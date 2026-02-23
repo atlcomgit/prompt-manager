@@ -1,0 +1,162 @@
+/**
+ * Core type definitions for Prompt Manager extension
+ */
+
+/** Prompt status */
+export type PromptStatus = 'draft' | 'in-progress' | 'completed' | 'stopped' | 'cancelled';
+
+/** Prompt configuration stored as JSON */
+export interface PromptConfig {
+	/** Unique identifier (folder name / slug) */
+	id: string;
+	/** Human-readable title */
+	title: string;
+	/** Short description */
+	description: string;
+	/** Status of the prompt */
+	status: PromptStatus;
+	/** Whether this prompt is favorited */
+	favorite: boolean;
+	/** Icon codicon name or path */
+	icon?: string;
+
+	// --- Workspace context ---
+	/** Selected workspace folder names */
+	projects: string[];
+	/** Programming languages */
+	languages: string[];
+	/** Frameworks */
+	frameworks: string[];
+	/** Skills (from .vscode/skills/ or ~/.copilot/skills/) */
+	skills: string[];
+	/** MCP tool identifiers */
+	mcpTools: string[];
+	/** Hooks (from .vscode/hooks/ or ~/.copilot/hooks/) */
+	hooks: string[];
+
+	// --- Task tracking ---
+	/** Task tracker issue number/reference */
+	taskNumber: string;
+	/** Git branch name */
+	branch: string;
+
+	// --- AI model ---
+	/** AI model identifier to use */
+	model: string;
+
+	// --- Context files ---
+	/** Relative paths to context files attached to this prompt */
+	contextFiles: string[];
+
+	// --- Chat integration ---
+	/** Associated Copilot chat session IDs */
+	chatSessionIds: string[];
+
+	// --- Time tracking ---
+	/** Time spent writing the prompt (ms) */
+	timeSpentWriting: number;
+	/** Time spent in chat implementing (ms) */
+	timeSpentImplementing: number;
+
+	// --- Timestamps ---
+	createdAt: string;
+	updatedAt: string;
+}
+
+/** Full prompt data (config + markdown content) */
+export interface Prompt extends PromptConfig {
+	/** Markdown content of the prompt */
+	content: string;
+}
+
+/** Default prompt config */
+export function createDefaultPrompt(id: string = ''): Prompt {
+	const now = new Date().toISOString();
+	return {
+		id,
+		title: '',
+		description: '',
+		status: 'draft',
+		favorite: false,
+		projects: [],
+		languages: [],
+		frameworks: [],
+		skills: [],
+		mcpTools: [],
+		hooks: [],
+		taskNumber: '',
+		branch: '',
+		model: '',
+		contextFiles: [],
+		chatSessionIds: [],
+		timeSpentWriting: 0,
+		timeSpentImplementing: 0,
+		createdAt: now,
+		updatedAt: now,
+		content: '',
+	};
+}
+
+/** Sidebar sort options */
+export type SortField = 'title' | 'createdAt' | 'updatedAt' | 'status';
+export type SortOrder = 'asc' | 'desc';
+
+/** Sidebar group options */
+export type GroupBy = 'none' | 'status' | 'project' | 'language' | 'framework';
+
+/** Filter state for sidebar */
+export interface FilterState {
+	search: string;
+	status: PromptStatus[];
+	projects: string[];
+	languages: string[];
+	frameworks: string[];
+	favorites: boolean;
+}
+
+/** Sidebar UI state */
+export interface SidebarState {
+	selectedPromptId: string | null;
+	filters: FilterState;
+	sortField: SortField;
+	sortOrder: SortOrder;
+	groupBy: GroupBy;
+	panelWidth: number;
+}
+
+/** Create default sidebar state */
+export function createDefaultSidebarState(): SidebarState {
+	return {
+		selectedPromptId: null,
+		filters: {
+			search: '',
+			status: [],
+			projects: [],
+			languages: [],
+			frameworks: [],
+			favorites: false,
+		},
+		sortField: 'updatedAt',
+		sortOrder: 'desc',
+		groupBy: 'none',
+		panelWidth: 300,
+	};
+}
+
+/** Statistics for all prompts */
+export interface PromptStatistics {
+	totalPrompts: number;
+	byStatus: Record<PromptStatus, number>;
+	byLanguage: Record<string, number>;
+	byFramework: Record<string, number>;
+	totalTimeWriting: number;
+	totalTimeImplementing: number;
+	totalTime: number;
+	favoriteCount: number;
+	avgTimePerPrompt: number;
+	recentActivity: Array<{ id: string; title: string; updatedAt: string }>;
+	topLanguages: Array<{ name: string; count: number }>;
+	topFrameworks: Array<{ name: string; count: number }>;
+	/** Brief report rows: taskNumber, title, total time */
+	reportRows: Array<{ taskNumber: string; title: string; timeWriting: number; timeImplementing: number; totalTime: number; status: PromptStatus }>;
+}

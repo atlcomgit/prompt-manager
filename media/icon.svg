@@ -1,0 +1,27 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="256" height="256" rx="24" fill="#1e1e2e"/>
+  
+  <!-- Document shape -->
+  <path d="M160 40H72C62 40 54 48 54 58v140c0 10 8 18 18 18h112c10 0 18-8 18-18V82L160 40z" 
+        fill="#2d2d3f" stroke="#007acc" stroke-width="3"/>
+  <path d="M160 40v42h42" fill="none" stroke="#007acc" stroke-width="3"/>
+  
+  <!-- Prompt lines -->
+  <rect x="78" y="100" width="80" height="6" rx="3" fill="#007acc" opacity="0.8"/>
+  <rect x="78" y="116" width="100" height="6" rx="3" fill="#007acc" opacity="0.5"/>
+  <rect x="78" y="132" width="60" height="6" rx="3" fill="#007acc" opacity="0.3"/>
+  
+  <!-- AI sparkle circle -->
+  <circle cx="180" cy="180" r="36" fill="#007acc"/>
+  
+  <!-- Sparkle icon -->
+  <path d="M180 158l4 12h12l-10 7 4 12-10-7-10 7 4-12-10-7h12z" 
+        fill="white" opacity="0.9"/>
+  <path d="M172 188l2 6h6l-5 4 2 6-5-4-5 4 2-6-5-4h6z" 
+        fill="white" opacity="0.7"/>
+  
+  <!-- Lightning bolt accent -->
+  <path d="M126 150l-6 16h10l-4 14 14-18h-10l6-12z" 
+        fill="#ffd700" opacity="0.8"/>
+</svg>

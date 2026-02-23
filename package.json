@@ -1,0 +1,176 @@
+{
+  "name": "prompt-manager",
+  "displayName": "Prompt Manager",
+  "description": "Manage, organize and use AI prompts directly in VS Code with Copilot Chat integration",
+  "version": "0.1.0",
+  "publisher": "alek",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "keywords": [
+    "prompt",
+    "copilot",
+    "ai",
+    "chat",
+    "manager",
+    "template"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "prompt-manager",
+          "title": "Prompt Manager",
+          "icon": "media/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "prompt-manager": [
+        {
+          "type": "webview",
+          "id": "promptManager.sidebar",
+          "name": "Prompts"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "promptManager.openPrompt",
+        "title": "Open Prompt",
+        "category": "Prompt Manager"
+      },
+      {
+        "command": "promptManager.createPrompt",
+        "title": "Create New Prompt",
+        "category": "Prompt Manager",
+        "icon": "$(add)"
+      },
+      {
+        "command": "promptManager.deletePrompt",
+        "title": "Delete Prompt",
+        "category": "Prompt Manager",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "promptManager.duplicatePrompt",
+        "title": "Duplicate Prompt",
+        "category": "Prompt Manager",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "promptManager.importPrompt",
+        "title": "Import Prompt",
+        "category": "Prompt Manager",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "promptManager.exportPrompt",
+        "title": "Export Prompt",
+        "category": "Prompt Manager",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "promptManager.refreshList",
+        "title": "Refresh Prompt List",
+        "category": "Prompt Manager",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "promptManager.startChat",
+        "title": "Start Chat with Prompt",
+        "category": "Prompt Manager",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "promptManager.openChat",
+        "title": "Open Chat",
+        "category": "Prompt Manager",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "promptManager.showStatistics",
+        "title": "Show Statistics",
+        "category": "Prompt Manager",
+        "icon": "$(graph)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "promptManager.createPrompt",
+          "when": "view == promptManager.sidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "promptManager.refreshList",
+          "when": "view == promptManager.sidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "promptManager.importPrompt",
+          "when": "view == promptManager.sidebar"
+        },
+        {
+          "command": "promptManager.showStatistics",
+          "when": "view == promptManager.sidebar",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "promptManager.createPrompt",
+        "key": "ctrl+shift+p ctrl+n",
+        "mac": "cmd+shift+p cmd+n"
+      },
+      {
+        "command": "promptManager.openPrompt",
+        "key": "ctrl+shift+p ctrl+o",
+        "mac": "cmd+shift+p cmd+o"
+      },
+      {
+        "command": "promptManager.showStatistics",
+        "key": "ctrl+shift+p ctrl+s",
+        "mac": "cmd+shift+p cmd+s"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "compile": "npm run build",
+    "build": "npm run build:extension && npm run build:webview",
+    "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "build:webview": "node esbuild.webview.mjs",
+    "watch:esbuild": "npm run watch:extension & npm run watch:webview",
+    "watch:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap --watch",
+    "watch:webview": "node esbuild.webview.mjs --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "lint": "eslint src",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.48",
+    "@types/react-dom": "^18.2.18",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}

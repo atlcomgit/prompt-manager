@@ -11,13 +11,15 @@ interface Props {
   hasChatSession: boolean;
   isDirty: boolean;
   isSaving: boolean;
+  isStartingChat: boolean;
   hasContent: boolean;
 }
 
 export const ActionBar: React.FC<Props> = ({
-  onSave, onStartChat, onOpenChat, onMarkCompleted, onMarkStopped, showStatusActions, hasChatSession, isDirty, isSaving, hasContent,
+  onSave, onStartChat, onOpenChat, onMarkCompleted, onMarkStopped, showStatusActions, hasChatSession, isDirty, isSaving, isStartingChat, hasContent,
 }) => {
   const t = useT();
+  const startChatDisabled = !hasContent || isStartingChat;
   return (
     <div style={styles.bar}>
       <div style={styles.left}>
@@ -35,9 +37,10 @@ export const ActionBar: React.FC<Props> = ({
           </button>
         ) : (
           <button
-            style={{ ...styles.btn, ...styles.btnChat }}
+            style={{ ...styles.btn, ...styles.btnChat, ...(startChatDisabled ? styles.btnDisabled : {}) }}
             onClick={onStartChat}
-            disabled={!hasContent}
+            disabled={startChatDisabled}
+            aria-disabled={startChatDisabled}
             title={!hasContent ? t('actions.enterText') : t('actions.startChatTooltip')}
           >
             {t('actions.startChat')}
@@ -101,6 +104,11 @@ const styles: Record<string, React.CSSProperties> = {
   btnChat: {
     background: 'var(--vscode-button-secondaryBackground)',
     color: 'var(--vscode-button-secondaryForeground)',
+  },
+  btnDisabled: {
+    opacity: 0.6,
+    cursor: 'not-allowed',
+    pointerEvents: 'none',
   },
   btnSuccess: {
     background: 'var(--vscode-testing-iconPassed, var(--vscode-button-secondaryBackground))',

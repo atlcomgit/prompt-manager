@@ -28,6 +28,7 @@ export const EditorApp: React.FC = () => {
   const [prompt, setPrompt] = useState<Prompt>(createDefaultPrompt());
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isStartingChat, setIsStartingChat] = useState(false);
   const [workspaceFolders, setWorkspaceFolders] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<SelectOption[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SelectOption[]>([]);
@@ -43,6 +44,7 @@ export const EditorApp: React.FC = () => {
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
+  const startChatLockRef = useRef(false);
 
   // Time tracking
   const openedAtRef = useRef<number>(Date.now());
@@ -122,6 +124,10 @@ export const EditorApp: React.FC = () => {
         if (msg.prompt) {
           setPrompt(msg.prompt);
           setIsDirty(false);
+          if ((msg.prompt.chatSessionIds || []).length > 0) {
+            startChatLockRef.current = false;
+            setIsStartingChat(false);
+          }
         }
         break;
       case 'promptSaved':
@@ -192,6 +198,8 @@ export const EditorApp: React.FC = () => {
         break;
       case 'error':
         // Could show inline error
+        startChatLockRef.current = false;
+        setIsStartingChat(false);
         break;
       case 'info':
         // Could show inline info
@@ -220,7 +228,9 @@ export const EditorApp: React.FC = () => {
 
   const updateField = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
     setPrompt(prev => ({ ...prev, [field]: value }));
-    setIsDirty(true);
+    if (field !== 'timeSpentWriting' && field !== 'timeSpentImplementing') {
+      setIsDirty(true);
+    }
   };
 
   const handleSave = () => {
@@ -237,6 +247,11 @@ export const EditorApp: React.FC = () => {
   };
 
   const handleStartChat = () => {
+    if (startChatLockRef.current || isStartingChat || !prompt.content || prompt.chatSessionIds.length > 0) {
+      return;
+    }
+    startChatLockRef.current = true;
+    setIsStartingChat(true);
     vscode.postMessage({ type: 'startChat', id: prompt.id || '__new__', prompt });
   };
 
@@ -278,7 +293,6 @@ export const EditorApp: React.FC = () => {
 
   const handleSwitchBranch = (branch: string) => {
     vscode.postMessage({ type: 'switchBranch', branch, projects: prompt.projects });
-    updateField('branch', branch);
     setShowBranches(false);
   };
 
@@ -409,11 +423,9 @@ export const EditorApp: React.FC = () => {
                 <button style={styles.linkBtn} onClick={handleShowBranches}>
                   {t('editor.showBranches')}
                 </button>
-                {prompt.taskNumber && prompt.projects.length > 0 && (
+                {prompt.branch.trim() && prompt.projects.length > 0 && (
                   <button style={styles.linkBtn} onClick={() => {
-                    const suggested = prompt.taskNumber.replace(/^#/, '').replace(/\s+/g, '-').toLowerCase();
-                    const branchName = `feature/${suggested}`;
-                    updateField('branch', branchName);
+                    const branchName = prompt.branch.trim();
                     vscode.postMessage({ type: 'createBranch', branch: branchName, projects: prompt.projects });
                   }}>
                     {t('editor.createBranch')}
@@ -630,6 +642,7 @@ export const EditorApp: React.FC = () => {
         hasChatSession={prompt.chatSessionIds.length > 0}
         isDirty={isDirty}
         isSaving={isSaving}
+        isStartingChat={isStartingChat}
         hasContent={!!prompt.content}
       />
     </div>

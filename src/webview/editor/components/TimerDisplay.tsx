@@ -7,15 +7,19 @@ interface Props {
 }
 
 function formatDuration(ms: number): string {
-  if (ms < 1000) { return '0м'; }
+  if (ms < 1000) { return '0с'; }
   const totalSeconds = Math.floor(ms / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
 
   if (hours > 0) {
-    return `${hours}ч ${minutes}м`;
+    return `${hours}ч ${minutes}м ${seconds}с`;
   }
-  return `${minutes}м`;
+  if (minutes > 0) {
+    return `${minutes}м ${seconds}с`;
+  }
+  return `${seconds}с`;
 }
 
 export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing }) => {

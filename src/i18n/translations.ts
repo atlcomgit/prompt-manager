@@ -103,7 +103,7 @@ const en: Record<string, string> = {
 	// --- ActionBar ---
 	'actions.saving': '💾 Saving...',
 	'actions.save': '💾 Save',
-	'actions.openChat': '💬 Open chat',
+	'actions.openChat': '💬 Go to chat',
 	'actions.startChat': '🚀 Start chat',
 	'actions.enterText': 'Enter prompt text',
 	'actions.startChatTooltip': 'Start chat with this prompt',
@@ -267,7 +267,7 @@ const ru: Record<string, string> = {
 	// --- ActionBar ---
 	'actions.saving': '💾 Сохранение...',
 	'actions.save': '💾 Сохранить',
-	'actions.openChat': '💬 Открыть чат',
+	'actions.openChat': '💬 Перейти в чат',
 	'actions.startChat': '🚀 Начать чат',
 	'actions.enterText': 'Введите текст промпта',
 	'actions.startChatTooltip': 'Начать чат с этим промптом',

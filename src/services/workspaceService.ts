@@ -39,6 +39,15 @@ export class WorkspaceService {
 		this.mcpToolsCache = null;
 	}
 
+	private getHookSearchPaths(): string[] {
+		const searchPaths: string[] = [];
+		for (const folder of vscode.workspace.workspaceFolders || []) {
+			searchPaths.push(path.join(folder.uri.fsPath, '.vscode', 'hooks'));
+		}
+		searchPaths.push(path.join(os.homedir(), '.copilot', 'hooks'));
+		return searchPaths;
+	}
+
 	/** Get all workspace folder names */
 	getWorkspaceFolders(): string[] {
 		return (vscode.workspace.workspaceFolders || []).map(f => f.name);
@@ -168,12 +177,7 @@ export class WorkspaceService {
 		if (this.hooksCache) { return this.hooksCache; }
 
 		const hooks: DiscoveredItem[] = [];
-		const searchPaths: string[] = [];
-
-		for (const folder of vscode.workspace.workspaceFolders || []) {
-			searchPaths.push(path.join(folder.uri.fsPath, '.vscode', 'hooks'));
-		}
-		searchPaths.push(path.join(os.homedir(), '.copilot', 'hooks'));
+		const searchPaths = this.getHookSearchPaths();
 
 		for (const searchPath of searchPaths) {
 			try {
@@ -198,6 +202,67 @@ export class WorkspaceService {
 
 		this.hooksCache = hooks;
 		return hooks;
+	}
+
+	/** Resolve hook names (without extension) to executable file paths */
+	async resolveHookExecutables(hookIds: string[]): Promise<Map<string, string>> {
+		const resolved = new Map<string, string>();
+		const targets = new Set(hookIds.map(h => h.trim()).filter(Boolean));
+		if (targets.size === 0) {
+			return resolved;
+		}
+
+		const extensionRank = new Map<string, number>([
+			['.sh', 0],
+			['.bash', 1],
+			['.zsh', 2],
+			['.py', 3],
+			['.js', 4],
+			['.mjs', 5],
+			['.cjs', 6],
+			['', 7],
+		]);
+
+		for (const searchPath of this.getHookSearchPaths()) {
+			try {
+				const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(searchPath));
+				const candidatesById = new Map<string, string[]>();
+
+				for (const [name, type] of entries) {
+					if (type !== vscode.FileType.File) {
+						continue;
+					}
+
+					const baseName = name.replace(/\.[^.]+$/, '');
+					if (!targets.has(baseName)) {
+						continue;
+					}
+
+					const absPath = path.join(searchPath, name);
+					const arr = candidatesById.get(baseName) || [];
+					arr.push(absPath);
+					candidatesById.set(baseName, arr);
+				}
+
+				for (const [hookId, candidates] of candidatesById.entries()) {
+					if (resolved.has(hookId)) {
+						continue;
+					}
+					const sorted = [...candidates].sort((a, b) => {
+						const extA = path.extname(a).toLowerCase();
+						const extB = path.extname(b).toLowerCase();
+						const rankA = extensionRank.get(extA) ?? 100;
+						const rankB = extensionRank.get(extB) ?? 100;
+						return rankA - rankB;
+					});
+					resolved.set(hookId, sorted[0]);
+				}
+			} catch {
+				// Directory doesn't exist
+			}
+		}
+
+		return resolved;
 	}
 
 	/** Ensure global agent context is stored as hidden chat instruction file and linked in chat.instructionsFilesLocations */

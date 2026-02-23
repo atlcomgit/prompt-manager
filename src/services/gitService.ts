@@ -136,6 +136,12 @@ export class GitService {
 		branch: string
 	): Promise<{ success: boolean; errors: string[] }> {
 		const errors: string[] = [];
+		const targetBranch = branch.trim();
+		const allowedBaseBranches = new Set(['master', 'main', 'develop']);
+
+		if (!targetBranch) {
+			return { success: false, errors: ['Название ветки пустое'] };
+		}
 
 		for (const project of projectNames) {
 			const projectPath = projectPaths.get(project);
@@ -145,7 +151,25 @@ export class GitService {
 			}
 
 			try {
-				await execAsync(`git checkout -b "${branch}"`, { cwd: projectPath });
+				const { stdout } = await execAsync(
+					`git branch --list "${targetBranch}"`,
+					{ cwd: projectPath }
+				);
+
+				if (stdout.trim()) {
+					await execAsync(`git checkout "${targetBranch}"`, { cwd: projectPath });
+					continue;
+				}
+
+				const currentBranch = await this.getCurrentBranch(projectPath);
+				if (!allowedBaseBranches.has(currentBranch)) {
+					errors.push(
+						`${project}: ветка "${targetBranch}" не существует. Создание разрешено только из master/main/develop (текущая: ${currentBranch || 'unknown'}).`
+					);
+					continue;
+				}
+
+				await execAsync(`git checkout -b "${targetBranch}"`, { cwd: projectPath });
 			} catch (err: any) {
 				errors.push(`${project}: ${err.message || 'Unknown error'}`);
 			}

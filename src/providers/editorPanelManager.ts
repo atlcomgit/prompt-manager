@@ -4,6 +4,8 @@
  */
 
 import * as vscode from 'vscode';
+import { spawn } from 'child_process';
+import * as path from 'path';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import type { Prompt } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
@@ -23,6 +25,218 @@ export class EditorPanelManager {
 	private chatTrackingDisposables = new Map<string, vscode.Disposable>();
 	private pendingRestorePrompt: Prompt | null = null;
 	private pendingRestoreIsDirty = false;
+	private readonly hooksOutput = vscode.window.createOutputChannel('Prompt Manager Hooks');
+
+	private async runConfiguredHooks(
+		hookIds: string[],
+		payload: Record<string, unknown>,
+		phase: 'beforeChat' | 'afterChat' | 'chatError' | 'afterChatCompleted'
+	): Promise<void> {
+		const selected = (hookIds || []).map(h => h.trim()).filter(Boolean);
+		if (selected.length === 0) {
+			return;
+		}
+
+		const resolved = await this.workspaceService.resolveHookExecutables(selected);
+		for (const hookId of selected) {
+			const executable = resolved.get(hookId);
+			if (!executable) {
+				this.hooksOutput.appendLine(`[${phase}] hook "${hookId}" not found in .vscode/hooks or ~/.copilot/hooks`);
+				continue;
+			}
+
+			const ext = path.extname(executable).toLowerCase();
+			let command = executable;
+			let args: string[] = [];
+
+			if (ext === '.py') {
+				command = 'python3';
+				args = [executable];
+			} else if (ext === '.sh' || ext === '.bash' || ext === '.zsh') {
+				command = 'bash';
+				args = [executable];
+			} else if (ext === '.js' || ext === '.mjs' || ext === '.cjs') {
+				command = 'node';
+				args = [executable];
+			}
+
+			await this.executeHookProcess(command, args, payload, hookId, phase);
+		}
+	}
+
+	private async executeHookProcess(
+		command: string,
+		args: string[],
+		payload: Record<string, unknown>,
+		hookId: string,
+		phase: 'beforeChat' | 'afterChat' | 'chatError' | 'afterChatCompleted'
+	): Promise<void> {
+		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const stdinPayload = JSON.stringify(payload, null, 2);
+
+		await new Promise<void>((resolve) => {
+			const child = spawn(command, args, {
+				cwd: workspaceRoot,
+				env: process.env,
+				stdio: ['pipe', 'pipe', 'pipe'],
+			});
+
+			let stdout = '';
+			let stderr = '';
+			let settled = false;
+
+			const finish = () => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				clearTimeout(timeoutHandle);
+				resolve();
+			};
+
+			const timeoutHandle = setTimeout(() => {
+				this.hooksOutput.appendLine(`[${phase}] hook "${hookId}" timeout after 30s`);
+				try {
+					child.kill('SIGTERM');
+				} catch {
+					// best effort
+				}
+				finish();
+			}, 30000);
+
+			child.stdout.on('data', (chunk: Buffer) => {
+				stdout += chunk.toString('utf-8');
+			});
+
+			child.stderr.on('data', (chunk: Buffer) => {
+				stderr += chunk.toString('utf-8');
+			});
+
+			child.on('error', (error) => {
+				this.hooksOutput.appendLine(`[${phase}] hook "${hookId}" spawn error: ${error.message}`);
+				finish();
+			});
+
+			child.on('close', (code) => {
+				if (stdout.trim()) {
+					this.hooksOutput.appendLine(`[${phase}] hook "${hookId}" stdout:\n${stdout.trim()}`);
+				}
+				if (stderr.trim()) {
+					this.hooksOutput.appendLine(`[${phase}] hook "${hookId}" stderr:\n${stderr.trim()}`);
+				}
+				if (code !== 0) {
+					this.hooksOutput.appendLine(`[${phase}] hook "${hookId}" exited with code ${code ?? 'unknown'}`);
+				}
+				finish();
+			});
+
+			try {
+				child.stdin.write(stdinPayload);
+				child.stdin.end();
+			} catch {
+				finish();
+			}
+		});
+	}
+
+	private async tryReadChatMarkdownFromClipboard(): Promise<string> {
+		const commands = await vscode.commands.getCommands(true);
+		const copyCommands = [
+			'workbench.action.chat.copyAll',
+			'workbench.action.chat.copyLast',
+			'workbench.action.chat.copyResponse',
+			'workbench.action.chat.copy',
+		].filter(cmd => commands.includes(cmd));
+
+		if (copyCommands.length === 0) {
+			return '';
+		}
+
+		const openChatCmds = ['workbench.action.chat.openAgent', 'workbench.action.chat.open'];
+		for (const openCmd of openChatCmds) {
+			try {
+				await vscode.commands.executeCommand(openCmd);
+				break;
+			} catch {
+				// try next open command
+			}
+		}
+
+		const originalClipboard = await vscode.env.clipboard.readText();
+		for (const copyCmd of copyCommands) {
+			try {
+				await vscode.commands.executeCommand(copyCmd);
+				await new Promise(resolve => setTimeout(resolve, 150));
+				const copied = (await vscode.env.clipboard.readText()).trim();
+				if (copied) {
+					await vscode.env.clipboard.writeText(originalClipboard);
+					return copied;
+				}
+			} catch {
+				// try next copy command
+			}
+		}
+
+		await vscode.env.clipboard.writeText(originalClipboard);
+		return '';
+	}
+
+	private buildChatSessionResource(sessionId: string): vscode.Uri {
+		const encoded = Buffer
+			.from(sessionId, 'utf-8')
+			.toString('base64')
+			.replace(/=+$/g, '');
+		return vscode.Uri.parse(`vscode-chat-session://local/${encoded}`);
+	}
+
+	private async openBoundChatSession(sessionId: string): Promise<boolean> {
+		const trimmed = (sessionId || '').trim();
+		if (!trimmed) {
+			return false;
+		}
+
+		const sessionResource = this.buildChatSessionResource(trimmed);
+		const isTargetSessionActive = async (): Promise<boolean> => {
+			const activeSessionId = await this.stateService.getActiveChatSessionId(4500, 150);
+			return activeSessionId === trimmed;
+		};
+
+		try {
+			await vscode.commands.executeCommand('vscode.open', sessionResource);
+			if (await isTargetSessionActive()) {
+				return true;
+			}
+		} catch {
+			// continue with compatibility variants
+		}
+
+		const openChatCmds = ['workbench.action.chat.openAgent', 'workbench.action.chat.open'];
+		const argCandidates: unknown[] = [
+			sessionResource,
+			{ resource: sessionResource },
+			{ uri: sessionResource },
+			{ sessionId: trimmed },
+			{ id: trimmed },
+			{ chatSessionId: trimmed },
+			{ session: trimmed },
+			{ sessionId: trimmed, resource: sessionResource },
+		];
+
+		for (const openCmd of openChatCmds) {
+			for (const arg of argCandidates) {
+				try {
+					await vscode.commands.executeCommand(openCmd, arg);
+					if (await isTargetSessionActive()) {
+						return true;
+					}
+				} catch {
+					// try next argument variant
+				}
+			}
+		}
+
+		return false;
+	}
 
 	private async broadcastAvailableLanguagesAndFrameworks(
 		extraSources: Array<Pick<Prompt, 'languages' | 'frameworks'>> = []
@@ -207,7 +421,7 @@ export class EditorPanelManager {
 					? JSON.parse(JSON.stringify(latestPromptState))
 					: JSON.parse(JSON.stringify(prompt));
 				const saveLabel = isRu ? 'Сохранить' : 'Save';
-				const discardLabel = isRu ? 'Отбросить' : 'Discard';
+				const discardLabel = isRu ? 'Не сохранять' : 'Discard';
 				const promptTitle = dirtySnapshot.title || dirtySnapshot.id || (isRu ? 'Новый промпт' : 'New prompt');
 				const answer = await vscode.window.showWarningMessage(
 					isRu
@@ -292,10 +506,30 @@ export class EditorPanelManager {
 		getIsDirty: () => boolean,
 		setIsDirty: (v: boolean) => void,
 	): Promise<void> {
-		const postMessage = (m: ExtensionToWebviewMessage) => panel.webview.postMessage(m);
+		const postMessage = (m: ExtensionToWebviewMessage): void => {
+			try {
+				void panel.webview.postMessage(m);
+			} catch {
+				// panel/webview might be disposed; ignore to keep background flows alive
+			}
+		};
 
 		switch (msg.type) {
 			case 'ready': {
+				if (currentPrompt.chatSessionIds?.length) {
+					const existingSessionIds: string[] = [];
+					for (const sessionId of currentPrompt.chatSessionIds) {
+						if (await this.stateService.hasChatSession(sessionId)) {
+							existingSessionIds.push(sessionId);
+						}
+					}
+					if (existingSessionIds.length !== currentPrompt.chatSessionIds.length) {
+						currentPrompt.chatSessionIds = existingSessionIds;
+						await this.storageService.savePrompt(currentPrompt);
+						this._onDidSave.fire(currentPrompt.id);
+					}
+				}
+
 				postMessage({ type: 'prompt', prompt: currentPrompt });
 
 				// Send global agent context
@@ -335,6 +569,15 @@ export class EditorPanelManager {
 				if (!promptToSave.id) {
 					const slug = await this.aiService.generateSlug(promptToSave.title, promptToSave.description);
 					promptToSave.id = await this.storageService.uniqueId(slug);
+				}
+
+				const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(promptToSave.id) : null;
+				if (existingPrompt) {
+					promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
+					promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
+					promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
+						? promptToSave.chatSessionIds
+						: (existingPrompt.chatSessionIds || []);
 				}
 
 				// Auto-detect languages & frameworks
@@ -418,10 +661,44 @@ export class EditorPanelManager {
 			case 'startChat': {
 				let prompt: Prompt | null = msg.prompt ? { ...msg.prompt } : await this.storageService.getPrompt(msg.id);
 				if (prompt && prompt.content) {
+					const bindSessionToPrompt = async (sessionId: string): Promise<void> => {
+						const normalizedSessionId = (sessionId || '').trim();
+						if (!normalizedSessionId) {
+							return;
+						}
+
+						const promptFromStorage = await this.storageService.getPrompt(prompt.id);
+						if (!promptFromStorage) {
+							return;
+						}
+
+						const updatedChatSessionIds = [
+							normalizedSessionId,
+							...(promptFromStorage.chatSessionIds || []).filter(id => id !== normalizedSessionId),
+						];
+						const changed = JSON.stringify(updatedChatSessionIds) !== JSON.stringify(promptFromStorage.chatSessionIds || []);
+						if (!changed) {
+							return;
+						}
+
+						promptFromStorage.chatSessionIds = updatedChatSessionIds;
+						await this.storageService.savePrompt(promptFromStorage);
+						Object.assign(prompt, promptFromStorage);
+						Object.assign(currentPrompt, promptFromStorage);
+						this._onDidSave.fire(promptFromStorage.id);
+						postMessage({ type: 'prompt', prompt: promptFromStorage });
+					};
+
 					// Ensure prompt has id and persist latest editor state before starting chat
 					if (!prompt.id) {
 						const slug = await this.aiService.generateSlug(prompt.title, prompt.description);
 						prompt.id = await this.storageService.uniqueId(slug || 'untitled');
+					}
+					const existingBeforeChat = await this.storageService.getPrompt(prompt.id);
+					if (existingBeforeChat) {
+						prompt.timeSpentWriting = Math.max(prompt.timeSpentWriting || 0, existingBeforeChat.timeSpentWriting || 0);
+						prompt.timeSpentImplementing = Math.max(prompt.timeSpentImplementing || 0, existingBeforeChat.timeSpentImplementing || 0);
+						prompt.chatSessionIds = prompt.chatSessionIds?.length ? prompt.chatSessionIds : (existingBeforeChat.chatSessionIds || []);
 					}
 					await this.storageService.savePrompt(prompt);
 					Object.assign(currentPrompt, prompt);
@@ -466,11 +743,32 @@ export class EditorPanelManager {
 					if (prompt.status !== 'in-progress') {
 						prompt.status = 'in-progress';
 						await this.storageService.savePrompt(prompt);
+						Object.assign(currentPrompt, prompt);
+						setIsDirty(false);
 						this._onDidSave.fire(prompt.id);
 						postMessage({ type: 'prompt', prompt });
 					}
 
 					const query = parts.join('\n');
+					const hookPayloadBase = {
+						promptId: prompt.id,
+						title: prompt.title,
+						description: prompt.description,
+						status: prompt.status,
+						query,
+						model: prompt.model,
+						taskNumber: prompt.taskNumber,
+						branch: prompt.branch,
+						contextFiles: prompt.contextFiles,
+						hooks: prompt.hooks,
+						timestamp: new Date().toISOString(),
+					};
+					const requestStartTimestamp = Date.now();
+					await this.runConfiguredHooks(prompt.hooks || [], {
+						event: 'beforeChat',
+						...hookPayloadBase,
+					}, 'beforeChat');
+
 					let requestModelIdentifier = '';
 					let requestModelSelector: vscode.LanguageModelChatSelector | undefined;
 
@@ -559,6 +857,7 @@ export class EditorPanelManager {
 						}
 					};
 
+					let sendMessageSucceeded = false;
 					// Best-effort model/files actions and single prompt send
 					try {
 						await new Promise(resolve => setTimeout(resolve, 150));
@@ -601,8 +900,97 @@ export class EditorPanelManager {
 						}
 
 						await sendMessage(query);
+						const startedSessionImmediate = await this.stateService.waitForChatSessionStarted(requestStartTimestamp, 8000, 250);
+						if (startedSessionImmediate.ok && startedSessionImmediate.sessionId) {
+							await bindSessionToPrompt(startedSessionImmediate.sessionId);
+						}
+						sendMessageSucceeded = true;
 					} catch {
+						await this.runConfiguredHooks(prompt.hooks || [], {
+							event: 'chatError',
+							error: 'Failed to dispatch chat message via VS Code chat commands',
+							...hookPayloadBase,
+						}, 'chatError');
 						// ignore optional compatibility attempts
+					}
+
+					if (sendMessageSucceeded) {
+						void (async () => {
+							const startedSession = await this.stateService.waitForChatSessionStarted(requestStartTimestamp);
+							if (startedSession.ok && startedSession.sessionId) {
+								await bindSessionToPrompt(startedSession.sessionId);
+							}
+
+							const completion = await this.stateService.waitForChatRequestCompletion(requestStartTimestamp);
+							const chatMarkdown = await this.tryReadChatMarkdownFromClipboard();
+							if (completion.ok) {
+								const promptToComplete = await this.storageService.getPrompt(prompt.id);
+								if (promptToComplete) {
+									const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
+									const endedAt = Number(completion.lastRequestEnded || Date.now());
+									const implementingDelta = Math.max(0, endedAt - startedAt);
+									if (implementingDelta > 0) {
+										promptToComplete.timeSpentImplementing = (promptToComplete.timeSpentImplementing || 0) + implementingDelta;
+									}
+
+									const sessionId = String(completion.sessionId || '').trim();
+									if (sessionId) {
+										promptToComplete.chatSessionIds = [
+											sessionId,
+											...(promptToComplete.chatSessionIds || []).filter(id => id !== sessionId),
+										];
+									}
+									if (promptToComplete.status !== 'completed') {
+										promptToComplete.status = 'completed';
+									}
+									await this.storageService.savePrompt(promptToComplete);
+									Object.assign(currentPrompt, promptToComplete);
+									this._onDidSave.fire(promptToComplete.id);
+									postMessage({ type: 'prompt', prompt: promptToComplete });
+								}
+
+								await this.runConfiguredHooks(prompt?.hooks || [], {
+									event: 'afterChatCompleted',
+									chatCompletion: completion,
+									chatMarkdown,
+									...hookPayloadBase,
+									status: 'completed',
+								}, 'afterChatCompleted');
+								return;
+							}
+
+							if (chatMarkdown) {
+								const promptForTiming = await this.storageService.getPrompt(prompt.id);
+								if (promptForTiming) {
+									const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
+									const endedAt = Number(completion.lastRequestEnded || Date.now());
+									const implementingDelta = Math.max(0, endedAt - startedAt);
+									if (implementingDelta > 0) {
+										promptForTiming.timeSpentImplementing = (promptForTiming.timeSpentImplementing || 0) + implementingDelta;
+										await this.storageService.savePrompt(promptForTiming);
+										Object.assign(currentPrompt, promptForTiming);
+										this._onDidSave.fire(promptForTiming.id);
+										postMessage({ type: 'prompt', prompt: promptForTiming });
+									}
+								}
+
+								await this.runConfiguredHooks(prompt?.hooks || [], {
+									event: 'afterChatCompleted',
+									chatCompletion: completion,
+									chatMarkdown,
+									...hookPayloadBase,
+									status: 'completed',
+								}, 'afterChatCompleted');
+								return;
+							}
+
+							await this.runConfiguredHooks(prompt?.hooks || [], {
+								event: 'chatError',
+								error: `Chat completion not detected (${completion.reason || 'unknown'})`,
+								chatCompletion: completion,
+								...hookPayloadBase,
+							}, 'chatError');
+						})();
 					}
 
 					// Notify webview that chat was started
@@ -621,10 +1009,36 @@ export class EditorPanelManager {
 			}
 
 			case 'openChat': {
-				try {
-					await vscode.commands.executeCommand('workbench.action.chat.openAgent');
-				} catch {
-					await vscode.commands.executeCommand('workbench.action.chat.open');
+				if (msg.id) {
+					const promptFromStorage = await this.storageService.getPrompt(msg.id);
+					if (promptFromStorage) {
+						const existingSessionIds: string[] = [];
+						for (const sessionId of promptFromStorage.chatSessionIds || []) {
+							if (await this.stateService.hasChatSession(sessionId)) {
+								existingSessionIds.push(sessionId);
+							}
+						}
+						if (existingSessionIds.length !== (promptFromStorage.chatSessionIds || []).length) {
+							promptFromStorage.chatSessionIds = existingSessionIds;
+							await this.storageService.savePrompt(promptFromStorage);
+							Object.assign(currentPrompt, promptFromStorage);
+							this._onDidSave.fire(promptFromStorage.id);
+							postMessage({ type: 'prompt', prompt: promptFromStorage });
+						}
+					}
+				}
+
+				const openedBoundSession = await this.openBoundChatSession(msg.sessionId);
+				if (!openedBoundSession) {
+					if (msg.sessionId) {
+						postMessage({ type: 'error', message: 'Не удалось открыть привязанный чат. Возможно, он удалён или недоступен.' });
+					} else {
+						try {
+							await vscode.commands.executeCommand('workbench.action.chat.openAgent');
+						} catch {
+							await vscode.commands.executeCommand('workbench.action.chat.open');
+						}
+					}
 				}
 				break;
 			}
@@ -744,9 +1158,14 @@ export class EditorPanelManager {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
 				const result = await this.gitService.createBranch(paths, msg.projects, msg.branch);
 				if (result.success) {
-					postMessage({ type: 'info', message: `Branch "${msg.branch}" created.` });
+					postMessage({ type: 'info', message: `Ветка "${msg.branch}" активирована.` });
 				} else {
-					postMessage({ type: 'error', message: `Errors: ${result.errors.join(', ')}` });
+					const details = result.errors.join('\n');
+					void vscode.window.showWarningMessage(
+						'Не удалось переключить/создать ветку для всех выбранных проектов.',
+						{ modal: true, detail: details }
+					);
+					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}` });
 				}
 				break;
 			}
@@ -793,5 +1212,6 @@ export class EditorPanelManager {
 			panel.dispose();
 		}
 		openPanels.clear();
+		this.hooksOutput.dispose();
 	}
 }

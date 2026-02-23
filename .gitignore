@@ -1,0 +1,6 @@
+.qodo
+.vscode
+node_modules
+dist
+.github
+.env

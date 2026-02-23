@@ -21,61 +21,57 @@ export const MultiSelect: React.FC<Props> = ({
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const [draft, setDraft] = useState<string[]>(selected);
   const containerRef = useRef<HTMLDivElement>(null);
   const t = useT();
 
-  // Sync draft when selected changes externally or dropdown opens
-  useEffect(() => {
-    if (isOpen) {
-      setDraft(selected);
-    }
-  }, [isOpen]);
+  const normalizeCustomValue = (value: string): string => value.trim();
 
-  // Close on click outside — treat as cancel
+  const hasValue = (items: string[], value: string): boolean =>
+    items.some(item => item.toLowerCase() === value.toLowerCase());
+
+  const hasOption = (value: string): boolean =>
+    options.some(option => option.id.toLowerCase() === value.toLowerCase() || option.name.toLowerCase() === value.toLowerCase());
+
+  // Close on click outside
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         if (isOpen) {
-          setDraft(selected); // revert
+          const normalized = normalizeCustomValue(search);
+          if (allowCustom && normalized && !hasValue(selected, normalized) && !hasOption(normalized)) {
+            onChange([...selected, normalized]);
+          }
           setIsOpen(false);
           setSearch('');
         }
       }
     };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [isOpen, selected]);
+    document.addEventListener('pointerdown', handleClick, true);
+    return () => document.removeEventListener('pointerdown', handleClick, true);
+  }, [allowCustom, isOpen, onChange, options, search, selected]);
 
   const filteredOptions = options.filter(o =>
     o.name.toLowerCase().includes(search.toLowerCase()) ||
     (o.description || '').toLowerCase().includes(search.toLowerCase())
   );
 
-  // Custom items in draft that are not in the options list
-  const customDraftItems = draft.filter(id => !options.find(o => o.id === id));
+  // Custom selected items that are not in the options list
+  const customSelectedItems = selected.filter(id => !options.find(o => o.id === id));
 
-  const toggleDraft = (id: string) => {
-    setDraft(prev =>
-      prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
-    );
+  const toggleSelected = (id: string) => {
+    const next = selected.includes(id)
+      ? selected.filter(s => s !== id)
+      : [...selected, id];
+    onChange(next);
   };
 
   const addCustom = () => {
-    if (search && !draft.includes(search)) {
-      setDraft(prev => [...prev, search]);
-      setSearch('');
+    const normalized = normalizeCustomValue(search);
+    if (!normalized || hasValue(selected, normalized) || hasOption(normalized)) {
+      return;
     }
-  };
 
-  const handleSave = () => {
-    onChange(draft);
-    setIsOpen(false);
-    setSearch('');
-  };
-
-  const handleCancel = () => {
-    setDraft(selected);
+    onChange([...selected, normalized]);
     setIsOpen(false);
     setSearch('');
   };
@@ -84,9 +80,22 @@ export const MultiSelect: React.FC<Props> = ({
     if (e.key === 'Enter' && allowCustom && search) {
       e.preventDefault();
       addCustom();
+      return;
     }
     if (e.key === 'Escape') {
-      handleCancel();
+      setIsOpen(false);
+      setSearch('');
+      return;
+    }
+    if (e.key === 'Tab') {
+      if (allowCustom && search) {
+        const normalized = normalizeCustomValue(search);
+        if (normalized && !hasValue(selected, normalized) && !hasOption(normalized)) {
+          onChange([...selected, normalized]);
+        }
+      }
+      setIsOpen(false);
+      setSearch('');
     }
   };
 
@@ -110,6 +119,18 @@ export const MultiSelect: React.FC<Props> = ({
           value={search}
           onChange={e => setSearch(e.target.value)}
           onFocus={() => setIsOpen(true)}
+          onBlur={() => {
+            requestAnimationFrame(() => {
+              if (!containerRef.current?.contains(document.activeElement)) {
+                const normalized = normalizeCustomValue(search);
+                if (allowCustom && normalized && !hasValue(selected, normalized) && !hasOption(normalized)) {
+                  onChange([...selected, normalized]);
+                }
+                setIsOpen(false);
+                setSearch('');
+              }
+            });
+          }}
           onKeyDown={handleKeyDown}
           placeholder={selected.length === 0 ? placeholder : ''}
           style={styles.input}
@@ -120,18 +141,18 @@ export const MultiSelect: React.FC<Props> = ({
       {isOpen && (
         <div style={styles.dropdown}>
           <div style={styles.dropdownScroll}>
-            {/* Show custom draft items */}
-            {customDraftItems.length > 0 && customDraftItems.map(id => (
+            {/* Show custom selected items */}
+            {customSelectedItems.length > 0 && customSelectedItems.map(id => (
               <button
                 key={id}
                 style={{
                   ...styles.option,
-                  ...(draft.includes(id) ? styles.optionSelected : {}),
+                  ...(selected.includes(id) ? styles.optionSelected : {}),
                 }}
-                onClick={() => toggleDraft(id)}
+                onClick={() => toggleSelected(id)}
               >
                 <span style={styles.optionCheck}>
-                  {draft.includes(id) ? '☑' : '☐'}
+                  {selected.includes(id) ? '☑' : '☐'}
                 </span>
                 <div style={styles.optionContent}>
                   <span style={styles.optionName}>{id}</span>
@@ -144,12 +165,12 @@ export const MultiSelect: React.FC<Props> = ({
                   key={opt.id}
                   style={{
                     ...styles.option,
-                    ...(draft.includes(opt.id) ? styles.optionSelected : {}),
+                    ...(selected.includes(opt.id) ? styles.optionSelected : {}),
                   }}
-                  onClick={() => toggleDraft(opt.id)}
+                  onClick={() => toggleSelected(opt.id)}
                 >
                   <span style={styles.optionCheck}>
-                    {draft.includes(opt.id) ? '☑' : '☐'}
+                    {selected.includes(opt.id) ? '☑' : '☐'}
                   </span>
                   <div style={styles.optionContent}>
                     <span style={styles.optionName}>{opt.name}</span>
@@ -159,7 +180,7 @@ export const MultiSelect: React.FC<Props> = ({
                   </div>
                 </button>
               ))
-            ) : customDraftItems.length === 0 ? (
+            ) : customSelectedItems.length === 0 ? (
               <div style={styles.noResults}>
                 {allowCustom && search ? (
                   <button style={styles.addCustomBtn} onClick={addCustom}>
@@ -179,11 +200,6 @@ export const MultiSelect: React.FC<Props> = ({
                 + {t('multiSelect.add')} "{search}"
               </button>
             )}
-          </div>
-          {/* Save / Cancel buttons */}
-          <div style={styles.dropdownActions}>
-            <button style={styles.cancelBtn} onClick={handleCancel}>{t('common.cancel')}</button>
-            <button style={styles.saveBtn} onClick={handleSave}>{t('common.save')}</button>
           </div>
         </div>
       )}
@@ -262,33 +278,6 @@ const styles: Record<string, React.CSSProperties> = {
   dropdownScroll: {
     maxHeight: '200px',
     overflowY: 'auto',
-  },
-  dropdownActions: {
-    display: 'flex',
-    justifyContent: 'flex-end',
-    gap: '6px',
-    padding: '6px 8px',
-    borderTop: '1px solid var(--vscode-panel-border)',
-  },
-  cancelBtn: {
-    padding: '4px 12px',
-    background: 'var(--vscode-button-secondaryBackground)',
-    color: 'var(--vscode-button-secondaryForeground)',
-    border: 'none',
-    borderRadius: '3px',
-    cursor: 'pointer',
-    fontSize: '12px',
-    fontFamily: 'var(--vscode-font-family)',
-  },
-  saveBtn: {
-    padding: '4px 12px',
-    background: 'var(--vscode-button-background)',
-    color: 'var(--vscode-button-foreground)',
-    border: 'none',
-    borderRadius: '3px',
-    cursor: 'pointer',
-    fontSize: '12px',
-    fontFamily: 'var(--vscode-font-family)',
   },
   option: {
     display: 'flex',

@@ -24,6 +24,38 @@ export class EditorPanelManager {
 	private pendingRestorePrompt: Prompt | null = null;
 	private pendingRestoreIsDirty = false;
 
+	private async broadcastAvailableLanguagesAndFrameworks(
+		extraSources: Array<Pick<Prompt, 'languages' | 'frameworks'>> = []
+	): Promise<void> {
+		const allPrompts = await this.storageService.listPrompts();
+		const langSet = new Set<string>();
+		const fwSet = new Set<string>();
+
+		for (const p of allPrompts) {
+			p.languages?.forEach(l => langSet.add(l));
+			p.frameworks?.forEach(f => fwSet.add(f));
+		}
+
+		for (const source of extraSources) {
+			source.languages?.forEach(l => langSet.add(l));
+			source.frameworks?.forEach(f => fwSet.add(f));
+		}
+
+		const languagesMessage: ExtensionToWebviewMessage = {
+			type: 'availableLanguages',
+			options: [...langSet].sort().map(l => ({ id: l, name: l })),
+		};
+		const frameworksMessage: ExtensionToWebviewMessage = {
+			type: 'availableFrameworks',
+			options: [...fwSet].sort().map(f => ({ id: f, name: f })),
+		};
+
+		for (const panel of openPanels.values()) {
+			void panel.webview.postMessage(languagesMessage);
+			void panel.webview.postMessage(frameworksMessage);
+		}
+	}
+
 	private resolveStatusFromHooks(hooks: string[]): 'completed' | 'stopped' | null {
 		const values = hooks.map(h => h.toLowerCase());
 		const completed = values.some(h =>
@@ -203,12 +235,13 @@ export class EditorPanelManager {
 							dirtySnapshot.id = await this.storageService.uniqueId(slug || 'untitled');
 						}
 						await this.storageService.savePrompt(dirtySnapshot);
+						await this.broadcastAvailableLanguagesAndFrameworks();
 						this._onDidSave.fire(dirtySnapshot.id);
-						vscode.window.showInformationMessage(
-							isRu
-								? `Промпт "${dirtySnapshot.title || dirtySnapshot.id}" сохранён.`
-								: `Prompt "${dirtySnapshot.title || dirtySnapshot.id}" saved.`
-						);
+						// vscode.window.showInformationMessage(
+						// 	isRu
+						// 		? `Промпт "${dirtySnapshot.title || dirtySnapshot.id}" сохранён.`
+						// 		: `Prompt "${dirtySnapshot.title || dirtySnapshot.id}" saved.`
+						// );
 					} catch (err) {
 						vscode.window.showErrorMessage(
 							isRu ? `Ошибка сохранения: ${err}` : `Save error: ${err}`
@@ -222,12 +255,25 @@ export class EditorPanelManager {
 		panel.webview.onDidReceiveMessage(
 			async (msg: WebviewToExtensionMessage) => {
 				if (msg.type === 'markDirty') {
+					const previousLanguages = latestPromptState?.languages || prompt.languages;
+					const previousFrameworks = latestPromptState?.frameworks || prompt.frameworks;
+
 					isDirty = msg.dirty;
 					if (msg.prompt) {
 						latestPromptState = msg.prompt;
 					} else if (msg.dirty && !latestPromptState) {
 						latestPromptState = JSON.parse(JSON.stringify(prompt));
 					}
+
+					if (msg.prompt && msg.dirty) {
+						const normalize = (items: string[]): string[] => [...items].map(v => v.trim()).filter(Boolean).sort();
+						const languagesChanged = JSON.stringify(normalize(previousLanguages)) !== JSON.stringify(normalize(msg.prompt.languages || []));
+						const frameworksChanged = JSON.stringify(normalize(previousFrameworks)) !== JSON.stringify(normalize(msg.prompt.frameworks || []));
+						if (languagesChanged || frameworksChanged) {
+							await this.broadcastAvailableLanguagesAndFrameworks([msg.prompt]);
+						}
+					}
+
 					const displayTitle = (latestPromptState?.title || prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt'));
 					panel.title = isDirty ? `⚡● ${displayTitle}` : `⚡ ${displayTitle}`;
 					return;
@@ -272,16 +318,7 @@ export class EditorPanelManager {
 				const hooks = await this.workspaceService.getHooks();
 				postMessage({ type: 'availableHooks', hooks });
 
-				// Send available languages & frameworks from all prompts
-				const allPrompts = await this.storageService.listPrompts();
-				const langSet = new Set<string>();
-				const fwSet = new Set<string>();
-				for (const p of allPrompts) {
-					p.languages?.forEach(l => langSet.add(l));
-					p.frameworks?.forEach(f => fwSet.add(f));
-				}
-				postMessage({ type: 'availableLanguages', options: [...langSet].sort().map(l => ({ id: l, name: l })) });
-				postMessage({ type: 'availableFrameworks', options: [...fwSet].sort().map(f => ({ id: f, name: f })) });
+				await this.broadcastAvailableLanguagesAndFrameworks();
 				break;
 			}
 
@@ -323,20 +360,10 @@ export class EditorPanelManager {
 				panel.title = `⚡ ${saved.title || saved.id}`;
 				postMessage({ type: 'promptSaved', prompt: saved });
 				postMessage({ type: 'prompt', prompt: promptToSave });
-
-				// Re-send available languages/frameworks (new custom items may have been added)
-				const updatedPrompts = await this.storageService.listPrompts();
-				const updatedLangs = new Set<string>();
-				const updatedFws = new Set<string>();
-				for (const p of updatedPrompts) {
-					p.languages?.forEach(l => updatedLangs.add(l));
-					p.frameworks?.forEach(f => updatedFws.add(f));
-				}
-				postMessage({ type: 'availableLanguages', options: [...updatedLangs].sort().map(l => ({ id: l, name: l })) });
-				postMessage({ type: 'availableFrameworks', options: [...updatedFws].sort().map(f => ({ id: f, name: f })) });
+				await this.broadcastAvailableLanguagesAndFrameworks();
 
 				this._onDidSave.fire(promptToSave.id);
-				vscode.window.showInformationMessage(`Промпт "${saved.title || saved.id}" сохранён.`);
+				// vscode.window.showInformationMessage(`Промпт "${saved.title || saved.id}" сохранён.`);
 				break;
 			}
 
@@ -402,10 +429,10 @@ export class EditorPanelManager {
 					// Compose query with prompt content and metadata
 					const globalContext = this.stateService.getGlobalAgentContext();
 					const parts: string[] = [];
-
-					if (globalContext) {
-						parts.push(globalContext);
-						parts.push('');
+					try {
+						await this.workspaceService.ensureChatInstructionsFile(globalContext);
+					} catch {
+						// keep chat flow even if instructions file sync fails
 					}
 
 					parts.push(prompt.content);
@@ -705,6 +732,11 @@ export class EditorPanelManager {
 
 			case 'saveGlobalContext': {
 				await this.stateService.saveGlobalAgentContext(msg.context);
+				try {
+					await this.workspaceService.ensureChatInstructionsFile(msg.context);
+				} catch {
+					// keep UI responsive even if file/settings sync fails
+				}
 				break;
 			}
 

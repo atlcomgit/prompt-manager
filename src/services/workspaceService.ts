@@ -17,6 +17,8 @@ export class WorkspaceService {
 	private hooksCache: DiscoveredItem[] | null = null;
 	private mcpToolsCache: DiscoveredItem[] | null = null;
 	private refreshInterval: NodeJS.Timeout | null = null;
+	private static readonly AGENT_INSTRUCTIONS_FOLDER = '.vscode/prompt-manager';
+	private static readonly PROJECT_INSTRUCTIONS_FOLDER = '.github/instructions';
 
 	constructor() {
 		// Background refresh every 30 seconds
@@ -196,5 +198,158 @@ export class WorkspaceService {
 
 		this.hooksCache = hooks;
 		return hooks;
+	}
+
+	/** Ensure global agent context is stored as hidden chat instruction file and linked in chat.instructionsFilesLocations */
+	async ensureChatInstructionsFile(globalContext: string): Promise<void> {
+		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+		if (!workspaceFolder) {
+			return;
+		}
+
+		const instructionsDir = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager');
+		const instructionsFile = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager', 'ai.instructions.md');
+		const projectInstructionsDir = vscode.Uri.joinPath(workspaceFolder.uri, '.github', 'instructions');
+		const projectInstructionsFile = vscode.Uri.joinPath(workspaceFolder.uri, '.github', 'instructions', 'prompt-manager.instructions.md');
+
+		await vscode.workspace.fs.createDirectory(instructionsDir);
+		await vscode.workspace.fs.createDirectory(projectInstructionsDir);
+
+		const trimmedContext = (globalContext || '').trim();
+		const fileContent = trimmedContext
+			? `---\napplyTo: '**'\n---\n\n# Prompt Manager Agent Instructions\n\n${trimmedContext}\n`
+			: '';
+
+		await vscode.workspace.fs.writeFile(instructionsFile, Buffer.from(fileContent, 'utf-8'));
+		await vscode.workspace.fs.writeFile(projectInstructionsFile, Buffer.from(fileContent, 'utf-8'));
+
+		const chatConfig = vscode.workspace.getConfiguration('chat', workspaceFolder.uri);
+		await this.ensurePathInChatLocationsSetting(
+			chatConfig,
+			'instructionsFilesLocations',
+			WorkspaceService.AGENT_INSTRUCTIONS_FOLDER,
+			vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager').fsPath,
+			vscode.ConfigurationTarget.Workspace,
+			false,
+		);
+		await this.ensurePathInChatLocationsSetting(
+			chatConfig,
+			'instructionsFilesLocations',
+			WorkspaceService.PROJECT_INSTRUCTIONS_FOLDER,
+			vscode.Uri.joinPath(workspaceFolder.uri, '.github', 'instructions').fsPath,
+			vscode.ConfigurationTarget.Workspace,
+			false,
+		);
+
+		const includeApplyingInstructions = chatConfig.get<boolean>('includeApplyingInstructions');
+		if (includeApplyingInstructions !== true) {
+			await vscode.workspace.getConfiguration().update(
+				'chat.includeApplyingInstructions',
+				true,
+				vscode.ConfigurationTarget.Workspace,
+			);
+		}
+
+		const includeReferencedInstructions = chatConfig.get<boolean>('includeReferencedInstructions');
+		if (includeReferencedInstructions !== true) {
+			await vscode.workspace.getConfiguration().update(
+				'chat.includeReferencedInstructions',
+				true,
+				vscode.ConfigurationTarget.Workspace,
+			);
+		}
+
+		const useInstructionFiles = vscode.workspace.getConfiguration().get<boolean>('github.copilot.chat.codeGeneration.useInstructionFiles');
+		if (useInstructionFiles !== true) {
+			await vscode.workspace.getConfiguration().update(
+				'github.copilot.chat.codeGeneration.useInstructionFiles',
+				true,
+				vscode.ConfigurationTarget.Workspace,
+			);
+		}
+
+		const requestedLocale = 'auto';
+		const localeOverride = vscode.workspace.getConfiguration().get<string>('github.copilot.chat.localeOverride');
+		if ((localeOverride || '').toLowerCase() !== requestedLocale.toLowerCase()) {
+			await vscode.workspace.getConfiguration().update(
+				'github.copilot.chat.localeOverride',
+				requestedLocale,
+				vscode.ConfigurationTarget.Workspace,
+			);
+		}
+	}
+
+	private async ensurePathInChatLocationsSetting(
+		chatConfig: vscode.WorkspaceConfiguration,
+		settingKey: 'instructionsFilesLocations' | 'promptFilesLocations',
+		relativePath: string,
+		absolutePath: string,
+		target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Workspace,
+		fallbackToGlobal: boolean = false,
+	): Promise<void> {
+		const currentValue = chatConfig.get<unknown>(settingKey);
+		const normalizedRelative = relativePath.replace(/\\/g, '/');
+		const normalizedAbsolute = absolutePath.replace(/\\/g, '/');
+		const hasPath = (value: unknown): boolean => {
+			if (Array.isArray(value)) {
+				return value
+					.filter((v): v is string => typeof v === 'string')
+					.some(v => {
+						const normalized = v.replace(/\\/g, '/');
+						return normalized === normalizedRelative || normalized === normalizedAbsolute;
+					});
+			}
+			if (value && typeof value === 'object') {
+				return Object.keys(value as Record<string, unknown>).some(key => {
+					const normalized = key.replace(/\\/g, '/');
+					return normalized === normalizedRelative || normalized === normalizedAbsolute;
+				});
+			}
+			return false;
+		};
+
+		if (hasPath(currentValue)) {
+			return;
+		}
+
+		if (Array.isArray(currentValue)) {
+			const values = currentValue.filter((v): v is string => typeof v === 'string');
+			await chatConfig.update(settingKey, [...values, relativePath], target);
+			if (fallbackToGlobal && !hasPath(chatConfig.get<unknown>(settingKey))) {
+				await chatConfig.update(settingKey, [...values, relativePath], vscode.ConfigurationTarget.Global);
+			}
+			return;
+		}
+
+		if (currentValue && typeof currentValue === 'object') {
+			const entries = currentValue as Record<string, unknown>;
+			const normalizedEntries: Record<string, boolean> = {};
+			for (const [key, value] of Object.entries(entries)) {
+				if (typeof value === 'boolean') {
+					normalizedEntries[key] = value;
+					continue;
+				}
+
+				if (typeof value === 'string' && /^\d+$/.test(key)) {
+					normalizedEntries[value] = true;
+				}
+			}
+
+			const updated: Record<string, boolean> = {
+				...normalizedEntries,
+				[relativePath]: true,
+			};
+			await chatConfig.update(settingKey, updated, target);
+			if (fallbackToGlobal && !hasPath(chatConfig.get<unknown>(settingKey))) {
+				await chatConfig.update(settingKey, updated, vscode.ConfigurationTarget.Global);
+			}
+			return;
+		}
+
+		const defaultValue = { [relativePath]: true };
+		await chatConfig.update(settingKey, defaultValue, target);
+		if (fallbackToGlobal && !hasPath(chatConfig.get<unknown>(settingKey))) {
+			await chatConfig.update(settingKey, defaultValue, vscode.ConfigurationTarget.Global);
+		}
 	}
 }

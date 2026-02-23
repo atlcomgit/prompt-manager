@@ -20,6 +20,10 @@ export function activate(context: vscode.ExtensionContext) {
 	const gitService = new GitService();
 	const stateService = new StateService(context);
 
+	void workspaceService.ensureChatInstructionsFile(stateService.getGlobalAgentContext()).catch(() => {
+		// keep activation resilient if chat settings/files sync fails
+	});
+
 	// Initialize providers
 	const sidebarProvider = new SidebarProvider(
 		context.extensionUri,
@@ -170,7 +174,11 @@ export function activate(context: vscode.ExtensionContext) {
 				if (prompt?.content) {
 					const globalContext = stateService.getGlobalAgentContext();
 					const parts: string[] = [];
-					if (globalContext) { parts.push(globalContext); parts.push(''); }
+					try {
+						await workspaceService.ensureChatInstructionsFile(globalContext);
+					} catch {
+						// keep chat flow even if instructions file sync fails
+					}
 					parts.push(prompt.content);
 
 					const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
@@ -356,9 +364,7 @@ export function activate(context: vscode.ExtensionContext) {
 		},
 	});
 
-	console.log('[PromptManager] Extension activated');
 }
 
 export function deactivate() {
-	console.log('[PromptManager] Extension deactivated');
 }

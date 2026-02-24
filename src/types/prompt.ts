@@ -3,7 +3,7 @@
  */
 
 /** Prompt status */
-export type PromptStatus = 'draft' | 'in-progress' | 'completed' | 'stopped' | 'cancelled';
+export type PromptStatus = 'draft' | 'in-progress' | 'stopped' | 'cancelled' | 'completed' | 'report' | 'review' | 'closed';
 
 /** Prompt configuration stored as JSON */
 export interface PromptConfig {
@@ -69,6 +69,8 @@ export interface PromptConfig {
 export interface Prompt extends PromptConfig {
 	/** Markdown content of the prompt */
 	content: string;
+	/** Markdown report content */
+	report: string;
 }
 
 /** Default prompt config */
@@ -97,6 +99,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		createdAt: now,
 		updatedAt: now,
 		content: '',
+		report: '',
 	};
 }
 

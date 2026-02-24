@@ -15,17 +15,23 @@ interface Props {
 const STATUS_ICONS: Record<string, string> = {
   'draft': '📝',
   'in-progress': '🚀',
-  'completed': '✅',
   'stopped': '▣',
   'cancelled': '❌',
+  'completed': '✅',
+  'report': '🧾',
+  'review': '🔎',
+  'closed': '🔒',
 };
 
 const STATUS_COLORS: Record<string, string> = {
   'draft': 'var(--vscode-descriptionForeground)',
   'in-progress': 'var(--vscode-editorInfo-foreground, #3794ff)',
-  'completed': 'var(--vscode-testing-iconPassed, #73c991)',
   'stopped': 'var(--vscode-editorWarning-foreground, #cca700)',
   'cancelled': 'var(--vscode-errorForeground, #f44747)',
+  'completed': 'var(--vscode-testing-iconPassed, #73c991)',
+  'report': 'var(--vscode-textLink-foreground)',
+  'review': 'var(--vscode-editorWarning-foreground, #cca700)',
+  'closed': 'var(--vscode-disabledForeground)',
 };
 
 
@@ -36,9 +42,12 @@ export const PromptItem: React.FC<Props> = ({
   const STATUS_LABELS: Record<string, string> = {
     'draft': t('status.draft'),
     'in-progress': t('status.inProgress'),
-    'completed': t('status.completed'),
     'stopped': t('status.stopped'),
     'cancelled': t('status.cancelled'),
+    'completed': t('status.completed'),
+    'report': t('status.report'),
+    'review': t('status.review'),
+    'closed': t('status.closed'),
   };
   const [showActions, setShowActions] = useState(false);
   const [showMenu, setShowMenu] = useState(false);

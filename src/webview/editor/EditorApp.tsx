@@ -25,8 +25,16 @@ interface SelectOption {
 
 export const EditorApp: React.FC = () => {
   const t = useT();
+  const initialWebviewStateRef = useRef<Record<string, unknown>>((vscode.getState?.() || {}) as Record<string, unknown>);
   const storage = typeof window !== 'undefined' ? window.localStorage : null;
   const readStoredHeight = (key: string): number | undefined => {
+    const stateValue = initialWebviewStateRef.current?.[key];
+    const parsedStateValue = typeof stateValue === 'number'
+      ? stateValue
+      : (typeof stateValue === 'string' ? Number.parseInt(stateValue, 10) : NaN);
+    if (Number.isFinite(parsedStateValue) && parsedStateValue > 0) {
+      return parsedStateValue;
+    }
     if (!storage) {
       return undefined;
     }
@@ -58,6 +66,7 @@ export const EditorApp: React.FC = () => {
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
   const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
+  const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
   const startChatLockRef = useRef(false);
   const globalContextTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -270,17 +279,36 @@ export const EditorApp: React.FC = () => {
   }, [targetBranch, prompt.projects]);
 
   useEffect(() => {
-    if (!storage || !promptContentHeight) {
+    if (!promptContentHeight) {
       return;
     }
-    storage.setItem('pm.editor.promptContentHeight', String(promptContentHeight));
+    const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
+    vscode.setState?.({ ...currentState, 'pm.editor.promptContentHeight': promptContentHeight });
+    if (storage) {
+      storage.setItem('pm.editor.promptContentHeight', String(promptContentHeight));
+    }
   }, [promptContentHeight, storage]);
 
   useEffect(() => {
-    if (!storage || !globalContextHeight) {
+    if (!reportHeight) {
       return;
     }
-    storage.setItem('pm.editor.globalContextHeight', String(globalContextHeight));
+    const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
+    vscode.setState?.({ ...currentState, 'pm.editor.reportHeight': reportHeight });
+    if (storage) {
+      storage.setItem('pm.editor.reportHeight', String(reportHeight));
+    }
+  }, [reportHeight, storage]);
+
+  useEffect(() => {
+    if (!globalContextHeight) {
+      return;
+    }
+    const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
+    vscode.setState?.({ ...currentState, 'pm.editor.globalContextHeight': globalContextHeight });
+    if (storage) {
+      storage.setItem('pm.editor.globalContextHeight', String(globalContextHeight));
+    }
   }, [globalContextHeight, storage]);
 
   useEffect(() => {
@@ -305,26 +333,34 @@ export const EditorApp: React.FC = () => {
     }
   };
 
-  const handleSave = () => {
+  const buildPromptForSave = (): Prompt => {
     // Track writing time
     const timeSpent = Date.now() - openedAtRef.current;
-    const updatedPrompt = {
+    const updatedPrompt: Prompt = {
       ...prompt,
       timeSpentWriting: prompt.timeSpentWriting + timeSpent,
     };
     openedAtRef.current = Date.now();
+    return updatedPrompt;
+  };
+
+  const handleSave = (source: 'manual' | 'status-change' | 'autosave' = 'manual') => {
+    const updatedPrompt = buildPromptForSave();
 
     setIsSaving(true);
-    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt });
+    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source });
   };
 
   const handleStartChat = () => {
     if (startChatLockRef.current || isStartingChat || !prompt.content || prompt.chatSessionIds.length > 0) {
       return;
     }
+    const updatedPrompt = buildPromptForSave();
     startChatLockRef.current = true;
     setIsStartingChat(true);
-    vscode.postMessage({ type: 'startChat', id: prompt.id || '__new__', prompt });
+    setIsSaving(true);
+    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
+    vscode.postMessage({ type: 'startChat', id: updatedPrompt.id || '__new__', prompt: updatedPrompt });
   };
 
   const handleOpenChat = () => {
@@ -341,8 +377,21 @@ export const EditorApp: React.FC = () => {
     setPrompt(updatedPrompt);
     setIsSaving(true);
     setIsDirty(false);
-    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt });
+    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'status-change' });
   };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const isSaveCombo = (event.ctrlKey || event.metaKey)
+        && (event.code === 'KeyS' || event.key.toLowerCase() === 's' || event.keyCode === 83);
+      if (isSaveCombo) {
+        event.preventDefault();
+        handleSave('manual');
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleSave]);
 
   const handleGenerateTitle = () => {
     if (prompt.content) {
@@ -494,7 +543,7 @@ export const EditorApp: React.FC = () => {
               />
             )}
           </div>
-
+          
           {/* Global agent context */}
           <div style={styles.field}>
             <label style={styles.label}>{t('editor.globalContext')}</label>
@@ -535,6 +584,21 @@ export const EditorApp: React.FC = () => {
               <span style={styles.varHint}>{t('editor.templateHint')}</span>
             </div>
           )}
+
+
+          {/* Report */}
+          <div style={styles.field}>
+            <label style={styles.label}>{t('editor.report')}</label>
+            <TextArea
+              value={prompt.report || ''}
+              onChange={v => updateField('report', v)}
+              placeholder={t('editor.reportPlaceholder')}
+              rows={8}
+              showControls={false}
+              persistedHeight={reportHeight}
+              onHeightChange={setReportHeight}
+            />
+          </div>
 
           {/* Separator */}
           <div style={styles.separator} />

@@ -184,6 +184,7 @@ export function activate(context: vscode.ExtensionContext) {
 					const fileUris = prompt.contextFiles.map(f => vscode.Uri.file(f.startsWith('/') ? f : `${workspaceRoot}/${f}`));
 
 					const ctx: string[] = [];
+					if (prompt.projects.length > 0) ctx.push(`Projects: ${prompt.projects.join(', ')}`);
 					if (prompt.languages.length > 0) ctx.push(`Languages: ${prompt.languages.join(', ')}`);
 					if (prompt.frameworks.length > 0) ctx.push(`Frameworks: ${prompt.frameworks.join(', ')}`);
 					if (prompt.skills.length > 0) ctx.push(`Skills: ${prompt.skills.join(', ')}`);

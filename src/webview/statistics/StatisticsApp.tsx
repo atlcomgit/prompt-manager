@@ -110,16 +110,22 @@ export const StatisticsApp: React.FC = () => {
             const STATUS_ICONS: Record<string, string> = {
               'draft': '📝',
               'in-progress': '🚀',
-              'completed': '✅',
               'stopped': '▣',
               'cancelled': '❌',
+              'completed': '✅',
+              'report': '🧾',
+              'review': '🔎',
+              'closed': '🔒',
             };
             const STATUS_KEYS: Record<string, string> = {
               'draft': 'status.draft',
               'in-progress': 'status.inProgress',
-              'completed': 'status.completed',
               'stopped': 'status.stopped',
               'cancelled': 'status.cancelled',
+              'completed': 'status.completed',
+              'report': 'status.report',
+              'review': 'status.review',
+              'closed': 'status.closed',
             };
             const label = `${STATUS_ICONS[status] || ''} ${t(STATUS_KEYS[status] || status)}`;
             return (
@@ -242,9 +248,12 @@ export const StatisticsApp: React.FC = () => {
                 const statusLabels: Record<string, string> = {
                   'draft': t('status.draft'),
                   'in-progress': t('status.inProgress'),
-                  'completed': t('status.completed'),
                   'stopped': t('status.stopped'),
                   'cancelled': t('status.cancelled'),
+                  'completed': t('status.completed'),
+                  'report': t('status.report'),
+                  'review': t('status.review'),
+                  'closed': t('status.closed'),
                 };
                 return (
                   <tr key={idx} style={idx % 2 === 0 ? styles.reportRowEven : undefined}>

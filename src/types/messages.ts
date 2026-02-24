@@ -10,7 +10,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'ready' }
 	| { type: 'getPrompts' }
 	| { type: 'getPrompt'; id: string }
-	| { type: 'savePrompt'; prompt: Prompt }
+	| { type: 'savePrompt'; prompt: Prompt; source?: 'manual' | 'status-change' | 'autosave' }
 	| { type: 'deletePrompt'; id: string }
 	| { type: 'duplicatePrompt'; id: string }
 	| { type: 'createPrompt' }

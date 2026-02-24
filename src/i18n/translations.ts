@@ -12,6 +12,9 @@ const en: Record<string, string> = {
 	'status.completed': 'Completed',
 	'status.stopped': 'Stopped',
 	'status.cancelled': 'Cancelled',
+	'status.report': 'Report',
+	'status.review': 'Review',
+	'status.closed': 'Closed',
 
 	// --- Common ---
 	'common.save': 'Save',
@@ -69,6 +72,8 @@ const en: Record<string, string> = {
 	'editor.preview': 'Preview',
 	'editor.open': 'Open',
 	'editor.promptPlaceholder': 'Enter prompt text in Markdown format...\n\nUse {{variables}} for templating',
+	'editor.report': 'Report',
+	'editor.reportPlaceholder': 'Agent response and implementation report...',
 	'editor.templateVars': '🔤 Template variables',
 	'editor.templateHint': 'Values are substituted in preview',
 	'editor.taskNumber': 'Task number',
@@ -180,8 +185,11 @@ const ru: Record<string, string> = {
 	'status.draft': 'Черновик',
 	'status.inProgress': 'В работе',
 	'status.completed': 'Завершён',
-	'status.stopped': 'Остановлен',
+	'status.stopped': 'Стоп',
 	'status.cancelled': 'Отменён',
+	'status.report': 'Отчет',
+	'status.review': 'Проверка',
+	'status.closed': 'Закрыт',
 
 	// --- Common ---
 	'common.save': 'Сохранить',
@@ -239,6 +247,8 @@ const ru: Record<string, string> = {
 	'editor.preview': 'Предпросмотр',
 	'editor.open': 'Открыть',
 	'editor.promptPlaceholder': 'Введите текст промпта в формате Markdown...\n\nИспользуйте {{переменные}} для шаблонизации',
+	'editor.report': 'Отчет',
+	'editor.reportPlaceholder': 'Ответ агента и отчет по реализации...',
 	'editor.templateVars': '🔤 Переменные шаблона',
 	'editor.templateHint': 'Значения подставляются в предпросмотре',
 	'editor.taskNumber': 'Номер задачи',

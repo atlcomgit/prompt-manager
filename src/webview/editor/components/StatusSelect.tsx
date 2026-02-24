@@ -13,9 +13,12 @@ export const StatusSelect: React.FC<Props> = ({ value, onChange }) => {
   const STATUS_OPTIONS: { value: PromptStatus; label: string; icon: string; color: string }[] = [
     { value: 'draft', label: t('status.draft'), icon: '📝', color: 'var(--vscode-descriptionForeground)' },
     { value: 'in-progress', label: t('status.inProgress'), icon: '🚀', color: 'var(--vscode-editorInfo-foreground, #3794ff)' },
-    { value: 'completed', label: t('status.completed'), icon: '✅', color: 'var(--vscode-testing-iconPassed, #73c991)' },
     { value: 'stopped', label: t('status.stopped'), icon: '▣', color: 'var(--vscode-editorWarning-foreground, #cca700)' },
     { value: 'cancelled', label: t('status.cancelled'), icon: '❌', color: 'var(--vscode-errorForeground, #f44747)' },
+    { value: 'completed', label: t('status.completed'), icon: '✅', color: 'var(--vscode-testing-iconPassed, #73c991)' },
+    { value: 'report', label: t('status.report'), icon: '🧾', color: 'var(--vscode-textLink-foreground)' },
+    { value: 'review', label: t('status.review'), icon: '🔎', color: 'var(--vscode-editorWarning-foreground, #cca700)' },
+    { value: 'closed', label: t('status.closed'), icon: '🔒', color: 'var(--vscode-disabledForeground)' },
   ];
 
   return (

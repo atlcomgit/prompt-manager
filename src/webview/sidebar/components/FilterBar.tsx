@@ -27,9 +27,12 @@ export const FilterBar: React.FC<Props> = ({
   const STATUS_OPTIONS: { value: PromptStatus; label: string }[] = [
     { value: 'draft', label: `📝 ${t('status.draft')}` },
     { value: 'in-progress', label: `🚀 ${t('status.inProgress')}` },
-    { value: 'completed', label: `✅ ${t('status.completed')}` },
     { value: 'stopped', label: `▣ ${t('status.stopped')}` },
     { value: 'cancelled', label: `❌ ${t('status.cancelled')}` },
+    { value: 'completed', label: `✅ ${t('status.completed')}` },
+    { value: 'report', label: `🧾 ${t('status.report')}` },
+    { value: 'review', label: `🔎 ${t('status.review')}` },
+    { value: 'closed', label: `🔒 ${t('status.closed')}` },
   ];
 
   const SORT_OPTIONS: { value: SortField; label: string }[] = [

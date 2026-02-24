@@ -91,7 +91,9 @@ export class StorageService {
 		if (!config) { return null; }
 
 		const mdPath = path.join(this.promptDir(id), 'prompt.md');
+		const reportPath = path.join(this.promptDir(id), 'report.md');
 		let content = '';
+		let report = '';
 		try {
 			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(mdPath));
 			content = Buffer.from(raw).toString('utf-8');
@@ -99,7 +101,14 @@ export class StorageService {
 			// No markdown file yet
 		}
 
-		return { ...config, content };
+		try {
+			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(reportPath));
+			report = Buffer.from(raw).toString('utf-8');
+		} catch {
+			// No report file yet
+		}
+
+		return { ...config, content, report };
 	}
 
 	/** Save prompt (config + markdown) */
@@ -116,7 +125,7 @@ export class StorageService {
 		}
 
 		// Save config.json (without content field)
-		const { content, ...config } = prompt;
+		const { content, report, ...config } = prompt;
 		config.updatedAt = new Date().toISOString();
 
 		const configPath = path.join(dir, 'config.json');
@@ -131,6 +140,13 @@ export class StorageService {
 		await vscode.workspace.fs.writeFile(
 			vscode.Uri.file(mdPath),
 			Buffer.from(content, 'utf-8')
+		);
+
+		// Save report.md
+		const reportPath = path.join(dir, 'report.md');
+		await vscode.workspace.fs.writeFile(
+			vscode.Uri.file(reportPath),
+			Buffer.from(report || '', 'utf-8')
 		);
 
 		// Ensure context directory exists
@@ -237,7 +253,16 @@ export class StorageService {
 				return date.getFullYear() === filter.year;
 			});
 		}
-		const byStatus: Record<PromptStatus, number> = { draft: 0, 'in-progress': 0, completed: 0, stopped: 0, cancelled: 0 };
+		const byStatus: Record<PromptStatus, number> = {
+			draft: 0,
+			'in-progress': 0,
+			stopped: 0,
+			cancelled: 0,
+			completed: 0,
+			report: 0,
+			review: 0,
+			closed: 0,
+		};
 		const byLanguage: Record<string, number> = {};
 		const byFramework: Record<string, number> = {};
 		let totalTimeWriting = 0;

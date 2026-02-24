@@ -302,6 +302,41 @@ export class EditorPanelManager {
 		return null;
 	}
 
+	private statusRank(status: Prompt['status']): number {
+		switch (status) {
+			case 'draft':
+				return 10;
+			case 'in-progress':
+				return 20;
+			case 'stopped':
+				return 30;
+			case 'cancelled':
+				return 40;
+			case 'completed':
+				return 50;
+			case 'report':
+				return 60;
+			case 'review':
+				return 70;
+			case 'closed':
+				return 80;
+			default:
+				return 0;
+		}
+	}
+
+	private mergeReport(existingReport: string, chatMarkdown: string): string {
+		const incoming = (chatMarkdown || '').trim();
+		if (!incoming) {
+			return existingReport || '';
+		}
+		const current = (existingReport || '').trim();
+		if (!current) {
+			return incoming;
+		}
+		return `${current}\n\n${incoming}`;
+	}
+
 	constructor(
 		private readonly extensionUri: vscode.Uri,
 		private readonly storageService: StorageService,
@@ -534,6 +569,7 @@ export class EditorPanelManager {
 						currentSnapshot.title
 						|| currentSnapshot.description
 						|| currentSnapshot.content
+						|| currentSnapshot.report
 						|| currentSnapshot.projects.length
 						|| currentSnapshot.languages.length
 						|| currentSnapshot.frameworks.length
@@ -563,12 +599,6 @@ export class EditorPanelManager {
 						const slug = await this.aiService.generateSlug(dirtySnapshot.title, dirtySnapshot.description);
 						dirtySnapshot.id = await this.storageService.uniqueId(slug || 'untitled');
 					}
-					if (dirtySnapshot.languages.length === 0 && dirtySnapshot.content) {
-						dirtySnapshot.languages = await this.aiService.detectLanguages(dirtySnapshot.content);
-					}
-					if (dirtySnapshot.frameworks.length === 0 && dirtySnapshot.content) {
-						dirtySnapshot.frameworks = await this.aiService.detectFrameworks(dirtySnapshot.content);
-					}
 					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
 					await this.storageService.savePrompt(dirtySnapshot);
 					await this.broadcastAvailableLanguagesAndFrameworks();
@@ -593,6 +623,8 @@ export class EditorPanelManager {
 						latestPromptState = msg.prompt;
 					} else if (msg.dirty && !latestPromptState) {
 						latestPromptState = JSON.parse(JSON.stringify(prompt));
+					} else if (!msg.dirty) {
+						latestPromptState = null;
 					}
 
 					if (msg.prompt && msg.dirty) {
@@ -674,6 +706,7 @@ export class EditorPanelManager {
 
 			case 'savePrompt': {
 				let promptToSave = msg.prompt;
+				const saveSource = msg.source || 'manual';
 
 				// Generate missing fields via AI
 				if (!promptToSave.title && promptToSave.content) {
@@ -688,6 +721,13 @@ export class EditorPanelManager {
 				}
 
 				const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(promptToSave.id) : null;
+				const hasConcurrentUpdate = Boolean(existingPrompt && promptToSave.updatedAt && existingPrompt.updatedAt !== promptToSave.updatedAt);
+				const allowStatusOverwrite = saveSource === 'status-change';
+				if (existingPrompt && hasConcurrentUpdate && !allowStatusOverwrite) {
+					if (this.statusRank(existingPrompt.status) >= this.statusRank(promptToSave.status)) {
+						promptToSave.status = existingPrompt.status;
+					}
+				}
 				if (existingPrompt) {
 					promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
 					promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
@@ -699,14 +739,6 @@ export class EditorPanelManager {
 						: (existingPrompt.chatSessionIds || []);
 				} else {
 					promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
-				}
-
-				// Auto-detect languages & frameworks
-				if (promptToSave.languages.length === 0 && promptToSave.content) {
-					promptToSave.languages = await this.aiService.detectLanguages(promptToSave.content);
-				}
-				if (promptToSave.frameworks.length === 0 && promptToSave.content) {
-					promptToSave.frameworks = await this.aiService.detectFrameworks(promptToSave.content);
 				}
 
 				const saved = await this.storageService.savePrompt(promptToSave);
@@ -837,6 +869,7 @@ export class EditorPanelManager {
 					}
 					await this.storageService.savePrompt(prompt);
 					Object.assign(currentPrompt, prompt);
+					this._onDidSave.fire(prompt.id);
 
 					// Compose query with prompt content and metadata
 					const globalContext = this.stateService.getGlobalAgentContext();
@@ -855,6 +888,7 @@ export class EditorPanelManager {
 
 					// Add context metadata
 					const ctx: string[] = [];
+					if (prompt.projects.length > 0) ctx.push(`Projects: ${prompt.projects.join(', ')}`);
 					if (prompt.languages.length > 0) ctx.push(`Languages: ${prompt.languages.join(', ')}`);
 					if (prompt.frameworks.length > 0) ctx.push(`Frameworks: ${prompt.frameworks.join(', ')}`);
 					if (prompt.skills.length > 0) ctx.push(`Skills: ${prompt.skills.join(', ')}`);
@@ -1104,6 +1138,9 @@ export class EditorPanelManager {
 											...(promptToComplete.chatSessionIds || []).filter(id => id !== sessionId),
 										];
 									}
+									if (chatMarkdown) {
+										promptToComplete.report = this.mergeReport(promptToComplete.report || '', chatMarkdown);
+									}
 									if (promptToComplete.status !== 'completed') {
 										promptToComplete.status = 'completed';
 									}
@@ -1133,11 +1170,12 @@ export class EditorPanelManager {
 									const implementingDelta = Math.max(0, endedAt - startedAt);
 									if (implementingDelta > 0) {
 										promptForTiming.timeSpentImplementing = (promptForTiming.timeSpentImplementing || 0) + implementingDelta;
-										await this.storageService.savePrompt(promptForTiming);
-										Object.assign(currentPrompt, promptForTiming);
-										this._onDidSave.fire(promptForTiming.id);
-										postMessage({ type: 'prompt', prompt: promptForTiming });
 									}
+									promptForTiming.report = this.mergeReport(promptForTiming.report || '', chatMarkdown);
+									await this.storageService.savePrompt(promptForTiming);
+									Object.assign(currentPrompt, promptForTiming);
+									this._onDidSave.fire(promptForTiming.id);
+									postMessage({ type: 'prompt', prompt: promptForTiming });
 								}
 
 								await this.runConfiguredHooks(prompt?.hooks || [], {

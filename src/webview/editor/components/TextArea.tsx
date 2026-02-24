@@ -52,7 +52,7 @@ export const TextArea: React.FC<Props> = ({
     }
   }, [suggestion, suggestions]);
 
-  // Handle text input — clear ghost, debounce new suggestion request
+  // Handle text input — clear ghost, debounce suggestion request only after space
   const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value;
     const pos = e.target.selectionStart;
@@ -60,19 +60,24 @@ export const TextArea: React.FC<Props> = ({
     setCursorPos(pos);
     setGhostText('');
 
-    // Auto-request suggestion after 800ms idle (only if enabled)
-    if (autoCompleteEnabled && onRequestSuggestion && newValue.length > 10) {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      debounceRef.current = setTimeout(() => {
-        const textBefore = newValue.substring(0, pos);
-        const charAfter = newValue[pos];
-        if (!charAfter || charAfter === '\n' || charAfter === ' ') {
-          setIsRequesting(true);
-          onRequestSuggestion(textBefore);
-        }
-      }, 800);
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
     }
-  }, [onChange, onRequestSuggestion]);
+
+    // Auto-request suggestion only after typing a space or newline, with 2s delay
+    if (autoCompleteEnabled && onRequestSuggestion) {
+      const typedChar = pos > 0 ? newValue[pos - 1] : '';
+      if (typedChar === ' ' || typedChar === '\n') {
+        debounceRef.current = setTimeout(() => {
+          const textBefore = newValue.substring(0, pos);
+          if (textBefore.trim().length > 0) {
+            setIsRequesting(true);
+            onRequestSuggestion(textBefore);
+          }
+        }, 2000);
+      }
+    }
+  }, [onChange, onRequestSuggestion, autoCompleteEnabled]);
 
   // Track cursor position on selection change
   const handleSelect = useCallback(() => {
@@ -196,10 +201,7 @@ export const TextArea: React.FC<Props> = ({
           onScroll={syncScroll}
           placeholder={placeholder}
           rows={rows}
-          style={{
-            ...styles.textarea,
-            ...(ghostText ? styles.textareaWithGhost : {}),
-          }}
+          style={styles.textarea}
           spellCheck={false}
         />
 
@@ -289,6 +291,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid transparent',
     boxSizing: 'border-box',
     borderRadius: '4px',
+    zIndex: 2,
   },
   ghostText: {
     color: 'var(--vscode-editorGhostText-foreground, rgba(128,128,128,0.6))',
@@ -296,6 +299,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   textarea: {
     position: 'relative',
+    zIndex: 1,
     width: '100%',
     padding: '8px',
     background: 'var(--vscode-input-background)',
@@ -310,9 +314,6 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: '120px',
     boxSizing: 'border-box',
     caretColor: 'var(--vscode-editorCursor-foreground, var(--vscode-foreground))',
-  },
-  textareaWithGhost: {
-    background: 'transparent',
   },
   ghostHint: {
     position: 'absolute',

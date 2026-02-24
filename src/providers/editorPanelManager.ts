@@ -24,6 +24,9 @@ export class EditorPanelManager {
 	public readonly onDidSave = this._onDidSave.event;
 	private chatTrackingDisposables = new Map<string, vscode.Disposable>();
 	private panelDirtySetters = new Map<string, (v: boolean) => void>();
+	private panelDirtyFlags = new Map<string, boolean>();
+	private panelLatestPromptSnapshots = new Map<string, Prompt | null>();
+	private panelBasePrompts = new Map<string, Prompt>();
 	private silentClosePanels = new Set<string>();
 	private pendingRestorePrompt: Prompt | null = null;
 	private pendingRestoreIsDirty = false;
@@ -31,6 +34,7 @@ export class EditorPanelManager {
 	private contentEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string }>();
 	private panelKeyByContentEditorUri = new Map<string, string>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
+	private openPromptQueue: Promise<void> = Promise.resolve();
 
 	private async runConfiguredHooks(
 		hookIds: string[],
@@ -337,6 +341,68 @@ export class EditorPanelManager {
 		return `${current}\n\n${incoming}`;
 	}
 
+	private normalizePromptForCompare(p: Prompt): string {
+		const normalized = {
+			...p,
+			updatedAt: '',
+		};
+		return JSON.stringify(normalized);
+	}
+
+	private hasPromptDataWithoutId(p: Prompt): boolean {
+		return Boolean(
+			p.title
+			|| p.description
+			|| p.content
+			|| p.report
+			|| p.projects.length
+			|| p.languages.length
+			|| p.frameworks.length
+			|| p.skills.length
+			|| p.mcpTools.length
+			|| p.hooks.length
+			|| p.taskNumber
+			|| p.branch
+			|| p.model
+			|| p.contextFiles.length
+		);
+	}
+
+	private async persistPromptSnapshotForSwitch(snapshot: Prompt): Promise<Prompt | null> {
+		const promptToSave: Prompt = JSON.parse(JSON.stringify(snapshot));
+		if (!promptToSave.id && !this.hasPromptDataWithoutId(promptToSave)) {
+			return null;
+		}
+
+		if (!promptToSave.title && promptToSave.content) {
+			promptToSave.title = await this.aiService.generateTitle(promptToSave.content);
+		}
+		if (!promptToSave.description && promptToSave.content) {
+			promptToSave.description = await this.aiService.generateDescription(promptToSave.content);
+		}
+		if (!promptToSave.id) {
+			const slug = await this.aiService.generateSlug(promptToSave.title, promptToSave.description);
+			promptToSave.id = await this.storageService.uniqueId(slug || 'untitled');
+		}
+
+		const existingPrompt = await this.storageService.getPrompt(promptToSave.id);
+		if (existingPrompt) {
+			promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
+			promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
+			promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
+				? Math.max(0, promptToSave.timeSpentUntracked || 0)
+				: (existingPrompt.timeSpentUntracked || 0);
+			promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
+				? promptToSave.chatSessionIds
+				: (existingPrompt.chatSessionIds || []);
+		} else {
+			promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
+		}
+
+		await this.storageService.savePrompt(promptToSave);
+		return promptToSave;
+	}
+
 	constructor(
 		private readonly extensionUri: vscode.Uri,
 		private readonly storageService: StorageService,
@@ -441,14 +507,44 @@ export class EditorPanelManager {
 
 	/** Open or focus an editor panel for a prompt */
 	async openPrompt(promptId: string): Promise<void> {
+		this.openPromptQueue = this.openPromptQueue.then(async () => {
+			await this.openPromptInternal(promptId);
+		});
+		await this.openPromptQueue;
+	}
+
+	private async openPromptInternal(promptId: string): Promise<void> {
 		const isNew = promptId === '__new__';
 		const panelKey = isNew ? `new-${Date.now()}` : promptId;
 
-		// If panel already open, reveal it
-		const existing = openPanels.get(promptId);
-		if (existing && !isNew) {
-			existing.reveal();
+		const existingEntries = [...openPanels.entries()];
+		if (!isNew && existingEntries.length === 1 && existingEntries[0][0] === promptId) {
+			existingEntries[0][1].reveal();
 			return;
+		}
+
+		for (const [existingKey, existingPanel] of existingEntries) {
+			const latestSnapshot = this.panelLatestPromptSnapshots.get(existingKey)
+				|| this.panelBasePrompts.get(existingKey)
+				|| null;
+			if (latestSnapshot) {
+				const isDirty = this.panelDirtyFlags.get(existingKey) || false;
+				if (isDirty || latestSnapshot.id || this.hasPromptDataWithoutId(latestSnapshot)) {
+					try {
+						const saved = await this.persistPromptSnapshotForSwitch(latestSnapshot);
+						if (saved?.id) {
+							this._onDidSave.fire(saved.id);
+						}
+					} catch (err) {
+						const isRu = vscode.env.language.startsWith('ru');
+						vscode.window.showErrorMessage(
+							isRu ? `Ошибка сохранения перед переключением: ${err}` : `Save before switch error: ${err}`
+						);
+					}
+				}
+			}
+			this.silentClosePanels.add(existingKey);
+			existingPanel.dispose();
 		}
 
 		// Load prompt data
@@ -514,20 +610,17 @@ export class EditorPanelManager {
 		openPanels.set(panelKey, panel);
 		let isDirty = restoredUnsaved;
 		let latestPromptState: Prompt | null = restoredUnsaved ? prompt : null;
-		const normalizePromptForCompare = (p: Prompt): string => {
-			const normalized = {
-				...p,
-				updatedAt: '',
-			};
-			return JSON.stringify(normalized);
-		};
 		if (isDirty) {
 			const displayTitle = latestPromptState?.title || prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt');
 			panel.title = `⚡● ${displayTitle}`;
 		}
+		this.panelDirtyFlags.set(panelKey, isDirty);
+		this.panelLatestPromptSnapshots.set(panelKey, latestPromptState ? JSON.parse(JSON.stringify(latestPromptState)) : null);
+		this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(prompt)));
 
 		const setPanelDirty = (v: boolean): void => {
 			isDirty = v;
+			this.panelDirtyFlags.set(panelKey, v);
 		};
 		this.panelDirtySetters.set(panelKey, setPanelDirty);
 
@@ -543,12 +636,18 @@ export class EditorPanelManager {
 				this.silentClosePanels.delete(key);
 				openPanels.delete(key);
 				this.panelDirtySetters.delete(key);
+				this.panelDirtyFlags.delete(key);
+				this.panelLatestPromptSnapshots.delete(key);
+				this.panelBasePrompts.delete(key);
 				this.clearContentEditorBinding(key);
 			}
 			openPanels.delete(panelKey);
 			this.chatTrackingDisposables.get(panelKey)?.dispose();
 			this.chatTrackingDisposables.delete(panelKey);
 			this.panelDirtySetters.delete(panelKey);
+			this.panelDirtyFlags.delete(panelKey);
+			this.panelLatestPromptSnapshots.delete(panelKey);
+			this.panelBasePrompts.delete(panelKey);
 			this.clearContentEditorBinding(panelKey);
 
 			if (skipUnsavedPrompt) {
@@ -563,7 +662,7 @@ export class EditorPanelManager {
 				if (currentSnapshot.id) {
 					const persisted = await this.storageService.getPrompt(currentSnapshot.id);
 					hasUnsavedChanges = !persisted
-						|| normalizePromptForCompare(currentSnapshot) !== normalizePromptForCompare(persisted);
+						|| this.normalizePromptForCompare(currentSnapshot) !== this.normalizePromptForCompare(persisted);
 				} else {
 					hasUnsavedChanges = Boolean(
 						currentSnapshot.title
@@ -601,6 +700,9 @@ export class EditorPanelManager {
 					}
 					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
 					await this.storageService.savePrompt(dirtySnapshot);
+					this.panelDirtyFlags.set(panelKey, false);
+					this.panelLatestPromptSnapshots.set(panelKey, null);
+					this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(dirtySnapshot)));
 					await this.broadcastAvailableLanguagesAndFrameworks();
 					this._onDidSave.fire(dirtySnapshot.id);
 				} catch (err) {
@@ -621,10 +723,13 @@ export class EditorPanelManager {
 					isDirty = msg.dirty;
 					if (msg.prompt) {
 						latestPromptState = msg.prompt;
+						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(msg.prompt)));
 					} else if (msg.dirty && !latestPromptState) {
 						latestPromptState = JSON.parse(JSON.stringify(prompt));
+						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(latestPromptState)));
 					} else if (!msg.dirty) {
 						latestPromptState = null;
+						this.panelLatestPromptSnapshots.set(panelKey, null);
 					}
 
 					if (msg.prompt && msg.dirty) {
@@ -756,8 +861,22 @@ export class EditorPanelManager {
 						this.panelDirtySetters.delete(panelKey);
 						this.panelDirtySetters.set(promptToSave.id, dirtySetter);
 					}
+					const dirtyFlag = this.panelDirtyFlags.get(panelKey);
+					this.panelDirtyFlags.delete(panelKey);
+					this.panelDirtyFlags.set(promptToSave.id, Boolean(dirtyFlag));
+					const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
+					this.panelLatestPromptSnapshots.delete(panelKey);
+					this.panelLatestPromptSnapshots.set(promptToSave.id, latestSnapshot ? JSON.parse(JSON.stringify(latestSnapshot)) : null);
+					const basePrompt = this.panelBasePrompts.get(panelKey);
+					this.panelBasePrompts.delete(panelKey);
+					this.panelBasePrompts.set(promptToSave.id, basePrompt ? JSON.parse(JSON.stringify(basePrompt)) : JSON.parse(JSON.stringify(promptToSave)));
 					this.rebindContentEditorPanelKey(panelKey, promptToSave.id);
 				}
+
+				const stateKey = panelKey.startsWith('new-') ? promptToSave.id : panelKey;
+				this.panelDirtyFlags.set(stateKey, false);
+				this.panelLatestPromptSnapshots.set(stateKey, null);
+				this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptToSave)));
 
 				panel.title = `⚡ ${saved.title || saved.id}`;
 				postMessage({ type: 'promptSaved', prompt: saved });

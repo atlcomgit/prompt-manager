@@ -1,7 +1,7 @@
 # Prompt Manager for VS Code
 
 <p align="center">
-  <img src="media/icon.svg" alt="Prompt Manager" width="128" height="128">
+  <img src="media/icon.png" alt="Prompt Manager" width="128" height="128">
 </p>
 
 <p align="center">

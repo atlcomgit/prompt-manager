@@ -25,6 +25,16 @@ interface SelectOption {
 
 export const EditorApp: React.FC = () => {
   const t = useT();
+  const storage = typeof window !== 'undefined' ? window.localStorage : null;
+  const readStoredHeight = (key: string): number | undefined => {
+    if (!storage) {
+      return undefined;
+    }
+    const rawValue = storage.getItem(key);
+    const parsed = rawValue ? Number.parseInt(rawValue, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  };
+
   const [prompt, setPrompt] = useState<Prompt>(createDefaultPrompt());
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -41,13 +51,16 @@ export const EditorApp: React.FC = () => {
   const [showBranches, setShowBranches] = useState(false);
   const [inlineSuggestion, setInlineSuggestion] = useState<string>('');
   const [inlineSuggestions, setInlineSuggestions] = useState<string[]>([]);
-  const [autoCompleteEnabled, setAutoCompleteEnabled] = useState(true);
+  const [autoCompleteEnabled, setAutoCompleteEnabled] = useState(false);
   const [requestSuggestionSignal, setRequestSuggestionSignal] = useState(0);
   const [isSuggestionLoading, setIsSuggestionLoading] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
+  const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
+  const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
   const startChatLockRef = useRef(false);
+  const globalContextTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Time tracking
   const openedAtRef = useRef<number>(Date.now());
@@ -255,17 +268,34 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'getBranches', projects: prompt.projects });
   }, [targetBranch, prompt.projects]);
 
-  // Warn about unsaved changes when closing the tab
   useEffect(() => {
-    const handler = (e: BeforeUnloadEvent) => {
-      if (isDirty) {
-        e.preventDefault();
-        e.returnValue = '';
+    if (!storage || !promptContentHeight) {
+      return;
+    }
+    storage.setItem('pm.editor.promptContentHeight', String(promptContentHeight));
+  }, [promptContentHeight, storage]);
+
+  useEffect(() => {
+    if (!storage || !globalContextHeight) {
+      return;
+    }
+    storage.setItem('pm.editor.globalContextHeight', String(globalContextHeight));
+  }, [globalContextHeight, storage]);
+
+  useEffect(() => {
+    if (!globalContextTextareaRef.current || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+    const textarea = globalContextTextareaRef.current;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = Math.round(textarea.getBoundingClientRect().height);
+      if (nextHeight > 0) {
+        setGlobalContextHeight(nextHeight);
       }
-    };
-    window.addEventListener('beforeunload', handler);
-    return () => window.removeEventListener('beforeunload', handler);
-  }, [isDirty]);
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, []);
 
   const updateField = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
     setPrompt(prev => ({ ...prev, [field]: value }));
@@ -447,6 +477,8 @@ export const EditorApp: React.FC = () => {
                 autoCompleteEnabled={autoCompleteEnabled}
                 onAutoCompleteChange={setAutoCompleteEnabled}
                 showControls={false}
+                persistedHeight={promptContentHeight}
+                onHeightChange={setPromptContentHeight}
                 requestSuggestionSignal={requestSuggestionSignal}
                 onSuggestionLoadingChange={setIsSuggestionLoading}
                 onRequestSuggestion={(textBefore) => {
@@ -460,6 +492,26 @@ export const EditorApp: React.FC = () => {
                 suggestions={inlineSuggestions}
               />
             )}
+          </div>
+
+          {/* Global agent context */}
+          <div style={styles.field}>
+            <label style={styles.label}>{t('editor.globalContext')}</label>
+            <textarea
+              ref={globalContextTextareaRef}
+              value={globalContext}
+              onChange={e => {
+                setGlobalContext(e.target.value);
+                vscode.postMessage({ type: 'saveGlobalContext', context: e.target.value });
+              }}
+              placeholder={t('editor.globalContextPlaceholder')}
+              rows={3}
+              style={{
+                ...styles.globalContextTextarea,
+                height: globalContextHeight ? `${globalContextHeight}px` : undefined,
+              }}
+            />
+            <span style={styles.varHint}>{t('editor.globalContextHint')}</span>
           </div>
 
           {/* Template variables (auto-detected) */}
@@ -485,6 +537,15 @@ export const EditorApp: React.FC = () => {
 
           {/* Separator */}
           <div style={styles.separator} />
+
+          {/* Projects */}
+          <MultiSelect
+            label={t('editor.projects')}
+            selected={prompt.projects}
+            options={workspaceFolders.map(f => ({ id: f, name: f }))}
+            onChange={v => updateField('projects', v)}
+            placeholder={t('editor.projectsPlaceholder')}
+          />
 
           {/* Task & Branch */}
           <div style={styles.twoCol}>
@@ -540,15 +601,6 @@ export const EditorApp: React.FC = () => {
 
           {/* Separator */}
           <div style={styles.separator} />
-
-          {/* Projects */}
-          <MultiSelect
-            label={t('editor.projects')}
-            selected={prompt.projects}
-            options={workspaceFolders.map(f => ({ id: f, name: f }))}
-            onChange={v => updateField('projects', v)}
-            placeholder={t('editor.projectsPlaceholder')}
-          />
 
           {/* Languages */}
           <MultiSelect
@@ -681,25 +733,6 @@ export const EditorApp: React.FC = () => {
                 </button>
               </div>
             </div>
-          </div>
-
-          {/* Separator */}
-          <div style={styles.separator} />
-
-          {/* Global agent context */}
-          <div style={styles.field}>
-            <label style={styles.label}>{t('editor.globalContext')}</label>
-            <textarea
-              value={globalContext}
-              onChange={e => {
-                setGlobalContext(e.target.value);
-                vscode.postMessage({ type: 'saveGlobalContext', context: e.target.value });
-              }}
-              placeholder={t('editor.globalContextPlaceholder')}
-              rows={3}
-              style={styles.globalContextTextarea}
-            />
-            <span style={styles.varHint}>{t('editor.globalContextHint')}</span>
           </div>
 
           {/* Separator */}

@@ -16,7 +16,7 @@ export interface BranchInfo {
 }
 
 export class GitService {
-	/** Get branches for specified projects */
+	/** Get current branches for specified projects */
 	async getBranches(projectPaths: Map<string, string>, projectNames: string[]): Promise<BranchInfo[]> {
 		const branches: BranchInfo[] = [];
 
@@ -25,15 +25,10 @@ export class GitService {
 			if (!projectPath) { continue; }
 
 			try {
-				const { stdout } = await execAsync('git branch --no-color', { cwd: projectPath });
-				const lines = stdout.split('\n').filter(l => l.trim());
-
-				for (const line of lines) {
-					const isCurrent = line.startsWith('*');
-					const name = line.replace(/^\*?\s+/, '').trim();
-					if (name) {
-						branches.push({ name, current: isCurrent, project });
-					}
+				const { stdout } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: projectPath });
+				const currentBranch = stdout.trim();
+				if (currentBranch) {
+					branches.push({ name: currentBranch, current: true, project });
 				}
 			} catch {
 				// Not a git repo or git not available

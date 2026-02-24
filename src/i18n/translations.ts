@@ -131,7 +131,7 @@ const en: Record<string, string> = {
 	'timer.writing': 'Writing prompt',
 	'timer.implementing': 'Chat implementation',
 	'timer.untracked': 'Untracked time',
-	'timer.untrackedPlaceholder': 'minutes',
+	'timer.untrackedPlaceholder': 'hours',
 	'timer.total': 'Total',
 
 	// --- Statistics ---
@@ -301,7 +301,7 @@ const ru: Record<string, string> = {
 	'timer.writing': 'Написание промпта',
 	'timer.implementing': 'Реализация в чате',
 	'timer.untracked': 'Неучтенное время',
-	'timer.untrackedPlaceholder': 'минуты',
+	'timer.untrackedPlaceholder': 'часы',
 	'timer.total': 'Всего',
 
 	// --- Statistics ---

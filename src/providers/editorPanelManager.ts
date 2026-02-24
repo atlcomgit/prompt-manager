@@ -420,6 +420,17 @@ export class EditorPanelManager {
 		let prompt: Prompt;
 		if (isNew) {
 			prompt = createDefaultPrompt('');
+			const promptConfigs = await this.storageService.listPrompts();
+			const lastPromptConfig = [...promptConfigs]
+				.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())[0];
+			if (lastPromptConfig) {
+				prompt.languages = [...(lastPromptConfig.languages || [])];
+				prompt.frameworks = [...(lastPromptConfig.frameworks || [])];
+				prompt.skills = [...(lastPromptConfig.skills || [])];
+				prompt.mcpTools = [...(lastPromptConfig.mcpTools || [])];
+				prompt.hooks = [...(lastPromptConfig.hooks || [])];
+				prompt.model = lastPromptConfig.model || '';
+			}
 		} else {
 			const loaded = await this.storageService.getPrompt(promptId);
 			if (!loaded) {
@@ -485,7 +496,7 @@ export class EditorPanelManager {
 		};
 		this.panelDirtySetters.set(panelKey, setPanelDirty);
 
-		// Handle panel close — warn if unsaved changes
+		// Handle panel close — autosave unsaved changes silently
 		panel.onDidDispose(async () => {
 			const linkedKeys = [...openPanels.entries()]
 				.filter(([, p]) => p === panel)
@@ -541,47 +552,31 @@ export class EditorPanelManager {
 				const dirtySnapshot: Prompt = latestPromptState
 					? JSON.parse(JSON.stringify(latestPromptState))
 					: JSON.parse(JSON.stringify(prompt));
-				const saveLabel = isRu ? 'Сохранить' : 'Save';
-				const discardLabel = isRu ? 'Не сохранять' : 'Discard';
-				const promptTitle = dirtySnapshot.title || dirtySnapshot.id || (isRu ? 'Новый промпт' : 'New prompt');
-				const answer = await vscode.window.showWarningMessage(
-					isRu
-						? `Промпт "${promptTitle}" имеет несохранённые изменения. Сохранить?`
-						: `Prompt "${promptTitle}" has unsaved changes. Save?`,
-					{ modal: true },
-					saveLabel,
-					discardLabel
-				);
-
-				if (answer !== saveLabel && answer !== discardLabel) {
-					this.pendingRestorePrompt = dirtySnapshot;
-					this.pendingRestoreIsDirty = true;
-					setTimeout(() => {
-						void this.openPrompt(dirtySnapshot.id || '__new__');
-					}, 0);
-					return;
-				}
-
-				if (answer === saveLabel) {
-					try {
-						// Ensure prompt has an id before saving
-						if (!dirtySnapshot.id) {
-							const slug = await this.aiService.generateSlug(dirtySnapshot.title, dirtySnapshot.description);
-							dirtySnapshot.id = await this.storageService.uniqueId(slug || 'untitled');
-						}
-						await this.storageService.savePrompt(dirtySnapshot);
-						await this.broadcastAvailableLanguagesAndFrameworks();
-						this._onDidSave.fire(dirtySnapshot.id);
-						// vscode.window.showInformationMessage(
-						// 	isRu
-						// 		? `Промпт "${dirtySnapshot.title || dirtySnapshot.id}" сохранён.`
-						// 		: `Prompt "${dirtySnapshot.title || dirtySnapshot.id}" saved.`
-						// );
-					} catch (err) {
-						vscode.window.showErrorMessage(
-							isRu ? `Ошибка сохранения: ${err}` : `Save error: ${err}`
-						);
+				try {
+					if (!dirtySnapshot.title && dirtySnapshot.content) {
+						dirtySnapshot.title = await this.aiService.generateTitle(dirtySnapshot.content);
 					}
+					if (!dirtySnapshot.description && dirtySnapshot.content) {
+						dirtySnapshot.description = await this.aiService.generateDescription(dirtySnapshot.content);
+					}
+					if (!dirtySnapshot.id) {
+						const slug = await this.aiService.generateSlug(dirtySnapshot.title, dirtySnapshot.description);
+						dirtySnapshot.id = await this.storageService.uniqueId(slug || 'untitled');
+					}
+					if (dirtySnapshot.languages.length === 0 && dirtySnapshot.content) {
+						dirtySnapshot.languages = await this.aiService.detectLanguages(dirtySnapshot.content);
+					}
+					if (dirtySnapshot.frameworks.length === 0 && dirtySnapshot.content) {
+						dirtySnapshot.frameworks = await this.aiService.detectFrameworks(dirtySnapshot.content);
+					}
+					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
+					await this.storageService.savePrompt(dirtySnapshot);
+					await this.broadcastAvailableLanguagesAndFrameworks();
+					this._onDidSave.fire(dirtySnapshot.id);
+				} catch (err) {
+					vscode.window.showErrorMessage(
+						isRu ? `Ошибка сохранения: ${err}` : `Save error: ${err}`
+					);
 				}
 			}
 		});

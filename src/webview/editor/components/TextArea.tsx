@@ -16,6 +16,8 @@ interface Props {
   showControls?: boolean;
   requestSuggestionSignal?: number;
   onSuggestionLoadingChange?: (loading: boolean) => void;
+  persistedHeight?: number;
+  onHeightChange?: (height: number) => void;
 }
 
 /**
@@ -28,9 +30,11 @@ interface Props {
 export const TextArea: React.FC<Props> = ({
   label, value, onChange, placeholder, required, rows = 8,
   onRequestSuggestion, suggestion, suggestions,
-  autoCompleteEnabled = true, onAutoCompleteChange,
+  autoCompleteEnabled = false, onAutoCompleteChange,
   showControls = true, requestSuggestionSignal,
   onSuggestionLoadingChange,
+  persistedHeight,
+  onHeightChange,
 }) => {
   const t = useT();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -151,6 +155,23 @@ export const TextArea: React.FC<Props> = ({
   }, []);
 
   useEffect(() => {
+    if (!textareaRef.current || !onHeightChange || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const textarea = textareaRef.current;
+    const observer = new ResizeObserver(() => {
+      const height = Math.round(textarea.getBoundingClientRect().height);
+      if (height > 0) {
+        onHeightChange(height);
+      }
+    });
+    observer.observe(textarea);
+
+    return () => observer.disconnect();
+  }, [onHeightChange]);
+
+  useEffect(() => {
     if (!requestSuggestionSignal || !onRequestSuggestion || !textareaRef.current) {
       return;
     }
@@ -228,7 +249,10 @@ export const TextArea: React.FC<Props> = ({
           onScroll={syncScroll}
           placeholder={placeholder}
           rows={rows}
-          style={styles.textarea}
+          style={{
+            ...styles.textarea,
+            height: persistedHeight ? `${persistedHeight}px` : undefined,
+          }}
           spellCheck={false}
         />
 

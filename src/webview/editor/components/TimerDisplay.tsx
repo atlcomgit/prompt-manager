@@ -27,7 +27,7 @@ function formatDuration(ms: number): string {
 export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, timeUntracked, onUntrackedChange }) => {
   const t = useT();
   const totalTime = timeWriting + timeImplementing + timeUntracked;
-  const untrackedMinutes = Math.floor((timeUntracked || 0) / 60000);
+  const untrackedHours = Number((((timeUntracked || 0) / 3600000)).toFixed(2));
 
   return (
     <div style={styles.container}>
@@ -47,16 +47,16 @@ export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, t
             <input
               type="number"
               min={0}
-              step={1}
-              value={Number.isFinite(untrackedMinutes) ? untrackedMinutes : 0}
+              step={0.25}
+              value={Number.isFinite(untrackedHours) ? untrackedHours : 0}
               onChange={e => {
-                const minutes = Math.max(0, Number.parseInt(e.target.value || '0', 10) || 0);
-                onUntrackedChange(minutes * 60000);
+                const hours = Math.max(0, Number.parseFloat(e.target.value || '0') || 0);
+                onUntrackedChange(Math.round(hours * 3600000));
               }}
               style={styles.untrackedInput}
               placeholder={t('timer.untrackedPlaceholder')}
             />
-            <span style={styles.untrackedSuffix}>м</span>
+            <span style={styles.untrackedSuffix}>ч</span>
           </div>
         </div>
         <div style={styles.stat}>

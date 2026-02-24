@@ -17,6 +17,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
 	private _onDidOpenPrompt = new vscode.EventEmitter<string>();
 	public readonly onDidOpenPrompt = this._onDidOpenPrompt.event;
+	private _onDidDeletePrompt = new vscode.EventEmitter<string>();
+	public readonly onDidDeletePrompt = this._onDidDeletePrompt.event;
 
 	constructor(
 		private readonly extensionUri: vscode.Uri,
@@ -86,18 +88,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			}
 
 			case 'deletePrompt': {
-				const isRu = vscode.env.language.startsWith('ru');
-				const delLabel = isRu ? 'Удалить' : 'Delete';
-				const answer = await vscode.window.showWarningMessage(
-					isRu ? `Удалить промпт "${msg.id}"?` : `Delete prompt "${msg.id}"?`,
-					{ modal: true },
-					delLabel
-				);
-				if (answer === delLabel) {
-					await this.storageService.deletePrompt(msg.id);
-					this.postMessage({ type: 'promptDeleted', id: msg.id });
-					await this.refreshList();
-				}
+				await this.storageService.deletePrompt(msg.id);
+				this._onDidDeletePrompt.fire(msg.id);
+				this.postMessage({ type: 'promptDeleted', id: msg.id });
+				await this.refreshList();
 				break;
 			}
 

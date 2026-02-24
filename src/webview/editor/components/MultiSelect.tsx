@@ -135,6 +135,42 @@ export const MultiSelect: React.FC<Props> = ({
           placeholder={selected.length === 0 ? placeholder : ''}
           style={styles.input}
         />
+        <div style={styles.controls}>
+          <button
+            type="button"
+            style={{
+              ...styles.controlBtn,
+              ...(selected.length === 0 ? styles.controlBtnDisabled : {}),
+            }}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              if (selected.length === 0) {
+                return;
+              }
+              onChange([]);
+              setSearch('');
+              setIsOpen(false);
+            }}
+            title={t('multiSelect.clearSelection')}
+            disabled={selected.length === 0}
+            aria-label={t('multiSelect.clearSelection')}
+          >
+            ✕
+          </button>
+          <button
+            type="button"
+            style={styles.controlBtn}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              setIsOpen(prev => !prev);
+            }}
+            title={isOpen ? t('multiSelect.collapse') : t('multiSelect.expand')}
+            aria-label={isOpen ? t('multiSelect.collapse') : t('multiSelect.expand')}
+            aria-expanded={isOpen}
+          >
+            {isOpen ? '▴' : '▾'}
+          </button>
+        </div>
       </div>
 
       {/* Dropdown */}
@@ -237,7 +273,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '2px 6px',
     background: 'var(--vscode-badge-background)',
     color: 'var(--vscode-badge-foreground)',
-    borderRadius: '10px',
+    borderRadius: '4px',
     fontSize: '11px',
     whiteSpace: 'nowrap' as const,
   },
@@ -260,6 +296,32 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     fontFamily: 'var(--vscode-font-family)',
     padding: '2px 4px',
+  },
+  controls: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '2px',
+    marginLeft: 'auto',
+  },
+  controlBtn: {
+    width: '18px',
+    height: '18px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'transparent',
+    border: '1px solid var(--vscode-input-border, transparent)',
+    borderRadius: '3px',
+    color: 'var(--vscode-foreground)',
+    cursor: 'pointer',
+    fontSize: '11px',
+    fontFamily: 'var(--vscode-font-family)',
+    padding: 0,
+    flexShrink: 0,
+  },
+  controlBtnDisabled: {
+    opacity: 0.5,
+    cursor: 'not-allowed',
   },
   dropdown: {
     position: 'absolute',

@@ -53,7 +53,7 @@ export const ActionBar: React.FC<Props> = ({
               ✅ {t('status.completed')}
             </button>
             <button style={{ ...styles.btn, ...styles.btnWarn }} onClick={onMarkStopped}>
-              ⏹ {t('status.stopped')}
+              ▣ {t('status.stopped')}
             </button>
           </>
         )}

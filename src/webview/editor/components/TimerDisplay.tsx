@@ -69,7 +69,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '2px',
     padding: '8px 12px',
     background: 'var(--vscode-input-background)',
-    borderRadius: '6px',
+    borderRadius: '4px',
     minWidth: '100px',
   },
   statLabel: {

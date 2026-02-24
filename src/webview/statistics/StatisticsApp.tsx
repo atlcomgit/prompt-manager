@@ -111,7 +111,7 @@ export const StatisticsApp: React.FC = () => {
               'draft': '📝',
               'in-progress': '🚀',
               'completed': '✅',
-              'stopped': '⏹',
+              'stopped': '▣',
               'cancelled': '❌',
             };
             const STATUS_KEYS: Record<string, string> = {
@@ -333,7 +333,7 @@ const styles: Record<string, React.CSSProperties> = {
   card: {
     padding: '16px',
     background: 'var(--vscode-input-background)',
-    borderRadius: '8px',
+    borderRadius: '4px',
     textAlign: 'center',
     border: '1px solid var(--vscode-panel-border)',
   },
@@ -378,13 +378,13 @@ const styles: Record<string, React.CSSProperties> = {
     flex: 1,
     height: '16px',
     background: 'var(--vscode-input-background)',
-    borderRadius: '8px',
+    borderRadius: '4px',
     overflow: 'hidden',
   },
   barFill: {
     height: '100%',
     background: 'var(--vscode-progressBar-background)',
-    borderRadius: '8px',
+    borderRadius: '4px',
     transition: 'width 0.3s ease',
   },
   barCount: {
@@ -404,7 +404,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '4px',
     padding: '12px',
     background: 'var(--vscode-input-background)',
-    borderRadius: '6px',
+    borderRadius: '4px',
   },
   timeLabel: {
     fontSize: '11px',
@@ -427,7 +427,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '4px 10px',
     background: 'var(--vscode-badge-background)',
     color: 'var(--vscode-badge-foreground)',
-    borderRadius: '12px',
+    borderRadius: '4px',
     fontSize: '12px',
   },
   tagCount: {

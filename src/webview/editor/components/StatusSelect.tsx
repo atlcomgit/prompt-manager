@@ -14,7 +14,7 @@ export const StatusSelect: React.FC<Props> = ({ value, onChange }) => {
     { value: 'draft', label: t('status.draft'), icon: '📝', color: 'var(--vscode-descriptionForeground)' },
     { value: 'in-progress', label: t('status.inProgress'), icon: '🚀', color: 'var(--vscode-editorInfo-foreground, #3794ff)' },
     { value: 'completed', label: t('status.completed'), icon: '✅', color: 'var(--vscode-testing-iconPassed, #73c991)' },
-    { value: 'stopped', label: t('status.stopped'), icon: '⏹', color: 'var(--vscode-editorWarning-foreground, #cca700)' },
+    { value: 'stopped', label: t('status.stopped'), icon: '▣', color: 'var(--vscode-editorWarning-foreground, #cca700)' },
     { value: 'cancelled', label: t('status.cancelled'), icon: '❌', color: 'var(--vscode-errorForeground, #f44747)' },
   ];
 
@@ -27,13 +27,16 @@ export const StatusSelect: React.FC<Props> = ({ value, onChange }) => {
             key={opt.value}
             style={{
               ...styles.statusBtn,
-              ...(value === opt.value ? { ...styles.statusBtnActive, borderColor: opt.color, color: opt.color } : {}),
+              ...(value === opt.value ? { ...styles.statusBtnActive, borderColor: opt.color } : {}),
             }}
             onClick={() => onChange(opt.value)}
             title={opt.label}
+            aria-pressed={value === opt.value}
           >
-            <span>{opt.icon}</span>
-            <span>{opt.label}</span>
+            <span style={{ ...styles.statusIconWrap, color: opt.color }}>
+              <span style={styles.statusIcon}>{opt.icon}</span>
+            </span>
+            <span style={styles.statusText}>{opt.label}</span>
           </button>
         ))}
       </div>
@@ -60,19 +63,39 @@ const styles: Record<string, React.CSSProperties> = {
   statusBtn: {
     display: 'flex',
     alignItems: 'center',
-    gap: '4px',
-    padding: '5px 12px',
+    gap: '6px',
+    padding: '5px 10px',
     border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
-    borderRadius: '16px',
-    background: 'transparent',
+    borderRadius: '4px',
+    background: 'var(--vscode-input-background)',
     color: 'var(--vscode-foreground)',
     cursor: 'pointer',
     fontSize: '12px',
     fontFamily: 'var(--vscode-font-family)',
-    transition: 'all 0.15s ease',
+    transition: 'border-color 0.15s ease, background 0.15s ease',
   },
   statusBtnActive: {
-    background: 'var(--vscode-input-background)',
+    background: 'var(--vscode-list-activeSelectionBackground)',
+    color: 'var(--vscode-list-activeSelectionForeground)',
     fontWeight: 600,
+  },
+  statusIconWrap: {
+    width: '16px',
+    height: '16px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  statusIcon: {
+    fontSize: '14px',
+    lineHeight: 1,
+    fontFamily: '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statusText: {
+    lineHeight: 1.2,
   },
 };

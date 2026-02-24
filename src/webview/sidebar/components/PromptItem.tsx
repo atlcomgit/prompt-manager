@@ -14,10 +14,18 @@ interface Props {
 
 const STATUS_ICONS: Record<string, string> = {
   'draft': '📝',
-  'in-progress': '�',
+  'in-progress': '🚀',
   'completed': '✅',
-  'stopped': '⏹',
+  'stopped': '▣',
   'cancelled': '❌',
+};
+
+const STATUS_COLORS: Record<string, string> = {
+  'draft': 'var(--vscode-descriptionForeground)',
+  'in-progress': 'var(--vscode-editorInfo-foreground, #3794ff)',
+  'completed': 'var(--vscode-testing-iconPassed, #73c991)',
+  'stopped': 'var(--vscode-editorWarning-foreground, #cca700)',
+  'cancelled': 'var(--vscode-errorForeground, #f44747)',
 };
 
 
@@ -36,6 +44,8 @@ export const PromptItem: React.FC<Props> = ({
   const [showMenu, setShowMenu] = useState(false);
 
   const selFg = isSelected ? 'var(--vscode-list-activeSelectionForeground)' : undefined;
+  const selBg = isSelected ? 'var(--vscode-list-activeSelectionBackground)' : undefined;
+  const statusAccent = STATUS_COLORS[prompt.status] || 'var(--vscode-descriptionForeground)';
 
   const formatDate = (iso: string) => {
     try {
@@ -59,7 +69,15 @@ export const PromptItem: React.FC<Props> = ({
     >
       <div style={styles.row}>
         <span style={styles.statusIcon}>
-          {STATUS_ICONS[prompt.status] || '📄'}
+          <span
+            style={{
+              ...styles.statusIconGlyph,
+              color: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
+              textShadow: isSelected ? '0 0 1px var(--vscode-list-activeSelectionBackground)' : 'none',
+            }}
+          >
+            {STATUS_ICONS[prompt.status] || '◇'}
+          </span>
         </span>
         <div style={styles.content}>
           <div style={{ ...styles.title, ...(selFg ? { color: selFg } : {}) }}>
@@ -69,7 +87,7 @@ export const PromptItem: React.FC<Props> = ({
           {prompt.description && (
             <div style={{
               ...styles.description,
-              ...(selFg ? { color: selFg, opacity: 0.85 } : {}),
+              ...(selFg ? { color: selFg } : {}),
             }}>{prompt.description}</div>
           )}
           {prompt.taskNumber && (
@@ -82,15 +100,24 @@ export const PromptItem: React.FC<Props> = ({
           )}
           <div style={{
             ...styles.meta,
-            ...(selFg ? { color: selFg, opacity: 0.75 } : {}),
+            ...(selFg ? { color: selFg } : {}),
           }}>
-            <span>{STATUS_LABELS[prompt.status]}</span>
+            <span
+              style={{
+                ...styles.statusBadge,
+                color: selFg || statusAccent,
+                borderColor: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
+                background: selBg ? 'color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 14%, var(--vscode-list-activeSelectionBackground))' : 'transparent',
+              }}
+            >
+              <span>{STATUS_LABELS[prompt.status]}</span>
+            </span>
             <span>·</span>
             <span>{formatDate(prompt.updatedAt)}</span>
-            {prompt.languages.length > 0 && (
+            {prompt.projects.length > 0 && (
               <>
                 <span>·</span>
-                <span>{prompt.languages.slice(0, 2).join(', ')}</span>
+                <span>{prompt.projects.slice(0, 2).join(', ')}</span>
               </>
             )}
           </div>
@@ -100,7 +127,7 @@ export const PromptItem: React.FC<Props> = ({
             <button
               style={{
                 ...styles.actionBtn,
-                ...(selFg ? { color: selFg } : {}),
+                ...(selFg ? { color: selFg, opacity: 1 } : {}),
               }}
               onClick={e => { e.stopPropagation(); onToggleFavorite(prompt.id); }}
               title={prompt.favorite ? t('item.removeFavorite') : t('item.addFavorite')}
@@ -110,7 +137,7 @@ export const PromptItem: React.FC<Props> = ({
             <button
               style={{
                 ...styles.actionBtn,
-                ...(selFg ? { color: selFg } : {}),
+                ...(selFg ? { color: selFg, opacity: 1 } : {}),
               }}
               onClick={e => { e.stopPropagation(); setShowMenu(!showMenu); }}
               title={t('item.more')}
@@ -155,9 +182,20 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '6px',
   },
   statusIcon: {
-    fontSize: '14px',
-    lineHeight: '20px',
+    width: '18px',
+    height: '20px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     flexShrink: 0,
+  },
+  statusIconGlyph: {
+    fontSize: '15px',
+    fontFamily: '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif',
+    lineHeight: 1,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   content: {
     flex: 1,
@@ -197,9 +235,22 @@ const styles: Record<string, React.CSSProperties> = {
   meta: {
     display: 'flex',
     gap: '4px',
-    fontSize: '10px',
+    fontSize: '11px',
     color: 'var(--vscode-descriptionForeground)',
     marginTop: '2px',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+  },
+  statusBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '5px',
+    padding: '1px 7px',
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    fontSize: '10px',
+    lineHeight: '14px',
+    fontWeight: 600,
   },
   actions: {
     display: 'flex',
@@ -212,7 +263,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--vscode-foreground)',
     cursor: 'pointer',
     padding: '2px 4px',
-    borderRadius: '3px',
+    borderRadius: '4px',
     fontSize: '13px',
     opacity: 0.7,
   },

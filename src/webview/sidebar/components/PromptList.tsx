@@ -135,7 +135,7 @@ const styles: Record<string, React.CSSProperties> = {
   groupCount: {
     background: 'var(--vscode-badge-background)',
     color: 'var(--vscode-badge-foreground)',
-    borderRadius: '10px',
+    borderRadius: '4px',
     padding: '0 6px',
     fontSize: '10px',
     fontWeight: 600,

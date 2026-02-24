@@ -121,6 +121,9 @@ const en: Record<string, string> = {
 	// --- MultiSelect ---
 	'multiSelect.add': 'Add',
 	'multiSelect.noResults': 'No options',
+	'multiSelect.clearSelection': 'Clear selected values',
+	'multiSelect.expand': 'Expand list',
+	'multiSelect.collapse': 'Collapse list',
 
 	// --- Timer ---
 	'timer.title': '⏱ Time spent',
@@ -239,7 +242,7 @@ const ru: Record<string, string> = {
 	'editor.gitBranch': 'Ветка Git',
 	'editor.gitBranchPlaceholder': 'feature/my-branch',
 	'editor.showBranches': '🔀 Показать ветки',
-	'editor.createBranch': '🌿 Создать ветку',
+	'editor.createBranch': '🌿 Переключить на ветку',
 	'editor.branchesLabel': 'Ветки в проектах:',
 	'editor.projects': 'Проекты рабочей области',
 	'editor.projectsPlaceholder': 'Выберите проекты...',
@@ -285,6 +288,9 @@ const ru: Record<string, string> = {
 	// --- MultiSelect ---
 	'multiSelect.add': 'Добавить',
 	'multiSelect.noResults': 'Нет вариантов',
+	'multiSelect.clearSelection': 'Сбросить выбранные значения',
+	'multiSelect.expand': 'Раскрыть список',
+	'multiSelect.collapse': 'Свернуть список',
 
 	// --- Timer ---
 	'timer.title': '⏱ Затраченное время',

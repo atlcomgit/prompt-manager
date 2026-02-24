@@ -28,7 +28,7 @@ export const FilterBar: React.FC<Props> = ({
     { value: 'draft', label: `📝 ${t('status.draft')}` },
     { value: 'in-progress', label: `🚀 ${t('status.inProgress')}` },
     { value: 'completed', label: `✅ ${t('status.completed')}` },
-    { value: 'stopped', label: `⏹ ${t('status.stopped')}` },
+    { value: 'stopped', label: `▣ ${t('status.stopped')}` },
     { value: 'cancelled', label: `❌ ${t('status.cancelled')}` },
   ];
 
@@ -153,7 +153,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   chip: {
     padding: '2px 8px',
-    borderRadius: '10px',
+    borderRadius: '4px',
     border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
     background: 'transparent',
     color: 'var(--vscode-foreground)',

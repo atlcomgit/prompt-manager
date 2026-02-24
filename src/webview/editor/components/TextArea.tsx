@@ -266,7 +266,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '11px',
     fontFamily: 'var(--vscode-font-family)',
     padding: '2px 6px',
-    borderRadius: '3px',
+    borderRadius: '4px',
   },
   editorContainer: {
     position: 'relative',
@@ -322,7 +322,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--vscode-descriptionForeground)',
     background: 'var(--vscode-input-background)',
     padding: '2px 6px',
-    borderRadius: '3px',
+    borderRadius: '4px',
     opacity: 0.8,
     pointerEvents: 'none',
   },

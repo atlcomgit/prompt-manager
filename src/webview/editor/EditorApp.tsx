@@ -37,6 +37,7 @@ export const EditorApp: React.FC = () => {
   const [availableLanguages, setAvailableLanguages] = useState<SelectOption[]>([]);
   const [availableFrameworks, setAvailableFrameworks] = useState<SelectOption[]>([]);
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
+  const [branchesResolved, setBranchesResolved] = useState(false);
   const [showBranches, setShowBranches] = useState(false);
   const [inlineSuggestion, setInlineSuggestion] = useState<string>('');
   const [inlineSuggestions, setInlineSuggestions] = useState<string[]>([]);
@@ -60,6 +61,23 @@ export const EditorApp: React.FC = () => {
     }
     return Array.from(vars);
   }, [prompt.content]);
+
+  const targetBranch = prompt.branch.trim();
+
+  const shouldShowSwitchBranchBtn = useMemo(() => {
+    if (!targetBranch || prompt.projects.length === 0 || !branchesResolved) {
+      return false;
+    }
+
+    const currentByProject = new Map<string, string>();
+    for (const branchInfo of branches) {
+      if (branchInfo.current) {
+        currentByProject.set(branchInfo.project, branchInfo.name);
+      }
+    }
+
+    return prompt.projects.some(projectName => currentByProject.get(projectName) !== targetBranch);
+  }, [targetBranch, prompt.projects, branches]);
 
   /** Simple Markdown → HTML converter */
   const renderMarkdown = (md: string): string => {
@@ -184,6 +202,7 @@ export const EditorApp: React.FC = () => {
         break;
       case 'branches':
         setBranches(msg.branches);
+        setBranchesResolved(true);
         break;
       case 'inlineSuggestion':
         setInlineSuggestion(msg.suggestion || '');
@@ -213,6 +232,16 @@ export const EditorApp: React.FC = () => {
   useEffect(() => {
     vscode.postMessage({ type: 'markDirty', dirty: isDirty, prompt: isDirty ? prompt : undefined });
   }, [isDirty, prompt]);
+
+  useEffect(() => {
+    if (!targetBranch || prompt.projects.length === 0) {
+      setBranchesResolved(false);
+      setBranches([]);
+      return;
+    }
+    setBranchesResolved(false);
+    vscode.postMessage({ type: 'getBranches', projects: prompt.projects });
+  }, [targetBranch, prompt.projects]);
 
   // Warn about unsaved changes when closing the tab
   useEffect(() => {
@@ -423,9 +452,9 @@ export const EditorApp: React.FC = () => {
                 <button style={styles.linkBtn} onClick={handleShowBranches}>
                   {t('editor.showBranches')}
                 </button>
-                {prompt.branch.trim() && prompt.projects.length > 0 && (
+                {shouldShowSwitchBranchBtn && (
                   <button style={styles.linkBtn} onClick={() => {
-                    const branchName = prompt.branch.trim();
+                    const branchName = targetBranch;
                     vscode.postMessage({ type: 'createBranch', branch: branchName, projects: prompt.projects });
                   }}>
                     {t('editor.createBranch')}
@@ -751,7 +780,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'transparent',
     color: 'var(--vscode-foreground)',
     cursor: 'pointer',
-    borderRadius: '3px',
+    borderRadius: '4px',
     fontSize: '12px',
     fontFamily: 'var(--vscode-font-family)',
     textAlign: 'left',
@@ -862,7 +891,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--vscode-editor-background)',
     color: 'var(--vscode-input-foreground)',
     border: '1px solid var(--vscode-input-border, transparent)',
-    borderRadius: '3px',
+    borderRadius: '4px',
     fontSize: '12px',
     fontFamily: 'var(--vscode-font-family)',
   },

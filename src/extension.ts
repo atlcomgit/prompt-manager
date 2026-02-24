@@ -62,6 +62,11 @@ export function activate(context: vscode.ExtensionContext) {
 		await editorPanelManager.openPrompt(id);
 	});
 
+	// Close prompt editor tab immediately when prompt is deleted from sidebar
+	sidebarProvider.onDidDeletePrompt((id) => {
+		editorPanelManager.closePromptSilently(id);
+	});
+
 	// Refresh sidebar when prompt is saved in editor
 	editorPanelManager.onDidSave(async () => {
 		await sidebarProvider.refreshList();
@@ -100,16 +105,10 @@ export function activate(context: vscode.ExtensionContext) {
 				placeHolder: 'Выберите промпт для удаления',
 			});
 			if (selected) {
-				const confirm = await vscode.window.showWarningMessage(
-					`Удалить промпт "${selected.label}"?`,
-					{ modal: true },
-					'Удалить'
-				);
-				if (confirm === 'Удалить') {
-					await storageService.deletePrompt(selected.id);
-					await sidebarProvider.refreshList();
-					vscode.window.showInformationMessage(`Промпт "${selected.label}" удалён.`);
-				}
+				await storageService.deletePrompt(selected.id);
+				editorPanelManager.closePromptSilently(selected.id);
+				await sidebarProvider.refreshList();
+				vscode.window.showInformationMessage(`Промпт "${selected.label}" удалён.`);
 			}
 		}),
 

@@ -23,6 +23,8 @@ export class EditorPanelManager {
 	private _onDidSave = new vscode.EventEmitter<string>();
 	public readonly onDidSave = this._onDidSave.event;
 	private chatTrackingDisposables = new Map<string, vscode.Disposable>();
+	private panelDirtySetters = new Map<string, (v: boolean) => void>();
+	private silentClosePanels = new Set<string>();
 	private pendingRestorePrompt: Prompt | null = null;
 	private pendingRestoreIsDirty = false;
 	private readonly hooksOutput = vscode.window.createOutputChannel('Prompt Manager Hooks');
@@ -382,11 +384,32 @@ export class EditorPanelManager {
 			panel.title = `⚡● ${displayTitle}`;
 		}
 
+		const setPanelDirty = (v: boolean): void => {
+			isDirty = v;
+		};
+		this.panelDirtySetters.set(panelKey, setPanelDirty);
+
 		// Handle panel close — warn if unsaved changes
 		panel.onDidDispose(async () => {
+			const linkedKeys = [...openPanels.entries()]
+				.filter(([, p]) => p === panel)
+				.map(([key]) => key);
+			const skipUnsavedPrompt = this.silentClosePanels.has(panelKey)
+				|| linkedKeys.some(key => this.silentClosePanels.has(key));
+			this.silentClosePanels.delete(panelKey);
+			for (const key of linkedKeys) {
+				this.silentClosePanels.delete(key);
+				openPanels.delete(key);
+				this.panelDirtySetters.delete(key);
+			}
 			openPanels.delete(panelKey);
 			this.chatTrackingDisposables.get(panelKey)?.dispose();
 			this.chatTrackingDisposables.delete(panelKey);
+			this.panelDirtySetters.delete(panelKey);
+
+			if (skipUnsavedPrompt) {
+				return;
+			}
 			const currentSnapshot: Prompt = latestPromptState
 				? JSON.parse(JSON.stringify(latestPromptState))
 				: JSON.parse(JSON.stringify(prompt));
@@ -492,7 +515,7 @@ export class EditorPanelManager {
 					panel.title = isDirty ? `⚡● ${displayTitle}` : `⚡ ${displayTitle}`;
 					return;
 				}
-				await this.handleMessage(msg, panel, prompt, panelKey, () => isDirty, (v: boolean) => { isDirty = v; });
+				await this.handleMessage(msg, panel, prompt, panelKey, () => isDirty, setPanelDirty);
 			}
 		);
 	}
@@ -598,6 +621,11 @@ export class EditorPanelManager {
 				if (panelKey.startsWith('new-')) {
 					openPanels.delete(panelKey);
 					openPanels.set(promptToSave.id, panel);
+					const dirtySetter = this.panelDirtySetters.get(panelKey);
+					if (dirtySetter) {
+						this.panelDirtySetters.delete(panelKey);
+						this.panelDirtySetters.set(promptToSave.id, dirtySetter);
+					}
 				}
 
 				panel.title = `⚡ ${saved.title || saved.id}`;
@@ -1068,6 +1096,8 @@ export class EditorPanelManager {
 				const result = await this.gitService.switchBranch(paths, msg.projects, msg.branch);
 				if (result.success) {
 					postMessage({ type: 'info', message: `Ветка "${msg.branch}" активирована.` });
+					const branches = await this.gitService.getBranches(paths, msg.projects);
+					postMessage({ type: 'branches', branches });
 				} else {
 					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}` });
 				}
@@ -1159,6 +1189,8 @@ export class EditorPanelManager {
 				const result = await this.gitService.createBranch(paths, msg.projects, msg.branch);
 				if (result.success) {
 					postMessage({ type: 'info', message: `Ветка "${msg.branch}" активирована.` });
+					const branches = await this.gitService.getBranches(paths, msg.projects);
+					postMessage({ type: 'branches', branches });
 				} else {
 					const details = result.errors.join('\n');
 					void vscode.window.showWarningMessage(
@@ -1212,6 +1244,20 @@ export class EditorPanelManager {
 			panel.dispose();
 		}
 		openPanels.clear();
+		this.panelDirtySetters.clear();
+		this.silentClosePanels.clear();
 		this.hooksOutput.dispose();
+	}
+
+	/** Close prompt panel silently (without unsaved confirmation) */
+	closePromptSilently(promptId: string): void {
+		const panel = openPanels.get(promptId);
+		if (!panel) {
+			return;
+		}
+
+		this.panelDirtySetters.get(promptId)?.(false);
+		this.silentClosePanels.add(promptId);
+		panel.dispose();
 	}
 }

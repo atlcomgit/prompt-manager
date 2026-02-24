@@ -142,7 +142,7 @@ export function createDefaultSidebarState(): SidebarState {
 			frameworks: [],
 			favorites: false,
 		},
-		sortField: 'updatedAt',
+		sortField: 'createdAt',
 		sortOrder: 'desc',
 		groupBy: 'none',
 		panelWidth: 300,

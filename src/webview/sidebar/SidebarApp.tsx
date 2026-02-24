@@ -22,10 +22,11 @@ export const SidebarApp: React.FC = () => {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<PromptStatus[]>([]);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
-  const [sortField, setSortField] = useState<SortField>('updatedAt');
+  const [sortField, setSortField] = useState<SortField>('createdAt');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
   const [groupBy, setGroupBy] = useState<GroupBy>('none');
   const [showFilters, setShowFilters] = useState(false);
+  const [hasHydratedState, setHasHydratedState] = useState(false);
 
   // Request initial data
   useEffect(() => {
@@ -47,9 +48,10 @@ export const SidebarApp: React.FC = () => {
           setStatusFilter(state.filters.status || []);
           setFavoritesOnly(state.filters.favorites || false);
         }
-        setSortField(state.sortField || 'updatedAt');
+        setSortField(state.sortField || 'createdAt');
         setSortOrder(state.sortOrder || 'desc');
         setGroupBy(state.groupBy || 'none');
+        setHasHydratedState(true);
         break;
       }
       case 'promptDeleted':
@@ -62,6 +64,9 @@ export const SidebarApp: React.FC = () => {
 
   // Save state when it changes
   useEffect(() => {
+    if (!hasHydratedState) {
+      return;
+    }
     const state: SidebarState = {
       selectedPromptId: selectedId,
       filters: { search, status: statusFilter, projects: [], languages: [], frameworks: [], favorites: favoritesOnly },
@@ -71,7 +76,7 @@ export const SidebarApp: React.FC = () => {
       panelWidth: 300,
     };
     vscode.postMessage({ type: 'saveSidebarState', state });
-  }, [selectedId, search, statusFilter, favoritesOnly, sortField, sortOrder, groupBy]);
+  }, [hasHydratedState, selectedId, search, statusFilter, favoritesOnly, sortField, sortOrder, groupBy]);
 
   // Filter & sort prompts
   const filteredPrompts = useMemo(() => {

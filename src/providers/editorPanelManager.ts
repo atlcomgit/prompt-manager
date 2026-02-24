@@ -18,6 +18,7 @@ import type { StateService } from '../services/stateService.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
+const SINGLE_EDITOR_PANEL_KEY = '__prompt_editor_singleton__';
 
 export class EditorPanelManager {
 	private _onDidSave = new vscode.EventEmitter<string>();
@@ -27,6 +28,7 @@ export class EditorPanelManager {
 	private panelDirtyFlags = new Map<string, boolean>();
 	private panelLatestPromptSnapshots = new Map<string, Prompt | null>();
 	private panelBasePrompts = new Map<string, Prompt>();
+	private panelPromptRefs = new Map<string, Prompt>();
 	private silentClosePanels = new Set<string>();
 	private pendingRestorePrompt: Prompt | null = null;
 	private pendingRestoreIsDirty = false;
@@ -515,13 +517,16 @@ export class EditorPanelManager {
 
 	private async openPromptInternal(promptId: string): Promise<void> {
 		const isNew = promptId === '__new__';
-		const panelKey = isNew ? `new-${Date.now()}` : promptId;
+		const panelKey = SINGLE_EDITOR_PANEL_KEY;
 
-		const existingEntries = [...openPanels.entries()];
-		if (!isNew && existingEntries.length === 1 && existingEntries[0][0] === promptId) {
-			existingEntries[0][1].reveal();
+		const singletonPanel = openPanels.get(panelKey);
+		const singletonPrompt = this.panelPromptRefs.get(panelKey);
+		if (!isNew && singletonPanel && singletonPrompt?.id === promptId) {
+			singletonPanel.reveal();
 			return;
 		}
+
+		const existingEntries = [...openPanels.entries()];
 
 		for (const [existingKey, existingPanel] of existingEntries) {
 			const latestSnapshot = this.panelLatestPromptSnapshots.get(existingKey)
@@ -543,8 +548,10 @@ export class EditorPanelManager {
 					}
 				}
 			}
-			this.silentClosePanels.add(existingKey);
-			existingPanel.dispose();
+			if (existingKey !== panelKey) {
+				this.silentClosePanels.add(existingKey);
+				existingPanel.dispose();
+			}
 		}
 
 		// Load prompt data
@@ -586,6 +593,24 @@ export class EditorPanelManager {
 		const title = isNew ? 'New prompt' : (prompt.title || prompt.id);
 		const isRu = vscode.env.language.startsWith('ru');
 
+		if (singletonPanel) {
+			const currentPromptRef = this.panelPromptRefs.get(panelKey);
+			if (currentPromptRef) {
+				Object.assign(currentPromptRef, prompt);
+			}
+
+			this.panelDirtyFlags.set(panelKey, restoredUnsaved);
+			this.panelLatestPromptSnapshots.set(panelKey, restoredUnsaved ? JSON.parse(JSON.stringify(prompt)) : null);
+			this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(prompt)));
+
+			singletonPanel.title = restoredUnsaved
+				? `⚡● ${prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt')}`
+				: `⚡ ${prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt')}`;
+			singletonPanel.reveal();
+			void singletonPanel.webview.postMessage({ type: 'prompt', prompt });
+			return;
+		}
+
 		const panel = vscode.window.createWebviewPanel(
 			'promptManager.editor',
 			`⚡ ${title}`,
@@ -608,6 +633,7 @@ export class EditorPanelManager {
 		);
 
 		openPanels.set(panelKey, panel);
+		this.panelPromptRefs.set(panelKey, prompt);
 		let isDirty = restoredUnsaved;
 		let latestPromptState: Prompt | null = restoredUnsaved ? prompt : null;
 		if (isDirty) {
@@ -635,6 +661,7 @@ export class EditorPanelManager {
 			for (const key of linkedKeys) {
 				this.silentClosePanels.delete(key);
 				openPanels.delete(key);
+				this.panelPromptRefs.delete(key);
 				this.panelDirtySetters.delete(key);
 				this.panelDirtyFlags.delete(key);
 				this.panelLatestPromptSnapshots.delete(key);
@@ -642,6 +669,7 @@ export class EditorPanelManager {
 				this.clearContentEditorBinding(key);
 			}
 			openPanels.delete(panelKey);
+			this.panelPromptRefs.delete(panelKey);
 			this.chatTrackingDisposables.get(panelKey)?.dispose();
 			this.chatTrackingDisposables.delete(panelKey);
 			this.panelDirtySetters.delete(panelKey);
@@ -851,6 +879,7 @@ export class EditorPanelManager {
 
 				// Update current prompt reference
 				Object.assign(currentPrompt, promptToSave);
+				this.panelPromptRefs.set(panelKey, currentPrompt);
 
 				// Update panel tracking
 				if (panelKey.startsWith('new-')) {
@@ -1552,6 +1581,7 @@ export class EditorPanelManager {
 		}
 		openPanels.clear();
 		this.panelDirtySetters.clear();
+		this.panelPromptRefs.clear();
 		this.silentClosePanels.clear();
 		this.contentEditorByPanelKey.clear();
 		this.panelKeyByContentEditorUri.clear();
@@ -1560,13 +1590,17 @@ export class EditorPanelManager {
 
 	/** Close prompt panel silently (without unsaved confirmation) */
 	closePromptSilently(promptId: string): void {
-		const panel = openPanels.get(promptId);
+		const panel = openPanels.get(SINGLE_EDITOR_PANEL_KEY);
 		if (!panel) {
 			return;
 		}
+		const currentPrompt = this.panelPromptRefs.get(SINGLE_EDITOR_PANEL_KEY);
+		if (currentPrompt?.id && currentPrompt.id !== promptId) {
+			return;
+		}
 
-		this.panelDirtySetters.get(promptId)?.(false);
-		this.silentClosePanels.add(promptId);
+		this.panelDirtySetters.get(SINGLE_EDITOR_PANEL_KEY)?.(false);
+		this.silentClosePanels.add(SINGLE_EDITOR_PANEL_KEY);
 		panel.dispose();
 	}
 }

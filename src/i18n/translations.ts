@@ -165,6 +165,14 @@ const en: Record<string, string> = {
 	'stats.implementingCol': 'Implementing',
 	'stats.totalCol': 'Total',
 
+	// --- Tracker ---
+	'tracker.title': 'Prompt status tracker',
+	'tracker.addPrompt': '＋ New prompt',
+	'tracker.loading': 'Loading tracker...',
+	'tracker.projects': 'Projects',
+	'tracker.open': 'Open',
+	'tracker.startChat': 'Start chat',
+
 	// --- Months ---
 	'month.1': 'January',
 	'month.2': 'February',
@@ -339,6 +347,14 @@ const ru: Record<string, string> = {
 	'stats.writingCol': 'Написание',
 	'stats.implementingCol': 'Реализация',
 	'stats.totalCol': 'Итого',
+
+	// --- Tracker ---
+	'tracker.title': 'Трекер статусов промптов',
+	'tracker.addPrompt': '＋ Новый промпт',
+	'tracker.loading': 'Загрузка трекера...',
+	'tracker.projects': 'Проекты',
+	'tracker.open': 'Открыть',
+	'tracker.startChat': 'Запустить чат',
 
 	// --- Months ---
 	'month.1': 'Январь',

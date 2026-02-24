@@ -106,6 +106,12 @@
         "title": "Show Statistics",
         "category": "Prompt Manager",
         "icon": "$(graph)"
+      },
+      {
+        "command": "promptManager.showTracker",
+        "title": "Show Prompt Tracker",
+        "category": "Prompt Manager",
+        "icon": "$(repo)"
       }
     ],
     "menus": {
@@ -126,6 +132,11 @@
         },
         {
           "command": "promptManager.showStatistics",
+          "when": "view == promptManager.sidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "promptManager.showTracker",
           "when": "view == promptManager.sidebar",
           "group": "navigation"
         }

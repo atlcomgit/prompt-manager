@@ -4,7 +4,7 @@
 
 import * as vscode from 'vscode';
 import { StorageService, AiService, WorkspaceService, GitService, StateService } from './services/index.js';
-import { SidebarProvider, EditorPanelManager, StatisticsPanelManager } from './providers/index.js';
+import { SidebarProvider, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager } from './providers/index.js';
 
 export function activate(context: vscode.ExtensionContext) {
 	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -48,6 +48,12 @@ export function activate(context: vscode.ExtensionContext) {
 		storageService,
 	);
 
+	const trackerPanelManager = new TrackerPanelManager(
+		context.extensionUri,
+		storageService,
+		stateService,
+	);
+
 	// Register sidebar webview provider
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(
@@ -70,6 +76,11 @@ export function activate(context: vscode.ExtensionContext) {
 	// Refresh sidebar when prompt is saved in editor
 	editorPanelManager.onDidSave(async () => {
 		await sidebarProvider.refreshList();
+		await trackerPanelManager.refresh();
+	});
+
+	trackerPanelManager.onDidOpenPrompt(async (id) => {
+		await editorPanelManager.openPrompt(id);
 	});
 
 	// Register commands
@@ -353,6 +364,10 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('promptManager.showStatistics', async () => {
 			await statisticsPanelManager.show();
 		}),
+
+		vscode.commands.registerCommand('promptManager.showTracker', async () => {
+			await trackerPanelManager.show();
+		}),
 	);
 
 	// Cleanup
@@ -361,6 +376,7 @@ export function activate(context: vscode.ExtensionContext) {
 			workspaceService.dispose();
 			editorPanelManager.disposeAll();
 			statisticsPanelManager.dispose();
+			trackerPanelManager.dispose();
 		},
 	});
 

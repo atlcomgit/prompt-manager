@@ -2,7 +2,7 @@
  * Message types for communication between extension and webviews
  */
 
-import type { Prompt, PromptConfig, SidebarState, PromptStatistics } from './prompt.js';
+import type { Prompt, PromptConfig, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 
 // ---- Messages FROM webview TO extension ----
 
@@ -42,6 +42,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'exportReport'; rows: Array<{ taskNumber: string; title: string; hours: number }> }
 	| { type: 'markDirty'; dirty: boolean; prompt?: Prompt }
 	| { type: 'showStatistics' }
+	| { type: 'updatePromptStatus'; id: string; status: PromptStatus }
 	| { type: 'getGlobalContext' }
 	| { type: 'saveGlobalContext'; context: string }
 	| { type: 'createBranch'; branch: string; projects: string[] }

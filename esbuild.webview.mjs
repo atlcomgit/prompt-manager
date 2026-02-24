@@ -13,6 +13,10 @@ const webviewEntries = [
     entry: "src/webview/statistics/index.tsx",
     outfile: "dist/webview/statistics.js",
   },
+  {
+    entry: "src/webview/tracker/index.tsx",
+    outfile: "dist/webview/tracker.js",
+  },
 ];
 
 const buildOptions = webviewEntries.map(({ entry, outfile }) => ({

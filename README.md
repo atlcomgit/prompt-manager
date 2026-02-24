@@ -87,7 +87,7 @@
 │   └── context/
 ```
 
-### config.json
+### 🛠 config.json
 ```json
 {
   "id": "my-prompt-slug",
@@ -130,73 +130,6 @@
 
 ---
 
-## 🛠 Разработка
-
-```bash
-# Установка зависимостей
-npm install
-
-# Запуск в режиме разработки
-npm run watch:esbuild
-
-# Сборка для публикации
-npm run build
-
-# Упаковка расширения
-npm run package
-```
-
-### Архитектура
-
-```
-src/
-├── extension.ts              # Точка входа расширения
-├── types/                    # TypeScript типы
-│   ├── prompt.ts             # Типы промптов
-│   └── messages.ts           # Типы сообщений webview
-├── services/                 # Бизнес-логика
-│   ├── storageService.ts     # Чтение/запись промптов
-│   ├── aiService.ts          # AI генерация (LM API)
-│   ├── workspaceService.ts   # Workspace, skills, MCP, hooks
-│   ├── gitService.ts         # Git операции
-│   └── stateService.ts       # Сохранение UI состояния
-├── providers/                # VS Code провайдеры
-│   ├── sidebarProvider.ts    # Боковая панель
-│   └── editorPanelManager.ts # Панели редактора
-├── utils/                    # Утилиты
-│   ├── nonce.ts              # CSP nonce
-│   └── webviewHtml.ts        # HTML шаблон webview
-└── webview/                  # React UI
-    ├── shared/               # Общие компоненты
-    ├── sidebar/              # Боковая панель
-    └── editor/               # Форма редактирования
-```
-
----
-
-## 📋 Roadmap
-
-### Фаза 1 (MVP) ✅
-- [x] Список промптов в боковой панели
-- [x] Форма настройки промптов
-- [x] CRUD операции
-- [x] Поиск, фильтрация, сортировка, группировка
-- [x] AI генерация (LM API)
-- [x] Интеграция с Copilot Chat
-- [x] Перcистенция UI состояния
-
-### Фаза 2
-- [ ] Статистика и отчёты
-- [ ] Ежемесячные отчёты
-- [ ] Расширенные графики
-- [ ] Drag & drop файлов контекста
-- [ ] Markdown preview в промпте
-
-### Фаза 3
-- [ ] Шаблоны промптов
-- [ ] Командная работа (shared prompts)
-- [ ] Расширенная интеграция с Git
-- [ ] Поддержка нескольких рабочих областей
 
 ---
 

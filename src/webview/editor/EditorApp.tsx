@@ -202,7 +202,8 @@ export const EditorApp: React.FC = () => {
         setGlobalContext(msg.context || '');
         break;
       case 'chatStarted':
-        // Chat was opened — UI can show indicator if needed
+        startChatLockRef.current = false;
+        setIsStartingChat(false);
         break;
       case 'generatedTitle':
         setPrompt(prev => ({ ...prev, title: msg.title }));

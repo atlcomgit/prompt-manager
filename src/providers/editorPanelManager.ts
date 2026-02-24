@@ -906,6 +906,7 @@ export class EditorPanelManager {
 
 					let requestModelIdentifier = '';
 					let requestModelSelector: vscode.LanguageModelChatSelector | undefined;
+					let trackedSessionId = '';
 
 					const openChatCmds = ['workbench.action.chat.openAgent', 'workbench.action.chat.open'];
 					let opened = false;
@@ -1037,7 +1038,14 @@ export class EditorPanelManager {
 						await sendMessage(query);
 						const startedSessionImmediate = await this.stateService.waitForChatSessionStarted(requestStartTimestamp, 8000, 250);
 						if (startedSessionImmediate.ok && startedSessionImmediate.sessionId) {
+							trackedSessionId = startedSessionImmediate.sessionId;
 							await bindSessionToPrompt(startedSessionImmediate.sessionId);
+						} else {
+							const activeSessionId = await this.stateService.getActiveChatSessionId(2500, 250);
+							if (activeSessionId) {
+								trackedSessionId = activeSessionId;
+								await bindSessionToPrompt(activeSessionId);
+							}
 						}
 						sendMessageSucceeded = true;
 					} catch {
@@ -1051,14 +1059,35 @@ export class EditorPanelManager {
 
 					if (sendMessageSucceeded) {
 						void (async () => {
-							const startedSession = await this.stateService.waitForChatSessionStarted(requestStartTimestamp);
+							const startedSession = await this.stateService.waitForChatSessionStarted(
+								requestStartTimestamp,
+								15000,
+								500,
+								trackedSessionId || undefined,
+							);
 							if (startedSession.ok && startedSession.sessionId) {
+								trackedSessionId = startedSession.sessionId;
 								await bindSessionToPrompt(startedSession.sessionId);
+							} else {
+								const activeSessionId = await this.stateService.getActiveChatSessionId(5000, 250);
+								if (activeSessionId) {
+									trackedSessionId = trackedSessionId || activeSessionId;
+									await bindSessionToPrompt(activeSessionId);
+								}
 							}
 
-							const completion = await this.stateService.waitForChatRequestCompletion(requestStartTimestamp);
+							const completion = await this.stateService.waitForChatRequestCompletion(
+								requestStartTimestamp,
+								180000,
+								1000,
+								trackedSessionId || undefined,
+							);
 							const chatMarkdown = await this.tryReadChatMarkdownFromClipboard();
-							if (completion.ok) {
+							const completionObserved = Number(completion.lastRequestEnded || 0) > Number(completion.lastRequestStarted || 0);
+							this.hooksOutput.appendLine(
+								`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} completionOk=${completion.ok} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatMarkdown ? 'yes' : 'no'}`
+							);
+							if (completion.ok || completionObserved) {
 								const promptToComplete = await this.storageService.getPrompt(prompt.id);
 								if (promptToComplete) {
 									const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
@@ -1090,7 +1119,9 @@ export class EditorPanelManager {
 									chatMarkdown,
 									...hookPayloadBase,
 									status: 'completed',
+									completionFallback: completion.ok ? false : true,
 								}, 'afterChatCompleted');
+								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
 								return;
 							}
 
@@ -1116,6 +1147,7 @@ export class EditorPanelManager {
 									...hookPayloadBase,
 									status: 'completed',
 								}, 'afterChatCompleted');
+								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
 								return;
 							}
 
@@ -1125,11 +1157,15 @@ export class EditorPanelManager {
 								chatCompletion: completion,
 								...hookPayloadBase,
 							}, 'chatError');
+							this.hooksOutput.appendLine(`[chat-track] chatError fired for prompt=${prompt.id}: completion not detected`);
 						})();
 					}
 
-					// Notify webview that chat was started
-					postMessage({ type: 'chatStarted', promptId: prompt.id });
+					if (sendMessageSucceeded) {
+						postMessage({ type: 'chatStarted', promptId: prompt.id });
+					} else {
+						postMessage({ type: 'error', message: 'Не удалось отправить промпт в чат. Проверьте, что Copilot Chat доступен, и повторите попытку.' });
+					}
 
 					// Optional hook-based status policy (no modal)
 					const hookStatus = this.resolveStatusFromHooks(prompt.hooks || []);

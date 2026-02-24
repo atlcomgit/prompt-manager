@@ -20,12 +20,20 @@ const GLOBAL_AGENT_CONTEXT_KEY = 'promptManager.globalAgentContext';
 export class StateService {
 	constructor(private readonly context: vscode.ExtensionContext) { }
 
+	private getPreferredWorkspaceStateDbPath(): string | null {
+		const storageUriPath = this.context.storageUri?.fsPath;
+		if (!storageUriPath) {
+			return null;
+		}
+		return path.join(storageUriPath, '..', 'state.vscdb');
+	}
+
 	private getWorkspaceStateDbCandidates(): string[] {
 		const candidates: string[] = [];
 
-		const storageUriPath = this.context.storageUri?.fsPath;
-		if (storageUriPath) {
-			candidates.push(path.join(storageUriPath, '..', 'state.vscdb'));
+		const preferredPath = this.getPreferredWorkspaceStateDbPath();
+		if (preferredPath) {
+			candidates.push(preferredPath);
 		}
 
 		const home = os.homedir();
@@ -41,6 +49,57 @@ export class StateService {
 		}
 
 		return candidates;
+	}
+
+	private async resolveWorkspaceStateDbPaths(): Promise<string[]> {
+		const candidates = this.getWorkspaceStateDbCandidates();
+		const resolved = new Map<string, number>();
+
+		for (const candidate of candidates) {
+			if (candidate.endsWith('state.vscdb')) {
+				try {
+					const stat = await vscode.workspace.fs.stat(vscode.Uri.file(candidate));
+					resolved.set(candidate, stat.mtime);
+				} catch {
+					// continue
+				}
+				continue;
+			}
+
+			try {
+				const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(candidate));
+				for (const [name, type] of entries) {
+					if (type !== vscode.FileType.Directory) {
+						continue;
+					}
+					const dbPath = path.join(candidate, name, 'state.vscdb');
+					try {
+						const stat = await vscode.workspace.fs.stat(vscode.Uri.file(dbPath));
+						resolved.set(dbPath, stat.mtime);
+					} catch {
+						// continue
+					}
+				}
+			} catch {
+				// continue
+			}
+		}
+
+		const preferredPath = this.getPreferredWorkspaceStateDbPath();
+		const preferredMtime = preferredPath ? resolved.get(preferredPath) : undefined;
+
+		const ordered = Array.from(resolved.entries())
+			.sort((a, b) => b[1] - a[1])
+			.map(([dbPath]) => dbPath);
+
+		if (preferredPath && preferredMtime !== undefined) {
+			return [
+				preferredPath,
+				...ordered.filter(dbPath => dbPath !== preferredPath),
+			];
+		}
+
+		return ordered;
 	}
 
 	private getStateDbCandidates(): string[] {
@@ -83,39 +142,8 @@ export class StateService {
 	}
 
 	private async resolveWorkspaceStateDbPath(): Promise<string | null> {
-		const candidates = this.getWorkspaceStateDbCandidates();
-
-		for (const candidate of candidates) {
-			if (candidate.endsWith('state.vscdb')) {
-				try {
-					await vscode.workspace.fs.stat(vscode.Uri.file(candidate));
-					return candidate;
-				} catch {
-					// continue
-				}
-				continue;
-			}
-
-			try {
-				const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(candidate));
-				const dbCandidates = entries
-					.filter(([, type]) => type === vscode.FileType.Directory)
-					.map(([name]) => path.join(candidate, name, 'state.vscdb'));
-
-				for (const dbPath of dbCandidates) {
-					try {
-						await vscode.workspace.fs.stat(vscode.Uri.file(dbPath));
-						return dbPath;
-					} catch {
-						// continue
-					}
-				}
-			} catch {
-				// continue
-			}
-		}
-
-		return null;
+		const paths = await this.resolveWorkspaceStateDbPaths();
+		return paths[0] || null;
 	}
 
 	private async readChatSessionStoreIndex(dbPath: string): Promise<any | null> {
@@ -132,6 +160,23 @@ export class StateService {
 		}
 	}
 
+	private getPreferredAndFallbackDbPaths(dbPaths: string[]): { preferred: string[]; fallback: string[] } {
+		if (dbPaths.length === 0) {
+			return { preferred: [], fallback: [] };
+		}
+
+		const preferredPath = this.getPreferredWorkspaceStateDbPath();
+		if (!preferredPath) {
+			return { preferred: [dbPaths[0]], fallback: dbPaths.slice(1) };
+		}
+
+		const preferred = dbPaths.includes(preferredPath)
+			? [preferredPath]
+			: [dbPaths[0]];
+		const fallback = dbPaths.filter(dbPath => !preferred.includes(dbPath));
+		return { preferred, fallback };
+	}
+
 	private async readWorkspaceItemValue(dbPath: string, key: string): Promise<string> {
 		try {
 			const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
@@ -146,10 +191,11 @@ export class StateService {
 		timeoutMs: number = 5000,
 		pollIntervalMs: number = 250,
 	): Promise<string> {
-		const dbPath = await this.resolveWorkspaceStateDbPath();
-		if (!dbPath) {
+		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		if (dbPaths.length === 0) {
 			return '';
 		}
+		const { preferred, fallback } = this.getPreferredAndFallbackDbPaths(dbPaths);
 
 		const startedAt = Date.now();
 		while (Date.now() - startedAt <= timeoutMs) {
@@ -159,29 +205,43 @@ export class StateService {
 				'memento/interactive-session',
 			];
 
-			for (const key of keysToCheck) {
-				const raw = await this.readWorkspaceItemValue(dbPath, key);
-				if (!raw) {
-					continue;
-				}
+			const scanGroup = async (paths: string[]): Promise<string> => {
+				for (const dbPath of paths) {
+					for (const key of keysToCheck) {
+						const raw = await this.readWorkspaceItemValue(dbPath, key);
+						if (!raw) {
+							continue;
+						}
 
-				try {
-					const parsed = JSON.parse(raw);
-					const direct = String(parsed?.sessionId || '').trim();
-					if (direct) {
-						return direct;
-					}
+						try {
+							const parsed = JSON.parse(raw);
+							const direct = String(parsed?.sessionId || '').trim();
+							if (direct) {
+								return direct;
+							}
 
-					const historyCopilot = parsed?.history?.copilot;
-					if (Array.isArray(historyCopilot) && historyCopilot.length > 0) {
-						const candidate = String(historyCopilot[historyCopilot.length - 1]?.sessionId || '').trim();
-						if (candidate) {
-							return candidate;
+							const historyCopilot = parsed?.history?.copilot;
+							if (Array.isArray(historyCopilot) && historyCopilot.length > 0) {
+								const candidate = String(historyCopilot[historyCopilot.length - 1]?.sessionId || '').trim();
+								if (candidate) {
+									return candidate;
+								}
+							}
+						} catch {
+							// continue with next key
 						}
 					}
-				} catch {
-					// continue with next key
 				}
+				return '';
+			};
+
+			const preferredSession = await scanGroup(preferred);
+			if (preferredSession) {
+				return preferredSession;
+			}
+			const fallbackSession = await scanGroup(fallback);
+			if (fallbackSession) {
+				return fallbackSession;
 			}
 
 			await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
@@ -208,29 +268,49 @@ export class StateService {
 		referenceTimestampMs: number,
 		timeoutMs: number = 15000,
 		pollIntervalMs: number = 500,
+		sessionIdHint?: string,
 	): Promise<{ ok: boolean; sessionId?: string; lastRequestStarted?: number; dbPath?: string; reason?: string }> {
-		const dbPath = await this.resolveWorkspaceStateDbPath();
-		if (!dbPath) {
+		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		if (dbPaths.length === 0) {
 			return { ok: false, reason: 'workspace-db-not-found' };
 		}
+		const normalizedHint = String(sessionIdHint || '').trim();
 
 		const startedAt = Date.now();
 		while (Date.now() - startedAt <= timeoutMs) {
-			const index = await this.readChatSessionStoreIndex(dbPath);
-			const sessions = this.getRecentChatSessionsFromIndex(index, referenceTimestampMs);
-			const current = sessions[0];
+			let current: any;
+			let matchedDbPath = '';
+
+			for (const dbPath of dbPaths) {
+				const index = await this.readChatSessionStoreIndex(dbPath);
+				const sessions = this.getRecentChatSessionsFromIndex(index, referenceTimestampMs);
+				const hinted = normalizedHint
+					? sessions.find((entry: any) => String(entry?.sessionId || '').trim() === normalizedHint)
+					: undefined;
+				const candidate = hinted || sessions[0];
+				if (!candidate) {
+					continue;
+				}
+				const candidateStarted = Number(candidate?.timing?.lastRequestStarted || 0);
+				const currentStarted = Number(current?.timing?.lastRequestStarted || 0);
+				if (!current || candidateStarted > currentStarted) {
+					current = candidate;
+					matchedDbPath = dbPath;
+				}
+			}
+
 			if (current) {
 				const sessionId = String(current?.sessionId || '').trim();
 				const lastRequestStarted = Number(current?.timing?.lastRequestStarted || 0);
 				if (sessionId && lastRequestStarted > 0) {
-					return { ok: true, sessionId, lastRequestStarted, dbPath };
+					return { ok: true, sessionId, lastRequestStarted, dbPath: matchedDbPath };
 				}
 			}
 
 			await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
 		}
 
-		return { ok: false, reason: 'timeout', dbPath };
+		return { ok: false, reason: 'timeout', dbPath: dbPaths[0] };
 	}
 
 	async hasChatSession(sessionId: string): Promise<boolean> {
@@ -239,24 +319,30 @@ export class StateService {
 			return false;
 		}
 
-		const dbPath = await this.resolveWorkspaceStateDbPath();
-		if (!dbPath) {
+		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		if (dbPaths.length === 0) {
 			return false;
 		}
 
-		const index = await this.readChatSessionStoreIndex(dbPath);
-		const entries = index?.entries as Record<string, any> | undefined;
-		if (!entries || typeof entries !== 'object') {
-			return false;
+		for (const dbPath of dbPaths) {
+			const index = await this.readChatSessionStoreIndex(dbPath);
+			const entries = index?.entries as Record<string, any> | undefined;
+			if (!entries || typeof entries !== 'object') {
+				continue;
+			}
+			if (Object.values(entries).some((entry: any) => String(entry?.sessionId || '') === target)) {
+				return true;
+			}
 		}
 
-		return Object.values(entries).some((entry: any) => String(entry?.sessionId || '') === target);
+		return false;
 	}
 
 	async waitForChatRequestCompletion(
 		referenceTimestampMs: number,
 		timeoutMs: number = 180000,
 		pollIntervalMs: number = 1000,
+		sessionIdHint?: string,
 	): Promise<{
 		ok: boolean;
 		reason?: string;
@@ -267,22 +353,53 @@ export class StateService {
 		hasPendingEdits?: boolean;
 		dbPath?: string;
 	}> {
-		const dbPath = await this.resolveWorkspaceStateDbPath();
-		if (!dbPath) {
+		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		if (dbPaths.length === 0) {
 			return { ok: false, reason: 'workspace-db-not-found' };
 		}
+		const normalizedHint = String(sessionIdHint || '').trim();
 
 		const startedAt = Date.now();
+		let lastObservedSessionId = '';
+		let lastObservedRequestStarted = 0;
+		let lastObservedRequestEnded = 0;
+		let lastObservedResponseState: number | undefined;
+		let lastObservedHasPendingEdits: boolean | undefined;
+		let lastObservedDbPath = '';
 		while (Date.now() - startedAt <= timeoutMs) {
-			const index = await this.readChatSessionStoreIndex(dbPath);
-			const sessions = this.getRecentChatSessionsFromIndex(index, referenceTimestampMs);
-			const current = sessions[0];
+			let current: any;
+			let matchedDbPath = '';
+
+			for (const dbPath of dbPaths) {
+				const index = await this.readChatSessionStoreIndex(dbPath);
+				const sessions = this.getRecentChatSessionsFromIndex(index, referenceTimestampMs);
+				const hinted = normalizedHint
+					? sessions.find((entry: any) => String(entry?.sessionId || '').trim() === normalizedHint)
+					: undefined;
+				const candidate = hinted || sessions[0];
+				if (!candidate) {
+					continue;
+				}
+				const candidateStarted = Number(candidate?.timing?.lastRequestStarted || 0);
+				const currentStarted = Number(current?.timing?.lastRequestStarted || 0);
+				if (!current || candidateStarted > currentStarted) {
+					current = candidate;
+					matchedDbPath = dbPath;
+				}
+			}
+
 			if (current) {
 				const lastRequestStarted = Number(current?.timing?.lastRequestStarted || 0);
 				const lastRequestEnded = Number(current?.timing?.lastRequestEnded || 0);
 				const lastResponseState = Number(current?.lastResponseState ?? -1);
 				const hasPendingEdits = Boolean(current?.hasPendingEdits);
-				const finished = lastRequestEnded > lastRequestStarted && !hasPendingEdits && lastResponseState !== 2;
+				lastObservedSessionId = String(current?.sessionId || '').trim();
+				lastObservedRequestStarted = lastRequestStarted;
+				lastObservedRequestEnded = lastRequestEnded;
+				lastObservedResponseState = lastResponseState;
+				lastObservedHasPendingEdits = hasPendingEdits;
+				lastObservedDbPath = matchedDbPath;
+				const finished = lastRequestEnded > lastRequestStarted && !hasPendingEdits;
 
 				if (finished) {
 					return {
@@ -292,7 +409,7 @@ export class StateService {
 						lastRequestEnded,
 						lastResponseState,
 						hasPendingEdits,
-						dbPath,
+						dbPath: matchedDbPath,
 					};
 				}
 			}
@@ -300,7 +417,16 @@ export class StateService {
 			await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
 		}
 
-		return { ok: false, reason: 'timeout', dbPath };
+		return {
+			ok: false,
+			reason: 'timeout',
+			sessionId: lastObservedSessionId || undefined,
+			lastRequestStarted: lastObservedRequestStarted || undefined,
+			lastRequestEnded: lastObservedRequestEnded || undefined,
+			lastResponseState: lastObservedResponseState,
+			hasPendingEdits: lastObservedHasPendingEdits,
+			dbPath: lastObservedDbPath || dbPaths[0],
+		};
 	}
 
 	private escapeSql(value: string): string {

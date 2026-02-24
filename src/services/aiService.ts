@@ -150,16 +150,22 @@ export class AiService {
 	}
 
 	/** Generate inline suggestion / continuation for prompt text */
-	async generateSuggestion(textBefore: string): Promise<string> {
+	async generateSuggestion(textBefore: string, globalContext?: string): Promise<string> {
 		const systemPrompt = 'You are an AI assistant that continues writing a prompt. Given the text written so far, generate a natural continuation (1-3 sentences or a code block). Respond with ONLY the continuation text, nothing else. Match the language and style of the input.';
-		const userPrompt = `Continue this prompt text:\n\n${textBefore.slice(-1500)}`;
+		const contextBlock = (globalContext || '').trim()
+			? `Global agent context:\n${(globalContext || '').trim().slice(0, 1500)}\n\n`
+			: '';
+		const userPrompt = `${contextBlock}Continue this prompt text:\n\n${textBefore.slice(-1500)}`;
 		return this.chat(systemPrompt, userPrompt, '');
 	}
 
 	/** Generate multiple suggestion variants for prompt text */
-	async generateSuggestionVariants(textBefore: string, count: number = 3): Promise<string[]> {
+	async generateSuggestionVariants(textBefore: string, count: number = 3, globalContext?: string): Promise<string[]> {
 		const systemPrompt = `You are an AI assistant that continues writing a prompt. Given the text written so far, generate ${count} DIFFERENT natural continuations (each 1-3 sentences). Return a JSON array of strings. Example: ["continuation 1", "continuation 2", "continuation 3"]. Return ONLY the JSON array, nothing else. Match the language and style of the input.`;
-		const userPrompt = `Continue this prompt text (${count} variants):\n\n${textBefore.slice(-1500)}`;
+		const contextBlock = (globalContext || '').trim()
+			? `Global agent context:\n${(globalContext || '').trim().slice(0, 1500)}\n\n`
+			: '';
+		const userPrompt = `${contextBlock}Continue this prompt text (${count} variants):\n\n${textBefore.slice(-1500)}`;
 		const result = await this.chat(systemPrompt, userPrompt, '[]');
 		try {
 			const parsed = JSON.parse(result);

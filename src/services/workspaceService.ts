@@ -184,15 +184,17 @@ export class WorkspaceService {
 				const uri = vscode.Uri.file(searchPath);
 				const entries = await vscode.workspace.fs.readDirectory(uri);
 				for (const [name, type] of entries) {
-					if (type === vscode.FileType.File || type === vscode.FileType.Directory) {
-						const hookName = name.replace(/\.[^.]+$/, '');
-						if (!hooks.find(h => h.id === hookName)) {
-							hooks.push({
-								id: hookName,
-								name: hookName,
-								description: `Hook: ${hookName}`,
-							});
-						}
+					if (type !== vscode.FileType.File) {
+						continue;
+					}
+
+					const hookName = name.replace(/\.[^.]+$/, '');
+					if (!hooks.find(h => h.id === hookName)) {
+						hooks.push({
+							id: hookName,
+							name: hookName,
+							description: `Hook: ${hookName}`,
+						});
 					}
 				}
 			} catch {

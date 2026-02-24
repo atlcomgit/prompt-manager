@@ -13,6 +13,9 @@ interface Props {
   suggestions?: string[];
   autoCompleteEnabled?: boolean;
   onAutoCompleteChange?: (enabled: boolean) => void;
+  showControls?: boolean;
+  requestSuggestionSignal?: number;
+  onSuggestionLoadingChange?: (loading: boolean) => void;
 }
 
 /**
@@ -26,6 +29,8 @@ export const TextArea: React.FC<Props> = ({
   label, value, onChange, placeholder, required, rows = 8,
   onRequestSuggestion, suggestion, suggestions,
   autoCompleteEnabled = true, onAutoCompleteChange,
+  showControls = true, requestSuggestionSignal,
+  onSuggestionLoadingChange,
 }) => {
   const t = useT();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -51,6 +56,10 @@ export const TextArea: React.FC<Props> = ({
       setIsRequesting(false);
     }
   }, [suggestion, suggestions]);
+
+  useEffect(() => {
+    onSuggestionLoadingChange?.(isRequesting);
+  }, [isRequesting, onSuggestionLoadingChange]);
 
   // Handle text input — clear ghost, debounce suggestion request only after space
   const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -141,46 +150,64 @@ export const TextArea: React.FC<Props> = ({
     };
   }, []);
 
+  useEffect(() => {
+    if (!requestSuggestionSignal || !onRequestSuggestion || !textareaRef.current) {
+      return;
+    }
+    const pos = textareaRef.current.selectionStart;
+    const textBefore = value.substring(0, pos);
+    if (textBefore.trim().length === 0) {
+      return;
+    }
+    setIsRequesting(true);
+    onRequestSuggestion(textBefore);
+  }, [requestSuggestionSignal, onRequestSuggestion, value]);
+
   const textBeforeCursor = value.substring(0, cursorPos);
   const textAfterCursor = value.substring(cursorPos);
+  const showLabelRow = Boolean(label) || showControls;
 
   return (
     <div style={styles.field}>
-      <div style={styles.labelRow}>
-        <label style={styles.label}>
-          {label}
-          {required && <span style={styles.required}> *</span>}
-        </label>
-        <div style={styles.labelActions}>
-          {onAutoCompleteChange && (
-            <label style={styles.autoCompleteLabel}>
-              <input
-                type="checkbox"
-                checked={autoCompleteEnabled}
-                onChange={e => onAutoCompleteChange(e.target.checked)}
-                style={{ margin: 0 }}
-              />
-              Автодополнение
-            </label>
-          )}
-          <span style={styles.loadingIndicator}>{isRequesting ? '⏳' : ''}</span>
-          {onRequestSuggestion && (
-            <button
-              style={styles.suggestBtn}
-              onClick={() => {
-                if (textareaRef.current && onRequestSuggestion) {
-                  const pos = textareaRef.current.selectionStart;
-                  setIsRequesting(true);
-                  onRequestSuggestion(value.substring(0, pos));
-                }
-              }}
-              title={t('textArea.suggestTooltip')}
-            >
-              {t('textArea.suggest')}
-            </button>
+      {showLabelRow && (
+        <div style={styles.labelRow}>
+          <label style={styles.label}>
+            {label}
+            {required && <span style={styles.required}> *</span>}
+          </label>
+          {showControls && (
+            <div style={styles.labelActions}>
+              {onAutoCompleteChange && (
+                <label style={styles.autoCompleteLabel}>
+                  <input
+                    type="checkbox"
+                    checked={autoCompleteEnabled}
+                    onChange={e => onAutoCompleteChange(e.target.checked)}
+                    style={{ margin: 0 }}
+                  />
+                  Автодополнение
+                </label>
+              )}
+              <span style={styles.loadingIndicator}>{isRequesting ? '⏳' : ''}</span>
+              {onRequestSuggestion && (
+                <button
+                  style={styles.suggestBtn}
+                  onClick={() => {
+                    if (textareaRef.current && onRequestSuggestion) {
+                      const pos = textareaRef.current.selectionStart;
+                      setIsRequesting(true);
+                      onRequestSuggestion(value.substring(0, pos));
+                    }
+                  }}
+                  title={t('textArea.suggestTooltip')}
+                >
+                  {t('textArea.suggest')}
+                </button>
+              )}
+            </div>
           )}
         </div>
-      </div>
+      )}
 
       <div style={styles.editorContainer}>
         {/* Mirror div behind textarea — renders ghost text */}

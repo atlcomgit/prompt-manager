@@ -28,6 +28,9 @@ export class EditorPanelManager {
 	private pendingRestorePrompt: Prompt | null = null;
 	private pendingRestoreIsDirty = false;
 	private readonly hooksOutput = vscode.window.createOutputChannel('Prompt Manager Hooks');
+	private contentEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string }>();
+	private panelKeyByContentEditorUri = new Map<string, string>();
+	private contentSyncDisposables: vscode.Disposable[] = [];
 
 	private async runConfiguredHooks(
 		hookIds: string[],
@@ -306,7 +309,100 @@ export class EditorPanelManager {
 		private readonly workspaceService: WorkspaceService,
 		private readonly gitService: GitService,
 		private readonly stateService: StateService,
-	) { }
+	) {
+		this.contentSyncDisposables.push(
+			vscode.workspace.onDidSaveTextDocument((document) => {
+				void this.syncPromptContentFromEditorDocument(document);
+			})
+		);
+	}
+
+	private getPromptEditorSyncDir(): string | null {
+		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (!workspaceRoot) {
+			return null;
+		}
+		return path.join(workspaceRoot, '.vscode', 'prompt-manager', '.editor-sync');
+	}
+
+	private sanitizeFileName(value: string): string {
+		const cleaned = value.trim().toLowerCase().replace(/[^a-zа-я0-9._-]+/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+		return cleaned || 'prompt';
+	}
+
+	private rebindContentEditorPanelKey(oldKey: string, newKey: string): void {
+		const binding = this.contentEditorByPanelKey.get(oldKey);
+		if (!binding) {
+			return;
+		}
+		this.contentEditorByPanelKey.delete(oldKey);
+		this.contentEditorByPanelKey.set(newKey, binding);
+		this.panelKeyByContentEditorUri.set(binding.uri.toString(), newKey);
+	}
+
+	private clearContentEditorBinding(panelKey: string): void {
+		const binding = this.contentEditorByPanelKey.get(panelKey);
+		if (!binding) {
+			return;
+		}
+		this.panelKeyByContentEditorUri.delete(binding.uri.toString());
+		this.contentEditorByPanelKey.delete(panelKey);
+	}
+
+	private async syncPromptContentFromEditorDocument(document: vscode.TextDocument): Promise<void> {
+		const uriKey = document.uri.toString();
+		const panelKey = this.panelKeyByContentEditorUri.get(uriKey);
+		if (!panelKey) {
+			return;
+		}
+
+		const panel = openPanels.get(panelKey);
+		if (!panel) {
+			return;
+		}
+
+		const content = document.getText();
+		const binding = this.contentEditorByPanelKey.get(panelKey);
+		if (!binding || binding.lastSyncedContent === content) {
+			return;
+		}
+
+		binding.lastSyncedContent = content;
+		void panel.webview.postMessage({ type: 'promptContentUpdated', content } satisfies ExtensionToWebviewMessage);
+	}
+
+	private async openPromptContentInEditor(panelKey: string, currentPrompt: Prompt, content: string): Promise<void> {
+		const existingBinding = this.contentEditorByPanelKey.get(panelKey);
+		if (existingBinding) {
+			const doc = await vscode.workspace.openTextDocument(existingBinding.uri);
+			if (!doc.isDirty && doc.getText() !== content) {
+				await vscode.workspace.fs.writeFile(existingBinding.uri, Buffer.from(content, 'utf-8'));
+				existingBinding.lastSyncedContent = content;
+			}
+			await vscode.window.showTextDocument(existingBinding.uri, { preview: false, preserveFocus: false });
+			return;
+		}
+
+		const syncDir = this.getPromptEditorSyncDir();
+		if (!syncDir) {
+			vscode.window.showErrorMessage('Prompt Manager: не удалось определить рабочую папку для синхронизации редактора.');
+			return;
+		}
+
+		await vscode.workspace.fs.createDirectory(vscode.Uri.file(syncDir));
+
+		const baseName = this.sanitizeFileName(currentPrompt.id || currentPrompt.title || panelKey);
+		const fileName = `${baseName}-${this.sanitizeFileName(panelKey)}.md`;
+		const fileUri = vscode.Uri.file(path.join(syncDir, fileName));
+
+		await vscode.workspace.fs.writeFile(fileUri, Buffer.from(content, 'utf-8'));
+
+		this.contentEditorByPanelKey.set(panelKey, { uri: fileUri, lastSyncedContent: content });
+		this.panelKeyByContentEditorUri.set(fileUri.toString(), panelKey);
+
+		const doc = await vscode.workspace.openTextDocument(fileUri);
+		await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false });
+	}
 
 	/** Open or focus an editor panel for a prompt */
 	async openPrompt(promptId: string): Promise<void> {
@@ -401,11 +497,13 @@ export class EditorPanelManager {
 				this.silentClosePanels.delete(key);
 				openPanels.delete(key);
 				this.panelDirtySetters.delete(key);
+				this.clearContentEditorBinding(key);
 			}
 			openPanels.delete(panelKey);
 			this.chatTrackingDisposables.get(panelKey)?.dispose();
 			this.chatTrackingDisposables.delete(panelKey);
 			this.panelDirtySetters.delete(panelKey);
+			this.clearContentEditorBinding(panelKey);
 
 			if (skipUnsavedPrompt) {
 				return;
@@ -598,9 +696,14 @@ export class EditorPanelManager {
 				if (existingPrompt) {
 					promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
 					promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
+					promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
+						? Math.max(0, promptToSave.timeSpentUntracked || 0)
+						: (existingPrompt.timeSpentUntracked || 0);
 					promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
 						? promptToSave.chatSessionIds
 						: (existingPrompt.chatSessionIds || []);
+				} else {
+					promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
 				}
 
 				// Auto-detect languages & frameworks
@@ -626,6 +729,7 @@ export class EditorPanelManager {
 						this.panelDirtySetters.delete(panelKey);
 						this.panelDirtySetters.set(promptToSave.id, dirtySetter);
 					}
+					this.rebindContentEditorPanelKey(panelKey, promptToSave.id);
 				}
 
 				panel.title = `⚡ ${saved.title || saved.id}`;
@@ -635,6 +739,11 @@ export class EditorPanelManager {
 
 				this._onDidSave.fire(promptToSave.id);
 				// vscode.window.showInformationMessage(`Промпт "${saved.title || saved.id}" сохранён.`);
+				break;
+			}
+
+			case 'openPromptContentInEditor': {
+				await this.openPromptContentInEditor(panelKey, currentPrompt, msg.content || '');
 				break;
 			}
 
@@ -726,6 +835,9 @@ export class EditorPanelManager {
 					if (existingBeforeChat) {
 						prompt.timeSpentWriting = Math.max(prompt.timeSpentWriting || 0, existingBeforeChat.timeSpentWriting || 0);
 						prompt.timeSpentImplementing = Math.max(prompt.timeSpentImplementing || 0, existingBeforeChat.timeSpentImplementing || 0);
+						prompt.timeSpentUntracked = Number.isFinite(prompt.timeSpentUntracked)
+							? Math.max(0, prompt.timeSpentUntracked || 0)
+							: (existingBeforeChat.timeSpentUntracked || 0);
 						prompt.chatSessionIds = prompt.chatSessionIds?.length ? prompt.chatSessionIds : (existingBeforeChat.chatSessionIds || []);
 					}
 					await this.storageService.savePrompt(prompt);
@@ -1216,7 +1328,10 @@ export class EditorPanelManager {
 					const cancellation = new (await import('vscode')).CancellationTokenSource();
 					// Timeout after 10 seconds
 					const timeout = setTimeout(() => cancellation.cancel(), 10000);
-					const suggestions = await this.aiService.generateSuggestionVariants(msg.textBefore, 3);
+					const globalContext = typeof msg.globalContext === 'string'
+						? msg.globalContext
+						: this.stateService.getGlobalAgentContext();
+					const suggestions = await this.aiService.generateSuggestionVariants(msg.textBefore, 3, globalContext);
 					clearTimeout(timeout);
 					if (suggestions.length > 0) {
 						postMessage({ type: 'inlineSuggestions', suggestions });
@@ -1236,6 +1351,10 @@ export class EditorPanelManager {
 
 	/** Close all open panels */
 	disposeAll(): void {
+		for (const d of this.contentSyncDisposables) {
+			d.dispose();
+		}
+		this.contentSyncDisposables = [];
 		for (const d of this.chatTrackingDisposables.values()) {
 			d.dispose();
 		}
@@ -1246,6 +1365,8 @@ export class EditorPanelManager {
 		openPanels.clear();
 		this.panelDirtySetters.clear();
 		this.silentClosePanels.clear();
+		this.contentEditorByPanelKey.clear();
+		this.panelKeyByContentEditorUri.clear();
 		this.hooksOutput.dispose();
 	}
 

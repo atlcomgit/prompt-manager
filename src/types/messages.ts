@@ -37,14 +37,15 @@ export type WebviewToExtensionMessage =
 	| { type: 'pickFile' }
 	| { type: 'pasteFiles'; files: string[] }
 	| { type: 'openFile'; file: string }
-	| { type: 'requestSuggestion'; textBefore: string }
+	| { type: 'requestSuggestion'; textBefore: string; globalContext?: string }
 	| { type: 'getStatistics'; month?: number; year?: number }
 	| { type: 'exportReport'; rows: Array<{ taskNumber: string; title: string; hours: number }> }
 	| { type: 'markDirty'; dirty: boolean; prompt?: Prompt }
 	| { type: 'showStatistics' }
 	| { type: 'getGlobalContext' }
 	| { type: 'saveGlobalContext'; context: string }
-	| { type: 'createBranch'; branch: string; projects: string[] };
+	| { type: 'createBranch'; branch: string; projects: string[] }
+	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string };
 
 // ---- Messages FROM extension TO webview ----
 
@@ -74,4 +75,5 @@ export type ExtensionToWebviewMessage =
 	| { type: 'globalContext'; context: string }
 	| { type: 'availableLanguages'; options: Array<{ id: string; name: string }> }
 	| { type: 'availableFrameworks'; options: Array<{ id: string; name: string }> }
-	| { type: 'chatStarted'; promptId: string };
+	| { type: 'chatStarted'; promptId: string }
+	| { type: 'promptContentUpdated'; content: string };

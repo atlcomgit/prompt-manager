@@ -67,6 +67,7 @@ const en: Record<string, string> = {
 	'editor.promptText': 'Prompt text (Markdown)',
 	'editor.edit': 'Edit',
 	'editor.preview': 'Preview',
+	'editor.open': 'Open',
 	'editor.promptPlaceholder': 'Enter prompt text in Markdown format...\n\nUse {{variables}} for templating',
 	'editor.templateVars': '🔤 Template variables',
 	'editor.templateHint': 'Values are substituted in preview',
@@ -129,6 +130,8 @@ const en: Record<string, string> = {
 	'timer.title': '⏱ Time spent',
 	'timer.writing': 'Writing prompt',
 	'timer.implementing': 'Chat implementation',
+	'timer.untracked': 'Untracked time',
+	'timer.untrackedPlaceholder': 'minutes',
 	'timer.total': 'Total',
 
 	// --- Statistics ---
@@ -234,6 +237,7 @@ const ru: Record<string, string> = {
 	'editor.promptText': 'Текст промпта (Markdown)',
 	'editor.edit': 'Редактировать',
 	'editor.preview': 'Предпросмотр',
+	'editor.open': 'Открыть',
 	'editor.promptPlaceholder': 'Введите текст промпта в формате Markdown...\n\nИспользуйте {{переменные}} для шаблонизации',
 	'editor.templateVars': '🔤 Переменные шаблона',
 	'editor.templateHint': 'Значения подставляются в предпросмотре',
@@ -296,6 +300,8 @@ const ru: Record<string, string> = {
 	'timer.title': '⏱ Затраченное время',
 	'timer.writing': 'Написание промпта',
 	'timer.implementing': 'Реализация в чате',
+	'timer.untracked': 'Неучтенное время',
+	'timer.untrackedPlaceholder': 'минуты',
 	'timer.total': 'Всего',
 
 	// --- Statistics ---

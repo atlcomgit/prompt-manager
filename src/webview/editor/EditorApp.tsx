@@ -42,6 +42,8 @@ export const EditorApp: React.FC = () => {
   const [inlineSuggestion, setInlineSuggestion] = useState<string>('');
   const [inlineSuggestions, setInlineSuggestions] = useState<string[]>([]);
   const [autoCompleteEnabled, setAutoCompleteEnabled] = useState(true);
+  const [requestSuggestionSignal, setRequestSuggestionSignal] = useState(0);
+  const [isSuggestionLoading, setIsSuggestionLoading] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
@@ -151,6 +153,16 @@ export const EditorApp: React.FC = () => {
       case 'promptSaved':
         setIsSaving(false);
         setIsDirty(false);
+        break;
+      case 'promptContentUpdated':
+        setPrompt(prev => {
+          const nextContent = msg.content || '';
+          if (prev.content === nextContent) {
+            return prev;
+          }
+          setIsDirty(true);
+          return { ...prev, content: nextContent };
+        });
         break;
       case 'workspaceFolders':
         setWorkspaceFolders(msg.folders);
@@ -372,9 +384,14 @@ export const EditorApp: React.FC = () => {
 
           {/* Prompt content (markdown) with preview toggle */}
           <div style={styles.field}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <label style={styles.label}>{t('editor.promptText')}</label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={styles.promptFieldHeader}>
+              <div style={styles.promptFieldLabelRow}>
+                <label style={styles.label}>{t('editor.promptText')}</label>
+                <span style={styles.promptLoadingIndicator} aria-live="polite" aria-label={isSuggestionLoading ? t('textArea.suggestTooltip') : ''}>
+                  {isSuggestionLoading ? '⏳' : ''}
+                </span>
+              </div>
+              <div style={styles.promptFieldActions}>
                 <button
                   style={{
                     ...styles.linkBtn,
@@ -383,6 +400,35 @@ export const EditorApp: React.FC = () => {
                   onClick={() => setShowPreview(!showPreview)}
                 >
                   {showPreview ? `✏️ ${t('editor.edit')}` : `👁 ${t('editor.preview')}`}
+                </button>
+                <button
+                  style={styles.linkBtn}
+                  onClick={() => {
+                    vscode.postMessage({
+                      type: 'openPromptContentInEditor',
+                      content: prompt.content,
+                      promptId: prompt.id,
+                      title: prompt.title,
+                    });
+                  }}
+                >
+                  {`📝 ${t('editor.open')}`}
+                </button>
+                <label style={styles.autoCompleteLabelInline}>
+                  <input
+                    type="checkbox"
+                    checked={autoCompleteEnabled}
+                    onChange={e => setAutoCompleteEnabled(e.target.checked)}
+                    style={{ margin: 0 }}
+                  />
+                  Автодополнение
+                </label>
+                <button
+                  style={styles.linkBtn}
+                  onClick={() => setRequestSuggestionSignal(prev => prev + 1)}
+                  title={t('textArea.suggestTooltip')}
+                >
+                  {t('textArea.suggest')}
                 </button>
               </div>
             </div>
@@ -400,8 +446,15 @@ export const EditorApp: React.FC = () => {
                 required
                 autoCompleteEnabled={autoCompleteEnabled}
                 onAutoCompleteChange={setAutoCompleteEnabled}
+                showControls={false}
+                requestSuggestionSignal={requestSuggestionSignal}
+                onSuggestionLoadingChange={setIsSuggestionLoading}
                 onRequestSuggestion={(textBefore) => {
-                  vscode.postMessage({ type: 'requestSuggestion', textBefore });
+                  vscode.postMessage({
+                    type: 'requestSuggestion',
+                    textBefore,
+                    globalContext,
+                  });
                 }}
                 suggestion={inlineSuggestion}
                 suggestions={inlineSuggestions}
@@ -656,6 +709,8 @@ export const EditorApp: React.FC = () => {
           <TimerDisplay
             timeWriting={prompt.timeSpentWriting}
             timeImplementing={prompt.timeSpentImplementing}
+            timeUntracked={prompt.timeSpentUntracked || 0}
+            onUntrackedChange={(ms) => updateField('timeSpentUntracked', ms)}
           />
         </div>
       </div>
@@ -761,6 +816,43 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     padding: '4px 0',
     fontFamily: 'var(--vscode-font-family)',
+    whiteSpace: 'nowrap',
+  },
+  promptFieldHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '8px',
+    flexWrap: 'nowrap',
+  },
+  promptFieldLabelRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    minWidth: 0,
+  },
+  promptLoadingIndicator: {
+    fontSize: '12px',
+    width: '16px',
+    textAlign: 'center',
+    flexShrink: 0,
+  },
+  promptFieldActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    flexWrap: 'nowrap',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+  },
+  autoCompleteLabelInline: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    fontSize: '11px',
+    cursor: 'pointer',
+    color: 'var(--vscode-descriptionForeground)',
+    whiteSpace: 'nowrap',
   },
   branchList: {
     display: 'flex',

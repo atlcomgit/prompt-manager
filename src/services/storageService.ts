@@ -71,9 +71,15 @@ export class StorageService {
 		const configPath = path.join(this.promptDir(id), 'config.json');
 		try {
 			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(configPath));
-			const config = JSON.parse(Buffer.from(raw).toString('utf-8')) as PromptConfig;
-			config.id = id; // Ensure id matches folder name
-			return config;
+			const parsed = JSON.parse(Buffer.from(raw).toString('utf-8')) as Partial<PromptConfig>;
+			const defaults = createDefaultPrompt(id);
+			const normalized: PromptConfig = {
+				...defaults,
+				...parsed,
+				id,
+				timeSpentUntracked: typeof parsed.timeSpentUntracked === 'number' ? parsed.timeSpentUntracked : 0,
+			};
+			return normalized;
 		} catch {
 			return null;
 		}
@@ -161,6 +167,7 @@ export class StorageService {
 			chatSessionIds: [],
 			timeSpentWriting: 0,
 			timeSpentImplementing: 0,
+			timeSpentUntracked: 0,
 			createdAt: now,
 			updatedAt: now,
 		};
@@ -235,6 +242,7 @@ export class StorageService {
 		const byFramework: Record<string, number> = {};
 		let totalTimeWriting = 0;
 		let totalTimeImplementing = 0;
+		let totalTimeUntracked = 0;
 		let favoriteCount = 0;
 
 		for (const p of prompts) {
@@ -242,6 +250,7 @@ export class StorageService {
 			if (p.favorite) favoriteCount++;
 			totalTimeWriting += p.timeSpentWriting || 0;
 			totalTimeImplementing += p.timeSpentImplementing || 0;
+			totalTimeUntracked += p.timeSpentUntracked || 0;
 			for (const lang of p.languages) {
 				byLanguage[lang] = (byLanguage[lang] || 0) + 1;
 			}
@@ -250,7 +259,7 @@ export class StorageService {
 			}
 		}
 
-		const totalTime = totalTimeWriting + totalTimeImplementing;
+		const totalTime = totalTimeWriting + totalTimeImplementing + totalTimeUntracked;
 		const avgTimePerPrompt = prompts.length > 0 ? totalTime / prompts.length : 0;
 
 		const recentActivity = [...prompts]
@@ -273,7 +282,7 @@ export class StorageService {
 			title: p.title || p.id,
 			timeWriting: p.timeSpentWriting || 0,
 			timeImplementing: p.timeSpentImplementing || 0,
-			totalTime: (p.timeSpentWriting || 0) + (p.timeSpentImplementing || 0),
+			totalTime: (p.timeSpentWriting || 0) + (p.timeSpentImplementing || 0) + (p.timeSpentUntracked || 0),
 			status: p.status,
 		}));
 

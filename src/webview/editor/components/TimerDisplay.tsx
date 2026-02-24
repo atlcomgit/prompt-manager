@@ -4,6 +4,8 @@ import { useT } from '../../shared/i18n';
 interface Props {
   timeWriting: number;
   timeImplementing: number;
+  timeUntracked: number;
+  onUntrackedChange: (ms: number) => void;
 }
 
 function formatDuration(ms: number): string {
@@ -22,9 +24,10 @@ function formatDuration(ms: number): string {
   return `${seconds}с`;
 }
 
-export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing }) => {
+export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, timeUntracked, onUntrackedChange }) => {
   const t = useT();
-  const totalTime = timeWriting + timeImplementing;
+  const totalTime = timeWriting + timeImplementing + timeUntracked;
+  const untrackedMinutes = Math.floor((timeUntracked || 0) / 60000);
 
   return (
     <div style={styles.container}>
@@ -37,6 +40,24 @@ export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing })
         <div style={styles.stat}>
           <span style={styles.statLabel}>{t('timer.implementing')}</span>
           <span style={styles.statValue}>{formatDuration(timeImplementing)}</span>
+        </div>
+        <div style={styles.stat}>
+          <span style={styles.statLabel}>{t('timer.untracked')}</span>
+          <div style={styles.untrackedRow}>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={Number.isFinite(untrackedMinutes) ? untrackedMinutes : 0}
+              onChange={e => {
+                const minutes = Math.max(0, Number.parseInt(e.target.value || '0', 10) || 0);
+                onUntrackedChange(minutes * 60000);
+              }}
+              style={styles.untrackedInput}
+              placeholder={t('timer.untrackedPlaceholder')}
+            />
+            <span style={styles.untrackedSuffix}>м</span>
+          </div>
         </div>
         <div style={styles.stat}>
           <span style={styles.statLabel}>{t('timer.total')}</span>
@@ -70,7 +91,8 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '8px 12px',
     background: 'var(--vscode-input-background)',
     borderRadius: '4px',
-    minWidth: '100px',
+    minWidth: '160px',
+    width: '160px',
   },
   statLabel: {
     fontSize: '10px',
@@ -85,5 +107,30 @@ const styles: Record<string, React.CSSProperties> = {
   },
   statTotal: {
     color: 'var(--vscode-textLink-foreground)',
+  },
+  untrackedInput: {
+    width: '80%',
+    padding: '0',
+    background: 'transparent',
+    color: 'var(--vscode-foreground)',
+    border: 'none',
+    borderRadius: '0',
+    fontSize: '16px',
+    fontWeight: 600,
+    fontFamily: 'var(--vscode-font-family)',
+    lineHeight: 1.2,
+    boxSizing: 'border-box',
+    outline: 'none',
+  },
+  untrackedRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: '4px',
+  },
+  untrackedSuffix: {
+    fontSize: '16px',
+    fontWeight: 600,
+    color: 'var(--vscode-foreground)',
+    lineHeight: 1.2,
   },
 };

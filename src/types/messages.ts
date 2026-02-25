@@ -76,5 +76,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'globalContext'; context: string }
 	| { type: 'availableLanguages'; options: Array<{ id: string; name: string }> }
 	| { type: 'availableFrameworks'; options: Array<{ id: string; name: string }> }
+	| { type: 'promptSaving'; id: string; saving: boolean }
+	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string }
 	| { type: 'promptContentUpdated'; content: string };

@@ -5,6 +5,7 @@ import { useT } from '../../shared/i18n';
 interface Props {
   prompt: PromptConfig;
   isSelected: boolean;
+  isSaving?: boolean;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
   onDuplicate: (id: string) => void;
@@ -36,7 +37,7 @@ const STATUS_COLORS: Record<string, string> = {
 
 
 export const PromptItem: React.FC<Props> = ({
-  prompt, isSelected, onOpen, onDelete, onDuplicate, onToggleFavorite, onExport,
+  prompt, isSelected, isSaving = false, onOpen, onDelete, onDuplicate, onToggleFavorite, onExport,
 }) => {
   const t = useT();
   const STATUS_LABELS: Record<string, string> = {
@@ -93,12 +94,10 @@ export const PromptItem: React.FC<Props> = ({
             {prompt.favorite && <span style={styles.star}>⭐</span>}
             {prompt.title || prompt.id}
           </div>
-          {prompt.description && (
-            <div style={{
-              ...styles.description,
-              ...(selFg ? { color: selFg } : {}),
-            }}>{prompt.description}</div>
-          )}
+          <div style={{
+            ...styles.description,
+            ...(selFg ? { color: selFg } : {}),
+          }}>{prompt.description || 'Описание не указано'}</div>
           {prompt.taskNumber && (
             <div style={{
               ...styles.taskBadge,
@@ -167,6 +166,11 @@ export const PromptItem: React.FC<Props> = ({
           <button style={{ ...styles.menuItem, ...styles.menuItemDanger }} onClick={e => { e.stopPropagation(); onDelete(prompt.id); setShowMenu(false); }}>
             🗑 {t('common.delete')}
           </button>
+        </div>
+      )}
+      {isSaving && (
+        <div style={styles.savingOverlay}>
+          <div style={styles.savingLabel}>Сохранение...</div>
         </div>
       )}
     </div>
@@ -304,5 +308,25 @@ const styles: Record<string, React.CSSProperties> = {
   },
   menuItemDanger: {
     color: 'var(--vscode-errorForeground)',
+  },
+  savingOverlay: {
+    position: 'absolute',
+    inset: 0,
+    background: 'color-mix(in srgb, var(--vscode-editor-background) 40%, transparent)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    pointerEvents: 'none',
+    zIndex: 2,
+  },
+  savingLabel: {
+    fontSize: '12px',
+    fontWeight: 700,
+    color: 'var(--vscode-button-foreground)',
+    background: 'var(--vscode-button-background)',
+    padding: '3px 8px',
+    borderRadius: '999px',
+    boxShadow: '0 0 0 1px color-mix(in srgb, var(--vscode-button-background) 70%, var(--vscode-panel-border))',
+    whiteSpace: 'nowrap',
   },
 };

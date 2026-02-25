@@ -23,6 +23,8 @@ const SINGLE_EDITOR_PANEL_KEY = '__prompt_editor_singleton__';
 export class EditorPanelManager {
 	private _onDidSave = new vscode.EventEmitter<string>();
 	public readonly onDidSave = this._onDidSave.event;
+	private _onDidSaveStateChange = new vscode.EventEmitter<{ id: string; saving: boolean }>();
+	public readonly onDidSaveStateChange = this._onDidSaveStateChange.event;
 	private chatTrackingDisposables = new Map<string, vscode.Disposable>();
 	private panelDirtySetters = new Map<string, (v: boolean) => void>();
 	private panelDirtyFlags = new Map<string, boolean>();
@@ -372,37 +374,50 @@ export class EditorPanelManager {
 
 	private async persistPromptSnapshotForSwitch(snapshot: Prompt): Promise<Prompt | null> {
 		const promptToSave: Prompt = JSON.parse(JSON.stringify(snapshot));
+		const globalContext = this.stateService.getGlobalAgentContext();
+		const saveStateId = (promptToSave.id || '__new__').trim() || '__new__';
 		if (!promptToSave.id && !this.hasPromptDataWithoutId(promptToSave)) {
 			return null;
 		}
 
-		if (!promptToSave.title && promptToSave.content) {
-			promptToSave.title = await this.aiService.generateTitle(promptToSave.content);
-		}
-		if (!promptToSave.description && promptToSave.content) {
-			promptToSave.description = await this.aiService.generateDescription(promptToSave.content);
-		}
-		if (!promptToSave.id) {
-			const slug = await this.aiService.generateSlug(promptToSave.title, promptToSave.description);
-			promptToSave.id = await this.storageService.uniqueId(slug || 'untitled');
-		}
+		this._onDidSaveStateChange.fire({ id: saveStateId, saving: true });
+		try {
 
-		const existingPrompt = await this.storageService.getPrompt(promptToSave.id);
-		if (existingPrompt) {
-			promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
-			promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
-			promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
-				? Math.max(0, promptToSave.timeSpentUntracked || 0)
-				: (existingPrompt.timeSpentUntracked || 0);
-			promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
-				? promptToSave.chatSessionIds
-				: (existingPrompt.chatSessionIds || []);
-		} else {
-			promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
-		}
+			if (!promptToSave.title && promptToSave.content) {
+				promptToSave.title = await this.aiService.generateTitle(promptToSave.content, globalContext);
+			}
+			if (!promptToSave.description && promptToSave.content) {
+				promptToSave.description = await this.aiService.generateDescription(promptToSave.content, globalContext);
+			}
+			if (!promptToSave.id) {
+				const slug = await this.aiService.generateSlug(promptToSave.title, promptToSave.description, globalContext);
+				promptToSave.id = await this.storageService.uniqueId(slug || 'untitled');
+			}
 
-		await this.storageService.savePrompt(promptToSave);
-		return promptToSave;
+			const existingPrompt = await this.storageService.getPrompt(promptToSave.id);
+			if (existingPrompt) {
+				promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
+				promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
+				promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
+					? Math.max(0, promptToSave.timeSpentUntracked || 0)
+					: (existingPrompt.timeSpentUntracked || 0);
+				promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
+					? promptToSave.chatSessionIds
+					: (existingPrompt.chatSessionIds || []);
+			} else {
+				promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
+			}
+
+			await this.storageService.savePrompt(promptToSave);
+			this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
+			if (promptToSave.id && promptToSave.id !== saveStateId) {
+				this._onDidSaveStateChange.fire({ id: promptToSave.id, saving: false });
+			}
+			return promptToSave;
+		} catch (error) {
+			this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
+			throw error;
+		}
 	}
 
 	constructor(
@@ -418,19 +433,6 @@ export class EditorPanelManager {
 				void this.syncPromptContentFromEditorDocument(document);
 			})
 		);
-	}
-
-	private getPromptEditorSyncDir(): string | null {
-		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-		if (!workspaceRoot) {
-			return null;
-		}
-		return path.join(workspaceRoot, '.vscode', 'prompt-manager', '.editor-sync');
-	}
-
-	private sanitizeFileName(value: string): string {
-		const cleaned = value.trim().toLowerCase().replace(/[^a-zа-я0-9._-]+/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-		return cleaned || 'prompt';
 	}
 
 	private rebindContentEditorPanelKey(oldKey: string, newKey: string): void {
@@ -450,6 +452,50 @@ export class EditorPanelManager {
 		}
 		this.panelKeyByContentEditorUri.delete(binding.uri.toString());
 		this.contentEditorByPanelKey.delete(panelKey);
+	}
+
+	private makePromptIdBase(title: string, description: string): string {
+		const source = (title || description || '').trim();
+		const normalized = source
+			.toLowerCase()
+			.replace(/[\s_]+/g, '-')
+			.replace(/[^a-zа-я0-9-]/gi, '')
+			.replace(/-+/g, '-')
+			.replace(/^-|-$/g, '')
+			.substring(0, 40);
+		return normalized || 'untitled';
+	}
+
+	private makeTitleFallbackFromContent(content: string): string {
+		const singleLine = content.replace(/\s+/g, ' ').trim();
+		if (!singleLine) {
+			return 'Untitled Prompt';
+		}
+		return singleLine.length > 60 ? `${singleLine.slice(0, 59)}…` : singleLine;
+	}
+
+	private makeDescriptionFallbackFromContent(content: string): string {
+		const singleLine = content.replace(/\s+/g, ' ').trim();
+		if (!singleLine) {
+			return '';
+		}
+		return singleLine.length > 140 ? `${singleLine.slice(0, 139)}…` : singleLine;
+	}
+
+	private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+		let timeoutHandle: NodeJS.Timeout | undefined;
+		try {
+			return await Promise.race<T>([
+				promise,
+				new Promise<T>((resolve) => {
+					timeoutHandle = setTimeout(() => resolve(fallback), timeoutMs);
+				}),
+			]);
+		} finally {
+			if (timeoutHandle) {
+				clearTimeout(timeoutHandle);
+			}
+		}
 	}
 
 	private async syncPromptContentFromEditorDocument(document: vscode.TextDocument): Promise<void> {
@@ -475,28 +521,37 @@ export class EditorPanelManager {
 	}
 
 	private async openPromptContentInEditor(panelKey: string, currentPrompt: Prompt, content: string): Promise<void> {
+		if (!currentPrompt.id) {
+			const isRu = vscode.env.language.startsWith('ru');
+			vscode.window.showWarningMessage(
+				isRu
+					? 'Сначала сохраните промпт, затем откройте prompt.md в редакторе.'
+					: 'Save prompt first, then open prompt.md in the editor.'
+			);
+			return;
+		}
+
+		const fileUri = this.storageService.getPromptMarkdownUri(currentPrompt.id);
 		const existingBinding = this.contentEditorByPanelKey.get(panelKey);
 		if (existingBinding) {
-			const doc = await vscode.workspace.openTextDocument(existingBinding.uri);
+			const existingUri = existingBinding.uri.toString() === fileUri.toString()
+				? existingBinding.uri
+				: fileUri;
+			const doc = await vscode.workspace.openTextDocument(existingUri);
 			if (!doc.isDirty && doc.getText() !== content) {
-				await vscode.workspace.fs.writeFile(existingBinding.uri, Buffer.from(content, 'utf-8'));
+				await vscode.workspace.fs.writeFile(existingUri, Buffer.from(content, 'utf-8'));
 				existingBinding.lastSyncedContent = content;
 			}
-			await vscode.window.showTextDocument(existingBinding.uri, { preview: false, preserveFocus: false });
+			if (existingBinding.uri.toString() !== existingUri.toString()) {
+				this.panelKeyByContentEditorUri.delete(existingBinding.uri.toString());
+				existingBinding.uri = existingUri;
+				this.panelKeyByContentEditorUri.set(existingUri.toString(), panelKey);
+			}
+			await vscode.window.showTextDocument(existingUri, { preview: false, preserveFocus: false });
 			return;
 		}
 
-		const syncDir = this.getPromptEditorSyncDir();
-		if (!syncDir) {
-			vscode.window.showErrorMessage('Prompt Manager: не удалось определить рабочую папку для синхронизации редактора.');
-			return;
-		}
-
-		await vscode.workspace.fs.createDirectory(vscode.Uri.file(syncDir));
-
-		const baseName = this.sanitizeFileName(currentPrompt.id || currentPrompt.title || panelKey);
-		const fileName = `${baseName}-${this.sanitizeFileName(panelKey)}.md`;
-		const fileUri = vscode.Uri.file(path.join(syncDir, fileName));
+		await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(fileUri.fsPath)));
 
 		await vscode.workspace.fs.writeFile(fileUri, Buffer.from(content, 'utf-8'));
 
@@ -534,7 +589,14 @@ export class EditorPanelManager {
 				|| null;
 			if (latestSnapshot) {
 				const isDirty = this.panelDirtyFlags.get(existingKey) || false;
-				if (isDirty || latestSnapshot.id || this.hasPromptDataWithoutId(latestSnapshot)) {
+				const hasUnsavedDraftData = !latestSnapshot.id && this.hasPromptDataWithoutId(latestSnapshot);
+				let shouldPersistBeforeSwitch = isDirty || hasUnsavedDraftData;
+				if (!shouldPersistBeforeSwitch && latestSnapshot.id) {
+					const persistedSnapshot = await this.storageService.getPrompt(latestSnapshot.id);
+					shouldPersistBeforeSwitch = !persistedSnapshot
+						|| this.normalizePromptForCompare(latestSnapshot) !== this.normalizePromptForCompare(persistedSnapshot);
+				}
+				if (shouldPersistBeforeSwitch) {
 					try {
 						const saved = await this.persistPromptSnapshotForSwitch(latestSnapshot);
 						if (saved?.id) {
@@ -715,15 +777,16 @@ export class EditorPanelManager {
 				const dirtySnapshot: Prompt = latestPromptState
 					? JSON.parse(JSON.stringify(latestPromptState))
 					: JSON.parse(JSON.stringify(prompt));
+				const globalContext = this.stateService.getGlobalAgentContext();
 				try {
 					if (!dirtySnapshot.title && dirtySnapshot.content) {
-						dirtySnapshot.title = await this.aiService.generateTitle(dirtySnapshot.content);
+						dirtySnapshot.title = await this.aiService.generateTitle(dirtySnapshot.content, globalContext);
 					}
 					if (!dirtySnapshot.description && dirtySnapshot.content) {
-						dirtySnapshot.description = await this.aiService.generateDescription(dirtySnapshot.content);
+						dirtySnapshot.description = await this.aiService.generateDescription(dirtySnapshot.content, globalContext);
 					}
 					if (!dirtySnapshot.id) {
-						const slug = await this.aiService.generateSlug(dirtySnapshot.title, dirtySnapshot.description);
+						const slug = await this.aiService.generateSlug(dirtySnapshot.title, dirtySnapshot.description, globalContext);
 						dirtySnapshot.id = await this.storageService.uniqueId(slug || 'untitled');
 					}
 					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
@@ -838,82 +901,114 @@ export class EditorPanelManager {
 			}
 
 			case 'savePrompt': {
-				let promptToSave = msg.prompt;
-				const saveSource = msg.source || 'manual';
+				const saveStateId = (msg.prompt.id || currentPrompt.id || '__new__').trim() || '__new__';
+				this._onDidSaveStateChange.fire({ id: saveStateId, saving: true });
+				postMessage({ type: 'promptSaving', id: saveStateId, saving: true });
+				try {
+					let promptToSave = msg.prompt;
+					const saveSource = msg.source || 'manual';
+					const globalContext = this.stateService.getGlobalAgentContext();
 
-				// Generate missing fields via AI
-				if (!promptToSave.title && promptToSave.content) {
-					promptToSave.title = await this.aiService.generateTitle(promptToSave.content);
-				}
-				if (!promptToSave.description && promptToSave.content) {
-					promptToSave.description = await this.aiService.generateDescription(promptToSave.content);
-				}
-				if (!promptToSave.id) {
-					const slug = await this.aiService.generateSlug(promptToSave.title, promptToSave.description);
-					promptToSave.id = await this.storageService.uniqueId(slug);
-				}
-
-				const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(promptToSave.id) : null;
-				const hasConcurrentUpdate = Boolean(existingPrompt && promptToSave.updatedAt && existingPrompt.updatedAt !== promptToSave.updatedAt);
-				const allowStatusOverwrite = saveSource === 'status-change';
-				if (existingPrompt && hasConcurrentUpdate && !allowStatusOverwrite) {
-					if (this.statusRank(existingPrompt.status) >= this.statusRank(promptToSave.status)) {
-						promptToSave.status = existingPrompt.status;
+					const needsTitle = !promptToSave.title && !!promptToSave.content;
+					const needsDescription = !promptToSave.description && !!promptToSave.content;
+					if (needsTitle || needsDescription) {
+						const [generatedTitle, generatedDescription] = await Promise.all([
+							needsTitle
+								? this.withTimeout(this.aiService.generateTitle(promptToSave.content, globalContext), 3000, '')
+								: Promise.resolve(''),
+							needsDescription
+								? this.withTimeout(this.aiService.generateDescription(promptToSave.content, globalContext), 3000, '')
+								: Promise.resolve(''),
+						]);
+						if (needsTitle && generatedTitle) {
+							promptToSave.title = generatedTitle;
+						} else if (needsTitle) {
+							promptToSave.title = this.makeTitleFallbackFromContent(promptToSave.content);
+						}
+						if (needsDescription && generatedDescription) {
+							promptToSave.description = generatedDescription;
+						} else if (needsDescription) {
+							promptToSave.description = this.makeDescriptionFallbackFromContent(promptToSave.content);
+						}
 					}
-				}
-				if (existingPrompt) {
-					promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
-					promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
-					promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
-						? Math.max(0, promptToSave.timeSpentUntracked || 0)
-						: (existingPrompt.timeSpentUntracked || 0);
-					promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
-						? promptToSave.chatSessionIds
-						: (existingPrompt.chatSessionIds || []);
-				} else {
-					promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
-				}
 
-				const saved = await this.storageService.savePrompt(promptToSave);
-				setIsDirty(false);
-
-				// Update current prompt reference
-				Object.assign(currentPrompt, promptToSave);
-				this.panelPromptRefs.set(panelKey, currentPrompt);
-
-				// Update panel tracking
-				if (panelKey.startsWith('new-')) {
-					openPanels.delete(panelKey);
-					openPanels.set(promptToSave.id, panel);
-					const dirtySetter = this.panelDirtySetters.get(panelKey);
-					if (dirtySetter) {
-						this.panelDirtySetters.delete(panelKey);
-						this.panelDirtySetters.set(promptToSave.id, dirtySetter);
+					if (!promptToSave.id) {
+						promptToSave.id = await this.storageService.uniqueId(
+							this.makePromptIdBase(promptToSave.title, promptToSave.description || promptToSave.content)
+						);
 					}
-					const dirtyFlag = this.panelDirtyFlags.get(panelKey);
-					this.panelDirtyFlags.delete(panelKey);
-					this.panelDirtyFlags.set(promptToSave.id, Boolean(dirtyFlag));
-					const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
-					this.panelLatestPromptSnapshots.delete(panelKey);
-					this.panelLatestPromptSnapshots.set(promptToSave.id, latestSnapshot ? JSON.parse(JSON.stringify(latestSnapshot)) : null);
-					const basePrompt = this.panelBasePrompts.get(panelKey);
-					this.panelBasePrompts.delete(panelKey);
-					this.panelBasePrompts.set(promptToSave.id, basePrompt ? JSON.parse(JSON.stringify(basePrompt)) : JSON.parse(JSON.stringify(promptToSave)));
-					this.rebindContentEditorPanelKey(panelKey, promptToSave.id);
+
+					const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(promptToSave.id) : null;
+					const hasConcurrentUpdate = Boolean(existingPrompt && promptToSave.updatedAt && existingPrompt.updatedAt !== promptToSave.updatedAt);
+					const allowStatusOverwrite = saveSource === 'status-change';
+					if (existingPrompt && hasConcurrentUpdate && !allowStatusOverwrite) {
+						if (this.statusRank(existingPrompt.status) >= this.statusRank(promptToSave.status)) {
+							promptToSave.status = existingPrompt.status;
+						}
+					}
+					if (existingPrompt) {
+						promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
+						promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
+						promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
+							? Math.max(0, promptToSave.timeSpentUntracked || 0)
+							: (existingPrompt.timeSpentUntracked || 0);
+						promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
+							? promptToSave.chatSessionIds
+							: (existingPrompt.chatSessionIds || []);
+					} else {
+						promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
+					}
+
+					const saved = await this.storageService.savePrompt(promptToSave);
+					setIsDirty(false);
+
+					// Update current prompt reference
+					Object.assign(currentPrompt, promptToSave);
+					this.panelPromptRefs.set(panelKey, currentPrompt);
+
+					// Update panel tracking
+					if (panelKey.startsWith('new-')) {
+						openPanels.delete(panelKey);
+						openPanels.set(promptToSave.id, panel);
+						const dirtySetter = this.panelDirtySetters.get(panelKey);
+						if (dirtySetter) {
+							this.panelDirtySetters.delete(panelKey);
+							this.panelDirtySetters.set(promptToSave.id, dirtySetter);
+						}
+						const dirtyFlag = this.panelDirtyFlags.get(panelKey);
+						this.panelDirtyFlags.delete(panelKey);
+						this.panelDirtyFlags.set(promptToSave.id, Boolean(dirtyFlag));
+						const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
+						this.panelLatestPromptSnapshots.delete(panelKey);
+						this.panelLatestPromptSnapshots.set(promptToSave.id, latestSnapshot ? JSON.parse(JSON.stringify(latestSnapshot)) : null);
+						const basePrompt = this.panelBasePrompts.get(panelKey);
+						this.panelBasePrompts.delete(panelKey);
+						this.panelBasePrompts.set(promptToSave.id, basePrompt ? JSON.parse(JSON.stringify(basePrompt)) : JSON.parse(JSON.stringify(promptToSave)));
+						this.rebindContentEditorPanelKey(panelKey, promptToSave.id);
+					}
+
+					const stateKey = panelKey.startsWith('new-') ? promptToSave.id : panelKey;
+					this.panelDirtyFlags.set(stateKey, false);
+					this.panelLatestPromptSnapshots.set(stateKey, null);
+					this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptToSave)));
+
+					panel.title = `⚡ ${saved.title || saved.id}`;
+					postMessage({ type: 'promptSaved', prompt: saved });
+					postMessage({ type: 'prompt', prompt: promptToSave });
+					await this.broadcastAvailableLanguagesAndFrameworks();
+
+					this._onDidSave.fire(promptToSave.id);
+					if (promptToSave.id && promptToSave.id !== saveStateId) {
+						this._onDidSaveStateChange.fire({ id: promptToSave.id, saving: false });
+					}
+					// vscode.window.showInformationMessage(`Промпт "${saved.title || saved.id}" сохранён.`);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					postMessage({ type: 'error', message: `Save failed: ${message}` });
+				} finally {
+					this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
+					postMessage({ type: 'promptSaving', id: saveStateId, saving: false });
 				}
-
-				const stateKey = panelKey.startsWith('new-') ? promptToSave.id : panelKey;
-				this.panelDirtyFlags.set(stateKey, false);
-				this.panelLatestPromptSnapshots.set(stateKey, null);
-				this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptToSave)));
-
-				panel.title = `⚡ ${saved.title || saved.id}`;
-				postMessage({ type: 'promptSaved', prompt: saved });
-				postMessage({ type: 'prompt', prompt: promptToSave });
-				await this.broadcastAvailableLanguagesAndFrameworks();
-
-				this._onDidSave.fire(promptToSave.id);
-				// vscode.window.showInformationMessage(`Промпт "${saved.title || saved.id}" сохранён.`);
 				break;
 			}
 
@@ -923,19 +1018,19 @@ export class EditorPanelManager {
 			}
 
 			case 'generateTitle': {
-				const title = await this.aiService.generateTitle(msg.content);
+				const title = await this.aiService.generateTitle(msg.content, this.stateService.getGlobalAgentContext());
 				postMessage({ type: 'generatedTitle', title });
 				break;
 			}
 
 			case 'generateDescription': {
-				const description = await this.aiService.generateDescription(msg.content);
+				const description = await this.aiService.generateDescription(msg.content, this.stateService.getGlobalAgentContext());
 				postMessage({ type: 'generatedDescription', description });
 				break;
 			}
 
 			case 'generateSlug': {
-				const slug = await this.aiService.generateSlug(msg.title, msg.description);
+				const slug = await this.aiService.generateSlug(msg.title, msg.description, this.stateService.getGlobalAgentContext());
 				postMessage({ type: 'generatedSlug', slug });
 				break;
 			}
@@ -1003,7 +1098,7 @@ export class EditorPanelManager {
 
 					// Ensure prompt has id and persist latest editor state before starting chat
 					if (!prompt.id) {
-						const slug = await this.aiService.generateSlug(prompt.title, prompt.description);
+						const slug = await this.aiService.generateSlug(prompt.title, prompt.description, this.stateService.getGlobalAgentContext());
 						prompt.id = await this.storageService.uniqueId(slug || 'untitled');
 					}
 					const existingBeforeChat = await this.storageService.getPrompt(prompt.id);

@@ -23,6 +23,16 @@ interface SelectOption {
   description?: string;
 }
 
+type SectionKey = 'basic' | 'workspace' | 'tech' | 'integrations' | 'time';
+
+const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
+  basic: true,
+  workspace: false,
+  tech: false,
+  integrations: false,
+  time: false,
+};
+
 export const EditorApp: React.FC = () => {
   const t = useT();
   const initialWebviewStateRef = useRef<Record<string, unknown>>((vscode.getState?.() || {}) as Record<string, unknown>);
@@ -41,6 +51,52 @@ export const EditorApp: React.FC = () => {
     const rawValue = storage.getItem(key);
     const parsed = rawValue ? Number.parseInt(rawValue, 10) : NaN;
     return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  };
+  const readStoredExpandedSections = (): Record<SectionKey, boolean> => {
+    const stateValue = initialWebviewStateRef.current?.['pm.editor.expandedSections'];
+
+    const normalize = (value: unknown): Record<SectionKey, boolean> | null => {
+      if (!value || typeof value !== 'object') {
+        return null;
+      }
+      const candidate = value as Record<string, unknown>;
+      const keys: SectionKey[] = ['basic', 'workspace', 'tech', 'integrations', 'time'];
+      const allValid = keys.every((key) => typeof candidate[key] === 'boolean');
+      if (!allValid) {
+        return null;
+      }
+      return {
+        basic: Boolean(candidate.basic),
+        workspace: Boolean(candidate.workspace),
+        tech: Boolean(candidate.tech),
+        integrations: Boolean(candidate.integrations),
+        time: Boolean(candidate.time),
+      };
+    };
+
+    if (stateValue) {
+      const normalized = normalize(stateValue);
+      if (normalized) {
+        return normalized;
+      }
+    }
+
+    if (storage) {
+      const rawValue = storage.getItem('pm.editor.expandedSections');
+      if (rawValue) {
+        try {
+          const parsed = JSON.parse(rawValue);
+          const normalized = normalize(parsed);
+          if (normalized) {
+            return normalized;
+          }
+        } catch {
+          // ignore corrupted local state
+        }
+      }
+    }
+
+    return { ...DEFAULT_EXPANDED_SECTIONS };
   };
 
   const [prompt, setPrompt] = useState<Prompt>(createDefaultPrompt());
@@ -65,11 +121,15 @@ export const EditorApp: React.FC = () => {
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
+  const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>(() => readStoredExpandedSections());
   const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
   const startChatLockRef = useRef(false);
   const globalContextTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const saveTimeoutRef = useRef<number | null>(null);
+  const currentPromptIdRef = useRef<string>('__new__');
+  const activeSaveIdRef = useRef<string | null>(null);
 
   // Time tracking
   const openedAtRef = useRef<number>(Date.now());
@@ -102,6 +162,88 @@ export const EditorApp: React.FC = () => {
 
     return prompt.projects.some(projectName => currentByProject.get(projectName) !== targetBranch);
   }, [targetBranch, prompt.projects, branches]);
+
+  const sortedAvailableModels = useMemo(
+    () => [...availableModels].sort((a, b) => `${a.name} ${a.id}`.localeCompare(`${b.name} ${b.id}`, 'ru', { sensitivity: 'base' })),
+    [availableModels]
+  );
+
+  const toShortText = (value: string, maxLength = 64): string => {
+    const normalized = value.trim();
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+    return `${normalized.slice(0, maxLength - 1)}…`;
+  };
+
+  const joinSelected = (values: string[]): string => values
+    .map(v => v.trim())
+    .filter(Boolean)
+    .join(', ');
+
+  const selectedModelName = useMemo(() => {
+    if (!prompt.model.trim()) {
+      return '';
+    }
+    const selected = sortedAvailableModels.find(m => m.id === prompt.model.trim());
+    if (selected) {
+      return `${selected.name} (${selected.id})`;
+    }
+    return prompt.model.trim();
+  }, [prompt.model, sortedAvailableModels]);
+
+  const basicSummary = useMemo(() => {
+    const chunks: string[] = [];
+    if (prompt.title.trim()) chunks.push(`Заголовок: ${toShortText(prompt.title, 48)}`);
+    if (prompt.description.trim()) chunks.push(`Описание: ${toShortText(prompt.description, 48)}`);
+    if (prompt.content.trim()) chunks.push(`Текст: ${toShortText(prompt.content.replace(/\s+/g, ' '), 48)}`);
+    if ((prompt.report || '').trim()) chunks.push(`Отчёт: ${toShortText(prompt.report || '', 42)}`);
+    if (globalContext.trim()) chunks.push(`Контекст: ${toShortText(globalContext, 42)}`);
+    return chunks;
+  }, [prompt.title, prompt.description, prompt.content, prompt.report, globalContext]);
+
+  const workspaceSummary = useMemo(() => {
+    const chunks: string[] = [];
+    const projects = joinSelected(prompt.projects);
+    if (projects) chunks.push(`Проекты: ${toShortText(projects, 64)}`);
+    if (prompt.taskNumber.trim()) chunks.push(`Задача: ${prompt.taskNumber.trim()}`);
+    if (prompt.branch.trim()) chunks.push(`Ветка: ${prompt.branch.trim()}`);
+    return chunks;
+  }, [prompt.projects, prompt.taskNumber, prompt.branch]);
+
+  const techSummary = useMemo(() => {
+    const chunks: string[] = [];
+    const languages = joinSelected(prompt.languages);
+    const frameworks = joinSelected(prompt.frameworks);
+    if (languages) chunks.push(`Языки: ${toShortText(languages, 64)}`);
+    if (frameworks) chunks.push(`Фреймворки: ${toShortText(frameworks, 64)}`);
+    return chunks;
+  }, [prompt.languages, prompt.frameworks]);
+
+  const integrationsSummary = useMemo(() => {
+    const chunks: string[] = [];
+    const skills = joinSelected(prompt.skills);
+    const mcpTools = joinSelected(prompt.mcpTools);
+    const hooks = joinSelected(prompt.hooks);
+    const files = prompt.contextFiles
+      .map(filePath => {
+        const segments = filePath.split(/[\\/]/).filter(Boolean);
+        return segments.length > 0 ? segments[segments.length - 1] : filePath;
+      })
+      .join(', ');
+    if (skills) chunks.push(`Skills: ${toShortText(skills, 56)}`);
+    if (mcpTools) chunks.push(`MCP: ${toShortText(mcpTools, 56)}`);
+    if (hooks) chunks.push(`Hooks: ${toShortText(hooks, 56)}`);
+    if (selectedModelName) chunks.push(`Модель: ${toShortText(selectedModelName, 56)}`);
+    if (files) chunks.push(`Файлы: ${toShortText(files, 56)}`);
+    return chunks;
+  }, [prompt.skills, prompt.mcpTools, prompt.hooks, prompt.contextFiles, selectedModelName]);
+
+  const timeSummary = useMemo(() => {
+    const totalMs = (prompt.timeSpentWriting || 0) + (prompt.timeSpentImplementing || 0) + (prompt.timeSpentUntracked || 0);
+    const minutes = Math.round(totalMs / 60000);
+    return minutes > 0 ? [`Всего: ${minutes} мин`] : [];
+  }, [prompt.timeSpentWriting, prompt.timeSpentImplementing, prompt.timeSpentUntracked]);
 
   /** Simple Markdown → HTML converter */
   const renderMarkdown = (md: string): string => {
@@ -160,12 +302,18 @@ export const EditorApp: React.FC = () => {
     return () => clearInterval(interval);
   }, [prompt.id]);
 
+  useEffect(() => {
+    currentPromptIdRef.current = (prompt.id || '__new__').trim() || '__new__';
+  }, [prompt.id]);
+
   const handleMessage = useCallback((msg: any) => {
     switch (msg.type) {
       case 'prompt':
         if (msg.prompt) {
           setPrompt(msg.prompt);
           setIsDirty(false);
+          setIsSaving(false);
+          activeSaveIdRef.current = null;
           if ((msg.prompt.chatSessionIds || []).length > 0) {
             startChatLockRef.current = false;
             setIsStartingChat(false);
@@ -175,6 +323,22 @@ export const EditorApp: React.FC = () => {
       case 'promptSaved':
         setIsSaving(false);
         setIsDirty(false);
+        activeSaveIdRef.current = null;
+        break;
+      case 'promptSaving':
+        {
+          const incomingId = String(msg.id || '').trim() || '__new__';
+          const currentId = currentPromptIdRef.current || '__new__';
+          const activeSaveId = activeSaveIdRef.current;
+          const isRelated = incomingId === currentId || incomingId === activeSaveId;
+          if (!isRelated) {
+            break;
+          }
+          setIsSaving(Boolean(msg.saving));
+          if (!msg.saving) {
+            activeSaveIdRef.current = null;
+          }
+        }
         break;
       case 'promptContentUpdated':
         setPrompt(prev => {
@@ -254,6 +418,8 @@ export const EditorApp: React.FC = () => {
         // Could show inline error
         startChatLockRef.current = false;
         setIsStartingChat(false);
+        setIsSaving(false);
+        activeSaveIdRef.current = null;
         break;
       case 'info':
         // Could show inline info
@@ -272,6 +438,7 @@ export const EditorApp: React.FC = () => {
     if (!targetBranch || prompt.projects.length === 0) {
       setBranchesResolved(false);
       setBranches([]);
+      setShowBranches(false);
       return;
     }
     setBranchesResolved(false);
@@ -312,6 +479,14 @@ export const EditorApp: React.FC = () => {
   }, [globalContextHeight, storage]);
 
   useEffect(() => {
+    const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
+    vscode.setState?.({ ...currentState, 'pm.editor.expandedSections': expandedSections });
+    if (storage) {
+      storage.setItem('pm.editor.expandedSections', JSON.stringify(expandedSections));
+    }
+  }, [expandedSections, storage]);
+
+  useEffect(() => {
     if (!globalContextTextareaRef.current || typeof ResizeObserver === 'undefined') {
       return;
     }
@@ -344,11 +519,16 @@ export const EditorApp: React.FC = () => {
     return updatedPrompt;
   };
 
-  const handleSave = (source: 'manual' | 'status-change' | 'autosave' = 'manual') => {
+  const handleSave = (source: 'manual' | 'status-change' | 'autosave' | unknown = 'manual') => {
+    const normalizedSource: 'manual' | 'status-change' | 'autosave' =
+      source === 'status-change' || source === 'autosave' || source === 'manual'
+        ? source
+        : 'manual';
     const updatedPrompt = buildPromptForSave();
 
+    activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
-    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source });
+    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: normalizedSource });
   };
 
   const handleStartChat = () => {
@@ -358,6 +538,7 @@ export const EditorApp: React.FC = () => {
     const updatedPrompt = buildPromptForSave();
     startChatLockRef.current = true;
     setIsStartingChat(true);
+    activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
     vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
     vscode.postMessage({ type: 'startChat', id: updatedPrompt.id || '__new__', prompt: updatedPrompt });
@@ -375,10 +556,33 @@ export const EditorApp: React.FC = () => {
       status,
     };
     setPrompt(updatedPrompt);
+    activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
     setIsDirty(false);
     vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'status-change' });
   };
+
+  useEffect(() => {
+    if (!isSaving) {
+      if (saveTimeoutRef.current) {
+        window.clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    saveTimeoutRef.current = window.setTimeout(() => {
+      setIsSaving(false);
+      activeSaveIdRef.current = null;
+    }, 15000);
+
+    return () => {
+      if (saveTimeoutRef.current) {
+        window.clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+      }
+    };
+  }, [isSaving]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -417,6 +621,48 @@ export const EditorApp: React.FC = () => {
     setShowBranches(false);
   };
 
+  const toggleSection = (key: SectionKey) => {
+    setExpandedSections(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const renderSection = (key: SectionKey, title: string, summaryItems: string[], content: React.ReactNode) => {
+    const visibleItems = summaryItems.slice(0, 3);
+    const hiddenCount = Math.max(0, summaryItems.length - visibleItems.length);
+
+    return (
+      <section style={styles.sectionCard}>
+      <button
+        type="button"
+        style={styles.sectionHeaderBtn}
+        onClick={() => toggleSection(key)}
+        aria-expanded={expandedSections[key]}
+      >
+        <span style={styles.sectionHeaderLeft}>
+          <span style={styles.sectionArrow}>{expandedSections[key] ? '▾' : '▸'}</span>
+          <span style={styles.sectionTitle}>{title}</span>
+        </span>
+        <span style={styles.sectionSummaryWrap}>
+          {visibleItems.length > 0 ? (
+            <>
+              {visibleItems.map((item, index) => (
+                <span key={`${key}-summary-${index}`} style={styles.sectionSummaryChip} title={item}>
+                  {toShortText(item, 34)}
+                </span>
+              ))}
+              {hiddenCount > 0 && (
+                <span style={styles.sectionSummaryMore}>+{hiddenCount}</span>
+              )}
+            </>
+          ) : (
+            <span style={styles.sectionSummaryEmpty}>Пусто</span>
+          )}
+        </span>
+      </button>
+      {expandedSections[key] && <div style={styles.sectionBody}>{content}</div>}
+      </section>
+    );
+  };
+
   return (
     <div style={styles.container}>
       {/* Header */}
@@ -430,392 +676,377 @@ export const EditorApp: React.FC = () => {
       {/* Main content */}
       <div style={styles.body}>
         <div style={styles.formGrid}>
-          {/* Title  */}
-          <div style={styles.fieldRow}>
-            <TextField
-              label={t('editor.title')}
-              value={prompt.title}
-              onChange={v => updateField('title', v)}
-              placeholder={t('editor.titlePlaceholder')}
-            />
-            <button style={styles.aiBtn} onClick={handleGenerateTitle} title={t('editor.aiGenerate')}>
-              ✨
-            </button>
-          </div>
-
-          {/* Description */}
-          <div style={styles.fieldRow}>
-            <TextField
-              label={t('editor.description')}
-              value={prompt.description}
-              onChange={v => updateField('description', v)}
-              placeholder={t('editor.descPlaceholder')}
-            />
-            <button style={styles.aiBtn} onClick={handleGenerateDescription} title={t('editor.aiGenerate')}>
-              ✨
-            </button>
-          </div>
-
-          {/* Status */}
-          <StatusSelect
-            value={prompt.status}
-            onChange={v => updateField('status', v as PromptStatus)}
-          />
-
-          {/* Prompt content (markdown) with preview toggle */}
-          <div style={styles.field}>
-            <div style={styles.promptFieldHeader}>
-              <div style={styles.promptFieldLabelRow}>
-                <label style={styles.label}>{t('editor.promptText')}</label>
-                <span style={styles.promptLoadingIndicator} aria-live="polite" aria-label={isSuggestionLoading ? t('textArea.suggestTooltip') : ''}>
-                  {isSuggestionLoading ? '⏳' : ''}
-                </span>
-              </div>
-              <div style={styles.promptFieldActions}>
-                <button
-                  style={{
-                    ...styles.linkBtn,
-                    fontWeight: showPreview ? 600 : 400,
-                  }}
-                  onClick={() => setShowPreview(!showPreview)}
-                >
-                  {showPreview ? `✏️ ${t('editor.edit')}` : `👁 ${t('editor.preview')}`}
-                </button>
-                <button
-                  style={styles.linkBtn}
-                  onClick={() => {
-                    vscode.postMessage({
-                      type: 'openPromptContentInEditor',
-                      content: prompt.content,
-                      promptId: prompt.id,
-                      title: prompt.title,
-                    });
-                  }}
-                >
-                  {`📝 ${t('editor.open')}`}
-                </button>
-                <label style={styles.autoCompleteLabelInline}>
-                  <input
-                    type="checkbox"
-                    checked={autoCompleteEnabled}
-                    onChange={e => setAutoCompleteEnabled(e.target.checked)}
-                    style={{ margin: 0 }}
-                  />
-                  Автодополнение
-                </label>
-                <button
-                  style={styles.linkBtn}
-                  onClick={() => setRequestSuggestionSignal(prev => prev + 1)}
-                  title={t('textArea.suggestTooltip')}
-                >
-                  {t('textArea.suggest')}
+          {renderSection('basic', 'Основное', basicSummary, (
+            <>
+              <div style={styles.fieldRow}>
+                <TextField
+                  label={t('editor.title')}
+                  value={prompt.title}
+                  onChange={v => updateField('title', v)}
+                  placeholder={t('editor.titlePlaceholder')}
+                />
+                <button style={styles.aiBtn} onClick={handleGenerateTitle} title={t('editor.aiGenerate')}>
+                  ✨
                 </button>
               </div>
-            </div>
-            {showPreview ? (
-              <div
-                style={styles.previewPane}
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(prompt.content) }}
-              />
-            ) : (
-              <TextArea
-                value={prompt.content}
-                onChange={v => { updateField('content', v); setInlineSuggestion(''); setInlineSuggestions([]); }}
-                placeholder={t('editor.promptPlaceholder')}
-                rows={12}
-                required
-                autoCompleteEnabled={autoCompleteEnabled}
-                onAutoCompleteChange={setAutoCompleteEnabled}
-                showControls={false}
-                persistedHeight={promptContentHeight}
-                onHeightChange={setPromptContentHeight}
-                requestSuggestionSignal={requestSuggestionSignal}
-                onSuggestionLoadingChange={setIsSuggestionLoading}
-                onRequestSuggestion={(textBefore) => {
-                  vscode.postMessage({
-                    type: 'requestSuggestion',
-                    textBefore,
-                    globalContext,
-                  });
-                }}
-                suggestion={inlineSuggestion}
-                suggestions={inlineSuggestions}
-              />
-            )}
-          </div>
-          
-          {/* Global agent context */}
-          <div style={styles.field}>
-            <label style={styles.label}>{t('editor.globalContext')}</label>
-            <textarea
-              ref={globalContextTextareaRef}
-              value={globalContext}
-              onChange={e => {
-                setGlobalContext(e.target.value);
-                vscode.postMessage({ type: 'saveGlobalContext', context: e.target.value });
-              }}
-              placeholder={t('editor.globalContextPlaceholder')}
-              rows={3}
-              style={{
-                ...styles.globalContextTextarea,
-                height: globalContextHeight ? `${globalContextHeight}px` : undefined,
-              }}
-            />
-            <span style={styles.varHint}>{t('editor.globalContextHint')}</span>
-          </div>
 
-          {/* Template variables (auto-detected) */}
-          {detectedVars.length > 0 && (
-            <div style={styles.field}>
-              <label style={styles.label}>{t('editor.templateVars')}</label>
-              <div style={styles.varsGrid}>
-                {detectedVars.map(v => (
-                  <div key={v} style={styles.varRow}>
-                    <span style={styles.varName}>{`{{${v}}}`}</span>
-                    <input
-                      style={styles.varInput}
-                      value={templateVars[v] || ''}
-                      onChange={e => setTemplateVars(prev => ({ ...prev, [v]: e.target.value }))}
-                      placeholder={`${t('editor.valueFor')} ${v}`}
-                    />
+              <div style={styles.fieldRow}>
+                <TextField
+                  label={t('editor.description')}
+                  value={prompt.description}
+                  onChange={v => updateField('description', v)}
+                  placeholder={t('editor.descPlaceholder')}
+                />
+                <button style={styles.aiBtn} onClick={handleGenerateDescription} title={t('editor.aiGenerate')}>
+                  ✨
+                </button>
+              </div>
+
+              <StatusSelect
+                value={prompt.status}
+                onChange={v => updateField('status', v as PromptStatus)}
+              />
+
+              <div style={styles.field}>
+                <div style={styles.promptFieldHeader}>
+                  <div style={styles.promptFieldLabelRow}>
+                    <label style={styles.label}>{t('editor.promptText')}</label>
+                    <span style={styles.promptLoadingIndicator} aria-live="polite" aria-label={isSuggestionLoading ? t('textArea.suggestTooltip') : ''}>
+                      {isSuggestionLoading ? '⏳' : ''}
+                    </span>
                   </div>
-                ))}
-              </div>
-              <span style={styles.varHint}>{t('editor.templateHint')}</span>
-            </div>
-          )}
-
-
-          {/* Report */}
-          <div style={styles.field}>
-            <label style={styles.label}>{t('editor.report')}</label>
-            <TextArea
-              value={prompt.report || ''}
-              onChange={v => updateField('report', v)}
-              placeholder={t('editor.reportPlaceholder')}
-              rows={8}
-              showControls={false}
-              persistedHeight={reportHeight}
-              onHeightChange={setReportHeight}
-            />
-          </div>
-
-          {/* Separator */}
-          <div style={styles.separator} />
-
-          {/* Projects */}
-          <MultiSelect
-            label={t('editor.projects')}
-            selected={prompt.projects}
-            options={workspaceFolders.map(f => ({ id: f, name: f }))}
-            onChange={v => updateField('projects', v)}
-            placeholder={t('editor.projectsPlaceholder')}
-          />
-
-          {/* Task & Branch */}
-          <div style={styles.twoCol}>
-            <TextField
-              label={t('editor.taskNumber')}
-              value={prompt.taskNumber}
-              onChange={v => updateField('taskNumber', v)}
-              placeholder={t('editor.taskPlaceholder')}
-            />
-            <div>
-              <TextField
-                label={t('editor.gitBranch')}
-                value={prompt.branch}
-                onChange={v => updateField('branch', v)}
-                placeholder={t('editor.gitBranchPlaceholder')}
-              />
-              <div style={{ display: 'flex', gap: '6px' }}>
-                <button style={styles.linkBtn} onClick={handleShowBranches}>
-                  {t('editor.showBranches')}
-                </button>
-                {shouldShowSwitchBranchBtn && (
-                  <button style={styles.linkBtn} onClick={() => {
-                    const branchName = targetBranch;
-                    vscode.postMessage({ type: 'createBranch', branch: branchName, projects: prompt.projects });
-                  }}>
-                    {t('editor.createBranch')}
-                  </button>
+                  <div style={styles.promptFieldActions}>
+                    <button
+                      style={{
+                        ...styles.linkBtn,
+                        fontWeight: showPreview ? 600 : 400,
+                      }}
+                      onClick={() => setShowPreview(!showPreview)}
+                    >
+                      {showPreview ? `✏️ ${t('editor.edit')}` : `👁 ${t('editor.preview')}`}
+                    </button>
+                    <button
+                      style={styles.linkBtn}
+                      onClick={() => {
+                        vscode.postMessage({
+                          type: 'openPromptContentInEditor',
+                          content: prompt.content,
+                          promptId: prompt.id,
+                          title: prompt.title,
+                        });
+                      }}
+                    >
+                      {`📝 ${t('editor.open')}`}
+                    </button>
+                    <label style={styles.autoCompleteLabelInline}>
+                      <input
+                        type="checkbox"
+                        checked={autoCompleteEnabled}
+                        onChange={e => setAutoCompleteEnabled(e.target.checked)}
+                        style={{ margin: 0 }}
+                      />
+                      Автодополнение
+                    </label>
+                    <button
+                      style={styles.linkBtn}
+                      onClick={() => setRequestSuggestionSignal(prev => prev + 1)}
+                      title={t('textArea.suggestTooltip')}
+                    >
+                      {t('textArea.suggest')}
+                    </button>
+                  </div>
+                </div>
+                {showPreview ? (
+                  <div
+                    style={styles.previewPane}
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(prompt.content) }}
+                  />
+                ) : (
+                  <TextArea
+                    value={prompt.content}
+                    onChange={v => { updateField('content', v); setInlineSuggestion(''); setInlineSuggestions([]); }}
+                    placeholder={t('editor.promptPlaceholder')}
+                    rows={12}
+                    required
+                    autoCompleteEnabled={autoCompleteEnabled}
+                    onAutoCompleteChange={setAutoCompleteEnabled}
+                    showControls={false}
+                    persistedHeight={promptContentHeight}
+                    onHeightChange={setPromptContentHeight}
+                    requestSuggestionSignal={requestSuggestionSignal}
+                    onSuggestionLoadingChange={setIsSuggestionLoading}
+                    onRequestSuggestion={(textBefore) => {
+                      vscode.postMessage({
+                        type: 'requestSuggestion',
+                        textBefore,
+                        globalContext,
+                      });
+                    }}
+                    suggestion={inlineSuggestion}
+                    suggestions={inlineSuggestions}
+                  />
                 )}
               </div>
-            </div>
-          </div>
 
-          {/* Branch picker */}
-          {showBranches && branches.length > 0 && (
-            <div style={styles.branchList}>
-              <label style={styles.label}>{t('editor.branchesLabel')}</label>
-              {branches.map((b, i) => (
-                <button
-                  key={`${b.project}-${b.name}-${i}`}
+              <div style={styles.field}>
+                <label style={styles.label}>{t('editor.globalContext')}</label>
+                <textarea
+                  ref={globalContextTextareaRef}
+                  value={globalContext}
+                  onChange={e => {
+                    setGlobalContext(e.target.value);
+                    vscode.postMessage({ type: 'saveGlobalContext', context: e.target.value });
+                  }}
+                  placeholder={t('editor.globalContextPlaceholder')}
+                  rows={3}
                   style={{
-                    ...styles.branchItem,
-                    ...(b.current ? styles.branchItemCurrent : {}),
-                    ...(b.name === prompt.branch ? styles.branchItemSelected : {}),
+                    ...styles.globalContextTextarea,
+                    height: globalContextHeight ? `${globalContextHeight}px` : undefined,
                   }}
-                  onClick={() => handleSwitchBranch(b.name)}
-                >
-                  <span>{b.current ? '● ' : '○ '}{b.name}</span>
-                  <span style={styles.branchProject}>{b.project}</span>
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Separator */}
-          <div style={styles.separator} />
-
-          {/* Languages */}
-          <MultiSelect
-            label={t('editor.languages')}
-            selected={prompt.languages}
-            options={availableLanguages}
-            onChange={v => updateField('languages', v)}
-            allowCustom
-            placeholder={t('editor.langPlaceholder')}
-          />
-
-          {/* Frameworks */}
-          <MultiSelect
-            label={t('editor.frameworks')}
-            selected={prompt.frameworks}
-            options={availableFrameworks}
-            onChange={v => updateField('frameworks', v)}
-            allowCustom
-            placeholder={t('editor.frameworksPlaceholder')}
-          />
-
-          {/* Separator */}
-          <div style={styles.separator} />
-
-          {/* Skills */}
-          <MultiSelect
-            label={t('editor.skills')}
-            selected={prompt.skills}
-            options={availableSkills}
-            onChange={v => updateField('skills', v)}
-            placeholder={t('editor.skillsPlaceholder')}
-          />
-
-          {/* MCP Tools */}
-          <MultiSelect
-            label={t('editor.mcpTools')}
-            selected={prompt.mcpTools}
-            options={availableMcpTools}
-            onChange={v => updateField('mcpTools', v)}
-            placeholder={t('editor.mcpPlaceholder')}
-          />
-
-          {/* Hooks */}
-          <MultiSelect
-            label={t('editor.hooks')}
-            selected={prompt.hooks}
-            options={availableHooks}
-            onChange={v => updateField('hooks', v)}
-            placeholder={t('editor.hooksPlaceholder')}
-          />
-
-          {/* Separator */}
-          <div style={styles.separator} />
-
-          {/* Model */}
-          <div style={styles.field}>
-            <label style={styles.label}>{t('editor.aiModel')}</label>
-            <select
-              value={prompt.model}
-              onChange={e => updateField('model', e.target.value)}
-              style={styles.select}
-            >
-              <option value="">{t('common.auto')}</option>
-              {availableModels.map(m => (
-                <option key={m.id} value={m.id}>{m.name}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Context files */}
-          <div style={styles.field}>
-            <label style={styles.label}>{t('editor.contextFiles')}</label>
-            <div style={styles.fileList}>
-              {prompt.contextFiles.map((f, i) => (
-                <div key={i} style={styles.fileItem}>
-                  <span
-                    style={styles.fileLink}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      vscode.postMessage({ type: 'openFile', file: f });
-                    }}
-                    title={`${t('editor.openInEditor')} ${f}`}
-                  >📄 {f}</span>
-                  <button
-                    style={styles.removeBtn}
-                    onClick={() => {
-                      const updated = prompt.contextFiles.filter((_, idx) => idx !== i);
-                      updateField('contextFiles', updated);
-                    }}
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
-              <div style={styles.fileActions}>
-                <button
-                  style={styles.addFileBtn}
-                  onClick={() => {
-                    vscode.postMessage({ type: 'pickFile' });
-                  }}
-                >
-                  {t('editor.addFile')}
-                </button>
-                <button
-                  style={styles.addFileBtn}
-                  onClick={async () => {
-                    try {
-                      const text = await navigator.clipboard.readText();
-                      if (text) {
-                        const files = text.split('\n')
-                          .map(f => f.trim())
-                          .filter(f => {
-                            if (!f || f.length === 0) return false;
-                            // Only accept file-like paths (must contain / or \ or have a file extension)
-                            if (f.includes('/') || f.includes('\\')) return true;
-                            if (/\.[a-zA-Z0-9]{1,10}$/.test(f)) return true;
-                            return false;
-                          });
-                        if (files.length > 0) {
-                          vscode.postMessage({ type: 'pasteFiles', files });
-                        }
-                      }
-                    } catch {
-                      // Clipboard not available or permission denied
-                    }
-                  }}
-                  title={t('editor.clipboardTooltip')}
-                >
-                  {t('editor.fromClipboard')}
-                </button>
+                />
+                <span style={styles.varHint}>{t('editor.globalContextHint')}</span>
               </div>
-            </div>
-          </div>
 
-          {/* Separator */}
-          <div style={styles.separator} />
+              {detectedVars.length > 0 && (
+                <div style={styles.field}>
+                  <label style={styles.label}>{t('editor.templateVars')}</label>
+                  <div style={styles.varsGrid}>
+                    {detectedVars.map(v => (
+                      <div key={v} style={styles.varRow}>
+                        <span style={styles.varName}>{`{{${v}}}`}</span>
+                        <input
+                          style={styles.varInput}
+                          value={templateVars[v] || ''}
+                          onChange={e => setTemplateVars(prev => ({ ...prev, [v]: e.target.value }))}
+                          placeholder={`${t('editor.valueFor')} ${v}`}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <span style={styles.varHint}>{t('editor.templateHint')}</span>
+                </div>
+              )}
 
-          {/* Time tracking */}
-          <TimerDisplay
-            timeWriting={prompt.timeSpentWriting}
-            timeImplementing={prompt.timeSpentImplementing}
-            timeUntracked={prompt.timeSpentUntracked || 0}
-            onUntrackedChange={(ms) => updateField('timeSpentUntracked', ms)}
-          />
+              <div style={styles.field}>
+                <label style={styles.label}>{t('editor.report')}</label>
+                <TextArea
+                  value={prompt.report || ''}
+                  onChange={v => updateField('report', v)}
+                  placeholder={t('editor.reportPlaceholder')}
+                  rows={8}
+                  showControls={false}
+                  persistedHeight={reportHeight}
+                  onHeightChange={setReportHeight}
+                />
+              </div>
+            </>
+          ))}
+
+          {renderSection('workspace', 'Рабочее окружение', workspaceSummary, (
+            <>
+              <MultiSelect
+                label={t('editor.projects')}
+                selected={prompt.projects}
+                options={workspaceFolders.map(f => ({ id: f, name: f }))}
+                onChange={v => updateField('projects', v)}
+                placeholder={t('editor.projectsPlaceholder')}
+              />
+
+              <div style={styles.twoCol}>
+                <TextField
+                  label={t('editor.taskNumber')}
+                  value={prompt.taskNumber}
+                  onChange={v => updateField('taskNumber', v)}
+                  placeholder={t('editor.taskPlaceholder')}
+                />
+                <div>
+                  <TextField
+                    label={t('editor.gitBranch')}
+                    value={prompt.branch}
+                    onChange={v => updateField('branch', v)}
+                    placeholder={t('editor.gitBranchPlaceholder')}
+                  />
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    {prompt.projects.length > 0 && (
+                      <button style={styles.linkBtn} onClick={handleShowBranches}>
+                        {t('editor.showBranches')}
+                      </button>
+                    )}
+                    {shouldShowSwitchBranchBtn && (
+                      <button style={styles.linkBtn} onClick={() => {
+                        const branchName = targetBranch;
+                        vscode.postMessage({ type: 'createBranch', branch: branchName, projects: prompt.projects });
+                      }}>
+                        {t('editor.createBranch')}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {showBranches && branches.length > 0 && (
+                <div style={styles.branchList}>
+                  <label style={styles.label}>{t('editor.branchesLabel')}</label>
+                  {branches.map((b, i) => (
+                    <button
+                      key={`${b.project}-${b.name}-${i}`}
+                      style={{
+                        ...styles.branchItem,
+                        ...(b.current ? styles.branchItemCurrent : {}),
+                        ...(b.name === prompt.branch ? styles.branchItemSelected : {}),
+                      }}
+                      onClick={() => handleSwitchBranch(b.name)}
+                    >
+                      <span>{b.current ? '● ' : '○ '}{b.name}</span>
+                      <span style={styles.branchProject}>{b.project}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          ))}
+
+          {renderSection('tech', 'Технологии', techSummary, (
+            <>
+              <MultiSelect
+                label={t('editor.languages')}
+                selected={prompt.languages}
+                options={availableLanguages}
+                onChange={v => updateField('languages', v)}
+                allowCustom
+                placeholder={t('editor.langPlaceholder')}
+              />
+
+              <MultiSelect
+                label={t('editor.frameworks')}
+                selected={prompt.frameworks}
+                options={availableFrameworks}
+                onChange={v => updateField('frameworks', v)}
+                allowCustom
+                placeholder={t('editor.frameworksPlaceholder')}
+              />
+            </>
+          ))}
+
+          {renderSection('integrations', 'Интеграции', integrationsSummary, (
+            <>
+              <MultiSelect
+                label={t('editor.skills')}
+                selected={prompt.skills}
+                options={availableSkills}
+                onChange={v => updateField('skills', v)}
+                placeholder={t('editor.skillsPlaceholder')}
+              />
+
+              <MultiSelect
+                label={t('editor.mcpTools')}
+                selected={prompt.mcpTools}
+                options={availableMcpTools}
+                onChange={v => updateField('mcpTools', v)}
+                placeholder={t('editor.mcpPlaceholder')}
+              />
+
+              <MultiSelect
+                label={t('editor.hooks')}
+                selected={prompt.hooks}
+                options={availableHooks}
+                onChange={v => updateField('hooks', v)}
+                placeholder={t('editor.hooksPlaceholder')}
+              />
+
+              <div style={styles.field}>
+                <label style={styles.label}>{t('editor.aiModel')}</label>
+                <select
+                  value={prompt.model}
+                  onChange={e => updateField('model', e.target.value)}
+                  style={styles.select}
+                >
+                  <option value="">{t('common.auto')}</option>
+                  {sortedAvailableModels.map(m => (
+                    <option key={m.id} value={m.id}>{`${m.name} (${m.id})`}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div style={styles.field}>
+                <label style={styles.label}>{t('editor.contextFiles')}</label>
+                <div style={styles.fileList}>
+                  {prompt.contextFiles.map((f, i) => (
+                    <div key={i} style={styles.fileItem}>
+                      <span
+                        style={styles.fileLink}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          vscode.postMessage({ type: 'openFile', file: f });
+                        }}
+                        title={`${t('editor.openInEditor')} ${f}`}
+                      >📄 {f}</span>
+                      <button
+                        style={styles.removeBtn}
+                        onClick={() => {
+                          const updated = prompt.contextFiles.filter((_, idx) => idx !== i);
+                          updateField('contextFiles', updated);
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <div style={styles.fileActions}>
+                    <button
+                      style={styles.addFileBtn}
+                      onClick={() => {
+                        vscode.postMessage({ type: 'pickFile' });
+                      }}
+                    >
+                      {t('editor.addFile')}
+                    </button>
+                    <button
+                      style={styles.addFileBtn}
+                      onClick={async () => {
+                        try {
+                          const text = await navigator.clipboard.readText();
+                          if (text) {
+                            const files = text.split('\n')
+                              .map(f => f.trim())
+                              .filter(f => {
+                                if (!f || f.length === 0) return false;
+                                if (f.includes('/') || f.includes('\\')) return true;
+                                if (/\.[a-zA-Z0-9]{1,10}$/.test(f)) return true;
+                                return false;
+                              });
+                            if (files.length > 0) {
+                              vscode.postMessage({ type: 'pasteFiles', files });
+                            }
+                          }
+                        } catch {
+                          // Clipboard not available or permission denied
+                        }
+                      }}
+                      title={t('editor.clipboardTooltip')}
+                    >
+                      {t('editor.fromClipboard')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </>
+          ))}
+
+          {renderSection('time', 'Учёт времени', timeSummary, (
+            <TimerDisplay
+              timeWriting={prompt.timeSpentWriting}
+              timeImplementing={prompt.timeSpentImplementing}
+              timeUntracked={prompt.timeSpentUntracked || 0}
+              onUntrackedChange={(ms) => updateField('timeSpentUntracked', ms)}
+            />
+          ))}
         </div>
       </div>
 
       {/* Action bar */}
       <ActionBar
-        onSave={handleSave}
+        onSave={() => handleSave('manual')}
         onStartChat={handleStartChat}
         onOpenChat={handleOpenChat}
         onMarkCompleted={() => handleSetStatus('completed')}
@@ -870,6 +1101,78 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     gap: '12px',
     maxWidth: '800px',
+  },
+  sectionCard: {
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '6px',
+    background: 'var(--vscode-editor-background)',
+    overflow: 'hidden',
+  },
+  sectionHeaderBtn: {
+    width: '100%',
+    display: 'flex',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: '10px',
+    border: 'none',
+    background: 'var(--vscode-sideBar-background)',
+    color: 'var(--vscode-foreground)',
+    cursor: 'pointer',
+    padding: '10px 12px',
+    fontFamily: 'var(--vscode-font-family)',
+    fontSize: '12px',
+  },
+  sectionHeaderLeft: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    minWidth: 0,
+  },
+  sectionArrow: {
+    color: 'var(--vscode-descriptionForeground)',
+    width: '10px',
+    flexShrink: 0,
+  },
+  sectionTitle: {
+    fontSize: '13px',
+    fontWeight: 600,
+    whiteSpace: 'nowrap',
+  },
+  sectionSummaryWrap: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    flexWrap: 'wrap',
+    gap: '6px',
+    maxWidth: '68%',
+  },
+  sectionSummaryChip: {
+    maxWidth: '220px',
+    fontSize: '11px',
+    color: 'var(--vscode-foreground)',
+    background: 'var(--vscode-badge-background)',
+    borderRadius: '4px',
+    padding: '2px 8px',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  sectionSummaryMore: {
+    fontSize: '11px',
+    fontWeight: 700,
+    color: 'var(--vscode-descriptionForeground)',
+    whiteSpace: 'nowrap',
+  },
+  sectionSummaryEmpty: {
+    fontSize: '11px',
+    color: 'var(--vscode-descriptionForeground)',
+    whiteSpace: 'nowrap',
+  },
+  sectionBody: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+    padding: '12px',
   },
   fieldRow: {
     display: 'flex',

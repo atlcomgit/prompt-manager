@@ -59,6 +59,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		this._view?.webview.postMessage(msg);
 	}
 
+	/** Trigger create flow in sidebar UI (same as "+ Новый") */
+	triggerCreatePromptUi(): boolean {
+		if (!this._view) {
+			return false;
+		}
+		this.postMessage({ type: 'triggerCreatePrompt' });
+		return true;
+	}
+
 	/** Refresh the prompt list */
 	async refreshList(): Promise<void> {
 		const prompts = await this.storageService.listPrompts();

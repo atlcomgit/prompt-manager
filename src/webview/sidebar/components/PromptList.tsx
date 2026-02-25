@@ -6,6 +6,7 @@ import { useT } from '../../shared/i18n';
 interface Props {
   groups: Record<string, PromptConfig[]>;
   selectedId: string | null;
+  savingPromptIds?: string[];
   isLoading?: boolean;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
@@ -15,7 +16,7 @@ interface Props {
 }
 
 export const PromptList: React.FC<Props> = ({
-  groups, selectedId, isLoading, onOpen, onDelete, onDuplicate, onToggleFavorite, onExport,
+  groups, selectedId, savingPromptIds = [], isLoading, onOpen, onDelete, onDuplicate, onToggleFavorite, onExport,
 }) => {
   const t = useT();
   const groupNames = Object.keys(groups);
@@ -51,6 +52,7 @@ export const PromptList: React.FC<Props> = ({
             key={p.id}
             prompt={p}
             isSelected={p.id === selectedId}
+            isSaving={savingPromptIds.includes(p.id)}
             onOpen={onOpen}
             onDelete={onDelete}
             onDuplicate={onDuplicate}
@@ -79,6 +81,7 @@ export const PromptList: React.FC<Props> = ({
               key={p.id}
               prompt={p}
               isSelected={p.id === selectedId}
+              isSaving={savingPromptIds.includes(p.id)}
               onOpen={onOpen}
               onDelete={onDelete}
               onDuplicate={onDuplicate}

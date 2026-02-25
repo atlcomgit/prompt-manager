@@ -79,6 +79,10 @@ export function activate(context: vscode.ExtensionContext) {
 		await trackerPanelManager.refresh();
 	});
 
+	editorPanelManager.onDidSaveStateChange(({ id, saving }) => {
+		sidebarProvider.postMessage({ type: 'promptSaving', id, saving });
+	});
+
 	trackerPanelManager.onDidOpenPrompt(async (id) => {
 		await editorPanelManager.openPrompt(id);
 	});
@@ -86,7 +90,10 @@ export function activate(context: vscode.ExtensionContext) {
 	// Register commands
 	context.subscriptions.push(
 		vscode.commands.registerCommand('promptManager.createPrompt', () => {
-			editorPanelManager.openPrompt('__new__');
+			const triggeredInSidebar = sidebarProvider.triggerCreatePromptUi();
+			if (!triggeredInSidebar) {
+				editorPanelManager.openPrompt('__new__');
+			}
 		}),
 
 		vscode.commands.registerCommand('promptManager.openPrompt', async () => {

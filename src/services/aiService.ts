@@ -26,22 +26,32 @@ export class AiService {
 		family: 'gpt-4o',
 	};
 
+	private buildGlobalContextBlock(globalContext?: string): string {
+		const normalized = (globalContext || '').trim();
+		if (!normalized) {
+			return '';
+		}
+		return `Global agent context:\n${normalized.slice(0, 1500)}\n\n`;
+	}
+
 	/** Generate a short title from prompt content */
-	async generateTitle(content: string): Promise<string> {
+	async generateTitle(content: string, globalContext?: string): Promise<string> {
 		const systemPrompt = 'You are a helpful assistant that generates short, descriptive titles for prompts. Respond with ONLY the title, nothing else. The title should be 3-7 words, in the same language as the content.';
-		const userPrompt = `Generate a short title for this prompt:\n\n${content.substring(0, 2000)}`;
+		const contextBlock = this.buildGlobalContextBlock(globalContext);
+		const userPrompt = `${contextBlock}Generate a short title for this prompt:\n\n${content.substring(0, 2000)}`;
 		return this.chat(systemPrompt, userPrompt, 'Untitled Prompt');
 	}
 
 	/** Generate a short description from prompt content */
-	async generateDescription(content: string): Promise<string> {
+	async generateDescription(content: string, globalContext?: string): Promise<string> {
 		const systemPrompt = 'You are a helpful assistant that generates short descriptions for prompts. Respond with ONLY the description, nothing else. The description should be 1-2 sentences, in the same language as the content.';
-		const userPrompt = `Generate a short description for this prompt:\n\n${content.substring(0, 2000)}`;
+		const contextBlock = this.buildGlobalContextBlock(globalContext);
+		const userPrompt = `${contextBlock}Generate a short description for this prompt:\n\n${content.substring(0, 2000)}`;
 		return this.chat(systemPrompt, userPrompt, '');
 	}
 
 	/** Generate a URL-friendly slug from title or description */
-	async generateSlug(title: string, description: string): Promise<string> {
+	async generateSlug(title: string, description: string, globalContext?: string): Promise<string> {
 		const input = title || description;
 		if (!input) {
 			return `prompt-${Date.now()}`;
@@ -49,7 +59,8 @@ export class AiService {
 
 		// Try to generate via AI first
 		const systemPrompt = 'You are a helper that converts text to a short URL-friendly slug (lowercase, hyphens, no special chars, max 40 chars). Respond with ONLY the slug, nothing else.';
-		const userPrompt = `Convert to slug: "${input}"`;
+		const contextBlock = this.buildGlobalContextBlock(globalContext);
+		const userPrompt = `${contextBlock}Convert to slug: "${input}"`;
 
 		const result = await this.chat(systemPrompt, userPrompt, '');
 		if (result) {
@@ -142,11 +153,30 @@ export class AiService {
 			const models = await vscode.lm.selectChatModels({});
 			return models.map(m => ({
 				id: m.id,
-				name: `${m.vendor}/${m.family} (${m.id})`,
-			}));
+				name: this.toReadableModelName(m.vendor, m.family, m.id),
+			})).sort((a, b) => `${a.name} ${a.id}`.localeCompare(`${b.name} ${b.id}`, 'ru', { sensitivity: 'base' }));
 		} catch {
 			return [];
 		}
+	}
+
+	private toReadableModelName(vendor: string, family: string, modelId: string): string {
+		const prettifyToken = (token: string): string => token
+			.split(/[-_\s]+/)
+			.filter(Boolean)
+			.map((part) => {
+				if (/^\d/.test(part) || part.length <= 2) {
+					return part.toUpperCase();
+				}
+				return part.charAt(0).toUpperCase() + part.slice(1);
+			})
+			.join('-')
+			.replace(/\bGpt\b/g, 'GPT')
+			.replace(/\bO\b/g, 'o');
+
+		const vendorName = prettifyToken(vendor || 'AI');
+		const familyName = prettifyToken(family || modelId || 'Model');
+		return `${vendorName} · ${familyName}`;
 	}
 
 	/** Generate inline suggestion / continuation for prompt text */

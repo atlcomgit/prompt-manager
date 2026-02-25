@@ -10,6 +10,7 @@ import { SearchBar } from './components/SearchBar';
 import { FilterBar } from './components/FilterBar';
 import { PromptList } from './components/PromptList';
 import { Toolbar } from './components/Toolbar';
+import { createDefaultPrompt } from '../../types/prompt';
 import type { PromptConfig, SidebarState, FilterState, SortField, SortOrder, GroupBy, PromptStatus } from '../../types/prompt';
 
 const vscode = getVsCodeApi();
@@ -27,6 +28,18 @@ export const SidebarApp: React.FC = () => {
   const [groupBy, setGroupBy] = useState<GroupBy>('none');
   const [showFilters, setShowFilters] = useState(false);
   const [hasHydratedState, setHasHydratedState] = useState(false);
+  const [showOptimisticNewPrompt, setShowOptimisticNewPrompt] = useState(false);
+  const [optimisticBaselineIds, setOptimisticBaselineIds] = useState<string[] | null>(null);
+  const [savingPromptIds, setSavingPromptIds] = useState<string[]>([]);
+
+  const optimisticPrompt = useMemo<PromptConfig>(() => {
+    const draft = createDefaultPrompt('__new__');
+    return {
+      ...draft,
+      title: 'Новый промпт…',
+      description: 'Черновик (ещё не сохранён)',
+    };
+  }, []);
 
   // Request initial data
   useEffect(() => {
@@ -38,6 +51,15 @@ export const SidebarApp: React.FC = () => {
     switch (msg.type) {
       case 'prompts':
         setPrompts(msg.prompts);
+        if (showOptimisticNewPrompt && optimisticBaselineIds) {
+          const baselineSet = new Set(optimisticBaselineIds);
+          const newPrompt = (msg.prompts as PromptConfig[]).find(p => !baselineSet.has(p.id));
+          if (newPrompt) {
+            setShowOptimisticNewPrompt(false);
+            setOptimisticBaselineIds(null);
+            setSelectedId(prev => (prev === '__new__' ? newPrompt.id : prev));
+          }
+        }
         setIsLoading(false);
         break;
       case 'sidebarState': {
@@ -57,8 +79,24 @@ export const SidebarApp: React.FC = () => {
       case 'promptDeleted':
         if (selectedId === msg.id) { setSelectedId(null); }
         break;
+      case 'triggerCreatePrompt':
+        handleCreate();
+        break;
+      case 'promptSaving': {
+        const id = String(msg.id || '').trim();
+        if (!id) {
+          break;
+        }
+        setSavingPromptIds(prev => {
+          if (msg.saving) {
+            return prev.includes(id) ? prev : [...prev, id];
+          }
+          return prev.filter(existingId => existingId !== id);
+        });
+        break;
+      }
     }
-  }, [selectedId]);
+  }, [selectedId, showOptimisticNewPrompt, optimisticBaselineIds, prompts]);
 
   useMessageListener(handleMessage);
 
@@ -78,7 +116,6 @@ export const SidebarApp: React.FC = () => {
     vscode.postMessage({ type: 'saveSidebarState', state });
   }, [hasHydratedState, selectedId, search, statusFilter, favoritesOnly, sortField, sortOrder, groupBy]);
 
-  // Filter & sort prompts
   const filteredPrompts = useMemo(() => {
     let result = [...prompts];
 
@@ -129,8 +166,12 @@ export const SidebarApp: React.FC = () => {
       return sortOrder === 'asc' ? cmp : -cmp;
     });
 
+    if (showOptimisticNewPrompt && !result.some(p => p.id === '__new__')) {
+      result = [optimisticPrompt, ...result];
+    }
+
     return result;
-  }, [prompts, search, statusFilter, favoritesOnly, sortField, sortOrder]);
+  }, [prompts, search, statusFilter, favoritesOnly, sortField, sortOrder, showOptimisticNewPrompt, optimisticPrompt]);
 
   // Group prompts
   const groupedPrompts = useMemo(() => {
@@ -176,6 +217,9 @@ export const SidebarApp: React.FC = () => {
   };
 
   const handleCreate = () => {
+    setOptimisticBaselineIds(prompts.map(p => p.id));
+    setShowOptimisticNewPrompt(true);
+    setSelectedId('__new__');
     vscode.postMessage({ type: 'createPrompt' });
   };
 
@@ -226,6 +270,7 @@ export const SidebarApp: React.FC = () => {
         <PromptList
           groups={groupedPrompts}
           selectedId={selectedId}
+          savingPromptIds={savingPromptIds}
           isLoading={isLoading}
           onOpen={handleOpenPrompt}
           onDelete={handleDelete}
@@ -235,7 +280,7 @@ export const SidebarApp: React.FC = () => {
         />
       </div>
       <div style={styles.footer}>
-        <span style={styles.count}>{filteredPrompts.length} / {prompts.length} {t('sidebar.promptCount')}</span>
+        <span style={styles.count}>{filteredPrompts.length} / {prompts.length + (showOptimisticNewPrompt ? 1 : 0)} {t('sidebar.promptCount')}</span>
       </div>
     </div>
   );

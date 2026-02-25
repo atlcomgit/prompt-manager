@@ -38,6 +38,11 @@ export class StorageService {
 		return path.join(this.storageDir, id);
 	}
 
+	/** Get absolute URI to prompt.md for prompt id */
+	getPromptMarkdownUri(id: string): vscode.Uri {
+		return vscode.Uri.file(path.join(this.promptDir(id), 'prompt.md'));
+	}
+
 	/** List all prompt configs (lightweight — no content) */
 	async listPrompts(): Promise<PromptConfig[]> {
 		await this.ensureStorageDir();

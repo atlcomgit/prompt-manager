@@ -343,12 +343,21 @@ export const EditorApp: React.FC = () => {
       case 'promptContentUpdated':
         setPrompt(prev => {
           const nextContent = msg.content || '';
+          const writingDeltaMs = Number.isFinite(msg.writingDeltaMs) ? Math.max(0, Number(msg.writingDeltaMs)) : 0;
           if (prev.content === nextContent) {
-            return prev;
+            if (writingDeltaMs <= 0) {
+              return prev;
+            }
+            return { ...prev, timeSpentWriting: (prev.timeSpentWriting || 0) + writingDeltaMs };
           }
           setIsDirty(true);
-          return { ...prev, content: nextContent };
+          return {
+            ...prev,
+            content: nextContent,
+            timeSpentWriting: (prev.timeSpentWriting || 0) + writingDeltaMs,
+          };
         });
+        openedAtRef.current = Date.now();
         break;
       case 'workspaceFolders':
         setWorkspaceFolders(msg.folders);

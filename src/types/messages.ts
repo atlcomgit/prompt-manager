@@ -79,4 +79,4 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptSaving'; id: string; saving: boolean }
 	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string }
-	| { type: 'promptContentUpdated'; content: string };
+	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number };

@@ -37,6 +37,7 @@ export class EditorPanelManager {
 	private readonly hooksOutput = vscode.window.createOutputChannel('Prompt Manager Hooks');
 	private contentEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string }>();
 	private panelKeyByContentEditorUri = new Map<string, string>();
+	private contentEditorLastActivityByPanelKey = new Map<string, number>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
 	private openPromptQueue: Promise<void> = Promise.resolve();
 
@@ -429,10 +430,40 @@ export class EditorPanelManager {
 		private readonly stateService: StateService,
 	) {
 		this.contentSyncDisposables.push(
+			vscode.workspace.onDidChangeTextDocument((event) => {
+				void this.syncPromptContentFromEditorDocument(event.document);
+			}),
 			vscode.workspace.onDidSaveTextDocument((document) => {
 				void this.syncPromptContentFromEditorDocument(document);
 			})
 		);
+	}
+
+	private ensureContentEditorBinding(panelKey: string, prompt: Prompt): void {
+		if (!prompt.id) {
+			return;
+		}
+
+		const fileUri = this.storageService.getPromptMarkdownUri(prompt.id);
+		const fileUriKey = fileUri.toString();
+		const openDocument = vscode.workspace.textDocuments.find(d => d.uri.toString() === fileUriKey);
+		const actualContent = openDocument ? openDocument.getText() : prompt.content;
+
+		const existingBinding = this.contentEditorByPanelKey.get(panelKey);
+		if (existingBinding && existingBinding.uri.toString() !== fileUriKey) {
+			this.panelKeyByContentEditorUri.delete(existingBinding.uri.toString());
+		}
+
+		this.contentEditorByPanelKey.set(panelKey, {
+			uri: fileUri,
+			lastSyncedContent: actualContent,
+		});
+		this.panelKeyByContentEditorUri.set(fileUriKey, panelKey);
+		this.contentEditorLastActivityByPanelKey.set(panelKey, Date.now());
+
+		if (prompt.content !== actualContent) {
+			prompt.content = actualContent;
+		}
 	}
 
 	private rebindContentEditorPanelKey(oldKey: string, newKey: string): void {
@@ -452,6 +483,7 @@ export class EditorPanelManager {
 		}
 		this.panelKeyByContentEditorUri.delete(binding.uri.toString());
 		this.contentEditorByPanelKey.delete(panelKey);
+		this.contentEditorLastActivityByPanelKey.delete(panelKey);
 	}
 
 	private makePromptIdBase(title: string, description: string): string {
@@ -516,8 +548,14 @@ export class EditorPanelManager {
 			return;
 		}
 
+		const now = Date.now();
+		const lastActivity = this.contentEditorLastActivityByPanelKey.get(panelKey) || now;
+		const rawDelta = now - lastActivity;
+		const writingDeltaMs = rawDelta > 0 && rawDelta <= 5000 ? rawDelta : 0;
+		this.contentEditorLastActivityByPanelKey.set(panelKey, now);
+
 		binding.lastSyncedContent = content;
-		void panel.webview.postMessage({ type: 'promptContentUpdated', content } satisfies ExtensionToWebviewMessage);
+		void panel.webview.postMessage({ type: 'promptContentUpdated', content, writingDeltaMs } satisfies ExtensionToWebviewMessage);
 	}
 
 	private async openPromptContentInEditor(panelKey: string, currentPrompt: Prompt, content: string): Promise<void> {
@@ -534,6 +572,7 @@ export class EditorPanelManager {
 		const fileUri = this.storageService.getPromptMarkdownUri(currentPrompt.id);
 		const existingBinding = this.contentEditorByPanelKey.get(panelKey);
 		if (existingBinding) {
+			this.contentEditorLastActivityByPanelKey.set(panelKey, Date.now());
 			const existingUri = existingBinding.uri.toString() === fileUri.toString()
 				? existingBinding.uri
 				: fileUri;
@@ -557,6 +596,7 @@ export class EditorPanelManager {
 
 		this.contentEditorByPanelKey.set(panelKey, { uri: fileUri, lastSyncedContent: content });
 		this.panelKeyByContentEditorUri.set(fileUri.toString(), panelKey);
+		this.contentEditorLastActivityByPanelKey.set(panelKey, Date.now());
 
 		const doc = await vscode.workspace.openTextDocument(fileUri);
 		await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false });
@@ -656,6 +696,8 @@ export class EditorPanelManager {
 		const isRu = vscode.env.language.startsWith('ru');
 
 		if (singletonPanel) {
+			this.ensureContentEditorBinding(panelKey, prompt);
+
 			const currentPromptRef = this.panelPromptRefs.get(panelKey);
 			if (currentPromptRef) {
 				Object.assign(currentPromptRef, prompt);
@@ -695,6 +737,7 @@ export class EditorPanelManager {
 		);
 
 		openPanels.set(panelKey, panel);
+		this.ensureContentEditorBinding(panelKey, prompt);
 		this.panelPromptRefs.set(panelKey, prompt);
 		let isDirty = restoredUnsaved;
 		let latestPromptState: Prompt | null = restoredUnsaved ? prompt : null;
@@ -1680,6 +1723,7 @@ export class EditorPanelManager {
 		this.silentClosePanels.clear();
 		this.contentEditorByPanelKey.clear();
 		this.panelKeyByContentEditorUri.clear();
+		this.contentEditorLastActivityByPanelKey.clear();
 		this.hooksOutput.dispose();
 	}
 

@@ -21,10 +21,29 @@ export type ChatModelApplyResult = {
 };
 
 export class AiService {
+	private static readonly DEFAULT_IMPROVE_PROMPT_INSTRUCTIONS = [
+		'Пиши на русском языке.',
+		'Пиши ответ с обращением к одному лицу.',
+	];
+
 	private modelSelector: vscode.LanguageModelChatSelector = {
 		vendor: 'copilot',
 		family: 'gpt-4o',
 	};
+
+	private getImprovePromptInstructions(): string[] {
+		const configured = vscode.workspace
+			.getConfiguration('promptManager')
+			.get<string[]>('improvePromptInstructions', AiService.DEFAULT_IMPROVE_PROMPT_INSTRUCTIONS);
+
+		const normalized = (configured || [])
+			.map(item => String(item || '').trim())
+			.filter(Boolean);
+
+		return normalized.length > 0
+			? normalized
+			: [...AiService.DEFAULT_IMPROVE_PROMPT_INSTRUCTIONS];
+	}
 
 	private buildGlobalContextBlock(globalContext?: string): string {
 		const normalized = (globalContext || '').trim();
@@ -69,6 +88,37 @@ export class AiService {
 
 		// Fallback: manual slug generation
 		return this.sanitizeSlug(input);
+	}
+
+	/** Improve prompt text: fix errors, clarify, format, and optimize for AI agents */
+	async improvePromptText(content: string, projectContext?: string): Promise<string> {
+		const normalized = (content || '').trim();
+		if (!normalized) {
+			return '';
+		}
+		const extraInstructions = this.getImprovePromptInstructions();
+		const extraInstructionBlock = extraInstructions.map(line => `- ${line}`).join(' ');
+
+		const systemPrompt = [
+			'You are an expert prompt editor for AI coding agents.',
+			'Your task is to rewrite the given prompt text and return ONLY the improved final text.',
+			'Do not include explanations, headings like "Improved version", analysis notes, or markdown fences unless they are part of the prompt itself.',
+			'Preserve the original intent and requirements.',
+			'Apply these improvements:',
+			'- Fix grammar, spelling, and wording errors.',
+			'- Remove ambiguity and make instructions explicit.',
+			'- Improve readability and structure (short paragraphs, lists where useful).',
+			'- Keep formatting clean and attractive for humans.',
+			'- Optimize wording for reliable interpretation by AI agents.',
+			'Additional required style instructions:',
+			extraInstructionBlock,
+		].join(' ');
+
+		const contextBlock = (projectContext || '').trim()
+			? `Project context snapshot:\n${(projectContext || '').trim().slice(0, 6000)}\n\n`
+			: '';
+		const userPrompt = `${contextBlock}Improve this prompt text:\n\n${normalized.substring(0, 12000)}`;
+		return this.chat(systemPrompt, userPrompt, normalized);
 	}
 
 	/** Detect programming languages from content */

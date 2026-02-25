@@ -252,6 +252,76 @@ export class EditorPanelManager {
 		return false;
 	}
 
+	private async readFilePreview(uri: vscode.Uri, maxChars: number): Promise<string> {
+		try {
+			const raw = await vscode.workspace.fs.readFile(uri);
+			return Buffer.from(raw).toString('utf-8').slice(0, maxChars).trim();
+		} catch {
+			return '';
+		}
+	}
+
+	private async buildProjectsContextSnapshot(projects: string[] = []): Promise<string> {
+		const workspaceFolders = vscode.workspace.workspaceFolders || [];
+		if (workspaceFolders.length === 0) {
+			return '';
+		}
+
+		const selected = new Set((projects || []).map(p => p.trim()).filter(Boolean));
+		const targets = selected.size > 0
+			? workspaceFolders.filter(folder => selected.has(folder.name))
+			: workspaceFolders;
+
+		const effectiveTargets = targets.length > 0 ? targets : workspaceFolders;
+		const chunks: string[] = [];
+
+		for (const folder of effectiveTargets.slice(0, 8)) {
+			let topEntries: string[] = [];
+			try {
+				const entries = await vscode.workspace.fs.readDirectory(folder.uri);
+				topEntries = entries
+					.map(([name]) => name)
+					.filter(Boolean)
+					.sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }))
+					.slice(0, 30);
+			} catch {
+				// ignore read errors for a specific folder
+			}
+
+			const readme = await this.readFilePreview(vscode.Uri.joinPath(folder.uri, 'README.md'), 1400);
+			const packageJsonRaw = await this.readFilePreview(vscode.Uri.joinPath(folder.uri, 'package.json'), 1600);
+			let packageSummary = '';
+			if (packageJsonRaw) {
+				try {
+					const parsed = JSON.parse(packageJsonRaw) as Record<string, unknown>;
+					const scripts = parsed.scripts && typeof parsed.scripts === 'object'
+						? Object.keys(parsed.scripts as Record<string, unknown>).slice(0, 12)
+						: [];
+					const dependencies = parsed.dependencies && typeof parsed.dependencies === 'object'
+						? Object.keys(parsed.dependencies as Record<string, unknown>).slice(0, 12)
+						: [];
+					packageSummary = [
+						typeof parsed.name === 'string' ? `name: ${parsed.name}` : '',
+						typeof parsed.description === 'string' ? `description: ${parsed.description}` : '',
+						scripts.length ? `scripts: ${scripts.join(', ')}` : '',
+						dependencies.length ? `deps: ${dependencies.join(', ')}` : '',
+					].filter(Boolean).join('\n');
+				} catch {
+					packageSummary = packageJsonRaw.slice(0, 400);
+				}
+			}
+
+			chunks.push([
+				`Project: ${folder.name}`,
+				topEntries.length ? `Top-level entries: ${topEntries.join(', ')}` : '',
+				packageSummary ? `package.json summary:\n${packageSummary}` : '',
+				readme ? `README excerpt:\n${readme}` : '',
+			].filter(Boolean).join('\n'));
+		}
+
+		return chunks.join('\n\n---\n\n').slice(0, 6000);
+	}
+
 	private async broadcastAvailableLanguagesAndFrameworks(
 		extraSources: Array<Pick<Prompt, 'languages' | 'frameworks'>> = []
 	): Promise<void> {
@@ -1075,6 +1145,13 @@ export class EditorPanelManager {
 			case 'generateSlug': {
 				const slug = await this.aiService.generateSlug(msg.title, msg.description, this.stateService.getGlobalAgentContext());
 				postMessage({ type: 'generatedSlug', slug });
+				break;
+			}
+
+			case 'improvePromptText': {
+				const projectContext = await this.buildProjectsContextSnapshot(msg.projects || currentPrompt.projects || []);
+				const improvedContent = await this.aiService.improvePromptText(msg.content, projectContext);
+				postMessage({ type: 'improvedPromptText', content: improvedContent });
 				break;
 			}
 

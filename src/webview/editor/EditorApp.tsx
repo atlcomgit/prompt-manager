@@ -23,11 +23,14 @@ interface SelectOption {
   description?: string;
 }
 
-type SectionKey = 'basic' | 'workspace' | 'tech' | 'integrations' | 'time';
+type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' | 'tech' | 'integrations' | 'time';
 
 const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
   basic: true,
   workspace: false,
+  prompt: true,
+  globalPrompt: false,
+  report: false,
   tech: false,
   integrations: false,
   time: false,
@@ -60,7 +63,7 @@ export const EditorApp: React.FC = () => {
         return null;
       }
       const candidate = value as Record<string, unknown>;
-      const keys: SectionKey[] = ['basic', 'workspace', 'tech', 'integrations', 'time'];
+      const keys: SectionKey[] = ['basic', 'workspace', 'prompt', 'globalPrompt', 'report', 'tech', 'integrations', 'time'];
       const allValid = keys.every((key) => typeof candidate[key] === 'boolean');
       if (!allValid) {
         return null;
@@ -68,6 +71,9 @@ export const EditorApp: React.FC = () => {
       return {
         basic: Boolean(candidate.basic),
         workspace: Boolean(candidate.workspace),
+        prompt: Boolean(candidate.prompt),
+        globalPrompt: Boolean(candidate.globalPrompt),
+        report: Boolean(candidate.report),
         tech: Boolean(candidate.tech),
         integrations: Boolean(candidate.integrations),
         time: Boolean(candidate.time),
@@ -118,6 +124,7 @@ export const EditorApp: React.FC = () => {
   const [autoCompleteEnabled, setAutoCompleteEnabled] = useState(false);
   const [requestSuggestionSignal, setRequestSuggestionSignal] = useState(0);
   const [isSuggestionLoading, setIsSuggestionLoading] = useState(false);
+  const [isImprovingPromptText, setIsImprovingPromptText] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
@@ -196,11 +203,26 @@ export const EditorApp: React.FC = () => {
     const chunks: string[] = [];
     if (prompt.title.trim()) chunks.push(`Заголовок: ${toShortText(prompt.title, 48)}`);
     if (prompt.description.trim()) chunks.push(`Описание: ${toShortText(prompt.description, 48)}`);
-    if (prompt.content.trim()) chunks.push(`Текст: ${toShortText(prompt.content.replace(/\s+/g, ' '), 48)}`);
-    if ((prompt.report || '').trim()) chunks.push(`Отчёт: ${toShortText(prompt.report || '', 42)}`);
-    if (globalContext.trim()) chunks.push(`Контекст: ${toShortText(globalContext, 42)}`);
     return chunks;
-  }, [prompt.title, prompt.description, prompt.content, prompt.report, globalContext]);
+  }, [prompt.title, prompt.description]);
+
+  const promptSummary = useMemo(() => {
+    const chunks: string[] = [];
+    if (prompt.content.trim()) chunks.push(`Текст: ${toShortText(prompt.content.replace(/\s+/g, ' '), 48)}`);
+    return chunks;
+  }, [prompt.content]);
+
+  const globalPromptSummary = useMemo(() => {
+    const chunks: string[] = [];
+    if (globalContext.trim()) chunks.push(`Контекст: ${toShortText(globalContext, 64)}`);
+    return chunks;
+  }, [globalContext]);
+
+  const reportSummary = useMemo(() => {
+    const chunks: string[] = [];
+    if ((prompt.report || '').trim()) chunks.push(`Результат: ${toShortText(prompt.report || '', 64)}`);
+    return chunks;
+  }, [prompt.report]);
 
   const workspaceSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -244,6 +266,13 @@ export const EditorApp: React.FC = () => {
     const minutes = Math.round(totalMs / 60000);
     return minutes > 0 ? [`Всего: ${minutes} мин`] : [];
   }, [prompt.timeSpentWriting, prompt.timeSpentImplementing, prompt.timeSpentUntracked]);
+
+  const analyzedProjectsCount = useMemo(() => {
+    if (prompt.projects.length > 0) {
+      return prompt.projects.length;
+    }
+    return workspaceFolders.length;
+  }, [prompt.projects, workspaceFolders]);
 
   /** Simple Markdown → HTML converter */
   const renderMarkdown = (md: string): string => {
@@ -399,6 +428,23 @@ export const EditorApp: React.FC = () => {
         setPrompt(prev => ({ ...prev, id: msg.slug }));
         setIsDirty(true);
         break;
+      case 'improvedPromptText':
+        setPrompt(prev => {
+          const writingDeltaMs = Math.max(0, Date.now() - openedAtRef.current);
+          const updatedPrompt: Prompt = {
+            ...prev,
+            content: msg.content || prev.content,
+            timeSpentWriting: (prev.timeSpentWriting || 0) + writingDeltaMs,
+          };
+          openedAtRef.current = Date.now();
+          activeSaveIdRef.current = (updatedPrompt.id || '__new__').trim() || '__new__';
+          setIsSaving(true);
+          setIsDirty(false);
+          vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
+          return updatedPrompt;
+        });
+        setIsImprovingPromptText(false);
+        break;
       case 'pickedFiles':
         if (msg.files && msg.files.length > 0) {
           setPrompt(prev => ({
@@ -428,6 +474,7 @@ export const EditorApp: React.FC = () => {
         startChatLockRef.current = false;
         setIsStartingChat(false);
         setIsSaving(false);
+        setIsImprovingPromptText(false);
         activeSaveIdRef.current = null;
         break;
       case 'info':
@@ -618,6 +665,15 @@ export const EditorApp: React.FC = () => {
     }
   };
 
+  const handleImprovePromptText = () => {
+    const content = prompt.content.trim();
+    if (!content || isImprovingPromptText) {
+      return;
+    }
+    setIsImprovingPromptText(true);
+    vscode.postMessage({ type: 'improvePromptText', content, projects: prompt.projects });
+  };
+
   const handleShowBranches = () => {
     if (prompt.projects.length > 0) {
       vscode.postMessage({ type: 'getBranches', projects: prompt.projects });
@@ -715,7 +771,75 @@ export const EditorApp: React.FC = () => {
                 value={prompt.status}
                 onChange={v => updateField('status', v as PromptStatus)}
               />
+            </>
+          ))}
 
+          {renderSection('workspace', 'Рабочее окружение', workspaceSummary, (
+            <>
+              <MultiSelect
+                label={t('editor.projects')}
+                selected={prompt.projects}
+                options={workspaceFolders.map(f => ({ id: f, name: f }))}
+                onChange={v => updateField('projects', v)}
+                placeholder={t('editor.projectsPlaceholder')}
+              />
+
+              <div style={styles.twoCol}>
+                <TextField
+                  label={t('editor.taskNumber')}
+                  value={prompt.taskNumber}
+                  onChange={v => updateField('taskNumber', v)}
+                  placeholder={t('editor.taskPlaceholder')}
+                />
+                <div>
+                  <TextField
+                    label={t('editor.gitBranch')}
+                    value={prompt.branch}
+                    onChange={v => updateField('branch', v)}
+                    placeholder={t('editor.gitBranchPlaceholder')}
+                  />
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    {prompt.projects.length > 0 && (
+                      <button style={styles.linkBtn} onClick={handleShowBranches}>
+                        {t('editor.showBranches')}
+                      </button>
+                    )}
+                    {shouldShowSwitchBranchBtn && (
+                      <button style={styles.linkBtn} onClick={() => {
+                        const branchName = targetBranch;
+                        vscode.postMessage({ type: 'createBranch', branch: branchName, projects: prompt.projects });
+                      }}>
+                        {t('editor.createBranch')}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {showBranches && branches.length > 0 && (
+                <div style={styles.branchList}>
+                  <label style={styles.label}>{t('editor.branchesLabel')}</label>
+                  {branches.map((b, i) => (
+                    <button
+                      key={`${b.project}-${b.name}-${i}`}
+                      style={{
+                        ...styles.branchItem,
+                        ...(b.current ? styles.branchItemCurrent : {}),
+                        ...(b.name === prompt.branch ? styles.branchItemSelected : {}),
+                      }}
+                      onClick={() => handleSwitchBranch(b.name)}
+                    >
+                      <span>{b.current ? '● ' : '○ '}{b.name}</span>
+                      <span style={styles.branchProject}>{b.project}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          ))}
+
+          {renderSection('prompt', 'Промпт', promptSummary, (
+            <>
               <div style={styles.field}>
                 <div style={styles.promptFieldHeader}>
                   <div style={styles.promptFieldLabelRow}>
@@ -725,6 +849,20 @@ export const EditorApp: React.FC = () => {
                     </span>
                   </div>
                   <div style={styles.promptFieldActions}>
+                    <button
+                      style={{
+                        ...styles.linkBtn,
+                        ...((!prompt.content.trim() || isImprovingPromptText) ? styles.linkBtnDisabled : {}),
+                      }}
+                      onClick={handleImprovePromptText}
+                      disabled={!prompt.content.trim() || isImprovingPromptText}
+                      title={t('editor.generatePromptTooltip')}
+                    >
+                      {isImprovingPromptText ? t('editor.generating') : t('editor.generatePrompt')}
+                    </button>
+                    <span style={styles.generateProjectsHint} title={t('editor.generateProjectsTooltip')}>
+                      {`${t('editor.generateProjectsPrefix')}: ${analyzedProjectsCount}`}
+                    </span>
                     <button
                       style={{
                         ...styles.linkBtn,
@@ -797,25 +935,6 @@ export const EditorApp: React.FC = () => {
                 )}
               </div>
 
-              <div style={styles.field}>
-                <label style={styles.label}>{t('editor.globalContext')}</label>
-                <textarea
-                  ref={globalContextTextareaRef}
-                  value={globalContext}
-                  onChange={e => {
-                    setGlobalContext(e.target.value);
-                    vscode.postMessage({ type: 'saveGlobalContext', context: e.target.value });
-                  }}
-                  placeholder={t('editor.globalContextPlaceholder')}
-                  rows={3}
-                  style={{
-                    ...styles.globalContextTextarea,
-                    height: globalContextHeight ? `${globalContextHeight}px` : undefined,
-                  }}
-                />
-                <span style={styles.varHint}>{t('editor.globalContextHint')}</span>
-              </div>
-
               {detectedVars.length > 0 && (
                 <div style={styles.field}>
                   <label style={styles.label}>{t('editor.templateVars')}</label>
@@ -836,82 +955,29 @@ export const EditorApp: React.FC = () => {
                 </div>
               )}
 
-              <div style={styles.field}>
-                <label style={styles.label}>{t('editor.report')}</label>
-                <TextArea
-                  value={prompt.report || ''}
-                  onChange={v => updateField('report', v)}
-                  placeholder={t('editor.reportPlaceholder')}
-                  rows={8}
-                  showControls={false}
-                  persistedHeight={reportHeight}
-                  onHeightChange={setReportHeight}
-                />
-              </div>
             </>
           ))}
 
-          {renderSection('workspace', 'Рабочее окружение', workspaceSummary, (
+          {renderSection('globalPrompt', 'Общий промпт', globalPromptSummary, (
             <>
-              <MultiSelect
-                label={t('editor.projects')}
-                selected={prompt.projects}
-                options={workspaceFolders.map(f => ({ id: f, name: f }))}
-                onChange={v => updateField('projects', v)}
-                placeholder={t('editor.projectsPlaceholder')}
-              />
-
-              <div style={styles.twoCol}>
-                <TextField
-                  label={t('editor.taskNumber')}
-                  value={prompt.taskNumber}
-                  onChange={v => updateField('taskNumber', v)}
-                  placeholder={t('editor.taskPlaceholder')}
+              <div style={styles.field}>
+                <label style={styles.label}>{t('editor.globalContext')}</label>
+                <textarea
+                  ref={globalContextTextareaRef}
+                  value={globalContext}
+                  onChange={e => {
+                    setGlobalContext(e.target.value);
+                    vscode.postMessage({ type: 'saveGlobalContext', context: e.target.value });
+                  }}
+                  placeholder={t('editor.globalContextPlaceholder')}
+                  rows={3}
+                  style={{
+                    ...styles.globalContextTextarea,
+                    height: globalContextHeight ? `${globalContextHeight}px` : undefined,
+                  }}
                 />
-                <div>
-                  <TextField
-                    label={t('editor.gitBranch')}
-                    value={prompt.branch}
-                    onChange={v => updateField('branch', v)}
-                    placeholder={t('editor.gitBranchPlaceholder')}
-                  />
-                  <div style={{ display: 'flex', gap: '6px' }}>
-                    {prompt.projects.length > 0 && (
-                      <button style={styles.linkBtn} onClick={handleShowBranches}>
-                        {t('editor.showBranches')}
-                      </button>
-                    )}
-                    {shouldShowSwitchBranchBtn && (
-                      <button style={styles.linkBtn} onClick={() => {
-                        const branchName = targetBranch;
-                        vscode.postMessage({ type: 'createBranch', branch: branchName, projects: prompt.projects });
-                      }}>
-                        {t('editor.createBranch')}
-                      </button>
-                    )}
-                  </div>
-                </div>
+                <span style={styles.varHint}>{t('editor.globalContextHint')}</span>
               </div>
-
-              {showBranches && branches.length > 0 && (
-                <div style={styles.branchList}>
-                  <label style={styles.label}>{t('editor.branchesLabel')}</label>
-                  {branches.map((b, i) => (
-                    <button
-                      key={`${b.project}-${b.name}-${i}`}
-                      style={{
-                        ...styles.branchItem,
-                        ...(b.current ? styles.branchItemCurrent : {}),
-                        ...(b.name === prompt.branch ? styles.branchItemSelected : {}),
-                      }}
-                      onClick={() => handleSwitchBranch(b.name)}
-                    >
-                      <span>{b.current ? '● ' : '○ '}{b.name}</span>
-                      <span style={styles.branchProject}>{b.project}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
             </>
           ))}
 
@@ -1042,6 +1108,23 @@ export const EditorApp: React.FC = () => {
             </>
           ))}
 
+          {renderSection('report', 'Отчет', reportSummary, (
+            <>
+              <div style={styles.field}>
+                <label style={styles.label}>{t('editor.workResult')}</label>
+                <TextArea
+                  value={prompt.report || ''}
+                  onChange={v => updateField('report', v)}
+                  placeholder={t('editor.reportPlaceholder')}
+                  rows={8}
+                  showControls={false}
+                  persistedHeight={reportHeight}
+                  onHeightChange={setReportHeight}
+                />
+              </div>
+            </>
+          ))}
+
           {renderSection('time', 'Учёт времени', timeSummary, (
             <TimerDisplay
               timeWriting={prompt.timeSpentWriting}
@@ -1115,7 +1198,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid var(--vscode-panel-border)',
     borderRadius: '6px',
     background: 'var(--vscode-editor-background)',
-    overflow: 'hidden',
+    overflow: 'visible',
   },
   sectionHeaderBtn: {
     width: '100%',
@@ -1226,6 +1309,15 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     padding: '4px 0',
     fontFamily: 'var(--vscode-font-family)',
+    whiteSpace: 'nowrap',
+  },
+  linkBtnDisabled: {
+    opacity: 0.6,
+    cursor: 'not-allowed',
+  },
+  generateProjectsHint: {
+    fontSize: '11px',
+    color: 'var(--vscode-descriptionForeground)',
     whiteSpace: 'nowrap',
   },
   promptFieldHeader: {

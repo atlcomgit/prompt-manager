@@ -22,6 +22,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'generateTitle'; content: string }
 	| { type: 'generateDescription'; content: string }
 	| { type: 'generateSlug'; title: string; description: string }
+	| { type: 'improvePromptText'; content: string; projects?: string[] }
 	| { type: 'saveSidebarState'; state: SidebarState }
 	| { type: 'getSidebarState' }
 	| { type: 'getWorkspaceFolders' }
@@ -65,6 +66,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'generatedTitle'; title: string }
 	| { type: 'generatedDescription'; description: string }
 	| { type: 'generatedSlug'; slug: string }
+	| { type: 'improvedPromptText'; content: string }
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
 	| { type: 'branchStatus'; hasChanges: boolean; details: string }
 	| { type: 'error'; message: string }

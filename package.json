@@ -158,7 +158,23 @@
         "key": "ctrl+shift+p ctrl+s",
         "mac": "cmd+shift+p cmd+s"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Prompt Manager",
+      "properties": {
+        "promptManager.improvePromptInstructions": {
+          "type": "array",
+          "description": "Additional instructions for AI prompt text improvement (button \"Генерация\").",
+          "default": [
+            "Пиши на русском языке.",
+            "Пиши ответ с обращением к одному лицу."
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run build",

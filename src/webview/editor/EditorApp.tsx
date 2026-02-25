@@ -8,6 +8,7 @@ import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
 import { TextField } from './components/TextField';
 import { TextArea } from './components/TextArea';
+import { RichTextEditor } from './components/RichTextEditor';
 import { MultiSelect } from './components/MultiSelect';
 import { StatusSelect } from './components/StatusSelect';
 import { ActionBar } from './components/ActionBar';
@@ -220,7 +221,8 @@ export const EditorApp: React.FC = () => {
 
   const reportSummary = useMemo(() => {
     const chunks: string[] = [];
-    if ((prompt.report || '').trim()) chunks.push(`Результат: ${toShortText(prompt.report || '', 64)}`);
+    const reportText = (prompt.report || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (reportText) chunks.push(`Результат: ${toShortText(reportText, 64)}`);
     return chunks;
   }, [prompt.report]);
 
@@ -1112,12 +1114,10 @@ export const EditorApp: React.FC = () => {
             <>
               <div style={styles.field}>
                 <label style={styles.label}>{t('editor.workResult')}</label>
-                <TextArea
+                <RichTextEditor
                   value={prompt.report || ''}
                   onChange={v => updateField('report', v)}
                   placeholder={t('editor.reportPlaceholder')}
-                  rows={8}
-                  showControls={false}
                   persistedHeight={reportHeight}
                   onHeightChange={setReportHeight}
                 />

@@ -5,24 +5,24 @@ import * as vscode from 'vscode';
 import { getNonce } from './nonce.js';
 
 export function getWebviewHtml(
-	webview: vscode.Webview,
-	extensionUri: vscode.Uri,
-	scriptPath: string,
-	title: string,
-	locale?: string
+  webview: vscode.Webview,
+  extensionUri: vscode.Uri,
+  scriptPath: string,
+  title: string,
+  locale?: string
 ): string {
-	const lang = locale || vscode.env.language || 'en';
-	const scriptUri = webview.asWebviewUri(
-		vscode.Uri.joinPath(extensionUri, scriptPath)
-	);
+  const lang = locale || vscode.env.language || 'en';
+  const scriptUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, scriptPath)
+  );
 
-	const codiconsUri = webview.asWebviewUri(
-		vscode.Uri.joinPath(extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css')
-	);
+  const codiconsUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css')
+  );
 
-	const nonce = getNonce();
+  const nonce = getNonce();
 
-	return /* html */`<!DOCTYPE html>
+  return /* html */`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -77,6 +77,11 @@ export function getWebviewHtml(
     *:focus-visible {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: -1px;
+    }
+
+    /* Loading spinner animation */
+    @keyframes pm-spin {
+      to { transform: rotate(360deg); }
     }
   </style>
 </head>

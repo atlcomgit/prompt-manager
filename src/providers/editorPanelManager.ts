@@ -1521,6 +1521,31 @@ export class EditorPanelManager {
 									status: 'completed',
 									completionFallback: completion.ok ? false : true,
 								}, 'afterChatCompleted');
+								// Rename chat session in agent history after completion
+								// Delay 5s to let VS Code finish writing its own JSONL entries (followups, modelState etc.)
+								const sessionToRename = String(completion.sessionId || trackedSessionId || '').trim();
+								if (sessionToRename) {
+									const latestPrompt = await this.storageService.getPrompt(prompt.id);
+									const renameTitle = latestPrompt?.taskNumber
+										? `${latestPrompt.taskNumber} | ${latestPrompt.title}`
+										: (latestPrompt?.title || '');
+									if (renameTitle) {
+										this.hooksOutput.appendLine(`[chat-rename] scheduling rename session=${sessionToRename} title="${renameTitle}" (5s delay)`);
+										setTimeout(() => {
+											void this.stateService.renameChatSession(sessionToRename, renameTitle).then(r => {
+												this.hooksOutput.appendLine(`[chat-rename] result: ok=${r.ok} reason=${r.reason || '-'}`);
+												if (r.ok) {
+													void vscode.window.showInformationMessage(
+														`Chat session renamed to "${renameTitle}". Title will appear after window reload.`,
+													);
+												}
+											}).catch(e => {
+												this.hooksOutput.appendLine(`[chat-rename] error: ${e?.message || e}`);
+											});
+										}, 5000);
+									}
+								}
+
 								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
 								return;
 							}
@@ -1548,6 +1573,31 @@ export class EditorPanelManager {
 									...hookPayloadBase,
 									status: 'completed',
 								}, 'afterChatCompleted');
+
+								// Rename chat session in agent history (markdown fallback path)
+								const sessionToRename2 = String(completion.sessionId || trackedSessionId || '').trim();
+								if (sessionToRename2) {
+									const latestPrompt2 = await this.storageService.getPrompt(prompt.id);
+									const renameTitle2 = latestPrompt2?.taskNumber
+										? `${latestPrompt2.taskNumber} | ${latestPrompt2.title}`
+										: (latestPrompt2?.title || '');
+									if (renameTitle2) {
+										this.hooksOutput.appendLine(`[chat-rename] (fallback) scheduling rename session=${sessionToRename2} title="${renameTitle2}" (5s delay)`);
+										setTimeout(() => {
+											void this.stateService.renameChatSession(sessionToRename2, renameTitle2).then(r => {
+												this.hooksOutput.appendLine(`[chat-rename] (fallback) result: ok=${r.ok} reason=${r.reason || '-'}`);
+												if (r.ok) {
+													void vscode.window.showInformationMessage(
+														`Chat session renamed to "${renameTitle2}". Title will appear after window reload.`,
+													);
+												}
+											}).catch(e => {
+												this.hooksOutput.appendLine(`[chat-rename] (fallback) error: ${e?.message || e}`);
+											});
+										}, 5000);
+									}
+								}
+
 								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
 								return;
 							}

@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
+import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { SidebarState } from '../types/prompt.js';
@@ -461,6 +462,79 @@ export class StateService {
 			return { ok: true, dbPath };
 		} catch (error: any) {
 			return { ok: false, reason: error?.message || 'sqlite-write-failed', dbPath };
+		}
+	}
+
+	/**
+	 * Rename a chat session by writing customTitle to its JSONL session file.
+	 * VS Code stores chat sessions as JSONL files in chatSessions/ directory.
+	 * Appending a kind:1 patch for customTitle sets the display title.
+	 * The title takes effect after VS Code window reload (VS Code reads JSONL on startup).
+	 */
+	async renameChatSession(
+		sessionId: string,
+		newTitle: string,
+	): Promise<{ ok: boolean; reason?: string }> {
+		const normalizedId = (sessionId || '').trim();
+		const normalizedTitle = (newTitle || '').trim();
+		if (!normalizedId || !normalizedTitle) {
+			return { ok: false, reason: 'empty-args' };
+		}
+
+		// Find the chatSessions directory by resolving workspace state DB paths.
+		// Each state.vscdb sits next to chatSessions/ in the same parent dir.
+		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		let jsonlPath: string | null = null;
+
+		for (const dbPath of dbPaths) {
+			const candidate = path.join(path.dirname(dbPath), 'chatSessions', `${normalizedId}.jsonl`);
+			try {
+				await fs.access(candidate);
+				jsonlPath = candidate;
+				break;
+			} catch {
+				// not in this workspace storage, try next
+			}
+		}
+
+		// Also try via storageUri as fallback
+		if (!jsonlPath) {
+			const storageUriPath = this.context.storageUri?.fsPath;
+			if (storageUriPath) {
+				const candidate = path.join(storageUriPath, '..', 'chatSessions', `${normalizedId}.jsonl`);
+				try {
+					await fs.access(candidate);
+					jsonlPath = candidate;
+				} catch {
+					// not found via storageUri either
+				}
+			}
+		}
+
+		if (!jsonlPath) {
+			return { ok: false, reason: `jsonl-not-found (searched ${dbPaths.length} db paths)` };
+		}
+
+		// Append a kind:1 patch that sets customTitle on the session object.
+		// VS Code's JSONL format: kind:0 = initial state, kind:1 = field patch
+		const patch = JSON.stringify({ kind: 1, k: ['customTitle'], v: normalizedTitle });
+		try {
+			// Read last byte to avoid creating empty lines (double \n)
+			const stat = await fs.stat(jsonlPath);
+			let prefix = '\n';
+			if (stat.size > 0) {
+				const fd = await fs.open(jsonlPath, 'r');
+				const buf = Buffer.alloc(1);
+				await fd.read(buf, 0, 1, stat.size - 1);
+				await fd.close();
+				if (buf[0] === 0x0A) { // file already ends with \n
+					prefix = '';
+				}
+			}
+			await fs.appendFile(jsonlPath, prefix + patch + '\n');
+			return { ok: true, reason: jsonlPath };
+		} catch (error: any) {
+			return { ok: false, reason: error?.message || 'jsonl-write-failed' };
 		}
 	}
 

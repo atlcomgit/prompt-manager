@@ -107,6 +107,7 @@ export const EditorApp: React.FC = () => {
   };
 
   const [prompt, setPrompt] = useState<Prompt>(createDefaultPrompt());
+  const [isLoaded, setIsLoaded] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingChat, setIsStartingChat] = useState(false);
@@ -342,6 +343,7 @@ export const EditorApp: React.FC = () => {
       case 'prompt':
         if (msg.prompt) {
           setPrompt(msg.prompt);
+          setIsLoaded(true);
           setIsDirty(false);
           setIsSaving(false);
           activeSaveIdRef.current = null;
@@ -732,6 +734,13 @@ export const EditorApp: React.FC = () => {
 
   return (
     <div style={styles.container}>
+      {/* Loading overlay */}
+      {!isLoaded && (
+        <div style={styles.loadingOverlay}>
+          <div style={styles.loadingSpinner} />
+        </div>
+      )}
+
       {/* Header */}
       <div style={styles.header}>
         <h2 style={styles.headerTitle}>
@@ -1160,6 +1169,25 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     height: '100vh',
     overflow: 'hidden',
+    position: 'relative',
+  },
+  loadingOverlay: {
+    position: 'absolute',
+    inset: 0,
+    zIndex: 1000,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'rgb(var(--vscode-editor-background) / 20%)',
+    pointerEvents: 'all',
+  },
+  loadingSpinner: {
+    width: '36px',
+    height: '36px',
+    border: '3px solid var(--vscode-descriptionForeground)',
+    borderTopColor: 'var(--vscode-focusBorder)',
+    borderRadius: '50%',
+    animation: 'pm-spin 0.8s linear infinite',
   },
   header: {
     display: 'flex',

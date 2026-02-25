@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage, organize and use AI prompts directly in VS Code with Copilot Chat integration",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",

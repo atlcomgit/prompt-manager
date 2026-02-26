@@ -44,6 +44,10 @@ export interface PromptConfig {
 	/** AI model identifier to use */
 	model: string;
 
+	// --- Chat mode ---
+	/** Chat mode: 'agent' | 'plan' */
+	chatMode: 'agent' | 'plan';
+
 	// --- Context files ---
 	/** Relative paths to context files attached to this prompt */
 	contextFiles: string[];
@@ -91,6 +95,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		taskNumber: '',
 		branch: '',
 		model: '',
+		chatMode: 'agent',
 		contextFiles: [],
 		chatSessionIds: [],
 		timeSpentWriting: 0,

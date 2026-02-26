@@ -260,9 +260,10 @@ export const EditorApp: React.FC = () => {
     if (mcpTools) chunks.push(`MCP: ${toShortText(mcpTools, 56)}`);
     if (hooks) chunks.push(`Hooks: ${toShortText(hooks, 56)}`);
     if (selectedModelName) chunks.push(`Модель: ${toShortText(selectedModelName, 56)}`);
+    chunks.push(`Режим: ${prompt.chatMode === 'agent' ? 'Agent' : 'Plan'}`);
     if (files) chunks.push(`Файлы: ${toShortText(files, 56)}`);
     return chunks;
-  }, [prompt.skills, prompt.mcpTools, prompt.hooks, prompt.contextFiles, selectedModelName]);
+  }, [prompt.skills, prompt.mcpTools, prompt.hooks, prompt.contextFiles, selectedModelName, prompt.chatMode]);
 
   const timeSummary = useMemo(() => {
     const totalMs = (prompt.timeSpentWriting || 0) + (prompt.timeSpentImplementing || 0) + (prompt.timeSpentUntracked || 0);
@@ -1061,6 +1062,25 @@ export const EditorApp: React.FC = () => {
               </div>
 
               <div style={styles.field}>
+                <label style={styles.label}>{t('editor.chatMode')}</label>
+                <div style={styles.toggleGroup}>
+                  {(['agent', 'plan'] as const).map(mode => (
+                    <button
+                      key={mode}
+                      style={{
+                        ...styles.toggleBtn,
+                        ...(prompt.chatMode === mode ? styles.toggleBtnActive : {}),
+                      }}
+                      onClick={() => updateField('chatMode', mode)}
+                      title={mode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
+                    >
+                      {mode === 'agent' ? `🤖 ${t('editor.chatModeAgent')}` : `📋 ${t('editor.chatModePlan')}`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={styles.field}>
                 <label style={styles.label}>{t('editor.contextFiles')}</label>
                 <div style={styles.fileList}>
                   {prompt.contextFiles.map((f, i) => (
@@ -1324,6 +1344,30 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '4px',
     fontSize: '13px',
     fontFamily: 'var(--vscode-font-family)',
+  },
+  toggleGroup: {
+    display: 'flex',
+    gap: '0px',
+    borderRadius: '4px',
+    overflow: 'hidden',
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    width: 'fit-content',
+  },
+  toggleBtn: {
+    padding: '5px 14px',
+    border: 'none',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontFamily: 'var(--vscode-font-family)',
+    fontWeight: 500,
+    borderRight: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    transition: 'background 0.15s, color 0.15s',
+  },
+  toggleBtnActive: {
+    background: 'var(--vscode-button-background)',
+    color: 'var(--vscode-button-foreground)',
   },
   separator: {
     height: '1px',

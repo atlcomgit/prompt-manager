@@ -1305,15 +1305,37 @@ export class EditorPanelManager {
 					let requestModelSelector: vscode.LanguageModelChatSelector | undefined;
 					let trackedSessionId = '';
 
-					const openChatCmds = ['workbench.action.chat.openAgent', 'workbench.action.chat.open'];
+					const chatMode = prompt.chatMode || 'agent';
+					const chatModeName = chatMode === 'agent' ? 'Agent' : 'Plan';
+
+					// Open chat in the requested mode using mode-specific commands first
+					const openChatCmds = chatMode === 'agent'
+						? ['workbench.action.chat.openAgent', 'workbench.action.chat.open']
+						: [`workbench.action.chat.open${chatModeName}`, 'workbench.action.chat.open'];
 					let opened = false;
 					for (const openCmd of openChatCmds) {
 						try {
-							await vscode.commands.executeCommand(openCmd);
+							if (openCmd === 'workbench.action.chat.open') {
+								await vscode.commands.executeCommand(openCmd, { mode: chatModeName });
+							} else {
+								await vscode.commands.executeCommand(openCmd);
+							}
 							opened = true;
 							break;
 						} catch {
 							// try next open command
+						}
+					}
+
+					// Ensure correct mode via toggleAgentMode (accepts both id and name)
+					if (opened) {
+						try {
+							await vscode.commands.executeCommand(
+								'workbench.action.chat.toggleAgentMode',
+								{ modeId: chatMode },
+							);
+						} catch {
+							// best-effort mode switch
 						}
 					}
 
@@ -1331,10 +1353,12 @@ export class EditorPanelManager {
 					const sendMessage = async (message: string): Promise<void> => {
 						if (requestModelSelector) {
 							try {
-								await vscode.commands.executeCommand('workbench.action.chat.open', {
+								const openArg: Record<string, unknown> = {
 									query: message,
 									modelSelector: requestModelSelector,
-								});
+									mode: chatModeName,
+								};
+								await vscode.commands.executeCommand('workbench.action.chat.open', openArg);
 								return;
 							} catch {
 								// fallback to compatibility variants
@@ -1342,6 +1366,7 @@ export class EditorPanelManager {
 						}
 
 						const args: unknown[] = [
+							{ query: message, mode: chatModeName },
 							{ query: message },
 							message,
 							{ message },
@@ -1350,9 +1375,10 @@ export class EditorPanelManager {
 
 						if (requestModelIdentifier) {
 							args.unshift(
+								{ query: message, userSelectedModelId: requestModelIdentifier, mode: chatModeName },
 								{ query: message, userSelectedModelId: requestModelIdentifier },
-								{ query: message, modelId: requestModelIdentifier },
-								{ query: message, model: requestModelIdentifier },
+								{ query: message, modelId: requestModelIdentifier, mode: chatModeName },
+								{ query: message, model: requestModelIdentifier, mode: chatModeName },
 								{ message, userSelectedModelId: requestModelIdentifier },
 								{ prompt: message, userSelectedModelId: requestModelIdentifier },
 								{ query: message, options: { userSelectedModelId: requestModelIdentifier } },

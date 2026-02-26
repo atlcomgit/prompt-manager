@@ -1155,6 +1155,8 @@ export const EditorApp: React.FC = () => {
                   placeholder={t('editor.reportPlaceholder')}
                   persistedHeight={reportHeight}
                   onHeightChange={setReportHeight}
+                  canReset={Boolean((prompt.report || '').trim())}
+                  onReset={() => updateField('report', '')}
                 />
               </div>
             </>
@@ -1204,7 +1206,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    background: 'rgb(var(--vscode-editor-background) / 20%)',
+    background: 'color-mix(in srgb, var(--vscode-editor-background) 50%, transparent)',
     pointerEvents: 'all',
   },
   loadingSpinner: {

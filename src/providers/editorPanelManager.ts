@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import { spawn } from 'child_process';
 import * as path from 'path';
+import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import type { Prompt } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
@@ -40,6 +41,12 @@ export class EditorPanelManager {
 	private contentEditorLastActivityByPanelKey = new Map<string, number>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
 	private openPromptQueue: Promise<void> = Promise.resolve();
+	private readonly markdownRenderer = new MarkdownIt({
+		html: false,
+		linkify: true,
+		breaks: false,
+		typographer: false,
+	});
 
 	private async runConfiguredHooks(
 		hookIds: string[],
@@ -153,13 +160,56 @@ export class EditorPanelManager {
 		});
 	}
 
+	private extractAgentResponse(chatText: string): string {
+		const text = (chatText || '').trim();
+		if (!text) {
+			return '';
+		}
+		// Find the last occurrence of "GitHub Copilot:" (or similar agent markers)
+		const markers = ['GitHub Copilot:', 'Copilot:'];
+		let lastIdx = -1;
+		let markerLen = 0;
+		for (const marker of markers) {
+			const idx = text.lastIndexOf(marker);
+			if (idx > lastIdx) {
+				lastIdx = idx;
+				markerLen = marker.length;
+			}
+		}
+		if (lastIdx >= 0) {
+			return text.substring(lastIdx + markerLen).trim();
+		}
+		return text;
+	}
+
+	/**
+	 * Convert Markdown text to HTML suitable for RichTextEditor.
+	 * Uses markdown-it parser to preserve list nesting and chat-like structure.
+	 */
+	private markdownToHtml(md: string): string {
+		const text = (md || '').trim();
+		if (!text) {
+			return '';
+		}
+
+		let html = this.markdownRenderer.render(text).trim();
+
+		html = html.replace(
+			/^<p>\s*(?:Оптимизация выбора инструмента\.\.\.|Optimizing tool selection\.\.\.|Choosing the best tool\.\.\.)\s*/i,
+			'<p>'
+		);
+		html = html.replace(/^<p>\s*<\/p>\s*/i, '').trim();
+
+		return html;
+	}
+
 	private async tryReadChatMarkdownFromClipboard(): Promise<string> {
 		const commands = await vscode.commands.getCommands(true);
 		const copyCommands = [
-			'workbench.action.chat.copyAll',
-			'workbench.action.chat.copyLast',
 			'workbench.action.chat.copyResponse',
+			'workbench.action.chat.copyLast',
 			'workbench.action.chat.copy',
+			'workbench.action.chat.copyAll',
 		].filter(cmd => commands.includes(cmd));
 
 		if (copyCommands.length === 0) {
@@ -184,7 +234,8 @@ export class EditorPanelManager {
 				const copied = (await vscode.env.clipboard.readText()).trim();
 				if (copied) {
 					await vscode.env.clipboard.writeText(originalClipboard);
-					return copied;
+					const agentMd = this.extractAgentResponse(copied);
+					return this.markdownToHtml(agentMd);
 				}
 			} catch {
 				// try next copy command
@@ -402,18 +453,6 @@ export class EditorPanelManager {
 			default:
 				return 0;
 		}
-	}
-
-	private mergeReport(existingReport: string, chatMarkdown: string): string {
-		const incoming = (chatMarkdown || '').trim();
-		if (!incoming) {
-			return existingReport || '';
-		}
-		const current = (existingReport || '').trim();
-		if (!current) {
-			return incoming;
-		}
-		return `${current}\n\n${incoming}`;
 	}
 
 	private normalizePromptForCompare(p: Prompt): string {
@@ -1527,8 +1566,8 @@ export class EditorPanelManager {
 											...(promptToComplete.chatSessionIds || []).filter(id => id !== sessionId),
 										];
 									}
-									if (chatMarkdown) {
-										promptToComplete.report = this.mergeReport(promptToComplete.report || '', chatMarkdown);
+									if (chatMarkdown && !(promptToComplete.report || '').trim()) {
+										promptToComplete.report = chatMarkdown;
 									}
 									if (promptToComplete.status !== 'completed') {
 										promptToComplete.status = 'completed';
@@ -1585,7 +1624,9 @@ export class EditorPanelManager {
 									if (implementingDelta > 0) {
 										promptForTiming.timeSpentImplementing = (promptForTiming.timeSpentImplementing || 0) + implementingDelta;
 									}
-									promptForTiming.report = this.mergeReport(promptForTiming.report || '', chatMarkdown);
+									if (!(promptForTiming.report || '').trim()) {
+										promptForTiming.report = chatMarkdown;
+									}
 									await this.storageService.savePrompt(promptForTiming);
 									Object.assign(currentPrompt, promptForTiming);
 									this._onDidSave.fire(promptForTiming.id);

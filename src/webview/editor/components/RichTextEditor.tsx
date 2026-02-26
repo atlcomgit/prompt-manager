@@ -6,9 +6,15 @@ interface Props {
   placeholder?: string;
   persistedHeight?: number;
   onHeightChange?: (height: number) => void;
+  onReset?: () => void;
+  canReset?: boolean;
 }
 
 type Mode = 'visual' | 'html';
+
+const DEFAULT_HEIGHT = 180;
+const MIN_HEIGHT = 80;
+const MAX_HEIGHT = 800;
 
 const normalizeText = (value: string): string => value
   .replace(/\r\n?/g, '\n')
@@ -115,28 +121,57 @@ const sanitizeHtml = (rawHtml: string): string => {
   return wrapper.innerHTML.trim();
 };
 
-const htmlToPlain = (html: string): string => {
-  if (!html) {
-    return '';
-  }
-  if (typeof DOMParser === 'undefined') {
-    return html;
-  }
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, 'text/html');
-  return (doc.body.textContent || '').trim();
-};
-
 export const RichTextEditor: React.FC<Props> = ({
   value,
   onChange,
   placeholder,
   persistedHeight,
   onHeightChange,
+  onReset,
+  canReset,
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<Mode>('visual');
   const [htmlSource, setHtmlSource] = useState(value || '');
+
+  const [currentHeight, setCurrentHeight] = useState(persistedHeight || DEFAULT_HEIGHT);
+  const isDragging = useRef(false);
+  const dragStartY = useRef(0);
+  const dragStartHeight = useRef(0);
+
+  useEffect(() => {
+    if (typeof persistedHeight === 'number' && persistedHeight > 0) {
+      setCurrentHeight(persistedHeight);
+    }
+  }, [persistedHeight]);
+
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDragging.current = true;
+    dragStartY.current = e.clientY;
+    dragStartHeight.current = currentHeight;
+
+    const handleMouseMove = (ev: MouseEvent) => {
+      if (!isDragging.current) return;
+      const delta = ev.clientY - dragStartY.current;
+      const newH = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, dragStartHeight.current + delta));
+      setCurrentHeight(newH);
+    };
+
+    const handleMouseUp = () => {
+      isDragging.current = false;
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [currentHeight]);
+
+  // Persist height on change
+  useEffect(() => {
+    onHeightChange?.(currentHeight);
+  }, [currentHeight, onHeightChange]);
 
   useEffect(() => {
     setHtmlSource(value || '');
@@ -152,25 +187,6 @@ export const RichTextEditor: React.FC<Props> = ({
       editorRef.current.innerHTML = sanitized;
     }
   }, [mode, value]);
-
-  useEffect(() => {
-    if (!editorRef.current || !onHeightChange || typeof ResizeObserver === 'undefined') {
-      return;
-    }
-
-    const observer = new ResizeObserver(() => {
-      if (!editorRef.current) {
-        return;
-      }
-      const height = Math.round(editorRef.current.getBoundingClientRect().height);
-      if (height > 0) {
-        onHeightChange(height);
-      }
-    });
-
-    observer.observe(editorRef.current);
-    return () => observer.disconnect();
-  }, [onHeightChange]);
 
   const insertHtmlAtCursor = useCallback((html: string) => {
     if (!editorRef.current) {
@@ -248,42 +264,139 @@ export const RichTextEditor: React.FC<Props> = ({
     <div style={styles.root}>
       <style>
         {`
+          .pm-rich-editor-content {
+            font-size: var(--vscode-font-size, 13px);
+            line-height: 1.6;
+            color: var(--vscode-foreground);
+          }
+
+          .pm-rich-editor-content p {
+            margin: 0.4em 0;
+          }
+
+          .pm-rich-editor-content h1,
+          .pm-rich-editor-content h2,
+          .pm-rich-editor-content h3,
+          .pm-rich-editor-content h4,
+          .pm-rich-editor-content h5,
+          .pm-rich-editor-content h6 {
+            margin: 0.8em 0 0.4em;
+            font-weight: 600;
+            line-height: 1.3;
+          }
+          .pm-rich-editor-content h1 { font-size: 1.4em; }
+          .pm-rich-editor-content h2 { font-size: 1.25em; }
+          .pm-rich-editor-content h3 { font-size: 1.1em; }
+          .pm-rich-editor-content h4 { font-size: 1em; }
+
           .pm-rich-editor-content ul,
           .pm-rich-editor-content ol {
-            margin: 0.5em 0;
+            margin: 0.4em 0;
             padding-left: 1.6em;
             list-style-position: outside;
           }
-
           .pm-rich-editor-content ul { list-style-type: disc; }
           .pm-rich-editor-content ol { list-style-type: decimal; }
 
           .pm-rich-editor-content li {
             margin: 0.15em 0;
           }
-
           .pm-rich-editor-content li > ul,
           .pm-rich-editor-content li > ol {
             margin-top: 0.25em;
             margin-bottom: 0.25em;
           }
+
+          .pm-rich-editor-content code {
+            font-family: var(--vscode-editor-font-family, 'Consolas', 'Courier New', monospace);
+            font-size: 0.9em;
+            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+            padding: 1px 4px;
+            border-radius: 3px;
+          }
+
+          .pm-rich-editor-content pre {
+            margin: 0.6em 0;
+            padding: 10px 12px;
+            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+            border-radius: 4px;
+            overflow-x: auto;
+            line-height: 1.45;
+          }
+          .pm-rich-editor-content pre code {
+            background: none;
+            padding: 0;
+            border-radius: 0;
+            font-size: var(--vscode-editor-font-size, 12px);
+          }
+
+          .pm-rich-editor-content blockquote {
+            margin: 0.6em 0;
+            padding: 4px 12px;
+            border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-focusBorder));
+            background: var(--vscode-textBlockQuote-background, transparent);
+            color: var(--vscode-foreground);
+          }
+
+          .pm-rich-editor-content a {
+            color: var(--vscode-textLink-foreground);
+            text-decoration: none;
+          }
+          .pm-rich-editor-content a:hover {
+            text-decoration: underline;
+          }
+
+          .pm-rich-editor-content hr {
+            border: none;
+            border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+            margin: 0.8em 0;
+          }
+
+          .pm-rich-editor-content table {
+            border-collapse: collapse;
+            margin: 0.6em 0;
+            width: 100%;
+            font-size: 0.95em;
+          }
+          .pm-rich-editor-content th,
+          .pm-rich-editor-content td {
+            border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+            padding: 5px 10px;
+            text-align: left;
+          }
+          .pm-rich-editor-content th {
+            font-weight: 600;
+            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.1));
+          }
+
+          .pm-rich-editor-content strong,
+          .pm-rich-editor-content b {
+            font-weight: 600;
+          }
         `}
       </style>
       <div style={styles.toolbar}>
-        <button
-          type="button"
-          style={{ ...styles.modeBtn, ...(mode === 'visual' ? styles.modeBtnActive : null) }}
-          onClick={() => setMode('visual')}
-        >
-          Визуально
-        </button>
-        <button
-          type="button"
-          style={{ ...styles.modeBtn, ...(mode === 'html' ? styles.modeBtnActive : null) }}
-          onClick={() => setMode('html')}
-        >
-          HTML
-        </button>
+        <div style={styles.modeGroup}>
+          <button
+            type="button"
+            style={{ ...styles.modeBtn, ...(mode === 'visual' ? styles.modeBtnActive : null) }}
+            onClick={() => setMode('visual')}
+          >
+            Визуально
+          </button>
+          <button
+            type="button"
+            style={{ ...styles.modeBtn, ...(mode === 'html' ? styles.modeBtnActive : null) }}
+            onClick={() => setMode('html')}
+          >
+            HTML
+          </button>
+        </div>
+        {canReset && onReset && (
+          <button type="button" style={styles.resetBtn} onClick={onReset} title="Очистить отчет">
+            Сбросить
+          </button>
+        )}
       </div>
 
       {mode === 'visual' ? (
@@ -298,7 +411,9 @@ export const RichTextEditor: React.FC<Props> = ({
           data-placeholder={placeholder || 'Введите отчет'}
           style={{
             ...styles.editor,
-            minHeight: persistedHeight ? `${persistedHeight}px` : styles.editor.minHeight,
+            height: `${currentHeight}px`,
+            minHeight: undefined,
+            maxHeight: undefined,
           }}
         />
       ) : (
@@ -312,14 +427,22 @@ export const RichTextEditor: React.FC<Props> = ({
           placeholder={placeholder}
           style={{
             ...styles.source,
-            minHeight: persistedHeight ? `${persistedHeight}px` : styles.source.minHeight,
+            height: `${currentHeight}px`,
+            minHeight: undefined,
+            maxHeight: undefined,
           }}
           spellCheck={false}
         />
       )}
 
+      {/* Drag handle for resizing */}
+      <div
+        onMouseDown={handleDragStart}
+        style={styles.resizeHandle}
+        title="Потяните для изменения высоты"
+      />
+
       <div style={styles.hint}>{modeHint}</div>
-      <div style={styles.previewPlain}>Текст: {htmlToPlain(value) || '—'}</div>
     </div>
   );
 };
@@ -331,6 +454,12 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '6px',
   },
   toolbar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+  },
+  modeGroup: {
     display: 'flex',
     gap: '6px',
   },
@@ -347,25 +476,32 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--vscode-button-background)',
     color: 'var(--vscode-button-foreground)',
   },
+  resetBtn: {
+    padding: '4px 8px',
+    background: 'transparent',
+    border: '1px dashed var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    color: 'var(--vscode-textLink-foreground)',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontFamily: 'var(--vscode-font-family)',
+  },
   editor: {
     width: '100%',
-    minHeight: '180px',
     border: '1px solid var(--vscode-input-border, transparent)',
-    borderRadius: '4px',
+    borderRadius: '4px 4px 0 0',
     background: 'var(--vscode-input-background)',
     color: 'var(--vscode-input-foreground)',
     padding: '10px',
     boxSizing: 'border-box',
     outline: 'none',
     lineHeight: 1.5,
-    whiteSpace: 'pre-wrap',
     overflow: 'auto',
   },
   source: {
     width: '100%',
-    minHeight: '180px',
     border: '1px solid var(--vscode-input-border, transparent)',
-    borderRadius: '4px',
+    borderRadius: '4px 4px 0 0',
     background: 'var(--vscode-input-background)',
     color: 'var(--vscode-input-foreground)',
     padding: '10px',
@@ -373,15 +509,18 @@ const styles: Record<string, React.CSSProperties> = {
     outline: 'none',
     lineHeight: 1.5,
     fontFamily: 'var(--vscode-editor-font-family, monospace)',
-    resize: 'vertical',
+    resize: 'none',
+  },
+  resizeHandle: {
+    height: '6px',
+    cursor: 'ns-resize',
+    background: 'var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '0 0 4px 4px',
+    opacity: 0.5,
+    transition: 'opacity 0.15s',
   },
   hint: {
     fontSize: '11px',
     color: 'var(--vscode-descriptionForeground)',
-  },
-  previewPlain: {
-    fontSize: '11px',
-    color: 'var(--vscode-descriptionForeground)',
-    opacity: 0.9,
   },
 };

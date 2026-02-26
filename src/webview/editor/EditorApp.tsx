@@ -130,6 +130,7 @@ export const EditorApp: React.FC = () => {
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
+  const [isRecalculating, setIsRecalculating] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>(() => readStoredExpandedSections());
   const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
@@ -139,6 +140,7 @@ export const EditorApp: React.FC = () => {
   const saveTimeoutRef = useRef<number | null>(null);
   const currentPromptIdRef = useRef<string>('__new__');
   const activeSaveIdRef = useRef<string | null>(null);
+  const recalcTriggeredForRef = useRef<string>('');
 
   // Time tracking
   const openedAtRef = useRef<number>(Date.now());
@@ -351,6 +353,13 @@ export const EditorApp: React.FC = () => {
           if ((msg.prompt.chatSessionIds || []).length > 0) {
             startChatLockRef.current = false;
             setIsStartingChat(false);
+            // Auto-recalc implementing time on first load
+            const pid = String(msg.prompt.id || '').trim();
+            if (pid && recalcTriggeredForRef.current !== pid) {
+              recalcTriggeredForRef.current = pid;
+              vscode.postMessage({ type: 'recalcImplementingTime', id: pid });
+              setIsRecalculating(true);
+            }
           }
         }
         break;
@@ -480,10 +489,14 @@ export const EditorApp: React.FC = () => {
         setIsStartingChat(false);
         setIsSaving(false);
         setIsImprovingPromptText(false);
+        setIsRecalculating(false);
         activeSaveIdRef.current = null;
         break;
       case 'info':
         // Could show inline info
+        break;
+      case 'implementingTimeRecalculated':
+        setIsRecalculating(false);
         break;
     }
   }, []);
@@ -609,6 +622,14 @@ export const EditorApp: React.FC = () => {
     if (prompt.id && prompt.chatSessionIds.length > 0) {
       vscode.postMessage({ type: 'openChat', id: prompt.id, sessionId: prompt.chatSessionIds[0] });
     }
+  };
+
+  const handleRecalcImplementingTime = () => {
+    if (isRecalculating || !prompt.id || prompt.chatSessionIds.length === 0) {
+      return;
+    }
+    setIsRecalculating(true);
+    vscode.postMessage({ type: 'recalcImplementingTime', id: prompt.id });
   };
 
   const handleSetStatus = (status: PromptStatus) => {
@@ -1168,6 +1189,9 @@ export const EditorApp: React.FC = () => {
               timeImplementing={prompt.timeSpentImplementing}
               timeUntracked={prompt.timeSpentUntracked || 0}
               onUntrackedChange={(ms) => updateField('timeSpentUntracked', ms)}
+              hasChatSessions={prompt.chatSessionIds.length > 0}
+              isRecalculating={isRecalculating}
+              onRecalcImplementingTime={handleRecalcImplementingTime}
             />
           ))}
         </div>

@@ -1576,39 +1576,26 @@ export class EditorPanelManager {
 									Object.assign(currentPrompt, promptToComplete);
 									this._onDidSave.fire(promptToComplete.id);
 									postMessage({ type: 'prompt', prompt: promptToComplete });
-								}
 
-								await this.runConfiguredHooks(prompt?.hooks || [], {
-									event: 'afterChatCompleted',
-									chatCompletion: completion,
-									chatMarkdown,
-									...hookPayloadBase,
-									status: 'completed',
-									completionFallback: completion.ok ? false : true,
-								}, 'afterChatCompleted');
-								// Rename chat session in agent history after completion
-								// Delay 5s to let VS Code finish writing its own JSONL entries (followups, modelState etc.)
-								const sessionToRename = String(completion.sessionId || trackedSessionId || '').trim();
-								if (sessionToRename) {
-									const latestPrompt = await this.storageService.getPrompt(prompt.id);
-									const renameTitle = latestPrompt?.taskNumber
-										? `${latestPrompt.taskNumber} | ${latestPrompt.title}`
-										: (latestPrompt?.title || '');
-									if (renameTitle) {
-										this.hooksOutput.appendLine(`[chat-rename] scheduling rename session=${sessionToRename} title="${renameTitle}" (5s delay)`);
-										setTimeout(() => {
-											void this.stateService.renameChatSession(sessionToRename, renameTitle).then(r => {
-												this.hooksOutput.appendLine(`[chat-rename] result: ok=${r.ok} reason=${r.reason || '-'}`);
-												if (r.ok) {
-													void vscode.window.showInformationMessage(
-														`Chat session renamed to "${renameTitle}". Title will appear after window reload.`,
-													);
+									// Recalc implementing time from JSONL after VS Code finishes writing session data
+									const recalcPromptId = promptToComplete.id;
+									setTimeout(async () => {
+										try {
+											const freshPrompt = await this.storageService.getPrompt(recalcPromptId);
+											if (freshPrompt && (freshPrompt.chatSessionIds || []).length > 0) {
+												const totalMs = await this.stateService.getChatSessionsTotalElapsed(freshPrompt.chatSessionIds);
+												if (totalMs > 0) {
+													freshPrompt.timeSpentImplementing = totalMs;
+													await this.storageService.savePrompt(freshPrompt);
+													Object.assign(currentPrompt, freshPrompt);
+													this._onDidSave.fire(freshPrompt.id);
+													postMessage({ type: 'prompt', prompt: freshPrompt });
 												}
-											}).catch(e => {
-												this.hooksOutput.appendLine(`[chat-rename] error: ${e?.message || e}`);
-											});
-										}, 5000);
-									}
+											}
+										} catch (e: any) {
+											this.hooksOutput.appendLine(`[chat-track] recalc implementing time error: ${e?.message || e}`);
+										}
+									}, 3000);
 								}
 
 								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
@@ -1631,15 +1618,27 @@ export class EditorPanelManager {
 									Object.assign(currentPrompt, promptForTiming);
 									this._onDidSave.fire(promptForTiming.id);
 									postMessage({ type: 'prompt', prompt: promptForTiming });
-								}
 
-								await this.runConfiguredHooks(prompt?.hooks || [], {
-									event: 'afterChatCompleted',
-									chatCompletion: completion,
-									chatMarkdown,
-									...hookPayloadBase,
-									status: 'completed',
-								}, 'afterChatCompleted');
+									// Recalc implementing time from JSONL (markdown fallback path)
+									const recalcPromptId2 = promptForTiming.id;
+									setTimeout(async () => {
+										try {
+											const freshPrompt = await this.storageService.getPrompt(recalcPromptId2);
+											if (freshPrompt && (freshPrompt.chatSessionIds || []).length > 0) {
+												const totalMs = await this.stateService.getChatSessionsTotalElapsed(freshPrompt.chatSessionIds);
+												if (totalMs > 0) {
+													freshPrompt.timeSpentImplementing = totalMs;
+													await this.storageService.savePrompt(freshPrompt);
+													Object.assign(currentPrompt, freshPrompt);
+													this._onDidSave.fire(freshPrompt.id);
+													postMessage({ type: 'prompt', prompt: freshPrompt });
+												}
+											}
+										} catch (e: any) {
+											this.hooksOutput.appendLine(`[chat-track] recalc implementing time (fallback) error: ${e?.message || e}`);
+										}
+									}, 3000);
+								}
 
 								// Rename chat session in agent history (markdown fallback path)
 								const sessionToRename2 = String(completion.sessionId || trackedSessionId || '').trim();
@@ -1868,6 +1867,35 @@ export class EditorPanelManager {
 				if (prompt) {
 					prompt[msg.field] += msg.delta;
 					await this.storageService.savePrompt(prompt);
+				}
+				break;
+			}
+
+			case 'recalcImplementingTime': {
+				const prompt = await this.storageService.getPrompt(msg.id);
+				if (!prompt) {
+					postMessage({ type: 'error', message: 'Промпт не найден.' });
+					break;
+				}
+				const sessionIds = prompt.chatSessionIds || [];
+				if (sessionIds.length === 0) {
+					postMessage({ type: 'error', message: 'У промпта нет привязанных чат-сессий.' });
+					break;
+				}
+				try {
+					const totalMs = await this.stateService.getChatSessionsTotalElapsed(sessionIds);
+					if (totalMs <= 0) {
+						postMessage({ type: 'error', message: 'Не удалось извлечь тайминги из истории чата. Файлы сессий могут быть недоступны.' });
+						break;
+					}
+					prompt.timeSpentImplementing = totalMs;
+					await this.storageService.savePrompt(prompt);
+					Object.assign(currentPrompt, prompt);
+					this._onDidSave.fire(prompt.id);
+					postMessage({ type: 'implementingTimeRecalculated', id: prompt.id, timeMs: totalMs, sessionsCount: sessionIds.length });
+					postMessage({ type: 'prompt', prompt });
+				} catch (err: any) {
+					postMessage({ type: 'error', message: `Ошибка при пересчёте: ${err?.message || err}` });
 				}
 				break;
 			}

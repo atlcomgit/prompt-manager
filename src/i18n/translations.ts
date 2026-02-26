@@ -147,6 +147,7 @@ const en: Record<string, string> = {
 	'timer.untracked': 'Untracked time',
 	'timer.untrackedPlaceholder': 'hours',
 	'timer.total': 'Total',
+	'timer.recalcTitle': 'Recalculate implementing time from chat history',
 
 	// --- Statistics ---
 	'stats.title': '📊 Prompt statistics',
@@ -339,6 +340,7 @@ const ru: Record<string, string> = {
 	'timer.untracked': 'Неучтенное время',
 	'timer.untrackedPlaceholder': 'часы',
 	'timer.total': 'Всего',
+	'timer.recalcTitle': 'Пересчитать время реализации из истории чата',
 
 	// --- Statistics ---
 	'stats.title': '📊 Статистика промптов',

@@ -466,6 +466,100 @@ export class StateService {
 	}
 
 	/**
+	 * Extract total implementing time from a chat session JSONL file.
+	 * Parses the JSONL, finds all requests and their result.timings.totalElapsed,
+	 * and returns the sum (ms). Returns 0 if the file is not found or unreadable.
+	 */
+	async getChatSessionTotalElapsed(sessionId: string): Promise<number> {
+		const normalizedId = (sessionId || '').trim();
+		if (!normalizedId) {
+			return 0;
+		}
+
+		const jsonlPath = await this.findChatSessionJsonlPath(normalizedId);
+		if (!jsonlPath) {
+			return 0;
+		}
+
+		try {
+			const raw = await fs.readFile(jsonlPath, 'utf-8');
+			let totalElapsed = 0;
+
+			for (const line of raw.split('\n')) {
+				const trimmed = line.trim();
+				if (!trimmed) {
+					continue;
+				}
+				let obj: any;
+				try {
+					obj = JSON.parse(trimmed);
+				} catch {
+					continue;
+				}
+
+				const kind = obj?.kind;
+				const k: any[] = obj?.k || [];
+				const v = obj?.v;
+
+				// kind=1 patch: ['requests', <index>, 'result'] → v.timings.totalElapsed
+				if (kind === 1 && Array.isArray(k) && k.length === 3 && k[0] === 'requests' && k[2] === 'result') {
+					const elapsed = Number(v?.timings?.totalElapsed || 0);
+					if (elapsed > 0) {
+						totalElapsed += elapsed;
+					}
+				}
+			}
+
+			return totalElapsed;
+		} catch {
+			return 0;
+		}
+	}
+
+	/**
+	 * Extract total implementing time from multiple chat sessions.
+	 * Returns the sum of totalElapsed across all provided session IDs.
+	 */
+	async getChatSessionsTotalElapsed(sessionIds: string[]): Promise<number> {
+		let total = 0;
+		for (const sessionId of sessionIds) {
+			total += await this.getChatSessionTotalElapsed(sessionId);
+		}
+		return total;
+	}
+
+	/**
+	 * Find the JSONL file path for a given chat session ID.
+	 */
+	private async findChatSessionJsonlPath(sessionId: string): Promise<string | null> {
+		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+
+		for (const dbPath of dbPaths) {
+			const candidate = path.join(path.dirname(dbPath), 'chatSessions', `${sessionId}.jsonl`);
+			try {
+				await fs.access(candidate);
+				return candidate;
+			} catch {
+				// not in this workspace storage, try next
+			}
+		}
+
+		// Also try via storageUri as fallback
+		const storageUriPath = this.context.storageUri?.fsPath;
+		if (storageUriPath) {
+			const candidate = path.join(storageUriPath, '..', 'chatSessions', `${sessionId}.jsonl`);
+			try {
+				await fs.access(candidate);
+				return candidate;
+			} catch {
+				// not found via storageUri either
+			}
+		}
+
+		return null;
+	}
+
+	/**
 	 * Rename a chat session by writing customTitle to its JSONL session file.
 	 * VS Code stores chat sessions as JSONL files in chatSessions/ directory.
 	 * Appending a kind:1 patch for customTitle sets the display title.
@@ -481,38 +575,9 @@ export class StateService {
 			return { ok: false, reason: 'empty-args' };
 		}
 
-		// Find the chatSessions directory by resolving workspace state DB paths.
-		// Each state.vscdb sits next to chatSessions/ in the same parent dir.
-		const dbPaths = await this.resolveWorkspaceStateDbPaths();
-		let jsonlPath: string | null = null;
-
-		for (const dbPath of dbPaths) {
-			const candidate = path.join(path.dirname(dbPath), 'chatSessions', `${normalizedId}.jsonl`);
-			try {
-				await fs.access(candidate);
-				jsonlPath = candidate;
-				break;
-			} catch {
-				// not in this workspace storage, try next
-			}
-		}
-
-		// Also try via storageUri as fallback
+		const jsonlPath = await this.findChatSessionJsonlPath(normalizedId);
 		if (!jsonlPath) {
-			const storageUriPath = this.context.storageUri?.fsPath;
-			if (storageUriPath) {
-				const candidate = path.join(storageUriPath, '..', 'chatSessions', `${normalizedId}.jsonl`);
-				try {
-					await fs.access(candidate);
-					jsonlPath = candidate;
-				} catch {
-					// not found via storageUri either
-				}
-			}
-		}
-
-		if (!jsonlPath) {
-			return { ok: false, reason: `jsonl-not-found (searched ${dbPaths.length} db paths)` };
+			return { ok: false, reason: 'jsonl-not-found' };
 		}
 
 		// Append a kind:1 patch that sets customTitle on the session object.

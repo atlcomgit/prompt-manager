@@ -6,6 +6,9 @@ interface Props {
   timeImplementing: number;
   timeUntracked: number;
   onUntrackedChange: (ms: number) => void;
+  hasChatSessions: boolean;
+  isRecalculating: boolean;
+  onRecalcImplementingTime: () => void;
 }
 
 function formatDuration(ms: number): string {
@@ -24,7 +27,7 @@ function formatDuration(ms: number): string {
   return `${seconds}с`;
 }
 
-export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, timeUntracked, onUntrackedChange }) => {
+export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, timeUntracked, onUntrackedChange, hasChatSessions, isRecalculating, onRecalcImplementingTime }) => {
   const t = useT();
   const totalTime = timeWriting + timeImplementing + timeUntracked;
   const untrackedHours = Number((((timeUntracked || 0) / 3600000)).toFixed(2));
@@ -38,7 +41,20 @@ export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, t
           <span style={styles.statValue}>{formatDuration(timeWriting)}</span>
         </div>
         <div style={styles.stat}>
-          <span style={styles.statLabel}>{t('timer.implementing')}</span>
+          <div style={styles.statHeaderRow}>
+            <span style={styles.statLabel}>{t('timer.implementing')}</span>
+            {hasChatSessions && (
+              <button
+                type="button"
+                onClick={onRecalcImplementingTime}
+                disabled={isRecalculating}
+                style={styles.recalcButton}
+                title={t('timer.recalcTitle')}
+              >
+                {isRecalculating ? '⏳' : '🔄'}
+              </button>
+            )}
+          </div>
           <span style={styles.statValue}>{formatDuration(timeImplementing)}</span>
         </div>
         <div style={styles.stat}>
@@ -132,5 +148,21 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     color: 'var(--vscode-foreground)',
     lineHeight: 1.2,
+  },
+  recalcButton: {
+    background: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+    fontSize: '12px',
+    padding: '0 2px',
+    lineHeight: 1,
+    opacity: 0.7,
+    transition: 'opacity 0.15s',
+  },
+  statHeaderRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '4px',
   },
 };

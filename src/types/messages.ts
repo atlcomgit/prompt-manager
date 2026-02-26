@@ -47,7 +47,8 @@ export type WebviewToExtensionMessage =
 	| { type: 'getGlobalContext' }
 	| { type: 'saveGlobalContext'; context: string }
 	| { type: 'createBranch'; branch: string; projects: string[] }
-	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string };
+	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
+	| { type: 'recalcImplementingTime'; id: string };
 
 // ---- Messages FROM extension TO webview ----
 
@@ -81,4 +82,5 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptSaving'; id: string; saving: boolean }
 	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string }
-	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number };
+	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number }
+	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number };

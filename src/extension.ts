@@ -189,6 +189,23 @@ export function activate(context: vscode.ExtensionContext) {
 			if (lastId) {
 				const prompt = await storageService.getPrompt(lastId);
 				if (prompt?.content) {
+					// --- Branch mismatch check ---
+					if (prompt.projects.length > 0) {
+						const paths = workspaceService.getWorkspaceFolderPaths();
+						const mismatches = await gitService.getBranchMismatches(paths, prompt.projects, prompt.branch);
+						if (mismatches.length > 0) {
+							const details = mismatches.map(m => `Ветка проекта ${m.project} переключена на ${m.currentBranch}`).join('\n');
+							const answer = await vscode.window.showWarningMessage(
+								details,
+								{ modal: true },
+								'Продолжить',
+							);
+							if (answer !== 'Продолжить') {
+								return;
+							}
+						}
+					}
+
 					const globalContext = stateService.getGlobalAgentContext();
 					const parts: string[] = [];
 					try {

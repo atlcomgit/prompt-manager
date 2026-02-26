@@ -173,6 +173,41 @@ export class GitService {
 		return { success: errors.length === 0, errors };
 	}
 
+	/** Default branches that are considered "safe" (no warning needed) */
+	static readonly DEFAULT_ALLOWED_BRANCHES = new Set(['master', 'main', 'prod', 'develop', 'dev']);
+
+	/**
+	 * Check branches across projects and return mismatches.
+	 * A mismatch means the current branch is NOT in the allowed set
+	 * (DEFAULT_ALLOWED_BRANCHES + optional prompt branch).
+	 */
+	async getBranchMismatches(
+		projectPaths: Map<string, string>,
+		projectNames: string[],
+		promptBranch?: string,
+	): Promise<Array<{ project: string; currentBranch: string }>> {
+		const allowed = new Set(GitService.DEFAULT_ALLOWED_BRANCHES);
+		if (promptBranch?.trim()) {
+			allowed.add(promptBranch.trim());
+		}
+
+		const mismatches: Array<{ project: string; currentBranch: string }> = [];
+
+		for (const project of projectNames) {
+			const projectPath = projectPaths.get(project);
+			if (!projectPath) { continue; }
+
+			const currentBranch = await this.getCurrentBranch(projectPath);
+			if (!currentBranch) { continue; } // not a git repo — skip
+
+			if (!allowed.has(currentBranch)) {
+				mismatches.push({ project, currentBranch });
+			}
+		}
+
+		return mismatches;
+	}
+
 	/** Generate a branch name from a task number */
 	static suggestBranchName(taskNumber: string): string {
 		if (!taskNumber) return '';

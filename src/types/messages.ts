@@ -83,4 +83,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string }
 	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number }
+	| { type: 'contentEditorOpened' }
+	| { type: 'contentEditorClosed'; reverted: boolean; content: string }
+	| { type: 'contentEditorSaved' }
 	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number };

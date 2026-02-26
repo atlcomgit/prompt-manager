@@ -142,6 +142,14 @@ export const EditorApp: React.FC = () => {
   const activeSaveIdRef = useRef<string | null>(null);
   const recalcTriggeredForRef = useRef<string>('');
 
+  // Auto-save refs
+  const promptRef = useRef<Prompt>(prompt);
+  const isSavingRef = useRef(false);
+  const autoSaveTimerRef = useRef<number | null>(null);
+  const userChangeCounterRef = useRef(0);
+  const saveStartCounterRef = useRef(0);
+  const isExternalEditorOpenRef = useRef(false);
+
   // Time tracking
   const openedAtRef = useRef<number>(Date.now());
   const lastFocusRef = useRef<number>(Date.now());
@@ -341,13 +349,40 @@ export const EditorApp: React.FC = () => {
     currentPromptIdRef.current = (prompt.id || '__new__').trim() || '__new__';
   }, [prompt.id]);
 
+  // Keep refs in sync with state
+  useEffect(() => { promptRef.current = prompt; }, [prompt]);
+  useEffect(() => { isSavingRef.current = isSaving; }, [isSaving]);
+
+  // Cleanup auto-save timer on unmount
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimerRef.current) {
+        window.clearTimeout(autoSaveTimerRef.current);
+      }
+    };
+  }, []);
+
   const handleMessage = useCallback((msg: any) => {
     switch (msg.type) {
       case 'prompt':
         if (msg.prompt) {
-          setPrompt(msg.prompt);
+          const userChangedAfterSave = userChangeCounterRef.current !== saveStartCounterRef.current;
+          if (userChangedAfterSave && saveStartCounterRef.current > 0) {
+            // User changed something after save started — merge only server-generated fields, keep user edits
+            setPrompt(prev => ({
+              ...prev,
+              id: msg.prompt.id || prev.id,
+              title: prev.title || msg.prompt.title,
+              description: prev.description || msg.prompt.description,
+              updatedAt: msg.prompt.updatedAt,
+              chatSessionIds: msg.prompt.chatSessionIds || prev.chatSessionIds,
+            }));
+            // Keep isDirty = true so next auto-save picks up user's changes
+          } else {
+            setPrompt(msg.prompt);
+            setIsDirty(false);
+          }
           setIsLoaded(true);
-          setIsDirty(false);
           setIsSaving(false);
           activeSaveIdRef.current = null;
           if ((msg.prompt.chatSessionIds || []).length > 0) {
@@ -365,7 +400,10 @@ export const EditorApp: React.FC = () => {
         break;
       case 'promptSaved':
         setIsSaving(false);
-        setIsDirty(false);
+        // Only clear isDirty if user hasn't changed anything since save started
+        if (userChangeCounterRef.current === saveStartCounterRef.current) {
+          setIsDirty(false);
+        }
         activeSaveIdRef.current = null;
         break;
       case 'promptSaving':
@@ -384,6 +422,8 @@ export const EditorApp: React.FC = () => {
         }
         break;
       case 'promptContentUpdated':
+        // Content updated from external editor — show changes but do NOT auto-save
+        // (user decides when to save in the external editor)
         setPrompt(prev => {
           const nextContent = msg.content || '';
           const writingDeltaMs = Number.isFinite(msg.writingDeltaMs) ? Math.max(0, Number(msg.writingDeltaMs)) : 0;
@@ -393,7 +433,6 @@ export const EditorApp: React.FC = () => {
             }
             return { ...prev, timeSpentWriting: (prev.timeSpentWriting || 0) + writingDeltaMs };
           }
-          setIsDirty(true);
           return {
             ...prev,
             content: nextContent,
@@ -401,6 +440,28 @@ export const EditorApp: React.FC = () => {
           };
         });
         openedAtRef.current = Date.now();
+        break;
+      case 'contentEditorOpened':
+        isExternalEditorOpenRef.current = true;
+        break;
+      case 'contentEditorClosed':
+        isExternalEditorOpenRef.current = false;
+        if (msg.reverted && msg.content !== undefined) {
+          // External editor was closed without saving — revert content to saved version
+          setPrompt(prev => {
+            if (prev.content === msg.content) {
+              return prev;
+            }
+            return { ...prev, content: msg.content };
+          });
+          setIsDirty(false);
+        }
+        break;
+      case 'contentEditorSaved':
+        // External editor saved — trigger auto-save of the full prompt
+        userChangeCounterRef.current++;
+        setIsDirty(true);
+        scheduleAutoSave(50);
         break;
       case 'workspaceFolders':
         setWorkspaceFolders(msg.folders);
@@ -432,15 +493,21 @@ export const EditorApp: React.FC = () => {
         break;
       case 'generatedTitle':
         setPrompt(prev => ({ ...prev, title: msg.title }));
+        userChangeCounterRef.current++;
         setIsDirty(true);
+        scheduleAutoSave(50);
         break;
       case 'generatedDescription':
         setPrompt(prev => ({ ...prev, description: msg.description }));
+        userChangeCounterRef.current++;
         setIsDirty(true);
+        scheduleAutoSave(50);
         break;
       case 'generatedSlug':
         setPrompt(prev => ({ ...prev, id: msg.slug }));
+        userChangeCounterRef.current++;
         setIsDirty(true);
+        scheduleAutoSave(50);
         break;
       case 'improvedPromptText':
         setPrompt(prev => {
@@ -465,7 +532,9 @@ export const EditorApp: React.FC = () => {
             ...prev,
             contextFiles: [...prev.contextFiles, ...msg.files],
           }));
+          userChangeCounterRef.current++;
           setIsDirty(true);
+          scheduleAutoSave(50);
         }
         break;
       case 'branches':
@@ -575,10 +644,50 @@ export const EditorApp: React.FC = () => {
     return () => observer.disconnect();
   }, []);
 
+  /** Schedule an auto-save with the given delay. Cancels any pending auto-save. */
+  const scheduleAutoSave = (delayMs: number) => {
+    if (autoSaveTimerRef.current) {
+      window.clearTimeout(autoSaveTimerRef.current);
+    }
+    autoSaveTimerRef.current = window.setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      // If already saving, reschedule
+      if (isSavingRef.current) {
+        scheduleAutoSave(1500);
+        return;
+      }
+      const currentPrompt = promptRef.current;
+      const timeSpent = Date.now() - openedAtRef.current;
+      const updatedPrompt: Prompt = {
+        ...currentPrompt,
+        timeSpentWriting: currentPrompt.timeSpentWriting + timeSpent,
+      };
+      openedAtRef.current = Date.now();
+      saveStartCounterRef.current = userChangeCounterRef.current;
+      activeSaveIdRef.current = (updatedPrompt.id || '__new__').trim() || '__new__';
+      setIsSaving(true);
+      setIsDirty(false);
+      vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
+    }, delayMs);
+  };
+
+  /** Update a text field with debounced auto-save (1.5 s). */
   const updateField = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
     setPrompt(prev => ({ ...prev, [field]: value }));
     if (field !== 'timeSpentWriting' && field !== 'timeSpentImplementing') {
+      userChangeCounterRef.current++;
       setIsDirty(true);
+      scheduleAutoSave(1500);
+    }
+  };
+
+  /** Update a select/toggle field with near-immediate auto-save. */
+  const updateFieldAndSaveNow = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
+    setPrompt(prev => ({ ...prev, [field]: value }));
+    if (field !== 'timeSpentWriting' && field !== 'timeSpentImplementing') {
+      userChangeCounterRef.current++;
+      setIsDirty(true);
+      scheduleAutoSave(50);
     }
   };
 
@@ -802,7 +911,7 @@ export const EditorApp: React.FC = () => {
 
               <StatusSelect
                 value={prompt.status}
-                onChange={v => updateField('status', v as PromptStatus)}
+                onChange={v => handleSetStatus(v as PromptStatus)}
               />
             </>
           ))}
@@ -813,7 +922,7 @@ export const EditorApp: React.FC = () => {
                 label={t('editor.projects')}
                 selected={prompt.projects}
                 options={workspaceFolders.map(f => ({ id: f, name: f }))}
-                onChange={v => updateField('projects', v)}
+                onChange={v => updateFieldAndSaveNow('projects', v)}
                 placeholder={t('editor.projectsPlaceholder')}
               />
 
@@ -1026,7 +1135,7 @@ export const EditorApp: React.FC = () => {
                 label={t('editor.languages')}
                 selected={prompt.languages}
                 options={availableLanguages}
-                onChange={v => updateField('languages', v)}
+                onChange={v => updateFieldAndSaveNow('languages', v)}
                 allowCustom
                 placeholder={t('editor.langPlaceholder')}
               />
@@ -1035,7 +1144,7 @@ export const EditorApp: React.FC = () => {
                 label={t('editor.frameworks')}
                 selected={prompt.frameworks}
                 options={availableFrameworks}
-                onChange={v => updateField('frameworks', v)}
+                onChange={v => updateFieldAndSaveNow('frameworks', v)}
                 allowCustom
                 placeholder={t('editor.frameworksPlaceholder')}
               />
@@ -1048,7 +1157,7 @@ export const EditorApp: React.FC = () => {
                 label={t('editor.skills')}
                 selected={prompt.skills}
                 options={availableSkills}
-                onChange={v => updateField('skills', v)}
+                onChange={v => updateFieldAndSaveNow('skills', v)}
                 placeholder={t('editor.skillsPlaceholder')}
               />
 
@@ -1056,7 +1165,7 @@ export const EditorApp: React.FC = () => {
                 label={t('editor.mcpTools')}
                 selected={prompt.mcpTools}
                 options={availableMcpTools}
-                onChange={v => updateField('mcpTools', v)}
+                onChange={v => updateFieldAndSaveNow('mcpTools', v)}
                 placeholder={t('editor.mcpPlaceholder')}
               />
 
@@ -1064,7 +1173,7 @@ export const EditorApp: React.FC = () => {
                 label={t('editor.hooks')}
                 selected={prompt.hooks}
                 options={availableHooks}
-                onChange={v => updateField('hooks', v)}
+                onChange={v => updateFieldAndSaveNow('hooks', v)}
                 placeholder={t('editor.hooksPlaceholder')}
               />
 
@@ -1072,7 +1181,7 @@ export const EditorApp: React.FC = () => {
                 <label style={styles.label}>{t('editor.aiModel')}</label>
                 <select
                   value={prompt.model}
-                  onChange={e => updateField('model', e.target.value)}
+                  onChange={e => updateFieldAndSaveNow('model', e.target.value)}
                   style={styles.select}
                 >
                   <option value="">{t('common.auto')}</option>
@@ -1092,7 +1201,7 @@ export const EditorApp: React.FC = () => {
                         ...styles.toggleBtn,
                         ...(prompt.chatMode === mode ? styles.toggleBtnActive : {}),
                       }}
-                      onClick={() => updateField('chatMode', mode)}
+                      onClick={() => updateFieldAndSaveNow('chatMode', mode)}
                       title={mode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
                     >
                       {mode === 'agent' ? `🤖 ${t('editor.chatModeAgent')}` : `📋 ${t('editor.chatModePlan')}`}
@@ -1118,7 +1227,7 @@ export const EditorApp: React.FC = () => {
                         style={styles.removeBtn}
                         onClick={() => {
                           const updated = prompt.contextFiles.filter((_, idx) => idx !== i);
-                          updateField('contextFiles', updated);
+                          updateFieldAndSaveNow('contextFiles', updated);
                         }}
                       >
                         ✕

@@ -544,6 +544,10 @@ export class EditorPanelManager {
 			}),
 			vscode.workspace.onDidSaveTextDocument((document) => {
 				void this.syncPromptContentFromEditorDocument(document);
+				void this.handleContentEditorSaved(document);
+			}),
+			vscode.workspace.onDidCloseTextDocument((document) => {
+				void this.handleContentEditorClosed(document);
 			})
 		);
 	}
@@ -678,6 +682,8 @@ export class EditorPanelManager {
 			return;
 		}
 
+		const panel = openPanels.get(panelKey);
+
 		const fileUri = this.storageService.getPromptMarkdownUri(currentPrompt.id);
 		const existingBinding = this.contentEditorByPanelKey.get(panelKey);
 		if (existingBinding) {
@@ -696,6 +702,9 @@ export class EditorPanelManager {
 				this.panelKeyByContentEditorUri.set(existingUri.toString(), panelKey);
 			}
 			await vscode.window.showTextDocument(existingUri, { preview: false, preserveFocus: false });
+			if (panel) {
+				void panel.webview.postMessage({ type: 'contentEditorOpened' } satisfies ExtensionToWebviewMessage);
+			}
 			return;
 		}
 
@@ -709,6 +718,65 @@ export class EditorPanelManager {
 
 		const doc = await vscode.workspace.openTextDocument(fileUri);
 		await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false });
+
+		if (panel) {
+			void panel.webview.postMessage({ type: 'contentEditorOpened' } satisfies ExtensionToWebviewMessage);
+		}
+	}
+
+	/**
+	 * Called when a text document tracked as a content editor is closed.
+	 * If the user closed without saving, revert the webview content to the last saved version.
+	 */
+	private async handleContentEditorClosed(document: vscode.TextDocument): Promise<void> {
+		const uriKey = document.uri.toString();
+		const panelKey = this.panelKeyByContentEditorUri.get(uriKey);
+		if (!panelKey) {
+			return;
+		}
+
+		const panel = openPanels.get(panelKey);
+		const binding = this.contentEditorByPanelKey.get(panelKey);
+
+		// Read the saved content from file to determine if there was a revert
+		let savedContent = '';
+		try {
+			const fileBytes = await vscode.workspace.fs.readFile(document.uri);
+			savedContent = Buffer.from(fileBytes).toString('utf-8');
+		} catch {
+			// File may not exist anymore
+		}
+
+		const lastSyncedContent = binding?.lastSyncedContent ?? '';
+		const reverted = lastSyncedContent !== savedContent;
+
+		// Clean up binding
+		this.clearContentEditorBinding(panelKey);
+
+		if (panel) {
+			void panel.webview.postMessage({
+				type: 'contentEditorClosed',
+				reverted,
+				content: savedContent,
+			} satisfies ExtensionToWebviewMessage);
+		}
+	}
+
+	/**
+	 * Called when a content editor document is saved.
+	 * Notifies the webview to trigger a prompt save.
+	 */
+	private async handleContentEditorSaved(document: vscode.TextDocument): Promise<void> {
+		const uriKey = document.uri.toString();
+		const panelKey = this.panelKeyByContentEditorUri.get(uriKey);
+		if (!panelKey) {
+			return;
+		}
+
+		const panel = openPanels.get(panelKey);
+		if (panel) {
+			void panel.webview.postMessage({ type: 'contentEditorSaved' } satisfies ExtensionToWebviewMessage);
+		}
 	}
 
 	/** Open or focus an editor panel for a prompt */
@@ -1227,6 +1295,24 @@ export class EditorPanelManager {
 			case 'startChat': {
 				let prompt: Prompt | null = msg.prompt ? { ...msg.prompt } : await this.storageService.getPrompt(msg.id);
 				if (prompt && prompt.content) {
+					// --- Branch mismatch check ---
+					if (prompt.projects.length > 0) {
+						const paths = this.workspaceService.getWorkspaceFolderPaths();
+						const mismatches = await this.gitService.getBranchMismatches(paths, prompt.projects, prompt.branch);
+						if (mismatches.length > 0) {
+							const details = mismatches.map(m => `Ветка проекта ${m.project} переключена на ${m.currentBranch}`).join('\n');
+							const answer = await vscode.window.showWarningMessage(
+								details,
+								{ modal: true },
+								'Продолжить',
+							);
+							if (answer !== 'Продолжить') {
+								postMessage({ type: 'chatStarted', promptId: prompt.id });
+								break;
+							}
+						}
+					}
+
 					const bindSessionToPrompt = async (sessionId: string): Promise<void> => {
 						const normalizedSessionId = (sessionId || '').trim();
 						if (!normalizedSessionId) {
@@ -1700,6 +1786,23 @@ export class EditorPanelManager {
 				if (msg.id) {
 					const promptFromStorage = await this.storageService.getPrompt(msg.id);
 					if (promptFromStorage) {
+						// --- Branch mismatch check ---
+						if (promptFromStorage.projects.length > 0) {
+							const paths = this.workspaceService.getWorkspaceFolderPaths();
+							const mismatches = await this.gitService.getBranchMismatches(paths, promptFromStorage.projects, promptFromStorage.branch);
+							if (mismatches.length > 0) {
+								const details = mismatches.map(m => `Ветка проекта ${m.project} переключена на ${m.currentBranch}`).join('\n');
+								const answer = await vscode.window.showWarningMessage(
+									details,
+									{ modal: true },
+									'Продолжить',
+								);
+								if (answer !== 'Продолжить') {
+									break;
+								}
+							}
+						}
+
 						const existingSessionIds: string[] = [];
 						for (const sessionId of promptFromStorage.chatSessionIds || []) {
 							if (await this.stateService.hasChatSession(sessionId)) {

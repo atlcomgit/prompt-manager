@@ -149,6 +149,8 @@ export const EditorApp: React.FC = () => {
   const userChangeCounterRef = useRef(0);
   const saveStartCounterRef = useRef(0);
   const isExternalEditorOpenRef = useRef(false);
+  /** true once the prompt has been saved at least once (manually or loaded from storage) */
+  const hasBeenSavedRef = useRef(false);
 
   // Time tracking
   const openedAtRef = useRef<number>(Date.now());
@@ -385,6 +387,10 @@ export const EditorApp: React.FC = () => {
           setIsLoaded(true);
           setIsSaving(false);
           activeSaveIdRef.current = null;
+          // Mark as saved if prompt has an id (loaded from storage or just saved)
+          if (msg.prompt.id) {
+            hasBeenSavedRef.current = true;
+          }
           if ((msg.prompt.chatSessionIds || []).length > 0) {
             startChatLockRef.current = false;
             setIsStartingChat(false);
@@ -518,10 +524,14 @@ export const EditorApp: React.FC = () => {
             timeSpentWriting: (prev.timeSpentWriting || 0) + writingDeltaMs,
           };
           openedAtRef.current = Date.now();
-          activeSaveIdRef.current = (updatedPrompt.id || '__new__').trim() || '__new__';
-          setIsSaving(true);
-          setIsDirty(false);
-          vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
+          if (hasBeenSavedRef.current) {
+            activeSaveIdRef.current = (updatedPrompt.id || '__new__').trim() || '__new__';
+            setIsSaving(true);
+            setIsDirty(false);
+            vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
+          } else {
+            setIsDirty(true);
+          }
           return updatedPrompt;
         });
         setIsImprovingPromptText(false);
@@ -646,11 +656,19 @@ export const EditorApp: React.FC = () => {
 
   /** Schedule an auto-save with the given delay. Cancels any pending auto-save. */
   const scheduleAutoSave = (delayMs: number) => {
+    // Never auto-save a prompt that hasn't been saved manually at least once
+    if (!hasBeenSavedRef.current) {
+      return;
+    }
     if (autoSaveTimerRef.current) {
       window.clearTimeout(autoSaveTimerRef.current);
     }
     autoSaveTimerRef.current = window.setTimeout(() => {
       autoSaveTimerRef.current = null;
+      // Double-check in case ref was reset between scheduling and execution
+      if (!hasBeenSavedRef.current) {
+        return;
+      }
       // If already saving, reschedule
       if (isSavingRef.current) {
         scheduleAutoSave(1500);
@@ -709,6 +727,11 @@ export const EditorApp: React.FC = () => {
         : 'manual';
     const updatedPrompt = buildPromptForSave();
 
+    // First manual save unlocks auto-save for this prompt
+    if (normalizedSource === 'manual' || normalizedSource === 'status-change') {
+      hasBeenSavedRef.current = true;
+    }
+
     activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
     vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: normalizedSource });
@@ -718,6 +741,7 @@ export const EditorApp: React.FC = () => {
     if (startChatLockRef.current || isStartingChat || !prompt.content || prompt.chatSessionIds.length > 0) {
       return;
     }
+    hasBeenSavedRef.current = true;
     const updatedPrompt = buildPromptForSave();
     startChatLockRef.current = true;
     setIsStartingChat(true);
@@ -747,6 +771,11 @@ export const EditorApp: React.FC = () => {
       status,
     };
     setPrompt(updatedPrompt);
+    // For never-saved prompts, just mark dirty — don't trigger save
+    if (!hasBeenSavedRef.current) {
+      setIsDirty(true);
+      return;
+    }
     activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
     setIsDirty(false);

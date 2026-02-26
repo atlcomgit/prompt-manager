@@ -855,8 +855,14 @@ export const EditorApp: React.FC = () => {
                 <div style={styles.promptFieldHeader}>
                   <div style={styles.promptFieldLabelRow}>
                     <label style={styles.label}>{t('editor.promptText')}</label>
-                    <span style={styles.promptLoadingIndicator} aria-live="polite" aria-label={isSuggestionLoading ? t('textArea.suggestTooltip') : ''}>
-                      {isSuggestionLoading ? '⏳' : ''}
+                    <span
+                      style={styles.promptLoadingIndicator}
+                      aria-live="polite"
+                      aria-label={isImprovingPromptText
+                        ? t('editor.generating')
+                        : (isSuggestionLoading ? t('textArea.suggestTooltip') : '')}
+                    >
+                      {isImprovingPromptText ? '⏳' : (isSuggestionLoading ? '⏳' : '')}
                     </span>
                   </div>
                   <div style={styles.promptFieldActions}>

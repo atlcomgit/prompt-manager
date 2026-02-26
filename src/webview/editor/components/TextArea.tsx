@@ -225,6 +225,7 @@ export const TextArea: React.FC<Props> = ({
   const [isRequesting, setIsRequesting] = useState(false);
   const [allVariants, setAllVariants] = useState<string[]>([]);
   const [currentVariantIdx, setCurrentVariantIdx] = useState(0);
+  const lastHandledSuggestionSignalRef = useRef<number>(0);
 
   // Show ghost text when suggestion arrives
   useEffect(() => {
@@ -237,6 +238,11 @@ export const TextArea: React.FC<Props> = ({
       setAllVariants([suggestion]);
       setCurrentVariantIdx(0);
       setGhostText(suggestion);
+      setIsRequesting(false);
+    } else {
+      setGhostText('');
+      setAllVariants([]);
+      setCurrentVariantIdx(0);
       setIsRequesting(false);
     }
   }, [suggestion, suggestions]);
@@ -408,9 +414,15 @@ export const TextArea: React.FC<Props> = ({
     if (!requestSuggestionSignal || !onRequestSuggestion || !textareaRef.current) {
       return;
     }
+    if (lastHandledSuggestionSignalRef.current === requestSuggestionSignal) {
+      return;
+    }
+    lastHandledSuggestionSignalRef.current = requestSuggestionSignal;
+
     const pos = textareaRef.current.selectionStart;
     const textBefore = value.substring(0, pos);
     if (textBefore.trim().length === 0) {
+      setIsRequesting(false);
       return;
     }
     setIsRequesting(true);

@@ -77,6 +77,23 @@ export interface Prompt extends PromptConfig {
 	report: string;
 }
 
+export type PromptHistoryReason =
+	| 'manual'
+	| 'autosave'
+	| 'status-change'
+	| 'switch'
+	| 'start-chat'
+	| 'restore'
+	| 'system';
+
+export interface PromptHistoryEntry {
+	id: string;
+	promptId: string;
+	createdAt: string;
+	reason: PromptHistoryReason;
+	prompt: Prompt;
+}
+
 /** Default prompt config */
 export function createDefaultPrompt(id: string = ''): Prompt {
 	const now = new Date().toISOString();
@@ -132,6 +149,7 @@ export interface SidebarState {
 	sortField: SortField;
 	sortOrder: SortOrder;
 	groupBy: GroupBy;
+	collapsedGroups: Record<string, boolean>;
 	panelWidth: number;
 }
 
@@ -150,6 +168,7 @@ export function createDefaultSidebarState(): SidebarState {
 		sortField: 'createdAt',
 		sortOrder: 'desc',
 		groupBy: 'none',
+		collapsedGroups: {},
 		panelWidth: 300,
 	};
 }

@@ -518,7 +518,10 @@ export class EditorPanelManager {
 				promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
 			}
 
-			await this.storageService.savePrompt(promptToSave);
+			await this.storageService.savePrompt(promptToSave, {
+				historyReason: 'switch',
+				forceHistory: true,
+			});
 			this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
 			if (promptToSave.id && promptToSave.id !== saveStateId) {
 				this._onDidSaveStateChange.fire({ id: promptToSave.id, saving: false });
@@ -888,7 +891,7 @@ export class EditorPanelManager {
 				? `⚡● ${prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt')}`
 				: `⚡ ${prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt')}`;
 			singletonPanel.reveal();
-			void singletonPanel.webview.postMessage({ type: 'prompt', prompt });
+			void singletonPanel.webview.postMessage({ type: 'prompt', prompt, reason: 'open' });
 			return;
 		}
 
@@ -1094,7 +1097,7 @@ export class EditorPanelManager {
 					}
 				}
 
-				postMessage({ type: 'prompt', prompt: currentPrompt });
+				postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'open' });
 
 				// Send global agent context
 				const globalCtx = this.stateService.getGlobalAgentContext();
@@ -1179,15 +1182,22 @@ export class EditorPanelManager {
 						promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
 					}
 
-					const saved = await this.storageService.savePrompt(promptToSave);
+					const saved = await this.storageService.savePrompt(promptToSave, {
+						historyReason: saveSource,
+					});
 					setIsDirty(false);
 
-					// Update current prompt reference
-					Object.assign(currentPrompt, promptToSave);
-					this.panelPromptRefs.set(panelKey, currentPrompt);
+					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();
+					const shouldApplyToCurrentPanel = !normalizedCurrentPromptId || normalizedCurrentPromptId === promptToSave.id;
+
+					if (shouldApplyToCurrentPanel) {
+						// Update current prompt reference
+						Object.assign(currentPrompt, promptToSave);
+						this.panelPromptRefs.set(panelKey, currentPrompt);
+					}
 
 					// Update panel tracking
-					if (panelKey.startsWith('new-')) {
+					if (shouldApplyToCurrentPanel && panelKey.startsWith('new-')) {
 						openPanels.delete(panelKey);
 						openPanels.set(promptToSave.id, panel);
 						const dirtySetter = this.panelDirtySetters.get(panelKey);
@@ -1207,14 +1217,18 @@ export class EditorPanelManager {
 						this.rebindContentEditorPanelKey(panelKey, promptToSave.id);
 					}
 
-					const stateKey = panelKey.startsWith('new-') ? promptToSave.id : panelKey;
-					this.panelDirtyFlags.set(stateKey, false);
-					this.panelLatestPromptSnapshots.set(stateKey, null);
-					this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptToSave)));
+					if (shouldApplyToCurrentPanel) {
+						const stateKey = panelKey.startsWith('new-') ? promptToSave.id : panelKey;
+						this.panelDirtyFlags.set(stateKey, false);
+						this.panelLatestPromptSnapshots.set(stateKey, null);
+						this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptToSave)));
+					}
 
-					panel.title = `⚡ ${saved.title || saved.id}`;
-					postMessage({ type: 'promptSaved', prompt: saved });
-					postMessage({ type: 'prompt', prompt: promptToSave });
+					if (shouldApplyToCurrentPanel) {
+						panel.title = `⚡ ${saved.title || saved.id}`;
+						postMessage({ type: 'promptSaved', prompt: saved });
+						postMessage({ type: 'prompt', prompt: promptToSave, reason: 'save' });
+					}
 					await this.broadcastAvailableLanguagesAndFrameworks();
 
 					this._onDidSave.fire(promptToSave.id);
@@ -1234,6 +1248,57 @@ export class EditorPanelManager {
 
 			case 'openPromptContentInEditor': {
 				await this.openPromptContentInEditor(panelKey, currentPrompt, msg.content || '');
+				break;
+			}
+
+			case 'showPromptHistory': {
+				const promptId = (msg.id || currentPrompt.id || '').trim();
+				if (!promptId) {
+					postMessage({ type: 'error', message: 'Сначала сохраните промпт, затем откройте историю.' });
+					break;
+				}
+
+				const history = await this.storageService.listPromptHistory(promptId);
+				if (history.length === 0) {
+					vscode.window.showInformationMessage('История для этого промпта пуста.');
+					break;
+				}
+
+				const items = history.map(entry => {
+					const when = new Date(entry.createdAt);
+					const label = `${when.toLocaleString('ru-RU')} • ${entry.reason}`;
+					return {
+						label,
+						description: entry.id,
+						entryId: entry.id,
+					};
+				});
+
+				const selected = await vscode.window.showQuickPick(items, {
+					placeHolder: 'Выберите ревизию для полного восстановления',
+					matchOnDescription: true,
+				});
+
+				if (!selected) {
+					break;
+				}
+
+				const restored = await this.storageService.restorePromptHistory(promptId, selected.entryId);
+				if (!restored) {
+					postMessage({ type: 'error', message: 'Не удалось восстановить выбранную ревизию.' });
+					break;
+				}
+
+				Object.assign(currentPrompt, restored);
+				this.panelPromptRefs.set(panelKey, currentPrompt);
+				setIsDirty(false);
+				this.panelDirtyFlags.set(panelKey, false);
+				this.panelLatestPromptSnapshots.set(panelKey, null);
+				this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(restored)));
+				panel.title = `⚡ ${restored.title || restored.id}`;
+				postMessage({ type: 'prompt', prompt: restored, reason: 'open' });
+				await this.broadcastAvailableLanguagesAndFrameworks();
+				this._onDidSave.fire(restored.id);
 				break;
 			}
 
@@ -1334,7 +1399,7 @@ export class EditorPanelManager {
 						}
 
 						promptFromStorage.chatSessionIds = updatedChatSessionIds;
-						await this.storageService.savePrompt(promptFromStorage);
+						await this.storageService.savePrompt(promptFromStorage, { historyReason: 'start-chat' });
 						Object.assign(prompt, promptFromStorage);
 						Object.assign(currentPrompt, promptFromStorage);
 						this._onDidSave.fire(promptFromStorage.id);
@@ -1355,7 +1420,7 @@ export class EditorPanelManager {
 							: (existingBeforeChat.timeSpentUntracked || 0);
 						prompt.chatSessionIds = prompt.chatSessionIds?.length ? prompt.chatSessionIds : (existingBeforeChat.chatSessionIds || []);
 					}
-					await this.storageService.savePrompt(prompt);
+					await this.storageService.savePrompt(prompt, { historyReason: 'start-chat' });
 					Object.assign(currentPrompt, prompt);
 					this._onDidSave.fire(prompt.id);
 
@@ -1399,7 +1464,7 @@ export class EditorPanelManager {
 					// Change status to in-progress and save
 					if (prompt.status !== 'in-progress') {
 						prompt.status = 'in-progress';
-						await this.storageService.savePrompt(prompt);
+						await this.storageService.savePrompt(prompt, { historyReason: 'status-change' });
 						Object.assign(currentPrompt, prompt);
 						setIsDirty(false);
 						this._onDidSave.fire(prompt.id);

@@ -382,14 +382,50 @@ export const EditorApp: React.FC = () => {
     switch (msg.type) {
       case 'prompt':
         if (msg.prompt) {
+          const incomingPromptId = (String(msg.prompt.id || '__new__').trim() || '__new__');
+          const currentPromptId = (currentPromptIdRef.current || '__new__').trim() || '__new__';
+          const activeSaveId = (activeSaveIdRef.current || '').trim();
+          const reason: 'open' | 'save' | 'sync' | undefined = msg.reason;
+          const isOpenPayload = reason === 'open';
+          const isRelatedToCurrentPrompt = incomingPromptId === currentPromptId || (activeSaveId !== '' && incomingPromptId === activeSaveId);
+
+          if (!isOpenPayload && !isRelatedToCurrentPrompt) {
+            break;
+          }
+
           if (autoSaveTimerRef.current) {
             window.clearTimeout(autoSaveTimerRef.current);
             autoSaveTimerRef.current = null;
           }
+
+          if (isOpenPayload) {
+            setPrompt(msg.prompt);
+            currentPromptIdRef.current = incomingPromptId;
+            hasBeenSavedRef.current = Boolean(msg.prompt.id);
+            userChangeCounterRef.current = 0;
+            saveStartCounterRef.current = 0;
+            setIsDirty(false);
+            setIsLoaded(true);
+            setIsSaving(false);
+            activeSaveIdRef.current = null;
+            if ((msg.prompt.chatSessionIds || []).length > 0) {
+              startChatLockRef.current = false;
+              setIsStartingChat(false);
+              const pid = String(msg.prompt.id || '').trim();
+              if (pid && recalcTriggeredForRef.current !== pid) {
+                recalcTriggeredForRef.current = pid;
+                vscode.postMessage({ type: 'recalcImplementingTime', id: pid });
+                setIsRecalculating(true);
+              }
+            }
+            break;
+          }
+
           // Reset autosave lock state per prompt to avoid inheriting from previous prompt
           hasBeenSavedRef.current = Boolean(msg.prompt.id);
           const userChangedAfterSave = userChangeCounterRef.current !== saveStartCounterRef.current;
-          if (userChangedAfterSave && saveStartCounterRef.current > 0) {
+          const shouldMergeAfterSave = reason === 'save' && userChangedAfterSave && saveStartCounterRef.current > 0;
+          if (shouldMergeAfterSave) {
             // User changed something after save started — merge only server-generated fields, keep user edits
             setPrompt(prev => ({
               ...prev,
@@ -779,6 +815,14 @@ export const EditorApp: React.FC = () => {
     }
     setIsRecalculating(true);
     vscode.postMessage({ type: 'recalcImplementingTime', id: prompt.id });
+  };
+
+  const handleShowHistory = () => {
+    const promptId = (prompt.id || '').trim();
+    if (!promptId) {
+      return;
+    }
+    vscode.postMessage({ type: 'showPromptHistory', id: promptId });
   };
 
   const handleSetStatus = (status: PromptStatus) => {
@@ -1362,6 +1406,7 @@ export const EditorApp: React.FC = () => {
       {/* Action bar */}
       <ActionBar
         onSave={() => handleSave('manual')}
+        onShowHistory={handleShowHistory}
         onStartChat={handleStartChat}
         onOpenChat={handleOpenChat}
         onMarkCompleted={() => handleSetStatus('completed')}

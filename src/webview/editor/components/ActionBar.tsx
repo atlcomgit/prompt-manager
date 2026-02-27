@@ -3,6 +3,7 @@ import { useT } from '../../shared/i18n';
 
 interface Props {
   onSave: () => void;
+  onShowHistory: () => void;
   onStartChat: () => void;
   onOpenChat: () => void;
   onMarkCompleted: () => void;
@@ -16,7 +17,7 @@ interface Props {
 }
 
 export const ActionBar: React.FC<Props> = ({
-  onSave, onStartChat, onOpenChat, onMarkCompleted, onMarkStopped, showStatusActions, hasChatSession, isDirty, isSaving, isStartingChat, hasContent,
+  onSave, onShowHistory, onStartChat, onOpenChat, onMarkCompleted, onMarkStopped, showStatusActions, hasChatSession, isDirty, isSaving, isStartingChat, hasContent,
 }) => {
   const t = useT();
   const startChatDisabled = !hasContent || isStartingChat;
@@ -29,6 +30,15 @@ export const ActionBar: React.FC<Props> = ({
           disabled={isSaving}
         >
           {isSaving ? t('actions.saving') : t('actions.save')}
+        </button>
+
+        <button
+          style={{ ...styles.btn, ...styles.btnChat }}
+          onClick={onShowHistory}
+          disabled={isSaving}
+          title="История версий"
+        >
+          🕘 История
         </button>
 
         {hasChatSession ? (

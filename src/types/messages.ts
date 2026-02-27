@@ -48,13 +48,14 @@ export type WebviewToExtensionMessage =
 	| { type: 'saveGlobalContext'; context: string }
 	| { type: 'createBranch'; branch: string; projects: string[] }
 	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
+	| { type: 'showPromptHistory'; id: string }
 	| { type: 'recalcImplementingTime'; id: string };
 
 // ---- Messages FROM extension TO webview ----
 
 export type ExtensionToWebviewMessage =
 	| { type: 'prompts'; prompts: PromptConfig[] }
-	| { type: 'prompt'; prompt: Prompt | null }
+	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync' }
 	| { type: 'promptSaved'; prompt: PromptConfig }
 	| { type: 'promptDeleted'; id: string }
 	| { type: 'promptDuplicated'; prompt: PromptConfig }

@@ -1,13 +1,16 @@
-import React, { useState } from 'react';
-import type { PromptConfig } from '../../../types/prompt';
+import React from 'react';
+import type { GroupBy, PromptConfig } from '../../../types/prompt';
 import { PromptItem } from './PromptItem';
 import { useT } from '../../shared/i18n';
 
 interface Props {
   groups: Record<string, PromptConfig[]>;
+  groupBy: GroupBy;
+  collapsedGroups: Record<string, boolean>;
   selectedId: string | null;
   savingPromptIds?: string[];
   isLoading?: boolean;
+  onToggleGroup: (name: string) => void;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
   onDuplicate: (id: string) => void;
@@ -16,16 +19,23 @@ interface Props {
 }
 
 export const PromptList: React.FC<Props> = ({
-  groups, selectedId, savingPromptIds = [], isLoading, onOpen, onDelete, onDuplicate, onToggleFavorite, onExport,
+  groups,
+  groupBy,
+  collapsedGroups,
+  selectedId,
+  savingPromptIds = [],
+  isLoading,
+  onToggleGroup,
+  onOpen,
+  onDelete,
+  onDuplicate,
+  onToggleFavorite,
+  onExport,
 }) => {
   const t = useT();
   const groupNames = Object.keys(groups);
   const hasGroups = !(groupNames.length === 1 && groupNames[0] === '');
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-
-  const toggleGroup = (name: string) => {
-    setCollapsed(prev => ({ ...prev, [name]: !prev[name] }));
-  };
+  const makeGroupCollapseKey = (group: GroupBy, name: string): string => `${group}::${name}`;
 
   if (isLoading) {
     return (
@@ -70,13 +80,13 @@ export const PromptList: React.FC<Props> = ({
         <div key={name}>
           <button
             style={styles.groupHeader}
-            onClick={() => toggleGroup(name)}
+            onClick={() => onToggleGroup(name)}
           >
-            <span>{collapsed[name] ? '▸' : '▾'}</span>
+            <span>{collapsedGroups[makeGroupCollapseKey(groupBy, name)] ? '▸' : '▾'}</span>
             <span style={styles.groupName}>{name}</span>
             <span style={styles.groupCount}>{groups[name].length}</span>
           </button>
-          {!collapsed[name] && groups[name].map(p => (
+          {!collapsedGroups[makeGroupCollapseKey(groupBy, name)] && groups[name].map(p => (
             <PromptItem
               key={p.id}
               prompt={p}

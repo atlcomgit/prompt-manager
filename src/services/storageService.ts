@@ -10,11 +10,21 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import type { Prompt, PromptConfig, PromptStatistics, PromptStatus } from '../types/prompt.js';
+import type {
+	Prompt,
+	PromptConfig,
+	PromptHistoryEntry,
+	PromptHistoryReason,
+	PromptStatistics,
+	PromptStatus,
+} from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
 
 export class StorageService {
 	private readonly STORAGE_DIR = '.vscode/prompt-manager';
+	private readonly HISTORY_DIR_NAME = 'history';
+	private readonly HISTORY_LIMIT = 20;
+	private readonly HISTORY_WINDOW_MS = 30_000;
 
 	constructor(private readonly workspaceRoot: string) { }
 
@@ -41,6 +51,166 @@ export class StorageService {
 	/** Get absolute URI to prompt.md for prompt id */
 	getPromptMarkdownUri(id: string): vscode.Uri {
 		return vscode.Uri.file(path.join(this.promptDir(id), 'prompt.md'));
+	}
+
+	private promptHistoryDir(id: string): string {
+		return path.join(this.promptDir(id), this.HISTORY_DIR_NAME);
+	}
+
+	private normalizeHistoryReason(reason?: string): PromptHistoryReason {
+		switch ((reason || '').trim()) {
+			case 'manual':
+			case 'autosave':
+			case 'status-change':
+			case 'switch':
+			case 'start-chat':
+			case 'restore':
+				return reason as PromptHistoryReason;
+			default:
+				return 'system';
+		}
+	}
+
+	private historyTrackedFingerprint(prompt: Prompt): string {
+		const stable = {
+			content: prompt.content,
+			report: prompt.report,
+			contextFiles: [...(prompt.contextFiles || [])].map(file => file.trim()).sort(),
+		};
+		return JSON.stringify(stable);
+	}
+
+	private makeHistoryEntryId(): string {
+		const now = new Date();
+		const ts = now.toISOString().replace(/[:.]/g, '-');
+		const suffix = Math.random().toString(36).slice(2, 8);
+		return `${ts}-${suffix}`;
+	}
+
+	private async readHistoryEntry(promptId: string, entryId: string): Promise<PromptHistoryEntry | null> {
+		const fileUri = vscode.Uri.file(path.join(this.promptHistoryDir(promptId), `${entryId}.json`));
+		try {
+			const raw = await vscode.workspace.fs.readFile(fileUri);
+			const parsed = JSON.parse(Buffer.from(raw).toString('utf-8')) as PromptHistoryEntry;
+			if (!parsed || !parsed.id || !parsed.prompt || !parsed.promptId) {
+				return null;
+			}
+			return parsed;
+		} catch {
+			return null;
+		}
+	}
+
+	private async trimPromptHistory(promptId: string): Promise<void> {
+		const dirUri = vscode.Uri.file(this.promptHistoryDir(promptId));
+		let entries: [string, vscode.FileType][] = [];
+		try {
+			entries = await vscode.workspace.fs.readDirectory(dirUri);
+		} catch {
+			return;
+		}
+
+		const files = entries
+			.filter(([name, type]) => type === vscode.FileType.File && name.endsWith('.json'))
+			.map(([name]) => name)
+			.sort((a, b) => b.localeCompare(a));
+
+		if (files.length <= this.HISTORY_LIMIT) {
+			return;
+		}
+
+		for (const file of files.slice(this.HISTORY_LIMIT)) {
+			try {
+				await vscode.workspace.fs.delete(vscode.Uri.joinPath(dirUri, file));
+			} catch {
+				// ignore trimming issues
+			}
+		}
+	}
+
+	private async getLatestHistoryEntry(promptId: string): Promise<PromptHistoryEntry | null> {
+		const list = await this.listPromptHistory(promptId);
+		if (list.length === 0) {
+			return null;
+		}
+		return this.readHistoryEntry(promptId, list[0].id);
+	}
+
+	private async createHistorySnapshot(prompt: Prompt, reason: PromptHistoryReason): Promise<void> {
+		if (!prompt.id) {
+			return;
+		}
+
+		const latestEntry = await this.getLatestHistoryEntry(prompt.id);
+		if (latestEntry?.prompt && this.historyTrackedFingerprint(latestEntry.prompt) === this.historyTrackedFingerprint(prompt)) {
+			return;
+		}
+
+		const historyDirUri = vscode.Uri.file(this.promptHistoryDir(prompt.id));
+		try {
+			await vscode.workspace.fs.stat(historyDirUri);
+		} catch {
+			await vscode.workspace.fs.createDirectory(historyDirUri);
+		}
+
+		const entry: PromptHistoryEntry = {
+			id: this.makeHistoryEntryId(),
+			promptId: prompt.id,
+			createdAt: new Date().toISOString(),
+			reason,
+			prompt: JSON.parse(JSON.stringify(prompt)) as Prompt,
+		};
+
+		const entryUri = vscode.Uri.file(path.join(this.promptHistoryDir(prompt.id), `${entry.id}.json`));
+		await vscode.workspace.fs.writeFile(entryUri, Buffer.from(JSON.stringify(entry, null, 2), 'utf-8'));
+		await this.trimPromptHistory(prompt.id);
+	}
+
+	private async shouldCaptureHistorySnapshot(
+		previousPrompt: Prompt | null,
+		nextPrompt: Prompt,
+		reason: PromptHistoryReason,
+		_forceHistory: boolean,
+	): Promise<boolean> {
+		if (!previousPrompt || !previousPrompt.id) {
+			return false;
+		}
+
+		const previousTrackedFingerprint = this.historyTrackedFingerprint(previousPrompt);
+		const nextTrackedFingerprint = this.historyTrackedFingerprint(nextPrompt);
+		if (previousTrackedFingerprint === nextTrackedFingerprint) {
+			return false;
+		}
+
+		const contentChanged = previousPrompt.content !== nextPrompt.content;
+		const reportChanged = previousPrompt.report !== nextPrompt.report;
+		const previousFiles = [...(previousPrompt.contextFiles || [])].map(file => file.trim()).sort();
+		const nextFiles = [...(nextPrompt.contextFiles || [])].map(file => file.trim()).sort();
+		const filesChanged = JSON.stringify(previousFiles) !== JSON.stringify(nextFiles);
+
+		if (!contentChanged && !reportChanged && !filesChanged) {
+			return false;
+		}
+
+		if (reason === 'manual') {
+			return true;
+		}
+
+		if (reportChanged || filesChanged) {
+			return true;
+		}
+
+		const latestEntry = await this.getLatestHistoryEntry(previousPrompt.id);
+		if (!latestEntry?.createdAt) {
+			return true;
+		}
+
+		const latestTs = new Date(latestEntry.createdAt).getTime();
+		if (!Number.isFinite(latestTs)) {
+			return true;
+		}
+
+		return (Date.now() - latestTs) >= this.HISTORY_WINDOW_MS;
 	}
 
 	/** List all prompt configs (lightweight — no content) */
@@ -117,8 +287,21 @@ export class StorageService {
 	}
 
 	/** Save prompt (config + markdown) */
-	async savePrompt(prompt: Prompt): Promise<PromptConfig> {
+	async savePrompt(
+		prompt: Prompt,
+		options?: { historyReason?: PromptHistoryReason | string; forceHistory?: boolean; skipHistory?: boolean }
+	): Promise<PromptConfig> {
 		await this.ensureStorageDir();
+		const reason = this.normalizeHistoryReason(options?.historyReason);
+		const forceHistory = Boolean(options?.forceHistory);
+		const skipHistory = Boolean(options?.skipHistory);
+		const existingPrompt = prompt.id ? await this.getPrompt(prompt.id) : null;
+		if (!skipHistory && prompt.id) {
+			const shouldCapture = await this.shouldCaptureHistorySnapshot(existingPrompt, prompt, reason, forceHistory);
+			if (shouldCapture && existingPrompt) {
+				await this.createHistorySnapshot(existingPrompt, reason);
+			}
+		}
 
 		const dir = this.promptDir(prompt.id);
 		const dirUri = vscode.Uri.file(dir);
@@ -163,6 +346,55 @@ export class StorageService {
 		}
 
 		return config;
+	}
+
+	async listPromptHistory(promptId: string): Promise<Array<{ id: string; createdAt: string; reason: PromptHistoryReason }>> {
+		const dirUri = vscode.Uri.file(this.promptHistoryDir(promptId));
+		let entries: [string, vscode.FileType][] = [];
+		try {
+			entries = await vscode.workspace.fs.readDirectory(dirUri);
+		} catch {
+			return [];
+		}
+
+		const result: Array<{ id: string; createdAt: string; reason: PromptHistoryReason }> = [];
+		for (const [name, type] of entries) {
+			if (type !== vscode.FileType.File || !name.endsWith('.json')) {
+				continue;
+			}
+			const id = name.slice(0, -5);
+			const entry = await this.readHistoryEntry(promptId, id);
+			if (!entry) {
+				continue;
+			}
+			result.push({ id: entry.id, createdAt: entry.createdAt, reason: entry.reason });
+		}
+
+		return result.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+	}
+
+	async restorePromptHistory(promptId: string, entryId: string): Promise<Prompt | null> {
+		const targetEntry = await this.readHistoryEntry(promptId, entryId);
+		if (!targetEntry) {
+			return null;
+		}
+
+		const currentPrompt = await this.getPrompt(promptId);
+		const targetPromptForCompare: Prompt = {
+			...targetEntry.prompt,
+			id: promptId,
+		};
+
+		if (currentPrompt && this.historyTrackedFingerprint(currentPrompt) !== this.historyTrackedFingerprint(targetPromptForCompare)) {
+			await this.createHistorySnapshot(currentPrompt, 'restore');
+		}
+
+		const restoredPrompt: Prompt = {
+			...targetPromptForCompare,
+		};
+
+		await this.savePrompt(restoredPrompt, { historyReason: 'restore', skipHistory: true });
+		return this.getPrompt(promptId);
 	}
 
 	/** Delete a prompt folder */

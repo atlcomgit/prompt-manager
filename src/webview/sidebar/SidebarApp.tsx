@@ -26,6 +26,7 @@ export const SidebarApp: React.FC = () => {
   const [sortField, setSortField] = useState<SortField>('createdAt');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
   const [groupBy, setGroupBy] = useState<GroupBy>('none');
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [showFilters, setShowFilters] = useState(false);
   const [hasHydratedState, setHasHydratedState] = useState(false);
   const [showOptimisticNewPrompt, setShowOptimisticNewPrompt] = useState(false);
@@ -73,6 +74,7 @@ export const SidebarApp: React.FC = () => {
         setSortField(state.sortField || 'createdAt');
         setSortOrder(state.sortOrder || 'desc');
         setGroupBy(state.groupBy || 'none');
+        setCollapsedGroups(state.collapsedGroups || {});
         setHasHydratedState(true);
         break;
       }
@@ -111,10 +113,11 @@ export const SidebarApp: React.FC = () => {
       sortField,
       sortOrder,
       groupBy,
+      collapsedGroups,
       panelWidth: 300,
     };
     vscode.postMessage({ type: 'saveSidebarState', state });
-  }, [hasHydratedState, selectedId, search, statusFilter, favoritesOnly, sortField, sortOrder, groupBy]);
+  }, [hasHydratedState, selectedId, search, statusFilter, favoritesOnly, sortField, sortOrder, groupBy, collapsedGroups]);
 
   const filteredPrompts = useMemo(() => {
     let result = [...prompts];
@@ -243,6 +246,13 @@ export const SidebarApp: React.FC = () => {
     vscode.postMessage({ type: 'exportPrompt', id });
   };
 
+  const makeGroupCollapseKey = (group: GroupBy, name: string): string => `${group}::${name}`;
+
+  const handleToggleGroup = (name: string) => {
+    const collapseKey = makeGroupCollapseKey(groupBy, name);
+    setCollapsedGroups(prev => ({ ...prev, [collapseKey]: !prev[collapseKey] }));
+  };
+
   return (
     <div style={styles.container}>
       <Toolbar
@@ -269,9 +279,12 @@ export const SidebarApp: React.FC = () => {
       <div style={styles.listContainer}>
         <PromptList
           groups={groupedPrompts}
+          groupBy={groupBy}
+          collapsedGroups={collapsedGroups}
           selectedId={selectedId}
           savingPromptIds={savingPromptIds}
           isLoading={isLoading}
+          onToggleGroup={handleToggleGroup}
           onOpen={handleOpenPrompt}
           onDelete={handleDelete}
           onDuplicate={handleDuplicate}

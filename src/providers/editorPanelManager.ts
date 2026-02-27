@@ -801,6 +801,11 @@ export class EditorPanelManager {
 			return;
 		}
 
+		// Show loading overlay immediately so the user doesn't see stale data
+		if (singletonPanel) {
+			void singletonPanel.webview.postMessage({ type: 'promptLoading' });
+		}
+
 		const existingEntries = [...openPanels.entries()];
 
 		for (const [existingKey, existingPanel] of existingEntries) {
@@ -1031,6 +1036,13 @@ export class EditorPanelManager {
 		panel.webview.onDidReceiveMessage(
 			async (msg: WebviewToExtensionMessage) => {
 				if (msg.type === 'markDirty') {
+					// Validate: ignore stale markDirty from a previous prompt
+					const markDirtyPromptId = (msg.promptId || msg.prompt?.id || '').trim();
+					const currentPanelPromptId = (prompt.id || '').trim();
+					if (markDirtyPromptId && currentPanelPromptId && markDirtyPromptId !== currentPanelPromptId) {
+						return;
+					}
+
 					const previousLanguages = latestPromptState?.languages || prompt.languages;
 					const previousFrameworks = latestPromptState?.frameworks || prompt.frameworks;
 
@@ -1185,12 +1197,12 @@ export class EditorPanelManager {
 					const saved = await this.storageService.savePrompt(promptToSave, {
 						historyReason: saveSource,
 					});
-					setIsDirty(false);
 
 					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();
 					const shouldApplyToCurrentPanel = !normalizedCurrentPromptId || normalizedCurrentPromptId === promptToSave.id;
 
 					if (shouldApplyToCurrentPanel) {
+						setIsDirty(false);
 						// Update current prompt reference
 						Object.assign(currentPrompt, promptToSave);
 						this.panelPromptRefs.set(panelKey, currentPrompt);
@@ -1401,9 +1413,11 @@ export class EditorPanelManager {
 						promptFromStorage.chatSessionIds = updatedChatSessionIds;
 						await this.storageService.savePrompt(promptFromStorage, { historyReason: 'start-chat' });
 						Object.assign(prompt, promptFromStorage);
-						Object.assign(currentPrompt, promptFromStorage);
+						if (currentPrompt.id === promptFromStorage.id) {
+							Object.assign(currentPrompt, promptFromStorage);
+							postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
+						}
 						this._onDidSave.fire(promptFromStorage.id);
-						postMessage({ type: 'prompt', prompt: promptFromStorage });
 					};
 
 					// Ensure prompt has id and persist latest editor state before starting chat
@@ -1421,7 +1435,9 @@ export class EditorPanelManager {
 						prompt.chatSessionIds = prompt.chatSessionIds?.length ? prompt.chatSessionIds : (existingBeforeChat.chatSessionIds || []);
 					}
 					await this.storageService.savePrompt(prompt, { historyReason: 'start-chat' });
-					Object.assign(currentPrompt, prompt);
+					if (currentPrompt.id === prompt.id) {
+						Object.assign(currentPrompt, prompt);
+					}
 					this._onDidSave.fire(prompt.id);
 
 					// Compose query with prompt content and metadata
@@ -1465,10 +1481,12 @@ export class EditorPanelManager {
 					if (prompt.status !== 'in-progress') {
 						prompt.status = 'in-progress';
 						await this.storageService.savePrompt(prompt, { historyReason: 'status-change' });
-						Object.assign(currentPrompt, prompt);
-						setIsDirty(false);
+						if (currentPrompt.id === prompt.id) {
+							Object.assign(currentPrompt, prompt);
+							setIsDirty(false);
+							postMessage({ type: 'prompt', prompt, reason: 'sync' });
+						}
 						this._onDidSave.fire(prompt.id);
-						postMessage({ type: 'prompt', prompt });
 					}
 
 					const query = parts.join('\n');
@@ -1724,10 +1742,11 @@ export class EditorPanelManager {
 										promptToComplete.status = 'completed';
 									}
 									await this.storageService.savePrompt(promptToComplete);
-									Object.assign(currentPrompt, promptToComplete);
+									if (currentPrompt.id === promptToComplete.id) {
+										Object.assign(currentPrompt, promptToComplete);
+										postMessage({ type: 'prompt', prompt: promptToComplete, reason: 'sync' });
+									}
 									this._onDidSave.fire(promptToComplete.id);
-									postMessage({ type: 'prompt', prompt: promptToComplete });
-
 									// Recalc implementing time from JSONL after VS Code finishes writing session data
 									const recalcPromptId = promptToComplete.id;
 									setTimeout(async () => {
@@ -1738,9 +1757,11 @@ export class EditorPanelManager {
 												if (totalMs > 0) {
 													freshPrompt.timeSpentImplementing = totalMs;
 													await this.storageService.savePrompt(freshPrompt);
-													Object.assign(currentPrompt, freshPrompt);
+													if (currentPrompt.id === freshPrompt.id) {
+														Object.assign(currentPrompt, freshPrompt);
+														postMessage({ type: 'prompt', prompt: freshPrompt, reason: 'sync' });
+													}
 													this._onDidSave.fire(freshPrompt.id);
-													postMessage({ type: 'prompt', prompt: freshPrompt });
 												}
 											}
 										} catch (e: any) {
@@ -1766,10 +1787,11 @@ export class EditorPanelManager {
 										promptForTiming.report = chatMarkdown;
 									}
 									await this.storageService.savePrompt(promptForTiming);
-									Object.assign(currentPrompt, promptForTiming);
+									if (currentPrompt.id === promptForTiming.id) {
+										Object.assign(currentPrompt, promptForTiming);
+										postMessage({ type: 'prompt', prompt: promptForTiming, reason: 'sync' });
+									}
 									this._onDidSave.fire(promptForTiming.id);
-									postMessage({ type: 'prompt', prompt: promptForTiming });
-
 									// Recalc implementing time from JSONL (markdown fallback path)
 									const recalcPromptId2 = promptForTiming.id;
 									setTimeout(async () => {
@@ -1780,9 +1802,11 @@ export class EditorPanelManager {
 												if (totalMs > 0) {
 													freshPrompt.timeSpentImplementing = totalMs;
 													await this.storageService.savePrompt(freshPrompt);
-													Object.assign(currentPrompt, freshPrompt);
+													if (currentPrompt.id === freshPrompt.id) {
+														Object.assign(currentPrompt, freshPrompt);
+														postMessage({ type: 'prompt', prompt: freshPrompt, reason: 'sync' });
+													}
 													this._onDidSave.fire(freshPrompt.id);
-													postMessage({ type: 'prompt', prompt: freshPrompt });
 												}
 											}
 										} catch (e: any) {
@@ -1841,7 +1865,10 @@ export class EditorPanelManager {
 						prompt.status = hookStatus;
 						await this.storageService.savePrompt(prompt);
 						this._onDidSave.fire(prompt.id);
-						postMessage({ type: 'prompt', prompt });
+						if (currentPrompt.id === prompt.id) {
+							Object.assign(currentPrompt, prompt);
+							postMessage({ type: 'prompt', prompt, reason: 'sync' });
+						}
 					}
 				}
 				break;
@@ -1877,9 +1904,11 @@ export class EditorPanelManager {
 						if (existingSessionIds.length !== (promptFromStorage.chatSessionIds || []).length) {
 							promptFromStorage.chatSessionIds = existingSessionIds;
 							await this.storageService.savePrompt(promptFromStorage);
-							Object.assign(currentPrompt, promptFromStorage);
+							if (currentPrompt.id === promptFromStorage.id) {
+								Object.assign(currentPrompt, promptFromStorage);
+								postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
+							}
 							this._onDidSave.fire(promptFromStorage.id);
-							postMessage({ type: 'prompt', prompt: promptFromStorage });
 						}
 					}
 				}
@@ -2058,10 +2087,12 @@ export class EditorPanelManager {
 					}
 					prompt.timeSpentImplementing = totalMs;
 					await this.storageService.savePrompt(prompt);
-					Object.assign(currentPrompt, prompt);
+					if (currentPrompt.id === prompt.id) {
+						Object.assign(currentPrompt, prompt);
+						postMessage({ type: 'prompt', prompt, reason: 'sync' });
+					}
 					this._onDidSave.fire(prompt.id);
 					postMessage({ type: 'implementingTimeRecalculated', id: prompt.id, timeMs: totalMs, sessionsCount: sessionIds.length });
-					postMessage({ type: 'prompt', prompt });
 				} catch (err: any) {
 					postMessage({ type: 'error', message: `Ошибка при пересчёте: ${err?.message || err}` });
 				}

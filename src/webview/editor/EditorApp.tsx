@@ -113,6 +113,8 @@ export const EditorApp: React.FC = () => {
   const [prompt, setPrompt] = useState<Prompt>(createDefaultPrompt());
   const [isLoaded, setIsLoaded] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
+  const [showLoader, setShowLoader] = useState(false);
+  const showLoaderTimerRef = useRef<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingChat, setIsStartingChat] = useState(false);
   const [workspaceFolders, setWorkspaceFolders] = useState<string[]>([]);
@@ -369,17 +371,26 @@ export const EditorApp: React.FC = () => {
   useEffect(() => { promptRef.current = prompt; }, [prompt]);
   useEffect(() => { isSavingRef.current = isSaving; }, [isSaving]);
 
-  // Cleanup auto-save timer on unmount
+  // Cleanup auto-save timer and loader timer on unmount
   useEffect(() => {
     return () => {
       if (autoSaveTimerRef.current) {
         window.clearTimeout(autoSaveTimerRef.current);
+      }
+      if (showLoaderTimerRef.current) {
+        window.clearTimeout(showLoaderTimerRef.current);
       }
     };
   }, []);
 
   const handleMessage = useCallback((msg: any) => {
     switch (msg.type) {
+      case 'promptLoading':
+        setIsLoaded(false);
+        // Delay showing the loader so fast loads don't flash
+        if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); }
+        showLoaderTimerRef.current = window.setTimeout(() => { setShowLoader(true); }, 300);
+        break;
       case 'prompt':
         if (msg.prompt) {
           const incomingPromptId = (String(msg.prompt.id || '__new__').trim() || '__new__');
@@ -399,6 +410,8 @@ export const EditorApp: React.FC = () => {
           }
 
           if (isOpenPayload) {
+            if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); showLoaderTimerRef.current = null; }
+            setShowLoader(false);
             setPrompt(msg.prompt);
             currentPromptIdRef.current = incomingPromptId;
             hasBeenSavedRef.current = Boolean(msg.prompt.id);
@@ -423,6 +436,27 @@ export const EditorApp: React.FC = () => {
 
           // Reset autosave lock state per prompt to avoid inheriting from previous prompt
           hasBeenSavedRef.current = Boolean(msg.prompt.id);
+
+          if (reason === 'sync') {
+            // Background sync (chat completion, recalc, status change) — merge only server-side fields, keep user edits
+            setPrompt(prev => ({
+              ...prev,
+              chatSessionIds: msg.prompt.chatSessionIds ?? prev.chatSessionIds,
+              timeSpentImplementing: Math.max(msg.prompt.timeSpentImplementing || 0, prev.timeSpentImplementing || 0),
+              timeSpentUntracked: Math.max(msg.prompt.timeSpentUntracked || 0, prev.timeSpentUntracked || 0),
+              updatedAt: msg.prompt.updatedAt || prev.updatedAt,
+              status: msg.prompt.status || prev.status,
+              // Merge report only if user hasn't written one yet
+              report: (prev.report || '').trim() ? prev.report : (msg.prompt.report || prev.report),
+            }));
+            // Don't touch isDirty — user's pending edits stay intact
+            if ((msg.prompt.chatSessionIds || []).length > 0) {
+              startChatLockRef.current = false;
+              setIsStartingChat(false);
+            }
+            break;
+          }
+
           const userChangedAfterSave = userChangeCounterRef.current !== saveStartCounterRef.current;
           const shouldMergeAfterSave = reason === 'save' && userChangedAfterSave && saveStartCounterRef.current > 0;
           if (shouldMergeAfterSave) {
@@ -636,7 +670,7 @@ export const EditorApp: React.FC = () => {
 
   // Notify extension about dirty state changes
   useEffect(() => {
-    vscode.postMessage({ type: 'markDirty', dirty: isDirty, prompt: isDirty ? prompt : undefined });
+    vscode.postMessage({ type: 'markDirty', dirty: isDirty, prompt: isDirty ? prompt : undefined, promptId: currentPromptIdRef.current || '' });
   }, [isDirty, prompt]);
 
   useEffect(() => {
@@ -954,8 +988,8 @@ export const EditorApp: React.FC = () => {
 
   return (
     <div style={styles.container}>
-      {/* Loading overlay */}
-      {!isLoaded && (
+      {/* Loading overlay — covers only the form area width */}
+      {showLoader && !isLoaded && (
         <div style={styles.loadingOverlay}>
           <div style={styles.loadingSpinner} />
         </div>
@@ -1432,13 +1466,18 @@ const styles: Record<string, React.CSSProperties> = {
   },
   loadingOverlay: {
     position: 'absolute',
-    inset: 0,
+    top: 0,
+    bottom: 0,
+    left: 0,
+    width: '840px',
+    maxWidth: '100%',
     zIndex: 1000,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    background: 'color-mix(in srgb, var(--vscode-editor-background) 50%, transparent)',
+    background: 'color-mix(in srgb, var(--vscode-editor-background) 70%, transparent)',
     pointerEvents: 'all',
+    animation: 'pm-fade-in 0.2s ease-out',
   },
   loadingSpinner: {
     width: '36px',

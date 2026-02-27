@@ -41,7 +41,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'requestSuggestion'; textBefore: string; globalContext?: string }
 	| { type: 'getStatistics'; month?: number; year?: number }
 	| { type: 'exportReport'; rows: Array<{ taskNumber: string; title: string; hours: number }> }
-	| { type: 'markDirty'; dirty: boolean; prompt?: Prompt }
+	| { type: 'markDirty'; dirty: boolean; prompt?: Prompt; promptId?: string }
 	| { type: 'showStatistics' }
 	| { type: 'updatePromptStatus'; id: string; status: PromptStatus }
 	| { type: 'getGlobalContext' }
@@ -87,4 +87,5 @@ export type ExtensionToWebviewMessage =
 	| { type: 'contentEditorOpened' }
 	| { type: 'contentEditorClosed'; reverted: boolean; content: string }
 	| { type: 'contentEditorSaved' }
-	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number };
+	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number }
+	| { type: 'promptLoading' };

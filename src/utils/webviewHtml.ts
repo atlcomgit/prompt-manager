@@ -83,6 +83,12 @@ export function getWebviewHtml(
     @keyframes pm-spin {
       to { transform: rotate(360deg); }
     }
+
+    /* Fade-in for loading overlay */
+    @keyframes pm-fade-in {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
   </style>
 </head>
 <body>

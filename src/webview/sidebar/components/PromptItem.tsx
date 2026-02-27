@@ -39,6 +39,10 @@ const STATUS_COLORS: Record<string, string> = {
 export const PromptItem: React.FC<Props> = ({
   prompt, isSelected, isSaving = false, onOpen, onDelete, onDuplicate, onToggleFavorite, onExport,
 }) => {
+  const MENU_WIDTH = 170;
+  const MENU_HEIGHT = 102;
+  const MENU_GAP = 4;
+
   const t = useT();
   const STATUS_LABELS: Record<string, string> = {
     'draft': t('status.draft'),
@@ -52,6 +56,9 @@ export const PromptItem: React.FC<Props> = ({
   };
   const [showActions, setShowActions] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const [hoveredMenuItem, setHoveredMenuItem] = useState<'duplicate' | 'export' | 'delete' | null>(null);
+  const [contextTargeted, setContextTargeted] = useState(false);
 
   const selFg = isSelected ? 'var(--vscode-list-activeSelectionForeground)' : undefined;
   const selBg = isSelected ? 'var(--vscode-list-activeSelectionBackground)' : undefined;
@@ -66,15 +73,49 @@ export const PromptItem: React.FC<Props> = ({
     }
   };
 
+  const openMenuAtPointer = (event: React.MouseEvent<HTMLElement>) => {
+    const itemRect = event.currentTarget.closest('[data-prompt-item]')?.getBoundingClientRect();
+
+    if (itemRect) {
+      const maxX = Math.max(MENU_GAP, itemRect.width - MENU_WIDTH - MENU_GAP);
+      const maxY = Math.max(MENU_GAP, itemRect.height - MENU_HEIGHT - MENU_GAP);
+      const x = Math.min(Math.max(event.clientX - itemRect.left, MENU_GAP), maxX);
+      const y = Math.min(Math.max(event.clientY - itemRect.top, MENU_GAP), maxY);
+
+      setMenuPosition({
+        x,
+        y,
+      });
+    } else {
+      setMenuPosition(null);
+    }
+
+    setShowMenu(true);
+    setContextTargeted(true);
+  };
+
   return (
     <div
+      data-prompt-item
       style={{
         ...styles.item,
         ...(isSelected ? styles.itemSelected : {}),
+        ...(!isSelected && contextTargeted ? styles.itemContextTargeted : {}),
       }}
       onClick={() => onOpen(prompt.id)}
+      onContextMenu={event => {
+        event.preventDefault();
+        event.stopPropagation();
+        setShowActions(true);
+        openMenuAtPointer(event);
+      }}
       onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => { setShowActions(false); setShowMenu(false); }}
+      onMouseLeave={() => {
+        setShowActions(false);
+        setShowMenu(false);
+        setHoveredMenuItem(null);
+        setContextTargeted(false);
+      }}
       title={prompt.description || prompt.title || prompt.id}
     >
       <div style={styles.row}>
@@ -147,7 +188,16 @@ export const PromptItem: React.FC<Props> = ({
                 ...styles.actionBtn,
                 ...(selFg ? { color: selFg, opacity: 1 } : {}),
               }}
-              onClick={e => { e.stopPropagation(); setShowMenu(!showMenu); }}
+              onClick={event => {
+                event.stopPropagation();
+                if (showMenu) {
+                  setShowMenu(false);
+                  setHoveredMenuItem(null);
+                  setContextTargeted(false);
+                  return;
+                }
+                openMenuAtPointer(event);
+              }}
               title={t('item.more')}
             >
               ⋯
@@ -156,14 +206,44 @@ export const PromptItem: React.FC<Props> = ({
         )}
       </div>
       {showMenu && (
-        <div style={styles.menu}>
-          <button style={styles.menuItem} onClick={e => { e.stopPropagation(); onDuplicate(prompt.id); setShowMenu(false); }}>
+        <div
+          style={{
+            ...styles.menu,
+            ...(menuPosition ? { left: `${menuPosition.x}px`, top: `${menuPosition.y}px`, right: 'auto' } : {}),
+          }}
+        >
+          <button
+            style={{
+              ...styles.menuItem,
+              ...(hoveredMenuItem === 'duplicate' ? styles.menuItemHover : {}),
+            }}
+            onMouseEnter={() => setHoveredMenuItem('duplicate')}
+            onMouseLeave={() => setHoveredMenuItem(null)}
+            onClick={e => { e.stopPropagation(); onDuplicate(prompt.id); setShowMenu(false); setHoveredMenuItem(null); setContextTargeted(false); }}
+          >
             📋 {t('item.duplicate')}
           </button>
-          <button style={styles.menuItem} onClick={e => { e.stopPropagation(); onExport(prompt.id); setShowMenu(false); }}>
+          <button
+            style={{
+              ...styles.menuItem,
+              ...(hoveredMenuItem === 'export' ? styles.menuItemHover : {}),
+            }}
+            onMouseEnter={() => setHoveredMenuItem('export')}
+            onMouseLeave={() => setHoveredMenuItem(null)}
+            onClick={e => { e.stopPropagation(); onExport(prompt.id); setShowMenu(false); setHoveredMenuItem(null); setContextTargeted(false); }}
+          >
             📤 {t('item.export')}
           </button>
-          <button style={{ ...styles.menuItem, ...styles.menuItemDanger }} onClick={e => { e.stopPropagation(); onDelete(prompt.id); setShowMenu(false); }}>
+          <button
+            style={{
+              ...styles.menuItem,
+              ...(hoveredMenuItem === 'delete' ? styles.menuItemHover : {}),
+              ...(hoveredMenuItem === 'delete' ? {} : styles.menuItemDanger),
+            }}
+            onMouseEnter={() => setHoveredMenuItem('delete')}
+            onMouseLeave={() => setHoveredMenuItem(null)}
+            onClick={e => { e.stopPropagation(); onDelete(prompt.id); setShowMenu(false); setHoveredMenuItem(null); setContextTargeted(false); }}
+          >
             🗑 {t('common.delete')}
           </button>
         </div>
@@ -188,6 +268,9 @@ const styles: Record<string, React.CSSProperties> = {
   itemSelected: {
     background: 'var(--vscode-list-activeSelectionBackground)',
     color: 'var(--vscode-list-activeSelectionForeground)',
+  },
+  itemContextTargeted: {
+    background: 'color-mix(in srgb, var(--vscode-list-hoverBackground) 85%, transparent)',
   },
   row: {
     display: 'flex',
@@ -305,6 +388,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     fontFamily: 'var(--vscode-font-family)',
     textAlign: 'left',
+  },
+  menuItemHover: {
+    background: 'var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground))',
+    color: 'var(--vscode-menu-selectionForeground, var(--vscode-menu-foreground, var(--vscode-foreground)))',
   },
   menuItemDanger: {
     color: 'var(--vscode-errorForeground)',

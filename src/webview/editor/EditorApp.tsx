@@ -24,7 +24,7 @@ interface SelectOption {
   description?: string;
 }
 
-type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' | 'tech' | 'integrations' | 'time';
+type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' | 'tech' | 'integrations' | 'agent' | 'files' | 'time';
 
 const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
   basic: true,
@@ -34,6 +34,8 @@ const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
   report: false,
   tech: false,
   integrations: false,
+  agent: false,
+  files: false,
   time: false,
 };
 
@@ -64,7 +66,7 @@ export const EditorApp: React.FC = () => {
         return null;
       }
       const candidate = value as Record<string, unknown>;
-      const keys: SectionKey[] = ['basic', 'workspace', 'prompt', 'globalPrompt', 'report', 'tech', 'integrations', 'time'];
+      const keys: Array<Exclude<SectionKey, 'agent' | 'files'>> = ['basic', 'workspace', 'prompt', 'globalPrompt', 'report', 'tech', 'integrations', 'time'];
       const allValid = keys.every((key) => typeof candidate[key] === 'boolean');
       if (!allValid) {
         return null;
@@ -77,6 +79,8 @@ export const EditorApp: React.FC = () => {
         report: Boolean(candidate.report),
         tech: Boolean(candidate.tech),
         integrations: Boolean(candidate.integrations),
+        agent: typeof candidate.agent === 'boolean' ? Boolean(candidate.agent) : DEFAULT_EXPANDED_SECTIONS.agent,
+        files: typeof candidate.files === 'boolean' ? Boolean(candidate.files) : DEFAULT_EXPANDED_SECTIONS.files,
         time: Boolean(candidate.time),
       };
     };
@@ -262,20 +266,30 @@ export const EditorApp: React.FC = () => {
     const skills = joinSelected(prompt.skills);
     const mcpTools = joinSelected(prompt.mcpTools);
     const hooks = joinSelected(prompt.hooks);
+    if (skills) chunks.push(`Skills: ${toShortText(skills, 56)}`);
+    if (mcpTools) chunks.push(`MCP: ${toShortText(mcpTools, 56)}`);
+    if (hooks) chunks.push(`Hooks: ${toShortText(hooks, 56)}`);
+    return chunks;
+  }, [prompt.skills, prompt.mcpTools, prompt.hooks]);
+
+  const agentSummary = useMemo(() => {
+    const chunks: string[] = [];
+    if (selectedModelName) chunks.push(`Модель: ${toShortText(selectedModelName, 56)}`);
+    chunks.push(`Режим: ${prompt.chatMode === 'agent' ? 'Agent' : 'Plan'}`);
+    return chunks;
+  }, [selectedModelName, prompt.chatMode]);
+
+  const filesSummary = useMemo(() => {
+    const chunks: string[] = [];
     const files = prompt.contextFiles
       .map(filePath => {
         const segments = filePath.split(/[\\/]/).filter(Boolean);
         return segments.length > 0 ? segments[segments.length - 1] : filePath;
       })
       .join(', ');
-    if (skills) chunks.push(`Skills: ${toShortText(skills, 56)}`);
-    if (mcpTools) chunks.push(`MCP: ${toShortText(mcpTools, 56)}`);
-    if (hooks) chunks.push(`Hooks: ${toShortText(hooks, 56)}`);
-    if (selectedModelName) chunks.push(`Модель: ${toShortText(selectedModelName, 56)}`);
-    chunks.push(`Режим: ${prompt.chatMode === 'agent' ? 'Agent' : 'Plan'}`);
     if (files) chunks.push(`Файлы: ${toShortText(files, 56)}`);
     return chunks;
-  }, [prompt.skills, prompt.mcpTools, prompt.hooks, prompt.contextFiles, selectedModelName, prompt.chatMode]);
+  }, [prompt.contextFiles]);
 
   const timeSummary = useMemo(() => {
     const totalMs = (prompt.timeSpentWriting || 0) + (prompt.timeSpentImplementing || 0) + (prompt.timeSpentUntracked || 0);
@@ -368,6 +382,12 @@ export const EditorApp: React.FC = () => {
     switch (msg.type) {
       case 'prompt':
         if (msg.prompt) {
+          if (autoSaveTimerRef.current) {
+            window.clearTimeout(autoSaveTimerRef.current);
+            autoSaveTimerRef.current = null;
+          }
+          // Reset autosave lock state per prompt to avoid inheriting from previous prompt
+          hasBeenSavedRef.current = Boolean(msg.prompt.id);
           const userChangedAfterSave = userChangeCounterRef.current !== saveStartCounterRef.current;
           if (userChangedAfterSave && saveStartCounterRef.current > 0) {
             // User changed something after save started — merge only server-generated fields, keep user edits
@@ -387,10 +407,6 @@ export const EditorApp: React.FC = () => {
           setIsLoaded(true);
           setIsSaving(false);
           activeSaveIdRef.current = null;
-          // Mark as saved if prompt has an id (loaded from storage or just saved)
-          if (msg.prompt.id) {
-            hasBeenSavedRef.current = true;
-          }
           if ((msg.prompt.chatSessionIds || []).length > 0) {
             startChatLockRef.current = false;
             setIsStartingChat(false);
@@ -1205,7 +1221,11 @@ export const EditorApp: React.FC = () => {
                 onChange={v => updateFieldAndSaveNow('hooks', v)}
                 placeholder={t('editor.hooksPlaceholder')}
               />
+            </>
+          ))}
 
+          {renderSection('agent', 'Агент', agentSummary, (
+            <>
               <div style={styles.field}>
                 <label style={styles.label}>{t('editor.aiModel')}</label>
                 <select
@@ -1238,7 +1258,11 @@ export const EditorApp: React.FC = () => {
                   ))}
                 </div>
               </div>
+            </>
+          ))}
 
+          {renderSection('files', 'Файлы', filesSummary, (
+            <>
               <div style={styles.field}>
                 <label style={styles.label}>{t('editor.contextFiles')}</label>
                 <div style={styles.fileList}>

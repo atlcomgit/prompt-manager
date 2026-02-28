@@ -113,7 +113,10 @@ export const EditorApp: React.FC = () => {
   const [prompt, setPrompt] = useState<Prompt>(createDefaultPrompt());
   const [isLoaded, setIsLoaded] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
-  const [showLoader, setShowLoader] = useState(false);
+  // Start with loader visible: on new panel creation promptLoading is never sent
+  // (only sent when reusing an existing singleton panel), so we show the loader
+  // immediately and hide it once the first 'prompt' message with reason='open' arrives.
+  const [showLoader, setShowLoader] = useState(true);
   const showLoaderTimerRef = useRef<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingChat, setIsStartingChat] = useState(false);
@@ -896,10 +899,13 @@ export const EditorApp: React.FC = () => {
       setIsDirty(true);
       return;
     }
-    activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
+    // Use buildPromptForSave to also update timeSpentWriting (like manual save)
+    const promptToSave = { ...buildPromptForSave(), status };
+    setPrompt(promptToSave);
+    activeSaveIdRef.current = (promptToSave.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
     setIsDirty(false);
-    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'status-change' });
+    vscode.postMessage({ type: 'savePrompt', prompt: promptToSave, source: 'status-change' });
   };
 
   useEffect(() => {

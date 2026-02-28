@@ -1,5 +1,5 @@
 import React from 'react';
-import type { PromptStatus } from '../../../types/prompt';
+import { PROMPT_STATUS_ORDER, type PromptStatus } from '../../../types/prompt';
 import { useT } from '../../shared/i18n';
 
 interface Props {
@@ -10,16 +10,26 @@ interface Props {
 export const StatusSelect: React.FC<Props> = ({ value, onChange }) => {
   const t = useT();
 
-  const STATUS_OPTIONS: { value: PromptStatus; label: string; icon: string; color: string }[] = [
-    { value: 'draft', label: t('status.draft'), icon: '📝', color: 'var(--vscode-descriptionForeground)' },
-    { value: 'in-progress', label: t('status.inProgress'), icon: '🚀', color: 'var(--vscode-editorInfo-foreground, #3794ff)' },
-    { value: 'stopped', label: t('status.stopped'), icon: '▣', color: 'var(--vscode-editorWarning-foreground, #cca700)' },
-    { value: 'cancelled', label: t('status.cancelled'), icon: '❌', color: 'var(--vscode-errorForeground, #f44747)' },
-    { value: 'completed', label: t('status.completed'), icon: '✅', color: 'var(--vscode-testing-iconPassed, #73c991)' },
-    { value: 'report', label: t('status.report'), icon: '🧾', color: 'var(--vscode-textLink-foreground)' },
-    { value: 'review', label: t('status.review'), icon: '🔎', color: 'var(--vscode-editorWarning-foreground, #cca700)' },
-    { value: 'closed', label: t('status.closed'), icon: '🔒', color: 'var(--vscode-disabledForeground)' },
-  ];
+  const STATUS_OPTIONS: { value: PromptStatus; label: string; icon: string; color: string }[] = PROMPT_STATUS_ORDER.map(status => {
+    switch (status) {
+      case 'draft':
+        return { value: status, label: t('status.draft'), icon: '📝', color: 'var(--vscode-descriptionForeground)' };
+      case 'in-progress':
+        return { value: status, label: t('status.inProgress'), icon: '🚀', color: 'var(--vscode-editorInfo-foreground, #3794ff)' };
+      case 'stopped':
+        return { value: status, label: t('status.stopped'), icon: '▣', color: 'var(--vscode-editorWarning-foreground, #cca700)' };
+      case 'cancelled':
+        return { value: status, label: t('status.cancelled'), icon: '❌', color: 'var(--vscode-errorForeground, #f44747)' };
+      case 'completed':
+        return { value: status, label: t('status.completed'), icon: '✅', color: 'var(--vscode-testing-iconPassed, #73c991)' };
+      case 'report':
+        return { value: status, label: t('status.report'), icon: '🧾', color: 'var(--vscode-textLink-foreground)' };
+      case 'review':
+        return { value: status, label: t('status.review'), icon: '🔎', color: 'var(--vscode-editorWarning-foreground, #cca700)' };
+      case 'closed':
+        return { value: status, label: t('status.closed'), icon: '🔒', color: 'var(--vscode-disabledForeground)' };
+    }
+  });
 
   return (
     <div style={styles.field}>

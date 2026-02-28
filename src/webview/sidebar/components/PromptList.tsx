@@ -1,5 +1,5 @@
 import React from 'react';
-import type { GroupBy, PromptConfig } from '../../../types/prompt';
+import type { GroupBy, PromptConfig, PromptStatus } from '../../../types/prompt';
 import { PromptItem } from './PromptItem';
 import { useT } from '../../shared/i18n';
 
@@ -36,6 +36,32 @@ export const PromptList: React.FC<Props> = ({
   const groupNames = Object.keys(groups);
   const hasGroups = !(groupNames.length === 1 && groupNames[0] === '');
   const makeGroupCollapseKey = (group: GroupBy, name: string): string => `${group}::${name}`;
+  const getGroupDisplayName = (name: string): string => {
+    if (groupBy !== 'status') {
+      return name;
+    }
+
+    switch (name as PromptStatus) {
+      case 'draft':
+        return t('status.draft');
+      case 'in-progress':
+        return t('status.inProgress');
+      case 'stopped':
+        return t('status.stopped');
+      case 'cancelled':
+        return t('status.cancelled');
+      case 'completed':
+        return t('status.completed');
+      case 'report':
+        return t('status.report');
+      case 'review':
+        return t('status.review');
+      case 'closed':
+        return t('status.closed');
+      default:
+        return name;
+    }
+  };
 
   if (isLoading) {
     return (
@@ -83,7 +109,7 @@ export const PromptList: React.FC<Props> = ({
             onClick={() => onToggleGroup(name)}
           >
             <span>{collapsedGroups[makeGroupCollapseKey(groupBy, name)] ? '▸' : '▾'}</span>
-            <span style={styles.groupName}>{name}</span>
+            <span style={styles.groupName}>{getGroupDisplayName(name)}</span>
             <span style={styles.groupCount}>{groups[name].length}</span>
           </button>
           {!collapsedGroups[makeGroupCollapseKey(groupBy, name)] && groups[name].map(p => (

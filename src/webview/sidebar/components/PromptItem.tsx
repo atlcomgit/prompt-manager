@@ -64,15 +64,6 @@ export const PromptItem: React.FC<Props> = ({
   const selBg = isSelected ? 'var(--vscode-list-activeSelectionBackground)' : undefined;
   const statusAccent = STATUS_COLORS[prompt.status] || 'var(--vscode-descriptionForeground)';
 
-  const formatDate = (iso: string) => {
-    try {
-      const d = new Date(iso);
-      return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' });
-    } catch {
-      return '';
-    }
-  };
-
   const openMenuAtPointer = (event: React.MouseEvent<HTMLElement>) => {
     const itemRect = event.currentTarget.closest('[data-prompt-item]')?.getBoundingClientRect();
 
@@ -164,8 +155,30 @@ export const PromptItem: React.FC<Props> = ({
             >
               <span>{STATUS_LABELS[prompt.status]}</span>
             </span>
-            <span>·</span>
-            <span>{formatDate(prompt.updatedAt)}</span>
+            {prompt.chatMode && (
+              <>
+                <span>·</span>
+                <span
+                  style={{
+                    ...(isSelected ? styles.metaBadgeSelected : styles.metaBadgeText),
+                  }}
+                >
+                  {prompt.chatMode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
+                </span>
+              </>
+            )}
+            {prompt.model && (
+              <>
+                <span>·</span>
+                <span
+                  style={{
+                    ...(isSelected ? styles.metaBadgeSelected : styles.metaBadgeText),
+                  }}
+                >
+                  {prompt.model}
+                </span>
+              </>
+            )}
             {prompt.projects.length > 0 && (
               <>
                 <span>·</span>
@@ -349,6 +362,38 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '10px',
     lineHeight: '14px',
     fontWeight: 600,
+  },
+  metaBadgeText: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '1px 7px',
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '4px',
+    fontSize: '10px',
+    lineHeight: '14px',
+    fontWeight: 500,
+    color: 'var(--vscode-descriptionForeground)',
+    background: 'transparent',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    maxWidth: '120px',
+  },
+  metaBadgeSelected: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '1px 7px',
+    border: '1px solid #000000',
+    borderRadius: '4px',
+    fontSize: '10px',
+    lineHeight: '14px',
+    fontWeight: 500,
+    color: '#000000',
+    background: '#ffffff',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    maxWidth: '120px',
   },
   actions: {
     display: 'flex',

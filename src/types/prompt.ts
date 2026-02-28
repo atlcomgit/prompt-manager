@@ -5,6 +5,18 @@
 /** Prompt status */
 export type PromptStatus = 'draft' | 'in-progress' | 'stopped' | 'cancelled' | 'completed' | 'report' | 'review' | 'closed';
 
+/** Canonical order of prompt statuses used in UI controls and grouping */
+export const PROMPT_STATUS_ORDER: PromptStatus[] = [
+	'draft',
+	'in-progress',
+	'stopped',
+	'cancelled',
+	'completed',
+	'report',
+	'review',
+	'closed',
+];
+
 /** Prompt configuration stored as JSON */
 export interface PromptConfig {
 	/** Unique identifier (folder name / slug) */

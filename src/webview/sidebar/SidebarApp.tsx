@@ -10,7 +10,7 @@ import { SearchBar } from './components/SearchBar';
 import { FilterBar } from './components/FilterBar';
 import { PromptList } from './components/PromptList';
 import { Toolbar } from './components/Toolbar';
-import { createDefaultPrompt } from '../../types/prompt';
+import { createDefaultPrompt, PROMPT_STATUS_ORDER } from '../../types/prompt';
 import type { PromptConfig, SidebarState, FilterState, SortField, SortOrder, GroupBy, PromptStatus } from '../../types/prompt';
 
 const vscode = getVsCodeApi();
@@ -205,13 +205,28 @@ export const SidebarApp: React.FC = () => {
       }
     }
 
-    // Add favorites group at top
-    const favoritePrompts = filteredPrompts.filter(p => p.favorite);
-    if (favoritePrompts.length > 0) {
-      groups[`⭐ ${t('filter.favoritesOnly')}`] = favoritePrompts;
+    let orderedGroups = groups;
+    if (groupBy === 'status') {
+      orderedGroups = {};
+      for (const status of PROMPT_STATUS_ORDER) {
+        if (groups[status]) {
+          orderedGroups[status] = groups[status];
+        }
+      }
+      for (const [groupName, groupPrompts] of Object.entries(groups)) {
+        if (!(groupName in orderedGroups)) {
+          orderedGroups[groupName] = groupPrompts;
+        }
+      }
     }
 
-    return groups;
+    // Add favorites group
+    const favoritePrompts = filteredPrompts.filter(p => p.favorite);
+    if (favoritePrompts.length > 0) {
+      orderedGroups[`⭐ ${t('filter.favoritesOnly')}`] = favoritePrompts;
+    }
+
+    return orderedGroups;
   }, [filteredPrompts, groupBy]);
 
   const handleOpenPrompt = (id: string) => {

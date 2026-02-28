@@ -49,7 +49,8 @@ export type WebviewToExtensionMessage =
 	| { type: 'createBranch'; branch: string; projects: string[] }
 	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
 	| { type: 'showPromptHistory'; id: string }
-	| { type: 'recalcImplementingTime'; id: string };
+	| { type: 'recalcImplementingTime'; id: string }
+	| { type: 'getNextTaskNumber' };
 
 // ---- Messages FROM extension TO webview ----
 
@@ -88,4 +89,5 @@ export type ExtensionToWebviewMessage =
 	| { type: 'contentEditorClosed'; reverted: boolean; content: string }
 	| { type: 'contentEditorSaved' }
 	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number }
-	| { type: 'promptLoading' };
+	| { type: 'promptLoading' }
+	| { type: 'nextTaskNumber'; taskNumber: string };

@@ -643,6 +643,12 @@ export const EditorApp: React.FC = () => {
         setBranches(msg.branches);
         setBranchesResolved(true);
         break;
+      case 'nextTaskNumber':
+        setPrompt(prev => ({ ...prev, taskNumber: msg.taskNumber }));
+        userChangeCounterRef.current++;
+        setIsDirty(true);
+        scheduleAutoSave(50);
+        break;
       case 'inlineSuggestion':
         setInlineSuggestion(msg.suggestion || '');
         break;
@@ -1056,12 +1062,21 @@ export const EditorApp: React.FC = () => {
               />
 
               <div style={styles.twoCol}>
-                <TextField
-                  label={t('editor.taskNumber')}
-                  value={prompt.taskNumber}
-                  onChange={v => updateField('taskNumber', v)}
-                  placeholder={t('editor.taskPlaceholder')}
-                />
+                <div>
+                  <TextField
+                    label={t('editor.taskNumber')}
+                    value={prompt.taskNumber}
+                    onChange={v => updateField('taskNumber', v)}
+                    placeholder={t('editor.taskPlaceholder')}
+                  />
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button style={styles.linkBtn} onClick={() => {
+                      vscode.postMessage({ type: 'getNextTaskNumber' });
+                    }}>
+                      {t('editor.nextTaskNumber')}
+                    </button>
+                  </div>
+                </div>
                 <div>
                   <TextField
                     label={t('editor.gitBranch')}

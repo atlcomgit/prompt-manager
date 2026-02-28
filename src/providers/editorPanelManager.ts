@@ -2027,6 +2027,54 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'getNextTaskNumber': {
+				const allPrompts = await this.storageService.listPrompts();
+				const taskNumbers = allPrompts
+					.map(p => p.taskNumber?.trim())
+					.filter((v): v is string => Boolean(v));
+
+				if (taskNumbers.length === 0) {
+					postMessage({ type: 'nextTaskNumber', taskNumber: '1' });
+					break;
+				}
+
+				// Extract prefix + numeric suffix from each task number
+				const parsed = taskNumbers.map(tn => {
+					const match = tn.match(/^(.*?)(\d+)$/);
+					if (match) {
+						return { prefix: match[1], num: parseInt(match[2], 10) };
+					}
+					return null;
+				}).filter((v): v is { prefix: string; num: number } => v !== null);
+
+				if (parsed.length === 0) {
+					postMessage({ type: 'nextTaskNumber', taskNumber: '1' });
+					break;
+				}
+
+				// Find the most common prefix
+				const prefixCounts = new Map<string, number>();
+				for (const { prefix } of parsed) {
+					prefixCounts.set(prefix, (prefixCounts.get(prefix) || 0) + 1);
+				}
+				let bestPrefix = '';
+				let bestCount = 0;
+				for (const [prefix, count] of prefixCounts) {
+					if (count > bestCount) {
+						bestPrefix = prefix;
+						bestCount = count;
+					}
+				}
+
+				// Find max number among entries with the best prefix
+				const maxNum = Math.max(...parsed
+					.filter(p => p.prefix === bestPrefix)
+					.map(p => p.num));
+
+				postMessage({ type: 'nextTaskNumber', taskNumber: `${bestPrefix}${maxNum + 1}` });
+				break;
+			}
+
 			case 'pickFile': {
 				const uris = await vscode.window.showOpenDialog({
 					canSelectFiles: true,

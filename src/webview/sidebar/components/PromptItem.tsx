@@ -139,18 +139,21 @@ export const PromptItem: React.FC<Props> = ({
             ...styles.description,
             ...(selFg ? { color: selFg } : {}),
           }}>{prompt.description || 'Описание не указано'}</div>
-          {prompt.taskNumber && (
-            <div style={{
-              ...styles.taskBadge,
-              ...(selFg ? { color: selFg } : {}),
-            }}>
-              🎫 {prompt.taskNumber}
-            </div>
-          )}
           <div style={{
             ...styles.meta,
             ...(selFg ? { color: selFg } : {}),
           }}>
+            {prompt.taskNumber && (
+              <>
+                <span style={{
+                  ...styles.taskBadge,
+                  ...(selFg ? { color: selFg } : {}),
+                }}>
+                  🎫 {prompt.taskNumber}
+                </span>
+                <span>·</span>
+              </>
+            )}
             <span
               style={{
                 ...styles.statusBadge,
@@ -323,7 +326,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '11px',
     fontWeight: 600,
     color: 'var(--vscode-textLink-foreground)',
-    marginTop: '2px',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',

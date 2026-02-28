@@ -217,7 +217,16 @@ export const StatisticsApp: React.FC = () => {
                 const realTotalMs = stats.reportRows.reduce((s, r) => s + r.totalTime, 0);
                 const realTotalHours = realTotalMs / (1000 * 60 * 60);
                 const scale = realTotalHours > 0 ? TARGET_HOURS / realTotalHours : 1;
-                const rows = stats.reportRows.map(r => {
+                const rows = [...stats.reportRows].sort((a, b) => {
+                  const numA = parseInt(a.taskNumber, 10);
+                  const numB = parseInt(b.taskNumber, 10);
+                  const isNumA = !isNaN(numA);
+                  const isNumB = !isNaN(numB);
+                  if (isNumA && isNumB) return numB - numA;
+                  if (isNumA) return -1;
+                  if (isNumB) return 1;
+                  return b.taskNumber.localeCompare(a.taskNumber);
+                }).map(r => {
                   const scaledHours = Math.round((r.totalTime / (1000 * 60 * 60)) * scale);
                   return {
                     taskNumber: r.taskNumber || '—',
@@ -244,7 +253,16 @@ export const StatisticsApp: React.FC = () => {
               </tr>
             </thead>
             <tbody>
-              {stats.reportRows.map((row, idx) => {
+              {[...stats.reportRows].sort((a, b) => {
+                const numA = parseInt(a.taskNumber, 10);
+                const numB = parseInt(b.taskNumber, 10);
+                const isNumA = !isNaN(numA);
+                const isNumB = !isNaN(numB);
+                if (isNumA && isNumB) return numB - numA;
+                if (isNumA) return -1;
+                if (isNumB) return 1;
+                return b.taskNumber.localeCompare(a.taskNumber);
+              }).map((row, idx) => {
                 const statusLabels: Record<string, string> = {
                   'draft': t('status.draft'),
                   'in-progress': t('status.inProgress'),

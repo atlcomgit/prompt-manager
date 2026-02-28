@@ -614,10 +614,23 @@ export class EditorPanelManager {
 		return normalized || 'untitled';
 	}
 
+	private static readonly UNTITLED_PROMPT_TITLE = 'Промпт без названия';
+
+	private static wordCount(text: string): number {
+		return text.trim().split(/\s+/).filter(Boolean).length;
+	}
+
+	/** Check if description is a fallback (prefix of content, possibly truncated with '…') */
+	private static isDescriptionFallback(description: string, content: string): boolean {
+		const normalizedDesc = description.replace(/…$/, '').trim();
+		const normalizedContent = content.replace(/\s+/g, ' ').trim();
+		return normalizedContent.startsWith(normalizedDesc);
+	}
+
 	private makeTitleFallbackFromContent(content: string): string {
 		const singleLine = content.replace(/\s+/g, ' ').trim();
 		if (!singleLine) {
-			return 'Untitled Prompt';
+			return EditorPanelManager.UNTITLED_PROMPT_TITLE;
 		}
 		return singleLine.length > 60 ? `${singleLine.slice(0, 59)}…` : singleLine;
 	}
@@ -676,13 +689,52 @@ export class EditorPanelManager {
 
 	private async openPromptContentInEditor(panelKey: string, currentPrompt: Prompt, content: string): Promise<void> {
 		if (!currentPrompt.id) {
-			const isRu = vscode.env.language.startsWith('ru');
-			vscode.window.showWarningMessage(
-				isRu
-					? 'Сначала сохраните промпт, затем откройте prompt.md в редакторе.'
-					: 'Save prompt first, then open prompt.md in the editor.'
+			// Auto-save new prompt before opening in external editor
+			if (!currentPrompt.title) {
+				currentPrompt.title = this.makeTitleFallbackFromContent(content || currentPrompt.content);
+			}
+			if (!currentPrompt.description) {
+				currentPrompt.description = this.makeDescriptionFallbackFromContent(content || currentPrompt.content);
+			}
+			currentPrompt.id = await this.storageService.uniqueId(
+				this.makePromptIdBase(currentPrompt.title, currentPrompt.description || content || currentPrompt.content)
 			);
-			return;
+			currentPrompt.content = content || currentPrompt.content;
+			const saved = await this.storageService.savePrompt(currentPrompt);
+
+			// Update panel tracking from 'new-*' key to the real ID
+			const panel = openPanels.get(panelKey);
+			if (panel) {
+				Object.assign(currentPrompt, saved);
+				this.panelPromptRefs.set(panelKey, currentPrompt);
+
+				if (panelKey.startsWith('new-')) {
+					openPanels.delete(panelKey);
+					openPanels.set(currentPrompt.id, panel);
+					const dirtySetter = this.panelDirtySetters.get(panelKey);
+					if (dirtySetter) {
+						this.panelDirtySetters.delete(panelKey);
+						this.panelDirtySetters.set(currentPrompt.id, dirtySetter);
+					}
+					const dirtyFlag = this.panelDirtyFlags.get(panelKey);
+					this.panelDirtyFlags.delete(panelKey);
+					this.panelDirtyFlags.set(currentPrompt.id, Boolean(dirtyFlag));
+					const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
+					this.panelLatestPromptSnapshots.delete(panelKey);
+					this.panelLatestPromptSnapshots.set(currentPrompt.id, latestSnapshot ? JSON.parse(JSON.stringify(latestSnapshot)) : null);
+					const basePrompt = this.panelBasePrompts.get(panelKey);
+					this.panelBasePrompts.delete(panelKey);
+					this.panelBasePrompts.set(currentPrompt.id, basePrompt ? JSON.parse(JSON.stringify(basePrompt)) : JSON.parse(JSON.stringify(currentPrompt)));
+					this.rebindContentEditorPanelKey(panelKey, currentPrompt.id);
+					panelKey = currentPrompt.id;
+				}
+
+				panel.title = `⚡ ${saved.title || saved.id}`;
+				void panel.webview.postMessage({ type: 'promptSaved', prompt: saved });
+				void panel.webview.postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'save' });
+			}
+
+			this._onDidSave.fire(currentPrompt.id);
 		}
 
 		const panel = openPanels.get(panelKey);
@@ -1144,8 +1196,15 @@ export class EditorPanelManager {
 					const saveSource = msg.source || 'manual';
 					const globalContext = this.stateService.getGlobalAgentContext();
 
-					const needsTitle = !promptToSave.title && !!promptToSave.content;
-					const needsDescription = !promptToSave.description && !!promptToSave.content;
+					const isUntitledWithEnoughContent = promptToSave.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
+						&& !!promptToSave.content
+						&& EditorPanelManager.wordCount(promptToSave.content) > 10;
+					const needsTitle = (!promptToSave.title || isUntitledWithEnoughContent) && !!promptToSave.content;
+					const hasEnoughContentForDescription = !!promptToSave.content && EditorPanelManager.wordCount(promptToSave.content) > 10;
+					const isFallbackDescription = !!promptToSave.description
+						&& hasEnoughContentForDescription
+						&& EditorPanelManager.isDescriptionFallback(promptToSave.description, promptToSave.content);
+					const needsDescription = ((!promptToSave.description && hasEnoughContentForDescription) || isFallbackDescription);
 					if (needsTitle || needsDescription) {
 						const [generatedTitle, generatedDescription] = await Promise.all([
 							needsTitle

@@ -58,7 +58,7 @@ export class AiService {
 		const systemPrompt = 'You are a helpful assistant that generates short, descriptive titles for prompts. Respond with ONLY the title, nothing else. The title should be 3-7 words, in the same language as the content.';
 		const contextBlock = this.buildGlobalContextBlock(globalContext);
 		const userPrompt = `${contextBlock}Generate a short title for this prompt:\n\n${content.substring(0, 2000)}`;
-		return this.chat(systemPrompt, userPrompt, 'Untitled Prompt');
+		return this.chat(systemPrompt, userPrompt, 'Промпт без названия');
 	}
 
 	/** Generate a short description from prompt content */

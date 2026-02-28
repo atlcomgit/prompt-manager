@@ -398,7 +398,8 @@ export const EditorApp: React.FC = () => {
           const activeSaveId = (activeSaveIdRef.current || '').trim();
           const reason: 'open' | 'save' | 'sync' | undefined = msg.reason;
           const isOpenPayload = reason === 'open';
-          const isRelatedToCurrentPrompt = incomingPromptId === currentPromptId || (activeSaveId !== '' && incomingPromptId === activeSaveId);
+          const isNewPromptSaveResponse = currentPromptId === '__new__' && reason === 'save';
+          const isRelatedToCurrentPrompt = incomingPromptId === currentPromptId || (activeSaveId !== '' && incomingPromptId === activeSaveId) || isNewPromptSaveResponse;
 
           if (!isOpenPayload && !isRelatedToCurrentPrompt) {
             break;
@@ -474,6 +475,10 @@ export const EditorApp: React.FC = () => {
             setPrompt(msg.prompt);
             setIsDirty(false);
           }
+          // Update currentPromptIdRef when backend assigns a real ID to a new prompt
+          if (incomingPromptId !== currentPromptId && incomingPromptId !== '__new__') {
+            currentPromptIdRef.current = incomingPromptId;
+          }
           setIsLoaded(true);
           setIsSaving(false);
           activeSaveIdRef.current = null;
@@ -496,7 +501,8 @@ export const EditorApp: React.FC = () => {
         if (userChangeCounterRef.current === saveStartCounterRef.current) {
           setIsDirty(false);
         }
-        activeSaveIdRef.current = null;
+        // Don't clear activeSaveIdRef here — the 'prompt' handler (reason: 'save')
+        // that follows needs it to match the incoming prompt to the current panel.
         break;
       case 'promptSaving':
         {

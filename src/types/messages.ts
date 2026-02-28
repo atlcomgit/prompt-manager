@@ -50,7 +50,8 @@ export type WebviewToExtensionMessage =
 	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
 	| { type: 'showPromptHistory'; id: string }
 	| { type: 'recalcImplementingTime'; id: string }
-	| { type: 'getNextTaskNumber' };
+	| { type: 'getNextTaskNumber' }
+	| { type: 'openChatPanel' };
 
 // ---- Messages FROM extension TO webview ----
 
@@ -90,4 +91,5 @@ export type ExtensionToWebviewMessage =
 	| { type: 'contentEditorSaved' }
 	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number }
 	| { type: 'promptLoading' }
-	| { type: 'nextTaskNumber'; taskNumber: string };
+	| { type: 'nextTaskNumber'; taskNumber: string }
+	| { type: 'chatOpened'; promptId: string };

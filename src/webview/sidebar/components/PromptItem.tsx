@@ -187,8 +187,19 @@ export const PromptItem: React.FC<Props> = ({
             )}
           </div>
         </div>
-        {showActions && (
-          <div style={styles.actions}>
+      </div>
+      <div
+        style={{
+          ...styles.actions,
+          visibility: showActions ? 'visible' : 'hidden',
+          pointerEvents: showActions ? 'auto' : 'none',
+          background: isSelected
+            ? 'linear-gradient(to right, transparent, var(--vscode-list-activeSelectionBackground) 28%)'
+            : contextTargeted
+              ? 'linear-gradient(to right, transparent, color-mix(in srgb, var(--vscode-list-hoverBackground) 85%, transparent) 28%)'
+              : 'linear-gradient(to right, transparent, var(--vscode-sideBar-background, var(--vscode-editor-background)) 28%)',
+        }}
+      >
             <button
               style={{
                 ...styles.actionBtn,
@@ -219,8 +230,6 @@ export const PromptItem: React.FC<Props> = ({
               ⋯
             </button>
           </div>
-        )}
-      </div>
       {showMenu && (
         <div
           style={{
@@ -396,19 +405,27 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: '120px',
   },
   actions: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
     display: 'flex',
+    alignItems: 'center',
     gap: '2px',
-    flexShrink: 0,
+    paddingLeft: '20px',
+    paddingRight: '4px',
   },
   actionBtn: {
-    background: 'none',
-    border: 'none',
-    color: 'var(--vscode-foreground)',
+    background: 'var(--vscode-button-secondaryBackground, rgba(128,128,128,0.18))',
+    border: '1px solid var(--vscode-button-border, transparent)',
+    color: 'var(--vscode-button-secondaryForeground, var(--vscode-foreground))',
     cursor: 'pointer',
-    padding: '2px 4px',
+    padding: '3px 7px',
     borderRadius: '4px',
-    fontSize: '13px',
-    opacity: 0.7,
+    fontSize: '15px',
+    lineHeight: '18px',
+    opacity: 1,
+    fontWeight: 600,
   },
   menu: {
     position: 'absolute',

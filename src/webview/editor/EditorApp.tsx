@@ -117,6 +117,7 @@ export const EditorApp: React.FC = () => {
   const showLoaderTimerRef = useRef<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingChat, setIsStartingChat] = useState(false);
+  const [isChatPanelOpen, setIsChatPanelOpen] = useState(false);
   const [workspaceFolders, setWorkspaceFolders] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<SelectOption[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SelectOption[]>([]);
@@ -387,6 +388,7 @@ export const EditorApp: React.FC = () => {
     switch (msg.type) {
       case 'promptLoading':
         setIsLoaded(false);
+        setIsChatPanelOpen(false);
         // Delay showing the loader so fast loads don't flash
         if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); }
         showLoaderTimerRef.current = window.setTimeout(() => { setShowLoader(true); }, 300);
@@ -588,6 +590,11 @@ export const EditorApp: React.FC = () => {
       case 'chatStarted':
         startChatLockRef.current = false;
         setIsStartingChat(false);
+        break;
+      case 'chatOpened':
+        startChatLockRef.current = false;
+        setIsStartingChat(false);
+        setIsChatPanelOpen(true);
         break;
       case 'generatedTitle':
         setPrompt(prev => ({ ...prev, title: msg.title }));
@@ -840,7 +847,11 @@ export const EditorApp: React.FC = () => {
       return;
     }
     hasBeenSavedRef.current = true;
-    const updatedPrompt = buildPromptForSave();
+    // Set status to in-progress immediately — both locally and in the payload sent to backend.
+    // This prevents the status from reverting to draft if the user switches prompts before
+    // the backend's startChat handler finishes and sends a sync message.
+    const updatedPrompt = { ...buildPromptForSave(), status: 'in-progress' as const };
+    setPrompt(prev => ({ ...prev, status: 'in-progress' }));
     startChatLockRef.current = true;
     setIsStartingChat(true);
     activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
@@ -852,6 +863,9 @@ export const EditorApp: React.FC = () => {
   const handleOpenChat = () => {
     if (prompt.id && prompt.chatSessionIds.length > 0) {
       vscode.postMessage({ type: 'openChat', id: prompt.id, sessionId: prompt.chatSessionIds[0] });
+    } else {
+      // Chat was opened but session ID not yet tracked — just switch to chat panel
+      vscode.postMessage({ type: 'openChatPanel' });
     }
   };
 
@@ -1468,6 +1482,7 @@ export const EditorApp: React.FC = () => {
         onMarkStopped={() => handleSetStatus('stopped')}
         showStatusActions={prompt.status === 'in-progress'}
         hasChatSession={prompt.chatSessionIds.length > 0}
+        isChatPanelOpen={isChatPanelOpen}
         isDirty={isDirty}
         isSaving={isSaving}
         isStartingChat={isStartingChat}

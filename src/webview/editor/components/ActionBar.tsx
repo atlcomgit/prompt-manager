@@ -10,6 +10,7 @@ interface Props {
   onMarkStopped: () => void;
   showStatusActions: boolean;
   hasChatSession: boolean;
+  isChatPanelOpen: boolean;
   isDirty: boolean;
   isSaving: boolean;
   isStartingChat: boolean;
@@ -17,7 +18,7 @@ interface Props {
 }
 
 export const ActionBar: React.FC<Props> = ({
-  onSave, onShowHistory, onStartChat, onOpenChat, onMarkCompleted, onMarkStopped, showStatusActions, hasChatSession, isDirty, isSaving, isStartingChat, hasContent,
+  onSave, onShowHistory, onStartChat, onOpenChat, onMarkCompleted, onMarkStopped, showStatusActions, hasChatSession, isChatPanelOpen, isDirty, isSaving, isStartingChat, hasContent,
 }) => {
   const t = useT();
   const startChatDisabled = !hasContent || isStartingChat;
@@ -41,7 +42,7 @@ export const ActionBar: React.FC<Props> = ({
           🕘 История
         </button>
 
-        {hasChatSession ? (
+        {(hasChatSession || isChatPanelOpen) ? (
           <button style={{ ...styles.btn, ...styles.btnChat }} onClick={onOpenChat}>
             {t('actions.openChat')}
           </button>
@@ -53,7 +54,7 @@ export const ActionBar: React.FC<Props> = ({
             aria-disabled={startChatDisabled}
             title={!hasContent ? t('actions.enterText') : t('actions.startChatTooltip')}
           >
-            {t('actions.startChat')}
+            {isStartingChat ? t('actions.startChat') + '...' : t('actions.startChat')}
           </button>
         )}
 

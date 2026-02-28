@@ -1748,6 +1748,8 @@ export class EditorPanelManager {
 					}
 
 					if (sendMessageSucceeded) {
+						// Immediately notify UI that chat has been opened so the button switches
+						postMessage({ type: 'chatOpened', promptId: prompt.id });
 						void (async () => {
 							const startedSession = await this.stateService.waitForChatSessionStarted(
 								requestStartTimestamp,
@@ -1830,6 +1832,14 @@ export class EditorPanelManager {
 								}
 
 								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
+								await this.runConfiguredHooks(prompt?.hooks || [], {
+									event: 'afterChatCompleted',
+									...hookPayloadBase,
+									status: promptToComplete?.status || prompt.status,
+									report: promptToComplete?.report || '',
+									chatSessionId: trackedSessionId || '',
+									timeSpentImplementing: promptToComplete?.timeSpentImplementing || 0,
+								}, 'afterChatCompleted');
 								return;
 							}
 
@@ -1899,6 +1909,14 @@ export class EditorPanelManager {
 								}
 
 								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
+								await this.runConfiguredHooks(prompt?.hooks || [], {
+									event: 'afterChatCompleted',
+									...hookPayloadBase,
+									status: promptForTiming?.status || prompt.status,
+									report: promptForTiming?.report || '',
+									chatSessionId: trackedSessionId || '',
+									timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
+								}, 'afterChatCompleted');
 								return;
 							}
 
@@ -1982,6 +2000,19 @@ export class EditorPanelManager {
 						} catch {
 							await vscode.commands.executeCommand('workbench.action.chat.open');
 						}
+					}
+				}
+				break;
+			}
+
+			case 'openChatPanel': {
+				try {
+					await vscode.commands.executeCommand('workbench.action.chat.openAgent');
+				} catch {
+					try {
+						await vscode.commands.executeCommand('workbench.action.chat.open');
+					} catch {
+						// ignore
 					}
 				}
 				break;

@@ -179,20 +179,43 @@ export const EditorApp: React.FC = () => {
 
   const targetBranch = prompt.branch.trim();
 
+  /** Allowed branches that don't trigger a mismatch warning */
+  const ALLOWED_BRANCHES = useMemo(
+    () => {
+      const set = new Set(['master', 'main', 'prod', 'develop', 'dev']);
+      if (targetBranch) { set.add(targetBranch); }
+      return set;
+    },
+    [targetBranch],
+  );
+
+  /** Map project → current branch (from resolved branches) */
+  const currentBranchByProject = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const branchInfo of branches) {
+      if (branchInfo.current) {
+        map.set(branchInfo.project, branchInfo.name);
+      }
+    }
+    return map;
+  }, [branches]);
+
+  /** Whether any selected project has a branch NOT in the allowed set */
+  const hasBranchMismatch = useMemo(() => {
+    if (prompt.projects.length === 0 || !branchesResolved) { return false; }
+    return prompt.projects.some(p => {
+      const cur = currentBranchByProject.get(p);
+      return cur ? !ALLOWED_BRANCHES.has(cur) : false;
+    });
+  }, [prompt.projects, branchesResolved, currentBranchByProject, ALLOWED_BRANCHES]);
+
   const shouldShowSwitchBranchBtn = useMemo(() => {
     if (!targetBranch || prompt.projects.length === 0 || !branchesResolved) {
       return false;
     }
 
-    const currentByProject = new Map<string, string>();
-    for (const branchInfo of branches) {
-      if (branchInfo.current) {
-        currentByProject.set(branchInfo.project, branchInfo.name);
-      }
-    }
-
-    return prompt.projects.some(projectName => currentByProject.get(projectName) !== targetBranch);
-  }, [targetBranch, prompt.projects, branches]);
+    return prompt.projects.some(projectName => currentBranchByProject.get(projectName) !== targetBranch);
+  }, [targetBranch, prompt.projects, currentBranchByProject, branchesResolved]);
 
   const sortedAvailableModels = useMemo(
     () => [...availableModels].sort((a, b) => `${a.name} ${a.id}`.localeCompare(`${b.name} ${b.id}`, 'ru', { sensitivity: 'base' })),
@@ -695,16 +718,28 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'markDirty', dirty: isDirty, prompt: isDirty ? prompt : undefined, promptId: currentPromptIdRef.current || '' });
   }, [isDirty, prompt]);
 
+  /** Ref to track whether auto-expand already fired for this prompt load */
+  const branchAutoExpandedRef = useRef(false);
+
   useEffect(() => {
-    if (!targetBranch || prompt.projects.length === 0) {
+    if (prompt.projects.length === 0) {
       setBranchesResolved(false);
       setBranches([]);
       setShowBranches(false);
       return;
     }
     setBranchesResolved(false);
+    branchAutoExpandedRef.current = false;
     vscode.postMessage({ type: 'getBranches', projects: prompt.projects });
-  }, [targetBranch, prompt.projects]);
+  }, [prompt.projects]);
+
+  // Auto-expand branch list on first resolve if mismatch detected
+  useEffect(() => {
+    if (branchesResolved && hasBranchMismatch && !branchAutoExpandedRef.current) {
+      branchAutoExpandedRef.current = true;
+      setShowBranches(true);
+    }
+  }, [branchesResolved, hasBranchMismatch]);
 
   useEffect(() => {
     if (!promptContentHeight) {
@@ -1125,20 +1160,26 @@ export const EditorApp: React.FC = () => {
               {showBranches && branches.length > 0 && (
                 <div style={styles.branchList}>
                   <label style={styles.label}>{t('editor.branchesLabel')}</label>
-                  {branches.map((b, i) => (
-                    <button
-                      key={`${b.project}-${b.name}-${i}`}
-                      style={{
-                        ...styles.branchItem,
-                        ...(b.current ? styles.branchItemCurrent : {}),
-                        ...(b.name === prompt.branch ? styles.branchItemSelected : {}),
-                      }}
-                      onClick={() => handleSwitchBranch(b.name)}
-                    >
-                      <span>{b.current ? '● ' : '○ '}{b.name}</span>
-                      <span style={styles.branchProject}>{b.project}</span>
-                    </button>
-                  ))}
+                  {branches.map((b, i) => {
+                    const isMismatch = b.current && !ALLOWED_BRANCHES.has(b.name);
+                    const isMatchedTarget = b.current && !!targetBranch && b.name === targetBranch;
+                    return (
+                      <button
+                        key={`${b.project}-${b.name}-${i}`}
+                        style={{
+                          ...styles.branchItem,
+                          ...(b.current ? styles.branchItemCurrent : {}),
+                          ...(isMatchedTarget ? styles.branchItemMatched : {}),
+                          ...(isMismatch ? styles.branchItemMismatch : {}),
+                          ...(b.name === prompt.branch && !b.current ? styles.branchItemSelected : {}),
+                        }}
+                        onClick={() => handleSwitchBranch(b.name)}
+                      >
+                        <span>{b.current ? '● ' : '○ '}{b.name}</span>
+                        <span style={styles.branchProject}>{b.project}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </>
@@ -1773,6 +1814,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   branchItemCurrent: {
     fontWeight: 600,
+  },
+  branchItemMismatch: {
+    background: 'rgba(255, 80, 80, 0.18)',
+    color: 'var(--vscode-errorForeground)',
+  },
+  branchItemMatched: {
+    background: 'rgba(80, 200, 80, 0.18)',
+    color: 'var(--vscode-testing-iconPassed, #73c991)',
   },
   branchItemSelected: {
     background: 'var(--vscode-list-activeSelectionBackground)',

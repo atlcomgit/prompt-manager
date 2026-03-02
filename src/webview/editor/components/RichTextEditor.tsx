@@ -182,6 +182,13 @@ export const RichTextEditor: React.FC<Props> = ({
       return;
     }
 
+    // Skip DOM update while user is actively editing — the DOM already has
+    // the latest content and overwriting innerHTML would destroy cursor position
+    // and selection, making editing painful (especially during auto-save).
+    if (document.activeElement === editorRef.current) {
+      return;
+    }
+
     const sanitized = sanitizeHtml(value || '');
     if (editorRef.current.innerHTML !== sanitized) {
       editorRef.current.innerHTML = sanitized;

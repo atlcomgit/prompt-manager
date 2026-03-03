@@ -192,7 +192,8 @@ export function activate(context: vscode.ExtensionContext) {
 					// --- Branch mismatch check ---
 					if (prompt.projects.length > 0) {
 						const paths = workspaceService.getWorkspaceFolderPaths();
-						const mismatches = await gitService.getBranchMismatches(paths, prompt.projects, prompt.branch);
+						const allowedBranches = GitService.getConfiguredAllowedBranches();
+						const mismatches = await gitService.getBranchMismatches(paths, prompt.projects, prompt.branch, allowedBranches);
 						if (mismatches.length > 0) {
 							const details = mismatches.map(m => `Ветка проекта ${m.project} переключена на ${m.currentBranch}`).join('\n');
 							const answer = await vscode.window.showWarningMessage(

@@ -130,6 +130,7 @@ export const EditorApp: React.FC = () => {
   const [availableHooks, setAvailableHooks] = useState<SelectOption[]>([]);
   const [availableLanguages, setAvailableLanguages] = useState<SelectOption[]>([]);
   const [availableFrameworks, setAvailableFrameworks] = useState<SelectOption[]>([]);
+  const [allowedBranchesSetting, setAllowedBranchesSetting] = useState<string[]>(['master', 'main', 'prod', 'develop', 'dev']);
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
   const [branchesResolved, setBranchesResolved] = useState(false);
   const [showBranches, setShowBranches] = useState(false);
@@ -182,14 +183,18 @@ export const EditorApp: React.FC = () => {
   const targetBranch = prompt.branch.trim();
 
   /** Allowed branches that don't trigger a mismatch warning */
-  const ALLOWED_BRANCHES = useMemo(
-    () => {
-      const set = new Set(['master', 'main', 'prod', 'develop', 'dev']);
-      if (targetBranch) { set.add(targetBranch); }
-      return set;
-    },
-    [targetBranch],
-  );
+  const ALLOWED_BRANCHES = useMemo(() => {
+    const set = new Set((allowedBranchesSetting || []).map(b => b.trim()).filter(Boolean));
+    if (set.size === 0) {
+      set.add('master');
+      set.add('main');
+      set.add('prod');
+      set.add('develop');
+      set.add('dev');
+    }
+    if (targetBranch) { set.add(targetBranch); }
+    return set;
+  }, [allowedBranchesSetting, targetBranch]);
 
   /** Map project → current branch (from resolved branches) */
   const currentBranchByProject = useMemo(() => {
@@ -611,6 +616,9 @@ export const EditorApp: React.FC = () => {
         break;
       case 'availableFrameworks':
         setAvailableFrameworks(msg.options);
+        break;
+      case 'allowedBranches':
+        setAllowedBranchesSetting(Array.isArray(msg.branches) ? msg.branches : []);
         break;
       case 'globalContext':
         setGlobalContext(msg.context || '');
@@ -1821,12 +1829,12 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
   },
   branchItemMismatch: {
-    background: 'rgba(255, 80, 80, 0.18)',
+    background: 'var(--vscode-inputValidation-errorBackground)',
     color: 'var(--vscode-errorForeground)',
   },
   branchItemMatched: {
-    background: 'rgba(80, 200, 80, 0.18)',
-    color: 'var(--vscode-testing-iconPassed, #73c991)',
+    background: 'var(--vscode-inputValidation-infoBackground)',
+    color: 'var(--vscode-testing-iconPassed)',
   },
   branchItemSelected: {
     background: 'var(--vscode-list-activeSelectionBackground)',

@@ -176,6 +176,26 @@ export class GitService {
 	/** Default branches that are considered "safe" (no warning needed) */
 	static readonly DEFAULT_ALLOWED_BRANCHES = new Set(['master', 'main', 'prod', 'develop', 'dev']);
 
+	/** Get configured allowed branches from VS Code settings with fallback to defaults */
+	static getConfiguredAllowedBranches(): string[] {
+		const configured = vscode.workspace
+			.getConfiguration('promptManager')
+			.get<unknown>('allowedBranches');
+
+		const normalized = Array.isArray(configured)
+			? configured
+				.filter((item): item is string => typeof item === 'string')
+				.map(item => item.trim())
+				.filter(Boolean)
+			: [];
+
+		if (normalized.length > 0) {
+			return normalized;
+		}
+
+		return Array.from(GitService.DEFAULT_ALLOWED_BRANCHES);
+	}
+
 	/**
 	 * Check branches across projects and return mismatches.
 	 * A mismatch means the current branch is NOT in the allowed set
@@ -185,8 +205,12 @@ export class GitService {
 		projectPaths: Map<string, string>,
 		projectNames: string[],
 		promptBranch?: string,
+		configuredAllowedBranches?: string[],
 	): Promise<Array<{ project: string; currentBranch: string }>> {
-		const allowed = new Set(GitService.DEFAULT_ALLOWED_BRANCHES);
+		const allowedBase = (configuredAllowedBranches || []).map(b => b.trim()).filter(Boolean);
+		const allowed = new Set(allowedBase.length > 0
+			? allowedBase
+			: Array.from(GitService.DEFAULT_ALLOWED_BRANCHES));
 		if (promptBranch?.trim()) {
 			allowed.add(promptBranch.trim());
 		}

@@ -67,6 +67,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'availableSkills'; skills: Array<{ id: string; name: string; description: string }> }
 	| { type: 'availableMcpTools'; tools: Array<{ id: string; name: string; description: string }> }
 	| { type: 'availableHooks'; hooks: Array<{ id: string; name: string; description: string }> }
+	| { type: 'allowedBranches'; branches: string[] }
 	| { type: 'generatedTitle'; title: string }
 	| { type: 'generatedDescription'; description: string }
 	| { type: 'generatedSlug'; slug: string }

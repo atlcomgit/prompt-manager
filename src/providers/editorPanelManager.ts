@@ -592,6 +592,10 @@ export class EditorPanelManager {
 		this.panelKeyByContentEditorUri.set(binding.uri.toString(), newKey);
 	}
 
+	private getAllowedBranchesSetting(): string[] {
+		return GitService.getConfiguredAllowedBranches();
+	}
+
 	private clearContentEditorBinding(panelKey: string): void {
 		const binding = this.contentEditorByPanelKey.get(panelKey);
 		if (!binding) {
@@ -1183,6 +1187,9 @@ export class EditorPanelManager {
 				const hooks = await this.workspaceService.getHooks();
 				postMessage({ type: 'availableHooks', hooks });
 
+				const allowedBranches = this.getAllowedBranchesSetting();
+				postMessage({ type: 'allowedBranches', branches: allowedBranches });
+
 				await this.broadcastAvailableLanguagesAndFrameworks();
 				break;
 			}
@@ -1434,7 +1441,8 @@ export class EditorPanelManager {
 					// --- Branch mismatch check ---
 					if (prompt.projects.length > 0) {
 						const paths = this.workspaceService.getWorkspaceFolderPaths();
-						const mismatches = await this.gitService.getBranchMismatches(paths, prompt.projects, prompt.branch);
+						const allowedBranches = this.getAllowedBranchesSetting();
+						const mismatches = await this.gitService.getBranchMismatches(paths, prompt.projects, prompt.branch, allowedBranches);
 						if (mismatches.length > 0) {
 							const details = mismatches.map(m => `Ветка проекта ${m.project} переключена на ${m.currentBranch}`).join('\n');
 							const answer = await vscode.window.showWarningMessage(
@@ -1958,7 +1966,8 @@ export class EditorPanelManager {
 						// --- Branch mismatch check ---
 						if (promptFromStorage.projects.length > 0) {
 							const paths = this.workspaceService.getWorkspaceFolderPaths();
-							const mismatches = await this.gitService.getBranchMismatches(paths, promptFromStorage.projects, promptFromStorage.branch);
+							const allowedBranches = this.getAllowedBranchesSetting();
+							const mismatches = await this.gitService.getBranchMismatches(paths, promptFromStorage.projects, promptFromStorage.branch, allowedBranches);
 							if (mismatches.length > 0) {
 								const details = mismatches.map(m => `Ветка проекта ${m.project} переключена на ${m.currentBranch}`).join('\n');
 								const answer = await vscode.window.showWarningMessage(

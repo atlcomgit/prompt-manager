@@ -1437,6 +1437,7 @@ export class EditorPanelManager {
 
 			case 'startChat': {
 				let prompt: Prompt | null = msg.prompt ? { ...msg.prompt } : await this.storageService.getPrompt(msg.id);
+				const shouldForceRebindChat = msg.forceRebindChat === true;
 				if (prompt && prompt.content) {
 					// --- Branch mismatch check ---
 					if (prompt.projects.length > 0) {
@@ -1468,10 +1469,12 @@ export class EditorPanelManager {
 							return;
 						}
 
-						const updatedChatSessionIds = [
-							normalizedSessionId,
-							...(promptFromStorage.chatSessionIds || []).filter(id => id !== normalizedSessionId),
-						];
+						const updatedChatSessionIds = shouldForceRebindChat
+							? [normalizedSessionId]
+							: [
+								normalizedSessionId,
+								...(promptFromStorage.chatSessionIds || []).filter(id => id !== normalizedSessionId),
+							];
 						const changed = JSON.stringify(updatedChatSessionIds) !== JSON.stringify(promptFromStorage.chatSessionIds || []);
 						if (!changed) {
 							return;
@@ -1499,7 +1502,11 @@ export class EditorPanelManager {
 						prompt.timeSpentUntracked = Number.isFinite(prompt.timeSpentUntracked)
 							? Math.max(0, prompt.timeSpentUntracked || 0)
 							: (existingBeforeChat.timeSpentUntracked || 0);
-						prompt.chatSessionIds = prompt.chatSessionIds?.length ? prompt.chatSessionIds : (existingBeforeChat.chatSessionIds || []);
+						if (shouldForceRebindChat) {
+							prompt.chatSessionIds = [];
+						} else {
+							prompt.chatSessionIds = prompt.chatSessionIds?.length ? prompt.chatSessionIds : (existingBeforeChat.chatSessionIds || []);
+						}
 					}
 					await this.storageService.savePrompt(prompt, { historyReason: 'start-chat' });
 					if (currentPrompt.id === prompt.id) {
@@ -1696,13 +1703,16 @@ export class EditorPanelManager {
 					try {
 						await new Promise(resolve => setTimeout(resolve, 150));
 						const commands = await vscode.commands.getCommands(true);
+						if (shouldForceRebindChat) {
+							await forceNewChatSession();
+							await new Promise(resolve => setTimeout(resolve, 120));
+						}
+
 						if (prompt.model) {
 							const storageModel = await this.aiService.resolveModelStorageIdentifier(prompt.model);
 							requestModelIdentifier = storageModel || requestModelIdentifier;
 							requestModelSelector = await this.aiService.resolveChatOpenModelSelector(prompt.model);
 							await this.stateService.forcePersistChatCurrentLanguageModel(storageModel);
-							await forceNewChatSession();
-							await new Promise(resolve => setTimeout(resolve, 120));
 							await this.aiService.tryApplyChatModelSafely(prompt.model);
 						}
 

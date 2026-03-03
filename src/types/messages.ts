@@ -17,7 +17,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'openPrompt'; id: string }
 	| { type: 'importPrompt' }
 	| { type: 'exportPrompt'; id: string }
-	| { type: 'startChat'; id: string; prompt?: Prompt }
+	| { type: 'startChat'; id: string; prompt?: Prompt; forceRebindChat?: boolean }
 	| { type: 'openChat'; id: string; sessionId: string }
 	| { type: 'generateTitle'; content: string }
 	| { type: 'generateDescription'; content: string }

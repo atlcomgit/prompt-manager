@@ -894,21 +894,35 @@ export const EditorApp: React.FC = () => {
   };
 
   const handleStartChat = () => {
-    if (startChatLockRef.current || isStartingChat || !prompt.content || prompt.chatSessionIds.length > 0) {
+    const shouldForceRebindChat = prompt.status === 'draft';
+    if (startChatLockRef.current || isStartingChat || !prompt.content || (!shouldForceRebindChat && prompt.chatSessionIds.length > 0)) {
       return;
     }
     hasBeenSavedRef.current = true;
     // Set status to in-progress immediately — both locally and in the payload sent to backend.
     // This prevents the status from reverting to draft if the user switches prompts before
     // the backend's startChat handler finishes and sends a sync message.
-    const updatedPrompt = { ...buildPromptForSave(), status: 'in-progress' as const };
-    setPrompt(prev => ({ ...prev, status: 'in-progress' }));
+    const updatedPrompt = {
+      ...buildPromptForSave(),
+      status: 'in-progress' as const,
+      chatSessionIds: shouldForceRebindChat ? [] : prompt.chatSessionIds,
+    };
+    setPrompt(prev => ({
+      ...prev,
+      status: 'in-progress',
+      chatSessionIds: shouldForceRebindChat ? [] : prev.chatSessionIds,
+    }));
     startChatLockRef.current = true;
     setIsStartingChat(true);
     activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
     vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
-    vscode.postMessage({ type: 'startChat', id: updatedPrompt.id || '__new__', prompt: updatedPrompt });
+    vscode.postMessage({
+      type: 'startChat',
+      id: updatedPrompt.id || '__new__',
+      prompt: updatedPrompt,
+      forceRebindChat: shouldForceRebindChat,
+    });
   };
 
   const handleOpenChat = () => {
@@ -1547,6 +1561,7 @@ export const EditorApp: React.FC = () => {
         isSaving={isSaving}
         isStartingChat={isStartingChat}
         hasContent={!!prompt.content}
+        isDraftStatus={prompt.status === 'draft'}
       />
     </div>
   );

@@ -15,13 +15,15 @@ interface Props {
   isSaving: boolean;
   isStartingChat: boolean;
   hasContent: boolean;
+  isDraftStatus: boolean;
 }
 
 export const ActionBar: React.FC<Props> = ({
-  onSave, onShowHistory, onStartChat, onOpenChat, onMarkCompleted, onMarkStopped, showStatusActions, hasChatSession, isChatPanelOpen, isDirty, isSaving, isStartingChat, hasContent,
+  onSave, onShowHistory, onStartChat, onOpenChat, onMarkCompleted, onMarkStopped, showStatusActions, hasChatSession, isChatPanelOpen, isDirty, isSaving, isStartingChat, hasContent, isDraftStatus,
 }) => {
   const t = useT();
   const startChatDisabled = !hasContent || isStartingChat;
+  const shouldShowOpenChat = !isDraftStatus && (hasChatSession || isChatPanelOpen);
   return (
     <div style={styles.bar}>
       <div style={styles.left}>
@@ -42,7 +44,7 @@ export const ActionBar: React.FC<Props> = ({
           🕘 История
         </button>
 
-        {(hasChatSession || isChatPanelOpen) ? (
+        {shouldShowOpenChat ? (
           <button style={{ ...styles.btn, ...styles.btnChat }} onClick={onOpenChat}>
             {t('actions.openChat')}
           </button>

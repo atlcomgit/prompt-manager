@@ -3,8 +3,8 @@
  */
 
 import * as vscode from 'vscode';
-import { StorageService, AiService, WorkspaceService, GitService, StateService } from './services/index.js';
-import { SidebarProvider, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager } from './providers/index.js';
+import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService } from './services/index.js';
+import { SidebarProvider, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager, CopilotStatusBarProvider, CopilotUsagePanelManager } from './providers/index.js';
 
 export function activate(context: vscode.ExtensionContext) {
 	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -53,6 +53,11 @@ export function activate(context: vscode.ExtensionContext) {
 		storageService,
 		stateService,
 	);
+
+	// Initialize Copilot Premium usage status bar
+	const copilotUsageService = new CopilotUsageService(context);
+	const copilotUsagePanelManager = new CopilotUsagePanelManager(context.extensionUri, copilotUsageService);
+	const copilotStatusBarProvider = new CopilotStatusBarProvider(copilotUsageService, copilotUsagePanelManager);
 
 	// Register sidebar webview provider
 	context.subscriptions.push(
@@ -189,6 +194,9 @@ export function activate(context: vscode.ExtensionContext) {
 			if (lastId) {
 				const prompt = await storageService.getPrompt(lastId);
 				if (prompt?.content) {
+					// Инкрементируем счётчик использования Copilot Premium запросов
+					void copilotUsageService.incrementUsage();
+
 					// --- Branch mismatch check ---
 					if (prompt.projects.length > 0) {
 						const paths = workspaceService.getWorkspaceFolderPaths();
@@ -428,6 +436,9 @@ export function activate(context: vscode.ExtensionContext) {
 			editorPanelManager.disposeAll();
 			statisticsPanelManager.dispose();
 			trackerPanelManager.dispose();
+			copilotUsagePanelManager.dispose();
+			copilotStatusBarProvider.dispose();
+			copilotUsageService.dispose();
 		},
 	});
 

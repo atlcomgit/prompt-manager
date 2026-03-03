@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage, organize and use AI prompts directly in VS Code with Copilot Chat integration",
-  "version": "0.1.31",
+  "version": "0.1.33",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -112,6 +112,18 @@
         "title": "Show Prompt Tracker",
         "category": "Prompt Manager",
         "icon": "$(repo)"
+      },
+      {
+        "command": "promptManager.copilotUsageDetails",
+        "title": "Show Copilot Premium Usage",
+        "category": "Prompt Manager",
+        "icon": "$(copilot)"
+      },
+      {
+        "command": "promptManager.copilotUsageAuth",
+        "title": "Authenticate for Copilot Usage",
+        "category": "Prompt Manager",
+        "icon": "$(sign-in)"
       }
     ],
     "menus": {
@@ -186,6 +198,22 @@
           "items": {
             "type": "string"
           }
+        },
+        "promptManager.copilotStatusBar.enabled": {
+          "type": "boolean",
+          "description": "Enable/disable Copilot Premium usage progress bar in the status bar.",
+          "default": true
+        },
+        "promptManager.copilotPremiumRequestsLimit": {
+          "type": "number",
+          "description": "Custom monthly limit for Copilot Premium requests. Set to 0 to auto-detect from subscription type.",
+          "default": 0,
+          "minimum": 0
+        },
+        "promptManager.copilotUsage.debugVerbose": {
+          "type": "boolean",
+          "description": "Enable verbose Copilot usage debug log in usage panel. Disable for compact log.",
+          "default": false
         }
       }
     }

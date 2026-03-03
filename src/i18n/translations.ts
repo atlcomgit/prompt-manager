@@ -197,6 +197,23 @@ const en: Record<string, string> = {
 	'month.10': 'October',
 	'month.11': 'November',
 	'month.12': 'December',
+
+	// --- Copilot Usage ---
+	'copilot.title': 'Copilot Premium Requests',
+	'copilot.authenticate': 'Sign in to view statistics',
+	'copilot.loading': 'Loading Copilot usage data...',
+	'copilot.used': 'Used',
+	'copilot.remaining': 'Remaining',
+	'copilot.period': 'Period',
+	'copilot.avgPerDay': 'Average per day',
+	'copilot.plan': 'Subscription',
+	'copilot.updated': 'Updated',
+	'copilot.refresh': 'Refresh data',
+	'copilot.settings': 'Open settings',
+	'copilot.githubSettings': 'GitHub Copilot Settings',
+	'copilot.daysRemaining': 'days remaining',
+	'copilot.recommendedPace': 'Recommended pace',
+	'copilot.requestsPerDay': 'requests/day',
 };
 
 const ru: Record<string, string> = {
@@ -391,6 +408,23 @@ const ru: Record<string, string> = {
 	'month.10': 'Октябрь',
 	'month.11': 'Ноябрь',
 	'month.12': 'Декабрь',
+
+	// --- Copilot Usage ---
+	'copilot.title': 'Copilot Premium запросы',
+	'copilot.authenticate': 'Авторизуйтесь для просмотра статистики',
+	'copilot.loading': 'Загрузка данных использования Copilot...',
+	'copilot.used': 'Использовано',
+	'copilot.remaining': 'Осталось',
+	'copilot.period': 'Период',
+	'copilot.avgPerDay': 'Среднее в день',
+	'copilot.plan': 'Подписка',
+	'copilot.updated': 'Обновлено',
+	'copilot.refresh': 'Обновить данные',
+	'copilot.settings': 'Открыть настройки',
+	'copilot.githubSettings': 'Настройки GitHub Copilot',
+	'copilot.daysRemaining': 'дней осталось',
+	'copilot.recommendedPace': 'Рекомендуемый темп',
+	'copilot.requestsPerDay': 'запросов/день',
 };
 
 export const translations: Record<string, Record<string, string>> = { en, ru };

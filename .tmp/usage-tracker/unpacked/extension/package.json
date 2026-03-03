@@ -1,0 +1,168 @@
+{
+  "name": "copilot-usage-tracker",
+  "displayName": "GitHub Copilot Usage Tracker",
+  "description": "See your GitHub Copilot request usage at a glance — track consumption vs your daily or monthly quota right from the status bar.",
+  "version": "1.1.0",
+  "publisher": "TMRomain",
+  "icon": "logo.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TMRomain/copilot-usage-traker"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "copilotUsageTracker.refresh",
+        "title": "Copilot Usage: Refresh"
+      },
+      {
+        "command": "copilotUsageTracker.authenticate",
+        "title": "Copilot Usage: Authenticate with GitHub"
+      },
+      {
+        "command": "copilotUsageTracker.setToken",
+        "title": "Copilot Usage: Set GitHub Token (PAT)"
+      },
+      {
+        "command": "copilotUsageTracker.clearToken",
+        "title": "Copilot Usage: Clear Token"
+      },
+      {
+        "command": "copilotUsageTracker.showDetails",
+        "title": "Copilot Usage: Show Details"
+      },
+      {
+        "command": "copilotUsageTracker.showHistory",
+        "title": "Copilot Usage: Show History"
+      },
+      {
+        "command": "copilotUsageTracker.showLogs",
+        "title": "Copilot Usage: Show Logs"
+      },
+      {
+        "command": "copilotUsageTracker.disconnect",
+        "title": "Copilot Usage: Disconnect from GitHub"
+      },
+      {
+        "command": "copilotUsageTracker.exportCsv",
+        "title": "Copilot Usage: Export History (CSV)"
+      },
+      {
+        "command": "copilotUsageTracker.exportJson",
+        "title": "Copilot Usage: Export History (JSON)"
+      }
+    ],
+    "configuration": {
+      "title": "Copilot Usage Tracker",
+      "properties": {
+        "copilotUsageTracker.displayMode": {
+          "type": "string",
+          "default": "both",
+          "enum": ["count", "percentage", "both"],
+          "enumDescriptions": [
+            "Show only the number of requests (e.g. 42/300)",
+            "Show only the percentage (e.g. 14%)",
+            "Show both count and percentage (e.g. 42/300 (14%))"
+          ],
+          "description": "How to display usage values: count only, percentage only, or both."
+        },
+        "copilotUsageTracker.viewStyle": {
+          "type": "string",
+          "default": "both",
+          "enum": ["bar", "text", "both"],
+          "enumDescriptions": [
+            "Show usage as a progress bar only",
+            "Show usage as plain text only",
+            "Show both a progress bar and text"
+          ],
+          "description": "How to render the usage: bar only, text only, or both."
+        },
+        "copilotUsageTracker.usageReference": {
+          "type": "string",
+          "default": "total",
+          "enum": ["total", "daily"],
+          "enumDescriptions": [
+            "Compare usage against the total monthly quota",
+            "Compare usage against the expected daily target for today"
+          ],
+          "description": "Whether to compare usage against the total monthly quota or the pro-rated daily target."
+        },
+        "copilotUsageTracker.refreshIntervalMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 60,
+          "description": "Auto-refresh interval in minutes."
+        },
+        "copilotUsageTracker.retentionMonths": {
+          "type": "number",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 24,
+          "description": "Number of months of usage snapshots to keep."
+        },
+        "copilotUsageTracker.alerts.global.mode": {
+          "type": "string",
+          "default": "threshold",
+          "enum": ["everyday", "threshold", "disabled"],
+          "enumDescriptions": [
+            "Send one notification per day when global usage is above threshold",
+            "Send one notification once threshold is reached for the current cycle",
+            "Disable global usage notifications"
+          ],
+          "description": "Notification mode for global usage alert."
+        },
+        "copilotUsageTracker.alerts.global.threshold": {
+          "type": "number",
+          "default": 80,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Threshold percentage for global usage alert."
+        },
+        "copilotUsageTracker.alerts.daily.mode": {
+          "type": "string",
+          "default": "threshold",
+          "enum": ["everyday", "threshold", "disabled"],
+          "enumDescriptions": [
+            "Send one notification per day when daily usage is above threshold",
+            "Send one notification when daily threshold is reached",
+            "Disable daily notifications"
+          ],
+          "description": "Notification mode for daily alert."
+        },
+        "copilotUsageTracker.alerts.daily.threshold": {
+          "type": "number",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Threshold percentage for daily alert relative to the daily target (100 = target reached)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "18.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.2"
+  }
+}

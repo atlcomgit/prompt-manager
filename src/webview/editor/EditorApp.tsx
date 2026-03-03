@@ -1324,7 +1324,7 @@ export const EditorApp: React.FC = () => {
             </>
           ))}
 
-          {renderSection('globalPrompt', 'Общий промпт', globalPromptSummary, (
+          {renderSection('globalPrompt', 'Общая инструкция', globalPromptSummary, (
             <>
               <div style={styles.field}>
                 <label style={styles.label}>{t('editor.globalContext')}</label>

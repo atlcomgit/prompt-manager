@@ -39,6 +39,8 @@ const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
   time: false,
 };
 
+const ensureTrailingNewline = (text: string): string => (text.endsWith('\n') ? text : `${text}\n`);
+
 export const EditorApp: React.FC = () => {
   const t = useT();
   const initialWebviewStateRef = useRef<Record<string, unknown>>((vscode.getState?.() || {}) as Record<string, unknown>);
@@ -643,9 +645,12 @@ export const EditorApp: React.FC = () => {
       case 'improvedPromptText':
         setPrompt(prev => {
           const writingDeltaMs = Math.max(0, Date.now() - openedAtRef.current);
+          const improvedContent = typeof msg.content === 'string'
+            ? ensureTrailingNewline(msg.content)
+            : prev.content;
           const updatedPrompt: Prompt = {
             ...prev,
-            content: msg.content || prev.content,
+            content: improvedContent,
             timeSpentWriting: (prev.timeSpentWriting || 0) + writingDeltaMs,
           };
           openedAtRef.current = Date.now();

@@ -73,6 +73,8 @@ export interface PromptConfig {
 	timeSpentWriting: number;
 	/** Time spent in chat implementing (ms) */
 	timeSpentImplementing: number;
+	/** Accumulated task work time while status is in-progress (ms) */
+	timeSpentOnTask: number;
 	/** Additional manually entered time (ms) */
 	timeSpentUntracked: number;
 
@@ -129,6 +131,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		chatSessionIds: [],
 		timeSpentWriting: 0,
 		timeSpentImplementing: 0,
+		timeSpentOnTask: 0,
 		timeSpentUntracked: 0,
 		createdAt: now,
 		updatedAt: now,

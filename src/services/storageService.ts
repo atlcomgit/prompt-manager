@@ -252,6 +252,7 @@ export class StorageService {
 				...defaults,
 				...parsed,
 				id,
+				timeSpentOnTask: typeof parsed.timeSpentOnTask === 'number' ? parsed.timeSpentOnTask : 0,
 				timeSpentUntracked: typeof parsed.timeSpentUntracked === 'number' ? parsed.timeSpentUntracked : 0,
 			};
 			return normalized;
@@ -420,6 +421,7 @@ export class StorageService {
 			chatSessionIds: [],
 			timeSpentWriting: 0,
 			timeSpentImplementing: 0,
+			timeSpentOnTask: 0,
 			timeSpentUntracked: 0,
 			createdAt: now,
 			updatedAt: now,

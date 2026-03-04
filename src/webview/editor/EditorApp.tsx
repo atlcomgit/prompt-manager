@@ -331,7 +331,7 @@ export const EditorApp: React.FC = () => {
     const totalMs = (prompt.timeSpentWriting || 0) + (prompt.timeSpentImplementing || 0) + (prompt.timeSpentUntracked || 0);
     const minutes = Math.round(totalMs / 60000);
     return minutes > 0 ? [`Всего: ${minutes} мин`] : [];
-  }, [prompt.timeSpentWriting, prompt.timeSpentImplementing, prompt.timeSpentUntracked]);
+  }, [prompt.timeSpentWriting, prompt.timeSpentImplementing, prompt.timeSpentUntracked, prompt.timeSpentOnTask]);
 
   const analyzedProjectsCount = useMemo(() => {
     if (prompt.projects.length > 0) {
@@ -479,6 +479,7 @@ export const EditorApp: React.FC = () => {
               ...prev,
               chatSessionIds: msg.prompt.chatSessionIds ?? prev.chatSessionIds,
               timeSpentImplementing: Math.max(msg.prompt.timeSpentImplementing || 0, prev.timeSpentImplementing || 0),
+              timeSpentOnTask: Math.max(msg.prompt.timeSpentOnTask || 0, prev.timeSpentOnTask || 0),
               timeSpentUntracked: Math.max(msg.prompt.timeSpentUntracked || 0, prev.timeSpentUntracked || 0),
               updatedAt: msg.prompt.updatedAt || prev.updatedAt,
               status: msg.prompt.status || prev.status,
@@ -835,6 +836,10 @@ export const EditorApp: React.FC = () => {
       const updatedPrompt: Prompt = {
         ...currentPrompt,
         timeSpentWriting: currentPrompt.timeSpentWriting + timeSpent,
+        // Accumulate task work time when status is "in-progress"
+        timeSpentOnTask: currentPrompt.status === 'in-progress'
+          ? (currentPrompt.timeSpentOnTask || 0) + timeSpent
+          : (currentPrompt.timeSpentOnTask || 0),
       };
       openedAtRef.current = Date.now();
       saveStartCounterRef.current = userChangeCounterRef.current;
@@ -871,6 +876,10 @@ export const EditorApp: React.FC = () => {
     const updatedPrompt: Prompt = {
       ...prompt,
       timeSpentWriting: prompt.timeSpentWriting + timeSpent,
+      // Accumulate task work time when status is "in-progress"
+      timeSpentOnTask: prompt.status === 'in-progress'
+        ? (prompt.timeSpentOnTask || 0) + timeSpent
+        : (prompt.timeSpentOnTask || 0),
     };
     openedAtRef.current = Date.now();
     return updatedPrompt;
@@ -1131,6 +1140,19 @@ export const EditorApp: React.FC = () => {
                 onChange={v => handleSetStatus(v as PromptStatus)}
               />
             </>
+          ))}
+
+          {renderSection('time', 'Учёт времени', timeSummary, (
+            <TimerDisplay
+              timeWriting={prompt.timeSpentWriting}
+              timeImplementing={prompt.timeSpentImplementing}
+              timeOnTask={prompt.timeSpentOnTask || 0}
+              timeUntracked={prompt.timeSpentUntracked || 0}
+              onUntrackedChange={(ms) => updateField('timeSpentUntracked', ms)}
+              hasChatSessions={prompt.chatSessionIds.length > 0}
+              isRecalculating={isRecalculating}
+              onRecalcImplementingTime={handleRecalcImplementingTime}
+            />
           ))}
 
           {renderSection('workspace', 'Рабочее окружение', workspaceSummary, (
@@ -1530,18 +1552,6 @@ export const EditorApp: React.FC = () => {
                 />
               </div>
             </>
-          ))}
-
-          {renderSection('time', 'Учёт времени', timeSummary, (
-            <TimerDisplay
-              timeWriting={prompt.timeSpentWriting}
-              timeImplementing={prompt.timeSpentImplementing}
-              timeUntracked={prompt.timeSpentUntracked || 0}
-              onUntrackedChange={(ms) => updateField('timeSpentUntracked', ms)}
-              hasChatSessions={prompt.chatSessionIds.length > 0}
-              isRecalculating={isRecalculating}
-              onRecalcImplementingTime={handleRecalcImplementingTime}
-            />
           ))}
         </div>
       </div>

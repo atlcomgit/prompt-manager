@@ -4,6 +4,7 @@ import { useT } from '../../shared/i18n';
 interface Props {
   timeWriting: number;
   timeImplementing: number;
+  timeOnTask: number;
   timeUntracked: number;
   onUntrackedChange: (ms: number) => void;
   hasChatSessions: boolean;
@@ -27,7 +28,7 @@ function formatDuration(ms: number): string {
   return `${seconds}с`;
 }
 
-export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, timeUntracked, onUntrackedChange, hasChatSessions, isRecalculating, onRecalcImplementingTime }) => {
+export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, timeOnTask, timeUntracked, onUntrackedChange, hasChatSessions, isRecalculating, onRecalcImplementingTime }) => {
   const t = useT();
   const totalTime = timeWriting + timeImplementing + timeUntracked;
   const untrackedHours = Number((((timeUntracked || 0) / 3600000)).toFixed(2));
@@ -56,6 +57,10 @@ export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, t
             )}
           </div>
           <span style={styles.statValue}>{formatDuration(timeImplementing)}</span>
+        </div>
+        <div style={styles.stat}>
+          <span style={styles.statLabel}>{t('timer.taskWork')}</span>
+          <span style={styles.statValue}>{formatDuration(timeOnTask)}</span>
         </div>
         <div style={styles.stat}>
           <span style={styles.statLabel}>{t('timer.untracked')}</span>
@@ -107,8 +112,8 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '8px 12px',
     background: 'var(--vscode-input-background)',
     borderRadius: '4px',
-    minWidth: '160px',
-    width: '160px',
+    flex: '1 1 0',
+    minWidth: '120px',
   },
   statLabel: {
     fontSize: '10px',

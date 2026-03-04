@@ -405,6 +405,7 @@ export function activate(context: vscode.ExtensionContext) {
 						}
 
 						await sendMessage(query);
+						copilotStatusBarProvider.notifyChatStarted();
 					} catch {
 						// ignore optional compatibility attempts
 					}

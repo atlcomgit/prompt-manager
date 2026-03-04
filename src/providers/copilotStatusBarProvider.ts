@@ -32,6 +32,7 @@ const PROGRESS_EMPTY = '░';
 const PROGRESS_BAR_LENGTH = 10;
 const SPARKLINE_CHARS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const STATUSBAR_REFRESH_INTERVAL_MS = 30 * 1000;
+const POST_CHAT_REFRESH_DELAY_MS = 5 * 1000;
 
 export class CopilotStatusBarProvider implements vscode.Disposable {
 	/** Элемент статусбара */
@@ -39,6 +40,7 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 
 	/** Подписки на события */
 	private disposables: vscode.Disposable[] = [];
+	private postChatRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(
 		private readonly usageService: CopilotUsageService,
@@ -331,9 +333,39 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 	}
 
 	/**
+	 * Вызывается после старта чата: через 5 секунд делает принудительное обновление,
+	 * затем перезапускает автообновление с интервалом 30 секунд.
+	 */
+	notifyChatStarted(): void {
+		if (this.postChatRefreshTimer) {
+			clearTimeout(this.postChatRefreshTimer);
+			this.postChatRefreshTimer = undefined;
+		}
+
+		this.postChatRefreshTimer = setTimeout(() => {
+			void (async () => {
+				try {
+					const data = await this.usageService.fetchUsage(true);
+					this.updateStatusBar(data);
+					this.usageService.startAutoRefresh({
+						intervalMs: STATUSBAR_REFRESH_INTERVAL_MS,
+						forceRefresh: false,
+					});
+				} catch {
+					// do nothing, keep extension resilient
+				}
+			})();
+		}, POST_CHAT_REFRESH_DELAY_MS);
+	}
+
+	/**
 	 * Освобождает ресурсы провайдера.
 	 */
 	dispose(): void {
+		if (this.postChatRefreshTimer) {
+			clearTimeout(this.postChatRefreshTimer);
+			this.postChatRefreshTimer = undefined;
+		}
 		this.statusBarItem.dispose();
 		for (const d of this.disposables) {
 			d.dispose();

@@ -328,7 +328,7 @@ export const EditorApp: React.FC = () => {
   }, [prompt.contextFiles]);
 
   const timeSummary = useMemo(() => {
-    const totalMs = (prompt.timeSpentWriting || 0) + (prompt.timeSpentImplementing || 0) + (prompt.timeSpentUntracked || 0);
+    const totalMs = (prompt.timeSpentWriting || 0) + (prompt.timeSpentImplementing || 0) + (prompt.timeSpentOnTask || 0) + (prompt.timeSpentUntracked || 0);
     const minutes = Math.round(totalMs / 60000);
     return minutes > 0 ? [`Всего: ${minutes} мин`] : [];
   }, [prompt.timeSpentWriting, prompt.timeSpentImplementing, prompt.timeSpentUntracked, prompt.timeSpentOnTask]);

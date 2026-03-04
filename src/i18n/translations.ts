@@ -164,6 +164,7 @@ const en: Record<string, string> = {
 	'stats.time': '⏱ Time',
 	'stats.writingTime': 'Writing prompts',
 	'stats.implementingTime': 'Chat implementation',
+	'stats.taskWorkTime': 'Task work',
 	'stats.languages': '💻 Programming languages',
 	'stats.frameworks': '🛠 Frameworks',
 	'stats.recentActivity': '🕐 Recent activity',
@@ -175,6 +176,7 @@ const en: Record<string, string> = {
 	'stats.statusCol': 'Status',
 	'stats.writingCol': 'Writing',
 	'stats.implementingCol': 'Implementing',
+	'stats.taskWorkCol': 'Task work',
 	'stats.totalCol': 'Total',
 
 	// --- Tracker ---
@@ -376,6 +378,7 @@ const ru: Record<string, string> = {
 	'stats.time': '⏱ Время',
 	'stats.writingTime': 'Написание промптов',
 	'stats.implementingTime': 'Реализация в чатах',
+	'stats.taskWorkTime': 'Работа с задачей',
 	'stats.languages': '💻 Языки программирования',
 	'stats.frameworks': '🛠 Фреймворки',
 	'stats.recentActivity': '🕐 Недавняя активность',
@@ -387,6 +390,7 @@ const ru: Record<string, string> = {
 	'stats.statusCol': 'Статус',
 	'stats.writingCol': 'Написание',
 	'stats.implementingCol': 'Реализация',
+	'stats.taskWorkCol': 'Работа с задачей',
 	'stats.totalCol': 'Итого',
 
 	// --- Tracker ---

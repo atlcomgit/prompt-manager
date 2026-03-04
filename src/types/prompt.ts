@@ -196,6 +196,7 @@ export interface PromptStatistics {
 	byFramework: Record<string, number>;
 	totalTimeWriting: number;
 	totalTimeImplementing: number;
+	totalTimeOnTask: number;
 	totalTime: number;
 	favoriteCount: number;
 	avgTimePerPrompt: number;
@@ -203,5 +204,5 @@ export interface PromptStatistics {
 	topLanguages: Array<{ name: string; count: number }>;
 	topFrameworks: Array<{ name: string; count: number }>;
 	/** Brief report rows: taskNumber, title, total time */
-	reportRows: Array<{ taskNumber: string; title: string; timeWriting: number; timeImplementing: number; totalTime: number; status: PromptStatus }>;
+	reportRows: Array<{ taskNumber: string; title: string; timeWriting: number; timeImplementing: number; timeOnTask: number; totalTime: number; status: PromptStatus }>;
 }

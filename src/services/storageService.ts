@@ -506,6 +506,7 @@ export class StorageService {
 		const byFramework: Record<string, number> = {};
 		let totalTimeWriting = 0;
 		let totalTimeImplementing = 0;
+		let totalTimeOnTask = 0;
 		let totalTimeUntracked = 0;
 		let favoriteCount = 0;
 
@@ -514,6 +515,7 @@ export class StorageService {
 			if (p.favorite) favoriteCount++;
 			totalTimeWriting += p.timeSpentWriting || 0;
 			totalTimeImplementing += p.timeSpentImplementing || 0;
+			totalTimeOnTask += p.timeSpentOnTask || 0;
 			totalTimeUntracked += p.timeSpentUntracked || 0;
 			for (const lang of p.languages) {
 				byLanguage[lang] = (byLanguage[lang] || 0) + 1;
@@ -523,7 +525,7 @@ export class StorageService {
 			}
 		}
 
-		const totalTime = totalTimeWriting + totalTimeImplementing + totalTimeUntracked;
+		const totalTime = totalTimeWriting + totalTimeImplementing + totalTimeOnTask + totalTimeUntracked;
 		const avgTimePerPrompt = prompts.length > 0 ? totalTime / prompts.length : 0;
 
 		const recentActivity = [...prompts]
@@ -546,7 +548,8 @@ export class StorageService {
 			title: p.title || p.id,
 			timeWriting: p.timeSpentWriting || 0,
 			timeImplementing: p.timeSpentImplementing || 0,
-			totalTime: (p.timeSpentWriting || 0) + (p.timeSpentImplementing || 0) + (p.timeSpentUntracked || 0),
+			timeOnTask: p.timeSpentOnTask || 0,
+			totalTime: (p.timeSpentWriting || 0) + (p.timeSpentImplementing || 0) + (p.timeSpentOnTask || 0) + (p.timeSpentUntracked || 0),
 			status: p.status,
 		}));
 
@@ -557,6 +560,7 @@ export class StorageService {
 			byFramework,
 			totalTimeWriting,
 			totalTimeImplementing,
+			totalTimeOnTask,
 			totalTime,
 			favoriteCount,
 			avgTimePerPrompt,

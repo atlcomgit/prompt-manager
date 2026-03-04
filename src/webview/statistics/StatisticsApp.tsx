@@ -11,12 +11,14 @@ import type { PromptStatistics } from '../../types/prompt';
 const vscode = getVsCodeApi();
 
 function formatDuration(ms: number): string {
-  if (ms < 1000) return '0м';
+  if (ms < 1000) return '0с';
   const totalSeconds = Math.floor(ms / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  if (hours > 0) return `${hours}ч ${minutes}м`;
-  return `${minutes}м`;
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}ч ${minutes}м ${seconds}с`;
+  if (minutes > 0) return `${minutes}м ${seconds}с`;
+  return `${seconds}с`;
 }
 
 export const StatisticsApp: React.FC = () => {
@@ -47,15 +49,18 @@ export const StatisticsApp: React.FC = () => {
 
   if (!stats) {
     return (
-      <div style={styles.container}>
-        <div style={styles.loading}>{t('stats.loading')}</div>
+      <div style={styles.page}>
+        <div style={styles.container}>
+          <div style={styles.loading}>{t('stats.loading')}</div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div style={styles.container}>
-      <h2 style={styles.title}>{t('stats.title')}</h2>
+    <div style={styles.page}>
+      <div style={styles.container}>
+        <h2 style={styles.title}>{t('stats.title')}</h2>
 
       {/* Period filter */}
       <div style={styles.periodFilter}>
@@ -153,6 +158,10 @@ export const StatisticsApp: React.FC = () => {
             <span style={styles.timeLabel}>{t('stats.implementingTime')}</span>
             <span style={styles.timeValue}>{formatDuration(stats.totalTimeImplementing)}</span>
           </div>
+          <div style={styles.timeStat}>
+            <span style={styles.timeLabel}>{t('stats.taskWorkTime')}</span>
+            <span style={styles.timeValue}>{formatDuration(stats.totalTimeOnTask || 0)}</span>
+          </div>
         </div>
       </div>
 
@@ -205,8 +214,8 @@ export const StatisticsApp: React.FC = () => {
       )}
 
       {/* Brief report table */}
-      {stats.reportRows && stats.reportRows.length > 0 && (
-        <div style={styles.section}>
+        {stats.reportRows && stats.reportRows.length > 0 && (
+          <div style={styles.section}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h3 style={styles.sectionTitle}>{t('stats.briefReport')}</h3>
             <button
@@ -249,6 +258,7 @@ export const StatisticsApp: React.FC = () => {
                 <th style={styles.reportTh}>{t('stats.statusCol')}</th>
                 <th style={{ ...styles.reportTh, textAlign: 'right' }}>{t('stats.writingCol')}</th>
                 <th style={{ ...styles.reportTh, textAlign: 'right' }}>{t('stats.implementingCol')}</th>
+                <th style={{ ...styles.reportTh, textAlign: 'right' }}>{t('stats.taskWorkCol')}</th>
                 <th style={{ ...styles.reportTh, textAlign: 'right' }}>{t('stats.totalCol')}</th>
               </tr>
             </thead>
@@ -280,6 +290,7 @@ export const StatisticsApp: React.FC = () => {
                     <td style={styles.reportTd}>{statusLabels[row.status] || row.status}</td>
                     <td style={{ ...styles.reportTd, textAlign: 'right' }}>{formatDuration(row.timeWriting)}</td>
                     <td style={{ ...styles.reportTd, textAlign: 'right' }}>{formatDuration(row.timeImplementing)}</td>
+                    <td style={{ ...styles.reportTd, textAlign: 'right' }}>{formatDuration(row.timeOnTask || 0)}</td>
                     <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(row.totalTime)}</td>
                   </tr>
                 );
@@ -290,25 +301,34 @@ export const StatisticsApp: React.FC = () => {
                 <td style={styles.reportTd} colSpan={3}>{t('stats.totalCol')}</td>
                 <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeWriting)}</td>
                 <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeImplementing)}</td>
+                <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeOnTask || 0)}</td>
                 <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 700 }}>{formatDuration(stats.totalTime)}</td>
               </tr>
             </tfoot>
           </table>
-        </div>
-      )}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
 
 const styles: Record<string, React.CSSProperties> = {
+  page: {
+    width: '100%',
+    height: '100vh',
+    overflowY: 'auto',
+    display: 'flex',
+    justifyContent: 'center',
+  },
   container: {
     padding: '20px',
-    maxWidth: '800px',
-    margin: '0 auto',
+    width: '980px',
+    maxWidth: '980px',
+    minWidth: '920px',
+    boxSizing: 'border-box',
     fontFamily: 'var(--vscode-font-family)',
     color: 'var(--vscode-foreground)',
-    overflowY: 'auto',
-    height: '100vh',
   },
   loading: {
     textAlign: 'center',

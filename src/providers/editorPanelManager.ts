@@ -508,6 +508,7 @@ export class EditorPanelManager {
 			if (existingPrompt) {
 				promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
 				promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
+				promptToSave.timeSpentOnTask = Math.max(promptToSave.timeSpentOnTask || 0, existingPrompt.timeSpentOnTask || 0);
 				promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
 					? Math.max(0, promptToSave.timeSpentUntracked || 0)
 					: (existingPrompt.timeSpentUntracked || 0);
@@ -515,6 +516,7 @@ export class EditorPanelManager {
 					? promptToSave.chatSessionIds
 					: (existingPrompt.chatSessionIds || []);
 			} else {
+				promptToSave.timeSpentOnTask = Math.max(0, promptToSave.timeSpentOnTask || 0);
 				promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
 			}
 
@@ -1074,6 +1076,7 @@ export class EditorPanelManager {
 						dirtySnapshot.id = await this.storageService.uniqueId(slug || 'untitled');
 					}
 					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
+					dirtySnapshot.timeSpentOnTask = Math.max(0, dirtySnapshot.timeSpentOnTask || 0);
 					await this.storageService.savePrompt(dirtySnapshot);
 					this.panelDirtyFlags.set(panelKey, false);
 					this.panelLatestPromptSnapshots.set(panelKey, null);
@@ -1250,6 +1253,7 @@ export class EditorPanelManager {
 					if (existingPrompt) {
 						promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
 						promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
+						promptToSave.timeSpentOnTask = Math.max(promptToSave.timeSpentOnTask || 0, existingPrompt.timeSpentOnTask || 0);
 						promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
 							? Math.max(0, promptToSave.timeSpentUntracked || 0)
 							: (existingPrompt.timeSpentUntracked || 0);
@@ -1257,6 +1261,7 @@ export class EditorPanelManager {
 							? promptToSave.chatSessionIds
 							: (existingPrompt.chatSessionIds || []);
 					} else {
+						promptToSave.timeSpentOnTask = Math.max(0, promptToSave.timeSpentOnTask || 0);
 						promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
 					}
 

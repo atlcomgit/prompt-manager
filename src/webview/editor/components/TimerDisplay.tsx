@@ -30,7 +30,7 @@ function formatDuration(ms: number): string {
 
 export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, timeOnTask, timeUntracked, onUntrackedChange, hasChatSessions, isRecalculating, onRecalcImplementingTime }) => {
   const t = useT();
-  const totalTime = timeWriting + timeImplementing + timeUntracked;
+  const totalTime = timeWriting + timeImplementing + timeOnTask + timeUntracked;
   const untrackedHours = Number((((timeUntracked || 0) / 3600000)).toFixed(2));
 
   return (

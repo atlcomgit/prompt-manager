@@ -2051,6 +2051,7 @@ export class EditorPanelManager {
 
 			case 'switchBranch': {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const allowedBranches = this.getAllowedBranchesSetting();
 				// Check for uncommitted changes first
 				const status = await this.gitService.checkBranchStatus(paths, msg.projects, msg.branch);
 				if (status.hasChanges) {
@@ -2064,7 +2065,7 @@ export class EditorPanelManager {
 						return;
 					}
 				}
-				const result = await this.gitService.switchBranch(paths, msg.projects, msg.branch);
+				const result = await this.gitService.switchBranch(paths, msg.projects, msg.branch, allowedBranches);
 				if (result.success) {
 					postMessage({ type: 'info', message: `Ветка "${msg.branch}" активирована.` });
 					const branches = await this.gitService.getBranches(paths, msg.projects);
@@ -2205,7 +2206,8 @@ export class EditorPanelManager {
 
 			case 'createBranch': {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
-				const result = await this.gitService.createBranch(paths, msg.projects, msg.branch);
+				const allowedBranches = this.getAllowedBranchesSetting();
+				const result = await this.gitService.createBranch(paths, msg.projects, msg.branch, allowedBranches);
 				if (result.success) {
 					postMessage({ type: 'info', message: `Ветка "${msg.branch}" активирована.` });
 					const branches = await this.gitService.getBranches(paths, msg.projects);

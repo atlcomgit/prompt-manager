@@ -2108,9 +2108,12 @@ export class EditorPanelManager {
 					break;
 				}
 
-				// Find the most common prefix
+				const prefixed = parsed.filter(item => item.prefix.length > 0);
+				const candidates = prefixed.length > 0 ? prefixed : parsed;
+
+				// Prefer real prefixes when they exist; otherwise keep numeric-only numbering.
 				const prefixCounts = new Map<string, number>();
-				for (const { prefix } of parsed) {
+				for (const { prefix } of candidates) {
 					prefixCounts.set(prefix, (prefixCounts.get(prefix) || 0) + 1);
 				}
 				let bestPrefix = '';
@@ -2123,7 +2126,7 @@ export class EditorPanelManager {
 				}
 
 				// Find max number among entries with the best prefix
-				const maxNum = Math.max(...parsed
+				const maxNum = Math.max(...candidates
 					.filter(p => p.prefix === bestPrefix)
 					.map(p => p.num));
 

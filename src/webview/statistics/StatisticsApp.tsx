@@ -35,6 +35,84 @@ interface SortCriterion {
 /** Column keys for report table */
 type ReportColumn = 'taskNumber' | 'title' | 'status' | 'timeWriting' | 'timeImplementing' | 'timeOnTask' | 'totalTime';
 
+type ExportFormat = 'html' | 'md';
+
+interface ExportRow {
+  taskNumber: string;
+  title: string;
+  hours: number;
+}
+
+function buildScaledExportRows(
+  rows: Array<{ taskNumber: string; title: string; totalTime: number }>,
+  targetHours: number,
+): ExportRow[] {
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const totalMs = rows.reduce((sum, row) => sum + row.totalTime, 0);
+
+  if (totalMs <= 0) {
+    const baseHours = Math.floor(targetHours / rows.length);
+    let remainder = targetHours - baseHours * rows.length;
+    return rows.map((row) => {
+      const hours = baseHours + (remainder > 0 ? 1 : 0);
+      remainder = Math.max(0, remainder - 1);
+      return {
+        taskNumber: row.taskNumber || '—',
+        title: row.title,
+        hours,
+      };
+    });
+  }
+
+  const scale = targetHours / (totalMs / (1000 * 60 * 60));
+  const normalized = rows.map((row, index) => {
+    const rawHours = (row.totalTime / (1000 * 60 * 60)) * scale;
+    const flooredHours = Math.floor(rawHours);
+    return {
+      index,
+      rawHours,
+      flooredHours,
+      fraction: rawHours - flooredHours,
+      row,
+    };
+  });
+
+  let allocatedHours = normalized.reduce((sum, item) => sum + item.flooredHours, 0);
+  let remainder = targetHours - allocatedHours;
+
+  normalized
+    .slice()
+    .sort((left, right) => {
+      if (right.fraction !== left.fraction) {
+        return right.fraction - left.fraction;
+      }
+      return left.index - right.index;
+    })
+    .forEach((item) => {
+      if (remainder <= 0) {
+        return;
+      }
+      item.flooredHours += 1;
+      remainder -= 1;
+      allocatedHours += 1;
+    });
+
+  if (allocatedHours !== targetHours && normalized.length > 0) {
+    normalized[normalized.length - 1].flooredHours += targetHours - allocatedHours;
+  }
+
+  return normalized
+    .sort((left, right) => left.index - right.index)
+    .map(({ row, flooredHours }) => ({
+      taskNumber: row.taskNumber || '—',
+      title: row.title,
+      hours: flooredHours,
+    }));
+}
+
 export const StatisticsApp: React.FC = () => {
   const t = useT();
   const [stats, setStats] = useState<PromptStatistics | null>(null);
@@ -166,6 +244,13 @@ export const StatisticsApp: React.FC = () => {
       return 0;
     });
   }, [stats?.reportRows, sortCriteria]);
+
+  const exportRows = useMemo(() => buildScaledExportRows(sortedReportRows, 165), [sortedReportRows]);
+
+  const handleExport = useCallback((format: ExportFormat) => {
+    if (exportRows.length === 0) return;
+    vscode.postMessage({ type: 'exportReport', format, rows: exportRows });
+  }, [exportRows]);
 
   /** Status labels map */
   const statusLabels: Record<string, string> = {
@@ -347,25 +432,17 @@ export const StatisticsApp: React.FC = () => {
                 )}
                 <button
                   style={styles.exportBtn}
-                  onClick={() => {
-                    if (!stats.reportRows) return;
-                    const TARGET_HOURS = 165;
-                    const realTotalMs = stats.reportRows.reduce((s, r) => s + r.totalTime, 0);
-                    const realTotalHours = realTotalMs / (1000 * 60 * 60);
-                    const scale = realTotalHours > 0 ? TARGET_HOURS / realTotalHours : 1;
-                    const rows = sortedReportRows.map(r => {
-                      const scaledHours = Math.round((r.totalTime / (1000 * 60 * 60)) * scale);
-                      return {
-                        taskNumber: r.taskNumber || '—',
-                        title: r.title,
-                        hours: scaledHours,
-                      };
-                    });
-                    vscode.postMessage({ type: 'exportReport', rows });
-                  }}
-                  title={t('stats.exportTooltip')}
+                  onClick={() => handleExport('html')}
+                  title={t('stats.exportHtmlTooltip')}
                 >
-                  {t('stats.exportBtn')}
+                  {t('stats.exportHtmlBtn')}
+                </button>
+                <button
+                  style={styles.exportMdBtn}
+                  onClick={() => handleExport('md')}
+                  title={t('stats.exportMdTooltip')}
+                >
+                  {t('stats.exportMdBtn')}
                 </button>
               </div>
             </div>
@@ -485,11 +562,23 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: 'nowrap',
   },
   exportBtn: {
-    padding: '4px 10px',
+    padding: '6px 12px',
+    background: 'linear-gradient(135deg, var(--vscode-button-background), color-mix(in srgb, var(--vscode-button-background) 70%, white))',
+    color: 'var(--vscode-button-foreground)',
+    border: '1px solid color-mix(in srgb, var(--vscode-button-background) 70%, black)',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontFamily: 'var(--vscode-font-family)',
+    whiteSpace: 'nowrap',
+    boxShadow: '0 8px 20px color-mix(in srgb, var(--vscode-button-background) 20%, transparent)',
+  },
+  exportMdBtn: {
+    padding: '6px 12px',
     background: 'var(--vscode-button-secondaryBackground)',
     color: 'var(--vscode-button-secondaryForeground)',
-    border: 'none',
-    borderRadius: '4px',
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '8px',
     cursor: 'pointer',
     fontSize: '12px',
     fontFamily: 'var(--vscode-font-family)',

@@ -2,14 +2,16 @@
  * Statistics App — Shows prompt usage statistics and reports
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
-import type { PromptStatistics } from '../../types/prompt';
+import { DateRangeCalendar } from './DateRangeCalendar';
+import type { PromptStatistics, PromptStatus } from '../../types/prompt';
 
 const vscode = getVsCodeApi();
 
+/** Format milliseconds as human-readable duration */
 function formatDuration(ms: number): string {
   if (ms < 1000) return '0с';
   const totalSeconds = Math.floor(ms / 1000);
@@ -21,24 +23,49 @@ function formatDuration(ms: number): string {
   return `${seconds}с`;
 }
 
+/** Sort direction type */
+type SortDir = 'asc' | 'desc';
+
+/** Single sort criterion */
+interface SortCriterion {
+  field: string;
+  dir: SortDir;
+}
+
+/** Column keys for report table */
+type ReportColumn = 'taskNumber' | 'title' | 'status' | 'timeWriting' | 'timeImplementing' | 'timeOnTask' | 'totalTime';
+
 export const StatisticsApp: React.FC = () => {
   const t = useT();
   const [stats, setStats] = useState<PromptStatistics | null>(null);
-  const currentDate = new Date();
-  const [selectedMonth, setSelectedMonth] = useState<number>(0); // 0 = all months
-  const [selectedYear, setSelectedYear] = useState<number>(currentDate.getFullYear());
 
+  // --- Date range filter ---
+  const [dateFrom, setDateFrom] = useState<string | null>(null);
+  const [dateTo, setDateTo] = useState<string | null>(null);
+  /** Flag: show only prompts with ≥5 min total time in daily-time.json */
+  const [minFiveMin, setMinFiveMin] = useState(false);
+
+  // --- Table sorting (multi-column) ---
+  const [sortCriteria, setSortCriteria] = useState<SortCriterion[]>([]);
+
+  /** Load statistics with current filters */
   const loadStatistics = useCallback(() => {
     const msg: any = { type: 'getStatistics' };
-    if (selectedYear) msg.year = selectedYear;
-    if (selectedMonth > 0) msg.month = selectedMonth;
+    if (dateFrom && dateTo) {
+      msg.dateFrom = dateFrom;
+      msg.dateTo = dateTo;
+    }
+    if (minFiveMin) {
+      msg.minFiveMin = true;
+    }
     vscode.postMessage(msg);
-  }, [selectedMonth, selectedYear]);
+  }, [dateFrom, dateTo, minFiveMin]);
 
   useEffect(() => {
     loadStatistics();
   }, [loadStatistics]);
 
+  /** Handle messages from extension */
   const handleMessage = useCallback((msg: any) => {
     if (msg.type === 'statistics') {
       setStats(msg.data);
@@ -46,6 +73,111 @@ export const StatisticsApp: React.FC = () => {
   }, []);
 
   useMessageListener(handleMessage);
+
+  /** Reset all filters */
+  const resetFilters = useCallback(() => {
+    setDateFrom(null);
+    setDateTo(null);
+    setMinFiveMin(false);
+  }, []);
+
+  /** Handle column header click for sorting */
+  const handleSortClick = useCallback((field: ReportColumn, e: React.MouseEvent) => {
+    setSortCriteria(prev => {
+      // Ctrl+Click — add/toggle secondary sort
+      if (e.ctrlKey || e.metaKey) {
+        const existingIdx = prev.findIndex(c => c.field === field);
+        if (existingIdx >= 0) {
+          // Toggle direction or remove if clicked 3rd time
+          const existing = prev[existingIdx];
+          if (existing.dir === 'asc') {
+            const updated = [...prev];
+            updated[existingIdx] = { field, dir: 'desc' };
+            return updated;
+          } else {
+            // Remove this sort criterion
+            return prev.filter((_, i) => i !== existingIdx);
+          }
+        }
+        return [...prev, { field, dir: 'asc' }];
+      }
+      // Regular click — single column sort
+      const existing = prev.length === 1 && prev[0].field === field ? prev[0] : null;
+      if (existing) {
+        return existing.dir === 'asc' ? [{ field, dir: 'desc' }] : [];
+      }
+      return [{ field, dir: 'asc' }];
+    });
+  }, []);
+
+  /** Reset sort */
+  const resetSort = useCallback(() => {
+    setSortCriteria([]);
+  }, []);
+
+  /** Sort indicator for column header */
+  const getSortIndicator = useCallback((field: ReportColumn): string => {
+    const idx = sortCriteria.findIndex(c => c.field === field);
+    if (idx < 0) return '';
+    const arrow = sortCriteria[idx].dir === 'asc' ? '↑' : '↓';
+    return sortCriteria.length > 1 ? `${arrow}${idx + 1}` : arrow;
+  }, [sortCriteria]);
+
+  /** Sorted report rows */
+  const sortedReportRows = useMemo(() => {
+    if (!stats?.reportRows) return [];
+    const rows = [...stats.reportRows];
+
+    if (sortCriteria.length === 0) {
+      // Default sort: by task number descending
+      return rows.sort((a, b) => {
+        const numA = parseInt(a.taskNumber, 10);
+        const numB = parseInt(b.taskNumber, 10);
+        const isNumA = !isNaN(numA);
+        const isNumB = !isNaN(numB);
+        if (isNumA && isNumB) return numB - numA;
+        if (isNumA) return -1;
+        if (isNumB) return 1;
+        return b.taskNumber.localeCompare(a.taskNumber);
+      });
+    }
+
+    return rows.sort((a, b) => {
+      for (const { field, dir } of sortCriteria) {
+        let cmp = 0;
+        const valA = (a as any)[field];
+        const valB = (b as any)[field];
+        if (typeof valA === 'number' && typeof valB === 'number') {
+          cmp = valA - valB;
+        } else if (field === 'taskNumber') {
+          const nA = parseInt(valA, 10);
+          const nB = parseInt(valB, 10);
+          const isNA = !isNaN(nA);
+          const isNB = !isNaN(nB);
+          if (isNA && isNB) cmp = nA - nB;
+          else if (isNA) cmp = -1;
+          else if (isNB) cmp = 1;
+          else cmp = String(valA).localeCompare(String(valB));
+        } else {
+          cmp = String(valA || '').localeCompare(String(valB || ''));
+        }
+        if (cmp !== 0) return dir === 'asc' ? cmp : -cmp;
+      }
+      return 0;
+    });
+  }, [stats?.reportRows, sortCriteria]);
+
+  /** Status labels map */
+  const statusLabels: Record<string, string> = {
+    'draft': t('status.draft'),
+    'in-progress': t('status.inProgress'),
+    'stopped': t('status.stopped'),
+    'cancelled': t('status.cancelled'),
+    'completed': t('status.completed'),
+    'report': t('status.report'),
+    'review': t('status.review'),
+    'closed': t('status.closed'),
+  };
 
   if (!stats) {
     return (
@@ -57,233 +189,200 @@ export const StatisticsApp: React.FC = () => {
     );
   }
 
+  /** Column header builder with sort support */
+  const sortableHeader = (field: ReportColumn, label: string, align: 'left' | 'right' = 'left') => {
+    const indicator = getSortIndicator(field);
+    return (
+      <th
+        style={{
+          ...styles.reportTh,
+          textAlign: align,
+          cursor: 'pointer',
+          userSelect: 'none',
+        }}
+        onClick={(e) => handleSortClick(field, e)}
+        title={t('stats.sortTooltip')}
+      >
+        {label} {indicator && <span style={styles.sortIndicator}>{indicator}</span>}
+      </th>
+    );
+  };
+
   return (
     <div style={styles.page}>
       <div style={styles.container}>
         <h2 style={styles.title}>{t('stats.title')}</h2>
 
-      {/* Period filter */}
-      <div style={styles.periodFilter}>
-        <label style={styles.periodLabel}>{t('stats.period')}</label>
-        <select
-          value={selectedYear}
-          onChange={e => setSelectedYear(Number(e.target.value))}
-          style={styles.periodSelect}
-        >
-          {Array.from({ length: 5 }, (_, i) => currentDate.getFullYear() - i).map(y => (
-            <option key={y} value={y}>{y}</option>
-          ))}
-        </select>
-        <select
-          value={selectedMonth}
-          onChange={e => setSelectedMonth(Number(e.target.value))}
-          style={styles.periodSelect}
-        >
-          <option value={0}>{t('stats.allYear')}</option>
-          {Array.from({ length: 12 }, (_, i) => (
-            <option key={i + 1} value={i + 1}>{t(`month.${i + 1}`)}</option>
-          ))}
-        </select>
-      </div>
+        {/* Period filter — date range + min 5 min checkbox + reset */}
+        <div style={styles.periodFilter}>
+          <label style={styles.periodLabel}>{t('stats.period')}</label>
+          <DateRangeCalendar
+            dateFrom={dateFrom}
+            dateTo={dateTo}
+            onChange={(from, to) => { setDateFrom(from); setDateTo(to); }}
+            placeholder={t('stats.selectPeriod')}
+          />
+          <label style={styles.checkboxLabel}>
+            <input
+              type="checkbox"
+              checked={minFiveMin}
+              onChange={e => setMinFiveMin(e.target.checked)}
+              style={styles.checkbox}
+            />
+            {t('stats.minFiveMin')}
+          </label>
+          {(dateFrom || dateTo || minFiveMin) && (
+            <button
+              style={styles.resetBtn}
+              onClick={resetFilters}
+              title={t('stats.resetFilters')}
+            >
+              ✕ {t('stats.resetFilters')}
+            </button>
+          )}
+        </div>
 
-      {/* Summary cards */}
-      <div style={styles.cardsRow}>
-        <div style={styles.card}>
-          <div style={styles.cardValue}>{stats.totalPrompts}</div>
-          <div style={styles.cardLabel}>{t('stats.totalPrompts')}</div>
+        {/* Summary cards */}
+        <div style={styles.cardsRow}>
+          <div style={styles.card}>
+            <div style={styles.cardValue}>{stats.totalPrompts}</div>
+            <div style={styles.cardLabel}>{t('stats.totalPrompts')}</div>
+          </div>
+          <div style={styles.card}>
+            <div style={styles.cardValue}>{stats.favoriteCount}</div>
+            <div style={styles.cardLabel}>{t('stats.favorites')}</div>
+          </div>
+          <div style={styles.card}>
+            <div style={styles.cardValue}>{formatDuration(stats.totalTime)}</div>
+            <div style={styles.cardLabel}>{t('stats.totalTime')}</div>
+          </div>
+          <div style={styles.card}>
+            <div style={styles.cardValue}>{formatDuration(stats.avgTimePerPrompt)}</div>
+            <div style={styles.cardLabel}>{t('stats.avgTime')}</div>
+          </div>
         </div>
-        <div style={styles.card}>
-          <div style={styles.cardValue}>{stats.favoriteCount}</div>
-          <div style={styles.cardLabel}>{t('stats.favorites')}</div>
-        </div>
-        <div style={styles.card}>
-          <div style={styles.cardValue}>{formatDuration(stats.totalTime)}</div>
-          <div style={styles.cardLabel}>{t('stats.totalTime')}</div>
-        </div>
-        <div style={styles.card}>
-          <div style={styles.cardValue}>{formatDuration(stats.avgTimePerPrompt)}</div>
-          <div style={styles.cardLabel}>{t('stats.avgTime')}</div>
-        </div>
-      </div>
 
-      {/* Status breakdown */}
-      <div style={styles.section}>
-        <h3 style={styles.sectionTitle}>{t('stats.byStatus')}</h3>
-        <div style={styles.barChart}>
-          {Object.entries(stats.byStatus).map(([status, count]) => {
-            const pct = stats.totalPrompts > 0 ? (count / stats.totalPrompts) * 100 : 0;
-            const STATUS_ICONS: Record<string, string> = {
-              'draft': '📝',
-              'in-progress': '🚀',
-              'stopped': '▣',
-              'cancelled': '❌',
-              'completed': '✅',
-              'report': '🧾',
-              'review': '🔎',
-              'closed': '🔒',
-            };
-            const STATUS_KEYS: Record<string, string> = {
-              'draft': 'status.draft',
-              'in-progress': 'status.inProgress',
-              'stopped': 'status.stopped',
-              'cancelled': 'status.cancelled',
-              'completed': 'status.completed',
-              'report': 'status.report',
-              'review': 'status.review',
-              'closed': 'status.closed',
-            };
-            const label = `${STATUS_ICONS[status] || ''} ${t(STATUS_KEYS[status] || status)}`;
-            return (
-              <div key={status} style={styles.barRow}>
-                <span style={styles.barLabel}>{label}</span>
-                <div style={styles.barTrack}>
-                  <div style={{ ...styles.barFill, width: `${Math.max(pct, 2)}%` }} />
+        {/* Status breakdown */}
+        <div style={styles.section}>
+          <h3 style={styles.sectionTitle}>{t('stats.byStatus')}</h3>
+          <div style={styles.barChart}>
+            {Object.entries(stats.byStatus).map(([status, count]) => {
+              const pct = stats.totalPrompts > 0 ? (count / stats.totalPrompts) * 100 : 0;
+              const STATUS_ICONS: Record<string, string> = {
+                'draft': '📝', 'in-progress': '🚀', 'stopped': '▣', 'cancelled': '❌',
+                'completed': '✅', 'report': '🧾', 'review': '🔎', 'closed': '🔒',
+              };
+              const STATUS_KEYS: Record<string, string> = {
+                'draft': 'status.draft', 'in-progress': 'status.inProgress', 'stopped': 'status.stopped',
+                'cancelled': 'status.cancelled', 'completed': 'status.completed', 'report': 'status.report',
+                'review': 'status.review', 'closed': 'status.closed',
+              };
+              const label = `${STATUS_ICONS[status] || ''} ${t(STATUS_KEYS[status] || status)}`;
+              return (
+                <div key={status} style={styles.barRow}>
+                  <span style={styles.barLabel}>{label}</span>
+                  <div style={styles.barTrack}>
+                    <div style={{ ...styles.barFill, width: `${Math.max(pct, 2)}%` }} />
+                  </div>
+                  <span style={styles.barCount}>{count}</span>
                 </div>
-                <span style={styles.barCount}>{count}</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Time breakdown */}
-      <div style={styles.section}>
-        <h3 style={styles.sectionTitle}>{t('stats.time')}</h3>
-        <div style={styles.timeGrid}>
-          <div style={styles.timeStat}>
-            <span style={styles.timeLabel}>{t('stats.writingTime')}</span>
-            <span style={styles.timeValue}>{formatDuration(stats.totalTimeWriting)}</span>
-          </div>
-          <div style={styles.timeStat}>
-            <span style={styles.timeLabel}>{t('stats.implementingTime')}</span>
-            <span style={styles.timeValue}>{formatDuration(stats.totalTimeImplementing)}</span>
-          </div>
-          <div style={styles.timeStat}>
-            <span style={styles.timeLabel}>{t('stats.taskWorkTime')}</span>
-            <span style={styles.timeValue}>{formatDuration(stats.totalTimeOnTask || 0)}</span>
+              );
+            })}
           </div>
         </div>
-      </div>
 
-      {/* Languages */}
-      {stats.topLanguages.length > 0 && (
+        {/* Time breakdown — all fields in one row, equal size */}
         <div style={styles.section}>
-          <h3 style={styles.sectionTitle}>{t('stats.languages')}</h3>
-          <div style={styles.tagCloud}>
-            {stats.topLanguages.map(l => (
-              <span key={l.name} style={styles.tag}>
-                {l.name} <span style={styles.tagCount}>{l.count}</span>
-              </span>
-            ))}
+          <h3 style={styles.sectionTitle}>{t('stats.time')}</h3>
+          <div style={styles.timeGridRow}>
+            <div style={styles.timeStat}>
+              <span style={styles.timeLabel}>{t('stats.writingTime')}</span>
+              <span style={styles.timeValue}>{formatDuration(stats.totalTimeWriting)}</span>
+            </div>
+            <div style={styles.timeStat}>
+              <span style={styles.timeLabel}>{t('stats.implementingTime')}</span>
+              <span style={styles.timeValue}>{formatDuration(stats.totalTimeImplementing)}</span>
+            </div>
+            <div style={styles.timeStat}>
+              <span style={styles.timeLabel}>{t('stats.taskWorkTime')}</span>
+              <span style={styles.timeValue}>{formatDuration(stats.totalTimeOnTask || 0)}</span>
+            </div>
           </div>
         </div>
-      )}
 
-      {/* Frameworks */}
-      {stats.topFrameworks.length > 0 && (
-        <div style={styles.section}>
-          <h3 style={styles.sectionTitle}>{t('stats.frameworks')}</h3>
-          <div style={styles.tagCloud}>
-            {stats.topFrameworks.map(f => (
-              <span key={f.name} style={styles.tag}>
-                {f.name} <span style={styles.tagCount}>{f.count}</span>
-              </span>
-            ))}
+        {/* Recent activity */}
+        {stats.recentActivity.length > 0 && (
+          <div style={styles.section}>
+            <h3 style={styles.sectionTitle}>{t('stats.recentActivity')}</h3>
+            <div style={styles.activityList}>
+              {stats.recentActivity.map(a => (
+                <div key={a.id} style={styles.activityItem}>
+                  <span style={styles.activityTitle}>{a.title || a.id}</span>
+                  <span style={styles.activityDate}>
+                    {new Date(a.updatedAt).toLocaleDateString('ru-RU', {
+                      day: '2-digit', month: '2-digit', year: '2-digit',
+                      hour: '2-digit', minute: '2-digit',
+                    })}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Recent activity */}
-      {stats.recentActivity.length > 0 && (
-        <div style={styles.section}>
-          <h3 style={styles.sectionTitle}>{t('stats.recentActivity')}</h3>
-          <div style={styles.activityList}>
-            {stats.recentActivity.map(a => (
-              <div key={a.id} style={styles.activityItem}>
-                <span style={styles.activityTitle}>{a.title || a.id}</span>
-                <span style={styles.activityDate}>
-                  {new Date(a.updatedAt).toLocaleDateString('ru-RU', {
-                    day: '2-digit', month: '2-digit', year: '2-digit',
-                    hour: '2-digit', minute: '2-digit',
-                  })}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Brief report table */}
+        {/* Brief report table with sortable headers */}
         {stats.reportRows && stats.reportRows.length > 0 && (
           <div style={styles.section}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h3 style={styles.sectionTitle}>{t('stats.briefReport')}</h3>
-            <button
-              style={styles.exportBtn}
-              onClick={() => {
-                if (!stats.reportRows) return;
-                const TARGET_HOURS = 165;
-                const realTotalMs = stats.reportRows.reduce((s, r) => s + r.totalTime, 0);
-                const realTotalHours = realTotalMs / (1000 * 60 * 60);
-                const scale = realTotalHours > 0 ? TARGET_HOURS / realTotalHours : 1;
-                const rows = [...stats.reportRows].sort((a, b) => {
-                  const numA = parseInt(a.taskNumber, 10);
-                  const numB = parseInt(b.taskNumber, 10);
-                  const isNumA = !isNaN(numA);
-                  const isNumB = !isNaN(numB);
-                  if (isNumA && isNumB) return numB - numA;
-                  if (isNumA) return -1;
-                  if (isNumB) return 1;
-                  return b.taskNumber.localeCompare(a.taskNumber);
-                }).map(r => {
-                  const scaledHours = Math.round((r.totalTime / (1000 * 60 * 60)) * scale);
-                  return {
-                    taskNumber: r.taskNumber || '—',
-                    title: r.title,
-                    hours: scaledHours,
-                  };
-                });
-                vscode.postMessage({ type: 'exportReport', rows });
-              }}
-              title={t('stats.exportTooltip')}
-            >
-              {t('stats.exportBtn')}
-            </button>
-          </div>
-          <table style={styles.reportTable}>
-            <thead>
-              <tr>
-                <th style={styles.reportTh}>{t('stats.taskCol')}</th>
-                <th style={styles.reportTh}>{t('stats.nameCol')}</th>
-                <th style={styles.reportTh}>{t('stats.statusCol')}</th>
-                <th style={{ ...styles.reportTh, textAlign: 'right' }}>{t('stats.writingCol')}</th>
-                <th style={{ ...styles.reportTh, textAlign: 'right' }}>{t('stats.implementingCol')}</th>
-                <th style={{ ...styles.reportTh, textAlign: 'right' }}>{t('stats.taskWorkCol')}</th>
-                <th style={{ ...styles.reportTh, textAlign: 'right' }}>{t('stats.totalCol')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...stats.reportRows].sort((a, b) => {
-                const numA = parseInt(a.taskNumber, 10);
-                const numB = parseInt(b.taskNumber, 10);
-                const isNumA = !isNaN(numA);
-                const isNumB = !isNaN(numB);
-                if (isNumA && isNumB) return numB - numA;
-                if (isNumA) return -1;
-                if (isNumB) return 1;
-                return b.taskNumber.localeCompare(a.taskNumber);
-              }).map((row, idx) => {
-                const statusLabels: Record<string, string> = {
-                  'draft': t('status.draft'),
-                  'in-progress': t('status.inProgress'),
-                  'stopped': t('status.stopped'),
-                  'cancelled': t('status.cancelled'),
-                  'completed': t('status.completed'),
-                  'report': t('status.report'),
-                  'review': t('status.review'),
-                  'closed': t('status.closed'),
-                };
-                return (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={styles.sectionTitle}>{t('stats.briefReport')}</h3>
+              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                {sortCriteria.length > 0 && (
+                  <button
+                    style={styles.resetSortBtn}
+                    onClick={resetSort}
+                    title={t('stats.resetSort')}
+                  >
+                    ✕ {t('stats.resetSort')}
+                  </button>
+                )}
+                <button
+                  style={styles.exportBtn}
+                  onClick={() => {
+                    if (!stats.reportRows) return;
+                    const TARGET_HOURS = 165;
+                    const realTotalMs = stats.reportRows.reduce((s, r) => s + r.totalTime, 0);
+                    const realTotalHours = realTotalMs / (1000 * 60 * 60);
+                    const scale = realTotalHours > 0 ? TARGET_HOURS / realTotalHours : 1;
+                    const rows = sortedReportRows.map(r => {
+                      const scaledHours = Math.round((r.totalTime / (1000 * 60 * 60)) * scale);
+                      return {
+                        taskNumber: r.taskNumber || '—',
+                        title: r.title,
+                        hours: scaledHours,
+                      };
+                    });
+                    vscode.postMessage({ type: 'exportReport', rows });
+                  }}
+                  title={t('stats.exportTooltip')}
+                >
+                  {t('stats.exportBtn')}
+                </button>
+              </div>
+            </div>
+            <table style={styles.reportTable}>
+              <thead>
+                <tr>
+                  {sortableHeader('taskNumber', t('stats.taskCol'))}
+                  {sortableHeader('title', t('stats.nameCol'))}
+                  {sortableHeader('status', t('stats.statusCol'))}
+                  {sortableHeader('timeWriting', t('stats.writingCol'), 'right')}
+                  {sortableHeader('timeImplementing', t('stats.implementingCol'), 'right')}
+                  {sortableHeader('timeOnTask', t('stats.taskWorkCol'), 'right')}
+                  {sortableHeader('totalTime', t('stats.totalCol'), 'right')}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedReportRows.map((row, idx) => (
                   <tr key={idx} style={idx % 2 === 0 ? styles.reportRowEven : undefined}>
                     <td style={styles.reportTaskCell}>{row.taskNumber || '—'}</td>
                     <td style={styles.reportTd}>{row.title}</td>
@@ -293,19 +392,18 @@ export const StatisticsApp: React.FC = () => {
                     <td style={{ ...styles.reportTd, textAlign: 'right' }}>{formatDuration(row.timeOnTask || 0)}</td>
                     <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(row.totalTime)}</td>
                   </tr>
-                );
-              })}
-            </tbody>
-            <tfoot>
-              <tr style={styles.reportFooter}>
-                <td style={styles.reportTd} colSpan={3}>{t('stats.totalCol')}</td>
-                <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeWriting)}</td>
-                <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeImplementing)}</td>
-                <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeOnTask || 0)}</td>
-                <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 700 }}>{formatDuration(stats.totalTime)}</td>
-              </tr>
-            </tfoot>
-          </table>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={styles.reportFooter}>
+                  <td style={styles.reportTd} colSpan={3}>{t('stats.totalCol')}</td>
+                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeWriting)}</td>
+                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeImplementing)}</td>
+                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeOnTask || 0)}</td>
+                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 700 }}>{formatDuration(stats.totalTime)}</td>
+                </tr>
+              </tfoot>
+            </table>
           </div>
         )}
       </div>
@@ -343,22 +441,48 @@ const styles: Record<string, React.CSSProperties> = {
   periodFilter: {
     display: 'flex',
     alignItems: 'center',
-    gap: '8px',
+    gap: '10px',
     marginBottom: '16px',
+    flexWrap: 'wrap',
   },
   periodLabel: {
     fontSize: '12px',
     fontWeight: 500,
     color: 'var(--vscode-foreground)',
   },
-  periodSelect: {
-    padding: '4px 8px',
-    background: 'var(--vscode-input-background)',
-    color: 'var(--vscode-input-foreground)',
-    border: '1px solid var(--vscode-input-border, transparent)',
-    borderRadius: '4px',
+  checkboxLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
     fontSize: '12px',
+    color: 'var(--vscode-foreground)',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
+  checkbox: {
+    accentColor: 'var(--vscode-button-background)',
+  },
+  resetBtn: {
+    padding: '4px 8px',
+    background: 'var(--vscode-button-secondaryBackground)',
+    color: 'var(--vscode-button-secondaryForeground)',
+    border: 'none',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontSize: '11px',
     fontFamily: 'var(--vscode-font-family)',
+    whiteSpace: 'nowrap',
+  },
+  resetSortBtn: {
+    padding: '4px 8px',
+    background: 'var(--vscode-button-secondaryBackground)',
+    color: 'var(--vscode-button-secondaryForeground)',
+    border: 'none',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontSize: '11px',
+    fontFamily: 'var(--vscode-font-family)',
+    whiteSpace: 'nowrap',
   },
   exportBtn: {
     padding: '4px 10px',
@@ -369,7 +493,7 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     fontSize: '12px',
     fontFamily: 'var(--vscode-font-family)',
-    whiteSpace: 'nowrap' as const,
+    whiteSpace: 'nowrap',
   },
   cardsRow: {
     display: 'grid',
@@ -440,9 +564,10 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: '24px',
     textAlign: 'right',
   },
-  timeGrid: {
+  /* Time grid: all 3 fields in one row, equal width */
+  timeGridRow: {
     display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
+    gridTemplateColumns: 'repeat(3, 1fr)',
     gap: '12px',
   },
   timeStat: {
@@ -461,25 +586,6 @@ const styles: Record<string, React.CSSProperties> = {
   timeValue: {
     fontSize: '18px',
     fontWeight: 600,
-  },
-  tagCloud: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: '6px',
-  },
-  tag: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '4px',
-    padding: '4px 10px',
-    background: 'var(--vscode-badge-background)',
-    color: 'var(--vscode-badge-foreground)',
-    borderRadius: '4px',
-    fontSize: '12px',
-  },
-  tagCount: {
-    opacity: 0.7,
-    fontSize: '10px',
   },
   activityList: {
     display: 'flex',
@@ -522,6 +628,11 @@ const styles: Record<string, React.CSSProperties> = {
     textTransform: 'uppercase',
     letterSpacing: '0.3px',
     color: 'var(--vscode-descriptionForeground)',
+  },
+  sortIndicator: {
+    fontSize: '10px',
+    color: 'var(--vscode-textLink-foreground)',
+    marginLeft: '2px',
   },
   reportTd: {
     padding: '6px 10px',

@@ -39,7 +39,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'pasteFiles'; files: string[] }
 	| { type: 'openFile'; file: string }
 	| { type: 'requestSuggestion'; textBefore: string; globalContext?: string }
-	| { type: 'getStatistics'; month?: number; year?: number }
+	| { type: 'getStatistics'; dateFrom?: string; dateTo?: string; minFiveMin?: boolean }
 	| { type: 'exportReport'; rows: Array<{ taskNumber: string; title: string; hours: number }> }
 	| { type: 'markDirty'; dirty: boolean; prompt?: Prompt; promptId?: string }
 	| { type: 'showStatistics' }

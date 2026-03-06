@@ -51,7 +51,9 @@ export class StatisticsPanelManager {
 
 		panel.webview.onDidReceiveMessage(async (msg: WebviewToExtensionMessage) => {
 			if (msg.type === 'getStatistics') {
-				const filter = (msg.month || msg.year) ? { month: msg.month, year: msg.year } : undefined;
+				const filter = (msg.dateFrom || msg.dateTo || msg.minFiveMin)
+					? { dateFrom: msg.dateFrom, dateTo: msg.dateTo, minFiveMin: msg.minFiveMin }
+					: undefined;
 				const stats = await this.storageService.getStatistics(filter);
 				const response: ExtensionToWebviewMessage = { type: 'statistics', data: stats };
 				panel.webview.postMessage(response);

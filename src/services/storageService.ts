@@ -20,9 +20,21 @@ import type {
 } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
 
+/** Daily time entry for a prompt (ms per category) */
+export interface DailyTimeEntry {
+	writing: number;
+	implementing: number;
+	onTask: number;
+	untracked: number;
+}
+
+/** Daily time data: date string (YYYY-MM-DD) → time breakdown */
+export type DailyTimeData = Record<string, DailyTimeEntry>;
+
 export class StorageService {
 	private readonly STORAGE_DIR = '.vscode/prompt-manager';
 	private readonly HISTORY_DIR_NAME = 'history';
+	private readonly DAILY_TIME_FILE = 'daily-time.json';
 	private readonly HISTORY_LIMIT = 20;
 	private readonly HISTORY_WINDOW_MS = 30_000;
 
@@ -346,6 +358,11 @@ export class StorageService {
 			await vscode.workspace.fs.createDirectory(vscode.Uri.file(contextDir));
 		}
 
+		// Update daily time tracking (record time deltas for today)
+		if (existingPrompt) {
+			await this.updateDailyTime(prompt.id, existingPrompt, prompt);
+		}
+
 		return config;
 	}
 
@@ -478,20 +495,87 @@ export class StorageService {
 		);
 	}
 
-	/** Compute statistics across all prompts, optionally filtered by period */
-	async getStatistics(filter?: { month?: number; year?: number }): Promise<PromptStatistics> {
-		let prompts = await this.listPrompts();
+	/** Read daily time data for a prompt */
+	async getDailyTime(promptId: string): Promise<DailyTimeData> {
+		const filePath = path.join(this.promptDir(promptId), this.DAILY_TIME_FILE);
+		try {
+			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(filePath));
+			return JSON.parse(Buffer.from(raw).toString('utf-8')) as DailyTimeData;
+		} catch {
+			return {};
+		}
+	}
 
-		// Filter by period if specified
-		if (filter?.year) {
+	/** Update daily time tracking: compute deltas and add to today's entry */
+	private async updateDailyTime(promptId: string, oldPrompt: PromptConfig, newPrompt: Prompt): Promise<void> {
+		const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+		// Compute time deltas
+		const dWriting = Math.max(0, (newPrompt.timeSpentWriting || 0) - (oldPrompt.timeSpentWriting || 0));
+		const dImplementing = Math.max(0, (newPrompt.timeSpentImplementing || 0) - (oldPrompt.timeSpentImplementing || 0));
+		const dOnTask = Math.max(0, (newPrompt.timeSpentOnTask || 0) - (oldPrompt.timeSpentOnTask || 0));
+		const dUntracked = Math.max(0, (newPrompt.timeSpentUntracked || 0) - (oldPrompt.timeSpentUntracked || 0));
+
+		// Skip if no time change
+		if (dWriting === 0 && dImplementing === 0 && dOnTask === 0 && dUntracked === 0) {
+			return;
+		}
+
+		// Read existing daily time data
+		const dailyData = await this.getDailyTime(promptId);
+		const entry = dailyData[today] || { writing: 0, implementing: 0, onTask: 0, untracked: 0 };
+		entry.writing += dWriting;
+		entry.implementing += dImplementing;
+		entry.onTask += dOnTask;
+		entry.untracked += dUntracked;
+		dailyData[today] = entry;
+
+		// Write back
+		const filePath = path.join(this.promptDir(promptId), this.DAILY_TIME_FILE);
+		await vscode.workspace.fs.writeFile(
+			vscode.Uri.file(filePath),
+			Buffer.from(JSON.stringify(dailyData, null, 2), 'utf-8')
+		);
+	}
+
+	/** Get total time from daily data within a date range */
+	getDailyTimeTotalInRange(dailyData: DailyTimeData, dateFrom: string, dateTo: string): number {
+		let total = 0;
+		for (const [date, entry] of Object.entries(dailyData)) {
+			if (date >= dateFrom && date <= dateTo) {
+				total += (entry.writing || 0) + (entry.implementing || 0) + (entry.onTask || 0) + (entry.untracked || 0);
+			}
+		}
+		return total;
+	}
+
+	/** Compute statistics across all prompts, optionally filtered by date range */
+	async getStatistics(filter?: { dateFrom?: string; dateTo?: string; minFiveMin?: boolean }): Promise<PromptStatistics> {
+		let prompts = await this.listPrompts();
+		const hasDateRange = filter?.dateFrom && filter?.dateTo;
+
+		// Filter by updatedAt within date range
+		if (hasDateRange) {
 			prompts = prompts.filter(p => {
-				const date = new Date(p.updatedAt);
-				if (filter.month !== undefined && filter.month > 0) {
-					return date.getFullYear() === filter.year && date.getMonth() + 1 === filter.month;
-				}
-				return date.getFullYear() === filter.year;
+				const dateStr = p.updatedAt.slice(0, 10); // YYYY-MM-DD
+				return dateStr >= filter.dateFrom! && dateStr <= filter.dateTo!;
 			});
 		}
+
+		// Filter by ≥5 min total daily time in date range (from daily-time.json)
+		if (filter?.minFiveMin && hasDateRange) {
+			const MIN_TIME_MS = 5 * 60 * 1000; // 5 minutes
+			const filtered: PromptConfig[] = [];
+			for (const p of prompts) {
+				const dailyData = await this.getDailyTime(p.id);
+				const totalInRange = this.getDailyTimeTotalInRange(dailyData, filter.dateFrom!, filter.dateTo!);
+				if (totalInRange >= MIN_TIME_MS) {
+					filtered.push(p);
+				}
+			}
+			prompts = filtered;
+		}
+
 		const byStatus: Record<PromptStatus, number> = {
 			draft: 0,
 			'in-progress': 0,
@@ -502,8 +586,6 @@ export class StorageService {
 			review: 0,
 			closed: 0,
 		};
-		const byLanguage: Record<string, number> = {};
-		const byFramework: Record<string, number> = {};
 		let totalTimeWriting = 0;
 		let totalTimeImplementing = 0;
 		let totalTimeOnTask = 0;
@@ -517,12 +599,6 @@ export class StorageService {
 			totalTimeImplementing += p.timeSpentImplementing || 0;
 			totalTimeOnTask += p.timeSpentOnTask || 0;
 			totalTimeUntracked += p.timeSpentUntracked || 0;
-			for (const lang of p.languages) {
-				byLanguage[lang] = (byLanguage[lang] || 0) + 1;
-			}
-			for (const fw of p.frameworks) {
-				byFramework[fw] = (byFramework[fw] || 0) + 1;
-			}
 		}
 
 		const totalTime = totalTimeWriting + totalTimeImplementing + totalTimeOnTask + totalTimeUntracked;
@@ -532,16 +608,6 @@ export class StorageService {
 			.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
 			.slice(0, 10)
 			.map(p => ({ id: p.id, title: p.title, updatedAt: p.updatedAt }));
-
-		const topLanguages = Object.entries(byLanguage)
-			.sort(([, a], [, b]) => b - a)
-			.slice(0, 10)
-			.map(([name, count]) => ({ name, count }));
-
-		const topFrameworks = Object.entries(byFramework)
-			.sort(([, a], [, b]) => b - a)
-			.slice(0, 10)
-			.map(([name, count]) => ({ name, count }));
 
 		const reportRows = prompts.map(p => ({
 			taskNumber: p.taskNumber || '',
@@ -556,8 +622,6 @@ export class StorageService {
 		return {
 			totalPrompts: prompts.length,
 			byStatus,
-			byLanguage,
-			byFramework,
 			totalTimeWriting,
 			totalTimeImplementing,
 			totalTimeOnTask,
@@ -565,8 +629,6 @@ export class StorageService {
 			favoriteCount,
 			avgTimePerPrompt,
 			recentActivity,
-			topLanguages,
-			topFrameworks,
 			reportRows,
 		};
 	}

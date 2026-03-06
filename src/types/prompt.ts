@@ -192,8 +192,6 @@ export function createDefaultSidebarState(): SidebarState {
 export interface PromptStatistics {
 	totalPrompts: number;
 	byStatus: Record<PromptStatus, number>;
-	byLanguage: Record<string, number>;
-	byFramework: Record<string, number>;
 	totalTimeWriting: number;
 	totalTimeImplementing: number;
 	totalTimeOnTask: number;
@@ -201,8 +199,6 @@ export interface PromptStatistics {
 	favoriteCount: number;
 	avgTimePerPrompt: number;
 	recentActivity: Array<{ id: string; title: string; updatedAt: string }>;
-	topLanguages: Array<{ name: string; count: number }>;
-	topFrameworks: Array<{ name: string; count: number }>;
 	/** Brief report rows: taskNumber, title, total time */
 	reportRows: Array<{ taskNumber: string; title: string; timeWriting: number; timeImplementing: number; timeOnTask: number; totalTime: number; status: PromptStatus }>;
 }

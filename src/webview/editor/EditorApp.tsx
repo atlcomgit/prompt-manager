@@ -575,6 +575,16 @@ export const EditorApp: React.FC = () => {
         });
         openedAtRef.current = Date.now();
         break;
+      case 'reportContentUpdated':
+        setPrompt(prev => ({
+          ...prev,
+          report: typeof msg.report === 'string' ? msg.report : prev.report,
+          timeSpentWriting: Math.max(msg.timeSpentWriting || 0, prev.timeSpentWriting || 0),
+          timeSpentOnTask: Math.max(msg.timeSpentOnTask || 0, prev.timeSpentOnTask || 0),
+          updatedAt: msg.updatedAt || prev.updatedAt,
+        }));
+        hasBeenSavedRef.current = true;
+        break;
       case 'contentEditorOpened':
         isExternalEditorOpenRef.current = true;
         break;
@@ -811,6 +821,25 @@ export const EditorApp: React.FC = () => {
     return () => observer.disconnect();
   }, []);
 
+  const applyElapsedTimeByStatus = useCallback((basePrompt: Prompt, elapsedMs: number): Prompt => {
+    const deltaMs = Math.max(0, elapsedMs);
+    if (deltaMs <= 0) {
+      return basePrompt;
+    }
+
+    if (basePrompt.status === 'in-progress') {
+      return {
+        ...basePrompt,
+        timeSpentOnTask: (basePrompt.timeSpentOnTask || 0) + deltaMs,
+      };
+    }
+
+    return {
+      ...basePrompt,
+      timeSpentWriting: (basePrompt.timeSpentWriting || 0) + deltaMs,
+    };
+  }, []);
+
   /** Schedule an auto-save with the given delay. Cancels any pending auto-save. */
   const scheduleAutoSave = (delayMs: number) => {
     // Never auto-save a prompt that hasn't been saved manually at least once
@@ -833,14 +862,7 @@ export const EditorApp: React.FC = () => {
       }
       const currentPrompt = promptRef.current;
       const timeSpent = Date.now() - openedAtRef.current;
-      const updatedPrompt: Prompt = {
-        ...currentPrompt,
-        timeSpentWriting: currentPrompt.timeSpentWriting + timeSpent,
-        // Accumulate task work time when status is "in-progress"
-        timeSpentOnTask: currentPrompt.status === 'in-progress'
-          ? (currentPrompt.timeSpentOnTask || 0) + timeSpent
-          : (currentPrompt.timeSpentOnTask || 0),
-      };
+      const updatedPrompt = applyElapsedTimeByStatus(currentPrompt, timeSpent);
       openedAtRef.current = Date.now();
       saveStartCounterRef.current = userChangeCounterRef.current;
       activeSaveIdRef.current = (updatedPrompt.id || '__new__').trim() || '__new__';
@@ -871,16 +893,8 @@ export const EditorApp: React.FC = () => {
   };
 
   const buildPromptForSave = (): Prompt => {
-    // Track writing time
     const timeSpent = Date.now() - openedAtRef.current;
-    const updatedPrompt: Prompt = {
-      ...prompt,
-      timeSpentWriting: prompt.timeSpentWriting + timeSpent,
-      // Accumulate task work time when status is "in-progress"
-      timeSpentOnTask: prompt.status === 'in-progress'
-        ? (prompt.timeSpentOnTask || 0) + timeSpent
-        : (prompt.timeSpentOnTask || 0),
-    };
+    const updatedPrompt = applyElapsedTimeByStatus(prompt, timeSpent);
     openedAtRef.current = Date.now();
     return updatedPrompt;
   };
@@ -1548,6 +1562,16 @@ export const EditorApp: React.FC = () => {
                   persistedHeight={reportHeight}
                   onHeightChange={setReportHeight}
                   canReset={Boolean((prompt.report || '').trim())}
+                  onOpen={() => {
+                    vscode.postMessage({
+                      type: 'openPromptReportInEditor',
+                      report: prompt.report || '',
+                      promptId: prompt.id,
+                      title: prompt.title,
+                    });
+                  }}
+                  openLabel={t('editor.open')}
+                  openTitle={t('editor.open')}
                   onReset={() => updateField('report', '')}
                 />
               </div>

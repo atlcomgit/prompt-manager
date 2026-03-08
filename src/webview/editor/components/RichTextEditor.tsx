@@ -8,6 +8,10 @@ interface Props {
   onHeightChange?: (height: number) => void;
   onReset?: () => void;
   canReset?: boolean;
+  onOpen?: () => void;
+  openLabel?: string;
+  openTitle?: string;
+  fillHeight?: boolean;
 }
 
 type Mode = 'visual' | 'html';
@@ -129,6 +133,10 @@ export const RichTextEditor: React.FC<Props> = ({
   onHeightChange,
   onReset,
   canReset,
+  onOpen,
+  openLabel,
+  openTitle,
+  fillHeight,
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<Mode>('visual');
@@ -268,7 +276,7 @@ export const RichTextEditor: React.FC<Props> = ({
   }, [mode]);
 
   return (
-    <div style={styles.root}>
+    <div style={{ ...styles.root, ...(fillHeight ? styles.rootFillHeight : null) }}>
       <style>
         {`
           .pm-rich-editor-content {
@@ -399,11 +407,23 @@ export const RichTextEditor: React.FC<Props> = ({
             HTML
           </button>
         </div>
-        {canReset && onReset && (
-          <button type="button" style={styles.resetBtn} onClick={onReset} title="Очистить отчет">
-            Сбросить
-          </button>
-        )}
+        <div style={styles.actionGroup}>
+          {onOpen && (
+            <button
+              type="button"
+              style={styles.openBtn}
+              onClick={onOpen}
+              title={openTitle || openLabel || 'Открыть'}
+            >
+              {openLabel || 'Открыть'}
+            </button>
+          )}
+          {canReset && onReset && (
+            <button type="button" style={styles.resetBtn} onClick={onReset} title="Очистить отчет">
+              Сбросить
+            </button>
+          )}
+        </div>
       </div>
 
       {mode === 'visual' ? (
@@ -418,7 +438,8 @@ export const RichTextEditor: React.FC<Props> = ({
           data-placeholder={placeholder || 'Введите отчет'}
           style={{
             ...styles.editor,
-            height: `${currentHeight}px`,
+            ...(fillHeight ? styles.editorFillHeight : null),
+            height: fillHeight ? undefined : `${currentHeight}px`,
             minHeight: undefined,
             maxHeight: undefined,
           }}
@@ -434,7 +455,8 @@ export const RichTextEditor: React.FC<Props> = ({
           placeholder={placeholder}
           style={{
             ...styles.source,
-            height: `${currentHeight}px`,
+            ...(fillHeight ? styles.editorFillHeight : null),
+            height: fillHeight ? undefined : `${currentHeight}px`,
             minHeight: undefined,
             maxHeight: undefined,
           }}
@@ -443,11 +465,13 @@ export const RichTextEditor: React.FC<Props> = ({
       )}
 
       {/* Drag handle for resizing */}
-      <div
-        onMouseDown={handleDragStart}
-        style={styles.resizeHandle}
-        title="Потяните для изменения высоты"
-      />
+      {!fillHeight && (
+        <div
+          onMouseDown={handleDragStart}
+          style={styles.resizeHandle}
+          title="Потяните для изменения высоты"
+        />
+      )}
 
       <div style={styles.hint}>{modeHint}</div>
     </div>
@@ -460,15 +484,34 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     gap: '6px',
   },
+  rootFillHeight: {
+    flex: 1,
+    minHeight: 0,
+  },
   toolbar: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: '8px',
   },
+  actionGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+  },
   modeGroup: {
     display: 'flex',
     gap: '6px',
+  },
+  openBtn: {
+    padding: '4px 8px',
+    background: 'transparent',
+    border: '1px solid var(--vscode-button-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    color: 'var(--vscode-textLink-foreground)',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontFamily: 'var(--vscode-font-family)',
   },
   modeBtn: {
     border: '1px solid var(--vscode-button-border, transparent)',
@@ -504,6 +547,10 @@ const styles: Record<string, React.CSSProperties> = {
     outline: 'none',
     lineHeight: 1.5,
     overflow: 'auto',
+  },
+  editorFillHeight: {
+    flex: 1,
+    minHeight: 0,
   },
   source: {
     width: '100%',

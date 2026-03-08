@@ -10,6 +10,10 @@ const webviewEntries = [
   },
   { entry: "src/webview/editor/index.tsx", outfile: "dist/webview/editor.js" },
   {
+    entry: "src/webview/reportEditor/index.tsx",
+    outfile: "dist/webview/reportEditor.js",
+  },
+  {
     entry: "src/webview/statistics/index.tsx",
     outfile: "dist/webview/statistics.js",
   },

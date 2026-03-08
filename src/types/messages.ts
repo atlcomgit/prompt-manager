@@ -48,10 +48,13 @@ export type WebviewToExtensionMessage =
 	| { type: 'saveGlobalContext'; context: string }
 	| { type: 'createBranch'; branch: string; projects: string[] }
 	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
+	| { type: 'openPromptReportInEditor'; report: string; promptId?: string; title?: string }
 	| { type: 'showPromptHistory'; id: string }
 	| { type: 'recalcImplementingTime'; id: string }
 	| { type: 'getNextTaskNumber' }
-	| { type: 'openChatPanel' };
+	| { type: 'openChatPanel' }
+	| { type: 'reportEditorReady'; promptId: string }
+	| { type: 'reportEditorUpdate'; promptId: string; report: string; activityDeltaMs?: number };
 
 // ---- Messages FROM extension TO webview ----
 
@@ -87,9 +90,11 @@ export type ExtensionToWebviewMessage =
 	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string }
 	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number }
+	| { type: 'reportContentUpdated'; report: string; timeSpentWriting?: number; timeSpentOnTask?: number; updatedAt?: string }
 	| { type: 'contentEditorOpened' }
 	| { type: 'contentEditorClosed'; reverted: boolean; content: string }
 	| { type: 'contentEditorSaved' }
+	| { type: 'reportEditorInit'; promptId: string; title: string; report: string }
 	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number }
 	| { type: 'promptLoading' }
 	| { type: 'nextTaskNumber'; taskNumber: string }

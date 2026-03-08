@@ -39,6 +39,7 @@ export class EditorPanelManager {
 	private contentEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string }>();
 	private panelKeyByContentEditorUri = new Map<string, string>();
 	private contentEditorLastActivityByPanelKey = new Map<string, number>();
+	private reportEditorPanels = new Map<string, vscode.WebviewPanel>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
 	private openPromptQueue: Promise<void> = Promise.resolve();
 	private readonly markdownRenderer = new MarkdownIt({
@@ -785,6 +786,152 @@ export class EditorPanelManager {
 		}
 	}
 
+	private applyElapsedTimeByStatus(prompt: Prompt, elapsedMs: number): void {
+		const deltaMs = Math.max(0, elapsedMs);
+		if (deltaMs <= 0) {
+			return;
+		}
+
+		if (prompt.status === 'in-progress') {
+			prompt.timeSpentOnTask = (prompt.timeSpentOnTask || 0) + deltaMs;
+			return;
+		}
+
+		prompt.timeSpentWriting = (prompt.timeSpentWriting || 0) + deltaMs;
+	}
+
+	private async ensurePromptSavedForExternalEditor(
+		panelKey: string,
+		currentPrompt: Prompt,
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		panel: vscode.WebviewPanel
+	): Promise<void> {
+		if (currentPrompt.id) {
+			return;
+		}
+
+		if (!currentPrompt.title) {
+			currentPrompt.title = this.makeTitleFallbackFromContent(currentPrompt.content || currentPrompt.report);
+		}
+		if (!currentPrompt.description) {
+			currentPrompt.description = this.makeDescriptionFallbackFromContent(currentPrompt.content || currentPrompt.report);
+		}
+		currentPrompt.id = await this.storageService.uniqueId(
+			this.makePromptIdBase(currentPrompt.title, currentPrompt.description || currentPrompt.content || currentPrompt.report)
+		);
+
+		const saved = await this.storageService.savePrompt(currentPrompt, { historyReason: 'manual' });
+
+		Object.assign(currentPrompt, saved);
+		this.panelPromptRefs.set(panelKey, currentPrompt);
+		panel.title = `⚡ ${saved.title || saved.id}`;
+		postMessage({ type: 'promptSaved', prompt: saved });
+		postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'save' });
+		this._onDidSave.fire(currentPrompt.id);
+	}
+
+	private async openPromptReportInEditor(
+		panelKey: string,
+		currentPrompt: Prompt,
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		panel: vscode.WebviewPanel
+	): Promise<void> {
+		await this.ensurePromptSavedForExternalEditor(panelKey, currentPrompt, postMessage, panel);
+
+		const promptId = (currentPrompt.id || '').trim();
+		if (!promptId) {
+			return;
+		}
+
+		const existingPanel = this.reportEditorPanels.get(promptId);
+		if (existingPanel) {
+			existingPanel.reveal(vscode.ViewColumn.Beside);
+			void existingPanel.webview.postMessage({
+				type: 'reportEditorInit',
+				promptId,
+				title: currentPrompt.title || currentPrompt.id,
+				report: currentPrompt.report || '',
+			} satisfies ExtensionToWebviewMessage);
+			return;
+		}
+
+		const reportPanel = vscode.window.createWebviewPanel(
+			'promptManager.reportEditor',
+			`Результат: ${currentPrompt.title || currentPrompt.id}`,
+			{ viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
+			{
+				enableScripts: true,
+				retainContextWhenHidden: true,
+				localResourceRoots: [this.extensionUri],
+			}
+		);
+
+		reportPanel.webview.html = getWebviewHtml(
+			reportPanel.webview,
+			this.extensionUri,
+			'dist/webview/reportEditor.js',
+			'Prompt Manager Report Editor'
+		);
+
+		reportPanel.onDidDispose(() => {
+			this.reportEditorPanels.delete(promptId);
+		});
+
+		reportPanel.webview.onDidReceiveMessage(async (msg: WebviewToExtensionMessage) => {
+			switch (msg.type) {
+				case 'reportEditorReady': {
+					void reportPanel.webview.postMessage({
+						type: 'reportEditorInit',
+						promptId,
+						title: currentPrompt.title || currentPrompt.id,
+						report: currentPrompt.report || '',
+					} satisfies ExtensionToWebviewMessage);
+					break;
+				}
+
+				case 'reportEditorUpdate': {
+					const targetPromptId = (msg.promptId || promptId).trim();
+					if (!targetPromptId) {
+						break;
+					}
+
+					const storedPrompt = await this.storageService.getPrompt(targetPromptId);
+					if (!storedPrompt) {
+						break;
+					}
+
+					storedPrompt.report = typeof msg.report === 'string' ? msg.report : '';
+					this.applyElapsedTimeByStatus(storedPrompt, Number(msg.activityDeltaMs) || 0);
+					const saved = await this.storageService.savePrompt(storedPrompt, {
+						historyReason: 'autosave',
+						skipHistory: true,
+					});
+
+					if (currentPrompt.id === targetPromptId) {
+						currentPrompt.report = storedPrompt.report;
+						currentPrompt.timeSpentWriting = Math.max(saved.timeSpentWriting || 0, currentPrompt.timeSpentWriting || 0);
+						currentPrompt.timeSpentOnTask = Math.max(saved.timeSpentOnTask || 0, currentPrompt.timeSpentOnTask || 0);
+						currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
+						this.panelPromptRefs.set(panelKey, currentPrompt);
+						postMessage({
+							type: 'reportContentUpdated',
+							report: storedPrompt.report,
+							timeSpentWriting: saved.timeSpentWriting,
+							timeSpentOnTask: saved.timeSpentOnTask,
+							updatedAt: saved.updatedAt,
+						});
+					}
+					break;
+				}
+
+				default:
+					break;
+			}
+		});
+
+		this.reportEditorPanels.set(promptId, reportPanel);
+	}
+
 	/**
 	 * Called when a text document tracked as a content editor is closed.
 	 * If the user closed without saving, revert the webview content to the last saved version.
@@ -1331,6 +1478,12 @@ export class EditorPanelManager {
 
 			case 'openPromptContentInEditor': {
 				await this.openPromptContentInEditor(panelKey, currentPrompt, msg.content || '');
+				break;
+			}
+
+			case 'openPromptReportInEditor': {
+				currentPrompt.report = typeof msg.report === 'string' ? msg.report : currentPrompt.report;
+				await this.openPromptReportInEditor(panelKey, currentPrompt, postMessage, panel);
 				break;
 			}
 
@@ -2312,6 +2465,10 @@ export class EditorPanelManager {
 		this.contentEditorByPanelKey.clear();
 		this.panelKeyByContentEditorUri.clear();
 		this.contentEditorLastActivityByPanelKey.clear();
+		for (const panel of this.reportEditorPanels.values()) {
+			panel.dispose();
+		}
+		this.reportEditorPanels.clear();
 		this.hooksOutput.dispose();
 	}
 

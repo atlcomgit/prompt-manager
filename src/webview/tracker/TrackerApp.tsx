@@ -54,7 +54,11 @@ export const TrackerApp: React.FC = () => {
   const [dragOverStatus, setDragOverStatus] = useState<PromptStatus | null>(null);
 
   useEffect(() => {
-    vscode.postMessage({ type: 'ready' });
+    const timer = window.setTimeout(() => {
+      vscode.postMessage({ type: 'ready' });
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, []);
 
   const handleMessage = useCallback((msg: any) => {

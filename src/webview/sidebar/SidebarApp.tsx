@@ -42,9 +42,13 @@ export const SidebarApp: React.FC = () => {
     };
   }, []);
 
-  // Request initial data
+  // Request initial data after message listener is attached.
   useEffect(() => {
-    vscode.postMessage({ type: 'ready' });
+    const timer = window.setTimeout(() => {
+      vscode.postMessage({ type: 'ready' });
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, []);
 
   // Listen for messages from extension

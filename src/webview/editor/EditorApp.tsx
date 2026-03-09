@@ -381,7 +381,9 @@ export const EditorApp: React.FC = () => {
   };
 
   useEffect(() => {
-    vscode.postMessage({ type: 'ready' });
+    const readyTimer = window.setTimeout(() => {
+      vscode.postMessage({ type: 'ready' });
+    }, 0);
 
     // Track writing time
     const interval = setInterval(() => {
@@ -394,7 +396,10 @@ export const EditorApp: React.FC = () => {
       }
     }, 1000);
 
-    return () => clearInterval(interval);
+    return () => {
+      window.clearTimeout(readyTimer);
+      clearInterval(interval);
+    };
   }, [prompt.id]);
 
   useEffect(() => {

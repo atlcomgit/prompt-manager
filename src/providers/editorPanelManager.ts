@@ -16,6 +16,7 @@ import type { AiService } from '../services/aiService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import { GitService } from '../services/gitService.js';
 import type { StateService } from '../services/stateService.js';
+import { TimeTrackingService } from '../services/timeTrackingService.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
@@ -786,20 +787,6 @@ export class EditorPanelManager {
 		}
 	}
 
-	private applyElapsedTimeByStatus(prompt: Prompt, elapsedMs: number): void {
-		const deltaMs = Math.max(0, elapsedMs);
-		if (deltaMs <= 0) {
-			return;
-		}
-
-		if (prompt.status === 'in-progress') {
-			prompt.timeSpentOnTask = (prompt.timeSpentOnTask || 0) + deltaMs;
-			return;
-		}
-
-		prompt.timeSpentWriting = (prompt.timeSpentWriting || 0) + deltaMs;
-	}
-
 	private async ensurePromptSavedForExternalEditor(
 		panelKey: string,
 		currentPrompt: Prompt,
@@ -901,7 +888,18 @@ export class EditorPanelManager {
 					}
 
 					storedPrompt.report = typeof msg.report === 'string' ? msg.report : '';
-					this.applyElapsedTimeByStatus(storedPrompt, Number(msg.activityDeltaMs) || 0);
+					const activityDeltaMs = Math.max(0, Number(msg.activityDeltaMs) || 0);
+					switch (TimeTrackingService.getBucketByStatus(storedPrompt.status)) {
+						case 'writing':
+							storedPrompt.timeSpentWriting = Math.max(0, storedPrompt.timeSpentWriting || 0) + activityDeltaMs;
+							break;
+						case 'task':
+							storedPrompt.timeSpentOnTask = Math.max(0, storedPrompt.timeSpentOnTask || 0) + activityDeltaMs;
+							break;
+						case 'none':
+						default:
+							break;
+					}
 					const saved = await this.storageService.savePrompt(storedPrompt, {
 						historyReason: 'autosave',
 						skipHistory: true,
@@ -1415,6 +1413,8 @@ export class EditorPanelManager {
 					const saved = await this.storageService.savePrompt(promptToSave, {
 						historyReason: saveSource,
 					});
+					const savedPrompt = await this.storageService.getPrompt(promptToSave.id);
+					const promptForPanel = savedPrompt || promptToSave;
 
 					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();
 					const shouldApplyToCurrentPanel = !normalizedCurrentPromptId || normalizedCurrentPromptId === promptToSave.id;
@@ -1422,7 +1422,7 @@ export class EditorPanelManager {
 					if (shouldApplyToCurrentPanel) {
 						setIsDirty(false);
 						// Update current prompt reference
-						Object.assign(currentPrompt, promptToSave);
+						Object.assign(currentPrompt, promptForPanel);
 						this.panelPromptRefs.set(panelKey, currentPrompt);
 					}
 
@@ -1443,7 +1443,7 @@ export class EditorPanelManager {
 						this.panelLatestPromptSnapshots.set(promptToSave.id, latestSnapshot ? JSON.parse(JSON.stringify(latestSnapshot)) : null);
 						const basePrompt = this.panelBasePrompts.get(panelKey);
 						this.panelBasePrompts.delete(panelKey);
-						this.panelBasePrompts.set(promptToSave.id, basePrompt ? JSON.parse(JSON.stringify(basePrompt)) : JSON.parse(JSON.stringify(promptToSave)));
+						this.panelBasePrompts.set(promptToSave.id, basePrompt ? JSON.parse(JSON.stringify(basePrompt)) : JSON.parse(JSON.stringify(promptForPanel)));
 						this.rebindContentEditorPanelKey(panelKey, promptToSave.id);
 					}
 
@@ -1451,13 +1451,13 @@ export class EditorPanelManager {
 						const stateKey = panelKey.startsWith('new-') ? promptToSave.id : panelKey;
 						this.panelDirtyFlags.set(stateKey, false);
 						this.panelLatestPromptSnapshots.set(stateKey, null);
-						this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptToSave)));
+						this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptForPanel)));
 					}
 
 					if (shouldApplyToCurrentPanel) {
 						panel.title = `⚡ ${saved.title || saved.id}`;
 						postMessage({ type: 'promptSaved', prompt: saved });
-						postMessage({ type: 'prompt', prompt: promptToSave, reason: 'save' });
+						postMessage({ type: 'prompt', prompt: promptForPanel, reason: 'save' });
 					}
 					await this.broadcastAvailableLanguagesAndFrameworks();
 
@@ -1657,6 +1657,7 @@ export class EditorPanelManager {
 					if (existingBeforeChat) {
 						prompt.timeSpentWriting = Math.max(prompt.timeSpentWriting || 0, existingBeforeChat.timeSpentWriting || 0);
 						prompt.timeSpentImplementing = Math.max(prompt.timeSpentImplementing || 0, existingBeforeChat.timeSpentImplementing || 0);
+						prompt.timeSpentOnTask = Math.max(prompt.timeSpentOnTask || 0, existingBeforeChat.timeSpentOnTask || 0);
 						prompt.timeSpentUntracked = Number.isFinite(prompt.timeSpentUntracked)
 							? Math.max(0, prompt.timeSpentUntracked || 0)
 							: (existingBeforeChat.timeSpentUntracked || 0);
@@ -1689,6 +1690,14 @@ export class EditorPanelManager {
 
 					// Add context metadata
 					const ctx: string[] = [];
+					if (prompt.id) ctx.push(`Prompt ID: ${prompt.id}`);
+					if (prompt.title) ctx.push(`Prompt title: ${prompt.title}`);
+					if (prompt.id) {
+						const promptDirectory = this.storageService.getPromptDirectoryPath(prompt.id);
+						ctx.push(`Prompt directory: ${promptDirectory}`);
+						ctx.push(`Prompt file: ${this.storageService.getPromptMarkdownUri(prompt.id).fsPath}`);
+						ctx.push(`Report file: ${promptDirectory}/report.md`);
+					}
 					if (prompt.projects.length > 0) ctx.push(`Projects: ${prompt.projects.join(', ')}`);
 					if (prompt.languages.length > 0) ctx.push(`Languages: ${prompt.languages.join(', ')}`);
 					if (prompt.frameworks.length > 0) ctx.push(`Frameworks: ${prompt.frameworks.join(', ')}`);
@@ -2164,6 +2173,16 @@ export class EditorPanelManager {
 							}
 							this._onDidSave.fire(promptFromStorage.id);
 						}
+
+						if (promptFromStorage.status !== 'in-progress') {
+							promptFromStorage.status = 'in-progress';
+							await this.storageService.savePrompt(promptFromStorage, { historyReason: 'status-change' });
+							if (currentPrompt.id === promptFromStorage.id) {
+								Object.assign(currentPrompt, promptFromStorage);
+								postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
+							}
+							this._onDidSave.fire(promptFromStorage.id);
+						}
 					}
 				}
 
@@ -2183,6 +2202,16 @@ export class EditorPanelManager {
 			}
 
 			case 'openChatPanel': {
+				if (currentPrompt.id && currentPrompt.status !== 'in-progress') {
+					const promptFromStorage = await this.storageService.getPrompt(currentPrompt.id);
+					if (promptFromStorage && promptFromStorage.status !== 'in-progress') {
+						promptFromStorage.status = 'in-progress';
+						await this.storageService.savePrompt(promptFromStorage, { historyReason: 'status-change' });
+						Object.assign(currentPrompt, promptFromStorage);
+						postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
+						this._onDidSave.fire(promptFromStorage.id);
+					}
+				}
 				try {
 					await vscode.commands.executeCommand('workbench.action.chat.openAgent');
 				} catch {

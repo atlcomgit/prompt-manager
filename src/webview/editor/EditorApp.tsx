@@ -15,6 +15,7 @@ import { ActionBar } from './components/ActionBar';
 import { TimerDisplay } from './components/TimerDisplay';
 import type { Prompt, PromptStatus } from '../../types/prompt';
 import { createDefaultPrompt } from '../../types/prompt';
+import { TimeTrackingService } from '../../services/timeTrackingService';
 
 const vscode = getVsCodeApi();
 
@@ -565,17 +566,28 @@ export const EditorApp: React.FC = () => {
         // (user decides when to save in the external editor)
         setPrompt(prev => {
           const nextContent = msg.content || '';
-          const writingDeltaMs = Number.isFinite(msg.writingDeltaMs) ? Math.max(0, Number(msg.writingDeltaMs)) : 0;
+          const activityDeltaMs = Number.isFinite(msg.writingDeltaMs) ? Math.max(0, Number(msg.writingDeltaMs)) : 0;
+          const deltaPatch = TimeTrackingService.buildElapsedPatch(prev.status, activityDeltaMs);
+          const nextTimePatch = Object.keys(deltaPatch).length > 0
+            ? {
+              ...(deltaPatch.timeSpentWriting !== undefined
+                ? { timeSpentWriting: (prev.timeSpentWriting || 0) + deltaPatch.timeSpentWriting }
+                : {}),
+              ...(deltaPatch.timeSpentOnTask !== undefined
+                ? { timeSpentOnTask: (prev.timeSpentOnTask || 0) + deltaPatch.timeSpentOnTask }
+                : {}),
+            }
+            : null;
           if (prev.content === nextContent) {
-            if (writingDeltaMs <= 0) {
+            if (!nextTimePatch || activityDeltaMs <= 0) {
               return prev;
             }
-            return { ...prev, timeSpentWriting: (prev.timeSpentWriting || 0) + writingDeltaMs };
+            return { ...prev, ...nextTimePatch };
           }
           return {
             ...prev,
             content: nextContent,
-            timeSpentWriting: (prev.timeSpentWriting || 0) + writingDeltaMs,
+            ...(nextTimePatch || {}),
           };
         });
         openedAtRef.current = Date.now();
@@ -668,14 +680,20 @@ export const EditorApp: React.FC = () => {
         break;
       case 'improvedPromptText':
         setPrompt(prev => {
-          const writingDeltaMs = Math.max(0, Date.now() - openedAtRef.current);
+          const activityDeltaMs = Math.max(0, Date.now() - openedAtRef.current);
           const improvedContent = typeof msg.content === 'string'
             ? ensureTrailingNewline(msg.content)
             : prev.content;
+          const deltaPatch = TimeTrackingService.buildElapsedPatch(prev.status, activityDeltaMs);
           const updatedPrompt: Prompt = {
             ...prev,
             content: improvedContent,
-            timeSpentWriting: (prev.timeSpentWriting || 0) + writingDeltaMs,
+            ...(deltaPatch.timeSpentWriting !== undefined
+              ? { timeSpentWriting: (prev.timeSpentWriting || 0) + deltaPatch.timeSpentWriting }
+              : {}),
+            ...(deltaPatch.timeSpentOnTask !== undefined
+              ? { timeSpentOnTask: (prev.timeSpentOnTask || 0) + deltaPatch.timeSpentOnTask }
+              : {}),
           };
           openedAtRef.current = Date.now();
           if (hasBeenSavedRef.current) {
@@ -826,23 +844,8 @@ export const EditorApp: React.FC = () => {
     return () => observer.disconnect();
   }, []);
 
-  const applyElapsedTimeByStatus = useCallback((basePrompt: Prompt, elapsedMs: number): Prompt => {
-    const deltaMs = Math.max(0, elapsedMs);
-    if (deltaMs <= 0) {
-      return basePrompt;
-    }
-
-    if (basePrompt.status === 'in-progress') {
-      return {
-        ...basePrompt,
-        timeSpentOnTask: (basePrompt.timeSpentOnTask || 0) + deltaMs,
-      };
-    }
-
-    return {
-      ...basePrompt,
-      timeSpentWriting: (basePrompt.timeSpentWriting || 0) + deltaMs,
-    };
+  const applyElapsedTimeByContext = useCallback((basePrompt: Prompt, elapsedMs: number): Prompt => {
+    return TimeTrackingService.applyElapsedToPrompt(basePrompt, elapsedMs);
   }, []);
 
   /** Schedule an auto-save with the given delay. Cancels any pending auto-save. */
@@ -867,7 +870,7 @@ export const EditorApp: React.FC = () => {
       }
       const currentPrompt = promptRef.current;
       const timeSpent = Date.now() - openedAtRef.current;
-      const updatedPrompt = applyElapsedTimeByStatus(currentPrompt, timeSpent);
+      const updatedPrompt = applyElapsedTimeByContext(currentPrompt, timeSpent);
       openedAtRef.current = Date.now();
       saveStartCounterRef.current = userChangeCounterRef.current;
       activeSaveIdRef.current = (updatedPrompt.id || '__new__').trim() || '__new__';
@@ -899,7 +902,7 @@ export const EditorApp: React.FC = () => {
 
   const buildPromptForSave = (): Prompt => {
     const timeSpent = Date.now() - openedAtRef.current;
-    const updatedPrompt = applyElapsedTimeByStatus(prompt, timeSpent);
+    const updatedPrompt = applyElapsedTimeByContext(prompt, timeSpent);
     openedAtRef.current = Date.now();
     return updatedPrompt;
   };
@@ -954,6 +957,17 @@ export const EditorApp: React.FC = () => {
   };
 
   const handleOpenChat = () => {
+    if (prompt.status !== 'in-progress') {
+      const promptToSave = { ...buildPromptForSave(), status: 'in-progress' as const };
+      setPrompt(promptToSave);
+      if (hasBeenSavedRef.current || promptToSave.id) {
+        activeSaveIdRef.current = (promptToSave.id || prompt.id || '__new__').trim() || '__new__';
+        setIsSaving(true);
+        setIsDirty(false);
+        vscode.postMessage({ type: 'savePrompt', prompt: promptToSave, source: 'status-change' });
+      }
+    }
+
     if (prompt.id && prompt.chatSessionIds.length > 0) {
       vscode.postMessage({ type: 'openChat', id: prompt.id, sessionId: prompt.chatSessionIds[0] });
     } else {

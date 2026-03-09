@@ -40,6 +40,14 @@ function formatPercent(value: number): string {
 	return `${new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(safe)}%`;
 }
 
+function formatNumber(value: number, maximumFractionDigits = 1): string {
+	const safe = Number.isFinite(value) ? value : 0;
+	return new Intl.NumberFormat('ru-RU', {
+		minimumFractionDigits: 0,
+		maximumFractionDigits,
+	}).format(safe);
+}
+
 const getToneColor = (percent: number): string => {
 	if (percent >= 91) return 'var(--vscode-errorForeground)';
 	if (percent >= 76) return 'var(--vscode-charts-orange)';
@@ -71,7 +79,7 @@ const MiniLineChart: React.FC<{ points: TimelinePoint[] }> = ({ points }) => {
 		<div style={styles.chartWrap}>
 			<svg viewBox="0 0 100 32" preserveAspectRatio="none" style={styles.chartSvg}>
 				<line x1="0" y1="31" x2="100" y2="31" stroke="var(--vscode-panel-border)" strokeWidth="1" />
-				<path d={path} fill="none" stroke="var(--vscode-textLink-foreground)" strokeWidth="2" />
+				<path d={path} fill="none" stroke="var(--vscode-textLink-foreground)" strokeWidth="1.25" />
 			</svg>
 			<div style={styles.chartMeta}>
 				<span>max: {maxY}</span>
@@ -164,6 +172,43 @@ export const CopilotUsageApp: React.FC = () => {
 
 	const toneColor = getToneColor(data.percent);
 	const percentText = formatPercent(data.percent);
+	const forecast = (() => {
+		const dailyDeltas = data.timeline.reduce<Array<{ date: string; delta: number }>>((rows, point, index) => {
+			const previous = data.timeline[index - 1];
+			const delta = previous ? Math.max(0, point.used - previous.used) : 0;
+			rows.push({ date: point.date, delta });
+			return rows;
+		}, []);
+
+		const recentWindow = dailyDeltas.slice(-7).filter(item => item.delta > 0);
+		const windowForAverage = recentWindow.length > 0 ? recentWindow : dailyDeltas.slice(-7);
+		const recentAverage = windowForAverage.length > 0
+			? windowForAverage.reduce((sum, item) => sum + item.delta, 0) / windowForAverage.length
+			: data.avgPerDay;
+		const projectedAdditional = Math.max(0, recentAverage) * Math.max(0, data.daysRemaining);
+		const projectedUsed = data.used + projectedAdditional;
+		const projectedRemaining = data.limit - projectedUsed;
+		const safeDailyBudget = data.daysRemaining > 0 ? data.remaining / data.daysRemaining : data.remaining;
+		const daysUntilLimit = recentAverage > 0 ? data.remaining / recentAverage : Number.POSITIVE_INFINITY;
+		const fitsMonth = projectedUsed <= data.limit;
+		const recommendation = recentAverage <= 0
+			? `Расход почти не наблюдается. Можно держать темп до ${formatNumber(data.recommendedPerDay)} запросов в день.`
+			: fitsMonth
+				? recentAverage <= data.recommendedPerDay
+					? `Темп комфортный. Можно держаться около ${formatNumber(recentAverage)} в день, лимита должно хватить.`
+					: `Лимита пока хватит, но темп выше рекомендованного. Лучше снизиться ближе к ${formatNumber(data.recommendedPerDay)} в день.`
+				: `При текущем темпе лимит закончится раньше конца месяца. Целевой темп: не выше ${formatNumber(data.recommendedPerDay)} в день.`;
+
+		return {
+			recentAverage,
+			projectedUsed,
+			projectedRemaining,
+			safeDailyBudget,
+			daysUntilLimit,
+			fitsMonth,
+			recommendation,
+		};
+	})();
 
 	return (
 		<div style={styles.page}>
@@ -216,7 +261,35 @@ export const CopilotUsageApp: React.FC = () => {
 						</div>
 					</div>
 
-					<div style={styles.section}>
+					<div style={styles.forecastSection}>
+						<h3 style={styles.sectionTitle}>Прогноз расхода и остатка</h3>
+						<div style={styles.forecastGrid}>
+							<div style={styles.forecastCard}>
+								<div style={styles.forecastValue}>{formatNumber(forecast.projectedUsed)}</div>
+								<div style={styles.cardLabel}>Прогноз usage к концу месяца</div>
+							</div>
+							<div style={styles.forecastCard}>
+								<div style={{ ...styles.forecastValue, color: forecast.projectedRemaining < 0 ? 'var(--vscode-errorForeground)' : 'var(--vscode-foreground)' }}>
+									{formatNumber(forecast.projectedRemaining)}
+								</div>
+								<div style={styles.cardLabel}>Прогноз остатка к концу месяца</div>
+							</div>
+							<div style={styles.forecastCard}>
+								<div style={{ ...styles.forecastValue, color: forecast.fitsMonth ? 'var(--vscode-testing-iconPassed)' : 'var(--vscode-errorForeground)' }}>
+									{forecast.fitsMonth ? 'Хватит' : 'Не хватит'}
+								</div>
+								<div style={styles.cardLabel}>Лимит при текущем темпе</div>
+							</div>
+						</div>
+						<div style={styles.forecastMetaGrid}>
+							<div>Текущий темп: <b>{formatNumber(forecast.recentAverage)} / день</b></div>
+							<div>Безопасный темп: <b>{formatNumber(forecast.safeDailyBudget)} / день</b></div>
+							<div>До исчерпания: <b>{Number.isFinite(forecast.daysUntilLimit) ? `${formatNumber(forecast.daysUntilLimit)} дн.` : 'запас большой'}</b></div>
+						</div>
+						<div style={styles.recommendationBox}>{forecast.recommendation}</div>
+					</div>
+
+					<div style={styles.trendSection}>
 						<h3 style={styles.sectionTitle}>Тренд накопления usage</h3>
 						<MiniLineChart points={data.timeline} />
 					</div>
@@ -368,6 +441,15 @@ const styles: Record<string, React.CSSProperties> = {
 		borderRadius: '8px',
 		marginBottom: '16px',
 	},
+	forecastSection: {
+		padding: '14px',
+		border: '1px solid var(--vscode-panel-border)',
+		borderRadius: '8px',
+		background: 'var(--vscode-editor-background)',
+		marginBottom: '16px',
+		display: 'grid',
+		gap: '12px',
+	},
 	progressHeader: {
 		display: 'flex',
 		justifyContent: 'space-between',
@@ -393,11 +475,49 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '8px',
 		fontSize: '12px',
 	},
+	forecastGrid: {
+		display: 'grid',
+		gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+		gap: '12px',
+	},
+	forecastCard: {
+		padding: '12px',
+		border: '1px solid var(--vscode-panel-border)',
+		borderRadius: '8px',
+		background: 'var(--vscode-sideBar-background)',
+	},
+	forecastValue: {
+		fontSize: '22px',
+		fontWeight: 700,
+		lineHeight: 1.2,
+	},
+	forecastMetaGrid: {
+		display: 'grid',
+		gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+		gap: '8px',
+		fontSize: '12px',
+	},
+	recommendationBox: {
+		padding: '10px 12px',
+		borderRadius: '8px',
+		border: '1px solid var(--vscode-panel-border)',
+		background: 'var(--vscode-sideBar-background)',
+		fontSize: '12px',
+		lineHeight: 1.45,
+		color: 'var(--vscode-foreground)',
+	},
 	section: {
 		padding: '14px',
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '8px',
 		background: 'var(--vscode-editor-background)',
+	},
+	trendSection: {
+		padding: '14px',
+		border: '1px solid var(--vscode-panel-border)',
+		borderRadius: '8px',
+		background: 'var(--vscode-editor-background)',
+		minHeight: '260px',
 	},
 	sectionTall: {
 		padding: '14px',
@@ -433,7 +553,7 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	chartSvg: {
 		width: '100%',
-		height: '120px',
+		height: '190px',
 		background: 'var(--vscode-editor-background)',
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '6px',

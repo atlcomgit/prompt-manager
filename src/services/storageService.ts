@@ -65,6 +65,11 @@ export class StorageService {
 		return vscode.Uri.file(path.join(this.promptDir(id), 'prompt.md'));
 	}
 
+	/** Get absolute path to a prompt folder */
+	getPromptDirectoryPath(id: string): string {
+		return this.promptDir(id);
+	}
+
 	private promptHistoryDir(id: string): string {
 		return path.join(this.promptDir(id), this.HISTORY_DIR_NAME);
 	}

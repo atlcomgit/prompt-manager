@@ -145,6 +145,73 @@ export class AiService {
 		}
 	}
 
+	/** Generate a tester-facing implementation report from staged changes */
+	async generateImplementationReport(input: {
+		promptTitle?: string;
+		taskNumber?: string;
+		projects?: string[];
+		languages?: string[];
+		frameworks?: string[];
+		promptContent?: string;
+		stagedChangesSummary: string;
+	}): Promise<string> {
+		const fallback = [
+			'- **Что сделано**.',
+			'  Недостаточно данных для автоматического формирования отчета.',
+			'- **Как протестировать**.',
+			'  1. Проверить staged-изменения вручную.',
+			'- **Особенности реализации**.',
+			'  Существенных особенностей автоматически определить не удалось.',
+			'- **Примеры**.',
+			'  Не добавлялись.',
+		].join('\n');
+
+		const systemPrompt = [
+			'Ты формируешь краткий отчет для тестировщика по изменениям в коде.',
+			'Пиши строго на русском языке.',
+			'Это правило относится только к генерации отчета.',
+			'Пиши отчет понятным для обычного пользователя и тестировщика языком, а не языком разработчика.',
+			'Используй только факты из переданных данных, ничего не выдумывай.',
+			'Верни только итоговый Markdown-отчет без пояснений до и после.',
+			'Не упоминай названия файлов, пути, директории, классы, методы, хуки, коммиты, diff, ветки и другие технические идентификаторы.',
+			'Не перечисляй затронутые файлы и не ссылайся на структуру проекта.',
+			'Описывай изменения через пользовательское поведение, бизнес-логику, интерфейс и сценарии проверки.',
+			'Если изменение сугубо техническое, переведи его в понятное следствие для тестирования или сопровождения, не раскрывая файловую структуру.',
+			'Строго соблюдай формат и заголовки:',
+			'- **Что сделано**.',
+			'  Краткое описание выполненных изменений и реализованного функционала.',
+			'- **Как протестировать**.',
+			'  Пошаговая инструкция по проверке работы функционала.',
+			'- **Особенности реализации**.',
+			'  Описание особенностей реализации, если таковые имеются.',
+			'- **Примеры**.',
+			'  Примеры HTTP-запросов, вызовов страниц и т.д., которые были созданы в процессе реализации.',
+			'Если для раздела мало данных, кратко укажи это внутри раздела.',
+			'В разделе Как протестировать используй нумерованный список, если можно выделить шаги.',
+			'В разделе Примеры перечисляй только реально обнаруженные примеры; если их нет, напиши: Не добавлялись.',
+		].join(' ');
+
+		const metaLines = [
+			input.promptTitle ? `Заголовок задачи: ${input.promptTitle}` : '',
+			input.taskNumber ? `Номер задачи: ${input.taskNumber}` : '',
+			input.projects && input.projects.length > 0 ? `Проекты: ${input.projects.join(', ')}` : '',
+			input.languages && input.languages.length > 0 ? `Языки: ${input.languages.join(', ')}` : '',
+			input.frameworks && input.frameworks.length > 0 ? `Фреймворки: ${input.frameworks.join(', ')}` : '',
+		].filter(Boolean).join('\n');
+
+		const promptBlock = (input.promptContent || '').trim()
+			? `Контекст из промпта:\n${(input.promptContent || '').trim().slice(0, 4000)}\n\n`
+			: '';
+
+		const userPrompt = [
+			metaLines ? `Метаданные:\n${metaLines}\n` : '',
+			promptBlock,
+			`Staged-изменения для анализа:\n${(input.stagedChangesSummary || '').trim().slice(0, 24000)}`,
+		].filter(Boolean).join('\n');
+
+		return this.chat(systemPrompt, userPrompt, fallback);
+	}
+
 	/** Generic chat with Language Model API */
 	private async chat(systemPrompt: string, userPrompt: string, fallback: string): Promise<string> {
 		try {

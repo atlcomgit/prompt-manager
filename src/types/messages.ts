@@ -23,6 +23,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'generateDescription'; content: string }
 	| { type: 'generateSlug'; title: string; description: string }
 	| { type: 'improvePromptText'; content: string; projects?: string[] }
+	| { type: 'generateReportFromStagedChanges'; prompt: Prompt }
 	| { type: 'saveSidebarState'; state: SidebarState }
 	| { type: 'getSidebarState' }
 	| { type: 'getWorkspaceFolders' }
@@ -54,14 +55,15 @@ export type WebviewToExtensionMessage =
 	| { type: 'getNextTaskNumber' }
 	| { type: 'openChatPanel' }
 	| { type: 'reportEditorReady'; promptId: string }
-	| { type: 'reportEditorUpdate'; promptId: string; report: string; activityDeltaMs?: number };
+	| { type: 'reportEditorUpdate'; promptId: string; report: string; activityDeltaMs?: number }
+	| { type: 'reportEditorGenerate'; promptId: string };
 
 // ---- Messages FROM extension TO webview ----
 
 export type ExtensionToWebviewMessage =
 	| { type: 'prompts'; prompts: PromptConfig[] }
-	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync' }
-	| { type: 'promptSaved'; prompt: PromptConfig }
+	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync'; previousId?: string }
+	| { type: 'promptSaved'; prompt: PromptConfig; previousId?: string }
 	| { type: 'promptDeleted'; id: string }
 	| { type: 'promptDuplicated'; prompt: PromptConfig }
 	| { type: 'sidebarState'; state: SidebarState }
@@ -75,6 +77,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'generatedDescription'; description: string }
 	| { type: 'generatedSlug'; slug: string }
 	| { type: 'improvedPromptText'; content: string }
+	| { type: 'generatedReport'; report: string }
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
 	| { type: 'branchStatus'; hasChanges: boolean; details: string }
 	| { type: 'error'; message: string }

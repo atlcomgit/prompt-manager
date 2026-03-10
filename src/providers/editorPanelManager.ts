@@ -375,6 +375,73 @@ export class EditorPanelManager {
 		return chunks.join('\n\n---\n\n').slice(0, 6000);
 	}
 
+	private buildPreparedCommitContext(projects: Awaited<ReturnType<GitService['getPreparedCommitProjectData']>>): string {
+		const MAX_DIFF_CHARS_PER_PROJECT = 12000;
+		const MAX_TOTAL_CHARS = 28000;
+		const sanitizeDiffForReportContext = (diff: string): string => diff
+			.split('\n')
+			.filter(line => !/^diff --git\s/.test(line))
+			.filter(line => !/^index\s/.test(line))
+			.filter(line => !/^---\s/.test(line))
+			.filter(line => !/^\+\+\+\s/.test(line))
+			.filter(line => !/^rename from\s/.test(line))
+			.filter(line => !/^rename to\s/.test(line))
+			.filter(line => !/^similarity index\s/.test(line))
+			.filter(line => !/^new file mode\s/.test(line))
+			.filter(line => !/^deleted file mode\s/.test(line))
+			.join('\n')
+			.trim();
+		const sections = projects.map((project) => {
+			const statusCounts = project.stagedFiles.reduce<Record<string, number>>((acc, file) => {
+				acc[file.status] = (acc[file.status] || 0) + 1;
+				return acc;
+			}, {});
+			const changeSummary = Object.entries(statusCounts)
+				.map(([status, count]) => `${status}: ${count}`)
+				.join(', ');
+			const sanitizedDiff = sanitizeDiffForReportContext(project.diff);
+			const trimmedDiff = sanitizedDiff.length > MAX_DIFF_CHARS_PER_PROJECT
+				? `${sanitizedDiff.slice(0, MAX_DIFF_CHARS_PER_PROJECT)}\n...[diff truncated]`
+				: sanitizedDiff;
+
+			return [
+				`Project: ${project.project}`,
+				`Branch: ${project.branch || 'unknown'}`,
+				`Change source: ${project.changeSource === 'staged' ? 'staged changes' : 'working tree changes'}`,
+				`Changed items: ${project.stagedFiles.length}`,
+				changeSummary ? `Change types: ${changeSummary}` : '',
+				trimmedDiff ? `Code changes:\n${trimmedDiff}` : '',
+			].filter(Boolean).join('\n');
+		});
+
+		return sections.join('\n\n---\n\n').slice(0, MAX_TOTAL_CHARS);
+	}
+
+	private async generateReportHtmlFromPrompt(promptSnapshot: Prompt): Promise<string> {
+		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
+		const selectedProjects = promptSnapshot.projects && promptSnapshot.projects.length > 0
+			? promptSnapshot.projects
+			: this.workspaceService.getWorkspaceFolders();
+		const stagedProjects = await this.gitService.getPreparedCommitProjectData(projectPaths, selectedProjects);
+
+		if (stagedProjects.length === 0) {
+			throw new Error('Не найдено подготовленных к коммиту файлов или изменений рабочего дерева в выбранных проектах.');
+		}
+
+		const stagedChangesSummary = this.buildPreparedCommitContext(stagedProjects);
+		const generatedReportMarkdown = await this.aiService.generateImplementationReport({
+			promptTitle: promptSnapshot.title,
+			taskNumber: promptSnapshot.taskNumber,
+			projects: selectedProjects,
+			languages: promptSnapshot.languages,
+			frameworks: promptSnapshot.frameworks,
+			promptContent: promptSnapshot.content,
+			stagedChangesSummary,
+		});
+
+		return this.markdownToHtml(generatedReportMarkdown);
+	}
+
 	private async broadcastAvailableLanguagesAndFrameworks(
 		extraSources: Array<Pick<Prompt, 'languages' | 'frameworks'>> = []
 	): Promise<void> {
@@ -488,6 +555,7 @@ export class EditorPanelManager {
 		const promptToSave: Prompt = JSON.parse(JSON.stringify(snapshot));
 		const globalContext = this.stateService.getGlobalAgentContext();
 		const saveStateId = (promptToSave.id || '__new__').trim() || '__new__';
+		const previousPromptId = (promptToSave.id || '').trim() || undefined;
 		if (!promptToSave.id && !this.hasPromptDataWithoutId(promptToSave)) {
 			return null;
 		}
@@ -501,12 +569,9 @@ export class EditorPanelManager {
 			if (!promptToSave.description && promptToSave.content) {
 				promptToSave.description = await this.aiService.generateDescription(promptToSave.content, globalContext);
 			}
-			if (!promptToSave.id) {
-				const slug = await this.aiService.generateSlug(promptToSave.title, promptToSave.description, globalContext);
-				promptToSave.id = await this.storageService.uniqueId(slug || 'untitled');
-			}
+			const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
 
-			const existingPrompt = await this.storageService.getPrompt(promptToSave.id);
+			const existingPrompt = await this.storageService.getPrompt(renameFromId || promptToSave.id);
 			if (existingPrompt) {
 				promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
 				promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
@@ -525,6 +590,7 @@ export class EditorPanelManager {
 			await this.storageService.savePrompt(promptToSave, {
 				historyReason: 'switch',
 				forceHistory: true,
+				previousId: renameFromId,
 			});
 			this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
 			if (promptToSave.id && promptToSave.id !== saveStateId) {
@@ -610,15 +676,22 @@ export class EditorPanelManager {
 		this.contentEditorLastActivityByPanelKey.delete(panelKey);
 	}
 
-	private makePromptIdBase(title: string, description: string): string {
-		const source = (title || description || '').trim();
-		const normalized = source
+	private sanitizePromptSlugPart(value: string): string {
+		return (value || '')
 			.toLowerCase()
 			.replace(/[\s_]+/g, '-')
 			.replace(/[^a-zа-я0-9-]/gi, '')
 			.replace(/-+/g, '-')
-			.replace(/^-|-$/g, '')
-			.substring(0, 40);
+			.replace(/^-|-$/g, '');
+	}
+
+	private makePromptIdBase(taskNumber: string, title: string, description: string): string {
+		const titlePart = this.sanitizePromptSlugPart(title || description || '');
+		const taskPart = this.sanitizePromptSlugPart(taskNumber || '');
+		const combined = [taskPart, titlePart].filter(Boolean).join('-');
+		const normalized = combined
+			.substring(0, 40)
+			.replace(/-+$/g, '');
 		return normalized || 'untitled';
 	}
 
@@ -649,6 +722,29 @@ export class EditorPanelManager {
 			return '';
 		}
 		return singleLine.length > 140 ? `${singleLine.slice(0, 139)}…` : singleLine;
+	}
+
+	private async ensurePromptIdMatchesTitle(promptToSave: Prompt, previousId?: string): Promise<string | undefined> {
+		const normalizedPreviousId = (previousId || promptToSave.id || '').trim() || undefined;
+		const slugSource = (promptToSave.title || promptToSave.description || promptToSave.content || promptToSave.report || '').trim();
+
+		if (!slugSource) {
+			if (normalizedPreviousId) {
+				promptToSave.id = normalizedPreviousId;
+				return undefined;
+			}
+
+			promptToSave.id = await this.storageService.uniqueId('untitled');
+			return undefined;
+		}
+
+		const nextId = await this.storageService.uniqueId(
+			this.makePromptIdBase(promptToSave.taskNumber, promptToSave.title, promptToSave.description || promptToSave.content || promptToSave.report),
+			normalizedPreviousId,
+		);
+		promptToSave.id = nextId;
+
+		return normalizedPreviousId && normalizedPreviousId !== nextId ? normalizedPreviousId : undefined;
 	}
 
 	private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
@@ -705,7 +801,7 @@ export class EditorPanelManager {
 				currentPrompt.description = this.makeDescriptionFallbackFromContent(content || currentPrompt.content);
 			}
 			currentPrompt.id = await this.storageService.uniqueId(
-				this.makePromptIdBase(currentPrompt.title, currentPrompt.description || content || currentPrompt.content)
+				this.makePromptIdBase(currentPrompt.taskNumber, currentPrompt.title, currentPrompt.description || content || currentPrompt.content)
 			);
 			currentPrompt.content = content || currentPrompt.content;
 			const saved = await this.storageService.savePrompt(currentPrompt);
@@ -804,7 +900,7 @@ export class EditorPanelManager {
 			currentPrompt.description = this.makeDescriptionFallbackFromContent(currentPrompt.content || currentPrompt.report);
 		}
 		currentPrompt.id = await this.storageService.uniqueId(
-			this.makePromptIdBase(currentPrompt.title, currentPrompt.description || currentPrompt.content || currentPrompt.report)
+			this.makePromptIdBase(currentPrompt.taskNumber, currentPrompt.title, currentPrompt.description || currentPrompt.content || currentPrompt.report)
 		);
 
 		const saved = await this.storageService.savePrompt(currentPrompt, { historyReason: 'manual' });
@@ -918,6 +1014,47 @@ export class EditorPanelManager {
 							timeSpentOnTask: saved.timeSpentOnTask,
 							updatedAt: saved.updatedAt,
 						});
+					}
+					break;
+				}
+
+				case 'reportEditorGenerate': {
+					const targetPromptId = (msg.promptId || promptId).trim();
+					if (!targetPromptId) {
+						break;
+					}
+
+					const storedPrompt = await this.storageService.getPrompt(targetPromptId);
+					if (!storedPrompt) {
+						void reportPanel.webview.postMessage({ type: 'error', message: 'Не удалось загрузить промпт для генерации отчета.' } satisfies ExtensionToWebviewMessage);
+						break;
+					}
+
+					try {
+						const generatedReportHtml = await this.generateReportHtmlFromPrompt(storedPrompt);
+						storedPrompt.report = generatedReportHtml;
+						const saved = await this.storageService.savePrompt(storedPrompt, {
+							historyReason: 'autosave',
+							skipHistory: true,
+						});
+
+						if (currentPrompt.id === targetPromptId) {
+							currentPrompt.report = storedPrompt.report;
+							currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
+							this.panelPromptRefs.set(panelKey, currentPrompt);
+							postMessage({
+								type: 'reportContentUpdated',
+								report: storedPrompt.report,
+								timeSpentWriting: saved.timeSpentWriting,
+								timeSpentOnTask: saved.timeSpentOnTask,
+								updatedAt: saved.updatedAt,
+							});
+						}
+
+						void reportPanel.webview.postMessage({ type: 'generatedReport', report: generatedReportHtml } satisfies ExtensionToWebviewMessage);
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						void reportPanel.webview.postMessage({ type: 'error', message } satisfies ExtensionToWebviewMessage);
 					}
 					break;
 				}
@@ -1216,13 +1353,10 @@ export class EditorPanelManager {
 					if (!dirtySnapshot.description && dirtySnapshot.content) {
 						dirtySnapshot.description = await this.aiService.generateDescription(dirtySnapshot.content, globalContext);
 					}
-					if (!dirtySnapshot.id) {
-						const slug = await this.aiService.generateSlug(dirtySnapshot.title, dirtySnapshot.description, globalContext);
-						dirtySnapshot.id = await this.storageService.uniqueId(slug || 'untitled');
-					}
+					const renameFromId = await this.ensurePromptIdMatchesTitle(dirtySnapshot, dirtySnapshot.id || undefined);
 					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
 					dirtySnapshot.timeSpentOnTask = Math.max(0, dirtySnapshot.timeSpentOnTask || 0);
-					await this.storageService.savePrompt(dirtySnapshot);
+					await this.storageService.savePrompt(dirtySnapshot, { previousId: renameFromId });
 					this.panelDirtyFlags.set(panelKey, false);
 					this.panelLatestPromptSnapshots.set(panelKey, null);
 					this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(dirtySnapshot)));
@@ -1350,6 +1484,7 @@ export class EditorPanelManager {
 					let promptToSave = msg.prompt;
 					const saveSource = msg.source || 'manual';
 					const globalContext = this.stateService.getGlobalAgentContext();
+					const previousPromptId = (currentPrompt.id || msg.prompt.id || '').trim() || undefined;
 
 					const isUntitledWithEnoughContent = promptToSave.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
 						&& !!promptToSave.content
@@ -1381,13 +1516,9 @@ export class EditorPanelManager {
 						}
 					}
 
-					if (!promptToSave.id) {
-						promptToSave.id = await this.storageService.uniqueId(
-							this.makePromptIdBase(promptToSave.title, promptToSave.description || promptToSave.content)
-						);
-					}
+					const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
 
-					const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(promptToSave.id) : null;
+					const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(renameFromId || promptToSave.id) : null;
 					const hasConcurrentUpdate = Boolean(existingPrompt && promptToSave.updatedAt && existingPrompt.updatedAt !== promptToSave.updatedAt);
 					const allowStatusOverwrite = saveSource === 'status-change';
 					if (existingPrompt && hasConcurrentUpdate && !allowStatusOverwrite) {
@@ -1412,18 +1543,22 @@ export class EditorPanelManager {
 
 					const saved = await this.storageService.savePrompt(promptToSave, {
 						historyReason: saveSource,
+						previousId: renameFromId,
 					});
 					const savedPrompt = await this.storageService.getPrompt(promptToSave.id);
 					const promptForPanel = savedPrompt || promptToSave;
 
 					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();
-					const shouldApplyToCurrentPanel = !normalizedCurrentPromptId || normalizedCurrentPromptId === promptToSave.id;
+					const shouldApplyToCurrentPanel = !normalizedCurrentPromptId
+						|| normalizedCurrentPromptId === promptToSave.id
+						|| Boolean(previousPromptId && normalizedCurrentPromptId === previousPromptId);
 
 					if (shouldApplyToCurrentPanel) {
 						setIsDirty(false);
 						// Update current prompt reference
 						Object.assign(currentPrompt, promptForPanel);
 						this.panelPromptRefs.set(panelKey, currentPrompt);
+						this.ensureContentEditorBinding(panelKey, currentPrompt);
 					}
 
 					// Update panel tracking
@@ -1456,8 +1591,8 @@ export class EditorPanelManager {
 
 					if (shouldApplyToCurrentPanel) {
 						panel.title = `⚡ ${saved.title || saved.id}`;
-						postMessage({ type: 'promptSaved', prompt: saved });
-						postMessage({ type: 'prompt', prompt: promptForPanel, reason: 'save' });
+						postMessage({ type: 'promptSaved', prompt: saved, previousId: renameFromId });
+						postMessage({ type: 'prompt', prompt: promptForPanel, reason: 'save', previousId: renameFromId });
 					}
 					await this.broadcastAvailableLanguagesAndFrameworks();
 
@@ -1563,6 +1698,21 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'generateReportFromStagedChanges': {
+				const promptSnapshot: Prompt = msg.prompt
+					? JSON.parse(JSON.stringify(msg.prompt))
+					: JSON.parse(JSON.stringify(currentPrompt));
+				try {
+					const generatedReportHtml = await this.generateReportHtmlFromPrompt(promptSnapshot);
+					postMessage({ type: 'generatedReport', report: generatedReportHtml });
+				} catch (error) {
+					const warning = error instanceof Error ? error.message : String(error);
+					vscode.window.showWarningMessage(warning);
+					postMessage({ type: 'error', message: warning });
+				}
+				break;
+			}
+
 			case 'getWorkspaceFolders': {
 				const folders = this.workspaceService.getWorkspaceFolders();
 				postMessage({ type: 'workspaceFolders', folders });
@@ -1650,8 +1800,7 @@ export class EditorPanelManager {
 
 					// Ensure prompt has id and persist latest editor state before starting chat
 					if (!prompt.id) {
-						const slug = await this.aiService.generateSlug(prompt.title, prompt.description, this.stateService.getGlobalAgentContext());
-						prompt.id = await this.storageService.uniqueId(slug || 'untitled');
+						await this.ensurePromptIdMatchesTitle(prompt);
 					}
 					const existingBeforeChat = await this.storageService.getPrompt(prompt.id);
 					if (existingBeforeChat) {

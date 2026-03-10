@@ -11,6 +11,7 @@ export const ReportEditorApp: React.FC = () => {
   const [promptId, setPromptId] = useState('');
   const [title, setTitle] = useState('');
   const [report, setReport] = useState('');
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [reportHeight, setReportHeight] = useState<number | undefined>(undefined);
   const flushTimerRef = useRef<number | null>(null);
   const lastActivityRef = useRef(Date.now());
@@ -47,8 +48,18 @@ export const ReportEditorApp: React.FC = () => {
         setPromptId(String(msg.promptId || ''));
         setTitle(String(msg.title || ''));
         setReport(typeof msg.report === 'string' ? msg.report : '');
+        setIsGeneratingReport(false);
         lastActivityRef.current = Date.now();
         pendingActivityRef.current = 0;
+        break;
+      case 'generatedReport':
+        setReport(typeof msg.report === 'string' ? msg.report : '');
+        setIsGeneratingReport(false);
+        lastActivityRef.current = Date.now();
+        pendingActivityRef.current = 0;
+        break;
+      case 'error':
+        setIsGeneratingReport(false);
         break;
       default:
         break;
@@ -94,6 +105,17 @@ export const ReportEditorApp: React.FC = () => {
         onHeightChange={setReportHeight}
         canReset={Boolean(report.trim())}
         fillHeight
+        onSecondaryAction={() => {
+          if (!promptId || isGeneratingReport) {
+            return;
+          }
+
+          setIsGeneratingReport(true);
+          vscode.postMessage({ type: 'reportEditorGenerate', promptId });
+        }}
+        secondaryActionLabel={isGeneratingReport ? t('editor.generating') : t('editor.generateReport')}
+        secondaryActionTitle={t('editor.generateReportTooltip')}
+        secondaryActionDisabled={!promptId || isGeneratingReport}
         onReset={() => {
           lastActivityRef.current = Date.now();
           setReport('');

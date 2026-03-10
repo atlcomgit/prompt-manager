@@ -141,6 +141,7 @@ export const EditorApp: React.FC = () => {
   const [requestSuggestionSignal, setRequestSuggestionSignal] = useState(0);
   const [isSuggestionLoading, setIsSuggestionLoading] = useState(false);
   const [isImprovingPromptText, setIsImprovingPromptText] = useState(false);
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
@@ -437,10 +438,14 @@ export const EditorApp: React.FC = () => {
           const incomingPromptId = (String(msg.prompt.id || '__new__').trim() || '__new__');
           const currentPromptId = (currentPromptIdRef.current || '__new__').trim() || '__new__';
           const activeSaveId = (activeSaveIdRef.current || '').trim();
+          const previousPromptId = (String(msg.previousId || '').trim() || '');
           const reason: 'open' | 'save' | 'sync' | undefined = msg.reason;
           const isOpenPayload = reason === 'open';
           const isNewPromptSaveResponse = currentPromptId === '__new__' && reason === 'save';
-          const isRelatedToCurrentPrompt = incomingPromptId === currentPromptId || (activeSaveId !== '' && incomingPromptId === activeSaveId) || isNewPromptSaveResponse;
+          const isRelatedToCurrentPrompt = incomingPromptId === currentPromptId
+            || previousPromptId === currentPromptId
+            || (activeSaveId !== '' && (incomingPromptId === activeSaveId || previousPromptId === activeSaveId))
+            || isNewPromptSaveResponse;
 
           if (!isOpenPayload && !isRelatedToCurrentPrompt) {
             break;
@@ -708,6 +713,16 @@ export const EditorApp: React.FC = () => {
         });
         setIsImprovingPromptText(false);
         break;
+      case 'generatedReport':
+        setPrompt(prev => ({
+          ...prev,
+          report: typeof msg.report === 'string' ? msg.report : prev.report,
+        }));
+        userChangeCounterRef.current++;
+        setIsDirty(true);
+        setIsGeneratingReport(false);
+        scheduleAutoSave(50);
+        break;
       case 'pickedFiles':
         if (msg.files && msg.files.length > 0) {
           setPrompt(prev => ({
@@ -746,6 +761,7 @@ export const EditorApp: React.FC = () => {
         setIsStartingChat(false);
         setIsSaving(false);
         setIsImprovingPromptText(false);
+        setIsGeneratingReport(false);
         setIsRecalculating(false);
         activeSaveIdRef.current = null;
         break;
@@ -1066,6 +1082,15 @@ export const EditorApp: React.FC = () => {
     }
     setIsImprovingPromptText(true);
     vscode.postMessage({ type: 'improvePromptText', content, projects: prompt.projects });
+  };
+
+  const handleGenerateReport = () => {
+    if (isGeneratingReport) {
+      return;
+    }
+
+    setIsGeneratingReport(true);
+    vscode.postMessage({ type: 'generateReportFromStagedChanges', prompt });
   };
 
   const handleShowBranches = () => {
@@ -1591,6 +1616,10 @@ export const EditorApp: React.FC = () => {
                   }}
                   openLabel={t('editor.open')}
                   openTitle={t('editor.open')}
+                  onSecondaryAction={handleGenerateReport}
+                  secondaryActionLabel={isGeneratingReport ? t('editor.generating') : t('editor.generateReport')}
+                  secondaryActionTitle={t('editor.generateReportTooltip')}
+                  secondaryActionDisabled={isGeneratingReport}
                   onReset={() => updateField('report', '')}
                 />
               </div>

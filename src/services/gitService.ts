@@ -4,10 +4,12 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { exec } from 'child_process';
+import * as fs from 'fs/promises';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface BranchInfo {
 	name: string;
@@ -15,7 +17,133 @@ export interface BranchInfo {
 	project: string;
 }
 
+export interface StagedFileChange {
+	status: string;
+	path: string;
+	previousPath?: string;
+}
+
+export interface PreparedCommitProjectData {
+	project: string;
+	projectPath: string;
+	branch: string;
+	changeSource: 'staged' | 'working-tree';
+	stagedFiles: StagedFileChange[];
+	stat: string;
+	diff: string;
+}
+
 export class GitService {
+	private static readonly DIFF_MAX_BUFFER = 8 * 1024 * 1024;
+
+	private parseStagedNameStatus(raw: string): StagedFileChange[] {
+		return raw
+			.split(/\r?\n/)
+			.map(line => line.trim())
+			.filter(Boolean)
+			.map((line) => {
+				const parts = line.split('\t').filter(Boolean);
+				const statusToken = (parts[0] || '').trim();
+				const normalizedStatus = statusToken.replace(/\d+/g, '') || statusToken;
+
+				if (normalizedStatus.startsWith('R') || normalizedStatus.startsWith('C')) {
+					return {
+						status: normalizedStatus.charAt(0),
+						previousPath: parts[1] || '',
+						path: parts[2] || parts[1] || '',
+					};
+				}
+
+				return {
+					status: normalizedStatus || statusToken,
+					path: parts[1] || '',
+				};
+			})
+			.filter(item => Boolean(item.path));
+	}
+
+	private async runGitFileCommand(projectPath: string, args: string[]): Promise<string> {
+		const { stdout } = await execFileAsync('git', args, {
+			cwd: projectPath,
+			maxBuffer: GitService.DIFF_MAX_BUFFER,
+		});
+		return stdout.trim();
+	}
+
+	private buildUntrackedPreview(projectPath: string, relativePath: string, maxChars = 4000): Promise<string> {
+		return fs.readFile(path.join(projectPath, relativePath), 'utf-8')
+			.then((content) => {
+				const trimmed = content.slice(0, maxChars);
+				return [
+					`diff --git a/${relativePath} b/${relativePath}`,
+					'new file mode 100644',
+					'--- /dev/null',
+					`+++ b/${relativePath}`,
+					trimmed
+						.split(/\r?\n/)
+						.map(line => `+${line}`)
+						.join('\n'),
+					content.length > maxChars ? '+...[file truncated]' : '',
+				].filter(Boolean).join('\n');
+			})
+			.catch(() => `diff --git a/${relativePath} b/${relativePath}\n+++ b/${relativePath}\n+[unable to read file preview]`);
+	}
+
+	private async getWorkingTreeProjectData(project: string, projectPath: string): Promise<PreparedCommitProjectData | null> {
+		const statusOutput = await this.runGitFileCommand(projectPath, ['status', '--porcelain']);
+		if (!statusOutput) {
+			return null;
+		}
+
+		const statusLines = statusOutput.split(/\r?\n/).filter(Boolean);
+		const untrackedFiles = statusLines
+			.filter(line => line.startsWith('?? '))
+			.map(line => line.slice(3).trim())
+			.filter(Boolean);
+
+		const trackedNameStatus = await this.runGitFileCommand(projectPath, [
+			'diff',
+			'--name-status',
+			'--find-renames',
+			'--diff-filter=ACDMR',
+		]);
+
+		const trackedFiles = trackedNameStatus ? this.parseStagedNameStatus(trackedNameStatus) : [];
+		const untrackedChanges: StagedFileChange[] = untrackedFiles.map((filePath) => ({
+			status: 'A',
+			path: filePath,
+		}));
+
+		const allFiles = [...trackedFiles, ...untrackedChanges];
+		if (allFiles.length === 0) {
+			return null;
+		}
+
+		const [trackedStat, trackedDiff, branch, untrackedPreviews] = await Promise.all([
+			this.runGitFileCommand(projectPath, ['diff', '--stat']),
+			this.runGitFileCommand(projectPath, ['diff', '--no-color', '--no-ext-diff', '--find-renames', '--diff-filter=ACDMR', '--unified=3']),
+			this.getCurrentBranch(projectPath),
+			Promise.all(untrackedFiles.map((filePath) => this.buildUntrackedPreview(projectPath, filePath))),
+		]);
+
+		const statParts = [trackedStat];
+		if (untrackedFiles.length > 0) {
+			statParts.push(`Untracked files: ${untrackedFiles.length}`);
+		}
+
+		const diffParts = [trackedDiff, ...untrackedPreviews].filter(Boolean);
+
+		return {
+			project,
+			projectPath,
+			branch,
+			changeSource: 'working-tree',
+			stagedFiles: allFiles,
+			stat: statParts.filter(Boolean).join('\n'),
+			diff: diffParts.join('\n\n'),
+		};
+	}
+
 	private getAllowedBaseBranches(configuredAllowedBranches?: string[]): Set<string> {
 		const normalized = (configuredAllowedBranches || [])
 			.map(branch => branch.trim())
@@ -48,6 +176,79 @@ export class GitService {
 		}
 
 		return branches;
+	}
+
+	/** Collect staged changes prepared for commit across selected projects */
+	async getPreparedCommitProjectData(
+		projectPaths: Map<string, string>,
+		projectNames: string[]
+	): Promise<PreparedCommitProjectData[]> {
+		const effectiveProjects = projectNames.length > 0
+			? projectNames
+			: Array.from(projectPaths.keys());
+		const prepared: PreparedCommitProjectData[] = [];
+
+		for (const project of effectiveProjects) {
+			const projectPath = projectPaths.get(project);
+			if (!projectPath) {
+				continue;
+			}
+
+			try {
+				const nameStatus = await this.runGitFileCommand(projectPath, [
+					'diff',
+					'--cached',
+					'--name-status',
+					'--find-renames',
+					'--diff-filter=ACDMR',
+				]);
+
+				if (nameStatus) {
+					const stagedFiles = this.parseStagedNameStatus(nameStatus);
+					if (stagedFiles.length > 0) {
+						const [stat, diff, branch] = await Promise.all([
+							this.runGitFileCommand(projectPath, [
+								'diff',
+								'--cached',
+								'--stat',
+								'--find-renames',
+								'--diff-filter=ACDMR',
+							]),
+							this.runGitFileCommand(projectPath, [
+								'diff',
+								'--cached',
+								'--no-color',
+								'--no-ext-diff',
+								'--find-renames',
+								'--diff-filter=ACDMR',
+								'--unified=3',
+							]),
+							this.getCurrentBranch(projectPath),
+						]);
+
+						prepared.push({
+							project,
+							projectPath,
+							branch,
+							changeSource: 'staged',
+							stagedFiles,
+							stat,
+							diff,
+						});
+						continue;
+					}
+				}
+
+				const workingTreeData = await this.getWorkingTreeProjectData(project, projectPath);
+				if (workingTreeData) {
+					prepared.push(workingTreeData);
+				}
+			} catch {
+				// Ignore non-git folders and command failures for a specific project.
+			}
+		}
+
+		return prepared;
 	}
 
 	/** Check if there are uncommitted changes */

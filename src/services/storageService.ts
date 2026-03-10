@@ -307,18 +307,24 @@ export class StorageService {
 	/** Save prompt (config + markdown) */
 	async savePrompt(
 		prompt: Prompt,
-		options?: { historyReason?: PromptHistoryReason | string; forceHistory?: boolean; skipHistory?: boolean }
+		options?: { historyReason?: PromptHistoryReason | string; forceHistory?: boolean; skipHistory?: boolean; previousId?: string }
 	): Promise<PromptConfig> {
 		await this.ensureStorageDir();
 		const reason = this.normalizeHistoryReason(options?.historyReason);
 		const forceHistory = Boolean(options?.forceHistory);
 		const skipHistory = Boolean(options?.skipHistory);
-		const existingPrompt = prompt.id ? await this.getPrompt(prompt.id) : null;
-		if (!skipHistory && prompt.id) {
+		const previousId = (options?.previousId || '').trim();
+		const existingPromptId = previousId || prompt.id;
+		const existingPrompt = existingPromptId ? await this.getPrompt(existingPromptId) : null;
+		if (!skipHistory && existingPromptId) {
 			const shouldCapture = await this.shouldCaptureHistorySnapshot(existingPrompt, prompt, reason, forceHistory);
 			if (shouldCapture && existingPrompt) {
 				await this.createHistorySnapshot(existingPrompt, reason);
 			}
+		}
+
+		if (previousId && previousId !== prompt.id) {
+			await this.renamePromptDirectory(previousId, prompt.id);
 		}
 
 		const dir = this.promptDir(prompt.id);
@@ -464,10 +470,10 @@ export class StorageService {
 	}
 
 	/** Generate a unique id by appending number if needed */
-	async uniqueId(baseId: string): Promise<string> {
+	async uniqueId(baseId: string, excludeId?: string): Promise<string> {
 		let id = baseId;
 		let counter = 1;
-		while (await this.exists(id)) {
+		while (await this.exists(id) && id !== excludeId) {
 			id = `${baseId}-${counter}`;
 			counter++;
 		}
@@ -658,5 +664,22 @@ export class StorageService {
 				await vscode.workspace.fs.writeFile(tgtUri, data);
 			}
 		}
+	}
+
+	private async renamePromptDirectory(oldId: string, newId: string): Promise<void> {
+		if (!oldId || !newId || oldId === newId) {
+			return;
+		}
+
+		const oldUri = vscode.Uri.file(this.promptDir(oldId));
+		const newUri = vscode.Uri.file(this.promptDir(newId));
+
+		try {
+			await vscode.workspace.fs.stat(oldUri);
+		} catch {
+			return;
+		}
+
+		await vscode.workspace.fs.rename(oldUri, newUri, { overwrite: false });
 	}
 }

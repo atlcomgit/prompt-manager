@@ -11,6 +11,10 @@ interface Props {
   onOpen?: () => void;
   openLabel?: string;
   openTitle?: string;
+  onSecondaryAction?: () => void;
+  secondaryActionLabel?: string;
+  secondaryActionTitle?: string;
+  secondaryActionDisabled?: boolean;
   fillHeight?: boolean;
 }
 
@@ -136,6 +140,10 @@ export const RichTextEditor: React.FC<Props> = ({
   onOpen,
   openLabel,
   openTitle,
+  onSecondaryAction,
+  secondaryActionLabel,
+  secondaryActionTitle,
+  secondaryActionDisabled,
   fillHeight,
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
@@ -411,16 +419,27 @@ export const RichTextEditor: React.FC<Props> = ({
           {onOpen && (
             <button
               type="button"
-              style={styles.openBtn}
+              style={styles.linkBtn}
               onClick={onOpen}
               title={openTitle || openLabel || 'Открыть'}
             >
-              {openLabel || 'Открыть'}
+              {`↗ ${openLabel || 'Открыть'}`}
+            </button>
+          )}
+          {onSecondaryAction && secondaryActionLabel && (
+            <button
+              type="button"
+              style={{ ...styles.linkBtn, ...(secondaryActionDisabled ? styles.linkBtnDisabled : null) }}
+              onClick={onSecondaryAction}
+              title={secondaryActionTitle || secondaryActionLabel}
+              disabled={secondaryActionDisabled}
+            >
+              {`✨ ${secondaryActionLabel}`}
             </button>
           )}
           {canReset && onReset && (
             <button type="button" style={styles.resetBtn} onClick={onReset} title="Очистить отчет">
-              Сбросить
+              ↺ Сбросить
             </button>
           )}
         </div>
@@ -503,15 +522,18 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     gap: '6px',
   },
-  openBtn: {
-    padding: '4px 8px',
+  linkBtn: {
+    padding: '2px 0',
     background: 'transparent',
-    border: '1px solid var(--vscode-button-border, var(--vscode-panel-border))',
-    borderRadius: '4px',
+    border: 'none',
     color: 'var(--vscode-textLink-foreground)',
     cursor: 'pointer',
     fontSize: '12px',
     fontFamily: 'var(--vscode-font-family)',
+  },
+  linkBtnDisabled: {
+    opacity: 0.5,
+    cursor: 'default',
   },
   modeBtn: {
     border: '1px solid var(--vscode-button-border, transparent)',

@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 interface Props {
   value: string;
   onChange: (value: string) => void;
+  onDebug?: (message: string, payload?: Record<string, unknown>) => void;
   autoModeKey?: string;
   placeholder?: string;
   t?: (key: string) => string;
@@ -239,6 +240,7 @@ const sanitizeHtml = (rawHtml: string): string => {
 export const RichTextEditor: React.FC<Props> = ({
   value,
   onChange,
+  onDebug,
   autoModeKey,
   placeholder,
   t,
@@ -306,7 +308,18 @@ export const RichTextEditor: React.FC<Props> = ({
     const nextValue = value || '';
     setHtmlSource(nextValue);
 
+    onDebug?.('propValue.received', {
+      nextLength: nextValue.length,
+      lastLocalLength: lastLocalValueRef.current?.length ?? null,
+      mode,
+      autoModeKey: autoModeKey || '',
+    });
+
     if (lastLocalValueRef.current === nextValue) {
+      onDebug?.('propValue.skipSameAsLocal', {
+        nextLength: nextValue.length,
+        mode,
+      });
       return;
     }
 
@@ -318,8 +331,12 @@ export const RichTextEditor: React.FC<Props> = ({
   useEffect(() => {
     lastLocalValueRef.current = null;
     isModeManuallySelectedRef.current = false;
+    onDebug?.('autoModeKey.reset', {
+      autoModeKey: autoModeKey || '',
+      valueLength: (value || '').length,
+    });
     setMode(detectPreferredMode(value || ''));
-  }, [autoModeKey]);
+  }, [autoModeKey, onDebug]);
 
   const translate = useCallback((key: string, fallback: string) => t?.(key) || fallback, [t]);
 
@@ -391,14 +408,30 @@ export const RichTextEditor: React.FC<Props> = ({
     // the latest content and overwriting innerHTML would destroy cursor position
     // and selection, making editing painful (especially during auto-save).
     if (document.activeElement === editorRef.current && document.hasFocus()) {
+      onDebug?.('domSync.skipFocused', {
+        incomingLength: (value || '').length,
+        domLength: editorRef.current.innerHTML.length,
+        mode,
+      });
       return;
     }
 
     const sanitized = sanitizeHtml(value || '');
     if (editorRef.current.innerHTML !== sanitized) {
+      onDebug?.('domSync.apply', {
+        incomingLength: sanitized.length,
+        previousDomLength: editorRef.current.innerHTML.length,
+        mode,
+      });
       editorRef.current.innerHTML = sanitized;
+    } else {
+      onDebug?.('domSync.noop', {
+        incomingLength: sanitized.length,
+        domLength: editorRef.current.innerHTML.length,
+        mode,
+      });
     }
-  }, [mode, value]);
+  }, [mode, onDebug, value]);
 
   useEffect(() => {
     if (!showFormattingToolbar) {
@@ -449,10 +482,15 @@ export const RichTextEditor: React.FC<Props> = ({
       return;
     }
     const sanitized = sanitizeHtml(editorRef.current.innerHTML);
+    onDebug?.('visual.syncFromEditor', {
+      domLength: editorRef.current.innerHTML.length,
+      sanitizedLength: sanitized.length,
+      mode,
+    });
     lastLocalValueRef.current = sanitized;
     setHtmlSource(sanitized);
     onChange(sanitized);
-  }, [onChange]);
+  }, [mode, onChange, onDebug]);
 
   const executeEditorCommand = useCallback((command: string, commandValue?: string) => {
     if (mode !== 'visual' || !editorRef.current) {
@@ -739,7 +777,13 @@ export const RichTextEditor: React.FC<Props> = ({
             </button>
           )}
           {canReset && onReset && (
-            <button type="button" style={styles.resetBtn} onClick={onReset} title="Очистить отчет">
+            <button
+              type="button"
+              style={styles.resetBtn}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={onReset}
+              title="Очистить отчет"
+            >
               ↺ Сбросить
             </button>
           )}
@@ -949,6 +993,11 @@ export const RichTextEditor: React.FC<Props> = ({
           value={htmlSource}
           onChange={(e) => {
             const next = normalizeText(e.target.value);
+            onDebug?.('text.syncFromTextarea', {
+              nextLength: next.length,
+              previousLength: htmlSource.length,
+              mode,
+            });
             lastLocalValueRef.current = next;
             setHtmlSource(next);
             onChange(next);

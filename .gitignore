@@ -3,6 +3,7 @@
 node_modules
 dist
 out
+out-tests
 .env
 *.vsix
 .DS_Store

@@ -60,6 +60,32 @@ export class StorageService {
 		return path.join(this.storageDir, id);
 	}
 
+	private async ensurePromptDirectory(id: string): Promise<string> {
+		await this.ensureStorageDir();
+		const dir = this.promptDir(id);
+		const dirUri = vscode.Uri.file(dir);
+		try {
+			await vscode.workspace.fs.stat(dirUri);
+		} catch {
+			await vscode.workspace.fs.createDirectory(dirUri);
+		}
+		return dir;
+	}
+
+	private async ensurePromptReportFile(id: string, reportContent: string = ''): Promise<void> {
+		if (!id.trim()) {
+			return;
+		}
+
+		const dir = await this.ensurePromptDirectory(id);
+		const reportUri = vscode.Uri.file(path.join(dir, 'report.txt'));
+		try {
+			await vscode.workspace.fs.stat(reportUri);
+		} catch {
+			await vscode.workspace.fs.writeFile(reportUri, Buffer.from(reportContent, 'utf-8'));
+		}
+	}
+
 	/** Get absolute URI to prompt.md for prompt id */
 	getPromptMarkdownUri(id: string): vscode.Uri {
 		return vscode.Uri.file(path.join(this.promptDir(id), 'prompt.md'));
@@ -298,6 +324,7 @@ export class StorageService {
 		const legacyReportPath = path.join(this.promptDir(id), 'report.md');
 		let content = '';
 		let report = '';
+		let hasReportTxt = true;
 		try {
 			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(mdPath));
 			content = Buffer.from(raw).toString('utf-8');
@@ -309,12 +336,17 @@ export class StorageService {
 			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(reportPath));
 			report = Buffer.from(raw).toString('utf-8');
 		} catch {
+			hasReportTxt = false;
 			try {
 				const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(legacyReportPath));
 				report = Buffer.from(raw).toString('utf-8');
 			} catch {
 				// No report file yet
 			}
+		}
+
+		if (!hasReportTxt) {
+			await this.ensurePromptReportFile(id, report);
 		}
 
 		return { ...config, content, report };
@@ -343,14 +375,8 @@ export class StorageService {
 			await this.renamePromptDirectory(previousId, prompt.id);
 		}
 
-		const dir = this.promptDir(prompt.id);
-		const dirUri = vscode.Uri.file(dir);
-
-		try {
-			await vscode.workspace.fs.stat(dirUri);
-		} catch {
-			await vscode.workspace.fs.createDirectory(dirUri);
-		}
+		const dir = await this.ensurePromptDirectory(prompt.id);
+		await this.ensurePromptReportFile(prompt.id);
 
 		// Save config.json (without content field)
 		const { content, report, ...config } = prompt;

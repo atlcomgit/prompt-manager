@@ -57,7 +57,9 @@ export type WebviewToExtensionMessage =
 	| { type: 'reportEditorReady'; promptId: string }
 	| { type: 'reportEditorUpdate'; promptId: string; report: string; previousReport?: string; activityDeltaMs?: number }
 	| { type: 'reportEditorSave'; promptId: string; report: string; previousReport?: string; activityDeltaMs?: number }
-	| { type: 'reportEditorGenerate'; promptId: string };
+	| { type: 'reportEditorGenerate'; promptId: string }
+	| { type: 'mainReportUpdate'; promptId: string; report: string }
+	| { type: 'debugLog'; scope: string; message: string; payload?: unknown };
 
 // ---- Messages FROM extension TO webview ----
 

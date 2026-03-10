@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage, organize and use AI prompts directly in VS Code with Copilot Chat integration",
-  "version": "0.1.44",
+  "version": "0.1.46",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -216,6 +216,16 @@
           "type": "boolean",
           "description": "Enable verbose Copilot usage debug log in usage panel. Disable for compact log.",
           "default": false
+        },
+        "promptManager.debugLogging.enabled": {
+          "type": "boolean",
+          "description": "Enable Prompt Manager debug logging for key extension flows in output channels. Keep disabled unless you are debugging extension behavior.",
+          "default": false
+        },
+        "promptManager.captureAgentFinalResponse": {
+          "type": "boolean",
+          "description": "Save the final agent chat response to the prompt report and include it in afterChatCompleted hooks (for example, Telegram integrations).",
+          "default": false
         }
       }
     }
@@ -224,6 +234,9 @@
     "vscode:prepublish": "npm run build",
     "compile": "npm run build",
     "build": "npm run build:extension && npm run build:webview",
+    "test": "npm run test:compile && npm run test:run",
+    "test:compile": "tsc -p tsconfig.tests.json",
+    "test:run": "node --test out-tests/tests/**/*.test.js",
     "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
     "build:webview": "node esbuild.webview.mjs",
     "watch:esbuild": "npm run watch:extension & npm run watch:webview",

@@ -159,7 +159,10 @@ export const EditorApp: React.FC = () => {
 
   // Auto-save refs
   const promptRef = useRef<Prompt>(prompt);
+  const isDirtyRef = useRef(false);
   const isSavingRef = useRef(false);
+  const localReportDirtyRef = useRef(false);
+  const pendingReportOverrideRef = useRef<string | null>(null);
   const autoSaveTimerRef = useRef<number | null>(null);
   const userChangeCounterRef = useRef(0);
   const saveStartCounterRef = useRef(0);
@@ -181,6 +184,14 @@ export const EditorApp: React.FC = () => {
     }
     return Array.from(vars);
   }, [prompt.content]);
+
+  const logReportDebug = useCallback((message: string, payload?: Record<string, unknown>) => {
+    vscode.postMessage({ type: 'debugLog', scope: 'editor-report', message, payload });
+  }, []);
+
+  const logMainRichTextDebug = useCallback((message: string, payload?: Record<string, unknown>) => {
+    logReportDebug(`mainRichText.${message}`, payload);
+  }, [logReportDebug]);
 
   const targetBranch = prompt.branch.trim();
 
@@ -410,7 +421,18 @@ export const EditorApp: React.FC = () => {
 
   // Keep refs in sync with state
   useEffect(() => { promptRef.current = prompt; }, [prompt]);
+  useEffect(() => { isDirtyRef.current = isDirty; }, [isDirty]);
   useEffect(() => { isSavingRef.current = isSaving; }, [isSaving]);
+
+  useEffect(() => {
+    logReportDebug('state.reportChanged', {
+      promptId: prompt.id || '__new__',
+      reportLength: (prompt.report || '').length,
+      localReportDirty: localReportDirtyRef.current,
+      globalDirty: isDirty,
+      pendingOverrideLength: pendingReportOverrideRef.current?.length ?? null,
+    });
+  }, [isDirty, logReportDebug, prompt.id, prompt.report]);
 
   // Cleanup auto-save timer and loader timer on unmount
   useEffect(() => {
@@ -460,6 +482,7 @@ export const EditorApp: React.FC = () => {
             if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); showLoaderTimerRef.current = null; }
             setShowLoader(false);
             setPrompt(msg.prompt);
+            localReportDirtyRef.current = false;
             currentPromptIdRef.current = incomingPromptId;
             hasBeenSavedRef.current = Boolean(msg.prompt.id);
             userChangeCounterRef.current = 0;
@@ -494,7 +517,6 @@ export const EditorApp: React.FC = () => {
               timeSpentUntracked: Math.max(msg.prompt.timeSpentUntracked || 0, prev.timeSpentUntracked || 0),
               updatedAt: msg.prompt.updatedAt || prev.updatedAt,
               status: msg.prompt.status || prev.status,
-              // Merge report only if user hasn't written one yet
               report: (prev.report || '').trim() ? prev.report : (msg.prompt.report || prev.report),
             }));
             // Don't touch isDirty — user's pending edits stay intact
@@ -520,7 +542,15 @@ export const EditorApp: React.FC = () => {
             // Keep isDirty = true so next auto-save picks up user's changes
           } else {
             setPrompt(msg.prompt);
+            localReportDirtyRef.current = false;
             setIsDirty(false);
+          }
+          if (pendingReportOverrideRef.current !== null && (msg.prompt.report || '') === pendingReportOverrideRef.current) {
+            logReportDebug('prompt.override-confirmed', {
+              promptId: incomingPromptId,
+              reportLength: (msg.prompt.report || '').length,
+            });
+            pendingReportOverrideRef.current = null;
           }
           // Update currentPromptIdRef when backend assigns a real ID to a new prompt
           if (incomingPromptId !== currentPromptId && incomingPromptId !== '__new__') {
@@ -598,15 +628,57 @@ export const EditorApp: React.FC = () => {
         openedAtRef.current = Date.now();
         break;
       case 'reportContentUpdated':
-        setPrompt(prev => ({
-          ...prev,
-          report: typeof msg.report === 'string' ? msg.report : prev.report,
-          timeSpentWriting: Math.max(msg.timeSpentWriting || 0, prev.timeSpentWriting || 0),
-          timeSpentOnTask: Math.max(msg.timeSpentOnTask || 0, prev.timeSpentOnTask || 0),
-          updatedAt: msg.updatedAt || prev.updatedAt,
-        }));
+        {
+        const currentReport = promptRef.current.report || '';
+        const incomingReport = typeof msg.report === 'string' ? msg.report : currentReport;
+        if (pendingReportOverrideRef.current !== null && incomingReport !== pendingReportOverrideRef.current) {
+          logReportDebug('reportContentUpdated.ignored.pendingOverride', {
+            promptId: promptRef.current.id || '__new__',
+            previousLength: currentReport.length,
+            incomingLength: incomingReport.length,
+            pendingLength: pendingReportOverrideRef.current.length,
+          });
+          break;
+        }
+        if (pendingReportOverrideRef.current !== null && incomingReport === pendingReportOverrideRef.current) {
+          logReportDebug('reportContentUpdated.override-confirmed', {
+            promptId: promptRef.current.id || '__new__',
+            incomingLength: incomingReport.length,
+          });
+          pendingReportOverrideRef.current = null;
+        }
+        const hasLocalUnsavedReportChanges = localReportDirtyRef.current && incomingReport !== currentReport;
+
+        logReportDebug('reportContentUpdated.received', {
+          promptId: promptRef.current.id || '__new__',
+          previousLength: currentReport.length,
+          incomingLength: incomingReport.length,
+          dirty: isDirtyRef.current,
+          ignoredDueToDirty: hasLocalUnsavedReportChanges,
+        });
+
+        setPrompt(prev => {
+          const nextReport = hasLocalUnsavedReportChanges ? prev.report : incomingReport;
+          logReportDebug('reportContentUpdated.stateApply', {
+            promptId: prev.id || '__new__',
+            previousLength: (prev.report || '').length,
+            nextLength: (nextReport || '').length,
+            usedIncoming: !hasLocalUnsavedReportChanges,
+          });
+          return {
+            ...prev,
+            report: nextReport,
+            timeSpentWriting: Math.max(msg.timeSpentWriting || 0, prev.timeSpentWriting || 0),
+            timeSpentOnTask: Math.max(msg.timeSpentOnTask || 0, prev.timeSpentOnTask || 0),
+            updatedAt: msg.updatedAt || prev.updatedAt,
+          };
+        });
+        if (!hasLocalUnsavedReportChanges) {
+          localReportDirtyRef.current = false;
+        }
         hasBeenSavedRef.current = true;
         break;
+        }
       case 'contentEditorOpened':
         isExternalEditorOpenRef.current = true;
         break;
@@ -899,6 +971,9 @@ export const EditorApp: React.FC = () => {
   /** Update a text field with debounced auto-save (1.5 s). */
   const updateField = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
     setPrompt(prev => ({ ...prev, [field]: value }));
+    if (field === 'report') {
+      localReportDirtyRef.current = true;
+    }
     if (field !== 'timeSpentWriting' && field !== 'timeSpentImplementing') {
       userChangeCounterRef.current++;
       setIsDirty(true);
@@ -909,6 +984,9 @@ export const EditorApp: React.FC = () => {
   /** Update a select/toggle field with near-immediate auto-save. */
   const updateFieldAndSaveNow = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
     setPrompt(prev => ({ ...prev, [field]: value }));
+    if (field === 'report') {
+      localReportDirtyRef.current = true;
+    }
     if (field !== 'timeSpentWriting' && field !== 'timeSpentImplementing') {
       userChangeCounterRef.current++;
       setIsDirty(true);
@@ -916,12 +994,14 @@ export const EditorApp: React.FC = () => {
     }
   };
 
-  const buildPromptForSave = (): Prompt => {
+  const buildPromptForSaveFrom = (basePrompt: Prompt): Prompt => {
     const timeSpent = Date.now() - openedAtRef.current;
-    const updatedPrompt = applyElapsedTimeByContext(prompt, timeSpent);
+    const updatedPrompt = applyElapsedTimeByContext(basePrompt, timeSpent);
     openedAtRef.current = Date.now();
     return updatedPrompt;
   };
+
+  const buildPromptForSave = (): Prompt => buildPromptForSaveFrom(promptRef.current);
 
   const handleSave = (source: 'manual' | 'status-change' | 'autosave' | unknown = 'manual') => {
     const normalizedSource: 'manual' | 'status-change' | 'autosave' =
@@ -938,6 +1018,56 @@ export const EditorApp: React.FC = () => {
     activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
     vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: normalizedSource });
+  };
+
+  const handleResetReport = () => {
+    if (autoSaveTimerRef.current) {
+      window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+
+    const nextPrompt = buildPromptForSaveFrom({
+      ...promptRef.current,
+      report: '',
+    });
+
+    logReportDebug('reset.start', {
+      promptId: nextPrompt.id || '__new__',
+      previousLength: (promptRef.current.report || '').length,
+      nextLength: nextPrompt.report.length,
+    });
+
+    pendingReportOverrideRef.current = '';
+    localReportDirtyRef.current = true;
+    promptRef.current = nextPrompt;
+    setPrompt(nextPrompt);
+    if (nextPrompt.id) {
+      vscode.postMessage({
+        type: 'mainReportUpdate',
+        promptId: nextPrompt.id,
+        report: nextPrompt.report,
+      });
+    }
+    userChangeCounterRef.current++;
+
+    if (!hasBeenSavedRef.current && !nextPrompt.id) {
+      logReportDebug('reset.local-only', {
+        promptId: nextPrompt.id || '__new__',
+      });
+      setIsDirty(true);
+      return;
+    }
+
+    hasBeenSavedRef.current = true;
+    saveStartCounterRef.current = userChangeCounterRef.current;
+    activeSaveIdRef.current = (nextPrompt.id || '__new__').trim() || '__new__';
+    setIsSaving(true);
+    setIsDirty(false);
+    logReportDebug('reset.save-dispatched', {
+      promptId: nextPrompt.id || '__new__',
+      reportLength: nextPrompt.report.length,
+    });
+    vscode.postMessage({ type: 'savePrompt', prompt: nextPrompt, source: 'manual' });
   };
 
   const handleStartChat = () => {
@@ -1602,6 +1732,7 @@ export const EditorApp: React.FC = () => {
                 <RichTextEditor
                   value={prompt.report || ''}
                   onChange={v => updateField('report', v)}
+                  onDebug={logMainRichTextDebug}
                   autoModeKey={prompt.id}
                   placeholder={t('editor.reportPlaceholder')}
                   persistedHeight={reportHeight}
@@ -1621,7 +1752,7 @@ export const EditorApp: React.FC = () => {
                   secondaryActionLabel={isGeneratingReport ? t('editor.generating') : t('editor.generateReport')}
                   secondaryActionTitle={t('editor.generateReportTooltip')}
                   secondaryActionDisabled={isGeneratingReport}
-                  onReset={() => updateField('report', '')}
+                  onReset={handleResetReport}
                 />
               </div>
             </>

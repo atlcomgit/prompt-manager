@@ -2,6 +2,7 @@
 .vscode-test/**
 src/**
 out/**
+out-tests/**
 node_modules/**
 esbuild.webview.mjs
 tsconfig.json

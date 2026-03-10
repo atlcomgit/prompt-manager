@@ -17,6 +17,7 @@ import type { WorkspaceService } from '../services/workspaceService.js';
 import { GitService } from '../services/gitService.js';
 import type { StateService } from '../services/stateService.js';
 import { TimeTrackingService } from '../services/timeTrackingService.js';
+import { decideFileReportSync, isLatestPersistedReport } from '../utils/reportSync.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
@@ -37,6 +38,7 @@ export class EditorPanelManager {
 	private pendingRestorePrompt: Prompt | null = null;
 	private pendingRestoreIsDirty = false;
 	private readonly hooksOutput = vscode.window.createOutputChannel('Prompt Manager Hooks');
+	private readonly reportDebugOutput = vscode.window.createOutputChannel('Prompt Manager Report Debug');
 	private contentEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string }>();
 	private panelKeyByContentEditorUri = new Map<string, string>();
 	private contentEditorLastActivityByPanelKey = new Map<string, number>();
@@ -165,26 +167,133 @@ export class EditorPanelManager {
 		});
 	}
 
+	private reportDebugPreview(value: unknown, maxLength: number = 120): string {
+		const text = typeof value === 'string'
+			? value
+			: JSON.stringify(value ?? null);
+		const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+		if (normalized.length <= maxLength) {
+			return normalized;
+		}
+		return `${normalized.slice(0, maxLength - 1)}…`;
+	}
+
+	private logReportDebug(event: string, payload?: Record<string, unknown>): void {
+		if (!this.isDebugLoggingEnabled()) {
+			return;
+		}
+		const timestamp = new Date().toISOString();
+		const serializedPayload = payload ? ` ${JSON.stringify(payload)}` : '';
+		this.reportDebugOutput.appendLine(`[${timestamp}] ${event}${serializedPayload}`);
+	}
+
+	private isDebugLoggingEnabled(): boolean {
+		return vscode.workspace
+			.getConfiguration('promptManager')
+			.get<boolean>('debugLogging.enabled', false) === true;
+	}
+
 	private extractAgentResponse(chatText: string): string {
-		const text = (chatText || '').trim();
+		const text = (chatText || '').replace(/\r\n?/g, '\n').trim();
 		if (!text) {
 			return '';
 		}
-		// Find the last occurrence of "GitHub Copilot:" (or similar agent markers)
-		const markers = ['GitHub Copilot:', 'Copilot:'];
-		let lastIdx = -1;
-		let markerLen = 0;
-		for (const marker of markers) {
-			const idx = text.lastIndexOf(marker);
-			if (idx > lastIdx) {
-				lastIdx = idx;
-				markerLen = marker.length;
+
+		type ChatSpeaker = 'assistant' | 'user' | 'other';
+		const assistantInlinePatterns = [
+			/^\s*(?:#{1,6}\s*)?(?:GitHub Copilot|Copilot)\s*:\s*(.+)$/i,
+		];
+		const userInlinePatterns = [
+			/^\s*(?:#{1,6}\s*)?(?:You|User|Me)\s*:\s*(.+)$/i,
+			/^\s*(?:#{1,6}\s*)?(?:Вы|Пользователь)\s*:\s*(.+)$/i,
+		];
+		const assistantMarkerPatterns = [
+			/^\s*(?:#{1,6}\s*)?(?:GitHub Copilot|Copilot)\s*:??\s*$/i,
+		];
+		const userMarkerPatterns = [
+			/^\s*(?:#{1,6}\s*)?(?:You|User|Me)\s*:??\s*$/i,
+			/^\s*(?:#{1,6}\s*)?(?:Вы|Пользователь)\s*:??\s*$/i,
+		];
+
+		const sections: Array<{ speaker: ChatSpeaker; content: string }> = [];
+		let currentSpeaker: ChatSpeaker = 'other';
+		let currentLines: string[] = [];
+
+		const flushSection = (): void => {
+			const content = currentLines.join('\n').trim();
+			if (!content) {
+				currentLines = [];
+				return;
 			}
+			sections.push({ speaker: currentSpeaker, content });
+			currentLines = [];
+		};
+
+		for (const line of text.split('\n')) {
+			const assistantInline = assistantInlinePatterns
+				.map(pattern => line.match(pattern))
+				.find(Boolean);
+			if (assistantInline) {
+				flushSection();
+				currentSpeaker = 'assistant';
+				currentLines = [assistantInline[1]];
+				continue;
+			}
+
+			const userInline = userInlinePatterns
+				.map(pattern => line.match(pattern))
+				.find(Boolean);
+			if (userInline) {
+				flushSection();
+				currentSpeaker = 'user';
+				currentLines = [userInline[1]];
+				continue;
+			}
+
+			if (assistantMarkerPatterns.some(pattern => pattern.test(line))) {
+				flushSection();
+				currentSpeaker = 'assistant';
+				continue;
+			}
+
+			if (userMarkerPatterns.some(pattern => pattern.test(line))) {
+				flushSection();
+				currentSpeaker = 'user';
+				continue;
+			}
+
+			currentLines.push(line);
 		}
-		if (lastIdx >= 0) {
-			return text.substring(lastIdx + markerLen).trim();
+
+		flushSection();
+
+		const latestAssistantSection = [...sections]
+			.reverse()
+			.find(section => section.speaker === 'assistant' && section.content.trim());
+		if (latestAssistantSection) {
+			return latestAssistantSection.content.trim();
 		}
+
 		return text;
+	}
+
+	private reportHtmlToText(reportHtml: string): string {
+		const html = (reportHtml || '').trim();
+		if (!html) {
+			return '';
+		}
+
+		return html
+			.replace(/<br\s*\/?>/gi, '\n')
+			.replace(/<li\b[^>]*>/gi, '- ')
+			.replace(/<\/(?:p|div|section|article|li|ul|ol|h[1-6]|blockquote|pre|tr|table)>/gi, '\n')
+			.replace(/<[^>]+>/g, '')
+			.replace(/&nbsp;/gi, ' ')
+			.replace(/&amp;/gi, '&')
+			.replace(/&lt;/gi, '<')
+			.replace(/&gt;/gi, '>')
+			.replace(/\n{3,}/g, '\n\n')
+			.trim();
 	}
 
 	/**
@@ -208,7 +317,7 @@ export class EditorPanelManager {
 		return html;
 	}
 
-	private async tryReadChatMarkdownFromClipboard(): Promise<string> {
+	private async tryReadChatMarkdownFromClipboard(): Promise<{ markdown: string; html: string }> {
 		const commands = await vscode.commands.getCommands(true);
 		const copyCommands = [
 			'workbench.action.chat.copyResponse',
@@ -218,7 +327,7 @@ export class EditorPanelManager {
 		].filter(cmd => commands.includes(cmd));
 
 		if (copyCommands.length === 0) {
-			return '';
+			return { markdown: '', html: '' };
 		}
 
 		const openChatCmds = ['workbench.action.chat.openAgent', 'workbench.action.chat.open'];
@@ -240,7 +349,10 @@ export class EditorPanelManager {
 				if (copied) {
 					await vscode.env.clipboard.writeText(originalClipboard);
 					const agentMd = this.extractAgentResponse(copied);
-					return this.markdownToHtml(agentMd);
+					return {
+						markdown: agentMd,
+						html: this.markdownToHtml(agentMd),
+					};
 				}
 			} catch {
 				// try next copy command
@@ -248,7 +360,7 @@ export class EditorPanelManager {
 		}
 
 		await vscode.env.clipboard.writeText(originalClipboard);
-		return '';
+		return { markdown: '', html: '' };
 	}
 
 	private buildChatSessionResource(sessionId: string): vscode.Uri {
@@ -641,12 +753,13 @@ export class EditorPanelManager {
 		const diskReport = bindingState?.content;
 		const extensionReport = this.panelPromptRefs.get(panelKey)?.report ?? currentPrompt.report;
 		const nextReport = promptToSave.report || '';
+		const hasLocalReportChange = nextReport !== (extensionReport || '');
 
 		if (!diskReport) {
 			return;
 		}
 
-		if (extensionReport === diskReport && nextReport !== diskReport) {
+		if (!hasLocalReportChange && extensionReport === diskReport && nextReport !== diskReport) {
 			promptToSave.report = diskReport;
 		}
 	}
@@ -747,11 +860,15 @@ export class EditorPanelManager {
 		this.contentSyncDisposables.push(
 			vscode.workspace.onDidChangeTextDocument((event) => {
 				void this.syncPromptContentFromEditorDocument(event.document);
-				void this.syncPromptReportFromDocument(event.document);
+				if (this.panelKeyByReportEditorUri.has(event.document.uri.toString())) {
+					void this.syncPromptReportFromDocument(event.document);
+				}
 			}),
 			vscode.workspace.onDidSaveTextDocument((document) => {
 				void this.syncPromptContentFromEditorDocument(document);
-				void this.syncPromptReportFromDocument(document);
+				if (this.panelKeyByReportEditorUri.has(document.uri.toString())) {
+					void this.syncPromptReportFromDocument(document);
+				}
 				void this.handleContentEditorSaved(document);
 			}),
 			vscode.workspace.onDidCloseTextDocument((document) => {
@@ -774,6 +891,12 @@ export class EditorPanelManager {
 				void this.syncPromptReportFromFileUri(uri, '');
 			})
 		);
+	}
+
+	private shouldCaptureAgentFinalResponse(): boolean {
+		return vscode.workspace
+			.getConfiguration('promptManager')
+			.get<boolean>('captureAgentFinalResponse', false) === true;
 	}
 
 	private ensureContentEditorBinding(panelKey: string, prompt: Prompt): void {
@@ -1009,6 +1132,7 @@ export class EditorPanelManager {
 
 		const binding = this.reportEditorByPanelKey.get(panelKey);
 		if (!binding) {
+			this.logReportDebug('syncPromptReportFromFileUri.skip.noBinding', { panelKey, uri: uri.fsPath });
 			return;
 		}
 
@@ -1028,7 +1152,21 @@ export class EditorPanelManager {
 		}
 
 		const previousSyncedReport = binding.lastSyncedContent;
-		if (previousSyncedReport === report) {
+		const promptRef = this.panelPromptRefs.get(panelKey);
+		const basePrompt = this.panelBasePrompts.get(panelKey);
+		const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
+		const syncDecision = decideFileReportSync({
+			previousSyncedReport,
+			incomingReport: report,
+			baseReport: basePrompt?.report || '',
+			localReport: latestSnapshot?.report ?? promptRef?.report ?? '',
+		});
+		if (syncDecision === 'skip-same-content') {
+			this.logReportDebug('syncPromptReportFromFileUri.skip.sameContent', {
+				panelKey,
+				uri: uri.fsPath,
+				reportLength: report.length,
+			});
 			return;
 		}
 
@@ -1040,17 +1178,37 @@ export class EditorPanelManager {
 			binding.lastModifiedMs = null;
 		}
 
-		const promptRef = this.panelPromptRefs.get(panelKey);
+		const baseReport = basePrompt?.report || '';
+		const localReport = latestSnapshot?.report ?? promptRef?.report ?? '';
+		if (syncDecision === 'skip-local-changes') {
+			this.logReportDebug('syncPromptReportFromFileUri.skip.localChanges', {
+				panelKey,
+				uri: uri.fsPath,
+				baseLength: baseReport.length,
+				localLength: localReport.length,
+				incomingLength: report.length,
+				localPreview: this.reportDebugPreview(localReport),
+				incomingPreview: this.reportDebugPreview(report),
+			});
+			return;
+		}
+
+		this.logReportDebug('syncPromptReportFromFileUri.apply', {
+			panelKey,
+			uri: uri.fsPath,
+			previousLength: previousSyncedReport.length,
+			incomingLength: report.length,
+			incomingPreview: this.reportDebugPreview(report),
+		});
+
 		if (promptRef && promptRef.report !== report) {
 			promptRef.report = report;
 		}
 
-		const basePrompt = this.panelBasePrompts.get(panelKey);
 		if (basePrompt && !this.panelDirtyFlags.get(panelKey)) {
 			basePrompt.report = report;
 		}
 
-		const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
 		if (latestSnapshot && (latestSnapshot.report || '') === (previousSyncedReport || '')) {
 			latestSnapshot.report = report;
 		}
@@ -1348,23 +1506,10 @@ export class EditorPanelManager {
 					skipHistory: true,
 				});
 
-			if (currentPrompt.id === targetPromptId) {
-				currentPrompt.report = storedPrompt.report;
-				currentPrompt.timeSpentWriting = Math.max(saved.timeSpentWriting || 0, currentPrompt.timeSpentWriting || 0);
-				currentPrompt.timeSpentOnTask = Math.max(saved.timeSpentOnTask || 0, currentPrompt.timeSpentOnTask || 0);
-				currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
-				this.panelPromptRefs.set(panelKey, currentPrompt);
-				this.ensureReportEditorBinding(panelKey, currentPrompt);
-				postMessage({
-					type: 'reportContentUpdated',
-					report: storedPrompt.report,
-					timeSpentWriting: saved.timeSpentWriting,
-					timeSpentOnTask: saved.timeSpentOnTask,
-					updatedAt: saved.updatedAt,
-				});
-			}
-
-			return saved;
+			return {
+				...storedPrompt,
+				...saved,
+			};
 		};
 
 		reportPanel.onDidDispose(() => {
@@ -1373,6 +1518,13 @@ export class EditorPanelManager {
 
 		reportPanel.webview.onDidReceiveMessage(async (msg: WebviewToExtensionMessage) => {
 			switch (msg.type) {
+				case 'debugLog': {
+					this.logReportDebug(`webview.${msg.scope}.${msg.message}`, msg.payload && typeof msg.payload === 'object'
+						? msg.payload as Record<string, unknown>
+						: { value: msg.payload ?? null });
+					break;
+				}
+
 				case 'reportEditorReady': {
 					const readyPrompt = await this.storageService.getPrompt(promptId);
 					void reportPanel.webview.postMessage({
@@ -1389,12 +1541,38 @@ export class EditorPanelManager {
 					if (!targetPromptId) {
 						break;
 					}
+					const nextReport = typeof msg.report === 'string' ? msg.report : '';
+
+					this.logReportDebug('reportEditorUpdate.received', {
+						panelKey,
+						targetPromptId,
+						currentPromptId: currentPrompt.id,
+						previousLength: typeof msg.previousReport === 'string' ? msg.previousReport.length : null,
+						incomingLength: nextReport.length,
+						activityDeltaMs: Math.max(0, Number(msg.activityDeltaMs) || 0),
+					});
+
+					if (currentPrompt.id === targetPromptId) {
+						currentPrompt.report = nextReport;
+						this.panelPromptRefs.set(panelKey, currentPrompt);
+						this.ensureReportEditorBinding(panelKey, currentPrompt);
+						this.logReportDebug('reportEditorUpdate.forwardedToMainPanel', {
+							panelKey,
+							targetPromptId,
+							reportLength: nextReport.length,
+							reportPreview: this.reportDebugPreview(nextReport),
+						});
+						postMessage({
+							type: 'reportContentUpdated',
+							report: nextReport,
+						} satisfies ExtensionToWebviewMessage);
+					}
 
 					try {
 						const saved = await this.enqueueReportPersist(targetPromptId, () =>
 							persistReport(
 								targetPromptId,
-								typeof msg.report === 'string' ? msg.report : '',
+								nextReport,
 								typeof msg.previousReport === 'string' ? msg.previousReport : undefined,
 								Math.max(0, Number(msg.activityDeltaMs) || 0),
 								'autosave'
@@ -1404,12 +1582,45 @@ export class EditorPanelManager {
 							break;
 						}
 
-						void reportPanel.webview.postMessage({
-							type: 'reportEditorSynced',
-							report: typeof msg.report === 'string' ? msg.report : '',
-							updatedAt: saved.updatedAt,
-						} satisfies ExtensionToWebviewMessage);
+						const isLatestLiveReport = currentPrompt.id === targetPromptId && isLatestPersistedReport({
+							currentReport: currentPrompt.report || '',
+							persistedReport: nextReport,
+						});
+						if (isLatestLiveReport) {
+							currentPrompt.timeSpentWriting = Math.max(saved.timeSpentWriting || 0, currentPrompt.timeSpentWriting || 0);
+							currentPrompt.timeSpentOnTask = Math.max(saved.timeSpentOnTask || 0, currentPrompt.timeSpentOnTask || 0);
+							currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
+							this.panelPromptRefs.set(panelKey, currentPrompt);
+							this.ensureReportEditorBinding(panelKey, currentPrompt);
+						} else {
+							this.logReportDebug('reportEditorUpdate.persistedStale', {
+								panelKey,
+								targetPromptId,
+								reportLength: nextReport.length,
+								currentLength: currentPrompt.id === targetPromptId ? currentPrompt.report.length : null,
+							});
+						}
+
+						this.logReportDebug('reportEditorUpdate.persisted', {
+							panelKey,
+							targetPromptId,
+							reportLength: nextReport.length,
+							updatedAt: saved.updatedAt || null,
+						});
+
+						if (isLatestLiveReport) {
+							void reportPanel.webview.postMessage({
+								type: 'reportEditorSynced',
+								report: nextReport,
+								updatedAt: saved.updatedAt,
+							} satisfies ExtensionToWebviewMessage);
+						}
 					} catch (error) {
+						this.logReportDebug('reportEditorUpdate.persistFailed', {
+							panelKey,
+							targetPromptId,
+							message: error instanceof Error ? error.message : String(error),
+						});
 						const message = this.formatSaveConflictMessage(error);
 						void reportPanel.webview.postMessage({ type: 'error', message } satisfies ExtensionToWebviewMessage);
 						const storedPrompt = await this.storageService.getPrompt(targetPromptId);
@@ -1430,6 +1641,14 @@ export class EditorPanelManager {
 						break;
 					}
 
+					this.logReportDebug('reportEditorSave.received', {
+						panelKey,
+						targetPromptId,
+						previousLength: typeof msg.previousReport === 'string' ? msg.previousReport.length : null,
+						incomingLength: typeof msg.report === 'string' ? msg.report.length : 0,
+						activityDeltaMs: Math.max(0, Number(msg.activityDeltaMs) || 0),
+					});
+
 					try {
 						const saved = await this.enqueueReportPersist(targetPromptId, () =>
 							persistReport(
@@ -1445,11 +1664,23 @@ export class EditorPanelManager {
 							break;
 						}
 
+						this.logReportDebug('reportEditorSave.persisted', {
+							panelKey,
+							targetPromptId,
+							reportLength: typeof msg.report === 'string' ? msg.report.length : 0,
+							updatedAt: saved.updatedAt || null,
+						});
+
 						void reportPanel.webview.postMessage({
 							type: 'reportEditorSaved',
 							updatedAt: saved.updatedAt,
 						} satisfies ExtensionToWebviewMessage);
 					} catch (error) {
+						this.logReportDebug('reportEditorSave.persistFailed', {
+							panelKey,
+							targetPromptId,
+							message: error instanceof Error ? error.message : String(error),
+						});
 						const message = this.formatSaveConflictMessage(error);
 						void reportPanel.webview.postMessage({ type: 'error', message } satisfies ExtensionToWebviewMessage);
 					}
@@ -1852,6 +2083,12 @@ export class EditorPanelManager {
 		// Handle messages
 		panel.webview.onDidReceiveMessage(
 			async (msg: WebviewToExtensionMessage) => {
+				if (msg.type === 'debugLog') {
+					this.logReportDebug(`webview.${msg.scope}.${msg.message}`, msg.payload && typeof msg.payload === 'object'
+						? msg.payload as Record<string, unknown>
+						: { value: msg.payload ?? null });
+					return;
+				}
 				if (msg.type === 'markDirty') {
 					// Validate: ignore stale markDirty from a previous prompt
 					const markDirtyPromptId = (msg.promptId || msg.prompt?.id || '').trim();
@@ -1862,10 +2099,13 @@ export class EditorPanelManager {
 
 					const previousLanguages = latestPromptState?.languages || prompt.languages;
 					const previousFrameworks = latestPromptState?.frameworks || prompt.frameworks;
+					const previousCurrentReport = prompt.report || '';
 
 					isDirty = msg.dirty;
 					if (msg.prompt) {
 						latestPromptState = msg.prompt;
+						Object.assign(prompt, msg.prompt);
+						this.panelPromptRefs.set(panelKey, prompt);
 						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(msg.prompt)));
 					} else if (msg.dirty && !latestPromptState) {
 						latestPromptState = JSON.parse(JSON.stringify(prompt));
@@ -1873,6 +2113,36 @@ export class EditorPanelManager {
 					} else if (!msg.dirty) {
 						latestPromptState = null;
 						this.panelLatestPromptSnapshots.set(panelKey, null);
+					}
+
+					const debugReportSource = msg.prompt?.report
+						?? latestPromptState?.report
+						?? prompt.report
+						?? '';
+					this.logReportDebug('markDirty', {
+						panelKey,
+						dirty: msg.dirty,
+						reportLength: debugReportSource.length,
+						reportPreview: this.reportDebugPreview(debugReportSource),
+					});
+
+					if (msg.prompt && prompt.id) {
+						const nextReport = msg.prompt.report || '';
+						if (nextReport !== previousCurrentReport) {
+							const reportPanel = this.reportEditorPanels.get(prompt.id);
+							if (reportPanel) {
+								this.logReportDebug('markDirty.forwardedToReportEditor', {
+									panelKey,
+									promptId: prompt.id,
+									previousLength: previousCurrentReport.length,
+									nextLength: nextReport.length,
+								});
+								void reportPanel.webview.postMessage({
+									type: 'reportEditorExternalUpdate',
+									report: nextReport,
+								} satisfies ExtensionToWebviewMessage);
+							}
+						}
 					}
 
 					if (msg.prompt && msg.dirty) {
@@ -1957,6 +2227,13 @@ export class EditorPanelManager {
 
 			case 'savePrompt': {
 				const saveStateId = (msg.prompt.id || currentPrompt.id || '__new__').trim() || '__new__';
+				this.logReportDebug('savePrompt.received', {
+					panelKey,
+					source: msg.source || 'manual',
+					promptId: msg.prompt.id || currentPrompt.id || '',
+					reportLength: (msg.prompt.report || '').length,
+					reportPreview: this.reportDebugPreview(msg.prompt.report || ''),
+				});
 				this._onDidSaveStateChange.fire({ id: saveStateId, saving: true });
 				postMessage({ type: 'promptSaving', id: saveStateId, saving: true });
 				try {
@@ -1998,10 +2275,10 @@ export class EditorPanelManager {
 
 					const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
 					await this.reconcileReportWithExtensionState(panelKey, promptToSave, currentPrompt);
+					const basePrompt = this.panelBasePrompts.get(panelKey);
 					await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, basePrompt || null);
 
 					const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(renameFromId || promptToSave.id) : null;
-					const basePrompt = this.panelBasePrompts.get(panelKey);
 					const hasConcurrentUpdate = Boolean(existingPrompt && promptToSave.updatedAt && existingPrompt.updatedAt !== promptToSave.updatedAt);
 					const allowStatusOverwrite = saveSource === 'status-change';
 					if (existingPrompt && hasConcurrentUpdate && !allowStatusOverwrite) {
@@ -2034,6 +2311,13 @@ export class EditorPanelManager {
 					const saved = await this.storageService.savePrompt(promptToSave, {
 						historyReason: saveSource,
 						previousId: renameFromId,
+					});
+					this.logReportDebug('savePrompt.saved', {
+						panelKey,
+						promptId: promptToSave.id,
+						source: saveSource,
+						reportLength: (promptToSave.report || '').length,
+						reportPreview: this.reportDebugPreview(promptToSave.report || ''),
 					});
 					const savedPrompt = await this.storageService.getPrompt(promptToSave.id);
 					const promptForPanel = savedPrompt || promptToSave;
@@ -2099,6 +2383,38 @@ export class EditorPanelManager {
 				} finally {
 					this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
 					postMessage({ type: 'promptSaving', id: saveStateId, saving: false });
+				}
+				break;
+			}
+
+			case 'mainReportUpdate': {
+				const targetPromptId = (msg.promptId || currentPrompt.id || '').trim();
+				if (!targetPromptId || currentPrompt.id !== targetPromptId) {
+					break;
+				}
+
+				const nextReport = typeof msg.report === 'string' ? msg.report : '';
+				const previousReport = currentPrompt.report || '';
+				currentPrompt.report = nextReport;
+				this.panelPromptRefs.set(panelKey, currentPrompt);
+				const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
+				if (latestSnapshot) {
+					latestSnapshot.report = nextReport;
+					this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(latestSnapshot)));
+				}
+
+				const reportPanel = this.reportEditorPanels.get(targetPromptId);
+				if (reportPanel && previousReport !== nextReport) {
+					this.logReportDebug('mainReportUpdate.forwardedToReportEditor', {
+						panelKey,
+						promptId: targetPromptId,
+						previousLength: previousReport.length,
+						nextLength: nextReport.length,
+					});
+					void reportPanel.webview.postMessage({
+						type: 'reportEditorExternalUpdate',
+						report: nextReport,
+					} satisfies ExtensionToWebviewMessage);
 				}
 				break;
 			}
@@ -2600,10 +2916,13 @@ export class EditorPanelManager {
 								1000,
 								trackedSessionId || undefined,
 							);
-							const chatMarkdown = await this.tryReadChatMarkdownFromClipboard();
+							const shouldCaptureAgentFinalResponse = this.shouldCaptureAgentFinalResponse();
+							const chatResponse = await this.tryReadChatMarkdownFromClipboard();
+							const chatReportText = chatResponse.markdown;
+							const chatReportHtml = chatResponse.html;
 							const completionObserved = Number(completion.lastRequestEnded || 0) > Number(completion.lastRequestStarted || 0);
 							this.hooksOutput.appendLine(
-								`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} completionOk=${completion.ok} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatMarkdown ? 'yes' : 'no'}`
+								`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} completionOk=${completion.ok} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatReportHtml ? 'yes' : 'no'}`
 							);
 							if (completion.ok || completionObserved) {
 								const promptToComplete = await this.storageService.getPrompt(prompt.id);
@@ -2622,8 +2941,8 @@ export class EditorPanelManager {
 											...(promptToComplete.chatSessionIds || []).filter(id => id !== sessionId),
 										];
 									}
-									if (chatMarkdown && !(promptToComplete.report || '').trim()) {
-										promptToComplete.report = chatMarkdown;
+									if (shouldCaptureAgentFinalResponse && chatReportHtml) {
+										promptToComplete.report = chatReportHtml;
 									}
 									if (promptToComplete.status !== 'completed') {
 										promptToComplete.status = 'completed';
@@ -2657,19 +2976,22 @@ export class EditorPanelManager {
 									}, 3000);
 								}
 
-								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
-								await this.runConfiguredHooks(prompt?.hooks || [], {
-									event: 'afterChatCompleted',
-									...hookPayloadBase,
-									status: promptToComplete?.status || prompt.status,
-									report: promptToComplete?.report || '',
-									chatSessionId: trackedSessionId || '',
-									timeSpentImplementing: promptToComplete?.timeSpentImplementing || 0,
-								}, 'afterChatCompleted');
+								if (shouldCaptureAgentFinalResponse) {
+									this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
+									await this.runConfiguredHooks(prompt?.hooks || [], {
+										event: 'afterChatCompleted',
+										...hookPayloadBase,
+										status: promptToComplete?.status || prompt.status,
+										report: promptToComplete?.report || '',
+										reportText: chatReportText || this.reportHtmlToText(promptToComplete?.report || ''),
+										chatSessionId: trackedSessionId || '',
+										timeSpentImplementing: promptToComplete?.timeSpentImplementing || 0,
+									}, 'afterChatCompleted');
+								}
 								return;
 							}
 
-							if (chatMarkdown) {
+							if (chatReportHtml) {
 								const promptForTiming = await this.storageService.getPrompt(prompt.id);
 								if (promptForTiming) {
 									const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
@@ -2678,8 +3000,8 @@ export class EditorPanelManager {
 									if (implementingDelta > 0) {
 										promptForTiming.timeSpentImplementing = (promptForTiming.timeSpentImplementing || 0) + implementingDelta;
 									}
-									if (!(promptForTiming.report || '').trim()) {
-										promptForTiming.report = chatMarkdown;
+									if (shouldCaptureAgentFinalResponse) {
+										promptForTiming.report = chatReportHtml;
 									}
 									await this.storageService.savePrompt(promptForTiming);
 									if (currentPrompt.id === promptForTiming.id) {
@@ -2734,15 +3056,18 @@ export class EditorPanelManager {
 									}
 								}
 
-								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
-								await this.runConfiguredHooks(prompt?.hooks || [], {
-									event: 'afterChatCompleted',
-									...hookPayloadBase,
-									status: promptForTiming?.status || prompt.status,
-									report: promptForTiming?.report || '',
-									chatSessionId: trackedSessionId || '',
-									timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
-								}, 'afterChatCompleted');
+								if (shouldCaptureAgentFinalResponse) {
+									this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
+									await this.runConfiguredHooks(prompt?.hooks || [], {
+										event: 'afterChatCompleted',
+										...hookPayloadBase,
+										status: promptForTiming?.status || prompt.status,
+										report: promptForTiming?.report || '',
+										reportText: chatReportText || this.reportHtmlToText(promptForTiming?.report || ''),
+										chatSessionId: trackedSessionId || '',
+										timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
+									}, 'afterChatCompleted');
+								}
 								return;
 							}
 

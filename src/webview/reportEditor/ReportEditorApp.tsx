@@ -3,6 +3,7 @@ import { RichTextEditor } from '../editor/components/RichTextEditor';
 import { useT } from '../shared/i18n';
 import { useMessageListener } from '../shared/useMessageListener';
 import { getVsCodeApi } from '../shared/vscodeApi';
+import { shouldIgnoreReportEditorExternalUpdate } from '../../utils/reportSync.js';
 
 const vscode = getVsCodeApi();
 
@@ -19,6 +20,12 @@ export const ReportEditorApp: React.FC = () => {
   const lastActivityRef = useRef(Date.now());
   const pendingActivityRef = useRef(0);
   const lastSyncedReportRef = useRef('');
+  const reportRef = useRef('');
+  const hasUnsyncedLocalChangesRef = useRef(false);
+
+  const logReportDebug = useCallback((message: string, payload?: Record<string, unknown>) => {
+    vscode.postMessage({ type: 'debugLog', scope: 'report-editor', message, payload });
+  }, []);
 
   const clearSaveFeedbackTimer = useCallback(() => {
     if (saveFeedbackTimerRef.current) {
@@ -32,6 +39,13 @@ export const ReportEditorApp: React.FC = () => {
       return;
     }
 
+    logReportDebug('flush.dispatched', {
+      promptId,
+      nextLength: nextReport.length,
+      previousSyncedLength: lastSyncedReportRef.current.length,
+      activityDeltaMs: pendingActivityRef.current,
+    });
+
     vscode.postMessage({
       type: 'reportEditorUpdate',
       promptId,
@@ -40,7 +54,7 @@ export const ReportEditorApp: React.FC = () => {
       activityDeltaMs: pendingActivityRef.current,
     });
     pendingActivityRef.current = 0;
-  }, [promptId]);
+  }, [logReportDebug, promptId]);
 
   const saveReport = useCallback(() => {
     if (!promptId || saveState === 'saving') {
@@ -54,6 +68,12 @@ export const ReportEditorApp: React.FC = () => {
 
     clearSaveFeedbackTimer();
     setSaveState('saving');
+    logReportDebug('save.dispatched', {
+      promptId,
+      reportLength: report.length,
+      previousSyncedLength: lastSyncedReportRef.current.length,
+      activityDeltaMs: pendingActivityRef.current,
+    });
     vscode.postMessage({
       type: 'reportEditorSave',
       promptId,
@@ -62,7 +82,7 @@ export const ReportEditorApp: React.FC = () => {
       activityDeltaMs: pendingActivityRef.current,
     });
     pendingActivityRef.current = 0;
-  }, [clearSaveFeedbackTimer, promptId, report, saveState]);
+  }, [clearSaveFeedbackTimer, logReportDebug, promptId, report, saveState]);
 
   const scheduleFlush = useCallback((nextReport: string, delayMs: number) => {
     if (flushTimerRef.current) {
@@ -78,10 +98,15 @@ export const ReportEditorApp: React.FC = () => {
   const handleMessage = useCallback((msg: any) => {
     switch (msg.type) {
       case 'reportEditorInit':
+        logReportDebug('message.init', {
+          promptId: String(msg.promptId || ''),
+          reportLength: typeof msg.report === 'string' ? msg.report.length : 0,
+        });
         setPromptId(String(msg.promptId || ''));
         setTitle(String(msg.title || ''));
         setReport(typeof msg.report === 'string' ? msg.report : '');
         lastSyncedReportRef.current = typeof msg.report === 'string' ? msg.report : '';
+        hasUnsyncedLocalChangesRef.current = false;
         setIsGeneratingReport(false);
         clearSaveFeedbackTimer();
         setSaveState('idle');
@@ -89,8 +114,12 @@ export const ReportEditorApp: React.FC = () => {
         pendingActivityRef.current = 0;
         break;
       case 'generatedReport':
+        logReportDebug('message.generatedReport', {
+          reportLength: typeof msg.report === 'string' ? msg.report.length : 0,
+        });
         setReport(typeof msg.report === 'string' ? msg.report : '');
         lastSyncedReportRef.current = typeof msg.report === 'string' ? msg.report : '';
+        hasUnsyncedLocalChangesRef.current = false;
         setIsGeneratingReport(false);
         clearSaveFeedbackTimer();
         setSaveState('idle');
@@ -98,18 +127,43 @@ export const ReportEditorApp: React.FC = () => {
         pendingActivityRef.current = 0;
         break;
       case 'reportEditorExternalUpdate':
+        if (typeof msg.report === 'string' && shouldIgnoreReportEditorExternalUpdate({
+          hasUnsyncedLocalChanges: hasUnsyncedLocalChangesRef.current,
+          incomingReport: msg.report,
+          currentReport: reportRef.current,
+        })) {
+          logReportDebug('message.externalUpdateIgnoredLocalAhead', {
+            incomingLength: msg.report.length,
+            currentLength: reportRef.current.length,
+            syncedLength: lastSyncedReportRef.current.length,
+          });
+          break;
+        }
+        logReportDebug('message.externalUpdate', {
+          reportLength: typeof msg.report === 'string' ? msg.report.length : 0,
+          currentLength: reportRef.current.length,
+        });
         setReport(typeof msg.report === 'string' ? msg.report : '');
         lastSyncedReportRef.current = typeof msg.report === 'string' ? msg.report : '';
+        hasUnsyncedLocalChangesRef.current = false;
         clearSaveFeedbackTimer();
         setSaveState('idle');
         lastActivityRef.current = Date.now();
         pendingActivityRef.current = 0;
         break;
       case 'reportEditorSynced':
+        logReportDebug('message.synced', {
+          reportLength: typeof msg.report === 'string' ? msg.report.length : report.length,
+        });
         lastSyncedReportRef.current = typeof msg.report === 'string' ? msg.report : report;
+        hasUnsyncedLocalChangesRef.current = false;
         break;
       case 'reportEditorSaved':
+        logReportDebug('message.saved', {
+          reportLength: report.length,
+        });
         lastSyncedReportRef.current = report;
+        hasUnsyncedLocalChangesRef.current = false;
         clearSaveFeedbackTimer();
         setSaveState('saved');
         saveFeedbackTimerRef.current = window.setTimeout(() => {
@@ -118,6 +172,9 @@ export const ReportEditorApp: React.FC = () => {
         }, 1800);
         break;
       case 'error':
+        logReportDebug('message.error', {
+          message: String(msg.message || ''),
+        });
         setIsGeneratingReport(false);
         clearSaveFeedbackTimer();
         setSaveState('idle');
@@ -131,7 +188,23 @@ export const ReportEditorApp: React.FC = () => {
 
   useEffect(() => {
     vscode.postMessage({ type: 'reportEditorReady', promptId });
-  }, [promptId]);
+    logReportDebug('ready', {
+      promptId,
+    });
+  }, [logReportDebug, promptId]);
+
+  useEffect(() => {
+    reportRef.current = report;
+  }, [report]);
+
+  useEffect(() => {
+    logReportDebug('state.reportChanged', {
+      promptId,
+      reportLength: report.length,
+      syncedLength: lastSyncedReportRef.current.length,
+      saveState,
+    });
+  }, [logReportDebug, promptId, report, saveState]);
 
   useEffect(() => {
     return () => {
@@ -142,10 +215,14 @@ export const ReportEditorApp: React.FC = () => {
       }
       clearSaveFeedbackTimer();
       if (hadPendingFlush) {
-        flushReport(report);
+        logReportDebug('cleanup.flushPendingOnUnmount', {
+          promptId,
+          reportLength: reportRef.current.length,
+        });
+        flushReport(reportRef.current);
       }
     };
-  }, [clearSaveFeedbackTimer, flushReport, report]);
+  }, [clearSaveFeedbackTimer, flushReport, logReportDebug, promptId]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -204,6 +281,14 @@ export const ReportEditorApp: React.FC = () => {
             pendingActivityRef.current += rawDelta;
           }
           lastActivityRef.current = now;
+          logReportDebug('input.onChange', {
+            promptId,
+            previousLength: report.length,
+            nextLength: nextReport.length,
+            rawDelta,
+            pendingActivityMs: pendingActivityRef.current,
+          });
+          hasUnsyncedLocalChangesRef.current = true;
           if (saveState !== 'idle') {
             clearSaveFeedbackTimer();
             setSaveState('idle');
@@ -218,6 +303,7 @@ export const ReportEditorApp: React.FC = () => {
         onHeightChange={setReportHeight}
         canReset={Boolean(report.trim())}
         fillHeight
+        onDebug={logReportDebug}
         showFormattingToolbar
         onSecondaryAction={() => {
           if (!promptId || isGeneratingReport) {
@@ -232,6 +318,11 @@ export const ReportEditorApp: React.FC = () => {
         secondaryActionDisabled={!promptId || isGeneratingReport}
         onReset={() => {
           lastActivityRef.current = Date.now();
+          logReportDebug('reset', {
+            promptId,
+            previousLength: report.length,
+          });
+          hasUnsyncedLocalChangesRef.current = true;
           setReport('');
           scheduleFlush('', 0);
         }}

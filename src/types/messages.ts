@@ -56,6 +56,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'openChatPanel' }
 	| { type: 'reportEditorReady'; promptId: string }
 	| { type: 'reportEditorUpdate'; promptId: string; report: string; activityDeltaMs?: number }
+	| { type: 'reportEditorSave'; promptId: string; report: string; activityDeltaMs?: number }
 	| { type: 'reportEditorGenerate'; promptId: string };
 
 // ---- Messages FROM extension TO webview ----
@@ -98,6 +99,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'contentEditorClosed'; reverted: boolean; content: string }
 	| { type: 'contentEditorSaved' }
 	| { type: 'reportEditorInit'; promptId: string; title: string; report: string }
+	| { type: 'reportEditorSaved'; updatedAt?: string }
 	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number }
 	| { type: 'promptLoading' }
 	| { type: 'nextTaskNumber'; taskNumber: string }

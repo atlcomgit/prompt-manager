@@ -35,6 +35,7 @@ export function getWebviewHtml(
     img-src ${webview.cspSource} https: data:;
   ">
   <title>${title}</title>
+  <link rel="stylesheet" href="${codiconsUri}">
   <style>
     :root {
       --pm-spacing-xs: 4px;
@@ -74,9 +75,38 @@ export function getWebviewHtml(
     }
 
     /* Focus styles */
-    *:focus-visible {
+    button {
+      -webkit-appearance: none;
+      appearance: none;
+      background-image: none;
+      box-shadow: none;
+      outline: none;
+    }
+
+    button::-moz-focus-inner {
+      border: 0;
+      padding: 0;
+    }
+
+    :where(input, textarea, select, [contenteditable="true"]):focus-visible {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: -1px;
+    }
+
+    button:focus,
+    button:focus-visible,
+    button:active {
+      outline: none;
+      box-shadow: none;
+    }
+
+    button:disabled,
+    button[aria-disabled="true"] {
+      border: none !important;
+      outline: none !important;
+      box-shadow: none !important;
+      -webkit-appearance: none;
+      appearance: none;
     }
 
     /* Loading spinner animation */
@@ -94,6 +124,61 @@ export function getWebviewHtml(
 <body>
   <div id="root"></div>
   <script nonce="${nonce}">window.__LOCALE__='${lang}';</script>
+  <script nonce="${nonce}">
+    (() => {
+      let pointerPressedButton = null;
+
+      const blurIfInactiveButtonFocused = () => {
+        const activeElement = document.activeElement;
+        if (!(activeElement instanceof HTMLButtonElement)) {
+          return;
+        }
+
+        if (activeElement.disabled || activeElement.getAttribute('aria-disabled') === 'true') {
+          activeElement.blur();
+        }
+      };
+
+      document.addEventListener('pointerdown', (event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) {
+          pointerPressedButton = null;
+          return;
+        }
+
+        pointerPressedButton = target.closest('button');
+      }, true);
+
+      document.addEventListener('click', () => {
+        if (!(pointerPressedButton instanceof HTMLElement)) {
+          pointerPressedButton = null;
+          return;
+        }
+
+        const buttonToBlur = pointerPressedButton;
+        pointerPressedButton = null;
+
+        window.requestAnimationFrame(() => {
+          buttonToBlur.blur();
+          if (document.activeElement instanceof HTMLElement && document.activeElement.tagName === 'BUTTON') {
+            document.activeElement.blur();
+          }
+
+          blurIfInactiveButtonFocused();
+        });
+      }, true);
+
+      const observer = new MutationObserver(() => {
+        blurIfInactiveButtonFocused();
+      });
+
+      observer.observe(document.documentElement, {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['disabled', 'aria-disabled', 'class', 'style'],
+      });
+    })();
+  </script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

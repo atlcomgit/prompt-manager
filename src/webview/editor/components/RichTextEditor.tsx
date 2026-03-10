@@ -4,6 +4,7 @@ interface Props {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
+  t?: (key: string) => string;
   persistedHeight?: number;
   onHeightChange?: (height: number) => void;
   onReset?: () => void;
@@ -16,13 +17,79 @@ interface Props {
   secondaryActionTitle?: string;
   secondaryActionDisabled?: boolean;
   fillHeight?: boolean;
+  showFormattingToolbar?: boolean;
 }
 
 type Mode = 'visual' | 'html';
+type BlockTag = 'p' | 'h1' | 'h2' | 'h3' | 'blockquote' | 'pre' | '';
+
+interface FormattingState {
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  strikeThrough: boolean;
+  unorderedList: boolean;
+  orderedList: boolean;
+  link: boolean;
+  block: BlockTag;
+}
+
+interface ToolbarButtonProps {
+  title: string;
+  icon?: string;
+  label?: string;
+  active?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  wide?: boolean;
+  textStyle?: React.CSSProperties;
+}
 
 const DEFAULT_HEIGHT = 180;
 const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 800;
+
+const DEFAULT_FORMATTING_STATE: FormattingState = {
+  bold: false,
+  italic: false,
+  underline: false,
+  strikeThrough: false,
+  unorderedList: false,
+  orderedList: false,
+  link: false,
+  block: '',
+};
+
+const ToolbarButton: React.FC<ToolbarButtonProps> = ({
+  title,
+  icon,
+  label,
+  active,
+  disabled,
+  onClick,
+  wide,
+  textStyle,
+}) => (
+  <button
+    type="button"
+    className="pm-rich-toolbar-button"
+    style={{
+      ...styles.formatBtn,
+      ...(wide ? styles.formatBtnWide : null),
+      ...(active ? styles.formatBtnActive : null),
+      ...(disabled ? styles.formatBtnDisabled : null),
+    }}
+    title={title}
+    aria-label={title}
+    aria-pressed={active}
+    disabled={disabled}
+    onMouseDown={(event) => event.preventDefault()}
+    onClick={onClick}
+  >
+    {icon && <span style={styles.formatIcon} className={`codicon ${icon}`} />}
+    {label && <span style={{ ...styles.formatBtnLabel, ...(textStyle || null) }}>{label}</span>}
+  </button>
+);
 
 const normalizeText = (value: string): string => value
   .replace(/\r\n?/g, '\n')
@@ -133,6 +200,7 @@ export const RichTextEditor: React.FC<Props> = ({
   value,
   onChange,
   placeholder,
+  t,
   persistedHeight,
   onHeightChange,
   onReset,
@@ -145,10 +213,12 @@ export const RichTextEditor: React.FC<Props> = ({
   secondaryActionTitle,
   secondaryActionDisabled,
   fillHeight,
+  showFormattingToolbar,
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<Mode>('visual');
   const [htmlSource, setHtmlSource] = useState(value || '');
+  const [formattingState, setFormattingState] = useState<FormattingState>(DEFAULT_FORMATTING_STATE);
 
   const [currentHeight, setCurrentHeight] = useState(persistedHeight || DEFAULT_HEIGHT);
   const isDragging = useRef(false);
@@ -193,6 +263,62 @@ export const RichTextEditor: React.FC<Props> = ({
     setHtmlSource(value || '');
   }, [value]);
 
+  const translate = useCallback((key: string, fallback: string) => t?.(key) || fallback, [t]);
+
+  const syncFormattingState = useCallback(() => {
+    if (!showFormattingToolbar || mode !== 'visual' || !editorRef.current) {
+      setFormattingState(DEFAULT_FORMATTING_STATE);
+      return;
+    }
+
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      setFormattingState(DEFAULT_FORMATTING_STATE);
+      return;
+    }
+
+    const anchorNode = selection.anchorNode;
+    const focusNode = selection.focusNode;
+    if (
+      (anchorNode && !editorRef.current.contains(anchorNode)) ||
+      (focusNode && !editorRef.current.contains(focusNode))
+    ) {
+      setFormattingState(DEFAULT_FORMATTING_STATE);
+      return;
+    }
+
+    const readState = (command: string): boolean => {
+      try {
+        return document.queryCommandState(command);
+      } catch {
+        return false;
+      }
+    };
+
+    let block: BlockTag = '';
+    try {
+      const rawBlock = String(document.queryCommandValue('formatBlock') || '')
+        .toLowerCase()
+        .replace(/[<>]/g, '') as BlockTag;
+      if (['p', 'h1', 'h2', 'h3', 'blockquote', 'pre'].includes(rawBlock)) {
+        block = rawBlock;
+      }
+    } catch {
+      block = '';
+    }
+
+    setFormattingState({
+      bold: readState('bold'),
+      italic: readState('italic'),
+      underline: readState('underline'),
+      strikeThrough: readState('strikeThrough'),
+      unorderedList: readState('insertUnorderedList'),
+      orderedList: readState('insertOrderedList'),
+      link: readState('createLink'),
+      block,
+    });
+  }, [mode, showFormattingToolbar]);
+
   useEffect(() => {
     if (mode !== 'visual' || !editorRef.current) {
       return;
@@ -210,6 +336,21 @@ export const RichTextEditor: React.FC<Props> = ({
       editorRef.current.innerHTML = sanitized;
     }
   }, [mode, value]);
+
+  useEffect(() => {
+    if (!showFormattingToolbar) {
+      return;
+    }
+
+    const handleSelectionChange = () => {
+      syncFormattingState();
+    };
+
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionChange);
+    };
+  }, [showFormattingToolbar, syncFormattingState]);
 
   const insertHtmlAtCursor = useCallback((html: string) => {
     if (!editorRef.current) {
@@ -248,6 +389,93 @@ export const RichTextEditor: React.FC<Props> = ({
     setHtmlSource(sanitized);
     onChange(sanitized);
   }, [onChange]);
+
+  const executeEditorCommand = useCallback((command: string, commandValue?: string) => {
+    if (mode !== 'visual' || !editorRef.current) {
+      return;
+    }
+
+    editorRef.current.focus();
+    document.execCommand(command, false, commandValue);
+    syncFromEditor();
+    syncFormattingState();
+  }, [mode, syncFormattingState, syncFromEditor]);
+
+  const applyBlockFormat = useCallback((tag: Exclude<BlockTag, ''>) => {
+    executeEditorCommand('formatBlock', tag);
+  }, [executeEditorCommand]);
+
+  const handleCreateLink = useCallback(() => {
+    const rawUrl = window.prompt(translate('editor.formatLinkPrompt', 'Введите адрес ссылки'), 'https://');
+    if (!rawUrl) {
+      return;
+    }
+
+    const trimmed = rawUrl.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const normalizedUrl = /^[a-z]+:/i.test(trimmed) || trimmed.startsWith('/') || trimmed.startsWith('#')
+      ? trimmed
+      : `https://${trimmed}`;
+
+    executeEditorCommand('createLink', normalizedUrl);
+  }, [executeEditorCommand, translate]);
+
+  const handleClearFormatting = useCallback(() => {
+    executeEditorCommand('removeFormat');
+    executeEditorCommand('unlink');
+  }, [executeEditorCommand]);
+
+  const wrapSelectionWithHtml = useCallback((before: string, after: string, placeholder: string) => {
+    if (mode !== 'visual' || !editorRef.current) {
+      return;
+    }
+
+    editorRef.current.focus();
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      insertHtmlAtCursor(`${before}${placeholder}${after}`);
+      syncFromEditor();
+      syncFormattingState();
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    const wrapper = document.createElement('div');
+    wrapper.appendChild(range.cloneContents());
+    const selectedHtml = wrapper.innerHTML.trim();
+    const html = `${before}${selectedHtml || placeholder}${after}`;
+
+    range.deleteContents();
+    const fragment = range.createContextualFragment(html);
+    const lastNode = fragment.lastChild;
+    range.insertNode(fragment);
+
+    if (lastNode) {
+      const nextRange = document.createRange();
+      nextRange.setStartAfter(lastNode);
+      nextRange.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(nextRange);
+    }
+
+    syncFromEditor();
+    syncFormattingState();
+  }, [insertHtmlAtCursor, mode, syncFormattingState, syncFromEditor]);
+
+  const handleInlineCode = useCallback(() => {
+    wrapSelectionWithHtml('<code>', '</code>', 'code');
+  }, [wrapSelectionWithHtml]);
+
+  const handleCodeBlock = useCallback(() => {
+    wrapSelectionWithHtml('<pre><code>', '</code></pre>', 'code');
+  }, [wrapSelectionWithHtml]);
+
+  const handleUnlink = useCallback(() => {
+    executeEditorCommand('unlink');
+  }, [executeEditorCommand]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
     if (mode !== 'visual') {
@@ -396,6 +624,15 @@ export const RichTextEditor: React.FC<Props> = ({
           .pm-rich-editor-content b {
             font-weight: 600;
           }
+
+          .pm-rich-toolbar-button:hover:not(:disabled) {
+            color: var(--vscode-foreground);
+            background: var(--vscode-list-hoverBackground);
+          }
+
+          .pm-rich-toolbar-button:disabled {
+            opacity: 0.45;
+          }
         `}
       </style>
       <div style={styles.toolbar}>
@@ -445,6 +682,184 @@ export const RichTextEditor: React.FC<Props> = ({
         </div>
       </div>
 
+      {showFormattingToolbar && (
+        <div style={styles.formatToolbarContainer}>
+          <div style={styles.formatToolbar}>
+            <div style={styles.formatGroup}>
+              <ToolbarButton
+                title={translate('editor.formatUndo', 'Отменить')}
+                icon="codicon-discard"
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('undo')}
+              />
+              <ToolbarButton
+                title={translate('editor.formatRedo', 'Повторить')}
+                icon="codicon-redo"
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('redo')}
+              />
+            </div>
+
+            <div style={styles.formatDivider} />
+
+            <div style={styles.formatGroup}>
+              <ToolbarButton
+                title={translate('editor.formatParagraph', 'Абзац')}
+                label="P"
+                active={formattingState.block === 'p'}
+                disabled={mode !== 'visual'}
+                onClick={() => applyBlockFormat('p')}
+                wide
+              />
+              <ToolbarButton
+                title={translate('editor.formatHeading1', 'Заголовок 1')}
+                label="H1"
+                active={formattingState.block === 'h1'}
+                disabled={mode !== 'visual'}
+                onClick={() => applyBlockFormat('h1')}
+                wide
+              />
+              <ToolbarButton
+                title={translate('editor.formatHeading2', 'Заголовок 2')}
+                label="H2"
+                active={formattingState.block === 'h2'}
+                disabled={mode !== 'visual'}
+                onClick={() => applyBlockFormat('h2')}
+                wide
+              />
+              <ToolbarButton
+                title={translate('editor.formatHeading3', 'Заголовок 3')}
+                label="H3"
+                active={formattingState.block === 'h3'}
+                disabled={mode !== 'visual'}
+                onClick={() => applyBlockFormat('h3')}
+                wide
+              />
+              <ToolbarButton
+                title={translate('editor.formatQuote', 'Цитата')}
+                icon="codicon-quote"
+                active={formattingState.block === 'blockquote'}
+                disabled={mode !== 'visual'}
+                onClick={() => applyBlockFormat('blockquote')}
+              />
+              <ToolbarButton
+                title={translate('editor.formatCodeBlock', 'Блок кода')}
+                icon="codicon-code"
+                active={formattingState.block === 'pre'}
+                disabled={mode !== 'visual'}
+                onClick={handleCodeBlock}
+              />
+            </div>
+
+            <div style={styles.formatDivider} />
+
+            <div style={styles.formatGroup}>
+              <ToolbarButton
+                title={translate('editor.formatBold', 'Жирный')}
+                icon="codicon-bold"
+                active={formattingState.bold}
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('bold')}
+              />
+              <ToolbarButton
+                title={translate('editor.formatItalic', 'Курсив')}
+                icon="codicon-italic"
+                active={formattingState.italic}
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('italic')}
+              />
+              <ToolbarButton
+                title={translate('editor.formatUnderline', 'Подчеркивание')}
+                label="U"
+                textStyle={styles.formatUnderline}
+                active={formattingState.underline}
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('underline')}
+              />
+              <ToolbarButton
+                title={translate('editor.formatStrike', 'Зачеркнутый')}
+                label="S"
+                textStyle={styles.formatStrike}
+                active={formattingState.strikeThrough}
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('strikeThrough')}
+              />
+              <ToolbarButton
+                title={translate('editor.formatInlineCode', 'Строчный код')}
+                icon="codicon-symbol-keyword"
+                disabled={mode !== 'visual'}
+                onClick={handleInlineCode}
+              />
+              <ToolbarButton
+                title={translate('editor.formatClear', 'Очистить форматирование')}
+                icon="codicon-clear-all"
+                disabled={mode !== 'visual'}
+                onClick={handleClearFormatting}
+              />
+            </div>
+
+            <div style={styles.formatDivider} />
+
+            <div style={styles.formatGroup}>
+              <ToolbarButton
+                title={translate('editor.formatBulletedList', 'Маркированный список')}
+                icon="codicon-list-unordered"
+                active={formattingState.unorderedList}
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('insertUnorderedList')}
+              />
+              <ToolbarButton
+                title={translate('editor.formatNumberedList', 'Нумерованный список')}
+                icon="codicon-list-ordered"
+                active={formattingState.orderedList}
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('insertOrderedList')}
+              />
+              <ToolbarButton
+                title={translate('editor.formatIndent', 'Увеличить отступ')}
+                icon="codicon-indent"
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('indent')}
+              />
+              <ToolbarButton
+                title={translate('editor.formatOutdent', 'Уменьшить отступ')}
+                label="⇤"
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('outdent')}
+              />
+            </div>
+
+            <div style={styles.formatDivider} />
+
+            <div style={styles.formatGroup}>
+              <ToolbarButton
+                title={translate('editor.formatLink', 'Вставить ссылку')}
+                icon="codicon-link"
+                active={formattingState.link}
+                disabled={mode !== 'visual'}
+                onClick={handleCreateLink}
+              />
+              <ToolbarButton
+                title={translate('editor.formatUnlink', 'Убрать ссылку')}
+                icon="codicon-link-external"
+                disabled={mode !== 'visual'}
+                onClick={handleUnlink}
+              />
+              <ToolbarButton
+                title={translate('editor.formatDivider', 'Вставить разделитель')}
+                icon="codicon-symbol-ruler"
+                disabled={mode !== 'visual'}
+                onClick={() => executeEditorCommand('insertHorizontalRule')}
+              />
+            </div>
+          </div>
+
+          {mode !== 'visual' && (
+            <div style={styles.formatToolbarHint}>{translate('editor.formatToolbarHint', 'Форматирование доступно в визуальном режиме.')}</div>
+          )}
+        </div>
+      )}
+
       {mode === 'visual' ? (
         <div
           ref={editorRef}
@@ -453,6 +868,8 @@ export const RichTextEditor: React.FC<Props> = ({
           suppressContentEditableWarning
           onInput={syncFromEditor}
           onBlur={syncFromEditor}
+          onKeyUp={syncFormattingState}
+          onMouseUp={syncFormattingState}
           onPaste={handlePaste}
           data-placeholder={placeholder || 'Введите отчет'}
           style={{
@@ -518,6 +935,83 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: '6px',
   },
+  formatToolbarContainer: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  formatToolbar: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '0 2px 6px',
+    borderBottom: '1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent))',
+    overflowX: 'auto',
+  },
+  formatGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    flexShrink: 0,
+  },
+  formatDivider: {
+    width: '1px',
+    height: '18px',
+    background: 'var(--vscode-panel-border, var(--vscode-input-border, transparent))',
+    flexShrink: 0,
+  },
+  formatBtn: {
+    minWidth: '34px',
+    height: '28px',
+    padding: '0 8px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '4px',
+    border: 'none',
+    borderRadius: '4px',
+    background: 'transparent',
+    color: 'var(--vscode-descriptionForeground)',
+    cursor: 'pointer',
+    fontSize: '11px',
+    fontFamily: 'var(--vscode-font-family)',
+    boxShadow: 'none',
+    outline: 'none',
+    transition: 'background 0.12s ease, color 0.12s ease',
+  },
+  formatBtnWide: {
+    minWidth: '38px',
+  },
+  formatBtnActive: {
+    background: 'var(--vscode-list-activeSelectionBackground)',
+    color: 'var(--vscode-foreground)',
+    boxShadow: 'none',
+  },
+  formatBtnDisabled: {
+    opacity: 0.5,
+    cursor: 'default',
+    border: 'none',
+  },
+  formatIcon: {
+    fontSize: '13px',
+    lineHeight: 1,
+  },
+  formatBtnLabel: {
+    fontSize: '11px',
+    fontWeight: 700,
+    lineHeight: 1,
+  },
+  formatToolbarHint: {
+    fontSize: '11px',
+    color: 'var(--vscode-descriptionForeground)',
+  },
+  formatUnderline: {
+    textDecoration: 'underline',
+  },
+  formatStrike: {
+    textDecoration: 'line-through',
+  },
   modeGroup: {
     display: 'flex',
     gap: '6px',
@@ -534,19 +1028,22 @@ const styles: Record<string, React.CSSProperties> = {
   linkBtnDisabled: {
     opacity: 0.5,
     cursor: 'default',
+    border: 'none',
   },
   modeBtn: {
-    border: '1px solid var(--vscode-button-border, transparent)',
-    background: 'var(--vscode-button-secondaryBackground)',
-    color: 'var(--vscode-button-secondaryForeground)',
+    border: 'none',
+    background: 'transparent',
+    color: 'var(--vscode-descriptionForeground)',
     borderRadius: '4px',
     padding: '4px 8px',
     fontSize: '12px',
     cursor: 'pointer',
+    boxShadow: 'none',
+    outline: 'none',
   },
   modeBtnActive: {
-    background: 'var(--vscode-button-background)',
-    color: 'var(--vscode-button-foreground)',
+    background: 'var(--vscode-list-activeSelectionBackground)',
+    color: 'var(--vscode-foreground)',
   },
   resetBtn: {
     padding: '4px 8px',

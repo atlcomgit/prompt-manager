@@ -322,6 +322,7 @@ const styles: Record<string, React.CSSProperties> = {
   controlBtnDisabled: {
     opacity: 0.5,
     cursor: 'not-allowed',
+    border: 'none',
   },
   dropdown: {
     position: 'absolute',

@@ -1857,6 +1857,7 @@ const styles: Record<string, React.CSSProperties> = {
   linkBtnDisabled: {
     opacity: 0.6,
     cursor: 'not-allowed',
+    border: 'none',
   },
   generateProjectsHint: {
     fontSize: '11px',

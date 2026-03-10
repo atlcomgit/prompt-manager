@@ -956,6 +956,55 @@ export class EditorPanelManager {
 			'Prompt Manager Report Editor'
 		);
 
+		const persistReport = async (
+			targetPromptId: string,
+			reportValue: string,
+			activityDeltaMs: number,
+			saveMode: 'autosave' | 'manual'
+		): Promise<Prompt | null> => {
+			const storedPrompt = await this.storageService.getPrompt(targetPromptId);
+			if (!storedPrompt) {
+				return null;
+			}
+
+			storedPrompt.report = reportValue;
+			switch (TimeTrackingService.getBucketByStatus(storedPrompt.status)) {
+				case 'writing':
+					storedPrompt.timeSpentWriting = Math.max(0, storedPrompt.timeSpentWriting || 0) + activityDeltaMs;
+					break;
+				case 'task':
+					storedPrompt.timeSpentOnTask = Math.max(0, storedPrompt.timeSpentOnTask || 0) + activityDeltaMs;
+					break;
+				case 'none':
+				default:
+					break;
+			}
+
+			const saved = saveMode === 'manual'
+				? await this.storageService.savePrompt(storedPrompt, { historyReason: 'manual' })
+				: await this.storageService.savePrompt(storedPrompt, {
+					historyReason: 'autosave',
+					skipHistory: true,
+				});
+
+			if (currentPrompt.id === targetPromptId) {
+				currentPrompt.report = storedPrompt.report;
+				currentPrompt.timeSpentWriting = Math.max(saved.timeSpentWriting || 0, currentPrompt.timeSpentWriting || 0);
+				currentPrompt.timeSpentOnTask = Math.max(saved.timeSpentOnTask || 0, currentPrompt.timeSpentOnTask || 0);
+				currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
+				this.panelPromptRefs.set(panelKey, currentPrompt);
+				postMessage({
+					type: 'reportContentUpdated',
+					report: storedPrompt.report,
+					timeSpentWriting: saved.timeSpentWriting,
+					timeSpentOnTask: saved.timeSpentOnTask,
+					updatedAt: saved.updatedAt,
+				});
+			}
+
+			return saved;
+		};
+
 		reportPanel.onDidDispose(() => {
 			this.reportEditorPanels.delete(promptId);
 		});
@@ -978,42 +1027,40 @@ export class EditorPanelManager {
 						break;
 					}
 
-					const storedPrompt = await this.storageService.getPrompt(targetPromptId);
-					if (!storedPrompt) {
+					await persistReport(
+						targetPromptId,
+						typeof msg.report === 'string' ? msg.report : '',
+						Math.max(0, Number(msg.activityDeltaMs) || 0),
+						'autosave'
+					);
+					break;
+				}
+
+				case 'reportEditorSave': {
+					const targetPromptId = (msg.promptId || promptId).trim();
+					if (!targetPromptId) {
 						break;
 					}
 
-					storedPrompt.report = typeof msg.report === 'string' ? msg.report : '';
-					const activityDeltaMs = Math.max(0, Number(msg.activityDeltaMs) || 0);
-					switch (TimeTrackingService.getBucketByStatus(storedPrompt.status)) {
-						case 'writing':
-							storedPrompt.timeSpentWriting = Math.max(0, storedPrompt.timeSpentWriting || 0) + activityDeltaMs;
+					try {
+						const saved = await persistReport(
+							targetPromptId,
+							typeof msg.report === 'string' ? msg.report : '',
+							Math.max(0, Number(msg.activityDeltaMs) || 0),
+							'manual'
+						);
+						if (!saved) {
+							void reportPanel.webview.postMessage({ type: 'error', message: 'Не удалось сохранить отчет.' } satisfies ExtensionToWebviewMessage);
 							break;
-						case 'task':
-							storedPrompt.timeSpentOnTask = Math.max(0, storedPrompt.timeSpentOnTask || 0) + activityDeltaMs;
-							break;
-						case 'none':
-						default:
-							break;
-					}
-					const saved = await this.storageService.savePrompt(storedPrompt, {
-						historyReason: 'autosave',
-						skipHistory: true,
-					});
+						}
 
-					if (currentPrompt.id === targetPromptId) {
-						currentPrompt.report = storedPrompt.report;
-						currentPrompt.timeSpentWriting = Math.max(saved.timeSpentWriting || 0, currentPrompt.timeSpentWriting || 0);
-						currentPrompt.timeSpentOnTask = Math.max(saved.timeSpentOnTask || 0, currentPrompt.timeSpentOnTask || 0);
-						currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
-						this.panelPromptRefs.set(panelKey, currentPrompt);
-						postMessage({
-							type: 'reportContentUpdated',
-							report: storedPrompt.report,
-							timeSpentWriting: saved.timeSpentWriting,
-							timeSpentOnTask: saved.timeSpentOnTask,
+						void reportPanel.webview.postMessage({
+							type: 'reportEditorSaved',
 							updatedAt: saved.updatedAt,
-						});
+						} satisfies ExtensionToWebviewMessage);
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						void reportPanel.webview.postMessage({ type: 'error', message } satisfies ExtensionToWebviewMessage);
 					}
 					break;
 				}

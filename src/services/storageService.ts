@@ -65,6 +65,16 @@ export class StorageService {
 		return vscode.Uri.file(path.join(this.promptDir(id), 'prompt.md'));
 	}
 
+	/** Get absolute URI to report.txt for prompt id */
+	getPromptReportUri(id: string): vscode.Uri {
+		return vscode.Uri.file(path.join(this.promptDir(id), 'report.txt'));
+	}
+
+	/** Get absolute path to storage directory */
+	getStorageDirectoryPath(): string {
+		return this.storageDir;
+	}
+
 	/** Get absolute path to a prompt folder */
 	getPromptDirectoryPath(id: string): string {
 		return this.promptDir(id);
@@ -284,7 +294,8 @@ export class StorageService {
 		if (!config) { return null; }
 
 		const mdPath = path.join(this.promptDir(id), 'prompt.md');
-		const reportPath = path.join(this.promptDir(id), 'report.md');
+		const reportPath = path.join(this.promptDir(id), 'report.txt');
+		const legacyReportPath = path.join(this.promptDir(id), 'report.md');
 		let content = '';
 		let report = '';
 		try {
@@ -298,7 +309,12 @@ export class StorageService {
 			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(reportPath));
 			report = Buffer.from(raw).toString('utf-8');
 		} catch {
-			// No report file yet
+			try {
+				const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(legacyReportPath));
+				report = Buffer.from(raw).toString('utf-8');
+			} catch {
+				// No report file yet
+			}
 		}
 
 		return { ...config, content, report };
@@ -354,12 +370,19 @@ export class StorageService {
 			Buffer.from(content, 'utf-8')
 		);
 
-		// Save report.md
-		const reportPath = path.join(dir, 'report.md');
+		// Save report.txt
+		const reportPath = path.join(dir, 'report.txt');
 		await vscode.workspace.fs.writeFile(
 			vscode.Uri.file(reportPath),
 			Buffer.from(report || '', 'utf-8')
 		);
+
+		const legacyReportUri = vscode.Uri.file(path.join(dir, 'report.md'));
+		try {
+			await vscode.workspace.fs.delete(legacyReportUri);
+		} catch {
+			// ignore missing legacy report file
+		}
 
 		// Ensure context directory exists
 		const contextDir = path.join(dir, 'context');

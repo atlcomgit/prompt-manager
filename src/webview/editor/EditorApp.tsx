@@ -1602,6 +1602,7 @@ export const EditorApp: React.FC = () => {
                 <RichTextEditor
                   value={prompt.report || ''}
                   onChange={v => updateField('report', v)}
+                  autoModeKey={prompt.id}
                   placeholder={t('editor.reportPlaceholder')}
                   persistedHeight={reportHeight}
                   onHeightChange={setReportHeight}

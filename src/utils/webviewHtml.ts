@@ -16,10 +16,6 @@ export function getWebviewHtml(
     vscode.Uri.joinPath(extensionUri, scriptPath)
   );
 
-  const codiconsUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css')
-  );
-
   const nonce = getNonce();
 
   return /* html */`<!DOCTYPE html>
@@ -30,12 +26,10 @@ export function getWebviewHtml(
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     style-src ${webview.cspSource} 'unsafe-inline';
-    font-src ${webview.cspSource};
     script-src 'nonce-${nonce}';
     img-src ${webview.cspSource} https: data:;
   ">
   <title>${title}</title>
-  <link rel="stylesheet" href="${codiconsUri}">
   <style>
     :root {
       --pm-spacing-xs: 4px;

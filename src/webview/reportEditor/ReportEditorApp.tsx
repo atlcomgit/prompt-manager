@@ -18,6 +18,7 @@ export const ReportEditorApp: React.FC = () => {
   const saveFeedbackTimerRef = useRef<number | null>(null);
   const lastActivityRef = useRef(Date.now());
   const pendingActivityRef = useRef(0);
+  const lastSyncedReportRef = useRef('');
 
   const clearSaveFeedbackTimer = useCallback(() => {
     if (saveFeedbackTimerRef.current) {
@@ -35,6 +36,7 @@ export const ReportEditorApp: React.FC = () => {
       type: 'reportEditorUpdate',
       promptId,
       report: nextReport,
+      previousReport: lastSyncedReportRef.current,
       activityDeltaMs: pendingActivityRef.current,
     });
     pendingActivityRef.current = 0;
@@ -56,6 +58,7 @@ export const ReportEditorApp: React.FC = () => {
       type: 'reportEditorSave',
       promptId,
       report,
+      previousReport: lastSyncedReportRef.current,
       activityDeltaMs: pendingActivityRef.current,
     });
     pendingActivityRef.current = 0;
@@ -78,6 +81,7 @@ export const ReportEditorApp: React.FC = () => {
         setPromptId(String(msg.promptId || ''));
         setTitle(String(msg.title || ''));
         setReport(typeof msg.report === 'string' ? msg.report : '');
+        lastSyncedReportRef.current = typeof msg.report === 'string' ? msg.report : '';
         setIsGeneratingReport(false);
         clearSaveFeedbackTimer();
         setSaveState('idle');
@@ -86,13 +90,26 @@ export const ReportEditorApp: React.FC = () => {
         break;
       case 'generatedReport':
         setReport(typeof msg.report === 'string' ? msg.report : '');
+        lastSyncedReportRef.current = typeof msg.report === 'string' ? msg.report : '';
         setIsGeneratingReport(false);
         clearSaveFeedbackTimer();
         setSaveState('idle');
         lastActivityRef.current = Date.now();
         pendingActivityRef.current = 0;
         break;
+      case 'reportEditorExternalUpdate':
+        setReport(typeof msg.report === 'string' ? msg.report : '');
+        lastSyncedReportRef.current = typeof msg.report === 'string' ? msg.report : '';
+        clearSaveFeedbackTimer();
+        setSaveState('idle');
+        lastActivityRef.current = Date.now();
+        pendingActivityRef.current = 0;
+        break;
+      case 'reportEditorSynced':
+        lastSyncedReportRef.current = typeof msg.report === 'string' ? msg.report : report;
+        break;
       case 'reportEditorSaved':
+        lastSyncedReportRef.current = report;
         clearSaveFeedbackTimer();
         setSaveState('saved');
         saveFeedbackTimerRef.current = window.setTimeout(() => {
@@ -118,25 +135,33 @@ export const ReportEditorApp: React.FC = () => {
 
   useEffect(() => {
     return () => {
+      const hadPendingFlush = flushTimerRef.current !== null;
       if (flushTimerRef.current) {
         window.clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
       }
       clearSaveFeedbackTimer();
-      flushReport(report);
+      if (hadPendingFlush) {
+        flushReport(report);
+      }
     };
   }, [clearSaveFeedbackTimer, flushReport, report]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+      const isSaveShortcut = (event.ctrlKey || event.metaKey) && (event.code === 'KeyS' || event.key.toLowerCase() === 's');
+      if (isSaveShortcut) {
         event.preventDefault();
+        event.stopPropagation();
         saveReport();
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
+    document.addEventListener('keydown', handleKeyDown, true);
     return () => {
-      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keydown', handleKeyDown, true);
+      document.removeEventListener('keydown', handleKeyDown, true);
     };
   }, [saveReport]);
 
@@ -186,6 +211,7 @@ export const ReportEditorApp: React.FC = () => {
           setReport(nextReport);
           scheduleFlush(nextReport, 350);
         }}
+        autoModeKey={promptId}
         placeholder={t('editor.reportPlaceholder')}
         t={t}
         persistedHeight={reportHeight}

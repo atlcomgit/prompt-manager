@@ -1,6 +1,15 @@
 import React from 'react';
 import { useT } from '../../shared/i18n';
 
+const SearchIcon: React.FC = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" style={styles.icon}>
+    <path
+      d="M10.5 4a6.5 6.5 0 0 1 5.17 10.44l4.44 4.45-1.41 1.41-4.45-4.44A6.5 6.5 0 1 1 10.5 4zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9z"
+      fill="currentColor"
+    />
+  </svg>
+);
+
 interface Props {
   value: string;
   onChange: (value: string) => void;
@@ -11,7 +20,7 @@ export const SearchBar: React.FC<Props> = ({ value, onChange }) => {
   return (
     <div style={styles.container}>
       <div style={styles.inputWrapper}>
-        <span style={styles.icon} className="codicon codicon-search" />
+        <SearchIcon />
         <input
           type="text"
           placeholder={t('sidebar.searchPlaceholder')}
@@ -42,9 +51,11 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '0 6px',
   },
   icon: {
+	width: '14px',
+	height: '14px',
+	flexShrink: 0,
     marginRight: '4px',
     opacity: 0.6,
-    fontSize: '14px',
   },
   input: {
     flex: 1,

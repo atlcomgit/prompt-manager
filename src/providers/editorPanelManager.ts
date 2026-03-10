@@ -40,7 +40,10 @@ export class EditorPanelManager {
 	private contentEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string }>();
 	private panelKeyByContentEditorUri = new Map<string, string>();
 	private contentEditorLastActivityByPanelKey = new Map<string, number>();
+	private reportEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string; lastModifiedMs: number | null }>();
+	private panelKeyByReportEditorUri = new Map<string, string>();
 	private reportEditorPanels = new Map<string, vscode.WebviewPanel>();
+	private pendingReportPersistByPromptId = new Map<string, Promise<Prompt | null>>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
 	private openPromptQueue: Promise<void> = Promise.resolve();
 	private readonly markdownRenderer = new MarkdownIt({
@@ -551,7 +554,133 @@ export class EditorPanelManager {
 		);
 	}
 
-	private async persistPromptSnapshotForSwitch(snapshot: Prompt): Promise<Prompt | null> {
+	private mergeExternalReportIfUnchanged(snapshot: Prompt, persistedPrompt: Prompt | null, basePrompt: Prompt | null): void {
+		if (!persistedPrompt || !basePrompt) {
+			return;
+		}
+
+		const baseReport = basePrompt.report || '';
+		if (snapshot.report === baseReport && persistedPrompt.report !== baseReport) {
+			snapshot.report = persistedPrompt.report;
+		}
+	}
+
+	private async refreshReportBindingFromDisk(panelKey: string): Promise<{ content: string; lastModifiedMs: number | null } | null> {
+		const binding = this.reportEditorByPanelKey.get(panelKey);
+		if (!binding) {
+			return null;
+		}
+
+		let currentMtime: number | null = null;
+		try {
+			const stat = await vscode.workspace.fs.stat(binding.uri);
+			currentMtime = typeof stat.mtime === 'number' ? stat.mtime : null;
+		} catch {
+			currentMtime = null;
+		}
+
+		if (binding.lastModifiedMs !== currentMtime) {
+			await this.syncPromptReportFromFileUri(binding.uri);
+		}
+
+		const updatedBinding = this.reportEditorByPanelKey.get(panelKey);
+		if (!updatedBinding) {
+			return { content: '', lastModifiedMs: currentMtime };
+		}
+
+		return {
+			content: updatedBinding.lastSyncedContent,
+			lastModifiedMs: updatedBinding.lastModifiedMs,
+		};
+	}
+
+	private async guardReportOverwriteBeforeSave(
+		panelKey: string | undefined,
+		promptToSave: Prompt,
+		baseSnapshot: Prompt | null,
+	): Promise<void> {
+		if (!panelKey || !baseSnapshot || !promptToSave.id) {
+			return;
+		}
+
+		const bindingState = await this.refreshReportBindingFromDisk(panelKey);
+		if (!bindingState) {
+			return;
+		}
+
+		const baseReport = baseSnapshot.report || '';
+		const localReport = promptToSave.report || '';
+		const externalReport = bindingState.content || '';
+		const localChanged = localReport !== baseReport;
+		const externalChanged = externalReport !== baseReport;
+
+		if (!externalChanged) {
+			return;
+		}
+
+		if (!localChanged) {
+			promptToSave.report = externalReport;
+			return;
+		}
+
+		if (localReport !== externalReport) {
+			throw new Error('REPORT_CONFLICT');
+		}
+	}
+
+	private async reconcileReportWithExtensionState(
+		panelKey: string | undefined,
+		promptToSave: Prompt,
+		currentPrompt: Prompt,
+	): Promise<void> {
+		if (!panelKey) {
+			return;
+		}
+
+		const bindingState = await this.refreshReportBindingFromDisk(panelKey);
+		const diskReport = bindingState?.content;
+		const extensionReport = this.panelPromptRefs.get(panelKey)?.report ?? currentPrompt.report;
+		const nextReport = promptToSave.report || '';
+
+		if (!diskReport) {
+			return;
+		}
+
+		if (extensionReport === diskReport && nextReport !== diskReport) {
+			promptToSave.report = diskReport;
+		}
+	}
+
+	private enqueueReportPersist(targetPromptId: string, task: () => Promise<Prompt | null>): Promise<Prompt | null> {
+		const previousTask = this.pendingReportPersistByPromptId.get(targetPromptId) || Promise.resolve(null);
+		const nextTask = previousTask
+			.catch(() => null)
+			.then(task)
+			.finally(() => {
+				if (this.pendingReportPersistByPromptId.get(targetPromptId) === nextTask) {
+					this.pendingReportPersistByPromptId.delete(targetPromptId);
+				}
+			});
+
+		this.pendingReportPersistByPromptId.set(targetPromptId, nextTask);
+		return nextTask;
+	}
+
+	private async awaitPendingReportPersist(promptId?: string): Promise<void> {
+		const normalizedPromptId = (promptId || '').trim();
+		if (!normalizedPromptId) {
+			return;
+		}
+
+		const pendingTask = this.pendingReportPersistByPromptId.get(normalizedPromptId);
+		if (!pendingTask) {
+			return;
+		}
+
+		await pendingTask.catch(() => null);
+	}
+
+	private async persistPromptSnapshotForSwitch(snapshot: Prompt, baseSnapshot?: Prompt | null, panelKey?: string): Promise<Prompt | null> {
 		const promptToSave: Prompt = JSON.parse(JSON.stringify(snapshot));
 		const globalContext = this.stateService.getGlobalAgentContext();
 		const saveStateId = (promptToSave.id || '__new__').trim() || '__new__';
@@ -559,6 +688,8 @@ export class EditorPanelManager {
 		if (!promptToSave.id && !this.hasPromptDataWithoutId(promptToSave)) {
 			return null;
 		}
+
+		await this.awaitPendingReportPersist(promptToSave.id);
 
 		this._onDidSaveStateChange.fire({ id: saveStateId, saving: true });
 		try {
@@ -570,8 +701,10 @@ export class EditorPanelManager {
 				promptToSave.description = await this.aiService.generateDescription(promptToSave.content, globalContext);
 			}
 			const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
+			await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, baseSnapshot || null);
 
 			const existingPrompt = await this.storageService.getPrompt(renameFromId || promptToSave.id);
+			this.mergeExternalReportIfUnchanged(promptToSave, existingPrompt, baseSnapshot || null);
 			if (existingPrompt) {
 				promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
 				promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
@@ -614,13 +747,31 @@ export class EditorPanelManager {
 		this.contentSyncDisposables.push(
 			vscode.workspace.onDidChangeTextDocument((event) => {
 				void this.syncPromptContentFromEditorDocument(event.document);
+				void this.syncPromptReportFromDocument(event.document);
 			}),
 			vscode.workspace.onDidSaveTextDocument((document) => {
 				void this.syncPromptContentFromEditorDocument(document);
+				void this.syncPromptReportFromDocument(document);
 				void this.handleContentEditorSaved(document);
 			}),
 			vscode.workspace.onDidCloseTextDocument((document) => {
 				void this.handleContentEditorClosed(document);
+			})
+		);
+
+		const reportWatcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(this.storageService.getStorageDirectoryPath(), '*/report.txt')
+		);
+		this.contentSyncDisposables.push(
+			reportWatcher,
+			reportWatcher.onDidCreate((uri) => {
+				void this.syncPromptReportFromFileUri(uri);
+			}),
+			reportWatcher.onDidChange((uri) => {
+				void this.syncPromptReportFromFileUri(uri);
+			}),
+			reportWatcher.onDidDelete((uri) => {
+				void this.syncPromptReportFromFileUri(uri, '');
 			})
 		);
 	}
@@ -652,6 +803,33 @@ export class EditorPanelManager {
 		}
 	}
 
+	private ensureReportEditorBinding(panelKey: string, prompt: Prompt): void {
+		if (!prompt.id) {
+			return;
+		}
+
+		const fileUri = this.storageService.getPromptReportUri(prompt.id);
+		const fileUriKey = fileUri.toString();
+		const openDocument = vscode.workspace.textDocuments.find(d => d.uri.toString() === fileUriKey);
+		const actualContent = openDocument ? openDocument.getText() : prompt.report;
+
+		const existingBinding = this.reportEditorByPanelKey.get(panelKey);
+		if (existingBinding && existingBinding.uri.toString() !== fileUriKey) {
+			this.panelKeyByReportEditorUri.delete(existingBinding.uri.toString());
+		}
+
+		this.reportEditorByPanelKey.set(panelKey, {
+			uri: fileUri,
+			lastSyncedContent: actualContent,
+			lastModifiedMs: null,
+		});
+		this.panelKeyByReportEditorUri.set(fileUriKey, panelKey);
+
+		if (prompt.report !== actualContent) {
+			prompt.report = actualContent;
+		}
+	}
+
 	private rebindContentEditorPanelKey(oldKey: string, newKey: string): void {
 		const binding = this.contentEditorByPanelKey.get(oldKey);
 		if (!binding) {
@@ -660,6 +838,16 @@ export class EditorPanelManager {
 		this.contentEditorByPanelKey.delete(oldKey);
 		this.contentEditorByPanelKey.set(newKey, binding);
 		this.panelKeyByContentEditorUri.set(binding.uri.toString(), newKey);
+	}
+
+	private rebindReportEditorPanelKey(oldKey: string, newKey: string): void {
+		const binding = this.reportEditorByPanelKey.get(oldKey);
+		if (!binding) {
+			return;
+		}
+		this.reportEditorByPanelKey.delete(oldKey);
+		this.reportEditorByPanelKey.set(newKey, binding);
+		this.panelKeyByReportEditorUri.set(binding.uri.toString(), newKey);
 	}
 
 	private getAllowedBranchesSetting(): string[] {
@@ -674,6 +862,15 @@ export class EditorPanelManager {
 		this.panelKeyByContentEditorUri.delete(binding.uri.toString());
 		this.contentEditorByPanelKey.delete(panelKey);
 		this.contentEditorLastActivityByPanelKey.delete(panelKey);
+	}
+
+	private clearReportEditorBinding(panelKey: string): void {
+		const binding = this.reportEditorByPanelKey.get(panelKey);
+		if (!binding) {
+			return;
+		}
+		this.panelKeyByReportEditorUri.delete(binding.uri.toString());
+		this.reportEditorByPanelKey.delete(panelKey);
 	}
 
 	private sanitizePromptSlugPart(value: string): string {
@@ -763,6 +960,14 @@ export class EditorPanelManager {
 		}
 	}
 
+	private formatSaveConflictMessage(error: unknown): string {
+		if (error instanceof Error && error.message === 'REPORT_CONFLICT') {
+			return 'Отчет был изменен во внешнем файле. Сохранение отменено, чтобы не перезаписать внешние правки.';
+		}
+
+		return error instanceof Error ? error.message : String(error);
+	}
+
 	private async syncPromptContentFromEditorDocument(document: vscode.TextDocument): Promise<void> {
 		const uriKey = document.uri.toString();
 		const panelKey = this.panelKeyByContentEditorUri.get(uriKey);
@@ -789,6 +994,136 @@ export class EditorPanelManager {
 
 		binding.lastSyncedContent = content;
 		void panel.webview.postMessage({ type: 'promptContentUpdated', content, writingDeltaMs } satisfies ExtensionToWebviewMessage);
+	}
+
+	private async syncPromptReportFromDocument(document: vscode.TextDocument): Promise<void> {
+		await this.syncPromptReportFromFileUri(document.uri, document.getText());
+	}
+
+	private async syncPromptReportFromFileUri(uri: vscode.Uri, reportOverride?: string): Promise<void> {
+		const uriKey = uri.toString();
+		const panelKey = this.panelKeyByReportEditorUri.get(uriKey);
+		if (!panelKey) {
+			return;
+		}
+
+		const binding = this.reportEditorByPanelKey.get(panelKey);
+		if (!binding) {
+			return;
+		}
+
+		let report = typeof reportOverride === 'string' ? reportOverride : '';
+		if (reportOverride === undefined) {
+			const openDocument = vscode.workspace.textDocuments.find(document => document.uri.toString() === uriKey);
+			if (openDocument) {
+				report = openDocument.getText();
+			} else {
+				try {
+					const fileBytes = await vscode.workspace.fs.readFile(uri);
+					report = Buffer.from(fileBytes).toString('utf-8');
+				} catch {
+					report = '';
+				}
+			}
+		}
+
+		const previousSyncedReport = binding.lastSyncedContent;
+		if (previousSyncedReport === report) {
+			return;
+		}
+
+		binding.lastSyncedContent = report;
+		try {
+			const stat = await vscode.workspace.fs.stat(uri);
+			binding.lastModifiedMs = typeof stat.mtime === 'number' ? stat.mtime : null;
+		} catch {
+			binding.lastModifiedMs = null;
+		}
+
+		const promptRef = this.panelPromptRefs.get(panelKey);
+		if (promptRef && promptRef.report !== report) {
+			promptRef.report = report;
+		}
+
+		const basePrompt = this.panelBasePrompts.get(panelKey);
+		if (basePrompt && !this.panelDirtyFlags.get(panelKey)) {
+			basePrompt.report = report;
+		}
+
+		const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
+		if (latestSnapshot && (latestSnapshot.report || '') === (previousSyncedReport || '')) {
+			latestSnapshot.report = report;
+		}
+
+		const panel = openPanels.get(panelKey);
+		if (panel) {
+			void panel.webview.postMessage({
+				type: 'reportContentUpdated',
+				report,
+			} satisfies ExtensionToWebviewMessage);
+		}
+
+		const promptId = (promptRef?.id || '').trim();
+		if (promptId) {
+			const reportPanel = this.reportEditorPanels.get(promptId);
+			if (reportPanel) {
+				void reportPanel.webview.postMessage({
+					type: 'reportEditorExternalUpdate',
+					report,
+				} satisfies ExtensionToWebviewMessage);
+			}
+		}
+	}
+
+	private async refreshPromptReportForPanel(panelKey: string, panel: vscode.WebviewPanel): Promise<void> {
+		const promptRef = this.panelPromptRefs.get(panelKey);
+		const promptId = (promptRef?.id || '').trim();
+		if (!promptRef || !promptId) {
+			return;
+		}
+
+		const persistedPrompt = await this.storageService.getPrompt(promptId);
+		if (!persistedPrompt) {
+			return;
+		}
+
+		const basePrompt = this.panelBasePrompts.get(panelKey) || null;
+		const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey) || null;
+		const baseReport = basePrompt?.report || '';
+		const latestReport = latestSnapshot?.report ?? promptRef.report ?? '';
+		const hasLocalReportChanges = latestReport !== baseReport;
+
+		if (hasLocalReportChanges && latestReport !== persistedPrompt.report) {
+			return;
+		}
+
+		promptRef.report = persistedPrompt.report;
+		promptRef.timeSpentWriting = Math.max(promptRef.timeSpentWriting || 0, persistedPrompt.timeSpentWriting || 0);
+		promptRef.timeSpentOnTask = Math.max(promptRef.timeSpentOnTask || 0, persistedPrompt.timeSpentOnTask || 0);
+		promptRef.updatedAt = persistedPrompt.updatedAt || promptRef.updatedAt;
+
+		if (basePrompt) {
+			basePrompt.report = persistedPrompt.report;
+			basePrompt.timeSpentWriting = Math.max(basePrompt.timeSpentWriting || 0, persistedPrompt.timeSpentWriting || 0);
+			basePrompt.timeSpentOnTask = Math.max(basePrompt.timeSpentOnTask || 0, persistedPrompt.timeSpentOnTask || 0);
+			basePrompt.updatedAt = persistedPrompt.updatedAt || basePrompt.updatedAt;
+		}
+
+		if (latestSnapshot && latestSnapshot.report === baseReport) {
+			latestSnapshot.report = persistedPrompt.report;
+			latestSnapshot.timeSpentWriting = Math.max(latestSnapshot.timeSpentWriting || 0, persistedPrompt.timeSpentWriting || 0);
+			latestSnapshot.timeSpentOnTask = Math.max(latestSnapshot.timeSpentOnTask || 0, persistedPrompt.timeSpentOnTask || 0);
+			latestSnapshot.updatedAt = persistedPrompt.updatedAt || latestSnapshot.updatedAt;
+		}
+
+		this.ensureReportEditorBinding(panelKey, promptRef);
+		void panel.webview.postMessage({
+			type: 'reportContentUpdated',
+			report: persistedPrompt.report,
+			timeSpentWriting: persistedPrompt.timeSpentWriting,
+			timeSpentOnTask: persistedPrompt.timeSpentOnTask,
+			updatedAt: persistedPrompt.updatedAt,
+		} satisfies ExtensionToWebviewMessage);
 	}
 
 	private async openPromptContentInEditor(panelKey: string, currentPrompt: Prompt, content: string): Promise<void> {
@@ -926,6 +1261,23 @@ export class EditorPanelManager {
 			return;
 		}
 
+		const latestStoredPrompt = await this.storageService.getPrompt(promptId);
+		if (latestStoredPrompt) {
+			currentPrompt.report = latestStoredPrompt.report;
+			currentPrompt.updatedAt = latestStoredPrompt.updatedAt || currentPrompt.updatedAt;
+			this.panelPromptRefs.set(panelKey, currentPrompt);
+			this.ensureReportEditorBinding(panelKey, currentPrompt);
+			postMessage({
+				type: 'reportContentUpdated',
+				report: latestStoredPrompt.report,
+				timeSpentWriting: latestStoredPrompt.timeSpentWriting,
+				timeSpentOnTask: latestStoredPrompt.timeSpentOnTask,
+				updatedAt: latestStoredPrompt.updatedAt,
+			});
+		} else {
+			this.ensureReportEditorBinding(panelKey, currentPrompt);
+		}
+
 		const existingPanel = this.reportEditorPanels.get(promptId);
 		if (existingPanel) {
 			existingPanel.reveal(vscode.ViewColumn.Beside);
@@ -933,7 +1285,7 @@ export class EditorPanelManager {
 				type: 'reportEditorInit',
 				promptId,
 				title: currentPrompt.title || currentPrompt.id,
-				report: currentPrompt.report || '',
+				report: latestStoredPrompt?.report || currentPrompt.report || '',
 			} satisfies ExtensionToWebviewMessage);
 			return;
 		}
@@ -959,12 +1311,21 @@ export class EditorPanelManager {
 		const persistReport = async (
 			targetPromptId: string,
 			reportValue: string,
+			previousReport: string | undefined,
 			activityDeltaMs: number,
 			saveMode: 'autosave' | 'manual'
 		): Promise<Prompt | null> => {
 			const storedPrompt = await this.storageService.getPrompt(targetPromptId);
 			if (!storedPrompt) {
 				return null;
+			}
+
+			if (
+				typeof previousReport === 'string'
+				&& storedPrompt.report !== previousReport
+				&& reportValue !== storedPrompt.report
+			) {
+				throw new Error('REPORT_CONFLICT');
 			}
 
 			storedPrompt.report = reportValue;
@@ -993,6 +1354,7 @@ export class EditorPanelManager {
 				currentPrompt.timeSpentOnTask = Math.max(saved.timeSpentOnTask || 0, currentPrompt.timeSpentOnTask || 0);
 				currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
 				this.panelPromptRefs.set(panelKey, currentPrompt);
+				this.ensureReportEditorBinding(panelKey, currentPrompt);
 				postMessage({
 					type: 'reportContentUpdated',
 					report: storedPrompt.report,
@@ -1012,11 +1374,12 @@ export class EditorPanelManager {
 		reportPanel.webview.onDidReceiveMessage(async (msg: WebviewToExtensionMessage) => {
 			switch (msg.type) {
 				case 'reportEditorReady': {
+					const readyPrompt = await this.storageService.getPrompt(promptId);
 					void reportPanel.webview.postMessage({
 						type: 'reportEditorInit',
 						promptId,
 						title: currentPrompt.title || currentPrompt.id,
-						report: currentPrompt.report || '',
+						report: readyPrompt?.report || currentPrompt.report || '',
 					} satisfies ExtensionToWebviewMessage);
 					break;
 				}
@@ -1027,12 +1390,37 @@ export class EditorPanelManager {
 						break;
 					}
 
-					await persistReport(
-						targetPromptId,
-						typeof msg.report === 'string' ? msg.report : '',
-						Math.max(0, Number(msg.activityDeltaMs) || 0),
-						'autosave'
-					);
+					try {
+						const saved = await this.enqueueReportPersist(targetPromptId, () =>
+							persistReport(
+								targetPromptId,
+								typeof msg.report === 'string' ? msg.report : '',
+								typeof msg.previousReport === 'string' ? msg.previousReport : undefined,
+								Math.max(0, Number(msg.activityDeltaMs) || 0),
+								'autosave'
+							)
+						);
+						if (!saved) {
+							break;
+						}
+
+						void reportPanel.webview.postMessage({
+							type: 'reportEditorSynced',
+							report: typeof msg.report === 'string' ? msg.report : '',
+							updatedAt: saved.updatedAt,
+						} satisfies ExtensionToWebviewMessage);
+					} catch (error) {
+						const message = this.formatSaveConflictMessage(error);
+						void reportPanel.webview.postMessage({ type: 'error', message } satisfies ExtensionToWebviewMessage);
+						const storedPrompt = await this.storageService.getPrompt(targetPromptId);
+						if (storedPrompt) {
+							void reportPanel.webview.postMessage({
+								type: 'reportEditorExternalUpdate',
+								report: storedPrompt.report,
+								updatedAt: storedPrompt.updatedAt,
+							} satisfies ExtensionToWebviewMessage);
+						}
+					}
 					break;
 				}
 
@@ -1043,11 +1431,14 @@ export class EditorPanelManager {
 					}
 
 					try {
-						const saved = await persistReport(
-							targetPromptId,
-							typeof msg.report === 'string' ? msg.report : '',
-							Math.max(0, Number(msg.activityDeltaMs) || 0),
-							'manual'
+						const saved = await this.enqueueReportPersist(targetPromptId, () =>
+							persistReport(
+								targetPromptId,
+								typeof msg.report === 'string' ? msg.report : '',
+								typeof msg.previousReport === 'string' ? msg.previousReport : undefined,
+								Math.max(0, Number(msg.activityDeltaMs) || 0),
+								'manual'
+							)
 						);
 						if (!saved) {
 							void reportPanel.webview.postMessage({ type: 'error', message: 'Не удалось сохранить отчет.' } satisfies ExtensionToWebviewMessage);
@@ -1059,7 +1450,7 @@ export class EditorPanelManager {
 							updatedAt: saved.updatedAt,
 						} satisfies ExtensionToWebviewMessage);
 					} catch (error) {
-						const message = error instanceof Error ? error.message : String(error);
+						const message = this.formatSaveConflictMessage(error);
 						void reportPanel.webview.postMessage({ type: 'error', message } satisfies ExtensionToWebviewMessage);
 					}
 					break;
@@ -1089,6 +1480,7 @@ export class EditorPanelManager {
 							currentPrompt.report = storedPrompt.report;
 							currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
 							this.panelPromptRefs.set(panelKey, currentPrompt);
+							this.ensureReportEditorBinding(panelKey, currentPrompt);
 							postMessage({
 								type: 'reportContentUpdated',
 								report: storedPrompt.report,
@@ -1210,14 +1602,19 @@ export class EditorPanelManager {
 				}
 				if (shouldPersistBeforeSwitch) {
 					try {
-						const saved = await this.persistPromptSnapshotForSwitch(latestSnapshot);
+						const saved = await this.persistPromptSnapshotForSwitch(
+							latestSnapshot,
+							this.panelBasePrompts.get(existingKey) || null,
+							existingKey,
+						);
 						if (saved?.id) {
 							this._onDidSave.fire(saved.id);
 						}
 					} catch (err) {
+						const message = this.formatSaveConflictMessage(err);
 						const isRu = vscode.env.language.startsWith('ru');
 						vscode.window.showErrorMessage(
-							isRu ? `Ошибка сохранения перед переключением: ${err}` : `Save before switch error: ${err}`
+							isRu ? `Ошибка сохранения перед переключением: ${message}` : `Save before switch error: ${message}`
 						);
 					}
 				}
@@ -1269,6 +1666,7 @@ export class EditorPanelManager {
 
 		if (singletonPanel) {
 			this.ensureContentEditorBinding(panelKey, prompt);
+			this.ensureReportEditorBinding(panelKey, prompt);
 
 			const currentPromptRef = this.panelPromptRefs.get(panelKey);
 			if (currentPromptRef) {
@@ -1310,6 +1708,7 @@ export class EditorPanelManager {
 
 		openPanels.set(panelKey, panel);
 		this.ensureContentEditorBinding(panelKey, prompt);
+		this.ensureReportEditorBinding(panelKey, prompt);
 		this.panelPromptRefs.set(panelKey, prompt);
 		let isDirty = restoredUnsaved;
 		let latestPromptState: Prompt | null = restoredUnsaved ? prompt : null;
@@ -1329,6 +1728,16 @@ export class EditorPanelManager {
 
 		// Handle panel close — autosave unsaved changes silently
 		panel.onDidDispose(async () => {
+			await this.awaitPendingReportPersist(prompt.id);
+			const promptRefSnapshot = this.panelPromptRefs.get(panelKey)
+				? JSON.parse(JSON.stringify(this.panelPromptRefs.get(panelKey))) as Prompt
+				: null;
+			const latestPromptSnapshot = this.panelLatestPromptSnapshots.get(panelKey)
+				? JSON.parse(JSON.stringify(this.panelLatestPromptSnapshots.get(panelKey))) as Prompt
+				: null;
+			const basePromptSnapshot = this.panelBasePrompts.get(panelKey)
+				? JSON.parse(JSON.stringify(this.panelBasePrompts.get(panelKey))) as Prompt
+				: null;
 			const linkedKeys = [...openPanels.entries()]
 				.filter(([, p]) => p === panel)
 				.map(([key]) => key);
@@ -1344,6 +1753,7 @@ export class EditorPanelManager {
 				this.panelLatestPromptSnapshots.delete(key);
 				this.panelBasePrompts.delete(key);
 				this.clearContentEditorBinding(key);
+				this.clearReportEditorBinding(key);
 			}
 			openPanels.delete(panelKey);
 			this.panelPromptRefs.delete(panelKey);
@@ -1354,18 +1764,24 @@ export class EditorPanelManager {
 			this.panelLatestPromptSnapshots.delete(panelKey);
 			this.panelBasePrompts.delete(panelKey);
 			this.clearContentEditorBinding(panelKey);
+			this.clearReportEditorBinding(panelKey);
 
 			if (skipUnsavedPrompt) {
 				return;
 			}
-			const currentSnapshot: Prompt = latestPromptState
-				? JSON.parse(JSON.stringify(latestPromptState))
-				: JSON.parse(JSON.stringify(prompt));
+			const currentSnapshot: Prompt = latestPromptSnapshot
+				? JSON.parse(JSON.stringify(latestPromptSnapshot))
+				: promptRefSnapshot
+					? JSON.parse(JSON.stringify(promptRefSnapshot))
+					: latestPromptState
+						? JSON.parse(JSON.stringify(latestPromptState))
+						: JSON.parse(JSON.stringify(prompt));
 
 			let hasUnsavedChanges = isDirty;
 			if (!hasUnsavedChanges) {
 				if (currentSnapshot.id) {
 					const persisted = await this.storageService.getPrompt(currentSnapshot.id);
+					this.mergeExternalReportIfUnchanged(currentSnapshot, persisted, basePromptSnapshot);
 					hasUnsavedChanges = !persisted
 						|| this.normalizePromptForCompare(currentSnapshot) !== this.normalizePromptForCompare(persisted);
 				} else {
@@ -1389,9 +1805,13 @@ export class EditorPanelManager {
 			}
 
 			if (hasUnsavedChanges) {
-				const dirtySnapshot: Prompt = latestPromptState
-					? JSON.parse(JSON.stringify(latestPromptState))
-					: JSON.parse(JSON.stringify(prompt));
+				const dirtySnapshot: Prompt = latestPromptSnapshot
+					? JSON.parse(JSON.stringify(latestPromptSnapshot))
+					: promptRefSnapshot
+						? JSON.parse(JSON.stringify(promptRefSnapshot))
+						: latestPromptState
+							? JSON.parse(JSON.stringify(latestPromptState))
+							: JSON.parse(JSON.stringify(prompt));
 				const globalContext = this.stateService.getGlobalAgentContext();
 				try {
 					if (!dirtySnapshot.title && dirtySnapshot.content) {
@@ -1401,6 +1821,9 @@ export class EditorPanelManager {
 						dirtySnapshot.description = await this.aiService.generateDescription(dirtySnapshot.content, globalContext);
 					}
 					const renameFromId = await this.ensurePromptIdMatchesTitle(dirtySnapshot, dirtySnapshot.id || undefined);
+					await this.guardReportOverwriteBeforeSave(panelKey, dirtySnapshot, basePromptSnapshot);
+					const persistedPrompt = dirtySnapshot.id ? await this.storageService.getPrompt(renameFromId || dirtySnapshot.id) : null;
+					this.mergeExternalReportIfUnchanged(dirtySnapshot, persistedPrompt, basePromptSnapshot);
 					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
 					dirtySnapshot.timeSpentOnTask = Math.max(0, dirtySnapshot.timeSpentOnTask || 0);
 					await this.storageService.savePrompt(dirtySnapshot, { previousId: renameFromId });
@@ -1410,11 +1833,20 @@ export class EditorPanelManager {
 					await this.broadcastAvailableLanguagesAndFrameworks();
 					this._onDidSave.fire(dirtySnapshot.id);
 				} catch (err) {
+					const message = this.formatSaveConflictMessage(err);
 					vscode.window.showErrorMessage(
-						isRu ? `Ошибка сохранения: ${err}` : `Save error: ${err}`
+						isRu ? `Ошибка сохранения: ${message}` : `Save error: ${message}`
 					);
 				}
 			}
+		});
+
+		panel.onDidChangeViewState((event) => {
+			if (!event.webviewPanel.visible) {
+				return;
+			}
+
+			void this.refreshPromptReportForPanel(panelKey, event.webviewPanel);
 		});
 
 		// Handle messages
@@ -1529,6 +1961,7 @@ export class EditorPanelManager {
 				postMessage({ type: 'promptSaving', id: saveStateId, saving: true });
 				try {
 					let promptToSave = msg.prompt;
+					await this.awaitPendingReportPersist(promptToSave.id || currentPrompt.id);
 					const saveSource = msg.source || 'manual';
 					const globalContext = this.stateService.getGlobalAgentContext();
 					const previousPromptId = (currentPrompt.id || msg.prompt.id || '').trim() || undefined;
@@ -1564,8 +1997,11 @@ export class EditorPanelManager {
 					}
 
 					const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
+					await this.reconcileReportWithExtensionState(panelKey, promptToSave, currentPrompt);
+					await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, basePrompt || null);
 
 					const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(renameFromId || promptToSave.id) : null;
+					const basePrompt = this.panelBasePrompts.get(panelKey);
 					const hasConcurrentUpdate = Boolean(existingPrompt && promptToSave.updatedAt && existingPrompt.updatedAt !== promptToSave.updatedAt);
 					const allowStatusOverwrite = saveSource === 'status-change';
 					if (existingPrompt && hasConcurrentUpdate && !allowStatusOverwrite) {
@@ -1574,6 +2010,13 @@ export class EditorPanelManager {
 						}
 					}
 					if (existingPrompt) {
+						if (
+							basePrompt
+							&& promptToSave.report === (basePrompt.report || '')
+							&& existingPrompt.report !== (basePrompt.report || '')
+						) {
+							promptToSave.report = existingPrompt.report;
+						}
 						promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
 						promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
 						promptToSave.timeSpentOnTask = Math.max(promptToSave.timeSpentOnTask || 0, existingPrompt.timeSpentOnTask || 0);
@@ -1606,6 +2049,7 @@ export class EditorPanelManager {
 						Object.assign(currentPrompt, promptForPanel);
 						this.panelPromptRefs.set(panelKey, currentPrompt);
 						this.ensureContentEditorBinding(panelKey, currentPrompt);
+						this.ensureReportEditorBinding(panelKey, currentPrompt);
 					}
 
 					// Update panel tracking
@@ -1627,6 +2071,7 @@ export class EditorPanelManager {
 						this.panelBasePrompts.delete(panelKey);
 						this.panelBasePrompts.set(promptToSave.id, basePrompt ? JSON.parse(JSON.stringify(basePrompt)) : JSON.parse(JSON.stringify(promptForPanel)));
 						this.rebindContentEditorPanelKey(panelKey, promptToSave.id);
+						this.rebindReportEditorPanelKey(panelKey, promptToSave.id);
 					}
 
 					if (shouldApplyToCurrentPanel) {
@@ -1649,7 +2094,7 @@ export class EditorPanelManager {
 					}
 					// vscode.window.showInformationMessage(`Промпт "${saved.title || saved.id}" сохранён.`);
 				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
+					const message = this.formatSaveConflictMessage(error);
 					postMessage({ type: 'error', message: `Save failed: ${message}` });
 				} finally {
 					this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
@@ -1892,7 +2337,7 @@ export class EditorPanelManager {
 						const promptDirectory = this.storageService.getPromptDirectoryPath(prompt.id);
 						ctx.push(`Prompt directory: ${promptDirectory}`);
 						ctx.push(`Prompt file: ${this.storageService.getPromptMarkdownUri(prompt.id).fsPath}`);
-						ctx.push(`Report file: ${promptDirectory}/report.md`);
+						ctx.push(`Report file: ${promptDirectory}/report.txt`);
 					}
 					if (prompt.projects.length > 0) ctx.push(`Projects: ${prompt.projects.join(', ')}`);
 					if (prompt.languages.length > 0) ctx.push(`Languages: ${prompt.languages.join(', ')}`);
@@ -2690,6 +3135,8 @@ export class EditorPanelManager {
 		this.contentEditorByPanelKey.clear();
 		this.panelKeyByContentEditorUri.clear();
 		this.contentEditorLastActivityByPanelKey.clear();
+		this.reportEditorByPanelKey.clear();
+		this.panelKeyByReportEditorUri.clear();
 		for (const panel of this.reportEditorPanels.values()) {
 			panel.dispose();
 		}

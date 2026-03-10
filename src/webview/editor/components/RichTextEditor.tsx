@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 interface Props {
   value: string;
   onChange: (value: string) => void;
+  autoModeKey?: string;
   placeholder?: string;
   t?: (key: string) => string;
   persistedHeight?: number;
@@ -36,7 +37,7 @@ interface FormattingState {
 
 interface ToolbarButtonProps {
   title: string;
-  icon?: string;
+  icon?: keyof typeof ICON_PATHS;
   label?: string;
   active?: boolean;
   disabled?: boolean;
@@ -59,6 +60,29 @@ const DEFAULT_FORMATTING_STATE: FormattingState = {
   link: false,
   block: '',
 };
+
+const ICON_PATHS = {
+  discard: 'M12 3a9 9 0 1 0 6.36 2.64l1.42-1.42v4.78H15l1.93-1.93A6 6 0 1 1 12 6v2l-4-3 4-3v1z',
+  redo: 'M12 3a9 9 0 1 1-6.36 2.64L4.22 4.22V9h4.78L7.07 7.07A6 6 0 1 0 12 6v2l4-3-4-3v1z',
+  quote: 'M6.5 7A3.5 3.5 0 0 0 3 10.5V17h6v-6H6c0-1.38 1.12-2.5 2.5-2.5V7zm8 0A3.5 3.5 0 0 0 11 10.5V17h6v-6h-3c0-1.38 1.12-2.5 2.5-2.5V7z',
+  code: 'M9.47 7.47 4.94 12l4.53 4.53-1.41 1.41L2.11 12l5.95-5.94 1.41 1.41zm5.06 0 1.41-1.41L21.89 12l-5.95 5.94-1.41-1.41L19.06 12l-4.53-4.53z',
+  bold: 'M8 4h5.5a3.5 3.5 0 0 1 1.81 6.49A4 4 0 0 1 14 18H8V4zm2 2v4h3.5a1.5 1.5 0 0 0 0-3H10zm0 6v4h4a2 2 0 1 0 0-4h-4z',
+  italic: 'M10 4v2h2.59l-3.18 8H7v2h7v-2h-2.59l3.18-8H17V4h-7z',
+  inlineCode: 'M7.41 12 11 8.41 9.59 7 4.59 12l5 5 1.41-1.41L7.41 12zm9.18 0L13 15.59 14.41 17l5-5-5-5L13 8.41 16.59 12z',
+  clearAll: 'M5 5h10l4 4-8.5 8.5a2.12 2.12 0 0 1-3 0L2.5 12.5a2.12 2.12 0 0 1 0-3L5 5zm3.41 4L7 10.41 8.59 12 7 13.59 8.41 15 10 13.41 11.59 15 13 13.59 11.41 12 13 10.41 11.59 9 10 10.59 8.41 9z',
+  listUnordered: 'M4 6h2v2H4V6zm4 0h12v2H8V6zm-4 5h2v2H4v-2zm4 0h12v2H8v-2zm-4 5h2v2H4v-2zm4 0h12v2H8v-2z',
+  listOrdered: 'M4 6h2v2H4V6zm4 0h12v2H8V6zM4 11h2v2H4v-2zm4 0h12v2H8v-2zM4 16h2v2H4v-2zm4 0h12v2H8v-2z',
+  indent: 'M3 6h10v2H3V6zm0 4h6v2H3v-2zm0 4h10v2H3v-2zm12-1 4 3-4 3v-2h-2v-2h2v-2z',
+  link: 'M10.59 13.41a1.996 1.996 0 0 1 0-2.82l3.18-3.18a2 2 0 1 1 2.83 2.83l-1.06 1.06 1.41 1.41 1.06-1.06a4 4 0 1 0-5.66-5.66l-3.18 3.18a4 4 0 0 0 5.66 5.66l.53-.53-1.41-1.41-.53.52a1.996 1.996 0 0 1-2.83 0zm2.82-2.82a1.996 1.996 0 0 1 2.82 0 1.996 1.996 0 0 1 0 2.82l-3.18 3.18a2 2 0 1 1-2.83-2.83l1.06-1.06-1.41-1.41-1.06 1.06a4 4 0 1 0 5.66 5.66l3.18-3.18a4 4 0 0 0 0-5.66 4 4 0 0 0-5.66 0l-.53.53 1.41 1.41.53-.52z',
+  unlink: 'M6.7 7.3a4 4 0 0 1 5.66 0l.7.7-1.42 1.42-.7-.7a2 2 0 0 0-2.82 2.82l.7.7L7.4 13.66l-.7-.7a4 4 0 0 1 0-5.66zm10.6 9.4a4 4 0 0 1-5.66 0l-.7-.7 1.42-1.42.7.7a2 2 0 1 0 2.82-2.82l-.7-.7 1.42-1.42.7.7a4 4 0 0 1 0 5.66zM5 19.59 19.59 5 21 6.41 6.41 21 5 19.59z',
+  ruler: 'M3 11h18v2H3v-2zm2-4h2v3H5V7zm4 0h1v3H9V7zm3 0h2v3h-2V7zm4 0h1v3h-1V7z',
+} as const;
+
+const ToolbarIcon: React.FC<{ icon: keyof typeof ICON_PATHS }> = ({ icon }) => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" style={styles.formatIcon}>
+    <path d={ICON_PATHS[icon]} fill="currentColor" />
+  </svg>
+);
 
 const ToolbarButton: React.FC<ToolbarButtonProps> = ({
   title,
@@ -86,7 +110,7 @@ const ToolbarButton: React.FC<ToolbarButtonProps> = ({
     onMouseDown={(event) => event.preventDefault()}
     onClick={onClick}
   >
-    {icon && <span style={styles.formatIcon} className={`codicon ${icon}`} />}
+    {icon && <ToolbarIcon icon={icon} />}
     {label && <span style={{ ...styles.formatBtnLabel, ...(textStyle || null) }}>{label}</span>}
   </button>
 );
@@ -97,6 +121,22 @@ const normalizeText = (value: string): string => value
   .replace(/[\u00A0\u2007\u202F]/g, ' ')
   .replace(/[\u200B\u2060\uFEFF\u00AD]/g, '')
   .normalize('NFC');
+
+const hasHtmlMarkup = (value: string): boolean => {
+  if (!value.trim()) {
+    return false;
+  }
+
+  if (typeof DOMParser === 'undefined') {
+    return /<\/?[a-z][\w:-]*(?:\s[^<>]*)?>/i.test(value);
+  }
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(value, 'text/html');
+  return Array.from(doc.body.querySelectorAll('*')).length > 0;
+};
+
+const detectPreferredMode = (value: string): Mode => (hasHtmlMarkup(value) ? 'visual' : 'html');
 
 const sanitizeHtml = (rawHtml: string): string => {
   if (!rawHtml.trim()) {
@@ -199,6 +239,7 @@ const sanitizeHtml = (rawHtml: string): string => {
 export const RichTextEditor: React.FC<Props> = ({
   value,
   onChange,
+  autoModeKey,
   placeholder,
   t,
   persistedHeight,
@@ -216,7 +257,9 @@ export const RichTextEditor: React.FC<Props> = ({
   showFormattingToolbar,
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
-  const [mode, setMode] = useState<Mode>('visual');
+  const lastLocalValueRef = useRef<string | null>(null);
+  const isModeManuallySelectedRef = useRef(false);
+  const [mode, setMode] = useState<Mode>(() => detectPreferredMode(value || ''));
   const [htmlSource, setHtmlSource] = useState(value || '');
   const [formattingState, setFormattingState] = useState<FormattingState>(DEFAULT_FORMATTING_STATE);
 
@@ -260,10 +303,30 @@ export const RichTextEditor: React.FC<Props> = ({
   }, [currentHeight, onHeightChange]);
 
   useEffect(() => {
-    setHtmlSource(value || '');
+    const nextValue = value || '';
+    setHtmlSource(nextValue);
+
+    if (lastLocalValueRef.current === nextValue) {
+      return;
+    }
+
+    if (!isModeManuallySelectedRef.current) {
+      setMode(detectPreferredMode(nextValue));
+    }
   }, [value]);
 
+  useEffect(() => {
+    lastLocalValueRef.current = null;
+    isModeManuallySelectedRef.current = false;
+    setMode(detectPreferredMode(value || ''));
+  }, [autoModeKey]);
+
   const translate = useCallback((key: string, fallback: string) => t?.(key) || fallback, [t]);
+
+  const switchMode = useCallback((nextMode: Mode) => {
+    isModeManuallySelectedRef.current = true;
+    setMode(nextMode);
+  }, []);
 
   const syncFormattingState = useCallback(() => {
     if (!showFormattingToolbar || mode !== 'visual' || !editorRef.current) {
@@ -327,7 +390,7 @@ export const RichTextEditor: React.FC<Props> = ({
     // Skip DOM update while user is actively editing — the DOM already has
     // the latest content and overwriting innerHTML would destroy cursor position
     // and selection, making editing painful (especially during auto-save).
-    if (document.activeElement === editorRef.current) {
+    if (document.activeElement === editorRef.current && document.hasFocus()) {
       return;
     }
 
@@ -386,6 +449,7 @@ export const RichTextEditor: React.FC<Props> = ({
       return;
     }
     const sanitized = sanitizeHtml(editorRef.current.innerHTML);
+    lastLocalValueRef.current = sanitized;
     setHtmlSource(sanitized);
     onChange(sanitized);
   }, [onChange]);
@@ -506,9 +570,9 @@ export const RichTextEditor: React.FC<Props> = ({
 
   const modeHint = useMemo(() => {
     if (mode === 'visual') {
-      return 'Вставка из Copilot Chat сохраняет оформление (списки, таблицы, блоки, ссылки).';
+      return 'Режим Html показывает отрендеренный результат с оформлением, списками и таблицами.';
     }
-    return 'Режим исходного HTML для точной правки разметки.';
+    return 'Режим Текст показывает исходное содержимое отчета без визуального рендеринга.';
   }, [mode]);
 
   return (
@@ -640,16 +704,16 @@ export const RichTextEditor: React.FC<Props> = ({
           <button
             type="button"
             style={{ ...styles.modeBtn, ...(mode === 'visual' ? styles.modeBtnActive : null) }}
-            onClick={() => setMode('visual')}
+            onClick={() => switchMode('visual')}
           >
-            Визуально
+            Html
           </button>
           <button
             type="button"
             style={{ ...styles.modeBtn, ...(mode === 'html' ? styles.modeBtnActive : null) }}
-            onClick={() => setMode('html')}
+            onClick={() => switchMode('html')}
           >
-            HTML
+            Текст
           </button>
         </div>
         <div style={styles.actionGroup}>
@@ -688,13 +752,13 @@ export const RichTextEditor: React.FC<Props> = ({
             <div style={styles.formatGroup}>
               <ToolbarButton
                 title={translate('editor.formatUndo', 'Отменить')}
-                icon="codicon-discard"
+                icon="discard"
                 disabled={mode !== 'visual'}
                 onClick={() => executeEditorCommand('undo')}
               />
               <ToolbarButton
                 title={translate('editor.formatRedo', 'Повторить')}
-                icon="codicon-redo"
+                icon="redo"
                 disabled={mode !== 'visual'}
                 onClick={() => executeEditorCommand('redo')}
               />
@@ -737,14 +801,14 @@ export const RichTextEditor: React.FC<Props> = ({
               />
               <ToolbarButton
                 title={translate('editor.formatQuote', 'Цитата')}
-                icon="codicon-quote"
+                icon="quote"
                 active={formattingState.block === 'blockquote'}
                 disabled={mode !== 'visual'}
                 onClick={() => applyBlockFormat('blockquote')}
               />
               <ToolbarButton
                 title={translate('editor.formatCodeBlock', 'Блок кода')}
-                icon="codicon-code"
+                icon="code"
                 active={formattingState.block === 'pre'}
                 disabled={mode !== 'visual'}
                 onClick={handleCodeBlock}
@@ -756,14 +820,14 @@ export const RichTextEditor: React.FC<Props> = ({
             <div style={styles.formatGroup}>
               <ToolbarButton
                 title={translate('editor.formatBold', 'Жирный')}
-                icon="codicon-bold"
+                icon="bold"
                 active={formattingState.bold}
                 disabled={mode !== 'visual'}
                 onClick={() => executeEditorCommand('bold')}
               />
               <ToolbarButton
                 title={translate('editor.formatItalic', 'Курсив')}
-                icon="codicon-italic"
+                icon="italic"
                 active={formattingState.italic}
                 disabled={mode !== 'visual'}
                 onClick={() => executeEditorCommand('italic')}
@@ -786,13 +850,13 @@ export const RichTextEditor: React.FC<Props> = ({
               />
               <ToolbarButton
                 title={translate('editor.formatInlineCode', 'Строчный код')}
-                icon="codicon-symbol-keyword"
+                icon="inlineCode"
                 disabled={mode !== 'visual'}
                 onClick={handleInlineCode}
               />
               <ToolbarButton
                 title={translate('editor.formatClear', 'Очистить форматирование')}
-                icon="codicon-clear-all"
+                icon="clearAll"
                 disabled={mode !== 'visual'}
                 onClick={handleClearFormatting}
               />
@@ -803,21 +867,21 @@ export const RichTextEditor: React.FC<Props> = ({
             <div style={styles.formatGroup}>
               <ToolbarButton
                 title={translate('editor.formatBulletedList', 'Маркированный список')}
-                icon="codicon-list-unordered"
+                icon="listUnordered"
                 active={formattingState.unorderedList}
                 disabled={mode !== 'visual'}
                 onClick={() => executeEditorCommand('insertUnorderedList')}
               />
               <ToolbarButton
                 title={translate('editor.formatNumberedList', 'Нумерованный список')}
-                icon="codicon-list-ordered"
+                icon="listOrdered"
                 active={formattingState.orderedList}
                 disabled={mode !== 'visual'}
                 onClick={() => executeEditorCommand('insertOrderedList')}
               />
               <ToolbarButton
                 title={translate('editor.formatIndent', 'Увеличить отступ')}
-                icon="codicon-indent"
+                icon="indent"
                 disabled={mode !== 'visual'}
                 onClick={() => executeEditorCommand('indent')}
               />
@@ -834,20 +898,20 @@ export const RichTextEditor: React.FC<Props> = ({
             <div style={styles.formatGroup}>
               <ToolbarButton
                 title={translate('editor.formatLink', 'Вставить ссылку')}
-                icon="codicon-link"
+                icon="link"
                 active={formattingState.link}
                 disabled={mode !== 'visual'}
                 onClick={handleCreateLink}
               />
               <ToolbarButton
                 title={translate('editor.formatUnlink', 'Убрать ссылку')}
-                icon="codicon-link-external"
+                icon="unlink"
                 disabled={mode !== 'visual'}
                 onClick={handleUnlink}
               />
               <ToolbarButton
                 title={translate('editor.formatDivider', 'Вставить разделитель')}
-                icon="codicon-symbol-ruler"
+                icon="ruler"
                 disabled={mode !== 'visual'}
                 onClick={() => executeEditorCommand('insertHorizontalRule')}
               />
@@ -855,7 +919,7 @@ export const RichTextEditor: React.FC<Props> = ({
           </div>
 
           {mode !== 'visual' && (
-            <div style={styles.formatToolbarHint}>{translate('editor.formatToolbarHint', 'Форматирование доступно в визуальном режиме.')}</div>
+            <div style={styles.formatToolbarHint}>{translate('editor.formatToolbarHint', 'Форматирование доступно в режиме Html.')}</div>
           )}
         </div>
       )}
@@ -885,6 +949,7 @@ export const RichTextEditor: React.FC<Props> = ({
           value={htmlSource}
           onChange={(e) => {
             const next = normalizeText(e.target.value);
+            lastLocalValueRef.current = next;
             setHtmlSource(next);
             onChange(next);
           }}
@@ -994,8 +1059,10 @@ const styles: Record<string, React.CSSProperties> = {
     border: 'none',
   },
   formatIcon: {
-    fontSize: '13px',
-    lineHeight: 1,
+    width: '14px',
+    height: '14px',
+    display: 'block',
+    flexShrink: 0,
   },
   formatBtnLabel: {
     fontSize: '11px',

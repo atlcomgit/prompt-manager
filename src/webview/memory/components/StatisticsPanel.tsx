@@ -5,6 +5,7 @@
 
 import React from 'react';
 import type { MemoryStatistics } from '../../../types/memory';
+import { memoryButtonStyles } from './buttonStyles';
 
 interface Props {
 	statistics: MemoryStatistics | null;
@@ -29,10 +30,10 @@ export const StatisticsPanel: React.FC<Props> = ({ statistics, onRefresh, onClea
 		<div style={styles.container}>
 			{/* Action bar */}
 			<div style={styles.actions}>
-				<button style={styles.refreshBtn} onClick={onRefresh}>
+				<button style={memoryButtonStyles.secondary} onClick={onRefresh}>
 					↻ {t('memory.refresh')}
 				</button>
-				<button style={styles.dangerBtn} onClick={onClearAll}>
+				<button style={memoryButtonStyles.danger} onClick={onClearAll}>
 					🗑 {t('memory.clearAll')}
 				</button>
 			</div>
@@ -147,18 +148,6 @@ const styles: Record<string, React.CSSProperties> = {
 		height: '100%', color: 'var(--vscode-descriptionForeground)',
 	},
 	actions: { display: 'flex', gap: '8px', marginBottom: '16px' },
-	refreshBtn: {
-		background: 'var(--vscode-button-secondaryBackground)',
-		color: 'var(--vscode-button-secondaryForeground)',
-		border: 'none', borderRadius: '4px', padding: '6px 12px',
-		cursor: 'pointer', fontSize: '12px',
-	},
-	dangerBtn: {
-		background: 'var(--vscode-inputValidation-errorBackground)',
-		color: 'var(--vscode-inputValidation-errorForeground)',
-		border: 'none', borderRadius: '4px', padding: '6px 12px',
-		cursor: 'pointer', fontSize: '12px',
-	},
 	cards: { display: 'flex', gap: '12px', flexWrap: 'wrap' as const, marginBottom: '16px' },
 	card: {
 		flex: '1 1 120px', padding: '12px', textAlign: 'center' as const,

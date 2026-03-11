@@ -4,6 +4,7 @@
 
 import React, { useState, useCallback } from 'react';
 import type { MemorySearchResult } from '../../../types/memory';
+import { memoryButtonStyles } from './buttonStyles';
 
 interface Props {
 	results: MemorySearchResult[];
@@ -34,7 +35,7 @@ export const SearchPanel: React.FC<Props> = ({ results, query, onSearch, onSelec
 					onChange={e => setInput(e.target.value)}
 					placeholder={t('memory.searchPlaceholder')}
 				/>
-				<button type="submit" style={styles.searchBtn}>
+				<button type="submit" style={memoryButtonStyles.primary}>
 					{t('memory.search')}
 				</button>
 			</form>
@@ -91,11 +92,6 @@ const styles: Record<string, React.CSSProperties> = {
 		flex: 1, padding: '6px 10px',
 		background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)',
 		border: '1px solid var(--vscode-input-border)', borderRadius: '4px', fontSize: '13px',
-	},
-	searchBtn: {
-		padding: '6px 16px',
-		background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)',
-		border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '13px',
 	},
 	results: { flex: 1, overflow: 'auto' },
 	resultHeader: {

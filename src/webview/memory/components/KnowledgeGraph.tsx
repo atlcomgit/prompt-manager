@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import type { KnowledgeGraphData, KnowledgeGraphNode, KnowledgeGraphEdge } from '../../../types/memory';
+import { memoryButtonStyles } from './buttonStyles';
 
 interface Props {
 	data: KnowledgeGraphData | null;
@@ -112,7 +113,7 @@ export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestG
 						{repositories.map(r => <option key={r} value={r}>{r}</option>)}
 					</select>
 				)}
-				<button style={styles.refreshBtn} onClick={() => onRequestGraph(selectedRepo || undefined)}>
+				<button style={memoryButtonStyles.secondary} onClick={() => onRequestGraph(selectedRepo || undefined)}>
 					↻ {t('memory.refresh')}
 				</button>
 			</div>
@@ -174,12 +175,6 @@ const styles: Record<string, React.CSSProperties> = {
 		background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)',
 		border: '1px solid var(--vscode-input-border)', borderRadius: '3px',
 		padding: '4px 8px', fontSize: '12px',
-	},
-	refreshBtn: {
-		background: 'var(--vscode-button-secondaryBackground)',
-		color: 'var(--vscode-button-secondaryForeground)',
-		border: 'none', borderRadius: '3px', padding: '4px 10px',
-		cursor: 'pointer', fontSize: '12px',
 	},
 	empty: {
 		flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',

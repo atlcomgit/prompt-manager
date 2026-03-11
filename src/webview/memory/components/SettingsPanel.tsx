@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect } from 'react';
 import type { MemorySettings, MemoryAnalysisDepth, MemoryNotificationType } from '../../../types/memory';
+import { memoryButtonStyles } from './buttonStyles';
 
 interface Props {
 	settings: MemorySettings | null;
@@ -37,10 +38,10 @@ export const SettingsPanel: React.FC<Props> = ({ settings, onSave, onRefresh, t 
 	return (
 		<div style={styles.container}>
 			<div style={styles.actions}>
-				<button style={styles.saveBtn} onClick={handleSave}>
+				<button style={memoryButtonStyles.primary} onClick={handleSave}>
 					💾 {t('memory.saveSettings')}
 				</button>
-				<button style={styles.refreshBtn} onClick={onRefresh}>
+				<button style={memoryButtonStyles.secondary} onClick={onRefresh}>
 					↻ {t('memory.refresh')}
 				</button>
 			</div>
@@ -227,17 +228,6 @@ const styles: Record<string, React.CSSProperties> = {
 		height: '100%', color: 'var(--vscode-descriptionForeground)',
 	},
 	actions: { display: 'flex', gap: '8px', marginBottom: '16px' },
-	saveBtn: {
-		background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)',
-		border: 'none', borderRadius: '4px', padding: '6px 16px',
-		cursor: 'pointer', fontSize: '13px',
-	},
-	refreshBtn: {
-		background: 'var(--vscode-button-secondaryBackground)',
-		color: 'var(--vscode-button-secondaryForeground)',
-		border: 'none', borderRadius: '4px', padding: '6px 12px',
-		cursor: 'pointer', fontSize: '12px',
-	},
 	section: {
 		marginBottom: '16px', padding: '12px',
 		background: 'var(--vscode-editor-background)',

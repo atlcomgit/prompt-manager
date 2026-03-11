@@ -4,6 +4,7 @@
 
 import React, { useState } from 'react';
 import type { MemoryCommit, MemoryFilter } from '../../../types/memory';
+import { memoryButtonStyles } from './buttonStyles';
 
 interface Props {
 	commits: MemoryCommit[];
@@ -39,7 +40,7 @@ export const CommitList: React.FC<Props> = ({
 				<span style={styles.count}>
 					{t('memory.commits')}: {total}
 				</span>
-				<button style={styles.filterBtn} onClick={() => setShowFilters(!showFilters)}>
+				<button style={memoryButtonStyles.secondary} onClick={() => setShowFilters(!showFilters)}>
 					{showFilters ? '▲' : '▼'} {t('memory.filters')}
 				</button>
 			</div>
@@ -102,7 +103,7 @@ export const CommitList: React.FC<Props> = ({
 
 					{/* Reset */}
 					<button
-						style={styles.resetBtn}
+						style={{ ...memoryButtonStyles.secondary, alignSelf: 'flex-start' }}
 						onClick={() => onFilterChange({})}
 					>
 						{t('memory.resetFilters')}
@@ -155,10 +156,6 @@ const styles: Record<string, React.CSSProperties> = {
 		padding: '8px 12px', borderBottom: '1px solid var(--vscode-panel-border)',
 	},
 	count: { fontSize: '12px', color: 'var(--vscode-descriptionForeground)' },
-	filterBtn: {
-		background: 'none', border: 'none', color: 'var(--vscode-textLink-foreground)',
-		cursor: 'pointer', fontSize: '12px',
-	},
 	filters: {
 		padding: '8px 12px', borderBottom: '1px solid var(--vscode-panel-border)',
 		display: 'flex', flexDirection: 'column', gap: '4px',
@@ -173,12 +170,6 @@ const styles: Record<string, React.CSSProperties> = {
 		background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)',
 		border: '1px solid var(--vscode-input-border)', borderRadius: '3px',
 		padding: '3px 6px', fontSize: '12px',
-	},
-	resetBtn: {
-		background: 'var(--vscode-button-secondaryBackground)',
-		color: 'var(--vscode-button-secondaryForeground)',
-		border: 'none', borderRadius: '3px', padding: '4px 8px',
-		cursor: 'pointer', fontSize: '12px', marginTop: '6px', alignSelf: 'flex-start',
 	},
 	list: { flex: 1, overflow: 'auto' },
 	empty: {

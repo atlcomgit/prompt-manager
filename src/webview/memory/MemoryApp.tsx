@@ -13,6 +13,7 @@ import { SearchPanel } from './components/SearchPanel';
 import { KnowledgeGraph } from './components/KnowledgeGraph';
 import { StatisticsPanel } from './components/StatisticsPanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import { memoryButtonStyles } from './components/buttonStyles';
 import type {
 	MemoryCommit,
 	MemoryFileChange,
@@ -270,8 +271,8 @@ export const MemoryApp: React.FC = () => {
 						<button
 							key={tab}
 							style={{
-								...styles.tab,
-								...(activeTab === tab ? styles.tabActive : {}),
+								...memoryButtonStyles.tab,
+								...(activeTab === tab ? memoryButtonStyles.tabActive : {}),
 							}}
 							onClick={() => setActiveTab(tab)}
 						>
@@ -281,7 +282,10 @@ export const MemoryApp: React.FC = () => {
 				</div>
 				<div style={styles.headerActions}>
 					<button
-						style={styles.actionBtn}
+						style={{
+							...memoryButtonStyles.secondary,
+							...(analysisProgress ? memoryButtonStyles.disabled : {}),
+						}}
 						onClick={() => onRunAnalysis(50)}
 						disabled={!!analysisProgress}
 						title={t('memory.runAnalysis')}
@@ -292,14 +296,14 @@ export const MemoryApp: React.FC = () => {
 						}
 					</button>
 					<button
-						style={styles.actionBtn}
+						style={memoryButtonStyles.secondary}
 						onClick={() => onExport('json')}
 						title={t('memory.export')}
 					>
 						📥 JSON
 					</button>
 					<button
-						style={styles.actionBtn}
+						style={memoryButtonStyles.secondary}
 						onClick={() => onExport('csv')}
 						title={t('memory.export')}
 					>
@@ -411,33 +415,12 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	tabs: {
 		display: 'flex',
-		gap: '4px',
-	},
-	tab: {
-		background: 'transparent',
-		border: '1px solid transparent',
-		borderRadius: '4px',
-		color: 'var(--vscode-foreground)',
-		padding: '6px 12px',
-		cursor: 'pointer',
-		fontSize: '13px',
-	},
-	tabActive: {
-		background: 'var(--vscode-button-secondaryBackground)',
-		borderColor: 'var(--vscode-focusBorder)',
+		gap: '8px',
+		flexWrap: 'wrap',
 	},
 	headerActions: {
 		display: 'flex',
-		gap: '4px',
-	},
-	actionBtn: {
-		background: 'var(--vscode-button-secondaryBackground)',
-		color: 'var(--vscode-button-secondaryForeground)',
-		border: 'none',
-		borderRadius: '4px',
-		padding: '4px 8px',
-		cursor: 'pointer',
-		fontSize: '12px',
+		gap: '8px',
 	},
 	statusBar: {
 		padding: '4px 16px',

@@ -250,7 +250,11 @@
         },
         "promptManager.memory.analysisDepth": {
           "type": "string",
-          "enum": ["minimal", "standard", "deep"],
+          "enum": [
+            "minimal",
+            "standard",
+            "deep"
+          ],
           "description": "Depth of AI analysis: minimal (fast, no diff), standard (summary + insights), deep (includes knowledge graph and bug detection).",
           "default": "standard"
         },
@@ -301,7 +305,11 @@
         },
         "promptManager.memory.notifications.type": {
           "type": "string",
-          "enum": ["info", "statusbar", "silent"],
+          "enum": [
+            "info",
+            "statusbar",
+            "silent"
+          ],
           "description": "Notification style: info (popup), statusbar (status bar item), silent (log only).",
           "default": "statusbar"
         },
@@ -314,6 +322,46 @@
           "type": "boolean",
           "description": "Enable knowledge graph construction from deep analysis.",
           "default": true
+        },
+        "promptManager.memory.projectMap.enabled": {
+          "type": "boolean",
+          "description": "Include a compact ASCII project file map in generated chat memory instructions.",
+          "default": true
+        },
+        "promptManager.memory.projectMap.maxDepth": {
+          "type": "number",
+          "description": "Maximum directory depth for the generated project file map.",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 8
+        },
+        "promptManager.memory.projectMap.excludedFolders": {
+          "type": "array",
+          "description": "Additional folders or relative paths to exclude from the generated project file map.",
+          "default": [
+            ".git",
+            "node_modules",
+            "dist",
+            "build",
+            "coverage",
+            "out",
+            "out-tests",
+            ".next",
+            ".turbo",
+            ".cache",
+            ".qodo",
+            ".vscode/prompt-manager/chat-memory"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "promptManager.memory.projectMap.maxEntries": {
+          "type": "number",
+          "description": "Maximum number of rendered tree nodes in the generated project file map.",
+          "default": 200,
+          "minimum": 20,
+          "maximum": 2000
         }
       }
     }
@@ -351,6 +399,7 @@
   "dependencies": {
     "@vscode/codicons": "^0.0.44",
     "@xenova/transformers": "^2.17.2",
+    "ignore": "^7.0.5",
     "markdown-it": "^14.1.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

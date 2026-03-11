@@ -86,6 +86,11 @@ export class MemoryPanelManager {
 					await this.sendInitialData(panel);
 					break;
 
+				case 'openMemoryFile': {
+					await this.openMemoryFile(msg.repository, msg.filePath);
+					break;
+				}
+
 				case 'getMemoryCommits': {
 					const { commits, total } = await this.db.getCommits(msg.filter || {});
 					panel.webview.postMessage({
@@ -292,6 +297,26 @@ export class MemoryPanelManager {
 				message,
 			} as MemoryExtensionToWebviewMessage);
 		}
+	}
+
+	private async openMemoryFile(repository: string, filePath: string): Promise<void> {
+		const targetFolder = this.findWorkspaceFolder(repository);
+		if (!targetFolder) {
+			throw new Error(`Workspace folder for repository ${repository} not found`);
+		}
+
+		const relativeParts = filePath.split(/[\\/]/).filter(Boolean);
+		const fileUri = vscode.Uri.joinPath(targetFolder.uri, ...relativeParts);
+		await vscode.workspace.fs.stat(fileUri);
+		const document = await vscode.workspace.openTextDocument(fileUri);
+		await vscode.window.showTextDocument(document, { preview: true });
+	}
+
+	private findWorkspaceFolder(repository: string): vscode.WorkspaceFolder | undefined {
+		const workspaceFolders = vscode.workspace.workspaceFolders || [];
+		return workspaceFolders.find(folder => folder.name === repository)
+			|| workspaceFolders.find(folder => folder.uri.fsPath.endsWith(`/${repository}`))
+			|| workspaceFolders[0];
 	}
 
 	/** Send initial data when webview becomes ready */

@@ -5,6 +5,34 @@
 
 import React from 'react';
 import type { MemoryCommit, MemoryFileChange, MemoryAnalysis, MemoryBugRelation } from '../../../types/memory';
+import { renderAsciiTreeLines } from '../../../utils/asciiTree.js';
+
+const FILE_TREE_INTERACTION_STYLES = `
+	.pm-memory-file-link {
+		transition:
+			transform 120ms ease,
+			background-color 140ms ease,
+			color 140ms ease,
+			box-shadow 140ms ease;
+		border-radius: 6px;
+	}
+
+	.pm-memory-file-link:hover {
+		background: color-mix(in srgb, var(--vscode-list-hoverBackground) 72%, transparent);
+		color: var(--vscode-textLink-foreground);
+		transform: translateX(2px);
+	}
+
+	.pm-memory-file-link:active {
+		transform: translateX(1px) scale(0.985);
+		background: color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 32%, transparent);
+	}
+
+	.pm-memory-file-link:focus-visible {
+		outline: 1px solid var(--vscode-focusBorder);
+		outline-offset: 1px;
+	}
+`;
 
 interface Props {
 	commit: MemoryCommit;
@@ -12,11 +40,21 @@ interface Props {
 	analysis?: MemoryAnalysis;
 	bugRelations: MemoryBugRelation[];
 	t: (key: string) => string;
+	onOpenFile?: (repository: string, filePath: string) => void;
 }
 
-export const CommitDetail: React.FC<Props> = ({ commit, fileChanges, analysis, bugRelations, t }) => {
+export const CommitDetail: React.FC<Props> = ({ commit, fileChanges, analysis, bugRelations, t, onOpenFile }) => {
+	const fileTreeLines = renderAsciiTreeLines(fileChanges.map(fileChange => ({
+		path: fileChange.filePath.replace(/\\/g, '/'),
+		kind: 'file',
+	})));
+	const fileStatuses = new Map(
+		fileChanges.map(fileChange => [fileChange.filePath.replace(/\\/g, '/'), getFileStatusLetter(fileChange.changeType)]),
+	);
+
 	return (
 		<div style={styles.container}>
+			<style>{FILE_TREE_INTERACTION_STYLES}</style>
 			{/* Commit header */}
 			<div style={styles.section}>
 				<h3 style={styles.heading}>{commit.sha.substring(0, 7)} — {commit.commitType}</h3>
@@ -91,13 +129,35 @@ export const CommitDetail: React.FC<Props> = ({ commit, fileChanges, analysis, b
 					<h4 style={styles.subHeading}>
 						{t('memory.fileChanges')} ({fileChanges.length})
 					</h4>
-					<div style={styles.fileList}>
-						{fileChanges.map((f, i) => (
-							<div key={i} style={styles.fileItem}>
-								<span style={styles.fileStatus}>{f.changeType[0].toUpperCase()}</span>
-								<span style={styles.filePath}>{f.filePath}</span>
-							</div>
-						))}
+					<div style={styles.fileTree}>
+						{fileTreeLines.map((line) => {
+							const status = line.kind === 'file' ? fileStatuses.get(line.path) : undefined;
+							const isFile = line.kind === 'file';
+							// prefix содержит отступы (│   /    ), connector — ├── /└── .
+							// Рендерим как pre-текст моноширинным шрифтом — гарантированно ровное выравнивание.
+							const prefixText = line.prefix + line.connector;
+							return (
+								<div key={`${line.path}-${line.depth}`} style={styles.fileTreeRow}>
+									{prefixText && (
+										<span style={styles.fileTreePrefix}>{prefixText}</span>
+									)}
+									{isFile ? (
+										<button
+											type="button"
+											style={styles.fileTreeButton}
+											className="pm-memory-file-link"
+											onClick={() => onOpenFile?.(commit.repository, line.path)}
+											title={line.path}
+										>
+											<span style={styles.fileTreeLabel}>{line.label}</span>
+										</button>
+									) : (
+										<span style={styles.fileTreeLabel}>{line.label}</span>
+									)}
+									{status && <span style={getStatusBadgeStyle(status)}>{status}</span>}
+								</div>
+							);
+						})}
 					</div>
 				</div>
 			)}
@@ -119,6 +179,38 @@ export const CommitDetail: React.FC<Props> = ({ commit, fileChanges, analysis, b
 		</div>
 	);
 };
+
+function getFileStatusLetter(changeType: MemoryFileChange['changeType']): string {
+	switch (changeType) {
+		case 'added':
+			return 'A';
+		case 'deleted':
+			return 'D';
+		case 'renamed':
+			return 'R';
+		case 'copied':
+			return 'C';
+		case 'modified':
+		default:
+			return 'M';
+	}
+}
+
+function getStatusBadgeStyle(status: string): React.CSSProperties {
+	const backgroundByStatus: Record<string, string> = {
+		A: 'var(--vscode-testing-iconPassed)',
+		M: 'var(--vscode-gitDecoration-modifiedResourceForeground)',
+		D: 'var(--vscode-gitDecoration-deletedResourceForeground)',
+		R: 'var(--vscode-gitDecoration-renamedResourceForeground)',
+		C: 'var(--vscode-gitDecoration-addedResourceForeground)',
+	};
+
+	return {
+		...styles.fileStatusBadge,
+		borderColor: backgroundByStatus[status] || 'var(--vscode-panel-border)',
+		color: backgroundByStatus[status] || 'var(--vscode-foreground)',
+	};
+}
 
 const styles: Record<string, React.CSSProperties> = {
 	container: { padding: '16px', overflow: 'auto' },
@@ -163,13 +255,59 @@ const styles: Record<string, React.CSSProperties> = {
 		color: 'var(--vscode-inputValidation-warningForeground)',
 		fontSize: '12px',
 	},
-	fileList: { display: 'flex', flexDirection: 'column' as const, gap: '2px' },
-	fileItem: { display: 'flex', gap: '8px', fontSize: '12px', padding: '2px 0' },
-	fileStatus: {
-		width: '16px', textAlign: 'center' as const, fontWeight: 600,
-		color: 'var(--vscode-gitDecoration-modifiedResourceForeground)',
+	fileTree: {
+		margin: 0,
+		padding: '10px 12px',
+		background: 'var(--vscode-textCodeBlock-background)',
+		borderRadius: '4px',
+		border: '1px solid var(--vscode-panel-border)',
+		display: 'flex',
+		flexDirection: 'column' as const,
+		// Явно указываем моноширинные шрифты с поддержкой Unicode box-drawing символов,
+		// чтобы │, ─, ├, └ выглядели ровно вне зависимости от системного шрифта.
+		fontFamily: '"JetBrains Mono", "DejaVu Sans Mono", "Fira Code", monospace',
 	},
-	filePath: { fontFamily: 'var(--vscode-editor-font-family)', fontSize: '12px' },
+	fileTreeRow: {
+		display: 'flex',
+		alignItems: 'baseline',
+		minHeight: '20px',
+	},
+	// Префикс (отступы + коннектор) в режиме pre — символы моноширинные и выровнены строго.
+	fileTreePrefix: {
+		fontSize: '12px',
+		lineHeight: 1.6,
+		whiteSpace: 'pre' as const,
+		color: 'var(--vscode-descriptionForeground)',
+		flexShrink: 0,
+	},
+	fileTreeLabel: {
+		fontSize: '12px',
+		lineHeight: 1.6,
+		wordBreak: 'break-word' as const,
+	},
+	fileTreeButton: {
+		padding: 0,
+		margin: 0,
+		border: 'none',
+		background: 'transparent',
+		color: 'inherit',
+		font: 'inherit',
+		textAlign: 'left' as const,
+		cursor: 'pointer',
+		minWidth: 0,
+		flex: 1,
+	},
+	fileStatusBadge: {
+		marginLeft: 'auto',
+		padding: '1px 7px',
+		borderRadius: '999px',
+		border: '1px solid var(--vscode-panel-border)',
+		fontSize: '10px',
+		fontWeight: 700,
+		fontFamily: 'var(--vscode-editor-font-family)',
+		background: 'color-mix(in srgb, var(--vscode-editor-background) 82%, transparent)',
+		flexShrink: 0,
+	},
 	bugRelation: {
 		padding: '6px', marginBottom: '4px',
 		background: 'var(--vscode-textCodeBlock-background)', borderRadius: '3px',

@@ -11,6 +11,7 @@ export { MemoryGitHookService } from './memoryGitHookService.js';
 export { MemoryAnalyzerService } from './memoryAnalyzerService.js';
 export { MemoryEmbeddingService } from './memoryEmbeddingService.js';
 export { MemoryContextService } from './memoryContextService.js';
+export { ProjectStructureMapService } from './projectStructureMapService.js';
 export { MemoryNotificationService } from './memoryNotificationService.js';
 export { ChatMemoryInstructionComposer } from './chatMemoryInstructionComposer.js';
 export { ChatMemoryInstructionService } from './chatMemoryInstructionService.js';

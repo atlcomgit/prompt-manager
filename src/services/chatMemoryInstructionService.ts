@@ -102,6 +102,7 @@ export class ChatMemoryInstructionService {
 		const rawMemoryContext = await this.memoryContextService.getContextForChat(prompt.content, {
 			maxChars: 6000,
 			shortTermLimit: 15,
+			projectNames: prompt.projects,
 		});
 
 		if (!rawMemoryContext.trim()) {

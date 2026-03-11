@@ -10,6 +10,7 @@
 import * as vscode from 'vscode';
 import type { MemoryDatabaseService } from './memoryDatabaseService.js';
 import type { MemoryEmbeddingService } from './memoryEmbeddingService.js';
+import { ProjectStructureMapService } from './projectStructureMapService.js';
 import type {
 	MemoryCommit,
 	MemoryAnalysis,
@@ -28,6 +29,8 @@ export interface MemoryContextOptions {
 	includeLongTerm?: boolean;
 	/** Whether to use semantic search when available */
 	useSemantic?: boolean;
+	/** Project names selected in the prompt */
+	projectNames?: string[];
 	/** Filter to apply */
 	filter?: MemoryFilter;
 }
@@ -37,14 +40,20 @@ const DEFAULT_OPTIONS: Required<MemoryContextOptions> = {
 	shortTermLimit: 50,
 	includeLongTerm: true,
 	useSemantic: true,
+	projectNames: [],
 	filter: {},
 };
 
 export class MemoryContextService {
+	private readonly projectStructureMapService: ProjectStructureMapService;
+
 	constructor(
 		private db: MemoryDatabaseService,
 		private embedding: MemoryEmbeddingService,
-	) { }
+		projectStructureMapService?: ProjectStructureMapService,
+	) {
+		this.projectStructureMapService = projectStructureMapService || new ProjectStructureMapService();
+	}
 
 	private isRussianLocale(): boolean {
 		return vscode.env.language.toLowerCase().startsWith('ru');
@@ -54,6 +63,9 @@ export class MemoryContextService {
 		rootTitle: string;
 		shortTermTitle: string;
 		longTermTitle: string;
+		projectMapTitle: string;
+		projectMapUnavailable: string;
+		projectMapTruncated: (limit: number) => string;
 		summaryLabel: string;
 		categoriesLabel: string;
 		highImpactLabel: string;
@@ -72,6 +84,9 @@ export class MemoryContextService {
 				rootTitle: '## Контекст проектной памяти',
 				shortTermTitle: '### Недавние и релевантные изменения',
 				longTermTitle: '### Архитектурная сводка',
+				projectMapTitle: '### Карта файлов проекта',
+				projectMapUnavailable: 'Карта файлов проекта недоступна для текущего рабочего пространства.',
+				projectMapTruncated: (limit) => `... дополнительные узлы скрыты после достижения лимита ${limit}`,
 				summaryLabel: 'Сводка',
 				categoriesLabel: 'Категории',
 				highImpactLabel: 'Высокое влияние на архитектуру',
@@ -91,6 +106,9 @@ export class MemoryContextService {
 			rootTitle: '## Project Memory Context',
 			shortTermTitle: '### Recent & Relevant Changes',
 			longTermTitle: '### Architecture Summary',
+			projectMapTitle: '### Project File Map',
+			projectMapUnavailable: 'Project file map is unavailable for the current workspace.',
+			projectMapTruncated: (limit) => `... additional nodes omitted after reaching the limit ${limit}`,
 			summaryLabel: 'Summary',
 			categoriesLabel: 'Categories',
 			highImpactLabel: 'High architecture impact',
@@ -126,7 +144,10 @@ export class MemoryContextService {
 			if (longTermBlock) { sections.push(longTermBlock); }
 		}
 
-		// 2) Short-term context — semantically relevant or recent
+		const projectMapBlock = await this.buildProjectMapContext(opts);
+		if (projectMapBlock) { sections.push(projectMapBlock); }
+
+		// 3) Short-term context — semantically relevant or recent
 		const shortTermBlock = await this.buildShortTermContext(prompt, opts);
 		if (shortTermBlock) { sections.push(shortTermBlock); }
 
@@ -192,6 +213,32 @@ export class MemoryContextService {
 			.map(s => `${text.repositorySummary(s.repository, s.commitCount)} ${s.summary}`);
 
 		return `${text.longTermTitle}\n\n${blocks.join('\n\n')}`;
+	}
+
+	private async buildProjectMapContext(
+		opts: Required<MemoryContextOptions>,
+	): Promise<string> {
+		const text = this.getLocaleText();
+		const result = await this.projectStructureMapService.buildProjectStructureMap({
+			projectNames: opts.projectNames,
+		});
+		if (!result?.tree) {
+			return '';
+		}
+
+		const lines = [
+			text.projectMapTitle,
+			'',
+			'```text',
+			result.tree,
+			'```',
+		];
+
+		if (result.truncated) {
+			lines.push('', text.projectMapTruncated(result.maxEntries));
+		}
+
+		return lines.join('\n');
 	}
 
 	/**

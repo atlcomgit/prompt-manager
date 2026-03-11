@@ -192,6 +192,11 @@ export const MemoryApp: React.FC = () => {
 		vscode.postMessage({ type: 'getMemoryCommitDetail', sha });
 	};
 
+	/** Open file from commit tree */
+	const onOpenCommitFile = (repository: string, filePath: string) => {
+		vscode.postMessage({ type: 'openMemoryFile', repository, filePath });
+	};
+
 	/** Handle search */
 	const onSearch = (query: string) => {
 		vscode.postMessage({ type: 'searchMemory', query, filter });
@@ -335,6 +340,7 @@ export const MemoryApp: React.FC = () => {
 									analysis={commitAnalysis}
 									bugRelations={commitBugRelations}
 									t={t}
+									onOpenFile={onOpenCommitFile}
 								/>
 							) : (
 								<div style={styles.placeholder}>{t('memory.selectCommit')}</div>

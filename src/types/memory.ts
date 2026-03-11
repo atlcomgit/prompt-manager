@@ -388,6 +388,7 @@ export type MemoryWebviewToExtensionMessage =
 	| { type: 'memoryReady' }
 	| { type: 'getMemoryCommits'; filter?: MemoryFilter }
 	| { type: 'getMemoryCommitDetail'; sha: string }
+	| { type: 'openMemoryFile'; repository: string; filePath: string }
 	| { type: 'searchMemory'; query: string; filter?: MemoryFilter }
 	| { type: 'deleteMemoryCommit'; sha: string }
 	| { type: 'clearMemory' }

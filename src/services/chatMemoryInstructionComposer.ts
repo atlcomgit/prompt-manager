@@ -88,7 +88,13 @@ export class ChatMemoryInstructionComposer {
 		const taskRef = input.prompt.taskNumber ? `${text.taskReference}: ${input.prompt.taskNumber}` : text.taskRef;
 		const branchRef = input.prompt.branch ? `${text.branch}: ${input.prompt.branch}` : text.branchRef;
 		const titleRef = input.prompt.title ? `${text.promptTitle}: ${input.prompt.title}` : text.titleRef;
-		const rawContext = (input.rawMemoryContext || '').trim() || text.emptyContext;
+		const structuredContext = (input.rawMemoryContext || '').trim();
+		const normalizedStructuredContext = structuredContext.replace(/\s+/g, ' ').trim();
+		const hasMeaningfulStructuredContext = Boolean(structuredContext)
+			&& normalizedStructuredContext !== text.contextTitle;
+		const contextSection = hasMeaningfulStructuredContext
+			? [structuredContext]
+			: [text.contextTitle, '', text.emptyContext];
 
 		return [
 			'---',
@@ -123,9 +129,7 @@ export class ChatMemoryInstructionComposer {
 			`- ${text.nav2}`,
 			`- ${text.nav3}`,
 			'',
-			text.contextTitle,
-			'',
-			rawContext,
+			...contextSection,
 			'',
 			text.usageTitle,
 			text.usageLine1,

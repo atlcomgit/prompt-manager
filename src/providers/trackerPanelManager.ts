@@ -5,6 +5,7 @@
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import type { PromptStatus } from '../types/prompt.js';
+import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
 import type { StorageService } from '../services/storageService.js';
 import type { StateService } from '../services/stateService.js';
 import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from '../types/messages.js';
@@ -30,6 +31,7 @@ export class TrackerPanelManager {
 		private readonly extensionUri: vscode.Uri,
 		private readonly storageService: StorageService,
 		private readonly stateService: StateService,
+		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
 	) { }
 
 	/** Open or focus the tracker panel */
@@ -126,6 +128,13 @@ export class TrackerPanelManager {
 				}
 				prompt.status = msg.status;
 				await this.storageService.savePrompt(prompt);
+				if (prompt.status !== 'in-progress') {
+					try {
+						await this.getChatMemoryInstructionService?.()?.handlePromptStatusChange(prompt);
+					} catch {
+						// keep tracker responsive if session cleanup fails
+					}
+				}
 				await this.refresh();
 				break;
 			}

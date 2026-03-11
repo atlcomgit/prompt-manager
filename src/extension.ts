@@ -4,7 +4,20 @@
 
 import * as vscode from 'vscode';
 import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService } from './services/index.js';
-import { SidebarProvider, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager, CopilotStatusBarProvider, CopilotUsagePanelManager } from './providers/index.js';
+import {
+	MemoryDatabaseService,
+	MemoryCleanupService,
+	MemoryHttpServerService,
+	MemoryGitHookService,
+	MemoryAnalyzerService,
+	MemoryEmbeddingService,
+	MemoryContextService,
+	MemoryNotificationService,
+	ChatMemoryInstructionComposer,
+	ChatMemoryInstructionService,
+} from './services/index.js';
+import { SidebarProvider, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager, CopilotStatusBarProvider, CopilotUsagePanelManager, MemoryPanelManager } from './providers/index.js';
+import type { MemoryCommit, HookCommitPayload, MemoryAnalysisDepth } from './types/index.js';
 
 export function activate(context: vscode.ExtensionContext) {
 	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -41,6 +54,7 @@ export function activate(context: vscode.ExtensionContext) {
 		workspaceService,
 		gitService,
 		stateService,
+		() => chatMemoryInstructionService,
 	);
 
 	const statisticsPanelManager = new StatisticsPanelManager(
@@ -52,12 +66,137 @@ export function activate(context: vscode.ExtensionContext) {
 		context.extensionUri,
 		storageService,
 		stateService,
+		() => chatMemoryInstructionService,
 	);
 
 	// Initialize Copilot Premium usage status bar
 	const copilotUsageService = new CopilotUsageService(context);
 	const copilotUsagePanelManager = new CopilotUsagePanelManager(context.extensionUri, copilotUsageService);
 	const copilotStatusBarProvider = new CopilotStatusBarProvider(copilotUsageService, copilotUsagePanelManager);
+
+	// ---- Project Memory System ----
+	const memoryEnabled = vscode.workspace.getConfiguration('promptManager').get<boolean>('memory.enabled', false);
+	let memoryDb: MemoryDatabaseService | undefined;
+	let memoryCleanup: MemoryCleanupService | undefined;
+	let memoryHttpServer: MemoryHttpServerService | undefined;
+	let memoryGitHook: MemoryGitHookService | undefined;
+	let memoryAnalyzer: MemoryAnalyzerService | undefined;
+	let memoryEmbedding: MemoryEmbeddingService | undefined;
+	let memoryContext: MemoryContextService | undefined;
+	let memoryNotification: MemoryNotificationService | undefined;
+	let memoryPanelManager: MemoryPanelManager | undefined;
+	let chatMemoryInstructionService: ChatMemoryInstructionService | undefined;
+
+	if (memoryEnabled) {
+		memoryDb = new MemoryDatabaseService(context.extensionUri);
+		memoryCleanup = new MemoryCleanupService(memoryDb);
+		memoryHttpServer = new MemoryHttpServerService();
+		memoryGitHook = new MemoryGitHookService();
+		memoryAnalyzer = new MemoryAnalyzerService();
+		memoryEmbedding = new MemoryEmbeddingService();
+		memoryNotification = new MemoryNotificationService();
+		const chatMemoryInstructionComposer = new ChatMemoryInstructionComposer();
+
+		// Initialize DB and start subsystems
+		void (async () => {
+			try {
+				await memoryDb!.initialize(workspaceRoot);
+				memoryCleanup!.start();
+
+				// Start HTTP server and install git hooks
+				const { port, token } = await memoryHttpServer!.start();
+				const folders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
+				await memoryGitHook!.installHooksForWorkspace(folders, port, token);
+
+				// Initialize embedding model in background
+				const embeddingsEnabled = vscode.workspace.getConfiguration('promptManager').get<boolean>('memory.embeddings.enabled', true);
+				if (embeddingsEnabled) {
+					const cacheDir = context.globalStorageUri.fsPath;
+					void memoryEmbedding!.initialize(cacheDir);
+				}
+
+				memoryContext = new MemoryContextService(memoryDb!, memoryEmbedding!);
+				chatMemoryInstructionService = new ChatMemoryInstructionService(
+					storageService,
+					memoryContext,
+					chatMemoryInstructionComposer,
+				);
+				await chatMemoryInstructionService.recoverSessionsOnStartup();
+				memoryPanelManager = new MemoryPanelManager(
+					context.extensionUri,
+					memoryDb!,
+					memoryContext,
+					memoryEmbedding!,
+					memoryAnalyzer!,
+					memoryGitHook!,
+				);
+
+				// Wire up pipeline: HTTP server → analyze → store → embed
+				memoryHttpServer!.onCommitReceived(async (payload: HookCommitPayload) => {
+					try {
+						if (memoryDb!.hasCommit(payload.sha)) { return; }
+
+						const config = vscode.workspace.getConfiguration('promptManager');
+						const depth = config.get<MemoryAnalysisDepth>('memory.analysisDepth', 'standard');
+						const diffLimit = config.get<number>('memory.diffLimit', 200000);
+
+						// Classify and store commit
+						const commitType = memoryAnalyzer!.classifyCommitType(payload.message);
+						const commit: MemoryCommit = {
+							sha: payload.sha,
+							author: payload.author,
+							email: payload.email,
+							date: payload.date,
+							branch: payload.branch,
+							repository: payload.repository,
+							parentSha: payload.parentSha,
+							commitType,
+							message: payload.message,
+						};
+						memoryDb!.insertCommit(commit);
+
+						// Run AI analysis
+						const result = await memoryAnalyzer!.analyzeCommit(payload, depth, diffLimit);
+						memoryDb!.insertAnalysis(result.analysis);
+						memoryDb!.insertFileChanges(result.fileChanges);
+						if (result.knowledgeNodes.length > 0) {
+							memoryDb!.insertKnowledgeNodes(result.knowledgeNodes);
+						}
+						if (result.bugRelation) {
+							memoryDb!.insertBugRelation(result.bugRelation);
+						}
+
+						// Generate embedding if enabled
+						if (embeddingsEnabled && memoryEmbedding!.isReady()) {
+							const text = `${payload.message}\n${result.analysis.summary}\n${result.analysis.keyInsights.join('\n')}`;
+							const vector = await memoryEmbedding!.generateEmbedding(text);
+							if (vector) {
+								memoryDb!.insertEmbedding({
+									commitSha: payload.sha,
+									vector,
+									text,
+									createdAt: new Date().toISOString(),
+								});
+							}
+						}
+
+						memoryNotification!.notifyCommitAnalysed(payload.sha.substring(0, 7), result.analysis.summary);
+
+						// Periodically update project summary
+						void memoryContext!.updateProjectSummary(payload.repository);
+					} catch (err) {
+						const msg = err instanceof Error ? err.message : String(err);
+						memoryNotification!.notifyError(`Memory analysis failed: ${msg}`);
+					}
+				});
+
+				memoryNotification!.updateStatusBar(memoryDb!.getCommitCount(), false);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				console.error('[PromptManager] Memory system init failed:', msg);
+			}
+		})();
+	}
 
 	// Register sidebar webview provider
 	context.subscriptions.push(
@@ -222,6 +361,11 @@ export function activate(context: vscode.ExtensionContext) {
 					} catch {
 						// keep chat flow even if instructions file sync fails
 					}
+					try {
+						await chatMemoryInstructionService?.prepareSessionInstruction(prompt);
+					} catch (error) {
+						console.error('[PromptManager] prepareSessionInstruction failed:', error);
+					}
 					parts.push(prompt.content);
 
 					const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
@@ -249,6 +393,7 @@ export function activate(context: vscode.ExtensionContext) {
 					}
 
 					const query = parts.join('\n');
+					const requestStartTimestamp = Date.now();
 					let requestModelIdentifier = '';
 					let requestModelSelector: vscode.LanguageModelChatSelector | undefined;
 
@@ -406,7 +551,61 @@ export function activate(context: vscode.ExtensionContext) {
 
 						await sendMessage(query);
 						copilotStatusBarProvider.notifyChatStarted();
-					} catch {
+						void (async () => {
+							let trackedSessionId = '';
+							const startedSession = await stateService.waitForChatSessionStarted(requestStartTimestamp, 15000, 500);
+							if (startedSession.ok && startedSession.sessionId) {
+								trackedSessionId = startedSession.sessionId;
+								try {
+									await chatMemoryInstructionService?.bindChatSession(prompt.promptUuid, trackedSessionId);
+								} catch (error) {
+									console.error('[PromptManager] bindChatSession failed:', error);
+								}
+								const promptFromStorage = await storageService.getPrompt(prompt.id);
+								if (promptFromStorage) {
+									promptFromStorage.chatSessionIds = [
+										trackedSessionId,
+										...(promptFromStorage.chatSessionIds || []).filter(id => id !== trackedSessionId),
+									];
+									await storageService.savePrompt(promptFromStorage, { historyReason: 'start-chat' });
+								}
+							}
+
+							const completion = await stateService.waitForChatRequestCompletion(
+								requestStartTimestamp,
+								180000,
+								1000,
+								trackedSessionId || undefined,
+							);
+							const completionObserved = Number(completion.lastRequestEnded || 0) > Number(completion.lastRequestStarted || 0);
+							if (completion.ok || completionObserved) {
+								try {
+									await chatMemoryInstructionService?.completeChatSession(
+										prompt.promptUuid,
+										'afterChatCompleted',
+										trackedSessionId || completion.sessionId || undefined,
+									);
+								} catch (error) {
+									console.error('[PromptManager] completeChatSession failed:', error);
+								}
+								return;
+							}
+
+							try {
+								await chatMemoryInstructionService?.noteChatError(
+									prompt.promptUuid,
+									`Chat completion not detected (${completion.reason || 'unknown'})`,
+									trackedSessionId || completion.sessionId || undefined,
+								);
+							} catch (error) {
+								console.error('[PromptManager] noteChatError failed:', error);
+							}
+						})();
+					} catch (error) {
+						void chatMemoryInstructionService?.noteChatError(
+							prompt.promptUuid,
+							error instanceof Error ? error.message : 'Failed to dispatch chat message',
+						);
 						// ignore optional compatibility attempts
 					}
 				}
@@ -428,6 +627,14 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('promptManager.showTracker', async () => {
 			await trackerPanelManager.show();
 		}),
+
+		vscode.commands.registerCommand('promptManager.openMemory', async () => {
+			if (memoryPanelManager) {
+				await memoryPanelManager.show();
+			} else {
+				vscode.window.showWarningMessage('Project Memory не включена. Активируйте в настройках: promptManager.memory.enabled');
+			}
+		}),
 	);
 
 	// Cleanup
@@ -440,6 +647,14 @@ export function activate(context: vscode.ExtensionContext) {
 			copilotUsagePanelManager.dispose();
 			copilotStatusBarProvider.dispose();
 			copilotUsageService.dispose();
+
+			// Memory system cleanup
+			memoryCleanup?.dispose();
+			memoryHttpServer?.dispose();
+			memoryEmbedding?.dispose();
+			memoryNotification?.dispose();
+			chatMemoryInstructionService?.dispose();
+			memoryDb?.close();
 		},
 	});
 

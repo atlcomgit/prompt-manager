@@ -14,6 +14,7 @@ import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../ty
 import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
+import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
 import { GitService } from '../services/gitService.js';
 import type { StateService } from '../services/stateService.js';
 import { TimeTrackingService } from '../services/timeTrackingService.js';
@@ -856,6 +857,7 @@ export class EditorPanelManager {
 		private readonly workspaceService: WorkspaceService,
 		private readonly gitService: GitService,
 		private readonly stateService: StateService,
+		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
 	) {
 		this.contentSyncDisposables.push(
 			vscode.workspace.onDidChangeTextDocument((event) => {
@@ -891,6 +893,10 @@ export class EditorPanelManager {
 				void this.syncPromptReportFromFileUri(uri, '');
 			})
 		);
+	}
+
+	private chatMemoryInstructionService(): ChatMemoryInstructionService | undefined {
+		return this.getChatMemoryInstructionService?.();
 	}
 
 	private shouldCaptureAgentFinalResponse(): boolean {
@@ -2371,6 +2377,13 @@ export class EditorPanelManager {
 						postMessage({ type: 'prompt', prompt: promptForPanel, reason: 'save', previousId: renameFromId });
 					}
 					await this.broadcastAvailableLanguagesAndFrameworks();
+					if (promptForPanel.status !== 'in-progress') {
+						try {
+							await this.chatMemoryInstructionService()?.handlePromptStatusChange(promptForPanel);
+						} catch (error) {
+							this.hooksOutput.appendLine(`[chat-memory] status cleanup after save failed: ${error instanceof Error ? error.message : String(error)}`);
+						}
+					}
 
 					this._onDidSave.fire(promptToSave.id);
 					if (promptToSave.id && promptToSave.id !== saveStateId) {
@@ -2598,6 +2611,11 @@ export class EditorPanelManager {
 
 						promptFromStorage.chatSessionIds = updatedChatSessionIds;
 						await this.storageService.savePrompt(promptFromStorage, { historyReason: 'start-chat' });
+						try {
+							await this.chatMemoryInstructionService()?.bindChatSession(promptFromStorage.promptUuid, normalizedSessionId);
+						} catch (error) {
+							this.hooksOutput.appendLine(`[chat-memory] bindChatSession failed for prompt=${promptFromStorage.id}: ${error instanceof Error ? error.message : String(error)}`);
+						}
 						Object.assign(prompt, promptFromStorage);
 						if (currentPrompt.id === promptFromStorage.id) {
 							Object.assign(currentPrompt, promptFromStorage);
@@ -2637,6 +2655,11 @@ export class EditorPanelManager {
 						await this.workspaceService.ensureChatInstructionsFile(globalContext);
 					} catch {
 						// keep chat flow even if instructions file sync fails
+					}
+					try {
+						await this.chatMemoryInstructionService()?.prepareSessionInstruction(prompt);
+					} catch (error) {
+						this.hooksOutput.appendLine(`[chat-memory] prepareSessionInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 					}
 
 					parts.push(prompt.content);
@@ -2886,6 +2909,15 @@ export class EditorPanelManager {
 							error: 'Failed to dispatch chat message via VS Code chat commands',
 							...hookPayloadBase,
 						}, 'chatError');
+						try {
+							await this.chatMemoryInstructionService()?.noteChatError(
+								prompt.promptUuid,
+								'Failed to dispatch chat message via VS Code chat commands',
+								trackedSessionId || undefined,
+							);
+						} catch (error) {
+							this.hooksOutput.appendLine(`[chat-memory] noteChatError failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+						}
 						// ignore optional compatibility attempts
 					}
 
@@ -2988,6 +3020,15 @@ export class EditorPanelManager {
 										timeSpentImplementing: promptToComplete?.timeSpentImplementing || 0,
 									}, 'afterChatCompleted');
 								}
+								try {
+									await this.chatMemoryInstructionService()?.completeChatSession(
+										prompt.promptUuid,
+										'afterChatCompleted',
+										trackedSessionId || undefined,
+									);
+								} catch (error) {
+									this.hooksOutput.appendLine(`[chat-memory] completeChatSession failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+								}
 								return;
 							}
 
@@ -3068,6 +3109,15 @@ export class EditorPanelManager {
 										timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
 									}, 'afterChatCompleted');
 								}
+								try {
+									await this.chatMemoryInstructionService()?.completeChatSession(
+										prompt.promptUuid,
+										'afterChatCompleted',
+										trackedSessionId || undefined,
+									);
+								} catch (error) {
+									this.hooksOutput.appendLine(`[chat-memory] completeChatSession fallback failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+								}
 								return;
 							}
 
@@ -3077,6 +3127,15 @@ export class EditorPanelManager {
 								chatCompletion: completion,
 								...hookPayloadBase,
 							}, 'chatError');
+							try {
+								await this.chatMemoryInstructionService()?.noteChatError(
+									prompt.promptUuid,
+									`Chat completion not detected (${completion.reason || 'unknown'})`,
+									trackedSessionId || undefined,
+								);
+							} catch (error) {
+								this.hooksOutput.appendLine(`[chat-memory] noteChatError completion failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+							}
 							this.hooksOutput.appendLine(`[chat-track] chatError fired for prompt=${prompt.id}: completion not detected`);
 						})();
 					}
@@ -3092,6 +3151,11 @@ export class EditorPanelManager {
 					if (hookStatus) {
 						prompt.status = hookStatus;
 						await this.storageService.savePrompt(prompt);
+						try {
+							await this.chatMemoryInstructionService()?.handlePromptStatusChange(prompt);
+						} catch (error) {
+							this.hooksOutput.appendLine(`[chat-memory] hook status cleanup failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+						}
 						this._onDidSave.fire(prompt.id);
 						if (currentPrompt.id === prompt.id) {
 							Object.assign(currentPrompt, prompt);

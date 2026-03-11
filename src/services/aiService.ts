@@ -22,7 +22,7 @@ export type ChatModelApplyResult = {
 
 export class AiService {
 	private static readonly DEFAULT_IMPROVE_PROMPT_INSTRUCTIONS = [
-		'Пиши на русском языке.',
+		// 'Пиши на русском языке.',
 		'Пиши ответ с обращением к одному лицу.',
 	];
 

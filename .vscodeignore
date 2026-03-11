@@ -4,6 +4,7 @@ src/**
 out/**
 out-tests/**
 node_modules/**
+!dist/sql-wasm.wasm
 esbuild.webview.mjs
 tsconfig.json
 .gitignore

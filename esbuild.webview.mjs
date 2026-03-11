@@ -25,6 +25,10 @@ const webviewEntries = [
     entry: "src/webview/copilotUsage/index.tsx",
     outfile: "dist/webview/copilotUsage.js",
   },
+  {
+    entry: "src/webview/memory/index.tsx",
+    outfile: "dist/webview/memory.js",
+  },
 ];
 
 const buildOptions = webviewEntries.map(({ entry, outfile }) => ({

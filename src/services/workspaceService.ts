@@ -17,7 +17,8 @@ export class WorkspaceService {
 	private hooksCache: DiscoveredItem[] | null = null;
 	private mcpToolsCache: DiscoveredItem[] | null = null;
 	private refreshInterval: NodeJS.Timeout | null = null;
-	private static readonly AGENT_INSTRUCTIONS_FOLDER = '.vscode/prompt-manager';
+	private static readonly LEGACY_AGENT_INSTRUCTIONS_FOLDER = '.vscode/prompt-manager';
+	private static readonly CHAT_MEMORY_INSTRUCTIONS_FOLDER = '.vscode/prompt-manager/chat-memory';
 	private static readonly PROJECT_INSTRUCTIONS_FOLDER = '.github/instructions';
 
 	constructor() {
@@ -274,8 +275,9 @@ export class WorkspaceService {
 			return;
 		}
 
-		const instructionsDir = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager');
-		const instructionsFile = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager', 'ai.instructions.md');
+		const instructionsDir = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager', 'chat-memory');
+		const instructionsFile = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager', 'chat-memory', 'ai.instructions.md');
+		const legacyInstructionsFile = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager', 'ai.instructions.md');
 		const projectInstructionsDir = vscode.Uri.joinPath(workspaceFolder.uri, '.github', 'instructions');
 		const projectInstructionsFile = vscode.Uri.joinPath(workspaceFolder.uri, '.github', 'instructions', 'prompt-manager.instructions.md');
 
@@ -289,13 +291,32 @@ export class WorkspaceService {
 
 		await vscode.workspace.fs.writeFile(instructionsFile, Buffer.from(fileContent, 'utf-8'));
 		await vscode.workspace.fs.writeFile(projectInstructionsFile, Buffer.from(fileContent, 'utf-8'));
+		try {
+			await vscode.workspace.fs.delete(legacyInstructionsFile);
+		} catch {
+			// ignore missing legacy file
+		}
 
 		const chatConfig = vscode.workspace.getConfiguration('chat', workspaceFolder.uri);
+		await this.removePathFromChatLocationsSetting(
+			chatConfig,
+			'instructionsFilesLocations',
+			WorkspaceService.LEGACY_AGENT_INSTRUCTIONS_FOLDER,
+			vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager').fsPath,
+			vscode.ConfigurationTarget.Workspace,
+		);
+		await this.removePathFromChatLocationsSetting(
+			chatConfig,
+			'instructionsFilesLocations',
+			WorkspaceService.LEGACY_AGENT_INSTRUCTIONS_FOLDER,
+			vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager').fsPath,
+			vscode.ConfigurationTarget.Global,
+		);
 		await this.ensurePathInChatLocationsSetting(
 			chatConfig,
 			'instructionsFilesLocations',
-			WorkspaceService.AGENT_INSTRUCTIONS_FOLDER,
-			vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager').fsPath,
+			WorkspaceService.CHAT_MEMORY_INSTRUCTIONS_FOLDER,
+			vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager', 'chat-memory').fsPath,
 			vscode.ConfigurationTarget.Workspace,
 			false,
 		);
@@ -417,6 +438,53 @@ export class WorkspaceService {
 		await chatConfig.update(settingKey, defaultValue, target);
 		if (fallbackToGlobal && !hasPath(chatConfig.get<unknown>(settingKey))) {
 			await chatConfig.update(settingKey, defaultValue, vscode.ConfigurationTarget.Global);
+		}
+	}
+
+	private async removePathFromChatLocationsSetting(
+		chatConfig: vscode.WorkspaceConfiguration,
+		settingKey: 'instructionsFilesLocations' | 'promptFilesLocations',
+		relativePath: string,
+		absolutePath: string,
+		target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Workspace,
+	): Promise<void> {
+		const currentValue = chatConfig.get<unknown>(settingKey);
+		const normalizedRelative = relativePath.replace(/\\/g, '/');
+		const normalizedAbsolute = absolutePath.replace(/\\/g, '/');
+		const matchesPath = (value: string): boolean => {
+			const normalized = value.replace(/\\/g, '/');
+			return normalized === normalizedRelative || normalized === normalizedAbsolute;
+		};
+
+		if (Array.isArray(currentValue)) {
+			const updated = currentValue
+				.filter((value): value is string => typeof value === 'string')
+				.filter(value => !matchesPath(value));
+			if (updated.length !== currentValue.length) {
+				await chatConfig.update(settingKey, updated, target);
+			}
+			return;
+		}
+
+		if (currentValue && typeof currentValue === 'object') {
+			const entries = currentValue as Record<string, unknown>;
+			const updated: Record<string, boolean> = {};
+			let changed = false;
+			for (const [key, value] of Object.entries(entries)) {
+				const effectiveKey = typeof value === 'string' && /^\d+$/.test(key) ? value : key;
+				if (matchesPath(effectiveKey)) {
+					changed = true;
+					continue;
+				}
+				if (typeof value === 'boolean') {
+					updated[key] = value;
+				} else {
+					updated[effectiveKey] = true;
+				}
+			}
+			if (changed) {
+				await chatConfig.update(settingKey, updated, target);
+			}
 		}
 	}
 }

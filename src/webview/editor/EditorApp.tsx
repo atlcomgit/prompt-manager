@@ -531,16 +531,19 @@ export const EditorApp: React.FC = () => {
           const shouldMergeAfterSave = reason === 'save' && userChangedAfterSave && saveStartCounterRef.current > 0;
           if (shouldMergeAfterSave) {
             // User changed something after save started — merge only server-generated fields, keep user edits
-            setPrompt(prev => ({
-              ...prev,
-              id: msg.prompt.id || prev.id,
-              title: prev.title || msg.prompt.title,
-              description: prev.description || msg.prompt.description,
-              updatedAt: msg.prompt.updatedAt,
-              chatSessionIds: msg.prompt.chatSessionIds || prev.chatSessionIds,
-            }));
+          const mergedPrompt = {
+            ...promptRef.current,
+            id: msg.prompt.id || promptRef.current.id,
+            title: promptRef.current.title || msg.prompt.title,
+            description: promptRef.current.description || msg.prompt.description,
+            updatedAt: msg.prompt.updatedAt,
+            chatSessionIds: msg.prompt.chatSessionIds || promptRef.current.chatSessionIds,
+          };
+          promptRef.current = mergedPrompt;
+          setPrompt(mergedPrompt);
             // Keep isDirty = true so next auto-save picks up user's changes
           } else {
+          promptRef.current = msg.prompt;
             setPrompt(msg.prompt);
             localReportDirtyRef.current = false;
             setIsDirty(false);

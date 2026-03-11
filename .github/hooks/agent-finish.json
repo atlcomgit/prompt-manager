@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "/home/alek/.copilot/hooks/agent-finish.sh",
+        "timeout": 60
+      }
+    ]
+  }
+}

@@ -21,6 +21,8 @@ export const PROMPT_STATUS_ORDER: PromptStatus[] = [
 export interface PromptConfig {
 	/** Unique identifier (folder name / slug) */
 	id: string;
+	/** Stable UUID that survives slug/folder renames */
+	promptUuid: string;
 	/** Human-readable title */
 	title: string;
 	/** Short description */
@@ -113,6 +115,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 	const now = new Date().toISOString();
 	return {
 		id,
+		promptUuid: '',
 		title: '',
 		description: '',
 		status: 'draft',

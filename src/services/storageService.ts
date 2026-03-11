@@ -9,6 +9,7 @@
  */
 
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import * as path from 'path';
 import type {
 	Prompt,
@@ -33,6 +34,7 @@ export type DailyTimeData = Record<string, DailyTimeEntry>;
 
 export class StorageService {
 	private readonly STORAGE_DIR = '.vscode/prompt-manager';
+	private readonly RESERVED_PROMPT_DIR_NAMES = new Set(['chat-memory']);
 	private readonly HISTORY_DIR_NAME = 'history';
 	private readonly DAILY_TIME_FILE = 'daily-time.json';
 	private readonly HISTORY_LIMIT = 20;
@@ -58,6 +60,56 @@ export class StorageService {
 	/** Get path to a prompt folder */
 	private promptDir(id: string): string {
 		return path.join(this.storageDir, id);
+	}
+
+	private normalizePromptId(baseId: string): string {
+		const trimmed = (baseId || '').trim();
+		return trimmed || 'prompt';
+	}
+
+	private isReservedPromptDirName(id: string): boolean {
+		return this.RESERVED_PROMPT_DIR_NAMES.has((id || '').trim());
+	}
+
+	private ensurePromptUuid<T extends Prompt | PromptConfig>(prompt: T): T {
+		if (!(prompt.promptUuid || '').trim()) {
+			prompt.promptUuid = crypto.randomUUID();
+		}
+		return prompt;
+	}
+
+	private async findPromptIdByUuid(promptUuid: string): Promise<string | undefined> {
+		const normalizedPromptUuid = (promptUuid || '').trim();
+		if (!normalizedPromptUuid) {
+			return undefined;
+		}
+
+		const prompts = await this.listPrompts();
+		return prompts.find(prompt => (prompt.promptUuid || '').trim() === normalizedPromptUuid)?.id;
+	}
+
+	private async resolveExistingPromptIdentity(prompt: Prompt, requestedPreviousId: string): Promise<string | undefined> {
+		const normalizedPreviousId = requestedPreviousId.trim();
+		if (normalizedPreviousId) {
+			return normalizedPreviousId;
+		}
+
+		const canonicalPromptId = await this.findPromptIdByUuid(prompt.promptUuid);
+		if (canonicalPromptId) {
+			return canonicalPromptId;
+		}
+
+		const normalizedPromptId = (prompt.id || '').trim();
+		if (!normalizedPromptId) {
+			return undefined;
+		}
+
+		const existingPrompt = await this.getPrompt(normalizedPromptId);
+		if (existingPrompt && (existingPrompt.promptUuid || '').trim() === (prompt.promptUuid || '').trim()) {
+			return normalizedPromptId;
+		}
+
+		return undefined;
 	}
 
 	private async ensurePromptDirectory(id: string): Promise<string> {
@@ -305,10 +357,11 @@ export class StorageService {
 				...defaults,
 				...parsed,
 				id,
+				promptUuid: typeof parsed.promptUuid === 'string' ? parsed.promptUuid : '',
 				timeSpentOnTask: typeof parsed.timeSpentOnTask === 'number' ? parsed.timeSpentOnTask : 0,
 				timeSpentUntracked: typeof parsed.timeSpentUntracked === 'number' ? parsed.timeSpentUntracked : 0,
 			};
-			return normalized;
+			return this.ensurePromptUuid(normalized);
 		} catch {
 			return null;
 		}
@@ -358,10 +411,16 @@ export class StorageService {
 		options?: { historyReason?: PromptHistoryReason | string; forceHistory?: boolean; skipHistory?: boolean; previousId?: string }
 	): Promise<PromptConfig> {
 		await this.ensureStorageDir();
+		this.ensurePromptUuid(prompt);
+		const requestedPreviousId = (options?.previousId || '').trim();
+		const existingPromptIdentity = await this.resolveExistingPromptIdentity(prompt, requestedPreviousId);
+		if (existingPromptIdentity && existingPromptIdentity !== prompt.id) {
+			prompt.id = existingPromptIdentity;
+		}
 		const reason = this.normalizeHistoryReason(options?.historyReason);
 		const forceHistory = Boolean(options?.forceHistory);
 		const skipHistory = Boolean(options?.skipHistory);
-		const previousId = (options?.previousId || '').trim();
+		const previousId = existingPromptIdentity || requestedPreviousId;
 		const existingPromptId = previousId || prompt.id;
 		const existingPrompt = existingPromptId ? await this.getPrompt(existingPromptId) : null;
 		if (!skipHistory && existingPromptId) {
@@ -370,6 +429,9 @@ export class StorageService {
 				await this.createHistorySnapshot(existingPrompt, reason);
 			}
 		}
+
+		const safePromptId = await this.uniqueId(prompt.id, existingPromptIdentity || previousId || undefined);
+		prompt.id = safePromptId;
 
 		if (previousId && previousId !== prompt.id) {
 			await this.renamePromptDirectory(previousId, prompt.id);
@@ -494,6 +556,7 @@ export class StorageService {
 		const duplicate: Prompt = {
 			...source,
 			id: newId,
+			promptUuid: '',
 			title: `${source.title} (copy)`,
 			chatSessionIds: [],
 			timeSpentWriting: 0,
@@ -520,10 +583,11 @@ export class StorageService {
 
 	/** Generate a unique id by appending number if needed */
 	async uniqueId(baseId: string, excludeId?: string): Promise<string> {
-		let id = baseId;
+		const normalizedBaseId = this.normalizePromptId(baseId);
+		let id = normalizedBaseId;
 		let counter = 1;
-		while (await this.exists(id) && id !== excludeId) {
-			id = `${baseId}-${counter}`;
+		while (this.isReservedPromptDirName(id) || ((await this.exists(id)) && id !== excludeId)) {
+			id = `${normalizedBaseId}-${counter}`;
 			counter++;
 		}
 		return id;
@@ -541,7 +605,13 @@ export class StorageService {
 			vscode.Uri.file(targetDir)
 		);
 
-		return this.getPrompt(newId);
+		const imported = await this.getPrompt(newId);
+		if (!imported) {
+			return null;
+		}
+		imported.promptUuid = '';
+		await this.savePrompt(imported, { skipHistory: true });
+		return this.getPrompt(imported.id);
 	}
 
 	/** Export a prompt to an external folder */

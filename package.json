@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage, organize and use AI prompts directly in VS Code with Copilot Chat integration",
-  "version": "0.1.50",
+  "version": "0.1.51",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -81,7 +81,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.1.50",
+        "title": "About 0.1.51",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },
@@ -138,6 +138,12 @@
         "title": "Open Project Memory",
         "category": "Prompt Manager",
         "icon": "$(database)"
+      },
+      {
+        "command": "promptManager.openSettings",
+        "title": "Open Prompt Manager Settings",
+        "category": "Prompt Manager",
+        "icon": "$(gear)"
       }
     ],
     "menus": {
@@ -169,6 +175,11 @@
         },
         {
           "command": "promptManager.openMemory",
+          "when": "view == promptManager.sidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "promptManager.openSettings",
           "when": "view == promptManager.sidebar",
           "group": "navigation"
         },
@@ -248,6 +259,16 @@
         "promptManager.captureAgentFinalResponse": {
           "type": "boolean",
           "description": "Save the final agent chat response to the prompt report and include it in afterChatCompleted hooks (for example, Telegram integrations).",
+          "default": false
+        },
+        "promptManager.startup.openTracker": {
+          "type": "boolean",
+          "description": "Automatically open the Prompt Tracker panel when VS Code starts.",
+          "default": false
+        },
+        "promptManager.startup.restoreLastOpenPrompt": {
+          "type": "boolean",
+          "description": "Automatically reopen the last prompt editor on startup if it was open when VS Code was closed.",
           "default": false
         },
         "promptManager.memory.enabled": {

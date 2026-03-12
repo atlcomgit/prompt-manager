@@ -17,6 +17,8 @@ const execFileAsync = promisify(execFile);
 const SIDEBAR_STATE_KEY = 'promptManager.sidebarState';
 const LAST_PROMPT_KEY = 'promptManager.lastPromptId';
 const GLOBAL_AGENT_CONTEXT_KEY = 'promptManager.globalAgentContext';
+const STARTUP_EDITOR_OPEN_KEY = 'promptManager.startup.editorOpen';
+const STARTUP_EDITOR_PROMPT_ID_KEY = 'promptManager.startup.editorPromptId';
 
 export class StateService {
 	constructor(private readonly context: vscode.ExtensionContext) { }
@@ -622,6 +624,22 @@ export class StateService {
 	/** Save last opened prompt id */
 	async saveLastPromptId(id: string): Promise<void> {
 		await this.context.workspaceState.update(LAST_PROMPT_KEY, id);
+	}
+
+	/** Get persisted startup restore state for the prompt editor */
+	getStartupEditorRestoreState(): { wasOpen: boolean; promptId: string | null } {
+		return {
+			wasOpen: this.context.workspaceState.get<boolean>(STARTUP_EDITOR_OPEN_KEY, false),
+			promptId: this.context.workspaceState.get<string>(STARTUP_EDITOR_PROMPT_ID_KEY) || null,
+		};
+	}
+
+	/** Save persisted startup restore state for the prompt editor */
+	async saveStartupEditorRestoreState(wasOpen: boolean, promptId: string | null): Promise<void> {
+		await Promise.all([
+			this.context.workspaceState.update(STARTUP_EDITOR_OPEN_KEY, wasOpen),
+			this.context.workspaceState.update(STARTUP_EDITOR_PROMPT_ID_KEY, promptId && promptId.trim() ? promptId.trim() : undefined),
+		]);
 	}
 
 	/** Get global agent context */

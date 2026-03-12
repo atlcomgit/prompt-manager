@@ -52,12 +52,35 @@ export class EditorPanelManager {
 	private openPromptQueue: Promise<void> | null = null;
 	private pendingOpenPromptId: string | null = null;
 	private openPromptRequestVersion = 0;
+	private isShuttingDown = false;
 	private readonly markdownRenderer = new MarkdownIt({
 		html: false,
 		linkify: true,
 		breaks: false,
 		typographer: false,
 	});
+
+	private syncStartupEditorRestoreState(): void {
+		if (this.isShuttingDown) {
+			return;
+		}
+
+		const promptId = (this.panelPromptRefs.get(SINGLE_EDITOR_PANEL_KEY)?.id || '').trim() || null;
+		void this.stateService.saveStartupEditorRestoreState(Boolean(openPanels.get(SINGLE_EDITOR_PANEL_KEY)), promptId);
+	}
+
+	private setPanelPromptRef(panelKey: string, prompt: Prompt): void {
+		this.panelPromptRefs.set(panelKey, prompt);
+		if (panelKey === SINGLE_EDITOR_PANEL_KEY) {
+			this.syncStartupEditorRestoreState();
+		}
+	}
+
+	prepareForShutdown(): void {
+		this.isShuttingDown = true;
+		const promptId = (this.panelPromptRefs.get(SINGLE_EDITOR_PANEL_KEY)?.id || '').trim() || null;
+		void this.stateService.saveStartupEditorRestoreState(Boolean(openPanels.get(SINGLE_EDITOR_PANEL_KEY)), promptId);
+	}
 
 	private async runConfiguredHooks(
 		hookIds: string[],
@@ -1346,7 +1369,7 @@ export class EditorPanelManager {
 			const panel = openPanels.get(panelKey);
 			if (panel) {
 				Object.assign(currentPrompt, saved);
-				this.panelPromptRefs.set(panelKey, currentPrompt);
+				this.setPanelPromptRef(panelKey, currentPrompt);
 
 				if (panelKey.startsWith('new-')) {
 					openPanels.delete(panelKey);
@@ -1442,7 +1465,7 @@ export class EditorPanelManager {
 		const saved = await this.storageService.savePrompt(currentPrompt, { historyReason: 'manual' });
 
 		Object.assign(currentPrompt, saved);
-		this.panelPromptRefs.set(panelKey, currentPrompt);
+		this.setPanelPromptRef(panelKey, currentPrompt);
 		panel.title = `⚡ ${saved.title || saved.id}`;
 		postMessage({ type: 'promptSaved', prompt: saved });
 		postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'save' });
@@ -1466,7 +1489,7 @@ export class EditorPanelManager {
 		if (latestStoredPrompt) {
 			currentPrompt.report = latestStoredPrompt.report;
 			currentPrompt.updatedAt = latestStoredPrompt.updatedAt || currentPrompt.updatedAt;
-			this.panelPromptRefs.set(panelKey, currentPrompt);
+			this.setPanelPromptRef(panelKey, currentPrompt);
 			this.ensureReportEditorBinding(panelKey, currentPrompt);
 			postMessage({
 				type: 'reportContentUpdated',
@@ -1597,7 +1620,7 @@ export class EditorPanelManager {
 
 					if (currentPrompt.id === targetPromptId) {
 						currentPrompt.report = nextReport;
-						this.panelPromptRefs.set(panelKey, currentPrompt);
+						this.setPanelPromptRef(panelKey, currentPrompt);
 						this.ensureReportEditorBinding(panelKey, currentPrompt);
 						this.logReportDebug('reportEditorUpdate.forwardedToMainPanel', {
 							panelKey,
@@ -1633,7 +1656,7 @@ export class EditorPanelManager {
 							currentPrompt.timeSpentWriting = Math.max(saved.timeSpentWriting || 0, currentPrompt.timeSpentWriting || 0);
 							currentPrompt.timeSpentOnTask = Math.max(saved.timeSpentOnTask || 0, currentPrompt.timeSpentOnTask || 0);
 							currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
-							this.panelPromptRefs.set(panelKey, currentPrompt);
+							this.setPanelPromptRef(panelKey, currentPrompt);
 							this.ensureReportEditorBinding(panelKey, currentPrompt);
 						} else {
 							this.logReportDebug('reportEditorUpdate.persistedStale', {
@@ -1753,7 +1776,7 @@ export class EditorPanelManager {
 						if (currentPrompt.id === targetPromptId) {
 							currentPrompt.report = storedPrompt.report;
 							currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
-							this.panelPromptRefs.set(panelKey, currentPrompt);
+							this.setPanelPromptRef(panelKey, currentPrompt);
 							this.ensureReportEditorBinding(panelKey, currentPrompt);
 							postMessage({
 								type: 'reportContentUpdated',
@@ -1873,6 +1896,7 @@ export class EditorPanelManager {
 		const singletonPanel = openPanels.get(panelKey);
 		const singletonPrompt = this.panelPromptRefs.get(panelKey);
 		if (!isNew && singletonPanel && singletonPrompt?.id === promptId) {
+			this.syncStartupEditorRestoreState();
 			singletonPanel.reveal();
 			return;
 		}
@@ -1992,6 +2016,7 @@ export class EditorPanelManager {
 				bootId,
 			);
 			singletonPanel.reveal(vscode.ViewColumn.One);
+			this.syncStartupEditorRestoreState();
 
 			for (const existingPanel of panelsToDispose) {
 				this.silentClosePanels.add(existingPanel);
@@ -2026,6 +2051,7 @@ export class EditorPanelManager {
 
 		openPanels.set(panelKey, panel);
 		this.panelDirtySetters.set(panelKey, setPanelDirty);
+		this.syncStartupEditorRestoreState();
 
 		for (const existingPanel of panelsToDispose) {
 			this.silentClosePanels.add(existingPanel);
@@ -2048,6 +2074,7 @@ export class EditorPanelManager {
 			const linkedKeys = [...openPanels.entries()]
 				.filter(([, p]) => p === panel)
 				.map(([key]) => key);
+			const disposedCurrentEditorPanel = linkedKeys.includes(SINGLE_EDITOR_PANEL_KEY);
 			const skipUnsavedPrompt = this.silentClosePanels.has(panel);
 			this.silentClosePanels.delete(panel);
 			for (const key of linkedKeys) {
@@ -2062,6 +2089,10 @@ export class EditorPanelManager {
 				this.panelBasePrompts.delete(key);
 				this.clearContentEditorBinding(key);
 				this.clearReportEditorBinding(key);
+			}
+
+			if (disposedCurrentEditorPanel && !this.isShuttingDown) {
+				await this.stateService.saveStartupEditorRestoreState(false, null);
 			}
 
 			if (skipUnsavedPrompt) {
@@ -2179,7 +2210,7 @@ export class EditorPanelManager {
 					this.panelDirtyFlags.set(panelKey, msg.dirty);
 					if (msg.prompt) {
 						Object.assign(currentPrompt, msg.prompt);
-						this.panelPromptRefs.set(panelKey, currentPrompt);
+						this.setPanelPromptRef(panelKey, currentPrompt);
 						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(msg.prompt)));
 					} else if (msg.dirty && !latestPromptState) {
 						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(currentPrompt)));
@@ -2435,7 +2466,7 @@ export class EditorPanelManager {
 						setIsDirty(false);
 						// Update current prompt reference
 						Object.assign(currentPrompt, promptForPanel);
-						this.panelPromptRefs.set(panelKey, currentPrompt);
+						this.setPanelPromptRef(panelKey, currentPrompt);
 						this.ensureContentEditorBinding(panelKey, currentPrompt);
 						this.ensureReportEditorBinding(panelKey, currentPrompt);
 					}
@@ -2507,7 +2538,7 @@ export class EditorPanelManager {
 				const nextReport = typeof msg.report === 'string' ? msg.report : '';
 				const previousReport = currentPrompt.report || '';
 				currentPrompt.report = nextReport;
-				this.panelPromptRefs.set(panelKey, currentPrompt);
+				this.setPanelPromptRef(panelKey, currentPrompt);
 				const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
 				if (latestSnapshot) {
 					latestSnapshot.report = nextReport;
@@ -2580,7 +2611,7 @@ export class EditorPanelManager {
 				}
 
 				Object.assign(currentPrompt, restored);
-				this.panelPromptRefs.set(panelKey, currentPrompt);
+				this.setPanelPromptRef(panelKey, currentPrompt);
 				setIsDirty(false);
 				this.panelDirtyFlags.set(panelKey, false);
 				this.panelLatestPromptSnapshots.set(panelKey, null);

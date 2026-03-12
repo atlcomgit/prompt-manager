@@ -26,6 +26,8 @@ export function activate(context: vscode.ExtensionContext) {
 		return;
 	}
 
+	const extensionSettingsQuery = '@ext:alek-fiend.copilot-prompt-manager';
+
 	// Initialize services
 	const storageService = new StorageService(workspaceRoot);
 	const aiService = new AiService();
@@ -649,12 +651,46 @@ export function activate(context: vscode.ExtensionContext) {
 				vscode.window.showWarningMessage('Project Memory не включена. Активируйте в настройках: promptManager.memory.enabled');
 			}
 		}),
+
+		vscode.commands.registerCommand('promptManager.openSettings', async () => {
+			await vscode.commands.executeCommand('workbench.action.openSettings', extensionSettingsQuery);
+		}),
 	);
+
+	const startupConfig = vscode.workspace.getConfiguration('promptManager');
+	const shouldOpenTrackerOnStartup = startupConfig.get<boolean>('startup.openTracker', false);
+	const shouldRestoreLastOpenPromptOnStartup = startupConfig.get<boolean>('startup.restoreLastOpenPrompt', false);
+
+	if (shouldOpenTrackerOnStartup || shouldRestoreLastOpenPromptOnStartup) {
+		void (async () => {
+			if (shouldOpenTrackerOnStartup) {
+				await trackerPanelManager.show();
+			}
+
+			if (!shouldRestoreLastOpenPromptOnStartup) {
+				return;
+			}
+
+			const { wasOpen, promptId } = stateService.getStartupEditorRestoreState();
+			if (!wasOpen || !promptId) {
+				return;
+			}
+
+			const prompt = await storageService.getPrompt(promptId);
+			if (!prompt) {
+				await stateService.saveStartupEditorRestoreState(false, null);
+				return;
+			}
+
+			await editorPanelManager.openPrompt(prompt.id);
+		})();
+	}
 
 	// Cleanup
 	context.subscriptions.push({
 		dispose() {
 			workspaceService.dispose();
+			editorPanelManager.prepareForShutdown();
 			editorPanelManager.disposeAll();
 			statisticsPanelManager.dispose();
 			trackerPanelManager.dispose();

@@ -19,7 +19,6 @@ const FILE_TREE_INTERACTION_STYLES = `
 
 	.pm-memory-file-link:hover {
 		background: color-mix(in srgb, var(--vscode-list-hoverBackground) 72%, transparent);
-		color: var(--vscode-textLink-foreground);
 		transform: translateX(2px);
 	}
 
@@ -133,6 +132,9 @@ export const CommitDetail: React.FC<Props> = ({ commit, fileChanges, analysis, b
 						{fileTreeLines.map((line) => {
 							const status = line.kind === 'file' ? fileStatuses.get(line.path) : undefined;
 							const isFile = line.kind === 'file';
+							const fileButtonStyle = status
+								? { ...styles.fileTreeButton, color: getStatusColor(status) }
+								: styles.fileTreeButton;
 							// prefix содержит отступы (│   /    ), connector — ├── /└── .
 							// Рендерим как pre-текст моноширинным шрифтом — гарантированно ровное выравнивание.
 							const prefixText = line.prefix + line.connector;
@@ -144,7 +146,7 @@ export const CommitDetail: React.FC<Props> = ({ commit, fileChanges, analysis, b
 									{isFile ? (
 										<button
 											type="button"
-											style={styles.fileTreeButton}
+											style={fileButtonStyle}
 											className="pm-memory-file-link"
 											onClick={() => onOpenFile?.(commit.repository, line.path)}
 											title={line.path}
@@ -197,7 +199,15 @@ function getFileStatusLetter(changeType: MemoryFileChange['changeType']): string
 }
 
 function getStatusBadgeStyle(status: string): React.CSSProperties {
-	const backgroundByStatus: Record<string, string> = {
+	return {
+		...styles.fileStatusBadge,
+		borderColor: getStatusColor(status),
+		color: getStatusColor(status),
+	};
+}
+
+function getStatusColor(status?: string): string {
+	const colorByStatus: Record<string, string> = {
 		A: 'var(--vscode-testing-iconPassed)',
 		M: 'var(--vscode-gitDecoration-modifiedResourceForeground)',
 		D: 'var(--vscode-gitDecoration-deletedResourceForeground)',
@@ -205,11 +215,7 @@ function getStatusBadgeStyle(status: string): React.CSSProperties {
 		C: 'var(--vscode-gitDecoration-addedResourceForeground)',
 	};
 
-	return {
-		...styles.fileStatusBadge,
-		borderColor: backgroundByStatus[status] || 'var(--vscode-panel-border)',
-		color: backgroundByStatus[status] || 'var(--vscode-foreground)',
-	};
+	return colorByStatus[status || ''] || 'var(--vscode-foreground)';
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -290,7 +296,7 @@ const styles: Record<string, React.CSSProperties> = {
 		margin: 0,
 		border: 'none',
 		background: 'transparent',
-		color: 'inherit',
+		color: 'var(--vscode-foreground)',
 		font: 'inherit',
 		textAlign: 'left' as const,
 		cursor: 'pointer',

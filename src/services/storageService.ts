@@ -20,6 +20,7 @@ import type {
 	PromptStatus,
 } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
+import { normalizeStoredPromptConfig } from '../utils/promptConfig.js';
 
 /** Daily time entry for a prompt (ms per category) */
 export interface DailyTimeEntry {
@@ -352,16 +353,24 @@ export class StorageService {
 		try {
 			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(configPath));
 			const parsed = JSON.parse(Buffer.from(raw).toString('utf-8')) as Partial<PromptConfig>;
-			const defaults = createDefaultPrompt(id);
-			const normalized: PromptConfig = {
-				...defaults,
-				...parsed,
+			const { config, shouldBackfillPromptUuid } = normalizeStoredPromptConfig(
 				id,
-				promptUuid: typeof parsed.promptUuid === 'string' ? parsed.promptUuid : '',
-				timeSpentOnTask: typeof parsed.timeSpentOnTask === 'number' ? parsed.timeSpentOnTask : 0,
-				timeSpentUntracked: typeof parsed.timeSpentUntracked === 'number' ? parsed.timeSpentUntracked : 0,
-			};
-			return this.ensurePromptUuid(normalized);
+				parsed,
+				() => crypto.randomUUID(),
+			);
+
+			if (shouldBackfillPromptUuid) {
+				try {
+					await vscode.workspace.fs.writeFile(
+						vscode.Uri.file(configPath),
+						Buffer.from(JSON.stringify(config, null, 2), 'utf-8'),
+					);
+				} catch {
+					// Ignore backfill failures and continue with in-memory config.
+				}
+			}
+
+			return config;
 		} catch {
 			return null;
 		}

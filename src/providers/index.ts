@@ -1,4 +1,5 @@
 export { SidebarProvider } from './sidebarProvider.js';
+export { AboutPanelManager } from './aboutPanelManager.js';
 export { EditorPanelManager } from './editorPanelManager.js';
 export { StatisticsPanelManager } from './statisticsPanelManager.js';
 export { TrackerPanelManager } from './trackerPanelManager.js';

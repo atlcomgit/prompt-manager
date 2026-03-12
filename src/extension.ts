@@ -16,7 +16,7 @@ import {
 	ChatMemoryInstructionComposer,
 	ChatMemoryInstructionService,
 } from './services/index.js';
-import { SidebarProvider, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager, CopilotStatusBarProvider, CopilotUsagePanelManager, MemoryPanelManager } from './providers/index.js';
+import { SidebarProvider, AboutPanelManager, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager, CopilotStatusBarProvider, CopilotUsagePanelManager, MemoryPanelManager } from './providers/index.js';
 import type { MemoryCommit, HookCommitPayload, MemoryAnalysisDepth } from './types/index.js';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -32,6 +32,8 @@ export function activate(context: vscode.ExtensionContext) {
 	const workspaceService = new WorkspaceService();
 	const gitService = new GitService();
 	const stateService = new StateService(context);
+	const extensionPackage = context.extension.packageJSON as { description?: string; version?: string };
+	const extensionVersion = String(extensionPackage.version || '0.0.0');
 
 	void workspaceService.ensureChatInstructionsFile(stateService.getGlobalAgentContext()).catch(() => {
 		// keep activation resilient if chat settings/files sync fails
@@ -60,6 +62,12 @@ export function activate(context: vscode.ExtensionContext) {
 	const statisticsPanelManager = new StatisticsPanelManager(
 		context.extensionUri,
 		storageService,
+	);
+
+	const aboutPanelManager = new AboutPanelManager(
+		context.extensionUri,
+		extensionVersion,
+		String(extensionPackage.description || ''),
 	);
 
 	const trackerPanelManager = new TrackerPanelManager(
@@ -302,6 +310,10 @@ export function activate(context: vscode.ExtensionContext) {
 					await editorPanelManager.openPrompt(imported.id);
 				}
 			}
+		}),
+
+		vscode.commands.registerCommand('promptManager.showAbout', async () => {
+			await aboutPanelManager.show();
 		}),
 
 		vscode.commands.registerCommand('promptManager.exportPrompt', async () => {

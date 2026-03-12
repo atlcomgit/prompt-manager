@@ -33,6 +33,20 @@ export interface PreparedCommitProjectData {
 	diff: string;
 }
 
+export interface UncommittedProjectData {
+	project: string;
+	projectPath: string;
+	branch: string;
+	stagedFiles: StagedFileChange[];
+	unstagedFiles: StagedFileChange[];
+	untrackedFiles: StagedFileChange[];
+	stagedStat: string;
+	unstagedStat: string;
+	stagedDiff: string;
+	unstagedDiff: string;
+	untrackedDiff: string;
+}
+
 export class GitService {
 	private static readonly DIFF_MAX_BUFFER = 8 * 1024 * 1024;
 
@@ -89,59 +103,146 @@ export class GitService {
 			.catch(() => `diff --git a/${relativePath} b/${relativePath}\n+++ b/${relativePath}\n+[unable to read file preview]`);
 	}
 
-	private async getWorkingTreeProjectData(project: string, projectPath: string): Promise<PreparedCommitProjectData | null> {
+	private async getUncommittedProjectSnapshot(project: string, projectPath: string): Promise<UncommittedProjectData | null> {
 		const statusOutput = await this.runGitFileCommand(projectPath, ['status', '--porcelain']);
-		if (!statusOutput) {
-			return null;
-		}
-
 		const statusLines = statusOutput.split(/\r?\n/).filter(Boolean);
 		const untrackedFiles = statusLines
 			.filter(line => line.startsWith('?? '))
 			.map(line => line.slice(3).trim())
 			.filter(Boolean);
 
-		const trackedNameStatus = await this.runGitFileCommand(projectPath, [
-			'diff',
-			'--name-status',
-			'--find-renames',
-			'--diff-filter=ACDMR',
+		const [stagedNameStatus, unstagedNameStatus] = await Promise.all([
+			this.runGitFileCommand(projectPath, [
+				'diff',
+				'--cached',
+				'--name-status',
+				'--find-renames',
+				'--diff-filter=ACDMR',
+			]),
+			this.runGitFileCommand(projectPath, [
+				'diff',
+				'--name-status',
+				'--find-renames',
+				'--diff-filter=ACDMR',
+			]),
 		]);
 
-		const trackedFiles = trackedNameStatus ? this.parseStagedNameStatus(trackedNameStatus) : [];
+		const stagedFiles = stagedNameStatus ? this.parseStagedNameStatus(stagedNameStatus) : [];
+		const unstagedFiles = unstagedNameStatus ? this.parseStagedNameStatus(unstagedNameStatus) : [];
 		const untrackedChanges: StagedFileChange[] = untrackedFiles.map((filePath) => ({
 			status: 'A',
 			path: filePath,
 		}));
 
-		const allFiles = [...trackedFiles, ...untrackedChanges];
-		if (allFiles.length === 0) {
+		if (stagedFiles.length === 0 && unstagedFiles.length === 0 && untrackedChanges.length === 0) {
 			return null;
 		}
 
-		const [trackedStat, trackedDiff, branch, untrackedPreviews] = await Promise.all([
-			this.runGitFileCommand(projectPath, ['diff', '--stat']),
-			this.runGitFileCommand(projectPath, ['diff', '--no-color', '--no-ext-diff', '--find-renames', '--diff-filter=ACDMR', '--unified=3']),
+		const [stagedStat, stagedDiff, unstagedStat, unstagedDiff, branch, untrackedPreviews] = await Promise.all([
+			stagedFiles.length > 0
+				? this.runGitFileCommand(projectPath, [
+					'diff',
+					'--cached',
+					'--stat',
+					'--find-renames',
+					'--diff-filter=ACDMR',
+				])
+				: Promise.resolve(''),
+			stagedFiles.length > 0
+				? this.runGitFileCommand(projectPath, [
+					'diff',
+					'--cached',
+					'--no-color',
+					'--no-ext-diff',
+					'--find-renames',
+					'--diff-filter=ACDMR',
+					'--unified=3',
+				])
+				: Promise.resolve(''),
+			unstagedFiles.length > 0
+				? this.runGitFileCommand(projectPath, ['diff', '--stat'])
+				: Promise.resolve(''),
+			unstagedFiles.length > 0
+				? this.runGitFileCommand(projectPath, ['diff', '--no-color', '--no-ext-diff', '--find-renames', '--diff-filter=ACDMR', '--unified=3'])
+				: Promise.resolve(''),
 			this.getCurrentBranch(projectPath),
 			Promise.all(untrackedFiles.map((filePath) => this.buildUntrackedPreview(projectPath, filePath))),
 		]);
-
-		const statParts = [trackedStat];
-		if (untrackedFiles.length > 0) {
-			statParts.push(`Untracked files: ${untrackedFiles.length}`);
-		}
-
-		const diffParts = [trackedDiff, ...untrackedPreviews].filter(Boolean);
 
 		return {
 			project,
 			projectPath,
 			branch,
+			stagedFiles,
+			unstagedFiles,
+			untrackedFiles: untrackedChanges,
+			stagedStat,
+			unstagedStat,
+			stagedDiff,
+			unstagedDiff,
+			untrackedDiff: untrackedPreviews.filter(Boolean).join('\n\n'),
+		};
+	}
+
+	private async getWorkingTreeProjectData(project: string, projectPath: string): Promise<PreparedCommitProjectData | null> {
+		const snapshot = await this.getUncommittedProjectSnapshot(project, projectPath);
+		return this.buildWorkingTreePreparedData(snapshot);
+	}
+
+	private buildWorkingTreePreparedData(snapshot: UncommittedProjectData | null): PreparedCommitProjectData | null {
+		if (!snapshot) {
+			return null;
+		}
+
+		const workingTreeFiles = [...snapshot.unstagedFiles, ...snapshot.untrackedFiles];
+		if (workingTreeFiles.length === 0) {
+			return null;
+		}
+
+		const statParts = [snapshot.unstagedStat];
+		if (snapshot.untrackedFiles.length > 0) {
+			statParts.push(`Untracked files: ${snapshot.untrackedFiles.length}`);
+		}
+
+		const diffParts = [snapshot.unstagedDiff, snapshot.untrackedDiff].filter(Boolean);
+
+		return {
+			project: snapshot.project,
+			projectPath: snapshot.projectPath,
+			branch: snapshot.branch,
 			changeSource: 'working-tree',
-			stagedFiles: allFiles,
+			stagedFiles: workingTreeFiles,
 			stat: statParts.filter(Boolean).join('\n'),
 			diff: diffParts.join('\n\n'),
 		};
+	}
+
+	async getUncommittedProjectData(
+		projectPaths: Map<string, string>,
+		projectNames: string[],
+	): Promise<UncommittedProjectData[]> {
+		const effectiveProjects = projectNames.length > 0
+			? projectNames
+			: Array.from(projectPaths.keys());
+		const snapshots: UncommittedProjectData[] = [];
+
+		for (const project of effectiveProjects) {
+			const projectPath = projectPaths.get(project);
+			if (!projectPath) {
+				continue;
+			}
+
+			try {
+				const snapshot = await this.getUncommittedProjectSnapshot(project, projectPath);
+				if (snapshot) {
+					snapshots.push(snapshot);
+				}
+			} catch {
+				// Ignore non-git folders and command failures for a specific project.
+			}
+		}
+
+		return snapshots;
 	}
 
 	private getAllowedBaseBranches(configuredAllowedBranches?: string[]): Set<string> {
@@ -195,51 +296,25 @@ export class GitService {
 			}
 
 			try {
-				const nameStatus = await this.runGitFileCommand(projectPath, [
-					'diff',
-					'--cached',
-					'--name-status',
-					'--find-renames',
-					'--diff-filter=ACDMR',
-				]);
-
-				if (nameStatus) {
-					const stagedFiles = this.parseStagedNameStatus(nameStatus);
-					if (stagedFiles.length > 0) {
-						const [stat, diff, branch] = await Promise.all([
-							this.runGitFileCommand(projectPath, [
-								'diff',
-								'--cached',
-								'--stat',
-								'--find-renames',
-								'--diff-filter=ACDMR',
-							]),
-							this.runGitFileCommand(projectPath, [
-								'diff',
-								'--cached',
-								'--no-color',
-								'--no-ext-diff',
-								'--find-renames',
-								'--diff-filter=ACDMR',
-								'--unified=3',
-							]),
-							this.getCurrentBranch(projectPath),
-						]);
-
-						prepared.push({
-							project,
-							projectPath,
-							branch,
-							changeSource: 'staged',
-							stagedFiles,
-							stat,
-							diff,
-						});
-						continue;
-					}
+				const snapshot = await this.getUncommittedProjectSnapshot(project, projectPath);
+				if (!snapshot) {
+					continue;
 				}
 
-				const workingTreeData = await this.getWorkingTreeProjectData(project, projectPath);
+				if (snapshot.stagedFiles.length > 0) {
+					prepared.push({
+						project,
+						projectPath,
+						branch: snapshot.branch,
+						changeSource: 'staged',
+						stagedFiles: snapshot.stagedFiles,
+						stat: snapshot.stagedStat,
+						diff: snapshot.stagedDiff,
+					});
+					continue;
+				}
+
+				const workingTreeData = this.buildWorkingTreePreparedData(snapshot);
 				if (workingTreeData) {
 					prepared.push(workingTreeData);
 				}

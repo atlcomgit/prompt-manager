@@ -10,7 +10,9 @@
 import * as vscode from 'vscode';
 import type { MemoryDatabaseService } from './memoryDatabaseService.js';
 import type { MemoryEmbeddingService } from './memoryEmbeddingService.js';
+import type { UncommittedProjectData } from './gitService.js';
 import { ProjectStructureMapService } from './projectStructureMapService.js';
+import { summarizeUncommittedProjects } from '../utils/uncommittedChangesSummary.js';
 import type {
 	MemoryCommit,
 	MemoryAnalysis,
@@ -31,6 +33,8 @@ export interface MemoryContextOptions {
 	useSemantic?: boolean;
 	/** Project names selected in the prompt */
 	projectNames?: string[];
+	/** Session-scoped snapshot of uncommitted changes */
+	uncommittedProjects?: UncommittedProjectData[];
 	/** Filter to apply */
 	filter?: MemoryFilter;
 }
@@ -41,6 +45,7 @@ const DEFAULT_OPTIONS: Required<MemoryContextOptions> = {
 	includeLongTerm: true,
 	useSemantic: true,
 	projectNames: [],
+	uncommittedProjects: [],
 	filter: {},
 };
 
@@ -64,8 +69,24 @@ export class MemoryContextService {
 		shortTermTitle: string;
 		longTermTitle: string;
 		projectMapTitle: string;
+		uncommittedTitle: string;
 		projectMapUnavailable: string;
 		projectMapTruncated: (limit: number) => string;
+		uncommittedSnapshotAt: (value: string) => string;
+		uncommittedProjectSummary: (project: string, branch: string, totalFiles: number) => string;
+		uncommittedScopeCount: (label: string, count: number) => string;
+		uncommittedScopeLabel: (scope: 'staged' | 'unstaged' | 'untracked') => string;
+		uncommittedRenamedCountLabel: string;
+		uncommittedDeletedCountLabel: string;
+		uncommittedRenamed: (previousPath: string) => string;
+		uncommittedAreas: (value: string) => string;
+		uncommittedSymbols: (value: string) => string;
+		uncommittedNewFile: string;
+		uncommittedDeletedFile: string;
+		uncommittedFallbackHint: string;
+		uncommittedHiddenFiles: (count: number) => string;
+		uncommittedHiddenProjects: (count: number) => string;
+		uncommittedTruncated: string;
 		summaryLabel: string;
 		categoriesLabel: string;
 		highImpactLabel: string;
@@ -85,8 +106,28 @@ export class MemoryContextService {
 				shortTermTitle: '### Недавние и релевантные изменения',
 				longTermTitle: '### Архитектурная сводка',
 				projectMapTitle: '### Карта файлов проекта',
+				uncommittedTitle: '### Память о текущих незакомиченных изменениях',
 				projectMapUnavailable: 'Карта файлов проекта недоступна для текущего рабочего пространства.',
 				projectMapTruncated: (limit) => `... дополнительные узлы скрыты после достижения лимита ${limit}`,
+				uncommittedSnapshotAt: (value) => `Снимок состояния: ${value}.`,
+				uncommittedProjectSummary: (project, branch, totalFiles) => `Проект ${project} (ветка ${branch || 'unknown'}): ${totalFiles} файлов.`,
+				uncommittedScopeCount: (label, count) => `${label}: ${count}`,
+				uncommittedScopeLabel: (scope) => ({
+					staged: 'staged',
+					unstaged: 'unstaged',
+					untracked: 'untracked',
+				}[scope]),
+				uncommittedRenamedCountLabel: 'переименовано',
+				uncommittedDeletedCountLabel: 'удалено',
+				uncommittedRenamed: (previousPath) => `переименован из ${previousPath}`,
+				uncommittedAreas: (value) => `области: ${value}`,
+				uncommittedSymbols: (value) => `символы: ${value}`,
+				uncommittedNewFile: 'новый файл',
+				uncommittedDeletedFile: 'удален',
+				uncommittedFallbackHint: 'есть незакомиченная работа в процессе',
+				uncommittedHiddenFiles: (count) => `... еще ${count} файлов скрыто`,
+				uncommittedHiddenProjects: (count) => `... еще ${count} проектов скрыто`,
+				uncommittedTruncated: 'дополнительные незакомиченные изменения скрыты из-за лимита контекста.',
 				summaryLabel: 'Сводка',
 				categoriesLabel: 'Категории',
 				highImpactLabel: 'Высокое влияние на архитектуру',
@@ -107,8 +148,28 @@ export class MemoryContextService {
 			shortTermTitle: '### Recent & Relevant Changes',
 			longTermTitle: '### Architecture Summary',
 			projectMapTitle: '### Project File Map',
+			uncommittedTitle: '### Current Uncommitted Changes Memory',
 			projectMapUnavailable: 'Project file map is unavailable for the current workspace.',
 			projectMapTruncated: (limit) => `... additional nodes omitted after reaching the limit ${limit}`,
+			uncommittedSnapshotAt: (value) => `Snapshot captured at: ${value}.`,
+			uncommittedProjectSummary: (project, branch, totalFiles) => `Project ${project} (branch ${branch || 'unknown'}): ${totalFiles} files.`,
+			uncommittedScopeCount: (label, count) => `${label}: ${count}`,
+			uncommittedScopeLabel: (scope) => ({
+				staged: 'staged',
+				unstaged: 'unstaged',
+				untracked: 'untracked',
+			}[scope]),
+			uncommittedRenamedCountLabel: 'renamed',
+			uncommittedDeletedCountLabel: 'deleted',
+			uncommittedRenamed: (previousPath) => `renamed from ${previousPath}`,
+			uncommittedAreas: (value) => `areas: ${value}`,
+			uncommittedSymbols: (value) => `symbols: ${value}`,
+			uncommittedNewFile: 'new file',
+			uncommittedDeletedFile: 'deleted',
+			uncommittedFallbackHint: 'contains uncommitted work in progress',
+			uncommittedHiddenFiles: (count) => `... ${count} more files hidden`,
+			uncommittedHiddenProjects: (count) => `... ${count} more projects hidden`,
+			uncommittedTruncated: 'additional uncommitted changes were hidden to fit the context budget.',
 			summaryLabel: 'Summary',
 			categoriesLabel: 'Categories',
 			highImpactLabel: 'High architecture impact',
@@ -146,6 +207,9 @@ export class MemoryContextService {
 
 		const projectMapBlock = await this.buildProjectMapContext(opts);
 		if (projectMapBlock) { sections.push(projectMapBlock); }
+
+		const uncommittedBlock = this.buildUncommittedChangesContext(opts);
+		if (uncommittedBlock) { sections.push(uncommittedBlock); }
 
 		// 3) Short-term context — semantically relevant or recent
 		const shortTermBlock = await this.buildShortTermContext(prompt, opts);
@@ -239,6 +303,109 @@ export class MemoryContextService {
 		}
 
 		return lines.join('\n');
+	}
+
+	private buildUncommittedChangesContext(opts: Required<MemoryContextOptions>): string {
+		if (opts.projectNames.length === 0 || opts.uncommittedProjects.length === 0) {
+			return '';
+		}
+
+		const text = this.getLocaleText();
+		const summary = summarizeUncommittedProjects(opts.uncommittedProjects, {
+			maxProjects: 3,
+			maxFilesPerProject: 4,
+			maxAreasPerFile: 2,
+			maxSymbolsPerFile: 2,
+		});
+
+		if (summary.projects.length === 0) {
+			return '';
+		}
+
+		const lines: string[] = [
+			text.uncommittedTitle,
+			'',
+			`- ${text.uncommittedSnapshotAt(summary.generatedAt)}`,
+		];
+
+		for (const project of summary.projects) {
+			const countParts = [
+				text.uncommittedScopeCount(text.uncommittedScopeLabel('staged'), project.counts.staged),
+				text.uncommittedScopeCount(text.uncommittedScopeLabel('unstaged'), project.counts.unstaged),
+				text.uncommittedScopeCount(text.uncommittedScopeLabel('untracked'), project.counts.untracked),
+			];
+
+			if (project.counts.renamed > 0) {
+				countParts.push(text.uncommittedScopeCount(text.uncommittedRenamedCountLabel, project.counts.renamed));
+			}
+			if (project.counts.deleted > 0) {
+				countParts.push(text.uncommittedScopeCount(text.uncommittedDeletedCountLabel, project.counts.deleted));
+			}
+
+			lines.push(`- ${text.uncommittedProjectSummary(project.project, project.branch, project.totalFiles)} ${countParts.join(', ')}.`);
+
+			for (const file of project.files) {
+				const scopeLabel = file.scopes.map(scope => text.uncommittedScopeLabel(scope)).join(', ');
+				lines.push(`  - [${scopeLabel}] ${file.path} — ${this.formatUncommittedFileHint(file)}`);
+			}
+
+			if (project.hiddenFiles > 0) {
+				lines.push(`  - ${text.uncommittedHiddenFiles(project.hiddenFiles)}`);
+			}
+		}
+
+		if (summary.hiddenProjects > 0) {
+			lines.push(`- ${text.uncommittedHiddenProjects(summary.hiddenProjects)}`);
+		}
+
+		return this.limitUncommittedBlock(lines, Math.min(1800, Math.max(900, Math.floor(opts.maxChars * 0.3))), text.uncommittedTruncated);
+	}
+
+	private formatUncommittedFileHint(file: {
+		previousPath?: string;
+		isNewFile: boolean;
+		isDeleted: boolean;
+		areas: string[];
+		symbols: string[];
+	}): string {
+		const text = this.getLocaleText();
+		const parts: string[] = [];
+
+		if (file.isNewFile) {
+			parts.push(text.uncommittedNewFile);
+		}
+		if (file.isDeleted) {
+			parts.push(text.uncommittedDeletedFile);
+		}
+		if (file.previousPath) {
+			parts.push(text.uncommittedRenamed(file.previousPath));
+		}
+		if (file.symbols.length > 0) {
+			parts.push(text.uncommittedSymbols(file.symbols.join(', ')));
+		}
+		if (file.areas.length > 0) {
+			parts.push(text.uncommittedAreas(file.areas.join(' | ')));
+		}
+
+		return parts.join('; ') || text.uncommittedFallbackHint;
+	}
+
+	private limitUncommittedBlock(lines: string[], maxChars: number, truncatedText: string): string {
+		const result: string[] = [];
+		let currentLength = 0;
+
+		for (const line of lines) {
+			const nextLength = currentLength + line.length + (result.length > 0 ? 1 : 0);
+			if (nextLength > maxChars) {
+				result.push(`- ${truncatedText}`);
+				break;
+			}
+
+			result.push(line);
+			currentLength = nextLength;
+		}
+
+		return result.join('\n');
 	}
 
 	/**

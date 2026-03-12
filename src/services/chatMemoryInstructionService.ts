@@ -4,6 +4,8 @@ import type { Prompt } from '../types/prompt.js';
 import type { StorageService } from './storageService.js';
 import type { MemoryContextService } from './memoryContextService.js';
 import type { ChatMemoryInstructionComposer } from './chatMemoryInstructionComposer.js';
+import type { GitService } from './gitService.js';
+import type { WorkspaceService } from './workspaceService.js';
 
 const SESSION_FOLDER_NAME = 'chat-memory';
 const SESSION_FOLDER_RELATIVE_PATH = '.vscode/prompt-manager/chat-memory';
@@ -34,6 +36,8 @@ export class ChatMemoryInstructionService {
 		private readonly storageService: StorageService,
 		private readonly memoryContextService: MemoryContextService,
 		private readonly composer: ChatMemoryInstructionComposer,
+		private readonly gitService: GitService,
+		private readonly workspaceService: WorkspaceService,
 	) { }
 
 	dispose(): void {
@@ -99,10 +103,18 @@ export class ChatMemoryInstructionService {
 		await this.cleanupStaleSessions();
 		await this.removePromptSessionInstructions(prompt.promptUuid, 'new-chat');
 
+		const uncommittedProjects = prompt.projects.length > 0
+			? await this.gitService.getUncommittedProjectData(
+				this.workspaceService.getWorkspaceFolderPaths(),
+				prompt.projects,
+			)
+			: [];
+
 		const rawMemoryContext = await this.memoryContextService.getContextForChat(prompt.content, {
 			maxChars: 6000,
 			shortTermLimit: 15,
 			projectNames: prompt.projects,
+			uncommittedProjects,
 		});
 
 		if (!rawMemoryContext.trim()) {

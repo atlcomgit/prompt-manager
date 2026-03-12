@@ -128,6 +128,8 @@ export function activate(context: vscode.ExtensionContext) {
 					storageService,
 					memoryContext,
 					chatMemoryInstructionComposer,
+					gitService,
+					workspaceService,
 				);
 				await chatMemoryInstructionService.recoverSessionsOnStartup();
 				memoryPanelManager = new MemoryPanelManager(

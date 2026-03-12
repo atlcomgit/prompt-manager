@@ -151,6 +151,18 @@ export const SettingsPanel: React.FC<Props> = ({ settings, onSave, onRefresh, t 
 				</div>
 
 				<div style={styles.field}>
+					<label style={styles.label}>{t('memory.historyAnalysisLimit')}</label>
+					<input
+						type="number"
+						style={styles.input}
+						value={local.historyAnalysisLimit}
+						onChange={e => update('historyAnalysisLimit', Number(e.target.value))}
+						min={1}
+						max={500}
+					/>
+				</div>
+
+				<div style={styles.field}>
 					<label style={styles.label}>
 						<input
 							type="checkbox"

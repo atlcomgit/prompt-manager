@@ -8,3 +8,7 @@ out-tests
 *.vsix
 .DS_Store
 *.log
+
+# Prompt Manager memory database
+memory.db
+*.db-backup

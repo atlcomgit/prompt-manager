@@ -249,6 +249,8 @@ export interface MemorySettings {
 	retentionDays: number;
 	/** Short-term memory limit (recent commits) */
 	shortTermLimit: number;
+	/** Maximum commits for manual history analysis */
+	historyAnalysisLimit: number;
 	/** Whether auto-cleanup is enabled */
 	autoCleanup: boolean;
 	/** Whether notifications are enabled */
@@ -272,6 +274,7 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
 	maxRecords: 5000,
 	retentionDays: 365,
 	shortTermLimit: 50,
+	historyAnalysisLimit: 500,
 	autoCleanup: true,
 	notificationsEnabled: true,
 	notificationType: 'statusbar',

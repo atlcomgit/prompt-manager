@@ -6,6 +6,7 @@
 
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
+import { normalizeHistoryAnalysisLimit } from '../utils/historyAnalysisLimit.js';
 import type { MemoryDatabaseService } from '../services/memoryDatabaseService.js';
 import type { MemoryContextService } from '../services/memoryContextService.js';
 import type { MemoryEmbeddingService } from '../services/memoryEmbeddingService.js';
@@ -165,7 +166,7 @@ export class MemoryPanelManager {
 				}
 
 				case 'runManualAnalysis': {
-					await this.runManualAnalysis(panel, msg.limit || 50);
+					await this.runManualAnalysis(panel, msg.limit);
 					break;
 				}
 
@@ -179,6 +180,7 @@ export class MemoryPanelManager {
 						maxRecords: config.get<number>('memory.maxRecords', 5000),
 						retentionDays: config.get<number>('memory.retentionDays', 365),
 						shortTermLimit: config.get<number>('memory.shortTermLimit', 50),
+						historyAnalysisLimit: config.get<number>('memory.historyAnalysisLimit', 500),
 						autoCleanup: config.get<boolean>('memory.autoCleanup', true),
 						notificationsEnabled: config.get<boolean>('memory.notifications.enabled', true),
 						notificationType: config.get<any>('memory.notifications.type', 'statusbar'),
@@ -203,6 +205,7 @@ export class MemoryPanelManager {
 					if (s.maxRecords !== undefined) { await config.update('memory.maxRecords', s.maxRecords, true); }
 					if (s.retentionDays !== undefined) { await config.update('memory.retentionDays', s.retentionDays, true); }
 					if (s.shortTermLimit !== undefined) { await config.update('memory.shortTermLimit', s.shortTermLimit, true); }
+					if (s.historyAnalysisLimit !== undefined) { await config.update('memory.historyAnalysisLimit', s.historyAnalysisLimit, true); }
 					if (s.autoCleanup !== undefined) { await config.update('memory.autoCleanup', s.autoCleanup, true); }
 					if (s.notificationsEnabled !== undefined) { await config.update('memory.notifications.enabled', s.notificationsEnabled, true); }
 					if (s.notificationType !== undefined) { await config.update('memory.notifications.type', s.notificationType, true); }
@@ -338,7 +341,7 @@ export class MemoryPanelManager {
 	/** Run manual analysis of recent commits from git history */
 	private async runManualAnalysis(
 		panel: vscode.WebviewPanel,
-		limit: number,
+		limit?: number,
 	): Promise<void> {
 		const workspaceFolders = vscode.workspace.workspaceFolders;
 		if (!workspaceFolders) { return; }
@@ -346,12 +349,14 @@ export class MemoryPanelManager {
 		const config = vscode.workspace.getConfiguration('promptManager');
 		const depth = config.get<any>('memory.analysisDepth', 'standard');
 		const diffLimit = config.get<number>('memory.diffLimit', 10000);
+		const configuredLimit = config.get<number>('memory.historyAnalysisLimit', 500);
+		const effectiveLimit = normalizeHistoryAnalysisLimit(limit, configuredLimit);
 
 		let processed = 0;
 
 		for (const folder of workspaceFolders) {
 			const repoPath = folder.uri.fsPath;
-			const shas = await this.gitHook.getCommitShas(repoPath, limit);
+			const shas = await this.gitHook.getCommitShas(repoPath, effectiveLimit);
 			const repoName = this.gitHook.getRepositoryName(repoPath);
 
 			for (const sha of shas) {

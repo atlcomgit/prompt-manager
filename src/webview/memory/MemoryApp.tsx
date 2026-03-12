@@ -217,8 +217,8 @@ export const MemoryApp: React.FC = () => {
 	};
 
 	/** Handle manual analysis */
-	const onRunAnalysis = (limit: number) => {
-		vscode.postMessage({ type: 'runManualAnalysis', limit });
+	const onRunAnalysis = () => {
+		vscode.postMessage({ type: 'runManualAnalysis' });
 	};
 
 	/** Handle export */
@@ -286,7 +286,7 @@ export const MemoryApp: React.FC = () => {
 							...memoryButtonStyles.secondary,
 							...(analysisProgress ? memoryButtonStyles.disabled : {}),
 						}}
-						onClick={() => onRunAnalysis(50)}
+						onClick={onRunAnalysis}
 						disabled={!!analysisProgress}
 						title={t('memory.runAnalysis')}
 					>

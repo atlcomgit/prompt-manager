@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage, organize and use AI prompts directly in VS Code with Copilot Chat integration",
-  "version": "0.1.51",
+  "version": "0.1.52",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -81,7 +81,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.1.51",
+        "title": "About 0.1.52",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },
@@ -442,10 +442,12 @@
   "dependencies": {
     "@vscode/codicons": "^0.0.44",
     "@xenova/transformers": "^2.17.2",
+    "3d-force-graph": "^1.79.1",
     "ignore": "^7.0.5",
     "markdown-it": "^14.1.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "sql.js": "^1.14.1"
+    "sql.js": "^1.14.1",
+    "three": "^0.183.2"
   }
 }

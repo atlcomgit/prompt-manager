@@ -22,13 +22,14 @@ import type {
 	MemoryStatistics,
 	MemoryCategory,
 	KnowledgeGraphData,
-	KnowledgeGraphNode,
-	KnowledgeGraphEdge,
 	DEFAULT_MEMORY_SETTINGS,
 } from '../types/memory.js';
+import type { RawKnowledgeGraphCommitFile, RawKnowledgeGraphRecord } from '../utils/knowledgeGraph.js';
+import { buildKnowledgeGraphData } from '../utils/knowledgeGraph.js';
+import { logMemoryGraphDebug } from '../utils/memoryGraphDebug.js';
 
 /** Current schema version — increment when adding migrations */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** Maximum number of backup files to keep */
 const MAX_BACKUPS = 3;
@@ -113,6 +114,9 @@ export class MemoryDatabaseService {
 		}
 		if (currentVersion < 2) {
 			this.migrateV2();
+		}
+		if (currentVersion < 3) {
+			this.migrateV3();
 		}
 
 		// Update version
@@ -255,6 +259,104 @@ export class MemoryDatabaseService {
 		`);
 
 		this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_embeddings_commit_unique ON embeddings(commitSha);');
+	}
+
+	/**
+	 * Schema version 3: richer metadata for knowledge graph visualization.
+	 */
+	private migrateV3(): void {
+		if (!this.db) { return; }
+
+		this.applyKnowledgeGraphSchemaV3();
+	}
+
+	private applyKnowledgeGraphSchemaV3(): boolean {
+		if (!this.db) {
+			return false;
+		}
+
+		let changed = false;
+		changed = this.addColumnIfMissing('knowledge_graph', 'sourceKind', "TEXT NOT NULL DEFAULT 'component'") || changed;
+		changed = this.addColumnIfMissing('knowledge_graph', 'targetKind', "TEXT NOT NULL DEFAULT 'component'") || changed;
+		changed = this.addColumnIfMissing('knowledge_graph', 'sourceLayer', "TEXT NOT NULL DEFAULT ''") || changed;
+		changed = this.addColumnIfMissing('knowledge_graph', 'targetLayer', "TEXT NOT NULL DEFAULT ''") || changed;
+		changed = this.addColumnIfMissing('knowledge_graph', 'sourceFilePath', "TEXT NOT NULL DEFAULT ''") || changed;
+		changed = this.addColumnIfMissing('knowledge_graph', 'targetFilePath', "TEXT NOT NULL DEFAULT ''") || changed;
+		changed = this.addColumnIfMissing('knowledge_graph', 'relationStrength', 'INTEGER NOT NULL DEFAULT 1') || changed;
+		changed = this.addColumnIfMissing('knowledge_graph', 'confidence', 'REAL NOT NULL DEFAULT 0') || changed;
+
+		this.db.run('CREATE INDEX IF NOT EXISTS idx_knowledge_graph_commit ON knowledge_graph(commitSha);');
+		this.db.run('CREATE INDEX IF NOT EXISTS idx_knowledge_graph_source_file ON knowledge_graph(sourceFilePath);');
+		this.db.run('CREATE INDEX IF NOT EXISTS idx_knowledge_graph_target_file ON knowledge_graph(targetFilePath);');
+
+		return changed;
+	}
+
+	private ensureKnowledgeGraphSchemaCompatibility(): void {
+		if (!this.db) {
+			return;
+		}
+
+		const changed = this.applyKnowledgeGraphSchemaV3();
+		const currentVersion = this.getSchemaVersion();
+		if (currentVersion < SCHEMA_VERSION) {
+			const previousVersion = currentVersion;
+			if (currentVersion === 0) {
+				this.db.run('INSERT INTO schema_version (version) VALUES (?);', [SCHEMA_VERSION]);
+			} else {
+				this.db.run('UPDATE schema_version SET version = ?;', [SCHEMA_VERSION]);
+			}
+			logMemoryGraphDebug('db:knowledgeGraph:schemaUpdated', {
+				previousVersion,
+				nextVersion: SCHEMA_VERSION,
+				columns: Array.from(this.getTableColumns('knowledge_graph')).sort(),
+				changed,
+			});
+			this.save();
+			return;
+		}
+
+		if (changed) {
+			logMemoryGraphDebug('db:knowledgeGraph:schemaPatched', {
+				version: currentVersion,
+				columns: Array.from(this.getTableColumns('knowledge_graph')).sort(),
+			});
+			this.save();
+		}
+	}
+
+	private addColumnIfMissing(tableName: string, columnName: string, sqlType: string): boolean {
+		if (!this.db || this.hasColumn(tableName, columnName)) {
+			return false;
+		}
+		this.db.run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${sqlType};`);
+		return true;
+	}
+
+	private getSchemaVersion(): number {
+		if (!this.db) {
+			return 0;
+		}
+		const result = this.db.exec('SELECT version FROM schema_version LIMIT 1;');
+		if (result.length === 0) {
+			return 0;
+		}
+		return Number(result[0].values[0]?.[0] || 0);
+	}
+
+	private getTableColumns(tableName: string): Set<string> {
+		if (!this.db) {
+			return new Set<string>();
+		}
+		const result = this.db.exec(`PRAGMA table_info(${tableName});`);
+		if (result.length === 0) {
+			return new Set<string>();
+		}
+		return new Set<string>(result[0].values.map(value => String(value[1])));
+	}
+
+	private hasColumn(tableName: string, columnName: string): boolean {
+		return this.getTableColumns(tableName).has(columnName);
 	}
 
 	// ---- Persistence ----
@@ -662,11 +764,38 @@ export class MemoryDatabaseService {
 	/** Insert knowledge graph edges */
 	insertKnowledgeNodes(nodes: MemoryKnowledgeNode[]): void {
 		if (!this.db || nodes.length === 0) { return; }
+		this.ensureKnowledgeGraphSchemaCompatibility();
 		const stmt = this.db.prepare(
-			'INSERT INTO knowledge_graph (sourceComponent, targetComponent, relationType, commitSha) VALUES (?, ?, ?, ?);',
+			`INSERT INTO knowledge_graph (
+				sourceComponent,
+				targetComponent,
+				relationType,
+				commitSha,
+				sourceKind,
+				targetKind,
+				sourceLayer,
+				targetLayer,
+				sourceFilePath,
+				targetFilePath,
+				relationStrength,
+				confidence
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		);
 		for (const n of nodes) {
-			stmt.run([n.sourceComponent, n.targetComponent, n.relationType, n.commitSha]);
+			stmt.run([
+				n.sourceComponent,
+				n.targetComponent,
+				n.relationType,
+				n.commitSha,
+				n.sourceKind || 'component',
+				n.targetKind || 'component',
+				n.sourceLayer || '',
+				n.targetLayer || '',
+				n.sourceFilePath || '',
+				n.targetFilePath || '',
+				n.relationStrength || 1,
+				n.confidence || 0,
+			]);
 		}
 		stmt.free();
 		this.save();
@@ -674,48 +803,85 @@ export class MemoryDatabaseService {
 
 	/** Get knowledge graph data for visualization */
 	getKnowledgeGraph(repository?: string): KnowledgeGraphData {
-		if (!this.db) { return { nodes: [], edges: [] }; }
+		if (!this.db) { return buildKnowledgeGraphData([], []); }
+		this.ensureKnowledgeGraphSchemaCompatibility();
 
-		let query = `
-			SELECT sourceComponent, targetComponent, relationType, COUNT(*) as cnt
-			FROM knowledge_graph kg
-			JOIN commits c ON kg.commitSha = c.sha
-		`;
 		const params: (string | number)[] = [];
+		const where = repository ? 'WHERE c.repository = ?' : '';
 		if (repository) {
-			query += ' WHERE c.repository = ?';
 			params.push(repository);
 		}
-		query += ' GROUP BY sourceComponent, targetComponent, relationType;';
+		const knowledgeGraphColumns = this.getTableColumns('knowledge_graph');
+		const kgColumn = (columnName: string, fallbackSql: string): string => (
+			knowledgeGraphColumns.has(columnName)
+				? `kg.${columnName} AS ${columnName}`
+				: `${fallbackSql} AS ${columnName}`
+		);
 
-		const result = this.db.exec(query, params);
-		if (result.length === 0) { return { nodes: [], edges: [] }; }
+		const rowsResult = this.db.exec(
+			`SELECT
+				kg.sourceComponent,
+				kg.targetComponent,
+				kg.relationType,
+				kg.commitSha,
+				${kgColumn('sourceKind', "'component'")},
+				${kgColumn('targetKind', "'component'")},
+				${kgColumn('sourceLayer', "''")},
+				${kgColumn('targetLayer', "''")},
+				${kgColumn('sourceFilePath', "''")},
+				${kgColumn('targetFilePath', "''")},
+				${kgColumn('relationStrength', '1')},
+				${kgColumn('confidence', '0')},
+				c.repository,
+				c.date,
+				a.architectureImpactScore,
+				a.layers,
+				a.categories,
+				a.businessDomains,
+				a.components,
+				a.isBreakingChange
+			FROM knowledge_graph kg
+			JOIN commits c ON kg.commitSha = c.sha
+			LEFT JOIN analyses a ON kg.commitSha = a.commitSha
+			${where}
+			ORDER BY c.date DESC;`,
+			params,
+		);
 
-		const nodeMap = new Map<string, KnowledgeGraphNode>();
-		const edges: KnowledgeGraphEdge[] = [];
+		const commitFilesResult = this.db.exec(
+			`SELECT fc.commitSha, c.repository, fc.filePath
+			FROM file_changes fc
+			JOIN commits c ON fc.commitSha = c.sha
+			${where};`,
+			params,
+		);
 
-		for (const row of result[0].values) {
-			const source = row[0] as string;
-			const target = row[1] as string;
-			const relType = row[2] as string;
-			const weight = row[3] as number;
-
-			// Build edges
-			edges.push({ source, target, type: relType, weight });
-
-			// Accumulate node weights
-			if (!nodeMap.has(source)) {
-				nodeMap.set(source, { id: source, label: source, type: 'component', weight: 0 });
-			}
-			nodeMap.get(source)!.weight += weight;
-
-			if (!nodeMap.has(target)) {
-				nodeMap.set(target, { id: target, label: target, type: 'component', weight: 0 });
-			}
-			nodeMap.get(target)!.weight += weight;
-		}
-
-		return { nodes: Array.from(nodeMap.values()), edges };
+		const commitFiles = this.rowsToCommitFiles(commitFilesResult);
+		const graphRows = this.rowsToKnowledgeGraphRecords(rowsResult);
+		const graph = buildKnowledgeGraphData(graphRows, commitFiles);
+		logMemoryGraphDebug('db:getKnowledgeGraph:result', {
+			repository: repository || null,
+			schemaVersion: this.getSchemaVersion(),
+			knowledgeGraphColumns: Array.from(this.getTableColumns('knowledge_graph')).sort(),
+			rawGraphRows: graphRows.length,
+			commitFiles: commitFiles.length,
+			nodes: graph.nodes.length,
+			edges: graph.edges.length,
+			relationTypes: graph.summary.relationTypes,
+			repositories: graph.summary.repositories,
+			sampleRow: graphRows[0]
+				? {
+					sourceComponent: graphRows[0].sourceComponent,
+					targetComponent: graphRows[0].targetComponent,
+					relationType: graphRows[0].relationType,
+					sourceKind: graphRows[0].sourceKind || null,
+					targetKind: graphRows[0].targetKind || null,
+					sourceLayer: graphRows[0].sourceLayer || null,
+					targetLayer: graphRows[0].targetLayer || null,
+				}
+				: null,
+		});
+		return graph;
 	}
 
 	// ---- Bug Relations ----
@@ -1007,6 +1173,64 @@ export class MemoryDatabaseService {
 			isBreakingChange: !!(row['isBreakingChange'] as number),
 			createdAt: (row['createdAt'] as string) || '',
 		};
+	}
+
+	private rowsToKnowledgeGraphRecords(result: Array<{ columns: string[]; values: unknown[][] }>): RawKnowledgeGraphRecord[] {
+		if (result.length === 0) {
+			return [];
+		}
+		const columns = result[0].columns;
+		return result[0].values.map(values => {
+			const row: Record<string, unknown> = {};
+			columns.forEach((col, index) => {
+				row[col] = values[index];
+			});
+			return {
+				sourceComponent: row['sourceComponent'] as string,
+				targetComponent: row['targetComponent'] as string,
+				relationType: row['relationType'] as string,
+				commitSha: row['commitSha'] as string,
+				repository: row['repository'] as string,
+				commitDate: (row['date'] as string) || undefined,
+				sourceKind: (row['sourceKind'] as string) || undefined,
+				targetKind: (row['targetKind'] as string) || undefined,
+				sourceLayer: (row['sourceLayer'] as string) || undefined,
+				targetLayer: (row['targetLayer'] as string) || undefined,
+				sourceFilePath: (row['sourceFilePath'] as string) || undefined,
+				targetFilePath: (row['targetFilePath'] as string) || undefined,
+				relationStrength: Number(row['relationStrength'] || 1),
+				confidence: Number(row['confidence'] || 0),
+				architectureImpactScore: Number(row['architectureImpactScore'] || 0),
+				analysisLayers: this.parseStringArray(row['layers']),
+				analysisCategories: this.parseStringArray(row['categories']),
+				analysisBusinessDomains: this.parseStringArray(row['businessDomains']),
+				analysisComponents: this.parseStringArray(row['components']),
+				isBreakingChange: Boolean(row['isBreakingChange']),
+			};
+		});
+	}
+
+	private rowsToCommitFiles(result: Array<{ columns: string[]; values: unknown[][] }>): RawKnowledgeGraphCommitFile[] {
+		if (result.length === 0) {
+			return [];
+		}
+		return result[0].values.map(values => ({
+			commitSha: values[0] as string,
+			repository: values[1] as string,
+			filePath: values[2] as string,
+		}));
+	}
+
+	private parseStringArray(value: unknown): string[] {
+		if (typeof value !== 'string' || !value.trim()) {
+			return [];
+		}
+		try {
+			const parsed = JSON.parse(value);
+			return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+		} catch {
+			return [];
+		}
 	}
 
 	/** Get top authors by commit count */

@@ -86,6 +86,14 @@ export class MemoryAnalyzerService {
 				targetComponent: String(n.target || ''),
 				relationType: String(n.relation || 'uses'),
 				commitSha: payload.sha,
+				sourceKind: this.normalizeKnowledgeKind(n.sourceKind),
+				targetKind: this.normalizeKnowledgeKind(n.targetKind),
+				sourceLayer: this.normalizeKnowledgeLayer(n.sourceLayer),
+				targetLayer: this.normalizeKnowledgeLayer(n.targetLayer),
+				sourceFilePath: this.normalizeOptionalString(n.sourceFile),
+				targetFilePath: this.normalizeOptionalString(n.targetFile),
+				relationStrength: this.clampRelationStrength(n.strength),
+				confidence: this.clampConfidence(n.confidence),
 			})).filter((n: MemoryKnowledgeNode) => n.sourceComponent && n.targetComponent);
 		}
 
@@ -230,7 +238,7 @@ export class MemoryAnalyzerService {
 
 		if (depth === 'deep') {
 			base.push(
-				'- "knowledgeNodes": array of { "source": string, "target": string, "relation": string } — component relationships detected',
+				'- "knowledgeNodes": array of { "source": string, "target": string, "relation": string, "sourceKind"?: "layer"|"file"|"component", "targetKind"?: "layer"|"file"|"component", "sourceLayer"?: string, "targetLayer"?: string, "sourceFile"?: string, "targetFile"?: string, "strength"?: number, "confidence"?: number } — architectural relationships detected',
 				'- "bugFix": { "sourceCommitSha": string, "description": string } | null — if this commit fixes a bug, identify the source commit if mentioned',
 			);
 		}
@@ -313,5 +321,57 @@ export class MemoryAnalyzerService {
 	private clampScore(value: any): number {
 		const num = Number(value) || 0;
 		return Math.max(0, Math.min(10, Math.round(num)));
+	}
+
+	private clampRelationStrength(value: any): number | undefined {
+		if (value === undefined || value === null || value === '') {
+			return undefined;
+		}
+		const num = Number(value);
+		if (!Number.isFinite(num)) {
+			return undefined;
+		}
+		return Math.max(1, Math.min(10, Math.round(num)));
+	}
+
+	private clampConfidence(value: any): number | undefined {
+		if (value === undefined || value === null || value === '') {
+			return undefined;
+		}
+		const num = Number(value);
+		if (!Number.isFinite(num)) {
+			return undefined;
+		}
+		return Math.max(0, Math.min(1, Number(num.toFixed(2))));
+	}
+
+	private normalizeOptionalString(value: any): string | undefined {
+		if (typeof value !== 'string') {
+			return undefined;
+		}
+		const normalized = value.trim();
+		return normalized ? normalized : undefined;
+	}
+
+	private normalizeKnowledgeKind(value: any): 'layer' | 'file' | 'component' | undefined {
+		if (value === 'layer' || value === 'file' || value === 'component') {
+			return value;
+		}
+		return undefined;
+	}
+
+	private normalizeKnowledgeLayer(value: any): MemoryLayer | 'mixed' | undefined {
+		if (value === 'mixed') {
+			return value;
+		}
+		const normalized = this.normalizeOptionalString(value);
+		if (!normalized) {
+			return undefined;
+		}
+		const allowed: Set<string> = new Set([
+			'controller', 'service', 'repository', 'model', 'middleware',
+			'migration', 'config', 'util', 'view', 'component', 'other',
+		]);
+		return allowed.has(normalized) ? (normalized as MemoryLayer) : undefined;
 	}
 }

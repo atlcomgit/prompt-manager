@@ -34,6 +34,11 @@ import type {
 
 const vscode = getVsCodeApi();
 
+function sendMemoryDebugLog(scope: string, payload?: unknown): void {
+	console.log(`[PromptManager/MemoryGraph/Webview] ${scope}`, payload ?? '');
+	vscode.postMessage({ type: 'memoryDebugLog', scope, payload });
+}
+
 const MEMORY_APP_GLOBAL_STYLES = `
 	.pm-memory-root button {
 		appearance: none;
@@ -123,6 +128,12 @@ export const MemoryApp: React.FC = () => {
 				setStatistics(msg.statistics);
 				break;
 			case 'memoryKnowledgeGraph':
+				sendMemoryDebugLog('memoryApp:receivedKnowledgeGraph', {
+					nodes: msg.data.nodes.length,
+					edges: msg.data.edges.length,
+					summary: msg.data.summary,
+					sampleNodeIds: msg.data.nodes.slice(0, 5).map(node => node.id),
+				});
 				setGraphData(msg.data);
 				break;
 			case 'memoryCategories':
@@ -150,6 +161,7 @@ export const MemoryApp: React.FC = () => {
 				setStatusMessage(t('memory.analysisComplete').replace('{count}', String(msg.count)));
 				break;
 			case 'memoryError':
+				sendMemoryDebugLog('memoryApp:error', { activeTab, message: msg.message });
 				setErrorMessage(msg.message);
 				setTimeout(() => setErrorMessage(''), 5000);
 				break;
@@ -167,12 +179,13 @@ export const MemoryApp: React.FC = () => {
 				setStatusMessage(t('memory.cleared'));
 				break;
 		}
-	}, [t, filter]);
+	}, [activeTab, t]);
 
 	useMessageListener(handleMessage);
 
 	// On mount, notify extension that webview is ready
 	useEffect(() => {
+		sendMemoryDebugLog('memoryApp:ready', { userAgent: navigator.userAgent });
 		vscode.postMessage({ type: 'memoryReady' });
 		vscode.postMessage({ type: 'requestManualAnalysisSnapshot' });
 		vscode.postMessage({ type: 'getMemoryAuthors' });
@@ -267,6 +280,10 @@ export const MemoryApp: React.FC = () => {
 
 	/** Request knowledge graph */
 	const onRequestGraph = (repository?: string) => {
+		sendMemoryDebugLog('memoryApp:requestGraph', {
+			activeTab,
+			repository: repository || null,
+		});
 		vscode.postMessage({ type: 'getKnowledgeGraph', repository });
 	};
 
@@ -304,6 +321,7 @@ export const MemoryApp: React.FC = () => {
 	useEffect(() => {
 		switch (activeTab) {
 			case 'graph':
+				sendMemoryDebugLog('memoryApp:tabChanged', { activeTab });
 				onRequestGraph();
 				break;
 			case 'statistics':

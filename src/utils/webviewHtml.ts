@@ -11,11 +11,15 @@ export function getWebviewHtml(
   title: string,
   locale?: string,
   bootId?: string,
+  extraScriptPaths: string[] = [],
 ): string {
   const lang = locale || vscode.env.language || 'en';
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, scriptPath)
   );
+  const extraScriptUris = extraScriptPaths.map((extraScriptPath) => webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, extraScriptPath)
+  ));
 
   const nonce = getNonce();
 
@@ -174,6 +178,7 @@ export function getWebviewHtml(
       });
     })();
   </script>
+  ${extraScriptUris.map((uri) => `<script nonce="${nonce}" src="${uri}"></script>`).join('\n  ')}
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

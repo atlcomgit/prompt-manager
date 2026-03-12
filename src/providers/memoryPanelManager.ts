@@ -12,6 +12,7 @@ import {
 	computeManualAnalysisThroughput,
 	MANUAL_ANALYSIS_EVENT_LIMIT,
 } from '../utils/manualAnalysisRuntime.js';
+import { logMemoryGraphDebug, showMemoryGraphDebugChannel } from '../utils/memoryGraphDebug.js';
 import type { MemoryDatabaseService } from '../services/memoryDatabaseService.js';
 import type { MemoryContextService } from '../services/memoryContextService.js';
 import type { MemoryEmbeddingService } from '../services/memoryEmbeddingService.js';
@@ -120,6 +121,8 @@ export class MemoryPanelManager {
 			'dist/webview/memory.js',
 			'Project Memory',
 			vscode.env.language,
+			undefined,
+			['node_modules/3d-force-graph/dist/3d-force-graph.min.js'],
 		);
 
 		currentPanel = panel;
@@ -145,6 +148,10 @@ export class MemoryPanelManager {
 	): Promise<void> {
 		try {
 			switch (msg.type) {
+				case 'memoryDebugLog':
+					logMemoryGraphDebug(`webview:${msg.scope}`, msg.payload);
+					break;
+
 				case 'memoryReady':
 					await this.sendInitialData(panel);
 					break;
@@ -317,7 +324,19 @@ export class MemoryPanelManager {
 				}
 
 				case 'getKnowledgeGraph': {
+					showMemoryGraphDebugChannel(true);
+					logMemoryGraphDebug('extension:getKnowledgeGraph:request', {
+						repository: msg.repository || null,
+					});
 					const graph = await this.db.getKnowledgeGraph(msg.repository);
+					logMemoryGraphDebug('extension:getKnowledgeGraph:response', {
+						repository: msg.repository || null,
+						nodes: graph.nodes.length,
+						edges: graph.edges.length,
+						summary: graph.summary,
+						sampleNodeIds: graph.nodes.slice(0, 5).map(node => node.id),
+						sampleEdgeIds: graph.edges.slice(0, 5).map(edge => edge.id),
+					});
 					panel.webview.postMessage({
 						type: 'memoryKnowledgeGraph',
 						data: graph,
@@ -377,6 +396,11 @@ export class MemoryPanelManager {
 			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
+			logMemoryGraphDebug('extension:handleMessage:error', {
+				message,
+				inputType: msg.type,
+				stack: err instanceof Error ? err.stack : undefined,
+			});
 			panel.webview.postMessage({
 				type: 'memoryError',
 				message,

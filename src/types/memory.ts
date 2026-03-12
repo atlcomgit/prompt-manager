@@ -42,6 +42,15 @@ export const MEMORY_LAYERS: MemoryLayer[] = [
 	'migration', 'config', 'util', 'view', 'component', 'other',
 ];
 
+/** Knowledge graph node kinds */
+export type KnowledgeGraphNodeKind = 'layer' | 'file' | 'component';
+
+/** Knowledge graph directionality */
+export type KnowledgeGraphDirectionality = 'directed' | 'undirected';
+
+/** Knowledge graph layer including mixed fallback */
+export type KnowledgeGraphLayer = MemoryLayer | 'mixed';
+
 /** Commit types (conventional commits) */
 export type MemoryCommitType =
 	| 'feat'
@@ -163,6 +172,22 @@ export interface MemoryKnowledgeNode {
 	relationType: string;
 	/** Commit where this relation was detected */
 	commitSha: string;
+	/** Source node kind */
+	sourceKind?: KnowledgeGraphNodeKind;
+	/** Target node kind */
+	targetKind?: KnowledgeGraphNodeKind;
+	/** Source architecture layer */
+	sourceLayer?: KnowledgeGraphLayer;
+	/** Target architecture layer */
+	targetLayer?: KnowledgeGraphLayer;
+	/** Source file path */
+	sourceFilePath?: string;
+	/** Target file path */
+	targetFilePath?: string;
+	/** Relation strength 1-10 */
+	relationStrength?: number;
+	/** Optional model confidence 0-1 */
+	confidence?: number;
 }
 
 /** Bug-fix relationship */
@@ -334,18 +359,66 @@ export type EmbeddingModelStatus = 'not-downloaded' | 'downloading' | 'ready' | 
 
 /** Node in the knowledge graph visualization */
 export interface KnowledgeGraphNode {
-	/** Component name */
+	/** Stable graph node identifier */
 	id: string;
 	/** Display label */
 	label: string;
+	/** Shorter display label for dense views */
+	shortLabel?: string;
+	/** Node kind */
+	kind: KnowledgeGraphNodeKind;
 	/** Component type (service, controller, etc.) */
 	type: string;
+	/** Repository that owns this node */
+	repository?: string;
+	/** Architecture layer associated with the node */
+	layer?: KnowledgeGraphLayer;
+	/** File path if this node represents or maps to a file */
+	filePath?: string;
 	/** Number of connections */
 	weight: number;
+	/** Visual node magnitude */
+	val: number;
+	/** Aggregated architecture impact */
+	impactScore: number;
+	/** Number of unique commits touching the node */
+	commitCount: number;
+	/** Number of breaking-change commits touching the node */
+	breakingChangeCount: number;
+	/** Related business domains */
+	businessDomains: string[];
+	/** Related change categories */
+	categories: MemoryCategory[];
+	/** Group key used for coloring and filtering */
+	group: string;
+	/** Preferred node color */
+	color?: string;
+	/** Related files for inspector */
+	relatedFiles: string[];
+	/** Related components for inspector */
+	relatedComponents: string[];
+	/** First commit date when this node was seen */
+	firstSeenAt?: string;
+	/** Last commit date when this node was seen */
+	lastSeenAt?: string;
+	/** Runtime x position */
+	x?: number;
+	/** Runtime y position */
+	y?: number;
+	/** Runtime z position */
+	z?: number;
+	/** Runtime fixed x position */
+	fx?: number;
+	/** Runtime fixed y position */
+	fy?: number;
+	/** Runtime fixed z position */
+	fz?: number;
 }
 
 /** Edge in the knowledge graph visualization */
 export interface KnowledgeGraphEdge {
+	/** Stable edge identifier */
+	id: string;
 	/** Source component */
 	source: string;
 	/** Target component */
@@ -354,12 +427,53 @@ export interface KnowledgeGraphEdge {
 	type: string;
 	/** Number of commits with this relation */
 	weight: number;
+	/** Relation strength (average / aggregate) */
+	strength: number;
+	/** Number of unique commits for this edge */
+	commitCount: number;
+	/** Directionality hint */
+	directionality: KnowledgeGraphDirectionality;
+	/** Repositories contributing to the edge */
+	repositories: string[];
+	/** Categories contributing to the edge */
+	categories: MemoryCategory[];
+	/** Layers contributing to the edge */
+	layers: KnowledgeGraphLayer[];
+	/** Related files */
+	relatedFiles: string[];
+	/** First commit date when this edge was seen */
+	firstSeenAt?: string;
+	/** Last commit date when this edge was seen */
+	lastSeenAt?: string;
+	/** Suggested edge color */
+	color?: string;
+}
+
+/** Knowledge graph summary and filter metadata */
+export interface KnowledgeGraphSummary {
+	/** Present node kinds */
+	nodeKinds: KnowledgeGraphNodeKind[];
+	/** Present layers */
+	layers: KnowledgeGraphLayer[];
+	/** Present relation types */
+	relationTypes: string[];
+	/** Present repositories */
+	repositories: string[];
+	/** Max node weight */
+	maxNodeWeight: number;
+	/** Max edge weight */
+	maxEdgeWeight: number;
+	/** Total impact score across nodes */
+	totalImpact: number;
+	/** Node counts by kind */
+	nodeCounts: Record<KnowledgeGraphNodeKind, number>;
 }
 
 /** Full knowledge graph data for visualization */
 export interface KnowledgeGraphData {
 	nodes: KnowledgeGraphNode[];
 	edges: KnowledgeGraphEdge[];
+	summary: KnowledgeGraphSummary;
 }
 
 // ---- Statistics ----
@@ -476,6 +590,7 @@ export interface ManualAnalysisSnapshot {
 /** Messages from Memory WebView to the extension */
 export type MemoryWebviewToExtensionMessage =
 	| { type: 'memoryReady' }
+	| { type: 'memoryDebugLog'; scope: string; payload?: unknown }
 	| { type: 'getMemoryCommits'; filter?: MemoryFilter }
 	| { type: 'getMemoryCommitDetail'; sha: string }
 	| { type: 'openMemoryFile'; repository: string; filePath: string }

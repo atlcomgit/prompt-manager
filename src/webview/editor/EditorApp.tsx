@@ -144,6 +144,8 @@ export const EditorApp: React.FC = () => {
   const [isSuggestionLoading, setIsSuggestionLoading] = useState(false);
   const [isImprovingPromptText, setIsImprovingPromptText] = useState(false);
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
+  const [isGeneratingDescription, setIsGeneratingDescription] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
@@ -453,6 +455,8 @@ export const EditorApp: React.FC = () => {
       case 'promptLoading':
         setIsLoaded(false);
         setIsChatPanelOpen(false);
+        setIsGeneratingTitle(false);
+        setIsGeneratingDescription(false);
         // Delay showing the loader so fast loads don't flash
         if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); }
         showLoaderTimerRef.current = window.setTimeout(() => { setShowLoader(true); }, 300);
@@ -483,6 +487,8 @@ export const EditorApp: React.FC = () => {
           if (isOpenPayload) {
             if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); showLoaderTimerRef.current = null; }
             setShowLoader(false);
+            setIsGeneratingTitle(false);
+            setIsGeneratingDescription(false);
             setPrompt(msg.prompt);
             localReportDirtyRef.current = false;
             currentPromptIdRef.current = incomingPromptId;
@@ -563,6 +569,8 @@ export const EditorApp: React.FC = () => {
           }
           setIsLoaded(true);
           setIsSaving(false);
+          setIsGeneratingTitle(false);
+          setIsGeneratingDescription(false);
           activeSaveIdRef.current = null;
           if ((msg.prompt.chatSessionIds || []).length > 0) {
             startChatLockRef.current = false;
@@ -743,12 +751,14 @@ export const EditorApp: React.FC = () => {
         setIsChatPanelOpen(true);
         break;
       case 'generatedTitle':
+        setIsGeneratingTitle(false);
         setPrompt(prev => ({ ...prev, title: msg.title }));
         userChangeCounterRef.current++;
         setIsDirty(true);
         scheduleAutoSave(50);
         break;
       case 'generatedDescription':
+        setIsGeneratingDescription(false);
         setPrompt(prev => ({ ...prev, description: msg.description }));
         userChangeCounterRef.current++;
         setIsDirty(true);
@@ -837,6 +847,8 @@ export const EditorApp: React.FC = () => {
         startChatLockRef.current = false;
         setIsStartingChat(false);
         setIsSaving(false);
+        setIsGeneratingTitle(false);
+        setIsGeneratingDescription(false);
         setIsImprovingPromptText(false);
         setIsGeneratingReport(false);
         setIsRecalculating(false);
@@ -1199,15 +1211,21 @@ export const EditorApp: React.FC = () => {
   }, [handleSave]);
 
   const handleGenerateTitle = () => {
-    if (prompt.content) {
-      vscode.postMessage({ type: 'generateTitle', content: prompt.content });
+    if (!prompt.content.trim() || isGeneratingTitle) {
+      return;
     }
+
+    setIsGeneratingTitle(true);
+    vscode.postMessage({ type: 'generateTitle', content: prompt.content });
   };
 
   const handleGenerateDescription = () => {
-    if (prompt.content) {
-      vscode.postMessage({ type: 'generateDescription', content: prompt.content });
+    if (!prompt.content.trim() || isGeneratingDescription) {
+      return;
     }
+
+    setIsGeneratingDescription(true);
+    vscode.postMessage({ type: 'generateDescription', content: prompt.content });
   };
 
   const handleImprovePromptText = () => {
@@ -1338,8 +1356,17 @@ export const EditorApp: React.FC = () => {
                   onChange={v => updateField('title', v)}
                   placeholder={t('editor.titlePlaceholder')}
                 />
-                <button style={styles.aiBtn} onClick={handleGenerateTitle} title={t('editor.aiGenerate')}>
-                  ✨
+                <button
+                  style={{
+                    ...styles.aiBtn,
+                    ...((!prompt.content.trim() || isGeneratingTitle) ? styles.aiBtnDisabled : {}),
+                  }}
+                  onClick={handleGenerateTitle}
+                  title={isGeneratingTitle ? t('editor.generating') : t('editor.aiGenerate')}
+                  disabled={!prompt.content.trim() || isGeneratingTitle}
+                  aria-busy={isGeneratingTitle}
+                >
+                  {isGeneratingTitle ? <span style={styles.aiBtnSpinner} aria-hidden="true" /> : '✨'}
                 </button>
               </div>
 
@@ -1350,8 +1377,17 @@ export const EditorApp: React.FC = () => {
                   onChange={v => updateField('description', v)}
                   placeholder={t('editor.descPlaceholder')}
                 />
-                <button style={styles.aiBtn} onClick={handleGenerateDescription} title={t('editor.aiGenerate')}>
-                  ✨
+                <button
+                  style={{
+                    ...styles.aiBtn,
+                    ...((!prompt.content.trim() || isGeneratingDescription) ? styles.aiBtnDisabled : {}),
+                  }}
+                  onClick={handleGenerateDescription}
+                  title={isGeneratingDescription ? t('editor.generating') : t('editor.aiGenerate')}
+                  disabled={!prompt.content.trim() || isGeneratingDescription}
+                  aria-busy={isGeneratingDescription}
+                >
+                  {isGeneratingDescription ? <span style={styles.aiBtnSpinner} aria-hidden="true" /> : '✨'}
                 </button>
               </div>
 
@@ -2135,6 +2171,23 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     fontSize: '14px',
     flexShrink: 0,
+    minWidth: '36px',
+    minHeight: '32px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  aiBtnDisabled: {
+    opacity: 0.7,
+    cursor: 'not-allowed',
+  },
+  aiBtnSpinner: {
+    width: '14px',
+    height: '14px',
+    border: '2px solid color-mix(in srgb, var(--vscode-button-secondaryForeground) 35%, transparent)',
+    borderTopColor: 'var(--vscode-button-secondaryForeground)',
+    borderRadius: '50%',
+    animation: 'pm-spin 0.8s linear infinite',
   },
   fileList: {
     display: 'flex',

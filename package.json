@@ -81,7 +81,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.1.49",
+        "title": "About 0.1.50",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },
@@ -386,6 +386,9 @@
     }
   },
   "scripts": {
+    "sync:about-title": "node scripts/sync-about-command-title.mjs",
+    "prebuild": "npm run sync:about-title",
+    "version": "npm run sync:about-title",
     "vscode:prepublish": "npm run build",
     "compile": "npm run build",
     "build": "npm run build:extension && npm run build:webview && npm run copy:wasm",

@@ -70,6 +70,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptDeleted'; id: string }
 	| { type: 'promptDuplicated'; prompt: PromptConfig }
 	| { type: 'sidebarState'; state: SidebarState }
+	| { type: 'sidebarSelectionChanged'; id: string | null }
 	| { type: 'workspaceFolders'; folders: string[] }
 	| { type: 'availableModels'; models: Array<{ id: string; name: string }> }
 	| { type: 'availableSkills'; skills: Array<{ id: string; name: string; description: string }> }

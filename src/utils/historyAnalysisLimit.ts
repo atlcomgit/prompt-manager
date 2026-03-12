@@ -1,4 +1,4 @@
-export const DEFAULT_HISTORY_ANALYSIS_LIMIT = 500;
+export const DEFAULT_HISTORY_ANALYSIS_LIMIT = 100;
 export const MIN_HISTORY_ANALYSIS_LIMIT = 1;
 
 export const normalizeHistoryAnalysisLimit = (

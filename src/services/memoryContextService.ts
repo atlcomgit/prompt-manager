@@ -12,6 +12,7 @@ import type { MemoryDatabaseService } from './memoryDatabaseService.js';
 import type { MemoryEmbeddingService } from './memoryEmbeddingService.js';
 import type { UncommittedProjectData } from './gitService.js';
 import { ProjectStructureMapService } from './projectStructureMapService.js';
+import { dedupeMemorySearchResults } from '../utils/memorySearchResults.js';
 import { summarizeUncommittedProjects } from '../utils/uncommittedChangesSummary.js';
 import type {
 	MemoryCommit,
@@ -254,6 +255,8 @@ export class MemoryContextService {
 		if (results.length === 0) {
 			results = await this.getRecentCommits(opts.shortTermLimit, opts.filter);
 		}
+
+		results = dedupeMemorySearchResults(results).slice(0, opts.shortTermLimit);
 
 		if (results.length === 0) { return ''; }
 

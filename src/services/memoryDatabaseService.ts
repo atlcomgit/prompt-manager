@@ -28,7 +28,7 @@ import type {
 } from '../types/memory.js';
 
 /** Current schema version — increment when adding migrations */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /** Maximum number of backup files to keep */
 const MAX_BACKUPS = 3;
@@ -110,6 +110,9 @@ export class MemoryDatabaseService {
 		// Apply migrations
 		if (currentVersion < 1) {
 			this.migrateV1();
+		}
+		if (currentVersion < 2) {
+			this.migrateV2();
 		}
 
 		// Update version
@@ -234,6 +237,24 @@ export class MemoryDatabaseService {
 		this.db.run('CREATE INDEX IF NOT EXISTS idx_knowledge_graph_source ON knowledge_graph(sourceComponent);');
 		this.db.run('CREATE INDEX IF NOT EXISTS idx_knowledge_graph_target ON knowledge_graph(targetComponent);');
 		this.db.run('CREATE INDEX IF NOT EXISTS idx_summaries_scope ON summaries(scope, period, repository);');
+	}
+
+	/**
+	 * Schema version 2: keep a single embedding per commit.
+	 */
+	private migrateV2(): void {
+		if (!this.db) { return; }
+
+		this.db.run(`
+			DELETE FROM embeddings
+			WHERE id NOT IN (
+				SELECT MAX(id)
+				FROM embeddings
+				GROUP BY commitSha
+			);
+		`);
+
+		this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_embeddings_commit_unique ON embeddings(commitSha);');
 	}
 
 	// ---- Persistence ----
@@ -591,7 +612,12 @@ export class MemoryDatabaseService {
 		if (!this.db) { return; }
 		const vectorBuffer = Buffer.from(embedding.vector.buffer);
 		this.db.run(
-			'INSERT INTO embeddings (commitSha, vector, text, createdAt) VALUES (?, ?, ?, ?);',
+			`INSERT INTO embeddings (commitSha, vector, text, createdAt)
+			 VALUES (?, ?, ?, ?)
+			 ON CONFLICT(commitSha) DO UPDATE SET
+			 	vector = excluded.vector,
+			 	text = excluded.text,
+			 	createdAt = excluded.createdAt;`,
 			[embedding.commitSha, vectorBuffer, embedding.text, embedding.createdAt],
 		);
 		this.save();
@@ -600,7 +626,15 @@ export class MemoryDatabaseService {
 	/** Get all embeddings (for cosine similarity search) */
 	getAllEmbeddings(): Array<{ commitSha: string; vector: Float32Array; text: string }> {
 		if (!this.db) { return []; }
-		const result = this.db.exec('SELECT commitSha, vector, text FROM embeddings;');
+		const result = this.db.exec(`
+			SELECT e.commitSha, e.vector, e.text
+			FROM embeddings e
+			INNER JOIN (
+				SELECT MAX(id) AS id
+				FROM embeddings
+				GROUP BY commitSha
+			) latest ON latest.id = e.id;
+		`);
 		if (result.length === 0) { return []; }
 		return result[0].values.map(v => ({
 			commitSha: v[0] as string,

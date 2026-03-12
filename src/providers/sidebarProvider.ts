@@ -74,6 +74,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		this.postMessage({ type: 'prompts', prompts });
 	}
 
+	/** Sync selected prompt in persisted sidebar state and active webview */
+	async syncSelectedPrompt(id: string | null): Promise<void> {
+		const state = this.stateService.getSidebarState();
+		if (state.selectedPromptId !== id) {
+			await this.stateService.saveSidebarState({
+				...state,
+				selectedPromptId: id,
+			});
+		}
+		this.postMessage({ type: 'sidebarSelectionChanged', id });
+	}
+
 	/** Handle messages from sidebar webview */
 	private async handleMessage(msg: WebviewToExtensionMessage): Promise<void> {
 		switch (msg.type) {

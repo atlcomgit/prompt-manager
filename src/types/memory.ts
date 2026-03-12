@@ -384,6 +384,93 @@ export interface MemoryStatistics {
 	commitsPerDay: Array<{ date: string; count: number }>;
 }
 
+// ---- Manual History Analysis Runtime ----
+
+export type ManualAnalysisRunStatus =
+	| 'idle'
+	| 'running'
+	| 'pausing'
+	| 'paused'
+	| 'stopping'
+	| 'stopped'
+	| 'completed';
+
+export type ManualAnalysisCommitStatus = 'queued' | 'running' | 'completed' | 'skipped' | 'error';
+
+export type ManualAnalysisEventKind = 'state' | 'info' | 'skip' | 'error';
+
+export interface ManualAnalysisCommitRow {
+	id: string;
+	sha: string;
+	repository: string;
+	branch: string;
+	message: string;
+	status: ManualAnalysisCommitStatus;
+	reason?: string;
+	fileCount: number;
+	diffBytes: number;
+	startedAt?: string;
+	finishedAt?: string;
+	durationMs?: number;
+	categories: MemoryCategory[];
+	architectureImpactScore?: number;
+	summary?: string;
+	isStored: boolean;
+	sequence: number;
+}
+
+export interface ManualAnalysisRepositoryProgress {
+	repository: string;
+	total: number;
+	planned: number;
+	skippedExisting: number;
+	queued: number;
+	running: number;
+	completed: number;
+	skipped: number;
+	error: number;
+	processed: number;
+	remaining: number;
+	currentSha?: string;
+	currentMessage?: string;
+}
+
+export interface ManualAnalysisEventEntry {
+	id: string;
+	kind: ManualAnalysisEventKind;
+	timestamp: string;
+	repository?: string;
+	sha?: string;
+	message: string;
+}
+
+export interface ManualAnalysisSnapshot {
+	status: ManualAnalysisRunStatus;
+	effectiveLimit: number;
+	startedAt?: string;
+	updatedAt: string;
+	finishedAt?: string;
+	total: number;
+	planned: number;
+	skippedExisting: number;
+	queued: number;
+	running: number;
+	completed: number;
+	skipped: number;
+	error: number;
+	processed: number;
+	remaining: number;
+	elapsedMs: number;
+	throughputPerMinute: number;
+	etaMs?: number;
+	currentRepository?: string;
+	currentSha?: string;
+	currentMessage?: string;
+	repositories: ManualAnalysisRepositoryProgress[];
+	commitRows: ManualAnalysisCommitRow[];
+	recentEvents: ManualAnalysisEventEntry[];
+}
+
 // ---- WebView Message Types ----
 
 /** Messages from Memory WebView to the extension */
@@ -396,6 +483,10 @@ export type MemoryWebviewToExtensionMessage =
 	| { type: 'deleteMemoryCommit'; sha: string }
 	| { type: 'clearMemory' }
 	| { type: 'runManualAnalysis'; fromCommit?: string; toCommit?: string; limit?: number }
+	| { type: 'pauseManualAnalysis' }
+	| { type: 'resumeManualAnalysis' }
+	| { type: 'stopManualAnalysis' }
+	| { type: 'requestManualAnalysisSnapshot' }
 	| { type: 'getMemorySettings' }
 	| { type: 'saveMemorySettings'; settings: Partial<MemorySettings> }
 	| { type: 'exportMemoryData'; format: 'csv' | 'json'; filter?: MemoryFilter }
@@ -420,6 +511,7 @@ export type MemoryExtensionToWebviewMessage =
 	| { type: 'memoryRepositories'; repositories: string[] }
 	| { type: 'memoryExportReady'; format: 'csv' | 'json'; data: string }
 	| { type: 'memoryAnalysisProgress'; current: number; total: number; message: string }
+	| { type: 'memoryAnalysisSnapshot'; snapshot: ManualAnalysisSnapshot }
 	| { type: 'memoryAnalysisComplete'; count: number }
 	| { type: 'memoryError'; message: string }
 	| { type: 'memoryInfo'; message: string }

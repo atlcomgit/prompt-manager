@@ -7,12 +7,22 @@
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { normalizeHistoryAnalysisLimit } from '../utils/historyAnalysisLimit.js';
+import {
+	computeManualAnalysisEta,
+	computeManualAnalysisThroughput,
+	MANUAL_ANALYSIS_EVENT_LIMIT,
+} from '../utils/manualAnalysisRuntime.js';
 import type { MemoryDatabaseService } from '../services/memoryDatabaseService.js';
 import type { MemoryContextService } from '../services/memoryContextService.js';
 import type { MemoryEmbeddingService } from '../services/memoryEmbeddingService.js';
 import type { MemoryAnalyzerService } from '../services/memoryAnalyzerService.js';
 import type { MemoryGitHookService } from '../services/memoryGitHookService.js';
 import type {
+	ManualAnalysisCommitRow,
+	ManualAnalysisEventEntry,
+	ManualAnalysisRepositoryProgress,
+	ManualAnalysisRunStatus,
+	ManualAnalysisSnapshot,
 	MemoryWebviewToExtensionMessage,
 	MemoryExtensionToWebviewMessage,
 	MemorySettings,
@@ -22,7 +32,26 @@ import type {
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
+interface ManualAnalysisCommitRuntime extends ManualAnalysisCommitRow {
+	repoPath: string;
+}
+
+interface ManualAnalysisSession {
+	status: ManualAnalysisRunStatus;
+	effectiveLimit: number;
+	startedAt: string;
+	updatedAt: string;
+	finishedAt?: string;
+	commitRows: ManualAnalysisCommitRuntime[];
+	recentEvents: ManualAnalysisEventEntry[];
+	eventSequence: number;
+}
+
 export class MemoryPanelManager {
+	private manualAnalysisSession: ManualAnalysisSession | null = null;
+
+	private manualAnalysisLoopPromise: Promise<void> | null = null;
+
 	constructor(
 		private readonly extensionUri: vscode.Uri,
 		private readonly db: MemoryDatabaseService,
@@ -31,6 +60,39 @@ export class MemoryPanelManager {
 		private readonly analyzer: MemoryAnalyzerService,
 		private readonly gitHook: MemoryGitHookService,
 	) { }
+
+	private isRussianLocale(): boolean {
+		return vscode.env.language.toLowerCase().startsWith('ru');
+	}
+
+	private getManualAnalysisUiText(): {
+		alreadyRunning: string;
+		noWorkspaceFolders: string;
+		noCommitsFound: string;
+		noNewCommits: string;
+		started: string;
+		stopped: string;
+	} {
+		if (this.isRussianLocale()) {
+			return {
+				alreadyRunning: 'Анализ истории уже выполняется. Открыт актуальный прогресс.',
+				noWorkspaceFolders: 'Не найдено открытых папок workspace для анализа истории',
+				noCommitsFound: 'В выбранном диапазоне истории не найдено коммитов для анализа.',
+				noNewCommits: 'Новых коммитов для анализа нет: все коммиты из выбранного диапазона уже сохранены в памяти.',
+				started: 'Анализ истории запущен.',
+				stopped: 'Анализ истории остановлен.',
+			};
+		}
+
+		return {
+			alreadyRunning: 'History analysis is already running. Showing the current progress.',
+			noWorkspaceFolders: 'No workspace folders found for manual history analysis',
+			noCommitsFound: 'No commits were found in the selected history range.',
+			noNewCommits: 'No new commits to analyse: all commits in the selected range are already stored in memory.',
+			started: 'History analysis started.',
+			stopped: 'History analysis stopped.',
+		};
+	}
 
 	/** Open or focus the memory panel */
 	async show(): Promise<void> {
@@ -167,6 +229,26 @@ export class MemoryPanelManager {
 
 				case 'runManualAnalysis': {
 					await this.runManualAnalysis(panel, msg.limit);
+					break;
+				}
+
+				case 'pauseManualAnalysis': {
+					this.pauseManualAnalysis();
+					break;
+				}
+
+				case 'resumeManualAnalysis': {
+					this.resumeManualAnalysis();
+					break;
+				}
+
+				case 'stopManualAnalysis': {
+					this.stopManualAnalysis();
+					break;
+				}
+
+				case 'requestManualAnalysisSnapshot': {
+					this.postManualAnalysisSnapshot(panel);
 					break;
 				}
 
@@ -336,6 +418,8 @@ export class MemoryPanelManager {
 			commits,
 			total,
 		} as MemoryExtensionToWebviewMessage);
+
+		this.postManualAnalysisSnapshot(panel);
 	}
 
 	/** Run manual analysis of recent commits from git history */
@@ -343,108 +427,622 @@ export class MemoryPanelManager {
 		panel: vscode.WebviewPanel,
 		limit?: number,
 	): Promise<void> {
+		const text = this.getManualAnalysisUiText();
+
+		if (this.manualAnalysisSession && (
+			this.manualAnalysisSession.status === 'running'
+			|| this.manualAnalysisSession.status === 'pausing'
+			|| this.manualAnalysisSession.status === 'paused'
+			|| this.manualAnalysisSession.status === 'stopping'
+		)) {
+			panel.webview.postMessage({
+				type: 'memoryInfo',
+				message: text.alreadyRunning,
+			} as MemoryExtensionToWebviewMessage);
+			this.postManualAnalysisSnapshot(panel);
+			return;
+		}
+
 		const workspaceFolders = vscode.workspace.workspaceFolders;
-		if (!workspaceFolders) { return; }
+		if (!workspaceFolders || workspaceFolders.length === 0) {
+			panel.webview.postMessage({
+				type: 'memoryError',
+				message: text.noWorkspaceFolders,
+			} as MemoryExtensionToWebviewMessage);
+			return;
+		}
 
 		const config = vscode.workspace.getConfiguration('promptManager');
-		const depth = config.get<any>('memory.analysisDepth', 'standard');
-		const diffLimit = config.get<number>('memory.diffLimit', 10000);
 		const configuredLimit = config.get<number>('memory.historyAnalysisLimit', 500);
 		const effectiveLimit = normalizeHistoryAnalysisLimit(limit, configuredLimit);
+		const session = await this.createManualAnalysisSession(workspaceFolders, effectiveLimit);
+		this.manualAnalysisSession = session;
 
-		let processed = 0;
+		if (session.commitRows.length === 0) {
+			this.pushManualAnalysisEvent(session, {
+				kind: 'info',
+				message: text.noCommitsFound,
+			});
+			panel.webview.postMessage({
+				type: 'memoryInfo',
+				message: text.noCommitsFound,
+			} as MemoryExtensionToWebviewMessage);
+			this.finishManualAnalysis('completed');
+			return;
+		}
+
+		if (!session.commitRows.some((row) => row.status === 'queued')) {
+			this.pushManualAnalysisEvent(session, {
+				kind: 'info',
+				message: text.noNewCommits,
+			});
+			panel.webview.postMessage({
+				type: 'memoryInfo',
+				message: text.noNewCommits,
+			} as MemoryExtensionToWebviewMessage);
+			this.finishManualAnalysis('completed');
+			return;
+		}
+
+		session.status = 'running';
+		session.updatedAt = new Date().toISOString();
+		this.pushManualAnalysisEvent(session, {
+			kind: 'state',
+			message: `Manual analysis started with limit ${effectiveLimit}`,
+		});
+		panel.webview.postMessage({
+			type: 'memoryInfo',
+			message: text.started,
+		} as MemoryExtensionToWebviewMessage);
+		this.postManualAnalysisSnapshot(panel);
+
+		const loopSession = session;
+		this.manualAnalysisLoopPromise = this.processManualAnalysisQueue(loopSession)
+			.catch((err) => {
+				const activeSession = this.manualAnalysisSession;
+				if (!activeSession || activeSession !== loopSession) {
+					return;
+				}
+
+				this.pushManualAnalysisEvent(activeSession, {
+					kind: 'error',
+					message: err instanceof Error ? err.message : String(err),
+				});
+				this.finishManualAnalysis('stopped');
+			})
+			.finally(() => {
+				if (this.manualAnalysisSession === loopSession) {
+					this.manualAnalysisLoopPromise = null;
+				}
+			});
+	}
+
+	private pauseManualAnalysis(): void {
+		if (!this.manualAnalysisSession || this.manualAnalysisSession.status !== 'running') {
+			this.postManualAnalysisSnapshot();
+			return;
+		}
+
+		this.manualAnalysisSession.status = 'pausing';
+		this.manualAnalysisSession.updatedAt = new Date().toISOString();
+		this.pushManualAnalysisEvent(this.manualAnalysisSession, {
+			kind: 'state',
+			message: 'Pause requested. Waiting for the current commit to finish.',
+		});
+		this.postManualAnalysisSnapshot();
+	}
+
+	private resumeManualAnalysis(): void {
+		if (!this.manualAnalysisSession || this.manualAnalysisSession.status !== 'paused') {
+			this.postManualAnalysisSnapshot();
+			return;
+		}
+
+		this.manualAnalysisSession.status = 'running';
+		this.manualAnalysisSession.updatedAt = new Date().toISOString();
+		this.pushManualAnalysisEvent(this.manualAnalysisSession, {
+			kind: 'state',
+			message: 'Manual analysis resumed',
+		});
+		this.postManualAnalysisSnapshot();
+
+		if (!this.manualAnalysisLoopPromise) {
+			const loopSession = this.manualAnalysisSession;
+			this.manualAnalysisLoopPromise = this.processManualAnalysisQueue(loopSession)
+				.finally(() => {
+					if (this.manualAnalysisSession === loopSession) {
+						this.manualAnalysisLoopPromise = null;
+					}
+				});
+		}
+	}
+
+	private stopManualAnalysis(): void {
+		if (!this.manualAnalysisSession) {
+			return;
+		}
+
+		if (this.manualAnalysisSession.status === 'paused') {
+			this.pushManualAnalysisEvent(this.manualAnalysisSession, {
+				kind: 'state',
+				message: 'Manual analysis stopped',
+			});
+			this.finishManualAnalysis('stopped');
+			return;
+		}
+
+		if (this.manualAnalysisSession.status !== 'running' && this.manualAnalysisSession.status !== 'pausing') {
+			this.postManualAnalysisSnapshot();
+			return;
+		}
+
+		this.manualAnalysisSession.status = 'stopping';
+		this.manualAnalysisSession.updatedAt = new Date().toISOString();
+		this.pushManualAnalysisEvent(this.manualAnalysisSession, {
+			kind: 'state',
+			message: 'Stop requested. Waiting for the current commit to finish.',
+		});
+		this.postManualAnalysisSnapshot();
+	}
+
+	private async createManualAnalysisSession(
+		workspaceFolders: readonly vscode.WorkspaceFolder[],
+		effectiveLimit: number,
+	): Promise<ManualAnalysisSession> {
+		const startedAt = new Date().toISOString();
+		const commitRows: ManualAnalysisCommitRuntime[] = [];
+		const session: ManualAnalysisSession = {
+			status: 'idle',
+			effectiveLimit,
+			startedAt,
+			updatedAt: startedAt,
+			commitRows,
+			recentEvents: [],
+			eventSequence: 0,
+		};
+
+		let sequence = 0;
 
 		for (const folder of workspaceFolders) {
 			const repoPath = folder.uri.fsPath;
+			const repository = this.gitHook.getRepositoryName(repoPath);
 			const shas = await this.gitHook.getCommitShas(repoPath, effectiveLimit);
-			const repoName = this.gitHook.getRepositoryName(repoPath);
+
+			let skippedExisting = 0;
+			let queued = 0;
 
 			for (const sha of shas) {
-				// Skip if already analysed
-				const existing = await this.db.getCommit(sha);
-				if (existing) { continue; }
-
-				// Get commit data from git
-				const commitData = await this.gitHook.getCommitData(repoPath, sha);
-				if (!commitData) { continue; }
-
-				processed++;
-				panel.webview.postMessage({
-					type: 'memoryAnalysisProgress',
-					current: processed,
-					total: shas.length,
-					message: `Analyzing ${sha.substring(0, 7)}...`,
-				} as MemoryExtensionToWebviewMessage);
-
-				// Build payload
-				const payload = {
-					sha,
-					author: commitData.author,
-					email: commitData.email,
-					date: commitData.date,
-					branch: commitData.branch,
-					repository: repoName,
-					parentSha: commitData.parentSha,
-					message: commitData.message,
-					diff: commitData.diff,
-					files: commitData.files,
-				};
-
-				// Classify commit type
-				const commitType = this.analyzer.classifyCommitType(commitData.message);
-
-				// Store commit
-				await this.db.insertCommit({
-					sha,
-					author: commitData.author,
-					email: commitData.email,
-					date: commitData.date,
-					branch: commitData.branch,
-					repository: repoName,
-					parentSha: commitData.parentSha,
-					commitType,
-					message: commitData.message,
-				});
-
-				// Run AI analysis
-				try {
-					const result = await this.analyzer.analyzeCommit(payload, depth, diffLimit);
-					await this.db.insertAnalysis(result.analysis);
-					await this.db.insertFileChanges(result.fileChanges);
-					if (result.knowledgeNodes.length > 0) {
-						await this.db.insertKnowledgeNodes(result.knowledgeNodes);
-					}
-					if (result.bugRelation) {
-						await this.db.insertBugRelation(result.bugRelation);
-					}
-
-					// Generate embedding if available
-					if (this.embedding.isReady()) {
-						const text = `${commitData.message}\n${result.analysis.summary}\n${result.analysis.keywords.join(' ')}`;
-						const vector = await this.embedding.generateEmbedding(text);
-						if (vector) {
-							await this.db.insertEmbedding({
-								commitSha: sha,
-								vector,
-								text,
-								createdAt: new Date().toISOString(),
-							});
-						}
-					}
-				} catch (err) {
-					console.error(`[PromptManager/Memory] Analysis error for ${sha}:`, err);
+				sequence += 1;
+				const existing = this.db.getCommit(sha);
+				if (existing) {
+					skippedExisting += 1;
+					commitRows.push({
+						id: `${repository}:${sha}`,
+						sha,
+						repository,
+						repoPath,
+						branch: existing.branch,
+						message: this.getCommitHeadline(existing.message),
+						status: 'skipped',
+						reason: 'already-analyzed',
+						fileCount: 0,
+						diffBytes: 0,
+						categories: [],
+						isStored: true,
+						sequence,
+					});
+					continue;
 				}
+
+				queued += 1;
+				commitRows.push({
+					id: `${repository}:${sha}`,
+					sha,
+					repository,
+					repoPath,
+					branch: '',
+					message: '',
+					status: 'queued',
+					fileCount: 0,
+					diffBytes: 0,
+					categories: [],
+					isStored: false,
+					sequence,
+				});
+			}
+
+			this.pushManualAnalysisEvent(session, {
+				kind: 'info',
+				repository,
+				message: `${repository}: ${queued} queued, ${skippedExisting} already analysed, ${shas.length} total`,
+			});
+		}
+
+		return session;
+	}
+
+	private async processManualAnalysisQueue(session: ManualAnalysisSession): Promise<void> {
+		while (this.manualAnalysisSession === session) {
+			if (session.status === 'paused' || session.status === 'completed' || session.status === 'stopped') {
+				return;
+			}
+
+			if (session.status === 'pausing') {
+				session.status = 'paused';
+				session.updatedAt = new Date().toISOString();
+				this.pushManualAnalysisEvent(session, {
+					kind: 'state',
+					message: 'Manual analysis paused',
+				});
+				this.postManualAnalysisSnapshot();
+				return;
+			}
+
+			if (session.status === 'stopping') {
+				this.finishManualAnalysis('stopped');
+				return;
+			}
+
+			const nextRow = session.commitRows
+				.filter((row) => row.status === 'queued')
+				.sort((left, right) => left.sequence - right.sequence)[0];
+
+			if (!nextRow) {
+				this.finishManualAnalysis('completed');
+				return;
+			}
+
+			await this.processManualAnalysisRow(session, nextRow);
+
+			if (session.status === 'pausing') {
+				session.status = 'paused';
+				session.updatedAt = new Date().toISOString();
+				this.pushManualAnalysisEvent(session, {
+					kind: 'state',
+					message: 'Manual analysis paused',
+				});
+				this.postManualAnalysisSnapshot();
+				return;
+			}
+
+			if (session.status === 'stopping') {
+				this.finishManualAnalysis('stopped');
+				return;
+			}
+		}
+	}
+
+	private async processManualAnalysisRow(
+		session: ManualAnalysisSession,
+		row: ManualAnalysisCommitRuntime,
+	): Promise<void> {
+		const config = vscode.workspace.getConfiguration('promptManager');
+		const depth = config.get<any>('memory.analysisDepth', 'standard');
+		const diffLimit = config.get<number>('memory.diffLimit', 10000);
+		const startedAt = new Date().toISOString();
+
+		row.status = 'running';
+		row.startedAt = startedAt;
+		row.finishedAt = undefined;
+		row.durationMs = undefined;
+		row.reason = undefined;
+		session.updatedAt = startedAt;
+		this.pushManualAnalysisEvent(session, {
+			kind: 'state',
+			repository: row.repository,
+			sha: row.sha,
+			message: `Analysing ${row.repository} ${row.sha.substring(0, 7)}`,
+		});
+		this.postManualAnalysisSnapshot();
+
+		const commitData = await this.gitHook.getCommitData(row.repoPath, row.sha);
+		if (!commitData) {
+			this.completeManualAnalysisRow(session, row, 'skipped', 'no-commit-data');
+			this.pushManualAnalysisEvent(session, {
+				kind: 'skip',
+				repository: row.repository,
+				sha: row.sha,
+				message: `Skipped ${row.repository} ${row.sha.substring(0, 7)}: commit metadata is unavailable`,
+			});
+			return;
+		}
+
+		row.branch = commitData.branch;
+		row.message = this.getCommitHeadline(commitData.message);
+		row.fileCount = commitData.files.length;
+		row.diffBytes = Buffer.byteLength(commitData.diff || '', 'utf8');
+		session.updatedAt = new Date().toISOString();
+		this.postManualAnalysisSnapshot();
+
+		const existing = this.db.getCommit(row.sha);
+		if (existing) {
+			row.branch = existing.branch;
+			row.message = this.getCommitHeadline(existing.message);
+			row.isStored = true;
+			this.completeManualAnalysisRow(session, row, 'skipped', 'already-analyzed');
+			this.pushManualAnalysisEvent(session, {
+				kind: 'skip',
+				repository: row.repository,
+				sha: row.sha,
+				message: `Skipped ${row.repository} ${row.sha.substring(0, 7)}: already analysed`,
+			});
+			return;
+		}
+
+		const payload = {
+			sha: row.sha,
+			author: commitData.author,
+			email: commitData.email,
+			date: commitData.date,
+			branch: commitData.branch,
+			repository: row.repository,
+			parentSha: commitData.parentSha,
+			message: commitData.message,
+			diff: commitData.diff,
+			files: commitData.files,
+		};
+
+		const commitType = this.analyzer.classifyCommitType(commitData.message);
+		this.db.insertCommit({
+			sha: row.sha,
+			author: commitData.author,
+			email: commitData.email,
+			date: commitData.date,
+			branch: commitData.branch,
+			repository: row.repository,
+			parentSha: commitData.parentSha,
+			commitType,
+			message: commitData.message,
+		});
+		row.isStored = true;
+
+		try {
+			const result = await this.analyzer.analyzeCommit(payload, depth, diffLimit);
+			this.db.insertAnalysis(result.analysis);
+			this.db.insertFileChanges(result.fileChanges);
+			if (result.knowledgeNodes.length > 0) {
+				this.db.insertKnowledgeNodes(result.knowledgeNodes);
+			}
+			if (result.bugRelation) {
+				this.db.insertBugRelation(result.bugRelation);
+			}
+
+			if (this.embedding.isReady()) {
+				const text = `${commitData.message}\n${result.analysis.summary}\n${result.analysis.keywords.join(' ')}`;
+				const vector = await this.embedding.generateEmbedding(text);
+				if (vector) {
+					this.db.insertEmbedding({
+						commitSha: row.sha,
+						vector,
+						text,
+						createdAt: new Date().toISOString(),
+					});
+				}
+			}
+
+			row.categories = result.analysis.categories;
+			row.architectureImpactScore = result.analysis.architectureImpactScore;
+			row.summary = result.analysis.summary;
+			this.completeManualAnalysisRow(session, row, 'completed');
+			this.pushManualAnalysisEvent(session, {
+				kind: 'info',
+				repository: row.repository,
+				sha: row.sha,
+				message: `Completed ${row.repository} ${row.sha.substring(0, 7)}`,
+			});
+		} catch (err) {
+			const reason = err instanceof Error ? err.message : String(err);
+			console.error(`[PromptManager/Memory] Analysis error for ${row.sha}:`, err);
+			this.completeManualAnalysisRow(session, row, 'error', reason);
+			this.pushManualAnalysisEvent(session, {
+				kind: 'error',
+				repository: row.repository,
+				sha: row.sha,
+				message: `Failed ${row.repository} ${row.sha.substring(0, 7)}: ${reason}`,
+			});
+		}
+	}
+
+	private completeManualAnalysisRow(
+		session: ManualAnalysisSession,
+		row: ManualAnalysisCommitRuntime,
+		status: ManualAnalysisCommitRow['status'],
+		reason?: string,
+	): void {
+		const finishedAt = new Date().toISOString();
+		const startedAt = row.startedAt ? new Date(row.startedAt).getTime() : new Date(finishedAt).getTime();
+		const finishedAtMs = new Date(finishedAt).getTime();
+
+		row.status = status;
+		row.finishedAt = finishedAt;
+		row.durationMs = Math.max(0, finishedAtMs - startedAt);
+		row.reason = reason;
+		session.updatedAt = finishedAt;
+		this.postManualAnalysisSnapshot();
+	}
+
+	private buildManualAnalysisSnapshot(session: ManualAnalysisSession): ManualAnalysisSnapshot {
+		const repositoryOrder: string[] = [];
+		const repositoryMap = new Map<string, ManualAnalysisRepositoryProgress>();
+
+		let total = 0;
+		let queued = 0;
+		let running = 0;
+		let completed = 0;
+		let skipped = 0;
+		let skippedExisting = 0;
+		let error = 0;
+		let currentRepository: string | undefined;
+		let currentSha: string | undefined;
+		let currentMessage: string | undefined;
+
+		for (const row of session.commitRows.slice().sort((left, right) => left.sequence - right.sequence)) {
+			total += 1;
+			if (!repositoryMap.has(row.repository)) {
+				repositoryOrder.push(row.repository);
+				repositoryMap.set(row.repository, {
+					repository: row.repository,
+					total: 0,
+					planned: 0,
+					skippedExisting: 0,
+					queued: 0,
+					running: 0,
+					completed: 0,
+					skipped: 0,
+					error: 0,
+					processed: 0,
+					remaining: 0,
+				});
+			}
+
+			const repository = repositoryMap.get(row.repository)!;
+			repository.total += 1;
+
+			switch (row.status) {
+				case 'queued':
+					queued += 1;
+					repository.queued += 1;
+					break;
+				case 'running':
+					running += 1;
+					repository.running += 1;
+					repository.currentSha = row.sha;
+					repository.currentMessage = row.message;
+					currentRepository = row.repository;
+					currentSha = row.sha;
+					currentMessage = row.message;
+					break;
+				case 'completed':
+					completed += 1;
+					repository.completed += 1;
+					break;
+				case 'skipped':
+					skipped += 1;
+					repository.skipped += 1;
+					if (row.reason === 'already-analyzed') {
+						skippedExisting += 1;
+						repository.skippedExisting += 1;
+					}
+					break;
+				case 'error':
+					error += 1;
+					repository.error += 1;
+					break;
 			}
 		}
 
-		panel.webview.postMessage({
-			type: 'memoryAnalysisComplete',
-			count: processed,
-		} as MemoryExtensionToWebviewMessage);
+		for (const repository of repositoryMap.values()) {
+			repository.planned = repository.total - repository.skippedExisting;
+			repository.processed = repository.completed + repository.skipped + repository.error;
+			repository.remaining = repository.total - repository.processed;
+		}
+
+		const planned = total - skippedExisting;
+		const processed = completed + skipped + error;
+		const remaining = total - processed;
+		const runtimeHandled = completed + error + (skipped - skippedExisting);
+		const endReference = session.finishedAt ? new Date(session.finishedAt).getTime() : Date.now();
+		const elapsedMs = Math.max(0, endReference - new Date(session.startedAt).getTime());
+		const throughputPerMinute = computeManualAnalysisThroughput(runtimeHandled, elapsedMs);
+		const etaMs = computeManualAnalysisEta(queued + running, throughputPerMinute);
+
+		return {
+			status: session.status,
+			effectiveLimit: session.effectiveLimit,
+			startedAt: session.startedAt,
+			updatedAt: session.updatedAt,
+			finishedAt: session.finishedAt,
+			total,
+			planned,
+			skippedExisting,
+			queued,
+			running,
+			completed,
+			skipped,
+			error,
+			processed,
+			remaining,
+			elapsedMs,
+			throughputPerMinute,
+			etaMs,
+			currentRepository,
+			currentSha,
+			currentMessage,
+			repositories: repositoryOrder.map((repository) => repositoryMap.get(repository)!),
+			commitRows: session.commitRows
+				.slice()
+				.sort((left, right) => left.sequence - right.sequence)
+				.map(({ repoPath, ...row }) => row),
+			recentEvents: session.recentEvents.slice(-MANUAL_ANALYSIS_EVENT_LIMIT),
+		};
 	}
 
-	dispose(): void {
-		currentPanel?.dispose();
-		currentPanel = undefined;
+	private postManualAnalysisSnapshot(targetPanel?: vscode.WebviewPanel): void {
+		if (!this.manualAnalysisSession) {
+			return;
+		}
+
+		const snapshot = this.buildManualAnalysisSnapshot(this.manualAnalysisSession);
+		const message: MemoryExtensionToWebviewMessage = {
+			type: 'memoryAnalysisSnapshot',
+			snapshot,
+		};
+
+		if (targetPanel) {
+			targetPanel.webview.postMessage(message);
+			return;
+		}
+
+		this.postMessage(message);
+	}
+
+	private finishManualAnalysis(status: Extract<ManualAnalysisRunStatus, 'completed' | 'stopped'>): void {
+		if (!this.manualAnalysisSession) {
+			return;
+		}
+
+		this.manualAnalysisSession.status = status;
+		this.manualAnalysisSession.finishedAt = new Date().toISOString();
+		this.manualAnalysisSession.updatedAt = this.manualAnalysisSession.finishedAt;
+		this.pushManualAnalysisEvent(this.manualAnalysisSession, {
+			kind: 'state',
+			message: status === 'completed' ? 'Manual analysis completed' : 'Manual analysis stopped',
+		});
+		this.postManualAnalysisSnapshot();
+
+		const runtimeCount = this.manualAnalysisSession.commitRows.filter((row) => row.reason !== 'already-analyzed' && row.status !== 'queued' && row.status !== 'running').length;
+		if (status === 'completed') {
+			this.postMessage({
+				type: 'memoryAnalysisComplete',
+				count: runtimeCount,
+			});
+			return;
+		}
+
+		this.postMessage({
+			type: 'memoryInfo',
+			message: this.getManualAnalysisUiText().stopped,
+		});
+	}
+
+	private pushManualAnalysisEvent(
+		session: ManualAnalysisSession,
+		event: Omit<ManualAnalysisEventEntry, 'id' | 'timestamp'>,
+	): void {
+		session.eventSequence += 1;
+		session.recentEvents.push({
+			id: `event-${session.eventSequence}`,
+			timestamp: new Date().toISOString(),
+			...event,
+		});
+
+		if (session.recentEvents.length > MANUAL_ANALYSIS_EVENT_LIMIT) {
+			session.recentEvents = session.recentEvents.slice(-MANUAL_ANALYSIS_EVENT_LIMIT);
+		}
+	}
+
+	private getCommitHeadline(message: string): string {
+		return message.split('\n')[0] || message;
+		let processed = 0;
 	}
 }

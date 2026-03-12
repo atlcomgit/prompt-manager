@@ -77,7 +77,7 @@ export const SidebarApp: React.FC = () => {
         break;
       case 'sidebarState': {
         const state: SidebarState = msg.state;
-        if (state.selectedPromptId) { setSelectedId(state.selectedPromptId); }
+        setSelectedId(state.selectedPromptId || null);
         if (state.filters) {
           setSearch(state.filters.search || '');
           setStatusFilter(state.filters.status || []);
@@ -90,6 +90,9 @@ export const SidebarApp: React.FC = () => {
         setHasHydratedState(true);
         break;
       }
+      case 'sidebarSelectionChanged':
+        setSelectedId(msg.id || null);
+        break;
       case 'promptDeleted':
         if (selectedId === msg.id) { setSelectedId(null); }
         break;

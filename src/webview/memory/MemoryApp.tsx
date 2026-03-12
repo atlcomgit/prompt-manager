@@ -9,12 +9,17 @@ import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
 import { CommitList } from './components/CommitList';
 import { CommitDetail } from './components/CommitDetail';
+import { AnalysisProgressOverlay } from './components/AnalysisProgressOverlay';
+import { CommitDetailDialog } from './components/CommitDetailDialog';
 import { SearchPanel } from './components/SearchPanel';
 import { KnowledgeGraph } from './components/KnowledgeGraph';
 import { StatisticsPanel } from './components/StatisticsPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { memoryButtonStyles } from './components/buttonStyles';
+import { isManualAnalysisBusy, isManualAnalysisTerminal } from '../../utils/manualAnalysisRuntime';
 import type {
+	ManualAnalysisSnapshot,
+	ManualAnalysisRunStatus,
 	MemoryCommit,
 	MemoryFileChange,
 	MemoryAnalysis,
@@ -77,8 +82,12 @@ export const MemoryApp: React.FC = () => {
 	// Settings state
 	const [settings, setSettings] = useState<MemorySettings | null>(null);
 
-	// Analysis progress
-	const [analysisProgress, setAnalysisProgress] = useState<{ current: number; total: number; message: string } | null>(null);
+	// Analysis runtime state
+	const [analysisSnapshot, setAnalysisSnapshot] = useState<ManualAnalysisSnapshot | null>(null);
+	const [isAnalysisOverlayOpen, setIsAnalysisOverlayOpen] = useState(false);
+	const [analysisViewedCommitSha, setAnalysisViewedCommitSha] = useState<string | null>(null);
+	const [isAnalysisDetailDialogOpen, setIsAnalysisDetailDialogOpen] = useState(false);
+	const previousAnalysisStatusRef = useRef<ManualAnalysisRunStatus | null>(null);
 
 	// Status messages
 	const [statusMessage, setStatusMessage] = useState('');
@@ -131,15 +140,14 @@ export const MemoryApp: React.FC = () => {
 			case 'memoryExportReady':
 				downloadExport(msg.format, msg.data);
 				break;
-			case 'memoryAnalysisProgress':
-				setAnalysisProgress({ current: msg.current, total: msg.total, message: msg.message });
+			case 'memoryAnalysisSnapshot':
+				setAnalysisSnapshot(msg.snapshot);
+				if (!previousAnalysisStatusRef.current && (isManualAnalysisBusy(msg.snapshot.status) || msg.snapshot.status === 'paused')) {
+					setIsAnalysisOverlayOpen(true);
+				}
 				break;
 			case 'memoryAnalysisComplete':
-				setAnalysisProgress(null);
 				setStatusMessage(t('memory.analysisComplete').replace('{count}', String(msg.count)));
-				// Refresh data
-				vscode.postMessage({ type: 'getMemoryCommits', filter });
-				vscode.postMessage({ type: 'getMemoryStatistics' });
 				break;
 			case 'memoryError':
 				setErrorMessage(msg.message);
@@ -166,6 +174,7 @@ export const MemoryApp: React.FC = () => {
 	// On mount, notify extension that webview is ready
 	useEffect(() => {
 		vscode.postMessage({ type: 'memoryReady' });
+		vscode.postMessage({ type: 'requestManualAnalysisSnapshot' });
 		vscode.postMessage({ type: 'getMemoryAuthors' });
 		vscode.postMessage({ type: 'getMemoryBranches' });
 		vscode.postMessage({ type: 'getMemoryCategories' });
@@ -176,6 +185,18 @@ export const MemoryApp: React.FC = () => {
 	useEffect(() => {
 		vscode.postMessage({ type: 'getMemoryCommits', filter });
 	}, [filter]);
+
+	useEffect(() => {
+		const previousStatus = previousAnalysisStatusRef.current;
+		const nextStatus = analysisSnapshot?.status ?? null;
+
+		if (previousStatus && nextStatus && previousStatus !== nextStatus && isManualAnalysisTerminal(nextStatus)) {
+			vscode.postMessage({ type: 'getMemoryCommits', filter });
+			vscode.postMessage({ type: 'getMemoryStatistics' });
+		}
+
+		previousAnalysisStatusRef.current = nextStatus;
+	}, [analysisSnapshot?.status, filter]);
 
 	/** Trigger file download for exported data */
 	const downloadExport = (format: string, data: string) => {
@@ -218,7 +239,20 @@ export const MemoryApp: React.FC = () => {
 
 	/** Handle manual analysis */
 	const onRunAnalysis = () => {
-		vscode.postMessage({ type: 'runManualAnalysis' });
+		setIsAnalysisOverlayOpen(true);
+		vscode.postMessage({ type: 'requestManualAnalysisSnapshot' });
+	};
+
+	const onPauseAnalysis = () => {
+		vscode.postMessage({ type: 'pauseManualAnalysis' });
+	};
+
+	const onResumeAnalysis = () => {
+		vscode.postMessage({ type: 'resumeManualAnalysis' });
+	};
+
+	const onStopAnalysis = () => {
+		vscode.postMessage({ type: 'stopManualAnalysis' });
 	};
 
 	/** Handle export */
@@ -245,6 +279,26 @@ export const MemoryApp: React.FC = () => {
 	const onRequestSettings = () => {
 		vscode.postMessage({ type: 'getMemorySettings' });
 	};
+
+	const analysisButtonLabel = (() => {
+		if (!analysisSnapshot) {
+			return `▶ ${t('memory.runAnalysis')}`;
+		}
+
+		if (analysisSnapshot.status === 'paused') {
+			return `⏸ ${analysisSnapshot.processed}/${analysisSnapshot.total}`;
+		}
+
+		if (isManualAnalysisBusy(analysisSnapshot.status)) {
+			return `⏳ ${analysisSnapshot.processed}/${analysisSnapshot.total}`;
+		}
+
+		return `▶ ${t('memory.runAnalysis')}`;
+	})();
+
+	const analysisDetailCommit = analysisViewedCommitSha && selectedCommit?.sha === analysisViewedCommitSha
+		? selectedCommit
+		: null;
 
 	// Fetch tab-specific data on tab change
 	useEffect(() => {
@@ -282,18 +336,11 @@ export const MemoryApp: React.FC = () => {
 				</div>
 				<div style={styles.headerActions}>
 					<button
-						style={{
-							...memoryButtonStyles.secondary,
-							...(analysisProgress ? memoryButtonStyles.disabled : {}),
-						}}
+						style={memoryButtonStyles.secondary}
 						onClick={onRunAnalysis}
-						disabled={!!analysisProgress}
 						title={t('memory.runAnalysis')}
 					>
-						{analysisProgress
-							? `⏳ ${analysisProgress.current}/${analysisProgress.total}`
-							: `▶ ${t('memory.runAnalysis')}`
-						}
+						{analysisButtonLabel}
 					</button>
 					<button
 						style={memoryButtonStyles.secondary}
@@ -313,43 +360,83 @@ export const MemoryApp: React.FC = () => {
 			</div>
 
 			{/* Status / error messages */}
-			{statusMessage && <div style={styles.statusBar}>{statusMessage}</div>}
-			{errorMessage && <div style={styles.errorBar}>{errorMessage}</div>}
+			<div style={styles.messageHost}>
+				{errorMessage ? (
+					<div style={styles.errorBar}>{errorMessage}</div>
+				) : statusMessage ? (
+					<div style={styles.statusBar}>{statusMessage}</div>
+				) : (
+					<div style={styles.messagePlaceholder} />
+				)}
+			</div>
 
 			{/* Tab content */}
 			<div style={styles.content}>
 				{activeTab === 'commits' && (
-					<div style={styles.splitView}>
-						<div style={styles.listPane}>
-							<CommitList
-								commits={commits}
-								total={totalCommits}
-								filter={filter}
-								onFilterChange={setFilter}
-								onSelectCommit={onSelectCommit}
-								onDeleteCommit={onDeleteCommit}
-								selectedSha={selectedCommit?.sha}
-								authors={availableAuthors}
-								branches={availableBranches}
-								categories={availableCategories}
-								repositories={availableRepositories}
-								t={t}
-							/>
-						</div>
-						<div style={styles.detailPane}>
-							{selectedCommit ? (
-								<CommitDetail
-									commit={selectedCommit}
-									fileChanges={commitFileChanges}
-									analysis={commitAnalysis}
-									bugRelations={commitBugRelations}
+					<div style={styles.splitViewContainer}>
+						<div style={styles.splitView}>
+							<div style={styles.listPane}>
+								<CommitList
+									commits={commits}
+									total={totalCommits}
+									filter={filter}
+									onFilterChange={setFilter}
+									onSelectCommit={onSelectCommit}
+									onDeleteCommit={onDeleteCommit}
+									selectedSha={selectedCommit?.sha}
+									authors={availableAuthors}
+									branches={availableBranches}
+									categories={availableCategories}
+									repositories={availableRepositories}
 									t={t}
-									onOpenFile={onOpenCommitFile}
 								/>
-							) : (
-								<div style={styles.placeholder}>{t('memory.selectCommit')}</div>
-							)}
+							</div>
+							<div style={styles.detailPane}>
+								{selectedCommit ? (
+									<CommitDetail
+										commit={selectedCommit}
+										fileChanges={commitFileChanges}
+										analysis={commitAnalysis}
+										bugRelations={commitBugRelations}
+										t={t}
+										onOpenFile={onOpenCommitFile}
+									/>
+								) : (
+									<div style={styles.placeholder}>{t('memory.selectCommit')}</div>
+								)}
+							</div>
 						</div>
+						<AnalysisProgressOverlay
+							open={isAnalysisOverlayOpen}
+							snapshot={analysisSnapshot}
+							selectedCommitSha={analysisViewedCommitSha}
+							onClose={() => setIsAnalysisOverlayOpen(false)}
+							onStart={() => {
+								setIsAnalysisOverlayOpen(true);
+								vscode.postMessage({ type: 'runManualAnalysis' });
+							}}
+							onPause={onPauseAnalysis}
+							onResume={onResumeAnalysis}
+							onStop={onStopAnalysis}
+							onOpenCommit={(sha) => {
+								setAnalysisViewedCommitSha(sha);
+								setIsAnalysisDetailDialogOpen(true);
+								onSelectCommit(sha);
+							}}
+							t={t}
+						/>
+						<CommitDetailDialog
+							open={isAnalysisDetailDialogOpen}
+							title={t('memory.analysisOpenDetails')}
+							loading={Boolean(analysisViewedCommitSha) && !analysisDetailCommit}
+							commit={analysisDetailCommit}
+							fileChanges={analysisDetailCommit ? commitFileChanges : []}
+							analysis={analysisDetailCommit ? commitAnalysis : undefined}
+							bugRelations={analysisDetailCommit ? commitBugRelations : []}
+							onClose={() => setIsAnalysisDetailDialogOpen(false)}
+							onOpenFile={onOpenCommitFile}
+							t={t}
+						/>
 					</div>
 				)}
 
@@ -422,17 +509,28 @@ const styles: Record<string, React.CSSProperties> = {
 		display: 'flex',
 		gap: '8px',
 	},
+	messageHost: {
+		minHeight: '28px',
+		flexShrink: 0,
+	},
 	statusBar: {
 		padding: '4px 16px',
 		background: 'var(--vscode-editorInfo-background)',
 		color: 'var(--vscode-editorInfo-foreground)',
 		fontSize: '12px',
+		height: '100%',
+		boxSizing: 'border-box',
 	},
 	errorBar: {
 		padding: '4px 16px',
 		background: 'var(--vscode-inputValidation-errorBackground)',
 		color: 'var(--vscode-inputValidation-errorForeground)',
 		fontSize: '12px',
+		height: '100%',
+		boxSizing: 'border-box',
+	},
+	messagePlaceholder: {
+		height: '100%',
 	},
 	content: {
 		flex: 1,
@@ -440,6 +538,10 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	splitView: {
 		display: 'flex',
+		height: '100%',
+	},
+	splitViewContainer: {
+		position: 'relative',
 		height: '100%',
 	},
 	listPane: {

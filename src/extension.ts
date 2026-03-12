@@ -219,6 +219,14 @@ export function activate(context: vscode.ExtensionContext) {
 		)
 	);
 
+	const openPromptOutsideSidebar = async (id: string): Promise<void> => {
+		await editorPanelManager.openPrompt(id);
+		if (id !== '__new__') {
+			await stateService.saveLastPromptId(id);
+		}
+		await sidebarProvider.syncSelectedPrompt(id);
+	};
+
 	// Open prompt when selected in sidebar
 	sidebarProvider.onDidOpenPrompt(async (id) => {
 		await editorPanelManager.openPrompt(id);
@@ -240,7 +248,7 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 
 	trackerPanelManager.onDidOpenPrompt(async (id) => {
-		await editorPanelManager.openPrompt(id);
+		await openPromptOutsideSidebar(id);
 	});
 
 	// Register commands
@@ -268,7 +276,7 @@ export function activate(context: vscode.ExtensionContext) {
 				placeHolder: 'Выберите промпт для открытия',
 			});
 			if (selected) {
-				await editorPanelManager.openPrompt(selected.id);
+				await openPromptOutsideSidebar(selected.id);
 			}
 		}),
 
@@ -296,7 +304,7 @@ export function activate(context: vscode.ExtensionContext) {
 				const newId = await storageService.uniqueId(`${selected.id}-copy`);
 				await storageService.duplicatePrompt(selected.id, newId);
 				await sidebarProvider.refreshList();
-				await editorPanelManager.openPrompt(newId);
+				await openPromptOutsideSidebar(newId);
 			}
 		}),
 
@@ -311,7 +319,7 @@ export function activate(context: vscode.ExtensionContext) {
 				const imported = await storageService.importPrompt(uris[0].fsPath);
 				if (imported) {
 					await sidebarProvider.refreshList();
-					await editorPanelManager.openPrompt(imported.id);
+					await openPromptOutsideSidebar(imported.id);
 				}
 			}
 		}),
@@ -682,7 +690,7 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 
-			await editorPanelManager.openPrompt(prompt.id);
+			await openPromptOutsideSidebar(prompt.id);
 		})();
 	}
 

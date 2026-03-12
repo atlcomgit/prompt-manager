@@ -243,6 +243,10 @@ export function activate(context: vscode.ExtensionContext) {
 		await trackerPanelManager.refresh();
 	});
 
+	trackerPanelManager.onDidSave(async () => {
+		await sidebarProvider.refreshList();
+	});
+
 	editorPanelManager.onDidSaveStateChange(({ id, saving }) => {
 		sidebarProvider.postMessage({ type: 'promptSaving', id, saving });
 	});

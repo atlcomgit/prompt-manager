@@ -26,6 +26,8 @@ const STATUS_SET = new Set<PromptStatus>([
 export class TrackerPanelManager {
 	private _onDidOpenPrompt = new vscode.EventEmitter<string>();
 	public readonly onDidOpenPrompt = this._onDidOpenPrompt.event;
+	private _onDidSave = new vscode.EventEmitter<string>();
+	public readonly onDidSave = this._onDidSave.event;
 
 	constructor(
 		private readonly extensionUri: vscode.Uri,
@@ -128,6 +130,7 @@ export class TrackerPanelManager {
 				}
 				prompt.status = msg.status;
 				await this.storageService.savePrompt(prompt);
+				this._onDidSave.fire(prompt.id);
 				if (prompt.status !== 'in-progress') {
 					try {
 						await this.getChatMemoryInstructionService?.()?.handlePromptStatusChange(prompt);

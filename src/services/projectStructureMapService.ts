@@ -108,7 +108,7 @@ export class ProjectStructureMapService {
 
 	private async createIgnoreMatcher(rootUri: vscode.Uri) {
 		const matcher = ignore();
-		for (const fileName of ['.gitignore', '.vscodeignore']) {
+		for (const fileName of ['.gitignore', '.vscodeignore', 'package.json', 'composer.json']) {
 			const content = await this.readTextFile(vscode.Uri.joinPath(rootUri, fileName));
 			if (content) {
 				matcher.add(content);
@@ -202,7 +202,12 @@ export class ProjectStructureMapService {
 		// Файлы правил игнорирования никогда не исключаем из карты:
 		// они сами являются источником правил и должны быть всегда видны.
 		const fileName = normalizedPath.split('/').pop() ?? '';
-		if (fileName === '.gitignore' || fileName === '.vscodeignore') {
+		if (
+			fileName === '.gitignore'
+			|| fileName === '.vscodeignore'
+			|| fileName === 'package.json'
+			|| fileName === 'composer.json'
+		) {
 			return false;
 		}
 

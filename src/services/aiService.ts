@@ -3,6 +3,40 @@
  */
 
 import * as vscode from 'vscode';
+import * as os from 'os';
+import * as path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
+
+type AvailableModelOption = { id: string; name: string };
+
+type ChatModelsControlEntry = {
+	id?: string;
+	label?: string;
+	featured?: boolean;
+};
+
+type ChatModelsControl = {
+	free?: Record<string, ChatModelsControlEntry>;
+	paid?: Record<string, ChatModelsControlEntry>;
+};
+
+type CachedLanguageModelEntry = {
+	identifier?: string;
+	metadata?: {
+		id?: string;
+		name?: string;
+		vendor?: string;
+		isUserSelectable?: boolean;
+		targetChatSessionType?: string;
+		modelPickerCategory?: {
+			label?: string;
+			order?: number;
+		};
+	};
+};
 
 export type ChatModelApplyStatus =
 	| 'applied'
@@ -265,35 +299,309 @@ export class AiService {
 	}
 
 	/** Get available language models */
-	async getAvailableModels(): Promise<Array<{ id: string; name: string }>> {
+	async getAvailableModels(): Promise<AvailableModelOption[]> {
 		try {
-			const models = await vscode.lm.selectChatModels({});
-			return models.map(m => ({
-				id: m.id,
-				name: this.toReadableModelName(m.vendor, m.family, m.id),
-			})).sort((a, b) => `${a.name} ${a.id}`.localeCompare(`${b.name} ${b.id}`, 'ru', { sensitivity: 'base' }));
+			const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+			const visibleModels = await this.getVisibleCopilotModels(models);
+			if (visibleModels.length > 0) {
+				return visibleModels;
+			}
+
+			return this.normalizeAvailableModels(models.map(model => ({
+				id: model.id,
+				name: (model.name || '').trim() || model.family || model.id,
+			})));
 		} catch {
 			return [];
 		}
 	}
 
-	private toReadableModelName(vendor: string, family: string, modelId: string): string {
-		const prettifyToken = (token: string): string => token
-			.split(/[-_\s]+/)
-			.filter(Boolean)
-			.map((part) => {
-				if (/^\d/.test(part) || part.length <= 2) {
-					return part.toUpperCase();
-				}
-				return part.charAt(0).toUpperCase() + part.slice(1);
-			})
-			.join('-')
-			.replace(/\bGpt\b/g, 'GPT')
-			.replace(/\bO\b/g, 'o');
+	private async getVisibleCopilotModels(models: vscode.LanguageModelChat[]): Promise<AvailableModelOption[]> {
+		const dbPath = await this.resolveStateDbPath();
+		if (!dbPath) {
+			return [];
+		}
 
-		const vendorName = prettifyToken(vendor || 'AI');
-		const familyName = prettifyToken(family || modelId || 'Model');
-		return `${vendorName} · ${familyName}`;
+		const cachedModels = await this.getVisibleCopilotModelsFromCache(dbPath, models);
+		if (cachedModels.length > 0) {
+			return cachedModels;
+		}
+
+		const [modelsControlRaw, modelPickerPreferencesRaw, copilotSkuRaw] = await Promise.all([
+			this.readStateItemValue(dbPath, 'chat.modelsControl'),
+			this.readStateItemValue(dbPath, 'chatModelPickerPreferences'),
+			this.readStateItemValue(dbPath, 'extensionsAssignmentFilterProvider.copilotSku'),
+		]);
+
+		const modelsControl = this.parseJson<ChatModelsControl>(modelsControlRaw);
+		if (!modelsControl) {
+			return [];
+		}
+
+		const featuredEntries = this.getVisibleControlEntries(modelsControl, this.resolveCopilotTier(copilotSkuRaw));
+		if (featuredEntries.length === 0) {
+			return [];
+		}
+
+		const preferences = this.parseJson<Record<string, boolean>>(modelPickerPreferencesRaw) || {};
+		const availableById = new Map<string, vscode.LanguageModelChat>();
+		const availableByIdentifier = new Map<string, vscode.LanguageModelChat>();
+
+		for (const model of models) {
+			const id = (model.id || '').trim();
+			if (id) {
+				availableById.set(id, model);
+				availableByIdentifier.set(`copilot/${id}`.toLowerCase(), model);
+			}
+
+			const family = (model.family || '').trim();
+			if (family) {
+				availableByIdentifier.set(`copilot/${family}`.toLowerCase(), model);
+			}
+
+			const identifier = String((model as any).identifier || '').trim();
+			if (identifier) {
+				availableByIdentifier.set(identifier.toLowerCase(), model);
+			}
+		}
+
+		const result: AvailableModelOption[] = [];
+		const seenIds = new Set<string>();
+		const pushModel = (model: vscode.LanguageModelChat | undefined, nameOverride?: string): void => {
+			if (!model) {
+				return;
+			}
+
+			const id = (model.id || '').trim();
+			if (!id || id === 'auto' || seenIds.has(id)) {
+				return;
+			}
+
+			seenIds.add(id);
+			result.push({
+				id,
+				name: (nameOverride || '').trim() || (model.name || '').trim() || model.family || id,
+			});
+		};
+
+		for (const entry of featuredEntries) {
+			const controlId = (entry.id || '').trim();
+			if (!controlId) {
+				continue;
+			}
+
+			pushModel(
+				availableById.get(controlId) || availableByIdentifier.get(`copilot/${controlId}`),
+				entry.label,
+			);
+		}
+
+		for (const [identifier, isVisible] of Object.entries(preferences)) {
+			if (!isVisible || !identifier.toLowerCase().startsWith('copilot/')) {
+				continue;
+			}
+
+			pushModel(availableByIdentifier.get(identifier.toLowerCase()));
+		}
+
+		return this.sortVisibleModels(result, featuredEntries);
+	}
+
+	private async getVisibleCopilotModelsFromCache(
+		dbPath: string,
+		models: vscode.LanguageModelChat[],
+	): Promise<AvailableModelOption[]> {
+		const cachedModelsRaw = await this.readStateItemValue(dbPath, 'chat.cachedLanguageModels.v2');
+		const cachedModels = this.parseJson<CachedLanguageModelEntry[]>(cachedModelsRaw);
+		if (!cachedModels || cachedModels.length === 0) {
+			return [];
+		}
+
+		const availableById = new Map<string, vscode.LanguageModelChat>();
+		const availableByIdentifier = new Map<string, vscode.LanguageModelChat>();
+		for (const model of models) {
+			const id = (model.id || '').trim();
+			if (id) {
+				availableById.set(id, model);
+				availableByIdentifier.set(`copilot/${id}`.toLowerCase(), model);
+			}
+
+			const family = (model.family || '').trim();
+			if (family) {
+				availableByIdentifier.set(`copilot/${family}`.toLowerCase(), model);
+			}
+
+			const identifier = String((model as any).identifier || '').trim();
+			if (identifier) {
+				availableByIdentifier.set(identifier.toLowerCase(), model);
+			}
+		}
+
+		const result: AvailableModelOption[] = [];
+		const seenIds = new Set<string>();
+		for (const entry of cachedModels) {
+			const metadata = entry.metadata;
+			if (!metadata || metadata.vendor !== 'copilot' || metadata.isUserSelectable !== true) {
+				continue;
+			}
+
+			// Prompt Manager opens the regular Copilot chat panel, not special session types.
+			if (metadata.targetChatSessionType) {
+				continue;
+			}
+
+			const model = availableByIdentifier.get(String(entry.identifier || '').trim().toLowerCase())
+				|| availableById.get(String(metadata.id || '').trim());
+			if (!model) {
+				continue;
+			}
+
+			const id = (model.id || '').trim();
+			if (!id || id === 'auto' || seenIds.has(id)) {
+				continue;
+			}
+
+			seenIds.add(id);
+			result.push({
+				id,
+				name: String(metadata.name || '').trim() || (model.name || '').trim() || model.family || id,
+			});
+		}
+
+		return result;
+	}
+
+	private sortVisibleModels(
+		models: AvailableModelOption[],
+		featuredEntries: ChatModelsControlEntry[],
+	): AvailableModelOption[] {
+		const featuredRank = new Map<string, number>();
+		featuredEntries.forEach((entry, index) => {
+			const id = String(entry.id || '').trim();
+			if (id && !featuredRank.has(id)) {
+				featuredRank.set(id, index);
+			}
+		});
+
+		return [...models].sort((left, right) => {
+			const leftFeatured = featuredRank.get(left.id);
+			const rightFeatured = featuredRank.get(right.id);
+			if (leftFeatured !== undefined || rightFeatured !== undefined) {
+				if (leftFeatured === undefined) {
+					return 1;
+				}
+				if (rightFeatured === undefined) {
+					return -1;
+				}
+				if (leftFeatured !== rightFeatured) {
+					return leftFeatured - rightFeatured;
+				}
+			}
+
+			return left.name.localeCompare(right.name, 'ru', { sensitivity: 'base' });
+		});
+	}
+
+	private normalizeAvailableModels(models: AvailableModelOption[]): AvailableModelOption[] {
+		const result: AvailableModelOption[] = [];
+		const seen = new Set<string>();
+
+		for (const model of models) {
+			const id = String(model.id || '').trim();
+			if (!id || id === 'auto' || seen.has(id)) {
+				continue;
+			}
+
+			seen.add(id);
+			result.push({
+				id,
+				name: String(model.name || '').trim() || id,
+			});
+		}
+
+		return result;
+	}
+
+	private getVisibleControlEntries(modelsControl: ChatModelsControl, preferredTier: 'free' | 'paid'): ChatModelsControlEntry[] {
+		const primary = preferredTier === 'free' ? modelsControl.free : modelsControl.paid;
+		const fallback = preferredTier === 'free' ? modelsControl.paid : modelsControl.free;
+		const source = primary && Object.keys(primary).length > 0 ? primary : fallback;
+		if (!source) {
+			return [];
+		}
+
+		return Object.values(source).filter(entry => Boolean(entry?.featured));
+	}
+
+	private resolveCopilotTier(rawSku: string): 'free' | 'paid' {
+		const normalized = String(rawSku || '').trim().toLowerCase();
+		return normalized.includes('free') ? 'free' : 'paid';
+	}
+
+	private parseJson<T>(raw: string): T | null {
+		const normalized = String(raw || '').trim();
+		if (!normalized) {
+			return null;
+		}
+
+		try {
+			return JSON.parse(normalized) as T;
+		} catch {
+			return null;
+		}
+	}
+
+	private async readStateItemValue(dbPath: string, key: string): Promise<string> {
+		try {
+			const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
+			const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
+			return (stdout || '').trim();
+		} catch {
+			return '';
+		}
+	}
+
+	private async resolveStateDbPath(): Promise<string | null> {
+		for (const candidate of this.getStateDbCandidates()) {
+			try {
+				await vscode.workspace.fs.stat(vscode.Uri.file(candidate));
+				return candidate;
+			} catch {
+				// continue
+			}
+		}
+		return null;
+	}
+
+	private getStateDbCandidates(): string[] {
+		const home = os.homedir();
+		if (process.platform === 'linux') {
+			return [
+				path.join(home, '.config', 'Code', 'User', 'globalStorage', 'state.vscdb'),
+				path.join(home, '.config', 'Code - Insiders', 'User', 'globalStorage', 'state.vscdb'),
+				path.join(home, '.config', 'VSCodium', 'User', 'globalStorage', 'state.vscdb'),
+			];
+		}
+		if (process.platform === 'darwin') {
+			return [
+				path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'state.vscdb'),
+				path.join(home, 'Library', 'Application Support', 'Code - Insiders', 'User', 'globalStorage', 'state.vscdb'),
+				path.join(home, 'Library', 'Application Support', 'VSCodium', 'User', 'globalStorage', 'state.vscdb'),
+			];
+		}
+		if (process.platform === 'win32') {
+			const appData = process.env.APPDATA || '';
+			return [
+				path.join(appData, 'Code', 'User', 'globalStorage', 'state.vscdb'),
+				path.join(appData, 'Code - Insiders', 'User', 'globalStorage', 'state.vscdb'),
+				path.join(appData, 'VSCodium', 'User', 'globalStorage', 'state.vscdb'),
+			];
+		}
+		return [];
+	}
+
+	private escapeSql(value: string): string {
+		return value.replace(/'/g, "''");
 	}
 
 	/** Generate inline suggestion / continuation for prompt text */

@@ -241,11 +241,6 @@ export const EditorApp: React.FC = () => {
     return prompt.projects.some(projectName => currentBranchByProject.get(projectName) !== targetBranch);
   }, [targetBranch, prompt.projects, currentBranchByProject, branchesResolved]);
 
-  const sortedAvailableModels = useMemo(
-    () => [...availableModels].sort((a, b) => `${a.name} ${a.id}`.localeCompare(`${b.name} ${b.id}`, 'ru', { sensitivity: 'base' })),
-    [availableModels]
-  );
-
   const toShortText = (value: string, maxLength = 64): string => {
     const normalized = value.trim();
     if (normalized.length <= maxLength) {
@@ -263,12 +258,12 @@ export const EditorApp: React.FC = () => {
     if (!prompt.model.trim()) {
       return '';
     }
-    const selected = sortedAvailableModels.find(m => m.id === prompt.model.trim());
+    const selected = availableModels.find(m => m.id === prompt.model.trim());
     if (selected) {
-      return `${selected.name} (${selected.id})`;
+      return selected.name;
     }
     return prompt.model.trim();
-  }, [prompt.model, sortedAvailableModels]);
+  }, [prompt.model, availableModels]);
 
   const basicSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -1699,8 +1694,8 @@ export const EditorApp: React.FC = () => {
                   style={styles.select}
                 >
                   <option value="">{t('common.auto')}</option>
-                  {sortedAvailableModels.map(m => (
-                    <option key={m.id} value={m.id}>{`${m.name} (${m.id})`}</option>
+                  {availableModels.map(m => (
+                    <option key={m.id} value={m.id}>{m.name}</option>
                   ))}
                 </select>
               </div>

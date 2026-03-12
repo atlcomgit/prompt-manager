@@ -3,7 +3,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "/home/alek/.copilot/hooks/agent-finish.sh",
+        "command": "/home/alek/.copilot/hooks/agent-finish-voice.sh",
         "timeout": 60
       }
     ]

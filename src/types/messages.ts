@@ -7,7 +7,7 @@ import type { Prompt, PromptConfig, SidebarState, PromptStatistics, PromptStatus
 // ---- Messages FROM webview TO extension ----
 
 export type WebviewToExtensionMessage =
-	| { type: 'ready' }
+	| { type: 'ready'; bootId?: string }
 	| { type: 'getPrompts' }
 	| { type: 'getPrompt'; id: string }
 	| { type: 'savePrompt'; prompt: Prompt; source?: 'manual' | 'status-change' | 'autosave' }

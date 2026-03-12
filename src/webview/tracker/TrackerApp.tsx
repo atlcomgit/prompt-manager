@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
@@ -47,18 +47,37 @@ const statusTranslationKey = (status: PromptStatus): string => {
 };
 
 export const TrackerApp: React.FC = () => {
+  const OPEN_PROMPT_DEBOUNCE_MS = 120;
   const t = useT();
   const [prompts, setPrompts] = useState<PromptConfig[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverStatus, setDragOverStatus] = useState<PromptStatus | null>(null);
+  const openPromptTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       vscode.postMessage({ type: 'ready' });
     }, 0);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      if (openPromptTimerRef.current !== null) {
+        window.clearTimeout(openPromptTimerRef.current);
+        openPromptTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleOpenPrompt = useCallback((promptId: string) => {
+    if (openPromptTimerRef.current !== null) {
+      window.clearTimeout(openPromptTimerRef.current);
+    }
+
+    openPromptTimerRef.current = window.setTimeout(() => {
+      openPromptTimerRef.current = null;
+      vscode.postMessage({ type: 'openPrompt', id: promptId });
+    }, OPEN_PROMPT_DEBOUNCE_MS);
   }, []);
 
   const handleMessage = useCallback((msg: any) => {
@@ -170,7 +189,7 @@ export const TrackerApp: React.FC = () => {
                           <div style={styles.metaRow}><strong>№</strong> {prompt.taskNumber || '—'}</div>
                           <div style={styles.metaRow}><strong>{t('tracker.projects')}</strong> {prompt.projects.length ? prompt.projects.join(', ') : '—'}</div>
                           <div style={styles.actionsRow}>
-                            <button style={styles.actionBtn} onClick={() => vscode.postMessage({ type: 'openPrompt', id: prompt.id })}>
+                            <button style={styles.actionBtn} onClick={() => handleOpenPrompt(prompt.id)}>
                               {t('tracker.open')}
                             </button>
                             <button style={styles.actionBtnPrimary} onClick={() => vscode.postMessage({ type: 'startChat', id: prompt.id })}>

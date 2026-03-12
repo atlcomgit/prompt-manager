@@ -18,6 +18,7 @@ import { createDefaultPrompt } from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
 
 const vscode = getVsCodeApi();
+const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
 
 interface SelectOption {
   id: string;
@@ -44,6 +45,7 @@ const ensureTrailingNewline = (text: string): string => (text.endsWith('\n') ? t
 
 export const EditorApp: React.FC = () => {
   const t = useT();
+  const bootIdRef = useRef<string>(initialBootId);
   const initialWebviewStateRef = useRef<Record<string, unknown>>((vscode.getState?.() || {}) as Record<string, unknown>);
   const storage = typeof window !== 'undefined' ? window.localStorage : null;
   const readStoredHeight = (key: string): number | undefined => {
@@ -395,7 +397,7 @@ export const EditorApp: React.FC = () => {
 
   useEffect(() => {
     const readyTimer = window.setTimeout(() => {
-      vscode.postMessage({ type: 'ready' });
+      vscode.postMessage({ type: 'ready', bootId: bootIdRef.current });
     }, 0);
 
     // Track writing time
@@ -1258,7 +1260,12 @@ export const EditorApp: React.FC = () => {
           <span style={styles.sectionArrow}>{expandedSections[key] ? '▾' : '▸'}</span>
           <span style={styles.sectionTitle}>{title}</span>
         </span>
-        <span style={styles.sectionSummaryWrap}>
+        <span
+          style={{
+            ...styles.sectionSummaryWrap,
+            ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden),
+          }}
+        >
           {visibleItems.length > 0 ? (
             <>
               {visibleItems.map((item, index) => (
@@ -1275,7 +1282,18 @@ export const EditorApp: React.FC = () => {
           )}
         </span>
       </button>
-      {expandedSections[key] && <div style={styles.sectionBody}>{content}</div>}
+      {expandedSections[key] && (
+        <div style={styles.sectionBody}>
+          <div
+            style={{
+              ...styles.sectionBodyContent,
+              ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden),
+            }}
+          >
+            {content}
+          </div>
+        </div>
+      )}
       </section>
     );
   };
@@ -1289,17 +1307,28 @@ export const EditorApp: React.FC = () => {
         </div>
       )}
 
-      {/* Header */}
-      <div style={styles.header}>
-        <h2 style={styles.headerTitle}>
-          {prompt.title || prompt.id || t('editor.newPrompt')}
-        </h2>
-        {isDirty && <span style={styles.dirtyIndicator}>● {t('editor.unsaved')}</span>}
-      </div>
+      <div style={styles.contentShell}>
+        {/* Header */}
+        <div style={styles.header}>
+          <h2
+            style={{
+              ...styles.headerTitle,
+              ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden),
+            }}
+          >
+            {prompt.title || prompt.id || t('editor.newPrompt')}
+          </h2>
+          <span
+            style={{
+              ...styles.dirtyIndicator,
+              ...((isLoaded && isDirty) ? styles.blockContentVisible : styles.blockContentHidden),
+            }}
+          >● {t('editor.unsaved')}</span>
+        </div>
 
-      {/* Main content */}
-      <div style={styles.body}>
-        <div style={styles.formGrid}>
+        {/* Main content */}
+        <div style={styles.body}>
+          <div style={styles.formGrid}>
           {renderSection('basic', 'Основное', basicSummary, (
             <>
               <div style={styles.fieldRow}>
@@ -1760,26 +1789,29 @@ export const EditorApp: React.FC = () => {
               </div>
             </>
           ))}
+          </div>
+        </div>
+
+        {/* Action bar */}
+        <div style={isLoaded ? styles.blockContentVisible : styles.blockContentHidden}>
+          <ActionBar
+            onSave={() => handleSave('manual')}
+            onShowHistory={handleShowHistory}
+            onStartChat={handleStartChat}
+            onOpenChat={handleOpenChat}
+            onMarkCompleted={() => handleSetStatus('completed')}
+            onMarkStopped={() => handleSetStatus('stopped')}
+            showStatusActions={prompt.status === 'in-progress'}
+            hasChatSession={prompt.chatSessionIds.length > 0}
+            isChatPanelOpen={isChatPanelOpen}
+            isDirty={isDirty}
+            isSaving={isSaving}
+            isStartingChat={isStartingChat}
+            hasContent={!!prompt.content}
+            isDraftStatus={prompt.status === 'draft'}
+          />
         </div>
       </div>
-
-      {/* Action bar */}
-      <ActionBar
-        onSave={() => handleSave('manual')}
-        onShowHistory={handleShowHistory}
-        onStartChat={handleStartChat}
-        onOpenChat={handleOpenChat}
-        onMarkCompleted={() => handleSetStatus('completed')}
-        onMarkStopped={() => handleSetStatus('stopped')}
-        showStatusActions={prompt.status === 'in-progress'}
-        hasChatSession={prompt.chatSessionIds.length > 0}
-        isChatPanelOpen={isChatPanelOpen}
-        isDirty={isDirty}
-        isSaving={isSaving}
-        isStartingChat={isStartingChat}
-        hasContent={!!prompt.content}
-        isDraftStatus={prompt.status === 'draft'}
-      />
     </div>
   );
 };
@@ -1791,6 +1823,18 @@ const styles: Record<string, React.CSSProperties> = {
     height: '100vh',
     overflow: 'hidden',
     position: 'relative',
+  },
+  contentShell: {
+    display: 'flex',
+    flexDirection: 'column',
+    flex: 1,
+    minHeight: 0,
+  },
+  blockContentVisible: {
+    visibility: 'visible',
+  },
+  blockContentHidden: {
+    visibility: 'hidden',
   },
   loadingOverlay: {
     position: 'absolute',
@@ -1919,6 +1963,11 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     gap: '12px',
     padding: '12px',
+  },
+  sectionBodyContent: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
   },
   fieldRow: {
     display: 'flex',

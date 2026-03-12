@@ -35,7 +35,7 @@ export class EditorPanelManager {
 	private panelLatestPromptSnapshots = new Map<string, Prompt | null>();
 	private panelBasePrompts = new Map<string, Prompt>();
 	private panelPromptRefs = new Map<string, Prompt>();
-	private silentClosePanels = new Set<string>();
+	private silentClosePanels = new Set<vscode.WebviewPanel>();
 	private pendingRestorePrompt: Prompt | null = null;
 	private pendingRestoreIsDirty = false;
 	private readonly hooksOutput = vscode.window.createOutputChannel('Prompt Manager Hooks');
@@ -46,9 +46,12 @@ export class EditorPanelManager {
 	private reportEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string; lastModifiedMs: number | null }>();
 	private panelKeyByReportEditorUri = new Map<string, string>();
 	private reportEditorPanels = new Map<string, vscode.WebviewPanel>();
+	private panelBootIds = new Map<string, string>();
 	private pendingReportPersistByPromptId = new Map<string, Promise<Prompt | null>>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
-	private openPromptQueue: Promise<void> = Promise.resolve();
+	private openPromptQueue: Promise<void> | null = null;
+	private pendingOpenPromptId: string | null = null;
+	private openPromptRequestVersion = 0;
 	private readonly markdownRenderer = new MarkdownIt({
 		html: false,
 		linkify: true,
@@ -561,6 +564,20 @@ export class EditorPanelManager {
 	private async broadcastAvailableLanguagesAndFrameworks(
 		extraSources: Array<Pick<Prompt, 'languages' | 'frameworks'>> = []
 	): Promise<void> {
+		const { languagesMessage, frameworksMessage } = await this.buildAvailableLanguagesAndFrameworksMessages(extraSources);
+
+		for (const panel of openPanels.values()) {
+			void panel.webview.postMessage(languagesMessage);
+			void panel.webview.postMessage(frameworksMessage);
+		}
+	}
+
+	private async buildAvailableLanguagesAndFrameworksMessages(
+		extraSources: Array<Pick<Prompt, 'languages' | 'frameworks'>> = []
+	): Promise<{
+		languagesMessage: ExtensionToWebviewMessage;
+		frameworksMessage: ExtensionToWebviewMessage;
+	}> {
 		const allPrompts = await this.storageService.listPrompts();
 		const langSet = new Set<string>();
 		const fwSet = new Set<string>();
@@ -584,10 +601,10 @@ export class EditorPanelManager {
 			options: [...fwSet].sort().map(f => ({ id: f, name: f })),
 		};
 
-		for (const panel of openPanels.values()) {
-			void panel.webview.postMessage(languagesMessage);
-			void panel.webview.postMessage(frameworksMessage);
-		}
+		return {
+			languagesMessage,
+			frameworksMessage,
+		};
 	}
 
 	private resolveStatusFromHooks(hooks: string[]): 'completed' | 'stopped' | null {
@@ -665,6 +682,26 @@ export class EditorPanelManager {
 			|| p.model
 			|| p.contextFiles.length
 		);
+	}
+
+	private isStalePromptMessage(
+		currentPrompt: Pick<Prompt, 'id' | 'promptUuid'>,
+		incomingPrompt?: Partial<Pick<Prompt, 'id' | 'promptUuid'>> | null,
+		incomingPromptId?: string,
+	): boolean {
+		const currentPromptUuid = (currentPrompt.promptUuid || '').trim();
+		const incomingPromptUuid = (incomingPrompt?.promptUuid || '').trim();
+		if (currentPromptUuid && incomingPromptUuid && currentPromptUuid !== incomingPromptUuid) {
+			return true;
+		}
+
+		const currentPromptId = (currentPrompt.id || '').trim();
+		const normalizedIncomingPromptId = (incomingPromptId || incomingPrompt?.id || '').trim();
+		if (currentPromptId && normalizedIncomingPromptId && currentPromptId !== normalizedIncomingPromptId) {
+			return true;
+		}
+
+		return false;
 	}
 
 	private mergeExternalReportIfUnchanged(snapshot: Prompt, persistedPrompt: Prompt | null, basePrompt: Prompt | null): void {
@@ -1800,13 +1837,36 @@ export class EditorPanelManager {
 
 	/** Open or focus an editor panel for a prompt */
 	async openPrompt(promptId: string): Promise<void> {
-		this.openPromptQueue = this.openPromptQueue.then(async () => {
-			await this.openPromptInternal(promptId);
-		});
+		this.pendingOpenPromptId = promptId;
+		this.openPromptRequestVersion += 1;
+
+		if (!this.openPromptQueue) {
+			this.openPromptQueue = this.processPendingOpenPromptRequests().finally(() => {
+				this.openPromptQueue = null;
+			});
+		}
+
 		await this.openPromptQueue;
 	}
 
-	private async openPromptInternal(promptId: string): Promise<void> {
+	private async processPendingOpenPromptRequests(): Promise<void> {
+		while (this.pendingOpenPromptId) {
+			const promptId = this.pendingOpenPromptId;
+			const requestVersion = this.openPromptRequestVersion;
+			this.pendingOpenPromptId = null;
+			await this.openPromptInternal(promptId, requestVersion);
+		}
+	}
+
+	private isOpenPromptRequestStale(requestVersion: number): boolean {
+		return requestVersion !== this.openPromptRequestVersion;
+	}
+
+	private createPanelBootId(): string {
+		return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+	}
+
+	private async openPromptInternal(promptId: string, requestVersion: number): Promise<void> {
 		const isNew = promptId === '__new__';
 		const panelKey = SINGLE_EDITOR_PANEL_KEY;
 
@@ -1817,12 +1877,8 @@ export class EditorPanelManager {
 			return;
 		}
 
-		// Show loading overlay immediately so the user doesn't see stale data
-		if (singletonPanel) {
-			void singletonPanel.webview.postMessage({ type: 'promptLoading' });
-		}
-
 		const existingEntries = [...openPanels.entries()];
+		const panelsToDispose: vscode.WebviewPanel[] = [];
 
 		for (const [existingKey, existingPanel] of existingEntries) {
 			const latestSnapshot = this.panelLatestPromptSnapshots.get(existingKey)
@@ -1856,10 +1912,14 @@ export class EditorPanelManager {
 					}
 				}
 			}
-			if (existingKey !== panelKey) {
-				this.silentClosePanels.add(existingKey);
-				existingPanel.dispose();
+			if (existingKey === panelKey) {
+				continue;
 			}
+			panelsToDispose.push(existingPanel);
+		}
+
+		if (this.isOpenPromptRequestStale(requestVersion)) {
+			return;
 		}
 
 		// Load prompt data
@@ -1901,24 +1961,42 @@ export class EditorPanelManager {
 		const title = isNew ? 'New prompt' : (prompt.title || prompt.id);
 		const isRu = vscode.env.language.startsWith('ru');
 
+		if (this.isOpenPromptRequestStale(requestVersion)) {
+			return;
+		}
+
+		this.ensureContentEditorBinding(panelKey, prompt);
+		this.ensureReportEditorBinding(panelKey, prompt);
+		this.panelPromptRefs.set(panelKey, prompt);
+		this.panelDirtyFlags.set(panelKey, restoredUnsaved);
+		this.panelLatestPromptSnapshots.set(panelKey, restoredUnsaved ? JSON.parse(JSON.stringify(prompt)) : null);
+		this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(prompt)));
+
+		const setPanelDirty = (v: boolean): void => {
+			this.panelDirtyFlags.set(panelKey, v);
+		};
+
 		if (singletonPanel) {
-			this.ensureContentEditorBinding(panelKey, prompt);
-			this.ensureReportEditorBinding(panelKey, prompt);
-
-			const currentPromptRef = this.panelPromptRefs.get(panelKey);
-			if (currentPromptRef) {
-				Object.assign(currentPromptRef, prompt);
-			}
-
-			this.panelDirtyFlags.set(panelKey, restoredUnsaved);
-			this.panelLatestPromptSnapshots.set(panelKey, restoredUnsaved ? JSON.parse(JSON.stringify(prompt)) : null);
-			this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(prompt)));
-
+			this.panelDirtySetters.set(panelKey, setPanelDirty);
+			const bootId = this.createPanelBootId();
+			this.panelBootIds.set(panelKey, bootId);
 			singletonPanel.title = restoredUnsaved
 				? `⚡● ${prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt')}`
 				: `⚡ ${prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt')}`;
-			singletonPanel.reveal();
-			void singletonPanel.webview.postMessage({ type: 'prompt', prompt, reason: 'open' });
+			singletonPanel.webview.html = getWebviewHtml(
+				singletonPanel.webview,
+				this.extensionUri,
+				'dist/webview/editor.js',
+				`Prompt: ${title}`,
+				vscode.env.language,
+				bootId,
+			);
+			singletonPanel.reveal(vscode.ViewColumn.One);
+
+			for (const existingPanel of panelsToDispose) {
+				this.silentClosePanels.add(existingPanel);
+				existingPanel.dispose();
+			}
 			return;
 		}
 
@@ -1934,38 +2012,30 @@ export class EditorPanelManager {
 		);
 
 		panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'sidebar-icon.svg');
+		const bootId = this.createPanelBootId();
+		this.panelBootIds.set(panelKey, bootId);
 
 		panel.webview.html = getWebviewHtml(
 			panel.webview,
 			this.extensionUri,
 			'dist/webview/editor.js',
 			`Prompt: ${title}`,
-			vscode.env.language
+			vscode.env.language,
+			bootId,
 		);
 
 		openPanels.set(panelKey, panel);
-		this.ensureContentEditorBinding(panelKey, prompt);
-		this.ensureReportEditorBinding(panelKey, prompt);
-		this.panelPromptRefs.set(panelKey, prompt);
-		let isDirty = restoredUnsaved;
-		let latestPromptState: Prompt | null = restoredUnsaved ? prompt : null;
-		if (isDirty) {
-			const displayTitle = latestPromptState?.title || prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt');
-			panel.title = `⚡● ${displayTitle}`;
-		}
-		this.panelDirtyFlags.set(panelKey, isDirty);
-		this.panelLatestPromptSnapshots.set(panelKey, latestPromptState ? JSON.parse(JSON.stringify(latestPromptState)) : null);
-		this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(prompt)));
-
-		const setPanelDirty = (v: boolean): void => {
-			isDirty = v;
-			this.panelDirtyFlags.set(panelKey, v);
-		};
 		this.panelDirtySetters.set(panelKey, setPanelDirty);
+
+		for (const existingPanel of panelsToDispose) {
+			this.silentClosePanels.add(existingPanel);
+			existingPanel.dispose();
+		}
 
 		// Handle panel close — autosave unsaved changes silently
 		panel.onDidDispose(async () => {
-			await this.awaitPendingReportPersist(prompt.id);
+			const promptIdForWait = (this.panelPromptRefs.get(panelKey)?.id || '').trim();
+			await this.awaitPendingReportPersist(promptIdForWait);
 			const promptRefSnapshot = this.panelPromptRefs.get(panelKey)
 				? JSON.parse(JSON.stringify(this.panelPromptRefs.get(panelKey))) as Prompt
 				: null;
@@ -1978,13 +2048,14 @@ export class EditorPanelManager {
 			const linkedKeys = [...openPanels.entries()]
 				.filter(([, p]) => p === panel)
 				.map(([key]) => key);
-			const skipUnsavedPrompt = this.silentClosePanels.has(panelKey)
-				|| linkedKeys.some(key => this.silentClosePanels.has(key));
-			this.silentClosePanels.delete(panelKey);
+			const skipUnsavedPrompt = this.silentClosePanels.has(panel);
+			this.silentClosePanels.delete(panel);
 			for (const key of linkedKeys) {
-				this.silentClosePanels.delete(key);
 				openPanels.delete(key);
 				this.panelPromptRefs.delete(key);
+				this.panelBootIds.delete(key);
+				this.chatTrackingDisposables.get(key)?.dispose();
+				this.chatTrackingDisposables.delete(key);
 				this.panelDirtySetters.delete(key);
 				this.panelDirtyFlags.delete(key);
 				this.panelLatestPromptSnapshots.delete(key);
@@ -1992,16 +2063,6 @@ export class EditorPanelManager {
 				this.clearContentEditorBinding(key);
 				this.clearReportEditorBinding(key);
 			}
-			openPanels.delete(panelKey);
-			this.panelPromptRefs.delete(panelKey);
-			this.chatTrackingDisposables.get(panelKey)?.dispose();
-			this.chatTrackingDisposables.delete(panelKey);
-			this.panelDirtySetters.delete(panelKey);
-			this.panelDirtyFlags.delete(panelKey);
-			this.panelLatestPromptSnapshots.delete(panelKey);
-			this.panelBasePrompts.delete(panelKey);
-			this.clearContentEditorBinding(panelKey);
-			this.clearReportEditorBinding(panelKey);
 
 			if (skipUnsavedPrompt) {
 				return;
@@ -2010,11 +2071,11 @@ export class EditorPanelManager {
 				? JSON.parse(JSON.stringify(latestPromptSnapshot))
 				: promptRefSnapshot
 					? JSON.parse(JSON.stringify(promptRefSnapshot))
-					: latestPromptState
-						? JSON.parse(JSON.stringify(latestPromptState))
-						: JSON.parse(JSON.stringify(prompt));
+					: basePromptSnapshot
+						? JSON.parse(JSON.stringify(basePromptSnapshot))
+						: createDefaultPrompt('');
 
-			let hasUnsavedChanges = isDirty;
+			let hasUnsavedChanges = this.panelDirtyFlags.get(panelKey) || false;
 			if (!hasUnsavedChanges) {
 				if (currentSnapshot.id) {
 					const persisted = await this.storageService.getPrompt(currentSnapshot.id);
@@ -2046,9 +2107,9 @@ export class EditorPanelManager {
 					? JSON.parse(JSON.stringify(latestPromptSnapshot))
 					: promptRefSnapshot
 						? JSON.parse(JSON.stringify(promptRefSnapshot))
-						: latestPromptState
-							? JSON.parse(JSON.stringify(latestPromptState))
-							: JSON.parse(JSON.stringify(prompt));
+						: basePromptSnapshot
+							? JSON.parse(JSON.stringify(basePromptSnapshot))
+							: createDefaultPrompt('');
 				const globalContext = this.stateService.getGlobalAgentContext();
 				try {
 					if (!dirtySnapshot.title && dirtySnapshot.content) {
@@ -2089,6 +2150,16 @@ export class EditorPanelManager {
 		// Handle messages
 		panel.webview.onDidReceiveMessage(
 			async (msg: WebviewToExtensionMessage) => {
+				const currentPrompt = this.panelPromptRefs.get(panelKey);
+				if (!currentPrompt) {
+					return;
+				}
+				if (msg.type === 'ready') {
+					const activeBootId = this.panelBootIds.get(panelKey) || '';
+					if (activeBootId && (msg.bootId || '') !== activeBootId) {
+						return;
+					}
+				}
 				if (msg.type === 'debugLog') {
 					this.logReportDebug(`webview.${msg.scope}.${msg.message}`, msg.payload && typeof msg.payload === 'object'
 						? msg.payload as Record<string, unknown>
@@ -2096,34 +2167,31 @@ export class EditorPanelManager {
 					return;
 				}
 				if (msg.type === 'markDirty') {
-					// Validate: ignore stale markDirty from a previous prompt
-					const markDirtyPromptId = (msg.promptId || msg.prompt?.id || '').trim();
-					const currentPanelPromptId = (prompt.id || '').trim();
-					if (markDirtyPromptId && currentPanelPromptId && markDirtyPromptId !== currentPanelPromptId) {
+					if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.promptId)) {
 						return;
 					}
 
-					const previousLanguages = latestPromptState?.languages || prompt.languages;
-					const previousFrameworks = latestPromptState?.frameworks || prompt.frameworks;
-					const previousCurrentReport = prompt.report || '';
+					const latestPromptState = this.panelLatestPromptSnapshots.get(panelKey) || null;
+					const previousLanguages = latestPromptState?.languages || currentPrompt.languages;
+					const previousFrameworks = latestPromptState?.frameworks || currentPrompt.frameworks;
+					const previousCurrentReport = currentPrompt.report || '';
 
-					isDirty = msg.dirty;
+					this.panelDirtyFlags.set(panelKey, msg.dirty);
 					if (msg.prompt) {
-						latestPromptState = msg.prompt;
-						Object.assign(prompt, msg.prompt);
-						this.panelPromptRefs.set(panelKey, prompt);
+						Object.assign(currentPrompt, msg.prompt);
+						this.panelPromptRefs.set(panelKey, currentPrompt);
 						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(msg.prompt)));
 					} else if (msg.dirty && !latestPromptState) {
-						latestPromptState = JSON.parse(JSON.stringify(prompt));
-						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(latestPromptState)));
+						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(currentPrompt)));
 					} else if (!msg.dirty) {
-						latestPromptState = null;
 						this.panelLatestPromptSnapshots.set(panelKey, null);
 					}
 
+					const updatedLatestPromptState = this.panelLatestPromptSnapshots.get(panelKey) || null;
+
 					const debugReportSource = msg.prompt?.report
-						?? latestPromptState?.report
-						?? prompt.report
+						?? updatedLatestPromptState?.report
+						?? currentPrompt.report
 						?? '';
 					this.logReportDebug('markDirty', {
 						panelKey,
@@ -2132,14 +2200,14 @@ export class EditorPanelManager {
 						reportPreview: this.reportDebugPreview(debugReportSource),
 					});
 
-					if (msg.prompt && prompt.id) {
+					if (msg.prompt && currentPrompt.id) {
 						const nextReport = msg.prompt.report || '';
 						if (nextReport !== previousCurrentReport) {
-							const reportPanel = this.reportEditorPanels.get(prompt.id);
+							const reportPanel = this.reportEditorPanels.get(currentPrompt.id);
 							if (reportPanel) {
 								this.logReportDebug('markDirty.forwardedToReportEditor', {
 									panelKey,
-									promptId: prompt.id,
+									promptId: currentPrompt.id,
 									previousLength: previousCurrentReport.length,
 									nextLength: nextReport.length,
 								});
@@ -2160,11 +2228,11 @@ export class EditorPanelManager {
 						}
 					}
 
-					const displayTitle = (latestPromptState?.title || prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt'));
-					panel.title = isDirty ? `⚡● ${displayTitle}` : `⚡ ${displayTitle}`;
+					const displayTitle = (updatedLatestPromptState?.title || currentPrompt.title || currentPrompt.id || (isRu ? 'Новый промпт' : 'New prompt'));
+					panel.title = (this.panelDirtyFlags.get(panelKey) || false) ? `⚡● ${displayTitle}` : `⚡ ${displayTitle}`;
 					return;
 				}
-				await this.handleMessage(msg, panel, prompt, panelKey, () => isDirty, setPanelDirty);
+				await this.handleMessage(msg, panel, currentPrompt, panelKey, () => this.panelDirtyFlags.get(panelKey) || false, setPanelDirty);
 			}
 		);
 	}
@@ -2188,6 +2256,25 @@ export class EditorPanelManager {
 
 		switch (msg.type) {
 			case 'ready': {
+				const readyBootId = (msg.bootId || '').trim();
+				const isReadyCycleStale = (): boolean => {
+					const activePromptRef = this.panelPromptRefs.get(panelKey);
+					if (activePromptRef !== currentPrompt) {
+						return true;
+					}
+
+					const activeBootId = (this.panelBootIds.get(panelKey) || '').trim();
+					if (readyBootId && activeBootId && readyBootId !== activeBootId) {
+						return true;
+					}
+
+					return false;
+				};
+
+				if (isReadyCycleStale()) {
+					break;
+				}
+
 				if (currentPrompt.chatSessionIds?.length) {
 					const existingSessionIds: string[] = [];
 					for (const sessionId of currentPrompt.chatSessionIds) {
@@ -2195,43 +2282,54 @@ export class EditorPanelManager {
 							existingSessionIds.push(sessionId);
 						}
 					}
+					if (isReadyCycleStale()) {
+						break;
+					}
 					if (existingSessionIds.length !== currentPrompt.chatSessionIds.length) {
 						currentPrompt.chatSessionIds = existingSessionIds;
 						await this.storageService.savePrompt(currentPrompt);
+						if (isReadyCycleStale()) {
+							break;
+						}
 						this._onDidSave.fire(currentPrompt.id);
 					}
 				}
 
-				postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'open' });
+				const [
+					models,
+					skills,
+					mcpTools,
+					hooks,
+					availableLanguageAndFrameworkMessages,
+				] = await Promise.all([
+					this.aiService.getAvailableModels(),
+					this.workspaceService.getSkills(),
+					this.workspaceService.getMcpTools(),
+					this.workspaceService.getHooks(),
+					this.buildAvailableLanguagesAndFrameworksMessages(),
+				]);
 
-				// Send global agent context
-				const globalCtx = this.stateService.getGlobalAgentContext();
-				postMessage({ type: 'globalContext', context: globalCtx });
+				if (isReadyCycleStale()) {
+					break;
+				}
 
-				// Send workspace info
-				const folders = this.workspaceService.getWorkspaceFolders();
-				postMessage({ type: 'workspaceFolders', folders });
-
-				const models = await this.aiService.getAvailableModels();
+				postMessage({ type: 'globalContext', context: this.stateService.getGlobalAgentContext() });
+				postMessage({ type: 'workspaceFolders', folders: this.workspaceService.getWorkspaceFolders() });
 				postMessage({ type: 'availableModels', models });
-
-				const skills = await this.workspaceService.getSkills();
 				postMessage({ type: 'availableSkills', skills });
-
-				const mcpTools = await this.workspaceService.getMcpTools();
 				postMessage({ type: 'availableMcpTools', tools: mcpTools });
-
-				const hooks = await this.workspaceService.getHooks();
 				postMessage({ type: 'availableHooks', hooks });
-
-				const allowedBranches = this.getAllowedBranchesSetting();
-				postMessage({ type: 'allowedBranches', branches: allowedBranches });
-
-				await this.broadcastAvailableLanguagesAndFrameworks();
+				postMessage({ type: 'allowedBranches', branches: this.getAllowedBranchesSetting() });
+				postMessage(availableLanguageAndFrameworkMessages.languagesMessage);
+				postMessage(availableLanguageAndFrameworkMessages.frameworksMessage);
+				postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'open' });
 				break;
 			}
 
 			case 'savePrompt': {
+				if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.prompt?.id)) {
+					break;
+				}
 				const saveStateId = (msg.prompt.id || currentPrompt.id || '__new__').trim() || '__new__';
 				this.logReportDebug('savePrompt.received', {
 					panelKey,
@@ -3545,7 +3643,7 @@ export class EditorPanelManager {
 		}
 
 		this.panelDirtySetters.get(SINGLE_EDITOR_PANEL_KEY)?.(false);
-		this.silentClosePanels.add(SINGLE_EDITOR_PANEL_KEY);
+		this.silentClosePanels.add(panel);
 		panel.dispose();
 	}
 }

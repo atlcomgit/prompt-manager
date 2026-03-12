@@ -2,7 +2,7 @@
  * Sidebar App — Main component for the prompt list sidebar
  */
 
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
@@ -16,6 +16,7 @@ import type { PromptConfig, SidebarState, FilterState, SortField, SortOrder, Gro
 const vscode = getVsCodeApi();
 
 export const SidebarApp: React.FC = () => {
+  const OPEN_PROMPT_DEBOUNCE_MS = 120;
   const t = useT();
   const [prompts, setPrompts] = useState<PromptConfig[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -32,6 +33,7 @@ export const SidebarApp: React.FC = () => {
   const [showOptimisticNewPrompt, setShowOptimisticNewPrompt] = useState(false);
   const [optimisticBaselineIds, setOptimisticBaselineIds] = useState<string[] | null>(null);
   const [savingPromptIds, setSavingPromptIds] = useState<string[]>([]);
+  const openPromptTimerRef = useRef<number | null>(null);
 
   const optimisticPrompt = useMemo<PromptConfig>(() => {
     const draft = createDefaultPrompt('__new__');
@@ -48,7 +50,13 @@ export const SidebarApp: React.FC = () => {
       vscode.postMessage({ type: 'ready' });
     }, 0);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      if (openPromptTimerRef.current !== null) {
+        window.clearTimeout(openPromptTimerRef.current);
+        openPromptTimerRef.current = null;
+      }
+    };
   }, []);
 
   // Listen for messages from extension
@@ -235,10 +243,20 @@ export const SidebarApp: React.FC = () => {
 
   const handleOpenPrompt = (id: string) => {
     setSelectedId(id);
-    vscode.postMessage({ type: 'openPrompt', id });
+    if (openPromptTimerRef.current !== null) {
+      window.clearTimeout(openPromptTimerRef.current);
+    }
+    openPromptTimerRef.current = window.setTimeout(() => {
+      openPromptTimerRef.current = null;
+      vscode.postMessage({ type: 'openPrompt', id });
+    }, OPEN_PROMPT_DEBOUNCE_MS);
   };
 
   const handleCreate = () => {
+    if (openPromptTimerRef.current !== null) {
+      window.clearTimeout(openPromptTimerRef.current);
+      openPromptTimerRef.current = null;
+    }
     setOptimisticBaselineIds(prompts.map(p => p.id));
     setShowOptimisticNewPrompt(true);
     setSelectedId('__new__');

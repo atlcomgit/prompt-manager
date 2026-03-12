@@ -9,7 +9,8 @@ export function getWebviewHtml(
   extensionUri: vscode.Uri,
   scriptPath: string,
   title: string,
-  locale?: string
+  locale?: string,
+  bootId?: string,
 ): string {
   const lang = locale || vscode.env.language || 'en';
   const scriptUri = webview.asWebviewUri(
@@ -117,7 +118,7 @@ export function getWebviewHtml(
 </head>
 <body>
   <div id="root"></div>
-  <script nonce="${nonce}">window.__LOCALE__='${lang}';</script>
+  <script nonce="${nonce}">window.__LOCALE__='${lang}';window.__WEBVIEW_BOOT_ID__='${bootId || ''}';</script>
   <script nonce="${nonce}">
     (() => {
       let pointerPressedButton = null;

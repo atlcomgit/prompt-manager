@@ -759,6 +759,7 @@ export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestG
 	const graph2DTransformRef = useRef<Graph2DTransform | null>(null);
 	const graph2DViewportFrameRef = useRef<number | null>(null);
 	const graph2DQueuedViewportRef = useRef<Graph2DViewportState | null>(null);
+	const saveViewNameInputRef = useRef<HTMLInputElement>(null);
 	const graph2DPointerRef = useRef<{ dragging: boolean; moved: boolean; startX: number; startY: number; startPanX: number; startPanY: number; button?: number; }>({
 		dragging: false,
 		moved: false,
@@ -776,6 +777,8 @@ export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestG
 	const autoResetHiddenStateRef = useRef(false);
 	const [savedViews, setSavedViews] = useState<SavedGraphView[]>(persisted.savedViews || []);
 	const [selectedSavedViewId, setSelectedSavedViewId] = useState('');
+	const [isSaveViewDialogOpen, setIsSaveViewDialogOpen] = useState(false);
+	const [saveViewName, setSaveViewName] = useState('');
 	const [sceneStatus, setSceneStatus] = useState<GraphSceneStatus>('idle');
 	const [sceneSize, setSceneSize] = useState({ width: 0, height: 560 });
 	const [graph2DViewport, setGraph2DViewport] = useState<Graph2DViewportState>({ zoom: 1, panX: 0, panY: 0 });
@@ -829,6 +832,29 @@ export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestG
 	useEffect(() => {
 		vscode.setState({ viewState, savedViews });
 	}, [savedViews, viewState]);
+
+	useEffect(() => {
+		if (!isSaveViewDialogOpen) {
+			return;
+		}
+
+		const focusTimer = window.requestAnimationFrame(() => {
+			saveViewNameInputRef.current?.focus();
+			saveViewNameInputRef.current?.select();
+		});
+
+		return () => window.cancelAnimationFrame(focusTimer);
+	}, [isSaveViewDialogOpen]);
+
+	useEffect(() => {
+		if (!selectedSavedViewId) {
+			return;
+		}
+
+		if (!savedViews.some(item => item.id === selectedSavedViewId)) {
+			setSelectedSavedViewId('');
+		}
+	}, [savedViews, selectedSavedViewId]);
 
 	useEffect(() => () => {
 		if (graph2DViewportFrameRef.current !== null) {
@@ -1837,8 +1863,18 @@ export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestG
 		}
 	}, [visibleData, viewState.selectedNodeId]);
 
+	const openSaveCurrentViewDialog = () => {
+		setSaveViewName('');
+		setIsSaveViewDialogOpen(true);
+	};
+
+	const closeSaveCurrentViewDialog = () => {
+		setIsSaveViewDialogOpen(false);
+		setSaveViewName('');
+	};
+
 	const saveCurrentView = () => {
-		const name = window.prompt(t('memory.graphSaveViewPrompt'))?.trim();
+		const name = saveViewName.trim();
 		if (!name) {
 			return;
 		}
@@ -1850,6 +1886,7 @@ export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestG
 		};
 		setSavedViews(current => [...current.filter(item => item.name !== name), nextView]);
 		setSelectedSavedViewId(nextView.id);
+		closeSaveCurrentViewDialog();
 	};
 
 	const applySavedView = () => {
@@ -2133,7 +2170,7 @@ export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestG
 							<option value="">{t('memory.graphSavedViews')}</option>
 							{savedViews.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
 						</select>
-						<button style={memoryButtonStyles.secondary} onClick={saveCurrentView}>{t('memory.graphSaveView')}</button>
+						<button style={memoryButtonStyles.secondary} onClick={openSaveCurrentViewDialog}>{t('memory.graphSaveView')}</button>
 						<button style={memoryButtonStyles.secondary} onClick={applySavedView} disabled={!selectedSavedViewId}>{t('memory.graphLoadView')}</button>
 						<button style={memoryButtonStyles.secondary} onClick={deleteSavedView} disabled={!selectedSavedViewId}>{t('memory.graphDeleteView')}</button>
 					</div>
@@ -2280,6 +2317,33 @@ export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestG
 					</div>
 				)}
 			</div>
+			{isSaveViewDialogOpen && (
+				<div style={styles.dialogBackdrop} onClick={closeSaveCurrentViewDialog}>
+					<div style={styles.dialog} onClick={event => event.stopPropagation()}>
+						<div style={styles.dialogTitle}>{t('memory.graphSaveView')}</div>
+						<div style={styles.dialogText}>{t('memory.graphSaveViewPrompt')}</div>
+						<form
+							style={styles.dialogForm}
+							onSubmit={(event) => {
+								event.preventDefault();
+								saveCurrentView();
+							}}
+						>
+							<input
+								ref={saveViewNameInputRef}
+								style={styles.dialogInput}
+								value={saveViewName}
+								placeholder={t('memory.graphSaveViewPrompt')}
+								onChange={event => setSaveViewName(event.target.value)}
+							/>
+							<div style={styles.dialogActions}>
+								<button type="button" style={memoryButtonStyles.secondary} onClick={closeSaveCurrentViewDialog}>{t('common.cancel')}</button>
+								<button type="submit" style={{ ...memoryButtonStyles.primary, ...(!saveViewName.trim() ? memoryButtonStyles.disabled : {}) }} disabled={!saveViewName.trim()}>{t('common.save')}</button>
+							</div>
+						</form>
+					</div>
+				</div>
+			)}
 		</div>
 	);
 };
@@ -2369,6 +2433,57 @@ const styles: Record<string, React.CSSProperties> = {
 		borderRadius: '10px',
 		border: panelBorder,
 		background: 'var(--vscode-editorWidget-background)',
+	},
+	dialogBackdrop: {
+		position: 'absolute',
+		inset: 0,
+		display: 'flex',
+		alignItems: 'center',
+		justifyContent: 'center',
+		padding: '20px',
+		background: 'color-mix(in srgb, var(--vscode-editor-background) 72%, transparent)',
+		backdropFilter: 'blur(4px)',
+		zIndex: 30,
+	},
+	dialog: {
+		width: 'min(420px, 100%)',
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '10px',
+		padding: '18px',
+		borderRadius: '14px',
+		border: panelBorder,
+		background: 'var(--vscode-editorWidget-background)',
+		boxShadow: '0 20px 60px rgba(0, 0, 0, 0.28)',
+	},
+	dialogTitle: {
+		fontSize: '15px',
+		fontWeight: 700,
+		color: 'var(--vscode-foreground)',
+	},
+	dialogText: {
+		fontSize: '12px',
+		color: 'var(--vscode-descriptionForeground)',
+	},
+	dialogForm: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '12px',
+	},
+	dialogInput: {
+		background: 'var(--vscode-input-background)',
+		color: 'var(--vscode-input-foreground)',
+		border: '1px solid var(--vscode-input-border)',
+		borderRadius: '8px',
+		padding: '10px 12px',
+		fontSize: '13px',
+		outline: 'none',
+	},
+	dialogActions: {
+		display: 'flex',
+		justifyContent: 'flex-end',
+		gap: '8px',
+		flexWrap: 'wrap',
 	},
 	body: { flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: '12px', minHeight: 0 },
 	bodyOverview: { flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: '12px', minHeight: 0 },

@@ -203,5 +203,5 @@ export interface PromptStatistics {
 	avgTimePerPrompt: number;
 	recentActivity: Array<{ id: string; title: string; updatedAt: string }>;
 	/** Brief report rows: taskNumber, title, total time */
-	reportRows: Array<{ taskNumber: string; title: string; timeWriting: number; timeImplementing: number; timeOnTask: number; totalTime: number; status: PromptStatus }>;
+	reportRows: Array<{ taskNumber: string; title: string; timeWriting: number; timeImplementing: number; timeOnTask: number; totalTime: number; status: PromptStatus; reportSummary: string }>;
 }

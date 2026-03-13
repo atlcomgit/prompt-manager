@@ -8,6 +8,7 @@ import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
 import { DateRangeCalendar } from './DateRangeCalendar';
 import type { PromptStatistics, PromptStatus } from '../../types/prompt';
+import { calculateStatisticsExportTargetHours } from '../../utils/statisticsExport';
 
 const vscode = getVsCodeApi();
 
@@ -41,10 +42,12 @@ interface ExportRow {
   taskNumber: string;
   title: string;
   hours: number;
+  status?: PromptStatus;
+  reportSummary?: string;
 }
 
 function buildScaledExportRows(
-  rows: Array<{ taskNumber: string; title: string; totalTime: number }>,
+  rows: Array<{ taskNumber: string; title: string; totalTime: number; status: PromptStatus; reportSummary?: string }>,
   targetHours: number,
 ): ExportRow[] {
   if (rows.length === 0) {
@@ -63,6 +66,8 @@ function buildScaledExportRows(
         taskNumber: row.taskNumber || '—',
         title: row.title,
         hours,
+        status: row.status,
+        reportSummary: row.reportSummary || '',
       };
     });
   }
@@ -110,6 +115,8 @@ function buildScaledExportRows(
       taskNumber: row.taskNumber || '—',
       title: row.title,
       hours: flooredHours,
+      status: row.status,
+      reportSummary: row.reportSummary || '',
     }));
 }
 
@@ -122,6 +129,7 @@ export const StatisticsApp: React.FC = () => {
   const [dateTo, setDateTo] = useState<string | null>(null);
   /** Flag: show only prompts with ≥5 min total time in daily-time.json */
   const [minFiveMin, setMinFiveMin] = useState(false);
+  const [includeReportInExport, setIncludeReportInExport] = useState(false);
 
   // --- Table sorting (multi-column) ---
   const [sortCriteria, setSortCriteria] = useState<SortCriterion[]>([]);
@@ -245,12 +253,17 @@ export const StatisticsApp: React.FC = () => {
     });
   }, [stats?.reportRows, sortCriteria]);
 
-  const exportRows = useMemo(() => buildScaledExportRows(sortedReportRows, 165), [sortedReportRows]);
+  const exportTargetHours = useMemo(() => calculateStatisticsExportTargetHours({ dateFrom, dateTo }), [dateFrom, dateTo]);
+
+  const exportRows = useMemo(
+    () => buildScaledExportRows(sortedReportRows, exportTargetHours),
+    [exportTargetHours, sortedReportRows],
+  );
 
   const handleExport = useCallback((format: ExportFormat) => {
     if (exportRows.length === 0) return;
-    vscode.postMessage({ type: 'exportReport', format, rows: exportRows });
-  }, [exportRows]);
+    vscode.postMessage({ type: 'exportReport', format, rows: exportRows, includeReport: includeReportInExport });
+  }, [exportRows, includeReportInExport]);
 
   /** Status labels map */
   const statusLabels: Record<string, string> = {
@@ -430,19 +443,28 @@ export const StatisticsApp: React.FC = () => {
                     ✕ {t('stats.resetSort')}
                   </button>
                 )}
+                <label style={styles.checkboxLabel} title={t('stats.exportWithReportTooltip')}>
+                  <input
+                    type="checkbox"
+                    checked={includeReportInExport}
+                    onChange={e => setIncludeReportInExport(e.target.checked)}
+                    style={styles.checkbox}
+                  />
+                  {t('stats.exportWithReport')}
+                </label>
                 <button
                   style={styles.exportBtn}
                   onClick={() => handleExport('html')}
-                  title={t('stats.exportHtmlTooltip')}
+                  title={t('stats.exportHtmlTooltip').replace('{hours}', String(exportTargetHours))}
                 >
-                  {t('stats.exportHtmlBtn')}
+                  {`${t('stats.exportHtmlBtn')} (${exportTargetHours}${t('stats.exportHoursSuffix')})`}
                 </button>
                 <button
                   style={styles.exportMdBtn}
                   onClick={() => handleExport('md')}
-                  title={t('stats.exportMdTooltip')}
+                  title={t('stats.exportMdTooltip').replace('{hours}', String(exportTargetHours))}
                 >
-                  {t('stats.exportMdBtn')}
+                  {`${t('stats.exportMdBtn')} (${exportTargetHours}${t('stats.exportHoursSuffix')})`}
                 </button>
               </div>
             </div>

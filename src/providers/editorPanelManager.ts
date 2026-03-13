@@ -967,6 +967,7 @@ export class EditorPanelManager {
 
 	private ensureContentEditorBinding(panelKey: string, prompt: Prompt): void {
 		if (!prompt.id) {
+			this.clearContentEditorBinding(panelKey);
 			return;
 		}
 
@@ -994,6 +995,7 @@ export class EditorPanelManager {
 
 	private ensureReportEditorBinding(panelKey: string, prompt: Prompt): void {
 		if (!prompt.id) {
+			this.clearReportEditorBinding(panelKey);
 			return;
 		}
 
@@ -2326,19 +2328,33 @@ export class EditorPanelManager {
 					}
 				}
 
-				const [
-					models,
-					skills,
-					mcpTools,
-					hooks,
-					availableLanguageAndFrameworkMessages,
-				] = await Promise.all([
-					this.aiService.getAvailableModels(),
-					this.workspaceService.getSkills(),
-					this.workspaceService.getMcpTools(),
-					this.workspaceService.getHooks(),
-					this.buildAvailableLanguagesAndFrameworksMessages(),
-				]);
+				// Make ready initialization resilient: timebox and tolerate errors
+				let models: any[] = [];
+				let skills: any[] = [];
+				let mcpTools: any[] = [];
+				let hooks: any[] = [];
+				let availableLanguageAndFrameworkMessages: any = {
+					languagesMessage: { type: 'availableLanguages', options: [] },
+					frameworksMessage: { type: 'availableFrameworks', options: [] },
+				};
+
+				try {
+					const results = await Promise.all([
+						this.withTimeout(this.aiService.getAvailableModels(), 2000, [] as any),
+						this.withTimeout(this.workspaceService.getSkills(), 2000, [] as any),
+						this.withTimeout(this.workspaceService.getMcpTools(), 2000, [] as any),
+						this.withTimeout(this.workspaceService.getHooks(), 2000, [] as any),
+						this.withTimeout(this.buildAvailableLanguagesAndFrameworkMessages(), 2000, availableLanguageAndFrameworkMessages),
+					]);
+
+					models = results[0] || [];
+					skills = results[1] || [];
+					mcpTools = results[2] || [];
+					hooks = results[3] || [];
+					availableLanguageAndFrameworkMessages = results[4] || availableLanguageAndFrameworkMessages;
+				} catch (err) {
+					console.error('[PromptManager] ready initialization partially failed:', err);
+				}
 
 				if (isReadyCycleStale()) {
 					break;

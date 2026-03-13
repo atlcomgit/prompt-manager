@@ -147,7 +147,7 @@ export const AnalysisProgressOverlay: React.FC<Props> = ({
 						<div style={styles.section}>
 							<div style={styles.sectionHeader}>{t('memory.analysisRepositories')}</div>
 							<div style={styles.tableScroll}>
-								<table style={styles.table}>
+								<table style={styles.tableFixed}>
 									<thead>
 										<tr>
 											<th style={styles.tableHead}>{t('memory.repository')}</th>
@@ -159,11 +159,16 @@ export const AnalysisProgressOverlay: React.FC<Props> = ({
 											<th style={styles.tableHead}>{t('memory.analysisStatusCompleted')}</th>
 											<th style={styles.tableHead}>{t('memory.analysisStatusSkipped')}</th>
 											<th style={styles.tableHead}>{t('memory.analysisStatusError')}</th>
-											<th style={styles.tableHead}>{t('memory.analysisCurrent')}</th>
+											<th style={styles.tableHeadCurrent}>{t('memory.analysisCurrent')}</th>
 										</tr>
 									</thead>
 									<tbody>
-										{snapshot.repositories.map((repository) => (
+										{snapshot.repositories.map((repository) => {
+											const currentLabel = repository.currentSha
+												? [repository.currentSha.substring(0, 7), repository.currentMessage || ''].filter(Boolean).join(' ')
+												: '—';
+
+											return (
 											<tr key={repository.repository}>
 												<td style={styles.tableCellStrong}>{repository.repository}</td>
 												<td style={styles.tableCell}>{repository.total}</td>
@@ -174,9 +179,12 @@ export const AnalysisProgressOverlay: React.FC<Props> = ({
 												<td style={styles.tableCell}>{repository.completed}</td>
 												<td style={styles.tableCell}>{repository.skipped}</td>
 												<td style={styles.tableCell}>{repository.error}</td>
-												<td style={styles.tableCell}>{repository.currentSha ? `${repository.currentSha.substring(0, 7)} ${repository.currentMessage || ''}` : '—'}</td>
+												<td style={styles.tableCellCurrent} title={currentLabel}>
+													<div style={styles.ellipsisText}>{currentLabel}</div>
+												</td>
 											</tr>
-										))}
+											);
+										})}
 									</tbody>
 								</table>
 							</div>
@@ -270,7 +278,7 @@ export const AnalysisProgressOverlay: React.FC<Props> = ({
 							<div ref={logListRef} style={styles.logList}>
 								{snapshot.recentEvents.length === 0 ? (
 									<div style={styles.logEmpty}>{t('memory.analysisNoEvents')}</div>
-								) : snapshot.recentEvents.slice().reverse().map((event) => (
+								) : snapshot.recentEvents.map((event) => (
 									<div key={event.id} style={styles.logItem}>
 										<span style={styles.logTime}>{formatClock(event.timestamp)}</span>
 										<span style={eventKindStyles(event.kind)}>{event.kind}</span>
@@ -552,6 +560,12 @@ const styles: Record<string, CSSProperties> = {
 		borderCollapse: 'collapse',
 		fontSize: '12px',
 	},
+	tableFixed: {
+		width: '100%',
+		borderCollapse: 'collapse',
+		fontSize: '12px',
+		tableLayout: 'fixed',
+	},
 	tableHead: {
 		position: 'sticky',
 		top: 0,
@@ -561,6 +575,19 @@ const styles: Record<string, CSSProperties> = {
 		borderBottom: '1px solid var(--vscode-panel-border)',
 		fontWeight: 700,
 		whiteSpace: 'nowrap',
+	},
+	tableHeadCurrent: {
+		position: 'sticky',
+		top: 0,
+		background: 'var(--vscode-editor-background)',
+		textAlign: 'left',
+		padding: '8px',
+		borderBottom: '1px solid var(--vscode-panel-border)',
+		fontWeight: 700,
+		whiteSpace: 'nowrap',
+		width: '280px',
+		minWidth: '280px',
+		maxWidth: '280px',
 	},
 	tableCell: {
 		padding: '8px',
@@ -580,6 +607,14 @@ const styles: Record<string, CSSProperties> = {
 		maxWidth: '380px',
 		verticalAlign: 'top',
 	},
+	tableCellCurrent: {
+		padding: '8px',
+		borderBottom: '1px solid color-mix(in srgb, var(--vscode-panel-border) 50%, transparent)',
+		verticalAlign: 'top',
+		width: '280px',
+		minWidth: '280px',
+		maxWidth: '280px',
+	},
 	tableCellMono: {
 		padding: '8px',
 		borderBottom: '1px solid color-mix(in srgb, var(--vscode-panel-border) 50%, transparent)',
@@ -597,9 +632,15 @@ const styles: Record<string, CSSProperties> = {
 	logList: {
 		display: 'flex',
 		flexDirection: 'column',
+		justifyContent: 'flex-end',
 		gap: '8px',
 		maxHeight: '150px',
 		overflow: 'auto',
+	},
+	ellipsisText: {
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
 	},
 	logItem: {
 		display: 'flex',

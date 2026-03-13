@@ -21,6 +21,7 @@ import type {
 } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
 import { normalizeStoredPromptConfig } from '../utils/promptConfig.js';
+import { summarizePromptReport } from '../utils/statisticsExport.js';
 
 /** Daily time entry for a prompt (ms per category) */
 export interface DailyTimeEntry {
@@ -422,8 +423,14 @@ export class StorageService {
 		await this.ensureStorageDir();
 		this.ensurePromptUuid(prompt);
 		const requestedPreviousId = (options?.previousId || '').trim();
+		const requestedPromptId = (prompt.id || '').trim();
 		const existingPromptIdentity = await this.resolveExistingPromptIdentity(prompt, requestedPreviousId);
-		if (existingPromptIdentity && existingPromptIdentity !== prompt.id) {
+		const shouldPreserveRequestedPromptId = Boolean(
+			requestedPromptId
+			&& existingPromptIdentity
+			&& requestedPromptId !== existingPromptIdentity,
+		);
+		if (existingPromptIdentity && existingPromptIdentity !== prompt.id && !shouldPreserveRequestedPromptId) {
 			prompt.id = existingPromptIdentity;
 		}
 		const reason = this.normalizeHistoryReason(options?.historyReason);
@@ -748,7 +755,12 @@ export class StorageService {
 			.slice(0, 10)
 			.map(p => ({ id: p.id, title: p.title, updatedAt: p.updatedAt }));
 
-		const reportRows = prompts.map(p => ({
+		const reportRowPrompts = await Promise.all(prompts.map(async (promptConfig) => {
+			const fullPrompt = await this.getPrompt(promptConfig.id);
+			return fullPrompt || ({ ...createDefaultPrompt(promptConfig.id), ...promptConfig } as Prompt);
+		}));
+
+		const reportRows = reportRowPrompts.map(p => ({
 			taskNumber: p.taskNumber || '',
 			title: p.title || p.id,
 			timeWriting: p.timeSpentWriting || 0,
@@ -756,6 +768,7 @@ export class StorageService {
 			timeOnTask: p.timeSpentOnTask || 0,
 			totalTime: (p.timeSpentWriting || 0) + (p.timeSpentImplementing || 0) + (p.timeSpentOnTask || 0) + (p.timeSpentUntracked || 0),
 			status: p.status,
+			reportSummary: summarizePromptReport(p.report || ''),
 		}));
 
 		return {

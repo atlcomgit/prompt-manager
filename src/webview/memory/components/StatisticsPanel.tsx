@@ -4,11 +4,12 @@
  */
 
 import React from 'react';
-import type { MemoryStatistics } from '../../../types/memory';
+import type { MemoryAvailableModel, MemoryStatistics } from '../../../types/memory';
 import { memoryButtonStyles } from './buttonStyles';
 
 interface Props {
 	statistics: MemoryStatistics | null;
+	availableModels: MemoryAvailableModel[];
 	onRefresh: () => void;
 	onClearAll: () => void;
 	t: (key: string) => string;
@@ -21,10 +22,12 @@ function formatBytes(bytes: number): string {
 	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export const StatisticsPanel: React.FC<Props> = ({ statistics, onRefresh, onClearAll, t }) => {
+export const StatisticsPanel: React.FC<Props> = ({ statistics, availableModels, onRefresh, onClearAll, t }) => {
 	if (!statistics) {
 		return <div style={styles.loading}>{t('memory.loading')}</div>;
 	}
+
+	const resolveModelName = (modelId: string): string => availableModels.find(item => item.id === modelId)?.name || modelId;
 
 	return (
 		<div style={styles.container}>
@@ -69,6 +72,27 @@ export const StatisticsPanel: React.FC<Props> = ({ statistics, onRefresh, onClea
 							return (
 								<div key={item.category} style={styles.barRow}>
 									<span style={styles.barLabel}>{item.category}</span>
+									<div style={styles.barTrack}>
+										<div style={{ ...styles.barFill, width: `${width}%` }} />
+									</div>
+									<span style={styles.barValue}>{item.count}</span>
+								</div>
+							);
+						})}
+					</div>
+				</div>
+			)}
+
+			{statistics.analysisModels.length > 0 && (
+				<div style={styles.section}>
+					<h4 style={styles.sectionTitle}>{t('memory.analysisModels')}</h4>
+					<div style={styles.barChart}>
+						{statistics.analysisModels.map(item => {
+							const maxCount = Math.max(...statistics.analysisModels.map(model => model.count));
+							const width = maxCount > 0 ? (item.count / maxCount) * 100 : 0;
+							return (
+								<div key={item.model} style={styles.barRow}>
+									<span style={styles.barLabel}>{resolveModelName(item.model)}</span>
 									<div style={styles.barTrack}>
 										<div style={{ ...styles.barFill, width: `${width}%` }} />
 									</div>

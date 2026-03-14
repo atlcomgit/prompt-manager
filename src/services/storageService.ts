@@ -36,7 +36,7 @@ export type DailyTimeData = Record<string, DailyTimeEntry>;
 
 export class StorageService {
 	private readonly STORAGE_DIR = '.vscode/prompt-manager';
-	private readonly RESERVED_PROMPT_DIR_NAMES = new Set(['chat-memory']);
+	private readonly RESERVED_PROMPT_DIR_NAMES = new Set(['chat-memory', 'codemap']);
 	private readonly HISTORY_DIR_NAME = 'history';
 	private readonly DAILY_TIME_FILE = 'daily-time.json';
 	private readonly HISTORY_LIMIT = 20;

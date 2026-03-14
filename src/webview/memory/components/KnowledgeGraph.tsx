@@ -105,6 +105,7 @@ interface Graph2DNodePoint {
 	y: number;
 	radius: number;
 	node: KnowledgeGraphNode;
+	emphasis: boolean;
 }
 
 interface WindowWithForceGraph3D extends Window {
@@ -745,7 +746,7 @@ function visibilityByTimeline(
 export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestGraph, t }) => {
 	const persisted = useMemo(() => loadPersistedState(), []);
 	const sceneWrapRef = useRef<HTMLDivElement>(null);
-	const graphContainerRef = useRef<HTMLDivElement>(null);
+	const graphContainerRef = useRef<HTMLDivElement | null>(null);
 	const graph2DCanvasRef = useRef<HTMLCanvasElement>(null);
 	const [graphContainerVersion, setGraphContainerVersion] = useState(0);
 	const minimapRef = useRef<HTMLCanvasElement>(null);
@@ -1809,7 +1810,7 @@ export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestG
 					emphasis,
 				};
 			})
-			.filter((point): point is Graph2DNodePoint & { emphasis: boolean } => Boolean(point));
+			.filter((point): point is Graph2DNodePoint => Boolean(point));
 		const pointById = new Map(graph2DNodePointsRef.current.map(point => [point.id, point]));
 
 		for (const edge of visibleData.edges) {

@@ -40,7 +40,7 @@ export const PromptItem: React.FC<Props> = ({
   prompt, isSelected, isSaving = false, onOpen, onDelete, onDuplicate, onToggleFavorite, onExport,
 }) => {
   const MENU_WIDTH = 170;
-  const MENU_HEIGHT = 102;
+  const MENU_ITEM_HEIGHT = 34;
   const MENU_GAP = 4;
 
   const t = useT();
@@ -57,12 +57,58 @@ export const PromptItem: React.FC<Props> = ({
   const [showActions, setShowActions] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
-  const [hoveredMenuItem, setHoveredMenuItem] = useState<'duplicate' | 'export' | 'delete' | null>(null);
+  const [hoveredMenuItem, setHoveredMenuItem] = useState<string | null>(null);
   const [contextTargeted, setContextTargeted] = useState(false);
 
   const selFg = isSelected ? 'var(--vscode-list-activeSelectionForeground)' : undefined;
   const selBg = isSelected ? 'var(--vscode-list-activeSelectionBackground)' : undefined;
   const statusAccent = STATUS_COLORS[prompt.status] || 'var(--vscode-descriptionForeground)';
+  const menuItems: Array<{
+    id: string;
+    icon: string;
+    label: string;
+    onClick: () => void;
+    danger?: boolean;
+  }> = [
+    {
+      id: 'open',
+      icon: '↗',
+      label: t('editor.open'),
+      onClick: () => onOpen(prompt.id),
+    },
+    {
+      id: 'favorite',
+      icon: prompt.favorite ? '★' : '☆',
+      label: prompt.favorite ? t('item.removeFavorite') : t('item.addFavorite'),
+      onClick: () => onToggleFavorite(prompt.id),
+    },
+    {
+      id: 'duplicate',
+      icon: '📋',
+      label: t('item.duplicate'),
+      onClick: () => onDuplicate(prompt.id),
+    },
+    {
+      id: 'export',
+      icon: '📤',
+      label: t('item.export'),
+      onClick: () => onExport(prompt.id),
+    },
+    {
+      id: 'delete',
+      icon: '🗑',
+      label: t('common.delete'),
+      onClick: () => onDelete(prompt.id),
+      danger: true,
+    },
+  ];
+  const MENU_HEIGHT = menuItems.length * MENU_ITEM_HEIGHT;
+
+  const closeMenu = () => {
+    setShowMenu(false);
+    setHoveredMenuItem(null);
+    setContextTargeted(false);
+  };
 
   const openMenuAtPointer = (event: React.MouseEvent<HTMLElement>) => {
     const itemRect = event.currentTarget.closest('[data-prompt-item]')?.getBoundingClientRect();
@@ -103,9 +149,7 @@ export const PromptItem: React.FC<Props> = ({
       onMouseEnter={() => setShowActions(true)}
       onMouseLeave={() => {
         setShowActions(false);
-        setShowMenu(false);
-        setHoveredMenuItem(null);
-        setContextTargeted(false);
+        closeMenu();
       }}
       title={prompt.description || prompt.title || prompt.id}
     >
@@ -218,9 +262,7 @@ export const PromptItem: React.FC<Props> = ({
               onClick={event => {
                 event.stopPropagation();
                 if (showMenu) {
-                  setShowMenu(false);
-                  setHoveredMenuItem(null);
-                  setContextTargeted(false);
+                  closeMenu();
                   return;
                 }
                 openMenuAtPointer(event);
@@ -237,40 +279,25 @@ export const PromptItem: React.FC<Props> = ({
             ...(menuPosition ? { left: `${menuPosition.x}px`, top: `${menuPosition.y}px`, right: 'auto' } : {}),
           }}
         >
-          <button
-            style={{
-              ...styles.menuItem,
-              ...(hoveredMenuItem === 'duplicate' ? styles.menuItemHover : {}),
-            }}
-            onMouseEnter={() => setHoveredMenuItem('duplicate')}
-            onMouseLeave={() => setHoveredMenuItem(null)}
-            onClick={e => { e.stopPropagation(); onDuplicate(prompt.id); setShowMenu(false); setHoveredMenuItem(null); setContextTargeted(false); }}
-          >
-            📋 {t('item.duplicate')}
-          </button>
-          <button
-            style={{
-              ...styles.menuItem,
-              ...(hoveredMenuItem === 'export' ? styles.menuItemHover : {}),
-            }}
-            onMouseEnter={() => setHoveredMenuItem('export')}
-            onMouseLeave={() => setHoveredMenuItem(null)}
-            onClick={e => { e.stopPropagation(); onExport(prompt.id); setShowMenu(false); setHoveredMenuItem(null); setContextTargeted(false); }}
-          >
-            📤 {t('item.export')}
-          </button>
-          <button
-            style={{
-              ...styles.menuItem,
-              ...(hoveredMenuItem === 'delete' ? styles.menuItemHover : {}),
-              ...(hoveredMenuItem === 'delete' ? {} : styles.menuItemDanger),
-            }}
-            onMouseEnter={() => setHoveredMenuItem('delete')}
-            onMouseLeave={() => setHoveredMenuItem(null)}
-            onClick={e => { e.stopPropagation(); onDelete(prompt.id); setShowMenu(false); setHoveredMenuItem(null); setContextTargeted(false); }}
-          >
-            🗑 {t('common.delete')}
-          </button>
+          {menuItems.map(item => (
+            <button
+              key={item.id}
+              style={{
+                ...styles.menuItem,
+                ...(hoveredMenuItem === item.id ? styles.menuItemHover : {}),
+                ...(item.danger && hoveredMenuItem !== item.id ? styles.menuItemDanger : {}),
+              }}
+              onMouseEnter={() => setHoveredMenuItem(item.id)}
+              onMouseLeave={() => setHoveredMenuItem(null)}
+              onClick={e => {
+                e.stopPropagation();
+                item.onClick();
+                closeMenu();
+              }}
+            >
+              {item.icon} {item.label}
+            </button>
+          ))}
         </div>
       )}
       {isSaving && (

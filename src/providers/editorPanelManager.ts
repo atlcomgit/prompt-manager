@@ -15,10 +15,12 @@ import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
+import type { CodeMapChatInstructionService } from '../codemap/codeMapChatInstructionService.js';
 import { GitService } from '../services/gitService.js';
 import type { StateService } from '../services/stateService.js';
 import { TimeTrackingService } from '../services/timeTrackingService.js';
 import { decideFileReportSync, isLatestPersistedReport } from '../utils/reportSync.js';
+import { buildChatContextFiles } from '../utils/chatContextFiles.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
@@ -918,6 +920,7 @@ export class EditorPanelManager {
 		private readonly gitService: GitService,
 		private readonly stateService: StateService,
 		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
+		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined,
 	) {
 		this.contentSyncDisposables.push(
 			vscode.workspace.onDidChangeTextDocument((event) => {
@@ -957,6 +960,10 @@ export class EditorPanelManager {
 
 	private chatMemoryInstructionService(): ChatMemoryInstructionService | undefined {
 		return this.getChatMemoryInstructionService?.();
+	}
+
+	private codeMapChatInstructionService(): CodeMapChatInstructionService | undefined {
+		return this.getCodeMapChatInstructionService?.();
 	}
 
 	private shouldCaptureAgentFinalResponse(): boolean {
@@ -2344,7 +2351,7 @@ export class EditorPanelManager {
 						this.withTimeout(this.workspaceService.getSkills(), 2000, [] as any),
 						this.withTimeout(this.workspaceService.getMcpTools(), 2000, [] as any),
 						this.withTimeout(this.workspaceService.getHooks(), 2000, [] as any),
-						this.withTimeout(this.buildAvailableLanguagesAndFrameworkMessages(), 2000, availableLanguageAndFrameworkMessages),
+						this.withTimeout(this.buildAvailableLanguagesAndFrameworksMessages(), 2000, availableLanguageAndFrameworkMessages),
 					]);
 
 					models = results[0] || [];
@@ -2802,7 +2809,13 @@ export class EditorPanelManager {
 						// keep chat flow even if instructions file sync fails
 					}
 					try {
-						await this.chatMemoryInstructionService()?.prepareSessionInstruction(prompt);
+						await this.codeMapChatInstructionService()?.prepareInstruction(prompt);
+					} catch (error) {
+						this.hooksOutput.appendLine(`[codemap] prepareInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+					}
+					let sessionInstructionRecord: Awaited<ReturnType<ChatMemoryInstructionService['prepareSessionInstruction']>> | null = null;
+					try {
+						sessionInstructionRecord = await this.chatMemoryInstructionService()?.prepareSessionInstruction(prompt) ?? null;
 					} catch (error) {
 						this.hooksOutput.appendLine(`[chat-memory] prepareSessionInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 					}
@@ -2810,8 +2823,13 @@ export class EditorPanelManager {
 					parts.push(prompt.content);
 
 					const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-					const fileUris = prompt.contextFiles
-						.map(f => vscode.Uri.file(f.startsWith('/') ? f : `${workspaceRoot}/${f}`));
+					const chatContextFiles = buildChatContextFiles({
+						workspaceRoot,
+						storageDir: this.storageService.getStorageDirectoryPath(),
+						promptContextFiles: prompt.contextFiles,
+						sessionInstructionFilePath: sessionInstructionRecord?.instructionFilePath,
+					});
+					const fileUris = chatContextFiles.allAbsolutePaths.map(filePath => vscode.Uri.file(filePath));
 
 					// Add context metadata
 					const ctx: string[] = [];
@@ -2832,8 +2850,11 @@ export class EditorPanelManager {
 					if (prompt.model) ctx.push(`Preferred model: ${prompt.model}`);
 					if (prompt.taskNumber) ctx.push(`Task: ${prompt.taskNumber}`);
 					if (prompt.branch) ctx.push(`Branch: ${prompt.branch}`);
-					if (prompt.contextFiles.length > 0) {
-						ctx.push(`Context files: ${prompt.contextFiles.map(f => `#file:${f}`).join(' ')}`);
+					if (chatContextFiles.promptContextReferences.length > 0) {
+						ctx.push(`Context files: ${chatContextFiles.promptContextReferences.join(' ')}`);
+					}
+					if (chatContextFiles.instructionReferences.length > 0) {
+						ctx.push(`Memory instruction files: ${chatContextFiles.instructionReferences.join(' ')}`);
 					}
 
 					if (ctx.length > 0) {

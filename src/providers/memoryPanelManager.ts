@@ -13,23 +13,27 @@ import {
 	MANUAL_ANALYSIS_EVENT_LIMIT,
 } from '../utils/manualAnalysisRuntime.js';
 import { logMemoryGraphDebug, showMemoryGraphDebugChannel } from '../utils/memoryGraphDebug.js';
+import type { AiService } from '../services/aiService.js';
 import type { MemoryDatabaseService } from '../services/memoryDatabaseService.js';
 import type { MemoryContextService } from '../services/memoryContextService.js';
 import type { MemoryEmbeddingService } from '../services/memoryEmbeddingService.js';
 import type { MemoryAnalyzerService } from '../services/memoryAnalyzerService.js';
 import type { MemoryGitHookService } from '../services/memoryGitHookService.js';
+import type { CodeMapAdminService } from '../codemap/codeMapAdminService.js';
 import type {
 	ManualAnalysisCommitRow,
 	ManualAnalysisEventEntry,
 	ManualAnalysisRepositoryProgress,
 	ManualAnalysisRunStatus,
 	ManualAnalysisSnapshot,
+	MemoryAvailableModel,
 	MemoryWebviewToExtensionMessage,
 	MemoryExtensionToWebviewMessage,
 	MemorySettings,
 	MemorySearchResult,
-	DEFAULT_MEMORY_SETTINGS,
 } from '../types/memory.js';
+import { DEFAULT_MEMORY_SETTINGS } from '../types/memory.js';
+import { DEFAULT_COPILOT_MODEL_FAMILY } from '../constants/ai.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
@@ -60,6 +64,8 @@ export class MemoryPanelManager {
 		private readonly embedding: MemoryEmbeddingService,
 		private readonly analyzer: MemoryAnalyzerService,
 		private readonly gitHook: MemoryGitHookService,
+		private readonly aiService?: AiService,
+			private readonly codeMapAdmin?: CodeMapAdminService,
 	) { }
 
 	private isRussianLocale(): boolean {
@@ -260,23 +266,11 @@ export class MemoryPanelManager {
 				}
 
 				case 'getMemorySettings': {
-					const config = vscode.workspace.getConfiguration('promptManager');
-					const settings: MemorySettings = {
-						enabled: config.get<boolean>('memory.enabled', true),
-						aiModel: config.get<string>('memory.aiModel', 'gpt-4o'),
-						analysisDepth: config.get<any>('memory.analysisDepth', 'standard'),
-						diffLimit: config.get<number>('memory.diffLimit', 10000),
-						maxRecords: config.get<number>('memory.maxRecords', 5000),
-						retentionDays: config.get<number>('memory.retentionDays', 365),
-						shortTermLimit: config.get<number>('memory.shortTermLimit', 50),
-						historyAnalysisLimit: config.get<number>('memory.historyAnalysisLimit', 500),
-						autoCleanup: config.get<boolean>('memory.autoCleanup', true),
-						notificationsEnabled: config.get<boolean>('memory.notifications.enabled', true),
-						notificationType: config.get<any>('memory.notifications.type', 'statusbar'),
-						embeddingsEnabled: config.get<boolean>('memory.embeddings.enabled', true),
-						knowledgeGraphEnabled: config.get<boolean>('memory.knowledgeGraph.enabled', true),
-						httpPort: config.get<number>('memory.httpPort', 0),
-					};
+					const settings = this.getMemorySettings();
+					panel.webview.postMessage({
+						type: 'memoryAvailableModels',
+						models: await this.getAvailableModels(),
+					} as MemoryExtensionToWebviewMessage);
 					panel.webview.postMessage({
 						type: 'memorySettings',
 						settings,
@@ -301,6 +295,12 @@ export class MemoryPanelManager {
 					if (s.embeddingsEnabled !== undefined) { await config.update('memory.embeddings.enabled', s.embeddingsEnabled, true); }
 					if (s.knowledgeGraphEnabled !== undefined) { await config.update('memory.knowledgeGraph.enabled', s.knowledgeGraphEnabled, true); }
 					if (s.httpPort !== undefined) { await config.update('memory.httpPort', s.httpPort, true); }
+					const settings = this.getMemorySettings();
+					this.analyzer.setModelFamily(settings.aiModel);
+					panel.webview.postMessage({
+						type: 'memorySettings',
+						settings,
+					} as MemoryExtensionToWebviewMessage);
 					panel.webview.postMessage({
 						type: 'memoryInfo',
 						message: 'Settings saved',
@@ -391,6 +391,169 @@ export class MemoryPanelManager {
 					break;
 				}
 
+				case 'getCodeMapInstructions': {
+					panel.webview.postMessage({
+						type: 'codeMapInstructions',
+						instructions: this.codeMapAdmin ? await this.codeMapAdmin.getInstructions() : [],
+					} as MemoryExtensionToWebviewMessage);
+					break;
+				}
+
+				case 'getCodeMapInstructionDetail': {
+					panel.webview.postMessage({
+						type: 'codeMapInstructionDetail',
+						detail: this.codeMapAdmin?.getInstructionDetail(msg.id) || null,
+					} as MemoryExtensionToWebviewMessage);
+					break;
+				}
+
+				case 'getCodeMapStatistics': {
+					panel.webview.postMessage({
+						type: 'codeMapStatistics',
+						statistics: this.codeMapAdmin?.getStatistics() || this.getEmptyCodeMapStatistics(),
+					} as MemoryExtensionToWebviewMessage);
+					break;
+				}
+
+				case 'getCodeMapActivity': {
+					panel.webview.postMessage({
+						type: 'codeMapActivity',
+						activity: this.codeMapAdmin?.getActivity() || this.getEmptyCodeMapActivity(),
+					} as MemoryExtensionToWebviewMessage);
+					break;
+				}
+
+				case 'deleteCodeMapInstruction': {
+					const deleted = this.codeMapAdmin ? this.codeMapAdmin.deleteInstruction(msg.id) : false;
+					panel.webview.postMessage({
+						type: deleted ? 'memoryInfo' : 'memoryError',
+						message: this.isRussianLocale()
+							? (deleted ? 'Инструкция удалена' : 'Не удалось удалить инструкцию')
+							: (deleted ? 'Instruction deleted' : 'Failed to delete instruction'),
+					} as MemoryExtensionToWebviewMessage);
+					panel.webview.postMessage({
+						type: 'codeMapInstructions',
+						instructions: this.codeMapAdmin ? await this.codeMapAdmin.getInstructions() : [],
+					} as MemoryExtensionToWebviewMessage);
+					panel.webview.postMessage({
+						type: 'codeMapActivity',
+						activity: this.codeMapAdmin?.getActivity() || this.getEmptyCodeMapActivity(),
+					} as MemoryExtensionToWebviewMessage);
+					break;
+				}
+
+				case 'deleteObsoleteCodeMapInstructions': {
+					const deletedCount = this.codeMapAdmin ? await this.codeMapAdmin.deleteObsoleteInstructions() : 0;
+					panel.webview.postMessage({
+						type: 'memoryInfo',
+						message: this.isRussianLocale()
+							? `Удалено неактуальных инструкций: ${deletedCount}`
+							: `Deleted obsolete instructions: ${deletedCount}`,
+					} as MemoryExtensionToWebviewMessage);
+					panel.webview.postMessage({
+						type: 'codeMapInstructions',
+						instructions: this.codeMapAdmin ? await this.codeMapAdmin.getInstructions() : [],
+					} as MemoryExtensionToWebviewMessage);
+					panel.webview.postMessage({
+						type: 'codeMapActivity',
+						activity: this.codeMapAdmin?.getActivity() || this.getEmptyCodeMapActivity(),
+					} as MemoryExtensionToWebviewMessage);
+					break;
+				}
+
+				case 'getCodeMapSettings': {
+					panel.webview.postMessage({
+						type: 'codeMapSettings',
+						settings: this.codeMapAdmin?.getSettings() || {
+							enabled: false,
+							trackedBranches: [],
+							autoUpdate: false,
+							notificationsEnabled: false,
+							aiModel: DEFAULT_COPILOT_MODEL_FAMILY,
+							instructionMaxChars: 120000,
+							blockDescriptionMode: 'medium',
+							blockMaxChars: 2000,
+							batchContextMaxChars: 24000,
+							updatePriority: 'normal',
+							aiDelayMs: 1000,
+							startupDelayMs: 15000,
+							maxVersionsPerInstruction: 3,
+						},
+					} as MemoryExtensionToWebviewMessage);
+					break;
+				}
+
+				case 'saveCodeMapSettings': {
+					const settings = this.codeMapAdmin
+						? await this.codeMapAdmin.saveSettings(msg.settings)
+						: {
+							enabled: false,
+							trackedBranches: [],
+							autoUpdate: false,
+							notificationsEnabled: false,
+							aiModel: DEFAULT_COPILOT_MODEL_FAMILY,
+							instructionMaxChars: 120000,
+							blockDescriptionMode: 'medium' as const,
+							blockMaxChars: 2000,
+							batchContextMaxChars: 24000,
+							updatePriority: 'normal' as const,
+							aiDelayMs: 1000,
+							startupDelayMs: 15000,
+							maxVersionsPerInstruction: 3,
+						};
+					panel.webview.postMessage({
+						type: 'codeMapSettings',
+						settings,
+					} as MemoryExtensionToWebviewMessage);
+					panel.webview.postMessage({
+						type: 'memoryInfo',
+						message: this.isRussianLocale() ? 'Настройки инструкций сохранены' : 'Instruction settings saved',
+					} as MemoryExtensionToWebviewMessage);
+					break;
+				}
+
+				case 'refreshCodeMapWorkspace': {
+					const queued = this.codeMapAdmin ? await this.codeMapAdmin.queueRefreshWorkspace() : 0;
+					panel.webview.postMessage({
+						type: 'memoryInfo',
+						message: this.isRussianLocale()
+							? `В очередь обновления инструкций добавлено: ${queued}`
+							: `Queued instruction refresh jobs: ${queued}`,
+					} as MemoryExtensionToWebviewMessage);
+					panel.webview.postMessage({
+						type: 'codeMapInstructions',
+						instructions: this.codeMapAdmin ? await this.codeMapAdmin.getInstructions() : [],
+					} as MemoryExtensionToWebviewMessage);
+					panel.webview.postMessage({
+						type: 'codeMapStatistics',
+						statistics: this.codeMapAdmin?.getStatistics() || this.getEmptyCodeMapStatistics(),
+					} as MemoryExtensionToWebviewMessage);
+					panel.webview.postMessage({
+						type: 'codeMapActivity',
+						activity: this.codeMapAdmin?.getActivity() || this.getEmptyCodeMapActivity(),
+					} as MemoryExtensionToWebviewMessage);
+					break;
+				}
+
+				case 'refreshCodeMapInstruction': {
+					const queued = this.codeMapAdmin ? await this.codeMapAdmin.queueRefreshInstruction(msg.id) : false;
+					panel.webview.postMessage({
+						type: 'memoryInfo',
+						message: this.isRussianLocale()
+							? (queued ? 'Выбранная инструкция поставлена в очередь обновления' : 'Не удалось поставить инструкцию в очередь обновления')
+							: (queued ? 'Selected instruction queued for refresh' : 'Failed to queue selected instruction'),
+					} as MemoryExtensionToWebviewMessage);
+					panel.webview.postMessage({
+						type: 'codeMapStatistics',
+						statistics: this.codeMapAdmin?.getStatistics() || this.getEmptyCodeMapStatistics(),
+					} as MemoryExtensionToWebviewMessage);
+					panel.webview.postMessage({
+						type: 'codeMapActivity',
+						activity: this.codeMapAdmin?.getActivity() || this.getEmptyCodeMapActivity(),
+					} as MemoryExtensionToWebviewMessage);
+					break;
+				}
+
 				default:
 					break;
 			}
@@ -432,6 +595,10 @@ export class MemoryPanelManager {
 	private async sendInitialData(panel: vscode.WebviewPanel): Promise<void> {
 		const stats = await this.db.getStatistics();
 		panel.webview.postMessage({
+			type: 'memoryAvailableModels',
+			models: await this.getAvailableModels(),
+		} as MemoryExtensionToWebviewMessage);
+		panel.webview.postMessage({
 			type: 'memoryStatistics',
 			statistics: stats,
 		} as MemoryExtensionToWebviewMessage);
@@ -443,7 +610,108 @@ export class MemoryPanelManager {
 			total,
 		} as MemoryExtensionToWebviewMessage);
 
+		if (this.codeMapAdmin) {
+			panel.webview.postMessage({
+				type: 'codeMapInstructions',
+				instructions: await this.codeMapAdmin.getInstructions(),
+			} as MemoryExtensionToWebviewMessage);
+			panel.webview.postMessage({
+				type: 'codeMapStatistics',
+				statistics: this.codeMapAdmin.getStatistics(),
+			} as MemoryExtensionToWebviewMessage);
+			panel.webview.postMessage({
+				type: 'codeMapSettings',
+				settings: this.codeMapAdmin.getSettings(),
+			} as MemoryExtensionToWebviewMessage);
+			panel.webview.postMessage({
+				type: 'codeMapActivity',
+				activity: this.codeMapAdmin.getActivity(),
+			} as MemoryExtensionToWebviewMessage);
+		}
+
 		this.postManualAnalysisSnapshot(panel);
+	}
+
+	private getEmptyCodeMapStatistics(): import('../types/codemap.js').CodeMapStatistics {
+		return {
+			totalInstructions: 0,
+			totalVersions: 0,
+			totalJobs: 0,
+			queuedJobs: 0,
+			runningJobs: 0,
+			completedJobs: 0,
+			failedJobs: 0,
+			dbSizeBytes: 0,
+			repositories: [],
+			branches: [],
+			avgDurationMs: 0,
+			avgGenerationDurationMs: 0,
+			maxDurationMs: 0,
+			peakHeapUsedBytes: 0,
+			aiModels: [],
+			triggerStats: [],
+			repositoryStats: [],
+		};
+	}
+
+	private getMemorySettings(): MemorySettings {
+		const config = vscode.workspace.getConfiguration('promptManager');
+		return {
+			enabled: config.get<boolean>('memory.enabled', DEFAULT_MEMORY_SETTINGS.enabled),
+			aiModel: config.get<string>('memory.aiModel', DEFAULT_MEMORY_SETTINGS.aiModel),
+			analysisDepth: config.get<any>('memory.analysisDepth', DEFAULT_MEMORY_SETTINGS.analysisDepth),
+			diffLimit: config.get<number>('memory.diffLimit', DEFAULT_MEMORY_SETTINGS.diffLimit),
+			maxRecords: config.get<number>('memory.maxRecords', DEFAULT_MEMORY_SETTINGS.maxRecords),
+			retentionDays: config.get<number>('memory.retentionDays', DEFAULT_MEMORY_SETTINGS.retentionDays),
+			shortTermLimit: config.get<number>('memory.shortTermLimit', DEFAULT_MEMORY_SETTINGS.shortTermLimit),
+			historyAnalysisLimit: config.get<number>('memory.historyAnalysisLimit', DEFAULT_MEMORY_SETTINGS.historyAnalysisLimit),
+			autoCleanup: config.get<boolean>('memory.autoCleanup', DEFAULT_MEMORY_SETTINGS.autoCleanup),
+			notificationsEnabled: config.get<boolean>('memory.notifications.enabled', DEFAULT_MEMORY_SETTINGS.notificationsEnabled),
+			notificationType: config.get<any>('memory.notifications.type', DEFAULT_MEMORY_SETTINGS.notificationType),
+			embeddingsEnabled: config.get<boolean>('memory.embeddings.enabled', DEFAULT_MEMORY_SETTINGS.embeddingsEnabled),
+			knowledgeGraphEnabled: config.get<boolean>('memory.knowledgeGraph.enabled', DEFAULT_MEMORY_SETTINGS.knowledgeGraphEnabled),
+			httpPort: config.get<number>('memory.httpPort', DEFAULT_MEMORY_SETTINGS.httpPort),
+		};
+	}
+
+	private async getAvailableModels(): Promise<MemoryAvailableModel[]> {
+		const configured = this.getMemorySettings().aiModel;
+		const discovered = this.aiService ? await this.aiService.getAvailableModels() : [];
+		const items = [...discovered];
+		if (configured && !items.some(item => item.id === configured)) {
+			items.unshift({ id: configured, name: configured });
+		}
+
+		const seen = new Set<string>();
+		return items.filter(item => {
+			const id = String(item.id || '').trim();
+			if (!id || seen.has(id)) {
+				return false;
+			}
+			seen.add(id);
+			return true;
+		});
+	}
+
+	private getEmptyCodeMapActivity(): import('../types/codemap.js').CodeMapActivity {
+		return {
+			statistics: this.getEmptyCodeMapStatistics(),
+			runtime: {
+				pendingCount: 0,
+				queuedCount: 0,
+				runningCount: 0,
+				isProcessing: false,
+				queuedTasks: [],
+				recentEvents: [],
+				cycle: {
+					queuedTotal: 0,
+					startedTotal: 0,
+					completedTotal: 0,
+					failedTotal: 0,
+				},
+			},
+			recentJobs: [],
+		};
 	}
 
 	/** Run manual analysis of recent commits from git history */
@@ -687,11 +955,12 @@ export class MemoryPanelManager {
 
 	private async processManualAnalysisQueue(session: ManualAnalysisSession): Promise<void> {
 		while (this.manualAnalysisSession === session) {
-			if (session.status === 'paused' || session.status === 'completed' || session.status === 'stopped') {
+			const sessionStatus = session.status;
+			if (sessionStatus === 'paused' || sessionStatus === 'completed' || sessionStatus === 'stopped') {
 				return;
 			}
 
-			if (session.status === 'pausing') {
+			if (sessionStatus === 'pausing') {
 				session.status = 'paused';
 				session.updatedAt = new Date().toISOString();
 				this.pushManualAnalysisEvent(session, {
@@ -702,7 +971,7 @@ export class MemoryPanelManager {
 				return;
 			}
 
-			if (session.status === 'stopping') {
+			if (sessionStatus === 'stopping') {
 				this.finishManualAnalysis('stopped');
 				return;
 			}
@@ -718,7 +987,8 @@ export class MemoryPanelManager {
 
 			await this.processManualAnalysisRow(session, nextRow);
 
-			if (session.status === 'pausing') {
+			const updatedStatus = session.status;
+			if (updatedStatus === 'pausing') {
 				session.status = 'paused';
 				session.updatedAt = new Date().toISOString();
 				this.pushManualAnalysisEvent(session, {
@@ -729,7 +999,7 @@ export class MemoryPanelManager {
 				return;
 			}
 
-			if (session.status === 'stopping') {
+			if (updatedStatus === 'stopping') {
 				this.finishManualAnalysis('stopped');
 				return;
 			}
@@ -743,6 +1013,7 @@ export class MemoryPanelManager {
 		const config = vscode.workspace.getConfiguration('promptManager');
 		const depth = config.get<any>('memory.analysisDepth', 'standard');
 		const diffLimit = config.get<number>('memory.diffLimit', 10000);
+		const aiModel = config.get<string>('memory.aiModel', DEFAULT_MEMORY_SETTINGS.aiModel);
 		const startedAt = new Date().toISOString();
 
 		row.status = 'running';
@@ -821,6 +1092,7 @@ export class MemoryPanelManager {
 		row.isStored = true;
 
 		try {
+			this.analyzer.setModelFamily(aiModel);
 			const result = await this.analyzer.analyzeCommit(payload, depth, diffLimit);
 			this.db.insertAnalysis(result.analysis);
 			this.db.insertFileChanges(result.fileChanges);

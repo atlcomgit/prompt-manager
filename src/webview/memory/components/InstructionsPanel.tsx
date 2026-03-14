@@ -1,0 +1,814 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import type { MemoryAvailableModel } from '../../../types/memory';
+import type {
+	CodeMapActivity,
+	CodeMapInstructionDetail,
+	CodeMapInstructionListItem,
+	CodeMapRuntimePhase,
+	CodeMapRuntimeTask,
+	CodeMapSettings,
+	CodeMapStatistics,
+} from '../../../types/codemap';
+import { memoryButtonStyles } from './buttonStyles';
+
+type InstructionTab = 'browse' | 'update' | 'statistics' | 'settings';
+
+interface Props {
+	instructions: CodeMapInstructionListItem[];
+	selectedInstructionId: number | null;
+	detail: CodeMapInstructionDetail | null;
+	statistics: CodeMapStatistics | null;
+	activity: CodeMapActivity | null;
+	settings: CodeMapSettings | null;
+	availableModels: MemoryAvailableModel[];
+	onSelectInstruction: (id: number) => void;
+	onRefreshInstructions: () => void;
+	onRefreshWorkspace: () => void;
+	onRefreshInstruction: (id: number) => void;
+	onRefreshStatistics: () => void;
+	onRefreshActivity: () => void;
+	onRefreshSettings: () => void;
+	onSaveSettings: (settings: Partial<CodeMapSettings>) => void;
+	onDeleteInstruction: (id: number) => void;
+	onDeleteObsolete: () => void;
+	isRefreshing: boolean;
+	t: (key: string) => string;
+}
+
+const PIPELINE_PHASES: CodeMapRuntimePhase[] = [
+	'queued',
+	'collecting-files',
+	'describing-areas',
+	'describing-files',
+	'collecting-history',
+	'assembling-instruction',
+	'persisting-instruction',
+];
+
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) {
+		return `${bytes} B`;
+	}
+	if (bytes < 1024 * 1024) {
+		return `${(bytes / 1024).toFixed(1)} KB`;
+	}
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDate(value?: string): string {
+	if (!value) {
+		return '—';
+	}
+
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) {
+		return value;
+	}
+
+	return date.toLocaleString();
+}
+
+function formatDuration(ms?: number): string {
+	if (!ms || ms <= 0) {
+		return '—';
+	}
+	if (ms < 1000) {
+		return `${ms} ms`;
+	}
+	if (ms < 60_000) {
+		return `${(ms / 1000).toFixed(1)} s`;
+	}
+	return `${(ms / 60_000).toFixed(1)} min`;
+}
+
+function formatPercent(value: number): string {
+	if (!Number.isFinite(value)) {
+		return '0%';
+	}
+	return `${Math.round(value)}%`;
+}
+
+function formatProgressDetails(task: CodeMapRuntimeTask | undefined): string {
+	if (!task || !task.progressTotal || task.progressTotal <= 0 || task.progressCurrent === undefined) {
+		return '—';
+	}
+	const percent = Math.max(0, Math.min(100, (task.progressCurrent / task.progressTotal) * 100));
+	return `${task.progressCurrent}/${task.progressTotal} · ${formatPercent(percent)}`;
+}
+
+function getPhaseLabel(phase: CodeMapRuntimePhase | undefined, t: Props['t']): string {
+	if (!phase) {
+		return t('memory.instructions.phase.idle');
+	}
+	return t(`memory.instructions.phase.${phase}`);
+}
+
+function getTaskProgress(task: CodeMapRuntimeTask | undefined): number | null {
+	if (!task || !task.progressTotal || task.progressTotal <= 0 || task.progressCurrent === undefined) {
+		return null;
+	}
+	return Math.max(0, Math.min(100, (task.progressCurrent / task.progressTotal) * 100));
+}
+
+const MetricCard: React.FC<{ label: string; value: string; secondary?: string; compact?: boolean }> = ({ label, value, secondary, compact }) => (
+	<div style={styles.metricCard}>
+		<div style={styles.metricLabel}>{label}</div>
+		<div style={compact ? styles.metricValueCompact : styles.metricValue}>{value}</div>
+		{secondary ? <div style={styles.metricSecondary}>{secondary}</div> : null}
+	</div>
+);
+
+export const InstructionsPanel: React.FC<Props> = ({
+	instructions,
+	selectedInstructionId,
+	detail,
+	statistics,
+	activity,
+	settings,
+	availableModels,
+	onSelectInstruction,
+	onRefreshInstructions,
+	onRefreshWorkspace,
+	onRefreshInstruction,
+	onRefreshStatistics,
+	onRefreshActivity,
+	onRefreshSettings,
+	onSaveSettings,
+	onDeleteInstruction,
+	onDeleteObsolete,
+	isRefreshing,
+	t,
+}) => {
+	const [activeTab, setActiveTab] = useState<InstructionTab>('browse');
+	const [localSettings, setLocalSettings] = useState<CodeMapSettings | null>(settings);
+
+	useEffect(() => {
+		if (settings) {
+			setLocalSettings({ ...settings });
+		}
+	}, [settings]);
+
+	const selectedInstruction = useMemo(() => (
+		instructions.find(item => item.id === selectedInstructionId) || null
+	), [instructions, selectedInstructionId]);
+
+	const runtime = activity?.runtime;
+	const currentTask = runtime?.currentTask;
+	const queuedTasks = runtime?.queuedTasks || [];
+	const recentEvents = runtime?.recentEvents || [];
+	const recentJobs = activity?.recentJobs || [];
+	const taskProgress = getTaskProgress(currentTask);
+	const cycle = runtime?.cycle;
+	const cycleTotal = cycle?.queuedTotal || 0;
+	const cycleFinished = (cycle?.completedTotal || 0) + (cycle?.failedTotal || 0);
+	const cycleProgress = cycleTotal > 0 ? (cycleFinished / cycleTotal) * 100 : 0;
+	const totalFinishedJobs = (statistics?.completedJobs || 0) + (statistics?.failedJobs || 0);
+	const successRate = totalFinishedJobs > 0 ? ((statistics?.completedJobs || 0) / totalFinishedJobs) * 100 : 0;
+	const repositoriesText = statistics?.repositories.join(', ') || '—';
+	const branchesText = statistics?.branches.join(', ') || '—';
+	const modelOptions = useMemo(() => {
+		const next = [...availableModels];
+		if (localSettings?.aiModel && !next.some(item => item.id === localSettings.aiModel)) {
+			next.unshift({ id: localSettings.aiModel, name: localSettings.aiModel });
+		}
+		return next;
+	}, [availableModels, localSettings?.aiModel]);
+
+	const updateSetting = <K extends keyof CodeMapSettings>(key: K, value: CodeMapSettings[K]) => {
+		setLocalSettings(prev => prev ? { ...prev, [key]: value } : prev);
+	};
+
+	const resolveModelName = (modelId?: string): string => {
+		if (!modelId) {
+			return '—';
+		}
+		return availableModels.find(item => item.id === modelId)?.name || modelId;
+	};
+	const currentTaskModelName = currentTask ? resolveModelName(currentTask.aiModel) : '—';
+	const currentTaskEvents = useMemo(() => {
+		if (!currentTask) {
+			return [];
+		}
+		return recentEvents.filter(event => event.jobId === currentTask.jobId).slice(0, 6);
+	}, [currentTask, recentEvents]);
+
+	const saveSettings = () => {
+		if (!localSettings) {
+			return;
+		}
+
+		onSaveSettings({
+			...localSettings,
+			trackedBranches: localSettings.trackedBranches.map(item => item.trim()).filter(Boolean),
+		});
+	};
+
+	return (
+		<div style={styles.container}>
+			<div style={styles.tabs}>
+				{(['browse', 'update', 'statistics', 'settings'] as InstructionTab[]).map(tab => (
+					<button
+						key={tab}
+						style={{
+							...memoryButtonStyles.tab,
+							...(activeTab === tab ? memoryButtonStyles.tabActive : {}),
+						}}
+						onClick={() => setActiveTab(tab)}
+					>
+						{t(`memory.instructions.tab.${tab}`)}
+					</button>
+				))}
+			</div>
+
+			{activeTab === 'browse' && (
+				<div style={styles.browseLayout}>
+					<div style={styles.sidebar}>
+						<div style={styles.actions}>
+							<button style={memoryButtonStyles.secondary} onClick={onRefreshInstructions}>
+								↻ {t('memory.refresh')}
+							</button>
+							<button style={memoryButtonStyles.danger} onClick={onDeleteObsolete}>
+								🗑 {t('memory.instructions.deleteObsolete')}
+							</button>
+						</div>
+						{instructions.length === 0 ? (
+							<div style={styles.empty}>{t('memory.instructions.empty')}</div>
+						) : instructions.map(item => (
+							<button
+								key={item.id}
+								style={{
+									...styles.listItem,
+									...(selectedInstructionId === item.id ? styles.listItemActive : {}),
+								}}
+								onClick={() => onSelectInstruction(item.id)}
+							>
+								<div style={styles.listItemHeader}>
+									<div style={styles.listItemTitle}>{item.repository}</div>
+									{item.isObsolete ? <span style={styles.obsoleteBadge}>{t('memory.instructions.obsolete')}</span> : null}
+								</div>
+								<div style={styles.listItemMeta}>{item.branchName} · {item.instructionKind}</div>
+								<div style={styles.listItemMeta}>{t('memory.instructions.updatedAt')}: {formatDate(item.updatedAt)}</div>
+							</button>
+						))}
+					</div>
+
+					<div style={styles.detailPane}>
+						{detail ? (
+							<>
+								<div style={styles.detailHeader}>
+									<div>
+										<h3 style={styles.detailTitle}>{detail.instruction.repository}</h3>
+										<div style={styles.detailSubtitle}>{detail.instruction.branchName} · {detail.instruction.instructionKind} · {detail.instruction.branchRole}</div>
+									</div>
+									{selectedInstruction ? (
+										<div style={styles.actions}>
+											<button style={memoryButtonStyles.primary} onClick={() => onRefreshInstruction(selectedInstruction.id)}>
+												↻ {t('memory.instructions.refreshSelected')}
+											</button>
+											<button style={memoryButtonStyles.danger} onClick={() => onDeleteInstruction(selectedInstruction.id)}>
+												🗑 {t('memory.instructions.deleteSelected')}
+											</button>
+										</div>
+									) : null}
+								</div>
+
+								<div style={styles.metricRow}>
+									<MetricCard label={t('memory.instructions.fileCount')} value={String(detail.instruction.fileCount)} />
+									<MetricCard label={t('memory.instructions.versions')} value={String(detail.instruction.versionCount)} />
+									<MetricCard label={t('memory.instructions.compressedSize')} value={formatBytes(detail.instruction.compressedSize)} />
+								</div>
+
+								<div style={styles.section}>
+									<h4 style={styles.sectionTitle}>{t('memory.instructions.summary')}</h4>
+									<div style={styles.keyValueGrid}>
+										<div>{t('memory.instructions.resolvedBranch')}</div>
+										<div>{detail.instruction.resolvedBranchName}</div>
+										<div>{t('memory.instructions.baseBranch')}</div>
+										<div>{detail.instruction.baseBranchName}</div>
+										<div>{t('memory.instructions.generatedAt')}</div>
+										<div>{formatDate(detail.instruction.generatedAt)}</div>
+										<div>{t('memory.aiModel')}</div>
+										<div>{resolveModelName(detail.instruction.aiModel)}</div>
+										<div>{t('memory.instructions.sourceCommit')}</div>
+										<div style={styles.mono}>{detail.instruction.sourceCommitSha}</div>
+									</div>
+								</div>
+
+								<div style={styles.section}>
+									<h4 style={styles.sectionTitle}>{t('memory.instructions.content')}</h4>
+									<pre style={styles.contentBox}>{detail.instruction.content}</pre>
+								</div>
+
+								<div style={styles.twoColumn}>
+									<div style={styles.section}>
+										<h4 style={styles.sectionTitle}>{t('memory.instructions.recentVersions')}</h4>
+										{detail.versions.length === 0 ? (
+											<div style={styles.emptyInline}>{t('memory.instructions.noVersions')}</div>
+										) : (
+											<div style={styles.listStack}>
+												{detail.versions.map(version => (
+													<div key={version.id} style={styles.infoRow}>
+														<div style={styles.infoPrimary}>{formatDate(version.generatedAt)}</div>
+														<div style={styles.monoSmall}>{version.contentHash}</div>
+													</div>
+												))}
+											</div>
+										)}
+									</div>
+
+									<div style={styles.section}>
+										<h4 style={styles.sectionTitle}>{t('memory.instructions.recentJobs')}</h4>
+										{detail.recentJobs.length === 0 ? (
+											<div style={styles.emptyInline}>{t('memory.instructions.noJobs')}</div>
+										) : (
+											<div style={styles.listStack}>
+												{detail.recentJobs.map(job => (
+													<div key={job.id} style={styles.infoRow}>
+														<div>
+															<div style={styles.infoPrimary}>{job.status} · {job.triggerType}</div>
+															<div style={styles.infoSecondary}>{resolveModelName(typeof job.payload.aiModel === 'string' ? job.payload.aiModel : '')} · {formatDate(job.finishedAt || job.requestedAt)}</div>
+														</div>
+														<div>{formatDuration(job.totalDurationMs)}</div>
+													</div>
+												))}
+											</div>
+										)}
+									</div>
+								</div>
+							</>
+						) : (
+							<div style={styles.empty}>{t('memory.instructions.selectInstruction')}</div>
+						)}
+					</div>
+				</div>
+			)}
+
+			{activeTab === 'update' && (
+				<div style={styles.pageStack}>
+					<div style={{ ...styles.heroCard, ...(isRefreshing ? styles.heroCardActive : {}) }}>
+						<div style={styles.heroHeader}>
+							<div>
+								<div style={styles.heroEyebrow}>{t('memory.instructions.progressTitle')}</div>
+								<h3 style={styles.heroTitle}>{currentTask ? `${currentTask.repository} · ${currentTask.branchName}` : t('memory.instructions.phase.idle')}</h3>
+								<div style={styles.heroDescription}>
+									{currentTask ? `${getPhaseLabel(currentTask.phase, t)} · ${currentTaskModelName}${currentTask.detail ? ` · ${currentTask.detail}` : ''}` : t('memory.instructions.progressIdle')}
+								</div>
+							</div>
+							<button style={memoryButtonStyles.secondary} onClick={onRefreshActivity}>
+								↻ {t('memory.refresh')}
+							</button>
+						</div>
+
+						<div style={styles.metricRow}>
+							<MetricCard label={t('memory.instructions.liveQueued')} value={String(runtime?.queuedCount || 0)} />
+							<MetricCard label={t('memory.instructions.liveRunning')} value={String(runtime?.runningCount || 0)} />
+							<MetricCard label={t('memory.instructions.liveCycleProgress')} value={cycleTotal > 0 ? `${cycleFinished}/${cycleTotal}` : '0/0'} secondary={formatPercent(cycleProgress)} />
+							<MetricCard label={t('memory.instructions.lastActivityAt')} value={formatDate(runtime?.lastActivityAt)} compact />
+						</div>
+
+						<div style={styles.progressBarShell}>
+							<div style={{ ...styles.progressBarFill, width: `${Math.max(isRefreshing ? 10 : 0, cycleProgress)}%` }} />
+						</div>
+					</div>
+
+					<div style={styles.pipelineGrid}>
+						{PIPELINE_PHASES.map((phase, index) => {
+							const currentIndex = currentTask ? PIPELINE_PHASES.indexOf(currentTask.phase) : -1;
+							const isDone = currentTask ? index < currentIndex : false;
+							const isActive = currentTask ? index === currentIndex : false;
+							return (
+								<div
+									key={phase}
+									style={{
+										...styles.pipelineStep,
+										...(isDone ? styles.pipelineStepDone : {}),
+										...(isActive ? styles.pipelineStepActive : {}),
+									}}
+								>
+									<div style={styles.pipelineIndex}>{index + 1}</div>
+									<div style={styles.pipelineLabel}>{getPhaseLabel(phase, t)}</div>
+								</div>
+							);
+						})}
+					</div>
+
+					<div style={styles.twoColumn}>
+						<div style={styles.pageStack}>
+							<div style={styles.section}>
+								<h4 style={styles.sectionTitle}>{t('memory.instructions.currentTask')}</h4>
+								{currentTask ? (
+									<>
+										<div style={styles.currentTaskHeader}>
+											<div>
+												<div style={styles.infoPrimary}>{currentTask.repository} · {currentTask.branchName}</div>
+												<div style={styles.infoSecondary}>{currentTask.instructionKind} · {currentTask.trigger} · {currentTask.priority} · {currentTaskModelName}</div>
+											</div>
+											<div style={styles.phaseBadge}>{getPhaseLabel(currentTask.phase, t)}</div>
+										</div>
+										<div style={styles.keyValueGrid}>
+											<div>{t('memory.instructions.phase')}</div>
+											<div>{getPhaseLabel(currentTask.phase, t)}</div>
+											<div>{t('memory.aiModel')}</div>
+											<div>{currentTaskModelName}</div>
+											<div>{t('memory.instructions.liveTaskProgress')}</div>
+											<div>{formatProgressDetails(currentTask)}</div>
+											<div>{t('memory.instructions.liveTaskRequestedAt')}</div>
+											<div>{formatDate(currentTask.requestedAt)}</div>
+											<div>{t('memory.instructions.liveTaskStartedAt')}</div>
+											<div>{formatDate(currentTask.startedAt)}</div>
+											<div>{t('memory.instructions.updatedAt')}</div>
+											<div>{formatDate(currentTask.updatedAt)}</div>
+											<div>{t('memory.instructions.liveTaskDetail')}</div>
+											<div>{currentTask.detail || '—'}</div>
+										</div>
+										{taskProgress !== null ? (
+											<>
+												<div style={styles.progressBarShell}>
+													<div style={{ ...styles.progressBarFill, width: `${Math.max(8, taskProgress)}%` }} />
+												</div>
+												<div style={styles.progressCaption}>{formatPercent(taskProgress)} · {currentTask.progressCurrent}/{currentTask.progressTotal}</div>
+											</>
+										) : null}
+										<div style={styles.sectionSubtleTitle}>{t('memory.instructions.liveTaskMessages')}</div>
+										{currentTaskEvents.length === 0 ? (
+											<div style={styles.emptyInline}>{t('memory.instructions.noTaskMessages')}</div>
+										) : (
+											<div style={styles.listStack}>
+												{currentTaskEvents.map(event => (
+													<div key={event.id} style={styles.infoRow}>
+														<div>
+															<div style={styles.infoPrimary}>{event.message}</div>
+															<div style={styles.infoSecondary}>{[event.phase ? getPhaseLabel(event.phase, t) : '', formatDate(event.at)].filter(Boolean).join(' · ')}</div>
+														</div>
+													</div>
+												))}
+											</div>
+										)}
+									</>
+								) : (
+									<div style={styles.emptyInline}>{t('memory.instructions.noCurrentTask')}</div>
+								)}
+							</div>
+
+							<div style={styles.section}>
+								<div style={styles.sectionHeader}>
+									<h4 style={styles.sectionTitle}>{t('memory.instructions.queuePreview')}</h4>
+									<div style={styles.sectionMeta}>{queuedTasks.length}</div>
+								</div>
+								{queuedTasks.length === 0 ? (
+									<div style={styles.emptyInline}>{t('memory.instructions.noQueuedTasks')}</div>
+								) : (
+									<div style={styles.listStack}>
+										{queuedTasks.map(task => (
+											<div key={task.jobId} style={styles.infoRow}>
+												<div>
+													<div style={styles.infoPrimary}>{task.repository} · {task.branchName}</div>
+													<div style={styles.infoSecondary}>{task.instructionKind} · {task.trigger} · {task.priority} · {resolveModelName(task.aiModel)}</div>
+												</div>
+												<div>{formatDate(task.requestedAt)}</div>
+											</div>
+										))}
+									</div>
+								)}
+							</div>
+						</div>
+
+						<div style={styles.pageStack}>
+							<div style={styles.section}>
+								<h4 style={styles.sectionTitle}>{t('memory.instructions.eventLog')}</h4>
+								{recentEvents.length === 0 ? (
+									<div style={styles.emptyInline}>{t('memory.instructions.noEvents')}</div>
+								) : (
+									<div style={styles.listStack}>
+										{recentEvents.map(event => (
+											<div key={event.id} style={styles.eventRow}>
+												<div style={{ ...styles.eventMarker, ...(event.level === 'success' ? styles.eventSuccess : event.level === 'error' ? styles.eventError : styles.eventInfo) }} />
+												<div style={styles.eventBody}>
+													<div style={styles.infoPrimary}>{event.message}</div>
+													<div style={styles.infoSecondary}>{[
+														event.phase ? getPhaseLabel(event.phase, t) : '',
+														event.repository && event.branchName ? `${event.repository} · ${event.branchName}` : '',
+														formatDate(event.at),
+													].filter(Boolean).join(' · ')}</div>
+												</div>
+											</div>
+										))}
+									</div>
+								)}
+							</div>
+
+							<div style={styles.section}>
+								<h4 style={styles.sectionTitle}>{t('memory.instructions.actionsTitle')}</h4>
+								<div style={styles.actionGrid}>
+									<div style={styles.actionCard}>
+										<div style={styles.infoPrimary}>{t('memory.instructions.updateWorkspace')}</div>
+										<div style={styles.infoSecondary}>{t('memory.instructions.updateWorkspaceHint')}</div>
+										<button style={memoryButtonStyles.primary} onClick={onRefreshWorkspace}>
+											↻ {t('memory.instructions.refreshWorkspace')}
+										</button>
+									</div>
+									<div style={styles.actionCard}>
+										<div style={styles.infoPrimary}>{t('memory.instructions.updateSelected')}</div>
+										<div style={styles.infoSecondary}>{selectedInstruction ? `${selectedInstruction.repository} · ${selectedInstruction.branchName}` : t('memory.instructions.selectInstruction')}</div>
+										<button
+											style={{
+												...memoryButtonStyles.secondary,
+												...(selectedInstruction ? {} : memoryButtonStyles.disabled),
+											}}
+											onClick={() => selectedInstruction && onRefreshInstruction(selectedInstruction.id)}
+										>
+											↻ {t('memory.instructions.refreshSelected')}
+										</button>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			)}
+
+			{activeTab === 'statistics' && (
+				<div style={styles.pageStack}>
+					<div style={styles.actions}>
+						<button style={memoryButtonStyles.secondary} onClick={onRefreshStatistics}>
+							↻ {t('memory.refresh')}
+						</button>
+					</div>
+
+					{statistics ? (
+						<>
+							<div style={styles.heroCard}>
+								<div style={styles.heroEyebrow}>{t('memory.instructions.statisticsOverview')}</div>
+								<h3 style={styles.heroTitle}>{t('memory.instructions.statisticsHeadline')}</h3>
+								<div style={styles.heroDescription}>
+									{t('memory.instructions.statisticsSummary')
+										.replace('{repositories}', String(statistics.repositories.length))
+										.replace('{branches}', String(statistics.branches.length))
+										.replace('{instructions}', String(statistics.totalInstructions))}
+								</div>
+							</div>
+
+							<div style={styles.metricRow}>
+								<MetricCard label={t('memory.instructions.totalInstructions')} value={String(statistics.totalInstructions)} secondary={`${statistics.repositories.length} ${t('memory.instructions.repositories').toLowerCase()}`} />
+								<MetricCard label={t('memory.instructions.statisticsSuccessRate')} value={formatPercent(successRate)} secondary={`${statistics.completedJobs}/${totalFinishedJobs || 0}`} />
+								<MetricCard label={t('memory.instructions.avgDuration')} value={formatDuration(statistics.avgDurationMs)} />
+								<MetricCard label={t('memory.instructions.avgGenerationDuration')} value={formatDuration(statistics.avgGenerationDurationMs)} />
+							</div>
+
+							<div style={styles.metricRow}>
+								<MetricCard label={t('memory.instructions.liveBacklog')} value={String((runtime?.queuedCount || 0) + (runtime?.runningCount || 0))} secondary={t('memory.instructions.liveBacklogHint')} />
+								<MetricCard label={t('memory.instructions.maxDuration')} value={formatDuration(statistics.maxDurationMs)} />
+								<MetricCard label={t('memory.instructions.peakHeap')} value={formatBytes(statistics.peakHeapUsedBytes)} />
+								<MetricCard label={t('memory.instructions.dbSize')} value={formatBytes(statistics.dbSizeBytes)} secondary={formatDate(statistics.latestUpdatedAt)} compact />
+							</div>
+
+							<div style={styles.twoColumn}>
+								<div style={styles.pageStack}>
+									<div style={styles.section}>
+										<h4 style={styles.sectionTitle}>{t('memory.instructions.scope')}</h4>
+										<div style={styles.keyValueGrid}>
+											<div>{t('memory.instructions.repositories')}</div>
+											<div>{repositoriesText}</div>
+											<div>{t('memory.instructions.branches')}</div>
+											<div>{branchesText}</div>
+											<div>{t('memory.instructions.latestUpdatedAt')}</div>
+											<div>{formatDate(statistics.latestUpdatedAt)}</div>
+										</div>
+									</div>
+
+									<div style={styles.section}>
+										<h4 style={styles.sectionTitle}>{t('memory.instructions.repositoryStatsTitle')}</h4>
+										{statistics.repositoryStats.length === 0 ? (
+											<div style={styles.emptyInline}>{t('memory.instructions.noJobs')}</div>
+										) : (
+											<div style={styles.listStack}>
+												{statistics.repositoryStats.map(item => (
+													<div key={item.repository} style={styles.infoRow}>
+														<div>
+															<div style={styles.infoPrimary}>{item.repository}</div>
+															<div style={styles.infoSecondary}>{t('memory.instructions.statisticsCompleted')}: {item.completed} · {t('memory.instructions.statisticsFailed')}: {item.failed}</div>
+														</div>
+														<div>{formatDuration(item.avgDurationMs)}</div>
+													</div>
+												))}
+											</div>
+										)}
+									</div>
+
+									<div style={styles.section}>
+										<h4 style={styles.sectionTitle}>{t('memory.instructions.aiModelsTitle')}</h4>
+										{statistics.aiModels.length === 0 ? (
+											<div style={styles.emptyInline}>{t('memory.instructions.noJobs')}</div>
+										) : (
+											<div style={styles.listStack}>
+												{statistics.aiModels.map(item => (
+													<div key={item.model} style={styles.infoRow}>
+														<div style={styles.infoPrimary}>{resolveModelName(item.model)}</div>
+														<div>{item.count}</div>
+													</div>
+												))}
+											</div>
+										)}
+									</div>
+								</div>
+
+								<div style={styles.pageStack}>
+									<div style={styles.section}>
+										<h4 style={styles.sectionTitle}>{t('memory.instructions.triggerStatsTitle')}</h4>
+										{statistics.triggerStats.length === 0 ? (
+											<div style={styles.emptyInline}>{t('memory.instructions.noJobs')}</div>
+										) : (
+											<div style={styles.triggerGrid}>
+												{statistics.triggerStats.map(item => {
+													const triggerTotal = item.completed + item.failed;
+													const triggerSuccessRate = triggerTotal > 0 ? (item.completed / triggerTotal) * 100 : 0;
+													return (
+														<div key={item.trigger} style={styles.triggerCard}>
+															<div style={styles.triggerTitle}>{item.trigger}</div>
+															<div style={styles.triggerValue}>{formatPercent(triggerSuccessRate)}</div>
+															<div style={styles.infoSecondary}>{item.total} {t('memory.instructions.totalJobs').toLowerCase()}</div>
+															<div style={styles.infoSecondary}>{formatDuration(item.avgDurationMs)} · {formatDuration(item.avgGenerationDurationMs)}</div>
+														</div>
+													);
+												})}
+											</div>
+										)}
+									</div>
+
+									<div style={styles.section}>
+										<h4 style={styles.sectionTitle}>{t('memory.instructions.statisticsRecentOutcomes')}</h4>
+										{recentJobs.length === 0 ? (
+											<div style={styles.emptyInline}>{t('memory.instructions.noJobs')}</div>
+										) : (
+											<div style={styles.listStack}>
+												{recentJobs.map(job => (
+													<div key={job.id} style={styles.infoRow}>
+														<div>
+															<div style={styles.infoPrimary}>{job.repository} · {job.branchName}</div>
+															<div style={styles.infoSecondary}>{job.status} · {job.triggerType} · {resolveModelName(typeof job.payload.aiModel === 'string' ? job.payload.aiModel : '')} · {formatDate(job.finishedAt || job.requestedAt)}</div>
+														</div>
+														<div>{formatDuration(job.totalDurationMs)}</div>
+													</div>
+												))}
+											</div>
+										)}
+									</div>
+								</div>
+							</div>
+						</>
+					) : (
+						<div style={styles.empty}>{t('memory.loading')}</div>
+					)}
+				</div>
+			)}
+
+			{activeTab === 'settings' && (
+				<div style={styles.pageStack}>
+					<div style={styles.actions}>
+						<button style={memoryButtonStyles.primary} onClick={saveSettings}>
+							💾 {t('memory.saveSettings')}
+						</button>
+						<button style={memoryButtonStyles.secondary} onClick={onRefreshSettings}>
+							↻ {t('memory.refresh')}
+						</button>
+					</div>
+
+					{localSettings ? (
+						<>
+							<div style={styles.section}>
+								<h4 style={styles.sectionTitle}>{t('memory.settingsGeneral')}</h4>
+								<label style={styles.checkboxLabel}><input type="checkbox" checked={localSettings.enabled} onChange={e => updateSetting('enabled', e.target.checked)} />{t('memory.enabled')}</label>
+								<label style={styles.checkboxLabel}><input type="checkbox" checked={localSettings.autoUpdate} onChange={e => updateSetting('autoUpdate', e.target.checked)} />{t('memory.instructions.autoUpdate')}</label>
+								<label style={styles.checkboxLabel}><input type="checkbox" checked={localSettings.notificationsEnabled} onChange={e => updateSetting('notificationsEnabled', e.target.checked)} />{t('memory.notificationsEnabled')}</label>
+							</div>
+
+							<div style={styles.section}>
+								<h4 style={styles.sectionTitle}>{t('memory.instructions.trackedBranches')}</h4>
+								<textarea
+									style={styles.textarea}
+									value={localSettings.trackedBranches.join('\n')}
+									onChange={e => updateSetting('trackedBranches', e.target.value.split('\n'))}
+								/>
+							</div>
+
+							<div style={styles.section}>
+								<h4 style={styles.sectionTitle}>{t('memory.instructions.limits')}</h4>
+								<div style={styles.fieldRow}><span>{t('memory.instructions.instructionMaxChars')}</span><input type="number" style={styles.input} value={localSettings.instructionMaxChars} onChange={e => updateSetting('instructionMaxChars', Number(e.target.value))} /></div>
+								<div style={styles.fieldRow}><span>{t('memory.instructions.blockMaxChars')}</span><input type="number" style={styles.input} value={localSettings.blockMaxChars} onChange={e => updateSetting('blockMaxChars', Number(e.target.value))} /></div>
+								<div style={styles.fieldRow}><span>{t('memory.instructions.batchContextMaxChars')}</span><input type="number" style={styles.input} value={localSettings.batchContextMaxChars} onChange={e => updateSetting('batchContextMaxChars', Number(e.target.value))} /></div>
+								<div style={styles.fieldRow}><span>{t('memory.instructions.maxVersions')}</span><input type="number" style={styles.input} value={localSettings.maxVersionsPerInstruction} onChange={e => updateSetting('maxVersionsPerInstruction', Number(e.target.value))} /></div>
+							</div>
+
+							<div style={styles.section}>
+								<h4 style={styles.sectionTitle}>{t('memory.instructions.ai')}</h4>
+								<div style={styles.fieldRow}>
+									<span>{t('memory.aiModel')}</span>
+									<select style={styles.select} value={localSettings.aiModel} onChange={e => updateSetting('aiModel', e.target.value)}>
+										{modelOptions.map(model => (
+											<option key={model.id} value={model.id}>{model.name}</option>
+										))}
+									</select>
+								</div>
+								<div style={styles.fieldRow}>
+									<span>{t('memory.instructions.blockDescriptionMode')}</span>
+									<select style={styles.select} value={localSettings.blockDescriptionMode} onChange={e => updateSetting('blockDescriptionMode', e.target.value as CodeMapSettings['blockDescriptionMode'])}>
+										<option value="short">short</option>
+										<option value="medium">medium</option>
+										<option value="long">long</option>
+									</select>
+								</div>
+								<div style={styles.fieldRow}>
+									<span>{t('memory.instructions.updatePriority')}</span>
+									<select style={styles.select} value={localSettings.updatePriority} onChange={e => updateSetting('updatePriority', e.target.value as CodeMapSettings['updatePriority'])}>
+										<option value="low">low</option>
+										<option value="normal">normal</option>
+										<option value="high">high</option>
+									</select>
+								</div>
+								<div style={styles.fieldRow}><span>{t('memory.instructions.aiDelayMs')}</span><input type="number" style={styles.input} value={localSettings.aiDelayMs} onChange={e => updateSetting('aiDelayMs', Number(e.target.value))} /></div>
+								<div style={styles.fieldRow}><span>{t('memory.instructions.startupDelayMs')}</span><input type="number" style={styles.input} value={localSettings.startupDelayMs} onChange={e => updateSetting('startupDelayMs', Number(e.target.value))} /></div>
+							</div>
+						</>
+					) : (
+						<div style={styles.empty}>{t('memory.loading')}</div>
+					)}
+				</div>
+			)}
+		</div>
+	);
+};
+
+const styles: Record<string, React.CSSProperties> = {
+	container: { padding: '16px', overflow: 'auto', height: '100%' },
+	tabs: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '16px' },
+	pageStack: { display: 'flex', flexDirection: 'column', gap: '16px' },
+	browseLayout: { display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: '16px', minHeight: 0 },
+	twoColumn: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '16px' },
+	sidebar: { minWidth: 0, overflow: 'auto' },
+	detailPane: { minWidth: 0, overflow: 'auto' },
+	actions: { display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' },
+	listItem: { display: 'block', width: '100%', textAlign: 'left', padding: '10px 12px', marginBottom: '8px', background: 'var(--vscode-editor-background)', border: '1px solid var(--vscode-panel-border)', borderRadius: '8px', color: 'var(--vscode-foreground)' },
+	listItemActive: { borderColor: 'var(--vscode-focusBorder)', outline: '1px solid var(--vscode-focusBorder)' },
+	listItemHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '4px' },
+	listItemTitle: { fontWeight: 700 },
+	listItemMeta: { fontSize: '11px', color: 'var(--vscode-descriptionForeground)', marginTop: '2px' },
+	obsoleteBadge: { padding: '2px 6px', borderRadius: '999px', background: 'var(--vscode-editorWarning-background, var(--vscode-inputValidation-warningBackground))', color: 'var(--vscode-editorWarning-foreground, var(--vscode-inputValidation-warningForeground))', fontSize: '10px', fontWeight: 700, textTransform: 'uppercase' },
+	detailHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', marginBottom: '16px' },
+	detailTitle: { margin: 0, fontSize: '18px' },
+	detailSubtitle: { fontSize: '12px', color: 'var(--vscode-descriptionForeground)', marginTop: '4px' },
+	heroCard: { padding: '18px', background: 'linear-gradient(135deg, color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-button-background) 12%), var(--vscode-editor-background))', border: '1px solid var(--vscode-panel-border)', borderRadius: '12px' },
+	heroCardActive: { borderColor: 'var(--vscode-progressBar-background)' },
+	heroHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', marginBottom: '14px' },
+	heroEyebrow: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--vscode-descriptionForeground)', marginBottom: '6px' },
+	heroTitle: { margin: 0, fontSize: '24px', lineHeight: 1.2 },
+	heroDescription: { marginTop: '6px', color: 'var(--vscode-descriptionForeground)', fontSize: '13px' },
+	metricRow: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' },
+	metricCard: { padding: '12px', background: 'var(--vscode-editor-background)', border: '1px solid var(--vscode-panel-border)', borderRadius: '8px' },
+	metricLabel: { fontSize: '11px', color: 'var(--vscode-descriptionForeground)' },
+	metricValue: { fontSize: '22px', fontWeight: 700, marginTop: '6px' },
+	metricValueCompact: { fontSize: '13px', fontWeight: 700, marginTop: '6px', wordBreak: 'break-word' },
+	metricSecondary: { marginTop: '6px', fontSize: '11px', color: 'var(--vscode-descriptionForeground)' },
+	progressBarShell: { height: '12px', background: 'var(--vscode-input-background)', borderRadius: '999px', overflow: 'hidden' },
+	progressBarFill: { height: '100%', background: 'linear-gradient(90deg, var(--vscode-progressBar-background), color-mix(in srgb, var(--vscode-progressBar-background) 60%, white 40%))', transition: 'width 180ms ease' },
+	pipelineGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px' },
+	pipelineStep: { display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', borderRadius: '10px', border: '1px solid var(--vscode-panel-border)', background: 'var(--vscode-editor-background)' },
+	pipelineStepDone: { borderColor: 'var(--vscode-testing-iconPassed)', background: 'color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-testing-iconPassed) 12%)' },
+	pipelineStepActive: { borderColor: 'var(--vscode-progressBar-background)', background: 'color-mix(in srgb, var(--vscode-editor-background) 86%, var(--vscode-progressBar-background) 14%)' },
+	pipelineIndex: { width: '24px', height: '24px', borderRadius: '999px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--vscode-badge-background)', color: 'var(--vscode-badge-foreground)', fontSize: '11px', fontWeight: 700 },
+	pipelineLabel: { fontSize: '12px', fontWeight: 600 },
+	section: { padding: '14px', background: 'var(--vscode-editor-background)', border: '1px solid var(--vscode-panel-border)', borderRadius: '10px' },
+	sectionTitle: { margin: '0 0 10px 0', fontSize: '13px' },
+	sectionHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', marginBottom: '10px' },
+	sectionMeta: { fontSize: '12px', color: 'var(--vscode-descriptionForeground)' },
+	keyValueGrid: { display: 'grid', gridTemplateColumns: '180px 1fr', gap: '8px 12px', fontSize: '12px' },
+	mono: { fontFamily: 'var(--vscode-editor-font-family)' },
+	monoSmall: { fontFamily: 'var(--vscode-editor-font-family)', fontSize: '11px', wordBreak: 'break-all' },
+	contentBox: { margin: 0, padding: '12px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '320px', overflow: 'auto', background: 'var(--vscode-textCodeBlock-background, var(--vscode-input-background))', borderRadius: '8px', fontSize: '12px', fontFamily: 'var(--vscode-editor-font-family)' },
+	listStack: { display: 'flex', flexDirection: 'column', gap: '10px' },
+	infoRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', paddingBottom: '10px', borderBottom: '1px solid var(--vscode-panel-border)' },
+	infoPrimary: { fontSize: '12px', fontWeight: 600 },
+	infoSecondary: { fontSize: '11px', color: 'var(--vscode-descriptionForeground)', marginTop: '4px' },
+	sectionSubtleTitle: { fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--vscode-descriptionForeground)', marginTop: '14px', marginBottom: '8px' },
+	currentTaskHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', marginBottom: '12px' },
+	phaseBadge: { padding: '4px 8px', borderRadius: '999px', background: 'color-mix(in srgb, var(--vscode-progressBar-background) 18%, transparent)', border: '1px solid var(--vscode-progressBar-background)', fontSize: '11px', fontWeight: 700 },
+	progressCaption: { marginTop: '8px', fontSize: '11px', color: 'var(--vscode-descriptionForeground)' },
+	eventRow: { display: 'flex', gap: '10px', alignItems: 'flex-start', paddingBottom: '10px', borderBottom: '1px solid var(--vscode-panel-border)' },
+	eventMarker: { width: '10px', height: '10px', borderRadius: '999px', marginTop: '4px', flex: '0 0 auto' },
+	eventInfo: { background: 'var(--vscode-progressBar-background)' },
+	eventSuccess: { background: 'var(--vscode-testing-iconPassed)' },
+	eventError: { background: 'var(--vscode-testing-iconFailed)' },
+	eventBody: { minWidth: 0 },
+	actionGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' },
+	actionCard: { padding: '12px', borderRadius: '10px', background: 'var(--vscode-sideBar-background)', border: '1px solid var(--vscode-panel-border)', display: 'flex', flexDirection: 'column', gap: '10px' },
+	triggerGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' },
+	triggerCard: { padding: '12px', borderRadius: '10px', background: 'var(--vscode-sideBar-background)', border: '1px solid var(--vscode-panel-border)' },
+	triggerTitle: { fontSize: '12px', color: 'var(--vscode-descriptionForeground)', marginBottom: '8px' },
+	triggerValue: { fontSize: '22px', fontWeight: 700, marginBottom: '4px' },
+	empty: { display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--vscode-descriptionForeground)', minHeight: '180px', textAlign: 'center' },
+	emptyInline: { color: 'var(--vscode-descriptionForeground)', fontSize: '12px' },
+	checkboxLabel: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', marginBottom: '10px' },
+	textarea: { width: '100%', minHeight: '120px', padding: '8px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '4px', fontSize: '12px', fontFamily: 'var(--vscode-editor-font-family)' },
+	fieldRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '10px', fontSize: '12px' },
+	input: { width: '180px', padding: '4px 8px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '3px', fontSize: '12px' },
+	select: { width: '180px', padding: '4px 8px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '3px', fontSize: '12px' },
+};

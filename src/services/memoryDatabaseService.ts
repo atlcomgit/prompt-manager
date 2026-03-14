@@ -29,7 +29,7 @@ import { buildKnowledgeGraphData } from '../utils/knowledgeGraph.js';
 import { logMemoryGraphDebug } from '../utils/memoryGraphDebug.js';
 
 /** Current schema version — increment when adding migrations */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /** Maximum number of backup files to keep */
 const MAX_BACKUPS = 3;
@@ -118,6 +118,9 @@ export class MemoryDatabaseService {
 		if (currentVersion < 3) {
 			this.migrateV3();
 		}
+		if (currentVersion < 4) {
+			this.migrateV4();
+		}
 
 		// Update version
 		if (currentVersion === 0) {
@@ -172,6 +175,7 @@ export class MemoryDatabaseService {
 				layers TEXT NOT NULL DEFAULT '[]',
 				businessDomains TEXT NOT NULL DEFAULT '[]',
 				isBreakingChange INTEGER NOT NULL DEFAULT 0,
+				aiModel TEXT NOT NULL DEFAULT '',
 				createdAt TEXT NOT NULL,
 				FOREIGN KEY (commitSha) REFERENCES commits(sha) ON DELETE CASCADE
 			);
@@ -268,6 +272,14 @@ export class MemoryDatabaseService {
 		if (!this.db) { return; }
 
 		this.applyKnowledgeGraphSchemaV3();
+	}
+
+	private migrateV4(): void {
+		if (!this.db) {
+			return;
+		}
+
+		this.addColumnIfMissing('analyses', 'aiModel', "TEXT NOT NULL DEFAULT ''");
 	}
 
 	private applyKnowledgeGraphSchemaV3(): boolean {
@@ -646,8 +658,8 @@ export class MemoryDatabaseService {
 		this.db.run(
 			`INSERT OR REPLACE INTO analyses
 				(commitSha, summary, keyInsights, components, categories, keywords,
-				 architectureImpact, architectureImpactScore, layers, businessDomains, isBreakingChange, createdAt)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+				 architectureImpact, architectureImpactScore, layers, businessDomains, isBreakingChange, aiModel, createdAt)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 			[
 				analysis.commitSha,
 				analysis.summary,
@@ -660,6 +672,7 @@ export class MemoryDatabaseService {
 				JSON.stringify(analysis.layers),
 				JSON.stringify(analysis.businessDomains),
 				analysis.isBreakingChange ? 1 : 0,
+				analysis.aiModel || '',
 				analysis.createdAt,
 			],
 		);
@@ -991,6 +1004,7 @@ export class MemoryDatabaseService {
 		const topAuthors = this.getTopAuthors();
 		const hotFiles = this.getHotFiles(10);
 		const categoryDistribution = this.getCategoryDistribution();
+		const analysisModels = this.getAnalysisModels();
 		const commitsPerDay = this.getCommitsPerDay(30);
 
 		return {
@@ -1001,6 +1015,7 @@ export class MemoryDatabaseService {
 			topAuthors,
 			hotFiles,
 			categoryDistribution,
+			analysisModels,
 			commitsPerDay,
 		};
 	}
@@ -1054,7 +1069,7 @@ export class MemoryDatabaseService {
 	/** Export all data as CSV */
 	exportCsv(filter?: MemoryFilter): string {
 		const { commits } = this.getCommits({ ...filter, limit: 999999 });
-		const headers = ['sha', 'author', 'email', 'date', 'branch', 'repository', 'commitType', 'message', 'summary', 'categories', 'keywords'];
+		const headers = ['sha', 'author', 'email', 'date', 'branch', 'repository', 'commitType', 'message', 'summary', 'categories', 'keywords', 'aiModel'];
 		const rows = commits.map(commit => {
 			const analysis = this.getAnalysis(commit.sha);
 			return [
@@ -1069,6 +1084,7 @@ export class MemoryDatabaseService {
 				`"${(analysis?.summary || '').replace(/"/g, '""')}"`,
 				`"${(analysis?.categories || []).join(', ')}"`,
 				`"${(analysis?.keywords || []).join(', ')}"`,
+				`"${(analysis?.aiModel || '').replace(/"/g, '""')}"`,
 			].join(',');
 		});
 		return [headers.join(','), ...rows].join('\n');
@@ -1171,8 +1187,33 @@ export class MemoryDatabaseService {
 			layers: JSON.parse((row['layers'] as string) || '[]'),
 			businessDomains: JSON.parse((row['businessDomains'] as string) || '[]'),
 			isBreakingChange: !!(row['isBreakingChange'] as number),
+			aiModel: ((row['aiModel'] as string) || '').trim() || undefined,
 			createdAt: (row['createdAt'] as string) || '',
 		};
+	}
+
+	private getAnalysisModels(limit = 10): Array<{ model: string; count: number }> {
+		if (!this.db) {
+			return [];
+		}
+
+		const result = this.db.exec(
+			`SELECT aiModel, COUNT(*) as cnt
+			FROM analyses
+			WHERE TRIM(aiModel) <> ''
+			GROUP BY aiModel
+			ORDER BY cnt DESC, aiModel ASC
+			LIMIT ?;`,
+			[limit],
+		);
+		if (result.length === 0) {
+			return [];
+		}
+
+		return result[0].values.map(value => ({
+			model: String(value[0]),
+			count: Number(value[1]),
+		}));
 	}
 
 	private rowsToKnowledgeGraphRecords(result: Array<{ columns: string[]; values: unknown[][] }>): RawKnowledgeGraphRecord[] {

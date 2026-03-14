@@ -15,3 +15,4 @@ export { ProjectStructureMapService } from './projectStructureMapService.js';
 export { MemoryNotificationService } from './memoryNotificationService.js';
 export { ChatMemoryInstructionComposer } from './chatMemoryInstructionComposer.js';
 export { ChatMemoryInstructionService } from './chatMemoryInstructionService.js';
+export * from '../codemap/index.js';

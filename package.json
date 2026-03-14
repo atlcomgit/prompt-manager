@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage, organize and use AI prompts directly in VS Code with Copilot Chat integration",
-  "version": "0.1.52",
+  "version": "0.1.53",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -81,7 +81,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.1.52",
+        "title": "About 0.1.53",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },
@@ -151,42 +151,72 @@
         {
           "command": "promptManager.createPrompt",
           "when": "view == promptManager.sidebar",
-          "group": "navigation"
+          "group": "navigation@1"
         },
         {
           "command": "promptManager.refreshList",
           "when": "view == promptManager.sidebar",
-          "group": "navigation"
-        },
-        {
-          "command": "promptManager.importPrompt",
-          "when": "view == promptManager.sidebar",
-          "group": "secondary@1"
-        },
-        {
-          "command": "promptManager.showStatistics",
-          "when": "view == promptManager.sidebar",
-          "group": "navigation"
+          "group": "navigation@2"
         },
         {
           "command": "promptManager.showTracker",
           "when": "view == promptManager.sidebar",
-          "group": "navigation"
+          "group": "navigation@10"
+        },
+        {
+          "command": "promptManager.showStatistics",
+          "when": "view == promptManager.sidebar",
+          "group": "navigation@11"
         },
         {
           "command": "promptManager.openMemory",
           "when": "view == promptManager.sidebar",
-          "group": "navigation"
+          "group": "navigation@12"
         },
         {
           "command": "promptManager.openSettings",
           "when": "view == promptManager.sidebar",
-          "group": "navigation"
+          "group": "navigation@20"
+        },
+        {
+          "command": "promptManager.createPrompt",
+          "when": "view == promptManager.sidebar",
+          "group": "1_manage@1"
+        },
+        {
+          "command": "promptManager.importPrompt",
+          "when": "view == promptManager.sidebar",
+          "group": "1_manage@2"
+        },
+        {
+          "command": "promptManager.refreshList",
+          "when": "view == promptManager.sidebar",
+          "group": "1_manage@3"
+        },
+        {
+          "command": "promptManager.showTracker",
+          "when": "view == promptManager.sidebar",
+          "group": "2_tools@1"
+        },
+        {
+          "command": "promptManager.showStatistics",
+          "when": "view == promptManager.sidebar",
+          "group": "2_tools@2"
+        },
+        {
+          "command": "promptManager.openMemory",
+          "when": "view == promptManager.sidebar",
+          "group": "2_tools@3"
+        },
+        {
+          "command": "promptManager.openSettings",
+          "when": "view == promptManager.sidebar",
+          "group": "3_preferences@1"
         },
         {
           "command": "promptManager.showAbout",
           "when": "view == promptManager.sidebar",
-          "group": "secondary@999"
+          "group": "4_help@1"
         }
       ]
     },
@@ -278,8 +308,8 @@
         },
         "promptManager.memory.aiModel": {
           "type": "string",
-          "description": "Language model family for commit analysis (e.g. gpt-4o, gpt-4o-mini).",
-          "default": "gpt-4o"
+          "description": "Language model family for commit analysis (e.g. gpt-5-mini, gpt-4.1).",
+          "default": "gpt-5-mini"
         },
         "promptManager.memory.analysisDepth": {
           "type": "string",
@@ -402,6 +432,101 @@
           "default": 200,
           "minimum": 20,
           "maximum": 2000
+        },
+        "promptManager.codemap.enabled": {
+          "type": "boolean",
+          "description": "Enable the codemap instruction system for branch-aware code map files used during chat sessions.",
+          "default": true
+        },
+        "promptManager.codemap.trackedBranches": {
+          "type": "array",
+          "description": "Tracked branches that should maintain base codemap instructions in the background.",
+          "default": [
+            "master",
+            "main",
+            "dev",
+            "develop"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "promptManager.codemap.autoUpdate": {
+          "type": "boolean",
+          "description": "Automatically refresh tracked codemap instructions in the background.",
+          "default": true
+        },
+        "promptManager.codemap.notifications.enabled": {
+          "type": "boolean",
+          "description": "Show notifications for codemap refresh state changes.",
+          "default": true
+        },
+        "promptManager.codemap.aiModel": {
+          "type": "string",
+          "description": "Copilot chat model family used for AI requests during codemap instruction generation, for example gpt-5-mini or gpt-4.1.",
+          "default": "gpt-5-mini"
+        },
+        "promptManager.codemap.instructionMaxChars": {
+          "type": "number",
+          "description": "Maximum target size for a single persisted codemap instruction.",
+          "default": 120000,
+          "minimum": 5000,
+          "maximum": 1000000
+        },
+        "promptManager.codemap.blockDescriptionMode": {
+          "type": "string",
+          "enum": [
+            "short",
+            "medium",
+            "long"
+          ],
+          "description": "Preferred description depth for codemap blocks.",
+          "default": "medium"
+        },
+        "promptManager.codemap.blockMaxChars": {
+          "type": "number",
+          "description": "Maximum size for a single block description in codemap generation.",
+          "default": 2000,
+          "minimum": 200,
+          "maximum": 20000
+        },
+        "promptManager.codemap.batchContextMaxChars": {
+          "type": "number",
+          "description": "Maximum total AI context size for one batched codemap area-description request.",
+          "default": 24000,
+          "minimum": 4000,
+          "maximum": 200000
+        },
+        "promptManager.codemap.updatePriority": {
+          "type": "string",
+          "enum": [
+            "lower",
+            "normal",
+            "higher"
+          ],
+          "description": "Background refresh priority for codemap jobs.",
+          "default": "normal"
+        },
+        "promptManager.codemap.aiDelayMs": {
+          "type": "number",
+          "description": "Delay between codemap generation jobs.",
+          "default": 1000,
+          "minimum": 0,
+          "maximum": 60000
+        },
+        "promptManager.codemap.startupDelayMs": {
+          "type": "number",
+          "description": "Delay before the first automatic codemap refresh after activation.",
+          "default": 15000,
+          "minimum": 0,
+          "maximum": 300000
+        },
+        "promptManager.codemap.maxVersionsPerInstruction": {
+          "type": "number",
+          "description": "Maximum number of persisted versions per unique codemap instruction.",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 100
         }
       }
     }
@@ -414,7 +539,7 @@
     "compile": "npm run build",
     "build": "npm run build:extension && npm run build:webview && npm run copy:wasm",
     "test": "npm run test:compile && npm run test:run",
-    "test:compile": "tsc -p tsconfig.tests.json",
+    "test:compile": "node -e \"require('fs').rmSync('out-tests', { recursive: true, force: true })\" && tsc -p tsconfig.tests.json",
     "test:run": "node --test out-tests/tests/**/*.test.js",
     "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@xenova/transformers --format=cjs --platform=node --minify",
     "build:webview": "node esbuild.webview.mjs",
@@ -434,6 +559,7 @@
     "@types/react": "^18.2.48",
     "@types/react-dom": "^18.2.18",
     "@types/sql.js": "^1.4.9",
+    "@types/three": "^0.183.1",
     "@types/vscode": "^1.95.0",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.24.0",

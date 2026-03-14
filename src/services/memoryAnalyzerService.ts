@@ -5,6 +5,7 @@
  */
 
 import * as vscode from 'vscode';
+import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily } from '../constants/ai.js';
 import type {
 	HookCommitPayload,
 	MemoryAnalysis,
@@ -22,7 +23,7 @@ export class MemoryAnalyzerService {
 	/** Selector for the AI model */
 	private modelSelector: vscode.LanguageModelChatSelector = {
 		vendor: 'copilot',
-		family: 'gpt-4o',
+		family: DEFAULT_COPILOT_MODEL_FAMILY,
 	};
 
 	private isRussianLocale(): boolean {
@@ -33,7 +34,7 @@ export class MemoryAnalyzerService {
 	 * Set the AI model family used for analysis.
 	 */
 	setModelFamily(family: string): void {
-		this.modelSelector = { vendor: 'copilot', family };
+		this.modelSelector = { vendor: 'copilot', family: normalizeCopilotModelFamily(family) };
 	}
 
 	/**
@@ -60,7 +61,7 @@ export class MemoryAnalyzerService {
 		const analysisInput = this.buildAnalysisInput(payload, truncatedDiff, depth);
 
 		// Run AI analysis
-		const rawResult = await this.runAnalysis(analysisInput, depth);
+		const { rawResult, usedModel } = await this.runAnalysis(analysisInput, depth);
 
 		// Build MemoryAnalysis from raw result
 		const analysis: MemoryAnalysis = {
@@ -75,6 +76,7 @@ export class MemoryAnalyzerService {
 			layers: this.validateLayers(rawResult.layers),
 			businessDomains: rawResult.businessDomains || [],
 			isBreakingChange: rawResult.isBreakingChange || false,
+			aiModel: usedModel,
 			createdAt: new Date().toISOString(),
 		};
 
@@ -194,19 +196,28 @@ export class MemoryAnalyzerService {
 	private async runAnalysis(
 		input: string,
 		depth: MemoryAnalysisDepth,
-	): Promise<any> {
+	): Promise<{ rawResult: any; usedModel: string }> {
 		const systemPrompt = this.buildSystemPrompt(depth);
+		const fallbackModel = normalizeCopilotModelFamily(this.modelSelector.family);
 		try {
 			const [model] = await vscode.lm.selectChatModels(this.modelSelector);
 			if (!model) {
 				const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-				if (models.length === 0) { return this.fallbackAnalysis(); }
-				return this.chatJson(models[0], systemPrompt, input);
+				if (models.length === 0) {
+					return { rawResult: this.fallbackAnalysis(), usedModel: fallbackModel };
+				}
+				return {
+					rawResult: await this.chatJson(models[0], systemPrompt, input),
+					usedModel: models[0].family || models[0].id || fallbackModel,
+				};
 			}
-			return this.chatJson(model, systemPrompt, input);
+			return {
+				rawResult: await this.chatJson(model, systemPrompt, input),
+				usedModel: model.family || model.id || fallbackModel,
+			};
 		} catch (err) {
 			console.error('[PromptManager/Memory] AI analysis error:', err);
-			return this.fallbackAnalysis();
+			return { rawResult: this.fallbackAnalysis(), usedModel: fallbackModel };
 		}
 	}
 

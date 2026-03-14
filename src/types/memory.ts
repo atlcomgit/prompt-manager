@@ -4,6 +4,9 @@
  * knowledge graph, filters, settings, and webview messages.
  */
 
+import type { CodeMapActivity, CodeMapInstructionDetail, CodeMapInstructionListItem, CodeMapSettings, CodeMapStatistics } from './codemap.js';
+import { DEFAULT_COPILOT_MODEL_FAMILY } from '../constants/ai.js';
+
 // ---- Enums & Constants ----
 
 /** Categories of code changes */
@@ -142,8 +145,15 @@ export interface MemoryAnalysis {
 	businessDomains: string[];
 	/** Whether this commit contains breaking changes */
 	isBreakingChange: boolean;
+	/** AI model family used for the analysis */
+	aiModel?: string;
 	/** ISO date string of analysis creation */
 	createdAt: string;
+}
+
+export interface MemoryAvailableModel {
+	id: string;
+	name: string;
 }
 
 /** Vector embedding for semantic search */
@@ -293,7 +303,7 @@ export interface MemorySettings {
 /** Default memory settings */
 export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
 	enabled: true,
-	aiModel: 'gpt-4o',
+	aiModel: DEFAULT_COPILOT_MODEL_FAMILY,
 	analysisDepth: 'standard',
 	diffLimit: 10000,
 	maxRecords: 5000,
@@ -494,6 +504,8 @@ export interface MemoryStatistics {
 	hotFiles: Array<{ filePath: string; count: number }>;
 	/** Category distribution */
 	categoryDistribution: Array<{ category: MemoryCategory; count: number }>;
+	/** AI model usage distribution for analyses */
+	analysisModels: Array<{ model: string; count: number }>;
 	/** Commits per day (recent 30 days) */
 	commitsPerDay: Array<{ date: string; count: number }>;
 }
@@ -610,13 +622,24 @@ export type MemoryWebviewToExtensionMessage =
 	| { type: 'getMemoryCategories' }
 	| { type: 'getMemoryAuthors' }
 	| { type: 'getMemoryBranches' }
-	| { type: 'getMemoryRepositories' };
+	| { type: 'getMemoryRepositories' }
+	| { type: 'getCodeMapInstructions' }
+	| { type: 'getCodeMapInstructionDetail'; id: number }
+	| { type: 'getCodeMapStatistics' }
+	| { type: 'getCodeMapActivity' }
+	| { type: 'getCodeMapSettings' }
+	| { type: 'deleteCodeMapInstruction'; id: number }
+	| { type: 'deleteObsoleteCodeMapInstructions' }
+	| { type: 'saveCodeMapSettings'; settings: Partial<CodeMapSettings> }
+	| { type: 'refreshCodeMapWorkspace' }
+	| { type: 'refreshCodeMapInstruction'; id: number };
 
 /** Messages from the extension to Memory WebView */
 export type MemoryExtensionToWebviewMessage =
 	| { type: 'memoryCommits'; commits: MemoryCommit[]; total: number; filter?: MemoryFilter }
 	| { type: 'memoryCommitDetail'; commit: MemoryCommit; fileChanges: MemoryFileChange[]; analysis?: MemoryAnalysis; bugRelations?: MemoryBugRelation[] }
 	| { type: 'memorySearchResults'; results: MemorySearchResult[]; query: string }
+	| { type: 'memoryAvailableModels'; models: MemoryAvailableModel[] }
 	| { type: 'memorySettings'; settings: MemorySettings }
 	| { type: 'memoryStatistics'; statistics: MemoryStatistics }
 	| { type: 'memoryKnowledgeGraph'; data: KnowledgeGraphData }
@@ -630,4 +653,9 @@ export type MemoryExtensionToWebviewMessage =
 	| { type: 'memoryAnalysisComplete'; count: number }
 	| { type: 'memoryError'; message: string }
 	| { type: 'memoryInfo'; message: string }
-	| { type: 'memoryCleared' };
+	| { type: 'memoryCleared' }
+	| { type: 'codeMapInstructions'; instructions: CodeMapInstructionListItem[] }
+	| { type: 'codeMapInstructionDetail'; detail: CodeMapInstructionDetail | null }
+	| { type: 'codeMapStatistics'; statistics: CodeMapStatistics }
+	| { type: 'codeMapActivity'; activity: CodeMapActivity }
+	| { type: 'codeMapSettings'; settings: CodeMapSettings };

@@ -15,9 +15,19 @@ import {
 	MemoryNotificationService,
 	ChatMemoryInstructionComposer,
 	ChatMemoryInstructionService,
+	CodeMapDatabaseService,
+	CodeMapBranchResolverService,
+	CodeMapInstructionService,
+	CodeMapMaterializerService,
+	CodeMapOrchestratorService,
+	CodeMapChatInstructionService,
+	CodeMapAdminService,
+	getCodeMapSettings,
 } from './services/index.js';
 import { SidebarProvider, AboutPanelManager, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager, CopilotStatusBarProvider, CopilotUsagePanelManager, MemoryPanelManager } from './providers/index.js';
 import type { MemoryCommit, HookCommitPayload, MemoryAnalysisDepth } from './types/index.js';
+import { DEFAULT_COPILOT_MODEL_FAMILY } from './constants/ai.js';
+import { buildChatContextFiles } from './utils/chatContextFiles.js';
 
 export function activate(context: vscode.ExtensionContext) {
 	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -59,6 +69,7 @@ export function activate(context: vscode.ExtensionContext) {
 		gitService,
 		stateService,
 		() => chatMemoryInstructionService,
+		() => codeMapChatInstructionService,
 	);
 
 	const statisticsPanelManager = new StatisticsPanelManager(
@@ -96,6 +107,49 @@ export function activate(context: vscode.ExtensionContext) {
 	let memoryNotification: MemoryNotificationService | undefined;
 	let memoryPanelManager: MemoryPanelManager | undefined;
 	let chatMemoryInstructionService: ChatMemoryInstructionService | undefined;
+	let codeMapDb: CodeMapDatabaseService | undefined;
+	let codeMapOrchestratorService: CodeMapOrchestratorService | undefined;
+	let codeMapChatInstructionService: CodeMapChatInstructionService | undefined;
+	let codeMapAdminService: CodeMapAdminService | undefined;
+	const codeMapSettings = getCodeMapSettings();
+
+	if (codeMapSettings.enabled) {
+		codeMapDb = new CodeMapDatabaseService(context.extensionUri);
+		const codeMapBranchResolverService = new CodeMapBranchResolverService(gitService);
+		const codeMapInstructionService = new CodeMapInstructionService(aiService);
+		const codeMapMaterializerService = new CodeMapMaterializerService();
+		codeMapOrchestratorService = new CodeMapOrchestratorService(codeMapDb, codeMapInstructionService);
+		codeMapChatInstructionService = new CodeMapChatInstructionService(
+			storageService,
+			workspaceService,
+			gitService,
+			codeMapDb,
+			codeMapBranchResolverService,
+			codeMapMaterializerService,
+			codeMapOrchestratorService,
+		);
+		codeMapAdminService = new CodeMapAdminService(
+			workspaceService,
+			gitService,
+			codeMapDb,
+			codeMapBranchResolverService,
+			codeMapOrchestratorService,
+		);
+
+		void (async () => {
+			try {
+				await codeMapDb!.initialize(workspaceRoot);
+				if (codeMapSettings.autoUpdate) {
+					setTimeout(() => {
+						codeMapChatInstructionService?.queueWorkspaceRefresh();
+					}, codeMapSettings.startupDelayMs);
+				}
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				console.error('[PromptManager] Code map init failed:', msg);
+			}
+		})();
+	}
 
 	if (memoryEnabled) {
 		memoryDb = new MemoryDatabaseService(context.extensionUri);
@@ -141,6 +195,8 @@ export function activate(context: vscode.ExtensionContext) {
 					memoryEmbedding!,
 					memoryAnalyzer!,
 					memoryGitHook!,
+					aiService,
+					codeMapAdminService,
 				);
 
 				// Wire up pipeline: HTTP server → analyze → store → embed
@@ -151,6 +207,7 @@ export function activate(context: vscode.ExtensionContext) {
 						const config = vscode.workspace.getConfiguration('promptManager');
 						const depth = config.get<MemoryAnalysisDepth>('memory.analysisDepth', 'standard');
 						const diffLimit = config.get<number>('memory.diffLimit', 200000);
+						const aiModel = config.get<string>('memory.aiModel', DEFAULT_COPILOT_MODEL_FAMILY);
 
 						// Classify and store commit
 						const commitType = memoryAnalyzer!.classifyCommitType(payload.message);
@@ -168,6 +225,7 @@ export function activate(context: vscode.ExtensionContext) {
 						memoryDb!.insertCommit(commit);
 
 						// Run AI analysis
+						memoryAnalyzer!.setModelFamily(aiModel);
 						const result = await memoryAnalyzer!.analyzeCommit(payload, depth, diffLimit);
 						memoryDb!.insertAnalysis(result.analysis);
 						memoryDb!.insertFileChanges(result.fileChanges);
@@ -390,14 +448,26 @@ export function activate(context: vscode.ExtensionContext) {
 						// keep chat flow even if instructions file sync fails
 					}
 					try {
-						await chatMemoryInstructionService?.prepareSessionInstruction(prompt);
+						await codeMapChatInstructionService?.prepareInstruction(prompt);
+					} catch (error) {
+						console.error('[PromptManager] prepare codemap instruction failed:', error);
+					}
+					let sessionInstructionRecord: Awaited<ReturnType<ChatMemoryInstructionService['prepareSessionInstruction']>> | null = null;
+					try {
+						sessionInstructionRecord = await chatMemoryInstructionService?.prepareSessionInstruction(prompt) ?? null;
 					} catch (error) {
 						console.error('[PromptManager] prepareSessionInstruction failed:', error);
 					}
 					parts.push(prompt.content);
 
 					const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-					const fileUris = prompt.contextFiles.map(f => vscode.Uri.file(f.startsWith('/') ? f : `${workspaceRoot}/${f}`));
+					const chatContextFiles = buildChatContextFiles({
+						workspaceRoot,
+						storageDir: storageService.getStorageDirectoryPath(),
+						promptContextFiles: prompt.contextFiles,
+						sessionInstructionFilePath: sessionInstructionRecord?.instructionFilePath,
+					});
+					const fileUris = chatContextFiles.allAbsolutePaths.map(filePath => vscode.Uri.file(filePath));
 
 					const ctx: string[] = [];
 					if (prompt.projects.length > 0) ctx.push(`Projects: ${prompt.projects.join(', ')}`);
@@ -409,8 +479,11 @@ export function activate(context: vscode.ExtensionContext) {
 					if (prompt.model) ctx.push(`Preferred model: ${prompt.model}`);
 					if (prompt.taskNumber) ctx.push(`Task: ${prompt.taskNumber}`);
 					if (prompt.branch) ctx.push(`Branch: ${prompt.branch}`);
-					if (prompt.contextFiles.length > 0) {
-						ctx.push(`Context files: ${prompt.contextFiles.map(f => `#file:${f}`).join(' ')}`);
+					if (chatContextFiles.promptContextReferences.length > 0) {
+						ctx.push(`Context files: ${chatContextFiles.promptContextReferences.join(' ')}`);
+					}
+					if (chatContextFiles.instructionReferences.length > 0) {
+						ctx.push(`Memory instruction files: ${chatContextFiles.instructionReferences.join(' ')}`);
 					}
 					if (ctx.length > 0) { parts.push(''); parts.push('---'); parts.push('Context:'); ctx.forEach(c => parts.push(`- ${c}`)); }
 
@@ -716,6 +789,8 @@ export function activate(context: vscode.ExtensionContext) {
 			memoryEmbedding?.dispose();
 			memoryNotification?.dispose();
 			chatMemoryInstructionService?.dispose();
+			codeMapOrchestratorService?.dispose();
+			codeMapDb?.close();
 			memoryDb?.close();
 		},
 	});

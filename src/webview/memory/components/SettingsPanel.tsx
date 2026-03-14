@@ -3,17 +3,18 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import type { MemorySettings, MemoryAnalysisDepth, MemoryNotificationType } from '../../../types/memory';
+import type { MemoryAvailableModel, MemorySettings, MemoryAnalysisDepth, MemoryNotificationType } from '../../../types/memory';
 import { memoryButtonStyles } from './buttonStyles';
 
 interface Props {
 	settings: MemorySettings | null;
+	availableModels: MemoryAvailableModel[];
 	onSave: (settings: Partial<MemorySettings>) => void;
 	onRefresh: () => void;
 	t: (key: string) => string;
 }
 
-export const SettingsPanel: React.FC<Props> = ({ settings, onSave, onRefresh, t }) => {
+export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSave, onRefresh, t }) => {
 	const [local, setLocal] = useState<MemorySettings | null>(null);
 
 	// Sync local state with incoming settings
@@ -23,6 +24,11 @@ export const SettingsPanel: React.FC<Props> = ({ settings, onSave, onRefresh, t 
 
 	if (!local) {
 		return <div style={styles.loading}>{t('memory.loading')}</div>;
+	}
+
+	const modelOptions = [...availableModels];
+	if (local.aiModel && !modelOptions.some(item => item.id === local.aiModel)) {
+		modelOptions.unshift({ id: local.aiModel, name: local.aiModel });
 	}
 
 	/** Update a single field in local state */
@@ -63,12 +69,15 @@ export const SettingsPanel: React.FC<Props> = ({ settings, onSave, onRefresh, t 
 
 				<div style={styles.field}>
 					<label style={styles.label}>{t('memory.aiModel')}</label>
-					<input
-						type="text"
-						style={styles.input}
+					<select
+						style={styles.select}
 						value={local.aiModel}
 						onChange={e => update('aiModel', e.target.value)}
-					/>
+					>
+						{modelOptions.map(model => (
+							<option key={model.id} value={model.id}>{model.name}</option>
+						))}
+					</select>
 				</div>
 
 				<div style={styles.field}>

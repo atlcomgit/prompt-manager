@@ -7,6 +7,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily } from '../constants/ai.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -54,6 +55,29 @@ export type ChatModelApplyResult = {
 	usedArg?: unknown;
 };
 
+export type CodeMapAreaDescriptionInput = {
+	repository: string;
+	branchName: string;
+	area: string;
+	locale: string;
+	mode: 'short' | 'medium' | 'long';
+	maxChars: number;
+	manifestDescription?: string;
+	representativeFiles: string[];
+	symbols: string[];
+	snippets: Array<{ filePath: string; snippet: string }>;
+};
+
+export type CodeMapAreaBatchDescriptionInput = {
+	repository: string;
+	branchName: string;
+	locale: string;
+	mode: 'short' | 'medium' | 'long';
+	maxChars: number;
+	manifestDescription?: string;
+	areas: Array<CodeMapAreaDescriptionInput & { id: string }>;
+};
+
 export class AiService {
 	private static readonly DEFAULT_IMPROVE_PROMPT_INSTRUCTIONS = [
 		// 'Пиши на русском языке.',
@@ -62,7 +86,7 @@ export class AiService {
 
 	private modelSelector: vscode.LanguageModelChatSelector = {
 		vendor: 'copilot',
-		family: 'gpt-4o',
+		family: DEFAULT_COPILOT_MODEL_FAMILY,
 	};
 
 	private getImprovePromptInstructions(): string[] {
@@ -246,10 +270,131 @@ export class AiService {
 		return this.chat(systemPrompt, userPrompt, fallback);
 	}
 
+	async generateCodeMapAreaDescription(
+		input: CodeMapAreaDescriptionInput,
+		modelFamily?: string,
+	): Promise<string> {
+		const isRussianLocale = input.locale.toLowerCase().startsWith('ru');
+		const fallback = isRussianLocale
+			? `Область ${input.area} объединяет связанные файлы ${input.representativeFiles.join(', ')} и ключевые символы ${input.symbols.join(', ')}.`
+			: `Area ${input.area} groups related files ${input.representativeFiles.join(', ')} and key symbols ${input.symbols.join(', ')}.`;
+		const systemPrompt = isRussianLocale
+			? [
+				'Ты анализируешь область кода для инструкции ИИ-агента.',
+				'Верни только короткое, плотное описание на русском языке без markdown-списков и без вводных фраз.',
+				'Опиши назначение области, главные обязанности, основные точки входа, связи между файлами и что именно в ней делает код.',
+				'Не перечисляй просто имена файлов без объяснения.',
+				'Не выдумывай то, чего нет в коде.',
+				`Длина ответа: до ${Math.max(200, input.maxChars)} символов.`,
+				`Глубина описания: ${input.mode}.`,
+			].join(' ')
+			: [
+				'You analyze a code area for an AI-agent instruction.',
+				'Return only a short dense description without markdown bullets or prefacing.',
+				'Describe the purpose of the area, main responsibilities, control points, relationships between files, and what the code actually does.',
+				'Do not only list file names.',
+				'Do not invent details not grounded in the code.',
+				`Keep the answer within ${Math.max(200, input.maxChars)} characters.`,
+				`Description depth: ${input.mode}.`,
+			].join(' ');
+
+		const snippetBlock = input.snippets
+			.map(item => `FILE: ${item.filePath}\n${item.snippet}`)
+			.join('\n\n');
+		const userPrompt = [
+			`Repository: ${input.repository}`,
+			`Branch: ${input.branchName}`,
+			`Area: ${input.area}`,
+			input.manifestDescription ? `Project description: ${input.manifestDescription}` : '',
+			`Representative files: ${input.representativeFiles.join(', ') || 'none'}`,
+			`Detected symbols: ${input.symbols.join(', ') || 'none'}`,
+			'',
+			'Code excerpts:',
+			snippetBlock || 'No code excerpts available.',
+		].filter(Boolean).join('\n');
+
+		return this.chatWithSelector(
+			{ vendor: 'copilot', family: normalizeCopilotModelFamily(modelFamily || this.modelSelector.family) },
+			systemPrompt,
+			userPrompt,
+			fallback,
+		);
+	}
+
+	async generateCodeMapAreaDescriptionsBatch(
+		input: CodeMapAreaBatchDescriptionInput,
+		modelFamily?: string,
+	): Promise<string> {
+		const isRussianLocale = input.locale.toLowerCase().startsWith('ru');
+		const fallback = JSON.stringify({
+			areas: input.areas.map(area => ({ id: area.id, description: '' })),
+		});
+		const systemPrompt = isRussianLocale
+			? [
+				'Ты анализируешь несколько областей кода для инструкции ИИ-агента.',
+				'Верни только валидный JSON без markdown и пояснений.',
+				'Формат ответа строго такой: {"areas":[{"id":"area-1","description":"..."}]}.',
+				'Для каждого id верни короткое плотное описание на русском языке.',
+				'Опиши назначение области, главные обязанности, ключевые точки входа и связи между файлами.',
+				'Не перечисляй только имена файлов и не выдумывай детали.',
+				`Длина каждого description: до ${Math.max(200, input.maxChars)} символов.`,
+				`Глубина описания: ${input.mode}.`,
+			].join(' ')
+			: [
+				'You analyze multiple code areas for an AI-agent instruction.',
+				'Return only valid JSON without markdown or commentary.',
+				'The response format must be exactly {"areas":[{"id":"area-1","description":"..."}]}.',
+				'Return one concise dense description for every provided id.',
+				'Describe purpose, main responsibilities, control points, and relationships between files.',
+				'Do not merely list file names and do not invent unsupported details.',
+				`Keep each description within ${Math.max(200, input.maxChars)} characters.`,
+				`Description depth: ${input.mode}.`,
+			].join(' ');
+
+		const areaBlocks = input.areas.map(area => {
+			const snippetBlock = area.snippets
+				.map(item => `FILE: ${item.filePath}\n${item.snippet}`)
+				.join('\n\n');
+			return [
+				`ID: ${area.id}`,
+				`Area: ${area.area}`,
+				`Representative files: ${area.representativeFiles.join(', ') || 'none'}`,
+				`Detected symbols: ${area.symbols.join(', ') || 'none'}`,
+				'Code excerpts:',
+				snippetBlock || 'No code excerpts available.',
+			].join('\n');
+		}).join('\n\n=====\n\n');
+
+		const userPrompt = [
+			`Repository: ${input.repository}`,
+			`Branch: ${input.branchName}`,
+			input.manifestDescription ? `Project description: ${input.manifestDescription}` : '',
+			'',
+			'Areas to describe:',
+			areaBlocks,
+		].filter(Boolean).join('\n');
+
+		return this.chatWithSelector(
+			{ vendor: 'copilot', family: normalizeCopilotModelFamily(modelFamily || this.modelSelector.family) },
+			systemPrompt,
+			userPrompt,
+			fallback,
+		);
+	}
+
 	/** Generic chat with Language Model API */
 	private async chat(systemPrompt: string, userPrompt: string, fallback: string): Promise<string> {
+		return this.chatWithSelector(this.modelSelector, systemPrompt, userPrompt, fallback);
+	}
+
+	private async chatWithSelector(
+		selector: vscode.LanguageModelChatSelector,
+		systemPrompt: string,
+		userPrompt: string,
+		fallback: string,
+	): Promise<string> {
 		try {
-			const [model] = await vscode.lm.selectChatModels(this.modelSelector);
+			const [model] = await vscode.lm.selectChatModels(selector);
 			if (!model) {
 				// Fallback: try any available model
 				const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });

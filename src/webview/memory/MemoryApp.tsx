@@ -1,6 +1,6 @@
 /**
  * MemoryApp — Root component for the Project Memory webview panel.
- * Provides tabbed navigation: Commits, Search, Knowledge Graph, Statistics, Settings.
+ * Provides sectioned navigation for histories and instructions.
  */
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
@@ -15,6 +15,7 @@ import { SearchPanel } from './components/SearchPanel';
 import { KnowledgeGraph } from './components/KnowledgeGraph';
 import { StatisticsPanel } from './components/StatisticsPanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import { InstructionsPanel } from './components/InstructionsPanel';
 import { memoryButtonStyles } from './components/buttonStyles';
 import { isManualAnalysisBusy, isManualAnalysisTerminal } from '../../utils/manualAnalysisRuntime';
 import type {
@@ -23,6 +24,7 @@ import type {
 	MemoryCommit,
 	MemoryFileChange,
 	MemoryAnalysis,
+	MemoryAvailableModel,
 	MemoryBugRelation,
 	MemorySearchResult,
 	MemoryStatistics,
@@ -31,6 +33,13 @@ import type {
 	MemoryFilter,
 	MemoryExtensionToWebviewMessage,
 } from '../../types/memory';
+import type {
+	CodeMapActivity,
+	CodeMapInstructionDetail,
+	CodeMapInstructionListItem,
+	CodeMapSettings,
+	CodeMapStatistics,
+} from '../../types/codemap';
 
 const vscode = getVsCodeApi();
 
@@ -58,12 +67,13 @@ const MEMORY_APP_GLOBAL_STYLES = `
 	}
 `;
 
-/** Available tabs */
-type Tab = 'commits' | 'search' | 'graph' | 'statistics' | 'settings';
+type Section = 'histories' | 'instructions';
+type HistoryTab = 'commits' | 'search' | 'graph' | 'statistics' | 'settings';
 
 export const MemoryApp: React.FC = () => {
 	const t = useT();
-	const [activeTab, setActiveTab] = useState<Tab>('commits');
+	const [activeSection, setActiveSection] = useState<Section>('histories');
+	const [activeHistoryTab, setActiveHistoryTab] = useState<HistoryTab>('commits');
 
 	// Commits state
 	const [commits, setCommits] = useState<MemoryCommit[]>([]);
@@ -86,6 +96,14 @@ export const MemoryApp: React.FC = () => {
 
 	// Settings state
 	const [settings, setSettings] = useState<MemorySettings | null>(null);
+	const [availableModels, setAvailableModels] = useState<MemoryAvailableModel[]>([]);
+	const [codeMapInstructions, setCodeMapInstructions] = useState<CodeMapInstructionListItem[]>([]);
+	const [selectedCodeMapInstructionId, setSelectedCodeMapInstructionId] = useState<number | null>(null);
+	const [codeMapInstructionDetail, setCodeMapInstructionDetail] = useState<CodeMapInstructionDetail | null>(null);
+	const [codeMapStatistics, setCodeMapStatistics] = useState<CodeMapStatistics | null>(null);
+	const [codeMapSettings, setCodeMapSettings] = useState<CodeMapSettings | null>(null);
+	const [codeMapActivity, setCodeMapActivity] = useState<CodeMapActivity | null>(null);
+	const [shouldPollCodeMapActivity, setShouldPollCodeMapActivity] = useState(false);
 
 	// Analysis runtime state
 	const [analysisSnapshot, setAnalysisSnapshot] = useState<ManualAnalysisSnapshot | null>(null);
@@ -124,6 +142,27 @@ export const MemoryApp: React.FC = () => {
 			case 'memorySettings':
 				setSettings(msg.settings);
 				break;
+			case 'memoryAvailableModels':
+				setAvailableModels(msg.models);
+				break;
+			case 'codeMapInstructions':
+				setCodeMapInstructions(msg.instructions);
+				if (!selectedCodeMapInstructionId && msg.instructions.length > 0) {
+					setSelectedCodeMapInstructionId(msg.instructions[0].id);
+				}
+				break;
+			case 'codeMapInstructionDetail':
+				setCodeMapInstructionDetail(msg.detail);
+				break;
+			case 'codeMapStatistics':
+				setCodeMapStatistics(msg.statistics);
+				break;
+			case 'codeMapSettings':
+				setCodeMapSettings(msg.settings);
+				break;
+			case 'codeMapActivity':
+				setCodeMapActivity(msg.activity);
+				break;
 			case 'memoryStatistics':
 				setStatistics(msg.statistics);
 				break;
@@ -161,7 +200,7 @@ export const MemoryApp: React.FC = () => {
 				setStatusMessage(t('memory.analysisComplete').replace('{count}', String(msg.count)));
 				break;
 			case 'memoryError':
-				sendMemoryDebugLog('memoryApp:error', { activeTab, message: msg.message });
+				sendMemoryDebugLog('memoryApp:error', { activeSection, activeHistoryTab, message: msg.message });
 				setErrorMessage(msg.message);
 				setTimeout(() => setErrorMessage(''), 5000);
 				break;
@@ -179,7 +218,7 @@ export const MemoryApp: React.FC = () => {
 				setStatusMessage(t('memory.cleared'));
 				break;
 		}
-	}, [activeTab, t]);
+	}, [activeHistoryTab, activeSection, selectedCodeMapInstructionId, t]);
 
 	useMessageListener(handleMessage);
 
@@ -192,6 +231,10 @@ export const MemoryApp: React.FC = () => {
 		vscode.postMessage({ type: 'getMemoryBranches' });
 		vscode.postMessage({ type: 'getMemoryCategories' });
 		vscode.postMessage({ type: 'getMemoryRepositories' });
+		vscode.postMessage({ type: 'getCodeMapInstructions' });
+		vscode.postMessage({ type: 'getCodeMapStatistics' });
+		vscode.postMessage({ type: 'getCodeMapSettings' });
+		vscode.postMessage({ type: 'getCodeMapActivity' });
 	}, []);
 
 	// Request commits when filter changes
@@ -281,7 +324,7 @@ export const MemoryApp: React.FC = () => {
 	/** Request knowledge graph */
 	const onRequestGraph = (repository?: string) => {
 		sendMemoryDebugLog('memoryApp:requestGraph', {
-			activeTab,
+			activeTab: activeHistoryTab,
 			repository: repository || null,
 		});
 		vscode.postMessage({ type: 'getKnowledgeGraph', repository });
@@ -296,6 +339,70 @@ export const MemoryApp: React.FC = () => {
 	const onRequestSettings = () => {
 		vscode.postMessage({ type: 'getMemorySettings' });
 	};
+
+	const onRequestCodeMapInstructions = () => {
+		vscode.postMessage({ type: 'getCodeMapInstructions' });
+	};
+
+	const onRequestCodeMapDetail = (id: number) => {
+		setSelectedCodeMapInstructionId(id);
+		vscode.postMessage({ type: 'getCodeMapInstructionDetail', id });
+	};
+
+	const onRequestCodeMapStatistics = () => {
+		vscode.postMessage({ type: 'getCodeMapStatistics' });
+	};
+
+	const onRequestCodeMapActivity = () => {
+		vscode.postMessage({ type: 'getCodeMapActivity' });
+	};
+
+	const onRequestCodeMapSettings = () => {
+		vscode.postMessage({ type: 'getCodeMapSettings' });
+	};
+
+	const onSelectCodeMapInstruction = (id: number) => {
+		setSelectedCodeMapInstructionId(id);
+	};
+
+	const onSaveCodeMapSettings = (newSettings: Partial<CodeMapSettings>) => {
+		vscode.postMessage({ type: 'saveCodeMapSettings', settings: newSettings });
+	};
+
+	const onRefreshCodeMapWorkspace = () => {
+		setShouldPollCodeMapActivity(true);
+		vscode.postMessage({ type: 'refreshCodeMapWorkspace' });
+	};
+
+	const onRefreshCodeMapInstruction = (id: number) => {
+		setShouldPollCodeMapActivity(true);
+		vscode.postMessage({ type: 'refreshCodeMapInstruction', id });
+	};
+
+	const onDeleteCodeMapInstruction = (id: number) => {
+		if (selectedCodeMapInstructionId === id) {
+			setSelectedCodeMapInstructionId(null);
+			setCodeMapInstructionDetail(null);
+		}
+		vscode.postMessage({ type: 'deleteCodeMapInstruction', id });
+	};
+
+	const onDeleteObsoleteCodeMapInstructions = () => {
+		if (selectedCodeMapInstructionId && codeMapInstructions.some(item => item.id === selectedCodeMapInstructionId && item.isObsolete)) {
+			setSelectedCodeMapInstructionId(null);
+			setCodeMapInstructionDetail(null);
+		}
+		vscode.postMessage({ type: 'deleteObsoleteCodeMapInstructions' });
+	};
+
+	const codeMapIsBusy = Boolean(
+		codeMapActivity && (
+			codeMapActivity.runtime.isProcessing
+			|| codeMapActivity.runtime.pendingCount > 0
+			|| codeMapActivity.runtime.queuedCount > 0
+			|| codeMapActivity.runtime.runningCount > 0
+		),
+	);
 
 	const analysisButtonLabel = (() => {
 		if (!analysisSnapshot) {
@@ -319,9 +426,13 @@ export const MemoryApp: React.FC = () => {
 
 	// Fetch tab-specific data on tab change
 	useEffect(() => {
-		switch (activeTab) {
+		if (activeSection !== 'histories') {
+			return;
+		}
+
+		switch (activeHistoryTab) {
 			case 'graph':
-				sendMemoryDebugLog('memoryApp:tabChanged', { activeTab });
+				sendMemoryDebugLog('memoryApp:tabChanged', { activeTab: activeHistoryTab });
 				onRequestGraph();
 				break;
 			case 'statistics':
@@ -331,49 +442,74 @@ export const MemoryApp: React.FC = () => {
 				onRequestSettings();
 				break;
 		}
-	}, [activeTab]);
+	}, [activeHistoryTab, activeSection]);
+
+	useEffect(() => {
+		if (activeSection !== 'instructions') {
+			return;
+		}
+
+		onRequestCodeMapInstructions();
+		onRequestCodeMapStatistics();
+		onRequestCodeMapSettings();
+		onRequestCodeMapActivity();
+	}, [activeSection]);
+
+	useEffect(() => {
+		if (selectedCodeMapInstructionId) {
+			vscode.postMessage({ type: 'getCodeMapInstructionDetail', id: selectedCodeMapInstructionId });
+		}
+	}, [selectedCodeMapInstructionId]);
+
+	useEffect(() => {
+		if (!codeMapIsBusy) {
+			const timeout = window.setTimeout(() => {
+				setShouldPollCodeMapActivity(false);
+			}, shouldPollCodeMapActivity ? 2000 : 0);
+			return () => window.clearTimeout(timeout);
+		}
+
+		setShouldPollCodeMapActivity(true);
+		return undefined;
+	}, [codeMapIsBusy, shouldPollCodeMapActivity]);
+
+	useEffect(() => {
+		if (activeSection !== 'instructions' || !shouldPollCodeMapActivity) {
+			return;
+		}
+
+		const tick = () => {
+			onRequestCodeMapActivity();
+			onRequestCodeMapStatistics();
+			onRequestCodeMapInstructions();
+			if (selectedCodeMapInstructionId) {
+				vscode.postMessage({ type: 'getCodeMapInstructionDetail', id: selectedCodeMapInstructionId });
+			}
+		};
+
+		tick();
+		const interval = window.setInterval(tick, 1500);
+		return () => window.clearInterval(interval);
+	}, [activeSection, selectedCodeMapInstructionId, shouldPollCodeMapActivity]);
 
 	return (
 		<div style={styles.container} className="pm-memory-root">
 			<style>{MEMORY_APP_GLOBAL_STYLES}</style>
-			{/* Header with tabs */}
+			{/* Header with sections */}
 			<div style={styles.header}>
 				<div style={styles.tabs}>
-					{(['commits', 'search', 'graph', 'statistics', 'settings'] as Tab[]).map(tab => (
+					{(['histories', 'instructions'] as Section[]).map(section => (
 						<button
-							key={tab}
+							key={section}
 							style={{
 								...memoryButtonStyles.tab,
-								...(activeTab === tab ? memoryButtonStyles.tabActive : {}),
+								...(activeSection === section ? memoryButtonStyles.tabActive : {}),
 							}}
-							onClick={() => setActiveTab(tab)}
+							onClick={() => setActiveSection(section)}
 						>
-							{t(`memory.tab.${tab}`)}
+							{t(`memory.section.${section}`)}
 						</button>
 					))}
-				</div>
-				<div style={styles.headerActions}>
-					<button
-						style={memoryButtonStyles.secondary}
-						onClick={onRunAnalysis}
-						title={t('memory.runAnalysis')}
-					>
-						{analysisButtonLabel}
-					</button>
-					<button
-						style={memoryButtonStyles.secondary}
-						onClick={() => onExport('json')}
-						title={t('memory.export')}
-					>
-						📥 JSON
-					</button>
-					<button
-						style={memoryButtonStyles.secondary}
-						onClick={() => onExport('csv')}
-						title={t('memory.export')}
-					>
-						📥 CSV
-					</button>
 				</div>
 			</div>
 
@@ -390,107 +526,178 @@ export const MemoryApp: React.FC = () => {
 
 			{/* Tab content */}
 			<div style={styles.content}>
-				{activeTab === 'commits' && (
-					<div style={styles.splitViewContainer}>
-						<div style={styles.splitView}>
-							<div style={styles.listPane}>
-								<CommitList
-									commits={commits}
-									total={totalCommits}
-									filter={filter}
-									onFilterChange={setFilter}
-									onSelectCommit={onSelectCommit}
-									onDeleteCommit={onDeleteCommit}
-									selectedSha={selectedCommit?.sha}
-									authors={availableAuthors}
-									branches={availableBranches}
-									categories={availableCategories}
-									repositories={availableRepositories}
-									t={t}
-								/>
+				{activeSection === 'histories' && (
+					<div style={styles.sectionLayout}>
+						<div style={styles.sectionHeader}>
+							<div style={styles.tabs}>
+								{(['commits', 'search', 'graph', 'statistics', 'settings'] as HistoryTab[]).map(tab => (
+									<button
+										key={tab}
+										style={{
+											...memoryButtonStyles.tab,
+											...(activeHistoryTab === tab ? memoryButtonStyles.tabActive : {}),
+										}}
+										onClick={() => setActiveHistoryTab(tab)}
+									>
+										{t(`memory.tab.${tab}`)}
+									</button>
+								))}
 							</div>
-							<div style={styles.detailPane}>
-								{selectedCommit ? (
-									<CommitDetail
-										commit={selectedCommit}
-										fileChanges={commitFileChanges}
-										analysis={commitAnalysis}
-										bugRelations={commitBugRelations}
-										t={t}
-										onOpenFile={onOpenCommitFile}
-									/>
-								) : (
-									<div style={styles.placeholder}>{t('memory.selectCommit')}</div>
-								)}
+							<div style={styles.headerActions}>
+								<button
+									style={memoryButtonStyles.secondary}
+									onClick={onRunAnalysis}
+									title={t('memory.runAnalysis')}
+								>
+									{analysisButtonLabel}
+								</button>
+								<button
+									style={memoryButtonStyles.secondary}
+									onClick={() => onExport('json')}
+									title={t('memory.export')}
+								>
+									📥 JSON
+								</button>
+								<button
+									style={memoryButtonStyles.secondary}
+									onClick={() => onExport('csv')}
+									title={t('memory.export')}
+								>
+									📥 CSV
+								</button>
 							</div>
 						</div>
-						<AnalysisProgressOverlay
-							open={isAnalysisOverlayOpen}
-							snapshot={analysisSnapshot}
-							selectedCommitSha={analysisViewedCommitSha}
-							onClose={() => setIsAnalysisOverlayOpen(false)}
-							onStart={() => {
-								setIsAnalysisOverlayOpen(true);
-								vscode.postMessage({ type: 'runManualAnalysis' });
-							}}
-							onPause={onPauseAnalysis}
-							onResume={onResumeAnalysis}
-							onStop={onStopAnalysis}
-							onOpenCommit={(sha) => {
-								setAnalysisViewedCommitSha(sha);
-								setIsAnalysisDetailDialogOpen(true);
-								onSelectCommit(sha);
-							}}
-							t={t}
-						/>
-						<CommitDetailDialog
-							open={isAnalysisDetailDialogOpen}
-							title={t('memory.analysisOpenDetails')}
-							loading={Boolean(analysisViewedCommitSha) && !analysisDetailCommit}
-							commit={analysisDetailCommit}
-							fileChanges={analysisDetailCommit ? commitFileChanges : []}
-							analysis={analysisDetailCommit ? commitAnalysis : undefined}
-							bugRelations={analysisDetailCommit ? commitBugRelations : []}
-							onClose={() => setIsAnalysisDetailDialogOpen(false)}
-							onOpenFile={onOpenCommitFile}
-							t={t}
-						/>
+						<div style={styles.sectionContent}>
+							{activeHistoryTab === 'commits' && (
+								<div style={styles.splitViewContainer}>
+									<div style={styles.splitView}>
+										<div style={styles.listPane}>
+											<CommitList
+												commits={commits}
+												total={totalCommits}
+												filter={filter}
+												onFilterChange={setFilter}
+												onSelectCommit={onSelectCommit}
+												onDeleteCommit={onDeleteCommit}
+												selectedSha={selectedCommit?.sha}
+												authors={availableAuthors}
+												branches={availableBranches}
+												categories={availableCategories}
+												repositories={availableRepositories}
+												t={t}
+											/>
+										</div>
+										<div style={styles.detailPane}>
+											{selectedCommit ? (
+												<CommitDetail
+													commit={selectedCommit}
+													fileChanges={commitFileChanges}
+													analysis={commitAnalysis}
+													bugRelations={commitBugRelations}
+													t={t}
+													onOpenFile={onOpenCommitFile}
+												/>
+											) : (
+												<div style={styles.placeholder}>{t('memory.selectCommit')}</div>
+											)}
+										</div>
+									</div>
+									<AnalysisProgressOverlay
+										open={isAnalysisOverlayOpen}
+										snapshot={analysisSnapshot}
+										selectedCommitSha={analysisViewedCommitSha}
+										onClose={() => setIsAnalysisOverlayOpen(false)}
+										onStart={() => {
+											setIsAnalysisOverlayOpen(true);
+											vscode.postMessage({ type: 'runManualAnalysis' });
+										}}
+										onPause={onPauseAnalysis}
+										onResume={onResumeAnalysis}
+										onStop={onStopAnalysis}
+										onOpenCommit={(sha) => {
+											setAnalysisViewedCommitSha(sha);
+											setIsAnalysisDetailDialogOpen(true);
+											onSelectCommit(sha);
+										}}
+										t={t}
+									/>
+									<CommitDetailDialog
+										open={isAnalysisDetailDialogOpen}
+										title={t('memory.analysisOpenDetails')}
+										loading={Boolean(analysisViewedCommitSha) && !analysisDetailCommit}
+										commit={analysisDetailCommit}
+										fileChanges={analysisDetailCommit ? commitFileChanges : []}
+										analysis={analysisDetailCommit ? commitAnalysis : undefined}
+										bugRelations={analysisDetailCommit ? commitBugRelations : []}
+										onClose={() => setIsAnalysisDetailDialogOpen(false)}
+										onOpenFile={onOpenCommitFile}
+										t={t}
+									/>
+								</div>
+							)}
+
+							{activeHistoryTab === 'search' && (
+								<SearchPanel
+									results={searchResults}
+									query={searchQuery}
+									onSearch={onSearch}
+									onSelectCommit={onSelectCommit}
+									t={t}
+								/>
+							)}
+
+							{activeHistoryTab === 'graph' && (
+								<KnowledgeGraph
+									data={graphData}
+									repositories={availableRepositories}
+									onRequestGraph={onRequestGraph}
+									t={t}
+								/>
+							)}
+
+							{activeHistoryTab === 'statistics' && (
+								<StatisticsPanel
+									statistics={statistics}
+									availableModels={availableModels}
+									onRefresh={onRequestStatistics}
+									onClearAll={onClearAll}
+									t={t}
+								/>
+							)}
+
+							{activeHistoryTab === 'settings' && (
+								<SettingsPanel
+									settings={settings}
+									availableModels={availableModels}
+									onSave={onSaveSettings}
+									onRefresh={onRequestSettings}
+									t={t}
+								/>
+							)}
+						</div>
 					</div>
 				)}
 
-				{activeTab === 'search' && (
-					<SearchPanel
-						results={searchResults}
-						query={searchQuery}
-						onSearch={onSearch}
-						onSelectCommit={onSelectCommit}
-						t={t}
-					/>
-				)}
-
-				{activeTab === 'graph' && (
-					<KnowledgeGraph
-						data={graphData}
-						repositories={availableRepositories}
-						onRequestGraph={onRequestGraph}
-						t={t}
-					/>
-				)}
-
-				{activeTab === 'statistics' && (
-					<StatisticsPanel
-						statistics={statistics}
-						onRefresh={onRequestStatistics}
-						onClearAll={onClearAll}
-						t={t}
-					/>
-				)}
-
-				{activeTab === 'settings' && (
-					<SettingsPanel
-						settings={settings}
-						onSave={onSaveSettings}
-						onRefresh={onRequestSettings}
+				{activeSection === 'instructions' && (
+					<InstructionsPanel
+						instructions={codeMapInstructions}
+						selectedInstructionId={selectedCodeMapInstructionId}
+						detail={codeMapInstructionDetail}
+						statistics={codeMapStatistics}
+						activity={codeMapActivity}
+						settings={codeMapSettings}
+						availableModels={availableModels}
+						onSelectInstruction={onSelectCodeMapInstruction}
+						onRefreshInstructions={onRequestCodeMapInstructions}
+						onRefreshWorkspace={onRefreshCodeMapWorkspace}
+						onRefreshInstruction={onRefreshCodeMapInstruction}
+						onRefreshStatistics={onRequestCodeMapStatistics}
+						onRefreshActivity={onRequestCodeMapActivity}
+						onRefreshSettings={onRequestCodeMapSettings}
+						onSaveSettings={onSaveCodeMapSettings}
+						onDeleteInstruction={onDeleteCodeMapInstruction}
+						onDeleteObsolete={onDeleteObsoleteCodeMapInstructions}
+						isRefreshing={codeMapIsBusy}
 						t={t}
 					/>
 				)}
@@ -551,6 +758,24 @@ const styles: Record<string, React.CSSProperties> = {
 		height: '100%',
 	},
 	content: {
+		flex: 1,
+		overflow: 'hidden',
+	},
+	sectionLayout: {
+		display: 'flex',
+		flexDirection: 'column',
+		height: '100%',
+	},
+	sectionHeader: {
+		display: 'flex',
+		justifyContent: 'space-between',
+		alignItems: 'center',
+		gap: '12px',
+		padding: '8px 16px',
+		borderBottom: '1px solid var(--vscode-panel-border)',
+		flexShrink: 0,
+	},
+	sectionContent: {
 		flex: 1,
 		overflow: 'hidden',
 	},

@@ -1,13 +1,32 @@
 import type { CodeMapSettings } from '../types/codemap.js';
 import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily } from '../constants/ai.js';
+import { resolveConfigurationScope } from '../utils/configurationScope.js';
 
 export const CODEMAP_CHAT_INSTRUCTION_FILE_NAME = 'codemap.instructions.md';
 
-type CodeMapConfiguration = {
+export type CodeMapConfiguration = {
 	get<T>(section: string, defaultValue?: T): T;
+	inspect?<T>(section: string): {
+		globalValue?: T;
+		workspaceValue?: T;
+		workspaceFolderValue?: T;
+	} | undefined;
+	update?(section: string, value: unknown, target: unknown): Thenable<void>;
 };
 
-const DEFAULT_CODEMAP_SETTINGS: CodeMapSettings = {
+type VscodeConfigurationTarget = {
+	Global?: unknown;
+	Workspace?: unknown;
+};
+
+type VscodeApi = {
+	workspace?: {
+		getConfiguration?: (section: string) => CodeMapConfiguration;
+	};
+	ConfigurationTarget?: VscodeConfigurationTarget;
+};
+
+export const DEFAULT_CODEMAP_SETTINGS: CodeMapSettings = {
 	enabled: true,
 	trackedBranches: [],
 	autoUpdate: true,
@@ -24,7 +43,10 @@ const DEFAULT_CODEMAP_SETTINGS: CodeMapSettings = {
 };
 
 export function getCodeMapSettings(): CodeMapSettings {
-	const config = getCodeMapConfiguration();
+	return getCodeMapSettingsFromConfiguration(getCodeMapConfiguration());
+}
+
+export function getCodeMapSettingsFromConfiguration(config: Pick<CodeMapConfiguration, 'get'> | null | undefined): CodeMapSettings {
 	const trackedBranches = normalizeTrackedBranches(config?.get<string[]>('trackedBranches', DEFAULT_CODEMAP_SETTINGS.trackedBranches) ?? DEFAULT_CODEMAP_SETTINGS.trackedBranches);
 
 	return {
@@ -44,10 +66,70 @@ export function getCodeMapSettings(): CodeMapSettings {
 	};
 }
 
+export async function saveCodeMapSettings(settings: Partial<CodeMapSettings>): Promise<CodeMapSettings> {
+	const config = getCodeMapConfiguration();
+	if (!config?.update) {
+		return getCodeMapSettingsFromConfiguration(config);
+	}
+
+	const vscodeApi = getVscodeApi();
+	await saveCodeMapSettingsToConfiguration(config, settings, async (key, value, scope) => {
+		await config.update?.(
+			key,
+			value,
+			scope === 'workspace'
+				? (vscodeApi?.ConfigurationTarget?.Workspace ?? false)
+				: (vscodeApi?.ConfigurationTarget?.Global ?? true),
+			);
+	});
+
+	return getCodeMapSettings();
+}
+
+export async function saveCodeMapSettingsToConfiguration(
+	config: CodeMapConfiguration,
+	settings: Partial<CodeMapSettings>,
+	updateValue: (key: string, value: unknown, scope: 'global' | 'workspace') => Promise<void> | void,
+): Promise<CodeMapSettings> {
+	if (settings.enabled !== undefined) { await updateValue('enabled', settings.enabled, resolveSettingScope(config, 'enabled')); }
+	if (settings.trackedBranches !== undefined) {
+		await updateValue('trackedBranches', normalizeTrackedBranches(settings.trackedBranches), resolveSettingScope(config, 'trackedBranches'));
+	}
+	if (settings.autoUpdate !== undefined) { await updateValue('autoUpdate', settings.autoUpdate, resolveSettingScope(config, 'autoUpdate')); }
+	if (settings.notificationsEnabled !== undefined) {
+		await updateValue('notifications.enabled', settings.notificationsEnabled, resolveSettingScope(config, 'notifications.enabled'));
+	}
+	if (settings.aiModel !== undefined) {
+		await updateValue('aiModel', normalizeModelFamily(settings.aiModel), resolveSettingScope(config, 'aiModel'));
+	}
+	if (settings.instructionMaxChars !== undefined) {
+		await updateValue('instructionMaxChars', settings.instructionMaxChars, resolveSettingScope(config, 'instructionMaxChars'));
+	}
+	if (settings.blockDescriptionMode !== undefined) {
+		await updateValue('blockDescriptionMode', settings.blockDescriptionMode, resolveSettingScope(config, 'blockDescriptionMode'));
+	}
+	if (settings.blockMaxChars !== undefined) {
+		await updateValue('blockMaxChars', settings.blockMaxChars, resolveSettingScope(config, 'blockMaxChars'));
+	}
+	if (settings.batchContextMaxChars !== undefined) {
+		await updateValue('batchContextMaxChars', settings.batchContextMaxChars, resolveSettingScope(config, 'batchContextMaxChars'));
+	}
+	if (settings.updatePriority !== undefined) {
+		const value = settings.updatePriority === 'low' ? 'lower' : settings.updatePriority === 'high' ? 'higher' : 'normal';
+		await updateValue('updatePriority', value, resolveSettingScope(config, 'updatePriority'));
+	}
+	if (settings.aiDelayMs !== undefined) { await updateValue('aiDelayMs', settings.aiDelayMs, resolveSettingScope(config, 'aiDelayMs')); }
+	if (settings.startupDelayMs !== undefined) { await updateValue('startupDelayMs', settings.startupDelayMs, resolveSettingScope(config, 'startupDelayMs')); }
+	if (settings.maxVersionsPerInstruction !== undefined) {
+		await updateValue('maxVersionsPerInstruction', settings.maxVersionsPerInstruction, resolveSettingScope(config, 'maxVersionsPerInstruction'));
+	}
+
+	return getCodeMapSettingsFromConfiguration(config);
+}
+
 function getCodeMapConfiguration(): CodeMapConfiguration | null {
 	try {
-		const localRequire = Function('return typeof require !== "undefined" ? require : null;')() as ((id: string) => { workspace?: { getConfiguration?: (section: string) => CodeMapConfiguration; }; }) | null;
-		return localRequire?.('vscode')?.workspace?.getConfiguration?.('promptManager.codemap') ?? null;
+		return getVscodeApi()?.workspace?.getConfiguration?.('promptManager.codemap') ?? null;
 	} catch {
 		return null;
 	}
@@ -80,4 +162,20 @@ function normalizePriority(value: string): CodeMapSettings['updatePriority'] {
 
 function normalizeModelFamily(value: string): string {
 	return normalizeCopilotModelFamily(value);
+}
+
+function getVscodeApi(): VscodeApi | null {
+	try {
+		if (typeof require !== 'function') {
+			return null;
+		}
+
+		return require('vscode') as VscodeApi;
+	} catch {
+		return null;
+	}
+}
+
+function resolveSettingScope(config: Pick<CodeMapConfiguration, 'inspect'>, key: string): 'global' | 'workspace' {
+	return resolveConfigurationScope(config.inspect?.(key));
 }

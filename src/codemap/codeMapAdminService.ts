@@ -1,4 +1,3 @@
-import * as vscode from 'vscode';
 import type {
 	CodeMapActivity,
 	CodeMapBranchResolution,
@@ -10,11 +9,10 @@ import type {
 } from '../types/codemap.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { GitService } from '../services/gitService.js';
-import { getCodeMapSettings } from './codeMapConfig.js';
+import { getCodeMapSettings, saveCodeMapSettings } from './codeMapConfig.js';
 import { CodeMapDatabaseService } from './codeMapDatabaseService.js';
 import { CodeMapBranchResolverService } from './codeMapBranchResolverService.js';
 import { CodeMapOrchestratorService } from './codeMapOrchestratorService.js';
-import { normalizeCopilotModelFamily } from '../constants/ai.js';
 
 export class CodeMapAdminService {
 	constructor(
@@ -107,25 +105,7 @@ export class CodeMapAdminService {
 	}
 
 	async saveSettings(settings: Partial<CodeMapSettings>): Promise<CodeMapSettings> {
-		const config = vscode.workspace.getConfiguration('promptManager.codemap');
-		if (settings.enabled !== undefined) { await config.update('enabled', settings.enabled, true); }
-		if (settings.trackedBranches !== undefined) { await config.update('trackedBranches', settings.trackedBranches, true); }
-		if (settings.autoUpdate !== undefined) { await config.update('autoUpdate', settings.autoUpdate, true); }
-		if (settings.notificationsEnabled !== undefined) { await config.update('notifications.enabled', settings.notificationsEnabled, true); }
-		if (settings.aiModel !== undefined) { await config.update('aiModel', normalizeCopilotModelFamily(settings.aiModel), true); }
-		if (settings.instructionMaxChars !== undefined) { await config.update('instructionMaxChars', settings.instructionMaxChars, true); }
-		if (settings.blockDescriptionMode !== undefined) { await config.update('blockDescriptionMode', settings.blockDescriptionMode, true); }
-		if (settings.blockMaxChars !== undefined) { await config.update('blockMaxChars', settings.blockMaxChars, true); }
-		if (settings.batchContextMaxChars !== undefined) { await config.update('batchContextMaxChars', settings.batchContextMaxChars, true); }
-		if (settings.updatePriority !== undefined) {
-			const value = settings.updatePriority === 'low' ? 'lower' : settings.updatePriority === 'high' ? 'higher' : 'normal';
-			await config.update('updatePriority', value, true);
-		}
-		if (settings.aiDelayMs !== undefined) { await config.update('aiDelayMs', settings.aiDelayMs, true); }
-		if (settings.startupDelayMs !== undefined) { await config.update('startupDelayMs', settings.startupDelayMs, true); }
-		if (settings.maxVersionsPerInstruction !== undefined) { await config.update('maxVersionsPerInstruction', settings.maxVersionsPerInstruction, true); }
-
-		return getCodeMapSettings();
+		return saveCodeMapSettings(settings);
 	}
 
 	async queueRefreshWorkspace(): Promise<number> {

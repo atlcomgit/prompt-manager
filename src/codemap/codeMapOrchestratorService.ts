@@ -3,6 +3,7 @@ import { getCodeMapSettings } from './codeMapConfig.js';
 import type { CodeMapBranchResolution, CodeMapInstructionKind, CodeMapRuntimeCycle, CodeMapRuntimeEvent, CodeMapRuntimePhase, CodeMapRuntimeState, CodeMapRuntimeTask, CodeMapUpdatePriority, CodeMapUpdateTrigger } from '../types/codemap.js';
 import { CodeMapDatabaseService } from './codeMapDatabaseService.js';
 import { CodeMapInstructionService } from './codeMapInstructionService.js';
+import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 
 interface QueueItem {
 	jobId: number;
@@ -22,7 +23,7 @@ interface QueueItem {
 const MAX_RUNTIME_EVENTS = 80;
 
 export class CodeMapOrchestratorService {
-	private readonly output = vscode.window.createOutputChannel('Prompt Manager Code Map');
+	private readonly output = getPromptManagerOutputChannel();
 	private readonly pendingKeys = new Set<string>();
 	private readonly queue: QueueItem[] = [];
 	private readonly recentEvents: CodeMapRuntimeEvent[] = [];
@@ -42,7 +43,6 @@ export class CodeMapOrchestratorService {
 	) { }
 
 	dispose(): void {
-		this.output.dispose();
 	}
 
 	queueInstruction(

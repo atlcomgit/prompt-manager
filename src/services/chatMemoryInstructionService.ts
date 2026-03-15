@@ -6,6 +6,7 @@ import type { MemoryContextService } from './memoryContextService.js';
 import type { ChatMemoryInstructionComposer } from './chatMemoryInstructionComposer.js';
 import type { GitService } from './gitService.js';
 import type { WorkspaceService } from './workspaceService.js';
+import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 
 const SESSION_FOLDER_NAME = 'chat-memory';
 const SESSION_FOLDER_RELATIVE_PATH = '.vscode/prompt-manager/chat-memory';
@@ -30,7 +31,7 @@ interface ChatMemorySessionRegistry {
 }
 
 export class ChatMemoryInstructionService {
-	private readonly output = vscode.window.createOutputChannel('Prompt Manager Chat Memory');
+	private readonly output = getPromptManagerOutputChannel();
 
 	constructor(
 		private readonly storageService: StorageService,
@@ -41,7 +42,6 @@ export class ChatMemoryInstructionService {
 	) { }
 
 	dispose(): void {
-		this.output.dispose();
 	}
 
 	async ensureInstructionsLocationRegistered(): Promise<void> {
@@ -411,11 +411,11 @@ export class ChatMemoryInstructionService {
 	}
 
 	private logInfo(message: string, context?: Record<string, unknown>): void {
-		this.output.appendLine(`[info] ${message}${context ? ` ${JSON.stringify(context)}` : ''}`);
+		this.output.appendLine(`[chat-memory][info] ${message}${context ? ` ${JSON.stringify(context)}` : ''}`);
 	}
 
 	private logError(message: string, error: unknown, context?: Record<string, unknown>): void {
 		const errorMessage = error instanceof Error ? error.message : String(error);
-		this.output.appendLine(`[error] ${message}: ${errorMessage}${context ? ` ${JSON.stringify(context)}` : ''}`);
+		this.output.appendLine(`[chat-memory][error] ${message}: ${errorMessage}${context ? ` ${JSON.stringify(context)}` : ''}`);
 	}
 }

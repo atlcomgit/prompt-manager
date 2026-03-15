@@ -28,11 +28,20 @@ import { SidebarProvider, AboutPanelManager, EditorPanelManager, StatisticsPanel
 import type { MemoryCommit, HookCommitPayload, MemoryAnalysisDepth } from './types/index.js';
 import { DEFAULT_COPILOT_MODEL_FAMILY } from './constants/ai.js';
 import { buildChatContextFiles } from './utils/chatContextFiles.js';
+import {
+	disposePromptManagerOutputChannel,
+	getPromptManagerOutputChannel,
+	installPromptManagerConsoleInterceptor,
+} from './utils/promptManagerOutput.js';
 
 export function activate(context: vscode.ExtensionContext) {
+	getPromptManagerOutputChannel();
+	const consoleInterceptor = installPromptManagerConsoleInterceptor();
 	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 	if (!workspaceRoot) {
 		vscode.window.showWarningMessage('Prompt Manager: откройте рабочую область для использования расширения.');
+		consoleInterceptor.dispose();
+		disposePromptManagerOutputChannel();
 		return;
 	}
 
@@ -792,6 +801,8 @@ export function activate(context: vscode.ExtensionContext) {
 			codeMapOrchestratorService?.dispose();
 			codeMapDb?.close();
 			memoryDb?.close();
+			consoleInterceptor.dispose();
+			disposePromptManagerOutputChannel();
 		},
 	});
 

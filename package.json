@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage, organize and use AI prompts directly in VS Code with Copilot Chat integration",
-  "version": "0.1.53",
+  "version": "0.1.54",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -81,7 +81,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.1.53",
+        "title": "About 0.1.54",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },
@@ -283,7 +283,7 @@
         },
         "promptManager.debugLogging.enabled": {
           "type": "boolean",
-          "description": "Enable Prompt Manager debug logging for key extension flows in output channels. Keep disabled unless you are debugging extension behavior.",
+          "description": "Enable Prompt Manager debug logging for key extension flows in the Prompt Manager output channel. Keep disabled unless you are debugging extension behavior.",
           "default": false
         },
         "promptManager.captureAgentFinalResponse": {

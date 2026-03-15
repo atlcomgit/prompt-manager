@@ -7,12 +7,14 @@
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { normalizeHistoryAnalysisLimit } from '../utils/historyAnalysisLimit.js';
+import { getMemorySettings, saveMemorySettings } from '../services/memorySettingsConfig.js';
 import {
 	computeManualAnalysisEta,
 	computeManualAnalysisThroughput,
 	MANUAL_ANALYSIS_EVENT_LIMIT,
 } from '../utils/manualAnalysisRuntime.js';
 import { logMemoryGraphDebug, showMemoryGraphDebugChannel } from '../utils/memoryGraphDebug.js';
+import { getCodeMapSettings, saveCodeMapSettings } from '../codemap/codeMapConfig.js';
 import type { AiService } from '../services/aiService.js';
 import type { MemoryDatabaseService } from '../services/memoryDatabaseService.js';
 import type { MemoryContextService } from '../services/memoryContextService.js';
@@ -29,11 +31,9 @@ import type {
 	MemoryAvailableModel,
 	MemoryWebviewToExtensionMessage,
 	MemoryExtensionToWebviewMessage,
-	MemorySettings,
 	MemorySearchResult,
 } from '../types/memory.js';
 import { DEFAULT_MEMORY_SETTINGS } from '../types/memory.js';
-import { DEFAULT_COPILOT_MODEL_FAMILY } from '../constants/ai.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
@@ -266,7 +266,7 @@ export class MemoryPanelManager {
 				}
 
 				case 'getMemorySettings': {
-					const settings = this.getMemorySettings();
+					const settings = getMemorySettings();
 					panel.webview.postMessage({
 						type: 'memoryAvailableModels',
 						models: await this.getAvailableModels(),
@@ -279,23 +279,7 @@ export class MemoryPanelManager {
 				}
 
 				case 'saveMemorySettings': {
-					const config = vscode.workspace.getConfiguration('promptManager');
-					const s = msg.settings;
-					if (s.enabled !== undefined) { await config.update('memory.enabled', s.enabled, true); }
-					if (s.aiModel !== undefined) { await config.update('memory.aiModel', s.aiModel, true); }
-					if (s.analysisDepth !== undefined) { await config.update('memory.analysisDepth', s.analysisDepth, true); }
-					if (s.diffLimit !== undefined) { await config.update('memory.diffLimit', s.diffLimit, true); }
-					if (s.maxRecords !== undefined) { await config.update('memory.maxRecords', s.maxRecords, true); }
-					if (s.retentionDays !== undefined) { await config.update('memory.retentionDays', s.retentionDays, true); }
-					if (s.shortTermLimit !== undefined) { await config.update('memory.shortTermLimit', s.shortTermLimit, true); }
-					if (s.historyAnalysisLimit !== undefined) { await config.update('memory.historyAnalysisLimit', s.historyAnalysisLimit, true); }
-					if (s.autoCleanup !== undefined) { await config.update('memory.autoCleanup', s.autoCleanup, true); }
-					if (s.notificationsEnabled !== undefined) { await config.update('memory.notifications.enabled', s.notificationsEnabled, true); }
-					if (s.notificationType !== undefined) { await config.update('memory.notifications.type', s.notificationType, true); }
-					if (s.embeddingsEnabled !== undefined) { await config.update('memory.embeddings.enabled', s.embeddingsEnabled, true); }
-					if (s.knowledgeGraphEnabled !== undefined) { await config.update('memory.knowledgeGraph.enabled', s.knowledgeGraphEnabled, true); }
-					if (s.httpPort !== undefined) { await config.update('memory.httpPort', s.httpPort, true); }
-					const settings = this.getMemorySettings();
+					const settings = await saveMemorySettings(msg.settings);
 					this.analyzer.setModelFamily(settings.aiModel);
 					panel.webview.postMessage({
 						type: 'memorySettings',
@@ -464,43 +448,13 @@ export class MemoryPanelManager {
 				case 'getCodeMapSettings': {
 					panel.webview.postMessage({
 						type: 'codeMapSettings',
-						settings: this.codeMapAdmin?.getSettings() || {
-							enabled: false,
-							trackedBranches: [],
-							autoUpdate: false,
-							notificationsEnabled: false,
-							aiModel: DEFAULT_COPILOT_MODEL_FAMILY,
-							instructionMaxChars: 120000,
-							blockDescriptionMode: 'medium',
-							blockMaxChars: 2000,
-							batchContextMaxChars: 24000,
-							updatePriority: 'normal',
-							aiDelayMs: 1000,
-							startupDelayMs: 15000,
-							maxVersionsPerInstruction: 3,
-						},
+						settings: getCodeMapSettings(),
 					} as MemoryExtensionToWebviewMessage);
 					break;
 				}
 
 				case 'saveCodeMapSettings': {
-					const settings = this.codeMapAdmin
-						? await this.codeMapAdmin.saveSettings(msg.settings)
-						: {
-							enabled: false,
-							trackedBranches: [],
-							autoUpdate: false,
-							notificationsEnabled: false,
-							aiModel: DEFAULT_COPILOT_MODEL_FAMILY,
-							instructionMaxChars: 120000,
-							blockDescriptionMode: 'medium' as const,
-							blockMaxChars: 2000,
-							batchContextMaxChars: 24000,
-							updatePriority: 'normal' as const,
-							aiDelayMs: 1000,
-							startupDelayMs: 15000,
-							maxVersionsPerInstruction: 3,
-						};
+					const settings = await saveCodeMapSettings(msg.settings);
 					panel.webview.postMessage({
 						type: 'codeMapSettings',
 						settings,
@@ -602,6 +556,10 @@ export class MemoryPanelManager {
 			type: 'memoryStatistics',
 			statistics: stats,
 		} as MemoryExtensionToWebviewMessage);
+		panel.webview.postMessage({
+			type: 'memorySettings',
+			settings: getMemorySettings(),
+		} as MemoryExtensionToWebviewMessage);
 
 		const { commits, total } = await this.db.getCommits({ limit: 50 });
 		panel.webview.postMessage({
@@ -654,28 +612,8 @@ export class MemoryPanelManager {
 		};
 	}
 
-	private getMemorySettings(): MemorySettings {
-		const config = vscode.workspace.getConfiguration('promptManager');
-		return {
-			enabled: config.get<boolean>('memory.enabled', DEFAULT_MEMORY_SETTINGS.enabled),
-			aiModel: config.get<string>('memory.aiModel', DEFAULT_MEMORY_SETTINGS.aiModel),
-			analysisDepth: config.get<any>('memory.analysisDepth', DEFAULT_MEMORY_SETTINGS.analysisDepth),
-			diffLimit: config.get<number>('memory.diffLimit', DEFAULT_MEMORY_SETTINGS.diffLimit),
-			maxRecords: config.get<number>('memory.maxRecords', DEFAULT_MEMORY_SETTINGS.maxRecords),
-			retentionDays: config.get<number>('memory.retentionDays', DEFAULT_MEMORY_SETTINGS.retentionDays),
-			shortTermLimit: config.get<number>('memory.shortTermLimit', DEFAULT_MEMORY_SETTINGS.shortTermLimit),
-			historyAnalysisLimit: config.get<number>('memory.historyAnalysisLimit', DEFAULT_MEMORY_SETTINGS.historyAnalysisLimit),
-			autoCleanup: config.get<boolean>('memory.autoCleanup', DEFAULT_MEMORY_SETTINGS.autoCleanup),
-			notificationsEnabled: config.get<boolean>('memory.notifications.enabled', DEFAULT_MEMORY_SETTINGS.notificationsEnabled),
-			notificationType: config.get<any>('memory.notifications.type', DEFAULT_MEMORY_SETTINGS.notificationType),
-			embeddingsEnabled: config.get<boolean>('memory.embeddings.enabled', DEFAULT_MEMORY_SETTINGS.embeddingsEnabled),
-			knowledgeGraphEnabled: config.get<boolean>('memory.knowledgeGraph.enabled', DEFAULT_MEMORY_SETTINGS.knowledgeGraphEnabled),
-			httpPort: config.get<number>('memory.httpPort', DEFAULT_MEMORY_SETTINGS.httpPort),
-		};
-	}
-
 	private async getAvailableModels(): Promise<MemoryAvailableModel[]> {
-		const configured = this.getMemorySettings().aiModel;
+		const configured = getMemorySettings().aiModel;
 		const discovered = this.aiService ? await this.aiService.getAvailableModels() : [];
 		const items = [...discovered];
 		if (configured && !items.some(item => item.id === configured)) {

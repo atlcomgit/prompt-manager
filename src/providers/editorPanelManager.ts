@@ -21,6 +21,7 @@ import type { StateService } from '../services/stateService.js';
 import { TimeTrackingService } from '../services/timeTrackingService.js';
 import { decideFileReportSync, isLatestPersistedReport } from '../utils/reportSync.js';
 import { buildChatContextFiles } from '../utils/chatContextFiles.js';
+import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
@@ -40,8 +41,8 @@ export class EditorPanelManager {
 	private silentClosePanels = new Set<vscode.WebviewPanel>();
 	private pendingRestorePrompt: Prompt | null = null;
 	private pendingRestoreIsDirty = false;
-	private readonly hooksOutput = vscode.window.createOutputChannel('Prompt Manager Hooks');
-	private readonly reportDebugOutput = vscode.window.createOutputChannel('Prompt Manager Report Debug');
+	private readonly hooksOutput = getPromptManagerOutputChannel();
+	private readonly reportDebugOutput = getPromptManagerOutputChannel();
 	private contentEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string }>();
 	private panelKeyByContentEditorUri = new Map<string, string>();
 	private contentEditorLastActivityByPanelKey = new Map<string, number>();
@@ -213,7 +214,7 @@ export class EditorPanelManager {
 		}
 		const timestamp = new Date().toISOString();
 		const serializedPayload = payload ? ` ${JSON.stringify(payload)}` : '';
-		this.reportDebugOutput.appendLine(`[${timestamp}] ${event}${serializedPayload}`);
+		this.reportDebugOutput.appendLine(`[${timestamp}] [report-debug] ${event}${serializedPayload}`);
 	}
 
 	private isDebugLoggingEnabled(): boolean {
@@ -3696,7 +3697,6 @@ export class EditorPanelManager {
 			panel.dispose();
 		}
 		this.reportEditorPanels.clear();
-		this.hooksOutput.dispose();
 	}
 
 	/** Close prompt panel silently (without unsaved confirmation) */

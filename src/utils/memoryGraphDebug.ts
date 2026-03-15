@@ -1,13 +1,7 @@
-import * as vscode from 'vscode';
-
-let outputChannel: vscode.OutputChannel | undefined;
-
-function getOutputChannel(): vscode.OutputChannel {
-	if (!outputChannel) {
-		outputChannel = vscode.window.createOutputChannel('Prompt Manager Memory Graph Debug');
-	}
-	return outputChannel;
-}
+import {
+	appendPromptManagerLog,
+	showPromptManagerOutputChannel,
+} from './promptManagerOutput.js';
 
 function stringifyPayload(payload: unknown): string {
 	if (payload === undefined) {
@@ -23,11 +17,12 @@ function stringifyPayload(payload: unknown): string {
 export function logMemoryGraphDebug(scope: string, payload?: unknown): void {
 	const timestamp = new Date().toISOString();
 	const suffix = stringifyPayload(payload);
-	const message = suffix ? `[${timestamp}] ${scope} ${suffix}` : `[${timestamp}] ${scope}`;
-	getOutputChannel().appendLine(message);
-	console.log(`[PromptManager/MemoryGraph] ${scope}`, payload ?? '');
+	const message = suffix
+		? `[${timestamp}] [memory-graph] ${scope} ${suffix}`
+		: `[${timestamp}] [memory-graph] ${scope}`;
+	appendPromptManagerLog(message);
 }
 
 export function showMemoryGraphDebugChannel(preserveFocus = true): void {
-	getOutputChannel().show(preserveFocus);
+	showPromptManagerOutputChannel(preserveFocus);
 }

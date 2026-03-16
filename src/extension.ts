@@ -49,7 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Initialize services
 	const storageService = new StorageService(workspaceRoot);
-	const aiService = new AiService();
+	const aiService = new AiService(context);
 	const workspaceService = new WorkspaceService();
 	const gitService = new GitService();
 	const stateService = new StateService(context);

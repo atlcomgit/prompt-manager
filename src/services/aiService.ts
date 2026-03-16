@@ -3,6 +3,7 @@
  */
 
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execFile } from 'child_process';
@@ -30,8 +31,12 @@ type CachedLanguageModelEntry = {
 		id?: string;
 		name?: string;
 		vendor?: string;
+		family?: string;
 		isUserSelectable?: boolean;
 		targetChatSessionType?: string;
+		capabilities?: {
+			agentMode?: boolean;
+		};
 		modelPickerCategory?: {
 			label?: string;
 			order?: number;
@@ -83,6 +88,9 @@ export class AiService {
 		// 'Пиши на русском языке.',
 		'Пиши ответ с обращением к одному лицу.',
 	];
+
+	constructor(private readonly context?: vscode.ExtensionContext) { }
+	private sqliteBinaryPath: string | null | undefined;
 
 	private modelSelector: vscode.LanguageModelChatSelector = {
 		vendor: 'copilot',
@@ -445,31 +453,39 @@ export class AiService {
 
 	/** Get available language models */
 	async getAvailableModels(): Promise<AvailableModelOption[]> {
+		let models: vscode.LanguageModelChat[] = [];
 		try {
-			const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-			const visibleModels = await this.getVisibleCopilotModels(models);
-			if (visibleModels.length > 0) {
-				return visibleModels;
-			}
-
-			return this.normalizeAvailableModels(models.map(model => ({
-				id: model.id,
-				name: (model.name || '').trim() || model.family || model.id,
-			})));
+			models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
 		} catch {
-			return [];
+			// Keep going: cached Copilot model state is still useful for the picker.
 		}
+
+		const visibleModels = await this.getVisibleCopilotModels(models);
+		if (visibleModels.length > 0) {
+			return visibleModels;
+		}
+
+		return this.normalizeAvailableModels(models.map(model => ({
+			id: this.getPreferredModelOptionId(model.id, String((model as any).identifier || '')),
+			name: (model.name || '').trim() || model.family || model.id,
+		})));
 	}
 
 	private async getVisibleCopilotModels(models: vscode.LanguageModelChat[]): Promise<AvailableModelOption[]> {
+		const workspaceSessionModels = await this.getVisibleCopilotModelsFromWorkspaceSessions();
 		const dbPath = await this.resolveStateDbPath();
 		if (!dbPath) {
-			return [];
+			return workspaceSessionModels;
 		}
 
 		const cachedModels = await this.getVisibleCopilotModelsFromCache(dbPath, models);
 		if (cachedModels.length > 0) {
 			return cachedModels;
+		}
+
+		const legacyCachedModels = await this.getVisibleCopilotModelsFromLegacyCache(dbPath);
+		if (legacyCachedModels.length > 0) {
+			return legacyCachedModels;
 		}
 
 		const [modelsControlRaw, modelPickerPreferencesRaw, copilotSkuRaw] = await Promise.all([
@@ -480,53 +496,32 @@ export class AiService {
 
 		const modelsControl = this.parseJson<ChatModelsControl>(modelsControlRaw);
 		if (!modelsControl) {
-			return [];
+			return workspaceSessionModels;
 		}
 
 		const featuredEntries = this.getVisibleControlEntries(modelsControl, this.resolveCopilotTier(copilotSkuRaw));
 		if (featuredEntries.length === 0) {
-			return [];
+			return workspaceSessionModels;
 		}
 
 		const preferences = this.parseJson<Record<string, boolean>>(modelPickerPreferencesRaw) || {};
-		const availableById = new Map<string, vscode.LanguageModelChat>();
-		const availableByIdentifier = new Map<string, vscode.LanguageModelChat>();
-
-		for (const model of models) {
-			const id = (model.id || '').trim();
-			if (id) {
-				availableById.set(id, model);
-				availableByIdentifier.set(`copilot/${id}`.toLowerCase(), model);
-			}
-
-			const family = (model.family || '').trim();
-			if (family) {
-				availableByIdentifier.set(`copilot/${family}`.toLowerCase(), model);
-			}
-
-			const identifier = String((model as any).identifier || '').trim();
-			if (identifier) {
-				availableByIdentifier.set(identifier.toLowerCase(), model);
-			}
-		}
+		const cacheLookup = await this.buildCopilotModelLookup(dbPath, models);
 
 		const result: AvailableModelOption[] = [];
 		const seenIds = new Set<string>();
-		const pushModel = (model: vscode.LanguageModelChat | undefined, nameOverride?: string): void => {
-			if (!model) {
+		const pushModel = (modelIdOrIdentifier: string, nameOverride?: string): void => {
+			const option = this.resolveLookupModelOption(cacheLookup, modelIdOrIdentifier, nameOverride);
+			if (!option) {
 				return;
 			}
 
-			const id = (model.id || '').trim();
-			if (!id || id === 'auto' || seenIds.has(id)) {
+			const seenKey = (this.normalizeModelInput(option.id) || option.id).toLowerCase();
+			if (!option.id || this.isAutoModelIdentifier(option.id) || seenIds.has(seenKey)) {
 				return;
 			}
 
-			seenIds.add(id);
-			result.push({
-				id,
-				name: (nameOverride || '').trim() || (model.name || '').trim() || model.family || id,
-			});
+			seenIds.add(seenKey);
+			result.push(option);
 		};
 
 		for (const entry of featuredEntries) {
@@ -535,10 +530,7 @@ export class AiService {
 				continue;
 			}
 
-			pushModel(
-				availableById.get(controlId) || availableByIdentifier.get(`copilot/${controlId}`),
-				entry.label,
-			);
+			pushModel(controlId, entry.label);
 		}
 
 		for (const [identifier, isVisible] of Object.entries(preferences)) {
@@ -546,10 +538,14 @@ export class AiService {
 				continue;
 			}
 
-			pushModel(availableByIdentifier.get(identifier.toLowerCase()));
+			pushModel(identifier);
 		}
 
-		return this.sortVisibleModels(result, featuredEntries);
+		if (result.length > 0) {
+			return this.sortVisibleModels(result, featuredEntries);
+		}
+
+		return workspaceSessionModels;
 	}
 
 	private async getVisibleCopilotModelsFromCache(
@@ -584,32 +580,74 @@ export class AiService {
 
 		const result: AvailableModelOption[] = [];
 		const seenIds = new Set<string>();
+		const resultIndexByName = new Map<string, number>();
 		for (const entry of cachedModels) {
-			const metadata = entry.metadata;
-			if (!metadata || metadata.vendor !== 'copilot' || metadata.isUserSelectable !== true) {
+			const metadata = entry.metadata!;
+			if (!this.isVisibleCopilotCacheEntry(entry)) {
 				continue;
 			}
 
 			// Prompt Manager opens the regular Copilot chat panel, not special session types.
-			if (metadata.targetChatSessionType) {
-				continue;
-			}
-
 			const model = availableByIdentifier.get(String(entry.identifier || '').trim().toLowerCase())
 				|| availableById.get(String(metadata.id || '').trim());
-			if (!model) {
+			const id = this.getPreferredModelOptionId(
+				(model?.id || metadata.id || '').trim(),
+				String((model as any)?.identifier || entry.identifier || '').trim(),
+			);
+			const seenKey = (this.normalizeModelInput(id) || id).toLowerCase();
+			if (!id || this.isAutoModelIdentifier(id) || seenIds.has(seenKey)) {
 				continue;
 			}
 
-			const id = (model.id || '').trim();
-			if (!id || id === 'auto' || seenIds.has(id)) {
+			seenIds.add(seenKey);
+			const option: AvailableModelOption = {
+				id,
+				name: String(metadata.name || '').trim() || (model?.name || '').trim() || model?.family || id,
+			};
+			const nameKey = this.normalizeVisibleModelName(option.name);
+			const existingIndex = nameKey ? resultIndexByName.get(nameKey) : undefined;
+			if (existingIndex !== undefined) {
+				const existing = result[existingIndex];
+				if (this.shouldPreferVisibleModelOption(option, existing)) {
+					result[existingIndex] = option;
+				}
 				continue;
 			}
 
-			seenIds.add(id);
+			if (nameKey) {
+				resultIndexByName.set(nameKey, result.length);
+			}
+			result.push(option);
+		}
+
+		return result;
+	}
+
+	private async getVisibleCopilotModelsFromLegacyCache(dbPath: string): Promise<AvailableModelOption[]> {
+		const cachedModelsRaw = await this.readStateItemValue(dbPath, 'chat.cachedLanguageModels');
+		const cachedModels = this.parseJson<CachedLanguageModelEntry[]>(cachedModelsRaw);
+		if (!cachedModels || cachedModels.length === 0) {
+			return [];
+		}
+
+		const result: AvailableModelOption[] = [];
+		const seenIds = new Set<string>();
+		for (const entry of cachedModels) {
+			if (!this.isVisibleCopilotCacheEntry(entry)) {
+				continue;
+			}
+
+			const metadata = entry.metadata!;
+			const id = this.getPreferredModelOptionId(metadata.id || '', entry.identifier);
+			const seenKey = (this.normalizeModelInput(id) || id).toLowerCase();
+			if (!id || this.isAutoModelIdentifier(id) || seenIds.has(seenKey)) {
+				continue;
+			}
+
+			seenIds.add(seenKey);
 			result.push({
 				id,
-				name: String(metadata.name || '').trim() || (model.name || '').trim() || model.family || id,
+				name: String(metadata.name || '').trim() || metadata.family || id,
 			});
 		}
 
@@ -622,15 +660,15 @@ export class AiService {
 	): AvailableModelOption[] {
 		const featuredRank = new Map<string, number>();
 		featuredEntries.forEach((entry, index) => {
-			const id = String(entry.id || '').trim();
+			const id = this.normalizeModelInput(String(entry.id || '').trim()) || String(entry.id || '').trim();
 			if (id && !featuredRank.has(id)) {
 				featuredRank.set(id, index);
 			}
 		});
 
 		return [...models].sort((left, right) => {
-			const leftFeatured = featuredRank.get(left.id);
-			const rightFeatured = featuredRank.get(right.id);
+			const leftFeatured = featuredRank.get(this.normalizeModelInput(left.id) || left.id);
+			const rightFeatured = featuredRank.get(this.normalizeModelInput(right.id) || right.id);
 			if (leftFeatured !== undefined || rightFeatured !== undefined) {
 				if (leftFeatured === undefined) {
 					return 1;
@@ -653,11 +691,12 @@ export class AiService {
 
 		for (const model of models) {
 			const id = String(model.id || '').trim();
-			if (!id || id === 'auto' || seen.has(id)) {
+			const seenKey = (this.normalizeModelInput(id) || id).toLowerCase();
+			if (!id || this.isAutoModelIdentifier(id) || seen.has(seenKey)) {
 				continue;
 			}
 
-			seen.add(id);
+			seen.add(seenKey);
 			result.push({
 				id,
 				name: String(model.name || '').trim() || id,
@@ -697,9 +736,14 @@ export class AiService {
 	}
 
 	private async readStateItemValue(dbPath: string, key: string): Promise<string> {
+		const sqlitePath = this.resolveSqliteBinaryPath();
+		if (!sqlitePath) {
+			return '';
+		}
+
 		try {
 			const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
-			const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
+			const { stdout } = await execFileAsync(sqlitePath, [dbPath, sql]);
 			return (stdout || '').trim();
 		} catch {
 			return '';
@@ -719,34 +763,303 @@ export class AiService {
 	}
 
 	private getStateDbCandidates(): string[] {
+		const candidates: string[] = [];
+		const globalStorageUriPath = this.context?.globalStorageUri?.fsPath;
+		if (globalStorageUriPath) {
+			candidates.push(path.join(globalStorageUriPath, '..', 'state.vscdb'));
+		}
+
 		const home = os.homedir();
 		if (process.platform === 'linux') {
-			return [
+			candidates.push(
 				path.join(home, '.config', 'Code', 'User', 'globalStorage', 'state.vscdb'),
 				path.join(home, '.config', 'Code - Insiders', 'User', 'globalStorage', 'state.vscdb'),
 				path.join(home, '.config', 'VSCodium', 'User', 'globalStorage', 'state.vscdb'),
-			];
-		}
-		if (process.platform === 'darwin') {
-			return [
+			);
+		} else if (process.platform === 'darwin') {
+			candidates.push(
 				path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'state.vscdb'),
 				path.join(home, 'Library', 'Application Support', 'Code - Insiders', 'User', 'globalStorage', 'state.vscdb'),
 				path.join(home, 'Library', 'Application Support', 'VSCodium', 'User', 'globalStorage', 'state.vscdb'),
-			];
-		}
-		if (process.platform === 'win32') {
+			);
+		} else if (process.platform === 'win32') {
 			const appData = process.env.APPDATA || '';
-			return [
+			candidates.push(
 				path.join(appData, 'Code', 'User', 'globalStorage', 'state.vscdb'),
 				path.join(appData, 'Code - Insiders', 'User', 'globalStorage', 'state.vscdb'),
 				path.join(appData, 'VSCodium', 'User', 'globalStorage', 'state.vscdb'),
-			];
+			);
 		}
-		return [];
+
+		return Array.from(new Set(candidates.filter(Boolean)));
+	}
+
+	private resolveSqliteBinaryPath(): string | null {
+		if (this.sqliteBinaryPath !== undefined) {
+			return this.sqliteBinaryPath;
+		}
+
+		const candidates = process.platform === 'win32'
+			? [
+				process.env.PROMPT_MANAGER_SQLITE3_PATH || '',
+				path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'sqlite3.exe'),
+				'C:\\sqlite3\\sqlite3.exe',
+				'C:\\Program Files\\SQLite\\sqlite3.exe',
+				'C:\\Program Files (x86)\\SQLite\\sqlite3.exe',
+				'sqlite3.exe',
+			]
+			: [
+				process.env.PROMPT_MANAGER_SQLITE3_PATH || '',
+				'/usr/bin/sqlite3',
+				'/bin/sqlite3',
+				'/usr/local/bin/sqlite3',
+				'/opt/homebrew/bin/sqlite3',
+				'sqlite3',
+			];
+
+		for (const candidate of candidates) {
+			if (!candidate) {
+				continue;
+			}
+			if (candidate.includes(path.sep) && !fs.existsSync(candidate)) {
+				continue;
+			}
+
+			this.sqliteBinaryPath = candidate;
+			return candidate;
+		}
+
+		this.sqliteBinaryPath = null;
+		return null;
 	}
 
 	private escapeSql(value: string): string {
 		return value.replace(/'/g, "''");
+	}
+
+	private async buildCopilotModelLookup(
+		dbPath: string,
+		models: vscode.LanguageModelChat[],
+	): Promise<Map<string, AvailableModelOption>> {
+		const lookup = new Map<string, AvailableModelOption>();
+		const register = (key: string, option: AvailableModelOption): void => {
+			const normalizedKey = key.trim().toLowerCase();
+			if (!normalizedKey || lookup.has(normalizedKey)) {
+				return;
+			}
+			lookup.set(normalizedKey, option);
+		};
+
+		for (const model of models) {
+			const id = this.getPreferredModelOptionId(model.id, String((model as any).identifier || ''));
+			if (!id || this.isAutoModelIdentifier(id)) {
+				continue;
+			}
+
+			const option: AvailableModelOption = {
+				id,
+				name: (model.name || '').trim() || model.family || model.id,
+			};
+			register(id, option);
+			register(model.id || '', option);
+			register(String((model as any).identifier || ''), option);
+			register(`copilot/${model.id || ''}`, option);
+			register(`copilot/${model.family || ''}`, option);
+		}
+
+		const registerCachedEntries = (entries: CachedLanguageModelEntry[] | null): void => {
+			for (const entry of entries || []) {
+				const metadata = entry.metadata;
+				if (!metadata || metadata.targetChatSessionType) {
+					continue;
+				}
+
+				const vendor = String(metadata.vendor || '').trim().toLowerCase();
+				const identifier = String(entry.identifier || '').trim();
+				if (vendor !== 'copilot' && !identifier.toLowerCase().startsWith('copilot/')) {
+					continue;
+				}
+
+				const optionId = this.getPreferredModelOptionId(metadata.id || '', identifier);
+				if (!optionId || this.isAutoModelIdentifier(optionId)) {
+					continue;
+				}
+
+				const option: AvailableModelOption = {
+					id: optionId,
+					name: String(metadata.name || '').trim() || metadata.family || optionId,
+				};
+				register(optionId, option);
+				register(metadata.id || '', option);
+				register(identifier, option);
+				register(`copilot/${metadata.id || ''}`, option);
+				register(`copilot/${metadata.family || ''}`, option);
+			}
+		};
+
+		const [cachedModelsRaw, legacyCachedModelsRaw] = await Promise.all([
+			this.readStateItemValue(dbPath, 'chat.cachedLanguageModels.v2'),
+			this.readStateItemValue(dbPath, 'chat.cachedLanguageModels'),
+		]);
+
+		registerCachedEntries(this.parseJson<CachedLanguageModelEntry[]>(cachedModelsRaw));
+		registerCachedEntries(this.parseJson<CachedLanguageModelEntry[]>(legacyCachedModelsRaw));
+
+		return lookup;
+	}
+
+	private resolveLookupModelOption(
+		lookup: Map<string, AvailableModelOption>,
+		modelIdOrIdentifier: string,
+		nameOverride?: string,
+	): AvailableModelOption | undefined {
+		const raw = String(modelIdOrIdentifier || '').trim();
+		if (!raw) {
+			return undefined;
+		}
+
+		const keys = [
+			raw,
+			raw.toLowerCase(),
+			this.normalizeModelInput(raw),
+			`copilot/${this.normalizeModelInput(raw)}`,
+		]
+			.map(value => value.trim().toLowerCase())
+			.filter(Boolean);
+
+		for (const key of keys) {
+			const option = lookup.get(key);
+			if (!option) {
+				continue;
+			}
+			return {
+				id: option.id,
+				name: (nameOverride || '').trim() || option.name,
+			};
+		}
+
+		return undefined;
+	}
+
+	private async getVisibleCopilotModelsFromWorkspaceSessions(): Promise<AvailableModelOption[]> {
+		const chatSessionsDir = this.getWorkspaceChatSessionsDir();
+		if (!chatSessionsDir || !fs.existsSync(chatSessionsDir)) {
+			return [];
+		}
+
+		try {
+			const entries = fs.readdirSync(chatSessionsDir, { withFileTypes: true })
+				.filter(entry => entry.isFile() && (entry.name.endsWith('.json') || entry.name.endsWith('.jsonl')))
+				.map(entry => {
+					const fullPath = path.join(chatSessionsDir, entry.name);
+					return {
+						fullPath,
+						mtimeMs: fs.statSync(fullPath).mtimeMs,
+					};
+				})
+				.sort((left, right) => right.mtimeMs - left.mtimeMs)
+				.slice(0, 40);
+
+			const namesById = new Map<string, string>();
+			const idsInOrder: string[] = [];
+			const seenIds = new Set<string>();
+			const modelIdPattern = /"modelId":"(copilot\/[^"]+)"/g;
+			const namedIdentifierPattern = /"identifier":"(copilot\/[^"]+)".{0,600}?"name":"([^"]+)"/gs;
+
+			for (const entry of entries) {
+				const text = fs.readFileSync(entry.fullPath, 'utf8');
+				namedIdentifierPattern.lastIndex = 0;
+				modelIdPattern.lastIndex = 0;
+
+				let namedMatch: RegExpExecArray | null;
+				while ((namedMatch = namedIdentifierPattern.exec(text)) !== null) {
+					const id = String(namedMatch[1] || '').trim();
+					const name = String(namedMatch[2] || '').trim();
+					if (!id || this.isAutoModelIdentifier(id)) {
+						continue;
+					}
+
+					if (!seenIds.has(id.toLowerCase())) {
+						idsInOrder.push(id);
+						seenIds.add(id.toLowerCase());
+					}
+					if (name && !namesById.has(id)) {
+						namesById.set(id, name);
+					}
+				}
+
+				let idMatch: RegExpExecArray | null;
+				while ((idMatch = modelIdPattern.exec(text)) !== null) {
+					const id = String(idMatch[1] || '').trim();
+					if (!id || this.isAutoModelIdentifier(id) || seenIds.has(id.toLowerCase())) {
+						continue;
+					}
+
+					idsInOrder.push(id);
+					seenIds.add(id.toLowerCase());
+				}
+			}
+
+			return idsInOrder.map(id => ({
+				id,
+				name: namesById.get(id) || this.formatCopilotModelName(id),
+			}));
+		} catch {
+			return [];
+		}
+	}
+
+	private getWorkspaceChatSessionsDir(): string | null {
+		const storageUriPath = this.context?.storageUri?.fsPath;
+		if (!storageUriPath) {
+			return null;
+		}
+
+		return path.join(storageUriPath, '..', 'chatSessions');
+	}
+
+	private formatCopilotModelName(modelId: string): string {
+		const normalized = this.normalizeModelInput(modelId);
+		if (!normalized) {
+			return modelId;
+		}
+
+		if (normalized.startsWith('gpt-')) {
+			return normalized
+				.replace(/^gpt-/, 'GPT-')
+				.replace(/-codex/gi, '-Codex')
+				.replace(/-mini/gi, ' mini')
+				.replace(/-max/gi, '-Max')
+				.replace(/-fast/gi, ' fast')
+				.replace(/-preview/gi, ' (Preview)');
+		}
+
+		return normalized
+			.split(/[-._]/g)
+			.filter(Boolean)
+			.map(part => {
+				const upper = part.toUpperCase();
+				if (part.length <= 3 && /\d/.test(part)) {
+					return upper;
+				}
+				if (part === 'gpt') {
+					return 'GPT';
+				}
+				if (part === 'claude') {
+					return 'Claude';
+				}
+				if (part === 'gemini') {
+					return 'Gemini';
+				}
+				if (part === 'grok') {
+					return 'Grok';
+				}
+				if (part === 'codex') {
+					return 'Codex';
+				}
+				return part.charAt(0).toUpperCase() + part.slice(1);
+			})
+			.join(' ');
 	}
 
 	/** Generate inline suggestion / continuation for prompt text */
@@ -950,6 +1263,18 @@ export class AiService {
 		} catch {
 			// ignore
 		}
+
+		const cachedModels = await this.getVisibleCopilotModels([]);
+		const cachedMatch = this.findBestAvailableModelMatch(cachedModels, modelId);
+		if (cachedMatch) {
+			const normalized = this.normalizeModelInput(cachedMatch.id) || cachedMatch.id;
+			return {
+				matched: true,
+				matchedId: normalized,
+				matchedFamily: normalized,
+			};
+		}
+
 		return { matched: false };
 	}
 
@@ -1076,6 +1401,82 @@ export class AiService {
 		}
 
 		return compact;
+	}
+
+	private getPreferredModelOptionId(rawId: string, rawIdentifier?: string): string {
+		const identifier = String(rawIdentifier || '').trim();
+		if (identifier.toLowerCase().startsWith('copilot/')) {
+			return identifier;
+		}
+		return String(rawId || '').trim() || identifier;
+	}
+
+	private isAutoModelIdentifier(value: string): boolean {
+		return this.normalizeModelInput(value) === 'auto';
+	}
+
+	private isVisibleCopilotCacheEntry(entry: CachedLanguageModelEntry): boolean {
+		const metadata = entry.metadata;
+		if (!metadata || metadata.isUserSelectable !== true || metadata.targetChatSessionType) {
+			return false;
+		}
+
+		const vendor = String(metadata.vendor || '').trim().toLowerCase();
+		const identifier = String(entry.identifier || '').trim().toLowerCase();
+		return vendor === 'copilot' || identifier.startsWith('copilot/');
+	}
+
+	private normalizeVisibleModelName(name: string): string {
+		return String(name || '').trim().toLowerCase();
+	}
+
+	private shouldPreferVisibleModelOption(next: AvailableModelOption, current: AvailableModelOption): boolean {
+		const nextIsCanonical = this.isCanonicalCopilotModelIdentifier(next.id);
+		const currentIsCanonical = this.isCanonicalCopilotModelIdentifier(current.id);
+		if (nextIsCanonical !== currentIsCanonical) {
+			return nextIsCanonical;
+		}
+
+		const nextId = String(next.id || '').trim().toLowerCase();
+		const currentId = String(current.id || '').trim().toLowerCase();
+		const nextIsAlias = nextId.startsWith('copilot/copilot-');
+		const currentIsAlias = currentId.startsWith('copilot/copilot-');
+		if (nextIsAlias !== currentIsAlias) {
+			return !nextIsAlias;
+		}
+
+		return nextId.length > currentId.length;
+	}
+
+	private isCanonicalCopilotModelIdentifier(value: string): boolean {
+		return /^(gpt-[\w.-]+|o[1-9][\w.-]*|claude-[\w.-]+|gemini-[\w.-]+|grok-[\w.-]+)/i.test(
+			this.normalizeModelInput(value),
+		);
+	}
+
+	private findBestAvailableModelMatch(models: AvailableModelOption[], modelInput: string): AvailableModelOption | undefined {
+		const raw = (modelInput || '').trim();
+		const normalized = this.normalizeModelInput(raw);
+		const candidates = [raw, normalized]
+			.map(value => value.trim().toLowerCase())
+			.filter(Boolean);
+
+		const exact = models.find(model => {
+			const id = (model.id || '').trim().toLowerCase();
+			const normalizedId = this.normalizeModelInput(model.id || '').toLowerCase();
+			return candidates.some(candidate => candidate === id || candidate === normalizedId);
+		});
+		if (exact) {
+			return exact;
+		}
+
+		return models.find(model => {
+			const text = [model.id, this.normalizeModelInput(model.id || ''), model.name]
+				.filter(Boolean)
+				.join(' ')
+				.toLowerCase();
+			return candidates.some(candidate => text.includes(candidate));
+		});
 	}
 
 	private findBestModelMatch(models: vscode.LanguageModelChat[], modelInput: string): vscode.LanguageModelChat | undefined {

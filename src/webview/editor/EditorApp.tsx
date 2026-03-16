@@ -254,16 +254,25 @@ export const EditorApp: React.FC = () => {
     .filter(Boolean)
     .join(', ');
 
+  const modelOptions = useMemo(() => {
+    const items = [...availableModels];
+    const currentModel = prompt.model.trim();
+    if (currentModel && !items.some(item => item.id === currentModel)) {
+      items.unshift({ id: currentModel, name: currentModel });
+    }
+    return items;
+  }, [availableModels, prompt.model]);
+
   const selectedModelName = useMemo(() => {
     if (!prompt.model.trim()) {
       return '';
     }
-    const selected = availableModels.find(m => m.id === prompt.model.trim());
+    const selected = modelOptions.find(m => m.id === prompt.model.trim());
     if (selected) {
       return selected.name;
     }
     return prompt.model.trim();
-  }, [prompt.model, availableModels]);
+  }, [prompt.model, modelOptions]);
 
   const basicSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -1694,7 +1703,7 @@ export const EditorApp: React.FC = () => {
                   style={styles.select}
                 >
                   <option value="">{t('common.auto')}</option>
-                  {availableModels.map(m => (
+                  {modelOptions.map(m => (
                     <option key={m.id} value={m.id}>{m.name}</option>
                   ))}
                 </select>

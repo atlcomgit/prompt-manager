@@ -10,7 +10,7 @@ out-tests
 *.log
 
 # Prompt Manager memory database
-.vscode/prompt-manager/
+.vscode/prompt-manager
 
 # Prompt Manager memory database
 memory.db

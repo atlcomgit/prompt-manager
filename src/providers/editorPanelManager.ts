@@ -1159,6 +1159,75 @@ export class EditorPanelManager {
 		}
 	}
 
+	private areAvailableModelsEqual(
+		left: Array<{ id: string; name: string }>,
+		right: Array<{ id: string; name: string }>,
+	): boolean {
+		if (left.length !== right.length) {
+			return false;
+		}
+
+		return left.every((model, index) => {
+			const other = right[index];
+			return model.id === other?.id && model.name === other?.name;
+		});
+	}
+
+	private isReadyCycleActive(panelKey: string, currentPrompt: Prompt, readyBootId: string): boolean {
+		const activePromptRef = this.panelPromptRefs.get(panelKey);
+		if (activePromptRef !== currentPrompt) {
+			return false;
+		}
+
+		const activeBootId = (this.panelBootIds.get(panelKey) || '').trim();
+		if (readyBootId && activeBootId && readyBootId !== activeBootId) {
+			return false;
+		}
+
+		return true;
+	}
+
+	private scheduleAvailableModelsRefreshAfterReady(
+		panelKey: string,
+		panel: vscode.WebviewPanel,
+		currentPrompt: Prompt,
+		readyBootId: string,
+		initialModels: Array<{ id: string; name: string }>,
+	): void {
+		if (initialModels.length > 1) {
+			return;
+		}
+
+		const delaysMs = [1500, 5000];
+		let lastModels = [...initialModels];
+
+		for (const delayMs of delaysMs) {
+			setTimeout(() => {
+				void (async () => {
+					if (!this.isReadyCycleActive(panelKey, currentPrompt, readyBootId)) {
+						return;
+					}
+
+					const refreshedModels = await this.aiService.getAvailableModels();
+					if (!this.isReadyCycleActive(panelKey, currentPrompt, readyBootId)) {
+						return;
+					}
+
+					if (this.areAvailableModelsEqual(lastModels, refreshedModels)) {
+						return;
+					}
+
+					lastModels = [...refreshedModels];
+					try {
+						await panel.webview.postMessage({ type: 'availableModels', models: refreshedModels } satisfies ExtensionToWebviewMessage);
+					} catch {
+						// panel/webview might be disposed; ignore
+					}
+				})();
+			}, delayMs);
+		}
+	}
+
 	private formatSaveConflictMessage(error: unknown): string {
 		if (error instanceof Error && error.message === 'REPORT_CONFLICT') {
 			return 'Отчет был изменен во внешнем файле. Сохранение отменено, чтобы не перезаписать внешние правки.';
@@ -2299,17 +2368,7 @@ export class EditorPanelManager {
 			case 'ready': {
 				const readyBootId = (msg.bootId || '').trim();
 				const isReadyCycleStale = (): boolean => {
-					const activePromptRef = this.panelPromptRefs.get(panelKey);
-					if (activePromptRef !== currentPrompt) {
-						return true;
-					}
-
-					const activeBootId = (this.panelBootIds.get(panelKey) || '').trim();
-					if (readyBootId && activeBootId && readyBootId !== activeBootId) {
-						return true;
-					}
-
-					return false;
+					return !this.isReadyCycleActive(panelKey, currentPrompt, readyBootId);
 				};
 
 				if (isReadyCycleStale()) {
@@ -2337,7 +2396,7 @@ export class EditorPanelManager {
 				}
 
 				// Make ready initialization resilient: timebox and tolerate errors
-				let models: any[] = [];
+				let models: Array<{ id: string; name: string }> = [];
 				let skills: any[] = [];
 				let mcpTools: any[] = [];
 				let hooks: any[] = [];
@@ -2378,6 +2437,7 @@ export class EditorPanelManager {
 				postMessage(availableLanguageAndFrameworkMessages.languagesMessage);
 				postMessage(availableLanguageAndFrameworkMessages.frameworksMessage);
 				postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'open' });
+				this.scheduleAvailableModelsRefreshAfterReady(panelKey, panel, currentPrompt, readyBootId, models);
 				break;
 			}
 

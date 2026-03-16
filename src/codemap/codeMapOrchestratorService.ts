@@ -133,31 +133,6 @@ export class CodeMapOrchestratorService {
 		};
 	}
 
-	async queueTrackedBranchSnapshots(projectPaths: Map<string, string>, trackedBranches: string[]): Promise<void> {
-		if (trackedBranches.length === 0) {
-			return;
-		}
-
-		for (const [repository, projectPath] of projectPaths.entries()) {
-			for (const branchName of trackedBranches) {
-				const resolution: CodeMapBranchResolution = {
-					repository,
-					projectPath,
-					currentBranch: branchName,
-					resolvedBranchName: branchName,
-					baseBranchName: branchName,
-					branchRole: 'tracked',
-					isTrackedBranch: true,
-					hasUncommittedChanges: false,
-					resolvedHeadSha: '',
-					currentHeadSha: '',
-				};
-
-				this.queueInstruction(resolution, 'base', 'startup', getCodeMapSettings().updatePriority);
-			}
-		}
-	}
-
 	private async processQueue(): Promise<void> {
 		if (this.isProcessing) {
 			return;

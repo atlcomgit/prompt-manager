@@ -8,6 +8,37 @@ const execFileAsync = promisify(execFile);
 export class CodeMapBranchResolverService {
 	constructor(private readonly gitService: GitService) { }
 
+	async resolveTrackedBranchSnapshots(
+		projectPaths: Map<string, string>,
+		trackedBranches: string[],
+	): Promise<CodeMapBranchResolution[]> {
+		const resolutions: CodeMapBranchResolution[] = [];
+
+		for (const [repository, projectPath] of projectPaths.entries()) {
+			for (const branchName of trackedBranches) {
+				const headSha = await this.getHeadSha(projectPath, branchName);
+				if (!headSha) {
+					continue;
+				}
+
+				resolutions.push({
+					repository,
+					projectPath,
+					currentBranch: branchName,
+					resolvedBranchName: branchName,
+					baseBranchName: branchName,
+					branchRole: 'tracked',
+					isTrackedBranch: true,
+					hasUncommittedChanges: false,
+					resolvedHeadSha: headSha,
+					currentHeadSha: headSha,
+				});
+			}
+		}
+
+		return resolutions;
+	}
+
 	async resolveProjects(
 		projectPaths: Map<string, string>,
 		projectNames: string[],

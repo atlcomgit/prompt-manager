@@ -74,8 +74,7 @@ export class CodeMapChatInstructionService {
 			return;
 		}
 
-		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
-		void this.orchestrator.queueTrackedBranchSnapshots(projectPaths, settings.trackedBranches);
+		void this.queueTrackedBranchSnapshots(settings.trackedBranches, settings.updatePriority);
 	}
 
 	private shouldQueueBaseRefresh(resolution: CodeMapMaterializationTarget['resolution'], baseInstruction: CodeMapMaterializationTarget['baseInstruction']): boolean {
@@ -96,6 +95,18 @@ export class CodeMapChatInstructionService {
 
 	private getInstructionFilePath(): string {
 		return path.join(this.storageService.getStorageDirectoryPath(), 'chat-memory', CODEMAP_CHAT_INSTRUCTION_FILE_NAME);
+	}
+
+	private async queueTrackedBranchSnapshots(trackedBranches: string[], updatePriority: ReturnType<typeof getCodeMapSettings>['updatePriority']): Promise<void> {
+		if (trackedBranches.length === 0) {
+			return;
+		}
+
+		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
+		const resolutions = await this.branchResolver.resolveTrackedBranchSnapshots(projectPaths, trackedBranches);
+		for (const resolution of resolutions) {
+			this.orchestrator.queueInstruction(resolution, 'base', 'startup', updatePriority);
+		}
 	}
 }
 

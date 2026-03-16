@@ -9,6 +9,8 @@ import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { DEFAULT_COPILOT_MODEL_FAMILY, isZeroCostCopilotModelPickerCategory, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
+import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
+import { buildDescriptionGenerationUserPrompt, buildPromptFieldLanguageRule, buildTitleGenerationUserPrompt } from '../utils/aiPromptBuilders.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -91,6 +93,7 @@ export class AiService {
 
 	constructor(private readonly context?: vscode.ExtensionContext) { }
 	private sqliteBinaryPath: string | null | undefined;
+	private readonly output = getPromptManagerOutputChannel();
 
 	private modelSelector: vscode.LanguageModelChatSelector = {
 		vendor: 'copilot',
@@ -120,19 +123,19 @@ export class AiService {
 	}
 
 	/** Generate a short title from prompt content */
-	async generateTitle(content: string, globalContext?: string): Promise<string> {
-		const systemPrompt = 'You are a helpful assistant that generates short, descriptive titles for prompts. Respond with ONLY the title, nothing else. The title should be 3-7 words, in the same language as the content.';
-		const contextBlock = this.buildGlobalContextBlock(globalContext);
-		const userPrompt = `${contextBlock}Generate a short title for this prompt:\n\n${content.substring(0, 2000)}`;
-		return this.chat(systemPrompt, userPrompt, 'Промпт без названия');
+	async generateTitle(content: string): Promise<string> {
+		const locale = vscode.env.language;
+		const systemPrompt = `You are a helpful assistant that generates short, descriptive titles for prompts. Respond with ONLY the title, nothing else. The title should be 3-7 words. ${buildPromptFieldLanguageRule(locale)}`;
+		const userPrompt = buildTitleGenerationUserPrompt(content, locale);
+		return this.chat(systemPrompt, userPrompt, 'Промпт без названия', 'generate-title');
 	}
 
 	/** Generate a short description from prompt content */
-	async generateDescription(content: string, globalContext?: string): Promise<string> {
-		const systemPrompt = 'You are a helpful assistant that generates short descriptions for prompts. Respond with ONLY the description, nothing else. The description should be 1-2 sentences, in the same language as the content.';
-		const contextBlock = this.buildGlobalContextBlock(globalContext);
-		const userPrompt = `${contextBlock}Generate a short description for this prompt:\n\n${content.substring(0, 2000)}`;
-		return this.chat(systemPrompt, userPrompt, '');
+	async generateDescription(content: string): Promise<string> {
+		const locale = vscode.env.language;
+		const systemPrompt = `You are a helpful assistant that generates short descriptions for prompts. Respond with ONLY the description, nothing else. The description should be 1-2 sentences. ${buildPromptFieldLanguageRule(locale)}`;
+		const userPrompt = buildDescriptionGenerationUserPrompt(content, locale);
+		return this.chat(systemPrompt, userPrompt, '', 'generate-description');
 	}
 
 	/** Generate a URL-friendly slug from title or description */
@@ -147,7 +150,7 @@ export class AiService {
 		const contextBlock = this.buildGlobalContextBlock(globalContext);
 		const userPrompt = `${contextBlock}Convert to slug: "${input}"`;
 
-		const result = await this.chat(systemPrompt, userPrompt, '');
+		const result = await this.chat(systemPrompt, userPrompt, '', 'generate-slug');
 		if (result) {
 			return this.sanitizeSlug(result);
 		}
@@ -184,14 +187,14 @@ export class AiService {
 			? `Project context snapshot:\n${(projectContext || '').trim().slice(0, 6000)}\n\n`
 			: '';
 		const userPrompt = `${contextBlock}Improve this prompt text:\n\n${normalized.substring(0, 12000)}`;
-		return this.chat(systemPrompt, userPrompt, normalized);
+		return this.chat(systemPrompt, userPrompt, normalized, 'improve-prompt-text');
 	}
 
 	/** Detect programming languages from content */
 	async detectLanguages(content: string): Promise<string[]> {
 		const systemPrompt = 'You detect programming languages mentioned or implied in a prompt. Return a JSON array of language names. Example: ["TypeScript", "Python"]. Return ONLY the JSON array.';
 		const userPrompt = content.substring(0, 2000);
-		const result = await this.chat(systemPrompt, userPrompt, '[]');
+		const result = await this.chat(systemPrompt, userPrompt, '[]', 'detect-languages');
 		try {
 			return JSON.parse(result);
 		} catch {
@@ -203,7 +206,7 @@ export class AiService {
 	async detectFrameworks(content: string): Promise<string[]> {
 		const systemPrompt = 'You detect frameworks and libraries mentioned or implied in a prompt. Return a JSON array. Example: ["React", "Express"]. Return ONLY the JSON array.';
 		const userPrompt = content.substring(0, 2000);
-		const result = await this.chat(systemPrompt, userPrompt, '[]');
+		const result = await this.chat(systemPrompt, userPrompt, '[]', 'detect-frameworks');
 		try {
 			return JSON.parse(result);
 		} catch {
@@ -275,7 +278,7 @@ export class AiService {
 			`Staged-изменения для анализа:\n${(input.stagedChangesSummary || '').trim().slice(0, 24000)}`,
 		].filter(Boolean).join('\n');
 
-		return this.chat(systemPrompt, userPrompt, fallback);
+		return this.chat(systemPrompt, userPrompt, fallback, 'generate-implementation-report');
 	}
 
 	async generateCodeMapAreaDescription(
@@ -330,7 +333,7 @@ export class AiService {
 			systemPrompt,
 			userPrompt,
 			fallback,
-			{ allowAnyCopilotFallback: false },
+			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-area-description' },
 		);
 	}
 
@@ -396,13 +399,13 @@ export class AiService {
 			systemPrompt,
 			userPrompt,
 			fallback,
-			{ allowAnyCopilotFallback: false },
+			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-area-description-batch' },
 		);
 	}
 
 	/** Generic chat with Language Model API */
-	private async chat(systemPrompt: string, userPrompt: string, fallback: string): Promise<string> {
-		return this.chatWithSelector(this.modelSelector, systemPrompt, userPrompt, fallback);
+	private async chat(systemPrompt: string, userPrompt: string, fallback: string, requestLabel: string): Promise<string> {
+		return this.chatWithSelector(this.modelSelector, systemPrompt, userPrompt, fallback, { requestLabel });
 	}
 
 	private async chatWithSelector(
@@ -411,26 +414,32 @@ export class AiService {
 		userPrompt: string,
 		fallback: string,
 		options?: {
-			allowAnyCopilotFallback?: boolean;
+			allowFreeCopilotFallback?: boolean;
+			requestLabel?: string;
 		},
 	): Promise<string> {
+		const requestLabel = options?.requestLabel || 'generic-chat';
 		try {
-			const allowAnyCopilotFallback = options?.allowAnyCopilotFallback ?? true;
+			const allowFreeCopilotFallback = options?.allowFreeCopilotFallback ?? true;
 			const [model] = await vscode.lm.selectChatModels(selector);
 			if (!model) {
-				if (!allowAnyCopilotFallback) {
+				if (!allowFreeCopilotFallback) {
+					this.logAiRequest(`label=${requestLabel} result=no-model selector="${this.formatSelectorForLog(selector)}" fallback=disabled`);
 					return fallback;
 				}
 
-				// Fallback: try any available model
-				const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-				if (models.length === 0) {
+				const fallbackModel = await this.selectFreeFallbackModel(selector);
+				if (!fallbackModel) {
+					this.logAiRequest(`label=${requestLabel} result=no-free-model selector="${this.formatSelectorForLog(selector)}" fallback=free-only`);
 					return fallback;
 				}
-				return this.chatWithModel(models[0], systemPrompt, userPrompt, fallback);
+				this.logAiRequest(`label=${requestLabel} result=free-fallback selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(fallbackModel)}"`);
+				return this.chatWithModel(fallbackModel, systemPrompt, userPrompt, fallback, requestLabel, selector);
 			}
-			return this.chatWithModel(model, systemPrompt, userPrompt, fallback);
+			return this.chatWithModel(model, systemPrompt, userPrompt, fallback, requestLabel, selector);
 		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.logAiRequest(`label=${requestLabel} result=selector-error selector="${this.formatSelectorForLog(selector)}" error="${message}"`);
 			console.error('[PromptManager] AI error:', err);
 			return fallback;
 		}
@@ -440,9 +449,12 @@ export class AiService {
 		model: vscode.LanguageModelChat,
 		systemPrompt: string,
 		userPrompt: string,
-		fallback: string
+		fallback: string,
+		requestLabel: string,
+		selector: vscode.LanguageModelChatSelector,
 	): Promise<string> {
 		try {
+			this.logAiRequest(`label=${requestLabel} result=send-request selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(model)}"`);
 			const messages = [
 				vscode.LanguageModelChatMessage.User(systemPrompt),
 				vscode.LanguageModelChatMessage.User(userPrompt),
@@ -453,9 +465,67 @@ export class AiService {
 				result += chunk;
 			}
 			return result.trim() || fallback;
-		} catch {
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.logAiRequest(`label=${requestLabel} result=send-error selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(model)}" error="${message}"`);
 			return fallback;
 		}
+	}
+
+	private async selectFreeFallbackModel(
+		selector: vscode.LanguageModelChatSelector,
+	): Promise<vscode.LanguageModelChat | null> {
+		const requestedModel = String(selector.id || selector.family || '').trim();
+		const freeModels = await this.getAvailableFreeModels();
+		if (freeModels.length === 0) {
+			return null;
+		}
+
+		const allModels = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+		if (allModels.length === 0) {
+			return null;
+		}
+
+		const preferred = requestedModel
+			? this.findBestAvailableModelMatch(freeModels, requestedModel)
+			: undefined;
+		const candidates = preferred
+			? [preferred, ...freeModels.filter(model => model.id !== preferred.id)]
+			: freeModels;
+
+		for (const candidate of candidates) {
+			const matched = this.findBestModelMatch(allModels, candidate.id);
+			if (matched) {
+				return matched;
+			}
+		}
+
+		return null;
+	}
+
+	private logAiRequest(message: string): void {
+		this.output.appendLine(`[ai-request] ${message}`);
+	}
+
+	private formatSelectorForLog(selector: vscode.LanguageModelChatSelector): string {
+		const parts = [
+			selector.vendor ? `vendor=${selector.vendor}` : '',
+			selector.id ? `id=${selector.id}` : '',
+			selector.family ? `family=${selector.family}` : '',
+			selector.version ? `version=${selector.version}` : '',
+		].filter(Boolean);
+		return parts.join(', ') || 'empty-selector';
+	}
+
+	private formatModelForLog(model: vscode.LanguageModelChat): string {
+		const parts = [
+			model.vendor ? `vendor=${model.vendor}` : '',
+			model.id ? `id=${model.id}` : '',
+			model.family ? `family=${model.family}` : '',
+			model.name ? `name=${model.name}` : '',
+			(model as { identifier?: string }).identifier ? `identifier=${(model as { identifier?: string }).identifier}` : '',
+		].filter(Boolean);
+		return parts.join(', ') || 'unknown-model';
 	}
 
 	/** Sanitize a string into a URL-friendly slug */
@@ -1155,7 +1225,7 @@ export class AiService {
 			? `Global agent context:\n${(globalContext || '').trim().slice(0, 1500)}\n\n`
 			: '';
 		const userPrompt = `${contextBlock}Continue this prompt text:\n\n${textBefore.slice(-1500)}`;
-		return this.chat(systemPrompt, userPrompt, '');
+		return this.chat(systemPrompt, userPrompt, '', 'inline-suggestion');
 	}
 
 	/** Generate multiple suggestion variants for prompt text */
@@ -1165,7 +1235,7 @@ export class AiService {
 			? `Global agent context:\n${(globalContext || '').trim().slice(0, 1500)}\n\n`
 			: '';
 		const userPrompt = `${contextBlock}Continue this prompt text (${count} variants):\n\n${textBefore.slice(-1500)}`;
-		const result = await this.chat(systemPrompt, userPrompt, '[]');
+		const result = await this.chat(systemPrompt, userPrompt, '[]', 'inline-suggestion-variants');
 		try {
 			const parsed = JSON.parse(result);
 			if (Array.isArray(parsed) && parsed.length > 0) {

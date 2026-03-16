@@ -859,7 +859,6 @@ export class EditorPanelManager {
 
 	private async persistPromptSnapshotForSwitch(snapshot: Prompt, baseSnapshot?: Prompt | null, panelKey?: string): Promise<Prompt | null> {
 		const promptToSave: Prompt = JSON.parse(JSON.stringify(snapshot));
-		const globalContext = this.stateService.getGlobalAgentContext();
 		const saveStateId = (promptToSave.id || '__new__').trim() || '__new__';
 		const previousPromptId = (promptToSave.id || '').trim() || undefined;
 		if (!promptToSave.id && !this.hasPromptDataWithoutId(promptToSave)) {
@@ -872,10 +871,10 @@ export class EditorPanelManager {
 		try {
 
 			if (!promptToSave.title && promptToSave.content) {
-				promptToSave.title = await this.aiService.generateTitle(promptToSave.content, globalContext);
+				promptToSave.title = await this.aiService.generateTitle(promptToSave.content);
 			}
 			if (!promptToSave.description && promptToSave.content) {
-				promptToSave.description = await this.aiService.generateDescription(promptToSave.content, globalContext);
+				promptToSave.description = await this.aiService.generateDescription(promptToSave.content);
 			}
 			const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
 			await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, baseSnapshot || null);
@@ -2220,13 +2219,12 @@ export class EditorPanelManager {
 						: basePromptSnapshot
 							? JSON.parse(JSON.stringify(basePromptSnapshot))
 							: createDefaultPrompt('');
-				const globalContext = this.stateService.getGlobalAgentContext();
 				try {
 					if (!dirtySnapshot.title && dirtySnapshot.content) {
-						dirtySnapshot.title = await this.aiService.generateTitle(dirtySnapshot.content, globalContext);
+						dirtySnapshot.title = await this.aiService.generateTitle(dirtySnapshot.content);
 					}
 					if (!dirtySnapshot.description && dirtySnapshot.content) {
-						dirtySnapshot.description = await this.aiService.generateDescription(dirtySnapshot.content, globalContext);
+						dirtySnapshot.description = await this.aiService.generateDescription(dirtySnapshot.content);
 					}
 					const renameFromId = await this.ensurePromptIdMatchesTitle(dirtySnapshot, dirtySnapshot.id || undefined);
 					await this.guardReportOverwriteBeforeSave(panelKey, dirtySnapshot, basePromptSnapshot);
@@ -2459,7 +2457,6 @@ export class EditorPanelManager {
 					let promptToSave = msg.prompt;
 					await this.awaitPendingReportPersist(promptToSave.id || currentPrompt.id);
 					const saveSource = msg.source || 'manual';
-					const globalContext = this.stateService.getGlobalAgentContext();
 					const previousPromptId = (currentPrompt.id || msg.prompt.id || '').trim() || undefined;
 
 					const isUntitledWithEnoughContent = promptToSave.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
@@ -2474,10 +2471,10 @@ export class EditorPanelManager {
 					if (needsTitle || needsDescription) {
 						const [generatedTitle, generatedDescription] = await Promise.all([
 							needsTitle
-								? this.withTimeout(this.aiService.generateTitle(promptToSave.content, globalContext), 3000, '')
+								? this.withTimeout(this.aiService.generateTitle(promptToSave.content), 3000, '')
 								: Promise.resolve(''),
 							needsDescription
-								? this.withTimeout(this.aiService.generateDescription(promptToSave.content, globalContext), 3000, '')
+								? this.withTimeout(this.aiService.generateDescription(promptToSave.content), 3000, '')
 								: Promise.resolve(''),
 						]);
 						if (needsTitle && generatedTitle) {
@@ -2708,13 +2705,13 @@ export class EditorPanelManager {
 			}
 
 			case 'generateTitle': {
-				const title = await this.aiService.generateTitle(msg.content, this.stateService.getGlobalAgentContext());
+				const title = await this.aiService.generateTitle(msg.content);
 				postMessage({ type: 'generatedTitle', title });
 				break;
 			}
 
 			case 'generateDescription': {
-				const description = await this.aiService.generateDescription(msg.content, this.stateService.getGlobalAgentContext());
+				const description = await this.aiService.generateDescription(msg.content);
 				postMessage({ type: 'generatedDescription', description });
 				break;
 			}

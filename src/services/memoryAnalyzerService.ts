@@ -6,6 +6,7 @@
 
 import * as vscode from 'vscode';
 import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
+import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import type {
 	HookCommitPayload,
 	MemoryAnalysis,
@@ -20,6 +21,8 @@ import type {
 } from '../types/memory.js';
 
 export class MemoryAnalyzerService {
+	private readonly output = getPromptManagerOutputChannel();
+
 	/** Selector for the AI model */
 	private modelSelector: vscode.LanguageModelChatSelector = {
 		vendor: 'copilot',
@@ -64,7 +67,7 @@ export class MemoryAnalyzerService {
 		const analysisInput = this.buildAnalysisInput(payload, truncatedDiff, depth);
 
 		// Run AI analysis
-		const { rawResult, usedModel } = await this.runAnalysis(analysisInput, depth);
+		const { rawResult, usedModel } = await this.runAnalysis(analysisInput, depth, payload.sha);
 
 		// Build MemoryAnalysis from raw result
 		const analysis: MemoryAnalysis = {
@@ -199,10 +202,12 @@ export class MemoryAnalyzerService {
 	private async runAnalysis(
 		input: string,
 		depth: MemoryAnalysisDepth,
+		commitSha?: string,
 	): Promise<{ rawResult: any; usedModel: string }> {
 		const systemPrompt = this.buildSystemPrompt(depth);
 		const configuredModel = String(this.modelSelector.family || '').trim();
 		if (!configuredModel) {
+			this.logAiRequest(`label=memory.commit-analysis commit=${this.shortenCommitSha(commitSha)} result=no-configured-model`);
 			return { rawResult: this.fallbackAnalysis(), usedModel: '' };
 		}
 
@@ -210,13 +215,16 @@ export class MemoryAnalyzerService {
 			const [model] = await vscode.lm.selectChatModels(this.modelSelector);
 			if (model) {
 				return {
-					rawResult: await this.chatJson(model, systemPrompt, input),
+					rawResult: await this.chatJson(model, systemPrompt, input, commitSha),
 					usedModel: normalizeCopilotModelFamily(model.family || model.id || configuredModel),
 				};
 			}
 
+			this.logAiRequest(`label=memory.commit-analysis commit=${this.shortenCommitSha(commitSha)} result=no-model selector="${this.formatSelectorForLog()}"`);
 			return { rawResult: this.fallbackAnalysis(), usedModel: configuredModel };
 		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.logAiRequest(`label=memory.commit-analysis commit=${this.shortenCommitSha(commitSha)} result=selector-error selector="${this.formatSelectorForLog()}" error="${message}"`);
 			console.error('[PromptManager/Memory] AI analysis error:', err);
 			return { rawResult: this.fallbackAnalysis(), usedModel: configuredModel };
 		}
@@ -263,8 +271,10 @@ export class MemoryAnalyzerService {
 		model: vscode.LanguageModelChat,
 		systemPrompt: string,
 		userPrompt: string,
+		commitSha?: string,
 	): Promise<any> {
 		try {
+			this.logAiRequest(`label=memory.commit-analysis commit=${this.shortenCommitSha(commitSha)} result=send-request selector="${this.formatSelectorForLog()}" model="${this.formatModelForLog(model)}"`);
 			const messages = [
 				vscode.LanguageModelChatMessage.User(systemPrompt),
 				vscode.LanguageModelChatMessage.User(userPrompt),
@@ -284,9 +294,40 @@ export class MemoryAnalyzerService {
 
 			return JSON.parse(result);
 		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.logAiRequest(`label=memory.commit-analysis commit=${this.shortenCommitSha(commitSha)} result=send-error selector="${this.formatSelectorForLog()}" model="${this.formatModelForLog(model)}" error="${message}"`);
 			console.error('[PromptManager/Memory] Failed to parse AI analysis response:', err);
 			return this.fallbackAnalysis();
 		}
+	}
+
+	private logAiRequest(message: string): void {
+		this.output.appendLine(`[ai-request] ${message}`);
+	}
+
+	private formatSelectorForLog(): string {
+		const parts = [
+			this.modelSelector.vendor ? `vendor=${this.modelSelector.vendor}` : '',
+			this.modelSelector.id ? `id=${this.modelSelector.id}` : '',
+			this.modelSelector.family ? `family=${this.modelSelector.family}` : '',
+			this.modelSelector.version ? `version=${this.modelSelector.version}` : '',
+		].filter(Boolean);
+		return parts.join(', ') || 'empty-selector';
+	}
+
+	private formatModelForLog(model: vscode.LanguageModelChat): string {
+		const parts = [
+			model.vendor ? `vendor=${model.vendor}` : '',
+			model.id ? `id=${model.id}` : '',
+			model.family ? `family=${model.family}` : '',
+			model.name ? `name=${model.name}` : '',
+			(model as { identifier?: string }).identifier ? `identifier=${(model as { identifier?: string }).identifier}` : '',
+		].filter(Boolean);
+		return parts.join(', ') || 'unknown-model';
+	}
+
+	private shortenCommitSha(commitSha?: string): string {
+		return String(commitSha || '').trim().slice(0, 7) || '-';
 	}
 
 	/** Fallback analysis when AI is unavailable */

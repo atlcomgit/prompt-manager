@@ -492,10 +492,31 @@
         },
         "promptManager.codemap.batchContextMaxChars": {
           "type": "number",
-          "description": "Maximum total AI context size for one batched codemap area-description request.",
+          "description": "Estimated maximum total context size for one codemap AI batch. Increase it to send more code in one request, or lower it to keep batches tighter and more focused.",
           "default": 24000,
           "minimum": 4000,
           "maximum": 200000
+        },
+        "promptManager.codemap.areaBatchMaxItems": {
+          "type": "number",
+          "description": "Maximum number of code areas packed into one AI batch during area description generation. Lower values isolate areas better; higher values reduce the number of requests.",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 6
+        },
+        "promptManager.codemap.symbolBatchMaxItems": {
+          "type": "number",
+          "description": "Maximum number of code symbols (classes, methods, functions, constants) packed into one AI batch for detailed file-element descriptions.",
+          "default": 24,
+          "minimum": 1,
+          "maximum": 200
+        },
+        "promptManager.codemap.symbolBatchMaxFiles": {
+          "type": "number",
+          "description": "Maximum number of different files that may be mixed into one AI symbol-description batch. Lower values keep the request focused on fewer files.",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 40
         },
         "promptManager.codemap.updatePriority": {
           "type": "string",

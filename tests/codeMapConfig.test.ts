@@ -52,6 +52,20 @@ test('getCodeMapSettingsFromConfiguration normalizes stored update priority valu
 	assert.equal(settings.updatePriority, 'high');
 });
 
+test('getCodeMapSettingsFromConfiguration clamps batching limits to safe ranges', () => {
+	const config = new FakeConfig({
+		areaBatchMaxItems: 99,
+		symbolBatchMaxItems: 0,
+		symbolBatchMaxFiles: -5,
+	});
+
+	const settings = getCodeMapSettingsFromConfiguration(config);
+
+	assert.equal(settings.areaBatchMaxItems, 6);
+	assert.equal(settings.symbolBatchMaxItems, 1);
+	assert.equal(settings.symbolBatchMaxFiles, 1);
+});
+
 test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves workspace scope and normalizes returned settings', async () => {
 	const config = new FakeConfig(
 		{
@@ -71,6 +85,9 @@ test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves works
 			trackedBranches: [' main ', '', 'dev', 'main'],
 			updatePriority: 'high',
 			notificationsEnabled: false,
+			areaBatchMaxItems: 4,
+			symbolBatchMaxItems: 18,
+			symbolBatchMaxFiles: 5,
 		},
 		async (key, value, scope) => {
 			updates.push({ key, value, scope });
@@ -81,10 +98,16 @@ test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves works
 	assert.deepEqual(updates, [
 		{ key: 'trackedBranches', value: ['main', 'dev'], scope: 'workspace' },
 		{ key: 'notifications.enabled', value: false, scope: 'global' },
+		{ key: 'areaBatchMaxItems', value: 4, scope: 'global' },
+		{ key: 'symbolBatchMaxItems', value: 18, scope: 'global' },
+		{ key: 'symbolBatchMaxFiles', value: 5, scope: 'global' },
 		{ key: 'updatePriority', value: 'higher', scope: 'workspace' },
 	]);
 	assert.deepEqual(settings.trackedBranches, ['main', 'dev']);
 	assert.equal(settings.notificationsEnabled, false);
+	assert.equal(settings.areaBatchMaxItems, 4);
+	assert.equal(settings.symbolBatchMaxItems, 18);
+	assert.equal(settings.symbolBatchMaxFiles, 5);
 	assert.equal(settings.updatePriority, 'high');
 });
 

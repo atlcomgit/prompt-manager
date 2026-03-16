@@ -36,6 +36,9 @@ export const DEFAULT_CODEMAP_SETTINGS: CodeMapSettings = {
 	blockDescriptionMode: 'medium',
 	blockMaxChars: 2000,
 	batchContextMaxChars: 24000,
+	areaBatchMaxItems: 6,
+	symbolBatchMaxItems: 24,
+	symbolBatchMaxFiles: 8,
 	updatePriority: 'normal',
 	aiDelayMs: 1000,
 	startupDelayMs: 15000,
@@ -59,6 +62,24 @@ export function getCodeMapSettingsFromConfiguration(config: Pick<CodeMapConfigur
 		blockDescriptionMode: config?.get<'short' | 'medium' | 'long'>('blockDescriptionMode', DEFAULT_CODEMAP_SETTINGS.blockDescriptionMode) ?? DEFAULT_CODEMAP_SETTINGS.blockDescriptionMode,
 		blockMaxChars: Math.max(200, config?.get<number>('blockMaxChars', DEFAULT_CODEMAP_SETTINGS.blockMaxChars) ?? DEFAULT_CODEMAP_SETTINGS.blockMaxChars),
 		batchContextMaxChars: Math.max(4000, config?.get<number>('batchContextMaxChars', DEFAULT_CODEMAP_SETTINGS.batchContextMaxChars) ?? DEFAULT_CODEMAP_SETTINGS.batchContextMaxChars),
+		areaBatchMaxItems: normalizeCodeMapInteger(
+			config?.get<number>('areaBatchMaxItems', DEFAULT_CODEMAP_SETTINGS.areaBatchMaxItems) ?? DEFAULT_CODEMAP_SETTINGS.areaBatchMaxItems,
+			DEFAULT_CODEMAP_SETTINGS.areaBatchMaxItems,
+			1,
+			6,
+		),
+		symbolBatchMaxItems: normalizeCodeMapInteger(
+			config?.get<number>('symbolBatchMaxItems', DEFAULT_CODEMAP_SETTINGS.symbolBatchMaxItems) ?? DEFAULT_CODEMAP_SETTINGS.symbolBatchMaxItems,
+			DEFAULT_CODEMAP_SETTINGS.symbolBatchMaxItems,
+			1,
+			200,
+		),
+		symbolBatchMaxFiles: normalizeCodeMapInteger(
+			config?.get<number>('symbolBatchMaxFiles', DEFAULT_CODEMAP_SETTINGS.symbolBatchMaxFiles) ?? DEFAULT_CODEMAP_SETTINGS.symbolBatchMaxFiles,
+			DEFAULT_CODEMAP_SETTINGS.symbolBatchMaxFiles,
+			1,
+			40,
+		),
 		updatePriority: normalizePriority(config?.get<string>('updatePriority', DEFAULT_CODEMAP_SETTINGS.updatePriority) ?? DEFAULT_CODEMAP_SETTINGS.updatePriority),
 		aiDelayMs: Math.max(0, config?.get<number>('aiDelayMs', DEFAULT_CODEMAP_SETTINGS.aiDelayMs) ?? DEFAULT_CODEMAP_SETTINGS.aiDelayMs),
 		startupDelayMs: Math.max(0, config?.get<number>('startupDelayMs', DEFAULT_CODEMAP_SETTINGS.startupDelayMs) ?? DEFAULT_CODEMAP_SETTINGS.startupDelayMs),
@@ -103,16 +124,25 @@ export async function saveCodeMapSettingsToConfiguration(
 		await updateValue('aiModel', normalizeModelFamily(settings.aiModel), resolveSettingScope(config, 'aiModel'));
 	}
 	if (settings.instructionMaxChars !== undefined) {
-		await updateValue('instructionMaxChars', settings.instructionMaxChars, resolveSettingScope(config, 'instructionMaxChars'));
+		await updateValue('instructionMaxChars', Math.max(5000, Math.floor(settings.instructionMaxChars)), resolveSettingScope(config, 'instructionMaxChars'));
 	}
 	if (settings.blockDescriptionMode !== undefined) {
 		await updateValue('blockDescriptionMode', settings.blockDescriptionMode, resolveSettingScope(config, 'blockDescriptionMode'));
 	}
 	if (settings.blockMaxChars !== undefined) {
-		await updateValue('blockMaxChars', settings.blockMaxChars, resolveSettingScope(config, 'blockMaxChars'));
+		await updateValue('blockMaxChars', Math.max(200, Math.floor(settings.blockMaxChars)), resolveSettingScope(config, 'blockMaxChars'));
 	}
 	if (settings.batchContextMaxChars !== undefined) {
-		await updateValue('batchContextMaxChars', settings.batchContextMaxChars, resolveSettingScope(config, 'batchContextMaxChars'));
+		await updateValue('batchContextMaxChars', Math.max(4000, Math.floor(settings.batchContextMaxChars)), resolveSettingScope(config, 'batchContextMaxChars'));
+	}
+	if (settings.areaBatchMaxItems !== undefined) {
+		await updateValue('areaBatchMaxItems', normalizeCodeMapInteger(settings.areaBatchMaxItems, DEFAULT_CODEMAP_SETTINGS.areaBatchMaxItems, 1, 6), resolveSettingScope(config, 'areaBatchMaxItems'));
+	}
+	if (settings.symbolBatchMaxItems !== undefined) {
+		await updateValue('symbolBatchMaxItems', normalizeCodeMapInteger(settings.symbolBatchMaxItems, DEFAULT_CODEMAP_SETTINGS.symbolBatchMaxItems, 1, 200), resolveSettingScope(config, 'symbolBatchMaxItems'));
+	}
+	if (settings.symbolBatchMaxFiles !== undefined) {
+		await updateValue('symbolBatchMaxFiles', normalizeCodeMapInteger(settings.symbolBatchMaxFiles, DEFAULT_CODEMAP_SETTINGS.symbolBatchMaxFiles, 1, 40), resolveSettingScope(config, 'symbolBatchMaxFiles'));
 	}
 	if (settings.updatePriority !== undefined) {
 		const value = settings.updatePriority === 'low' ? 'lower' : settings.updatePriority === 'high' ? 'higher' : 'normal';
@@ -162,6 +192,14 @@ function normalizePriority(value: string): CodeMapSettings['updatePriority'] {
 
 function normalizeModelFamily(value: string): string {
 	return normalizeOptionalCopilotModelFamily(value);
+}
+
+function normalizeCodeMapInteger(value: number, fallback: number, min: number, max: number): number {
+	if (!Number.isFinite(value)) {
+		return fallback;
+	}
+
+	return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
 function getVscodeApi(): VscodeApi | null {

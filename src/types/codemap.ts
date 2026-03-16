@@ -39,6 +39,9 @@ export interface CodeMapSettings {
 	blockDescriptionMode: CodeMapBlockDescriptionMode;
 	blockMaxChars: number;
 	batchContextMaxChars: number;
+	areaBatchMaxItems: number;
+	symbolBatchMaxItems: number;
+	symbolBatchMaxFiles: number;
 	updatePriority: CodeMapUpdatePriority;
 	aiDelayMs: number;
 	startupDelayMs: number;

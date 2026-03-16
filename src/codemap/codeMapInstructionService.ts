@@ -18,6 +18,7 @@ const MAX_SYMBOLS_PER_FILE = 10;
 const MAX_RELATIONS = 24;
 const MAX_RECENT_CHANGES = 10;
 const MAX_FILE_SUMMARY_COUNT = 36;
+const MAX_SYMBOL_SNIPPET_CHARS = 900;
 const ANONYMOUS_CLASS_SYMBOL_NAME = '__anonymous_class__';
 
 interface PackageManifest {
@@ -73,6 +74,51 @@ interface FileSummary {
 	role: string;
 	symbols: FileSymbolSummary[];
 	imports: string[];
+}
+
+interface PreparedFileSymbolSummary extends FileSymbolSummary {
+	id: string;
+	filePath: string;
+	fileRole: string;
+	excerpt: string;
+	fallbackDescription: string;
+}
+
+interface PreparedFileSummary extends FileSummary {
+	symbols: PreparedFileSymbolSummary[];
+}
+
+interface CodeMapSymbolBatchItem {
+	id: string;
+	filePath: string;
+	fileRole: string;
+	kind: string;
+	name: string;
+	signature: string;
+	excerpt: string;
+	fallbackDescription: string;
+}
+
+interface RoutineSignatureInfo {
+	params: string[];
+	returnType: string;
+}
+
+interface RoutineBodySignals {
+	hasBranches: boolean;
+	hasLoops: boolean;
+	hasAssertions: boolean;
+	hasAwait: boolean;
+	hasThrows: boolean;
+	returnsValue: boolean;
+	directReturnParam: string;
+	containerClasses: string[];
+	callTargets: string[];
+	instantiatedClasses: string[];
+	touchesPersistence: boolean;
+	buildsResponse: boolean;
+	validatesInput: boolean;
+	dispatchesWork: boolean;
 }
 
 interface ProjectCodeDescription {
@@ -243,7 +289,7 @@ export class CodeMapInstructionService {
 				fallback: describeArea(areaEntry.area, representativeFiles, symbols, isRussianLocale),
 			};
 		});
-		const areaBatches = buildAreaDescriptionBatches(preparedAreas, settings.batchContextMaxChars);
+		const areaBatches = buildAreaDescriptionBatches(preparedAreas, settings.batchContextMaxChars, settings.areaBatchMaxItems);
 		onProgress?.({
 			stage: 'describing-areas',
 			detail: formatAreaPreparationDetail(isRussianLocale, preparedAreas.length, analysisFiles.length, areaBatches.length, aiModel),
@@ -258,6 +304,7 @@ export class CodeMapInstructionService {
 			mode: settings.blockDescriptionMode,
 			maxChars: settings.blockMaxChars,
 			batchContextMaxChars: settings.batchContextMaxChars,
+			maxItemsPerBatch: settings.areaBatchMaxItems,
 			areas: preparedAreas,
 			onProgress,
 		});
@@ -270,7 +317,7 @@ export class CodeMapInstructionService {
 		}));
 
 		const detailFiles = selectFilesForDetailedSummary(analysisFiles);
-		const fileSummaries: FileSummary[] = [];
+		const preparedFileSummaries: PreparedFileSummary[] = [];
 		if (detailFiles.length > 0) {
 			onProgress?.({
 				stage: 'describing-files',
@@ -282,7 +329,7 @@ export class CodeMapInstructionService {
 			});
 		}
 		for (const [index, filePath] of detailFiles.entries()) {
-			fileSummaries.push(buildFileSummary(filePath, fileTexts.get(filePath) || '', isRussianLocale));
+			preparedFileSummaries.push(buildPreparedFileSummary(filePath, fileTexts.get(filePath) || '', isRussianLocale));
 			onProgress?.({
 				stage: 'describing-files',
 				detail: isRussianLocale
@@ -292,6 +339,33 @@ export class CodeMapInstructionService {
 				total: detailFiles.length,
 			});
 		}
+		const symbolDescriptionsById = await this.buildFileSymbolDescriptions({
+			projectPath,
+			ref,
+			locale,
+			aiModel,
+			mode: settings.blockDescriptionMode,
+			maxChars: Math.min(settings.blockMaxChars, 600),
+			batchContextMaxChars: settings.batchContextMaxChars,
+			maxItemsPerBatch: settings.symbolBatchMaxItems,
+			maxFilesPerBatch: settings.symbolBatchMaxFiles,
+			files: preparedFileSummaries,
+			onProgress,
+		});
+		const fileSummaries: FileSummary[] = preparedFileSummaries.map(file => ({
+			path: file.path,
+			lineCount: file.lineCount,
+			role: file.role,
+			imports: [...file.imports],
+			symbols: file.symbols.map(symbol => ({
+				kind: symbol.kind,
+				name: symbol.name,
+				signature: symbol.signature,
+				line: symbol.line,
+				column: symbol.column,
+				description: symbolDescriptionsById.get(symbol.id) || symbol.description,
+			})),
+		}));
 		const relations = buildRelations(fileSummaries, isRussianLocale);
 		onProgress?.({
 			stage: 'collecting-history',
@@ -321,6 +395,7 @@ export class CodeMapInstructionService {
 		mode: 'short' | 'medium' | 'long';
 		maxChars: number;
 		batchContextMaxChars: number;
+		maxItemsPerBatch: number;
 		areas: PreparedCodeMapAreaDescription[];
 		onProgress?: (progress: CodeMapGenerationProgress) => void;
 	}): Promise<Map<string, string>> {
@@ -342,7 +417,7 @@ export class CodeMapInstructionService {
 			return descriptions;
 		}
 
-		const batches = buildAreaDescriptionBatches(input.areas, input.batchContextMaxChars);
+		const batches = buildAreaDescriptionBatches(input.areas, input.batchContextMaxChars, input.maxItemsPerBatch);
 		let completed = 0;
 
 		for (const [batchIndex, batch] of batches.entries()) {
@@ -391,6 +466,96 @@ export class CodeMapInstructionService {
 					detail: formatAreaCompletionDetail(input.locale.toLowerCase().startsWith('ru'), completed, input.areas.length, area.area, usedFallback || !normalized),
 					completed,
 					total: input.areas.length,
+				});
+			}
+		}
+
+		return descriptions;
+	}
+
+	private async buildFileSymbolDescriptions(input: {
+		projectPath: string;
+		ref: string;
+		locale: string;
+		aiModel: string;
+		mode: 'short' | 'medium' | 'long';
+		maxChars: number;
+		batchContextMaxChars: number;
+		maxItemsPerBatch: number;
+		maxFilesPerBatch: number;
+		files: PreparedFileSummary[];
+		onProgress?: (progress: CodeMapGenerationProgress) => void;
+	}): Promise<Map<string, string>> {
+		const descriptions = new Map<string, string>();
+		const isRussianLocale = input.locale.toLowerCase().startsWith('ru');
+		const items: CodeMapSymbolBatchItem[] = input.files.flatMap(file => file.symbols.map(symbol => ({
+			id: symbol.id,
+			filePath: file.path,
+			fileRole: file.role,
+			kind: symbol.kind,
+			name: symbol.name,
+			signature: symbol.signature,
+			excerpt: symbol.excerpt,
+			fallbackDescription: symbol.description,
+		})));
+
+		if (items.length === 0 || !this.aiService || typeof (this.aiService as { generateCodeMapSymbolDescriptionsBatch?: unknown }).generateCodeMapSymbolDescriptionsBatch !== 'function') {
+			return descriptions;
+		}
+
+		const batches = buildSymbolDescriptionBatches(items, input.batchContextMaxChars, input.maxItemsPerBatch, input.maxFilesPerBatch);
+		input.onProgress?.({
+			stage: 'describing-files',
+			detail: isRussianLocale
+				? `Подготавливаются AI-батчи описаний символов: ${items.length} элементов, ${batches.length} батчей, модель ${input.aiModel}`
+				: `Preparing AI symbol-description batches: ${items.length} items, ${batches.length} batches, model ${input.aiModel}`,
+			completed: 0,
+			total: items.length,
+		});
+
+		let completed = 0;
+		for (const [batchIndex, batch] of batches.entries()) {
+			input.onProgress?.({
+				stage: 'describing-files',
+				detail: formatSymbolBatchStartDetail(isRussianLocale, batchIndex, batches.length, batch),
+				completed,
+				total: items.length,
+			});
+			let parsedDescriptions: Record<string, string> = {};
+			try {
+				const response = await this.aiService.generateCodeMapSymbolDescriptionsBatch({
+					repository: pathBasename(input.projectPath),
+					branchName: input.ref,
+					locale: input.locale,
+					mode: input.mode,
+					maxChars: input.maxChars,
+					symbols: batch.map(item => ({
+						id: item.id,
+						filePath: item.filePath,
+						fileRole: item.fileRole,
+						kind: item.kind,
+						name: item.name,
+						signature: item.signature,
+						excerpt: item.excerpt,
+						fallbackDescription: item.fallbackDescription,
+					})),
+				}, input.aiModel);
+				parsedDescriptions = parseCodeMapSymbolBatchResponse(response);
+			} catch {
+				parsedDescriptions = {};
+			}
+
+			for (const item of batch) {
+				const normalized = normalizeSymbolDescription(parsedDescriptions[item.id] || '', input.maxChars);
+				if (normalized) {
+					descriptions.set(item.id, normalized);
+				}
+				completed += 1;
+				input.onProgress?.({
+					stage: 'describing-files',
+					detail: formatSymbolBatchCompletionDetail(isRussianLocale, completed, items.length, item.filePath, item.name, !normalized),
+					completed,
+					total: items.length,
 				});
 			}
 		}
@@ -681,6 +846,24 @@ function detectPatterns(files: string[], manifest: PackageManifest | null, compo
 }
 
 export function buildFileSummary(filePath: string, source: string, isRussianLocale: boolean): FileSummary {
+	const prepared = buildPreparedFileSummary(filePath, source, isRussianLocale);
+	return {
+		path: prepared.path,
+		lineCount: prepared.lineCount,
+		role: prepared.role,
+		imports: [...prepared.imports],
+		symbols: prepared.symbols.map(symbol => ({
+			kind: symbol.kind,
+			name: symbol.name,
+			signature: symbol.signature,
+			line: symbol.line,
+			column: symbol.column,
+			description: symbol.description,
+		})),
+	};
+}
+
+function buildPreparedFileSummary(filePath: string, source: string, isRussianLocale: boolean): PreparedFileSummary {
 	const imports = extractInternalImports(source);
 	const role = describeFileRole(filePath, isRussianLocale);
 	return {
@@ -790,14 +973,14 @@ function describeFileRole(filePath: string, isRussianLocale: boolean): string {
 	return isRussianLocale ? 'файл структуры проекта' : 'project structure file';
 }
 
-function extractDetailedSymbols(filePath: string, source: string, role: string, isRussianLocale: boolean): FileSymbolSummary[] {
+function extractDetailedSymbols(filePath: string, source: string, role: string, isRussianLocale: boolean): PreparedFileSymbolSummary[] {
 	if (!source) {
 		return [];
 	}
 
 	const isPhpLike = /\.php$/i.test(filePath);
 	const isScriptLike = /\.(ts|tsx|js|jsx|mjs|cjs|vue)$/i.test(filePath);
-	const symbols: FileSymbolSummary[] = [];
+	const symbols: PreparedFileSymbolSummary[] = [];
 	const classPattern = /(?<!:)\b(?:export\s+)?(?:abstract\s+)?class(?:\s+([A-Za-z0-9_]+))?(?:\s+extends\s+[^{\n]+)?/g;
 	for (const match of source.matchAll(classPattern)) {
 		const rawClassName = match[1]?.trim();
@@ -807,28 +990,43 @@ function extractDetailedSymbols(filePath: string, source: string, role: string, 
 		const classIndex = match.index || 0;
 		const location = getLocation(source, classIndex);
 		const classBody = extractBraceBlock(source, classIndex);
+		const fallbackDescription = describeClassSymbol(filePath, className, match[0].trim(), role, isRussianLocale);
 		symbols.push({
+			id: createSymbolId(filePath, 'class', className, location.line, location.column),
 			kind: 'class',
 			name: className,
 			signature: match[0].trim(),
 			line: location.line,
 			column: location.column,
-			description: describeClassSymbol(filePath, className, match[0].trim(), role, isRussianLocale),
+			description: fallbackDescription,
+			fallbackDescription,
+			filePath,
+			fileRole: role,
+			excerpt: extractSymbolSnippet(source, classIndex),
 		});
 		for (const method of extractClassMethods(filePath, classBody, role, isRussianLocale)) {
 			symbols.push({
 				...method,
 				line: location.line + method.line - 1,
+				id: createSymbolId(filePath, method.kind, method.name, location.line + method.line - 1, method.column),
 			});
 		}
 	}
 
-	const patterns: Array<{ kind: string; regex: RegExp; enabled: boolean; describe: (name: string, signature: string) => string }> = [
+	const patterns: Array<{ kind: string; regex: RegExp; enabled: boolean; describe: (name: string, signature: string, body: string) => string }> = [
 		{
 			kind: 'function',
 			regex: /(^|\n)\s*(?:export\s+)?function\s+([A-Za-z0-9_]+)\s*\(([^)]*)\)/g,
 			enabled: isScriptLike || isPhpLike,
-			describe: (name, signature) => describeRoutineSymbol(filePath, 'function', name, signature, role, isRussianLocale),
+			describe: (name, signature, body) => describeRoutineSymbol(
+				filePath,
+				'function',
+				name,
+				signature,
+				role,
+				isRussianLocale,
+				body,
+			),
 		},
 		{
 			kind: 'const',
@@ -872,13 +1070,20 @@ function extractDetailedSymbols(filePath: string, source: string, role: string, 
 			if (symbols.some(item => item.kind === pattern.kind && item.name === name && item.line === location.line)) {
 				continue;
 			}
+			const body = pattern.kind === 'function' ? extractBraceBlock(source, symbolIndex) : '';
+			const fallbackDescription = pattern.describe(name, signature, body);
 			symbols.push({
+				id: createSymbolId(filePath, pattern.kind, name, location.line, location.column),
 				kind: pattern.kind,
 				name,
 				signature,
 				line: location.line,
 				column: location.column,
-				description: pattern.describe(name, signature),
+				description: fallbackDescription,
+				fallbackDescription,
+				filePath,
+				fileRole: role,
+				excerpt: extractSymbolSnippet(source, symbolIndex),
 			});
 		}
 	}
@@ -886,8 +1091,8 @@ function extractDetailedSymbols(filePath: string, source: string, role: string, 
 	return symbols.sort((left, right) => left.line - right.line || left.column - right.column);
 }
 
-function extractClassMethods(filePath: string, classBody: string, role: string, isRussianLocale: boolean): FileSymbolSummary[] {
-	const methods: FileSymbolSummary[] = [];
+function extractClassMethods(filePath: string, classBody: string, role: string, isRussianLocale: boolean): PreparedFileSymbolSummary[] {
+	const methods: PreparedFileSymbolSummary[] = [];
 	if (!classBody) {
 		return methods;
 	}
@@ -912,13 +1117,19 @@ function extractClassMethods(filePath: string, classBody: string, role: string, 
 			if (methods.some(item => item.name === name && item.line === location.line)) {
 				continue;
 			}
+			const fallbackDescription = describeRoutineSymbol(filePath, 'method', name, signature, role, isRussianLocale, extractBraceBlock(classBody, index));
 			methods.push({
 				kind: 'method',
 				name,
 				signature,
 				line: location.line,
 				column: location.column,
-				description: describeRoutineSymbol(filePath, 'method', name, signature, role, isRussianLocale),
+				description: fallbackDescription,
+				fallbackDescription,
+				filePath,
+				fileRole: role,
+				id: '',
+				excerpt: extractSymbolSnippet(classBody, index),
 			});
 		}
 	}
@@ -944,6 +1155,20 @@ function extractBraceBlock(source: string, startIndex: number): string {
 		}
 	}
 	return source.slice(openIndex + 1);
+}
+
+function extractSymbolSnippet(source: string, startIndex: number): string {
+	const normalizedStart = Math.max(0, startIndex);
+	const tail = source.slice(normalizedStart);
+	const firstLineEnd = tail.indexOf('\n');
+	const header = (firstLineEnd >= 0 ? tail.slice(0, firstLineEnd) : tail).trim();
+	const body = extractBraceBlock(source, normalizedStart).trim();
+	const combined = body ? `${header}\n${body}` : header;
+	return combined.replace(/\r/g, '').trim().slice(0, MAX_SYMBOL_SNIPPET_CHARS);
+}
+
+function createSymbolId(filePath: string, kind: string, name: string, line: number, column: number): string {
+	return `${filePath}::${kind}::${name}::${line}:${column}`;
 }
 
 function getLocation(source: string, index: number): { line: number; column: number } {
@@ -1050,18 +1275,32 @@ function estimateAreaBatchItemChars(item: CodeMapAreaDescriptionBatchItem): numb
 		+ 256;
 }
 
+function estimateSymbolBatchItemChars(item: CodeMapSymbolBatchItem): number {
+	return item.id.length
+		+ item.filePath.length
+		+ item.fileRole.length
+		+ item.kind.length
+		+ item.name.length
+		+ item.signature.length
+		+ item.excerpt.length
+		+ item.fallbackDescription.length
+		+ 256;
+}
+
 export function buildAreaDescriptionBatches<T extends CodeMapAreaDescriptionBatchItem>(
 	items: T[],
 	maxChars: number,
+	maxItemsPerBatch = Number.MAX_SAFE_INTEGER,
 ): T[][] {
 	const limit = Math.max(4000, Math.floor(maxChars || 0));
+	const itemLimit = Math.max(1, Math.floor(maxItemsPerBatch || 0));
 	const batches: T[][] = [];
 	let currentBatch: T[] = [];
 	let currentChars = 0;
 
 	for (const item of items) {
 		const itemChars = estimateAreaBatchItemChars(item);
-		if (currentBatch.length > 0 && currentChars + itemChars > limit) {
+		if (currentBatch.length > 0 && (currentChars + itemChars > limit || currentBatch.length >= itemLimit)) {
 			batches.push(currentBatch);
 			currentBatch = [];
 			currentChars = 0;
@@ -1069,6 +1308,43 @@ export function buildAreaDescriptionBatches<T extends CodeMapAreaDescriptionBatc
 
 		currentBatch.push(item);
 		currentChars += itemChars;
+	}
+
+	if (currentBatch.length > 0) {
+		batches.push(currentBatch);
+	}
+
+	return batches;
+}
+
+export function buildSymbolDescriptionBatches(
+	items: CodeMapSymbolBatchItem[],
+	maxChars: number,
+	maxItemsPerBatch = Number.MAX_SAFE_INTEGER,
+	maxFilesPerBatch = Number.MAX_SAFE_INTEGER,
+): CodeMapSymbolBatchItem[][] {
+	const limit = Math.max(4000, Math.floor(maxChars || 0));
+	const itemLimit = Math.max(1, Math.floor(maxItemsPerBatch || 0));
+	const fileLimit = Math.max(1, Math.floor(maxFilesPerBatch || 0));
+	const batches: CodeMapSymbolBatchItem[][] = [];
+	let currentBatch: CodeMapSymbolBatchItem[] = [];
+	let currentChars = 0;
+	let currentFiles = new Set<string>();
+
+	for (const item of items) {
+		const itemChars = estimateSymbolBatchItemChars(item);
+		const nextFileCount = currentFiles.has(item.filePath)
+			? currentFiles.size
+			: currentFiles.size + 1;
+		if (currentBatch.length > 0 && (currentChars + itemChars > limit || currentBatch.length >= itemLimit || nextFileCount > fileLimit)) {
+			batches.push(currentBatch);
+			currentBatch = [];
+			currentChars = 0;
+			currentFiles = new Set<string>();
+		}
+		currentBatch.push(item);
+		currentChars += itemChars;
+		currentFiles.add(item.filePath);
 	}
 
 	if (currentBatch.length > 0) {
@@ -1105,6 +1381,14 @@ function extractJsonCandidate(value: string): string {
 }
 
 export function parseCodeMapAreaBatchResponse(value: string): Record<string, string> {
+	return parseIdDescriptionResponse(value, 'areas');
+}
+
+function parseCodeMapSymbolBatchResponse(value: string): Record<string, string> {
+	return parseIdDescriptionResponse(value, 'symbols');
+}
+
+function parseIdDescriptionResponse(value: string, collectionKey: 'areas' | 'symbols'): Record<string, string> {
 	const candidate = extractJsonCandidate(value);
 	if (!candidate) {
 		return {};
@@ -1137,8 +1421,8 @@ export function parseCodeMapAreaBatchResponse(value: string): Record<string, str
 		}
 
 		const record = parsed as Record<string, unknown>;
-		if (Array.isArray(record.areas)) {
-			collect(record.areas);
+		if (Array.isArray(record[collectionKey])) {
+			collect(record[collectionKey] as unknown[]);
 			return result;
 		}
 
@@ -1164,6 +1448,18 @@ function normalizeAreaDescription(value: string, maxChars: number): string {
 		return '';
 	}
 	return normalized.slice(0, Math.max(200, maxChars));
+}
+
+function normalizeSymbolDescription(value: string, maxChars: number): string {
+	const normalized = value
+		.replace(/```[\s\S]*?```/g, '')
+		.replace(/^[\-*]\s+/gm, '')
+		.replace(/\s+/g, ' ')
+		.trim();
+	if (!normalized) {
+		return '';
+	}
+	return normalized.slice(0, Math.max(160, maxChars));
 }
 
 function pathBasename(projectPath: string): string {
@@ -1661,102 +1957,111 @@ function describeClassSymbol(filePath: string, className: string, signature: str
 		: `Class ${displayName} is the main object in this file and defines its public responsibility.${baseClass ? ` It extends ${baseClass}.` : ''}`;
 }
 
-function describeRoutineSymbol(filePath: string, kind: 'function' | 'method', name: string, signature: string, role: string, isRussianLocale: boolean): string {
+function describeRoutineSymbol(
+	filePath: string,
+	kind: 'function' | 'method',
+	name: string,
+	signature: string,
+	role: string,
+	isRussianLocale: boolean,
+	body = '',
+): string {
 	const lower = filePath.toLowerCase();
 	const normalizedName = name.toLowerCase();
 	const subject = kind === 'method'
 		? (isRussianLocale ? 'Метод' : 'Method')
 		: (isRussianLocale ? 'Функция' : 'Function');
+	const signatureInfo = parseRoutineSignature(signature);
 
 	if (normalizedName === '__construct' || normalizedName === 'constructor') {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} инициализирует объект, зависимости или исходную конфигурацию.`
-			: `${subject} ${name} initializes the object, its dependencies, or starting configuration.`;
+			: `${subject} ${name} initializes the object, its dependencies, or starting configuration.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'setup') {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} подготавливает тестовое окружение перед выполнением сценариев.`
-			: `${subject} ${name} prepares the test environment before scenarios run.`;
+			: `${subject} ${name} prepares the test environment before scenarios run.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'teardown') {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} очищает временное состояние после завершения тестов.`
-			: `${subject} ${name} cleans temporary state after the tests finish.`;
+			: `${subject} ${name} cleans temporary state after the tests finish.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'up' && /^database\/migrations\//.test(lower)) {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} применяет изменения схемы базы данных для этой миграции.`
-			: `${subject} ${name} applies the database schema changes for this migration.`;
+			: `${subject} ${name} applies the database schema changes for this migration.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'down' && /^database\/migrations\//.test(lower)) {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} откатывает изменения схемы базы данных, сделанные миграцией.`
-			: `${subject} ${name} rolls back the schema changes made by this migration.`;
+			: `${subject} ${name} rolls back the schema changes made by this migration.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'register' && /provider/.test(lower)) {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} регистрирует сервисы и зависимости в контейнере приложения.`
-			: `${subject} ${name} registers services and dependencies in the application container.`;
+			: `${subject} ${name} registers services and dependencies in the application container.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'boot' && /provider/.test(lower)) {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} завершает bootstrap области и подключает runtime-поведение.`
-			: `${subject} ${name} finalizes bootstrap for the area and attaches runtime behavior.`;
+			: `${subject} ${name} finalizes bootstrap for the area and attaches runtime behavior.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'handle') {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} служит основной точкой выполнения для команды, middleware или фоновой задачи.`
-			: `${subject} ${name} acts as the main execution entry for a command, middleware, or background job.`;
+			: `${subject} ${name} acts as the main execution entry for a command, middleware, or background job.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'render') {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} преобразует внутреннее состояние в HTTP- или UI-представление.`
-			: `${subject} ${name} transforms internal state into an HTTP or UI representation.`;
+			: `${subject} ${name} transforms internal state into an HTTP or UI representation.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'toarray') {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} сериализует объект в структуру данных для ответа или хранения.`
-			: `${subject} ${name} serializes the object into a data structure for responses or storage.`;
+			: `${subject} ${name} serializes the object into a data structure for responses or storage.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'definition') {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} задаёт шаблон данных для фабрики и генерации тестовых записей.`
-			: `${subject} ${name} defines the data template for a factory and generated test records.`;
+			: `${subject} ${name} defines the data template for a factory and generated test records.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'rules') {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} возвращает правила валидации входных данных.`
-			: `${subject} ${name} returns validation rules for incoming data.`;
+			: `${subject} ${name} returns validation rules for incoming data.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'casts') {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} описывает преобразования типов для полей модели или DTO.`
-			: `${subject} ${name} defines type casts for model or DTO fields.`;
+			: `${subject} ${name} defines type casts for model or DTO fields.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (normalizedName === 'response') {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} формирует унифицированный ответ для вызывающего кода.`
-			: `${subject} ${name} builds a normalized response for the caller.`;
+			: `${subject} ${name} builds a normalized response for the caller.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (isTestLikeName(name) || /^tests\//.test(lower)) {
-		return isRussianLocale
-			? `${subject} ${name} проверяет отдельный сценарий этой области.`
-			: `${subject} ${name} verifies the scenario: ${humanizeSymbolName(name, isRussianLocale)}.`;
+		return withRoutineBodyDetail(isRussianLocale
+			? `${subject} ${name} проверяет сценарий «${humanizeSymbolName(name, true)}», воспроизводит ожидаемый рабочий путь и фиксирует корректность поведения области.`
+			: `${subject} ${name} verifies the scenario “${humanizeSymbolName(name, false)}”, exercises the expected execution path, and checks the area behavior.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (/^app\/http\/controllers\//.test(lower)) {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} обслуживает HTTP-сценарий этой области и управляет ответом клиенту.`
-			: `${subject} ${name} serves an HTTP scenario in this area and manages the response to the client.`;
+			: `${subject} ${name} serves an HTTP scenario in this area and manages the response to the client.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 	if (/^app\/services\//.test(lower) || /\/services\//.test(lower)) {
-		return isRussianLocale
+		return withRoutineBodyDetail(isRussianLocale
 			? `${subject} ${name} реализует часть сервисной логики области «${role || 'сервисы'}».`
-			: `${subject} ${name} implements part of the service logic in the “${role || 'services'}” area.`;
+			: `${subject} ${name} implements part of the service logic in the “${role || 'services'}” area.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 	}
 
-	return isRussianLocale
-		? `${subject} ${name} выполняет действие своей области согласно контексту использования.`
-		: `${subject} ${name} performs the action expressed by its name: ${humanizeSymbolName(name, false)}.`;
+	return withRoutineBodyDetail(isRussianLocale
+		? `${subject} ${name} выполняет действие «${humanizeSymbolName(name, true)}» в контексте своей области.`
+		: `${subject} ${name} performs the action expressed by its name: ${humanizeSymbolName(name, false)}.`, buildRoutineBodyDetail(body, signatureInfo, isRussianLocale));
 }
 
 function describeConstantSymbol(name: string, signature: string, isRussianLocale: boolean): string {
@@ -1819,6 +2124,31 @@ function formatAreaCompletionDetail(
 		: `Completed ${completed}/${total}: ${areaName}${usedFallback ? ' (local fallback)' : ''}`;
 }
 
+function formatSymbolBatchStartDetail(
+	isRussianLocale: boolean,
+	batchIndex: number,
+	batchCount: number,
+	batch: CodeMapSymbolBatchItem[],
+): string {
+	const filePreview = Array.from(new Set(batch.map(item => item.filePath))).slice(0, 3).join(', ');
+	return isRussianLocale
+		? `AI-батч ${batchIndex + 1}/${batchCount}: ${batch.length} элементов${filePreview ? ` (${filePreview})` : ''}`
+		: `AI batch ${batchIndex + 1}/${batchCount}: ${batch.length} symbols${filePreview ? ` (${filePreview})` : ''}`;
+}
+
+function formatSymbolBatchCompletionDetail(
+	isRussianLocale: boolean,
+	completed: number,
+	total: number,
+	filePath: string,
+	symbolName: string,
+	usedFallback: boolean,
+): string {
+	return isRussianLocale
+		? `Готово ${completed}/${total}: ${filePath} -> ${symbolName}${usedFallback ? ' (локальное описание)' : ''}`
+		: `Completed ${completed}/${total}: ${filePath} -> ${symbolName}${usedFallback ? ' (local fallback)' : ''}`;
+}
+
 function formatFileElementHeading(symbol: FileSymbolSummary, filePath: string, isRussianLocale: boolean): string {
 	const kind = localizeSymbolKind(symbol.kind, isRussianLocale);
 	const location = `${filePath}:${symbol.line}:${symbol.column}`;
@@ -1854,6 +2184,209 @@ function localizeSymbolKind(kind: string, isRussianLocale: boolean): string {
 
 function isTestLikeName(name: string): boolean {
 	return /^(test|should|can|it_|it[A-Z])/.test(name);
+}
+
+function parseRoutineSignature(signature: string): RoutineSignatureInfo {
+	const openIndex = signature.indexOf('(');
+	const closeIndex = signature.lastIndexOf(')');
+	const paramsBlock = openIndex >= 0 && closeIndex > openIndex
+		? signature.slice(openIndex + 1, closeIndex)
+		: '';
+	const params = paramsBlock
+		.split(',')
+		.map(item => item.trim())
+		.filter(Boolean)
+		.map(item => {
+			const phpMatch = item.match(/\$([A-Za-z_][A-Za-z0-9_]*)/);
+			if (phpMatch?.[1]) {
+				return phpMatch[1];
+			}
+			const jsMatch = item.match(/([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:[?:=]|$)/);
+			return jsMatch?.[1] || '';
+		})
+		.filter(Boolean);
+	const returnType = closeIndex >= 0
+		? (signature.slice(closeIndex + 1).match(/:\s*([^={]+)/)?.[1] || '').trim()
+		: '';
+
+	return { params, returnType };
+}
+
+function withRoutineBodyDetail(baseDescription: string, detail: string): string {
+	const normalizedBase = baseDescription.trim();
+	const normalizedDetail = detail.trim();
+	if (!normalizedDetail) {
+		return normalizedBase;
+	}
+	return `${normalizedBase.endsWith('.') ? normalizedBase : `${normalizedBase}.`} ${normalizedDetail}`;
+}
+
+function buildRoutineBodyDetail(body: string, signature: RoutineSignatureInfo, isRussianLocale: boolean): string {
+	const signals = analyzeRoutineBody(body, signature);
+	const clauses: string[] = [];
+
+	if (signals.validatesInput) {
+		clauses.push(isRussianLocale ? 'валидирует входные данные' : 'validates incoming data');
+	}
+	if (signals.containerClasses.length > 0) {
+		clauses.push(isRussianLocale
+			? `разрешает через контейнер ${formatReadableList(signals.containerClasses, true)}`
+			: `resolves ${formatReadableList(signals.containerClasses, false)} from the application container`);
+	} else if (signals.instantiatedClasses.length > 0) {
+		clauses.push(isRussianLocale
+			? `создаёт ${formatReadableList(signals.instantiatedClasses, true)}`
+			: `instantiates ${formatReadableList(signals.instantiatedClasses, false)}`);
+	}
+	if (signals.touchesPersistence) {
+		clauses.push(isRussianLocale ? 'читает или изменяет данные в хранилище' : 'reads or writes persisted data');
+	}
+	if (signals.buildsResponse) {
+		clauses.push(isRussianLocale ? 'формирует ответ для вызывающей стороны' : 'builds the response for the caller');
+	}
+	if (signals.dispatchesWork) {
+		clauses.push(isRussianLocale ? 'запускает фоновую или отложенную работу' : 'dispatches background or deferred work');
+	}
+	if (signals.hasBranches) {
+		clauses.push(isRussianLocale ? 'разветвляет выполнение по условиям' : 'branches the control flow on conditions');
+	}
+	if (signals.hasLoops) {
+		clauses.push(isRussianLocale ? 'обходит набор данных' : 'iterates over a data set');
+	}
+	if (signals.hasAwait) {
+		clauses.push(isRussianLocale ? 'дожидается асинхронных операций' : 'waits for async operations');
+	}
+	if (signals.hasAssertions) {
+		clauses.push(isRussianLocale ? 'фиксирует ожидаемый результат проверками' : 'asserts the expected outcome');
+	}
+	if (signals.hasThrows) {
+		clauses.push(isRussianLocale ? 'прерывает выполнение исключением при ошибочном состоянии' : 'aborts by throwing on invalid state');
+	}
+	if (signals.directReturnParam) {
+		clauses.push(isRussianLocale
+			? `напрямую возвращает параметр ${signals.directReturnParam}`
+			: `returns the ${signals.directReturnParam} parameter directly`);
+	} else if (signals.returnsValue && !signals.buildsResponse) {
+		clauses.push(isRussianLocale
+			? (signature.returnType ? `возвращает значение типа ${signature.returnType}` : 'возвращает итоговое значение')
+			: (signature.returnType ? `returns a value of type ${signature.returnType}` : 'returns a resulting value'));
+	}
+	if (clauses.length === 0 && signals.callTargets.length > 0) {
+		clauses.push(isRussianLocale
+			? `вызывает ${formatReadableList(signals.callTargets, true)}`
+			: `calls ${formatReadableList(signals.callTargets, false)}`);
+	}
+	if (clauses.length === 0 && signature.params.length > 0) {
+		clauses.push(isRussianLocale
+			? `работает с аргументами ${formatReadableList(signature.params, true)}`
+			: `works with arguments ${formatReadableList(signature.params, false)}`);
+	}
+	if (clauses.length === 0) {
+		return '';
+	}
+
+	return isRussianLocale
+		? `Внутри ${formatReadableList(clauses.slice(0, 3), true)}.`
+		: `Inside it ${formatReadableList(clauses.slice(0, 3), false)}.`;
+}
+
+function analyzeRoutineBody(body: string, signature: RoutineSignatureInfo): RoutineBodySignals {
+	const normalized = body.replace(/\s+/g, ' ').trim();
+	if (!normalized) {
+		return {
+			hasBranches: false,
+			hasLoops: false,
+			hasAssertions: false,
+			hasAwait: false,
+			hasThrows: false,
+			returnsValue: false,
+			directReturnParam: '',
+			containerClasses: [],
+			callTargets: [],
+			instantiatedClasses: [],
+			touchesPersistence: false,
+			buildsResponse: false,
+			validatesInput: false,
+			dispatchesWork: false,
+		};
+	}
+
+	const containerClasses = uniqueMatches(body, /(?:app|resolve|make)\s*\(\s*([A-Za-z_][A-Za-z0-9_\\]*)::class/g)
+		.map(className => className.split('\\').pop() || className)
+		.slice(0, 3);
+	const callTargets = [
+		...uniqueMatches(body, /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g),
+		...uniqueMatches(body, /(?:->|\.)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g),
+		...uniqueMatches(body, /\b([A-Za-z_][A-Za-z0-9_\\]*)::([A-Za-z_][A-Za-z0-9_]*)\s*\(/g, 2).map(item => item.split('\\').pop() || item),
+	]
+		.filter(item => !ROUTINE_CALL_NAME_STOPLIST.has(item.toLowerCase()))
+		.filter(item => !containerClasses.includes(item))
+		.filter(item => !signature.params.includes(item))
+		.filter((item, index, array) => array.indexOf(item) === index)
+		.slice(0, 4);
+	const instantiatedClasses = uniqueMatches(body, /\bnew\s+([A-Za-z_][A-Za-z0-9_\\]*)/g)
+		.map(className => className.split('\\').pop() || className)
+		.slice(0, 3);
+	const directReturnMatch = body.match(/\breturn\s+\$?([A-Za-z_][A-Za-z0-9_]*)\s*;/);
+	const directReturnParam = signature.params.includes(directReturnMatch?.[1] || '') ? (directReturnMatch?.[1] || '') : '';
+
+	return {
+		hasBranches: /\b(if|elseif|else\s+if|switch|case|match)\b/.test(body),
+		hasLoops: /\b(foreach|for|while|map|filter|reduce|forEach)\b/.test(body),
+		hasAssertions: /\b(assert[A-Za-z0-9_]*|expect)\s*\(|->assert[A-Za-z0-9_]*\s*\(/.test(body),
+		hasAwait: /\bawait\b|Promise\.(all|race|allSettled)\b/.test(body),
+		hasThrows: /\bthrow\b/.test(body),
+		returnsValue: /\breturn\b/.test(body),
+		directReturnParam,
+		containerClasses,
+		callTargets,
+		instantiatedClasses,
+		touchesPersistence: /\b(DB|Schema)\s*::|::(create|update|delete|insert|find|first|get|query)\s*\(|->(save|create|update|delete|insert|get|first|find|pluck|sync|attach|detach)\s*\(/.test(body),
+		buildsResponse: /\b(response|json|view|redirect|abort)\s*\(|->(json|view|redirect|download|stream)\s*\(/.test(body),
+		validatesInput: /\bvalidate[A-Za-z0-9_]*\s*\(|->validate[A-Za-z0-9_]*\s*\(/.test(body),
+		dispatchesWork: /\bdispatch(?:Sync|Now)?\s*\(|::dispatch(?:Sync|Now)?\s*\(|->dispatch\s*\(/.test(body),
+	};
+}
+
+const ROUTINE_CALL_NAME_STOPLIST = new Set([
+	'if',
+	'for',
+	'foreach',
+	'while',
+	'switch',
+	'catch',
+	'return',
+	'function',
+	'new',
+	'class',
+	'isset',
+	'empty',
+	'array',
+	'eval',
+]);
+
+function uniqueMatches(input: string, regex: RegExp, groupIndex = 1): string[] {
+	const values = new Set<string>();
+	for (const match of input.matchAll(regex)) {
+		const value = match[groupIndex]?.trim();
+		if (value) {
+			values.add(value);
+		}
+	}
+	return Array.from(values);
+}
+
+function formatReadableList(items: string[], isRussianLocale: boolean): string {
+	const normalized = Array.from(new Set(items.map(item => item.trim()).filter(Boolean)));
+	if (normalized.length === 0) {
+		return '';
+	}
+	if (normalized.length === 1) {
+		return normalized[0] || '';
+	}
+	if (normalized.length === 2) {
+		return `${normalized[0]} ${isRussianLocale ? 'и' : 'and'} ${normalized[1]}`;
+	}
+	return `${normalized.slice(0, -1).join(', ')} ${isRussianLocale ? 'и' : 'and'} ${normalized[normalized.length - 1]}`;
 }
 
 function humanizeSymbolName(name: string, isRussianLocale: boolean): string {

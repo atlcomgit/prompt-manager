@@ -147,8 +147,14 @@ export const MemoryApp: React.FC = () => {
 				break;
 			case 'codeMapInstructions':
 				setCodeMapInstructions(msg.instructions);
-				if (!selectedCodeMapInstructionId && msg.instructions.length > 0) {
+				if (msg.instructions.length === 0) {
+					setSelectedCodeMapInstructionId(null);
+					setCodeMapInstructionDetail(null);
+					break;
+				}
+				if (!selectedCodeMapInstructionId || !msg.instructions.some(item => item.id === selectedCodeMapInstructionId)) {
 					setSelectedCodeMapInstructionId(msg.instructions[0].id);
+					setCodeMapInstructionDetail(null);
 				}
 				break;
 			case 'codeMapInstructionDetail':

@@ -60,6 +60,9 @@ class ModelLogTestController extends DefaultController
 	assert.deepEqual(summary.symbols.map(symbol => symbol.name), ['ModelLogTestController', '__construct', 'response', 'testModelLogEloquentCreate']);
 	assert.ok(summary.symbols.every(symbol => !/самостоятельный блок логики|инкапсулирует связанную логику файла/.test(symbol.description)));
 	assert.match(summary.symbols.find(symbol => symbol.name === 'response')?.description || '', /унифицированный ответ/);
+	assert.match(summary.symbols.find(symbol => symbol.name === 'response')?.description || '', /напрямую возвращает параметр status/);
+	assert.match(summary.symbols.find(symbol => symbol.name === 'testModelLogEloquentCreate')?.description || '', /проверяет сценарий «model log eloquent create»/);
+	assert.match(summary.symbols.find(symbol => symbol.name === 'testModelLogEloquentCreate')?.description || '', /разрешает через контейнер TestService/);
 });
 
 test('buildCodeMapProjectInstruction filters noise and detects Laravel signals', () => {
@@ -270,4 +273,67 @@ test('generateInstruction normalizes codemap aiModel through free-model resolver
 	assert.deepEqual(requestedModels, ['gpt-4o']);
 	assert.deepEqual(generationModels, ['gpt-5-mini']);
 	assert.equal(record.aiModel, 'gpt-5-mini');
+});
+
+test('generateInstruction batches symbol descriptions across multiple files', async () => {
+	const symbolBatchSizes: number[] = [];
+	const service = new CodeMapInstructionService({
+		resolveFreeCopilotModel: async () => 'gpt-5-mini',
+		generateCodeMapAreaDescriptionsBatch: async () => JSON.stringify({
+			areas: [
+				{ id: 'area-1', description: 'Описание HTTP-слоя.' },
+				{ id: 'area-2', description: 'Описание сервисов.' },
+			],
+		}),
+		generateCodeMapSymbolDescriptionsBatch: async (input: { symbols: Array<{ id: string; name: string }> }) => {
+			symbolBatchSizes.push(input.symbols.length);
+			return JSON.stringify({
+				symbols: input.symbols.map(symbol => ({
+					id: symbol.id,
+					description: `AI-описание для ${symbol.name}`,
+				})),
+			});
+		},
+	} as never) as any;
+
+	service.getFilesAtRef = async () => [
+		'app/Http/Controllers/TestController.php',
+		'app/Services/TestService.php',
+		'routes/api.php',
+	];
+	service.readJsonAtRef = async () => null;
+	service.readFileTexts = async () => new Map([
+		['app/Http/Controllers/TestController.php', `<?php
+class TestController {
+	public function index(): Response {
+		return response()->json([]);
+	}
+}`],
+		['app/Services/TestService.php', `<?php
+class TestService {
+	public function buildReport(array $items): array {
+		return $items;
+	}
+}`],
+		['routes/api.php', '<?php'],
+	]);
+	service.readRecentChanges = async () => [];
+
+	const record = await service.generateInstruction({
+		repository: 'laravel-test',
+		projectPath: '/tmp/laravel-test',
+		currentBranch: 'master',
+		resolvedBranchName: 'master',
+		baseBranchName: 'master',
+		branchRole: 'current',
+		isTrackedBranch: true,
+		hasUncommittedChanges: false,
+		resolvedHeadSha: 'abc123',
+		currentHeadSha: 'abc123',
+	}, 'base', 'ru', 'gpt-5-mini');
+
+	assert.ok(symbolBatchSizes.length >= 1);
+	assert.ok(symbolBatchSizes.some(size => size >= 2));
+	assert.match(record.content, /AI-описание для index/);
+	assert.match(record.content, /AI-описание для buildReport/);
 });

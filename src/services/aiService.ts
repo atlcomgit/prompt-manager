@@ -8,7 +8,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily } from '../constants/ai.js';
+import { DEFAULT_COPILOT_MODEL_FAMILY, isZeroCostCopilotModelPickerCategory, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -321,11 +321,16 @@ export class AiService {
 			snippetBlock || 'No code excerpts available.',
 		].filter(Boolean).join('\n');
 
+		const resolvedFamily = await this.resolveFreeCopilotModel(modelFamily || this.modelSelector.family);
+		if (!resolvedFamily) {
+			return fallback;
+		}
 		return this.chatWithSelector(
-			{ vendor: 'copilot', family: normalizeCopilotModelFamily(modelFamily || this.modelSelector.family) },
+			{ vendor: 'copilot', family: resolvedFamily },
 			systemPrompt,
 			userPrompt,
 			fallback,
+			{ allowAnyCopilotFallback: false },
 		);
 	}
 
@@ -382,11 +387,16 @@ export class AiService {
 			areaBlocks,
 		].filter(Boolean).join('\n');
 
+		const resolvedFamily = await this.resolveFreeCopilotModel(modelFamily || this.modelSelector.family);
+		if (!resolvedFamily) {
+			return fallback;
+		}
 		return this.chatWithSelector(
-			{ vendor: 'copilot', family: normalizeCopilotModelFamily(modelFamily || this.modelSelector.family) },
+			{ vendor: 'copilot', family: resolvedFamily },
 			systemPrompt,
 			userPrompt,
 			fallback,
+			{ allowAnyCopilotFallback: false },
 		);
 	}
 
@@ -400,10 +410,18 @@ export class AiService {
 		systemPrompt: string,
 		userPrompt: string,
 		fallback: string,
+		options?: {
+			allowAnyCopilotFallback?: boolean;
+		},
 	): Promise<string> {
 		try {
+			const allowAnyCopilotFallback = options?.allowAnyCopilotFallback ?? true;
 			const [model] = await vscode.lm.selectChatModels(selector);
 			if (!model) {
+				if (!allowAnyCopilotFallback) {
+					return fallback;
+				}
+
 				// Fallback: try any available model
 				const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
 				if (models.length === 0) {
@@ -471,6 +489,57 @@ export class AiService {
 		})));
 	}
 
+	async getAvailableFreeModels(): Promise<AvailableModelOption[]> {
+		let models: vscode.LanguageModelChat[] = [];
+		try {
+			models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+		} catch {
+			// Keep going: we can still fall back to the default free family.
+		}
+
+		const dbPath = await this.resolveStateDbPath();
+		if (dbPath) {
+			const cachedStandardModels = await this.getVisibleCopilotModelsFromCache(
+				dbPath,
+				models,
+				entry => this.isZeroCostCopilotCacheEntry(entry),
+			);
+			if (cachedStandardModels.length > 0) {
+				return this.normalizeAvailableModels(cachedStandardModels.map(option => ({
+					id: normalizeCopilotModelFamily(option.id),
+					name: option.name,
+				})));
+			}
+
+			const legacyStandardModels = await this.getVisibleCopilotModelsFromLegacyCache(
+				dbPath,
+				entry => this.isZeroCostCopilotCacheEntry(entry),
+			);
+			if (legacyStandardModels.length > 0) {
+				return this.normalizeAvailableModels(legacyStandardModels.map(option => ({
+					id: normalizeCopilotModelFamily(option.id),
+					name: option.name,
+				})));
+			}
+		}
+
+		return [];
+	}
+
+	async resolveFreeCopilotModel(modelId: string | undefined | null): Promise<string> {
+		const freeModels = await this.getAvailableFreeModels();
+		if (freeModels.length === 0) {
+			return '';
+		}
+
+		const matched = this.findBestAvailableModelMatch(freeModels, String(modelId || ''));
+		if (matched) {
+			return normalizeCopilotModelFamily(matched.id);
+		}
+
+		return '';
+	}
+
 	private async getVisibleCopilotModels(models: vscode.LanguageModelChat[]): Promise<AvailableModelOption[]> {
 		const workspaceSessionModels = await this.getVisibleCopilotModelsFromWorkspaceSessions();
 		const dbPath = await this.resolveStateDbPath();
@@ -505,41 +574,10 @@ export class AiService {
 		}
 
 		const preferences = this.parseJson<Record<string, boolean>>(modelPickerPreferencesRaw) || {};
-		const cacheLookup = await this.buildCopilotModelLookup(dbPath, models);
-
-		const result: AvailableModelOption[] = [];
-		const seenIds = new Set<string>();
-		const pushModel = (modelIdOrIdentifier: string, nameOverride?: string): void => {
-			const option = this.resolveLookupModelOption(cacheLookup, modelIdOrIdentifier, nameOverride);
-			if (!option) {
-				return;
-			}
-
-			const seenKey = (this.normalizeModelInput(option.id) || option.id).toLowerCase();
-			if (!option.id || this.isAutoModelIdentifier(option.id) || seenIds.has(seenKey)) {
-				return;
-			}
-
-			seenIds.add(seenKey);
-			result.push(option);
-		};
-
-		for (const entry of featuredEntries) {
-			const controlId = (entry.id || '').trim();
-			if (!controlId) {
-				continue;
-			}
-
-			pushModel(controlId, entry.label);
-		}
-
-		for (const [identifier, isVisible] of Object.entries(preferences)) {
-			if (!isVisible || !identifier.toLowerCase().startsWith('copilot/')) {
-				continue;
-			}
-
-			pushModel(identifier);
-		}
+		const extraVisibleIdentifiers = Object.entries(preferences)
+			.filter(([identifier, isVisible]) => isVisible && identifier.toLowerCase().startsWith('copilot/'))
+			.map(([identifier]) => identifier);
+		const result = await this.buildModelOptionsFromControlEntries(dbPath, models, featuredEntries, extraVisibleIdentifiers);
 
 		if (result.length > 0) {
 			return this.sortVisibleModels(result, featuredEntries);
@@ -551,6 +589,7 @@ export class AiService {
 	private async getVisibleCopilotModelsFromCache(
 		dbPath: string,
 		models: vscode.LanguageModelChat[],
+		entryFilter?: (entry: CachedLanguageModelEntry) => boolean,
 	): Promise<AvailableModelOption[]> {
 		const cachedModelsRaw = await this.readStateItemValue(dbPath, 'chat.cachedLanguageModels.v2');
 		const cachedModels = this.parseJson<CachedLanguageModelEntry[]>(cachedModelsRaw);
@@ -583,7 +622,7 @@ export class AiService {
 		const resultIndexByName = new Map<string, number>();
 		for (const entry of cachedModels) {
 			const metadata = entry.metadata!;
-			if (!this.isVisibleCopilotCacheEntry(entry)) {
+			if (!this.isVisibleCopilotCacheEntry(entry) || (entryFilter && !entryFilter(entry))) {
 				continue;
 			}
 
@@ -623,7 +662,10 @@ export class AiService {
 		return result;
 	}
 
-	private async getVisibleCopilotModelsFromLegacyCache(dbPath: string): Promise<AvailableModelOption[]> {
+	private async getVisibleCopilotModelsFromLegacyCache(
+		dbPath: string,
+		entryFilter?: (entry: CachedLanguageModelEntry) => boolean,
+	): Promise<AvailableModelOption[]> {
 		const cachedModelsRaw = await this.readStateItemValue(dbPath, 'chat.cachedLanguageModels');
 		const cachedModels = this.parseJson<CachedLanguageModelEntry[]>(cachedModelsRaw);
 		if (!cachedModels || cachedModels.length === 0) {
@@ -633,7 +675,7 @@ export class AiService {
 		const result: AvailableModelOption[] = [];
 		const seenIds = new Set<string>();
 		for (const entry of cachedModels) {
-			if (!this.isVisibleCopilotCacheEntry(entry)) {
+			if (!this.isVisibleCopilotCacheEntry(entry) || (entryFilter && !entryFilter(entry))) {
 				continue;
 			}
 
@@ -652,6 +694,10 @@ export class AiService {
 		}
 
 		return result;
+	}
+
+	private isZeroCostCopilotCacheEntry(entry: CachedLanguageModelEntry): boolean {
+		return isZeroCostCopilotModelPickerCategory(entry.metadata?.modelPickerCategory);
 	}
 
 	private sortVisibleModels(
@@ -701,6 +747,46 @@ export class AiService {
 				id,
 				name: String(model.name || '').trim() || id,
 			});
+		}
+
+		return result;
+	}
+
+	private async buildModelOptionsFromControlEntries(
+		dbPath: string,
+		models: vscode.LanguageModelChat[],
+		entries: ChatModelsControlEntry[],
+		extraIdentifiers: string[] = [],
+	): Promise<AvailableModelOption[]> {
+		const cacheLookup = await this.buildCopilotModelLookup(dbPath, models);
+		const result: AvailableModelOption[] = [];
+		const seenIds = new Set<string>();
+		const pushModel = (modelIdOrIdentifier: string, nameOverride?: string): void => {
+			const option = this.resolveLookupModelOption(cacheLookup, modelIdOrIdentifier, nameOverride);
+			if (!option) {
+				return;
+			}
+
+			const seenKey = (this.normalizeModelInput(option.id) || option.id).toLowerCase();
+			if (!option.id || this.isAutoModelIdentifier(option.id) || seenIds.has(seenKey)) {
+				return;
+			}
+
+			seenIds.add(seenKey);
+			result.push(option);
+		};
+
+		for (const entry of entries) {
+			const controlId = (entry.id || '').trim();
+			if (!controlId) {
+				continue;
+			}
+
+			pushModel(controlId, entry.label);
+		}
+
+		for (const identifier of extraIdentifiers) {
+			pushModel(identifier);
 		}
 
 		return result;

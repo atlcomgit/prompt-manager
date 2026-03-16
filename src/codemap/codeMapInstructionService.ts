@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { buildAsciiTree, type AsciiTreeItem } from '../utils/asciiTree.js';
 import type { CodeMapBranchResolution, CodeMapInstructionKind, CodeMapInstructionRecord } from '../types/codemap.js';
 import type { AiService } from '../services/aiService.js';
+import { normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { getCodeMapSettings } from './codeMapConfig.js';
 
 const execFileAsync = promisify(execFile);
@@ -95,6 +96,14 @@ interface CodeMapGenerationProgress {
 export class CodeMapInstructionService {
 	constructor(private readonly aiService?: AiService) { }
 
+	async resolveAiModel(aiModel: string): Promise<string> {
+		if (this.aiService && typeof (this.aiService as { resolveFreeCopilotModel?: unknown }).resolveFreeCopilotModel === 'function') {
+			return this.aiService.resolveFreeCopilotModel(aiModel);
+		}
+
+		return normalizeOptionalCopilotModelFamily(aiModel);
+	}
+
 	async generateInstruction(
 		resolution: CodeMapBranchResolution,
 		instructionKind: CodeMapInstructionKind,
@@ -103,6 +112,7 @@ export class CodeMapInstructionService {
 		onProgress?: (progress: CodeMapGenerationProgress) => void,
 	): Promise<CodeMapInstructionRecord> {
 		const isRussianLocale = locale.toLowerCase().startsWith('ru');
+		const resolvedAiModel = await this.resolveAiModel(aiModel);
 		const branchName = instructionKind === 'base'
 			? resolution.resolvedBranchName
 			: resolution.currentBranch;
@@ -133,7 +143,7 @@ export class CodeMapInstructionService {
 			completed: 0,
 			total: Math.max(1, Math.min(MAX_AREA_COUNT, buildAreaEntries(selectFilesForAnalysis(files)).length)),
 		});
-		const codeDescription = await this.describeProjectCode(resolution.projectPath, branchName, files, manifest, composerManifest, locale, aiModel, onProgress);
+		const codeDescription = await this.describeProjectCode(resolution.projectPath, branchName, files, manifest, composerManifest, locale, resolvedAiModel, onProgress);
 		const generatedAt = new Date().toISOString();
 		onProgress?.({
 			stage: 'assembling-instruction',
@@ -165,7 +175,7 @@ export class CodeMapInstructionService {
 			branchRole: instructionKind === 'base' ? resolution.branchRole : 'current',
 			instructionKind,
 			locale,
-			aiModel,
+			aiModel: resolvedAiModel,
 			content,
 			contentHash: '',
 			generatedAt,

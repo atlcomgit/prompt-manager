@@ -5,7 +5,7 @@
  */
 
 import * as vscode from 'vscode';
-import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily } from '../constants/ai.js';
+import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import type {
 	HookCommitPayload,
 	MemoryAnalysis,
@@ -34,7 +34,10 @@ export class MemoryAnalyzerService {
 	 * Set the AI model family used for analysis.
 	 */
 	setModelFamily(family: string): void {
-		this.modelSelector = { vendor: 'copilot', family: normalizeCopilotModelFamily(family) };
+		this.modelSelector = {
+			vendor: 'copilot',
+			family: normalizeOptionalCopilotModelFamily(family),
+		};
 	}
 
 	/**
@@ -198,26 +201,24 @@ export class MemoryAnalyzerService {
 		depth: MemoryAnalysisDepth,
 	): Promise<{ rawResult: any; usedModel: string }> {
 		const systemPrompt = this.buildSystemPrompt(depth);
-		const fallbackModel = normalizeCopilotModelFamily(this.modelSelector.family);
+		const configuredModel = String(this.modelSelector.family || '').trim();
+		if (!configuredModel) {
+			return { rawResult: this.fallbackAnalysis(), usedModel: '' };
+		}
+
 		try {
 			const [model] = await vscode.lm.selectChatModels(this.modelSelector);
-			if (!model) {
-				const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-				if (models.length === 0) {
-					return { rawResult: this.fallbackAnalysis(), usedModel: fallbackModel };
-				}
+			if (model) {
 				return {
-					rawResult: await this.chatJson(models[0], systemPrompt, input),
-					usedModel: models[0].family || models[0].id || fallbackModel,
+					rawResult: await this.chatJson(model, systemPrompt, input),
+					usedModel: normalizeCopilotModelFamily(model.family || model.id || configuredModel),
 				};
 			}
-			return {
-				rawResult: await this.chatJson(model, systemPrompt, input),
-				usedModel: model.family || model.id || fallbackModel,
-			};
+
+			return { rawResult: this.fallbackAnalysis(), usedModel: configuredModel };
 		} catch (err) {
 			console.error('[PromptManager/Memory] AI analysis error:', err);
-			return { rawResult: this.fallbackAnalysis(), usedModel: fallbackModel };
+			return { rawResult: this.fallbackAnalysis(), usedModel: configuredModel };
 		}
 	}
 

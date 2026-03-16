@@ -87,3 +87,31 @@ test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves works
 	assert.equal(settings.notificationsEnabled, false);
 	assert.equal(settings.updatePriority, 'high');
 });
+
+test('saveCodeMapSettingsToConfiguration preserves empty aiModel when none is selected', async () => {
+	const config = new FakeConfig(
+		{
+			aiModel: 'gpt-5-mini',
+		},
+		{
+			aiModel: 'workspace',
+		},
+	);
+	const updates: Array<{ key: string; value: unknown; scope: Scope }> = [];
+
+	const settings = await saveCodeMapSettingsToConfiguration(
+		config,
+		{
+			aiModel: '',
+		},
+		async (key, value, scope) => {
+			updates.push({ key, value, scope });
+			await config.apply(key, value, scope);
+		},
+	);
+
+	assert.deepEqual(updates, [
+		{ key: 'aiModel', value: '', scope: 'workspace' },
+	]);
+	assert.equal(settings.aiModel, '');
+});

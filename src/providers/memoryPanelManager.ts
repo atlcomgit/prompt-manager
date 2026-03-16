@@ -16,6 +16,7 @@ import {
 import { logMemoryGraphDebug, showMemoryGraphDebugChannel } from '../utils/memoryGraphDebug.js';
 import { getCodeMapSettings, saveCodeMapSettings } from '../codemap/codeMapConfig.js';
 import type { AiService } from '../services/aiService.js';
+import type { CodeMapSettings } from '../types/codemap.js';
 import type { MemoryDatabaseService } from '../services/memoryDatabaseService.js';
 import type { MemoryContextService } from '../services/memoryContextService.js';
 import type { MemoryEmbeddingService } from '../services/memoryEmbeddingService.js';
@@ -29,6 +30,7 @@ import type {
 	ManualAnalysisRunStatus,
 	ManualAnalysisSnapshot,
 	MemoryAvailableModel,
+	MemorySettings,
 	MemoryWebviewToExtensionMessage,
 	MemoryExtensionToWebviewMessage,
 	MemorySearchResult,
@@ -77,6 +79,7 @@ export class MemoryPanelManager {
 		noWorkspaceFolders: string;
 		noCommitsFound: string;
 		noNewCommits: string;
+		noModelSelected: string;
 		started: string;
 		stopped: string;
 	} {
@@ -86,6 +89,7 @@ export class MemoryPanelManager {
 				noWorkspaceFolders: 'Не найдено открытых папок workspace для анализа истории',
 				noCommitsFound: 'В выбранном диапазоне истории не найдено коммитов для анализа.',
 				noNewCommits: 'Новых коммитов для анализа нет: все коммиты из выбранного диапазона уже сохранены в памяти.',
+				noModelSelected: 'Анализ истории пропущен: в разделе Память не выбрана AI-модель.',
 				started: 'Анализ истории запущен.',
 				stopped: 'Анализ истории остановлен.',
 			};
@@ -96,9 +100,22 @@ export class MemoryPanelManager {
 			noWorkspaceFolders: 'No workspace folders found for manual history analysis',
 			noCommitsFound: 'No commits were found in the selected history range.',
 			noNewCommits: 'No new commits to analyse: all commits in the selected range are already stored in memory.',
+			noModelSelected: 'History analysis was skipped because no AI model is selected in Memory settings.',
 			started: 'History analysis started.',
 			stopped: 'History analysis stopped.',
 		};
+	}
+
+	private getMissingAiModelMessage(scope: 'memory-analysis' | 'instruction-update'): string {
+		if (this.isRussianLocale()) {
+			return scope === 'memory-analysis'
+				? 'Анализ истории не запущен: в разделе Память не выбрана AI-модель.'
+				: 'Обновление инструкций не запущено: в разделе Память не выбрана AI-модель.';
+		}
+
+		return scope === 'memory-analysis'
+			? 'History analysis was not started because no AI model is selected in Memory settings.'
+			: 'Instruction refresh was not started because no AI model is selected in Memory settings.';
 	}
 
 	/** Open or focus the memory panel */
@@ -266,7 +283,7 @@ export class MemoryPanelManager {
 				}
 
 				case 'getMemorySettings': {
-					const settings = getMemorySettings();
+					const settings = await this.normalizeMemorySettings(getMemorySettings());
 					panel.webview.postMessage({
 						type: 'memoryAvailableModels',
 						models: await this.getAvailableModels(),
@@ -279,7 +296,10 @@ export class MemoryPanelManager {
 				}
 
 				case 'saveMemorySettings': {
-					const settings = await saveMemorySettings(msg.settings);
+					const settingsToSave = msg.settings.aiModel !== undefined
+						? { ...msg.settings, aiModel: await this.resolveFreeModelFamily(msg.settings.aiModel) }
+						: msg.settings;
+					const settings = await this.normalizeMemorySettings(await saveMemorySettings(settingsToSave));
 					this.analyzer.setModelFamily(settings.aiModel);
 					panel.webview.postMessage({
 						type: 'memorySettings',
@@ -448,13 +468,16 @@ export class MemoryPanelManager {
 				case 'getCodeMapSettings': {
 					panel.webview.postMessage({
 						type: 'codeMapSettings',
-						settings: getCodeMapSettings(),
+						settings: await this.normalizeCodeMapSettings(getCodeMapSettings()),
 					} as MemoryExtensionToWebviewMessage);
 					break;
 				}
 
 				case 'saveCodeMapSettings': {
-					const settings = await saveCodeMapSettings(msg.settings);
+					const settingsToSave = msg.settings.aiModel !== undefined
+						? { ...msg.settings, aiModel: await this.resolveFreeModelFamily(msg.settings.aiModel) }
+						: msg.settings;
+					const settings = await this.normalizeCodeMapSettings(await saveCodeMapSettings(settingsToSave));
 					panel.webview.postMessage({
 						type: 'codeMapSettings',
 						settings,
@@ -467,6 +490,15 @@ export class MemoryPanelManager {
 				}
 
 				case 'refreshCodeMapWorkspace': {
+					const codeMapSettings = await this.normalizeCodeMapSettings(getCodeMapSettings());
+					if (!codeMapSettings.aiModel) {
+						panel.webview.postMessage({
+							type: 'memoryError',
+							message: this.getMissingAiModelMessage('instruction-update'),
+						} as MemoryExtensionToWebviewMessage);
+						break;
+					}
+
 					const queued = this.codeMapAdmin ? await this.codeMapAdmin.queueRefreshWorkspace() : 0;
 					panel.webview.postMessage({
 						type: 'memoryInfo',
@@ -490,9 +522,18 @@ export class MemoryPanelManager {
 				}
 
 				case 'refreshCodeMapInstruction': {
+					const codeMapSettings = await this.normalizeCodeMapSettings(getCodeMapSettings());
+					if (!codeMapSettings.aiModel) {
+						panel.webview.postMessage({
+							type: 'memoryError',
+							message: this.getMissingAiModelMessage('instruction-update'),
+						} as MemoryExtensionToWebviewMessage);
+						break;
+					}
+
 					const queued = this.codeMapAdmin ? await this.codeMapAdmin.queueRefreshInstruction(msg.id) : false;
 					panel.webview.postMessage({
-						type: 'memoryInfo',
+						type: queued ? 'memoryInfo' : 'memoryError',
 						message: this.isRussianLocale()
 							? (queued ? 'Выбранная инструкция поставлена в очередь обновления' : 'Не удалось поставить инструкцию в очередь обновления')
 							: (queued ? 'Selected instruction queued for refresh' : 'Failed to queue selected instruction'),
@@ -548,6 +589,7 @@ export class MemoryPanelManager {
 	/** Send initial data when webview becomes ready */
 	private async sendInitialData(panel: vscode.WebviewPanel): Promise<void> {
 		const stats = await this.db.getStatistics();
+		const memorySettings = await this.normalizeMemorySettings(getMemorySettings());
 		panel.webview.postMessage({
 			type: 'memoryAvailableModels',
 			models: await this.getAvailableModels(),
@@ -558,7 +600,7 @@ export class MemoryPanelManager {
 		} as MemoryExtensionToWebviewMessage);
 		panel.webview.postMessage({
 			type: 'memorySettings',
-			settings: getMemorySettings(),
+			settings: memorySettings,
 		} as MemoryExtensionToWebviewMessage);
 
 		const { commits, total } = await this.db.getCommits({ limit: 50 });
@@ -579,7 +621,7 @@ export class MemoryPanelManager {
 			} as MemoryExtensionToWebviewMessage);
 			panel.webview.postMessage({
 				type: 'codeMapSettings',
-				settings: this.codeMapAdmin.getSettings(),
+				settings: await this.normalizeCodeMapSettings(this.codeMapAdmin.getSettings()),
 			} as MemoryExtensionToWebviewMessage);
 			panel.webview.postMessage({
 				type: 'codeMapActivity',
@@ -613,8 +655,10 @@ export class MemoryPanelManager {
 	}
 
 	private async getAvailableModels(): Promise<MemoryAvailableModel[]> {
-		const configured = getMemorySettings().aiModel;
-		const discovered = this.aiService ? await this.aiService.getAvailableModels() : [];
+		const configured = await this.resolveFreeModelFamily(getMemorySettings().aiModel);
+		const discovered = this.aiService
+			? await this.aiService.getAvailableFreeModels()
+			: [];
 		const items = [...discovered];
 		if (configured && !items.some(item => item.id === configured)) {
 			items.unshift({ id: configured, name: configured });
@@ -629,6 +673,28 @@ export class MemoryPanelManager {
 			seen.add(id);
 			return true;
 		});
+	}
+
+	private async resolveFreeModelFamily(requestedModel: string | undefined | null): Promise<string> {
+		if (this.aiService) {
+			return this.aiService.resolveFreeCopilotModel(requestedModel);
+		}
+
+		return '';
+	}
+
+	private async normalizeMemorySettings(settings: MemorySettings): Promise<MemorySettings> {
+		return {
+			...settings,
+			aiModel: await this.resolveFreeModelFamily(settings.aiModel),
+		};
+	}
+
+	private async normalizeCodeMapSettings(settings: CodeMapSettings): Promise<CodeMapSettings> {
+		return {
+			...settings,
+			aiModel: await this.resolveFreeModelFamily(settings.aiModel),
+		};
 	}
 
 	private getEmptyCodeMapActivity(): import('../types/codemap.js').CodeMapActivity {
@@ -678,6 +744,15 @@ export class MemoryPanelManager {
 			panel.webview.postMessage({
 				type: 'memoryError',
 				message: text.noWorkspaceFolders,
+			} as MemoryExtensionToWebviewMessage);
+			return;
+		}
+
+		const selectedAiModel = await this.resolveFreeModelFamily(getMemorySettings().aiModel);
+		if (!selectedAiModel) {
+			panel.webview.postMessage({
+				type: 'memoryError',
+				message: this.getMissingAiModelMessage('memory-analysis'),
 			} as MemoryExtensionToWebviewMessage);
 			return;
 		}
@@ -951,7 +1026,7 @@ export class MemoryPanelManager {
 		const config = vscode.workspace.getConfiguration('promptManager');
 		const depth = config.get<any>('memory.analysisDepth', 'standard');
 		const diffLimit = config.get<number>('memory.diffLimit', 10000);
-		const aiModel = config.get<string>('memory.aiModel', DEFAULT_MEMORY_SETTINGS.aiModel);
+		const aiModel = await this.resolveFreeModelFamily(config.get<string>('memory.aiModel', DEFAULT_MEMORY_SETTINGS.aiModel));
 		const startedAt = new Date().toISOString();
 
 		row.status = 'running';
@@ -986,6 +1061,17 @@ export class MemoryPanelManager {
 		row.diffBytes = Buffer.byteLength(commitData.diff || '', 'utf8');
 		session.updatedAt = new Date().toISOString();
 		this.postManualAnalysisSnapshot();
+
+		if (!aiModel) {
+			this.completeManualAnalysisRow(session, row, 'skipped', 'no-model-selected');
+			this.pushManualAnalysisEvent(session, {
+				kind: 'skip',
+				repository: row.repository,
+				sha: row.sha,
+				message: `Skipped ${row.repository} ${row.sha.substring(0, 7)}: no AI model selected`,
+			});
+			return;
+		}
 
 		const existing = this.db.getCommit(row.sha);
 		if (existing) {

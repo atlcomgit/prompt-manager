@@ -224,3 +224,50 @@ test('generateInstruction emits detailed progress messages for area batching and
 	assert.ok(progress.some(item => item.stage === 'describing-areas' && /Готово \d+\/\d+/.test(item.detail || '')));
 	assert.ok(progress.some(item => item.stage === 'describing-files' && /Файл 1\//.test(item.detail || '')));
 });
+
+test('generateInstruction normalizes codemap aiModel through free-model resolver', async () => {
+	const requestedModels: string[] = [];
+	const generationModels: string[] = [];
+	const service = new CodeMapInstructionService({
+		resolveFreeCopilotModel: async (model: string) => {
+			requestedModels.push(model);
+			return 'gpt-5-mini';
+		},
+		generateCodeMapAreaDescriptionsBatch: async (_input: unknown, model?: string) => {
+			generationModels.push(model || '');
+			return JSON.stringify({
+				areas: [
+					{ id: 'area-1', description: 'Описание HTTP-слоя.' },
+				],
+			});
+		},
+	} as never) as any;
+
+	service.getFilesAtRef = async () => [
+		'app/Http/Controllers/TestController.php',
+		'routes/api.php',
+	];
+	service.readJsonAtRef = async () => null;
+	service.readFileTexts = async () => new Map([
+		['app/Http/Controllers/TestController.php', '<?php class TestController { public function testAction(): Response {} }'],
+		['routes/api.php', '<?php'],
+	]);
+	service.readRecentChanges = async () => [];
+
+	const record = await service.generateInstruction({
+		repository: 'laravel-test',
+		projectPath: '/tmp/laravel-test',
+		currentBranch: 'master',
+		resolvedBranchName: 'master',
+		baseBranchName: 'master',
+		branchRole: 'current',
+		isTrackedBranch: true,
+		hasUncommittedChanges: false,
+		resolvedHeadSha: 'abc123',
+		currentHeadSha: 'abc123',
+	}, 'base', 'ru', 'gpt-4o');
+
+	assert.deepEqual(requestedModels, ['gpt-4o']);
+	assert.deepEqual(generationModels, ['gpt-5-mini']);
+	assert.equal(record.aiModel, 'gpt-5-mini');
+});

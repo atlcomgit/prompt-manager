@@ -44,10 +44,12 @@ export class CodeMapChatInstructionService {
 				? this.db.getLatestInstruction(resolution.repository, resolution.currentBranch, 'delta')
 				: null;
 
-			const queuedBaseRefresh = this.shouldQueueBaseRefresh(resolution, baseInstruction)
+			const queuedBaseRefresh = Boolean(settings.aiModel) && this.shouldQueueBaseRefresh(resolution, baseInstruction)
 				? this.orchestrator.queueInstruction(resolution, 'base', 'start-chat', settings.updatePriority)
 				: false;
-			const queuedCurrentRefresh = resolution.currentBranch !== resolution.resolvedBranchName && this.shouldQueueCurrentRefresh(resolution, currentInstruction)
+			const queuedCurrentRefresh = Boolean(settings.aiModel)
+				&& resolution.currentBranch !== resolution.resolvedBranchName
+				&& this.shouldQueueCurrentRefresh(resolution, currentInstruction)
 				? this.orchestrator.queueInstruction(resolution, 'delta', 'start-chat', settings.updatePriority)
 				: false;
 
@@ -68,7 +70,7 @@ export class CodeMapChatInstructionService {
 
 	queueWorkspaceRefresh(): void {
 		const settings = getCodeMapSettings();
-		if (!settings.enabled || !settings.autoUpdate) {
+		if (!settings.enabled || !settings.autoUpdate || !String(settings.aiModel || '').trim()) {
 			return;
 		}
 

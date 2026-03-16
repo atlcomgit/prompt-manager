@@ -1,5 +1,5 @@
 import type { CodeMapSettings } from '../types/codemap.js';
-import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily } from '../constants/ai.js';
+import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { resolveConfigurationScope } from '../utils/configurationScope.js';
 
 export const CODEMAP_CHAT_INSTRUCTION_FILE_NAME = 'codemap.instructions.md';
@@ -161,7 +161,7 @@ function normalizePriority(value: string): CodeMapSettings['updatePriority'] {
 }
 
 function normalizeModelFamily(value: string): string {
-	return normalizeCopilotModelFamily(value);
+	return normalizeOptionalCopilotModelFamily(value);
 }
 
 function getVscodeApi(): VscodeApi | null {

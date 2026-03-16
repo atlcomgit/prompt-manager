@@ -160,20 +160,41 @@ export function activate(context: vscode.ExtensionContext) {
 		})();
 	}
 
+	memoryDb = new MemoryDatabaseService(context.extensionUri);
+	memoryGitHook = new MemoryGitHookService();
+	memoryAnalyzer = new MemoryAnalyzerService();
+	memoryEmbedding = new MemoryEmbeddingService();
+	memoryContext = new MemoryContextService(memoryDb, memoryEmbedding);
+	memoryPanelManager = new MemoryPanelManager(
+		context.extensionUri,
+		memoryDb,
+		memoryContext,
+		memoryEmbedding,
+		memoryAnalyzer,
+		memoryGitHook,
+		aiService,
+		codeMapAdminService,
+	);
+
+	const memoryDbReady = (async () => {
+		try {
+			await memoryDb!.initialize(workspaceRoot);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			console.error('[PromptManager] Memory database init failed:', msg);
+		}
+	})();
+
 	if (memoryEnabled) {
-		memoryDb = new MemoryDatabaseService(context.extensionUri);
 		memoryCleanup = new MemoryCleanupService(memoryDb);
 		memoryHttpServer = new MemoryHttpServerService();
-		memoryGitHook = new MemoryGitHookService();
-		memoryAnalyzer = new MemoryAnalyzerService();
-		memoryEmbedding = new MemoryEmbeddingService();
 		memoryNotification = new MemoryNotificationService();
 		const chatMemoryInstructionComposer = new ChatMemoryInstructionComposer();
 
-		// Initialize DB and start subsystems
+		// Start memory subsystems only when Memory is enabled
 		void (async () => {
 			try {
-				await memoryDb!.initialize(workspaceRoot);
+				await memoryDbReady;
 				memoryCleanup!.start();
 
 				// Start HTTP server and install git hooks
@@ -188,25 +209,14 @@ export function activate(context: vscode.ExtensionContext) {
 					void memoryEmbedding!.initialize(cacheDir);
 				}
 
-				memoryContext = new MemoryContextService(memoryDb!, memoryEmbedding!);
 				chatMemoryInstructionService = new ChatMemoryInstructionService(
 					storageService,
-					memoryContext,
+					memoryContext!,
 					chatMemoryInstructionComposer,
 					gitService,
 					workspaceService,
 				);
 				await chatMemoryInstructionService.recoverSessionsOnStartup();
-				memoryPanelManager = new MemoryPanelManager(
-					context.extensionUri,
-					memoryDb!,
-					memoryContext,
-					memoryEmbedding!,
-					memoryAnalyzer!,
-					memoryGitHook!,
-					aiService,
-					codeMapAdminService,
-				);
 
 				// Wire up pipeline: HTTP server → analyze → store → embed
 				memoryHttpServer!.onCommitReceived(async (payload: HookCommitPayload) => {
@@ -216,7 +226,12 @@ export function activate(context: vscode.ExtensionContext) {
 						const config = vscode.workspace.getConfiguration('promptManager');
 						const depth = config.get<MemoryAnalysisDepth>('memory.analysisDepth', 'standard');
 						const diffLimit = config.get<number>('memory.diffLimit', 200000);
-						const aiModel = config.get<string>('memory.aiModel', DEFAULT_COPILOT_MODEL_FAMILY);
+						const aiModel = aiService
+							? await aiService.resolveFreeCopilotModel(config.get<string>('memory.aiModel', DEFAULT_COPILOT_MODEL_FAMILY))
+							: '';
+						if (!aiModel) {
+							return;
+						}
 
 						// Classify and store commit
 						const commitType = memoryAnalyzer!.classifyCommitType(payload.message);
@@ -739,11 +754,8 @@ export function activate(context: vscode.ExtensionContext) {
 		}),
 
 		vscode.commands.registerCommand('promptManager.openMemory', async () => {
-			if (memoryPanelManager) {
-				await memoryPanelManager.show();
-			} else {
-				vscode.window.showWarningMessage('Project Memory не включена. Активируйте в настройках: promptManager.memory.enabled');
-			}
+			await memoryDbReady;
+			await memoryPanelManager?.show();
 		}),
 
 		vscode.commands.registerCommand('promptManager.openSettings', async () => {

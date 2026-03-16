@@ -22,14 +22,35 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 		if (settings) { setLocal({ ...settings }); }
 	}, [settings]);
 
+	useEffect(() => {
+		setLocal(prev => {
+			if (!prev) {
+				return prev;
+			}
+
+			if (availableModels.length === 0) {
+				if (!prev.aiModel) {
+					return prev;
+				}
+
+				return { ...prev, aiModel: '' };
+			}
+
+			if (availableModels.some(item => item.id === prev.aiModel)) {
+				return prev;
+			}
+
+			return { ...prev, aiModel: availableModels[0]!.id };
+		});
+	}, [availableModels]);
+
 	if (!local) {
 		return <div style={styles.loading}>{t('memory.loading')}</div>;
 	}
 
-	const modelOptions = [...availableModels];
-	if (local.aiModel && !modelOptions.some(item => item.id === local.aiModel)) {
-		modelOptions.unshift({ id: local.aiModel, name: local.aiModel });
-	}
+	const selectedModel = availableModels.some(item => item.id === local.aiModel)
+		? local.aiModel
+		: (availableModels[0]?.id || '');
 
 	/** Update a single field in local state */
 	const update = <K extends keyof MemorySettings>(key: K, value: MemorySettings[K]) => {
@@ -71,10 +92,11 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 					<label style={styles.label}>{t('memory.aiModel')}</label>
 					<select
 						style={styles.select}
-						value={local.aiModel}
+						value={selectedModel}
+						disabled={availableModels.length === 0}
 						onChange={e => update('aiModel', e.target.value)}
 					>
-						{modelOptions.map(model => (
+						{availableModels.map(model => (
 							<option key={model.id} value={model.id}>{model.name}</option>
 						))}
 					</select>

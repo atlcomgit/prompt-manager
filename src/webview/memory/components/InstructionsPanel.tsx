@@ -148,6 +148,28 @@ export const InstructionsPanel: React.FC<Props> = ({
 		}
 	}, [settings]);
 
+	useEffect(() => {
+		setLocalSettings(prev => {
+			if (!prev) {
+				return prev;
+			}
+
+			if (availableModels.length === 0) {
+				if (!prev.aiModel) {
+					return prev;
+				}
+
+				return { ...prev, aiModel: '' };
+			}
+
+			if (availableModels.some(item => item.id === prev.aiModel)) {
+				return prev;
+			}
+
+			return { ...prev, aiModel: availableModels[0]!.id };
+		});
+	}, [availableModels]);
+
 	const selectedInstruction = useMemo(() => (
 		instructions.find(item => item.id === selectedInstructionId) || null
 	), [instructions, selectedInstructionId]);
@@ -166,13 +188,10 @@ export const InstructionsPanel: React.FC<Props> = ({
 	const successRate = totalFinishedJobs > 0 ? ((statistics?.completedJobs || 0) / totalFinishedJobs) * 100 : 0;
 	const repositoriesText = statistics?.repositories.join(', ') || '—';
 	const branchesText = statistics?.branches.join(', ') || '—';
-	const modelOptions = useMemo(() => {
-		const next = [...availableModels];
-		if (localSettings?.aiModel && !next.some(item => item.id === localSettings.aiModel)) {
-			next.unshift({ id: localSettings.aiModel, name: localSettings.aiModel });
-		}
-		return next;
-	}, [availableModels, localSettings?.aiModel]);
+	const modelOptions = useMemo(() => [...availableModels], [availableModels]);
+	const selectedModel = localSettings && modelOptions.some(item => item.id === localSettings.aiModel)
+		? localSettings.aiModel
+		: (modelOptions[0]?.id || '');
 
 	const updateSetting = <K extends keyof CodeMapSettings>(key: K, value: CodeMapSettings[K]) => {
 		setLocalSettings(prev => prev ? { ...prev, [key]: value } : prev);
@@ -702,8 +721,13 @@ export const InstructionsPanel: React.FC<Props> = ({
 							<div style={styles.section}>
 								<h4 style={styles.sectionTitle}>{t('memory.instructions.ai')}</h4>
 								<div style={styles.fieldRow}>
-									<span>{t('memory.aiModel')}</span>
-									<select style={styles.select} value={localSettings.aiModel} onChange={e => updateSetting('aiModel', e.target.value)}>
+										<span>{t('memory.aiModel')}</span>
+									<select
+										style={styles.select}
+										value={selectedModel}
+										disabled={modelOptions.length === 0}
+										onChange={e => updateSetting('aiModel', e.target.value)}
+									>
 										{modelOptions.map(model => (
 											<option key={model.id} value={model.id}>{model.name}</option>
 										))}

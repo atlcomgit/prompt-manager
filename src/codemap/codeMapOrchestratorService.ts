@@ -51,6 +51,11 @@ export class CodeMapOrchestratorService {
 		trigger: CodeMapUpdateTrigger,
 		priority: CodeMapUpdatePriority,
 	): boolean {
+		if (!String(getCodeMapSettings().aiModel || '').trim()) {
+			this.output.appendLine(`[codemap] skipped ${resolution.repository}:${instructionKind} (${trigger}) because no AI model is selected`);
+			return false;
+		}
+
 		const dedupeKey = this.getDedupeKey(resolution.repository, instructionKind === 'base' ? resolution.resolvedBranchName : resolution.currentBranch, instructionKind);
 		if (this.pendingKeys.has(dedupeKey)) {
 			return false;
@@ -88,7 +93,6 @@ export class CodeMapOrchestratorService {
 			requestedAt,
 			resolution,
 			instructionKind,
-			aiModel: getCodeMapSettings().aiModel,
 			trigger,
 			priority,
 			phase: 'queued',
@@ -173,12 +177,17 @@ export class CodeMapOrchestratorService {
 			this.cycle.updatedAt = this.currentItem.startedAt;
 
 			const settings = getCodeMapSettings();
-			this.currentItem.aiModel = settings.aiModel;
+			const resolvedAiModel = await this.instructionService.resolveAiModel(settings.aiModel);
+			this.currentItem.aiModel = resolvedAiModel;
 			const branchName = item.instructionKind === 'base'
 				? item.resolution.resolvedBranchName
 				: item.resolution.currentBranch;
 
 			try {
+				if (!resolvedAiModel) {
+					throw new Error('No AI model selected');
+				}
+
 				this.touchActivity();
 				const totalStartedAt = Date.now();
 				const heapBefore = process.memoryUsage().heapUsed;
@@ -197,7 +206,7 @@ export class CodeMapOrchestratorService {
 					item.resolution,
 					item.instructionKind,
 					vscode.env.language,
-					settings.aiModel,
+					resolvedAiModel,
 					(progress) => this.updateCurrentProgress(progress.stage as CodeMapRuntimePhase, progress.detail, progress.completed, progress.total),
 				);
 				const generationDurationMs = Date.now() - generationStartedAt;
@@ -213,7 +222,7 @@ export class CodeMapOrchestratorService {
 					instructionChars: record.content.length,
 					fileCount: record.fileCount,
 					fileGroups: Array.isArray(record.metadata?.fileGroups) ? record.metadata?.fileGroups : [],
-					aiModel: settings.aiModel,
+					aiModel: record.aiModel,
 					generatedBy: record.metadata?.generatedBy || 'codemap-bootstrap',
 				});
 				this.cycle.completedTotal += 1;
@@ -234,7 +243,7 @@ export class CodeMapOrchestratorService {
 					totalDurationMs: 0,
 					generationDurationMs: 0,
 					peakHeapUsedBytes: process.memoryUsage().heapUsed,
-					aiModel: settings.aiModel,
+					aiModel: resolvedAiModel,
 				});
 				this.cycle.failedTotal += 1;
 				this.cycle.updatedAt = new Date().toISOString();

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildAreaDescriptionBatches, buildSymbolDescriptionBatches, parseCodeMapAreaBatchResponse } from '../src/codemap/codeMapInstructionService.js';
+import { buildAreaDescriptionBatches, buildFrontendBlockDescriptionBatches, buildSymbolDescriptionBatches, parseCodeMapAreaBatchResponse } from '../src/codemap/codeMapInstructionService.js';
 
 test('buildAreaDescriptionBatches packs multiple areas until the configured context budget is reached', () => {
 	const items = [
@@ -43,6 +43,73 @@ test('buildSymbolDescriptionBatches respects max files and max items limits', ()
 	assert.deepEqual(batches.map(batch => batch.map(item => item.id)), [
 		['s-1', 's-2', 's-3'],
 		['s-4'],
+	]);
+});
+
+test('buildFrontendBlockDescriptionBatches respects max files and max items limits', () => {
+	const batches = buildFrontendBlockDescriptionBatches([
+		{
+			id: 'b-1',
+			filePath: 'OrdersPage.vue',
+			fileRole: 'frontend',
+			framework: 'vue',
+			blockKind: 'filters',
+			blockName: 'OrdersFilters',
+			purpose: 'filters',
+			stateDeps: ['filters'],
+			eventHandlers: ['submitFilters'],
+			dataSources: ['ordersStore'],
+			childComponents: ['StatusSelect'],
+			conditions: [],
+			routes: [],
+			forms: ['query'],
+			excerpt: '<form class="orders-filters"></form>',
+			linkedScriptSnippets: ['const submitFilters = async () => {};'],
+			fallbackDescription: 'filters',
+		},
+		{
+			id: 'b-2',
+			filePath: 'OrdersPage.vue',
+			fileRole: 'frontend',
+			framework: 'vue',
+			blockKind: 'table',
+			blockName: 'OrdersTable',
+			purpose: 'table',
+			stateDeps: ['orders'],
+			eventHandlers: ['openOrder'],
+			dataSources: ['ordersStore'],
+			childComponents: ['OrdersTable'],
+			conditions: [],
+			routes: [],
+			forms: [],
+			excerpt: '<section class="orders-table"></section>',
+			linkedScriptSnippets: ['const openOrder = () => {};'],
+			fallbackDescription: 'table',
+		},
+		{
+			id: 'b-3',
+			filePath: 'CustomersPage.vue',
+			fileRole: 'frontend',
+			framework: 'vue',
+			blockKind: 'filters',
+			blockName: 'CustomersFilters',
+			purpose: 'filters',
+			stateDeps: ['filters'],
+			eventHandlers: ['submitCustomers'],
+			dataSources: ['customersStore'],
+			childComponents: ['StatusSelect'],
+			conditions: [],
+			routes: [],
+			forms: ['query'],
+			excerpt: '<form class="customers-filters"></form>',
+			linkedScriptSnippets: ['const submitCustomers = async () => {};'],
+			fallbackDescription: 'filters',
+		},
+	], 24000, 2, 1);
+
+	assert.deepEqual(batches.map(batch => batch.map(item => item.id)), [
+		['b-1', 'b-2'],
+		['b-3'],
 	]);
 });
 

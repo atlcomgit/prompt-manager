@@ -125,7 +125,7 @@ export function activate(context: vscode.ExtensionContext) {
 	if (codeMapSettings.enabled) {
 		codeMapDb = new CodeMapDatabaseService(context.extensionUri);
 		const codeMapBranchResolverService = new CodeMapBranchResolverService(gitService);
-		const codeMapInstructionService = new CodeMapInstructionService(aiService);
+		const codeMapInstructionService = new CodeMapInstructionService(aiService, codeMapDb);
 		const codeMapMaterializerService = new CodeMapMaterializerService();
 		codeMapOrchestratorService = new CodeMapOrchestratorService(codeMapDb, codeMapInstructionService);
 		codeMapChatInstructionService = new CodeMapChatInstructionService(

@@ -20,6 +20,7 @@ export class CodeMapBranchResolverService {
 				if (!headSha) {
 					continue;
 				}
+				const treeSha = await this.getTreeSha(projectPath, branchName);
 
 				resolutions.push({
 					repository,
@@ -32,6 +33,8 @@ export class CodeMapBranchResolverService {
 					hasUncommittedChanges: false,
 					resolvedHeadSha: headSha,
 					currentHeadSha: headSha,
+					resolvedTreeSha: treeSha || headSha,
+					currentTreeSha: treeSha || headSha,
 				});
 			}
 		}
@@ -62,6 +65,7 @@ export class CodeMapBranchResolverService {
 
 			const hasUncommittedChanges = (await this.gitService.hasUncommittedChanges(projectPath)).hasChanges;
 			const currentHeadSha = await this.getHeadSha(projectPath, currentBranch);
+			const currentTreeSha = await this.getTreeSha(projectPath, currentBranch);
 
 			if (trackedBranches.includes(currentBranch)) {
 				resolutions.push({
@@ -75,6 +79,8 @@ export class CodeMapBranchResolverService {
 					hasUncommittedChanges,
 					resolvedHeadSha: currentHeadSha,
 					currentHeadSha,
+					resolvedTreeSha: currentTreeSha || currentHeadSha,
+					currentTreeSha: currentTreeSha || currentHeadSha,
 				});
 				continue;
 			}
@@ -82,6 +88,7 @@ export class CodeMapBranchResolverService {
 			const baseBranchName = await this.findNearestTrackedBranch(projectPath, currentBranch, trackedBranches);
 			const resolvedBranchName = baseBranchName || currentBranch;
 			const resolvedHeadSha = await this.getHeadSha(projectPath, resolvedBranchName);
+			const resolvedTreeSha = await this.getTreeSha(projectPath, resolvedBranchName);
 
 			resolutions.push({
 				repository,
@@ -94,6 +101,8 @@ export class CodeMapBranchResolverService {
 				hasUncommittedChanges,
 				resolvedHeadSha,
 				currentHeadSha,
+				resolvedTreeSha: resolvedTreeSha || resolvedHeadSha,
+				currentTreeSha: currentTreeSha || currentHeadSha,
 			});
 		}
 
@@ -103,6 +112,15 @@ export class CodeMapBranchResolverService {
 	async getHeadSha(projectPath: string, ref: string): Promise<string> {
 		try {
 			const { stdout } = await execFileAsync('git', ['rev-parse', ref], { cwd: projectPath });
+			return stdout.trim();
+		} catch {
+			return '';
+		}
+	}
+
+	async getTreeSha(projectPath: string, ref: string): Promise<string> {
+		try {
+			const { stdout } = await execFileAsync('git', ['rev-parse', `${ref}^{tree}`], { cwd: projectPath });
 			return stdout.trim();
 		} catch {
 			return '';

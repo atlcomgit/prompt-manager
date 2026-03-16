@@ -105,6 +105,35 @@ export type CodeMapSymbolBatchDescriptionInput = {
 	symbols: CodeMapSymbolDescriptionBatchItem[];
 };
 
+export type CodeMapFrontendBlockDescriptionBatchItem = {
+	id: string;
+	filePath: string;
+	fileRole: string;
+	framework: 'vue' | 'html' | 'blade';
+	blockKind: string;
+	blockName: string;
+	purpose: string;
+	stateDeps: string[];
+	eventHandlers: string[];
+	dataSources: string[];
+	childComponents: string[];
+	conditions: string[];
+	routes: string[];
+	forms: string[];
+	excerpt: string;
+	linkedScriptSnippets: string[];
+	fallbackDescription?: string;
+};
+
+export type CodeMapFrontendBlockBatchDescriptionInput = {
+	repository: string;
+	branchName: string;
+	locale: string;
+	mode: 'short' | 'medium' | 'long';
+	maxChars: number;
+	blocks: CodeMapFrontendBlockDescriptionBatchItem[];
+};
+
 export class AiService {
 	private static readonly DEFAULT_IMPROVE_PROMPT_INSTRUCTIONS = [
 		// 'Пиши на русском языке.',
@@ -500,6 +529,98 @@ export class AiService {
 			userPrompt,
 			fallback,
 			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-symbol-description-batch' },
+		);
+	}
+
+	async generateCodeMapFrontendBlockDescriptionsBatch(
+		input: CodeMapFrontendBlockBatchDescriptionInput,
+		modelFamily?: string,
+	): Promise<string> {
+		const isRussianLocale = input.locale.toLowerCase().startsWith('ru');
+		const fallback = JSON.stringify({
+			blocks: input.blocks.map(block => ({ id: block.id, description: '' })),
+		});
+		const systemPrompt = isRussianLocale
+			? [
+				'Ты анализируешь UI-блоки frontend-файлов для инструкции ИИ-агента.',
+				'Верни только валидный JSON без markdown и пояснений.',
+				'Формат ответа строго такой: {"blocks":[{"id":"block-1","description":"..."}]}.',
+				'Для каждого id верни конкретное и полезное описание на русском языке.',
+				'Опирайся на purpose, stateDeps, eventHandlers, dataSources, childComponents, conditions, routes, формы и кодовые фрагменты.',
+				'Объясняй, что пользователь видит в этом блоке, от каких состояний он зависит и какие действия инициирует.',
+				'Не пиши пустые шаблоны вроде "отображает интерфейсный блок" или "рендерит часть страницы".',
+				'Если данных недостаточно, честно опиши только наблюдаемое поведение.',
+				`Длина каждого description: до ${Math.max(180, input.maxChars)} символов.`,
+				`Глубина описания: ${input.mode}.`,
+			].join(' ')
+			: [
+				'You analyze UI blocks from frontend files for an AI-agent instruction.',
+				'Return only valid JSON without markdown or commentary.',
+				'The response format must be exactly {"blocks":[{"id":"block-1","description":"..."}]}.',
+				'For each id, return a concrete and useful description.',
+				'Ground the description in purpose, stateDeps, eventHandlers, dataSources, childComponents, conditions, routes, form fields, and code snippets.',
+				'Explain what the user sees, which state drives the block, and which actions it triggers.',
+				'Do not use empty templates like "renders a UI block" or "shows part of the page".',
+				'If the evidence is partial, describe only the observable behavior.',
+				`Keep each description within ${Math.max(180, input.maxChars)} characters.`,
+				`Description depth: ${input.mode}.`,
+			].join(' ');
+
+		const groupedByFile = new Map<string, CodeMapFrontendBlockDescriptionBatchItem[]>();
+		for (const block of input.blocks) {
+			const key = `${block.filePath}::${block.fileRole}::${block.framework}`;
+			const group = groupedByFile.get(key) || [];
+			group.push(block);
+			groupedByFile.set(key, group);
+		}
+
+		const blockSections = Array.from(groupedByFile.entries()).map(([key, blocks]) => {
+			const [filePath, fileRole, framework] = key.split('::');
+			const blocksSection = blocks.map(block => [
+				`ID: ${block.id}`,
+				`Kind: ${block.blockKind}`,
+				`Name: ${block.blockName}`,
+				`Purpose: ${block.purpose}`,
+				block.stateDeps.length > 0 ? `State deps: ${block.stateDeps.join(', ')}` : '',
+				block.eventHandlers.length > 0 ? `Event handlers: ${block.eventHandlers.join(', ')}` : '',
+				block.dataSources.length > 0 ? `Data sources: ${block.dataSources.join(', ')}` : '',
+				block.childComponents.length > 0 ? `Child components: ${block.childComponents.join(', ')}` : '',
+				block.conditions.length > 0 ? `Conditions: ${block.conditions.join(', ')}` : '',
+				block.routes.length > 0 ? `Routes: ${block.routes.join(', ')}` : '',
+				block.forms.length > 0 ? `Forms: ${block.forms.join(', ')}` : '',
+				block.fallbackDescription ? `Fallback description: ${block.fallbackDescription}` : '',
+				'Template excerpt:',
+				block.excerpt || 'No template excerpt available.',
+				block.linkedScriptSnippets.length > 0 ? 'Linked script snippets:' : '',
+				...block.linkedScriptSnippets,
+			].filter(Boolean).join('\n')).join('\n\n-----\n\n');
+
+			return [
+				`FILE: ${filePath}`,
+				`Role: ${fileRole}`,
+				`Framework: ${framework}`,
+				'Blocks:',
+				blocksSection,
+			].join('\n');
+		}).join('\n\n=====\n\n');
+
+		const userPrompt = [
+			`Repository: ${input.repository}`,
+			`Branch: ${input.branchName}`,
+			'Frontend blocks to describe:',
+			blockSections,
+		].filter(Boolean).join('\n\n');
+
+		const resolvedFamily = await this.resolveFreeCopilotModel(modelFamily || this.modelSelector.family);
+		if (!resolvedFamily) {
+			return fallback;
+		}
+		return this.chatWithSelector(
+			{ vendor: 'copilot', family: resolvedFamily },
+			systemPrompt,
+			userPrompt,
+			fallback,
+			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-frontend-block-description-batch' },
 		);
 	}
 

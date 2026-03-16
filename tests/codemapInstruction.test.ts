@@ -3,6 +3,35 @@ import assert from 'node:assert/strict';
 
 import { CodeMapInstructionService, buildCodeMapProjectInstruction, buildFileSummary } from '../src/codemap/codeMapInstructionService.js';
 
+class FakeCodeMapSummaryCache {
+	private readonly fileSummaries = new Map<string, unknown>();
+	private readonly areaSummaries = new Map<string, unknown>();
+
+	getCachedFileSummary<T>(repository: string, filePath: string, blobSha: string, locale: string, generationFingerprint: string): T | null {
+		return (this.fileSummaries.get(this.buildKey(repository, filePath, blobSha, locale, generationFingerprint)) as T | undefined) || null;
+	}
+
+	upsertCachedFileSummary(repository: string, filePath: string, blobSha: string, locale: string, generationFingerprint: string, summary: unknown): void {
+		this.fileSummaries.set(this.buildKey(repository, filePath, blobSha, locale, generationFingerprint), this.clone(summary));
+	}
+
+	getCachedAreaSummary<T>(repository: string, areaKey: string, snapshotToken: string, locale: string, generationFingerprint: string): T | null {
+		return (this.areaSummaries.get(this.buildKey(repository, areaKey, snapshotToken, locale, generationFingerprint)) as T | undefined) || null;
+	}
+
+	upsertCachedAreaSummary(repository: string, areaKey: string, snapshotToken: string, locale: string, generationFingerprint: string, summary: unknown): void {
+		this.areaSummaries.set(this.buildKey(repository, areaKey, snapshotToken, locale, generationFingerprint), this.clone(summary));
+	}
+
+	private buildKey(...parts: string[]): string {
+		return parts.join('::');
+	}
+
+	private clone<T>(value: T): T {
+		return JSON.parse(JSON.stringify(value)) as T;
+	}
+}
+
 test('buildCodeMapProjectInstruction renders repository summary and file tree', () => {
 	const output = buildCodeMapProjectInstruction({
 		repository: 'prompt-manager',
@@ -178,6 +207,101 @@ return new class extends Migration
 	assert.ok(summary.symbols.every(symbol => symbol.name !== 'extends'));
 });
 
+test('buildFileSummary extracts linked frontend blocks from vue files', () => {
+	const summary = buildFileSummary('src/pages/OrdersPage.vue', `<template>
+		<main class="orders-page">
+			<form class="orders-filters" @submit.prevent="submitFilters">
+				<input v-model="filters.query" name="query" />
+				<StatusSelect v-model="filters.status" />
+			</form>
+			<section class="orders-table">
+				<OrdersTable :items="orders" @open="openOrder" />
+			</section>
+			<div class="empty-state" v-if="!orders.length && !isLoading">No orders</div>
+		</main>
+	</template>
+	<script setup lang="ts">
+	const filters = reactive({ query: '', status: 'all' });
+	const orders = ref([]);
+	const isLoading = ref(false);
+	const route = useRoute();
+	const router = useRouter();
+	const ordersStore = useOrdersStore();
+	const submitFilters = async () => {
+		await ordersStore.fetch(filters);
+		router.push({ query: filters });
+	};
+	const openOrder = (id: number) => {
+		router.push(\`/orders/\${id}\`);
+	};
+	</script>
+	`, true);
+
+	assert.equal(summary.role, 'frontend-компоненты и страницы интерфейса');
+	assert.ok((summary.frontendContract || []).some(item => /Фреймворк\/UI-слой: vue/i.test(item)));
+	assert.ok((summary.frontendContract || []).some(item => /ordersStore|router|route/.test(item)));
+	const filtersBlock = (summary.frontendBlocks || []).find(block => block.name === 'OrdersFilters');
+	assert.ok(filtersBlock);
+	assert.equal(filtersBlock?.kind, 'filters');
+	assert.match(filtersBlock?.description || '', /submitFilters/);
+	assert.match(filtersBlock?.description || '', /filters|query/);
+	assert.ok((summary.frontendBlocks || []).some(block => block.name === 'OrdersTable'));
+});
+
+test('buildCodeMapProjectInstruction renders frontend contract and ui blocks for frontend files', () => {
+	const output = buildCodeMapProjectInstruction({
+		repository: 'frontend-app',
+		branchName: 'main',
+		resolvedBranchName: 'main',
+		baseBranchName: 'main',
+		instructionKind: 'base',
+		branchRole: 'current',
+		generatedAt: '2026-03-14T00:00:00.000Z',
+		headSha: 'abc123',
+		locale: 'ru',
+		files: ['src/pages/OrdersPage.vue'],
+		manifest: null,
+		codeDescription: {
+			projectEssence: ['Тестовая суть проекта.'],
+			architectureSummary: ['Тестовое описание архитектуры.'],
+			patterns: [],
+			entryPoints: [],
+			areas: [],
+			fileSummaries: [{
+				path: 'src/pages/OrdersPage.vue',
+				lineCount: 48,
+				role: 'frontend-компоненты и страницы интерфейса',
+				imports: ['@/stores/orders'],
+				frontendContract: ['Фреймворк/UI-слой: vue. Значимые блоки: OrdersFilters, OrdersTable.'],
+				frontendBlocks: [{
+					kind: 'filters',
+					name: 'OrdersFilters',
+					line: 4,
+					column: 3,
+					description: 'UI-блок OrdersFilters управляет фильтрами, зависит от состояния filters и инициирует submitFilters.',
+					purpose: 'OrdersFilters управляет полями query, status.',
+					stateDeps: ['filters'],
+					eventHandlers: ['submitFilters'],
+					dataSources: ['ordersStore (useOrdersStore)'],
+					childComponents: ['StatusSelect'],
+					conditions: [],
+					routes: [],
+					forms: ['query', 'status'],
+				}],
+				symbols: [],
+			}],
+			relations: [],
+			recentChanges: [],
+		},
+	});
+
+	assert.match(output, /- Frontend-контракт:/);
+	assert.match(output, /- UI-блоки:/);
+	assert.match(output, /Фильтры OrdersFilters/);
+	assert.match(output, /События: submitFilters/);
+	assert.match(output, /Источники данных: ordersStore/);
+});
+
 test('generateInstruction emits detailed progress messages for area batching and file summaries', async () => {
 	const service = new CodeMapInstructionService({
 		generateCodeMapAreaDescriptionsBatch: async () => JSON.stringify({
@@ -336,4 +460,353 @@ class TestService {
 	assert.ok(symbolBatchSizes.some(size => size >= 2));
 	assert.match(record.content, /AI-описание для index/);
 	assert.match(record.content, /AI-описание для buildReport/);
+});
+
+test('generateInstruction batches frontend block descriptions for vue files', async () => {
+	const frontendBatchSizes: number[] = [];
+	const service = new CodeMapInstructionService({
+		resolveFreeCopilotModel: async () => 'gpt-5-mini',
+		generateCodeMapAreaDescriptionsBatch: async () => JSON.stringify({
+			areas: [
+				{ id: 'area-1', description: 'Описание фронтенд-слоя.' },
+			],
+		}),
+		generateCodeMapFrontendBlockDescriptionsBatch: async (input: { blocks: Array<{ id: string; blockName: string }> }) => {
+			frontendBatchSizes.push(input.blocks.length);
+			return JSON.stringify({
+				blocks: input.blocks.map(block => ({
+					id: block.id,
+					description: `AI-описание UI-блока ${block.blockName}`,
+				})),
+			});
+		},
+	} as never) as any;
+
+	service.getFilesAtRef = async () => [
+		'src/pages/OrdersPage.vue',
+	];
+	service.readJsonAtRef = async () => ({
+		name: 'frontend-app',
+		dependencies: { vue: '^3.4.0' },
+	});
+	service.readFileTexts = async () => new Map([
+		['src/pages/OrdersPage.vue', `<template>
+			<main class="orders-page">
+				<form class="orders-filters" @submit.prevent="submitFilters">
+					<input v-model="filters.query" name="query" />
+				</form>
+				<section class="orders-table">
+					<OrdersTable :items="orders" @open="openOrder" />
+				</section>
+			</main>
+		</template>
+		<script setup lang="ts">
+		const filters = reactive({ query: '' });
+		const orders = ref([]);
+		const ordersStore = useOrdersStore();
+		const submitFilters = async () => {
+			await ordersStore.fetch(filters);
+		};
+		const openOrder = (id: number) => {
+			return id;
+		};
+		</script>`],
+	]);
+	service.readRecentChanges = async () => [];
+
+	const record = await service.generateInstruction({
+		repository: 'frontend-app',
+		projectPath: '/tmp/frontend-app',
+		currentBranch: 'main',
+		resolvedBranchName: 'main',
+		baseBranchName: 'main',
+		branchRole: 'current',
+		isTrackedBranch: true,
+		hasUncommittedChanges: false,
+		resolvedHeadSha: 'abc123',
+		currentHeadSha: 'abc123',
+	}, 'base', 'ru', 'gpt-5-mini');
+
+	assert.ok(frontendBatchSizes.length >= 1);
+	assert.ok(frontendBatchSizes.some(size => size >= 2));
+	assert.match(record.content, /AI-описание UI-блока OrdersFilters/);
+	assert.match(record.content, /AI-описание UI-блока OrdersTable/);
+});
+
+test('generateInstruction reuses cached area and file summaries when blobs are unchanged', async () => {
+	const cache = new FakeCodeMapSummaryCache();
+	const areaCalls: string[][] = [];
+	const symbolCalls: string[][] = [];
+	const frontendCalls: string[][] = [];
+	const readRequests: string[][] = [];
+	const fileSources = new Map([
+		['app/Http/Controllers/TestController.php', `<?php
+class TestController {
+	public function index(): Response {
+		return response()->json([]);
+	}
+}`],
+		['src/pages/OrdersPage.vue', `<template>
+			<main class="orders-page">
+				<form class="orders-filters" @submit.prevent="submitFilters">
+					<input v-model="filters.query" name="query" />
+				</form>
+				<section class="orders-table">
+					<OrdersTable :items="orders" @open="openOrder" />
+				</section>
+			</main>
+		</template>
+		<script setup lang="ts">
+		const filters = reactive({ query: '' });
+		const orders = ref([]);
+		const ordersStore = useOrdersStore();
+		const submitFilters = async () => {
+			await ordersStore.fetch(filters);
+		};
+		const openOrder = (id: number) => {
+			return id;
+		};
+		</script>`],
+		['routes/api.php', '<?php Route::get("/orders", TestController::class);'],
+	]);
+	const blobMap = new Map([
+		['app/Http/Controllers/TestController.php', '1111111111111111111111111111111111111111'],
+		['src/pages/OrdersPage.vue', '2222222222222222222222222222222222222222'],
+		['routes/api.php', '3333333333333333333333333333333333333333'],
+	]);
+	const service = new CodeMapInstructionService({
+		resolveFreeCopilotModel: async () => 'gpt-5-mini',
+		generateCodeMapAreaDescriptionsBatch: async (input: { areas: Array<{ id: string; area: string }> }) => {
+			areaCalls.push(input.areas.map(area => area.area));
+			return JSON.stringify({
+				areas: input.areas.map(area => ({
+					id: area.id,
+					description: `Описание области ${area.area}`,
+				})),
+			});
+		},
+		generateCodeMapSymbolDescriptionsBatch: async (input: { symbols: Array<{ id: string; name: string; filePath: string }> }) => {
+			symbolCalls.push(input.symbols.map(symbol => `${symbol.filePath}:${symbol.name}`));
+			return JSON.stringify({
+				symbols: input.symbols.map(symbol => ({
+					id: symbol.id,
+					description: `AI-описание для ${symbol.name}`,
+				})),
+			});
+		},
+		generateCodeMapFrontendBlockDescriptionsBatch: async (input: { blocks: Array<{ id: string; blockName: string }> }) => {
+			frontendCalls.push(input.blocks.map(block => block.blockName));
+			return JSON.stringify({
+				blocks: input.blocks.map(block => ({
+					id: block.id,
+					description: `AI-описание UI-блока ${block.blockName}`,
+				})),
+			});
+		},
+	} as never, cache as never) as any;
+
+	service.getFilesAtRef = async () => Array.from(fileSources.keys());
+	service.getFileBlobShasAtRef = async () => new Map(blobMap);
+	service.readJsonAtRef = async (_projectPath: string, _ref: string, filePath: string) => {
+		if (filePath === 'package.json') {
+			return {
+				name: 'frontend-app',
+				dependencies: { vue: '^3.4.0' },
+			};
+		}
+		return null;
+	};
+	service.readFileTexts = async (_projectPath: string, _ref: string, files: string[]) => {
+		readRequests.push([...files].sort());
+		return new Map(files.map(filePath => [filePath, fileSources.get(filePath) || '']));
+	};
+	service.readRecentChanges = async () => [];
+
+	const firstRecord = await service.generateInstruction({
+		repository: 'frontend-app',
+		projectPath: '/tmp/frontend-app',
+		currentBranch: 'main',
+		resolvedBranchName: 'main',
+		baseBranchName: 'main',
+		branchRole: 'current',
+		isTrackedBranch: true,
+		hasUncommittedChanges: false,
+		resolvedHeadSha: 'abc123',
+		currentHeadSha: 'abc123',
+	}, 'base', 'ru', 'gpt-5-mini');
+	const secondRecord = await service.generateInstruction({
+		repository: 'frontend-app',
+		projectPath: '/tmp/frontend-app',
+		currentBranch: 'main',
+		resolvedBranchName: 'main',
+		baseBranchName: 'main',
+		branchRole: 'current',
+		isTrackedBranch: true,
+		hasUncommittedChanges: false,
+		resolvedHeadSha: 'abc123',
+		currentHeadSha: 'abc123',
+	}, 'base', 'ru', 'gpt-5-mini');
+
+	assert.equal(areaCalls.length, 1);
+	assert.equal(symbolCalls.length, 1);
+	assert.equal(frontendCalls.length, 1);
+	assert.equal(readRequests.length, 1);
+	assert.match(firstRecord.content, /AI-описание для index/);
+	assert.match(secondRecord.content, /AI-описание для index/);
+	assert.match(secondRecord.content, /AI-описание UI-блока OrdersFilters/);
+});
+
+test('generateInstruction regenerates only changed file summaries and affected area', async () => {
+	const cache = new FakeCodeMapSummaryCache();
+	const areaCalls: string[][] = [];
+	const symbolCalls: string[][] = [];
+	const frontendCalls: Array<Array<{ blockName: string; eventHandlers: string[] }>> = [];
+	const readRequests: string[][] = [];
+	const fileSources = new Map([
+		['app/Http/Controllers/TestController.php', `<?php
+class TestController {
+	public function index(): Response {
+		return response()->json([]);
+	}
+}`],
+		['src/pages/OrdersPage.vue', `<template>
+			<main class="orders-page">
+				<form class="orders-filters" @submit.prevent="submitFilters">
+					<input v-model="filters.query" name="query" />
+				</form>
+				<section class="orders-table">
+					<OrdersTable :items="orders" @open="openOrder" />
+				</section>
+			</main>
+		</template>
+		<script setup lang="ts">
+		const filters = reactive({ query: '' });
+		const orders = ref([]);
+		const ordersStore = useOrdersStore();
+		const submitFilters = async () => {
+			await ordersStore.fetch(filters);
+		};
+		const openOrder = (id: number) => {
+			return id;
+		};
+		</script>`],
+		['routes/api.php', '<?php Route::get("/orders", TestController::class);'],
+	]);
+	const blobMap = new Map([
+		['app/Http/Controllers/TestController.php', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+		['src/pages/OrdersPage.vue', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'],
+		['routes/api.php', 'cccccccccccccccccccccccccccccccccccccccc'],
+	]);
+	const service = new CodeMapInstructionService({
+		resolveFreeCopilotModel: async () => 'gpt-5-mini',
+		generateCodeMapAreaDescriptionsBatch: async (input: { areas: Array<{ id: string; area: string }> }) => {
+			areaCalls.push(input.areas.map(area => area.area));
+			return JSON.stringify({
+				areas: input.areas.map(area => ({
+					id: area.id,
+					description: `Описание области ${area.area}`,
+				})),
+			});
+		},
+		generateCodeMapSymbolDescriptionsBatch: async (input: { symbols: Array<{ id: string; name: string; filePath: string }> }) => {
+			symbolCalls.push(input.symbols.map(symbol => `${symbol.filePath}:${symbol.name}`));
+			return JSON.stringify({
+				symbols: input.symbols.map(symbol => ({
+					id: symbol.id,
+					description: `AI-описание для ${symbol.name}`,
+				})),
+			});
+		},
+		generateCodeMapFrontendBlockDescriptionsBatch: async (input: { blocks: Array<{ id: string; blockName: string; eventHandlers: string[] }> }) => {
+			frontendCalls.push(input.blocks.map(block => ({ blockName: block.blockName, eventHandlers: [...block.eventHandlers] })));
+			return JSON.stringify({
+				blocks: input.blocks.map(block => ({
+					id: block.id,
+					description: `AI-описание UI-блока ${block.blockName}: ${block.eventHandlers.join(', ') || 'no-events'}`,
+				})),
+			});
+		},
+	} as never, cache as never) as any;
+
+	service.getFilesAtRef = async () => Array.from(fileSources.keys());
+	service.getFileBlobShasAtRef = async () => new Map(blobMap);
+	service.readJsonAtRef = async (_projectPath: string, _ref: string, filePath: string) => {
+		if (filePath === 'package.json') {
+			return {
+				name: 'frontend-app',
+				dependencies: { vue: '^3.4.0' },
+			};
+		}
+		return null;
+	};
+	service.readFileTexts = async (_projectPath: string, _ref: string, files: string[]) => {
+		readRequests.push([...files].sort());
+		return new Map(files.map(filePath => [filePath, fileSources.get(filePath) || '']));
+	};
+	service.readRecentChanges = async () => [];
+
+	await service.generateInstruction({
+		repository: 'frontend-app',
+		projectPath: '/tmp/frontend-app',
+		currentBranch: 'main',
+		resolvedBranchName: 'main',
+		baseBranchName: 'main',
+		branchRole: 'current',
+		isTrackedBranch: true,
+		hasUncommittedChanges: false,
+		resolvedHeadSha: 'abc123',
+		currentHeadSha: 'abc123',
+	}, 'base', 'ru', 'gpt-5-mini');
+
+	fileSources.set('src/pages/OrdersPage.vue', `<template>
+		<main class="orders-page">
+			<form class="orders-filters" @submit.prevent="submitFiltersFast">
+				<input v-model="filters.query" name="query" />
+			</form>
+			<section class="orders-table">
+				<OrdersTable :items="orders" @open="openOrder" />
+			</section>
+		</main>
+	</template>
+	<script setup lang="ts">
+	const filters = reactive({ query: '' });
+	const orders = ref([]);
+	const ordersStore = useOrdersStore();
+	const submitFiltersFast = async () => {
+		await ordersStore.fetch(filters);
+	};
+	const openOrder = (id: number) => {
+		return id;
+	};
+	</script>`);
+	blobMap.set('src/pages/OrdersPage.vue', 'dddddddddddddddddddddddddddddddddddddddd');
+
+	const secondRecord = await service.generateInstruction({
+		repository: 'frontend-app',
+		projectPath: '/tmp/frontend-app',
+		currentBranch: 'main',
+		resolvedBranchName: 'main',
+		baseBranchName: 'main',
+		branchRole: 'current',
+		isTrackedBranch: true,
+		hasUncommittedChanges: false,
+		resolvedHeadSha: 'abc123',
+		currentHeadSha: 'abc123',
+	}, 'base', 'ru', 'gpt-5-mini');
+
+	assert.deepEqual(areaCalls, [
+		['app/Http', 'routes/api.php', 'src/pages'],
+		['src/pages'],
+	]);
+	assert.ok(symbolCalls[1]?.every(item => item.startsWith('src/pages/OrdersPage.vue:')));
+	assert.ok((frontendCalls[1] || []).every(item => ['OrdersPageTable', 'OrdersFilters', 'OrdersTable'].includes(item.blockName)));
+	assert.ok((frontendCalls[1] || []).some(item => item.blockName === 'OrdersFilters' && item.eventHandlers.includes('submitFiltersFast')));
+	assert.ok((frontendCalls[1] || []).some(item => item.blockName === 'OrdersTable' && item.eventHandlers.includes('openOrder')));
+	assert.deepEqual(readRequests, [
+		['app/Http/Controllers/TestController.php', 'routes/api.php', 'src/pages/OrdersPage.vue'],
+		['src/pages/OrdersPage.vue'],
+	]);
+	assert.match(secondRecord.content, /AI-описание для submitFiltersFast/);
+	assert.match(secondRecord.content, /AI-описание UI-блока OrdersFilters: submitFiltersFast/);
+	assert.match(secondRecord.content, /AI-описание для index/);
 });

@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { buildAsciiTree, type AsciiTreeItem } from '../utils/asciiTree.js';
@@ -5,6 +6,8 @@ import type { CodeMapBranchResolution, CodeMapInstructionKind, CodeMapInstructio
 import type { AiService } from '../services/aiService.js';
 import { normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { getCodeMapSettings } from './codeMapConfig.js';
+import { buildCodeMapGenerationFingerprint, resolveInstructionSnapshotToken } from './codeMapRefreshPolicy.js';
+import type { CodeMapDatabaseService } from './codeMapDatabaseService.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_TREE_ITEMS = 400;
@@ -15,11 +18,13 @@ const MAX_FILES_PER_AREA = 3;
 const MAX_SYMBOLS_PER_AREA = 6;
 const MAX_FILE_SNIPPET_BYTES = 12 * 1024;
 const MAX_SYMBOLS_PER_FILE = 10;
+const MAX_FRONTEND_BLOCKS_PER_FILE = 8;
 const MAX_RELATIONS = 24;
 const MAX_RECENT_CHANGES = 10;
 const MAX_FILE_SUMMARY_COUNT = 36;
 const MAX_SYMBOL_SNIPPET_CHARS = 900;
 const ANONYMOUS_CLASS_SYMBOL_NAME = '__anonymous_class__';
+const VOID_HTML_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
 
 interface PackageManifest {
 	name?: string;
@@ -74,6 +79,8 @@ interface FileSummary {
 	role: string;
 	symbols: FileSymbolSummary[];
 	imports: string[];
+	frontendContract?: string[];
+	frontendBlocks?: FrontendBlockSummary[];
 }
 
 interface PreparedFileSymbolSummary extends FileSymbolSummary {
@@ -84,8 +91,36 @@ interface PreparedFileSymbolSummary extends FileSymbolSummary {
 	fallbackDescription: string;
 }
 
+interface FrontendBlockSummary {
+	kind: string;
+	name: string;
+	line: number;
+	column: number;
+	description: string;
+	purpose: string;
+	stateDeps: string[];
+	eventHandlers: string[];
+	dataSources: string[];
+	childComponents: string[];
+	conditions: string[];
+	routes: string[];
+	forms: string[];
+}
+
+interface PreparedFrontendBlockSummary extends FrontendBlockSummary {
+	id: string;
+	filePath: string;
+	fileRole: string;
+	framework: 'vue' | 'html' | 'blade';
+	excerpt: string;
+	linkedScriptSnippets: string[];
+	fallbackDescription: string;
+}
+
 interface PreparedFileSummary extends FileSummary {
 	symbols: PreparedFileSymbolSummary[];
+	frontendContract: string[];
+	frontendBlocks: PreparedFrontendBlockSummary[];
 }
 
 interface CodeMapSymbolBatchItem {
@@ -96,6 +131,26 @@ interface CodeMapSymbolBatchItem {
 	name: string;
 	signature: string;
 	excerpt: string;
+	fallbackDescription: string;
+}
+
+interface CodeMapFrontendBlockBatchItem {
+	id: string;
+	filePath: string;
+	fileRole: string;
+	framework: 'vue' | 'html' | 'blade';
+	blockKind: string;
+	blockName: string;
+	purpose: string;
+	stateDeps: string[];
+	eventHandlers: string[];
+	dataSources: string[];
+	childComponents: string[];
+	conditions: string[];
+	routes: string[];
+	forms: string[];
+	excerpt: string;
+	linkedScriptSnippets: string[];
 	fallbackDescription: string;
 }
 
@@ -132,6 +187,34 @@ interface ProjectCodeDescription {
 	recentChanges: string[];
 }
 
+interface FrontendFileSections {
+	framework: 'vue' | 'html' | 'blade';
+	templateSource: string;
+	templateOffset: number;
+	scriptSource: string;
+}
+
+interface FrontendScriptIndex {
+	props: string[];
+	stateNames: string[];
+	eventHandlerSnippets: Map<string, string>;
+	handlerDataSources: Map<string, string[]>;
+	dataSources: string[];
+	routes: string[];
+	contract: string[];
+}
+
+interface FrontendTemplateCandidate {
+	tagName: string;
+	attrs: string;
+	startIndex: number;
+	endIndex: number;
+	startTagEnd: number;
+	location: { line: number; column: number };
+	excerpt: string;
+	score: number;
+}
+
 interface CodeMapGenerationProgress {
 	stage: string;
 	detail?: string;
@@ -140,7 +223,10 @@ interface CodeMapGenerationProgress {
 }
 
 export class CodeMapInstructionService {
-	constructor(private readonly aiService?: AiService) { }
+	constructor(
+		private readonly aiService?: AiService,
+		private readonly db?: CodeMapDatabaseService,
+	) { }
 
 	async resolveAiModel(aiModel: string): Promise<string> {
 		if (this.aiService && typeof (this.aiService as { resolveFreeCopilotModel?: unknown }).resolveFreeCopilotModel === 'function') {
@@ -159,6 +245,7 @@ export class CodeMapInstructionService {
 	): Promise<CodeMapInstructionRecord> {
 		const isRussianLocale = locale.toLowerCase().startsWith('ru');
 		const resolvedAiModel = await this.resolveAiModel(aiModel);
+		const settings = getCodeMapSettings();
 		const branchName = instructionKind === 'base'
 			? resolution.resolvedBranchName
 			: resolution.currentBranch;
@@ -181,15 +268,15 @@ export class CodeMapInstructionService {
 				? `Найдено ${files.length} файлов, к анализу отобрано ${analysisFiles.length}`
 				: `Discovered ${files.length} files, selected ${analysisFiles.length} for analysis`,
 		});
-		onProgress?.({
-			stage: 'describing-areas',
-			detail: isRussianLocale
-				? `Подготавливаются области кода для ${resolution.repository}:${branchName}`
-				: `Preparing code areas for ${resolution.repository}:${branchName}`,
-			completed: 0,
-			total: Math.max(1, Math.min(MAX_AREA_COUNT, buildAreaEntries(selectFilesForAnalysis(files)).length)),
-		});
-		const codeDescription = await this.describeProjectCode(resolution.projectPath, branchName, files, manifest, composerManifest, locale, resolvedAiModel, onProgress);
+			onProgress?.({
+				stage: 'describing-areas',
+				detail: isRussianLocale
+					? `Подготавливаются области кода для ${resolution.repository}:${branchName}`
+					: `Preparing code areas for ${resolution.repository}:${branchName}`,
+				completed: 0,
+				total: Math.max(1, Math.min(MAX_AREA_COUNT, buildAreaEntries(selectFilesForAnalysis(files)).length)),
+			});
+			const codeDescription = await this.describeProjectCode(resolution.repository, resolution.projectPath, branchName, files, manifest, composerManifest, locale, resolvedAiModel, onProgress);
 		const generatedAt = new Date().toISOString();
 		onProgress?.({
 			stage: 'assembling-instruction',
@@ -230,6 +317,8 @@ export class CodeMapInstructionService {
 			metadata: {
 				manifestName: manifest?.name || composerManifest?.name || '',
 				fileGroups: codeDescription.areas.map(area => ({ group: area.area, count: area.fileCount })),
+				sourceSnapshotToken: resolveInstructionSnapshotToken(resolution, instructionKind),
+				generationFingerprint: buildCodeMapGenerationFingerprint(settings),
 				generatedBy: 'codemap-bootstrap',
 			},
 		};
@@ -254,6 +343,7 @@ export class CodeMapInstructionService {
 	}
 
 	private async describeProjectCode(
+		repository: string,
 		projectPath: string,
 		ref: string,
 		files: string[],
@@ -265,11 +355,52 @@ export class CodeMapInstructionService {
 	): Promise<ProjectCodeDescription> {
 		const isRussianLocale = locale.toLowerCase().startsWith('ru');
 		const settings = getCodeMapSettings();
+		const generationFingerprint = buildCodeMapGenerationFingerprint(settings);
 		const analysisFiles = selectFilesForAnalysis(files);
 		const areaEntries = buildAreaEntries(analysisFiles).slice(0, MAX_AREA_COUNT);
-		const fileTexts = await this.readFileTexts(projectPath, ref, analysisFiles);
+		const detailFiles = selectFilesForDetailedSummary(analysisFiles);
+		const fileBlobShas = await this.getFileBlobShasAtRef(projectPath, ref, analysisFiles);
 		const manifestDescription = resolveProjectDescription(manifest, composerManifest, isRussianLocale, '');
-		const preparedAreas: PreparedCodeMapAreaDescription[] = areaEntries.map((areaEntry, index) => {
+		const cachedAreaSummariesByArea = new Map<string, CodeAreaSummary>();
+		const areaEntriesToGenerate: Array<{
+			entry: { area: string; files: string[] };
+			snapshotToken: string;
+		}> = [];
+		for (const areaEntry of areaEntries) {
+			const snapshotToken = buildAreaSnapshotToken(areaEntry.area, areaEntry.files, fileBlobShas);
+			const cachedSummary = snapshotToken
+				? normalizeCachedAreaSummary(this.db?.getCachedAreaSummary<CodeAreaSummary>(repository, areaEntry.area, snapshotToken, locale, generationFingerprint))
+				: null;
+			if (cachedSummary) {
+				cachedAreaSummariesByArea.set(areaEntry.area, cachedSummary);
+				continue;
+			}
+			areaEntriesToGenerate.push({ entry: areaEntry, snapshotToken });
+		}
+
+		const cachedFileSummariesByPath = new Map<string, FileSummary>();
+		const detailFilesToGenerate: Array<{ filePath: string; blobSha: string }> = [];
+		for (const filePath of detailFiles) {
+			const blobSha = String(fileBlobShas.get(filePath) || '').trim();
+			const cachedSummary = blobSha
+				? normalizeCachedFileSummary(this.db?.getCachedFileSummary<FileSummary>(repository, filePath, blobSha, locale, generationFingerprint))
+				: null;
+			if (cachedSummary) {
+				cachedFileSummariesByPath.set(filePath, cachedSummary);
+				continue;
+			}
+			detailFilesToGenerate.push({ filePath, blobSha });
+		}
+
+		const filesToRead = uniqueStrings([
+			...detailFilesToGenerate.map(item => item.filePath),
+			...areaEntriesToGenerate.flatMap(item => item.entry.files.slice(0, MAX_FILES_PER_AREA)),
+		]);
+		const fileTexts = filesToRead.length > 0
+			? await this.readFileTexts(projectPath, ref, filesToRead)
+			: new Map<string, string>();
+
+		const preparedAreas: PreparedCodeMapAreaDescription[] = areaEntriesToGenerate.map(({ entry: areaEntry }, index) => {
 			const representativeFiles = areaEntry.files.slice(0, MAX_FILES_PER_AREA);
 			const symbols = Array.from(new Set(representativeFiles.flatMap(filePath => extractSymbolNames(filePath, fileTexts.get(filePath) || '')))).slice(0, MAX_SYMBOLS_PER_AREA);
 			return {
@@ -290,14 +421,25 @@ export class CodeMapInstructionService {
 			};
 		});
 		const areaBatches = buildAreaDescriptionBatches(preparedAreas, settings.batchContextMaxChars, settings.areaBatchMaxItems);
-		onProgress?.({
-			stage: 'describing-areas',
-			detail: formatAreaPreparationDetail(isRussianLocale, preparedAreas.length, analysisFiles.length, areaBatches.length, aiModel),
-			completed: 0,
-			total: Math.max(1, preparedAreas.length),
-		});
+		if (preparedAreas.length > 0) {
+			onProgress?.({
+				stage: 'describing-areas',
+				detail: formatAreaPreparationDetail(isRussianLocale, preparedAreas.length, analysisFiles.length, areaBatches.length, aiModel),
+				completed: 0,
+				total: Math.max(1, preparedAreas.length),
+			});
+		} else if (areaEntries.length > 0) {
+			onProgress?.({
+				stage: 'describing-areas',
+				detail: isRussianLocale
+					? `Используются кэшированные описания ${areaEntries.length} областей`
+					: `Reusing cached descriptions for ${areaEntries.length} code areas`,
+				completed: areaEntries.length,
+				total: areaEntries.length,
+			});
+		}
 		const descriptionsById = await this.buildAreaDescriptions({
-			projectPath,
+			repository,
 			ref,
 			locale,
 			aiModel,
@@ -308,39 +450,55 @@ export class CodeMapInstructionService {
 			areas: preparedAreas,
 			onProgress,
 		});
-		const areaSummaries: CodeAreaSummary[] = preparedAreas.map(area => ({
-			area: area.area,
-			fileCount: area.fileCount,
-			description: descriptionsById.get(area.id) || area.fallback,
-			representativeFiles: area.representativeFiles,
-			symbols: area.symbols,
-		}));
+		const generatedAreaSummariesByArea = new Map<string, CodeAreaSummary>();
+		for (const area of preparedAreas) {
+			const summary: CodeAreaSummary = {
+				area: area.area,
+				fileCount: area.fileCount,
+				description: descriptionsById.get(area.id) || area.fallback,
+				representativeFiles: area.representativeFiles,
+				symbols: area.symbols,
+			};
+			generatedAreaSummariesByArea.set(area.area, summary);
+			const cachedEntry = areaEntriesToGenerate.find(item => item.entry.area === area.area);
+			if (cachedEntry?.snapshotToken) {
+				this.db?.upsertCachedAreaSummary(repository, area.area, cachedEntry.snapshotToken, locale, generationFingerprint, summary);
+			}
+		}
+		const areaSummaries: CodeAreaSummary[] = areaEntries.map(areaEntry => generatedAreaSummariesByArea.get(areaEntry.area)
+			|| cachedAreaSummariesByArea.get(areaEntry.area)
+			|| ({
+				area: areaEntry.area,
+				fileCount: areaEntry.files.length,
+				description: describeArea(areaEntry.area, areaEntry.files.slice(0, MAX_FILES_PER_AREA), [], isRussianLocale),
+				representativeFiles: areaEntry.files.slice(0, MAX_FILES_PER_AREA),
+				symbols: [],
+			}));
 
-		const detailFiles = selectFilesForDetailedSummary(analysisFiles);
 		const preparedFileSummaries: PreparedFileSummary[] = [];
 		if (detailFiles.length > 0) {
 			onProgress?.({
 				stage: 'describing-files',
 				detail: isRussianLocale
-					? `Подготавливаются описания ${detailFiles.length} ключевых файлов`
-					: `Preparing summaries for ${detailFiles.length} key files`,
+					? `Подготавливаются описания ${detailFiles.length} ключевых файлов (${cachedFileSummariesByPath.size} из кэша, ${detailFilesToGenerate.length} к генерации)`
+					: `Preparing summaries for ${detailFiles.length} key files (${cachedFileSummariesByPath.size} cached, ${detailFilesToGenerate.length} to generate)`,
 				completed: 0,
-				total: detailFiles.length,
+				total: Math.max(1, detailFilesToGenerate.length),
 			});
 		}
-		for (const [index, filePath] of detailFiles.entries()) {
-			preparedFileSummaries.push(buildPreparedFileSummary(filePath, fileTexts.get(filePath) || '', isRussianLocale));
+		for (const [index, item] of detailFilesToGenerate.entries()) {
+			preparedFileSummaries.push(buildPreparedFileSummary(item.filePath, fileTexts.get(item.filePath) || '', isRussianLocale));
 			onProgress?.({
 				stage: 'describing-files',
 				detail: isRussianLocale
-					? `Файл ${index + 1}/${detailFiles.length}: ${filePath}`
-					: `File ${index + 1}/${detailFiles.length}: ${filePath}`,
+					? `Файл ${index + 1}/${detailFilesToGenerate.length}: ${item.filePath}`
+					: `File ${index + 1}/${detailFilesToGenerate.length}: ${item.filePath}`,
 				completed: index + 1,
-				total: detailFiles.length,
+				total: detailFilesToGenerate.length,
 			});
 		}
 		const symbolDescriptionsById = await this.buildFileSymbolDescriptions({
-			projectPath,
+			repository,
 			ref,
 			locale,
 			aiModel,
@@ -352,20 +510,31 @@ export class CodeMapInstructionService {
 			files: preparedFileSummaries,
 			onProgress,
 		});
-		const fileSummaries: FileSummary[] = preparedFileSummaries.map(file => ({
-			path: file.path,
-			lineCount: file.lineCount,
-			role: file.role,
-			imports: [...file.imports],
-			symbols: file.symbols.map(symbol => ({
-				kind: symbol.kind,
-				name: symbol.name,
-				signature: symbol.signature,
-				line: symbol.line,
-				column: symbol.column,
-				description: symbolDescriptionsById.get(symbol.id) || symbol.description,
-			})),
-		}));
+		const frontendBlockDescriptionsById = await this.buildFrontendBlockDescriptions({
+			repository,
+			ref,
+			locale,
+			aiModel,
+			mode: settings.blockDescriptionMode,
+			maxChars: Math.min(Math.max(settings.blockMaxChars, 260), 720),
+			batchContextMaxChars: Math.min(settings.batchContextMaxChars, 18000),
+			maxItemsPerBatch: Math.min(settings.symbolBatchMaxItems, 10),
+			maxFilesPerBatch: Math.min(settings.symbolBatchMaxFiles, 3),
+			files: preparedFileSummaries,
+			onProgress,
+		});
+		const generatedFileSummariesByPath = new Map<string, FileSummary>();
+		for (const preparedFile of preparedFileSummaries) {
+			const summary = materializePreparedFileSummary(preparedFile, symbolDescriptionsById, frontendBlockDescriptionsById);
+			generatedFileSummariesByPath.set(preparedFile.path, summary);
+			const changedFile = detailFilesToGenerate.find(item => item.filePath === preparedFile.path);
+			if (changedFile?.blobSha) {
+				this.db?.upsertCachedFileSummary(repository, preparedFile.path, changedFile.blobSha, locale, generationFingerprint, summary);
+			}
+		}
+		const fileSummaries: FileSummary[] = detailFiles.map(filePath => generatedFileSummariesByPath.get(filePath)
+			|| cachedFileSummariesByPath.get(filePath)
+			|| buildFileSummary(filePath, fileTexts.get(filePath) || '', isRussianLocale));
 		const relations = buildRelations(fileSummaries, isRussianLocale);
 		onProgress?.({
 			stage: 'collecting-history',
@@ -388,7 +557,7 @@ export class CodeMapInstructionService {
 	}
 
 	private async buildAreaDescriptions(input: {
-		projectPath: string;
+		repository: string;
 		ref: string;
 		locale: string;
 		aiModel: string;
@@ -431,7 +600,7 @@ export class CodeMapInstructionService {
 			let usedFallback = false;
 			try {
 				const response = await this.aiService.generateCodeMapAreaDescriptionsBatch({
-					repository: pathBasename(input.projectPath),
+					repository: input.repository,
 					branchName: input.ref,
 					locale: input.locale,
 					mode: input.mode,
@@ -440,7 +609,7 @@ export class CodeMapInstructionService {
 					areas: batch.map(area => ({
 						id: area.id,
 						area: area.area,
-						repository: pathBasename(input.projectPath),
+						repository: input.repository,
 						branchName: input.ref,
 						locale: input.locale,
 						mode: input.mode,
@@ -474,7 +643,7 @@ export class CodeMapInstructionService {
 	}
 
 	private async buildFileSymbolDescriptions(input: {
-		projectPath: string;
+		repository: string;
 		ref: string;
 		locale: string;
 		aiModel: string;
@@ -524,7 +693,7 @@ export class CodeMapInstructionService {
 			let parsedDescriptions: Record<string, string> = {};
 			try {
 				const response = await this.aiService.generateCodeMapSymbolDescriptionsBatch({
-					repository: pathBasename(input.projectPath),
+					repository: input.repository,
 					branchName: input.ref,
 					locale: input.locale,
 					mode: input.mode,
@@ -561,6 +730,139 @@ export class CodeMapInstructionService {
 		}
 
 		return descriptions;
+	}
+
+	private async buildFrontendBlockDescriptions(input: {
+		repository: string;
+		ref: string;
+		locale: string;
+		aiModel: string;
+		mode: 'short' | 'medium' | 'long';
+		maxChars: number;
+		batchContextMaxChars: number;
+		maxItemsPerBatch: number;
+		maxFilesPerBatch: number;
+		files: PreparedFileSummary[];
+		onProgress?: (progress: CodeMapGenerationProgress) => void;
+	}): Promise<Map<string, string>> {
+		const descriptions = new Map<string, string>();
+		const isRussianLocale = input.locale.toLowerCase().startsWith('ru');
+		const items: CodeMapFrontendBlockBatchItem[] = input.files.flatMap(file => file.frontendBlocks.map(block => ({
+			id: block.id,
+			filePath: file.path,
+			fileRole: file.role,
+			framework: block.framework,
+			blockKind: block.kind,
+			blockName: block.name,
+			purpose: block.purpose,
+			stateDeps: [...block.stateDeps],
+			eventHandlers: [...block.eventHandlers],
+			dataSources: [...block.dataSources],
+			childComponents: [...block.childComponents],
+			conditions: [...block.conditions],
+			routes: [...block.routes],
+			forms: [...block.forms],
+			excerpt: block.excerpt,
+			linkedScriptSnippets: [...block.linkedScriptSnippets],
+			fallbackDescription: block.description,
+		})));
+
+		if (items.length === 0 || !this.aiService || typeof (this.aiService as { generateCodeMapFrontendBlockDescriptionsBatch?: unknown }).generateCodeMapFrontendBlockDescriptionsBatch !== 'function') {
+			return descriptions;
+		}
+
+		const batches = buildFrontendBlockDescriptionBatches(items, input.batchContextMaxChars, input.maxItemsPerBatch, input.maxFilesPerBatch);
+		input.onProgress?.({
+			stage: 'describing-files',
+			detail: isRussianLocale
+				? `Подготавливаются AI-батчи UI-блоков: ${items.length} блоков, ${batches.length} батчей, модель ${input.aiModel}`
+				: `Preparing AI frontend-block batches: ${items.length} blocks, ${batches.length} batches, model ${input.aiModel}`,
+			completed: 0,
+			total: items.length,
+		});
+
+		let completed = 0;
+		for (const [batchIndex, batch] of batches.entries()) {
+			input.onProgress?.({
+				stage: 'describing-files',
+				detail: formatFrontendBatchStartDetail(isRussianLocale, batchIndex, batches.length, batch),
+				completed,
+				total: items.length,
+			});
+			let parsedDescriptions: Record<string, string> = {};
+			try {
+				const response = await this.aiService.generateCodeMapFrontendBlockDescriptionsBatch({
+					repository: input.repository,
+					branchName: input.ref,
+					locale: input.locale,
+					mode: input.mode,
+					maxChars: input.maxChars,
+					blocks: batch.map(item => ({
+						id: item.id,
+						filePath: item.filePath,
+						fileRole: item.fileRole,
+						framework: item.framework,
+						blockKind: item.blockKind,
+						blockName: item.blockName,
+						purpose: item.purpose,
+						stateDeps: [...item.stateDeps],
+						eventHandlers: [...item.eventHandlers],
+						dataSources: [...item.dataSources],
+						childComponents: [...item.childComponents],
+						conditions: [...item.conditions],
+						routes: [...item.routes],
+						forms: [...item.forms],
+						excerpt: item.excerpt,
+						linkedScriptSnippets: [...item.linkedScriptSnippets],
+						fallbackDescription: item.fallbackDescription,
+					})),
+				}, input.aiModel);
+				parsedDescriptions = parseCodeMapFrontendBatchResponse(response);
+			} catch {
+				parsedDescriptions = {};
+			}
+
+			for (const item of batch) {
+				const normalized = normalizeSymbolDescription(parsedDescriptions[item.id] || '', input.maxChars);
+				if (normalized) {
+					descriptions.set(item.id, normalized);
+				}
+				completed += 1;
+				input.onProgress?.({
+					stage: 'describing-files',
+					detail: formatFrontendBatchCompletionDetail(isRussianLocale, completed, items.length, item.filePath, item.blockName, !normalized),
+					completed,
+					total: items.length,
+				});
+			}
+		}
+
+		return descriptions;
+	}
+
+	private async getFileBlobShasAtRef(projectPath: string, ref: string, files: string[]): Promise<Map<string, string>> {
+		if (files.length === 0) {
+			return new Map();
+		}
+
+		try {
+			const targets = new Set(files);
+			const { stdout } = await execFileAsync('git', ['ls-tree', '-r', ref], { cwd: projectPath, maxBuffer: 12 * 1024 * 1024 });
+			const shas = new Map<string, string>();
+			for (const line of stdout.split(/\r?\n/)) {
+				const match = line.match(/^[0-9]+\s+blob\s+([0-9a-f]{40})\t(.+)$/i);
+				if (!match?.[1] || !match[2]) {
+					continue;
+				}
+				if (!targets.has(match[2])) {
+					continue;
+				}
+				shas.set(match[2], match[1]);
+			}
+			return shas;
+		} catch {
+			return new Map();
+		}
 	}
 
 	private async readFileTexts(projectPath: string, ref: string, files: string[]): Promise<Map<string, string>> {
@@ -716,14 +1018,41 @@ export function buildCodeMapProjectInstruction(input: {
 				'',
 			];
 
-			if (file.imports.length > 0) {
-				lines.push(`- ${isRussianLocale ? 'Внутренние импорты' : 'Internal imports'}: ${file.imports.join(', ')}`);
-				lines.push('');
-			}
+				if (file.imports.length > 0) {
+					lines.push(`- ${isRussianLocale ? 'Внутренние импорты' : 'Internal imports'}: ${file.imports.join(', ')}`);
+					lines.push('');
+				}
 
-			if (file.symbols.length > 0) {
-				lines.push(`- ${isRussianLocale ? 'Элементы файла' : 'File elements'}:`);
-				for (const symbol of file.symbols) {
+				if ((file.frontendContract || []).length > 0) {
+					lines.push(`- ${isRussianLocale ? 'Frontend-контракт' : 'Frontend contract'}:`);
+					for (const item of file.frontendContract || []) {
+						lines.push(`  - ${item}`);
+					}
+					lines.push('');
+				}
+
+				if ((file.frontendBlocks || []).length > 0) {
+					lines.push(`- ${isRussianLocale ? 'UI-блоки' : 'UI blocks'}:`);
+					for (const block of file.frontendBlocks || []) {
+						lines.push('');
+						lines.push(`  - ${formatFrontendBlockHeading(block, file.path, isRussianLocale)}`);
+						lines.push(`    ${isRussianLocale ? 'Описание' : 'Description'}: ${block.description}`);
+						if (block.stateDeps.length > 0) {
+							lines.push(`    ${isRussianLocale ? 'Состояние' : 'State'}: ${block.stateDeps.join(', ')}`);
+						}
+						if (block.eventHandlers.length > 0) {
+							lines.push(`    ${isRussianLocale ? 'События' : 'Events'}: ${block.eventHandlers.join(', ')}`);
+						}
+						if (block.dataSources.length > 0) {
+							lines.push(`    ${isRussianLocale ? 'Источники данных' : 'Data sources'}: ${block.dataSources.join(', ')}`);
+						}
+					}
+					lines.push('');
+				}
+
+				if (file.symbols.length > 0) {
+					lines.push(`- ${isRussianLocale ? 'Элементы файла' : 'File elements'}:`);
+					for (const symbol of file.symbols) {
 					lines.push('');
 					lines.push(`  - ${formatFileElementHeading(symbol, file.path, isRussianLocale)}`);
 					lines.push(`    ${isRussianLocale ? 'Сигнатура' : 'Signature'}: ${symbol.signature}`);
@@ -833,6 +1162,12 @@ function detectPatterns(files: string[], manifest: PackageManifest | null, compo
 	if (manifest?.dependencies?.react || manifest?.devDependencies?.react) {
 		patterns.push(isRussianLocale ? 'component-based UI на React' : 'component-based UI with React');
 	}
+	if (files.some(filePath => /\.vue$/i.test(filePath))) {
+		patterns.push(isRussianLocale ? 'single-file components на Vue с шаблоном и script-логикой' : 'Vue single-file components with linked template and script logic');
+	}
+	if (files.some(filePath => /\.blade\.php$/i.test(filePath) || /\.html?$/i.test(filePath))) {
+		patterns.push(isRussianLocale ? 'шаблонный UI с секциями страниц, формами и интерактивными блоками' : 'template-driven UI with page sections, forms, and interactive blocks');
+	}
 	if (isLaravelProject(files, composerManifest)) {
 		patterns.push(isRussianLocale ? 'MVC-слои Laravel: маршруты, контроллеры, модели и миграции' : 'Laravel MVC layering with routes, controllers, models, and migrations');
 	}
@@ -847,32 +1182,815 @@ function detectPatterns(files: string[], manifest: PackageManifest | null, compo
 
 export function buildFileSummary(filePath: string, source: string, isRussianLocale: boolean): FileSummary {
 	const prepared = buildPreparedFileSummary(filePath, source, isRussianLocale);
+	return materializePreparedFileSummary(prepared);
+}
+
+function materializePreparedFileSummary(
+	prepared: PreparedFileSummary,
+	symbolDescriptionsById: ReadonlyMap<string, string> = new Map(),
+	frontendBlockDescriptionsById: ReadonlyMap<string, string> = new Map(),
+): FileSummary {
 	return {
 		path: prepared.path,
 		lineCount: prepared.lineCount,
 		role: prepared.role,
 		imports: [...prepared.imports],
+		frontendContract: [...prepared.frontendContract],
+		frontendBlocks: prepared.frontendBlocks.map(block => ({
+			kind: block.kind,
+			name: block.name,
+			line: block.line,
+			column: block.column,
+			description: frontendBlockDescriptionsById.get(block.id) || block.description,
+			purpose: block.purpose,
+			stateDeps: [...block.stateDeps],
+			eventHandlers: [...block.eventHandlers],
+			dataSources: [...block.dataSources],
+			childComponents: [...block.childComponents],
+			conditions: [...block.conditions],
+			routes: [...block.routes],
+			forms: [...block.forms],
+		})),
 		symbols: prepared.symbols.map(symbol => ({
 			kind: symbol.kind,
 			name: symbol.name,
 			signature: symbol.signature,
 			line: symbol.line,
 			column: symbol.column,
-			description: symbol.description,
+			description: symbolDescriptionsById.get(symbol.id) || symbol.description,
 		})),
+	};
+}
+
+function normalizeCachedFileSummary(value: unknown): FileSummary | null {
+	if (!value || typeof value !== 'object') {
+		return null;
+	}
+
+	const record = value as Partial<FileSummary>;
+	if (typeof record.path !== 'string' || typeof record.role !== 'string' || !Array.isArray(record.imports) || !Array.isArray(record.symbols)) {
+		return null;
+	}
+
+	return {
+		path: record.path,
+		lineCount: Number.isFinite(record.lineCount) ? Number(record.lineCount) : 0,
+		role: record.role,
+		imports: record.imports.map(item => String(item || '').trim()).filter(Boolean),
+		frontendContract: Array.isArray(record.frontendContract)
+			? record.frontendContract.map(item => String(item || '').trim()).filter(Boolean)
+			: [],
+		frontendBlocks: Array.isArray(record.frontendBlocks)
+			? record.frontendBlocks
+				.filter((block): block is FrontendBlockSummary => Boolean(block && typeof block === 'object' && typeof (block as FrontendBlockSummary).name === 'string'))
+				.map(block => ({
+					kind: String(block.kind || '').trim(),
+					name: String(block.name || '').trim(),
+					line: Number.isFinite(block.line) ? Number(block.line) : 0,
+					column: Number.isFinite(block.column) ? Number(block.column) : 0,
+					description: String(block.description || '').trim(),
+					purpose: String(block.purpose || '').trim(),
+					stateDeps: Array.isArray(block.stateDeps) ? block.stateDeps.map(item => String(item || '').trim()).filter(Boolean) : [],
+					eventHandlers: Array.isArray(block.eventHandlers) ? block.eventHandlers.map(item => String(item || '').trim()).filter(Boolean) : [],
+					dataSources: Array.isArray(block.dataSources) ? block.dataSources.map(item => String(item || '').trim()).filter(Boolean) : [],
+					childComponents: Array.isArray(block.childComponents) ? block.childComponents.map(item => String(item || '').trim()).filter(Boolean) : [],
+					conditions: Array.isArray(block.conditions) ? block.conditions.map(item => String(item || '').trim()).filter(Boolean) : [],
+					routes: Array.isArray(block.routes) ? block.routes.map(item => String(item || '').trim()).filter(Boolean) : [],
+					forms: Array.isArray(block.forms) ? block.forms.map(item => String(item || '').trim()).filter(Boolean) : [],
+				}))
+			: [],
+		symbols: record.symbols
+			.filter((symbol): symbol is FileSymbolSummary => Boolean(symbol && typeof symbol === 'object' && typeof (symbol as FileSymbolSummary).name === 'string'))
+			.map(symbol => ({
+				kind: String(symbol.kind || '').trim(),
+				name: String(symbol.name || '').trim(),
+				signature: String(symbol.signature || '').trim(),
+				line: Number.isFinite(symbol.line) ? Number(symbol.line) : 0,
+				column: Number.isFinite(symbol.column) ? Number(symbol.column) : 0,
+				description: String(symbol.description || '').trim(),
+			})),
+	};
+}
+
+function normalizeCachedAreaSummary(value: unknown): CodeAreaSummary | null {
+	if (!value || typeof value !== 'object') {
+		return null;
+	}
+
+	const record = value as Partial<CodeAreaSummary>;
+	if (typeof record.area !== 'string' || typeof record.description !== 'string' || !Array.isArray(record.representativeFiles) || !Array.isArray(record.symbols)) {
+		return null;
+	}
+
+	return {
+		area: record.area,
+		fileCount: Number.isFinite(record.fileCount) ? Number(record.fileCount) : 0,
+		description: record.description,
+		representativeFiles: record.representativeFiles.map(item => String(item || '').trim()).filter(Boolean),
+		symbols: record.symbols.map(item => String(item || '').trim()).filter(Boolean),
 	};
 }
 
 function buildPreparedFileSummary(filePath: string, source: string, isRussianLocale: boolean): PreparedFileSummary {
 	const imports = extractInternalImports(source);
 	const role = describeFileRole(filePath, isRussianLocale);
+	const frontendInsights = extractFrontendInsights(filePath, source, role, imports, isRussianLocale);
 	return {
 		path: filePath,
 		lineCount: source ? source.split(/\r?\n/).length : 0,
 		role,
 		symbols: extractDetailedSymbols(filePath, source, role, isRussianLocale).slice(0, MAX_SYMBOLS_PER_FILE),
 		imports,
+		frontendContract: frontendInsights.contract,
+		frontendBlocks: frontendInsights.blocks.slice(0, MAX_FRONTEND_BLOCKS_PER_FILE),
 	};
+}
+
+function extractFrontendInsights(
+	filePath: string,
+	source: string,
+	role: string,
+	imports: string[],
+	isRussianLocale: boolean,
+): { contract: string[]; blocks: PreparedFrontendBlockSummary[] } {
+	const sections = extractFrontendFileSections(filePath, source);
+	if (!sections) {
+		return { contract: [], blocks: [] };
+	}
+
+	const scriptIndex = buildFrontendScriptIndex(sections.scriptSource, imports, isRussianLocale);
+	const candidates = collectFrontendTemplateCandidates(source, sections.templateSource, sections.templateOffset);
+	const blocks = candidates
+		.map(candidate => buildFrontendBlockSummary(filePath, role, sections.framework, candidate, scriptIndex, isRussianLocale))
+		.filter((item): item is PreparedFrontendBlockSummary => Boolean(item));
+	const uniqueBlocks = dedupeFrontendBlocks(blocks)
+		.sort((left, right) => left.line - right.line || left.column - right.column)
+		.slice(0, MAX_FRONTEND_BLOCKS_PER_FILE);
+
+	return {
+		contract: buildFrontendContractSummary(sections.framework, uniqueBlocks, scriptIndex, isRussianLocale),
+		blocks: uniqueBlocks,
+	};
+}
+
+function extractFrontendFileSections(filePath: string, source: string): FrontendFileSections | null {
+	if (!source) {
+		return null;
+	}
+
+	if (/\.vue$/i.test(filePath)) {
+		const templateMatch = source.match(/<template\b[^>]*>([\s\S]*?)<\/template>/i);
+		const templateStart = templateMatch && templateMatch.index !== undefined
+			? templateMatch.index + templateMatch[0].indexOf('>') + 1
+			: 0;
+		const scriptBlocks = Array.from(source.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi));
+		return {
+			framework: 'vue',
+			templateSource: templateMatch?.[1] || source,
+			templateOffset: templateStart,
+			scriptSource: scriptBlocks.map(match => match[1] || '').join('\n\n'),
+		};
+	}
+
+	if (/\.blade\.php$/i.test(filePath)) {
+		return {
+			framework: 'blade',
+			templateSource: source,
+			templateOffset: 0,
+			scriptSource: extractInlineScriptContent(source),
+		};
+	}
+
+	if (/\.html?$/i.test(filePath)) {
+		return {
+			framework: 'html',
+			templateSource: source,
+			templateOffset: 0,
+			scriptSource: extractInlineScriptContent(source),
+		};
+	}
+
+	return null;
+}
+
+function extractInlineScriptContent(source: string): string {
+	return Array.from(source.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi))
+		.map(match => match[1] || '')
+		.join('\n\n');
+}
+
+function buildFrontendScriptIndex(scriptSource: string, imports: string[], isRussianLocale: boolean): FrontendScriptIndex {
+	const stateNames = new Set<string>();
+	const props = new Set<string>();
+	const dataSources = new Set<string>();
+	const routes = new Set<string>();
+	const eventHandlerSnippets = new Map<string, string>();
+	const handlerDataSources = new Map<string, string[]>();
+	const knownDataSourceNames = new Set<string>();
+
+	for (const match of scriptSource.matchAll(/\b(?:const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:ref|reactive|computed|shallowRef|useState)\s*\(/g)) {
+		stateNames.add(match[1] || '');
+	}
+	for (const match of scriptSource.matchAll(/\b(?:const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(use[A-Z][A-Za-z0-9_$]*)\s*\(/g)) {
+		const alias = match[1] || '';
+		const callee = match[2] || '';
+		if (alias) {
+			stateNames.add(alias);
+			knownDataSourceNames.add(alias);
+		}
+		if (callee) {
+			dataSources.add(alias ? `${alias} (${callee})` : callee);
+			if (callee === 'useRoute' || callee === 'useRouter') {
+				routes.add(alias || callee.toLowerCase());
+			}
+		}
+	}
+	for (const match of scriptSource.matchAll(/\b(?:const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*(?:Store|Service|Api))\s*=\s*(?:new\s+)?([A-Za-z_$][A-Za-z0-9_$]*)?\s*\(/g)) {
+		const alias = match[1] || '';
+		const callee = match[2] || '';
+		if (alias) {
+			knownDataSourceNames.add(alias);
+			dataSources.add(callee ? `${alias} (${callee})` : alias);
+		}
+	}
+	for (const match of scriptSource.matchAll(/\bdefineProps(?:<[^>]+>)?\s*\(\s*\{([\s\S]*?)\}\s*\)/g)) {
+		for (const key of match[1].matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:/g)) {
+			props.add(key[1] || '');
+		}
+	}
+	for (const match of scriptSource.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*defineModel\b/g)) {
+		props.add(match[1] || '');
+	}
+	for (const imported of imports) {
+		if (/store|service|api/i.test(imported)) {
+			dataSources.add(imported);
+		}
+	}
+
+	const functionCandidates = extractFrontendFunctionCandidates(scriptSource);
+	for (const item of functionCandidates) {
+		if (!item.name || eventHandlerSnippets.has(item.name)) {
+			continue;
+		}
+		const snippet = trimSnippet(item.snippet);
+		if (!snippet) {
+			continue;
+		}
+		eventHandlerSnippets.set(item.name, snippet);
+		const sources = Array.from(knownDataSourceNames).filter(name => new RegExp(`\\b${escapeForRegex(name)}\\b`).test(snippet));
+		if (/route\b|router\b/.test(snippet)) {
+			routes.add(/router\b/.test(snippet) ? 'router' : 'route');
+		}
+		handlerDataSources.set(item.name, sources.slice(0, 4));
+	}
+
+	const contract: string[] = [];
+	if (props.size > 0) {
+		contract.push(isRussianLocale
+			? `Входные данные и props: ${Array.from(props).slice(0, 6).join(', ')}.`
+			: `Inputs and props: ${Array.from(props).slice(0, 6).join(', ')}.`);
+	}
+	if (dataSources.size > 0 || routes.size > 0) {
+		const sources = [
+			...Array.from(dataSources).slice(0, 5),
+			...Array.from(routes).map(item => item === 'router' || item === 'route' ? item : `${item}`),
+		];
+		contract.push(isRussianLocale
+			? `Источники данных и навигация: ${sources.join(', ')}.`
+			: `Data sources and navigation: ${sources.join(', ')}.`);
+	}
+	if (eventHandlerSnippets.size > 0) {
+		contract.push(isRussianLocale
+			? `Связанные обработчики: ${Array.from(eventHandlerSnippets.keys()).slice(0, 6).join(', ')}.`
+			: `Linked handlers: ${Array.from(eventHandlerSnippets.keys()).slice(0, 6).join(', ')}.`);
+	}
+
+	return {
+		props: Array.from(props).filter(Boolean),
+		stateNames: Array.from(stateNames).filter(Boolean),
+		eventHandlerSnippets,
+		handlerDataSources,
+		dataSources: Array.from(dataSources).filter(Boolean),
+		routes: Array.from(routes).filter(Boolean),
+		contract,
+	};
+}
+
+function extractFrontendFunctionCandidates(scriptSource: string): Array<{ name: string; snippet: string }> {
+	const items: Array<{ name: string; snippet: string }> = [];
+	for (const match of scriptSource.matchAll(/(^|\n)\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g)) {
+		const name = match[2] || '';
+		const index = (match.index || 0) + (match[1]?.length || 0);
+		items.push({ name, snippet: extractSymbolSnippet(scriptSource, index) });
+	}
+	for (const match of scriptSource.matchAll(/(^|\n)\s*(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>/g)) {
+		const name = match[2] || '';
+		const index = (match.index || 0) + (match[1]?.length || 0);
+		items.push({ name, snippet: extractSymbolSnippet(scriptSource, index) });
+	}
+	return items;
+}
+
+function collectFrontendTemplateCandidates(
+	fullSource: string,
+	templateSource: string,
+	templateOffset: number,
+): FrontendTemplateCandidate[] {
+	const candidates: FrontendTemplateCandidate[] = [];
+	for (let index = 0; index < templateSource.length; index += 1) {
+		if (templateSource[index] !== '<') {
+			continue;
+		}
+		if (templateSource.startsWith('<!--', index)) {
+			const commentEnd = templateSource.indexOf('-->', index + 4);
+			index = commentEnd >= 0 ? commentEnd + 2 : templateSource.length;
+			continue;
+		}
+		if (templateSource[index + 1] === '/' || templateSource[index + 1] === '!' || templateSource[index + 1] === '?') {
+			continue;
+		}
+
+		const tag = readHtmlStartTag(templateSource, index);
+		if (!tag) {
+			continue;
+		}
+		index = Math.max(index, tag.endIndex - 1);
+		const score = scoreFrontendTemplateTag(tag.tagName, tag.attrs);
+		if (score <= 0) {
+			continue;
+		}
+		const globalStart = templateOffset + tag.startIndex;
+		const location = getLocation(fullSource, globalStart);
+		const excerpt = buildTemplateCandidateExcerpt(templateSource, tag.startIndex, tag.endIndex, tag.tagName);
+		candidates.push({
+			tagName: tag.tagName,
+			attrs: tag.attrs,
+			startIndex: globalStart,
+			endIndex: globalStart + excerpt.length,
+			startTagEnd: templateOffset + tag.endIndex,
+			location,
+			excerpt,
+			score,
+		});
+	}
+
+	return candidates
+		.sort((left, right) => right.score - left.score || left.startIndex - right.startIndex)
+		.slice(0, MAX_FRONTEND_BLOCKS_PER_FILE * 2);
+}
+
+function readHtmlStartTag(source: string, startIndex: number): { tagName: string; attrs: string; startIndex: number; endIndex: number } | null {
+	if (source[startIndex] !== '<') {
+		return null;
+	}
+	let cursor = startIndex + 1;
+	while (cursor < source.length && /\s/.test(source[cursor] || '')) {
+		cursor += 1;
+	}
+	const nameStart = cursor;
+	while (cursor < source.length && /[A-Za-z0-9:_-]/.test(source[cursor] || '')) {
+		cursor += 1;
+	}
+	const tagName = source.slice(nameStart, cursor);
+	if (!tagName) {
+		return null;
+	}
+	let inQuote = '';
+	while (cursor < source.length) {
+		const character = source[cursor] || '';
+		if (inQuote) {
+			if (character === inQuote) {
+				inQuote = '';
+			}
+		} else if (character === '"' || character === '\'') {
+			inQuote = character;
+		} else if (character === '>') {
+			const raw = source.slice(startIndex, cursor + 1);
+			const attrs = raw.replace(/^<[^\s>]+/, '').replace(/\/?>$/, '').trim();
+			return {
+				tagName,
+				attrs,
+				startIndex,
+				endIndex: cursor + 1,
+			};
+		}
+		cursor += 1;
+	}
+	return null;
+}
+
+function buildTemplateCandidateExcerpt(source: string, startIndex: number, startTagEnd: number, tagName: string): string {
+	if (VOID_HTML_TAGS.has(tagName.toLowerCase())) {
+		return trimSnippet(source.slice(startIndex, Math.min(source.length, startTagEnd + 220)));
+	}
+	const closingIndex = source.indexOf(`</${tagName}`, startTagEnd);
+	if (closingIndex >= 0) {
+		const closeEnd = source.indexOf('>', closingIndex);
+		if (closeEnd >= 0) {
+			return trimSnippet(source.slice(startIndex, Math.min(source.length, closeEnd + 1)));
+		}
+	}
+	return trimSnippet(source.slice(startIndex, Math.min(source.length, startIndex + 900)));
+}
+
+function scoreFrontendTemplateTag(tagName: string, attrs: string): number {
+	const lowerTag = tagName.toLowerCase();
+	const attrsLower = attrs.toLowerCase();
+	const isCustom = isCustomFrontendTag(tagName);
+	const hasInteractivity = /(?:@|v-on:|wire:|x-on:|v-model|:to=|href=|type\s*=\s*["']submit["'])/.test(attrs);
+	const hasVisibility = /(?:v-if|v-else|v-show|x-show|wire:loading)/.test(attrs);
+	const classSignals = /(toolbar|filter|search|table|grid|list|card|dialog|modal|empty|sidebar|tabs|nav|header|footer|actions)/.test(attrsLower);
+
+	if (isCustom) {
+		return 100 + (hasInteractivity ? 10 : 0);
+	}
+	if (['main', 'form', 'table', 'dialog', 'nav', 'aside', 'section', 'header', 'footer'].includes(lowerTag)) {
+		return 80 + (hasInteractivity ? 10 : 0) + (hasVisibility ? 6 : 0);
+	}
+	if (['article', 'div'].includes(lowerTag) && classSignals) {
+		return 62 + (hasInteractivity ? 8 : 0) + (hasVisibility ? 6 : 0);
+	}
+	if (['ul', 'ol'].includes(lowerTag) && (classSignals || hasInteractivity)) {
+		return 56;
+	}
+	return 0;
+}
+
+function buildFrontendBlockSummary(
+	filePath: string,
+	role: string,
+	framework: 'vue' | 'html' | 'blade',
+	candidate: FrontendTemplateCandidate,
+	scriptIndex: FrontendScriptIndex,
+	isRussianLocale: boolean,
+): PreparedFrontendBlockSummary | null {
+	const kind = detectFrontendBlockKind(candidate.tagName, candidate.attrs, candidate.excerpt);
+	const name = inferFrontendBlockName(filePath, candidate.tagName, candidate.attrs, candidate.excerpt, kind);
+	const eventHandlers = extractFrontendEventHandlers(candidate.attrs, candidate.excerpt);
+	const stateDeps = extractFrontendStateDependencies(candidate.attrs, candidate.excerpt, scriptIndex);
+	const conditions = extractFrontendConditions(candidate.attrs, candidate.excerpt);
+	const childComponents = extractChildComponentNames(candidate.excerpt, candidate.tagName);
+	const forms = extractFrontendFormFields(candidate.excerpt);
+	const routes = extractFrontendRoutes(candidate.attrs, candidate.excerpt, eventHandlers, scriptIndex);
+	const linkedScriptSnippets = eventHandlers
+		.map(handler => scriptIndex.eventHandlerSnippets.get(handler) || '')
+		.filter(Boolean)
+		.slice(0, 3);
+	const dataSources = uniqueStrings([
+		...eventHandlers.flatMap(handler => scriptIndex.handlerDataSources.get(handler) || []),
+		...scriptIndex.dataSources.filter(item => stateDeps.some(state => item.includes(state)) || routes.some(route => item.includes(route))),
+		...scriptIndex.routes.filter(item => routes.includes(item)),
+	]).slice(0, 6);
+	const purpose = describeFrontendBlockPurpose(kind, name, forms, childComponents, eventHandlers, isRussianLocale);
+	const fallbackDescription = describeFrontendBlock(filePath, name, kind, purpose, stateDeps, eventHandlers, dataSources, conditions, childComponents, forms, routes, isRussianLocale);
+	if (!fallbackDescription) {
+		return null;
+	}
+
+	return {
+		id: createSymbolId(filePath, 'ui-block', name, candidate.location.line, candidate.location.column),
+		filePath,
+		fileRole: role,
+		framework,
+		kind,
+		name,
+		line: candidate.location.line,
+		column: candidate.location.column,
+		description: fallbackDescription,
+		fallbackDescription,
+		purpose,
+		stateDeps,
+		eventHandlers,
+		dataSources,
+		childComponents,
+		conditions,
+		routes,
+		forms,
+		excerpt: candidate.excerpt,
+		linkedScriptSnippets,
+	};
+}
+
+function dedupeFrontendBlocks(blocks: PreparedFrontendBlockSummary[]): PreparedFrontendBlockSummary[] {
+	const seen = new Set<string>();
+	const result: PreparedFrontendBlockSummary[] = [];
+	for (const block of blocks) {
+		const key = `${block.kind}:${block.name}:${block.line}`;
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		result.push(block);
+	}
+	return result;
+}
+
+function buildFrontendContractSummary(
+	framework: 'vue' | 'html' | 'blade',
+	blocks: PreparedFrontendBlockSummary[],
+	scriptIndex: FrontendScriptIndex,
+	isRussianLocale: boolean,
+): string[] {
+	const lines = [
+		isRussianLocale
+			? `Фреймворк/UI-слой: ${framework}. Значимые блоки: ${blocks.length > 0 ? blocks.map(block => block.name).slice(0, 4).join(', ') : 'не выделены'}.`
+			: `Framework/UI layer: ${framework}. Meaningful blocks: ${blocks.length > 0 ? blocks.map(block => block.name).slice(0, 4).join(', ') : 'none detected'}.`,
+		...scriptIndex.contract,
+	];
+	return lines.filter(Boolean).slice(0, 3);
+}
+
+function isCustomFrontendTag(tagName: string): boolean {
+	return tagName.includes('-') || /^[A-Z]/.test(tagName);
+}
+
+function detectFrontendBlockKind(tagName: string, attrs: string, excerpt: string): string {
+	const lowerTag = tagName.toLowerCase();
+	const lower = `${attrs} ${excerpt}`.toLowerCase();
+	if (/\b(dialog|modal)\b/.test(lower) || lowerTag === 'dialog') { return 'dialog'; }
+	if (/\b(empty|no-results|zero-state)\b/.test(lower)) { return 'empty-state'; }
+	if (/\b(filter|search)\b/.test(lower) || (lowerTag === 'form' && /\bv-model|name=/.test(lower))) { return 'filters'; }
+	if (/\b(toolbar|actions)\b/.test(lower) || lowerTag === 'header') { return 'toolbar'; }
+	if (/\b(sidebar|drawer)\b/.test(lower) || lowerTag === 'aside') { return 'sidebar'; }
+	if (/\b(tab|tabs)\b/.test(lower)) { return 'tabs'; }
+	if (lowerTag === 'table' || /\btable|grid\b/.test(lower)) { return 'table'; }
+	if (lowerTag === 'form') { return 'form'; }
+	if (lowerTag === 'nav') { return 'navigation'; }
+	if (lowerTag === 'main') { return 'page'; }
+	if (lowerTag === 'section') { return 'section'; }
+	if (['ul', 'ol'].includes(lowerTag) || /\blist\b/.test(lower)) { return 'list'; }
+	if (/\b(card|tile)\b/.test(lower)) { return 'card'; }
+	return isCustomFrontendTag(tagName) ? 'section' : 'layout';
+}
+
+function inferFrontendBlockName(filePath: string, tagName: string, attrs: string, excerpt: string, kind: string): string {
+	if (isCustomFrontendTag(tagName)) {
+		return toPascalCase(tagName.replace(/^x-/, ''));
+	}
+	const idMatch = attrs.match(/\bid\s*=\s*["']([^"']+)["']/i);
+	if (idMatch?.[1]) {
+		return toPascalCase(idMatch[1]);
+	}
+	const classMatch = attrs.match(/\bclass\s*=\s*["']([^"']+)["']/i);
+	if (classMatch?.[1]) {
+		const tokens = classMatch[1].split(/\s+/).filter(Boolean);
+		const significantToken = tokens.find(token => /(toolbar|filter|search|table|list|card|dialog|modal|empty|sidebar|tabs|header|footer)/i.test(token));
+		if (significantToken) {
+			return toPascalCase(significantToken);
+		}
+	}
+	const headingMatch = excerpt.match(/<h[1-3]\b[^>]*>([\s\S]*?)<\/h[1-3]>/i);
+	const headingText = normalizeInlineText(headingMatch?.[1] || '');
+	if (headingText) {
+		return `${toPascalCase(headingText.split(/\s+/).slice(0, 3).join(' '))}${toPascalCase(kind)}`;
+	}
+	const fileStem = filePath.split('/').pop()?.replace(/\.[^.]+(?:\.[^.]+)?$/, '') || 'Ui';
+	return `${toPascalCase(fileStem)}${toPascalCase(kind)}`;
+}
+
+function extractFrontendEventHandlers(attrs: string, excerpt: string): string[] {
+	const handlers = new Set<string>();
+	for (const match of `${attrs}\n${excerpt}`.matchAll(/(?:@|v-on:|x-on:)([A-Za-z0-9_.:-]+)\s*=\s*["']([^"']+)["']/g)) {
+		const callable = extractCallableName(match[2] || '');
+		if (callable) {
+			handlers.add(callable);
+		}
+	}
+	for (const match of `${attrs}\n${excerpt}`.matchAll(/wire:([A-Za-z0-9_.:-]+)\s*=\s*["']([^"']+)["']/g)) {
+		const callable = extractCallableName(match[2] || '');
+		if (callable) {
+			handlers.add(callable);
+		}
+	}
+	return Array.from(handlers).slice(0, 6);
+}
+
+function extractFrontendStateDependencies(attrs: string, excerpt: string, scriptIndex: FrontendScriptIndex): string[] {
+	const expressions: string[] = [];
+	for (const match of `${attrs}\n${excerpt}`.matchAll(/(?:v-model(?::[A-Za-z-]+)?|x-model|wire:model|v-if|v-else-if|v-show|:[A-Za-z0-9_-]+)\s*=\s*["']([^"']+)["']/g)) {
+		expressions.push(match[1] || '');
+	}
+	for (const match of excerpt.matchAll(/\{\{\s*([^}]+)\s*\}\}/g)) {
+		expressions.push(match[1] || '');
+	}
+	const known = new Set([...scriptIndex.stateNames, ...scriptIndex.props, ...scriptIndex.routes.map(item => item.replace(/\s*\(.*/, ''))]);
+	const identifiers = uniqueStrings(expressions.flatMap(expression => extractExpressionIdentifiers(expression)))
+		.filter(identifier => !identifier.startsWith('v') && !['true', 'false', 'null', 'undefined'].includes(identifier));
+	const prioritized = identifiers.filter(identifier => known.has(identifier));
+	return uniqueStrings([...prioritized, ...identifiers]).slice(0, 6);
+}
+
+function extractFrontendConditions(attrs: string, excerpt: string): string[] {
+	const conditions = new Set<string>();
+	for (const match of `${attrs}\n${excerpt}`.matchAll(/(?:v-if|v-else-if|v-show|x-show)\s*=\s*["']([^"']+)["']/g)) {
+		const condition = normalizeInlineText(match[1] || '');
+		if (condition) {
+			conditions.add(condition);
+		}
+	}
+	for (const match of excerpt.matchAll(/@if\s*\(([^)]+)\)/g)) {
+		const condition = normalizeInlineText(match[1] || '');
+		if (condition) {
+			conditions.add(condition);
+		}
+	}
+	return Array.from(conditions).slice(0, 3);
+}
+
+function extractChildComponentNames(excerpt: string, currentTagName: string): string[] {
+	const components = new Set<string>();
+	for (const match of excerpt.matchAll(/<([A-Za-z][A-Za-z0-9:_-]*)\b/g)) {
+		const tagName = match[1] || '';
+		if (!tagName || tagName === currentTagName || !isCustomFrontendTag(tagName)) {
+			continue;
+		}
+		components.add(toPascalCase(tagName.replace(/^x-/, '')));
+	}
+	return Array.from(components).slice(0, 6);
+}
+
+function extractFrontendFormFields(excerpt: string): string[] {
+	const fields = new Set<string>();
+	for (const match of excerpt.matchAll(/\bname\s*=\s*["']([^"']+)["']/g)) {
+		if (match[1]) {
+			fields.add(match[1]);
+		}
+	}
+	for (const match of excerpt.matchAll(/(?:v-model(?::[A-Za-z-]+)?|x-model|wire:model)\s*=\s*["']([^"']+)["']/g)) {
+		const expression = match[1] || '';
+		const segment = expression.split('.').filter(Boolean).pop();
+		if (segment) {
+			fields.add(segment);
+		}
+	}
+	return Array.from(fields).slice(0, 6);
+}
+
+function extractFrontendRoutes(
+	attrs: string,
+	excerpt: string,
+	eventHandlers: string[],
+	scriptIndex: FrontendScriptIndex,
+): string[] {
+	const routes = new Set<string>();
+	for (const match of `${attrs}\n${excerpt}`.matchAll(/\b(?:href|to|:to)\s*=\s*["']([^"']+)["']/g)) {
+		const route = normalizeInlineText(match[1] || '');
+		if (route) {
+			routes.add(route);
+		}
+	}
+	for (const match of `${attrs}\n${excerpt}`.matchAll(/\b(route|router)\b/g)) {
+		routes.add(match[1] || '');
+	}
+	for (const handler of eventHandlers) {
+		const snippet = scriptIndex.eventHandlerSnippets.get(handler) || '';
+		if (/\brouter\./.test(snippet)) {
+			routes.add('router');
+		}
+		if (/\broute\b/.test(snippet)) {
+			routes.add('route');
+		}
+	}
+	return Array.from(routes).slice(0, 4);
+}
+
+function describeFrontendBlockPurpose(
+	kind: string,
+	name: string,
+	forms: string[],
+	childComponents: string[],
+	eventHandlers: string[],
+	isRussianLocale: boolean,
+): string {
+	const details: string[] = [];
+	if (forms.length > 0) {
+		details.push(isRussianLocale ? `управляет полями ${forms.join(', ')}` : `manages fields ${forms.join(', ')}`);
+	}
+	if (eventHandlers.length > 0) {
+		details.push(isRussianLocale ? `запускает действия ${eventHandlers.join(', ')}` : `triggers ${eventHandlers.join(', ')}`);
+	}
+	if (childComponents.length > 0) {
+		details.push(isRussianLocale ? `собирает дочерние компоненты ${childComponents.join(', ')}` : `composes child components ${childComponents.join(', ')}`);
+	}
+	if (details.length === 0) {
+		details.push(isRussianLocale ? `служит блоком типа «${kind}»` : `acts as a ${kind} block`);
+	}
+	return isRussianLocale
+		? `${name} ${details.join(', ')}.`
+		: `${name} ${details.join(', ')}.`;
+}
+
+function describeFrontendBlock(
+	filePath: string,
+	name: string,
+	kind: string,
+	purpose: string,
+	stateDeps: string[],
+	eventHandlers: string[],
+	dataSources: string[],
+	conditions: string[],
+	childComponents: string[],
+	forms: string[],
+	routes: string[],
+	isRussianLocale: boolean,
+): string {
+	const parts = [purpose.replace(/\.$/, '')];
+	if (stateDeps.length > 0) {
+		parts.push(isRussianLocale
+			? `зависит от состояния ${stateDeps.join(', ')}`
+			: `depends on state ${stateDeps.join(', ')}`);
+	}
+	if (eventHandlers.length > 0) {
+		parts.push(isRussianLocale
+			? `инициирует ${eventHandlers.join(', ')}`
+			: `triggers ${eventHandlers.join(', ')}`);
+	}
+	if (dataSources.length > 0) {
+		parts.push(isRussianLocale
+			? `опирается на источники данных ${dataSources.join(', ')}`
+			: `relies on data sources ${dataSources.join(', ')}`);
+	}
+	if (conditions.length > 0) {
+		parts.push(isRussianLocale
+			? `переключается по условиям ${conditions.join(', ')}`
+			: `switches by conditions ${conditions.join(', ')}`);
+	}
+	if (forms.length > 0 && (kind === 'form' || kind === 'filters')) {
+		parts.push(isRussianLocale
+			? `содержит поля ${forms.join(', ')}`
+			: `contains fields ${forms.join(', ')}`);
+	}
+	if (childComponents.length > 0) {
+		parts.push(isRussianLocale
+			? `внутри использует ${childComponents.join(', ')}`
+			: `internally uses ${childComponents.join(', ')}`);
+	}
+	if (routes.length > 0) {
+		parts.push(isRussianLocale
+			? `связан с навигацией ${routes.join(', ')}`
+			: `is tied to navigation ${routes.join(', ')}`);
+	}
+	const normalized = uniqueStrings(parts).join('. ').replace(/\.\s*\./g, '. ').trim();
+	if (!normalized) {
+		return '';
+	}
+	return `${isRussianLocale ? 'UI-блок' : 'UI block'} ${name} ${normalized.replace(/\.$/, '')}.`.replace(/\s+/g, ' ').trim();
+}
+
+function extractCallableName(expression: string): string {
+	const normalized = (expression || '').trim();
+	if (!normalized) {
+		return '';
+	}
+	const callableMatch = normalized.match(/([A-Za-z_$][A-Za-z0-9_$.]*)\s*\(/);
+	if (callableMatch?.[1]) {
+		return callableMatch[1].split('.').pop() || callableMatch[1];
+	}
+	if (/^[A-Za-z_$][A-Za-z0-9_$.]*$/.test(normalized)) {
+		return normalized.split('.').pop() || normalized;
+	}
+	return '';
+}
+
+function extractExpressionIdentifiers(expression: string): string[] {
+	const reserved = new Set([
+		'if', 'else', 'true', 'false', 'null', 'undefined', 'return', 'typeof', 'instanceof',
+		'new', 'await', 'async', 'for', 'of', 'in', 'let', 'const', 'var', 'this',
+		'Math', 'Date', 'Object', 'Array', 'Number', 'String', 'Boolean',
+	]);
+	const identifiers = new Set<string>();
+	for (const match of (expression || '').matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*)\b/g)) {
+		const value = match[1] || '';
+		if (!reserved.has(value)) {
+			identifiers.add(value);
+		}
+	}
+	return Array.from(identifiers);
+}
+
+function normalizeInlineText(value: string): string {
+	return (value || '')
+		.replace(/<[^>]+>/g, ' ')
+		.replace(/\{\{[\s\S]*?\}\}/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
+function toPascalCase(value: string): string {
+	return (value || '')
+		.replace(/[^A-Za-z0-9]+/g, ' ')
+		.split(/\s+/)
+		.filter(Boolean)
+		.map(token => token.charAt(0).toUpperCase() + token.slice(1))
+		.join('') || 'UiBlock';
+}
+
+function uniqueStrings(values: string[]): string[] {
+	return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)));
+}
+
+function escapeForRegex(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function describeFileRole(filePath: string, isRussianLocale: boolean): string {
@@ -904,6 +2022,9 @@ function describeFileRole(filePath: string, isRussianLocale: boolean): string {
 	if (lower.includes('/webview/')) {
 		return isRussianLocale ? 'клиентская часть webview UI' : 'client-side webview UI';
 	}
+	if (/(\.vue|\.tsx|\.jsx)$/.test(lower) && /(components|pages|views|screens)/.test(lower)) {
+		return isRussianLocale ? 'frontend-компоненты и страницы интерфейса' : 'frontend UI components and screens';
+	}
 	if (lower.includes('/types/')) {
 		return isRussianLocale ? 'контракты и типы данных' : 'shared contracts and data types';
 	}
@@ -927,6 +2048,9 @@ function describeFileRole(filePath: string, isRussianLocale: boolean): string {
 	}
 	if (/^resources\/(js|ts|css|scss)\//.test(lower)) {
 		return isRussianLocale ? 'frontend-ассеты и клиентские точки входа' : 'frontend assets and client entry points';
+	}
+	if (/\.html?$/.test(lower)) {
+		return isRussianLocale ? 'HTML-шаблоны и структура интерфейса' : 'HTML templates and interface structure';
 	}
 	if (/^config\//.test(lower)) {
 		return isRussianLocale ? 'конфигурация приложения и окружения' : 'application and environment configuration';
@@ -1287,6 +2411,27 @@ function estimateSymbolBatchItemChars(item: CodeMapSymbolBatchItem): number {
 		+ 256;
 }
 
+function estimateFrontendBlockBatchItemChars(item: CodeMapFrontendBlockBatchItem): number {
+	return item.id.length
+		+ item.filePath.length
+		+ item.fileRole.length
+		+ item.framework.length
+		+ item.blockKind.length
+		+ item.blockName.length
+		+ item.purpose.length
+		+ item.stateDeps.join(', ').length
+		+ item.eventHandlers.join(', ').length
+		+ item.dataSources.join(', ').length
+		+ item.childComponents.join(', ').length
+		+ item.conditions.join(', ').length
+		+ item.routes.join(', ').length
+		+ item.forms.join(', ').length
+		+ item.excerpt.length
+		+ item.linkedScriptSnippets.join('\n').length
+		+ item.fallbackDescription.length
+		+ 320;
+}
+
 export function buildAreaDescriptionBatches<T extends CodeMapAreaDescriptionBatchItem>(
 	items: T[],
 	maxChars: number,
@@ -1354,6 +2499,43 @@ export function buildSymbolDescriptionBatches(
 	return batches;
 }
 
+export function buildFrontendBlockDescriptionBatches(
+	items: CodeMapFrontendBlockBatchItem[],
+	maxChars: number,
+	maxItemsPerBatch = Number.MAX_SAFE_INTEGER,
+	maxFilesPerBatch = Number.MAX_SAFE_INTEGER,
+): CodeMapFrontendBlockBatchItem[][] {
+	const limit = Math.max(4000, Math.floor(maxChars || 0));
+	const itemLimit = Math.max(1, Math.floor(maxItemsPerBatch || 0));
+	const fileLimit = Math.max(1, Math.floor(maxFilesPerBatch || 0));
+	const batches: CodeMapFrontendBlockBatchItem[][] = [];
+	let currentBatch: CodeMapFrontendBlockBatchItem[] = [];
+	let currentChars = 0;
+	let currentFiles = new Set<string>();
+
+	for (const item of items) {
+		const itemChars = estimateFrontendBlockBatchItemChars(item);
+		const nextFileCount = currentFiles.has(item.filePath)
+			? currentFiles.size
+			: currentFiles.size + 1;
+		if (currentBatch.length > 0 && (currentChars + itemChars > limit || currentBatch.length >= itemLimit || nextFileCount > fileLimit)) {
+			batches.push(currentBatch);
+			currentBatch = [];
+			currentChars = 0;
+			currentFiles = new Set<string>();
+		}
+		currentBatch.push(item);
+		currentChars += itemChars;
+		currentFiles.add(item.filePath);
+	}
+
+	if (currentBatch.length > 0) {
+		batches.push(currentBatch);
+	}
+
+	return batches;
+}
+
 function extractJsonCandidate(value: string): string {
 	const trimmed = value.trim();
 	if (!trimmed) {
@@ -1388,7 +2570,11 @@ function parseCodeMapSymbolBatchResponse(value: string): Record<string, string> 
 	return parseIdDescriptionResponse(value, 'symbols');
 }
 
-function parseIdDescriptionResponse(value: string, collectionKey: 'areas' | 'symbols'): Record<string, string> {
+function parseCodeMapFrontendBatchResponse(value: string): Record<string, string> {
+	return parseIdDescriptionResponse(value, 'blocks');
+}
+
+function parseIdDescriptionResponse(value: string, collectionKey: 'areas' | 'symbols' | 'blocks'): Record<string, string> {
 	const candidate = extractJsonCandidate(value);
 	if (!candidate) {
 		return {};
@@ -1462,9 +2648,24 @@ function normalizeSymbolDescription(value: string, maxChars: number): string {
 	return normalized.slice(0, Math.max(160, maxChars));
 }
 
-function pathBasename(projectPath: string): string {
-	const parts = projectPath.split('/').filter(Boolean);
-	return parts[parts.length - 1] || projectPath;
+function buildAreaSnapshotToken(area: string, files: string[], fileBlobShas: ReadonlyMap<string, string>): string {
+	const entries = files.map(filePath => {
+		const blobSha = String(fileBlobShas.get(filePath) || '').trim();
+		if (!blobSha) {
+			return '';
+		}
+		return `${filePath}:${blobSha}`;
+	});
+
+	if (entries.some(entry => !entry)) {
+		return '';
+	}
+
+	return createHash('sha1')
+		.update(area)
+		.update('\0')
+		.update(entries.join('\n'))
+		.digest('hex');
 }
 
 function buildAreaEntries(files: string[]): Array<{ area: string; files: string[] }> {
@@ -1553,6 +2754,8 @@ function scoreRepresentativeFile(filePath: string): number {
 	if (/extension\.[jt]s$/.test(filePath)) { score += 120; }
 	if (/index\.[jt]s$/.test(filePath)) { score += 80; }
 	if (/App\.[jt]sx?$/.test(filePath)) { score += 70; }
+	if (/\.(vue|blade\.php|html?)$/i.test(filePath)) { score += 78; }
+	if (/(pages|views|screens|components)\//i.test(filePath)) { score += 55; }
 	if (/service|provider|manager|panel|controller|router|store/i.test(filePath)) { score += 60; }
 	if (/types?|schema|model/i.test(filePath)) { score += 35; }
 	if (/test|spec/i.test(filePath)) { score -= /^tests\//.test(filePath) ? 0 : 30; }
@@ -1804,6 +3007,9 @@ function detectFrameworks(manifest: PackageManifest | null, composerManifest: Co
 	if (detected.length === 0 && isLaravelProject(files, composerManifest)) {
 		detected.push('Laravel');
 	}
+	if (files.some(filePath => /\.vue$/i.test(filePath)) && !detected.includes('Vue')) {
+		detected.push('Vue');
+	}
 
 	return Array.from(new Set(detected));
 }
@@ -1811,6 +3017,8 @@ function detectFrameworks(manifest: PackageManifest | null, composerManifest: Co
 function normalizeLanguageLabel(filePath: string): string | null {
 	const lower = filePath.toLowerCase();
 	if (lower.endsWith('.blade.php')) { return 'blade'; }
+	if (lower.endsWith('.vue')) { return 'vue'; }
+	if (lower.endsWith('.html') || lower.endsWith('.htm')) { return 'html'; }
 	if (lower.endsWith('.php')) { return 'php'; }
 	if (lower.endsWith('.ts')) { return 'ts'; }
 	if (lower.endsWith('.tsx')) { return 'tsx'; }
@@ -1905,6 +3113,8 @@ function scoreDetailedFile(filePath: string): number {
 	if (/^config\//.test(lower)) { score += 50; }
 	if (/^resources\/views\//.test(lower)) { score += 40; }
 	if (/^resources\/(js|ts|css|scss)\//.test(lower)) { score += 45; }
+	if (/\.(vue|blade\.php|html?)$/i.test(filePath)) { score += 42; }
+	if (/(pages|views|screens|components)\//.test(lower)) { score += 28; }
 	if (/^database\/(migrations|factories|seeders)\//.test(lower)) { score += 55; }
 	if (/^tests\/(feature|unit)\//.test(lower)) { score += 35; }
 	if (/^README\.md$/i.test(filePath)) { score += 20; }
@@ -2149,6 +3359,31 @@ function formatSymbolBatchCompletionDetail(
 		: `Completed ${completed}/${total}: ${filePath} -> ${symbolName}${usedFallback ? ' (local fallback)' : ''}`;
 }
 
+function formatFrontendBatchStartDetail(
+	isRussianLocale: boolean,
+	batchIndex: number,
+	batchCount: number,
+	batch: CodeMapFrontendBlockBatchItem[],
+): string {
+	const filePreview = Array.from(new Set(batch.map(item => item.filePath))).slice(0, 3).join(', ');
+	return isRussianLocale
+		? `AI-батч UI ${batchIndex + 1}/${batchCount}: ${batch.length} блоков${filePreview ? ` (${filePreview})` : ''}`
+		: `AI UI batch ${batchIndex + 1}/${batchCount}: ${batch.length} blocks${filePreview ? ` (${filePreview})` : ''}`;
+}
+
+function formatFrontendBatchCompletionDetail(
+	isRussianLocale: boolean,
+	completed: number,
+	total: number,
+	filePath: string,
+	blockName: string,
+	usedFallback: boolean,
+): string {
+	return isRussianLocale
+		? `Готово ${completed}/${total}: ${filePath} -> ${blockName}${usedFallback ? ' (локальное описание)' : ''}`
+		: `Completed ${completed}/${total}: ${filePath} -> ${blockName}${usedFallback ? ' (local fallback)' : ''}`;
+}
+
 function formatFileElementHeading(symbol: FileSymbolSummary, filePath: string, isRussianLocale: boolean): string {
 	const kind = localizeSymbolKind(symbol.kind, isRussianLocale);
 	const location = `${filePath}:${symbol.line}:${symbol.column}`;
@@ -2156,6 +3391,11 @@ function formatFileElementHeading(symbol: FileSymbolSummary, filePath: string, i
 		return `${kind} (${location})`;
 	}
 	return `${kind} ${symbol.name} (${location})`;
+}
+
+function formatFrontendBlockHeading(block: FrontendBlockSummary, filePath: string, isRussianLocale: boolean): string {
+	const kind = localizeFrontendBlockKind(block.kind, isRussianLocale);
+	return `${kind} ${block.name} (${filePath}:${block.line}:${block.column})`;
 }
 
 function localizeSymbolKind(kind: string, isRussianLocale: boolean): string {
@@ -2179,6 +3419,46 @@ function localizeSymbolKind(kind: string, isRussianLocale: boolean): string {
 			return 'Перечисление';
 		default:
 			return kind;
+	}
+}
+
+function localizeFrontendBlockKind(kind: string, isRussianLocale: boolean): string {
+	if (!isRussianLocale) {
+		return kind;
+	}
+	switch (kind) {
+		case 'page':
+			return 'Страница';
+		case 'layout':
+			return 'Лэйаут';
+		case 'section':
+			return 'Секция';
+		case 'toolbar':
+			return 'Панель действий';
+		case 'form':
+			return 'Форма';
+		case 'filters':
+			return 'Фильтры';
+		case 'list':
+			return 'Список';
+		case 'table':
+			return 'Таблица';
+		case 'card':
+			return 'Карточка';
+		case 'dialog':
+			return 'Диалог';
+		case 'tabs':
+			return 'Вкладки';
+		case 'sidebar':
+			return 'Боковая панель';
+		case 'empty-state':
+			return 'Пустое состояние';
+		case 'feedback':
+			return 'Сообщение интерфейса';
+		case 'navigation':
+			return 'Навигация';
+		default:
+			return 'UI-блок';
 	}
 }
 

@@ -59,6 +59,8 @@ export interface CodeMapBranchResolution {
 	hasUncommittedChanges: boolean;
 	resolvedHeadSha: string;
 	currentHeadSha: string;
+	resolvedTreeSha?: string;
+	currentTreeSha?: string;
 }
 
 export interface CodeMapInstructionRecord {

@@ -11,6 +11,7 @@ import { CodeMapBranchResolverService } from './codeMapBranchResolverService.js'
 import { CodeMapMaterializerService } from './codeMapMaterializerService.js';
 import { CodeMapOrchestratorService } from './codeMapOrchestratorService.js';
 import { CODEMAP_CHAT_INSTRUCTION_FILE_NAME, getCodeMapSettings } from './codeMapConfig.js';
+import { isInstructionFreshForResolution } from './codeMapRefreshPolicy.js';
 
 export class CodeMapChatInstructionService {
 	constructor(
@@ -78,19 +79,21 @@ export class CodeMapChatInstructionService {
 	}
 
 	private shouldQueueBaseRefresh(resolution: CodeMapMaterializationTarget['resolution'], baseInstruction: CodeMapMaterializationTarget['baseInstruction']): boolean {
-		if (!baseInstruction) {
-			return true;
-		}
-
-		return baseInstruction.sourceCommitSha !== resolution.resolvedHeadSha;
+		return !isInstructionFreshForResolution({
+			instruction: baseInstruction,
+			resolution,
+			instructionKind: 'base',
+			settings: getCodeMapSettings(),
+		});
 	}
 
 	private shouldQueueCurrentRefresh(resolution: CodeMapMaterializationTarget['resolution'], currentInstruction: CodeMapMaterializationTarget['currentInstruction']): boolean {
-		if (!currentInstruction) {
-			return true;
-		}
-
-		return currentInstruction.sourceCommitSha !== resolution.currentHeadSha;
+		return !isInstructionFreshForResolution({
+			instruction: currentInstruction,
+			resolution,
+			instructionKind: 'delta',
+			settings: getCodeMapSettings(),
+		});
 	}
 
 	private getInstructionFilePath(): string {
@@ -105,7 +108,10 @@ export class CodeMapChatInstructionService {
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
 		const resolutions = await this.branchResolver.resolveTrackedBranchSnapshots(projectPaths, trackedBranches);
 		for (const resolution of resolutions) {
-			this.orchestrator.queueInstruction(resolution, 'base', 'startup', updatePriority);
+			const latestInstruction = this.db.getLatestInstruction(resolution.repository, resolution.resolvedBranchName, 'base');
+			if (this.shouldQueueBaseRefresh(resolution, latestInstruction)) {
+				this.orchestrator.queueInstruction(resolution, 'base', 'startup', updatePriority);
+			}
 		}
 	}
 }

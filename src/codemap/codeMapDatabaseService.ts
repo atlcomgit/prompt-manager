@@ -17,7 +17,7 @@ import type {
 	StoredCodeMapInstruction,
 } from '../types/codemap.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 export class CodeMapDatabaseService {
 	private db: Database | null = null;
@@ -333,6 +333,102 @@ export class CodeMapDatabaseService {
 		return this.mapInstructionRow(result[0].values[0]);
 	}
 
+	getCachedFileSummary<T>(repository: string, filePath: string, blobSha: string, locale: string, generationFingerprint: string): T | null {
+		if (!blobSha || !generationFingerprint) {
+			return null;
+		}
+		const db = this.requireDb();
+		const result = db.exec(
+			`SELECT summary_json
+			FROM codemap_file_summaries
+			WHERE repository = ?
+				AND file_path = ?
+				AND blob_sha = ?
+				AND locale = ?
+				AND generation_fingerprint = ?
+			LIMIT 1;`,
+			[repository, filePath, blobSha, locale, generationFingerprint],
+		);
+		if (result.length === 0 || result[0].values.length === 0) {
+			return null;
+		}
+		return this.parseJsonRecord(result[0].values[0][0]) as T | null;
+	}
+
+	upsertCachedFileSummary(repository: string, filePath: string, blobSha: string, locale: string, generationFingerprint: string, summary: unknown): void {
+		if (!blobSha || !generationFingerprint) {
+			return;
+		}
+		const db = this.requireDb();
+		const now = new Date().toISOString();
+		const summaryJson = JSON.stringify(summary || {});
+		db.run(
+			`INSERT INTO codemap_file_summaries (
+				repository,
+				file_path,
+				blob_sha,
+				locale,
+				generation_fingerprint,
+				summary_json,
+				created_at,
+				updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(repository, file_path, blob_sha, locale, generation_fingerprint)
+			DO UPDATE SET
+				summary_json = excluded.summary_json,
+				updated_at = excluded.updated_at;`,
+			[repository, filePath, blobSha, locale, generationFingerprint, summaryJson, now, now],
+		);
+	}
+
+	getCachedAreaSummary<T>(repository: string, areaKey: string, snapshotToken: string, locale: string, generationFingerprint: string): T | null {
+		if (!snapshotToken || !generationFingerprint) {
+			return null;
+		}
+		const db = this.requireDb();
+		const result = db.exec(
+			`SELECT summary_json
+			FROM codemap_area_summaries
+			WHERE repository = ?
+				AND area_key = ?
+				AND snapshot_token = ?
+				AND locale = ?
+				AND generation_fingerprint = ?
+			LIMIT 1;`,
+			[repository, areaKey, snapshotToken, locale, generationFingerprint],
+		);
+		if (result.length === 0 || result[0].values.length === 0) {
+			return null;
+		}
+		return this.parseJsonRecord(result[0].values[0][0]) as T | null;
+	}
+
+	upsertCachedAreaSummary(repository: string, areaKey: string, snapshotToken: string, locale: string, generationFingerprint: string, summary: unknown): void {
+		if (!snapshotToken || !generationFingerprint) {
+			return;
+		}
+		const db = this.requireDb();
+		const now = new Date().toISOString();
+		const summaryJson = JSON.stringify(summary || {});
+		db.run(
+			`INSERT INTO codemap_area_summaries (
+				repository,
+				area_key,
+				snapshot_token,
+				locale,
+				generation_fingerprint,
+				summary_json,
+				created_at,
+				updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(repository, area_key, snapshot_token, locale, generation_fingerprint)
+			DO UPDATE SET
+				summary_json = excluded.summary_json,
+				updated_at = excluded.updated_at;`,
+			[repository, areaKey, snapshotToken, locale, generationFingerprint, summaryJson, now, now],
+		);
+	}
+
 	upsertInstruction(record: CodeMapInstructionRecord, maxVersionsPerInstruction: number): StoredCodeMapInstruction {
 		const db = this.requireDb();
 		const now = new Date().toISOString();
@@ -515,6 +611,9 @@ export class CodeMapDatabaseService {
 		if (currentVersion < 1) {
 			this.migrateV1();
 		}
+		if (currentVersion < 2) {
+			this.migrateV2();
+		}
 
 		if (currentVersion === 0) {
 			db.run('INSERT INTO schema_version (version) VALUES (?);', [SCHEMA_VERSION]);
@@ -580,6 +679,38 @@ export class CodeMapDatabaseService {
 		db.run('CREATE INDEX IF NOT EXISTS idx_codemap_jobs_lookup ON codemap_jobs(repository, branch_name, instruction_kind, status);');
 	}
 
+	private migrateV2(): void {
+		const db = this.requireDb();
+		db.run(`
+			CREATE TABLE IF NOT EXISTS codemap_file_summaries (
+				repository TEXT NOT NULL,
+				file_path TEXT NOT NULL,
+				blob_sha TEXT NOT NULL,
+				locale TEXT NOT NULL,
+				generation_fingerprint TEXT NOT NULL,
+				summary_json TEXT NOT NULL DEFAULT '{}',
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				PRIMARY KEY (repository, file_path, blob_sha, locale, generation_fingerprint)
+			);
+		`);
+		db.run('CREATE INDEX IF NOT EXISTS idx_codemap_file_summaries_lookup ON codemap_file_summaries(repository, file_path, locale, updated_at DESC);');
+		db.run(`
+			CREATE TABLE IF NOT EXISTS codemap_area_summaries (
+				repository TEXT NOT NULL,
+				area_key TEXT NOT NULL,
+				snapshot_token TEXT NOT NULL,
+				locale TEXT NOT NULL,
+				generation_fingerprint TEXT NOT NULL,
+				summary_json TEXT NOT NULL DEFAULT '{}',
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				PRIMARY KEY (repository, area_key, snapshot_token, locale, generation_fingerprint)
+			);
+		`);
+		db.run('CREATE INDEX IF NOT EXISTS idx_codemap_area_summaries_lookup ON codemap_area_summaries(repository, area_key, locale, updated_at DESC);');
+	}
+
 	private insertVersion(instructionId: number, content: Buffer, contentHash: string, generatedAt: string, metadataJson: string): void {
 		const db = this.requireDb();
 		db.run(
@@ -640,6 +771,15 @@ export class CodeMapDatabaseService {
 			return JSON.parse(String(value || '{}')) as Record<string, unknown>;
 		} catch {
 			return {};
+		}
+	}
+
+	private parseJsonRecord(value: unknown): Record<string, unknown> | null {
+		try {
+			const parsed = JSON.parse(String(value || '{}')) as unknown;
+			return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
+		} catch {
+			return null;
 		}
 	}
 

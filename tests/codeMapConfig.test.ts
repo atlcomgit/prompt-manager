@@ -66,14 +66,28 @@ test('getCodeMapSettingsFromConfiguration clamps batching limits to safe ranges'
 	assert.equal(settings.symbolBatchMaxFiles, 1);
 });
 
+test('getCodeMapSettingsFromConfiguration normalizes excluded paths and falls back to defaults when empty', () => {
+	const normalized = getCodeMapSettingsFromConfiguration(new FakeConfig({
+		excludedPaths: [' node_modules ', './vendor/', '', '.github', 'node_modules'],
+	}));
+	const fallback = getCodeMapSettingsFromConfiguration(new FakeConfig({
+		excludedPaths: [],
+	}));
+
+	assert.deepEqual(normalized.excludedPaths, ['node_modules', 'vendor', '.github']);
+	assert.deepEqual(fallback.excludedPaths, ['node_modules', 'vendor', '.vscode', '.github', '.nuxt', '.qodo']);
+});
+
 test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves workspace scope and normalizes returned settings', async () => {
 	const config = new FakeConfig(
 		{
 			trackedBranches: ['main'],
+			excludedPaths: ['node_modules'],
 			updatePriority: 'normal',
 		},
 		{
 			trackedBranches: 'workspace',
+			excludedPaths: 'workspace',
 			updatePriority: 'workspace',
 		},
 	);
@@ -83,6 +97,7 @@ test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves works
 		config,
 		{
 			trackedBranches: [' main ', '', 'dev', 'main'],
+			excludedPaths: [' ./vendor ', '.github/', 'vendor'],
 			updatePriority: 'high',
 			notificationsEnabled: false,
 			areaBatchMaxItems: 4,
@@ -97,6 +112,7 @@ test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves works
 
 	assert.deepEqual(updates, [
 		{ key: 'trackedBranches', value: ['main', 'dev'], scope: 'workspace' },
+		{ key: 'excludedPaths', value: ['vendor', '.github'], scope: 'workspace' },
 		{ key: 'notifications.enabled', value: false, scope: 'global' },
 		{ key: 'areaBatchMaxItems', value: 4, scope: 'global' },
 		{ key: 'symbolBatchMaxItems', value: 18, scope: 'global' },
@@ -104,6 +120,7 @@ test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves works
 		{ key: 'updatePriority', value: 'higher', scope: 'workspace' },
 	]);
 	assert.deepEqual(settings.trackedBranches, ['main', 'dev']);
+	assert.deepEqual(settings.excludedPaths, ['vendor', '.github']);
 	assert.equal(settings.notificationsEnabled, false);
 	assert.equal(settings.areaBatchMaxItems, 4);
 	assert.equal(settings.symbolBatchMaxItems, 18);

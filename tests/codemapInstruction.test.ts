@@ -810,3 +810,52 @@ class TestController {
 	assert.match(secondRecord.content, /AI-описание UI-блока OrdersFilters: submitFiltersFast/);
 	assert.match(secondRecord.content, /AI-описание для index/);
 });
+
+test('codemap source filtering respects excluded paths and tracked .gitignore rules', async () => {
+	const service = new CodeMapInstructionService() as any;
+	const rawFiles = [
+		'.gitignore',
+		'.vscode/settings.json',
+		'dist/app.js',
+		'ignored.log',
+		'nested/.gitignore',
+		'nested/tmp/cache.json',
+		'nested/keep.ts',
+		'src/visible.ts',
+	];
+	const blobMap = new Map([
+		['.gitignore', '1111111111111111111111111111111111111111'],
+		['nested/.gitignore', '2222222222222222222222222222222222222222'],
+		['.vscode/settings.json', '3333333333333333333333333333333333333333'],
+		['dist/app.js', '4444444444444444444444444444444444444444'],
+		['ignored.log', '5555555555555555555555555555555555555555'],
+		['nested/tmp/cache.json', '6666666666666666666666666666666666666666'],
+		['nested/keep.ts', '7777777777777777777777777777777777777777'],
+		['src/visible.ts', '8888888888888888888888888888888888888888'],
+	]);
+	const gitIgnoreContents = new Map([
+		['.gitignore', 'dist/\nignored.log\n'],
+		['nested/.gitignore', 'tmp/\n'],
+	]);
+
+	service.readTextAtRef = async (_projectPath: string, _ref: string, filePath: string) => gitIgnoreContents.get(filePath) || '';
+	service.getFileBlobShasAtRef = async (_projectPath: string, _ref: string, files: string[]) => new Map(files.map(filePath => [filePath, blobMap.get(filePath) || '']));
+
+	const filteredFiles = await service.filterFilesForCodeMap('/tmp/repo', 'main', rawFiles, ['.vscode']);
+	const tokenBefore = await service.buildSourceSnapshotTokenForFiles('/tmp/repo', 'main', rawFiles, filteredFiles, ['.vscode']);
+
+	blobMap.set('dist/app.js', '9999999999999999999999999999999999999999');
+	const tokenAfterIgnoredChange = await service.buildSourceSnapshotTokenForFiles('/tmp/repo', 'main', rawFiles, filteredFiles, ['.vscode']);
+
+	blobMap.set('src/visible.ts', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+	const tokenAfterVisibleChange = await service.buildSourceSnapshotTokenForFiles('/tmp/repo', 'main', rawFiles, filteredFiles, ['.vscode']);
+
+	blobMap.set('src/visible.ts', '8888888888888888888888888888888888888888');
+	blobMap.set('.gitignore', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+	const tokenAfterGitIgnoreChange = await service.buildSourceSnapshotTokenForFiles('/tmp/repo', 'main', rawFiles, filteredFiles, ['.vscode']);
+
+	assert.deepEqual(filteredFiles.sort(), ['nested/keep.ts', 'src/visible.ts']);
+	assert.equal(tokenAfterIgnoredChange, tokenBefore);
+	assert.notEqual(tokenAfterVisibleChange, tokenBefore);
+	assert.notEqual(tokenAfterGitIgnoreChange, tokenBefore);
+});

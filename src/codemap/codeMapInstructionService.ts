@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import ignore from 'ignore';
 import { buildAsciiTree, type AsciiTreeItem } from '../utils/asciiTree.js';
 import type { CodeMapBranchResolution, CodeMapInstructionKind, CodeMapInstructionRecord } from '../types/codemap.js';
 import type { AiService } from '../services/aiService.js';
@@ -222,6 +223,12 @@ interface CodeMapGenerationProgress {
 	total?: number;
 }
 
+interface GitIgnoreMatcherEntry {
+	basePath: string;
+	depth: number;
+	matcher: ReturnType<typeof ignore>;
+}
+
 export class CodeMapInstructionService {
 	constructor(
 		private readonly aiService?: AiService,
@@ -234,6 +241,13 @@ export class CodeMapInstructionService {
 		}
 
 		return normalizeOptionalCopilotModelFamily(aiModel);
+	}
+
+	async resolveSourceSnapshotToken(projectPath: string, ref: string): Promise<string> {
+		const settings = getCodeMapSettings();
+		const rawFiles = await this.getFilesAtRef(projectPath, ref);
+		const filteredFiles = await this.filterFilesForCodeMap(projectPath, ref, rawFiles, settings.excludedPaths);
+		return this.buildSourceSnapshotTokenForFiles(projectPath, ref, rawFiles, filteredFiles, settings.excludedPaths);
 	}
 
 	async generateInstruction(
@@ -258,15 +272,17 @@ export class CodeMapInstructionService {
 				? `Подготавливается git-снимок ${resolution.repository}:${branchName}`
 				: `Preparing git snapshot for ${resolution.repository}:${branchName}`,
 		});
-		const files = await this.getFilesAtRef(resolution.projectPath, branchName);
+		const rawFiles = await this.getFilesAtRef(resolution.projectPath, branchName);
+		const files = await this.filterFilesForCodeMap(resolution.projectPath, branchName, rawFiles, settings.excludedPaths);
 		const manifest = await this.readJsonAtRef<PackageManifest>(resolution.projectPath, branchName, 'package.json');
 		const composerManifest = await this.readJsonAtRef<ComposerManifest>(resolution.projectPath, branchName, 'composer.json');
 		const analysisFiles = selectFilesForAnalysis(files);
+		const excludedCount = Math.max(0, rawFiles.length - files.length);
 		onProgress?.({
 			stage: 'collecting-files',
 			detail: isRussianLocale
-				? `Найдено ${files.length} файлов, к анализу отобрано ${analysisFiles.length}`
-				: `Discovered ${files.length} files, selected ${analysisFiles.length} for analysis`,
+				? `Найдено ${rawFiles.length} файлов, после исключений осталось ${files.length}, к анализу отобрано ${analysisFiles.length}${excludedCount > 0 ? ` (исключено ${excludedCount})` : ''}`
+				: `Discovered ${rawFiles.length} files, ${files.length} remain after exclusions, selected ${analysisFiles.length} for analysis${excludedCount > 0 ? ` (${excludedCount} excluded)` : ''}`,
 		});
 			onProgress?.({
 				stage: 'describing-areas',
@@ -274,9 +290,10 @@ export class CodeMapInstructionService {
 					? `Подготавливаются области кода для ${resolution.repository}:${branchName}`
 					: `Preparing code areas for ${resolution.repository}:${branchName}`,
 				completed: 0,
-				total: Math.max(1, Math.min(MAX_AREA_COUNT, buildAreaEntries(selectFilesForAnalysis(files)).length)),
+				total: Math.max(1, Math.min(MAX_AREA_COUNT, buildAreaEntries(analysisFiles).length)),
 			});
 			const codeDescription = await this.describeProjectCode(resolution.repository, resolution.projectPath, branchName, files, manifest, composerManifest, locale, resolvedAiModel, onProgress);
+		const sourceSnapshotToken = await this.buildSourceSnapshotTokenForFiles(resolution.projectPath, branchName, rawFiles, files, settings.excludedPaths);
 		const generatedAt = new Date().toISOString();
 		onProgress?.({
 			stage: 'assembling-instruction',
@@ -317,7 +334,7 @@ export class CodeMapInstructionService {
 			metadata: {
 				manifestName: manifest?.name || composerManifest?.name || '',
 				fileGroups: codeDescription.areas.map(area => ({ group: area.area, count: area.fileCount })),
-				sourceSnapshotToken: resolveInstructionSnapshotToken(resolution, instructionKind),
+				sourceSnapshotToken: sourceSnapshotToken || resolveInstructionSnapshotToken(resolution, instructionKind),
 				generationFingerprint: buildCodeMapGenerationFingerprint(settings),
 				generatedBy: 'codemap-bootstrap',
 			},
@@ -340,6 +357,53 @@ export class CodeMapInstructionService {
 		} catch {
 			return null;
 		}
+	}
+
+	private async filterFilesForCodeMap(projectPath: string, ref: string, files: string[], excludedPaths: string[]): Promise<string[]> {
+		if (files.length === 0) {
+			return [];
+		}
+
+		const normalizedExcludedPaths = normalizeExcludedPaths(excludedPaths);
+		const gitIgnoreMatchers = await this.readGitIgnoreMatchersAtRef(projectPath, ref, files, normalizedExcludedPaths);
+		return files.filter(filePath => !isGitIgnoreFile(filePath) && !matchesConfiguredExclusion(filePath, normalizedExcludedPaths) && !isIgnoredByGitIgnore(filePath, gitIgnoreMatchers));
+	}
+
+	private async buildSourceSnapshotTokenForFiles(
+		projectPath: string,
+		ref: string,
+		rawFiles: string[],
+		filteredFiles: string[],
+		excludedPaths: string[],
+	): Promise<string> {
+		const normalizedExcludedPaths = normalizeExcludedPaths(excludedPaths);
+		const fileBlobShas = await this.getFileBlobShasAtRef(projectPath, ref, filteredFiles);
+		const gitIgnoreFiles = collectGitIgnoreFiles(rawFiles, normalizedExcludedPaths);
+		const gitIgnoreBlobShas = await this.getFileBlobShasAtRef(projectPath, ref, gitIgnoreFiles);
+		return buildCodeMapSourceSnapshotToken(filteredFiles, fileBlobShas, gitIgnoreFiles, gitIgnoreBlobShas);
+	}
+
+	private async readGitIgnoreMatchersAtRef(
+		projectPath: string,
+		ref: string,
+		files: string[],
+		excludedPaths: string[],
+	): Promise<GitIgnoreMatcherEntry[]> {
+		const matchers: GitIgnoreMatcherEntry[] = [];
+		for (const gitIgnoreFile of collectGitIgnoreFiles(files, excludedPaths)) {
+			const content = await this.readTextAtRef(projectPath, ref, gitIgnoreFile);
+			if (!content.trim()) {
+				continue;
+			}
+			const matcher = ignore();
+			matcher.add(content);
+			matchers.push({
+				basePath: getParentDirectory(gitIgnoreFile),
+				depth: gitIgnoreFile.split('/').length,
+				matcher,
+			});
+		}
+		return matchers.sort((left, right) => left.depth - right.depth || left.basePath.localeCompare(right.basePath));
 	}
 
 	private async describeProjectCode(
@@ -2666,6 +2730,99 @@ function buildAreaSnapshotToken(area: string, files: string[], fileBlobShas: Rea
 		.update('\0')
 		.update(entries.join('\n'))
 		.digest('hex');
+}
+
+function buildCodeMapSourceSnapshotToken(
+	files: string[],
+	fileBlobShas: ReadonlyMap<string, string>,
+	gitIgnoreFiles: string[],
+	gitIgnoreBlobShas: ReadonlyMap<string, string>,
+): string {
+	const fileEntries = [...files]
+		.sort((left, right) => left.localeCompare(right))
+		.map(filePath => `${filePath}:${String(fileBlobShas.get(filePath) || '').trim()}`);
+	const gitIgnoreEntries = [...gitIgnoreFiles]
+		.sort((left, right) => left.localeCompare(right))
+		.map(filePath => `${filePath}:${String(gitIgnoreBlobShas.get(filePath) || '').trim()}`);
+
+	return createHash('sha1')
+		.update(JSON.stringify({
+			files: fileEntries,
+			gitignore: gitIgnoreEntries,
+		}))
+		.digest('hex');
+}
+
+function normalizeExcludedPaths(paths: string[]): string[] {
+	return Array.from(new Set((paths || [])
+		.map(item => String(item || '').trim().replace(/^\.\/+/, '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''))
+		.filter(Boolean)));
+}
+
+function matchesConfiguredExclusion(filePath: string, excludedPaths: string[]): boolean {
+	const normalizedFilePath = String(filePath || '').replace(/\\/g, '/');
+	if (!normalizedFilePath) {
+		return false;
+	}
+
+	return excludedPaths.some(excludedPath => {
+		if (!excludedPath) {
+			return false;
+		}
+		if (excludedPath.includes('/')) {
+			return normalizedFilePath === excludedPath || normalizedFilePath.startsWith(`${excludedPath}/`);
+		}
+		return normalizedFilePath.split('/').includes(excludedPath);
+	});
+}
+
+function collectGitIgnoreFiles(files: string[], excludedPaths: string[]): string[] {
+	return files
+		.filter(filePath => isGitIgnoreFile(filePath))
+		.filter(filePath => !matchesConfiguredExclusion(filePath, excludedPaths));
+}
+
+function isGitIgnoreFile(filePath: string): boolean {
+	return filePath === '.gitignore' || filePath.endsWith('/.gitignore');
+}
+
+function isIgnoredByGitIgnore(filePath: string, matchers: GitIgnoreMatcherEntry[]): boolean {
+	let ignored = false;
+
+	for (const entry of matchers) {
+		const relativePath = toRelativeGitIgnorePath(filePath, entry.basePath);
+		if (!relativePath) {
+			continue;
+		}
+
+		const result = entry.matcher.test(relativePath);
+		if (result.ignored) {
+			ignored = true;
+		}
+		if (result.unignored) {
+			ignored = false;
+		}
+	}
+
+	return ignored;
+}
+
+function toRelativeGitIgnorePath(filePath: string, basePath: string): string {
+	if (!basePath) {
+		return filePath;
+	}
+	if (filePath === basePath || !filePath.startsWith(`${basePath}/`)) {
+		return '';
+	}
+	return filePath.slice(basePath.length + 1);
+}
+
+function getParentDirectory(filePath: string): string {
+	const parts = filePath.split('/').filter(Boolean);
+	if (parts.length <= 1) {
+		return '';
+	}
+	return parts.slice(0, -1).join('/');
 }
 
 function buildAreaEntries(files: string[]): Array<{ area: string; files: string[] }> {

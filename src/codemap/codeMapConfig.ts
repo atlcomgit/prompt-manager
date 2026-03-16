@@ -3,6 +3,7 @@ import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeOptionalCopilotModelFamily } fro
 import { resolveConfigurationScope } from '../utils/configurationScope.js';
 
 export const CODEMAP_CHAT_INSTRUCTION_FILE_NAME = 'codemap.instructions.md';
+export const DEFAULT_CODEMAP_EXCLUDED_PATHS = ['node_modules', 'vendor', '.vscode', '.github', '.nuxt', '.qodo'];
 
 export type CodeMapConfiguration = {
 	get<T>(section: string, defaultValue?: T): T;
@@ -29,6 +30,7 @@ type VscodeApi = {
 export const DEFAULT_CODEMAP_SETTINGS: CodeMapSettings = {
 	enabled: true,
 	trackedBranches: [],
+	excludedPaths: [...DEFAULT_CODEMAP_EXCLUDED_PATHS],
 	autoUpdate: true,
 	notificationsEnabled: true,
 	aiModel: DEFAULT_COPILOT_MODEL_FAMILY,
@@ -51,10 +53,12 @@ export function getCodeMapSettings(): CodeMapSettings {
 
 export function getCodeMapSettingsFromConfiguration(config: Pick<CodeMapConfiguration, 'get'> | null | undefined): CodeMapSettings {
 	const trackedBranches = normalizeTrackedBranches(config?.get<string[]>('trackedBranches', DEFAULT_CODEMAP_SETTINGS.trackedBranches) ?? DEFAULT_CODEMAP_SETTINGS.trackedBranches);
+	const excludedPaths = normalizeExcludedPaths(config?.get<string[]>('excludedPaths', DEFAULT_CODEMAP_SETTINGS.excludedPaths) ?? DEFAULT_CODEMAP_SETTINGS.excludedPaths);
 
 	return {
 		enabled: config?.get<boolean>('enabled', DEFAULT_CODEMAP_SETTINGS.enabled) ?? DEFAULT_CODEMAP_SETTINGS.enabled,
 		trackedBranches,
+		excludedPaths,
 		autoUpdate: config?.get<boolean>('autoUpdate', DEFAULT_CODEMAP_SETTINGS.autoUpdate) ?? DEFAULT_CODEMAP_SETTINGS.autoUpdate,
 		notificationsEnabled: config?.get<boolean>('notifications.enabled', DEFAULT_CODEMAP_SETTINGS.notificationsEnabled) ?? DEFAULT_CODEMAP_SETTINGS.notificationsEnabled,
 		aiModel: normalizeModelFamily(config?.get<string>('aiModel', DEFAULT_CODEMAP_SETTINGS.aiModel) ?? DEFAULT_CODEMAP_SETTINGS.aiModel),
@@ -116,6 +120,9 @@ export async function saveCodeMapSettingsToConfiguration(
 	if (settings.trackedBranches !== undefined) {
 		await updateValue('trackedBranches', normalizeTrackedBranches(settings.trackedBranches), resolveSettingScope(config, 'trackedBranches'));
 	}
+	if (settings.excludedPaths !== undefined) {
+		await updateValue('excludedPaths', normalizeExcludedPaths(settings.excludedPaths), resolveSettingScope(config, 'excludedPaths'));
+	}
 	if (settings.autoUpdate !== undefined) { await updateValue('autoUpdate', settings.autoUpdate, resolveSettingScope(config, 'autoUpdate')); }
 	if (settings.notificationsEnabled !== undefined) {
 		await updateValue('notifications.enabled', settings.notificationsEnabled, resolveSettingScope(config, 'notifications.enabled'));
@@ -175,6 +182,18 @@ function normalizeTrackedBranches(value: string[]): string[] {
 	}
 
 	return [];
+}
+
+function normalizeExcludedPaths(value: string[]): string[] {
+	const normalized = (value || [])
+		.map(item => String(item || '').trim().replace(/^\.\/+/, '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''))
+		.filter(Boolean);
+
+	if (normalized.length > 0) {
+		return Array.from(new Set(normalized));
+	}
+
+	return [...DEFAULT_CODEMAP_SETTINGS.excludedPaths];
 }
 
 function normalizePriority(value: string): CodeMapSettings['updatePriority'] {

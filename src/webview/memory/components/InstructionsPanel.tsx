@@ -299,6 +299,7 @@ export const InstructionsPanel: React.FC<Props> = ({
 		onSaveSettings({
 			...localSettings,
 			trackedBranches: localSettings.trackedBranches.map(item => item.trim()).filter(Boolean),
+			excludedPaths: localSettings.excludedPaths.map(item => item.trim()).filter(Boolean),
 		});
 	};
 
@@ -815,6 +816,16 @@ export const InstructionsPanel: React.FC<Props> = ({
 										style={styles.textarea}
 										value={localSettings.trackedBranches.join('\n')}
 										onChange={e => updateSetting('trackedBranches', e.target.value.split('\n'))}
+									/>
+								</div>
+
+								<div style={styles.section}>
+									<h4 style={styles.sectionTitle}>{t('memory.instructions.excludedPaths')}</h4>
+									<div style={styles.sectionMeta}>{t('memory.instructions.excludedPaths.help')}</div>
+									<textarea
+										style={styles.textarea}
+										value={localSettings.excludedPaths.join('\n')}
+										onChange={e => updateSetting('excludedPaths', e.target.value.split('\n'))}
 									/>
 								</div>
 

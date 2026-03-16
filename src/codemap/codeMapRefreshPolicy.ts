@@ -3,7 +3,7 @@ import type { CodeMapBranchResolution, CodeMapInstructionKind, CodeMapSettings, 
 
 const CODEMAP_GENERATION_SCHEMA_VERSION = '2026-03-17.1';
 
-type RefreshRelevantSettings = Pick<CodeMapSettings, 'blockDescriptionMode' | 'blockMaxChars'>;
+type RefreshRelevantSettings = Pick<CodeMapSettings, 'blockDescriptionMode' | 'blockMaxChars'> & Partial<Pick<CodeMapSettings, 'excludedPaths'>>;
 
 export function buildCodeMapGenerationFingerprint(settings: RefreshRelevantSettings): string {
 	return createHash('sha1')
@@ -11,18 +11,21 @@ export function buildCodeMapGenerationFingerprint(settings: RefreshRelevantSetti
 			schema: CODEMAP_GENERATION_SCHEMA_VERSION,
 			blockDescriptionMode: settings.blockDescriptionMode,
 			blockMaxChars: Math.max(0, Math.floor(settings.blockMaxChars || 0)),
+			excludedPaths: Array.isArray(settings.excludedPaths)
+				? settings.excludedPaths.map(item => String(item || '').trim()).filter(Boolean).sort()
+				: [],
 		}))
 		.digest('hex');
 }
 
 export function resolveInstructionSnapshotToken(
-	resolution: Pick<CodeMapBranchResolution, 'resolvedTreeSha' | 'currentTreeSha' | 'resolvedHeadSha' | 'currentHeadSha'>,
+	resolution: Pick<CodeMapBranchResolution, 'resolvedSourceSnapshotToken' | 'currentSourceSnapshotToken' | 'resolvedTreeSha' | 'currentTreeSha' | 'resolvedHeadSha' | 'currentHeadSha'>,
 	instructionKind: CodeMapInstructionKind,
 ): string {
 	if (instructionKind === 'base') {
-		return String(resolution.resolvedTreeSha || resolution.resolvedHeadSha || '').trim();
+		return String(resolution.resolvedSourceSnapshotToken || resolution.resolvedTreeSha || resolution.resolvedHeadSha || '').trim();
 	}
-	return String(resolution.currentTreeSha || resolution.currentHeadSha || '').trim();
+	return String(resolution.currentSourceSnapshotToken || resolution.currentTreeSha || resolution.currentHeadSha || '').trim();
 }
 
 export function getStoredInstructionSnapshotToken(
@@ -36,7 +39,7 @@ export function getStoredInstructionSnapshotToken(
 
 export function isInstructionFreshForResolution(input: {
 	instruction: Pick<StoredCodeMapInstruction, 'sourceCommitSha' | 'metadata'> | null;
-	resolution: Pick<CodeMapBranchResolution, 'resolvedTreeSha' | 'currentTreeSha' | 'resolvedHeadSha' | 'currentHeadSha'>;
+	resolution: Pick<CodeMapBranchResolution, 'resolvedSourceSnapshotToken' | 'currentSourceSnapshotToken' | 'resolvedTreeSha' | 'currentTreeSha' | 'resolvedHeadSha' | 'currentHeadSha'>;
 	instructionKind: CodeMapInstructionKind;
 	settings: RefreshRelevantSettings;
 }): boolean {

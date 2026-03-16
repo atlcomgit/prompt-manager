@@ -5,6 +5,8 @@ import { buildCodeMapGenerationFingerprint, getStoredInstructionSnapshotToken, i
 
 test('resolveInstructionSnapshotToken prefers tree sha and falls back to commit sha', () => {
 	assert.equal(resolveInstructionSnapshotToken({
+		resolvedSourceSnapshotToken: '',
+		currentSourceSnapshotToken: '',
 		resolvedTreeSha: 'tree-base',
 		currentTreeSha: 'tree-current',
 		resolvedHeadSha: 'head-base',
@@ -16,6 +18,25 @@ test('resolveInstructionSnapshotToken prefers tree sha and falls back to commit 
 		resolvedHeadSha: 'head-base',
 		currentHeadSha: 'head-current',
 	}, 'delta'), 'head-current');
+});
+
+test('resolveInstructionSnapshotToken prefers source snapshot token over tree sha', () => {
+	assert.equal(resolveInstructionSnapshotToken({
+		resolvedSourceSnapshotToken: 'filtered-base',
+		currentSourceSnapshotToken: 'filtered-current',
+		resolvedTreeSha: 'tree-base',
+		currentTreeSha: 'tree-current',
+		resolvedHeadSha: 'head-base',
+		currentHeadSha: 'head-current',
+	}, 'base'), 'filtered-base');
+	assert.equal(resolveInstructionSnapshotToken({
+		resolvedSourceSnapshotToken: 'filtered-base',
+		currentSourceSnapshotToken: 'filtered-current',
+		resolvedTreeSha: 'tree-base',
+		currentTreeSha: 'tree-current',
+		resolvedHeadSha: 'head-base',
+		currentHeadSha: 'head-current',
+	}, 'delta'), 'filtered-current');
 });
 
 test('getStoredInstructionSnapshotToken prefers metadata snapshot token', () => {

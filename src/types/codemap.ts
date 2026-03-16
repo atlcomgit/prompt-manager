@@ -32,6 +32,7 @@ export type CodeMapRuntimePhase =
 export interface CodeMapSettings {
 	enabled: boolean;
 	trackedBranches: string[];
+	excludedPaths: string[];
 	autoUpdate: boolean;
 	notificationsEnabled: boolean;
 	aiModel: string;
@@ -61,6 +62,8 @@ export interface CodeMapBranchResolution {
 	currentHeadSha: string;
 	resolvedTreeSha?: string;
 	currentTreeSha?: string;
+	resolvedSourceSnapshotToken?: string;
+	currentSourceSnapshotToken?: string;
 }
 
 export interface CodeMapInstructionRecord {

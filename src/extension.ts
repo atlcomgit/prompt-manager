@@ -134,6 +134,7 @@ export function activate(context: vscode.ExtensionContext) {
 			gitService,
 			codeMapDb,
 			codeMapBranchResolverService,
+			codeMapInstructionService,
 			codeMapMaterializerService,
 			codeMapOrchestratorService,
 		);

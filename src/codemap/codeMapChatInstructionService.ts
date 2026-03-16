@@ -8,6 +8,7 @@ import type { GitService } from '../services/gitService.js';
 import type { CodeMapMaterializationTarget } from '../types/codemap.js';
 import { CodeMapDatabaseService } from './codeMapDatabaseService.js';
 import { CodeMapBranchResolverService } from './codeMapBranchResolverService.js';
+import { CodeMapInstructionService } from './codeMapInstructionService.js';
 import { CodeMapMaterializerService } from './codeMapMaterializerService.js';
 import { CodeMapOrchestratorService } from './codeMapOrchestratorService.js';
 import { CODEMAP_CHAT_INSTRUCTION_FILE_NAME, getCodeMapSettings } from './codeMapConfig.js';
@@ -20,6 +21,7 @@ export class CodeMapChatInstructionService {
 		private readonly gitService: GitService,
 		private readonly db: CodeMapDatabaseService,
 		private readonly branchResolver: CodeMapBranchResolverService,
+		private readonly instructionService: CodeMapInstructionService,
 		private readonly materializer: CodeMapMaterializerService,
 		private readonly orchestrator: CodeMapOrchestratorService,
 	) { }
@@ -45,12 +47,12 @@ export class CodeMapChatInstructionService {
 				? this.db.getLatestInstruction(resolution.repository, resolution.currentBranch, 'delta')
 				: null;
 
-			const queuedBaseRefresh = Boolean(settings.aiModel) && this.shouldQueueBaseRefresh(resolution, baseInstruction)
+			const queuedBaseRefresh = Boolean(settings.aiModel) && await this.shouldQueueBaseRefresh(resolution, baseInstruction)
 				? this.orchestrator.queueInstruction(resolution, 'base', 'start-chat', settings.updatePriority)
 				: false;
 			const queuedCurrentRefresh = Boolean(settings.aiModel)
 				&& resolution.currentBranch !== resolution.resolvedBranchName
-				&& this.shouldQueueCurrentRefresh(resolution, currentInstruction)
+				&& await this.shouldQueueCurrentRefresh(resolution, currentInstruction)
 				? this.orchestrator.queueInstruction(resolution, 'delta', 'start-chat', settings.updatePriority)
 				: false;
 
@@ -78,19 +80,27 @@ export class CodeMapChatInstructionService {
 		void this.queueTrackedBranchSnapshots(settings.trackedBranches, settings.updatePriority);
 	}
 
-	private shouldQueueBaseRefresh(resolution: CodeMapMaterializationTarget['resolution'], baseInstruction: CodeMapMaterializationTarget['baseInstruction']): boolean {
+	private async shouldQueueBaseRefresh(resolution: CodeMapMaterializationTarget['resolution'], baseInstruction: CodeMapMaterializationTarget['baseInstruction']): Promise<boolean> {
+		const expectedSnapshotToken = await this.instructionService.resolveSourceSnapshotToken(resolution.projectPath, resolution.resolvedBranchName);
 		return !isInstructionFreshForResolution({
 			instruction: baseInstruction,
-			resolution,
+			resolution: {
+				...resolution,
+				resolvedSourceSnapshotToken: expectedSnapshotToken,
+			},
 			instructionKind: 'base',
 			settings: getCodeMapSettings(),
 		});
 	}
 
-	private shouldQueueCurrentRefresh(resolution: CodeMapMaterializationTarget['resolution'], currentInstruction: CodeMapMaterializationTarget['currentInstruction']): boolean {
+	private async shouldQueueCurrentRefresh(resolution: CodeMapMaterializationTarget['resolution'], currentInstruction: CodeMapMaterializationTarget['currentInstruction']): Promise<boolean> {
+		const expectedSnapshotToken = await this.instructionService.resolveSourceSnapshotToken(resolution.projectPath, resolution.currentBranch);
 		return !isInstructionFreshForResolution({
 			instruction: currentInstruction,
-			resolution,
+			resolution: {
+				...resolution,
+				currentSourceSnapshotToken: expectedSnapshotToken,
+			},
 			instructionKind: 'delta',
 			settings: getCodeMapSettings(),
 		});
@@ -109,7 +119,7 @@ export class CodeMapChatInstructionService {
 		const resolutions = await this.branchResolver.resolveTrackedBranchSnapshots(projectPaths, trackedBranches);
 		for (const resolution of resolutions) {
 			const latestInstruction = this.db.getLatestInstruction(resolution.repository, resolution.resolvedBranchName, 'base');
-			if (this.shouldQueueBaseRefresh(resolution, latestInstruction)) {
+			if (await this.shouldQueueBaseRefresh(resolution, latestInstruction)) {
 				this.orchestrator.queueInstruction(resolution, 'base', 'startup', updatePriority);
 			}
 		}

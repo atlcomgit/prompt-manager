@@ -2,6 +2,8 @@ export type CodeMapInstructionKind = 'base' | 'delta';
 
 export type CodeMapBranchRole = 'tracked' | 'resolved-base' | 'current';
 
+export type CodeMapArtifactKind = 'full' | 'delta';
+
 export type CodeMapJobStatus = 'queued' | 'running' | 'completed' | 'failed';
 
 export type CodeMapUpdateTrigger =
@@ -83,6 +85,87 @@ export interface CodeMapInstructionRecord {
 	metadata?: Record<string, unknown>;
 }
 
+export interface CodeMapFileSymbolSummary {
+	kind: string;
+	name: string;
+	signature: string;
+	line: number;
+	column: number;
+	description: string;
+}
+
+export interface CodeMapFrontendBlockSummary {
+	kind: string;
+	name: string;
+	line: number;
+	column: number;
+	description: string;
+	purpose: string;
+	stateDeps: string[];
+	eventHandlers: string[];
+	dataSources: string[];
+	childComponents: string[];
+	conditions: string[];
+	routes: string[];
+	forms: string[];
+}
+
+export interface CodeMapFileSummary {
+	path: string;
+	lineCount: number;
+	role: string;
+	symbols: CodeMapFileSymbolSummary[];
+	imports: string[];
+	frontendContract?: string[];
+	frontendBlocks?: CodeMapFrontendBlockSummary[];
+}
+
+export interface CodeMapAreaSummary {
+	area: string;
+	fileCount: number;
+	description: string;
+	representativeFiles: string[];
+	symbols: string[];
+}
+
+export interface CodeMapProjectDescription {
+	projectEssence: string[];
+	architectureSummary: string[];
+	patterns: string[];
+	entryPoints: string[];
+	areas: CodeMapAreaSummary[];
+	fileSummaries: CodeMapFileSummary[];
+	relations: string[];
+	recentChanges: string[];
+}
+
+export interface CodeMapRefDiffEntry {
+	status: 'A' | 'M' | 'D' | 'R' | 'C';
+	path: string;
+	oldPath?: string;
+}
+
+export interface CodeMapBranchArtifactPayload {
+	artifactKind: CodeMapArtifactKind;
+	repository: string;
+	branchName: string;
+	headSha: string;
+	treeSha: string;
+	sourceSnapshotToken: string;
+	basedOnBranchName?: string;
+	basedOnSnapshotToken?: string;
+	files: string[];
+	analysisFiles: string[];
+	blobShaByFile: Record<string, string>;
+	manifest?: Record<string, unknown> | null;
+	composerManifest?: Record<string, unknown> | null;
+	codeDescription: CodeMapProjectDescription;
+	diffEntries?: CodeMapRefDiffEntry[];
+	changedFiles?: string[];
+	deletedFiles?: string[];
+	renamedFiles?: Array<{ from: string; to: string }>;
+}
+
 export interface StoredCodeMapInstruction extends Omit<CodeMapInstructionRecord, 'content' | 'metadata'> {
 	id: number;
 	uncompressedSize: number;
@@ -91,6 +174,25 @@ export interface StoredCodeMapInstruction extends Omit<CodeMapInstructionRecord,
 	metadata: Record<string, unknown>;
 	updatedAt: string;
 	versionCount: number;
+}
+
+export interface StoredCodeMapBranchArtifact {
+	repository: string;
+	branchName: string;
+	artifactKind: CodeMapArtifactKind;
+	locale: string;
+	generationFingerprint: string;
+	sourceSnapshotToken: string;
+	treeSha: string;
+	headSha: string;
+	basedOnBranchName?: string;
+	basedOnSnapshotToken?: string;
+	payload: CodeMapBranchArtifactPayload;
+	payloadHash: string;
+	uncompressedSize: number;
+	compressedSize: number;
+	generatedAt: string;
+	updatedAt: string;
 }
 
 export interface CodeMapJobRecord {

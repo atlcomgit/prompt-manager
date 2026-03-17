@@ -93,12 +93,20 @@ export class CodeMapAdminService {
 	async deleteObsoleteInstructions(): Promise<number> {
 		const instructions = await this.getInstructions();
 		const obsoleteIds = instructions.filter(item => item.isObsolete).map(item => item.id);
+		const keepArtifactKeys = await this.getKeepArtifactKeys();
 		if (obsoleteIds.length === 0) {
+			try {
+				this.db.deleteBranchArtifactsByKeys(keepArtifactKeys);
+			} catch {
+				// Ignore cleanup failures here.
+			}
 			return 0;
 		}
 
 		try {
-			return this.db.deleteInstructionsByIds(obsoleteIds);
+			const deletedInstructions = this.db.deleteInstructionsByIds(obsoleteIds);
+			this.db.deleteBranchArtifactsByKeys(keepArtifactKeys);
+			return deletedInstructions;
 		} catch {
 			return 0;
 		}
@@ -163,6 +171,20 @@ export class CodeMapAdminService {
 	}
 
 	private async getObsoleteInstructionIds(instructions: CodeMapInstructionListItem[]): Promise<Set<number>> {
+		const keepKeys = await this.getKeepInstructionKeys();
+		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
+		const obsoleteIds = new Set<number>();
+		for (const instruction of instructions) {
+			const key = `${instruction.repository}::${instruction.branchName}::${instruction.instructionKind}`;
+			if (!projectPaths.has(instruction.repository) || !keepKeys.has(key)) {
+				obsoleteIds.add(instruction.id);
+			}
+		}
+
+		return obsoleteIds;
+	}
+
+	private async getKeepInstructionKeys(): Promise<Set<string>> {
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
 		const trackedBranches = getCodeMapSettings().trackedBranches;
 		const keepKeys = new Set<string>();
@@ -183,16 +205,14 @@ export class CodeMapAdminService {
 				keepKeys.add(`${resolution.repository}::${resolution.currentBranch}::delta`);
 			}
 		}
+		return keepKeys;
+	}
 
-		const obsoleteIds = new Set<number>();
-		for (const instruction of instructions) {
-			const key = `${instruction.repository}::${instruction.branchName}::${instruction.instructionKind}`;
-			if (!projectPaths.has(instruction.repository) || !keepKeys.has(key)) {
-				obsoleteIds.add(instruction.id);
-			}
-		}
-
-		return obsoleteIds;
+	private async getKeepArtifactKeys(): Promise<string[]> {
+		const instructionKeys = await this.getKeepInstructionKeys();
+		return Array.from(instructionKeys).map((key) => key.endsWith('::base')
+			? key.replace(/::base$/, '::full')
+			: key.replace(/::delta$/, '::delta'));
 	}
 
 	private async buildResolutionFromInstruction(instruction: CodeMapInstructionDetail['instruction']): Promise<CodeMapBranchResolution | null> {

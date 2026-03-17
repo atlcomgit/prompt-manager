@@ -3,7 +3,19 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import ignore from 'ignore';
 import { buildAsciiTree, type AsciiTreeItem } from '../utils/asciiTree.js';
-import type { CodeMapBranchResolution, CodeMapInstructionKind, CodeMapInstructionRecord } from '../types/codemap.js';
+import type {
+	CodeMapAreaSummary as CodeAreaSummary,
+	CodeMapBranchArtifactPayload,
+	CodeMapBranchResolution,
+	CodeMapFileSummary as FileSummary,
+	CodeMapFileSymbolSummary as FileSymbolSummary,
+	CodeMapFrontendBlockSummary as FrontendBlockSummary,
+	CodeMapInstructionKind,
+	CodeMapInstructionRecord,
+	CodeMapProjectDescription as ProjectCodeDescription,
+	CodeMapRefDiffEntry,
+	StoredCodeMapBranchArtifact,
+} from '../types/codemap.js';
 import type { AiService } from '../services/aiService.js';
 import { normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { getCodeMapSettings } from './codeMapConfig.js';
@@ -24,6 +36,8 @@ const MAX_RELATIONS = 24;
 const MAX_RECENT_CHANGES = 10;
 const MAX_FILE_SUMMARY_COUNT = 36;
 const MAX_SYMBOL_SNIPPET_CHARS = 900;
+const MAX_REUSE_CHANGED_FILES = 200;
+const MAX_REUSE_CHANGED_RATIO = 0.35;
 const ANONYMOUS_CLASS_SYMBOL_NAME = '__anonymous_class__';
 const VOID_HTML_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
 
@@ -43,14 +57,6 @@ interface ComposerManifest {
 	requireDev?: Record<string, string>;
 }
 
-interface CodeAreaSummary {
-	area: string;
-	fileCount: number;
-	description: string;
-	representativeFiles: string[];
-	symbols: string[];
-}
-
 export interface CodeMapAreaDescriptionBatchItem {
 	id: string;
 	area: string;
@@ -65,47 +71,12 @@ interface PreparedCodeMapAreaDescription extends CodeMapAreaDescriptionBatchItem
 	fallback: string;
 }
 
-interface FileSymbolSummary {
-	kind: string;
-	name: string;
-	signature: string;
-	line: number;
-	column: number;
-	description: string;
-}
-
-interface FileSummary {
-	path: string;
-	lineCount: number;
-	role: string;
-	symbols: FileSymbolSummary[];
-	imports: string[];
-	frontendContract?: string[];
-	frontendBlocks?: FrontendBlockSummary[];
-}
-
 interface PreparedFileSymbolSummary extends FileSymbolSummary {
 	id: string;
 	filePath: string;
 	fileRole: string;
 	excerpt: string;
 	fallbackDescription: string;
-}
-
-interface FrontendBlockSummary {
-	kind: string;
-	name: string;
-	line: number;
-	column: number;
-	description: string;
-	purpose: string;
-	stateDeps: string[];
-	eventHandlers: string[];
-	dataSources: string[];
-	childComponents: string[];
-	conditions: string[];
-	routes: string[];
-	forms: string[];
 }
 
 interface PreparedFrontendBlockSummary extends FrontendBlockSummary {
@@ -177,17 +148,6 @@ interface RoutineBodySignals {
 	dispatchesWork: boolean;
 }
 
-interface ProjectCodeDescription {
-	projectEssence: string[];
-	architectureSummary: string[];
-	patterns: string[];
-	entryPoints: string[];
-	areas: CodeAreaSummary[];
-	fileSummaries: FileSummary[];
-	relations: string[];
-	recentChanges: string[];
-}
-
 interface FrontendFileSections {
 	framework: 'vue' | 'html' | 'blade';
 	templateSource: string;
@@ -229,6 +189,27 @@ interface GitIgnoreMatcherEntry {
 	matcher: ReturnType<typeof ignore>;
 }
 
+interface RefSnapshot {
+	ref: string;
+	headSha: string;
+	treeSha: string;
+	rawFiles: string[];
+	filteredFiles: string[];
+	analysisFiles: string[];
+	blobShaByFile: Map<string, string>;
+	sourceSnapshotToken: string;
+	manifest: PackageManifest | null;
+	composerManifest: ComposerManifest | null;
+}
+
+interface ReuseContext {
+	sourceArtifact: StoredCodeMapBranchArtifact;
+	diffEntries: CodeMapRefDiffEntry[];
+	changedFiles: Set<string>;
+	deletedFiles: string[];
+	renamedFiles: Array<{ from: string; to: string }>;
+}
+
 export class CodeMapInstructionService {
 	constructor(
 		private readonly aiService?: AiService,
@@ -244,10 +225,8 @@ export class CodeMapInstructionService {
 	}
 
 	async resolveSourceSnapshotToken(projectPath: string, ref: string): Promise<string> {
-		const settings = getCodeMapSettings();
-		const rawFiles = await this.getFilesAtRef(projectPath, ref);
-		const filteredFiles = await this.filterFilesForCodeMap(projectPath, ref, rawFiles, settings.excludedPaths);
-		return this.buildSourceSnapshotTokenForFiles(projectPath, ref, rawFiles, filteredFiles, settings.excludedPaths);
+		const snapshot = await this.collectRefSnapshot(projectPath, ref);
+		return snapshot.sourceSnapshotToken;
 	}
 
 	async generateInstruction(
@@ -272,28 +251,51 @@ export class CodeMapInstructionService {
 				? `Подготавливается git-снимок ${resolution.repository}:${branchName}`
 				: `Preparing git snapshot for ${resolution.repository}:${branchName}`,
 		});
-		const rawFiles = await this.getFilesAtRef(resolution.projectPath, branchName);
-		const files = await this.filterFilesForCodeMap(resolution.projectPath, branchName, rawFiles, settings.excludedPaths);
-		const manifest = await this.readJsonAtRef<PackageManifest>(resolution.projectPath, branchName, 'package.json');
-		const composerManifest = await this.readJsonAtRef<ComposerManifest>(resolution.projectPath, branchName, 'composer.json');
-		const analysisFiles = selectFilesForAnalysis(files);
-		const excludedCount = Math.max(0, rawFiles.length - files.length);
+		const snapshot = await this.collectRefSnapshot(resolution.projectPath, branchName, headSha);
+		const excludedCount = Math.max(0, snapshot.rawFiles.length - snapshot.filteredFiles.length);
 		onProgress?.({
 			stage: 'collecting-files',
 			detail: isRussianLocale
-				? `Найдено ${rawFiles.length} файлов, после исключений осталось ${files.length}, к анализу отобрано ${analysisFiles.length}${excludedCount > 0 ? ` (исключено ${excludedCount})` : ''}`
-				: `Discovered ${rawFiles.length} files, ${files.length} remain after exclusions, selected ${analysisFiles.length} for analysis${excludedCount > 0 ? ` (${excludedCount} excluded)` : ''}`,
+				? `Найдено ${snapshot.rawFiles.length} файлов, после исключений осталось ${snapshot.filteredFiles.length}, к анализу отобрано ${snapshot.analysisFiles.length}${excludedCount > 0 ? ` (исключено ${excludedCount})` : ''}`
+				: `Discovered ${snapshot.rawFiles.length} files, ${snapshot.filteredFiles.length} remain after exclusions, selected ${snapshot.analysisFiles.length} for analysis${excludedCount > 0 ? ` (${excludedCount} excluded)` : ''}`,
 		});
-			onProgress?.({
-				stage: 'describing-areas',
-				detail: isRussianLocale
-					? `Подготавливаются области кода для ${resolution.repository}:${branchName}`
-					: `Preparing code areas for ${resolution.repository}:${branchName}`,
-				completed: 0,
-				total: Math.max(1, Math.min(MAX_AREA_COUNT, buildAreaEntries(analysisFiles).length)),
-			});
-			const codeDescription = await this.describeProjectCode(resolution.repository, resolution.projectPath, branchName, files, manifest, composerManifest, locale, resolvedAiModel, onProgress);
-		const sourceSnapshotToken = await this.buildSourceSnapshotTokenForFiles(resolution.projectPath, branchName, rawFiles, files, settings.excludedPaths);
+		const generationFingerprint = buildCodeMapGenerationFingerprint(settings);
+		const reuseContext = await this.selectReuseContext({
+			repository: resolution.repository,
+			projectPath: resolution.projectPath,
+			branchName,
+			resolution,
+			instructionKind,
+			locale,
+			generationFingerprint,
+			snapshot,
+		});
+		onProgress?.({
+			stage: 'describing-areas',
+			detail: isRussianLocale
+				? `Подготавливаются области кода для ${resolution.repository}:${branchName}${reuseContext ? ` (reuse from ${reuseContext.sourceArtifact.branchName})` : ''}`
+				: `Preparing code areas for ${resolution.repository}:${branchName}${reuseContext ? ` (reuse from ${reuseContext.sourceArtifact.branchName})` : ''}`,
+			completed: 0,
+			total: Math.max(1, Math.min(MAX_AREA_COUNT, buildAreaEntries(
+				instructionKind === 'delta' && reuseContext
+					? snapshot.analysisFiles.filter(filePath => reuseContext.changedFiles.has(filePath))
+					: snapshot.analysisFiles,
+			).length)),
+		});
+		const codeDescription = await this.describeProjectCode({
+			repository: resolution.repository,
+			projectPath: resolution.projectPath,
+			ref: branchName,
+			snapshot,
+			manifest: snapshot.manifest,
+			composerManifest: snapshot.composerManifest,
+			locale,
+			aiModel: resolvedAiModel,
+			instructionKind,
+			reuseContext,
+			onProgress,
+		});
+		const sourceSnapshotToken = snapshot.sourceSnapshotToken;
 		const generatedAt = new Date().toISOString();
 		onProgress?.({
 			stage: 'assembling-instruction',
@@ -301,21 +303,60 @@ export class CodeMapInstructionService {
 				? 'Собираются итоговые разделы инструкции и дерево структуры проекта'
 				: 'Assembling final instruction sections and the project structure tree',
 		});
-		const content = buildCodeMapProjectInstruction({
-			repository: resolution.repository,
+		const content = instructionKind === 'delta' && resolution.currentBranch !== resolution.resolvedBranchName
+			? buildCodeMapDeltaInstruction({
+				repository: resolution.repository,
+				branchName,
+				baseBranchName: resolution.resolvedBranchName,
+				generatedAt,
+				headSha,
+				locale,
+				files: snapshot.filteredFiles,
+				codeDescription,
+				diffEntries: reuseContext?.diffEntries || [],
+				changedFiles: reuseContext?.changedFiles ? Array.from(reuseContext.changedFiles).sort((left, right) => left.localeCompare(right)) : [],
+				deletedFiles: reuseContext?.deletedFiles || [],
+				renamedFiles: reuseContext?.renamedFiles || [],
+				basedOnBranchName: reuseContext?.sourceArtifact.branchName || resolution.resolvedBranchName,
+			})
+			: buildCodeMapProjectInstruction({
+				repository: resolution.repository,
+				branchName,
+				resolvedBranchName: resolution.resolvedBranchName,
+				baseBranchName: resolution.baseBranchName,
+				instructionKind,
+				branchRole: instructionKind === 'base' ? resolution.branchRole : 'current',
+				generatedAt,
+				headSha,
+				locale,
+				files: snapshot.filteredFiles,
+				manifest: snapshot.manifest,
+				composerManifest: snapshot.composerManifest,
+				codeDescription,
+			});
+		this.persistBranchArtifact(
+			resolution.repository,
 			branchName,
-			resolvedBranchName: resolution.resolvedBranchName,
-			baseBranchName: resolution.baseBranchName,
-			instructionKind,
-			branchRole: instructionKind === 'base' ? resolution.branchRole : 'current',
-			generatedAt,
-			headSha,
+			instructionKind === 'delta' ? 'delta' : 'full',
 			locale,
-			files,
-			manifest,
-			composerManifest,
-			codeDescription,
-		});
+			generationFingerprint,
+			this.buildBranchArtifactPayload({
+				repository: resolution.repository,
+				branchName,
+				instructionKind,
+				snapshot,
+				codeDescription,
+				reuseContext,
+			}),
+			{
+				sourceSnapshotToken,
+				treeSha: snapshot.treeSha,
+				headSha: headSha || snapshot.headSha,
+				basedOnBranchName: reuseContext?.sourceArtifact.branchName,
+				basedOnSnapshotToken: reuseContext?.sourceArtifact.sourceSnapshotToken,
+				generatedAt,
+			},
+		);
 
 		return {
 			repository: resolution.repository,
@@ -330,23 +371,60 @@ export class CodeMapInstructionService {
 			contentHash: '',
 			generatedAt,
 			sourceCommitSha: headSha,
-			fileCount: files.length,
+			fileCount: snapshot.filteredFiles.length,
 			metadata: {
-				manifestName: manifest?.name || composerManifest?.name || '',
+				manifestName: snapshot.manifest?.name || snapshot.composerManifest?.name || '',
 				fileGroups: codeDescription.areas.map(area => ({ group: area.area, count: area.fileCount })),
 				sourceSnapshotToken: sourceSnapshotToken || resolveInstructionSnapshotToken(resolution, instructionKind),
-				generationFingerprint: buildCodeMapGenerationFingerprint(settings),
+				treeSha: snapshot.treeSha,
+				headSha: headSha || snapshot.headSha,
+				generationFingerprint,
+				basedOnBranchName: reuseContext?.sourceArtifact.branchName || undefined,
+				basedOnSnapshotToken: reuseContext?.sourceArtifact.sourceSnapshotToken || undefined,
+				artifactKind: instructionKind === 'delta' ? 'delta' : 'full',
 				generatedBy: 'codemap-bootstrap',
 			},
 		};
 	}
 
+	private async collectRefSnapshot(projectPath: string, ref: string, headSha = ''): Promise<RefSnapshot> {
+		const settings = getCodeMapSettings();
+		const rawFiles = await this.getFilesAtRef(projectPath, ref);
+		const filteredFiles = await this.filterFilesForCodeMap(projectPath, ref, rawFiles, settings.excludedPaths);
+		const blobShaByFile = await this.getFileBlobShasAtRef(projectPath, ref, filteredFiles);
+		return {
+			ref,
+			headSha: headSha || await this.getHeadShaAtRef(projectPath, ref),
+			treeSha: await this.getTreeShaAtRef(projectPath, ref),
+			rawFiles,
+			filteredFiles,
+			analysisFiles: selectFilesForAnalysis(filteredFiles),
+			blobShaByFile,
+			sourceSnapshotToken: await this.buildSourceSnapshotTokenForFiles(projectPath, ref, rawFiles, filteredFiles, settings.excludedPaths),
+			manifest: await this.readJsonAtRef<PackageManifest>(projectPath, ref, 'package.json'),
+			composerManifest: await this.readJsonAtRef<ComposerManifest>(projectPath, ref, 'composer.json'),
+		};
+	}
+
 	private async getFilesAtRef(projectPath: string, ref: string): Promise<string[]> {
+		const snapshot = await this.getGitTreeSnapshot(projectPath, ref);
+		return Array.from(snapshot.keys()).sort((left, right) => left.localeCompare(right));
+	}
+
+	private async getGitTreeSnapshot(projectPath: string, ref: string): Promise<Map<string, string>> {
 		try {
-			const { stdout } = await execFileAsync('git', ['ls-tree', '-r', '--name-only', ref], { cwd: projectPath, maxBuffer: 8 * 1024 * 1024 });
-			return stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+			const { stdout } = await execFileAsync('git', ['ls-tree', '-r', ref], { cwd: projectPath, maxBuffer: 12 * 1024 * 1024 });
+			const snapshot = new Map<string, string>();
+			for (const line of stdout.split(/\r?\n/)) {
+				const match = line.match(/^[0-9]+\s+blob\s+([0-9a-f]{40})\t(.+)$/i);
+				if (!match?.[1] || !match[2]) {
+					continue;
+				}
+				snapshot.set(match[2], match[1]);
+			}
+			return snapshot;
 		} catch {
-			return [];
+			return new Map();
 		}
 	}
 
@@ -383,6 +461,19 @@ export class CodeMapInstructionService {
 		return buildCodeMapSourceSnapshotToken(filteredFiles, fileBlobShas, gitIgnoreFiles, gitIgnoreBlobShas);
 	}
 
+	private buildSourceSnapshotTokenFromSnapshot(
+		rawFiles: string[],
+		filteredFiles: string[],
+		treeSnapshot: ReadonlyMap<string, string>,
+		excludedPaths: string[],
+	): string {
+		const normalizedExcludedPaths = normalizeExcludedPaths(excludedPaths);
+		const gitIgnoreFiles = collectGitIgnoreFiles(rawFiles, normalizedExcludedPaths);
+		const fileBlobShas = new Map(filteredFiles.map(filePath => [filePath, String(treeSnapshot.get(filePath) || '').trim()]));
+		const gitIgnoreBlobShas = new Map(gitIgnoreFiles.map(filePath => [filePath, String(treeSnapshot.get(filePath) || '').trim()]));
+		return buildCodeMapSourceSnapshotToken(filteredFiles, fileBlobShas, gitIgnoreFiles, gitIgnoreBlobShas);
+	}
+
 	private async readGitIgnoreMatchersAtRef(
 		projectPath: string,
 		ref: string,
@@ -406,25 +497,344 @@ export class CodeMapInstructionService {
 		return matchers.sort((left, right) => left.depth - right.depth || left.basePath.localeCompare(right.basePath));
 	}
 
-	private async describeProjectCode(
+	private async getHeadShaAtRef(projectPath: string, ref: string): Promise<string> {
+		try {
+			const { stdout } = await execFileAsync('git', ['rev-parse', ref], { cwd: projectPath });
+			return stdout.trim();
+		} catch {
+			return '';
+		}
+	}
+
+	private async getTreeShaAtRef(projectPath: string, ref: string): Promise<string> {
+		try {
+			const { stdout } = await execFileAsync('git', ['rev-parse', `${ref}^{tree}`], { cwd: projectPath });
+			return stdout.trim();
+		} catch {
+			return '';
+		}
+	}
+
+	private async getNameStatusDiff(projectPath: string, fromRef: string, toRef: string): Promise<CodeMapRefDiffEntry[]> {
+		try {
+			const { stdout } = await execFileAsync('git', ['diff', '--name-status', '--find-renames', fromRef, toRef], { cwd: projectPath, maxBuffer: 4 * 1024 * 1024 });
+			return stdout
+				.split(/\r?\n/)
+				.map(line => line.trim())
+				.filter(Boolean)
+				.map((line) => {
+					const parts = line.split('\t');
+					const normalizedStatus = ((parts[0] || '').trim()[0] || 'M') as CodeMapRefDiffEntry['status'];
+					if ((normalizedStatus === 'R' || normalizedStatus === 'C') && parts[2]) {
+						return {
+							status: normalizedStatus,
+							oldPath: parts[1] || '',
+							path: parts[2] || '',
+						};
+					}
+					return {
+						status: normalizedStatus,
+						path: parts[1] || '',
+					};
+				})
+				.filter(entry => Boolean(entry.path));
+		} catch {
+			return [];
+		}
+	}
+
+	private async selectReuseContext(input: {
+		repository: string;
+		projectPath: string;
+		branchName: string;
+		resolution: CodeMapBranchResolution;
+		instructionKind: CodeMapInstructionKind;
+		locale: string;
+		generationFingerprint: string;
+		snapshot: RefSnapshot;
+	}): Promise<ReuseContext | null> {
+		if (!this.db || !input.generationFingerprint || typeof (this.db as { getBranchArtifact?: unknown }).getBranchArtifact !== 'function') {
+			return null;
+		}
+
+		if (input.instructionKind === 'delta' && input.resolution.currentBranch !== input.resolution.resolvedBranchName) {
+			const baseArtifact = this.db.getBranchArtifact(input.repository, input.resolution.resolvedBranchName, 'full', input.locale, input.generationFingerprint);
+			if (!baseArtifact) {
+				return null;
+			}
+			const diffEntries = await this.getNameStatusDiff(input.projectPath, baseArtifact.headSha || input.resolution.resolvedBranchName, input.snapshot.headSha || input.branchName);
+			return this.buildReuseContext(baseArtifact, diffEntries, input.snapshot.analysisFiles.length);
+		}
+
+		const sameBranchArtifact = this.db.getBranchArtifact(input.repository, input.branchName, 'full', input.locale, input.generationFingerprint);
+		if (sameBranchArtifact) {
+			const diffEntries = await this.getNameStatusDiff(input.projectPath, sameBranchArtifact.headSha || input.branchName, input.snapshot.headSha || input.branchName);
+			const context = this.buildReuseContext(sameBranchArtifact, diffEntries, input.snapshot.analysisFiles.length);
+			if (context) {
+				return context;
+			}
+		}
+
+		const siblingArtifact = await this.findNearestTrackedArtifact(
+			input.repository,
+			input.projectPath,
+			input.branchName,
+			input.locale,
+			input.generationFingerprint,
+		);
+		if (!siblingArtifact) {
+			return null;
+		}
+		const diffEntries = await this.getNameStatusDiff(input.projectPath, siblingArtifact.headSha || siblingArtifact.branchName, input.snapshot.headSha || input.branchName);
+		return this.buildReuseContext(siblingArtifact, diffEntries, input.snapshot.analysisFiles.length);
+	}
+
+	private async findNearestTrackedArtifact(
 		repository: string,
 		projectPath: string,
-		ref: string,
-		files: string[],
-		manifest: PackageManifest | null,
-		composerManifest: ComposerManifest | null,
+		currentBranch: string,
 		locale: string,
-		aiModel: string,
-		onProgress?: (progress: CodeMapGenerationProgress) => void,
-	): Promise<ProjectCodeDescription> {
+		generationFingerprint: string,
+	): Promise<StoredCodeMapBranchArtifact | null> {
+		if (!this.db) {
+			return null;
+		}
+
+		const trackedBranches = getCodeMapSettings().trackedBranches;
+		const candidates: Array<{ artifact: StoredCodeMapBranchArtifact; distance: number; totalDistance: number }> = [];
+		for (const branchName of trackedBranches) {
+			if (!branchName || branchName === currentBranch) {
+				continue;
+			}
+
+			const artifact = this.db.getBranchArtifact(repository, branchName, 'full', locale, generationFingerprint);
+			if (!artifact) {
+				continue;
+			}
+
+			const mergeBase = await this.getMergeBase(projectPath, currentBranch, branchName);
+			if (!mergeBase) {
+				continue;
+			}
+
+			const distance = await this.getRevisionCount(projectPath, `${mergeBase}..${currentBranch}`);
+			const totalDistance = distance + await this.getRevisionCount(projectPath, `${mergeBase}..${branchName}`);
+			candidates.push({ artifact, distance, totalDistance });
+		}
+
+		candidates.sort((left, right) => left.distance - right.distance || left.totalDistance - right.totalDistance);
+		return candidates[0]?.artifact || null;
+	}
+
+	private buildReuseContext(
+		sourceArtifact: StoredCodeMapBranchArtifact,
+		diffEntries: CodeMapRefDiffEntry[],
+		analysisFileCount: number,
+	): ReuseContext | null {
+		if (diffEntries.some(entry => this.isReuseBoundaryPath(entry.path) || this.isReuseBoundaryPath(entry.oldPath || ''))) {
+			return null;
+		}
+
+		const changedFiles = new Set<string>();
+		const deletedFiles: string[] = [];
+		const renamedFiles: Array<{ from: string; to: string }> = [];
+		for (const entry of diffEntries) {
+			switch (entry.status) {
+				case 'D':
+					deletedFiles.push(entry.path);
+					break;
+				case 'R':
+					if (entry.oldPath) {
+						renamedFiles.push({ from: entry.oldPath, to: entry.path });
+					}
+					changedFiles.add(entry.path);
+					break;
+				default:
+					changedFiles.add(entry.path);
+					break;
+			}
+		}
+
+		if (changedFiles.size > MAX_REUSE_CHANGED_FILES) {
+			return null;
+		}
+
+		const changeRatio = analysisFileCount > 0 ? changedFiles.size / Math.max(analysisFileCount, 1) : 0;
+		if (changeRatio > MAX_REUSE_CHANGED_RATIO) {
+			return null;
+		}
+
+		return {
+			sourceArtifact,
+			diffEntries,
+			changedFiles,
+			deletedFiles: deletedFiles.sort((left, right) => left.localeCompare(right)),
+			renamedFiles: renamedFiles.sort((left, right) => left.to.localeCompare(right.to)),
+		};
+	}
+
+	private isReuseBoundaryPath(filePath: string): boolean {
+		const normalized = String(filePath || '').trim().toLowerCase();
+		return normalized === 'package.json'
+			|| normalized === 'composer.json'
+			|| normalized === '.gitignore'
+			|| /\/\.gitignore$/.test(normalized);
+	}
+
+	private async getMergeBase(projectPath: string, left: string, right: string): Promise<string> {
+		try {
+			const { stdout } = await execFileAsync('git', ['merge-base', left, right], { cwd: projectPath });
+			return stdout.trim();
+		} catch {
+			return '';
+		}
+	}
+
+	private async getRevisionCount(projectPath: string, revisionRange: string): Promise<number> {
+		try {
+			const { stdout } = await execFileAsync('git', ['rev-list', '--count', revisionRange], { cwd: projectPath });
+			return Number.parseInt(stdout.trim(), 10) || 0;
+		} catch {
+			return Number.MAX_SAFE_INTEGER;
+		}
+	}
+
+	private getReusableFileSummary(reuseContext: ReuseContext | null | undefined, filePath: string, blobSha: string): FileSummary | null {
+		if (!reuseContext || !blobSha || reuseContext.changedFiles.has(filePath)) {
+			return null;
+		}
+
+		const sourceBlobSha = String(reuseContext.sourceArtifact.payload.blobShaByFile[filePath] || '').trim();
+		if (!sourceBlobSha || sourceBlobSha !== blobSha) {
+			return null;
+		}
+
+		return normalizeCachedFileSummary(reuseContext.sourceArtifact.payload.codeDescription.fileSummaries.find(item => item.path === filePath) || null);
+	}
+
+	private getReusableAreaSummary(
+		reuseContext: ReuseContext | null | undefined,
+		areaKey: string,
+		areaFiles: string[],
+		fileBlobShas: ReadonlyMap<string, string>,
+	): CodeAreaSummary | null {
+		if (!reuseContext || areaFiles.some(filePath => reuseContext.changedFiles.has(filePath))) {
+			return null;
+		}
+
+		for (const filePath of areaFiles) {
+			const targetBlobSha = String(fileBlobShas.get(filePath) || '').trim();
+			const sourceBlobSha = String(reuseContext.sourceArtifact.payload.blobShaByFile[filePath] || '').trim();
+			if (!targetBlobSha || !sourceBlobSha || targetBlobSha !== sourceBlobSha) {
+				return null;
+			}
+		}
+
+		const areaSummary = reuseContext.sourceArtifact.payload.codeDescription.areas.find(item => item.area === areaKey && item.fileCount === areaFiles.length) || null;
+		return normalizeCachedAreaSummary(areaSummary);
+	}
+
+	private buildBranchArtifactPayload(input: {
+		repository: string;
+		branchName: string;
+		instructionKind: CodeMapInstructionKind;
+		snapshot: RefSnapshot;
+		codeDescription: ProjectCodeDescription;
+		reuseContext?: ReuseContext | null;
+	}): CodeMapBranchArtifactPayload {
+		return {
+			artifactKind: input.instructionKind === 'delta' ? 'delta' : 'full',
+			repository: input.repository,
+			branchName: input.branchName,
+			headSha: input.snapshot.headSha,
+			treeSha: input.snapshot.treeSha,
+			sourceSnapshotToken: input.snapshot.sourceSnapshotToken,
+			basedOnBranchName: input.reuseContext?.sourceArtifact.branchName || undefined,
+			basedOnSnapshotToken: input.reuseContext?.sourceArtifact.sourceSnapshotToken || undefined,
+			files: [...input.snapshot.filteredFiles],
+			analysisFiles: [...input.snapshot.analysisFiles],
+			blobShaByFile: Object.fromEntries(input.snapshot.blobShaByFile.entries()),
+			manifest: input.snapshot.manifest as Record<string, unknown> | null,
+			composerManifest: input.snapshot.composerManifest as Record<string, unknown> | null,
+			codeDescription: {
+				projectEssence: [...input.codeDescription.projectEssence],
+				architectureSummary: [...input.codeDescription.architectureSummary],
+				patterns: [...input.codeDescription.patterns],
+				entryPoints: [...input.codeDescription.entryPoints],
+				areas: input.codeDescription.areas.map(item => ({ ...item, representativeFiles: [...item.representativeFiles], symbols: [...item.symbols] })),
+				fileSummaries: input.codeDescription.fileSummaries.map(item => ({
+					...item,
+					imports: [...item.imports],
+					symbols: item.symbols.map(symbol => ({ ...symbol })),
+					frontendContract: Array.isArray(item.frontendContract) ? [...item.frontendContract] : [],
+					frontendBlocks: Array.isArray(item.frontendBlocks) ? item.frontendBlocks.map(block => ({
+						...block,
+						stateDeps: [...block.stateDeps],
+						eventHandlers: [...block.eventHandlers],
+						dataSources: [...block.dataSources],
+						childComponents: [...block.childComponents],
+						conditions: [...block.conditions],
+						routes: [...block.routes],
+						forms: [...block.forms],
+					})) : [],
+				})),
+				relations: [...input.codeDescription.relations],
+				recentChanges: [...input.codeDescription.recentChanges],
+			},
+			diffEntries: input.reuseContext?.diffEntries.map(entry => ({ ...entry })) || [],
+			changedFiles: input.reuseContext ? Array.from(input.reuseContext.changedFiles).sort((left, right) => left.localeCompare(right)) : [],
+			deletedFiles: input.reuseContext ? [...input.reuseContext.deletedFiles] : [],
+			renamedFiles: input.reuseContext ? input.reuseContext.renamedFiles.map(item => ({ ...item })) : [],
+		};
+	}
+
+	private persistBranchArtifact(
+		repository: string,
+		branchName: string,
+		artifactKind: 'full' | 'delta',
+		locale: string,
+		generationFingerprint: string,
+		payload: CodeMapBranchArtifactPayload,
+		options: {
+			sourceSnapshotToken: string;
+			treeSha: string;
+			headSha: string;
+			basedOnBranchName?: string;
+			basedOnSnapshotToken?: string;
+			generatedAt: string;
+		},
+	): void {
+		if (!this.db || typeof (this.db as { upsertBranchArtifact?: unknown }).upsertBranchArtifact !== 'function') {
+			return;
+		}
+		this.db.upsertBranchArtifact(repository, branchName, artifactKind, locale, generationFingerprint, payload, options);
+	}
+
+	private async describeProjectCode(input: {
+		repository: string;
+		projectPath: string;
+		ref: string;
+		snapshot: RefSnapshot;
+		manifest: PackageManifest | null;
+		composerManifest: ComposerManifest | null;
+		locale: string;
+		aiModel: string;
+		instructionKind: CodeMapInstructionKind;
+		reuseContext?: ReuseContext | null;
+		onProgress?: (progress: CodeMapGenerationProgress) => void;
+	}): Promise<ProjectCodeDescription> {
+		const { repository, projectPath, ref, snapshot, manifest, composerManifest, locale, aiModel, instructionKind, reuseContext, onProgress } = input;
 		const isRussianLocale = locale.toLowerCase().startsWith('ru');
 		const settings = getCodeMapSettings();
 		const generationFingerprint = buildCodeMapGenerationFingerprint(settings);
-		const analysisFiles = selectFilesForAnalysis(files);
+		const analysisFiles = instructionKind === 'delta' && reuseContext
+			? snapshot.analysisFiles.filter(filePath => reuseContext.changedFiles.has(filePath))
+			: snapshot.analysisFiles;
 		const areaEntries = buildAreaEntries(analysisFiles).slice(0, MAX_AREA_COUNT);
 		const detailFiles = selectFilesForDetailedSummary(analysisFiles);
-		const fileBlobShas = await this.getFileBlobShasAtRef(projectPath, ref, analysisFiles);
+		const fileBlobShas = snapshot.blobShaByFile;
 		const manifestDescription = resolveProjectDescription(manifest, composerManifest, isRussianLocale, '');
+		const reusableAreaSummariesByArea = new Map<string, CodeAreaSummary>();
 		const cachedAreaSummariesByArea = new Map<string, CodeAreaSummary>();
 		const areaEntriesToGenerate: Array<{
 			entry: { area: string; files: string[] };
@@ -432,6 +842,11 @@ export class CodeMapInstructionService {
 		}> = [];
 		for (const areaEntry of areaEntries) {
 			const snapshotToken = buildAreaSnapshotToken(areaEntry.area, areaEntry.files, fileBlobShas);
+			const reusableSummary = this.getReusableAreaSummary(reuseContext, areaEntry.area, areaEntry.files, fileBlobShas);
+			if (reusableSummary) {
+				reusableAreaSummariesByArea.set(areaEntry.area, reusableSummary);
+				continue;
+			}
 			const cachedSummary = snapshotToken
 				? normalizeCachedAreaSummary(this.db?.getCachedAreaSummary<CodeAreaSummary>(repository, areaEntry.area, snapshotToken, locale, generationFingerprint))
 				: null;
@@ -442,10 +857,16 @@ export class CodeMapInstructionService {
 			areaEntriesToGenerate.push({ entry: areaEntry, snapshotToken });
 		}
 
+		const reusableFileSummariesByPath = new Map<string, FileSummary>();
 		const cachedFileSummariesByPath = new Map<string, FileSummary>();
 		const detailFilesToGenerate: Array<{ filePath: string; blobSha: string }> = [];
 		for (const filePath of detailFiles) {
 			const blobSha = String(fileBlobShas.get(filePath) || '').trim();
+			const reusableSummary = this.getReusableFileSummary(reuseContext, filePath, blobSha);
+			if (reusableSummary) {
+				reusableFileSummariesByPath.set(filePath, reusableSummary);
+				continue;
+			}
 			const cachedSummary = blobSha
 				? normalizeCachedFileSummary(this.db?.getCachedFileSummary<FileSummary>(repository, filePath, blobSha, locale, generationFingerprint))
 				: null;
@@ -496,8 +917,8 @@ export class CodeMapInstructionService {
 			onProgress?.({
 				stage: 'describing-areas',
 				detail: isRussianLocale
-					? `Используются кэшированные описания ${areaEntries.length} областей`
-					: `Reusing cached descriptions for ${areaEntries.length} code areas`,
+					? `Используются готовые описания ${areaEntries.length} областей`
+					: `Reusing prepared descriptions for ${areaEntries.length} code areas`,
 				completed: areaEntries.length,
 				total: areaEntries.length,
 			});
@@ -530,6 +951,7 @@ export class CodeMapInstructionService {
 			}
 		}
 		const areaSummaries: CodeAreaSummary[] = areaEntries.map(areaEntry => generatedAreaSummariesByArea.get(areaEntry.area)
+			|| reusableAreaSummariesByArea.get(areaEntry.area)
 			|| cachedAreaSummariesByArea.get(areaEntry.area)
 			|| ({
 				area: areaEntry.area,
@@ -544,8 +966,8 @@ export class CodeMapInstructionService {
 			onProgress?.({
 				stage: 'describing-files',
 				detail: isRussianLocale
-					? `Подготавливаются описания ${detailFiles.length} ключевых файлов (${cachedFileSummariesByPath.size} из кэша, ${detailFilesToGenerate.length} к генерации)`
-					: `Preparing summaries for ${detailFiles.length} key files (${cachedFileSummariesByPath.size} cached, ${detailFilesToGenerate.length} to generate)`,
+					? `Подготавливаются описания ${detailFiles.length} ключевых файлов (${reusableFileSummariesByPath.size + cachedFileSummariesByPath.size} готовы, ${detailFilesToGenerate.length} к генерации)`
+					: `Preparing summaries for ${detailFiles.length} key files (${reusableFileSummariesByPath.size + cachedFileSummariesByPath.size} ready, ${detailFilesToGenerate.length} to generate)`,
 				completed: 0,
 				total: Math.max(1, detailFilesToGenerate.length),
 			});
@@ -597,20 +1019,29 @@ export class CodeMapInstructionService {
 			}
 		}
 		const fileSummaries: FileSummary[] = detailFiles.map(filePath => generatedFileSummariesByPath.get(filePath)
+			|| reusableFileSummariesByPath.get(filePath)
 			|| cachedFileSummariesByPath.get(filePath)
 			|| buildFileSummary(filePath, fileTexts.get(filePath) || '', isRussianLocale));
 		const relations = buildRelations(fileSummaries, isRussianLocale);
-		onProgress?.({
-			stage: 'collecting-history',
-			detail: isRussianLocale
-				? `Читается git history для ${ref}`
-				: `Collecting git history for ${ref}`,
-		});
-		const recentChanges = await this.readRecentChanges(projectPath, ref, isRussianLocale);
+		const recentChanges = instructionKind === 'delta'
+			? buildDeltaRecentChanges(reuseContext?.diffEntries || [], isRussianLocale)
+			: await (async () => {
+				onProgress?.({
+					stage: 'collecting-history',
+					detail: isRussianLocale
+						? `Читается git history для ${ref}`
+						: `Collecting git history for ${ref}`,
+				});
+				return this.readRecentChanges(projectPath, ref, isRussianLocale);
+			})();
 
 		return {
-			projectEssence: buildProjectEssence(analysisFiles, manifest, composerManifest, isRussianLocale),
-			architectureSummary: buildArchitectureSummary(analysisFiles, manifest, composerManifest, isRussianLocale),
+			projectEssence: instructionKind === 'delta' && reuseContext
+				? buildDeltaEssence(reuseContext, isRussianLocale)
+				: buildProjectEssence(analysisFiles, manifest, composerManifest, isRussianLocale),
+			architectureSummary: instructionKind === 'delta' && reuseContext
+				? buildDeltaArchitectureSummary(reuseContext, areaSummaries, isRussianLocale)
+				: buildArchitectureSummary(analysisFiles, manifest, composerManifest, isRussianLocale),
 			patterns: detectPatterns(analysisFiles, manifest, composerManifest, isRussianLocale),
 			entryPoints: findEntryPoints(analysisFiles, isRussianLocale),
 			areas: areaSummaries,
@@ -1155,6 +1586,115 @@ export function buildCodeMapProjectInstruction(input: {
 	].filter(line => line !== undefined && line !== null).join('\n');
 }
 
+function buildCodeMapDeltaInstruction(input: {
+	repository: string;
+	branchName: string;
+	baseBranchName: string;
+	generatedAt: string;
+	headSha: string;
+	locale: string;
+	files: string[];
+	codeDescription: ProjectCodeDescription;
+	diffEntries: CodeMapRefDiffEntry[];
+	changedFiles: string[];
+	deletedFiles: string[];
+	renamedFiles: Array<{ from: string; to: string }>;
+	basedOnBranchName: string;
+}): string {
+	const isRussianLocale = input.locale.toLowerCase().startsWith('ru');
+	const heading = isRussianLocale
+		? `# Delta Code Map проекта ${input.repository} для ветки ${input.branchName}`
+		: `# Project Delta Code Map for ${input.repository} branch ${input.branchName}`;
+	const overviewTitle = isRussianLocale ? '## Обзор delta' : '## Delta Overview';
+	const changedAreasTitle = isRussianLocale ? '## Изменённые области' : '## Changed Areas';
+	const changedFilesTitle = isRussianLocale ? '## Изменённые файлы и элементы' : '## Changed Files and Elements';
+	const relationsTitle = isRussianLocale ? '## Связи затронутых частей' : '## Impact Relationships';
+	const timelineTitle = isRussianLocale ? '## Сводка diff' : '## Diff Summary';
+	const deletedTitle = isRussianLocale ? '## Удалённые файлы' : '## Deleted Files';
+	const renamedTitle = isRussianLocale ? '## Переименования' : '## Renamed Files';
+
+	return [
+		heading,
+		'',
+		overviewTitle,
+		`- ${isRussianLocale ? 'Репозиторий' : 'Repository'}: ${input.repository}`,
+		`- ${isRussianLocale ? 'Текущая ветка' : 'Current branch'}: ${input.branchName}`,
+		`- ${isRussianLocale ? 'Базовая tracked-ветка' : 'Base tracked branch'}: ${input.baseBranchName}`,
+		`- ${isRussianLocale ? 'Использованный базовый артефакт' : 'Reused base artifact'}: ${input.basedOnBranchName || input.baseBranchName}`,
+		`- ${isRussianLocale ? 'HEAD коммит' : 'Head commit'}: ${input.headSha || (isRussianLocale ? 'неизвестно' : 'unknown')}`,
+		`- ${isRussianLocale ? 'Сгенерировано' : 'Generated at'}: ${input.generatedAt}`,
+		`- ${isRussianLocale ? 'Всего файлов в снимке' : 'Files in snapshot'}: ${input.files.length}`,
+		`- ${isRussianLocale ? 'Изменённых файлов' : 'Changed files'}: ${input.changedFiles.length}`,
+		`- ${isRussianLocale ? 'Удалённых файлов' : 'Deleted files'}: ${input.deletedFiles.length}`,
+		`- ${isRussianLocale ? 'Переименований' : 'Renames'}: ${input.renamedFiles.length}`,
+		'',
+		...(input.codeDescription.projectEssence.length > 0
+			? [(isRussianLocale ? '### Краткая суть delta' : '### Delta Essence'), ...input.codeDescription.projectEssence.map(item => `- ${item}`), '']
+			: []),
+		changedAreasTitle,
+		...(input.codeDescription.areas.length > 0
+			? input.codeDescription.areas.flatMap(area => [
+				`### ${area.area}`,
+				`- ${isRussianLocale ? 'Описание' : 'Description'}: ${area.description}`,
+				...(area.representativeFiles.length > 0 ? [`- ${isRussianLocale ? 'Файлы' : 'Files'}: ${area.representativeFiles.join(', ')}`] : []),
+				...(area.symbols.length > 0 ? [`- ${isRussianLocale ? 'Элементы' : 'Elements'}: ${area.symbols.join(', ')}`] : []),
+				'',
+			])
+			: [isRussianLocale ? '- Существенных изменённых областей не выделено.' : '- No significant changed areas were detected.']),
+		changedFilesTitle,
+		...(input.codeDescription.fileSummaries.length > 0
+			? input.codeDescription.fileSummaries.flatMap(file => buildInstructionFileSummaryLines(file, isRussianLocale))
+			: [isRussianLocale ? '- Изменённые сигнальные файлы не выбраны.' : '- No informative changed files were selected.']),
+		'',
+		relationsTitle,
+		...(input.codeDescription.relations.length > 0
+			? input.codeDescription.relations.map(item => `- ${item}`)
+			: [isRussianLocale ? '- Явные связи между изменениями не обнаружены.' : '- No explicit relationships between the changes were detected.']),
+		'',
+		timelineTitle,
+		...(input.codeDescription.recentChanges.length > 0
+			? input.codeDescription.recentChanges.map(item => `- ${item}`)
+			: [isRussianLocale ? '- Diff не дал компактной сводки.' : '- The diff did not produce a compact summary.']),
+		'',
+		deletedTitle,
+		...(input.deletedFiles.length > 0
+			? input.deletedFiles.map(item => `- ${item}`)
+			: [isRussianLocale ? '- Нет удалённых файлов.' : '- No deleted files.']),
+		'',
+		renamedTitle,
+		...(input.renamedFiles.length > 0
+			? input.renamedFiles.map(item => `- ${item.from} -> ${item.to}`)
+			: [isRussianLocale ? '- Нет переименованных файлов.' : '- No renamed files.']),
+	].join('\n');
+}
+
+function buildInstructionFileSummaryLines(file: FileSummary, isRussianLocale: boolean): string[] {
+	const lines = [
+		`### ${file.path}`,
+		`- ${isRussianLocale ? 'Роль' : 'Role'}: ${file.role}`,
+		`- ${isRussianLocale ? 'Строк в файле' : 'Line count'}: ${file.lineCount}`,
+	];
+
+	if (file.imports.length > 0) {
+		lines.push(`- ${isRussianLocale ? 'Внутренние импорты' : 'Internal imports'}: ${file.imports.join(', ')}`);
+	}
+
+	if ((file.frontendContract || []).length > 0) {
+		lines.push(`- ${isRussianLocale ? 'Frontend-контракт' : 'Frontend contract'}: ${(file.frontendContract || []).join(' | ')}`);
+	}
+
+	for (const block of file.frontendBlocks || []) {
+		lines.push(`- ${formatFrontendBlockHeading(block, file.path, isRussianLocale)}: ${block.description}`);
+	}
+
+	for (const symbol of file.symbols) {
+		lines.push(`- ${formatFileElementHeading(symbol, file.path, isRussianLocale)}: ${symbol.description}`);
+	}
+
+	lines.push('');
+	return lines;
+}
+
 function buildFallbackCodeDescription(files: string[], manifest: PackageManifest | null, composerManifest: ComposerManifest | null, isRussianLocale: boolean): ProjectCodeDescription {
 	const analysisFiles = selectFilesForAnalysis(files);
 	const detailFiles = selectFilesForDetailedSummary(analysisFiles);
@@ -1176,6 +1716,76 @@ function buildFallbackCodeDescription(files: string[], manifest: PackageManifest
 		relations: [],
 		recentChanges: [],
 	};
+}
+
+function buildDeltaRecentChanges(diffEntries: CodeMapRefDiffEntry[], isRussianLocale: boolean): string[] {
+	if (diffEntries.length === 0) {
+		return [];
+	}
+
+	return diffEntries.slice(0, MAX_RECENT_CHANGES).map((entry) => {
+		switch (entry.status) {
+			case 'A':
+				return isRussianLocale ? `Добавлен файл ${entry.path}` : `Added file ${entry.path}`;
+			case 'D':
+				return isRussianLocale ? `Удалён файл ${entry.path}` : `Deleted file ${entry.path}`;
+			case 'R':
+				return isRussianLocale
+					? `Переименование ${entry.oldPath || 'unknown'} -> ${entry.path}`
+					: `Renamed ${entry.oldPath || 'unknown'} -> ${entry.path}`;
+			case 'C':
+				return isRussianLocale
+					? `Скопирован файл ${entry.oldPath || 'unknown'} -> ${entry.path}`
+					: `Copied ${entry.oldPath || 'unknown'} -> ${entry.path}`;
+			default:
+				return isRussianLocale ? `Изменён файл ${entry.path}` : `Modified file ${entry.path}`;
+		}
+	});
+}
+
+function buildDeltaEssence(reuseContext: ReuseContext, isRussianLocale: boolean): string[] {
+	const lines = [
+		isRussianLocale
+			? `Delta построена относительно ветки ${reuseContext.sourceArtifact.branchName}.`
+			: `The delta is built against branch ${reuseContext.sourceArtifact.branchName}.`,
+		isRussianLocale
+			? `Сигнальные изменения затрагивают ${reuseContext.changedFiles.size} файлов.`
+			: `The informative change set touches ${reuseContext.changedFiles.size} files.`,
+	];
+
+	if (reuseContext.deletedFiles.length > 0) {
+		lines.push(isRussianLocale
+			? `Также удалено ${reuseContext.deletedFiles.length} файлов.`
+			: `${reuseContext.deletedFiles.length} files were also deleted.`);
+	}
+
+	if (reuseContext.renamedFiles.length > 0) {
+		lines.push(isRussianLocale
+			? `Есть ${reuseContext.renamedFiles.length} переименований, которые могут сдвинуть точки входа или связи.`
+			: `${reuseContext.renamedFiles.length} renames may shift entry points or relationships.`);
+	}
+
+	return lines;
+}
+
+function buildDeltaArchitectureSummary(reuseContext: ReuseContext, areas: CodeAreaSummary[], isRussianLocale: boolean): string[] {
+	const lines: string[] = [];
+	if (areas.length > 0) {
+		lines.push(isRussianLocale
+			? `Изменения сосредоточены в областях: ${areas.map(item => item.area).join(', ')}.`
+			: `Changes are concentrated in: ${areas.map(item => item.area).join(', ')}.`);
+	}
+	if (reuseContext.changedFiles.size === 0 && reuseContext.deletedFiles.length > 0) {
+		lines.push(isRussianLocale
+			? 'В этой delta нет новых сигнальных файлов, но есть удаления относительно базовой tracked-ветки.'
+			: 'This delta contains no new informative files but does include deletions against the tracked base.');
+	}
+	if (lines.length === 0) {
+		lines.push(isRussianLocale
+			? 'Архитектурное влияние delta выводится из изменённых файлов и связей.'
+			: 'The architectural impact of the delta is inferred from the changed files and their relationships.');
+	}
+	return lines;
 }
 
 function buildProjectEssence(files: string[], manifest: PackageManifest | null, composerManifest: ComposerManifest | null, isRussianLocale: boolean): string[] {

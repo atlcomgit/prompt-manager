@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
+import type { CodeMapRefDiffEntry } from '../types/codemap.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -82,6 +83,69 @@ export class GitService {
 			maxBuffer: GitService.DIFF_MAX_BUFFER,
 		});
 		return stdout.trim();
+	}
+
+	async getMergeBase(projectPath: string, left: string, right: string): Promise<string> {
+		try {
+			return await this.runGitFileCommand(projectPath, ['merge-base', left, right]);
+		} catch {
+			return '';
+		}
+	}
+
+	async getRevisionCount(projectPath: string, revisionRange: string): Promise<number> {
+		try {
+			const stdout = await this.runGitFileCommand(projectPath, ['rev-list', '--count', revisionRange]);
+			return Number.parseInt(stdout.trim(), 10) || 0;
+		} catch {
+			return Number.MAX_SAFE_INTEGER;
+		}
+	}
+
+	async getNameStatusDiff(projectPath: string, fromRef: string, toRef: string): Promise<CodeMapRefDiffEntry[]> {
+		try {
+			const stdout = await this.runGitFileCommand(projectPath, ['diff', '--name-status', '--find-renames', fromRef, toRef]);
+			return stdout
+				.split(/\r?\n/)
+				.map(line => line.trim())
+				.filter(Boolean)
+				.map((line) => {
+					const parts = line.split('\t');
+					const statusToken = String(parts[0] || '').trim();
+					const normalizedStatus = (statusToken[0] || '') as CodeMapRefDiffEntry['status'];
+					if ((normalizedStatus === 'R' || normalizedStatus === 'C') && parts[2]) {
+						return {
+							status: normalizedStatus,
+							oldPath: parts[1] || '',
+							path: parts[2] || '',
+						};
+					}
+					return {
+						status: normalizedStatus || 'M',
+						path: parts[1] || '',
+					};
+				})
+				.filter(entry => Boolean(entry.path));
+		} catch {
+			return [];
+		}
+	}
+
+	async getLsTreeSnapshot(projectPath: string, ref: string): Promise<Map<string, string>> {
+		try {
+			const stdout = await this.runGitFileCommand(projectPath, ['ls-tree', '-r', ref]);
+			const snapshot = new Map<string, string>();
+			for (const line of stdout.split(/\r?\n/)) {
+				const match = line.match(/^[0-9]+\s+blob\s+([0-9a-f]{40})\t(.+)$/i);
+				if (!match?.[1] || !match[2]) {
+					continue;
+				}
+				snapshot.set(match[2], match[1]);
+			}
+			return snapshot;
+		} catch {
+			return new Map();
+		}
 	}
 
 	private buildUntrackedPreview(projectPath: string, relativePath: string, maxChars = 4000): Promise<string> {

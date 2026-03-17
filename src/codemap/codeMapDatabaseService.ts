@@ -5,6 +5,8 @@ import * as crypto from 'crypto';
 import { gzipSync, gunzipSync } from 'zlib';
 import initSqlJs, { type Database } from 'sql.js';
 import type {
+	CodeMapArtifactKind,
+	CodeMapBranchArtifactPayload,
 	CodeMapFileGroupStat,
 	CodeMapInstructionDetail,
 	CodeMapInstructionListItem,
@@ -14,10 +16,11 @@ import type {
 	CodeMapJobStatus,
 	CodeMapJobSummary,
 	CodeMapStatistics,
+	StoredCodeMapBranchArtifact,
 	StoredCodeMapInstruction,
 } from '../types/codemap.js';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export class CodeMapDatabaseService {
 	private db: Database | null = null;
@@ -77,6 +80,47 @@ export class CodeMapDatabaseService {
 		db.run(`DELETE FROM codemap_instructions WHERE id IN (${placeholders});`, uniqueIds);
 		this.save();
 		return uniqueIds.length;
+	}
+
+	deleteBranchArtifactsByKeys(keys: string[]): number {
+		const uniqueKeys = Array.from(new Set(keys.map(item => String(item || '').trim()).filter(Boolean)));
+		const db = this.requireDb();
+		if (uniqueKeys.length === 0) {
+			const count = this.readSingleNumber('SELECT COUNT(*) FROM codemap_branch_artifacts;');
+			db.run('DELETE FROM codemap_branch_artifacts;');
+			this.save();
+			return count;
+		}
+
+		const result = db.exec(
+			`SELECT repository, branch_name, artifact_kind
+			FROM codemap_branch_artifacts;`,
+		);
+		if (result.length === 0) {
+			return 0;
+		}
+
+		const idsToDelete = result[0].values
+			.map((row) => ({
+				repository: String(row[0] || ''),
+				branchName: String(row[1] || ''),
+				artifactKind: String(row[2] || ''),
+			}))
+			.filter(item => !uniqueKeys.includes(`${item.repository}::${item.branchName}::${item.artifactKind}`));
+
+		for (const item of idsToDelete) {
+			db.run(
+				`DELETE FROM codemap_branch_artifacts
+				WHERE repository = ?
+					AND branch_name = ?
+					AND artifact_kind = ?;`,
+				[item.repository, item.branchName, item.artifactKind],
+			);
+		}
+		if (idsToDelete.length > 0) {
+			this.save();
+		}
+		return idsToDelete.length;
 	}
 
 	listLatestInstructions(): CodeMapInstructionListItem[] {
@@ -333,13 +377,138 @@ export class CodeMapDatabaseService {
 		return this.mapInstructionRow(result[0].values[0]);
 	}
 
+	getBranchArtifact(
+		repository: string,
+		branchName: string,
+		artifactKind: CodeMapArtifactKind,
+		locale: string,
+		generationFingerprint: string,
+	): StoredCodeMapBranchArtifact | null {
+		if (!generationFingerprint) {
+			return null;
+		}
+
+		const db = this.requireDb();
+		const result = db.exec(
+			`SELECT
+				repository,
+				branch_name,
+				artifact_kind,
+				locale,
+				generation_fingerprint,
+				source_snapshot_token,
+				tree_sha,
+				head_sha,
+				based_on_branch_name,
+				based_on_snapshot_token,
+				payload_gzip,
+				payload_hash,
+				uncompressed_size,
+				compressed_size,
+				generated_at,
+				updated_at
+			FROM codemap_branch_artifacts
+			WHERE repository = ?
+				AND branch_name = ?
+				AND artifact_kind = ?
+				AND locale = ?
+				AND generation_fingerprint = ?
+			LIMIT 1;`,
+			[repository, branchName, artifactKind, locale, generationFingerprint],
+		);
+
+		if (result.length === 0 || result[0].values.length === 0) {
+			return null;
+		}
+
+		return this.mapBranchArtifactRow(result[0].values[0]);
+	}
+
+	upsertBranchArtifact(
+		repository: string,
+		branchName: string,
+		artifactKind: CodeMapArtifactKind,
+		locale: string,
+		generationFingerprint: string,
+		payload: CodeMapBranchArtifactPayload,
+		options: {
+			sourceSnapshotToken: string;
+			treeSha: string;
+			headSha: string;
+			basedOnBranchName?: string;
+			basedOnSnapshotToken?: string;
+			generatedAt: string;
+		},
+	): StoredCodeMapBranchArtifact | null {
+		if (!generationFingerprint) {
+			return null;
+		}
+
+		const db = this.requireDb();
+		const now = new Date().toISOString();
+		const encoded = this.encodeCompressedJson(payload);
+		db.run(
+			`INSERT INTO codemap_branch_artifacts (
+				repository,
+				branch_name,
+				artifact_kind,
+				locale,
+				generation_fingerprint,
+				source_snapshot_token,
+				tree_sha,
+				head_sha,
+				based_on_branch_name,
+				based_on_snapshot_token,
+				payload_gzip,
+				payload_hash,
+				uncompressed_size,
+				compressed_size,
+				generated_at,
+				updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(repository, branch_name, artifact_kind, locale, generation_fingerprint)
+			DO UPDATE SET
+				source_snapshot_token = excluded.source_snapshot_token,
+				tree_sha = excluded.tree_sha,
+				head_sha = excluded.head_sha,
+				based_on_branch_name = excluded.based_on_branch_name,
+				based_on_snapshot_token = excluded.based_on_snapshot_token,
+				payload_gzip = excluded.payload_gzip,
+				payload_hash = excluded.payload_hash,
+				uncompressed_size = excluded.uncompressed_size,
+				compressed_size = excluded.compressed_size,
+				generated_at = excluded.generated_at,
+				updated_at = excluded.updated_at;`,
+			[
+				repository,
+				branchName,
+				artifactKind,
+				locale,
+				generationFingerprint,
+				options.sourceSnapshotToken,
+				options.treeSha,
+				options.headSha,
+				options.basedOnBranchName || null,
+				options.basedOnSnapshotToken || null,
+				encoded.compressed,
+				encoded.hash,
+				encoded.uncompressedSize,
+				encoded.compressedSize,
+				options.generatedAt,
+				now,
+			],
+		);
+		this.save();
+		return this.getBranchArtifact(repository, branchName, artifactKind, locale, generationFingerprint);
+	}
+
 	getCachedFileSummary<T>(repository: string, filePath: string, blobSha: string, locale: string, generationFingerprint: string): T | null {
 		if (!blobSha || !generationFingerprint) {
 			return null;
 		}
 		const db = this.requireDb();
 		const result = db.exec(
-			`SELECT summary_json
+			`SELECT summary_gzip, summary_json
 			FROM codemap_file_summaries
 			WHERE repository = ?
 				AND file_path = ?
@@ -352,7 +521,7 @@ export class CodeMapDatabaseService {
 		if (result.length === 0 || result[0].values.length === 0) {
 			return null;
 		}
-		return this.parseJsonRecord(result[0].values[0][0]) as T | null;
+		return this.decodeCompressedJson<T>(result[0].values[0][0], result[0].values[0][1]);
 	}
 
 	upsertCachedFileSummary(repository: string, filePath: string, blobSha: string, locale: string, generationFingerprint: string, summary: unknown): void {
@@ -361,7 +530,7 @@ export class CodeMapDatabaseService {
 		}
 		const db = this.requireDb();
 		const now = new Date().toISOString();
-		const summaryJson = JSON.stringify(summary || {});
+		const encoded = this.encodeCompressedJson(summary || {});
 		db.run(
 			`INSERT INTO codemap_file_summaries (
 				repository,
@@ -369,15 +538,33 @@ export class CodeMapDatabaseService {
 				blob_sha,
 				locale,
 				generation_fingerprint,
+				summary_gzip,
 				summary_json,
+				uncompressed_size,
+				compressed_size,
 				created_at,
 				updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(repository, file_path, blob_sha, locale, generation_fingerprint)
 			DO UPDATE SET
+				summary_gzip = excluded.summary_gzip,
 				summary_json = excluded.summary_json,
+				uncompressed_size = excluded.uncompressed_size,
+				compressed_size = excluded.compressed_size,
 				updated_at = excluded.updated_at;`,
-			[repository, filePath, blobSha, locale, generationFingerprint, summaryJson, now, now],
+			[
+				repository,
+				filePath,
+				blobSha,
+				locale,
+				generationFingerprint,
+				encoded.compressed,
+				'{}',
+				encoded.uncompressedSize,
+				encoded.compressedSize,
+				now,
+				now,
+			],
 		);
 	}
 
@@ -387,7 +574,7 @@ export class CodeMapDatabaseService {
 		}
 		const db = this.requireDb();
 		const result = db.exec(
-			`SELECT summary_json
+			`SELECT summary_gzip, summary_json
 			FROM codemap_area_summaries
 			WHERE repository = ?
 				AND area_key = ?
@@ -400,7 +587,7 @@ export class CodeMapDatabaseService {
 		if (result.length === 0 || result[0].values.length === 0) {
 			return null;
 		}
-		return this.parseJsonRecord(result[0].values[0][0]) as T | null;
+		return this.decodeCompressedJson<T>(result[0].values[0][0], result[0].values[0][1]);
 	}
 
 	upsertCachedAreaSummary(repository: string, areaKey: string, snapshotToken: string, locale: string, generationFingerprint: string, summary: unknown): void {
@@ -409,7 +596,7 @@ export class CodeMapDatabaseService {
 		}
 		const db = this.requireDb();
 		const now = new Date().toISOString();
-		const summaryJson = JSON.stringify(summary || {});
+		const encoded = this.encodeCompressedJson(summary || {});
 		db.run(
 			`INSERT INTO codemap_area_summaries (
 				repository,
@@ -417,15 +604,33 @@ export class CodeMapDatabaseService {
 				snapshot_token,
 				locale,
 				generation_fingerprint,
+				summary_gzip,
 				summary_json,
+				uncompressed_size,
+				compressed_size,
 				created_at,
 				updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(repository, area_key, snapshot_token, locale, generation_fingerprint)
 			DO UPDATE SET
+				summary_gzip = excluded.summary_gzip,
 				summary_json = excluded.summary_json,
+				uncompressed_size = excluded.uncompressed_size,
+				compressed_size = excluded.compressed_size,
 				updated_at = excluded.updated_at;`,
-			[repository, areaKey, snapshotToken, locale, generationFingerprint, summaryJson, now, now],
+			[
+				repository,
+				areaKey,
+				snapshotToken,
+				locale,
+				generationFingerprint,
+				encoded.compressed,
+				'{}',
+				encoded.uncompressedSize,
+				encoded.compressedSize,
+				now,
+				now,
+			],
 		);
 	}
 
@@ -614,6 +819,9 @@ export class CodeMapDatabaseService {
 		if (currentVersion < 2) {
 			this.migrateV2();
 		}
+		if (currentVersion < 3) {
+			this.migrateV3();
+		}
 
 		if (currentVersion === 0) {
 			db.run('INSERT INTO schema_version (version) VALUES (?);', [SCHEMA_VERSION]);
@@ -711,6 +919,40 @@ export class CodeMapDatabaseService {
 		db.run('CREATE INDEX IF NOT EXISTS idx_codemap_area_summaries_lookup ON codemap_area_summaries(repository, area_key, locale, updated_at DESC);');
 	}
 
+	private migrateV3(): void {
+		const db = this.requireDb();
+		this.ensureColumnExists('codemap_file_summaries', 'summary_gzip', 'BLOB');
+		this.ensureColumnExists('codemap_file_summaries', 'uncompressed_size', 'INTEGER NOT NULL DEFAULT 0');
+		this.ensureColumnExists('codemap_file_summaries', 'compressed_size', 'INTEGER NOT NULL DEFAULT 0');
+		this.ensureColumnExists('codemap_area_summaries', 'summary_gzip', 'BLOB');
+		this.ensureColumnExists('codemap_area_summaries', 'uncompressed_size', 'INTEGER NOT NULL DEFAULT 0');
+		this.ensureColumnExists('codemap_area_summaries', 'compressed_size', 'INTEGER NOT NULL DEFAULT 0');
+		db.run(`
+			CREATE TABLE IF NOT EXISTS codemap_branch_artifacts (
+				repository TEXT NOT NULL,
+				branch_name TEXT NOT NULL,
+				artifact_kind TEXT NOT NULL,
+				locale TEXT NOT NULL,
+				generation_fingerprint TEXT NOT NULL,
+				source_snapshot_token TEXT NOT NULL DEFAULT '',
+				tree_sha TEXT NOT NULL DEFAULT '',
+				head_sha TEXT NOT NULL DEFAULT '',
+				based_on_branch_name TEXT,
+				based_on_snapshot_token TEXT,
+				payload_gzip BLOB NOT NULL,
+				payload_hash TEXT NOT NULL,
+				uncompressed_size INTEGER NOT NULL DEFAULT 0,
+				compressed_size INTEGER NOT NULL DEFAULT 0,
+				generated_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				PRIMARY KEY (repository, branch_name, artifact_kind, locale, generation_fingerprint)
+			);
+		`);
+		db.run('CREATE INDEX IF NOT EXISTS idx_codemap_branch_artifacts_lookup ON codemap_branch_artifacts(repository, artifact_kind, locale, updated_at DESC);');
+		this.backfillCompressedSummaries('codemap_file_summaries');
+		this.backfillCompressedSummaries('codemap_area_summaries');
+	}
+
 	private insertVersion(instructionId: number, content: Buffer, contentHash: string, generatedAt: string, metadataJson: string): void {
 		const db = this.requireDb();
 		db.run(
@@ -766,6 +1008,32 @@ export class CodeMapDatabaseService {
 		};
 	}
 
+	private mapBranchArtifactRow(row: unknown[]): StoredCodeMapBranchArtifact | null {
+		const payload = this.decodeCompressedJson<CodeMapBranchArtifactPayload>(row[10], null);
+		if (!payload) {
+			return null;
+		}
+
+		return {
+			repository: String(row[0]),
+			branchName: String(row[1]),
+			artifactKind: row[2] as StoredCodeMapBranchArtifact['artifactKind'],
+			locale: String(row[3]),
+			generationFingerprint: String(row[4]),
+			sourceSnapshotToken: String(row[5] || ''),
+			treeSha: String(row[6] || ''),
+			headSha: String(row[7] || ''),
+			basedOnBranchName: row[8] ? String(row[8]) : undefined,
+			basedOnSnapshotToken: row[9] ? String(row[9]) : undefined,
+			payload,
+			payloadHash: String(row[11] || ''),
+			uncompressedSize: Number(row[12] || 0),
+			compressedSize: Number(row[13] || 0),
+			generatedAt: String(row[14]),
+			updatedAt: String(row[15]),
+		};
+	}
+
 	private parseMetadata(value: unknown): Record<string, unknown> {
 		try {
 			return JSON.parse(String(value || '{}')) as Record<string, unknown>;
@@ -780,6 +1048,92 @@ export class CodeMapDatabaseService {
 			return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
 		} catch {
 			return null;
+		}
+	}
+
+	private encodeCompressedJson(value: unknown): { compressed: Buffer; hash: string; uncompressedSize: number; compressedSize: number } {
+		const json = JSON.stringify(value || {});
+		const input = Buffer.from(json, 'utf-8');
+		const compressed = gzipSync(input);
+		return {
+			compressed,
+			hash: this.computeContentHash(json),
+			uncompressedSize: input.length,
+			compressedSize: compressed.length,
+		};
+	}
+
+	private decodeCompressedJson<T>(compressedValue: unknown, fallbackJson: unknown): T | null {
+		if (compressedValue instanceof Uint8Array || Buffer.isBuffer(compressedValue)) {
+			try {
+				const compressed = Buffer.from(compressedValue as Uint8Array);
+				return JSON.parse(gunzipSync(compressed).toString('utf-8')) as T;
+			} catch {
+				// Fall through to the legacy JSON column.
+			}
+		}
+
+		if (typeof fallbackJson === 'string' && fallbackJson.trim()) {
+			try {
+				return JSON.parse(fallbackJson) as T;
+			} catch {
+				return null;
+			}
+		}
+
+		return null;
+	}
+
+	private ensureColumnExists(tableName: string, columnName: string, columnDefinition: string): void {
+		const db = this.requireDb();
+		const result = db.exec(`PRAGMA table_info(${tableName});`);
+		const existingColumns = new Set(
+			result.length > 0
+				? result[0].values.map((row) => String(row[1] || ''))
+				: [],
+		);
+		if (existingColumns.has(columnName)) {
+			return;
+		}
+		db.run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition};`);
+	}
+
+	private backfillCompressedSummaries(tableName: 'codemap_file_summaries' | 'codemap_area_summaries'): void {
+		const db = this.requireDb();
+		const keyColumns = tableName === 'codemap_file_summaries'
+			? ['repository', 'file_path', 'blob_sha', 'locale', 'generation_fingerprint']
+			: ['repository', 'area_key', 'snapshot_token', 'locale', 'generation_fingerprint'];
+		const result = db.exec(
+			`SELECT ${keyColumns.join(', ')}, summary_json
+			FROM ${tableName}
+			WHERE (summary_gzip IS NULL OR length(summary_gzip) = 0)
+				AND summary_json IS NOT NULL
+				AND TRIM(summary_json) <> '';`,
+		);
+		if (result.length === 0) {
+			return;
+		}
+
+		for (const row of result[0].values) {
+			const summaryJson = String(row[keyColumns.length] || '').trim();
+			if (!summaryJson) {
+				continue;
+			}
+			const encoded = this.encodeCompressedJson(JSON.parse(summaryJson));
+			db.run(
+				`UPDATE ${tableName}
+				SET summary_gzip = ?,
+					summary_json = '{}',
+					uncompressed_size = ?,
+					compressed_size = ?
+				WHERE ${keyColumns.map((column) => `${column} = ?`).join(' AND ')};`,
+				[
+					encoded.compressed,
+					encoded.uncompressedSize,
+					encoded.compressedSize,
+					...row.slice(0, keyColumns.length),
+				],
+			);
 		}
 	}
 

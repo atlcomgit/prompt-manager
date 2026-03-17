@@ -127,11 +127,20 @@ export class CodeMapBranchResolverService {
 		}
 	}
 
-	private async findNearestTrackedBranch(projectPath: string, currentBranch: string, trackedBranches: string[]): Promise<string> {
+	async findNearestTrackedBranch(projectPath: string, currentBranch: string, trackedBranches: string[]): Promise<string> {
+		return this.findNearestReusableTrackedBranch(projectPath, currentBranch, trackedBranches);
+	}
+
+	async findNearestReusableTrackedBranch(
+		projectPath: string,
+		currentBranch: string,
+		trackedBranches: string[],
+		excludeBranch = '',
+	): Promise<string> {
 		const candidates: Array<{ branch: string; distance: number; totalDistance: number }> = [];
 
 		for (const branch of trackedBranches) {
-			if (!branch || branch === currentBranch) {
+			if (!branch || branch === currentBranch || (excludeBranch && branch === excludeBranch)) {
 				continue;
 			}
 
@@ -172,20 +181,10 @@ export class CodeMapBranchResolverService {
 	}
 
 	private async getMergeBase(projectPath: string, left: string, right: string): Promise<string> {
-		try {
-			const { stdout } = await execFileAsync('git', ['merge-base', left, right], { cwd: projectPath });
-			return stdout.trim();
-		} catch {
-			return '';
-		}
+		return this.gitService.getMergeBase(projectPath, left, right);
 	}
 
 	private async getRevisionCount(projectPath: string, revisionRange: string): Promise<number> {
-		try {
-			const { stdout } = await execFileAsync('git', ['rev-list', '--count', revisionRange], { cwd: projectPath });
-			return Number.parseInt(stdout.trim(), 10) || 0;
-		} catch {
-			return Number.MAX_SAFE_INTEGER;
-		}
+		return this.gitService.getRevisionCount(projectPath, revisionRange);
 	}
 }

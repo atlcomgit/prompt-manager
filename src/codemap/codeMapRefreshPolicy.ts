@@ -50,6 +50,23 @@ export function isInstructionFreshForResolution(input: {
 	const storedMetadataToken = typeof input.instruction.metadata?.sourceSnapshotToken === 'string'
 		? input.instruction.metadata.sourceSnapshotToken.trim()
 		: '';
+	const storedTreeSha = typeof input.instruction.metadata?.treeSha === 'string'
+		? input.instruction.metadata.treeSha.trim()
+		: '';
+	const expectedTreeSha = input.instructionKind === 'base'
+		? String(input.resolution.resolvedTreeSha || '').trim()
+		: String(input.resolution.currentTreeSha || '').trim();
+	const storedFingerprint = typeof input.instruction.metadata?.generationFingerprint === 'string'
+		? input.instruction.metadata.generationFingerprint.trim()
+		: '';
+	const expectedFingerprint = buildCodeMapGenerationFingerprint(input.settings);
+	if (storedTreeSha && expectedTreeSha) {
+		if (storedTreeSha !== expectedTreeSha) {
+			return false;
+		}
+		return !storedFingerprint || storedFingerprint === expectedFingerprint;
+	}
+
 	const expectedSnapshotToken = resolveInstructionSnapshotToken(input.resolution, input.instructionKind);
 	const expectedHeadSha = input.instructionKind === 'base'
 		? String(input.resolution.resolvedHeadSha || '').trim()
@@ -62,12 +79,9 @@ export function isInstructionFreshForResolution(input: {
 		return false;
 	}
 
-	const storedFingerprint = typeof input.instruction.metadata?.generationFingerprint === 'string'
-		? input.instruction.metadata.generationFingerprint.trim()
-		: '';
 	if (!storedFingerprint) {
 		return true;
 	}
 
-	return storedFingerprint === buildCodeMapGenerationFingerprint(input.settings);
+	return storedFingerprint === expectedFingerprint;
 }

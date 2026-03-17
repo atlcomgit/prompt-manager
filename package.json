@@ -576,7 +576,7 @@
     "build": "npm run build:extension && npm run build:webview && npm run copy:wasm",
     "test": "npm run test:compile && npm run test:run",
     "test:compile": "node -e \"require('fs').rmSync('out-tests', { recursive: true, force: true })\" && tsc -p tsconfig.tests.json",
-    "test:run": "node --test out-tests/tests/**/*.test.js",
+    "test:run": "node --test out-tests/tests/*.test.js",
     "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@xenova/transformers --format=cjs --platform=node --minify",
     "build:webview": "node esbuild.webview.mjs",
     "copy:wasm": "cp node_modules/sql.js/dist/sql-wasm.wasm dist/sql-wasm.wasm",

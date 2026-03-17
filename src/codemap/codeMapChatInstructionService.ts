@@ -81,6 +81,17 @@ export class CodeMapChatInstructionService {
 	}
 
 	private async shouldQueueBaseRefresh(resolution: CodeMapMaterializationTarget['resolution'], baseInstruction: CodeMapMaterializationTarget['baseInstruction']): Promise<boolean> {
+		const settings = getCodeMapSettings();
+		const fastFresh = isInstructionFreshForResolution({
+			instruction: baseInstruction,
+			resolution,
+			instructionKind: 'base',
+			settings,
+		});
+		if (fastFresh) {
+			return false;
+		}
+
 		const expectedSnapshotToken = await this.instructionService.resolveSourceSnapshotToken(resolution.projectPath, resolution.resolvedBranchName);
 		return !isInstructionFreshForResolution({
 			instruction: baseInstruction,
@@ -89,11 +100,22 @@ export class CodeMapChatInstructionService {
 				resolvedSourceSnapshotToken: expectedSnapshotToken,
 			},
 			instructionKind: 'base',
-			settings: getCodeMapSettings(),
+			settings,
 		});
 	}
 
 	private async shouldQueueCurrentRefresh(resolution: CodeMapMaterializationTarget['resolution'], currentInstruction: CodeMapMaterializationTarget['currentInstruction']): Promise<boolean> {
+		const settings = getCodeMapSettings();
+		const fastFresh = isInstructionFreshForResolution({
+			instruction: currentInstruction,
+			resolution,
+			instructionKind: 'delta',
+			settings,
+		});
+		if (fastFresh) {
+			return false;
+		}
+
 		const expectedSnapshotToken = await this.instructionService.resolveSourceSnapshotToken(resolution.projectPath, resolution.currentBranch);
 		return !isInstructionFreshForResolution({
 			instruction: currentInstruction,
@@ -102,7 +124,7 @@ export class CodeMapChatInstructionService {
 				currentSourceSnapshotToken: expectedSnapshotToken,
 			},
 			instructionKind: 'delta',
-			settings: getCodeMapSettings(),
+			settings,
 		});
 	}
 

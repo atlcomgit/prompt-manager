@@ -6,6 +6,7 @@ import { CodeMapInstructionService, buildCodeMapProjectInstruction, buildFileSum
 class FakeCodeMapSummaryCache {
 	private readonly fileSummaries = new Map<string, unknown>();
 	private readonly areaSummaries = new Map<string, unknown>();
+	private readonly branchArtifacts = new Map<string, unknown>();
 
 	getCachedFileSummary<T>(repository: string, filePath: string, blobSha: string, locale: string, generationFingerprint: string): T | null {
 		return (this.fileSummaries.get(this.buildKey(repository, filePath, blobSha, locale, generationFingerprint)) as T | undefined) || null;
@@ -21,6 +22,46 @@ class FakeCodeMapSummaryCache {
 
 	upsertCachedAreaSummary(repository: string, areaKey: string, snapshotToken: string, locale: string, generationFingerprint: string, summary: unknown): void {
 		this.areaSummaries.set(this.buildKey(repository, areaKey, snapshotToken, locale, generationFingerprint), this.clone(summary));
+	}
+
+	getBranchArtifact<T>(repository: string, branchName: string, artifactKind: string, locale: string, generationFingerprint: string): T | null {
+		return (this.branchArtifacts.get(this.buildKey(repository, branchName, artifactKind, locale, generationFingerprint)) as T | undefined) || null;
+	}
+
+	upsertBranchArtifact(
+		repository: string,
+		branchName: string,
+		artifactKind: string,
+		locale: string,
+		generationFingerprint: string,
+		payload: unknown,
+		options: {
+			sourceSnapshotToken: string;
+			treeSha: string;
+			headSha: string;
+			basedOnBranchName?: string;
+			basedOnSnapshotToken?: string;
+			generatedAt: string;
+		},
+	): void {
+		this.branchArtifacts.set(this.buildKey(repository, branchName, artifactKind, locale, generationFingerprint), this.clone({
+			repository,
+			branchName,
+			artifactKind,
+			locale,
+			generationFingerprint,
+			sourceSnapshotToken: options.sourceSnapshotToken,
+			treeSha: options.treeSha,
+			headSha: options.headSha,
+			basedOnBranchName: options.basedOnBranchName,
+			basedOnSnapshotToken: options.basedOnSnapshotToken,
+			payload,
+			payloadHash: '',
+			uncompressedSize: 0,
+			compressedSize: 0,
+			generatedAt: options.generatedAt,
+			updatedAt: options.generatedAt,
+		}));
 	}
 
 	private buildKey(...parts: string[]): string {
@@ -809,6 +850,151 @@ class TestController {
 	assert.match(secondRecord.content, /AI-описание для submitFiltersFast/);
 	assert.match(secondRecord.content, /AI-описание UI-блока OrdersFilters: submitFiltersFast/);
 	assert.match(secondRecord.content, /AI-описание для index/);
+});
+
+test('generateInstruction builds delta for a non-tracked branch from the parent tracked artifact', async () => {
+	const cache = new FakeCodeMapSummaryCache();
+	const symbolCalls: string[][] = [];
+	const readRequests: Array<{ ref: string; files: string[] }> = [];
+	const fileSourcesByRef = new Map<string, Map<string, string>>([
+		['main', new Map([
+			['src/services/orderService.ts', `export async function listOrders() {
+	return [];
+}`],
+			['src/pages/OrdersPage.vue', `<template>
+	<section class="orders-page">
+		<button @click="openOrder">Open</button>
+	</section>
+</template>
+<script setup lang="ts">
+const openOrder = () => true;
+</script>`],
+		])],
+		['feature/orders-filters', new Map([
+			['src/services/orderService.ts', `export async function listOrders() {
+	return [];
+}`],
+			['src/pages/OrdersPage.vue', `<template>
+	<section class="orders-page">
+		<form class="orders-filters" @submit.prevent="applyFilters">
+			<input v-model="query" />
+		</form>
+	</section>
+</template>
+<script setup lang="ts">
+const query = ref('');
+const applyFilters = () => query.value;
+</script>`],
+		])],
+	]);
+	const blobMapByRef = new Map<string, Map<string, string>>([
+		['main', new Map([
+			['src/services/orderService.ts', '1111111111111111111111111111111111111111'],
+			['src/pages/OrdersPage.vue', '2222222222222222222222222222222222222222'],
+		])],
+		['feature/orders-filters', new Map([
+			['src/services/orderService.ts', '1111111111111111111111111111111111111111'],
+			['src/pages/OrdersPage.vue', '3333333333333333333333333333333333333333'],
+		])],
+	]);
+	const service = new CodeMapInstructionService({
+		resolveFreeCopilotModel: async () => 'gpt-5-mini',
+		generateCodeMapAreaDescriptionsBatch: async (input: { areas: Array<{ id: string; area: string }> }) => JSON.stringify({
+			areas: input.areas.map(area => ({
+				id: area.id,
+				description: `Описание области ${area.area}`,
+			})),
+		}),
+		generateCodeMapSymbolDescriptionsBatch: async (input: { symbols: Array<{ id: string; name: string; filePath: string }> }) => {
+			symbolCalls.push(input.symbols.map(symbol => `${symbol.filePath}:${symbol.name}`));
+			return JSON.stringify({
+				symbols: input.symbols.map(symbol => ({
+					id: symbol.id,
+					description: `AI-описание для ${symbol.name}`,
+				})),
+			});
+		},
+		generateCodeMapFrontendBlockDescriptionsBatch: async (input: { blocks: Array<{ id: string; blockName: string }> }) => JSON.stringify({
+			blocks: input.blocks.map(block => ({
+				id: block.id,
+				description: `AI-описание UI-блока ${block.blockName}`,
+			})),
+		}),
+	} as never, cache as never) as any;
+
+	service.getFilesAtRef = async (_projectPath: string, ref: string) => Array.from(fileSourcesByRef.get(ref)?.keys() || []);
+	service.getFileBlobShasAtRef = async (_projectPath: string, ref: string, files: string[]) => {
+		const blobMap = blobMapByRef.get(ref) || new Map();
+		return new Map(files.map(filePath => [filePath, blobMap.get(filePath) || '']));
+	};
+	service.readJsonAtRef = async (_projectPath: string, _ref: string, filePath: string) => {
+		if (filePath === 'package.json') {
+			return {
+				name: 'orders-app',
+				dependencies: { vue: '^3.4.0' },
+			};
+		}
+		return null;
+	};
+	service.readFileTexts = async (_projectPath: string, ref: string, files: string[]) => {
+		readRequests.push({ ref, files: [...files].sort() });
+		const sources = fileSourcesByRef.get(ref) || new Map();
+		return new Map(files.map(filePath => [filePath, sources.get(filePath) || '']));
+	};
+	service.readRecentChanges = async () => [];
+
+	const baseRecord = await service.generateInstruction({
+		repository: 'orders-app',
+		projectPath: '/tmp/orders-app',
+		currentBranch: 'main',
+		resolvedBranchName: 'main',
+		baseBranchName: 'main',
+		branchRole: 'tracked',
+		isTrackedBranch: true,
+		hasUncommittedChanges: false,
+		resolvedHeadSha: 'base-head',
+		currentHeadSha: 'base-head',
+	}, 'base', 'ru', 'gpt-5-mini');
+	const baseArtifact = cache.getBranchArtifact<any>(
+		'orders-app',
+		'main',
+		'full',
+		'ru',
+		String(baseRecord.metadata?.generationFingerprint || ''),
+	);
+	assert.ok(baseArtifact);
+	service.selectReuseContext = async () => ({
+		sourceArtifact: baseArtifact,
+		diffEntries: [{ status: 'M', path: 'src/pages/OrdersPage.vue' }],
+		changedFiles: new Set(['src/pages/OrdersPage.vue']),
+		deletedFiles: [],
+		renamedFiles: [],
+	});
+
+	const deltaRecord = await service.generateInstruction({
+		repository: 'orders-app',
+		projectPath: '/tmp/orders-app',
+		currentBranch: 'feature/orders-filters',
+		resolvedBranchName: 'main',
+		baseBranchName: 'main',
+		branchRole: 'resolved-base',
+		isTrackedBranch: false,
+		hasUncommittedChanges: false,
+		resolvedHeadSha: 'base-head',
+		currentHeadSha: 'feature-head',
+	}, 'delta', 'ru', 'gpt-5-mini');
+
+	assert.match(deltaRecord.content, /Delta Code Map проекта orders-app/);
+	assert.match(deltaRecord.content, /Базовая tracked-ветка: main/);
+	assert.match(deltaRecord.content, /src\/pages\/OrdersPage\.vue/);
+	assert.doesNotMatch(deltaRecord.content, /src\/services\/orderService\.ts/);
+	assert.ok(symbolCalls[symbolCalls.length - 1]?.every(item => item.startsWith('src/pages/OrdersPage.vue:')));
+	assert.deepEqual(readRequests.map(item => item.files), [
+		['src/pages/OrdersPage.vue', 'src/services/orderService.ts'],
+		['src/pages/OrdersPage.vue'],
+	]);
+	assert.equal(deltaRecord.metadata?.basedOnBranchName, 'main');
+	assert.equal(deltaRecord.metadata?.artifactKind, 'delta');
 });
 
 test('codemap source filtering respects excluded paths and tracked .gitignore rules', async () => {

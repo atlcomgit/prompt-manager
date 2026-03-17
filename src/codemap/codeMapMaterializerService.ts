@@ -29,6 +29,7 @@ export function buildCodeMapChatInstructions(input: {
 			missingTitle: '### Инструкция пока не готова',
 			missingText: 'Для этой пары проект+ветка сохраненная инструкция еще не найдена. Обновление поставлено в очередь и будет выполнено в фоне.',
 			currentSnapshotTitle: '### Снимок текущей ветки',
+			currentDeltaTitle: '### Delta текущей ветки относительно tracked-базы',
 			uncommittedTitle: '### Незакомиченные изменения',
 			queueLine: '### Состояние очереди обновления',
 			queued: 'обновление поставлено в очередь',
@@ -43,6 +44,7 @@ export function buildCodeMapChatInstructions(input: {
 			missingTitle: '### Instruction not ready yet',
 			missingText: 'No persisted instruction was found for this project+branch pair yet. A refresh job has been queued and will run in the background.',
 			currentSnapshotTitle: '### Current branch snapshot',
+			currentDeltaTitle: '### Current branch delta against the tracked base',
 			uncommittedTitle: '### Uncommitted changes',
 			queueLine: '### Refresh queue state',
 			queued: 'refresh queued',
@@ -78,7 +80,12 @@ export function buildCodeMapChatInstructions(input: {
 		}
 
 		if (target.currentInstruction && target.currentInstruction.branchName !== target.resolution.resolvedBranchName) {
-			content.push('', text.currentSnapshotTitle, '', target.currentInstruction.content);
+			content.push(
+				'',
+				target.currentInstruction.instructionKind === 'delta' ? text.currentDeltaTitle : text.currentSnapshotTitle,
+				'',
+				target.currentInstruction.content,
+			);
 		} else if (target.queuedCurrentRefresh && target.resolution.currentBranch !== target.resolution.resolvedBranchName) {
 			content.push('', text.queueLine, `- ${target.resolution.currentBranch}: ${text.queued}`);
 		}

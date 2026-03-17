@@ -54,6 +54,11 @@ export type WebviewToExtensionMessage =
 	| { type: 'recalcImplementingTime'; id: string }
 	| { type: 'getNextTaskNumber' }
 	| { type: 'openChatPanel' }
+	| { type: 'startPromptVoiceRecording'; sessionId: string }
+	| { type: 'pausePromptVoiceRecording'; sessionId: string }
+	| { type: 'resumePromptVoiceRecording'; sessionId: string }
+	| { type: 'confirmPromptVoiceRecording'; sessionId: string }
+	| { type: 'cancelPromptVoiceRecording'; sessionId: string }
 	| { type: 'reportEditorReady'; promptId: string }
 	| { type: 'reportEditorUpdate'; promptId: string; report: string; previousReport?: string; activityDeltaMs?: number }
 	| { type: 'reportEditorSave'; promptId: string; report: string; previousReport?: string; activityDeltaMs?: number }
@@ -108,4 +113,17 @@ export type ExtensionToWebviewMessage =
 	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number }
 	| { type: 'promptLoading' }
 	| { type: 'nextTaskNumber'; taskNumber: string }
-	| { type: 'chatOpened'; promptId: string };
+	| { type: 'chatOpened'; promptId: string }
+	| {
+		type: 'promptVoiceState';
+		sessionId: string;
+		status: 'recording' | 'paused' | 'preparing-model' | 'processing' | 'error' | 'cancelled' | 'transcribed';
+		elapsedMs?: number;
+		level?: number;
+		levels?: number[];
+		message?: string;
+		progress?: number | null;
+		errorBadge?: string;
+		errorHint?: string;
+		text?: string;
+	};

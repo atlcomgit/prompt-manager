@@ -13,6 +13,7 @@ import { createDefaultPrompt } from '../types/prompt.js';
 import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
 import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
+import type { PromptVoiceService } from '../services/promptVoice/promptVoiceService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
 import type { CodeMapChatInstructionService } from '../codemap/codeMapChatInstructionService.js';
@@ -919,6 +920,7 @@ export class EditorPanelManager {
 		private readonly workspaceService: WorkspaceService,
 		private readonly gitService: GitService,
 		private readonly stateService: StateService,
+		private readonly promptVoiceService: PromptVoiceService,
 		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
 		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined,
 	) {
@@ -2138,6 +2140,7 @@ export class EditorPanelManager {
 
 		// Handle panel close — autosave unsaved changes silently
 		panel.onDidDispose(async () => {
+			await this.promptVoiceService.cancel(panelKey);
 			const promptIdForWait = (this.panelPromptRefs.get(panelKey)?.id || '').trim();
 			await this.awaitPendingReportPersist(promptIdForWait);
 			const promptRefSnapshot = this.panelPromptRefs.get(panelKey)
@@ -2644,6 +2647,31 @@ export class EditorPanelManager {
 
 			case 'openPromptContentInEditor': {
 				await this.openPromptContentInEditor(panelKey, currentPrompt, msg.content || '');
+				break;
+			}
+
+			case 'startPromptVoiceRecording': {
+				await this.promptVoiceService.start(panelKey, msg.sessionId, postMessage);
+				break;
+			}
+
+			case 'pausePromptVoiceRecording': {
+				await this.promptVoiceService.pause(panelKey, msg.sessionId);
+				break;
+			}
+
+			case 'resumePromptVoiceRecording': {
+				await this.promptVoiceService.resume(panelKey, msg.sessionId);
+				break;
+			}
+
+			case 'confirmPromptVoiceRecording': {
+				await this.promptVoiceService.confirm(panelKey, msg.sessionId);
+				break;
+			}
+
+			case 'cancelPromptVoiceRecording': {
+				await this.promptVoiceService.cancel(panelKey, msg.sessionId);
 				break;
 			}
 

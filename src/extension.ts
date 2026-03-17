@@ -3,7 +3,7 @@
  */
 
 import * as vscode from 'vscode';
-import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService } from './services/index.js';
+import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService, PromptVoiceService } from './services/index.js';
 import {
 	MemoryDatabaseService,
 	MemoryCleanupService,
@@ -53,6 +53,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const workspaceService = new WorkspaceService();
 	const gitService = new GitService();
 	const stateService = new StateService(context);
+	const promptVoiceService = new PromptVoiceService(context.globalStorageUri.fsPath);
 	const extensionPackage = context.extension.packageJSON as { description?: string; version?: string };
 	const extensionVersion = String(extensionPackage.version || '0.0.0');
 
@@ -77,9 +78,13 @@ export function activate(context: vscode.ExtensionContext) {
 		workspaceService,
 		gitService,
 		stateService,
+		promptVoiceService,
 		() => chatMemoryInstructionService,
 		() => codeMapChatInstructionService,
 	);
+	context.subscriptions.push(new vscode.Disposable(() => {
+		void promptVoiceService.dispose();
+	}));
 
 	const statisticsPanelManager = new StatisticsPanelManager(
 		context.extensionUri,

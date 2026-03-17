@@ -197,6 +197,7 @@ interface Props {
   persistedHeight?: number;
   onHeightChange?: (height: number) => void;
   normalizePastedText?: boolean;
+  focusSignal?: number;
 }
 
 /**
@@ -215,6 +216,7 @@ export const TextArea: React.FC<Props> = ({
   persistedHeight,
   onHeightChange,
   normalizePastedText = false,
+  focusSignal,
 }) => {
   const t = useT();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -428,6 +430,16 @@ export const TextArea: React.FC<Props> = ({
     setIsRequesting(true);
     onRequestSuggestion(textBefore);
   }, [requestSuggestionSignal, onRequestSuggestion, value]);
+
+  useEffect(() => {
+    if (!focusSignal || !textareaRef.current) {
+      return;
+    }
+    textareaRef.current.focus();
+    const position = textareaRef.current.value.length;
+    textareaRef.current.selectionStart = position;
+    textareaRef.current.selectionEnd = position;
+  }, [focusSignal]);
 
   const textBeforeCursor = value.substring(0, cursorPos);
   const textAfterCursor = value.substring(cursorPos);

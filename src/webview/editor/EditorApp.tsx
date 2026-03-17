@@ -13,9 +13,12 @@ import { MultiSelect } from './components/MultiSelect';
 import { StatusSelect } from './components/StatusSelect';
 import { ActionBar } from './components/ActionBar';
 import { TimerDisplay } from './components/TimerDisplay';
+import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import type { Prompt, PromptStatus } from '../../types/prompt';
 import { createDefaultPrompt } from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
+import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
+import { usePromptVoiceController } from './voice/usePromptVoiceController';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -42,6 +45,15 @@ const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
 };
 
 const ensureTrailingNewline = (text: string): string => (text.endsWith('\n') ? text : `${text}\n`);
+
+const VoiceMicIcon: React.FC = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" style={styles.inlineIcon}>
+    <path
+      fill="currentColor"
+      d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a1 1 0 1 1 2 0 7 7 0 0 1-6 6.93V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-3.07A7 7 0 0 1 5 11a1 1 0 1 1 2 0 5 5 0 1 0 10 0z"
+    />
+  </svg>
+);
 
 export const EditorApp: React.FC = () => {
   const t = useT();
@@ -154,6 +166,7 @@ export const EditorApp: React.FC = () => {
   const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
+  const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
   const startChatLockRef = useRef(false);
   const globalContextTextareaRef = useRef<HTMLTextAreaElement>(null);
   const saveTimeoutRef = useRef<number | null>(null);
@@ -989,6 +1002,34 @@ export const EditorApp: React.FC = () => {
     }, delayMs);
   };
 
+  const handleVoiceTranscriptionReady = (text: string) => {
+    const normalized = text.trim();
+    if (!normalized) {
+      return;
+    }
+
+    setShowPreview(false);
+    setInlineSuggestion('');
+    setInlineSuggestions([]);
+    setPrompt(prev => ({
+      ...prev,
+      content: appendRecognizedPromptText(prev.content, normalized),
+    }));
+    userChangeCounterRef.current++;
+    setIsDirty(true);
+    scheduleAutoSave(1500);
+    setPromptContentFocusSignal(prev => prev + 1);
+  };
+
+  const voiceController = usePromptVoiceController({
+    onOpen: () => {
+      setShowPreview(false);
+      setInlineSuggestion('');
+      setInlineSuggestions([]);
+    },
+    onTranscriptionReady: handleVoiceTranscriptionReady,
+  });
+
   /** Update a text field with debounced auto-save (1.5 s). */
   const updateField = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
     setPrompt(prev => ({ ...prev, [field]: value }));
@@ -1563,6 +1604,20 @@ export const EditorApp: React.FC = () => {
                     >
                       {t('textArea.suggest')}
                     </button>
+                    <button
+                      type="button"
+                      style={{
+                        ...styles.linkBtn,
+                        ...styles.iconLinkBtn,
+                        ...(voiceController.isVisible ? styles.linkBtnDisabled : {}),
+                      }}
+                      onClick={() => { void voiceController.startRecording(); }}
+                      title={t('editor.voiceRecordFromMic')}
+                      aria-label={t('editor.voiceRecordFromMic')}
+                      disabled={voiceController.isVisible}
+                    >
+                      <VoiceMicIcon />
+                    </button>
                   </div>
                 </div>
                 {showPreview ? (
@@ -1571,29 +1626,55 @@ export const EditorApp: React.FC = () => {
                     dangerouslySetInnerHTML={{ __html: renderMarkdown(prompt.content) }}
                   />
                 ) : (
-                  <TextArea
-                    value={prompt.content}
-                    onChange={v => { updateField('content', v); setInlineSuggestion(''); setInlineSuggestions([]); }}
-                    placeholder={t('editor.promptPlaceholder')}
-                    rows={12}
-                    required
-                    autoCompleteEnabled={autoCompleteEnabled}
-                    onAutoCompleteChange={setAutoCompleteEnabled}
-                    showControls={false}
-                    persistedHeight={promptContentHeight}
-                    onHeightChange={setPromptContentHeight}
-                    requestSuggestionSignal={requestSuggestionSignal}
-                    onSuggestionLoadingChange={setIsSuggestionLoading}
-                    onRequestSuggestion={(textBefore) => {
-                      vscode.postMessage({
-                        type: 'requestSuggestion',
-                        textBefore,
-                        globalContext,
-                      });
+                  <div
+                    style={{
+                      ...styles.promptTextAreaWrap,
+                      ...(voiceController.isVisible ? styles.promptTextAreaWrapWithOverlay : null),
                     }}
-                    suggestion={inlineSuggestion}
-                    suggestions={inlineSuggestions}
-                  />
+                  >
+                    {voiceController.isVisible && (
+                      <PromptVoiceOverlay
+                        status={voiceController.status}
+                        elapsedLabel={voiceController.elapsedLabel}
+                        maxDurationLabel={voiceController.maxDurationLabel}
+                        levels={voiceController.levels}
+                        progressMessage={voiceController.progressMessage}
+                        progressPercent={voiceController.progressPercent}
+                        errorMessage={voiceController.errorMessage}
+                        errorBadge={voiceController.errorBadge}
+                        errorHint={voiceController.errorHint}
+                        onConfirm={voiceController.confirmRecording}
+                        onPause={voiceController.pauseRecording}
+                        onResume={voiceController.resumeRecording}
+                        onCancel={voiceController.cancelRecording}
+                        t={t}
+                      />
+                    )}
+                    <TextArea
+                      value={prompt.content}
+                      onChange={v => { updateField('content', v); setInlineSuggestion(''); setInlineSuggestions([]); }}
+                      placeholder={t('editor.promptPlaceholder')}
+                      rows={12}
+                      required
+                      autoCompleteEnabled={autoCompleteEnabled}
+                      onAutoCompleteChange={setAutoCompleteEnabled}
+                      showControls={false}
+                      persistedHeight={promptContentHeight}
+                      onHeightChange={setPromptContentHeight}
+                      requestSuggestionSignal={requestSuggestionSignal}
+                      onSuggestionLoadingChange={setIsSuggestionLoading}
+                      onRequestSuggestion={(textBefore) => {
+                        vscode.postMessage({
+                          type: 'requestSuggestion',
+                          textBefore,
+                          globalContext,
+                        });
+                      }}
+                      suggestion={inlineSuggestion}
+                      suggestions={inlineSuggestions}
+                      focusSignal={promptContentFocusSignal}
+                    />
+                  </div>
                 )}
               </div>
 
@@ -2078,10 +2159,23 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'var(--vscode-font-family)',
     whiteSpace: 'nowrap',
   },
+  iconLinkBtn: {
+    minWidth: '28px',
+    minHeight: '24px',
+    padding: '0',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   linkBtnDisabled: {
     opacity: 0.6,
     cursor: 'not-allowed',
     border: 'none',
+  },
+  inlineIcon: {
+    width: '15px',
+    height: '15px',
+    display: 'block',
   },
   generateProjectsHint: {
     fontSize: '11px',
@@ -2114,6 +2208,12 @@ const styles: Record<string, React.CSSProperties> = {
     flexWrap: 'nowrap',
     whiteSpace: 'nowrap',
     flexShrink: 0,
+  },
+  promptTextAreaWrap: {
+    position: 'relative',
+  },
+  promptTextAreaWrapWithOverlay: {
+    isolation: 'isolate',
   },
   autoCompleteLabelInline: {
     display: 'flex',

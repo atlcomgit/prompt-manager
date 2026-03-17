@@ -33,6 +33,9 @@ export function getWebviewHtml(
     style-src ${webview.cspSource} 'unsafe-inline';
     script-src 'nonce-${nonce}';
     img-src ${webview.cspSource} https: data:;
+    connect-src ${webview.cspSource} https: data: blob:;
+    worker-src blob: https:;
+    media-src blob: data:;
   ">
   <title>${title}</title>
   <style>
@@ -117,6 +120,11 @@ export function getWebviewHtml(
     @keyframes pm-fade-in {
       from { opacity: 0; }
       to { opacity: 1; }
+    }
+
+    @keyframes pm-voice-pulse {
+      0%, 100% { opacity: 0.35; transform: translateY(0); }
+      50% { opacity: 1; transform: translateY(-1px); }
     }
   </style>
 </head>

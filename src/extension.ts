@@ -338,6 +338,11 @@ export function activate(context: vscode.ExtensionContext) {
 		await openPromptOutsideSidebar(id);
 	});
 
+	// Background cache refresh — detects manual file-system changes with low disk/CPU pressure
+	storageService.startBackgroundCacheRefresh(() => {
+		void sidebarProvider.refreshList();
+	});
+
 	// Register commands
 	context.subscriptions.push(
 		vscode.commands.registerCommand('promptManager.createPrompt', () => {
@@ -796,6 +801,7 @@ export function activate(context: vscode.ExtensionContext) {
 	// Cleanup
 	context.subscriptions.push({
 		dispose() {
+			storageService.cancelBackgroundCacheRefresh();
 			workspaceService.dispose();
 			editorPanelManager.prepareForShutdown();
 			editorPanelManager.disposeAll();

@@ -41,6 +41,10 @@ export class StorageService {
 	private readonly DAILY_TIME_FILE = 'daily-time.json';
 	private readonly HISTORY_LIMIT = 20;
 	private readonly HISTORY_WINDOW_MS = 30_000;
+	private readonly CACHE_FILE = 'prompt-list.json';
+
+	private _listCache: PromptConfig[] | null = null;
+	private _backgroundRefreshCancelled = false;
 
 	constructor(private readonly workspaceRoot: string) { }
 
@@ -57,6 +61,49 @@ export class StorageService {
 		} catch {
 			await vscode.workspace.fs.createDirectory(uri);
 		}
+	}
+
+	private get cacheFilePath(): string {
+		return path.join(this.storageDir, this.CACHE_FILE);
+	}
+
+	private async readListCache(): Promise<PromptConfig[] | null> {
+		try {
+			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(this.cacheFilePath));
+			const parsed = JSON.parse(Buffer.from(raw).toString('utf-8'));
+			if (!Array.isArray(parsed)) { return null; }
+			return parsed as PromptConfig[];
+		} catch {
+			return null;
+		}
+	}
+
+	private async writeListCache(prompts: PromptConfig[]): Promise<void> {
+		this._listCache = prompts;
+		try {
+			await vscode.workspace.fs.writeFile(
+				vscode.Uri.file(this.cacheFilePath),
+				Buffer.from(JSON.stringify(prompts, null, 2), 'utf-8'),
+			);
+		} catch {
+			// Cache write failure is non-fatal
+		}
+	}
+
+	/** Update or add one entry in the cache. No-op if no cache exists yet. */
+	private async updateListCacheEntry(config: PromptConfig, removedId?: string): Promise<void> {
+		const current = this._listCache ?? await this.readListCache();
+		if (current === null) { return; }
+		const updated = current.filter(p => p.id !== config.id && p.id !== removedId);
+		updated.push(config);
+		await this.writeListCache(updated);
+	}
+
+	/** Remove one entry from the cache by id. No-op if no cache exists yet. */
+	private async removeListCacheEntry(id: string): Promise<void> {
+		const current = this._listCache ?? await this.readListCache();
+		if (current === null) { return; }
+		await this.writeListCache(current.filter(p => p.id !== id));
 	}
 
 	/** Get path to a prompt folder */
@@ -323,8 +370,25 @@ export class StorageService {
 	/** List all prompt configs (lightweight — no content) */
 	async listPrompts(): Promise<PromptConfig[]> {
 		await this.ensureStorageDir();
-		const uri = vscode.Uri.file(this.storageDir);
 
+		// Level 1: in-memory cache
+		if (this._listCache !== null) {
+			return this._listCache;
+		}
+
+		// Level 2: persistent cache file
+		const cached = await this.readListCache();
+		if (cached !== null) {
+			this._listCache = cached;
+			return cached;
+		}
+
+		// Level 3: full parallel scan — build and persist cache
+		return this._scanAndCachePrompts();
+	}
+
+	private async _scanAndCachePrompts(): Promise<PromptConfig[]> {
+		const uri = vscode.Uri.file(this.storageDir);
 		let entries: [string, vscode.FileType][];
 		try {
 			entries = await vscode.workspace.fs.readDirectory(uri);
@@ -332,19 +396,12 @@ export class StorageService {
 			return [];
 		}
 
-		const prompts: PromptConfig[] = [];
-		for (const [name, type] of entries) {
-			if (type === vscode.FileType.Directory) {
-				try {
-					const config = await this.readConfig(name);
-					if (config) {
-						prompts.push(config);
-					}
-				} catch {
-					// Skip corrupted prompt folders
-				}
-			}
-		}
+		const dirs = entries
+			.filter(([, type]) => type === vscode.FileType.Directory)
+			.map(([name]) => name);
+		const configs = await Promise.all(dirs.map(name => this.readConfig(name).catch(() => null)));
+		const prompts = configs.filter(Boolean) as PromptConfig[];
+		await this.writeListCache(prompts);
 		return prompts;
 	}
 
@@ -501,6 +558,9 @@ export class StorageService {
 			await this.updateDailyTime(prompt.id, existingPrompt, prompt);
 		}
 
+		// Update list cache (pass previousId so old entry is removed on rename)
+		await this.updateListCacheEntry(config, previousId && previousId !== prompt.id ? previousId : undefined);
+
 		return config;
 	}
 
@@ -561,6 +621,7 @@ export class StorageService {
 		} catch {
 			// Already deleted or doesn't exist
 		}
+		await this.removeListCacheEntry(id);
 	}
 
 	/** Duplicate a prompt with a new id */
@@ -822,5 +883,78 @@ export class StorageService {
 		}
 
 		await vscode.workspace.fs.rename(oldUri, newUri, { overwrite: false });
+	}
+
+	/**
+	 * Start a low-priority background scan to sync the cache with any manual
+	 * file-system changes (e.g. user renamed a folder or edited config.json).
+	 * Reads each prompt folder sequentially with small pauses to minimise disk
+	 * and CPU pressure.  Calls `onComplete` only when actual changes are found.
+	 */
+	startBackgroundCacheRefresh(onComplete?: () => void): void {
+		this._backgroundRefreshCancelled = false;
+		setTimeout(() => void this._runBackgroundRefresh(onComplete), 0);
+	}
+
+	cancelBackgroundCacheRefresh(): void {
+		this._backgroundRefreshCancelled = true;
+	}
+
+	private async _runBackgroundRefresh(onComplete?: () => void): Promise<void> {
+		// Give the extension time to fully initialise before touching the disk.
+		await new Promise<void>(resolve => setTimeout(resolve, 2000));
+		if (this._backgroundRefreshCancelled) { return; }
+
+		let entries: [string, vscode.FileType][];
+		try {
+			await this.ensureStorageDir();
+			entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(this.storageDir));
+		} catch {
+			return;
+		}
+
+		const dirs = entries
+			.filter(([, type]) => type === vscode.FileType.Directory)
+			.map(([name]) => name);
+
+		const freshConfigs: PromptConfig[] = [];
+		for (const name of dirs) {
+			if (this._backgroundRefreshCancelled) { return; }
+			try {
+				const config = await this.readConfig(name);
+				if (config) { freshConfigs.push(config); }
+			} catch {
+				// skip corrupted folders
+			}
+			// Low-priority pause — keeps disk and CPU pressure minimal.
+			await new Promise<void>(resolve => setTimeout(resolve, 30));
+		}
+
+		if (this._backgroundRefreshCancelled) { return; }
+
+		// Compare fresh data against the current cache.
+		const cached = this._listCache ?? await this.readListCache();
+		let hasChanges = cached === null;
+
+		if (!hasChanges && cached !== null) {
+			const freshById = new Map(freshConfigs.map(c => [c.id, c]));
+			const cachedById = new Map(cached.map(c => [c.id, c]));
+			if (freshById.size !== cachedById.size) {
+				hasChanges = true;
+			} else {
+				for (const [id, fresh] of freshById) {
+					const existing = cachedById.get(id);
+					if (!existing || fresh.updatedAt !== existing.updatedAt) {
+						hasChanges = true;
+						break;
+					}
+				}
+			}
+		}
+
+		if (hasChanges && !this._backgroundRefreshCancelled) {
+			await this.writeListCache(freshConfigs);
+			onComplete?.();
+		}
 	}
 }

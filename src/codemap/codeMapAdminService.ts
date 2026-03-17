@@ -12,6 +12,7 @@ import type { GitService } from '../services/gitService.js';
 import { getCodeMapSettings, saveCodeMapSettings } from './codeMapConfig.js';
 import { CodeMapDatabaseService } from './codeMapDatabaseService.js';
 import { CodeMapBranchResolverService } from './codeMapBranchResolverService.js';
+import type { CodeMapChatInstructionService } from './codeMapChatInstructionService.js';
 import { CodeMapOrchestratorService } from './codeMapOrchestratorService.js';
 
 export class CodeMapAdminService {
@@ -21,6 +22,7 @@ export class CodeMapAdminService {
 		private readonly db: CodeMapDatabaseService,
 		private readonly branchResolver: CodeMapBranchResolverService,
 		private readonly orchestrator: CodeMapOrchestratorService,
+		private readonly chatInstructionService?: CodeMapChatInstructionService,
 	) { }
 
 	async getInstructions(): Promise<CodeMapInstructionListItem[]> {
@@ -71,9 +73,13 @@ export class CodeMapAdminService {
 	}
 
 	getActivity(): CodeMapActivity {
+		const runtime = this.orchestrator.getRuntimeState();
 		return {
 			statistics: this.getStatistics(),
-			runtime: this.orchestrator.getRuntimeState(),
+			runtime: {
+				...runtime,
+				scheduledRealtimeRefreshes: this.chatInstructionService?.getScheduledRealtimeRefreshes() || [],
+			},
 			recentJobs: this.getRecentJobs(),
 		};
 	}

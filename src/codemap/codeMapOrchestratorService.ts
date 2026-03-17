@@ -128,6 +128,7 @@ export class CodeMapOrchestratorService {
 			lastActivityAt: this.lastActivityAt || undefined,
 			currentTask: this.currentItem ? this.toRuntimeTask(this.currentItem, 'running') : undefined,
 			queuedTasks: this.queue.map(item => this.toRuntimeTask(item, 'queued')),
+			scheduledRealtimeRefreshes: [],
 			recentEvents: [...this.recentEvents],
 			cycle: { ...this.cycle },
 		};

@@ -125,6 +125,7 @@ export function activate(context: vscode.ExtensionContext) {
 	let codeMapOrchestratorService: CodeMapOrchestratorService | undefined;
 	let codeMapChatInstructionService: CodeMapChatInstructionService | undefined;
 	let codeMapAdminService: CodeMapAdminService | undefined;
+	let codeMapRealtimeWatcherRegistered = false;
 	const codeMapSettings = getCodeMapSettings();
 
 	if (codeMapSettings.enabled) {
@@ -149,11 +150,28 @@ export function activate(context: vscode.ExtensionContext) {
 			codeMapDb,
 			codeMapBranchResolverService,
 			codeMapOrchestratorService,
+			codeMapChatInstructionService,
 		);
+		const registerCodeMapRealtimeWatcher = () => {
+			if (codeMapRealtimeWatcherRegistered || !codeMapChatInstructionService) {
+				return;
+			}
+
+			codeMapRealtimeWatcherRegistered = true;
+			const watcher = vscode.workspace.createFileSystemWatcher('**/*');
+			const handleRealtimeChange = (uri: vscode.Uri) => {
+				codeMapChatInstructionService?.scheduleRealtimeRefreshForFile(uri);
+			};
+			watcher.onDidChange(handleRealtimeChange, null, context.subscriptions);
+			watcher.onDidCreate(handleRealtimeChange, null, context.subscriptions);
+			watcher.onDidDelete(handleRealtimeChange, null, context.subscriptions);
+			context.subscriptions.push(watcher);
+		};
 
 		void (async () => {
 			try {
 				await codeMapDb!.initialize(workspaceRoot);
+				registerCodeMapRealtimeWatcher();
 				if (codeMapSettings.autoUpdate) {
 					setTimeout(() => {
 						codeMapChatInstructionService?.queueWorkspaceRefresh();
@@ -822,6 +840,7 @@ export function activate(context: vscode.ExtensionContext) {
 			memoryEmbedding?.dispose();
 			memoryNotification?.dispose();
 			chatMemoryInstructionService?.dispose();
+			codeMapChatInstructionService?.dispose();
 			codeMapOrchestratorService?.dispose();
 			codeMapDb?.close();
 			memoryDb?.close();

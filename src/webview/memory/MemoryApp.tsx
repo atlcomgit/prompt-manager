@@ -70,6 +70,9 @@ const MEMORY_APP_GLOBAL_STYLES = `
 type Section = 'histories' | 'instructions';
 type HistoryTab = 'commits' | 'search' | 'graph' | 'statistics' | 'settings';
 
+const CODEMAP_BUSY_POLL_INTERVAL_MS = 1500;
+const CODEMAP_IDLE_POLL_INTERVAL_MS = 5000;
+
 export const MemoryApp: React.FC = () => {
 	const t = useT();
 	const [activeSection, setActiveSection] = useState<Section>('histories');
@@ -480,7 +483,7 @@ export const MemoryApp: React.FC = () => {
 	}, [codeMapIsBusy, shouldPollCodeMapActivity]);
 
 	useEffect(() => {
-		if (activeSection !== 'instructions' || !shouldPollCodeMapActivity) {
+		if (activeSection !== 'instructions') {
 			return;
 		}
 
@@ -494,7 +497,10 @@ export const MemoryApp: React.FC = () => {
 		};
 
 		tick();
-		const interval = window.setInterval(tick, 1500);
+		const interval = window.setInterval(
+			tick,
+			shouldPollCodeMapActivity ? CODEMAP_BUSY_POLL_INTERVAL_MS : CODEMAP_IDLE_POLL_INTERVAL_MS,
+		);
 		return () => window.clearInterval(interval);
 	}, [activeSection, selectedCodeMapInstructionId, shouldPollCodeMapActivity]);
 

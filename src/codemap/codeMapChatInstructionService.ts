@@ -5,7 +5,7 @@ import { summarizeUncommittedProjects } from '../utils/uncommittedChangesSummary
 import type { StorageService } from '../services/storageService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { GitService } from '../services/gitService.js';
-import type { CodeMapMaterializationTarget } from '../types/codemap.js';
+import type { CodeMapInstructionKind, CodeMapMaterializationTarget, CodeMapRealtimeScheduledRefresh } from '../types/codemap.js';
 import { CodeMapDatabaseService } from './codeMapDatabaseService.js';
 import { CodeMapBranchResolverService } from './codeMapBranchResolverService.js';
 import { CodeMapInstructionService } from './codeMapInstructionService.js';
@@ -13,8 +13,13 @@ import { CodeMapMaterializerService } from './codeMapMaterializerService.js';
 import { CodeMapOrchestratorService } from './codeMapOrchestratorService.js';
 import { CODEMAP_CHAT_INSTRUCTION_FILE_NAME, getCodeMapSettings } from './codeMapConfig.js';
 import { isInstructionFreshForResolution } from './codeMapRefreshPolicy.js';
+import { computeRealtimeRefreshTargetTime, shouldIgnoreRealtimeRefreshPath } from './codeMapRealtimeRefresh.js';
 
 export class CodeMapChatInstructionService {
+	private readonly realtimeTimers = new Map<string, NodeJS.Timeout>();
+	private readonly realtimeLastQueuedAt = new Map<string, number>();
+	private readonly realtimeScheduledRefreshes = new Map<string, CodeMapRealtimeScheduledRefresh>();
+
 	constructor(
 		private readonly storageService: StorageService,
 		private readonly workspaceService: WorkspaceService,
@@ -25,6 +30,14 @@ export class CodeMapChatInstructionService {
 		private readonly materializer: CodeMapMaterializerService,
 		private readonly orchestrator: CodeMapOrchestratorService,
 	) { }
+
+	dispose(): void {
+		for (const timer of this.realtimeTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.realtimeTimers.clear();
+		this.realtimeScheduledRefreshes.clear();
+	}
 
 	async prepareInstruction(prompt: Pick<Prompt, 'projects'>): Promise<void> {
 		const settings = getCodeMapSettings();
@@ -80,6 +93,49 @@ export class CodeMapChatInstructionService {
 		void this.queueTrackedBranchSnapshots(settings.trackedBranches, settings.updatePriority);
 	}
 
+	scheduleRealtimeRefreshForFile(fileUri: vscode.Uri): void {
+		const settings = getCodeMapSettings();
+		if (!settings.enabled || !settings.autoUpdate || !String(settings.aiModel || '').trim()) {
+			return;
+		}
+
+		const target = this.resolveProjectForRealtimeFile(fileUri.fsPath);
+		if (!target) {
+			return;
+		}
+
+		const relativePath = normalizeRealtimePath(path.relative(target.projectPath, fileUri.fsPath));
+		if (!relativePath || shouldIgnoreRealtimeRefreshPath(relativePath, settings.excludedPaths)) {
+			return;
+		}
+
+		const nowMs = Date.now();
+		const lastQueuedAtMs = this.realtimeLastQueuedAt.get(target.repository) || 0;
+		const targetAtMs = computeRealtimeRefreshTargetTime(nowMs, lastQueuedAtMs);
+		const existingTimer = this.realtimeTimers.get(target.repository);
+		if (existingTimer) {
+			clearTimeout(existingTimer);
+		}
+
+		const delayMs = Math.max(0, targetAtMs - nowMs);
+		this.realtimeScheduledRefreshes.set(target.repository, {
+			repository: target.repository,
+			changedAt: new Date(nowMs).toISOString(),
+			dueAt: new Date(targetAtMs).toISOString(),
+		});
+		const timer = setTimeout(() => {
+			this.realtimeTimers.delete(target.repository);
+			this.realtimeScheduledRefreshes.delete(target.repository);
+			void this.queueRealtimeRefreshForRepository(target.repository);
+		}, delayMs);
+		this.realtimeTimers.set(target.repository, timer);
+	}
+
+	getScheduledRealtimeRefreshes(): CodeMapRealtimeScheduledRefresh[] {
+		return Array.from(this.realtimeScheduledRefreshes.values())
+			.sort((left, right) => left.dueAt.localeCompare(right.dueAt));
+	}
+
 	private async shouldQueueBaseRefresh(resolution: CodeMapMaterializationTarget['resolution'], baseInstruction: CodeMapMaterializationTarget['baseInstruction']): Promise<boolean> {
 		const settings = getCodeMapSettings();
 		const fastFresh = isInstructionFreshForResolution({
@@ -132,6 +188,61 @@ export class CodeMapChatInstructionService {
 		return path.join(this.storageService.getStorageDirectoryPath(), 'chat-memory', CODEMAP_CHAT_INSTRUCTION_FILE_NAME);
 	}
 
+	private resolveProjectForRealtimeFile(filePath: string): { repository: string; projectPath: string } | null {
+		const normalizedFilePath = path.resolve(filePath);
+		let bestMatch: { repository: string; projectPath: string } | null = null;
+
+		for (const [repository, projectPath] of this.workspaceService.getWorkspaceFolderPaths().entries()) {
+			const normalizedProjectPath = path.resolve(projectPath);
+			const relativePath = path.relative(normalizedProjectPath, normalizedFilePath);
+			if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+				continue;
+			}
+
+			if (!bestMatch || normalizedProjectPath.length > bestMatch.projectPath.length) {
+				bestMatch = {
+					repository,
+					projectPath: normalizedProjectPath,
+				};
+			}
+		}
+
+		return bestMatch;
+	}
+
+	private async queueRealtimeRefreshForRepository(repository: string): Promise<void> {
+		const settings = getCodeMapSettings();
+		if (!settings.enabled || !settings.autoUpdate || !String(settings.aiModel || '').trim()) {
+			return;
+		}
+
+		this.realtimeScheduledRefreshes.delete(repository);
+
+		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
+		if (!projectPaths.has(repository)) {
+			return;
+		}
+
+		const resolutions = await this.branchResolver.resolveProjects(projectPaths, [repository], settings.trackedBranches);
+		const resolution = resolutions[0];
+		if (!resolution) {
+			return;
+		}
+
+		const instructionKind: CodeMapInstructionKind = resolution.currentBranch === resolution.resolvedBranchName
+			? 'base'
+			: 'delta';
+		const queued = this.orchestrator.queueInstruction(
+			resolution,
+			instructionKind,
+			'realtime',
+			settings.updatePriority,
+		);
+		if (queued) {
+			this.realtimeLastQueuedAt.set(repository, Date.now());
+		}
+	}
+
 	private async queueTrackedBranchSnapshots(trackedBranches: string[], updatePriority: ReturnType<typeof getCodeMapSettings>['updatePriority']): Promise<void> {
 		if (trackedBranches.length === 0) {
 			return;
@@ -146,6 +257,15 @@ export class CodeMapChatInstructionService {
 			}
 		}
 	}
+}
+
+function normalizeRealtimePath(value: string): string {
+	return String(value || '')
+		.trim()
+		.replace(/\\/g, '/')
+		.replace(/^\.\/+/, '')
+		.replace(/^\/+/, '')
+		.replace(/\/+$/g, '');
 }
 
 function buildUncommittedSummary(

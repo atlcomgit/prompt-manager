@@ -8,6 +8,7 @@ export type CodeMapJobStatus = 'queued' | 'running' | 'completed' | 'failed';
 
 export type CodeMapUpdateTrigger =
 	| 'startup'
+	| 'realtime'
 	| 'start-chat'
 	| 'manual'
 	| 'post-commit'
@@ -310,6 +311,12 @@ export interface CodeMapRuntimeCycle {
 	updatedAt?: string;
 }
 
+export interface CodeMapRealtimeScheduledRefresh {
+	repository: string;
+	changedAt: string;
+	dueAt: string;
+}
+
 export interface CodeMapRuntimeState {
 	pendingCount: number;
 	queuedCount: number;
@@ -318,6 +325,7 @@ export interface CodeMapRuntimeState {
 	lastActivityAt?: string;
 	currentTask?: CodeMapRuntimeTask;
 	queuedTasks: CodeMapRuntimeTask[];
+	scheduledRealtimeRefreshes: CodeMapRealtimeScheduledRefresh[];
 	recentEvents: CodeMapRuntimeEvent[];
 	cycle: CodeMapRuntimeCycle;
 }

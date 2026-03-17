@@ -251,6 +251,7 @@ export const InstructionsPanel: React.FC<Props> = ({
 	const runtime = activity?.runtime;
 	const currentTask = runtime?.currentTask;
 	const queuedTasks = runtime?.queuedTasks || [];
+	const scheduledRealtimeRefreshes = runtime?.scheduledRealtimeRefreshes || [];
 	const recentEvents = runtime?.recentEvents || [];
 	const recentJobs = activity?.recentJobs || [];
 	const taskProgress = getTaskProgress(currentTask);
@@ -290,6 +291,11 @@ export const InstructionsPanel: React.FC<Props> = ({
 		}
 		return recentEvents.filter(event => event.jobId === currentTask.jobId).slice(0, 6);
 	}, [currentTask, recentEvents]);
+	const heroDescription = currentTask
+		? `${getPhaseLabel(currentTask.phase, t)} · ${currentTaskModelName}${currentTask.detail ? ` · ${currentTask.detail}` : ''}`
+		: scheduledRealtimeRefreshes.length > 0
+			? t('memory.instructions.realtimePendingHint')
+			: t('memory.instructions.progressIdle');
 
 	const saveSettings = () => {
 		if (!localSettings) {
@@ -474,9 +480,7 @@ export const InstructionsPanel: React.FC<Props> = ({
 								<div>
 									<div style={styles.heroEyebrow}>{t('memory.instructions.progressTitle')}</div>
 									<h3 style={styles.heroTitle}>{currentTask ? `${currentTask.repository} · ${currentTask.branchName}` : t('memory.instructions.phase.idle')}</h3>
-									<div style={styles.heroDescription}>
-										{currentTask ? `${getPhaseLabel(currentTask.phase, t)} · ${currentTaskModelName}${currentTask.detail ? ` · ${currentTask.detail}` : ''}` : t('memory.instructions.progressIdle')}
-									</div>
+									<div style={styles.heroDescription}>{heroDescription}</div>
 								</div>
 								<button style={memoryButtonStyles.secondary} onClick={onRefreshActivity}>
 									↻ {t('memory.refresh')}
@@ -571,6 +575,30 @@ export const InstructionsPanel: React.FC<Props> = ({
 										</>
 									) : (
 										<div style={styles.emptyInline}>{t('memory.instructions.noCurrentTask')}</div>
+									)}
+								</div>
+
+								<div style={styles.section}>
+									<div style={styles.sectionHeader}>
+										<h4 style={styles.sectionTitle}>{t('memory.instructions.realtimePendingTitle')}</h4>
+										<div style={styles.sectionMeta}>{scheduledRealtimeRefreshes.length}</div>
+									</div>
+									<div style={styles.sectionMeta}>{t('memory.instructions.realtimePendingHint')}</div>
+									{scheduledRealtimeRefreshes.length === 0 ? (
+										<div style={styles.emptyInline}>{t('memory.instructions.noRealtimePending')}</div>
+									) : (
+										<div style={styles.listStack}>
+											{scheduledRealtimeRefreshes.map(item => (
+												<div key={`${item.repository}-${item.dueAt}`} style={styles.infoRow}>
+													<div>
+														<div style={styles.infoPrimary}>{item.repository}</div>
+														<div style={styles.infoSecondary}>
+															{t('memory.instructions.realtimeChangedAt')}: {formatDate(item.changedAt)} · {t('memory.instructions.realtimeDueAt')}: {formatDate(item.dueAt)}
+														</div>
+													</div>
+												</div>
+											))}
+										</div>
 									)}
 								</div>
 

@@ -706,6 +706,7 @@ export class MemoryPanelManager {
 				runningCount: 0,
 				isProcessing: false,
 				queuedTasks: [],
+				scheduledRealtimeRefreshes: [],
 				recentEvents: [],
 				cycle: {
 					queuedTotal: 0,

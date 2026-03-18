@@ -10,6 +10,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { DEFAULT_COPILOT_MODEL_FAMILY, isZeroCostCopilotModelPickerCategory, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
+import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { buildDescriptionGenerationUserPrompt, buildPromptFieldLanguageRule, buildTitleGenerationUserPrompt } from '../utils/aiPromptBuilders.js';
 
 const execFileAsync = promisify(execFile);
@@ -176,7 +177,7 @@ export class AiService {
 		const locale = vscode.env.language;
 		const systemPrompt = `You are a helpful assistant that generates short, descriptive titles for prompts. Respond with ONLY the title, nothing else. The title should be 3-7 words. ${buildPromptFieldLanguageRule(locale)}`;
 		const userPrompt = buildTitleGenerationUserPrompt(content, locale);
-		return this.chat(systemPrompt, userPrompt, 'Промпт без названия', 'generate-title');
+		return this.chat(systemPrompt, userPrompt, 'Промпт без названия', 'generate-title', 'AiService.generateTitle');
 	}
 
 	/** Generate a short description from prompt content */
@@ -184,7 +185,7 @@ export class AiService {
 		const locale = vscode.env.language;
 		const systemPrompt = `You are a helpful assistant that generates short descriptions for prompts. Respond with ONLY the description, nothing else. The description should be 1-2 sentences. ${buildPromptFieldLanguageRule(locale)}`;
 		const userPrompt = buildDescriptionGenerationUserPrompt(content, locale);
-		return this.chat(systemPrompt, userPrompt, '', 'generate-description');
+		return this.chat(systemPrompt, userPrompt, '', 'generate-description', 'AiService.generateDescription');
 	}
 
 	/** Generate a URL-friendly slug from title or description */
@@ -199,7 +200,7 @@ export class AiService {
 		const contextBlock = this.buildGlobalContextBlock(globalContext);
 		const userPrompt = `${contextBlock}Convert to slug: "${input}"`;
 
-		const result = await this.chat(systemPrompt, userPrompt, '', 'generate-slug');
+		const result = await this.chat(systemPrompt, userPrompt, '', 'generate-slug', 'AiService.generateSlug');
 		if (result) {
 			return this.sanitizeSlug(result);
 		}
@@ -236,14 +237,14 @@ export class AiService {
 			? `Project context snapshot:\n${(projectContext || '').trim().slice(0, 6000)}\n\n`
 			: '';
 		const userPrompt = `${contextBlock}Improve this prompt text:\n\n${normalized.substring(0, 12000)}`;
-		return this.chat(systemPrompt, userPrompt, normalized, 'improve-prompt-text');
+		return this.chat(systemPrompt, userPrompt, normalized, 'improve-prompt-text', 'AiService.improvePromptText');
 	}
 
 	/** Detect programming languages from content */
 	async detectLanguages(content: string): Promise<string[]> {
 		const systemPrompt = 'You detect programming languages mentioned or implied in a prompt. Return a JSON array of language names. Example: ["TypeScript", "Python"]. Return ONLY the JSON array.';
 		const userPrompt = content.substring(0, 2000);
-		const result = await this.chat(systemPrompt, userPrompt, '[]', 'detect-languages');
+		const result = await this.chat(systemPrompt, userPrompt, '[]', 'detect-languages', 'AiService.detectLanguages');
 		try {
 			return JSON.parse(result);
 		} catch {
@@ -255,7 +256,7 @@ export class AiService {
 	async detectFrameworks(content: string): Promise<string[]> {
 		const systemPrompt = 'You detect frameworks and libraries mentioned or implied in a prompt. Return a JSON array. Example: ["React", "Express"]. Return ONLY the JSON array.';
 		const userPrompt = content.substring(0, 2000);
-		const result = await this.chat(systemPrompt, userPrompt, '[]', 'detect-frameworks');
+		const result = await this.chat(systemPrompt, userPrompt, '[]', 'detect-frameworks', 'AiService.detectFrameworks');
 		try {
 			return JSON.parse(result);
 		} catch {
@@ -327,7 +328,7 @@ export class AiService {
 			`Staged-изменения для анализа:\n${(input.stagedChangesSummary || '').trim().slice(0, 24000)}`,
 		].filter(Boolean).join('\n');
 
-		return this.chat(systemPrompt, userPrompt, fallback, 'generate-implementation-report');
+		return this.chat(systemPrompt, userPrompt, fallback, 'generate-implementation-report', 'AiService.generateImplementationReport');
 	}
 
 	async generateCodeMapAreaDescription(
@@ -382,7 +383,7 @@ export class AiService {
 			systemPrompt,
 			userPrompt,
 			fallback,
-			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-area-description' },
+			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-area-description', callerMethod: 'AiService.generateCodeMapAreaDescription' },
 		);
 	}
 
@@ -448,7 +449,7 @@ export class AiService {
 			systemPrompt,
 			userPrompt,
 			fallback,
-			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-area-description-batch' },
+			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-area-description-batch', callerMethod: 'AiService.generateCodeMapAreaDescriptionsBatch' },
 		);
 	}
 
@@ -528,7 +529,7 @@ export class AiService {
 			systemPrompt,
 			userPrompt,
 			fallback,
-			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-symbol-description-batch' },
+			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-symbol-description-batch', callerMethod: 'AiService.generateCodeMapSymbolDescriptionsBatch' },
 		);
 	}
 
@@ -620,13 +621,19 @@ export class AiService {
 			systemPrompt,
 			userPrompt,
 			fallback,
-			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-frontend-block-description-batch' },
+			{ allowFreeCopilotFallback: false, requestLabel: 'codemap-frontend-block-description-batch', callerMethod: 'AiService.generateCodeMapFrontendBlockDescriptionsBatch' },
 		);
 	}
 
 	/** Generic chat with Language Model API */
-	private async chat(systemPrompt: string, userPrompt: string, fallback: string, requestLabel: string): Promise<string> {
-		return this.chatWithSelector(this.modelSelector, systemPrompt, userPrompt, fallback, { requestLabel });
+	private async chat(
+		systemPrompt: string,
+		userPrompt: string,
+		fallback: string,
+		requestLabel: string,
+		callerMethod: string,
+	): Promise<string> {
+		return this.chatWithSelector(this.modelSelector, systemPrompt, userPrompt, fallback, { requestLabel, callerMethod });
 	}
 
 	private async chatWithSelector(
@@ -637,9 +644,11 @@ export class AiService {
 		options?: {
 			allowFreeCopilotFallback?: boolean;
 			requestLabel?: string;
+			callerMethod?: string;
 		},
 	): Promise<string> {
 		const requestLabel = options?.requestLabel || 'generic-chat';
+		const callerMethod = options?.callerMethod || `AiService.${requestLabel}`;
 		try {
 			const allowFreeCopilotFallback = options?.allowFreeCopilotFallback ?? true;
 			const [model] = await vscode.lm.selectChatModels(selector);
@@ -655,9 +664,9 @@ export class AiService {
 					return fallback;
 				}
 				this.logAiRequest(`label=${requestLabel} result=free-fallback selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(fallbackModel)}"`);
-				return this.chatWithModel(fallbackModel, systemPrompt, userPrompt, fallback, requestLabel, selector);
+				return this.chatWithModel(fallbackModel, systemPrompt, userPrompt, fallback, requestLabel, selector, callerMethod);
 			}
-			return this.chatWithModel(model, systemPrompt, userPrompt, fallback, requestLabel, selector);
+			return this.chatWithModel(model, systemPrompt, userPrompt, fallback, requestLabel, selector, callerMethod);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			this.logAiRequest(`label=${requestLabel} result=selector-error selector="${this.formatSelectorForLog(selector)}" error="${message}"`);
@@ -673,9 +682,16 @@ export class AiService {
 		fallback: string,
 		requestLabel: string,
 		selector: vscode.LanguageModelChatSelector,
+		callerMethod: string,
 	): Promise<string> {
 		try {
 			this.logAiRequest(`label=${requestLabel} result=send-request selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(model)}"`);
+			await appendPromptAiLog({
+				kind: 'ai',
+				prompt: `SYSTEM: ${systemPrompt}\nUSER: ${userPrompt}`,
+				callerMethod,
+				model: this.getModelNameForPromptLog(model),
+			});
 			const messages = [
 				vscode.LanguageModelChatMessage.User(systemPrompt),
 				vscode.LanguageModelChatMessage.User(userPrompt),
@@ -747,6 +763,16 @@ export class AiService {
 			(model as { identifier?: string }).identifier ? `identifier=${(model as { identifier?: string }).identifier}` : '',
 		].filter(Boolean);
 		return parts.join(', ') || 'unknown-model';
+	}
+
+	private getModelNameForPromptLog(model: vscode.LanguageModelChat): string {
+		return String(
+			model.id
+			|| (model as { identifier?: string }).identifier
+			|| model.family
+			|| model.name
+			|| '',
+		).trim() || 'unknown-model';
 	}
 
 	/** Sanitize a string into a URL-friendly slug */
@@ -1446,7 +1472,7 @@ export class AiService {
 			? `Global agent context:\n${(globalContext || '').trim().slice(0, 1500)}\n\n`
 			: '';
 		const userPrompt = `${contextBlock}Continue this prompt text:\n\n${textBefore.slice(-1500)}`;
-		return this.chat(systemPrompt, userPrompt, '', 'inline-suggestion');
+		return this.chat(systemPrompt, userPrompt, '', 'inline-suggestion', 'AiService.generateSuggestion');
 	}
 
 	/** Generate multiple suggestion variants for prompt text */
@@ -1456,7 +1482,7 @@ export class AiService {
 			? `Global agent context:\n${(globalContext || '').trim().slice(0, 1500)}\n\n`
 			: '';
 		const userPrompt = `${contextBlock}Continue this prompt text (${count} variants):\n\n${textBefore.slice(-1500)}`;
-		const result = await this.chat(systemPrompt, userPrompt, '[]', 'inline-suggestion-variants');
+		const result = await this.chat(systemPrompt, userPrompt, '[]', 'inline-suggestion-variants', 'AiService.generateSuggestionVariants');
 		try {
 			const parsed = JSON.parse(result);
 			if (Array.isArray(parsed) && parsed.length > 0) {

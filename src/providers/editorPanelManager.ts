@@ -23,6 +23,7 @@ import { TimeTrackingService } from '../services/timeTrackingService.js';
 import { decideFileReportSync, isLatestPersistedReport } from '../utils/reportSync.js';
 import { buildChatContextFiles } from '../utils/chatContextFiles.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
+import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
@@ -3128,6 +3129,13 @@ export class EditorPanelManager {
 					}
 
 					const sendMessage = async (message: string): Promise<void> => {
+						const modelForLog = String(
+							requestModelIdentifier
+							|| requestModelSelector?.id
+							|| requestModelSelector?.family
+							|| prompt.model
+							|| '',
+						).trim() || 'default';
 						if (requestModelSelector) {
 							try {
 								const openArg: Record<string, unknown> = {
@@ -3136,6 +3144,12 @@ export class EditorPanelManager {
 									mode: chatModeName,
 								};
 								await vscode.commands.executeCommand('workbench.action.chat.open', openArg);
+								await appendPromptAiLog({
+									kind: 'chat',
+									prompt: message,
+									callerMethod: 'EditorPanelManager.startChat',
+									model: modelForLog,
+								});
 								return;
 							} catch {
 								// fallback to compatibility variants
@@ -3166,6 +3180,12 @@ export class EditorPanelManager {
 							for (const openCmd of openChatCmds) {
 								try {
 									await vscode.commands.executeCommand(openCmd, arg);
+									await appendPromptAiLog({
+										kind: 'chat',
+										prompt: message,
+										callerMethod: 'EditorPanelManager.startChat',
+										model: modelForLog,
+									});
 									return;
 								} catch {
 									// try next variant

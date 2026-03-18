@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
+import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import type {
 	HookCommitPayload,
 	MemoryAnalysis,
@@ -275,6 +276,12 @@ export class MemoryAnalyzerService {
 	): Promise<any> {
 		try {
 			this.logAiRequest(`label=memory.commit-analysis commit=${this.shortenCommitSha(commitSha)} result=send-request selector="${this.formatSelectorForLog()}" model="${this.formatModelForLog(model)}"`);
+			await appendPromptAiLog({
+				kind: 'ai',
+				prompt: `SYSTEM: ${systemPrompt}\nUSER: ${userPrompt}`,
+				callerMethod: 'MemoryAnalyzerService.analyzeCommit',
+				model: this.getModelNameForPromptLog(model),
+			});
 			const messages = [
 				vscode.LanguageModelChatMessage.User(systemPrompt),
 				vscode.LanguageModelChatMessage.User(userPrompt),
@@ -324,6 +331,16 @@ export class MemoryAnalyzerService {
 			(model as { identifier?: string }).identifier ? `identifier=${(model as { identifier?: string }).identifier}` : '',
 		].filter(Boolean);
 		return parts.join(', ') || 'unknown-model';
+	}
+
+	private getModelNameForPromptLog(model: vscode.LanguageModelChat): string {
+		return String(
+			model.id
+			|| (model as { identifier?: string }).identifier
+			|| model.family
+			|| model.name
+			|| '',
+		).trim() || 'unknown-model';
 	}
 
 	private shortenCommitSha(commitSha?: string): string {

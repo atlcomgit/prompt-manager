@@ -33,6 +33,7 @@ import {
 	getPromptManagerOutputChannel,
 	installPromptManagerConsoleInterceptor,
 } from './utils/promptManagerOutput.js';
+import { appendPromptAiLog } from './utils/promptAiLogger.js';
 
 export function activate(context: vscode.ExtensionContext) {
 	getPromptManagerOutputChannel();
@@ -598,6 +599,13 @@ export function activate(context: vscode.ExtensionContext) {
 					}
 
 					const sendMessage = async (message: string): Promise<void> => {
+						const modelForLog = String(
+							requestModelIdentifier
+							|| requestModelSelector?.id
+							|| requestModelSelector?.family
+							|| prompt.model
+							|| '',
+						).trim() || 'default';
 						if (requestModelSelector) {
 							try {
 								const openArg: Record<string, unknown> = {
@@ -606,6 +614,12 @@ export function activate(context: vscode.ExtensionContext) {
 									mode: chatModeName,
 								};
 								await vscode.commands.executeCommand('workbench.action.chat.open', openArg);
+								await appendPromptAiLog({
+									kind: 'chat',
+									prompt: message,
+									callerMethod: 'activate.promptManager.startChat',
+									model: modelForLog,
+								});
 								return;
 							} catch {
 								// fallback to compatibility variants
@@ -636,6 +650,12 @@ export function activate(context: vscode.ExtensionContext) {
 							for (const openCmd of openChatCmds) {
 								try {
 									await vscode.commands.executeCommand(openCmd, arg);
+									await appendPromptAiLog({
+										kind: 'chat',
+										prompt: message,
+										callerMethod: 'activate.promptManager.startChat',
+										model: modelForLog,
+									});
 									return;
 								} catch {
 									// try next variant

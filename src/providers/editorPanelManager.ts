@@ -1976,6 +1976,11 @@ export class EditorPanelManager {
 		const singletonPanel = openPanels.get(panelKey);
 		const singletonPrompt = this.panelPromptRefs.get(panelKey);
 		if (!isNew && singletonPanel && singletonPrompt?.id === promptId) {
+			try {
+				await singletonPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
+			} catch {
+				// panel/webview may be reloading
+			}
 			this.syncStartupEditorRestoreState();
 			singletonPanel.reveal();
 			return;
@@ -2081,6 +2086,12 @@ export class EditorPanelManager {
 		};
 
 		if (singletonPanel) {
+			try {
+				await singletonPanel.webview.postMessage({ type: 'promptLoading' } satisfies ExtensionToWebviewMessage);
+				await new Promise(resolve => setTimeout(resolve, 40));
+			} catch {
+				// panel may already be reloading; continue with fresh html
+			}
 			this.panelDirtySetters.set(panelKey, setPanelDirty);
 			const bootId = this.createPanelBootId();
 			this.panelBootIds.set(panelKey, bootId);
@@ -2252,9 +2263,11 @@ export class EditorPanelManager {
 
 		panel.onDidChangeViewState((event) => {
 			if (!event.webviewPanel.visible) {
+				void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
 				return;
 			}
 
+			void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
 			void this.refreshPromptReportForPanel(panelKey, event.webviewPanel);
 		});
 
@@ -2805,7 +2818,89 @@ export class EditorPanelManager {
 			case 'startChat': {
 				let prompt: Prompt | null = msg.prompt ? { ...msg.prompt } : await this.storageService.getPrompt(msg.id);
 				const shouldForceRebindChat = msg.forceRebindChat === true;
-				if (prompt && prompt.content) {
+				const startChatRequestId = (msg.requestId || '').trim();
+				const initialStatus = prompt?.status || 'draft';
+				const initialChatSessionIds = [...(prompt?.chatSessionIds || [])];
+				let hookPayloadBase: Record<string, unknown> | null = null;
+				let trackedSessionId = '';
+				const defaultStartChatError = 'Не удалось запустить чат. Проверьте, что Copilot Chat доступен, и повторите попытку.';
+				const formatStartChatErrorMessage = (error: unknown): string => {
+					const raw = error instanceof Error ? error.message : String(error ?? '');
+					const normalized = raw.trim();
+					if (!normalized) {
+						return defaultStartChatError;
+					}
+					if (normalized.startsWith('Не удалось')) {
+						return normalized;
+					}
+					return `Не удалось запустить чат: ${normalized}`;
+				};
+				const restorePromptAfterStartFailure = async (): Promise<void> => {
+					if (!prompt?.id) {
+						return;
+					}
+					const promptFromStorage = await this.storageService.getPrompt(prompt.id);
+					if (!promptFromStorage) {
+						return;
+					}
+					const restoredChatSessionIds = shouldForceRebindChat ? [] : initialChatSessionIds;
+					const changed = promptFromStorage.status !== initialStatus
+						|| JSON.stringify(promptFromStorage.chatSessionIds || []) !== JSON.stringify(restoredChatSessionIds);
+					if (!changed) {
+						return;
+					}
+					promptFromStorage.status = initialStatus;
+					promptFromStorage.chatSessionIds = restoredChatSessionIds;
+					await this.storageService.savePrompt(promptFromStorage, { historyReason: 'status-change' });
+					Object.assign(prompt, promptFromStorage);
+					if (currentPrompt.id === promptFromStorage.id) {
+						Object.assign(currentPrompt, promptFromStorage);
+						postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
+					}
+					this._onDidSave.fire(promptFromStorage.id);
+				};
+				const reportStartChatFailure = async (message: string): Promise<void> => {
+					const finalMessage = (message || '').trim() || defaultStartChatError;
+					this.hooksOutput.appendLine(`[chat-start] failed for prompt=${prompt?.id || '-'}: ${finalMessage}`);
+					if (hookPayloadBase) {
+						try {
+							await this.runConfiguredHooks(prompt?.hooks || [], {
+								event: 'chatError',
+								error: finalMessage,
+								...hookPayloadBase,
+							}, 'chatError');
+						} catch (error) {
+							this.hooksOutput.appendLine(`[chat-start] chatError hook failed for prompt=${prompt?.id || '-'}: ${error instanceof Error ? error.message : String(error)}`);
+						}
+					}
+					if (prompt?.promptUuid) {
+						try {
+							await this.chatMemoryInstructionService()?.noteChatError(
+								prompt.promptUuid,
+								finalMessage,
+								trackedSessionId || undefined,
+							);
+						} catch (error) {
+							this.hooksOutput.appendLine(`[chat-memory] noteChatError failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+						}
+					}
+					try {
+						await restorePromptAfterStartFailure();
+					} catch (error) {
+						this.hooksOutput.appendLine(`[chat-start] restore after failure failed for prompt=${prompt?.id || '-'}: ${error instanceof Error ? error.message : String(error)}`);
+					}
+					if (!panel.visible) {
+						void vscode.window.showErrorMessage(finalMessage);
+					}
+						postMessage({ type: 'error', message: finalMessage, requestId: startChatRequestId || undefined });
+					};
+
+				if (!prompt || !prompt.content) {
+					await reportStartChatFailure('Не удалось запустить чат: промпт пуст или не найден.');
+					break;
+				}
+
+				try {
 					// --- Branch mismatch check ---
 					if (prompt.projects.length > 0) {
 						const paths = this.workspaceService.getWorkspaceFolderPaths();
@@ -2813,17 +2908,17 @@ export class EditorPanelManager {
 						const mismatches = await this.gitService.getBranchMismatches(paths, prompt.projects, prompt.branch, allowedBranches);
 						if (mismatches.length > 0) {
 							const details = mismatches.map(m => `Ветка проекта ${m.project} переключена на ${m.currentBranch}`).join('\n');
-							const answer = await vscode.window.showWarningMessage(
-								details,
-								{ modal: true },
-								'Продолжить',
-							);
-							if (answer !== 'Продолжить') {
-								postMessage({ type: 'chatStarted', promptId: prompt.id });
-								break;
+								const answer = await vscode.window.showWarningMessage(
+									details,
+									{ modal: true },
+									'Продолжить',
+								);
+								if (answer !== 'Продолжить') {
+									postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
+									break;
+								}
 							}
 						}
-					}
 
 					const bindSessionToPrompt = async (sessionId: string): Promise<void> => {
 						const normalizedSessionId = (sessionId || '').trim();
@@ -2963,7 +3058,7 @@ export class EditorPanelManager {
 					}
 
 					const query = parts.join('\n');
-					const hookPayloadBase = {
+					hookPayloadBase = {
 						promptId: prompt.id,
 						title: prompt.title,
 						description: prompt.description,
@@ -2984,7 +3079,6 @@ export class EditorPanelManager {
 
 					let requestModelIdentifier = '';
 					let requestModelSelector: vscode.LanguageModelChatSelector | undefined;
-					let trackedSessionId = '';
 
 					const chatMode = prompt.chatMode || 'agent';
 					const chatModeName = chatMode === 'agent' ? 'Agent' : 'Plan';
@@ -3028,7 +3122,9 @@ export class EditorPanelManager {
 							requestModelSelector = await this.aiService.resolveChatOpenModelSelector(prompt.model);
 							await this.stateService.forcePersistChatCurrentLanguageModel(storageModel);
 							await this.aiService.tryApplyChatModelSafely(prompt.model);
-						} catch { }
+						} catch {
+							// keep default model if model switch fails
+						}
 					}
 
 					const sendMessage = async (message: string): Promise<void> => {
@@ -3076,6 +3172,8 @@ export class EditorPanelManager {
 								}
 							}
 						}
+
+						throw new Error('VS Code не принял команду отправки сообщения в чат.');
 					};
 
 					const forceNewChatSession = async (): Promise<void> => {
@@ -3097,306 +3195,269 @@ export class EditorPanelManager {
 						}
 					};
 
-					let sendMessageSucceeded = false;
-					// Best-effort model/files actions and single prompt send
-					try {
-						await new Promise(resolve => setTimeout(resolve, 150));
-						const commands = await vscode.commands.getCommands(true);
-						if (shouldForceRebindChat) {
-							await forceNewChatSession();
-							await new Promise(resolve => setTimeout(resolve, 120));
-						}
+					await new Promise(resolve => setTimeout(resolve, 150));
+					const commands = await vscode.commands.getCommands(true);
+					if (shouldForceRebindChat) {
+						await forceNewChatSession();
+						await new Promise(resolve => setTimeout(resolve, 120));
+					}
 
-						if (prompt.model) {
-							const storageModel = await this.aiService.resolveModelStorageIdentifier(prompt.model);
-							requestModelIdentifier = storageModel || requestModelIdentifier;
-							requestModelSelector = await this.aiService.resolveChatOpenModelSelector(prompt.model);
-							await this.stateService.forcePersistChatCurrentLanguageModel(storageModel);
-							await this.aiService.tryApplyChatModelSafely(prompt.model);
-						}
+					if (prompt.model) {
+						const storageModel = await this.aiService.resolveModelStorageIdentifier(prompt.model);
+						requestModelIdentifier = storageModel || requestModelIdentifier;
+						requestModelSelector = await this.aiService.resolveChatOpenModelSelector(prompt.model);
+						await this.stateService.forcePersistChatCurrentLanguageModel(storageModel);
+						await this.aiService.tryApplyChatModelSafely(prompt.model);
+					}
 
-						const attachFiles = async () => {
-							const attachCmds = [
-								'workbench.action.chat.attachFile',
-								'workbench.action.chat.addFile',
-								'workbench.action.chat.addContext',
-								'workbench.action.chat.attachContext',
-							].filter(c => commands.includes(c));
+					const attachFiles = async () => {
+						const attachCmds = [
+							'workbench.action.chat.attachFile',
+							'workbench.action.chat.addFile',
+							'workbench.action.chat.addContext',
+							'workbench.action.chat.attachContext',
+						].filter(c => commands.includes(c));
 
-							for (const cmd of attachCmds) {
-								for (const fileUri of fileUris) {
+						for (const cmd of attachCmds) {
+							for (const fileUri of fileUris) {
+								try {
+									await vscode.commands.executeCommand(cmd, fileUri);
+								} catch {
 									try {
-										await vscode.commands.executeCommand(cmd, fileUri);
+										await vscode.commands.executeCommand(cmd, { uri: fileUri });
 									} catch {
-										try {
-											await vscode.commands.executeCommand(cmd, { uri: fileUri });
-										} catch {
-											// try next variant
-										}
+										// try next variant
 									}
 								}
 							}
-						};
-
-						if (fileUris.length > 0) {
-							await attachFiles();
 						}
+					};
 
-						await sendMessage(query);
-						const startedSessionImmediate = await this.stateService.waitForChatSessionStarted(requestStartTimestamp, 8000, 250);
-						if (startedSessionImmediate.ok && startedSessionImmediate.sessionId) {
-							trackedSessionId = startedSessionImmediate.sessionId;
-							await bindSessionToPrompt(startedSessionImmediate.sessionId);
+					if (fileUris.length > 0) {
+						await attachFiles();
+					}
+
+					await sendMessage(query);
+					postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
+
+					void (async () => {
+						const startedSession = await this.stateService.waitForChatSessionStarted(
+							requestStartTimestamp,
+							15000,
+							500,
+							trackedSessionId || undefined,
+						);
+						if (startedSession.ok && startedSession.sessionId) {
+							trackedSessionId = startedSession.sessionId;
+							await bindSessionToPrompt(startedSession.sessionId);
+							postMessage({ type: 'chatOpened', promptId: prompt.id, requestId: startChatRequestId || undefined });
 						} else {
-							const activeSessionId = await this.stateService.getActiveChatSessionId(2500, 250);
+							const activeSessionId = await this.stateService.getActiveChatSessionId(5000, 250);
 							if (activeSessionId) {
-								trackedSessionId = activeSessionId;
+								trackedSessionId = trackedSessionId || activeSessionId;
 								await bindSessionToPrompt(activeSessionId);
+								postMessage({ type: 'chatOpened', promptId: prompt.id, requestId: startChatRequestId || undefined });
+							} else {
+								this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; chat message was dispatched but session was not detected yet`);
 							}
 						}
-						sendMessageSucceeded = true;
-					} catch {
-						await this.runConfiguredHooks(prompt.hooks || [], {
+
+						const completion = await this.stateService.waitForChatRequestCompletion(
+							requestStartTimestamp,
+							180000,
+							1000,
+							trackedSessionId || undefined,
+						);
+						const shouldCaptureAgentFinalResponse = this.shouldCaptureAgentFinalResponse();
+						const chatResponse = await this.tryReadChatMarkdownFromClipboard();
+						const chatReportText = chatResponse.markdown;
+						const chatReportHtml = chatResponse.html;
+						const completionObserved = Number(completion.lastRequestEnded || 0) > Number(completion.lastRequestStarted || 0);
+						this.hooksOutput.appendLine(
+							`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} completionOk=${completion.ok} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatReportHtml ? 'yes' : 'no'}`
+						);
+						if (completion.ok || completionObserved) {
+							const promptToComplete = await this.storageService.getPrompt(prompt.id);
+							if (promptToComplete) {
+								const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
+								const endedAt = Number(completion.lastRequestEnded || Date.now());
+								const implementingDelta = Math.max(0, endedAt - startedAt);
+								if (implementingDelta > 0) {
+									promptToComplete.timeSpentImplementing = (promptToComplete.timeSpentImplementing || 0) + implementingDelta;
+								}
+
+								const sessionId = String(completion.sessionId || '').trim();
+								if (sessionId) {
+									promptToComplete.chatSessionIds = [
+										sessionId,
+										...(promptToComplete.chatSessionIds || []).filter(id => id !== sessionId),
+									];
+								}
+								if (shouldCaptureAgentFinalResponse && chatReportHtml) {
+									promptToComplete.report = chatReportHtml;
+								}
+								if (promptToComplete.status !== 'completed') {
+									promptToComplete.status = 'completed';
+								}
+								await this.storageService.savePrompt(promptToComplete);
+								if (currentPrompt.id === promptToComplete.id) {
+									Object.assign(currentPrompt, promptToComplete);
+									postMessage({ type: 'prompt', prompt: promptToComplete, reason: 'sync' });
+								}
+								this._onDidSave.fire(promptToComplete.id);
+								// Recalc implementing time from JSONL after VS Code finishes writing session data
+								const recalcPromptId = promptToComplete.id;
+								setTimeout(async () => {
+									try {
+										const freshPrompt = await this.storageService.getPrompt(recalcPromptId);
+										if (freshPrompt && (freshPrompt.chatSessionIds || []).length > 0) {
+											const totalMs = await this.stateService.getChatSessionsTotalElapsed(freshPrompt.chatSessionIds);
+											if (totalMs > 0) {
+												freshPrompt.timeSpentImplementing = totalMs;
+												await this.storageService.savePrompt(freshPrompt);
+												if (currentPrompt.id === freshPrompt.id) {
+													Object.assign(currentPrompt, freshPrompt);
+													postMessage({ type: 'prompt', prompt: freshPrompt, reason: 'sync' });
+												}
+												this._onDidSave.fire(freshPrompt.id);
+											}
+										}
+									} catch (e: any) {
+										this.hooksOutput.appendLine(`[chat-track] recalc implementing time error: ${e?.message || e}`);
+									}
+								}, 3000);
+							}
+
+							if (shouldCaptureAgentFinalResponse) {
+								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
+								await this.runConfiguredHooks(prompt?.hooks || [], {
+									event: 'afterChatCompleted',
+									...hookPayloadBase,
+									status: promptToComplete?.status || prompt.status,
+									report: promptToComplete?.report || '',
+									reportText: chatReportText || this.reportHtmlToText(promptToComplete?.report || ''),
+									chatSessionId: trackedSessionId || '',
+									timeSpentImplementing: promptToComplete?.timeSpentImplementing || 0,
+								}, 'afterChatCompleted');
+							}
+							try {
+								await this.chatMemoryInstructionService()?.completeChatSession(
+									prompt.promptUuid,
+									'afterChatCompleted',
+									trackedSessionId || undefined,
+								);
+							} catch (error) {
+								this.hooksOutput.appendLine(`[chat-memory] completeChatSession failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+							}
+							return;
+						}
+
+						if (chatReportHtml) {
+							const promptForTiming = await this.storageService.getPrompt(prompt.id);
+							if (promptForTiming) {
+								const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
+								const endedAt = Number(completion.lastRequestEnded || Date.now());
+								const implementingDelta = Math.max(0, endedAt - startedAt);
+								if (implementingDelta > 0) {
+									promptForTiming.timeSpentImplementing = (promptForTiming.timeSpentImplementing || 0) + implementingDelta;
+								}
+								if (shouldCaptureAgentFinalResponse) {
+									promptForTiming.report = chatReportHtml;
+								}
+								await this.storageService.savePrompt(promptForTiming);
+								if (currentPrompt.id === promptForTiming.id) {
+									Object.assign(currentPrompt, promptForTiming);
+									postMessage({ type: 'prompt', prompt: promptForTiming, reason: 'sync' });
+								}
+								this._onDidSave.fire(promptForTiming.id);
+								// Recalc implementing time from JSONL (markdown fallback path)
+								const recalcPromptId2 = promptForTiming.id;
+								setTimeout(async () => {
+									try {
+										const freshPrompt = await this.storageService.getPrompt(recalcPromptId2);
+										if (freshPrompt && (freshPrompt.chatSessionIds || []).length > 0) {
+											const totalMs = await this.stateService.getChatSessionsTotalElapsed(freshPrompt.chatSessionIds);
+											if (totalMs > 0) {
+												freshPrompt.timeSpentImplementing = totalMs;
+												await this.storageService.savePrompt(freshPrompt);
+												if (currentPrompt.id === freshPrompt.id) {
+													Object.assign(currentPrompt, freshPrompt);
+													postMessage({ type: 'prompt', prompt: freshPrompt, reason: 'sync' });
+												}
+												this._onDidSave.fire(freshPrompt.id);
+											}
+										}
+									} catch (e: any) {
+										this.hooksOutput.appendLine(`[chat-track] recalc implementing time (fallback) error: ${e?.message || e}`);
+									}
+								}, 3000);
+							}
+
+							// Rename chat session in agent history (markdown fallback path)
+							const sessionToRename2 = String(completion.sessionId || trackedSessionId || '').trim();
+							if (sessionToRename2) {
+								const latestPrompt2 = await this.storageService.getPrompt(prompt.id);
+								const renameTitle2 = latestPrompt2?.taskNumber
+									? `${latestPrompt2.taskNumber} | ${latestPrompt2.title}`
+									: (latestPrompt2?.title || '');
+								if (renameTitle2) {
+									this.hooksOutput.appendLine(`[chat-rename] (fallback) scheduling rename session=${sessionToRename2} title="${renameTitle2}" (5s delay)`);
+									setTimeout(() => {
+										void this.stateService.renameChatSession(sessionToRename2, renameTitle2).then(r => {
+											this.hooksOutput.appendLine(`[chat-rename] (fallback) result: ok=${r.ok} reason=${r.reason || '-'}`);
+											if (r.ok) {
+												void vscode.window.showInformationMessage(
+													`Chat session renamed to "${renameTitle2}". Title will appear after window reload.`,
+												);
+											}
+										}).catch(e => {
+											this.hooksOutput.appendLine(`[chat-rename] (fallback) error: ${e?.message || e}`);
+										});
+									}, 5000);
+								}
+							}
+
+							if (shouldCaptureAgentFinalResponse) {
+								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
+								await this.runConfiguredHooks(prompt?.hooks || [], {
+									event: 'afterChatCompleted',
+									...hookPayloadBase,
+									status: promptForTiming?.status || prompt.status,
+									report: promptForTiming?.report || '',
+									reportText: chatReportText || this.reportHtmlToText(promptForTiming?.report || ''),
+									chatSessionId: trackedSessionId || '',
+									timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
+								}, 'afterChatCompleted');
+							}
+							try {
+								await this.chatMemoryInstructionService()?.completeChatSession(
+									prompt.promptUuid,
+									'afterChatCompleted',
+									trackedSessionId || undefined,
+								);
+							} catch (error) {
+								this.hooksOutput.appendLine(`[chat-memory] completeChatSession fallback failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+							}
+							return;
+						}
+
+						await this.runConfiguredHooks(prompt?.hooks || [], {
 							event: 'chatError',
-							error: 'Failed to dispatch chat message via VS Code chat commands',
+							error: `Chat completion not detected (${completion.reason || 'unknown'})`,
+							chatCompletion: completion,
 							...hookPayloadBase,
 						}, 'chatError');
 						try {
 							await this.chatMemoryInstructionService()?.noteChatError(
 								prompt.promptUuid,
-								'Failed to dispatch chat message via VS Code chat commands',
+								`Chat completion not detected (${completion.reason || 'unknown'})`,
 								trackedSessionId || undefined,
 							);
 						} catch (error) {
-							this.hooksOutput.appendLine(`[chat-memory] noteChatError failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+							this.hooksOutput.appendLine(`[chat-memory] noteChatError completion failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 						}
-						// ignore optional compatibility attempts
-					}
-
-					if (sendMessageSucceeded) {
-						// Immediately notify UI that chat has been opened so the button switches
-						postMessage({ type: 'chatOpened', promptId: prompt.id });
-						void (async () => {
-							const startedSession = await this.stateService.waitForChatSessionStarted(
-								requestStartTimestamp,
-								15000,
-								500,
-								trackedSessionId || undefined,
-							);
-							if (startedSession.ok && startedSession.sessionId) {
-								trackedSessionId = startedSession.sessionId;
-								await bindSessionToPrompt(startedSession.sessionId);
-							} else {
-								const activeSessionId = await this.stateService.getActiveChatSessionId(5000, 250);
-								if (activeSessionId) {
-									trackedSessionId = trackedSessionId || activeSessionId;
-									await bindSessionToPrompt(activeSessionId);
-								}
-							}
-
-							const completion = await this.stateService.waitForChatRequestCompletion(
-								requestStartTimestamp,
-								180000,
-								1000,
-								trackedSessionId || undefined,
-							);
-							const shouldCaptureAgentFinalResponse = this.shouldCaptureAgentFinalResponse();
-							const chatResponse = await this.tryReadChatMarkdownFromClipboard();
-							const chatReportText = chatResponse.markdown;
-							const chatReportHtml = chatResponse.html;
-							const completionObserved = Number(completion.lastRequestEnded || 0) > Number(completion.lastRequestStarted || 0);
-							this.hooksOutput.appendLine(
-								`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} completionOk=${completion.ok} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatReportHtml ? 'yes' : 'no'}`
-							);
-							if (completion.ok || completionObserved) {
-								const promptToComplete = await this.storageService.getPrompt(prompt.id);
-								if (promptToComplete) {
-									const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
-									const endedAt = Number(completion.lastRequestEnded || Date.now());
-									const implementingDelta = Math.max(0, endedAt - startedAt);
-									if (implementingDelta > 0) {
-										promptToComplete.timeSpentImplementing = (promptToComplete.timeSpentImplementing || 0) + implementingDelta;
-									}
-
-									const sessionId = String(completion.sessionId || '').trim();
-									if (sessionId) {
-										promptToComplete.chatSessionIds = [
-											sessionId,
-											...(promptToComplete.chatSessionIds || []).filter(id => id !== sessionId),
-										];
-									}
-									if (shouldCaptureAgentFinalResponse && chatReportHtml) {
-										promptToComplete.report = chatReportHtml;
-									}
-									if (promptToComplete.status !== 'completed') {
-										promptToComplete.status = 'completed';
-									}
-									await this.storageService.savePrompt(promptToComplete);
-									if (currentPrompt.id === promptToComplete.id) {
-										Object.assign(currentPrompt, promptToComplete);
-										postMessage({ type: 'prompt', prompt: promptToComplete, reason: 'sync' });
-									}
-									this._onDidSave.fire(promptToComplete.id);
-									// Recalc implementing time from JSONL after VS Code finishes writing session data
-									const recalcPromptId = promptToComplete.id;
-									setTimeout(async () => {
-										try {
-											const freshPrompt = await this.storageService.getPrompt(recalcPromptId);
-											if (freshPrompt && (freshPrompt.chatSessionIds || []).length > 0) {
-												const totalMs = await this.stateService.getChatSessionsTotalElapsed(freshPrompt.chatSessionIds);
-												if (totalMs > 0) {
-													freshPrompt.timeSpentImplementing = totalMs;
-													await this.storageService.savePrompt(freshPrompt);
-													if (currentPrompt.id === freshPrompt.id) {
-														Object.assign(currentPrompt, freshPrompt);
-														postMessage({ type: 'prompt', prompt: freshPrompt, reason: 'sync' });
-													}
-													this._onDidSave.fire(freshPrompt.id);
-												}
-											}
-										} catch (e: any) {
-											this.hooksOutput.appendLine(`[chat-track] recalc implementing time error: ${e?.message || e}`);
-										}
-									}, 3000);
-								}
-
-								if (shouldCaptureAgentFinalResponse) {
-									this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
-									await this.runConfiguredHooks(prompt?.hooks || [], {
-										event: 'afterChatCompleted',
-										...hookPayloadBase,
-										status: promptToComplete?.status || prompt.status,
-										report: promptToComplete?.report || '',
-										reportText: chatReportText || this.reportHtmlToText(promptToComplete?.report || ''),
-										chatSessionId: trackedSessionId || '',
-										timeSpentImplementing: promptToComplete?.timeSpentImplementing || 0,
-									}, 'afterChatCompleted');
-								}
-								try {
-									await this.chatMemoryInstructionService()?.completeChatSession(
-										prompt.promptUuid,
-										'afterChatCompleted',
-										trackedSessionId || undefined,
-									);
-								} catch (error) {
-									this.hooksOutput.appendLine(`[chat-memory] completeChatSession failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
-								}
-								return;
-							}
-
-							if (chatReportHtml) {
-								const promptForTiming = await this.storageService.getPrompt(prompt.id);
-								if (promptForTiming) {
-									const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
-									const endedAt = Number(completion.lastRequestEnded || Date.now());
-									const implementingDelta = Math.max(0, endedAt - startedAt);
-									if (implementingDelta > 0) {
-										promptForTiming.timeSpentImplementing = (promptForTiming.timeSpentImplementing || 0) + implementingDelta;
-									}
-									if (shouldCaptureAgentFinalResponse) {
-										promptForTiming.report = chatReportHtml;
-									}
-									await this.storageService.savePrompt(promptForTiming);
-									if (currentPrompt.id === promptForTiming.id) {
-										Object.assign(currentPrompt, promptForTiming);
-										postMessage({ type: 'prompt', prompt: promptForTiming, reason: 'sync' });
-									}
-									this._onDidSave.fire(promptForTiming.id);
-									// Recalc implementing time from JSONL (markdown fallback path)
-									const recalcPromptId2 = promptForTiming.id;
-									setTimeout(async () => {
-										try {
-											const freshPrompt = await this.storageService.getPrompt(recalcPromptId2);
-											if (freshPrompt && (freshPrompt.chatSessionIds || []).length > 0) {
-												const totalMs = await this.stateService.getChatSessionsTotalElapsed(freshPrompt.chatSessionIds);
-												if (totalMs > 0) {
-													freshPrompt.timeSpentImplementing = totalMs;
-													await this.storageService.savePrompt(freshPrompt);
-													if (currentPrompt.id === freshPrompt.id) {
-														Object.assign(currentPrompt, freshPrompt);
-														postMessage({ type: 'prompt', prompt: freshPrompt, reason: 'sync' });
-													}
-													this._onDidSave.fire(freshPrompt.id);
-												}
-											}
-										} catch (e: any) {
-											this.hooksOutput.appendLine(`[chat-track] recalc implementing time (fallback) error: ${e?.message || e}`);
-										}
-									}, 3000);
-								}
-
-								// Rename chat session in agent history (markdown fallback path)
-								const sessionToRename2 = String(completion.sessionId || trackedSessionId || '').trim();
-								if (sessionToRename2) {
-									const latestPrompt2 = await this.storageService.getPrompt(prompt.id);
-									const renameTitle2 = latestPrompt2?.taskNumber
-										? `${latestPrompt2.taskNumber} | ${latestPrompt2.title}`
-										: (latestPrompt2?.title || '');
-									if (renameTitle2) {
-										this.hooksOutput.appendLine(`[chat-rename] (fallback) scheduling rename session=${sessionToRename2} title="${renameTitle2}" (5s delay)`);
-										setTimeout(() => {
-											void this.stateService.renameChatSession(sessionToRename2, renameTitle2).then(r => {
-												this.hooksOutput.appendLine(`[chat-rename] (fallback) result: ok=${r.ok} reason=${r.reason || '-'}`);
-												if (r.ok) {
-													void vscode.window.showInformationMessage(
-														`Chat session renamed to "${renameTitle2}". Title will appear after window reload.`,
-													);
-												}
-											}).catch(e => {
-												this.hooksOutput.appendLine(`[chat-rename] (fallback) error: ${e?.message || e}`);
-											});
-										}, 5000);
-									}
-								}
-
-								if (shouldCaptureAgentFinalResponse) {
-									this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
-									await this.runConfiguredHooks(prompt?.hooks || [], {
-										event: 'afterChatCompleted',
-										...hookPayloadBase,
-										status: promptForTiming?.status || prompt.status,
-										report: promptForTiming?.report || '',
-										reportText: chatReportText || this.reportHtmlToText(promptForTiming?.report || ''),
-										chatSessionId: trackedSessionId || '',
-										timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
-									}, 'afterChatCompleted');
-								}
-								try {
-									await this.chatMemoryInstructionService()?.completeChatSession(
-										prompt.promptUuid,
-										'afterChatCompleted',
-										trackedSessionId || undefined,
-									);
-								} catch (error) {
-									this.hooksOutput.appendLine(`[chat-memory] completeChatSession fallback failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
-								}
-								return;
-							}
-
-							await this.runConfiguredHooks(prompt?.hooks || [], {
-								event: 'chatError',
-								error: `Chat completion not detected (${completion.reason || 'unknown'})`,
-								chatCompletion: completion,
-								...hookPayloadBase,
-							}, 'chatError');
-							try {
-								await this.chatMemoryInstructionService()?.noteChatError(
-									prompt.promptUuid,
-									`Chat completion not detected (${completion.reason || 'unknown'})`,
-									trackedSessionId || undefined,
-								);
-							} catch (error) {
-								this.hooksOutput.appendLine(`[chat-memory] noteChatError completion failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
-							}
-							this.hooksOutput.appendLine(`[chat-track] chatError fired for prompt=${prompt.id}: completion not detected`);
-						})();
-					}
-
-					if (sendMessageSucceeded) {
-						postMessage({ type: 'chatStarted', promptId: prompt.id });
-					} else {
-						postMessage({ type: 'error', message: 'Не удалось отправить промпт в чат. Проверьте, что Copilot Chat доступен, и повторите попытку.' });
-					}
+						this.hooksOutput.appendLine(`[chat-track] chatError fired for prompt=${prompt.id}: completion not detected`);
+					})();
 
 					// Optional hook-based status policy (no modal)
 					const hookStatus = this.resolveStatusFromHooks(prompt.hooks || []);
@@ -3414,6 +3475,8 @@ export class EditorPanelManager {
 							postMessage({ type: 'prompt', prompt, reason: 'sync' });
 						}
 					}
+				} catch (error) {
+					await reportStartChatFailure(formatStartChatErrorMessage(error));
 				}
 				break;
 			}
@@ -3700,20 +3763,44 @@ export class EditorPanelManager {
 			}
 
 			case 'recalcImplementingTime': {
+				const isSilentRecalc = msg.silent === true;
 				const prompt = await this.storageService.getPrompt(msg.id);
 				if (!prompt) {
-					postMessage({ type: 'error', message: 'Промпт не найден.' });
+					if (isSilentRecalc) {
+						postMessage({ type: 'implementingTimeRecalculated', id: msg.id, timeMs: 0, sessionsCount: 0 });
+					} else {
+						postMessage({ type: 'error', message: 'Промпт не найден.' });
+					}
 					break;
 				}
 				const sessionIds = prompt.chatSessionIds || [];
 				if (sessionIds.length === 0) {
-					postMessage({ type: 'error', message: 'У промпта нет привязанных чат-сессий.' });
+					if (isSilentRecalc) {
+						postMessage({
+							type: 'implementingTimeRecalculated',
+							id: prompt.id,
+							timeMs: prompt.timeSpentImplementing || 0,
+							sessionsCount: 0,
+						});
+					} else {
+						postMessage({ type: 'error', message: 'У промпта нет привязанных чат-сессий.' });
+					}
 					break;
 				}
 				try {
 					const totalMs = await this.stateService.getChatSessionsTotalElapsed(sessionIds);
 					if (totalMs <= 0) {
-						postMessage({ type: 'error', message: 'Не удалось извлечь тайминги из истории чата. Файлы сессий могут быть недоступны.' });
+						if (isSilentRecalc) {
+							this.hooksOutput.appendLine(`[chat-track] silent recalc skipped for prompt=${prompt.id}: no session timing files available yet`);
+							postMessage({
+								type: 'implementingTimeRecalculated',
+								id: prompt.id,
+								timeMs: prompt.timeSpentImplementing || 0,
+								sessionsCount: sessionIds.length,
+							});
+						} else {
+							postMessage({ type: 'error', message: 'Не удалось извлечь тайминги из истории чата. Файлы сессий могут быть недоступны.' });
+						}
 						break;
 					}
 					prompt.timeSpentImplementing = totalMs;
@@ -3725,7 +3812,17 @@ export class EditorPanelManager {
 					this._onDidSave.fire(prompt.id);
 					postMessage({ type: 'implementingTimeRecalculated', id: prompt.id, timeMs: totalMs, sessionsCount: sessionIds.length });
 				} catch (err: any) {
-					postMessage({ type: 'error', message: `Ошибка при пересчёте: ${err?.message || err}` });
+					if (isSilentRecalc) {
+						this.hooksOutput.appendLine(`[chat-track] silent recalc error for prompt=${prompt.id}: ${err?.message || err}`);
+						postMessage({
+							type: 'implementingTimeRecalculated',
+							id: prompt.id,
+							timeMs: prompt.timeSpentImplementing || 0,
+							sessionsCount: sessionIds.length,
+						});
+					} else {
+						postMessage({ type: 'error', message: `Ошибка при пересчёте: ${err?.message || err}` });
+					}
 				}
 				break;
 			}

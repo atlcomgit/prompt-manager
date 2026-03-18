@@ -17,7 +17,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'openPrompt'; id: string }
 	| { type: 'importPrompt' }
 	| { type: 'exportPrompt'; id: string }
-	| { type: 'startChat'; id: string; prompt?: Prompt; forceRebindChat?: boolean }
+	| { type: 'startChat'; id: string; prompt?: Prompt; forceRebindChat?: boolean; requestId?: string }
 	| { type: 'openChat'; id: string; sessionId: string }
 	| { type: 'generateTitle'; content: string }
 	| { type: 'generateDescription'; content: string }
@@ -51,7 +51,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
 	| { type: 'openPromptReportInEditor'; report: string; promptId?: string; title?: string }
 	| { type: 'showPromptHistory'; id: string }
-	| { type: 'recalcImplementingTime'; id: string }
+	| { type: 'recalcImplementingTime'; id: string; silent?: boolean }
 	| { type: 'getNextTaskNumber' }
 	| { type: 'openChatPanel' }
 	| { type: 'startPromptVoiceRecording'; sessionId: string }
@@ -89,8 +89,9 @@ export type ExtensionToWebviewMessage =
 	| { type: 'generatedReport'; report: string }
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
 	| { type: 'branchStatus'; hasChanges: boolean; details: string }
-	| { type: 'error'; message: string }
+	| { type: 'error'; message: string; requestId?: string }
 	| { type: 'info'; message: string }
+	| { type: 'clearNotice' }
 	| { type: 'pickedFiles'; files: string[] }
 	| { type: 'inlineSuggestion'; suggestion: string }
 	| { type: 'inlineSuggestions'; suggestions: string[] }
@@ -100,7 +101,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'availableFrameworks'; options: Array<{ id: string; name: string }> }
 	| { type: 'promptSaving'; id: string; saving: boolean }
 	| { type: 'triggerCreatePrompt' }
-	| { type: 'chatStarted'; promptId: string }
+	| { type: 'chatStarted'; promptId: string; requestId?: string }
 	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number }
 	| { type: 'reportContentUpdated'; report: string; timeSpentWriting?: number; timeSpentOnTask?: number; updatedAt?: string }
 	| { type: 'contentEditorOpened' }
@@ -113,7 +114,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number }
 	| { type: 'promptLoading' }
 	| { type: 'nextTaskNumber'; taskNumber: string }
-	| { type: 'chatOpened'; promptId: string }
+	| { type: 'chatOpened'; promptId: string; requestId?: string }
 	| {
 		type: 'promptVoiceState';
 		sessionId: string;

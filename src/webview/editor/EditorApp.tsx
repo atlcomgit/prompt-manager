@@ -30,6 +30,9 @@ interface SelectOption {
 }
 
 type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' | 'tech' | 'integrations' | 'agent' | 'files' | 'time';
+type InlineNotice = { kind: 'error' | 'info'; message: string };
+
+const CHAT_START_TIMEOUT_MS = 15000;
 
 const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
   basic: true,
@@ -163,11 +166,15 @@ export const EditorApp: React.FC = () => {
   const [globalContext, setGlobalContext] = useState('');
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>(() => readStoredExpandedSections());
+  const [notice, setNotice] = useState<InlineNotice | null>(null);
   const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
   const startChatLockRef = useRef(false);
+  const chatStartTimeoutRef = useRef<number | null>(null);
+  const pendingChatStartRequestIdRef = useRef<string>('');
+  const acceptedChatStartRequestIdRef = useRef<string>('');
   const globalContextTextareaRef = useRef<HTMLTextAreaElement>(null);
   const saveTimeoutRef = useRef<number | null>(null);
   const currentPromptIdRef = useRef<string>('__new__');
@@ -209,6 +216,59 @@ export const EditorApp: React.FC = () => {
   const logMainRichTextDebug = useCallback((message: string, payload?: Record<string, unknown>) => {
     logReportDebug(`mainRichText.${message}`, payload);
   }, [logReportDebug]);
+
+  const clearChatStartTimeout = useCallback(() => {
+    if (chatStartTimeoutRef.current) {
+      window.clearTimeout(chatStartTimeoutRef.current);
+      chatStartTimeoutRef.current = null;
+    }
+  }, []);
+
+  const resetChatStartRequestTracking = useCallback(() => {
+    pendingChatStartRequestIdRef.current = '';
+    acceptedChatStartRequestIdRef.current = '';
+  }, []);
+
+  const shouldHandleChatStartMessage = useCallback((requestId?: string): boolean => {
+    const normalizedRequestId = (requestId || '').trim();
+    if (!normalizedRequestId) {
+      return true;
+    }
+    return normalizedRequestId === pendingChatStartRequestIdRef.current
+      || normalizedRequestId === acceptedChatStartRequestIdRef.current;
+  }, []);
+
+  const releaseStartChatPendingState = useCallback((options?: { resetSaving?: boolean }) => {
+    clearChatStartTimeout();
+    startChatLockRef.current = false;
+    setIsStartingChat(false);
+    if (options?.resetSaving) {
+      setIsSaving(false);
+      activeSaveIdRef.current = null;
+    }
+  }, [clearChatStartTimeout]);
+
+  const showInlineNotice = useCallback((kind: InlineNotice['kind'], message: string) => {
+    const normalizedMessage = (message || '').trim();
+    if (!normalizedMessage) {
+      return;
+    }
+    setNotice({ kind, message: normalizedMessage });
+  }, []);
+
+  const handleChatStartTimeout = useCallback(() => {
+    if (!startChatLockRef.current) {
+      return;
+    }
+    releaseStartChatPendingState({ resetSaving: true });
+    resetChatStartRequestTracking();
+    showInlineNotice('error', t('actions.startChatTimeout'));
+  }, [releaseStartChatPendingState, resetChatStartRequestTracking, showInlineNotice, t]);
+
+  const scheduleChatStartTimeout = useCallback(() => {
+    clearChatStartTimeout();
+    chatStartTimeoutRef.current = window.setTimeout(handleChatStartTimeout, CHAT_START_TIMEOUT_MS);
+  }, [clearChatStartTimeout, handleChatStartTimeout]);
 
   const targetBranch = prompt.branch.trim();
 
@@ -470,8 +530,13 @@ export const EditorApp: React.FC = () => {
   const handleMessage = useCallback((msg: any) => {
     switch (msg.type) {
       case 'promptLoading':
+        clearChatStartTimeout();
+        startChatLockRef.current = false;
+        setIsStartingChat(false);
+        resetChatStartRequestTracking();
         setIsLoaded(false);
         setIsChatPanelOpen(false);
+        setNotice(null);
         setIsGeneratingTitle(false);
         setIsGeneratingDescription(false);
         // Delay showing the loader so fast loads don't flash
@@ -506,6 +571,7 @@ export const EditorApp: React.FC = () => {
             setShowLoader(false);
             setIsGeneratingTitle(false);
             setIsGeneratingDescription(false);
+            setNotice(null);
             setPrompt(msg.prompt);
             localReportDirtyRef.current = false;
             currentPromptIdRef.current = incomingPromptId;
@@ -517,12 +583,11 @@ export const EditorApp: React.FC = () => {
             setIsSaving(false);
             activeSaveIdRef.current = null;
             if ((msg.prompt.chatSessionIds || []).length > 0) {
-              startChatLockRef.current = false;
-              setIsStartingChat(false);
+              releaseStartChatPendingState();
               const pid = String(msg.prompt.id || '').trim();
               if (pid && recalcTriggeredForRef.current !== pid) {
                 recalcTriggeredForRef.current = pid;
-                vscode.postMessage({ type: 'recalcImplementingTime', id: pid });
+                vscode.postMessage({ type: 'recalcImplementingTime', id: pid, silent: true });
                 setIsRecalculating(true);
               }
             }
@@ -546,8 +611,7 @@ export const EditorApp: React.FC = () => {
             }));
             // Don't touch isDirty — user's pending edits stay intact
             if ((msg.prompt.chatSessionIds || []).length > 0) {
-              startChatLockRef.current = false;
-              setIsStartingChat(false);
+              releaseStartChatPendingState();
             }
             break;
           }
@@ -590,13 +654,12 @@ export const EditorApp: React.FC = () => {
           setIsGeneratingDescription(false);
           activeSaveIdRef.current = null;
           if ((msg.prompt.chatSessionIds || []).length > 0) {
-            startChatLockRef.current = false;
-            setIsStartingChat(false);
+            releaseStartChatPendingState();
             // Auto-recalc implementing time on first load
             const pid = String(msg.prompt.id || '').trim();
             if (pid && recalcTriggeredForRef.current !== pid) {
               recalcTriggeredForRef.current = pid;
-              vscode.postMessage({ type: 'recalcImplementingTime', id: pid });
+              vscode.postMessage({ type: 'recalcImplementingTime', id: pid, silent: true });
               setIsRecalculating(true);
             }
           }
@@ -759,12 +822,24 @@ export const EditorApp: React.FC = () => {
         setGlobalContext(msg.context || '');
         break;
       case 'chatStarted':
-        startChatLockRef.current = false;
-        setIsStartingChat(false);
+        if (!shouldHandleChatStartMessage(msg.requestId)) {
+          break;
+        }
+        if ((msg.requestId || '').trim() === pendingChatStartRequestIdRef.current) {
+          acceptedChatStartRequestIdRef.current = pendingChatStartRequestIdRef.current;
+          pendingChatStartRequestIdRef.current = '';
+        }
+        releaseStartChatPendingState();
         break;
       case 'chatOpened':
-        startChatLockRef.current = false;
-        setIsStartingChat(false);
+        if (!shouldHandleChatStartMessage(msg.requestId)) {
+          break;
+        }
+        if ((msg.requestId || '').trim() === pendingChatStartRequestIdRef.current) {
+          acceptedChatStartRequestIdRef.current = pendingChatStartRequestIdRef.current;
+          pendingChatStartRequestIdRef.current = '';
+        }
+        releaseStartChatPendingState();
         setIsChatPanelOpen(true);
         break;
       case 'generatedTitle':
@@ -860,9 +935,13 @@ export const EditorApp: React.FC = () => {
         }
         break;
       case 'error':
-        // Could show inline error
-        startChatLockRef.current = false;
-        setIsStartingChat(false);
+        if ((msg.requestId || '').trim()) {
+          const matchesPendingRequest = (msg.requestId || '').trim() === pendingChatStartRequestIdRef.current;
+          if (!matchesPendingRequest) {
+            break;
+          }
+        }
+        releaseStartChatPendingState({ resetSaving: true });
         setIsSaving(false);
         setIsGeneratingTitle(false);
         setIsGeneratingDescription(false);
@@ -870,17 +949,48 @@ export const EditorApp: React.FC = () => {
         setIsGeneratingReport(false);
         setIsRecalculating(false);
         activeSaveIdRef.current = null;
+        resetChatStartRequestTracking();
+        showInlineNotice('error', msg.message);
         break;
       case 'info':
-        // Could show inline info
+        showInlineNotice('info', msg.message);
+        break;
+      case 'clearNotice':
+        clearChatStartTimeout();
+        startChatLockRef.current = false;
+        setIsStartingChat(false);
+        resetChatStartRequestTracking();
+        setNotice(null);
         break;
       case 'implementingTimeRecalculated':
         setIsRecalculating(false);
         break;
     }
-  }, []);
+  }, [clearChatStartTimeout, releaseStartChatPendingState, resetChatStartRequestTracking, shouldHandleChatStartMessage, showInlineNotice]);
 
   useMessageListener(handleMessage);
+
+  useEffect(() => () => {
+    clearChatStartTimeout();
+  }, [clearChatStartTimeout]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'hidden') {
+        return;
+      }
+      clearChatStartTimeout();
+      startChatLockRef.current = false;
+      setIsStartingChat(false);
+      resetChatStartRequestTracking();
+      setNotice(null);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [clearChatStartTimeout, resetChatStartRequestTracking]);
 
   // Notify extension about dirty state changes
   useEffect(() => {
@@ -1137,6 +1247,11 @@ export const EditorApp: React.FC = () => {
     if (startChatLockRef.current || isStartingChat || !prompt.content || (!shouldForceRebindChat && prompt.chatSessionIds.length > 0)) {
       return;
     }
+    const requestId = `start-chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    pendingChatStartRequestIdRef.current = requestId;
+    acceptedChatStartRequestIdRef.current = '';
+    setNotice(null);
+    setIsChatPanelOpen(false);
     hasBeenSavedRef.current = true;
     // Set status to in-progress immediately — both locally and in the payload sent to backend.
     // This prevents the status from reverting to draft if the user switches prompts before
@@ -1153,6 +1268,7 @@ export const EditorApp: React.FC = () => {
     }));
     startChatLockRef.current = true;
     setIsStartingChat(true);
+    scheduleChatStartTimeout();
     activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
     vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
@@ -1161,6 +1277,7 @@ export const EditorApp: React.FC = () => {
       id: updatedPrompt.id || '__new__',
       prompt: updatedPrompt,
       forceRebindChat: shouldForceRebindChat,
+      requestId,
     });
   };
 
@@ -1913,8 +2030,27 @@ export const EditorApp: React.FC = () => {
           </div>
         </div>
 
-        {/* Action bar */}
+        {/* Footer */}
         <div style={isLoaded ? styles.blockContentVisible : styles.blockContentHidden}>
+          {notice && (
+            <div
+              style={{
+                ...styles.footerNotice,
+                ...(notice.kind === 'error' ? styles.footerNoticeError : styles.footerNoticeInfo),
+              }}
+              role={notice.kind === 'error' ? 'alert' : 'status'}
+            >
+              <span style={styles.noticeText}>{notice.message}</span>
+              <button
+                type="button"
+                style={styles.noticeCloseBtn}
+                onClick={() => setNotice(null)}
+                aria-label="Close notification"
+              >
+                ✕
+              </button>
+            </div>
+          )}
           <ActionBar
             onSave={() => handleSave('manual')}
             onShowHistory={handleShowHistory}
@@ -2001,6 +2137,36 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--vscode-editorWarning-foreground)',
     fontSize: '12px',
     whiteSpace: 'nowrap',
+  },
+  footerNotice: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
+    padding: '10px 20px',
+    fontSize: '12px',
+    borderTop: '1px solid var(--vscode-panel-border)',
+  },
+  footerNoticeError: {
+    background: 'var(--vscode-inputValidation-errorBackground)',
+    color: 'var(--vscode-errorForeground)',
+  },
+  footerNoticeInfo: {
+    background: 'var(--vscode-inputValidation-infoBackground)',
+    color: 'var(--vscode-foreground)',
+  },
+  noticeText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  noticeCloseBtn: {
+    border: 'none',
+    background: 'transparent',
+    color: 'inherit',
+    cursor: 'pointer',
+    padding: '0',
+    fontSize: '12px',
+    lineHeight: 1,
   },
   body: {
     flex: 1,

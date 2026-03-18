@@ -54,9 +54,15 @@ export const ActionBar: React.FC<Props> = ({
             onClick={onStartChat}
             disabled={startChatDisabled}
             aria-disabled={startChatDisabled}
+            aria-busy={isStartingChat}
             title={!hasContent ? t('actions.enterText') : t('actions.startChatTooltip')}
           >
-            {isStartingChat ? t('actions.startChat') + '...' : t('actions.startChat')}
+            {isStartingChat ? (
+              <>
+                <span style={styles.btnSpinner} aria-hidden="true" />
+                <span>{t('actions.startChat')}</span>
+              </>
+            ) : t('actions.startChat')}
           </button>
         )}
 
@@ -130,6 +136,15 @@ const styles: Record<string, React.CSSProperties> = {
   btnWarn: {
     background: 'var(--vscode-editorWarning-foreground, var(--vscode-button-secondaryBackground))',
     color: 'var(--vscode-editor-background)',
+  },
+  btnSpinner: {
+    width: '13px',
+    height: '13px',
+    border: '2px solid color-mix(in srgb, var(--vscode-button-secondaryForeground) 35%, transparent)',
+    borderTopColor: 'var(--vscode-button-secondaryForeground)',
+    borderRadius: '50%',
+    animation: 'pm-spin 0.8s linear infinite',
+    flexShrink: 0,
   },
   unsaved: {
     fontSize: '12px',

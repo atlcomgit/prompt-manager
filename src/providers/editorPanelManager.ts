@@ -3699,6 +3699,19 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'pickHttpExamplesFile': {
+				const uris = await vscode.window.showOpenDialog({
+					canSelectFiles: true,
+					canSelectFolders: false,
+					canSelectMany: false,
+					openLabel: 'Выбрать HTTP файл',
+				});
+				if (uris && uris.length > 0) {
+					postMessage({ type: 'pickedHttpExamplesFile', file: uris[0].fsPath });
+				}
+				break;
+			}
+
 			case 'pasteFiles': {
 				// Validate and normalize pasted paths
 				const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
@@ -3727,13 +3740,22 @@ export class EditorPanelManager {
 			}
 
 			case 'openFile': {
+				const file = (msg.file || '').trim();
+				if (!file) {
+					vscode.window.showWarningMessage('Не указан файл для открытия.');
+					break;
+				}
 				const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-				const fullPath = msg.file.startsWith('/') ? msg.file : `${workspaceRoot}/${msg.file}`;
+				const fullPath = file.startsWith('/') ? file : `${workspaceRoot}/${file}`;
 				try {
 					const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fullPath));
-					await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+					await vscode.window.showTextDocument(doc, {
+						viewColumn: vscode.ViewColumn.Beside,
+						preview: false,
+						preserveFocus: false,
+					});
 				} catch {
-					vscode.window.showErrorMessage(`Cannot open file: ${msg.file}`);
+					vscode.window.showErrorMessage(`Не удалось открыть файл: ${file}`);
 				}
 				break;
 			}

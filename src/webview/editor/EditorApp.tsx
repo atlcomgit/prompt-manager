@@ -370,8 +370,9 @@ export const EditorApp: React.FC = () => {
     const chunks: string[] = [];
     const reportText = (prompt.report || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     if (reportText) chunks.push(`Результат: ${toShortText(reportText, 64)}`);
+    if (prompt.httpExamples.trim()) chunks.push(`HTTP: ${toShortText(prompt.httpExamples.trim(), 56)}`);
     return chunks;
-  }, [prompt.report]);
+  }, [prompt.report, prompt.httpExamples]);
 
   const workspaceSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -913,6 +914,21 @@ export const EditorApp: React.FC = () => {
           scheduleAutoSave(50);
         }
         break;
+      case 'pickedHttpExamplesFile': {
+        const nextFile = (msg.file || '').trim();
+        const currentFile = (promptRef.current.httpExamples || '').trim();
+        if (!nextFile || nextFile === currentFile) {
+          break;
+        }
+        setPrompt(prev => ({
+          ...prev,
+          httpExamples: nextFile,
+        }));
+        userChangeCounterRef.current++;
+        setIsDirty(true);
+        scheduleAutoSave(50);
+        break;
+      }
       case 'branches':
         setBranches(msg.branches);
         setBranchesResolved(true);
@@ -1241,6 +1257,18 @@ export const EditorApp: React.FC = () => {
     });
     vscode.postMessage({ type: 'savePrompt', prompt: nextPrompt, source: 'manual' });
   };
+
+  const handleOpenHttpExamples = useCallback(() => {
+    const file = prompt.httpExamples.trim();
+    if (!file) {
+      return;
+    }
+    vscode.postMessage({ type: 'openFile', file });
+  }, [prompt.httpExamples]);
+
+  const handlePickHttpExamples = useCallback(() => {
+    vscode.postMessage({ type: 'pickHttpExamplesFile' });
+  }, []);
 
   const handleStartChat = () => {
     const shouldForceRebindChat = prompt.status === 'draft';
@@ -2025,6 +2053,37 @@ export const EditorApp: React.FC = () => {
                   onReset={handleResetReport}
                 />
               </div>
+
+              <div style={styles.fieldRow}>
+                <TextField
+                  label={t('editor.httpExamples')}
+                  value={prompt.httpExamples}
+                  onChange={v => updateField('httpExamples', v)}
+                  placeholder={t('editor.httpExamplesPlaceholder')}
+                />
+                <div style={styles.fieldActionGroup}>
+                  <button
+                    style={styles.fieldActionBtn}
+                    onClick={handlePickHttpExamples}
+                    title={t('editor.choose')}
+                  >
+                    {t('editor.choose')}
+                  </button>
+                  <button
+                    style={{
+                      ...styles.fieldActionBtn,
+                      ...(!prompt.httpExamples.trim() ? styles.fieldActionBtnDisabled : {}),
+                    }}
+                    onClick={handleOpenHttpExamples}
+                    disabled={!prompt.httpExamples.trim()}
+                    title={prompt.httpExamples.trim()
+                      ? `${t('editor.openInEditor')} ${prompt.httpExamples.trim()}`
+                      : t('editor.openInEditor')}
+                  >
+                    ↗ {t('editor.open')}
+                  </button>
+                </div>
+              </div>
             </>
           ))}
           </div>
@@ -2260,6 +2319,28 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     gap: '8px',
     alignItems: 'flex-end',
+  },
+  fieldActionGroup: {
+    display: 'flex',
+    gap: '8px',
+    flexShrink: 0,
+  },
+  fieldActionBtn: {
+    minHeight: '32px',
+    padding: '0 10px',
+    background: 'var(--vscode-button-secondaryBackground)',
+    color: 'var(--vscode-button-secondaryForeground)',
+    border: '1px solid var(--vscode-button-border, transparent)',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontFamily: 'var(--vscode-font-family)',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+  },
+  fieldActionBtnDisabled: {
+    opacity: 0.6,
+    cursor: 'not-allowed',
   },
   field: {
     display: 'flex',

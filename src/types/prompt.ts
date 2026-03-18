@@ -65,6 +65,8 @@ export interface PromptConfig {
 	// --- Context files ---
 	/** Relative paths to context files attached to this prompt */
 	contextFiles: string[];
+	/** Path to HTTP examples file */
+	httpExamples: string;
 
 	// --- Chat integration ---
 	/** Associated Copilot chat session IDs */
@@ -131,6 +133,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		model: '',
 		chatMode: 'agent',
 		contextFiles: [],
+		httpExamples: '',
 		chatSessionIds: [],
 		timeSpentWriting: 0,
 		timeSpentImplementing: 0,

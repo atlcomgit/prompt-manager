@@ -37,6 +37,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'getBranches'; projects: string[] }
 	| { type: 'updateTimeSpent'; id: string; field: 'timeSpentWriting' | 'timeSpentImplementing'; delta: number }
 	| { type: 'pickFile' }
+	| { type: 'pickHttpExamplesFile' }
 	| { type: 'pasteFiles'; files: string[] }
 	| { type: 'openFile'; file: string }
 	| { type: 'requestSuggestion'; textBefore: string; globalContext?: string }
@@ -93,6 +94,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'info'; message: string }
 	| { type: 'clearNotice' }
 	| { type: 'pickedFiles'; files: string[] }
+	| { type: 'pickedHttpExamplesFile'; file: string }
 	| { type: 'inlineSuggestion'; suggestion: string }
 	| { type: 'inlineSuggestions'; suggestions: string[] }
 	| { type: 'statistics'; data: PromptStatistics }

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "/home/alek/.copilot/hooks/agent-finish-telegram.sh",
+        "timeout": 60
+      },
+      {
+        "type": "command",
+        "command": "/home/alek/.copilot/hooks/agent-finish-voice.sh",
+        "timeout": 10
+      }
+    ]
+  }
+}

@@ -5,17 +5,29 @@
 
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
-import type { CopilotUsageAccountSummary, CopilotUsageService } from '../services/copilotUsageService.js';
+import type { CopilotUsageAccountSummary, CopilotUsageService, CopilotUsageSnapshot } from '../services/copilotUsageService.js';
+import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 let panelRefreshTimer: ReturnType<typeof setInterval> | undefined;
 const PANEL_REFRESH_INTERVAL_MS = 30 * 1000;
 
 export class CopilotUsagePanelManager {
+	private readonly disposables: vscode.Disposable[] = [];
+
 	constructor(
 		private readonly extensionUri: vscode.Uri,
 		private readonly usageService: CopilotUsageService,
-	) { }
+	) {
+		this.disposables.push(
+			this.usageService.onDidChangeAccountSwitchState((state) => {
+				if (!currentPanel) {
+					return;
+				}
+				void currentPanel.webview.postMessage({ type: 'copilotUsage.accountSwitching', state });
+			}),
+		);
+	}
 
 	async show(): Promise<void> {
 		if (currentPanel) {
@@ -75,31 +87,46 @@ export class CopilotUsagePanelManager {
 			}
 
 			if (msg.type === 'copilotUsage.switchAccount') {
-				// ШАГ 1: Открываем пикер и ждём выбора. Никаких overlay/спиннеров пока.
-				// switchCopilotChatAccountInteractively сам определит, сменился ли аккаунт.
-				// Если сменился — вернёт changed:true и уже покажет спиннер в статусбаре.
+				appendPromptManagerLog(`[${new Date().toISOString()}] [panel] switch account requested from Copilot Premium Usage page`);
 				const result = await this.usageService.switchCopilotChatAccountInteractively();
 
-				if (result.changed) {
-					// ШАГ 2: Аккаунт сменился. Статусбар уже показывает спиннер.
-					// Показываем overlay на странице.
-					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitching', isSwitching: true });
-
-					// ШАГ 3: Загружаем данные для нового аккаунта (API запрос).
-					// fetchUsage(true) использует userExplicitAccountChoice → новый аккаунт.
-					await this.pushUsageToWebview(panel.webview, true);
-
-					// ШАГ 4: Данные загружены. Сбрасываем спиннер и overlay ОДНОВРЕМЕННО.
-					// endAccountSwitching() fires onDidChangeAccountSwitchState(false) → статусбар обновится.
-					this.usageService.endAccountSwitching();
-					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitching', isSwitching: false });
-					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitchResult', result });
-				} else if (!result.cancelled) {
-					// Ошибка — показать сообщение
-					this.usageService.endAccountSwitching();
-					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitchResult', result });
+				if (!result.changed) {
+					appendPromptManagerLog(
+						`[${new Date().toISOString()}] [panel] switch account finished without change cancelled=${result.cancelled ? 'true' : 'false'} message=${result.message}`,
+					);
+					if (!result.cancelled) {
+						await panel.webview.postMessage({ type: 'copilotUsage.accountSwitchResult', result });
+					}
+					return;
 				}
-				// Если cancelled — вообще ничего не показываем
+
+				this.stopPanelRefresh();
+				try {
+					const completion = await this.usageService.completeAccountSwitch(result.accountLabel || '');
+					await this.pushUsageToWebview(panel.webview, false, completion);
+					await panel.webview.postMessage({
+						type: 'copilotUsage.accountSwitchResult',
+						result: {
+							changed: true,
+							message: completion.message,
+							accountLabel: completion.accountLabel,
+						},
+					});
+					appendPromptManagerLog(
+						`[${new Date().toISOString()}] [panel] switch account completed for ${completion.accountLabel}`,
+					);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					appendPromptManagerLog(`[${new Date().toISOString()}] [panel] switch account failed: ${message}`);
+					await panel.webview.postMessage({
+						type: 'copilotUsage.accountSwitchResult',
+						result: { changed: false, message },
+					});
+				} finally {
+					if (currentPanel === panel) {
+						this.startPanelRefresh(panel.webview);
+					}
+				}
 				return;
 			}
 
@@ -131,12 +158,9 @@ export class CopilotUsagePanelManager {
 		}
 	}
 
-	private async pushUsageToWebview(webview: vscode.Webview, forceRefresh: boolean): Promise<void> {
-		const [usage, accountSummary] = await Promise.all([
-			this.usageService.fetchUsage(forceRefresh),
-			this.usageService.getAccountBindingSummary(),
-		]);
-		const debugLog = this.usageService.getLastDebugLog();
+	private async pushUsageToWebview(webview: vscode.Webview, forceRefresh: boolean, snapshot?: CopilotUsageSnapshot): Promise<void> {
+		const resolvedSnapshot = snapshot ?? await this.usageService.getUsageSnapshot(forceRefresh);
+		const { usage, accountSummary, debugLog, switchState } = resolvedSnapshot;
 		const now = new Date();
 		const start = new Date(usage.periodStart);
 		const end = new Date(usage.periodEnd);
@@ -149,12 +173,16 @@ export class CopilotUsagePanelManager {
 		const timeline = usage.snapshots.length > 0
 			? usage.snapshots
 			: [{ date: new Date().toISOString().slice(0, 10), used: usage.used, limit: usage.limit }];
+		appendPromptManagerLog(
+			`[${new Date().toISOString()}] [panel] push usage to webview forceRefresh=${forceRefresh} active=${accountSummary.activeGithubSessionAccountLabel || 'none'} used=${usage.used}/${usage.limit} switching=${switchState.isSwitching}`,
+		);
 
 		await webview.postMessage({
 			type: 'copilotUsage.data',
 			data: {
 				...usage,
 				...this.buildAccountSummaryPayload(accountSummary),
+				accountSwitchState: switchState,
 				debugLog,
 				percent,
 				remaining,
@@ -178,6 +206,9 @@ export class CopilotUsagePanelManager {
 
 	dispose(): void {
 		this.stopPanelRefresh();
+		for (const disposable of this.disposables) {
+			disposable.dispose();
+		}
 		currentPanel?.dispose();
 		currentPanel = undefined;
 	}

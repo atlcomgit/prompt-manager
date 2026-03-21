@@ -3,6 +3,14 @@ import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 
 type TimelinePoint = { date: string; used: number; limit: number };
+type AccountSwitchState = {
+	isSwitching: boolean;
+	phase: 'idle' | 'detected' | 'syncing-extension' | 'awaiting-session' | 'refreshing-usage' | 'completed' | 'error';
+	message: string;
+	accountLabel: string | null;
+	startedAt: string | null;
+	updatedAt: string;
+};
 type UsageViewModel = {
 	used: number;
 	limit: number;
@@ -26,6 +34,7 @@ type UsageViewModel = {
 	activeGithubSessionAccountLabel?: string | null;
 	githubSessionIssue?: string | null;
 	availableGitHubAccounts?: Array<{ id: string; label: string }>;
+	accountSwitchState?: AccountSwitchState;
 };
 
 const vscode = getVsCodeApi();
@@ -59,6 +68,24 @@ const getToneColor = (percent: number): string => {
 	if (percent >= 51) return 'var(--vscode-editorWarning-foreground)';
 	return 'var(--vscode-foreground)';
 };
+
+function getAccountSwitchTitle(state: AccountSwitchState | null): string {
+	switch (state?.phase) {
+		case 'syncing-extension':
+			return 'Синхронизируем Prompt Manager';
+		case 'awaiting-session':
+			return 'Ждём GitHub-сессию';
+		case 'refreshing-usage':
+			return 'Обновляем Copilot Premium Usage';
+		case 'completed':
+			return 'Аккаунт обновлён';
+		case 'error':
+			return 'Ошибка смены аккаунта';
+		case 'detected':
+		default:
+			return 'Переключение аккаунта';
+	}
+}
 
 const MiniLineChart: React.FC<{ points: TimelinePoint[] }> = ({ points }) => {
 	const { path, maxY } = useMemo(() => {
@@ -133,9 +160,10 @@ const DailyBars: React.FC<{ points: TimelinePoint[] }> = ({ points }) => {
 export const CopilotUsageApp: React.FC = () => {
 	const [data, setData] = useState<UsageViewModel | null>(null);
 	const [isRefreshing, setIsRefreshing] = useState(false);
-	const [isSwitchingAccount, setIsSwitchingAccount] = useState(false);
+	const [accountSwitchState, setAccountSwitchState] = useState<AccountSwitchState | null>(null);
 	const [refreshedAt, setRefreshedAt] = useState<string>('');
 	const [accountSwitchMessage, setAccountSwitchMessage] = useState<string>('');
+	const isSwitchingAccount = Boolean(accountSwitchState?.isSwitching);
 
 	const requestData = useCallback(() => {
 		setIsRefreshing(true);
@@ -153,7 +181,9 @@ export const CopilotUsageApp: React.FC = () => {
 
 	useMessageListener((msg: any) => {
 		if (msg?.type === 'copilotUsage.data') {
-			setData(msg.data as UsageViewModel);
+			const nextData = msg.data as UsageViewModel;
+			setData(nextData);
+			setAccountSwitchState(nextData.accountSwitchState || null);
 			setIsRefreshing(false);
 		}
 		if (msg?.type === 'copilotUsage.refreshed') {
@@ -161,8 +191,9 @@ export const CopilotUsageApp: React.FC = () => {
 			setIsRefreshing(false);
 		}
 		if (msg?.type === 'copilotUsage.accountSwitching') {
-			setIsSwitchingAccount(Boolean(msg.isSwitching));
-			if (msg.isSwitching) {
+			const nextState = (msg.state || null) as AccountSwitchState | null;
+			setAccountSwitchState(nextState);
+			if (nextState?.isSwitching) {
 				setAccountSwitchMessage('');
 			}
 		}
@@ -180,8 +211,9 @@ export const CopilotUsageApp: React.FC = () => {
 			<style>{`@keyframes copilot-spin { to { transform: rotate(360deg); } }`}</style>
 			<div style={styles.switchingCard}>
 				<div style={{ fontSize: '28px', lineHeight: 1, animation: 'copilot-spin 1s linear infinite', display: 'inline-block' }}>&#x21BB;</div>
-				<div style={styles.switchingTitle}>Переключение аккаунта...</div>
-				<div style={styles.switchingText}>Обновляются данные расширения и статус-бар</div>
+				<div style={styles.switchingTitle}>{getAccountSwitchTitle(accountSwitchState)}</div>
+				<div style={styles.switchingText}>{accountSwitchState?.message || 'Обновляются данные расширения и статус-бар'}</div>
+				{accountSwitchState?.accountLabel ? <div style={styles.switchingText}>Аккаунт: {accountSwitchState.accountLabel}</div> : null}
 			</div>
 		</div>
 	) : null;

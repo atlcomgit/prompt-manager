@@ -12,7 +12,7 @@
  */
 
 import * as vscode from 'vscode';
-import type { CopilotUsageData, CopilotUsageService } from '../services/copilotUsageService.js';
+import type { CopilotAccountSwitchState, CopilotUsageData, CopilotUsageService } from '../services/copilotUsageService.js';
 import type { CopilotUsagePanelManager } from './copilotUsagePanelManager.js';
 
 /** Пороговые значения для цветовой индикации (в процентах) */
@@ -41,11 +41,15 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 	/** Подписки на события */
 	private disposables: vscode.Disposable[] = [];
 	private postChatRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+	private currentAccountSwitchState: CopilotAccountSwitchState;
+	private pendingUsageWhileSwitching: CopilotUsageData | null = null;
 
 	constructor(
 		private readonly usageService: CopilotUsageService,
 		private readonly panelManager: CopilotUsagePanelManager,
 	) {
+		this.currentAccountSwitchState = this.usageService.getAccountSwitchState();
+
 		// Создаём элемент статусбара (справа, с приоритетом между языком и кодировкой)
 		this.statusBarItem = vscode.window.createStatusBarItem(
 			vscode.StatusBarAlignment.Right,
@@ -64,25 +68,12 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 
 		// Подписываемся на обновления данных об использовании
 		this.disposables.push(
-			this.usageService.onDidChangeUsage((data) => this.updateStatusBar(data)),
+			this.usageService.onDidChangeUsage((data) => this.handleUsageChanged(data)),
 		);
 
 		// Показываем состояние переключения аккаунта в статусбаре
 		this.disposables.push(
-			this.usageService.onDidChangeAccountSwitchState((isSwitching) => {
-				if (isSwitching) {
-					this.statusBarItem.text = '$(loading~spin) Смена аккаунта...';
-					this.statusBarItem.tooltip = 'Переключение аккаунта Copilot Chat...';
-					this.statusBarItem.command = undefined;
-					this.statusBarItem.color = undefined;
-					this.statusBarItem.backgroundColor = undefined;
-				} else {
-					const cached = this.usageService.getCachedData();
-					if (cached) {
-						this.updateStatusBar(cached);
-					}
-				}
-			}),
+			this.usageService.onDidChangeAccountSwitchState((state) => this.handleAccountSwitchStateChanged(state)),
 		);
 
 		// Подписываемся на изменения настроек
@@ -117,6 +108,12 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 		// Проверяем, включён ли статусбар в настройках
 		if (!this.isEnabled()) {
 			this.statusBarItem.hide();
+			return;
+		}
+
+		if (this.currentAccountSwitchState.isSwitching) {
+			this.showAccountSwitchingState(this.currentAccountSwitchState);
+			this.statusBarItem.show();
 			return;
 		}
 
@@ -157,6 +154,60 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 		this.statusBarItem.command = undefined;
 	}
 
+	private handleUsageChanged(data: CopilotUsageData): void {
+		if (this.currentAccountSwitchState.isSwitching) {
+			this.pendingUsageWhileSwitching = data;
+			return;
+		}
+
+		this.updateStatusBar(data);
+	}
+
+	private handleAccountSwitchStateChanged(state: CopilotAccountSwitchState): void {
+		this.currentAccountSwitchState = state;
+		if (state.isSwitching) {
+			this.showAccountSwitchingState(state);
+			return;
+		}
+
+		const nextData = this.pendingUsageWhileSwitching ?? this.usageService.getCachedData();
+		this.pendingUsageWhileSwitching = null;
+		if (nextData) {
+			this.updateStatusBar(nextData);
+		}
+	}
+
+	private showAccountSwitchingState(state: CopilotAccountSwitchState): void {
+		const phaseLabel = this.getAccountSwitchPhaseLabel(state.phase);
+		const accountSuffix = state.accountLabel ? ` → ${state.accountLabel}` : '';
+		this.statusBarItem.text = `$(loading~spin) ${phaseLabel}${accountSuffix}`;
+		this.statusBarItem.tooltip = state.message || 'Переключение аккаунта Copilot Premium...';
+		this.statusBarItem.command = undefined;
+		this.statusBarItem.color = undefined;
+		this.statusBarItem.backgroundColor = undefined;
+		this.statusBarItem.show();
+	}
+
+	private getAccountSwitchPhaseLabel(phase: CopilotAccountSwitchState['phase']): string {
+		switch (phase) {
+			case 'detected':
+				return 'Смена аккаунта';
+			case 'syncing-extension':
+				return 'Синхронизация';
+			case 'awaiting-session':
+				return 'Ждём сессию';
+			case 'refreshing-usage':
+				return 'Обновляем usage';
+			case 'completed':
+				return 'Аккаунт обновлён';
+			case 'error':
+				return 'Ошибка смены';
+			case 'idle':
+			default:
+				return 'Copilot';
+		}
+	}
+
 	/**
 	 * Обновляет отображение статусбара на основе данных об использовании.
 	 * @param data — актуальные данные об использовании
@@ -164,6 +215,12 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 	private updateStatusBar(data: CopilotUsageData): void {
 		if (!this.isEnabled()) {
 			this.statusBarItem.hide();
+			return;
+		}
+
+		if (this.currentAccountSwitchState.isSwitching) {
+			this.pendingUsageWhileSwitching = data;
+			this.showAccountSwitchingState(this.currentAccountSwitchState);
 			return;
 		}
 

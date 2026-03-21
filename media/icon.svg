@@ -4,8 +4,10 @@
   <!-- Speech bubble -->
   <path d="M48 56h160c8.8 0 16 7.2 16 16v80c0 8.8-7.2 16-16 16h-40l-40 40v-40H48c-8.8 0-16-7.2-16-16V72c0-8.8 7.2-16 16-16z"
         stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <!-- Prompt chevron > -->
-  <path d="M72 92l30 24-30 24" stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <!-- Cursor line _ -->
-  <line x1="118" y1="140" x2="168" y2="140" stroke="white" stroke-width="12" stroke-linecap="round"/>
+  <!-- AI mark -->
+  <path d="M82 138l18-52 18 52" stroke="white" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="90" y1="118" x2="110" y2="118" stroke="white" stroke-width="10" stroke-linecap="round"/>
+  <line x1="134" y1="86" x2="170" y2="86" stroke="white" stroke-width="10" stroke-linecap="round"/>
+  <line x1="152" y1="86" x2="152" y2="138" stroke="white" stroke-width="10" stroke-linecap="round"/>
+  <line x1="134" y1="138" x2="170" y2="138" stroke="white" stroke-width="10" stroke-linecap="round"/>
 </svg>

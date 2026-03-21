@@ -1431,9 +1431,13 @@ export class CopilotUsageService implements vscode.Disposable {
 				accountLabel: expectedAccountLabel,
 			});
 			this.userExplicitAccountChoice = null;
+			const completedSnapshot: CopilotUsageSnapshot = {
+				...snapshot,
+				switchState: this.getAccountSwitchState(),
+			};
 
 			return {
-				...snapshot,
+				...completedSnapshot,
 				accountLabel: expectedAccountLabel,
 				message: `Аккаунт переключен на ${expectedAccountLabel}. Данные панели и статусбара обновлены.`,
 			};

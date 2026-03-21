@@ -160,7 +160,8 @@ export class CopilotUsagePanelManager {
 
 	private async pushUsageToWebview(webview: vscode.Webview, forceRefresh: boolean, snapshot?: CopilotUsageSnapshot): Promise<void> {
 		const resolvedSnapshot = snapshot ?? await this.usageService.getUsageSnapshot(forceRefresh);
-		const { usage, accountSummary, debugLog, switchState } = resolvedSnapshot;
+		const { usage, accountSummary, debugLog } = resolvedSnapshot;
+		const switchState = this.usageService.getAccountSwitchState();
 		const now = new Date();
 		const start = new Date(usage.periodStart);
 		const end = new Date(usage.periodEnd);

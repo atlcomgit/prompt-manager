@@ -1,13 +1,14 @@
 <svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Background rounded rect -->
-  <rect width="256" height="256" rx="24" fill="#0078d4"/>
+  <!-- Background -->
+  <rect width="256" height="256" rx="32" fill="#0078D4"/>
   <!-- Speech bubble -->
-  <path d="M48 56h160c8.8 0 16 7.2 16 16v80c0 8.8-7.2 16-16 16h-40l-40 40v-40H48c-8.8 0-16-7.2-16-16V72c0-8.8 7.2-16 16-16z"
-        stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <!-- AI mark -->
-  <path d="M82 138l18-52 18 52" stroke="white" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <line x1="90" y1="118" x2="110" y2="118" stroke="white" stroke-width="10" stroke-linecap="round"/>
-  <line x1="134" y1="86" x2="170" y2="86" stroke="white" stroke-width="10" stroke-linecap="round"/>
-  <line x1="152" y1="86" x2="152" y2="138" stroke="white" stroke-width="10" stroke-linecap="round"/>
-  <line x1="134" y1="138" x2="170" y2="138" stroke="white" stroke-width="10" stroke-linecap="round"/>
+  <path d="M44 32H212C223.046 32 232 40.954 232 52V162C232 173.046 223.046 182 212 182H152L128 218L104 182H44C32.954 182 24 173.046 24 162V52C24 40.954 32.954 32 44 32Z"
+    stroke="white" stroke-width="12" stroke-linejoin="round"/>
+  <!-- PM text: center of body = (128, 107) -->
+  <text x="128" y="107" dy="0.35em"
+    fill="white"
+    font-family="'DejaVu Sans Mono', 'Liberation Mono', monospace"
+    font-size="130"
+    font-weight="600"
+    text-anchor="middle">PM</text>
 </svg>

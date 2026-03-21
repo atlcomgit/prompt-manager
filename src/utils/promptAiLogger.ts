@@ -1,9 +1,8 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { clearPromptAiLogFileIfDateChanged, getPromptAiLogFilePath } from './promptAiLogFile.js';
 
-const PROMPT_AI_LOG_DIR = path.join('.vscode', 'prompt-manager');
-const PROMPT_AI_LOG_FILE = 'prompt-ai.log';
 const MAX_LOG_LINE_LENGTH = 1024;
 const ELLIPSIS = '...';
 
@@ -33,17 +32,49 @@ export async function appendPromptAiLog(entry: PromptAiLogEntry): Promise<void> 
 	const singleLinePrompt = normalizeSingleLine(rawPrompt);
 	const truncatedPrompt = truncateText(singleLinePrompt, maxPromptLength);
 	const line = `${prefix}${truncatedPrompt}${suffix}`.slice(0, MAX_LOG_LINE_LENGTH);
-	const logFilePath = path.join(workspaceRoot, PROMPT_AI_LOG_DIR, PROMPT_AI_LOG_FILE);
+	const logFilePath = getPromptAiLogFilePath(workspaceRoot);
 
-	appendQueue = appendQueue
-		.catch(() => undefined)
-		.then(async () => {
+	try {
+		await enqueuePromptAiLogOperation(async () => {
 			await fs.mkdir(path.dirname(logFilePath), { recursive: true });
 			await fs.appendFile(logFilePath, `${line}\n`, 'utf-8');
-		})
-		.catch(() => undefined);
+		});
+	} catch {
+		return;
+	}
+}
 
-	await appendQueue;
+export async function clearPromptAiLogIfDateChanged(options: { workspaceRoot?: string; now?: Date } = {}): Promise<boolean> {
+	const workspaceRoot = options.workspaceRoot ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!workspaceRoot) {
+		return false;
+	}
+
+	try {
+		return await enqueuePromptAiLogOperation(() => clearPromptAiLogFileIfDateChanged({
+			workspaceRoot,
+			now: options.now,
+		}));
+	} catch {
+		return false;
+	}
+}
+
+async function enqueuePromptAiLogOperation<T>(operation: () => Promise<T>): Promise<T> {
+	const previousOperation = appendQueue.catch(() => undefined);
+	let releaseQueue: (() => void) | undefined;
+
+	appendQueue = new Promise<void>(resolve => {
+		releaseQueue = resolve;
+	});
+
+	await previousOperation;
+
+	try {
+		return await operation();
+	} finally {
+		releaseQueue?.();
+	}
 }
 
 function formatTimestamp(date: Date): string {

@@ -34,7 +34,7 @@ import {
 	installPromptManagerConsoleInterceptor,
 	showPromptManagerOutputChannel,
 } from './utils/promptManagerOutput.js';
-import { appendPromptAiLog } from './utils/promptAiLogger.js';
+import { appendPromptAiLog, clearPromptAiLogIfDateChanged } from './utils/promptAiLogger.js';
 
 export function activate(context: vscode.ExtensionContext) {
 	getPromptManagerOutputChannel();
@@ -46,6 +46,7 @@ export function activate(context: vscode.ExtensionContext) {
 		disposePromptManagerOutputChannel();
 		return;
 	}
+	void clearPromptAiLogIfDateChanged({ workspaceRoot });
 
 	const extensionSettingsQuery = '@ext:alek-fiend.copilot-prompt-manager';
 

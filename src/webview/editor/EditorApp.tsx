@@ -628,6 +628,10 @@ export const EditorApp: React.FC = () => {
             description: promptRef.current.description || msg.prompt.description,
             updatedAt: msg.prompt.updatedAt,
             chatSessionIds: msg.prompt.chatSessionIds || promptRef.current.chatSessionIds,
+            timeSpentWriting: Math.max(msg.prompt.timeSpentWriting || 0, promptRef.current.timeSpentWriting || 0),
+            timeSpentImplementing: Math.max(msg.prompt.timeSpentImplementing || 0, promptRef.current.timeSpentImplementing || 0),
+            timeSpentOnTask: Math.max(msg.prompt.timeSpentOnTask || 0, promptRef.current.timeSpentOnTask || 0),
+            timeSpentUntracked: Math.max(msg.prompt.timeSpentUntracked || 0, promptRef.current.timeSpentUntracked || 0),
           };
           promptRef.current = mergedPrompt;
           setPrompt(mergedPrompt);

@@ -67,6 +67,24 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 			this.usageService.onDidChangeUsage((data) => this.updateStatusBar(data)),
 		);
 
+		// Показываем состояние переключения аккаунта в статусбаре
+		this.disposables.push(
+			this.usageService.onDidChangeAccountSwitchState((isSwitching) => {
+				if (isSwitching) {
+					this.statusBarItem.text = '$(loading~spin) Смена аккаунта...';
+					this.statusBarItem.tooltip = 'Переключение аккаунта Copilot Chat...';
+					this.statusBarItem.command = undefined;
+					this.statusBarItem.color = undefined;
+					this.statusBarItem.backgroundColor = undefined;
+				} else {
+					const cached = this.usageService.getCachedData();
+					if (cached) {
+						this.updateStatusBar(cached);
+					}
+				}
+			}),
+		);
+
 		// Подписываемся на изменения настроек
 		this.disposables.push(
 			vscode.workspace.onDidChangeConfiguration((e) => {

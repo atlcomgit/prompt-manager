@@ -11,6 +11,7 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +41,14 @@ export interface CopilotUsageData {
 	snapshots: Array<{ date: string; used: number; limit: number }>;
 }
 
+export interface CopilotUsageAccountSummary {
+	copilotPreferredGitHubLabel: string | null;
+	promptManagerPreferredGitHubLabel: string | null;
+	activeGithubSessionAccountLabel: string | null;
+	githubSessionIssue: string | null;
+	availableGitHubAccounts: Array<{ id: string; label: string }>;
+}
+
 /** Ключи для хранения состояния в globalState */
 const STATE_KEY_USAGE = 'promptManager.copilotUsage';
 
@@ -52,11 +61,18 @@ const MIN_FULL_REFRESH_INTERVAL_MS = 30 * 1000;
 const LAST_CHAT_ACTIVITY_KEY = 'promptManager.copilotUsage.lastChatActivity';
 const CHAT_REQUESTS_BASE_TOTAL_KEY = 'promptManager.copilotUsage.chatRequestsBaseTotal';
 const CHAT_REQUESTS_BASE_USED_KEY = 'promptManager.copilotUsage.chatRequestsBaseUsed';
+const GITHUB_AUTH_PROVIDER_ID = 'github';
+const COPILOT_CHAT_AUTH_PROVIDER_ID = '__GitHub.copilot-chat';
+const COPILOT_GITHUB_PREFERENCE_KEYS = ['github.copilot-github', 'github.copilot-chat-github'];
+const PROMPT_MANAGER_GITHUB_PREFERENCE_KEY = 'alek-fiend.copilot-prompt-manager-github';
 
 export class CopilotUsageService implements vscode.Disposable {
 	/** Событие обновления данных об использовании */
 	private readonly _onDidChangeUsage = new vscode.EventEmitter<CopilotUsageData>();
 	readonly onDidChangeUsage = this._onDidChangeUsage.event;
+	private readonly _onDidChangeAccountSwitchState = new vscode.EventEmitter<boolean>();
+	readonly onDidChangeAccountSwitchState = this._onDidChangeAccountSwitchState.event;
+	private readonly disposables: vscode.Disposable[] = [];
 
 	/** Таймер автоматического обновления */
 	private autoRefreshTimer: ReturnType<typeof setInterval> | undefined;
@@ -72,6 +88,12 @@ export class CopilotUsageService implements vscode.Disposable {
 	private lastKnownAuthenticated = false;
 	private lastDebugLog = '';
 	private lastFullRefreshTimestamp = 0;
+	private lastKnownCopilotGitHubPreference: string | null | undefined;
+	private lastGitHubSessionIssue: string | null = null;
+	private copilotPreferencePollingTimer: ReturnType<typeof setInterval> | undefined;
+	private isSwitchingAccount = false;
+	/** Когда пользователь явно выбрал аккаунт — не перезаписывать автоматически из Copilot Chat */
+	private userExplicitAccountChoice: string | null = null;
 
 	private isDebugVerbose(): boolean {
 		const config = vscode.workspace.getConfiguration('promptManager');
@@ -128,6 +150,21 @@ export class CopilotUsageService implements vscode.Disposable {
 			}
 		}
 		return null;
+	}
+
+	private async getCurrentWorkspaceStateDbPath(): Promise<string | null> {
+		const storageUriPath = this.context.storageUri?.fsPath;
+		if (!storageUriPath) {
+			return null;
+		}
+
+		const candidate = path.join(storageUriPath, '..', 'state.vscdb');
+		try {
+			await vscode.workspace.fs.stat(vscode.Uri.file(candidate));
+			return candidate;
+		} catch {
+			return null;
+		}
 	}
 
 	private async getWorkspaceStateDbPaths(): Promise<string[]> {
@@ -443,6 +480,176 @@ export class CopilotUsageService implements vscode.Disposable {
 	constructor(private readonly context: vscode.ExtensionContext) {
 		// Восстанавливаем сохранённое состояние при инициализации
 		this.restoreState();
+		this.disposables.push(
+			vscode.authentication.onDidChangeSessions((event) => {
+				if (!this.isRelevantAuthenticationProvider(event.provider.id)) {
+					return;
+				}
+
+				void this.handleAuthenticationSessionsChanged(event.provider.id);
+			}),
+		);
+		this.startCopilotPreferencePolling();
+	}
+
+	private isRelevantAuthenticationProvider(providerId: string): boolean {
+		return providerId === GITHUB_AUTH_PROVIDER_ID || providerId === COPILOT_CHAT_AUTH_PROVIDER_ID;
+	}
+
+	private async handleAuthenticationSessionsChanged(providerId: string): Promise<void> {
+		const ts = new Date().toISOString();
+		appendPromptManagerLog(
+			`[${ts}] [auth-event] onDidChangeSessions fired for provider: ${providerId}, userExplicitChoice=${this.userExplicitAccountChoice || 'none'}`,
+		);
+
+		// При смене сессии Copilot Chat — сбрасываем ручной выбор и синхронизируемся
+		if (providerId === COPILOT_CHAT_AUTH_PROVIDER_ID) {
+			const copilotChatAccount = await this.resolveCopilotChatBoundGitHubAccount();
+			appendPromptManagerLog(
+				`[${ts}] [auth-event] Copilot Chat session now: ${copilotChatAccount?.label || 'none'} (was: ${this.lastKnownCopilotGitHubPreference || 'none'})`,
+			);
+			// Copilot Chat сменился — сбрасываем ручной override, начинаем следовать за ним
+			if (this.userExplicitAccountChoice) {
+				appendPromptManagerLog(
+					`[${ts}] [auth-event] clearing userExplicitAccountChoice (was: ${this.userExplicitAccountChoice}) — Copilot Chat session changed`,
+				);
+				this.userExplicitAccountChoice = null;
+			}
+			const synced = await this.syncPreferenceFromCopilotChat(`auth-session-changed:${providerId}`);
+			appendPromptManagerLog(
+				`[${ts}] [auth-event] syncPreferenceFromCopilotChat result: synced=${synced}`,
+			);
+		}
+
+		if (providerId === GITHUB_AUTH_PROVIDER_ID) {
+			try {
+				const session = await vscode.authentication.getSession(GITHUB_AUTH_PROVIDER_ID, ['user:email', 'read:user'], { createIfNone: false });
+				appendPromptManagerLog(
+					`[${ts}] [auth-event] GitHub session now: ${session?.account.label || 'none'}`,
+				);
+			} catch { /* ignore */ }
+		}
+
+		await this.refreshAuthenticationBinding(`auth-session-changed:${providerId}`);
+	}
+
+	async checkAuthenticationBindingOnActivation(): Promise<void> {
+		const ts = new Date().toISOString();
+		appendPromptManagerLog(`[${ts}] [activation] === START checkAuthenticationBindingOnActivation ===`);
+
+		// При активации синхронизируем preference расширения с Copilot Chat
+		const synced = await this.syncPreferenceFromCopilotChat('activation');
+		appendPromptManagerLog(`[${ts}] [activation] syncPreferenceFromCopilotChat: synced=${synced}`);
+
+		await this.refreshAuthenticationBinding('activation');
+		appendPromptManagerLog(
+			`[${ts}] [activation] after refresh: authenticated=${this.cachedData?.authenticated}, account=${this.lastKnownCopilotGitHubPreference || 'none'}, issue=${this.lastGitHubSessionIssue || 'none'}`,
+		);
+	}
+
+	/**
+	 * Определяет текущий аккаунт Copilot Chat по живой сессии и синхронизирует расширение.
+	 * Живая сессия Copilot Chat — единственный надёжный source of truth.
+	 */
+	private async syncPreferenceFromCopilotChat(reason: string): Promise<boolean> {
+		try {
+			// Если пользователь явно выбрал аккаунт — не перезаписываем его выбор
+			if (this.userExplicitAccountChoice) {
+				appendPromptManagerLog(
+					`[${new Date().toISOString()}] [sync] ${reason}: SKIP — userExplicitAccountChoice=${this.userExplicitAccountChoice}`,
+				);
+				return false;
+			}
+
+			// Приоритет: живая сессия Copilot Chat → DB preference (fallback)
+			const copilotChatAccount = await this.resolveCopilotChatBoundGitHubAccount();
+			const dbPreference = await this.resolveCopilotPreferredGitHubAccountLabel();
+			const actualLabel = copilotChatAccount?.label ?? dbPreference;
+
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [sync] ${reason}: copilotChat=${copilotChatAccount?.label || 'none'}, db=${dbPreference || 'none'}, known=${this.lastKnownCopilotGitHubPreference || 'none'}, actual=${actualLabel || 'none'}`,
+			);
+
+			if (!actualLabel) {
+				return false;
+			}
+
+			const normalizedActual = actualLabel.trim().toLowerCase();
+			const normalizedKnown = this.lastKnownCopilotGitHubPreference?.trim().toLowerCase();
+
+			if (normalizedActual !== normalizedKnown) {
+				appendPromptManagerLog(
+					`[${new Date().toISOString()}] [sync] ${reason}: CHANGED from ${this.lastKnownCopilotGitHubPreference || 'none'} → ${actualLabel}`,
+				);
+				await this.persistPreferredAccountLabel(PROMPT_MANAGER_GITHUB_PREFERENCE_KEY, actualLabel);
+				this.lastKnownCopilotGitHubPreference = actualLabel;
+				return true;
+			}
+
+			return false;
+		} catch (err) {
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [sync] ${reason}: ERROR ${String(err)}`,
+			);
+			return false;
+		}
+	}
+
+	/**
+	 * Периодически проверяет, не изменился ли аккаунт Copilot Chat (через state.vscdb).
+	 * Если обнаружено расхождение — автоматически переключает расширение на тот же аккаунт.
+	 */
+	private startCopilotPreferencePolling(): void {
+		this.stopCopilotPreferencePolling();
+		// Проверяем каждые 15 секунд
+		this.copilotPreferencePollingTimer = setInterval(() => {
+			if (this.isSwitchingAccount || this.isFetching) {
+				return;
+			}
+			void this.pollCopilotPreferenceChange();
+		}, 15_000);
+	}
+
+	private stopCopilotPreferencePolling(): void {
+		if (this.copilotPreferencePollingTimer) {
+			clearInterval(this.copilotPreferencePollingTimer);
+			this.copilotPreferencePollingTimer = undefined;
+		}
+	}
+
+	private async pollCopilotPreferenceChange(): Promise<void> {
+		try {
+			const synced = await this.syncPreferenceFromCopilotChat('preference-poll');
+			if (synced) {
+				appendPromptManagerLog(
+					`[${new Date().toISOString()}] [poll] Copilot Chat account change detected, refreshing...`,
+				);
+				this.lastApiCallTimestamp = 0;
+				this.lastFullRefreshTimestamp = 0;
+				await this.refreshAuthenticationBinding('copilot-chat-account-changed');
+			}
+		} catch {
+			// keep polling resilient
+		}
+	}
+
+	private async refreshAuthenticationBinding(reason: string): Promise<void> {
+		this.lastApiCallTimestamp = 0;
+		this.lastFullRefreshTimestamp = 0;
+
+		if (this.cachedData) {
+			this.cachedData = {
+				...this.cachedData,
+				lastUpdated: new Date().toISOString(),
+				lastSyncStatus: reason,
+			};
+		}
+
+		try {
+			await this.fetchUsage(true);
+		} catch {
+			// keep extension resilient on auth provider glitches
+		}
 	}
 
 	/**
@@ -476,12 +683,495 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 	}
 
+	private async readStateValue(dbPath: string, key: string): Promise<string | null> {
+		try {
+			const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
+			const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
+			const raw = (stdout || '').trim();
+			return raw || null;
+		} catch {
+			return null;
+		}
+	}
+
+	private async writeStateValue(dbPath: string, key: string, value: string): Promise<void> {
+		const sql = [
+			'BEGIN TRANSACTION;',
+			`INSERT INTO ItemTable(key, value) VALUES ('${this.escapeSql(key)}', '${this.escapeSql(value)}')`,
+			'ON CONFLICT(key) DO UPDATE SET value=excluded.value;',
+			'COMMIT;',
+		].join(' ');
+		await execFileAsync('sqlite3', [dbPath, sql]);
+	}
+
+	private async persistPreferredAccountLabel(key: string, accountLabel: string): Promise<void> {
+		const dbPaths = [
+			await this.getCurrentWorkspaceStateDbPath(),
+			await this.resolveGlobalStateDbPath(),
+		].filter((value): value is string => !!value);
+
+		for (const dbPath of dbPaths) {
+			try {
+				await this.writeStateValue(dbPath, key, accountLabel);
+			} catch {
+				appendPromptManagerLog(
+					`[${new Date().toISOString()}] [copilot-usage.auth] failed to persist ${key}=${accountLabel} into ${dbPath}`,
+				);
+			}
+		}
+	}
+
+	private async resolveCopilotPreferredGitHubAccountLabel(): Promise<string | null> {
+		const dbPaths = [
+			await this.getCurrentWorkspaceStateDbPath(),
+			await this.resolveGlobalStateDbPath(),
+		].filter((value): value is string => !!value);
+
+		for (const dbPath of dbPaths) {
+			for (const key of COPILOT_GITHUB_PREFERENCE_KEYS) {
+				const value = await this.readStateValue(dbPath, key);
+				if (value) {
+					return value;
+				}
+			}
+		}
+
+		return null;
+	}
+
+	private async resolvePromptManagerPreferredGitHubAccountLabel(): Promise<string | null> {
+		const dbPaths = [
+			await this.getCurrentWorkspaceStateDbPath(),
+			await this.resolveGlobalStateDbPath(),
+		].filter((value): value is string => !!value);
+
+		for (const dbPath of dbPaths) {
+			const value = await this.readStateValue(dbPath, PROMPT_MANAGER_GITHUB_PREFERENCE_KEY);
+			if (value) {
+				return value;
+			}
+		}
+
+		return null;
+	}
+
+	private async refreshCopilotGitHubPreference(): Promise<boolean> {
+		// Если пользователь явно выбрал аккаунт — не перезаписывать
+		if (this.userExplicitAccountChoice) {
+			return false;
+		}
+		// Приоритет: живая сессия Copilot Chat → DB preference
+		const copilotChatAccount = await this.resolveCopilotChatBoundGitHubAccount();
+		const preference = copilotChatAccount?.label
+			?? await this.resolveCopilotPreferredGitHubAccountLabel();
+		const changed = this.lastKnownCopilotGitHubPreference !== preference;
+		this.lastKnownCopilotGitHubPreference = preference;
+		return changed;
+	}
+
+	private async requestGitHubSessionForAccount(
+		account: vscode.AuthenticationSessionAccountInformation,
+		createIfNone: boolean,
+	): Promise<vscode.AuthenticationSession | null> {
+		try {
+			return await vscode.authentication.getSession(
+				GITHUB_AUTH_PROVIDER_ID,
+				['repo', 'workflow', 'user:email', 'read:user'],
+				{
+					createIfNone,
+					clearSessionPreference: true,
+					account,
+				},
+			);
+		} catch {
+			return null;
+		}
+	}
+
+	private async syncPromptManagerGitHubPreference(
+		preferredAccount: vscode.AuthenticationSessionAccountInformation | undefined,
+		createIfNone: boolean,
+	): Promise<void> {
+		if (!preferredAccount) {
+			return;
+		}
+
+		const promptManagerPreference = await this.resolvePromptManagerPreferredGitHubAccountLabel();
+		if (promptManagerPreference?.trim().toLowerCase() === preferredAccount.label.trim().toLowerCase()) {
+			return;
+		}
+
+		appendPromptManagerLog(
+			`[${new Date().toISOString()}] [copilot-usage.auth] sync prompt-manager preference from ${promptManagerPreference || 'none'} to ${preferredAccount.label}`,
+		);
+
+		try {
+			await vscode.authentication.getSession(
+				GITHUB_AUTH_PROVIDER_ID,
+				['repo', 'workflow', 'user:email', 'read:user'],
+				{
+					createIfNone,
+					clearSessionPreference: true,
+					account: preferredAccount,
+				},
+			);
+		} catch {
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [copilot-usage.auth] sync prompt-manager preference failed for account ${preferredAccount.label}`,
+			);
+			// fall back to regular getSession flow below
+		}
+	}
+
+	private isSameGitHubAccount(
+		session: vscode.AuthenticationSession | null | undefined,
+		preferredAccount: vscode.AuthenticationSessionAccountInformation | undefined,
+	): boolean {
+		if (!session || !preferredAccount) {
+			return true;
+		}
+
+		if (session.account.id && preferredAccount.id && session.account.id === preferredAccount.id) {
+			return true;
+		}
+
+		return session.account.label.trim().toLowerCase() === preferredAccount.label.trim().toLowerCase();
+	}
+
+	private async retryGitHubSessionWithClearedPreference(
+		scopes: string[],
+		preferredAccount: vscode.AuthenticationSessionAccountInformation,
+		createIfNone: boolean,
+	): Promise<vscode.AuthenticationSession | null> {
+		appendPromptManagerLog(
+			`[${new Date().toISOString()}] [copilot-usage.auth] retry getSession with cleared preference for account ${preferredAccount.label} scopes=${scopes.join(',')}`,
+		);
+		try {
+			return await vscode.authentication.getSession(
+				GITHUB_AUTH_PROVIDER_ID,
+				scopes,
+				{
+					createIfNone,
+					clearSessionPreference: true,
+					account: preferredAccount,
+				},
+			);
+		} catch {
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [copilot-usage.auth] retry getSession with cleared preference failed for account ${preferredAccount.label}`,
+			);
+			return null;
+		}
+	}
+
+	private summarizeSession(session: vscode.AuthenticationSession | null | undefined): Record<string, unknown> | null {
+		if (!session) {
+			return null;
+		}
+
+		return {
+			id: session.id,
+			accountLabel: session.account.label,
+			accountId: session.account.id,
+			scopes: [...session.scopes].sort(),
+		};
+	}
+
+	private async buildPreferenceSnapshot(dbPath: string | null): Promise<Record<string, string | null>> {
+		if (!dbPath) {
+			return {};
+		}
+
+		const snapshot: Record<string, string | null> = {};
+		for (const key of [...COPILOT_GITHUB_PREFERENCE_KEYS, PROMPT_MANAGER_GITHUB_PREFERENCE_KEY]) {
+			snapshot[key] = await this.readStateValue(dbPath, key);
+		}
+		return snapshot;
+	}
+
+	async buildDiagnosticsReport(): Promise<string> {
+		const timestamp = new Date().toISOString();
+		const workspaceDbPath = await this.getCurrentWorkspaceStateDbPath();
+		const globalDbPath = await this.resolveGlobalStateDbPath();
+		const workspacePreferences = await this.buildPreferenceSnapshot(workspaceDbPath);
+		const globalPreferences = await this.buildPreferenceSnapshot(globalDbPath);
+		const copilotPreference = await this.resolveCopilotPreferredGitHubAccountLabel();
+		const promptManagerPreference = await this.resolvePromptManagerPreferredGitHubAccountLabel();
+		const githubAccounts = await vscode.authentication.getAccounts(GITHUB_AUTH_PROVIDER_ID).catch(() => []);
+		const preferredAccount = await this.resolveGitHubAccountByLabel(copilotPreference);
+		const copilotChatSession = await vscode.authentication.getSession(
+			COPILOT_CHAT_AUTH_PROVIDER_ID,
+			[],
+			{ createIfNone: false },
+		).catch(() => null);
+		const defaultGithubSession = await vscode.authentication.getSession(
+			GITHUB_AUTH_PROVIDER_ID,
+			['repo', 'workflow', 'user:email', 'read:user'],
+			{ createIfNone: false },
+		).catch(() => null);
+		const preferredGithubSession = preferredAccount
+			? await vscode.authentication.getSession(
+				GITHUB_AUTH_PROVIDER_ID,
+				['repo', 'workflow', 'user:email', 'read:user'],
+				{ createIfNone: false, account: preferredAccount },
+			).catch(() => null)
+			: null;
+
+		const report = {
+			timestamp,
+			workspaceStateDbPath: workspaceDbPath,
+			globalStateDbPath: globalDbPath,
+			workspacePreferences,
+			globalPreferences,
+			copilotPreferredGitHubLabel: copilotPreference,
+			promptManagerPreferredGitHubLabel: promptManagerPreference,
+			lastKnownCopilotGitHubPreference: this.lastKnownCopilotGitHubPreference,
+			availableGitHubAccounts: githubAccounts.map((account) => ({ id: account.id, label: account.label })),
+			resolvedPreferredGitHubAccount: preferredAccount ? { id: preferredAccount.id, label: preferredAccount.label } : null,
+			copilotChatSession: this.summarizeSession(copilotChatSession),
+			defaultGithubSession: this.summarizeSession(defaultGithubSession),
+			preferredGithubSession: this.summarizeSession(preferredGithubSession),
+			lastGitHubSessionIssue: this.lastGitHubSessionIssue,
+			cachedUsage: this.cachedData,
+			lastDebugLog: this.lastDebugLog,
+		};
+
+		return JSON.stringify(report, null, 2);
+	}
+
+	async getAccountBindingSummary(): Promise<CopilotUsageAccountSummary> {
+		const [
+			copilotChatBoundAccount,
+			copilotDbPreference,
+			promptManagerPreferredGitHubLabel,
+			availableGitHubAccounts,
+			defaultGithubSession,
+		] = await Promise.all([
+			this.resolveCopilotChatBoundGitHubAccount(),
+			this.resolveCopilotPreferredGitHubAccountLabel(),
+			this.resolvePromptManagerPreferredGitHubAccountLabel(),
+			Promise.resolve(vscode.authentication.getAccounts(GITHUB_AUTH_PROVIDER_ID)).catch(() => [] as readonly vscode.AuthenticationSessionAccountInformation[]),
+			Promise.resolve(vscode.authentication.getSession(
+				GITHUB_AUTH_PROVIDER_ID,
+				['repo', 'workflow', 'user:email', 'read:user'],
+				{ createIfNone: false },
+			)).catch(() => null as vscode.AuthenticationSession | null),
+		]);
+
+		// Живая сессия Copilot Chat — приоритет, DB preference — fallback
+		const copilotPreferredGitHubLabel = copilotChatBoundAccount?.label ?? copilotDbPreference;
+
+		return {
+			copilotPreferredGitHubLabel,
+			promptManagerPreferredGitHubLabel,
+			activeGithubSessionAccountLabel: defaultGithubSession?.account.label || null,
+			githubSessionIssue: this.lastGitHubSessionIssue,
+			availableGitHubAccounts: availableGitHubAccounts.map((a: { id: string; label: string }) => ({ id: a.id, label: a.label })),
+		};
+	}
+
+	async switchCopilotChatAccountInteractively(): Promise<{ changed: boolean; cancelled?: boolean; message: string }> {
+		const ts = () => new Date().toISOString();
+
+		// Собираем начальное состояние для логов
+		const copilotChatAccountBefore = await this.resolveCopilotChatBoundGitHubAccount();
+		const dbPreferenceBefore = await this.resolveCopilotPreferredGitHubAccountLabel();
+		appendPromptManagerLog(
+			`[${ts()}] [switch] === START switchAccount ===\n` +
+			`[${ts()}] [switch] copilotChat live session: ${copilotChatAccountBefore?.label || 'none'} (id: ${copilotChatAccountBefore?.id || 'none'})\n` +
+			`[${ts()}] [switch] DB preference (copilot keys): ${dbPreferenceBefore || 'none'}\n` +
+			`[${ts()}] [switch] lastKnownCopilotGitHubPreference: ${this.lastKnownCopilotGitHubPreference || 'none'}`,
+		);
+
+		this.isSwitchingAccount = true;
+		this._onDidChangeAccountSwitchState.fire(true);
+
+		try {
+			// ===== ШАГ 1: Переключаем Copilot Chat через внутреннюю команду VS Code =====
+			// Это тот же механизм, что использует "Управление настройками учетной записи расширения"
+			appendPromptManagerLog(`[${ts()}] [switch] calling _manageAccountPreferencesForExtension for github.copilot-chat...`);
+
+			try {
+				await vscode.commands.executeCommand(
+					'_manageAccountPreferencesForExtension',
+					'github.copilot-chat',
+					'github',
+				);
+			} catch (err) {
+				appendPromptManagerLog(`[${ts()}] [switch] _manageAccountPreferencesForExtension threw: ${String(err)}`);
+				// Fallback: пробуем переключить только расширение через clearSessionPreference
+				appendPromptManagerLog(`[${ts()}] [switch] fallback: calling clearSessionPreference...`);
+				try {
+					const fallbackSession = await vscode.authentication.getSession(
+						GITHUB_AUTH_PROVIDER_ID,
+						['user:email', 'read:user'],
+						{ clearSessionPreference: true, createIfNone: true },
+					);
+					if (!fallbackSession) {
+						return { changed: false, cancelled: true, message: 'Выбор аккаунта отменён.' };
+					}
+				} catch (err2) {
+					appendPromptManagerLog(`[${ts()}] [switch] fallback also threw: ${String(err2)}`);
+					return { changed: false, message: `Ошибка смены аккаунта: ${String(err)}` };
+				}
+			}
+
+			// Небольшая задержка чтобы VS Code обработал смену preference
+			await new Promise(resolve => setTimeout(resolve, 500));
+
+			// ===== ШАГ 2: Определяем на какой аккаунт переключился Copilot Chat =====
+			const copilotChatAccountAfter = await this.resolveCopilotChatBoundGitHubAccount();
+			const newAccountLabel = copilotChatAccountAfter?.label;
+
+			appendPromptManagerLog(
+				`[${ts()}] [switch] after picker: copilotChat live session: ${newAccountLabel || 'none'}`,
+			);
+
+			// Если Copilot Chat не изменился — возможно пользователь отменил
+			if (!newAccountLabel) {
+				appendPromptManagerLog(`[${ts()}] [switch] no copilot chat session after switch — cancelled?`);
+				return { changed: false, cancelled: true, message: 'Аккаунт Copilot Chat не определён после смены.' };
+			}
+
+			const accountChanged = copilotChatAccountBefore?.label !== newAccountLabel;
+			if (!accountChanged) {
+				appendPromptManagerLog(`[${ts()}] [switch] copilot chat account unchanged: ${newAccountLabel}`);
+				return { changed: false, cancelled: true, message: 'Аккаунт не изменён.' };
+			}
+
+			// ===== ШАГ 3: Синхронизируем расширение с новым аккаунтом Copilot Chat =====
+			appendPromptManagerLog(`[${ts()}] [switch] syncing extension to new copilot chat account: ${newAccountLabel}`);
+
+			this.userExplicitAccountChoice = newAccountLabel;
+			this.lastKnownCopilotGitHubPreference = newAccountLabel;
+			this.lastGitHubSessionIssue = null;
+			await this.persistPreferredAccountLabel(PROMPT_MANAGER_GITHUB_PREFERENCE_KEY, newAccountLabel);
+
+			// Обновляем данные расширения
+			await this.refreshAuthenticationBinding('manual-account-switch');
+
+			// Проверяем финальное состояние
+			const dbPreferenceAfter = await this.resolveCopilotPreferredGitHubAccountLabel();
+			appendPromptManagerLog(
+				`[${ts()}] [switch] === AFTER switchAccount ===\n` +
+				`[${ts()}] [switch] extension account: ${newAccountLabel}\n` +
+				`[${ts()}] [switch] copilotChat live session: ${newAccountLabel}\n` +
+				`[${ts()}] [switch] DB preference (copilot keys): ${dbPreferenceAfter || 'none'}\n` +
+				`[${ts()}] [switch] authenticated: ${this.cachedData?.authenticated}\n` +
+				`[${ts()}] [switch] lastGitHubSessionIssue: ${this.lastGitHubSessionIssue || 'none'}`,
+			);
+
+			if (this.cachedData?.authenticated) {
+				return {
+					changed: true,
+					message: `Copilot Chat и расширение переключены на ${newAccountLabel}.`,
+				};
+			}
+
+			return {
+				changed: true,
+				message: `Аккаунт переключён на ${newAccountLabel}, но usage пока недоступен.`,
+			};
+		} finally {
+			appendPromptManagerLog(`[${ts()}] [switch] === END switchAccount ===`);
+		}
+	}
+
+	/** Вызывается panel manager'ом, когда данные обновлены и overlay можно скрыть */
+	endAccountSwitching(): void {
+		this.isSwitchingAccount = false;
+		this._onDidChangeAccountSwitchState.fire(false);
+	}
+
+	private async resolveGitHubAccountByLabel(accountLabel: string | null): Promise<vscode.AuthenticationSessionAccountInformation | undefined> {
+		if (!accountLabel) {
+			return undefined;
+		}
+
+		try {
+			const githubAccounts = await vscode.authentication.getAccounts(GITHUB_AUTH_PROVIDER_ID);
+			const normalizedLabel = accountLabel.trim().toLowerCase();
+			return githubAccounts.find((account) => account.label.trim().toLowerCase() === normalizedLabel);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async resolveCopilotChatBoundGitHubAccount(): Promise<vscode.AuthenticationSessionAccountInformation | undefined> {
+		try {
+			const copilotChatSession = await vscode.authentication.getSession(
+				COPILOT_CHAT_AUTH_PROVIDER_ID,
+				[],
+				{ createIfNone: false },
+			);
+			const copilotChatAccount = copilotChatSession?.account;
+			if (!copilotChatAccount) {
+				return undefined;
+			}
+
+			const githubAccounts = await vscode.authentication.getAccounts(GITHUB_AUTH_PROVIDER_ID);
+			return githubAccounts.find((account) => {
+				if (copilotChatAccount.id && account.id === copilotChatAccount.id) {
+					return true;
+				}
+
+				return account.label.trim().toLowerCase() === copilotChatAccount.label.trim().toLowerCase();
+			});
+		} catch {
+			return undefined;
+		}
+	}
+
 	/**
 	 * Получает GitHub сессию через VS Code Authentication API.
 	 * @param createIfNone — создавать ли новую сессию, если её нет
 	 * @returns Сессия или null, если пользователь не авторизован
 	 */
 	private async getGitHubSession(createIfNone: boolean = false): Promise<vscode.AuthenticationSession | null> {
+		const ts = new Date().toISOString();
+
+		// Приоритет:
+		// 1. Явный выбор пользователя (через кнопку "Сменить аккаунт") — высший приоритет
+		// 2. Живая сессия Copilot Chat — auto-follow
+		// 3. DB preference / кэш — fallback
+		let preferredAccount: vscode.AuthenticationSessionAccountInformation | undefined;
+		let source = 'none';
+
+		if (this.userExplicitAccountChoice) {
+			preferredAccount = await this.resolveGitHubAccountByLabel(this.userExplicitAccountChoice);
+			if (preferredAccount) {
+				source = `explicit:${this.userExplicitAccountChoice}`;
+			}
+		}
+
+		if (!preferredAccount) {
+			const copilotChatBound = await this.resolveCopilotChatBoundGitHubAccount();
+			if (copilotChatBound) {
+				preferredAccount = copilotChatBound;
+				source = `copilot-chat:${copilotChatBound.label}`;
+			}
+		}
+
+		if (!preferredAccount) {
+			const fallbackLabel = this.lastKnownCopilotGitHubPreference === undefined
+				? await this.resolveCopilotPreferredGitHubAccountLabel()
+				: this.lastKnownCopilotGitHubPreference;
+			preferredAccount = await this.resolveGitHubAccountByLabel(fallbackLabel);
+			source = `fallback:${fallbackLabel || 'none'}`;
+		}
+
+		appendPromptManagerLog(
+			`[${ts}] [getSession] source=${source!}, preferred=${preferredAccount?.label || 'none'}, explicitChoice=${this.userExplicitAccountChoice || 'none'}, createIfNone=${createIfNone}`,
+		);
+
+		this.lastGitHubSessionIssue = null;
+		if (preferredAccount && !this.userExplicitAccountChoice) {
+			this.lastKnownCopilotGitHubPreference = preferredAccount.label;
+		}
+		// Не перезаписывать PM preference, если пользователь явно выбрал аккаунт
+		if (!this.userExplicitAccountChoice) {
+			await this.syncPromptManagerGitHubPreference(preferredAccount, createIfNone);
+		}
 		const scopesVariants: string[][] = [
 			['repo', 'workflow', 'user:email', 'read:user'],
 			['read:user', 'user:email'],
@@ -494,11 +1184,28 @@ export class CopilotUsageService implements vscode.Disposable {
 
 		for (const scopes of scopesVariants) {
 			try {
-				const session = await vscode.authentication.getSession(
-					'github',
+				let session = await vscode.authentication.getSession(
+					GITHUB_AUTH_PROVIDER_ID,
 					scopes,
-					{ createIfNone: createIfNone && scopes === scopesVariants[0] },
+					{
+						createIfNone: createIfNone && scopes === scopesVariants[0],
+						...(preferredAccount ? { account: preferredAccount } : {}),
+					},
 				);
+				if (!this.isSameGitHubAccount(session, preferredAccount) && preferredAccount) {
+					appendPromptManagerLog(
+						`[${new Date().toISOString()}] [copilot-usage.auth] getSession returned account ${session?.account.label || 'none'} instead of preferred ${preferredAccount.label}`,
+					);
+					session = await this.retryGitHubSessionWithClearedPreference(
+						scopes,
+						preferredAccount,
+						createIfNone && scopes === scopesVariants[0],
+					) ?? session;
+				}
+				if (!this.isSameGitHubAccount(session, preferredAccount) && preferredAccount) {
+					this.lastGitHubSessionIssue = `github-session-account-mismatch: expected=${preferredAccount.label}; actual=${session?.account.label || 'none'}`;
+					continue;
+				}
 				if (session) {
 					return session;
 				}
@@ -508,12 +1215,31 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 
 		if (!createIfNone) {
+			if (preferredAccount && !this.lastGitHubSessionIssue) {
+				this.lastGitHubSessionIssue = `github-session-not-accessible-for-preferred-account: ${preferredAccount.label}`;
+			}
+
 			return null;
 		}
 
 		try {
-			return await vscode.authentication.getSession('github', ['repo', 'workflow', 'user:email', 'read:user'], { createIfNone: true });
+			const session = await vscode.authentication.getSession(
+				GITHUB_AUTH_PROVIDER_ID,
+				['repo', 'workflow', 'user:email', 'read:user'],
+				{
+					createIfNone: true,
+					...(preferredAccount ? { account: preferredAccount } : {}),
+				},
+			);
+			if (!this.isSameGitHubAccount(session, preferredAccount) && preferredAccount) {
+				this.lastGitHubSessionIssue = `github-session-account-mismatch-after-create: expected=${preferredAccount.label}; actual=${session?.account.label || 'none'}`;
+				return null;
+			}
+			return session;
 		} catch {
+			if (preferredAccount) {
+				this.lastGitHubSessionIssue = `github-session-create-failed-for-preferred-account: ${preferredAccount.label}`;
+			}
 			return null;
 		}
 	}
@@ -1010,6 +1736,13 @@ export class CopilotUsageService implements vscode.Disposable {
 	 * @returns Данные об использовании
 	 */
 	async fetchUsage(forceRefresh: boolean = false): Promise<CopilotUsageData> {
+		const copilotPreferenceChanged = await this.refreshCopilotGitHubPreference();
+		if (copilotPreferenceChanged) {
+			forceRefresh = true;
+			this.lastApiCallTimestamp = 0;
+			this.lastFullRefreshTimestamp = 0;
+		}
+
 		const now = Date.now();
 		const fullRefreshThrottled = !forceRefresh
 			&& !!this.cachedData
@@ -1017,6 +1750,7 @@ export class CopilotUsageService implements vscode.Disposable {
 		if (fullRefreshThrottled && this.cachedData) {
 			this.lastDebugLog = this.formatDebugLog([
 				`[fetch] forceRefresh=${forceRefresh} fullRefreshThrottled=true now=${new Date(now).toISOString()}`,
+				`[auth] copilotPreference=${this.lastKnownCopilotGitHubPreference || 'none'} changed=${copilotPreferenceChanged}`,
 				`[cache] reuse-throttled-full-refresh ageMs=${now - this.lastFullRefreshTimestamp}`,
 				`[result] used=${this.cachedData.used} limit=${this.cachedData.limit} source=${this.cachedData.source} planType=${this.cachedData.planType}`,
 			]);
@@ -1029,6 +1763,7 @@ export class CopilotUsageService implements vscode.Disposable {
 		const shouldCallApi = forceRefresh || (now - this.lastApiCallTimestamp) >= minApiInterval;
 		const debugLines: string[] = [];
 		debugLines.push(`[fetch] forceRefresh=${forceRefresh} shouldCallApi=${shouldCallApi} minApiIntervalMs=${minApiInterval} now=${new Date(now).toISOString()}`);
+		debugLines.push(`[auth] copilotPreference=${this.lastKnownCopilotGitHubPreference || 'none'} changed=${copilotPreferenceChanged}`);
 
 		// Защита от параллельных запросов
 		if (this.isFetching && this.cachedData) {
@@ -1069,7 +1804,7 @@ export class CopilotUsageService implements vscode.Disposable {
 					authenticated: false,
 					planType: 'unknown',
 					source: 'local',
-					lastSyncStatus: 'github-session-not-found',
+					lastSyncStatus: this.lastGitHubSessionIssue || 'github-session-not-found',
 					snapshots: this.cachedData?.snapshots || [],
 				};
 				this.cachedData = unauthData;
@@ -1341,6 +2076,11 @@ export class CopilotUsageService implements vscode.Disposable {
 	 */
 	dispose(): void {
 		this.stopAutoRefresh();
+		this.stopCopilotPreferencePolling();
+		for (const disposable of this.disposables) {
+			disposable.dispose();
+		}
 		this._onDidChangeUsage.dispose();
+		this._onDidChangeAccountSwitchState.dispose();
 	}
 }

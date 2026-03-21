@@ -21,6 +21,11 @@ type UsageViewModel = {
 	recommendedPerDay: number;
 	timeline: TimelinePoint[];
 	debugLog?: string;
+	copilotPreferredGitHubLabel?: string | null;
+	promptManagerPreferredGitHubLabel?: string | null;
+	activeGithubSessionAccountLabel?: string | null;
+	githubSessionIssue?: string | null;
+	availableGitHubAccounts?: Array<{ id: string; label: string }>;
 };
 
 const vscode = getVsCodeApi();
@@ -128,11 +133,18 @@ const DailyBars: React.FC<{ points: TimelinePoint[] }> = ({ points }) => {
 export const CopilotUsageApp: React.FC = () => {
 	const [data, setData] = useState<UsageViewModel | null>(null);
 	const [isRefreshing, setIsRefreshing] = useState(false);
+	const [isSwitchingAccount, setIsSwitchingAccount] = useState(false);
 	const [refreshedAt, setRefreshedAt] = useState<string>('');
+	const [accountSwitchMessage, setAccountSwitchMessage] = useState<string>('');
 
 	const requestData = useCallback(() => {
 		setIsRefreshing(true);
 		vscode.postMessage({ type: 'copilotUsage.refresh' });
+	}, []);
+
+	const switchAccount = useCallback(() => {
+		setAccountSwitchMessage('');
+		vscode.postMessage({ type: 'copilotUsage.switchAccount' });
 	}, []);
 
 	useEffect(() => {
@@ -148,21 +160,47 @@ export const CopilotUsageApp: React.FC = () => {
 			setRefreshedAt(String(msg.at || ''));
 			setIsRefreshing(false);
 		}
+		if (msg?.type === 'copilotUsage.accountSwitching') {
+			setIsSwitchingAccount(Boolean(msg.isSwitching));
+			if (msg.isSwitching) {
+				setAccountSwitchMessage('');
+			}
+		}
+		if (msg?.type === 'copilotUsage.accountSwitchResult') {
+			setAccountSwitchMessage(String(msg.result?.message || ''));
+		}
 	});
 
 	if (!data) {
 		return <div style={styles.loading}>Загрузка статистики Copilot Premium...</div>;
 	}
 
+	const switchingOverlay = isSwitchingAccount ? (
+		<div style={styles.switchingOverlay}>
+			<style>{`@keyframes copilot-spin { to { transform: rotate(360deg); } }`}</style>
+			<div style={styles.switchingCard}>
+				<div style={{ fontSize: '28px', lineHeight: 1, animation: 'copilot-spin 1s linear infinite', display: 'inline-block' }}>&#x21BB;</div>
+				<div style={styles.switchingTitle}>Переключение аккаунта...</div>
+				<div style={styles.switchingText}>Обновляются данные расширения и статус-бар</div>
+			</div>
+		</div>
+	) : null;
+
 	if (!data.authenticated) {
 		return (
 			<div style={styles.page}>
+				{switchingOverlay}
 				<h2 style={styles.title}>Copilot Premium Usage</h2>
 				<div style={styles.authCard}>
 					<div style={styles.authTitle}>Авторизуйтесь для просмотра статистики</div>
 					<div style={styles.authText}>Расширение не получило GitHub-сессию с нужными правами доступа.</div>
+					<div style={styles.authText}>Copilot Chat: <b>{data.copilotPreferredGitHubLabel || 'не определён'}</b></div>
+					<div style={styles.authText}>Prompt Manager session: <b>{data.activeGithubSessionAccountLabel || 'недоступна'}</b></div>
+					{data.githubSessionIssue ? <div style={styles.warningBox}>{data.githubSessionIssue}</div> : null}
+					{accountSwitchMessage ? <div style={styles.infoBox}>{accountSwitchMessage}</div> : null}
 					<div style={styles.actionsRow}>
 						<button style={styles.primaryButton} onClick={() => vscode.postMessage({ type: 'copilotUsage.auth' })}>Авторизоваться</button>
+						<button style={styles.secondaryButton} onClick={switchAccount} disabled={isSwitchingAccount}>{isSwitchingAccount ? 'Переключение…' : 'Сменить аккаунт'}</button>
 						<button style={styles.secondaryButton} onClick={() => vscode.postMessage({ type: 'copilotUsage.openGitHub' })}>Открыть GitHub Copilot</button>
 					</div>
 				</div>
@@ -212,17 +250,23 @@ export const CopilotUsageApp: React.FC = () => {
 
 	return (
 		<div style={styles.page}>
+			{switchingOverlay}
 			<div style={styles.headerRow}>
 				<div>
 					<h2 style={styles.title}>Copilot Premium Usage</h2>
 					<div style={styles.subTitle}>Период: {formatDate(data.periodStart)} — {formatDate(data.periodEnd)}</div>
+					<div style={styles.subTitle}>Copilot Chat: {data.copilotPreferredGitHubLabel || 'не определён'} · Session: {data.activeGithubSessionAccountLabel || 'недоступна'}</div>
 				</div>
 				<div style={styles.actionsRow}>
-					<button style={styles.secondaryButton} onClick={requestData}>{isRefreshing ? 'Обновление…' : 'Обновить'}</button>
+					<button style={styles.secondaryButton} onClick={requestData} disabled={isSwitchingAccount}>{isRefreshing ? 'Обновление…' : 'Обновить'}</button>
+					<button style={styles.secondaryButton} onClick={switchAccount} disabled={isSwitchingAccount}>{isSwitchingAccount ? 'Переключение…' : 'Сменить аккаунт'}</button>
 					<button style={styles.secondaryButton} onClick={() => vscode.postMessage({ type: 'copilotUsage.openSettings' })}>Настройки</button>
 					<button style={styles.secondaryButton} onClick={() => vscode.postMessage({ type: 'copilotUsage.openGitHub' })}>GitHub</button>
 				</div>
 			</div>
+
+			{accountSwitchMessage ? <div style={styles.infoBox}>{accountSwitchMessage}</div> : null}
+			{data.githubSessionIssue ? <div style={styles.warningBox}>{data.githubSessionIssue}</div> : null}
 
 			<div style={styles.mainGrid}>
 				<div style={styles.leftCol}>
@@ -305,6 +349,10 @@ export const CopilotUsageApp: React.FC = () => {
 						<div style={styles.infoText}>GitHub API usage может не возвращать данные из токена VS Code (ограничение scopes / endpoint-доступа).</div>
 						<div style={styles.infoText}>Если API недоступен, используются локальные источники state.vscdb и кэш расширения.</div>
 						<div style={styles.infoText}>Текущий источник: <b>{data.source}</b></div>
+						<div style={styles.infoText}>Copilot Chat account: <b>{data.copilotPreferredGitHubLabel || 'не определён'}</b></div>
+						<div style={styles.infoText}>Prompt Manager preference: <b>{data.promptManagerPreferredGitHubLabel || 'не определён'}</b></div>
+						<div style={styles.infoText}>Активная GitHub-session: <b>{data.activeGithubSessionAccountLabel || 'недоступна'}</b></div>
+						<div style={styles.infoText}>GitHub-аккаунтов в VS Code: <b>{data.availableGitHubAccounts?.length || 0}</b></div>
 					</div>
 					<div style={styles.footerInfo}>
 						<div>Последнее обновление: {formatDateTime(data.lastUpdated)}</div>
@@ -615,6 +663,22 @@ const styles: Record<string, React.CSSProperties> = {
 		color: 'var(--vscode-descriptionForeground)',
 		fontSize: '13px',
 	},
+	infoBox: {
+		padding: '10px 12px',
+		borderRadius: '8px',
+		border: '1px solid var(--vscode-textLink-foreground)',
+		background: 'color-mix(in srgb, var(--vscode-textLink-foreground) 10%, transparent)',
+		fontSize: '12px',
+		lineHeight: 1.45,
+	},
+	warningBox: {
+		padding: '10px 12px',
+		borderRadius: '8px',
+		border: '1px solid var(--vscode-editorWarning-foreground)',
+		background: 'color-mix(in srgb, var(--vscode-editorWarning-foreground) 12%, transparent)',
+		fontSize: '12px',
+		lineHeight: 1.45,
+	},
 	footerInfo: {
 		fontSize: '12px',
 		color: 'var(--vscode-descriptionForeground)',
@@ -659,5 +723,37 @@ const styles: Record<string, React.CSSProperties> = {
 		fontFamily: 'var(--vscode-editor-font-family, var(--vscode-font-family))',
 		whiteSpace: 'pre-wrap',
 		wordBreak: 'break-word',
+	},
+	switchingOverlay: {
+		position: 'fixed',
+		top: 0,
+		left: 0,
+		right: 0,
+		bottom: 0,
+		background: 'color-mix(in srgb, var(--vscode-editor-background) 85%, transparent)',
+		display: 'flex',
+		alignItems: 'center',
+		justifyContent: 'center',
+		zIndex: 100,
+		backdropFilter: 'blur(2px)',
+	},
+	switchingCard: {
+		padding: '24px 32px',
+		border: '1px solid var(--vscode-panel-border)',
+		borderRadius: '12px',
+		background: 'var(--vscode-sideBar-background)',
+		textAlign: 'center' as const,
+		display: 'flex',
+		flexDirection: 'column' as const,
+		alignItems: 'center',
+		gap: '8px',
+	},
+	switchingTitle: {
+		fontSize: '16px',
+		fontWeight: 700,
+	},
+	switchingText: {
+		fontSize: '12px',
+		color: 'var(--vscode-descriptionForeground)',
 	},
 };

@@ -144,6 +144,12 @@
         "title": "Open Prompt Manager Settings",
         "category": "Prompt Manager",
         "icon": "$(gear)"
+      },
+      {
+        "command": "promptManager.copilotUsageDiagnostics",
+        "title": "Dump Copilot Usage Diagnostics",
+        "category": "Prompt Manager",
+        "icon": "$(output)"
       }
     ],
     "menus": {

@@ -32,6 +32,7 @@ import {
 	disposePromptManagerOutputChannel,
 	getPromptManagerOutputChannel,
 	installPromptManagerConsoleInterceptor,
+	showPromptManagerOutputChannel,
 } from './utils/promptManagerOutput.js';
 import { appendPromptAiLog } from './utils/promptAiLogger.js';
 
@@ -107,6 +108,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Initialize Copilot Premium usage status bar
 	const copilotUsageService = new CopilotUsageService(context);
+	void copilotUsageService.checkAuthenticationBindingOnActivation();
 	const copilotUsagePanelManager = new CopilotUsagePanelManager(context.extensionUri, copilotUsageService);
 	const copilotStatusBarProvider = new CopilotStatusBarProvider(copilotUsageService, copilotUsagePanelManager);
 
@@ -809,6 +811,17 @@ export function activate(context: vscode.ExtensionContext) {
 
 		vscode.commands.registerCommand('promptManager.openSettings', async () => {
 			await vscode.commands.executeCommand('workbench.action.openSettings', extensionSettingsQuery);
+		}),
+
+		vscode.commands.registerCommand('promptManager.copilotUsageDiagnostics', async () => {
+			const report = await copilotUsageService.buildDiagnosticsReport();
+			const output = getPromptManagerOutputChannel();
+			output.appendLine('===== Copilot Usage Diagnostics =====');
+			output.appendLine(report);
+			output.appendLine('===== End Copilot Usage Diagnostics =====');
+			showPromptManagerOutputChannel(false);
+			await vscode.env.clipboard.writeText(report);
+			vscode.window.showInformationMessage('Диагностика Copilot Usage скопирована в буфер и записана в Output: Prompt Manager.');
 		}),
 	);
 

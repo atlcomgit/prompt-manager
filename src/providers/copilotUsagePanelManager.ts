@@ -5,7 +5,7 @@
 
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
-import type { CopilotUsageService } from '../services/copilotUsageService.js';
+import type { CopilotUsageAccountSummary, CopilotUsageService } from '../services/copilotUsageService.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 let panelRefreshTimer: ReturnType<typeof setInterval> | undefined;
@@ -74,6 +74,29 @@ export class CopilotUsagePanelManager {
 				return;
 			}
 
+			if (msg.type === 'copilotUsage.switchAccount') {
+				// switchCopilotChatAccountInteractively открывает пикер VS Code для Copilot Chat,
+				// затем синхронизирует расширение. Статусбар показывает спиннер через событие сервиса.
+				const result = await this.usageService.switchCopilotChatAccountInteractively();
+
+				if (result.changed) {
+					// Показываем overlay пока обновляются данные
+					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitching', isSwitching: true });
+					// Обновляем данные для нового аккаунта
+					await this.pushUsageToWebview(panel.webview, true);
+					// Показываем результат
+					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitchResult', result });
+					// Даём webview отрисовать новые данные
+					await new Promise(resolve => setTimeout(resolve, 800));
+				} else {
+					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitchResult', result });
+				}
+				// Сбрасываем статус переключения — статусбар и overlay обновятся одновременно
+				this.usageService.endAccountSwitching();
+				await panel.webview.postMessage({ type: 'copilotUsage.accountSwitching', isSwitching: false });
+				return;
+			}
+
 			if (msg.type === 'copilotUsage.openSettings') {
 				await vscode.commands.executeCommand('workbench.action.openSettings', 'promptManager.copilot');
 				return;
@@ -103,7 +126,10 @@ export class CopilotUsagePanelManager {
 	}
 
 	private async pushUsageToWebview(webview: vscode.Webview, forceRefresh: boolean): Promise<void> {
-		const usage = await this.usageService.fetchUsage(forceRefresh);
+		const [usage, accountSummary] = await Promise.all([
+			this.usageService.fetchUsage(forceRefresh),
+			this.usageService.getAccountBindingSummary(),
+		]);
 		const debugLog = this.usageService.getLastDebugLog();
 		const now = new Date();
 		const start = new Date(usage.periodStart);
@@ -122,6 +148,7 @@ export class CopilotUsagePanelManager {
 			type: 'copilotUsage.data',
 			data: {
 				...usage,
+				...this.buildAccountSummaryPayload(accountSummary),
 				debugLog,
 				percent,
 				remaining,
@@ -131,6 +158,16 @@ export class CopilotUsagePanelManager {
 				timeline,
 			},
 		});
+	}
+
+	private buildAccountSummaryPayload(accountSummary: CopilotUsageAccountSummary): Record<string, unknown> {
+		return {
+			copilotPreferredGitHubLabel: accountSummary.copilotPreferredGitHubLabel,
+			promptManagerPreferredGitHubLabel: accountSummary.promptManagerPreferredGitHubLabel,
+			activeGithubSessionAccountLabel: accountSummary.activeGithubSessionAccountLabel,
+			githubSessionIssue: accountSummary.githubSessionIssue,
+			availableGitHubAccounts: accountSummary.availableGitHubAccounts,
+		};
 	}
 
 	dispose(): void {

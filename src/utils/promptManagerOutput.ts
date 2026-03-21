@@ -2,13 +2,19 @@ import * as vscode from 'vscode';
 
 type ConsoleMethod = 'debug' | 'info' | 'log' | 'warn' | 'error';
 
-const NOOP_DISPOSABLE = new vscode.Disposable(() => {});
+const NOOP_DISPOSABLE = new vscode.Disposable(() => { });
 const CONSOLE_METHODS: ConsoleMethod[] = ['debug', 'info', 'log', 'warn', 'error'];
 
 export const PROMPT_MANAGER_OUTPUT_CHANNEL_NAME = 'Prompt Manager';
 
 let outputChannel: vscode.OutputChannel | undefined;
 let restoreConsoleMethods: (() => void) | undefined;
+
+function isPromptManagerDebugLoggingEnabled(): boolean {
+	return vscode.workspace
+		.getConfiguration('promptManager')
+		.get<boolean>('debugLogging.enabled', false) === true;
+}
 
 export function getPromptManagerOutputChannel(): vscode.OutputChannel {
 	if (!outputChannel) {
@@ -18,6 +24,9 @@ export function getPromptManagerOutputChannel(): vscode.OutputChannel {
 }
 
 export function appendPromptManagerLog(message: string): void {
+	if (!isPromptManagerDebugLoggingEnabled()) {
+		return;
+	}
 	getPromptManagerOutputChannel().appendLine(message);
 }
 

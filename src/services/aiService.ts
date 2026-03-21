@@ -97,13 +97,26 @@ export type CodeMapSymbolDescriptionBatchItem = {
 	fallbackDescription?: string;
 };
 
+export type CodeMapFileDescriptionBatchItem = {
+	id: string;
+	filePath: string;
+	fileRole: string;
+	lineCount: number;
+	imports: string[];
+	frontendContract: string[];
+	frontendBlockNames: string[];
+	excerpt: string;
+	fallbackDescription?: string;
+	symbols: CodeMapSymbolDescriptionBatchItem[];
+};
+
 export type CodeMapSymbolBatchDescriptionInput = {
 	repository: string;
 	branchName: string;
 	locale: string;
 	mode: 'short' | 'medium' | 'long';
 	maxChars: number;
-	symbols: CodeMapSymbolDescriptionBatchItem[];
+	files: CodeMapFileDescriptionBatchItem[];
 };
 
 export type CodeMapFrontendBlockDescriptionBatchItem = {
@@ -459,43 +472,40 @@ export class AiService {
 	): Promise<string> {
 		const isRussianLocale = input.locale.toLowerCase().startsWith('ru');
 		const fallback = JSON.stringify({
-			symbols: input.symbols.map(symbol => ({ id: symbol.id, description: '' })),
+			files: input.files.map(file => ({ id: file.id, description: '' })),
+			symbols: input.files.flatMap(file => file.symbols.map(symbol => ({ id: symbol.id, description: '' }))),
 		});
 		const systemPrompt = isRussianLocale
 			? [
-				'Ты анализируешь пакет символов кода из нескольких файлов для инструкции ИИ-агента.',
+				'Ты анализируешь пакет файлов и их символов для инструкции ИИ-агента.',
 				'Верни только валидный JSON без markdown и пояснений.',
-				'Формат ответа строго такой: {"symbols":[{"id":"symbol-1","description":"..."}]}.',
-				'Для каждого id верни конкретное и полезное описание на русском языке.',
+				'Формат ответа строго такой: {"files":[{"id":"file-1","description":"..."}],"symbols":[{"id":"symbol-1","description":"..."}]}.',
+				'Для каждого id файла и символа верни конкретное и полезное описание на русском языке.',
+				'Для файла опиши назначение самого файла, его главные обязанности, роль в системе и ключевые части содержимого.',
 				'Опирайся на сигнатуру и кодовый фрагмент: объясни поведение символа, важные шаги, входы/выходы, побочные эффекты и ключевые вызовы.',
 				'Не пиши пустые общие шаблоны вроде "выполняет действие своей области" или "инкапсулирует логику".',
 				'Если по фрагменту видна только часть поведения, честно опиши только наблюдаемое.',
-				`Длина каждого description: до ${Math.max(160, input.maxChars)} символов.`,
+				`Длина каждого file description: до ${Math.max(180, input.maxChars)} символов.`,
+				`Длина каждого symbol description: до ${Math.max(160, input.maxChars)} символов.`,
 				`Глубина описания: ${input.mode}.`,
 			].join(' ')
 			: [
-				'You analyze a batch of code symbols from multiple files for an AI-agent instruction.',
+				'You analyze a batch of files and their code symbols for an AI-agent instruction.',
 				'Return only valid JSON without markdown or commentary.',
-				'The response format must be exactly {"symbols":[{"id":"symbol-1","description":"..."}]}.',
-				'For each id, return a concrete and useful description.',
+				'The response format must be exactly {"files":[{"id":"file-1","description":"..."}],"symbols":[{"id":"symbol-1","description":"..."}]}.',
+				'For each file id and symbol id, return a concrete and useful description.',
+				'For a file description, explain the purpose of the file, its main responsibilities, its role in the system, and the key parts of its contents.',
 				'Ground the description in the signature and code excerpt: explain behavior, key steps, inputs/outputs, side effects, and important calls.',
 				'Do not use empty templates like "performs an area action" or "encapsulates logic".',
 				'If the excerpt reveals only part of the behavior, describe only what is observable.',
-				`Keep each description within ${Math.max(160, input.maxChars)} characters.`,
+				`Keep each file description within ${Math.max(180, input.maxChars)} characters.`,
+				`Keep each symbol description within ${Math.max(160, input.maxChars)} characters.`,
 				`Description depth: ${input.mode}.`,
 			].join(' ');
 
-		const groupedByFile = new Map<string, CodeMapSymbolDescriptionBatchItem[]>();
-		for (const symbol of input.symbols) {
-			const key = `${symbol.filePath}::${symbol.fileRole}`;
-			const group = groupedByFile.get(key) || [];
-			group.push(symbol);
-			groupedByFile.set(key, group);
-		}
-
-		const symbolBlocks = Array.from(groupedByFile.entries()).map(([key, symbols]) => {
-			const [filePath, fileRole] = key.split('::');
-			const symbolsBlock = symbols.map(symbol => [
+		const fileBlocks = input.files.map(file => {
+			const symbolsBlock = file.symbols.length > 0
+				? file.symbols.map(symbol => [
 				`ID: ${symbol.id}`,
 				`Kind: ${symbol.kind}`,
 				`Name: ${symbol.name}`,
@@ -503,11 +513,20 @@ export class AiService {
 				symbol.fallbackDescription ? `Fallback description: ${symbol.fallbackDescription}` : '',
 				'Code excerpt:',
 				symbol.excerpt || 'No code excerpt available.',
-			].filter(Boolean).join('\n')).join('\n\n-----\n\n');
+			].filter(Boolean).join('\n')).join('\n\n-----\n\n')
+				: 'none';
 
 			return [
-				`FILE: ${filePath}`,
-				`Role: ${fileRole}`,
+				`FILE: ${file.filePath}`,
+				`FILE_ID: ${file.id}`,
+				`Role: ${file.fileRole}`,
+				`Line count: ${file.lineCount}`,
+				file.imports.length > 0 ? `Internal imports: ${file.imports.join(', ')}` : '',
+				file.frontendContract.length > 0 ? `Frontend contract: ${file.frontendContract.join(' | ')}` : '',
+				file.frontendBlockNames.length > 0 ? `Frontend blocks: ${file.frontendBlockNames.join(', ')}` : '',
+				file.fallbackDescription ? `Fallback file description: ${file.fallbackDescription}` : '',
+				'File excerpt:',
+				file.excerpt || 'No file excerpt available.',
 				'Symbols:',
 				symbolsBlock,
 			].join('\n');
@@ -517,7 +536,7 @@ export class AiService {
 			`Repository: ${input.repository}`,
 			`Branch: ${input.branchName}`,
 			'Files and symbols to describe:',
-			symbolBlocks,
+			fileBlocks,
 		].filter(Boolean).join('\n\n');
 
 		const resolvedFamily = await this.resolveFreeCopilotModel(modelFamily || this.modelSelector.family);

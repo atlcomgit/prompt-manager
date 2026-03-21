@@ -79,6 +79,19 @@ interface PreparedFileSymbolSummary extends FileSymbolSummary {
 	fallbackDescription: string;
 }
 
+interface CodeMapFileBatchItem {
+	id: string;
+	filePath: string;
+	fileRole: string;
+	lineCount: number;
+	imports: string[];
+	frontendContract: string[];
+	frontendBlockNames: string[];
+	excerpt: string;
+	fallbackDescription: string;
+	symbols: CodeMapSymbolBatchItem[];
+}
+
 interface PreparedFrontendBlockSummary extends FrontendBlockSummary {
 	id: string;
 	filePath: string;
@@ -90,6 +103,9 @@ interface PreparedFrontendBlockSummary extends FrontendBlockSummary {
 }
 
 interface PreparedFileSummary extends FileSummary {
+	description: string;
+	fileDescriptionId: string;
+	excerpt: string;
 	symbols: PreparedFileSymbolSummary[];
 	frontendContract: string[];
 	frontendBlocks: PreparedFrontendBlockSummary[];
@@ -983,7 +999,7 @@ export class CodeMapInstructionService {
 				total: detailFilesToGenerate.length,
 			});
 		}
-		const symbolDescriptionsById = await this.buildFileSymbolDescriptions({
+		const { fileDescriptionsById, symbolDescriptionsById } = await this.buildFileSymbolDescriptions({
 			repository,
 			ref,
 			locale,
@@ -1011,7 +1027,7 @@ export class CodeMapInstructionService {
 		});
 		const generatedFileSummariesByPath = new Map<string, FileSummary>();
 		for (const preparedFile of preparedFileSummaries) {
-			const summary = materializePreparedFileSummary(preparedFile, symbolDescriptionsById, frontendBlockDescriptionsById);
+			const summary = materializePreparedFileSummary(preparedFile, fileDescriptionsById, symbolDescriptionsById, frontendBlockDescriptionsById);
 			generatedFileSummariesByPath.set(preparedFile.path, summary);
 			const changedFile = detailFilesToGenerate.find(item => item.filePath === preparedFile.path);
 			if (changedFile?.blobSha) {
@@ -1149,30 +1165,43 @@ export class CodeMapInstructionService {
 		maxFilesPerBatch: number;
 		files: PreparedFileSummary[];
 		onProgress?: (progress: CodeMapGenerationProgress) => void;
-	}): Promise<Map<string, string>> {
-		const descriptions = new Map<string, string>();
+	}): Promise<{ fileDescriptionsById: Map<string, string>; symbolDescriptionsById: Map<string, string> }> {
+		const fileDescriptionsById = new Map<string, string>();
+		const symbolDescriptionsById = new Map<string, string>();
 		const isRussianLocale = input.locale.toLowerCase().startsWith('ru');
-		const items: CodeMapSymbolBatchItem[] = input.files.flatMap(file => file.symbols.map(symbol => ({
-			id: symbol.id,
+		const items: CodeMapFileBatchItem[] = input.files.map(file => ({
+			id: file.fileDescriptionId,
 			filePath: file.path,
 			fileRole: file.role,
-			kind: symbol.kind,
-			name: symbol.name,
-			signature: symbol.signature,
-			excerpt: symbol.excerpt,
-			fallbackDescription: symbol.description,
-		})));
+			lineCount: file.lineCount,
+			imports: [...file.imports],
+			frontendContract: [...file.frontendContract],
+			frontendBlockNames: file.frontendBlocks.map(block => block.name).filter(Boolean),
+			excerpt: file.excerpt,
+			fallbackDescription: file.description,
+			symbols: file.symbols.map(symbol => ({
+				id: symbol.id,
+				filePath: file.path,
+				fileRole: file.role,
+				kind: symbol.kind,
+				name: symbol.name,
+				signature: symbol.signature,
+				excerpt: symbol.excerpt,
+				fallbackDescription: symbol.description,
+			})),
+		}));
+		const totalSymbolCount = items.reduce((sum, item) => sum + item.symbols.length, 0);
 
 		if (items.length === 0 || !this.aiService || typeof (this.aiService as { generateCodeMapSymbolDescriptionsBatch?: unknown }).generateCodeMapSymbolDescriptionsBatch !== 'function') {
-			return descriptions;
+			return { fileDescriptionsById, symbolDescriptionsById };
 		}
 
-		const batches = buildSymbolDescriptionBatches(items, input.batchContextMaxChars, input.maxItemsPerBatch, input.maxFilesPerBatch);
+		const batches = buildFileSymbolDescriptionBatches(items, input.batchContextMaxChars, input.maxItemsPerBatch, input.maxFilesPerBatch);
 		input.onProgress?.({
 			stage: 'describing-files',
 			detail: isRussianLocale
-				? `Подготавливаются AI-батчи описаний символов: ${items.length} элементов, ${batches.length} батчей, модель ${input.aiModel}`
-				: `Preparing AI symbol-description batches: ${items.length} items, ${batches.length} batches, model ${input.aiModel}`,
+				? `Подготавливаются AI-батчи описаний файлов и символов: ${items.length} файлов, ${totalSymbolCount} символов, ${batches.length} батчей, модель ${input.aiModel}`
+				: `Preparing AI file and symbol batches: ${items.length} files, ${totalSymbolCount} symbols, ${batches.length} batches, model ${input.aiModel}`,
 			completed: 0,
 			total: items.length,
 		});
@@ -1185,7 +1214,10 @@ export class CodeMapInstructionService {
 				completed,
 				total: items.length,
 			});
-			let parsedDescriptions: Record<string, string> = {};
+			let parsedDescriptions: { fileDescriptions: Record<string, string>; symbolDescriptions: Record<string, string> } = {
+				fileDescriptions: {},
+				symbolDescriptions: {},
+			};
 			try {
 				const response = await this.aiService.generateCodeMapSymbolDescriptionsBatch({
 					repository: input.repository,
@@ -1193,38 +1225,58 @@ export class CodeMapInstructionService {
 					locale: input.locale,
 					mode: input.mode,
 					maxChars: input.maxChars,
-					symbols: batch.map(item => ({
+					files: batch.map(item => ({
 						id: item.id,
 						filePath: item.filePath,
 						fileRole: item.fileRole,
-						kind: item.kind,
-						name: item.name,
-						signature: item.signature,
+						lineCount: item.lineCount,
+						imports: [...item.imports],
+						frontendContract: [...item.frontendContract],
+						frontendBlockNames: [...item.frontendBlockNames],
 						excerpt: item.excerpt,
 						fallbackDescription: item.fallbackDescription,
+						symbols: item.symbols.map(symbol => ({
+							id: symbol.id,
+							filePath: symbol.filePath,
+							fileRole: symbol.fileRole,
+							kind: symbol.kind,
+							name: symbol.name,
+							signature: symbol.signature,
+							excerpt: symbol.excerpt,
+							fallbackDescription: symbol.fallbackDescription,
+						})),
 					})),
 				}, input.aiModel);
-				parsedDescriptions = parseCodeMapSymbolBatchResponse(response);
+				parsedDescriptions = parseCodeMapFileSymbolBatchResponse(response);
 			} catch {
-				parsedDescriptions = {};
+				parsedDescriptions = {
+					fileDescriptions: {},
+					symbolDescriptions: {},
+				};
 			}
 
 			for (const item of batch) {
-				const normalized = normalizeSymbolDescription(parsedDescriptions[item.id] || '', input.maxChars);
-				if (normalized) {
-					descriptions.set(item.id, normalized);
+				const normalizedFileDescription = normalizeFileDescription(parsedDescriptions.fileDescriptions[item.id] || '', input.maxChars);
+				if (normalizedFileDescription) {
+					fileDescriptionsById.set(item.id, normalizedFileDescription);
+				}
+				for (const symbol of item.symbols) {
+					const normalizedSymbolDescription = normalizeSymbolDescription(parsedDescriptions.symbolDescriptions[symbol.id] || '', input.maxChars);
+					if (normalizedSymbolDescription) {
+						symbolDescriptionsById.set(symbol.id, normalizedSymbolDescription);
+					}
 				}
 				completed += 1;
 				input.onProgress?.({
 					stage: 'describing-files',
-					detail: formatSymbolBatchCompletionDetail(isRussianLocale, completed, items.length, item.filePath, item.name, !normalized),
+					detail: formatSymbolBatchCompletionDetail(isRussianLocale, completed, items.length, item.filePath, item.symbols.length, !normalizedFileDescription),
 					completed,
 					total: items.length,
 				});
 			}
 		}
 
-		return descriptions;
+		return { fileDescriptionsById, symbolDescriptionsById };
 	}
 
 	private async buildFrontendBlockDescriptions(input: {
@@ -1508,6 +1560,7 @@ export function buildCodeMapProjectInstruction(input: {
 		...codeDescription.fileSummaries.flatMap(file => {
 			const lines = [
 				`### ${file.path}`,
+				...(file.description ? [`- ${isRussianLocale ? 'Описание' : 'Description'}: ${file.description}`] : []),
 				`- ${isRussianLocale ? 'Роль' : 'Role'}: ${file.role}`,
 				`- ${isRussianLocale ? 'Строк в файле' : 'Line count'}: ${file.lineCount}`,
 				'',
@@ -1671,6 +1724,7 @@ function buildCodeMapDeltaInstruction(input: {
 function buildInstructionFileSummaryLines(file: FileSummary, isRussianLocale: boolean): string[] {
 	const lines = [
 		`### ${file.path}`,
+		...(file.description ? [`- ${isRussianLocale ? 'Описание' : 'Description'}: ${file.description}`] : []),
 		`- ${isRussianLocale ? 'Роль' : 'Role'}: ${file.role}`,
 		`- ${isRussianLocale ? 'Строк в файле' : 'Line count'}: ${file.lineCount}`,
 	];
@@ -1861,12 +1915,14 @@ export function buildFileSummary(filePath: string, source: string, isRussianLoca
 
 function materializePreparedFileSummary(
 	prepared: PreparedFileSummary,
+	fileDescriptionsById: ReadonlyMap<string, string> = new Map(),
 	symbolDescriptionsById: ReadonlyMap<string, string> = new Map(),
 	frontendBlockDescriptionsById: ReadonlyMap<string, string> = new Map(),
 ): FileSummary {
 	return {
 		path: prepared.path,
 		lineCount: prepared.lineCount,
+		description: fileDescriptionsById.get(prepared.fileDescriptionId) || prepared.description,
 		role: prepared.role,
 		imports: [...prepared.imports],
 		frontendContract: [...prepared.frontendContract],
@@ -1909,6 +1965,7 @@ function normalizeCachedFileSummary(value: unknown): FileSummary | null {
 	return {
 		path: record.path,
 		lineCount: Number.isFinite(record.lineCount) ? Number(record.lineCount) : 0,
+		description: typeof record.description === 'string' ? record.description.trim() : '',
 		role: record.role,
 		imports: record.imports.map(item => String(item || '').trim()).filter(Boolean),
 		frontendContract: Array.isArray(record.frontendContract)
@@ -1972,7 +2029,10 @@ function buildPreparedFileSummary(filePath: string, source: string, isRussianLoc
 	return {
 		path: filePath,
 		lineCount: source ? source.split(/\r?\n/).length : 0,
+		description: '',
+		fileDescriptionId: createFileDescriptionId(filePath),
 		role,
+		excerpt: extractFileSummarySnippet(source),
 		symbols: extractDetailedSymbols(filePath, source, role, isRussianLocale).slice(0, MAX_SYMBOLS_PER_FILE),
 		imports,
 		frontendContract: frontendInsights.contract,
@@ -2965,6 +3025,14 @@ function extractSymbolSnippet(source: string, startIndex: number): string {
 	return combined.replace(/\r/g, '').trim().slice(0, MAX_SYMBOL_SNIPPET_CHARS);
 }
 
+function extractFileSummarySnippet(source: string): string {
+	return trimSnippet(source).slice(0, MAX_SYMBOL_SNIPPET_CHARS);
+}
+
+function createFileDescriptionId(filePath: string): string {
+	return `${filePath}::file`;
+}
+
 function createSymbolId(filePath: string, kind: string, name: string, line: number, column: number): string {
 	return `${filePath}::${kind}::${name}::${line}:${column}`;
 }
@@ -3085,6 +3153,20 @@ function estimateSymbolBatchItemChars(item: CodeMapSymbolBatchItem): number {
 		+ 256;
 }
 
+function estimateFileSymbolBatchItemChars(item: CodeMapFileBatchItem): number {
+	return item.id.length
+		+ item.filePath.length
+		+ item.fileRole.length
+		+ item.lineCount.toString().length
+		+ item.imports.join(', ').length
+		+ item.frontendContract.join(' | ').length
+		+ item.frontendBlockNames.join(', ').length
+		+ item.excerpt.length
+		+ item.fallbackDescription.length
+		+ item.symbols.reduce((total, symbol) => total + estimateSymbolBatchItemChars(symbol), 0)
+		+ 384;
+}
+
 function estimateFrontendBlockBatchItemChars(item: CodeMapFrontendBlockBatchItem): number {
 	return item.id.length
 		+ item.filePath.length
@@ -3136,34 +3218,33 @@ export function buildAreaDescriptionBatches<T extends CodeMapAreaDescriptionBatc
 	return batches;
 }
 
-export function buildSymbolDescriptionBatches(
-	items: CodeMapSymbolBatchItem[],
+export function buildFileSymbolDescriptionBatches(
+	items: CodeMapFileBatchItem[],
 	maxChars: number,
 	maxItemsPerBatch = Number.MAX_SAFE_INTEGER,
 	maxFilesPerBatch = Number.MAX_SAFE_INTEGER,
-): CodeMapSymbolBatchItem[][] {
+): CodeMapFileBatchItem[][] {
 	const limit = Math.max(4000, Math.floor(maxChars || 0));
 	const itemLimit = Math.max(1, Math.floor(maxItemsPerBatch || 0));
 	const fileLimit = Math.max(1, Math.floor(maxFilesPerBatch || 0));
-	const batches: CodeMapSymbolBatchItem[][] = [];
-	let currentBatch: CodeMapSymbolBatchItem[] = [];
+	const batches: CodeMapFileBatchItem[][] = [];
+	let currentBatch: CodeMapFileBatchItem[] = [];
 	let currentChars = 0;
-	let currentFiles = new Set<string>();
+	let currentSymbolCount = 0;
 
 	for (const item of items) {
-		const itemChars = estimateSymbolBatchItemChars(item);
-		const nextFileCount = currentFiles.has(item.filePath)
-			? currentFiles.size
-			: currentFiles.size + 1;
-		if (currentBatch.length > 0 && (currentChars + itemChars > limit || currentBatch.length >= itemLimit || nextFileCount > fileLimit)) {
+		const itemChars = estimateFileSymbolBatchItemChars(item);
+		const itemSymbolCount = Math.max(1, item.symbols.length);
+		const nextFileCount = currentBatch.length + 1;
+		if (currentBatch.length > 0 && (currentChars + itemChars > limit || currentSymbolCount + itemSymbolCount > itemLimit || nextFileCount > fileLimit)) {
 			batches.push(currentBatch);
 			currentBatch = [];
 			currentChars = 0;
-			currentFiles = new Set<string>();
+			currentSymbolCount = 0;
 		}
 		currentBatch.push(item);
 		currentChars += itemChars;
-		currentFiles.add(item.filePath);
+		currentSymbolCount += itemSymbolCount;
 	}
 
 	if (currentBatch.length > 0) {
@@ -3240,8 +3321,34 @@ export function parseCodeMapAreaBatchResponse(value: string): Record<string, str
 	return parseIdDescriptionResponse(value, 'areas');
 }
 
-function parseCodeMapSymbolBatchResponse(value: string): Record<string, string> {
-	return parseIdDescriptionResponse(value, 'symbols');
+function parseCodeMapFileSymbolBatchResponse(value: string): { fileDescriptions: Record<string, string>; symbolDescriptions: Record<string, string> } {
+	const candidate = extractJsonCandidate(value);
+	if (!candidate) {
+		return {
+			fileDescriptions: {},
+			symbolDescriptions: {},
+		};
+	}
+
+	try {
+		const parsed = JSON.parse(candidate) as unknown;
+		if (!parsed || typeof parsed !== 'object') {
+			return {
+				fileDescriptions: {},
+				symbolDescriptions: {},
+			};
+		}
+		const record = parsed as Record<string, unknown>;
+		return {
+			fileDescriptions: collectIdDescriptionEntries(record.files),
+			symbolDescriptions: collectIdDescriptionEntries(record.symbols),
+		};
+	} catch {
+		return {
+			fileDescriptions: {},
+			symbolDescriptions: {},
+		};
+	}
 }
 
 function parseCodeMapFrontendBatchResponse(value: string): Record<string, string> {
@@ -3298,6 +3405,27 @@ function parseIdDescriptionResponse(value: string, collectionKey: 'areas' | 'sym
 	}
 }
 
+function collectIdDescriptionEntries(value: unknown): Record<string, string> {
+	if (!Array.isArray(value)) {
+		return {};
+	}
+
+	const result: Record<string, string> = {};
+	for (const entry of value) {
+		if (!entry || typeof entry !== 'object') {
+			continue;
+		}
+		const record = entry as Record<string, unknown>;
+		const id = String(record.id || '').trim();
+		const description = String(record.description || '').trim();
+		if (id) {
+			result[id] = description;
+		}
+	}
+
+	return result;
+}
+
 function normalizeAreaDescription(value: string, maxChars: number): string {
 	const normalized = value
 		.replace(/```[\s\S]*?```/g, '')
@@ -3320,6 +3448,18 @@ function normalizeSymbolDescription(value: string, maxChars: number): string {
 		return '';
 	}
 	return normalized.slice(0, Math.max(160, maxChars));
+}
+
+function normalizeFileDescription(value: string, maxChars: number): string {
+	const normalized = value
+		.replace(/```[\s\S]*?```/g, '')
+		.replace(/^[\-*]\s+/gm, '')
+		.replace(/\s+/g, ' ')
+		.trim();
+	if (!normalized) {
+		return '';
+	}
+	return normalized.slice(0, Math.max(180, maxChars));
 }
 
 function buildAreaSnapshotToken(area: string, files: string[], fileBlobShas: ReadonlyMap<string, string>): string {
@@ -4105,12 +4245,13 @@ function formatSymbolBatchStartDetail(
 	isRussianLocale: boolean,
 	batchIndex: number,
 	batchCount: number,
-	batch: CodeMapSymbolBatchItem[],
+	batch: CodeMapFileBatchItem[],
 ): string {
-	const filePreview = Array.from(new Set(batch.map(item => item.filePath))).slice(0, 3).join(', ');
+	const filePreview = batch.map(item => item.filePath).slice(0, 3).join(', ');
+	const symbolCount = batch.reduce((sum, item) => sum + item.symbols.length, 0);
 	return isRussianLocale
-		? `AI-батч ${batchIndex + 1}/${batchCount}: ${batch.length} элементов${filePreview ? ` (${filePreview})` : ''}`
-		: `AI batch ${batchIndex + 1}/${batchCount}: ${batch.length} symbols${filePreview ? ` (${filePreview})` : ''}`;
+		? `AI-батч ${batchIndex + 1}/${batchCount}: ${batch.length} файлов, ${symbolCount} символов${filePreview ? ` (${filePreview})` : ''}`
+		: `AI batch ${batchIndex + 1}/${batchCount}: ${batch.length} files, ${symbolCount} symbols${filePreview ? ` (${filePreview})` : ''}`;
 }
 
 function formatSymbolBatchCompletionDetail(
@@ -4118,12 +4259,12 @@ function formatSymbolBatchCompletionDetail(
 	completed: number,
 	total: number,
 	filePath: string,
-	symbolName: string,
+	symbolCount: number,
 	usedFallback: boolean,
 ): string {
 	return isRussianLocale
-		? `Готово ${completed}/${total}: ${filePath} -> ${symbolName}${usedFallback ? ' (локальное описание)' : ''}`
-		: `Completed ${completed}/${total}: ${filePath} -> ${symbolName}${usedFallback ? ' (local fallback)' : ''}`;
+		? `Готово ${completed}/${total}: ${filePath} (${symbolCount} символов)${usedFallback ? ' (локальное описание)' : ''}`
+		: `Completed ${completed}/${total}: ${filePath} (${symbolCount} symbols)${usedFallback ? ' (local fallback)' : ''}`;
 }
 
 function formatFrontendBatchStartDetail(

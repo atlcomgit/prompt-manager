@@ -208,6 +208,7 @@ test('buildCodeMapProjectInstruction uses localized labels and clearer file elem
 			fileSummaries: [{
 				path: 'app/Http/Controllers/TestController.php',
 				lineCount: 12,
+				description: 'Файл собирает HTTP-точки входа для тестового контроллера и описывает контракт действия testAction.',
 				role: 'HTTP-контроллеры и обработчики маршрутов',
 				imports: [],
 				symbols: [{
@@ -225,6 +226,7 @@ test('buildCodeMapProjectInstruction uses localized labels and clearer file elem
 	});
 
 	assert.match(output, /- Репозиторий: laravel-test/);
+	assert.match(output, /### app\/Http\/Controllers\/TestController\.php\n- Описание: Файл собирает HTTP-точки входа для тестового контроллера и описывает контракт действия testAction\.\n- Роль: HTTP-контроллеры и обработчики маршрутов/);
 	assert.match(output, /- Ключевые элементы: TestController/);
 	assert.match(output, /- Элементы файла:/);
 	assert.match(output, /Описание: Метод testAction обслуживает HTTP-сценарий этой области\./);
@@ -450,10 +452,15 @@ test('generateInstruction batches symbol descriptions across multiple files', as
 				{ id: 'area-2', description: 'Описание сервисов.' },
 			],
 		}),
-		generateCodeMapSymbolDescriptionsBatch: async (input: { symbols: Array<{ id: string; name: string }> }) => {
-			symbolBatchSizes.push(input.symbols.length);
+		generateCodeMapSymbolDescriptionsBatch: async (input: { files: Array<{ id: string; filePath: string; symbols: Array<{ id: string; name: string }> }> }) => {
+			const flatSymbols = input.files.flatMap(file => file.symbols);
+			symbolBatchSizes.push(flatSymbols.length);
 			return JSON.stringify({
-				symbols: input.symbols.map(symbol => ({
+				files: input.files.map(file => ({
+					id: file.id,
+					description: `AI-описание файла ${file.filePath}`,
+				})),
+				symbols: flatSymbols.map(symbol => ({
 					id: symbol.id,
 					description: `AI-описание для ${symbol.name}`,
 				})),
@@ -499,6 +506,7 @@ class TestService {
 
 	assert.ok(symbolBatchSizes.length >= 1);
 	assert.ok(symbolBatchSizes.some(size => size >= 2));
+	assert.match(record.content, /- Описание: AI-описание файла app\/Http\/Controllers\/TestController\.php/);
 	assert.match(record.content, /AI-описание для index/);
 	assert.match(record.content, /AI-описание для buildReport/);
 });
@@ -626,10 +634,15 @@ class TestController {
 				})),
 			});
 		},
-		generateCodeMapSymbolDescriptionsBatch: async (input: { symbols: Array<{ id: string; name: string; filePath: string }> }) => {
-			symbolCalls.push(input.symbols.map(symbol => `${symbol.filePath}:${symbol.name}`));
+		generateCodeMapSymbolDescriptionsBatch: async (input: { files: Array<{ id: string; filePath: string; symbols: Array<{ id: string; name: string; filePath: string }> }> }) => {
+			const flatSymbols = input.files.flatMap(file => file.symbols);
+			symbolCalls.push(flatSymbols.map(symbol => `${symbol.filePath}:${symbol.name}`));
 			return JSON.stringify({
-				symbols: input.symbols.map(symbol => ({
+				files: input.files.map(file => ({
+					id: file.id,
+					description: `AI-описание файла ${file.filePath}`,
+				})),
+				symbols: flatSymbols.map(symbol => ({
 					id: symbol.id,
 					description: `AI-описание для ${symbol.name}`,
 				})),
@@ -692,6 +705,7 @@ class TestController {
 	assert.equal(symbolCalls.length, 1);
 	assert.equal(frontendCalls.length, 1);
 	assert.equal(readRequests.length, 1);
+	assert.match(secondRecord.content, /- Описание: AI-описание файла src\/pages\/OrdersPage\.vue/);
 	assert.match(firstRecord.content, /AI-описание для index/);
 	assert.match(secondRecord.content, /AI-описание для index/);
 	assert.match(secondRecord.content, /AI-описание UI-блока OrdersFilters/);
@@ -749,10 +763,15 @@ class TestController {
 				})),
 			});
 		},
-		generateCodeMapSymbolDescriptionsBatch: async (input: { symbols: Array<{ id: string; name: string; filePath: string }> }) => {
-			symbolCalls.push(input.symbols.map(symbol => `${symbol.filePath}:${symbol.name}`));
+		generateCodeMapSymbolDescriptionsBatch: async (input: { files: Array<{ id: string; filePath: string; symbols: Array<{ id: string; name: string; filePath: string }> }> }) => {
+			const flatSymbols = input.files.flatMap(file => file.symbols);
+			symbolCalls.push(flatSymbols.map(symbol => `${symbol.filePath}:${symbol.name}`));
 			return JSON.stringify({
-				symbols: input.symbols.map(symbol => ({
+				files: input.files.map(file => ({
+					id: file.id,
+					description: `AI-описание файла ${file.filePath}`,
+				})),
+				symbols: flatSymbols.map(symbol => ({
 					id: symbol.id,
 					description: `AI-описание для ${symbol.name}`,
 				})),
@@ -847,6 +866,7 @@ class TestController {
 		['app/Http/Controllers/TestController.php', 'routes/api.php', 'src/pages/OrdersPage.vue'],
 		['src/pages/OrdersPage.vue'],
 	]);
+	assert.match(secondRecord.content, /- Описание: AI-описание файла src\/pages\/OrdersPage\.vue/);
 	assert.match(secondRecord.content, /AI-описание для submitFiltersFast/);
 	assert.match(secondRecord.content, /AI-описание UI-блока OrdersFilters: submitFiltersFast/);
 	assert.match(secondRecord.content, /AI-описание для index/);
@@ -905,10 +925,15 @@ const applyFilters = () => query.value;
 				description: `Описание области ${area.area}`,
 			})),
 		}),
-		generateCodeMapSymbolDescriptionsBatch: async (input: { symbols: Array<{ id: string; name: string; filePath: string }> }) => {
-			symbolCalls.push(input.symbols.map(symbol => `${symbol.filePath}:${symbol.name}`));
+		generateCodeMapSymbolDescriptionsBatch: async (input: { files: Array<{ id: string; filePath: string; symbols: Array<{ id: string; name: string; filePath: string }> }> }) => {
+			const flatSymbols = input.files.flatMap(file => file.symbols);
+			symbolCalls.push(flatSymbols.map(symbol => `${symbol.filePath}:${symbol.name}`));
 			return JSON.stringify({
-				symbols: input.symbols.map(symbol => ({
+				files: input.files.map(file => ({
+					id: file.id,
+					description: `AI-описание файла ${file.filePath}`,
+				})),
+				symbols: flatSymbols.map(symbol => ({
 					id: symbol.id,
 					description: `AI-описание для ${symbol.name}`,
 				})),

@@ -114,6 +114,7 @@ export interface CodeMapFrontendBlockSummary {
 export interface CodeMapFileSummary {
 	path: string;
 	lineCount: number;
+	description?: string;
 	role: string;
 	symbols: CodeMapFileSymbolSummary[];
 	imports: string[];

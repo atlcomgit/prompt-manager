@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildAreaDescriptionBatches, buildFrontendBlockDescriptionBatches, buildSymbolDescriptionBatches, parseCodeMapAreaBatchResponse } from '../src/codemap/codeMapInstructionService.js';
+import { buildAreaDescriptionBatches, buildFileSymbolDescriptionBatches, buildFrontendBlockDescriptionBatches, parseCodeMapAreaBatchResponse } from '../src/codemap/codeMapInstructionService.js';
 
 test('buildAreaDescriptionBatches packs multiple areas until the configured context budget is reached', () => {
 	const items = [
@@ -32,17 +32,56 @@ test('buildAreaDescriptionBatches respects explicit max items per batch', () => 
 	]);
 });
 
-test('buildSymbolDescriptionBatches respects max files and max items limits', () => {
-	const batches = buildSymbolDescriptionBatches([
-		{ id: 's-1', filePath: 'a.ts', fileRole: 'services', kind: 'method', name: 'a', signature: 'a()', excerpt: 'a()', fallbackDescription: 'a' },
-		{ id: 's-2', filePath: 'a.ts', fileRole: 'services', kind: 'method', name: 'b', signature: 'b()', excerpt: 'b()', fallbackDescription: 'b' },
-		{ id: 's-3', filePath: 'b.ts', fileRole: 'services', kind: 'method', name: 'c', signature: 'c()', excerpt: 'c()', fallbackDescription: 'c' },
-		{ id: 's-4', filePath: 'c.ts', fileRole: 'services', kind: 'method', name: 'd', signature: 'd()', excerpt: 'd()', fallbackDescription: 'd' },
+test('buildFileSymbolDescriptionBatches respects max files and max symbol items limits', () => {
+	const batches = buildFileSymbolDescriptionBatches([
+		{
+			id: 'file-a',
+			filePath: 'a.ts',
+			fileRole: 'services',
+			lineCount: 20,
+			imports: ['./dep-a'],
+			frontendContract: [],
+			frontendBlockNames: [],
+			excerpt: 'export function a() {}',
+			fallbackDescription: '',
+			symbols: [
+				{ id: 's-1', filePath: 'a.ts', fileRole: 'services', kind: 'method', name: 'a', signature: 'a()', excerpt: 'a()', fallbackDescription: 'a' },
+				{ id: 's-2', filePath: 'a.ts', fileRole: 'services', kind: 'method', name: 'b', signature: 'b()', excerpt: 'b()', fallbackDescription: 'b' },
+			],
+		},
+		{
+			id: 'file-b',
+			filePath: 'b.ts',
+			fileRole: 'services',
+			lineCount: 12,
+			imports: ['./dep-b'],
+			frontendContract: [],
+			frontendBlockNames: [],
+			excerpt: 'export function c() {}',
+			fallbackDescription: '',
+			symbols: [
+				{ id: 's-3', filePath: 'b.ts', fileRole: 'services', kind: 'method', name: 'c', signature: 'c()', excerpt: 'c()', fallbackDescription: 'c' },
+			],
+		},
+		{
+			id: 'file-c',
+			filePath: 'c.ts',
+			fileRole: 'services',
+			lineCount: 12,
+			imports: ['./dep-c'],
+			frontendContract: [],
+			frontendBlockNames: [],
+			excerpt: 'export function d() {}',
+			fallbackDescription: '',
+			symbols: [
+				{ id: 's-4', filePath: 'c.ts', fileRole: 'services', kind: 'method', name: 'd', signature: 'd()', excerpt: 'd()', fallbackDescription: 'd' },
+			],
+		},
 	], 24000, 3, 2);
 
 	assert.deepEqual(batches.map(batch => batch.map(item => item.id)), [
-		['s-1', 's-2', 's-3'],
-		['s-4'],
+		['file-a', 'file-b'],
+		['file-c'],
 	]);
 });
 

@@ -499,19 +499,26 @@ export class CopilotUsageService implements vscode.Disposable {
 	private async handleAuthenticationSessionsChanged(providerId: string): Promise<void> {
 		const ts = new Date().toISOString();
 		appendPromptManagerLog(
-			`[${ts}] [auth-event] onDidChangeSessions fired for provider: ${providerId}, userExplicitChoice=${this.userExplicitAccountChoice || 'none'}`,
+			`[${ts}] [auth-event] onDidChangeSessions fired for provider: ${providerId}, ` +
+			`userExplicitChoice=${this.userExplicitAccountChoice || 'none'}, isSwitching=${this.isSwitchingAccount}`,
 		);
 
-		// При смене сессии Copilot Chat — сбрасываем ручной выбор и синхронизируемся
+		// Во время ручного переключения — не вмешиваемся, switchCopilotChatAccountInteractively
+		// сам управляет состоянием. Иначе возникает race condition.
+		if (this.isSwitchingAccount) {
+			appendPromptManagerLog(`[${ts}] [auth-event] SKIP — isSwitchingAccount=true`);
+			return;
+		}
+
+		// При смене сессии Copilot Chat (внешнее изменение, не наше) — следуем за ней
 		if (providerId === COPILOT_CHAT_AUTH_PROVIDER_ID) {
 			const copilotChatAccount = await this.resolveCopilotChatBoundGitHubAccount();
 			appendPromptManagerLog(
 				`[${ts}] [auth-event] Copilot Chat session now: ${copilotChatAccount?.label || 'none'} (was: ${this.lastKnownCopilotGitHubPreference || 'none'})`,
 			);
-			// Copilot Chat сменился — сбрасываем ручной override, начинаем следовать за ним
 			if (this.userExplicitAccountChoice) {
 				appendPromptManagerLog(
-					`[${ts}] [auth-event] clearing userExplicitAccountChoice (was: ${this.userExplicitAccountChoice}) — Copilot Chat session changed`,
+					`[${ts}] [auth-event] clearing userExplicitAccountChoice (was: ${this.userExplicitAccountChoice}) — external Copilot Chat change`,
 				);
 				this.userExplicitAccountChoice = null;
 			}
@@ -973,24 +980,31 @@ export class CopilotUsageService implements vscode.Disposable {
 	async switchCopilotChatAccountInteractively(): Promise<{ changed: boolean; cancelled?: boolean; message: string }> {
 		const ts = () => new Date().toISOString();
 
-		// Собираем начальное состояние для логов
 		const copilotChatAccountBefore = await this.resolveCopilotChatBoundGitHubAccount();
 		const dbPreferenceBefore = await this.resolveCopilotPreferredGitHubAccountLabel();
+		const beforeLabel = copilotChatAccountBefore?.label || null;
 		appendPromptManagerLog(
-			`[${ts()}] [switch] === START switchAccount ===\n` +
-			`[${ts()}] [switch] copilotChat live session: ${copilotChatAccountBefore?.label || 'none'} (id: ${copilotChatAccountBefore?.id || 'none'})\n` +
-			`[${ts()}] [switch] DB preference (copilot keys): ${dbPreferenceBefore || 'none'}\n` +
-			`[${ts()}] [switch] lastKnownCopilotGitHubPreference: ${this.lastKnownCopilotGitHubPreference || 'none'}`,
+			`[${ts()}] [switch] === START ===\n` +
+			`[${ts()}] [switch] copilotChat BEFORE: live=${beforeLabel || 'none'}, db=${dbPreferenceBefore || 'none'}`,
 		);
 
+		// Блокируем handleAuthenticationSessionsChanged от параллельных действий
 		this.isSwitchingAccount = true;
-		this._onDidChangeAccountSwitchState.fire(true);
+
+		// === Детекция смены: событие + поллинг (гонка — кто первый обнаружит) ===
+		let detected = false;
+		let detectedLabel: string | null = null;
+
+		const authEvents: string[] = [];
+		const authDisposable = vscode.authentication.onDidChangeSessions((e) => {
+			authEvents.push(`${e.provider.id}@${new Date().toISOString()}`);
+			appendPromptManagerLog(`[${ts()}] [switch] onDidChangeSessions: provider=${e.provider.id}`);
+		});
 
 		try {
-			// ===== ШАГ 1: Переключаем Copilot Chat через внутреннюю команду VS Code =====
-			// Это тот же механизм, что использует "Управление настройками учетной записи расширения"
-			appendPromptManagerLog(`[${ts()}] [switch] calling _manageAccountPreferencesForExtension for github.copilot-chat...`);
-
+			// ===== ШАГ 1: Открываем пикер Copilot Chat =====
+			appendPromptManagerLog(`[${ts()}] [switch] calling _manageAccountPreferencesForExtension...`);
+			let commandError: string | null = null;
 			try {
 				await vscode.commands.executeCommand(
 					'_manageAccountPreferencesForExtension',
@@ -998,82 +1012,79 @@ export class CopilotUsageService implements vscode.Disposable {
 					'github',
 				);
 			} catch (err) {
-				appendPromptManagerLog(`[${ts()}] [switch] _manageAccountPreferencesForExtension threw: ${String(err)}`);
-				// Fallback: пробуем переключить только расширение через clearSessionPreference
-				appendPromptManagerLog(`[${ts()}] [switch] fallback: calling clearSessionPreference...`);
-				try {
-					const fallbackSession = await vscode.authentication.getSession(
-						GITHUB_AUTH_PROVIDER_ID,
-						['user:email', 'read:user'],
-						{ clearSessionPreference: true, createIfNone: true },
-					);
-					if (!fallbackSession) {
-						return { changed: false, cancelled: true, message: 'Выбор аккаунта отменён.' };
-					}
-				} catch (err2) {
-					appendPromptManagerLog(`[${ts()}] [switch] fallback also threw: ${String(err2)}`);
-					return { changed: false, message: `Ошибка смены аккаунта: ${String(err)}` };
+				commandError = String(err);
+			}
+			appendPromptManagerLog(
+				`[${ts()}] [switch] command returned. error=${commandError || 'none'}, authEvents=[${authEvents.join(', ')}]`,
+			);
+
+			if (commandError) {
+				this.isSwitchingAccount = false;
+				return { changed: false, message: `Ошибка: ${commandError}` };
+			}
+
+			// ===== ШАГ 2: Поллинг — ждём пока Copilot Chat обновит аккаунт =====
+			// Проверяем и живую сессию, и DB, и auth events
+			for (let attempt = 1; attempt <= 15; attempt++) {
+				await new Promise(r => setTimeout(r, 400));
+
+				const liveSession = await this.resolveCopilotChatBoundGitHubAccount();
+				const liveLabel = liveSession?.label || null;
+				const dbPref = await this.resolveCopilotPreferredGitHubAccountLabel();
+
+				appendPromptManagerLog(
+					`[${ts()}] [switch] poll #${attempt}: live=${liveLabel || 'none'}, db=${dbPref || 'none'}, events=[${authEvents.join(', ')}]`,
+				);
+
+				// Проверяем: живая сессия изменилась?
+				if (liveLabel && liveLabel !== beforeLabel) {
+					detectedLabel = liveLabel;
+					detected = true;
+					appendPromptManagerLog(`[${ts()}] [switch] DETECTED via live session: ${detectedLabel}`);
+					break;
+				}
+
+				// Проверяем: DB preference изменилась?
+				if (dbPref && dbPref !== dbPreferenceBefore && dbPref !== beforeLabel) {
+					detectedLabel = dbPref;
+					detected = true;
+					appendPromptManagerLog(`[${ts()}] [switch] DETECTED via DB preference: ${detectedLabel}`);
+					break;
+				}
+
+				// Если executeCommand действительно ждал пикер, и ничего не поменялось
+				// после 3 попыток — пользователь отменил
+				if (attempt >= 3 && authEvents.length === 0) {
+					appendPromptManagerLog(`[${ts()}] [switch] no events after ${attempt} polls — likely cancelled`);
+					break;
 				}
 			}
 
-			// Небольшая задержка чтобы VS Code обработал смену preference
-			await new Promise(resolve => setTimeout(resolve, 500));
-
-			// ===== ШАГ 2: Определяем на какой аккаунт переключился Copilot Chat =====
-			const copilotChatAccountAfter = await this.resolveCopilotChatBoundGitHubAccount();
-			const newAccountLabel = copilotChatAccountAfter?.label;
-
-			appendPromptManagerLog(
-				`[${ts()}] [switch] after picker: copilotChat live session: ${newAccountLabel || 'none'}`,
-			);
-
-			// Если Copilot Chat не изменился — возможно пользователь отменил
-			if (!newAccountLabel) {
-				appendPromptManagerLog(`[${ts()}] [switch] no copilot chat session after switch — cancelled?`);
-				return { changed: false, cancelled: true, message: 'Аккаунт Copilot Chat не определён после смены.' };
-			}
-
-			const accountChanged = copilotChatAccountBefore?.label !== newAccountLabel;
-			if (!accountChanged) {
-				appendPromptManagerLog(`[${ts()}] [switch] copilot chat account unchanged: ${newAccountLabel}`);
+			if (!detected || !detectedLabel) {
+				appendPromptManagerLog(`[${ts()}] [switch] not detected — cancelled`);
+				this.isSwitchingAccount = false;
 				return { changed: false, cancelled: true, message: 'Аккаунт не изменён.' };
 			}
 
-			// ===== ШАГ 3: Синхронизируем расширение с новым аккаунтом Copilot Chat =====
-			appendPromptManagerLog(`[${ts()}] [switch] syncing extension to new copilot chat account: ${newAccountLabel}`);
+			// ===== ШАГ 3: Аккаунт РЕАЛЬНО изменился =====
+			appendPromptManagerLog(`[${ts()}] [switch] CHANGED: ${beforeLabel} → ${detectedLabel}`);
+			this._onDidChangeAccountSwitchState.fire(true);
 
-			this.userExplicitAccountChoice = newAccountLabel;
-			this.lastKnownCopilotGitHubPreference = newAccountLabel;
+			this.userExplicitAccountChoice = detectedLabel;
+			this.lastKnownCopilotGitHubPreference = detectedLabel;
 			this.lastGitHubSessionIssue = null;
-			await this.persistPreferredAccountLabel(PROMPT_MANAGER_GITHUB_PREFERENCE_KEY, newAccountLabel);
-
-			// Обновляем данные расширения
-			await this.refreshAuthenticationBinding('manual-account-switch');
-
-			// Проверяем финальное состояние
-			const dbPreferenceAfter = await this.resolveCopilotPreferredGitHubAccountLabel();
-			appendPromptManagerLog(
-				`[${ts()}] [switch] === AFTER switchAccount ===\n` +
-				`[${ts()}] [switch] extension account: ${newAccountLabel}\n` +
-				`[${ts()}] [switch] copilotChat live session: ${newAccountLabel}\n` +
-				`[${ts()}] [switch] DB preference (copilot keys): ${dbPreferenceAfter || 'none'}\n` +
-				`[${ts()}] [switch] authenticated: ${this.cachedData?.authenticated}\n` +
-				`[${ts()}] [switch] lastGitHubSessionIssue: ${this.lastGitHubSessionIssue || 'none'}`,
-			);
-
-			if (this.cachedData?.authenticated) {
-				return {
-					changed: true,
-					message: `Copilot Chat и расширение переключены на ${newAccountLabel}.`,
-				};
-			}
+			this.lastApiCallTimestamp = 0;
+			this.lastFullRefreshTimestamp = 0;
+			await this.persistPreferredAccountLabel(PROMPT_MANAGER_GITHUB_PREFERENCE_KEY, detectedLabel);
+			appendPromptManagerLog(`[${ts()}] [switch] extension preference saved: ${detectedLabel}`);
 
 			return {
 				changed: true,
-				message: `Аккаунт переключён на ${newAccountLabel}, но usage пока недоступен.`,
+				message: `Copilot Chat и расширение переключены на ${detectedLabel}.`,
 			};
 		} finally {
-			appendPromptManagerLog(`[${ts()}] [switch] === END switchAccount ===`);
+			authDisposable.dispose();
+			appendPromptManagerLog(`[${ts()}] [switch] === END === authEvents=[${authEvents.join(', ')}]`);
 		}
 	}
 

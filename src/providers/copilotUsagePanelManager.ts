@@ -75,25 +75,31 @@ export class CopilotUsagePanelManager {
 			}
 
 			if (msg.type === 'copilotUsage.switchAccount') {
-				// switchCopilotChatAccountInteractively открывает пикер VS Code для Copilot Chat,
-				// затем синхронизирует расширение. Статусбар показывает спиннер через событие сервиса.
+				// ШАГ 1: Открываем пикер и ждём выбора. Никаких overlay/спиннеров пока.
+				// switchCopilotChatAccountInteractively сам определит, сменился ли аккаунт.
+				// Если сменился — вернёт changed:true и уже покажет спиннер в статусбаре.
 				const result = await this.usageService.switchCopilotChatAccountInteractively();
 
 				if (result.changed) {
-					// Показываем overlay пока обновляются данные
+					// ШАГ 2: Аккаунт сменился. Статусбар уже показывает спиннер.
+					// Показываем overlay на странице.
 					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitching', isSwitching: true });
-					// Обновляем данные для нового аккаунта
+
+					// ШАГ 3: Загружаем данные для нового аккаунта (API запрос).
+					// fetchUsage(true) использует userExplicitAccountChoice → новый аккаунт.
 					await this.pushUsageToWebview(panel.webview, true);
-					// Показываем результат
+
+					// ШАГ 4: Данные загружены. Сбрасываем спиннер и overlay ОДНОВРЕМЕННО.
+					// endAccountSwitching() fires onDidChangeAccountSwitchState(false) → статусбар обновится.
+					this.usageService.endAccountSwitching();
+					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitching', isSwitching: false });
 					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitchResult', result });
-					// Даём webview отрисовать новые данные
-					await new Promise(resolve => setTimeout(resolve, 800));
-				} else {
+				} else if (!result.cancelled) {
+					// Ошибка — показать сообщение
+					this.usageService.endAccountSwitching();
 					await panel.webview.postMessage({ type: 'copilotUsage.accountSwitchResult', result });
 				}
-				// Сбрасываем статус переключения — статусбар и overlay обновятся одновременно
-				this.usageService.endAccountSwitching();
-				await panel.webview.postMessage({ type: 'copilotUsage.accountSwitching', isSwitching: false });
+				// Если cancelled — вообще ничего не показываем
 				return;
 			}
 

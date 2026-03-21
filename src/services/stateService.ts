@@ -11,6 +11,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { SidebarState } from '../types/prompt.js';
 import { normalizeSidebarState } from '../types/prompt.js';
+import { observeStableChatCompletion, type StableChatCompletionCandidate } from '../utils/chatCompletionState.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -369,6 +370,8 @@ export class StateService {
 		let lastObservedResponseState: number | undefined;
 		let lastObservedHasPendingEdits: boolean | undefined;
 		let lastObservedDbPath = '';
+		let stableCompletionCandidate: StableChatCompletionCandidate | null = null;
+		const completionStableForMs = Math.max(1500, pollIntervalMs * 2);
 		while (Date.now() - startedAt <= timeoutMs) {
 			let current: any;
 			let matchedDbPath = '';
@@ -402,9 +405,21 @@ export class StateService {
 				lastObservedResponseState = lastResponseState;
 				lastObservedHasPendingEdits = hasPendingEdits;
 				lastObservedDbPath = matchedDbPath;
-				const finished = lastRequestEnded > lastRequestStarted && !hasPendingEdits;
+				const completionObservation = observeStableChatCompletion(
+					stableCompletionCandidate,
+					{
+						sessionId: lastObservedSessionId,
+						lastRequestStarted,
+						lastRequestEnded,
+						lastResponseState,
+						hasPendingEdits,
+					},
+					Date.now(),
+					completionStableForMs,
+				);
+				stableCompletionCandidate = completionObservation.candidate;
 
-				if (finished) {
+				if (completionObservation.completed) {
 					return {
 						ok: true,
 						sessionId: String(current?.sessionId || ''),
@@ -415,6 +430,8 @@ export class StateService {
 						dbPath: matchedDbPath,
 					};
 				}
+			} else {
+				stableCompletionCandidate = null;
 			}
 
 			await new Promise(resolve => setTimeout(resolve, pollIntervalMs));

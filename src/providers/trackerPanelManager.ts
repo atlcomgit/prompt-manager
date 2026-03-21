@@ -103,6 +103,18 @@ export class TrackerPanelManager {
 				break;
 			}
 
+			case 'getPrompt': {
+				const prompt = await this.storageService.getPrompt(msg.id);
+				const response: ExtensionToWebviewMessage = {
+					type: 'prompt',
+					prompt,
+					reason: 'open',
+					previousId: msg.id,
+				};
+				currentPanel?.webview.postMessage(response);
+				break;
+			}
+
 			case 'createPrompt': {
 				this._onDidOpenPrompt.fire('__new__');
 				break;
@@ -117,6 +129,29 @@ export class TrackerPanelManager {
 			case 'startChat': {
 				await this.stateService.saveLastPromptId(msg.id);
 				await vscode.commands.executeCommand('promptManager.startChat');
+				break;
+			}
+
+			case 'openChat': {
+				if (msg.id) {
+					await this.stateService.saveLastPromptId(msg.id);
+					const prompt = await this.storageService.getPrompt(msg.id);
+					if (prompt && prompt.status !== 'in-progress') {
+						prompt.status = 'in-progress';
+						await this.storageService.savePrompt(prompt, { historyReason: 'status-change' });
+						this._onDidSave.fire(prompt.id);
+						await this.refresh();
+					}
+				}
+
+				const openedBoundSession = await this.openBoundChatSession(msg.sessionId);
+				if (!openedBoundSession) {
+					try {
+						await vscode.commands.executeCommand('workbench.action.chat.openAgent');
+					} catch {
+						await vscode.commands.executeCommand('workbench.action.chat.open');
+					}
+				}
 				break;
 			}
 
@@ -145,6 +180,64 @@ export class TrackerPanelManager {
 			default:
 				break;
 		}
+	}
+
+	private buildChatSessionResource(sessionId: string): vscode.Uri {
+		const encoded = Buffer
+			.from(sessionId, 'utf-8')
+			.toString('base64')
+			.replace(/=+$/g, '');
+
+		return vscode.Uri.parse(`vscode-chat-session://local/${encoded}`);
+	}
+
+	private async openBoundChatSession(sessionId: string): Promise<boolean> {
+		const trimmed = (sessionId || '').trim();
+		if (!trimmed) {
+			return false;
+		}
+
+		const sessionResource = this.buildChatSessionResource(trimmed);
+		const isTargetSessionActive = async (): Promise<boolean> => {
+			const activeSessionId = await this.stateService.getActiveChatSessionId(4500, 150);
+			return activeSessionId === trimmed;
+		};
+
+		try {
+			await vscode.commands.executeCommand('vscode.open', sessionResource);
+			if (await isTargetSessionActive()) {
+				return true;
+			}
+		} catch {
+			// continue with compatibility variants
+		}
+
+		const openChatCmds = ['workbench.action.chat.openAgent', 'workbench.action.chat.open'];
+		const argCandidates: unknown[] = [
+			sessionResource,
+			{ resource: sessionResource },
+			{ uri: sessionResource },
+			{ sessionId: trimmed },
+			{ id: trimmed },
+			{ chatSessionId: trimmed },
+			{ session: trimmed },
+			{ sessionId: trimmed, resource: sessionResource },
+		];
+
+		for (const openCmd of openChatCmds) {
+			for (const arg of argCandidates) {
+				try {
+					await vscode.commands.executeCommand(openCmd, arg);
+					if (await isTargetSessionActive()) {
+						return true;
+					}
+				} catch {
+					// try next argument variant
+				}
+			}
+		}
+
+		return false;
 	}
 
 	dispose(): void {

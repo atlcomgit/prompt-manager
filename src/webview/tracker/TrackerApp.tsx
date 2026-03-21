@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
-import type { PromptConfig, PromptStatus } from '../../types/prompt';
+import type { Prompt, PromptConfig, PromptStatus } from '../../types/prompt';
+import { PromptDetailOverlay } from './components/PromptDetailOverlay';
 
 const vscode = getVsCodeApi();
 
@@ -53,7 +54,12 @@ export const TrackerApp: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverStatus, setDragOverStatus] = useState<PromptStatus | null>(null);
+  const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
+  const [selectedPrompt, setSelectedPrompt] = useState<Prompt | null>(null);
+  const [isPromptLoading, setIsPromptLoading] = useState(false);
   const openPromptTimerRef = useRef<number | null>(null);
+  const requestedPromptIdRef = useRef<string | null>(null);
+  const suppressCardClickRef = useRef(false);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -87,17 +93,110 @@ export const TrackerApp: React.FC = () => {
       return;
     }
 
+    if (msg.type === 'prompt' && msg.reason === 'open') {
+      if (!requestedPromptIdRef.current || !selectedPromptId) {
+        return;
+      }
+
+      if (msg.previousId && requestedPromptIdRef.current && msg.previousId !== requestedPromptIdRef.current) {
+        return;
+      }
+
+      requestedPromptIdRef.current = null;
+      setSelectedPrompt(msg.prompt || null);
+      setIsPromptLoading(false);
+      return;
+    }
+
     if (msg.type === 'promptDeleted') {
       setPrompts(prev => prev.filter(p => p.id !== msg.id));
+      setSelectedPrompt(current => (current?.id === msg.id ? null : current));
+      setSelectedPromptId(current => (current === msg.id ? null : current));
     }
-  }, []);
+
+  }, [selectedPromptId]);
 
   useMessageListener(handleMessage);
 
   const movePrompt = useCallback((promptId: string, status: PromptStatus) => {
     setPrompts(prev => prev.map(p => (p.id === promptId ? { ...p, status } : p)));
+    setSelectedPrompt(current => (current?.id === promptId ? { ...current, status } : current));
     vscode.postMessage({ type: 'updatePromptStatus', id: promptId, status });
   }, []);
+
+  const selectedPromptConfig = useMemo(() => {
+    if (!selectedPromptId) {
+      return null;
+    }
+
+    return prompts.find(prompt => prompt.id === selectedPromptId) || null;
+  }, [prompts, selectedPromptId]);
+
+  useEffect(() => {
+    if (!selectedPromptId) {
+      requestedPromptIdRef.current = null;
+      setSelectedPrompt(null);
+      setIsPromptLoading(false);
+      return;
+    }
+
+    requestedPromptIdRef.current = selectedPromptId;
+    setSelectedPrompt(null);
+    setIsPromptLoading(true);
+    vscode.postMessage({ type: 'getPrompt', id: selectedPromptId });
+  }, [selectedPromptId]);
+
+  useEffect(() => {
+    if (selectedPromptId && !selectedPromptConfig) {
+      setSelectedPromptId(null);
+      setSelectedPrompt(null);
+      setIsPromptLoading(false);
+    }
+  }, [selectedPromptConfig, selectedPromptId]);
+
+  const openPromptOverlay = useCallback((promptId: string) => {
+    if (suppressCardClickRef.current) {
+      return;
+    }
+
+    setSelectedPromptId(promptId);
+  }, []);
+
+  const closePromptOverlay = useCallback(() => {
+    requestedPromptIdRef.current = null;
+    setSelectedPromptId(null);
+    setSelectedPrompt(null);
+    setIsPromptLoading(false);
+  }, []);
+
+  const handleOpenFromOverlay = useCallback(() => {
+    if (!selectedPromptId) {
+      return;
+    }
+
+    handleOpenPrompt(selectedPromptId);
+    closePromptOverlay();
+  }, [closePromptOverlay, handleOpenPrompt, selectedPromptId]);
+
+  const handleStartChatFromOverlay = useCallback(() => {
+    if (!selectedPromptId) {
+      return;
+    }
+
+    vscode.postMessage({ type: 'startChat', id: selectedPromptId });
+    closePromptOverlay();
+  }, [closePromptOverlay, selectedPromptId]);
+
+  const handleOpenChatFromOverlay = useCallback(() => {
+    const promptForChat = selectedPrompt ?? selectedPromptConfig;
+    const sessionId = promptForChat?.chatSessionIds?.[0];
+    if (!selectedPromptId || !sessionId) {
+      return;
+    }
+
+    vscode.postMessage({ type: 'openChat', id: selectedPromptId, sessionId });
+    closePromptOverlay();
+  }, [closePromptOverlay, selectedPrompt, selectedPromptConfig, selectedPromptId]);
 
   const columns = useMemo(() => {
     return STATUS_ORDER.map(status => {
@@ -170,6 +269,8 @@ export const TrackerApp: React.FC = () => {
                           key={prompt.id}
                           draggable
                           onDragStart={event => {
+                            closePromptOverlay();
+                            suppressCardClickRef.current = true;
                             setDraggingId(prompt.id);
                             event.dataTransfer.effectAllowed = 'move';
                             event.dataTransfer.setData('text/prompt-id', prompt.id);
@@ -177,24 +278,27 @@ export const TrackerApp: React.FC = () => {
                           onDragEnd={() => {
                             setDraggingId(null);
                             setDragOverStatus(null);
+                            window.setTimeout(() => {
+                              suppressCardClickRef.current = false;
+                            }, 0);
                           }}
+                          onClick={() => openPromptOverlay(prompt.id)}
                           style={{
                             ...styles.card,
                             ...(isDragging ? styles.cardDragging : {}),
                           }}
                         >
-                          <div style={styles.cardStatus}>{statusLabel}</div>
+                          <div style={styles.cardHeaderRow}>
+                            <div style={styles.cardStatus}>{statusLabel}</div>
+                            <div style={styles.cardHint}>{t('tracker.clickToOpen')}</div>
+                          </div>
                           <div style={styles.cardTitle}>{prompt.title || prompt.id}</div>
                           <div style={styles.cardDescription}>{prompt.description || '—'}</div>
                           <div style={styles.metaRow}><strong>№</strong> {prompt.taskNumber || '—'}</div>
                           <div style={styles.metaRow}><strong>{t('tracker.projects')}</strong> {prompt.projects.length ? prompt.projects.join(', ') : '—'}</div>
-                          <div style={styles.actionsRow}>
-                            <button style={styles.actionBtn} onClick={() => handleOpenPrompt(prompt.id)}>
-                              {t('tracker.open')}
-                            </button>
-                            <button style={styles.actionBtnPrimary} onClick={() => vscode.postMessage({ type: 'startChat', id: prompt.id })}>
-                              {t('tracker.startChat')}
-                            </button>
+                          <div style={styles.cardFooterRow}>
+                            <span style={styles.cardMetaChip}>{prompt.favorite ? '★' : '☆'} {prompt.model || t('tracker.detail.empty')}</span>
+                            <span style={styles.cardMetaChip}>{prompt.updatedAt ? new Date(prompt.updatedAt).toLocaleDateString('ru-RU') : '—'}</span>
                           </div>
                         </div>
                       );
@@ -206,6 +310,17 @@ export const TrackerApp: React.FC = () => {
           </div>
         </div>
       )}
+
+      <PromptDetailOverlay
+        promptConfig={selectedPromptConfig}
+        prompt={selectedPrompt}
+        loading={isPromptLoading}
+        onClose={closePromptOverlay}
+        onOpenPrompt={handleOpenFromOverlay}
+        onOpenChat={handleOpenChatFromOverlay}
+        onStartChat={handleStartChatFromOverlay}
+        t={t}
+      />
     </div>
   );
 };
@@ -316,30 +431,42 @@ const styles: Record<string, React.CSSProperties> = {
   card: {
     border: '1px solid var(--vscode-panel-border)',
     borderRadius: '8px',
-    padding: '8px',
+    padding: '10px',
     background: 'var(--vscode-editorWidget-background, var(--vscode-sideBar-background))',
-    cursor: 'grab',
-    transition: 'transform 100ms ease',
+    cursor: 'pointer',
+    transition: 'transform 100ms ease, border-color 120ms ease, background 120ms ease',
   },
   cardDragging: {
     transform: 'scale(0.995)',
     cursor: 'grabbing',
   },
+  cardHeaderRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+    marginBottom: '6px',
+  },
   cardStatus: {
     fontSize: '11px',
     color: 'var(--vscode-descriptionForeground)',
-    marginBottom: '4px',
+  },
+  cardHint: {
+    fontSize: '10px',
+    color: 'var(--vscode-descriptionForeground)',
+    textTransform: 'uppercase',
+    letterSpacing: '0.06em',
   },
   cardTitle: {
     fontSize: '13px',
     fontWeight: 700,
-    marginBottom: '4px',
+    marginBottom: '6px',
     wordBreak: 'break-word',
   },
   cardDescription: {
     fontSize: '12px',
     color: 'var(--vscode-descriptionForeground)',
-    marginBottom: '6px',
+    marginBottom: '8px',
     display: '-webkit-box',
     WebkitLineClamp: 2,
     WebkitBoxOrient: 'vertical',
@@ -351,34 +478,20 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--vscode-foreground)',
     wordBreak: 'break-word',
   },
-  actionsRow: {
+  cardFooterRow: {
     display: 'flex',
     flexWrap: 'wrap',
     gap: '6px',
     marginTop: '8px',
   },
-  actionBtn: {
-    flex: '1 1 88px',
-    minWidth: 0,
-    padding: '5px 8px',
-    border: '1px solid var(--vscode-button-border, var(--vscode-panel-border))',
-    borderRadius: '5px',
-    background: 'var(--vscode-button-secondaryBackground)',
-    color: 'var(--vscode-button-secondaryForeground)',
-    cursor: 'pointer',
+  cardMetaChip: {
+    maxWidth: '100%',
+    padding: '4px 8px',
+    borderRadius: '999px',
+    background: 'color-mix(in srgb, var(--vscode-button-secondaryBackground) 88%, transparent)',
+    color: 'var(--vscode-foreground)',
     fontSize: '11px',
     fontWeight: 600,
-  },
-  actionBtnPrimary: {
-    flex: '1 1 108px',
-    minWidth: 0,
-    padding: '5px 8px',
-    border: 'none',
-    borderRadius: '5px',
-    background: 'var(--vscode-button-background)',
-    color: 'var(--vscode-button-foreground)',
-    cursor: 'pointer',
-    fontSize: '11px',
-    fontWeight: 600,
+    wordBreak: 'break-word',
   },
 };

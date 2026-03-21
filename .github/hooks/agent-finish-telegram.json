@@ -1,10 +1,11 @@
 {
+  "version": 1,
   "hooks": {
-    "Stop": [
+    "agentStop": [
       {
         "type": "command",
-        "command": "/home/alek/.copilot/hooks/agent-finish-telegram.sh",
-        "timeout": 60
+        "bash": "/home/alek/.copilot/hooks/agent-finish-telegram.sh",
+        "timeoutSec": 60
       }
     ]
   }

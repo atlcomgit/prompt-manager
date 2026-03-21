@@ -1,4 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import MarkdownIt from 'markdown-it';
+
+import { detectReportContentMode } from '../../../utils/reportContentMode.js';
 
 interface Props {
   value: string;
@@ -22,7 +25,7 @@ interface Props {
   showFormattingToolbar?: boolean;
 }
 
-type Mode = 'visual' | 'html';
+type Mode = 'visual' | 'html' | 'markdown';
 type BlockTag = 'p' | 'h1' | 'h2' | 'h3' | 'blockquote' | 'pre' | '';
 
 interface FormattingState {
@@ -50,6 +53,13 @@ interface ToolbarButtonProps {
 const DEFAULT_HEIGHT = 180;
 const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 800;
+
+const markdownRenderer = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: false,
+  typographer: false,
+});
 
 const DEFAULT_FORMATTING_STATE: FormattingState = {
   bold: false,
@@ -123,21 +133,16 @@ const normalizeText = (value: string): string => value
   .replace(/[\u200B\u2060\uFEFF\u00AD]/g, '')
   .normalize('NFC');
 
-const hasHtmlMarkup = (value: string): boolean => {
-  if (!value.trim()) {
-    return false;
+const detectPreferredMode = (value: string): Mode => {
+  const detectedMode = detectReportContentMode(value);
+  if (detectedMode === 'html') {
+    return 'visual';
   }
-
-  if (typeof DOMParser === 'undefined') {
-    return /<\/?[a-z][\w:-]*(?:\s[^<>]*)?>/i.test(value);
+  if (detectedMode === 'markdown') {
+    return 'markdown';
   }
-
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(value, 'text/html');
-  return Array.from(doc.body.querySelectorAll('*')).length > 0;
+  return 'html';
 };
-
-const detectPreferredMode = (value: string): Mode => (hasHtmlMarkup(value) ? 'visual' : 'html');
 
 const sanitizeHtml = (rawHtml: string): string => {
   if (!rawHtml.trim()) {
@@ -339,6 +344,11 @@ export const RichTextEditor: React.FC<Props> = ({
   }, [autoModeKey, onDebug]);
 
   const translate = useCallback((key: string, fallback: string) => t?.(key) || fallback, [t]);
+
+  const markdownPreviewHtml = useMemo(() => {
+    const rendered = markdownRenderer.render(htmlSource || '').trim();
+    return sanitizeHtml(rendered);
+  }, [htmlSource]);
 
   const switchMode = useCallback((nextMode: Mode) => {
     isModeManuallySelectedRef.current = true;
@@ -608,10 +618,13 @@ export const RichTextEditor: React.FC<Props> = ({
 
   const modeHint = useMemo(() => {
     if (mode === 'visual') {
-      return 'Режим Html показывает отрендеренный результат с оформлением, списками и таблицами.';
+      return translate('editor.modeHintHtml', 'Html mode shows the rendered result with formatting, lists and tables.');
     }
-    return 'Режим Текст показывает исходное содержимое отчета без визуального рендеринга.';
-  }, [mode]);
+    if (mode === 'markdown') {
+      return translate('editor.modeHintMarkdown', 'Markdown mode shows the rendered Markdown preview. Switch to Text mode to edit the source.');
+    }
+    return translate('editor.modeHintText', 'Text mode shows the raw report content without visual rendering.');
+  }, [mode, translate]);
 
   return (
     <div style={{ ...styles.root, ...(fillHeight ? styles.rootFillHeight : null) }}>
@@ -722,6 +735,101 @@ export const RichTextEditor: React.FC<Props> = ({
             background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.1));
           }
 
+          .pm-rich-markdown-preview {
+            font-size: var(--vscode-font-size, 13px);
+            line-height: 1.6;
+            color: var(--vscode-foreground);
+          }
+
+          .pm-rich-markdown-preview > :first-child {
+            margin-top: 0;
+          }
+
+          .pm-rich-markdown-preview > :last-child {
+            margin-bottom: 0;
+          }
+
+          .pm-rich-markdown-preview h1,
+          .pm-rich-markdown-preview h2,
+          .pm-rich-markdown-preview h3,
+          .pm-rich-markdown-preview h4,
+          .pm-rich-markdown-preview h5,
+          .pm-rich-markdown-preview h6 {
+            margin: 1.1em 0 0.5em;
+            line-height: 1.3;
+            font-weight: 600;
+          }
+
+          .pm-rich-markdown-preview p,
+          .pm-rich-markdown-preview ul,
+          .pm-rich-markdown-preview ol,
+          .pm-rich-markdown-preview blockquote,
+          .pm-rich-markdown-preview table,
+          .pm-rich-markdown-preview pre {
+            margin: 0 0 1em;
+          }
+
+          .pm-rich-markdown-preview ul,
+          .pm-rich-markdown-preview ol {
+            padding-left: 1.6em;
+          }
+
+          .pm-rich-markdown-preview li {
+            margin: 0.15em 0;
+          }
+
+          .pm-rich-markdown-preview a {
+            color: var(--vscode-textLink-foreground);
+            text-decoration: none;
+          }
+
+          .pm-rich-markdown-preview a:hover {
+            text-decoration: underline;
+          }
+
+          .pm-rich-markdown-preview code {
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 0.95em;
+            padding: 0.15em 0.35em;
+            border-radius: 4px;
+            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+          }
+
+          .pm-rich-markdown-preview pre {
+            padding: 14px 16px;
+            border-radius: 10px;
+            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+            overflow: auto;
+          }
+
+          .pm-rich-markdown-preview pre code {
+            padding: 0;
+            background: none;
+            border-radius: 0;
+          }
+
+          .pm-rich-markdown-preview blockquote {
+            padding: 4px 12px;
+            border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-focusBorder));
+            background: var(--vscode-textBlockQuote-background, transparent);
+          }
+
+          .pm-rich-markdown-preview table {
+            width: 100%;
+            border-collapse: collapse;
+          }
+
+          .pm-rich-markdown-preview th,
+          .pm-rich-markdown-preview td {
+            border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+            padding: 6px 10px;
+            text-align: left;
+          }
+
+          .pm-rich-markdown-preview th {
+            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.1));
+          }
+
           .pm-rich-editor-content strong,
           .pm-rich-editor-content b {
             font-weight: 600;
@@ -741,17 +849,24 @@ export const RichTextEditor: React.FC<Props> = ({
         <div style={styles.modeGroup}>
           <button
             type="button"
-            style={{ ...styles.modeBtn, ...(mode === 'visual' ? styles.modeBtnActive : null) }}
-            onClick={() => switchMode('visual')}
-          >
-            Html
-          </button>
-          <button
-            type="button"
             style={{ ...styles.modeBtn, ...(mode === 'html' ? styles.modeBtnActive : null) }}
             onClick={() => switchMode('html')}
           >
-            Текст
+            {translate('editor.modeText', 'Text')}
+          </button>
+          <button
+            type="button"
+            style={{ ...styles.modeBtn, ...(mode === 'visual' ? styles.modeBtnActive : null) }}
+            onClick={() => switchMode('visual')}
+          >
+            {translate('editor.modeHtml', 'Html')}
+          </button>
+          <button
+            type="button"
+            style={{ ...styles.modeBtn, ...(mode === 'markdown' ? styles.modeBtnActive : null) }}
+            onClick={() => switchMode('markdown')}
+          >
+            {translate('editor.modeMarkdown', 'Markdown')}
           </button>
         </div>
         <div style={styles.actionGroup}>
@@ -988,6 +1103,32 @@ export const RichTextEditor: React.FC<Props> = ({
             maxHeight: undefined,
           }}
         />
+      ) : mode === 'markdown' ? (
+        markdownPreviewHtml ? (
+          <div
+            className="pm-rich-markdown-preview"
+            style={{
+              ...styles.preview,
+              ...(fillHeight ? styles.editorFillHeight : null),
+              height: fillHeight ? undefined : `${currentHeight}px`,
+              minHeight: undefined,
+              maxHeight: undefined,
+            }}
+            dangerouslySetInnerHTML={{ __html: markdownPreviewHtml }}
+          />
+        ) : (
+          <div
+            style={{
+              ...styles.previewEmpty,
+              ...(fillHeight ? styles.editorFillHeight : null),
+              height: fillHeight ? undefined : `${currentHeight}px`,
+              minHeight: undefined,
+              maxHeight: undefined,
+            }}
+          >
+            {translate('editor.markdownPreviewEmpty', 'Markdown preview is empty. Switch to Text mode to edit the content.')}
+          </div>
+        )
       ) : (
         <textarea
           value={htmlSource}
@@ -1199,6 +1340,28 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.5,
     fontFamily: 'var(--vscode-editor-font-family, monospace)',
     resize: 'none',
+  },
+  preview: {
+    width: '100%',
+    border: '1px solid var(--vscode-input-border, transparent)',
+    borderRadius: '4px 4px 0 0',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
+    padding: '14px',
+    boxSizing: 'border-box',
+    overflow: 'auto',
+  },
+  previewEmpty: {
+    width: '100%',
+    border: '1px solid var(--vscode-input-border, transparent)',
+    borderRadius: '4px 4px 0 0',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-descriptionForeground)',
+    padding: '14px',
+    boxSizing: 'border-box',
+    display: 'flex',
+    alignItems: 'center',
+    overflow: 'auto',
   },
   resizeHandle: {
     height: '6px',

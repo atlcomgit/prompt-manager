@@ -24,6 +24,7 @@ import { decideFileReportSync, isLatestPersistedReport } from '../utils/reportSy
 import { buildChatContextFiles } from '../utils/chatContextFiles.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
+import { filterPromptHookIdsForPhase } from '../utils/promptHookPhase.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
@@ -92,7 +93,10 @@ export class EditorPanelManager {
 		payload: Record<string, unknown>,
 		phase: 'beforeChat' | 'afterChat' | 'chatError' | 'afterChatCompleted'
 	): Promise<void> {
-		const selected = (hookIds || []).map(h => h.trim()).filter(Boolean);
+		const selected = filterPromptHookIdsForPhase(
+			(hookIds || []).map(h => h.trim()).filter(Boolean),
+			phase,
+		);
 		if (selected.length === 0) {
 			return;
 		}
@@ -2893,8 +2897,8 @@ export class EditorPanelManager {
 					if (!panel.visible) {
 						void vscode.window.showErrorMessage(finalMessage);
 					}
-						postMessage({ type: 'error', message: finalMessage, requestId: startChatRequestId || undefined });
-					};
+					postMessage({ type: 'error', message: finalMessage, requestId: startChatRequestId || undefined });
+				};
 
 				if (!prompt || !prompt.content) {
 					await reportStartChatFailure('Не удалось запустить чат: промпт пуст или не найден.');
@@ -2909,17 +2913,17 @@ export class EditorPanelManager {
 						const mismatches = await this.gitService.getBranchMismatches(paths, prompt.projects, prompt.branch, allowedBranches);
 						if (mismatches.length > 0) {
 							const details = mismatches.map(m => `Ветка проекта ${m.project} переключена на ${m.currentBranch}`).join('\n');
-								const answer = await vscode.window.showWarningMessage(
-									details,
-									{ modal: true },
-									'Продолжить',
-								);
-								if (answer !== 'Продолжить') {
-									postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
-									break;
-								}
+							const answer = await vscode.window.showWarningMessage(
+								details,
+								{ modal: true },
+								'Продолжить',
+							);
+							if (answer !== 'Продолжить') {
+								postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
+								break;
 							}
 						}
+					}
 
 					const bindSessionToPrompt = async (sessionId: string): Promise<void> => {
 						const normalizedSessionId = (sessionId || '').trim();
@@ -3348,18 +3352,18 @@ export class EditorPanelManager {
 								}, 3000);
 							}
 
-							if (shouldCaptureAgentFinalResponse) {
-								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
-								await this.runConfiguredHooks(prompt?.hooks || [], {
-									event: 'afterChatCompleted',
-									...hookPayloadBase,
-									status: promptToComplete?.status || prompt.status,
-									report: promptToComplete?.report || '',
-									reportText: chatReportText || this.reportHtmlToText(promptToComplete?.report || ''),
-									chatSessionId: trackedSessionId || '',
-									timeSpentImplementing: promptToComplete?.timeSpentImplementing || 0,
-								}, 'afterChatCompleted');
-							}
+							this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
+							await this.runConfiguredHooks(prompt?.hooks || [], {
+								event: 'afterChatCompleted',
+								...hookPayloadBase,
+								status: promptToComplete?.status || prompt.status,
+								report: shouldCaptureAgentFinalResponse ? (promptToComplete?.report || '') : '',
+								reportText: shouldCaptureAgentFinalResponse
+									? (chatReportText || this.reportHtmlToText(promptToComplete?.report || ''))
+									: '',
+								chatSessionId: trackedSessionId || '',
+								timeSpentImplementing: promptToComplete?.timeSpentImplementing || 0,
+							}, 'afterChatCompleted');
 							try {
 								await this.chatMemoryInstructionService()?.completeChatSession(
 									prompt.promptUuid,
@@ -3437,18 +3441,18 @@ export class EditorPanelManager {
 								}
 							}
 
-							if (shouldCaptureAgentFinalResponse) {
-								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
-								await this.runConfiguredHooks(prompt?.hooks || [], {
-									event: 'afterChatCompleted',
-									...hookPayloadBase,
-									status: promptForTiming?.status || prompt.status,
-									report: promptForTiming?.report || '',
-									reportText: chatReportText || this.reportHtmlToText(promptForTiming?.report || ''),
-									chatSessionId: trackedSessionId || '',
-									timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
-								}, 'afterChatCompleted');
-							}
+							this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
+							await this.runConfiguredHooks(prompt?.hooks || [], {
+								event: 'afterChatCompleted',
+								...hookPayloadBase,
+								status: promptForTiming?.status || prompt.status,
+								report: shouldCaptureAgentFinalResponse ? (promptForTiming?.report || '') : '',
+								reportText: shouldCaptureAgentFinalResponse
+									? (chatReportText || this.reportHtmlToText(promptForTiming?.report || ''))
+									: '',
+								chatSessionId: trackedSessionId || '',
+								timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
+							}, 'afterChatCompleted');
 							try {
 								await this.chatMemoryInstructionService()?.completeChatSession(
 									prompt.promptUuid,

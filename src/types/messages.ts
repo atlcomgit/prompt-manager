@@ -71,7 +71,7 @@ export type WebviewToExtensionMessage =
 
 export type ExtensionToWebviewMessage =
 	| { type: 'prompts'; prompts: PromptConfig[] }
-	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync'; previousId?: string }
+	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync' | 'ai-enrichment'; previousId?: string }
 	| { type: 'promptSaved'; prompt: PromptConfig; previousId?: string }
 	| { type: 'promptDeleted'; id: string }
 	| { type: 'promptDuplicated'; prompt: PromptConfig }

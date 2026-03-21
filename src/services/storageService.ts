@@ -99,6 +99,29 @@ export class StorageService {
 		await this.writeListCache(updated);
 	}
 
+	/** Быстрое обновление кэша: in-memory мгновенно, файловая запись в фоне */
+	private updateListCacheEntryFast(config: PromptConfig, removedId?: string): void {
+		const current = this._listCache;
+		if (current === null) { return; }
+		const updated = current.filter(p => p.id !== config.id && p.id !== removedId);
+		updated.push(config);
+		this._listCache = updated;
+		// Файловая запись кэша — в фоне, не блокирует save
+		void this.writeListCacheFile(updated).catch(() => { });
+	}
+
+	/** Запись файла кэша списка без обновления in-memory кэша */
+	private async writeListCacheFile(prompts: PromptConfig[]): Promise<void> {
+		try {
+			await vscode.workspace.fs.writeFile(
+				vscode.Uri.file(this.cacheFilePath),
+				Buffer.from(JSON.stringify(prompts, null, 2), 'utf-8'),
+			);
+		} catch {
+			// Cache write failure is non-fatal
+		}
+	}
+
 	/** Remove one entry from the cache by id. No-op if no cache exists yet. */
 	private async removeListCacheEntry(id: string): Promise<void> {
 		const current = this._listCache ?? await this.readListCache();
@@ -367,6 +390,23 @@ export class StorageService {
 		return (Date.now() - latestTs) >= this.HISTORY_WINDOW_MS;
 	}
 
+	/** Фоновая запись истории — не блокирует основной поток сохранения */
+	private async captureHistorySnapshotInBackground(
+		existingPrompt: Prompt | null,
+		nextPrompt: Prompt,
+		reason: PromptHistoryReason,
+		forceHistory: boolean,
+	): Promise<void> {
+		try {
+			const shouldCapture = await this.shouldCaptureHistorySnapshot(existingPrompt, nextPrompt, reason, forceHistory);
+			if (shouldCapture && existingPrompt) {
+				await this.createHistorySnapshot(existingPrompt, reason);
+			}
+		} catch {
+			// Ошибка записи истории не должна влиять на работу расширения
+		}
+	}
+
 	/** List all prompt configs (lightweight — no content) */
 	async listPrompts(): Promise<PromptConfig[]> {
 		await this.ensureStorageDir();
@@ -442,20 +482,22 @@ export class StorageService {
 		const mdPath = path.join(this.promptDir(id), 'prompt.md');
 		const reportPath = path.join(this.promptDir(id), 'report.txt');
 		const legacyReportPath = path.join(this.promptDir(id), 'report.md');
-		let content = '';
+
+		// Параллельное чтение content и report для ускорения
+		const [contentResult, reportResult] = await Promise.allSettled([
+			vscode.workspace.fs.readFile(vscode.Uri.file(mdPath)),
+			vscode.workspace.fs.readFile(vscode.Uri.file(reportPath)),
+		]);
+
+		const content = contentResult.status === 'fulfilled'
+			? Buffer.from(contentResult.value).toString('utf-8')
+			: '';
+
 		let report = '';
 		let hasReportTxt = true;
-		try {
-			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(mdPath));
-			content = Buffer.from(raw).toString('utf-8');
-		} catch {
-			// No markdown file yet
-		}
-
-		try {
-			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(reportPath));
-			report = Buffer.from(raw).toString('utf-8');
-		} catch {
+		if (reportResult.status === 'fulfilled') {
+			report = Buffer.from(reportResult.value).toString('utf-8');
+		} else {
 			hasReportTxt = false;
 			try {
 				const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(legacyReportPath));
@@ -472,11 +514,11 @@ export class StorageService {
 		return { ...config, content, report };
 	}
 
-	/** Save prompt (config + markdown) */
+	/** Save prompt (config + markdown). Возвращает полный Prompt (config + content + report) */
 	async savePrompt(
 		prompt: Prompt,
 		options?: { historyReason?: PromptHistoryReason | string; forceHistory?: boolean; skipHistory?: boolean; previousId?: string }
-	): Promise<PromptConfig> {
+	): Promise<Prompt> {
 		await this.ensureStorageDir();
 		this.ensurePromptUuid(prompt);
 		const requestedPreviousId = (options?.previousId || '').trim();
@@ -496,11 +538,9 @@ export class StorageService {
 		const previousId = existingPromptIdentity || requestedPreviousId;
 		const existingPromptId = previousId || prompt.id;
 		const existingPrompt = existingPromptId ? await this.getPrompt(existingPromptId) : null;
+		// История создаётся в фоне — не блокирует основной поток сохранения
 		if (!skipHistory && existingPromptId) {
-			const shouldCapture = await this.shouldCaptureHistorySnapshot(existingPrompt, prompt, reason, forceHistory);
-			if (shouldCapture && existingPrompt) {
-				await this.createHistorySnapshot(existingPrompt, reason);
-			}
+			void this.captureHistorySnapshotInBackground(existingPrompt, prompt, reason, forceHistory);
 		}
 
 		const safePromptId = await this.uniqueId(prompt.id, existingPromptIdentity || previousId || undefined);
@@ -519,31 +559,24 @@ export class StorageService {
 
 		const configPath = path.join(dir, 'config.json');
 		const configJson = JSON.stringify(config, null, 2);
-		await vscode.workspace.fs.writeFile(
-			vscode.Uri.file(configPath),
-			Buffer.from(configJson, 'utf-8')
-		);
 
-		// Save prompt.md
-		const mdPath = path.join(dir, 'prompt.md');
-		await vscode.workspace.fs.writeFile(
-			vscode.Uri.file(mdPath),
-			Buffer.from(content, 'utf-8')
-		);
-
-		// Save report.txt
-		const reportPath = path.join(dir, 'report.txt');
-		await vscode.workspace.fs.writeFile(
-			vscode.Uri.file(reportPath),
-			Buffer.from(report || '', 'utf-8')
-		);
-
-		const legacyReportUri = vscode.Uri.file(path.join(dir, 'report.md'));
-		try {
-			await vscode.workspace.fs.delete(legacyReportUri);
-		} catch {
-			// ignore missing legacy report file
-		}
+		// Параллельная запись всех файлов для ускорения
+		await Promise.all([
+			vscode.workspace.fs.writeFile(
+				vscode.Uri.file(configPath),
+				Buffer.from(configJson, 'utf-8')
+			),
+			vscode.workspace.fs.writeFile(
+				vscode.Uri.file(path.join(dir, 'prompt.md')),
+				Buffer.from(content, 'utf-8')
+			),
+			vscode.workspace.fs.writeFile(
+				vscode.Uri.file(path.join(dir, 'report.txt')),
+				Buffer.from(report || '', 'utf-8')
+			),
+			// Удаление legacy report.md (если существует)
+			vscode.workspace.fs.delete(vscode.Uri.file(path.join(dir, 'report.md'))).catch(() => { }),
+		]);
 
 		// Ensure context directory exists
 		const contextDir = path.join(dir, 'context');
@@ -553,15 +586,16 @@ export class StorageService {
 			await vscode.workspace.fs.createDirectory(vscode.Uri.file(contextDir));
 		}
 
-		// Update daily time tracking (record time deltas for today)
+		// Обновление daily time в фоне — не блокирует save
 		if (existingPrompt) {
-			await this.updateDailyTime(prompt.id, existingPrompt, prompt);
+			void this.updateDailyTime(prompt.id, existingPrompt, prompt).catch(() => { });
 		}
 
-		// Update list cache (pass previousId so old entry is removed on rename)
-		await this.updateListCacheEntry(config, previousId && previousId !== prompt.id ? previousId : undefined);
+		// Обновление in-memory кэша — мгновенно; файловая запись в фоне
+		this.updateListCacheEntryFast(config, previousId && previousId !== prompt.id ? previousId : undefined);
 
-		return config;
+		// Возвращаем полный Prompt (config + content + report) чтобы не требовался повторный getPrompt()
+		return { ...config, content, report };
 	}
 
 	async listPromptHistory(promptId: string): Promise<Array<{ id: string; createdAt: string; reason: PromptHistoryReason }>> {

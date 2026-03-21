@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
+import { generateSmartTitle } from '../utils/smartTitle.js';
 import type { Prompt } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
 import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
@@ -59,6 +60,8 @@ export class EditorPanelManager {
 	private pendingOpenPromptId: string | null = null;
 	private openPromptRequestVersion = 0;
 	private isShuttingDown = false;
+	/** ID промптов, для которых уже запущено фоновое AI-обогащение (дедупликация) */
+	private pendingEnrichmentPromptIds = new Set<string>();
 	private readonly markdownRenderer = new MarkdownIt({
 		html: false,
 		linkify: true,
@@ -1103,6 +1106,25 @@ export class EditorPanelManager {
 		return text.trim().split(/\s+/).filter(Boolean).length;
 	}
 
+	/**
+	 * Check if title is a fallback (prefix of content, smart-generated title, possibly truncated with '…').
+	 * Проверяет как старый формат (prefix + …), так и результат generateSmartTitle.
+	 */
+	private static isTitleFallback(title: string, content: string): boolean {
+		const normalizedTitle = title.replace(/…$/, '').trim();
+		const normalizedContent = content.replace(/\s+/g, ' ').trim();
+		// Старый формат: title — это начало контента
+		if (normalizedTitle.length > 0 && normalizedContent.startsWith(normalizedTitle)) {
+			return true;
+		}
+		// Новый формат: title совпадает с результатом generateSmartTitle
+		const smartTitle = generateSmartTitle(content);
+		if (smartTitle && title === smartTitle) {
+			return true;
+		}
+		return false;
+	}
+
 	/** Check if description is a fallback (prefix of content, possibly truncated with '…') */
 	private static isDescriptionFallback(description: string, content: string): boolean {
 		const normalizedDesc = description.replace(/…$/, '').trim();
@@ -1110,12 +1132,14 @@ export class EditorPanelManager {
 		return normalizedContent.startsWith(normalizedDesc);
 	}
 
+	/**
+	 * Генерирует осмысленное название из текста промпта без AI.
+	 * Использует алгоритм: заголовок markdown → первое предложение → обрезка по словам.
+	 * Fallback: 'Промпт без названия'.
+	 */
 	private makeTitleFallbackFromContent(content: string): string {
-		const singleLine = content.replace(/\s+/g, ' ').trim();
-		if (!singleLine) {
-			return EditorPanelManager.UNTITLED_PROMPT_TITLE;
-		}
-		return singleLine.length > 60 ? `${singleLine.slice(0, 59)}…` : singleLine;
+		const smart = generateSmartTitle(content);
+		return smart || EditorPanelManager.UNTITLED_PROMPT_TITLE;
 	}
 
 	private makeDescriptionFallbackFromContent(content: string): string {
@@ -1162,6 +1186,154 @@ export class EditorPanelManager {
 			if (timeoutHandle) {
 				clearTimeout(timeoutHandle);
 			}
+		}
+	}
+
+	/**
+	 * Фоновое AI-обогащение title и description после сохранения.
+	 * Если пользователь не менял title/description вручную (значение совпадает с fallback),
+	 * обновляет config.json на диске и отправляет обновлённый промпт в webview.
+	 */
+	private async scheduleBackgroundAiEnrichment(
+		promptId: string,
+		content: string,
+		needsTitle: boolean,
+		needsDescription: boolean,
+		postMessage: (m: ExtensionToWebviewMessage) => void,
+		panelKey: string,
+	): Promise<void> {
+		// Дедупликация: если AI-обогащение для этого промпта уже запущено — пропускаем
+		if (this.pendingEnrichmentPromptIds.has(promptId)) {
+			this.hooksOutput.appendLine(`[ai-enrichment] skip: already running for promptId=${promptId}`);
+			return;
+		}
+		this.pendingEnrichmentPromptIds.add(promptId);
+		this.hooksOutput.appendLine(`[ai-enrichment] start: promptId=${promptId} needsTitle=${needsTitle} needsDesc=${needsDescription}`);
+		try {
+			// Параллельные AI-запросы с увеличенным таймаутом (60с)
+			const TIMEOUT_MS = 60_000;
+			const TIMEOUT_SENTINEL = '\x00__TIMEOUT__';
+
+			const startMs = Date.now();
+
+			// Запускаем оба запроса параллельно
+			const [rawTitle, rawDesc] = await Promise.all([
+				needsTitle
+					? this.withTimeout(this.aiService.generateTitle(content), TIMEOUT_MS, TIMEOUT_SENTINEL)
+					: Promise.resolve(''),
+				needsDescription
+					? this.withTimeout(this.aiService.generateDescription(content), TIMEOUT_MS, TIMEOUT_SENTINEL)
+					: Promise.resolve(''),
+			]);
+
+			let generatedTitle = rawTitle;
+			let generatedDescription = rawDesc;
+
+			if (generatedDescription === TIMEOUT_SENTINEL) {
+				this.hooksOutput.appendLine(`[ai-enrichment] desc-timeout: ${Date.now() - startMs}ms promptId=${promptId}`);
+				generatedDescription = '';
+			}
+
+			if (generatedTitle === TIMEOUT_SENTINEL) {
+				this.hooksOutput.appendLine(`[ai-enrichment] title-timeout: ${Date.now() - startMs}ms, retrying promptId=${promptId}`);
+				// Retry один раз при timeout
+				generatedTitle = await this.withTimeout(
+					this.aiService.generateTitle(content), TIMEOUT_MS, TIMEOUT_SENTINEL,
+				);
+				if (generatedTitle === TIMEOUT_SENTINEL) {
+					this.hooksOutput.appendLine(`[ai-enrichment] title-timeout-retry: promptId=${promptId}`);
+					generatedTitle = '';
+				}
+			}
+
+			// Фильтруем: если AI вернул стандартный fallback — считаем пустым
+			if (generatedTitle === EditorPanelManager.UNTITLED_PROMPT_TITLE) {
+				generatedTitle = '';
+			}
+
+			this.hooksOutput.appendLine(
+				`[ai-enrichment] ai-result: promptId=${promptId}`
+				+ ` title=${JSON.stringify((generatedTitle || '').slice(0, 60))}`
+				+ ` desc=${JSON.stringify((generatedDescription || '').slice(0, 80))}`,
+			);
+
+			if (!generatedTitle && !generatedDescription) {
+				this.hooksOutput.appendLine(`[ai-enrichment] skip: both AI results empty for promptId=${promptId}`);
+				return;
+			}
+
+			// Перечитываем текущий промпт с диска для проверки актуальности
+			const currentPrompt = await this.storageService.getPrompt(promptId);
+			if (!currentPrompt) {
+				this.hooksOutput.appendLine(`[ai-enrichment] skip: prompt not found on disk promptId=${promptId}`);
+				return;
+			}
+
+			let updated = false;
+
+			// Обновляем title только если он ещё fallback (пользователь не менял вручную)
+			if (needsTitle && generatedTitle) {
+				const titleIsFallback = !currentPrompt.title
+					|| currentPrompt.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
+					|| EditorPanelManager.isTitleFallback(currentPrompt.title, content);
+				this.hooksOutput.appendLine(
+					`[ai-enrichment] title-check: promptId=${promptId}`
+					+ ` diskTitle=${JSON.stringify((currentPrompt.title || '').slice(0, 40))}`
+					+ ` isFallback=${titleIsFallback}`,
+				);
+				if (titleIsFallback) {
+					currentPrompt.title = generatedTitle;
+					updated = true;
+				}
+			}
+
+			// Обновляем description только если оно ещё fallback
+			if (needsDescription && generatedDescription) {
+				const descIsFallback = !currentPrompt.description
+					|| EditorPanelManager.isDescriptionFallback(currentPrompt.description, content);
+				if (descIsFallback) {
+					currentPrompt.description = generatedDescription;
+					updated = true;
+				}
+			}
+
+			if (!updated) {
+				this.hooksOutput.appendLine(`[ai-enrichment] skip: nothing to update for promptId=${promptId}`);
+				return;
+			}
+
+			// Сохраняем обновлённый промпт на диск (без истории — это просто обогащение)
+			const enriched = await this.storageService.savePrompt(currentPrompt, { skipHistory: true });
+
+			// Обновляем UI в webview
+			const activePrompt = this.panelPromptRefs.get(panelKey);
+			this.hooksOutput.appendLine(
+				`[ai-enrichment] ui-update: promptId=${promptId}`
+				+ ` panelKey=${panelKey}`
+				+ ` activeId=${activePrompt?.id || 'null'}`
+				+ ` match=${activePrompt?.id === promptId}`
+				+ ` newTitle=${JSON.stringify((enriched.title || '').slice(0, 40))}`,
+			);
+			if (activePrompt && activePrompt.id === promptId) {
+				Object.assign(activePrompt, enriched);
+				this.setPanelPromptRef(panelKey, activePrompt);
+				const panel = openPanels.get(panelKey);
+				if (panel) {
+					panel.title = `⚡ ${enriched.title || enriched.id}`;
+				}
+				postMessage({ type: 'prompt', prompt: enriched, reason: 'ai-enrichment' });
+				postMessage({ type: 'promptSaved', prompt: enriched });
+				// Обновляем базовый снимок, чтобы dirty-флаг не зажёгся от AI-обновления
+				this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(enriched)));
+			}
+			this.hooksOutput.appendLine(`[ai-enrichment] done: promptId=${promptId} title=${JSON.stringify((enriched.title || '').slice(0, 40))}`);
+
+			// Обновляем список промптов в sidebar (onDidSave → sidebarProvider.refreshList)
+			this._onDidSave.fire(promptId);
+		} catch (err) {
+			this.hooksOutput.appendLine(`[ai-enrichment] error: promptId=${promptId} ${err instanceof Error ? err.message : String(err)}`);
+		} finally {
+			this.pendingEnrichmentPromptIds.delete(promptId);
 		}
 	}
 
@@ -2480,35 +2652,41 @@ export class EditorPanelManager {
 					const saveSource = msg.source || 'manual';
 					const previousPromptId = (currentPrompt.id || msg.prompt.id || '').trim() || undefined;
 
+					const contentWordCount = promptToSave.content ? EditorPanelManager.wordCount(promptToSave.content) : 0;
 					const isUntitledWithEnoughContent = promptToSave.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
 						&& !!promptToSave.content
-						&& EditorPanelManager.wordCount(promptToSave.content) > 10;
-					const needsTitle = (!promptToSave.title || isUntitledWithEnoughContent) && !!promptToSave.content;
-					const hasEnoughContentForDescription = !!promptToSave.content && EditorPanelManager.wordCount(promptToSave.content) > 10;
+						&& contentWordCount > 10;
+					const hasEnoughContentForTitle = !!promptToSave.content && contentWordCount > 10;
+					const isFallbackTitle = !!promptToSave.title
+						&& hasEnoughContentForTitle
+						&& EditorPanelManager.isTitleFallback(promptToSave.title, promptToSave.content);
+					const needsTitle = (!promptToSave.title || isUntitledWithEnoughContent || isFallbackTitle) && !!promptToSave.content;
+					const hasEnoughContentForDescription = !!promptToSave.content && contentWordCount > 10;
 					const isFallbackDescription = !!promptToSave.description
 						&& hasEnoughContentForDescription
 						&& EditorPanelManager.isDescriptionFallback(promptToSave.description, promptToSave.content);
 					const needsDescription = ((!promptToSave.description && hasEnoughContentForDescription) || isFallbackDescription);
-					if (needsTitle || needsDescription) {
-						const [generatedTitle, generatedDescription] = await Promise.all([
-							needsTitle
-								? this.withTimeout(this.aiService.generateTitle(promptToSave.content), 3000, '')
-								: Promise.resolve(''),
-							needsDescription
-								? this.withTimeout(this.aiService.generateDescription(promptToSave.content), 3000, '')
-								: Promise.resolve(''),
-						]);
-						if (needsTitle && generatedTitle) {
-							promptToSave.title = generatedTitle;
-						} else if (needsTitle) {
-							promptToSave.title = this.makeTitleFallbackFromContent(promptToSave.content);
-						}
-						if (needsDescription && generatedDescription) {
-							promptToSave.description = generatedDescription;
-						} else if (needsDescription) {
-							promptToSave.description = this.makeDescriptionFallbackFromContent(promptToSave.content);
-						}
+
+					// [AI-ENRICHMENT-LOG] Диагностика для отладки AI-обогащения
+					this.hooksOutput.appendLine(
+						`[ai-enrichment] save: promptId=${promptToSave.id || currentPrompt.id || '?'}`
+						+ ` title=${JSON.stringify((promptToSave.title || '').slice(0, 40))}`
+						+ ` needsTitle=${needsTitle}`
+						+ ` (empty=${!promptToSave.title}, untitled=${isUntitledWithEnoughContent}, fallback=${isFallbackTitle})`
+						+ ` needsDesc=${needsDescription}`
+						+ ` words=${contentWordCount}`,
+					);
+
+					// Мгновенные fallback-значения вместо ожидания AI (AI обогатит в фоне после save)
+					// Если AI-обогащение уже запущено — не перезаписываем title/description, иначе race condition
+					const enrichmentAlreadyRunning = this.pendingEnrichmentPromptIds.has(promptToSave.id || currentPrompt.id);
+					if (needsTitle && !enrichmentAlreadyRunning) {
+						promptToSave.title = this.makeTitleFallbackFromContent(promptToSave.content);
 					}
+					if (needsDescription && !enrichmentAlreadyRunning) {
+						promptToSave.description = this.makeDescriptionFallbackFromContent(promptToSave.content);
+					}
+					const needsAiEnrichment = (needsTitle || needsDescription) && !enrichmentAlreadyRunning;
 
 					const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
 					await this.reconcileReportWithExtensionState(panelKey, promptToSave, currentPrompt);
@@ -2556,8 +2734,8 @@ export class EditorPanelManager {
 						reportLength: (promptToSave.report || '').length,
 						reportPreview: this.reportDebugPreview(promptToSave.report || ''),
 					});
-					const savedPrompt = await this.storageService.getPrompt(promptToSave.id);
-					const promptForPanel = savedPrompt || promptToSave;
+					// savePrompt теперь возвращает полный Prompt — повторный getPrompt не нужен
+					const promptForPanel = saved;
 
 					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();
 					const shouldApplyToCurrentPanel = !normalizedCurrentPromptId
@@ -2607,13 +2785,29 @@ export class EditorPanelManager {
 						postMessage({ type: 'promptSaved', prompt: saved, previousId: renameFromId });
 						postMessage({ type: 'prompt', prompt: promptForPanel, reason: 'save', previousId: renameFromId });
 					}
-					await this.broadcastAvailableLanguagesAndFrameworks();
+
+					// Фоновые операции — не блокируют UI сохранения
+					void this.broadcastAvailableLanguagesAndFrameworks().catch(() => { });
 					if (promptForPanel.status !== 'in-progress') {
-						try {
-							await this.chatMemoryInstructionService()?.handlePromptStatusChange(promptForPanel);
-						} catch (error) {
-							this.hooksOutput.appendLine(`[chat-memory] status cleanup after save failed: ${error instanceof Error ? error.message : String(error)}`);
-						}
+						void (async () => {
+							try {
+								await this.chatMemoryInstructionService()?.handlePromptStatusChange(promptForPanel);
+							} catch (error) {
+								this.hooksOutput.appendLine(`[chat-memory] status cleanup after save failed: ${error instanceof Error ? error.message : String(error)}`);
+							}
+						})();
+					}
+
+					// Фоновое AI-обогащение title и description (после save)
+					if (needsAiEnrichment) {
+						void this.scheduleBackgroundAiEnrichment(
+							promptToSave.id,
+							promptToSave.content,
+							needsTitle,
+							needsDescription,
+							postMessage,
+							panelKey,
+						);
 					}
 
 					this._onDidSave.fire(promptToSave.id);

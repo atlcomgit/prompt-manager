@@ -550,7 +550,7 @@ export const EditorApp: React.FC = () => {
           const currentPromptId = (currentPromptIdRef.current || '__new__').trim() || '__new__';
           const activeSaveId = (activeSaveIdRef.current || '').trim();
           const previousPromptId = (String(msg.previousId || '').trim() || '');
-          const reason: 'open' | 'save' | 'sync' | undefined = msg.reason;
+          const reason: 'open' | 'save' | 'sync' | 'ai-enrichment' | undefined = msg.reason;
           const isOpenPayload = reason === 'open';
           const isNewPromptSaveResponse = currentPromptId === '__new__' && reason === 'save';
           const isRelatedToCurrentPrompt = incomingPromptId === currentPromptId
@@ -614,6 +614,18 @@ export const EditorApp: React.FC = () => {
             if ((msg.prompt.chatSessionIds || []).length > 0) {
               releaseStartChatPendingState();
             }
+            break;
+          }
+
+          if (reason === 'ai-enrichment') {
+            // Background AI enrichment — merge only title/description from AI, keep everything else intact
+            setPrompt(prev => ({
+              ...prev,
+              title: msg.prompt.title || prev.title,
+              description: msg.prompt.description || prev.description,
+              updatedAt: msg.prompt.updatedAt || prev.updatedAt,
+            }));
+            // Don't touch isDirty — user's pending edits stay intact
             break;
           }
 

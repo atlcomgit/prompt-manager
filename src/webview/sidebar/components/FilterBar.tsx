@@ -1,10 +1,12 @@
 import React from 'react';
-import type { PromptStatus, SortField, SortOrder, GroupBy } from '../../../types/prompt';
+import type { PromptStatus, SortField, SortOrder, GroupBy, CreatedAtFilter } from '../../../types/prompt';
 import { useT } from '../../shared/i18n';
 
 interface Props {
   statusFilter: PromptStatus[];
   onStatusFilterChange: (f: PromptStatus[]) => void;
+  createdAtFilter: CreatedAtFilter;
+  onCreatedAtFilterChange: (f: CreatedAtFilter) => void;
   favoritesOnly: boolean;
   onFavoritesChange: (v: boolean) => void;
   sortField: SortField;
@@ -17,6 +19,7 @@ interface Props {
 
 export const FilterBar: React.FC<Props> = ({
   statusFilter, onStatusFilterChange,
+  createdAtFilter, onCreatedAtFilterChange,
   favoritesOnly, onFavoritesChange,
   sortField, onSortFieldChange,
   sortOrder, onSortOrderChange,
@@ -50,6 +53,21 @@ export const FilterBar: React.FC<Props> = ({
     { value: 'framework', label: t('filter.byFramework') },
   ];
 
+  const CREATED_AT_OPTIONS: { value: CreatedAtFilter; label: string }[] = [
+    { value: 'all', label: t('filter.periodAll') },
+    { value: 'last-1-day', label: t('filter.periodLast1Day') },
+    { value: 'last-7-days', label: t('filter.periodLast7Days') },
+    { value: 'last-14-days', label: t('filter.periodLast14Days') },
+    { value: 'last-30-days', label: t('filter.periodLast30Days') },
+    { value: 'last-1-year', label: t('filter.periodLast1Year') },
+    { value: 'current-week', label: t('filter.periodCurrentWeek') },
+    { value: 'previous-week', label: t('filter.periodPreviousWeek') },
+    { value: 'current-month', label: t('filter.periodCurrentMonth') },
+    { value: 'previous-month', label: t('filter.periodPreviousMonth') },
+    { value: 'current-year', label: t('filter.periodCurrentYear') },
+    { value: 'previous-year', label: t('filter.periodPreviousYear') },
+  ];
+
   const toggleStatus = (status: PromptStatus) => {
     if (statusFilter.includes(status)) {
       onStatusFilterChange(statusFilter.filter(s => s !== status));
@@ -78,6 +96,19 @@ export const FilterBar: React.FC<Props> = ({
             </button>
           ))}
         </div>
+      </div>
+
+      <div style={styles.section}>
+        <label style={styles.label}>{t('filter.showRecent')}</label>
+        <select
+          value={createdAtFilter}
+          onChange={e => onCreatedAtFilterChange(e.target.value as CreatedAtFilter)}
+          style={styles.select}
+        >
+          {CREATED_AT_OPTIONS.map(opt => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
       </div>
 
       {/* Favorites toggle */}

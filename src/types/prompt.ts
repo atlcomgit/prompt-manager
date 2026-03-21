@@ -153,6 +153,21 @@ export type SortOrder = 'asc' | 'desc';
 /** Sidebar group options */
 export type GroupBy = 'none' | 'status' | 'project' | 'language' | 'framework';
 
+/** Sidebar created-at period filter */
+export type CreatedAtFilter =
+	| 'all'
+	| 'last-1-day'
+	| 'last-7-days'
+	| 'last-14-days'
+	| 'last-30-days'
+	| 'last-1-year'
+	| 'current-week'
+	| 'previous-week'
+	| 'current-month'
+	| 'previous-month'
+	| 'current-year'
+	| 'previous-year';
+
 /** Filter state for sidebar */
 export interface FilterState {
 	search: string;
@@ -161,6 +176,7 @@ export interface FilterState {
 	languages: string[];
 	frameworks: string[];
 	favorites: boolean;
+	createdAt: CreatedAtFilter;
 }
 
 /** Sidebar UI state */
@@ -174,6 +190,10 @@ export interface SidebarState {
 	panelWidth: number;
 }
 
+type PartialSidebarState = Partial<Omit<SidebarState, 'filters'>> & {
+	filters?: Partial<FilterState>;
+};
+
 /** Create default sidebar state */
 export function createDefaultSidebarState(): SidebarState {
 	return {
@@ -185,12 +205,31 @@ export function createDefaultSidebarState(): SidebarState {
 			languages: [],
 			frameworks: [],
 			favorites: false,
+			createdAt: 'all',
 		},
 		sortField: 'createdAt',
 		sortOrder: 'desc',
 		groupBy: 'none',
 		collapsedGroups: {},
 		panelWidth: 300,
+	};
+}
+
+/** Normalize potentially partial persisted sidebar state */
+export function normalizeSidebarState(state?: PartialSidebarState | null): SidebarState {
+	const defaults = createDefaultSidebarState();
+	if (!state) {
+		return defaults;
+	}
+
+	return {
+		...defaults,
+		...state,
+		filters: {
+			...defaults.filters,
+			...(state.filters || {}),
+		},
+		collapsedGroups: state.collapsedGroups || defaults.collapsedGroups,
 	};
 }
 

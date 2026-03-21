@@ -37,6 +37,7 @@ const en: Record<string, string> = {
 
 	// --- FilterBar ---
 	'filter.status': 'Status',
+	'filter.showRecent': 'Show from recent period',
 	'filter.favoritesOnly': 'Favorites only',
 	'filter.sort': 'Sort',
 	'filter.sortAsc': 'Ascending',
@@ -51,6 +52,18 @@ const en: Record<string, string> = {
 	'filter.sortCreated': 'Created',
 	'filter.sortUpdated': 'Updated',
 	'filter.sortStatus': 'Status',
+	'filter.periodAll': 'All time',
+	'filter.periodLast1Day': '1 day',
+	'filter.periodLast7Days': '7 days',
+	'filter.periodLast14Days': '14 days',
+	'filter.periodLast30Days': '30 days',
+	'filter.periodLast1Year': '1 year',
+	'filter.periodCurrentWeek': 'Current week',
+	'filter.periodPreviousWeek': 'Previous week',
+	'filter.periodCurrentMonth': 'Current month',
+	'filter.periodPreviousMonth': 'Previous month',
+	'filter.periodCurrentYear': 'Current year',
+	'filter.periodPreviousYear': 'Previous year',
 
 	// --- PromptItem ---
 	'item.duplicate': 'Duplicate',
@@ -633,6 +646,7 @@ const ru: Record<string, string> = {
 
 	// --- FilterBar ---
 	'filter.status': 'Статус',
+	'filter.showRecent': 'Показывать за последние',
 	'filter.favoritesOnly': 'Только избранные',
 	'filter.sort': 'Сортировка',
 	'filter.sortAsc': 'По возрастанию',
@@ -647,6 +661,18 @@ const ru: Record<string, string> = {
 	'filter.sortCreated': 'Дата создания',
 	'filter.sortUpdated': 'Дата изменения',
 	'filter.sortStatus': 'Статус',
+	'filter.periodAll': 'Все время',
+	'filter.periodLast1Day': '1 день',
+	'filter.periodLast7Days': '7 дней',
+	'filter.periodLast14Days': '14 дней',
+	'filter.periodLast30Days': '30 дней',
+	'filter.periodLast1Year': '1 год',
+	'filter.periodCurrentWeek': 'Текущая неделя',
+	'filter.periodPreviousWeek': 'Прошлая неделя',
+	'filter.periodCurrentMonth': 'Текущий месяц',
+	'filter.periodPreviousMonth': 'Прошлый месяц',
+	'filter.periodCurrentYear': 'Текущий год',
+	'filter.periodPreviousYear': 'Прошлый год',
 
 	// --- PromptItem ---
 	'item.duplicate': 'Дублировать',

@@ -10,7 +10,7 @@ import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { SidebarState } from '../types/prompt.js';
-import { createDefaultSidebarState } from '../types/prompt.js';
+import { normalizeSidebarState } from '../types/prompt.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -608,7 +608,7 @@ export class StateService {
 	/** Get saved sidebar state */
 	getSidebarState(): SidebarState {
 		const saved = this.context.workspaceState.get<SidebarState>(SIDEBAR_STATE_KEY);
-		return saved ? { ...createDefaultSidebarState(), ...saved } : createDefaultSidebarState();
+		return normalizeSidebarState(saved);
 	}
 
 	/** Save sidebar state */

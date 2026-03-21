@@ -11,7 +11,8 @@ import { FilterBar } from './components/FilterBar';
 import { PromptList } from './components/PromptList';
 import { Toolbar } from './components/Toolbar';
 import { createDefaultPrompt, PROMPT_STATUS_ORDER } from '../../types/prompt';
-import type { PromptConfig, SidebarState, FilterState, SortField, SortOrder, GroupBy, PromptStatus } from '../../types/prompt';
+import { matchesCreatedAtFilter } from '../../utils/sidebarDateFilter.js';
+import type { PromptConfig, SidebarState, FilterState, SortField, SortOrder, GroupBy, PromptStatus, CreatedAtFilter } from '../../types/prompt';
 
 const vscode = getVsCodeApi();
 
@@ -23,6 +24,7 @@ export const SidebarApp: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<PromptStatus[]>([]);
+  const [createdAtFilter, setCreatedAtFilter] = useState<CreatedAtFilter>('all');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [sortField, setSortField] = useState<SortField>('createdAt');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
@@ -82,6 +84,7 @@ export const SidebarApp: React.FC = () => {
           setSearch(state.filters.search || '');
           setStatusFilter(state.filters.status || []);
           setFavoritesOnly(state.filters.favorites || false);
+          setCreatedAtFilter(state.filters.createdAt || 'all');
         }
         setSortField(state.sortField || 'createdAt');
         setSortOrder(state.sortOrder || 'desc');
@@ -124,7 +127,7 @@ export const SidebarApp: React.FC = () => {
     }
     const state: SidebarState = {
       selectedPromptId: selectedId,
-      filters: { search, status: statusFilter, projects: [], languages: [], frameworks: [], favorites: favoritesOnly },
+      filters: { search, status: statusFilter, projects: [], languages: [], frameworks: [], favorites: favoritesOnly, createdAt: createdAtFilter },
       sortField,
       sortOrder,
       groupBy,
@@ -132,7 +135,7 @@ export const SidebarApp: React.FC = () => {
       panelWidth: 300,
     };
     vscode.postMessage({ type: 'saveSidebarState', state });
-  }, [hasHydratedState, selectedId, search, statusFilter, favoritesOnly, sortField, sortOrder, groupBy, collapsedGroups]);
+  }, [hasHydratedState, selectedId, search, statusFilter, createdAtFilter, favoritesOnly, sortField, sortOrder, groupBy, collapsedGroups]);
 
   const filteredPrompts = useMemo(() => {
     let result = [...prompts];
@@ -157,6 +160,10 @@ export const SidebarApp: React.FC = () => {
     // Status filter
     if (statusFilter.length > 0) {
       result = result.filter(p => statusFilter.includes(p.status));
+    }
+
+    if (createdAtFilter !== 'all') {
+      result = result.filter(p => matchesCreatedAtFilter(p.createdAt, createdAtFilter));
     }
 
     // Favorites
@@ -189,7 +196,7 @@ export const SidebarApp: React.FC = () => {
     }
 
     return result;
-  }, [prompts, search, statusFilter, favoritesOnly, sortField, sortOrder, showOptimisticNewPrompt, optimisticPrompt]);
+  }, [prompts, search, statusFilter, createdAtFilter, favoritesOnly, sortField, sortOrder, showOptimisticNewPrompt, optimisticPrompt]);
 
   // Group prompts
   const groupedPrompts = useMemo(() => {
@@ -306,6 +313,8 @@ export const SidebarApp: React.FC = () => {
         <FilterBar
           statusFilter={statusFilter}
           onStatusFilterChange={setStatusFilter}
+          createdAtFilter={createdAtFilter}
+          onCreatedAtFilterChange={setCreatedAtFilter}
           favoritesOnly={favoritesOnly}
           onFavoritesChange={setFavoritesOnly}
           sortField={sortField}

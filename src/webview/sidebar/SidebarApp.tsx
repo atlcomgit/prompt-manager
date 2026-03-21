@@ -12,6 +12,7 @@ import { PromptList } from './components/PromptList';
 import { Toolbar } from './components/Toolbar';
 import { createDefaultPrompt, PROMPT_STATUS_ORDER } from '../../types/prompt';
 import { matchesCreatedAtFilter } from '../../utils/sidebarDateFilter.js';
+import { reconcileSidebarSelection } from '../../utils/sidebarSelection.js';
 import type { PromptConfig, SidebarState, FilterState, SortField, SortOrder, GroupBy, PromptStatus, CreatedAtFilter } from '../../types/prompt';
 
 const vscode = getVsCodeApi();
@@ -22,6 +23,7 @@ export const SidebarApp: React.FC = () => {
   const [prompts, setPrompts] = useState<PromptConfig[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedPromptUuid, setSelectedPromptUuid] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<PromptStatus[]>([]);
   const [createdAtFilter, setCreatedAtFilter] = useState<CreatedAtFilter>('all');
@@ -66,20 +68,32 @@ export const SidebarApp: React.FC = () => {
     switch (msg.type) {
       case 'prompts':
         setPrompts(msg.prompts);
+        let nextSelectedId = selectedId;
+        let nextSelectedPromptUuid = selectedPromptUuid;
         if (showOptimisticNewPrompt && optimisticBaselineIds) {
           const baselineSet = new Set(optimisticBaselineIds);
           const newPrompt = (msg.prompts as PromptConfig[]).find(p => !baselineSet.has(p.id));
           if (newPrompt) {
             setShowOptimisticNewPrompt(false);
             setOptimisticBaselineIds(null);
-            setSelectedId(prev => (prev === '__new__' ? newPrompt.id : prev));
+            if (nextSelectedId === '__new__') {
+              nextSelectedId = newPrompt.id;
+              nextSelectedPromptUuid = newPrompt.promptUuid || null;
+            }
           }
         }
+        const reconciledSelection = reconcileSidebarSelection(msg.prompts as PromptConfig[], {
+          selectedId: nextSelectedId,
+          selectedPromptUuid: nextSelectedPromptUuid,
+        });
+        setSelectedId(reconciledSelection.selectedId);
+        setSelectedPromptUuid(reconciledSelection.selectedPromptUuid);
         setIsLoading(false);
         break;
       case 'sidebarState': {
         const state: SidebarState = msg.state;
         setSelectedId(state.selectedPromptId || null);
+        setSelectedPromptUuid(state.selectedPromptUuid || null);
         if (state.filters) {
           setSearch(state.filters.search || '');
           setStatusFilter(state.filters.status || []);
@@ -93,11 +107,18 @@ export const SidebarApp: React.FC = () => {
         setHasHydratedState(true);
         break;
       }
-      case 'sidebarSelectionChanged':
-        setSelectedId(msg.id || null);
+      case 'sidebarSelectionChanged': {
+        const nextSelectedId = msg.id || null;
+        const matchingPrompt = nextSelectedId ? prompts.find(prompt => prompt.id === nextSelectedId) : null;
+        setSelectedId(nextSelectedId);
+        setSelectedPromptUuid(matchingPrompt?.promptUuid || null);
         break;
+      }
       case 'promptDeleted':
-        if (selectedId === msg.id) { setSelectedId(null); }
+        if (selectedId === msg.id) {
+          setSelectedId(null);
+          setSelectedPromptUuid(null);
+        }
         break;
       case 'triggerCreatePrompt':
         handleCreate();
@@ -116,7 +137,7 @@ export const SidebarApp: React.FC = () => {
         break;
       }
     }
-  }, [selectedId, showOptimisticNewPrompt, optimisticBaselineIds, prompts]);
+  }, [selectedId, selectedPromptUuid, showOptimisticNewPrompt, optimisticBaselineIds, prompts]);
 
   useMessageListener(handleMessage);
 
@@ -127,6 +148,7 @@ export const SidebarApp: React.FC = () => {
     }
     const state: SidebarState = {
       selectedPromptId: selectedId,
+      selectedPromptUuid,
       filters: { search, status: statusFilter, projects: [], languages: [], frameworks: [], favorites: favoritesOnly, createdAt: createdAtFilter },
       sortField,
       sortOrder,
@@ -135,7 +157,7 @@ export const SidebarApp: React.FC = () => {
       panelWidth: 300,
     };
     vscode.postMessage({ type: 'saveSidebarState', state });
-  }, [hasHydratedState, selectedId, search, statusFilter, createdAtFilter, favoritesOnly, sortField, sortOrder, groupBy, collapsedGroups]);
+  }, [hasHydratedState, selectedId, selectedPromptUuid, search, statusFilter, createdAtFilter, favoritesOnly, sortField, sortOrder, groupBy, collapsedGroups]);
 
   const filteredPrompts = useMemo(() => {
     let result = [...prompts];
@@ -252,7 +274,9 @@ export const SidebarApp: React.FC = () => {
   }, [filteredPrompts, groupBy]);
 
   const handleOpenPrompt = (id: string) => {
+    const matchingPrompt = prompts.find(prompt => prompt.id === id) || null;
     setSelectedId(id);
+    setSelectedPromptUuid(matchingPrompt?.promptUuid || null);
     if (openPromptTimerRef.current !== null) {
       window.clearTimeout(openPromptTimerRef.current);
     }
@@ -270,6 +294,7 @@ export const SidebarApp: React.FC = () => {
     setOptimisticBaselineIds(prompts.map(p => p.id));
     setShowOptimisticNewPrompt(true);
     setSelectedId('__new__');
+    setSelectedPromptUuid(null);
     vscode.postMessage({ type: 'createPrompt' });
   };
 

@@ -182,6 +182,7 @@ export interface FilterState {
 /** Sidebar UI state */
 export interface SidebarState {
 	selectedPromptId: string | null;
+	selectedPromptUuid: string | null;
 	filters: FilterState;
 	sortField: SortField;
 	sortOrder: SortOrder;
@@ -198,6 +199,7 @@ type PartialSidebarState = Partial<Omit<SidebarState, 'filters'>> & {
 export function createDefaultSidebarState(): SidebarState {
 	return {
 		selectedPromptId: null,
+		selectedPromptUuid: null,
 		filters: {
 			search: '',
 			status: [],

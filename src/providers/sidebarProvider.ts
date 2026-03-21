@@ -76,14 +76,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
 	/** Sync selected prompt in persisted sidebar state and active webview */
 	async syncSelectedPrompt(id: string | null): Promise<void> {
+		const normalizedId = (id || '').trim() || null;
+		let selectedPromptUuid: string | null = null;
+
+		if (normalizedId && normalizedId !== '__new__') {
+			const prompt = await this.storageService.getPrompt(normalizedId);
+			selectedPromptUuid = (prompt?.promptUuid || '').trim() || null;
+		}
+
 		const state = this.stateService.getSidebarState();
-		if (state.selectedPromptId !== id) {
+		if (state.selectedPromptId !== normalizedId || state.selectedPromptUuid !== selectedPromptUuid) {
 			await this.stateService.saveSidebarState({
 				...state,
-				selectedPromptId: id,
+				selectedPromptId: normalizedId,
+				selectedPromptUuid,
 			});
 		}
-		this.postMessage({ type: 'sidebarSelectionChanged', id });
+		this.postMessage({ type: 'sidebarSelectionChanged', id: normalizedId });
 	}
 
 	/** Handle messages from sidebar webview */
@@ -100,6 +109,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			case 'openPrompt': {
 				this._onDidOpenPrompt.fire(msg.id);
 				await this.stateService.saveLastPromptId(msg.id);
+				await this.syncSelectedPrompt(msg.id);
 				break;
 			}
 

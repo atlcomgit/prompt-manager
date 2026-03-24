@@ -12,6 +12,7 @@ import { PromptList } from './components/PromptList';
 import { Toolbar } from './components/Toolbar';
 import { createDefaultPrompt, PROMPT_STATUS_ORDER } from '../../types/prompt';
 import { matchesCreatedAtFilter } from '../../utils/sidebarDateFilter.js';
+import { makeSidebarGroupCollapseKey, shouldAutoExpandSidebarGroups } from '../../utils/sidebarGrouping.js';
 import { reconcileSidebarSelection } from '../../utils/sidebarSelection.js';
 import type { PromptConfig, SidebarState, FilterState, SortField, SortOrder, GroupBy, PromptStatus, CreatedAtFilter } from '../../types/prompt';
 
@@ -47,6 +48,26 @@ export const SidebarApp: React.FC = () => {
       description: 'Черновик (ещё не сохранён)',
     };
   }, []);
+
+  const filterState = useMemo<FilterState>(() => ({
+    search,
+    status: statusFilter,
+    projects: [],
+    languages: [],
+    frameworks: [],
+    favorites: favoritesOnly,
+    createdAt: createdAtFilter,
+  }), [search, statusFilter, favoritesOnly, createdAtFilter]);
+
+  const shouldAutoExpandGroups = useMemo(
+    () => shouldAutoExpandSidebarGroups(groupBy, filterState),
+    [groupBy, filterState],
+  );
+
+  const effectiveCollapsedGroups = useMemo(
+    () => (shouldAutoExpandGroups ? {} : collapsedGroups),
+    [shouldAutoExpandGroups, collapsedGroups],
+  );
 
   // Request initial data after message listener is attached.
   useEffect(() => {
@@ -149,7 +170,7 @@ export const SidebarApp: React.FC = () => {
     const state: SidebarState = {
       selectedPromptId: selectedId,
       selectedPromptUuid,
-      filters: { search, status: statusFilter, projects: [], languages: [], frameworks: [], favorites: favoritesOnly, createdAt: createdAtFilter },
+      filters: filterState,
       sortField,
       sortOrder,
       groupBy,
@@ -157,7 +178,7 @@ export const SidebarApp: React.FC = () => {
       panelWidth: 300,
     };
     vscode.postMessage({ type: 'saveSidebarState', state });
-  }, [hasHydratedState, selectedId, selectedPromptUuid, search, statusFilter, createdAtFilter, favoritesOnly, sortField, sortOrder, groupBy, collapsedGroups]);
+  }, [hasHydratedState, selectedId, selectedPromptUuid, filterState, sortField, sortOrder, groupBy, collapsedGroups]);
 
   const filteredPrompts = useMemo(() => {
     let result = [...prompts];
@@ -318,10 +339,12 @@ export const SidebarApp: React.FC = () => {
     vscode.postMessage({ type: 'exportPrompt', id });
   };
 
-  const makeGroupCollapseKey = (group: GroupBy, name: string): string => `${group}::${name}`;
-
   const handleToggleGroup = (name: string) => {
-    const collapseKey = makeGroupCollapseKey(groupBy, name);
+    if (shouldAutoExpandGroups) {
+      return;
+    }
+
+    const collapseKey = makeSidebarGroupCollapseKey(groupBy, name);
     setCollapsedGroups(prev => ({ ...prev, [collapseKey]: !prev[collapseKey] }));
   };
 
@@ -354,7 +377,7 @@ export const SidebarApp: React.FC = () => {
         <PromptList
           groups={groupedPrompts}
           groupBy={groupBy}
-          collapsedGroups={collapsedGroups}
+          collapsedGroups={effectiveCollapsedGroups}
           selectedId={selectedId}
           savingPromptIds={savingPromptIds}
           isLoading={isLoading}

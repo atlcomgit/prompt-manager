@@ -1,5 +1,6 @@
 import React from 'react';
 import type { GroupBy, PromptConfig, PromptStatus } from '../../../types/prompt';
+import { makeSidebarGroupCollapseKey } from '../../../utils/sidebarGrouping.js';
 import { PromptItem } from './PromptItem';
 import { useT } from '../../shared/i18n';
 
@@ -35,7 +36,6 @@ export const PromptList: React.FC<Props> = ({
   const t = useT();
   const groupNames = Object.keys(groups);
   const hasGroups = !(groupNames.length === 1 && groupNames[0] === '');
-  const makeGroupCollapseKey = (group: GroupBy, name: string): string => `${group}::${name}`;
   const getGroupDisplayName = (name: string): string => {
     if (groupBy !== 'status') {
       return name;
@@ -108,11 +108,11 @@ export const PromptList: React.FC<Props> = ({
             style={styles.groupHeader}
             onClick={() => onToggleGroup(name)}
           >
-            <span>{collapsedGroups[makeGroupCollapseKey(groupBy, name)] ? '▸' : '▾'}</span>
+            <span>{collapsedGroups[makeSidebarGroupCollapseKey(groupBy, name)] ? '▸' : '▾'}</span>
             <span style={styles.groupName}>{getGroupDisplayName(name)}</span>
             <span style={styles.groupCount}>{groups[name].length}</span>
           </button>
-          {!collapsedGroups[makeGroupCollapseKey(groupBy, name)] && groups[name].map(p => (
+          {!collapsedGroups[makeSidebarGroupCollapseKey(groupBy, name)] && groups[name].map(p => (
             <PromptItem
               key={p.id}
               prompt={p}

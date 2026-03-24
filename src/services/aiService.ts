@@ -506,14 +506,14 @@ export class AiService {
 		const fileBlocks = input.files.map(file => {
 			const symbolsBlock = file.symbols.length > 0
 				? file.symbols.map(symbol => [
-				`ID: ${symbol.id}`,
-				`Kind: ${symbol.kind}`,
-				`Name: ${symbol.name}`,
-				`Signature: ${symbol.signature}`,
-				symbol.fallbackDescription ? `Fallback description: ${symbol.fallbackDescription}` : '',
-				'Code excerpt:',
-				symbol.excerpt || 'No code excerpt available.',
-			].filter(Boolean).join('\n')).join('\n\n-----\n\n')
+					`ID: ${symbol.id}`,
+					`Kind: ${symbol.kind}`,
+					`Name: ${symbol.name}`,
+					`Signature: ${symbol.signature}`,
+					symbol.fallbackDescription ? `Fallback description: ${symbol.fallbackDescription}` : '',
+					'Code excerpt:',
+					symbol.excerpt || 'No code excerpt available.',
+				].filter(Boolean).join('\n')).join('\n\n-----\n\n')
 				: 'none';
 
 			return [

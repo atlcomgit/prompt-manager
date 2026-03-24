@@ -1566,41 +1566,41 @@ export function buildCodeMapProjectInstruction(input: {
 				'',
 			];
 
-				if (file.imports.length > 0) {
-					lines.push(`- ${isRussianLocale ? 'Внутренние импорты' : 'Internal imports'}: ${file.imports.join(', ')}`);
-					lines.push('');
-				}
+			if (file.imports.length > 0) {
+				lines.push(`- ${isRussianLocale ? 'Внутренние импорты' : 'Internal imports'}: ${file.imports.join(', ')}`);
+				lines.push('');
+			}
 
-				if ((file.frontendContract || []).length > 0) {
-					lines.push(`- ${isRussianLocale ? 'Frontend-контракт' : 'Frontend contract'}:`);
-					for (const item of file.frontendContract || []) {
-						lines.push(`  - ${item}`);
+			if ((file.frontendContract || []).length > 0) {
+				lines.push(`- ${isRussianLocale ? 'Frontend-контракт' : 'Frontend contract'}:`);
+				for (const item of file.frontendContract || []) {
+					lines.push(`  - ${item}`);
+				}
+				lines.push('');
+			}
+
+			if ((file.frontendBlocks || []).length > 0) {
+				lines.push(`- ${isRussianLocale ? 'UI-блоки' : 'UI blocks'}:`);
+				for (const block of file.frontendBlocks || []) {
+					lines.push('');
+					lines.push(`  - ${formatFrontendBlockHeading(block, file.path, isRussianLocale)}`);
+					lines.push(`    ${isRussianLocale ? 'Описание' : 'Description'}: ${block.description}`);
+					if (block.stateDeps.length > 0) {
+						lines.push(`    ${isRussianLocale ? 'Состояние' : 'State'}: ${block.stateDeps.join(', ')}`);
 					}
-					lines.push('');
-				}
-
-				if ((file.frontendBlocks || []).length > 0) {
-					lines.push(`- ${isRussianLocale ? 'UI-блоки' : 'UI blocks'}:`);
-					for (const block of file.frontendBlocks || []) {
-						lines.push('');
-						lines.push(`  - ${formatFrontendBlockHeading(block, file.path, isRussianLocale)}`);
-						lines.push(`    ${isRussianLocale ? 'Описание' : 'Description'}: ${block.description}`);
-						if (block.stateDeps.length > 0) {
-							lines.push(`    ${isRussianLocale ? 'Состояние' : 'State'}: ${block.stateDeps.join(', ')}`);
-						}
-						if (block.eventHandlers.length > 0) {
-							lines.push(`    ${isRussianLocale ? 'События' : 'Events'}: ${block.eventHandlers.join(', ')}`);
-						}
-						if (block.dataSources.length > 0) {
-							lines.push(`    ${isRussianLocale ? 'Источники данных' : 'Data sources'}: ${block.dataSources.join(', ')}`);
-						}
+					if (block.eventHandlers.length > 0) {
+						lines.push(`    ${isRussianLocale ? 'События' : 'Events'}: ${block.eventHandlers.join(', ')}`);
 					}
-					lines.push('');
+					if (block.dataSources.length > 0) {
+						lines.push(`    ${isRussianLocale ? 'Источники данных' : 'Data sources'}: ${block.dataSources.join(', ')}`);
+					}
 				}
+				lines.push('');
+			}
 
-				if (file.symbols.length > 0) {
-					lines.push(`- ${isRussianLocale ? 'Элементы файла' : 'File elements'}:`);
-					for (const symbol of file.symbols) {
+			if (file.symbols.length > 0) {
+				lines.push(`- ${isRussianLocale ? 'Элементы файла' : 'File elements'}:`);
+				for (const symbol of file.symbols) {
 					lines.push('');
 					lines.push(`  - ${formatFileElementHeading(symbol, file.path, isRussianLocale)}`);
 					lines.push(`    ${isRussianLocale ? 'Сигнатура' : 'Signature'}: ${symbol.signature}`);

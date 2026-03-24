@@ -459,6 +459,67 @@ export class EditorPanelManager {
 		return false;
 	}
 
+	private buildChatSessionRenameTitle(prompt: Pick<Prompt, 'id' | 'title' | 'taskNumber'> | null): string {
+		const title = String(prompt?.title || prompt?.id || '').trim();
+		if (!title) {
+			return '';
+		}
+
+		const taskNumber = String(prompt?.taskNumber || '').trim();
+		return taskNumber ? `${taskNumber} | ${title}` : title;
+	}
+
+	private async scheduleChatSessionRename(
+		sessionId: string,
+		promptId: string,
+		logSuffix: string = '',
+	): Promise<void> {
+		const normalizedSessionId = (sessionId || '').trim();
+		const normalizedPromptId = (promptId || '').trim();
+		if (!normalizedSessionId || !normalizedPromptId) {
+			this.hooksOutput.appendLine(`[chat-rename]${logSuffix} skipped: missing sessionId or promptId`);
+			return;
+		}
+
+		const latestPrompt = await this.storageService.getPrompt(normalizedPromptId);
+		const renameTitle = this.buildChatSessionRenameTitle(latestPrompt);
+		if (!renameTitle) {
+			this.hooksOutput.appendLine(`[chat-rename]${logSuffix} skipped: empty title for prompt=${normalizedPromptId}`);
+			return;
+		}
+
+		this.hooksOutput.appendLine(
+			`[chat-rename]${logSuffix} scheduling rename session=${normalizedSessionId} title="${renameTitle}"`,
+		);
+		const attemptDelaysMs = [5000, 12000, 25000];
+		for (let attemptIndex = 0; attemptIndex < attemptDelaysMs.length; attemptIndex += 1) {
+			const delayMs = attemptDelaysMs[attemptIndex];
+			this.hooksOutput.appendLine(
+				`[chat-rename]${logSuffix} attempt=${attemptIndex + 1}/${attemptDelaysMs.length} waiting ${delayMs}ms`,
+			);
+			await new Promise(resolve => setTimeout(resolve, delayMs));
+
+			try {
+				const result = await this.stateService.renameChatSession(normalizedSessionId, renameTitle);
+				this.hooksOutput.appendLine(
+					`[chat-rename]${logSuffix} attempt=${attemptIndex + 1} result: ok=${result.ok} reason=${result.reason || '-'}`,
+				);
+				if (result.ok) {
+					if (attemptIndex === 0) {
+						void vscode.window.showInformationMessage(
+							`Chat session renamed to "${renameTitle}". Title may appear after chat list refresh or window reload.`,
+						);
+					}
+					return;
+				}
+			} catch (error) {
+				this.hooksOutput.appendLine(
+					`[chat-rename]${logSuffix} attempt=${attemptIndex + 1} error: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+	}
+
 	private async readFilePreview(uri: vscode.Uri, maxChars: number): Promise<string> {
 		try {
 			const raw = await vscode.workspace.fs.readFile(uri);
@@ -3523,6 +3584,10 @@ export class EditorPanelManager {
 									postMessage({ type: 'prompt', prompt: promptToComplete, reason: 'sync' });
 								}
 								this._onDidSave.fire(promptToComplete.id);
+								await this.scheduleChatSessionRename(
+									String(completion.sessionId || trackedSessionId || promptToComplete.chatSessionIds?.[0] || ''),
+									promptToComplete.id,
+								);
 								// Recalc implementing time from JSONL after VS Code finishes writing session data
 								const recalcPromptId = promptToComplete.id;
 								setTimeout(async () => {
@@ -3608,56 +3673,38 @@ export class EditorPanelManager {
 									} catch (e: any) {
 										this.hooksOutput.appendLine(`[chat-track] recalc implementing time (fallback) error: ${e?.message || e}`);
 									}
-								}, 3000);
-							}
-
-							// Rename chat session in agent history (markdown fallback path)
-							const sessionToRename2 = String(completion.sessionId || trackedSessionId || '').trim();
-							if (sessionToRename2) {
-								const latestPrompt2 = await this.storageService.getPrompt(prompt.id);
-								const renameTitle2 = latestPrompt2?.taskNumber
-									? `${latestPrompt2.taskNumber} | ${latestPrompt2.title}`
-									: (latestPrompt2?.title || '');
-								if (renameTitle2) {
-									this.hooksOutput.appendLine(`[chat-rename] (fallback) scheduling rename session=${sessionToRename2} title="${renameTitle2}" (5s delay)`);
-									setTimeout(() => {
-										void this.stateService.renameChatSession(sessionToRename2, renameTitle2).then(r => {
-											this.hooksOutput.appendLine(`[chat-rename] (fallback) result: ok=${r.ok} reason=${r.reason || '-'}`);
-											if (r.ok) {
-												void vscode.window.showInformationMessage(
-													`Chat session renamed to "${renameTitle2}". Title will appear after window reload.`,
-												);
-											}
-										}).catch(e => {
-											this.hooksOutput.appendLine(`[chat-rename] (fallback) error: ${e?.message || e}`);
-										});
-									}, 5000);
+									}, 3000);
 								}
-							}
 
-							this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
-							await this.runConfiguredHooks(prompt?.hooks || [], {
-								event: 'afterChatCompleted',
-								...hookPayloadBase,
-								status: promptForTiming?.status || prompt.status,
-								report: shouldCaptureAgentFinalResponse ? (promptForTiming?.report || '') : '',
-								reportText: shouldCaptureAgentFinalResponse
-									? (chatReportText || this.reportHtmlToText(promptForTiming?.report || ''))
-									: '',
-								chatSessionId: trackedSessionId || '',
-								timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
-							}, 'afterChatCompleted');
-							try {
-								await this.chatMemoryInstructionService()?.completeChatSession(
-									prompt.promptUuid,
-									'afterChatCompleted',
-									trackedSessionId || undefined,
+								await this.scheduleChatSessionRename(
+									String(completion.sessionId || trackedSessionId || promptForTiming.chatSessionIds?.[0] || ''),
+									promptForTiming.id,
+									' (fallback)',
 								);
-							} catch (error) {
-								this.hooksOutput.appendLine(`[chat-memory] completeChatSession fallback failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+
+								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
+								await this.runConfiguredHooks(prompt?.hooks || [], {
+									event: 'afterChatCompleted',
+									...hookPayloadBase,
+									status: promptForTiming?.status || prompt.status,
+									report: shouldCaptureAgentFinalResponse ? (promptForTiming?.report || '') : '',
+									reportText: shouldCaptureAgentFinalResponse
+										? (chatReportText || this.reportHtmlToText(promptForTiming?.report || ''))
+										: '',
+									chatSessionId: trackedSessionId || '',
+									timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
+								}, 'afterChatCompleted');
+								try {
+									await this.chatMemoryInstructionService()?.completeChatSession(
+										prompt.promptUuid,
+										'afterChatCompleted',
+										trackedSessionId || undefined,
+									);
+								} catch (error) {
+									this.hooksOutput.appendLine(`[chat-memory] completeChatSession fallback failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+								}
+								return;
 							}
-							return;
-						}
 
 						await this.runConfiguredHooks(prompt?.hooks || [], {
 							event: 'chatError',

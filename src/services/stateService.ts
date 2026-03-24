@@ -453,6 +453,10 @@ export class StateService {
 		return value.replace(/'/g, "''");
 	}
 
+	private escapeSqlJsonPathSegment(value: string): string {
+		return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+	}
+
 	async forcePersistChatCurrentLanguageModel(modelIdentifier: string): Promise<{ ok: boolean; reason?: string; dbPath?: string }> {
 		if (!modelIdentifier) {
 			return { ok: false, reason: 'empty-model' };
@@ -579,10 +583,8 @@ export class StateService {
 	}
 
 	/**
-	 * Rename a chat session by writing customTitle to its JSONL session file.
-	 * VS Code stores chat sessions as JSONL files in chatSessions/ directory.
-	 * Appending a kind:1 patch for customTitle sets the display title.
-	 * The title takes effect after VS Code window reload (VS Code reads JSONL on startup).
+	 * Rename a chat session by writing customTitle to its JSONL session file
+	 * and updating the in-memory session index in state.vscdb when possible.
 	 */
 	async renameChatSession(
 		sessionId: string,
@@ -595,31 +597,68 @@ export class StateService {
 		}
 
 		const jsonlPath = await this.findChatSessionJsonlPath(normalizedId);
-		if (!jsonlPath) {
-			return { ok: false, reason: 'jsonl-not-found' };
+		let jsonlReason = 'jsonl-not-found';
+		let jsonlOk = false;
+		if (jsonlPath) {
+			// Append a kind:1 patch that sets customTitle on the session object.
+			// VS Code's JSONL format: kind:0 = initial state, kind:1 = field patch
+			const patch = JSON.stringify({ kind: 1, k: ['customTitle'], v: normalizedTitle });
+			try {
+				// Read last byte to avoid creating empty lines (double \n)
+				const stat = await fs.stat(jsonlPath);
+				let prefix = '\n';
+				if (stat.size > 0) {
+					const fd = await fs.open(jsonlPath, 'r');
+					const buf = Buffer.alloc(1);
+					await fd.read(buf, 0, 1, stat.size - 1);
+					await fd.close();
+					if (buf[0] === 0x0A) { // file already ends with \n
+						prefix = '';
+					}
+				}
+				await fs.appendFile(jsonlPath, prefix + patch + '\n');
+				jsonlOk = true;
+				jsonlReason = jsonlPath;
+			} catch (error: any) {
+				jsonlReason = error?.message || 'jsonl-write-failed';
+			}
 		}
 
-		// Append a kind:1 patch that sets customTitle on the session object.
-		// VS Code's JSONL format: kind:0 = initial state, kind:1 = field patch
-		const patch = JSON.stringify({ kind: 1, k: ['customTitle'], v: normalizedTitle });
-		try {
-			// Read last byte to avoid creating empty lines (double \n)
-			const stat = await fs.stat(jsonlPath);
-			let prefix = '\n';
-			if (stat.size > 0) {
-				const fd = await fs.open(jsonlPath, 'r');
-				const buf = Buffer.alloc(1);
-				await fd.read(buf, 0, 1, stat.size - 1);
-				await fd.close();
-				if (buf[0] === 0x0A) { // file already ends with \n
-					prefix = '';
+		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		let indexOk = false;
+		let indexReason = 'index-entry-not-found';
+		const sessionPathSegment = this.escapeSqlJsonPathSegment(normalizedId);
+		const titlePath = `$.entries."${sessionPathSegment}".title`;
+		const sessionPath = `$.entries."${sessionPathSegment}".sessionId`;
+		const escapedTitle = this.escapeSql(normalizedTitle);
+		for (const dbPath of dbPaths) {
+			try {
+				const sql = [
+					'PRAGMA busy_timeout=2000;',
+					`UPDATE ItemTable SET value = json_set(value, '${titlePath}', '${escapedTitle}')`,
+					`WHERE key='chat.ChatSessionStore.index' AND json_extract(value, '${sessionPath}') IS NOT NULL;`,
+					'SELECT changes();',
+				].join(' ');
+				const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
+				const changes = Number((stdout || '').trim().split(/\s+/).pop() || 0);
+				if (changes > 0) {
+					indexOk = true;
+					indexReason = dbPath;
+					break;
 				}
+			} catch (error: any) {
+				indexReason = error?.message || 'index-write-failed';
 			}
-			await fs.appendFile(jsonlPath, prefix + patch + '\n');
-			return { ok: true, reason: jsonlPath };
-		} catch (error: any) {
-			return { ok: false, reason: error?.message || 'jsonl-write-failed' };
 		}
+
+		if (jsonlOk || indexOk) {
+			return {
+				ok: true,
+				reason: `jsonl:${jsonlReason} | index:${indexReason}`,
+			};
+		}
+
+		return { ok: false, reason: `${jsonlReason} | ${indexReason}` };
 	}
 
 	/** Get saved sidebar state */

@@ -12,6 +12,7 @@ import { DEFAULT_COPILOT_MODEL_FAMILY, isZeroCostCopilotModelPickerCategory, nor
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { buildDescriptionGenerationUserPrompt, buildPromptFieldLanguageRule, buildTitleGenerationUserPrompt } from '../utils/aiPromptBuilders.js';
+import { readSqliteItemTable } from '../utils/sqliteItemTable.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -156,6 +157,7 @@ export class AiService {
 
 	constructor(private readonly context?: vscode.ExtensionContext) { }
 	private sqliteBinaryPath: string | null | undefined;
+	private readonly stateDbItemCache = new Map<string, { fingerprint: string; items: Map<string, string> }>();
 	private readonly output = getPromptManagerOutputChannel();
 
 	private modelSelector: vscode.LanguageModelChatSelector = {
@@ -1158,18 +1160,83 @@ export class AiService {
 	}
 
 	private async readStateItemValue(dbPath: string, key: string): Promise<string> {
+		const sqliteValue = await this.readStateItemValueWithSqlite(dbPath, key);
+		if (sqliteValue.ok) {
+			return sqliteValue.value;
+		}
+
+		const sqlJsValue = await this.readStateItemValueWithSqlJs(dbPath, key);
+		return sqlJsValue ?? '';
+	}
+
+	private async readStateItemValueWithSqlite(dbPath: string, key: string): Promise<{ ok: boolean; value: string }> {
 		const sqlitePath = this.resolveSqliteBinaryPath();
 		if (!sqlitePath) {
-			return '';
+			return { ok: false, value: '' };
 		}
 
 		try {
 			const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
 			const { stdout } = await execFileAsync(sqlitePath, [dbPath, sql]);
-			return (stdout || '').trim();
+			return { ok: true, value: (stdout || '').trim() };
 		} catch {
-			return '';
+			return { ok: false, value: '' };
 		}
+	}
+
+	private async readStateItemValueWithSqlJs(dbPath: string, key: string): Promise<string | null> {
+		const wasmPath = this.getSqlJsWasmPath();
+		if (!wasmPath) {
+			return null;
+		}
+
+		try {
+			const fingerprint = this.getStateDbFingerprint(dbPath);
+			if (!fingerprint) {
+				return null;
+			}
+
+			const cached = this.stateDbItemCache.get(dbPath);
+			if (!cached || cached.fingerprint !== fingerprint) {
+				const items = await readSqliteItemTable(dbPath, wasmPath);
+				this.stateDbItemCache.set(dbPath, { fingerprint, items });
+			}
+
+			return this.stateDbItemCache.get(dbPath)?.items.get(key) ?? '';
+		} catch {
+			return null;
+		}
+	}
+
+	private getSqlJsWasmPath(): string | null {
+		const extensionUri = this.context?.extensionUri;
+		if (!extensionUri) {
+			return null;
+		}
+
+		const wasmPath = vscode.Uri.joinPath(extensionUri, 'dist', 'sql-wasm.wasm').fsPath;
+		return fs.existsSync(wasmPath) ? wasmPath : null;
+	}
+
+	private getStateDbFingerprint(dbPath: string): string {
+		const candidates = [
+			dbPath,
+			`${dbPath}-wal`,
+			`${dbPath}-shm`,
+			`${dbPath}-journal`,
+		];
+
+		const parts: string[] = [];
+		for (const candidate of candidates) {
+			try {
+				const stat = fs.statSync(candidate);
+				parts.push(`${candidate}:${stat.size}:${stat.mtimeMs}`);
+			} catch {
+				// continue
+			}
+		}
+
+		return parts.join('|');
 	}
 
 	private async resolveStateDbPath(): Promise<string | null> {

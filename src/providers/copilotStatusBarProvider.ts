@@ -14,6 +14,7 @@
 import * as vscode from 'vscode';
 import type { CopilotAccountSwitchState, CopilotUsageData, CopilotUsageService } from '../services/copilotUsageService.js';
 import type { CopilotUsagePanelManager } from './copilotUsagePanelManager.js';
+import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 
 /** Пороговые значения для цветовой индикации (в процентах) */
 const THRESHOLD_YELLOW = 51;
@@ -358,12 +359,20 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 	 * Показывает QuickPick меню с подробной информацией при клике на статусбар.
 	 */
 	private async showDetailsQuickPick(): Promise<void> {
-		const data = await this.usageService.fetchUsage(false);
-		if (!data.authenticated) {
-			await this.handleAuthentication();
-			return;
+		try {
+			appendPromptManagerLog(`[${new Date().toISOString()}] [status-bar] showDetailsQuickPick called`);
+			const data = await this.usageService.fetchUsage(false);
+			appendPromptManagerLog(`[${new Date().toISOString()}] [status-bar] fetchUsage done authenticated=${data.authenticated} used=${data.used}/${data.limit}`);
+			if (!data.authenticated) {
+				await this.handleAuthentication();
+				return;
+			}
+			await this.panelManager.show();
+			appendPromptManagerLog(`[${new Date().toISOString()}] [status-bar] panelManager.show() completed`);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			appendPromptManagerLog(`[${new Date().toISOString()}] [status-bar] showDetailsQuickPick ERROR: ${msg}`);
 		}
-		await this.panelManager.show();
 	}
 
 	/**

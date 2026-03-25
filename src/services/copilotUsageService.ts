@@ -133,6 +133,8 @@ export class CopilotUsageService implements vscode.Disposable {
 	private lastDebugLog = '';
 	private lastFullRefreshTimestamp = 0;
 	private lastKnownCopilotGitHubPreference: string | null | undefined;
+	/** In-memory кэш PM preference — fallback при недоступной DB (state.vscdb заблокирован) */
+	private lastSyncedPmPreference: string | null = null;
 	private lastGitHubSessionIssue: string | null = null;
 	private copilotPreferencePollingTimer: ReturnType<typeof setInterval> | undefined;
 	private isSwitchingAccount = false;
@@ -850,7 +852,10 @@ export class CopilotUsageService implements vscode.Disposable {
 			const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
 			const raw = (stdout || '').trim();
 			return raw || null;
-		} catch {
+		} catch (err) {
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [state-db] readStateValue FAILED key=${key} db=${dbPath} error=${String(err)}`,
+			);
 			return null;
 		}
 	}
@@ -862,7 +867,17 @@ export class CopilotUsageService implements vscode.Disposable {
 			'ON CONFLICT(key) DO UPDATE SET value=excluded.value;',
 			'COMMIT;',
 		].join(' ');
-		await execFileAsync('sqlite3', [dbPath, sql]);
+		try {
+			await execFileAsync('sqlite3', [dbPath, sql]);
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [state-db] writeStateValue OK key=${key} value=${value} db=${dbPath}`,
+			);
+		} catch (err) {
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [state-db] writeStateValue FAILED key=${key} value=${value} db=${dbPath} error=${String(err)}`,
+			);
+			throw err;
+		}
 	}
 
 	private async persistPreferredAccountLabel(key: string, accountLabel: string): Promise<void> {
@@ -871,14 +886,24 @@ export class CopilotUsageService implements vscode.Disposable {
 			await this.resolveGlobalStateDbPath(),
 		].filter((value): value is string => !!value);
 
+		appendPromptManagerLog(
+			`[${new Date().toISOString()}] [persist] persistPreferredAccountLabel key=${key} value=${accountLabel} dbPaths=[${dbPaths.join(', ')}]`,
+		);
+
+		let anySuccess = false;
 		for (const dbPath of dbPaths) {
 			try {
 				await this.writeStateValue(dbPath, key, accountLabel);
+				anySuccess = true;
 			} catch {
-				appendPromptManagerLog(
-					`[${new Date().toISOString()}] [copilot-usage.auth] failed to persist ${key}=${accountLabel} into ${dbPath}`,
-				);
+				// writeStateValue уже залогировала ошибку
 			}
+		}
+
+		if (!anySuccess) {
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [persist] ALL DB writes FAILED for ${key}=${accountLabel} — preference NOT persisted to disk`,
+			);
 		}
 	}
 
@@ -909,11 +934,19 @@ export class CopilotUsageService implements vscode.Disposable {
 		for (const dbPath of dbPaths) {
 			const value = await this.readStateValue(dbPath, PROMPT_MANAGER_GITHUB_PREFERENCE_KEY);
 			if (value) {
+				this.lastSyncedPmPreference = value;
+				appendPromptManagerLog(
+					`[${new Date().toISOString()}] [resolve-pm] found in DB: ${value} db=${dbPath}`,
+				);
 				return value;
 			}
 		}
 
-		return null;
+		// Если DB недоступна — используем in-memory кэш, чтобы не зацикливать sync
+		appendPromptManagerLog(
+			`[${new Date().toISOString()}] [resolve-pm] DB returned nothing, using in-memory cache: ${this.lastSyncedPmPreference || 'null'}`,
+		);
+		return this.lastSyncedPmPreference;
 	}
 
 	private async resolveLatestUsedAccountForExtension(
@@ -1056,6 +1089,8 @@ export class CopilotUsageService implements vscode.Disposable {
 		appendPromptManagerLog(
 			`[${new Date().toISOString()}] [copilot-usage.auth] sync prompt-manager preference from ${promptManagerPreference || 'none'} to ${preferredAccount.label}`,
 		);
+		// Сохраняем в in-memory кэш ДО записи в DB — при неудаче DB sync не зацикливается
+		this.lastSyncedPmPreference = preferredAccount.label;
 		await this.persistPreferredAccountLabel(PROMPT_MANAGER_GITHUB_PREFERENCE_KEY, preferredAccount.label);
 
 		try {
@@ -1687,12 +1722,21 @@ export class CopilotUsageService implements vscode.Disposable {
 				}
 				if (!this.isSameGitHubAccount(session, preferredAccount) && preferredAccount) {
 					this.lastGitHubSessionIssue = `github-session-account-mismatch: expected=${preferredAccount.label}; actual=${session?.account.label || 'none'}`;
+					appendPromptManagerLog(
+						`[${new Date().toISOString()}] [getSession] scopes=[${scopes.join(',')}] MISMATCH expected=${preferredAccount.label} actual=${session?.account.label || 'none'} — trying next scopes`,
+					);
 					continue;
 				}
 				if (session) {
+					appendPromptManagerLog(
+						`[${new Date().toISOString()}] [getSession] SUCCESS scopes=[${scopes.join(',')}] account=${session.account.label}`,
+					);
 					return session;
 				}
-			} catch {
+			} catch (err) {
+				appendPromptManagerLog(
+					`[${new Date().toISOString()}] [getSession] scopes=[${scopes.join(',')}] ERROR: ${String(err)}`,
+				);
 				// try next scope variant
 			}
 		}

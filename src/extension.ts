@@ -29,6 +29,7 @@ import type { MemoryCommit, HookCommitPayload, MemoryAnalysisDepth } from './typ
 import { DEFAULT_COPILOT_MODEL_FAMILY } from './constants/ai.js';
 import { buildChatContextFiles } from './utils/chatContextFiles.js';
 import {
+	appendPromptManagerLog,
 	disposePromptManagerOutputChannel,
 	getPromptManagerOutputChannel,
 	installPromptManagerConsoleInterceptor,
@@ -131,6 +132,7 @@ export function activate(context: vscode.ExtensionContext) {
 	let codeMapAdminService: CodeMapAdminService | undefined;
 	let codeMapRealtimeWatcherRegistered = false;
 	const codeMapSettings = getCodeMapSettings();
+	appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] enabled=${codeMapSettings.enabled} autoUpdate=${codeMapSettings.autoUpdate}`);
 
 	if (codeMapSettings.enabled) {
 		codeMapDb = new CodeMapDatabaseService(context.extensionUri);
@@ -174,15 +176,21 @@ export function activate(context: vscode.ExtensionContext) {
 
 		void (async () => {
 			try {
+				appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] initializing DB...`);
 				await codeMapDb!.initialize(workspaceRoot);
+				appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] DB initialized, registering watcher`);
 				registerCodeMapRealtimeWatcher();
 				if (codeMapSettings.autoUpdate) {
+					appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] autoUpdate=true, scheduling workspace refresh in ${codeMapSettings.startupDelayMs}ms`);
 					setTimeout(() => {
 						codeMapChatInstructionService?.queueWorkspaceRefresh();
 					}, codeMapSettings.startupDelayMs);
+				} else {
+					appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] autoUpdate=false, skipping workspace refresh`);
 				}
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
+				appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] init FAILED: ${msg}`);
 				console.error('[PromptManager] Code map init failed:', msg);
 			}
 		})();
@@ -206,12 +214,17 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const memoryDbReady = (async () => {
 		try {
+			appendPromptManagerLog(`[${new Date().toISOString()}] [memory] initializing DB...`);
 			await memoryDb!.initialize(workspaceRoot);
+			appendPromptManagerLog(`[${new Date().toISOString()}] [memory] DB initialized OK`);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
+			appendPromptManagerLog(`[${new Date().toISOString()}] [memory] DB init FAILED: ${msg}`);
 			console.error('[PromptManager] Memory database init failed:', msg);
 		}
 	})();
+
+	appendPromptManagerLog(`[${new Date().toISOString()}] [memory] enabled=${memoryEnabled}`);
 
 	if (memoryEnabled) {
 		memoryCleanup = new MemoryCleanupService(memoryDb);
@@ -222,13 +235,19 @@ export function activate(context: vscode.ExtensionContext) {
 		// Start memory subsystems only when Memory is enabled
 		void (async () => {
 			try {
+				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] waiting for DB ready...`);
 				await memoryDbReady;
+				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] starting cleanup service`);
 				memoryCleanup!.start();
 
 				// Start HTTP server and install git hooks
+				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] starting HTTP server...`);
 				const { port, token } = await memoryHttpServer!.start();
+				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] HTTP server started on port=${port}`);
 				const folders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
+				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] installing git hooks for ${folders.length} folders`);
 				await memoryGitHook!.installHooksForWorkspace(folders, port, token);
+				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] git hooks installed`);
 
 				// Initialize embedding model in background
 				const embeddingsEnabled = vscode.workspace.getConfiguration('promptManager').get<boolean>('memory.embeddings.enabled', true);
@@ -237,6 +256,7 @@ export function activate(context: vscode.ExtensionContext) {
 					void memoryEmbedding!.initialize(cacheDir);
 				}
 
+				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] creating ChatMemoryInstructionService`);
 				chatMemoryInstructionService = new ChatMemoryInstructionService(
 					storageService,
 					memoryContext!,
@@ -245,6 +265,7 @@ export function activate(context: vscode.ExtensionContext) {
 					workspaceService,
 				);
 				await chatMemoryInstructionService.recoverSessionsOnStartup();
+				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] ChatMemoryInstructionService ready`);
 
 				// Wire up pipeline: HTTP server → analyze → store → embed
 				memoryHttpServer!.onCommitReceived(async (payload: HookCommitPayload) => {
@@ -258,6 +279,7 @@ export function activate(context: vscode.ExtensionContext) {
 							? await aiService.resolveFreeCopilotModel(config.get<string>('memory.aiModel', DEFAULT_COPILOT_MODEL_FAMILY))
 							: '';
 						if (!aiModel) {
+							appendPromptManagerLog(`[${new Date().toISOString()}] [memory] commit ${payload.sha.substring(0, 7)} SKIPPED — no AI model available`);
 							return;
 						}
 
@@ -313,11 +335,15 @@ export function activate(context: vscode.ExtensionContext) {
 				});
 
 				memoryNotification!.updateStatusBar(memoryDb!.getCommitCount(), false);
+				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] system fully initialized, commits=${memoryDb!.getCommitCount()}`);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
+				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] system init FAILED: ${msg}`);
 				console.error('[PromptManager] Memory system init failed:', msg);
 			}
 		})();
+	} else {
+		appendPromptManagerLog(`[${new Date().toISOString()}] [memory] DISABLED (promptManager.memory.enabled=false)`);
 	}
 
 	// Register sidebar webview provider

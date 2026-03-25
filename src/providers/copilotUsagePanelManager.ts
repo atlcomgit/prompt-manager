@@ -30,6 +30,7 @@ export class CopilotUsagePanelManager {
 	}
 
 	async show(): Promise<void> {
+		appendPromptManagerLog(`[${new Date().toISOString()}] [panel] show() called, currentPanel=${!!currentPanel}`);
 		if (currentPanel) {
 			currentPanel.reveal(vscode.ViewColumn.One);
 			await this.pushUsageToWebview(currentPanel.webview, false);
@@ -140,8 +141,14 @@ export class CopilotUsagePanelManager {
 			}
 		});
 
-		await this.pushUsageToWebview(panel.webview, false);
+		try {
+			await this.pushUsageToWebview(panel.webview, false);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			appendPromptManagerLog(`[${new Date().toISOString()}] [panel] initial pushUsageToWebview ERROR: ${msg}`);
+		}
 		this.startPanelRefresh(panel.webview);
+		appendPromptManagerLog(`[${new Date().toISOString()}] [panel] show() completed, panel created`);
 	}
 
 	private startPanelRefresh(webview: vscode.Webview): void {
@@ -159,7 +166,14 @@ export class CopilotUsagePanelManager {
 	}
 
 	private async pushUsageToWebview(webview: vscode.Webview, forceRefresh: boolean, snapshot?: CopilotUsageSnapshot): Promise<void> {
-		const resolvedSnapshot = snapshot ?? await this.usageService.getUsageSnapshot(forceRefresh);
+		let resolvedSnapshot: CopilotUsageSnapshot;
+		try {
+			resolvedSnapshot = snapshot ?? await this.usageService.getUsageSnapshot(forceRefresh);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			appendPromptManagerLog(`[${new Date().toISOString()}] [panel] getUsageSnapshot ERROR: ${msg}`);
+			return;
+		}
 		const { usage, accountSummary, debugLog } = resolvedSnapshot;
 		const switchState = this.usageService.getAccountSwitchState();
 		const now = new Date();

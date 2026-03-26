@@ -8,10 +8,12 @@
 import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
+import * as fsSync from 'fs';
 import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
+import { readSqliteItemTable } from '../utils/sqliteItemTable.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -102,6 +104,7 @@ const GITHUB_AUTH_PROVIDER_ID = 'github';
 const COPILOT_CHAT_AUTH_PROVIDER_ID = '__GitHub.copilot-chat';
 const COPILOT_GITHUB_PREFERENCE_KEYS = ['github.copilot-github', 'github.copilot-chat-github'];
 const PROMPT_MANAGER_GITHUB_PREFERENCE_KEY = 'alek-fiend.copilot-prompt-manager-github';
+const PROMPT_MANAGER_GITHUB_PREFERENCE_FALLBACK_STATE_KEY = 'promptManager.copilotUsage.githubPreference';
 const COPILOT_CHAT_GITHUB_USAGE_EXTENSION_IDS = ['github.copilot-chat', 'github.copilot'];
 const ACCOUNT_SWITCH_DETECTION_INTERVAL_MS = 500;
 const ACCOUNT_SWITCH_DETECTION_MAX_ATTEMPTS = 60;
@@ -140,6 +143,7 @@ export class CopilotUsageService implements vscode.Disposable {
 	private isSwitchingAccount = false;
 	/** Когда пользователь явно выбрал аккаунт — не перезаписывать автоматически из Copilot Chat */
 	private userExplicitAccountChoice: string | null = null;
+	private readonly stateDbItemCache = new Map<string, { fingerprint: string; items: Map<string, string> }>();
 	private accountSwitchState: CopilotAccountSwitchState = {
 		isSwitching: false,
 		phase: 'idle',
@@ -435,24 +439,29 @@ export class CopilotUsageService implements vscode.Disposable {
 		const lastSeen = this.context.globalState.get<number>(LAST_CHAT_ACTIVITY_KEY, 0);
 
 		for (const dbPath of dbPaths) {
+			const cachedRaw = await this.readStateValueWithSqlJs(dbPath, 'chat.ChatSessionStore.index');
+			if (cachedRaw.ok) {
+				const parsed = this.parseChatSessionStoreIndex(cachedRaw.value);
+				if (!parsed) {
+					continue;
+				}
+
+				const nextSignal = this.extractChatActivitySignal(parsed, lastSeen);
+				maxLastMessageDate = Math.max(maxLastMessageDate, nextSignal.maxLastMessageDate);
+				changedSessions += nextSignal.changedSessions;
+				continue;
+			}
+
 			try {
 				const sql = "SELECT value FROM ItemTable WHERE key='chat.ChatSessionStore.index' LIMIT 1;";
 				const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
-				const raw = (stdout || '').trim();
-				if (!raw) {
+				const parsed = this.parseChatSessionStoreIndex((stdout || '').trim());
+				if (!parsed) {
 					continue;
 				}
-				const parsed = JSON.parse(raw) as { entries?: Record<string, { lastMessageDate?: number }> };
-				const entries = parsed?.entries || {};
-				for (const entry of Object.values(entries)) {
-					const ts = Number(entry?.lastMessageDate || 0);
-					if (ts > maxLastMessageDate) {
-						maxLastMessageDate = ts;
-					}
-					if (ts > lastSeen) {
-						changedSessions += 1;
-					}
-				}
+				const nextSignal = this.extractChatActivitySignal(parsed, lastSeen);
+				maxLastMessageDate = Math.max(maxLastMessageDate, nextSignal.maxLastMessageDate);
+				changedSessions += nextSignal.changedSessions;
 			} catch {
 				// continue
 			}
@@ -460,6 +469,40 @@ export class CopilotUsageService implements vscode.Disposable {
 
 		if (maxLastMessageDate > lastSeen) {
 			await this.context.globalState.update(LAST_CHAT_ACTIVITY_KEY, maxLastMessageDate);
+		}
+
+		return { maxLastMessageDate, changedSessions };
+	}
+
+	private parseChatSessionStoreIndex(raw: string | null | undefined): { entries?: Record<string, { lastMessageDate?: number }> } | null {
+		const normalized = String(raw || '').trim();
+		if (!normalized) {
+			return null;
+		}
+
+		try {
+			return JSON.parse(normalized) as { entries?: Record<string, { lastMessageDate?: number }> };
+		} catch {
+			return null;
+		}
+	}
+
+	private extractChatActivitySignal(
+		index: { entries?: Record<string, { lastMessageDate?: number }> },
+		lastSeen: number,
+	): { maxLastMessageDate: number; changedSessions: number } {
+		let maxLastMessageDate = 0;
+		let changedSessions = 0;
+		const entries = index?.entries || {};
+
+		for (const entry of Object.values(entries)) {
+			const ts = Number(entry?.lastMessageDate || 0);
+			if (ts > maxLastMessageDate) {
+				maxLastMessageDate = ts;
+			}
+			if (ts > lastSeen) {
+				changedSessions += 1;
+			}
 		}
 
 		return { maxLastMessageDate, changedSessions };
@@ -582,6 +625,39 @@ export class CopilotUsageService implements vscode.Disposable {
 			'tmromain.copilot-usage-tracker',
 			'fail-safe.copilot-premium-usage-monitor',
 		];
+
+		const cachedItems = await this.getStateDbItems(dbPath);
+		if (cachedItems) {
+			for (const key of priorityKeys) {
+				const raw = String(cachedItems.get(key) || '').trim();
+				if (!raw) {
+					continue;
+				}
+
+				const parsed = this.parseUsageFromJsonText(raw);
+				if (parsed && parsed.limit > 0) {
+					return { ...parsed, status: `local-db:${key}` };
+				}
+			}
+
+			for (const [key, value] of cachedItems.entries()) {
+				const normalizedKey = key.toLowerCase();
+				const normalizedValue = value.toLowerCase();
+				if (!normalizedKey.includes('copilot')) {
+					continue;
+				}
+				if (!normalizedValue.includes('quota') && !normalizedValue.includes('premium') && !normalizedValue.includes('used')) {
+					continue;
+				}
+
+				const parsed = this.parseUsageFromJsonText(value);
+				if (parsed && parsed.limit > 0) {
+					return { ...parsed, status: `local-db:${key}` };
+				}
+			}
+
+			return null;
+		}
 
 		for (const key of priorityKeys) {
 			try {
@@ -847,6 +923,15 @@ export class CopilotUsageService implements vscode.Disposable {
 	}
 
 	private async readStateValue(dbPath: string, key: string): Promise<string | null> {
+		const cachedValue = await this.readStateValueWithSqlJs(dbPath, key);
+		if (cachedValue.ok) {
+			return cachedValue.value;
+		}
+
+		if (process.platform === 'win32') {
+			return null;
+		}
+
 		try {
 			const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
 			const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
@@ -861,6 +946,13 @@ export class CopilotUsageService implements vscode.Disposable {
 	}
 
 	private async writeStateValue(dbPath: string, key: string, value: string): Promise<void> {
+		if (process.platform === 'win32') {
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [state-db] writeStateValue SKIPPED key=${key} db=${dbPath} reason=external-sqlite-unavailable-on-win32`,
+			);
+			return;
+		}
+
 		const sql = [
 			'BEGIN TRANSACTION;',
 			`INSERT INTO ItemTable(key, value) VALUES ('${this.escapeSql(key)}', '${this.escapeSql(value)}')`,
@@ -881,6 +973,9 @@ export class CopilotUsageService implements vscode.Disposable {
 	}
 
 	private async persistPreferredAccountLabel(key: string, accountLabel: string): Promise<void> {
+		await this.context.globalState.update(PROMPT_MANAGER_GITHUB_PREFERENCE_FALLBACK_STATE_KEY, accountLabel);
+		this.lastSyncedPmPreference = accountLabel;
+
 		const dbPaths = [
 			await this.getCurrentWorkspaceStateDbPath(),
 			await this.resolveGlobalStateDbPath(),
@@ -902,7 +997,7 @@ export class CopilotUsageService implements vscode.Disposable {
 
 		if (!anySuccess) {
 			appendPromptManagerLog(
-				`[${new Date().toISOString()}] [persist] ALL DB writes FAILED for ${key}=${accountLabel} — preference NOT persisted to disk`,
+				`[${new Date().toISOString()}] [persist] ALL DB writes FAILED for ${key}=${accountLabel} — using globalState fallback`,
 			);
 		}
 	}
@@ -942,6 +1037,15 @@ export class CopilotUsageService implements vscode.Disposable {
 			}
 		}
 
+		const persistedFallback = this.context.globalState.get<string>(PROMPT_MANAGER_GITHUB_PREFERENCE_FALLBACK_STATE_KEY) || null;
+		if (persistedFallback) {
+			this.lastSyncedPmPreference = persistedFallback;
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [resolve-pm] using globalState fallback: ${persistedFallback}`,
+			);
+			return persistedFallback;
+		}
+
 		// Если DB недоступна — используем in-memory кэш, чтобы не зацикливать sync
 		appendPromptManagerLog(
 			`[${new Date().toISOString()}] [resolve-pm] DB returned nothing, using in-memory cache: ${this.lastSyncedPmPreference || 'null'}`,
@@ -969,6 +1073,55 @@ export class CopilotUsageService implements vscode.Disposable {
 		let latest: { accountLabel: string; lastUsed: number } | null = null;
 
 		for (const dbPath of dbPaths) {
+			const cachedItems = await this.getStateDbItems(dbPath);
+			if (cachedItems) {
+				for (const [key, rawValue] of cachedItems.entries()) {
+					if (!key.startsWith(keyPrefix) || !key.endsWith('-usages')) {
+						continue;
+					}
+
+					const accountLabel = key.slice(keyPrefix.length, -'-usages'.length).trim();
+					if (!accountLabel) {
+						continue;
+					}
+
+					let usages: unknown;
+					try {
+						usages = JSON.parse(rawValue);
+					} catch {
+						continue;
+					}
+
+					if (!Array.isArray(usages)) {
+						continue;
+					}
+
+					for (const usage of usages) {
+						if (!usage || typeof usage !== 'object') {
+							continue;
+						}
+
+						const usageRecord = usage as Record<string, unknown>;
+						const extensionId = typeof usageRecord.extensionId === 'string'
+							? usageRecord.extensionId.trim().toLowerCase()
+							: '';
+						if (!normalizedExtensionIds.has(extensionId)) {
+							continue;
+						}
+
+						const lastUsed = Number(usageRecord.lastUsed || 0);
+						if (!Number.isFinite(lastUsed) || lastUsed <= 0) {
+							continue;
+						}
+
+						if (!latest || lastUsed > latest.lastUsed) {
+							latest = { accountLabel, lastUsed };
+						}
+					}
+				}
+				continue;
+			}
+
 			try {
 				const { stdout } = await execFileAsync('sqlite3', [dbPath, sql, '-separator', '\t']);
 				const lines = (stdout || '').split('\n').map((line) => line.trim()).filter(Boolean);
@@ -1029,6 +1182,68 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 
 		return latest;
+	}
+
+	private async readStateValueWithSqlJs(dbPath: string, key: string): Promise<{ ok: boolean; value: string | null }> {
+		const items = await this.getStateDbItems(dbPath);
+		if (!items) {
+			return { ok: false, value: null };
+		}
+
+		return {
+			ok: true,
+			value: items.get(key) ?? null,
+		};
+	}
+
+	private async getStateDbItems(dbPath: string): Promise<Map<string, string> | null> {
+		const wasmPath = this.getSqlJsWasmPath();
+		if (!wasmPath) {
+			return null;
+		}
+
+		try {
+			const fingerprint = this.getStateDbFingerprint(dbPath);
+			if (!fingerprint) {
+				return null;
+			}
+
+			const cached = this.stateDbItemCache.get(dbPath);
+			if (!cached || cached.fingerprint !== fingerprint) {
+				const items = await readSqliteItemTable(dbPath, wasmPath);
+				this.stateDbItemCache.set(dbPath, { fingerprint, items });
+			}
+
+			return this.stateDbItemCache.get(dbPath)?.items ?? null;
+		} catch {
+			return null;
+		}
+	}
+
+	private getSqlJsWasmPath(): string | null {
+		const wasmPath = vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'sql-wasm.wasm').fsPath;
+		return fsSync.existsSync(wasmPath) ? wasmPath : null;
+	}
+
+	private getStateDbFingerprint(dbPath: string): string {
+		const candidates = [
+			dbPath,
+			`${dbPath}-wal`,
+			`${dbPath}-shm`,
+			`${dbPath}-journal`,
+		];
+
+		const parts: string[] = [];
+		for (const candidate of candidates) {
+			try {
+				const stat = fsSync.statSync(candidate);
+				parts.push(`${candidate}:${stat.size}:${stat.mtimeMs}`);
+			} catch {
+				// continue
+			}
+		}
+
+		return parts.join('|');
 	}
 
 	private async resolveCopilotChatGitHubUsageAccountLabel(): Promise<string | null> {

@@ -120,6 +120,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
 			case 'deletePrompt': {
 				await this.storageService.deletePrompt(msg.id);
+				const selectedPromptId = (this.stateService.getSidebarState().selectedPromptId || '').trim() || null;
+				if (msg.id === '__new__' || selectedPromptId === msg.id) {
+					await this.syncSelectedPrompt(null);
+				}
 				this._onDidDeletePrompt.fire(msg.id);
 				this.postMessage({ type: 'promptDeleted', id: msg.id });
 				await this.refreshList();

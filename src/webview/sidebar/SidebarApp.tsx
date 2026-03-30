@@ -13,7 +13,7 @@ import { Toolbar } from './components/Toolbar';
 import { createDefaultPrompt, PROMPT_STATUS_ORDER } from '../../types/prompt';
 import { matchesCreatedAtFilter } from '../../utils/sidebarDateFilter.js';
 import { makeSidebarGroupCollapseKey, shouldAutoExpandSidebarGroups } from '../../utils/sidebarGrouping.js';
-import { reconcileSidebarSelection } from '../../utils/sidebarSelection.js';
+import { reconcileSidebarDeletionState, reconcileSidebarSelection } from '../../utils/sidebarSelection.js';
 import type { PromptConfig, SidebarState, FilterState, SortField, SortOrder, GroupBy, PromptStatus, CreatedAtFilter } from '../../types/prompt';
 
 const vscode = getVsCodeApi();
@@ -68,6 +68,20 @@ export const SidebarApp: React.FC = () => {
     () => (shouldAutoExpandGroups ? {} : collapsedGroups),
     [shouldAutoExpandGroups, collapsedGroups],
   );
+
+  const applyDeletedPromptState = useCallback((deletedId: string | null | undefined) => {
+    const nextState = reconcileSidebarDeletionState({
+      showOptimisticNewPrompt,
+      optimisticBaselineIds,
+      selectedId,
+      selectedPromptUuid,
+    }, deletedId);
+
+    setShowOptimisticNewPrompt(nextState.showOptimisticNewPrompt);
+    setOptimisticBaselineIds(nextState.optimisticBaselineIds);
+    setSelectedId(nextState.selectedId);
+    setSelectedPromptUuid(nextState.selectedPromptUuid);
+  }, [showOptimisticNewPrompt, optimisticBaselineIds, selectedId, selectedPromptUuid]);
 
   // Request initial data after message listener is attached.
   useEffect(() => {
@@ -136,10 +150,7 @@ export const SidebarApp: React.FC = () => {
         break;
       }
       case 'promptDeleted':
-        if (selectedId === msg.id) {
-          setSelectedId(null);
-          setSelectedPromptUuid(null);
-        }
+        applyDeletedPromptState(String(msg.id || ''));
         break;
       case 'triggerCreatePrompt':
         handleCreate();
@@ -158,7 +169,7 @@ export const SidebarApp: React.FC = () => {
         break;
       }
     }
-  }, [selectedId, selectedPromptUuid, showOptimisticNewPrompt, optimisticBaselineIds, prompts]);
+  }, [applyDeletedPromptState, selectedId, selectedPromptUuid, showOptimisticNewPrompt, optimisticBaselineIds, prompts]);
 
   useMessageListener(handleMessage);
 
@@ -320,6 +331,11 @@ export const SidebarApp: React.FC = () => {
   };
 
   const handleDelete = (id: string) => {
+    if (id === '__new__' && openPromptTimerRef.current !== null) {
+      window.clearTimeout(openPromptTimerRef.current);
+      openPromptTimerRef.current = null;
+    }
+    applyDeletedPromptState(id);
     vscode.postMessage({ type: 'deletePrompt', id });
   };
 

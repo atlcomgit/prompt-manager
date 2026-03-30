@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { PromptConfig } from '../src/types/prompt.js';
 import { normalizeSidebarState } from '../src/types/prompt.js';
-import { reconcileSidebarSelection } from '../src/utils/sidebarSelection.js';
+import { reconcileSidebarDeletionState, reconcileSidebarSelection } from '../src/utils/sidebarSelection.js';
 
 function makePrompt(overrides: Partial<PromptConfig>): PromptConfig {
 	const now = '2026-03-21T12:00:00.000Z';
@@ -113,5 +113,53 @@ test('reconcileSidebarSelection preserves optimistic new prompt selection', () =
 	assert.deepEqual(result, {
 		selectedId: '__new__',
 		selectedPromptUuid: null,
+	});
+});
+
+test('reconcileSidebarDeletionState clears optimistic new prompt and selection', () => {
+	const result = reconcileSidebarDeletionState({
+		showOptimisticNewPrompt: true,
+		optimisticBaselineIds: ['prompt-1', 'prompt-2'],
+		selectedId: '__new__',
+		selectedPromptUuid: null,
+	}, '__new__');
+
+	assert.deepEqual(result, {
+		showOptimisticNewPrompt: false,
+		optimisticBaselineIds: null,
+		selectedId: null,
+		selectedPromptUuid: null,
+	});
+});
+
+test('reconcileSidebarDeletionState clears selected saved prompt only', () => {
+	const result = reconcileSidebarDeletionState({
+		showOptimisticNewPrompt: true,
+		optimisticBaselineIds: ['prompt-1'],
+		selectedId: 'prompt-1',
+		selectedPromptUuid: 'uuid-1',
+	}, 'prompt-1');
+
+	assert.deepEqual(result, {
+		showOptimisticNewPrompt: true,
+		optimisticBaselineIds: ['prompt-1'],
+		selectedId: null,
+		selectedPromptUuid: null,
+	});
+});
+
+test('reconcileSidebarDeletionState ignores unrelated prompt deletion', () => {
+	const result = reconcileSidebarDeletionState({
+		showOptimisticNewPrompt: true,
+		optimisticBaselineIds: ['prompt-1'],
+		selectedId: 'prompt-1',
+		selectedPromptUuid: 'uuid-1',
+	}, 'prompt-2');
+
+	assert.deepEqual(result, {
+		showOptimisticNewPrompt: true,
+		optimisticBaselineIds: ['prompt-1'],
+		selectedId: 'prompt-1',
+		selectedPromptUuid: 'uuid-1',
 	});
 });

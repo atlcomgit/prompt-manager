@@ -2252,19 +2252,23 @@ export class EditorPanelManager {
 		const panelKey = SINGLE_EDITOR_PANEL_KEY;
 
 		const singletonPanel = openPanels.get(panelKey);
-		const singletonPrompt = this.panelPromptRefs.get(panelKey);
-		if (!isNew && singletonPanel && singletonPrompt?.id === promptId) {
+		const reusableSingletonPanel = singletonPanel && !this.silentClosePanels.has(singletonPanel)
+			? singletonPanel
+			: undefined;
+		const singletonPrompt = reusableSingletonPanel ? this.panelPromptRefs.get(panelKey) : undefined;
+		if (!isNew && reusableSingletonPanel && singletonPrompt?.id === promptId) {
 			try {
-				await singletonPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
+				await reusableSingletonPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
 			} catch {
 				// panel/webview may be reloading
 			}
 			this.syncStartupEditorRestoreState();
-			singletonPanel.reveal();
+			reusableSingletonPanel.reveal();
 			return;
 		}
 
-		const existingEntries = [...openPanels.entries()];
+		const existingEntries = [...openPanels.entries()]
+			.filter(([, existingPanel]) => !this.silentClosePanels.has(existingPanel));
 		const panelsToDispose: vscode.WebviewPanel[] = [];
 
 		for (const [existingKey, existingPanel] of existingEntries) {
@@ -2363,9 +2367,9 @@ export class EditorPanelManager {
 			this.panelDirtyFlags.set(panelKey, v);
 		};
 
-		if (singletonPanel) {
+		if (reusableSingletonPanel) {
 			try {
-				await singletonPanel.webview.postMessage({ type: 'promptLoading' } satisfies ExtensionToWebviewMessage);
+				await reusableSingletonPanel.webview.postMessage({ type: 'promptLoading' } satisfies ExtensionToWebviewMessage);
 				await new Promise(resolve => setTimeout(resolve, 40));
 			} catch {
 				// panel may already be reloading; continue with fresh html
@@ -2373,18 +2377,18 @@ export class EditorPanelManager {
 			this.panelDirtySetters.set(panelKey, setPanelDirty);
 			const bootId = this.createPanelBootId();
 			this.panelBootIds.set(panelKey, bootId);
-			singletonPanel.title = restoredUnsaved
+			reusableSingletonPanel.title = restoredUnsaved
 				? `⚡● ${prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt')}`
 				: `⚡ ${prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt')}`;
-			singletonPanel.webview.html = getWebviewHtml(
-				singletonPanel.webview,
+			reusableSingletonPanel.webview.html = getWebviewHtml(
+				reusableSingletonPanel.webview,
 				this.extensionUri,
 				'dist/webview/editor.js',
 				`Prompt: ${title}`,
 				vscode.env.language,
 				bootId,
 			);
-			singletonPanel.reveal(vscode.ViewColumn.One);
+			reusableSingletonPanel.reveal(vscode.ViewColumn.One);
 			this.syncStartupEditorRestoreState();
 
 			for (const existingPanel of panelsToDispose) {

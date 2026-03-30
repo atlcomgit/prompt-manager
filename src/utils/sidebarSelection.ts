@@ -5,6 +5,31 @@ export interface SidebarSelectionState {
 	selectedPromptUuid: string | null;
 }
 
+export interface SidebarDeletionState extends SidebarSelectionState {
+	showOptimisticNewPrompt: boolean;
+	optimisticBaselineIds: string[] | null;
+}
+
+export function reconcileSidebarDeletionState(
+	state: SidebarDeletionState,
+	deletedId: string | null | undefined,
+): SidebarDeletionState {
+	const normalizedDeletedId = (deletedId || '').trim() || null;
+	if (!normalizedDeletedId) {
+		return state;
+	}
+
+	const shouldClearSelection = state.selectedId === normalizedDeletedId;
+	const shouldClearOptimisticNewPrompt = normalizedDeletedId === '__new__';
+
+	return {
+		showOptimisticNewPrompt: shouldClearOptimisticNewPrompt ? false : state.showOptimisticNewPrompt,
+		optimisticBaselineIds: shouldClearOptimisticNewPrompt ? null : state.optimisticBaselineIds,
+		selectedId: shouldClearSelection ? null : state.selectedId,
+		selectedPromptUuid: shouldClearSelection ? null : state.selectedPromptUuid,
+	};
+}
+
 export function reconcileSidebarSelection(
 	prompts: PromptConfig[],
 	selection: SidebarSelectionState,

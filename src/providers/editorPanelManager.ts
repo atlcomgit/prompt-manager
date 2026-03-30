@@ -85,6 +85,38 @@ export class EditorPanelManager {
 		}
 	}
 
+	private async syncPersistedActivePromptState(prompt: Prompt, previousId?: string): Promise<void> {
+		const nextPromptId = (prompt.id || '').trim();
+		if (!nextPromptId) {
+			return;
+		}
+
+		await this.stateService.saveLastPromptId(nextPromptId);
+
+		const state = this.stateService.getSidebarState();
+		const normalizedPreviousId = (previousId || '').trim() || null;
+		const promptUuid = (prompt.promptUuid || '').trim() || null;
+		const selectedPromptId = (state.selectedPromptId || '').trim() || null;
+		const selectedPromptUuid = (state.selectedPromptUuid || '').trim() || null;
+
+		const shouldSyncSidebarSelection = selectedPromptId === '__new__'
+			|| selectedPromptId === nextPromptId
+			|| Boolean(normalizedPreviousId && selectedPromptId === normalizedPreviousId)
+			|| Boolean(promptUuid && selectedPromptUuid === promptUuid);
+
+		if (!shouldSyncSidebarSelection) {
+			return;
+		}
+
+		if (state.selectedPromptId !== nextPromptId || state.selectedPromptUuid !== promptUuid) {
+			await this.stateService.saveSidebarState({
+				...state,
+				selectedPromptId: nextPromptId,
+				selectedPromptUuid: promptUuid,
+			});
+		}
+	}
+
 	prepareForShutdown(): void {
 		this.isShuttingDown = true;
 		const promptId = (this.panelPromptRefs.get(SINGLE_EDITOR_PANEL_KEY)?.id || '').trim() || null;
@@ -1363,8 +1395,13 @@ export class EditorPanelManager {
 				return;
 			}
 
+			const renameFromId = await this.ensurePromptIdMatchesTitle(currentPrompt, currentPrompt.id || undefined);
+
 			// Сохраняем обновлённый промпт на диск (без истории — это просто обогащение)
-			const enriched = await this.storageService.savePrompt(currentPrompt, { skipHistory: true });
+			const enriched = await this.storageService.savePrompt(currentPrompt, {
+				skipHistory: true,
+				previousId: renameFromId,
+			});
 
 			// Обновляем UI в webview
 			const activePrompt = this.panelPromptRefs.get(panelKey);
@@ -1378,19 +1415,22 @@ export class EditorPanelManager {
 			if (activePrompt && activePrompt.id === promptId) {
 				Object.assign(activePrompt, enriched);
 				this.setPanelPromptRef(panelKey, activePrompt);
+				this.ensureContentEditorBinding(panelKey, activePrompt);
+				this.ensureReportEditorBinding(panelKey, activePrompt);
+				await this.syncPersistedActivePromptState(enriched, renameFromId);
 				const panel = openPanels.get(panelKey);
 				if (panel) {
 					panel.title = `⚡ ${enriched.title || enriched.id}`;
 				}
-				postMessage({ type: 'prompt', prompt: enriched, reason: 'ai-enrichment' });
-				postMessage({ type: 'promptSaved', prompt: enriched });
+				postMessage({ type: 'prompt', prompt: enriched, reason: 'ai-enrichment', previousId: renameFromId });
+				postMessage({ type: 'promptSaved', prompt: enriched, previousId: renameFromId });
 				// Обновляем базовый снимок, чтобы dirty-флаг не зажёгся от AI-обновления
 				this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(enriched)));
 			}
 			this.hooksOutput.appendLine(`[ai-enrichment] done: promptId=${promptId} title=${JSON.stringify((enriched.title || '').slice(0, 40))}`);
 
 			// Обновляем список промптов в sidebar (onDidSave → sidebarProvider.refreshList)
-			this._onDidSave.fire(promptId);
+			this._onDidSave.fire(enriched.id);
 		} catch (err) {
 			this.hooksOutput.appendLine(`[ai-enrichment] error: promptId=${promptId} ${err instanceof Error ? err.message : String(err)}`);
 		} finally {
@@ -2810,6 +2850,7 @@ export class EditorPanelManager {
 						this.setPanelPromptRef(panelKey, currentPrompt);
 						this.ensureContentEditorBinding(panelKey, currentPrompt);
 						this.ensureReportEditorBinding(panelKey, currentPrompt);
+						await this.syncPersistedActivePromptState(promptForPanel, renameFromId);
 					}
 
 					// Update panel tracking
@@ -3218,10 +3259,9 @@ export class EditorPanelManager {
 					};
 
 					// Ensure prompt has id and persist latest editor state before starting chat
-					if (!prompt.id) {
-						await this.ensurePromptIdMatchesTitle(prompt);
-					}
-					const existingBeforeChat = await this.storageService.getPrompt(prompt.id);
+					const promptPreviousId = (prompt.id || '').trim() || undefined;
+					const renameFromId = await this.ensurePromptIdMatchesTitle(prompt, promptPreviousId);
+					const existingBeforeChat = await this.storageService.getPrompt(renameFromId || prompt.id);
 					if (existingBeforeChat) {
 						prompt.timeSpentWriting = Math.max(prompt.timeSpentWriting || 0, existingBeforeChat.timeSpentWriting || 0);
 						prompt.timeSpentImplementing = Math.max(prompt.timeSpentImplementing || 0, existingBeforeChat.timeSpentImplementing || 0);
@@ -3235,9 +3275,24 @@ export class EditorPanelManager {
 							prompt.chatSessionIds = prompt.chatSessionIds?.length ? prompt.chatSessionIds : (existingBeforeChat.chatSessionIds || []);
 						}
 					}
-					await this.storageService.savePrompt(prompt, { historyReason: 'start-chat' });
-					if (currentPrompt.id === prompt.id) {
+					prompt = await this.storageService.savePrompt(prompt, {
+						historyReason: 'start-chat',
+						previousId: renameFromId,
+					});
+					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();
+					const shouldSyncCurrentPanel = !normalizedCurrentPromptId
+						|| normalizedCurrentPromptId === prompt.id
+						|| Boolean(renameFromId && normalizedCurrentPromptId === renameFromId);
+					if (shouldSyncCurrentPanel) {
 						Object.assign(currentPrompt, prompt);
+						this.setPanelPromptRef(panelKey, currentPrompt);
+						this.ensureContentEditorBinding(panelKey, currentPrompt);
+						this.ensureReportEditorBinding(panelKey, currentPrompt);
+						await this.syncPersistedActivePromptState(prompt, renameFromId);
+						if (renameFromId && renameFromId !== prompt.id) {
+							postMessage({ type: 'promptSaved', prompt, previousId: renameFromId });
+							postMessage({ type: 'prompt', prompt, reason: 'save', previousId: renameFromId });
+						}
 					}
 					this._onDidSave.fire(prompt.id);
 
@@ -3673,38 +3728,38 @@ export class EditorPanelManager {
 									} catch (e: any) {
 										this.hooksOutput.appendLine(`[chat-track] recalc implementing time (fallback) error: ${e?.message || e}`);
 									}
-									}, 3000);
-								}
-
-								await this.scheduleChatSessionRename(
-									String(completion.sessionId || trackedSessionId || promptForTiming.chatSessionIds?.[0] || ''),
-									promptForTiming.id,
-									' (fallback)',
-								);
-
-								this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
-								await this.runConfiguredHooks(prompt?.hooks || [], {
-									event: 'afterChatCompleted',
-									...hookPayloadBase,
-									status: promptForTiming?.status || prompt.status,
-									report: shouldCaptureAgentFinalResponse ? (promptForTiming?.report || '') : '',
-									reportText: shouldCaptureAgentFinalResponse
-										? (chatReportText || this.reportHtmlToText(promptForTiming?.report || ''))
-										: '',
-									chatSessionId: trackedSessionId || '',
-									timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
-								}, 'afterChatCompleted');
-								try {
-									await this.chatMemoryInstructionService()?.completeChatSession(
-										prompt.promptUuid,
-										'afterChatCompleted',
-										trackedSessionId || undefined,
-									);
-								} catch (error) {
-									this.hooksOutput.appendLine(`[chat-memory] completeChatSession fallback failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
-								}
-								return;
+								}, 3000);
 							}
+
+							await this.scheduleChatSessionRename(
+								String(completion.sessionId || trackedSessionId || promptForTiming.chatSessionIds?.[0] || ''),
+								promptForTiming.id,
+								' (fallback)',
+							);
+
+							this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired via markdown fallback for prompt=${prompt.id}`);
+							await this.runConfiguredHooks(prompt?.hooks || [], {
+								event: 'afterChatCompleted',
+								...hookPayloadBase,
+								status: promptForTiming?.status || prompt.status,
+								report: shouldCaptureAgentFinalResponse ? (promptForTiming?.report || '') : '',
+								reportText: shouldCaptureAgentFinalResponse
+									? (chatReportText || this.reportHtmlToText(promptForTiming?.report || ''))
+									: '',
+								chatSessionId: trackedSessionId || '',
+								timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
+							}, 'afterChatCompleted');
+							try {
+								await this.chatMemoryInstructionService()?.completeChatSession(
+									prompt.promptUuid,
+									'afterChatCompleted',
+									trackedSessionId || undefined,
+								);
+							} catch (error) {
+								this.hooksOutput.appendLine(`[chat-memory] completeChatSession fallback failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+							}
+							return;
+						}
 
 						await this.runConfiguredHooks(prompt?.hooks || [], {
 							event: 'chatError',

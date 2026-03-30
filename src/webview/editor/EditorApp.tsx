@@ -618,13 +618,24 @@ export const EditorApp: React.FC = () => {
           }
 
           if (reason === 'ai-enrichment') {
-            // Background AI enrichment — merge only title/description from AI, keep everything else intact
-            setPrompt(prev => ({
-              ...prev,
-              title: msg.prompt.title || prev.title,
-              description: msg.prompt.description || prev.description,
-              updatedAt: msg.prompt.updatedAt || prev.updatedAt,
-            }));
+            // Background AI enrichment may also rename the prompt slug after the title changes.
+            const enrichedPrompt = {
+              ...promptRef.current,
+              id: msg.prompt.id || promptRef.current.id,
+              promptUuid: msg.prompt.promptUuid || promptRef.current.promptUuid,
+              title: msg.prompt.title || promptRef.current.title,
+              description: msg.prompt.description || promptRef.current.description,
+              updatedAt: msg.prompt.updatedAt || promptRef.current.updatedAt,
+            };
+            promptRef.current = enrichedPrompt;
+            setPrompt(enrichedPrompt);
+            const nextPromptId = (String(msg.prompt.id || '').trim() || '');
+            if (nextPromptId && nextPromptId !== '__new__' && nextPromptId !== currentPromptIdRef.current) {
+              currentPromptIdRef.current = nextPromptId;
+            }
+            if (previousPromptId && activeSaveIdRef.current === previousPromptId && nextPromptId) {
+              activeSaveIdRef.current = nextPromptId;
+            }
             // Don't touch isDirty — user's pending edits stay intact
             break;
           }

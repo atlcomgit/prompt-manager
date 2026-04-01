@@ -9,6 +9,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { CodeMapRefDiffEntry } from '../types/codemap.js';
 import type {
+	GitOverlayChangeGroup,
 	GitOverlayBranchInfo,
 	GitOverlayCommit,
 	GitOverlayFileHistoryEntry,
@@ -1320,6 +1321,37 @@ export class GitService {
 	): Promise<GitMultiProjectResult> {
 		return this.runProjectMutation(projectPaths, [projectName], async (_project, projectPath) => {
 			await this.runGitFileMutation(projectPath, ['restore', '--staged', '--', filePath]);
+		});
+	}
+
+	async discardFile(
+		projectPaths: Map<string, string>,
+		projectName: string,
+		filePath: string,
+		group: GitOverlayChangeGroup,
+		previousPath?: string,
+	): Promise<GitMultiProjectResult> {
+		const affectedPaths = previousPath && previousPath !== filePath
+			? [filePath, previousPath]
+			: [filePath];
+
+		return this.runProjectMutation(projectPaths, [projectName], async (_project, projectPath) => {
+			if (group === 'untracked') {
+				await this.runGitFileMutation(projectPath, ['clean', '-fd', '--', ...affectedPaths]);
+				return;
+			}
+
+			if (group === 'staged') {
+				await this.runGitFileMutation(projectPath, ['restore', '--staged', '--source=HEAD', '--', ...affectedPaths]);
+				return;
+			}
+
+			if (group === 'working-tree') {
+				await this.runGitFileMutation(projectPath, ['restore', '--worktree', '--source=HEAD', '--', ...affectedPaths]);
+				return;
+			}
+
+			await this.runGitFileMutation(projectPath, ['restore', '--staged', '--worktree', '--source=HEAD', '--', ...affectedPaths]);
 		});
 	}
 

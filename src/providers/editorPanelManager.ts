@@ -1266,6 +1266,20 @@ export class EditorPanelManager {
 		return false;
 	}
 
+	private async tryOpenGitDiff(uri: vscode.Uri): Promise<boolean> {
+		const commands = await vscode.commands.getCommands(true);
+		if (!commands.includes('git.openChange')) {
+			return false;
+		}
+
+		try {
+			await vscode.commands.executeCommand('git.openChange', uri);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	private async openGitOverlayFile(project: string, filePath: string, useMergeEditor: boolean): Promise<void> {
 		const uri = await this.resolveProjectFileUri(project, filePath);
 		if (useMergeEditor) {
@@ -1281,6 +1295,16 @@ export class EditorPanelManager {
 			preview: false,
 			preserveFocus: false,
 		});
+	}
+
+	private async openGitOverlayDiff(project: string, filePath: string): Promise<void> {
+		const uri = await this.resolveProjectFileUri(project, filePath);
+		const opened = await this.tryOpenGitDiff(uri);
+		if (opened) {
+			return;
+		}
+
+		await this.openGitOverlayFile(project, filePath, false);
 	}
 
 	private clearContentEditorBinding(panelKey: string): void {
@@ -4269,6 +4293,22 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'gitOverlayDiscardFile': {
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const result = await this.gitService.discardFile(
+					this.workspaceService.getWorkspaceFolderPaths(),
+					msg.project,
+					msg.filePath,
+					msg.group,
+					msg.previousPath,
+				);
+				if (result.errors.length > 0) {
+					postMessage({ type: 'error', message: this.describeGitMultiProjectResult(result, `Не удалось отменить изменения в ${msg.filePath}`) });
+				}
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, msg.projects);
+				break;
+			}
+
 			case 'gitOverlayLoadFileHistory': {
 				const history = await this.gitService.getFileHistoryPayload(this.workspaceService.getWorkspaceFolderPaths(), msg.project, msg.filePath);
 				postMessage({ type: 'gitOverlayFileHistory', history });
@@ -4278,6 +4318,15 @@ export class EditorPanelManager {
 			case 'gitOverlayOpenFile': {
 				try {
 					await this.openGitOverlayFile(msg.project, msg.filePath, false);
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+				}
+				break;
+			}
+
+			case 'gitOverlayOpenDiff': {
+				try {
+					await this.openGitOverlayDiff(msg.project, msg.filePath);
 				} catch (error) {
 					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
 				}

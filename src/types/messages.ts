@@ -3,7 +3,7 @@
  */
 
 import type { Prompt, PromptConfig, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
-import type { GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlaySnapshot } from './git.js';
+import type { GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlaySnapshot } from './git.js';
 
 // ---- Messages FROM webview TO extension ----
 
@@ -47,8 +47,10 @@ export type WebviewToExtensionMessage =
 	| { type: 'gitOverlayUnstageAll'; promptBranch: string; projects: string[]; project?: string }
 	| { type: 'gitOverlayStageFile'; promptBranch: string; projects: string[]; project: string; filePath: string }
 	| { type: 'gitOverlayUnstageFile'; promptBranch: string; projects: string[]; project: string; filePath: string }
+	| { type: 'gitOverlayDiscardFile'; promptBranch: string; projects: string[]; project: string; filePath: string; previousPath?: string; group: GitOverlayChangeGroup }
 	| { type: 'gitOverlayLoadFileHistory'; project: string; filePath: string }
 	| { type: 'gitOverlayOpenFile'; project: string; filePath: string }
+	| { type: 'gitOverlayOpenDiff'; project: string; filePath: string }
 	| { type: 'gitOverlayOpenMergeEditor'; project: string; filePath: string }
 	| { type: 'gitOverlayGenerateCommitMessage'; prompt: Prompt; project?: string; includeAllChanges?: boolean }
 	| { type: 'gitOverlayCommitStaged'; prompt: Prompt; messages: GitOverlayProjectCommitMessage[]; includeAllChanges?: boolean }

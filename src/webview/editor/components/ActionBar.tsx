@@ -6,9 +6,11 @@ interface Props {
   onShowHistory: () => void;
   onStartChat: () => void;
   onOpenChat: () => void;
+  onOpenGitFlow?: () => void;
   onMarkCompleted: () => void;
   onMarkStopped: () => void;
   showStatusActions: boolean;
+  showGitFlowAction?: boolean;
   hasChatSession: boolean;
   isChatPanelOpen: boolean;
   isDirty: boolean;
@@ -19,7 +21,7 @@ interface Props {
 }
 
 export const ActionBar: React.FC<Props> = ({
-  onSave, onShowHistory, onStartChat, onOpenChat, onMarkCompleted, onMarkStopped, showStatusActions, hasChatSession, isChatPanelOpen, isDirty, isSaving, isStartingChat, hasContent, isDraftStatus,
+  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isDirty, isSaving, isStartingChat, hasContent, isDraftStatus,
 }) => {
   const t = useT();
   const startChatDisabled = !hasContent || isStartingChat;
@@ -82,6 +84,15 @@ export const ActionBar: React.FC<Props> = ({
         {isDirty && (
           <span style={styles.unsaved}>{t('actions.unsavedChanges')}</span>
         )}
+        {showGitFlowAction && onOpenGitFlow && (
+          <button
+            style={{ ...styles.btn, ...styles.btnChat }}
+            onClick={onOpenGitFlow}
+            disabled={isSaving}
+          >
+            {t('editor.gitOverlay')}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -103,6 +114,7 @@ const styles: Record<string, React.CSSProperties> = {
   right: {
     display: 'flex',
     alignItems: 'center',
+    gap: '8px',
   },
   btn: {
     padding: '6px 16px',

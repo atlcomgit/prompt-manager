@@ -16,7 +16,7 @@ import { TimerDisplay } from './components/TimerDisplay';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
 import type { Prompt, PromptStatus } from '../../types/prompt';
-import type { GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlaySnapshot } from '../../types/git';
+import type { GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlaySnapshot } from '../../types/git';
 import { createDefaultPrompt } from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
 import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
@@ -35,6 +35,8 @@ type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' |
 type InlineNotice = { kind: 'error' | 'info'; message: string };
 
 const CHAT_START_TIMEOUT_MS = 15000;
+const EDITOR_FORM_SHELL_WIDTH_PX = 840;
+const EDITOR_FORM_CONTENT_WIDTH_PX = 800;
 
 const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
   basic: true,
@@ -178,6 +180,7 @@ export const EditorApp: React.FC = () => {
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
+  const shouldShowFooterGitFlow = prompt.status === 'completed' || prompt.status === 'report' || prompt.status === 'review';
   const startChatLockRef = useRef(false);
   const chatStartTimeoutRef = useRef<number | null>(null);
   const pendingChatStartRequestIdRef = useRef<string>('');
@@ -1340,14 +1343,14 @@ export const EditorApp: React.FC = () => {
   }, [prompt.branch, prompt.projects, t]);
 
   const handleGitOverlayPush = useCallback((branch?: string) => {
-    setGitOverlayBusyAction(t('editor.gitOverlayPushPromptBranch'));
+    setGitOverlayBusyAction('pushPromptBranch');
     vscode.postMessage({
       type: 'gitOverlayPush',
       promptBranch: prompt.branch.trim(),
       projects: prompt.projects,
       branch,
     });
-  }, [prompt.branch, prompt.projects, t]);
+  }, [prompt.branch, prompt.projects]);
 
   const handleGitOverlayStageAll = useCallback((project?: string, trackedOnly?: boolean) => {
     setGitOverlayBusyAction(trackedOnly ? t('editor.gitOverlayStageTracked') : t('editor.gitOverlayStageAll'));
@@ -1400,6 +1403,23 @@ export const EditorApp: React.FC = () => {
   const handleGitOverlayOpenFile = useCallback((project: string, filePath: string) => {
     vscode.postMessage({ type: 'gitOverlayOpenFile', project, filePath });
   }, []);
+
+  const handleGitOverlayOpenDiff = useCallback((project: string, filePath: string) => {
+    vscode.postMessage({ type: 'gitOverlayOpenDiff', project, filePath });
+  }, []);
+
+  const handleGitOverlayDiscardFile = useCallback((project: string, filePath: string, group: GitOverlayChangeGroup, previousPath?: string) => {
+    setGitOverlayBusyAction(`discardFile:${project}:${group}:${filePath}`);
+    vscode.postMessage({
+      type: 'gitOverlayDiscardFile',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      project,
+      filePath,
+      previousPath,
+      group,
+    });
+  }, [prompt.branch, prompt.projects]);
 
   const handleGitOverlayOpenMergeEditor = useCallback((project: string, filePath: string) => {
     vscode.postMessage({ type: 'gitOverlayOpenMergeEditor', project, filePath });
@@ -1891,9 +1911,6 @@ export const EditorApp: React.FC = () => {
                     placeholder={t('editor.gitBranchPlaceholder')}
                   />
                   <div style={{ display: 'flex', gap: '6px' }}>
-                    <button style={styles.linkBtn} onClick={handleOpenGitOverlay}>
-                      {t('editor.gitOverlay')}
-                    </button>
                     {prompt.projects.length > 0 && (
                       <button style={styles.linkBtn} onClick={handleShowBranches}>
                         {t('editor.showBranches')}
@@ -2374,9 +2391,11 @@ export const EditorApp: React.FC = () => {
             onShowHistory={handleShowHistory}
             onStartChat={handleStartChat}
             onOpenChat={handleOpenChat}
+            onOpenGitFlow={handleOpenGitOverlay}
             onMarkCompleted={() => handleSetStatus('completed')}
             onMarkStopped={() => handleSetStatus('stopped')}
             showStatusActions={prompt.status === 'in-progress'}
+            showGitFlowAction={shouldShowFooterGitFlow}
             hasChatSession={prompt.chatSessionIds.length > 0}
             isChatPanelOpen={isChatPanelOpen}
             isDirty={isDirty}
@@ -2396,8 +2415,11 @@ export const EditorApp: React.FC = () => {
         onClose={() => setGitOverlayOpen(false)}
         onRefresh={handleRefreshGitOverlay}
         onEnsurePromptBranch={handleGitOverlayEnsurePromptBranch}
+        onPush={handleGitOverlayPush}
         onMergePromptBranch={handleGitOverlayMergePromptBranch}
+        onDiscardFile={handleGitOverlayDiscardFile}
         onOpenFile={handleGitOverlayOpenFile}
+        onOpenDiff={handleGitOverlayOpenDiff}
         onOpenMergeEditor={handleGitOverlayOpenMergeEditor}
         onGenerateCommitMessage={handleGitOverlayGenerateCommitMessage}
         onCommitStaged={handleGitOverlayCommitStaged}
@@ -2421,6 +2443,8 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     flex: 1,
     minHeight: 0,
+    width: `${EDITOR_FORM_SHELL_WIDTH_PX}px`,
+    maxWidth: '100%',
   },
   blockContentVisible: {
     visibility: 'visible',
@@ -2433,7 +2457,7 @@ const styles: Record<string, React.CSSProperties> = {
     top: 0,
     bottom: 0,
     left: 0,
-    width: '840px',
+    width: `${EDITOR_FORM_SHELL_WIDTH_PX}px`,
     maxWidth: '100%',
     zIndex: 1000,
     display: 'flex',
@@ -2512,7 +2536,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '12px',
-    maxWidth: '800px',
+    maxWidth: `${EDITOR_FORM_CONTENT_WIDTH_PX}px`,
   },
   sectionCard: {
     border: '1px solid var(--vscode-panel-border)',

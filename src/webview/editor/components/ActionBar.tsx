@@ -1,5 +1,6 @@
 import React from 'react';
 import { useT } from '../../shared/i18n';
+import type { PromptStatus } from '../../../types/prompt';
 
 interface Props {
   onSave: () => void;
@@ -17,15 +18,18 @@ interface Props {
   isSaving: boolean;
   isStartingChat: boolean;
   hasContent: boolean;
-  isDraftStatus: boolean;
+  status: PromptStatus;
 }
 
 export const ActionBar: React.FC<Props> = ({
-  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isDirty, isSaving, isStartingChat, hasContent, isDraftStatus,
+  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isDirty, isSaving, isStartingChat, hasContent, status,
 }) => {
   const t = useT();
   const startChatDisabled = !hasContent || isStartingChat;
-  const shouldShowOpenChat = !isDraftStatus && (hasChatSession || isChatPanelOpen);
+  const canStartChat = status === 'draft' || status === 'in-progress' || status === 'stopped' || status === 'cancelled';
+  const canOpenChat = status === 'in-progress' || status === 'stopped' || status === 'cancelled';
+  const shouldShowOpenChat = canOpenChat && (hasChatSession || isChatPanelOpen);
+  const shouldShowStartChat = canStartChat && !shouldShowOpenChat;
   return (
     <div style={styles.bar}>
       <div style={styles.left}>
@@ -50,7 +54,7 @@ export const ActionBar: React.FC<Props> = ({
           <button style={{ ...styles.btn, ...styles.btnChat }} onClick={onOpenChat}>
             {t('actions.openChat')}
           </button>
-        ) : (
+        ) : shouldShowStartChat ? (
           <button
             style={{ ...styles.btn, ...styles.btnChat, ...(startChatDisabled ? styles.btnDisabled : {}) }}
             onClick={onStartChat}
@@ -66,8 +70,13 @@ export const ActionBar: React.FC<Props> = ({
               </>
             ) : t('actions.startChat')}
           </button>
-        )}
+        ) : null}
+      </div>
 
+      <div style={styles.right}>
+        {isDirty && (
+          <span style={styles.unsaved}>{t('actions.unsavedChanges')}</span>
+        )}
         {showStatusActions && (
           <>
             <button style={{ ...styles.btn, ...styles.btnSuccess }} onClick={onMarkCompleted}>
@@ -77,12 +86,6 @@ export const ActionBar: React.FC<Props> = ({
               ▣ {t('status.stopped')}
             </button>
           </>
-        )}
-      </div>
-
-      <div style={styles.right}>
-        {isDirty && (
-          <span style={styles.unsaved}>{t('actions.unsavedChanges')}</span>
         )}
         {showGitFlowAction && onOpenGitFlow && (
           <button
@@ -110,11 +113,14 @@ const styles: Record<string, React.CSSProperties> = {
   left: {
     display: 'flex',
     gap: '8px',
+    flexWrap: 'wrap',
   },
   right: {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
   },
   btn: {
     padding: '6px 16px',

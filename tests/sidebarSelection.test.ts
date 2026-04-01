@@ -22,6 +22,7 @@ function makePrompt(overrides: Partial<PromptConfig>): PromptConfig {
 		hooks: [],
 		taskNumber: '',
 		branch: '',
+		trackedBranch: '',
 		model: '',
 		chatMode: 'agent',
 		contextFiles: [],

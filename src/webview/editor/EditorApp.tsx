@@ -153,6 +153,7 @@ export const EditorApp: React.FC = () => {
   const [availableLanguages, setAvailableLanguages] = useState<SelectOption[]>([]);
   const [availableFrameworks, setAvailableFrameworks] = useState<SelectOption[]>([]);
   const [allowedBranchesSetting, setAllowedBranchesSetting] = useState<string[]>(['master', 'main', 'prod', 'develop', 'dev']);
+  const [workspaceTrackedBranchPreference, setWorkspaceTrackedBranchPreference] = useState('');
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
   const [branchesResolved, setBranchesResolved] = useState(false);
   const [showBranches, setShowBranches] = useState(false);
@@ -180,6 +181,7 @@ export const EditorApp: React.FC = () => {
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
+  const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
   const shouldShowFooterGitFlow = prompt.status === 'completed' || prompt.status === 'report' || prompt.status === 'review';
   const startChatLockRef = useRef(false);
   const chatStartTimeoutRef = useRef<number | null>(null);
@@ -257,6 +259,10 @@ export const EditorApp: React.FC = () => {
       activeSaveIdRef.current = null;
     }
   }, [clearChatStartTimeout]);
+
+  useEffect(() => {
+    setIsDescriptionExpanded(false);
+  }, [prompt.id]);
 
   const showInlineNotice = useCallback((kind: InlineNotice['kind'], message: string) => {
     const normalizedMessage = (message || '').trim();
@@ -866,6 +872,9 @@ export const EditorApp: React.FC = () => {
       case 'allowedBranches':
         setAllowedBranchesSetting(Array.isArray(msg.branches) ? msg.branches : []);
         break;
+      case 'gitOverlayTrackedBranchPreference':
+        setWorkspaceTrackedBranchPreference((msg.branch || '').trim());
+        break;
       case 'globalContext':
         setGlobalContext(msg.context || '');
         break;
@@ -1290,6 +1299,18 @@ export const EditorApp: React.FC = () => {
       projects: prompt.projects,
     });
   }, [prompt.branch, prompt.projects, t]);
+
+  const handleGitOverlayTrackedBranchChange = (trackedBranch: string) => {
+    const normalized = (trackedBranch || '').trim();
+    const currentTrackedBranch = (promptRef.current.trackedBranch || '').trim();
+
+    if (normalized !== currentTrackedBranch) {
+      updateFieldAndSaveNow('trackedBranch', normalized);
+    }
+
+    setWorkspaceTrackedBranchPreference(normalized);
+    vscode.postMessage({ type: 'saveGitOverlayTrackedBranchPreference', branch: normalized });
+  };
 
   const handleRefreshGitOverlay = useCallback((mode: 'local' | 'fetch' | 'sync' = 'local') => {
     setGitOverlayBusyAction(`refresh:${mode}`);
@@ -1837,24 +1858,50 @@ export const EditorApp: React.FC = () => {
               </div>
 
               <div style={styles.fieldRow}>
-                <TextField
-                  label={t('editor.description')}
-                  value={prompt.description}
-                  onChange={v => updateField('description', v)}
-                  placeholder={t('editor.descPlaceholder')}
-                />
-                <button
-                  style={{
-                    ...styles.aiBtn,
-                    ...((!prompt.content.trim() || isGeneratingDescription) ? styles.aiBtnDisabled : {}),
-                  }}
-                  onClick={handleGenerateDescription}
-                  title={isGeneratingDescription ? t('editor.generating') : t('editor.aiGenerate')}
-                  disabled={!prompt.content.trim() || isGeneratingDescription}
-                  aria-busy={isGeneratingDescription}
-                >
-                  {isGeneratingDescription ? <span style={styles.aiBtnSpinner} aria-hidden="true" /> : '✨'}
-                </button>
+                <div style={styles.collapsibleFieldWrap}>
+                  <button
+                    type="button"
+                    style={styles.collapsibleFieldToggle}
+                    onClick={() => setIsDescriptionExpanded(prev => !prev)}
+                    aria-expanded={isDescriptionExpanded}
+                  >
+                    <span style={styles.collapsibleFieldToggleLeft}>
+                      <span style={styles.sectionArrow}>{isDescriptionExpanded ? '▾' : '▸'}</span>
+                      <span style={styles.label}>{t('editor.description')}</span>
+                    </span>
+                    {!isDescriptionExpanded ? (
+                      <span style={styles.collapsibleFieldSummary}>
+                        {prompt.description.trim() ? toShortText(prompt.description.trim(), 72) : 'Пусто'}
+                      </span>
+                    ) : null}
+                  </button>
+
+                  {isDescriptionExpanded ? (
+                    <div style={styles.fieldRow}>
+                      <div style={styles.fieldFlexFill}>
+                        <input
+                          type="text"
+                          value={prompt.description}
+                          onChange={e => updateField('description', e.target.value)}
+                          placeholder={t('editor.descPlaceholder')}
+                          style={styles.textInput}
+                        />
+                      </div>
+                      <button
+                        style={{
+                          ...styles.aiBtn,
+                          ...((!prompt.content.trim() || isGeneratingDescription) ? styles.aiBtnDisabled : {}),
+                        }}
+                        onClick={handleGenerateDescription}
+                        title={isGeneratingDescription ? t('editor.generating') : t('editor.aiGenerate')}
+                        disabled={!prompt.content.trim() || isGeneratingDescription}
+                        aria-busy={isGeneratingDescription}
+                      >
+                        {isGeneratingDescription ? <span style={styles.aiBtnSpinner} aria-hidden="true" /> : '✨'}
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
               </div>
 
               <StatusSelect
@@ -2197,36 +2244,38 @@ export const EditorApp: React.FC = () => {
 
           {renderSection('agent', 'Агент', agentSummary, (
             <>
-              <div style={styles.field}>
-                <label style={styles.label}>{t('editor.aiModel')}</label>
-                <select
-                  value={prompt.model}
-                  onChange={e => updateFieldAndSaveNow('model', e.target.value)}
-                  style={styles.select}
-                >
-                  <option value="">{t('common.auto')}</option>
-                  {modelOptions.map(m => (
-                    <option key={m.id} value={m.id}>{m.name}</option>
-                  ))}
-                </select>
-              </div>
+              <div style={styles.agentInlineRow}>
+                <div style={{ ...styles.field, ...styles.agentFieldModel }}>
+                  <label style={styles.label}>{t('editor.aiModel')}</label>
+                  <select
+                    value={prompt.model}
+                    onChange={e => updateFieldAndSaveNow('model', e.target.value)}
+                    style={{ ...styles.select, ...styles.agentModelSelect }}
+                  >
+                    <option value="">{t('common.auto')}</option>
+                    {modelOptions.map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                </div>
 
-              <div style={styles.field}>
-                <label style={styles.label}>{t('editor.chatMode')}</label>
-                <div style={styles.toggleGroup}>
-                  {(['agent', 'plan'] as const).map(mode => (
-                    <button
-                      key={mode}
-                      style={{
-                        ...styles.toggleBtn,
-                        ...(prompt.chatMode === mode ? styles.toggleBtnActive : {}),
-                      }}
-                      onClick={() => updateFieldAndSaveNow('chatMode', mode)}
-                      title={mode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
-                    >
-                      {mode === 'agent' ? `🤖 ${t('editor.chatModeAgent')}` : `📋 ${t('editor.chatModePlan')}`}
-                    </button>
-                  ))}
+                <div style={{ ...styles.field, ...styles.agentFieldMode }}>
+                  <label style={styles.label}>{t('editor.chatMode')}</label>
+                  <div style={styles.toggleGroup}>
+                    {(['agent', 'plan'] as const).map(mode => (
+                      <button
+                        key={mode}
+                        style={{
+                          ...styles.toggleBtn,
+                          ...(prompt.chatMode === mode ? styles.toggleBtnActive : {}),
+                        }}
+                        onClick={() => updateFieldAndSaveNow('chatMode', mode)}
+                        title={mode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
+                      >
+                        {mode === 'agent' ? `🤖 ${t('editor.chatModeAgent')}` : `📋 ${t('editor.chatModePlan')}`}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             </>
@@ -2402,7 +2451,7 @@ export const EditorApp: React.FC = () => {
             isSaving={isSaving}
             isStartingChat={isStartingChat}
             hasContent={!!prompt.content}
-            isDraftStatus={prompt.status === 'draft'}
+            status={prompt.status}
           />
         </div>
       </div>
@@ -2412,6 +2461,7 @@ export const EditorApp: React.FC = () => {
         snapshot={gitOverlaySnapshot}
         commitMessages={gitOverlayCommitMessages}
         busyAction={gitOverlayBusyAction}
+        preferredTrackedBranch={(prompt.trackedBranch || '').trim() || workspaceTrackedBranchPreference}
         onClose={() => setGitOverlayOpen(false)}
         onRefresh={handleRefreshGitOverlay}
         onEnsurePromptBranch={handleGitOverlayEnsurePromptBranch}
@@ -2424,6 +2474,7 @@ export const EditorApp: React.FC = () => {
         onGenerateCommitMessage={handleGitOverlayGenerateCommitMessage}
         onCommitStaged={handleGitOverlayCommitStaged}
         onCommitMessageChange={handleGitOverlayCommitMessageChange}
+        onTrackedBranchChange={handleGitOverlayTrackedBranchChange}
         t={t}
       />
     </div>
@@ -2647,11 +2698,26 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     gap: '4px',
   },
+  fieldFlexFill: {
+    flex: 1,
+  },
   label: {
     fontSize: '12px',
     fontWeight: 500,
     color: 'var(--vscode-foreground)',
     marginBottom: '2px',
+  },
+  textInput: {
+    width: '100%',
+    padding: '6px 8px',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
+    border: '1px solid var(--vscode-input-border, transparent)',
+    borderRadius: '4px',
+    fontSize: '13px',
+    fontFamily: 'var(--vscode-font-family)',
+    boxSizing: 'border-box',
+    outline: 'none',
   },
   select: {
     padding: '6px 8px',
@@ -2661,6 +2727,40 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '4px',
     fontSize: '13px',
     fontFamily: 'var(--vscode-font-family)',
+  },
+  collapsibleFieldWrap: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    flex: 1,
+  },
+  collapsibleFieldToggle: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+    width: '100%',
+    padding: '0',
+    border: 'none',
+    background: 'transparent',
+    color: 'var(--vscode-foreground)',
+    cursor: 'pointer',
+    fontFamily: 'var(--vscode-font-family)',
+    textAlign: 'left',
+  },
+  collapsibleFieldToggleLeft: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    minWidth: 0,
+  },
+  collapsibleFieldSummary: {
+    fontSize: '11px',
+    color: 'var(--vscode-descriptionForeground)',
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
   },
   toggleGroup: {
     display: 'flex',
@@ -2695,6 +2795,23 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'grid',
     gridTemplateColumns: '1fr 1fr',
     gap: '12px',
+  },
+  agentInlineRow: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '12px',
+    alignItems: 'flex-start',
+  },
+  agentFieldModel: {
+    flex: '1 1 200px',
+    minWidth: '200px',
+  },
+  agentFieldMode: {
+    flex: '1 1 260px',
+    minWidth: '260px',
+  },
+  agentModelSelect: {
+    minWidth: '200px',
   },
   linkBtn: {
     background: 'none',

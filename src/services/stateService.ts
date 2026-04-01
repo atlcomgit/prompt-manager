@@ -22,6 +22,8 @@ const STARTUP_EDITOR_OPEN_KEY = 'promptManager.startup.editorOpen';
 const STARTUP_EDITOR_PROMPT_ID_KEY = 'promptManager.startup.editorPromptId';
 
 export class StateService {
+	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
+
 	constructor(private readonly context: vscode.ExtensionContext) { }
 
 	private getPreferredWorkspaceStateDbPath(): string | null {
@@ -706,6 +708,18 @@ export class StateService {
 	/** Save global agent context */
 	async saveGlobalAgentContext(context: string): Promise<void> {
 		await this.context.workspaceState.update(GLOBAL_AGENT_CONTEXT_KEY, context);
+	}
+
+	getGitOverlayTrackedBranchPreference(): string {
+		return (this.context.workspaceState.get<string>(StateService.GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY) || '').trim();
+	}
+
+	async saveGitOverlayTrackedBranchPreference(branch: string): Promise<void> {
+		const normalized = (branch || '').trim();
+		await this.context.workspaceState.update(
+			StateService.GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY,
+			normalized || undefined,
+		);
 	}
 
 	/** Generic get */

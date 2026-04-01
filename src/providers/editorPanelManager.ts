@@ -1168,6 +1168,10 @@ export class EditorPanelManager {
 		return this.getAllowedBranchesSetting();
 	}
 
+	private getGitOverlayTrackedBranchPreference(): string {
+		return this.stateService.getGitOverlayTrackedBranchPreference();
+	}
+
 	private resolveGitOverlayProjects(requestedProjects: string[], currentPrompt: Prompt): string[] {
 		const normalizedRequested = (requestedProjects || []).map(project => project.trim()).filter(Boolean);
 		if (normalizedRequested.length > 0) {
@@ -2882,6 +2886,7 @@ export class EditorPanelManager {
 				postMessage({ type: 'availableMcpTools', tools: mcpTools });
 				postMessage({ type: 'availableHooks', hooks });
 				postMessage({ type: 'allowedBranches', branches: this.getAllowedBranchesSetting() });
+				postMessage({ type: 'gitOverlayTrackedBranchPreference', branch: this.getGitOverlayTrackedBranchPreference() });
 				postMessage(availableLanguageAndFrameworkMessages.languagesMessage);
 				postMessage(availableLanguageAndFrameworkMessages.frameworksMessage);
 				postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'open' });
@@ -4566,6 +4571,11 @@ export class EditorPanelManager {
 				} catch {
 					// keep UI responsive even if file/settings sync fails
 				}
+				break;
+			}
+
+			case 'saveGitOverlayTrackedBranchPreference': {
+				await this.stateService.saveGitOverlayTrackedBranchPreference(msg.branch);
 				break;
 			}
 

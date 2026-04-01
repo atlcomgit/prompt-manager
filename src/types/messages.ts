@@ -38,6 +38,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'getBranches'; projects: string[] }
 	| { type: 'openGitOverlay'; promptBranch: string; projects: string[] }
 	| { type: 'refreshGitOverlay'; promptBranch: string; projects: string[]; mode?: 'local' | 'fetch' | 'sync' }
+	| { type: 'saveGitOverlayTrackedBranchPreference'; branch: string }
 	| { type: 'gitOverlaySwitchBranch'; promptBranch: string; projects: string[]; branch: string }
 	| { type: 'gitOverlayEnsurePromptBranch'; promptBranch: string; projects: string[]; trackedBranch: string }
 	| { type: 'gitOverlayMergePromptBranch'; promptBranch: string; projects: string[]; trackedBranch: string; stayOnTrackedBranch?: boolean }
@@ -121,6 +122,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'inlineSuggestions'; suggestions: string[] }
 	| { type: 'statistics'; data: PromptStatistics }
 	| { type: 'globalContext'; context: string }
+	| { type: 'gitOverlayTrackedBranchPreference'; branch: string }
 	| { type: 'availableLanguages'; options: Array<{ id: string; name: string }> }
 	| { type: 'availableFrameworks'; options: Array<{ id: string; name: string }> }
 	| { type: 'promptSaving'; id: string; saving: boolean }

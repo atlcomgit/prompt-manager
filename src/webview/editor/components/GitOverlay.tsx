@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 
 import type {
@@ -13,6 +13,7 @@ type Props = {
 	snapshot: GitOverlaySnapshot | null;
 	commitMessages: Record<string, string>;
 	busyAction: string | null;
+	preferredTrackedBranch?: string;
 	onClose: () => void;
 	onRefresh: (mode?: 'local' | 'fetch' | 'sync') => void;
 	onEnsurePromptBranch: (trackedBranch: string) => void;
@@ -25,6 +26,7 @@ type Props = {
 	onGenerateCommitMessage: (project?: string) => void;
 	onCommitStaged: (messages: GitOverlayProjectCommitMessage[]) => void;
 	onCommitMessageChange: (project: string, value: string) => void;
+	onTrackedBranchChange?: (trackedBranch: string) => void;
 	t: (key: string) => string;
 };
 
@@ -246,6 +248,7 @@ export const GitOverlay: React.FC<Props> = ({
 	snapshot,
 	commitMessages,
 	busyAction,
+	preferredTrackedBranch,
 	onClose,
 	onRefresh,
 	onEnsurePromptBranch,
@@ -258,12 +261,14 @@ export const GitOverlay: React.FC<Props> = ({
 	onGenerateCommitMessage,
 	onCommitStaged,
 	onCommitMessageChange,
+	onTrackedBranchChange,
 	t,
 }) => {
 	const [selectedTrackedBranch, setSelectedTrackedBranch] = useState('');
 	const [stayOnTrackedBranch, setStayOnTrackedBranch] = useState(true);
 	const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
 	const [collapsedSections, setCollapsedSections] = useState<Partial<Record<SectionKey, boolean>>>({});
+	const userSelectedTrackedBranchRef = useRef(false);
 
 	const trackedBranchOptions = useMemo(() => buildTrackedBranchOptions(snapshot), [snapshot]);
 	const promptBranch = (snapshot?.promptBranch || '').trim();
@@ -380,16 +385,38 @@ export const GitOverlay: React.FC<Props> = ({
 	}, [open, onClose]);
 
 	useEffect(() => {
+		if (!open) {
+			userSelectedTrackedBranchRef.current = false;
+		}
+	}, [open]);
+
+	const handleTrackedBranchSelection = useCallback((trackedBranch: string) => {
+		userSelectedTrackedBranchRef.current = true;
+		setSelectedTrackedBranch(trackedBranch);
+		onTrackedBranchChange?.(trackedBranch);
+	}, [onTrackedBranchChange]);
+
+	useEffect(() => {
 		if (trackedBranchOptions.length === 0) {
 			setSelectedTrackedBranch('');
 			return;
 		}
 
+		const normalizedPreferredTrackedBranch = (preferredTrackedBranch || '').trim();
+		const preferredSelection = normalizedPreferredTrackedBranch && trackedBranchOptions.includes(normalizedPreferredTrackedBranch)
+			? normalizedPreferredTrackedBranch
+			: '';
 		const currentTrackedBranch = availableProjects.find(project => trackedBranchOptions.includes(project.currentBranch))?.currentBranch;
-		if (!selectedTrackedBranch || !trackedBranchOptions.includes(selectedTrackedBranch)) {
-			setSelectedTrackedBranch(currentTrackedBranch || trackedBranchOptions[0]);
+		const nextSelection = preferredSelection || currentTrackedBranch || trackedBranchOptions[0];
+		const hasValidSelection = trackedBranchOptions.includes(selectedTrackedBranch);
+		const shouldApplyPreferredSelection = Boolean(preferredSelection)
+			&& !userSelectedTrackedBranchRef.current
+			&& selectedTrackedBranch !== preferredSelection;
+
+		if (!hasValidSelection || shouldApplyPreferredSelection) {
+			setSelectedTrackedBranch(nextSelection);
 		}
-	}, [availableProjects, selectedTrackedBranch, trackedBranchOptions]);
+	}, [availableProjects, preferredTrackedBranch, selectedTrackedBranch, trackedBranchOptions]);
 
 	useEffect(() => {
 		if (!snapshot) {
@@ -515,7 +542,7 @@ export const GitOverlay: React.FC<Props> = ({
 												...(!selectedTrackedBranch ? styles.errorField : null),
 											}}
 											value={selectedTrackedBranch}
-											onChange={(event) => setSelectedTrackedBranch(event.target.value)}
+											onChange={(event) => handleTrackedBranchSelection(event.target.value)}
 										>
 											<option value="">{t('editor.gitOverlayTrackedBranchMissing')}</option>
 											{trackedBranchOptions.map(branch => (

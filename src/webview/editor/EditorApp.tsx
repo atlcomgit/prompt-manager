@@ -154,6 +154,7 @@ export const EditorApp: React.FC = () => {
   const [availableFrameworks, setAvailableFrameworks] = useState<SelectOption[]>([]);
   const [allowedBranchesSetting, setAllowedBranchesSetting] = useState<string[]>(['master', 'main', 'prod', 'develop', 'dev']);
   const [workspaceTrackedBranchPreference, setWorkspaceTrackedBranchPreference] = useState('');
+  const [pageWidth, setPageWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : EDITOR_FORM_SHELL_WIDTH_PX));
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
   const [branchesResolved, setBranchesResolved] = useState(false);
   const [showBranches, setShowBranches] = useState(false);
@@ -183,6 +184,7 @@ export const EditorApp: React.FC = () => {
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
   const shouldShowFooterGitFlow = prompt.status === 'completed' || prompt.status === 'report' || prompt.status === 'review';
+  const shouldDockGitOverlaySecondHalf = pageWidth >= EDITOR_FORM_SHELL_WIDTH_PX * 2;
   const startChatLockRef = useRef(false);
   const chatStartTimeoutRef = useRef<number | null>(null);
   const pendingChatStartRequestIdRef = useRef<string>('');
@@ -263,6 +265,14 @@ export const EditorApp: React.FC = () => {
   useEffect(() => {
     setIsDescriptionExpanded(false);
   }, [prompt.id]);
+
+  useEffect(() => {
+    const handleResize = () => setPageWidth(window.innerWidth);
+
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   const showInlineNotice = useCallback((kind: InlineNotice['kind'], message: string) => {
     const normalizedMessage = (message || '').trim();
@@ -2461,6 +2471,7 @@ export const EditorApp: React.FC = () => {
         snapshot={gitOverlaySnapshot}
         commitMessages={gitOverlayCommitMessages}
         busyAction={gitOverlayBusyAction}
+        dockToSecondHalf={shouldDockGitOverlaySecondHalf}
         preferredTrackedBranch={(prompt.trackedBranch || '').trim() || workspaceTrackedBranchPreference}
         onClose={() => setGitOverlayOpen(false)}
         onRefresh={handleRefreshGitOverlay}

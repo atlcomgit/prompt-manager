@@ -13,6 +13,7 @@ type Props = {
 	snapshot: GitOverlaySnapshot | null;
 	commitMessages: Record<string, string>;
 	busyAction: string | null;
+	dockToSecondHalf?: boolean;
 	preferredTrackedBranch?: string;
 	onClose: () => void;
 	onRefresh: (mode?: 'local' | 'fetch' | 'sync') => void;
@@ -248,6 +249,7 @@ export const GitOverlay: React.FC<Props> = ({
 	snapshot,
 	commitMessages,
 	busyAction,
+	dockToSecondHalf = false,
 	preferredTrackedBranch,
 	onClose,
 	onRefresh,
@@ -482,6 +484,12 @@ export const GitOverlay: React.FC<Props> = ({
 
 	return (
 		<div style={styles.backdrop} onClick={onClose}>
+			<div
+				style={{
+					...styles.panelViewport,
+					...(dockToSecondHalf ? styles.panelViewportSecondHalf : null),
+				}}
+			>
 			<div style={styles.dialog} onClick={(event) => event.stopPropagation()}>
 				<div style={styles.header}>
 					<div style={styles.headerInfo}>
@@ -871,6 +879,7 @@ export const GitOverlay: React.FC<Props> = ({
 					</div>
 				)}
 			</div>
+			</div>
 		</div>
 	);
 };
@@ -881,15 +890,29 @@ const styles: Record<string, CSSProperties> = {
 		top: 0,
 		bottom: 0,
 		left: 0,
-		width: '840px',
+		right: 0,
+		width: '100%',
 		maxWidth: '100%',
 		zIndex: 1000,
+		background: 'rgba(0, 0, 0, 0.38)',
+	},
+	panelViewport: {
+		position: 'absolute',
+		top: 0,
+		bottom: 0,
+		left: 0,
+		width: '840px',
+		maxWidth: '100%',
 		padding: '20px 16px',
 		boxSizing: 'border-box',
-		background: 'rgba(0, 0, 0, 0.38)',
 		display: 'flex',
 		alignItems: 'center',
 		justifyContent: 'center',
+	},
+	panelViewportSecondHalf: {
+		left: '840px',
+		width: 'calc(100% - 840px)',
+		maxWidth: 'calc(100% - 840px)',
 	},
 	dialog: {
 		width: 'min(1040px, 100%)',

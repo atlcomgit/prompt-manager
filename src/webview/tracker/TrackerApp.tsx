@@ -4,6 +4,7 @@ import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
 import type { Prompt, PromptConfig, PromptStatus } from '../../types/prompt';
 import { PromptDetailOverlay } from './components/PromptDetailOverlay';
+import { trackerButtonStyles } from './trackerButtonStyles';
 
 const vscode = getVsCodeApi();
 
@@ -73,6 +74,12 @@ export const TrackerApp: React.FC = () => {
         openPromptTimerRef.current = null;
       }
     };
+  }, []);
+
+  const resetDragInteraction = useCallback(() => {
+    setDraggingId(null);
+    setDragOverStatus(null);
+    suppressCardClickRef.current = false;
   }, []);
 
   const handleOpenPrompt = useCallback((promptId: string) => {
@@ -210,8 +217,7 @@ export const TrackerApp: React.FC = () => {
   const onDropToColumn = (status: PromptStatus) => (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     const promptId = event.dataTransfer.getData('text/prompt-id');
-    setDragOverStatus(null);
-    setDraggingId(null);
+    resetDragInteraction();
     if (!promptId) {
       return;
     }
@@ -276,11 +282,7 @@ export const TrackerApp: React.FC = () => {
                             event.dataTransfer.setData('text/prompt-id', prompt.id);
                           }}
                           onDragEnd={() => {
-                            setDraggingId(null);
-                            setDragOverStatus(null);
-                            window.setTimeout(() => {
-                              suppressCardClickRef.current = false;
-                            }, 0);
+                          resetDragInteraction();
                           }}
                           onClick={() => openPromptOverlay(prompt.id)}
                           style={{
@@ -349,14 +351,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
   },
   createBtn: {
+    ...trackerButtonStyles.primary,
     padding: '6px 10px',
-    border: 'none',
-    borderRadius: '6px',
-    cursor: 'pointer',
-    background: 'var(--vscode-button-background)',
-    color: 'var(--vscode-button-foreground)',
-    fontSize: '12px',
-    fontWeight: 600,
   },
   loading: {
     padding: '24px',
@@ -487,9 +483,10 @@ const styles: Record<string, React.CSSProperties> = {
   cardMetaChip: {
     maxWidth: '100%',
     padding: '4px 8px',
-    borderRadius: '999px',
-    background: 'color-mix(in srgb, var(--vscode-button-secondaryBackground) 88%, transparent)',
-    color: 'var(--vscode-foreground)',
+    borderRadius: '2px',
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground, var(--vscode-foreground))',
     fontSize: '11px',
     fontWeight: 600,
     wordBreak: 'break-word',

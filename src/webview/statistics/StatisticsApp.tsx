@@ -8,9 +8,10 @@ import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
 import { DateRangeCalendar } from './DateRangeCalendar';
 import type { PromptStatistics, PromptStatus } from '../../types/prompt';
-import { calculateStatisticsExportTargetHours } from '../../utils/statisticsExport';
 
 const vscode = getVsCodeApi();
+const DEFAULT_EXPORT_HOURS = 165;
+const DEFAULT_EXPORT_HOURLY_RATE = 1743;
 
 /** Format milliseconds as human-readable duration */
 function formatDuration(ms: number): string {
@@ -44,6 +45,17 @@ interface ExportRow {
   hours: number;
   status?: PromptStatus;
   reportSummary?: string;
+}
+
+function parseExportHours(value: string): number {
+  const parsed = Number.parseInt(value.trim(), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_EXPORT_HOURS;
+}
+
+function parseExportHourlyRate(value: string): number {
+  const normalized = value.trim().replace(',', '.');
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_EXPORT_HOURLY_RATE;
 }
 
 function buildScaledExportRows(
@@ -130,6 +142,8 @@ export const StatisticsApp: React.FC = () => {
   /** Flag: show only prompts with ≥5 min total time in daily-time.json */
   const [minFiveMin, setMinFiveMin] = useState(false);
   const [includeReportInExport, setIncludeReportInExport] = useState(false);
+  const [exportHoursInput, setExportHoursInput] = useState<string>(String(DEFAULT_EXPORT_HOURS));
+  const [hourlyRateInput, setHourlyRateInput] = useState<string>(String(DEFAULT_EXPORT_HOURLY_RATE));
 
   // --- Table sorting (multi-column) ---
   const [sortCriteria, setSortCriteria] = useState<SortCriterion[]>([]);
@@ -253,7 +267,8 @@ export const StatisticsApp: React.FC = () => {
     });
   }, [stats?.reportRows, sortCriteria]);
 
-  const exportTargetHours = useMemo(() => calculateStatisticsExportTargetHours({ dateFrom, dateTo }), [dateFrom, dateTo]);
+  const exportTargetHours = useMemo(() => parseExportHours(exportHoursInput), [exportHoursInput]);
+  const exportHourlyRate = useMemo(() => parseExportHourlyRate(hourlyRateInput), [hourlyRateInput]);
 
   const exportRows = useMemo(
     () => buildScaledExportRows(sortedReportRows, exportTargetHours),
@@ -262,8 +277,14 @@ export const StatisticsApp: React.FC = () => {
 
   const handleExport = useCallback((format: ExportFormat) => {
     if (exportRows.length === 0) return;
-    vscode.postMessage({ type: 'exportReport', format, rows: exportRows, includeReport: includeReportInExport });
-  }, [exportRows, includeReportInExport]);
+    vscode.postMessage({
+      type: 'exportReport',
+      format,
+      rows: exportRows,
+      hourlyRate: exportHourlyRate,
+      includeReport: includeReportInExport,
+    });
+  }, [exportHourlyRate, exportRows, includeReportInExport]);
 
   /** Status labels map */
   const statusLabels: Record<string, string> = {
@@ -431,9 +452,9 @@ export const StatisticsApp: React.FC = () => {
         {/* Brief report table with sortable headers */}
         {stats.reportRows && stats.reportRows.length > 0 && (
           <div style={styles.section}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={styles.sectionTitle}>{t('stats.briefReport')}</h3>
-              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+            <h3 style={styles.sectionTitle}>{t('stats.briefReport')}</h3>
+            <div style={styles.reportControlsPanel}>
+              <div style={styles.reportControlsLeft}>
                 {sortCriteria.length > 0 && (
                   <button
                     style={styles.resetSortBtn}
@@ -443,6 +464,28 @@ export const StatisticsApp: React.FC = () => {
                     ✕ {t('stats.resetSort')}
                   </button>
                 )}
+                <label style={styles.exportField}>
+                  <span style={styles.exportFieldLabel}>{t('stats.exportHoursField')}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={exportHoursInput}
+                    onChange={e => setExportHoursInput(e.target.value)}
+                    style={styles.exportInput}
+                  />
+                </label>
+                <label style={styles.exportField}>
+                  <span style={styles.exportFieldLabel}>{t('stats.exportRateField')}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.01}
+                    value={hourlyRateInput}
+                    onChange={e => setHourlyRateInput(e.target.value)}
+                    style={styles.exportInput}
+                  />
+                </label>
                 <label style={styles.checkboxLabel} title={t('stats.exportWithReportTooltip')}>
                   <input
                     type="checkbox"
@@ -452,6 +495,8 @@ export const StatisticsApp: React.FC = () => {
                   />
                   {t('stats.exportWithReport')}
                 </label>
+              </div>
+              <div style={styles.reportControlsRight}>
                 <button
                   style={styles.exportBtn}
                   onClick={() => handleExport('html')}
@@ -582,6 +627,56 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '11px',
     fontFamily: 'var(--vscode-font-family)',
     whiteSpace: 'nowrap',
+  },
+  reportControlsPanel: {
+    display: 'flex',
+    gap: '12px',
+    alignItems: 'flex-end',
+    flexWrap: 'wrap',
+    marginBottom: '12px',
+    padding: '12px',
+    background: 'var(--vscode-input-background)',
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '6px',
+  },
+  reportControlsLeft: {
+    display: 'flex',
+    gap: '8px',
+    alignItems: 'flex-end',
+    flexWrap: 'wrap',
+    flex: '1 1 520px',
+  },
+  reportControlsRight: {
+    display: 'flex',
+    gap: '8px',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    flexWrap: 'wrap',
+    marginLeft: 'auto',
+  },
+  exportField: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    minWidth: '120px',
+  },
+  exportFieldLabel: {
+    fontSize: '11px',
+    color: 'var(--vscode-descriptionForeground)',
+    whiteSpace: 'nowrap',
+  },
+  exportInput: {
+    display: 'block',
+    width: '100%',
+    maxWidth: '140px',
+    padding: '4px 8px',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground)',
+    border: '1px solid var(--vscode-input-border)',
+    borderRadius: '3px',
+    fontSize: '12px',
+    fontFamily: 'var(--vscode-font-family)',
+    boxSizing: 'border-box',
   },
   exportBtn: {
     padding: '6px 12px',

@@ -9,8 +9,15 @@ export type StatisticsExportStatus = 'draft' | 'in-progress' | 'stopped' | 'canc
 export interface StatisticsMarkdownExportRow {
 	taskNumber: string;
 	title: string;
+	hours: number;
 	reportSummary?: string;
 	status?: StatisticsExportStatus;
+}
+
+export interface StatisticsWordExportRow {
+	taskNumber: string;
+	title: string;
+	hours: number;
 }
 
 function parseDateOnly(value?: string | null): Date | null {
@@ -89,6 +96,73 @@ export function calculateStatisticsExportTargetHours({
 	}
 
 	return countWorkingDays(start, end) * 8;
+}
+
+function resolveStatisticsLocale(locale: string): string {
+	return locale.toLowerCase().startsWith('ru') ? 'ru-RU' : 'en-US';
+}
+
+export function formatStatisticsExportNumber(value: number, locale: string): string {
+	const normalized = Number.isFinite(value) ? value : 0;
+	const hasFraction = Math.abs(normalized % 1) > 0.000001;
+	return new Intl.NumberFormat(resolveStatisticsLocale(locale), {
+		minimumFractionDigits: hasFraction ? 2 : 0,
+		maximumFractionDigits: 2,
+	}).format(normalized);
+}
+
+function formatStatisticsWordNumber(value: number, locale: string): string {
+	const normalized = Number.isFinite(value) ? value : 0;
+	const hasFraction = Math.abs(normalized % 1) > 0.000001;
+	return new Intl.NumberFormat(resolveStatisticsLocale(locale), {
+		useGrouping: false,
+		minimumFractionDigits: hasFraction ? 2 : 0,
+		maximumFractionDigits: 2,
+	}).format(normalized);
+}
+
+function sanitizeStatisticsWordCell(value: string): string {
+	return (value || '')
+		.replace(/\t+/g, ' ')
+		.replace(/\r?\n+/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
+export function buildStatisticsWordSection(
+	rows: StatisticsWordExportRow[],
+	hourlyRate: number,
+	locale: string,
+): string {
+	const isRu = locale.toLowerCase().startsWith('ru');
+	const taskFallback = isRu ? '—' : '-';
+	const unitLabel = isRu ? 'ч.' : 'h.';
+	const headers = isRu
+		? ['№', 'Номер задачи: Название', 'Количество часов', 'ч.', 'Стоимость часа', 'Сумма']
+		: ['#', 'Task number: Title', 'Hours', 'h.', 'Hourly rate', 'Amount'];
+	const safeHourlyRate = Number.isFinite(hourlyRate) ? hourlyRate : 0;
+	const lines = rows.map((row, index) => {
+		const taskNumber = sanitizeStatisticsWordCell(row.taskNumber || '') || taskFallback;
+		const title = sanitizeStatisticsWordCell(row.title || '') || taskFallback;
+		const hours = Number.isFinite(row.hours) ? row.hours : 0;
+		const amount = hours * safeHourlyRate;
+
+		return [
+			String(index + 1),
+			`${taskNumber}: ${title}`,
+			formatStatisticsWordNumber(hours, locale),
+			unitLabel,
+			formatStatisticsWordNumber(safeHourlyRate, locale),
+			formatStatisticsWordNumber(amount, locale),
+		].join('\t');
+	});
+
+	return [
+		'## Word',
+		'',
+		headers.join('\t'),
+		...lines,
+	].join('\n');
 }
 
 function decodeBasicHtmlEntities(value: string): string {
@@ -172,17 +246,24 @@ export function getStatisticsStatusPercent(status?: StatisticsExportStatus): num
 export function buildStatisticsMarkdownWithReport(
 	rows: StatisticsMarkdownExportRow[],
 	totalHours: number,
+	hourlyRate: number,
 	locale: string,
 ): string {
 	const isRu = locale.toLowerCase().startsWith('ru');
 	const title = isRu ? '# Отчёт по статистике' : '# Statistics Report';
 	const generatedLabel = isRu ? 'Сформировано' : 'Generated';
 	const totalLabel = isRu ? 'Итого часов' : 'Total hours';
+	const hourlyRateLabel = isRu ? 'Ставка часа' : 'Hourly rate';
+	const totalAmountLabel = isRu ? 'Итоговая сумма' : 'Total amount';
 	const taskNumberLabel = isRu ? 'Номер задачи' : 'Task number';
 	const nameLabel = isRu ? 'Название' : 'Title';
 	const summaryLabel = isRu ? 'Что сделано' : 'What was done';
 	const statusLabel = isRu ? 'Статус' : 'Status';
+	const hoursLabel = isRu ? 'Часы' : 'Hours';
+	const amountLabel = isRu ? 'Сумма' : 'Amount';
 	const emptyValue = isRu ? '—' : '-';
+	const totalAmount = rows.reduce((sum, row) => sum + ((Number.isFinite(row.hours) ? row.hours : 0) * (Number.isFinite(hourlyRate) ? hourlyRate : 0)), 0);
+	const wordSection = buildStatisticsWordSection(rows, hourlyRate, locale);
 	const formattedDate = new Date().toLocaleString(isRu ? 'ru-RU' : 'en-US', {
 		year: 'numeric',
 		month: '2-digit',
@@ -196,10 +277,14 @@ export function buildStatisticsMarkdownWithReport(
 		const taskTitle = (row.title || '').trim() || emptyValue;
 		const reportSummary = (row.reportSummary || '').trim() || emptyValue;
 		const statusPercent = getStatisticsStatusPercent(row.status);
+		const hours = formatStatisticsExportNumber(row.hours, locale);
+		const amount = formatStatisticsExportNumber(row.hours * hourlyRate, locale);
 
 		return [
 			`${taskNumberLabel}: ${taskNumber}`,
 			`${nameLabel}: ${taskTitle}`,
+			`${hoursLabel}: ${hours}`,
+			`${amountLabel}: ${amount}`,
 			`${summaryLabel}: ${reportSummary}`,
 			`${statusLabel}: ${statusPercent}%`,
 		].join('\n');
@@ -209,9 +294,13 @@ export function buildStatisticsMarkdownWithReport(
 		title,
 		'',
 		`- ${generatedLabel}: ${formattedDate}`,
-		`- ${totalLabel}: ${totalHours}`,
+		`- ${totalLabel}: ${formatStatisticsExportNumber(totalHours, locale)}`,
+		`- ${hourlyRateLabel}: ${formatStatisticsExportNumber(hourlyRate, locale)}`,
+		`- ${totalAmountLabel}: ${formatStatisticsExportNumber(totalAmount, locale)}`,
 		'',
 		blocks.join('\n\n'),
+		'',
+		wordSection,
 		'',
 	].join('\n');
 }

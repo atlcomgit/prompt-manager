@@ -6,9 +6,10 @@ import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import type { StorageService } from '../services/storageService.js';
 import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from '../types/messages.js';
-import { buildStatisticsMarkdownWithReport } from '../utils/statisticsExport.js';
+import { buildStatisticsMarkdownWithReport, buildStatisticsWordSection, formatStatisticsExportNumber } from '../utils/statisticsExport.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
+const DEFAULT_EXPORT_HOURLY_RATE = 1743;
 
 interface ExportReportRow {
 	taskNumber: string;
@@ -27,17 +28,39 @@ function escapeHtml(value: string): string {
 		.replace(/'/g, '&#39;');
 }
 
-function buildExportHtml(rows: ExportReportRow[], totalHours: number, locale: string, includeReport: boolean): string {
+function resolveExportHourlyRate(hourlyRate: number | undefined): number {
+	if (typeof hourlyRate !== 'number' || !Number.isFinite(hourlyRate) || hourlyRate < 0) {
+		return DEFAULT_EXPORT_HOURLY_RATE;
+	}
+
+	return hourlyRate;
+}
+
+function calculateExportRowAmount(hours: number, hourlyRate: number): number {
+	return (Number.isFinite(hours) ? hours : 0) * resolveExportHourlyRate(hourlyRate);
+}
+
+function buildExportHtml(rows: ExportReportRow[], totalHours: number, locale: string, includeReport: boolean, hourlyRate: number): string {
 	const isRu = locale.toLowerCase().startsWith('ru');
+	const exportHourlyRate = resolveExportHourlyRate(hourlyRate);
+	const totalAmount = rows.reduce((sum, row) => sum + calculateExportRowAmount(row.hours, exportHourlyRate), 0);
+	const formattedHourlyRate = formatStatisticsExportNumber(exportHourlyRate, locale);
+	const formattedTotalHours = formatStatisticsExportNumber(totalHours, locale);
+	const formattedTotalAmount = formatStatisticsExportNumber(totalAmount, locale);
 	const labels = {
 		title: isRu ? 'Отчёт по статистике' : 'Statistics Report',
-		subtitle: isRu ? `Сводный отчёт с пропорциональным распределением до ${totalHours} часов` : `Summary report with proportional distribution to ${totalHours} hours`,
+		subtitle: isRu
+			? `Сводный отчёт с пропорциональным распределением до ${formattedTotalHours} часов по ставке ${formattedHourlyRate}`
+			: `Summary report with proportional distribution to ${formattedTotalHours} hours at a ${formattedHourlyRate} hourly rate`,
 		generated: isRu ? 'Сформировано' : 'Generated',
 		total: isRu ? 'Итого часов' : 'Total hours',
+		rate: isRu ? 'Ставка часа' : 'Hourly rate',
+		totalAmount: isRu ? 'Итоговая сумма' : 'Total amount',
 		count: isRu ? 'Задач в отчёте' : 'Tasks in report',
 		taskNumber: isRu ? '№ задачи' : 'Task #',
 		name: isRu ? 'Название' : 'Title',
 		hours: isRu ? 'Часы' : 'Hours',
+		amount: isRu ? 'Сумма' : 'Amount',
 		report: isRu ? 'Что сделано' : 'Summary',
 	};
 	const formattedDate = new Date().toLocaleString(isRu ? 'ru-RU' : 'en-US', {
@@ -49,12 +72,14 @@ function buildExportHtml(rows: ExportReportRow[], totalHours: number, locale: st
 	});
 	const tableRows = rows.map((row, index) => {
 		const zebraClass = index % 2 === 0 ? 'row-even' : 'row-odd';
+		const amount = formatStatisticsExportNumber(calculateExportRowAmount(row.hours, exportHourlyRate), locale);
 		return [
 			`<tr class="${zebraClass}">`,
 			`<td class="col-task">${escapeHtml(row.taskNumber || '—')}</td>`,
 			`<td class="col-title">${escapeHtml(row.title)}</td>`,
 			...(includeReport ? [`<td class="col-report">${escapeHtml(row.reportSummary || '—')}</td>`] : []),
-			`<td class="col-hours">${row.hours}</td>`,
+			`<td class="col-hours">${escapeHtml(formatStatisticsExportNumber(row.hours, locale))}</td>`,
+			`<td class="col-amount">${escapeHtml(amount)}</td>`,
 			'</tr>',
 		].join('');
 	}).join('\n');
@@ -136,7 +161,7 @@ function buildExportHtml(rows: ExportReportRow[], totalHours: number, locale: st
 
 		.meta {
 			display: grid;
-			grid-template-columns: repeat(3, minmax(0, 1fr));
+			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 			gap: 12px;
 			padding: 24px 36px 0;
 		}
@@ -231,6 +256,12 @@ function buildExportHtml(rows: ExportReportRow[], totalHours: number, locale: st
 			font-weight: 700;
 		}
 
+		.col-amount {
+			width: 160px;
+			text-align: right;
+			font-weight: 700;
+		}
+
 		tfoot td {
 			background: #f8fafc;
 			font-weight: 700;
@@ -314,7 +345,15 @@ function buildExportHtml(rows: ExportReportRow[], totalHours: number, locale: st
 			</div>
 			<div class="meta-card">
 				<span class="meta-label">${escapeHtml(labels.total)}</span>
-				<span class="meta-value">${totalHours}</span>
+				<span class="meta-value">${escapeHtml(formattedTotalHours)}</span>
+			</div>
+			<div class="meta-card">
+				<span class="meta-label">${escapeHtml(labels.rate)}</span>
+				<span class="meta-value">${escapeHtml(formattedHourlyRate)}</span>
+			</div>
+			<div class="meta-card">
+				<span class="meta-label">${escapeHtml(labels.totalAmount)}</span>
+				<span class="meta-value">${escapeHtml(formattedTotalAmount)}</span>
 			</div>
 		</section>
 		<section class="table-wrap">
@@ -325,6 +364,7 @@ function buildExportHtml(rows: ExportReportRow[], totalHours: number, locale: st
 						<th>${escapeHtml(labels.name)}</th>
 						${includeReport ? `<th>${escapeHtml(labels.report)}</th>` : ''}
 						<th style="text-align: right;">${escapeHtml(labels.hours)}</th>
+						<th style="text-align: right;">${escapeHtml(labels.amount)}</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -333,7 +373,8 @@ function buildExportHtml(rows: ExportReportRow[], totalHours: number, locale: st
 				<tfoot>
 					<tr>
 						<td colspan="${includeReport ? '3' : '2'}">${escapeHtml(labels.total)}</td>
-						<td class="col-hours">${totalHours}</td>
+						<td class="col-hours">${escapeHtml(formattedTotalHours)}</td>
+						<td class="col-amount">${escapeHtml(formattedTotalAmount)}</td>
 					</tr>
 				</tfoot>
 			</table>
@@ -355,19 +396,28 @@ function padMarkdownCell(value: string, width: number, align: 'left' | 'right' =
 	return align === 'right' ? value.padStart(width, ' ') : value.padEnd(width, ' ');
 }
 
-function buildExportMarkdown(rows: ExportReportRow[], totalHours: number, locale: string, includeReport: boolean): string {
+
+function buildExportMarkdown(rows: ExportReportRow[], totalHours: number, locale: string, includeReport: boolean, hourlyRate: number): string {
+	const exportHourlyRate = resolveExportHourlyRate(hourlyRate);
+	const formattedTotalHours = formatStatisticsExportNumber(totalHours, locale);
+	const formattedHourlyRate = formatStatisticsExportNumber(exportHourlyRate, locale);
+	const totalAmount = rows.reduce((sum, row) => sum + calculateExportRowAmount(row.hours, exportHourlyRate), 0);
+	const formattedTotalAmount = formatStatisticsExportNumber(totalAmount, locale);
+
 	if (includeReport) {
-		return buildStatisticsMarkdownWithReport(rows, totalHours, locale);
+		return buildStatisticsMarkdownWithReport(rows, totalHours, exportHourlyRate, locale);
 	}
 
 	const isRu = locale.toLowerCase().startsWith('ru');
 	const title = isRu ? '# Отчёт по статистике' : '# Statistics Report';
 	const generatedLabel = isRu ? 'Сформировано' : 'Generated';
 	const totalLabel = isRu ? 'Итого часов' : 'Total hours';
+	const hourlyRateLabel = isRu ? 'Ставка часа' : 'Hourly rate';
+	const totalAmountLabel = isRu ? 'Итоговая сумма' : 'Total amount';
 	const taskNumberLabel = isRu ? '№ задачи' : 'Task #';
 	const titleLabel = isRu ? 'Название' : 'Title';
 	const hoursLabel = isRu ? 'Часы' : 'Hours';
-	const reportLabel = isRu ? 'Что сделано' : 'Summary';
+	const amountLabel = isRu ? 'Сумма' : 'Amount';
 	const formattedDate = new Date().toLocaleString(isRu ? 'ru-RU' : 'en-US', {
 		year: 'numeric',
 		month: '2-digit',
@@ -378,11 +428,12 @@ function buildExportMarkdown(rows: ExportReportRow[], totalHours: number, locale
 	const tableRows = rows.map((row) => ({
 		taskNumber: escapeMarkdownCell(row.taskNumber || '—'),
 		title: escapeMarkdownCell(row.title),
-		reportSummary: escapeMarkdownCell(row.reportSummary || '—'),
-		hours: String(row.hours),
+		hours: formatStatisticsExportNumber(row.hours, locale),
+		amount: formatStatisticsExportNumber(calculateExportRowAmount(row.hours, exportHourlyRate), locale),
 	}));
 	const totalTaskLabel = `**${isRu ? 'Итого' : 'Total'}**`;
-	const totalHoursLabel = `**${totalHours}**`;
+	const totalHoursLabel = `**${formattedTotalHours}**`;
+	const totalAmountRowLabel = `**${formattedTotalAmount}**`;
 	const taskNumberWidth = Math.max(
 		taskNumberLabel.length,
 		totalTaskLabel.length,
@@ -392,40 +443,38 @@ function buildExportMarkdown(rows: ExportReportRow[], totalHours: number, locale
 		titleLabel.length,
 		...tableRows.map((row) => row.title.length),
 	);
-	const reportWidth = Math.max(
-		reportLabel.length,
-		...tableRows.map((row) => row.reportSummary.length),
-	);
 	const hoursWidth = Math.max(
 		hoursLabel.length,
 		totalHoursLabel.length,
 		...tableRows.map((row) => row.hours.length),
 	);
-	const separator = includeReport
-		? `| ${'-'.repeat(taskNumberWidth)} | ${'-'.repeat(titleWidth)} | ${'-'.repeat(reportWidth)} | ${'-'.repeat(Math.max(3, hoursWidth - 1))}: |`
-		: `| ${'-'.repeat(taskNumberWidth)} | ${'-'.repeat(titleWidth)} | ${'-'.repeat(Math.max(3, hoursWidth - 1))}: |`;
-	const header = includeReport
-		? `| ${padMarkdownCell(taskNumberLabel, taskNumberWidth)} | ${padMarkdownCell(titleLabel, titleWidth)} | ${padMarkdownCell(reportLabel, reportWidth)} | ${padMarkdownCell(hoursLabel, hoursWidth, 'right')} |`
-		: `| ${padMarkdownCell(taskNumberLabel, taskNumberWidth)} | ${padMarkdownCell(titleLabel, titleWidth)} | ${padMarkdownCell(hoursLabel, hoursWidth, 'right')} |`;
+	const amountWidth = Math.max(
+		amountLabel.length,
+		totalAmountRowLabel.length,
+		...tableRows.map((row) => row.amount.length),
+	);
+	const separator = `| ${'-'.repeat(taskNumberWidth)} | ${'-'.repeat(titleWidth)} | ${'-'.repeat(Math.max(3, hoursWidth - 1))}: | ${'-'.repeat(Math.max(3, amountWidth - 1))}: |`;
+	const header = `| ${padMarkdownCell(taskNumberLabel, taskNumberWidth)} | ${padMarkdownCell(titleLabel, titleWidth)} | ${padMarkdownCell(hoursLabel, hoursWidth, 'right')} | ${padMarkdownCell(amountLabel, amountWidth, 'right')} |`;
 	const bodyRows = tableRows
-		.map((row) => includeReport
-			? `| ${padMarkdownCell(row.taskNumber, taskNumberWidth)} | ${padMarkdownCell(row.title, titleWidth)} | ${padMarkdownCell(row.reportSummary, reportWidth)} | ${padMarkdownCell(row.hours, hoursWidth, 'right')} |`
-			: `| ${padMarkdownCell(row.taskNumber, taskNumberWidth)} | ${padMarkdownCell(row.title, titleWidth)} | ${padMarkdownCell(row.hours, hoursWidth, 'right')} |`)
+		.map((row) => `| ${padMarkdownCell(row.taskNumber, taskNumberWidth)} | ${padMarkdownCell(row.title, titleWidth)} | ${padMarkdownCell(row.hours, hoursWidth, 'right')} | ${padMarkdownCell(row.amount, amountWidth, 'right')} |`)
 		.join('\n');
-	const totalRow = includeReport
-		? `| ${padMarkdownCell(totalTaskLabel, taskNumberWidth)} | ${padMarkdownCell('', titleWidth)} | ${padMarkdownCell('', reportWidth)} | ${padMarkdownCell(totalHoursLabel, hoursWidth, 'right')} |`
-		: `| ${padMarkdownCell(totalTaskLabel, taskNumberWidth)} | ${padMarkdownCell('', titleWidth)} | ${padMarkdownCell(totalHoursLabel, hoursWidth, 'right')} |`;
+	const totalRow = `| ${padMarkdownCell(totalTaskLabel, taskNumberWidth)} | ${padMarkdownCell('', titleWidth)} | ${padMarkdownCell(totalHoursLabel, hoursWidth, 'right')} | ${padMarkdownCell(totalAmountRowLabel, amountWidth, 'right')} |`;
+	const wordSection = buildStatisticsWordSection(rows, exportHourlyRate, locale);
 
 	return [
 		title,
 		'',
 		`- ${generatedLabel}: ${formattedDate}`,
-		`- ${totalLabel}: ${totalHours}`,
+		`- ${totalLabel}: ${formattedTotalHours}`,
+		`- ${hourlyRateLabel}: ${formattedHourlyRate}`,
+		`- ${totalAmountLabel}: ${formattedTotalAmount}`,
 		'',
 		header,
 		separator,
 		bodyRows,
 		totalRow,
+		'',
+		wordSection,
 	].join('\n') + '\n';
 }
 
@@ -485,9 +534,10 @@ export class StatisticsPanelManager {
 			}
 			if (msg.type === 'exportReport') {
 				const total = msg.rows.reduce((sum, row) => sum + row.hours, 0);
+				const hourlyRate = resolveExportHourlyRate(msg.hourlyRate);
 				const content = msg.format === 'md'
-					? buildExportMarkdown(msg.rows, total, vscode.env.language, Boolean(msg.includeReport))
-					: buildExportHtml(msg.rows, total, vscode.env.language, Boolean(msg.includeReport));
+					? buildExportMarkdown(msg.rows, total, vscode.env.language, Boolean(msg.includeReport), hourlyRate)
+					: buildExportHtml(msg.rows, total, vscode.env.language, Boolean(msg.includeReport), hourlyRate);
 				try {
 					await openExportDocument(content, msg.format === 'md' ? 'markdown' : 'html');
 				} catch (error) {

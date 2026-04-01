@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	buildStatisticsWordSection,
 	buildStatisticsMarkdownWithReport,
 	calculateStatisticsExportTargetHours,
 	getStatisticsStatusPercent,
@@ -65,22 +66,51 @@ test('buildStatisticsMarkdownWithReport renders task blocks with summary and sta
 		{
 			taskNumber: '123',
 			title: 'Исправить экспорт',
+			hours: 15,
 			reportSummary: 'Добавлен новый формат markdown.',
 			status: 'review',
 		},
 		{
 			taskNumber: '',
 			title: 'Подготовить отчёт',
+			hours: 5,
 			reportSummary: '',
 			status: 'cancelled',
 		},
-	], 165, 'ru');
+	], 165, 1743, 'ru');
 
 	assert.match(markdown, /Номер задачи: 123/);
 	assert.match(markdown, /Название: Исправить экспорт/);
+	assert.match(markdown, /Часы: 15/);
+	assert.match(markdown, /Сумма:/);
 	assert.match(markdown, /Что сделано: Добавлен новый формат markdown\./);
 	assert.match(markdown, /Статус: 90%/);
+	assert.match(markdown, /Ставка часа:/);
+	assert.match(markdown, /Итоговая сумма:/);
+	assert.match(markdown, /## Word/);
+	assert.match(markdown, /№\tНомер задачи: Название\tКоличество часов\tч\.\tСтоимость часа\tСумма/);
 	assert.match(markdown, /Номер задачи: —/);
 	assert.match(markdown, /Статус: 0%/);
 	assert.ok(!markdown.includes('| № задачи |'));
+});
+
+test('buildStatisticsWordSection renders tab-separated rows for Word tables', () => {
+	const section = buildStatisticsWordSection([
+		{
+			taskNumber: '52',
+			title: 'Добавить часы и ставку в экспорт',
+			hours: 12,
+		},
+		{
+			taskNumber: '',
+			title: 'Подготовить отчёт',
+			hours: 5.5,
+		},
+	], 1743, 'ru');
+
+	const lines = section.split('\n');
+	assert.equal(lines[0], '## Word');
+	assert.equal(lines[2], '№\tНомер задачи: Название\tКоличество часов\tч.\tСтоимость часа\tСумма');
+	assert.equal(lines[3], '1\t52: Добавить часы и ставку в экспорт\t12\tч.\t1743\t20916');
+	assert.equal(lines[4], '2\t—: Подготовить отчёт\t5,50\tч.\t1743\t9586,50');
 });

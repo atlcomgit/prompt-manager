@@ -3,7 +3,7 @@ import type { CSSProperties } from 'react';
 
 import type { Prompt, PromptConfig, PromptStatus } from '../../../types/prompt';
 import { getVsCodeApi } from '../../shared/vscodeApi';
-import { memoryButtonStyles } from '../../memory/components/buttonStyles';
+import { trackerButtonStyles } from '../trackerButtonStyles';
 
 interface Props {
 	promptConfig: PromptConfig | null;
@@ -279,7 +279,7 @@ export const PromptDetailOverlay: React.FC<Props> = ({
 					</button>
 					<button
 						type="button"
-						style={{ ...styles.footerButton, ...styles.footerChatButton }}
+						style={styles.footerChatButton}
 						onClick={shouldShowOpenChat ? onOpenChat : onStartChat}
 					>
 						{shouldShowOpenChat ? t('actions.openChat') : t('actions.startChat')}
@@ -400,7 +400,7 @@ const styles: Record<string, CSSProperties> = {
 		alignItems: 'center',
 		gap: '6px',
 		padding: '4px 8px',
-		borderRadius: '999px',
+		borderRadius: '2px',
 		border: '1px solid transparent',
 		fontSize: '11px',
 		fontWeight: 700,
@@ -409,9 +409,10 @@ const styles: Record<string, CSSProperties> = {
 		display: 'inline-flex',
 		alignItems: 'center',
 		padding: '4px 8px',
-		borderRadius: '999px',
-		background: 'color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)) 92%, transparent)',
-		color: 'var(--vscode-foreground)',
+		borderRadius: '2px',
+		border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+		background: 'var(--vscode-input-background)',
+		color: 'var(--vscode-input-foreground, var(--vscode-foreground))',
 		fontSize: '11px',
 		fontWeight: 600,
 	},
@@ -427,7 +428,7 @@ const styles: Record<string, CSSProperties> = {
 		color: 'var(--vscode-descriptionForeground)',
 	},
 	headerCloseButton: {
-		...memoryButtonStyles.secondary,
+		...trackerButtonStyles.secondary,
 		padding: '5px 12px',
 		fontSize: '12px',
 		minHeight: '28px',
@@ -568,9 +569,10 @@ const styles: Record<string, CSSProperties> = {
 	},
 	tag: {
 		padding: '4px 8px',
-		borderRadius: '999px',
-		background: 'color-mix(in srgb, var(--vscode-button-secondaryBackground) 90%, transparent)',
-		color: 'var(--vscode-foreground)',
+		borderRadius: '2px',
+		border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+		background: 'var(--vscode-input-background)',
+		color: 'var(--vscode-input-foreground, var(--vscode-foreground))',
 		fontSize: '11px',
 		lineHeight: 1.3,
 		wordBreak: 'break-word',
@@ -606,7 +608,7 @@ const styles: Record<string, CSSProperties> = {
 		overflow: 'hidden',
 	},
 	timeStatAccent: {
-		background: 'color-mix(in srgb, var(--vscode-button-background) 22%, var(--vscode-input-background))',
+		background: 'color-mix(in srgb, var(--vscode-list-activeSelectionBackground, var(--vscode-input-background)) 16%, var(--vscode-input-background))',
 	},
 	timeLabel: {
 		fontSize: '10px',
@@ -664,14 +666,16 @@ const styles: Record<string, CSSProperties> = {
 		flexShrink: 0,
 	},
 	footerButton: {
-		...memoryButtonStyles.secondary,
+		...trackerButtonStyles.secondary,
 		padding: '6px 14px',
 		fontSize: '13px',
 		minHeight: '30px',
 	},
 	footerChatButton: {
-		background: 'var(--vscode-button-secondaryBackground)',
-		color: 'var(--vscode-button-secondaryForeground)',
+		...trackerButtonStyles.primary,
+		padding: '6px 14px',
+		fontSize: '13px',
+		minHeight: '30px',
 	},
 	mono: {
 		fontFamily: 'var(--vscode-editor-font-family, var(--vscode-font-family))',

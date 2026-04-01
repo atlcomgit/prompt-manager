@@ -14,7 +14,9 @@ import { StatusSelect } from './components/StatusSelect';
 import { ActionBar } from './components/ActionBar';
 import { TimerDisplay } from './components/TimerDisplay';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
+import { GitOverlay } from './components/GitOverlay';
 import type { Prompt, PromptStatus } from '../../types/prompt';
+import type { GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlaySnapshot } from '../../types/git';
 import { createDefaultPrompt } from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
 import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
@@ -152,6 +154,11 @@ export const EditorApp: React.FC = () => {
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
   const [branchesResolved, setBranchesResolved] = useState(false);
   const [showBranches, setShowBranches] = useState(false);
+  const [gitOverlayOpen, setGitOverlayOpen] = useState(false);
+  const [gitOverlaySnapshot, setGitOverlaySnapshot] = useState<GitOverlaySnapshot | null>(null);
+  const [gitOverlayFileHistory, setGitOverlayFileHistory] = useState<GitOverlayFileHistoryPayload | null>(null);
+  const [gitOverlayCommitMessages, setGitOverlayCommitMessages] = useState<Record<string, string>>({});
+  const [gitOverlayBusyAction, setGitOverlayBusyAction] = useState<string | null>(null);
   const [inlineSuggestion, setInlineSuggestion] = useState<string>('');
   const [inlineSuggestions, setInlineSuggestions] = useState<string[]>([]);
   const [autoCompleteEnabled, setAutoCompleteEnabled] = useState(false);
@@ -540,6 +547,11 @@ export const EditorApp: React.FC = () => {
         setNotice(null);
         setIsGeneratingTitle(false);
         setIsGeneratingDescription(false);
+        setGitOverlayOpen(false);
+        setGitOverlaySnapshot(null);
+        setGitOverlayFileHistory(null);
+        setGitOverlayCommitMessages({});
+        setGitOverlayBusyAction(null);
         // Delay showing the loader so fast loads don't flash
         if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); }
         showLoaderTimerRef.current = window.setTimeout(() => { setShowLoader(true); }, 300);
@@ -573,6 +585,11 @@ export const EditorApp: React.FC = () => {
             setIsGeneratingTitle(false);
             setIsGeneratingDescription(false);
             setNotice(null);
+            setGitOverlayOpen(false);
+            setGitOverlaySnapshot(null);
+            setGitOverlayFileHistory(null);
+            setGitOverlayCommitMessages({});
+            setGitOverlayBusyAction(null);
             setPrompt(msg.prompt);
             localReportDirtyRef.current = false;
             currentPromptIdRef.current = incomingPromptId;
@@ -930,6 +947,46 @@ export const EditorApp: React.FC = () => {
         setIsGeneratingReport(false);
         scheduleAutoSave(50);
         break;
+      case 'gitOverlaySnapshot':
+        setGitOverlaySnapshot(msg.snapshot || null);
+        setGitOverlayOpen(true);
+        setGitOverlayCommitMessages((prev) => {
+          if (!msg.snapshot) {
+            return {};
+          }
+
+          const next: Record<string, string> = {};
+          for (const project of msg.snapshot.projects || []) {
+            const totalChanges = project.changeGroups.merge.length
+              + project.changeGroups.staged.length
+              + project.changeGroups.workingTree.length
+              + project.changeGroups.untracked.length;
+            if (project.available && totalChanges > 0 && prev[project.project]) {
+              next[project.project] = prev[project.project];
+            }
+          }
+          return next;
+        });
+        setGitOverlayBusyAction(null);
+        break;
+      case 'gitOverlayFileHistory':
+        setGitOverlayFileHistory(msg.history || null);
+        setGitOverlayBusyAction(null);
+        break;
+      case 'gitOverlayCommitMessagesGenerated':
+        setGitOverlayCommitMessages((prev) => {
+          const next = { ...prev };
+          for (const item of msg.messages || []) {
+            const projectName = (item.project || '').trim();
+            if (!projectName) {
+              continue;
+            }
+            next[projectName] = item.message || '';
+          }
+          return next;
+        });
+        setGitOverlayBusyAction(null);
+        break;
       case 'pickedFiles':
         if (msg.files && msg.files.length > 0) {
           setPrompt(prev => ({
@@ -991,11 +1048,13 @@ export const EditorApp: React.FC = () => {
         setIsImprovingPromptText(false);
         setIsGeneratingReport(false);
         setIsRecalculating(false);
+        setGitOverlayBusyAction(null);
         activeSaveIdRef.current = null;
         resetChatStartRequestTracking();
         showInlineNotice('error', msg.message);
         break;
       case 'info':
+        setGitOverlayBusyAction(null);
         showInlineNotice('info', msg.message);
         break;
       case 'clearNotice':
@@ -1217,6 +1276,176 @@ export const EditorApp: React.FC = () => {
   };
 
   const buildPromptForSave = (): Prompt => buildPromptForSaveFrom(promptRef.current);
+
+  const handleOpenGitOverlay = useCallback(() => {
+    setGitOverlayOpen(true);
+    setGitOverlayFileHistory(null);
+    setGitOverlayBusyAction('overlay:loading');
+    vscode.postMessage({
+      type: 'openGitOverlay',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+    });
+  }, [prompt.branch, prompt.projects, t]);
+
+  const handleRefreshGitOverlay = useCallback((mode: 'local' | 'fetch' | 'sync' = 'local') => {
+    setGitOverlayBusyAction(`refresh:${mode}`);
+    vscode.postMessage({
+      type: 'refreshGitOverlay',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      mode,
+    });
+  }, [prompt.branch, prompt.projects]);
+
+  const handleGitOverlaySwitchBranch = useCallback((branch: string) => {
+    setGitOverlayBusyAction(`${t('editor.gitOverlaySwitch')}: ${branch}`);
+    vscode.postMessage({
+      type: 'gitOverlaySwitchBranch',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      branch,
+    });
+  }, [prompt.branch, prompt.projects, t]);
+
+  const handleGitOverlayEnsurePromptBranch = useCallback((trackedBranch: string) => {
+    setGitOverlayBusyAction('ensurePromptBranch');
+    vscode.postMessage({
+      type: 'gitOverlayEnsurePromptBranch',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      trackedBranch,
+    });
+  }, [prompt.branch, prompt.projects]);
+
+  const handleGitOverlayMergePromptBranch = useCallback((trackedBranch: string, stayOnTrackedBranch: boolean) => {
+    setGitOverlayBusyAction('mergePromptBranch');
+    vscode.postMessage({
+      type: 'gitOverlayMergePromptBranch',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      trackedBranch,
+      stayOnTrackedBranch,
+    });
+  }, [prompt.branch, prompt.projects]);
+
+  const handleGitOverlayDeleteBranch = useCallback((branch: string) => {
+    setGitOverlayBusyAction(`${t('editor.gitOverlayDeleteBranch')}: ${branch}`);
+    vscode.postMessage({
+      type: 'gitOverlayDeleteBranch',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      branch,
+    });
+  }, [prompt.branch, prompt.projects, t]);
+
+  const handleGitOverlayPush = useCallback((branch?: string) => {
+    setGitOverlayBusyAction(t('editor.gitOverlayPushPromptBranch'));
+    vscode.postMessage({
+      type: 'gitOverlayPush',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      branch,
+    });
+  }, [prompt.branch, prompt.projects, t]);
+
+  const handleGitOverlayStageAll = useCallback((project?: string, trackedOnly?: boolean) => {
+    setGitOverlayBusyAction(trackedOnly ? t('editor.gitOverlayStageTracked') : t('editor.gitOverlayStageAll'));
+    vscode.postMessage({
+      type: 'gitOverlayStageAll',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      project,
+      trackedOnly,
+    });
+  }, [prompt.branch, prompt.projects, t]);
+
+  const handleGitOverlayUnstageAll = useCallback((project?: string) => {
+    setGitOverlayBusyAction(t('editor.gitOverlayUnstageAll'));
+    vscode.postMessage({
+      type: 'gitOverlayUnstageAll',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      project,
+    });
+  }, [prompt.branch, prompt.projects, t]);
+
+  const handleGitOverlayStageFile = useCallback((project: string, filePath: string) => {
+    setGitOverlayBusyAction(`${t('editor.gitOverlayStage')}: ${filePath}`);
+    vscode.postMessage({
+      type: 'gitOverlayStageFile',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      project,
+      filePath,
+    });
+  }, [prompt.branch, prompt.projects, t]);
+
+  const handleGitOverlayUnstageFile = useCallback((project: string, filePath: string) => {
+    setGitOverlayBusyAction(`${t('editor.gitOverlayUnstage')}: ${filePath}`);
+    vscode.postMessage({
+      type: 'gitOverlayUnstageFile',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      project,
+      filePath,
+    });
+  }, [prompt.branch, prompt.projects, t]);
+
+  const handleGitOverlayLoadFileHistory = useCallback((project: string, filePath: string) => {
+    setGitOverlayBusyAction(`${t('editor.gitOverlayFileHistory')}: ${filePath}`);
+    vscode.postMessage({ type: 'gitOverlayLoadFileHistory', project, filePath });
+  }, [t]);
+
+  const handleGitOverlayOpenFile = useCallback((project: string, filePath: string) => {
+    vscode.postMessage({ type: 'gitOverlayOpenFile', project, filePath });
+  }, []);
+
+  const handleGitOverlayOpenMergeEditor = useCallback((project: string, filePath: string) => {
+    vscode.postMessage({ type: 'gitOverlayOpenMergeEditor', project, filePath });
+  }, []);
+
+  const handleGitOverlayCommitMessageChange = useCallback((project: string, value: string) => {
+    setGitOverlayCommitMessages((prev) => ({
+      ...prev,
+      [project]: value,
+    }));
+  }, []);
+
+  const handleGitOverlayGenerateCommitMessage = useCallback((project?: string) => {
+    setGitOverlayBusyAction(project ? `generateCommitMessage:${project}` : 'generateCommitMessage:all');
+    vscode.postMessage({
+      type: 'gitOverlayGenerateCommitMessage',
+      prompt: buildPromptForSave(),
+      project,
+      includeAllChanges: true,
+    });
+  }, []);
+
+  const handleGitOverlayCommitStaged = useCallback((messages: GitOverlayProjectCommitMessage[]) => {
+    const normalizedMessages = (messages || [])
+      .map((item) => ({
+        project: (item.project || '').trim(),
+        message: (item.message || '').trim(),
+      }))
+      .filter(item => Boolean(item.project) && Boolean(item.message));
+
+    if (normalizedMessages.length === 0) {
+      return;
+    }
+
+    setGitOverlayBusyAction(
+      normalizedMessages.length === 1
+        ? `commitStaged:${normalizedMessages[0].project}`
+        : 'commitStaged:all'
+    );
+    vscode.postMessage({
+      type: 'gitOverlayCommitStaged',
+      prompt: buildPromptForSave(),
+      messages: normalizedMessages,
+      includeAllChanges: true,
+    });
+  }, []);
 
   const handleSave = (source: 'manual' | 'status-change' | 'autosave' | unknown = 'manual') => {
     const normalizedSource: 'manual' | 'status-change' | 'autosave' =
@@ -1662,6 +1891,9 @@ export const EditorApp: React.FC = () => {
                     placeholder={t('editor.gitBranchPlaceholder')}
                   />
                   <div style={{ display: 'flex', gap: '6px' }}>
+                    <button style={styles.linkBtn} onClick={handleOpenGitOverlay}>
+                      {t('editor.gitOverlay')}
+                    </button>
                     {prompt.projects.length > 0 && (
                       <button style={styles.linkBtn} onClick={handleShowBranches}>
                         {t('editor.showBranches')}
@@ -2155,6 +2387,23 @@ export const EditorApp: React.FC = () => {
           />
         </div>
       </div>
+
+      <GitOverlay
+        open={gitOverlayOpen}
+        snapshot={gitOverlaySnapshot}
+        commitMessages={gitOverlayCommitMessages}
+        busyAction={gitOverlayBusyAction}
+        onClose={() => setGitOverlayOpen(false)}
+        onRefresh={handleRefreshGitOverlay}
+        onEnsurePromptBranch={handleGitOverlayEnsurePromptBranch}
+        onMergePromptBranch={handleGitOverlayMergePromptBranch}
+        onOpenFile={handleGitOverlayOpenFile}
+        onOpenMergeEditor={handleGitOverlayOpenMergeEditor}
+        onGenerateCommitMessage={handleGitOverlayGenerateCommitMessage}
+        onCommitStaged={handleGitOverlayCommitStaged}
+        onCommitMessageChange={handleGitOverlayCommitMessageChange}
+        t={t}
+      />
     </div>
   );
 };

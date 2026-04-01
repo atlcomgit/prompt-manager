@@ -3,6 +3,7 @@
  */
 
 import type { Prompt, PromptConfig, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
+import type { GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlaySnapshot } from './git.js';
 
 // ---- Messages FROM webview TO extension ----
 
@@ -35,6 +36,22 @@ export type WebviewToExtensionMessage =
 	| { type: 'checkBranchStatus'; branch: string; projects: string[] }
 	| { type: 'switchBranch'; branch: string; projects: string[] }
 	| { type: 'getBranches'; projects: string[] }
+	| { type: 'openGitOverlay'; promptBranch: string; projects: string[] }
+	| { type: 'refreshGitOverlay'; promptBranch: string; projects: string[]; mode?: 'local' | 'fetch' | 'sync' }
+	| { type: 'gitOverlaySwitchBranch'; promptBranch: string; projects: string[]; branch: string }
+	| { type: 'gitOverlayEnsurePromptBranch'; promptBranch: string; projects: string[]; trackedBranch: string }
+	| { type: 'gitOverlayMergePromptBranch'; promptBranch: string; projects: string[]; trackedBranch: string; stayOnTrackedBranch?: boolean }
+	| { type: 'gitOverlayDeleteBranch'; promptBranch: string; projects: string[]; branch: string }
+	| { type: 'gitOverlayPush'; promptBranch: string; projects: string[]; branch?: string }
+	| { type: 'gitOverlayStageAll'; promptBranch: string; projects: string[]; project?: string; trackedOnly?: boolean }
+	| { type: 'gitOverlayUnstageAll'; promptBranch: string; projects: string[]; project?: string }
+	| { type: 'gitOverlayStageFile'; promptBranch: string; projects: string[]; project: string; filePath: string }
+	| { type: 'gitOverlayUnstageFile'; promptBranch: string; projects: string[]; project: string; filePath: string }
+	| { type: 'gitOverlayLoadFileHistory'; project: string; filePath: string }
+	| { type: 'gitOverlayOpenFile'; project: string; filePath: string }
+	| { type: 'gitOverlayOpenMergeEditor'; project: string; filePath: string }
+	| { type: 'gitOverlayGenerateCommitMessage'; prompt: Prompt; project?: string; includeAllChanges?: boolean }
+	| { type: 'gitOverlayCommitStaged'; prompt: Prompt; messages: GitOverlayProjectCommitMessage[]; includeAllChanges?: boolean }
 	| { type: 'updateTimeSpent'; id: string; field: 'timeSpentWriting' | 'timeSpentImplementing'; delta: number }
 	| { type: 'pickFile' }
 	| { type: 'pickHttpExamplesFile' }
@@ -88,6 +105,9 @@ export type ExtensionToWebviewMessage =
 	| { type: 'generatedSlug'; slug: string }
 	| { type: 'improvedPromptText'; content: string }
 	| { type: 'generatedReport'; report: string }
+	| { type: 'gitOverlaySnapshot'; snapshot: GitOverlaySnapshot }
+	| { type: 'gitOverlayFileHistory'; history: GitOverlayFileHistoryPayload }
+	| { type: 'gitOverlayCommitMessagesGenerated'; messages: GitOverlayProjectCommitMessage[] }
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
 	| { type: 'branchStatus'; hasChanges: boolean; details: string }
 	| { type: 'error'; message: string; requestId?: string }

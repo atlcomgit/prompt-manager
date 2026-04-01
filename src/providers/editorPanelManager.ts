@@ -26,6 +26,7 @@ import { buildChatContextFiles } from '../utils/chatContextFiles.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { filterPromptHookIdsForPhase } from '../utils/promptHookPhase.js';
+import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
@@ -1153,6 +1154,133 @@ export class EditorPanelManager {
 
 	private getAllowedBranchesSetting(): string[] {
 		return GitService.getConfiguredAllowedBranches();
+	}
+
+	private getTrackedBranchesSetting(): string[] {
+		const trackedBranches = getCodeMapSettings().trackedBranches
+			.map(branch => branch.trim())
+			.filter(Boolean);
+
+		if (trackedBranches.length > 0) {
+			return Array.from(new Set(trackedBranches));
+		}
+
+		return this.getAllowedBranchesSetting();
+	}
+
+	private resolveGitOverlayProjects(requestedProjects: string[], currentPrompt: Prompt): string[] {
+		const normalizedRequested = (requestedProjects || []).map(project => project.trim()).filter(Boolean);
+		if (normalizedRequested.length > 0) {
+			return Array.from(new Set(normalizedRequested));
+		}
+
+		const promptProjects = (currentPrompt.projects || []).map(project => project.trim()).filter(Boolean);
+		if (promptProjects.length > 0) {
+			return Array.from(new Set(promptProjects));
+		}
+
+		return this.workspaceService.getWorkspaceFolders();
+	}
+
+	private resolveGitOverlayPromptBranch(requestedBranch: string | undefined, currentPrompt: Prompt): string {
+		return (requestedBranch || currentPrompt.branch || '').trim();
+	}
+
+	private async postGitOverlaySnapshot(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		currentPrompt: Prompt,
+		promptBranch: string,
+		projects: string[],
+	): Promise<void> {
+		const paths = this.workspaceService.getWorkspaceFolderPaths();
+		const snapshot = await this.gitService.getGitOverlaySnapshot(
+			paths,
+			this.resolveGitOverlayProjects(projects, currentPrompt),
+			promptBranch,
+			this.getTrackedBranchesSetting(),
+		);
+		postMessage({ type: 'gitOverlaySnapshot', snapshot });
+	}
+
+	private describeGitMultiProjectResult(
+		result: { changedProjects: string[]; skippedProjects: string[]; errors: string[] },
+		successPrefix: string,
+	): string {
+		const parts = [successPrefix];
+		if (result.changedProjects.length > 0) {
+			parts.push(`Проекты: ${result.changedProjects.join(', ')}`);
+		}
+		if (result.skippedProjects.length > 0) {
+			parts.push(`Пропущено: ${result.skippedProjects.join(', ')}`);
+		}
+		if (result.errors.length > 0) {
+			parts.push(`Ошибки: ${result.errors.join('; ')}`);
+		}
+		return parts.filter(Boolean).join('. ');
+	}
+
+	private async resolveProjectFileUri(project: string, filePath: string): Promise<vscode.Uri> {
+		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
+		const projectRoot = projectPaths.get(project);
+		if (!projectRoot) {
+			throw new Error(`Проект "${project}" не найден среди workspace folders.`);
+		}
+
+		const normalizedPath = filePath.trim();
+		const absolutePath = path.isAbsolute(normalizedPath)
+			? normalizedPath
+			: path.join(projectRoot, normalizedPath);
+
+		return vscode.Uri.file(absolutePath);
+	}
+
+	private async tryOpenMergeEditor(uri: vscode.Uri): Promise<boolean> {
+		const commands = await vscode.commands.getCommands(true);
+		const candidates = [
+			'merge.openMergeEditor',
+			'git.openMergeEditor',
+			'mergeConflicts.openMergeEditor',
+		];
+
+		for (const commandId of candidates) {
+			if (!commands.includes(commandId)) {
+				continue;
+			}
+			try {
+				await vscode.commands.executeCommand(commandId, uri);
+				return true;
+			} catch {
+				// Fallback below.
+			}
+		}
+
+		if (commands.includes('vscode.openWith')) {
+			try {
+				await vscode.commands.executeCommand('vscode.openWith', uri, 'mergeEditor');
+				return true;
+			} catch {
+				// Fallback below.
+			}
+		}
+
+		return false;
+	}
+
+	private async openGitOverlayFile(project: string, filePath: string, useMergeEditor: boolean): Promise<void> {
+		const uri = await this.resolveProjectFileUri(project, filePath);
+		if (useMergeEditor) {
+			const openedInMergeEditor = await this.tryOpenMergeEditor(uri);
+			if (openedInMergeEditor) {
+				return;
+			}
+		}
+
+		const doc = await vscode.workspace.openTextDocument(uri);
+		await vscode.window.showTextDocument(doc, {
+			viewColumn: vscode.ViewColumn.Beside,
+			preview: false,
+			preserveFocus: false,
+		});
 	}
 
 	private clearContentEditorBinding(panelKey: string): void {
@@ -3931,6 +4059,318 @@ export class EditorPanelManager {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
 				const branches = await this.gitService.getBranches(paths, msg.projects);
 				postMessage({ type: 'branches', branches });
+				break;
+			}
+
+			case 'openGitOverlay': {
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, msg.projects);
+				break;
+			}
+
+			case 'refreshGitOverlay': {
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+
+				if (msg.mode === 'fetch') {
+					const result = await this.gitService.fetchProjects(paths, projects);
+					if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
+						postMessage({
+							type: result.errors.length > 0 ? 'error' : 'info',
+							message: this.describeGitMultiProjectResult(result, 'Git fetch завершён'),
+						});
+					}
+				} else if (msg.mode === 'sync') {
+					const result = await this.gitService.syncProjects(paths, projects);
+					if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
+						postMessage({
+							type: result.errors.length > 0 ? 'error' : 'info',
+							message: this.describeGitMultiProjectResult(result, 'Git sync завершён'),
+						});
+					}
+				}
+
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				break;
+			}
+
+			case 'gitOverlaySwitchBranch': {
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const status = await this.gitService.checkBranchStatus(paths, projects, msg.branch);
+				if (status.hasChanges) {
+					const answer = await vscode.window.showWarningMessage(
+						'Есть незакоммиченные изменения. Переключить ветку?',
+						{ modal: true, detail: status.details },
+						'Переключить',
+						'Отмена',
+					);
+					if (answer !== 'Переключить') {
+						break;
+					}
+				}
+
+				const result = await this.gitService.switchBranch(paths, projects, msg.branch, this.getAllowedBranchesSetting());
+				postMessage({
+					type: result.errors.length > 0 ? 'error' : 'info',
+					message: this.describeGitMultiProjectResult(result, `Ветка "${msg.branch}" активирована`),
+				});
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				break;
+			}
+
+			case 'gitOverlayEnsurePromptBranch': {
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				if (!promptBranch) {
+					postMessage({ type: 'error', message: 'Сначала укажите ветку промпта.' });
+					break;
+				}
+
+				const result = await this.gitService.ensurePromptBranchFromTracked(paths, projects, promptBranch, msg.trackedBranch);
+				postMessage({
+					type: result.errors.length > 0 ? 'error' : 'info',
+					message: this.describeGitMultiProjectResult(result, `Ветка промпта "${promptBranch}" готова`),
+				});
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				break;
+			}
+
+			case 'gitOverlayMergePromptBranch': {
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				if (!promptBranch) {
+					postMessage({ type: 'error', message: 'Сначала укажите ветку промпта.' });
+					break;
+				}
+
+				const answer = await vscode.window.showWarningMessage(
+					`Выполнить merge ветки "${promptBranch}" в "${msg.trackedBranch}"?`,
+					{ modal: true },
+					'Merge',
+					'Отмена',
+				);
+				if (answer !== 'Merge') {
+					break;
+				}
+
+				const result = await this.gitService.mergePromptBranchIntoTracked(
+					paths,
+					projects,
+					promptBranch,
+					msg.trackedBranch,
+					msg.stayOnTrackedBranch !== false,
+				);
+				if (result.conflicts.length > 0) {
+					const conflictDetails = result.conflicts
+						.map(item => `${item.project}: ${item.files.join(', ')}`)
+						.join('\n');
+					postMessage({
+						type: 'error',
+						message: `Merge завершился с конфликтами. ${conflictDetails}`,
+					});
+				} else {
+					postMessage({
+						type: result.errors.length > 0 ? 'error' : 'info',
+						message: this.describeGitMultiProjectResult(result, `Merge ветки "${promptBranch}" в "${msg.trackedBranch}" выполнен`),
+					});
+				}
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				break;
+			}
+
+			case 'gitOverlayDeleteBranch': {
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const answer = await vscode.window.showWarningMessage(
+					`Удалить локальную ветку "${msg.branch}"?`,
+					{ modal: true },
+					'Удалить',
+					'Отмена',
+				);
+				if (answer !== 'Удалить') {
+					break;
+				}
+
+				const result = await this.gitService.deleteLocalBranch(paths, projects, msg.branch, promptBranch, this.getTrackedBranchesSetting());
+				postMessage({
+					type: result.errors.length > 0 ? 'error' : 'info',
+					message: this.describeGitMultiProjectResult(result, `Ветка "${msg.branch}" удалена`),
+				});
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				break;
+			}
+
+			case 'gitOverlayPush': {
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const result = await this.gitService.pushBranch(paths, projects, msg.branch);
+				postMessage({
+					type: result.errors.length > 0 ? 'error' : 'info',
+					message: this.describeGitMultiProjectResult(result, `Push ветки ${msg.branch || 'текущей'} выполнен`),
+				});
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				break;
+			}
+
+			case 'gitOverlayStageAll': {
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const result = await this.gitService.stageAll(paths, projects, msg.trackedOnly === true, msg.project);
+				if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
+					postMessage({
+						type: result.errors.length > 0 ? 'error' : 'info',
+						message: this.describeGitMultiProjectResult(result, msg.trackedOnly === true ? 'Отслеживаемые изменения staged' : 'Изменения staged'),
+					});
+				}
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				break;
+			}
+
+			case 'gitOverlayUnstageAll': {
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const result = await this.gitService.unstageAll(paths, projects, msg.project);
+				if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
+					postMessage({
+						type: result.errors.length > 0 ? 'error' : 'info',
+						message: this.describeGitMultiProjectResult(result, 'Staged изменения сняты'),
+					});
+				}
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				break;
+			}
+
+			case 'gitOverlayStageFile': {
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const result = await this.gitService.stageFile(this.workspaceService.getWorkspaceFolderPaths(), msg.project, msg.filePath);
+				if (result.errors.length > 0) {
+					postMessage({ type: 'error', message: this.describeGitMultiProjectResult(result, `Не удалось добавить ${msg.filePath} в staged`) });
+				}
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, msg.projects);
+				break;
+			}
+
+			case 'gitOverlayUnstageFile': {
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const result = await this.gitService.unstageFile(this.workspaceService.getWorkspaceFolderPaths(), msg.project, msg.filePath);
+				if (result.errors.length > 0) {
+					postMessage({ type: 'error', message: this.describeGitMultiProjectResult(result, `Не удалось снять ${msg.filePath} со staged`) });
+				}
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, msg.projects);
+				break;
+			}
+
+			case 'gitOverlayLoadFileHistory': {
+				const history = await this.gitService.getFileHistoryPayload(this.workspaceService.getWorkspaceFolderPaths(), msg.project, msg.filePath);
+				postMessage({ type: 'gitOverlayFileHistory', history });
+				break;
+			}
+
+			case 'gitOverlayOpenFile': {
+				try {
+					await this.openGitOverlayFile(msg.project, msg.filePath, false);
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+				}
+				break;
+			}
+
+			case 'gitOverlayOpenMergeEditor': {
+				try {
+					await this.openGitOverlayFile(msg.project, msg.filePath, true);
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+				}
+				break;
+			}
+
+			case 'gitOverlayGenerateCommitMessage': {
+				if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.prompt?.id)) {
+					break;
+				}
+
+				const promptSnapshot = msg.prompt;
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(promptSnapshot.projects || [], currentPrompt);
+				const generationProjects = msg.project ? [msg.project] : projects;
+				const promptBranch = this.resolveGitOverlayPromptBranch(promptSnapshot.branch, currentPrompt);
+				if (msg.includeAllChanges === true) {
+					const stagedAll = await this.gitService.stageAll(paths, generationProjects, false);
+					if (stagedAll.errors.length > 0) {
+						postMessage({
+							type: 'error',
+							message: this.describeGitMultiProjectResult(stagedAll, 'Не удалось подготовить все изменения к генерации commit message'),
+						});
+						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+						break;
+					}
+				}
+				const stagedProjects = await this.gitService.getStagedCommitProjectData(paths, generationProjects);
+				if (stagedProjects.length === 0) {
+					postMessage({ type: 'error', message: 'Нет staged-изменений для генерации commit message.' });
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+					break;
+				}
+
+				const generatedMessages: Array<{ project: string; message: string }> = [];
+				for (const projectData of stagedProjects) {
+					let generatedMessage = await this.gitService.generateCommitMessageViaCopilot(projectData.projectPath);
+					if (!generatedMessage.trim()) {
+						generatedMessage = await this.aiService.generateCommitMessage({
+							projectName: projectData.project,
+							stagedChangesSummary: this.buildPreparedCommitContext([projectData]),
+						});
+					}
+					generatedMessages.push({ project: projectData.project, message: generatedMessage });
+				}
+
+				postMessage({ type: 'gitOverlayCommitMessagesGenerated', messages: generatedMessages });
+				if (msg.includeAllChanges === true) {
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				}
+				break;
+			}
+
+			case 'gitOverlayCommitStaged': {
+				if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.prompt?.id)) {
+					break;
+				}
+
+				const promptSnapshot = msg.prompt;
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(promptSnapshot.projects || [], currentPrompt);
+				const commitProjects = Array.from(new Set((msg.messages || []).map(item => (item.project || '').trim()).filter(Boolean)));
+				const promptBranch = this.resolveGitOverlayPromptBranch(promptSnapshot.branch, currentPrompt);
+				if (commitProjects.length === 0) {
+					postMessage({ type: 'error', message: 'Не выбраны проекты для коммита.' });
+					break;
+				}
+				if (msg.includeAllChanges === true) {
+					const stagedAll = await this.gitService.stageAll(paths, commitProjects, false);
+					if (stagedAll.errors.length > 0) {
+						postMessage({
+							type: 'error',
+							message: this.describeGitMultiProjectResult(stagedAll, 'Не удалось подготовить все изменения к коммиту'),
+						});
+						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+						break;
+					}
+				}
+				const result = await this.gitService.commitStagedChanges(paths, msg.messages);
+				postMessage({
+					type: result.errors.length > 0 ? 'error' : 'info',
+					message: this.describeGitMultiProjectResult(result, 'Коммит создан'),
+				});
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				break;
 			}
 

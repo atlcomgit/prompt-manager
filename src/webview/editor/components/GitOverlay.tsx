@@ -35,14 +35,20 @@ type Props = {
 	promptTaskNumber: string;
 	dockToSecondHalf?: boolean;
 	preferredTrackedBranch?: string;
+	preferredTrackedBranchesByProject?: Record<string, string>;
 	onClose: () => void;
 	onDone: (status: PromptStatus | null) => void;
 	onRefresh: (mode?: 'local' | 'fetch' | 'sync') => void;
-	onSwitchBranch?: (branch: string) => void;
-	onEnsurePromptBranch: (trackedBranch: string) => void;
+	onApplyBranchTargets?: (
+		sourceBranchesByProject: Record<string, string>,
+		targetBranchesByProject: Record<string, string>,
+		project?: string,
+	) => void;
+	onSwitchBranch?: (trackedBranchesByProject: Record<string, string>) => void;
+	onEnsurePromptBranch: (trackedBranchesByProject: Record<string, string>) => void;
 	onPush: (branch?: string) => void;
 	onCreateReviewRequest: (requests: GitOverlayProjectReviewRequestInput[]) => void;
-	onMergePromptBranch: (trackedBranch: string, stayOnTrackedBranch: boolean) => void;
+	onMergePromptBranch: (trackedBranchesByProject: Record<string, string>, stayOnTrackedBranch: boolean) => void;
 	onDiscardFile: (project: string, filePath: string, group: GitOverlayChangeFile['group'], previousPath?: string) => void;
 	onOpenFile: (project: string, filePath: string) => void;
 	onOpenDiff: (project: string, filePath: string) => void;
@@ -52,7 +58,7 @@ type Props = {
 	onGenerateCommitMessage: (project?: string) => void;
 	onCommitStaged: (messages: GitOverlayProjectCommitMessage[]) => void;
 	onCommitMessageChange: (project: string, value: string) => void;
-	onTrackedBranchChange?: (trackedBranch: string) => void;
+	onTrackedBranchChange?: (trackedBranchesByProject: Record<string, string>) => void;
 	onContinueStartChat?: () => void;
 	onContinueOpenChat?: () => void;
 	t: (key: string) => string;
@@ -92,31 +98,193 @@ function collectProjectChanges(project: GitOverlayProjectSnapshot): GitOverlayCh
 	];
 }
 
-function buildProjectTargetBranchOptions(project: GitOverlayProjectSnapshot, fallbackTrackedBranches: string[]): string[] {
-	const result = new Set<string>();
-
-	for (const branch of fallbackTrackedBranches) {
-		const normalized = branch.trim();
-		if (normalized) {
-			result.add(normalized);
-		}
-	}
-
-	for (const branch of project.branches) {
-		if (branch.kind !== 'tracked') {
+function normalizeTrackedBranchesByProject(value: Record<string, string> | undefined): Record<string, string> {
+	const result: Record<string, string> = {};
+	for (const [project, branch] of Object.entries(value || {})) {
+		const normalizedProject = project.trim();
+		const normalizedBranch = typeof branch === 'string' ? branch.trim() : '';
+		if (!normalizedProject || !normalizedBranch) {
 			continue;
 		}
-		const normalized = branch.name.trim();
-		if (normalized) {
-			result.add(normalized);
-		}
+		result[normalizedProject] = normalizedBranch;
 	}
+	return result;
+}
+
+function buildProjectTrackedBranchOptions(
+	project: GitOverlayProjectSnapshot,
+	trackedBranchOptions: string[],
+	preferredTrackedBranch = '',
+): string[] {
+	const result = new Set<string>();
+	const normalizedTrackedBranchOptions = Array.from(new Set(
+		trackedBranchOptions
+			.map(branch => branch.trim())
+			.filter(Boolean),
+	));
+	const trackedBranchOptionSet = new Set(normalizedTrackedBranchOptions);
+	const normalizedPreferredTrackedBranch = preferredTrackedBranch.trim();
+	const normalizedPromptBranch = project.promptBranch.trim();
+	const normalizedCurrentBranch = project.currentBranch.trim();
+	const trackedBranchNames = project.branches
+		.filter((branch) => {
+			if (!branch.exists) {
+				return false;
+			}
+
+			const normalizedBranchName = branch.name.trim();
+			if (!normalizedBranchName) {
+				return false;
+			}
+
+			if (trackedBranchOptionSet.size > 0) {
+				return trackedBranchOptionSet.has(normalizedBranchName);
+			}
+
+			return branch.kind === 'tracked' || branch.kind === 'current';
+		})
+		.map(branch => branch.name.trim())
+		.filter(Boolean);
+
+	if (
+		normalizedPreferredTrackedBranch
+		&& (
+			trackedBranchNames.includes(normalizedPreferredTrackedBranch)
+			|| (
+				normalizedPreferredTrackedBranch === normalizedCurrentBranch
+				&& normalizedCurrentBranch !== normalizedPromptBranch
+				&& (trackedBranchOptionSet.size === 0 || trackedBranchOptionSet.has(normalizedCurrentBranch))
+			)
+		)
+	) {
+		result.add(normalizedPreferredTrackedBranch);
+	}
+
+	if (normalizedCurrentBranch) {
+		result.add(normalizedCurrentBranch);
+	}
+
+	for (const branch of trackedBranchNames) {
+		result.add(branch);
+	}
+
+	return [...result];
+}
+
+function buildProjectTargetBranchOptions(
+	project: GitOverlayProjectSnapshot,
+	trackedBranchOptions: string[],
+	preferredTrackedBranch = '',
+): string[] {
+	const result = new Set<string>(buildProjectTrackedBranchOptions(project, trackedBranchOptions, preferredTrackedBranch));
 
 	if (project.review.request?.targetBranch) {
 		result.add(project.review.request.targetBranch.trim());
 	}
 
 	return [...result];
+}
+
+function buildProjectExpectedBranchOptions(
+	project: GitOverlayProjectSnapshot,
+	trackedBranchOptions: string[],
+	preferredTrackedBranch = '',
+): string[] {
+	const result = new Set<string>(buildProjectTrackedBranchOptions(project, trackedBranchOptions, preferredTrackedBranch));
+	const normalizedPromptBranch = project.promptBranch.trim();
+	if (normalizedPromptBranch) {
+		result.add(normalizedPromptBranch);
+	}
+	return [...result];
+}
+
+function resolveTrackedBranchesByProject(
+	projects: GitOverlayProjectSnapshot[],
+	trackedBranchOptions: string[],
+	explicitTrackedBranchesByProject: Record<string, string>,
+	persistedTrackedBranchesByProject: Record<string, string>,
+	preferredTrackedBranch = '',
+): Record<string, string> {
+	const normalizedExplicitTrackedBranchesByProject = normalizeTrackedBranchesByProject(explicitTrackedBranchesByProject);
+	const normalizedPersistedTrackedBranchesByProject = normalizeTrackedBranchesByProject(persistedTrackedBranchesByProject);
+	const normalizedPreferredTrackedBranch = preferredTrackedBranch.trim();
+	const result: Record<string, string> = {};
+
+	for (const project of projects) {
+		const options = buildProjectTrackedBranchOptions(project, trackedBranchOptions, normalizedPreferredTrackedBranch);
+		const explicitTrackedBranch = (normalizedExplicitTrackedBranchesByProject[project.project] || '').trim();
+		if (explicitTrackedBranch && options.includes(explicitTrackedBranch)) {
+			result[project.project] = explicitTrackedBranch;
+			continue;
+		}
+
+		const persistedTrackedBranch = (normalizedPersistedTrackedBranchesByProject[project.project] || '').trim();
+		if (persistedTrackedBranch && options.includes(persistedTrackedBranch)) {
+			result[project.project] = persistedTrackedBranch;
+			continue;
+		}
+
+		if (normalizedPreferredTrackedBranch && options.includes(normalizedPreferredTrackedBranch)) {
+			result[project.project] = normalizedPreferredTrackedBranch;
+			continue;
+		}
+
+		const currentBranch = project.currentBranch.trim();
+		if (currentBranch && options.includes(currentBranch)) {
+			result[project.project] = currentBranch;
+			continue;
+		}
+
+		if (options[0]) {
+			result[project.project] = options[0];
+		}
+	}
+
+	return result;
+}
+
+function resolveTargetBranchesByProject(
+	projects: GitOverlayProjectSnapshot[],
+	trackedBranchOptions: string[],
+	explicitTargetBranchesByProject: Record<string, string>,
+	trackedBranchesByProject: Record<string, string>,
+	promptBranch: string,
+): Record<string, string> {
+	const normalizedExplicitTargetBranchesByProject = normalizeTrackedBranchesByProject(explicitTargetBranchesByProject);
+	const normalizedPromptBranch = promptBranch.trim();
+	const result: Record<string, string> = {};
+
+	for (const project of projects) {
+		const sourceBranch = (trackedBranchesByProject[project.project] || '').trim();
+		const options = buildProjectExpectedBranchOptions(project, trackedBranchOptions, sourceBranch);
+		const explicitTargetBranch = (normalizedExplicitTargetBranchesByProject[project.project] || '').trim();
+		if (explicitTargetBranch && options.includes(explicitTargetBranch)) {
+			result[project.project] = explicitTargetBranch;
+			continue;
+		}
+
+		const currentBranch = project.currentBranch.trim();
+		if (normalizedPromptBranch && options.includes(normalizedPromptBranch)) {
+			result[project.project] = normalizedPromptBranch;
+			continue;
+		}
+
+		if (sourceBranch && options.includes(sourceBranch)) {
+			result[project.project] = sourceBranch;
+			continue;
+		}
+
+		if (currentBranch && options.includes(currentBranch)) {
+			result[project.project] = currentBranch;
+			continue;
+		}
+
+		if (options[0]) {
+			result[project.project] = options[0];
+		}
+	}
+
+	return result;
 }
 
 function buildProjectChangesSummary(project: GitOverlayProjectSnapshot, t: (key: string) => string): string {
@@ -417,9 +585,11 @@ export const GitOverlay: React.FC<Props> = ({
 	promptTaskNumber,
 	dockToSecondHalf = false,
 	preferredTrackedBranch,
+	preferredTrackedBranchesByProject = {},
 	onClose,
 	onDone,
 	onRefresh,
+	onApplyBranchTargets,
 	onSwitchBranch,
 	onEnsurePromptBranch,
 	onPush,
@@ -439,13 +609,13 @@ export const GitOverlay: React.FC<Props> = ({
 	onContinueOpenChat,
 	t,
 }) => {
-	const [selectedTrackedBranch, setSelectedTrackedBranch] = useState('');
+	const [selectedTrackedBranchesByProject, setSelectedTrackedBranchesByProject] = useState<Record<string, string>>({});
+	const [selectedTargetBranchesByProject, setSelectedTargetBranchesByProject] = useState<Record<string, string>>({});
 	const [stayOnTrackedBranch, setStayOnTrackedBranch] = useState(true);
 	const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
 	const [collapsedSections, setCollapsedSections] = useState<Partial<Record<SectionKey, boolean>>>({});
 	const [reviewDrafts, setReviewDrafts] = useState<Record<string, ReviewDraft>>({});
-	const userSelectedTrackedBranchRef = useRef(false);
-	const lastSyncedTrackedBranchRef = useRef('');
+	const lastSyncedTrackedBranchesRef = useRef<Record<string, string>>({});
 
 	const isStartChatPreflightMode = mode === 'start-chat-preflight';
 	const isOpenChatPreflightMode = mode === 'open-chat-preflight';
@@ -461,6 +631,30 @@ export const GitOverlay: React.FC<Props> = ({
 		),
 		[preferredTrackedBranch, promptBranch, snapshot],
 	);
+	const normalizedPreferredTrackedBranchesByProject = useMemo(
+		() => normalizeTrackedBranchesByProject(preferredTrackedBranchesByProject),
+		[preferredTrackedBranchesByProject],
+	);
+	const resolvedTrackedBranchesByProject = useMemo(
+		() => resolveTrackedBranchesByProject(
+			snapshot?.projects || [],
+			trackedBranchOptions,
+			selectedTrackedBranchesByProject,
+			normalizedPreferredTrackedBranchesByProject,
+			preferredTrackedBranch,
+		),
+			[normalizedPreferredTrackedBranchesByProject, preferredTrackedBranch, selectedTrackedBranchesByProject, snapshot, trackedBranchOptions],
+	);
+	const resolvedTargetBranchesByProject = useMemo(
+		() => resolveTargetBranchesByProject(
+			snapshot?.projects || [],
+			trackedBranchOptions,
+			selectedTargetBranchesByProject,
+			resolvedTrackedBranchesByProject,
+			promptBranch,
+		),
+		[selectedTargetBranchesByProject, resolvedTrackedBranchesByProject, snapshot, trackedBranchOptions, promptBranch],
+	);
 	const availableProjects = useMemo(
 		() => (snapshot?.projects || []).filter(project => project.available),
 		[snapshot],
@@ -469,53 +663,131 @@ export const GitOverlay: React.FC<Props> = ({
 		() => collectGitOverlayActionableProjects(availableProjects, promptBranch, trackedBranchOptions),
 		[availableProjects, promptBranch, trackedBranchOptions],
 	);
-	const stepAvailableProjects = useMemo(
+	const flowAvailableProjects = useMemo(
 		() => isChatPreflightMode ? availableProjects : defaultFlowAvailableProjects,
 		[availableProjects, defaultFlowAvailableProjects, isChatPreflightMode],
 	);
-	const stepProjects = useMemo(
+	const step1AvailableProjects = useMemo(
+		() => availableProjects,
+		[availableProjects],
+	);
+	const step1Projects = useMemo(
 		() => isChatPreflightMode
 			? (snapshot?.projects || [])
-			: collectGitOverlayActionableProjects(snapshot?.projects || [], promptBranch, trackedBranchOptions),
-		[isChatPreflightMode, promptBranch, snapshot, trackedBranchOptions],
+			: step1AvailableProjects,
+		[isChatPreflightMode, snapshot, step1AvailableProjects],
 	);
 	const startChatBranchMismatches = useMemo(
 		() => collectGitOverlayStartChatBranchMismatches(availableProjects, promptBranch, trackedBranchOptions),
 		[availableProjects, promptBranch, trackedBranchOptions],
 	);
 	const defaultStep1BranchMismatches = useMemo(
-		() => collectGitOverlayDefaultStepBranchMismatches(stepAvailableProjects, promptBranch, trackedBranchOptions),
-		[stepAvailableProjects, promptBranch, trackedBranchOptions],
+		() => collectGitOverlayDefaultStepBranchMismatches(step1AvailableProjects, promptBranch, trackedBranchOptions),
+		[step1AvailableProjects, promptBranch, trackedBranchOptions],
 	);
 	const projectsWithChanges = useMemo(
-		() => stepAvailableProjects.filter(project => countProjectChanges(project) > 0),
-		[stepAvailableProjects],
+		() => flowAvailableProjects.filter(project => countProjectChanges(project) > 0),
+		[flowAvailableProjects],
 	);
 	const totalChangedFiles = useMemo(
 		() => projectsWithChanges.reduce((sum, project) => sum + countProjectChanges(project), 0),
 		[projectsWithChanges],
 	);
-	const projectsOffPromptBranch = useMemo(
-		() => stepAvailableProjects.filter(project => !promptBranch || project.currentBranch !== promptBranch),
-		[stepAvailableProjects, promptBranch],
+	const step1ProjectsOffPromptBranch = useMemo(
+		() => step1AvailableProjects.filter(project => !promptBranch || project.currentBranch !== promptBranch),
+		[step1AvailableProjects, promptBranch],
+	);
+	const flowProjectsOffPromptBranch = useMemo(
+		() => flowAvailableProjects.filter(project => !promptBranch || project.currentBranch !== promptBranch),
+		[flowAvailableProjects, promptBranch],
 	);
 	const hasConflicts = useMemo(
 		() => projectsWithChanges.some(project => project.changeGroups.merge.length > 0),
 		[projectsWithChanges],
 	);
-	const allProjectsOnPromptBranch = Boolean(promptBranch) && stepAvailableProjects.length > 0 && projectsOffPromptBranch.length === 0;
+	const allProjectsOnPromptBranch = Boolean(promptBranch) && step1AvailableProjects.length > 0 && step1ProjectsOffPromptBranch.length === 0;
 	const promptBranchProjects = useMemo(
-		() => stepAvailableProjects.filter(project => project.currentBranch === promptBranch),
-		[stepAvailableProjects, promptBranch],
+		() => flowAvailableProjects.filter(project => project.currentBranch === promptBranch),
+		[flowAvailableProjects, promptBranch],
 	);
 	const projectsNeedingSync = useMemo(
-		() => collectGitOverlayProjectsNeedingSync(stepAvailableProjects),
-		[stepAvailableProjects],
+		() => collectGitOverlayProjectsNeedingSync(step1AvailableProjects),
+		[step1AvailableProjects],
 	);
-	const projectsOffSelectedTrackedBranch = useMemo(
-		() => stepAvailableProjects.filter(project => !selectedTrackedBranch || project.currentBranch !== selectedTrackedBranch),
-		[stepAvailableProjects, selectedTrackedBranch],
+	const step1MissingTrackedBranchProjects = useMemo(
+		() => step1AvailableProjects.filter(project => !(resolvedTrackedBranchesByProject[project.project] || '').trim()),
+		[resolvedTrackedBranchesByProject, step1AvailableProjects],
 	);
+	const flowMissingTrackedBranchProjects = useMemo(
+		() => flowAvailableProjects.filter(project => !(resolvedTrackedBranchesByProject[project.project] || '').trim()),
+		[flowAvailableProjects, resolvedTrackedBranchesByProject],
+	);
+	const step1ProjectsOffSelectedTrackedBranch = useMemo(
+		() => step1AvailableProjects.filter(project => {
+			const selectedTrackedBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
+			return !selectedTrackedBranch || project.currentBranch !== selectedTrackedBranch;
+		}),
+		[resolvedTrackedBranchesByProject, step1AvailableProjects],
+	);
+	const step1ProjectsMissingTargetBranch = useMemo(
+		() => step1AvailableProjects.filter(project => !(resolvedTargetBranchesByProject[project.project] || '').trim()),
+		[resolvedTargetBranchesByProject, step1AvailableProjects],
+	);
+	const step1ProjectsBlockedForApply = useMemo(
+		() => step1AvailableProjects.filter((project) => {
+			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
+			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
+			const needsSync = Boolean(project.upstream.trim()) && project.behind > 0;
+
+			if (needsSync || !targetBranch) {
+				return true;
+			}
+
+			if (targetBranch === promptBranch.trim()) {
+				return !sourceBranch;
+			}
+
+			return false;
+		}),
+		[promptBranch, resolvedTargetBranchesByProject, resolvedTrackedBranchesByProject, step1AvailableProjects],
+	);
+	const step1ProjectsReadyForApply = useMemo(
+		() => step1AvailableProjects.filter((project) => {
+			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
+			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
+			const needsSync = Boolean(project.upstream.trim()) && project.behind > 0;
+			if (needsSync || !targetBranch) {
+				return false;
+			}
+			if (targetBranch === promptBranch.trim() && !sourceBranch) {
+				return false;
+			}
+			return project.currentBranch.trim() !== targetBranch;
+		}),
+		[promptBranch, resolvedTargetBranchesByProject, resolvedTrackedBranchesByProject, step1AvailableProjects],
+	);
+	const step1ApplySourceBranches = useMemo(() => {
+		const result: Record<string, string> = {};
+		for (const project of step1ProjectsReadyForApply) {
+			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
+			if (!sourceBranch) {
+				continue;
+			}
+			result[project.project] = sourceBranch;
+		}
+		return result;
+	}, [resolvedTrackedBranchesByProject, step1ProjectsReadyForApply]);
+	const step1ApplyTargetBranches = useMemo(() => {
+		const result: Record<string, string> = {};
+		for (const project of step1ProjectsReadyForApply) {
+			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
+			if (!targetBranch) {
+				continue;
+			}
+			result[project.project] = targetBranch;
+		}
+		return result;
+	}, [resolvedTargetBranchesByProject, step1ProjectsReadyForApply]);
 	const projectsNeedingPush = useMemo(
 		() => promptBranchProjects.filter(project => !project.upstream || project.ahead > 0),
 		[promptBranchProjects],
@@ -565,17 +837,17 @@ export const GitOverlay: React.FC<Props> = ({
 		[projectValidations, projectsWithChanges],
 	);
 	const allChangedProjectsReadyForCommit = projectsWithChanges.length > 0 && projectsReadyForCommit.length === projectsWithChanges.length;
-	const canPreparePromptBranch = Boolean(promptBranch) && Boolean(selectedTrackedBranch);
-	const canSwitchToTrackedBranch = Boolean(selectedTrackedBranch)
-		&& (isChatPreflightMode ? startChatBranchMismatches.length > 0 : projectsOffSelectedTrackedBranch.length > 0);
+	const canPreparePromptBranch = Boolean(promptBranch) && step1AvailableProjects.length > 0 && step1MissingTrackedBranchProjects.length === 0;
+	const canSwitchToTrackedBranch = step1MissingTrackedBranchProjects.length === 0
+		&& (isChatPreflightMode ? startChatBranchMismatches.length > 0 : step1ProjectsOffSelectedTrackedBranch.length > 0);
 	const startChatBranchCheckDone = availableProjects.length > 0 && startChatBranchMismatches.length === 0;
 	const syncRequired = projectsNeedingSync.length > 0;
 	const defaultStep1ReadyOnTrackedBranches = !isChatPreflightMode
 		&& Boolean(promptBranch)
-		&& stepAvailableProjects.length > 0
-		&& projectsOffPromptBranch.length > 0
+		&& step1AvailableProjects.length > 0
+		&& step1ProjectsOffPromptBranch.length > 0
 		&& defaultStep1BranchMismatches.length === 0
-		&& stepAvailableProjects.every(project => trackedBranchOptions.includes(project.currentBranch));
+		&& step1AvailableProjects.every(project => trackedBranchOptions.includes(project.currentBranch));
 	const step1Pending = isChatPreflightMode
 		? !startChatBranchCheckDone || syncRequired
 		: !promptBranch || defaultStep1BranchMismatches.length > 0 || syncRequired;
@@ -588,10 +860,17 @@ export const GitOverlay: React.FC<Props> = ({
 	const shouldShowSwitchToPromptButton = Boolean(promptBranch)
 		&& !allProjectsOnPromptBranch
 		&& (!isChatPreflightMode || isStartChatPreflightMode);
+	const showNoChangesToCommitHint = !isChatPreflightMode
+		&& step1AvailableProjects.length > 0
+		&& projectsWithChanges.length === 0
+		&& step1ProjectsOffPromptBranch.length > 0
+		&& defaultStep1BranchMismatches.length === 0
+		&& !syncRequired;
+	const canApplyAllBranchTargets = step1ProjectsReadyForApply.length > 0 && step1ProjectsBlockedForApply.length === 0;
 	const canGenerateAllCommitMessages = projectsReadyForGenerate.length > 0;
 	const canCommitAllProjects = allChangedProjectsReadyForCommit;
 	const canAttemptPush = Boolean(promptBranch)
-		&& projectsOffPromptBranch.length === 0
+		&& flowProjectsOffPromptBranch.length === 0
 		&& !hasConflicts
 		&& projectsWithChanges.length === 0;
 	const pushRequired = canAttemptPush && projectsNeedingPush.length > 0;
@@ -603,12 +882,22 @@ export const GitOverlay: React.FC<Props> = ({
 		&& !step3Pending
 		&& reviewProjectsWithCli.length > 0
 		&& reviewProjectsMissingRequest.length > 0;
+	const uniqueTrackedBranches = useMemo(
+		() => Array.from(new Set(
+			Object.values(resolvedTrackedBranchesByProject)
+				.map(branch => branch.trim())
+				.filter(Boolean),
+		)),
+		[resolvedTrackedBranchesByProject],
+	);
 	const canMerge = Boolean(promptBranch)
-		&& Boolean(selectedTrackedBranch)
-		&& projectsOffPromptBranch.length === 0
+		&& flowAvailableProjects.length > 0
+		&& flowMissingTrackedBranchProjects.length === 0
+		&& flowProjectsOffPromptBranch.length === 0
 		&& !hasConflicts
 		&& projectsWithChanges.length === 0
 		&& !step4Pending;
+	const showEmptyStep1Hint = !isChatPreflightMode && step1Projects.length === 0;
 	const stepAvailability: Record<SectionKey, boolean> = {
 		step1: true,
 		step2: !step1Pending,
@@ -635,7 +924,8 @@ export const GitOverlay: React.FC<Props> = ({
 			: doneStatus === 'report'
 				? t('status.report')
 				: '';
-	const isSwitchingTrackedBranch = Boolean(selectedTrackedBranch) && busyAction === `switchBranch:${selectedTrackedBranch}`;
+	const isSwitchingTrackedBranch = busyAction === 'switchBranch:tracked';
+	const isApplyingAllBranchTargets = busyAction === 'applyBranchTargets:all';
 	const step1Title = isStartChatPreflightMode
 		? t('editor.gitOverlayStartChatCheckTitle')
 		: isOpenChatPreflightMode
@@ -647,9 +937,6 @@ export const GitOverlay: React.FC<Props> = ({
 			? t('editor.gitOverlayOpenChatCheckHint')
 			: t('editor.gitOverlayStepSwitchHint');
 	const step1SuccessMessage = isChatPreflightMode ? t('editor.gitOverlayStartChatBranchCheckReady') : t('editor.gitOverlayAllProjectsOnPrompt');
-	const step1TargetBranchValue = isChatPreflightMode
-		? ([selectedTrackedBranch.trim(), promptBranch].filter(Boolean).join(' / ') || '—')
-		: (promptBranch || '—');
 	const dialogFooterHint = isStartChatPreflightMode
 		? (startChatBranchCheckDone ? t('editor.gitOverlayStartChatReadyHint') : t('editor.gitOverlayStartChatBlockedHint'))
 		: isOpenChatPreflightMode
@@ -659,21 +946,23 @@ export const GitOverlay: React.FC<Props> = ({
 	useEffect(() => {
 		if (!snapshot) {
 			setReviewDrafts({});
-			lastSyncedTrackedBranchRef.current = '';
+			lastSyncedTrackedBranchesRef.current = {};
 			return;
 		}
 
 		const totalProjects = snapshot.projects.length;
-		const previousTrackedBranch = lastSyncedTrackedBranchRef.current;
+		const previousTrackedBranches = lastSyncedTrackedBranchesRef.current;
 		setReviewDrafts((prev) => {
 			const next: Record<string, ReviewDraft> = {};
 			for (const project of snapshot.projects) {
 				const previousDraft = prev[project.project];
-				const options = buildProjectTargetBranchOptions(project, trackedBranchOptions);
+				const selectedTrackedBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
+				const options = buildProjectTargetBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
 				const preferredTargetBranch = (project.review.request?.targetBranch || '').trim()
 					|| selectedTrackedBranch
 					|| options[0]
 					|| '';
+				const previousTrackedBranch = (previousTrackedBranches[project.project] || '').trim();
 				const canSyncTargetBranch = !previousDraft
 					|| !previousDraft.manualTargetBranch
 					|| !previousDraft.targetBranch
@@ -697,11 +986,14 @@ export const GitOverlay: React.FC<Props> = ({
 			}
 			return next;
 		});
-		lastSyncedTrackedBranchRef.current = selectedTrackedBranch;
-	}, [promptTaskNumber, promptTitle, selectedTrackedBranch, snapshot, trackedBranchOptions]);
+		lastSyncedTrackedBranchesRef.current = resolvedTrackedBranchesByProject;
+	}, [preferredTrackedBranch, promptTaskNumber, promptTitle, resolvedTrackedBranchesByProject, snapshot, trackedBranchOptions]);
 
 	useEffect(() => {
 		if (!open) {
+			setSelectedTrackedBranchesByProject({});
+			setSelectedTargetBranchesByProject({});
+			lastSyncedTrackedBranchesRef.current = {};
 			return;
 		}
 
@@ -716,39 +1008,54 @@ export const GitOverlay: React.FC<Props> = ({
 		return () => window.removeEventListener('keydown', handleKeyDown);
 	}, [open, onClose]);
 
-	useEffect(() => {
-		if (!open) {
-			userSelectedTrackedBranchRef.current = false;
+	const handleTrackedBranchSelection = useCallback((projectName: string, trackedBranch: string) => {
+		const normalizedTrackedBranch = trackedBranch.trim();
+		const nextSelections = {
+			...selectedTrackedBranchesByProject,
+			[projectName]: normalizedTrackedBranch,
+		};
+		if (!normalizedTrackedBranch) {
+			delete nextSelections[projectName];
 		}
-	}, [open]);
 
-	const handleTrackedBranchSelection = useCallback((trackedBranch: string) => {
-		userSelectedTrackedBranchRef.current = true;
-		setSelectedTrackedBranch(trackedBranch);
-		onTrackedBranchChange?.(trackedBranch);
-	}, [onTrackedBranchChange]);
+		setSelectedTrackedBranchesByProject(nextSelections);
+		onTrackedBranchChange?.(
+			resolveTrackedBranchesByProject(
+				snapshot?.projects || [],
+				trackedBranchOptions,
+				nextSelections,
+				normalizedPreferredTrackedBranchesByProject,
+				preferredTrackedBranch,
+			),
+		);
+	}, [normalizedPreferredTrackedBranchesByProject, onTrackedBranchChange, preferredTrackedBranch, selectedTrackedBranchesByProject, snapshot, trackedBranchOptions]);
 
-	useEffect(() => {
-		if (trackedBranchOptions.length === 0) {
-			setSelectedTrackedBranch('');
+	const handleTargetBranchSelection = useCallback((projectName: string, targetBranch: string) => {
+		const normalizedTargetBranch = targetBranch.trim();
+		setSelectedTargetBranchesByProject((prev) => {
+			const nextSelections = {
+				...prev,
+				[projectName]: normalizedTargetBranch,
+			};
+			if (!normalizedTargetBranch) {
+				delete nextSelections[projectName];
+			}
+			return nextSelections;
+		});
+	}, []);
+
+	const handleApplyProjectBranchTargets = useCallback((projectName: string) => {
+		const sourceBranch = (resolvedTrackedBranchesByProject[projectName] || '').trim();
+		const targetBranch = (resolvedTargetBranchesByProject[projectName] || '').trim();
+		if (!targetBranch) {
 			return;
 		}
-
-		const normalizedPreferredTrackedBranch = (preferredTrackedBranch || '').trim();
-		const preferredSelection = normalizedPreferredTrackedBranch && trackedBranchOptions.includes(normalizedPreferredTrackedBranch)
-			? normalizedPreferredTrackedBranch
-			: '';
-		const currentTrackedBranch = availableProjects.find(project => trackedBranchOptions.includes(project.currentBranch))?.currentBranch;
-		const nextSelection = preferredSelection || currentTrackedBranch || trackedBranchOptions[0];
-		const hasValidSelection = trackedBranchOptions.includes(selectedTrackedBranch);
-		const shouldApplyPreferredSelection = Boolean(preferredSelection)
-			&& !userSelectedTrackedBranchRef.current
-			&& selectedTrackedBranch !== preferredSelection;
-
-		if (!hasValidSelection || shouldApplyPreferredSelection) {
-			setSelectedTrackedBranch(nextSelection);
-		}
-	}, [availableProjects, preferredTrackedBranch, selectedTrackedBranch, trackedBranchOptions]);
+		onApplyBranchTargets?.(
+			sourceBranch ? { [projectName]: sourceBranch } : {},
+			{ [projectName]: targetBranch },
+			projectName,
+		);
+	}, [onApplyBranchTargets, resolvedTargetBranchesByProject, resolvedTrackedBranchesByProject]);
 
 	useEffect(() => {
 		if (!snapshot) {
@@ -855,7 +1162,9 @@ export const GitOverlay: React.FC<Props> = ({
 	const isMerging = busyAction === 'mergePromptBranch';
 	const isGeneratingAll = busyAction === 'generateCommitMessage:all';
 	const isCommittingAll = busyAction === 'commitStaged:all';
-	const stayOnTrackedBranchLabel = t('editor.gitOverlayStayOnTrackedBranchNamed').replace('{branch}', selectedTrackedBranch || t('editor.gitOverlayTrackedBranchMissing'));
+	const stayOnTrackedBranchLabel = uniqueTrackedBranches.length === 1
+		? t('editor.gitOverlayStayOnTrackedBranchNamed').replace('{branch}', uniqueTrackedBranches[0])
+		: t('editor.gitOverlayStayOnTrackedBranch');
 	const isSectionCollapsed = (section: SectionKey): boolean => collapsedSections[section] ?? autoCollapsedSections[section];
 	const isSectionAutoCollapsed = (section: SectionKey): boolean => collapsedSections[section] === undefined && autoCollapsedSections[section];
 
@@ -940,35 +1249,15 @@ export const GitOverlay: React.FC<Props> = ({
 								isSectionAutoCollapsed('step1') ? <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div> : null
 							) : (
 							<div style={styles.sectionBody}>
-								<div style={styles.twoColGrid}>
-									<div style={styles.fieldBlock}>
-										<label style={styles.label}>{t('editor.gitOverlayTrackedBranch')}</label>
-										<select
-											style={{
-												...styles.select,
-												...(!selectedTrackedBranch ? styles.errorField : null),
-											}}
-											value={selectedTrackedBranch}
-											onChange={(event) => handleTrackedBranchSelection(event.target.value)}
-										>
-											<option value="">{t('editor.gitOverlayTrackedBranchMissing')}</option>
-											{trackedBranchOptions.map(branch => (
-												<option key={branch} value={branch}>{branch}</option>
-											))}
-										</select>
-										{!selectedTrackedBranch ? <div style={styles.errorText}>{t('editor.gitOverlaySelectNeedsValue')}</div> : null}
+								<div style={styles.fieldBlock}>
+									<label style={styles.label}>{t('editor.gitOverlayPromptBranch')}</label>
+									<div style={{
+										...styles.readonlyField,
+										...(!promptBranch ? styles.errorField : null),
+									}}>
+										{promptBranch || t('editor.gitOverlayPromptBranchMissing')}
 									</div>
-
-									<div style={styles.fieldBlock}>
-										<label style={styles.label}>{t('editor.gitOverlayPromptBranch')}</label>
-										<div style={{
-											...styles.readonlyField,
-											...(!promptBranch ? styles.errorField : null),
-										}}>
-											{promptBranch || t('editor.gitOverlayPromptBranchMissing')}
-										</div>
-										{!promptBranch ? <div style={styles.errorText}>{t('editor.gitOverlayFieldNeedsValue')}</div> : null}
-									</div>
+									{!promptBranch ? <div style={styles.errorText}>{t('editor.gitOverlayFieldNeedsValue')}</div> : null}
 								</div>
 
 								{trackedBranchOptions.length === 0 ? <InlineHint message={t('editor.gitOverlayNoTrackedBranches')} tone="error" /> : null}
@@ -995,45 +1284,125 @@ export const GitOverlay: React.FC<Props> = ({
 												? <InlineHint message={t('editor.gitOverlayPullChangesRequired')} tone="error" />
 											: null)}
 
-								{stepProjects.length > 0 ? (
-								<div style={styles.projectTable}>
+									{showEmptyStep1Hint ? <InlineHint message={t('editor.gitOverlayStepSwitchNothingToDo')} tone="info" /> : null}
+									{showNoChangesToCommitHint ? <InlineHint message={t('editor.gitOverlayStepSwitchNoChangesToCommit')} tone="info" /> : null}
+
+								{step1Projects.length > 0 ? (
+									<div style={styles.projectTable}>
 									<div style={styles.projectTableHeader}>
 										<span>{t('editor.gitOverlayProjectName')}</span>
-										<span>{t('editor.gitOverlayProjectCurrentBranch')}</span>
-										<span>{t('editor.gitOverlayProjectTargetBranch')}</span>
-										<span>{t('editor.gitOverlayProjectChanges')}</span>
-										<span>{t('editor.gitOverlayProjectState')}</span>
+										<span style={styles.projectTableHeaderCentered}>{t('editor.gitOverlayProjectCurrentBranch')}</span>
+											<span>{t('editor.gitOverlayProjectSourceBranch')}</span>
+											<span>{t('editor.gitOverlayProjectExpectedBranch')}</span>
+										<span style={styles.projectTableHeaderCentered}>{t('editor.gitOverlayProjectChanges')}</span>
+										<span style={styles.projectTableHeaderCentered}>{t('editor.gitOverlayProjectState')}</span>
+											<span>{t('editor.gitOverlayProjectAction')}</span>
 									</div>
-									{stepProjects.map((project) => {
-										const validation = projectValidations.get(project.project);
-										const branchMismatch = isChatPreflightMode
-											? !isGitOverlayStartChatBranchAllowed(project.currentBranch, promptBranch, trackedBranchOptions)
-											: !isGitOverlayDefaultStepBranchAllowed(project.currentBranch, promptBranch, trackedBranchOptions);
-										const rowHasError = !project.available || branchMismatch;
+									{step1Projects.map((project) => {
+											const currentBranch = project.currentBranch.trim();
+											const selectedTrackedBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
+											const selectedTargetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
+											const projectTrackedBranchOptions = buildProjectTrackedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
+											const projectExpectedBranchOptions = buildProjectExpectedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
+											const projectNeedsSync = project.available && Boolean(project.upstream.trim()) && project.behind > 0;
+											const rowOnPrompt = Boolean(promptBranch) && currentBranch === promptBranch && selectedTargetBranch === promptBranch;
+											const rowCanApply = project.available
+												&& !projectNeedsSync
+												&& Boolean(selectedTargetBranch)
+												&& (selectedTargetBranch !== promptBranch || Boolean(selectedTrackedBranch))
+												&& currentBranch !== selectedTargetBranch;
+											const rowNeedsDecision = project.available
+												&& !rowOnPrompt
+												&& (!selectedTrackedBranch || !selectedTargetBranch || projectNeedsSync || currentBranch !== selectedTargetBranch);
+											const rowStatusLabel = !project.available
+												? t('editor.gitOverlayStateUnavailable')
+												: projectNeedsSync
+													? t('editor.gitOverlayStateNeedsSync')
+													: !selectedTrackedBranch
+														? t('editor.gitOverlayStateNeedsSource')
+														: !selectedTargetBranch
+															? t('editor.gitOverlayStateNeedsTarget')
+															: rowOnPrompt
+																? t('editor.gitOverlayStateOnPrompt')
+																: currentBranch === selectedTargetBranch
+																	? t('editor.gitOverlayStateReady')
+																	: t('editor.gitOverlayStateNeedsSwitch');
+											const rowActionLoading = busyAction === `applyBranchTargets:${project.project}` || isApplyingAllBranchTargets;
+											const rowStyle = rowOnPrompt
+												? styles.projectTableRowSuccess
+												: (!project.available ? styles.projectTableRowMuted : rowNeedsDecision ? styles.projectTableRowDecision : null);
 										return (
 											<div key={project.project} style={{
 												...styles.projectTableRow,
-												...(rowHasError ? styles.projectTableRowError : null),
+													...(rowStyle || null),
 											}}>
 												<span style={styles.projectName}>{project.project}</span>
-												<span style={{
-													...styles.branchValue,
-													...(branchMismatch ? styles.branchValueError : null),
-												}}>
-													{project.currentBranch || '—'}
+												<span style={styles.projectTableCellCentered}>
+														{currentBranch || '—'}
+													</span>
+													<span style={styles.branchValue}>
+													<select
+														style={{
+															...styles.select,
+															paddingTop: 6,
+															paddingBottom: 6,
+															minWidth: 0,
+															...(!selectedTrackedBranch ? styles.errorField : null),
+														}}
+														value={selectedTrackedBranch}
+														onChange={(event) => handleTrackedBranchSelection(project.project, event.target.value)}
+														disabled={projectTrackedBranchOptions.length === 0}
+													>
+														<option value="">{t('editor.gitOverlaySelectPlaceholder')}</option>
+														{projectTrackedBranchOptions.map(branch => (
+															<option key={`${project.project}-${branch}`} value={branch}>{branch}</option>
+														))}
+													</select>
 												</span>
-												<span style={styles.branchValue}>{step1TargetBranchValue}</span>
-												<span style={styles.projectMeta}>{buildProjectChangesSummary(project, t)}</span>
-												<span style={{
-													...styles.statePill,
-													...(!project.available ? styles.statePillMuted : branchMismatch ? styles.statePillError : styles.statePillOk),
-												}}>
-													{!project.available
-														? t('editor.gitOverlayStateUnavailable')
-														: branchMismatch
-															? t('editor.gitOverlayStateNeedsSwitch')
-															: t('editor.gitOverlayStateReady')}
-												</span>
+													<span style={styles.branchValue}>
+														<select
+															style={{
+																...styles.select,
+																paddingTop: 6,
+																paddingBottom: 6,
+																minWidth: 0,
+																...(!selectedTargetBranch ? styles.errorField : null),
+															}}
+															value={selectedTargetBranch}
+															onChange={(event) => handleTargetBranchSelection(project.project, event.target.value)}
+															disabled={projectExpectedBranchOptions.length === 0}
+														>
+															<option value="">{t('editor.gitOverlaySelectPlaceholder')}</option>
+															{projectExpectedBranchOptions.map(branch => (
+																<option key={`${project.project}-target-${branch}`} value={branch}>{branch}</option>
+															))}
+														</select>
+													</span>
+													<span style={styles.projectMetaCentered} title={buildProjectChangesSummary(project, t)}>{countProjectChanges(project)}</span>
+												<span style={styles.projectStateCell}>
+													<span style={{
+														...styles.statePill,
+														...(!project.available
+															? styles.statePillMuted
+															: rowOnPrompt
+																? styles.statePillOk
+																: rowNeedsDecision
+																	? styles.statePillError
+																	: styles.statePillInfo),
+													}}>
+														{rowStatusLabel}
+														</span>
+													</span>
+													<span style={styles.projectRowActionCell}>
+														<ActionButton
+															label={t('editor.gitOverlaySwitch')}
+															onClick={() => handleApplyProjectBranchTargets(project.project)}
+															disabled={!rowCanApply}
+															loading={rowActionLoading}
+															variant="primary"
+															size="compact"
+														/>
+													</span>
 											</div>
 										);
 									})}
@@ -1050,30 +1419,12 @@ export const GitOverlay: React.FC<Props> = ({
 											variant="primary"
 										/>
 									) : null}
-									{!isChatPreflightMode ? (
+										{!showEmptyStep1Hint ? (
 										<ActionButton
-											label={t('editor.gitOverlaySwitchAllToTracked')}
-											onClick={() => onSwitchBranch?.(selectedTrackedBranch)}
-											disabled={!canSwitchToTrackedBranch}
-											loading={isSwitchingTrackedBranch}
-											variant="secondary"
-										/>
-									) : null}
-									{shouldShowSwitchToPromptButton ? (
-										<ActionButton
-											label={t('editor.gitOverlaySwitchAllToPrompt')}
-											onClick={() => onEnsurePromptBranch(selectedTrackedBranch)}
-											disabled={!canPreparePromptBranch}
-											loading={isEnsuringPromptBranch}
-											variant="primary"
-										/>
-									) : null}
-									{isChatPreflightMode && startChatBranchMismatches.length > 0 ? (
-										<ActionButton
-											label={t('editor.gitOverlaySwitchAllToTracked')}
-											onClick={() => onSwitchBranch?.(selectedTrackedBranch)}
-											disabled={!canSwitchToTrackedBranch}
-											loading={isSwitchingTrackedBranch}
+												label={t('editor.gitOverlaySwitchAll')}
+												onClick={() => onApplyBranchTargets?.(step1ApplySourceBranches, step1ApplyTargetBranches)}
+												disabled={!canApplyAllBranchTargets}
+												loading={isApplyingAllBranchTargets}
 											variant="primary"
 										/>
 									) : null}
@@ -1270,7 +1621,7 @@ export const GitOverlay: React.FC<Props> = ({
 							) : (
 							<div style={styles.sectionBody}>
 								{!promptBranch ? <InlineHint message={t('editor.gitOverlayPushNeedsPromptBranch')} tone="error" /> : null}
-								{projectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayPushNeedsPromptCheckout')} tone="error" /> : null}
+								{flowProjectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayPushNeedsPromptCheckout')} tone="error" /> : null}
 								{projectsWithChanges.length > 0 ? <InlineHint message={t('editor.gitOverlayPushNeedsCleanState')} tone="error" /> : null}
 								{hasConflicts ? <InlineHint message={t('editor.gitOverlayMergeBlocked')} tone="error" /> : null}
 
@@ -1318,14 +1669,15 @@ export const GitOverlay: React.FC<Props> = ({
 							) : (
 							<div style={styles.sectionBody}>
 								{!promptBranch ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsPromptBranch')} tone="error" /> : null}
-								{projectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsPromptCheckout')} tone="error" /> : null}
+								{flowProjectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsPromptCheckout')} tone="error" /> : null}
 								{projectsWithChanges.length > 0 ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsCleanState')} tone="error" /> : null}
 								{reviewProjects.length === 0 ? <div style={styles.emptyStateInline}>{t('editor.gitOverlayReviewRequestUnsupported')}</div> : null}
 
 								<div style={styles.projectCards}>
 									{reviewProjects.map((project) => {
 										const actionLabel = project.review.remote?.actionLabel || t('editor.gitOverlayReviewRequest');
-										const targetBranchOptions = buildProjectTargetBranchOptions(project, trackedBranchOptions);
+										const selectedTrackedBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
+										const targetBranchOptions = buildProjectTargetBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
 										const draft = reviewDrafts[project.project] || {
 											targetBranch: project.review.request?.targetBranch || selectedTrackedBranch,
 											title: buildGitOverlayReviewRequestTitle({
@@ -1514,8 +1866,8 @@ export const GitOverlay: React.FC<Props> = ({
 								</label>
 
 								{!promptBranch ? <InlineHint message={t('editor.gitOverlayMergeNeedsPromptBranch')} tone="error" /> : null}
-								{!selectedTrackedBranch ? <InlineHint message={t('editor.gitOverlayMergeNeedsTrackedBranch')} tone="error" /> : null}
-								{projectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayMergeNeedsPromptCheckout')} tone="error" /> : null}
+								{flowMissingTrackedBranchProjects.length > 0 ? <InlineHint message={t('editor.gitOverlayMergeNeedsTrackedBranch')} tone="error" /> : null}
+								{flowProjectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayMergeNeedsPromptCheckout')} tone="error" /> : null}
 								{projectsWithChanges.length > 0 ? <InlineHint message={t('editor.gitOverlayMergeNeedsCleanState')} tone="error" /> : null}
 								{hasConflicts ? <InlineHint message={t('editor.gitOverlayMergeBlocked')} tone="error" /> : null}
 								{step4Pending ? <InlineHint message={t('editor.gitOverlayMergeNeedsReviewRequest')} tone="error" /> : null}
@@ -1528,7 +1880,7 @@ export const GitOverlay: React.FC<Props> = ({
 									{!completedActions.merge ? (
 										<ActionButton
 											label={t('editor.gitOverlayMergeNow')}
-											onClick={() => onMergePromptBranch(selectedTrackedBranch, stayOnTrackedBranch)}
+											onClick={() => onMergePromptBranch(resolvedTrackedBranchesByProject, stayOnTrackedBranch)}
 											disabled={!canMerge}
 											loading={isMerging}
 											variant="primary"
@@ -1837,6 +2189,8 @@ const styles: Record<string, CSSProperties> = {
 		fontSize: '13px',
 		fontFamily: 'var(--vscode-font-family)',
 		minHeight: '32px',
+		boxSizing: 'border-box',
+		width: '100%',
 	},
 	textInput: {
 		padding: '6px 8px',
@@ -1981,39 +2335,72 @@ const styles: Record<string, CSSProperties> = {
 		color: 'var(--vscode-testing-iconPassed)',
 	},
 	projectTable: {
+		width: '100%',
+		maxWidth: '100%',
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '4px',
-		overflow: 'hidden',
+		overflowX: 'auto',
+		overflowY: 'hidden',
 	},
 	projectTableHeader: {
 		display: 'grid',
-		gridTemplateColumns: 'minmax(120px, 1fr) minmax(120px, 0.9fr) minmax(120px, 0.9fr) minmax(220px, 1.3fr) minmax(120px, 0.8fr)',
-		gap: '8px',
+		gridTemplateColumns: 'minmax(104px, 1.1fr) minmax(72px, 0.75fr) minmax(98px, 1fr) minmax(98px, 1fr) minmax(64px, 0.45fr) minmax(108px, 0.8fr) minmax(88px, 0.65fr)',
+		gap: '6px',
 		padding: '8px 10px',
 		fontSize: '11px',
 		fontWeight: 600,
 		background: 'var(--vscode-sideBar-background)',
 		color: 'var(--vscode-descriptionForeground)',
+		width: '100%',
+		minWidth: '680px',
+		boxSizing: 'border-box',
+	},
+	projectTableHeaderCentered: {
+		textAlign: 'center',
 	},
 	projectTableRow: {
 		display: 'grid',
-		gridTemplateColumns: 'minmax(120px, 1fr) minmax(120px, 0.9fr) minmax(120px, 0.9fr) minmax(220px, 1.3fr) minmax(120px, 0.8fr)',
-		gap: '8px',
-		padding: '10px',
+		gridTemplateColumns: 'minmax(104px, 1.1fr) minmax(72px, 0.75fr) minmax(98px, 1fr) minmax(98px, 1fr) minmax(64px, 0.45fr) minmax(108px, 0.8fr) minmax(88px, 0.65fr)',
+		gap: '6px',
+		padding: '8px 10px',
 		alignItems: 'center',
 		borderTop: '1px solid var(--vscode-panel-border)',
+		width: '100%',
+		minWidth: '680px',
+		boxSizing: 'border-box',
 	},
 	projectTableRowError: {
 		background: 'color-mix(in srgb, var(--vscode-inputValidation-errorBackground) 50%, transparent)',
 	},
+	projectTableRowDecision: {
+		background: 'color-mix(in srgb, var(--vscode-inputValidation-errorBackground) 58%, transparent)',
+	},
+	projectTableRowSuccess: {
+		background: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 10%, transparent)',
+	},
+	projectTableRowMuted: {
+		opacity: 0.82,
+	},
 	projectName: {
 		fontSize: '13px',
 		fontWeight: 600,
+		minWidth: 0,
 		wordBreak: 'break-word',
 	},
 	branchValue: {
 		fontSize: '12px',
 		color: 'var(--vscode-foreground)',
+		minWidth: 0,
+		wordBreak: 'break-word',
+	},
+	projectTableCellCentered: {
+		display: 'flex',
+		justifyContent: 'center',
+		alignItems: 'center',
+		textAlign: 'center',
+		fontSize: '12px',
+		color: 'var(--vscode-foreground)',
+		minWidth: 0,
 		wordBreak: 'break-word',
 	},
 	branchValueError: {
@@ -2025,6 +2412,24 @@ const styles: Record<string, CSSProperties> = {
 		color: 'var(--vscode-descriptionForeground)',
 		wordBreak: 'break-word',
 	},
+	projectMetaCentered: {
+		display: 'flex',
+		justifyContent: 'center',
+		alignItems: 'center',
+		fontSize: '12px',
+		color: 'var(--vscode-descriptionForeground)',
+		textAlign: 'center',
+	},
+	projectStateCell: {
+		display: 'flex',
+		justifyContent: 'center',
+		alignItems: 'center',
+		minWidth: 0,
+	},
+	projectRowActionCell: {
+		display: 'flex',
+		justifyContent: 'flex-end',
+	},
 	statePill: {
 		display: 'inline-flex',
 		alignItems: 'center',
@@ -2034,6 +2439,9 @@ const styles: Record<string, CSSProperties> = {
 		fontSize: '11px',
 		fontWeight: 600,
 		width: 'fit-content',
+		maxWidth: '100%',
+		minWidth: 0,
+		textAlign: 'center',
 	},
 	statePillOk: {
 		background: 'var(--vscode-inputValidation-infoBackground)',

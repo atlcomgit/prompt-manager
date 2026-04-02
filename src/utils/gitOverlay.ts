@@ -282,7 +282,7 @@ export function resolveExistingGitOverlayTrackedBranches<T extends GitOverlayTra
 
 	if (normalizedTrackedBranches.length > 0) {
 		return normalizedTrackedBranches.filter(branchName => projectsToInspect.some(project => project.branches.some(branch => (
-			branch.kind === 'tracked'
+			(branch.kind === 'tracked' || branch.kind === 'current')
 			&& branch.exists
 			&& branch.name.trim() === branchName
 		))));

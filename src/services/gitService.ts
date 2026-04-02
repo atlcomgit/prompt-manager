@@ -797,6 +797,26 @@ export class GitService {
 		await this.runGitFileMutation(projectPath, ['checkout', '-b', branchName, '--track', remoteBranchRef]);
 	}
 
+	private async pullCurrentBranchIfTracked(projectPath: string): Promise<boolean> {
+		const currentBranch = await this.getCurrentBranch(projectPath);
+		if (!currentBranch) {
+			return false;
+		}
+
+		const upstream = await this.runGitFileCommandOptional(projectPath, ['config', `branch.${currentBranch}.merge`]);
+		if (!upstream) {
+			return false;
+		}
+
+		await this.runGitFileMutation(projectPath, ['pull', '--ff-only']);
+		return true;
+	}
+
+	private async ensureBranchCheckedOutAndPulled(projectPath: string, branchName: string): Promise<void> {
+		await this.ensureBranchCheckedOut(projectPath, branchName);
+		await this.pullCurrentBranchIfTracked(projectPath);
+	}
+
 	private async getBranchRemote(projectPath: string, branchName: string): Promise<string> {
 		const configuredRemote = await this.runGitFileCommandOptional(projectPath, ['config', `branch.${branchName}.remote`]);
 		if (configuredRemote) {
@@ -1575,28 +1595,142 @@ export class GitService {
 		};
 	}
 
+	private normalizeTrackedBranchesByProject(
+		projectNames: string[],
+		trackedBranch: string,
+		trackedBranchesByProject?: Record<string, string>,
+	): Record<string, string> {
+		const normalizedFallbackTrackedBranch = (trackedBranch || '').trim();
+		const normalizedSelections: Record<string, string> = {};
+
+		for (const project of projectNames) {
+			const normalizedProject = project.trim();
+			if (!normalizedProject) {
+				continue;
+			}
+
+			const mappedBranch = typeof trackedBranchesByProject?.[normalizedProject] === 'string'
+				? trackedBranchesByProject[normalizedProject].trim()
+				: '';
+			const resolvedBranch = mappedBranch || normalizedFallbackTrackedBranch;
+			if (!resolvedBranch) {
+				continue;
+			}
+
+			normalizedSelections[normalizedProject] = resolvedBranch;
+		}
+
+		return normalizedSelections;
+	}
+
+	private async switchProjectBranch(
+		project: string,
+		projectPath: string,
+		targetBranch: string,
+		allowedBaseBranches: Set<string>,
+	): Promise<void> {
+		this.logDebug('switchBranch.project.start', {
+			project,
+			projectPath,
+			targetBranch,
+		});
+
+		const hasLocalBranch = await this.branchExistsLocally(projectPath, targetBranch);
+		this.logDebug('switchBranch.project.localBranchChecked', {
+			project,
+			targetBranch,
+			hasLocalBranch,
+		});
+		if (!hasLocalBranch) {
+			const remoteBranchRef = await this.findRemoteBranchRef(projectPath, targetBranch);
+			this.logDebug('switchBranch.project.remoteBranchResolved', {
+				project,
+				targetBranch,
+				remoteBranchRef: remoteBranchRef || null,
+			});
+			if (remoteBranchRef) {
+				this.logDebug('switchBranch.project.checkoutTracked.start', {
+					project,
+					targetBranch,
+					remoteBranchRef,
+				});
+				await this.ensureBranchCheckedOutAndPulled(projectPath, targetBranch);
+				this.logDebug('switchBranch.project.checkoutTracked.done', {
+					project,
+					targetBranch,
+				});
+				return;
+			}
+
+			const currentBranch = await this.getCurrentBranch(projectPath);
+			this.logDebug('switchBranch.project.currentBranchResolved', {
+				project,
+				targetBranch,
+				currentBranch,
+			});
+			if (!allowedBaseBranches.has(currentBranch)) {
+				this.logDebug('switchBranch.project.disallowedBaseBranch', {
+					project,
+					targetBranch,
+					currentBranch,
+				});
+				throw new Error(
+					`ветка "${targetBranch}" не существует. Создание разрешено только из ${Array.from(allowedBaseBranches).join('/')} (текущая: ${currentBranch || 'unknown'}).`
+				);
+			}
+
+			this.logDebug('switchBranch.project.createAndCheckout.start', {
+				project,
+				targetBranch,
+				currentBranch,
+			});
+			await this.runGitFileMutation(projectPath, ['checkout', '-b', targetBranch]);
+			this.logDebug('switchBranch.project.createAndCheckout.done', {
+				project,
+				targetBranch,
+			});
+			return;
+		}
+
+		this.logDebug('switchBranch.project.checkoutExisting.start', {
+			project,
+			targetBranch,
+		});
+		await this.runGitFileMutation(projectPath, ['checkout', targetBranch]);
+		await this.pullCurrentBranchIfTracked(projectPath);
+		this.logDebug('switchBranch.project.checkoutExisting.done', {
+			project,
+			targetBranch,
+		});
+	}
+
 	/** Switch branch in specified projects */
 	async switchBranch(
 		projectPaths: Map<string, string>,
 		projectNames: string[],
 		branch: string,
 		configuredAllowedBranches?: string[],
-	): Promise<{ success: boolean; errors: string[] }> {
+	): Promise<GitMultiProjectResult> {
 		const errors: string[] = [];
+		const changedProjects: string[] = [];
+		const skippedProjects: string[] = [];
 		const targetBranch = branch.trim();
+		const effectiveProjects = projectNames.length > 0
+			? projectNames
+			: Array.from(projectPaths.keys());
 		const allowedBaseBranches = this.getAllowedBaseBranches(configuredAllowedBranches);
 
 		if (!targetBranch) {
-			return { success: false, errors: ['Название ветки пустое'] };
+			return { success: false, errors: ['Название ветки пустое'], changedProjects, skippedProjects };
 		}
 
 		this.logDebug('switchBranch.start', {
 			targetBranch,
-			projectNames,
+			projectNames: effectiveProjects,
 			allowedBaseBranches: Array.from(allowedBaseBranches),
 		});
 
-		for (const project of projectNames) {
+		for (const project of effectiveProjects) {
 			const projectPath = projectPaths.get(project);
 			if (!projectPath) {
 				this.logDebug('switchBranch.project.missingPath', {
@@ -1608,77 +1742,8 @@ export class GitService {
 			}
 
 			try {
-				this.logDebug('switchBranch.project.start', {
-					project,
-					projectPath,
-					targetBranch,
-				});
-				const hasLocalBranch = await this.branchExistsLocally(projectPath, targetBranch);
-				this.logDebug('switchBranch.project.localBranchChecked', {
-					project,
-					targetBranch,
-					hasLocalBranch,
-				});
-				if (!hasLocalBranch) {
-					const remoteBranchRef = await this.findRemoteBranchRef(projectPath, targetBranch);
-					this.logDebug('switchBranch.project.remoteBranchResolved', {
-						project,
-						targetBranch,
-						remoteBranchRef: remoteBranchRef || null,
-					});
-					if (remoteBranchRef) {
-						this.logDebug('switchBranch.project.checkoutTracked.start', {
-							project,
-							targetBranch,
-							remoteBranchRef,
-						});
-						await this.ensureBranchCheckedOut(projectPath, targetBranch);
-						this.logDebug('switchBranch.project.checkoutTracked.done', {
-							project,
-							targetBranch,
-						});
-						continue;
-					}
-
-					const currentBranch = await this.getCurrentBranch(projectPath);
-					this.logDebug('switchBranch.project.currentBranchResolved', {
-						project,
-						targetBranch,
-						currentBranch,
-					});
-					if (!allowedBaseBranches.has(currentBranch)) {
-						this.logDebug('switchBranch.project.disallowedBaseBranch', {
-							project,
-							targetBranch,
-							currentBranch,
-						});
-						errors.push(
-							`${project}: ветка "${targetBranch}" не существует. Создание разрешено только из ${Array.from(allowedBaseBranches).join('/')} (текущая: ${currentBranch || 'unknown'}).`
-						);
-						continue;
-					}
-
-					this.logDebug('switchBranch.project.createAndCheckout.start', {
-						project,
-						targetBranch,
-						currentBranch,
-					});
-					await this.runGitFileMutation(projectPath, ['checkout', '-b', targetBranch]);
-					this.logDebug('switchBranch.project.createAndCheckout.done', {
-						project,
-						targetBranch,
-					});
-				} else {
-					this.logDebug('switchBranch.project.checkoutExisting.start', {
-						project,
-						targetBranch,
-					});
-					await this.runGitFileMutation(projectPath, ['checkout', targetBranch]);
-					this.logDebug('switchBranch.project.checkoutExisting.done', {
-						project,
-						targetBranch,
-					});
-				}
+				await this.switchProjectBranch(project, projectPath, targetBranch, allowedBaseBranches);
+				changedProjects.push(project);
 			} catch (err: any) {
 				this.logDebug('switchBranch.project.error', {
 					project,
@@ -1692,11 +1757,133 @@ export class GitService {
 		this.logDebug('switchBranch.finish', {
 			targetBranch,
 			success: errors.length === 0,
+			changedProjects,
 			errorCount: errors.length,
 			errors,
 		});
 
-		return { success: errors.length === 0, errors };
+		return { success: errors.length === 0, errors, changedProjects, skippedProjects };
+	}
+
+	async switchBranchesByProject(
+		projectPaths: Map<string, string>,
+		projectNames: string[],
+		trackedBranch: string,
+		trackedBranchesByProject?: Record<string, string>,
+		configuredAllowedBranches?: string[],
+	): Promise<GitMultiProjectResult> {
+		const errors: string[] = [];
+		const changedProjects: string[] = [];
+		const skippedProjects: string[] = [];
+		const effectiveProjects = projectNames.length > 0
+			? projectNames
+			: Array.from(projectPaths.keys());
+		const branchSelections = this.normalizeTrackedBranchesByProject(
+			effectiveProjects,
+			trackedBranch,
+			trackedBranchesByProject,
+		);
+		const allowedBaseBranches = this.getAllowedBaseBranches(configuredAllowedBranches);
+
+		this.logDebug('switchBranchesByProject.start', {
+			projectNames: effectiveProjects,
+			branchSelections,
+			allowedBaseBranches: Array.from(allowedBaseBranches),
+		});
+
+		for (const project of effectiveProjects) {
+			const projectPath = projectPaths.get(project);
+			if (!projectPath) {
+				errors.push(`${project}: workspace folder not found`);
+				continue;
+			}
+
+			const targetBranch = (branchSelections[project] || '').trim();
+			if (!targetBranch) {
+				errors.push(`${project}: не выбрана tracked-ветка.`);
+				continue;
+			}
+
+			try {
+				await this.switchProjectBranch(project, projectPath, targetBranch, allowedBaseBranches);
+				changedProjects.push(project);
+			} catch (err: any) {
+				errors.push(`${project}: ${err.message || 'Unknown error'}`);
+			}
+		}
+
+		this.logDebug('switchBranchesByProject.finish', {
+			success: errors.length === 0,
+			changedProjects,
+			errorCount: errors.length,
+			errors,
+		});
+
+		return { success: errors.length === 0, errors, changedProjects, skippedProjects };
+	}
+
+	async applyBranchTargetsByProject(
+		projectPaths: Map<string, string>,
+		projectNames: string[],
+		promptBranch: string,
+		sourceBranchesByProject?: Record<string, string>,
+		targetBranchesByProject?: Record<string, string>,
+		configuredAllowedBranches?: string[],
+	): Promise<GitMultiProjectResult> {
+		const effectiveProjects = projectNames.length > 0
+			? projectNames
+			: Array.from(projectPaths.keys());
+		const normalizedPromptBranch = promptBranch.trim();
+		const sourceSelections = this.normalizeTrackedBranchesByProject(
+			effectiveProjects,
+			'',
+			sourceBranchesByProject,
+		);
+		const targetSelections = this.normalizeTrackedBranchesByProject(
+			effectiveProjects,
+			'',
+			targetBranchesByProject,
+		);
+		const allowedBaseBranches = this.getAllowedBaseBranches(configuredAllowedBranches);
+
+		this.logDebug('applyBranchTargetsByProject.start', {
+			projectNames: effectiveProjects,
+			normalizedPromptBranch,
+			sourceSelections,
+			targetSelections,
+			allowedBaseBranches: Array.from(allowedBaseBranches),
+		});
+
+		return this.runProjectMutation(projectPaths, effectiveProjects, async (project, projectPath) => {
+			const targetBranch = (targetSelections[project] || '').trim();
+			if (!targetBranch) {
+				throw new Error('Не выбрана ожидаемая ветка.');
+			}
+
+			const currentBranch = await this.getCurrentBranch(projectPath);
+			if (currentBranch === targetBranch) {
+				return false;
+			}
+
+			if (normalizedPromptBranch && targetBranch === normalizedPromptBranch) {
+				const sourceBranch = (sourceSelections[project] || '').trim();
+				if (!sourceBranch) {
+					throw new Error('Не выбрана исходная tracked-ветка для создания ветки промпта.');
+				}
+
+				await this.ensureBranchCheckedOutAndPulled(projectPath, sourceBranch);
+				if (await this.branchExistsLocally(projectPath, normalizedPromptBranch)) {
+					await this.runGitFileMutation(projectPath, ['checkout', normalizedPromptBranch]);
+					await this.pullCurrentBranchIfTracked(projectPath);
+					return;
+				}
+
+				await this.runGitFileMutation(projectPath, ['checkout', '-b', normalizedPromptBranch, sourceBranch]);
+				return;
+			}
+
+			await this.switchProjectBranch(project, projectPath, targetBranch, allowedBaseBranches);
+		});
 	}
 
 	/** Get current branch name */
@@ -1985,23 +2172,34 @@ export class GitService {
 		projectNames: string[],
 		promptBranch: string,
 		trackedBranch: string,
+		trackedBranchesByProject?: Record<string, string>,
 	): Promise<GitMultiProjectResult> {
 		const normalizedPromptBranch = promptBranch.trim();
-		const normalizedTrackedBranch = trackedBranch.trim();
+		const effectiveProjects = projectNames.length > 0
+			? projectNames
+			: Array.from(projectPaths.keys());
+		const branchSelections = this.normalizeTrackedBranchesByProject(
+			effectiveProjects,
+			trackedBranch,
+			trackedBranchesByProject,
+		);
 		if (!normalizedPromptBranch) {
 			return { success: false, errors: ['Название ветки промпта пустое.'], changedProjects: [], skippedProjects: [] };
 		}
-		if (!normalizedTrackedBranch) {
-			return { success: false, errors: ['Не выбрана tracked-ветка.'], changedProjects: [], skippedProjects: [] };
-		}
 
-		return this.runProjectMutation(projectPaths, projectNames, async (_project, projectPath) => {
-			await this.ensureBranchCheckedOut(projectPath, normalizedTrackedBranch);
+		return this.runProjectMutation(projectPaths, effectiveProjects, async (project, projectPath) => {
+			const trackedBranchForProject = (branchSelections[project] || '').trim();
+			if (!trackedBranchForProject) {
+				throw new Error('Не выбрана tracked-ветка.');
+			}
+
+			await this.ensureBranchCheckedOutAndPulled(projectPath, trackedBranchForProject);
 			if (await this.branchExistsLocally(projectPath, normalizedPromptBranch)) {
 				await this.runGitFileMutation(projectPath, ['checkout', normalizedPromptBranch]);
+				await this.pullCurrentBranchIfTracked(projectPath);
 				return;
 			}
-			await this.runGitFileMutation(projectPath, ['checkout', '-b', normalizedPromptBranch, normalizedTrackedBranch]);
+			await this.runGitFileMutation(projectPath, ['checkout', '-b', normalizedPromptBranch, trackedBranchForProject]);
 		});
 	}
 
@@ -2010,15 +2208,20 @@ export class GitService {
 		projectNames: string[],
 		promptBranch: string,
 		trackedBranch: string,
+		trackedBranchesByProject?: Record<string, string>,
 		stayOnTrackedBranch = true,
 	): Promise<GitMergeProjectsResult> {
 		const normalizedPromptBranch = promptBranch.trim();
-		const normalizedTrackedBranch = trackedBranch.trim();
+		const effectiveProjects = projectNames.length > 0
+			? projectNames
+			: Array.from(projectPaths.keys());
+		const branchSelections = this.normalizeTrackedBranchesByProject(
+			effectiveProjects,
+			trackedBranch,
+			trackedBranchesByProject,
+		);
 		if (!normalizedPromptBranch) {
 			return { success: false, errors: ['Название ветки промпта пустое.'], changedProjects: [], skippedProjects: [], conflicts: [] };
-		}
-		if (!normalizedTrackedBranch) {
-			return { success: false, errors: ['Не выбрана tracked-ветка для merge.'], changedProjects: [], skippedProjects: [], conflicts: [] };
 		}
 
 		const result: GitMergeProjectsResult = {
@@ -2029,13 +2232,19 @@ export class GitService {
 			conflicts: [],
 		};
 
-		for (const { project, projectPath } of this.getEffectiveProjects(projectPaths, projectNames)) {
+		for (const { project, projectPath } of this.getEffectiveProjects(projectPaths, effectiveProjects)) {
+			const trackedBranchForProject = (branchSelections[project] || '').trim();
+			if (!trackedBranchForProject) {
+				result.errors.push(`${project}: Не выбрана tracked-ветка для merge.`);
+				continue;
+			}
+
 			try {
-				await this.ensureBranchCheckedOut(projectPath, normalizedTrackedBranch);
+				await this.ensureBranchCheckedOutAndPulled(projectPath, trackedBranchForProject);
 				try {
 					await this.runGitFileMutation(projectPath, ['merge', '--no-edit', normalizedPromptBranch]);
 					if (!stayOnTrackedBranch) {
-						await this.ensureBranchCheckedOut(projectPath, normalizedPromptBranch);
+						await this.ensureBranchCheckedOutAndPulled(projectPath, normalizedPromptBranch);
 					}
 					result.changedProjects.push(project);
 				} catch (error) {

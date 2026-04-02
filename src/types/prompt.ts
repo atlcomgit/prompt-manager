@@ -55,6 +55,8 @@ export interface PromptConfig {
 	branch: string;
 	/** Preferred tracked branch for Git flow */
 	trackedBranch: string;
+	/** Preferred tracked branches per project for Git flow */
+	trackedBranchesByProject?: Record<string, string>;
 
 	// --- AI model ---
 	/** AI model identifier to use */
@@ -133,6 +135,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		taskNumber: '',
 		branch: '',
 		trackedBranch: '',
+		trackedBranchesByProject: {},
 		model: '',
 		chatMode: 'agent',
 		contextFiles: [],

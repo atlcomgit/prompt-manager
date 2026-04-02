@@ -6,6 +6,24 @@ export interface NormalizedStoredPromptConfigResult {
 	shouldBackfillPromptUuid: boolean;
 }
 
+function normalizeTrackedBranchesByProject(value: unknown): Record<string, string> {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return {};
+	}
+
+	const result: Record<string, string> = {};
+	for (const [project, branch] of Object.entries(value as Record<string, unknown>)) {
+		const normalizedProject = project.trim();
+		const normalizedBranch = typeof branch === 'string' ? branch.trim() : '';
+		if (!normalizedProject || !normalizedBranch) {
+			continue;
+		}
+		result[normalizedProject] = normalizedBranch;
+	}
+
+	return result;
+}
+
 export function normalizeStoredPromptConfig(
 	id: string,
 	parsed: Partial<PromptConfig>,
@@ -21,6 +39,7 @@ export function normalizeStoredPromptConfig(
 		...parsed,
 		id,
 		promptUuid,
+		trackedBranchesByProject: normalizeTrackedBranchesByProject(parsed.trackedBranchesByProject),
 		timeSpentOnTask: typeof parsed.timeSpentOnTask === 'number' ? parsed.timeSpentOnTask : 0,
 		timeSpentUntracked: typeof parsed.timeSpentUntracked === 'number' ? parsed.timeSpentUntracked : 0,
 	};

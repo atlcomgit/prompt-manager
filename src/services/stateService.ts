@@ -23,6 +23,7 @@ const STARTUP_EDITOR_PROMPT_ID_KEY = 'promptManager.startup.editorPromptId';
 
 export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
+	private static readonly GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchesByProjectPreference';
 
 	constructor(private readonly context: vscode.ExtensionContext) { }
 
@@ -714,11 +715,54 @@ export class StateService {
 		return (this.context.workspaceState.get<string>(StateService.GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY) || '').trim();
 	}
 
-	async saveGitOverlayTrackedBranchPreference(branch: string): Promise<void> {
+	getGitOverlayTrackedBranchesByProjectPreference(): Record<string, string> {
+		const stored = this.context.workspaceState.get<Record<string, string>>(
+			StateService.GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY,
+			{},
+		);
+		const result: Record<string, string> = {};
+
+		for (const [project, branch] of Object.entries(stored || {})) {
+			const normalizedProject = project.trim();
+			const normalizedBranch = typeof branch === 'string' ? branch.trim() : '';
+			if (!normalizedProject || !normalizedBranch) {
+				continue;
+			}
+			result[normalizedProject] = normalizedBranch;
+		}
+
+		return result;
+	}
+
+	async saveGitOverlayTrackedBranchPreference(branch: string, branchesByProject?: Record<string, string>): Promise<void> {
 		const normalized = (branch || '').trim();
+		const currentBranchesByProject = this.getGitOverlayTrackedBranchesByProjectPreference();
+		const nextBranchesByProject: Record<string, string> = {
+			...currentBranchesByProject,
+		};
+
+		for (const [project, projectBranch] of Object.entries(branchesByProject || {})) {
+			const normalizedProject = project.trim();
+			const normalizedProjectBranch = typeof projectBranch === 'string' ? projectBranch.trim() : '';
+			if (!normalizedProject) {
+				continue;
+			}
+
+			if (!normalizedProjectBranch) {
+				delete nextBranchesByProject[normalizedProject];
+				continue;
+			}
+
+			nextBranchesByProject[normalizedProject] = normalizedProjectBranch;
+		}
+
 		await this.context.workspaceState.update(
 			StateService.GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY,
 			normalized || undefined,
+		);
+		await this.context.workspaceState.update(
+			StateService.GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY,
+			Object.keys(nextBranchesByProject).length > 0 ? nextBranchesByProject : undefined,
 		);
 	}
 

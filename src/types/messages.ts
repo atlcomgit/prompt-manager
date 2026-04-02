@@ -39,10 +39,11 @@ export type WebviewToExtensionMessage =
 	| { type: 'getBranches'; projects: string[] }
 	| { type: 'openGitOverlay'; promptBranch: string; projects: string[] }
 	| { type: 'refreshGitOverlay'; promptBranch: string; projects: string[]; mode?: 'local' | 'fetch' | 'sync' }
-	| { type: 'saveGitOverlayTrackedBranchPreference'; branch: string }
-	| { type: 'gitOverlaySwitchBranch'; promptBranch: string; projects: string[]; branch: string }
-	| { type: 'gitOverlayEnsurePromptBranch'; promptBranch: string; projects: string[]; trackedBranch: string }
-	| { type: 'gitOverlayMergePromptBranch'; promptBranch: string; projects: string[]; trackedBranch: string; stayOnTrackedBranch?: boolean }
+	| { type: 'saveGitOverlayTrackedBranchPreference'; branch: string; branchesByProject?: Record<string, string> }
+	| { type: 'gitOverlayApplyBranchTargets'; promptBranch: string; projects: string[]; sourceBranchesByProject?: Record<string, string>; targetBranchesByProject?: Record<string, string> }
+	| { type: 'gitOverlaySwitchBranch'; promptBranch: string; projects: string[]; branch?: string; trackedBranchesByProject?: Record<string, string> }
+	| { type: 'gitOverlayEnsurePromptBranch'; promptBranch: string; projects: string[]; trackedBranch?: string; trackedBranchesByProject?: Record<string, string> }
+	| { type: 'gitOverlayMergePromptBranch'; promptBranch: string; projects: string[]; trackedBranch?: string; trackedBranchesByProject?: Record<string, string>; stayOnTrackedBranch?: boolean }
 	| { type: 'gitOverlayDeleteBranch'; promptBranch: string; projects: string[]; branch: string }
 	| { type: 'gitOverlayPush'; promptBranch: string; projects: string[]; branch?: string }
 	| { type: 'gitOverlayStageAll'; promptBranch: string; projects: string[]; project?: string; trackedOnly?: boolean }
@@ -127,7 +128,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'inlineSuggestions'; suggestions: string[] }
 	| { type: 'statistics'; data: PromptStatistics }
 	| { type: 'globalContext'; context: string }
-	| { type: 'gitOverlayTrackedBranchPreference'; branch: string }
+	| { type: 'gitOverlayTrackedBranchPreference'; branch: string; branchesByProject?: Record<string, string> }
 	| { type: 'availableLanguages'; options: Array<{ id: string; name: string }> }
 	| { type: 'availableFrameworks'; options: Array<{ id: string; name: string }> }
 	| { type: 'startChatPreflightResult'; requestId?: string; shouldOpenGitFlow: boolean; snapshot?: GitOverlaySnapshot }

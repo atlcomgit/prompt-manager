@@ -55,6 +55,46 @@ const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
 
 const ensureTrailingNewline = (text: string): string => (text.endsWith('\n') ? text : `${text}\n`);
 
+const normalizeTrackedBranchesByProject = (value?: Record<string, string>): Record<string, string> => {
+  const result: Record<string, string> = {};
+  for (const [project, branch] of Object.entries(value || {})) {
+    const normalizedProject = project.trim();
+    const normalizedBranch = typeof branch === 'string' ? branch.trim() : '';
+    if (!normalizedProject || !normalizedBranch) {
+      continue;
+    }
+    result[normalizedProject] = normalizedBranch;
+  }
+  return result;
+};
+
+const areTrackedBranchesByProjectEqual = (
+  left?: Record<string, string>,
+  right?: Record<string, string>,
+): boolean => {
+  const normalizedLeft = normalizeTrackedBranchesByProject(left);
+  const normalizedRight = normalizeTrackedBranchesByProject(right);
+  const leftEntries = Object.entries(normalizedLeft).sort(([leftProject], [rightProject]) => leftProject.localeCompare(rightProject));
+  const rightEntries = Object.entries(normalizedRight).sort(([leftProject], [rightProject]) => leftProject.localeCompare(rightProject));
+
+  if (leftEntries.length !== rightEntries.length) {
+    return false;
+  }
+
+  return leftEntries.every(([project, branch], index) => {
+    const [rightProject, rightBranch] = rightEntries[index];
+    return project === rightProject && branch === rightBranch;
+  });
+};
+
+const resolveSingleTrackedBranch = (trackedBranchesByProject?: Record<string, string>): string => {
+  const uniqueBranches = Array.from(new Set(
+    Object.values(normalizeTrackedBranchesByProject(trackedBranchesByProject)),
+  ));
+
+  return uniqueBranches.length === 1 ? uniqueBranches[0] : '';
+};
+
 const VoiceMicIcon: React.FC = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" style={styles.inlineIcon}>
     <path
@@ -157,6 +197,7 @@ export const EditorApp: React.FC = () => {
   const [availableFrameworks, setAvailableFrameworks] = useState<SelectOption[]>([]);
   const [allowedBranchesSetting, setAllowedBranchesSetting] = useState<string[]>(['master', 'main', 'prod', 'develop', 'dev']);
   const [workspaceTrackedBranchPreference, setWorkspaceTrackedBranchPreference] = useState('');
+  const [workspaceTrackedBranchesByProjectPreference, setWorkspaceTrackedBranchesByProjectPreference] = useState<Record<string, string>>({});
   const [pageWidth, setPageWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : EDITOR_FORM_SHELL_WIDTH_PX));
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
   const [branchesResolved, setBranchesResolved] = useState(false);
@@ -1031,6 +1072,7 @@ export const EditorApp: React.FC = () => {
         break;
       case 'gitOverlayTrackedBranchPreference':
         setWorkspaceTrackedBranchPreference((msg.branch || '').trim());
+        setWorkspaceTrackedBranchesByProjectPreference(normalizeTrackedBranchesByProject(msg.branchesByProject));
         break;
       case 'globalContext':
         setGlobalContext(msg.context || '');
@@ -1536,16 +1578,36 @@ export const EditorApp: React.FC = () => {
     });
   }, [logGitOverlayDebug, prompt.branch, prompt.id, prompt.projects, resetStartChatPreflightTracking]);
 
-  const handleGitOverlayTrackedBranchChange = (trackedBranch: string) => {
-    const normalized = (trackedBranch || '').trim();
+  const handleGitOverlayTrackedBranchChange = (trackedBranchesByProject: Record<string, string>) => {
+    const normalizedTrackedBranchesByProject = normalizeTrackedBranchesByProject(trackedBranchesByProject);
+    const normalizedTrackedBranch = resolveSingleTrackedBranch(normalizedTrackedBranchesByProject);
+    const currentTrackedBranchesByProject = normalizeTrackedBranchesByProject(promptRef.current.trackedBranchesByProject);
     const currentTrackedBranch = (promptRef.current.trackedBranch || '').trim();
 
-    if (normalized !== currentTrackedBranch) {
-      updateFieldAndSaveNow('trackedBranch', normalized);
+    if (
+      !areTrackedBranchesByProjectEqual(normalizedTrackedBranchesByProject, currentTrackedBranchesByProject)
+      || normalizedTrackedBranch !== currentTrackedBranch
+    ) {
+      setPrompt(prev => ({
+        ...prev,
+        trackedBranch: normalizedTrackedBranch,
+        trackedBranchesByProject: normalizedTrackedBranchesByProject,
+      }));
+      userChangeCounterRef.current++;
+      setIsDirty(true);
+      scheduleAutoSave(50);
     }
 
-    setWorkspaceTrackedBranchPreference(normalized);
-    vscode.postMessage({ type: 'saveGitOverlayTrackedBranchPreference', branch: normalized });
+    setWorkspaceTrackedBranchPreference(normalizedTrackedBranch);
+    setWorkspaceTrackedBranchesByProjectPreference(prev => ({
+      ...prev,
+      ...normalizedTrackedBranchesByProject,
+    }));
+    vscode.postMessage({
+      type: 'saveGitOverlayTrackedBranchPreference',
+      branch: normalizedTrackedBranch,
+      branchesByProject: normalizedTrackedBranchesByProject,
+    });
   };
 
   const handleRefreshGitOverlay = useCallback((mode: 'local' | 'fetch' | 'sync' = 'local') => {
@@ -1558,41 +1620,68 @@ export const EditorApp: React.FC = () => {
     });
   }, [prompt.branch, prompt.projects]);
 
-  const handleGitOverlaySwitchBranch = useCallback((branch: string) => {
+  const handleGitOverlaySwitchBranch = useCallback((trackedBranchesByProject: Record<string, string>) => {
+    const normalizedTrackedBranchesByProject = normalizeTrackedBranchesByProject(trackedBranchesByProject);
+    const branch = resolveSingleTrackedBranch(normalizedTrackedBranchesByProject);
     logGitOverlayDebug('switchBranch.requested', {
       branch,
+      trackedBranchesByProject: normalizedTrackedBranchesByProject,
       promptBranch: prompt.branch.trim(),
       projects: prompt.projects,
       mode: gitOverlayMode,
       previousBusyAction: gitOverlayBusyAction,
     });
-    setGitOverlayBusyAction(`switchBranch:${branch}`);
+    setGitOverlayBusyAction('switchBranch:tracked');
     vscode.postMessage({
       type: 'gitOverlaySwitchBranch',
       promptBranch: prompt.branch.trim(),
       projects: prompt.projects,
       branch,
+      trackedBranchesByProject: normalizedTrackedBranchesByProject,
     });
   }, [gitOverlayBusyAction, gitOverlayMode, logGitOverlayDebug, prompt.branch, prompt.projects, t]);
 
-  const handleGitOverlayEnsurePromptBranch = useCallback((trackedBranch: string) => {
+  const handleGitOverlayEnsurePromptBranch = useCallback((trackedBranchesByProject: Record<string, string>) => {
+    const normalizedTrackedBranchesByProject = normalizeTrackedBranchesByProject(trackedBranchesByProject);
+    const trackedBranch = resolveSingleTrackedBranch(normalizedTrackedBranchesByProject);
     setGitOverlayBusyAction('ensurePromptBranch');
     vscode.postMessage({
       type: 'gitOverlayEnsurePromptBranch',
       promptBranch: prompt.branch.trim(),
       projects: prompt.projects,
       trackedBranch,
+      trackedBranchesByProject: normalizedTrackedBranchesByProject,
     });
   }, [prompt.branch, prompt.projects]);
 
-  const handleGitOverlayMergePromptBranch = useCallback((trackedBranch: string, stayOnTrackedBranch: boolean) => {
+  const handleGitOverlayMergePromptBranch = useCallback((trackedBranchesByProject: Record<string, string>, stayOnTrackedBranch: boolean) => {
+    const normalizedTrackedBranchesByProject = normalizeTrackedBranchesByProject(trackedBranchesByProject);
+    const trackedBranch = resolveSingleTrackedBranch(normalizedTrackedBranchesByProject);
     setGitOverlayBusyAction('mergePromptBranch');
     vscode.postMessage({
       type: 'gitOverlayMergePromptBranch',
       promptBranch: prompt.branch.trim(),
       projects: prompt.projects,
       trackedBranch,
+      trackedBranchesByProject: normalizedTrackedBranchesByProject,
       stayOnTrackedBranch,
+    });
+  }, [prompt.branch, prompt.projects]);
+
+  const handleGitOverlayApplyBranchTargets = useCallback((
+    sourceBranchesByProject: Record<string, string>,
+    targetBranchesByProject: Record<string, string>,
+    project?: string,
+  ) => {
+    const normalizedSourceBranchesByProject = normalizeTrackedBranchesByProject(sourceBranchesByProject);
+    const normalizedTargetBranchesByProject = normalizeTrackedBranchesByProject(targetBranchesByProject);
+    setGitOverlayBusyAction(project ? `applyBranchTargets:${project}` : 'applyBranchTargets:all');
+    vscode.postMessage({
+      type: 'gitOverlayApplyBranchTargets',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      sourceBranchesByProject: normalizedSourceBranchesByProject,
+      targetBranchesByProject: normalizedTargetBranchesByProject,
     });
   }, [prompt.branch, prompt.projects]);
 
@@ -2666,7 +2755,6 @@ export const EditorApp: React.FC = () => {
                   label={t('editor.httpExamples')}
                   value={prompt.httpExamples}
                   onChange={v => updateField('httpExamples', v)}
-                  placeholder={t('editor.httpExamplesPlaceholder')}
                 />
                 <div style={styles.fieldActionGroup}>
                   <button
@@ -2750,8 +2838,13 @@ export const EditorApp: React.FC = () => {
         promptTaskNumber={prompt.taskNumber}
         dockToSecondHalf={shouldDockGitOverlaySecondHalf}
         preferredTrackedBranch={(prompt.trackedBranch || '').trim() || workspaceTrackedBranchPreference}
+        preferredTrackedBranchesByProject={{
+          ...workspaceTrackedBranchesByProjectPreference,
+          ...(prompt.trackedBranchesByProject || {}),
+        }}
         onClose={closeGitOverlay}
         onRefresh={handleRefreshGitOverlay}
+        onApplyBranchTargets={handleGitOverlayApplyBranchTargets}
         onSwitchBranch={handleGitOverlaySwitchBranch}
         onEnsurePromptBranch={handleGitOverlayEnsurePromptBranch}
         onPush={handleGitOverlayPush}

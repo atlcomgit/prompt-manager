@@ -19,6 +19,7 @@ test('normalizeStoredPromptConfig backfills missing promptUuid for legacy prompt
 	assert.equal(result.config.title, 'Legacy prompt');
 	assert.equal(result.config.description, 'Created before promptUuid existed');
 	assert.equal(result.config.trackedBranch, '');
+	assert.deepEqual(result.config.trackedBranchesByProject, {});
 });
 
 test('normalizeStoredPromptConfig preserves existing promptUuid', () => {
@@ -27,6 +28,10 @@ test('normalizeStoredPromptConfig preserves existing promptUuid', () => {
 		{
 			promptUuid: 'existing-uuid',
 			trackedBranch: 'master',
+			trackedBranchesByProject: {
+				api: 'master',
+				web: 'main',
+			},
 			title: 'Existing prompt',
 		},
 		() => 'generated-uuid',
@@ -35,6 +40,10 @@ test('normalizeStoredPromptConfig preserves existing promptUuid', () => {
 	assert.equal(result.shouldBackfillPromptUuid, false);
 	assert.equal(result.config.promptUuid, 'existing-uuid');
 	assert.equal(result.config.trackedBranch, 'master');
+	assert.deepEqual(result.config.trackedBranchesByProject, {
+		api: 'master',
+		web: 'main',
+	});
 	assert.equal(result.config.title, 'Existing prompt');
 	assert.equal(result.config.id, 'existing-prompt');
 });

@@ -56,6 +56,24 @@ test('resolveExistingGitOverlayTrackedBranches keeps only configured branches th
 	assert.deepEqual(branches, ['main', 'develop']);
 });
 
+test('resolveExistingGitOverlayTrackedBranches keeps configured current tracked branch when repository marks it as current', () => {
+	const branches = resolveExistingGitOverlayTrackedBranches(
+		['main', 'develop'],
+		[
+			{
+				available: true,
+				currentBranch: 'develop',
+				branches: [
+					{ name: 'develop', kind: 'current', exists: true },
+					{ name: 'main', kind: 'tracked', exists: true },
+				],
+			},
+		],
+	);
+
+	assert.deepEqual(branches, ['main', 'develop']);
+});
+
 test('resolveExistingGitOverlayTrackedBranches falls back to discovered existing tracked branches', () => {
 	const branches = resolveExistingGitOverlayTrackedBranches(
 		[],
@@ -347,10 +365,364 @@ test('GitOverlay shows switch-to-prompt action during start chat preflight when 
 		t: (key: string) => key,
 	}));
 
-	assert.match(markup, /editor\.gitOverlaySwitchAllToPrompt/);
+	assert.match(markup, /editor\.gitOverlaySwitchAll/);
 });
 
-test('GitOverlay hides passive tracked projects from default flow steps and does not let them block merge', () => {
+test('GitOverlay renders tracked branch options separately for each project', () => {
+	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
+		open: true,
+		mode: 'start-chat-preflight',
+		snapshot: {
+			generatedAt: '2026-04-02T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['master', 'main'],
+			projects: [
+				{
+					project: 'api',
+					repositoryPath: '/tmp/api',
+					available: true,
+					error: '',
+					currentBranch: 'master',
+					promptBranch: 'feature/task-42',
+					dirty: false,
+					hasConflicts: false,
+					upstream: 'origin/master',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [
+						{
+							name: 'master',
+							current: true,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/master',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+					cleanupBranches: [],
+					changeGroups: {
+						merge: [],
+						staged: [],
+						workingTree: [],
+						untracked: [],
+					},
+					review: {
+						remote: null,
+						request: null,
+						error: '',
+						setupAction: null,
+					},
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: {
+						nodes: [],
+						edges: [],
+					},
+				},
+				{
+					project: 'web',
+					repositoryPath: '/tmp/web',
+					available: true,
+					error: '',
+					currentBranch: 'main',
+					promptBranch: 'feature/task-42',
+					dirty: false,
+					hasConflicts: false,
+					upstream: 'origin/main',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [
+						{
+							name: 'main',
+							current: true,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+					cleanupBranches: [],
+					changeGroups: {
+						merge: [],
+						staged: [],
+						workingTree: [],
+						untracked: [],
+					},
+					review: {
+						remote: null,
+						request: null,
+						error: '',
+						setupAction: null,
+					},
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: {
+						nodes: [],
+						edges: [],
+					},
+				},
+			],
+		},
+		commitMessages: {},
+		busyAction: null,
+		completedActions: { push: false, 'review-request': false, merge: false },
+		promptStatus: 'draft',
+		promptTitle: '',
+		promptTaskNumber: '',
+		preferredTrackedBranch: '',
+		onClose: () => { },
+		onDone: () => { },
+		onRefresh: () => { },
+		onSwitchBranch: () => { },
+		onEnsurePromptBranch: () => { },
+		onPush: () => { },
+		onCreateReviewRequest: () => { },
+		onMergePromptBranch: () => { },
+		onDiscardFile: () => { },
+		onOpenFile: () => { },
+		onOpenDiff: () => { },
+		onOpenReviewRequest: () => { },
+		onSetupReviewCli: () => { },
+		onOpenMergeEditor: () => { },
+		onGenerateCommitMessage: () => { },
+		onCommitStaged: () => { },
+		onCommitMessageChange: () => { },
+		onTrackedBranchChange: () => { },
+		onContinueStartChat: () => { },
+		onContinueOpenChat: () => { },
+		t: (key: string) => key,
+	}));
+
+	assert.equal(markup.match(/<option value="master"[^>]*>master<\/option>/g)?.length || 0, 2);
+	assert.equal(markup.match(/<option value="main"[^>]*>main<\/option>/g)?.length || 0, 2);
+});
+
+test('GitOverlay keeps current tracked branch in per-project options', () => {
+	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
+		open: true,
+		mode: 'start-chat-preflight',
+		snapshot: {
+			generatedAt: '2026-04-02T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['master', 'develop'],
+			projects: [
+				{
+					project: 'api',
+					repositoryPath: '/tmp/api',
+					available: true,
+					error: '',
+					currentBranch: 'develop',
+					promptBranch: 'feature/task-42',
+					dirty: false,
+					hasConflicts: false,
+					upstream: 'origin/develop',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [
+						{
+							name: 'develop',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/develop',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'master',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/master',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+					cleanupBranches: [],
+					changeGroups: {
+						merge: [],
+						staged: [],
+						workingTree: [],
+						untracked: [],
+					},
+					review: {
+						remote: null,
+						request: null,
+						error: '',
+						setupAction: null,
+					},
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: {
+						nodes: [],
+						edges: [],
+					},
+				},
+			],
+		},
+		commitMessages: {},
+		busyAction: null,
+		completedActions: { push: false, 'review-request': false, merge: false },
+		promptStatus: 'draft',
+		promptTitle: '',
+		promptTaskNumber: '',
+		preferredTrackedBranch: '',
+		onClose: () => { },
+		onDone: () => { },
+		onRefresh: () => { },
+		onSwitchBranch: () => { },
+		onEnsurePromptBranch: () => { },
+		onPush: () => { },
+		onCreateReviewRequest: () => { },
+		onMergePromptBranch: () => { },
+		onDiscardFile: () => { },
+		onOpenFile: () => { },
+		onOpenDiff: () => { },
+		onOpenReviewRequest: () => { },
+		onSetupReviewCli: () => { },
+		onOpenMergeEditor: () => { },
+		onGenerateCommitMessage: () => { },
+		onCommitStaged: () => { },
+		onCommitMessageChange: () => { },
+		onTrackedBranchChange: () => { },
+		onContinueStartChat: () => { },
+		onContinueOpenChat: () => { },
+		t: (key: string) => key,
+	}));
+
+	assert.equal(markup.match(/<option value="master"[^>]*>master<\/option>/g)?.length || 0, 2);
+	assert.equal(markup.match(/<option value="develop"[^>]*>develop<\/option>/g)?.length || 0, 2);
+});
+
+test('GitOverlay adds current non-tracked branch to source and expected options', () => {
+	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
+		open: true,
+		mode: 'default',
+		snapshot: {
+			generatedAt: '2026-04-02T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				{
+					project: 'api',
+					repositoryPath: '/tmp/api',
+					available: true,
+					error: '',
+					currentBranch: 'feature/local-work',
+					promptBranch: 'feature/task-42',
+					dirty: false,
+					hasConflicts: false,
+					upstream: '',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [
+						{
+							name: 'feature/local-work',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: '',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'main',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+					cleanupBranches: [],
+					changeGroups: {
+						merge: [],
+						staged: [],
+						workingTree: [],
+						untracked: [],
+					},
+					review: {
+						remote: null,
+						request: null,
+						error: '',
+						setupAction: null,
+					},
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: {
+						nodes: [],
+						edges: [],
+					},
+				},
+			],
+		},
+		commitMessages: {},
+		busyAction: null,
+		completedActions: { push: false, 'review-request': false, merge: false },
+		promptStatus: 'draft',
+		promptTitle: '',
+		promptTaskNumber: '',
+		preferredTrackedBranch: 'main',
+		onClose: () => { },
+		onDone: () => { },
+		onRefresh: () => { },
+		onSwitchBranch: () => { },
+		onEnsurePromptBranch: () => { },
+		onPush: () => { },
+		onCreateReviewRequest: () => { },
+		onMergePromptBranch: () => { },
+		onDiscardFile: () => { },
+		onOpenFile: () => { },
+		onOpenDiff: () => { },
+		onOpenReviewRequest: () => { },
+		onSetupReviewCli: () => { },
+		onOpenMergeEditor: () => { },
+		onGenerateCommitMessage: () => { },
+		onCommitStaged: () => { },
+		onCommitMessageChange: () => { },
+		onTrackedBranchChange: () => { },
+		onContinueStartChat: () => { },
+		onContinueOpenChat: () => { },
+		t: (key: string) => key,
+	}));
+
+	assert.equal(markup.match(/<option value="feature\/local-work"[^>]*>feature\/local-work<\/option>/g)?.length || 0, 2);
+	assert.equal(markup.match(/<option value="main"[^>]*>main<\/option>/g)?.length || 0, 2);
+	assert.equal(markup.match(/<option value="feature\/task-42"[^>]*>feature\/task-42<\/option>/g)?.length || 0, 1);
+});
+
+test('GitOverlay keeps passive tracked projects visible in step 1 and does not let them block merge', () => {
 	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
 		open: true,
 		mode: 'default',
@@ -459,7 +831,7 @@ test('GitOverlay hides passive tracked projects from default flow steps and does
 		t: (key: string) => key,
 	}));
 
-	assert.doesNotMatch(markup, /passive-tracked-clean/);
+	assert.match(markup, /passive-tracked-clean/);
 	assert.match(markup, /prompt-project/);
 	const mergeButtonMarkup = markup.match(/<button[^>]*><span[^>]*><span>editor\.gitOverlayMergeNow<\/span><\/span><\/button>/);
 	assert.ok(mergeButtonMarkup);
@@ -467,6 +839,206 @@ test('GitOverlay hides passive tracked projects from default flow steps and does
 	assert.doesNotMatch(markup, /editor\.gitOverlayReviewRequestNeedsPromptCheckout/);
 });
 
+test('GitOverlay shows no-changes hint and allows switching clean tracked projects to prompt branch', () => {
+	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
+		open: true,
+		mode: 'default',
+		snapshot: {
+			generatedAt: '2026-04-02T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				{
+					project: 'api',
+					repositoryPath: '/tmp/api',
+					available: true,
+					error: '',
+					currentBranch: 'main',
+					promptBranch: 'feature/task-42',
+					dirty: false,
+					hasConflicts: false,
+					upstream: 'origin/main',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [],
+					cleanupBranches: [],
+					changeGroups: {
+						merge: [],
+						staged: [],
+						workingTree: [],
+						untracked: [],
+					},
+					review: {
+						remote: null,
+						request: null,
+						error: '',
+						setupAction: null,
+					},
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: {
+						nodes: [],
+						edges: [],
+					},
+				},
+				{
+					project: 'worker',
+					repositoryPath: '/tmp/worker',
+					available: true,
+					error: '',
+					currentBranch: 'main',
+					promptBranch: 'feature/task-42',
+					dirty: false,
+					hasConflicts: false,
+					upstream: 'origin/main',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [],
+					cleanupBranches: [],
+					changeGroups: {
+						merge: [],
+						staged: [],
+						workingTree: [],
+						untracked: [],
+					},
+					review: {
+						remote: null,
+						request: null,
+						error: '',
+						setupAction: null,
+					},
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: {
+						nodes: [],
+						edges: [],
+					},
+				},
+			],
+		},
+		commitMessages: {},
+		busyAction: null,
+		completedActions: { push: false, 'review-request': false, merge: false },
+		promptStatus: 'draft',
+		promptTitle: '',
+		promptTaskNumber: '',
+		preferredTrackedBranch: 'main',
+		onClose: () => { },
+		onDone: () => { },
+		onRefresh: () => { },
+		onSwitchBranch: () => { },
+		onEnsurePromptBranch: () => { },
+		onPush: () => { },
+		onCreateReviewRequest: () => { },
+		onMergePromptBranch: () => { },
+		onDiscardFile: () => { },
+		onOpenFile: () => { },
+		onOpenDiff: () => { },
+		onOpenReviewRequest: () => { },
+		onSetupReviewCli: () => { },
+		onOpenMergeEditor: () => { },
+		onGenerateCommitMessage: () => { },
+		onCommitStaged: () => { },
+		onCommitMessageChange: () => { },
+		onTrackedBranchChange: () => { },
+		onContinueStartChat: () => { },
+		onContinueOpenChat: () => { },
+		t: (key: string) => key,
+	}));
+
+	assert.match(markup, /editor\.gitOverlayStepSwitchNoChangesToCommit/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayStepSwitchNothingToDo/);
+	assert.match(markup, /editor\.gitOverlayProjectSourceBranch/);
+	assert.match(markup, /editor\.gitOverlayProjectExpectedBranch/);
+	assert.equal(markup.match(/<option value="">editor\.gitOverlaySelectPlaceholder<\/option>/g)?.length || 0, 4);
+	assert.equal(markup.match(/<option value="main"[^>]*>main<\/option>/g)?.length || 0, 4);
+	assert.equal(markup.match(/<option value="feature\/task-42"[^>]*>feature\/task-42<\/option>/g)?.length || 0, 2);
+	assert.doesNotMatch(markup, /min-width:1060px/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
+});
+
+test('GitOverlay shows empty-step hint when default step 1 has no available projects', () => {
+	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
+		open: true,
+		mode: 'default',
+		snapshot: {
+			generatedAt: '2026-04-02T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				{
+					project: 'api',
+					repositoryPath: '/tmp/api',
+					available: false,
+					error: 'workspace unavailable',
+					currentBranch: 'main',
+					promptBranch: 'feature/task-42',
+					dirty: false,
+					hasConflicts: false,
+					upstream: 'origin/main',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [],
+					cleanupBranches: [],
+					changeGroups: {
+						merge: [],
+						staged: [],
+						workingTree: [],
+						untracked: [],
+					},
+					review: {
+						remote: null,
+						request: null,
+						error: '',
+						setupAction: null,
+					},
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: {
+						nodes: [],
+						edges: [],
+					},
+				},
+			],
+		},
+		commitMessages: {},
+		busyAction: null,
+		completedActions: { push: false, 'review-request': false, merge: false },
+		promptStatus: 'draft',
+		promptTitle: '',
+		promptTaskNumber: '',
+		preferredTrackedBranch: 'main',
+		onClose: () => { },
+		onDone: () => { },
+		onRefresh: () => { },
+		onSwitchBranch: () => { },
+		onEnsurePromptBranch: () => { },
+		onPush: () => { },
+		onCreateReviewRequest: () => { },
+		onMergePromptBranch: () => { },
+		onDiscardFile: () => { },
+		onOpenFile: () => { },
+		onOpenDiff: () => { },
+		onOpenReviewRequest: () => { },
+		onSetupReviewCli: () => { },
+		onOpenMergeEditor: () => { },
+		onGenerateCommitMessage: () => { },
+		onCommitStaged: () => { },
+		onCommitMessageChange: () => { },
+		onTrackedBranchChange: () => { },
+		onContinueStartChat: () => { },
+		onContinueOpenChat: () => { },
+		t: (key: string) => key,
+	}));
+
+	assert.match(markup, /editor\.gitOverlayStepSwitchNothingToDo/);
+	assert.doesNotMatch(markup, /editor\.gitOverlaySwitchAll/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayProjectSourceBranch/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayProjectExpectedBranch/);
+});
 test('formatChangeSize formats bytes into compact localized values', () => {
 	assert.equal(formatChangeSize(5526, 'ru-RU'), '5,5КБ');
 	assert.equal(formatChangeSize(512, 'ru-RU'), '512Б');

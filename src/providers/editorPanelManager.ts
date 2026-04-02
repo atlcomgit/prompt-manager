@@ -1175,6 +1175,65 @@ export class EditorPanelManager {
 		return this.stateService.getGitOverlayTrackedBranchPreference();
 	}
 
+	private getGitOverlayTrackedBranchesByProjectPreference(): Record<string, string> {
+		return this.stateService.getGitOverlayTrackedBranchesByProjectPreference();
+	}
+
+	private normalizeGitOverlayTrackedBranchesByProject(value?: Record<string, string>): Record<string, string> {
+		const result: Record<string, string> = {};
+		for (const [project, branch] of Object.entries(value || {})) {
+			const normalizedProject = project.trim();
+			const normalizedBranch = typeof branch === 'string' ? branch.trim() : '';
+			if (!normalizedProject || !normalizedBranch) {
+				continue;
+			}
+			result[normalizedProject] = normalizedBranch;
+		}
+		return result;
+	}
+
+	private resolveGitOverlayTrackedBranchSelections(
+		projects: string[],
+		trackedBranchesByProject?: Record<string, string>,
+		fallbackTrackedBranch: string = '',
+	): Record<string, string> {
+		const normalizedSelections = this.normalizeGitOverlayTrackedBranchesByProject(trackedBranchesByProject);
+		const normalizedFallbackTrackedBranch = (fallbackTrackedBranch || '').trim();
+		const result: Record<string, string> = {};
+
+		for (const project of projects) {
+			const normalizedProject = project.trim();
+			if (!normalizedProject) {
+				continue;
+			}
+
+			const resolvedBranch = (normalizedSelections[normalizedProject] || '').trim() || normalizedFallbackTrackedBranch;
+			if (!resolvedBranch) {
+				continue;
+			}
+
+			result[normalizedProject] = resolvedBranch;
+		}
+
+		return result;
+	}
+
+	private resolveGitOverlaySingleTrackedBranch(trackedBranchSelections: Record<string, string>): string {
+		const uniqueBranches = Array.from(new Set(
+			Object.values(trackedBranchSelections)
+				.map(branch => branch.trim())
+				.filter(Boolean),
+		));
+
+		return uniqueBranches.length === 1 ? uniqueBranches[0] : '';
+	}
+
+	private describeGitOverlayTrackedBranchSelections(trackedBranchSelections: Record<string, string>): string {
+		return Object.entries(trackedBranchSelections)
+			.map(([project, branch]) => `${project}: ${branch}`)
+			.join('\n');
+	}
+
 	private async getStartChatTrackedBranchMismatches(prompt: Prompt): Promise<Array<{ project: string; currentBranch: string }>> {
 		const promptBranch = (prompt.branch || '').trim();
 		const projectNames = (prompt.projects || []).map(project => project.trim()).filter(Boolean);
@@ -3071,7 +3130,11 @@ export class EditorPanelManager {
 				postMessage({ type: 'availableMcpTools', tools: mcpTools });
 				postMessage({ type: 'availableHooks', hooks });
 				postMessage({ type: 'allowedBranches', branches: this.getAllowedBranchesSetting() });
-				postMessage({ type: 'gitOverlayTrackedBranchPreference', branch: this.getGitOverlayTrackedBranchPreference() });
+				postMessage({
+					type: 'gitOverlayTrackedBranchPreference',
+					branch: this.getGitOverlayTrackedBranchPreference(),
+					branchesByProject: this.getGitOverlayTrackedBranchesByProjectPreference(),
+				});
 				postMessage(availableLanguageAndFrameworkMessages.languagesMessage);
 				postMessage(availableLanguageAndFrameworkMessages.frameworksMessage);
 				postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'open' });
@@ -4372,16 +4435,29 @@ export class EditorPanelManager {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
 				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
 				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const trackedBranchSelections = this.resolveGitOverlayTrackedBranchSelections(
+					projects,
+					msg.trackedBranchesByProject,
+					msg.branch || '',
+				);
+				const singleTrackedBranch = this.resolveGitOverlaySingleTrackedBranch(trackedBranchSelections);
+				const branchLabel = singleTrackedBranch || (msg.branch || '').trim();
 				this.logReportDebug('gitOverlay.switchBranch.received', {
 					promptId: currentPrompt.id,
-					branch: msg.branch,
+					branch: branchLabel || null,
+					branchSelections: trackedBranchSelections,
 					promptBranch,
 					projects,
 				});
+				if (!branchLabel && Object.keys(trackedBranchSelections).length === 0) {
+					postMessage({ type: 'error', message: 'Не выбрана tracked-ветка.' });
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+					break;
+				}
 				try {
-					const status = await this.gitService.checkBranchStatus(paths, projects, msg.branch);
+					const status = await this.gitService.checkBranchStatus(paths, projects, branchLabel);
 					this.logReportDebug('gitOverlay.switchBranch.status', {
-						branch: msg.branch,
+						branch: branchLabel || null,
 						hasChanges: status.hasChanges,
 						details: this.reportDebugPreview(status.details, 600),
 					});
@@ -4393,58 +4469,72 @@ export class EditorPanelManager {
 							'Отмена',
 						);
 						this.logReportDebug('gitOverlay.switchBranch.confirmation', {
-							branch: msg.branch,
+							branch: branchLabel || null,
 							answer: answer || null,
 						});
 						if (answer !== 'Переключить') {
 							this.logReportDebug('gitOverlay.switchBranch.cancelled', {
-								branch: msg.branch,
+								branch: branchLabel || null,
 								projects,
 							});
 							await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 							this.logReportDebug('gitOverlay.switchBranch.cancelled.snapshotPosted', {
-								branch: msg.branch,
+								branch: branchLabel || null,
 							});
 							break;
 						}
 					}
 
 					this.logReportDebug('gitOverlay.switchBranch.git.start', {
-						branch: msg.branch,
+						branch: branchLabel || null,
+						branchSelections: trackedBranchSelections,
 						projects,
 					});
-					const result = await this.gitService.switchBranch(paths, projects, msg.branch, this.getAllowedBranchesSetting());
+					const result = Object.keys(trackedBranchSelections).length > 0
+						? await this.gitService.switchBranchesByProject(
+							paths,
+							projects,
+							msg.branch || '',
+							trackedBranchSelections,
+							this.getAllowedBranchesSetting(),
+						)
+						: await this.gitService.switchBranch(paths, projects, branchLabel, this.getAllowedBranchesSetting());
 					this.logReportDebug('gitOverlay.switchBranch.git.result', {
-						branch: msg.branch,
+						branch: branchLabel || null,
 						success: result.success,
 						errors: result.errors,
 					});
 					postMessage({
 						type: result.errors.length > 0 ? 'error' : 'info',
-						message: this.describeGitMultiProjectResult(result, `Ветка "${msg.branch}" активирована`),
+						message: this.describeGitMultiProjectResult(
+							result,
+							branchLabel
+								? `Ветка "${branchLabel}" активирована`
+								: 'Выбранные tracked-ветки активированы',
+						),
 					});
 					this.logReportDebug('gitOverlay.switchBranch.snapshot.start', {
-						branch: msg.branch,
+						branch: branchLabel || null,
 					});
 					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 					this.logReportDebug('gitOverlay.switchBranch.snapshot.done', {
-						branch: msg.branch,
+						branch: branchLabel || null,
 					});
 				} catch (error) {
 					const message = error instanceof Error ? (error.stack || error.message) : String(error);
 					this.logReportDebug('gitOverlay.switchBranch.exception', {
-						branch: msg.branch,
+						branch: branchLabel || null,
 						message: this.reportDebugPreview(message, 1000),
 					});
 					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
 					try {
 						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 						this.logReportDebug('gitOverlay.switchBranch.exception.snapshotPosted', {
-							branch: msg.branch,
+							branch: branchLabel || null,
 						});
 					} catch (snapshotError) {
 						this.logReportDebug('gitOverlay.switchBranch.exception.snapshotFailed', {
-							branch: msg.branch,
+							branch: branchLabel || null,
 							message: this.reportDebugPreview(snapshotError instanceof Error ? (snapshotError.stack || snapshotError.message) : String(snapshotError), 1000),
 						});
 					}
@@ -4456,15 +4546,71 @@ export class EditorPanelManager {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
 				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
 				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const trackedBranchSelections = this.resolveGitOverlayTrackedBranchSelections(
+					projects,
+					msg.trackedBranchesByProject,
+					msg.trackedBranch || '',
+				);
+				const singleTrackedBranch = this.resolveGitOverlaySingleTrackedBranch(trackedBranchSelections);
 				if (!promptBranch) {
 					postMessage({ type: 'error', message: 'Сначала укажите ветку промпта.' });
 					break;
 				}
+				if (Object.keys(trackedBranchSelections).length === 0) {
+					postMessage({ type: 'error', message: 'Не выбрана tracked-ветка.' });
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+					break;
+				}
 
-				const result = await this.gitService.ensurePromptBranchFromTracked(paths, projects, promptBranch, msg.trackedBranch);
+				const result = await this.gitService.ensurePromptBranchFromTracked(
+					paths,
+					projects,
+					promptBranch,
+					msg.trackedBranch || '',
+					trackedBranchSelections,
+				);
 				postMessage({
 					type: result.errors.length > 0 ? 'error' : 'info',
-					message: this.describeGitMultiProjectResult(result, `Ветка промпта "${promptBranch}" готова`),
+					message: this.describeGitMultiProjectResult(
+						result,
+						singleTrackedBranch
+							? `Ветка промпта "${promptBranch}" готова от "${singleTrackedBranch}"`
+							: `Ветка промпта "${promptBranch}" готова для выбранных tracked-веток`,
+					),
+				});
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				break;
+			}
+
+			case 'gitOverlayApplyBranchTargets': {
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const sourceBranchesByProject = this.resolveGitOverlayTrackedBranchSelections(
+					projects,
+					msg.sourceBranchesByProject,
+					'',
+				);
+				const targetBranchesByProject = this.normalizeGitOverlayTrackedBranchesByProject(msg.targetBranchesByProject);
+
+				if (Object.keys(targetBranchesByProject).length === 0) {
+					postMessage({ type: 'error', message: 'Не выбраны ожидаемые ветки для переключения.' });
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+					break;
+				}
+
+				const result = await this.gitService.applyBranchTargetsByProject(
+					paths,
+					projects,
+					promptBranch,
+					sourceBranchesByProject,
+					targetBranchesByProject,
+					this.getAllowedBranchesSetting(),
+				);
+
+				postMessage({
+					type: result.errors.length > 0 ? 'error' : 'info',
+					message: this.describeGitMultiProjectResult(result, 'Выбранные ветки применены'),
 				});
 				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				break;
@@ -4474,14 +4620,30 @@ export class EditorPanelManager {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
 				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
 				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const trackedBranchSelections = this.resolveGitOverlayTrackedBranchSelections(
+					projects,
+					msg.trackedBranchesByProject,
+					msg.trackedBranch || '',
+				);
+				const singleTrackedBranch = this.resolveGitOverlaySingleTrackedBranch(trackedBranchSelections);
 				if (!promptBranch) {
 					postMessage({ type: 'error', message: 'Сначала укажите ветку промпта.' });
 					break;
 				}
+				if (Object.keys(trackedBranchSelections).length === 0) {
+					postMessage({ type: 'error', message: 'Не выбрана tracked-ветка для merge.' });
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+					break;
+				}
 
 				const answer = await vscode.window.showWarningMessage(
-					`Выполнить merge ветки "${promptBranch}" в "${msg.trackedBranch}"?`,
-					{ modal: true },
+					singleTrackedBranch
+						? `Выполнить merge ветки "${promptBranch}" в "${singleTrackedBranch}"?`
+						: `Выполнить merge ветки "${promptBranch}" в выбранные tracked-ветки по проектам?`,
+					{
+						modal: true,
+						detail: this.describeGitOverlayTrackedBranchSelections(trackedBranchSelections) || undefined,
+					},
 					'Merge',
 					'Отмена',
 				);
@@ -4494,7 +4656,8 @@ export class EditorPanelManager {
 					paths,
 					projects,
 					promptBranch,
-					msg.trackedBranch,
+					msg.trackedBranch || '',
+					trackedBranchSelections,
 					msg.stayOnTrackedBranch !== false,
 				);
 				if (result.conflicts.length > 0) {
@@ -4508,7 +4671,12 @@ export class EditorPanelManager {
 				} else {
 					postMessage({
 						type: result.errors.length > 0 ? 'error' : 'info',
-						message: this.describeGitMultiProjectResult(result, `Merge ветки "${promptBranch}" в "${msg.trackedBranch}" выполнен`),
+						message: this.describeGitMultiProjectResult(
+							result,
+							singleTrackedBranch
+								? `Merge ветки "${promptBranch}" в "${singleTrackedBranch}" выполнен`
+								: `Merge ветки "${promptBranch}" в выбранные tracked-ветки выполнен`,
+						),
 					});
 					if (result.errors.length === 0) {
 						postMessage({ type: 'gitOverlayActionCompleted', action: 'merge' });
@@ -4930,7 +5098,7 @@ export class EditorPanelManager {
 			}
 
 			case 'saveGitOverlayTrackedBranchPreference': {
-				await this.stateService.saveGitOverlayTrackedBranchPreference(msg.branch);
+				await this.stateService.saveGitOverlayTrackedBranchPreference(msg.branch, msg.branchesByProject);
 				break;
 			}
 

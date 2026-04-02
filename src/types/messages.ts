@@ -74,6 +74,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'updatePromptStatus'; id: string; status: PromptStatus }
 	| { type: 'getGlobalContext' }
 	| { type: 'saveGlobalContext'; context: string }
+	| { type: 'loadRemoteGlobalContext' }
 	| { type: 'createBranch'; branch: string; projects: string[] }
 	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
 	| { type: 'openPromptReportInEditor'; report: string; promptId?: string; title?: string }
@@ -129,6 +130,8 @@ export type ExtensionToWebviewMessage =
 	| { type: 'inlineSuggestions'; suggestions: string[] }
 	| { type: 'statistics'; data: PromptStatistics }
 	| { type: 'globalContext'; context: string }
+	| { type: 'globalContextLoaded'; context: string }
+	| { type: 'globalContextLoadFailed'; message: string }
 	| { type: 'gitOverlayTrackedBranchPreference'; branch: string; branchesByProject?: Record<string, string> }
 	| { type: 'availableLanguages'; options: Array<{ id: string; name: string }> }
 	| { type: 'availableFrameworks'; options: Array<{ id: string; name: string }> }

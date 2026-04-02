@@ -1070,6 +1070,98 @@ test('GitOverlay shows no-changes status for clean tracked projects and keeps sw
 	assert.match(markup, /<button[^>]*disabled[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
 });
 
+test('GitOverlay shows ready status as blue text without a background pill', () => {
+	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
+		open: true,
+		mode: 'default',
+		snapshot: {
+			generatedAt: '2026-04-02T00:00:00.000Z',
+			promptBranch: '',
+			trackedBranches: ['main'],
+			projects: [
+				{
+					project: 'api',
+					repositoryPath: '/tmp/api',
+					available: true,
+					error: '',
+					currentBranch: 'main',
+					promptBranch: '',
+					dirty: true,
+					hasConflicts: false,
+					upstream: 'origin/main',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [],
+					cleanupBranches: [],
+					changeGroups: {
+						merge: [],
+						staged: [
+							{
+								project: 'api',
+								path: 'src/index.ts',
+								status: 'M',
+								previousPath: '',
+								group: 'staged',
+								conflicted: false,
+								staged: true,
+								isBinary: false,
+								additions: 1,
+								deletions: 0,
+								fileSizeBytes: 100,
+							},
+						],
+						workingTree: [],
+						untracked: [],
+					},
+					review: {
+						remote: null,
+						request: null,
+						error: '',
+						setupAction: null,
+					},
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: {
+						nodes: [],
+						edges: [],
+					},
+				},
+			],
+		},
+		commitMessages: {},
+		busyAction: null,
+		completedActions: { push: false, 'review-request': false, merge: false },
+		promptStatus: 'draft',
+		promptTitle: '',
+		promptTaskNumber: '',
+		preferredTrackedBranch: 'main',
+		onClose: () => { },
+		onDone: () => { },
+		onRefresh: () => { },
+		onSwitchBranch: () => { },
+		onEnsurePromptBranch: () => { },
+		onPush: () => { },
+		onCreateReviewRequest: () => { },
+		onMergePromptBranch: () => { },
+		onDiscardFile: () => { },
+		onOpenFile: () => { },
+		onOpenDiff: () => { },
+		onOpenReviewRequest: () => { },
+		onSetupReviewCli: () => { },
+		onOpenMergeEditor: () => { },
+		onGenerateCommitMessage: () => { },
+		onCommitStaged: () => { },
+		onCommitMessageChange: () => { },
+		onTrackedBranchChange: () => { },
+		onContinueStartChat: () => { },
+		onContinueOpenChat: () => { },
+		t: (key: string) => key,
+	}));
+
+	assert.match(markup, /<span style="font-size:12px;font-weight:600;text-align:center;word-break:break-word;color:blue">editor\.gitOverlayStateReady<\/span>/);
+});
+
 test('GitOverlay shows empty-step hint when default step 1 has no available projects', () => {
 	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
 		open: true,

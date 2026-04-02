@@ -361,6 +361,9 @@ const en: Record<string, string> = {
 	'editor.globalContext': 'Agent context (for all prompts)',
 	'editor.globalContextPlaceholder': 'General instructions for chat agent...\nExample: Always respond in Russian.',
 	'editor.globalContextHint': 'Applied to all prompts in workspace when starting chat',
+	'editor.resetGlobalContext': 'Reset',
+	'editor.loadGlobalContext': 'Load',
+	'editor.loadingGlobalContext': 'Loading...',
 	'editor.valueFor': 'Value for',
 	'editor.openInEditor': 'Open in editor',
 
@@ -1193,6 +1196,9 @@ const ru: Record<string, string> = {
 	'editor.globalContext': 'Контекст агента (для всех промптов)',
 	'editor.globalContextPlaceholder': 'Общие инструкции для чат-агента...\nНапример: Всегда отвечай на русском языке.',
 	'editor.globalContextHint': 'Применяется ко всем промптам при запуске чата',
+	'editor.resetGlobalContext': 'Сбросить',
+	'editor.loadGlobalContext': 'Загрузить',
+	'editor.loadingGlobalContext': 'Загрузка...',
 	'editor.valueFor': 'Значение для',
 	'editor.openInEditor': 'Открыть в редакторе',
 

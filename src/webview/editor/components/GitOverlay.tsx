@@ -2741,7 +2741,7 @@ const styles: Record<string, CSSProperties> = {
 		color: 'black',
 	},
 	projectStatusTextInfo: {
-		color: 'black',
+		color: 'blue',
 	},
 	projectChangesWrap: {
 		display: 'flex',

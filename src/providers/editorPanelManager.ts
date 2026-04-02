@@ -29,10 +29,12 @@ import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { filterPromptHookIdsForPhase } from '../utils/promptHookPhase.js';
 import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
+import { fetchRemoteText } from '../utils/remoteText.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
 const SINGLE_EDITOR_PANEL_KEY = '__prompt_editor_singleton__';
+const REMOTE_GLOBAL_CONTEXT_URL = 'https://raw.githubusercontent.com/atlcomgit/prompt-manager/refs/heads/master/share/general.instructions.md';
 
 export class EditorPanelManager {
 	private _onDidSave = new vscode.EventEmitter<string>();
@@ -87,6 +89,21 @@ export class EditorPanelManager {
 		if (panelKey === SINGLE_EDITOR_PANEL_KEY) {
 			this.syncStartupEditorRestoreState();
 		}
+	}
+
+	private async persistGlobalAgentContext(context: string): Promise<void> {
+		await this.stateService.saveGlobalAgentContext(context);
+		try {
+			await this.workspaceService.ensureChatInstructionsFile(context);
+		} catch {
+			// Keep UI responsive even if file/settings sync fails.
+		}
+	}
+
+	private async loadRemoteGlobalAgentContext(): Promise<string> {
+		return fetchRemoteText(REMOTE_GLOBAL_CONTEXT_URL, {
+			timeoutMs: 10000,
+		});
 	}
 
 	private async syncPersistedActivePromptState(prompt: Prompt, previousId?: string): Promise<void> {
@@ -5102,11 +5119,23 @@ export class EditorPanelManager {
 			}
 
 			case 'saveGlobalContext': {
-				await this.stateService.saveGlobalAgentContext(msg.context);
+				await this.persistGlobalAgentContext(msg.context);
+				break;
+			}
+
+			case 'loadRemoteGlobalContext': {
 				try {
-					await this.workspaceService.ensureChatInstructionsFile(msg.context);
-				} catch {
-					// keep UI responsive even if file/settings sync fails
+					const context = await this.loadRemoteGlobalAgentContext();
+					await this.persistGlobalAgentContext(context);
+					postMessage({ type: 'globalContextLoaded', context });
+				} catch (error) {
+					const message = error instanceof Error && error.message.trim()
+						? error.message.trim()
+						: 'Не удалось загрузить общую инструкцию.';
+					postMessage({
+						type: 'globalContextLoadFailed',
+						message: `Не удалось загрузить общую инструкцию: ${message}`,
+					});
 				}
 				break;
 			}

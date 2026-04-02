@@ -222,6 +222,7 @@ export const EditorApp: React.FC = () => {
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [isGeneratingDescription, setIsGeneratingDescription] = useState(false);
+  const [isLoadingGlobalContext, setIsLoadingGlobalContext] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
@@ -327,6 +328,25 @@ export const EditorApp: React.FC = () => {
     return normalizedRequestId === pendingChatStartRequestIdRef.current
       || normalizedRequestId === acceptedChatStartRequestIdRef.current;
   }, []);
+
+  const persistGlobalContext = useCallback((context: string) => {
+    setGlobalContext(context);
+    vscode.postMessage({ type: 'saveGlobalContext', context });
+  }, []);
+
+  const handleResetGlobalContext = useCallback(() => {
+    persistGlobalContext('');
+    setNotice(null);
+  }, [persistGlobalContext]);
+
+  const handleLoadGlobalContext = useCallback(() => {
+    if (isLoadingGlobalContext) {
+      return;
+    }
+    setNotice(null);
+    setIsLoadingGlobalContext(true);
+    vscode.postMessage({ type: 'loadRemoteGlobalContext' });
+  }, [isLoadingGlobalContext]);
 
   const releaseStartChatPendingState = useCallback((options?: { resetSaving?: boolean }) => {
     clearChatStartTimeout();
@@ -574,6 +594,8 @@ export const EditorApp: React.FC = () => {
     return chunks;
   }, [globalContext]);
 
+  const hasGlobalContext = globalContext.trim().length > 0;
+
   const reportSummary = useMemo(() => {
     const chunks: string[] = [];
     const reportText = (prompt.report || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -747,6 +769,7 @@ export const EditorApp: React.FC = () => {
         setIsLoaded(false);
         setIsChatPanelOpen(false);
         setNotice(null);
+        setIsLoadingGlobalContext(false);
         setIsGeneratingTitle(false);
         setIsGeneratingDescription(false);
         setGitOverlayOpen(false);
@@ -1076,6 +1099,15 @@ export const EditorApp: React.FC = () => {
         break;
       case 'globalContext':
         setGlobalContext(msg.context || '');
+        break;
+      case 'globalContextLoaded':
+        setIsLoadingGlobalContext(false);
+        setNotice(null);
+        setGlobalContext(msg.context || '');
+        break;
+      case 'globalContextLoadFailed':
+        setIsLoadingGlobalContext(false);
+        showInlineNotice('error', msg.message || 'Не удалось загрузить общую инструкцию.');
         break;
       case 'triggerStartChat':
         {
@@ -2558,18 +2590,58 @@ export const EditorApp: React.FC = () => {
           {renderSection('globalPrompt', 'Общая инструкция', globalPromptSummary, (
             <>
               <div style={styles.field}>
-                <label style={styles.label}>{t('editor.globalContext')}</label>
+                <div style={styles.promptFieldHeader}>
+                  <div style={styles.promptFieldLabelRow}>
+                    <label style={styles.label}>{t('editor.globalContext')}</label>
+                  </div>
+                  <div style={styles.promptFieldActions}>
+                    {hasGlobalContext && !isLoadingGlobalContext ? (
+                      <button
+                        type="button"
+                        style={styles.linkBtn}
+                        onClick={handleResetGlobalContext}
+                      >
+                        {t('editor.resetGlobalContext')}
+                      </button>
+                    ) : null}
+                    {(!hasGlobalContext || isLoadingGlobalContext) ? (
+                      <button
+                        type="button"
+                        style={{
+                          ...styles.linkBtn,
+                          ...styles.linkBtnWithSpinner,
+                          ...(isLoadingGlobalContext ? styles.linkBtnDisabled : null),
+                        }}
+                        onClick={handleLoadGlobalContext}
+                        disabled={isLoadingGlobalContext}
+                        aria-busy={isLoadingGlobalContext}
+                      >
+                        {isLoadingGlobalContext ? (
+                          <span style={styles.linkBtnSpinner} aria-hidden="true" />
+                        ) : (
+                          <span aria-hidden="true">📥</span>
+                        )}
+                        <span>
+                          {isLoadingGlobalContext
+                            ? t('editor.loadingGlobalContext')
+                            : t('editor.loadGlobalContext')}
+                        </span>
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
                 <textarea
                   ref={globalContextTextareaRef}
                   value={globalContext}
+                  disabled={isLoadingGlobalContext}
                   onChange={e => {
-                    setGlobalContext(e.target.value);
-                    vscode.postMessage({ type: 'saveGlobalContext', context: e.target.value });
+                    persistGlobalContext(e.target.value);
                   }}
                   placeholder={t('editor.globalContextPlaceholder')}
                   rows={3}
                   style={{
                     ...styles.globalContextTextarea,
+                    ...(isLoadingGlobalContext ? styles.globalContextTextareaDisabled : null),
                     height: globalContextHeight ? `${globalContextHeight}px` : undefined,
                   }}
                 />
@@ -3252,6 +3324,20 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'not-allowed',
     border: 'none',
   },
+  linkBtnWithSpinner: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+  },
+  linkBtnSpinner: {
+    width: '12px',
+    height: '12px',
+    border: '2px solid color-mix(in srgb, currentColor 35%, transparent)',
+    borderTopColor: 'currentColor',
+    borderRadius: '50%',
+    animation: 'pm-spin 0.8s linear infinite',
+    flexShrink: 0,
+  },
   inlineIcon: {
     width: '15px',
     height: '15px',
@@ -3481,5 +3567,9 @@ const styles: Record<string, React.CSSProperties> = {
     outline: 'none',
     minHeight: '60px',
     boxSizing: 'border-box' as const,
+  },
+  globalContextTextareaDisabled: {
+    opacity: 0.75,
+    cursor: 'progress',
   },
 };

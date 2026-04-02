@@ -16,7 +16,7 @@ import { TimerDisplay } from './components/TimerDisplay';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
 import type { Prompt, PromptStatus } from '../../types/prompt';
-import type { GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlaySnapshot } from '../../types/git';
+import type { GitOverlayActionKind, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
 import { createDefaultPrompt } from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
 import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
@@ -163,6 +163,11 @@ export const EditorApp: React.FC = () => {
   const [gitOverlayFileHistory, setGitOverlayFileHistory] = useState<GitOverlayFileHistoryPayload | null>(null);
   const [gitOverlayCommitMessages, setGitOverlayCommitMessages] = useState<Record<string, string>>({});
   const [gitOverlayBusyAction, setGitOverlayBusyAction] = useState<string | null>(null);
+  const [gitOverlayCompletedActions, setGitOverlayCompletedActions] = useState<Record<GitOverlayActionKind, boolean>>({
+    push: false,
+    'review-request': false,
+    merge: false,
+  });
   const [inlineSuggestion, setInlineSuggestion] = useState<string>('');
   const [inlineSuggestions, setInlineSuggestions] = useState<string[]>([]);
   const [autoCompleteEnabled, setAutoCompleteEnabled] = useState(false);
@@ -230,6 +235,10 @@ export const EditorApp: React.FC = () => {
   const logMainRichTextDebug = useCallback((message: string, payload?: Record<string, unknown>) => {
     logReportDebug(`mainRichText.${message}`, payload);
   }, [logReportDebug]);
+
+  const logGitOverlayDebug = useCallback((message: string, payload?: Record<string, unknown>) => {
+    vscode.postMessage({ type: 'debugLog', scope: 'editor-git-overlay', message, payload });
+  }, []);
 
   const clearChatStartTimeout = useCallback(() => {
     if (chatStartTimeoutRef.current) {
@@ -571,6 +580,7 @@ export const EditorApp: React.FC = () => {
         setGitOverlayFileHistory(null);
         setGitOverlayCommitMessages({});
         setGitOverlayBusyAction(null);
+        setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
         // Delay showing the loader so fast loads don't flash
         if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); }
         showLoaderTimerRef.current = window.setTimeout(() => { setShowLoader(true); }, 300);
@@ -609,6 +619,7 @@ export const EditorApp: React.FC = () => {
             setGitOverlayFileHistory(null);
             setGitOverlayCommitMessages({});
             setGitOverlayBusyAction(null);
+            setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
             setPrompt(msg.prompt);
             localReportDirtyRef.current = false;
             currentPromptIdRef.current = incomingPromptId;
@@ -970,8 +981,12 @@ export const EditorApp: React.FC = () => {
         scheduleAutoSave(50);
         break;
       case 'gitOverlaySnapshot':
+        logGitOverlayDebug('snapshot.received', {
+          projectCount: Array.isArray(msg.snapshot?.projects) ? msg.snapshot.projects.length : 0,
+          promptBranch: String(msg.snapshot?.promptBranch || '').trim(),
+          trackedBranchCount: Array.isArray(msg.snapshot?.trackedBranches) ? msg.snapshot.trackedBranches.length : 0,
+        });
         setGitOverlaySnapshot(msg.snapshot || null);
-        setGitOverlayOpen(true);
         setGitOverlayCommitMessages((prev) => {
           if (!msg.snapshot) {
             return {};
@@ -1007,6 +1022,13 @@ export const EditorApp: React.FC = () => {
           }
           return next;
         });
+        setGitOverlayBusyAction(null);
+        break;
+      case 'gitOverlayActionCompleted':
+        setGitOverlayCompletedActions((prev) => ({
+          ...prev,
+          [msg.action]: true,
+        }));
         setGitOverlayBusyAction(null);
         break;
       case 'pickedFiles':
@@ -1300,6 +1322,12 @@ export const EditorApp: React.FC = () => {
   const buildPromptForSave = (): Prompt => buildPromptForSaveFrom(promptRef.current);
 
   const handleOpenGitOverlay = useCallback(() => {
+    logGitOverlayDebug('open.requested', {
+      promptId: prompt.id || '__new__',
+      promptBranch: prompt.branch.trim(),
+      projectCount: prompt.projects.length,
+      projects: prompt.projects,
+    });
     setGitOverlayOpen(true);
     setGitOverlayFileHistory(null);
     setGitOverlayBusyAction('overlay:loading');
@@ -1308,7 +1336,7 @@ export const EditorApp: React.FC = () => {
       promptBranch: prompt.branch.trim(),
       projects: prompt.projects,
     });
-  }, [prompt.branch, prompt.projects, t]);
+  }, [logGitOverlayDebug, prompt.branch, prompt.id, prompt.projects]);
 
   const handleGitOverlayTrackedBranchChange = (trackedBranch: string) => {
     const normalized = (trackedBranch || '').trim();
@@ -1495,6 +1523,53 @@ export const EditorApp: React.FC = () => {
       prompt: buildPromptForSave(),
       messages: normalizedMessages,
       includeAllChanges: true,
+    });
+  }, []);
+
+  const handleGitOverlayCreateReviewRequest = useCallback((requests: GitOverlayProjectReviewRequestInput[]) => {
+    const normalizedRequests = (requests || [])
+      .map((item) => ({
+        project: (item.project || '').trim(),
+        targetBranch: (item.targetBranch || '').trim(),
+        title: (item.title || '').trim(),
+      }))
+      .filter(item => Boolean(item.project) && Boolean(item.targetBranch) && Boolean(item.title));
+
+    if (normalizedRequests.length === 0) {
+      return;
+    }
+
+    setGitOverlayBusyAction(
+      normalizedRequests.length === 1
+        ? `createReviewRequest:${normalizedRequests[0].project}`
+        : 'createReviewRequest:all'
+    );
+    vscode.postMessage({
+      type: 'gitOverlayCreateReviewRequest',
+      prompt: buildPromptForSave(),
+      requests: normalizedRequests,
+    });
+  }, []);
+
+  const handleGitOverlayOpenReviewRequest = useCallback((url: string) => {
+    vscode.postMessage({ type: 'gitOverlayOpenReviewRequest', url });
+  }, []);
+
+  const handleGitOverlaySetupReviewCli = useCallback((request: GitOverlayReviewCliSetupRequest) => {
+    const normalizedProject = (request.project || '').trim();
+    const normalizedHost = (request.host || '').trim();
+    if (!normalizedProject || !normalizedHost || (request.cliCommand !== 'gh' && request.cliCommand !== 'glab')) {
+      return;
+    }
+
+    vscode.postMessage({
+      type: 'gitOverlaySetupReviewCli',
+      request: {
+        project: normalizedProject,
+        cliCommand: request.cliCommand,
+        host: normalizedHost,
+        action: request.action,
+      },
     });
   }, []);
 
@@ -2471,21 +2546,33 @@ export const EditorApp: React.FC = () => {
         snapshot={gitOverlaySnapshot}
         commitMessages={gitOverlayCommitMessages}
         busyAction={gitOverlayBusyAction}
+        completedActions={gitOverlayCompletedActions}
+        promptTitle={prompt.title}
+        promptTaskNumber={prompt.taskNumber}
         dockToSecondHalf={shouldDockGitOverlaySecondHalf}
         preferredTrackedBranch={(prompt.trackedBranch || '').trim() || workspaceTrackedBranchPreference}
         onClose={() => setGitOverlayOpen(false)}
         onRefresh={handleRefreshGitOverlay}
         onEnsurePromptBranch={handleGitOverlayEnsurePromptBranch}
         onPush={handleGitOverlayPush}
+        onCreateReviewRequest={handleGitOverlayCreateReviewRequest}
         onMergePromptBranch={handleGitOverlayMergePromptBranch}
         onDiscardFile={handleGitOverlayDiscardFile}
         onOpenFile={handleGitOverlayOpenFile}
         onOpenDiff={handleGitOverlayOpenDiff}
+        onOpenReviewRequest={handleGitOverlayOpenReviewRequest}
+        onSetupReviewCli={handleGitOverlaySetupReviewCli}
         onOpenMergeEditor={handleGitOverlayOpenMergeEditor}
         onGenerateCommitMessage={handleGitOverlayGenerateCommitMessage}
         onCommitStaged={handleGitOverlayCommitStaged}
         onCommitMessageChange={handleGitOverlayCommitMessageChange}
         onTrackedBranchChange={handleGitOverlayTrackedBranchChange}
+        onDone={(status) => {
+          setGitOverlayOpen(false);
+          if (status) {
+            handleSetStatus(status);
+          }
+        }}
         t={t}
       />
     </div>

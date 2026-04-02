@@ -14,13 +14,21 @@ import type {
 	GitOverlayCommit,
 	GitOverlayFileHistoryEntry,
 	GitOverlayFileHistoryPayload,
+	GitOverlayProjectReviewRequestInput,
 	GitOverlayProjectCommitMessage,
 	GitOverlayProjectSnapshot,
+	GitOverlayReviewComment,
+	GitOverlayReviewRemote,
+	GitOverlayReviewRequest,
+	GitOverlayReviewState,
 	GitOverlaySnapshot,
 } from '../types/git.js';
+import type { Prompt } from '../types/prompt.js';
 import {
 	buildGitOverlayGraph,
 	canDeleteGitOverlayBranch,
+	normalizeGitOverlayReviewRequestState,
+	parseGitOverlayRemoteUrl,
 	resolveGitOverlayBranchNames,
 } from '../utils/gitOverlay.js';
 
@@ -106,6 +114,7 @@ interface BuiltInGitExtensionExports {
 
 export class GitService {
 	private static readonly DIFF_MAX_BUFFER = 8 * 1024 * 1024;
+	private readonly reviewCliAvailability = new Map<'gh' | 'glab', boolean>();
 
 	private parseStagedNameStatus(raw: string): StagedFileChange[] {
 		return raw
@@ -162,6 +171,501 @@ export class GitService {
 			cwd: projectPath,
 			maxBuffer: GitService.DIFF_MAX_BUFFER,
 		});
+	}
+
+	private async runJsonCliCommand(command: 'gh' | 'glab', projectPath: string, args: string[]): Promise<unknown> {
+		const { stdout } = await execFileAsync(command, args, {
+			cwd: projectPath,
+			maxBuffer: GitService.DIFF_MAX_BUFFER,
+		});
+		const normalized = stdout.trim();
+		if (!normalized) {
+			return null;
+		}
+
+		try {
+			return JSON.parse(normalized);
+		} catch (error) {
+			throw new Error(`${command} returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async isCliCommandAvailable(command: 'gh' | 'glab'): Promise<boolean> {
+		const cached = this.reviewCliAvailability.get(command);
+		if (cached !== undefined) {
+			return cached;
+		}
+
+		let available = false;
+		try {
+			await execFileAsync(command, ['--version'], {
+				maxBuffer: 256 * 1024,
+			});
+			available = true;
+		} catch {
+			available = false;
+		}
+
+		if (available) {
+			this.reviewCliAvailability.set(command, true);
+		} else {
+			this.reviewCliAvailability.delete(command);
+		}
+		return available;
+	}
+
+	private async isCliAuthenticated(command: 'gh' | 'glab', projectPath: string, host: string): Promise<boolean> {
+		const args = command === 'gh'
+			? ['auth', 'status', '--active', '--hostname', host]
+			: ['auth', 'status', '--hostname', host];
+
+		try {
+			await execFileAsync(command, args, {
+				cwd: projectPath,
+				maxBuffer: 256 * 1024,
+			});
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private parseNumstatOutput(raw: string): { additions: number | null; deletions: number | null; isBinary: boolean } {
+		const line = raw
+			.split(/\r?\n/)
+			.map(item => item.trim())
+			.find(Boolean);
+
+		if (!line) {
+			return { additions: 0, deletions: 0, isBinary: false };
+		}
+
+		const parts = line.split('\t');
+		if (parts.length < 2) {
+			return { additions: 0, deletions: 0, isBinary: false };
+		}
+
+		const additionsToken = (parts[0] || '').trim();
+		const deletionsToken = (parts[1] || '').trim();
+		if (additionsToken === '-' || deletionsToken === '-') {
+			return { additions: null, deletions: null, isBinary: true };
+		}
+
+		return {
+			additions: Number.parseInt(additionsToken || '0', 10) || 0,
+			deletions: Number.parseInt(deletionsToken || '0', 10) || 0,
+			isBinary: false,
+		};
+	}
+
+	private async resolveOverlayFileSize(projectPath: string, filePath: string, previousPath?: string): Promise<number> {
+		const candidates = Array.from(new Set([filePath, previousPath || ''].map(item => item.trim()).filter(Boolean)));
+		for (const candidate of candidates) {
+			try {
+				const stat = await fs.stat(path.join(projectPath, candidate));
+				if (stat.isFile()) {
+					return stat.size;
+				}
+			} catch {
+				// Fallback to Git blob size.
+			}
+
+			const sizeFromHead = await this.runGitFileCommandOptional(projectPath, ['cat-file', '-s', `HEAD:${candidate}`]);
+			const parsedSize = Number.parseInt(sizeFromHead, 10);
+			if (Number.isFinite(parsedSize) && parsedSize >= 0) {
+				return parsedSize;
+			}
+		}
+
+		return 0;
+	}
+
+	private async getTrackedChangeDiffStats(
+		projectPath: string,
+		filePath: string,
+		previousPath: string | undefined,
+		cached: boolean,
+	): Promise<{ additions: number | null; deletions: number | null; isBinary: boolean }> {
+		const args = ['diff'];
+		if (cached) {
+			args.push('--cached');
+		}
+		args.push('--numstat', '--find-renames', '--');
+		if (previousPath && previousPath !== filePath) {
+			args.push(previousPath, filePath);
+		} else {
+			args.push(filePath);
+		}
+
+		const output = await this.runGitFileCommandOptional(projectPath, args);
+		return this.parseNumstatOutput(output);
+	}
+
+	private async getUntrackedChangeDiffStats(projectPath: string, filePath: string): Promise<{ additions: number | null; deletions: number | null; isBinary: boolean }> {
+		try {
+			const content = await fs.readFile(path.join(projectPath, filePath));
+			if (content.includes(0)) {
+				return { additions: null, deletions: null, isBinary: true };
+			}
+
+			const text = content.toString('utf-8');
+			if (!text) {
+				return { additions: 0, deletions: 0, isBinary: false };
+			}
+
+			return {
+				additions: text.split(/\r?\n/).length,
+				deletions: 0,
+				isBinary: false,
+			};
+		} catch {
+			return { additions: null, deletions: null, isBinary: false };
+		}
+	}
+
+	private async enrichOverlayChangeFile(projectPath: string, change: GitOverlayProjectSnapshot['changeGroups'][keyof GitOverlayProjectSnapshot['changeGroups']][number]): Promise<GitOverlayProjectSnapshot['changeGroups'][keyof GitOverlayProjectSnapshot['changeGroups']][number]> {
+		const fileSizeBytes = await this.resolveOverlayFileSize(projectPath, change.path, change.previousPath);
+		const diffStats = change.group === 'untracked'
+			? await this.getUntrackedChangeDiffStats(projectPath, change.path)
+			: await this.getTrackedChangeDiffStats(projectPath, change.path, change.previousPath, change.group === 'staged');
+
+		return {
+			...change,
+			fileSizeBytes,
+			additions: diffStats.additions,
+			deletions: diffStats.deletions,
+			isBinary: diffStats.isBinary,
+		};
+	}
+
+	private async getReviewRemote(projectPath: string, branchName: string): Promise<GitOverlayReviewRemote | null> {
+		const remoteName = await this.getBranchRemote(projectPath, branchName);
+		if (!remoteName) {
+			return null;
+		}
+
+		const remoteUrl = await this.runGitFileCommandOptional(projectPath, ['remote', 'get-url', remoteName]);
+		const parsed = parseGitOverlayRemoteUrl(remoteUrl);
+		if (!parsed) {
+			return null;
+		}
+
+		const cliAvailable = parsed.cliCommand
+			? await this.isCliCommandAvailable(parsed.cliCommand)
+			: false;
+
+		return {
+			...parsed,
+			remoteName,
+			remoteUrl,
+			cliAvailable,
+		};
+	}
+
+	private normalizeGitHubReviewComments(issueComments: unknown, reviewComments: unknown): GitOverlayReviewComment[] {
+		const comments: GitOverlayReviewComment[] = [];
+		const appendComments = (items: unknown, prefix: string) => {
+			if (!Array.isArray(items)) {
+				return;
+			}
+
+			for (const item of items) {
+				const record = item as {
+					id?: number | string;
+					body?: string;
+					created_at?: string;
+					user?: { login?: string };
+				};
+				const body = String(record?.body || '').trim();
+				if (!body) {
+					continue;
+				}
+
+				comments.push({
+					id: `${prefix}-${String(record?.id || body)}`,
+					author: String(record?.user?.login || 'github'),
+					body,
+					createdAt: String(record?.created_at || ''),
+					system: false,
+				});
+			}
+		};
+
+		appendComments(issueComments, 'issue');
+		appendComments(reviewComments, 'review');
+
+		return comments.sort((left, right) => left.createdAt.localeCompare(right.createdAt, 'ru'));
+	}
+
+	private normalizeGitLabReviewComments(notes: unknown): GitOverlayReviewComment[] {
+		if (!Array.isArray(notes)) {
+			return [];
+		}
+
+		return notes
+			.map((item) => {
+				const record = item as {
+					id?: number | string;
+					body?: string;
+					created_at?: string;
+					system?: boolean;
+					author?: { username?: string; name?: string };
+				};
+				const body = String(record?.body || '').trim();
+				if (!body) {
+					return null;
+				}
+
+				return {
+					id: `note-${String(record?.id || body)}`,
+					author: String(record?.author?.username || record?.author?.name || 'gitlab'),
+					body,
+					createdAt: String(record?.created_at || ''),
+					system: Boolean(record?.system),
+				} satisfies GitOverlayReviewComment;
+			})
+			.filter((item): item is GitOverlayReviewComment => Boolean(item))
+			.sort((left, right) => left.createdAt.localeCompare(right.createdAt, 'ru'));
+	}
+
+	private async getGitHubReviewRequest(projectPath: string, remote: GitOverlayReviewRemote, sourceBranch: string): Promise<GitOverlayReviewRequest | null> {
+		const encodedHead = encodeURIComponent(`${remote.owner}:${sourceBranch}`);
+		const payload = await this.runJsonCliCommand('gh', projectPath, [
+			'api',
+			`repos/${remote.repositoryPath}/pulls?state=all&head=${encodedHead}`,
+		]);
+
+		if (!Array.isArray(payload) || payload.length === 0) {
+			return null;
+		}
+
+		const selected = payload
+			.map(item => item as {
+				id?: number | string;
+				number?: number | string;
+				title?: string;
+				html_url?: string;
+				state?: string;
+				merged_at?: string | null;
+				updated_at?: string;
+				draft?: boolean;
+				head?: { ref?: string };
+				base?: { ref?: string };
+			})
+			.filter(item => String(item.head?.ref || '').trim() === sourceBranch)
+			.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || ''), 'ru'))[0];
+
+		if (!selected) {
+			return null;
+		}
+
+		const number = String(selected.number || selected.id || '').trim();
+		if (!number) {
+			return null;
+		}
+
+		const [issueComments, reviewComments] = await Promise.all([
+			this.runJsonCliCommand('gh', projectPath, ['api', `repos/${remote.repositoryPath}/issues/${number}/comments`]).catch(() => []),
+			this.runJsonCliCommand('gh', projectPath, ['api', `repos/${remote.repositoryPath}/pulls/${number}/comments`]).catch(() => []),
+		]);
+
+		return {
+			id: String(selected.id || number),
+			number,
+			title: String(selected.title || '').trim(),
+			url: String(selected.html_url || '').trim(),
+			state: normalizeGitOverlayReviewRequestState({
+				state: String(selected.state || ''),
+				mergedAt: selected.merged_at || null,
+			}),
+			sourceBranch: String(selected.head?.ref || sourceBranch).trim(),
+			targetBranch: String(selected.base?.ref || '').trim(),
+			isDraft: Boolean(selected.draft),
+			comments: this.normalizeGitHubReviewComments(issueComments, reviewComments),
+		};
+	}
+
+	private async getGitLabReviewRequest(projectPath: string, remote: GitOverlayReviewRemote, sourceBranch: string): Promise<GitOverlayReviewRequest | null> {
+		const encodedRepoPath = encodeURIComponent(remote.repositoryPath);
+		const encodedSourceBranch = encodeURIComponent(sourceBranch);
+		const payload = await this.runJsonCliCommand('glab', projectPath, [
+			'api',
+			`projects/${encodedRepoPath}/merge_requests?source_branch=${encodedSourceBranch}&state=all`,
+		]);
+
+		if (!Array.isArray(payload) || payload.length === 0) {
+			return null;
+		}
+
+		const selected = payload
+			.map(item => item as {
+				id?: number | string;
+				iid?: number | string;
+				title?: string;
+				web_url?: string;
+				state?: string;
+				merged_at?: string | null;
+				updated_at?: string;
+				source_branch?: string;
+				target_branch?: string;
+				work_in_progress?: boolean;
+				draft?: boolean;
+			})
+			.filter(item => String(item.source_branch || '').trim() === sourceBranch)
+			.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || ''), 'ru'))[0];
+
+		if (!selected) {
+			return null;
+		}
+
+		const iid = String(selected.iid || selected.id || '').trim();
+		if (!iid) {
+			return null;
+		}
+
+		const notes = await this.runJsonCliCommand('glab', projectPath, [
+			'api',
+			`projects/${encodedRepoPath}/merge_requests/${iid}/notes`,
+		]).catch(() => []);
+
+		return {
+			id: String(selected.id || iid),
+			number: iid,
+			title: String(selected.title || '').trim(),
+			url: String(selected.web_url || '').trim(),
+			state: normalizeGitOverlayReviewRequestState({
+				state: String(selected.state || ''),
+				mergedAt: selected.merged_at || null,
+			}),
+			sourceBranch: String(selected.source_branch || sourceBranch).trim(),
+			targetBranch: String(selected.target_branch || '').trim(),
+			isDraft: Boolean(selected.draft || selected.work_in_progress),
+			comments: this.normalizeGitLabReviewComments(notes),
+		};
+	}
+
+	private async getExistingReviewRequest(projectPath: string, remote: GitOverlayReviewRemote, sourceBranch: string): Promise<GitOverlayReviewRequest | null> {
+		if (!remote.supported || !remote.cliAvailable || !sourceBranch.trim()) {
+			return null;
+		}
+
+		if (remote.provider === 'github') {
+			return this.getGitHubReviewRequest(projectPath, remote, sourceBranch.trim());
+		}
+
+		if (remote.provider === 'gitlab') {
+			return this.getGitLabReviewRequest(projectPath, remote, sourceBranch.trim());
+		}
+
+		return null;
+	}
+
+	private async getProjectReviewState(projectPath: string, branchName: string): Promise<GitOverlayReviewState> {
+		const remote = await this.getReviewRemote(projectPath, branchName);
+		if (!remote) {
+			return { remote: null, request: null, error: '', setupAction: null };
+		}
+
+		if (!remote.supported) {
+			return { remote, request: null, error: '', setupAction: null };
+		}
+
+		if (!remote.cliAvailable) {
+			return {
+				remote,
+				request: null,
+				error: '',
+				setupAction: 'install-and-auth',
+			};
+		}
+
+		const cliCommand = remote.cliCommand;
+		if (cliCommand !== 'gh' && cliCommand !== 'glab') {
+			return { remote, request: null, error: '', setupAction: null };
+		}
+
+		const authenticated = await this.isCliAuthenticated(cliCommand, projectPath, remote.host);
+		if (!authenticated) {
+			return {
+				remote,
+				request: null,
+				error: '',
+				setupAction: 'auth',
+			};
+		}
+
+		try {
+			const request = await this.getExistingReviewRequest(projectPath, remote, branchName);
+			return { remote, request, error: '', setupAction: null };
+		} catch (error) {
+			return {
+				remote,
+				request: null,
+				error: error instanceof Error ? error.message : String(error),
+				setupAction: null,
+			};
+		}
+	}
+
+	private buildReviewRequestBody(prompt: Prompt): string {
+		const lines = [
+			prompt.taskNumber?.trim() ? `Task: ${prompt.taskNumber.trim()}` : '',
+			prompt.title?.trim() ? `Prompt: ${prompt.title.trim()}` : '',
+			prompt.branch?.trim() ? `Branch: ${prompt.branch.trim()}` : '',
+			'',
+			(prompt.description || '').trim(),
+		].filter(Boolean);
+
+		return lines.join('\n').trim();
+	}
+
+	private async createGitHubReviewRequest(
+		projectPath: string,
+		remote: GitOverlayReviewRemote,
+		sourceBranch: string,
+		targetBranch: string,
+		title: string,
+		body: string,
+	): Promise<void> {
+		await this.runJsonCliCommand('gh', projectPath, [
+			'api',
+			'-X',
+			'POST',
+			`repos/${remote.repositoryPath}/pulls`,
+			'-f',
+			`title=${title}`,
+			'-f',
+			`head=${remote.owner}:${sourceBranch}`,
+			'-f',
+			`base=${targetBranch}`,
+			'-f',
+			`body=${body}`,
+		]);
+	}
+
+	private async createGitLabReviewRequest(
+		projectPath: string,
+		remote: GitOverlayReviewRemote,
+		sourceBranch: string,
+		targetBranch: string,
+		title: string,
+		body: string,
+	): Promise<void> {
+		const encodedRepoPath = encodeURIComponent(remote.repositoryPath);
+		await this.runJsonCliCommand('glab', projectPath, [
+			'api',
+			'-X',
+			'POST',
+			`projects/${encodedRepoPath}/merge_requests`,
+			'-F',
+			`source_branch=${sourceBranch}`,
+			'-F',
+			`target_branch=${targetBranch}`,
+			'-F',
+			`title=${title}`,
+			'-F',
+			`description=${body}`,
+		]);
 	}
 
 	private async getBuiltInGitApi(): Promise<BuiltInGitApi | null> {
@@ -377,6 +881,10 @@ export class GitService {
 				group: groupName === 'workingTree' ? 'working-tree' : groupName,
 				conflicted: conflictedFiles.has(file.path),
 				staged,
+				fileSizeBytes: 0,
+				additions: null,
+				deletions: null,
+				isBinary: false,
 			});
 		};
 
@@ -388,6 +896,10 @@ export class GitService {
 				group: 'merge',
 				conflicted: true,
 				staged: false,
+				fileSizeBytes: 0,
+				additions: null,
+				deletions: null,
+				isBinary: false,
 			})),
 			staged: [],
 			workingTree: [],
@@ -403,6 +915,10 @@ export class GitService {
 					group: 'untracked' as const,
 					conflicted: false,
 					staged: false,
+					fileSizeBytes: 0,
+					additions: null,
+					deletions: null,
+					isBinary: false,
 				})),
 		};
 
@@ -418,7 +934,19 @@ export class GitService {
 			}
 		}
 
-		return changeGroups;
+		const [merge, staged, workingTree, untracked] = await Promise.all([
+			Promise.all(changeGroups.merge.map(item => this.enrichOverlayChangeFile(projectPath, item))),
+			Promise.all(changeGroups.staged.map(item => this.enrichOverlayChangeFile(projectPath, item))),
+			Promise.all(changeGroups.workingTree.map(item => this.enrichOverlayChangeFile(projectPath, item))),
+			Promise.all(changeGroups.untracked.map(item => this.enrichOverlayChangeFile(projectPath, item))),
+		]);
+
+		return {
+			merge,
+			staged,
+			workingTree,
+			untracked,
+		};
 	}
 
 	private parseCommitLog(raw: string): GitOverlayCommit[] {
@@ -517,17 +1045,19 @@ export class GitService {
 					branches: [],
 					cleanupBranches: [],
 					changeGroups: { merge: [], staged: [], workingTree: [], untracked: [] },
+					review: { remote: null, request: null, error: '', setupAction: null },
 					recentCommits: [],
 					staleLocalBranches: [],
 					graph: { nodes: [], edges: [] },
 				};
 			}
 
-			const [localBranches, remoteBranches, changeGroups, recentCommits] = await Promise.all([
+			const [localBranches, remoteBranches, changeGroups, recentCommits, review] = await Promise.all([
 				this.listLocalBranches(projectPath),
 				this.listRemoteBranchNames(projectPath),
 				this.getChangeGroups(project, projectPath),
 				this.getRecentCommits(projectPath, currentBranch, 12),
+				this.getProjectReviewState(projectPath, promptBranch.trim() || currentBranch),
 			]);
 
 			const currentBranchRecord = localBranches.get(currentBranch) || null;
@@ -624,6 +1154,7 @@ export class GitService {
 				branches,
 				cleanupBranches,
 				changeGroups,
+				review,
 				recentCommits,
 				staleLocalBranches: cleanupBranches.filter(branch => branch.stale).map(branch => branch.name),
 				graph,
@@ -645,6 +1176,7 @@ export class GitService {
 				branches: [],
 				cleanupBranches: [],
 				changeGroups: { merge: [], staged: [], workingTree: [], untracked: [] },
+				review: { remote: null, request: null, error: '', setupAction: null },
 				recentCommits: [],
 				staleLocalBranches: [],
 				graph: { nodes: [], edges: [] },
@@ -1482,6 +2014,90 @@ export class GitService {
 			const hasUpstream = await this.runGitFileCommandOptional(projectPath, ['config', `branch.${targetBranch}.merge`]);
 			await this.runGitFileMutation(projectPath, hasUpstream ? ['push', remote, `${targetBranch}:${targetBranch}`] : ['push', '-u', remote, `${targetBranch}:${targetBranch}`]);
 		});
+	}
+
+	async createReviewRequests(
+		projectPaths: Map<string, string>,
+		prompt: Prompt,
+		requests: GitOverlayProjectReviewRequestInput[],
+	): Promise<GitMultiProjectResult> {
+		const promptBranch = (prompt.branch || '').trim();
+		if (!promptBranch) {
+			return { success: false, errors: ['Название ветки промпта пустое.'], changedProjects: [], skippedProjects: [] };
+		}
+
+		const normalizedRequests = Array.from(new Map(
+			(requests || [])
+				.map((item) => ({
+					project: (item.project || '').trim(),
+					targetBranch: (item.targetBranch || '').trim(),
+					title: (item.title || '').trim(),
+				}))
+				.filter(item => Boolean(item.project) && Boolean(item.targetBranch) && Boolean(item.title))
+				.map(item => [item.project, item]),
+		).values());
+
+		if (normalizedRequests.length === 0) {
+			return { success: false, errors: ['Не выбраны проекты для создания MR/PR.'], changedProjects: [], skippedProjects: [] };
+		}
+
+		const result: GitMultiProjectResult = {
+			success: true,
+			errors: [],
+			changedProjects: [],
+			skippedProjects: [],
+		};
+
+		const body = this.buildReviewRequestBody(prompt);
+
+		for (const item of normalizedRequests) {
+			const projectPath = projectPaths.get(item.project);
+			if (!projectPath) {
+				result.errors.push(`${item.project}: workspace folder not found`);
+				continue;
+			}
+
+			try {
+				const remote = await this.getReviewRemote(projectPath, promptBranch);
+				if (!remote || !remote.supported) {
+					result.errors.push(`${item.project}: поддержка MR/PR доступна только для GitHub и GitLab.`);
+					continue;
+				}
+				if (!remote.cliAvailable) {
+					result.errors.push(`${item.project}: CLI ${remote.cliCommand} не найден.`);
+					continue;
+				}
+				const cliCommand = remote.cliCommand;
+				if (cliCommand !== 'gh' && cliCommand !== 'glab') {
+					result.errors.push(`${item.project}: CLI для этого провайдера не поддерживается.`);
+					continue;
+				}
+				const authenticated = await this.isCliAuthenticated(cliCommand, projectPath, remote.host);
+				if (!authenticated) {
+					result.errors.push(`${item.project}: CLI ${cliCommand} не авторизован.`);
+					continue;
+				}
+
+				const existingRequest = await this.getExistingReviewRequest(projectPath, remote, promptBranch);
+				if (existingRequest) {
+					result.skippedProjects.push(item.project);
+					continue;
+				}
+
+				if (remote.provider === 'github') {
+					await this.createGitHubReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body);
+				} else {
+					await this.createGitLabReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body);
+				}
+
+				result.changedProjects.push(item.project);
+			} catch (error) {
+				result.errors.push(`${item.project}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+
+		result.success = result.errors.length === 0;
+		return result;
 	}
 
 	async fetchProjects(

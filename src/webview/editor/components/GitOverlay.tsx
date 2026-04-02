@@ -2,27 +2,39 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react';
 
 import type {
+	GitOverlayActionKind,
 	GitOverlayChangeFile,
 	GitOverlayProjectCommitMessage,
+	GitOverlayProjectReviewRequestInput,
+	GitOverlayReviewCliSetupRequest,
 	GitOverlayProjectSnapshot,
 	GitOverlaySnapshot,
 } from '../../../types/git';
+import type { PromptStatus } from '../../../types/prompt';
+import { buildGitOverlayReviewRequestTitle } from '../../../utils/gitOverlay.js';
 
 type Props = {
 	open: boolean;
 	snapshot: GitOverlaySnapshot | null;
 	commitMessages: Record<string, string>;
 	busyAction: string | null;
+	completedActions: Record<GitOverlayActionKind, boolean>;
+	promptTitle: string;
+	promptTaskNumber: string;
 	dockToSecondHalf?: boolean;
 	preferredTrackedBranch?: string;
 	onClose: () => void;
+	onDone: (status: PromptStatus | null) => void;
 	onRefresh: (mode?: 'local' | 'fetch' | 'sync') => void;
 	onEnsurePromptBranch: (trackedBranch: string) => void;
 	onPush: (branch?: string) => void;
+	onCreateReviewRequest: (requests: GitOverlayProjectReviewRequestInput[]) => void;
 	onMergePromptBranch: (trackedBranch: string, stayOnTrackedBranch: boolean) => void;
 	onDiscardFile: (project: string, filePath: string, group: GitOverlayChangeFile['group'], previousPath?: string) => void;
 	onOpenFile: (project: string, filePath: string) => void;
 	onOpenDiff: (project: string, filePath: string) => void;
+	onOpenReviewRequest: (url: string) => void;
+	onSetupReviewCli: (request: GitOverlayReviewCliSetupRequest) => void;
 	onOpenMergeEditor: (project: string, filePath: string) => void;
 	onGenerateCommitMessage: (project?: string) => void;
 	onCommitStaged: (messages: GitOverlayProjectCommitMessage[]) => void;
@@ -31,7 +43,14 @@ type Props = {
 	t: (key: string) => string;
 };
 
-type SectionKey = 'step1' | 'step2' | 'step3' | 'step4';
+type SectionKey = 'step1' | 'step2' | 'step3' | 'step4' | 'step5';
+
+type ReviewDraft = {
+	targetBranch: string;
+	title: string;
+	manualTitle: boolean;
+	manualTargetBranch: boolean;
+};
 
 type ProjectValidation = {
 	available: boolean;
@@ -74,6 +93,33 @@ function collectProjectChanges(project: GitOverlayProjectSnapshot): GitOverlayCh
 		...project.changeGroups.workingTree,
 		...project.changeGroups.untracked,
 	];
+}
+
+function buildProjectTargetBranchOptions(project: GitOverlayProjectSnapshot, fallbackTrackedBranches: string[]): string[] {
+	const result = new Set<string>();
+
+	for (const branch of fallbackTrackedBranches) {
+		const normalized = branch.trim();
+		if (normalized) {
+			result.add(normalized);
+		}
+	}
+
+	for (const branch of project.branches) {
+		if (branch.kind !== 'tracked') {
+			continue;
+		}
+		const normalized = branch.name.trim();
+		if (normalized) {
+			result.add(normalized);
+		}
+	}
+
+	if (project.review.request?.targetBranch) {
+		result.add(project.review.request.targetBranch.trim());
+	}
+
+	return [...result];
 }
 
 function buildProjectChangesSummary(project: GitOverlayProjectSnapshot, t: (key: string) => string): string {
@@ -126,6 +172,37 @@ function buildStatusLabel(status: string): string {
 		return 'C';
 	}
 	return 'M';
+}
+
+function formatChangeSize(size: number): string {
+	return String(Math.max(0, size || 0));
+}
+
+function formatChangeDiff(change: GitOverlayChangeFile, t: (key: string) => string): string {
+	if (change.conflicted) {
+		return t('editor.gitOverlayChangeConflict');
+	}
+	if (change.isBinary || change.additions === null || change.deletions === null) {
+		return t('editor.gitOverlayChangeBinary');
+	}
+	return `-${change.deletions} +${change.additions}`;
+}
+
+function buildChangeMetricsLabel(change: GitOverlayChangeFile, t: (key: string) => string): string {
+	return `${formatChangeSize(change.fileSizeBytes)} | ${formatChangeDiff(change, t)}`;
+}
+
+function resolveReviewRequestStateLabel(project: GitOverlayProjectSnapshot, t: (key: string) => string): string {
+	if (!project.review.request) {
+		return t('editor.gitOverlayReviewRequestMissing');
+	}
+	if (project.review.request.state === 'accepted') {
+		return t('editor.gitOverlayReviewRequestAccepted');
+	}
+	if (project.review.request.state === 'closed') {
+		return t('editor.gitOverlayReviewRequestClosed');
+	}
+	return t('editor.gitOverlayReviewRequestOpen');
 }
 
 const ChevronIcon: React.FC<{ collapsed: boolean; disabled?: boolean }> = ({ collapsed, disabled = false }) => (
@@ -232,7 +309,13 @@ const ActionButton: React.FC<{
 	</button>
 );
 
-const InlineHint: React.FC<{ message: string; tone?: 'error' | 'info' }> = ({ message, tone = 'info' }) => (
+const InlineHint: React.FC<{
+	message: string;
+	tone?: 'error' | 'info';
+	actionLabel?: string;
+	onAction?: () => void;
+	actionDisabled?: boolean;
+}> = ({ message, tone = 'info', actionLabel, onAction, actionDisabled = false }) => (
 	<div style={{
 		...styles.inlineHint,
 		...(tone === 'error' ? styles.inlineHintError : styles.inlineHintInfo),
@@ -241,6 +324,19 @@ const InlineHint: React.FC<{ message: string; tone?: 'error' | 'info' }> = ({ me
 			<HintIcon tone={tone} />
 		</span>
 		<span style={styles.inlineHintText}>{message}</span>
+		{actionLabel && onAction ? (
+			<button
+				type="button"
+				onClick={onAction}
+				disabled={actionDisabled}
+				style={{
+					...styles.inlineHintActionButton,
+					...(actionDisabled ? styles.inlineHintActionButtonDisabled : null),
+				}}
+			>
+				{actionLabel}
+			</button>
+		) : null}
 	</div>
 );
 
@@ -249,16 +345,23 @@ export const GitOverlay: React.FC<Props> = ({
 	snapshot,
 	commitMessages,
 	busyAction,
+	completedActions,
+	promptTitle,
+	promptTaskNumber,
 	dockToSecondHalf = false,
 	preferredTrackedBranch,
 	onClose,
+	onDone,
 	onRefresh,
 	onEnsurePromptBranch,
 	onPush,
+	onCreateReviewRequest,
 	onMergePromptBranch,
 	onDiscardFile,
 	onOpenFile,
 	onOpenDiff,
+	onOpenReviewRequest,
+	onSetupReviewCli,
 	onOpenMergeEditor,
 	onGenerateCommitMessage,
 	onCommitStaged,
@@ -270,7 +373,9 @@ export const GitOverlay: React.FC<Props> = ({
 	const [stayOnTrackedBranch, setStayOnTrackedBranch] = useState(true);
 	const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
 	const [collapsedSections, setCollapsedSections] = useState<Partial<Record<SectionKey, boolean>>>({});
+	const [reviewDrafts, setReviewDrafts] = useState<Record<string, ReviewDraft>>({});
 	const userSelectedTrackedBranchRef = useRef(false);
+	const lastSyncedTrackedBranchRef = useRef('');
 
 	const trackedBranchOptions = useMemo(() => buildTrackedBranchOptions(snapshot), [snapshot]);
 	const promptBranch = (snapshot?.promptBranch || '').trim();
@@ -303,6 +408,20 @@ export const GitOverlay: React.FC<Props> = ({
 		() => promptBranchProjects.filter(project => !project.upstream || project.ahead > 0),
 		[promptBranchProjects],
 	);
+	const reviewProjects = useMemo(
+		() => availableProjects,
+		[availableProjects],
+	);
+	const reviewProjectsWithCli = useMemo(
+		() => reviewProjects.filter(project => Boolean(project.review.remote?.supported) && Boolean(project.review.remote?.cliAvailable)),
+		[reviewProjects],
+	);
+	const reviewProjectsMissingRequest = useMemo(
+		() => reviewProjectsWithCli.filter(project => !project.review.request),
+		[reviewProjectsWithCli],
+	);
+	const allSupportedReviewRequestsReady = reviewProjectsWithCli.length > 0
+		&& reviewProjectsWithCli.every(project => Boolean(project.review.request));
 
 	const projectValidations = useMemo(() => {
 		const result = new Map<string, ProjectValidation>();
@@ -345,30 +464,96 @@ export const GitOverlay: React.FC<Props> = ({
 		&& projectsWithChanges.length === 0;
 	const pushRequired = canAttemptPush && projectsNeedingPush.length > 0;
 	const canPush = pushRequired;
+	const step1Pending = !promptBranch || projectsOffPromptBranch.length > 0;
+	const step2Pending = !step1Pending && projectsWithChanges.length > 0;
+	const step3Pending = !step1Pending && !step2Pending && pushRequired;
+	const step4Pending = !step1Pending
+		&& !step2Pending
+		&& !step3Pending
+		&& reviewProjectsWithCli.length > 0
+		&& reviewProjectsMissingRequest.length > 0;
 	const canMerge = Boolean(promptBranch)
 		&& Boolean(selectedTrackedBranch)
 		&& projectsOffPromptBranch.length === 0
 		&& !hasConflicts
-		&& projectsWithChanges.length === 0;
-	const step1Pending = !promptBranch || projectsOffPromptBranch.length > 0;
-	const step2Pending = !step1Pending && projectsWithChanges.length > 0;
-	const step3Pending = !step1Pending && !step2Pending && pushRequired;
+		&& projectsWithChanges.length === 0
+		&& !step4Pending;
 	const stepAvailability: Record<SectionKey, boolean> = {
 		step1: true,
 		step2: !step1Pending,
 		step3: !step1Pending && !step2Pending,
 		step4: !step1Pending && !step2Pending && !step3Pending,
+		step5: !step1Pending && !step2Pending && !step3Pending && !step4Pending,
 	};
-	const firstPendingStep = step1Pending ? 1 : step2Pending ? 2 : step3Pending ? 3 : null;
+	const firstPendingStep = step1Pending ? 1 : step2Pending ? 2 : step3Pending ? 3 : step4Pending ? 4 : null;
 	const autoCollapsedSections = useMemo<Record<SectionKey, boolean>>(
 		() => ({
 			step1: false,
 			step2: firstPendingStep !== null && 2 > firstPendingStep,
 			step3: firstPendingStep !== null && 3 > firstPendingStep,
 			step4: firstPendingStep !== null && 4 > firstPendingStep,
+			step5: firstPendingStep !== null && 5 > firstPendingStep,
 		}),
 		[firstPendingStep],
 	);
+	const doneStatus: PromptStatus | null = completedActions.merge
+		? 'closed'
+		: allSupportedReviewRequestsReady
+			? 'review'
+			: canAttemptPush && !pushRequired
+				? 'report'
+				: null;
+	const doneStatusLabel = doneStatus === 'closed'
+		? t('status.closed')
+		: doneStatus === 'review'
+			? t('status.review')
+			: doneStatus === 'report'
+				? t('status.report')
+				: '';
+
+	useEffect(() => {
+		if (!snapshot) {
+			setReviewDrafts({});
+			lastSyncedTrackedBranchRef.current = '';
+			return;
+		}
+
+		const totalProjects = snapshot.projects.length;
+		const previousTrackedBranch = lastSyncedTrackedBranchRef.current;
+		setReviewDrafts((prev) => {
+			const next: Record<string, ReviewDraft> = {};
+			for (const project of snapshot.projects) {
+				const previousDraft = prev[project.project];
+				const options = buildProjectTargetBranchOptions(project, trackedBranchOptions);
+				const preferredTargetBranch = (project.review.request?.targetBranch || '').trim()
+					|| selectedTrackedBranch
+					|| options[0]
+					|| '';
+				const canSyncTargetBranch = !previousDraft
+					|| !previousDraft.manualTargetBranch
+					|| !previousDraft.targetBranch
+					|| previousDraft.targetBranch === previousTrackedBranch;
+				const targetBranch = canSyncTargetBranch
+					? (options.includes(preferredTargetBranch) ? preferredTargetBranch : options[0] || preferredTargetBranch)
+					: (options.includes(previousDraft.targetBranch) ? previousDraft.targetBranch : preferredTargetBranch);
+				next[project.project] = {
+					targetBranch,
+					title: previousDraft?.manualTitle
+						? previousDraft.title
+						: (project.review.request?.title || buildGitOverlayReviewRequestTitle({
+							promptTitle,
+							taskNumber: promptTaskNumber,
+							projectName: project.project,
+							projectCount: totalProjects,
+						})),
+					manualTitle: Boolean(previousDraft?.manualTitle),
+					manualTargetBranch: Boolean(previousDraft?.manualTargetBranch),
+				};
+			}
+			return next;
+		});
+		lastSyncedTrackedBranchRef.current = selectedTrackedBranch;
+	}, [promptTaskNumber, promptTitle, selectedTrackedBranch, snapshot, trackedBranchOptions]);
 
 	useEffect(() => {
 		if (!open) {
@@ -446,6 +631,73 @@ export const GitOverlay: React.FC<Props> = ({
 		});
 	}, [projectValidations, projectsWithChanges.length, snapshot]);
 
+	const updateReviewDraftTargetBranch = useCallback((projectName: string, targetBranch: string) => {
+		setReviewDrafts((prev) => ({
+			...prev,
+			[projectName]: {
+				...(prev[projectName] || { title: '', targetBranch: '', manualTitle: false, manualTargetBranch: false }),
+				targetBranch,
+				manualTargetBranch: true,
+			},
+		}));
+	}, []);
+
+	const updateReviewDraftTitle = useCallback((projectName: string, title: string) => {
+		setReviewDrafts((prev) => ({
+			...prev,
+			[projectName]: {
+				...(prev[projectName] || { title: '', targetBranch: '', manualTitle: false, manualTargetBranch: false }),
+				title,
+				manualTitle: true,
+			},
+		}));
+	}, []);
+
+	const regenerateReviewDraftTitle = useCallback((projectName: string) => {
+		const totalProjects = snapshot?.projects.length || 0;
+		setReviewDrafts((prev) => ({
+			...prev,
+			[projectName]: {
+				...(prev[projectName] || { title: '', targetBranch: '', manualTitle: false, manualTargetBranch: false }),
+				title: buildGitOverlayReviewRequestTitle({
+					promptTitle,
+					taskNumber: promptTaskNumber,
+					projectName,
+					projectCount: totalProjects,
+				}),
+				manualTitle: false,
+			},
+		}));
+	}, [promptTaskNumber, promptTitle, snapshot?.projects.length]);
+
+	const handleCreateReviewRequest = useCallback((project: GitOverlayProjectSnapshot) => {
+		const draft = reviewDrafts[project.project];
+		if (!draft) {
+			return;
+		}
+
+		onCreateReviewRequest([{
+			project: project.project,
+			targetBranch: draft.targetBranch,
+			title: draft.title,
+		}]);
+	}, [onCreateReviewRequest, reviewDrafts]);
+
+	const handleSetupReviewCli = useCallback((project: GitOverlayProjectSnapshot) => {
+		const remote = project.review.remote;
+		const setupAction = project.review.setupAction;
+		if (!remote?.cliCommand || !setupAction) {
+			return;
+		}
+
+		onSetupReviewCli({
+			project: project.project,
+			cliCommand: remote.cliCommand,
+			host: remote.host,
+			action: setupAction,
+		});
+	}, [onSetupReviewCli]);
+
 	if (!open) {
 		return null;
 	}
@@ -510,6 +762,7 @@ export const GitOverlay: React.FC<Props> = ({
 						</div>
 					</div>
 				) : (
+					<>
 					<div style={styles.body}>
 						<div style={styles.summaryRow}>
 							<div style={styles.summaryChip}>{`${t('editor.gitOverlayProjects')}: ${snapshot.projects.length}`}</div>
@@ -620,7 +873,7 @@ export const GitOverlay: React.FC<Props> = ({
 									<ActionButton
 										label={t('editor.gitOverlaySwitchAllToPrompt')}
 										onClick={() => onEnsurePromptBranch(selectedTrackedBranch)}
-										disabled={!canPreparePromptBranch}
+										disabled={!canPreparePromptBranch || allProjectsOnPromptBranch}
 										loading={isEnsuringPromptBranch}
 										variant="primary"
 									/>
@@ -697,10 +950,18 @@ export const GitOverlay: React.FC<Props> = ({
 																				<span style={styles.changeStatusBadge}>{buildStatusLabel(change.status)}</span>
 																				<span style={styles.changeGroupBadge}>{buildChangeGroupLabel(change, t)}</span>
 																			</div>
-																			<div style={styles.changePathGroup}>
-																				<div style={styles.changePath}>{change.path}</div>
-																				{change.previousPath ? <div style={styles.changePreviousPath}>{`← ${change.previousPath}`}</div> : null}
-																			</div>
+																			<button
+																				type="button"
+																				onClick={() => onOpenDiff(project.project, change.path)}
+																				style={styles.changeInfoButton}
+																				disabled={isDiscarding}
+																			>
+																				<div style={styles.changePathGroup}>
+																					<div style={styles.changePath}>{change.path}</div>
+																					{change.previousPath ? <div style={styles.changePreviousPath}>{`← ${change.previousPath}`}</div> : null}
+																				</div>
+																				<div style={styles.changeMetrics}>{buildChangeMetricsLabel(change, t)}</div>
+																			</button>
 																		</div>
 																		<div style={styles.changeActions}>
 																			<TextActionButton
@@ -827,8 +1088,8 @@ export const GitOverlay: React.FC<Props> = ({
 								<div style={styles.sectionHeaderLeft}>
 									<div style={{ ...styles.sectionNumber, ...(stepAvailability.step4 ? null : styles.sectionNumberDisabled) }}>4</div>
 									<div>
-										<div style={styles.sectionTitle}>{t('editor.gitOverlayStepMergeTitle')}</div>
-										<div style={styles.sectionSubtitle}>{t('editor.gitOverlayStepMergeHint')}</div>
+										<div style={styles.sectionTitle}>{t('editor.gitOverlayStepReviewRequestTitle')}</div>
+										<div style={styles.sectionSubtitle}>{t('editor.gitOverlayStepReviewRequestHint')}</div>
 									</div>
 								</div>
 								<button
@@ -845,6 +1106,187 @@ export const GitOverlay: React.FC<Props> = ({
 								isSectionAutoCollapsed('step4') ? <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div> : null
 							) : (
 							<div style={styles.sectionBody}>
+								{!promptBranch ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsPromptBranch')} tone="error" /> : null}
+								{projectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsPromptCheckout')} tone="error" /> : null}
+								{projectsWithChanges.length > 0 ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsCleanState')} tone="error" /> : null}
+								{reviewProjects.length === 0 ? <div style={styles.emptyStateInline}>{t('editor.gitOverlayReviewRequestUnsupported')}</div> : null}
+
+								<div style={styles.projectCards}>
+									{reviewProjects.map((project) => {
+										const actionLabel = project.review.remote?.actionLabel || t('editor.gitOverlayReviewRequest');
+										const targetBranchOptions = buildProjectTargetBranchOptions(project, trackedBranchOptions);
+										const draft = reviewDrafts[project.project] || {
+											targetBranch: project.review.request?.targetBranch || selectedTrackedBranch,
+											title: buildGitOverlayReviewRequestTitle({
+												promptTitle,
+												taskNumber: promptTaskNumber,
+												projectName: project.project,
+												projectCount: snapshot.projects.length,
+											}),
+											manualTitle: false,
+											manualTargetBranch: false,
+										};
+										const hasRequest = Boolean(project.review.request);
+										const hasSetupAction = Boolean(project.review.setupAction);
+										const isCreatingReviewRequest = busyAction === `createReviewRequest:${project.project}` || busyAction === 'createReviewRequest:all';
+										const canCreateReviewRequest = Boolean(project.review.remote?.supported)
+											&& Boolean(project.review.remote?.cliAvailable)
+											&& !hasSetupAction
+											&& Boolean(promptBranch)
+											&& project.currentBranch === promptBranch
+											&& Boolean(draft.targetBranch)
+											&& Boolean(draft.title.trim())
+											&& !hasRequest;
+
+										return (
+											<div key={project.project} style={styles.projectCard}>
+												<div style={styles.projectCardHeader}>
+													<div style={styles.projectCardTitleWrap}>
+														<div style={styles.projectCardTitle}>{project.project}</div>
+														<div style={styles.projectCardSummary}>{`${actionLabel} • ${project.review.remote?.host || t('editor.gitOverlayUnavailable')}`}</div>
+													</div>
+													{hasRequest ? (
+														<span style={{
+															...styles.statePill,
+															...(project.review.request?.state === 'accepted'
+																? styles.statePillOk
+																: project.review.request?.state === 'closed'
+																	? styles.statePillMuted
+																	: styles.statePillInfo),
+														}}>
+															{resolveReviewRequestStateLabel(project, t)}
+														</span>
+													) : null}
+												</div>
+
+												{!project.review.remote?.supported ? <InlineHint message={t('editor.gitOverlayReviewRequestUnsupportedProject')} tone="info" /> : null}
+												{project.review.setupAction === 'install-and-auth' ? (
+													<InlineHint
+														message={t('editor.gitOverlayReviewRequestMissingCli').replace('{cli}', project.review.remote?.cliCommand || 'CLI')}
+														tone="info"
+														actionLabel={t('editor.gitOverlayReviewRequestSetupCli').replace('{cli}', project.review.remote?.cliCommand || 'CLI')}
+														onAction={() => handleSetupReviewCli(project)}
+													/>
+												) : null}
+												{project.review.setupAction === 'auth' ? (
+													<InlineHint
+														message={t('editor.gitOverlayReviewRequestMissingAuth')
+															.replace('{cli}', project.review.remote?.cliCommand || 'CLI')
+															.replace('{host}', project.review.remote?.host || '')}
+														tone="info"
+														actionLabel={t('editor.gitOverlayReviewRequestAuthCli').replace('{cli}', project.review.remote?.cliCommand || 'CLI')}
+														onAction={() => handleSetupReviewCli(project)}
+													/>
+												) : null}
+												{project.review.error && !project.review.setupAction ? <InlineHint message={project.review.error} tone="error" /> : null}
+												{project.currentBranch !== promptBranch ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsPromptCheckout')} tone="error" /> : null}
+
+												<div style={styles.twoColGrid}>
+													<div style={styles.fieldBlock}>
+														<label style={styles.label}>{t('editor.gitOverlayCurrentBranch')}</label>
+														<div style={styles.readonlyField}>{project.currentBranch || '—'}</div>
+													</div>
+													<div style={styles.fieldBlock}>
+														<label style={styles.label}>{t('editor.gitOverlayReviewRequestTargetBranch')}</label>
+														<select
+															style={styles.select}
+															value={draft.targetBranch}
+															onChange={(event) => updateReviewDraftTargetBranch(project.project, event.target.value)}
+															disabled={hasRequest || !project.review.remote?.cliAvailable}
+														>
+															<option value="">{t('editor.gitOverlayTrackedBranchMissing')}</option>
+															{targetBranchOptions.map(branch => (
+																<option key={`${project.project}-${branch}`} value={branch}>{branch}</option>
+															))}
+														</select>
+													</div>
+												</div>
+
+												<div style={styles.fieldBlock}>
+													<label style={styles.label}>{t('editor.gitOverlayReviewRequestTitle')}</label>
+													<input
+														type="text"
+														style={styles.textInput}
+														value={draft.title}
+														onChange={(event) => updateReviewDraftTitle(project.project, event.target.value)}
+														disabled={hasRequest || !project.review.remote?.cliAvailable}
+														placeholder={t('editor.gitOverlayReviewRequestTitlePlaceholder')}
+													/>
+												</div>
+
+												{hasRequest ? (
+													<div style={styles.reviewRequestSummaryWrap}>
+														<div style={styles.reviewRequestSummaryRow}>
+															<div style={styles.reviewRequestTitle}>{project.review.request?.title}</div>
+															{project.review.request?.url ? (
+																<ActionButton
+																	label={t('editor.gitOverlayOpenReviewRequest').replace('{label}', actionLabel)}
+																	onClick={() => onOpenReviewRequest(project.review.request?.url || '')}
+																	size="compact"
+																/>
+															) : null}
+														</div>
+														<div style={styles.reviewRequestMeta}>{`${project.review.request?.sourceBranch || promptBranch} → ${project.review.request?.targetBranch || '—'}`}</div>
+														{project.review.request?.comments.length ? (
+															<div style={styles.reviewCommentsList}>
+																{project.review.request.comments.map((comment) => (
+																	<div key={comment.id} style={styles.reviewCommentCard}>
+																		<div style={styles.reviewCommentMeta}>{`${comment.author} • ${comment.createdAt || t('editor.gitOverlayNoDate')}`}</div>
+																		<div style={styles.reviewCommentBody}>{comment.body}</div>
+																	</div>
+																))}
+															</div>
+														) : (
+															<div style={styles.reviewRequestMeta}>{t('editor.gitOverlayReviewRequestNoComments')}</div>
+														)}
+													</div>
+												) : null}
+
+												<div style={styles.projectCardFooter}>
+													<ActionButton
+														label={t('editor.gitOverlayGenerateReviewRequestTitle')}
+														onClick={() => regenerateReviewDraftTitle(project.project)}
+														disabled={hasRequest || !project.review.remote?.cliAvailable}
+													/>
+													<ActionButton
+														label={t('editor.gitOverlayCreateReviewRequest').replace('{label}', actionLabel)}
+														onClick={() => handleCreateReviewRequest(project)}
+														disabled={!canCreateReviewRequest}
+														loading={isCreatingReviewRequest}
+														variant="primary"
+													/>
+												</div>
+											</div>
+										);
+									})}
+								</div>
+							</div>
+							)}
+						</section>
+
+						<section style={styles.sectionCard}>
+							<div style={styles.sectionHeader}>
+								<div style={styles.sectionHeaderLeft}>
+									<div style={{ ...styles.sectionNumber, ...(stepAvailability.step5 ? null : styles.sectionNumberDisabled) }}>5</div>
+									<div>
+										<div style={styles.sectionTitle}>{t('editor.gitOverlayStepMergeTitle')}</div>
+										<div style={styles.sectionSubtitle}>{t('editor.gitOverlayStepMergeHint')}</div>
+									</div>
+								</div>
+								<button
+									type="button"
+									onClick={() => toggleSectionCollapse('step5')}
+									style={styles.sectionToggleButton}
+									title={isSectionCollapsed('step5') ? t('editor.gitOverlayExpandSection') : t('editor.gitOverlayCollapseSection')}
+									aria-label={isSectionCollapsed('step5') ? t('editor.gitOverlayExpandSection') : t('editor.gitOverlayCollapseSection')}
+								>
+									<ChevronIcon collapsed={isSectionCollapsed('step5')} disabled={!stepAvailability.step5} />
+								</button>
+							</div>
+							{isSectionCollapsed('step5') ? (
+								isSectionAutoCollapsed('step5') ? <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div> : null
+							) : (
+							<div style={styles.sectionBody}>
 								<label style={styles.checkboxRow}>
 									<input
 										type="checkbox"
@@ -859,6 +1301,7 @@ export const GitOverlay: React.FC<Props> = ({
 								{projectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayMergeNeedsPromptCheckout')} tone="error" /> : null}
 								{projectsWithChanges.length > 0 ? <InlineHint message={t('editor.gitOverlayMergeNeedsCleanState')} tone="error" /> : null}
 								{hasConflicts ? <InlineHint message={t('editor.gitOverlayMergeBlocked')} tone="error" /> : null}
+								{step4Pending ? <InlineHint message={t('editor.gitOverlayMergeNeedsReviewRequest')} tone="error" /> : null}
 
 								<div style={styles.mergeHint}>
 									{stayOnTrackedBranch ? t('editor.gitOverlayStayOnTrackedBranchHint') : t('editor.gitOverlayReturnToPromptBranchHint')}
@@ -877,6 +1320,15 @@ export const GitOverlay: React.FC<Props> = ({
 							)}
 						</section>
 					</div>
+					<div style={styles.dialogFooter}>
+						<div style={styles.dialogFooterHint}>
+							{doneStatus ? t('editor.gitOverlayDoneStatusHint').replace('{status}', doneStatusLabel) : t('editor.gitOverlayDoneNoStatusHint')}
+						</div>
+						<div style={styles.dialogFooterActions}>
+							<ActionButton label={t('editor.gitOverlayDone')} onClick={() => onDone(doneStatus)} variant="primary" />
+						</div>
+					</div>
+					</>
 				)}
 			</div>
 			</div>
@@ -1033,7 +1485,7 @@ const styles: Record<string, CSSProperties> = {
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '6px',
 		background: 'var(--vscode-editor-background)',
-		overflow: 'hidden',
+		overflow: 'visible',
 	},
 	sectionHeader: {
 		display: 'flex',
@@ -1152,6 +1604,18 @@ const styles: Record<string, CSSProperties> = {
 		fontFamily: 'var(--vscode-font-family)',
 		minHeight: '32px',
 	},
+	textInput: {
+		padding: '6px 8px',
+		background: 'var(--vscode-input-background)',
+		color: 'var(--vscode-input-foreground)',
+		border: '1px solid var(--vscode-input-border, transparent)',
+		borderRadius: '4px',
+		fontSize: '13px',
+		fontFamily: 'var(--vscode-font-family)',
+		minHeight: '32px',
+		boxSizing: 'border-box',
+		width: '100%',
+	},
 	textArea: {
 		width: '100%',
 		padding: '8px',
@@ -1252,6 +1716,22 @@ const styles: Record<string, CSSProperties> = {
 		flex: 1,
 		minWidth: 0,
 	},
+	inlineHintActionButton: {
+		background: 'transparent',
+		border: '1px solid currentColor',
+		borderRadius: '4px',
+		padding: '4px 8px',
+		fontSize: '11px',
+		lineHeight: 1.4,
+		color: 'inherit',
+		cursor: 'pointer',
+		fontFamily: 'var(--vscode-font-family)',
+		flexShrink: 0,
+	},
+	inlineHintActionButtonDisabled: {
+		opacity: 0.6,
+		cursor: 'not-allowed',
+	},
 	inlineHintError: {
 		background: 'var(--vscode-inputValidation-errorBackground)',
 		color: 'var(--vscode-errorForeground)',
@@ -1333,6 +1813,10 @@ const styles: Record<string, CSSProperties> = {
 		background: 'var(--vscode-badge-background)',
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	statePillInfo: {
+		background: 'var(--vscode-inputValidation-infoBackground)',
+		color: 'var(--vscode-textLink-foreground)',
+	},
 	emptyStateInline: {
 		padding: '10px',
 		border: '1px dashed var(--vscode-panel-border)',
@@ -1410,6 +1894,7 @@ const styles: Record<string, CSSProperties> = {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '6px',
+		minWidth: 0,
 	},
 	projectChangesTitle: {
 		fontSize: '12px',
@@ -1420,6 +1905,7 @@ const styles: Record<string, CSSProperties> = {
 		gap: '8px',
 		justifyContent: 'flex-start',
 		flexWrap: 'wrap',
+		alignItems: 'center',
 	},
 	changeList: {
 		display: 'flex',
@@ -1431,10 +1917,9 @@ const styles: Record<string, CSSProperties> = {
 		border: '1px solid var(--vscode-panel-border)',
 	},
 	changeRow: {
-		display: 'grid',
-		gridTemplateColumns: 'minmax(0, 1fr) auto',
-		justifyContent: 'space-between',
-		alignItems: 'center',
+		display: 'flex',
+		flexDirection: 'column',
+		alignItems: 'stretch',
 		gap: '8px',
 		padding: '7px 8px',
 		background: 'transparent',
@@ -1445,8 +1930,23 @@ const styles: Record<string, CSSProperties> = {
 	changeInfo: {
 		minWidth: 0,
 		display: 'flex',
-		alignItems: 'center',
+		alignItems: 'flex-start',
 		gap: '8px',
+	},
+	changeInfoButton: {
+		background: 'none',
+		border: 'none',
+		padding: 0,
+		margin: 0,
+		minWidth: 0,
+		display: 'flex',
+		flexDirection: 'column',
+		alignItems: 'flex-start',
+		gap: '4px',
+		color: 'inherit',
+		cursor: 'pointer',
+		textAlign: 'left',
+		fontFamily: 'var(--vscode-font-family)',
 	},
 	changeBadges: {
 		display: 'inline-flex',
@@ -1474,6 +1974,7 @@ const styles: Record<string, CSSProperties> = {
 		alignItems: 'center',
 		gap: '6px',
 		overflow: 'hidden',
+		flexWrap: 'wrap',
 	},
 	changePath: {
 		fontSize: '12px',
@@ -1490,13 +1991,18 @@ const styles: Record<string, CSSProperties> = {
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
 	},
+	changeMetrics: {
+		fontSize: '11px',
+		color: 'var(--vscode-descriptionForeground)',
+		lineHeight: 1.4,
+	},
 	changeActions: {
-		display: 'inline-flex',
+		display: 'flex',
 		gap: '10px',
 		alignItems: 'center',
-		flexWrap: 'nowrap',
-		justifyContent: 'flex-end',
-		flexShrink: 0,
+		flexWrap: 'wrap',
+		justifyContent: 'flex-start',
+		width: '100%',
 	},
 	changeActionLink: {
 		background: 'none',
@@ -1539,5 +2045,80 @@ const styles: Record<string, CSSProperties> = {
 		fontSize: '12px',
 		color: 'var(--vscode-descriptionForeground)',
 		lineHeight: 1.5,
+	},
+	reviewRequestSummaryWrap: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '8px',
+		padding: '10px',
+		border: '1px solid var(--vscode-panel-border)',
+		borderRadius: '4px',
+		background: 'var(--vscode-sideBar-background)',
+	},
+	reviewRequestSummaryRow: {
+		display: 'flex',
+		justifyContent: 'space-between',
+		alignItems: 'center',
+		gap: '8px',
+		flexWrap: 'wrap',
+	},
+	reviewRequestTitle: {
+		fontSize: '12px',
+		fontWeight: 600,
+		color: 'var(--vscode-foreground)',
+	},
+	reviewRequestMeta: {
+		fontSize: '11px',
+		color: 'var(--vscode-descriptionForeground)',
+		lineHeight: 1.5,
+	},
+	reviewCommentsList: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '8px',
+		maxHeight: '220px',
+		overflowY: 'auto',
+	},
+	reviewCommentCard: {
+		padding: '8px 10px',
+		borderRadius: '4px',
+		background: 'var(--vscode-editor-background)',
+		border: '1px solid var(--vscode-panel-border)',
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '4px',
+	},
+	reviewCommentMeta: {
+		fontSize: '11px',
+		color: 'var(--vscode-descriptionForeground)',
+	},
+	reviewCommentBody: {
+		fontSize: '12px',
+		lineHeight: 1.5,
+		whiteSpace: 'pre-wrap',
+		wordBreak: 'break-word',
+	},
+	dialogFooter: {
+		display: 'flex',
+		justifyContent: 'space-between',
+		alignItems: 'center',
+		gap: '12px',
+		padding: '12px 16px',
+		borderTop: '1px solid var(--vscode-panel-border)',
+		background: 'var(--vscode-sideBar-background)',
+		flexWrap: 'wrap',
+	},
+	dialogFooterHint: {
+		fontSize: '12px',
+		color: 'var(--vscode-descriptionForeground)',
+		lineHeight: 1.5,
+		flex: 1,
+		minWidth: 0,
+	},
+	dialogFooterActions: {
+		display: 'flex',
+		gap: '8px',
+		alignItems: 'center',
+		justifyContent: 'flex-end',
 	},
 };

@@ -3,7 +3,7 @@
  */
 
 import type { Prompt, PromptConfig, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
-import type { GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlaySnapshot } from './git.js';
+import type { GitOverlayActionKind, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 
 // ---- Messages FROM webview TO extension ----
 
@@ -53,8 +53,11 @@ export type WebviewToExtensionMessage =
 	| { type: 'gitOverlayOpenFile'; project: string; filePath: string }
 	| { type: 'gitOverlayOpenDiff'; project: string; filePath: string }
 	| { type: 'gitOverlayOpenMergeEditor'; project: string; filePath: string }
+	| { type: 'gitOverlayOpenReviewRequest'; url: string }
+	| { type: 'gitOverlaySetupReviewCli'; request: GitOverlayReviewCliSetupRequest }
 	| { type: 'gitOverlayGenerateCommitMessage'; prompt: Prompt; project?: string; includeAllChanges?: boolean }
 	| { type: 'gitOverlayCommitStaged'; prompt: Prompt; messages: GitOverlayProjectCommitMessage[]; includeAllChanges?: boolean }
+	| { type: 'gitOverlayCreateReviewRequest'; prompt: Prompt; requests: GitOverlayProjectReviewRequestInput[] }
 	| { type: 'updateTimeSpent'; id: string; field: 'timeSpentWriting' | 'timeSpentImplementing'; delta: number }
 	| { type: 'pickFile' }
 	| { type: 'pickHttpExamplesFile' }
@@ -111,6 +114,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'gitOverlaySnapshot'; snapshot: GitOverlaySnapshot }
 	| { type: 'gitOverlayFileHistory'; history: GitOverlayFileHistoryPayload }
 	| { type: 'gitOverlayCommitMessagesGenerated'; messages: GitOverlayProjectCommitMessage[] }
+	| { type: 'gitOverlayActionCompleted'; action: GitOverlayActionKind }
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
 	| { type: 'branchStatus'; hasChanges: boolean; details: string }
 	| { type: 'error'; message: string; requestId?: string }

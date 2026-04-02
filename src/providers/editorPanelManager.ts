@@ -4,6 +4,7 @@
  */
 
 import * as vscode from 'vscode';
+import { existsSync } from 'fs';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import MarkdownIt from 'markdown-it';
@@ -23,6 +24,7 @@ import type { StateService } from '../services/stateService.js';
 import { TimeTrackingService } from '../services/timeTrackingService.js';
 import { decideFileReportSync, isLatestPersistedReport } from '../utils/reportSync.js';
 import { buildChatContextFiles } from '../utils/chatContextFiles.js';
+import { buildGitOverlayReviewCliSetupCommand } from '../utils/gitOverlay.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { filterPromptHookIdsForPhase } from '../utils/promptHookPhase.js';
@@ -1309,6 +1311,81 @@ export class EditorPanelManager {
 		}
 
 		await this.openGitOverlayFile(project, filePath, false);
+	}
+
+	private async openGitOverlayReviewRequest(url: string): Promise<void> {
+		const normalizedUrl = (url || '').trim();
+		if (!normalizedUrl) {
+			throw new Error('Ссылка на MR/PR не указана.');
+		}
+
+		await vscode.env.openExternal(vscode.Uri.parse(normalizedUrl));
+	}
+
+	private resolveGitOverlaySetupShellPath(): string | undefined {
+		if (process.platform === 'win32') {
+			const programFiles = process.env.ProgramFiles || 'C:/Program Files';
+			const systemRoot = process.env.SystemRoot || 'C:/Windows';
+			const candidates = [
+				path.join(programFiles, 'PowerShell', '7', 'pwsh.exe'),
+				path.join(programFiles, 'PowerShell', '6', 'pwsh.exe'),
+				path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+			];
+			return candidates.find(candidate => existsSync(candidate));
+		}
+
+		const candidates = ['/bin/bash', '/usr/bin/bash'];
+		return candidates.find(candidate => existsSync(candidate));
+	}
+
+	private async setupGitOverlayReviewCli(request: {
+		project: string;
+		cliCommand: 'gh' | 'glab';
+		host: string;
+		action: 'install-and-auth' | 'auth';
+	}): Promise<string> {
+		const normalizedProject = (request.project || '').trim();
+		const normalizedHost = (request.host || '').trim();
+		if (!normalizedProject) {
+			throw new Error('Не указан проект для настройки CLI.');
+		}
+		if (request.cliCommand !== 'gh' && request.cliCommand !== 'glab') {
+			throw new Error('Неизвестный CLI для настройки MR/PR.');
+		}
+
+		const projectPath = this.workspaceService.getWorkspaceFolderPaths().get(normalizedProject);
+		if (!projectPath) {
+			throw new Error(`Проект "${normalizedProject}" не найден среди workspace folders.`);
+		}
+
+		const setupCommand = buildGitOverlayReviewCliSetupCommand({
+			platform: process.platform,
+			cliCommand: request.cliCommand,
+			host: normalizedHost,
+			action: request.action,
+		});
+		const shellPath = this.resolveGitOverlaySetupShellPath();
+
+		this.logReportDebug('gitOverlay.reviewCliSetup.started', {
+			project: normalizedProject,
+			cliCommand: request.cliCommand,
+			host: normalizedHost,
+			action: request.action,
+			shellPath: shellPath || null,
+			manualUrl: setupCommand.manualUrl,
+		});
+
+		const terminal = vscode.window.createTerminal({
+			name: setupCommand.terminalName,
+			cwd: projectPath,
+			...(shellPath ? { shellPath } : {}),
+		});
+		terminal.show(true);
+		terminal.sendText(setupCommand.command, true);
+
+		return request.action === 'install-and-auth'
+			? `Открыт терминал ${setupCommand.terminalName}: установка и авторизация ${request.cliCommand} запущены. После завершения обновите Git Flow.`
+			: `Открыт терминал ${setupCommand.terminalName}: завершите авторизацию ${request.cliCommand}, затем обновите Git Flow.`;
 	}
 
 	private clearContentEditorBinding(panelKey: string): void {
@@ -4207,6 +4284,9 @@ export class EditorPanelManager {
 						type: result.errors.length > 0 ? 'error' : 'info',
 						message: this.describeGitMultiProjectResult(result, `Merge ветки "${promptBranch}" в "${msg.trackedBranch}" выполнен`),
 					});
+					if (result.errors.length === 0) {
+						postMessage({ type: 'gitOverlayActionCompleted', action: 'merge' });
+					}
 				}
 				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				break;
@@ -4244,6 +4324,9 @@ export class EditorPanelManager {
 					type: result.errors.length > 0 ? 'error' : 'info',
 					message: this.describeGitMultiProjectResult(result, `Push ветки ${msg.branch || 'текущей'} выполнен`),
 				});
+				if (result.errors.length === 0) {
+					postMessage({ type: 'gitOverlayActionCompleted', action: 'push' });
+				}
 				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				break;
 			}
@@ -4347,6 +4430,25 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'gitOverlayOpenReviewRequest': {
+				try {
+					await this.openGitOverlayReviewRequest(msg.url);
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+				}
+				break;
+			}
+
+			case 'gitOverlaySetupReviewCli': {
+				try {
+					const message = await this.setupGitOverlayReviewCli(msg.request);
+					postMessage({ type: 'info', message });
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+				}
+				break;
+			}
+
 			case 'gitOverlayGenerateCommitMessage': {
 				if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.prompt?.id)) {
 					break;
@@ -4424,6 +4526,32 @@ export class EditorPanelManager {
 					type: result.errors.length > 0 ? 'error' : 'info',
 					message: this.describeGitMultiProjectResult(result, 'Коммит создан'),
 				});
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				break;
+			}
+
+			case 'gitOverlayCreateReviewRequest': {
+				if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.prompt?.id)) {
+					break;
+				}
+
+				const promptSnapshot = msg.prompt;
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const projects = this.resolveGitOverlayProjects(promptSnapshot.projects || [], currentPrompt);
+				const promptBranch = this.resolveGitOverlayPromptBranch(promptSnapshot.branch, currentPrompt);
+				if (!promptBranch) {
+					postMessage({ type: 'error', message: 'Сначала укажите ветку промпта.' });
+					break;
+				}
+
+				const result = await this.gitService.createReviewRequests(paths, promptSnapshot, msg.requests);
+				postMessage({
+					type: result.errors.length > 0 ? 'error' : 'info',
+					message: this.describeGitMultiProjectResult(result, 'MR/PR обработан'),
+				});
+				if (result.errors.length === 0) {
+					postMessage({ type: 'gitOverlayActionCompleted', action: 'review-request' });
+				}
 				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				break;
 			}

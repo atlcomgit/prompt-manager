@@ -2,6 +2,55 @@ export type GitOverlayChangeGroup = 'merge' | 'staged' | 'working-tree' | 'untra
 
 export type GitOverlayBranchKind = 'tracked' | 'prompt' | 'current' | 'local' | 'cleanup' | 'remote';
 
+export type GitOverlayReviewProvider = 'github' | 'gitlab' | 'unknown';
+
+export type GitOverlayReviewRequestState = 'open' | 'closed' | 'accepted';
+
+export type GitOverlayReviewSetupAction = 'install-and-auth' | 'auth';
+
+export type GitOverlayActionKind = 'push' | 'review-request' | 'merge';
+
+export interface GitOverlayReviewComment {
+	id: string;
+	author: string;
+	body: string;
+	createdAt: string;
+	system: boolean;
+}
+
+export interface GitOverlayReviewRemote {
+	provider: GitOverlayReviewProvider;
+	host: string;
+	remoteName: string;
+	remoteUrl: string;
+	repositoryPath: string;
+	owner: string;
+	name: string;
+	supported: boolean;
+	cliCommand: 'gh' | 'glab' | '';
+	cliAvailable: boolean;
+	actionLabel: string;
+}
+
+export interface GitOverlayReviewRequest {
+	id: string;
+	number: string;
+	title: string;
+	url: string;
+	state: GitOverlayReviewRequestState;
+	sourceBranch: string;
+	targetBranch: string;
+	isDraft: boolean;
+	comments: GitOverlayReviewComment[];
+}
+
+export interface GitOverlayReviewState {
+	remote: GitOverlayReviewRemote | null;
+	request: GitOverlayReviewRequest | null;
+	error: string;
+	setupAction: GitOverlayReviewSetupAction | null;
+}
+
 export interface GitOverlayCommit {
 	sha: string;
 	shortSha: string;
@@ -19,6 +68,10 @@ export interface GitOverlayChangeFile {
 	group: GitOverlayChangeGroup;
 	conflicted: boolean;
 	staged: boolean;
+	fileSizeBytes: number;
+	additions: number | null;
+	deletions: number | null;
+	isBinary: boolean;
 }
 
 export interface GitOverlayBranchInfo {
@@ -79,6 +132,7 @@ export interface GitOverlayProjectSnapshot {
 		workingTree: GitOverlayChangeFile[];
 		untracked: GitOverlayChangeFile[];
 	};
+	review: GitOverlayReviewState;
 	recentCommits: GitOverlayCommit[];
 	staleLocalBranches: string[];
 	graph: {
@@ -97,6 +151,19 @@ export interface GitOverlaySnapshot {
 export interface GitOverlayProjectCommitMessage {
 	project: string;
 	message: string;
+}
+
+export interface GitOverlayProjectReviewRequestInput {
+	project: string;
+	targetBranch: string;
+	title: string;
+}
+
+export interface GitOverlayReviewCliSetupRequest {
+	project: string;
+	cliCommand: 'gh' | 'glab';
+	host: string;
+	action: GitOverlayReviewSetupAction;
 }
 
 export interface GitOverlayFileHistoryPayload {

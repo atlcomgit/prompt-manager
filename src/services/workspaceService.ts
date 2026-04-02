@@ -289,8 +289,8 @@ export class WorkspaceService {
 			? `---\napplyTo: '**'\n---\n\n# Prompt Manager Agent Instructions\n\n${trimmedContext}\n`
 			: '';
 
-		await vscode.workspace.fs.writeFile(instructionsFile, Buffer.from(fileContent, 'utf-8'));
-		await vscode.workspace.fs.writeFile(projectInstructionsFile, Buffer.from(fileContent, 'utf-8'));
+		await this.writeFileIfChanged(instructionsFile, fileContent);
+		await this.writeFileIfChanged(projectInstructionsFile, fileContent);
 		try {
 			await vscode.workspace.fs.delete(legacyInstructionsFile);
 		} catch {
@@ -365,6 +365,19 @@ export class WorkspaceService {
 				vscode.ConfigurationTarget.Workspace,
 			);
 		}
+	}
+
+	private async writeFileIfChanged(file: vscode.Uri, content: string): Promise<void> {
+		try {
+			const current = await vscode.workspace.fs.readFile(file);
+			if (Buffer.from(current).toString('utf-8') === content) {
+				return;
+			}
+		} catch {
+			// file does not exist yet or cannot be read; write it below
+		}
+
+		await vscode.workspace.fs.writeFile(file, Buffer.from(content, 'utf-8'));
 	}
 
 	private async ensurePathInChatLocationsSetting(

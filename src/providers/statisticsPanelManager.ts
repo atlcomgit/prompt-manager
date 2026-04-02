@@ -6,476 +6,48 @@ import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import type { StorageService } from '../services/storageService.js';
 import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from '../types/messages.js';
-import { buildStatisticsMarkdownWithReport, buildStatisticsWordSection, formatStatisticsExportNumber } from '../utils/statisticsExport.js';
+import {
+	buildStatisticsExportHtmlDocument,
+	buildStatisticsExportMarkdownDocument,
+	type StatisticsExportDocumentRow,
+} from '../utils/statisticsDocumentTemplate.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
-const DEFAULT_EXPORT_HOURLY_RATE = 1743;
+const ALLOWED_EXPORT_STATUSES = new Set([
+	'draft',
+	'in-progress',
+	'stopped',
+	'cancelled',
+	'completed',
+	'report',
+	'review',
+	'closed',
+] as const);
 
-interface ExportReportRow {
-	taskNumber: string;
-	title: string;
-	hours: number;
-	status?: 'draft' | 'in-progress' | 'stopped' | 'cancelled' | 'completed' | 'report' | 'review' | 'closed';
-	reportSummary?: string;
-}
-
-function escapeHtml(value: string): string {
-	return value
-		.replace(/&/g, '&amp;')
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;')
-		.replace(/"/g, '&quot;')
-		.replace(/'/g, '&#39;');
-}
-
-function resolveExportHourlyRate(hourlyRate: number | undefined): number {
-	if (typeof hourlyRate !== 'number' || !Number.isFinite(hourlyRate) || hourlyRate < 0) {
-		return DEFAULT_EXPORT_HOURLY_RATE;
+function normalizeExportRows(rows: unknown): StatisticsExportDocumentRow[] {
+	if (!Array.isArray(rows)) {
+		return [];
 	}
 
-	return hourlyRate;
-}
+	return rows.map((row) => {
+		const candidate = row as Record<string, unknown>;
+		const taskNumber = typeof candidate.taskNumber === 'string' ? candidate.taskNumber : '';
+		const title = typeof candidate.title === 'string' ? candidate.title : '';
+		const reportSummary = typeof candidate.reportSummary === 'string' ? candidate.reportSummary : '';
+		const hoursValue = typeof candidate.hours === 'number' ? candidate.hours : Number(candidate.hours);
+		const normalizedHours = Number.isFinite(hoursValue) && hoursValue >= 0 ? hoursValue : 0;
+		const status = typeof candidate.status === 'string' && ALLOWED_EXPORT_STATUSES.has(candidate.status as never)
+			? candidate.status as StatisticsExportDocumentRow['status']
+			: undefined;
 
-function calculateExportRowAmount(hours: number, hourlyRate: number): number {
-	return (Number.isFinite(hours) ? hours : 0) * resolveExportHourlyRate(hourlyRate);
-}
-
-function buildExportHtml(rows: ExportReportRow[], totalHours: number, locale: string, includeReport: boolean, hourlyRate: number): string {
-	const isRu = locale.toLowerCase().startsWith('ru');
-	const exportHourlyRate = resolveExportHourlyRate(hourlyRate);
-	const totalAmount = rows.reduce((sum, row) => sum + calculateExportRowAmount(row.hours, exportHourlyRate), 0);
-	const formattedHourlyRate = formatStatisticsExportNumber(exportHourlyRate, locale);
-	const formattedTotalHours = formatStatisticsExportNumber(totalHours, locale);
-	const formattedTotalAmount = formatStatisticsExportNumber(totalAmount, locale);
-	const labels = {
-		title: isRu ? 'Отчёт по статистике' : 'Statistics Report',
-		subtitle: isRu
-			? `Сводный отчёт с пропорциональным распределением до ${formattedTotalHours} часов по ставке ${formattedHourlyRate}`
-			: `Summary report with proportional distribution to ${formattedTotalHours} hours at a ${formattedHourlyRate} hourly rate`,
-		generated: isRu ? 'Сформировано' : 'Generated',
-		total: isRu ? 'Итого часов' : 'Total hours',
-		rate: isRu ? 'Ставка часа' : 'Hourly rate',
-		totalAmount: isRu ? 'Итоговая сумма' : 'Total amount',
-		count: isRu ? 'Задач в отчёте' : 'Tasks in report',
-		taskNumber: isRu ? '№ задачи' : 'Task #',
-		name: isRu ? 'Название' : 'Title',
-		hours: isRu ? 'Часы' : 'Hours',
-		amount: isRu ? 'Сумма' : 'Amount',
-		report: isRu ? 'Что сделано' : 'Summary',
-	};
-	const formattedDate = new Date().toLocaleString(isRu ? 'ru-RU' : 'en-US', {
-		year: 'numeric',
-		month: '2-digit',
-		day: '2-digit',
-		hour: '2-digit',
-		minute: '2-digit',
-	});
-	const tableRows = rows.map((row, index) => {
-		const zebraClass = index % 2 === 0 ? 'row-even' : 'row-odd';
-		const amount = formatStatisticsExportNumber(calculateExportRowAmount(row.hours, exportHourlyRate), locale);
-		return [
-			`<tr class="${zebraClass}">`,
-			`<td class="col-task">${escapeHtml(row.taskNumber || '—')}</td>`,
-			`<td class="col-title">${escapeHtml(row.title)}</td>`,
-			...(includeReport ? [`<td class="col-report">${escapeHtml(row.reportSummary || '—')}</td>`] : []),
-			`<td class="col-hours">${escapeHtml(formatStatisticsExportNumber(row.hours, locale))}</td>`,
-			`<td class="col-amount">${escapeHtml(amount)}</td>`,
-			'</tr>',
-		].join('');
-	}).join('\n');
-
-	return `<!DOCTYPE html>
-<html lang="${isRu ? 'ru' : 'en'}">
-<head>
-	<meta charset="UTF-8" />
-	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-	<title>${escapeHtml(labels.title)}</title>
-	<style>
-		:root {
-			color-scheme: light;
-			--bg: #f4f6f8;
-			--panel: #ffffff;
-			--panel-muted: #fafbfc;
-			--border: #d8dee4;
-			--border-strong: #c7d0d9;
-			--text: #1f2933;
-			--muted: #5b6773;
-			--accent: #0f766e;
-		}
-
-		* {
-			box-sizing: border-box;
-		}
-
-		body {
-			margin: 0;
-			padding: 32px;
-			font-family: "Segoe UI", "Noto Sans", sans-serif;
-			background: var(--bg);
-			color: var(--text);
-		}
-
-		.container {
-			max-width: 1120px;
-			margin: 0 auto;
-			background: var(--panel);
-			border: 1px solid var(--border);
-			border-radius: 12px;
-			box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
-			overflow: hidden;
-		}
-
-		.header {
-			padding: 32px 36px 24px;
-			background: var(--panel-muted);
-			border-bottom: 1px solid var(--border);
-		}
-
-		.kicker {
-			display: inline-flex;
-			align-items: center;
-			padding: 6px 10px;
-			border-radius: 6px;
-			background: #ecfdf5;
-			color: var(--accent);
-			font-size: 12px;
-			font-weight: 700;
-			letter-spacing: 0.08em;
-			text-transform: uppercase;
-			border: 1px solid #cce9e4;
-		}
-
-		h1 {
-			margin: 18px 0 8px;
-			font-size: 32px;
-			line-height: 1.15;
-			letter-spacing: -0.02em;
-		}
-
-		.subtitle {
-			margin: 0;
-			font-size: 15px;
-			line-height: 1.5;
-			color: var(--muted);
-		}
-
-		.meta {
-			display: grid;
-			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-			gap: 12px;
-			padding: 24px 36px 0;
-		}
-
-		.meta-card {
-			padding: 18px 20px;
-			border-radius: 10px;
-			background: var(--panel);
-			border: 1px solid var(--border);
-		}
-
-		.meta-label {
-			display: block;
-			font-size: 12px;
-			font-weight: 700;
-			text-transform: uppercase;
-			letter-spacing: 0.08em;
-			color: var(--muted);
-			margin-bottom: 8px;
-		}
-
-		.meta-value {
-			display: block;
-			font-size: 28px;
-			font-weight: 700;
-		}
-
-		.table-wrap {
-			padding: 24px 36px 36px;
-		}
-
-		table {
-			width: 100%;
-			border-collapse: separate;
-			border-spacing: 0;
-			background: var(--panel);
-			border: 1px solid var(--border);
-			border-radius: 10px;
-			overflow: hidden;
-		}
-
-		thead th {
-			padding: 18px 20px;
-			text-align: left;
-			font-size: 13px;
-			font-weight: 700;
-			letter-spacing: 0.04em;
-			text-transform: uppercase;
-			background: #f8fafc;
-			border-bottom: 1px solid var(--border-strong);
-		}
-
-		tbody td,
-		tfoot td {
-			padding: 18px 20px;
-			border-bottom: 1px solid var(--border);
-			vertical-align: top;
-		}
-
-		tbody tr:last-child td {
-			border-bottom: none;
-		}
-
-		.row-even {
-			background: #ffffff;
-		}
-
-		.row-odd {
-			background: #fbfcfd;
-		}
-
-		.col-task {
-			width: 140px;
-			font-weight: 700;
-			white-space: nowrap;
-			color: var(--accent);
-		}
-
-		.col-title {
-			width: auto;
-		}
-
-		.col-report {
-			width: 36%;
-			line-height: 1.45;
-			color: var(--muted);
-		}
-
-		.col-hours {
-			width: 120px;
-			text-align: right;
-			font-weight: 700;
-		}
-
-		.col-amount {
-			width: 160px;
-			text-align: right;
-			font-weight: 700;
-		}
-
-		tfoot td {
-			background: #f8fafc;
-			font-weight: 700;
-			border-top: 1px solid var(--border-strong);
-			border-bottom: none;
-		}
-
-		.footer-note {
-			padding: 0 36px 32px;
-			font-size: 13px;
-			color: var(--muted);
-		}
-
-		@media (max-width: 800px) {
-			body {
-				padding: 16px;
-			}
-
-			.header,
-			.table-wrap,
-			.footer-note,
-			.meta {
-				padding-left: 18px;
-				padding-right: 18px;
-			}
-
-			.meta {
-				grid-template-columns: 1fr;
-			}
-
-			h1 {
-				font-size: 28px;
-			}
-
-			table,
-			thead,
-			tbody,
-			tfoot,
-			tr,
-			th,
-			td {
-				display: block;
-			}
-
-			thead {
-				display: none;
-			}
-
-			tbody tr,
-			tfoot tr {
-				border-bottom: 1px solid var(--border);
-			}
-
-			tbody td,
-			tfoot td {
-				padding: 10px 14px;
-				text-align: left;
-			}
-
-			.col-hours {
-				text-align: left;
-			}
-		}
-	</style>
-</head>
-<body>
-	<div class="container">
-		<header class="header">
-			<div class="kicker">Prompt Manager</div>
-			<h1>${escapeHtml(labels.title)}</h1>
-			<p class="subtitle">${escapeHtml(labels.subtitle)}</p>
-		</header>
-		<section class="meta">
-			<div class="meta-card">
-				<span class="meta-label">${escapeHtml(labels.generated)}</span>
-				<span class="meta-value">${escapeHtml(formattedDate)}</span>
-			</div>
-			<div class="meta-card">
-				<span class="meta-label">${escapeHtml(labels.count)}</span>
-				<span class="meta-value">${rows.length}</span>
-			</div>
-			<div class="meta-card">
-				<span class="meta-label">${escapeHtml(labels.total)}</span>
-				<span class="meta-value">${escapeHtml(formattedTotalHours)}</span>
-			</div>
-			<div class="meta-card">
-				<span class="meta-label">${escapeHtml(labels.rate)}</span>
-				<span class="meta-value">${escapeHtml(formattedHourlyRate)}</span>
-			</div>
-			<div class="meta-card">
-				<span class="meta-label">${escapeHtml(labels.totalAmount)}</span>
-				<span class="meta-value">${escapeHtml(formattedTotalAmount)}</span>
-			</div>
-		</section>
-		<section class="table-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>${escapeHtml(labels.taskNumber)}</th>
-						<th>${escapeHtml(labels.name)}</th>
-						${includeReport ? `<th>${escapeHtml(labels.report)}</th>` : ''}
-						<th style="text-align: right;">${escapeHtml(labels.hours)}</th>
-						<th style="text-align: right;">${escapeHtml(labels.amount)}</th>
-					</tr>
-				</thead>
-				<tbody>
-					${tableRows}
-				</tbody>
-				<tfoot>
-					<tr>
-						<td colspan="${includeReport ? '3' : '2'}">${escapeHtml(labels.total)}</td>
-						<td class="col-hours">${escapeHtml(formattedTotalHours)}</td>
-						<td class="col-amount">${escapeHtml(formattedTotalAmount)}</td>
-					</tr>
-				</tfoot>
-			</table>
-		</section>
-		<div class="footer-note">Prompt Manager • HTML export</div>
-	</div>
-</body>
-</html>`;
-}
-
-function escapeMarkdownCell(value: string): string {
-	return value
-		.replace(/\|/g, '\\|')
-		.replace(/\r?\n/g, ' ')
-		.trim();
-}
-
-function padMarkdownCell(value: string, width: number, align: 'left' | 'right' = 'left'): string {
-	return align === 'right' ? value.padStart(width, ' ') : value.padEnd(width, ' ');
-}
-
-
-function buildExportMarkdown(rows: ExportReportRow[], totalHours: number, locale: string, includeReport: boolean, hourlyRate: number): string {
-	const exportHourlyRate = resolveExportHourlyRate(hourlyRate);
-	const formattedTotalHours = formatStatisticsExportNumber(totalHours, locale);
-	const formattedHourlyRate = formatStatisticsExportNumber(exportHourlyRate, locale);
-	const totalAmount = rows.reduce((sum, row) => sum + calculateExportRowAmount(row.hours, exportHourlyRate), 0);
-	const formattedTotalAmount = formatStatisticsExportNumber(totalAmount, locale);
-
-	if (includeReport) {
-		return buildStatisticsMarkdownWithReport(rows, totalHours, exportHourlyRate, locale);
-	}
-
-	const isRu = locale.toLowerCase().startsWith('ru');
-	const title = isRu ? '# Отчёт по статистике' : '# Statistics Report';
-	const generatedLabel = isRu ? 'Сформировано' : 'Generated';
-	const totalLabel = isRu ? 'Итого часов' : 'Total hours';
-	const hourlyRateLabel = isRu ? 'Ставка часа' : 'Hourly rate';
-	const totalAmountLabel = isRu ? 'Итоговая сумма' : 'Total amount';
-	const taskNumberLabel = isRu ? '№ задачи' : 'Task #';
-	const titleLabel = isRu ? 'Название' : 'Title';
-	const hoursLabel = isRu ? 'Часы' : 'Hours';
-	const amountLabel = isRu ? 'Сумма' : 'Amount';
-	const formattedDate = new Date().toLocaleString(isRu ? 'ru-RU' : 'en-US', {
-		year: 'numeric',
-		month: '2-digit',
-		day: '2-digit',
-		hour: '2-digit',
-		minute: '2-digit',
-	});
-	const tableRows = rows.map((row) => ({
-		taskNumber: escapeMarkdownCell(row.taskNumber || '—'),
-		title: escapeMarkdownCell(row.title),
-		hours: formatStatisticsExportNumber(row.hours, locale),
-		amount: formatStatisticsExportNumber(calculateExportRowAmount(row.hours, exportHourlyRate), locale),
-	}));
-	const totalTaskLabel = `**${isRu ? 'Итого' : 'Total'}**`;
-	const totalHoursLabel = `**${formattedTotalHours}**`;
-	const totalAmountRowLabel = `**${formattedTotalAmount}**`;
-	const taskNumberWidth = Math.max(
-		taskNumberLabel.length,
-		totalTaskLabel.length,
-		...tableRows.map((row) => row.taskNumber.length),
-	);
-	const titleWidth = Math.max(
-		titleLabel.length,
-		...tableRows.map((row) => row.title.length),
-	);
-	const hoursWidth = Math.max(
-		hoursLabel.length,
-		totalHoursLabel.length,
-		...tableRows.map((row) => row.hours.length),
-	);
-	const amountWidth = Math.max(
-		amountLabel.length,
-		totalAmountRowLabel.length,
-		...tableRows.map((row) => row.amount.length),
-	);
-	const separator = `| ${'-'.repeat(taskNumberWidth)} | ${'-'.repeat(titleWidth)} | ${'-'.repeat(Math.max(3, hoursWidth - 1))}: | ${'-'.repeat(Math.max(3, amountWidth - 1))}: |`;
-	const header = `| ${padMarkdownCell(taskNumberLabel, taskNumberWidth)} | ${padMarkdownCell(titleLabel, titleWidth)} | ${padMarkdownCell(hoursLabel, hoursWidth, 'right')} | ${padMarkdownCell(amountLabel, amountWidth, 'right')} |`;
-	const bodyRows = tableRows
-		.map((row) => `| ${padMarkdownCell(row.taskNumber, taskNumberWidth)} | ${padMarkdownCell(row.title, titleWidth)} | ${padMarkdownCell(row.hours, hoursWidth, 'right')} | ${padMarkdownCell(row.amount, amountWidth, 'right')} |`)
-		.join('\n');
-	const totalRow = `| ${padMarkdownCell(totalTaskLabel, taskNumberWidth)} | ${padMarkdownCell('', titleWidth)} | ${padMarkdownCell(totalHoursLabel, hoursWidth, 'right')} | ${padMarkdownCell(totalAmountRowLabel, amountWidth, 'right')} |`;
-	const wordSection = buildStatisticsWordSection(rows, exportHourlyRate, locale);
-
-	return [
-		title,
-		'',
-		`- ${generatedLabel}: ${formattedDate}`,
-		`- ${totalLabel}: ${formattedTotalHours}`,
-		`- ${hourlyRateLabel}: ${formattedHourlyRate}`,
-		`- ${totalAmountLabel}: ${formattedTotalAmount}`,
-		'',
-		header,
-		separator,
-		bodyRows,
-		totalRow,
-		'',
-		wordSection,
-	].join('\n') + '\n';
+		return {
+			taskNumber,
+			title,
+			hours: normalizedHours,
+			status,
+			reportSummary,
+		};
+	}).filter((row) => row.title.trim().length > 0 || row.taskNumber.trim().length > 0 || row.hours > 0);
 }
 
 async function openExportDocument(content: string, language: 'html' | 'markdown'): Promise<void> {
@@ -533,11 +105,11 @@ export class StatisticsPanelManager {
 				panel.webview.postMessage(response);
 			}
 			if (msg.type === 'exportReport') {
-				const total = msg.rows.reduce((sum, row) => sum + row.hours, 0);
-				const hourlyRate = resolveExportHourlyRate(msg.hourlyRate);
+				const rows = normalizeExportRows(msg.rows);
+				const total = rows.reduce((sum, row) => sum + row.hours, 0);
 				const content = msg.format === 'md'
-					? buildExportMarkdown(msg.rows, total, vscode.env.language, Boolean(msg.includeReport), hourlyRate)
-					: buildExportHtml(msg.rows, total, vscode.env.language, Boolean(msg.includeReport), hourlyRate);
+					? buildStatisticsExportMarkdownDocument(rows, total, vscode.env.language, Boolean(msg.includeReport), msg.hourlyRate)
+					: buildStatisticsExportHtmlDocument(rows, total, vscode.env.language, Boolean(msg.includeReport), msg.hourlyRate);
 				try {
 					await openExportDocument(content, msg.format === 'md' ? 'markdown' : 'html');
 				} catch (error) {

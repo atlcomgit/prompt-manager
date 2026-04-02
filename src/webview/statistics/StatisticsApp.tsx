@@ -8,6 +8,11 @@ import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
 import { DateRangeCalendar } from './DateRangeCalendar';
 import type { PromptStatistics, PromptStatus } from '../../types/prompt';
+import {
+  buildStatisticsExportHtmlPreview,
+  buildStatisticsExportMarkdownDocument,
+  type StatisticsExportDocumentRow,
+} from '../../utils/statisticsDocumentTemplate.js';
 
 const vscode = getVsCodeApi();
 const DEFAULT_EXPORT_HOURS = 165;
@@ -39,14 +44,6 @@ type ReportColumn = 'taskNumber' | 'title' | 'status' | 'timeWriting' | 'timeImp
 
 type ExportFormat = 'html' | 'md';
 
-interface ExportRow {
-  taskNumber: string;
-  title: string;
-  hours: number;
-  status?: PromptStatus;
-  reportSummary?: string;
-}
-
 function parseExportHours(value: string): number {
   const parsed = Number.parseInt(value.trim(), 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_EXPORT_HOURS;
@@ -61,7 +58,7 @@ function parseExportHourlyRate(value: string): number {
 function buildScaledExportRows(
   rows: Array<{ taskNumber: string; title: string; totalTime: number; status: PromptStatus; reportSummary?: string }>,
   targetHours: number,
-): ExportRow[] {
+): StatisticsExportDocumentRow[] {
   if (rows.length === 0) {
     return [];
   }
@@ -135,6 +132,7 @@ function buildScaledExportRows(
 export const StatisticsApp: React.FC = () => {
   const t = useT();
   const [stats, setStats] = useState<PromptStatistics | null>(null);
+  const [previewFormat, setPreviewFormat] = useState<ExportFormat>('html');
 
   // --- Date range filter ---
   const [dateFrom, setDateFrom] = useState<string | null>(null);
@@ -273,6 +271,36 @@ export const StatisticsApp: React.FC = () => {
   const exportRows = useMemo(
     () => buildScaledExportRows(sortedReportRows, exportTargetHours),
     [exportTargetHours, sortedReportRows],
+  );
+  const exportRowsTotal = useMemo(
+    () => exportRows.reduce((sum, row) => sum + row.hours, 0),
+    [exportRows],
+  );
+  const uiLocale = useMemo(() => {
+    if (typeof document !== 'undefined') {
+      return document.documentElement.lang || navigator.language || 'en';
+    }
+    return 'en';
+  }, []);
+  const exportHtmlPreview = useMemo(
+    () => buildStatisticsExportHtmlPreview(
+      exportRows,
+      exportRowsTotal,
+      uiLocale,
+      includeReportInExport,
+      exportHourlyRate,
+    ),
+    [exportHourlyRate, uiLocale, exportRows, exportRowsTotal, includeReportInExport],
+  );
+  const exportMarkdownPreview = useMemo(
+    () => buildStatisticsExportMarkdownDocument(
+      exportRows,
+      exportRowsTotal,
+      uiLocale,
+      includeReportInExport,
+      exportHourlyRate,
+    ),
+    [exportHourlyRate, uiLocale, exportRows, exportRowsTotal, includeReportInExport],
   );
 
   const handleExport = useCallback((format: ExportFormat) => {
@@ -438,7 +466,7 @@ export const StatisticsApp: React.FC = () => {
                 <div key={a.id} style={styles.activityItem}>
                   <span style={styles.activityTitle}>{a.title || a.id}</span>
                   <span style={styles.activityDate}>
-                    {new Date(a.updatedAt).toLocaleDateString('ru-RU', {
+                    {new Date(a.updatedAt).toLocaleDateString(uiLocale, {
                       day: '2-digit', month: '2-digit', year: '2-digit',
                       hour: '2-digit', minute: '2-digit',
                     })}
@@ -511,6 +539,52 @@ export const StatisticsApp: React.FC = () => {
                 >
                   {`${t('stats.exportMdBtn')} (${exportTargetHours}${t('stats.exportHoursSuffix')})`}
                 </button>
+              </div>
+            </div>
+            <div style={styles.documentPreviewCard}>
+              <div style={styles.documentPreviewHeader}>
+                <div style={styles.documentPreviewHeadingBlock}>
+                  <div style={styles.documentPreviewTitle}>{t('stats.documentPreview')}</div>
+                  <div style={styles.documentPreviewSubtitle}>
+                    {previewFormat === 'html'
+                      ? t('stats.documentPreviewHtmlHint')
+                      : t('stats.documentPreviewMdHint')}
+                  </div>
+                </div>
+                <div style={styles.documentPreviewTabs}>
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.documentPreviewTab,
+                      ...(previewFormat === 'html' ? styles.documentPreviewTabActive : null),
+                    }}
+                    onClick={() => setPreviewFormat('html')}
+                  >
+                    {t('stats.previewHtmlTab')}
+                  </button>
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.documentPreviewTab,
+                      ...(previewFormat === 'md' ? styles.documentPreviewTabActive : null),
+                    }}
+                    onClick={() => setPreviewFormat('md')}
+                  >
+                    {t('stats.previewMdTab')}
+                  </button>
+                </div>
+              </div>
+              <div style={styles.documentPreviewViewport}>
+                {previewFormat === 'html' ? (
+                  <div
+                    style={styles.documentPreviewHtmlCanvas}
+                    dangerouslySetInnerHTML={{ __html: exportHtmlPreview }}
+                  />
+                ) : (
+                  <pre style={styles.documentPreviewSource}>
+                    <code style={styles.documentPreviewSourceCode}>{exportMarkdownPreview}</code>
+                  </pre>
+                )}
               </div>
             </div>
             <table style={styles.reportTable}>
@@ -638,6 +712,83 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--vscode-input-background)',
     border: '1px solid var(--vscode-panel-border)',
     borderRadius: '6px',
+  },
+  documentPreviewCard: {
+    marginBottom: '14px',
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '10px',
+    overflow: 'hidden',
+    background: 'var(--vscode-editor-background)',
+    boxShadow: '0 10px 28px color-mix(in srgb, var(--vscode-panel-border) 18%, transparent)',
+  },
+  documentPreviewHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '12px',
+    padding: '12px 14px',
+    /*background: 'color-mix(in srgb, var(--vscode-input-background) 84%, var(--vscode-editor-background) 16%)',*/
+    background: 'var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15))',
+    borderBottom: '1px solid var(--vscode-panel-border)',
+    flexWrap: 'wrap',
+  },
+  documentPreviewHeadingBlock: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  documentPreviewTitle: {
+    fontSize: '13px',
+    fontWeight: 700,
+    color: 'var(--vscode-foreground)',
+  },
+  documentPreviewSubtitle: {
+    fontSize: '11px',
+    color: 'var(--vscode-descriptionForeground)',
+  },
+  documentPreviewTabs: {
+    display: 'inline-flex',
+    gap: '6px',
+    alignItems: 'center',
+  },
+  documentPreviewTab: {
+    padding: '6px 10px',
+    background: 'transparent',
+    color: 'var(--vscode-foreground)',
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '999px',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontFamily: 'var(--vscode-font-family)',
+  },
+  documentPreviewTabActive: {
+    background: 'var(--vscode-button-background)',
+    color: 'var(--vscode-button-foreground)',
+    border: '1px solid color-mix(in srgb, var(--vscode-button-background) 76%, black)',
+  },
+  documentPreviewViewport: {
+    maxHeight: '760px',
+    overflow: 'auto',
+    background: 'color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-input-background) 10%)',
+  },
+  documentPreviewHtmlCanvas: {
+    minWidth: '840px',
+  },
+  documentPreviewSource: {
+    margin: 0,
+    padding: '22px 26px',
+    background: 'var(--vscode-editor-background)',
+    color: 'var(--vscode-editor-foreground)',
+    fontFamily: 'var(--vscode-editor-font-family, monospace)',
+    fontSize: '12px',
+    lineHeight: 1.75,
+    whiteSpace: 'pre',
+    minWidth: 'max-content',
+  },
+  documentPreviewSourceCode: {
+    fontFamily: 'inherit',
+    fontSize: 'inherit',
+    color: 'inherit',
   },
   reportControlsLeft: {
     display: 'flex',

@@ -16,6 +16,30 @@ test('fetchRemoteText returns remote text payload when response is valid', async
 	assert.equal(result, 'Instruction line 1\nInstruction line 2\n');
 });
 
+test('fetchRemoteText supports requestImpl transport without using global fetch', async () => {
+	let requestCalled = false;
+	const result = await fetchRemoteText('https://example.com/general.instructions.md', {
+		requestImpl: async (url, options) => {
+			requestCalled = true;
+			assert.equal(url, 'https://example.com/general.instructions.md');
+			assert.equal(options.timeoutMs, 10000);
+			assert.match(options.headers.Accept, /text\/plain/);
+			assert.match(options.headers['User-Agent'], /prompt-manager/);
+			return {
+				status: 200,
+				statusText: 'OK',
+				body: 'Instruction from request transport',
+			};
+		},
+		fetchImpl: async () => {
+			assert.fail('fetchImpl should not be used when requestImpl is provided');
+		},
+	});
+
+	assert.equal(requestCalled, true);
+	assert.equal(result, 'Instruction from request transport');
+});
+
 test('fetchRemoteText throws a readable error for non-ok HTTP responses', async () => {
 	await assert.rejects(
 		() => fetchRemoteText('https://example.com/general.instructions.md', {

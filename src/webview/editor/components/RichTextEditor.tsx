@@ -630,14 +630,39 @@ export const RichTextEditor: React.FC<Props> = ({
     <div style={{ ...styles.root, ...(fillHeight ? styles.rootFillHeight : null) }}>
       <style>
         {`
-          .pm-rich-editor-content {
-            font-size: var(--vscode-font-size, 13px);
-            line-height: 1.6;
+          .pm-rich-editor-content,
+          .pm-rich-markdown-preview {
+            /*--pm-rich-surface: color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-input-background) 10%);*/
+            --pm-rich-border: color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,0.35)) 88%, transparent);
+            --pm-rich-border-strong: color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,0.35)) 100%, black 6%);
+            --pm-rich-muted: var(--vscode-descriptionForeground);
+            --pm-rich-code-bg: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+            max-width: 980px;
+            margin: 0 auto;
+            padding: 6px 0;
+            font-size: 14px;
+            line-height: 1.72;
             color: var(--vscode-foreground);
           }
 
-          .pm-rich-editor-content p {
-            margin: 0.4em 0;
+          .pm-rich-editor-content *,
+          .pm-rich-markdown-preview * {
+            box-sizing: border-box;
+          }
+
+          .pm-rich-editor-content > :first-child,
+          .pm-rich-markdown-preview > :first-child {
+            margin-top: 0;
+          }
+
+          .pm-rich-editor-content > :last-child,
+          .pm-rich-markdown-preview > :last-child {
+            margin-bottom: 0;
+          }
+
+          .pm-rich-editor-content p,
+          .pm-rich-markdown-preview p {
+            margin: 0 0 1em;
           }
 
           .pm-rich-editor-content h1,
@@ -645,193 +670,178 @@ export const RichTextEditor: React.FC<Props> = ({
           .pm-rich-editor-content h3,
           .pm-rich-editor-content h4,
           .pm-rich-editor-content h5,
-          .pm-rich-editor-content h6 {
-            margin: 0.8em 0 0.4em;
-            font-weight: 600;
-            line-height: 1.3;
-          }
-          .pm-rich-editor-content h1 { font-size: 1.4em; }
-          .pm-rich-editor-content h2 { font-size: 1.25em; }
-          .pm-rich-editor-content h3 { font-size: 1.1em; }
-          .pm-rich-editor-content h4 { font-size: 1em; }
-
-          .pm-rich-editor-content ul,
-          .pm-rich-editor-content ol {
-            margin: 0.4em 0;
-            padding-left: 1.6em;
-            list-style-position: outside;
-          }
-          .pm-rich-editor-content ul { list-style-type: disc; }
-          .pm-rich-editor-content ol { list-style-type: decimal; }
-
-          .pm-rich-editor-content li {
-            margin: 0.15em 0;
-          }
-          .pm-rich-editor-content li > ul,
-          .pm-rich-editor-content li > ol {
-            margin-top: 0.25em;
-            margin-bottom: 0.25em;
-          }
-
-          .pm-rich-editor-content code {
-            font-family: var(--vscode-editor-font-family, 'Consolas', 'Courier New', monospace);
-            font-size: 0.9em;
-            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
-            padding: 1px 4px;
-            border-radius: 3px;
-          }
-
-          .pm-rich-editor-content pre {
-            margin: 0.6em 0;
-            padding: 10px 12px;
-            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
-            border-radius: 4px;
-            overflow-x: auto;
-            line-height: 1.45;
-          }
-          .pm-rich-editor-content pre code {
-            background: none;
-            padding: 0;
-            border-radius: 0;
-            font-size: var(--vscode-editor-font-size, 12px);
-          }
-
-          .pm-rich-editor-content blockquote {
-            margin: 0.6em 0;
-            padding: 4px 12px;
-            border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-focusBorder));
-            background: var(--vscode-textBlockQuote-background, transparent);
-            color: var(--vscode-foreground);
-          }
-
-          .pm-rich-editor-content a {
-            color: var(--vscode-textLink-foreground);
-            text-decoration: none;
-          }
-          .pm-rich-editor-content a:hover {
-            text-decoration: underline;
-          }
-
-          .pm-rich-editor-content hr {
-            border: none;
-            border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
-            margin: 0.8em 0;
-          }
-
-          .pm-rich-editor-content table {
-            border-collapse: collapse;
-            margin: 0.6em 0;
-            width: 100%;
-            font-size: 0.95em;
-          }
-          .pm-rich-editor-content th,
-          .pm-rich-editor-content td {
-            border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
-            padding: 5px 10px;
-            text-align: left;
-          }
-          .pm-rich-editor-content th {
-            font-weight: 600;
-            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.1));
-          }
-
-          .pm-rich-markdown-preview {
-            font-size: var(--vscode-font-size, 13px);
-            line-height: 1.6;
-            color: var(--vscode-foreground);
-          }
-
-          .pm-rich-markdown-preview > :first-child {
-            margin-top: 0;
-          }
-
-          .pm-rich-markdown-preview > :last-child {
-            margin-bottom: 0;
-          }
-
+          .pm-rich-editor-content h6,
           .pm-rich-markdown-preview h1,
           .pm-rich-markdown-preview h2,
           .pm-rich-markdown-preview h3,
           .pm-rich-markdown-preview h4,
           .pm-rich-markdown-preview h5,
           .pm-rich-markdown-preview h6 {
-            margin: 1.1em 0 0.5em;
-            line-height: 1.3;
-            font-weight: 600;
+            margin: 1.3em 0 0.55em;
+            line-height: 1.2;
+            font-weight: 700;
+            letter-spacing: -0.02em;
           }
 
-          .pm-rich-markdown-preview p,
-          .pm-rich-markdown-preview ul,
-          .pm-rich-markdown-preview ol,
-          .pm-rich-markdown-preview blockquote,
-          .pm-rich-markdown-preview table,
-          .pm-rich-markdown-preview pre {
-            margin: 0 0 1em;
+          .pm-rich-editor-content h1,
+          .pm-rich-markdown-preview h1 {
+            font-size: 2em;
           }
 
+          .pm-rich-editor-content h2,
+          .pm-rich-markdown-preview h2 {
+            font-size: 1.55em;
+          }
+
+          .pm-rich-editor-content h3,
+          .pm-rich-markdown-preview h3 {
+            font-size: 1.2em;
+          }
+
+          .pm-rich-editor-content h4,
+          .pm-rich-markdown-preview h4 {
+            font-size: 1.05em;
+          }
+
+          .pm-rich-editor-content ul,
+          .pm-rich-editor-content ol,
           .pm-rich-markdown-preview ul,
           .pm-rich-markdown-preview ol {
-            padding-left: 1.6em;
+            margin: 0 0 1em;
+            padding-left: 1.7em;
+            list-style-position: outside;
           }
 
+          .pm-rich-editor-content ul,
+          .pm-rich-markdown-preview ul {
+            list-style-type: disc;
+          }
+
+          .pm-rich-editor-content ol,
+          .pm-rich-markdown-preview ol {
+            list-style-type: decimal;
+          }
+
+          .pm-rich-editor-content li,
           .pm-rich-markdown-preview li {
-            margin: 0.15em 0;
+            margin: 0.18em 0;
           }
 
+          .pm-rich-editor-content li > ul,
+          .pm-rich-editor-content li > ol,
+          .pm-rich-markdown-preview li > ul,
+          .pm-rich-markdown-preview li > ol {
+            margin-top: 0.35em;
+            margin-bottom: 0.35em;
+          }
+
+          .pm-rich-editor-content code,
+          .pm-rich-markdown-preview code {
+            font-family: var(--vscode-editor-font-family, 'Consolas', 'Courier New', monospace);
+            font-size: 0.92em;
+            background: var(--pm-rich-code-bg);
+            padding: 0.12em 0.38em;
+            border-radius: 6px;
+          }
+
+          .pm-rich-editor-content pre,
+          .pm-rich-markdown-preview pre {
+            margin: 0 0 1.1em;
+            padding: 16px 18px;
+            background: var(--pm-rich-code-bg);
+            border: 1px solid var(--pm-rich-border);
+            border-radius: 12px;
+            overflow-x: auto;
+            line-height: 1.55;
+          }
+
+          .pm-rich-editor-content pre code,
+          .pm-rich-markdown-preview pre code {
+            background: none;
+            padding: 0;
+            border-radius: 0;
+            font-size: var(--vscode-editor-font-size, 12px);
+          }
+
+          .pm-rich-editor-content blockquote,
+          .pm-rich-markdown-preview blockquote {
+            margin: 0 0 1.1em;
+            padding: 12px 16px;
+            border-left: 4px solid var(--vscode-textBlockQuote-border, var(--vscode-focusBorder));
+            border-radius: 0 10px 10px 0;
+            background: color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-input-background) 12%);
+            color: var(--pm-rich-muted);
+          }
+
+          .pm-rich-editor-content a,
           .pm-rich-markdown-preview a {
             color: var(--vscode-textLink-foreground);
             text-decoration: none;
           }
 
+          .pm-rich-editor-content a:hover,
           .pm-rich-markdown-preview a:hover {
             text-decoration: underline;
           }
 
-          .pm-rich-markdown-preview code {
-            font-family: var(--vscode-editor-font-family, monospace);
-            font-size: 0.95em;
-            padding: 0.15em 0.35em;
-            border-radius: 4px;
-            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+          .pm-rich-editor-content hr,
+          .pm-rich-markdown-preview hr {
+            border: none;
+            border-top: 1px solid var(--pm-rich-border);
+            margin: 1.4em 0;
           }
 
-          .pm-rich-markdown-preview pre {
-            padding: 14px 16px;
-            border-radius: 10px;
-            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
-            overflow: auto;
-          }
-
-          .pm-rich-markdown-preview pre code {
-            padding: 0;
-            background: none;
-            border-radius: 0;
-          }
-
-          .pm-rich-markdown-preview blockquote {
-            padding: 4px 12px;
-            border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-focusBorder));
-            background: var(--vscode-textBlockQuote-background, transparent);
-          }
-
+          .pm-rich-editor-content table,
           .pm-rich-markdown-preview table {
             width: 100%;
-            border-collapse: collapse;
+            border-collapse: separate;
+            border-spacing: 0;
+            margin: 0 0 1.2em;
+            background: var(--pm-rich-surface);
+            border: 1px solid var(--pm-rich-border);
+            border-radius: 12px;
+            overflow: hidden;
           }
 
+          .pm-rich-editor-content th,
+          .pm-rich-editor-content td,
           .pm-rich-markdown-preview th,
           .pm-rich-markdown-preview td {
-            border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
-            padding: 6px 10px;
+            border-bottom: 1px solid var(--pm-rich-border);
+            padding: 12px 14px;
             text-align: left;
+            vertical-align: top;
           }
 
+          .pm-rich-editor-content tbody tr:last-child td,
+          .pm-rich-markdown-preview tbody tr:last-child td {
+            border-bottom: none;
+          }
+
+          .pm-rich-editor-content th,
           .pm-rich-markdown-preview th {
-            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.1));
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            /*background: color-mix(in srgb, var(--vscode-editor-background) 82%, var(--vscode-input-background) 18%);*/
+            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+            border-bottom: 1px solid var(--pm-rich-border-strong);
+          }
+
+          .pm-rich-editor-content tbody tr:nth-child(even) td,
+          .pm-rich-markdown-preview tbody tr:nth-child(even) td {
+            /*background: color-mix(in srgb, var(--vscode-editor-background) 94%, white 6%);*/
+            background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
           }
 
           .pm-rich-editor-content strong,
           .pm-rich-editor-content b {
+            font-weight: 600;
+          }
+
+          .pm-rich-markdown-preview strong,
+          .pm-rich-markdown-preview b {
             font-weight: 600;
           }
 
@@ -1314,15 +1324,16 @@ const styles: Record<string, React.CSSProperties> = {
   },
   editor: {
     width: '100%',
-    border: '1px solid var(--vscode-input-border, transparent)',
-    borderRadius: '4px 4px 0 0',
-    background: 'var(--vscode-input-background)',
-    color: 'var(--vscode-input-foreground)',
-    padding: '10px',
+    border: '1px solid var(--vscode-panel-border, transparent)',
+    borderRadius: '12px 12px 0 0',
+    /*background: 'color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-input-background) 10%)',*/
+    color: 'var(--vscode-editor-foreground)',
+    padding: '26px 30px',
     boxSizing: 'border-box',
     outline: 'none',
-    lineHeight: 1.5,
+    lineHeight: 1.65,
     overflow: 'auto',
+    boxShadow: 'inset 0 1px 0 color-mix(in srgb, var(--vscode-editor-background) 85%, white 15%)',
   },
   editorFillHeight: {
     flex: 1,
@@ -1330,38 +1341,41 @@ const styles: Record<string, React.CSSProperties> = {
   },
   source: {
     width: '100%',
-    border: '1px solid var(--vscode-input-border, transparent)',
-    borderRadius: '4px 4px 0 0',
-    background: 'var(--vscode-input-background)',
-    color: 'var(--vscode-input-foreground)',
-    padding: '10px',
+    border: '1px solid var(--vscode-panel-border, transparent)',
+    borderRadius: '12px 12px 0 0',
+    /*background: 'color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-input-background) 8%)',*/
+    color: 'var(--vscode-editor-foreground)',
+    padding: '24px 28px',
     boxSizing: 'border-box',
     outline: 'none',
-    lineHeight: 1.5,
+    lineHeight: 1.7,
     fontFamily: 'var(--vscode-editor-font-family, monospace)',
     resize: 'none',
+    fontSize: '13px',
   },
   preview: {
     width: '100%',
-    border: '1px solid var(--vscode-input-border, transparent)',
-    borderRadius: '4px 4px 0 0',
-    background: 'var(--vscode-input-background)',
-    color: 'var(--vscode-input-foreground)',
-    padding: '14px',
+    border: '1px solid var(--vscode-panel-border, transparent)',
+    borderRadius: '12px 12px 0 0',
+    background: 'color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-input-background) 10%)',
+    color: 'var(--vscode-editor-foreground)',
+    padding: '26px 30px',
     boxSizing: 'border-box',
     overflow: 'auto',
+    boxShadow: 'inset 0 1px 0 color-mix(in srgb, var(--vscode-editor-background) 85%, white 15%)',
   },
   previewEmpty: {
     width: '100%',
-    border: '1px solid var(--vscode-input-border, transparent)',
-    borderRadius: '4px 4px 0 0',
-    background: 'var(--vscode-input-background)',
+    border: '1px solid var(--vscode-panel-border, transparent)',
+    borderRadius: '12px 12px 0 0',
+    /*background: 'color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-input-background) 10%)',*/
     color: 'var(--vscode-descriptionForeground)',
-    padding: '14px',
+    padding: '26px 30px',
     boxSizing: 'border-box',
     display: 'flex',
     alignItems: 'center',
     overflow: 'auto',
+    lineHeight: 1.6,
   },
   resizeHandle: {
     height: '6px',

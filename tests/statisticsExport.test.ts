@@ -8,6 +8,11 @@ import {
 	getStatisticsStatusPercent,
 	summarizePromptReport,
 } from '../src/utils/statisticsExport.js';
+import {
+	buildStatisticsExportHtmlDocument,
+	buildStatisticsExportHtmlPreview,
+	buildStatisticsExportMarkdownDocument,
+} from '../src/utils/statisticsDocumentTemplate.js';
 
 test('calculateStatisticsExportTargetHours uses fallback when period is not selected', () => {
 	assert.equal(calculateStatisticsExportTargetHours({ dateFrom: null, dateTo: null }), 165);
@@ -113,4 +118,47 @@ test('buildStatisticsWordSection renders tab-separated rows for Word tables', ()
 	assert.equal(lines[2], '№\tНомер задачи: Название\tКоличество часов\tч.\tСтоимость часа\tСумма');
 	assert.equal(lines[3], '1\t52: Добавить часы и ставку в экспорт\t12\tч.\t1743\t20916');
 	assert.equal(lines[4], '2\t—: Подготовить отчёт\t5,50\tч.\t1743\t9586,50');
+});
+
+test('buildStatisticsExportHtmlDocument and preview share the same document shell', () => {
+	const rows = [
+		{
+			taskNumber: '55',
+			title: 'Выровнять превью документов',
+			hours: 12,
+			reportSummary: 'Сделан единый HTML-шаблон для preview и export.',
+		},
+	];
+
+	const fullHtml = buildStatisticsExportHtmlDocument(rows, 12, 'ru', true, 1743);
+	const previewHtml = buildStatisticsExportHtmlPreview(rows, 12, 'ru', true, 1743);
+
+	assert.match(fullHtml, /pm-stats-export-page/);
+	assert.match(fullHtml, /Отчёт по статистике/);
+	assert.match(fullHtml, /Выровнять превью документов/);
+	assert.match(fullHtml, /20.?916/);
+	assert.match(previewHtml, /pm-stats-export-page/);
+	assert.match(previewHtml, /pm-stats-export-table/);
+	assert.match(previewHtml, /Prompt Manager/);
+	assert.ok(previewHtml.includes('Сделан единый HTML-шаблон для preview и export.'));
+	assert.ok(fullHtml.includes('<style>'));
+	assert.ok(previewHtml.includes('<style>'));
+});
+
+test('buildStatisticsExportMarkdownDocument renders compact markdown export without summaries', () => {
+	const markdown = buildStatisticsExportMarkdownDocument([
+		{
+			taskNumber: '77',
+			title: 'Подготовить шаблон таблиц',
+			hours: 8,
+		},
+	], 8, 'ru', false, 1743);
+
+	assert.match(markdown, /# Отчёт по статистике/);
+	assert.match(markdown, /\| № задачи/);
+	assert.match(markdown, /Подготовить шаблон таблиц/);
+	assert.match(markdown, /## Word/);
+	assert.match(markdown, /13944/);
+	assert.ok(!markdown.includes('Что сделано:'));
+	assert.ok(markdown.endsWith('\n'));
 });

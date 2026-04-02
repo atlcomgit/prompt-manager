@@ -35,6 +35,8 @@ import { fetchRemoteText } from '../utils/remoteText.js';
 const openPanels = new Map<string, vscode.WebviewPanel>();
 const SINGLE_EDITOR_PANEL_KEY = '__prompt_editor_singleton__';
 const REMOTE_GLOBAL_CONTEXT_URL = 'https://raw.githubusercontent.com/atlcomgit/prompt-manager/refs/heads/master/share/general.instructions.md';
+const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
+const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
 
 export class EditorPanelManager {
 	private _onDidSave = new vscode.EventEmitter<string>();
@@ -74,6 +76,10 @@ export class EditorPanelManager {
 		breaks: false,
 		typographer: false,
 	});
+	private pendingGlobalAgentContextSync: string | null = null;
+	private globalAgentContextSyncTimer: NodeJS.Timeout | null = null;
+	private isGlobalAgentContextSyncInProgress = false;
+	private globalAgentContextPersistQueue: Promise<void> = Promise.resolve();
 
 	private syncStartupEditorRestoreState(): void {
 		if (this.isShuttingDown) {
@@ -91,13 +97,75 @@ export class EditorPanelManager {
 		}
 	}
 
-	private async persistGlobalAgentContext(context: string): Promise<void> {
-		await this.stateService.saveGlobalAgentContext(context);
+	private clearGlobalAgentContextSyncTimer(): void {
+		if (!this.globalAgentContextSyncTimer) {
+			return;
+		}
+
+		clearTimeout(this.globalAgentContextSyncTimer);
+		this.globalAgentContextSyncTimer = null;
+	}
+
+	private scheduleGlobalAgentContextSync(context: string): void {
+		if (this.isShuttingDown) {
+			return;
+		}
+
+		this.pendingGlobalAgentContextSync = context;
+		if (this.isGlobalAgentContextSyncInProgress) {
+			return;
+		}
+
+		if (!vscode.window.activeTextEditor?.document) {
+			return;
+		}
+
+		this.clearGlobalAgentContextSyncTimer();
+		this.globalAgentContextSyncTimer = setTimeout(() => {
+			this.globalAgentContextSyncTimer = null;
+			void this.flushGlobalAgentContextSync();
+		}, GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS);
+	}
+
+	private async flushGlobalAgentContextSync(): Promise<void> {
+		if (this.isShuttingDown || this.isGlobalAgentContextSyncInProgress) {
+			return;
+		}
+
+		if (!vscode.window.activeTextEditor?.document) {
+			return;
+		}
+
+		const context = this.pendingGlobalAgentContextSync;
+		if (context === null) {
+			return;
+		}
+
+		this.pendingGlobalAgentContextSync = null;
+		this.isGlobalAgentContextSyncInProgress = true;
 		try {
 			await this.workspaceService.ensureChatInstructionsFile(context);
 		} catch {
 			// Keep UI responsive even if file/settings sync fails.
+		} finally {
+			this.isGlobalAgentContextSyncInProgress = false;
+			if (this.pendingGlobalAgentContextSync !== null) {
+				this.scheduleGlobalAgentContextSync(this.pendingGlobalAgentContextSync);
+			}
 		}
+	}
+
+	private async persistGlobalAgentContext(context: string): Promise<void> {
+		const persist = async () => {
+			await this.stateService.saveGlobalAgentContext(context);
+			this.scheduleGlobalAgentContextSync(context);
+		};
+
+		const nextPersist = this.globalAgentContextPersistQueue.then(persist, persist);
+		this.globalAgentContextPersistQueue = nextPersist.catch(() => {
+			// keep the queue usable for subsequent saves
+		});
+		await nextPersist;
 	}
 
 	private async loadRemoteGlobalAgentContext(): Promise<string> {
@@ -520,6 +588,37 @@ export class EditorPanelManager {
 
 		const taskNumber = String(prompt?.taskNumber || '').trim();
 		return taskNumber ? `${taskNumber} | ${title}` : title;
+	}
+
+	private truncatePromptPanelTitle(title: string): string {
+		const normalized = String(title || '').replace(/\s+/g, ' ').trim();
+		if (normalized.length <= PROMPT_PANEL_TITLE_MAX_LENGTH) {
+			return normalized;
+		}
+
+		return `${normalized.slice(0, PROMPT_PANEL_TITLE_MAX_LENGTH - 3).trimEnd()}...`;
+	}
+
+	private formatPromptPanelTitleLabel(
+		prompt: Pick<Prompt, 'id' | 'title' | 'taskNumber'> | null,
+		isRu: boolean,
+	): string {
+		const fallbackTitle = isRu ? 'Новый промпт' : 'New prompt';
+		const rawTitle = String(prompt?.title || prompt?.id || fallbackTitle).trim() || fallbackTitle;
+		const taskNumber = String(prompt?.taskNumber || '').trim();
+		const truncatedTitle = this.truncatePromptPanelTitle(rawTitle);
+		return taskNumber ? `${taskNumber} | ${truncatedTitle}` : truncatedTitle;
+	}
+
+	private updatePromptPanelTitle(
+		panel: vscode.WebviewPanel,
+		prompt: Pick<Prompt, 'id' | 'title' | 'taskNumber'> | null,
+		options?: { dirty?: boolean; isRu?: boolean },
+	): void {
+		const isRu = options?.isRu ?? vscode.env.language.startsWith('ru');
+		const dirty = options?.dirty === true;
+		const label = this.formatPromptPanelTitleLabel(prompt, isRu);
+		panel.title = dirty ? `⚡● ${label}` : `⚡ ${label}`;
 	}
 
 	private async scheduleChatSessionRename(
@@ -1047,6 +1146,11 @@ export class EditorPanelManager {
 		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined,
 	) {
 		this.contentSyncDisposables.push(
+			vscode.window.onDidChangeActiveTextEditor(() => {
+				if (this.pendingGlobalAgentContextSync !== null) {
+					this.scheduleGlobalAgentContextSync(this.pendingGlobalAgentContextSync);
+				}
+			}),
 			vscode.workspace.onDidChangeTextDocument((event) => {
 				void this.syncPromptContentFromEditorDocument(event.document);
 				if (this.panelKeyByReportEditorUri.has(event.document.uri.toString())) {
@@ -1746,7 +1850,7 @@ export class EditorPanelManager {
 				await this.syncPersistedActivePromptState(enriched, renameFromId);
 				const panel = openPanels.get(panelKey);
 				if (panel) {
-					panel.title = `⚡ ${enriched.title || enriched.id}`;
+					this.updatePromptPanelTitle(panel, enriched);
 				}
 				postMessage({ type: 'prompt', prompt: enriched, reason: 'ai-enrichment', previousId: renameFromId });
 				postMessage({ type: 'promptSaved', prompt: enriched, previousId: renameFromId });
@@ -2076,7 +2180,7 @@ export class EditorPanelManager {
 					panelKey = currentPrompt.id;
 				}
 
-				panel.title = `⚡ ${saved.title || saved.id}`;
+				this.updatePromptPanelTitle(panel, saved);
 				void panel.webview.postMessage({ type: 'promptSaved', prompt: saved });
 				void panel.webview.postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'save' });
 			}
@@ -2150,7 +2254,7 @@ export class EditorPanelManager {
 
 		Object.assign(currentPrompt, saved);
 		this.setPanelPromptRef(panelKey, currentPrompt);
-		panel.title = `⚡ ${saved.title || saved.id}`;
+		this.updatePromptPanelTitle(panel, saved);
 		postMessage({ type: 'promptSaved', prompt: saved });
 		postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'save' });
 		this._onDidSave.fire(currentPrompt.id);
@@ -2793,9 +2897,7 @@ export class EditorPanelManager {
 			this.panelDirtySetters.set(panelKey, setPanelDirty);
 			const bootId = this.createPanelBootId();
 			this.panelBootIds.set(panelKey, bootId);
-			reusableSingletonPanel.title = restoredUnsaved
-				? `⚡● ${prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt')}`
-				: `⚡ ${prompt.title || prompt.id || (isRu ? 'Новый промпт' : 'New prompt')}`;
+			this.updatePromptPanelTitle(reusableSingletonPanel, prompt, { dirty: restoredUnsaved, isRu });
 			reusableSingletonPanel.webview.html = getWebviewHtml(
 				reusableSingletonPanel.webview,
 				this.extensionUri,
@@ -3051,8 +3153,10 @@ export class EditorPanelManager {
 						}
 					}
 
-					const displayTitle = (updatedLatestPromptState?.title || currentPrompt.title || currentPrompt.id || (isRu ? 'Новый промпт' : 'New prompt'));
-					panel.title = (this.panelDirtyFlags.get(panelKey) || false) ? `⚡● ${displayTitle}` : `⚡ ${displayTitle}`;
+					this.updatePromptPanelTitle(panel, updatedLatestPromptState || currentPrompt, {
+						dirty: this.panelDirtyFlags.get(panelKey) || false,
+						isRu,
+					});
 					return;
 				}
 				await this.handleMessage(msg, panel, currentPrompt, panelKey, () => this.panelDirtyFlags.get(panelKey) || false, setPanelDirty);
@@ -3310,7 +3414,7 @@ export class EditorPanelManager {
 					}
 
 					if (shouldApplyToCurrentPanel) {
-						panel.title = `⚡ ${saved.title || saved.id}`;
+						this.updatePromptPanelTitle(panel, saved);
 						postMessage({ type: 'promptSaved', prompt: saved, previousId: renameFromId });
 						postMessage({ type: 'prompt', prompt: promptForPanel, reason: 'save', previousId: renameFromId });
 					}
@@ -3466,7 +3570,7 @@ export class EditorPanelManager {
 				this.panelDirtyFlags.set(panelKey, false);
 				this.panelLatestPromptSnapshots.set(panelKey, null);
 				this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(restored)));
-				panel.title = `⚡ ${restored.title || restored.id}`;
+				this.updatePromptPanelTitle(panel, restored);
 				postMessage({ type: 'prompt', prompt: restored, reason: 'open' });
 				await this.broadcastAvailableLanguagesAndFrameworks();
 				this._onDidSave.fire(restored.id);
@@ -5126,8 +5230,10 @@ export class EditorPanelManager {
 			case 'loadRemoteGlobalContext': {
 				try {
 					const context = await this.loadRemoteGlobalAgentContext();
-					await this.persistGlobalAgentContext(context);
 					postMessage({ type: 'globalContextLoaded', context });
+					void this.persistGlobalAgentContext(context).catch((error) => {
+						this.hooksOutput.appendLine(`[global-context] persist after remote load failed: ${error instanceof Error ? error.message : String(error)}`);
+					});
 				} catch (error) {
 					const message = error instanceof Error && error.message.trim()
 						? error.message.trim()
@@ -5266,6 +5372,9 @@ export class EditorPanelManager {
 
 	/** Close all open panels */
 	disposeAll(): void {
+		this.clearGlobalAgentContextSyncTimer();
+		this.pendingGlobalAgentContextSync = null;
+		this.isGlobalAgentContextSyncInProgress = false;
 		for (const d of this.contentSyncDisposables) {
 			d.dispose();
 		}

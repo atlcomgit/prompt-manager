@@ -1,4 +1,5 @@
 import type {
+	GitOverlayActionKind,
 	GitOverlayBranchKind,
 	GitOverlayGraphEdge,
 	GitOverlayGraphNode,
@@ -6,6 +7,7 @@ import type {
 	GitOverlayReviewRequestState,
 	GitOverlayReviewSetupAction,
 } from '../types/git.js';
+import type { PromptStatus } from '../types/prompt.js';
 
 type ParsedGitOverlayRemote = {
 	provider: GitOverlayReviewProvider;
@@ -31,12 +33,37 @@ type GitOverlayStartChatBranchProject = {
 
 type GitOverlayTrackedBranchProject = {
 	available: boolean;
+	currentBranch: string;
 	branches: Array<{
 		name: string;
 		kind: GitOverlayBranchKind;
 		exists: boolean;
 	}>;
 };
+
+type GitOverlaySyncProject = {
+	available: boolean;
+	upstream: string;
+	behind: number;
+};
+
+type GitOverlayActionableProject = {
+	available: boolean;
+	currentBranch: string;
+	changeGroups: {
+		merge: unknown[];
+		staged: unknown[];
+		workingTree: unknown[];
+		untracked: unknown[];
+	};
+};
+
+function countGitOverlayActionableProjectChanges<T extends GitOverlayActionableProject>(project: T): number {
+	return project.changeGroups.merge.length
+		+ project.changeGroups.staged.length
+		+ project.changeGroups.workingTree.length
+		+ project.changeGroups.untracked.length;
+}
 
 function normalizeInteractiveTerminalCommand(command: string): string {
 	return command.replace(/\t/g, '    ');
@@ -275,6 +302,40 @@ export function resolveExistingGitOverlayTrackedBranches<T extends GitOverlayTra
 	return [...result];
 }
 
+export function resolveGitOverlayTrackedBranchOptions<T extends GitOverlayTrackedBranchProject>(
+	trackedBranches: string[],
+	projects: T[],
+	promptBranch: string,
+	preferredTrackedBranch = '',
+): string[] {
+	const normalizedTrackedBranches = Array.from(new Set(
+		trackedBranches
+			.map(branch => branch.trim())
+			.filter(Boolean),
+	));
+	if (normalizedTrackedBranches.length > 0) {
+		return normalizedTrackedBranches;
+	}
+
+	const availableProjects = projects.filter(project => project.available);
+	const projectsToInspect = availableProjects.length > 0 ? availableProjects : projects;
+	const normalizedPromptBranch = promptBranch.trim();
+	const preferredBranch = preferredTrackedBranch.trim();
+	const fallbackBranches = projectsToInspect
+		.map(project => project.currentBranch.trim())
+		.filter(Boolean)
+		.filter(branch => branch !== normalizedPromptBranch);
+	const options = Array.from(new Set(fallbackBranches.length > 0 ? fallbackBranches : projectsToInspect
+		.map(project => project.currentBranch.trim())
+		.filter(Boolean)));
+
+	if (!preferredBranch) {
+		return options;
+	}
+
+	return Array.from(new Set([preferredBranch, ...options]));
+}
+
 export function isGitOverlayStartChatBranchAllowed(
 	branchName: string,
 	promptBranch: string,
@@ -295,12 +356,75 @@ export function isGitOverlayStartChatBranchAllowed(
 		.includes(normalizedBranch);
 }
 
+export function isGitOverlayDefaultStepBranchAllowed(
+	branchName: string,
+	promptBranch: string,
+	trackedBranches: string[],
+): boolean {
+	if (!promptBranch.trim()) {
+		return false;
+	}
+
+	return isGitOverlayStartChatBranchAllowed(branchName, promptBranch, trackedBranches);
+}
+
 export function collectGitOverlayStartChatBranchMismatches<T extends GitOverlayStartChatBranchProject>(
 	projects: T[],
 	promptBranch: string,
 	trackedBranches: string[],
 ): T[] {
 	return projects.filter(project => project.available && !isGitOverlayStartChatBranchAllowed(project.currentBranch, promptBranch, trackedBranches));
+}
+
+export function collectGitOverlayDefaultStepBranchMismatches<T extends GitOverlayStartChatBranchProject>(
+	projects: T[],
+	promptBranch: string,
+	trackedBranches: string[],
+): T[] {
+	return projects.filter(project => project.available && !isGitOverlayDefaultStepBranchAllowed(project.currentBranch, promptBranch, trackedBranches));
+}
+
+export function collectGitOverlayProjectsNeedingSync<T extends GitOverlaySyncProject>(projects: T[]): T[] {
+	return projects.filter(project => project.available && Boolean(project.upstream.trim()) && project.behind > 0);
+}
+
+export function isGitOverlayPassiveTrackedProject<T extends GitOverlayActionableProject>(
+	project: T,
+	promptBranch: string,
+	trackedBranches: string[],
+): boolean {
+	if (!project.available) {
+		return false;
+	}
+
+	const normalizedCurrentBranch = project.currentBranch.trim();
+	if (!normalizedCurrentBranch) {
+		return false;
+	}
+
+	const normalizedPromptBranch = promptBranch.trim();
+	if (normalizedPromptBranch && normalizedCurrentBranch === normalizedPromptBranch) {
+		return false;
+	}
+
+	const trackedBranchSet = new Set(
+		trackedBranches
+			.map(branch => branch.trim())
+			.filter(Boolean),
+	);
+	if (!trackedBranchSet.has(normalizedCurrentBranch)) {
+		return false;
+	}
+
+	return countGitOverlayActionableProjectChanges(project) === 0;
+}
+
+export function collectGitOverlayActionableProjects<T extends GitOverlayActionableProject>(
+	projects: T[],
+	promptBranch: string,
+	trackedBranches: string[],
+): T[] {
+	return projects.filter(project => !isGitOverlayPassiveTrackedProject(project, promptBranch, trackedBranches));
 }
 
 export function canDeleteGitOverlayBranch(
@@ -326,6 +450,22 @@ export function canDeleteGitOverlayBranch(
 		.map(branch => branch.trim())
 		.filter(Boolean)
 		.includes(normalizedBranch);
+}
+
+export function resolveGitOverlayDoneStatus(completedActions: Record<GitOverlayActionKind, boolean>): PromptStatus | null {
+	if (completedActions.merge) {
+		return 'closed';
+	}
+
+	if (completedActions['review-request']) {
+		return 'review';
+	}
+
+	if (completedActions.push) {
+		return 'report';
+	}
+
+	return null;
 }
 
 export function normalizeCommitMessageGenerationInstructions(value: unknown): string {

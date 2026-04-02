@@ -32,6 +32,7 @@ import {
 	resolveExistingGitOverlayTrackedBranches,
 	resolveGitOverlayBranchNames,
 } from '../utils/gitOverlay.js';
+import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -116,6 +117,11 @@ interface BuiltInGitExtensionExports {
 export class GitService {
 	private static readonly DIFF_MAX_BUFFER = 8 * 1024 * 1024;
 	private readonly reviewCliAvailability = new Map<'gh' | 'glab', boolean>();
+
+	private logDebug(event: string, payload?: Record<string, unknown>): void {
+		const serializedPayload = payload ? ` ${JSON.stringify(payload)}` : '';
+		appendPromptManagerLog(`[${new Date().toISOString()}] [git-service] ${event}${serializedPayload}`);
+	}
 
 	private parseStagedNameStatus(raw: string): StagedFileChange[] {
 		return raw
@@ -1584,38 +1590,111 @@ export class GitService {
 			return { success: false, errors: ['Название ветки пустое'] };
 		}
 
+		this.logDebug('switchBranch.start', {
+			targetBranch,
+			projectNames,
+			allowedBaseBranches: Array.from(allowedBaseBranches),
+		});
+
 		for (const project of projectNames) {
 			const projectPath = projectPaths.get(project);
 			if (!projectPath) {
+				this.logDebug('switchBranch.project.missingPath', {
+					project,
+					targetBranch,
+				});
 				errors.push(`${project}: workspace folder not found`);
 				continue;
 			}
 
 			try {
+				this.logDebug('switchBranch.project.start', {
+					project,
+					projectPath,
+					targetBranch,
+				});
 				const hasLocalBranch = await this.branchExistsLocally(projectPath, targetBranch);
+				this.logDebug('switchBranch.project.localBranchChecked', {
+					project,
+					targetBranch,
+					hasLocalBranch,
+				});
 				if (!hasLocalBranch) {
 					const remoteBranchRef = await this.findRemoteBranchRef(projectPath, targetBranch);
+					this.logDebug('switchBranch.project.remoteBranchResolved', {
+						project,
+						targetBranch,
+						remoteBranchRef: remoteBranchRef || null,
+					});
 					if (remoteBranchRef) {
+						this.logDebug('switchBranch.project.checkoutTracked.start', {
+							project,
+							targetBranch,
+							remoteBranchRef,
+						});
 						await this.ensureBranchCheckedOut(projectPath, targetBranch);
+						this.logDebug('switchBranch.project.checkoutTracked.done', {
+							project,
+							targetBranch,
+						});
 						continue;
 					}
 
 					const currentBranch = await this.getCurrentBranch(projectPath);
+					this.logDebug('switchBranch.project.currentBranchResolved', {
+						project,
+						targetBranch,
+						currentBranch,
+					});
 					if (!allowedBaseBranches.has(currentBranch)) {
+						this.logDebug('switchBranch.project.disallowedBaseBranch', {
+							project,
+							targetBranch,
+							currentBranch,
+						});
 						errors.push(
 							`${project}: ветка "${targetBranch}" не существует. Создание разрешено только из ${Array.from(allowedBaseBranches).join('/')} (текущая: ${currentBranch || 'unknown'}).`
 						);
 						continue;
 					}
 
+					this.logDebug('switchBranch.project.createAndCheckout.start', {
+						project,
+						targetBranch,
+						currentBranch,
+					});
 					await this.runGitFileMutation(projectPath, ['checkout', '-b', targetBranch]);
+					this.logDebug('switchBranch.project.createAndCheckout.done', {
+						project,
+						targetBranch,
+					});
 				} else {
+					this.logDebug('switchBranch.project.checkoutExisting.start', {
+						project,
+						targetBranch,
+					});
 					await this.runGitFileMutation(projectPath, ['checkout', targetBranch]);
+					this.logDebug('switchBranch.project.checkoutExisting.done', {
+						project,
+						targetBranch,
+					});
 				}
 			} catch (err: any) {
+				this.logDebug('switchBranch.project.error', {
+					project,
+					targetBranch,
+					message: err?.stack || err?.message || String(err),
+				});
 				errors.push(`${project}: ${err.message || 'Unknown error'}`);
 			}
 		}
+
+		this.logDebug('switchBranch.finish', {
+			targetBranch,
+			success: errors.length === 0,
+			errorCount: errors.length,
+			errors,
+		});
 
 		return { success: errors.length === 0, errors };
 	}

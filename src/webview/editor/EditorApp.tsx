@@ -249,6 +249,17 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'debugLog', scope: 'editor-git-overlay', message, payload });
   }, []);
 
+  useEffect(() => {
+    if (!gitOverlayOpen) {
+      return;
+    }
+    logGitOverlayDebug('busyAction.changed', {
+      busyAction: gitOverlayBusyAction,
+      mode: gitOverlayMode,
+      open: gitOverlayOpen,
+    });
+  }, [gitOverlayBusyAction, gitOverlayMode, gitOverlayOpen, logGitOverlayDebug]);
+
   const clearChatStartTimeout = useCallback(() => {
     if (chatStartTimeoutRef.current) {
       window.clearTimeout(chatStartTimeoutRef.current);
@@ -1548,6 +1559,13 @@ export const EditorApp: React.FC = () => {
   }, [prompt.branch, prompt.projects]);
 
   const handleGitOverlaySwitchBranch = useCallback((branch: string) => {
+    logGitOverlayDebug('switchBranch.requested', {
+      branch,
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      mode: gitOverlayMode,
+      previousBusyAction: gitOverlayBusyAction,
+    });
     setGitOverlayBusyAction(`switchBranch:${branch}`);
     vscode.postMessage({
       type: 'gitOverlaySwitchBranch',
@@ -1555,7 +1573,7 @@ export const EditorApp: React.FC = () => {
       projects: prompt.projects,
       branch,
     });
-  }, [prompt.branch, prompt.projects, t]);
+  }, [gitOverlayBusyAction, gitOverlayMode, logGitOverlayDebug, prompt.branch, prompt.projects, t]);
 
   const handleGitOverlayEnsurePromptBranch = useCallback((trackedBranch: string) => {
     setGitOverlayBusyAction('ensurePromptBranch');
@@ -2727,6 +2745,7 @@ export const EditorApp: React.FC = () => {
         commitMessages={gitOverlayCommitMessages}
         busyAction={gitOverlayBusyAction}
         completedActions={gitOverlayCompletedActions}
+        promptStatus={prompt.status}
         promptTitle={prompt.title}
         promptTaskNumber={prompt.taskNumber}
         dockToSecondHalf={shouldDockGitOverlaySecondHalf}

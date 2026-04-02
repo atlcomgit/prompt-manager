@@ -4372,25 +4372,83 @@ export class EditorPanelManager {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
 				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
 				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
-				const status = await this.gitService.checkBranchStatus(paths, projects, msg.branch);
-				if (status.hasChanges) {
-					const answer = await vscode.window.showWarningMessage(
-						'Есть незакоммиченные изменения. Переключить ветку?',
-						{ modal: true, detail: status.details },
-						'Переключить',
-						'Отмена',
-					);
-					if (answer !== 'Переключить') {
-						break;
+				this.logReportDebug('gitOverlay.switchBranch.received', {
+					promptId: currentPrompt.id,
+					branch: msg.branch,
+					promptBranch,
+					projects,
+				});
+				try {
+					const status = await this.gitService.checkBranchStatus(paths, projects, msg.branch);
+					this.logReportDebug('gitOverlay.switchBranch.status', {
+						branch: msg.branch,
+						hasChanges: status.hasChanges,
+						details: this.reportDebugPreview(status.details, 600),
+					});
+					if (status.hasChanges) {
+						const answer = await vscode.window.showWarningMessage(
+							'Есть незакоммиченные изменения. Переключить ветку?',
+							{ modal: true, detail: status.details },
+							'Переключить',
+							'Отмена',
+						);
+						this.logReportDebug('gitOverlay.switchBranch.confirmation', {
+							branch: msg.branch,
+							answer: answer || null,
+						});
+						if (answer !== 'Переключить') {
+							this.logReportDebug('gitOverlay.switchBranch.cancelled', {
+								branch: msg.branch,
+								projects,
+							});
+							await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+							this.logReportDebug('gitOverlay.switchBranch.cancelled.snapshotPosted', {
+								branch: msg.branch,
+							});
+							break;
+						}
+					}
+
+					this.logReportDebug('gitOverlay.switchBranch.git.start', {
+						branch: msg.branch,
+						projects,
+					});
+					const result = await this.gitService.switchBranch(paths, projects, msg.branch, this.getAllowedBranchesSetting());
+					this.logReportDebug('gitOverlay.switchBranch.git.result', {
+						branch: msg.branch,
+						success: result.success,
+						errors: result.errors,
+					});
+					postMessage({
+						type: result.errors.length > 0 ? 'error' : 'info',
+						message: this.describeGitMultiProjectResult(result, `Ветка "${msg.branch}" активирована`),
+					});
+					this.logReportDebug('gitOverlay.switchBranch.snapshot.start', {
+						branch: msg.branch,
+					});
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+					this.logReportDebug('gitOverlay.switchBranch.snapshot.done', {
+						branch: msg.branch,
+					});
+				} catch (error) {
+					const message = error instanceof Error ? (error.stack || error.message) : String(error);
+					this.logReportDebug('gitOverlay.switchBranch.exception', {
+						branch: msg.branch,
+						message: this.reportDebugPreview(message, 1000),
+					});
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+					try {
+						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+						this.logReportDebug('gitOverlay.switchBranch.exception.snapshotPosted', {
+							branch: msg.branch,
+						});
+					} catch (snapshotError) {
+						this.logReportDebug('gitOverlay.switchBranch.exception.snapshotFailed', {
+							branch: msg.branch,
+							message: this.reportDebugPreview(snapshotError instanceof Error ? (snapshotError.stack || snapshotError.message) : String(snapshotError), 1000),
+						});
 					}
 				}
-
-				const result = await this.gitService.switchBranch(paths, projects, msg.branch, this.getAllowedBranchesSetting());
-				postMessage({
-					type: result.errors.length > 0 ? 'error' : 'info',
-					message: this.describeGitMultiProjectResult(result, `Ветка "${msg.branch}" активирована`),
-				});
-				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				break;
 			}
 
@@ -4428,6 +4486,7 @@ export class EditorPanelManager {
 					'Отмена',
 				);
 				if (answer !== 'Merge') {
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 					break;
 				}
 
@@ -4470,6 +4529,7 @@ export class EditorPanelManager {
 					'Отмена',
 				);
 				if (answer !== 'Удалить') {
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 					break;
 				}
 

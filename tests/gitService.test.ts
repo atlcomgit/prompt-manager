@@ -192,3 +192,24 @@ test('GitService discardProjectChanges applies each git restore strategy once pe
 		['restore', '--staged', '--worktree', '--source=HEAD', '--', 'src/renamed.ts', 'src/original.ts'],
 	]);
 });
+
+test('GitService getProjectReviewState returns granular unsupported reasons for review setup', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.getBranchRemote = async () => '';
+	let reviewState = await service.getProjectReviewState('/tmp/api', 'feature/task-42');
+	assert.equal(reviewState.remote, null);
+	assert.equal(reviewState.unsupportedReason, 'missing-remote');
+
+	service.getBranchRemote = async () => 'origin';
+	service.runGitFileCommandOptional = async () => 'not-a-supported-remote-url';
+	reviewState = await service.getProjectReviewState('/tmp/api', 'feature/task-42');
+	assert.equal(reviewState.remote, null);
+	assert.equal(reviewState.unsupportedReason, 'unrecognized-remote');
+
+	service.runGitFileCommandOptional = async () => 'https://bitbucket.example.com/acme/repo.git';
+	reviewState = await service.getProjectReviewState('/tmp/api', 'feature/task-42');
+	assert.equal(reviewState.remote?.supported, false);
+	assert.equal(reviewState.unsupportedReason, 'unsupported-provider');
+});

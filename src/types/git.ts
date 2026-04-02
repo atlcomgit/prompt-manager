@@ -8,6 +8,8 @@ export type GitOverlayReviewRequestState = 'open' | 'closed' | 'accepted';
 
 export type GitOverlayReviewSetupAction = 'install-and-auth' | 'auth';
 
+export type GitOverlayReviewUnsupportedReason = 'missing-remote' | 'unrecognized-remote' | 'unsupported-provider';
+
 export type GitOverlayActionKind = 'push' | 'review-request' | 'merge';
 
 export interface GitOverlayReviewComment {
@@ -49,6 +51,7 @@ export interface GitOverlayReviewState {
 	request: GitOverlayReviewRequest | null;
 	error: string;
 	setupAction: GitOverlayReviewSetupAction | null;
+	unsupportedReason?: GitOverlayReviewUnsupportedReason | null;
 }
 
 export interface GitOverlayCommit {

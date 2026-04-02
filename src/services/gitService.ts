@@ -22,6 +22,7 @@ import type {
 	GitOverlayReviewRemote,
 	GitOverlayReviewRequest,
 	GitOverlayReviewState,
+	GitOverlayReviewUnsupportedReason,
 	GitOverlaySnapshot,
 } from '../types/git.js';
 import type { Prompt } from '../types/prompt.js';
@@ -346,16 +347,19 @@ export class GitService {
 		};
 	}
 
-	private async getReviewRemote(projectPath: string, branchName: string): Promise<GitOverlayReviewRemote | null> {
+	private async resolveReviewRemoteContext(
+		projectPath: string,
+		branchName: string,
+	): Promise<{ remote: GitOverlayReviewRemote | null; unsupportedReason: GitOverlayReviewUnsupportedReason | null }> {
 		const remoteName = await this.getBranchRemote(projectPath, branchName);
 		if (!remoteName) {
-			return null;
+			return { remote: null, unsupportedReason: 'missing-remote' };
 		}
 
 		const remoteUrl = await this.runGitFileCommandOptional(projectPath, ['remote', 'get-url', remoteName]);
 		const parsed = parseGitOverlayRemoteUrl(remoteUrl);
 		if (!parsed) {
-			return null;
+			return { remote: null, unsupportedReason: 'unrecognized-remote' };
 		}
 
 		const cliAvailable = parsed.cliCommand
@@ -363,11 +367,19 @@ export class GitService {
 			: false;
 
 		return {
-			...parsed,
-			remoteName,
-			remoteUrl,
-			cliAvailable,
+			remote: {
+				...parsed,
+				remoteName,
+				remoteUrl,
+				cliAvailable,
+			},
+			unsupportedReason: parsed.supported ? null : 'unsupported-provider',
 		};
+	}
+
+	private async getReviewRemote(projectPath: string, branchName: string): Promise<GitOverlayReviewRemote | null> {
+		const { remote } = await this.resolveReviewRemoteContext(projectPath, branchName);
+		return remote;
 	}
 
 	private normalizeGitHubReviewComments(issueComments: unknown, reviewComments: unknown): GitOverlayReviewComment[] {
@@ -569,13 +581,13 @@ export class GitService {
 	}
 
 	private async getProjectReviewState(projectPath: string, branchName: string): Promise<GitOverlayReviewState> {
-		const remote = await this.getReviewRemote(projectPath, branchName);
+		const { remote, unsupportedReason } = await this.resolveReviewRemoteContext(projectPath, branchName);
 		if (!remote) {
-			return { remote: null, request: null, error: '', setupAction: null };
+			return { remote: null, request: null, error: '', setupAction: null, unsupportedReason };
 		}
 
 		if (!remote.supported) {
-			return { remote, request: null, error: '', setupAction: null };
+			return { remote, request: null, error: '', setupAction: null, unsupportedReason };
 		}
 
 		if (!remote.cliAvailable) {
@@ -584,12 +596,13 @@ export class GitService {
 				request: null,
 				error: '',
 				setupAction: 'install-and-auth',
+				unsupportedReason: null,
 			};
 		}
 
 		const cliCommand = remote.cliCommand;
 		if (cliCommand !== 'gh' && cliCommand !== 'glab') {
-			return { remote, request: null, error: '', setupAction: null };
+			return { remote, request: null, error: '', setupAction: null, unsupportedReason };
 		}
 
 		const authenticated = await this.isCliAuthenticated(cliCommand, projectPath, remote.host);
@@ -599,18 +612,20 @@ export class GitService {
 				request: null,
 				error: '',
 				setupAction: 'auth',
+				unsupportedReason: null,
 			};
 		}
 
 		try {
 			const request = await this.getExistingReviewRequest(projectPath, remote, branchName);
-			return { remote, request, error: '', setupAction: null };
+			return { remote, request, error: '', setupAction: null, unsupportedReason: null };
 		} catch (error) {
 			return {
 				remote,
 				request: null,
 				error: error instanceof Error ? error.message : String(error),
 				setupAction: null,
+				unsupportedReason: null,
 			};
 		}
 	}
@@ -1073,7 +1088,7 @@ export class GitService {
 					branches: [],
 					cleanupBranches: [],
 					changeGroups: { merge: [], staged: [], workingTree: [], untracked: [] },
-					review: { remote: null, request: null, error: '', setupAction: null },
+					review: { remote: null, request: null, error: '', setupAction: null, unsupportedReason: null },
 					recentCommits: [],
 					staleLocalBranches: [],
 					graph: { nodes: [], edges: [] },
@@ -1213,7 +1228,7 @@ export class GitService {
 				branches: [],
 				cleanupBranches: [],
 				changeGroups: { merge: [], staged: [], workingTree: [], untracked: [] },
-				review: { remote: null, request: null, error: '', setupAction: null },
+				review: { remote: null, request: null, error: '', setupAction: null, unsupportedReason: null },
 				recentCommits: [],
 				staleLocalBranches: [],
 				graph: { nodes: [], edges: [] },

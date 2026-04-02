@@ -1066,7 +1066,7 @@ test('GitOverlay shows no-changes status for clean tracked projects and keeps sw
 	assert.equal(markup.match(/<option value="main"[^>]*>main<\/option>/g)?.length || 0, 4);
 	assert.equal(markup.match(/<option value="feature\/task-42"[^>]*>feature\/task-42<\/option>/g)?.length || 0, 2);
 	assert.doesNotMatch(markup, /min-width:1060px/);
-	assert.match(markup, /<span style="font-size:12px;font-weight:600;text-align:center;word-break:break-word;color:var\(--vscode-badge-background\)">editor\.gitOverlayStateNoChanges<\/span>/);
+	assert.match(markup, /<span style="font-size:12px;font-weight:600;text-align:center;word-break:break-word;color:black">editor\.gitOverlayStateNoChanges<\/span>/);
 	assert.match(markup, /<button[^>]*disabled[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
 });
 
@@ -1244,6 +1244,117 @@ test('GitOverlay renders project discard action before the changes toggle in ste
 	}));
 
 	assert.match(markup, /editor\.gitOverlayDiscardProjectChanges[\s\S]*editor\.gitOverlayShowChanges/);
+});
+
+test('GitOverlay shows specific review unsupported reasons per project', () => {
+	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
+		open: true,
+		mode: 'default',
+		snapshot: {
+			generatedAt: '2026-04-02T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				{
+					project: 'missing-remote',
+					repositoryPath: '/tmp/missing-remote',
+					available: true,
+					error: '',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: false,
+					hasConflicts: false,
+					upstream: 'origin/feature/task-42',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [],
+					cleanupBranches: [],
+					changeGroups: { merge: [], staged: [], workingTree: [], untracked: [] },
+					review: {
+						remote: null,
+						request: null,
+						error: '',
+						setupAction: null,
+						unsupportedReason: 'missing-remote',
+					},
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: { nodes: [], edges: [] },
+				},
+				{
+					project: 'unsupported-provider',
+					repositoryPath: '/tmp/unsupported-provider',
+					available: true,
+					error: '',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: false,
+					hasConflicts: false,
+					upstream: 'origin/feature/task-42',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [],
+					cleanupBranches: [],
+					changeGroups: { merge: [], staged: [], workingTree: [], untracked: [] },
+					review: {
+						remote: {
+							provider: 'unknown',
+							host: 'bitbucket.example.com',
+							remoteName: 'origin',
+							remoteUrl: 'https://bitbucket.example.com/acme/repo.git',
+							repositoryPath: 'acme/repo',
+							owner: 'acme',
+							name: 'repo',
+							supported: false,
+							cliCommand: '',
+							cliAvailable: false,
+							actionLabel: 'Review request',
+						},
+						request: null,
+						error: '',
+						setupAction: null,
+						unsupportedReason: 'unsupported-provider',
+					},
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: { nodes: [], edges: [] },
+				},
+			],
+		},
+		commitMessages: {},
+		busyAction: null,
+		completedActions: { push: true, 'review-request': false, merge: false },
+		promptStatus: 'report',
+		promptTitle: '',
+		promptTaskNumber: '',
+		preferredTrackedBranch: 'main',
+		onClose: () => { },
+		onDone: () => { },
+		onRefresh: () => { },
+		onSwitchBranch: () => { },
+		onEnsurePromptBranch: () => { },
+		onPush: () => { },
+		onCreateReviewRequest: () => { },
+		onMergePromptBranch: () => { },
+		onDiscardFile: () => { },
+		onOpenFile: () => { },
+		onOpenDiff: () => { },
+		onOpenReviewRequest: () => { },
+		onSetupReviewCli: () => { },
+		onOpenMergeEditor: () => { },
+		onGenerateCommitMessage: () => { },
+		onCommitStaged: () => { },
+		onCommitMessageChange: () => { },
+		onTrackedBranchChange: () => { },
+		onContinueStartChat: () => { },
+		onContinueOpenChat: () => { },
+		t: (key: string) => key,
+	}));
+
+	assert.match(markup, /editor\.gitOverlayReviewRequestMissingRemoteProject/);
+	assert.match(markup, /editor\.gitOverlayReviewRequestUnsupportedProject/);
 });
 
 test('formatChangeSize formats bytes into compact localized values', () => {

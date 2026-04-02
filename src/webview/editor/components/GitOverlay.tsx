@@ -8,6 +8,7 @@ import type {
 	GitOverlayProjectReviewRequestInput,
 	GitOverlayReviewCliSetupRequest,
 	GitOverlayProjectSnapshot,
+	GitOverlayReviewUnsupportedReason,
 	GitOverlaySnapshot,
 } from '../../../types/git';
 import type { PromptStatus } from '../../../types/prompt';
@@ -495,6 +496,19 @@ function resolveReviewRequestStateLabel(project: GitOverlayProjectSnapshot, t: (
 		return t('editor.gitOverlayReviewRequestClosed');
 	}
 	return t('editor.gitOverlayReviewRequestOpen');
+}
+
+function resolveReviewUnsupportedProjectMessage(
+	unsupportedReason: GitOverlayReviewUnsupportedReason | null | undefined,
+	t: (key: string) => string,
+): string {
+	if (unsupportedReason === 'missing-remote') {
+		return t('editor.gitOverlayReviewRequestMissingRemoteProject');
+	}
+	if (unsupportedReason === 'unrecognized-remote') {
+		return t('editor.gitOverlayReviewRequestUnknownRemoteProject');
+	}
+	return t('editor.gitOverlayReviewRequestUnsupportedProject');
 }
 
 const ChevronIcon: React.FC<{ collapsed: boolean; disabled?: boolean }> = ({ collapsed, disabled = false }) => (
@@ -1855,6 +1869,9 @@ export const GitOverlay: React.FC<Props> = ({
 										};
 										const hasRequest = Boolean(project.review.request);
 										const hasSetupAction = Boolean(project.review.setupAction);
+											const unsupportedReviewMessage = (!project.review.remote?.supported || project.review.unsupportedReason)
+												? resolveReviewUnsupportedProjectMessage(project.review.unsupportedReason, t)
+												: '';
 										const isCreatingReviewRequest = busyAction === `createReviewRequest:${project.project}` || busyAction === 'createReviewRequest:all';
 										const canCreateReviewRequest = Boolean(project.review.remote?.supported)
 											&& Boolean(project.review.remote?.cliAvailable)
@@ -1886,7 +1903,7 @@ export const GitOverlay: React.FC<Props> = ({
 													) : null}
 												</div>
 
-												{!project.review.remote?.supported ? <InlineHint message={t('editor.gitOverlayReviewRequestUnsupportedProject')} tone="info" /> : null}
+														{unsupportedReviewMessage ? <InlineHint message={unsupportedReviewMessage} tone="info" /> : null}
 												{project.review.setupAction === 'install-and-auth' ? (
 													<InlineHint
 														message={t('editor.gitOverlayReviewRequestMissingCli').replace('{cli}', project.review.remote?.cliCommand || 'CLI')}
@@ -2715,16 +2732,16 @@ const styles: Record<string, CSSProperties> = {
 		wordBreak: 'break-word',
 	},
 	projectStatusTextOk: {
-		color: 'var(--vscode-inputValidation-infoBackground)',
+		color: 'green',
 	},
 	projectStatusTextError: {
-		color: 'var(--vscode-inputValidation-errorBackground)',
+		color: 'red',
 	},
 	projectStatusTextMuted: {
-		color: 'var(--vscode-badge-background)',
+		color: 'black',
 	},
 	projectStatusTextInfo: {
-		color: 'var(--vscode-inputValidation-infoBackground)',
+		color: 'black',
 	},
 	projectChangesWrap: {
 		display: 'flex',

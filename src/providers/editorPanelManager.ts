@@ -4792,6 +4792,20 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'gitOverlayDiscardProjectChanges': {
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				const result = await this.gitService.discardProjectChanges(
+					this.workspaceService.getWorkspaceFolderPaths(),
+					msg.project,
+					msg.changes,
+				);
+				if (result.errors.length > 0) {
+					postMessage({ type: 'error', message: this.describeGitMultiProjectResult(result, `Не удалось отменить изменения в проекте ${msg.project}`) });
+				}
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, msg.projects);
+				break;
+			}
+
 			case 'gitOverlayLoadFileHistory': {
 				const history = await this.gitService.getFileHistoryPayload(this.workspaceService.getWorkspaceFolderPaths(), msg.project, msg.filePath);
 				postMessage({ type: 'gitOverlayFileHistory', history });

@@ -102,3 +102,93 @@ test('GitService applyBranchTargetsByProject pulls source branch and existing ex
 		['pull', '--ff-only'],
 	]);
 });
+
+test('GitService discardProjectChanges applies each git restore strategy once per unique file', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const calls: string[][] = [];
+
+	service.runGitFileMutation = async (_projectPath: string, args: string[]) => {
+		calls.push(args);
+	};
+
+	const result = await service.discardProjectChanges(
+		new Map([['api', '/tmp/api']]),
+		'api',
+		[
+			{
+				project: 'api',
+				path: 'src/staged.ts',
+				status: 'M',
+				previousPath: '',
+				group: 'staged',
+				conflicted: false,
+				staged: true,
+				isBinary: false,
+				additions: 1,
+				deletions: 0,
+				fileSizeBytes: 100,
+			},
+			{
+				project: 'api',
+				path: 'src/staged.ts',
+				status: 'M',
+				previousPath: '',
+				group: 'staged',
+				conflicted: false,
+				staged: true,
+				isBinary: false,
+				additions: 1,
+				deletions: 0,
+				fileSizeBytes: 100,
+			},
+			{
+				project: 'api',
+				path: 'src/working.ts',
+				status: 'M',
+				previousPath: '',
+				group: 'working-tree',
+				conflicted: false,
+				staged: false,
+				isBinary: false,
+				additions: 2,
+				deletions: 1,
+				fileSizeBytes: 120,
+			},
+			{
+				project: 'api',
+				path: 'src/new-file.ts',
+				status: 'A',
+				previousPath: '',
+				group: 'untracked',
+				conflicted: false,
+				staged: false,
+				isBinary: false,
+				additions: 0,
+				deletions: 0,
+				fileSizeBytes: 90,
+			},
+			{
+				project: 'api',
+				path: 'src/renamed.ts',
+				status: 'R',
+				previousPath: 'src/original.ts',
+				group: 'merge',
+				conflicted: false,
+				staged: true,
+				isBinary: false,
+				additions: 0,
+				deletions: 0,
+				fileSizeBytes: 110,
+			},
+		],
+	);
+
+	assert.equal(result.success, true);
+	assert.deepEqual(calls, [
+		['restore', '--staged', '--source=HEAD', '--', 'src/staged.ts'],
+		['restore', '--worktree', '--source=HEAD', '--', 'src/working.ts'],
+		['clean', '-fd', '--', 'src/new-file.ts'],
+		['restore', '--staged', '--worktree', '--source=HEAD', '--', 'src/renamed.ts', 'src/original.ts'],
+	]);
+});

@@ -10,6 +10,7 @@ import { promisify } from 'util';
 import type { CodeMapRefDiffEntry } from '../types/codemap.js';
 import type {
 	GitOverlayChangeGroup,
+	GitOverlayChangeFile,
 	GitOverlayBranchInfo,
 	GitOverlayCommit,
 	GitOverlayFileHistoryEntry,
@@ -2136,6 +2137,34 @@ export class GitService {
 		});
 	}
 
+	private async discardProjectChange(
+		projectPath: string,
+		filePath: string,
+		group: GitOverlayChangeGroup,
+		previousPath?: string,
+	): Promise<void> {
+		const affectedPaths = previousPath && previousPath !== filePath
+			? [filePath, previousPath]
+			: [filePath];
+
+		if (group === 'untracked') {
+			await this.runGitFileMutation(projectPath, ['clean', '-fd', '--', ...affectedPaths]);
+			return;
+		}
+
+		if (group === 'staged') {
+			await this.runGitFileMutation(projectPath, ['restore', '--staged', '--source=HEAD', '--', ...affectedPaths]);
+			return;
+		}
+
+		if (group === 'working-tree') {
+			await this.runGitFileMutation(projectPath, ['restore', '--worktree', '--source=HEAD', '--', ...affectedPaths]);
+			return;
+		}
+
+		await this.runGitFileMutation(projectPath, ['restore', '--staged', '--worktree', '--source=HEAD', '--', ...affectedPaths]);
+	}
+
 	async discardFile(
 		projectPaths: Map<string, string>,
 		projectName: string,
@@ -2148,22 +2177,32 @@ export class GitService {
 			: [filePath];
 
 		return this.runProjectMutation(projectPaths, [projectName], async (_project, projectPath) => {
-			if (group === 'untracked') {
-				await this.runGitFileMutation(projectPath, ['clean', '-fd', '--', ...affectedPaths]);
-				return;
+			await this.discardProjectChange(projectPath, affectedPaths[0], group, affectedPaths[1]);
+		});
+	}
+
+	async discardProjectChanges(
+		projectPaths: Map<string, string>,
+		projectName: string,
+		changes: GitOverlayChangeFile[],
+	): Promise<GitMultiProjectResult> {
+		const normalizedChanges = changes.filter(change => Boolean(change.path.trim()));
+		const uniqueChanges = Array.from(new Map(
+			normalizedChanges.map(change => {
+				const previousPath = (change.previousPath || '').trim();
+				const key = [change.group, change.path.trim(), previousPath, change.status.trim()].join('::');
+				return [key, change] as const;
+			}),
+		).values());
+
+		return this.runProjectMutation(projectPaths, [projectName], async (_project, projectPath) => {
+			if (uniqueChanges.length === 0) {
+				return false;
 			}
 
-			if (group === 'staged') {
-				await this.runGitFileMutation(projectPath, ['restore', '--staged', '--source=HEAD', '--', ...affectedPaths]);
-				return;
+			for (const change of uniqueChanges) {
+				await this.discardProjectChange(projectPath, change.path, change.group, change.previousPath);
 			}
-
-			if (group === 'working-tree') {
-				await this.runGitFileMutation(projectPath, ['restore', '--worktree', '--source=HEAD', '--', ...affectedPaths]);
-				return;
-			}
-
-			await this.runGitFileMutation(projectPath, ['restore', '--staged', '--worktree', '--source=HEAD', '--', ...affectedPaths]);
 		});
 	}
 

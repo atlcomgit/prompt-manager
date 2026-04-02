@@ -17,7 +17,6 @@ import {
 	collectGitOverlayDefaultStepBranchMismatches,
 	collectGitOverlayProjectsNeedingSync,
 	collectGitOverlayStartChatBranchMismatches,
-	isGitOverlayDefaultStepBranchAllowed,
 	isGitOverlayStartChatBranchAllowed,
 	resolveGitOverlayTrackedBranchOptions,
 	resolveGitOverlayDoneStatus,
@@ -46,10 +45,11 @@ type Props = {
 	) => void;
 	onSwitchBranch?: (trackedBranchesByProject: Record<string, string>) => void;
 	onEnsurePromptBranch: (trackedBranchesByProject: Record<string, string>) => void;
-	onPush: (branch?: string) => void;
+	onPush: (branch?: string, projects?: string[]) => void;
 	onCreateReviewRequest: (requests: GitOverlayProjectReviewRequestInput[]) => void;
-	onMergePromptBranch: (trackedBranchesByProject: Record<string, string>, stayOnTrackedBranch: boolean) => void;
+	onMergePromptBranch: (trackedBranchesByProject: Record<string, string>, stayOnTrackedBranch: boolean, projects?: string[]) => void;
 	onDiscardFile: (project: string, filePath: string, group: GitOverlayChangeFile['group'], previousPath?: string) => void;
+	onDiscardProjectChanges?: (project: string, changes: GitOverlayChangeFile[]) => void;
 	onOpenFile: (project: string, filePath: string) => void;
 	onOpenDiff: (project: string, filePath: string) => void;
 	onOpenReviewRequest: (url: string) => void;
@@ -96,6 +96,65 @@ function collectProjectChanges(project: GitOverlayProjectSnapshot): GitOverlayCh
 		...project.changeGroups.workingTree,
 		...project.changeGroups.untracked,
 	];
+}
+
+function buildGitOverlayChangeSelectionKey(
+	projectName: string,
+	change: Pick<GitOverlayChangeFile, 'group' | 'path' | 'status'>,
+): string {
+	return [projectName.trim(), change.group, change.path.trim(), change.status.trim()].join('::');
+}
+
+function findGitOverlayBranchInfo(
+	project: Pick<GitOverlayProjectSnapshot, 'branches'>,
+	branchName: string,
+): GitOverlayProjectSnapshot['branches'][number] | null {
+	const normalizedBranchName = branchName.trim();
+	if (!normalizedBranchName) {
+		return null;
+	}
+
+	return project.branches.find(branch => branch.name.trim() === normalizedBranchName) || null;
+}
+
+export function isGitOverlayPassivePromptProject<T extends Pick<GitOverlayProjectSnapshot, 'project' | 'available' | 'currentBranch' | 'branches'>>(
+	project: T,
+	promptBranch: string,
+	trackedBranch: string,
+): boolean {
+	if (!project.available) {
+		return false;
+	}
+
+	const normalizedPromptBranch = promptBranch.trim();
+	if (!normalizedPromptBranch || project.currentBranch.trim() !== normalizedPromptBranch) {
+		return false;
+	}
+
+	const normalizedTrackedBranch = trackedBranch.trim();
+	if (!normalizedTrackedBranch) {
+		return false;
+	}
+
+	const promptBranchInfo = findGitOverlayBranchInfo(project, normalizedPromptBranch);
+	const trackedBranchInfo = findGitOverlayBranchInfo(project, normalizedTrackedBranch);
+ if (!promptBranchInfo?.lastCommit || !trackedBranchInfo?.lastCommit) {
+		return false;
+	}
+
+	return promptBranchInfo.lastCommit.sha === trackedBranchInfo.lastCommit.sha;
+}
+
+export function resolveGitOverlayPostCommitProjects<T extends Pick<GitOverlayProjectSnapshot, 'project' | 'available' | 'currentBranch' | 'branches'>>(
+	projects: T[],
+	promptBranch: string,
+	trackedBranchesByProject: Record<string, string>,
+): T[] {
+	return projects.filter(project => !isGitOverlayPassivePromptProject(
+		project,
+		promptBranch,
+		trackedBranchesByProject[project.project] || '',
+	));
 }
 
 function normalizeTrackedBranchesByProject(value: Record<string, string> | undefined): Record<string, string> {
@@ -596,6 +655,7 @@ export const GitOverlay: React.FC<Props> = ({
 	onCreateReviewRequest,
 	onMergePromptBranch,
 	onDiscardFile,
+	onDiscardProjectChanges,
 	onOpenFile,
 	onOpenDiff,
 	onOpenReviewRequest,
@@ -611,6 +671,7 @@ export const GitOverlay: React.FC<Props> = ({
 }) => {
 	const [selectedTrackedBranchesByProject, setSelectedTrackedBranchesByProject] = useState<Record<string, string>>({});
 	const [selectedTargetBranchesByProject, setSelectedTargetBranchesByProject] = useState<Record<string, string>>({});
+	const [selectedChangeKey, setSelectedChangeKey] = useState('');
 	const [stayOnTrackedBranch, setStayOnTrackedBranch] = useState(true);
 	const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
 	const [collapsedSections, setCollapsedSections] = useState<Partial<Record<SectionKey, boolean>>>({});
@@ -681,25 +742,40 @@ export const GitOverlay: React.FC<Props> = ({
 		() => collectGitOverlayStartChatBranchMismatches(availableProjects, promptBranch, trackedBranchOptions),
 		[availableProjects, promptBranch, trackedBranchOptions],
 	);
-	const defaultStep1BranchMismatches = useMemo(
-		() => collectGitOverlayDefaultStepBranchMismatches(step1AvailableProjects, promptBranch, trackedBranchOptions),
-		[step1AvailableProjects, promptBranch, trackedBranchOptions],
-	);
 	const projectsWithChanges = useMemo(
 		() => flowAvailableProjects.filter(project => countProjectChanges(project) > 0),
 		[flowAvailableProjects],
 	);
+	const allowDirtyTrackedProjectsWithoutPromptBranch = !isChatPreflightMode
+		&& !promptBranch
+		&& projectsWithChanges.length > 0;
+	const defaultStep1BranchMismatches = useMemo(
+		() => allowDirtyTrackedProjectsWithoutPromptBranch
+			? collectGitOverlayStartChatBranchMismatches(projectsWithChanges, '', trackedBranchOptions)
+			: collectGitOverlayDefaultStepBranchMismatches(step1AvailableProjects, promptBranch, trackedBranchOptions),
+		[
+			allowDirtyTrackedProjectsWithoutPromptBranch,
+			projectsWithChanges,
+			promptBranch,
+			step1AvailableProjects,
+			trackedBranchOptions,
+		],
+	);
 	const totalChangedFiles = useMemo(
 		() => projectsWithChanges.reduce((sum, project) => sum + countProjectChanges(project), 0),
 		[projectsWithChanges],
+	);
+	const flowPostCommitProjects = useMemo(
+		() => resolveGitOverlayPostCommitProjects(flowAvailableProjects, promptBranch, resolvedTrackedBranchesByProject),
+		[flowAvailableProjects, promptBranch, resolvedTrackedBranchesByProject],
 	);
 	const step1ProjectsOffPromptBranch = useMemo(
 		() => step1AvailableProjects.filter(project => !promptBranch || project.currentBranch !== promptBranch),
 		[step1AvailableProjects, promptBranch],
 	);
 	const flowProjectsOffPromptBranch = useMemo(
-		() => flowAvailableProjects.filter(project => !promptBranch || project.currentBranch !== promptBranch),
-		[flowAvailableProjects, promptBranch],
+		() => flowPostCommitProjects.filter(project => !promptBranch || project.currentBranch !== promptBranch),
+		[flowPostCommitProjects, promptBranch],
 	);
 	const hasConflicts = useMemo(
 		() => projectsWithChanges.some(project => project.changeGroups.merge.length > 0),
@@ -707,8 +783,8 @@ export const GitOverlay: React.FC<Props> = ({
 	);
 	const allProjectsOnPromptBranch = Boolean(promptBranch) && step1AvailableProjects.length > 0 && step1ProjectsOffPromptBranch.length === 0;
 	const promptBranchProjects = useMemo(
-		() => flowAvailableProjects.filter(project => project.currentBranch === promptBranch),
-		[flowAvailableProjects, promptBranch],
+		() => flowPostCommitProjects.filter(project => project.currentBranch === promptBranch),
+		[flowPostCommitProjects, promptBranch],
 	);
 	const projectsNeedingSync = useMemo(
 		() => collectGitOverlayProjectsNeedingSync(step1AvailableProjects),
@@ -719,8 +795,8 @@ export const GitOverlay: React.FC<Props> = ({
 		[resolvedTrackedBranchesByProject, step1AvailableProjects],
 	);
 	const flowMissingTrackedBranchProjects = useMemo(
-		() => flowAvailableProjects.filter(project => !(resolvedTrackedBranchesByProject[project.project] || '').trim()),
-		[flowAvailableProjects, resolvedTrackedBranchesByProject],
+		() => flowPostCommitProjects.filter(project => !(resolvedTrackedBranchesByProject[project.project] || '').trim()),
+		[flowPostCommitProjects, resolvedTrackedBranchesByProject],
 	);
 	const step1ProjectsOffSelectedTrackedBranch = useMemo(
 		() => step1AvailableProjects.filter(project => {
@@ -735,6 +811,10 @@ export const GitOverlay: React.FC<Props> = ({
 	);
 	const step1ProjectsBlockedForApply = useMemo(
 		() => step1AvailableProjects.filter((project) => {
+			if (countProjectChanges(project) === 0) {
+				return false;
+			}
+
 			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
 			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
 			const needsSync = Boolean(project.upstream.trim()) && project.behind > 0;
@@ -753,6 +833,10 @@ export const GitOverlay: React.FC<Props> = ({
 	);
 	const step1ProjectsReadyForApply = useMemo(
 		() => step1AvailableProjects.filter((project) => {
+			if (countProjectChanges(project) === 0) {
+				return false;
+			}
+
 			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
 			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
 			const needsSync = Boolean(project.upstream.trim()) && project.behind > 0;
@@ -810,7 +894,11 @@ export const GitOverlay: React.FC<Props> = ({
 		for (const project of snapshot?.projects || []) {
 			const hasChanges = countProjectChanges(project) > 0;
 			const hasConflictsForProject = project.changeGroups.merge.length > 0;
-			const branchMismatch = project.available && (!promptBranch || project.currentBranch !== promptBranch);
+			const branchMismatch = project.available && (
+				promptBranch
+					? project.currentBranch !== promptBranch
+					: hasChanges && !isGitOverlayStartChatBranchAllowed(project.currentBranch, '', trackedBranchOptions)
+			);
 			const message = (commitMessages[project.project] || '').trim();
 			const needsMessage = project.available && hasChanges && !hasConflictsForProject && !branchMismatch && !message;
 			result.set(project.project, {
@@ -823,7 +911,7 @@ export const GitOverlay: React.FC<Props> = ({
 			});
 		}
 		return result;
-	}, [snapshot, commitMessages, promptBranch]);
+	}, [snapshot, commitMessages, promptBranch, trackedBranchOptions]);
 
 	const projectsReadyForGenerate = useMemo(
 		() => projectsWithChanges.filter(project => {
@@ -848,12 +936,22 @@ export const GitOverlay: React.FC<Props> = ({
 		&& step1ProjectsOffPromptBranch.length > 0
 		&& defaultStep1BranchMismatches.length === 0
 		&& step1AvailableProjects.every(project => trackedBranchOptions.includes(project.currentBranch));
+	const defaultStep1ReadyOnTrackedBranchesWithoutPrompt = !isChatPreflightMode
+		&& !promptBranch
+		&& projectsWithChanges.length > 0
+		&& defaultStep1BranchMismatches.length === 0;
 	const step1Pending = isChatPreflightMode
 		? !startChatBranchCheckDone || syncRequired
-		: !promptBranch || defaultStep1BranchMismatches.length > 0 || syncRequired;
+		: (allowDirtyTrackedProjectsWithoutPromptBranch
+			? defaultStep1BranchMismatches.length > 0 || syncRequired
+			: !promptBranch || defaultStep1BranchMismatches.length > 0 || syncRequired);
 	const shouldShowStep1Success = !step1Pending
-		&& (isChatPreflightMode ? startChatBranchCheckDone : (allProjectsOnPromptBranch || defaultStep1ReadyOnTrackedBranches));
-	const step1ResolvedSuccessMessage = isChatPreflightMode || defaultStep1ReadyOnTrackedBranches
+		&& (
+			isChatPreflightMode
+				? startChatBranchCheckDone
+				: (allProjectsOnPromptBranch || defaultStep1ReadyOnTrackedBranches || defaultStep1ReadyOnTrackedBranchesWithoutPrompt)
+		);
+	const step1ResolvedSuccessMessage = isChatPreflightMode || defaultStep1ReadyOnTrackedBranches || defaultStep1ReadyOnTrackedBranchesWithoutPrompt
 		? t('editor.gitOverlayStartChatBranchCheckReady')
 		: t('editor.gitOverlayAllProjectsOnPrompt');
 	const showDefaultFlowFollowUpSteps = !isChatPreflightMode && !isDraftPrompt;
@@ -870,6 +968,7 @@ export const GitOverlay: React.FC<Props> = ({
 	const canGenerateAllCommitMessages = projectsReadyForGenerate.length > 0;
 	const canCommitAllProjects = allChangedProjectsReadyForCommit;
 	const canAttemptPush = Boolean(promptBranch)
+		&& flowPostCommitProjects.length > 0
 		&& flowProjectsOffPromptBranch.length === 0
 		&& !hasConflicts
 		&& projectsWithChanges.length === 0;
@@ -891,7 +990,7 @@ export const GitOverlay: React.FC<Props> = ({
 		[resolvedTrackedBranchesByProject],
 	);
 	const canMerge = Boolean(promptBranch)
-		&& flowAvailableProjects.length > 0
+		&& flowPostCommitProjects.length > 0
 		&& flowMissingTrackedBranchProjects.length === 0
 		&& flowProjectsOffPromptBranch.length === 0
 		&& !hasConflicts
@@ -993,6 +1092,7 @@ export const GitOverlay: React.FC<Props> = ({
 		if (!open) {
 			setSelectedTrackedBranchesByProject({});
 			setSelectedTargetBranchesByProject({});
+			setSelectedChangeKey('');
 			lastSyncedTrackedBranchesRef.current = {};
 			return;
 		}
@@ -1007,6 +1107,25 @@ export const GitOverlay: React.FC<Props> = ({
 		window.addEventListener('keydown', handleKeyDown);
 		return () => window.removeEventListener('keydown', handleKeyDown);
 	}, [open, onClose]);
+
+	useEffect(() => {
+		if (!snapshot) {
+			setSelectedChangeKey('');
+			return;
+		}
+
+		if (!selectedChangeKey) {
+			return;
+		}
+
+		const hasSelectedChange = snapshot.projects.some(project => collectProjectChanges(project).some(
+			change => buildGitOverlayChangeSelectionKey(project.project, change) === selectedChangeKey,
+		));
+
+		if (!hasSelectedChange) {
+			setSelectedChangeKey('');
+		}
+	}, [selectedChangeKey, snapshot]);
 
 	const handleTrackedBranchSelection = useCallback((projectName: string, trackedBranch: string) => {
 		const normalizedTrackedBranch = trackedBranch.trim();
@@ -1043,6 +1162,25 @@ export const GitOverlay: React.FC<Props> = ({
 			return nextSelections;
 		});
 	}, []);
+
+	const handleSelectProjectChange = useCallback((projectName: string, change: GitOverlayChangeFile) => {
+		setSelectedChangeKey(buildGitOverlayChangeSelectionKey(projectName, change));
+	}, []);
+
+	const handleOpenProjectFile = useCallback((projectName: string, change: GitOverlayChangeFile) => {
+		handleSelectProjectChange(projectName, change);
+		onOpenFile(projectName, change.path);
+	}, [handleSelectProjectChange, onOpenFile]);
+
+	const handleOpenProjectDiff = useCallback((projectName: string, change: GitOverlayChangeFile) => {
+		handleSelectProjectChange(projectName, change);
+		onOpenDiff(projectName, change.path);
+	}, [handleSelectProjectChange, onOpenDiff]);
+
+	const handleOpenProjectMergeEditor = useCallback((projectName: string, change: GitOverlayChangeFile) => {
+		handleSelectProjectChange(projectName, change);
+		onOpenMergeEditor(projectName, change.path);
+	}, [handleSelectProjectChange, onOpenMergeEditor]);
 
 	const handleApplyProjectBranchTargets = useCallback((projectName: string) => {
 		const sourceBranch = (resolvedTrackedBranchesByProject[projectName] || '').trim();
@@ -1300,6 +1438,7 @@ export const GitOverlay: React.FC<Props> = ({
 									</div>
 									{step1Projects.map((project) => {
 											const currentBranch = project.currentBranch.trim();
+											const projectHasChanges = countProjectChanges(project) > 0;
 											const selectedTrackedBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
 											const selectedTargetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
 											const projectTrackedBranchOptions = buildProjectTrackedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
@@ -1307,15 +1446,19 @@ export const GitOverlay: React.FC<Props> = ({
 											const projectNeedsSync = project.available && Boolean(project.upstream.trim()) && project.behind > 0;
 											const rowOnPrompt = Boolean(promptBranch) && currentBranch === promptBranch && selectedTargetBranch === promptBranch;
 											const rowCanApply = project.available
+												&& projectHasChanges
 												&& !projectNeedsSync
 												&& Boolean(selectedTargetBranch)
 												&& (selectedTargetBranch !== promptBranch || Boolean(selectedTrackedBranch))
 												&& currentBranch !== selectedTargetBranch;
 											const rowNeedsDecision = project.available
+												&& projectHasChanges
 												&& !rowOnPrompt
 												&& (!selectedTrackedBranch || !selectedTargetBranch || projectNeedsSync || currentBranch !== selectedTargetBranch);
 											const rowStatusLabel = !project.available
 												? t('editor.gitOverlayStateUnavailable')
+												: !projectHasChanges
+													? t('editor.gitOverlayStateNoChanges')
 												: projectNeedsSync
 													? t('editor.gitOverlayStateNeedsSync')
 													: !selectedTrackedBranch
@@ -1331,6 +1474,15 @@ export const GitOverlay: React.FC<Props> = ({
 											const rowStyle = rowOnPrompt
 												? styles.projectTableRowSuccess
 												: (!project.available ? styles.projectTableRowMuted : rowNeedsDecision ? styles.projectTableRowDecision : null);
+											const rowStatusStyle = !project.available
+												? styles.projectStatusTextMuted
+												: !projectHasChanges
+													? styles.projectStatusTextMuted
+												: rowOnPrompt
+													? styles.projectStatusTextOk
+												: rowNeedsDecision
+													? styles.projectStatusTextError
+													: styles.projectStatusTextInfo;
 										return (
 											<div key={project.project} style={{
 												...styles.projectTableRow,
@@ -1381,14 +1533,8 @@ export const GitOverlay: React.FC<Props> = ({
 													<span style={styles.projectMetaCentered} title={buildProjectChangesSummary(project, t)}>{countProjectChanges(project)}</span>
 												<span style={styles.projectStateCell}>
 													<span style={{
-														...styles.statePill,
-														...(!project.available
-															? styles.statePillMuted
-															: rowOnPrompt
-																? styles.statePillOk
-																: rowNeedsDecision
-																	? styles.statePillError
-																	: styles.statePillInfo),
+														...styles.projectStatusText,
+														...rowStatusStyle,
 													}}>
 														{rowStatusLabel}
 														</span>
@@ -1467,15 +1613,25 @@ export const GitOverlay: React.FC<Props> = ({
 										const projectChanges = collectProjectChanges(project);
 										const isGeneratingProject = busyAction === `generateCommitMessage:${project.project}`;
 										const isCommittingProject = busyAction === `commitStaged:${project.project}`;
+											const isDiscardingProject = busyAction === `discardProject:${project.project}`;
 										const expanded = Boolean(expandedProjects[project.project]);
 										return (
 											<div key={project.project} style={styles.projectCard}>
 												<div style={styles.projectCardHeader}>
 													<div style={styles.projectCardTitleWrap}>
-														<div style={styles.projectCardTitle}>{project.project}</div>
-														<div style={styles.projectCardSummary}>{buildProjectChangesSummary(project, t)}</div>
+															<div style={styles.projectCardTitleLine}>
+																<div style={styles.projectCardTitle}>{project.project}</div>
+																<div style={styles.projectCardSummary}>{buildProjectChangesSummary(project, t)}</div>
+															</div>
 													</div>
 													<div style={styles.projectCardHeaderActions}>
+															<TextActionButton
+																label={t('editor.gitOverlayDiscardProjectChanges')}
+																onClick={() => onDiscardProjectChanges?.(project.project, projectChanges)}
+																tone="danger"
+																disabled={projectChanges.length === 0 || !onDiscardProjectChanges}
+																loading={isDiscardingProject}
+															/>
 														<button type="button" onClick={() => toggleProject(project.project)} style={styles.linkButton}>
 															{expanded ? t('editor.gitOverlayHideChanges') : t('editor.gitOverlayShowChanges')}
 														</button>
@@ -1488,13 +1644,17 @@ export const GitOverlay: React.FC<Props> = ({
 														<div style={styles.changeList}>
 															{projectChanges.map((change, index) => {
 																const isDiscarding = busyAction === `discardFile:${project.project}:${change.group}:${change.path}`;
+																const changeSelectionKey = buildGitOverlayChangeSelectionKey(project.project, change);
+																const isSelectedChange = changeSelectionKey === selectedChangeKey;
 
 																return (
 																	<div
 																		key={`${project.project}-${change.group}-${change.path}-${change.status}`}
+																		data-selected={isSelectedChange ? 'true' : undefined}
 																		style={{
 																			...styles.changeRow,
 																			...(index > 0 ? styles.changeRowBorderTop : null),
+																			...(isSelectedChange ? styles.changeRowSelected : null),
 																		}}
 																	>
 																		<div style={styles.changeInfo} title={change.previousPath ? `${change.previousPath} -> ${change.path}` : change.path}>
@@ -1504,8 +1664,11 @@ export const GitOverlay: React.FC<Props> = ({
 																			</div>
 																			<button
 																				type="button"
-																				onClick={() => onOpenDiff(project.project, change.path)}
-																				style={styles.changeInfoButton}
+																				onClick={() => handleOpenProjectDiff(project.project, change)}
+																				style={{
+																					...styles.changeInfoButton,
+																					...(isSelectedChange ? styles.changeInfoButtonSelected : null),
+																				}}
 																				disabled={isDiscarding}
 																			>
 																				<div style={styles.changePathGroup}>
@@ -1522,9 +1685,9 @@ export const GitOverlay: React.FC<Props> = ({
 																				tone="danger"
 																				loading={isDiscarding}
 																			/>
-																			<TextActionButton label={t('editor.gitOverlayOpenFile')} onClick={() => onOpenFile(project.project, change.path)} disabled={isDiscarding} />
-																			<TextActionButton label={t('editor.gitOverlayOpenDiff')} onClick={() => onOpenDiff(project.project, change.path)} disabled={isDiscarding} />
-																			{change.conflicted ? <TextActionButton label={t('editor.gitOverlayOpenMergeEditor')} onClick={() => onOpenMergeEditor(project.project, change.path)} disabled={isDiscarding} /> : null}
+																				<TextActionButton label={t('editor.gitOverlayOpenFile')} onClick={() => handleOpenProjectFile(project.project, change)} disabled={isDiscarding} />
+																				<TextActionButton label={t('editor.gitOverlayOpenDiff')} onClick={() => handleOpenProjectDiff(project.project, change)} disabled={isDiscarding} />
+																				{change.conflicted ? <TextActionButton label={t('editor.gitOverlayOpenMergeEditor')} onClick={() => handleOpenProjectMergeEditor(project.project, change)} disabled={isDiscarding} /> : null}
 																		</div>
 																	</div>
 																);
@@ -1541,9 +1704,10 @@ export const GitOverlay: React.FC<Props> = ({
 												<div style={styles.fieldBlock}>
 													<label style={styles.label}>{t('editor.gitOverlayCommit')}</label>
 													<textarea
+														disabled={!validation?.available || validation.branchMismatch || validation.hasConflicts}
 														style={{
 															...styles.textArea,
-															...(validation?.needsMessage ? styles.errorField : null),
+															...((!validation?.available || validation.branchMismatch || validation.hasConflicts) ? styles.textAreaDisabled : null),
 														}}
 														value={projectCommitMessage}
 														onChange={(event) => onCommitMessageChange(project.project, event.target.value)}
@@ -1632,7 +1796,7 @@ export const GitOverlay: React.FC<Props> = ({
 									{pushRequired ? (
 										<ActionButton
 											label={t('editor.gitOverlayPushPromptBranch')}
-											onClick={() => onPush(promptBranch)}
+														onClick={() => onPush(promptBranch, projectsNeedingPush.map(project => project.project))}
 											disabled={!canPush}
 											loading={isPushing}
 											variant="primary"
@@ -1880,7 +2044,11 @@ export const GitOverlay: React.FC<Props> = ({
 									{!completedActions.merge ? (
 										<ActionButton
 											label={t('editor.gitOverlayMergeNow')}
-											onClick={() => onMergePromptBranch(resolvedTrackedBranchesByProject, stayOnTrackedBranch)}
+												onClick={() => onMergePromptBranch(
+													resolvedTrackedBranchesByProject,
+													stayOnTrackedBranch,
+													promptBranchProjects.map(project => project.project),
+												)}
 											disabled={!canMerge}
 											loading={isMerging}
 											variant="primary"
@@ -2217,6 +2385,10 @@ const styles: Record<string, CSSProperties> = {
 		resize: 'vertical',
 		boxSizing: 'border-box',
 	},
+	textAreaDisabled: {
+		opacity: 0.6,
+		cursor: 'not-allowed',
+	},
 	errorField: {
 		borderColor: 'var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground))',
 		background: 'var(--vscode-inputValidation-errorBackground, var(--vscode-input-background))',
@@ -2490,12 +2662,18 @@ const styles: Record<string, CSSProperties> = {
 		minWidth: 0,
 		flex: 1,
 	},
+	projectCardTitleLine: {
+		display: 'flex',
+		alignItems: 'baseline',
+		gap: '8px',
+		flexWrap: 'wrap',
+		minWidth: 0,
+	},
 	projectCardTitle: {
 		fontSize: '13px',
 		fontWeight: 600,
 	},
 	projectCardSummary: {
-		marginTop: '4px',
 		fontSize: '12px',
 		color: 'var(--vscode-descriptionForeground)',
 		lineHeight: 1.5,
@@ -2511,6 +2689,8 @@ const styles: Record<string, CSSProperties> = {
 		display: 'flex',
 		alignItems: 'center',
 		justifyContent: 'flex-end',
+		gap: '12px',
+		flexWrap: 'wrap',
 		flexShrink: 0,
 	},
 	linkButton: {
@@ -2530,7 +2710,21 @@ const styles: Record<string, CSSProperties> = {
 	},
 	projectStatusText: {
 		fontSize: '12px',
-		color: 'var(--vscode-descriptionForeground)',
+		fontWeight: 600,
+		textAlign: 'center',
+		wordBreak: 'break-word',
+	},
+	projectStatusTextOk: {
+		color: 'var(--vscode-inputValidation-infoBackground)',
+	},
+	projectStatusTextError: {
+		color: 'var(--vscode-inputValidation-errorBackground)',
+	},
+	projectStatusTextMuted: {
+		color: 'var(--vscode-badge-background)',
+	},
+	projectStatusTextInfo: {
+		color: 'var(--vscode-inputValidation-infoBackground)',
 	},
 	projectChangesWrap: {
 		display: 'flex',
@@ -2566,6 +2760,11 @@ const styles: Record<string, CSSProperties> = {
 		gap: '12px',
 		padding: '7px 8px',
 		background: 'transparent',
+		borderRadius: '4px',
+	},
+	changeRowSelected: {
+		background: 'color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 34%, transparent)',
+		boxShadow: 'inset 0 0 0 1px var(--vscode-focusBorder)',
 	},
 	changeRowBorderTop: {
 		borderTop: '1px solid var(--vscode-panel-border)',
@@ -2592,6 +2791,9 @@ const styles: Record<string, CSSProperties> = {
 		cursor: 'pointer',
 		textAlign: 'left',
 		fontFamily: 'var(--vscode-font-family)',
+	},
+	changeInfoButtonSelected: {
+		color: 'var(--vscode-foreground)',
 	},
 	changeBadges: {
 		display: 'inline-flex',

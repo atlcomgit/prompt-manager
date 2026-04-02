@@ -3,7 +3,7 @@
  */
 
 import type { Prompt, PromptConfig, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
-import type { GitOverlayActionKind, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
+import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 
 // ---- Messages FROM webview TO extension ----
 
@@ -51,6 +51,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'gitOverlayStageFile'; promptBranch: string; projects: string[]; project: string; filePath: string }
 	| { type: 'gitOverlayUnstageFile'; promptBranch: string; projects: string[]; project: string; filePath: string }
 	| { type: 'gitOverlayDiscardFile'; promptBranch: string; projects: string[]; project: string; filePath: string; previousPath?: string; group: GitOverlayChangeGroup }
+	| { type: 'gitOverlayDiscardProjectChanges'; promptBranch: string; projects: string[]; project: string; changes: GitOverlayChangeFile[] }
 	| { type: 'gitOverlayLoadFileHistory'; project: string; filePath: string }
 	| { type: 'gitOverlayOpenFile'; project: string; filePath: string }
 	| { type: 'gitOverlayOpenDiff'; project: string; filePath: string }

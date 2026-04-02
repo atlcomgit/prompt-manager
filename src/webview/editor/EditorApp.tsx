@@ -16,7 +16,7 @@ import { TimerDisplay } from './components/TimerDisplay';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
 import type { Prompt, PromptStatus } from '../../types/prompt';
-import type { GitOverlayActionKind, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
+import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
 import { createDefaultPrompt } from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
 import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
@@ -1654,14 +1654,18 @@ export const EditorApp: React.FC = () => {
     });
   }, [prompt.branch, prompt.projects]);
 
-  const handleGitOverlayMergePromptBranch = useCallback((trackedBranchesByProject: Record<string, string>, stayOnTrackedBranch: boolean) => {
+  const handleGitOverlayMergePromptBranch = useCallback((
+    trackedBranchesByProject: Record<string, string>,
+    stayOnTrackedBranch: boolean,
+    projects?: string[],
+  ) => {
     const normalizedTrackedBranchesByProject = normalizeTrackedBranchesByProject(trackedBranchesByProject);
     const trackedBranch = resolveSingleTrackedBranch(normalizedTrackedBranchesByProject);
     setGitOverlayBusyAction('mergePromptBranch');
     vscode.postMessage({
       type: 'gitOverlayMergePromptBranch',
       promptBranch: prompt.branch.trim(),
-      projects: prompt.projects,
+      projects: (projects && projects.length > 0 ? projects : prompt.projects),
       trackedBranch,
       trackedBranchesByProject: normalizedTrackedBranchesByProject,
       stayOnTrackedBranch,
@@ -1695,12 +1699,12 @@ export const EditorApp: React.FC = () => {
     });
   }, [prompt.branch, prompt.projects, t]);
 
-  const handleGitOverlayPush = useCallback((branch?: string) => {
+  const handleGitOverlayPush = useCallback((branch?: string, projects?: string[]) => {
     setGitOverlayBusyAction('pushPromptBranch');
     vscode.postMessage({
       type: 'gitOverlayPush',
       promptBranch: prompt.branch.trim(),
-      projects: prompt.projects,
+      projects: (projects && projects.length > 0 ? projects : prompt.projects),
       branch,
     });
   }, [prompt.branch, prompt.projects]);
@@ -1771,6 +1775,17 @@ export const EditorApp: React.FC = () => {
       filePath,
       previousPath,
       group,
+    });
+  }, [prompt.branch, prompt.projects]);
+
+  const handleGitOverlayDiscardProjectChanges = useCallback((project: string, changes: GitOverlayChangeFile[]) => {
+    setGitOverlayBusyAction(`discardProject:${project}`);
+    vscode.postMessage({
+      type: 'gitOverlayDiscardProjectChanges',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      project,
+      changes,
     });
   }, [prompt.branch, prompt.projects]);
 
@@ -2851,6 +2866,7 @@ export const EditorApp: React.FC = () => {
         onCreateReviewRequest={handleGitOverlayCreateReviewRequest}
         onMergePromptBranch={handleGitOverlayMergePromptBranch}
         onDiscardFile={handleGitOverlayDiscardFile}
+        onDiscardProjectChanges={handleGitOverlayDiscardProjectChanges}
         onOpenFile={handleGitOverlayOpenFile}
         onOpenDiff={handleGitOverlayOpenDiff}
         onOpenReviewRequest={handleGitOverlayOpenReviewRequest}

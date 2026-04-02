@@ -33,6 +33,8 @@ interface SelectOption {
 
 type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' | 'tech' | 'integrations' | 'agent' | 'files' | 'time';
 type InlineNotice = { kind: 'error' | 'info'; message: string };
+type ChatEntryAction = 'start' | 'open';
+type GitOverlayMode = 'default' | 'start-chat-preflight' | 'open-chat-preflight';
 
 const CHAT_START_TIMEOUT_MS = 15000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
@@ -144,6 +146,7 @@ export const EditorApp: React.FC = () => {
   const showLoaderTimerRef = useRef<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingChat, setIsStartingChat] = useState(false);
+  const [pendingExternalStartChatPromptId, setPendingExternalStartChatPromptId] = useState<string | null>(null);
   const [isChatPanelOpen, setIsChatPanelOpen] = useState(false);
   const [workspaceFolders, setWorkspaceFolders] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<SelectOption[]>([]);
@@ -159,6 +162,7 @@ export const EditorApp: React.FC = () => {
   const [branchesResolved, setBranchesResolved] = useState(false);
   const [showBranches, setShowBranches] = useState(false);
   const [gitOverlayOpen, setGitOverlayOpen] = useState(false);
+  const [gitOverlayMode, setGitOverlayMode] = useState<GitOverlayMode>('default');
   const [gitOverlaySnapshot, setGitOverlaySnapshot] = useState<GitOverlaySnapshot | null>(null);
   const [gitOverlayFileHistory, setGitOverlayFileHistory] = useState<GitOverlayFileHistoryPayload | null>(null);
   const [gitOverlayCommitMessages, setGitOverlayCommitMessages] = useState<Record<string, string>>({});
@@ -188,12 +192,17 @@ export const EditorApp: React.FC = () => {
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
-  const shouldShowFooterGitFlow = prompt.status === 'completed' || prompt.status === 'report' || prompt.status === 'review';
+  const shouldShowFooterGitFlow = prompt.status === 'draft' || prompt.status === 'completed' || prompt.status === 'report' || prompt.status === 'review';
   const shouldDockGitOverlaySecondHalf = pageWidth >= EDITOR_FORM_SHELL_WIDTH_PX * 2;
   const startChatLockRef = useRef(false);
   const chatStartTimeoutRef = useRef<number | null>(null);
   const pendingChatStartRequestIdRef = useRef<string>('');
   const acceptedChatStartRequestIdRef = useRef<string>('');
+  const pendingChatStartPreflightRequestIdRef = useRef<string>('');
+  const pendingGitOverlayStartChatRequestIdRef = useRef<string>('');
+  const pendingChatPreflightActionRef = useRef<ChatEntryAction | ''>('');
+  const handleStartChatRef = useRef<() => void>(() => undefined);
+  const handleOpenChatRef = useRef<() => void>(() => undefined);
   const globalContextTextareaRef = useRef<HTMLTextAreaElement>(null);
   const saveTimeoutRef = useRef<number | null>(null);
   const currentPromptIdRef = useRef<string>('__new__');
@@ -252,6 +261,12 @@ export const EditorApp: React.FC = () => {
     acceptedChatStartRequestIdRef.current = '';
   }, []);
 
+  const resetStartChatPreflightTracking = useCallback(() => {
+    pendingChatStartPreflightRequestIdRef.current = '';
+    pendingGitOverlayStartChatRequestIdRef.current = '';
+    pendingChatPreflightActionRef.current = '';
+  }, []);
+
   const shouldHandleChatStartMessage = useCallback((requestId?: string): boolean => {
     const normalizedRequestId = (requestId || '').trim();
     if (!normalizedRequestId) {
@@ -304,6 +319,112 @@ export const EditorApp: React.FC = () => {
     clearChatStartTimeout();
     chatStartTimeoutRef.current = window.setTimeout(handleChatStartTimeout, CHAT_START_TIMEOUT_MS);
   }, [clearChatStartTimeout, handleChatStartTimeout]);
+
+  const buildPromptForSaveFrom = useCallback((basePrompt: Prompt): Prompt => {
+    const timeSpent = Date.now() - openedAtRef.current;
+    const updatedPrompt = applyElapsedTimeByContext(basePrompt, timeSpent);
+    openedAtRef.current = Date.now();
+    return updatedPrompt;
+  }, []);
+
+  const buildPromptForSave = useCallback((): Prompt => buildPromptForSaveFrom(promptRef.current), [buildPromptForSaveFrom]);
+
+  const createStartChatRequestId = useCallback(
+    (): string => `start-chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    [],
+  );
+
+  const closeGitOverlay = useCallback(() => {
+    setGitOverlayOpen(false);
+    setGitOverlayMode('default');
+    resetStartChatPreflightTracking();
+  }, [resetStartChatPreflightTracking]);
+
+  const dispatchStartChat = useCallback((requestId: string, options?: { skipBranchMismatchCheck?: boolean }) => {
+    const latestPrompt = promptRef.current;
+    const originalStatus = latestPrompt.status;
+    const shouldForceRebindChat = latestPrompt.status === 'draft';
+    if (!latestPrompt.content || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)) {
+      return;
+    }
+
+    pendingChatStartRequestIdRef.current = requestId;
+    acceptedChatStartRequestIdRef.current = '';
+    pendingChatStartPreflightRequestIdRef.current = '';
+    pendingGitOverlayStartChatRequestIdRef.current = '';
+    setNotice(null);
+    setIsChatPanelOpen(false);
+    hasBeenSavedRef.current = true;
+
+    const updatedPrompt = {
+      ...buildPromptForSave(),
+      status: 'in-progress' as const,
+      chatSessionIds: shouldForceRebindChat ? [] : latestPrompt.chatSessionIds,
+    };
+
+    startChatLockRef.current = true;
+    setIsStartingChat(true);
+    scheduleChatStartTimeout();
+    vscode.postMessage({
+      type: 'startChat',
+      id: updatedPrompt.id || '__new__',
+      prompt: updatedPrompt,
+      forceRebindChat: shouldForceRebindChat,
+      requestId,
+      skipBranchMismatchCheck: options?.skipBranchMismatchCheck === true,
+      originalStatus,
+    });
+  }, [buildPromptForSave, scheduleChatStartTimeout]);
+
+  const continueOpenChat = useCallback(() => {
+    const latestPrompt = promptRef.current;
+
+    if (latestPrompt.status !== 'in-progress') {
+      const promptToSave = { ...buildPromptForSaveFrom(latestPrompt), status: 'in-progress' as const };
+      promptRef.current = promptToSave;
+      setPrompt(promptToSave);
+      if (hasBeenSavedRef.current || promptToSave.id) {
+        activeSaveIdRef.current = (promptToSave.id || latestPrompt.id || '__new__').trim() || '__new__';
+        setIsSaving(true);
+        setIsDirty(false);
+        vscode.postMessage({ type: 'savePrompt', prompt: promptToSave, source: 'status-change' });
+      }
+    }
+
+    if (latestPrompt.id && latestPrompt.chatSessionIds.length > 0) {
+      vscode.postMessage({ type: 'openChat', id: latestPrompt.id, sessionId: latestPrompt.chatSessionIds[0] });
+      return;
+    }
+
+    vscode.postMessage({ type: 'openChatPanel' });
+  }, [buildPromptForSaveFrom]);
+
+  const requestChatEntryPreflight = useCallback((action: ChatEntryAction): string | null => {
+    const latestPrompt = promptRef.current;
+    const shouldRunBranchPreflight = latestPrompt.projects.length > 0
+      && Boolean((latestPrompt.branch || '').trim());
+
+    if (!shouldRunBranchPreflight) {
+      return null;
+    }
+
+    const requestId = createStartChatRequestId();
+    pendingChatStartPreflightRequestIdRef.current = requestId;
+    pendingGitOverlayStartChatRequestIdRef.current = '';
+    pendingChatPreflightActionRef.current = action;
+    startChatLockRef.current = true;
+    setIsStartingChat(true);
+    setNotice(null);
+    setIsChatPanelOpen(false);
+    vscode.postMessage({
+      type: 'startChatPreflight',
+      id: latestPrompt.id || '__new__',
+      prompt: latestPrompt,
+      forceRebindChat: action === 'start' && latestPrompt.status === 'draft',
+      requestId,
+    });
+    return requestId;
+  }, [createStartChatRequestId]);
 
   const targetBranch = prompt.branch.trim();
 
@@ -570,12 +691,14 @@ export const EditorApp: React.FC = () => {
         startChatLockRef.current = false;
         setIsStartingChat(false);
         resetChatStartRequestTracking();
+        resetStartChatPreflightTracking();
         setIsLoaded(false);
         setIsChatPanelOpen(false);
         setNotice(null);
         setIsGeneratingTitle(false);
         setIsGeneratingDescription(false);
         setGitOverlayOpen(false);
+        setGitOverlayMode('default');
         setGitOverlaySnapshot(null);
         setGitOverlayFileHistory(null);
         setGitOverlayCommitMessages({});
@@ -615,6 +738,8 @@ export const EditorApp: React.FC = () => {
             setIsGeneratingDescription(false);
             setNotice(null);
             setGitOverlayOpen(false);
+            setGitOverlayMode('default');
+            resetStartChatPreflightTracking();
             setGitOverlaySnapshot(null);
             setGitOverlayFileHistory(null);
             setGitOverlayCommitMessages({});
@@ -899,6 +1024,60 @@ export const EditorApp: React.FC = () => {
       case 'globalContext':
         setGlobalContext(msg.context || '');
         break;
+      case 'triggerStartChat':
+        {
+          const targetPromptId = (msg.promptId || currentPromptIdRef.current || '__new__').trim() || '__new__';
+          const currentPromptId = (currentPromptIdRef.current || '__new__').trim() || '__new__';
+          if (isLoaded && targetPromptId === currentPromptId) {
+            handleStartChatRef.current();
+            break;
+          }
+
+          setPendingExternalStartChatPromptId(targetPromptId);
+        }
+        break;
+      case 'startChatPreflightResult':
+        {
+          const requestId = (msg.requestId || '').trim();
+          const matchesPreflightRequest = requestId === pendingChatStartPreflightRequestIdRef.current;
+          const matchesStartRequest = requestId === pendingChatStartRequestIdRef.current;
+          if (requestId && !matchesPreflightRequest && !matchesStartRequest) {
+            break;
+          }
+
+          const preflightAction: ChatEntryAction = matchesStartRequest
+            ? 'start'
+            : (pendingChatPreflightActionRef.current || 'start');
+
+          pendingChatStartPreflightRequestIdRef.current = '';
+          pendingChatPreflightActionRef.current = '';
+          if (matchesStartRequest) {
+            resetChatStartRequestTracking();
+            releaseStartChatPendingState({ resetSaving: true });
+          } else {
+            releaseStartChatPendingState();
+          }
+
+          if (msg.shouldOpenGitFlow) {
+            pendingGitOverlayStartChatRequestIdRef.current = requestId;
+            setGitOverlayMode(preflightAction === 'open' ? 'open-chat-preflight' : 'start-chat-preflight');
+            setGitOverlayOpen(true);
+            setGitOverlaySnapshot(msg.snapshot || null);
+            setGitOverlayFileHistory(null);
+            setGitOverlayCommitMessages({});
+            setGitOverlayBusyAction(null);
+            setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
+            break;
+          }
+
+          if (preflightAction === 'open') {
+            continueOpenChat();
+            break;
+          }
+
+          dispatchStartChat(requestId || createStartChatRequestId(), { skipBranchMismatchCheck: true });
+        }
+        break;
       case 'chatStarted':
         if (!shouldHandleChatStartMessage(msg.requestId)) {
           break;
@@ -906,6 +1085,11 @@ export const EditorApp: React.FC = () => {
         if ((msg.requestId || '').trim() === pendingChatStartRequestIdRef.current) {
           acceptedChatStartRequestIdRef.current = pendingChatStartRequestIdRef.current;
           pendingChatStartRequestIdRef.current = '';
+        }
+        if (promptRef.current.status !== 'in-progress') {
+          const nextPrompt = { ...promptRef.current, status: 'in-progress' as const };
+          promptRef.current = nextPrompt;
+          setPrompt(nextPrompt);
         }
         releaseStartChatPendingState();
         break;
@@ -916,6 +1100,11 @@ export const EditorApp: React.FC = () => {
         if ((msg.requestId || '').trim() === pendingChatStartRequestIdRef.current) {
           acceptedChatStartRequestIdRef.current = pendingChatStartRequestIdRef.current;
           pendingChatStartRequestIdRef.current = '';
+        }
+        if (promptRef.current.status !== 'in-progress') {
+          const nextPrompt = { ...promptRef.current, status: 'in-progress' as const };
+          promptRef.current = nextPrompt;
+          setPrompt(nextPrompt);
         }
         releaseStartChatPendingState();
         setIsChatPanelOpen(true);
@@ -1080,8 +1269,10 @@ export const EditorApp: React.FC = () => {
         break;
       case 'error':
         if ((msg.requestId || '').trim()) {
-          const matchesPendingRequest = (msg.requestId || '').trim() === pendingChatStartRequestIdRef.current;
-          if (!matchesPendingRequest) {
+          const requestId = (msg.requestId || '').trim();
+          const matchesPendingRequest = requestId === pendingChatStartRequestIdRef.current;
+          const matchesPreflightRequest = requestId === pendingChatStartPreflightRequestIdRef.current;
+          if (!matchesPendingRequest && !matchesPreflightRequest) {
             break;
           }
         }
@@ -1095,6 +1286,7 @@ export const EditorApp: React.FC = () => {
         setGitOverlayBusyAction(null);
         activeSaveIdRef.current = null;
         resetChatStartRequestTracking();
+        resetStartChatPreflightTracking();
         showInlineNotice('error', msg.message);
         break;
       case 'info':
@@ -1106,13 +1298,14 @@ export const EditorApp: React.FC = () => {
         startChatLockRef.current = false;
         setIsStartingChat(false);
         resetChatStartRequestTracking();
+        resetStartChatPreflightTracking();
         setNotice(null);
         break;
       case 'implementingTimeRecalculated':
         setIsRecalculating(false);
         break;
     }
-  }, [clearChatStartTimeout, releaseStartChatPendingState, resetChatStartRequestTracking, shouldHandleChatStartMessage, showInlineNotice]);
+  }, [clearChatStartTimeout, createStartChatRequestId, dispatchStartChat, releaseStartChatPendingState, resetChatStartRequestTracking, resetStartChatPreflightTracking, shouldHandleChatStartMessage, showInlineNotice]);
 
   useMessageListener(handleMessage);
 
@@ -1129,6 +1322,7 @@ export const EditorApp: React.FC = () => {
       startChatLockRef.current = false;
       setIsStartingChat(false);
       resetChatStartRequestTracking();
+      resetStartChatPreflightTracking();
       setNotice(null);
     };
 
@@ -1136,7 +1330,7 @@ export const EditorApp: React.FC = () => {
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [clearChatStartTimeout, resetChatStartRequestTracking]);
+  }, [clearChatStartTimeout, resetChatStartRequestTracking, resetStartChatPreflightTracking]);
 
   // Notify extension about dirty state changes
   useEffect(() => {
@@ -1312,16 +1506,9 @@ export const EditorApp: React.FC = () => {
     }
   };
 
-  const buildPromptForSaveFrom = (basePrompt: Prompt): Prompt => {
-    const timeSpent = Date.now() - openedAtRef.current;
-    const updatedPrompt = applyElapsedTimeByContext(basePrompt, timeSpent);
-    openedAtRef.current = Date.now();
-    return updatedPrompt;
-  };
-
-  const buildPromptForSave = (): Prompt => buildPromptForSaveFrom(promptRef.current);
-
   const handleOpenGitOverlay = useCallback(() => {
+	resetStartChatPreflightTracking();
+	setGitOverlayMode('default');
     logGitOverlayDebug('open.requested', {
       promptId: prompt.id || '__new__',
       promptBranch: prompt.branch.trim(),
@@ -1336,7 +1523,7 @@ export const EditorApp: React.FC = () => {
       promptBranch: prompt.branch.trim(),
       projects: prompt.projects,
     });
-  }, [logGitOverlayDebug, prompt.branch, prompt.id, prompt.projects]);
+  }, [logGitOverlayDebug, prompt.branch, prompt.id, prompt.projects, resetStartChatPreflightTracking]);
 
   const handleGitOverlayTrackedBranchChange = (trackedBranch: string) => {
     const normalized = (trackedBranch || '').trim();
@@ -1361,7 +1548,7 @@ export const EditorApp: React.FC = () => {
   }, [prompt.branch, prompt.projects]);
 
   const handleGitOverlaySwitchBranch = useCallback((branch: string) => {
-    setGitOverlayBusyAction(`${t('editor.gitOverlaySwitch')}: ${branch}`);
+    setGitOverlayBusyAction(`switchBranch:${branch}`);
     vscode.postMessage({
       type: 'gitOverlaySwitchBranch',
       promptBranch: prompt.branch.trim(),
@@ -1653,62 +1840,54 @@ export const EditorApp: React.FC = () => {
   }, []);
 
   const handleStartChat = () => {
-    const shouldForceRebindChat = prompt.status === 'draft';
-    if (startChatLockRef.current || isStartingChat || !prompt.content || (!shouldForceRebindChat && prompt.chatSessionIds.length > 0)) {
+    const latestPrompt = promptRef.current;
+    const shouldForceRebindChat = latestPrompt.status === 'draft';
+    if (startChatLockRef.current || isStartingChat || !latestPrompt.content || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)) {
       return;
     }
-    const requestId = `start-chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    pendingChatStartRequestIdRef.current = requestId;
-    acceptedChatStartRequestIdRef.current = '';
-    setNotice(null);
-    setIsChatPanelOpen(false);
-    hasBeenSavedRef.current = true;
-    // Set status to in-progress immediately — both locally and in the payload sent to backend.
-    // This prevents the status from reverting to draft if the user switches prompts before
-    // the backend's startChat handler finishes and sends a sync message.
-    const updatedPrompt = {
-      ...buildPromptForSave(),
-      status: 'in-progress' as const,
-      chatSessionIds: shouldForceRebindChat ? [] : prompt.chatSessionIds,
-    };
-    setPrompt(prev => ({
-      ...prev,
-      status: 'in-progress',
-      chatSessionIds: shouldForceRebindChat ? [] : prev.chatSessionIds,
-    }));
-    startChatLockRef.current = true;
-    setIsStartingChat(true);
-    scheduleChatStartTimeout();
-    activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
-    setIsSaving(true);
-    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
-    vscode.postMessage({
-      type: 'startChat',
-      id: updatedPrompt.id || '__new__',
-      prompt: updatedPrompt,
-      forceRebindChat: shouldForceRebindChat,
-      requestId,
-    });
+    const preflightRequestId = requestChatEntryPreflight('start');
+    if (preflightRequestId) {
+      return;
+    }
+
+    dispatchStartChat(createStartChatRequestId());
   };
 
-  const handleOpenChat = () => {
-    if (prompt.status !== 'in-progress') {
-      const promptToSave = { ...buildPromptForSave(), status: 'in-progress' as const };
-      setPrompt(promptToSave);
-      if (hasBeenSavedRef.current || promptToSave.id) {
-        activeSaveIdRef.current = (promptToSave.id || prompt.id || '__new__').trim() || '__new__';
-        setIsSaving(true);
-        setIsDirty(false);
-        vscode.postMessage({ type: 'savePrompt', prompt: promptToSave, source: 'status-change' });
-      }
+  useEffect(() => {
+    handleStartChatRef.current = handleStartChat;
+  }, [handleStartChat]);
+
+  useEffect(() => {
+    handleOpenChatRef.current = continueOpenChat;
+  }, [continueOpenChat]);
+
+  useEffect(() => {
+    const targetPromptId = (pendingExternalStartChatPromptId || '').trim();
+    if (!targetPromptId || !isLoaded) {
+      return;
     }
 
-    if (prompt.id && prompt.chatSessionIds.length > 0) {
-      vscode.postMessage({ type: 'openChat', id: prompt.id, sessionId: prompt.chatSessionIds[0] });
-    } else {
-      // Chat was opened but session ID not yet tracked — just switch to chat panel
-      vscode.postMessage({ type: 'openChatPanel' });
+    const currentPromptId = (currentPromptIdRef.current || '__new__').trim() || '__new__';
+    if (targetPromptId !== currentPromptId) {
+      return;
     }
+
+    setPendingExternalStartChatPromptId(null);
+    handleStartChatRef.current();
+  }, [isLoaded, pendingExternalStartChatPromptId, prompt.id]);
+
+  const handleOpenChat = () => {
+    const latestPrompt = promptRef.current;
+    if (!latestPrompt.content) {
+      return;
+    }
+
+    const preflightRequestId = requestChatEntryPreflight('open');
+    if (preflightRequestId) {
+      return;
+    }
+
+    continueOpenChat();
   };
 
   const handleRecalcImplementingTime = () => {
@@ -2543,6 +2722,7 @@ export const EditorApp: React.FC = () => {
 
       <GitOverlay
         open={gitOverlayOpen}
+        mode={gitOverlayMode}
         snapshot={gitOverlaySnapshot}
         commitMessages={gitOverlayCommitMessages}
         busyAction={gitOverlayBusyAction}
@@ -2551,8 +2731,9 @@ export const EditorApp: React.FC = () => {
         promptTaskNumber={prompt.taskNumber}
         dockToSecondHalf={shouldDockGitOverlaySecondHalf}
         preferredTrackedBranch={(prompt.trackedBranch || '').trim() || workspaceTrackedBranchPreference}
-        onClose={() => setGitOverlayOpen(false)}
+        onClose={closeGitOverlay}
         onRefresh={handleRefreshGitOverlay}
+        onSwitchBranch={handleGitOverlaySwitchBranch}
         onEnsurePromptBranch={handleGitOverlayEnsurePromptBranch}
         onPush={handleGitOverlayPush}
         onCreateReviewRequest={handleGitOverlayCreateReviewRequest}
@@ -2567,8 +2748,17 @@ export const EditorApp: React.FC = () => {
         onCommitStaged={handleGitOverlayCommitStaged}
         onCommitMessageChange={handleGitOverlayCommitMessageChange}
         onTrackedBranchChange={handleGitOverlayTrackedBranchChange}
+        onContinueStartChat={() => {
+          const requestId = pendingGitOverlayStartChatRequestIdRef.current || createStartChatRequestId();
+          closeGitOverlay();
+          dispatchStartChat(requestId, { skipBranchMismatchCheck: true });
+        }}
+        onContinueOpenChat={() => {
+          closeGitOverlay();
+          handleOpenChatRef.current();
+        }}
         onDone={(status) => {
-          setGitOverlayOpen(false);
+          closeGitOverlay();
           if (status) {
             handleSetStatus(status);
           }

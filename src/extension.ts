@@ -27,7 +27,6 @@ import {
 import { SidebarProvider, AboutPanelManager, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager, CopilotStatusBarProvider, CopilotUsagePanelManager, MemoryPanelManager } from './providers/index.js';
 import type { MemoryCommit, HookCommitPayload, MemoryAnalysisDepth } from './types/index.js';
 import { DEFAULT_COPILOT_MODEL_FAMILY } from './constants/ai.js';
-import { buildChatContextFiles } from './utils/chatContextFiles.js';
 import {
 	appendPromptManagerLog,
 	disposePromptManagerOutputChannel,
@@ -35,7 +34,7 @@ import {
 	installPromptManagerConsoleInterceptor,
 	showPromptManagerOutputChannel,
 } from './utils/promptManagerOutput.js';
-import { appendPromptAiLog, clearPromptAiLogIfDateChanged } from './utils/promptAiLogger.js';
+import { clearPromptAiLogIfDateChanged } from './utils/promptAiLogger.js';
 
 export function activate(context: vscode.ExtensionContext) {
 	getPromptManagerOutputChannel();
@@ -363,6 +362,14 @@ export function activate(context: vscode.ExtensionContext) {
 		await sidebarProvider.syncSelectedPrompt(id);
 	};
 
+	const openPromptAndStartChatOutsideSidebar = async (id: string): Promise<void> => {
+		await editorPanelManager.openPromptAndStartChat(id);
+		if (id !== '__new__') {
+			await stateService.saveLastPromptId(id);
+		}
+		await sidebarProvider.syncSelectedPrompt(id);
+	};
+
 	// Open prompt when selected in sidebar
 	sidebarProvider.onDidOpenPrompt(async (id) => {
 		await editorPanelManager.openPrompt(id);
@@ -497,322 +504,26 @@ export function activate(context: vscode.ExtensionContext) {
 			await sidebarProvider.refreshList();
 		}),
 
-		vscode.commands.registerCommand('promptManager.startChat', async () => {
-			const lastId = stateService.getLastPromptId();
-			if (lastId) {
-				const prompt = await storageService.getPrompt(lastId);
-				if (prompt?.content) {
-					// Инкрементируем счётчик использования Copilot Premium запросов
-					void copilotUsageService.incrementUsage();
-
-					// --- Branch mismatch check ---
-					if (prompt.projects.length > 0) {
-						const paths = workspaceService.getWorkspaceFolderPaths();
-						const allowedBranches = GitService.getConfiguredAllowedBranches();
-						const mismatches = await gitService.getBranchMismatches(paths, prompt.projects, prompt.branch, allowedBranches);
-						if (mismatches.length > 0) {
-							const details = mismatches.map(m => `Ветка проекта ${m.project} переключена на ${m.currentBranch}`).join('\n');
-							const answer = await vscode.window.showWarningMessage(
-								details,
-								{ modal: true },
-								'Продолжить',
-							);
-							if (answer !== 'Продолжить') {
-								return;
-							}
-						}
-					}
-
-					const globalContext = stateService.getGlobalAgentContext();
-					const parts: string[] = [];
-					try {
-						await workspaceService.ensureChatInstructionsFile(globalContext);
-					} catch {
-						// keep chat flow even if instructions file sync fails
-					}
-					try {
-						await codeMapChatInstructionService?.prepareInstruction(prompt);
-					} catch (error) {
-						console.error('[PromptManager] prepare codemap instruction failed:', error);
-					}
-					let sessionInstructionRecord: Awaited<ReturnType<ChatMemoryInstructionService['prepareSessionInstruction']>> | null = null;
-					try {
-						sessionInstructionRecord = await chatMemoryInstructionService?.prepareSessionInstruction(prompt) ?? null;
-					} catch (error) {
-						console.error('[PromptManager] prepareSessionInstruction failed:', error);
-					}
-					parts.push(prompt.content);
-
-					const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-					const chatContextFiles = buildChatContextFiles({
-						workspaceRoot,
-						storageDir: storageService.getStorageDirectoryPath(),
-						promptContextFiles: prompt.contextFiles,
-						sessionInstructionFilePath: sessionInstructionRecord?.instructionFilePath,
-					});
-					const fileUris = chatContextFiles.allAbsolutePaths.map(filePath => vscode.Uri.file(filePath));
-
-					const ctx: string[] = [];
-					if (prompt.projects.length > 0) ctx.push(`Projects: ${prompt.projects.join(', ')}`);
-					if (prompt.languages.length > 0) ctx.push(`Languages: ${prompt.languages.join(', ')}`);
-					if (prompt.frameworks.length > 0) ctx.push(`Frameworks: ${prompt.frameworks.join(', ')}`);
-					if (prompt.skills.length > 0) ctx.push(`Skills: ${prompt.skills.join(', ')}`);
-					if (prompt.mcpTools.length > 0) ctx.push(`MCP Tools: ${prompt.mcpTools.join(', ')}`);
-					if (prompt.hooks.length > 0) ctx.push(`Hooks: ${prompt.hooks.join(', ')}`);
-					if (prompt.model) ctx.push(`Preferred model: ${prompt.model}`);
-					if (prompt.taskNumber) ctx.push(`Task: ${prompt.taskNumber}`);
-					if (prompt.branch) ctx.push(`Branch: ${prompt.branch}`);
-					if (chatContextFiles.promptContextReferences.length > 0) {
-						ctx.push(`Context files: ${chatContextFiles.promptContextReferences.join(' ')}`);
-					}
-					if (chatContextFiles.instructionReferences.length > 0) {
-						ctx.push(`Memory instruction files: ${chatContextFiles.instructionReferences.join(' ')}`);
-					}
-					if (ctx.length > 0) { parts.push(''); parts.push('---'); parts.push('Context:'); ctx.forEach(c => parts.push(`- ${c}`)); }
-
-					if (prompt.status !== 'in-progress') {
-						prompt.status = 'in-progress';
-						await storageService.savePrompt(prompt);
-						await sidebarProvider.refreshList();
-					}
-
-					const query = parts.join('\n');
-					const requestStartTimestamp = Date.now();
-					let requestModelIdentifier = '';
-					let requestModelSelector: vscode.LanguageModelChatSelector | undefined;
-
-					const chatMode = prompt.chatMode || 'agent';
-					const chatModeName = chatMode === 'agent' ? 'Agent' : 'Plan';
-
-					// Open chat in the requested mode using mode-specific commands first
-					const openChatCmds = chatMode === 'agent'
-						? ['workbench.action.chat.openAgent', 'workbench.action.chat.open']
-						: [`workbench.action.chat.open${chatModeName}`, 'workbench.action.chat.open'];
-					let opened = false;
-					for (const openCmd of openChatCmds) {
-						try {
-							if (openCmd === 'workbench.action.chat.open') {
-								await vscode.commands.executeCommand(openCmd, { mode: chatModeName });
-							} else {
-								await vscode.commands.executeCommand(openCmd);
-							}
-							opened = true;
-							break;
-						} catch {
-							// try next open command
-						}
-					}
-
-					// Ensure correct mode via toggleAgentMode (accepts both id and name)
-					if (opened) {
-						try {
-							await vscode.commands.executeCommand(
-								'workbench.action.chat.toggleAgentMode',
-								{ modeId: chatMode },
-							);
-						} catch {
-							// best-effort mode switch
-						}
-					}
-
-					// Prefer switching model after chat is opened so current session picks it
-					if (prompt.model) {
-						try {
-							await new Promise(resolve => setTimeout(resolve, 200));
-							const storageModel = await aiService.resolveModelStorageIdentifier(prompt.model);
-							requestModelIdentifier = storageModel || requestModelIdentifier;
-							requestModelSelector = await aiService.resolveChatOpenModelSelector(prompt.model);
-							await stateService.forcePersistChatCurrentLanguageModel(storageModel);
-							await aiService.tryApplyChatModelSafely(prompt.model);
-						} catch { }
-					}
-
-					const sendMessage = async (message: string): Promise<void> => {
-						const modelForLog = String(
-							requestModelIdentifier
-							|| requestModelSelector?.id
-							|| requestModelSelector?.family
-							|| prompt.model
-							|| '',
-						).trim() || 'default';
-						if (requestModelSelector) {
-							try {
-								const openArg: Record<string, unknown> = {
-									query: message,
-									modelSelector: requestModelSelector,
-									mode: chatModeName,
-								};
-								await vscode.commands.executeCommand('workbench.action.chat.open', openArg);
-								await appendPromptAiLog({
-									kind: 'chat',
-									prompt: message,
-									callerMethod: 'activate.promptManager.startChat',
-									model: modelForLog,
-								});
-								return;
-							} catch {
-								// fallback to compatibility variants
-							}
-						}
-
-						const args: unknown[] = [
-							{ query: message, mode: chatModeName },
-							{ query: message },
-							message,
-							{ message },
-							{ prompt: message },
-						];
-
-						if (requestModelIdentifier) {
-							args.unshift(
-								{ query: message, userSelectedModelId: requestModelIdentifier, mode: chatModeName },
-								{ query: message, userSelectedModelId: requestModelIdentifier },
-								{ query: message, modelId: requestModelIdentifier, mode: chatModeName },
-								{ query: message, model: requestModelIdentifier, mode: chatModeName },
-								{ message, userSelectedModelId: requestModelIdentifier },
-								{ prompt: message, userSelectedModelId: requestModelIdentifier },
-								{ query: message, options: { userSelectedModelId: requestModelIdentifier } },
-							);
-						}
-
-						for (const arg of args) {
-							for (const openCmd of openChatCmds) {
-								try {
-									await vscode.commands.executeCommand(openCmd, arg);
-									await appendPromptAiLog({
-										kind: 'chat',
-										prompt: message,
-										callerMethod: 'activate.promptManager.startChat',
-										model: modelForLog,
-									});
-									return;
-								} catch {
-									// try next variant
-								}
-							}
-						}
-					};
-
-					const forceNewChatSession = async (): Promise<void> => {
-						const commands = await vscode.commands.getCommands(true);
-						const newSessionCmds = [
-							'workbench.action.chat.newChat',
-							'workbench.action.chat.new',
-							'workbench.action.chat.openNew',
-							'workbench.action.chat.clear',
-						].filter(c => commands.includes(c));
-
-						for (const cmd of newSessionCmds) {
-							try {
-								await vscode.commands.executeCommand(cmd);
-								return;
-							} catch {
-								// try next command
-							}
-						}
-					};
-
-					try {
-						await new Promise(resolve => setTimeout(resolve, 150));
-						const commands = await vscode.commands.getCommands(true);
-						if (prompt.model) {
-							const storageModel = await aiService.resolveModelStorageIdentifier(prompt.model);
-							requestModelIdentifier = storageModel || requestModelIdentifier;
-							requestModelSelector = await aiService.resolveChatOpenModelSelector(prompt.model);
-							await stateService.forcePersistChatCurrentLanguageModel(storageModel);
-							await forceNewChatSession();
-							await new Promise(resolve => setTimeout(resolve, 120));
-							await aiService.tryApplyChatModelSafely(prompt.model);
-						}
-
-						const attachFiles = async () => {
-							const attachCmds = [
-								'workbench.action.chat.attachFile',
-								'workbench.action.chat.addFile',
-								'workbench.action.chat.addContext',
-								'workbench.action.chat.attachContext',
-							].filter(c => commands.includes(c));
-
-							for (const cmd of attachCmds) {
-								for (const fileUri of fileUris) {
-									try {
-										await vscode.commands.executeCommand(cmd, fileUri);
-									} catch {
-										try {
-											await vscode.commands.executeCommand(cmd, { uri: fileUri });
-										} catch {
-											// try next variant
-										}
-									}
-								}
-							}
-						};
-
-						if (fileUris.length > 0) {
-							await attachFiles();
-						}
-
-						await sendMessage(query);
-						copilotStatusBarProvider.notifyChatStarted();
-						void (async () => {
-							let trackedSessionId = '';
-							const startedSession = await stateService.waitForChatSessionStarted(requestStartTimestamp, 15000, 500);
-							if (startedSession.ok && startedSession.sessionId) {
-								trackedSessionId = startedSession.sessionId;
-								try {
-									await chatMemoryInstructionService?.bindChatSession(prompt.promptUuid, trackedSessionId);
-								} catch (error) {
-									console.error('[PromptManager] bindChatSession failed:', error);
-								}
-								const promptFromStorage = await storageService.getPrompt(prompt.id);
-								if (promptFromStorage) {
-									promptFromStorage.chatSessionIds = [
-										trackedSessionId,
-										...(promptFromStorage.chatSessionIds || []).filter(id => id !== trackedSessionId),
-									];
-									await storageService.savePrompt(promptFromStorage, { historyReason: 'start-chat' });
-								}
-							}
-
-							const completion = await stateService.waitForChatRequestCompletion(
-								requestStartTimestamp,
-								180000,
-								1000,
-								trackedSessionId || undefined,
-							);
-							const completionObserved = Number(completion.lastRequestEnded || 0) > Number(completion.lastRequestStarted || 0);
-							if (completion.ok || completionObserved) {
-								try {
-									await chatMemoryInstructionService?.completeChatSession(
-										prompt.promptUuid,
-										'afterChatCompleted',
-										trackedSessionId || completion.sessionId || undefined,
-									);
-								} catch (error) {
-									console.error('[PromptManager] completeChatSession failed:', error);
-								}
-								return;
-							}
-
-							try {
-								await chatMemoryInstructionService?.noteChatError(
-									prompt.promptUuid,
-									`Chat completion not detected (${completion.reason || 'unknown'})`,
-									trackedSessionId || completion.sessionId || undefined,
-								);
-							} catch (error) {
-								console.error('[PromptManager] noteChatError failed:', error);
-							}
-						})();
-					} catch (error) {
-						void chatMemoryInstructionService?.noteChatError(
-							prompt.promptUuid,
-							error instanceof Error ? error.message : 'Failed to dispatch chat message',
-						);
-						// ignore optional compatibility attempts
-					}
-				}
+		vscode.commands.registerCommand('promptManager.startChat', async (promptId?: string) => {
+			const targetId = (typeof promptId === 'string' ? promptId : stateService.getLastPromptId() || '').trim();
+			if (!targetId) {
+				vscode.window.showInformationMessage('Сначала выберите промпт.');
+				return;
 			}
+
+			const prompt = await storageService.getPrompt(targetId);
+			if (!prompt) {
+				vscode.window.showErrorMessage(`Промпт "${targetId}" не найден.`);
+				return;
+			}
+
+			if (!prompt.content.trim()) {
+				vscode.window.showInformationMessage('У выбранного промпта нет текста для старта чата.');
+				return;
+			}
+
+			void copilotUsageService.incrementUsage();
+			await openPromptAndStartChatOutsideSidebar(targetId);
 		}),
 
 		vscode.commands.registerCommand('promptManager.openChat', async () => {

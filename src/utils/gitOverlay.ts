@@ -24,6 +24,20 @@ type GitOverlayReviewCliSetupCommand = {
 	manualUrl: string;
 };
 
+type GitOverlayStartChatBranchProject = {
+	available: boolean;
+	currentBranch: string;
+};
+
+type GitOverlayTrackedBranchProject = {
+	available: boolean;
+	branches: Array<{
+		name: string;
+		kind: GitOverlayBranchKind;
+		exists: boolean;
+	}>;
+};
+
 function normalizeInteractiveTerminalCommand(command: string): string {
 	return command.replace(/\t/g, '    ');
 }
@@ -221,6 +235,72 @@ export function resolveGitOverlayBranchNames(
 	}
 
 	return [...result];
+}
+
+export function resolveExistingGitOverlayTrackedBranches<T extends GitOverlayTrackedBranchProject>(
+	trackedBranches: string[],
+	projects: T[],
+): string[] {
+	const normalizedTrackedBranches = Array.from(new Set(
+		trackedBranches
+			.map(branch => branch.trim())
+			.filter(Boolean),
+	));
+
+	const availableProjects = projects.filter(project => project.available);
+	const projectsToInspect = availableProjects.length > 0 ? availableProjects : projects;
+	if (projectsToInspect.length === 0) {
+		return [];
+	}
+
+	if (normalizedTrackedBranches.length > 0) {
+		return normalizedTrackedBranches.filter(branchName => projectsToInspect.some(project => project.branches.some(branch => (
+			branch.kind === 'tracked'
+			&& branch.exists
+			&& branch.name.trim() === branchName
+		))));
+	}
+
+	const result = new Set<string>();
+	for (const project of projectsToInspect) {
+		for (const branch of project.branches) {
+			const normalizedBranch = branch.name.trim();
+			if (branch.kind !== 'tracked' || !branch.exists || !normalizedBranch) {
+				continue;
+			}
+			result.add(normalizedBranch);
+		}
+	}
+
+	return [...result];
+}
+
+export function isGitOverlayStartChatBranchAllowed(
+	branchName: string,
+	promptBranch: string,
+	trackedBranches: string[],
+): boolean {
+	const normalizedBranch = branchName.trim();
+	if (!normalizedBranch) {
+		return false;
+	}
+
+	if (normalizedBranch === promptBranch.trim()) {
+		return true;
+	}
+
+	return trackedBranches
+		.map(branch => branch.trim())
+		.filter(Boolean)
+		.includes(normalizedBranch);
+}
+
+export function collectGitOverlayStartChatBranchMismatches<T extends GitOverlayStartChatBranchProject>(
+	projects: T[],
+	promptBranch: string,
+	trackedBranches: string[],
+): T[] {
+	return projects.filter(project => project.available && !isGitOverlayStartChatBranchAllowed(project.currentBranch, promptBranch, trackedBranches));
 }
 
 export function canDeleteGitOverlayBranch(

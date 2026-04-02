@@ -57,6 +57,7 @@ export class EditorPanelManager {
 	private panelKeyByReportEditorUri = new Map<string, string>();
 	private reportEditorPanels = new Map<string, vscode.WebviewPanel>();
 	private panelBootIds = new Map<string, string>();
+	private pendingPanelMessages = new Map<string, ExtensionToWebviewMessage[]>();
 	private pendingReportPersistByPromptId = new Map<string, Promise<Prompt | null>>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
 	private openPromptQueue: Promise<void> | null = null;
@@ -1172,6 +1173,22 @@ export class EditorPanelManager {
 
 	private getGitOverlayTrackedBranchPreference(): string {
 		return this.stateService.getGitOverlayTrackedBranchPreference();
+	}
+
+	private async getStartChatTrackedBranchMismatches(prompt: Prompt): Promise<Array<{ project: string; currentBranch: string }>> {
+		const promptBranch = (prompt.branch || '').trim();
+		const projectNames = (prompt.projects || []).map(project => project.trim()).filter(Boolean);
+		if (!promptBranch || projectNames.length === 0) {
+			return [];
+		}
+
+		const paths = this.workspaceService.getWorkspaceFolderPaths();
+		return this.gitService.getBranchMismatches(
+			paths,
+			projectNames,
+			promptBranch,
+			this.getTrackedBranchesSetting(),
+		);
 	}
 
 	private resolveGitOverlayProjects(requestedProjects: string[], currentPrompt: Prompt): string[] {
@@ -2480,6 +2497,96 @@ export class EditorPanelManager {
 		return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 	}
 
+	private enqueuePendingPanelMessage(panelKey: string, message: ExtensionToWebviewMessage): void {
+		const pending = (this.pendingPanelMessages.get(panelKey) || []).filter(item => {
+			if (item.type !== 'triggerStartChat' || message.type !== 'triggerStartChat') {
+				return true;
+			}
+
+			return (item.promptId || '').trim() !== (message.promptId || '').trim();
+		});
+		pending.push(message);
+		this.pendingPanelMessages.set(panelKey, pending);
+	}
+
+	private postMessageToPanelIfReady(panelKey: string, message: ExtensionToWebviewMessage, promptId?: string): boolean {
+		const panel = openPanels.get(panelKey);
+		if (!panel || this.silentClosePanels.has(panel)) {
+			return false;
+		}
+
+		const normalizedPromptId = (promptId || '').trim();
+		if (normalizedPromptId) {
+			const currentPromptId = (this.panelPromptRefs.get(panelKey)?.id || '__new__').trim() || '__new__';
+			if (currentPromptId !== normalizedPromptId) {
+				return false;
+			}
+		}
+
+		try {
+			void panel.webview.postMessage(message);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private flushPendingPanelMessages(panelKey: string, panel: vscode.WebviewPanel, currentPrompt: Prompt): void {
+		const pending = this.pendingPanelMessages.get(panelKey);
+		if (!pending?.length) {
+			return;
+		}
+
+		const currentPromptId = (currentPrompt.id || '__new__').trim() || '__new__';
+		const remaining: ExtensionToWebviewMessage[] = [];
+
+		for (const message of pending) {
+			if (message.type === 'triggerStartChat') {
+				const targetPromptId = (message.promptId || '').trim() || currentPromptId;
+				if (targetPromptId !== currentPromptId) {
+					remaining.push(message);
+					continue;
+				}
+			}
+
+			try {
+				void panel.webview.postMessage(message);
+			} catch {
+				remaining.push(message);
+			}
+		}
+
+		if (remaining.length > 0) {
+			this.pendingPanelMessages.set(panelKey, remaining);
+			return;
+		}
+
+		this.pendingPanelMessages.delete(panelKey);
+	}
+
+	async openPromptAndStartChat(promptId: string): Promise<void> {
+		const normalizedPromptId = (promptId || '').trim();
+		if (!normalizedPromptId) {
+			return;
+		}
+
+		const panelKey = SINGLE_EDITOR_PANEL_KEY;
+		const message: ExtensionToWebviewMessage = { type: 'triggerStartChat', promptId: normalizedPromptId };
+		const panel = openPanels.get(panelKey);
+		const activePromptId = panel && !this.silentClosePanels.has(panel)
+			? (this.panelPromptRefs.get(panelKey)?.id || '').trim()
+			: '';
+
+		if (activePromptId === normalizedPromptId) {
+			await this.openPrompt(normalizedPromptId);
+			this.postMessageToPanelIfReady(panelKey, message, normalizedPromptId);
+			return;
+		}
+
+		this.enqueuePendingPanelMessage(panelKey, message);
+		await this.openPrompt(normalizedPromptId);
+	}
+
 	private async openPromptInternal(promptId: string, requestVersion: number): Promise<void> {
 		const isNew = promptId === '__new__';
 		const panelKey = SINGLE_EDITOR_PANEL_KEY;
@@ -2688,6 +2795,7 @@ export class EditorPanelManager {
 				openPanels.delete(key);
 				this.panelPromptRefs.delete(key);
 				this.panelBootIds.delete(key);
+				this.pendingPanelMessages.delete(key);
 				this.chatTrackingDisposables.get(key)?.dispose();
 				this.chatTrackingDisposables.delete(key);
 				this.panelDirtySetters.delete(key);
@@ -2967,6 +3075,7 @@ export class EditorPanelManager {
 				postMessage(availableLanguageAndFrameworkMessages.languagesMessage);
 				postMessage(availableLanguageAndFrameworkMessages.frameworksMessage);
 				postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'open' });
+				this.flushPendingPanelMessages(panelKey, panel, currentPrompt);
 				this.scheduleAvailableModelsRefreshAfterReady(panelKey, panel, currentPrompt, readyBootId, models);
 				break;
 			}
@@ -3354,11 +3463,61 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'startChatPreflight': {
+				const prompt = msg.prompt ? { ...msg.prompt } : await this.storageService.getPrompt(msg.id);
+				const requestId = (msg.requestId || '').trim();
+				if (!prompt) {
+					postMessage({
+						type: 'error',
+						message: 'Не удалось подготовить запуск чата: промпт не найден.',
+						requestId: requestId || undefined,
+					});
+					break;
+				}
+
+				const shouldCheckAnyBranches = prompt.projects.length > 0
+					&& Boolean((prompt.branch || '').trim());
+				if (!shouldCheckAnyBranches) {
+					postMessage({
+						type: 'startChatPreflightResult',
+						requestId: requestId || undefined,
+						shouldOpenGitFlow: false,
+					});
+					break;
+				}
+
+				const mismatches = await this.getStartChatTrackedBranchMismatches(prompt);
+				if (mismatches.length === 0) {
+					postMessage({
+						type: 'startChatPreflightResult',
+						requestId: requestId || undefined,
+						shouldOpenGitFlow: false,
+					});
+					break;
+				}
+
+				const paths = this.workspaceService.getWorkspaceFolderPaths();
+				const snapshot = await this.gitService.getGitOverlaySnapshot(
+					paths,
+					this.resolveGitOverlayProjects(prompt.projects, prompt),
+					(prompt.branch || '').trim(),
+					this.getTrackedBranchesSetting(),
+				);
+				postMessage({
+					type: 'startChatPreflightResult',
+					requestId: requestId || undefined,
+					shouldOpenGitFlow: true,
+					snapshot,
+				});
+				break;
+			}
+
 			case 'startChat': {
 				let prompt: Prompt | null = msg.prompt ? { ...msg.prompt } : await this.storageService.getPrompt(msg.id);
+				const skipBranchMismatchCheck = msg.skipBranchMismatchCheck === true;
 				const shouldForceRebindChat = msg.forceRebindChat === true;
 				const startChatRequestId = (msg.requestId || '').trim();
-				const initialStatus = prompt?.status || 'draft';
+				const initialStatus = msg.originalStatus || prompt?.status || 'draft';
 				const initialChatSessionIds = [...(prompt?.chatSessionIds || [])];
 				let hookPayloadBase: Record<string, unknown> | null = null;
 				let trackedSessionId = '';
@@ -3441,23 +3600,29 @@ export class EditorPanelManager {
 
 				try {
 					// --- Branch mismatch check ---
-					if (prompt.projects.length > 0) {
+					if (!skipBranchMismatchCheck && prompt.projects.length > 0) {
 						const paths = this.workspaceService.getWorkspaceFolderPaths();
 						const allowedBranches = this.getAllowedBranchesSetting();
 						const mismatches = await this.gitService.getBranchMismatches(paths, prompt.projects, prompt.branch, allowedBranches);
 						if (mismatches.length > 0) {
-							const details = mismatches.map(m => `Ветка проекта ${m.project} переключена на ${m.currentBranch}`).join('\n');
-							const answer = await vscode.window.showWarningMessage(
-								details,
-								{ modal: true },
-								'Продолжить',
+							await restorePromptAfterStartFailure();
+							const snapshot = await this.gitService.getGitOverlaySnapshot(
+								paths,
+								this.resolveGitOverlayProjects(prompt.projects, prompt),
+								(prompt.branch || '').trim(),
+								this.getTrackedBranchesSetting(),
 							);
-							if (answer !== 'Продолжить') {
-								postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
-								break;
-							}
+							postMessage({
+								type: 'startChatPreflightResult',
+								requestId: startChatRequestId || undefined,
+								shouldOpenGitFlow: true,
+								snapshot,
+							});
+							break;
 						}
 					}
+
+					prompt.status = 'in-progress';
 
 					const bindSessionToPrompt = async (sessionId: string): Promise<void> => {
 						const normalizedSessionId = (sessionId || '').trim();
@@ -3530,6 +3695,8 @@ export class EditorPanelManager {
 						if (renameFromId && renameFromId !== prompt.id) {
 							postMessage({ type: 'promptSaved', prompt, previousId: renameFromId });
 							postMessage({ type: 'prompt', prompt, reason: 'save', previousId: renameFromId });
+						} else {
+							postMessage({ type: 'prompt', prompt, reason: 'sync' });
 						}
 					}
 					this._onDidSave.fire(prompt.id);

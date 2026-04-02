@@ -128,7 +128,7 @@ export class TrackerPanelManager {
 
 			case 'startChat': {
 				await this.stateService.saveLastPromptId(msg.id);
-				await vscode.commands.executeCommand('promptManager.startChat');
+				await vscode.commands.executeCommand('promptManager.startChat', msg.id);
 				break;
 			}
 

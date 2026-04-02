@@ -2,13 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	collectGitOverlayStartChatBranchMismatches,
 	buildGitOverlayReviewCliSetupCommand,
 	buildGitOverlayReviewRequestTitle,
 	buildGitOverlayGraph,
 	canDeleteGitOverlayBranch,
+	isGitOverlayStartChatBranchAllowed,
 	normalizeGitOverlayReviewRequestState,
 	normalizeCommitMessageGenerationInstructions,
 	parseGitOverlayRemoteUrl,
+	resolveExistingGitOverlayTrackedBranches,
 	resolveGitOverlayBranchNames,
 } from '../src/utils/gitOverlay.js';
 
@@ -16,6 +19,73 @@ test('resolveGitOverlayBranchNames keeps tracked order and appends prompt/curren
 	const branches = resolveGitOverlayBranchNames(['main', 'develop', 'main'], 'feature/task-42', 'feature/task-42');
 
 	assert.deepEqual(branches, ['main', 'develop', 'feature/task-42']);
+});
+
+test('resolveExistingGitOverlayTrackedBranches keeps only configured branches that exist in projects', () => {
+	const branches = resolveExistingGitOverlayTrackedBranches(
+		['main', 'develop', 'release'],
+		[
+			{
+				available: true,
+				branches: [
+					{ name: 'main', kind: 'tracked', exists: true },
+					{ name: 'release', kind: 'tracked', exists: false },
+				],
+			},
+			{
+				available: true,
+				branches: [
+					{ name: 'develop', kind: 'tracked', exists: true },
+					{ name: 'feature/task-42', kind: 'prompt', exists: true },
+				],
+			},
+		],
+	);
+
+	assert.deepEqual(branches, ['main', 'develop']);
+});
+
+test('resolveExistingGitOverlayTrackedBranches falls back to discovered existing tracked branches', () => {
+	const branches = resolveExistingGitOverlayTrackedBranches(
+		[],
+		[
+			{
+				available: true,
+				branches: [
+					{ name: 'main', kind: 'tracked', exists: true },
+					{ name: 'release', kind: 'tracked', exists: false },
+				],
+			},
+			{
+				available: true,
+				branches: [
+					{ name: 'develop', kind: 'tracked', exists: true },
+					{ name: 'main', kind: 'tracked', exists: true },
+				],
+			},
+		],
+	);
+
+	assert.deepEqual(branches, ['main', 'develop']);
+});
+
+test('isGitOverlayStartChatBranchAllowed accepts tracked and prompt branches only', () => {
+	assert.equal(isGitOverlayStartChatBranchAllowed('main', 'feature/task-42', ['main', 'develop']), true);
+	assert.equal(isGitOverlayStartChatBranchAllowed('feature/task-42', 'feature/task-42', ['main', 'develop']), true);
+	assert.equal(isGitOverlayStartChatBranchAllowed('bugfix/legacy', 'feature/task-42', ['main', 'develop']), false);
+});
+
+test('collectGitOverlayStartChatBranchMismatches returns only available projects outside tracked and prompt branches', () => {
+	const mismatches = collectGitOverlayStartChatBranchMismatches([
+		{ project: 'api', available: true, currentBranch: 'feature/legacy' },
+		{ project: 'web', available: true, currentBranch: 'main' },
+		{ project: 'docs', available: true, currentBranch: 'feature/task-42' },
+		{ project: 'infra', available: false, currentBranch: 'feature/legacy' },
+	], 'feature/task-42', ['main', 'develop']);
+
+	assert.deepEqual(mismatches, [
+		{ project: 'api', available: true, currentBranch: 'feature/legacy' },
+	]);
 });
 
 test('canDeleteGitOverlayBranch blocks current, prompt and tracked branches', () => {

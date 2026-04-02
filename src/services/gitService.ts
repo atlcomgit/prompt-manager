@@ -29,6 +29,7 @@ import {
 	canDeleteGitOverlayBranch,
 	normalizeGitOverlayReviewRequestState,
 	parseGitOverlayRemoteUrl,
+	resolveExistingGitOverlayTrackedBranches,
 	resolveGitOverlayBranchNames,
 } from '../utils/gitOverlay.js';
 
@@ -1061,14 +1062,23 @@ export class GitService {
 			]);
 
 			const currentBranchRecord = localBranches.get(currentBranch) || null;
-			const visibleBranchNames = resolveGitOverlayBranchNames(trackedBranches, promptBranch, currentBranch);
+			const availableTrackedBranches = trackedBranches.filter((branchName) => {
+				const normalizedBranchName = branchName.trim();
+				if (!normalizedBranchName) {
+					return false;
+				}
+
+				return Boolean(localBranches.get(normalizedBranchName)) || remoteBranches.has(normalizedBranchName);
+			});
+			const trackedBranchSet = new Set(availableTrackedBranches);
+			const visibleBranchNames = resolveGitOverlayBranchNames(availableTrackedBranches, promptBranch, currentBranch);
 			const branches: GitOverlayBranchInfo[] = visibleBranchNames.map((branchName) => {
 				const localBranch = localBranches.get(branchName) || null;
 				const kind = branchName === promptBranch.trim()
 					? 'prompt'
 					: branchName === currentBranch
 						? 'current'
-						: trackedBranches.map(branch => branch.trim()).includes(branchName)
+						: trackedBranchSet.has(branchName)
 							? 'tracked'
 							: 'local';
 
@@ -1091,13 +1101,13 @@ export class GitService {
 						}
 						: null,
 					canSwitch: Boolean(localBranch) || remoteBranches.has(branchName),
-					canDelete: Boolean(localBranch) && canDeleteGitOverlayBranch(branchName, currentBranch, trackedBranches, promptBranch),
+					canDelete: Boolean(localBranch) && canDeleteGitOverlayBranch(branchName, currentBranch, availableTrackedBranches, promptBranch),
 					stale: Boolean(localBranch?.stale),
 				};
 			});
 
 			const cleanupBranches = [...localBranches.values()]
-				.filter(branch => canDeleteGitOverlayBranch(branch.name, currentBranch, trackedBranches, promptBranch))
+				.filter(branch => canDeleteGitOverlayBranch(branch.name, currentBranch, availableTrackedBranches, promptBranch))
 				.map((branch): GitOverlayBranchInfo => ({
 					name: branch.name,
 					current: false,
@@ -1127,7 +1137,7 @@ export class GitService {
 
 			const graph = buildGitOverlayGraph({
 				branchNames: [...new Set([...branches.map(branch => branch.name), ...cleanupBranches.map(branch => branch.name)])],
-				trackedBranches,
+				trackedBranches: availableTrackedBranches,
 				promptBranch,
 				currentBranch,
 				currentUpstream: currentBranchRecord?.upstream,
@@ -1800,15 +1810,19 @@ export class GitService {
 		promptBranch: string,
 		trackedBranches: string[],
 	): Promise<GitOverlaySnapshot> {
+		const normalizedTrackedBranches = Array.from(new Set(
+			trackedBranches.map(branch => branch.trim()).filter(Boolean),
+		));
 		const projects = await Promise.all(
 			this.getEffectiveProjects(projectPaths, projectNames)
-				.map(({ project, projectPath }) => this.buildProjectSnapshot(project, projectPath, promptBranch, trackedBranches)),
+				.map(({ project, projectPath }) => this.buildProjectSnapshot(project, projectPath, promptBranch, normalizedTrackedBranches)),
 		);
+		const resolvedTrackedBranches = resolveExistingGitOverlayTrackedBranches(normalizedTrackedBranches, projects);
 
 		return {
 			generatedAt: new Date().toISOString(),
 			promptBranch: promptBranch.trim(),
-			trackedBranches: trackedBranches.map(branch => branch.trim()).filter(Boolean),
+			trackedBranches: resolvedTrackedBranches,
 			projects,
 		};
 	}

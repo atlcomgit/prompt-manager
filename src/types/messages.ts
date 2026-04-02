@@ -18,7 +18,8 @@ export type WebviewToExtensionMessage =
 	| { type: 'openPrompt'; id: string }
 	| { type: 'importPrompt' }
 	| { type: 'exportPrompt'; id: string }
-	| { type: 'startChat'; id: string; prompt?: Prompt; forceRebindChat?: boolean; requestId?: string }
+	| { type: 'startChatPreflight'; id: string; prompt?: Prompt; forceRebindChat?: boolean; requestId?: string }
+	| { type: 'startChat'; id: string; prompt?: Prompt; forceRebindChat?: boolean; requestId?: string; skipBranchMismatchCheck?: boolean; originalStatus?: PromptStatus }
 	| { type: 'openChat'; id: string; sessionId: string }
 	| { type: 'generateTitle'; content: string }
 	| { type: 'generateDescription'; content: string }
@@ -129,6 +130,8 @@ export type ExtensionToWebviewMessage =
 	| { type: 'gitOverlayTrackedBranchPreference'; branch: string }
 	| { type: 'availableLanguages'; options: Array<{ id: string; name: string }> }
 	| { type: 'availableFrameworks'; options: Array<{ id: string; name: string }> }
+	| { type: 'startChatPreflightResult'; requestId?: string; shouldOpenGitFlow: boolean; snapshot?: GitOverlaySnapshot }
+	| { type: 'triggerStartChat'; promptId?: string }
 	| { type: 'promptSaving'; id: string; saving: boolean }
 	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string; requestId?: string }

@@ -11,10 +11,15 @@ import type {
 	GitOverlaySnapshot,
 } from '../../../types/git';
 import type { PromptStatus } from '../../../types/prompt';
-import { buildGitOverlayReviewRequestTitle } from '../../../utils/gitOverlay.js';
+import {
+	buildGitOverlayReviewRequestTitle,
+	collectGitOverlayStartChatBranchMismatches,
+	isGitOverlayStartChatBranchAllowed,
+} from '../../../utils/gitOverlay.js';
 
 type Props = {
 	open: boolean;
+	mode?: 'default' | 'start-chat-preflight' | 'open-chat-preflight';
 	snapshot: GitOverlaySnapshot | null;
 	commitMessages: Record<string, string>;
 	busyAction: string | null;
@@ -26,6 +31,7 @@ type Props = {
 	onClose: () => void;
 	onDone: (status: PromptStatus | null) => void;
 	onRefresh: (mode?: 'local' | 'fetch' | 'sync') => void;
+	onSwitchBranch?: (branch: string) => void;
 	onEnsurePromptBranch: (trackedBranch: string) => void;
 	onPush: (branch?: string) => void;
 	onCreateReviewRequest: (requests: GitOverlayProjectReviewRequestInput[]) => void;
@@ -40,6 +46,8 @@ type Props = {
 	onCommitStaged: (messages: GitOverlayProjectCommitMessage[]) => void;
 	onCommitMessageChange: (project: string, value: string) => void;
 	onTrackedBranchChange?: (trackedBranch: string) => void;
+	onContinueStartChat?: () => void;
+	onContinueOpenChat?: () => void;
 	t: (key: string) => string;
 };
 
@@ -342,6 +350,7 @@ const InlineHint: React.FC<{
 
 export const GitOverlay: React.FC<Props> = ({
 	open,
+	mode = 'default',
 	snapshot,
 	commitMessages,
 	busyAction,
@@ -353,6 +362,7 @@ export const GitOverlay: React.FC<Props> = ({
 	onClose,
 	onDone,
 	onRefresh,
+	onSwitchBranch,
 	onEnsurePromptBranch,
 	onPush,
 	onCreateReviewRequest,
@@ -367,6 +377,8 @@ export const GitOverlay: React.FC<Props> = ({
 	onCommitStaged,
 	onCommitMessageChange,
 	onTrackedBranchChange,
+	onContinueStartChat,
+	onContinueOpenChat,
 	t,
 }) => {
 	const [selectedTrackedBranch, setSelectedTrackedBranch] = useState('');
@@ -378,10 +390,17 @@ export const GitOverlay: React.FC<Props> = ({
 	const lastSyncedTrackedBranchRef = useRef('');
 
 	const trackedBranchOptions = useMemo(() => buildTrackedBranchOptions(snapshot), [snapshot]);
+	const isStartChatPreflightMode = mode === 'start-chat-preflight';
+	const isOpenChatPreflightMode = mode === 'open-chat-preflight';
+	const isChatPreflightMode = isStartChatPreflightMode || isOpenChatPreflightMode;
 	const promptBranch = (snapshot?.promptBranch || '').trim();
 	const availableProjects = useMemo(
 		() => (snapshot?.projects || []).filter(project => project.available),
 		[snapshot],
+	);
+	const startChatBranchMismatches = useMemo(
+		() => collectGitOverlayStartChatBranchMismatches(availableProjects, promptBranch, trackedBranchOptions),
+		[availableProjects, promptBranch, trackedBranchOptions],
 	);
 	const projectsWithChanges = useMemo(
 		() => (snapshot?.projects || []).filter(project => project.available && countProjectChanges(project) > 0),
@@ -456,6 +475,8 @@ export const GitOverlay: React.FC<Props> = ({
 	);
 	const allChangedProjectsReadyForCommit = projectsWithChanges.length > 0 && projectsReadyForCommit.length === projectsWithChanges.length;
 	const canPreparePromptBranch = Boolean(promptBranch) && Boolean(selectedTrackedBranch);
+	const canSwitchToTrackedBranch = Boolean(selectedTrackedBranch) && startChatBranchMismatches.length > 0;
+	const startChatBranchCheckDone = availableProjects.length > 0 && startChatBranchMismatches.length === 0;
 	const canGenerateAllCommitMessages = projectsReadyForGenerate.length > 0;
 	const canCommitAllProjects = allChangedProjectsReadyForCommit;
 	const canAttemptPush = Boolean(promptBranch)
@@ -510,6 +531,26 @@ export const GitOverlay: React.FC<Props> = ({
 			: doneStatus === 'report'
 				? t('status.report')
 				: '';
+	const isSwitchingTrackedBranch = Boolean(selectedTrackedBranch) && busyAction === `switchBranch:${selectedTrackedBranch}`;
+	const step1Title = isStartChatPreflightMode
+		? t('editor.gitOverlayStartChatCheckTitle')
+		: isOpenChatPreflightMode
+			? t('editor.gitOverlayOpenChatCheckTitle')
+			: t('editor.gitOverlayStepSwitchTitle');
+	const step1Hint = isStartChatPreflightMode
+		? t('editor.gitOverlayStartChatCheckHint')
+		: isOpenChatPreflightMode
+			? t('editor.gitOverlayOpenChatCheckHint')
+			: t('editor.gitOverlayStepSwitchHint');
+	const step1SuccessMessage = isChatPreflightMode ? t('editor.gitOverlayStartChatBranchCheckReady') : t('editor.gitOverlayAllProjectsOnPrompt');
+	const step1TargetBranchValue = isChatPreflightMode
+		? ([selectedTrackedBranch.trim(), promptBranch].filter(Boolean).join(' / ') || '—')
+		: (promptBranch || '—');
+	const dialogFooterHint = isStartChatPreflightMode
+		? (startChatBranchCheckDone ? t('editor.gitOverlayStartChatReadyHint') : t('editor.gitOverlayStartChatBlockedHint'))
+		: isOpenChatPreflightMode
+			? (startChatBranchCheckDone ? t('editor.gitOverlayOpenChatReadyHint') : t('editor.gitOverlayOpenChatBlockedHint'))
+		: (doneStatus ? t('editor.gitOverlayDoneStatusHint').replace('{status}', doneStatusLabel) : t('editor.gitOverlayDoneNoStatusHint'));
 
 	useEffect(() => {
 		if (!snapshot) {
@@ -776,8 +817,8 @@ export const GitOverlay: React.FC<Props> = ({
 								<div style={styles.sectionHeaderLeft}>
 									<div style={{ ...styles.sectionNumber, ...(stepAvailability.step1 ? null : styles.sectionNumberDisabled) }}>1</div>
 									<div>
-										<div style={styles.sectionTitle}>{t('editor.gitOverlayStepSwitchTitle')}</div>
-										<div style={styles.sectionSubtitle}>{t('editor.gitOverlayStepSwitchHint')}</div>
+										<div style={styles.sectionTitle}>{step1Title}</div>
+										<div style={styles.sectionSubtitle}>{step1Hint}</div>
 									</div>
 								</div>
 								<button
@@ -826,7 +867,9 @@ export const GitOverlay: React.FC<Props> = ({
 								</div>
 
 								{trackedBranchOptions.length === 0 ? <InlineHint message={t('editor.gitOverlayNoTrackedBranches')} tone="error" /> : null}
-								{projectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayProjectNeedsSwitch')} tone="error" /> : null}
+								{isChatPreflightMode
+									? (startChatBranchMismatches.length > 0 ? <InlineHint message={t(isOpenChatPreflightMode ? 'editor.gitOverlayOpenChatProjectNeedsSwitch' : 'editor.gitOverlayStartChatProjectNeedsSwitch')} tone="error" /> : null)
+									: (projectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayProjectNeedsSwitch')} tone="error" /> : null)}
 
 								<div style={styles.projectTable}>
 									<div style={styles.projectTableHeader}>
@@ -838,7 +881,10 @@ export const GitOverlay: React.FC<Props> = ({
 									</div>
 									{snapshot.projects.map((project) => {
 										const validation = projectValidations.get(project.project);
-										const rowHasError = !project.available || Boolean(validation?.branchMismatch);
+										const branchMismatch = isChatPreflightMode
+											? !isGitOverlayStartChatBranchAllowed(project.currentBranch, promptBranch, trackedBranchOptions)
+											: Boolean(validation?.branchMismatch);
+										const rowHasError = !project.available || branchMismatch;
 										return (
 											<div key={project.project} style={{
 												...styles.projectTableRow,
@@ -847,19 +893,19 @@ export const GitOverlay: React.FC<Props> = ({
 												<span style={styles.projectName}>{project.project}</span>
 												<span style={{
 													...styles.branchValue,
-													...(validation?.branchMismatch ? styles.branchValueError : null),
+													...(branchMismatch ? styles.branchValueError : null),
 												}}>
 													{project.currentBranch || '—'}
 												</span>
-												<span style={styles.branchValue}>{promptBranch || '—'}</span>
+												<span style={styles.branchValue}>{step1TargetBranchValue}</span>
 												<span style={styles.projectMeta}>{buildProjectChangesSummary(project, t)}</span>
 												<span style={{
 													...styles.statePill,
-													...(!project.available ? styles.statePillMuted : validation?.branchMismatch ? styles.statePillError : styles.statePillOk),
+													...(!project.available ? styles.statePillMuted : branchMismatch ? styles.statePillError : styles.statePillOk),
 												}}>
 													{!project.available
 														? t('editor.gitOverlayStateUnavailable')
-														: validation?.branchMismatch
+														: branchMismatch
 															? t('editor.gitOverlayStateNeedsSwitch')
 															: t('editor.gitOverlayStateReady')}
 												</span>
@@ -869,19 +915,31 @@ export const GitOverlay: React.FC<Props> = ({
 								</div>
 
 								<div style={styles.actionRowEnd}>
-									{allProjectsOnPromptBranch ? <span style={styles.successText}>{t('editor.gitOverlayAllProjectsOnPrompt')}</span> : null}
-									<ActionButton
-										label={t('editor.gitOverlaySwitchAllToPrompt')}
-										onClick={() => onEnsurePromptBranch(selectedTrackedBranch)}
-										disabled={!canPreparePromptBranch || allProjectsOnPromptBranch}
-										loading={isEnsuringPromptBranch}
-										variant="primary"
-									/>
+									{(isChatPreflightMode ? startChatBranchCheckDone : allProjectsOnPromptBranch) ? <span style={styles.successText}>{step1SuccessMessage}</span> : null}
+									{!isChatPreflightMode && !allProjectsOnPromptBranch ? (
+										<ActionButton
+											label={t('editor.gitOverlaySwitchAllToPrompt')}
+											onClick={() => onEnsurePromptBranch(selectedTrackedBranch)}
+											disabled={!canPreparePromptBranch}
+											loading={isEnsuringPromptBranch}
+											variant="primary"
+										/>
+									) : null}
+									{isChatPreflightMode && startChatBranchMismatches.length > 0 ? (
+										<ActionButton
+											label={t('editor.gitOverlaySwitchAllToTracked')}
+											onClick={() => onSwitchBranch?.(selectedTrackedBranch)}
+											disabled={!canSwitchToTrackedBranch}
+											loading={isSwitchingTrackedBranch}
+											variant="primary"
+										/>
+									) : null}
 								</div>
 							</div>
 							)}
 						</section>
 
+						{!isChatPreflightMode ? (
 						<section style={styles.sectionCard}>
 							<div style={styles.sectionHeader}>
 								<div style={styles.sectionHeaderLeft}>
@@ -1021,24 +1079,30 @@ export const GitOverlay: React.FC<Props> = ({
 								</div>
 
 								<div style={styles.actionRowEnd}>
-									<ActionButton
-										label={t('editor.gitOverlayGenerateAllCommitMessages')}
-										onClick={() => onGenerateCommitMessage()}
-										disabled={!canGenerateAllCommitMessages}
-										loading={isGeneratingAll}
-									/>
-									<ActionButton
-										label={t('editor.gitOverlayCommitAll')}
-										onClick={() => onCommitStaged(commitAllMessages)}
-										disabled={!canCommitAllProjects}
-										loading={isCommittingAll}
-										variant="primary"
-									/>
+									{projectsReadyForGenerate.length > 0 ? (
+										<ActionButton
+											label={t('editor.gitOverlayGenerateAllCommitMessages')}
+											onClick={() => onGenerateCommitMessage()}
+											disabled={!canGenerateAllCommitMessages}
+											loading={isGeneratingAll}
+										/>
+									) : null}
+									{projectsWithChanges.length > 0 ? (
+										<ActionButton
+											label={t('editor.gitOverlayCommitAll')}
+											onClick={() => onCommitStaged(commitAllMessages)}
+											disabled={!canCommitAllProjects}
+											loading={isCommittingAll}
+											variant="primary"
+										/>
+									) : null}
 								</div>
 							</div>
 							)}
 						</section>
+						) : null}
 
+						{!isChatPreflightMode ? (
 						<section style={styles.sectionCard}>
 							<div style={styles.sectionHeader}>
 								<div style={styles.sectionHeaderLeft}>
@@ -1071,18 +1135,22 @@ export const GitOverlay: React.FC<Props> = ({
 								{canAttemptPush && !pushRequired ? <div style={styles.successText}>{t('editor.gitOverlayPushAlreadyPublished')}</div> : null}
 
 								<div style={styles.actionRowEnd}>
-									<ActionButton
-										label={t('editor.gitOverlayPushPromptBranch')}
-										onClick={() => onPush(promptBranch)}
-										disabled={!canPush}
-										loading={isPushing}
-										variant="primary"
-									/>
+									{pushRequired ? (
+										<ActionButton
+											label={t('editor.gitOverlayPushPromptBranch')}
+											onClick={() => onPush(promptBranch)}
+											disabled={!canPush}
+											loading={isPushing}
+											variant="primary"
+										/>
+									) : null}
 								</div>
 							</div>
 							)}
 						</section>
+						) : null}
 
+						{!isChatPreflightMode ? (
 						<section style={styles.sectionCard}>
 							<div style={styles.sectionHeader}>
 								<div style={styles.sectionHeaderLeft}>
@@ -1243,18 +1311,22 @@ export const GitOverlay: React.FC<Props> = ({
 												) : null}
 
 												<div style={styles.projectCardFooter}>
-													<ActionButton
-														label={t('editor.gitOverlayGenerateReviewRequestTitle')}
-														onClick={() => regenerateReviewDraftTitle(project.project)}
-														disabled={hasRequest || !project.review.remote?.cliAvailable}
-													/>
-													<ActionButton
-														label={t('editor.gitOverlayCreateReviewRequest').replace('{label}', actionLabel)}
-														onClick={() => handleCreateReviewRequest(project)}
-														disabled={!canCreateReviewRequest}
-														loading={isCreatingReviewRequest}
-														variant="primary"
-													/>
+													{!hasRequest ? (
+														<ActionButton
+															label={t('editor.gitOverlayGenerateReviewRequestTitle')}
+															onClick={() => regenerateReviewDraftTitle(project.project)}
+															disabled={!project.review.remote?.cliAvailable}
+														/>
+													) : null}
+													{!hasRequest ? (
+														<ActionButton
+															label={t('editor.gitOverlayCreateReviewRequest').replace('{label}', actionLabel)}
+															onClick={() => handleCreateReviewRequest(project)}
+															disabled={!canCreateReviewRequest}
+															loading={isCreatingReviewRequest}
+															variant="primary"
+														/>
+													) : null}
 												</div>
 											</div>
 										);
@@ -1263,7 +1335,9 @@ export const GitOverlay: React.FC<Props> = ({
 							</div>
 							)}
 						</section>
+						) : null}
 
+						{!isChatPreflightMode ? (
 						<section style={styles.sectionCard}>
 							<div style={styles.sectionHeader}>
 								<div style={styles.sectionHeaderLeft}>
@@ -1308,24 +1382,41 @@ export const GitOverlay: React.FC<Props> = ({
 								</div>
 
 								<div style={styles.actionRowEnd}>
-									<ActionButton
-										label={t('editor.gitOverlayMergeNow')}
-										onClick={() => onMergePromptBranch(selectedTrackedBranch, stayOnTrackedBranch)}
-										disabled={!canMerge}
-										loading={isMerging}
-										variant="primary"
-									/>
+									{!completedActions.merge ? (
+										<ActionButton
+											label={t('editor.gitOverlayMergeNow')}
+											onClick={() => onMergePromptBranch(selectedTrackedBranch, stayOnTrackedBranch)}
+											disabled={!canMerge}
+											loading={isMerging}
+											variant="primary"
+										/>
+									) : null}
 								</div>
 							</div>
 							)}
 						</section>
+						) : null}
 					</div>
 					<div style={styles.dialogFooter}>
-						<div style={styles.dialogFooterHint}>
-							{doneStatus ? t('editor.gitOverlayDoneStatusHint').replace('{status}', doneStatusLabel) : t('editor.gitOverlayDoneNoStatusHint')}
-						</div>
+						<div style={styles.dialogFooterHint}>{dialogFooterHint}</div>
 						<div style={styles.dialogFooterActions}>
-							<ActionButton label={t('editor.gitOverlayDone')} onClick={() => onDone(doneStatus)} variant="primary" />
+							{isStartChatPreflightMode ? (
+								<ActionButton
+									label={t('editor.gitOverlayStart')}
+									onClick={() => onContinueStartChat?.()}
+									disabled={!startChatBranchCheckDone}
+									variant="primary"
+								/>
+							) : isOpenChatPreflightMode ? (
+								<ActionButton
+									label={t('actions.openChat')}
+									onClick={() => onContinueOpenChat?.()}
+									disabled={!startChatBranchCheckDone}
+									variant="primary"
+								/>
+							) : (
+								<ActionButton label={t('editor.gitOverlayDone')} onClick={() => onDone(doneStatus)} variant="primary" />
+							)}
 						</div>
 					</div>
 					</>

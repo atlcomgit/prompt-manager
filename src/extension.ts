@@ -60,8 +60,8 @@ export function activate(context: vscode.ExtensionContext) {
 	const extensionPackage = context.extension.packageJSON as { description?: string; version?: string };
 	const extensionVersion = String(extensionPackage.version || '0.0.0');
 
-	void workspaceService.ensureChatInstructionsFile(stateService.getGlobalAgentContext()).catch(() => {
-		// keep activation resilient if chat settings/files sync fails
+	void workspaceService.syncGlobalAgentInstructionsFile(stateService.getGlobalAgentContext()).catch(() => {
+		// keep activation resilient if project instruction file sync fails
 	});
 
 	// Initialize providers

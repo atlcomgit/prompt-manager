@@ -142,3 +142,4 @@ MIT © alek
 <p align="center">
   Made with ⚡ for VS Code
 </p>
+

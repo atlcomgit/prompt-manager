@@ -1,8 +1,7 @@
 /**
  * MemoryDatabaseService — Repository layer for project memory.
  * Uses sql.js (SQLite over WASM) for local persistent storage.
- * Handles schema migrations, CRUD operations, backup/restore,
- * and automatic .gitignore management.
+ * Handles schema migrations, CRUD operations, and backup/restore.
  */
 
 import * as vscode from 'vscode';
@@ -49,7 +48,7 @@ export class MemoryDatabaseService {
 	// ---- Initialization ----
 
 	/**
-	 * Initialize the database: open or create, run migrations, manage .gitignore.
+	 * Initialize the database: open or create, run migrations, persist to disk.
 	 * @param workspaceRoot Workspace root path
 	 */
 	async initialize(workspaceRoot: string): Promise<void> {
@@ -83,9 +82,6 @@ export class MemoryDatabaseService {
 
 		// Persist to disk
 		this.save();
-
-		// Ensure .gitignore has memory.db entries
-		this.ensureGitignore(workspaceRoot);
 	}
 
 	/**
@@ -387,36 +383,6 @@ export class MemoryDatabaseService {
 			this.save();
 			this.db.close();
 			this.db = null;
-		}
-	}
-
-	// ---- .gitignore management ----
-
-	/**
-	 * Ensure .gitignore includes memory.db and backup files.
-	 */
-	private ensureGitignore(workspaceRoot: string): void {
-		const gitignorePath = path.join(workspaceRoot, '.gitignore');
-		const entries = ['memory.db', '*.db-backup'];
-
-		let content = '';
-		if (fs.existsSync(gitignorePath)) {
-			content = fs.readFileSync(gitignorePath, 'utf-8');
-		}
-
-		const linesToAdd: string[] = [];
-		for (const entry of entries) {
-			// Check whether the pattern is anywhere in .gitignore
-			const pattern = entry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-			if (!new RegExp(`(^|\\n)\\s*${pattern}\\s*(\\n|$)`).test(content)) {
-				linesToAdd.push(entry);
-			}
-		}
-
-		if (linesToAdd.length > 0) {
-			const suffix = content.endsWith('\n') ? '' : '\n';
-			const addition = `${suffix}\n# Prompt Manager memory database\n${linesToAdd.join('\n')}\n`;
-			fs.writeFileSync(gitignorePath, content + addition, 'utf-8');
 		}
 	}
 

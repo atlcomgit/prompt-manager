@@ -90,6 +90,110 @@ function countProjectChanges(project: GitOverlayProjectSnapshot): number {
 		+ project.changeGroups.untracked.length;
 }
 
+function countProjectLikeChanges(project: Pick<GitOverlayProjectSnapshot, 'changeGroups'>): number {
+	return project.changeGroups.merge.length
+		+ project.changeGroups.staged.length
+		+ project.changeGroups.workingTree.length
+		+ project.changeGroups.untracked.length;
+}
+
+function doesGitOverlayBranchExist(
+	project: Pick<GitOverlayProjectSnapshot, 'branches'>,
+	branchName: string,
+): boolean {
+	return Boolean(findGitOverlayBranchInfo(project, branchName)?.exists);
+}
+
+function shouldGitOverlayRequireSourceBranch(
+	project: Pick<GitOverlayProjectSnapshot, 'branches'>,
+	targetBranch: string,
+): boolean {
+	const normalizedTargetBranch = targetBranch.trim();
+	if (!normalizedTargetBranch) {
+		return false;
+	}
+
+	return !doesGitOverlayBranchExist(project, normalizedTargetBranch);
+}
+
+function isGitOverlayTrackedBranch(
+	branchName: string,
+	trackedBranches: string[],
+): boolean {
+	const normalizedBranchName = branchName.trim();
+	if (!normalizedBranchName) {
+		return false;
+	}
+
+	return trackedBranches
+		.map(branch => branch.trim())
+		.filter(Boolean)
+		.includes(normalizedBranchName);
+}
+
+function resolveGitOverlayImplicitExpectedBranch(
+	project: Pick<GitOverlayProjectSnapshot, 'currentBranch'>,
+	promptBranch: string,
+	trackedBranches: string[],
+): string {
+	const normalizedCurrentBranch = project.currentBranch.trim();
+	if (!normalizedCurrentBranch) {
+		return '';
+	}
+
+	const normalizedPromptBranch = promptBranch.trim();
+	if (normalizedPromptBranch && normalizedCurrentBranch === normalizedPromptBranch) {
+		return normalizedCurrentBranch;
+	}
+
+	if (!normalizedPromptBranch && isGitOverlayTrackedBranch(normalizedCurrentBranch, trackedBranches)) {
+		return normalizedCurrentBranch;
+	}
+
+	return '';
+}
+
+function isGitOverlayStep1ProjectActionable(
+	project: Pick<GitOverlayProjectSnapshot, 'currentBranch' | 'changeGroups'>,
+	promptBranch: string,
+	trackedBranches: string[],
+): boolean {
+	return countProjectLikeChanges(project) > 0
+		|| !isGitOverlayStartChatBranchAllowed(project.currentBranch, promptBranch, trackedBranches);
+}
+
+export function collectGitOverlayProjectsWithChangesOutsideTrackedOrPrompt<T extends Pick<GitOverlayProjectSnapshot, 'currentBranch' | 'changeGroups'>>(
+	projects: T[],
+	promptBranch: string,
+	trackedBranches: string[],
+): T[] {
+	return projects.filter(project => countProjectLikeChanges(project) > 0
+		&& !isGitOverlayStartChatBranchAllowed(project.currentBranch, promptBranch, trackedBranches));
+}
+
+export function collectGitOverlayProjectsWithChangesOnTrackedBranches<T extends Pick<GitOverlayProjectSnapshot, 'currentBranch' | 'changeGroups'>>(
+	projects: T[],
+	trackedBranches: string[],
+): T[] {
+	const trackedBranchSet = new Set(
+		trackedBranches
+			.map(branch => branch.trim())
+			.filter(Boolean),
+	);
+
+	return projects.filter(project => countProjectLikeChanges(project) > 0
+		&& trackedBranchSet.has(project.currentBranch.trim()));
+}
+
+export function areGitOverlayProjectsOnTrackedOrPrompt<T extends Pick<GitOverlayProjectSnapshot, 'currentBranch'>>(
+	projects: T[],
+	promptBranch: string,
+	trackedBranches: string[],
+): boolean {
+	return projects.length > 0
+		&& projects.every(project => isGitOverlayStartChatBranchAllowed(project.currentBranch, promptBranch, trackedBranches));
+}
+
 function collectProjectChanges(project: GitOverlayProjectSnapshot): GitOverlayChangeFile[] {
 	return [
 		...project.changeGroups.merge,
@@ -252,8 +356,12 @@ function buildProjectExpectedBranchOptions(
 ): string[] {
 	const result = new Set<string>(buildProjectTrackedBranchOptions(project, trackedBranchOptions, preferredTrackedBranch));
 	const normalizedPromptBranch = project.promptBranch.trim();
+	const normalizedCurrentBranch = project.currentBranch.trim();
 	if (normalizedPromptBranch) {
 		result.add(normalizedPromptBranch);
+	}
+	if (normalizedCurrentBranch) {
+		result.delete(normalizedCurrentBranch);
 	}
 	return [...result];
 }
@@ -324,6 +432,11 @@ function resolveTargetBranchesByProject(
 		}
 
 		const currentBranch = project.currentBranch.trim();
+		const implicitExpectedBranch = resolveGitOverlayImplicitExpectedBranch(project, normalizedPromptBranch, trackedBranchOptions);
+		if (implicitExpectedBranch) {
+			continue;
+		}
+
 		if (normalizedPromptBranch && options.includes(normalizedPromptBranch)) {
 			result[project.project] = normalizedPromptBranch;
 			continue;
@@ -331,11 +444,6 @@ function resolveTargetBranchesByProject(
 
 		if (sourceBranch && options.includes(sourceBranch)) {
 			result[project.project] = sourceBranch;
-			continue;
-		}
-
-		if (currentBranch && options.includes(currentBranch)) {
-			result[project.project] = currentBranch;
 			continue;
 		}
 
@@ -760,6 +868,14 @@ export const GitOverlay: React.FC<Props> = ({
 		() => flowAvailableProjects.filter(project => countProjectChanges(project) > 0),
 		[flowAvailableProjects],
 	);
+	const projectsWithChangesOutsideTrackedOrPrompt = useMemo(
+		() => collectGitOverlayProjectsWithChangesOutsideTrackedOrPrompt(flowAvailableProjects, promptBranch, trackedBranchOptions),
+		[flowAvailableProjects, promptBranch, trackedBranchOptions],
+	);
+	const projectsWithChangesOnTrackedBranches = useMemo(
+		() => collectGitOverlayProjectsWithChangesOnTrackedBranches(flowAvailableProjects, trackedBranchOptions),
+		[flowAvailableProjects, trackedBranchOptions],
+	);
 	const allowDirtyTrackedProjectsWithoutPromptBranch = !isChatPreflightMode
 		&& !promptBranch
 		&& projectsWithChanges.length > 0;
@@ -825,44 +941,48 @@ export const GitOverlay: React.FC<Props> = ({
 	);
 	const step1ProjectsBlockedForApply = useMemo(
 		() => step1AvailableProjects.filter((project) => {
-			if (countProjectChanges(project) === 0) {
+			if (!isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions)) {
 				return false;
 			}
 
 			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
-			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
+			const implicitTargetBranch = resolveGitOverlayImplicitExpectedBranch(project, promptBranch, trackedBranchOptions);
+			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim() || implicitTargetBranch;
 			const needsSync = Boolean(project.upstream.trim()) && project.behind > 0;
+			const targetRequiresSource = shouldGitOverlayRequireSourceBranch(project, targetBranch);
 
 			if (needsSync || !targetBranch) {
 				return true;
 			}
 
-			if (targetBranch === promptBranch.trim()) {
+			if (targetRequiresSource) {
 				return !sourceBranch;
 			}
 
 			return false;
 		}),
-		[promptBranch, resolvedTargetBranchesByProject, resolvedTrackedBranchesByProject, step1AvailableProjects],
+		[promptBranch, resolvedTargetBranchesByProject, resolvedTrackedBranchesByProject, step1AvailableProjects, trackedBranchOptions],
 	);
 	const step1ProjectsReadyForApply = useMemo(
 		() => step1AvailableProjects.filter((project) => {
-			if (countProjectChanges(project) === 0) {
+			if (!isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions)) {
 				return false;
 			}
 
 			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
-			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
+			const implicitTargetBranch = resolveGitOverlayImplicitExpectedBranch(project, promptBranch, trackedBranchOptions);
+			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim() || implicitTargetBranch;
 			const needsSync = Boolean(project.upstream.trim()) && project.behind > 0;
+			const targetRequiresSource = shouldGitOverlayRequireSourceBranch(project, targetBranch);
 			if (needsSync || !targetBranch) {
 				return false;
 			}
-			if (targetBranch === promptBranch.trim() && !sourceBranch) {
+			if (targetRequiresSource && !sourceBranch) {
 				return false;
 			}
 			return project.currentBranch.trim() !== targetBranch;
 		}),
-		[promptBranch, resolvedTargetBranchesByProject, resolvedTrackedBranchesByProject, step1AvailableProjects],
+		[promptBranch, resolvedTargetBranchesByProject, resolvedTrackedBranchesByProject, step1AvailableProjects, trackedBranchOptions],
 	);
 	const step1ApplySourceBranches = useMemo(() => {
 		const result: Record<string, string> = {};
@@ -886,10 +1006,6 @@ export const GitOverlay: React.FC<Props> = ({
 		}
 		return result;
 	}, [resolvedTargetBranchesByProject, step1ProjectsReadyForApply]);
-	const projectsNeedingPush = useMemo(
-		() => promptBranchProjects.filter(project => !project.upstream || project.ahead > 0),
-		[promptBranchProjects],
-	);
 	const reviewProjects = useMemo(
 		() => promptBranchProjects,
 		[promptBranchProjects],
@@ -954,11 +1070,24 @@ export const GitOverlay: React.FC<Props> = ({
 		&& !promptBranch
 		&& projectsWithChanges.length > 0
 		&& defaultStep1BranchMismatches.length === 0;
+	const allStep1ProjectsOnTrackedBranches = useMemo(
+		() => areGitOverlayProjectsOnTrackedOrPrompt(step1AvailableProjects, '', trackedBranchOptions),
+		[step1AvailableProjects, trackedBranchOptions],
+	);
+	const showPromptBranchFallbackInfo = !isChatPreflightMode
+		&& !promptBranch
+		&& projectsWithChanges.length > 0
+		&& projectsWithChangesOutsideTrackedOrPrompt.length === 0;
+	const showPromptBranchMissingError = !promptBranch
+		&& !showPromptBranchFallbackInfo
+		&& !allStep1ProjectsOnTrackedBranches;
+	const showProjectNeedsTrackedOrPromptSwitchHint = defaultStep1BranchMismatches.length > 0
+		&& !(!promptBranch && allStep1ProjectsOnTrackedBranches);
 	const step1Pending = isChatPreflightMode
 		? !startChatBranchCheckDone || syncRequired
 		: (allowDirtyTrackedProjectsWithoutPromptBranch
 			? defaultStep1BranchMismatches.length > 0 || syncRequired
-			: !promptBranch || defaultStep1BranchMismatches.length > 0 || syncRequired);
+			: showPromptBranchMissingError || showProjectNeedsTrackedOrPromptSwitchHint || syncRequired);
 	const shouldShowStep1Success = !step1Pending
 		&& (
 			isChatPreflightMode
@@ -978,14 +1107,41 @@ export const GitOverlay: React.FC<Props> = ({
 		&& step1ProjectsOffPromptBranch.length > 0
 		&& defaultStep1BranchMismatches.length === 0
 		&& !syncRequired;
+	const showStep1NoProjectChangesHint = !isChatPreflightMode
+		&& step1Projects.length > 0
+		&& projectsWithChanges.length === 0
+		&& trackedBranchOptions.length > 0
+		&& !showPromptBranchFallbackInfo
+		&& !showPromptBranchMissingError
+		&& !defaultStep1ReadyOnTrackedBranches
+		&& !showProjectNeedsTrackedOrPromptSwitchHint
+		&& !showNoChangesToCommitHint
+		&& !syncRequired
+		&& !shouldShowStep1Success;
 	const canApplyAllBranchTargets = step1ProjectsReadyForApply.length > 0 && step1ProjectsBlockedForApply.length === 0;
 	const canGenerateAllCommitMessages = projectsReadyForGenerate.length > 0;
 	const canCommitAllProjects = allChangedProjectsReadyForCommit;
-	const canAttemptPush = Boolean(promptBranch)
-		&& flowPostCommitProjects.length > 0
-		&& flowProjectsOffPromptBranch.length === 0
+	const canPushTrackedBranchesWithoutPromptBranch = !promptBranch && allStep1ProjectsOnTrackedBranches;
+	const allFlowProjectsOnTrackedOrPrompt = useMemo(
+		() => areGitOverlayProjectsOnTrackedOrPrompt(flowAvailableProjects, promptBranch, trackedBranchOptions),
+		[flowAvailableProjects, promptBranch, trackedBranchOptions],
+	);
+	const pushTargetProjects = useMemo(
+		() => promptBranch
+			? promptBranchProjects
+			: (canPushTrackedBranchesWithoutPromptBranch ? step1AvailableProjects : []),
+		[canPushTrackedBranchesWithoutPromptBranch, promptBranch, promptBranchProjects, step1AvailableProjects],
+	);
+	const showPushNeedsPromptBranchHint = !promptBranch && !canPushTrackedBranchesWithoutPromptBranch;
+	const canAttemptPush = pushTargetProjects.length > 0
+		&& !step1Pending
+		&& (!promptBranch || flowProjectsOffPromptBranch.length === 0)
 		&& !hasConflicts
 		&& projectsWithChanges.length === 0;
+	const projectsNeedingPush = useMemo(
+		() => pushTargetProjects.filter(project => !project.upstream || project.ahead > 0),
+		[pushTargetProjects],
+	);
 	const pushRequired = canAttemptPush && projectsNeedingPush.length > 0;
 	const canPush = pushRequired;
 	const step2Pending = !step1Pending && projectsWithChanges.length > 0;
@@ -1011,12 +1167,13 @@ export const GitOverlay: React.FC<Props> = ({
 		&& projectsWithChanges.length === 0
 		&& !step4Pending;
 	const showEmptyStep1Hint = !isChatPreflightMode && step1Projects.length === 0;
+	const canProceedToReviewAndMerge = Boolean(promptBranch);
 	const stepAvailability: Record<SectionKey, boolean> = {
 		step1: true,
 		step2: !step1Pending,
 		step3: !step1Pending && !step2Pending,
-		step4: !step1Pending && !step2Pending && !step3Pending,
-		step5: !step1Pending && !step2Pending && !step3Pending && !step4Pending,
+		step4: canProceedToReviewAndMerge && !step1Pending && !step2Pending && !step3Pending,
+		step5: canProceedToReviewAndMerge && !step1Pending && !step2Pending && !step3Pending && !step4Pending,
 	};
 	const firstPendingStep = step1Pending ? 1 : step2Pending ? 2 : step3Pending ? 3 : step4Pending ? 4 : null;
 	const autoCollapsedSections = useMemo<Record<SectionKey, boolean>>(
@@ -1405,14 +1562,14 @@ export const GitOverlay: React.FC<Props> = ({
 									<label style={styles.label}>{t('editor.gitOverlayPromptBranch')}</label>
 									<div style={{
 										...styles.readonlyField,
-										...(!promptBranch ? styles.errorField : null),
+										...(showPromptBranchMissingError ? styles.errorField : null),
 									}}>
-										{promptBranch || t('editor.gitOverlayPromptBranchMissing')}
+										{promptBranch || (showPromptBranchMissingError ? t('editor.gitOverlayPromptBranchMissing') : '—')}
 									</div>
-									{!promptBranch ? <div style={styles.errorText}>{t('editor.gitOverlayFieldNeedsValue')}</div> : null}
 								</div>
 
 								{trackedBranchOptions.length === 0 ? <InlineHint message={t('editor.gitOverlayNoTrackedBranches')} tone="error" /> : null}
+								{showPromptBranchFallbackInfo ? <InlineHint message={t('editor.gitOverlayPromptBranchFallbackInfo')} tone="info" /> : null}
 								{isChatPreflightMode
 									? (syncRequired
 										? <InlineHint message={t('editor.gitOverlayPullChangesRequired')} tone="error" />
@@ -1430,7 +1587,7 @@ export const GitOverlay: React.FC<Props> = ({
 												)}
 												tone={isDraftPrompt ? 'info' : 'error'}
 											/>)
-										: defaultStep1BranchMismatches.length > 0
+									: showProjectNeedsTrackedOrPromptSwitchHint
 											? <InlineHint message={t('editor.gitOverlayProjectNeedsTrackedOrPromptSwitch')} tone="error" />
 											: syncRequired
 												? <InlineHint message={t('editor.gitOverlayPullChangesRequired')} tone="error" />
@@ -1438,6 +1595,7 @@ export const GitOverlay: React.FC<Props> = ({
 
 									{showEmptyStep1Hint ? <InlineHint message={t('editor.gitOverlayStepSwitchNothingToDo')} tone="info" /> : null}
 									{showNoChangesToCommitHint ? <InlineHint message={t('editor.gitOverlayStepSwitchNoChangesToCommit')} tone="info" /> : null}
+									{showStep1NoProjectChangesHint ? <InlineHint message={t('editor.gitOverlayStepNoProjectChanges')} tone="info" /> : null}
 
 								{step1Projects.length > 0 ? (
 									<div style={styles.projectTable}>
@@ -1458,30 +1616,37 @@ export const GitOverlay: React.FC<Props> = ({
 											const projectTrackedBranchOptions = buildProjectTrackedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
 											const projectExpectedBranchOptions = buildProjectExpectedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
 											const projectNeedsSync = project.available && Boolean(project.upstream.trim()) && project.behind > 0;
-											const rowOnPrompt = Boolean(promptBranch) && currentBranch === promptBranch && selectedTargetBranch === promptBranch;
+											const projectActionableForApply = isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions);
+											const implicitTargetBranch = resolveGitOverlayImplicitExpectedBranch(project, promptBranch, trackedBranchOptions);
+											const effectiveTargetBranch = selectedTargetBranch || implicitTargetBranch;
+											const targetRequiresSource = shouldGitOverlayRequireSourceBranch(project, effectiveTargetBranch);
+											const hideSourceBranchField = projectTrackedBranchOptions.length === 0
+												|| (Boolean(effectiveTargetBranch) && !targetRequiresSource);
+											const hideExpectedBranchField = projectExpectedBranchOptions.length === 0;
+											const rowOnPrompt = Boolean(promptBranch) && currentBranch === promptBranch && effectiveTargetBranch === promptBranch;
 											const rowCanApply = project.available
-												&& projectHasChanges
+												&& projectActionableForApply
 												&& !projectNeedsSync
-												&& Boolean(selectedTargetBranch)
-												&& (selectedTargetBranch !== promptBranch || Boolean(selectedTrackedBranch))
-												&& currentBranch !== selectedTargetBranch;
+												&& Boolean(effectiveTargetBranch)
+												&& (!targetRequiresSource || Boolean(selectedTrackedBranch))
+												&& currentBranch !== effectiveTargetBranch;
 											const rowNeedsDecision = project.available
-												&& projectHasChanges
+												&& projectActionableForApply
 												&& !rowOnPrompt
-												&& (!selectedTrackedBranch || !selectedTargetBranch || projectNeedsSync || currentBranch !== selectedTargetBranch);
+												&& ((targetRequiresSource && !selectedTrackedBranch) || !effectiveTargetBranch || projectNeedsSync || currentBranch !== effectiveTargetBranch);
 											const rowStatusLabel = !project.available
 												? t('editor.gitOverlayStateUnavailable')
-												: !projectHasChanges
+												: !projectActionableForApply
 													? t('editor.gitOverlayStateNoChanges')
 												: projectNeedsSync
 													? t('editor.gitOverlayStateNeedsSync')
-													: !selectedTrackedBranch
+														: (targetRequiresSource && !selectedTrackedBranch)
 														? t('editor.gitOverlayStateNeedsSource')
-														: !selectedTargetBranch
+														: !effectiveTargetBranch
 															? t('editor.gitOverlayStateNeedsTarget')
 															: rowOnPrompt
 																? t('editor.gitOverlayStateOnPrompt')
-																: currentBranch === selectedTargetBranch
+																: currentBranch === effectiveTargetBranch
 																	? t('editor.gitOverlayStateReady')
 																	: t('editor.gitOverlayStateNeedsSwitch');
 											const rowActionLoading = busyAction === `applyBranchTargets:${project.project}` || isApplyingAllBranchTargets;
@@ -1490,7 +1655,7 @@ export const GitOverlay: React.FC<Props> = ({
 												: (!project.available ? styles.projectTableRowMuted : rowNeedsDecision ? styles.projectTableRowDecision : null);
 											const rowStatusStyle = !project.available
 												? styles.projectStatusTextMuted
-												: !projectHasChanges
+												: !projectActionableForApply
 													? styles.projectStatusTextMuted
 												: rowOnPrompt
 													? styles.projectStatusTextOk
@@ -1507,42 +1672,49 @@ export const GitOverlay: React.FC<Props> = ({
 														{currentBranch || '—'}
 													</span>
 													<span style={styles.branchValue}>
-													<select
-														style={{
-															...styles.select,
-															paddingTop: 6,
-															paddingBottom: 6,
-															minWidth: 0,
-															...(!selectedTrackedBranch ? styles.errorField : null),
-														}}
-														value={selectedTrackedBranch}
-														onChange={(event) => handleTrackedBranchSelection(project.project, event.target.value)}
-														disabled={projectTrackedBranchOptions.length === 0}
-													>
-														<option value="">{t('editor.gitOverlaySelectPlaceholder')}</option>
-														{projectTrackedBranchOptions.map(branch => (
-															<option key={`${project.project}-${branch}`} value={branch}>{branch}</option>
-														))}
-													</select>
-												</span>
-													<span style={styles.branchValue}>
+													{hideSourceBranchField ? (
+														<span style={styles.projectTableCellCentered}>—</span>
+													) : (
 														<select
 															style={{
 																...styles.select,
 																paddingTop: 6,
 																paddingBottom: 6,
 																minWidth: 0,
-																...(!selectedTargetBranch ? styles.errorField : null),
+																...((targetRequiresSource && !selectedTrackedBranch) ? styles.errorField : null),
 															}}
-															value={selectedTargetBranch}
-															onChange={(event) => handleTargetBranchSelection(project.project, event.target.value)}
-															disabled={projectExpectedBranchOptions.length === 0}
+															value={selectedTrackedBranch}
+															onChange={(event) => handleTrackedBranchSelection(project.project, event.target.value)}
+															disabled={projectTrackedBranchOptions.length === 0}
 														>
 															<option value="">{t('editor.gitOverlaySelectPlaceholder')}</option>
-															{projectExpectedBranchOptions.map(branch => (
-																<option key={`${project.project}-target-${branch}`} value={branch}>{branch}</option>
+															{projectTrackedBranchOptions.map(branch => (
+																<option key={`${project.project}-${branch}`} value={branch}>{branch}</option>
 															))}
 														</select>
+													)}
+												</span>
+													<span style={styles.branchValue}>
+														{hideExpectedBranchField ? (
+															<span style={styles.projectTableCellCentered}>—</span>
+														) : (
+															<select
+																style={{
+																	...styles.select,
+																	paddingTop: 6,
+																	paddingBottom: 6,
+																	minWidth: 0,
+																	...(!effectiveTargetBranch ? styles.errorField : null),
+																}}
+																value={selectedTargetBranch}
+																onChange={(event) => handleTargetBranchSelection(project.project, event.target.value)}
+															>
+																<option value="">{t('editor.gitOverlaySelectPlaceholder')}</option>
+																{projectExpectedBranchOptions.map(branch => (
+																	<option key={`${project.project}-target-${branch}`} value={branch}>{branch}</option>
+																))}
+															</select>
+														)}
 													</span>
 													<span style={styles.projectMetaCentered} title={buildProjectChangesSummary(project, t)}>{countProjectChanges(project)}</span>
 												<span style={styles.projectStateCell}>
@@ -1798,8 +1970,17 @@ export const GitOverlay: React.FC<Props> = ({
 								isSectionAutoCollapsed('step3') ? <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div> : null
 							) : (
 							<div style={styles.sectionBody}>
-								{!promptBranch ? <InlineHint message={t('editor.gitOverlayPushNeedsPromptBranch')} tone="error" /> : null}
-								{flowProjectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayPushNeedsPromptCheckout')} tone="error" /> : null}
+								{showPushNeedsPromptBranchHint ? <InlineHint message={t('editor.gitOverlayPushNeedsPromptBranch')} tone="error" /> : null}
+								{projectsWithChangesOutsideTrackedOrPrompt.length > 0 ? <InlineHint message={t('editor.gitOverlayPushNeedsTrackedOrPromptBranch')} tone="error" /> : null}
+								{projectsWithChangesOnTrackedBranches.map(project => (
+									<InlineHint
+										key={`push-tracked-${project.project}`}
+										message={t('editor.gitOverlayPushTrackedBranchInfo')
+											.replace('{project}', project.project)
+											.replace('{branch}', project.currentBranch.trim() || '—')}
+										tone="info"
+									/>
+								))}
 								{projectsWithChanges.length > 0 ? <InlineHint message={t('editor.gitOverlayPushNeedsCleanState')} tone="error" /> : null}
 								{hasConflicts ? <InlineHint message={t('editor.gitOverlayMergeBlocked')} tone="error" /> : null}
 
@@ -1810,7 +1991,7 @@ export const GitOverlay: React.FC<Props> = ({
 									{pushRequired ? (
 										<ActionButton
 											label={t('editor.gitOverlayPushPromptBranch')}
-														onClick={() => onPush(promptBranch, projectsNeedingPush.map(project => project.project))}
+														onClick={() => onPush(promptBranch || undefined, projectsNeedingPush.map(project => project.project))}
 											disabled={!canPush}
 											loading={isPushing}
 											variant="primary"

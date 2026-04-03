@@ -1882,18 +1882,22 @@ export class GitService {
 			}
 
 			if (normalizedPromptBranch && targetBranch === normalizedPromptBranch) {
+				const promptBranchExistsLocally = await this.branchExistsLocally(projectPath, normalizedPromptBranch);
+				const promptBranchRemoteRef = promptBranchExistsLocally
+					? ''
+					: await this.findRemoteBranchRef(projectPath, normalizedPromptBranch);
+
+				if (promptBranchExistsLocally || promptBranchRemoteRef) {
+					await this.switchProjectBranch(project, projectPath, normalizedPromptBranch, allowedBaseBranches);
+					return;
+				}
+
 				const sourceBranch = (sourceSelections[project] || '').trim();
 				if (!sourceBranch) {
 					throw new Error('Не выбрана исходная tracked-ветка для создания ветки промпта.');
 				}
 
 				await this.ensureBranchCheckedOutAndPulled(projectPath, sourceBranch);
-				if (await this.branchExistsLocally(projectPath, normalizedPromptBranch)) {
-					await this.runGitFileMutation(projectPath, ['checkout', normalizedPromptBranch]);
-					await this.pullCurrentBranchIfTracked(projectPath);
-					return;
-				}
-
 				await this.runGitFileMutation(projectPath, ['checkout', '-b', normalizedPromptBranch, sourceBranch]);
 				return;
 			}

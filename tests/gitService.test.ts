@@ -57,21 +57,19 @@ async function importGitService() {
 	}
 }
 
-test('GitService applyBranchTargetsByProject pulls source branch and existing expected branch', async () => {
+test('GitService applyBranchTargetsByProject switches to existing prompt branch without source branch', async () => {
 	const { GitService } = await importGitService();
 	const service = new GitService() as any;
 	const calls: string[][] = [];
 	let currentBranch = 'feature/old';
 
 	service.getCurrentBranch = async () => currentBranch;
-	service.branchExistsLocally = async (_projectPath: string, branchName: string) => branchName === 'main' || branchName === 'feature/task-42';
-	service.findRemoteBranchRef = async () => '';
+	service.branchExistsLocally = async () => false;
+	service.findRemoteBranchRef = async (_projectPath: string, branchName: string) => branchName === 'feature/task-42'
+		? 'origin/feature/task-42'
+		: '';
 	service.getAllowedBaseBranches = () => new Set(['main', 'develop']);
 	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
-		if (args[0] === 'config' && args[1] === 'branch.main.merge') {
-			return 'refs/heads/main';
-		}
-
 		if (args[0] === 'config' && args[1] === 'branch.feature/task-42.merge') {
 			return 'refs/heads/feature/task-42';
 		}
@@ -80,7 +78,51 @@ test('GitService applyBranchTargetsByProject pulls source branch and existing ex
 	};
 	service.runGitFileMutation = async (_projectPath: string, args: string[]) => {
 		if (args[0] === 'checkout') {
-			currentBranch = args[1] || currentBranch;
+			currentBranch = args[1] === '-b'
+				? (args[2] || currentBranch)
+				: (args[1] || currentBranch);
+		}
+		calls.push(args);
+	};
+
+	const result = await service.applyBranchTargetsByProject(
+		new Map([['api', '/tmp/api']]),
+		['api'],
+		'feature/task-42',
+		undefined,
+		{ api: 'feature/task-42' },
+		['main', 'develop'],
+	);
+
+	assert.equal(result.success, true);
+	assert.deepEqual(calls, [
+		['checkout', '-b', 'feature/task-42', '--track', 'origin/feature/task-42'],
+		['pull', '--ff-only'],
+	]);
+});
+
+test('GitService applyBranchTargetsByProject creates missing prompt branch from selected source branch', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const calls: string[][] = [];
+	let currentBranch = 'feature/old';
+
+	service.getCurrentBranch = async () => currentBranch;
+	service.branchExistsLocally = async (_projectPath: string, branchName: string) => branchName === 'main';
+	service.findRemoteBranchRef = async () => '';
+	service.getAllowedBaseBranches = () => new Set(['main', 'develop']);
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'config' && args[1] === 'branch.main.merge') {
+			return 'refs/heads/main';
+		}
+
+		return '';
+	};
+	service.runGitFileMutation = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'checkout') {
+			currentBranch = args[1] === '-b'
+				? (args[2] || currentBranch)
+				: (args[1] || currentBranch);
 		}
 		calls.push(args);
 	};
@@ -98,8 +140,7 @@ test('GitService applyBranchTargetsByProject pulls source branch and existing ex
 	assert.deepEqual(calls, [
 		['checkout', 'main'],
 		['pull', '--ff-only'],
-		['checkout', 'feature/task-42'],
-		['pull', '--ff-only'],
+		['checkout', '-b', 'feature/task-42', 'main'],
 	]);
 });
 

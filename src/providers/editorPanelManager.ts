@@ -144,9 +144,9 @@ export class EditorPanelManager {
 		this.pendingGlobalAgentContextSync = null;
 		this.isGlobalAgentContextSyncInProgress = true;
 		try {
-			await this.workspaceService.ensureChatInstructionsFile(context);
+			await this.workspaceService.syncGlobalAgentInstructionsFile(context);
 		} catch {
-			// Keep UI responsive even if file/settings sync fails.
+			// Keep UI responsive even if project instruction file sync fails.
 		} finally {
 			this.isGlobalAgentContextSyncInProgress = false;
 			if (this.pendingGlobalAgentContextSync !== null) {
@@ -3889,9 +3889,14 @@ export class EditorPanelManager {
 					const globalContext = this.stateService.getGlobalAgentContext();
 					const parts: string[] = [];
 					try {
-						await this.workspaceService.ensureChatInstructionsFile(globalContext);
-					} catch {
-						// keep chat flow even if instructions file sync fails
+						await this.workspaceService.syncGlobalAgentInstructionsFile(globalContext);
+					} catch (error) {
+						this.hooksOutput.appendLine(`[global-context] sync project instruction file failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+					}
+					try {
+						await this.workspaceService.ensureProjectInstructionsFolderRegistered();
+					} catch (error) {
+						this.hooksOutput.appendLine(`[global-context] register .github/instructions failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 					}
 					try {
 						await this.codeMapChatInstructionService()?.prepareInstruction(prompt);

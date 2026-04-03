@@ -11,7 +11,3 @@ out-tests
 
 # Prompt Manager memory database
 .vscode/prompt-manager
-
-# Prompt Manager memory database
-memory.db
-*.db-backup

@@ -23,11 +23,138 @@ import {
 	resolveGitOverlayBranchNames,
 } from '../src/utils/gitOverlay.js';
 import {
+	areGitOverlayProjectsOnTrackedOrPrompt,
+	collectGitOverlayProjectsWithChangesOnTrackedBranches,
+	collectGitOverlayProjectsWithChangesOutsideTrackedOrPrompt,
 	formatChangeSize,
 	GitOverlay,
 	resolveChangeDiffStats,
 	resolveGitOverlayPostCommitProjects,
 } from '../src/webview/editor/components/GitOverlay.js';
+import type { GitOverlayChangeFile, GitOverlayProjectSnapshot, GitOverlaySnapshot } from '../src/types/git.js';
+
+type TestProjectOverrides = Omit<Partial<GitOverlayProjectSnapshot>, 'changeGroups' | 'review' | 'graph'> & {
+	changeGroups?: Partial<GitOverlayProjectSnapshot['changeGroups']>;
+	review?: Partial<GitOverlayProjectSnapshot['review']>;
+	graph?: Partial<GitOverlayProjectSnapshot['graph']>;
+};
+
+function createTestChange(overrides: Partial<GitOverlayChangeFile> = {}): GitOverlayChangeFile {
+	return {
+		project: overrides.project || 'api',
+		path: overrides.path || 'src/index.ts',
+		previousPath: overrides.previousPath,
+		status: overrides.status || 'M',
+		group: overrides.group || 'staged',
+		conflicted: overrides.conflicted || false,
+		staged: overrides.staged ?? true,
+		fileSizeBytes: overrides.fileSizeBytes ?? 100,
+		additions: overrides.additions ?? 1,
+		deletions: overrides.deletions ?? 0,
+		isBinary: overrides.isBinary || false,
+	};
+}
+
+function createTestProject(overrides: TestProjectOverrides = {}): GitOverlayProjectSnapshot {
+	const base: GitOverlayProjectSnapshot = {
+		project: 'api',
+		repositoryPath: '/tmp/api',
+		available: true,
+		error: '',
+		currentBranch: 'main',
+		promptBranch: 'feature/task-42',
+		dirty: false,
+		hasConflicts: false,
+		upstream: 'origin/main',
+		ahead: 0,
+		behind: 0,
+		lastCommit: null,
+		branches: [],
+		cleanupBranches: [],
+		changeGroups: {
+			merge: [],
+			staged: [],
+			workingTree: [],
+			untracked: [],
+		},
+		review: {
+			remote: null,
+			request: null,
+			error: '',
+			setupAction: null,
+		},
+		recentCommits: [],
+		staleLocalBranches: [],
+		graph: {
+			nodes: [],
+			edges: [],
+		},
+	};
+
+	return {
+		...base,
+		...overrides,
+		changeGroups: {
+			...base.changeGroups,
+			...(overrides.changeGroups || {}),
+		},
+		review: {
+			...base.review,
+			...(overrides.review || {}),
+		},
+		graph: {
+			...base.graph,
+			...(overrides.graph || {}),
+		},
+	};
+}
+
+function createTestSnapshot(overrides: Partial<GitOverlaySnapshot> = {}): GitOverlaySnapshot {
+	return {
+		generatedAt: '2026-04-02T00:00:00.000Z',
+		promptBranch: 'feature/task-42',
+		trackedBranches: ['main'],
+		projects: [],
+		...overrides,
+	};
+}
+
+function renderGitOverlayMarkup(overrides: Partial<React.ComponentProps<typeof GitOverlay>> = {}): string {
+	return renderToStaticMarkup(React.createElement(GitOverlay, {
+		open: true,
+		mode: 'default',
+		snapshot: createTestSnapshot(),
+		commitMessages: {},
+		busyAction: null,
+		completedActions: { push: false, 'review-request': false, merge: false },
+		promptStatus: 'completed',
+		promptTitle: '',
+		promptTaskNumber: '',
+		preferredTrackedBranch: 'main',
+		onClose: () => { },
+		onDone: () => { },
+		onRefresh: () => { },
+		onSwitchBranch: () => { },
+		onEnsurePromptBranch: () => { },
+		onPush: () => { },
+		onCreateReviewRequest: () => { },
+		onMergePromptBranch: () => { },
+		onDiscardFile: () => { },
+		onOpenFile: () => { },
+		onOpenDiff: () => { },
+		onOpenReviewRequest: () => { },
+		onSetupReviewCli: () => { },
+		onOpenMergeEditor: () => { },
+		onGenerateCommitMessage: () => { },
+		onCommitStaged: () => { },
+		onCommitMessageChange: () => { },
+		onTrackedBranchChange: () => { },
+		onContinueStartChat: () => { },
+		onContinueOpenChat: () => { },
+		t: (key: string) => key,
+		...overrides,
+	}));
+}
 
 test('resolveGitOverlayBranchNames keeps tracked order and appends prompt/current branches once', () => {
 	const branches = resolveGitOverlayBranchNames(['main', 'develop', 'main'], 'feature/task-42', 'feature/task-42');
@@ -200,6 +327,78 @@ test('collectGitOverlayProjectsNeedingSync returns only available projects behin
 		[
 			{ project: 'api', available: true, upstream: 'origin/main', behind: 2 },
 		],
+	);
+});
+
+test('collectGitOverlayProjectsWithChangesOutsideTrackedOrPrompt keeps only dirty projects outside tracked and prompt branches', () => {
+	const projects = [
+		createTestProject({
+			project: 'tracked-dirty',
+			currentBranch: 'main',
+			changeGroups: { staged: [createTestChange({ project: 'tracked-dirty' })] },
+		}),
+		createTestProject({
+			project: 'prompt-dirty',
+			currentBranch: 'feature/task-42',
+			changeGroups: { staged: [createTestChange({ project: 'prompt-dirty' })] },
+		}),
+		createTestProject({
+			project: 'legacy-dirty',
+			currentBranch: 'feature/legacy',
+			changeGroups: { staged: [createTestChange({ project: 'legacy-dirty' })] },
+		}),
+		createTestProject({
+			project: 'tracked-clean',
+			currentBranch: 'main',
+		}),
+	];
+
+	assert.deepEqual(
+		collectGitOverlayProjectsWithChangesOutsideTrackedOrPrompt(projects, 'feature/task-42', ['main']).map(project => project.project),
+		['legacy-dirty'],
+	);
+});
+
+test('collectGitOverlayProjectsWithChangesOnTrackedBranches keeps only dirty tracked projects', () => {
+	const projects = [
+		createTestProject({
+			project: 'tracked-dirty',
+			currentBranch: 'main',
+			changeGroups: { staged: [createTestChange({ project: 'tracked-dirty' })] },
+		}),
+		createTestProject({
+			project: 'prompt-dirty',
+			currentBranch: 'feature/task-42',
+			changeGroups: { staged: [createTestChange({ project: 'prompt-dirty' })] },
+		}),
+		createTestProject({
+			project: 'legacy-dirty',
+			currentBranch: 'feature/legacy',
+			changeGroups: { staged: [createTestChange({ project: 'legacy-dirty' })] },
+		}),
+	];
+
+	assert.deepEqual(
+		collectGitOverlayProjectsWithChangesOnTrackedBranches(projects, ['main']).map(project => project.project),
+		['tracked-dirty'],
+	);
+});
+
+test('areGitOverlayProjectsOnTrackedOrPrompt checks every project branch against tracked and prompt branches', () => {
+	assert.equal(
+		areGitOverlayProjectsOnTrackedOrPrompt([
+			createTestProject({ project: 'tracked', currentBranch: 'main' }),
+			createTestProject({ project: 'prompt', currentBranch: 'feature/task-42' }),
+		], 'feature/task-42', ['main']),
+		true,
+	);
+
+	assert.equal(
+		areGitOverlayProjectsOnTrackedOrPrompt([
+			createTestProject({ project: 'tracked', currentBranch: 'main' }),
+			createTestProject({ project: 'legacy', currentBranch: 'feature/legacy' }),
+		], 'feature/task-42', ['main']),
+		false,
 	);
 });
 
@@ -510,8 +709,8 @@ test('GitOverlay renders tracked branch options separately for each project', ()
 		t: (key: string) => key,
 	}));
 
-	assert.equal(markup.match(/<option value="master"[^>]*>master<\/option>/g)?.length || 0, 2);
-	assert.equal(markup.match(/<option value="main"[^>]*>main<\/option>/g)?.length || 0, 2);
+	assert.equal(markup.match(/value="master"[^>]*>master<\/option>/g)?.length || 0, 1);
+	assert.equal(markup.match(/value="main"[^>]*>main<\/option>/g)?.length || 0, 1);
 });
 
 test('GitOverlay keeps current tracked branch in per-project options', () => {
@@ -616,11 +815,11 @@ test('GitOverlay keeps current tracked branch in per-project options', () => {
 		t: (key: string) => key,
 	}));
 
-	assert.equal(markup.match(/<option value="master"[^>]*>master<\/option>/g)?.length || 0, 2);
-	assert.equal(markup.match(/<option value="develop"[^>]*>develop<\/option>/g)?.length || 0, 2);
+	assert.equal(markup.match(/value="master"[^>]*>master<\/option>/g)?.length || 0, 2);
+	assert.equal(markup.match(/value="develop"[^>]*>develop<\/option>/g)?.length || 0, 1);
 });
 
-test('GitOverlay adds current non-tracked branch to source and expected options', () => {
+test('GitOverlay keeps current non-tracked branch only in source options and removes it from expected options', () => {
 	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
 		open: true,
 		mode: 'default',
@@ -722,9 +921,9 @@ test('GitOverlay adds current non-tracked branch to source and expected options'
 		t: (key: string) => key,
 	}));
 
-	assert.equal(markup.match(/<option value="feature\/local-work"[^>]*>feature\/local-work<\/option>/g)?.length || 0, 2);
-	assert.equal(markup.match(/<option value="main"[^>]*>main<\/option>/g)?.length || 0, 2);
-	assert.equal(markup.match(/<option value="feature\/task-42"[^>]*>feature\/task-42<\/option>/g)?.length || 0, 1);
+	assert.equal(markup.match(/value="feature\/local-work"[^>]*>feature\/local-work<\/option>/g)?.length || 0, 1);
+	assert.equal(markup.match(/value="main"[^>]*>main<\/option>/g)?.length || 0, 2);
+	assert.equal(markup.match(/value="feature\/task-42"[^>]*>feature\/task-42<\/option>/g)?.length || 0, 1);
 });
 
 test('GitOverlay keeps passive tracked projects visible in step 1 and does not let them block merge', () => {
@@ -1063,8 +1262,8 @@ test('GitOverlay shows no-changes status for clean tracked projects and keeps sw
 	assert.match(markup, /editor\.gitOverlayProjectExpectedBranch/);
 	assert.match(markup, /editor\.gitOverlayStateNoChanges/);
 	assert.equal(markup.match(/<option value="">editor\.gitOverlaySelectPlaceholder<\/option>/g)?.length || 0, 4);
-	assert.equal(markup.match(/<option value="main"[^>]*>main<\/option>/g)?.length || 0, 4);
-	assert.equal(markup.match(/<option value="feature\/task-42"[^>]*>feature\/task-42<\/option>/g)?.length || 0, 2);
+	assert.equal(markup.match(/value="main"[^>]*>main<\/option>/g)?.length || 0, 2);
+	assert.equal(markup.match(/value="feature\/task-42"[^>]*>feature\/task-42<\/option>/g)?.length || 0, 2);
 	assert.doesNotMatch(markup, /min-width:1060px/);
 	assert.match(markup, /<span style="font-size:12px;font-weight:600;text-align:center;word-break:break-word;color:black">editor\.gitOverlayStateNoChanges<\/span>/);
 	assert.match(markup, /<button[^>]*disabled[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
@@ -1725,6 +1924,414 @@ test('GitOverlay allows commit step when prompt branch is empty but dirty projec
 	assert.match(markup, /tracked commit message/);
 	assert.doesNotMatch(markup, /editor\.gitOverlayProjectNeedsSwitch/);
 	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlayCommitProject<\/span><\/span><\/button>/);
+});
+
+test('GitOverlay shows prompt-branch fallback info without red prompt-branch validation when dirty projects stay on tracked branches', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: '',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'tracked-dirty',
+					currentBranch: 'main',
+					promptBranch: '',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'tracked-dirty' })],
+					},
+				}),
+			],
+		}),
+		commitMessages: {
+			'tracked-dirty': 'tracked commit message',
+		},
+	});
+
+	assert.match(markup, /editor\.gitOverlayPromptBranchFallbackInfo/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPromptBranchMissing/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayFieldNeedsValue/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayProjectNeedsTrackedOrPromptSwitch/);
+	assert.match(markup, /editor\.gitOverlayStateReady/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayStateNeedsTarget/);
+});
+
+test('GitOverlay hides prompt-branch warning when prompt branch is empty and the current branch is tracked', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: '',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'tracked-clean',
+					currentBranch: 'main',
+					promptBranch: '',
+					branches: [
+						{
+							name: 'main',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.doesNotMatch(markup, /editor\.gitOverlayPromptBranchMissing/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPromptBranchFallbackInfo/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayProjectNeedsTrackedOrPromptSwitch/);
+	assert.match(markup, /editor\.gitOverlayStepNoProjectChanges/);
+	assert.equal(markup.match(/<select/g)?.length || 0, 0);
+});
+
+test('GitOverlay does not show generic no-project-changes hint when another step 1 info already applies', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'tracked-clean',
+					currentBranch: 'main',
+					promptBranch: 'feature/task-42',
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayTrackedBranchSwitchRequiredHint/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayStepNoProjectChanges/);
+});
+
+test('GitOverlay excludes the current branch from expected branch options', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: '',
+			trackedBranches: ['main', 'develop'],
+			projects: [
+				createTestProject({
+					project: 'tracked-clean',
+					currentBranch: 'main',
+					promptBranch: '',
+					branches: [
+						{
+							name: 'main',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'develop',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/develop',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.equal((markup.match(/>main<\/option>/g) || []).length, 0);
+	assert.equal((markup.match(/>develop<\/option>/g) || []).length, 1);
+	assert.equal(markup.match(/<select/g)?.length || 0, 1);
+});
+
+test('GitOverlay enables step 1 switching for clean projects outside tracked and prompt branches', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'legacy-clean',
+					currentBranch: 'feature/legacy',
+					branches: [
+						{
+							name: 'feature/legacy',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: '',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'main',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayStateNeedsSwitch/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayStateNoChanges/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlaySwitch<\/span><\/span><\/button>/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
+});
+
+test('GitOverlay hides source select when expected branch already exists for the project', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'legacy-clean',
+					currentBranch: 'feature/legacy',
+					branches: [
+						{
+							name: 'feature/legacy',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: '',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'main',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'feature/task-42',
+							current: false,
+							exists: true,
+							kind: 'prompt',
+							upstream: 'origin/feature/task-42',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.equal(markup.match(/<select/g)?.length || 0, 1);
+	assert.match(markup, /editor\.gitOverlayProjectSourceBranch/);
+	assert.match(markup, /editor\.gitOverlayProjectExpectedBranch/);
+});
+
+test('GitOverlay keeps prompt-branch warning, hides field-needs-value text, and hides source for existing tracked target when prompt branch is empty', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: '',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'legacy-clean',
+					currentBranch: 'feature/legacy',
+					promptBranch: '',
+					branches: [
+						{
+							name: 'feature/legacy',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: '',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'main',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayPromptBranchMissing/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayFieldNeedsValue/);
+	assert.match(markup, /editor\.gitOverlayStateNeedsSwitch/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlaySwitch<\/span><\/span><\/button>/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
+	assert.equal(markup.match(/<select/g)?.length || 0, 1);
+});
+
+test('GitOverlay keeps prompt rows on prompt even when the current prompt branch is hidden from expected options', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'prompt-dirty',
+					currentBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'prompt-dirty' })],
+					},
+					branches: [
+						{
+							name: 'feature/task-42',
+							current: true,
+							exists: true,
+							kind: 'prompt',
+							upstream: 'origin/feature/task-42',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'main',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayStateOnPrompt/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayStateNeedsTarget/);
+	assert.equal(markup.match(/<select/g)?.length || 0, 1);
+});
+
+test('GitOverlay step 3 keeps tracked projects without prompt-checkout warnings when the section is visible', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'tracked-clean',
+					currentBranch: 'main',
+					promptBranch: 'feature/task-42',
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayStepPushTitle/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPushNeedsPromptCheckout/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPushNeedsTrackedOrPromptBranch/);
+});
+
+test('GitOverlay allows push on tracked branches without prompt branch after commit, keeps steps 2 and 3 active, and grays out steps 4 and 5', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: '',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'tracked-clean',
+					currentBranch: 'main',
+					promptBranch: '',
+					ahead: 1,
+					upstream: 'origin/main',
+					branches: [
+						{
+							name: 'main',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/main',
+							ahead: 1,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.doesNotMatch(markup, /editor\.gitOverlayPushNeedsPromptBranch/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlayPushPromptBranch<\/span><\/span><\/button>/);
+	assert.match(markup, /<div style="[^"]*background:var\(--vscode-button-background\);color:var\(--vscode-button-foreground\)[^"]*">2<\/div>/);
+	assert.match(markup, /<div style="[^"]*background:var\(--vscode-button-background\);color:var\(--vscode-button-foreground\)[^"]*">3<\/div>/);
+	assert.match(markup, /<div style="[^"]*background:var\(--vscode-badge-background\);color:var\(--vscode-descriptionForeground\)[^"]*">4<\/div>/);
+	assert.match(markup, /<div style="[^"]*background:var\(--vscode-badge-background\);color:var\(--vscode-descriptionForeground\)[^"]*">5<\/div>/);
+	assert.doesNotMatch(markup, /<div style="[^"]*background:var\(--vscode-badge-background\);color:var\(--vscode-descriptionForeground\)[^"]*">2<\/div>/);
+	assert.doesNotMatch(markup, /<div style="[^"]*background:var\(--vscode-badge-background\);color:var\(--vscode-descriptionForeground\)[^"]*">3<\/div>/);
+	assert.doesNotMatch(markup, /<div style="[^"]*background:var\(--vscode-button-background\);color:var\(--vscode-button-foreground\)[^"]*">4<\/div>/);
+	assert.doesNotMatch(markup, /<div style="[^"]*background:var\(--vscode-button-background\);color:var\(--vscode-button-foreground\)[^"]*">5<\/div>/);
 });
 
 test('GitOverlay disables commit textarea with the same gating as commit message generation', () => {

@@ -2464,6 +2464,88 @@ test('GitOverlay disables commit textarea with the same gating as commit message
 	assert.match(markup, /<textarea[^>]*disabled[^>]*placeholder="Сообщение коммита\.\.\."/);
 });
 
+test('GitOverlay shows progress line during automatic refresh', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'refresh:auto',
+	});
+
+	assert.match(markup, /data-pm-git-overlay-progress="auto"/);
+});
+
+test('GitOverlay shows progress line during initial overlay loading', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'overlay:loading',
+		snapshot: null,
+	});
+
+	assert.match(markup, /data-pm-git-overlay-progress="loading"/);
+	assert.match(markup, /editor\.gitOverlayLoading/);
+});
+
+test('GitOverlay keeps progress track mounted while idle to avoid layout jumps', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: null,
+	});
+
+	assert.match(markup, /data-pm-git-overlay-progress="idle"/);
+});
+
+test('GitOverlay renders default mode as read-only for prompts in progress', () => {
+	const markup = renderGitOverlayMarkup({
+		promptStatus: 'in-progress',
+		snapshot: createTestSnapshot({
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'feature/task-42',
+					upstream: 'origin/feature/task-42',
+					branches: [
+						{
+							name: 'feature/task-42',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/feature/task-42',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'main',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+					changeGroups: {
+						staged: [createTestChange({ project: 'api' })],
+					},
+				}),
+			],
+		}),
+		commitMessages: {
+			api: 'feat: keep current progress',
+		},
+	});
+
+	assert.match(markup, /editor\.gitOverlayStepCommitTitle/);
+	assert.match(markup, /<select[^>]*disabled/);
+	assert.match(markup, /<textarea[^>]*disabled[^>]*placeholder="editor\.gitOverlayCommitPlaceholder"/);
+	assert.match(markup, /<button[^>]*disabled=""[^>]*><span[^>]*><span>editor\.gitOverlayCommitProject<\/span><\/span><\/button>/);
+	assert.match(markup, /<button[^>]*disabled=""[^>]*><span[^>]*><span>editor\.gitOverlayDone<\/span><\/span><\/button>/);
+	assert.match(markup, /<button[^>]*disabled=""[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
+});
+
 test('GitOverlay keeps commit warning without applying error textarea styling', () => {
 	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
 		open: true,
@@ -2705,4 +2787,55 @@ test('buildGitOverlayReviewCliSetupCommand prepares Windows winget flow', () => 
 	assert.match(command.command, /winget install -e --id GLab\.GLab/);
 	assert.match(command.command, /glab auth login --hostname 'gitlab\.com'/);
 	assert.doesNotMatch(command.command, /\t/);
+});
+
+test('GitOverlay shows changed projects outside selected prompt projects in a separate step 1 block', () => {
+	const markup = renderGitOverlayMarkup({
+		selectedProjects: ['selected-clean'],
+		onUpdateProjects: () => { },
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'selected-clean',
+					currentBranch: 'feature/task-42',
+				}),
+				createTestProject({
+					project: 'docs-dirty',
+					currentBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'docs-dirty', path: 'README.md' })],
+					},
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayProjects: 1/);
+	assert.match(markup, /editor\.gitOverlayOtherProjectsTitle/);
+	assert.match(markup, /docs-dirty/);
+	assert.match(markup, /editor\.gitOverlayAddProject/);
+	assert.match(markup, /editor\.gitOverlayShowChanges/);
+});
+
+test('GitOverlay shows exclude action instead of inactive switch for clean selected projects without step 1 work', () => {
+	const markup = renderGitOverlayMarkup({
+		selectedProjects: ['selected-clean'],
+		onUpdateProjects: () => { },
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'selected-clean',
+					currentBranch: 'feature/task-42',
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayExcludeProject/);
+	assert.doesNotMatch(markup, /<button[^>]*disabled[^>]*><span[^>]*><span>editor\.gitOverlaySwitch<\/span><\/span><\/button>/);
 });

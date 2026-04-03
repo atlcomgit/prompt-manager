@@ -37,6 +37,20 @@ const SINGLE_EDITOR_PANEL_KEY = '__prompt_editor_singleton__';
 const REMOTE_GLOBAL_CONTEXT_URL = 'https://raw.githubusercontent.com/atlcomgit/prompt-manager/refs/heads/master/share/general.instructions.md';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
+const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 250;
+
+type GitOverlayRefreshMode = 'local' | 'fetch' | 'sync';
+
+interface GitOverlaySession {
+	active: boolean;
+	promptBranch: string;
+	projects: string[];
+	postMessage: (message: ExtensionToWebviewMessage) => void;
+	refreshTimer: NodeJS.Timeout | null;
+	refreshInFlight: boolean;
+	refreshQueued: boolean;
+	queuedMode: GitOverlayRefreshMode | null;
+}
 
 export class EditorPanelManager {
 	private _onDidSave = new vscode.EventEmitter<string>();
@@ -64,6 +78,10 @@ export class EditorPanelManager {
 	private pendingPanelMessages = new Map<string, ExtensionToWebviewMessage[]>();
 	private pendingReportPersistByPromptId = new Map<string, Promise<Prompt | null>>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
+	private gitOverlaySessions = new Map<string, GitOverlaySession>();
+	private gitOverlayReactiveDisposables: vscode.Disposable[] = [];
+	private gitOverlayBuiltInRepositoryDisposables = new Map<string, vscode.Disposable>();
+	private gitOverlayReactiveSourcesReady: Promise<void> | null = null;
 	private openPromptQueue: Promise<void> | null = null;
 	private pendingOpenPromptId: string | null = null;
 	private openPromptRequestVersion = 0;
@@ -208,6 +226,7 @@ export class EditorPanelManager {
 
 	prepareForShutdown(): void {
 		this.isShuttingDown = true;
+		this.disposeGitOverlayReactiveSources();
 		const promptId = (this.panelPromptRefs.get(SINGLE_EDITOR_PANEL_KEY)?.id || '').trim() || null;
 		void this.stateService.saveStartupEditorRestoreState(Boolean(openPanels.get(SINGLE_EDITOR_PANEL_KEY)), promptId);
 	}
@@ -1396,13 +1415,378 @@ export class EditorPanelManager {
 		projects: string[],
 	): Promise<void> {
 		const paths = this.workspaceService.getWorkspaceFolderPaths();
+		const snapshotProjects = this.workspaceService.getWorkspaceFolders();
 		const snapshot = await this.gitService.getGitOverlaySnapshot(
 			paths,
-			this.resolveGitOverlayProjects(projects, currentPrompt),
+			snapshotProjects.length > 0 ? snapshotProjects : this.resolveGitOverlayProjects(projects, currentPrompt),
 			promptBranch,
 			this.getTrackedBranchesSetting(),
 		);
 		postMessage({ type: 'gitOverlaySnapshot', snapshot });
+	}
+
+	private clearGitOverlaySessionRefreshTimer(session: GitOverlaySession): void {
+		if (!session.refreshTimer) {
+			return;
+		}
+
+		clearTimeout(session.refreshTimer);
+		session.refreshTimer = null;
+	}
+
+	private hasActiveGitOverlaySessions(): boolean {
+		for (const session of this.gitOverlaySessions.values()) {
+			if (session.active) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private disposeGitOverlayBuiltInRepositoryWatcher(repositoryRootPath: string): void {
+		const key = path.resolve(repositoryRootPath);
+		this.gitOverlayBuiltInRepositoryDisposables.get(key)?.dispose();
+		this.gitOverlayBuiltInRepositoryDisposables.delete(key);
+	}
+
+	private disposeGitOverlayReactiveSources(): void {
+		for (const disposable of this.gitOverlayReactiveDisposables) {
+			disposable.dispose();
+		}
+		this.gitOverlayReactiveDisposables = [];
+
+		for (const disposable of this.gitOverlayBuiltInRepositoryDisposables.values()) {
+			disposable.dispose();
+		}
+		this.gitOverlayBuiltInRepositoryDisposables.clear();
+		this.gitOverlayReactiveSourcesReady = null;
+	}
+
+	private isGitOverlayMetadataPath(targetPath: string): boolean {
+		const normalizedPath = path.resolve(targetPath);
+		const gitSegment = `${path.sep}.git${path.sep}`;
+		return normalizedPath.includes(gitSegment)
+			|| normalizedPath.endsWith(`${path.sep}.git`)
+			|| path.basename(normalizedPath) === '.git';
+	}
+
+	private scheduleGitOverlayAutoRefreshForActiveSessions(reason: 'file' | 'git'): void {
+		for (const [panelKey, session] of this.gitOverlaySessions.entries()) {
+			if (!session.active) {
+				continue;
+			}
+
+			this.clearGitOverlaySessionRefreshTimer(session);
+			session.refreshTimer = setTimeout(() => {
+				session.refreshTimer = null;
+				const currentPrompt = this.panelPromptRefs.get(panelKey);
+				if (!currentPrompt || !session.active) {
+					return;
+				}
+
+				void this.runGitOverlayRefresh(
+					panelKey,
+					session.postMessage,
+					currentPrompt,
+					session.promptBranch,
+					session.projects,
+					'local',
+					true,
+				);
+			}, GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS + (reason === 'git' ? 50 : 0));
+		}
+	}
+
+	private registerGitOverlayBuiltInRepositoryWatcher(repository: {
+		rootUri: vscode.Uri;
+		state: { onDidChange: vscode.Event<void> };
+		onDidCommit?: vscode.Event<void>;
+		onDidCheckout?: vscode.Event<void>;
+	}): void {
+		const repositoryRootPath = path.resolve(repository.rootUri.fsPath);
+		if (this.gitOverlayBuiltInRepositoryDisposables.has(repositoryRootPath)) {
+			return;
+		}
+
+		const disposables: vscode.Disposable[] = [
+			repository.state.onDidChange(() => {
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+			}),
+		];
+
+		if (repository.onDidCommit) {
+			disposables.push(repository.onDidCommit(() => {
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+			}));
+		}
+
+		if (repository.onDidCheckout) {
+			disposables.push(repository.onDidCheckout(() => {
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+			}));
+		}
+
+		this.gitOverlayBuiltInRepositoryDisposables.set(
+			repositoryRootPath,
+			vscode.Disposable.from(...disposables),
+		);
+	}
+
+	private async initializeGitOverlayReactiveSources(): Promise<void> {
+		if (!this.hasActiveGitOverlaySessions()) {
+			return;
+		}
+
+		const workspaceRoots = Array.from(this.workspaceService.getWorkspaceFolderPaths().values())
+			.filter(Boolean)
+			.map(rootPath => path.resolve(rootPath));
+		const gitStatePatterns = [
+			'.git/HEAD',
+			'.git/index',
+			'.git/refs/**',
+			'.git/MERGE_HEAD',
+			'.git/CHERRY_PICK_HEAD',
+			'.git/REVERT_HEAD',
+			'.git/rebase-merge/**',
+			'.git/rebase-apply/**',
+		];
+
+		for (const workspaceRoot of workspaceRoots) {
+			const workspaceWatcher = vscode.workspace.createFileSystemWatcher(
+				new vscode.RelativePattern(workspaceRoot, '**/*'),
+			);
+			const handleWorkspaceFileChange = (uri: vscode.Uri) => {
+				if (this.isGitOverlayMetadataPath(uri.fsPath)) {
+					return;
+				}
+
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('file');
+			};
+
+			this.gitOverlayReactiveDisposables.push(
+				workspaceWatcher,
+				workspaceWatcher.onDidChange(handleWorkspaceFileChange),
+				workspaceWatcher.onDidCreate(handleWorkspaceFileChange),
+				workspaceWatcher.onDidDelete(handleWorkspaceFileChange),
+			);
+
+			for (const pattern of gitStatePatterns) {
+				const gitWatcher = vscode.workspace.createFileSystemWatcher(
+					new vscode.RelativePattern(workspaceRoot, pattern),
+				);
+				const handleGitMetadataChange = () => {
+					this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+				};
+
+				this.gitOverlayReactiveDisposables.push(
+					gitWatcher,
+					gitWatcher.onDidChange(handleGitMetadataChange),
+					gitWatcher.onDidCreate(handleGitMetadataChange),
+					gitWatcher.onDidDelete(handleGitMetadataChange),
+				);
+			}
+		}
+
+		const gitApi = await this.gitService.getBuiltInGitApi();
+		if (!gitApi) {
+			return;
+		}
+
+		for (const repository of gitApi.repositories) {
+			this.registerGitOverlayBuiltInRepositoryWatcher(repository);
+		}
+
+		if (gitApi.onDidOpenRepository) {
+			this.gitOverlayReactiveDisposables.push(gitApi.onDidOpenRepository((repository) => {
+				this.registerGitOverlayBuiltInRepositoryWatcher(repository);
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+			}));
+		}
+
+		if (gitApi.onDidCloseRepository) {
+			this.gitOverlayReactiveDisposables.push(gitApi.onDidCloseRepository((repository) => {
+				this.disposeGitOverlayBuiltInRepositoryWatcher(repository.rootUri.fsPath);
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+			}));
+		}
+	}
+
+	private async ensureGitOverlayReactiveSources(): Promise<void> {
+		if (this.gitOverlayReactiveSourcesReady) {
+			await this.gitOverlayReactiveSourcesReady;
+			return;
+		}
+
+		if (this.gitOverlayReactiveDisposables.length > 0) {
+			return;
+		}
+
+		this.gitOverlayReactiveSourcesReady = this.initializeGitOverlayReactiveSources();
+		try {
+			await this.gitOverlayReactiveSourcesReady;
+		} finally {
+			this.gitOverlayReactiveSourcesReady = null;
+		}
+	}
+
+	private async setGitOverlaySessionVisibility(
+		panelKey: string,
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		currentPrompt: Prompt,
+		promptBranch: string,
+		projects: string[],
+		open: boolean,
+	): Promise<void> {
+		const normalizedPromptBranch = this.resolveGitOverlayPromptBranch(promptBranch, currentPrompt);
+		const normalizedProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
+		const session = this.gitOverlaySessions.get(panelKey) || {
+			active: false,
+			promptBranch: normalizedPromptBranch,
+			projects: normalizedProjects,
+			postMessage,
+			refreshTimer: null,
+			refreshInFlight: false,
+			refreshQueued: false,
+			queuedMode: null,
+		};
+
+		session.active = open;
+		session.promptBranch = normalizedPromptBranch;
+		session.projects = normalizedProjects;
+		session.postMessage = postMessage;
+		this.gitOverlaySessions.set(panelKey, session);
+
+		if (!open) {
+			this.clearGitOverlaySessionRefreshTimer(session);
+			session.refreshQueued = false;
+			session.queuedMode = null;
+			if (!this.hasActiveGitOverlaySessions()) {
+				this.disposeGitOverlayReactiveSources();
+			}
+			return;
+		}
+
+		await this.ensureGitOverlayReactiveSources();
+	}
+
+	private resolveGitOverlayQueuedMode(
+		currentMode: GitOverlayRefreshMode | null,
+		nextMode: GitOverlayRefreshMode,
+	): GitOverlayRefreshMode {
+		const priority: Record<GitOverlayRefreshMode, number> = {
+			local: 1,
+			fetch: 2,
+			sync: 3,
+		};
+
+		if (!currentMode) {
+			return nextMode;
+		}
+
+		return priority[nextMode] >= priority[currentMode] ? nextMode : currentMode;
+	}
+
+	private async runGitOverlayRefresh(
+		panelKey: string,
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		currentPrompt: Prompt,
+		promptBranch: string,
+		projects: string[],
+		mode: GitOverlayRefreshMode,
+		announceBusy: boolean,
+	): Promise<void> {
+		const normalizedPromptBranch = this.resolveGitOverlayPromptBranch(promptBranch, currentPrompt);
+		const normalizedProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
+		const session = this.gitOverlaySessions.get(panelKey);
+
+		if (session) {
+			session.postMessage = postMessage;
+			session.promptBranch = normalizedPromptBranch;
+			session.projects = normalizedProjects;
+			if (session.refreshInFlight) {
+				session.refreshQueued = true;
+				session.queuedMode = this.resolveGitOverlayQueuedMode(session.queuedMode, mode);
+				return;
+			}
+			session.refreshInFlight = true;
+		}
+
+		if (announceBusy) {
+			postMessage({ type: 'gitOverlayBusy', action: 'refresh:auto' });
+		}
+
+		try {
+			const paths = this.workspaceService.getWorkspaceFolderPaths();
+			if (mode === 'fetch') {
+				const result = await this.gitService.fetchProjects(paths, normalizedProjects);
+				if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
+					postMessage({
+						type: result.errors.length > 0 ? 'error' : 'info',
+						message: this.describeGitMultiProjectResult(result, 'Git fetch завершён'),
+					});
+				}
+			} else if (mode === 'sync') {
+				const result = await this.gitService.syncProjects(paths, normalizedProjects);
+				if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
+					postMessage({
+						type: result.errors.length > 0 ? 'error' : 'info',
+						message: this.describeGitMultiProjectResult(result, 'Git sync завершён'),
+					});
+				}
+			}
+
+			const currentSession = this.gitOverlaySessions.get(panelKey);
+			if (currentSession && !currentSession.active) {
+				return;
+			}
+
+			await this.postGitOverlaySnapshot(postMessage, currentPrompt, normalizedPromptBranch, normalizedProjects);
+		} catch (error) {
+			if (announceBusy) {
+				postMessage({ type: 'gitOverlayBusy', action: null });
+			}
+			throw error;
+		} finally {
+			const currentSession = this.gitOverlaySessions.get(panelKey);
+			if (!currentSession) {
+				return;
+			}
+
+			currentSession.refreshInFlight = false;
+			if (!currentSession.active) {
+				return;
+			}
+
+			if (currentSession.refreshQueued) {
+				const queuedMode = currentSession.queuedMode || 'local';
+				currentSession.refreshQueued = false;
+				currentSession.queuedMode = null;
+				const queuedPrompt = this.panelPromptRefs.get(panelKey) || currentPrompt;
+				void this.runGitOverlayRefresh(
+					panelKey,
+					currentSession.postMessage,
+					queuedPrompt,
+					currentSession.promptBranch,
+					currentSession.projects,
+					queuedMode,
+					queuedMode === 'local',
+				);
+			}
+		}
+	}
+
+	private disposeGitOverlaySession(panelKey: string): void {
+		const session = this.gitOverlaySessions.get(panelKey);
+		if (!session) {
+			return;
+		}
+
+		this.clearGitOverlaySessionRefreshTimer(session);
+		this.gitOverlaySessions.delete(panelKey);
+		if (!this.hasActiveGitOverlaySessions()) {
+			this.disposeGitOverlayReactiveSources();
+		}
 	}
 
 	private describeGitMultiProjectResult(
@@ -2970,6 +3354,7 @@ export class EditorPanelManager {
 			const skipUnsavedPrompt = this.silentClosePanels.has(panel);
 			this.silentClosePanels.delete(panel);
 			for (const key of linkedKeys) {
+				this.disposeGitOverlaySession(key);
 				openPanels.delete(key);
 				this.panelPromptRefs.delete(key);
 				this.panelBootIds.delete(key);
@@ -4483,6 +4868,24 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'stopChat': {
+				const commands = await vscode.commands.getCommands(true);
+				const stopChatCommands = [
+					'workbench.action.chat.cancel',
+					'workbench.action.chat.stop',
+				].filter(commandId => commands.includes(commandId));
+
+				for (const commandId of stopChatCommands) {
+					try {
+						await vscode.commands.executeCommand(commandId);
+						break;
+					} catch {
+						// try next command
+					}
+				}
+				break;
+			}
+
 			case 'checkBranchStatus': {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
 				const status = await this.gitService.checkBranchStatus(paths, msg.projects, msg.branch);
@@ -4526,34 +4929,51 @@ export class EditorPanelManager {
 
 			case 'openGitOverlay': {
 				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				await this.setGitOverlaySessionVisibility(
+					panelKey,
+					postMessage,
+					currentPrompt,
+					promptBranch,
+					msg.projects,
+					true,
+				);
 				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, msg.projects);
+				break;
+			}
+
+			case 'gitOverlayVisibility': {
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				await this.setGitOverlaySessionVisibility(
+					panelKey,
+					postMessage,
+					currentPrompt,
+					promptBranch,
+					msg.projects,
+					msg.open,
+				);
 				break;
 			}
 
 			case 'refreshGitOverlay': {
 				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
 				const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
-				const paths = this.workspaceService.getWorkspaceFolderPaths();
-
-				if (msg.mode === 'fetch') {
-					const result = await this.gitService.fetchProjects(paths, projects);
-					if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
-						postMessage({
-							type: result.errors.length > 0 ? 'error' : 'info',
-							message: this.describeGitMultiProjectResult(result, 'Git fetch завершён'),
-						});
-					}
-				} else if (msg.mode === 'sync') {
-					const result = await this.gitService.syncProjects(paths, projects);
-					if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
-						postMessage({
-							type: result.errors.length > 0 ? 'error' : 'info',
-							message: this.describeGitMultiProjectResult(result, 'Git sync завершён'),
-						});
-					}
-				}
-
-				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				await this.setGitOverlaySessionVisibility(
+					panelKey,
+					postMessage,
+					currentPrompt,
+					promptBranch,
+					projects,
+					true,
+				);
+				await this.runGitOverlayRefresh(
+					panelKey,
+					postMessage,
+					currentPrompt,
+					promptBranch,
+					projects,
+					msg.mode || 'local',
+					false,
+				);
 				break;
 			}
 

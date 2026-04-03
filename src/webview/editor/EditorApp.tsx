@@ -234,7 +234,11 @@ export const EditorApp: React.FC = () => {
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
-  const shouldShowFooterGitFlow = prompt.status === 'draft' || prompt.status === 'completed' || prompt.status === 'report' || prompt.status === 'review';
+  const shouldShowFooterGitFlow = prompt.status === 'draft'
+    || prompt.status === 'in-progress'
+    || prompt.status === 'completed'
+    || prompt.status === 'report'
+    || prompt.status === 'review';
   const shouldDockGitOverlaySecondHalf = pageWidth >= EDITOR_FORM_SHELL_WIDTH_PX * 2;
   const startChatLockRef = useRef(false);
   const chatStartTimeoutRef = useRef<number | null>(null);
@@ -243,6 +247,7 @@ export const EditorApp: React.FC = () => {
   const pendingChatStartPreflightRequestIdRef = useRef<string>('');
   const pendingGitOverlayStartChatRequestIdRef = useRef<string>('');
   const pendingChatPreflightActionRef = useRef<ChatEntryAction | ''>('');
+  const hasReportedGitOverlayVisibilityRef = useRef(false);
   const handleStartChatRef = useRef<() => void>(() => undefined);
   const handleOpenChatRef = useRef<() => void>(() => undefined);
   const globalContextTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -411,6 +416,20 @@ export const EditorApp: React.FC = () => {
     setGitOverlayMode('default');
     resetStartChatPreflightTracking();
   }, [resetStartChatPreflightTracking]);
+
+  useEffect(() => {
+    if (!hasReportedGitOverlayVisibilityRef.current && !gitOverlayOpen) {
+      return;
+    }
+
+    hasReportedGitOverlayVisibilityRef.current = true;
+    vscode.postMessage({
+      type: 'gitOverlayVisibility',
+      open: gitOverlayOpen,
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+    });
+  }, [gitOverlayOpen, prompt.branch, prompt.projects]);
 
   const dispatchStartChat = useCallback((requestId: string, options?: { skipBranchMismatchCheck?: boolean }) => {
     const latestPrompt = promptRef.current;
@@ -1254,6 +1273,32 @@ export const EditorApp: React.FC = () => {
         setIsGeneratingReport(false);
         scheduleAutoSave(50);
         break;
+      case 'gitOverlayBusy':
+        setGitOverlayBusyAction((previousBusyAction) => {
+          const nextBusyAction = (msg.action || '').trim() || null;
+          if (!nextBusyAction) {
+            if (
+              previousBusyAction
+              && previousBusyAction !== 'overlay:loading'
+              && !previousBusyAction.startsWith('refresh:')
+            ) {
+              return previousBusyAction;
+            }
+
+            return null;
+          }
+
+          if (
+            previousBusyAction
+            && previousBusyAction !== 'overlay:loading'
+            && !previousBusyAction.startsWith('refresh:')
+          ) {
+            return previousBusyAction;
+          }
+
+          return nextBusyAction;
+        });
+        break;
       case 'gitOverlaySnapshot':
         logGitOverlayDebug('snapshot.received', {
           projectCount: Array.isArray(msg.snapshot?.projects) ? msg.snapshot.projects.length : 0,
@@ -2080,6 +2125,15 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'savePrompt', prompt: promptToSave, source: 'status-change' });
   };
 
+  const handleStopChatAndSetStatus = () => {
+    const promptId = (prompt.id || '').trim();
+    if (promptId) {
+      vscode.postMessage({ type: 'stopChat', id: promptId });
+    }
+
+    handleSetStatus('stopped');
+  };
+
   useEffect(() => {
     if (!isSaving) {
       if (saveTimeoutRef.current) {
@@ -2816,6 +2870,7 @@ export const EditorApp: React.FC = () => {
                   onDebug={logMainRichTextDebug}
                   autoModeKey={prompt.id}
                   placeholder={t('editor.reportPlaceholder')}
+                  contentPadding="compact"
                   persistedHeight={reportHeight}
                   onHeightChange={setReportHeight}
                   canReset={Boolean((prompt.report || '').trim())}
@@ -2899,7 +2954,7 @@ export const EditorApp: React.FC = () => {
             onOpenChat={handleOpenChat}
             onOpenGitFlow={handleOpenGitOverlay}
             onMarkCompleted={() => handleSetStatus('completed')}
-            onMarkStopped={() => handleSetStatus('stopped')}
+            onMarkStopped={handleStopChatAndSetStatus}
             showStatusActions={prompt.status === 'in-progress'}
             showGitFlowAction={shouldShowFooterGitFlow}
             hasChatSession={prompt.chatSessionIds.length > 0}
@@ -2923,6 +2978,7 @@ export const EditorApp: React.FC = () => {
         promptStatus={prompt.status}
         promptTitle={prompt.title}
         promptTaskNumber={prompt.taskNumber}
+        selectedProjects={prompt.projects}
         dockToSecondHalf={shouldDockGitOverlaySecondHalf}
         preferredTrackedBranch={(prompt.trackedBranch || '').trim() || workspaceTrackedBranchPreference}
         preferredTrackedBranchesByProject={{
@@ -2947,6 +3003,7 @@ export const EditorApp: React.FC = () => {
         onGenerateCommitMessage={handleGitOverlayGenerateCommitMessage}
         onCommitStaged={handleGitOverlayCommitStaged}
         onCommitMessageChange={handleGitOverlayCommitMessageChange}
+        onUpdateProjects={(projects) => updateFieldAndSaveNow('projects', projects)}
         onTrackedBranchChange={handleGitOverlayTrackedBranchChange}
         onContinueStartChat={() => {
           const requestId = pendingGitOverlayStartChatRequestIdRef.current || createStartChatRequestId();

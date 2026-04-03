@@ -23,6 +23,7 @@ interface Props {
   secondaryActionDisabled?: boolean;
   fillHeight?: boolean;
   showFormattingToolbar?: boolean;
+  contentPadding?: 'default' | 'compact';
 }
 
 type Mode = 'visual' | 'html' | 'markdown';
@@ -262,6 +263,7 @@ export const RichTextEditor: React.FC<Props> = ({
   secondaryActionDisabled,
   fillHeight,
   showFormattingToolbar,
+  contentPadding = 'default',
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const lastLocalValueRef = useRef<string | null>(null);
@@ -274,6 +276,7 @@ export const RichTextEditor: React.FC<Props> = ({
   const isDragging = useRef(false);
   const dragStartY = useRef(0);
   const dragStartHeight = useRef(0);
+  const isCompactPadding = contentPadding === 'compact';
 
   useEffect(() => {
     if (typeof persistedHeight === 'number' && persistedHeight > 0) {
@@ -1107,6 +1110,7 @@ export const RichTextEditor: React.FC<Props> = ({
           data-placeholder={placeholder || 'Введите отчет'}
           style={{
             ...styles.editor,
+            ...(isCompactPadding ? styles.editorCompactPadding : null),
             ...(fillHeight ? styles.editorFillHeight : null),
             height: fillHeight ? undefined : `${currentHeight}px`,
             minHeight: undefined,
@@ -1119,6 +1123,7 @@ export const RichTextEditor: React.FC<Props> = ({
             className="pm-rich-markdown-preview"
             style={{
               ...styles.preview,
+              ...(isCompactPadding ? styles.previewCompactPadding : null),
               ...(fillHeight ? styles.editorFillHeight : null),
               height: fillHeight ? undefined : `${currentHeight}px`,
               minHeight: undefined,
@@ -1130,6 +1135,7 @@ export const RichTextEditor: React.FC<Props> = ({
           <div
             style={{
               ...styles.previewEmpty,
+              ...(isCompactPadding ? styles.previewCompactPadding : null),
               ...(fillHeight ? styles.editorFillHeight : null),
               height: fillHeight ? undefined : `${currentHeight}px`,
               minHeight: undefined,
@@ -1156,6 +1162,7 @@ export const RichTextEditor: React.FC<Props> = ({
           placeholder={placeholder}
           style={{
             ...styles.source,
+            ...(isCompactPadding ? styles.sourceCompactPadding : null),
             ...(fillHeight ? styles.editorFillHeight : null),
             height: fillHeight ? undefined : `${currentHeight}px`,
             minHeight: undefined,
@@ -1335,6 +1342,9 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'auto',
     boxShadow: 'inset 0 1px 0 color-mix(in srgb, var(--vscode-editor-background) 85%, white 15%)',
   },
+  editorCompactPadding: {
+    padding: '10px 12px',
+  },
   editorFillHeight: {
     flex: 1,
     minHeight: 0,
@@ -1353,6 +1363,9 @@ const styles: Record<string, React.CSSProperties> = {
     resize: 'none',
     fontSize: '13px',
   },
+  sourceCompactPadding: {
+    padding: '10px 12px',
+  },
   preview: {
     width: '100%',
     border: '1px solid var(--vscode-panel-border, transparent)',
@@ -1363,6 +1376,9 @@ const styles: Record<string, React.CSSProperties> = {
     boxSizing: 'border-box',
     overflow: 'auto',
     boxShadow: 'inset 0 1px 0 color-mix(in srgb, var(--vscode-editor-background) 85%, white 15%)',
+  },
+  previewCompactPadding: {
+    padding: '10px 12px',
   },
   previewEmpty: {
     width: '100%',

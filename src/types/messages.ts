@@ -21,6 +21,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'startChatPreflight'; id: string; prompt?: Prompt; forceRebindChat?: boolean; requestId?: string }
 	| { type: 'startChat'; id: string; prompt?: Prompt; forceRebindChat?: boolean; requestId?: string; skipBranchMismatchCheck?: boolean; originalStatus?: PromptStatus }
 	| { type: 'openChat'; id: string; sessionId: string }
+	| { type: 'stopChat'; id?: string }
 	| { type: 'generateTitle'; content: string }
 	| { type: 'generateDescription'; content: string }
 	| { type: 'generateSlug'; title: string; description: string }
@@ -38,6 +39,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'switchBranch'; branch: string; projects: string[] }
 	| { type: 'getBranches'; projects: string[] }
 	| { type: 'openGitOverlay'; promptBranch: string; projects: string[] }
+	| { type: 'gitOverlayVisibility'; open: boolean; promptBranch: string; projects: string[] }
 	| { type: 'refreshGitOverlay'; promptBranch: string; projects: string[]; mode?: 'local' | 'fetch' | 'sync' }
 	| { type: 'saveGitOverlayTrackedBranchPreference'; branch: string; branchesByProject?: Record<string, string> }
 	| { type: 'gitOverlayApplyBranchTargets'; promptBranch: string; projects: string[]; sourceBranchesByProject?: Record<string, string>; targetBranchesByProject?: Record<string, string> }
@@ -116,6 +118,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'improvedPromptText'; content: string }
 	| { type: 'generatedReport'; report: string }
 	| { type: 'gitOverlaySnapshot'; snapshot: GitOverlaySnapshot }
+	| { type: 'gitOverlayBusy'; action: string | null }
 	| { type: 'gitOverlayFileHistory'; history: GitOverlayFileHistoryPayload }
 	| { type: 'gitOverlayCommitMessagesGenerated'; messages: GitOverlayProjectCommitMessage[] }
 	| { type: 'gitOverlayActionCompleted'; action: GitOverlayActionKind }

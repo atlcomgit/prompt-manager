@@ -102,14 +102,23 @@ interface BuiltInGitInputBox {
 	value: string;
 }
 
+interface BuiltInGitRepositoryState {
+	onDidChange: vscode.Event<void>;
+}
+
 interface BuiltInGitRepository {
 	rootUri: vscode.Uri;
 	inputBox: BuiltInGitInputBox;
+	state: BuiltInGitRepositoryState;
+	onDidCommit?: vscode.Event<void>;
+	onDidCheckout?: vscode.Event<void>;
 }
 
 interface BuiltInGitApi {
 	repositories: BuiltInGitRepository[];
 	getRepository(uri: vscode.Uri): BuiltInGitRepository | null;
+	onDidOpenRepository?: vscode.Event<BuiltInGitRepository>;
+	onDidCloseRepository?: vscode.Event<BuiltInGitRepository>;
 }
 
 interface BuiltInGitExtensionExports {
@@ -691,7 +700,7 @@ export class GitService {
 		]);
 	}
 
-	private async getBuiltInGitApi(): Promise<BuiltInGitApi | null> {
+	public async getBuiltInGitApi(): Promise<BuiltInGitApi | null> {
 		const extension = vscode.extensions.getExtension<BuiltInGitExtensionExports>('vscode.git');
 		if (!extension) {
 			return null;

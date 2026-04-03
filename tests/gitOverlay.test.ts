@@ -1147,7 +1147,7 @@ test('resolveGitOverlayPostCommitProjects excludes passive prompt projects witho
 	assert.deepEqual(projects.map(project => project.project), ['active-prompt']);
 });
 
-test('GitOverlay shows no-changes status for clean tracked projects and keeps switch-all disabled', () => {
+test('GitOverlay shows needs-switch status for clean tracked projects on step 1 and keeps switch-all enabled', () => {
 	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
 		open: true,
 		mode: 'default',
@@ -1260,13 +1260,13 @@ test('GitOverlay shows no-changes status for clean tracked projects and keeps sw
 	assert.doesNotMatch(markup, /editor\.gitOverlayStepSwitchNothingToDo/);
 	assert.match(markup, /editor\.gitOverlayProjectSourceBranch/);
 	assert.match(markup, /editor\.gitOverlayProjectExpectedBranch/);
-	assert.match(markup, /editor\.gitOverlayStateNoChanges/);
+	assert.match(markup, /editor\.gitOverlayStateNeedsSwitch/);
 	assert.equal(markup.match(/<option value="">editor\.gitOverlaySelectPlaceholder<\/option>/g)?.length || 0, 4);
 	assert.equal(markup.match(/value="main"[^>]*>main<\/option>/g)?.length || 0, 2);
 	assert.equal(markup.match(/value="feature\/task-42"[^>]*>feature\/task-42<\/option>/g)?.length || 0, 2);
 	assert.doesNotMatch(markup, /min-width:1060px/);
-	assert.match(markup, /<span style="font-size:12px;font-weight:600;text-align:center;word-break:break-word;color:black">editor\.gitOverlayStateNoChanges<\/span>/);
-	assert.match(markup, /<button[^>]*disabled[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
+	assert.match(markup, /<span style="font-size:12px;font-weight:600;text-align:center;word-break:break-word;color:red">editor\.gitOverlayStateNeedsSwitch<\/span>/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
 });
 
 test('GitOverlay shows ready status as blue text without a background pill', () => {
@@ -2104,6 +2104,42 @@ test('GitOverlay enables step 1 switching for clean projects outside tracked and
 
 	assert.match(markup, /editor\.gitOverlayStateNeedsSwitch/);
 	assert.doesNotMatch(markup, /editor\.gitOverlayStateNoChanges/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlaySwitch<\/span><\/span><\/button>/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
+});
+
+test('GitOverlay enables step 1 switching from tracked to prompt branch without uncommitted changes', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'tracked-clean',
+					currentBranch: 'main',
+					branches: [
+						{
+							name: 'main',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayStateNeedsSwitch/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayStateNoChanges/);
+	assert.equal(markup.match(/<select/g)?.length || 0, 2);
 	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlaySwitch<\/span><\/span><\/button>/);
 	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlaySwitchAll<\/span><\/span><\/button>/);
 });

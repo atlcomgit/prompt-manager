@@ -941,13 +941,14 @@ export const GitOverlay: React.FC<Props> = ({
 	);
 	const step1ProjectsBlockedForApply = useMemo(
 		() => step1AvailableProjects.filter((project) => {
-			if (!isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions)) {
-				return false;
-			}
-
 			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
 			const implicitTargetBranch = resolveGitOverlayImplicitExpectedBranch(project, promptBranch, trackedBranchOptions);
 			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim() || implicitTargetBranch;
+			const needsTargetSwitch = Boolean(targetBranch) && project.currentBranch.trim() !== targetBranch;
+			if (!needsTargetSwitch && !isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions)) {
+				return false;
+			}
+
 			const needsSync = Boolean(project.upstream.trim()) && project.behind > 0;
 			const targetRequiresSource = shouldGitOverlayRequireSourceBranch(project, targetBranch);
 
@@ -965,13 +966,14 @@ export const GitOverlay: React.FC<Props> = ({
 	);
 	const step1ProjectsReadyForApply = useMemo(
 		() => step1AvailableProjects.filter((project) => {
-			if (!isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions)) {
-				return false;
-			}
-
 			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
 			const implicitTargetBranch = resolveGitOverlayImplicitExpectedBranch(project, promptBranch, trackedBranchOptions);
 			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim() || implicitTargetBranch;
+			const needsTargetSwitch = Boolean(targetBranch) && project.currentBranch.trim() !== targetBranch;
+			if (!needsTargetSwitch && !isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions)) {
+				return false;
+			}
+
 			const needsSync = Boolean(project.upstream.trim()) && project.behind > 0;
 			const targetRequiresSource = shouldGitOverlayRequireSourceBranch(project, targetBranch);
 			if (needsSync || !targetBranch) {
@@ -980,7 +982,7 @@ export const GitOverlay: React.FC<Props> = ({
 			if (targetRequiresSource && !sourceBranch) {
 				return false;
 			}
-			return project.currentBranch.trim() !== targetBranch;
+			return needsTargetSwitch;
 		}),
 		[promptBranch, resolvedTargetBranchesByProject, resolvedTrackedBranchesByProject, step1AvailableProjects, trackedBranchOptions],
 	);
@@ -1616,9 +1618,11 @@ export const GitOverlay: React.FC<Props> = ({
 											const projectTrackedBranchOptions = buildProjectTrackedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
 											const projectExpectedBranchOptions = buildProjectExpectedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
 											const projectNeedsSync = project.available && Boolean(project.upstream.trim()) && project.behind > 0;
-											const projectActionableForApply = isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions);
 											const implicitTargetBranch = resolveGitOverlayImplicitExpectedBranch(project, promptBranch, trackedBranchOptions);
 											const effectiveTargetBranch = selectedTargetBranch || implicitTargetBranch;
+											const projectNeedsTargetSwitch = Boolean(effectiveTargetBranch) && currentBranch !== effectiveTargetBranch;
+											const projectActionableForApply = projectNeedsTargetSwitch
+												|| isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions);
 											const targetRequiresSource = shouldGitOverlayRequireSourceBranch(project, effectiveTargetBranch);
 											const hideSourceBranchField = projectTrackedBranchOptions.length === 0
 												|| (Boolean(effectiveTargetBranch) && !targetRequiresSource);
@@ -1629,11 +1633,11 @@ export const GitOverlay: React.FC<Props> = ({
 												&& !projectNeedsSync
 												&& Boolean(effectiveTargetBranch)
 												&& (!targetRequiresSource || Boolean(selectedTrackedBranch))
-												&& currentBranch !== effectiveTargetBranch;
+												&& projectNeedsTargetSwitch;
 											const rowNeedsDecision = project.available
 												&& projectActionableForApply
 												&& !rowOnPrompt
-												&& ((targetRequiresSource && !selectedTrackedBranch) || !effectiveTargetBranch || projectNeedsSync || currentBranch !== effectiveTargetBranch);
+												&& ((targetRequiresSource && !selectedTrackedBranch) || !effectiveTargetBranch || projectNeedsSync || projectNeedsTargetSwitch);
 											const rowStatusLabel = !project.available
 												? t('editor.gitOverlayStateUnavailable')
 												: !projectActionableForApply

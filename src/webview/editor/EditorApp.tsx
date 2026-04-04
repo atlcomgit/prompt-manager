@@ -15,6 +15,7 @@ import { ActionBar } from './components/ActionBar';
 import { TimerDisplay } from './components/TimerDisplay';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
+import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
 import type { Prompt, PromptStatus } from '../../types/prompt';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
 import { createDefaultPrompt } from '../../types/prompt';
@@ -240,6 +241,17 @@ export const EditorApp: React.FC = () => {
     || prompt.status === 'report'
     || prompt.status === 'review';
   const shouldDockGitOverlaySecondHalf = pageWidth >= EDITOR_FORM_SHELL_WIDTH_PX * 2;
+  const editorProgressMode = resolveEditorProgressMode({
+    isSaving,
+    isStartingChat,
+    isImprovingPromptText,
+    isGeneratingReport,
+    isGeneratingTitle,
+    isGeneratingDescription,
+    isSuggestionLoading,
+    isRecalculating,
+    isLoadingGlobalContext,
+  });
   const startChatLockRef = useRef(false);
   const chatStartTimeoutRef = useRef<number | null>(null);
   const pendingChatStartRequestIdRef = useRef<string>('');
@@ -2303,6 +2315,12 @@ export const EditorApp: React.FC = () => {
           >● {t('editor.unsaved')}</span>
         </div>
 
+        <ProgressLine
+          mode={editorProgressMode}
+          modeAttributeName="data-pm-editor-progress"
+          phaseAttributeName="data-pm-editor-progress-phase"
+        />
+
         {/* Main content */}
         <div style={styles.body}>
           <div style={styles.formGrid}>
@@ -2959,7 +2977,6 @@ export const EditorApp: React.FC = () => {
             showGitFlowAction={shouldShowFooterGitFlow}
             hasChatSession={prompt.chatSessionIds.length > 0}
             isChatPanelOpen={isChatPanelOpen}
-            isDirty={isDirty}
             isSaving={isSaving}
             isStartingChat={isStartingChat}
             hasContent={!!prompt.content}

@@ -14,17 +14,34 @@ interface Props {
   showGitFlowAction?: boolean;
   hasChatSession: boolean;
   isChatPanelOpen: boolean;
-  isDirty: boolean;
   isSaving: boolean;
   isStartingChat: boolean;
   hasContent: boolean;
   status: PromptStatus;
 }
 
+function splitLeadingIconLabel(label: string): { icon: string; text: string } {
+  const trimmedLabel = label.trim();
+  const firstSpaceIndex = trimmedLabel.indexOf(' ');
+  if (firstSpaceIndex <= 0) {
+    return { icon: '', text: trimmedLabel };
+  }
+
+  const leadingToken = trimmedLabel.slice(0, firstSpaceIndex).trim();
+  const text = trimmedLabel.slice(firstSpaceIndex + 1).trim();
+  const hasLetterOrDigit = /[\p{L}\p{N}]/u.test(leadingToken);
+  if (!text || hasLetterOrDigit) {
+    return { icon: '', text: trimmedLabel };
+  }
+
+  return { icon: leadingToken, text };
+}
+
 export const ActionBar: React.FC<Props> = ({
-  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isDirty, isSaving, isStartingChat, hasContent, status,
+  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isSaving, isStartingChat, hasContent, status,
 }) => {
   const t = useT();
+  const saveLabel = splitLeadingIconLabel(t('actions.save'));
   const startChatDisabled = !hasContent || isStartingChat;
   const canStartChat = status === 'draft' || status === 'in-progress' || status === 'stopped' || status === 'cancelled';
   const canOpenChat = status === 'in-progress' || status === 'stopped' || status === 'cancelled';
@@ -37,8 +54,12 @@ export const ActionBar: React.FC<Props> = ({
           style={{ ...styles.btn, ...styles.btnPrimary }}
           onClick={onSave}
           disabled={isSaving}
+          aria-busy={isSaving}
         >
-          {isSaving ? t('actions.saving') : t('actions.save')}
+          <span style={styles.btnLeadSlot} aria-hidden="true">
+            {isSaving ? <span style={styles.btnSpinner} /> : saveLabel.icon}
+          </span>
+          <span>{saveLabel.text}</span>
         </button>
 
         <button
@@ -74,9 +95,6 @@ export const ActionBar: React.FC<Props> = ({
       </div>
 
       <div style={styles.right}>
-        {isDirty && (
-          <span style={styles.unsaved}>{t('actions.unsavedChanges')}</span>
-        )}
         {showStatusActions && (
           <>
             <button style={{ ...styles.btn, ...styles.btnSuccess }} onClick={onMarkCompleted}>
@@ -138,6 +156,15 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--vscode-button-background)',
     color: 'var(--vscode-button-foreground)',
   },
+  btnLeadSlot: {
+    width: '1em',
+    minWidth: '1em',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    lineHeight: 1,
+    flexShrink: 0,
+  },
   btnChat: {
     background: 'var(--vscode-button-secondaryBackground)',
     color: 'var(--vscode-button-secondaryForeground)',
@@ -158,14 +185,10 @@ const styles: Record<string, React.CSSProperties> = {
   btnSpinner: {
     width: '13px',
     height: '13px',
-    border: '2px solid color-mix(in srgb, var(--vscode-button-secondaryForeground) 35%, transparent)',
-    borderTopColor: 'var(--vscode-button-secondaryForeground)',
+    border: '2px solid color-mix(in srgb, currentColor 35%, transparent)',
+    borderTopColor: 'currentColor',
     borderRadius: '50%',
     animation: 'pm-spin 0.8s linear infinite',
     flexShrink: 0,
-  },
-  unsaved: {
-    fontSize: '12px',
-    color: 'var(--vscode-editorWarning-foreground)',
   },
 };

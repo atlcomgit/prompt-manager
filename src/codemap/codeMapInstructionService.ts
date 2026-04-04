@@ -20,6 +20,7 @@ import type { AiService } from '../services/aiService.js';
 import { normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { getCodeMapSettings } from './codeMapConfig.js';
 import { buildCodeMapGenerationFingerprint, resolveInstructionSnapshotToken } from './codeMapRefreshPolicy.js';
+import { buildCodeMapRelationBlock, buildLegacyRelationsFromRelationBlock } from './codeMapRelationBuilder.js';
 import type { CodeMapDatabaseService } from './codeMapDatabaseService.js';
 
 const execFileAsync = promisify(execFile);
@@ -795,6 +796,16 @@ export class CodeMapInstructionService {
 					})) : [],
 				})),
 				relations: [...input.codeDescription.relations],
+				relationBlock: input.codeDescription.relationBlock
+					? {
+						summary: [...input.codeDescription.relationBlock.summary],
+						diagramLines: [...input.codeDescription.relationBlock.diagramLines],
+						architectureFlows: [...input.codeDescription.relationBlock.architectureFlows],
+						fileLinks: input.codeDescription.relationBlock.fileLinks.map(edge => ({ ...edge, details: [...edge.details] })),
+						uiDataLinks: input.codeDescription.relationBlock.uiDataLinks.map(edge => ({ ...edge, details: [...edge.details] })),
+						symbolLinks: input.codeDescription.relationBlock.symbolLinks.map(edge => ({ ...edge, details: [...edge.details] })),
+					}
+					: undefined,
 				recentChanges: [...input.codeDescription.recentChanges],
 			},
 			diffEntries: input.reuseContext?.diffEntries.map(entry => ({ ...entry })) || [],
@@ -1038,7 +1049,13 @@ export class CodeMapInstructionService {
 			|| reusableFileSummariesByPath.get(filePath)
 			|| cachedFileSummariesByPath.get(filePath)
 			|| buildFileSummary(filePath, fileTexts.get(filePath) || '', isRussianLocale));
-		const relations = buildRelations(fileSummaries, isRussianLocale);
+		const relationBlock = buildCodeMapRelationBlock({
+			files: snapshot.filteredFiles,
+			fileSummaries,
+			fileTexts,
+			locale,
+		});
+		const relations = buildLegacyRelationsFromRelationBlock(relationBlock, isRussianLocale);
 		const recentChanges = instructionKind === 'delta'
 			? buildDeltaRecentChanges(reuseContext?.diffEntries || [], isRussianLocale)
 			: await (async () => {
@@ -1063,6 +1080,7 @@ export class CodeMapInstructionService {
 			areas: areaSummaries,
 			fileSummaries,
 			relations,
+			relationBlock,
 			recentChanges,
 		};
 	}
@@ -1614,9 +1632,12 @@ export function buildCodeMapProjectInstruction(input: {
 		}),
 		'',
 		relationsTitle,
-		...(codeDescription.relations.length > 0
-			? codeDescription.relations.map(item => `- ${item}`)
-			: [isRussianLocale ? '- Явные связи между файлами не обнаружены.' : '- No explicit file relationships were detected.']),
+		...buildRelationSectionLines(
+			codeDescription.relationBlock,
+			codeDescription.relations,
+			isRussianLocale,
+			isRussianLocale ? 'Явные связи между файлами не обнаружены.' : 'No explicit file relationships were detected.',
+		),
 		'',
 		timelineTitle,
 		...(codeDescription.recentChanges.length > 0
@@ -1700,9 +1721,12 @@ function buildCodeMapDeltaInstruction(input: {
 			: [isRussianLocale ? '- Изменённые сигнальные файлы не выбраны.' : '- No informative changed files were selected.']),
 		'',
 		relationsTitle,
-		...(input.codeDescription.relations.length > 0
-			? input.codeDescription.relations.map(item => `- ${item}`)
-			: [isRussianLocale ? '- Явные связи между изменениями не обнаружены.' : '- No explicit relationships between the changes were detected.']),
+		...buildRelationSectionLines(
+			input.codeDescription.relationBlock,
+			input.codeDescription.relations,
+			isRussianLocale,
+			isRussianLocale ? 'Явные связи между изменениями не обнаружены.' : 'No explicit relationships between the changes were detected.',
+		),
 		'',
 		timelineTitle,
 		...(input.codeDescription.recentChanges.length > 0
@@ -1749,6 +1773,71 @@ function buildInstructionFileSummaryLines(file: FileSummary, isRussianLocale: bo
 	return lines;
 }
 
+function buildRelationSectionLines(
+	relationBlock: ProjectCodeDescription['relationBlock'],
+	fallbackRelations: string[],
+	isRussianLocale: boolean,
+	emptyMessage: string,
+): string[] {
+	const hasStructuredBlock = Boolean(
+		relationBlock
+		&& (
+			relationBlock.summary.length > 0
+			|| relationBlock.diagramLines.length > 0
+			|| relationBlock.architectureFlows.length > 0
+			|| relationBlock.fileLinks.length > 0
+			|| relationBlock.uiDataLinks.length > 0
+			|| relationBlock.symbolLinks.length > 0
+		),
+	);
+
+	if (hasStructuredBlock && relationBlock) {
+		const lines: string[] = [];
+		if (relationBlock.summary.length > 0) {
+			lines.push(isRussianLocale ? '### Краткая сводка' : '### Summary');
+			lines.push(...relationBlock.summary.map(item => `- ${item}`));
+			lines.push('');
+		}
+		if (relationBlock.diagramLines.length > 0) {
+			lines.push(isRussianLocale ? '### Схема связи' : '### Relationship Diagram');
+			lines.push('```text');
+			lines.push(...relationBlock.diagramLines);
+			lines.push('```');
+			lines.push('');
+		}
+		if (relationBlock.architectureFlows.length > 0) {
+			lines.push(isRussianLocale ? '### Архитектурные потоки' : '### Architectural Flows');
+			lines.push(...relationBlock.architectureFlows.map(item => `- ${item}`));
+			lines.push('');
+		}
+		if (relationBlock.fileLinks.length > 0) {
+			lines.push(isRussianLocale ? '### Межфайловые связи' : '### Inter-file Links');
+			lines.push(...relationBlock.fileLinks.map(item => `- ${item.label}`));
+			lines.push('');
+		}
+		if (relationBlock.uiDataLinks.length > 0) {
+			lines.push(isRussianLocale ? '### UI и данные' : '### UI and Data');
+			lines.push(...relationBlock.uiDataLinks.map(item => `- ${item.label}`));
+			lines.push('');
+		}
+		if (relationBlock.symbolLinks.length > 0) {
+			lines.push(isRussianLocale ? '### Символьные связи' : '### Symbol Links');
+			lines.push(...relationBlock.symbolLinks.map(item => `- ${item.label}`));
+			lines.push('');
+		}
+		while (lines[lines.length - 1] === '') {
+			lines.pop();
+		}
+		return lines;
+	}
+
+	if (fallbackRelations.length > 0) {
+		return fallbackRelations.map(item => `- ${item}`);
+	}
+
+	return [`- ${emptyMessage}`];
+}
+
 function buildFallbackCodeDescription(files: string[], manifest: PackageManifest | null, composerManifest: ComposerManifest | null, isRussianLocale: boolean): ProjectCodeDescription {
 	const analysisFiles = selectFilesForAnalysis(files);
 	const detailFiles = selectFilesForDetailedSummary(analysisFiles);
@@ -1768,6 +1857,14 @@ function buildFallbackCodeDescription(files: string[], manifest: PackageManifest
 		areas,
 		fileSummaries: detailFiles.map(filePath => buildFileSummary(filePath, '', isRussianLocale)),
 		relations: [],
+		relationBlock: {
+			summary: [],
+			diagramLines: [],
+			architectureFlows: [],
+			fileLinks: [],
+			uiDataLinks: [],
+			symbolLinks: [],
+		},
 		recentChanges: [],
 	};
 }

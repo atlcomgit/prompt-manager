@@ -345,6 +345,78 @@ test('buildCodeMapProjectInstruction renders frontend contract and ui blocks for
 	assert.match(output, /Источники данных: ordersStore/);
 });
 
+test('buildCodeMapProjectInstruction renders structured relation block sections', () => {
+	const output = buildCodeMapProjectInstruction({
+		repository: 'prompt-manager',
+		branchName: 'master',
+		resolvedBranchName: 'master',
+		baseBranchName: 'master',
+		instructionKind: 'base',
+		branchRole: 'tracked',
+		generatedAt: '2026-03-14T00:00:00.000Z',
+		headSha: 'abc123',
+		locale: 'ru',
+		files: ['src/extension.ts', 'src/providers/index.ts'],
+		manifest: null,
+		codeDescription: {
+			projectEssence: ['Тестовая суть проекта.'],
+			architectureSummary: ['Тестовое описание архитектуры.'],
+			patterns: [],
+			entryPoints: [],
+			areas: [],
+			fileSummaries: [],
+			relations: [],
+			relationBlock: {
+				summary: ['Разрешено 3 межфайловых связи.'],
+				diagramLines: ['├─ extension', '│  -> providers', '└─ providers', '   -> services'],
+				architectureFlows: ['extension -> providers (1 связь)', 'providers -> services (2 связи)'],
+				fileLinks: [{
+					kind: 'import',
+					sourcePath: 'src/extension.ts',
+					targetPath: 'src/providers/index.ts',
+					label: 'src/extension.ts -> src/providers/index.ts (импорт: providers)',
+					weight: 1,
+					details: ['providers'],
+					sourceLayer: 'extension',
+					targetLayer: 'providers',
+				}],
+				uiDataLinks: [{
+					kind: 'frontend-data',
+					sourcePath: 'src/webview/editor/EditorApp.tsx',
+					targetPath: 'src/services/stateService.ts',
+					label: 'src/webview/editor/EditorApp.tsx -> src/services/stateService.ts (источник данных: editorState)',
+					weight: 1,
+					details: ['editorState'],
+					sourceLayer: 'webview',
+					targetLayer: 'services',
+				}],
+				symbolLinks: [{
+					kind: 'symbol-ref',
+					sourcePath: 'src/extension.ts',
+					targetPath: 'src/providers/index.ts',
+					label: 'src/extension.ts -> src/providers/index.ts (символ: SidebarProvider)',
+					weight: 1,
+					details: ['SidebarProvider -> SidebarProvider'],
+					sourceLayer: 'extension',
+					targetLayer: 'providers',
+					sourceSymbol: 'SidebarProvider',
+					targetSymbol: 'SidebarProvider',
+				}],
+			},
+			recentChanges: [],
+		},
+	});
+
+	assert.match(output, /### Краткая сводка/);
+	assert.match(output, /### Схема связи/);
+	assert.match(output, /```text[\s\S]*extension[\s\S]*providers/);
+	assert.match(output, /### Архитектурные потоки/);
+	assert.match(output, /### Межфайловые связи/);
+	assert.match(output, /### UI и данные/);
+	assert.match(output, /### Символьные связи/);
+	assert.match(output, /SidebarProvider/);
+});
+
 test('generateInstruction emits detailed progress messages for area batching and file summaries', async () => {
 	const service = new CodeMapInstructionService({
 		generateCodeMapAreaDescriptionsBatch: async () => JSON.stringify({

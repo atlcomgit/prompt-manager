@@ -2539,6 +2539,7 @@ test('GitOverlay renders default mode as read-only for prompts in progress', () 
 	});
 
 	assert.match(markup, /editor\.gitOverlayStepCommitTitle/);
+	assert.match(markup, /editor\.gitOverlayReadOnlyModeHint[\s\S]*editor\.gitOverlayPromptBranch/);
 	assert.match(markup, /<select[^>]*disabled/);
 	assert.match(markup, /<textarea[^>]*disabled[^>]*placeholder="editor\.gitOverlayCommitPlaceholder"/);
 	assert.match(markup, /<button[^>]*disabled=""[^>]*><span[^>]*><span>editor\.gitOverlayCommitProject<\/span><\/span><\/button>/);

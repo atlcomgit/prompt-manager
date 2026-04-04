@@ -1662,6 +1662,7 @@ export const GitOverlay: React.FC<Props> = ({
 								isSectionAutoCollapsed('step1') ? <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div> : null
 							) : (
 							<div style={styles.sectionBody}>
+								{isReadOnlyFlow ? <InlineHint message={t('editor.gitOverlayReadOnlyModeHint')} tone="error" /> : null}
 								<div style={styles.fieldBlock}>
 									<label style={styles.label}>{t('editor.gitOverlayPromptBranch')}</label>
 									<div style={{

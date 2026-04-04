@@ -111,6 +111,37 @@ export interface CodeMapFrontendBlockSummary {
 	forms: string[];
 }
 
+export type CodeMapRelationKind =
+	| 'import'
+	| 'reexport'
+	| 'dynamic-import'
+	| 'layer-flow'
+	| 'frontend-component'
+	| 'frontend-data'
+	| 'symbol-ref';
+
+export interface CodeMapRelationEdge {
+	kind: CodeMapRelationKind;
+	sourcePath: string;
+	targetPath: string;
+	label: string;
+	weight: number;
+	details: string[];
+	sourceLayer?: string;
+	targetLayer?: string;
+	sourceSymbol?: string;
+	targetSymbol?: string;
+}
+
+export interface CodeMapRelationBlock {
+	summary: string[];
+	diagramLines: string[];
+	architectureFlows: string[];
+	fileLinks: CodeMapRelationEdge[];
+	uiDataLinks: CodeMapRelationEdge[];
+	symbolLinks: CodeMapRelationEdge[];
+}
+
 export interface CodeMapFileSummary {
 	path: string;
 	lineCount: number;
@@ -138,6 +169,7 @@ export interface CodeMapProjectDescription {
 	areas: CodeMapAreaSummary[];
 	fileSummaries: CodeMapFileSummary[];
 	relations: string[];
+	relationBlock?: CodeMapRelationBlock;
 	recentChanges: string[];
 }
 

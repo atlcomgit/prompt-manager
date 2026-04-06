@@ -822,14 +822,23 @@ export class GitService {
 		await this.runGitFileMutation(projectPath, ['checkout', '-b', branchName, '--track', remoteBranchRef]);
 	}
 
-	private async pullCurrentBranchIfTracked(projectPath: string): Promise<boolean> {
+	private async getCurrentLocalBranchRecord(projectPath: string): Promise<GitLocalBranchRecord | null> {
 		const currentBranch = await this.getCurrentBranch(projectPath);
 		if (!currentBranch) {
+			return null;
+		}
+
+		const localBranches = await this.listLocalBranches(projectPath);
+		return localBranches.get(currentBranch) || null;
+	}
+
+	private async pullCurrentBranchIfTracked(projectPath: string): Promise<boolean> {
+		const currentBranchRecord = await this.getCurrentLocalBranchRecord(projectPath);
+		if (!currentBranchRecord) {
 			return false;
 		}
 
-		const upstream = await this.runGitFileCommandOptional(projectPath, ['config', `branch.${currentBranch}.merge`]);
-		if (!upstream) {
+		if (!currentBranchRecord.upstream) {
 			return false;
 		}
 
@@ -2483,12 +2492,11 @@ export class GitService {
 		projectNames: string[],
 	): Promise<GitMultiProjectResult> {
 		return this.runProjectMutation(projectPaths, projectNames, async (_project, projectPath) => {
-			const currentBranch = await this.getCurrentBranch(projectPath);
-			if (!currentBranch) {
+			const currentBranchRecord = await this.getCurrentLocalBranchRecord(projectPath);
+			if (!currentBranchRecord) {
 				return false;
 			}
-			const upstream = await this.runGitFileCommandOptional(projectPath, ['config', `branch.${currentBranch}.merge`]);
-			if (!upstream) {
+			if (!currentBranchRecord.upstream || currentBranchRecord.behind <= 0 || currentBranchRecord.stale) {
 				return false;
 			}
 			await this.runGitFileMutation(projectPath, ['pull', '--ff-only']);

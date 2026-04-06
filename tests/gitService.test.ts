@@ -68,6 +68,20 @@ test('GitService applyBranchTargetsByProject switches to existing prompt branch 
 	service.findRemoteBranchRef = async (_projectPath: string, branchName: string) => branchName === 'feature/task-42'
 		? 'origin/feature/task-42'
 		: '';
+	service.listLocalBranches = async () => new Map([
+		[currentBranch, {
+			name: currentBranch,
+			current: true,
+			upstream: currentBranch === 'feature/task-42' ? 'origin/feature/task-42' : '',
+			ahead: 0,
+			behind: 0,
+			stale: false,
+			sha: 'abc1234',
+			author: 'Test User',
+			committedAt: '2026-04-06T00:00:00.000Z',
+			subject: 'Test commit',
+		}],
+	]);
 	service.getAllowedBaseBranches = () => new Set(['main', 'develop']);
 	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
 		if (args[0] === 'config' && args[1] === 'branch.feature/task-42.merge') {
@@ -110,6 +124,20 @@ test('GitService applyBranchTargetsByProject creates missing prompt branch from 
 	service.getCurrentBranch = async () => currentBranch;
 	service.branchExistsLocally = async (_projectPath: string, branchName: string) => branchName === 'main';
 	service.findRemoteBranchRef = async () => '';
+	service.listLocalBranches = async () => new Map([
+		[currentBranch, {
+			name: currentBranch,
+			current: true,
+			upstream: currentBranch === 'main' ? 'origin/main' : '',
+			ahead: 0,
+			behind: 0,
+			stale: false,
+			sha: 'abc1234',
+			author: 'Test User',
+			committedAt: '2026-04-06T00:00:00.000Z',
+			subject: 'Test commit',
+		}],
+	]);
 	service.getAllowedBaseBranches = () => new Set(['main', 'develop']);
 	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
 		if (args[0] === 'config' && args[1] === 'branch.main.merge') {
@@ -142,6 +170,113 @@ test('GitService applyBranchTargetsByProject creates missing prompt branch from 
 		['pull', '--ff-only'],
 		['checkout', '-b', 'feature/task-42', 'main'],
 	]);
+});
+
+test('GitService syncProjects pulls only branches that are behind their upstream', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const calls: string[][] = [];
+
+	service.getCurrentBranch = async () => 'feature/task-42';
+	service.listLocalBranches = async () => new Map([
+		['feature/task-42', {
+			name: 'feature/task-42',
+			current: true,
+			upstream: 'origin/feature/task-42',
+			ahead: 0,
+			behind: 2,
+			stale: false,
+			sha: 'abc1234',
+			author: 'Test User',
+			committedAt: '2026-04-06T00:00:00.000Z',
+			subject: 'Test commit',
+		}],
+	]);
+	service.runGitFileMutation = async (_projectPath: string, args: string[]) => {
+		calls.push(args);
+	};
+
+	const result = await service.syncProjects(
+		new Map([['api', '/tmp/api']]),
+		['api'],
+	);
+
+	assert.equal(result.success, true);
+	assert.deepEqual(result.changedProjects, ['api']);
+	assert.deepEqual(result.skippedProjects, []);
+	assert.deepEqual(calls, [
+		['pull', '--ff-only'],
+	]);
+});
+
+test('GitService syncProjects skips branches without upstream changes', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const calls: string[][] = [];
+
+	service.getCurrentBranch = async () => 'feature/task-42';
+	service.listLocalBranches = async () => new Map([
+		['feature/task-42', {
+			name: 'feature/task-42',
+			current: true,
+			upstream: 'origin/feature/task-42',
+			ahead: 0,
+			behind: 0,
+			stale: false,
+			sha: 'abc1234',
+			author: 'Test User',
+			committedAt: '2026-04-06T00:00:00.000Z',
+			subject: 'Test commit',
+		}],
+	]);
+	service.runGitFileMutation = async (_projectPath: string, args: string[]) => {
+		calls.push(args);
+	};
+
+	const result = await service.syncProjects(
+		new Map([['api', '/tmp/api']]),
+		['api'],
+	);
+
+	assert.equal(result.success, true);
+	assert.deepEqual(result.changedProjects, []);
+	assert.deepEqual(result.skippedProjects, ['api']);
+	assert.deepEqual(calls, []);
+});
+
+test('GitService syncProjects skips stale upstream branches', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const calls: string[][] = [];
+
+	service.getCurrentBranch = async () => 'feature/task-42';
+	service.listLocalBranches = async () => new Map([
+		['feature/task-42', {
+			name: 'feature/task-42',
+			current: true,
+			upstream: 'origin/feature/task-42',
+			ahead: 0,
+			behind: 3,
+			stale: true,
+			sha: 'abc1234',
+			author: 'Test User',
+			committedAt: '2026-04-06T00:00:00.000Z',
+			subject: 'Test commit',
+		}],
+	]);
+	service.runGitFileMutation = async (_projectPath: string, args: string[]) => {
+		calls.push(args);
+	};
+
+	const result = await service.syncProjects(
+		new Map([['api', '/tmp/api']]),
+		['api'],
+	);
+
+	assert.equal(result.success, true);
+	assert.deepEqual(result.changedProjects, []);
+	assert.deepEqual(result.skippedProjects, ['api']);
+	assert.deepEqual(calls, []);
 });
 
 test('GitService discardProjectChanges applies each git restore strategy once per unique file', async () => {

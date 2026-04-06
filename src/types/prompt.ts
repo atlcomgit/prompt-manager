@@ -17,6 +17,21 @@ export const PROMPT_STATUS_ORDER: PromptStatus[] = [
 	'closed',
 ];
 
+const PROMPT_STATUS_SET = new Set<PromptStatus>(PROMPT_STATUS_ORDER);
+
+export function isPromptStatus(value: string): value is PromptStatus {
+	return PROMPT_STATUS_SET.has(value as PromptStatus);
+}
+
+export function getNextPromptStatus(status: PromptStatus): PromptStatus | null {
+	const index = PROMPT_STATUS_ORDER.indexOf(status);
+	if (index < 0 || index >= PROMPT_STATUS_ORDER.length - 1) {
+		return null;
+	}
+
+	return PROMPT_STATUS_ORDER[index + 1] || null;
+}
+
 /** Prompt configuration stored as JSON */
 export interface PromptConfig {
 	/** Unique identifier (folder name / slug) */

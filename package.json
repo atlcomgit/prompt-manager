@@ -248,7 +248,7 @@
       "properties": {
         "promptManager.improvePromptInstructions": {
           "type": "array",
-          "description": "Additional instructions for AI prompt text improvement (button \"Генерация\").",
+          "description": "Additional instructions for AI prompt text improvement (button \"Improve\").",
           "default": [
             "Пиши на русском языке.",
             "Пиши ответ с обращением к одному лицу."

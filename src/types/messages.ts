@@ -74,6 +74,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'markDirty'; dirty: boolean; prompt?: Prompt; promptId?: string }
 	| { type: 'showStatistics' }
 	| { type: 'updatePromptStatus'; id: string; status: PromptStatus }
+	| { type: 'moveAllPromptsToNextStatus'; status: PromptStatus }
 	| { type: 'getGlobalContext' }
 	| { type: 'saveGlobalContext'; context: string }
 	| { type: 'loadRemoteGlobalContext' }

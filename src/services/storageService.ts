@@ -575,7 +575,7 @@ export class StorageService {
 				Buffer.from(report || '', 'utf-8')
 			),
 			// Удаление legacy report.md (если существует)
-			vscode.workspace.fs.delete(vscode.Uri.file(path.join(dir, 'report.md'))).catch(() => { }),
+			vscode.workspace.fs.delete(vscode.Uri.file(path.join(dir, 'report.md'))).then(undefined, () => { }),
 		]);
 
 		// Ensure context directory exists

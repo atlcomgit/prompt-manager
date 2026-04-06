@@ -2,22 +2,15 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
-import type { Prompt, PromptConfig, PromptStatus } from '../../types/prompt';
+import {
+  PROMPT_STATUS_ORDER,
+  getNextPromptStatus,
+  type Prompt,
+  type PromptConfig,
+  type PromptStatus,
+} from '../../types/prompt';
 import { PromptDetailOverlay } from './components/PromptDetailOverlay';
 import { trackerButtonStyles } from './trackerButtonStyles';
-
-const vscode = getVsCodeApi();
-
-const STATUS_ORDER: PromptStatus[] = [
-  'draft',
-  'in-progress',
-  'stopped',
-  'cancelled',
-  'completed',
-  'report',
-  'review',
-  'closed',
-];
 
 const STATUS_COLORS: Record<PromptStatus, string> = {
   draft: 'var(--vscode-descriptionForeground)',
@@ -48,8 +41,34 @@ const statusTranslationKey = (status: PromptStatus): string => {
   return `status.${status}`;
 };
 
+export function applyPromptStatusToPrompts(
+  prompts: PromptConfig[],
+  promptIds: string[],
+  status: PromptStatus,
+): PromptConfig[] {
+  const promptIdSet = new Set(promptIds);
+  if (!promptIdSet.size) {
+    return prompts;
+  }
+
+  return prompts.map(prompt => (
+    promptIdSet.has(prompt.id)
+      ? { ...prompt, status }
+      : prompt
+  ));
+}
+
+export function getTrackerMoveAllState(status: PromptStatus, itemCount: number) {
+  const nextStatus = getNextPromptStatus(status);
+  return {
+    nextStatus,
+    disabled: itemCount === 0 || !nextStatus,
+  };
+}
+
 export const TrackerApp: React.FC = () => {
   const OPEN_PROMPT_DEBOUNCE_MS = 120;
+  const vscode = getVsCodeApi();
   const t = useT();
   const [prompts, setPrompts] = useState<PromptConfig[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -125,11 +144,41 @@ export const TrackerApp: React.FC = () => {
 
   useMessageListener(handleMessage);
 
-  const movePrompt = useCallback((promptId: string, status: PromptStatus) => {
-    setPrompts(prev => prev.map(p => (p.id === promptId ? { ...p, status } : p)));
-    setSelectedPrompt(current => (current?.id === promptId ? { ...current, status } : current));
-    vscode.postMessage({ type: 'updatePromptStatus', id: promptId, status });
+  const updatePromptStatuses = useCallback((promptIds: string[], status: PromptStatus) => {
+    if (!promptIds.length) {
+      return;
+    }
+
+    setPrompts(prev => applyPromptStatusToPrompts(prev, promptIds, status));
+    setSelectedPrompt(current => (
+      current && promptIds.includes(current.id)
+        ? { ...current, status }
+        : current
+    ));
   }, []);
+
+  const movePrompt = useCallback((promptId: string, status: PromptStatus) => {
+    updatePromptStatuses([promptId], status);
+    vscode.postMessage({ type: 'updatePromptStatus', id: promptId, status });
+  }, [updatePromptStatuses, vscode]);
+
+  const moveAllPromptsToNextStatus = useCallback((status: PromptStatus) => {
+    const nextStatus = getNextPromptStatus(status);
+    if (!nextStatus) {
+      return;
+    }
+
+    const promptIds = prompts
+      .filter(prompt => prompt.status === status)
+      .map(prompt => prompt.id);
+
+    if (!promptIds.length) {
+      return;
+    }
+
+    updatePromptStatuses(promptIds, nextStatus);
+    vscode.postMessage({ type: 'moveAllPromptsToNextStatus', status });
+  }, [prompts, updatePromptStatuses, vscode]);
 
   const selectedPromptConfig = useMemo(() => {
     if (!selectedPromptId) {
@@ -206,7 +255,7 @@ export const TrackerApp: React.FC = () => {
   }, [closePromptOverlay, selectedPrompt, selectedPromptConfig, selectedPromptId]);
 
   const columns = useMemo(() => {
-    return STATUS_ORDER.map(status => {
+    return PROMPT_STATUS_ORDER.map(status => {
       const items = prompts
         .filter(p => p.status === status)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -246,6 +295,7 @@ export const TrackerApp: React.FC = () => {
           <div style={styles.board}>
             {columns.map(({ status, items }) => {
               const isOver = dragOverStatus === status;
+              const moveAllState = getTrackerMoveAllState(status, items.length);
               return (
                 <div
                   key={status}
@@ -305,6 +355,22 @@ export const TrackerApp: React.FC = () => {
                         </div>
                       );
                     })}
+                  </div>
+
+                  <div style={styles.columnFooter}>
+                    <button
+                      style={{
+                        ...styles.columnFooterButton,
+                        ...(moveAllState.disabled ? styles.columnFooterButtonDisabled : {}),
+                      }}
+                      onClick={() => moveAllPromptsToNextStatus(status)}
+                      disabled={moveAllState.disabled}
+                      title={moveAllState.nextStatus
+                        ? `${t('tracker.moveAllToNext')} -> ${t(statusTranslationKey(moveAllState.nextStatus))}`
+                        : t('tracker.moveAllToNext')}
+                    >
+                      {t('tracker.moveAllToNext')}
+                    </button>
                   </div>
                 </div>
               );
@@ -368,9 +434,9 @@ const styles: Record<string, React.CSSProperties> = {
   board: {
     height: '100%',
     width: '100%',
-    minWidth: `${STATUS_ORDER.length * 100}px`,
+    minWidth: `${PROMPT_STATUS_ORDER.length * 100}px`,
     display: 'grid',
-    gridTemplateColumns: `repeat(${STATUS_ORDER.length}, minmax(100px, 1fr))`,
+    gridTemplateColumns: `repeat(${PROMPT_STATUS_ORDER.length}, minmax(100px, 1fr))`,
     gap: '10px',
     padding: '10px',
     boxSizing: 'border-box',
@@ -423,6 +489,18 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '8px',
     padding: '8px',
     overflowY: 'auto',
+  },
+  columnFooter: {
+    padding: '8px',
+    borderTop: '1px solid var(--vscode-panel-border)',
+  },
+  columnFooterButton: {
+    ...trackerButtonStyles.secondary,
+    width: '100%',
+  },
+  columnFooterButtonDisabled: {
+    opacity: 0.55,
+    cursor: 'not-allowed',
   },
   card: {
     border: '1px solid var(--vscode-panel-border)',

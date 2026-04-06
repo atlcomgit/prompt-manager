@@ -4,24 +4,17 @@
 
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
-import type { PromptStatus } from '../types/prompt.js';
+import {
+	getNextPromptStatus,
+	isPromptStatus,
+	type PromptStatus,
+} from '../types/prompt.js';
 import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
 import type { StorageService } from '../services/storageService.js';
 import type { StateService } from '../services/stateService.js';
 import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from '../types/messages.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
-
-const STATUS_SET = new Set<PromptStatus>([
-	'draft',
-	'in-progress',
-	'stopped',
-	'cancelled',
-	'completed',
-	'report',
-	'review',
-	'closed',
-]);
 
 export class TrackerPanelManager {
 	private _onDidOpenPrompt = new vscode.EventEmitter<string>();
@@ -95,6 +88,26 @@ export class TrackerPanelManager {
 		currentPanel.webview.postMessage(response);
 	}
 
+	private async updateStoredPromptStatus(promptId: string, status: PromptStatus): Promise<boolean> {
+		const prompt = await this.storageService.getPrompt(promptId);
+		if (!prompt || prompt.status === status) {
+			return false;
+		}
+
+		prompt.status = status;
+		await this.storageService.savePrompt(prompt);
+		this._onDidSave.fire(prompt.id);
+		if (prompt.status !== 'in-progress') {
+			try {
+				await this.getChatMemoryInstructionService?.()?.handlePromptStatusChange(prompt);
+			} catch {
+				// keep tracker responsive if session cleanup fails
+			}
+		}
+
+		return true;
+	}
+
 	private async handleMessage(msg: WebviewToExtensionMessage): Promise<void> {
 		switch (msg.type) {
 			case 'ready':
@@ -156,24 +169,39 @@ export class TrackerPanelManager {
 			}
 
 			case 'updatePromptStatus': {
-				if (!STATUS_SET.has(msg.status)) {
+				if (!isPromptStatus(msg.status)) {
 					break;
 				}
-				const prompt = await this.storageService.getPrompt(msg.id);
-				if (!prompt || prompt.status === msg.status) {
+				const changed = await this.updateStoredPromptStatus(msg.id, msg.status);
+				if (changed) {
+					await this.refresh();
+				}
+				break;
+			}
+
+			case 'moveAllPromptsToNextStatus': {
+				if (!isPromptStatus(msg.status)) {
 					break;
 				}
-				prompt.status = msg.status;
-				await this.storageService.savePrompt(prompt);
-				this._onDidSave.fire(prompt.id);
-				if (prompt.status !== 'in-progress') {
-					try {
-						await this.getChatMemoryInstructionService?.()?.handlePromptStatusChange(prompt);
-					} catch {
-						// keep tracker responsive if session cleanup fails
-					}
+
+				const nextStatus = getNextPromptStatus(msg.status);
+				if (!nextStatus) {
+					break;
 				}
-				await this.refresh();
+
+				const prompts = await this.storageService.listPrompts();
+				const promptIds = prompts
+					.filter(prompt => prompt.status === msg.status)
+					.map(prompt => prompt.id);
+
+				let changed = false;
+				for (const promptId of promptIds) {
+					changed = (await this.updateStoredPromptStatus(promptId, nextStatus)) || changed;
+				}
+
+				if (changed) {
+					await this.refresh();
+				}
 				break;
 			}
 

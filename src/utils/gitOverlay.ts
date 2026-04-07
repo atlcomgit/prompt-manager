@@ -97,6 +97,85 @@ function buildReviewCliAuthCommand(cliCommand: 'gh' | 'glab', host: string, plat
 		: `glab auth login --hostname ${quotedHost}`;
 }
 
+/** Проверка, требуется ли self-managed GitLab сценарий с вводом PAT */
+function isGitLabSelfManaged(cliCommand: 'gh' | 'glab', host: string): boolean {
+	return cliCommand === 'glab' && host !== 'gitlab.com';
+}
+
+/** Генерирует POSIX-блок интерактивной авторизации для self-managed GitLab через Personal Access Token */
+function buildPosixGitLabSelfManagedAuthBlock(host: string, manualUrl: string): string {
+	const quotedHost = quoteShellArg(host);
+	return [
+		'echo ""',
+		`echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"`,
+		`echo "  To authenticate, create a Personal Access Token:"`,
+		`echo ""`,
+		`echo "  1. Open: https://${host}/-/user_settings/personal_access_tokens"`,
+		`echo "  2. Name: glab-cli"`,
+		`echo "  3. Scopes: api, write_repository"`,
+		`echo "  4. Click 'Create personal access token'"`,
+		`echo "  5. Copy the token and paste it below"`,
+		`echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"`,
+		'echo ""',
+		'printf "Paste your token: "',
+		'read -r _pm_token',
+		'if [ -z "$_pm_token" ]; then',
+		'    echo "[Prompt Manager] Token cannot be empty."',
+		`    echo "[Prompt Manager] Manual setup: ${manualUrl}"`,
+		'    echo ""',
+		'    echo "Press Enter to close this terminal..."',
+		'    read -r _',
+		'    exit 1',
+		'fi',
+		`if echo "$_pm_token" | glab auth login --hostname ${quotedHost} --stdin; then`,
+		`    echo "[Prompt Manager] glab is ready. Return to Git Flow and refresh the overlay."`,
+		'else',
+		`    echo "[Prompt Manager] glab authentication failed (exit code $?)."`,
+		`    echo "[Prompt Manager] Manual setup: ${manualUrl}"`,
+		'    echo ""',
+		'    echo "Press Enter to close this terminal..."',
+		'    read -r _',
+		'fi',
+	].join('\n');
+}
+
+/** Генерирует Windows-блок интерактивной авторизации для self-managed GitLab через Personal Access Token */
+function buildWindowsGitLabSelfManagedAuthBlock(host: string, manualUrl: string): string {
+	const quotedHost = quotePowerShellArg(host);
+	return [
+		"Write-Host ''",
+		`Write-Host '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'`,
+		`Write-Host '  To authenticate, create a Personal Access Token:'`,
+		"Write-Host ''",
+		`Write-Host '  1. Open: https://${host}/-/user_settings/personal_access_tokens'`,
+		`Write-Host '  2. Name: glab-cli'`,
+		`Write-Host '  3. Scopes: api, write_repository'`,
+		`Write-Host "  4. Click 'Create personal access token'"`,
+		`Write-Host '  5. Copy the token and paste it below'`,
+		`Write-Host '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'`,
+		"Write-Host ''",
+		"$pmToken = Read-Host 'Paste your token'",
+		"if ([string]::IsNullOrWhiteSpace($pmToken)) {",
+		"    Write-Host '[Prompt Manager] Token cannot be empty.'",
+		`    Write-Host '[Prompt Manager] Manual setup: ${manualUrl}'`,
+		"    Write-Host ''",
+		"    Write-Host 'Press Enter to close this terminal...'",
+		"    Read-Host",
+		"    exit 1",
+		"}",
+		'try {',
+		`    $pmToken | glab auth login --hostname ${quotedHost} --stdin`,
+		`    Write-Host '[Prompt Manager] glab is ready. Return to Git Flow and refresh the overlay.'`,
+		'} catch {',
+		`    Write-Host "[Prompt Manager] glab authentication failed: $_"`,
+		`    Write-Host '[Prompt Manager] Manual setup: ${manualUrl}'`,
+		"    Write-Host ''",
+		"    Write-Host 'Press Enter to close this terminal...'",
+		"    Read-Host",
+		'}',
+	].join('\n');
+}
+
 function buildPosixReviewCliInstallCommand(cliCommand: 'gh' | 'glab', manualUrl: string): string {
 	const installPackage = cliCommand === 'gh' ? 'gh' : 'glab';
 	const pacmanPackage = cliCommand === 'gh' ? 'github-cli' : 'glab';
@@ -127,6 +206,24 @@ function buildPosixReviewCliInstallCommand(cliCommand: 'gh' | 'glab', manualUrl:
 		: [
 			'if command -v brew >/dev/null; then',
 			'    brew install glab',
+			'    return',
+			'fi',
+			'if command -v snap >/dev/null; then',
+			'    run_privileged snap install glab',
+			'    return',
+			'fi',
+			'if command -v apt-get >/dev/null; then',
+			'    if command -v curl >/dev/null; then',
+			'        curl -sSL "https://raw.githubusercontent.com/upciti/wakemeops/main/assets/install_repository" | run_privileged bash',
+			'    elif command -v wget >/dev/null; then',
+			'        wget -qO- "https://raw.githubusercontent.com/upciti/wakemeops/main/assets/install_repository" | run_privileged bash',
+			'    else',
+			'        echo "[Prompt Manager] curl or wget is required to install glab on Debian/Ubuntu."',
+			`        echo "[Prompt Manager] Manual install: ${manualUrl}"`,
+			'        exit 1',
+			'    fi',
+			'    run_privileged apt-get update',
+			'    run_privileged apt-get install -y glab',
 			'    return',
 			'fi',
 		];
@@ -194,12 +291,30 @@ function buildWindowsReviewCliInstallCommand(cliCommand: 'gh' | 'glab', host: st
 		].join('\n')
 		: '';
 
+	/* Для self-managed GitLab используем интерактивный ввод PAT вместо OAuth */
+	const selfManaged = isGitLabSelfManaged(cliCommand, host);
+	if (selfManaged) {
+		return normalizeInteractiveTerminalCommand([
+			"$ErrorActionPreference = 'Stop'",
+			installCommand,
+			buildWindowsGitLabSelfManagedAuthBlock(host, manualUrl),
+		].filter(Boolean).join('\n'));
+	}
+
 	return normalizeInteractiveTerminalCommand([
 		"$ErrorActionPreference = 'Stop'",
 		installCommand,
 		`Write-Host '[Prompt Manager] Opening ${cliCommand} authentication...'`,
-		authCommand,
-		`Write-Host '[Prompt Manager] ${cliCommand} is ready. Return to Git Flow and refresh the overlay.'`,
+		'try {',
+		`    ${authCommand}`,
+		`    Write-Host '[Prompt Manager] ${cliCommand} is ready. Return to Git Flow and refresh the overlay.'`,
+		'} catch {',
+		`    Write-Host "[Prompt Manager] ${cliCommand} authentication failed: $_"`,
+		`    Write-Host '[Prompt Manager] Manual setup: ${manualUrl}'`,
+		"    Write-Host ''",
+		"    Write-Host 'Press Enter to close this terminal...'",
+		'    Read-Host',
+		'}',
 	].filter(Boolean).join('\n'));
 }
 
@@ -225,14 +340,34 @@ export function buildGitOverlayReviewCliSetupCommand(input: {
 		? buildPosixReviewCliInstallCommand(input.cliCommand, manualUrl)
 		: ['set -e', 'set -o pipefail'].join('\n');
 
+	/* Для self-managed GitLab используем интерактивный ввод PAT вместо OAuth */
+	const selfManaged = isGitLabSelfManaged(input.cliCommand, host);
+	if (selfManaged) {
+		return {
+			terminalName: `Prompt Manager ${input.cliCommand}`,
+			manualUrl,
+			command: normalizeInteractiveTerminalCommand([
+				installCommand,
+				buildPosixGitLabSelfManagedAuthBlock(host, manualUrl),
+			].join('\n')),
+		};
+	}
+
 	return {
 		terminalName: `Prompt Manager ${input.cliCommand}`,
 		manualUrl,
 		command: normalizeInteractiveTerminalCommand([
 			installCommand,
 			`echo "[Prompt Manager] Opening ${input.cliCommand} authentication..."`,
-			authCommand,
-			`echo "[Prompt Manager] ${input.cliCommand} is ready. Return to Git Flow and refresh the overlay."`,
+			`if ${authCommand}; then`,
+			`    echo "[Prompt Manager] ${input.cliCommand} is ready. Return to Git Flow and refresh the overlay."`,
+			'else',
+			`    echo "[Prompt Manager] ${input.cliCommand} authentication failed (exit code $?)."`,
+			`    echo "[Prompt Manager] Manual setup: ${manualUrl}"`,
+			'    echo ""',
+			'    echo "Press Enter to close this terminal..."',
+			'    read -r _',
+			'fi',
 		].join('\n')),
 	};
 }
@@ -594,7 +729,10 @@ export function buildGitOverlayGraph(input: {
 	};
 }
 
-export function parseGitOverlayRemoteUrl(remoteUrl: string): ParsedGitOverlayRemote | null {
+export function parseGitOverlayRemoteUrl(
+	remoteUrl: string,
+	providerHosts?: Record<string, string>,
+): ParsedGitOverlayRemote | null {
 	const normalizedRemoteUrl = remoteUrl.trim();
 	if (!normalizedRemoteUrl) {
 		return null;
@@ -631,11 +769,16 @@ export function parseGitOverlayRemoteUrl(remoteUrl: string): ParsedGitOverlayRem
 	}
 
 	const normalizedHost = host.trim().toLowerCase();
-	const provider: GitOverlayReviewProvider = normalizedHost.includes('gitlab')
-		? 'gitlab'
-		: normalizedHost.includes('github')
-			? 'github'
-			: 'unknown';
+
+	/* Определение провайдера: сначала проверяем пользовательский маппинг хостов,
+	   затем автоматическое определение по имени хоста. */
+	const explicitProvider = resolveExplicitReviewProvider(normalizedHost, providerHosts);
+	const provider: GitOverlayReviewProvider = explicitProvider
+		|| (normalizedHost.includes('gitlab')
+			? 'gitlab'
+			: normalizedHost.includes('github')
+				? 'github'
+				: 'unknown');
 
 	return {
 		provider,
@@ -647,6 +790,32 @@ export function parseGitOverlayRemoteUrl(remoteUrl: string): ParsedGitOverlayRem
 		cliCommand: provider === 'github' ? 'gh' : provider === 'gitlab' ? 'glab' : '',
 		actionLabel: provider === 'github' ? 'Pull request' : provider === 'gitlab' ? 'Merge request' : 'Review request',
 	};
+}
+
+/** Сопоставляет хост с провайдером из пользовательского маппинга. */
+function resolveExplicitReviewProvider(
+	normalizedHost: string,
+	providerHosts?: Record<string, string>,
+): GitOverlayReviewProvider | null {
+	if (!providerHosts) {
+		return null;
+	}
+
+	for (const [hostPattern, providerValue] of Object.entries(providerHosts)) {
+		const normalizedPattern = (hostPattern || '').trim().toLowerCase();
+		if (!normalizedPattern) {
+			continue;
+		}
+
+		if (normalizedHost === normalizedPattern) {
+			const normalized = (providerValue || '').trim().toLowerCase();
+			if (normalized === 'github' || normalized === 'gitlab') {
+				return normalized;
+			}
+		}
+	}
+
+	return null;
 }
 
 export function normalizeGitOverlayReviewRequestState(input: {

@@ -366,7 +366,8 @@ export class GitService {
 		}
 
 		const remoteUrl = await this.runGitFileCommandOptional(projectPath, ['remote', 'get-url', remoteName]);
-		const parsed = parseGitOverlayRemoteUrl(remoteUrl);
+		const providerHosts = GitService.getReviewProviderHostsSetting();
+		const parsed = parseGitOverlayRemoteUrl(remoteUrl, providerHosts);
 		if (!parsed) {
 			return { remote: null, unsupportedReason: 'unrecognized-remote' };
 		}
@@ -2032,6 +2033,28 @@ export class GitService {
 		}
 
 		return Array.from(GitService.DEFAULT_ALLOWED_BRANCHES);
+	}
+
+	/** Маппинг пользовательских хостов на провайдера (github / gitlab) из настроек VS Code. */
+	static getReviewProviderHostsSetting(): Record<string, string> {
+		const raw = vscode.workspace
+			.getConfiguration('promptManager')
+			.get<unknown>('reviewProviderHosts');
+
+		if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+			return {};
+		}
+
+		const result: Record<string, string> = {};
+		for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+			const host = (key || '').trim().toLowerCase();
+			const provider = typeof value === 'string' ? value.trim().toLowerCase() : '';
+			if (host && (provider === 'github' || provider === 'gitlab')) {
+				result[host] = provider;
+			}
+		}
+
+		return result;
 	}
 
 	/**

@@ -60,6 +60,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'gitOverlayOpenMergeEditor'; project: string; filePath: string }
 	| { type: 'gitOverlayOpenReviewRequest'; url: string }
 	| { type: 'gitOverlaySetupReviewCli'; request: GitOverlayReviewCliSetupRequest }
+	| { type: 'gitOverlayAssignReviewProvider'; host: string; provider: 'github' | 'gitlab'; promptBranch: string; projects: string[] }
 	| { type: 'gitOverlayGenerateCommitMessage'; prompt: Prompt; project?: string; includeAllChanges?: boolean }
 	| { type: 'gitOverlayCommitStaged'; prompt: Prompt; messages: GitOverlayProjectCommitMessage[]; includeAllChanges?: boolean }
 	| { type: 'gitOverlayCreateReviewRequest'; prompt: Prompt; requests: GitOverlayProjectReviewRequestInput[] }

@@ -57,6 +57,7 @@ type Props = {
 	onOpenDiff: (project: string, filePath: string) => void;
 	onOpenReviewRequest: (url: string) => void;
 	onSetupReviewCli: (request: GitOverlayReviewCliSetupRequest) => void;
+	onAssignReviewProvider: (host: string, provider: 'github' | 'gitlab') => void;
 	onOpenMergeEditor: (project: string, filePath: string) => void;
 	onGenerateCommitMessage: (project?: string) => void;
 	onCommitStaged: (messages: GitOverlayProjectCommitMessage[]) => void;
@@ -821,6 +822,7 @@ export const GitOverlay: React.FC<Props> = ({
 	onOpenDiff,
 	onOpenReviewRequest,
 	onSetupReviewCli,
+	onAssignReviewProvider,
 	onOpenMergeEditor,
 	onGenerateCommitMessage,
 	onCommitStaged,
@@ -2308,7 +2310,28 @@ export const GitOverlay: React.FC<Props> = ({
 													) : null}
 												</div>
 
-														{unsupportedReviewMessage ? <InlineHint message={unsupportedReviewMessage} tone="info" /> : null}
+												{unsupportedReviewMessage && project.review.unsupportedReason === 'unsupported-provider' && project.review.remote?.host ? (
+													<>
+														<InlineHint
+															message={t('editor.gitOverlayReviewRequestChooseProvider').replace('{host}', project.review.remote.host)}
+															tone="info"
+														/>
+														<div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
+															<ActionButton
+																label={t('editor.gitOverlayReviewRequestChooseGitHub')}
+																onClick={() => onAssignReviewProvider(project.review.remote!.host, 'github')}
+																size="compact"
+																disabled={isReadOnlyFlow}
+															/>
+															<ActionButton
+																label={t('editor.gitOverlayReviewRequestChooseGitLab')}
+																onClick={() => onAssignReviewProvider(project.review.remote!.host, 'gitlab')}
+																size="compact"
+																disabled={isReadOnlyFlow}
+															/>
+														</div>
+													</>
+												) : unsupportedReviewMessage ? <InlineHint message={unsupportedReviewMessage} tone="info" /> : null}
 												{project.review.setupAction === 'install-and-auth' ? (
 													<InlineHint
 														message={t('editor.gitOverlayReviewRequestMissingCli').replace('{cli}', project.review.remote?.cliCommand || 'CLI')}

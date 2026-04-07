@@ -1971,6 +1971,22 @@ export const EditorApp: React.FC = () => {
     });
   }, []);
 
+  /** Сохраняет привязку хоста к провайдеру и обновляет overlay */
+  const handleGitOverlayAssignReviewProvider = useCallback((host: string, provider: 'github' | 'gitlab') => {
+    const normalizedHost = (host || '').trim().toLowerCase();
+    if (!normalizedHost || (provider !== 'github' && provider !== 'gitlab')) {
+      return;
+    }
+
+    vscode.postMessage({
+      type: 'gitOverlayAssignReviewProvider',
+      host: normalizedHost,
+      provider,
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+    });
+  }, [prompt.branch, prompt.projects]);
+
   const handleSave = (source: 'manual' | 'status-change' | 'autosave' | unknown = 'manual') => {
     const normalizedSource: 'manual' | 'status-change' | 'autosave' =
       source === 'status-change' || source === 'autosave' || source === 'manual'
@@ -3016,6 +3032,7 @@ export const EditorApp: React.FC = () => {
         onOpenDiff={handleGitOverlayOpenDiff}
         onOpenReviewRequest={handleGitOverlayOpenReviewRequest}
         onSetupReviewCli={handleGitOverlaySetupReviewCli}
+        onAssignReviewProvider={handleGitOverlayAssignReviewProvider}
         onOpenMergeEditor={handleGitOverlayOpenMergeEditor}
         onGenerateCommitMessage={handleGitOverlayGenerateCommitMessage}
         onCommitStaged={handleGitOverlayCommitStaged}

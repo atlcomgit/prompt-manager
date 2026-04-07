@@ -145,6 +145,7 @@ function renderGitOverlayMarkup(overrides: Partial<React.ComponentProps<typeof G
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -482,6 +483,7 @@ test('GitOverlay renders safely when mounted closed', () => {
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -560,6 +562,7 @@ test('GitOverlay shows switch-to-prompt action during start chat preflight when 
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -700,6 +703,7 @@ test('GitOverlay renders tracked branch options separately for each project', ()
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -806,6 +810,7 @@ test('GitOverlay keeps current tracked branch in per-project options', () => {
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -912,6 +917,7 @@ test('GitOverlay keeps current non-tracked branch only in source options and rem
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -1026,6 +1032,7 @@ test('GitOverlay keeps passive tracked projects visible in step 1 and does not l
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -1326,6 +1333,7 @@ test('GitOverlay shows needs-switch status for clean tracked projects on step 1 
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -1428,6 +1436,7 @@ test('GitOverlay shows ready status as blue text without a background pill', () 
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -1506,6 +1515,7 @@ test('GitOverlay shows empty-step hint when default step 1 has no available proj
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -1604,6 +1614,7 @@ test('GitOverlay renders project discard action before the changes toggle in ste
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -1714,6 +1725,7 @@ test('GitOverlay shows specific review unsupported reasons per project', () => {
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -1725,7 +1737,37 @@ test('GitOverlay shows specific review unsupported reasons per project', () => {
 	}));
 
 	assert.match(markup, /editor\.gitOverlayReviewRequestMissingRemoteProject/);
-	assert.match(markup, /editor\.gitOverlayReviewRequestUnsupportedProject/);
+	assert.match(markup, /editor\.gitOverlayReviewRequestChooseProvider/);
+	assert.match(markup, /editor\.gitOverlayReviewRequestChooseGitHub/);
+	assert.match(markup, /editor\.gitOverlayReviewRequestChooseGitLab/);
+});
+
+test('GitOverlay does not show provider choice buttons for missing-remote unsupported reason', () => {
+	const markup = renderGitOverlayMarkup({
+		completedActions: { push: true, 'review-request': false, merge: false },
+		promptStatus: 'report',
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'no-remote-project',
+					currentBranch: 'feature/task-42',
+					review: {
+						remote: null,
+						request: null,
+						error: '',
+						setupAction: null,
+						unsupportedReason: 'missing-remote',
+					},
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayReviewRequestMissingRemoteProject/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayReviewRequestChooseProvider/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayReviewRequestChooseGitHub/);
 });
 
 test('formatChangeSize formats bytes into compact localized values', () => {
@@ -1798,6 +1840,7 @@ test('GitOverlay hides steps 2-5 for draft prompts in default mode', () => {
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -1894,6 +1937,7 @@ test('GitOverlay shows blocking prompt-branch warning for non-draft prompts on t
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -1990,6 +2034,7 @@ test('GitOverlay allows commit step when prompt branch is empty but dirty projec
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -2531,6 +2576,7 @@ test('GitOverlay disables commit textarea with the same gating as commit message
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -2708,6 +2754,7 @@ test('GitOverlay keeps commit warning without applying error textarea styling', 
 		onOpenDiff: () => { },
 		onOpenReviewRequest: () => { },
 		onSetupReviewCli: () => { },
+		onAssignReviewProvider: () => { },
 		onOpenMergeEditor: () => { },
 		onGenerateCommitMessage: () => { },
 		onCommitStaged: () => { },
@@ -2801,6 +2848,67 @@ test('parseGitOverlayRemoteUrl detects GitHub and GitLab remotes', () => {
 	});
 });
 
+test('parseGitOverlayRemoteUrl uses providerHosts mapping for custom hosts', () => {
+	const providerHosts = {
+		'gtl.expobank.ru': 'gitlab',
+		'git.skladno.com': 'gitlab',
+		'gh.internal.dev': 'github',
+	};
+
+	/* Кастомный GitLab хост через HTTPS */
+	assert.deepEqual(parseGitOverlayRemoteUrl('https://gtl.expobank.ru/team/backend-api.git', providerHosts), {
+		provider: 'gitlab',
+		host: 'gtl.expobank.ru',
+		repositoryPath: 'team/backend-api',
+		owner: 'team',
+		name: 'backend-api',
+		supported: true,
+		cliCommand: 'glab',
+		actionLabel: 'Merge request',
+	});
+
+	/* Кастомный GitLab хост через SSH */
+	assert.deepEqual(parseGitOverlayRemoteUrl('git@git.skladno.com:devops/infra.git', providerHosts), {
+		provider: 'gitlab',
+		host: 'git.skladno.com',
+		repositoryPath: 'devops/infra',
+		owner: 'devops',
+		name: 'infra',
+		supported: true,
+		cliCommand: 'glab',
+		actionLabel: 'Merge request',
+	});
+
+	/* Кастомный GitHub хост */
+	assert.deepEqual(parseGitOverlayRemoteUrl('https://gh.internal.dev/org/repo.git', providerHosts), {
+		provider: 'github',
+		host: 'gh.internal.dev',
+		repositoryPath: 'org/repo',
+		owner: 'org',
+		name: 'repo',
+		supported: true,
+		cliCommand: 'gh',
+		actionLabel: 'Pull request',
+	});
+
+	/* Без маппинга — неизвестный хост остаётся unknown */
+	assert.deepEqual(parseGitOverlayRemoteUrl('https://gtl.expobank.ru/team/backend-api.git'), {
+		provider: 'unknown',
+		host: 'gtl.expobank.ru',
+		repositoryPath: 'team/backend-api',
+		owner: 'team',
+		name: 'backend-api',
+		supported: false,
+		cliCommand: '',
+		actionLabel: 'Review request',
+	});
+
+	/* Стандартные хосты определяются автоматически даже при пустом маппинге */
+	const emptyMap = {};
+	assert.equal(parseGitOverlayRemoteUrl('https://github.com/acme/toolbox.git', emptyMap)?.provider, 'github');
+	assert.equal(parseGitOverlayRemoteUrl('git@gitlab.com:team/repo.git', emptyMap)?.provider, 'gitlab');
+});
+
 test('normalizeGitOverlayReviewRequestState maps open, closed and merged states', () => {
 	assert.equal(normalizeGitOverlayReviewRequestState({ state: 'OPEN' }), 'open');
 	assert.equal(normalizeGitOverlayReviewRequestState({ state: 'closed' }), 'closed');
@@ -2842,6 +2950,8 @@ test('buildGitOverlayReviewCliSetupCommand prepares Linux gh install and auth fl
 	assert.match(command.command, /apt-get install -y gh/);
 	assert.match(command.command, /gh auth login --hostname 'github\.com' --web/);
 	assert.doesNotMatch(command.command, /\t/);
+	assert.match(command.command, /authentication failed/);
+	assert.match(command.command, /read -r/);
 });
 
 test('buildGitOverlayReviewCliSetupCommand prepares auth-only flow for GitLab', () => {
@@ -2855,6 +2965,8 @@ test('buildGitOverlayReviewCliSetupCommand prepares auth-only flow for GitLab', 
 	assert.equal(command.manualUrl, 'https://docs.gitlab.com/cli/');
 	assert.doesNotMatch(command.command, /Installing glab/);
 	assert.match(command.command, /glab auth login --hostname 'gitlab\.example\.com'/);
+	assert.match(command.command, /authentication failed/);
+	assert.match(command.command, /read -r/);
 });
 
 test('buildGitOverlayReviewCliSetupCommand prepares Windows winget flow', () => {
@@ -2868,6 +2980,8 @@ test('buildGitOverlayReviewCliSetupCommand prepares Windows winget flow', () => 
 	assert.match(command.command, /winget install -e --id GLab\.GLab/);
 	assert.match(command.command, /glab auth login --hostname 'gitlab\.com'/);
 	assert.doesNotMatch(command.command, /\t/);
+	assert.match(command.command, /authentication failed/);
+	assert.match(command.command, /Read-Host/);
 });
 
 test('GitOverlay shows changed projects outside selected prompt projects in a separate step 1 block', () => {

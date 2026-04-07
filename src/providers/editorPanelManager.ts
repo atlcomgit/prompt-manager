@@ -4,8 +4,9 @@
  */
 
 import * as vscode from 'vscode';
-import { existsSync } from 'fs';
+import { existsSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
+import * as os from 'os';
 import * as path from 'path';
 import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
@@ -1962,11 +1963,43 @@ export class EditorPanelManager {
 			...(shellPath ? { shellPath } : {}),
 		});
 		terminal.show(true);
-		terminal.sendText(setupCommand.command, true);
+
+		/* Скрипт записывается во временный файл, чтобы интерактивные команды (glab auth login и др.)
+		   получали stdin терминала, а не оставшиеся строки скрипта из sendText-буфера. */
+		const scriptExt = process.platform === 'win32' ? '.ps1' : '.sh';
+		const scriptPath = path.join(os.tmpdir(), `prompt-manager-cli-setup-${Date.now()}${scriptExt}`);
+		writeFileSync(scriptPath, setupCommand.command + '\n', { mode: 0o755 });
+
+		if (process.platform === 'win32') {
+			terminal.sendText(`& '${scriptPath.replace(/'/g, "''")}' ; Remove-Item -Force '${scriptPath.replace(/'/g, "''")}'`, true);
+		} else {
+			terminal.sendText(`bash '${scriptPath.replace(/'/g, "'\\''")}' ; rm -f '${scriptPath.replace(/'/g, "'\\''")}'`, true);
+		}
 
 		return request.action === 'install-and-auth'
 			? `Открыт терминал ${setupCommand.terminalName}: установка и авторизация ${request.cliCommand} запущены. После завершения обновите Git Flow.`
 			: `Открыт терминал ${setupCommand.terminalName}: завершите авторизацию ${request.cliCommand}, затем обновите Git Flow.`;
+	}
+
+	/** Сохраняет привязку хоста к провайдеру (github/gitlab) в настройки и обновляет snapshot */
+	private async assignGitOverlayReviewProvider(host: string, provider: 'github' | 'gitlab'): Promise<void> {
+		const normalizedHost = (host || '').trim().toLowerCase();
+		if (!normalizedHost) {
+			throw new Error('Не указан хост для привязки провайдера.');
+		}
+		if (provider !== 'github' && provider !== 'gitlab') {
+			throw new Error('Неизвестный тип провайдера.');
+		}
+
+		const config = vscode.workspace.getConfiguration('promptManager');
+		const current = config.get<Record<string, string>>('reviewProviderHosts', {});
+		const updated = { ...current, [normalizedHost]: provider };
+		await config.update('reviewProviderHosts', updated, vscode.ConfigurationTarget.Global);
+
+		this.logReportDebug('gitOverlay.assignReviewProvider', {
+			host: normalizedHost,
+			provider,
+		});
 	}
 
 	private clearContentEditorBinding(panelKey: string): void {
@@ -5398,6 +5431,18 @@ export class EditorPanelManager {
 				try {
 					const message = await this.setupGitOverlayReviewCli(msg.request);
 					postMessage({ type: 'info', message });
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+				}
+				break;
+			}
+
+			case 'gitOverlayAssignReviewProvider': {
+				try {
+					await this.assignGitOverlayReviewProvider(msg.host, msg.provider);
+					const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+					const projects = this.resolveGitOverlayProjects(msg.projects, currentPrompt);
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				} catch (error) {
 					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
 				}

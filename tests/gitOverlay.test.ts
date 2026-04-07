@@ -2964,7 +2964,9 @@ test('buildGitOverlayReviewCliSetupCommand prepares auth-only flow for GitLab', 
 
 	assert.equal(command.manualUrl, 'https://docs.gitlab.com/cli/');
 	assert.doesNotMatch(command.command, /Installing glab/);
-	assert.match(command.command, /glab auth login --hostname 'gitlab\.example\.com'/);
+	assert.match(command.command, /glab config get api_protocol --host 'gitlab\.example\.com'/);
+	assert.match(command.command, /glab config get git_protocol --host 'gitlab\.example\.com'/);
+	assert.match(command.command, /glab auth login --hostname 'gitlab\.example\.com' --api-host 'gitlab\.example\.com' --api-protocol "\$_pm_api_protocol" --git-protocol "\$_pm_git_protocol" --stdin/);
 	assert.match(command.command, /authentication failed/);
 	assert.match(command.command, /read -r/);
 });
@@ -2980,6 +2982,23 @@ test('buildGitOverlayReviewCliSetupCommand prepares Windows winget flow', () => 
 	assert.match(command.command, /winget install -e --id GLab\.GLab/);
 	assert.match(command.command, /glab auth login --hostname 'gitlab\.com'/);
 	assert.doesNotMatch(command.command, /\t/);
+	assert.match(command.command, /authentication failed/);
+	assert.match(command.command, /Read-Host/);
+});
+
+test('buildGitOverlayReviewCliSetupCommand prepares Windows self-managed GitLab auth flow', () => {
+	const command = buildGitOverlayReviewCliSetupCommand({
+		platform: 'win32',
+		cliCommand: 'glab',
+		host: 'gitlab.example.com',
+		action: 'auth',
+	});
+
+	assert.doesNotMatch(command.command, /Installing glab/);
+	assert.match(command.command, /glab config get api_protocol --host 'gitlab\.example\.com'/);
+	assert.match(command.command, /glab config get git_protocol --host 'gitlab\.example\.com'/);
+	assert.match(command.command, /glab auth login --hostname 'gitlab\.example\.com' --api-host 'gitlab\.example\.com' --api-protocol \$pmApiProtocol --git-protocol \$pmGitProtocol --stdin/);
+	assert.match(command.command, /Read-Host 'Paste your token'/);
 	assert.match(command.command, /authentication failed/);
 	assert.match(command.command, /Read-Host/);
 });

@@ -246,6 +246,12 @@ export function isGitOverlayPassivePromptProject<T extends Pick<GitOverlayProjec
 		return false;
 	}
 
+	/* Если tracked branch совпадает с prompt branch — сравнение SHA бессмысленно
+	   (ветка всегда равна самой себе), проект считаем активным. */
+	if (normalizedPromptBranch === normalizedTrackedBranch) {
+		return false;
+	}
+
 	const promptBranchInfo = findGitOverlayBranchInfo(project, normalizedPromptBranch);
 	const trackedBranchInfo = findGitOverlayBranchInfo(project, normalizedTrackedBranch);
  if (!promptBranchInfo?.lastCommit || !trackedBranchInfo?.lastCommit) {
@@ -346,7 +352,9 @@ function buildProjectTrackedBranchOptions(
 		result.add(normalizedPreferredTrackedBranch);
 	}
 
-	if (normalizedCurrentBranch) {
+	/* Текущую ветку добавляем в список tracked-опций только если она
+	   не совпадает с prompt branch — prompt branch не является tracked. */
+	if (normalizedCurrentBranch && normalizedCurrentBranch !== normalizedPromptBranch) {
 		result.add(normalizedCurrentBranch);
 	}
 
@@ -420,7 +428,9 @@ function resolveTrackedBranchesByProject(
 		}
 
 		const currentBranch = project.currentBranch.trim();
-		if (currentBranch && options.includes(currentBranch)) {
+		const projectPromptBranch = (project.promptBranch || '').trim();
+		/* Не выбираем текущую ветку как tracked, если она совпадает с prompt branch. */
+		if (currentBranch && currentBranch !== projectPromptBranch && options.includes(currentBranch)) {
 			result[project.project] = currentBranch;
 			continue;
 		}

@@ -28,6 +28,7 @@ import {
 	collectGitOverlayProjectsWithChangesOutsideTrackedOrPrompt,
 	formatChangeSize,
 	GitOverlay,
+	isGitOverlayPassivePromptProject,
 	resolveChangeDiffStats,
 	resolveGitOverlayPostCommitProjects,
 } from '../src/webview/editor/components/GitOverlay.js';
@@ -1145,6 +1146,85 @@ test('resolveGitOverlayPostCommitProjects excludes passive prompt projects witho
 	});
 
 	assert.deepEqual(projects.map(project => project.project), ['active-prompt']);
+});
+
+test('isGitOverlayPassivePromptProject returns false when tracked branch equals prompt branch', () => {
+	/* Когда tracked branch совпадает с prompt branch, SHA всегда одинаковый —
+	   проект не должен считаться passive. */
+	const project = {
+		project: 'api',
+		available: true,
+		currentBranch: 'feature/task-42',
+		branches: [
+			{
+				name: 'feature/task-42',
+				current: true,
+				exists: true,
+				kind: 'prompt' as const,
+				upstream: '',
+				ahead: 1,
+				behind: 0,
+				lastCommit: {
+					sha: 'aaa1111',
+					shortSha: 'aaa1111',
+					subject: 'new commit',
+					author: 'dev',
+					committedAt: '2026-04-06T00:00:00.000Z',
+					refNames: ['feature/task-42'],
+				},
+				canSwitch: true,
+				canDelete: false,
+				stale: false,
+			},
+		],
+	};
+
+	assert.equal(
+		isGitOverlayPassivePromptProject(project, 'feature/task-42', 'feature/task-42'),
+		false,
+		'Project should NOT be passive when tracked branch equals prompt branch',
+	);
+});
+
+test('resolveGitOverlayPostCommitProjects keeps projects when tracked branch equals prompt branch', () => {
+	/* Если для проекта tracked branch = prompt branch, проект должен остаться в списке. */
+	const projects = resolveGitOverlayPostCommitProjects([
+		{
+			project: 'api',
+			available: true,
+			currentBranch: 'feature/task-42',
+			branches: [
+				{
+					name: 'feature/task-42',
+					current: true,
+					exists: true,
+					kind: 'prompt' as const,
+					upstream: '',
+					ahead: 1,
+					behind: 0,
+					lastCommit: {
+						sha: 'ccc3333',
+						shortSha: 'ccc3333',
+						subject: 'committed work',
+						author: 'dev',
+						committedAt: '2026-04-06T00:00:00.000Z',
+						refNames: ['feature/task-42'],
+					},
+					canSwitch: true,
+					canDelete: false,
+					stale: false,
+				},
+			],
+		},
+	], 'feature/task-42', {
+		'api': 'feature/task-42',
+	});
+
+	assert.deepEqual(
+		projects.map(project => project.project),
+		['api'],
+		'Project should remain when tracked branch equals prompt branch',
+	);
 });
 
 test('GitOverlay shows needs-switch status for clean tracked projects on step 1 and keeps switch-all enabled', () => {

@@ -672,10 +672,25 @@ export const EditorApp: React.FC = () => {
 
   const planLines = useMemo(() => promptPlanState.content.split(/\r?\n/), [promptPlanState.content]);
 
-  const highlightedPlanLineIndexSet = useMemo(
-    () => new Set(planHighlightedLineIndexes),
-    [planHighlightedLineIndexes],
-  );
+  const planLineSegments = useMemo(() => {
+    const highlightedLineIndexSet = new Set(planHighlightedLineIndexes);
+    const segments: Array<{ highlighted: boolean; lines: Array<{ index: number; text: string }> }> = [];
+
+    for (let index = 0; index < planLines.length; index += 1) {
+      const highlighted = highlightedLineIndexSet.has(index);
+      const lastSegment = segments[segments.length - 1];
+      const lineEntry = { index, text: planLines[index] };
+
+      if (!lastSegment || lastSegment.highlighted !== highlighted) {
+        segments.push({ highlighted, lines: [lineEntry] });
+        continue;
+      }
+
+      lastSegment.lines.push(lineEntry);
+    }
+
+    return segments;
+  }, [planLines, planHighlightedLineIndexes]);
 
   const shouldShowPlanSection = prompt.status === 'in-progress' && promptPlanState.exists;
 
@@ -3077,15 +3092,16 @@ export const EditorApp: React.FC = () => {
             <>
               {promptPlanState.content.trim().length > 0 ? (
                 <div style={styles.planRawContent} role="log" aria-live="polite" aria-atomic="false">
-                  {planLines.map((line, index) => (
+                  {planLineSegments.map((segment, segmentIndex) => (
                     <div
-                      key={`plan-line-${index}`}
-                      style={{
-                        ...styles.planRawLine,
-                        ...(highlightedPlanLineIndexSet.has(index) ? styles.planRawLineHighlighted : null),
-                      }}
+                      key={`plan-segment-${segment.lines[0]?.index ?? segmentIndex}`}
+                      style={segment.highlighted ? styles.planRawHighlightedBlock : styles.planRawSegment}
                     >
-                      {line.length > 0 ? line : '\u00A0'}
+                      {segment.lines.map((line) => (
+                        <div key={`plan-line-${line.index}`} style={styles.planRawLine}>
+                          {line.text.length > 0 ? line.text : '\u00A0'}
+                        </div>
+                      ))}
                     </div>
                   ))}
                 </div>
@@ -3409,16 +3425,25 @@ const styles: Record<string, React.CSSProperties> = {
     wordBreak: 'break-word',
     overflow: 'visible',
   },
+  planRawSegment: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 0,
+  },
+  planRawHighlightedBlock: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 0,
+    padding: '2px 0',
+    borderRadius: '6px',
+    background: 'var(--vscode-diffEditor-insertedLineBackground, var(--vscode-diffEditor-insertedTextBackground, rgba(46, 160, 67, 0.18)))',
+    boxShadow: 'inset 3px 0 0 var(--vscode-charts-green, var(--vscode-terminal-ansiGreen))',
+  },
   planRawLine: {
     padding: '1px 4px',
-    borderRadius: '4px',
     whiteSpace: 'pre-wrap',
     overflowWrap: 'anywhere',
     wordBreak: 'break-word',
-  },
-  planRawLineHighlighted: {
-    background: 'var(--vscode-diffEditor-insertedLineBackground, var(--vscode-diffEditor-insertedTextBackground, rgba(46, 160, 67, 0.18)))',
-    boxShadow: 'inset 3px 0 0 var(--vscode-charts-green, var(--vscode-terminal-ansiGreen))',
   },
   planRawContentEmpty: {
     padding: '8px 10px',

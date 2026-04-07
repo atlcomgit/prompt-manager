@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage, organize and use AI prompts directly in VS Code with Copilot Chat integration",
-  "version": "0.1.83",
+  "version": "0.1.84",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -81,7 +81,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.1.83",
+        "title": "About 0.1.84",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },
@@ -312,7 +312,7 @@
         "promptManager.editor.globalContextUrl": {
           "type": "string",
           "description": "URL for loading the shared agent context into the \"Общая инструкция\" block. Leave empty to hide the load button.",
-          "default": ""
+          "default": "https://raw.githubusercontent.com/atlcomgit/prompt-manager/refs/heads/master/share/default.instructions.md"
         },
         "promptManager.startup.openTracker": {
           "type": "boolean",

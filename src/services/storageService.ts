@@ -220,6 +220,11 @@ export class StorageService {
 		return vscode.Uri.file(path.join(this.promptDir(id), 'report.txt'));
 	}
 
+	/** Get absolute URI to plan.md for prompt id */
+	getPromptPlanUri(id: string): vscode.Uri {
+		return vscode.Uri.file(path.join(this.promptDir(id), 'plan.md'));
+	}
+
 	/** Get absolute path to storage directory */
 	getStorageDirectoryPath(): string {
 		return this.storageDir;

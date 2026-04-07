@@ -82,6 +82,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'createBranch'; branch: string; projects: string[] }
 	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
 	| { type: 'openPromptReportInEditor'; report: string; promptId?: string; title?: string }
+	| { type: 'requestPromptPlanState'; promptId?: string }
 	| { type: 'showPromptHistory'; id: string }
 	| { type: 'recalcImplementingTime'; id: string; silent?: boolean }
 	| { type: 'getNextTaskNumber' }
@@ -147,6 +148,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'chatStarted'; promptId: string; requestId?: string }
 	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number }
 	| { type: 'reportContentUpdated'; report: string; timeSpentWriting?: number; timeSpentOnTask?: number; updatedAt?: string }
+	| { type: 'promptPlanUpdated'; promptId?: string; exists: boolean; content: string }
 	| { type: 'contentEditorOpened' }
 	| { type: 'contentEditorClosed'; reverted: boolean; content: string }
 	| { type: 'contentEditorSaved' }

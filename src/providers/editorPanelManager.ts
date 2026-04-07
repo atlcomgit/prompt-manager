@@ -75,6 +75,12 @@ export class EditorPanelManager {
 	private reportEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string; lastModifiedMs: number | null }>();
 	private panelKeyByReportEditorUri = new Map<string, string>();
 	private reportEditorPanels = new Map<string, vscode.WebviewPanel>();
+	private promptPlanByPanelKey = new Map<string, {
+		uri: vscode.Uri;
+		lastSyncedContent: string;
+		exists: boolean;
+		disposables: vscode.Disposable[];
+	}>();
 	private panelBootIds = new Map<string, string>();
 	private pendingPanelMessages = new Map<string, ExtensionToWebviewMessage[]>();
 	private pendingReportPersistByPromptId = new Map<string, Promise<Prompt | null>>();
@@ -114,6 +120,123 @@ export class EditorPanelManager {
 		if (panelKey === SINGLE_EDITOR_PANEL_KEY) {
 			this.syncStartupEditorRestoreState();
 		}
+	}
+
+	private resolveOpenEditorPanel(panelKey: string): vscode.WebviewPanel | undefined {
+		const directPanel = openPanels.get(panelKey);
+		if (directPanel) {
+			return directPanel;
+		}
+
+		const promptId = (this.panelPromptRefs.get(panelKey)?.id || '').trim();
+		return promptId ? openPanels.get(promptId) : undefined;
+	}
+
+	private postPromptPlanSnapshot(panelKey: string, promptId: string | undefined, exists: boolean, content: string): void {
+		const panel = this.resolveOpenEditorPanel(panelKey);
+		if (!panel) {
+			return;
+		}
+
+		void panel.webview.postMessage({
+			type: 'promptPlanUpdated',
+			promptId: (promptId || '').trim() || undefined,
+			exists,
+			content,
+		} satisfies ExtensionToWebviewMessage);
+	}
+
+	private clearPromptPlanTracking(panelKey: string): void {
+		const entry = this.promptPlanByPanelKey.get(panelKey);
+		if (!entry) {
+			return;
+		}
+
+		for (const disposable of entry.disposables) {
+			disposable.dispose();
+		}
+
+		this.promptPlanByPanelKey.delete(panelKey);
+	}
+
+	private async readPromptPlanSnapshot(panelKey: string, promptId: string, fileUri: vscode.Uri): Promise<void> {
+		const entry = this.promptPlanByPanelKey.get(panelKey);
+		if (!entry || entry.uri.toString() !== fileUri.toString()) {
+			return;
+		}
+
+		const promptRef = this.panelPromptRefs.get(panelKey);
+		const currentPromptId = (promptRef?.id || '').trim();
+		if (!promptRef || promptRef.status !== 'in-progress' || currentPromptId !== promptId) {
+			this.clearPromptPlanTracking(panelKey);
+			this.postPromptPlanSnapshot(panelKey, currentPromptId || undefined, false, '');
+			return;
+		}
+
+		let content = '';
+		let exists = true;
+		const openDocument = vscode.workspace.textDocuments.find(document => document.uri.toString() === fileUri.toString());
+		if (openDocument) {
+			content = openDocument.getText();
+		} else {
+			try {
+				const fileBytes = await vscode.workspace.fs.readFile(fileUri);
+				content = Buffer.from(fileBytes).toString('utf-8');
+			} catch {
+				exists = false;
+				content = '';
+			}
+		}
+
+		if (entry.exists === exists && entry.lastSyncedContent === content) {
+			return;
+		}
+
+		entry.exists = exists;
+		entry.lastSyncedContent = content;
+		this.postPromptPlanSnapshot(panelKey, promptId, exists, exists ? content : '');
+	}
+
+	private async syncPromptPlanSnapshot(panelKey: string, prompt: Prompt): Promise<void> {
+		const promptId = (prompt.id || '').trim();
+		if (prompt.status !== 'in-progress' || !promptId) {
+			this.clearPromptPlanTracking(panelKey);
+			this.postPromptPlanSnapshot(panelKey, promptId || undefined, false, '');
+			return;
+		}
+
+		const fileUri = this.storageService.getPromptPlanUri(promptId);
+		const fileUriKey = fileUri.toString();
+		let entry = this.promptPlanByPanelKey.get(panelKey);
+		if (!entry || entry.uri.toString() !== fileUriKey) {
+			this.clearPromptPlanTracking(panelKey);
+
+			const watcher = vscode.workspace.createFileSystemWatcher(
+				new vscode.RelativePattern(path.dirname(fileUri.fsPath), path.basename(fileUri.fsPath))
+			);
+			const disposables: vscode.Disposable[] = [
+				watcher,
+				watcher.onDidCreate(() => {
+					void this.readPromptPlanSnapshot(panelKey, promptId, fileUri);
+				}),
+				watcher.onDidChange(() => {
+					void this.readPromptPlanSnapshot(panelKey, promptId, fileUri);
+				}),
+				watcher.onDidDelete(() => {
+					void this.readPromptPlanSnapshot(panelKey, promptId, fileUri);
+				}),
+			];
+
+			entry = {
+				uri: fileUri,
+				lastSyncedContent: '',
+				exists: false,
+				disposables,
+			};
+			this.promptPlanByPanelKey.set(panelKey, entry);
+		}
+
+		await this.readPromptPlanSnapshot(panelKey, promptId, fileUri);
 	}
 
 	private clearGlobalAgentContextSyncTimer(): void {
@@ -3293,6 +3416,8 @@ export class EditorPanelManager {
 			return;
 		}
 
+		this.clearPromptPlanTracking(panelKey);
+
 		this.ensureContentEditorBinding(panelKey, prompt);
 		this.ensureReportEditorBinding(panelKey, prompt);
 		this.panelPromptRefs.set(panelKey, prompt);
@@ -3386,6 +3511,7 @@ export class EditorPanelManager {
 			const disposedCurrentEditorPanel = linkedKeys.includes(SINGLE_EDITOR_PANEL_KEY);
 			const skipUnsavedPrompt = this.silentClosePanels.has(panel);
 			this.silentClosePanels.delete(panel);
+			this.clearPromptPlanTracking(panelKey);
 			for (const key of linkedKeys) {
 				this.disposeGitOverlaySession(key);
 				openPanels.delete(key);
@@ -3400,6 +3526,7 @@ export class EditorPanelManager {
 				this.panelBasePrompts.delete(key);
 				this.clearContentEditorBinding(key);
 				this.clearReportEditorBinding(key);
+				this.clearPromptPlanTracking(key);
 			}
 
 			if (disposedCurrentEditorPanel && !this.isShuttingDown) {
@@ -3488,6 +3615,10 @@ export class EditorPanelManager {
 
 			void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
 			void this.refreshPromptReportForPanel(panelKey, event.webviewPanel);
+			const promptRef = this.panelPromptRefs.get(panelKey);
+			if (promptRef) {
+				void this.syncPromptPlanSnapshot(panelKey, promptRef);
+			}
 		});
 
 		// Handle messages
@@ -3905,6 +4036,17 @@ export class EditorPanelManager {
 						report: nextReport,
 					} satisfies ExtensionToWebviewMessage);
 				}
+				break;
+			}
+
+			case 'requestPromptPlanState': {
+				const requestedPromptId = (msg.promptId || '').trim();
+				const currentPromptId = (currentPrompt.id || '').trim();
+				if (requestedPromptId && currentPromptId && requestedPromptId !== currentPromptId) {
+					break;
+				}
+
+				await this.syncPromptPlanSnapshot(panelKey, currentPrompt);
 				break;
 			}
 
@@ -4348,6 +4490,7 @@ export class EditorPanelManager {
 						ctx.push(`Prompt directory: ${promptDirectory}`);
 						ctx.push(`Prompt file: ${this.storageService.getPromptMarkdownUri(prompt.id).fsPath}`);
 						ctx.push(`Report file: ${promptDirectory}/report.txt`);
+						ctx.push(`Plan file: ${promptDirectory}/plan.md`);
 					}
 					if (prompt.projects.length > 0) ctx.push(`Projects: ${prompt.projects.join(', ')}`);
 					if (prompt.languages.length > 0) ctx.push(`Languages: ${prompt.languages.join(', ')}`);

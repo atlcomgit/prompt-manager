@@ -22,6 +22,7 @@ import { createDefaultPrompt } from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
 import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
 import { usePromptVoiceController } from './voice/usePromptVoiceController';
+import { buildPlanChecklistSummary, parsePlanChecklist } from '../../utils/planChecklist.js';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -32,7 +33,7 @@ interface SelectOption {
   description?: string;
 }
 
-type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' | 'tech' | 'integrations' | 'agent' | 'files' | 'time';
+type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' | 'plan' | 'tech' | 'integrations' | 'agent' | 'files' | 'time';
 type InlineNotice = { kind: 'error' | 'info'; message: string };
 type ChatEntryAction = 'start' | 'open';
 type GitOverlayMode = 'default' | 'start-chat-preflight' | 'open-chat-preflight';
@@ -47,6 +48,7 @@ const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
   prompt: true,
   globalPrompt: false,
   report: false,
+  plan: false,
   tech: false,
   integrations: false,
   agent: false,
@@ -133,7 +135,7 @@ export const EditorApp: React.FC = () => {
         return null;
       }
       const candidate = value as Record<string, unknown>;
-      const keys: Array<Exclude<SectionKey, 'agent' | 'files'>> = ['basic', 'workspace', 'prompt', 'globalPrompt', 'report', 'tech', 'integrations', 'time'];
+      const keys: Array<Exclude<SectionKey, 'agent' | 'files'>> = ['basic', 'workspace', 'prompt', 'globalPrompt', 'report', 'plan', 'tech', 'integrations', 'time'];
       const allValid = keys.every((key) => typeof candidate[key] === 'boolean');
       if (!allValid) {
         return null;
@@ -144,6 +146,7 @@ export const EditorApp: React.FC = () => {
         prompt: Boolean(candidate.prompt),
         globalPrompt: Boolean(candidate.globalPrompt),
         report: Boolean(candidate.report),
+        plan: Boolean(candidate.plan),
         tech: Boolean(candidate.tech),
         integrations: Boolean(candidate.integrations),
         agent: typeof candidate.agent === 'boolean' ? Boolean(candidate.agent) : DEFAULT_EXPANDED_SECTIONS.agent,
@@ -229,6 +232,7 @@ export const EditorApp: React.FC = () => {
   const [globalContext, setGlobalContext] = useState('');
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>(() => readStoredExpandedSections());
+  const [promptPlanState, setPromptPlanState] = useState<{ exists: boolean; content: string }>({ exists: false, content: '' });
   const [notice, setNotice] = useState<InlineNotice | null>(null);
   const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
@@ -635,6 +639,12 @@ export const EditorApp: React.FC = () => {
     return chunks;
   }, [prompt.report, prompt.httpExamples]);
 
+  const planChecklistItems = useMemo(() => parsePlanChecklist(promptPlanState.content), [promptPlanState.content]);
+
+  const planSummary = useMemo(() => buildPlanChecklistSummary(planChecklistItems), [planChecklistItems]);
+
+  const shouldShowPlanSection = prompt.status === 'in-progress' && promptPlanState.exists;
+
   const workspaceSummary = useMemo(() => {
     const chunks: string[] = [];
     const projects = joinSelected(prompt.projects);
@@ -736,6 +746,10 @@ export const EditorApp: React.FC = () => {
     return html;
   };
 
+  const requestPromptPlanState = useCallback((promptId?: string) => {
+    vscode.postMessage({ type: 'requestPromptPlanState', promptId });
+  }, []);
+
   useEffect(() => {
     const readyTimer = window.setTimeout(() => {
       vscode.postMessage({ type: 'ready', bootId: bootIdRef.current });
@@ -810,6 +824,7 @@ export const EditorApp: React.FC = () => {
         setGitOverlayCommitMessages({});
         setGitOverlayBusyAction(null);
         setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
+        setPromptPlanState({ exists: false, content: '' });
         // Delay showing the loader so fast loads don't flash
         if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); }
         showLoaderTimerRef.current = window.setTimeout(() => { setShowLoader(true); }, 300);
@@ -870,6 +885,7 @@ export const EditorApp: React.FC = () => {
                 setIsRecalculating(true);
               }
             }
+            requestPromptPlanState(msg.prompt.id);
             break;
           }
 
@@ -892,6 +908,7 @@ export const EditorApp: React.FC = () => {
             if ((msg.prompt.chatSessionIds || []).length > 0) {
               releaseStartChatPendingState();
             }
+            requestPromptPlanState(msg.prompt.id);
             break;
           }
 
@@ -915,6 +932,7 @@ export const EditorApp: React.FC = () => {
               activeSaveIdRef.current = nextPromptId;
             }
             // Don't touch isDirty — user's pending edits stay intact
+            requestPromptPlanState(msg.prompt.id);
             break;
           }
 
@@ -969,6 +987,21 @@ export const EditorApp: React.FC = () => {
               setIsRecalculating(true);
             }
           }
+          requestPromptPlanState(msg.prompt.id);
+        }
+        break;
+      case 'promptPlanUpdated':
+        {
+          const incomingPromptId = String(msg.promptId || '').trim();
+          const currentPromptId = String(currentPromptIdRef.current || '').trim();
+          if (incomingPromptId && currentPromptId && incomingPromptId !== currentPromptId) {
+            break;
+          }
+
+          setPromptPlanState({
+            exists: Boolean(msg.exists),
+            content: Boolean(msg.exists) ? String(msg.content || '') : '',
+          });
         }
         break;
       case 'promptSaved':
@@ -2957,6 +2990,33 @@ export const EditorApp: React.FC = () => {
               </div>
             </>
           ))}
+
+          {shouldShowPlanSection ? renderSection('plan', 'План', planSummary, (
+            <div style={styles.planChecklistList}>
+              {planChecklistItems.length > 0 ? planChecklistItems.map(item => (
+                <div key={`${item.lineNumber}-${item.text}`} style={styles.planChecklistItem}>
+                  <span
+                    style={{
+                      ...styles.planChecklistIcon,
+                      ...(item.checked ? styles.planChecklistIconCompleted : styles.planChecklistIconPending),
+                    }}
+                    aria-hidden="true"
+                  >
+                    {item.checked ? '☑' : '☐'}
+                  </span>
+                  <span
+                    style={{
+                      ...styles.planChecklistText,
+                      ...(item.checked ? styles.planChecklistTextCompleted : null),
+                    }}
+                    dangerouslySetInnerHTML={{ __html: renderMarkdown(item.text) }}
+                  />
+                </div>
+              )) : (
+                <div style={styles.planChecklistEmpty}>В файле plan.md не найдено пунктов чеклиста.</div>
+              )}
+            </div>
+          )) : null}
           </div>
         </div>
 
@@ -3244,6 +3304,50 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '12px',
+  },
+  planChecklistList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+  },
+  planChecklistItem: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '8px',
+    padding: '8px 10px',
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '6px',
+    background: 'var(--vscode-sideBar-background)',
+  },
+  planChecklistIcon: {
+    flexShrink: 0,
+    lineHeight: 1.2,
+    fontSize: '14px',
+    marginTop: '1px',
+  },
+  planChecklistIconCompleted: {
+    color: 'var(--vscode-testing-iconPassed, var(--vscode-terminal-ansiGreen))',
+  },
+  planChecklistIconPending: {
+    color: 'var(--vscode-descriptionForeground)',
+  },
+  planChecklistText: {
+    minWidth: 0,
+    fontSize: '13px',
+    lineHeight: 1.5,
+    color: 'var(--vscode-foreground)',
+    overflowWrap: 'anywhere',
+  },
+  planChecklistTextCompleted: {
+    color: 'var(--vscode-descriptionForeground)',
+    textDecoration: 'line-through',
+  },
+  planChecklistEmpty: {
+    padding: '8px 10px',
+    border: '1px dashed var(--vscode-panel-border)',
+    borderRadius: '6px',
+    color: 'var(--vscode-descriptionForeground)',
+    fontSize: '12px',
   },
   fieldRow: {
     display: 'flex',

@@ -82,6 +82,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'createBranch'; branch: string; projects: string[] }
 	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
 	| { type: 'openPromptReportInEditor'; report: string; promptId?: string; title?: string }
+	| { type: 'openPromptPlanInEditor'; promptId?: string }
 	| { type: 'requestPromptPlanState'; promptId?: string }
 	| { type: 'showPromptHistory'; id: string }
 	| { type: 'recalcImplementingTime'; id: string; silent?: boolean }
@@ -135,8 +136,8 @@ export type ExtensionToWebviewMessage =
 	| { type: 'inlineSuggestion'; suggestion: string }
 	| { type: 'inlineSuggestions'; suggestions: string[] }
 	| { type: 'statistics'; data: PromptStatistics }
-	| { type: 'globalContext'; context: string }
-	| { type: 'globalContextLoaded'; context: string }
+	| { type: 'globalContext'; context: string; canLoadRemote: boolean }
+	| { type: 'globalContextLoaded'; context: string; canLoadRemote: boolean }
 	| { type: 'globalContextLoadFailed'; message: string }
 	| { type: 'gitOverlayTrackedBranchPreference'; branch: string; branchesByProject?: Record<string, string> }
 	| { type: 'availableLanguages'; options: Array<{ id: string; name: string }> }

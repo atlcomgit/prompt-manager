@@ -36,7 +36,6 @@ import { fetchRemoteText } from '../utils/remoteText.js';
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
 const SINGLE_EDITOR_PANEL_KEY = '__prompt_editor_singleton__';
-const REMOTE_GLOBAL_CONTEXT_URL = 'https://raw.githubusercontent.com/atlcomgit/prompt-manager/refs/heads/master/share/general.instructions.md';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
 const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 250;
@@ -311,8 +310,39 @@ export class EditorPanelManager {
 		await nextPersist;
 	}
 
+	private getRemoteGlobalContextUrl(): string {
+		return vscode.workspace
+			.getConfiguration('promptManager')
+			.get<string>('editor.globalContextUrl', '')
+			.trim();
+	}
+
+	private canLoadRemoteGlobalContext(): boolean {
+		return this.getRemoteGlobalContextUrl().length > 0;
+	}
+
+	private buildGlobalContextMessage(): ExtensionToWebviewMessage {
+		return {
+			type: 'globalContext',
+			context: this.stateService.getGlobalAgentContext(),
+			canLoadRemote: this.canLoadRemoteGlobalContext(),
+		};
+	}
+
+	private broadcastGlobalContextState(): void {
+		const message = this.buildGlobalContextMessage();
+		for (const panel of openPanels.values()) {
+			void panel.webview.postMessage(message);
+		}
+	}
+
 	private async loadRemoteGlobalAgentContext(): Promise<string> {
-		return fetchRemoteText(REMOTE_GLOBAL_CONTEXT_URL, {
+		const remoteUrl = this.getRemoteGlobalContextUrl();
+		if (!remoteUrl) {
+			throw new Error('URL общей инструкции не настроен в параметрах расширения.');
+		}
+
+		return fetchRemoteText(remoteUrl, {
 			timeoutMs: 10000,
 		});
 	}
@@ -1318,6 +1348,13 @@ export class EditorPanelManager {
 				if (this.pendingGlobalAgentContextSync !== null) {
 					this.scheduleGlobalAgentContextSync(this.pendingGlobalAgentContextSync);
 				}
+			}),
+			vscode.workspace.onDidChangeConfiguration((event) => {
+				if (!event.affectsConfiguration('promptManager.editor.globalContextUrl')) {
+					return;
+				}
+
+				this.broadcastGlobalContextState();
 			}),
 			vscode.workspace.onDidChangeTextDocument((event) => {
 				void this.syncPromptContentFromEditorDocument(event.document);
@@ -3263,6 +3300,40 @@ export class EditorPanelManager {
 		}
 	}
 
+	private async openPromptPlanInEditor(panelKey: string, currentPrompt: Prompt): Promise<void> {
+		const promptId = (currentPrompt.id || '').trim();
+		if (!promptId) {
+			vscode.window.showWarningMessage('Сначала сохраните промпт, затем откройте план.');
+			return;
+		}
+
+		const trackedPlanEntry = this.promptPlanByPanelKey.get(panelKey);
+		const planUri = trackedPlanEntry?.uri ?? this.storageService.getPromptPlanUri(promptId);
+		const openDocument = vscode.workspace.textDocuments.find(document => document.uri.toString() === planUri.toString());
+		if (openDocument) {
+			await vscode.window.showTextDocument(openDocument, {
+				viewColumn: vscode.ViewColumn.Beside,
+				preview: false,
+				preserveFocus: false,
+			});
+			return;
+		}
+
+		try {
+			await vscode.workspace.fs.stat(planUri);
+		} catch {
+			vscode.window.showWarningMessage('Файл plan.md для этого промпта пока не найден.');
+			return;
+		}
+
+		const doc = await vscode.workspace.openTextDocument(planUri);
+		await vscode.window.showTextDocument(doc, {
+			viewColumn: vscode.ViewColumn.Beside,
+			preview: false,
+			preserveFocus: false,
+		});
+	}
+
 	/**
 	 * Called when a content editor document is saved.
 	 * Notifies the webview to trigger a prompt save.
@@ -3887,7 +3958,7 @@ export class EditorPanelManager {
 					break;
 				}
 
-				postMessage({ type: 'globalContext', context: this.stateService.getGlobalAgentContext() });
+				postMessage(this.buildGlobalContextMessage());
 				postMessage({ type: 'workspaceFolders', folders: this.workspaceService.getWorkspaceFolders() });
 				postMessage({ type: 'availableModels', models });
 				postMessage({ type: 'availableSkills', skills });
@@ -4177,6 +4248,11 @@ export class EditorPanelManager {
 			case 'openPromptReportInEditor': {
 				currentPrompt.report = typeof msg.report === 'string' ? msg.report : currentPrompt.report;
 				await this.openPromptReportInEditor(panelKey, currentPrompt, postMessage, panel);
+				break;
+			}
+
+			case 'openPromptPlanInEditor': {
+				await this.openPromptPlanInEditor(panelKey, currentPrompt);
 				break;
 			}
 
@@ -5948,8 +6024,7 @@ export class EditorPanelManager {
 			}
 
 			case 'getGlobalContext': {
-				const ctx = this.stateService.getGlobalAgentContext();
-				postMessage({ type: 'globalContext', context: ctx });
+				postMessage(this.buildGlobalContextMessage());
 				break;
 			}
 
@@ -5961,7 +6036,11 @@ export class EditorPanelManager {
 			case 'loadRemoteGlobalContext': {
 				try {
 					const context = await this.loadRemoteGlobalAgentContext();
-					postMessage({ type: 'globalContextLoaded', context });
+					postMessage({
+						type: 'globalContextLoaded',
+						context,
+						canLoadRemote: this.canLoadRemoteGlobalContext(),
+					});
 					void this.persistGlobalAgentContext(context).catch((error) => {
 						this.hooksOutput.appendLine(`[global-context] persist after remote load failed: ${error instanceof Error ? error.message : String(error)}`);
 					});

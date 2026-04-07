@@ -309,6 +309,11 @@
           "description": "Save the final agent chat response to the prompt report and include it in afterChatCompleted hooks (for example, Telegram integrations).",
           "default": false
         },
+        "promptManager.editor.globalContextUrl": {
+          "type": "string",
+          "description": "URL for loading the shared agent context into the \"Общая инструкция\" block. Leave empty to hide the load button.",
+          "default": ""
+        },
         "promptManager.startup.openTracker": {
           "type": "boolean",
           "description": "Automatically open the Prompt Tracker panel when VS Code starts.",

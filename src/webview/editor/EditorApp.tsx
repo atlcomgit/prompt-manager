@@ -227,6 +227,7 @@ export const EditorApp: React.FC = () => {
   const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [isGeneratingDescription, setIsGeneratingDescription] = useState(false);
   const [isLoadingGlobalContext, setIsLoadingGlobalContext] = useState(false);
+  const [canLoadRemoteGlobalContext, setCanLoadRemoteGlobalContext] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
@@ -364,13 +365,13 @@ export const EditorApp: React.FC = () => {
   }, [persistGlobalContext]);
 
   const handleLoadGlobalContext = useCallback(() => {
-    if (isLoadingGlobalContext) {
+    if (isLoadingGlobalContext || !canLoadRemoteGlobalContext) {
       return;
     }
     setNotice(null);
     setIsLoadingGlobalContext(true);
     vscode.postMessage({ type: 'loadRemoteGlobalContext' });
-  }, [isLoadingGlobalContext]);
+  }, [canLoadRemoteGlobalContext, isLoadingGlobalContext]);
 
   const releaseStartChatPendingState = useCallback((options?: { resetSaving?: boolean }) => {
     clearChatStartTimeout();
@@ -782,6 +783,10 @@ export const EditorApp: React.FC = () => {
   const requestPromptPlanState = useCallback((promptId?: string) => {
     vscode.postMessage({ type: 'requestPromptPlanState', promptId });
   }, []);
+
+  const handleOpenPromptPlanInEditor = useCallback(() => {
+    vscode.postMessage({ type: 'openPromptPlanInEditor', promptId: prompt.id });
+  }, [prompt.id]);
 
   useEffect(() => {
     const readyTimer = window.setTimeout(() => {
@@ -1208,11 +1213,13 @@ export const EditorApp: React.FC = () => {
         break;
       case 'globalContext':
         setGlobalContext(msg.context || '');
+        setCanLoadRemoteGlobalContext(msg.canLoadRemote === true);
         break;
       case 'globalContextLoaded':
         setIsLoadingGlobalContext(false);
         setNotice(null);
         setGlobalContext(msg.context || '');
+        setCanLoadRemoteGlobalContext(msg.canLoadRemote === true);
         break;
       case 'globalContextLoadFailed':
         setIsLoadingGlobalContext(false);
@@ -2800,7 +2807,7 @@ export const EditorApp: React.FC = () => {
                         {t('editor.resetGlobalContext')}
                       </button>
                     ) : null}
-                    {(!hasGlobalContext || isLoadingGlobalContext) ? (
+                    {canLoadRemoteGlobalContext && (!hasGlobalContext || isLoadingGlobalContext) ? (
                       <button
                         type="button"
                         style={{
@@ -3067,23 +3074,35 @@ export const EditorApp: React.FC = () => {
           ))}
 
           {shouldShowPlanSection ? renderSection('plan', 'План', planSummary, (
-            promptPlanState.content.trim().length > 0 ? (
-              <div style={styles.planRawContent} role="log" aria-live="polite" aria-atomic="false">
-                {planLines.map((line, index) => (
-                  <div
-                    key={`plan-line-${index}`}
-                    style={{
-                      ...styles.planRawLine,
-                      ...(highlightedPlanLineIndexSet.has(index) ? styles.planRawLineHighlighted : null),
-                    }}
-                  >
-                    {line.length > 0 ? line : '\u00A0'}
-                  </div>
-                ))}
+            <>
+              {promptPlanState.content.trim().length > 0 ? (
+                <div style={styles.planRawContent} role="log" aria-live="polite" aria-atomic="false">
+                  {planLines.map((line, index) => (
+                    <div
+                      key={`plan-line-${index}`}
+                      style={{
+                        ...styles.planRawLine,
+                        ...(highlightedPlanLineIndexSet.has(index) ? styles.planRawLineHighlighted : null),
+                      }}
+                    >
+                      {line.length > 0 ? line : '\u00A0'}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={styles.planRawContentEmpty}>Файл plan.md пуст.</div>
+              )}
+              <div style={styles.fieldActionGroup}>
+                <button
+                  type="button"
+                  style={styles.fieldActionBtn}
+                  onClick={handleOpenPromptPlanInEditor}
+                  title={t('editor.open')}
+                >
+                  ↗ {t('editor.open')}
+                </button>
               </div>
-            ) : (
-              <div style={styles.planRawContentEmpty}>Файл plan.md пуст.</div>
-            )
+            </>
           )) : null}
           </div>
         </div>

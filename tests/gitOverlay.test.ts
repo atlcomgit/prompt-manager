@@ -2966,9 +2966,26 @@ test('buildGitOverlayReviewCliSetupCommand prepares auth-only flow for GitLab', 
 	assert.doesNotMatch(command.command, /Installing glab/);
 	assert.match(command.command, /glab config get api_protocol --host 'gitlab\.example\.com'/);
 	assert.match(command.command, /glab config get git_protocol --host 'gitlab\.example\.com'/);
-	assert.match(command.command, /glab auth login --hostname 'gitlab\.example\.com' --api-host 'gitlab\.example\.com' --api-protocol "\$_pm_api_protocol" --git-protocol "\$_pm_git_protocol" --stdin/);
+	assert.match(command.command, /glab config set api_protocol "\$_pm_api_protocol" --host 'gitlab\.example\.com'/);
+	assert.match(command.command, /glab config set git_protocol "\$_pm_git_protocol" --host 'gitlab\.example\.com'/);
+	assert.match(command.command, /glab config set token "\$_pm_token" --host 'gitlab\.example\.com'/);
+	assert.match(command.command, /glab auth status --hostname 'gitlab\.example\.com'/);
+	assert.doesNotMatch(command.command, /skip_tls_verify true --host 'gitlab\.example\.com'/);
 	assert.match(command.command, /authentication failed/);
 	assert.match(command.command, /read -r/);
+});
+
+test('buildGitOverlayReviewCliSetupCommand enables skip_tls_verify for IP-based GitLab hosts on Linux', () => {
+	const command = buildGitOverlayReviewCliSetupCommand({
+		platform: 'linux',
+		cliCommand: 'glab',
+		host: '10.0.0.14',
+		action: 'auth',
+	});
+
+	assert.match(command.command, /skip_tls_verify true --host '10\.0\.0\.14'/);
+	assert.match(command.command, /glab config set token "\$_pm_token" --host '10\.0\.0\.14'/);
+	assert.match(command.command, /glab auth status --hostname '10\.0\.0\.14'/);
 });
 
 test('buildGitOverlayReviewCliSetupCommand prepares Windows winget flow', () => {
@@ -2997,10 +3014,27 @@ test('buildGitOverlayReviewCliSetupCommand prepares Windows self-managed GitLab 
 	assert.doesNotMatch(command.command, /Installing glab/);
 	assert.match(command.command, /glab config get api_protocol --host 'gitlab\.example\.com'/);
 	assert.match(command.command, /glab config get git_protocol --host 'gitlab\.example\.com'/);
-	assert.match(command.command, /glab auth login --hostname 'gitlab\.example\.com' --api-host 'gitlab\.example\.com' --api-protocol \$pmApiProtocol --git-protocol \$pmGitProtocol --stdin/);
+	assert.match(command.command, /Invoke-PromptManagerGlabCommand config set api_protocol \$pmApiProtocol --host 'gitlab\.example\.com'/);
+	assert.match(command.command, /Invoke-PromptManagerGlabCommand config set git_protocol \$pmGitProtocol --host 'gitlab\.example\.com'/);
+	assert.match(command.command, /Invoke-PromptManagerGlabCommand config set token \$pmToken --host 'gitlab\.example\.com'/);
+	assert.match(command.command, /Invoke-PromptManagerGlabCommand auth status --hostname 'gitlab\.example\.com'/);
+	assert.doesNotMatch(command.command, /skip_tls_verify true --host 'gitlab\.example\.com'/);
 	assert.match(command.command, /Read-Host 'Paste your token'/);
 	assert.match(command.command, /authentication failed/);
 	assert.match(command.command, /Read-Host/);
+});
+
+test('buildGitOverlayReviewCliSetupCommand enables skip_tls_verify for IP-based GitLab hosts on Windows', () => {
+	const command = buildGitOverlayReviewCliSetupCommand({
+		platform: 'win32',
+		cliCommand: 'glab',
+		host: '10.0.0.14',
+		action: 'auth',
+	});
+
+	assert.match(command.command, /skip_tls_verify true --host '10\.0\.0\.14'/);
+	assert.match(command.command, /Invoke-PromptManagerGlabCommand config set token \$pmToken --host '10\.0\.0\.14'/);
+	assert.match(command.command, /Invoke-PromptManagerGlabCommand auth status --hostname '10\.0\.0\.14'/);
 });
 
 test('GitOverlay shows changed projects outside selected prompt projects in a separate step 1 block', () => {

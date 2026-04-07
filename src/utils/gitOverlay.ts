@@ -77,6 +77,27 @@ function quotePowerShellArg(value: string): string {
 	return `'${value.replace(/'/g, `''`)}'`;
 }
 
+function isIpLiteralHost(host: string): boolean {
+	const normalizedHost = host.trim();
+	if (!normalizedHost) {
+		return false;
+	}
+
+	const ipv4Match = normalizedHost.match(/^(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?$/);
+	if (ipv4Match) {
+		return ipv4Match[1]
+			.split('.')
+			.every(part => Number(part) >= 0 && Number(part) <= 255);
+	}
+
+	const bracketedIpv6Match = normalizedHost.match(/^\[([0-9A-Fa-f:]+)\](?::\d+)?$/);
+	if (bracketedIpv6Match) {
+		return true;
+	}
+
+	return normalizedHost.includes(':') && /^[0-9A-Fa-f:]+$/.test(normalizedHost);
+}
+
 function resolveReviewCliManualUrl(cliCommand: 'gh' | 'glab'): string {
 	return cliCommand === 'gh'
 		? 'https://cli.github.com/'
@@ -105,6 +126,7 @@ function isGitLabSelfManaged(cliCommand: 'gh' | 'glab', host: string): boolean {
 /** Генерирует POSIX-блок интерактивной авторизации для self-managed GitLab через Personal Access Token */
 function buildPosixGitLabSelfManagedAuthBlock(host: string, manualUrl: string): string {
 	const quotedHost = quoteShellArg(host);
+	const shouldSkipTlsVerify = isIpLiteralHost(host);
 	return [
 		'echo ""',
 		`echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"`,
@@ -135,7 +157,16 @@ function buildPosixGitLabSelfManagedAuthBlock(host: string, manualUrl: string): 
 		'if [ -z "$_pm_git_protocol" ]; then',
 		"    _pm_git_protocol='ssh'",
 		'fi',
-		`if printf '%s' "$_pm_token" | glab auth login --hostname ${quotedHost} --api-host ${quotedHost} --api-protocol "$_pm_api_protocol" --git-protocol "$_pm_git_protocol" --stdin; then`,
+		...(shouldSkipTlsVerify
+			? [
+				`echo "[Prompt Manager] ${host} is an IP-based GitLab host. Enabling skip_tls_verify for glab."`,
+			]
+			: []),
+		`if glab config set api_protocol "$_pm_api_protocol" --host ${quotedHost} \
+		    && glab config set git_protocol "$_pm_git_protocol" --host ${quotedHost} \
+		    ${shouldSkipTlsVerify ? `&& glab config set skip_tls_verify true --host ${quotedHost} \\
+		    ` : ''}&& glab config set token "$_pm_token" --host ${quotedHost} \
+		    && glab auth status --hostname ${quotedHost} >/dev/null 2>/dev/null; then`,
 		`    echo "[Prompt Manager] glab is ready. Return to Git Flow and refresh the overlay."`,
 		'else',
 		`    echo "[Prompt Manager] glab authentication failed (exit code $?)."`,
@@ -150,6 +181,7 @@ function buildPosixGitLabSelfManagedAuthBlock(host: string, manualUrl: string): 
 /** Генерирует Windows-блок интерактивной авторизации для self-managed GitLab через Personal Access Token */
 function buildWindowsGitLabSelfManagedAuthBlock(host: string, manualUrl: string): string {
 	const quotedHost = quotePowerShellArg(host);
+	const shouldSkipTlsVerify = isIpLiteralHost(host);
 	return [
 		"Write-Host ''",
 		`Write-Host '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'`,
@@ -179,8 +211,24 @@ function buildWindowsGitLabSelfManagedAuthBlock(host: string, manualUrl: string)
 		"if ([string]::IsNullOrWhiteSpace($pmGitProtocol)) {",
 		"    $pmGitProtocol = 'ssh'",
 		"}",
+		"function Invoke-PromptManagerGlabCommand {",
+		"    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)",
+		"    & glab @Arguments",
+		"    if ($LASTEXITCODE -ne 0) {",
+		"        throw \"glab $($Arguments -join ' ') failed with exit code $LASTEXITCODE\"",
+		"    }",
+		"}",
 		'try {',
-		`    $pmToken | glab auth login --hostname ${quotedHost} --api-host ${quotedHost} --api-protocol $pmApiProtocol --git-protocol $pmGitProtocol --stdin`,
+		`    Invoke-PromptManagerGlabCommand config set api_protocol $pmApiProtocol --host ${quotedHost}`,
+		`    Invoke-PromptManagerGlabCommand config set git_protocol $pmGitProtocol --host ${quotedHost}`,
+		...(shouldSkipTlsVerify
+			? [
+				`    Write-Host '[Prompt Manager] ${host} is an IP-based GitLab host. Enabling skip_tls_verify for glab.'`,
+				`    Invoke-PromptManagerGlabCommand config set skip_tls_verify true --host ${quotedHost}`,
+			]
+			: []),
+		`    Invoke-PromptManagerGlabCommand config set token $pmToken --host ${quotedHost}`,
+		`    Invoke-PromptManagerGlabCommand auth status --hostname ${quotedHost}`,
 		`    Write-Host '[Prompt Manager] glab is ready. Return to Git Flow and refresh the overlay.'`,
 		'} catch {',
 		`    Write-Host "[Prompt Manager] glab authentication failed: $_"`,

@@ -134,6 +134,19 @@ export class GitService {
 		appendPromptManagerLog(`[${new Date().toISOString()}] [git-service] ${event}${serializedPayload}`);
 	}
 
+	private previewDebugValue(value: unknown, maxLength: number = 220): string {
+		const text = Buffer.isBuffer(value)
+			? value.toString('utf8')
+			: typeof value === 'string'
+				? value
+				: JSON.stringify(value ?? null);
+		const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+		if (normalized.length <= maxLength) {
+			return normalized;
+		}
+		return `${normalized.slice(0, maxLength - 1)}…`;
+	}
+
 	private parseStagedNameStatus(raw: string): StagedFileChange[] {
 		return raw
 			.split(/\r?\n/)
@@ -236,14 +249,38 @@ export class GitService {
 		const args = command === 'gh'
 			? ['auth', 'status', '--active', '--hostname', host]
 			: ['auth', 'status', '--hostname', host];
+		const projectLabel = path.basename(projectPath) || projectPath;
 
 		try {
-			await execFileAsync(command, args, {
+			const { stdout, stderr } = await execFileAsync(command, args, {
 				cwd: projectPath,
 				maxBuffer: 256 * 1024,
 			});
+			this.logDebug('reviewCli.auth.check.ok', {
+				project: projectLabel,
+				command,
+				host,
+				stdoutPreview: this.previewDebugValue(stdout, 180) || null,
+				stderrPreview: this.previewDebugValue(stderr, 180) || null,
+			});
 			return true;
-		} catch {
+		} catch (error) {
+			const errorRecord = error as {
+				code?: number | string;
+				message?: string;
+				stdout?: string | Buffer;
+				stderr?: string | Buffer;
+				shortMessage?: string;
+			};
+			this.logDebug('reviewCli.auth.check.failed', {
+				project: projectLabel,
+				command,
+				host,
+				code: errorRecord.code ?? null,
+				message: this.previewDebugValue(errorRecord.shortMessage || errorRecord.message || error, 260) || null,
+				stdoutPreview: this.previewDebugValue(errorRecord.stdout, 180) || null,
+				stderrPreview: this.previewDebugValue(errorRecord.stderr, 180) || null,
+			});
 			return false;
 		}
 	}
@@ -360,8 +397,13 @@ export class GitService {
 		projectPath: string,
 		branchName: string,
 	): Promise<{ remote: GitOverlayReviewRemote | null; unsupportedReason: GitOverlayReviewUnsupportedReason | null }> {
+		const projectLabel = path.basename(projectPath) || projectPath;
 		const remoteName = await this.getBranchRemote(projectPath, branchName);
 		if (!remoteName) {
+			this.logDebug('reviewRemote.missing', {
+				project: projectLabel,
+				branchName,
+			});
 			return { remote: null, unsupportedReason: 'missing-remote' };
 		}
 
@@ -369,6 +411,12 @@ export class GitService {
 		const providerHosts = GitService.getReviewProviderHostsSetting();
 		const parsed = parseGitOverlayRemoteUrl(remoteUrl, providerHosts);
 		if (!parsed) {
+			this.logDebug('reviewRemote.unrecognized', {
+				project: projectLabel,
+				branchName,
+				remoteName,
+				remoteUrl: this.previewDebugValue(remoteUrl, 260) || null,
+			});
 			return { remote: null, unsupportedReason: 'unrecognized-remote' };
 		}
 
@@ -376,13 +424,25 @@ export class GitService {
 			? await this.isCliCommandAvailable(parsed.cliCommand)
 			: false;
 
+		const remote = {
+			...parsed,
+			remoteName,
+			remoteUrl,
+			cliAvailable,
+		};
+		this.logDebug('reviewRemote.resolved', {
+			project: projectLabel,
+			branchName,
+			remoteName,
+			host: remote.host,
+			provider: remote.provider,
+			supported: remote.supported,
+			cliCommand: remote.cliCommand || null,
+			cliAvailable,
+		});
+
 		return {
-			remote: {
-				...parsed,
-				remoteName,
-				remoteUrl,
-				cliAvailable,
-			},
+			remote,
 			unsupportedReason: parsed.supported ? null : 'unsupported-provider',
 		};
 	}
@@ -591,16 +651,42 @@ export class GitService {
 	}
 
 	private async getProjectReviewState(projectPath: string, branchName: string): Promise<GitOverlayReviewState> {
+		const projectLabel = path.basename(projectPath) || projectPath;
 		const { remote, unsupportedReason } = await this.resolveReviewRemoteContext(projectPath, branchName);
 		if (!remote) {
+			this.logDebug('reviewState.resolved', {
+				project: projectLabel,
+				branchName,
+				remote: null,
+				setupAction: null,
+				unsupportedReason: unsupportedReason || null,
+			});
 			return { remote: null, request: null, error: '', setupAction: null, unsupportedReason };
 		}
 
 		if (!remote.supported) {
+			this.logDebug('reviewState.resolved', {
+				project: projectLabel,
+				branchName,
+				host: remote.host,
+				provider: remote.provider,
+				cliAvailable: remote.cliAvailable,
+				setupAction: null,
+				unsupportedReason: unsupportedReason || null,
+			});
 			return { remote, request: null, error: '', setupAction: null, unsupportedReason };
 		}
 
 		if (!remote.cliAvailable) {
+			this.logDebug('reviewState.resolved', {
+				project: projectLabel,
+				branchName,
+				host: remote.host,
+				provider: remote.provider,
+				cliAvailable: false,
+				setupAction: 'install-and-auth',
+				unsupportedReason: null,
+			});
 			return {
 				remote,
 				request: null,
@@ -612,11 +698,30 @@ export class GitService {
 
 		const cliCommand = remote.cliCommand;
 		if (cliCommand !== 'gh' && cliCommand !== 'glab') {
+			this.logDebug('reviewState.resolved', {
+				project: projectLabel,
+				branchName,
+				host: remote.host,
+				provider: remote.provider,
+				cliAvailable: remote.cliAvailable,
+				setupAction: null,
+				unsupportedReason: unsupportedReason || null,
+			});
 			return { remote, request: null, error: '', setupAction: null, unsupportedReason };
 		}
 
 		const authenticated = await this.isCliAuthenticated(cliCommand, projectPath, remote.host);
 		if (!authenticated) {
+			this.logDebug('reviewState.resolved', {
+				project: projectLabel,
+				branchName,
+				host: remote.host,
+				provider: remote.provider,
+				cliAvailable: remote.cliAvailable,
+				authenticated: false,
+				setupAction: 'auth',
+				unsupportedReason: null,
+			});
 			return {
 				remote,
 				request: null,
@@ -628,8 +733,26 @@ export class GitService {
 
 		try {
 			const request = await this.getExistingReviewRequest(projectPath, remote, branchName);
+			this.logDebug('reviewState.resolved', {
+				project: projectLabel,
+				branchName,
+				host: remote.host,
+				provider: remote.provider,
+				cliAvailable: remote.cliAvailable,
+				authenticated: true,
+				setupAction: null,
+				hasRequest: Boolean(request),
+				requestState: request?.state || null,
+			});
 			return { remote, request, error: '', setupAction: null, unsupportedReason: null };
 		} catch (error) {
+			this.logDebug('reviewState.request.error', {
+				project: projectLabel,
+				branchName,
+				host: remote.host,
+				provider: remote.provider,
+				message: this.previewDebugValue(error instanceof Error ? (error.stack || error.message) : String(error), 320),
+			});
 			return {
 				remote,
 				request: null,

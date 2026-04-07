@@ -14,6 +14,7 @@ import { generateSmartTitle } from '../utils/smartTitle.js';
 import type { Prompt } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
 import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
+import type { GitOverlaySnapshot } from '../types/git.js';
 import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
 import type { PromptVoiceService } from '../services/promptVoice/promptVoiceService.js';
@@ -494,6 +495,30 @@ export class EditorPanelManager {
 		return vscode.workspace
 			.getConfiguration('promptManager')
 			.get<boolean>('debugLogging.enabled', false) === true;
+	}
+
+	private buildGitOverlayReviewDebugSummary(snapshot: GitOverlaySnapshot): Array<Record<string, unknown>> {
+		return (snapshot.projects || [])
+			.filter(project => Boolean(project.review.remote)
+				|| Boolean(project.review.setupAction)
+				|| Boolean(project.review.request)
+				|| Boolean(project.review.unsupportedReason)
+				|| Boolean(project.review.error))
+			.map(project => ({
+				project: project.project,
+				branch: project.currentBranch || null,
+				host: project.review.remote?.host || null,
+				provider: project.review.remote?.provider || null,
+				cliCommand: project.review.remote?.cliCommand || null,
+				cliAvailable: project.review.remote?.cliAvailable ?? null,
+				setupAction: project.review.setupAction || null,
+				unsupportedReason: project.review.unsupportedReason || null,
+				hasRequest: Boolean(project.review.request),
+				requestState: project.review.request?.state || null,
+				error: project.review.error
+					? this.reportDebugPreview(project.review.error, 220)
+					: null,
+			}));
 	}
 
 	private extractAgentResponse(chatText: string): string {
@@ -1546,6 +1571,12 @@ export class EditorPanelManager {
 			promptBranch,
 			this.getTrackedBranchesSetting(),
 		);
+		this.logReportDebug('gitOverlay.snapshot.computed', {
+			promptId: currentPrompt.id,
+			promptBranch: snapshot.promptBranch || null,
+			projectCount: snapshot.projects.length,
+			reviewProjects: this.buildGitOverlayReviewDebugSummary(snapshot),
+		});
 		postMessage({ type: 'gitOverlaySnapshot', snapshot });
 	}
 
@@ -2048,6 +2079,7 @@ export class EditorPanelManager {
 		cliCommand: 'gh' | 'glab';
 		host: string;
 		action: 'install-and-auth' | 'auth';
+		panelKey?: string;
 	}): Promise<string> {
 		const normalizedProject = (request.project || '').trim();
 		const normalizedHost = (request.host || '').trim();
@@ -2078,12 +2110,61 @@ export class EditorPanelManager {
 			action: request.action,
 			shellPath: shellPath || null,
 			manualUrl: setupCommand.manualUrl,
+			commandPreview: this.reportDebugPreview(setupCommand.command, 1500),
 		});
 
 		const terminal = vscode.window.createTerminal({
 			name: setupCommand.terminalName,
 			cwd: projectPath,
 			...(shellPath ? { shellPath } : {}),
+		});
+		const terminalCloseDisposable = vscode.window.onDidCloseTerminal((closedTerminal) => {
+			if (closedTerminal !== terminal) {
+				return;
+			}
+			terminalCloseDisposable.dispose();
+			this.logReportDebug('gitOverlay.reviewCliSetup.terminalClosed', {
+				project: normalizedProject,
+				cliCommand: request.cliCommand,
+				host: normalizedHost,
+				action: request.action,
+				exitCode: closedTerminal.exitStatus?.code ?? null,
+			});
+
+			const panelKey = request.panelKey;
+			if (!panelKey) {
+				return;
+			}
+
+			const session = this.gitOverlaySessions.get(panelKey);
+			const latestPrompt = this.panelPromptRefs.get(panelKey);
+			if (!session?.active || !latestPrompt) {
+				this.logReportDebug('gitOverlay.reviewCliSetup.terminalClosed.snapshotSkipped', {
+					project: normalizedProject,
+					host: normalizedHost,
+					reason: !session?.active ? 'inactive-session' : 'missing-prompt',
+				});
+				return;
+			}
+
+			void this.postGitOverlaySnapshot(
+				session.postMessage,
+				latestPrompt,
+				session.promptBranch,
+				session.projects,
+			).then(() => {
+				this.logReportDebug('gitOverlay.reviewCliSetup.terminalClosed.snapshotPosted', {
+					project: normalizedProject,
+					host: normalizedHost,
+					promptId: latestPrompt.id,
+				});
+			}).catch((error) => {
+				this.logReportDebug('gitOverlay.reviewCliSetup.terminalClosed.snapshotFailed', {
+					project: normalizedProject,
+					host: normalizedHost,
+					message: this.reportDebugPreview(error instanceof Error ? (error.stack || error.message) : String(error), 1000),
+				});
+			});
 		});
 		terminal.show(true);
 
@@ -2092,12 +2173,25 @@ export class EditorPanelManager {
 		const scriptExt = process.platform === 'win32' ? '.ps1' : '.sh';
 		const scriptPath = path.join(os.tmpdir(), `prompt-manager-cli-setup-${Date.now()}${scriptExt}`);
 		writeFileSync(scriptPath, setupCommand.command + '\n', { mode: 0o755 });
+		this.logReportDebug('gitOverlay.reviewCliSetup.scriptWritten', {
+			project: normalizedProject,
+			host: normalizedHost,
+			scriptPath,
+			scriptExt,
+		});
 
 		if (process.platform === 'win32') {
 			terminal.sendText(`& '${scriptPath.replace(/'/g, "''")}' ; Remove-Item -Force '${scriptPath.replace(/'/g, "''")}'`, true);
 		} else {
 			terminal.sendText(`bash '${scriptPath.replace(/'/g, "'\\''")}' ; rm -f '${scriptPath.replace(/'/g, "'\\''")}'`, true);
 		}
+		this.logReportDebug('gitOverlay.reviewCliSetup.dispatched', {
+			project: normalizedProject,
+			cliCommand: request.cliCommand,
+			host: normalizedHost,
+			action: request.action,
+			terminalName: setupCommand.terminalName,
+		});
 
 		return request.action === 'install-and-auth'
 			? `Открыт терминал ${setupCommand.terminalName}: установка и авторизация ${request.cliCommand} запущены. После завершения обновите Git Flow.`
@@ -5571,10 +5665,34 @@ export class EditorPanelManager {
 			}
 
 			case 'gitOverlaySetupReviewCli': {
+				this.logReportDebug('gitOverlay.reviewCliSetup.received', {
+					promptId: currentPrompt.id,
+					panelKey,
+					project: msg.request.project,
+					cliCommand: msg.request.cliCommand,
+					host: msg.request.host,
+					action: msg.request.action,
+				});
 				try {
-					const message = await this.setupGitOverlayReviewCli(msg.request);
+					const message = await this.setupGitOverlayReviewCli({
+						...msg.request,
+						panelKey,
+					});
+					this.logReportDebug('gitOverlay.reviewCliSetup.accepted', {
+						promptId: currentPrompt.id,
+						panelKey,
+						project: msg.request.project,
+						host: msg.request.host,
+					});
 					postMessage({ type: 'info', message });
 				} catch (error) {
+					this.logReportDebug('gitOverlay.reviewCliSetup.error', {
+						promptId: currentPrompt.id,
+						panelKey,
+						project: msg.request.project,
+						host: msg.request.host,
+						message: this.reportDebugPreview(error instanceof Error ? (error.stack || error.message) : String(error), 1000),
+					});
 					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
 				}
 				break;

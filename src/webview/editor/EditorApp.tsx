@@ -22,7 +22,7 @@ import { createDefaultPrompt } from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
 import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
 import { usePromptVoiceController } from './voice/usePromptVoiceController';
-import { buildPlanChecklistSummary, parsePlanChecklist } from '../../utils/planChecklist.js';
+import { getChangedLineIndexes } from '../../utils/planLineDiff.js';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -233,6 +233,7 @@ export const EditorApp: React.FC = () => {
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>(() => readStoredExpandedSections());
   const [promptPlanState, setPromptPlanState] = useState<{ exists: boolean; content: string }>({ exists: false, content: '' });
+  const [planHighlightedLineIndexes, setPlanHighlightedLineIndexes] = useState<number[]>([]);
   const [notice, setNotice] = useState<InlineNotice | null>(null);
   const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
@@ -271,6 +272,8 @@ export const EditorApp: React.FC = () => {
   const currentPromptIdRef = useRef<string>('__new__');
   const activeSaveIdRef = useRef<string | null>(null);
   const recalcTriggeredForRef = useRef<string>('');
+  const promptPlanStateRef = useRef<{ exists: boolean; content: string }>({ exists: false, content: '' });
+  const hasSeenPromptPlanSnapshotRef = useRef(false);
 
   // Auto-save refs
   const promptRef = useRef<Prompt>(prompt);
@@ -382,6 +385,16 @@ export const EditorApp: React.FC = () => {
   useEffect(() => {
     setIsDescriptionExpanded(false);
   }, [prompt.id]);
+
+  useEffect(() => {
+    setPlanHighlightedLineIndexes([]);
+    promptPlanStateRef.current = { exists: false, content: '' };
+    hasSeenPromptPlanSnapshotRef.current = false;
+  }, [prompt.id]);
+
+  useEffect(() => {
+    promptPlanStateRef.current = promptPlanState;
+  }, [promptPlanState]);
 
   useEffect(() => {
     const handleResize = () => setPageWidth(window.innerWidth);
@@ -639,9 +652,29 @@ export const EditorApp: React.FC = () => {
     return chunks;
   }, [prompt.report, prompt.httpExamples]);
 
-  const planChecklistItems = useMemo(() => parsePlanChecklist(promptPlanState.content), [promptPlanState.content]);
+  const planSummary = useMemo(() => {
+    const chunks: string[] = [];
+    const nonEmptyLines = promptPlanState.content
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
 
-  const planSummary = useMemo(() => buildPlanChecklistSummary(planChecklistItems), [planChecklistItems]);
+    if (nonEmptyLines.length > 0) {
+      chunks.push(toShortText(nonEmptyLines[0], 64));
+      if (nonEmptyLines.length > 1) {
+        chunks.push(`Строк: ${nonEmptyLines.length}`);
+      }
+    }
+
+    return chunks;
+  }, [promptPlanState.content]);
+
+  const planLines = useMemo(() => promptPlanState.content.split(/\r?\n/), [promptPlanState.content]);
+
+  const highlightedPlanLineIndexSet = useMemo(
+    () => new Set(planHighlightedLineIndexes),
+    [planHighlightedLineIndexes],
+  );
 
   const shouldShowPlanSection = prompt.status === 'in-progress' && promptPlanState.exists;
 
@@ -998,10 +1031,22 @@ export const EditorApp: React.FC = () => {
             break;
           }
 
-          setPromptPlanState({
+          const nextPlanState = {
             exists: Boolean(msg.exists),
             content: Boolean(msg.exists) ? String(msg.content || '') : '',
-          });
+          };
+          const previousPlanState = promptPlanStateRef.current;
+          const shouldHighlightChangedLines = hasSeenPromptPlanSnapshotRef.current
+            && (previousPlanState.exists !== nextPlanState.exists
+              || previousPlanState.content !== nextPlanState.content);
+          const nextHighlightedLineIndexes = shouldHighlightChangedLines && nextPlanState.exists
+            ? getChangedLineIndexes(previousPlanState.exists ? previousPlanState.content : '', nextPlanState.content)
+            : [];
+
+          hasSeenPromptPlanSnapshotRef.current = true;
+          promptPlanStateRef.current = nextPlanState;
+          setPlanHighlightedLineIndexes(nextHighlightedLineIndexes);
+          setPromptPlanState(nextPlanState);
         }
         break;
       case 'promptSaved':
@@ -1345,10 +1390,32 @@ export const EditorApp: React.FC = () => {
         });
         break;
       case 'gitOverlaySnapshot':
+        {
+        const reviewProjects = Array.isArray(msg.snapshot?.projects)
+          ? msg.snapshot.projects
+            .filter(project => Boolean(project.review.remote)
+              || Boolean(project.review.setupAction)
+              || Boolean(project.review.request)
+              || Boolean(project.review.unsupportedReason)
+              || Boolean(project.review.error))
+            .map(project => ({
+              project: project.project,
+              host: project.review.remote?.host || null,
+              provider: project.review.remote?.provider || null,
+              cliCommand: project.review.remote?.cliCommand || null,
+              cliAvailable: project.review.remote?.cliAvailable ?? null,
+              setupAction: project.review.setupAction || null,
+              unsupportedReason: project.review.unsupportedReason || null,
+              hasRequest: Boolean(project.review.request),
+              requestState: project.review.request?.state || null,
+              error: project.review.error || null,
+            }))
+          : [];
         logGitOverlayDebug('snapshot.received', {
           projectCount: Array.isArray(msg.snapshot?.projects) ? msg.snapshot.projects.length : 0,
           promptBranch: String(msg.snapshot?.promptBranch || '').trim(),
           trackedBranchCount: Array.isArray(msg.snapshot?.trackedBranches) ? msg.snapshot.trackedBranches.length : 0,
+          reviewProjects,
         });
         setGitOverlaySnapshot(msg.snapshot || null);
         setGitOverlayCommitMessages((prev) => {
@@ -1370,6 +1437,7 @@ export const EditorApp: React.FC = () => {
         });
         setGitOverlayBusyAction(null);
         break;
+        }
       case 'gitOverlayFileHistory':
         setGitOverlayFileHistory(msg.history || null);
         setGitOverlayBusyAction(null);
@@ -1993,6 +2061,13 @@ export const EditorApp: React.FC = () => {
       return;
     }
 
+      logGitOverlayDebug('setupReviewCli.dispatched', {
+        project: normalizedProject,
+        cliCommand: request.cliCommand,
+        host: normalizedHost,
+        action: request.action,
+      });
+
     vscode.postMessage({
       type: 'gitOverlaySetupReviewCli',
       request: {
@@ -2002,7 +2077,7 @@ export const EditorApp: React.FC = () => {
         action: request.action,
       },
     });
-  }, []);
+    }, [logGitOverlayDebug]);
 
   /** Сохраняет привязку хоста к провайдеру и обновляет overlay */
   const handleGitOverlayAssignReviewProvider = useCallback((host: string, provider: 'github' | 'gitlab') => {
@@ -2992,30 +3067,23 @@ export const EditorApp: React.FC = () => {
           ))}
 
           {shouldShowPlanSection ? renderSection('plan', 'План', planSummary, (
-            <div style={styles.planChecklistList}>
-              {planChecklistItems.length > 0 ? planChecklistItems.map(item => (
-                <div key={`${item.lineNumber}-${item.text}`} style={styles.planChecklistItem}>
-                  <span
+            promptPlanState.content.trim().length > 0 ? (
+              <div style={styles.planRawContent} role="log" aria-live="polite" aria-atomic="false">
+                {planLines.map((line, index) => (
+                  <div
+                    key={`plan-line-${index}`}
                     style={{
-                      ...styles.planChecklistIcon,
-                      ...(item.checked ? styles.planChecklistIconCompleted : styles.planChecklistIconPending),
+                      ...styles.planRawLine,
+                      ...(highlightedPlanLineIndexSet.has(index) ? styles.planRawLineHighlighted : null),
                     }}
-                    aria-hidden="true"
                   >
-                    {item.checked ? '☑' : '☐'}
-                  </span>
-                  <span
-                    style={{
-                      ...styles.planChecklistText,
-                      ...(item.checked ? styles.planChecklistTextCompleted : null),
-                    }}
-                    dangerouslySetInnerHTML={{ __html: renderMarkdown(item.text) }}
-                  />
-                </div>
-              )) : (
-                <div style={styles.planChecklistEmpty}>В файле plan.md не найдено пунктов чеклиста.</div>
-              )}
-            </div>
+                    {line.length > 0 ? line : '\u00A0'}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={styles.planRawContentEmpty}>Файл plan.md пуст.</div>
+            )
           )) : null}
           </div>
         </div>
@@ -3305,44 +3373,35 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     gap: '12px',
   },
-  planChecklistList: {
+  planRawContent: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '8px',
-  },
-  planChecklistItem: {
-    display: 'flex',
-    alignItems: 'flex-start',
-    gap: '8px',
-    padding: '8px 10px',
+    gap: '2px',
+    padding: '12px 14px',
     border: '1px solid var(--vscode-panel-border)',
     borderRadius: '6px',
     background: 'var(--vscode-sideBar-background)',
-  },
-  planChecklistIcon: {
-    flexShrink: 0,
-    lineHeight: 1.2,
-    fontSize: '14px',
-    marginTop: '1px',
-  },
-  planChecklistIconCompleted: {
-    color: 'var(--vscode-testing-iconPassed, var(--vscode-terminal-ansiGreen))',
-  },
-  planChecklistIconPending: {
-    color: 'var(--vscode-descriptionForeground)',
-  },
-  planChecklistText: {
-    minWidth: 0,
-    fontSize: '13px',
-    lineHeight: 1.5,
     color: 'var(--vscode-foreground)',
+    fontFamily: 'var(--vscode-editor-font-family)',
+    fontSize: '12px',
+    lineHeight: 1.55,
+    whiteSpace: 'pre-wrap',
     overflowWrap: 'anywhere',
+    wordBreak: 'break-word',
+    overflow: 'visible',
   },
-  planChecklistTextCompleted: {
-    color: 'var(--vscode-descriptionForeground)',
-    textDecoration: 'line-through',
+  planRawLine: {
+    padding: '1px 4px',
+    borderRadius: '4px',
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'anywhere',
+    wordBreak: 'break-word',
   },
-  planChecklistEmpty: {
+  planRawLineHighlighted: {
+    background: 'var(--vscode-diffEditor-insertedLineBackground, var(--vscode-diffEditor-insertedTextBackground, rgba(46, 160, 67, 0.18)))',
+    boxShadow: 'inset 3px 0 0 var(--vscode-charts-green, var(--vscode-terminal-ansiGreen))',
+  },
+  planRawContentEmpty: {
     padding: '8px 10px',
     border: '1px dashed var(--vscode-panel-border)',
     borderRadius: '6px',

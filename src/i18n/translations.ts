@@ -75,6 +75,9 @@ const en: Record<string, string> = {
 	// --- Editor ---
 	'editor.newPrompt': 'New Prompt',
 	'editor.unsaved': 'Unsaved',
+	'editor.viewTabs': 'Prompt sections',
+	'editor.tabMain': 'Main',
+	'editor.tabProcess': 'Process',
 	'editor.title': 'Title',
 	'editor.titlePlaceholder': 'Prompt title (auto-generated)',
 	'editor.description': 'Description',
@@ -933,6 +936,9 @@ const ru: Record<string, string> = {
 	// --- Editor ---
 	'editor.newPrompt': 'Новый промпт',
 	'editor.unsaved': 'Не сохранён',
+	'editor.viewTabs': 'Разделы промпта',
+	'editor.tabMain': 'Основное',
+	'editor.tabProcess': 'Процесс',
 	'editor.title': 'Название',
 	'editor.titlePlaceholder': 'Название промпта (генерируется автоматически)',
 	'editor.description': 'Описание',

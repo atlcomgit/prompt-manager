@@ -9,8 +9,15 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import type { SidebarState } from '../types/prompt.js';
-import { normalizeSidebarState } from '../types/prompt.js';
+import type { EditorPromptViewState, EditorPromptViewStateKeySource, SidebarState } from '../types/prompt.js';
+import {
+	createDefaultEditorPromptViewState,
+	moveEditorPromptViewStateEntries,
+	normalizeEditorPromptViewState,
+	normalizeSidebarState,
+	getEditorPromptViewStateStorageKeys,
+	resolveEditorPromptViewStateStorageKey,
+} from '../types/prompt.js';
 import { observeStableChatCompletion, type StableChatCompletionCandidate } from '../utils/chatCompletionState.js';
 
 const execFileAsync = promisify(execFile);
@@ -20,6 +27,7 @@ const LAST_PROMPT_KEY = 'promptManager.lastPromptId';
 const GLOBAL_AGENT_CONTEXT_KEY = 'promptManager.globalAgentContext';
 const STARTUP_EDITOR_OPEN_KEY = 'promptManager.startup.editorOpen';
 const STARTUP_EDITOR_PROMPT_ID_KEY = 'promptManager.startup.editorPromptId';
+const PROMPT_EDITOR_VIEW_STATE_KEY = 'promptManager.editorPromptViewState';
 
 export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
@@ -709,6 +717,46 @@ export class StateService {
 	/** Save global agent context */
 	async saveGlobalAgentContext(context: string): Promise<void> {
 		await this.context.workspaceState.update(GLOBAL_AGENT_CONTEXT_KEY, context);
+	}
+
+	getPromptEditorViewState(source?: EditorPromptViewStateKeySource | null): EditorPromptViewState {
+		const saved = this.context.workspaceState.get<Record<string, EditorPromptViewState>>(PROMPT_EDITOR_VIEW_STATE_KEY, {});
+		for (const key of getEditorPromptViewStateStorageKeys(source)) {
+			const state = saved[key];
+			if (state) {
+				return normalizeEditorPromptViewState(state);
+			}
+		}
+
+		return createDefaultEditorPromptViewState();
+	}
+
+	async savePromptEditorViewState(
+		source: EditorPromptViewStateKeySource | null | undefined,
+		state: EditorPromptViewState,
+	): Promise<void> {
+		const key = resolveEditorPromptViewStateStorageKey(source);
+		if (!key) {
+			return;
+		}
+
+		const current = this.context.workspaceState.get<Record<string, EditorPromptViewState>>(PROMPT_EDITOR_VIEW_STATE_KEY, {});
+		await this.context.workspaceState.update(PROMPT_EDITOR_VIEW_STATE_KEY, {
+			...current,
+			[key]: normalizeEditorPromptViewState(state),
+		});
+	}
+
+	async migratePromptEditorViewState(
+		fromSources: Array<EditorPromptViewStateKeySource | null | undefined>,
+		toSource: EditorPromptViewStateKeySource | null | undefined,
+	): Promise<void> {
+		const current = this.context.workspaceState.get<Record<string, EditorPromptViewState>>(PROMPT_EDITOR_VIEW_STATE_KEY, {});
+		const next = moveEditorPromptViewStateEntries(current, fromSources, toSource);
+		await this.context.workspaceState.update(
+			PROMPT_EDITOR_VIEW_STATE_KEY,
+			Object.keys(next).length > 0 ? next : undefined,
+		);
 	}
 
 	getGitOverlayTrackedBranchPreference(): string {

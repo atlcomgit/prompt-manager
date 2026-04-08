@@ -2,7 +2,7 @@
  * Message types for communication between extension and webviews
  */
 
-import type { Prompt, PromptConfig, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
+import type { EditorPromptViewState, Prompt, PromptConfig, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 
 export type GitOverlayBusyReason =
@@ -33,6 +33,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'improvePromptText'; content: string; projects?: string[] }
 	| { type: 'generateReportFromStagedChanges'; prompt: Prompt }
 	| { type: 'saveSidebarState'; state: SidebarState }
+	| { type: 'savePromptEditorViewState'; promptId?: string; promptUuid?: string; state: EditorPromptViewState }
 	| { type: 'getSidebarState' }
 	| { type: 'getWorkspaceFolders' }
 	| { type: 'getAvailableModels' }
@@ -109,7 +110,7 @@ export type WebviewToExtensionMessage =
 
 export type ExtensionToWebviewMessage =
 	| { type: 'prompts'; prompts: PromptConfig[] }
-	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync' | 'ai-enrichment'; previousId?: string }
+	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync' | 'ai-enrichment'; previousId?: string; editorViewState?: EditorPromptViewState }
 	| { type: 'promptSaved'; prompt: PromptConfig; previousId?: string }
 	| { type: 'promptDeleted'; id: string }
 	| { type: 'promptDuplicated'; prompt: PromptConfig }

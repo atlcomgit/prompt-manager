@@ -11,7 +11,7 @@ import * as path from 'path';
 import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { generateSmartTitle } from '../utils/smartTitle.js';
-import type { Prompt } from '../types/prompt.js';
+import type { EditorPromptViewState, EditorPromptViewStateKeySource, Prompt } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
 import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
 import type { GitOverlaySnapshot } from '../types/git.js';
@@ -131,6 +131,26 @@ export class EditorPanelManager {
 
 		const promptId = (this.panelPromptRefs.get(panelKey)?.id || '').trim();
 		return promptId ? openPanels.get(promptId) : undefined;
+	}
+
+	private getPromptEditorViewFallbackKey(panelKey: string): string {
+		return `panel:${panelKey}`;
+	}
+
+	private getPromptEditorViewStateSource(
+		panelKey: string,
+		prompt?: Partial<Prompt> | null,
+		overrides?: { promptId?: string | null; promptUuid?: string | null },
+	): EditorPromptViewStateKeySource {
+		return {
+			promptUuid: overrides?.promptUuid ?? prompt?.promptUuid ?? null,
+			promptId: overrides?.promptId ?? prompt?.id ?? null,
+			fallbackKey: this.getPromptEditorViewFallbackKey(panelKey),
+		};
+	}
+
+	private getPromptEditorViewState(panelKey: string, prompt?: Partial<Prompt> | null): EditorPromptViewState {
+		return this.stateService.getPromptEditorViewState(this.getPromptEditorViewStateSource(panelKey, prompt));
 	}
 
 	private postPromptPlanSnapshot(panelKey: string, promptId: string | undefined, exists: boolean, content: string): void {
@@ -3984,7 +4004,12 @@ export class EditorPanelManager {
 				});
 				postMessage(availableLanguageAndFrameworkMessages.languagesMessage);
 				postMessage(availableLanguageAndFrameworkMessages.frameworksMessage);
-				postMessage({ type: 'prompt', prompt: currentPrompt, reason: 'open' });
+				postMessage({
+					type: 'prompt',
+					prompt: currentPrompt,
+					reason: 'open',
+					editorViewState: this.getPromptEditorViewState(panelKey, currentPrompt),
+				});
 				this.flushPendingPanelMessages(panelKey, panel, currentPrompt);
 				this.scheduleAvailableModelsRefreshAfterReady(panelKey, panel, currentPrompt, readyBootId, models);
 				break;
@@ -4094,6 +4119,15 @@ export class EditorPanelManager {
 					});
 					// savePrompt теперь возвращает полный Prompt — повторный getPrompt не нужен
 					const promptForPanel = saved;
+					await this.stateService.migratePromptEditorViewState(
+						[
+							this.getPromptEditorViewStateSource(panelKey, currentPrompt),
+							previousPromptId
+								? this.getPromptEditorViewStateSource(panelKey, null, { promptId: previousPromptId })
+								: null,
+						],
+						this.getPromptEditorViewStateSource(panelKey, promptForPanel),
+					);
 
 					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();
 					const shouldApplyToCurrentPanel = !normalizedCurrentPromptId
@@ -4216,6 +4250,17 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'savePromptEditorViewState': {
+				await this.stateService.savePromptEditorViewState(
+					this.getPromptEditorViewStateSource(panelKey, currentPrompt, {
+						promptId: msg.promptId ?? currentPrompt.id,
+						promptUuid: msg.promptUuid ?? currentPrompt.promptUuid,
+					}),
+					msg.state,
+				);
+				break;
+			}
+
 			case 'requestPromptPlanState': {
 				const requestedPromptId = (msg.promptId || '').trim();
 				const currentPromptId = (currentPrompt.id || '').trim();
@@ -4313,7 +4358,12 @@ export class EditorPanelManager {
 				this.panelLatestPromptSnapshots.set(panelKey, null);
 				this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(restored)));
 				this.updatePromptPanelTitle(panel, restored);
-				postMessage({ type: 'prompt', prompt: restored, reason: 'open' });
+				postMessage({
+					type: 'prompt',
+					prompt: restored,
+					reason: 'open',
+					editorViewState: this.getPromptEditorViewState(panelKey, restored),
+				});
 				await this.broadcastAvailableLanguagesAndFrameworks();
 				this._onDidSave.fire(restored.id);
 				break;

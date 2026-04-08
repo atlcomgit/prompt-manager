@@ -32,6 +32,119 @@ export function getNextPromptStatus(status: PromptStatus): PromptStatus | null {
 	return PROMPT_STATUS_ORDER[index + 1] || null;
 }
 
+/** Editor tab in prompt settings page */
+export type EditorPromptTab = 'main' | 'process';
+
+/** Persisted per-prompt editor view state */
+export interface EditorPromptViewState {
+	activeTab: EditorPromptTab;
+}
+
+/** Key source used for resolving persisted editor view state */
+export interface EditorPromptViewStateKeySource {
+	promptUuid?: string | null;
+	promptId?: string | null;
+	fallbackKey?: string | null;
+}
+
+/** Create default per-prompt editor view state */
+export function createDefaultEditorPromptViewState(): EditorPromptViewState {
+	return {
+		activeTab: 'main',
+	};
+}
+
+/** Normalize potentially partial persisted editor view state */
+export function normalizeEditorPromptViewState(
+	state?: Partial<EditorPromptViewState> | null,
+): EditorPromptViewState {
+	const defaults = createDefaultEditorPromptViewState();
+	if (!state) {
+		return defaults;
+	}
+
+	return {
+		activeTab: state.activeTab === 'process' ? 'process' : defaults.activeTab,
+	};
+}
+
+/** Resolve all candidate storage keys for per-prompt editor view state */
+export function getEditorPromptViewStateStorageKeys(source?: EditorPromptViewStateKeySource | null): string[] {
+	const keys: string[] = [];
+	const promptUuid = typeof source?.promptUuid === 'string' ? source.promptUuid.trim() : '';
+	if (promptUuid) {
+		keys.push(`promptUuid:${promptUuid}`);
+	}
+
+	const promptId = typeof source?.promptId === 'string' ? source.promptId.trim() : '';
+	if (promptId) {
+		keys.push(`promptId:${promptId}`);
+	}
+
+	const fallbackKey = typeof source?.fallbackKey === 'string' ? source.fallbackKey.trim() : '';
+	if (fallbackKey) {
+		keys.push(fallbackKey);
+	}
+
+	return Array.from(new Set(keys));
+}
+
+/** Resolve the primary storage key for per-prompt editor view state */
+export function resolveEditorPromptViewStateStorageKey(source?: EditorPromptViewStateKeySource | null): string | null {
+	return getEditorPromptViewStateStorageKeys(source)[0] || null;
+}
+
+/** Move persisted editor view state from transient keys to a stable prompt key */
+export function moveEditorPromptViewStateEntries(
+	states: Record<string, EditorPromptViewState> | null | undefined,
+	fromSources: Array<EditorPromptViewStateKeySource | null | undefined>,
+	toSource?: EditorPromptViewStateKeySource | null,
+): Record<string, EditorPromptViewState> {
+	const next: Record<string, EditorPromptViewState> = {};
+	for (const [key, value] of Object.entries(states || {})) {
+		const normalizedKey = key.trim();
+		if (!normalizedKey) {
+			continue;
+		}
+		next[normalizedKey] = normalizeEditorPromptViewState(value);
+	}
+
+	const targetKeys = getEditorPromptViewStateStorageKeys(toSource);
+	const primaryTargetKey = targetKeys[0] || null;
+	if (!primaryTargetKey) {
+		return next;
+	}
+
+	const sourceKeys = Array.from(new Set(
+		fromSources.flatMap(source => getEditorPromptViewStateStorageKeys(source)),
+	));
+
+	let stateToCarry = next[primaryTargetKey];
+	for (const sourceKey of sourceKeys) {
+		if (!stateToCarry && next[sourceKey]) {
+			stateToCarry = next[sourceKey];
+		}
+	}
+
+	if (!stateToCarry) {
+		return next;
+	}
+
+	next[primaryTargetKey] = normalizeEditorPromptViewState(stateToCarry);
+	for (const sourceKey of sourceKeys) {
+		if (sourceKey !== primaryTargetKey) {
+			delete next[sourceKey];
+		}
+	}
+	for (const targetKey of targetKeys.slice(1)) {
+		if (targetKey !== primaryTargetKey) {
+			delete next[targetKey];
+		}
+	}
+
+	return next;
+}
+
 /** Prompt configuration stored as JSON */
 export interface PromptConfig {
 	/** Unique identifier (folder name / slug) */

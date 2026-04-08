@@ -16,9 +16,13 @@ import { TimerDisplay } from './components/TimerDisplay';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
-import type { Prompt, PromptStatus } from '../../types/prompt';
+import type { EditorPromptTab, Prompt, PromptStatus } from '../../types/prompt';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
-import { createDefaultPrompt } from '../../types/prompt';
+import {
+  createDefaultEditorPromptViewState,
+  createDefaultPrompt,
+  normalizeEditorPromptViewState,
+} from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
 import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
 import { usePromptVoiceController } from './voice/usePromptVoiceController';
@@ -41,6 +45,7 @@ type GitOverlayMode = 'default' | 'start-chat-preflight' | 'open-chat-preflight'
 const CHAT_START_TIMEOUT_MS = 15000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
 const EDITOR_FORM_CONTENT_WIDTH_PX = 800;
+const EDITOR_PROMPT_TABS: EditorPromptTab[] = ['main', 'process'];
 
 const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
   basic: true,
@@ -244,6 +249,7 @@ export const EditorApp: React.FC = () => {
   const [globalContext, setGlobalContext] = useState('');
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>(() => readStoredExpandedSections());
+  const [activeTab, setActiveTab] = useState<EditorPromptTab>(() => createDefaultEditorPromptViewState().activeTab);
   const [promptPlanState, setPromptPlanState] = useState<{ exists: boolean; content: string }>({ exists: false, content: '' });
   const [planHighlightedLineIndexes, setPlanHighlightedLineIndexes] = useState<number[]>([]);
   const [notice, setNotice] = useState<InlineNotice | null>(null);
@@ -520,6 +526,20 @@ export const EditorApp: React.FC = () => {
     });
   }, [gitOverlayOpen, prompt.branch, prompt.projects]);
 
+  const handleEditorTabChange = useCallback((tab: EditorPromptTab) => {
+    if (activeTab === tab) {
+      return;
+    }
+
+    setActiveTab(tab);
+    vscode.postMessage({
+      type: 'savePromptEditorViewState',
+      promptId: promptRef.current.id || undefined,
+      promptUuid: promptRef.current.promptUuid || undefined,
+      state: { activeTab: tab },
+    });
+  }, [activeTab]);
+
   const dispatchStartChat = useCallback((requestId: string, options?: { skipBranchMismatchCheck?: boolean }) => {
     const latestPrompt = promptRef.current;
     const originalStatus = latestPrompt.status;
@@ -527,6 +547,8 @@ export const EditorApp: React.FC = () => {
     if (!latestPrompt.content || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)) {
       return;
     }
+
+    handleEditorTabChange('process');
 
     pendingChatStartRequestIdRef.current = requestId;
     acceptedChatStartRequestIdRef.current = '';
@@ -554,7 +576,7 @@ export const EditorApp: React.FC = () => {
       skipBranchMismatchCheck: options?.skipBranchMismatchCheck === true,
       originalStatus,
     });
-  }, [buildPromptForSave, scheduleChatStartTimeout]);
+  }, [buildPromptForSave, handleEditorTabChange, scheduleChatStartTimeout]);
 
   const continueOpenChat = useCallback(() => {
     const latestPrompt = promptRef.current;
@@ -965,6 +987,7 @@ export const EditorApp: React.FC = () => {
           }
 
           if (isOpenPayload) {
+            const nextEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
             if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); showLoaderTimerRef.current = null; }
             setShowLoader(false);
             setIsGeneratingTitle(false);
@@ -978,7 +1001,9 @@ export const EditorApp: React.FC = () => {
             setGitOverlayCommitMessages({});
             clearGitOverlayBusyState();
             setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
+            promptRef.current = msg.prompt;
             setPrompt(msg.prompt);
+            setActiveTab(nextEditorViewState.activeTab);
             localReportDirtyRef.current = false;
             currentPromptIdRef.current = incomingPromptId;
             hasBeenSavedRef.current = Boolean(msg.prompt.id);
@@ -2303,6 +2328,9 @@ export const EditorApp: React.FC = () => {
     if (startChatLockRef.current || isStartingChat || !latestPrompt.content || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)) {
       return;
     }
+
+    handleEditorTabChange('process');
+
     const preflightRequestId = requestChatEntryPreflight('start');
     if (preflightRequestId) {
       return;
@@ -2554,12 +2582,36 @@ export const EditorApp: React.FC = () => {
           >
             {prompt.title || prompt.id || t('editor.newPrompt')}
           </h2>
-          <span
+          <div
             style={{
-              ...styles.dirtyIndicator,
-              ...((isLoaded && isDirty) ? styles.blockContentVisible : styles.blockContentHidden),
+              ...styles.headerRight,
+              ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden),
             }}
-          >● {t('editor.unsaved')}</span>
+          >
+            <span
+              style={{
+                ...styles.dirtyIndicator,
+                ...(isDirty ? styles.blockContentVisible : styles.blockContentHidden),
+              }}
+            >● {t('editor.unsaved')}</span>
+            <div style={styles.headerTabs} role="tablist" aria-label={t('editor.viewTabs')}>
+              {EDITOR_PROMPT_TABS.map(tab => (
+                <button
+                  key={tab}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === tab}
+                  style={{
+                    ...styles.headerTabBtn,
+                    ...(activeTab === tab ? styles.headerTabBtnActive : null),
+                  }}
+                  onClick={() => handleEditorTabChange(tab)}
+                >
+                  {tab === 'main' ? t('editor.tabMain') : t('editor.tabProcess')}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <ProgressLine
@@ -2571,6 +2623,8 @@ export const EditorApp: React.FC = () => {
         {/* Main content */}
         <div style={styles.body}>
           <div style={styles.formGrid}>
+          {activeTab === 'main' ? (
+            <>
           {renderSection('basic', 'Основное', basicSummary, (
             <>
               <div style={styles.fieldRow}>
@@ -3125,6 +3179,10 @@ export const EditorApp: React.FC = () => {
             </>
           ))}
 
+            </>
+          ) : (
+            <>
+
           {renderSection('report', 'Отчет', reportSummary, (
             <>
               <div style={styles.field}>
@@ -3221,6 +3279,8 @@ export const EditorApp: React.FC = () => {
               </div>
             </>
           )) : null}
+            </>
+          )}
           </div>
         </div>
 
@@ -3383,12 +3443,45 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '16px',
     fontWeight: 600,
     flex: 1,
+    minWidth: 0,
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
   },
+  headerRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    marginLeft: 'auto',
+    flexShrink: 0,
+  },
+  headerTabs: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '2px',
+    padding: '2px',
+    borderRadius: '8px',
+    border: '1px solid var(--vscode-panel-border)',
+    background: 'var(--vscode-sideBar-background)',
+  },
+  headerTabBtn: {
+    border: 'none',
+    borderRadius: '6px',
+    background: 'transparent',
+    color: 'var(--vscode-descriptionForeground)',
+    cursor: 'pointer',
+    padding: '6px 12px',
+    fontSize: '12px',
+    fontWeight: 600,
+    fontFamily: 'var(--vscode-font-family)',
+    whiteSpace: 'nowrap',
+  },
+  headerTabBtnActive: {
+    background: 'var(--vscode-button-secondaryBackground)',
+    color: 'var(--vscode-button-secondaryForeground)',
+  },
   dirtyIndicator: {
-    color: 'var(--vscode-editorWarning-foreground)',
+    color: 'var(--vscode-textLink-foreground)',
     fontSize: '12px',
     whiteSpace: 'nowrap',
   },

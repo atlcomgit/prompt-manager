@@ -2,13 +2,18 @@
  * Message types for communication between extension and webviews
  */
 
-import type { EditorPromptViewState, Prompt, PromptConfig, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
+import type { EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 
 export type GitOverlayBusyReason =
 	| { kind: 'label'; label: string }
 	| { kind: 'file'; filePath: string }
 	| { kind: 'git' };
+
+export interface ClipboardImagePayload {
+	mimeType: string;
+	dataBase64: string;
+}
 
 // ---- Messages FROM webview TO extension ----
 
@@ -73,7 +78,10 @@ export type WebviewToExtensionMessage =
 	| { type: 'updateTimeSpent'; id: string; field: 'timeSpentWriting' | 'timeSpentImplementing'; delta: number }
 	| { type: 'pickFile' }
 	| { type: 'pickHttpExamplesFile' }
+	| { type: 'pasteClipboardImages'; promptId?: string; images: ClipboardImagePayload[] }
+	| { type: 'pasteFilesFromClipboard' }
 	| { type: 'pasteFiles'; files: string[] }
+	| { type: 'requestContextFileCards'; files: string[]; requestId?: string }
 	| { type: 'openFile'; file: string }
 	| { type: 'requestSuggestion'; textBefore: string; globalContext?: string }
 	| { type: 'getStatistics'; dateFrom?: string; dateTo?: string; minFiveMin?: boolean }
@@ -138,6 +146,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'info'; message: string }
 	| { type: 'clearNotice' }
 	| { type: 'pickedFiles'; files: string[] }
+	| { type: 'contextFileCards'; files: PromptContextFileCard[]; requestId?: string }
 	| { type: 'pickedHttpExamplesFile'; file: string }
 	| { type: 'inlineSuggestion'; suggestion: string }
 	| { type: 'inlineSuggestions'; suggestions: string[] }

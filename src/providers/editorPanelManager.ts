@@ -11,9 +11,9 @@ import * as path from 'path';
 import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { generateSmartTitle } from '../utils/smartTitle.js';
-import type { EditorPromptViewState, EditorPromptViewStateKeySource, Prompt } from '../types/prompt.js';
+import type { EditorPromptViewState, EditorPromptViewStateKeySource, Prompt, PromptContextFileCard } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
-import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
+import type { ClipboardImagePayload, WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
 import type { GitOverlaySnapshot } from '../types/git.js';
 import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
@@ -32,6 +32,21 @@ import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { filterPromptHookIdsForPhase } from '../utils/promptHookPhase.js';
 import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 import { fetchRemoteText } from '../utils/remoteText.js';
+import {
+	dedupeContextFileReferences,
+	extractContextFilePathsFromClipboardText,
+	formatContextFileSize,
+	getContextFileDirectoryLabel,
+	getContextFileDisplayName,
+	getContextFileExtension,
+	getContextFileExtensionFromMimeType,
+	getContextFileKind,
+	getContextFileTileLabel,
+	getContextFileTypeLabel,
+	hasContextFileParentTraversal,
+	isContextFilePreviewSupported,
+	normalizeContextFileReference,
+} from '../utils/contextFiles.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
@@ -340,6 +355,212 @@ export class EditorPanelManager {
 
 	private canLoadRemoteGlobalContext(): boolean {
 		return this.getRemoteGlobalContextUrl().length > 0;
+	}
+
+	private getWorkspaceRootPath(): string {
+		return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+	}
+
+	private toStoredContextFileReference(filePath: string): string {
+		const workspaceRoot = this.getWorkspaceRootPath();
+		const normalizedFsPath = path.normalize(filePath);
+		if (workspaceRoot) {
+			const relativePath = path.relative(workspaceRoot, normalizedFsPath);
+			if (relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath)) {
+				return normalizeContextFileReference(relativePath);
+			}
+		}
+
+		return normalizeContextFileReference(normalizedFsPath);
+	}
+
+	private resolveContextFileUri(filePath: string): vscode.Uri | null {
+		const normalizedReference = normalizeContextFileReference(filePath);
+		if (!normalizedReference) {
+			return null;
+		}
+		if (hasContextFileParentTraversal(normalizedReference)) {
+			return null;
+		}
+
+		const expandedHomePath = normalizedReference.startsWith('~/')
+			? path.join(os.homedir(), normalizedReference.slice(2))
+			: normalizedReference.startsWith('~\\')
+				? path.join(os.homedir(), normalizedReference.slice(2))
+				: normalizedReference;
+
+		if (path.isAbsolute(expandedHomePath) || expandedHomePath.startsWith('//')) {
+			return vscode.Uri.file(expandedHomePath);
+		}
+
+		const workspaceRoot = this.getWorkspaceRootPath();
+		if (!workspaceRoot) {
+			return null;
+		}
+
+		return vscode.Uri.file(path.join(workspaceRoot, expandedHomePath));
+	}
+
+	private getEditorWebviewLocalResourceRoots(contextFiles: string[] = []): vscode.Uri[] {
+		const roots = new Map<string, vscode.Uri>();
+		const addRoot = (uri?: vscode.Uri | null): void => {
+			if (!uri) {
+				return;
+			}
+
+			roots.set(uri.toString(), uri);
+		};
+
+		addRoot(this.extensionUri);
+		for (const workspaceFolder of vscode.workspace.workspaceFolders || []) {
+			addRoot(workspaceFolder.uri);
+		}
+
+		for (const contextFile of dedupeContextFileReferences(contextFiles)) {
+			const fileUri = this.resolveContextFileUri(contextFile);
+			if (!fileUri) {
+				continue;
+			}
+
+			addRoot(vscode.Uri.file(path.dirname(fileUri.fsPath)));
+		}
+
+		return Array.from(roots.values());
+	}
+
+	private getEditorWebviewOptions(contextFiles: string[] = []): vscode.WebviewOptions {
+		return {
+			enableScripts: true,
+			localResourceRoots: this.getEditorWebviewLocalResourceRoots(contextFiles),
+		};
+	}
+
+	private updateEditorWebviewOptions(panel: vscode.WebviewPanel, contextFiles: string[] = []): void {
+		panel.webview.options = this.getEditorWebviewOptions(contextFiles);
+	}
+
+	private async collectExistingContextFiles(files: string[]): Promise<{ accepted: string[]; skipped: string[] }> {
+		const accepted: string[] = [];
+		const skipped: string[] = [];
+
+		for (const filePath of dedupeContextFileReferences(files)) {
+			const normalizedPath = normalizeContextFileReference(filePath);
+			const fileUri = this.resolveContextFileUri(normalizedPath);
+			if (!fileUri) {
+				skipped.push(normalizedPath);
+				continue;
+			}
+
+			try {
+				const stat = await vscode.workspace.fs.stat(fileUri);
+				if ((stat.type & vscode.FileType.Directory) !== 0) {
+					skipped.push(normalizedPath);
+					continue;
+				}
+
+				accepted.push(this.toStoredContextFileReference(fileUri.fsPath));
+			} catch {
+				skipped.push(normalizedPath);
+			}
+		}
+
+		return { accepted, skipped };
+	}
+
+	private async buildContextFileCards(files: string[], webview: vscode.Webview): Promise<PromptContextFileCard[]> {
+		const cards: PromptContextFileCard[] = [];
+
+		for (const filePath of dedupeContextFileReferences(files)) {
+			const normalizedPath = normalizeContextFileReference(filePath);
+			const fileUri = this.resolveContextFileUri(normalizedPath);
+			const kind = getContextFileKind(normalizedPath);
+			const extension = getContextFileExtension(normalizedPath);
+			let exists = false;
+			let sizeBytes: number | undefined;
+			let modifiedAt: string | undefined;
+			let previewUri: string | undefined;
+
+			if (fileUri) {
+				try {
+					const stat = await vscode.workspace.fs.stat(fileUri);
+					exists = (stat.type & vscode.FileType.Directory) === 0;
+					sizeBytes = stat.size;
+					modifiedAt = stat.mtime > 0 ? new Date(stat.mtime).toISOString() : undefined;
+					if (exists && isContextFilePreviewSupported(kind)) {
+						previewUri = webview.asWebviewUri(fileUri).toString();
+					}
+				} catch {
+					exists = false;
+				}
+			}
+
+			cards.push({
+				path: normalizedPath,
+				displayName: getContextFileDisplayName(normalizedPath),
+				directoryLabel: getContextFileDirectoryLabel(normalizedPath),
+				extension,
+				tileLabel: getContextFileTileLabel(normalizedPath, kind),
+				kind,
+				typeLabel: getContextFileTypeLabel(kind, extension),
+				exists,
+				sizeBytes,
+				sizeLabel: exists ? formatContextFileSize(sizeBytes) : '—',
+				modifiedAt,
+				previewUri,
+			});
+		}
+
+		return cards;
+	}
+
+	private getClipboardImageDirectory(promptId?: string): string {
+		const normalizedPromptId = (promptId || '').trim();
+		if (normalizedPromptId && normalizedPromptId !== '__new__') {
+			return path.join(this.storageService.getPromptDirectoryPath(normalizedPromptId), 'context');
+		}
+
+		return path.join(this.storageService.getStorageDirectoryPath(), 'clipboard-context');
+	}
+
+	private async persistClipboardImages(promptId: string | undefined, images: ClipboardImagePayload[]): Promise<string[]> {
+		const workspaceRoot = this.getWorkspaceRootPath();
+		if (!workspaceRoot) {
+			return [];
+		}
+
+		await this.storageService.ensureStorageDir();
+		const targetDirectory = this.getClipboardImageDirectory(promptId);
+		await vscode.workspace.fs.createDirectory(vscode.Uri.file(targetDirectory));
+
+		const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+		const savedFiles: string[] = [];
+
+		for (const [index, image] of (images || []).entries()) {
+			const dataBase64 = String(image?.dataBase64 || '').trim();
+			if (!dataBase64) {
+				continue;
+			}
+
+			let bytes: Uint8Array;
+			try {
+				bytes = Buffer.from(dataBase64, 'base64');
+			} catch {
+				continue;
+			}
+
+			if (bytes.byteLength === 0) {
+				continue;
+			}
+
+			const extension = getContextFileExtensionFromMimeType(image.mimeType);
+			const suffix = Math.random().toString(36).slice(2, 8);
+			const fileName = `clipboard-image-${timestamp}-${index + 1}-${suffix}.${extension}`;
+			const filePath = path.join(targetDirectory, fileName);
+			await vscode.workspace.fs.writeFile(vscode.Uri.file(filePath), bytes);
+			savedFiles.push(this.toStoredContextFileReference(filePath));
+		}
+
+		return dedupeContextFileReferences(savedFiles);
 	}
 
 	private buildGlobalContextMessage(): ExtensionToWebviewMessage {
@@ -3633,6 +3854,7 @@ export class EditorPanelManager {
 			} catch {
 				// panel may already be reloading; continue with fresh html
 			}
+			this.updateEditorWebviewOptions(reusableSingletonPanel, prompt.contextFiles);
 			this.panelDirtySetters.set(panelKey, setPanelDirty);
 			const bootId = this.createPanelBootId();
 			this.panelBootIds.set(panelKey, bootId);
@@ -3660,9 +3882,8 @@ export class EditorPanelManager {
 			`⚡ ${title}`,
 			vscode.ViewColumn.One,
 			{
-				enableScripts: true,
 				retainContextWhenHidden: true,
-				localResourceRoots: [this.extensionUri],
+				...this.getEditorWebviewOptions(prompt.contextFiles),
 			}
 		);
 
@@ -6014,11 +6235,7 @@ export class EditorPanelManager {
 					openLabel: 'Добавить файл контекста',
 				});
 				if (uris && uris.length > 0) {
-					const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-					const files = uris.map(u => {
-						const fp = u.fsPath;
-						return fp.startsWith(workspaceRoot) ? fp.slice(workspaceRoot.length + 1) : fp;
-					});
+					const files = dedupeContextFileReferences(uris.map(uri => this.toStoredContextFileReference(uri.fsPath)));
 					postMessage({ type: 'pickedFiles', files });
 				}
 				break;
@@ -6037,30 +6254,63 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'pasteClipboardImages': {
+				const savedFiles = await this.persistClipboardImages(msg.promptId, msg.images || []);
+				if (savedFiles.length > 0) {
+					postMessage({ type: 'pickedFiles', files: savedFiles });
+					postMessage({ type: 'info', message: `Из буфера добавлено изображений: ${savedFiles.length}.` });
+				} else {
+					postMessage({ type: 'error', message: 'Не удалось сохранить изображение из буфера обмена.' });
+				}
+				break;
+			}
+
 			case 'pasteFiles': {
-				// Validate and normalize pasted paths
-				const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-				const validFiles: string[] = [];
-				for (const f of msg.files) {
-					let filePath = f.trim();
-					if (!filePath) continue;
-					// If absolute, convert to relative
-					if (filePath.startsWith(workspaceRoot)) {
-						filePath = filePath.slice(workspaceRoot.length + 1);
-					}
-					// Check if file exists
-					try {
-						const fullPath = filePath.startsWith('/') ? filePath : `${workspaceRoot}/${filePath}`;
-						await vscode.workspace.fs.stat(vscode.Uri.file(fullPath));
-						validFiles.push(filePath);
-					} catch {
-						// Skip non-existent files, just add the path
-						validFiles.push(filePath);
-					}
+				const { accepted, skipped } = await this.collectExistingContextFiles(msg.files || []);
+				if (accepted.length > 0) {
+					postMessage({ type: 'pickedFiles', files: accepted });
 				}
-				if (validFiles.length > 0) {
-					postMessage({ type: 'pickedFiles', files: validFiles });
+				if (accepted.length === 0) {
+					postMessage({ type: 'info', message: 'Не удалось распознать существующие файлы в переданном списке.' });
+				} else if (skipped.length > 0) {
+					postMessage({ type: 'info', message: `Добавлено файлов: ${accepted.length}. Пропущено: ${skipped.length}.` });
 				}
+				break;
+			}
+
+			case 'pasteFilesFromClipboard': {
+				try {
+					const clipboardText = await vscode.env.clipboard.readText();
+					if (!clipboardText.trim()) {
+						postMessage({ type: 'info', message: 'Буфер обмена пуст или не содержит путей к файлам.' });
+						break;
+					}
+
+					const clipboardFiles = extractContextFilePathsFromClipboardText(clipboardText);
+					if (clipboardFiles.length === 0) {
+						postMessage({ type: 'info', message: 'В буфере обмена не найдены пути к файлам.' });
+						break;
+					}
+
+					const { accepted, skipped } = await this.collectExistingContextFiles(clipboardFiles);
+					if (accepted.length > 0) {
+						postMessage({ type: 'pickedFiles', files: accepted });
+					}
+					if (accepted.length === 0) {
+						postMessage({ type: 'error', message: 'Не удалось добавить файлы из буфера обмена. Проверьте, что пути существуют и доступны.' });
+					} else if (skipped.length > 0) {
+						postMessage({ type: 'info', message: `Из буфера добавлено файлов: ${accepted.length}. Пропущено: ${skipped.length}.` });
+					}
+				} catch {
+					postMessage({ type: 'error', message: 'Не удалось прочитать буфер обмена из VS Code.' });
+				}
+				break;
+			}
+
+			case 'requestContextFileCards': {
+				this.updateEditorWebviewOptions(panel, msg.files || []);
+				const files = await this.buildContextFileCards(msg.files || [], panel.webview);
+				postMessage({ type: 'contextFileCards', files, requestId: msg.requestId });
 				break;
 			}
 
@@ -6070,11 +6320,13 @@ export class EditorPanelManager {
 					vscode.window.showWarningMessage('Не указан файл для открытия.');
 					break;
 				}
-				const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-				const fullPath = file.startsWith('/') ? file : `${workspaceRoot}/${file}`;
+				const fileUri = this.resolveContextFileUri(file);
+				if (!fileUri) {
+					vscode.window.showErrorMessage(`Не удалось определить путь к файлу: ${file}`);
+					break;
+				}
 				try {
-					const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fullPath));
-					await vscode.window.showTextDocument(doc, {
+					await vscode.commands.executeCommand('vscode.open', fileUri, {
 						viewColumn: vscode.ViewColumn.Beside,
 						preview: false,
 						preserveFocus: false,

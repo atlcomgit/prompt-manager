@@ -35,7 +35,7 @@ export function getWebviewHtml(
     img-src ${webview.cspSource} https: data:;
     connect-src ${webview.cspSource} https: data: blob:;
     worker-src blob: https:;
-    media-src blob: data:;
+    media-src ${webview.cspSource} blob: data:;
   ">
   <title>${title}</title>
   <style>

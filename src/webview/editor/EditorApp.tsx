@@ -13,10 +13,12 @@ import { MultiSelect } from './components/MultiSelect';
 import { StatusSelect } from './components/StatusSelect';
 import { ActionBar } from './components/ActionBar';
 import { TimerDisplay } from './components/TimerDisplay';
+import { ContextFileCard } from './components/ContextFileCard';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
-import type { EditorPromptTab, Prompt, PromptStatus } from '../../types/prompt';
+import type { ClipboardImagePayload } from '../../types/messages';
+import type { EditorPromptTab, Prompt, PromptContextFileCard, PromptStatus } from '../../types/prompt';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
 import {
   createDefaultEditorPromptViewState,
@@ -27,6 +29,11 @@ import { TimeTrackingService } from '../../services/timeTrackingService';
 import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
 import { usePromptVoiceController } from './voice/usePromptVoiceController';
 import { getChangedLineIndexes } from '../../utils/planLineDiff.js';
+import {
+  buildContextFileCardPlaceholder,
+  dedupeContextFileReferences,
+  normalizeContextFileReference,
+} from '../../utils/contextFiles.js';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -112,6 +119,61 @@ const extractGitOverlayFileName = (filePath: string): string => {
   const segments = normalizedPath.split('/').filter(Boolean);
   return segments[segments.length - 1] || normalizedPath;
 };
+
+const areFileListsEqual = (left: string[], right: string[]): boolean => {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((filePath, index) => filePath === right[index]);
+};
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error('Failed to read clipboard blob.'));
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      const commaIndex = result.indexOf(',');
+      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function readClipboardImagePayloads(): Promise<ClipboardImagePayload[]> {
+  if (typeof navigator === 'undefined' || !navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
+    return [];
+  }
+
+  try {
+    const items = await navigator.clipboard.read();
+    const images: ClipboardImagePayload[] = [];
+
+    for (const item of items) {
+      for (const type of item.types) {
+        if (!type.startsWith('image/')) {
+          continue;
+        }
+
+        const blob = await item.getType(type);
+        const dataBase64 = await blobToBase64(blob);
+        if (!dataBase64) {
+          continue;
+        }
+
+        images.push({
+          mimeType: type,
+          dataBase64,
+        });
+      }
+    }
+
+    return images;
+  } catch {
+    return [];
+  }
+}
 
 const VoiceMicIcon: React.FC = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" style={styles.inlineIcon}>
@@ -253,11 +315,13 @@ export const EditorApp: React.FC = () => {
   const [promptPlanState, setPromptPlanState] = useState<{ exists: boolean; content: string }>({ exists: false, content: '' });
   const [planHighlightedLineIndexes, setPlanHighlightedLineIndexes] = useState<number[]>([]);
   const [notice, setNotice] = useState<InlineNotice | null>(null);
+  const [contextFileCards, setContextFileCards] = useState<PromptContextFileCard[]>([]);
   const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
+  const contextFileCardRequestIdRef = useRef('');
   const shouldShowFooterGitFlow = prompt.status === 'draft'
     || prompt.status === 'in-progress'
     || prompt.status === 'completed'
@@ -813,7 +877,7 @@ export const EditorApp: React.FC = () => {
 
   const filesSummary = useMemo(() => {
     const chunks: string[] = [];
-    const files = prompt.contextFiles
+    const files = dedupeContextFileReferences(prompt.contextFiles)
       .map(filePath => {
         const segments = filePath.split(/[\\/]/).filter(Boolean);
         return segments.length > 0 ? segments[segments.length - 1] : filePath;
@@ -822,6 +886,24 @@ export const EditorApp: React.FC = () => {
     if (files) chunks.push(`Файлы: ${toShortText(files, 56)}`);
     return chunks;
   }, [prompt.contextFiles]);
+
+  const normalizedContextFiles = useMemo(
+    () => dedupeContextFileReferences(prompt.contextFiles),
+    [prompt.contextFiles],
+  );
+
+  const contextFileCardMap = useMemo(() => {
+    const nextMap = new Map<string, PromptContextFileCard>();
+    for (const fileCard of contextFileCards) {
+      nextMap.set(normalizeContextFileReference(fileCard.path), fileCard);
+    }
+    return nextMap;
+  }, [contextFileCards]);
+
+  const visibleContextFileCards = useMemo(
+    () => normalizedContextFiles.map(filePath => contextFileCardMap.get(filePath) || buildContextFileCardPlaceholder(filePath)),
+    [contextFileCardMap, normalizedContextFiles],
+  );
 
   const timeSummary = useMemo(() => {
     const totalMs = (prompt.timeSpentWriting || 0) + (prompt.timeSpentImplementing || 0) + (prompt.timeSpentOnTask || 0) + (prompt.timeSpentUntracked || 0);
@@ -880,6 +962,20 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'requestPromptPlanState', promptId });
   }, []);
 
+  const handlePasteContextFilesFromClipboard = useCallback(async () => {
+    const clipboardImages = await readClipboardImagePayloads();
+    if (clipboardImages.length > 0) {
+      vscode.postMessage({
+        type: 'pasteClipboardImages',
+        promptId: (promptRef.current.id || '').trim() || undefined,
+        images: clipboardImages,
+      });
+      return;
+    }
+
+    vscode.postMessage({ type: 'pasteFilesFromClipboard' });
+  }, []);
+
   const handleOpenPromptPlanInEditor = useCallback(() => {
     vscode.postMessage({ type: 'openPromptPlanInEditor', promptId: prompt.id });
   }, [prompt.id]);
@@ -909,6 +1005,18 @@ export const EditorApp: React.FC = () => {
   useEffect(() => {
     currentPromptIdRef.current = (prompt.id || '__new__').trim() || '__new__';
   }, [prompt.id]);
+
+  useEffect(() => {
+    if (normalizedContextFiles.length === 0) {
+      contextFileCardRequestIdRef.current = '';
+      setContextFileCards([]);
+      return;
+    }
+
+    const requestId = `context-files-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    contextFileCardRequestIdRef.current = requestId;
+    vscode.postMessage({ type: 'requestContextFileCards', files: normalizedContextFiles, requestId });
+  }, [normalizedContextFiles]);
 
   // Keep refs in sync with state
   useEffect(() => { promptRef.current = prompt; }, [prompt]);
@@ -1572,11 +1680,29 @@ export const EditorApp: React.FC = () => {
           [msg.action]: true,
         }));
         break;
+      case 'contextFileCards': {
+        const requestId = (msg.requestId || '').trim();
+        if (requestId && requestId !== contextFileCardRequestIdRef.current) {
+          break;
+        }
+
+        setContextFileCards(Array.isArray(msg.files) ? msg.files : []);
+        break;
+      }
       case 'pickedFiles':
         if (msg.files && msg.files.length > 0) {
+          const nextContextFiles = dedupeContextFileReferences([
+            ...promptRef.current.contextFiles,
+            ...msg.files,
+          ]);
+          const currentContextFiles = dedupeContextFileReferences(promptRef.current.contextFiles);
+          if (areFileListsEqual(currentContextFiles, nextContextFiles)) {
+            break;
+          }
+
           setPrompt(prev => ({
             ...prev,
-            contextFiles: [...prev.contextFiles, ...msg.files],
+            contextFiles: nextContextFiles,
           }));
           userChangeCounterRef.current++;
           setIsDirty(true);
@@ -2412,7 +2538,14 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'savePrompt', prompt: promptToSave, source: 'status-change' });
   };
 
+  const handleFooterMarkCompleted = () => {
+    handleEditorTabChange('main');
+    handleSetStatus('completed');
+  };
+
   const handleStopChatAndSetStatus = () => {
+    handleEditorTabChange('main');
+
     const promptId = (prompt.id || '').trim();
     if (promptId) {
       vscode.postMessage({ type: 'stopChat', id: promptId });
@@ -3117,61 +3250,51 @@ export const EditorApp: React.FC = () => {
               <div style={styles.field}>
                 <label style={styles.label}>{t('editor.contextFiles')}</label>
                 <div style={styles.fileList}>
-                  {prompt.contextFiles.map((f, i) => (
-                    <div key={i} style={styles.fileItem}>
-                      <span
-                        style={styles.fileLink}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          vscode.postMessage({ type: 'openFile', file: f });
+                  {visibleContextFileCards.length === 0 ? (
+                    <div style={styles.fileEmptyState}>{t('editor.contextFilesEmpty')}</div>
+                  ) : null}
+                  <div style={styles.fileGrid}>
+                    {visibleContextFileCards.map((fileCard) => (
+                      <ContextFileCard
+                        key={fileCard.path}
+                        file={fileCard}
+                        onOpen={() => {
+                          vscode.postMessage({ type: 'openFile', file: fileCard.path });
                         }}
-                        title={`${t('editor.openInEditor')} ${f}`}
-                      >📄 {f}</span>
-                      <button
-                        style={styles.removeBtn}
-                        onClick={() => {
-                          const updated = prompt.contextFiles.filter((_, idx) => idx !== i);
+                        onRemove={() => {
+                          const normalizedPath = normalizeContextFileReference(fileCard.path);
+                          const updated = dedupeContextFileReferences(prompt.contextFiles).filter(
+                            existingPath => normalizeContextFileReference(existingPath) !== normalizedPath,
+                          );
                           updateFieldAndSaveNow('contextFiles', updated);
                         }}
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                  <div style={styles.fileActions}>
+                      />
+                    ))}
                     <button
-                      style={styles.addFileBtn}
+                      type="button"
+                      style={styles.fileActionCard}
                       onClick={() => {
                         vscode.postMessage({ type: 'pickFile' });
                       }}
+                      title={t('editor.addFileHint')}
                     >
-                      {t('editor.addFile')}
+                      <span style={styles.fileActionGlyph}>＋</span>
+                      <span style={styles.fileActionText}>
+                        <span style={styles.fileActionTitle}>{t('editor.addFile')}</span>
+                        <span style={styles.fileActionHint}>{t('editor.addFileHint')}</span>
+                      </span>
                     </button>
                     <button
-                      style={styles.addFileBtn}
-                      onClick={async () => {
-                        try {
-                          const text = await navigator.clipboard.readText();
-                          if (text) {
-                            const files = text.split('\n')
-                              .map(f => f.trim())
-                              .filter(f => {
-                                if (!f || f.length === 0) return false;
-                                if (f.includes('/') || f.includes('\\')) return true;
-                                if (/\.[a-zA-Z0-9]{1,10}$/.test(f)) return true;
-                                return false;
-                              });
-                            if (files.length > 0) {
-                              vscode.postMessage({ type: 'pasteFiles', files });
-                            }
-                          }
-                        } catch {
-                          // Clipboard not available or permission denied
-                        }
-                      }}
+                      type="button"
+                      style={styles.fileActionCard}
+                      onClick={handlePasteContextFilesFromClipboard}
                       title={t('editor.clipboardTooltip')}
                     >
-                      {t('editor.fromClipboard')}
+                      <span style={styles.fileActionGlyph}>📋</span>
+                      <span style={styles.fileActionText}>
+                        <span style={styles.fileActionTitle}>{t('editor.fromClipboard')}</span>
+                        <span style={styles.fileActionHint}>{t('editor.fromClipboardHint')}</span>
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -3311,7 +3434,7 @@ export const EditorApp: React.FC = () => {
             onStartChat={handleStartChat}
             onOpenChat={handleOpenChat}
             onOpenGitFlow={handleOpenGitOverlay}
-            onMarkCompleted={() => handleSetStatus('completed')}
+            onMarkCompleted={handleFooterMarkCompleted}
             onMarkStopped={handleStopChatAndSetStatus}
             showStatusActions={prompt.status === 'in-progress'}
             showGitFlowAction={shouldShowFooterGitFlow}
@@ -3955,48 +4078,58 @@ const styles: Record<string, React.CSSProperties> = {
   fileList: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '4px',
+    gap: '10px',
   },
-  fileItem: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '4px 8px',
-    background: 'var(--vscode-input-background)',
-    borderRadius: '4px',
+  fileEmptyState: {
+    padding: '12px 14px',
+    borderRadius: '10px',
+    border: '1px dashed var(--vscode-input-border, var(--vscode-panel-border))',
+    background: 'color-mix(in srgb, var(--vscode-editor-background) 76%, var(--vscode-input-background))',
+    color: 'var(--vscode-descriptionForeground)',
     fontSize: '12px',
+    lineHeight: 1.5,
   },
-  fileLink: {
+  fileGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+    gap: '12px',
+    alignItems: 'stretch',
+  },
+  fileActionCard: {
+    minHeight: '196px',
+    padding: '14px',
+    borderRadius: '10px',
+    border: '1px dashed var(--vscode-input-border, var(--vscode-panel-border))',
+    background: 'color-mix(in srgb, var(--vscode-editor-background) 68%, var(--vscode-input-background))',
+    color: 'var(--vscode-foreground)',
     cursor: 'pointer',
-    color: 'var(--vscode-textLink-foreground)',
-    textDecoration: 'none',
-    flex: 1,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
-  removeBtn: {
-    background: 'none',
-    border: 'none',
-    color: 'var(--vscode-errorForeground)',
-    cursor: 'pointer',
-    padding: '2px 4px',
-    fontSize: '11px',
-    flexShrink: 0,
-  },
-  fileActions: {
     display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: '16px',
+    textAlign: 'left',
+    fontFamily: 'var(--vscode-font-family)',
+  },
+  fileActionGlyph: {
+    fontSize: '24px',
+    lineHeight: 1,
+    color: 'var(--vscode-textLink-foreground)',
+  },
+  fileActionText: {
+    display: 'flex',
+    flexDirection: 'column',
     gap: '6px',
   },
-  addFileBtn: {
-    padding: '4px 8px',
-    background: 'transparent',
-    border: '1px dashed var(--vscode-input-border, var(--vscode-panel-border))',
-    borderRadius: '4px',
-    color: 'var(--vscode-textLink-foreground)',
-    cursor: 'pointer',
-    fontSize: '12px',
-    fontFamily: 'var(--vscode-font-family)',
+  fileActionTitle: {
+    fontSize: '13px',
+    lineHeight: 1.4,
+    fontWeight: 600,
+  },
+  fileActionHint: {
+    fontSize: '11px',
+    lineHeight: 1.4,
+    color: 'var(--vscode-descriptionForeground)',
   },
   previewPane: {
     padding: '12px 16px',

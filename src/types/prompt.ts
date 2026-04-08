@@ -227,6 +227,34 @@ export interface Prompt extends PromptConfig {
 	report: string;
 }
 
+export type PromptContextFileKind =
+	| 'image'
+	| 'video'
+	| 'audio'
+	| 'pdf'
+	| 'archive'
+	| 'document'
+	| 'sheet'
+	| 'slides'
+	| 'code'
+	| 'text'
+	| 'other';
+
+export interface PromptContextFileCard {
+	path: string;
+	displayName: string;
+	directoryLabel: string;
+	extension: string;
+	tileLabel: string;
+	kind: PromptContextFileKind;
+	typeLabel: string;
+	exists: boolean;
+	sizeBytes?: number;
+	sizeLabel: string;
+	modifiedAt?: string;
+	previewUri?: string;
+}
+
 export type PromptHistoryReason =
 	| 'manual'
 	| 'autosave'

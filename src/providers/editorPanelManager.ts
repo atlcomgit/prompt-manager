@@ -51,6 +51,7 @@ interface GitOverlaySession {
 	refreshInFlight: boolean;
 	refreshQueued: boolean;
 	queuedMode: GitOverlayRefreshMode | null;
+	queuedBusyReason: ExtensionToWebviewMessage extends { type: 'gitOverlayBusy'; reason?: infer T } ? T : null;
 }
 
 export class EditorPanelManager {
@@ -1663,7 +1664,7 @@ export class EditorPanelManager {
 			|| path.basename(normalizedPath) === '.git';
 	}
 
-	private scheduleGitOverlayAutoRefreshForActiveSessions(reason: 'file' | 'git'): void {
+	private scheduleGitOverlayAutoRefreshForActiveSessions(reason: 'file' | 'git', changedPath?: string): void {
 		for (const [panelKey, session] of this.gitOverlaySessions.entries()) {
 			if (!session.active) {
 				continue;
@@ -1676,6 +1677,9 @@ export class EditorPanelManager {
 				if (!currentPrompt || !session.active) {
 					return;
 				}
+				const busyReason = reason === 'file' && changedPath
+					? { kind: 'file', filePath: changedPath } as const
+					: { kind: 'git' } as const;
 
 				void this.runGitOverlayRefresh(
 					panelKey,
@@ -1685,6 +1689,7 @@ export class EditorPanelManager {
 					session.projects,
 					'local',
 					true,
+					busyReason,
 				);
 			}, GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS + (reason === 'git' ? 50 : 0));
 		}
@@ -1753,7 +1758,7 @@ export class EditorPanelManager {
 					return;
 				}
 
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('file');
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('file', uri.fsPath);
 			};
 
 			this.gitOverlayReactiveDisposables.push(
@@ -1841,6 +1846,7 @@ export class EditorPanelManager {
 			refreshInFlight: false,
 			refreshQueued: false,
 			queuedMode: null,
+			queuedBusyReason: null,
 		};
 
 		session.active = open;
@@ -1853,6 +1859,7 @@ export class EditorPanelManager {
 			this.clearGitOverlaySessionRefreshTimer(session);
 			session.refreshQueued = false;
 			session.queuedMode = null;
+			session.queuedBusyReason = null;
 			if (!this.hasActiveGitOverlaySessions()) {
 				this.disposeGitOverlayReactiveSources();
 			}
@@ -1887,6 +1894,7 @@ export class EditorPanelManager {
 		projects: string[],
 		mode: GitOverlayRefreshMode,
 		announceBusy: boolean,
+		busyReason: Extract<ExtensionToWebviewMessage, { type: 'gitOverlayBusy' }>['reason'] = null,
 	): Promise<void> {
 		const normalizedPromptBranch = this.resolveGitOverlayPromptBranch(promptBranch, currentPrompt);
 		const normalizedProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
@@ -1899,13 +1907,14 @@ export class EditorPanelManager {
 			if (session.refreshInFlight) {
 				session.refreshQueued = true;
 				session.queuedMode = this.resolveGitOverlayQueuedMode(session.queuedMode, mode);
+				session.queuedBusyReason = busyReason || session.queuedBusyReason;
 				return;
 			}
 			session.refreshInFlight = true;
 		}
 
 		if (announceBusy) {
-			postMessage({ type: 'gitOverlayBusy', action: 'refresh:auto' });
+			postMessage({ type: 'gitOverlayBusy', action: 'refresh:auto', reason: busyReason });
 		}
 
 		try {
@@ -1952,8 +1961,10 @@ export class EditorPanelManager {
 
 			if (currentSession.refreshQueued) {
 				const queuedMode = currentSession.queuedMode || 'local';
+				const queuedBusyReason = currentSession.queuedBusyReason || null;
 				currentSession.refreshQueued = false;
 				currentSession.queuedMode = null;
+				currentSession.queuedBusyReason = null;
 				const queuedPrompt = this.panelPromptRefs.get(panelKey) || currentPrompt;
 				void this.runGitOverlayRefresh(
 					panelKey,
@@ -1963,6 +1974,7 @@ export class EditorPanelManager {
 					currentSession.projects,
 					queuedMode,
 					queuedMode === 'local',
+					queuedBusyReason,
 				);
 			}
 		}
@@ -5570,11 +5582,11 @@ export class EditorPanelManager {
 								: `Merge ветки "${promptBranch}" в выбранные tracked-ветки выполнен`,
 						),
 					});
-					if (result.errors.length === 0) {
-						postMessage({ type: 'gitOverlayActionCompleted', action: 'merge' });
-					}
 				}
 				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				if (result.errors.length === 0) {
+					postMessage({ type: 'gitOverlayActionCompleted', action: 'merge' });
+				}
 				break;
 			}
 
@@ -5611,10 +5623,10 @@ export class EditorPanelManager {
 					type: result.errors.length > 0 ? 'error' : 'info',
 					message: this.describeGitMultiProjectResult(result, `Push ветки ${msg.branch || 'текущей'} выполнен`),
 				});
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				if (result.errors.length === 0) {
 					postMessage({ type: 'gitOverlayActionCompleted', action: 'push' });
 				}
-				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				break;
 			}
 
@@ -5886,10 +5898,10 @@ export class EditorPanelManager {
 					type: result.errors.length > 0 ? 'error' : 'info',
 					message: this.describeGitMultiProjectResult(result, 'MR/PR обработан'),
 				});
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				if (result.errors.length === 0) {
 					postMessage({ type: 'gitOverlayActionCompleted', action: 'review-request' });
 				}
-				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				break;
 			}
 

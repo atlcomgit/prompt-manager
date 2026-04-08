@@ -12,7 +12,7 @@
  */
 
 import * as vscode from 'vscode';
-import type { CopilotAccountSwitchState, CopilotUsageData, CopilotUsageService } from '../services/copilotUsageService.js';
+import type { CopilotAccountSwitchState, CopilotUsageAccountSummary, CopilotUsageData, CopilotUsageService } from '../services/copilotUsageService.js';
 import type { CopilotUsagePanelManager } from './copilotUsagePanelManager.js';
 import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 
@@ -43,6 +43,7 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 	private disposables: vscode.Disposable[] = [];
 	private postChatRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private currentAccountSwitchState: CopilotAccountSwitchState;
+	private currentAccountSummary: CopilotUsageAccountSummary | null = null;
 	private pendingUsageWhileSwitching: CopilotUsageData | null = null;
 
 	constructor(
@@ -122,13 +123,14 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 		const cached = this.usageService.getCachedData();
 		if (cached) {
 			this.updateStatusBar(cached);
+			void this.refreshAccountSummary(true);
 		} else {
 			this.showLoadingState();
 		}
 
 		// Запрашиваем свежие данные в фоне
 		void this.usageService.fetchUsage().then((data) => {
-			this.updateStatusBar(data);
+			void this.updateStatusBarWithAccountSummary(data);
 		});
 
 		// Запускаем автообновление
@@ -161,7 +163,7 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 			return;
 		}
 
-		this.updateStatusBar(data);
+		void this.updateStatusBarWithAccountSummary(data);
 	}
 
 	private handleAccountSwitchStateChanged(state: CopilotAccountSwitchState): void {
@@ -174,8 +176,33 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 		const nextData = this.pendingUsageWhileSwitching ?? this.usageService.getCachedData();
 		this.pendingUsageWhileSwitching = null;
 		if (nextData) {
-			this.updateStatusBar(nextData);
+			void this.updateStatusBarWithAccountSummary(nextData);
 		}
+	}
+
+	private async refreshAccountSummary(rerenderStatusBar: boolean): Promise<void> {
+		try {
+			this.currentAccountSummary = await this.usageService.getAccountBindingSummary();
+		} catch (error) {
+			appendPromptManagerLog(
+				`[${new Date().toISOString()}] [status-bar] account summary refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+
+		if (!rerenderStatusBar) {
+			return;
+		}
+
+		const cached = this.usageService.getCachedData();
+		if (cached) {
+			this.updateStatusBar(cached);
+		}
+	}
+
+	private async updateStatusBarWithAccountSummary(data: CopilotUsageData): Promise<void> {
+		await this.refreshAccountSummary(false);
+		this.updateStatusBar(data);
 	}
 
 	private showAccountSwitchingState(state: CopilotAccountSwitchState): void {
@@ -339,11 +366,13 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 		const filled = Math.min(tooltipBarLength, Math.round((percent / 100) * tooltipBarLength));
 		const empty = tooltipBarLength - filled;
 		const tooltipBar = '█'.repeat(filled) + '░'.repeat(empty);
+		const copilotChatAccountLabel = this.currentAccountSummary?.copilotPreferredGitHubLabel || 'не определён';
 
 		md.appendMarkdown(`### $(copilot) Copilot Premium запросы — ${percentText}\n\n`);
 		md.appendMarkdown(`**${data.used}** / **${data.limit}** запросов (${percentText})\n\n`);
 		md.appendMarkdown(`\`${tooltipBar}\`\n\n`);
 		md.appendMarkdown(`---\n\n`);
+		md.appendMarkdown(`$(account) **Copilot Chat:** ${copilotChatAccountLabel}\n\n`);
 		md.appendMarkdown(`$(calendar) **Период:** ${periodStart} — ${periodEnd}\n\n`);
 		md.appendMarkdown(`$(graph) **Среднее в день:** ${data.avgPerDay} запросов\n\n`);
 		md.appendMarkdown(`$(info) **Подписка:** ${data.planType}\n\n`);
@@ -404,9 +433,12 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 			const cached = this.usageService.getCachedData();
 			if (cached) {
 				this.updateStatusBar(cached);
+				void this.refreshAccountSummary(true);
 			} else {
 				this.showLoadingState();
-				void this.usageService.fetchUsage();
+				void this.usageService.fetchUsage().then((data) => {
+					void this.updateStatusBarWithAccountSummary(data);
+				});
 			}
 			this.usageService.startAutoRefresh({ intervalMs: STATUSBAR_REFRESH_INTERVAL_MS, forceRefresh: false });
 			this.statusBarItem.show();

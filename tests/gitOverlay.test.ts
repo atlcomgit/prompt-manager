@@ -2598,6 +2598,54 @@ test('GitOverlay shows progress line during automatic refresh', () => {
 	assert.match(markup, /data-pm-git-overlay-progress="auto"/);
 });
 
+test('GitOverlay shows process subtitle for automatic refresh reasons', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'refresh:auto',
+		processLabel: 'обновление файла prompt.md',
+		t: (key: string) => key === 'editor.gitOverlayProcessPrefix' ? 'Процесс:' : key,
+	});
+
+	assert.match(markup, /Процесс: обновление файла prompt\.md/);
+});
+
+test('GitOverlay shows process subtitle for button-driven actions', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'pushPromptBranch',
+		processLabel: 'Push ветки промпта',
+		t: (key: string) => key === 'editor.gitOverlayProcessPrefix' ? 'Процесс:' : key,
+	});
+
+	assert.match(markup, /Процесс: Push ветки промпта/);
+});
+
+test('GitOverlay highlights process subtitle while busy', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'refresh:auto',
+		processLabel: 'обновление файла prompt.md',
+		t: (key: string) => key === 'editor.gitOverlayProcessPrefix' ? 'Процесс:' : key,
+	});
+
+	assert.match(markup, /Процесс: обновление файла prompt\.md/);
+	assert.match(markup, /font-weight:600/);
+	assert.match(markup, /color:var\(--vscode-editor-foreground, var\(--vscode-foreground, #000000\)\)/);
+});
+
+test('GitOverlay renders pull-all action once and directly after sync warning', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			projects: [
+				createTestProject({
+					project: 'api',
+					behind: 2,
+				}),
+			],
+		}),
+	});
+
+	assert.equal(markup.match(/editor\.gitOverlayPullAllChanges/g)?.length || 0, 1);
+	assert.match(markup, /editor\.gitOverlayPullChangesRequired[\s\S]*editor\.gitOverlayPullAllChanges[\s\S]*editor\.gitOverlaySwitchAll/);
+});
+
 test('GitOverlay shows progress line during initial overlay loading', () => {
 	const markup = renderGitOverlayMarkup({
 		busyAction: 'overlay:loading',

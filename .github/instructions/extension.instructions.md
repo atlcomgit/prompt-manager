@@ -6,4 +6,4 @@
 
 ## Сборка
 
-После окончания реализации задачи выполняй сборку расширения через скрипт `/home/alek/project/my/vscode-extensions/prompt-manager/.vscode/bash/compile.sh`.
+После окончания реализации задачи выполняй каждый раз сборку расширения через скрипт `/home/alek/project/my/vscode-extensions/prompt-manager/.vscode/bash/compile.sh`.

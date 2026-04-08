@@ -30,6 +30,7 @@ type Props = {
 	snapshot: GitOverlaySnapshot | null;
 	commitMessages: Record<string, string>;
 	busyAction: string | null;
+	processLabel?: string | null;
 	completedActions: Record<GitOverlayActionKind, boolean>;
 	promptStatus: PromptStatus;
 	promptTitle: string;
@@ -799,6 +800,7 @@ export const GitOverlay: React.FC<Props> = ({
 	snapshot,
 	commitMessages,
 	busyAction,
+	processLabel = null,
 	completedActions,
 	promptStatus,
 	promptTitle,
@@ -1577,6 +1579,10 @@ export const GitOverlay: React.FC<Props> = ({
 	const stayOnTrackedBranchLabel = uniqueTrackedBranches.length === 1
 		? t('editor.gitOverlayStayOnTrackedBranchNamed').replace('{branch}', uniqueTrackedBranches[0])
 		: t('editor.gitOverlayStayOnTrackedBranch');
+	const headerSubtitle = processLabel
+		? `${t('editor.gitOverlayProcessPrefix')} ${processLabel}`
+		: t('editor.gitOverlaySubtitle');
+	const isProcessSubtitleActive = Boolean(processLabel && busyAction);
 	const isSectionCollapsed = (section: SectionKey): boolean => collapsedSections[section] ?? autoCollapsedSections[section];
 	const isSectionAutoCollapsed = (section: SectionKey): boolean => collapsedSections[section] === undefined && autoCollapsedSections[section];
 
@@ -1617,7 +1623,14 @@ export const GitOverlay: React.FC<Props> = ({
 				<div style={styles.header}>
 					<div style={styles.headerInfo}>
 						<h2 style={styles.headerTitle}>{t('editor.gitOverlayTitle')}</h2>
-						<div style={styles.headerSubtitle}>{t('editor.gitOverlaySubtitle')}</div>
+						<div
+							style={{
+								...styles.headerSubtitle,
+								...(isProcessSubtitleActive ? styles.headerSubtitleActive : null),
+							}}
+						>
+							{headerSubtitle}
+						</div>
 					</div>
 					<div style={styles.headerActions}>
 						<HeaderIconButton label={t('editor.gitOverlayRefresh')} onClick={() => onRefresh('local')} loading={isRefreshing} />
@@ -1709,6 +1722,18 @@ export const GitOverlay: React.FC<Props> = ({
 											: syncRequired
 												? <InlineHint message={t('editor.gitOverlayPullChangesRequired')} tone="error" />
 											: null)}
+
+								{syncRequired ? (
+									<div style={styles.inlineActionRow}>
+										<ActionButton
+											label={t('editor.gitOverlayPullAllChanges')}
+											onClick={() => onRefresh('sync')}
+											disabled={isReadOnlyFlow}
+											loading={isSyncing}
+											variant="primary"
+										/>
+									</div>
+								) : null}
 
 									{showEmptyStep1Hint ? <InlineHint message={t('editor.gitOverlayStepSwitchNothingToDo')} tone="info" /> : null}
 									{showNoChangesToCommitHint ? <InlineHint message={t('editor.gitOverlayStepSwitchNoChangesToCommit')} tone="info" /> : null}
@@ -1967,15 +1992,6 @@ export const GitOverlay: React.FC<Props> = ({
 
 								<div style={styles.actionRowEnd}>
 									{shouldShowStep1Success ? <span style={styles.successText}>{step1ResolvedSuccessMessage}</span> : null}
-									{syncRequired ? (
-										<ActionButton
-											label={t('editor.gitOverlayPullAllChanges')}
-											onClick={() => onRefresh('sync')}
-											disabled={isReadOnlyFlow}
-											loading={isSyncing}
-											variant="primary"
-										/>
-									) : null}
 										{!showEmptyStep1Hint ? (
 										<ActionButton
 												label={t('editor.gitOverlaySwitchAll')}
@@ -2608,6 +2624,10 @@ const styles: Record<string, CSSProperties> = {
 		color: 'var(--vscode-descriptionForeground)',
 		lineHeight: 1.5,
 	},
+	headerSubtitleActive: {
+		color: 'var(--vscode-editor-foreground, var(--vscode-foreground, #000000))',
+		fontWeight: 600,
+	},
 	headerActions: {
 		display: 'flex',
 		gap: '8px',
@@ -2954,6 +2974,10 @@ const styles: Record<string, CSSProperties> = {
 	inlineHintText: {
 		flex: 1,
 		minWidth: 0,
+	},
+	inlineActionRow: {
+		display: 'flex',
+		justifyContent: 'flex-end',
 	},
 	inlineHintActionButton: {
 		background: 'transparent',

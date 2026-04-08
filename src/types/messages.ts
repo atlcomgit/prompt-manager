@@ -5,6 +5,11 @@
 import type { Prompt, PromptConfig, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 
+export type GitOverlayBusyReason =
+	| { kind: 'label'; label: string }
+	| { kind: 'file'; filePath: string }
+	| { kind: 'git' };
+
 // ---- Messages FROM webview TO extension ----
 
 export type WebviewToExtensionMessage =
@@ -122,7 +127,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'improvedPromptText'; content: string }
 	| { type: 'generatedReport'; report: string }
 	| { type: 'gitOverlaySnapshot'; snapshot: GitOverlaySnapshot }
-	| { type: 'gitOverlayBusy'; action: string | null }
+	| { type: 'gitOverlayBusy'; action: string | null; reason?: GitOverlayBusyReason | null }
 	| { type: 'gitOverlayFileHistory'; history: GitOverlayFileHistoryPayload }
 	| { type: 'gitOverlayCommitMessagesGenerated'; messages: GitOverlayProjectCommitMessage[] }
 	| { type: 'gitOverlayActionCompleted'; action: GitOverlayActionKind }

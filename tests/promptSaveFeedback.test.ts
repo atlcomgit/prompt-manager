@@ -8,10 +8,11 @@ import {
 } from '../src/utils/promptSaveFeedback.js';
 
 test('shouldApplyPromptAiEnrichmentState matches current prompt or active save id only', () => {
-	assert.equal(shouldApplyPromptAiEnrichmentState('prompt-1', 'prompt-1', null), true);
-	assert.equal(shouldApplyPromptAiEnrichmentState('prompt-1', 'other-prompt', 'prompt-1'), true);
-	assert.equal(shouldApplyPromptAiEnrichmentState('prompt-1', 'other-prompt', 'another-save'), false);
-	assert.equal(shouldApplyPromptAiEnrichmentState('', 'prompt-1', 'prompt-1'), false);
+	assert.equal(shouldApplyPromptAiEnrichmentState('prompt-1', '', 'prompt-1', '', null), true);
+	assert.equal(shouldApplyPromptAiEnrichmentState('prompt-1', '', 'other-prompt', '', 'prompt-1'), true);
+	assert.equal(shouldApplyPromptAiEnrichmentState('prompt-1', '', 'other-prompt', '', 'another-save'), false);
+	assert.equal(shouldApplyPromptAiEnrichmentState('', '', 'prompt-1', '', 'prompt-1'), false);
+	assert.equal(shouldApplyPromptAiEnrichmentState('old-prompt-id', 'uuid-1', 'other-prompt', 'uuid-1', null), true);
 });
 
 test('shouldNotifyReservedArchiveRename only reports exact archive base renames', () => {

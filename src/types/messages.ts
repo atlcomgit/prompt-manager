@@ -121,9 +121,16 @@ export type WebviewToExtensionMessage =
 
 export type ExtensionToWebviewMessage =
 	| { type: 'prompts'; prompts: PromptConfig[]; archivedPrompts?: PromptConfig[] }
-	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config'; previousId?: string; editorViewState?: EditorPromptViewState }
+	| {
+		type: 'prompt';
+		prompt: Prompt | null;
+		reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config';
+		previousId?: string;
+		editorViewState?: EditorPromptViewState;
+		aiEnrichment?: { title: boolean; description: boolean };
+	}
 	| { type: 'promptSaved'; prompt: PromptConfig; previousId?: string }
-	| { type: 'promptAiEnrichmentState'; promptId: string; title: boolean; description: boolean }
+	| { type: 'promptAiEnrichmentState'; promptId: string; promptUuid?: string; title: boolean; description: boolean }
 	| { type: 'promptDeleted'; id: string }
 	| { type: 'promptDuplicated'; prompt: PromptConfig }
 	| { type: 'sidebarState'; state: SidebarState }

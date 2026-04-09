@@ -122,8 +122,9 @@ export class EditorPanelManager {
 	private pendingOpenPromptId: string | null = null;
 	private openPromptRequestVersion = 0;
 	private isShuttingDown = false;
-	/** ID промптов, для которых уже запущено фоновое AI-обогащение (дедупликация) */
-	private pendingEnrichmentPromptIds = new Set<string>();
+	/** Stable keys промптов, для которых уже запущено фоновое AI-обогащение (дедупликация) */
+	private pendingEnrichmentPromptKeys = new Set<string>();
+	private pendingPromptAiEnrichmentStates = new Map<string, { title: boolean; description: boolean }>();
 	private readonly markdownRenderer = new MarkdownIt({
 		html: false,
 		linkify: true,
@@ -2870,19 +2871,26 @@ export class EditorPanelManager {
 	 */
 	private async scheduleBackgroundAiEnrichment(
 		promptId: string,
+		promptUuid: string | null | undefined,
 		content: string,
 		needsTitle: boolean,
 		needsDescription: boolean,
-		postMessage: (m: ExtensionToWebviewMessage) => void,
+		postMessage: (m: ExtensionToWebviewMessage) => Promise<void>,
 		panelKey: string,
 	): Promise<void> {
+		const enrichmentKey = this.resolvePromptAiEnrichmentKey(promptId, promptUuid);
+		if (!enrichmentKey) {
+			return;
+		}
+
 		// Дедупликация: если AI-обогащение для этого промпта уже запущено — пропускаем
-		if (this.pendingEnrichmentPromptIds.has(promptId)) {
+		if (this.pendingEnrichmentPromptKeys.has(enrichmentKey)) {
 			this.hooksOutput.appendLine(`[ai-enrichment] skip: already running for promptId=${promptId}`);
 			return;
 		}
-		this.pendingEnrichmentPromptIds.add(promptId);
+		this.pendingEnrichmentPromptKeys.add(enrichmentKey);
 		this.hooksOutput.appendLine(`[ai-enrichment] start: promptId=${promptId} needsTitle=${needsTitle} needsDesc=${needsDescription}`);
+		let postedPromptUpdateToUi = false;
 		try {
 			// Параллельные AI-запросы с увеличенным таймаутом (60с)
 			const TIMEOUT_MS = 60_000;
@@ -2937,7 +2945,9 @@ export class EditorPanelManager {
 			}
 
 			// Перечитываем текущий промпт с диска для проверки актуальности
-			const currentPrompt = await this.storageService.getPrompt(promptId);
+			const currentPrompt = (promptUuid
+				? await this.storageService.getPromptByUuid(promptUuid)
+				: null) || await this.storageService.getPrompt(promptId);
 			if (!currentPrompt) {
 				this.hooksOutput.appendLine(`[ai-enrichment] skip: prompt not found on disk promptId=${promptId}`);
 				return;
@@ -2983,17 +2993,24 @@ export class EditorPanelManager {
 				skipHistory: true,
 				previousId: renameFromId,
 			});
+			this.setPendingPromptAiEnrichmentState(enriched.id, enriched.promptUuid, null);
 
 			// Обновляем UI в webview
 			const activePrompt = this.panelPromptRefs.get(panelKey);
+			const activePromptMatches = Boolean(
+				activePrompt
+				&& ((activePrompt.promptUuid || '').trim() && (enriched.promptUuid || '').trim()
+					? (activePrompt.promptUuid || '').trim() === (enriched.promptUuid || '').trim()
+					: activePrompt.id === promptId),
+			);
 			this.hooksOutput.appendLine(
 				`[ai-enrichment] ui-update: promptId=${promptId}`
 				+ ` panelKey=${panelKey}`
 				+ ` activeId=${activePrompt?.id || 'null'}`
-				+ ` match=${activePrompt?.id === promptId}`
+				+ ` match=${activePromptMatches}`
 				+ ` newTitle=${JSON.stringify((enriched.title || '').slice(0, 40))}`,
 			);
-			if (activePrompt && activePrompt.id === promptId) {
+			if (activePrompt && activePromptMatches) {
 				Object.assign(activePrompt, enriched);
 				this.setPanelPromptRef(panelKey, activePrompt);
 				this.ensureContentEditorBinding(panelKey, activePrompt);
@@ -3003,8 +3020,9 @@ export class EditorPanelManager {
 				if (panel) {
 					this.updatePromptPanelTitle(panel, enriched);
 				}
-				postMessage({ type: 'prompt', prompt: enriched, reason: 'ai-enrichment', previousId: renameFromId });
-				postMessage({ type: 'promptSaved', prompt: enriched, previousId: renameFromId });
+				await postMessage({ type: 'prompt', prompt: enriched, reason: 'ai-enrichment', previousId: renameFromId });
+				await postMessage({ type: 'promptSaved', prompt: enriched, previousId: renameFromId });
+				postedPromptUpdateToUi = true;
 				// Обновляем базовый снимок, чтобы dirty-флаг не зажёгся от AI-обновления
 				this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(enriched)));
 			}
@@ -3015,8 +3033,17 @@ export class EditorPanelManager {
 		} catch (err) {
 			this.hooksOutput.appendLine(`[ai-enrichment] error: promptId=${promptId} ${err instanceof Error ? err.message : String(err)}`);
 		} finally {
-			postMessage({ type: 'promptAiEnrichmentState', promptId, title: false, description: false });
-			this.pendingEnrichmentPromptIds.delete(promptId);
+			this.setPendingPromptAiEnrichmentState(promptId, promptUuid, null);
+			if (!postedPromptUpdateToUi) {
+				await postMessage({
+					type: 'promptAiEnrichmentState',
+					promptId,
+					promptUuid: promptUuid || undefined,
+					title: false,
+					description: false,
+				});
+			}
+			this.pendingEnrichmentPromptKeys.delete(enrichmentKey);
 		}
 	}
 
@@ -3894,6 +3921,78 @@ export class EditorPanelManager {
 		return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 	}
 
+	private resolvePromptAiEnrichmentKey(promptId?: string | null, promptUuid?: string | null): string | null {
+		const normalizedPromptUuid = (promptUuid || '').trim();
+		if (normalizedPromptUuid) {
+			return `uuid:${normalizedPromptUuid}`;
+		}
+
+		const normalizedPromptId = (promptId || '').trim();
+		if (normalizedPromptId) {
+			return `id:${normalizedPromptId}`;
+		}
+
+		return null;
+	}
+
+	private getPendingPromptAiEnrichmentState(
+		prompt?: Pick<Prompt, 'id' | 'promptUuid'> | null,
+	): { title: boolean; description: boolean } | undefined {
+		const key = this.resolvePromptAiEnrichmentKey(prompt?.id, prompt?.promptUuid);
+		if (!key) {
+			return undefined;
+		}
+
+		const state = this.pendingPromptAiEnrichmentStates.get(key);
+		if (!state || (!state.title && !state.description)) {
+			return undefined;
+		}
+
+		return {
+			title: Boolean(state.title),
+			description: Boolean(state.description),
+		};
+	}
+
+	private setPendingPromptAiEnrichmentState(
+		promptId?: string | null,
+		promptUuid?: string | null,
+		state?: { title: boolean; description: boolean } | null,
+	): void {
+		const key = this.resolvePromptAiEnrichmentKey(promptId, promptUuid);
+		if (!key) {
+			return;
+		}
+
+		if (state && (state.title || state.description)) {
+			this.pendingPromptAiEnrichmentStates.set(key, {
+				title: Boolean(state.title),
+				description: Boolean(state.description),
+			});
+			return;
+		}
+
+		this.pendingPromptAiEnrichmentStates.delete(key);
+	}
+
+	private buildPromptMessage(
+		prompt: Prompt,
+		options: {
+			reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config';
+			previousId?: string;
+			editorViewState?: EditorPromptViewState;
+		} = {},
+	): ExtensionToWebviewMessage {
+		const pendingAiEnrichment = this.getPendingPromptAiEnrichmentState(prompt);
+
+		return {
+			type: 'prompt',
+			prompt,
+			...options,
+			...(pendingAiEnrichment ? { aiEnrichment: pendingAiEnrichment } : {}),
+		};
+	}
+
 	private enqueuePendingPanelMessage(panelKey: string, message: ExtensionToWebviewMessage): void {
 		const pending = (this.pendingPanelMessages.get(panelKey) || []).filter(item => {
 			if (item.type !== 'triggerStartChat' || message.type !== 'triggerStartChat') {
@@ -4402,9 +4501,9 @@ export class EditorPanelManager {
 		getIsDirty: () => boolean,
 		setIsDirty: (v: boolean) => void,
 	): Promise<void> {
-		const postMessage = (m: ExtensionToWebviewMessage): void => {
+		const postMessage = async (m: ExtensionToWebviewMessage): Promise<void> => {
 			try {
-				void panel.webview.postMessage(m);
+				await panel.webview.postMessage(m);
 			} catch {
 				// panel/webview might be disposed; ignore to keep background flows alive
 			}
@@ -4487,12 +4586,10 @@ export class EditorPanelManager {
 				});
 				postMessage(availableLanguageAndFrameworkMessages.languagesMessage);
 				postMessage(availableLanguageAndFrameworkMessages.frameworksMessage);
-				postMessage({
-					type: 'prompt',
-					prompt: currentPrompt,
+				postMessage(this.buildPromptMessage(currentPrompt, {
 					reason: 'open',
 					editorViewState: this.getPromptEditorViewState(panelKey, currentPrompt),
-				});
+				}));
 				this.flushPendingPanelMessages(panelKey, panel, currentPrompt);
 				this.scheduleAvailableModelsRefreshAfterReady(panelKey, panel, currentPrompt, readyBootId, models);
 				break;
@@ -4545,7 +4642,13 @@ export class EditorPanelManager {
 
 					// Мгновенные fallback-значения вместо ожидания AI (AI обогатит в фоне после save)
 					// Если AI-обогащение уже запущено — не перезаписываем title/description, иначе race condition
-					const enrichmentAlreadyRunning = this.pendingEnrichmentPromptIds.has(promptToSave.id || currentPrompt.id);
+					const enrichmentKey = this.resolvePromptAiEnrichmentKey(
+						promptToSave.id || currentPrompt.id,
+						promptToSave.promptUuid || currentPrompt.promptUuid,
+					);
+					const enrichmentAlreadyRunning = Boolean(
+						enrichmentKey && this.pendingEnrichmentPromptKeys.has(enrichmentKey),
+					);
 					if (needsTitle && !enrichmentAlreadyRunning) {
 						promptToSave.title = this.makeTitleFallbackFromContent(promptToSave.content);
 					}
@@ -4604,6 +4707,14 @@ export class EditorPanelManager {
 					});
 					// savePrompt теперь возвращает полный Prompt — повторный getPrompt не нужен
 					const promptForPanel = saved;
+					if (needsAiEnrichment && !enrichmentAlreadyRunning) {
+						this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, {
+							title: needsTitle,
+							description: needsDescription,
+						});
+					} else if (!enrichmentAlreadyRunning) {
+						this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, null);
+					}
 					await this.stateService.migratePromptEditorViewState(
 						[
 							this.getPromptEditorViewStateSource(panelKey, currentPrompt),
@@ -4664,18 +4775,13 @@ export class EditorPanelManager {
 
 					if (shouldApplyToCurrentPanel) {
 						this.updatePromptPanelTitle(panel, saved);
-						postMessage({ type: 'promptSaved', prompt: saved, previousId: renameFromId });
-						postMessage({ type: 'prompt', prompt: promptForPanel, reason: 'save', previousId: renameFromId });
-						if (needsAiEnrichment) {
-							postMessage({
-								type: 'promptAiEnrichmentState',
-								promptId: saved.id,
-								title: needsTitle,
-								description: needsDescription,
-							});
-						}
+						await postMessage({ type: 'promptSaved', prompt: saved, previousId: renameFromId });
+						await postMessage(this.buildPromptMessage(promptForPanel, {
+							reason: 'save',
+							previousId: renameFromId,
+						}));
 						if (shouldNotifyArchiveRename) {
-							postMessage({
+							await postMessage({
 								type: 'info',
 								message: buildReservedArchiveRenameNotice(saved.id, this.getPromptSaveFeedbackLocale()),
 							});
@@ -4698,6 +4804,7 @@ export class EditorPanelManager {
 					if (needsAiEnrichment) {
 						void this.scheduleBackgroundAiEnrichment(
 							promptToSave.id,
+							promptToSave.promptUuid || currentPrompt.promptUuid,
 							promptToSave.content,
 							needsTitle,
 							needsDescription,
@@ -4866,12 +4973,10 @@ export class EditorPanelManager {
 				this.panelLatestPromptSnapshots.set(panelKey, null);
 				this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(restored)));
 				this.updatePromptPanelTitle(panel, restored);
-				postMessage({
-					type: 'prompt',
-					prompt: restored,
+				postMessage(this.buildPromptMessage(restored, {
 					reason: 'open',
 					editorViewState: this.getPromptEditorViewState(panelKey, restored),
-				});
+				}));
 				await this.broadcastAvailableLanguagesAndFrameworks();
 				this._onDidSave.fire(restored.id);
 				break;

@@ -249,6 +249,15 @@ export class StorageService implements vscode.Disposable {
 		return prompts.find(prompt => (prompt.promptUuid || '').trim() === normalizedPromptUuid)?.id;
 	}
 
+	async getPromptByUuid(promptUuid: string): Promise<Prompt | null> {
+		const promptId = await this.findPromptIdByUuid(promptUuid);
+		if (!promptId) {
+			return null;
+		}
+
+		return this.getPrompt(promptId);
+	}
+
 	private async resolveExistingPromptIdentity(prompt: Prompt, requestedPreviousId: string): Promise<string | undefined> {
 		const normalizedPreviousId = requestedPreviousId.trim();
 		if (normalizedPreviousId) {

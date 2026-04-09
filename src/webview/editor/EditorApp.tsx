@@ -1,7 +1,6 @@
 /**
  * Editor App — Main component for prompt configuration form
  */
-
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
@@ -1142,13 +1141,16 @@ export const EditorApp: React.FC = () => {
       case 'prompt':
         if (msg.prompt) {
           const incomingPromptId = (String(msg.prompt.id || '__new__').trim() || '__new__');
+          const incomingPromptUuid = (String(msg.prompt.promptUuid || '').trim() || '');
           const currentPromptId = (currentPromptIdRef.current || '__new__').trim() || '__new__';
+          const currentPromptUuid = (String(promptRef.current.promptUuid || '').trim() || '');
           const activeSaveId = (activeSaveIdRef.current || '').trim();
           const previousPromptId = (String(msg.previousId || '').trim() || '');
           const reason: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config' | undefined = msg.reason;
           const isOpenPayload = reason === 'open';
           const isNewPromptSaveResponse = currentPromptId === '__new__' && reason === 'save';
           const isRelatedToCurrentPrompt = incomingPromptId === currentPromptId
+            || (incomingPromptUuid !== '' && currentPromptUuid !== '' && incomingPromptUuid === currentPromptUuid)
             || previousPromptId === currentPromptId
             || (activeSaveId !== '' && (incomingPromptId === activeSaveId || previousPromptId === activeSaveId))
             || isNewPromptSaveResponse;
@@ -1166,8 +1168,8 @@ export const EditorApp: React.FC = () => {
             const nextEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
             if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); showLoaderTimerRef.current = null; }
             setShowLoader(false);
-            setIsGeneratingTitle(false);
-            setIsGeneratingDescription(false);
+            setIsGeneratingTitle(Boolean(msg.aiEnrichment?.title));
+            setIsGeneratingDescription(Boolean(msg.aiEnrichment?.description));
             setNotice(null);
             setGitOverlayOpen(false);
             setGitOverlayMode('default');
@@ -1313,6 +1315,10 @@ export const EditorApp: React.FC = () => {
           setIsLoaded(true);
           setIsSaving(false);
           activeSaveIdRef.current = null;
+          if (reason === 'save' && msg.aiEnrichment) {
+            setIsGeneratingTitle(Boolean(msg.aiEnrichment.title));
+            setIsGeneratingDescription(Boolean(msg.aiEnrichment.description));
+          }
           if ((msg.prompt.chatSessionIds || []).length > 0) {
             releaseStartChatPendingState();
             // Auto-recalc implementing time on first load
@@ -1524,7 +1530,13 @@ export const EditorApp: React.FC = () => {
         showInlineNotice('error', msg.message || 'Не удалось загрузить общую инструкцию.');
         break;
       case 'promptAiEnrichmentState':
-        if (!shouldApplyPromptAiEnrichmentState(msg.promptId, currentPromptIdRef.current, activeSaveIdRef.current)) {
+        if (!shouldApplyPromptAiEnrichmentState(
+          msg.promptId,
+          msg.promptUuid,
+          currentPromptIdRef.current,
+          promptRef.current.promptUuid,
+          activeSaveIdRef.current,
+        )) {
           break;
         }
 

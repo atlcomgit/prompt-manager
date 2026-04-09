@@ -1,8 +1,16 @@
 export function shouldApplyPromptAiEnrichmentState(
 	promptId: string | null | undefined,
+	promptUuid: string | null | undefined,
 	currentPromptId?: string | null,
+	currentPromptUuid?: string | null,
 	activeSaveId?: string | null,
 ): boolean {
+	const normalizedPromptUuid = (promptUuid || '').trim();
+	const normalizedCurrentPromptUuid = (currentPromptUuid || '').trim();
+	if (normalizedPromptUuid && normalizedCurrentPromptUuid && normalizedPromptUuid === normalizedCurrentPromptUuid) {
+		return true;
+	}
+
 	const normalizedPromptId = (promptId || '').trim();
 	if (!normalizedPromptId) {
 		return false;

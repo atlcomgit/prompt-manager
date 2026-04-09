@@ -1,145 +1,213 @@
-# Prompt Manager for VS Code
+# Copilot Prompt Manager
 
 <p align="center">
-  <img src="media/icon.png" alt="Prompt Manager" width="128" height="128">
+  <img src="media/icon.png" alt="Copilot Prompt Manager icon" width="128" height="128">
 </p>
 
 <p align="center">
-  <strong>Управляйте, организуйте и используйте AI-промпты прямо в VS Code</strong><br>
-  с интеграцией GitHub Copilot Chat
+  <strong>Structured prompt workflows for VS Code.</strong><br>
+  Design prompts, launch GitHub Copilot chats, keep Git context nearby, track delivery, and build searchable project memory in one extension.
 </p>
 
----
+<p align="center">
+  <a href="https://marketplace.visualstudio.com/items?itemName=alek-fiend.copilot-prompt-manager">Marketplace</a>
+  ·
+  <a href="https://github.com/atlcomgit/prompt-manager">Repository</a>
+  ·
+  <a href="https://github.com/atlcomgit/prompt-manager/issues">Issues</a>
+</p>
 
-## ✨ Возможности
+<p align="center">
+  <img src="https://img.shields.io/badge/VS%20Code-1.95%2B-2f8cff?logo=visualstudiocode&logoColor=white" alt="VS Code 1.95+">
+  <img src="https://img.shields.io/badge/version-0.1.88-55d0a6" alt="Version 0.1.88">
+  <img src="https://img.shields.io/badge/license-MIT-0f172a" alt="MIT License">
+</p>
 
-### 📋 Управление промптами
-- Создание, редактирование, удаление и дублирование промптов
-- Хранение промптов в `.vscode/prompt-manager/` — версионируется через Git
-- Автогенерация названий и описаний через AI
-- Импорт и экспорт промптов
+<p align="center">
+  <img src="media/readme/hero.png" alt="Copilot Prompt Manager overview" width="100%">
+</p>
 
-### 🔍 Поиск и фильтрация
-- Полнотекстовый поиск по названию и описанию
-- Фильтрация по статусу (Черновик, В работе, Завершён, Остановлен)
-- Сортировка по названию, дате создания, дате изменения
-- Группировка по статусу, проектам, языкам, фреймворкам
-- Избранные промпты для быстрого доступа
+Prompt work usually gets scattered across chat tabs, notes, branch names, and half-finished checklists. Copilot Prompt Manager turns that into a repeatable workflow inside VS Code: prompts live as project assets, chats can be started and reopened from context, Git-aware execution stays close to the prompt, and delivery surfaces like tracker, statistics, reports, and project memory stay connected.
 
-### ⚙️ Настройка промпта
-- Текст промпта в формате **Markdown** с поддержкой шаблонных переменных `{{variable}}`
-- Выбор **проектов рабочей области**, языков программирования и фреймворков
-- Подключение **скиллов** (`.vscode/skills/`, `~/.copilot/skills/`)
-- Подключение **MCP инструментов** из конфигурации рабочей области
-- Подключение и запуск **hooks** (`.vscode/hooks/`, `~/.copilot/hooks/`) до отправки и после завершения ответа чата
-- Выбор **модели AI** для использования в чате
-- Прикрепление **файлов контекста** к промпту
-- Привязка к **задачам трекера** и **веткам Git**
-- Трекинг статуса работы с промптом
+This README is intentionally modular. The extension is still evolving, and the page is designed so new panels, workflows, screenshots, and examples can be added without another full rewrite.
 
-### 💬 Интеграция с Copilot Chat
-- Отправка промптов в GitHub Copilot Chat одним нажатием
-- Связь промптов с чат-сессиями
-- Открытие существующего чата по промпту
+## Contents
 
-### 🔀 Работа с Git
-- Просмотр и переключение веток в выбранных проектах
-- Проверка несохранённых изменений перед переключением
-- Автоматическое создание веток в проектах
+- [Why Prompt Manager](#why-prompt-manager)
+- [Visual Tour](#visual-tour)
+- [What You Can Do](#what-you-can-do)
+- [Extension Surfaces](#extension-surfaces)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Storage and Configuration](#storage-and-configuration)
+- [Actively Evolving Areas](#actively-evolving-areas)
+- [Ideas for Further Expansion](#ideas-for-further-expansion)
+- [License](#license)
 
-### ⏱ Аналитика
-- Трекинг времени написания промпта
-- Трекинг времени реализации в чате
-- Анализ эффективности промптов
+## Why Prompt Manager
 
----
+- Keep prompts as real project artifacts instead of disposable chat fragments.
+- Launch GitHub Copilot chats from structured context that already knows your task, branch, files, skills, and hooks.
+- Track the prompt lifecycle with eight statuses: draft, in-progress, stopped, cancelled, completed, report, review, and closed.
+- Connect prompt execution with Git workflows, reports, implementation timing, and repository memory.
+- Turn commit history into searchable AI-assisted memory with analysis, embeddings, and codemap-oriented context.
 
-## 🚀 Быстрый старт
+## Visual Tour
 
-### Установка
-1. Откройте VS Code
-2. Перейдите в **Extensions** (`Ctrl+Shift+X`)
-3. Найдите **"Prompt Manager"**
-4. Нажмите **Install**
+| Prompt Library | Prompt Editor |
+| --- | --- |
+| ![Prompt library in the sidebar](media/readme/sidebar.png) | ![Prompt editor with process panels](media/readme/editor.png) |
 
-### Использование
-1. Откройте иконку **Prompt Manager** в Activity Bar (боковая панель)
-2. Нажмите **"＋ Новый"** для создания промпта
-3. Заполните форму настройки промпта
-4. Нажмите **"💾 Сохранить"**
-5. Нажмите **"🚀 Начать чат"** для отправки в Copilot
+| Project Analysis | Project Memory |
+| --- | --- |
+| ![Project AI analysis and history](media/readme/analytics.png) | ![Project Memory store](media/readme/memory.png) |
 
----
+## What You Can Do
 
-## 📁 Структура хранения
+### Design prompts as reusable project assets
 
-Промпты сохраняются в папке `.vscode/prompt-manager/`:
+- Create, edit, duplicate, archive, import, and export prompts from a dedicated VS Code sidebar.
+- Store prompt content in Markdown and keep prompt metadata in JSON inside `.vscode/prompt-manager/`.
+- Attach projects, languages, frameworks, skills, MCP tools, hooks, task references, branches, notes, plans, and reports.
+- Reuse prompt context across sessions without rebuilding the same setup every time.
 
-```
+### Launch and reopen Copilot chats from context
+
+- Start a GitHub Copilot chat directly from a selected prompt.
+- Reopen existing chat sessions linked to the prompt.
+- Keep the prompt, report, and editor state tied to the same workflow instead of splitting them across tools.
+
+### Work with Git without leaving the prompt flow
+
+- View, switch, and create branches in workspace projects.
+- Guard branch actions with dirty-worktree checks.
+- Keep branch references and task metadata near the prompt itself.
+- Use the Git-oriented editor flow to support commits, review preparation, and related prompt execution.
+
+### Track delivery, not just prompt writing
+
+- Move prompts through a full lifecycle in the tracker panel.
+- Track writing time, implementation time, overall time on task, and untracked corrections.
+- Open statistics and export delivery-friendly summaries in HTML or Markdown.
+- Keep reports inside the prompt workflow instead of treating them as a separate afterthought.
+
+### Build project memory from real repository history
+
+- Open the Project Memory panel to browse commits, file changes, and stored analysis.
+- Run AI-powered history analysis with configurable models.
+- Use semantic search over embeddings to find similar work by meaning, not just by text.
+- Inspect knowledge-graph style relationships and code-oriented instruction snapshots.
+
+### Monitor Copilot usage inside VS Code
+
+- See Copilot Premium request usage in the status bar.
+- Open a detailed usage panel with quota signals, refresh health, and account binding diagnostics.
+- Keep usage awareness close to the same workflow where prompts and chats are executed.
+
+## Extension Surfaces
+
+| Surface | What it does | Best used for |
+| --- | --- | --- |
+| Prompt Sidebar | Prompt list, search, filters, grouping, favorites, compact/detailed views | Navigating and organizing prompt inventory |
+| Prompt Editor | Main prompt workspace with content, context, integrations, files, notes, plans, reports, and timing | Day-to-day prompt preparation and execution |
+| Tracker | Kanban-style lifecycle view across prompt statuses | Delivery flow and prompt handoff |
+| Statistics | Aggregated time and status analytics with export support | Reporting and review summaries |
+| Project Memory | Commit browsing, AI analysis, semantic search, statistics, settings | Recalling prior implementation work |
+| Copilot Usage | Status bar widget and detailed quota diagnostics | Monitoring Premium request consumption |
+| About / Settings | Extension details and configuration access | Maintenance and onboarding |
+
+## Installation
+
+### From the VS Code Marketplace
+
+1. Open the Extensions view in VS Code.
+2. Search for **Copilot Prompt Manager**.
+3. Click **Install**.
+4. Open the Prompt Manager icon from the Activity Bar.
+
+### Requirements
+
+- VS Code `1.95+`
+- GitHub Copilot Chat for the chat-centered workflow
+- Git-enabled workspace folders for branch-aware features
+- Optional: Project Memory enabled in settings when you want AI-assisted repository memory features
+
+## Quick Start
+
+1. Open **Prompt Manager** from the Activity Bar.
+2. Create a new prompt from the sidebar.
+3. Fill in the brief: title, description, workspace projects, languages, frameworks, branch, task number, and AI model.
+4. Add prompt content in Markdown and attach context files if needed.
+5. Save the prompt and launch GitHub Copilot Chat directly from the editor.
+6. Use the tracker and statistics panels to move the task forward and keep reporting aligned.
+7. If you want long-term recall, open **Project Memory** and start building repository history into a searchable assistant layer.
+
+## Storage and Configuration
+
+Prompt Manager keeps prompts in your workspace so they can travel with the repository.
+
+```text
 .vscode/prompt-manager/
-├── my-prompt-slug/
-│   ├── config.json      # Настройки промпта
-│   ├── prompt.md        # Текст промпта (Markdown)
-│   └── context/         # Прикреплённые файлы
-├── another-prompt/
+├── my-prompt/
 │   ├── config.json
 │   ├── prompt.md
-│   └── context/
+│   ├── report.txt
+│   ├── plan.md
+│   ├── context/
+│   └── history/
+└── another-prompt/
+    ├── config.json
+    └── prompt.md
 ```
 
-### 🛠 config.json
+Example `config.json` shape:
+
 ```json
 {
-  "id": "my-prompt-slug",
-  "title": "Рефакторинг компонентов",
-  "description": "Промпт для рефакторинга React компонентов",
+  "id": "marketplace-readme-refresh",
+  "title": "README for Marketplace visuals",
   "status": "in-progress",
-  "favorite": true,
-  "projects": ["frontend"],
+  "projects": ["prompt-manager"],
   "languages": ["TypeScript"],
-  "frameworks": ["React"],
-  "skills": ["devtools"],
-  "mcpTools": ["context7"],
-  "hooks": [],
-  "taskNumber": "JIRA-123",
-  "branch": "feature/refactor",
-  "model": "copilot/gpt-4o",
-  "contextFiles": ["src/components/App.tsx"],
-  "chatSessionIds": [],
-  "timeSpentWriting": 300000,
-  "timeSpentImplementing": 1200000,
-  "createdAt": "2025-01-01T00:00:00.000Z",
-  "updatedAt": "2025-01-02T00:00:00.000Z"
+  "frameworks": ["Visual Studio Code", "vscode extension"],
+  "skills": ["grep-timeout", "devtools"],
+  "taskNumber": "30",
+  "branch": "feature/readme-marketplace",
+  "model": "gpt-5.4",
+  "contextFiles": ["README.md", "package.json"]
 }
 ```
 
----
+Useful configuration ideas:
 
-## ⌨️ Команды
+- Keep skills and hooks curated so repeated workflows stay consistent.
+- Use branches and task numbers to connect prompts with delivery artifacts.
+- Keep reports and plans with the prompt so review context stays local to the repository.
+- Enable Project Memory when your repository history is valuable enough to search semantically.
 
-| Команда | Описание |
-|---------|----------|
-| `Prompt Manager: Create New Prompt` | Создать новый промпт |
-| `Prompt Manager: Open Prompt` | Открыть промпт из списка |
-| `Prompt Manager: Delete Prompt` | Удалить промпт |
-| `Prompt Manager: Duplicate Prompt` | Дублировать промпт |
-| `Prompt Manager: Import Prompt` | Импортировать промпт из папки |
-| `Prompt Manager: Export Prompt` | Экспортировать промпт в папку |
-| `Prompt Manager: Refresh Prompt List` | Обновить список промптов |
-| `Prompt Manager: Start Chat with Prompt` | Начать чат с промптом |
+## Actively Evolving Areas
 
----
+The extension already covers a broad daily workflow, but some surfaces are still expanding and should be treated as evolving capabilities rather than a fixed end state.
 
+- Voice-assisted prompt input and transcription workflows
+- Codemap-oriented instruction refresh and project structure guidance
+- Deeper report generation and review handoff workflows
+- More advanced automation around project memory and repository analysis
 
----
+## Ideas for Further Expansion
 
-## 📄 Лицензия
+These are product-direction ideas, not promises. They are listed here because the README is meant to grow with the extension.
+
+- Team prompt packs and shared workflow presets
+- Prompt comparison views across multiple AI models
+- Release-focused prompt templates for review, changelog, and reporting flows
+- Stronger memory-to-prompt suggestions based on commit similarity and code areas
+
+## License
 
 MIT © alek
 
----
-
 <p align="center">
-  Made with ⚡ for VS Code
+  Built for VS Code teams who want prompt work to be reviewable, repeatable, and project-aware.
 </p>
 

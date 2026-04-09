@@ -1,0 +1,1333 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Copilot Prompt Manager Showcase</title>
+	<style>
+		:root {
+			--bg: #09111f;
+			--bg-soft: #0f1b33;
+			--panel: rgba(12, 22, 42, 0.86);
+			--panel-strong: rgba(7, 14, 30, 0.96);
+			--panel-border: rgba(157, 189, 255, 0.16);
+			--panel-shadow: 0 28px 80px rgba(0, 0, 0, 0.4);
+			--text: #f4f7ff;
+			--muted: #a6b5d7;
+			--accent: #4db4ff;
+			--accent-soft: rgba(77, 180, 255, 0.16);
+			--accent-strong: #82d5ff;
+			--emerald: #42d3a2;
+			--amber: #f4c561;
+			--rose: #ff8494;
+			--lavender: #b7a2ff;
+			--grid: rgba(173, 200, 255, 0.08);
+			--mono: "Cascadia Code", "Consolas", "Monaco", monospace;
+			--sans: "Trebuchet MS", "Segoe UI Variable", "Segoe UI", sans-serif;
+			color-scheme: dark;
+		}
+
+		* {
+			box-sizing: border-box;
+		}
+
+		html,
+		body {
+			margin: 0;
+			min-height: 100%;
+			background:
+				radial-gradient(circle at top left, rgba(50, 115, 255, 0.34), transparent 30%),
+				radial-gradient(circle at top right, rgba(66, 211, 162, 0.22), transparent 25%),
+				linear-gradient(180deg, #08101c 0%, #09111f 45%, #0b1220 100%);
+			color: var(--text);
+			font-family: var(--sans);
+		}
+
+		body::before,
+		body::after {
+			content: "";
+			position: fixed;
+			inset: 0;
+			pointer-events: none;
+			z-index: 0;
+		}
+
+		body::before {
+			background-image:
+				linear-gradient(var(--grid) 1px, transparent 1px),
+				linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+			background-size: 56px 56px;
+			mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 0.85), transparent 85%);
+			opacity: 0.55;
+		}
+
+		body::after {
+			background:
+				radial-gradient(circle at 15% 20%, rgba(77, 180, 255, 0.14), transparent 22%),
+				radial-gradient(circle at 85% 15%, rgba(183, 162, 255, 0.1), transparent 28%),
+				radial-gradient(circle at 50% 88%, rgba(66, 211, 162, 0.1), transparent 24%);
+		}
+
+		.page {
+			position: relative;
+			z-index: 1;
+			width: min(1600px, calc(100vw - 48px));
+			margin: 0 auto;
+			padding: 36px 0 72px;
+		}
+
+		.header {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			gap: 24px;
+			margin-bottom: 26px;
+			padding: 0 6px;
+		}
+
+		.brand {
+			display: flex;
+			align-items: center;
+			gap: 16px;
+		}
+
+		.brand img {
+			width: 58px;
+			height: 58px;
+			border-radius: 18px;
+			box-shadow: 0 18px 40px rgba(0, 120, 212, 0.34);
+			background: rgba(255, 255, 255, 0.08);
+			padding: 8px;
+		}
+
+		.brand-copy {
+			display: grid;
+			gap: 4px;
+		}
+
+		.brand-copy strong {
+			font-size: 14px;
+			letter-spacing: 0.28em;
+			text-transform: uppercase;
+			color: var(--accent-strong);
+		}
+
+		.brand-copy span {
+			font-size: 27px;
+			line-height: 1;
+			font-weight: 700;
+			letter-spacing: 0.02em;
+		}
+
+		.build-stamp {
+			display: inline-flex;
+			align-items: center;
+			gap: 10px;
+			padding: 14px 18px;
+			border: 1px solid var(--panel-border);
+			border-radius: 999px;
+			background: rgba(9, 17, 31, 0.72);
+			color: var(--muted);
+			backdrop-filter: blur(12px);
+			box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+			font-size: 14px;
+		}
+
+		.build-stamp b {
+			color: var(--text);
+			font-weight: 700;
+		}
+
+		.hero {
+			display: grid;
+			grid-template-columns: 1.05fr 1.2fr;
+			gap: 28px;
+			margin-bottom: 30px;
+		}
+
+		.hero-copy,
+		.panel-card {
+			border: 1px solid var(--panel-border);
+			border-radius: 32px;
+			background: linear-gradient(180deg, rgba(18, 31, 58, 0.9) 0%, rgba(10, 19, 35, 0.95) 100%);
+			box-shadow: var(--panel-shadow);
+			backdrop-filter: blur(18px);
+		}
+
+		.hero-copy {
+			padding: 34px 34px 30px;
+			position: relative;
+			overflow: hidden;
+		}
+
+		.hero-copy::before {
+			content: "";
+			position: absolute;
+			inset: auto -10% -22% auto;
+			width: 260px;
+			height: 260px;
+			border-radius: 999px;
+			background: radial-gradient(circle, rgba(66, 211, 162, 0.22), transparent 70%);
+			filter: blur(18px);
+		}
+
+		.eyebrow {
+			display: inline-flex;
+			align-items: center;
+			gap: 10px;
+			padding: 8px 12px;
+			border-radius: 999px;
+			background: rgba(77, 180, 255, 0.12);
+			border: 1px solid rgba(77, 180, 255, 0.18);
+			color: var(--accent-strong);
+			font-size: 14px;
+			font-weight: 700;
+			letter-spacing: 0.06em;
+			text-transform: uppercase;
+			margin-bottom: 18px;
+		}
+
+		h1 {
+			margin: 0 0 16px;
+			font-size: clamp(42px, 5vw, 72px);
+			line-height: 0.95;
+			letter-spacing: -0.04em;
+			max-width: 640px;
+		}
+
+		.lead {
+			margin: 0 0 22px;
+			max-width: 620px;
+			color: var(--muted);
+			font-size: 20px;
+			line-height: 1.55;
+		}
+
+		.feature-pills {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px;
+			margin-bottom: 24px;
+		}
+
+		.feature-pills span,
+		.metric-row span {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 10px 14px;
+			border-radius: 999px;
+			background: rgba(255, 255, 255, 0.05);
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			color: var(--text);
+			font-size: 14px;
+		}
+
+		.metric-row {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 12px;
+			margin-bottom: 22px;
+		}
+
+		.hero-points {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 14px;
+		}
+
+		.hero-points article {
+			padding: 18px 18px 16px;
+			border-radius: 20px;
+			background: rgba(255, 255, 255, 0.04);
+			border: 1px solid rgba(255, 255, 255, 0.07);
+		}
+
+		.hero-points strong {
+			display: block;
+			margin-bottom: 8px;
+			font-size: 15px;
+			letter-spacing: 0.06em;
+			text-transform: uppercase;
+			color: var(--accent-strong);
+		}
+
+		.hero-points p {
+			margin: 0;
+			color: var(--muted);
+			font-size: 14px;
+			line-height: 1.55;
+		}
+
+		.workspace {
+			padding: 22px;
+			position: relative;
+			overflow: hidden;
+			min-height: 760px;
+		}
+
+		.workspace::before {
+			content: "";
+			position: absolute;
+			inset: 0;
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 18%);
+			pointer-events: none;
+		}
+
+		.workspace-shell {
+			display: grid;
+			grid-template-columns: 64px 340px 1fr;
+			gap: 0;
+			min-height: 716px;
+			overflow: hidden;
+			border-radius: 24px;
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			background: linear-gradient(180deg, rgba(7, 14, 30, 0.96) 0%, rgba(10, 19, 35, 0.96) 100%);
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+		}
+
+		.activity-bar {
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			gap: 16px;
+			padding: 18px 0;
+			background: rgba(5, 11, 24, 0.9);
+			border-right: 1px solid rgba(255, 255, 255, 0.06);
+		}
+
+		.activity-dot {
+			width: 34px;
+			height: 34px;
+			border-radius: 12px;
+			display: grid;
+			place-items: center;
+			color: #d8e0ff;
+			background: rgba(255, 255, 255, 0.04);
+			border: 1px solid transparent;
+			font-size: 16px;
+			font-weight: 700;
+		}
+
+		.activity-dot.active {
+			background: rgba(77, 180, 255, 0.16);
+			color: var(--accent-strong);
+			border-color: rgba(77, 180, 255, 0.35);
+			box-shadow: 0 12px 28px rgba(0, 120, 212, 0.2);
+		}
+
+		.sidebar {
+			display: flex;
+			flex-direction: column;
+			background: rgba(8, 15, 28, 0.96);
+			border-right: 1px solid rgba(255, 255, 255, 0.06);
+			min-width: 0;
+		}
+
+		.sidebar-top {
+			padding: 18px 18px 14px;
+			border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+		}
+
+		.sidebar-title {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			margin-bottom: 14px;
+			font-size: 16px;
+			font-weight: 700;
+		}
+
+		.search {
+			display: flex;
+			align-items: center;
+			gap: 10px;
+			padding: 11px 13px;
+			border-radius: 16px;
+			background: rgba(255, 255, 255, 0.05);
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			color: var(--muted);
+			font-size: 13px;
+		}
+
+		.pill-row {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px;
+			margin-top: 12px;
+		}
+
+		.small-pill {
+			padding: 7px 10px;
+			border-radius: 999px;
+			background: rgba(255, 255, 255, 0.04);
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			color: var(--muted);
+			font-size: 11px;
+			letter-spacing: 0.04em;
+			text-transform: uppercase;
+		}
+
+		.prompt-list {
+			padding: 12px;
+			display: grid;
+			gap: 10px;
+			overflow: hidden;
+		}
+
+		.prompt-item {
+			padding: 14px;
+			border-radius: 18px;
+			background: rgba(255, 255, 255, 0.035);
+			border: 1px solid rgba(255, 255, 255, 0.05);
+		}
+
+		.prompt-item.active {
+			background: linear-gradient(180deg, rgba(77, 180, 255, 0.14), rgba(77, 180, 255, 0.08));
+			border-color: rgba(77, 180, 255, 0.22);
+			box-shadow: 0 14px 28px rgba(0, 120, 212, 0.16);
+		}
+
+		.prompt-item header,
+		.stack header,
+		.strip header {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			gap: 12px;
+			margin-bottom: 10px;
+		}
+
+		.prompt-item strong,
+		.stack strong,
+		.strip strong,
+		.editor-pane h3,
+		.section-header strong {
+			font-size: 14px;
+			letter-spacing: 0.01em;
+		}
+
+		.muted {
+			color: var(--muted);
+		}
+
+		.status {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 6px 10px;
+			border-radius: 999px;
+			font-size: 11px;
+			letter-spacing: 0.05em;
+			text-transform: uppercase;
+			border: 1px solid transparent;
+			background: rgba(255, 255, 255, 0.05);
+		}
+
+		.status.blue {
+			color: var(--accent-strong);
+			border-color: rgba(77, 180, 255, 0.22);
+			background: rgba(77, 180, 255, 0.13);
+		}
+
+		.status.green {
+			color: #9cf1cb;
+			border-color: rgba(66, 211, 162, 0.24);
+			background: rgba(66, 211, 162, 0.13);
+		}
+
+		.status.amber {
+			color: #ffd883;
+			border-color: rgba(244, 197, 97, 0.25);
+			background: rgba(244, 197, 97, 0.12);
+		}
+
+		.status.rose {
+			color: #ffb4be;
+			border-color: rgba(255, 132, 148, 0.25);
+			background: rgba(255, 132, 148, 0.12);
+		}
+
+		.prompt-item p,
+		.stack p,
+		.strip p,
+		.editor-pane p,
+		.mini-card p,
+		.section-copy,
+		.metric-card p {
+			margin: 0;
+			font-size: 13px;
+			line-height: 1.55;
+			color: var(--muted);
+		}
+
+		.meta-row {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px;
+			margin-top: 12px;
+		}
+
+		.meta-row span {
+			padding: 6px 9px;
+			border-radius: 999px;
+			background: rgba(255, 255, 255, 0.04);
+			color: var(--muted);
+			font-size: 11px;
+			border: 1px solid rgba(255, 255, 255, 0.05);
+		}
+
+		.editor-pane {
+			display: grid;
+			grid-template-rows: auto 1fr auto;
+			min-width: 0;
+		}
+
+		.window-topbar {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 18px;
+			padding: 16px 18px;
+			border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+			background: rgba(255, 255, 255, 0.02);
+		}
+
+		.window-topbar .left,
+		.window-topbar .right {
+			display: flex;
+			align-items: center;
+			gap: 10px;
+		}
+
+		.window-pill {
+			padding: 8px 12px;
+			border-radius: 12px;
+			background: rgba(255, 255, 255, 0.04);
+			border: 1px solid rgba(255, 255, 255, 0.06);
+			font-size: 12px;
+			color: var(--muted);
+		}
+
+		.window-pill.active {
+			color: var(--text);
+			background: rgba(77, 180, 255, 0.14);
+			border-color: rgba(77, 180, 255, 0.24);
+		}
+
+		.editor-body {
+			padding: 22px;
+			display: grid;
+			grid-template-columns: 1.16fr 0.84fr;
+			gap: 18px;
+			min-height: 0;
+		}
+
+		.editor-column {
+			display: grid;
+			gap: 16px;
+			align-content: start;
+			min-width: 0;
+		}
+
+		.stack,
+		.strip,
+		.mini-card,
+		.metric-card {
+			padding: 16px;
+			border-radius: 20px;
+			background: rgba(255, 255, 255, 0.04);
+			border: 1px solid rgba(255, 255, 255, 0.06);
+		}
+
+		.field-grid {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 12px;
+			margin-top: 14px;
+		}
+
+		.field {
+			padding: 12px 13px;
+			border-radius: 16px;
+			background: rgba(255, 255, 255, 0.03);
+			border: 1px solid rgba(255, 255, 255, 0.05);
+		}
+
+		.field label {
+			display: block;
+			margin-bottom: 8px;
+			font-size: 11px;
+			text-transform: uppercase;
+			letter-spacing: 0.08em;
+			color: var(--muted);
+		}
+
+		.field strong {
+			font-size: 13px;
+			line-height: 1.4;
+		}
+
+		.editor-doc {
+			font-family: var(--mono);
+			padding: 18px;
+			border-radius: 20px;
+			background: linear-gradient(180deg, rgba(7, 14, 30, 0.95) 0%, rgba(10, 18, 34, 0.95) 100%);
+			border: 1px solid rgba(130, 213, 255, 0.12);
+			min-height: 246px;
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+		}
+
+		.editor-doc .line {
+			display: block;
+			font-size: 13px;
+			line-height: 1.74;
+			color: #dfe8ff;
+			white-space: pre-wrap;
+		}
+
+		.editor-doc .line span {
+			color: #7db6ff;
+		}
+
+		.insight-list {
+			display: grid;
+			gap: 12px;
+			margin-top: 14px;
+		}
+
+		.insight {
+			padding: 14px;
+			border-radius: 16px;
+			background: rgba(255, 255, 255, 0.03);
+			border: 1px solid rgba(255, 255, 255, 0.05);
+		}
+
+		.insight strong {
+			display: block;
+			margin-bottom: 8px;
+			color: var(--accent-strong);
+			font-size: 12px;
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+		}
+
+		.editor-footer {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			gap: 12px;
+			padding: 16px 18px 18px;
+			border-top: 1px solid rgba(255, 255, 255, 0.06);
+			background: rgba(255, 255, 255, 0.02);
+		}
+
+		.button-row {
+			display: flex;
+			align-items: center;
+			gap: 10px;
+			flex-wrap: wrap;
+		}
+
+		.button {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 10px 14px;
+			border-radius: 999px;
+			border: 1px solid rgba(255, 255, 255, 0.09);
+			font-size: 12px;
+			letter-spacing: 0.05em;
+			text-transform: uppercase;
+			background: rgba(255, 255, 255, 0.04);
+			color: var(--text);
+		}
+
+		.button.primary {
+			background: linear-gradient(135deg, rgba(0, 120, 212, 0.96), rgba(77, 180, 255, 0.88));
+			border-color: rgba(130, 213, 255, 0.34);
+			box-shadow: 0 16px 30px rgba(0, 120, 212, 0.28);
+		}
+
+		.button.success {
+			background: linear-gradient(135deg, rgba(38, 148, 111, 0.92), rgba(66, 211, 162, 0.82));
+			border-color: rgba(156, 241, 203, 0.28);
+		}
+
+		.button.ghost {
+			color: var(--muted);
+		}
+
+		.gallery {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 22px;
+			margin-bottom: 30px;
+		}
+
+		.section-header {
+			display: flex;
+			justify-content: space-between;
+			align-items: flex-start;
+			gap: 14px;
+			margin-bottom: 16px;
+		}
+
+		.section-header div {
+			display: grid;
+			gap: 8px;
+		}
+
+		.section-header span {
+			font-size: 12px;
+			text-transform: uppercase;
+			letter-spacing: 0.08em;
+			color: var(--accent-strong);
+		}
+
+		.stack-list {
+			display: grid;
+			gap: 14px;
+		}
+
+		.chart {
+			display: grid;
+			gap: 12px;
+			margin-top: 14px;
+		}
+
+		.bar-row {
+			display: grid;
+			grid-template-columns: 130px 1fr 44px;
+			align-items: center;
+			gap: 12px;
+		}
+
+		.bar-row label {
+			font-size: 12px;
+			color: var(--muted);
+		}
+
+		.bar {
+			position: relative;
+			height: 10px;
+			border-radius: 999px;
+			background: rgba(255, 255, 255, 0.06);
+			overflow: hidden;
+		}
+
+		.bar::after {
+			content: "";
+			position: absolute;
+			inset: 0 auto 0 0;
+			width: var(--size);
+			border-radius: inherit;
+			background: linear-gradient(90deg, rgba(77, 180, 255, 0.86), rgba(66, 211, 162, 0.86));
+			box-shadow: 0 8px 22px rgba(77, 180, 255, 0.3);
+		}
+
+		.timeline {
+			display: grid;
+			gap: 12px;
+			margin-top: 14px;
+		}
+
+		.timeline-item {
+			display: grid;
+			grid-template-columns: 116px 1fr;
+			gap: 14px;
+			align-items: start;
+		}
+
+		.timeline-item time {
+			font-size: 12px;
+			color: var(--accent-strong);
+			letter-spacing: 0.06em;
+			text-transform: uppercase;
+			padding-top: 4px;
+		}
+
+		.timeline-item div {
+			padding: 12px 14px;
+			border-radius: 16px;
+			background: rgba(255, 255, 255, 0.035);
+			border: 1px solid rgba(255, 255, 255, 0.05);
+		}
+
+		.timeline-item strong {
+			display: block;
+			margin-bottom: 6px;
+			font-size: 13px;
+		}
+
+		.matrix {
+			display: grid;
+			grid-template-columns: repeat(4, minmax(0, 1fr));
+			gap: 18px;
+			margin-bottom: 18px;
+		}
+
+		.metric-card strong {
+			display: block;
+			font-size: 28px;
+			line-height: 1;
+			margin-bottom: 10px;
+			letter-spacing: -0.03em;
+		}
+
+		.metric-card span {
+			display: block;
+			font-size: 12px;
+			text-transform: uppercase;
+			letter-spacing: 0.08em;
+			color: var(--accent-strong);
+			margin-bottom: 10px;
+		}
+
+		.footnote {
+			display: flex;
+			justify-content: space-between;
+			gap: 18px;
+			padding: 18px 20px;
+			border-radius: 22px;
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			background: rgba(255, 255, 255, 0.04);
+			color: var(--muted);
+			font-size: 14px;
+			line-height: 1.6;
+		}
+
+		.footnote strong {
+			color: var(--text);
+		}
+
+		@media (max-width: 1280px) {
+
+			.hero,
+			.gallery {
+				grid-template-columns: 1fr;
+			}
+
+			.workspace-shell {
+				grid-template-columns: 52px 280px 1fr;
+			}
+
+			.editor-body {
+				grid-template-columns: 1fr;
+			}
+
+			.matrix {
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+			}
+		}
+
+		@media (max-width: 920px) {
+			.page {
+				width: min(100vw - 20px, 100%);
+				padding-top: 18px;
+			}
+
+			.header,
+			.brand {
+				flex-direction: column;
+				align-items: flex-start;
+			}
+
+			.workspace-shell {
+				grid-template-columns: 1fr;
+			}
+
+			.activity-bar {
+				flex-direction: row;
+				justify-content: center;
+				padding: 14px;
+			}
+
+			.sidebar {
+				border-right: none;
+				border-top: 1px solid rgba(255, 255, 255, 0.06);
+				border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+			}
+
+			.hero-points,
+			.field-grid,
+			.matrix {
+				grid-template-columns: 1fr;
+			}
+
+			.footnote {
+				flex-direction: column;
+			}
+		}
+	</style>
+</head>
+
+<body>
+	<main class="page">
+		<section class="header">
+			<div class="brand">
+				<img src="../icon.png" alt="Copilot Prompt Manager icon">
+				<div class="brand-copy">
+					<strong>VS Code Extension</strong>
+					<span>Copilot Prompt Manager</span>
+				</div>
+			</div>
+			<div class="build-stamp">
+				<b>Version 0.1.88</b>
+				<span>Prompt workflows, project memory, Git overlays, analytics</span>
+			</div>
+		</section>
+
+		<section class="hero" id="hero-stage" aria-label="Hero stage">
+			<article class="hero-copy">
+				<div class="eyebrow">Built for serious Copilot workflows</div>
+				<h1>Turn prompt work into a first-class engineering workflow.</h1>
+				<p class="lead">
+					Create structured prompts, launch chats, track progress, connect Git branches,
+					attach project context, and build a searchable memory of what your team already learned.
+				</p>
+				<div class="feature-pills">
+					<span>Prompt workspace inside VS Code</span>
+					<span>Copilot Chat launch + reopen</span>
+					<span>Git branches, reviews, and overlay actions</span>
+					<span>Project memory with AI analysis</span>
+					<span>Tracker, statistics, and reports</span>
+				</div>
+				<div class="metric-row">
+					<span>8 lifecycle statuses</span>
+					<span>12 editor sections</span>
+					<span>Semantic memory search</span>
+					<span>Status bar quota widget</span>
+				</div>
+				<div class="hero-points">
+					<article>
+						<strong>Prompt Studio</strong>
+						<p>Store reusable prompts as project files with variables, skills, hooks, context files, notes,
+							plans, and reports.</p>
+					</article>
+					<article>
+						<strong>Git-Aware Flow</strong>
+						<p>Keep prompt work tied to branches, changes, review requests, and the state of the repository
+							directly from the editor surface.</p>
+					</article>
+					<article>
+						<strong>Project Memory</strong>
+						<p>Browse commits, inspect AI-generated analysis, explore knowledge graphs, and search history
+							with embeddings and filters.</p>
+					</article>
+					<article>
+						<strong>Execution Signals</strong>
+						<p>Track writing time, chat time, implementation time, status changes, and Copilot premium usage
+							without leaving VS Code.</p>
+					</article>
+				</div>
+			</article>
+
+			<article class="workspace panel-card" aria-label="Workspace showcase" role="region">
+				<div class="workspace-shell">
+					<aside class="activity-bar" aria-label="Activity Bar">
+						<div class="activity-dot">E</div>
+						<div class="activity-dot active">PM</div>
+						<div class="activity-dot">G</div>
+						<div class="activity-dot">R</div>
+						<div class="activity-dot">M</div>
+					</aside>
+
+					<section class="sidebar" id="shot-sidebar" aria-label="Prompt sidebar showcase">
+						<div class="sidebar-top">
+							<div class="sidebar-title">
+								<span>Prompts</span>
+								<span class="status blue">Detailed view</span>
+							</div>
+							<div class="search">Search prompts, branches, tasks, languages…</div>
+							<div class="pill-row">
+								<span class="small-pill">Status groups</span>
+								<span class="small-pill">Favorites</span>
+								<span class="small-pill">Created this week</span>
+							</div>
+						</div>
+						<div class="prompt-list">
+							<article class="prompt-item active">
+								<header>
+									<strong>Marketplace README refresh</strong>
+									<span class="status blue">In progress</span>
+								</header>
+								<p>Rewrite documentation, generate showcase visuals, attach screenshots, and align
+									Marketplace messaging.</p>
+								<div class="meta-row">
+									<span>prompt-manager</span>
+									<span>TypeScript</span>
+									<span>Task 30</span>
+								</div>
+							</article>
+							<article class="prompt-item">
+								<header>
+									<strong>Git overlay review flow</strong>
+									<span class="status amber">Review</span>
+								</header>
+								<p>Validate branch checks, PR metadata, and handoff rules before opening review
+									requests.</p>
+								<div class="meta-row">
+									<span>Git</span>
+									<span>Copilot</span>
+									<span>Workspace</span>
+								</div>
+							</article>
+							<article class="prompt-item">
+								<header>
+									<strong>Semantic memory tuning</strong>
+									<span class="status green">Completed</span>
+								</header>
+								<p>Adjust embedding model behaviour, history limits, and commit analysis flow for memory
+									search.</p>
+								<div class="meta-row">
+									<span>Memory</span>
+									<span>Embeddings</span>
+									<span>AI model</span>
+								</div>
+							</article>
+							<article class="prompt-item">
+								<header>
+									<strong>Release notes and packaging</strong>
+									<span class="status rose">Report</span>
+								</header>
+								<p>Prepare changelog summary, export stats, and finalize the release package for
+									publication.</p>
+								<div class="meta-row">
+									<span>Export</span>
+									<span>Changelog</span>
+									<span>Packaging</span>
+								</div>
+							</article>
+						</div>
+					</section>
+
+					<section class="editor-pane" id="shot-editor" aria-label="Prompt editor showcase">
+						<div class="window-topbar">
+							<div class="left">
+								<span class="window-pill active">Prompt editor</span>
+								<span class="window-pill">Process</span>
+								<span class="window-pill">Report editor</span>
+							</div>
+							<div class="right">
+								<span class="window-pill">Task 30</span>
+								<span class="window-pill active">feature/readme-marketplace</span>
+							</div>
+						</div>
+						<div class="editor-body">
+							<div class="editor-column">
+								<article class="stack">
+									<header>
+										<strong>Prompt Overview</strong>
+										<span class="status blue">Copilot ready</span>
+									</header>
+									<p>Every prompt keeps workspace context, AI model, skills, hooks, task reference,
+										branch mapping, plan, report, and timing in one place.</p>
+									<div class="field-grid">
+										<div class="field">
+											<label>Projects</label>
+											<strong>prompt-manager</strong>
+										</div>
+										<div class="field">
+											<label>Frameworks</label>
+											<strong>Visual Studio Code, Extension Host</strong>
+										</div>
+										<div class="field">
+											<label>Skills</label>
+											<strong>grep-timeout, devtools</strong>
+										</div>
+										<div class="field">
+											<label>Hooks</label>
+											<strong>agent-finish-telegram, voice</strong>
+										</div>
+									</div>
+								</article>
+
+								<article class="editor-doc">
+									<span class="line"># Marketplace README refresh</span>
+									<span class="line">Analyze the extension, extract <span>key differentiators</span>,
+										and write a polished README.</span>
+									<span class="line"></span>
+									<span class="line">- Create a <span>showcase HTML</span> that mirrors the extension
+										surfaces.</span>
+									<span class="line">- Capture screenshots and insert them into the
+										documentation.</span>
+									<span class="line">- Keep the structure modular so the README can grow with the
+										product.</span>
+									<span class="line">- Align messaging for both <span>GitHub</span> and <span>VS Code
+											Marketplace</span>.</span>
+									<span class="line"></span>
+									<span class="line">{{Prompt directory}} / README.md / media/readme /
+										CHANGELOG.md</span>
+								</article>
+							</div>
+
+							<div class="editor-column">
+								<article class="strip">
+									<header>
+										<strong>Process Panels</strong>
+										<span class="status amber">Live workflow</span>
+									</header>
+									<p>Expandable sections cover brief, workspace scope, prompt content, global
+										instructions, report, notes, plan, integrations, files, and time tracking.</p>
+									<div class="insight-list">
+										<div class="insight">
+											<strong>Git overlay</strong>
+											Branch awareness, dirty-worktree checks, create/switch branch actions, and
+											review request helpers.
+										</div>
+										<div class="insight">
+											<strong>Context files</strong>
+											Attach source files, previews, clipboard images, and reusable context
+											bundles for richer chat sessions.
+										</div>
+										<div class="insight">
+											<strong>Execution history</strong>
+											Reopen existing chats, sync report content, and keep timing metrics with the
+											prompt itself.
+										</div>
+									</div>
+								</article>
+
+								<article class="stack">
+									<header>
+										<strong>Copilot Premium Usage</strong>
+										<span class="status green">Status bar</span>
+									</header>
+									<p>Track quota usage with a live progress bar, thresholds, account binding info,
+										diagnostics, and a dedicated detail panel.</p>
+									<div class="chart">
+										<div class="bar-row">
+											<label>Monthly quota</label>
+											<div class="bar" style="--size: 67%;"></div>
+											<span>67%</span>
+										</div>
+										<div class="bar-row">
+											<label>Daily pace</label>
+											<div class="bar" style="--size: 54%;"></div>
+											<span>54%</span>
+										</div>
+										<div class="bar-row">
+											<label>Refresh health</label>
+											<div class="bar" style="--size: 92%;"></div>
+											<span>92%</span>
+										</div>
+									</div>
+								</article>
+							</div>
+						</div>
+						<div class="editor-footer">
+							<div class="button-row">
+								<span class="button primary">Save prompt</span>
+								<span class="button success">Start chat</span>
+								<span class="button ghost">Open chat</span>
+								<span class="button ghost">Mark review</span>
+							</div>
+							<div class="button-row muted">
+								<span>Writing 00:22</span>
+								<span>Implementing 01:34</span>
+								<span>On task 02:11</span>
+							</div>
+						</div>
+					</section>
+				</div>
+			</article>
+		</section>
+
+		<section class="gallery">
+			<article class="panel-card" id="shot-memory" aria-label="Project memory showcase" role="region"
+				style="padding: 22px;">
+				<div class="section-header">
+					<div>
+						<span>Advanced Surface</span>
+						<strong>Project Memory and Code Understanding</strong>
+						<p class="section-copy">Browse commit history, open file deltas, run AI analysis, inspect
+							knowledge graphs, and keep codemap instructions close to your prompts.</p>
+					</div>
+					<span class="status blue">Memory panel</span>
+				</div>
+
+				<div class="matrix">
+					<article class="metric-card">
+						<span>Commits indexed</span>
+						<strong>1,248</strong>
+						<p>Stored in a local SQL.js database with cleanup and backup support.</p>
+					</article>
+					<article class="metric-card">
+						<span>Analyses</span>
+						<strong>842</strong>
+						<p>AI summaries, categories, insights, bug links, and structured commit metadata.</p>
+					</article>
+					<article class="metric-card">
+						<span>Embeddings</span>
+						<strong>768</strong>
+						<p>Semantic search across commit history for faster recall of prior solutions.</p>
+					</article>
+					<article class="metric-card">
+						<span>CodeMap runs</span>
+						<strong>36</strong>
+						<p>Instruction snapshots for repositories, branches, and AI-assisted code navigation.</p>
+					</article>
+				</div>
+
+				<div class="stack-list">
+					<article class="stack">
+						<header>
+							<strong>Commit Intelligence</strong>
+							<span class="status green">Semantic search</span>
+						</header>
+						<p>Search by message, author, branch, repository, or embedding similarity. Open commit details
+							and affected files straight from the panel.</p>
+						<div class="timeline">
+							<div class="timeline-item">
+								<time>Today</time>
+								<div>
+									<strong>README refresh · 7 files changed</strong>
+									Added a showcase HTML, screenshot assets, and updated Marketplace-facing docs.
+								</div>
+							</div>
+							<div class="timeline-item">
+								<time>Yesterday</time>
+								<div>
+									<strong>Sidebar view modes · compact / detailed</strong>
+									Improved grouping, filters, and visual density options for prompt navigation.
+								</div>
+							</div>
+							<div class="timeline-item">
+								<time>Earlier</time>
+								<div>
+									<strong>Prompt AI enrichment</strong>
+									Added auto-generated titles, summaries, UUID support, and improved save flow.
+								</div>
+							</div>
+						</div>
+					</article>
+
+					<article class="stack">
+						<header>
+							<strong>Analysis Distribution</strong>
+							<span class="status amber">Recent history</span>
+						</header>
+						<p>Track categories, model usage, commit volume, and repository hotspots before turning history
+							into new prompts or codemap instructions.</p>
+						<div class="chart">
+							<div class="bar-row">
+								<label>Frontend workflow</label>
+								<div class="bar" style="--size: 81%;"></div>
+								<span>81</span>
+							</div>
+							<div class="bar-row">
+								<label>Editor internals</label>
+								<div class="bar" style="--size: 73%;"></div>
+								<span>73</span>
+							</div>
+							<div class="bar-row">
+								<label>Memory system</label>
+								<div class="bar" style="--size: 58%;"></div>
+								<span>58</span>
+							</div>
+							<div class="bar-row">
+								<label>Git integration</label>
+								<div class="bar" style="--size: 66%;"></div>
+								<span>66</span>
+							</div>
+						</div>
+					</article>
+				</div>
+			</article>
+
+			<article class="panel-card" id="shot-tracker" aria-label="Tracker and statistics showcase" role="region"
+				style="padding: 22px;">
+				<div class="section-header">
+					<div>
+						<span>Delivery Flow</span>
+						<strong>Tracker, statistics, and reporting</strong>
+						<p class="section-copy">Keep prompt work moving through statuses, review time spent, and export
+							readable reports without copying context between tools.</p>
+					</div>
+					<span class="status rose">Execution layer</span>
+				</div>
+
+				<div class="stack-list">
+					<article class="stack">
+						<header>
+							<strong>Prompt Tracker</strong>
+							<span class="status blue">Kanban panel</span>
+						</header>
+						<p>Move prompts across draft, in-progress, review, report, and closed states while preserving
+							branch links and chat context.</p>
+						<div class="field-grid">
+							<div class="mini-card">
+								<strong>Draft</strong>
+								<p>4 prompts</p>
+							</div>
+							<div class="mini-card">
+								<strong>In progress</strong>
+								<p>7 prompts</p>
+							</div>
+							<div class="mini-card">
+								<strong>Review</strong>
+								<p>3 prompts</p>
+							</div>
+							<div class="mini-card">
+								<strong>Report</strong>
+								<p>2 prompts</p>
+							</div>
+						</div>
+					</article>
+
+					<article class="stack">
+						<header>
+							<strong>Statistics Export</strong>
+							<span class="status green">HTML + Markdown</span>
+						</header>
+						<p>Build management-friendly summaries with hours, filters, prompt statuses, and optional
+							hourly-rate totals for delivery reporting.</p>
+						<div class="chart">
+							<div class="bar-row">
+								<label>Writing</label>
+								<div class="bar" style="--size: 42%;"></div>
+								<span>8.4h</span>
+							</div>
+							<div class="bar-row">
+								<label>Implementing</label>
+								<div class="bar" style="--size: 76%;"></div>
+								<span>15.2h</span>
+							</div>
+							<div class="bar-row">
+								<label>On task</label>
+								<div class="bar" style="--size: 64%;"></div>
+								<span>12.8h</span>
+							</div>
+						</div>
+					</article>
+
+					<article class="stack">
+						<header>
+							<strong>Active Development Note</strong>
+							<span class="status amber">Roadmap-friendly</span>
+						</header>
+						<p>The extension already covers the full prompt lifecycle, while surfaces like voice input,
+							codemap workflows, and advanced reports continue to evolve.</p>
+					</article>
+				</div>
+			</article>
+		</section>
+
+		<section class="footnote">
+			<div>
+				<strong>How to use this page</strong><br>
+				Open this local HTML file in a browser and capture element or full-page screenshots for README assets.
+				The layout is intentionally modular so new sections can be added as the extension grows.
+			</div>
+			<div>
+				<strong>Recommended capture targets</strong><br>
+				Use hero-stage for the lead image, shot-sidebar for prompt navigation, shot-editor for the main
+				workflow, shot-memory for project memory, and shot-tracker for delivery and analytics surfaces.
+			</div>
+		</section>
+	</main>
+</body>
+
+</html>

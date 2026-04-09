@@ -1,6 +1,6 @@
-# Общая инструкция (v.02)
+# General Instructions (v.03)
 
-- Отвечай, рассуждай и все пиши на языке локализации `vscode`.
-- Перед реализацией сохрани план действий в файл `plan.md` в папке проекта `Prompt directory`.
-- После реализации сохрани отчет в файл `report.md` в папке проекта `Prompt directory`.
-- После реализации сохрани значение "completed" в файле `config.json` в папке проекта `Prompt directory` по ключу `status`.
+- Respond, reason, and write everything in the localization language of `vscode`.
+- Before implementation, save the action plan to the file `plan.md` in the project folder `Prompt directory`.
+- After implementation, save the report to the file `report.md` in the project folder `Prompt directory`.
+- After implementation, save the value "completed" in the file `config.json` in the project folder `Prompt directory` under the key `status`.

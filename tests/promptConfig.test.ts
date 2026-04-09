@@ -20,6 +20,7 @@ test('normalizeStoredPromptConfig backfills missing promptUuid for legacy prompt
 	assert.equal(result.config.description, 'Created before promptUuid existed');
 	assert.equal(result.config.trackedBranch, '');
 	assert.deepEqual(result.config.trackedBranchesByProject, {});
+	assert.equal(result.config.notes, '');
 });
 
 test('normalizeStoredPromptConfig preserves existing promptUuid', () => {

@@ -30,6 +30,7 @@ function makePromptConfig(id: string, status: PromptStatus): PromptConfig {
 		timeSpentImplementing: 0,
 		timeSpentOnTask: 0,
 		timeSpentUntracked: 0,
+		notes: '',
 		createdAt: '2026-04-06T00:00:00.000Z',
 		updatedAt: '2026-04-06T00:00:00.000Z',
 	};

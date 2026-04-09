@@ -257,6 +257,7 @@ export class StorageService {
 		const stable = {
 			content: prompt.content,
 			report: prompt.report,
+			notes: prompt.notes,
 			contextFiles: [...(prompt.contextFiles || [])].map(file => file.trim()).sort(),
 		};
 		return JSON.stringify(stable);
@@ -366,11 +367,12 @@ export class StorageService {
 
 		const contentChanged = previousPrompt.content !== nextPrompt.content;
 		const reportChanged = previousPrompt.report !== nextPrompt.report;
+		const notesChanged = previousPrompt.notes !== nextPrompt.notes;
 		const previousFiles = [...(previousPrompt.contextFiles || [])].map(file => file.trim()).sort();
 		const nextFiles = [...(nextPrompt.contextFiles || [])].map(file => file.trim()).sort();
 		const filesChanged = JSON.stringify(previousFiles) !== JSON.stringify(nextFiles);
 
-		if (!contentChanged && !reportChanged && !filesChanged) {
+		if (!contentChanged && !reportChanged && !notesChanged && !filesChanged) {
 			return false;
 		}
 
@@ -378,7 +380,7 @@ export class StorageService {
 			return true;
 		}
 
-		if (reportChanged || filesChanged) {
+		if (reportChanged || notesChanged || filesChanged) {
 			return true;
 		}
 

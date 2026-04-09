@@ -12,7 +12,7 @@ import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { generateSmartTitle } from '../utils/smartTitle.js';
 import type { EditorPromptViewState, EditorPromptViewStateKeySource, Prompt, PromptContextFileCard } from '../types/prompt.js';
-import { createDefaultPrompt } from '../types/prompt.js';
+import { createDefaultPrompt, shouldShowPromptPlanForStatus } from '../types/prompt.js';
 import type { ClipboardImagePayload, WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
 import type { GitOverlaySnapshot } from '../types/git.js';
 import type { StorageService } from '../services/storageService.js';
@@ -203,7 +203,7 @@ export class EditorPanelManager {
 
 		const promptRef = this.panelPromptRefs.get(panelKey);
 		const currentPromptId = (promptRef?.id || '').trim();
-		if (!promptRef || promptRef.status !== 'in-progress' || currentPromptId !== promptId) {
+		if (!promptRef || !shouldShowPromptPlanForStatus(promptRef.status) || currentPromptId !== promptId) {
 			this.clearPromptPlanTracking(panelKey);
 			this.postPromptPlanSnapshot(panelKey, currentPromptId || undefined, false, '');
 			return;
@@ -235,7 +235,7 @@ export class EditorPanelManager {
 
 	private async syncPromptPlanSnapshot(panelKey: string, prompt: Prompt): Promise<void> {
 		const promptId = (prompt.id || '').trim();
-		if (prompt.status !== 'in-progress' || !promptId) {
+		if (!shouldShowPromptPlanForStatus(prompt.status) || !promptId) {
 			this.clearPromptPlanTracking(panelKey);
 			this.postPromptPlanSnapshot(panelKey, promptId || undefined, false, '');
 			return;
@@ -3575,8 +3575,8 @@ export class EditorPanelManager {
 		try {
 			await vscode.workspace.fs.stat(planUri);
 		} catch {
-			vscode.window.showWarningMessage('Файл plan.md для этого промпта пока не найден.');
-			return;
+			await vscode.workspace.fs.writeFile(planUri, Buffer.from('', 'utf-8'));
+			await this.readPromptPlanSnapshot(panelKey, promptId, planUri);
 		}
 
 		const doc = await vscode.workspace.openTextDocument(planUri);

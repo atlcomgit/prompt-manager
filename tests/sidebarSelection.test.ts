@@ -32,6 +32,7 @@ function makePrompt(overrides: Partial<PromptConfig>): PromptConfig {
 		timeSpentImplementing: 0,
 		timeSpentOnTask: 0,
 		timeSpentUntracked: 0,
+		notes: '',
 		createdAt: now,
 		updatedAt: now,
 		...overrides,

@@ -32,6 +32,10 @@ export function getNextPromptStatus(status: PromptStatus): PromptStatus | null {
 	return PROMPT_STATUS_ORDER[index + 1] || null;
 }
 
+export function shouldShowPromptPlanForStatus(status: PromptStatus): boolean {
+	return status !== 'draft';
+}
+
 /** Editor tab in prompt settings page */
 export type EditorPromptTab = 'main' | 'process';
 
@@ -213,6 +217,8 @@ export interface PromptConfig {
 	timeSpentOnTask: number;
 	/** Additional manually entered time (ms) */
 	timeSpentUntracked: number;
+	/** Process notes for the prompt execution */
+	notes: string;
 
 	// --- Timestamps ---
 	createdAt: string;
@@ -301,6 +307,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		timeSpentImplementing: 0,
 		timeSpentOnTask: 0,
 		timeSpentUntracked: 0,
+		notes: '',
 		createdAt: now,
 		updatedAt: now,
 		content: '',

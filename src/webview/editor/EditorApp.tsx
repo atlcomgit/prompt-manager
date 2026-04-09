@@ -24,6 +24,7 @@ import {
   createDefaultEditorPromptViewState,
   createDefaultPrompt,
   normalizeEditorPromptViewState,
+  shouldShowPromptPlanForStatus,
 } from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
 import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
@@ -44,7 +45,7 @@ interface SelectOption {
   description?: string;
 }
 
-type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' | 'plan' | 'tech' | 'integrations' | 'agent' | 'files' | 'time';
+type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' | 'notes' | 'plan' | 'tech' | 'integrations' | 'agent' | 'files' | 'time';
 type InlineNotice = { kind: 'error' | 'info'; message: string };
 type ChatEntryAction = 'start' | 'open';
 type GitOverlayMode = 'default' | 'start-chat-preflight' | 'open-chat-preflight';
@@ -60,6 +61,7 @@ const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
   prompt: true,
   globalPrompt: false,
   report: false,
+  notes: false,
   plan: false,
   tech: false,
   integrations: false,
@@ -212,7 +214,7 @@ export const EditorApp: React.FC = () => {
         return null;
       }
       const candidate = value as Record<string, unknown>;
-      const keys: Array<Exclude<SectionKey, 'agent' | 'files'>> = ['basic', 'workspace', 'prompt', 'globalPrompt', 'report', 'plan', 'tech', 'integrations', 'time'];
+      const keys: Array<Exclude<SectionKey, 'agent' | 'files'>> = ['basic', 'workspace', 'prompt', 'globalPrompt', 'report', 'notes', 'plan', 'tech', 'integrations', 'time'];
       const allValid = keys.every((key) => typeof candidate[key] === 'boolean');
       if (!allValid) {
         return null;
@@ -223,6 +225,7 @@ export const EditorApp: React.FC = () => {
         prompt: Boolean(candidate.prompt),
         globalPrompt: Boolean(candidate.globalPrompt),
         report: Boolean(candidate.report),
+        notes: Boolean(candidate.notes),
         plan: Boolean(candidate.plan),
         tech: Boolean(candidate.tech),
         integrations: Boolean(candidate.integrations),
@@ -798,6 +801,13 @@ export const EditorApp: React.FC = () => {
     return chunks;
   }, [prompt.report, prompt.httpExamples]);
 
+  const notesSummary = useMemo(() => {
+    const chunks: string[] = [];
+    const notesText = (prompt.notes || '').replace(/\s+/g, ' ').trim();
+    if (notesText) chunks.push(`Заметки: ${toShortText(notesText, 64)}`);
+    return chunks;
+  }, [prompt.notes]);
+
   const planSummary = useMemo(() => {
     const chunks: string[] = [];
     const nonEmptyLines = promptPlanState.content
@@ -837,7 +847,7 @@ export const EditorApp: React.FC = () => {
     return segments;
   }, [planLines, planHighlightedLineIndexes]);
 
-  const shouldShowPlanSection = prompt.status === 'in-progress' && promptPlanState.exists;
+  const shouldShowPlanSection = shouldShowPromptPlanForStatus(prompt.status);
 
   const workspaceSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -3370,9 +3380,23 @@ export const EditorApp: React.FC = () => {
             </>
           ))}
 
+            {renderSection('notes', t('editor.notes'), notesSummary, (
+            <>
+              <div style={styles.field}>
+              <label style={styles.label}>{t('editor.notes')}</label>
+              <TextArea
+                value={prompt.notes || ''}
+                onChange={v => updateField('notes', v)}
+                placeholder={t('editor.notesPlaceholder')}
+                rows={6}
+              />
+              </div>
+            </>
+            ))}
+
           {shouldShowPlanSection ? renderSection('plan', 'План', planSummary, (
             <>
-              {promptPlanState.content.trim().length > 0 ? (
+              {promptPlanState.exists && promptPlanState.content.trim().length > 0 ? (
                 <div style={styles.planRawContent} role="log" aria-live="polite" aria-atomic="false">
                   {planLineSegments.map((segment, segmentIndex) => (
                     <div
@@ -3387,8 +3411,10 @@ export const EditorApp: React.FC = () => {
                     </div>
                   ))}
                 </div>
+                ) : promptPlanState.exists ? (
+                <div style={styles.planRawContentEmpty}>{t('editor.planEmpty')}</div>
               ) : (
-                <div style={styles.planRawContentEmpty}>Файл plan.md пуст.</div>
+                <div style={styles.planRawContentEmpty}>{t('editor.planMissing')}</div>
               )}
               <div style={styles.fieldActionGroup}>
                 <button

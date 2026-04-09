@@ -35,6 +35,8 @@ import {
 	resolveGitOverlayBranchNames,
 } from '../utils/gitOverlay.js';
 import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
+import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
+import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1034,27 +1036,34 @@ export class GitService {
 	}
 
 	private async getChangeGroups(project: string, projectPath: string): Promise<GitOverlayProjectSnapshot['changeGroups']> {
-		const statusOutput = await this.runGitFileCommandOptional(projectPath, ['status', '--porcelain', '--untracked-files=all']);
-		const conflictOutput = await this.runGitFileCommandOptional(projectPath, ['diff', '--name-only', '--diff-filter=U']);
-		const stagedOutput = await this.runGitFileCommandOptional(projectPath, [
-			'diff',
-			'--cached',
-			'--name-status',
-			'--find-renames',
-			'--diff-filter=ACDMR',
-		]);
-		const workingTreeOutput = await this.runGitFileCommandOptional(projectPath, [
-			'diff',
-			'--name-status',
-			'--find-renames',
-			'--diff-filter=ACDMR',
+		const excludedPaths = getCodeMapSettings().excludedPaths;
+		const shouldTrackPath = (filePath: string): boolean => {
+			const normalizedFilePath = String(filePath || '').trim();
+			return Boolean(normalizedFilePath) && !shouldIgnoreRealtimeRefreshPath(normalizedFilePath, excludedPaths);
+		};
+		const [statusOutput, conflictOutput, stagedOutput, workingTreeOutput] = await Promise.all([
+			this.runGitFileCommandOptional(projectPath, ['status', '--porcelain', '--untracked-files=all']),
+			this.runGitFileCommandOptional(projectPath, ['diff', '--name-only', '--diff-filter=U']),
+			this.runGitFileCommandOptional(projectPath, [
+				'diff',
+				'--cached',
+				'--name-status',
+				'--find-renames',
+				'--diff-filter=ACDMR',
+			]),
+			this.runGitFileCommandOptional(projectPath, [
+				'diff',
+				'--name-status',
+				'--find-renames',
+				'--diff-filter=ACDMR',
+			]),
 		]);
 
 		const conflictedFiles = new Set(
 			conflictOutput
 				.split(/\r?\n/)
 				.map(line => line.trim())
-				.filter(Boolean),
+				.filter(shouldTrackPath),
 		);
 
 		const mapChange = (file: StagedFileChange, group: GitOverlayProjectSnapshot['changeGroups'][keyof GitOverlayProjectSnapshot['changeGroups']], groupName: 'merge' | 'staged' | 'workingTree' | 'untracked', staged: boolean) => {
@@ -1092,7 +1101,7 @@ export class GitService {
 				.split(/\r?\n/)
 				.filter(line => line.startsWith('?? '))
 				.map(line => line.slice(3).trim())
-				.filter(Boolean)
+				.filter(shouldTrackPath)
 				.map(filePath => ({
 					project,
 					path: filePath,
@@ -1108,13 +1117,13 @@ export class GitService {
 		};
 
 		for (const file of this.parseStagedNameStatus(stagedOutput)) {
-			if (!conflictedFiles.has(file.path)) {
+			if (!conflictedFiles.has(file.path) && shouldTrackPath(file.path)) {
 				mapChange(file, changeGroups.staged, 'staged', true);
 			}
 		}
 
 		for (const file of this.parseStagedNameStatus(workingTreeOutput)) {
-			if (!conflictedFiles.has(file.path)) {
+			if (!conflictedFiles.has(file.path) && shouldTrackPath(file.path)) {
 				mapChange(file, changeGroups.workingTree, 'workingTree', false);
 			}
 		}

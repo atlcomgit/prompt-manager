@@ -27,8 +27,10 @@ import {
 	collectGitOverlayProjectsWithChangesOnTrackedBranches,
 	collectGitOverlayProjectsWithChangesOutsideTrackedOrPrompt,
 	formatChangeSize,
+	GIT_OVERLAY_EXPECTED_BRANCH_CURRENT,
 	GitOverlay,
 	isGitOverlayPassivePromptProject,
+	resolveGitOverlayEffectiveExpectedBranch,
 	resolveChangeDiffStats,
 	resolveGitOverlayPostCommitProjects,
 } from '../src/webview/editor/components/GitOverlay.js';
@@ -823,6 +825,18 @@ test('GitOverlay keeps current tracked branch in per-project options', () => {
 
 	assert.equal(markup.match(/value="master"[^>]*>master<\/option>/g)?.length || 0, 2);
 	assert.equal(markup.match(/value="develop"[^>]*>develop<\/option>/g)?.length || 0, 1);
+});
+
+test('resolveGitOverlayEffectiveExpectedBranch resolves current sentinel to the current branch', () => {
+	assert.equal(
+		resolveGitOverlayEffectiveExpectedBranch(
+			{ currentBranch: 'feature/local-work' },
+			GIT_OVERLAY_EXPECTED_BRANCH_CURRENT,
+			'feature/task-42',
+			['main'],
+		),
+		'feature/local-work',
+	);
 });
 
 test('GitOverlay keeps current non-tracked branch only in source options and removes it from expected options', () => {
@@ -2182,7 +2196,55 @@ test('GitOverlay excludes the current branch from expected branch options', () =
 
 	assert.equal((markup.match(/>main<\/option>/g) || []).length, 0);
 	assert.equal((markup.match(/>develop<\/option>/g) || []).length, 1);
+	assert.equal((markup.match(/editor\.gitOverlayProjectExpectedCurrentBranch/g) || []).length, 1);
 	assert.equal(markup.match(/<select/g)?.length || 0, 1);
+});
+
+test('GitOverlay hides switch-all action while the overlay is waiting for a fresh snapshot', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'applyBranchTargets:all',
+		waitingForSnapshotAction: 'applyBranchTargets:all',
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'main',
+					branches: [
+						{
+							name: 'main',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'feature/task-42',
+							current: false,
+							exists: true,
+							kind: 'prompt',
+							upstream: 'origin/feature/task-42',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.doesNotMatch(markup, /editor\.gitOverlaySwitchAll/);
 });
 
 test('GitOverlay enables step 1 switching for clean projects outside tracked and prompt branches', () => {
@@ -2667,6 +2729,7 @@ test('GitOverlay keeps progress track mounted while idle to avoid layout jumps',
 test('GitOverlay renders default mode as read-only for prompts in progress', () => {
 	const markup = renderGitOverlayMarkup({
 		promptStatus: 'in-progress',
+		onMarkCompletedInPlace: () => { },
 		snapshot: createTestSnapshot({
 			projects: [
 				createTestProject({
@@ -2714,6 +2777,7 @@ test('GitOverlay renders default mode as read-only for prompts in progress', () 
 
 	assert.match(markup, /editor\.gitOverlayStepCommitTitle/);
 	assert.match(markup, /editor\.gitOverlayReadOnlyModeHint[\s\S]*editor\.gitOverlayPromptBranch/);
+	assert.match(markup, /editor\.gitOverlayMarkCompletedInPlace/);
 	assert.match(markup, /<select[^>]*disabled/);
 	assert.match(markup, /<textarea[^>]*disabled[^>]*placeholder="editor\.gitOverlayCommitPlaceholder"/);
 	assert.match(markup, /<button[^>]*disabled=""[^>]*><span[^>]*><span>editor\.gitOverlayCommitProject<\/span><\/span><\/button>/);

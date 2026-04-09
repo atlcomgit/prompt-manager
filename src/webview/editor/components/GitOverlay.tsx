@@ -30,6 +30,7 @@ type Props = {
 	snapshot: GitOverlaySnapshot | null;
 	commitMessages: Record<string, string>;
 	busyAction: string | null;
+	waitingForSnapshotAction?: string | null;
 	processLabel?: string | null;
 	completedActions: Record<GitOverlayActionKind, boolean>;
 	promptStatus: PromptStatus;
@@ -41,6 +42,7 @@ type Props = {
 	preferredTrackedBranchesByProject?: Record<string, string>;
 	onClose: () => void;
 	onDone: (status: PromptStatus | null) => void;
+	onMarkCompletedInPlace?: () => void;
 	onRefresh: (mode?: 'local' | 'fetch' | 'sync') => void;
 	onApplyBranchTargets?: (
 		sourceBranchesByProject: Record<string, string>,
@@ -89,6 +91,8 @@ type ProjectValidation = {
 };
 
 type RefreshProgressMode = 'idle' | 'loading' | 'auto' | 'sync' | 'fetch' | 'local';
+
+export const GIT_OVERLAY_EXPECTED_BRANCH_CURRENT = '__pm_git_overlay_current__';
 
 function countProjectChanges(project: GitOverlayProjectSnapshot): number {
 	return project.changeGroups.merge.length
@@ -158,6 +162,24 @@ function resolveGitOverlayImplicitExpectedBranch(
 	}
 
 	return '';
+}
+
+export function isGitOverlayCurrentExpectedBranchSelection(branchName: string): boolean {
+	return branchName.trim() === GIT_OVERLAY_EXPECTED_BRANCH_CURRENT;
+}
+
+export function resolveGitOverlayEffectiveExpectedBranch(
+	project: Pick<GitOverlayProjectSnapshot, 'currentBranch'>,
+	explicitTargetBranch: string,
+	promptBranch: string,
+	trackedBranches: string[],
+): string {
+	const normalizedExplicitTargetBranch = explicitTargetBranch.trim();
+	if (isGitOverlayCurrentExpectedBranchSelection(normalizedExplicitTargetBranch)) {
+		return project.currentBranch.trim();
+	}
+
+	return normalizedExplicitTargetBranch || resolveGitOverlayImplicitExpectedBranch(project, promptBranch, trackedBranches);
 }
 
 function isGitOverlayStep1ProjectActionable(
@@ -460,6 +482,10 @@ function resolveTargetBranchesByProject(
 		const sourceBranch = (trackedBranchesByProject[project.project] || '').trim();
 		const options = buildProjectExpectedBranchOptions(project, trackedBranchOptions, sourceBranch);
 		const explicitTargetBranch = (normalizedExplicitTargetBranchesByProject[project.project] || '').trim();
+		if (isGitOverlayCurrentExpectedBranchSelection(explicitTargetBranch)) {
+			result[project.project] = explicitTargetBranch;
+			continue;
+		}
 		if (explicitTargetBranch && options.includes(explicitTargetBranch)) {
 			result[project.project] = explicitTargetBranch;
 			continue;
@@ -711,7 +737,13 @@ const TextActionButton: React.FC<{
 	tone?: 'default' | 'danger';
 	disabled?: boolean;
 	loading?: boolean;
-}> = ({ label, onClick, tone = 'default', disabled = false, loading = false }) => (
+	hidden?: boolean;
+}> = ({ label, onClick, tone = 'default', disabled = false, loading = false, hidden = false }) => {
+	if (hidden) {
+		return null;
+	}
+
+	return (
 	<button
 		type="button"
 		onClick={onClick}
@@ -729,6 +761,7 @@ const TextActionButton: React.FC<{
 		</span>
 	</button>
 );
+};
 
 const ActionButton: React.FC<{
 	label: string;
@@ -737,7 +770,13 @@ const ActionButton: React.FC<{
 	loading?: boolean;
 	variant?: 'primary' | 'secondary' | 'success' | 'danger';
 	size?: 'default' | 'compact';
-}> = ({ label, onClick, disabled = false, loading = false, variant = 'secondary', size = 'default' }) => (
+	hidden?: boolean;
+}> = ({ label, onClick, disabled = false, loading = false, variant = 'secondary', size = 'default', hidden = false }) => {
+	if (hidden) {
+		return null;
+	}
+
+	return (
 	<button
 		type="button"
 		onClick={onClick}
@@ -762,6 +801,7 @@ const ActionButton: React.FC<{
 		</span>
 	</button>
 );
+};
 
 const InlineHint: React.FC<{
 	message: string;
@@ -800,6 +840,7 @@ export const GitOverlay: React.FC<Props> = ({
 	snapshot,
 	commitMessages,
 	busyAction,
+	waitingForSnapshotAction = null,
 	processLabel = null,
 	completedActions,
 	promptStatus,
@@ -811,6 +852,7 @@ export const GitOverlay: React.FC<Props> = ({
 	preferredTrackedBranchesByProject = {},
 	onClose,
 	onDone,
+	onMarkCompletedInPlace,
 	onRefresh,
 	onApplyBranchTargets,
 	onSwitchBranch,
@@ -849,6 +891,8 @@ export const GitOverlay: React.FC<Props> = ({
 	const isChatPreflightMode = isStartChatPreflightMode || isOpenChatPreflightMode;
 	const isDraftPrompt = promptStatus === 'draft';
 	const isReadOnlyFlow = !isChatPreflightMode && promptStatus === 'in-progress';
+	const isWaitingForSnapshot = Boolean(waitingForSnapshotAction);
+	const shouldHideActionWhileWaiting = (actionName: string): boolean => isWaitingForSnapshot && waitingForSnapshotAction === actionName;
 	const promptBranch = (snapshot?.promptBranch || '').trim();
 	const allProjects = snapshot?.projects || [];
 	const normalizedSelectedProjects = useMemo(
@@ -1010,8 +1054,11 @@ export const GitOverlay: React.FC<Props> = ({
 	const step1ProjectsBlockedForApply = useMemo(
 		() => step1AvailableProjects.filter((project) => {
 			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
-			const implicitTargetBranch = resolveGitOverlayImplicitExpectedBranch(project, promptBranch, trackedBranchOptions);
-			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim() || implicitTargetBranch;
+			const selectedTargetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
+			if (isGitOverlayCurrentExpectedBranchSelection(selectedTargetBranch)) {
+				return false;
+			}
+			const targetBranch = resolveGitOverlayEffectiveExpectedBranch(project, selectedTargetBranch, promptBranch, trackedBranchOptions);
 			const needsTargetSwitch = Boolean(targetBranch) && project.currentBranch.trim() !== targetBranch;
 			if (!needsTargetSwitch && !isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions)) {
 				return false;
@@ -1035,8 +1082,11 @@ export const GitOverlay: React.FC<Props> = ({
 	const step1ProjectsReadyForApply = useMemo(
 		() => step1AvailableProjects.filter((project) => {
 			const sourceBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
-			const implicitTargetBranch = resolveGitOverlayImplicitExpectedBranch(project, promptBranch, trackedBranchOptions);
-			const targetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim() || implicitTargetBranch;
+			const selectedTargetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
+			if (isGitOverlayCurrentExpectedBranchSelection(selectedTargetBranch)) {
+				return false;
+			}
+			const targetBranch = resolveGitOverlayEffectiveExpectedBranch(project, selectedTargetBranch, promptBranch, trackedBranchOptions);
 			const needsTargetSwitch = Boolean(targetBranch) && project.currentBranch.trim() !== targetBranch;
 			if (!needsTargetSwitch && !isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions)) {
 				return false;
@@ -1426,8 +1476,16 @@ export const GitOverlay: React.FC<Props> = ({
 
 	const handleApplyProjectBranchTargets = useCallback((projectName: string) => {
 		const sourceBranch = (resolvedTrackedBranchesByProject[projectName] || '').trim();
-		const targetBranch = (resolvedTargetBranchesByProject[projectName] || '').trim();
-		if (!targetBranch) {
+		const project = selectedSnapshotProjects.find(item => item.project === projectName);
+		if (!project) {
+			return;
+		}
+		const selectedTargetBranch = (resolvedTargetBranchesByProject[projectName] || '').trim();
+		if (isGitOverlayCurrentExpectedBranchSelection(selectedTargetBranch)) {
+			return;
+		}
+		const targetBranch = resolveGitOverlayEffectiveExpectedBranch(project, selectedTargetBranch, promptBranch, trackedBranchOptions);
+		if (!targetBranch || targetBranch === project.currentBranch.trim()) {
 			return;
 		}
 		onApplyBranchTargets?.(
@@ -1435,7 +1493,7 @@ export const GitOverlay: React.FC<Props> = ({
 			{ [projectName]: targetBranch },
 			projectName,
 		);
-	}, [onApplyBranchTargets, resolvedTargetBranchesByProject, resolvedTrackedBranchesByProject]);
+	}, [onApplyBranchTargets, promptBranch, resolvedTargetBranchesByProject, resolvedTrackedBranchesByProject, selectedSnapshotProjects, trackedBranchOptions]);
 
 	const handleAddProjectToPrompt = useCallback((projectName: string) => {
 		if (!onUpdateProjects) {
@@ -1688,6 +1746,15 @@ export const GitOverlay: React.FC<Props> = ({
 							) : (
 							<div style={styles.sectionBody}>
 								{isReadOnlyFlow ? <InlineHint message={t('editor.gitOverlayReadOnlyModeHint')} tone="error" /> : null}
+								{isReadOnlyFlow && onMarkCompletedInPlace ? (
+									<div style={styles.inlineActionRow}>
+										<ActionButton
+											label={t('editor.gitOverlayMarkCompletedInPlace')}
+											onClick={onMarkCompletedInPlace}
+											variant="success"
+										/>
+									</div>
+								) : null}
 								<div style={styles.fieldBlock}>
 									<label style={styles.label}>{t('editor.gitOverlayPromptBranch')}</label>
 									<div style={{
@@ -1847,15 +1914,19 @@ export const GitOverlay: React.FC<Props> = ({
 											const projectTrackedBranchOptions = buildProjectTrackedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
 											const projectExpectedBranchOptions = buildProjectExpectedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
 											const projectNeedsSync = project.available && Boolean(project.upstream.trim()) && project.behind > 0;
-											const implicitTargetBranch = resolveGitOverlayImplicitExpectedBranch(project, promptBranch, trackedBranchOptions);
-											const effectiveTargetBranch = selectedTargetBranch || implicitTargetBranch;
+											const currentTargetSelected = isGitOverlayCurrentExpectedBranchSelection(selectedTargetBranch);
+											const effectiveTargetBranch = resolveGitOverlayEffectiveExpectedBranch(project, selectedTargetBranch, promptBranch, trackedBranchOptions);
 											const projectNeedsTargetSwitch = Boolean(effectiveTargetBranch) && currentBranch !== effectiveTargetBranch;
-											const projectActionableForApply = projectNeedsTargetSwitch
+											const projectActionableForApply = currentTargetSelected
+												? false
+												: projectNeedsTargetSwitch
 												|| isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions);
 											const targetRequiresSource = shouldGitOverlayRequireSourceBranch(project, effectiveTargetBranch);
 											const hideSourceBranchField = projectTrackedBranchOptions.length === 0
+												|| currentTargetSelected
 												|| (Boolean(effectiveTargetBranch) && !targetRequiresSource);
-											const hideExpectedBranchField = projectExpectedBranchOptions.length === 0;
+											const hideExpectedBranchField = projectExpectedBranchOptions.length === 0
+												&& (!currentBranch || (!selectedTargetBranch && !projectActionableForApply));
 											const rowOnPrompt = Boolean(promptBranch) && currentBranch === promptBranch && effectiveTargetBranch === promptBranch;
 											const rowCanApply = project.available
 												&& projectActionableForApply
@@ -1869,6 +1940,8 @@ export const GitOverlay: React.FC<Props> = ({
 												&& ((targetRequiresSource && !selectedTrackedBranch) || !effectiveTargetBranch || projectNeedsSync || projectNeedsTargetSwitch);
 											const rowStatusLabel = !project.available
 												? t('editor.gitOverlayStateUnavailable')
+												: currentTargetSelected
+													? t('editor.gitOverlayStateCurrentSelected')
 												: !projectActionableForApply
 													? t('editor.gitOverlayStateNoChanges')
 												: projectNeedsSync
@@ -1949,6 +2022,7 @@ export const GitOverlay: React.FC<Props> = ({
 																disabled={isReadOnlyFlow}
 															>
 																<option value="">{t('editor.gitOverlaySelectPlaceholder')}</option>
+																<option value={GIT_OVERLAY_EXPECTED_BRANCH_CURRENT}>{t('editor.gitOverlayProjectExpectedCurrentBranch')}</option>
 																{projectExpectedBranchOptions.map(branch => (
 																	<option key={`${project.project}-target-${branch}`} value={branch}>{branch}</option>
 																))}
@@ -1979,6 +2053,7 @@ export const GitOverlay: React.FC<Props> = ({
 																onClick={() => handleApplyProjectBranchTargets(project.project)}
 																disabled={isReadOnlyFlow || !rowCanApply}
 																loading={rowActionLoading}
+																hidden={shouldHideActionWhileWaiting(`applyBranchTargets:${project.project}`)}
 																variant="primary"
 																size="compact"
 															/>
@@ -1998,6 +2073,7 @@ export const GitOverlay: React.FC<Props> = ({
 												onClick={() => onApplyBranchTargets?.(step1ApplySourceBranches, step1ApplyTargetBranches)}
 												disabled={isReadOnlyFlow || !canApplyAllBranchTargets}
 												loading={isApplyingAllBranchTargets}
+											hidden={shouldHideActionWhileWaiting('applyBranchTargets:all')}
 											variant="primary"
 										/>
 									) : null}
@@ -2058,6 +2134,7 @@ export const GitOverlay: React.FC<Props> = ({
 																tone="danger"
 																disabled={isReadOnlyFlow || projectChanges.length === 0 || !onDiscardProjectChanges}
 																loading={isDiscardingProject}
+																hidden={shouldHideActionWhileWaiting(`discardProject:${project.project}`)}
 															/>
 														<button type="button" onClick={() => toggleProject(project.project)} style={styles.linkButton}>
 															{expanded ? t('editor.gitOverlayHideChanges') : t('editor.gitOverlayShowChanges')}
@@ -2112,6 +2189,7 @@ export const GitOverlay: React.FC<Props> = ({
 																				tone="danger"
 																				disabled={isReadOnlyFlow}
 																				loading={isDiscarding}
+																				hidden={shouldHideActionWhileWaiting(`discardFile:${project.project}:${change.group}:${change.path}`)}
 																			/>
 																				<TextActionButton label={t('editor.gitOverlayOpenFile')} onClick={() => handleOpenProjectFile(project.project, change)} disabled={isDiscarding} />
 																				<TextActionButton label={t('editor.gitOverlayOpenDiff')} onClick={() => handleOpenProjectDiff(project.project, change)} disabled={isDiscarding} />
@@ -2150,12 +2228,14 @@ export const GitOverlay: React.FC<Props> = ({
 														onClick={() => onGenerateCommitMessage(project.project)}
 														disabled={isReadOnlyFlow || !validation?.available || validation.branchMismatch || validation.hasConflicts}
 														loading={isGeneratingProject}
+														hidden={shouldHideActionWhileWaiting(`generateCommitMessage:${project.project}`)}
 													/>
 													<ActionButton
 														label={t('editor.gitOverlayCommitProject')}
 														onClick={() => onCommitStaged([{ project: project.project, message: projectCommitMessage.trim() }])}
 														disabled={isReadOnlyFlow || !validation?.committable}
 														loading={isCommittingProject}
+														hidden={shouldHideActionWhileWaiting(`commitStaged:${project.project}`)}
 														variant="primary"
 													/>
 												</div>
@@ -2171,6 +2251,7 @@ export const GitOverlay: React.FC<Props> = ({
 											onClick={() => onGenerateCommitMessage()}
 											disabled={isReadOnlyFlow || !canGenerateAllCommitMessages}
 											loading={isGeneratingAll}
+											hidden={shouldHideActionWhileWaiting('generateCommitMessage:all')}
 										/>
 									) : null}
 									{projectsWithChanges.length > 0 ? (
@@ -2179,6 +2260,7 @@ export const GitOverlay: React.FC<Props> = ({
 											onClick={() => onCommitStaged(commitAllMessages)}
 											disabled={isReadOnlyFlow || !canCommitAllProjects}
 											loading={isCommittingAll}
+											hidden={shouldHideActionWhileWaiting('commitStaged:all')}
 											variant="primary"
 										/>
 									) : null}
@@ -2236,6 +2318,7 @@ export const GitOverlay: React.FC<Props> = ({
 														onClick={() => onPush(promptBranch || undefined, projectsNeedingPush.map(project => project.project))}
 											disabled={isReadOnlyFlow || !canPush}
 											loading={isPushing}
+											hidden={shouldHideActionWhileWaiting('pushPromptBranch')}
 											variant="primary"
 										/>
 									) : null}
@@ -2446,6 +2529,7 @@ export const GitOverlay: React.FC<Props> = ({
 															onClick={() => handleCreateReviewRequest(project)}
 															disabled={isReadOnlyFlow || !canCreateReviewRequest}
 															loading={isCreatingReviewRequest}
+															hidden={shouldHideActionWhileWaiting(`createReviewRequest:${project.project}`) || shouldHideActionWhileWaiting('createReviewRequest:all')}
 															variant="primary"
 														/>
 													) : null}
@@ -2515,6 +2599,7 @@ export const GitOverlay: React.FC<Props> = ({
 												)}
 											disabled={isReadOnlyFlow || !canMerge}
 											loading={isMerging}
+											hidden={shouldHideActionWhileWaiting('mergePromptBranch')}
 											variant="primary"
 										/>
 									) : null}

@@ -369,6 +369,35 @@ test('GitService discardProjectChanges applies each git restore strategy once pe
 	]);
 });
 
+test('GitService getChangeGroups ignores files from default codemap excluded paths', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'status') {
+			return '?? node_modules/skip.js\n?? src/keep.ts';
+		}
+		if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
+			return 'node_modules/conflict.ts\nsrc/conflict.ts';
+		}
+		if (args[0] === 'diff' && args[1] === '--cached') {
+			return 'M\tnode_modules/staged.ts\nM\tsrc/staged.ts';
+		}
+		if (args[0] === 'diff' && args[1] !== '--cached') {
+			return 'M\tnode_modules/work.ts\nM\tsrc/work.ts';
+		}
+		return '';
+	};
+	service.enrichOverlayChangeFile = async (_projectPath: string, item: any) => item;
+
+	const groups = await service.getChangeGroups('api', '/tmp/api');
+
+	assert.deepEqual(groups.merge.map((item: any) => item.path), ['src/conflict.ts']);
+	assert.deepEqual(groups.staged.map((item: any) => item.path), ['src/staged.ts']);
+	assert.deepEqual(groups.workingTree.map((item: any) => item.path), ['src/work.ts']);
+	assert.deepEqual(groups.untracked.map((item: any) => item.path), ['src/keep.ts']);
+});
+
 test('GitService getProjectReviewState returns granular unsupported reasons for review setup', async () => {
 	const { GitService } = await importGitService();
 	const service = new GitService() as any;

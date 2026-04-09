@@ -31,6 +31,7 @@ import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { filterPromptHookIdsForPhase } from '../utils/promptHookPhase.js';
 import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
+import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 import { fetchRemoteText } from '../utils/remoteText.js';
 import {
 	dedupeContextFileReferences,
@@ -1739,6 +1740,66 @@ export class EditorPanelManager {
 		return this.getAllowedBranchesSetting();
 	}
 
+	private getGitOverlayExcludedPathsSetting(): string[] {
+		return getCodeMapSettings().excludedPaths
+			.map(item => item.trim())
+			.filter(Boolean);
+	}
+
+	private resolveGitOverlaySessionProjectNames(projects: string[]): string[] {
+		const normalizedProjects = (projects || []).map(project => project.trim()).filter(Boolean);
+		return normalizedProjects.length > 0
+			? normalizedProjects
+			: this.workspaceService.getWorkspaceFolders();
+	}
+
+	private resolveGitOverlayProjectRelativePath(targetPath: string, projectRootPath: string): string | null {
+		const normalizedTargetPath = path.resolve(targetPath);
+		const normalizedProjectRootPath = path.resolve(projectRootPath);
+		const relativePath = path.relative(normalizedProjectRootPath, normalizedTargetPath);
+		if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+			return null;
+		}
+
+		return relativePath.replace(/\\/g, '/');
+	}
+
+	private doesGitOverlayPathMatchSessionProjects(session: GitOverlaySession, targetPath: string): boolean {
+		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
+		for (const projectName of this.resolveGitOverlaySessionProjectNames(session.projects)) {
+			const projectRootPath = projectPaths.get(projectName);
+			if (!projectRootPath) {
+				continue;
+			}
+
+			if (this.resolveGitOverlayProjectRelativePath(targetPath, projectRootPath) !== null) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private shouldIgnoreGitOverlaySessionFileChange(session: GitOverlaySession, changedPath: string): boolean {
+		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
+		const excludedPaths = this.getGitOverlayExcludedPathsSetting();
+		for (const projectName of this.resolveGitOverlaySessionProjectNames(session.projects)) {
+			const projectRootPath = projectPaths.get(projectName);
+			if (!projectRootPath) {
+				continue;
+			}
+
+			const relativePath = this.resolveGitOverlayProjectRelativePath(changedPath, projectRootPath);
+			if (relativePath === null) {
+				continue;
+			}
+
+			return shouldIgnoreRealtimeRefreshPath(relativePath, excludedPaths);
+		}
+
+		return true;
+	}
+
 	private getGitOverlayTrackedBranchPreference(): string {
 		return this.stateService.getGitOverlayTrackedBranchPreference();
 	}
@@ -1843,10 +1904,10 @@ export class EditorPanelManager {
 		projects: string[],
 	): Promise<void> {
 		const paths = this.workspaceService.getWorkspaceFolderPaths();
-		const snapshotProjects = this.workspaceService.getWorkspaceFolders();
+		const snapshotProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
 		const snapshot = await this.gitService.getGitOverlaySnapshot(
 			paths,
-			snapshotProjects.length > 0 ? snapshotProjects : this.resolveGitOverlayProjects(projects, currentPrompt),
+			snapshotProjects,
 			promptBranch,
 			this.getTrackedBranchesSetting(),
 		);
@@ -1911,6 +1972,15 @@ export class EditorPanelManager {
 				continue;
 			}
 
+			if (changedPath) {
+				if (!this.doesGitOverlayPathMatchSessionProjects(session, changedPath)) {
+					continue;
+				}
+				if (reason === 'file' && this.shouldIgnoreGitOverlaySessionFileChange(session, changedPath)) {
+					continue;
+				}
+			}
+
 			this.clearGitOverlaySessionRefreshTimer(session);
 			session.refreshTimer = setTimeout(() => {
 				session.refreshTimer = null;
@@ -1949,19 +2019,19 @@ export class EditorPanelManager {
 
 		const disposables: vscode.Disposable[] = [
 			repository.state.onDidChange(() => {
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('git', repository.rootUri.fsPath);
 			}),
 		];
 
 		if (repository.onDidCommit) {
 			disposables.push(repository.onDidCommit(() => {
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('git', repository.rootUri.fsPath);
 			}));
 		}
 
 		if (repository.onDidCheckout) {
 			disposables.push(repository.onDidCheckout(() => {
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('git', repository.rootUri.fsPath);
 			}));
 		}
 
@@ -2014,7 +2084,7 @@ export class EditorPanelManager {
 					new vscode.RelativePattern(workspaceRoot, pattern),
 				);
 				const handleGitMetadataChange = () => {
-					this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+					this.scheduleGitOverlayAutoRefreshForActiveSessions('git', workspaceRoot);
 				};
 
 				this.gitOverlayReactiveDisposables.push(
@@ -2038,14 +2108,14 @@ export class EditorPanelManager {
 		if (gitApi.onDidOpenRepository) {
 			this.gitOverlayReactiveDisposables.push(gitApi.onDidOpenRepository((repository) => {
 				this.registerGitOverlayBuiltInRepositoryWatcher(repository);
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('git', repository.rootUri.fsPath);
 			}));
 		}
 
 		if (gitApi.onDidCloseRepository) {
 			this.gitOverlayReactiveDisposables.push(gitApi.onDidCloseRepository((repository) => {
 				this.disposeGitOverlayBuiltInRepositoryWatcher(repository.rootUri.fsPath);
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('git');
+				this.scheduleGitOverlayAutoRefreshForActiveSessions('git', repository.rootUri.fsPath);
 			}));
 		}
 	}

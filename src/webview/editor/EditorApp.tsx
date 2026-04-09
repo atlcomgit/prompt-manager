@@ -292,6 +292,7 @@ export const EditorApp: React.FC = () => {
   const [gitOverlayFileHistory, setGitOverlayFileHistory] = useState<GitOverlayFileHistoryPayload | null>(null);
   const [gitOverlayCommitMessages, setGitOverlayCommitMessages] = useState<Record<string, string>>({});
   const [gitOverlayBusyAction, setGitOverlayBusyAction] = useState<string | null>(null);
+  const [gitOverlayWaitingForSnapshotAction, setGitOverlayWaitingForSnapshotAction] = useState<string | null>(null);
   const [gitOverlayProcessLabel, setGitOverlayProcessLabel] = useState<string | null>(null);
   const [gitOverlayCompletedActions, setGitOverlayCompletedActions] = useState<Record<GitOverlayActionKind, boolean>>({
     push: false,
@@ -404,6 +405,7 @@ export const EditorApp: React.FC = () => {
 
   const clearGitOverlayBusyState = useCallback(() => {
     gitOverlayHoldBusyUntilSnapshotRef.current = false;
+    setGitOverlayWaitingForSnapshotAction(null);
     setGitOverlayBusyAction(null);
     setGitOverlayProcessLabel(null);
   }, []);
@@ -414,6 +416,9 @@ export const EditorApp: React.FC = () => {
     holdUntilSnapshot: boolean = false,
   ) => {
     gitOverlayHoldBusyUntilSnapshotRef.current = holdUntilSnapshot;
+    if (action) {
+      setGitOverlayWaitingForSnapshotAction(null);
+    }
     setGitOverlayBusyAction(action);
     setGitOverlayProcessLabel(processLabel);
   }, []);
@@ -1778,6 +1783,12 @@ export const EditorApp: React.FC = () => {
         showInlineNotice('error', msg.message);
         break;
       case 'info':
+				if (gitOverlayHoldBusyUntilSnapshotRef.current) {
+					const activeBusyAction = gitOverlayBusyActionRef.current;
+					if (activeBusyAction && activeBusyAction !== 'overlay:loading' && !activeBusyAction.startsWith('refresh:')) {
+						setGitOverlayWaitingForSnapshotAction(activeBusyAction);
+					}
+				}
         if (!gitOverlayHoldBusyUntilSnapshotRef.current) {
           clearGitOverlayBusyState();
         }
@@ -3480,6 +3491,7 @@ export const EditorApp: React.FC = () => {
         snapshot={gitOverlaySnapshot}
         commitMessages={gitOverlayCommitMessages}
         busyAction={gitOverlayBusyAction}
+        waitingForSnapshotAction={gitOverlayWaitingForSnapshotAction}
         processLabel={gitOverlayProcessLabel}
         completedActions={gitOverlayCompletedActions}
         promptStatus={prompt.status}
@@ -3522,6 +3534,7 @@ export const EditorApp: React.FC = () => {
           closeGitOverlay();
           handleOpenChatRef.current();
         }}
+        onMarkCompletedInPlace={handleFooterMarkCompleted}
         onDone={(status) => {
           closeGitOverlay();
           if (status) {

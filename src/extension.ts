@@ -35,6 +35,7 @@ import {
 	showPromptManagerOutputChannel,
 } from './utils/promptManagerOutput.js';
 import { clearPromptAiLogIfDateChanged } from './utils/promptAiLogger.js';
+import type { ExternalPromptConfigChange } from './services/storageService.js';
 
 export function activate(context: vscode.ExtensionContext) {
 	getPromptManagerOutputChannel();
@@ -394,6 +395,46 @@ export function activate(context: vscode.ExtensionContext) {
 		sidebarProvider.postMessage({ type: 'promptSaving', id, saving });
 	});
 
+	const pendingExternalPromptConfigChanges = new Map<string, ExternalPromptConfigChange>();
+	let externalPromptConfigSyncTimer: NodeJS.Timeout | null = null;
+	const scheduleExternalPromptConfigSync = (): void => {
+		if (externalPromptConfigSyncTimer) {
+			clearTimeout(externalPromptConfigSyncTimer);
+		}
+
+		externalPromptConfigSyncTimer = setTimeout(() => {
+			externalPromptConfigSyncTimer = null;
+			const changes = [...pendingExternalPromptConfigChanges.values()];
+			pendingExternalPromptConfigChanges.clear();
+			if (changes.length === 0) {
+				return;
+			}
+
+			void (async () => {
+				await editorPanelManager.handleExternalPromptConfigChanges(changes);
+				await Promise.all([
+					sidebarProvider.refreshList(),
+					trackerPanelManager.refresh(),
+				]);
+			})();
+		}, 140);
+	};
+
+	storageService.onDidExternalPromptConfigChange((changes) => {
+		for (const change of changes) {
+			const changeKey = `${change.archived ? 'archive' : 'active'}:${change.id}`;
+			pendingExternalPromptConfigChanges.set(changeKey, change);
+		}
+		scheduleExternalPromptConfigSync();
+	});
+	context.subscriptions.push(new vscode.Disposable(() => {
+		if (externalPromptConfigSyncTimer) {
+			clearTimeout(externalPromptConfigSyncTimer);
+			externalPromptConfigSyncTimer = null;
+		}
+		pendingExternalPromptConfigChanges.clear();
+	}));
+
 	trackerPanelManager.onDidOpenPrompt(async (id) => {
 		await openPromptOutsideSidebar(id);
 	});
@@ -401,6 +442,7 @@ export function activate(context: vscode.ExtensionContext) {
 	// Background cache refresh — detects manual file-system changes with low disk/CPU pressure
 	storageService.startBackgroundCacheRefresh(() => {
 		void sidebarProvider.refreshList();
+		void trackerPanelManager.refresh();
 	});
 
 	// Register commands
@@ -595,7 +637,7 @@ export function activate(context: vscode.ExtensionContext) {
 	// Cleanup
 	context.subscriptions.push({
 		dispose() {
-			storageService.cancelBackgroundCacheRefresh();
+			storageService.dispose();
 			workspaceService.dispose();
 			editorPanelManager.prepareForShutdown();
 			editorPanelManager.disposeAll();

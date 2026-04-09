@@ -9,6 +9,7 @@ import {
   type PromptConfig,
   type PromptStatus,
 } from '../../types/prompt';
+import { applyPromptConfigSnapshotToPrompt, diffPromptConfigSyncFields } from '../../utils/promptExternalSync.js';
 import { PromptDetailOverlay } from './components/PromptDetailOverlay';
 import { trackerButtonStyles } from './trackerButtonStyles';
 
@@ -157,6 +158,18 @@ export function getTrackerMoveAllState(status: PromptStatus, selectedCount: numb
     nextStatus,
     disabled: selectedCount === 0 || !nextStatus,
   };
+}
+
+export function shouldRefreshTrackerSelectedPrompt(
+  selectedPrompt: Prompt | null,
+  selectedPromptConfig: PromptConfig | null,
+): boolean {
+  if (!selectedPrompt || !selectedPromptConfig || selectedPrompt.id !== selectedPromptConfig.id) {
+    return false;
+  }
+
+  return selectedPrompt.updatedAt !== selectedPromptConfig.updatedAt
+    || diffPromptConfigSyncFields(selectedPrompt, selectedPromptConfig).length > 0;
 }
 
 export const TrackerApp: React.FC = () => {
@@ -345,6 +358,25 @@ export const TrackerApp: React.FC = () => {
       setIsPromptLoading(false);
     }
   }, [selectedPromptConfig, selectedPromptId]);
+
+  useEffect(() => {
+    if (!selectedPromptId || !selectedPromptConfig || !selectedPrompt) {
+      return;
+    }
+
+    if (!shouldRefreshTrackerSelectedPrompt(selectedPrompt, selectedPromptConfig)) {
+      return;
+    }
+
+    setSelectedPrompt(current => (
+      current && current.id === selectedPromptConfig.id
+        ? applyPromptConfigSnapshotToPrompt(current, selectedPromptConfig)
+        : current
+    ));
+    requestedPromptIdRef.current = selectedPromptId;
+    setIsPromptLoading(true);
+    vscode.postMessage({ type: 'getPrompt', id: selectedPromptId });
+  }, [selectedPrompt, selectedPromptConfig, selectedPromptId]);
 
   const openPromptOverlay = useCallback((promptId: string) => {
     if (suppressCardClickRef.current) {

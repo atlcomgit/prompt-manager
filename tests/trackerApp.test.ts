@@ -130,3 +130,21 @@ test('filterExistingTrackerSelections removes ids that are no longer present', a
 		['draft-a', 'review-a'],
 	);
 });
+
+test('shouldRefreshTrackerSelectedPrompt returns true when refreshed list has newer config metadata', async () => {
+	const { shouldRefreshTrackerSelectedPrompt } = await importTrackerHelpers();
+	const selectedPrompt = {
+		...makePromptConfig('draft-a', 'draft'),
+		content: 'Prompt body',
+		report: 'Report body',
+	};
+	const refreshedConfig = {
+		...makePromptConfig('draft-a', 'review'),
+		title: 'Updated title',
+		updatedAt: '2026-04-06T10:00:00.000Z',
+	};
+
+	assert.equal(shouldRefreshTrackerSelectedPrompt(selectedPrompt, refreshedConfig), true);
+	assert.equal(shouldRefreshTrackerSelectedPrompt(selectedPrompt, makePromptConfig('draft-a', 'draft')), false);
+	assert.equal(shouldRefreshTrackerSelectedPrompt(selectedPrompt, makePromptConfig('other', 'draft')), false);
+});

@@ -461,3 +461,136 @@ test('GitService getProjectReviewState includes resolved title prefix in review 
 	assert.equal(reviewState.titlePrefix, 'MR');
 	assert.equal(reviewState.unsupportedReason, 'missing-remote');
 });
+
+test('GitService resolveGitLabProjectId extracts numeric id from moved-project redirect output', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.runJsonCliCommand = async () => {
+		const error = new Error('glab: Non GET methods are not allowed for moved projects (HTTP 405)');
+		(error as Error & { stderr?: string }).stderr = 'Location: https://gitlab.example.com/api/v4/projects/654';
+		throw error;
+	};
+
+	const projectId = await service.resolveGitLabProjectId('/tmp/api', {
+		provider: 'gitlab',
+		host: 'gitlab.example.com',
+		remoteName: 'origin',
+		remoteUrl: 'https://gitlab.example.com/acme/api.git',
+		repositoryPath: 'acme/api',
+		owner: 'acme',
+		name: 'api',
+		supported: true,
+		cliCommand: 'glab',
+		cliAvailable: true,
+		actionLabel: 'Merge request',
+	});
+
+	assert.equal(projectId, '654');
+});
+
+test('GitService createGitLabReviewRequest uses resolved project id, Draft title and remove_source_branch flag', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	let capturedArgs: string[] | null = null;
+
+	service.resolveGitLabProjectId = async () => '321';
+	service.runJsonCliCommand = async (_command: string, _projectPath: string, args: string[]) => {
+		capturedArgs = args;
+		return {};
+	};
+
+	await service.createGitLabReviewRequest(
+		'/tmp/api',
+		{
+			provider: 'gitlab',
+			host: 'gitlab.example.com',
+			remoteName: 'origin',
+			remoteUrl: 'https://gitlab.example.com/acme/api.git',
+			repositoryPath: 'acme/api',
+			owner: 'acme',
+			name: 'api',
+			supported: true,
+			cliCommand: 'glab',
+			cliAvailable: true,
+			actionLabel: 'Merge request',
+		},
+		'feature/task-42',
+		'main',
+		'Add moved-project handling',
+		'Body',
+		true,
+		false,
+	);
+
+	assert.deepEqual(capturedArgs, [
+		'api',
+		'-X',
+		'POST',
+		'projects/321/merge_requests',
+		'-F',
+		'source_branch=feature/task-42',
+		'-F',
+		'target_branch=main',
+		'-F',
+		'title=Draft: Add moved-project handling',
+		'-F',
+		'description=Body',
+		'-F',
+		'remove_source_branch=false',
+	]);
+});
+
+test('GitService createReviewRequests enables draft PRs by default for GitHub', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const remote = {
+		provider: 'github',
+		host: 'github.com',
+		remoteName: 'origin',
+		remoteUrl: 'https://github.com/acme/api.git',
+		repositoryPath: 'acme/api',
+		owner: 'acme',
+		name: 'api',
+		supported: true,
+		cliCommand: 'gh',
+		cliAvailable: true,
+		actionLabel: 'Pull request',
+	};
+	let capturedCall: unknown[] | null = null;
+
+	service.getReviewRemote = async () => remote;
+	service.isCliAuthenticated = async () => true;
+	service.getExistingReviewRequest = async () => null;
+	service.createGitHubReviewRequest = async (...args: unknown[]) => {
+		capturedCall = args;
+	};
+
+	const result = await service.createReviewRequests(
+		new Map([['api', '/tmp/api']]),
+		{
+			id: 'prompt-61',
+			taskNumber: '61',
+			title: 'MR automation',
+			description: '',
+			branch: 'feature/task-42',
+		} as any,
+		[
+			{
+				project: 'api',
+				targetBranch: 'main',
+				title: '61 MR automation',
+			},
+		],
+	);
+
+	assert.equal(result.success, true);
+	assert.deepEqual(result.changedProjects, ['api']);
+	assert.ok(capturedCall);
+	assert.equal(capturedCall?.[0], '/tmp/api');
+	assert.equal(capturedCall?.[2], 'feature/task-42');
+	assert.equal(capturedCall?.[3], 'main');
+	assert.equal(capturedCall?.[4], '61 MR automation');
+	assert.equal(capturedCall?.[5], 'Task: 61\nPrompt: MR automation\nBranch: feature/task-42');
+	assert.equal(capturedCall?.[6], true);
+});

@@ -34,6 +34,17 @@ import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 import { fetchRemoteText } from '../utils/remoteText.js';
 import {
+	mergePromptExternalConfig,
+	PROMPT_CONFIG_SYNC_FIELDS,
+	type PromptConfigFieldChangedAt,
+	type PromptConfigSyncField,
+} from '../utils/promptExternalSync.js';
+import {
+	buildReservedArchiveRenameNotice,
+	shouldNotifyReservedArchiveRename,
+} from '../utils/promptSaveFeedback.js';
+import type { ExternalPromptConfigChange } from '../services/storageService.js';
+import {
 	dedupeContextFileReferences,
 	extractContextFilePathsFromClipboardText,
 	formatContextFileSize,
@@ -75,6 +86,7 @@ export class EditorPanelManager {
 	public readonly onDidSave = this._onDidSave.event;
 	private _onDidSaveStateChange = new vscode.EventEmitter<{ id: string; saving: boolean }>();
 	public readonly onDidSaveStateChange = this._onDidSaveStateChange.event;
+	private panelPromptConfigFieldChangedAt = new Map<string, PromptConfigFieldChangedAt>();
 	private chatTrackingDisposables = new Map<string, vscode.Disposable>();
 	private panelDirtySetters = new Map<string, (v: boolean) => void>();
 	private panelDirtyFlags = new Map<string, boolean>();
@@ -137,6 +149,59 @@ export class EditorPanelManager {
 		if (panelKey === SINGLE_EDITOR_PANEL_KEY) {
 			this.syncStartupEditorRestoreState();
 		}
+	}
+
+	private normalizePromptConfigFieldChangedAt(
+		changedAt?: Record<string, number> | PromptConfigFieldChangedAt | null,
+	): PromptConfigFieldChangedAt {
+		const normalized: PromptConfigFieldChangedAt = {};
+		if (!changedAt) {
+			return normalized;
+		}
+
+		for (const field of PROMPT_CONFIG_SYNC_FIELDS) {
+			const value = changedAt[field];
+			if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+				normalized[field] = value;
+			}
+		}
+
+		return normalized;
+	}
+
+	private getPanelPromptConfigFieldChangedAt(panelKey: string): PromptConfigFieldChangedAt {
+		return this.normalizePromptConfigFieldChangedAt(this.panelPromptConfigFieldChangedAt.get(panelKey));
+	}
+
+	private setPanelPromptConfigFieldChangedAt(
+		panelKey: string,
+		changedAt?: Record<string, number> | PromptConfigFieldChangedAt | null,
+	): void {
+		const normalized = this.normalizePromptConfigFieldChangedAt(changedAt);
+		if (Object.keys(normalized).length === 0) {
+			this.panelPromptConfigFieldChangedAt.delete(panelKey);
+			return;
+		}
+
+		this.panelPromptConfigFieldChangedAt.set(panelKey, normalized);
+	}
+
+	private retainPanelPromptConfigFieldChangedAt(
+		panelKey: string,
+		retainedFields: PromptConfigSyncField[],
+	): void {
+		const current = this.getPanelPromptConfigFieldChangedAt(panelKey);
+		const retained = new Set(retainedFields);
+		const next: PromptConfigFieldChangedAt = {};
+
+		for (const field of retained) {
+			const value = current[field];
+			if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+				next[field] = value;
+			}
+		}
+
+		this.setPanelPromptConfigFieldChangedAt(panelKey, next);
 	}
 
 	private resolveOpenEditorPanel(panelKey: string): vscode.WebviewPanel | undefined {
@@ -627,6 +692,84 @@ export class EditorPanelManager {
 		this.disposeGitOverlayReactiveSources();
 		const promptId = (this.panelPromptRefs.get(SINGLE_EDITOR_PANEL_KEY)?.id || '').trim() || null;
 		void this.stateService.saveStartupEditorRestoreState(Boolean(openPanels.get(SINGLE_EDITOR_PANEL_KEY)), promptId);
+	}
+
+	async handleExternalPromptConfigChanges(changes: ExternalPromptConfigChange[]): Promise<void> {
+		if (this.isShuttingDown || changes.length === 0) {
+			return;
+		}
+
+		const activeChanges = changes.filter((change): change is ExternalPromptConfigChange & { config: NonNullable<ExternalPromptConfigChange['config']> } => {
+			return !change.archived && change.kind !== 'deleted' && Boolean(change.config);
+		});
+		if (activeChanges.length === 0) {
+			return;
+		}
+
+		const openPromptEntries = [...this.panelPromptRefs.entries()];
+		for (const change of activeChanges) {
+			const matchingPanels = openPromptEntries.filter(([, prompt]) => (prompt.id || '').trim() === change.id);
+			for (const [panelKey] of matchingPanels) {
+				await this.applyExternalPromptConfigChange(panelKey, change);
+			}
+		}
+	}
+
+	private async applyExternalPromptConfigChange(
+		panelKey: string,
+		change: ExternalPromptConfigChange & { config: NonNullable<ExternalPromptConfigChange['config']> },
+	): Promise<void> {
+		const currentPrompt = this.panelPromptRefs.get(panelKey);
+		const panel = this.resolveOpenEditorPanel(panelKey);
+		if (!currentPrompt || !panel || (currentPrompt.id || '').trim() !== change.id) {
+			return;
+		}
+
+		const promptFromStorage = await this.storageService.getPrompt(change.id);
+		if (!promptFromStorage) {
+			return;
+		}
+
+		const isDirty = this.panelDirtyFlags.get(panelKey) || false;
+		const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
+		const currentSnapshot = latestSnapshot
+			? JSON.parse(JSON.stringify(latestSnapshot)) as Prompt
+			: JSON.parse(JSON.stringify(currentPrompt)) as Prompt;
+		const { mergedPrompt, hasChanges, preservedLocalFields } = mergePromptExternalConfig(
+			currentSnapshot,
+			promptFromStorage,
+			this.getPanelPromptConfigFieldChangedAt(panelKey),
+			change.externalChangedAt,
+		);
+
+		if (!hasChanges) {
+			this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(promptFromStorage)));
+			return;
+		}
+
+		Object.assign(currentPrompt, mergedPrompt);
+		this.setPanelPromptRef(panelKey, currentPrompt);
+		this.ensureContentEditorBinding(panelKey, currentPrompt);
+		this.ensureReportEditorBinding(panelKey, currentPrompt);
+		this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(promptFromStorage)));
+		if (isDirty) {
+			this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(mergedPrompt)));
+			this.retainPanelPromptConfigFieldChangedAt(panelKey, preservedLocalFields);
+		} else {
+			this.panelLatestPromptSnapshots.set(panelKey, null);
+			this.setPanelPromptConfigFieldChangedAt(panelKey, null);
+		}
+
+		await this.syncPersistedActivePromptState(currentPrompt);
+		this.updatePromptPanelTitle(panel, currentPrompt, {
+			dirty: isDirty,
+			isRu: vscode.env.language.startsWith('ru'),
+		});
+		void panel.webview.postMessage({
+			type: 'prompt',
+			prompt: currentPrompt,
+			reason: 'external-config',
+		} satisfies ExtensionToWebviewMessage);
 	}
 
 	private async runConfiguredHooks(
@@ -2667,11 +2810,28 @@ export class EditorPanelManager {
 		return singleLine.length > 140 ? `${singleLine.slice(0, 139)}…` : singleLine;
 	}
 
+	private resolvePromptIdBase(promptToSave: Pick<Prompt, 'taskNumber' | 'title' | 'description' | 'content' | 'report'>): string | undefined {
+		const slugSource = (promptToSave.title || promptToSave.description || promptToSave.content || promptToSave.report || '').trim();
+		if (!slugSource) {
+			return undefined;
+		}
+
+		return this.makePromptIdBase(
+			promptToSave.taskNumber,
+			promptToSave.title,
+			promptToSave.description || promptToSave.content || promptToSave.report,
+		);
+	}
+
+	private getPromptSaveFeedbackLocale(): 'en' | 'ru' {
+		return vscode.env.language.startsWith('ru') ? 'ru' : 'en';
+	}
+
 	private async ensurePromptIdMatchesTitle(promptToSave: Prompt, previousId?: string): Promise<string | undefined> {
 		const normalizedPreviousId = (previousId || promptToSave.id || '').trim() || undefined;
-		const slugSource = (promptToSave.title || promptToSave.description || promptToSave.content || promptToSave.report || '').trim();
+		const requestedIdBase = this.resolvePromptIdBase(promptToSave);
 
-		if (!slugSource) {
+		if (!requestedIdBase) {
 			if (normalizedPreviousId) {
 				promptToSave.id = normalizedPreviousId;
 				return undefined;
@@ -2681,10 +2841,7 @@ export class EditorPanelManager {
 			return undefined;
 		}
 
-		const nextId = await this.storageService.uniqueId(
-			this.makePromptIdBase(promptToSave.taskNumber, promptToSave.title, promptToSave.description || promptToSave.content || promptToSave.report),
-			normalizedPreviousId,
-		);
+		const nextId = await this.storageService.uniqueId(requestedIdBase, normalizedPreviousId);
 		promptToSave.id = nextId;
 
 		return normalizedPreviousId && normalizedPreviousId !== nextId ? normalizedPreviousId : undefined;
@@ -2858,6 +3015,7 @@ export class EditorPanelManager {
 		} catch (err) {
 			this.hooksOutput.appendLine(`[ai-enrichment] error: promptId=${promptId} ${err instanceof Error ? err.message : String(err)}`);
 		} finally {
+			postMessage({ type: 'promptAiEnrichmentState', promptId, title: false, description: false });
 			this.pendingEnrichmentPromptIds.delete(promptId);
 		}
 	}
@@ -3164,6 +3322,9 @@ export class EditorPanelManager {
 					const dirtyFlag = this.panelDirtyFlags.get(panelKey);
 					this.panelDirtyFlags.delete(panelKey);
 					this.panelDirtyFlags.set(currentPrompt.id, Boolean(dirtyFlag));
+					const configFieldChangedAt = this.panelPromptConfigFieldChangedAt.get(panelKey);
+					this.panelPromptConfigFieldChangedAt.delete(panelKey);
+					this.setPanelPromptConfigFieldChangedAt(currentPrompt.id, configFieldChangedAt || null);
 					const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
 					this.panelLatestPromptSnapshots.delete(panelKey);
 					this.panelLatestPromptSnapshots.set(currentPrompt.id, latestSnapshot ? JSON.parse(JSON.stringify(latestSnapshot)) : null);
@@ -3201,7 +3362,11 @@ export class EditorPanelManager {
 				existingBinding.uri = existingUri;
 				this.panelKeyByContentEditorUri.set(existingUri.toString(), panelKey);
 			}
-			await vscode.window.showTextDocument(existingUri, { preview: false, preserveFocus: false });
+			await vscode.window.showTextDocument(existingUri, {
+				viewColumn: vscode.ViewColumn.Beside,
+				preview: false,
+				preserveFocus: false,
+			});
 			if (panel) {
 				void panel.webview.postMessage({ type: 'contentEditorOpened' } satisfies ExtensionToWebviewMessage);
 			}
@@ -3217,7 +3382,11 @@ export class EditorPanelManager {
 		this.contentEditorLastActivityByPanelKey.set(panelKey, Date.now());
 
 		const doc = await vscode.workspace.openTextDocument(fileUri);
-		await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: false });
+		await vscode.window.showTextDocument(doc, {
+			viewColumn: vscode.ViewColumn.Beside,
+			preview: false,
+			preserveFocus: false,
+		});
 
 		if (panel) {
 			void panel.webview.postMessage({ type: 'contentEditorOpened' } satisfies ExtensionToWebviewMessage);
@@ -3657,6 +3826,26 @@ export class EditorPanelManager {
 		});
 	}
 
+	private async openPromptConfigInEditor(currentPrompt: Prompt): Promise<void> {
+		const promptId = (currentPrompt.id || '').trim();
+		if (!promptId) {
+			vscode.window.showWarningMessage('Сначала сохраните промпт, затем откройте config.json.');
+			return;
+		}
+
+		const configUri = this.storageService.getPromptConfigUri(promptId);
+		try {
+			const doc = await vscode.workspace.openTextDocument(configUri);
+			await vscode.window.showTextDocument(doc, {
+				viewColumn: vscode.ViewColumn.Beside,
+				preview: false,
+				preserveFocus: false,
+			});
+		} catch {
+			vscode.window.showErrorMessage('Не удалось открыть config.json для этого промпта.');
+		}
+	}
+
 	/**
 	 * Called when a content editor document is saved.
 	 * Notifies the webview to trigger a prompt save.
@@ -3910,6 +4099,7 @@ export class EditorPanelManager {
 		this.ensureReportEditorBinding(panelKey, prompt);
 		this.panelPromptRefs.set(panelKey, prompt);
 		this.panelDirtyFlags.set(panelKey, restoredUnsaved);
+		this.setPanelPromptConfigFieldChangedAt(panelKey, null);
 		this.panelLatestPromptSnapshots.set(panelKey, restoredUnsaved ? JSON.parse(JSON.stringify(prompt)) : null);
 		this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(prompt)));
 
@@ -4010,6 +4200,7 @@ export class EditorPanelManager {
 				this.chatTrackingDisposables.delete(key);
 				this.panelDirtySetters.delete(key);
 				this.panelDirtyFlags.delete(key);
+				this.panelPromptConfigFieldChangedAt.delete(key);
 				this.panelLatestPromptSnapshots.delete(key);
 				this.panelBasePrompts.delete(key);
 				this.clearContentEditorBinding(key);
@@ -4139,6 +4330,7 @@ export class EditorPanelManager {
 					const previousCurrentReport = currentPrompt.report || '';
 
 					this.panelDirtyFlags.set(panelKey, msg.dirty);
+					this.setPanelPromptConfigFieldChangedAt(panelKey, msg.dirty ? msg.configFieldChangedAt || null : null);
 					if (msg.prompt) {
 						Object.assign(currentPrompt, msg.prompt);
 						this.setPanelPromptRef(panelKey, currentPrompt);
@@ -4361,6 +4553,7 @@ export class EditorPanelManager {
 						promptToSave.description = this.makeDescriptionFallbackFromContent(promptToSave.content);
 					}
 					const needsAiEnrichment = (needsTitle || needsDescription) && !enrichmentAlreadyRunning;
+					const requestedIdBase = this.resolvePromptIdBase(promptToSave);
 
 					const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
 					await this.reconcileReportWithExtensionState(panelKey, promptToSave, currentPrompt);
@@ -4401,6 +4594,7 @@ export class EditorPanelManager {
 						historyReason: saveSource,
 						previousId: renameFromId,
 					});
+					const shouldNotifyArchiveRename = shouldNotifyReservedArchiveRename(requestedIdBase, saved.id, previousPromptId);
 					this.logReportDebug('savePrompt.saved', {
 						panelKey,
 						promptId: promptToSave.id,
@@ -4447,6 +4641,9 @@ export class EditorPanelManager {
 						const dirtyFlag = this.panelDirtyFlags.get(panelKey);
 						this.panelDirtyFlags.delete(panelKey);
 						this.panelDirtyFlags.set(promptToSave.id, Boolean(dirtyFlag));
+						const configFieldChangedAt = this.panelPromptConfigFieldChangedAt.get(panelKey);
+						this.panelPromptConfigFieldChangedAt.delete(panelKey);
+						this.setPanelPromptConfigFieldChangedAt(promptToSave.id, configFieldChangedAt || null);
 						const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
 						this.panelLatestPromptSnapshots.delete(panelKey);
 						this.panelLatestPromptSnapshots.set(promptToSave.id, latestSnapshot ? JSON.parse(JSON.stringify(latestSnapshot)) : null);
@@ -4460,6 +4657,7 @@ export class EditorPanelManager {
 					if (shouldApplyToCurrentPanel) {
 						const stateKey = panelKey.startsWith('new-') ? promptToSave.id : panelKey;
 						this.panelDirtyFlags.set(stateKey, false);
+						this.setPanelPromptConfigFieldChangedAt(stateKey, null);
 						this.panelLatestPromptSnapshots.set(stateKey, null);
 						this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptForPanel)));
 					}
@@ -4468,6 +4666,20 @@ export class EditorPanelManager {
 						this.updatePromptPanelTitle(panel, saved);
 						postMessage({ type: 'promptSaved', prompt: saved, previousId: renameFromId });
 						postMessage({ type: 'prompt', prompt: promptForPanel, reason: 'save', previousId: renameFromId });
+						if (needsAiEnrichment) {
+							postMessage({
+								type: 'promptAiEnrichmentState',
+								promptId: saved.id,
+								title: needsTitle,
+								description: needsDescription,
+							});
+						}
+						if (shouldNotifyArchiveRename) {
+							postMessage({
+								type: 'info',
+								message: buildReservedArchiveRenameNotice(saved.id, this.getPromptSaveFeedbackLocale()),
+							});
+						}
 					}
 
 					// Фоновые операции — не блокируют UI сохранения
@@ -4596,6 +4808,11 @@ export class EditorPanelManager {
 			case 'openPromptReportInEditor': {
 				currentPrompt.report = typeof msg.report === 'string' ? msg.report : currentPrompt.report;
 				await this.openPromptReportInEditor(panelKey, currentPrompt, postMessage, panel);
+				break;
+			}
+
+			case 'openPromptConfigInEditor': {
+				await this.openPromptConfigInEditor(currentPrompt);
 				break;
 			}
 

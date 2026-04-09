@@ -35,6 +35,8 @@ import {
   dedupeContextFileReferences,
   normalizeContextFileReference,
 } from '../../utils/contextFiles.js';
+import { diffPromptConfigSyncFields, PROMPT_CONFIG_SYNC_FIELDS } from '../../utils/promptExternalSync.js';
+import { shouldApplyPromptAiEnrichmentState } from '../../utils/promptSaveFeedback.js';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -113,6 +115,30 @@ const areFileListsEqual = (left: string[], right: string[]): boolean => {
   }
 
   return left.every((filePath, index) => filePath === right[index]);
+};
+
+const clearPromptConfigFieldChangedAt = (
+  current: Record<string, number>,
+  clearedFields: string[],
+): Record<string, number> => {
+  if (clearedFields.length === 0) {
+    return current;
+  }
+
+  const cleared = new Set(clearedFields);
+  const next: Record<string, number> = {};
+  for (const field of PROMPT_CONFIG_SYNC_FIELDS) {
+    if (cleared.has(field)) {
+      continue;
+    }
+
+    const value = current[field];
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      next[field] = value;
+    }
+  }
+
+  return next;
 };
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -378,6 +404,9 @@ export const EditorApp: React.FC = () => {
   const isExternalEditorOpenRef = useRef(false);
   /** true once the prompt has been saved at least once (manually or loaded from storage) */
   const hasBeenSavedRef = useRef(false);
+  const promptConfigFieldChangedAtRef = useRef<Record<string, number>>({});
+  const previousPromptConfigSnapshotRef = useRef<Prompt>(prompt);
+  const skipNextPromptConfigTrackingRef = useRef(false);
 
   // Time tracking
   const openedAtRef = useRef<number>(Date.now());
@@ -988,6 +1017,10 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'openPromptPlanInEditor', promptId: prompt.id });
   }, [prompt.id]);
 
+  const handleOpenPromptConfigInEditor = useCallback(() => {
+    vscode.postMessage({ type: 'openPromptConfigInEditor', promptId: prompt.id });
+  }, [prompt.id]);
+
   useEffect(() => {
     const readyTimer = window.setTimeout(() => {
       vscode.postMessage({ type: 'ready', bootId: bootIdRef.current });
@@ -1030,6 +1063,33 @@ export const EditorApp: React.FC = () => {
   useEffect(() => { promptRef.current = prompt; }, [prompt]);
   useEffect(() => { isDirtyRef.current = isDirty; }, [isDirty]);
   useEffect(() => { isSavingRef.current = isSaving; }, [isSaving]);
+
+  useEffect(() => {
+    const previousPrompt = previousPromptConfigSnapshotRef.current;
+    if (skipNextPromptConfigTrackingRef.current) {
+      skipNextPromptConfigTrackingRef.current = false;
+      previousPromptConfigSnapshotRef.current = prompt;
+      return;
+    }
+
+    const changedFields = diffPromptConfigSyncFields(previousPrompt, prompt);
+    if (changedFields.length > 0) {
+      const now = Date.now();
+      const nextChangedAt = { ...promptConfigFieldChangedAtRef.current };
+      for (const field of changedFields) {
+        nextChangedAt[field] = now;
+      }
+      promptConfigFieldChangedAtRef.current = nextChangedAt;
+    }
+
+    previousPromptConfigSnapshotRef.current = prompt;
+  }, [prompt]);
+
+  useEffect(() => {
+    if (!isDirty) {
+      promptConfigFieldChangedAtRef.current = {};
+    }
+  }, [isDirty]);
 
   useEffect(() => {
     logReportDebug('state.reportChanged', {
@@ -1085,7 +1145,7 @@ export const EditorApp: React.FC = () => {
           const currentPromptId = (currentPromptIdRef.current || '__new__').trim() || '__new__';
           const activeSaveId = (activeSaveIdRef.current || '').trim();
           const previousPromptId = (String(msg.previousId || '').trim() || '');
-          const reason: 'open' | 'save' | 'sync' | 'ai-enrichment' | undefined = msg.reason;
+          const reason: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config' | undefined = msg.reason;
           const isOpenPayload = reason === 'open';
           const isNewPromptSaveResponse = currentPromptId === '__new__' && reason === 'save';
           const isRelatedToCurrentPrompt = incomingPromptId === currentPromptId
@@ -1117,6 +1177,7 @@ export const EditorApp: React.FC = () => {
             setGitOverlayCommitMessages({});
             clearGitOverlayBusyState();
             setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
+            skipNextPromptConfigTrackingRef.current = true;
             promptRef.current = msg.prompt;
             setPrompt(msg.prompt);
             setActiveTab(nextEditorViewState.activeTab);
@@ -1149,6 +1210,7 @@ export const EditorApp: React.FC = () => {
 
           if (reason === 'sync') {
             // Background sync (chat completion, recalc, status change) — merge only server-side fields, keep user edits
+            skipNextPromptConfigTrackingRef.current = true;
             setPrompt(prev => ({
               ...prev,
               chatSessionIds: msg.prompt.chatSessionIds ?? prev.chatSessionIds,
@@ -1167,6 +1229,23 @@ export const EditorApp: React.FC = () => {
             break;
           }
 
+          if (reason === 'external-config') {
+            const changedFields = diffPromptConfigSyncFields(promptRef.current, msg.prompt);
+            promptConfigFieldChangedAtRef.current = clearPromptConfigFieldChangedAt(
+              promptConfigFieldChangedAtRef.current,
+              changedFields,
+            );
+            skipNextPromptConfigTrackingRef.current = true;
+            promptRef.current = msg.prompt;
+            setPrompt(msg.prompt);
+            if (incomingPromptId !== currentPromptId && incomingPromptId !== '__new__') {
+              currentPromptIdRef.current = incomingPromptId;
+            }
+            setIsLoaded(true);
+            requestPromptPlanState(msg.prompt.id);
+            break;
+          }
+
           if (reason === 'ai-enrichment') {
             // Background AI enrichment may also rename the prompt slug after the title changes.
             const enrichedPrompt = {
@@ -1177,6 +1256,7 @@ export const EditorApp: React.FC = () => {
               description: msg.prompt.description || promptRef.current.description,
               updatedAt: msg.prompt.updatedAt || promptRef.current.updatedAt,
             };
+            skipNextPromptConfigTrackingRef.current = true;
             promptRef.current = enrichedPrompt;
             setPrompt(enrichedPrompt);
             const nextPromptId = (String(msg.prompt.id || '').trim() || '');
@@ -1186,6 +1266,8 @@ export const EditorApp: React.FC = () => {
             if (previousPromptId && activeSaveIdRef.current === previousPromptId && nextPromptId) {
               activeSaveIdRef.current = nextPromptId;
             }
+            setIsGeneratingTitle(false);
+            setIsGeneratingDescription(false);
             // Don't touch isDirty — user's pending edits stay intact
             requestPromptPlanState(msg.prompt.id);
             break;
@@ -1193,6 +1275,7 @@ export const EditorApp: React.FC = () => {
 
           const userChangedAfterSave = userChangeCounterRef.current !== saveStartCounterRef.current;
           const shouldMergeAfterSave = reason === 'save' && userChangedAfterSave && saveStartCounterRef.current > 0;
+          skipNextPromptConfigTrackingRef.current = true;
           if (shouldMergeAfterSave) {
             // User changed something after save started — merge only server-generated fields, keep user edits
           const mergedPrompt = {
@@ -1229,8 +1312,6 @@ export const EditorApp: React.FC = () => {
           }
           setIsLoaded(true);
           setIsSaving(false);
-          setIsGeneratingTitle(false);
-          setIsGeneratingDescription(false);
           activeSaveIdRef.current = null;
           if ((msg.prompt.chatSessionIds || []).length > 0) {
             releaseStartChatPendingState();
@@ -1441,6 +1522,14 @@ export const EditorApp: React.FC = () => {
       case 'globalContextLoadFailed':
         setIsLoadingGlobalContext(false);
         showInlineNotice('error', msg.message || 'Не удалось загрузить общую инструкцию.');
+        break;
+      case 'promptAiEnrichmentState':
+        if (!shouldApplyPromptAiEnrichmentState(msg.promptId, currentPromptIdRef.current, activeSaveIdRef.current)) {
+          break;
+        }
+
+        setIsGeneratingTitle(Boolean(msg.title));
+        setIsGeneratingDescription(Boolean(msg.description));
         break;
       case 'triggerStartChat':
         {
@@ -1830,7 +1919,13 @@ export const EditorApp: React.FC = () => {
 
   // Notify extension about dirty state changes
   useEffect(() => {
-    vscode.postMessage({ type: 'markDirty', dirty: isDirty, prompt: isDirty ? prompt : undefined, promptId: currentPromptIdRef.current || '' });
+    vscode.postMessage({
+      type: 'markDirty',
+      dirty: isDirty,
+      prompt: isDirty ? prompt : undefined,
+      promptId: currentPromptIdRef.current || '',
+      configFieldChangedAt: isDirty ? promptConfigFieldChangedAtRef.current : undefined,
+    });
   }, [isDirty, prompt]);
 
   /** Ref to track whether auto-expand already fired for this prompt load */
@@ -2337,6 +2432,8 @@ export const EditorApp: React.FC = () => {
         project: (item.project || '').trim(),
         targetBranch: (item.targetBranch || '').trim(),
         title: (item.title || '').trim(),
+        draft: item.draft !== false,
+        removeSourceBranch: item.removeSourceBranch === true,
       }))
       .filter(item => Boolean(item.project) && Boolean(item.targetBranch) && Boolean(item.title));
 
@@ -2761,22 +2858,37 @@ export const EditorApp: React.FC = () => {
                 ...(isDirty ? styles.blockContentVisible : styles.blockContentHidden),
               }}
             >● {t('editor.unsaved')}</span>
-            <div style={styles.headerTabs} role="tablist" aria-label={t('editor.viewTabs')}>
-              {EDITOR_PROMPT_TABS.map(tab => (
-                <button
-                  key={tab}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeTab === tab}
-                  style={{
-                    ...styles.headerTabBtn,
-                    ...(activeTab === tab ? styles.headerTabBtnActive : null),
-                  }}
-                  onClick={() => handleEditorTabChange(tab)}
-                >
-                  {tab === 'main' ? t('editor.tabMain') : t('editor.tabProcess')}
-                </button>
-              ))}
+            <div style={styles.headerActionGroup}>
+              <div style={styles.headerTabs} role="tablist" aria-label={t('editor.viewTabs')}>
+                {EDITOR_PROMPT_TABS.map(tab => (
+                  <button
+                    key={tab}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === tab}
+                    style={{
+                      ...styles.headerTabBtn,
+                      ...(activeTab === tab ? styles.headerTabBtnActive : null),
+                    }}
+                    onClick={() => handleEditorTabChange(tab)}
+                  >
+                    {tab === 'main' ? t('editor.tabMain') : t('editor.tabProcess')}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                style={{
+                  ...styles.headerIconBtn,
+                  ...(!(prompt.id || '').trim() ? styles.headerIconBtnDisabled : null),
+                }}
+                onClick={handleOpenPromptConfigInEditor}
+                disabled={!(prompt.id || '').trim()}
+                title={t('editor.openConfigTooltip')}
+                aria-label={t('editor.openConfigTooltip')}
+              >
+                ⚙
+              </button>
             </div>
           </div>
         </div>
@@ -3630,6 +3742,11 @@ const styles: Record<string, React.CSSProperties> = {
     marginLeft: 'auto',
     flexShrink: 0,
   },
+  headerActionGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
   headerTabs: {
     display: 'inline-flex',
     alignItems: 'center',
@@ -3654,6 +3771,26 @@ const styles: Record<string, React.CSSProperties> = {
   headerTabBtnActive: {
     background: 'var(--vscode-button-secondaryBackground)',
     color: 'var(--vscode-button-secondaryForeground)',
+  },
+  headerIconBtn: {
+    width: '32px',
+    height: '32px',
+    padding: 0,
+    border: '1px solid var(--vscode-button-border, transparent)',
+    borderRadius: '6px',
+    background: 'var(--vscode-button-secondaryBackground)',
+    color: 'var(--vscode-button-secondaryForeground)',
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: '15px',
+    lineHeight: 1,
+    flexShrink: 0,
+  },
+  headerIconBtnDisabled: {
+    opacity: 0.6,
+    cursor: 'not-allowed',
   },
   dirtyIndicator: {
     color: 'var(--vscode-textLink-foreground)',

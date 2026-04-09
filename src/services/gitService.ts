@@ -130,6 +130,7 @@ interface BuiltInGitExtensionExports {
 export class GitService {
 	private static readonly DIFF_MAX_BUFFER = 8 * 1024 * 1024;
 	private readonly reviewCliAvailability = new Map<'gh' | 'glab', boolean>();
+	private readonly gitLabProjectIdCache = new Map<string, string>();
 
 	private logDebug(event: string, payload?: Record<string, unknown>): void {
 		const serializedPayload = payload ? ` ${JSON.stringify(payload)}` : '';
@@ -206,11 +207,16 @@ export class GitService {
 		});
 	}
 
-	private async runJsonCliCommand(command: 'gh' | 'glab', projectPath: string, args: string[]): Promise<unknown> {
-		const { stdout } = await execFileAsync(command, args, {
+	private async runCliCommand(command: 'gh' | 'glab', projectPath: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+		const { stdout, stderr } = await execFileAsync(command, args, {
 			cwd: projectPath,
 			maxBuffer: GitService.DIFF_MAX_BUFFER,
 		});
+		return { stdout, stderr };
+	}
+
+	private async runJsonCliCommand(command: 'gh' | 'glab', projectPath: string, args: string[]): Promise<unknown> {
+		const { stdout } = await this.runCliCommand(command, projectPath, args);
 		const normalized = stdout.trim();
 		if (!normalized) {
 			return null;
@@ -221,6 +227,90 @@ export class GitService {
 		} catch (error) {
 			throw new Error(`${command} returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	private extractCliErrorOutput(error: unknown): string {
+		if (!(error instanceof Error)) {
+			return String(error || '').trim();
+		}
+
+		const stdout = typeof (error as { stdout?: unknown }).stdout === 'string'
+			? String((error as { stdout?: string }).stdout)
+			: '';
+		const stderr = typeof (error as { stderr?: unknown }).stderr === 'string'
+			? String((error as { stderr?: string }).stderr)
+			: '';
+
+		return [stdout, stderr, error.message]
+			.map(part => part.trim())
+			.filter(Boolean)
+			.join('\n');
+	}
+
+	private extractGitLabProjectId(payload: unknown): string {
+		if (!payload || typeof payload !== 'object') {
+			return '';
+		}
+
+		const projectId = (payload as { id?: number | string }).id;
+		return projectId === undefined || projectId === null ? '' : String(projectId).trim();
+	}
+
+	private parseGitLabProjectIdFromRedirectOutput(output: string): string {
+		const normalized = output.trim();
+		if (!normalized) {
+			return '';
+		}
+
+		const locationMatch = normalized.match(/Location:\s+[^\s]*\/projects\/(\d+)(?:\b|[/?#])/i);
+		if (locationMatch?.[1]) {
+			return locationMatch[1].trim();
+		}
+
+		const messageMatch = normalized.match(/\/projects\/(\d+)(?:\b|[/?#])/i);
+		return messageMatch?.[1]?.trim() || '';
+	}
+
+	private async resolveGitLabProjectId(projectPath: string, remote: GitOverlayReviewRemote): Promise<string> {
+		const cacheKey = `${remote.host}:${remote.repositoryPath}`;
+		const cached = this.gitLabProjectIdCache.get(cacheKey);
+		if (cached) {
+			return cached;
+		}
+
+		const encodedRepoPath = encodeURIComponent(remote.repositoryPath);
+
+		try {
+			const payload = await this.runJsonCliCommand('glab', projectPath, [
+				'api',
+				`projects/${encodedRepoPath}`,
+			]);
+			const projectId = this.extractGitLabProjectId(payload);
+			if (projectId) {
+				this.gitLabProjectIdCache.set(cacheKey, projectId);
+				return projectId;
+			}
+		} catch (error) {
+			const redirectedProjectId = this.parseGitLabProjectIdFromRedirectOutput(this.extractCliErrorOutput(error));
+			if (redirectedProjectId) {
+				this.gitLabProjectIdCache.set(cacheKey, redirectedProjectId);
+				return redirectedProjectId;
+			}
+			throw error;
+		}
+
+		throw new Error(`Не удалось определить GitLab project id для ${remote.repositoryPath}.`);
+	}
+
+	private ensureGitLabDraftTitle(title: string, draft: boolean): string {
+		const normalizedTitle = title.trim();
+		if (!draft || !normalizedTitle) {
+			return normalizedTitle;
+		}
+
+		return /^(draft|wip)\s*:/i.test(normalizedTitle)
+			? normalizedTitle
+			: `Draft: ${normalizedTitle}`;
 	}
 
 	private async isCliCommandAvailable(command: 'gh' | 'glab'): Promise<boolean> {
@@ -578,11 +668,11 @@ export class GitService {
 	}
 
 	private async getGitLabReviewRequest(projectPath: string, remote: GitOverlayReviewRemote, sourceBranch: string): Promise<GitOverlayReviewRequest | null> {
-		const encodedRepoPath = encodeURIComponent(remote.repositoryPath);
+		const gitLabProjectId = await this.resolveGitLabProjectId(projectPath, remote);
 		const encodedSourceBranch = encodeURIComponent(sourceBranch);
 		const payload = await this.runJsonCliCommand('glab', projectPath, [
 			'api',
-			`projects/${encodedRepoPath}/merge_requests?source_branch=${encodedSourceBranch}&state=all`,
+			`projects/${gitLabProjectId}/merge_requests?source_branch=${encodedSourceBranch}&state=all`,
 		]);
 
 		if (!Array.isArray(payload) || payload.length === 0) {
@@ -617,7 +707,7 @@ export class GitService {
 
 		const notes = await this.runJsonCliCommand('glab', projectPath, [
 			'api',
-			`projects/${encodedRepoPath}/merge_requests/${iid}/notes`,
+			`projects/${gitLabProjectId}/merge_requests/${iid}/notes`,
 		]).catch(() => []);
 
 		return {
@@ -788,6 +878,7 @@ export class GitService {
 		targetBranch: string,
 		title: string,
 		body: string,
+		draft: boolean,
 	): Promise<void> {
 		await this.runJsonCliCommand('gh', projectPath, [
 			'api',
@@ -802,6 +893,8 @@ export class GitService {
 			`base=${targetBranch}`,
 			'-f',
 			`body=${body}`,
+			'-f',
+			`draft=${draft ? 'true' : 'false'}`,
 		]);
 	}
 
@@ -812,21 +905,26 @@ export class GitService {
 		targetBranch: string,
 		title: string,
 		body: string,
+		draft: boolean,
+		removeSourceBranch: boolean,
 	): Promise<void> {
-		const encodedRepoPath = encodeURIComponent(remote.repositoryPath);
+		const gitLabProjectId = await this.resolveGitLabProjectId(projectPath, remote);
+		const resolvedTitle = this.ensureGitLabDraftTitle(title, draft);
 		await this.runJsonCliCommand('glab', projectPath, [
 			'api',
 			'-X',
 			'POST',
-			`projects/${encodedRepoPath}/merge_requests`,
+			`projects/${gitLabProjectId}/merge_requests`,
 			'-F',
 			`source_branch=${sourceBranch}`,
 			'-F',
 			`target_branch=${targetBranch}`,
 			'-F',
-			`title=${title}`,
+			`title=${resolvedTitle}`,
 			'-F',
 			`description=${body}`,
+			'-F',
+			`remove_source_branch=${removeSourceBranch ? 'true' : 'false'}`,
 		]);
 	}
 
@@ -2590,6 +2688,8 @@ export class GitService {
 					project: (item.project || '').trim(),
 					targetBranch: (item.targetBranch || '').trim(),
 					title: (item.title || '').trim(),
+					draft: item.draft !== false,
+					removeSourceBranch: item.removeSourceBranch === true,
 				}))
 				.filter(item => Boolean(item.project) && Boolean(item.targetBranch) && Boolean(item.title))
 				.map(item => [item.project, item]),
@@ -2643,9 +2743,9 @@ export class GitService {
 				}
 
 				if (remote.provider === 'github') {
-					await this.createGitHubReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body);
+					await this.createGitHubReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body, item.draft);
 				} else {
-					await this.createGitLabReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body);
+					await this.createGitLabReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body, item.draft, item.removeSourceBranch);
 				}
 
 				result.changedProjects.push(item.project);

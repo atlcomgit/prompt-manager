@@ -2558,6 +2558,100 @@ test('GitOverlay allows push on tracked branches without prompt branch after com
 	assert.doesNotMatch(markup, /<div style="[^"]*background:var\(--vscode-button-background\);color:var\(--vscode-button-foreground\)[^"]*">5<\/div>/);
 });
 
+test('GitOverlay hides project and bulk commit actions while waiting for the global commit snapshot', () => {
+	const markup = renderGitOverlayMarkup({
+		waitingForSnapshotAction: 'commitStaged:all',
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'api', group: 'staged' })],
+					},
+				}),
+			],
+		}),
+	});
+
+	assert.doesNotMatch(markup, /editor\.gitOverlayCommitProject/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayCommitAll/);
+	assert.match(markup, /editor\.gitOverlayGenerateCommitMessage/);
+});
+
+test('GitOverlay step 4 renders bulk create and copy-link actions from the current snapshot', () => {
+	const remoteApi: NonNullable<GitOverlayProjectSnapshot['review']['remote']> = {
+		provider: 'gitlab',
+		host: 'gitlab.example.com',
+		remoteName: 'origin',
+		remoteUrl: 'https://gitlab.example.com/acme/api.git',
+		repositoryPath: 'acme/api',
+		owner: 'acme',
+		name: 'api',
+		supported: true,
+		cliCommand: 'glab',
+		cliAvailable: true,
+		actionLabel: 'Merge request',
+	};
+	const remoteWeb: NonNullable<GitOverlayProjectSnapshot['review']['remote']> = {
+		...remoteApi,
+		remoteUrl: 'https://gitlab.example.com/acme/web.git',
+		repositoryPath: 'acme/web',
+		name: 'web',
+	};
+	const markup = renderGitOverlayMarkup({
+		completedActions: { push: true, 'review-request': false, merge: false },
+		promptStatus: 'report',
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					review: {
+						remote: remoteApi,
+						request: null,
+						error: '',
+						setupAction: null,
+						titlePrefix: '',
+					},
+				}),
+				createTestProject({
+					project: 'web',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					review: {
+						remote: remoteWeb,
+						request: {
+							id: '11',
+							number: '11',
+							title: 'Draft: Existing request',
+							url: 'https://gitlab.example.com/acme/web/-/merge_requests/11',
+							state: 'open',
+							sourceBranch: 'feature/task-42',
+							targetBranch: 'main',
+							isDraft: true,
+							comments: [],
+						},
+						error: '',
+						setupAction: null,
+						titlePrefix: '',
+					},
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayCreateAllReviewRequests/);
+	assert.match(markup, /editor\.gitOverlayCopyAllReviewRequestLinks/);
+});
+
 test('GitOverlay disables commit textarea with the same gating as commit message generation', () => {
 	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
 		open: true,

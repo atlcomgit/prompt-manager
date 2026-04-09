@@ -86,7 +86,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'requestSuggestion'; textBefore: string; globalContext?: string }
 	| { type: 'getStatistics'; dateFrom?: string; dateTo?: string; minFiveMin?: boolean }
 	| { type: 'exportReport'; format: 'html' | 'md'; rows: Array<{ taskNumber: string; title: string; hours: number; status?: PromptStatus; reportSummary?: string }>; hourlyRate?: number; includeReport?: boolean }
-	| { type: 'markDirty'; dirty: boolean; prompt?: Prompt; promptId?: string }
+	| { type: 'markDirty'; dirty: boolean; prompt?: Prompt; promptId?: string; configFieldChangedAt?: Record<string, number> }
 	| { type: 'showStatistics' }
 	| { type: 'updatePromptStatus'; id: string; status: PromptStatus }
 	| { type: 'moveAllPromptsToNextStatus'; status: PromptStatus }
@@ -98,6 +98,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'createBranch'; branch: string; projects: string[] }
 	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
 	| { type: 'openPromptReportInEditor'; report: string; promptId?: string; title?: string }
+	| { type: 'openPromptConfigInEditor'; promptId?: string }
 	| { type: 'openPromptPlanInEditor'; promptId?: string }
 	| { type: 'requestPromptPlanState'; promptId?: string }
 	| { type: 'showPromptHistory'; id: string }
@@ -120,8 +121,9 @@ export type WebviewToExtensionMessage =
 
 export type ExtensionToWebviewMessage =
 	| { type: 'prompts'; prompts: PromptConfig[]; archivedPrompts?: PromptConfig[] }
-	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync' | 'ai-enrichment'; previousId?: string; editorViewState?: EditorPromptViewState }
+	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config'; previousId?: string; editorViewState?: EditorPromptViewState }
 	| { type: 'promptSaved'; prompt: PromptConfig; previousId?: string }
+	| { type: 'promptAiEnrichmentState'; promptId: string; title: boolean; description: boolean }
 	| { type: 'promptDeleted'; id: string }
 	| { type: 'promptDuplicated'; prompt: PromptConfig }
 	| { type: 'sidebarState'; state: SidebarState }

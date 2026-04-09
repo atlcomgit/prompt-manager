@@ -161,6 +161,8 @@ export interface GitOverlayProjectReviewRequestInput {
 	project: string;
 	targetBranch: string;
 	title: string;
+	draft?: boolean;
+	removeSourceBranch?: boolean;
 }
 
 export interface GitOverlayReviewCliSetupRequest {

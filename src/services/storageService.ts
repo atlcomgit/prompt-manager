@@ -22,6 +22,7 @@ import type {
 } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
 import { normalizeStoredPromptConfig } from '../utils/promptConfig.js';
+import { normalizePromptExternalChangedAt } from '../utils/promptExternalSync.js';
 import { summarizePromptReport } from '../utils/statisticsExport.js';
 
 /** Daily time entry for a prompt (ms per category) */
@@ -35,13 +36,22 @@ export interface DailyTimeEntry {
 /** Daily time data: date string (YYYY-MM-DD) → time breakdown */
 export type DailyTimeData = Record<string, DailyTimeEntry>;
 
+export interface ExternalPromptConfigChange {
+	id: string;
+	archived: boolean;
+	kind: 'created' | 'changed' | 'deleted';
+	config: PromptConfig | null;
+	uri: vscode.Uri;
+	externalChangedAt: number | null;
+}
+
 interface PromptStorageLocation {
 	id: string;
 	archived: boolean;
 	dirPath: string;
 }
 
-export class StorageService {
+export class StorageService implements vscode.Disposable {
 	private readonly STORAGE_DIR = '.vscode/prompt-manager';
 	private readonly ARCHIVE_DIR_NAME = 'archive';
 	private readonly RESERVED_PROMPT_DIR_NAMES = new Set(['chat-memory', 'codemap', 'archive']);
@@ -50,11 +60,23 @@ export class StorageService {
 	private readonly HISTORY_LIMIT = 20;
 	private readonly HISTORY_WINDOW_MS = 30_000;
 	private readonly CACHE_FILE = 'prompt-list.json';
+	private readonly INTERNAL_CONFIG_WRITE_SUPPRESS_MS = 500;
+	private readonly EXTERNAL_CONFIG_CHANGE_DEBOUNCE_MS = 120;
 
 	private _listCache: PromptConfig[] | null = null;
 	private _backgroundRefreshCancelled = false;
+	private readonly _onDidExternalPromptConfigChange = new vscode.EventEmitter<ExternalPromptConfigChange[]>();
+	private promptConfigWatcher: vscode.FileSystemWatcher | null = null;
+	private promptConfigWatcherDisposables: vscode.Disposable[] = [];
+	private externalConfigChangeTimer: NodeJS.Timeout | null = null;
+	private pendingExternalConfigChanges = new Map<string, ExternalPromptConfigChange>();
+	private internalConfigWriteSuppressionByPath = new Map<string, number>();
 
-	constructor(private readonly workspaceRoot: string) { }
+	public readonly onDidExternalPromptConfigChange = this._onDidExternalPromptConfigChange.event;
+
+	constructor(private readonly workspaceRoot: string) {
+		this.initializePromptConfigWatcher();
+	}
 
 	/** Get absolute path to storage directory */
 	private get storageDir(): string {
@@ -108,6 +130,14 @@ export class StorageService {
 		} catch {
 			// Cache write failure is non-fatal
 		}
+	}
+
+	private removeListCacheEntryFast(id: string): void {
+		const current = this._listCache;
+		if (current === null) { return; }
+		const updated = current.filter(prompt => prompt.id !== id);
+		this._listCache = updated;
+		void this.writeListCacheFile(updated).catch(() => { });
 	}
 
 	/** Update or add one entry in the cache. No-op if no cache exists yet. */
@@ -278,6 +308,11 @@ export class StorageService {
 		return vscode.Uri.file(path.join(this.getPromptDirectoryPath(id), 'report.txt'));
 	}
 
+	/** Get absolute URI to config.json for prompt id */
+	getPromptConfigUri(id: string): vscode.Uri {
+		return vscode.Uri.file(path.join(this.getPromptDirectoryPath(id), 'config.json'));
+	}
+
 	/** Get absolute URI to plan.md for prompt id */
 	getPromptPlanUri(id: string): vscode.Uri {
 		return vscode.Uri.file(path.join(this.getPromptDirectoryPath(id), 'plan.md'));
@@ -291,6 +326,178 @@ export class StorageService {
 	/** Get absolute path to a prompt folder */
 	getPromptDirectoryPath(id: string): string {
 		return this.resolvePromptStorageLocationSync(id)?.dirPath || this.promptDir(id, false);
+	}
+
+	private initializePromptConfigWatcher(): void {
+		if (this.promptConfigWatcher) {
+			return;
+		}
+
+		const watcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(this.workspaceRoot, `${this.STORAGE_DIR}/**/config.json`)
+		);
+
+		this.promptConfigWatcher = watcher;
+		this.promptConfigWatcherDisposables = [
+			watcher,
+			watcher.onDidCreate((uri) => {
+				void this.handleWatchedPromptConfigChange(uri, 'created');
+			}),
+			watcher.onDidChange((uri) => {
+				void this.handleWatchedPromptConfigChange(uri, 'changed');
+			}),
+			watcher.onDidDelete((uri) => {
+				void this.handleWatchedPromptConfigChange(uri, 'deleted');
+			}),
+		];
+	}
+
+	private clearExternalConfigChangeTimer(): void {
+		if (!this.externalConfigChangeTimer) {
+			return;
+		}
+
+		clearTimeout(this.externalConfigChangeTimer);
+		this.externalConfigChangeTimer = null;
+	}
+
+	private cleanupInternalConfigWriteSuppression(now: number = Date.now()): void {
+		for (const [configPath, expiresAt] of this.internalConfigWriteSuppressionByPath.entries()) {
+			if (expiresAt <= now) {
+				this.internalConfigWriteSuppressionByPath.delete(configPath);
+			}
+		}
+	}
+
+	private markInternalConfigWrite(configPath: string): void {
+		const normalizedPath = path.normalize(configPath);
+		const now = Date.now();
+		this.cleanupInternalConfigWriteSuppression(now);
+		this.internalConfigWriteSuppressionByPath.set(normalizedPath, now + this.INTERNAL_CONFIG_WRITE_SUPPRESS_MS);
+	}
+
+	private shouldIgnoreWatchedPromptConfigChange(uri: vscode.Uri): boolean {
+		const normalizedPath = path.normalize(uri.fsPath);
+		const now = Date.now();
+		this.cleanupInternalConfigWriteSuppression(now);
+		const expiresAt = this.internalConfigWriteSuppressionByPath.get(normalizedPath);
+		return typeof expiresAt === 'number' && expiresAt > now;
+	}
+
+	private resolvePromptConfigPathDetails(uri: vscode.Uri): { id: string; archived: boolean } | null {
+		const normalizedFilePath = path.normalize(uri.fsPath);
+		const archiveRoot = path.normalize(this.archiveStorageDir);
+		const activeRoot = path.normalize(this.storageDir);
+
+		if (normalizedFilePath.startsWith(`${archiveRoot}${path.sep}`)) {
+			const relativePath = path.relative(archiveRoot, normalizedFilePath);
+			const segments = relativePath.split(path.sep).filter(Boolean);
+			if (segments.length === 2 && segments[1] === 'config.json' && !this.isReservedPromptDirName(segments[0])) {
+				return { id: segments[0], archived: true };
+			}
+			return null;
+		}
+
+		if (!normalizedFilePath.startsWith(`${activeRoot}${path.sep}`)) {
+			return null;
+		}
+
+		const relativePath = path.relative(activeRoot, normalizedFilePath);
+		const segments = relativePath.split(path.sep).filter(Boolean);
+		if (segments.length !== 2 || segments[1] !== 'config.json' || this.isReservedPromptDirName(segments[0])) {
+			return null;
+		}
+
+		return { id: segments[0], archived: false };
+	}
+
+	private queueExternalPromptConfigChange(change: ExternalPromptConfigChange): void {
+		const queueKey = `${change.archived ? 'archive' : 'active'}:${change.id}`;
+		this.pendingExternalConfigChanges.set(queueKey, change);
+		this.clearExternalConfigChangeTimer();
+		this.externalConfigChangeTimer = setTimeout(() => {
+			this.externalConfigChangeTimer = null;
+			const changes = [...this.pendingExternalConfigChanges.values()];
+			this.pendingExternalConfigChanges.clear();
+			if (changes.length > 0) {
+				this._onDidExternalPromptConfigChange.fire(changes);
+			}
+		}, this.EXTERNAL_CONFIG_CHANGE_DEBOUNCE_MS);
+	}
+
+	private async resolvePromptConfigFileMtime(uri: vscode.Uri): Promise<number | null> {
+		try {
+			const stat = await vscode.workspace.fs.stat(uri);
+			return typeof stat.mtime === 'number' && Number.isFinite(stat.mtime) ? stat.mtime : null;
+		} catch {
+			return null;
+		}
+	}
+
+	private async handleWatchedPromptConfigChange(
+		uri: vscode.Uri,
+		kind: ExternalPromptConfigChange['kind'],
+	): Promise<void> {
+		if (this.shouldIgnoreWatchedPromptConfigChange(uri)) {
+			return;
+		}
+
+		const pathDetails = this.resolvePromptConfigPathDetails(uri);
+		if (!pathDetails) {
+			return;
+		}
+
+		if (kind === 'deleted') {
+			if (!pathDetails.archived) {
+				if (this._listCache === null) {
+					await this.removeListCacheEntry(pathDetails.id);
+				} else {
+					this.removeListCacheEntryFast(pathDetails.id);
+				}
+			}
+			this.queueExternalPromptConfigChange({
+				id: pathDetails.id,
+				archived: pathDetails.archived,
+				kind,
+				config: null,
+				uri,
+				externalChangedAt: Date.now(),
+			});
+			return;
+		}
+
+		const [config, fileMtimeMs] = await Promise.all([
+			this.readConfig(pathDetails.id, { archived: pathDetails.archived, dirPath: path.dirname(uri.fsPath) }),
+			this.resolvePromptConfigFileMtime(uri),
+		]);
+
+		if (!config) {
+			if (!pathDetails.archived) {
+				if (this._listCache === null) {
+					await this.removeListCacheEntry(pathDetails.id);
+				} else {
+					this.removeListCacheEntryFast(pathDetails.id);
+				}
+			}
+			return;
+		}
+
+		if (!pathDetails.archived) {
+			if (this._listCache === null) {
+				await this.updateListCacheEntry(config);
+			} else {
+				this.updateListCacheEntryFast(config);
+			}
+		}
+
+		this.queueExternalPromptConfigChange({
+			id: pathDetails.id,
+			archived: pathDetails.archived,
+			kind,
+			config,
+			uri,
+			externalChangedAt: normalizePromptExternalChangedAt(config.updatedAt, fileMtimeMs),
+		});
 	}
 
 	private promptHistoryDir(id: string): string {
@@ -543,6 +750,7 @@ export class StorageService {
 
 			if (shouldBackfillPromptUuid || shouldBackfillArchived) {
 				try {
+					this.markInternalConfigWrite(configPath);
 					await vscode.workspace.fs.writeFile(
 						vscode.Uri.file(configPath),
 						Buffer.from(JSON.stringify(config, null, 2), 'utf-8'),
@@ -655,6 +863,7 @@ export class StorageService {
 		const configJson = JSON.stringify(config, null, 2);
 
 		// Параллельная запись всех файлов для ускорения
+		this.markInternalConfigWrite(configPath);
 		await Promise.all([
 			vscode.workspace.fs.writeFile(
 				vscode.Uri.file(configPath),
@@ -1109,5 +1318,17 @@ export class StorageService {
 			await this.writeListCache(freshConfigs);
 			onComplete?.();
 		}
+	}
+
+	dispose(): void {
+		this.cancelBackgroundCacheRefresh();
+		this.clearExternalConfigChangeTimer();
+		this.pendingExternalConfigChanges.clear();
+		for (const disposable of this.promptConfigWatcherDisposables) {
+			disposable.dispose();
+		}
+		this.promptConfigWatcherDisposables = [];
+		this.promptConfigWatcher = null;
+		this._onDidExternalPromptConfigChange.dispose();
 	}
 }

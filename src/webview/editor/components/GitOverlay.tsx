@@ -893,6 +893,13 @@ export const GitOverlay: React.FC<Props> = ({
 	const isReadOnlyFlow = !isChatPreflightMode && promptStatus === 'in-progress';
 	const isWaitingForSnapshot = Boolean(waitingForSnapshotAction);
 	const shouldHideActionWhileWaiting = (actionName: string): boolean => isWaitingForSnapshot && waitingForSnapshotAction === actionName;
+	const shouldHideCommitActionWhileWaiting = (projectName?: string): boolean => {
+		if (shouldHideActionWhileWaiting('commitStaged:all')) {
+			return true;
+		}
+
+		return Boolean(projectName) && shouldHideActionWhileWaiting(`commitStaged:${projectName}`);
+	};
 	const promptBranch = (snapshot?.promptBranch || '').trim();
 	const allProjects = snapshot?.projects || [];
 	const normalizedSelectedProjects = useMemo(
@@ -1138,6 +1145,51 @@ export const GitOverlay: React.FC<Props> = ({
 		() => reviewProjectsWithCli.filter(project => !project.review.request),
 		[reviewProjectsWithCli],
 	);
+	const reviewRequestLinks = useMemo(
+		() => reviewProjects
+			.map(project => (project.review.request?.url || '').trim())
+			.filter((url): url is string => Boolean(url)),
+		[reviewProjects],
+	);
+	const reviewRequestLinksText = useMemo(
+		() => reviewRequestLinks.join('\n'),
+		[reviewRequestLinks],
+	);
+	const bulkReviewRequests = useMemo<GitOverlayProjectReviewRequestInput[]>(() => {
+		const result: GitOverlayProjectReviewRequestInput[] = [];
+
+		for (const project of reviewProjectsMissingRequest) {
+			const draft = reviewDrafts[project.project];
+			const targetBranch = (draft?.targetBranch || '').trim();
+			const title = (draft?.title || '').trim();
+			const canCreateReviewRequest = Boolean(project.review.remote?.supported)
+				&& Boolean(project.review.remote?.cliAvailable)
+				&& !project.review.setupAction
+				&& Boolean(promptBranch)
+				&& project.currentBranch === promptBranch
+				&& Boolean(targetBranch)
+				&& Boolean(title);
+
+			if (!canCreateReviewRequest) {
+				continue;
+			}
+
+			result.push({
+				project: project.project,
+				targetBranch,
+				title,
+				draft: true,
+				removeSourceBranch: false,
+			});
+		}
+
+		return result;
+	}, [promptBranch, reviewDrafts, reviewProjectsMissingRequest]);
+	const canCreateAllReviewRequests = reviewProjectsMissingRequest.length > 0
+		&& bulkReviewRequests.length === reviewProjectsMissingRequest.length;
+	const canCopyAllReviewRequestLinks = typeof navigator !== 'undefined'
+		&& typeof navigator.clipboard?.writeText === 'function'
+		&& reviewRequestLinks.length > 0;
 
 	const projectValidations = useMemo(() => {
 		const result = new Map<string, ProjectValidation>();
@@ -1595,10 +1647,28 @@ export const GitOverlay: React.FC<Props> = ({
 
 		onCreateReviewRequest([{
 			project: project.project,
-			targetBranch: draft.targetBranch,
-			title: draft.title,
+			targetBranch: draft.targetBranch.trim(),
+			title: draft.title.trim(),
+			draft: true,
+			removeSourceBranch: false,
 		}]);
 	}, [onCreateReviewRequest, reviewDrafts]);
+
+	const handleCreateAllReviewRequests = useCallback(() => {
+		if (bulkReviewRequests.length === 0) {
+			return;
+		}
+
+		onCreateReviewRequest(bulkReviewRequests);
+	}, [bulkReviewRequests, onCreateReviewRequest]);
+
+	const handleCopyAllReviewRequestLinks = useCallback(() => {
+		if (!reviewRequestLinksText || typeof navigator === 'undefined' || typeof navigator.clipboard?.writeText !== 'function') {
+			return;
+		}
+
+		navigator.clipboard.writeText(reviewRequestLinksText).catch(() => undefined);
+	}, [reviewRequestLinksText]);
 
 	const handleSetupReviewCli = useCallback((project: GitOverlayProjectSnapshot) => {
 		const remote = project.review.remote;
@@ -1625,6 +1695,7 @@ export const GitOverlay: React.FC<Props> = ({
 	const isMerging = busyAction === 'mergePromptBranch';
 	const isGeneratingAll = busyAction === 'generateCommitMessage:all';
 	const isCommittingAll = busyAction === 'commitStaged:all';
+	const isCreatingAllReviewRequests = busyAction === 'createReviewRequest:all';
 
 	const refreshProgressMode: RefreshProgressMode = isLoadingOverlay
 		? 'loading'
@@ -2238,7 +2309,7 @@ export const GitOverlay: React.FC<Props> = ({
 														onClick={() => onCommitStaged([{ project: project.project, message: projectCommitMessage.trim() }])}
 														disabled={isReadOnlyFlow || !validation?.committable}
 														loading={isCommittingProject}
-														hidden={shouldHideActionWhileWaiting(`commitStaged:${project.project}`)}
+														hidden={shouldHideCommitActionWhileWaiting(project.project)}
 														variant="primary"
 													/>
 												</div>
@@ -2263,7 +2334,7 @@ export const GitOverlay: React.FC<Props> = ({
 											onClick={() => onCommitStaged(commitAllMessages)}
 											disabled={isReadOnlyFlow || !canCommitAllProjects}
 											loading={isCommittingAll}
-											hidden={shouldHideActionWhileWaiting('commitStaged:all')}
+											hidden={shouldHideCommitActionWhileWaiting()}
 											variant="primary"
 										/>
 									) : null}
@@ -2388,7 +2459,7 @@ export const GitOverlay: React.FC<Props> = ({
 											&& !hasSetupAction
 											&& Boolean(promptBranch)
 											&& project.currentBranch === promptBranch
-											&& Boolean(draft.targetBranch)
+											&& Boolean(draft.targetBranch.trim())
 											&& Boolean(draft.title.trim())
 											&& !hasRequest;
 
@@ -2542,6 +2613,28 @@ export const GitOverlay: React.FC<Props> = ({
 										);
 									})}
 								</div>
+
+										{reviewProjectsMissingRequest.length > 0 || reviewRequestLinks.length > 0 ? (
+											<div style={styles.actionRowEnd}>
+												{reviewRequestLinks.length > 0 ? (
+													<ActionButton
+														label={t('editor.gitOverlayCopyAllReviewRequestLinks')}
+														onClick={handleCopyAllReviewRequestLinks}
+														disabled={isReadOnlyFlow || !canCopyAllReviewRequestLinks}
+													/>
+												) : null}
+												{reviewProjectsMissingRequest.length > 0 ? (
+													<ActionButton
+														label={t('editor.gitOverlayCreateAllReviewRequests')}
+														onClick={handleCreateAllReviewRequests}
+														disabled={isReadOnlyFlow || !canCreateAllReviewRequests}
+														loading={isCreatingAllReviewRequests}
+														hidden={shouldHideActionWhileWaiting('createReviewRequest:all')}
+														variant="primary"
+													/>
+												) : null}
+											</div>
+										) : null}
 							</div>
 							)}
 						</section>

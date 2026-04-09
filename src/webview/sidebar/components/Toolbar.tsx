@@ -1,14 +1,41 @@
 import React from 'react';
 import { useT } from '../../shared/i18n';
 
+const FilterIcon: React.FC = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" style={styles.icon}>
+    <path
+      d="M4 6h16l-6.6 7.2v4.9l-2.8 1.4v-6.3L4 6z"
+      fill="currentColor"
+    />
+  </svg>
+);
+
+const ImportIcon: React.FC = () => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" style={styles.icon}>
+    <path
+      d="M11 4h2v8.17l2.59-2.58L17 11l-5 5-5-5 1.41-1.41L11 12.17V4zm-5 13h12v3H6v-3z"
+      fill="currentColor"
+    />
+  </svg>
+);
+
 interface Props {
   onCreateNew: () => void;
   onImport: () => void;
   onToggleFilters: () => void;
+  onToggleViewSettings: () => void;
   showFilters: boolean;
+  showViewSettings: boolean;
 }
 
-export const Toolbar: React.FC<Props> = ({ onCreateNew, onImport, onToggleFilters, showFilters }) => {
+export const Toolbar: React.FC<Props> = ({
+  onCreateNew,
+  onImport,
+  onToggleFilters,
+  onToggleViewSettings,
+  showFilters,
+  showViewSettings,
+}) => {
   const t = useT();
   return (
     <div style={styles.container}>
@@ -16,14 +43,21 @@ export const Toolbar: React.FC<Props> = ({ onCreateNew, onImport, onToggleFilter
         {t('sidebar.new')}
       </button>
       <button style={styles.btnSec} onClick={onImport} title={t('sidebar.importTooltip')}>
-        📥
+        <ImportIcon />
       </button>
       <button
         style={{ ...styles.btnSec, ...(showFilters ? styles.btnActive : {}) }}
         onClick={onToggleFilters}
         title={t('sidebar.filtersTooltip')}
       >
-        🔍
+        <FilterIcon />
+      </button>
+      <button
+        style={{ ...styles.btnSec, ...(showViewSettings ? styles.btnActive : {}) }}
+        onClick={onToggleViewSettings}
+        title={t('sidebar.viewSettingsTooltip')}
+      >
+        ▤
       </button>
     </div>
   );
@@ -50,6 +84,9 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
   },
   btnSec: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     padding: '4px 8px',
     background: 'var(--vscode-button-secondaryBackground)',
     color: 'var(--vscode-button-secondaryForeground)',
@@ -61,5 +98,10 @@ const styles: Record<string, React.CSSProperties> = {
   btnActive: {
     background: 'var(--vscode-badge-background)',
     color: 'var(--vscode-badge-foreground)',
+  },
+  icon: {
+    width: '14px',
+    height: '14px',
+    flexShrink: 0,
   },
 };

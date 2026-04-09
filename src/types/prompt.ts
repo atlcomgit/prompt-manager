@@ -394,6 +394,9 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 export type SortField = 'title' | 'createdAt' | 'updatedAt' | 'status';
 export type SortOrder = 'asc' | 'desc';
 
+/** Sidebar list view options */
+export type SidebarViewMode = 'detailed' | 'compact';
+
 /** Sidebar group options */
 export type GroupBy = 'none' | 'status' | 'project' | 'language' | 'framework';
 
@@ -430,6 +433,7 @@ export interface SidebarState {
 	filters: FilterState;
 	sortField: SortField;
 	sortOrder: SortOrder;
+	viewMode: SidebarViewMode;
 	groupBy: GroupBy;
 	collapsedGroups: Record<string, boolean>;
 	panelWidth: number;
@@ -455,6 +459,7 @@ export function createDefaultSidebarState(): SidebarState {
 		},
 		sortField: 'createdAt',
 		sortOrder: 'desc',
+		viewMode: 'detailed',
 		groupBy: 'none',
 		collapsedGroups: {},
 		panelWidth: 300,

@@ -55,7 +55,16 @@ test('normalizeSidebarState backfills selectedPromptUuid for legacy sidebar stat
 
 	assert.equal(result.selectedPromptId, 'prompt-1');
 	assert.equal(result.selectedPromptUuid, null);
+	assert.equal(result.viewMode, 'detailed');
 	assert.equal(result.filters.createdAt, 'all');
+});
+
+test('normalizeSidebarState preserves explicit compact view mode', () => {
+	const result = normalizeSidebarState({
+		viewMode: 'compact',
+	});
+
+	assert.equal(result.viewMode, 'compact');
 });
 
 test('reconcileSidebarSelection remaps selection to renamed prompt by promptUuid', () => {

@@ -1,5 +1,5 @@
 import React from 'react';
-import type { GroupBy, PromptConfig, PromptStatus } from '../../../types/prompt';
+import type { GroupBy, PromptConfig, PromptStatus, SidebarViewMode } from '../../../types/prompt';
 import { makeSidebarGroupCollapseKey } from '../../../utils/sidebarGrouping.js';
 import { PromptItem } from './PromptItem';
 import { useT } from '../../shared/i18n';
@@ -7,6 +7,7 @@ import { useT } from '../../shared/i18n';
 interface Props {
   groups: Record<string, PromptConfig[]>;
   groupBy: GroupBy;
+  viewMode: SidebarViewMode;
   collapsedGroups: Record<string, boolean>;
   selectedId: string | null;
   savingPromptIds?: string[];
@@ -22,6 +23,7 @@ interface Props {
 export const PromptList: React.FC<Props> = ({
   groups,
   groupBy,
+  viewMode,
   collapsedGroups,
   selectedId,
   savingPromptIds = [],
@@ -87,6 +89,7 @@ export const PromptList: React.FC<Props> = ({
           <PromptItem
             key={p.id}
             prompt={p}
+            viewMode={viewMode}
             isSelected={p.id === selectedId}
             isSaving={savingPromptIds.includes(p.id)}
             onOpen={onOpen}
@@ -116,6 +119,7 @@ export const PromptList: React.FC<Props> = ({
             <PromptItem
               key={p.id}
               prompt={p}
+              viewMode={viewMode}
               isSelected={p.id === selectedId}
               isSaving={savingPromptIds.includes(p.id)}
               onOpen={onOpen}

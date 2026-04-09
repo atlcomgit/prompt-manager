@@ -1,31 +1,41 @@
 import React from 'react';
-import type { PromptStatus, SortField, SortOrder, GroupBy, CreatedAtFilter } from '../../../types/prompt';
+import type {
+  PromptStatus,
+  SortField,
+  SortOrder,
+  GroupBy,
+  CreatedAtFilter,
+  SidebarViewMode,
+} from '../../../types/prompt';
 import { useT } from '../../shared/i18n';
 
-interface Props {
+type FilterControlsProps = {
+  mode?: 'filters';
   statusFilter: PromptStatus[];
   onStatusFilterChange: (f: PromptStatus[]) => void;
   createdAtFilter: CreatedAtFilter;
   onCreatedAtFilterChange: (f: CreatedAtFilter) => void;
   favoritesOnly: boolean;
   onFavoritesChange: (v: boolean) => void;
+};
+
+type ViewSettingsProps = {
+  mode: 'view-settings';
   sortField: SortField;
   onSortFieldChange: (f: SortField) => void;
   sortOrder: SortOrder;
   onSortOrderChange: (o: SortOrder) => void;
+  viewMode: SidebarViewMode;
+  onViewModeChange: (mode: SidebarViewMode) => void;
   groupBy: GroupBy;
   onGroupByChange: (g: GroupBy) => void;
-}
+};
 
-export const FilterBar: React.FC<Props> = ({
-  statusFilter, onStatusFilterChange,
-  createdAtFilter, onCreatedAtFilterChange,
-  favoritesOnly, onFavoritesChange,
-  sortField, onSortFieldChange,
-  sortOrder, onSortOrderChange,
-  groupBy, onGroupByChange,
-}) => {
+type Props = FilterControlsProps | ViewSettingsProps;
+
+export const FilterBar: React.FC<Props> = (props) => {
   const t = useT();
+  const isViewSettings = props.mode === 'view-settings';
 
   const STATUS_OPTIONS: { value: PromptStatus; label: string }[] = [
     { value: 'draft', label: `📝 ${t('status.draft')}` },
@@ -53,6 +63,11 @@ export const FilterBar: React.FC<Props> = ({
     { value: 'framework', label: t('filter.byFramework') },
   ];
 
+  const VIEW_MODE_OPTIONS: { value: SidebarViewMode; label: string }[] = [
+    { value: 'compact', label: t('filter.viewModeCompact') },
+    { value: 'detailed', label: t('filter.viewModeDetailed') },
+  ];
+
   const CREATED_AT_OPTIONS: { value: CreatedAtFilter; label: string }[] = [
     { value: 'all', label: t('filter.periodAll') },
     { value: 'last-1-day', label: t('filter.periodLast1Day') },
@@ -69,6 +84,11 @@ export const FilterBar: React.FC<Props> = ({
   ];
 
   const toggleStatus = (status: PromptStatus) => {
+    if (isViewSettings) {
+      return;
+    }
+
+    const { statusFilter, onStatusFilterChange } = props;
     if (statusFilter.includes(status)) {
       onStatusFilterChange(statusFilter.filter(s => s !== status));
     } else {
@@ -78,86 +98,111 @@ export const FilterBar: React.FC<Props> = ({
 
   return (
     <div style={styles.container}>
-      {/* Status filter */}
-      <div style={styles.section}>
-        <label style={styles.label}>{t('filter.status')}</label>
-        <div style={styles.chips}>
-          {STATUS_OPTIONS.map(opt => (
-            <button
-              key={opt.value}
-              style={{
-                ...styles.chip,
-                ...(statusFilter.includes(opt.value) ? styles.chipActive : {}),
-              }}
-              onClick={() => toggleStatus(opt.value)}
-              title={opt.label}
-            >
-              {opt.label}
-            </button>
-          ))}
+      <div style={styles.card}>
+        <div style={styles.headerRow}>
+          <span style={styles.headerTitle}>
+            {isViewSettings ? t('filter.viewSettingsTitle') : t('filter.filtersTitle')}
+          </span>
         </div>
-      </div>
+        {isViewSettings ? (
+          <div style={styles.settingsGrid}>
+            <div style={styles.fieldWide}>
+              <label style={styles.label}>{t('filter.sort')}</label>
+              <div style={styles.row}>
+                <select
+                  value={props.sortField}
+                  onChange={e => props.onSortFieldChange(e.target.value as SortField)}
+                  style={styles.select}
+                >
+                  {SORT_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                <button
+                  style={styles.sortBtn}
+                  onClick={() => props.onSortOrderChange(props.sortOrder === 'asc' ? 'desc' : 'asc')}
+                  title={props.sortOrder === 'asc' ? t('filter.sortAsc') : t('filter.sortDesc')}
+                >
+                  {props.sortOrder === 'asc' ? '↑' : '↓'}
+                </button>
+              </div>
+            </div>
 
-      <div style={styles.section}>
-        <label style={styles.label}>{t('filter.showRecent')}</label>
-        <select
-          value={createdAtFilter}
-          onChange={e => onCreatedAtFilterChange(e.target.value as CreatedAtFilter)}
-          style={styles.select}
-        >
-          {CREATED_AT_OPTIONS.map(opt => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
-          ))}
-        </select>
-      </div>
+            <div style={styles.section}>
+              <label style={styles.label}>{t('filter.groupBy')}</label>
+              <select
+                value={props.groupBy}
+                onChange={e => props.onGroupByChange(e.target.value as GroupBy)}
+                style={styles.select}
+              >
+                {GROUP_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
 
-      {/* Favorites toggle */}
-      <div style={styles.section}>
-        <label style={styles.checkboxLabel}>
-          <input
-            type="checkbox"
-            checked={favoritesOnly}
-            onChange={e => onFavoritesChange(e.target.checked)}
-          />
-          ⭐ {t('filter.favoritesOnly')}
-        </label>
-      </div>
+            <div style={styles.section}>
+              <label style={styles.label}>{t('filter.viewMode')}</label>
+              <select
+                value={props.viewMode}
+                onChange={e => props.onViewModeChange(e.target.value as SidebarViewMode)}
+                style={styles.select}
+              >
+                {VIEW_MODE_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={styles.section}>
+              <label style={styles.label}>{t('filter.status')}</label>
+              <div style={styles.chips}>
+                {STATUS_OPTIONS.map(opt => (
+                  <button
+                    key={opt.value}
+                    style={{
+                      ...styles.chip,
+                      ...(props.statusFilter.includes(opt.value) ? styles.chipActive : {}),
+                    }}
+                    onClick={() => toggleStatus(opt.value)}
+                    title={opt.label}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-      {/* Sort */}
-      <div style={styles.section}>
-        <label style={styles.label}>{t('filter.sort')}</label>
-        <div style={styles.row}>
-          <select
-            value={sortField}
-            onChange={e => onSortFieldChange(e.target.value as SortField)}
-            style={styles.select}
-          >
-            {SORT_OPTIONS.map(opt => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
-          <button
-            style={styles.sortBtn}
-            onClick={() => onSortOrderChange(sortOrder === 'asc' ? 'desc' : 'asc')}
-            title={sortOrder === 'asc' ? t('filter.sortAsc') : t('filter.sortDesc')}
-          >
-            {sortOrder === 'asc' ? '↑' : '↓'}
-          </button>
-        </div>
-      </div>
+            <div style={styles.filtersGrid}>
+              <div style={styles.section}>
+                <label style={styles.label}>{t('filter.showRecent')}</label>
+                <select
+                  value={props.createdAtFilter}
+                  onChange={e => props.onCreatedAtFilterChange(e.target.value as CreatedAtFilter)}
+                  style={styles.select}
+                >
+                  {CREATED_AT_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
 
-      {/* Group by */}
-      <div style={styles.section}>
-        <label style={styles.label}>{t('filter.groupBy')}</label>
-        <select
-          value={groupBy}
-          onChange={e => onGroupByChange(e.target.value as GroupBy)}
-          style={styles.select}
-        >
-          {GROUP_OPTIONS.map(opt => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
-          ))}
-        </select>
+              <div style={{ ...styles.section, ...styles.favoriteSection }}>
+                <label style={styles.label}>{t('filter.quickOptions')}</label>
+                <label style={styles.checkboxLabel}>
+                  <input
+                    type="checkbox"
+                    checked={props.favoritesOnly}
+                    onChange={e => props.onFavoritesChange(e.target.checked)}
+                  />
+                  ⭐ {t('filter.favoritesOnly')}
+                </label>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -165,20 +210,57 @@ export const FilterBar: React.FC<Props> = ({
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
-    padding: '8px',
-    borderBottom: '1px solid var(--vscode-panel-border)',
     fontSize: '12px',
   },
+  card: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    padding: '10px',
+    background: 'color-mix(in srgb, var(--vscode-input-background) 84%, transparent)',
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '8px',
+  },
+  headerRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  headerTitle: {
+    fontSize: '11px',
+    fontWeight: 700,
+    color: 'var(--vscode-descriptionForeground)',
+    textTransform: 'uppercase',
+    letterSpacing: '0.6px',
+  },
   section: {
-    marginBottom: '8px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  },
+  fieldWide: {
+    gridColumn: '1 / -1',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
   },
   label: {
     display: 'block',
-    marginBottom: '4px',
     color: 'var(--vscode-descriptionForeground)',
     fontSize: '11px',
     textTransform: 'uppercase',
     letterSpacing: '0.5px',
+  },
+  filtersGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1.45fr) minmax(0, 1fr)',
+    gap: '10px',
+    alignItems: 'stretch',
+  },
+  settingsGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: '10px',
   },
   chips: {
     display: 'flex',
@@ -206,6 +288,10 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '4px',
     cursor: 'pointer',
     color: 'var(--vscode-foreground)',
+    minHeight: '32px',
+  },
+  favoriteSection: {
+    justifyContent: 'space-between',
   },
   row: {
     display: 'flex',

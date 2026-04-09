@@ -14,7 +14,17 @@ import { createDefaultPrompt, PROMPT_STATUS_ORDER } from '../../types/prompt';
 import { matchesCreatedAtFilter } from '../../utils/sidebarDateFilter.js';
 import { makeSidebarGroupCollapseKey, shouldAutoExpandSidebarGroups } from '../../utils/sidebarGrouping.js';
 import { reconcileSidebarDeletionState, reconcileSidebarSelection } from '../../utils/sidebarSelection.js';
-import type { PromptConfig, SidebarState, FilterState, SortField, SortOrder, GroupBy, PromptStatus, CreatedAtFilter } from '../../types/prompt';
+import type {
+  PromptConfig,
+  SidebarState,
+  FilterState,
+  SortField,
+  SortOrder,
+  GroupBy,
+  PromptStatus,
+  CreatedAtFilter,
+  SidebarViewMode,
+} from '../../types/prompt';
 
 const vscode = getVsCodeApi();
 
@@ -40,9 +50,11 @@ export const SidebarApp: React.FC = () => {
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [sortField, setSortField] = useState<SortField>('createdAt');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
+  const [viewMode, setViewMode] = useState<SidebarViewMode>('detailed');
   const [groupBy, setGroupBy] = useState<GroupBy>('none');
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [showFilters, setShowFilters] = useState(false);
+  const [showViewSettings, setShowViewSettings] = useState(false);
   const [hasHydratedState, setHasHydratedState] = useState(false);
   const [showOptimisticNewPrompt, setShowOptimisticNewPrompt] = useState(false);
   const [optimisticBaselineIds, setOptimisticBaselineIds] = useState<string[] | null>(null);
@@ -149,6 +161,7 @@ export const SidebarApp: React.FC = () => {
         }
         setSortField(state.sortField || 'createdAt');
         setSortOrder(state.sortOrder || 'desc');
+        setViewMode(state.viewMode || 'detailed');
         setGroupBy(state.groupBy || 'none');
         setCollapsedGroups(state.collapsedGroups || {});
         setHasHydratedState(true);
@@ -198,12 +211,13 @@ export const SidebarApp: React.FC = () => {
       filters: filterState,
       sortField,
       sortOrder,
+      viewMode,
       groupBy,
       collapsedGroups,
       panelWidth: 300,
     };
     vscode.postMessage({ type: 'saveSidebarState', state });
-  }, [hasHydratedState, selectedId, selectedPromptUuid, filterState, sortField, sortOrder, groupBy, collapsedGroups]);
+  }, [hasHydratedState, selectedId, selectedPromptUuid, filterState, sortField, sortOrder, viewMode, groupBy, collapsedGroups]);
 
   const filteredPrompts = useMemo(() => {
     let result = getSidebarPromptSearchPool(prompts, archivedPrompts, search);
@@ -391,29 +405,43 @@ export const SidebarApp: React.FC = () => {
         onCreateNew={handleCreate}
         onImport={handleImport}
         onToggleFilters={() => setShowFilters(!showFilters)}
+        onToggleViewSettings={() => setShowViewSettings(!showViewSettings)}
         showFilters={showFilters}
+        showViewSettings={showViewSettings}
       />
       <SearchBar value={search} onChange={setSearch} />
-      {showFilters && (
-        <FilterBar
-          statusFilter={statusFilter}
-          onStatusFilterChange={setStatusFilter}
-          createdAtFilter={createdAtFilter}
-          onCreatedAtFilterChange={setCreatedAtFilter}
-          favoritesOnly={favoritesOnly}
-          onFavoritesChange={setFavoritesOnly}
-          sortField={sortField}
-          onSortFieldChange={setSortField}
-          sortOrder={sortOrder}
-          onSortOrderChange={setSortOrder}
-          groupBy={groupBy}
-          onGroupByChange={setGroupBy}
-        />
+      {(showFilters || showViewSettings) && (
+        <div style={styles.controlsContainer}>
+          {showFilters && (
+            <FilterBar
+              statusFilter={statusFilter}
+              onStatusFilterChange={setStatusFilter}
+              createdAtFilter={createdAtFilter}
+              onCreatedAtFilterChange={setCreatedAtFilter}
+              favoritesOnly={favoritesOnly}
+              onFavoritesChange={setFavoritesOnly}
+            />
+          )}
+          {showViewSettings && (
+            <FilterBar
+              mode="view-settings"
+              sortField={sortField}
+              onSortFieldChange={setSortField}
+              sortOrder={sortOrder}
+              onSortOrderChange={setSortOrder}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
+              groupBy={groupBy}
+              onGroupByChange={setGroupBy}
+            />
+          )}
+        </div>
       )}
       <div style={styles.listContainer}>
         <PromptList
           groups={groupedPrompts}
           groupBy={groupBy}
+          viewMode={viewMode}
           collapsedGroups={effectiveCollapsedGroups}
           selectedId={selectedId}
           savingPromptIds={savingPromptIds}
@@ -444,6 +472,13 @@ const styles: Record<string, React.CSSProperties> = {
     flex: 1,
     overflowY: 'auto',
     overflowX: 'hidden',
+  },
+  controlsContainer: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    padding: '0 8px 8px',
+    borderBottom: '1px solid var(--vscode-panel-border)',
   },
   footer: {
     padding: '4px 8px',

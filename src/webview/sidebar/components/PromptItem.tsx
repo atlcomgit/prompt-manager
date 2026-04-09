@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import type { PromptConfig } from '../../../types/prompt';
+import type { PromptConfig, SidebarViewMode } from '../../../types/prompt';
 import { useT } from '../../shared/i18n';
 
 interface Props {
   prompt: PromptConfig;
+  viewMode: SidebarViewMode;
   isSelected: boolean;
   isSaving?: boolean;
   onOpen: (id: string) => void;
@@ -37,7 +38,15 @@ const STATUS_COLORS: Record<string, string> = {
 
 
 export const PromptItem: React.FC<Props> = ({
-  prompt, isSelected, isSaving = false, onOpen, onDelete, onDuplicate, onToggleFavorite, onExport,
+  prompt,
+  viewMode,
+  isSelected,
+  isSaving = false,
+  onOpen,
+  onDelete,
+  onDuplicate,
+  onToggleFavorite,
+  onExport,
 }) => {
   const MENU_WIDTH = 170;
   const MENU_ITEM_HEIGHT = 34;
@@ -63,6 +72,8 @@ export const PromptItem: React.FC<Props> = ({
   const selFg = isSelected ? 'var(--vscode-list-activeSelectionForeground)' : undefined;
   const selBg = isSelected ? 'var(--vscode-list-activeSelectionBackground)' : undefined;
   const statusAccent = STATUS_COLORS[prompt.status] || 'var(--vscode-descriptionForeground)';
+  const compactTaskNumber = prompt.taskNumber?.trim() || '—';
+  const compactTitle = prompt.title?.trim() || prompt.id;
   const menuItems: Array<{
     id: string;
     icon: string;
@@ -153,97 +164,134 @@ export const PromptItem: React.FC<Props> = ({
       }}
       title={prompt.description || prompt.title || prompt.id}
     >
-      <div style={styles.row}>
-        <span style={styles.statusIcon}>
-          <span
+      {viewMode === 'compact' ? (
+        <div
+          style={{
+            ...styles.compactRow,
+            ...(showActions ? styles.compactRowWithActions : {}),
+          }}
+        >
+          <div style={{ ...styles.compactTask, ...(selFg ? { color: selFg } : {}) }}>
+            {compactTaskNumber}
+          </div>
+          <div style={styles.compactTitle}>
+            <span style={{ ...styles.compactTitleText, ...(selFg ? { color: selFg } : {}) }}>
+              {compactTitle}
+            </span>
+            {prompt.favorite && <span style={styles.compactMarker}>⭐</span>}
+            {prompt.archived && (
+              <span
+                style={{
+                  ...styles.compactArchiveBadge,
+                  ...(selFg ? { color: selFg, borderColor: selFg } : {}),
+                }}
+              >
+                {t('sidebar.archivedBadge')}
+              </span>
+            )}
+          </div>
+          <div
             style={{
-              ...styles.statusIconGlyph,
-              color: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
-              textShadow: isSelected ? '0 0 1px var(--vscode-list-activeSelectionBackground)' : 'none',
+              ...styles.compactStatus,
+              color: selFg || statusAccent,
             }}
           >
-            {STATUS_ICONS[prompt.status] || '◇'}
-          </span>
-        </span>
-        <div style={styles.content}>
-          <div style={{ ...styles.title, ...(selFg ? { color: selFg } : {}) }}>
-            {prompt.favorite && <span style={styles.star}>⭐</span>}
-            {prompt.title || prompt.id}
-          </div>
-          <div style={{
-            ...styles.description,
-            ...(selFg ? { color: selFg } : {}),
-          }}>{prompt.description || 'Описание не указано'}</div>
-          <div style={{
-            ...styles.meta,
-            ...(selFg ? { color: selFg } : {}),
-          }}>
-            {prompt.taskNumber && (
-              <>
-                <span style={{
-                  ...styles.taskBadge,
-                  ...(selFg ? { color: selFg } : {}),
-                }}>
-                  🎫 {prompt.taskNumber}
-                </span>
-                <span>·</span>
-              </>
-            )}
-            <span
-              style={{
-                ...styles.statusBadge,
-                color: selFg || statusAccent,
-                borderColor: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
-                background: selBg ? 'color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 14%, var(--vscode-list-activeSelectionBackground))' : 'transparent',
-              }}
-            >
-              <span>{STATUS_LABELS[prompt.status]}</span>
-            </span>
-            {prompt.archived && (
-              <>
-                <span>·</span>
-                <span
-                  style={{
-                    ...(isSelected ? styles.metaBadgeSelected : styles.metaBadgeText),
-                  }}
-                >
-                  {t('sidebar.archivedBadge')}
-                </span>
-              </>
-            )}
-            {prompt.chatMode && (
-              <>
-                <span>·</span>
-                <span
-                  style={{
-                    ...(isSelected ? styles.metaBadgeSelected : styles.metaBadgeText),
-                  }}
-                >
-                  {prompt.chatMode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
-                </span>
-              </>
-            )}
-            {prompt.model && (
-              <>
-                <span>·</span>
-                <span
-                  style={{
-                    ...(isSelected ? styles.metaBadgeSelected : styles.metaBadgeText),
-                  }}
-                >
-                  {prompt.model}
-                </span>
-              </>
-            )}
-            {prompt.projects.length > 0 && (
-              <>
-                <span>·</span>
-                <span>{prompt.projects.slice(0, 2).join(', ')}</span>
-              </>
-            )}
+            {STATUS_LABELS[prompt.status]}
           </div>
         </div>
-      </div>
+      ) : (
+        <div style={styles.row}>
+          <span style={styles.statusIcon}>
+            <span
+              style={{
+                ...styles.statusIconGlyph,
+                color: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
+                textShadow: isSelected ? '0 0 1px var(--vscode-list-activeSelectionBackground)' : 'none',
+              }}
+            >
+              {STATUS_ICONS[prompt.status] || '◇'}
+            </span>
+          </span>
+          <div style={styles.content}>
+            <div style={{ ...styles.title, ...(selFg ? { color: selFg } : {}) }}>
+              {prompt.favorite && <span style={styles.star}>⭐</span>}
+              {prompt.title || prompt.id}
+            </div>
+            <div style={{
+              ...styles.description,
+              ...(selFg ? { color: selFg } : {}),
+            }}>{prompt.description || 'Описание не указано'}</div>
+            <div style={{
+              ...styles.meta,
+              ...(selFg ? { color: selFg } : {}),
+            }}>
+              {prompt.taskNumber && (
+                <>
+                  <span style={{
+                    ...styles.taskBadge,
+                    ...(selFg ? { color: selFg } : {}),
+                  }}>
+                    🎫 {prompt.taskNumber}
+                  </span>
+                  <span>·</span>
+                </>
+              )}
+              <span
+                style={{
+                  ...styles.statusBadge,
+                  color: selFg || statusAccent,
+                  borderColor: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
+                  background: selBg ? 'color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 14%, var(--vscode-list-activeSelectionBackground))' : 'transparent',
+                }}
+              >
+                <span>{STATUS_LABELS[prompt.status]}</span>
+              </span>
+              {prompt.archived && (
+                <>
+                  <span>·</span>
+                  <span
+                    style={{
+                      ...(isSelected ? styles.metaBadgeSelected : styles.metaBadgeText),
+                    }}
+                  >
+                    {t('sidebar.archivedBadge')}
+                  </span>
+                </>
+              )}
+              {prompt.chatMode && (
+                <>
+                  <span>·</span>
+                  <span
+                    style={{
+                      ...(isSelected ? styles.metaBadgeSelected : styles.metaBadgeText),
+                    }}
+                  >
+                    {prompt.chatMode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
+                  </span>
+                </>
+              )}
+              {prompt.model && (
+                <>
+                  <span>·</span>
+                  <span
+                    style={{
+                      ...(isSelected ? styles.metaBadgeSelected : styles.metaBadgeText),
+                    }}
+                  >
+                    {prompt.model}
+                  </span>
+                </>
+              )}
+              {prompt.projects.length > 0 && (
+                <>
+                  <span>·</span>
+                  <span>{prompt.projects.slice(0, 2).join(', ')}</span>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       <div
         style={{
           ...styles.actions,
@@ -340,6 +388,74 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'flex-start',
     gap: '6px',
+  },
+  compactRow: {
+    display: 'grid',
+    gridTemplateColumns: '44px minmax(0, 1fr) max-content',
+    alignItems: 'center',
+    columnGap: '16px',
+    minHeight: '22px',
+    width: '100%',
+    boxSizing: 'border-box',
+    paddingLeft: '8px',
+    paddingRight: '8px',
+  },
+  compactRowWithActions: {
+    paddingRight: '40px',
+  },
+  compactTask: {
+    minWidth: 0,
+    textAlign: 'left',
+    fontSize: '12px',
+    lineHeight: '16px',
+    fontWeight: 700,
+    color: 'var(--vscode-textLink-foreground)',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  compactTitle: {
+    minWidth: 0,
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontSize: '12px',
+    fontWeight: 500,
+    textAlign: 'left',
+  },
+  compactTitleText: {
+    minWidth: 0,
+    flex: 1,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  compactStatus: {
+    minWidth: 0,
+    fontSize: '11px',
+    fontWeight: 600,
+    justifySelf: 'end',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    textAlign: 'right',
+  },
+  compactMarker: {
+    flexShrink: 0,
+    fontSize: '10px',
+  },
+  compactArchiveBadge: {
+    flexShrink: 0,
+    padding: '1px 5px',
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '999px',
+    fontSize: '9px',
+    lineHeight: '12px',
+    color: 'var(--vscode-descriptionForeground)',
+    maxWidth: '64px',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   },
   statusIcon: {
     width: '18px',

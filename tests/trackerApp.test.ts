@@ -11,6 +11,7 @@ function makePromptConfig(id: string, status: PromptStatus): PromptConfig {
 		description: '',
 		status,
 		favorite: false,
+		archived: false,
 		projects: [],
 		languages: [],
 		frameworks: [],
@@ -55,7 +56,7 @@ async function importTrackerHelpers() {
 	}
 }
 
-test('getTrackerMoveAllState disables action for empty and final columns', async () => {
+test('getTrackerMoveAllState disables action only when no cards are selected', async () => {
 	const { getTrackerMoveAllState } = await importTrackerHelpers();
 
 	assert.deepEqual(getTrackerMoveAllState('draft', 2), {
@@ -69,8 +70,8 @@ test('getTrackerMoveAllState disables action for empty and final columns', async
 	});
 
 	assert.deepEqual(getTrackerMoveAllState('closed', 3), {
-		nextStatus: null,
-		disabled: true,
+		nextStatus: 'draft',
+		disabled: false,
 	});
 });
 
@@ -90,4 +91,42 @@ test('applyPromptStatusToPrompts updates only targeted prompt cards', async () =
 		{ id: 'review-a', status: 'review' },
 	]);
 	assert.equal(updated[2], prompts[2]);
+});
+
+test('tracker selection helpers toggle cards and work per column', async () => {
+	const {
+		getSelectedPromptIdsForStatus,
+		setTrackerPromptSelectionForStatus,
+		toggleTrackerPromptSelection,
+	} = await importTrackerHelpers();
+	const prompts = [
+		makePromptConfig('draft-a', 'draft'),
+		makePromptConfig('draft-b', 'draft'),
+		makePromptConfig('review-a', 'review'),
+	];
+
+	const toggled = toggleTrackerPromptSelection(['draft-a'], 'draft-b').sort();
+	assert.deepEqual(toggled, ['draft-a', 'draft-b']);
+
+	const selectedAllDraft = setTrackerPromptSelectionForStatus(['review-a'], prompts, 'draft', true).sort();
+	assert.deepEqual(selectedAllDraft, ['draft-a', 'draft-b', 'review-a']);
+
+	const selectedDraftIds = getSelectedPromptIdsForStatus(prompts, selectedAllDraft, 'draft');
+	assert.deepEqual(selectedDraftIds, ['draft-a', 'draft-b']);
+
+	const deselectedDraft = setTrackerPromptSelectionForStatus(selectedAllDraft, prompts, 'draft', false);
+	assert.deepEqual(deselectedDraft, ['review-a']);
+});
+
+test('filterExistingTrackerSelections removes ids that are no longer present', async () => {
+	const { filterExistingTrackerSelections } = await importTrackerHelpers();
+	const prompts = [
+		makePromptConfig('draft-a', 'draft'),
+		makePromptConfig('review-a', 'review'),
+	];
+
+	assert.deepEqual(
+		filterExistingTrackerSelections(['draft-a', 'ghost', 'review-a'], prompts),
+		['draft-a', 'review-a'],
+	);
 });

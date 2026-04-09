@@ -70,8 +70,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
 	/** Refresh the prompt list */
 	async refreshList(): Promise<void> {
-		const prompts = await this.storageService.listPrompts();
-		this.postMessage({ type: 'prompts', prompts });
+		const [prompts, archivedPrompts] = await Promise.all([
+			this.storageService.listPrompts(),
+			this.storageService.listArchivedPrompts(),
+		]);
+		this.postMessage({ type: 'prompts', prompts, archivedPrompts });
 	}
 
 	/** Sync selected prompt in persisted sidebar state and active webview */

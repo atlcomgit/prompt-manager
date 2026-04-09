@@ -1618,7 +1618,7 @@ export class EditorPanelManager {
 		);
 
 		const reportWatcher = vscode.workspace.createFileSystemWatcher(
-			new vscode.RelativePattern(this.storageService.getStorageDirectoryPath(), '*/report.txt')
+			new vscode.RelativePattern(this.storageService.getStorageDirectoryPath(), '**/report.txt')
 		);
 		this.contentSyncDisposables.push(
 			reportWatcher,

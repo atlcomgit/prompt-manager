@@ -90,6 +90,8 @@ export type WebviewToExtensionMessage =
 	| { type: 'showStatistics' }
 	| { type: 'updatePromptStatus'; id: string; status: PromptStatus }
 	| { type: 'moveAllPromptsToNextStatus'; status: PromptStatus }
+	| { type: 'moveSelectedPromptsToStatus'; ids: string[]; status: PromptStatus }
+	| { type: 'archivePrompts'; ids: string[] }
 	| { type: 'getGlobalContext' }
 	| { type: 'saveGlobalContext'; context: string }
 	| { type: 'loadRemoteGlobalContext' }
@@ -117,7 +119,7 @@ export type WebviewToExtensionMessage =
 // ---- Messages FROM extension TO webview ----
 
 export type ExtensionToWebviewMessage =
-	| { type: 'prompts'; prompts: PromptConfig[] }
+	| { type: 'prompts'; prompts: PromptConfig[]; archivedPrompts?: PromptConfig[] }
 	| { type: 'prompt'; prompt: Prompt | null; reason?: 'open' | 'save' | 'sync' | 'ai-enrichment'; previousId?: string; editorViewState?: EditorPromptViewState }
 	| { type: 'promptSaved'; prompt: PromptConfig; previousId?: string }
 	| { type: 'promptDeleted'; id: string }

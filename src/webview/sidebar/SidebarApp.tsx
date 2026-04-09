@@ -18,10 +18,19 @@ import type { PromptConfig, SidebarState, FilterState, SortField, SortOrder, Gro
 
 const vscode = getVsCodeApi();
 
+export function getSidebarPromptSearchPool(
+  prompts: PromptConfig[],
+  archivedPrompts: PromptConfig[],
+  search: string,
+): PromptConfig[] {
+  return search.trim() ? [...prompts, ...archivedPrompts] : [...prompts];
+}
+
 export const SidebarApp: React.FC = () => {
   const OPEN_PROMPT_DEBOUNCE_MS = 120;
   const t = useT();
   const [prompts, setPrompts] = useState<PromptConfig[]>([]);
+  const [archivedPrompts, setArchivedPrompts] = useState<PromptConfig[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedPromptUuid, setSelectedPromptUuid] = useState<string | null>(null);
@@ -103,6 +112,9 @@ export const SidebarApp: React.FC = () => {
     switch (msg.type) {
       case 'prompts':
         setPrompts(msg.prompts);
+        setArchivedPrompts(msg.archivedPrompts || []);
+        const nextArchivedPrompts = (msg.archivedPrompts as PromptConfig[] | undefined) || [];
+        const combinedPrompts = [...(msg.prompts as PromptConfig[]), ...nextArchivedPrompts];
         let nextSelectedId = selectedId;
         let nextSelectedPromptUuid = selectedPromptUuid;
         if (showOptimisticNewPrompt && optimisticBaselineIds) {
@@ -117,7 +129,7 @@ export const SidebarApp: React.FC = () => {
             }
           }
         }
-        const reconciledSelection = reconcileSidebarSelection(msg.prompts as PromptConfig[], {
+        const reconciledSelection = reconcileSidebarSelection(combinedPrompts, {
           selectedId: nextSelectedId,
           selectedPromptUuid: nextSelectedPromptUuid,
         });
@@ -144,7 +156,9 @@ export const SidebarApp: React.FC = () => {
       }
       case 'sidebarSelectionChanged': {
         const nextSelectedId = msg.id || null;
-        const matchingPrompt = nextSelectedId ? prompts.find(prompt => prompt.id === nextSelectedId) : null;
+        const matchingPrompt = nextSelectedId
+          ? [...prompts, ...archivedPrompts].find(prompt => prompt.id === nextSelectedId)
+          : null;
         setSelectedId(nextSelectedId);
         setSelectedPromptUuid(matchingPrompt?.promptUuid || null);
         break;
@@ -169,7 +183,7 @@ export const SidebarApp: React.FC = () => {
         break;
       }
     }
-  }, [applyDeletedPromptState, selectedId, selectedPromptUuid, showOptimisticNewPrompt, optimisticBaselineIds, prompts]);
+  }, [applyDeletedPromptState, selectedId, selectedPromptUuid, showOptimisticNewPrompt, optimisticBaselineIds, prompts, archivedPrompts]);
 
   useMessageListener(handleMessage);
 
@@ -192,7 +206,7 @@ export const SidebarApp: React.FC = () => {
   }, [hasHydratedState, selectedId, selectedPromptUuid, filterState, sortField, sortOrder, groupBy, collapsedGroups]);
 
   const filteredPrompts = useMemo(() => {
-    let result = [...prompts];
+    let result = getSidebarPromptSearchPool(prompts, archivedPrompts, search);
 
     // Search across all fields
     if (search) {
@@ -250,7 +264,7 @@ export const SidebarApp: React.FC = () => {
     }
 
     return result;
-  }, [prompts, search, statusFilter, createdAtFilter, favoritesOnly, sortField, sortOrder, showOptimisticNewPrompt, optimisticPrompt]);
+  }, [prompts, archivedPrompts, search, statusFilter, createdAtFilter, favoritesOnly, sortField, sortOrder, showOptimisticNewPrompt, optimisticPrompt]);
 
   // Group prompts
   const groupedPrompts = useMemo(() => {
@@ -306,7 +320,7 @@ export const SidebarApp: React.FC = () => {
   }, [filteredPrompts, groupBy]);
 
   const handleOpenPrompt = (id: string) => {
-    const matchingPrompt = prompts.find(prompt => prompt.id === id) || null;
+    const matchingPrompt = [...prompts, ...archivedPrompts].find(prompt => prompt.id === id) || null;
     setSelectedId(id);
     setSelectedPromptUuid(matchingPrompt?.promptUuid || null);
     if (openPromptTimerRef.current !== null) {
@@ -364,6 +378,13 @@ export const SidebarApp: React.FC = () => {
     setCollapsedGroups(prev => ({ ...prev, [collapseKey]: !prev[collapseKey] }));
   };
 
+  const totalPromptCount = useMemo(() => {
+    const baseCount = search.trim()
+      ? prompts.length + archivedPrompts.length
+      : prompts.length;
+    return baseCount + (showOptimisticNewPrompt ? 1 : 0);
+  }, [search, prompts.length, archivedPrompts.length, showOptimisticNewPrompt]);
+
   return (
     <div style={styles.container}>
       <Toolbar
@@ -406,7 +427,7 @@ export const SidebarApp: React.FC = () => {
         />
       </div>
       <div style={styles.footer}>
-        <span style={styles.count}>{filteredPrompts.length} / {prompts.length + (showOptimisticNewPrompt ? 1 : 0)} {t('sidebar.promptCount')}</span>
+        <span style={styles.count}>{filteredPrompts.length} / {totalPromptCount} {t('sidebar.promptCount')}</span>
       </div>
     </div>
   );

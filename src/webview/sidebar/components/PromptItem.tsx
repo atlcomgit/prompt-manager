@@ -199,6 +199,18 @@ export const PromptItem: React.FC<Props> = ({
             >
               <span>{STATUS_LABELS[prompt.status]}</span>
             </span>
+            {prompt.archived && (
+              <>
+                <span>·</span>
+                <span
+                  style={{
+                    ...(isSelected ? styles.metaBadgeSelected : styles.metaBadgeText),
+                  }}
+                >
+                  {t('sidebar.archivedBadge')}
+                </span>
+              </>
+            )}
             {prompt.chatMode && (
               <>
                 <span>·</span>

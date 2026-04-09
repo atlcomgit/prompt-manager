@@ -163,6 +163,8 @@ export interface PromptConfig {
 	status: PromptStatus;
 	/** Whether this prompt is favorited */
 	favorite: boolean;
+	/** Whether this prompt is stored in archive */
+	archived?: boolean;
 	/** Icon codicon name or path */
 	icon?: string;
 
@@ -288,6 +290,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		description: '',
 		status: 'draft',
 		favorite: false,
+		archived: false,
 		projects: [],
 		languages: [],
 		frameworks: [],

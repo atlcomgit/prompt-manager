@@ -41,6 +41,43 @@ const statusTranslationKey = (status: PromptStatus): string => {
   return `status.${status}`;
 };
 
+interface ColumnSelectAllCheckboxProps {
+  checked: boolean;
+  disabled: boolean;
+  indeterminate: boolean;
+  onChange: (checked: boolean) => void;
+  title: string;
+}
+
+const ColumnSelectAllCheckbox: React.FC<ColumnSelectAllCheckboxProps> = ({
+  checked,
+  disabled,
+  indeterminate,
+  onChange,
+  title,
+}) => {
+  const checkboxRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (checkboxRef.current) {
+      checkboxRef.current.indeterminate = indeterminate;
+    }
+  }, [indeterminate]);
+
+  return (
+    <input
+      ref={checkboxRef}
+      type="checkbox"
+      checked={checked}
+      disabled={disabled}
+      onChange={event => onChange(event.target.checked)}
+      onClick={event => event.stopPropagation()}
+      title={title}
+      style={styles.columnHeaderCheckbox}
+    />
+  );
+};
+
 export function applyPromptStatusToPrompts(
   prompts: PromptConfig[],
   promptIds: string[],
@@ -58,11 +95,67 @@ export function applyPromptStatusToPrompts(
   ));
 }
 
-export function getTrackerMoveAllState(status: PromptStatus, itemCount: number) {
-  const nextStatus = getNextPromptStatus(status);
+export function getPromptIdsForStatus(prompts: PromptConfig[], status: PromptStatus): string[] {
+  return prompts
+    .filter(prompt => prompt.status === status)
+    .map(prompt => prompt.id);
+}
+
+export function getSelectedPromptIdsForStatus(
+  prompts: PromptConfig[],
+  selectedPromptIds: string[],
+  status: PromptStatus,
+): string[] {
+  const selectedIdSet = new Set(selectedPromptIds);
+  return prompts
+    .filter(prompt => prompt.status === status && selectedIdSet.has(prompt.id))
+    .map(prompt => prompt.id);
+}
+
+export function toggleTrackerPromptSelection(selectedPromptIds: string[], promptId: string): string[] {
+  const nextIds = new Set(selectedPromptIds);
+  if (nextIds.has(promptId)) {
+    nextIds.delete(promptId);
+  } else {
+    nextIds.add(promptId);
+  }
+
+  return Array.from(nextIds);
+}
+
+export function setTrackerPromptSelectionForStatus(
+  selectedPromptIds: string[],
+  prompts: PromptConfig[],
+  status: PromptStatus,
+  checked: boolean,
+): string[] {
+  const nextIds = new Set(selectedPromptIds);
+  const columnPromptIds = getPromptIdsForStatus(prompts, status);
+
+  for (const promptId of columnPromptIds) {
+    if (checked) {
+      nextIds.add(promptId);
+    } else {
+      nextIds.delete(promptId);
+    }
+  }
+
+  return Array.from(nextIds);
+}
+
+export function filterExistingTrackerSelections(
+  selectedPromptIds: string[],
+  prompts: PromptConfig[],
+): string[] {
+  const existingIds = new Set(prompts.map(prompt => prompt.id));
+  return selectedPromptIds.filter(promptId => existingIds.has(promptId));
+}
+
+export function getTrackerMoveAllState(status: PromptStatus, selectedCount: number) {
+  const nextStatus = getNextPromptStatus(status) || PROMPT_STATUS_ORDER.find(item => item !== status) || null;
   return {
     nextStatus,
-    disabled: itemCount === 0 || !nextStatus,
+    disabled: selectedCount === 0 || !nextStatus,
   };
 }
 
@@ -74,9 +167,12 @@ export const TrackerApp: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOverStatus, setDragOverStatus] = useState<PromptStatus | null>(null);
+  const [selectedPromptIds, setSelectedPromptIds] = useState<string[]>([]);
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [selectedPrompt, setSelectedPrompt] = useState<Prompt | null>(null);
   const [isPromptLoading, setIsPromptLoading] = useState(false);
+  const [moveDialogSourceStatus, setMoveDialogSourceStatus] = useState<PromptStatus | null>(null);
+  const [moveDialogTargetStatus, setMoveDialogTargetStatus] = useState<PromptStatus | null>(null);
   const openPromptTimerRef = useRef<number | null>(null);
   const requestedPromptIdRef = useRef<string | null>(null);
   const suppressCardClickRef = useRef(false);
@@ -114,7 +210,9 @@ export const TrackerApp: React.FC = () => {
 
   const handleMessage = useCallback((msg: any) => {
     if (msg.type === 'prompts') {
-      setPrompts(msg.prompts || []);
+      const nextPrompts = msg.prompts || [];
+      setPrompts(nextPrompts);
+      setSelectedPromptIds(prev => filterExistingTrackerSelections(prev, nextPrompts));
       setIsLoading(false);
       return;
     }
@@ -136,6 +234,7 @@ export const TrackerApp: React.FC = () => {
 
     if (msg.type === 'promptDeleted') {
       setPrompts(prev => prev.filter(p => p.id !== msg.id));
+      setSelectedPromptIds(prev => prev.filter(promptId => promptId !== msg.id));
       setSelectedPrompt(current => (current?.id === msg.id ? null : current));
       setSelectedPromptId(current => (current === msg.id ? null : current));
     }
@@ -162,23 +261,60 @@ export const TrackerApp: React.FC = () => {
     vscode.postMessage({ type: 'updatePromptStatus', id: promptId, status });
   }, [updatePromptStatuses, vscode]);
 
-  const moveAllPromptsToNextStatus = useCallback((status: PromptStatus) => {
-    const nextStatus = getNextPromptStatus(status);
-    if (!nextStatus) {
+  const closeMoveDialog = useCallback(() => {
+    setMoveDialogSourceStatus(null);
+    setMoveDialogTargetStatus(null);
+  }, []);
+
+  const openMoveDialog = useCallback((status: PromptStatus) => {
+    const selectedIds = getSelectedPromptIdsForStatus(prompts, selectedPromptIds, status);
+    const moveState = getTrackerMoveAllState(status, selectedIds.length);
+    if (moveState.disabled) {
       return;
     }
 
-    const promptIds = prompts
-      .filter(prompt => prompt.status === status)
-      .map(prompt => prompt.id);
+    setMoveDialogSourceStatus(status);
+    setMoveDialogTargetStatus(moveState.nextStatus);
+  }, [prompts, selectedPromptIds]);
 
+  const archivePromptIds = useCallback((promptIds: string[]) => {
     if (!promptIds.length) {
       return;
     }
 
-    updatePromptStatuses(promptIds, nextStatus);
-    vscode.postMessage({ type: 'moveAllPromptsToNextStatus', status });
-  }, [prompts, updatePromptStatuses, vscode]);
+    closeMoveDialog();
+    vscode.postMessage({ type: 'archivePrompts', ids: promptIds });
+  }, [closeMoveDialog, vscode]);
+
+  const moveSelectedPromptsToStatus = useCallback(() => {
+    if (!moveDialogSourceStatus || !moveDialogTargetStatus) {
+      return;
+    }
+
+    const promptIds = getSelectedPromptIdsForStatus(prompts, selectedPromptIds, moveDialogSourceStatus)
+      .filter(promptId => prompts.find(prompt => prompt.id === promptId)?.status !== moveDialogTargetStatus);
+
+    if (!promptIds.length) {
+      closeMoveDialog();
+      return;
+    }
+
+    updatePromptStatuses(promptIds, moveDialogTargetStatus);
+    setSelectedPromptIds(prev => prev.filter(promptId => !promptIds.includes(promptId)));
+    vscode.postMessage({ type: 'moveSelectedPromptsToStatus', ids: promptIds, status: moveDialogTargetStatus });
+    closeMoveDialog();
+  }, [closeMoveDialog, moveDialogSourceStatus, moveDialogTargetStatus, prompts, selectedPromptIds, updatePromptStatuses, vscode]);
+
+  const moveAllPromptsToNextStatus = useCallback((status: PromptStatus) => {
+    openMoveDialog(status);
+  }, [openMoveDialog]);
+
+  const archiveClosedPrompts = useCallback(() => {
+    const selectedClosedPromptIds = getSelectedPromptIdsForStatus(prompts, selectedPromptIds, 'closed');
+    const promptIds = selectedClosedPromptIds;
+
+    archivePromptIds(promptIds);
+  }, [archivePromptIds, selectedPromptIds, prompts]);
 
   const selectedPromptConfig = useMemo(() => {
     if (!selectedPromptId) {
@@ -279,6 +415,14 @@ export const TrackerApp: React.FC = () => {
     movePrompt(promptId, status);
   };
 
+  const moveDialogOptions = useMemo(() => {
+    if (!moveDialogSourceStatus) {
+      return [] as PromptStatus[];
+    }
+
+    return PROMPT_STATUS_ORDER.filter(status => status !== moveDialogSourceStatus);
+  }, [moveDialogSourceStatus]);
+
   return (
     <div style={styles.container}>
       <div style={styles.header}>
@@ -295,7 +439,10 @@ export const TrackerApp: React.FC = () => {
           <div style={styles.board}>
             {columns.map(({ status, items }) => {
               const isOver = dragOverStatus === status;
-              const moveAllState = getTrackerMoveAllState(status, items.length);
+              const selectedIds = getSelectedPromptIdsForStatus(prompts, selectedPromptIds, status);
+              const moveAllState = getTrackerMoveAllState(status, selectedIds.length);
+              const allSelected = items.length > 0 && selectedIds.length === items.length;
+              const isPartiallySelected = selectedIds.length > 0 && selectedIds.length < items.length;
               return (
                 <div
                   key={status}
@@ -311,14 +458,26 @@ export const TrackerApp: React.FC = () => {
                   onDrop={onDropToColumn(status)}
                 >
                   <div style={styles.columnHeader}>
-                    <span style={{ ...styles.statusDot, background: STATUS_COLORS[status] }} />
-                    <span>{STATUS_ICONS[status]} {t(statusTranslationKey(status))}</span>
+                    <div style={styles.columnHeaderInfo}>
+                      <ColumnSelectAllCheckbox
+                        checked={allSelected}
+                        disabled={items.length === 0}
+                        indeterminate={isPartiallySelected}
+                        onChange={checked => setSelectedPromptIds(prev => (
+                          setTrackerPromptSelectionForStatus(prev, prompts, status, checked)
+                        ))}
+                        title={t('tracker.selectAllInColumn')}
+                      />
+                      <span style={{ ...styles.statusDot, background: STATUS_COLORS[status] }} />
+                      <span>{STATUS_ICONS[status]} {t(statusTranslationKey(status))}</span>
+                    </div>
                     <span style={styles.count}>{items.length}</span>
                   </div>
 
                   <div style={styles.columnBody}>
                     {items.map(prompt => {
                       const isDragging = draggingId === prompt.id;
+                      const isSelected = selectedPromptIds.includes(prompt.id);
                       const statusLabel = t(statusTranslationKey(prompt.status));
                       return (
                         <div
@@ -337,11 +496,22 @@ export const TrackerApp: React.FC = () => {
                           onClick={() => openPromptOverlay(prompt.id)}
                           style={{
                             ...styles.card,
+                            ...(isSelected ? styles.cardSelected : {}),
                             ...(isDragging ? styles.cardDragging : {}),
                           }}
                         >
                           <div style={styles.cardHeaderRow}>
-                            <div style={styles.cardStatus}>{statusLabel}</div>
+                            <div style={styles.cardHeaderMain}>
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => setSelectedPromptIds(prev => toggleTrackerPromptSelection(prev, prompt.id))}
+                                onClick={event => event.stopPropagation()}
+                                style={styles.cardCheckbox}
+                                title={t('tracker.selectPrompt')}
+                              />
+                              <div style={styles.cardStatus}>{statusLabel}</div>
+                            </div>
                             <div style={styles.cardHint}>{t('tracker.clickToOpen')}</div>
                           </div>
                           <div style={styles.cardTitle}>{prompt.title || prompt.id}</div>
@@ -358,23 +528,93 @@ export const TrackerApp: React.FC = () => {
                   </div>
 
                   <div style={styles.columnFooter}>
-                    <button
-                      style={{
-                        ...styles.columnFooterButton,
-                        ...(moveAllState.disabled ? styles.columnFooterButtonDisabled : {}),
-                      }}
-                      onClick={() => moveAllPromptsToNextStatus(status)}
-                      disabled={moveAllState.disabled}
-                      title={moveAllState.nextStatus
-                        ? `${t('tracker.moveAllToNext')} -> ${t(statusTranslationKey(moveAllState.nextStatus))}`
-                        : t('tracker.moveAllToNext')}
-                    >
-                      {t('tracker.moveAllToNext')}
-                    </button>
+                    <div style={styles.columnFooterButtons}>
+                      <button
+                        style={{
+                          ...styles.columnFooterButton,
+                          ...(moveAllState.disabled ? styles.columnFooterButtonDisabled : {}),
+                        }}
+                        onClick={() => moveAllPromptsToNextStatus(status)}
+                        disabled={moveAllState.disabled}
+                        title={moveAllState.nextStatus
+                          ? `${t('tracker.moveAllToNext')} -> ${t(statusTranslationKey(moveAllState.nextStatus))}`
+                          : t('tracker.moveAllToNext')}
+                      >
+                        {t('tracker.moveAllToNext')}
+                      </button>
+                      {status === 'closed' && (
+                        <button
+                          style={{
+                            ...styles.columnFooterButton,
+                            ...styles.columnFooterButtonDanger,
+                            ...(selectedIds.length === 0 ? styles.columnFooterButtonDisabled : {}),
+                          }}
+                          onClick={archiveClosedPrompts}
+                          disabled={selectedIds.length === 0}
+                          title={t('tracker.archive')}
+                        >
+                          {t('tracker.archive')}
+                        </button>
+                      )}
+                    </div>
+                    <div style={styles.columnFooterHint}>
+                      {selectedIds.length > 0
+                        ? `${t('tracker.selectedCount')}: ${selectedIds.length}`
+                        : t('tracker.noSelection')}
+                    </div>
                   </div>
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {moveDialogSourceStatus && (
+        <div style={styles.moveDialogBackdrop} onClick={closeMoveDialog}>
+          <div style={styles.moveDialog} onClick={event => event.stopPropagation()}>
+            <div style={styles.moveDialogHeader}>
+              <h3 style={styles.moveDialogTitle}>{t('tracker.moveDialogTitle')}</h3>
+              <button type="button" style={styles.moveDialogCloseButton} onClick={closeMoveDialog}>
+                {t('common.close')}
+              </button>
+            </div>
+            <div style={styles.moveDialogBody}>
+              <div style={styles.moveDialogLabel}>{t('tracker.moveDialogCurrentColumn')}</div>
+              <div style={styles.moveDialogCurrentValue}>{t(statusTranslationKey(moveDialogSourceStatus))}</div>
+              <label style={styles.moveDialogLabel} htmlFor="tracker-move-target-select">
+                {t('tracker.moveDialogTargetColumn')}
+              </label>
+              <select
+                id="tracker-move-target-select"
+                value={moveDialogTargetStatus || ''}
+                onChange={event => setMoveDialogTargetStatus((event.target.value || null) as PromptStatus | null)}
+                style={styles.moveDialogSelect}
+              >
+                <option value="">{t('tracker.moveDialogSelectPlaceholder')}</option>
+                {moveDialogOptions.map(status => (
+                  <option key={status} value={status}>
+                    {t(statusTranslationKey(status))}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div style={styles.moveDialogFooter}>
+              <button type="button" style={styles.moveDialogSecondaryButton} onClick={closeMoveDialog}>
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                style={{
+                  ...styles.moveDialogPrimaryButton,
+                  ...(!moveDialogTargetStatus ? styles.columnFooterButtonDisabled : {}),
+                }}
+                onClick={moveSelectedPromptsToStatus}
+                disabled={!moveDialogTargetStatus}
+              >
+                {t('tracker.moveDialogConfirm')}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -465,6 +705,17 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     fontWeight: 600,
   },
+  columnHeaderInfo: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    minWidth: 0,
+  },
+  columnHeaderCheckbox: {
+    margin: 0,
+    cursor: 'pointer',
+    flexShrink: 0,
+  },
   statusDot: {
     width: '8px',
     height: '8px',
@@ -494,13 +745,28 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '8px',
     borderTop: '1px solid var(--vscode-panel-border)',
   },
+  columnFooterButtons: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+  },
   columnFooterButton: {
     ...trackerButtonStyles.secondary,
     width: '100%',
   },
+  columnFooterButtonDanger: {
+    background: 'color-mix(in srgb, var(--vscode-errorForeground) 14%, var(--vscode-button-background))',
+    color: 'var(--vscode-button-foreground)',
+    WebkitTextFillColor: 'var(--vscode-button-foreground)',
+  },
   columnFooterButtonDisabled: {
     opacity: 0.55,
     cursor: 'not-allowed',
+  },
+  columnFooterHint: {
+    marginTop: '8px',
+    fontSize: '10px',
+    color: 'var(--vscode-descriptionForeground)',
   },
   card: {
     border: '1px solid var(--vscode-panel-border)',
@@ -509,6 +775,10 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--vscode-editorWidget-background, var(--vscode-sideBar-background))',
     cursor: 'pointer',
     transition: 'transform 100ms ease, border-color 120ms ease, background 120ms ease',
+  },
+  cardSelected: {
+    borderColor: 'var(--vscode-focusBorder)',
+    background: 'color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 12%, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)))',
   },
   cardDragging: {
     transform: 'scale(0.995)',
@@ -520,6 +790,17 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
     gap: '8px',
     marginBottom: '6px',
+  },
+  cardHeaderMain: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    minWidth: 0,
+  },
+  cardCheckbox: {
+    margin: 0,
+    cursor: 'pointer',
+    flexShrink: 0,
   },
   cardStatus: {
     fontSize: '11px',
@@ -568,5 +849,86 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '11px',
     fontWeight: 600,
     wordBreak: 'break-word',
+  },
+  moveDialogBackdrop: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0, 0, 0, 0.38)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '16px',
+    zIndex: 40,
+  },
+  moveDialog: {
+    width: 'min(420px, 100%)',
+    borderRadius: '10px',
+    border: '1px solid var(--vscode-panel-border)',
+    background: 'var(--vscode-editorWidget-background, var(--vscode-editor-background))',
+    boxShadow: '0 18px 40px rgba(0, 0, 0, 0.28)',
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+  },
+  moveDialogHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
+    padding: '14px 16px',
+    borderBottom: '1px solid var(--vscode-panel-border)',
+  },
+  moveDialogTitle: {
+    margin: 0,
+    fontSize: '15px',
+    fontWeight: 700,
+  },
+  moveDialogCloseButton: {
+    ...trackerButtonStyles.secondary,
+    padding: '6px 10px',
+  },
+  moveDialogBody: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    padding: '16px',
+  },
+  moveDialogLabel: {
+    fontSize: '12px',
+    fontWeight: 600,
+    color: 'var(--vscode-descriptionForeground)',
+  },
+  moveDialogCurrentValue: {
+    padding: '8px 10px',
+    borderRadius: '6px',
+    border: '1px solid var(--vscode-panel-border)',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground, var(--vscode-foreground))',
+    fontSize: '13px',
+    fontWeight: 600,
+  },
+  moveDialogSelect: {
+    width: '100%',
+    padding: '8px 10px',
+    borderRadius: '6px',
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    background: 'var(--vscode-input-background)',
+    color: 'var(--vscode-input-foreground, var(--vscode-foreground))',
+    fontSize: '13px',
+  },
+  moveDialogFooter: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: '8px',
+    padding: '14px 16px 16px',
+    borderTop: '1px solid var(--vscode-panel-border)',
+  },
+  moveDialogPrimaryButton: {
+    ...trackerButtonStyles.primary,
+    padding: '6px 12px',
+  },
+  moveDialogSecondaryButton: {
+    ...trackerButtonStyles.secondary,
+    padding: '6px 12px',
   },
 };

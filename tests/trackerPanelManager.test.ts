@@ -61,6 +61,7 @@ function makePrompt(id: string, status: 'draft' | 'completed' | 'closed') {
 		description: '',
 		status,
 		favorite: false,
+		archived: false,
 		projects: [],
 		languages: [],
 		frameworks: [],
@@ -98,7 +99,9 @@ test('TrackerPanelManager moves all prompts from source status to the next statu
 	const cleanupCalls: string[] = [];
 
 	const storageService = {
-		listPrompts: async () => Array.from(stored.values()).map(({ content, report, ...prompt }) => ({ ...prompt })),
+		listPrompts: async () => Array.from(stored.values())
+			.filter(prompt => !prompt.archived)
+			.map(({ content, report, ...prompt }) => ({ ...prompt })),
 		getPrompt: async (id: string) => stored.get(id) || null,
 		savePrompt: async (prompt: ReturnType<typeof makePrompt>) => {
 			stored.set(prompt.id, { ...prompt });
@@ -136,7 +139,9 @@ test('TrackerPanelManager ignores move-all requests for the final status column'
 	let saveCalls = 0;
 
 	const storageService = {
-		listPrompts: async () => Array.from(stored.values()).map(({ content, report, ...prompt }) => ({ ...prompt })),
+		listPrompts: async () => Array.from(stored.values())
+			.filter(prompt => !prompt.archived)
+			.map(({ content, report, ...prompt }) => ({ ...prompt })),
 		getPrompt: async (id: string) => stored.get(id) || null,
 		savePrompt: async (prompt: ReturnType<typeof makePrompt>) => {
 			saveCalls += 1;
@@ -155,4 +160,86 @@ test('TrackerPanelManager ignores move-all requests for the final status column'
 
 	assert.equal(saveCalls, 0);
 	assert.equal(stored.get('closed-a')?.status, 'closed');
+});
+
+test('TrackerPanelManager moves only selected prompts to an explicitly chosen status', async () => {
+	const { TrackerPanelManager } = await importTrackerPanelManager();
+	const stored = new Map([
+		['draft-a', makePrompt('draft-a', 'draft')],
+		['draft-b', makePrompt('draft-b', 'draft')],
+		['closed-a', makePrompt('closed-a', 'closed')],
+	]);
+	const savedStatuses: Array<{ id: string; status: string }> = [];
+
+	const storageService = {
+		listPrompts: async () => Array.from(stored.values())
+			.filter(prompt => !prompt.archived)
+			.map(({ content, report, ...prompt }) => ({ ...prompt })),
+		getPrompt: async (id: string) => stored.get(id) || null,
+		savePrompt: async (prompt: ReturnType<typeof makePrompt>) => {
+			stored.set(prompt.id, { ...prompt });
+			savedStatuses.push({ id: prompt.id, status: prompt.status });
+			return prompt;
+		},
+	};
+
+	const manager = new TrackerPanelManager(
+		{ fsPath: '/tmp/prompt-manager-extension' } as any,
+		storageService as any,
+		{} as any,
+	);
+
+	await (manager as any).handleMessage({
+		type: 'moveSelectedPromptsToStatus',
+		ids: ['draft-a', 'closed-a'],
+		status: 'review',
+	});
+
+	assert.deepEqual(savedStatuses, [
+		{ id: 'draft-a', status: 'review' },
+		{ id: 'closed-a', status: 'review' },
+	]);
+	assert.equal(stored.get('draft-b')?.status, 'draft');
+});
+
+test('TrackerPanelManager archives only closed prompts from the requested ids', async () => {
+	const { TrackerPanelManager } = await importTrackerPanelManager();
+	const stored = new Map([
+		['closed-a', makePrompt('closed-a', 'closed')],
+		['completed-a', makePrompt('completed-a', 'completed')],
+	]);
+	const archivedIds: string[] = [];
+
+	const storageService = {
+		listPrompts: async () => Array.from(stored.values())
+			.filter(prompt => !prompt.archived)
+			.map(({ content, report, ...prompt }) => ({ ...prompt })),
+		getPrompt: async (id: string) => stored.get(id) || null,
+		archivePrompt: async (id: string) => {
+			const prompt = stored.get(id);
+			if (!prompt) {
+				return null;
+			}
+
+			const archivedPrompt = { ...prompt, archived: true };
+			stored.set(id, archivedPrompt);
+			archivedIds.push(id);
+			return archivedPrompt;
+		},
+	};
+
+	const manager = new TrackerPanelManager(
+		{ fsPath: '/tmp/prompt-manager-extension' } as any,
+		storageService as any,
+		{} as any,
+	);
+
+	await (manager as any).handleMessage({
+		type: 'archivePrompts',
+		ids: ['closed-a', 'completed-a'],
+	});
+
+	assert.deepEqual(archivedIds, ['closed-a']);
+	assert.equal(stored.get('closed-a')?.archived, true);
+	assert.equal(stored.get('completed-a')?.archived, false);
 });

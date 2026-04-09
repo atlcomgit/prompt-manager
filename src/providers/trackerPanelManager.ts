@@ -205,6 +205,45 @@ export class TrackerPanelManager {
 				break;
 			}
 
+			case 'moveSelectedPromptsToStatus': {
+				if (!isPromptStatus(msg.status) || !Array.isArray(msg.ids) || msg.ids.length === 0) {
+					break;
+				}
+
+				let changed = false;
+				for (const promptId of msg.ids) {
+					changed = (await this.updateStoredPromptStatus(promptId, msg.status)) || changed;
+				}
+
+				if (changed) {
+					await this.refresh();
+				}
+				break;
+			}
+
+			case 'archivePrompts': {
+				if (!Array.isArray(msg.ids) || msg.ids.length === 0) {
+					break;
+				}
+
+				let changed = false;
+				for (const promptId of msg.ids) {
+					const prompt = await this.storageService.getPrompt(promptId);
+					if (!prompt || prompt.archived || prompt.status !== 'closed') {
+						continue;
+					}
+
+					await this.storageService.archivePrompt(promptId);
+					this._onDidSave.fire(promptId);
+					changed = true;
+				}
+
+				if (changed) {
+					await this.refresh();
+				}
+				break;
+			}
+
 			default:
 				break;
 		}

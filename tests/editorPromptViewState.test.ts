@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	createDefaultEditorPromptExpandedSections,
 	createDefaultEditorPromptViewState,
 	getEditorPromptViewStateStorageKeys,
 	moveEditorPromptViewStateEntries,
@@ -12,19 +13,37 @@ import {
 test('createDefaultEditorPromptViewState returns main tab by default', () => {
 	assert.deepEqual(createDefaultEditorPromptViewState(), {
 		activeTab: 'main',
+		expandedSections: createDefaultEditorPromptExpandedSections(),
+		descriptionExpanded: false,
 	});
 });
 
 test('normalizeEditorPromptViewState accepts only supported tabs', () => {
-	assert.deepEqual(normalizeEditorPromptViewState({ activeTab: 'process' }), {
+	assert.deepEqual(normalizeEditorPromptViewState({
 		activeTab: 'process',
+		expandedSections: { basic: false, plan: true },
+		descriptionExpanded: true,
+	}), {
+		activeTab: 'process',
+		expandedSections: {
+			...createDefaultEditorPromptExpandedSections(),
+			basic: false,
+			plan: true,
+		},
+		descriptionExpanded: true,
 	});
 	assert.deepEqual(
 		normalizeEditorPromptViewState({ activeTab: 'unknown' as 'main' }),
-		{ activeTab: 'main' },
+		{
+			activeTab: 'main',
+			expandedSections: createDefaultEditorPromptExpandedSections(),
+			descriptionExpanded: false,
+		},
 	);
 	assert.deepEqual(normalizeEditorPromptViewState(null), {
 		activeTab: 'main',
+		expandedSections: createDefaultEditorPromptExpandedSections(),
+		descriptionExpanded: false,
 	});
 });
 
@@ -61,7 +80,11 @@ test('moveEditorPromptViewStateEntries migrates transient panel state to promptU
 	);
 
 	assert.deepEqual(next, {
-		'promptUuid:uuid-1': { activeTab: 'process' },
+		'promptUuid:uuid-1': {
+			activeTab: 'process',
+			expandedSections: createDefaultEditorPromptExpandedSections(),
+			descriptionExpanded: false,
+		},
 	});
 });
 
@@ -81,6 +104,10 @@ test('moveEditorPromptViewStateEntries keeps stable target state and removes dup
 	);
 
 	assert.deepEqual(next, {
-		'promptUuid:uuid-1': { activeTab: 'process' },
+		'promptUuid:uuid-1': {
+			activeTab: 'process',
+			expandedSections: createDefaultEditorPromptExpandedSections(),
+			descriptionExpanded: false,
+		},
 	});
 });

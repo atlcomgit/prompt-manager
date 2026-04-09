@@ -51,6 +51,7 @@ export interface GitOverlayReviewState {
 	request: GitOverlayReviewRequest | null;
 	error: string;
 	setupAction: GitOverlayReviewSetupAction | null;
+	titlePrefix?: string;
 	unsupportedReason?: GitOverlayReviewUnsupportedReason | null;
 }
 

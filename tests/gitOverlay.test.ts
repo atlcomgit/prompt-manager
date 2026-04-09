@@ -85,6 +85,7 @@ function createTestProject(overrides: TestProjectOverrides = {}): GitOverlayProj
 			request: null,
 			error: '',
 			setupAction: null,
+			titlePrefix: '',
 		},
 		recentCommits: [],
 		staleLocalBranches: [],
@@ -3028,7 +3029,7 @@ test('normalizeGitOverlayReviewRequestState maps open, closed and merged states'
 	assert.equal(normalizeGitOverlayReviewRequestState({ state: 'closed', mergedAt: '2026-04-02T00:00:00.000Z' }), 'accepted');
 });
 
-test('buildGitOverlayReviewRequestTitle includes task number and project name when needed', () => {
+test('buildGitOverlayReviewRequestTitle applies prefix spacing, fallbacks and truncation', () => {
 	assert.equal(buildGitOverlayReviewRequestTitle({
 		promptTitle: 'Размер файла и количество изменений',
 		taskNumber: '53',
@@ -3036,15 +3037,34 @@ test('buildGitOverlayReviewRequestTitle includes task number and project name wh
 		projectCount: 2,
 	}), '53 Размер файла и количество изменений [prompt-manager]');
 	assert.equal(buildGitOverlayReviewRequestTitle({
+		titlePrefix: 'alek',
+		promptTitle: 'Размер файла и количество изменений',
+		taskNumber: '53',
+		projectName: 'prompt-manager',
+		projectCount: 2,
+	}), 'alek 53 Размер файла и количество изменений [prompt-manager]');
+	assert.equal(buildGitOverlayReviewRequestTitle({
+		titlePrefix: 'alek ',
+		promptTitle: 'Размер файла и количество изменений',
+		taskNumber: '53',
+	}), 'alek 53 Размер файла и количество изменений');
+	assert.equal(buildGitOverlayReviewRequestTitle({
 		promptTitle: '',
 		projectName: 'prompt-manager',
 		projectCount: 1,
 	}), 'prompt-manager');
+	assert.equal(buildGitOverlayReviewRequestTitle({
+		titlePrefix: 'alek',
+		promptTitle: '',
+		projectName: 'prompt-manager',
+		projectCount: 1,
+	}), 'alek prompt-manager');
 	const truncatedTitle = buildGitOverlayReviewRequestTitle({
+		titlePrefix: 'alek',
 		promptTitle: 'A'.repeat(250),
 		taskNumber: '53',
 	});
-	assert.equal(truncatedTitle.startsWith('53'), true);
+	assert.equal(truncatedTitle.startsWith('alek 53'), true);
 	assert.equal(truncatedTitle.endsWith('…'), true);
 	assert.equal(truncatedTitle.length <= 180, true);
 });

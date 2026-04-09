@@ -18,7 +18,7 @@ import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
 import type { ClipboardImagePayload } from '../../types/messages';
-import type { EditorPromptTab, Prompt, PromptContextFileCard, PromptStatus } from '../../types/prompt';
+import type { EditorPromptTab, EditorPromptViewState, Prompt, PromptContextFileCard, PromptStatus } from '../../types/prompt';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
 import {
   createDefaultEditorPromptViewState,
@@ -54,21 +54,6 @@ const CHAT_START_TIMEOUT_MS = 15000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
 const EDITOR_FORM_CONTENT_WIDTH_PX = 800;
 const EDITOR_PROMPT_TABS: EditorPromptTab[] = ['main', 'process'];
-
-const DEFAULT_EXPANDED_SECTIONS: Record<SectionKey, boolean> = {
-  basic: true,
-  workspace: false,
-  prompt: true,
-  globalPrompt: false,
-  report: false,
-  notes: false,
-  plan: false,
-  tech: false,
-  integrations: false,
-  agent: false,
-  files: false,
-  time: false,
-};
 
 const ensureTrailingNewline = (text: string): string => (text.endsWith('\n') ? text : `${text}\n`);
 
@@ -206,48 +191,56 @@ export const EditorApp: React.FC = () => {
     const parsed = rawValue ? Number.parseInt(rawValue, 10) : NaN;
     return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
   };
-  const readStoredExpandedSections = (): Record<SectionKey, boolean> => {
-    const stateValue = initialWebviewStateRef.current?.['pm.editor.expandedSections'];
-
-    const normalize = (value: unknown): Record<SectionKey, boolean> | null => {
+  const readStoredEditorViewState = (): EditorPromptViewState => {
+    const normalizeViewState = (value: unknown): EditorPromptViewState | null => {
       if (!value || typeof value !== 'object') {
         return null;
       }
-      const candidate = value as Record<string, unknown>;
-      const keys: Array<Exclude<SectionKey, 'agent' | 'files'>> = ['basic', 'workspace', 'prompt', 'globalPrompt', 'report', 'notes', 'plan', 'tech', 'integrations', 'time'];
-      const allValid = keys.every((key) => typeof candidate[key] === 'boolean');
-      if (!allValid) {
-        return null;
-      }
-      return {
-        basic: Boolean(candidate.basic),
-        workspace: Boolean(candidate.workspace),
-        prompt: Boolean(candidate.prompt),
-        globalPrompt: Boolean(candidate.globalPrompt),
-        report: Boolean(candidate.report),
-        notes: Boolean(candidate.notes),
-        plan: Boolean(candidate.plan),
-        tech: Boolean(candidate.tech),
-        integrations: Boolean(candidate.integrations),
-        agent: typeof candidate.agent === 'boolean' ? Boolean(candidate.agent) : DEFAULT_EXPANDED_SECTIONS.agent,
-        files: typeof candidate.files === 'boolean' ? Boolean(candidate.files) : DEFAULT_EXPANDED_SECTIONS.files,
-        time: Boolean(candidate.time),
-      };
+
+      return normalizeEditorPromptViewState(value as Partial<EditorPromptViewState>);
     };
 
-    if (stateValue) {
-      const normalized = normalize(stateValue);
-      if (normalized) {
-        return normalized;
+    const normalizeLegacyExpandedSections = (value: unknown): EditorPromptViewState | null => {
+      if (!value || typeof value !== 'object') {
+        return null;
       }
+
+      return normalizeEditorPromptViewState({
+        expandedSections: value as Partial<EditorPromptViewState['expandedSections']>,
+      });
+    };
+
+    const stateValue = initialWebviewStateRef.current?.['pm.editor.viewState'];
+    const normalizedStateValue = normalizeViewState(stateValue);
+    if (normalizedStateValue) {
+      return normalizedStateValue;
+    }
+
+    const legacyStateValue = initialWebviewStateRef.current?.['pm.editor.expandedSections'];
+    const normalizedLegacyStateValue = normalizeLegacyExpandedSections(legacyStateValue);
+    if (normalizedLegacyStateValue) {
+      return normalizedLegacyStateValue;
     }
 
     if (storage) {
-      const rawValue = storage.getItem('pm.editor.expandedSections');
+      const rawValue = storage.getItem('pm.editor.viewState');
       if (rawValue) {
         try {
           const parsed = JSON.parse(rawValue);
-          const normalized = normalize(parsed);
+          const normalized = normalizeViewState(parsed);
+          if (normalized) {
+            return normalized;
+          }
+        } catch {
+          // ignore corrupted local state
+        }
+      }
+
+      const legacyRawValue = storage.getItem('pm.editor.expandedSections');
+      if (legacyRawValue) {
+        try {
+          const parsed = JSON.parse(legacyRawValue);
+          const normalized = normalizeLegacyExpandedSections(parsed);
           if (normalized) {
             return normalized;
           }
@@ -257,8 +250,12 @@ export const EditorApp: React.FC = () => {
       }
     }
 
-    return { ...DEFAULT_EXPANDED_SECTIONS };
+    return createDefaultEditorPromptViewState();
   };
+  const initialEditorViewStateRef = useRef<EditorPromptViewState | null>(null);
+  if (!initialEditorViewStateRef.current) {
+    initialEditorViewStateRef.current = readStoredEditorViewState();
+  }
 
   const [prompt, setPrompt] = useState<Prompt>(createDefaultPrompt());
   const [isLoaded, setIsLoaded] = useState(false);
@@ -314,8 +311,12 @@ export const EditorApp: React.FC = () => {
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
   const [isRecalculating, setIsRecalculating] = useState(false);
-  const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>(() => readStoredExpandedSections());
-  const [activeTab, setActiveTab] = useState<EditorPromptTab>(() => createDefaultEditorPromptViewState().activeTab);
+  const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>(
+    () => initialEditorViewStateRef.current?.expandedSections || createDefaultEditorPromptViewState().expandedSections,
+  );
+  const [activeTab, setActiveTab] = useState<EditorPromptTab>(
+    () => initialEditorViewStateRef.current?.activeTab || createDefaultEditorPromptViewState().activeTab,
+  );
   const [promptPlanState, setPromptPlanState] = useState<{ exists: boolean; content: string }>({ exists: false, content: '' });
   const [planHighlightedLineIndexes, setPlanHighlightedLineIndexes] = useState<number[]>([]);
   const [notice, setNotice] = useState<InlineNotice | null>(null);
@@ -324,7 +325,9 @@ export const EditorApp: React.FC = () => {
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
-  const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
+  const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(
+    () => initialEditorViewStateRef.current?.descriptionExpanded || createDefaultEditorPromptViewState().descriptionExpanded,
+  );
   const contextFileCardRequestIdRef = useRef('');
   const shouldShowFooterGitFlow = prompt.status === 'draft'
     || prompt.status === 'in-progress'
@@ -520,10 +523,6 @@ export const EditorApp: React.FC = () => {
   }, [clearChatStartTimeout]);
 
   useEffect(() => {
-    setIsDescriptionExpanded(false);
-  }, [prompt.id]);
-
-  useEffect(() => {
     setPlanHighlightedLineIndexes([]);
     promptPlanStateRef.current = { exists: false, content: '' };
     hasSeenPromptPlanSnapshotRef.current = false;
@@ -604,12 +603,6 @@ export const EditorApp: React.FC = () => {
     }
 
     setActiveTab(tab);
-    vscode.postMessage({
-      type: 'savePromptEditorViewState',
-      promptId: promptRef.current.id || undefined,
-      promptUuid: promptRef.current.promptUuid || undefined,
-      state: { activeTab: tab },
-    });
   }, [activeTab]);
 
   const dispatchStartChat = useCallback((requestId: string, options?: { skipBranchMismatchCheck?: boolean }) => {
@@ -1127,6 +1120,8 @@ export const EditorApp: React.FC = () => {
             promptRef.current = msg.prompt;
             setPrompt(msg.prompt);
             setActiveTab(nextEditorViewState.activeTab);
+            setExpandedSections(nextEditorViewState.expandedSections);
+            setIsDescriptionExpanded(nextEditorViewState.descriptionExpanded);
             localReportDirtyRef.current = false;
             currentPromptIdRef.current = incomingPromptId;
             hasBeenSavedRef.current = Boolean(msg.prompt.id);
@@ -1895,12 +1890,30 @@ export const EditorApp: React.FC = () => {
   }, [globalContextHeight, storage]);
 
   useEffect(() => {
+    const nextEditorViewState = normalizeEditorPromptViewState({
+      activeTab,
+      expandedSections,
+      descriptionExpanded: isDescriptionExpanded,
+    });
     const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
-    vscode.setState?.({ ...currentState, 'pm.editor.expandedSections': expandedSections });
+    vscode.setState?.({ ...currentState, 'pm.editor.viewState': nextEditorViewState });
     if (storage) {
-      storage.setItem('pm.editor.expandedSections', JSON.stringify(expandedSections));
+      storage.setItem('pm.editor.viewState', JSON.stringify(nextEditorViewState));
     }
-  }, [expandedSections, storage]);
+  }, [activeTab, expandedSections, isDescriptionExpanded, storage]);
+
+  useEffect(() => {
+    vscode.postMessage({
+      type: 'savePromptEditorViewState',
+      promptId: promptRef.current.id || undefined,
+      promptUuid: promptRef.current.promptUuid || undefined,
+      state: normalizeEditorPromptViewState({
+        activeTab,
+        expandedSections,
+        descriptionExpanded: isDescriptionExpanded,
+      }),
+    });
+  }, [activeTab, expandedSections, isDescriptionExpanded]);
 
   useEffect(() => {
     if (!globalContextTextareaRef.current || typeof ResizeObserver === 'undefined') {

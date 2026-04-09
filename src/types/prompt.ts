@@ -39,10 +39,52 @@ export function shouldShowPromptPlanForStatus(status: PromptStatus): boolean {
 /** Editor tab in prompt settings page */
 export type EditorPromptTab = 'main' | 'process';
 
+/** Expandable section keys in prompt settings page */
+export type EditorPromptSectionKey =
+	| 'basic'
+	| 'workspace'
+	| 'prompt'
+	| 'globalPrompt'
+	| 'report'
+	| 'notes'
+	| 'plan'
+	| 'tech'
+	| 'integrations'
+	| 'agent'
+	| 'files'
+	| 'time';
+
+/** Persisted expanded/collapsed state for prompt editor sections */
+export type EditorPromptExpandedSections = Record<EditorPromptSectionKey, boolean>;
+
+/** Create default expanded/collapsed state for prompt editor sections */
+export function createDefaultEditorPromptExpandedSections(): EditorPromptExpandedSections {
+	return {
+		basic: true,
+		workspace: false,
+		prompt: true,
+		globalPrompt: false,
+		report: false,
+		notes: false,
+		plan: false,
+		tech: false,
+		integrations: false,
+		agent: false,
+		files: false,
+		time: false,
+	};
+}
+
 /** Persisted per-prompt editor view state */
 export interface EditorPromptViewState {
 	activeTab: EditorPromptTab;
+	expandedSections: EditorPromptExpandedSections;
+	descriptionExpanded: boolean;
 }
+
+type PartialEditorPromptViewState = Partial<Omit<EditorPromptViewState, 'expandedSections'>> & {
+	expandedSections?: Partial<EditorPromptExpandedSections> | null;
+};
 
 /** Key source used for resolving persisted editor view state */
 export interface EditorPromptViewStateKeySource {
@@ -55,12 +97,38 @@ export interface EditorPromptViewStateKeySource {
 export function createDefaultEditorPromptViewState(): EditorPromptViewState {
 	return {
 		activeTab: 'main',
+		expandedSections: createDefaultEditorPromptExpandedSections(),
+		descriptionExpanded: false,
+	};
+}
+
+function normalizeEditorPromptExpandedSections(
+	state?: Partial<Record<EditorPromptSectionKey, unknown>> | null,
+): EditorPromptExpandedSections {
+	const defaults = createDefaultEditorPromptExpandedSections();
+	if (!state || typeof state !== 'object') {
+		return defaults;
+	}
+
+	return {
+		basic: typeof state.basic === 'boolean' ? state.basic : defaults.basic,
+		workspace: typeof state.workspace === 'boolean' ? state.workspace : defaults.workspace,
+		prompt: typeof state.prompt === 'boolean' ? state.prompt : defaults.prompt,
+		globalPrompt: typeof state.globalPrompt === 'boolean' ? state.globalPrompt : defaults.globalPrompt,
+		report: typeof state.report === 'boolean' ? state.report : defaults.report,
+		notes: typeof state.notes === 'boolean' ? state.notes : defaults.notes,
+		plan: typeof state.plan === 'boolean' ? state.plan : defaults.plan,
+		tech: typeof state.tech === 'boolean' ? state.tech : defaults.tech,
+		integrations: typeof state.integrations === 'boolean' ? state.integrations : defaults.integrations,
+		agent: typeof state.agent === 'boolean' ? state.agent : defaults.agent,
+		files: typeof state.files === 'boolean' ? state.files : defaults.files,
+		time: typeof state.time === 'boolean' ? state.time : defaults.time,
 	};
 }
 
 /** Normalize potentially partial persisted editor view state */
 export function normalizeEditorPromptViewState(
-	state?: Partial<EditorPromptViewState> | null,
+	state?: PartialEditorPromptViewState | null,
 ): EditorPromptViewState {
 	const defaults = createDefaultEditorPromptViewState();
 	if (!state) {
@@ -69,6 +137,10 @@ export function normalizeEditorPromptViewState(
 
 	return {
 		activeTab: state.activeTab === 'process' ? 'process' : defaults.activeTab,
+		expandedSections: normalizeEditorPromptExpandedSections(state.expandedSections),
+		descriptionExpanded: typeof state.descriptionExpanded === 'boolean'
+			? state.descriptionExpanded
+			: defaults.descriptionExpanded,
 	};
 }
 
@@ -100,7 +172,7 @@ export function resolveEditorPromptViewStateStorageKey(source?: EditorPromptView
 
 /** Move persisted editor view state from transient keys to a stable prompt key */
 export function moveEditorPromptViewStateEntries(
-	states: Record<string, EditorPromptViewState> | null | undefined,
+	states: Record<string, PartialEditorPromptViewState> | null | undefined,
 	fromSources: Array<EditorPromptViewStateKeySource | null | undefined>,
 	toSource?: EditorPromptViewStateKeySource | null,
 ): Record<string, EditorPromptViewState> {

@@ -904,12 +904,16 @@ export function normalizeGitOverlayReviewRequestState(input: {
 export function buildGitOverlayReviewRequestTitle(input: {
 	promptTitle: string;
 	taskNumber?: string;
+	titlePrefix?: string;
 	projectName?: string;
 	projectCount?: number;
 }): string {
 	const MAX_TITLE_LENGTH = 180;
 	const normalizedTitle = input.promptTitle.trim();
 	const normalizedTaskNumber = (input.taskNumber || '').trim();
+	const normalizedTitlePrefix = typeof input.titlePrefix === 'string' && input.titlePrefix.trim()
+		? input.titlePrefix
+		: '';
 	const normalizedProjectName = (input.projectName || '').trim();
 	const projectCount = Math.max(0, input.projectCount || 0);
 	const truncate = (value: string): string => {
@@ -921,17 +925,24 @@ export function buildGitOverlayReviewRequestTitle(input: {
 		const lastSpace = shortened.lastIndexOf(' ');
 		return `${(lastSpace > 0 ? shortened.slice(0, lastSpace) : shortened).trimEnd()}…`;
 	};
+	const withTitlePrefix = (value: string): string => {
+		if (!normalizedTitlePrefix) {
+			return value;
+		}
+
+		return `${normalizedTitlePrefix}${/\s$/u.test(normalizedTitlePrefix) ? '' : ' '}${value}`;
+	};
 
 	const base = [normalizedTaskNumber, normalizedTitle].filter(Boolean).join(' ').trim();
 	if (base) {
-		return truncate(projectCount > 1 && normalizedProjectName
+		return truncate(withTitlePrefix(projectCount > 1 && normalizedProjectName
 			? `${base} [${normalizedProjectName}]`
-			: base);
+			: base));
 	}
 
 	if (normalizedProjectName) {
-		return truncate(projectCount > 1 ? `Update ${normalizedProjectName}` : normalizedProjectName);
+		return truncate(withTitlePrefix(projectCount > 1 ? `Update ${normalizedProjectName}` : normalizedProjectName));
 	}
 
-	return 'Update changes';
+	return truncate(withTitlePrefix('Update changes'));
 }

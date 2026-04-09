@@ -1368,6 +1368,7 @@ export const GitOverlay: React.FC<Props> = ({
 						: (project.review.request?.title || buildGitOverlayReviewRequestTitle({
 							promptTitle,
 							taskNumber: promptTaskNumber,
+								titlePrefix: project.review.titlePrefix,
 							projectName: project.project,
 							projectCount: totalProjects,
 						})),
@@ -1569,6 +1570,7 @@ export const GitOverlay: React.FC<Props> = ({
 
 	const regenerateReviewDraftTitle = useCallback((projectName: string) => {
 		const totalProjects = selectedSnapshotProjects.length;
+		const project = selectedSnapshotProjects.find(item => item.project === projectName);
 		setReviewDrafts((prev) => ({
 			...prev,
 			[projectName]: {
@@ -1576,13 +1578,14 @@ export const GitOverlay: React.FC<Props> = ({
 				title: buildGitOverlayReviewRequestTitle({
 					promptTitle,
 					taskNumber: promptTaskNumber,
+					titlePrefix: project?.review.titlePrefix,
 					projectName,
 					projectCount: totalProjects,
 				}),
 				manualTitle: false,
 			},
 		}));
-	}, [promptTaskNumber, promptTitle, selectedSnapshotProjects.length]);
+	}, [promptTaskNumber, promptTitle, selectedSnapshotProjects]);
 
 	const handleCreateReviewRequest = useCallback((project: GitOverlayProjectSnapshot) => {
 		const draft = reviewDrafts[project.project];
@@ -2367,6 +2370,7 @@ export const GitOverlay: React.FC<Props> = ({
 											title: buildGitOverlayReviewRequestTitle({
 												promptTitle,
 												taskNumber: promptTaskNumber,
+												titlePrefix: project.review.titlePrefix,
 												projectName: project.project,
 												projectCount: snapshot.projects.length,
 											}),

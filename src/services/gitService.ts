@@ -654,6 +654,7 @@ export class GitService {
 
 	private async getProjectReviewState(projectPath: string, branchName: string): Promise<GitOverlayReviewState> {
 		const projectLabel = path.basename(projectPath) || projectPath;
+		const titlePrefix = await this.resolveReviewRequestTitlePrefix(projectPath);
 		const { remote, unsupportedReason } = await this.resolveReviewRemoteContext(projectPath, branchName);
 		if (!remote) {
 			this.logDebug('reviewState.resolved', {
@@ -663,7 +664,7 @@ export class GitService {
 				setupAction: null,
 				unsupportedReason: unsupportedReason || null,
 			});
-			return { remote: null, request: null, error: '', setupAction: null, unsupportedReason };
+			return { remote: null, request: null, error: '', setupAction: null, titlePrefix, unsupportedReason };
 		}
 
 		if (!remote.supported) {
@@ -676,7 +677,7 @@ export class GitService {
 				setupAction: null,
 				unsupportedReason: unsupportedReason || null,
 			});
-			return { remote, request: null, error: '', setupAction: null, unsupportedReason };
+			return { remote, request: null, error: '', setupAction: null, titlePrefix, unsupportedReason };
 		}
 
 		if (!remote.cliAvailable) {
@@ -694,6 +695,7 @@ export class GitService {
 				request: null,
 				error: '',
 				setupAction: 'install-and-auth',
+				titlePrefix,
 				unsupportedReason: null,
 			};
 		}
@@ -709,7 +711,7 @@ export class GitService {
 				setupAction: null,
 				unsupportedReason: unsupportedReason || null,
 			});
-			return { remote, request: null, error: '', setupAction: null, unsupportedReason };
+			return { remote, request: null, error: '', setupAction: null, titlePrefix, unsupportedReason };
 		}
 
 		const authenticated = await this.isCliAuthenticated(cliCommand, projectPath, remote.host);
@@ -729,6 +731,7 @@ export class GitService {
 				request: null,
 				error: '',
 				setupAction: 'auth',
+				titlePrefix,
 				unsupportedReason: null,
 			};
 		}
@@ -746,7 +749,7 @@ export class GitService {
 				hasRequest: Boolean(request),
 				requestState: request?.state || null,
 			});
-			return { remote, request, error: '', setupAction: null, unsupportedReason: null };
+			return { remote, request, error: '', setupAction: null, titlePrefix, unsupportedReason: null };
 		} catch (error) {
 			this.logDebug('reviewState.request.error', {
 				project: projectLabel,
@@ -760,6 +763,7 @@ export class GitService {
 				request: null,
 				error: error instanceof Error ? error.message : String(error),
 				setupAction: null,
+				titlePrefix,
 				unsupportedReason: null,
 			};
 		}
@@ -1239,7 +1243,7 @@ export class GitService {
 					branches: [],
 					cleanupBranches: [],
 					changeGroups: { merge: [], staged: [], workingTree: [], untracked: [] },
-					review: { remote: null, request: null, error: '', setupAction: null, unsupportedReason: null },
+					review: { remote: null, request: null, error: '', setupAction: null, titlePrefix: '', unsupportedReason: null },
 					recentCommits: [],
 					staleLocalBranches: [],
 					graph: { nodes: [], edges: [] },
@@ -1379,7 +1383,7 @@ export class GitService {
 				branches: [],
 				cleanupBranches: [],
 				changeGroups: { merge: [], staged: [], workingTree: [], untracked: [] },
-				review: { remote: null, request: null, error: '', setupAction: null, unsupportedReason: null },
+				review: { remote: null, request: null, error: '', setupAction: null, titlePrefix: '', unsupportedReason: null },
 				recentCommits: [],
 				staleLocalBranches: [],
 				graph: { nodes: [], edges: [] },
@@ -2187,6 +2191,27 @@ export class GitService {
 		}
 
 		return result;
+	}
+
+	private getReviewRequestTitlePrefixSetting(): string {
+		const configured = vscode.workspace
+			.getConfiguration('promptManager')
+			.get<string>('gitOverlay.reviewTitlePrefix', '');
+
+		return typeof configured === 'string' && configured.trim() ? configured : '';
+	}
+
+	private async getGitUserName(projectPath: string): Promise<string> {
+		return (await this.runGitFileCommandOptional(projectPath, ['config', 'user.name'])).trim();
+	}
+
+	private async resolveReviewRequestTitlePrefix(projectPath: string): Promise<string> {
+		const configuredPrefix = this.getReviewRequestTitlePrefixSetting();
+		if (configuredPrefix) {
+			return configuredPrefix;
+		}
+
+		return await this.getGitUserName(projectPath);
 	}
 
 	/**

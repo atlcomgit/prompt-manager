@@ -418,3 +418,46 @@ test('GitService getProjectReviewState returns granular unsupported reasons for 
 	assert.equal(reviewState.remote?.supported, false);
 	assert.equal(reviewState.unsupportedReason, 'unsupported-provider');
 });
+
+test('GitService resolveReviewRequestTitlePrefix prefers configured setting', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.getReviewRequestTitlePrefixSetting = () => 'MR';
+	service.runGitFileCommandOptional = async () => 'Git User';
+
+	const titlePrefix = await service.resolveReviewRequestTitlePrefix('/tmp/api');
+
+	assert.equal(titlePrefix, 'MR');
+});
+
+test('GitService resolveReviewRequestTitlePrefix falls back to git user name when setting is empty', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.getReviewRequestTitlePrefixSetting = () => '';
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'config' && args[1] === 'user.name') {
+			return 'Git User';
+		}
+
+		return '';
+	};
+
+	const titlePrefix = await service.resolveReviewRequestTitlePrefix('/tmp/api');
+
+	assert.equal(titlePrefix, 'Git User');
+});
+
+test('GitService getProjectReviewState includes resolved title prefix in review state', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.resolveReviewRequestTitlePrefix = async () => 'MR';
+	service.resolveReviewRemoteContext = async () => ({ remote: null, unsupportedReason: 'missing-remote' });
+
+	const reviewState = await service.getProjectReviewState('/tmp/api', 'feature/task-42');
+
+	assert.equal(reviewState.titlePrefix, 'MR');
+	assert.equal(reviewState.unsupportedReason, 'missing-remote');
+});

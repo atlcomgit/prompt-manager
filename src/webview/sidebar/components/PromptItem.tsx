@@ -105,6 +105,7 @@ export const PromptItem: React.FC<Props> = ({
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [menuBounds, setMenuBounds] = useState<{ width: number; height: number } | null>(null);
   const [hoveredMenuItem, setHoveredMenuItem] = useState<string | null>(null);
+  const [hoveredStatusOption, setHoveredStatusOption] = useState<PromptStatus | null>(null);
   const [openSubmenuId, setOpenSubmenuId] = useState<string | null>(null);
   const [contextTargeted, setContextTargeted] = useState(false);
 
@@ -165,6 +166,7 @@ export const PromptItem: React.FC<Props> = ({
   const closeMenu = () => {
     setShowMenu(false);
     setHoveredMenuItem(null);
+    setHoveredStatusOption(null);
     setOpenSubmenuId(null);
     setContextTargeted(false);
   };
@@ -450,6 +452,9 @@ export const PromptItem: React.FC<Props> = ({
             setHoveredMenuItem('status');
             setOpenSubmenuId('status');
           }}
+          onMouseLeave={() => {
+            setHoveredStatusOption(null);
+          }}
         >
           {statusOptions.map((option) => {
             const isCurrent = option.value === prompt.status;
@@ -458,8 +463,12 @@ export const PromptItem: React.FC<Props> = ({
                 key={option.value}
                 style={{
                   ...styles.submenuItem,
+                  ...(hoveredStatusOption === option.value ? styles.submenuItemHover : {}),
                   ...(isCurrent ? styles.submenuItemCurrent : {}),
                 }}
+                onMouseEnter={() => setHoveredStatusOption(option.value)}
+                onMouseLeave={() => setHoveredStatusOption(null)}
+                onFocus={() => setHoveredStatusOption(option.value)}
                 onClick={(event) => {
                   event.stopPropagation();
                   if (!isCurrent) {
@@ -770,6 +779,11 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     fontFamily: 'var(--vscode-font-family)',
     textAlign: 'left',
+    transition: 'background-color 0.12s ease, color 0.12s ease',
+  },
+  submenuItemHover: {
+    background: 'var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground))',
+    color: 'var(--vscode-menu-selectionForeground, var(--vscode-menu-foreground, var(--vscode-foreground)))',
   },
   submenuItemCurrent: {
     background: 'var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground))',

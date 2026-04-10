@@ -2984,6 +2984,120 @@ export const EditorApp: React.FC = () => {
     );
   };
 
+  const footerChatLaunchBlock = shouldShowChatLaunchBlock ? (
+    <div style={styles.chatLaunchDock}>
+      <section style={styles.chatLaunchCard} aria-live="polite">
+        <div style={styles.chatLaunchTopRow}>
+          <div style={styles.chatLaunchStatusRow}>
+            <span style={styles.chatLaunchStatusDot} aria-hidden="true" />
+            <span style={styles.chatLaunchStatusText}>{chatLaunchStateLabel}</span>
+          </div>
+          <div style={styles.chatLaunchTopMeta}>
+            {chatLaunchPhase !== 'ready' ? (
+              <div style={styles.chatLaunchActivity} aria-hidden="true">
+                {Array.from({ length: 6 }, (_, index) => {
+                  const isActive = index === chatLaunchActivityFrame;
+                  const isTrailing = index === ((chatLaunchActivityFrame + 5) % 6);
+                  return (
+                    <span
+                      key={`chat-launch-activity-${index}`}
+                      style={{
+                        ...styles.chatLaunchActivityBar,
+                        ...(isActive
+                          ? styles.chatLaunchActivityBarActive
+                          : isTrailing
+                            ? styles.chatLaunchActivityBarTrailing
+                            : null),
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            ) : null}
+            <span
+              style={{
+                ...styles.chatLaunchProgressBadge,
+                ...(chatLaunchPhase === 'ready'
+                  ? styles.chatLaunchProgressBadgeDone
+                  : styles.chatLaunchProgressBadgeActive),
+              }}
+            >
+              {`${completedChatLaunchStepCount}/${chatLaunchSteps.length}`}
+            </span>
+          </div>
+        </div>
+
+        <div style={styles.chatLaunchBody}>
+          <div style={styles.chatLaunchHeaderCopy}>
+            <h3 style={styles.chatLaunchTitle}>{t('editor.chatLaunchTitle')}</h3>
+            <p style={styles.chatLaunchDescription}>{chatLaunchDescription}</p>
+          </div>
+
+          <div style={styles.chatLaunchSteps}>
+            {chatLaunchSteps.map((step, index) => (
+              <div
+                key={step.key}
+                style={{
+                  ...styles.chatLaunchStep,
+                  ...(step.state === 'done'
+                    ? styles.chatLaunchStepDone
+                    : step.state === 'active'
+                      ? styles.chatLaunchStepActive
+                      : styles.chatLaunchStepPending),
+                }}
+              >
+                <span style={styles.chatLaunchStepLine} aria-hidden="true">
+                  {index < chatLaunchSteps.length - 1 ? <span style={styles.chatLaunchStepLineInner} /> : null}
+                </span>
+                <span
+                  style={{
+                    ...styles.chatLaunchStepMarker,
+                    ...(step.state === 'done'
+                      ? styles.chatLaunchStepMarkerDone
+                      : step.state === 'active'
+                        ? styles.chatLaunchStepMarkerActive
+                        : styles.chatLaunchStepMarkerPending),
+                  }}
+                  aria-hidden="true"
+                >
+                  {step.state === 'done' ? '✓' : step.state === 'active' ? <span style={styles.chatLaunchStepLoader} /> : '•'}
+                </span>
+                <div style={styles.chatLaunchStepBody}>
+                  <span style={styles.chatLaunchStepLabel}>{step.label}</span>
+                  <span
+                    style={{
+                      ...styles.chatLaunchStepBadge,
+                      ...(step.state === 'done'
+                        ? styles.chatLaunchStepBadgeDone
+                        : step.state === 'active'
+                          ? styles.chatLaunchStepBadgeActive
+                          : styles.chatLaunchStepBadgePending),
+                    }}
+                  >
+                    {step.state === 'done'
+                      ? t('editor.chatLaunchStepStateDone')
+                      : step.state === 'active'
+                        ? t('editor.chatLaunchStepStateActive')
+                        : t('editor.chatLaunchStepStatePending')}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div
+          style={{
+            ...styles.chatLaunchHint,
+            ...(chatLaunchPhase === 'ready' ? styles.chatLaunchHintDone : null),
+          }}
+        >
+          {chatLaunchHint}
+        </div>
+      </section>
+    </div>
+  ) : null;
+
   return (
     <div style={styles.container}>
       {/* Loading overlay — covers only the form area width */}
@@ -3722,126 +3836,13 @@ export const EditorApp: React.FC = () => {
             </>
           ))}
 
-          {shouldShowChatLaunchBlock ? (
-            <div style={styles.chatLaunchDock}>
-              <section style={styles.chatLaunchCard} aria-live="polite">
-                <div style={styles.chatLaunchTopRow}>
-                  <div style={styles.chatLaunchStatusRow}>
-                    <span style={styles.chatLaunchStatusDot} aria-hidden="true" />
-                    <span style={styles.chatLaunchStatusText}>{chatLaunchStateLabel}</span>
-                  </div>
-                  <div style={styles.chatLaunchTopMeta}>
-                    {chatLaunchPhase !== 'ready' ? (
-                      <div style={styles.chatLaunchActivity} aria-hidden="true">
-                        {Array.from({ length: 6 }, (_, index) => {
-                          const isActive = index === chatLaunchActivityFrame;
-                          const isTrailing = index === ((chatLaunchActivityFrame + 5) % 6);
-                          return (
-                            <span
-                              key={`chat-launch-activity-${index}`}
-                              style={{
-                                ...styles.chatLaunchActivityBar,
-                                ...(isActive
-                                  ? styles.chatLaunchActivityBarActive
-                                  : isTrailing
-                                    ? styles.chatLaunchActivityBarTrailing
-                                    : null),
-                              }}
-                            />
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                    <span
-                      style={{
-                        ...styles.chatLaunchProgressBadge,
-                        ...(chatLaunchPhase === 'ready'
-                          ? styles.chatLaunchProgressBadgeDone
-                          : styles.chatLaunchProgressBadgeActive),
-                      }}
-                    >
-                      {`${completedChatLaunchStepCount}/${chatLaunchSteps.length}`}
-                    </span>
-                  </div>
-                </div>
-
-                <div style={styles.chatLaunchBody}>
-                  <div style={styles.chatLaunchHeaderCopy}>
-                    <h3 style={styles.chatLaunchTitle}>{t('editor.chatLaunchTitle')}</h3>
-                    <p style={styles.chatLaunchDescription}>{chatLaunchDescription}</p>
-                  </div>
-
-                  <div style={styles.chatLaunchSteps}>
-                    {chatLaunchSteps.map((step, index) => (
-                      <div
-                        key={step.key}
-                        style={{
-                          ...styles.chatLaunchStep,
-                          ...(step.state === 'done'
-                            ? styles.chatLaunchStepDone
-                            : step.state === 'active'
-                              ? styles.chatLaunchStepActive
-                              : styles.chatLaunchStepPending),
-                        }}
-                      >
-                        <span style={styles.chatLaunchStepLine} aria-hidden="true">
-                          {index < chatLaunchSteps.length - 1 ? <span style={styles.chatLaunchStepLineInner} /> : null}
-                        </span>
-                        <span
-                          style={{
-                            ...styles.chatLaunchStepMarker,
-                            ...(step.state === 'done'
-                              ? styles.chatLaunchStepMarkerDone
-                              : step.state === 'active'
-                                ? styles.chatLaunchStepMarkerActive
-                                : styles.chatLaunchStepMarkerPending),
-                          }}
-                          aria-hidden="true"
-                        >
-                          {step.state === 'done' ? '✓' : step.state === 'active' ? <span style={styles.chatLaunchStepLoader} /> : '•'}
-                        </span>
-                        <div style={styles.chatLaunchStepBody}>
-                          <span style={styles.chatLaunchStepLabel}>{step.label}</span>
-                          <span
-                            style={{
-                              ...styles.chatLaunchStepBadge,
-                              ...(step.state === 'done'
-                                ? styles.chatLaunchStepBadgeDone
-                                : step.state === 'active'
-                                  ? styles.chatLaunchStepBadgeActive
-                                  : styles.chatLaunchStepBadgePending),
-                            }}
-                          >
-                            {step.state === 'done'
-                              ? t('editor.chatLaunchStepStateDone')
-                              : step.state === 'active'
-                                ? t('editor.chatLaunchStepStateActive')
-                                : t('editor.chatLaunchStepStatePending')}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    ...styles.chatLaunchHint,
-                    ...(chatLaunchPhase === 'ready' ? styles.chatLaunchHintDone : null),
-                  }}
-                >
-                  {chatLaunchHint}
-                </div>
-              </section>
-            </div>
-          ) : null}
             </>
           )}
           </div>
         </div>
 
         {/* Footer */}
-        <div style={isLoaded ? styles.blockContentVisible : styles.blockContentHidden}>
+        <div style={{ ...styles.footerArea, ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden) }}>
           {notice && (
             <div
               style={{
@@ -3861,6 +3862,7 @@ export const EditorApp: React.FC = () => {
               </button>
             </div>
           )}
+          {activeTab === 'process' ? footerChatLaunchBlock : null}
           <ActionBar
             onSave={() => handleSave('manual')}
             onShowHistory={handleShowHistory}
@@ -4085,6 +4087,12 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--vscode-inputValidation-infoBackground)',
     color: 'var(--vscode-foreground)',
   },
+  footerArea: {
+    display: 'flex',
+    flexDirection: 'column',
+    flexShrink: 0,
+    background: 'var(--vscode-editor-background)',
+  },
   noticeText: {
     flex: 1,
     minWidth: 0,
@@ -4110,10 +4118,8 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: `${EDITOR_FORM_CONTENT_WIDTH_PX}px`,
   },
   chatLaunchDock: {
-    position: 'sticky',
-    bottom: 0,
-    zIndex: 2,
-    paddingTop: '12px',
+    flexShrink: 0,
+    padding: '12px 20px 16px',
     background: 'var(--vscode-editor-background)',
   },
   chatLaunchCard: {

@@ -5,7 +5,9 @@
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
-import type { StorageService } from '../services/storageService.js';
+import { isPromptStatus, type PromptStatus } from '../types/prompt.js';
+import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
+import type { ExternalPromptConfigChange, StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { GitService } from '../services/gitService.js';
@@ -19,6 +21,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 	public readonly onDidOpenPrompt = this._onDidOpenPrompt.event;
 	private _onDidDeletePrompt = new vscode.EventEmitter<string>();
 	public readonly onDidDeletePrompt = this._onDidDeletePrompt.event;
+	private _onDidSave = new vscode.EventEmitter<ExternalPromptConfigChange[]>();
+	public readonly onDidSave = this._onDidSave.event;
 
 	constructor(
 		private readonly extensionUri: vscode.Uri,
@@ -27,7 +31,35 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		private readonly workspaceService: WorkspaceService,
 		private readonly gitService: GitService,
 		private readonly stateService: StateService,
+		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
 	) { }
+
+	private async updateStoredPromptStatus(promptId: string, status: PromptStatus): Promise<ExternalPromptConfigChange[] | null> {
+		const prompt = await this.storageService.getPrompt(promptId);
+		if (!prompt || prompt.status === status) {
+			return null;
+		}
+
+		prompt.status = status;
+		const savedPrompt = await this.storageService.savePrompt(prompt, { historyReason: 'status-change' });
+		if (savedPrompt.status !== 'in-progress') {
+			try {
+				await this.getChatMemoryInstructionService?.()?.handlePromptStatusChange(savedPrompt);
+			} catch {
+				// keep sidebar responsive if session cleanup fails
+			}
+		}
+
+		const { content, report, ...config } = savedPrompt;
+		return [{
+			id: savedPrompt.id,
+			archived: Boolean(savedPrompt.archived),
+			kind: 'changed',
+			config,
+			uri: vscode.Uri.file(''),
+			externalChangedAt: Date.now(),
+		}];
+	}
 
 	resolveWebviewView(
 		webviewView: vscode.WebviewView,
@@ -200,6 +232,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
 			case 'showStatistics': {
 				await vscode.commands.executeCommand('promptManager.showStatistics');
+				break;
+			}
+
+			case 'updatePromptStatus': {
+				if (!isPromptStatus(msg.status)) {
+					break;
+				}
+
+				const changes = await this.updateStoredPromptStatus(msg.id, msg.status);
+				if (changes) {
+					this._onDidSave.fire(changes);
+					await this.refreshList();
+				}
 				break;
 			}
 

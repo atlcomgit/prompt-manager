@@ -120,6 +120,46 @@ test('buildStatisticsWordSection renders tab-separated rows for Word tables', ()
 	assert.equal(lines[4], '2\t—: Подготовить отчёт\t5,50\tч.\t1743\t9586,50');
 });
 
+test('buildStatisticsWordSection hides cost columns when hourly rate data should be omitted', () => {
+	const section = buildStatisticsWordSection([
+		{
+			taskNumber: '52',
+			title: 'Добавить часы без стоимости',
+			hours: 12,
+		},
+	], 1743, 'ru', { showHours: true, showCost: false });
+
+	const lines = section.split('\n');
+	assert.equal(lines[2], '№\tНомер задачи: Название\tКоличество часов\tч.');
+	assert.equal(lines[3], '1\t52: Добавить часы без стоимости\t12\tч.');
+	assert.ok(!section.includes('Стоимость часа'));
+	assert.ok(!section.includes('Сумма'));
+});
+
+test('buildStatisticsMarkdownWithReport omits hours and cost data when both are hidden', () => {
+	const markdown = buildStatisticsMarkdownWithReport([
+		{
+			taskNumber: '123',
+			title: 'Исправить экспорт',
+			hours: 15,
+			reportSummary: 'Добавлен новый формат markdown.',
+			status: 'review',
+		},
+	], 0, 1743, 'ru', { showHours: false, showCost: false });
+
+	assert.match(markdown, /Номер задачи: 123/);
+	assert.match(markdown, /Название: Исправить экспорт/);
+	assert.match(markdown, /Что сделано: Добавлен новый формат markdown\./);
+	assert.match(markdown, /Статус: 90%/);
+	assert.ok(!markdown.includes('Итого часов'));
+	assert.ok(!markdown.includes('Ставка часа'));
+	assert.ok(!markdown.includes('Итоговая сумма'));
+	assert.ok(!markdown.includes('Часы:'));
+	assert.ok(!markdown.includes('Сумма:'));
+	assert.ok(!markdown.includes('Количество часов'));
+	assert.ok(!markdown.includes('Стоимость часа'));
+});
+
 test('buildStatisticsExportHtmlDocument and preview share the same document shell', () => {
 	const rows = [
 		{
@@ -145,6 +185,23 @@ test('buildStatisticsExportHtmlDocument and preview share the same document shel
 	assert.ok(previewHtml.includes('<style>'));
 });
 
+test('buildStatisticsExportHtmlDocument hides money columns and summary when hourly rate is zero', () => {
+	const html = buildStatisticsExportHtmlDocument([
+		{
+			taskNumber: '55',
+			title: 'Выровнять превью документов',
+			hours: 12,
+			reportSummary: 'Сделан единый HTML-шаблон для preview и export.',
+		},
+	], 12, 'ru', true, 0);
+
+	assert.match(html, /Итого часов/);
+	assert.ok(!html.includes('Ставка часа'));
+	assert.ok(!html.includes('Итоговая сумма'));
+	assert.ok(!html.includes('<th class="pm-stats-export-col-amount-head">'));
+	assert.ok(!html.includes('<td class="pm-stats-export-col-amount">'));
+});
+
 test('buildStatisticsExportMarkdownDocument renders compact markdown export without summaries', () => {
 	const markdown = buildStatisticsExportMarkdownDocument([
 		{
@@ -160,5 +217,25 @@ test('buildStatisticsExportMarkdownDocument renders compact markdown export with
 	assert.match(markdown, /## Word/);
 	assert.match(markdown, /13944/);
 	assert.ok(!markdown.includes('Что сделано:'));
+	assert.ok(markdown.endsWith('\n'));
+});
+
+test('buildStatisticsExportMarkdownDocument hides hours and cost sections when total hours are zero', () => {
+	const markdown = buildStatisticsExportMarkdownDocument([
+		{
+			taskNumber: '77',
+			title: 'Подготовить шаблон таблиц',
+			hours: 0,
+		},
+	], 0, 'ru', false, 1743);
+
+	assert.match(markdown, /# Отчёт по статистике/);
+	assert.match(markdown, /\|\s+№ задачи\s+\|\s+Название\s+\|/);
+	assert.ok(!markdown.includes('Итого часов'));
+	assert.ok(!markdown.includes('Ставка часа'));
+	assert.ok(!markdown.includes('Итоговая сумма'));
+	assert.ok(!markdown.includes('Количество часов'));
+	assert.ok(!markdown.includes('Стоимость часа'));
+	assert.ok(!markdown.includes('Подготовить шаблон таблиц |    0'));
 	assert.ok(markdown.endsWith('\n'));
 });

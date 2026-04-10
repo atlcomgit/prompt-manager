@@ -18,6 +18,7 @@ interface Props {
   onDuplicate: (id: string) => void;
   onToggleFavorite: (id: string) => void;
   onExport: (id: string) => void;
+  onUpdateStatus: (id: string, status: PromptStatus) => void;
 }
 
 export const PromptList: React.FC<Props> = ({
@@ -34,6 +35,7 @@ export const PromptList: React.FC<Props> = ({
   onDuplicate,
   onToggleFavorite,
   onExport,
+  onUpdateStatus,
 }) => {
   const t = useT();
   const groupNames = Object.keys(groups);
@@ -97,6 +99,7 @@ export const PromptList: React.FC<Props> = ({
             onDuplicate={onDuplicate}
             onToggleFavorite={onToggleFavorite}
             onExport={onExport}
+            onUpdateStatus={onUpdateStatus}
           />
         ))}
       </div>
@@ -127,6 +130,7 @@ export const PromptList: React.FC<Props> = ({
               onDuplicate={onDuplicate}
               onToggleFavorite={onToggleFavorite}
               onExport={onExport}
+              onUpdateStatus={onUpdateStatus}
             />
           ))}
         </div>

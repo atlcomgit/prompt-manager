@@ -20,6 +20,31 @@ interface Props {
   status: PromptStatus;
 }
 
+export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSession' | 'isChatPanelOpen'>): {
+  canStartChat: boolean;
+  canOpenChat: boolean;
+  hasChatEntry: boolean;
+  shouldShowOpenChat: boolean;
+  shouldShowStartChat: boolean;
+} {
+  const canStartChat = input.status === 'draft'
+    || input.status === 'in-progress'
+    || input.status === 'stopped'
+    || input.status === 'cancelled';
+  const canOpenChat = input.status === 'in-progress'
+    || input.status === 'stopped'
+    || input.status === 'cancelled';
+  const hasChatEntry = canOpenChat && (input.hasChatSession || input.isChatPanelOpen);
+
+  return {
+    canStartChat,
+    canOpenChat,
+    hasChatEntry,
+    shouldShowOpenChat: hasChatEntry,
+    shouldShowStartChat: canStartChat && !hasChatEntry,
+  };
+}
+
 function splitLeadingIconLabel(label: string): { icon: string; text: string } {
   const trimmedLabel = label.trim();
   const firstSpaceIndex = trimmedLabel.indexOf(' ');
@@ -43,10 +68,7 @@ export const ActionBar: React.FC<Props> = ({
   const t = useT();
   const saveLabel = splitLeadingIconLabel(t('actions.save'));
   const startChatDisabled = !hasContent || isStartingChat;
-  const canStartChat = status === 'draft' || status === 'in-progress' || status === 'stopped' || status === 'cancelled';
-  const canOpenChat = status === 'in-progress' || status === 'stopped' || status === 'cancelled';
-  const shouldShowOpenChat = canOpenChat && (hasChatSession || isChatPanelOpen);
-  const shouldShowStartChat = canStartChat && !shouldShowOpenChat;
+  const chatEntryState = resolveChatEntryState({ status, hasChatSession, isChatPanelOpen });
   return (
     <div style={styles.bar}>
       <div style={styles.left}>
@@ -71,11 +93,11 @@ export const ActionBar: React.FC<Props> = ({
           🕘 История
         </button>
 
-        {shouldShowOpenChat ? (
+        {chatEntryState.shouldShowOpenChat ? (
           <button style={{ ...styles.btn, ...styles.btnChat }} onClick={onOpenChat}>
             {t('actions.openChat')}
           </button>
-        ) : shouldShowStartChat ? (
+        ) : chatEntryState.shouldShowStartChat ? (
           <button
             style={{ ...styles.btn, ...styles.btnChat, ...(startChatDisabled ? styles.btnDisabled : {}) }}
             onClick={onStartChat}

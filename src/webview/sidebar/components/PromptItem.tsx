@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import type { PromptConfig, SidebarViewMode } from '../../../types/prompt';
+import React, { useMemo, useState } from 'react';
+import { PROMPT_STATUS_ORDER, type PromptConfig, type PromptStatus, type SidebarViewMode } from '../../../types/prompt';
 import { useT } from '../../shared/i18n';
 
 interface Props {
@@ -12,9 +12,10 @@ interface Props {
   onDuplicate: (id: string) => void;
   onToggleFavorite: (id: string) => void;
   onExport: (id: string) => void;
+  onUpdateStatus: (id: string, status: PromptStatus) => void;
 }
 
-const STATUS_ICONS: Record<string, string> = {
+const STATUS_ICONS: Record<PromptStatus, string> = {
   'draft': '📝',
   'in-progress': '🚀',
   'stopped': '▣',
@@ -25,7 +26,7 @@ const STATUS_ICONS: Record<string, string> = {
   'closed': '🔒',
 };
 
-const STATUS_COLORS: Record<string, string> = {
+const STATUS_COLORS: Record<PromptStatus, string> = {
   'draft': 'var(--vscode-descriptionForeground)',
   'in-progress': 'var(--vscode-editorInfo-foreground, #3794ff)',
   'stopped': 'var(--vscode-editorWarning-foreground, #cca700)',
@@ -35,6 +36,27 @@ const STATUS_COLORS: Record<string, string> = {
   'review': 'var(--vscode-editorWarning-foreground, #cca700)',
   'closed': 'var(--vscode-disabledForeground)',
 };
+
+function statusTranslationKey(status: PromptStatus): string {
+  switch (status) {
+    case 'draft':
+      return 'status.draft';
+    case 'in-progress':
+      return 'status.inProgress';
+    case 'stopped':
+      return 'status.stopped';
+    case 'cancelled':
+      return 'status.cancelled';
+    case 'completed':
+      return 'status.completed';
+    case 'report':
+      return 'status.report';
+    case 'review':
+      return 'status.review';
+    case 'closed':
+      return 'status.closed';
+  }
+}
 
 
 export const PromptItem: React.FC<Props> = ({
@@ -47,26 +69,43 @@ export const PromptItem: React.FC<Props> = ({
   onDuplicate,
   onToggleFavorite,
   onExport,
+  onUpdateStatus,
 }) => {
   const MENU_WIDTH = 170;
+  const SUBMENU_WIDTH = 220;
   const MENU_ITEM_HEIGHT = 34;
   const MENU_GAP = 4;
 
   const t = useT();
-  const STATUS_LABELS: Record<string, string> = {
-    'draft': t('status.draft'),
-    'in-progress': t('status.inProgress'),
-    'stopped': t('status.stopped'),
-    'cancelled': t('status.cancelled'),
-    'completed': t('status.completed'),
-    'report': t('status.report'),
-    'review': t('status.review'),
-    'closed': t('status.closed'),
-  };
+  const statusOptions = useMemo(() => (
+    PROMPT_STATUS_ORDER.map(status => ({
+      value: status,
+      label: t(statusTranslationKey(status)),
+      icon: STATUS_ICONS[status],
+      color: STATUS_COLORS[status],
+    }))
+  ), [t]);
+  const STATUS_LABELS: Record<PromptStatus, string> = useMemo(() => (
+    statusOptions.reduce<Record<PromptStatus, string>>((acc, option) => {
+      acc[option.value] = option.label;
+      return acc;
+    }, {
+      'draft': '',
+      'in-progress': '',
+      'stopped': '',
+      'cancelled': '',
+      'completed': '',
+      'report': '',
+      'review': '',
+      'closed': '',
+    })
+  ), [statusOptions]);
   const [showActions, setShowActions] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const [menuBounds, setMenuBounds] = useState<{ width: number; height: number } | null>(null);
   const [hoveredMenuItem, setHoveredMenuItem] = useState<string | null>(null);
+  const [openSubmenuId, setOpenSubmenuId] = useState<string | null>(null);
   const [contextTargeted, setContextTargeted] = useState(false);
 
   const selFg = isSelected ? 'var(--vscode-list-activeSelectionForeground)' : undefined;
@@ -74,12 +113,14 @@ export const PromptItem: React.FC<Props> = ({
   const statusAccent = STATUS_COLORS[prompt.status] || 'var(--vscode-descriptionForeground)';
   const compactTaskNumber = prompt.taskNumber?.trim() || '—';
   const compactTitle = prompt.title?.trim() || prompt.id;
+  const statusMenuIndex = 2;
   const menuItems: Array<{
     id: string;
     icon: string;
     label: string;
-    onClick: () => void;
+    onClick?: () => void;
     danger?: boolean;
+    hasSubmenu?: boolean;
   }> = [
     {
       id: 'open',
@@ -92,6 +133,12 @@ export const PromptItem: React.FC<Props> = ({
       icon: prompt.favorite ? '★' : '☆',
       label: prompt.favorite ? t('item.removeFavorite') : t('item.addFavorite'),
       onClick: () => onToggleFavorite(prompt.id),
+    },
+    {
+      id: 'status',
+      icon: STATUS_ICONS[prompt.status],
+      label: t('filter.status'),
+      hasSubmenu: true,
     },
     {
       id: 'duplicate',
@@ -118,6 +165,7 @@ export const PromptItem: React.FC<Props> = ({
   const closeMenu = () => {
     setShowMenu(false);
     setHoveredMenuItem(null);
+    setOpenSubmenuId(null);
     setContextTargeted(false);
   };
 
@@ -134,12 +182,28 @@ export const PromptItem: React.FC<Props> = ({
         x,
         y,
       });
+      setMenuBounds({
+        width: itemRect.width,
+        height: itemRect.height,
+      });
     } else {
       setMenuPosition(null);
+      setMenuBounds(null);
     }
 
     setShowMenu(true);
+    setOpenSubmenuId(null);
     setContextTargeted(true);
+  };
+
+  const preferredSubmenuLeft = (menuPosition?.x ?? MENU_GAP) + MENU_WIDTH - 1;
+  const menuWidth = menuBounds?.width ?? Number.POSITIVE_INFINITY;
+  const submenuOverflowRight = preferredSubmenuLeft + SUBMENU_WIDTH > menuWidth - MENU_GAP;
+  const statusSubmenuPosition = {
+    left: submenuOverflowRight
+      ? Math.max(MENU_GAP, (menuPosition?.x ?? MENU_GAP) - SUBMENU_WIDTH + 1)
+      : preferredSubmenuLeft,
+    top: Math.max(MENU_GAP, (menuPosition?.y ?? MENU_GAP) + (statusMenuIndex * MENU_ITEM_HEIGHT) - 1),
   };
 
   return (
@@ -347,19 +411,73 @@ export const PromptItem: React.FC<Props> = ({
                 ...(hoveredMenuItem === item.id ? styles.menuItemHover : {}),
                 ...(item.danger && hoveredMenuItem !== item.id ? styles.menuItemDanger : {}),
               }}
-              onMouseEnter={() => setHoveredMenuItem(item.id)}
               onMouseLeave={() => setHoveredMenuItem(null)}
+              onFocus={() => {
+                setHoveredMenuItem(item.id);
+                setOpenSubmenuId(item.hasSubmenu ? item.id : null);
+              }}
               onClick={e => {
                 e.stopPropagation();
-                item.onClick();
+                if (item.hasSubmenu) {
+                  setOpenSubmenuId(prev => prev === item.id ? null : item.id);
+                  return;
+                }
+
+                item.onClick?.();
                 closeMenu();
               }}
+              onMouseEnter={() => {
+                setHoveredMenuItem(item.id);
+                setOpenSubmenuId(item.hasSubmenu ? item.id : null);
+              }}
             >
-              {item.icon} {item.label}
+              <span style={styles.menuItemLead}>{item.icon}</span>
+              <span style={styles.menuItemLabel}>{item.label}</span>
+              {item.hasSubmenu ? <span style={styles.menuItemChevron}>▸</span> : null}
             </button>
           ))}
         </div>
       )}
+      {showMenu && openSubmenuId === 'status' ? (
+        <div
+          style={{
+            ...styles.submenu,
+            left: `${statusSubmenuPosition.left}px`,
+            top: `${statusSubmenuPosition.top}px`,
+            width: `${SUBMENU_WIDTH}px`,
+          }}
+          onMouseEnter={() => {
+            setHoveredMenuItem('status');
+            setOpenSubmenuId('status');
+          }}
+        >
+          {statusOptions.map((option) => {
+            const isCurrent = option.value === prompt.status;
+            return (
+              <button
+                key={option.value}
+                style={{
+                  ...styles.submenuItem,
+                  ...(isCurrent ? styles.submenuItemCurrent : {}),
+                }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (!isCurrent) {
+                    onUpdateStatus(prompt.id, option.value);
+                  }
+                  closeMenu();
+                }}
+              >
+                <span style={{ ...styles.submenuStatusIcon, color: option.color }}>
+                  {option.icon}
+                </span>
+                <span style={styles.submenuStatusLabel}>{option.label}</span>
+                <span style={styles.submenuStatusCheck}>{isCurrent ? '✓' : ''}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       {isSaving && (
         <div style={styles.savingOverlay}>
           <div style={styles.savingLabel}>Сохранение...</div>
@@ -592,7 +710,16 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '4px',
     boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
     overflow: 'hidden',
-    minWidth: '150px',
+    minWidth: '170px',
+  },
+  submenu: {
+    position: 'absolute',
+    zIndex: 101,
+    background: 'var(--vscode-menu-background, var(--vscode-editor-background))',
+    border: '1px solid var(--vscode-menu-border, var(--vscode-panel-border))',
+    borderRadius: '4px',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+    overflow: 'hidden',
   },
   menuItem: {
     display: 'flex',
@@ -608,12 +735,64 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'var(--vscode-font-family)',
     textAlign: 'left',
   },
+  menuItemLead: {
+    width: '16px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  menuItemLabel: {
+    flex: 1,
+    minWidth: 0,
+  },
+  menuItemChevron: {
+    color: 'var(--vscode-descriptionForeground)',
+    flexShrink: 0,
+  },
   menuItemHover: {
     background: 'var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground))',
     color: 'var(--vscode-menu-selectionForeground, var(--vscode-menu-foreground, var(--vscode-foreground)))',
   },
   menuItemDanger: {
     color: 'var(--vscode-errorForeground)',
+  },
+  submenuItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    width: '100%',
+    padding: '7px 12px',
+    background: 'none',
+    border: 'none',
+    color: 'var(--vscode-menu-foreground, var(--vscode-foreground))',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontFamily: 'var(--vscode-font-family)',
+    textAlign: 'left',
+  },
+  submenuItemCurrent: {
+    background: 'var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground))',
+    color: 'var(--vscode-menu-selectionForeground, var(--vscode-menu-foreground, var(--vscode-foreground)))',
+  },
+  submenuStatusIcon: {
+    width: '16px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    fontFamily: '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif',
+  },
+  submenuStatusLabel: {
+    flex: 1,
+    minWidth: 0,
+  },
+  submenuStatusCheck: {
+    width: '14px',
+    textAlign: 'center',
+    color: 'var(--vscode-textLink-foreground)',
+    fontWeight: 700,
+    flexShrink: 0,
   },
   savingOverlay: {
     position: 'absolute',

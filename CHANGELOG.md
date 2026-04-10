@@ -16,6 +16,11 @@
 ### Improved
 - Better support for context files, clipboard-driven assets, and reusable prompt execution context.
 - Stronger AI enrichment and repository understanding workflows through memory and codemap-related capabilities.
+- Prompt statuses can now be changed directly from the sidebar item menu, with a dedicated Status submenu and current-state checkmark.
+- New prompts now open on the Main tab, and the Process tab shows a sticky chat launch state above the footer until Go to chat becomes available.
+- Statistics exports now auto-fill hours from the selected work period, persist the hourly rate between panel openings, hide empty hour or cost sections, and use cleaner document previews.
+- The prompt editor Process tab now follows the working order of notes, plan, and report.
+- The prompt editor now keeps Open actions visually consistent and places the plan Open action in the section header when content exists.
 
 ## [0.1.0] - 2026-02-23
 

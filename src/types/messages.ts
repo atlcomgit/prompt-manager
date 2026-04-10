@@ -85,7 +85,17 @@ export type WebviewToExtensionMessage =
 	| { type: 'openFile'; file: string }
 	| { type: 'requestSuggestion'; textBefore: string; globalContext?: string }
 	| { type: 'getStatistics'; dateFrom?: string; dateTo?: string; minFiveMin?: boolean }
-	| { type: 'exportReport'; format: 'html' | 'md'; rows: Array<{ taskNumber: string; title: string; hours: number; status?: PromptStatus; reportSummary?: string }>; hourlyRate?: number; includeReport?: boolean }
+	| { type: 'getStatisticsUiState' }
+	| { type: 'saveStatisticsUiState'; hourlyRateInput: string }
+	| {
+		type: 'exportReport';
+		format: 'html' | 'md';
+		rows: Array<{ taskNumber: string; title: string; hours: number; status?: PromptStatus; reportSummary?: string }>;
+		hourlyRate?: number;
+		includeReport?: boolean;
+		showHours?: boolean;
+		showCost?: boolean;
+	}
 	| { type: 'markDirty'; dirty: boolean; prompt?: Prompt; promptId?: string; configFieldChangedAt?: Record<string, number> }
 	| { type: 'showStatistics' }
 	| { type: 'updatePromptStatus'; id: string; status: PromptStatus }
@@ -162,6 +172,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'inlineSuggestion'; suggestion: string }
 	| { type: 'inlineSuggestions'; suggestions: string[] }
 	| { type: 'statistics'; data: PromptStatistics }
+	| { type: 'statisticsUiState'; hourlyRateInput: string }
 	| { type: 'globalContext'; context: string; canLoadRemote: boolean }
 	| { type: 'globalContextLoaded'; context: string; canLoadRemote: boolean }
 	| { type: 'globalContextLoadFailed'; message: string }

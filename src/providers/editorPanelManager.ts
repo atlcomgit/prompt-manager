@@ -12,7 +12,7 @@ import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { generateSmartTitle } from '../utils/smartTitle.js';
 import type { EditorPromptViewState, EditorPromptViewStateKeySource, Prompt, PromptContextFileCard } from '../types/prompt.js';
-import { createDefaultPrompt, shouldShowPromptPlanForStatus } from '../types/prompt.js';
+import { createDefaultEditorPromptViewState, createDefaultPrompt, shouldShowPromptPlanForStatus } from '../types/prompt.js';
 import type { ClipboardImagePayload, WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
 import type { GitOverlaySnapshot } from '../types/git.js';
 import type { StorageService } from '../services/storageService.js';
@@ -4183,6 +4183,13 @@ export class EditorPanelManager {
 				this.pendingRestorePrompt = null;
 				this.pendingRestoreIsDirty = false;
 			}
+		}
+
+		if (isNew && !restoredUnsaved) {
+			await this.stateService.savePromptEditorViewState(
+				this.getPromptEditorViewStateSource(panelKey, null),
+				createDefaultEditorPromptViewState(),
+			);
 		}
 
 		const title = isNew ? 'New prompt' : (prompt.title || prompt.id);

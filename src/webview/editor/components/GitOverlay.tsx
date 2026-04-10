@@ -93,6 +93,7 @@ type ProjectValidation = {
 type RefreshProgressMode = 'idle' | 'loading' | 'auto' | 'sync' | 'fetch' | 'local';
 
 export const GIT_OVERLAY_EXPECTED_BRANCH_CURRENT = '__pm_git_overlay_current__';
+const GIT_OVERLAY_LEFT_ACCENT_SHADOW = 'inset 3px 0 0 var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))';
 
 function countProjectChanges(project: GitOverlayProjectSnapshot): number {
 	return project.changeGroups.merge.length
@@ -1743,6 +1744,13 @@ export const GitOverlay: React.FC<Props> = ({
 		}));
 	};
 
+	const getSectionHeaderStyle = (section: SectionKey): CSSProperties => ({
+		...styles.sectionHeader,
+		...(isSectionCollapsed(section) && !isSectionAutoCollapsed(section)
+			? styles.sectionHeaderCollapsed
+			: styles.sectionHeaderExpanded),
+	});
+
 	return (
 		<div style={styles.backdrop} onClick={onClose}>
 			<div
@@ -1797,7 +1805,7 @@ export const GitOverlay: React.FC<Props> = ({
 						</div>
 
 						<section style={styles.sectionCard}>
-							<div style={styles.sectionHeader}>
+							<div style={getSectionHeaderStyle('step1')}>
 								<div style={styles.sectionHeaderLeft}>
 									<div style={{ ...styles.sectionNumber, ...(stepAvailability.step1 ? null : styles.sectionNumberDisabled) }}>1</div>
 									<div>
@@ -2158,7 +2166,7 @@ export const GitOverlay: React.FC<Props> = ({
 
 						{showDefaultFlowFollowUpSteps ? (
 						<section style={styles.sectionCard}>
-							<div style={styles.sectionHeader}>
+							<div style={getSectionHeaderStyle('step2')}>
 								<div style={styles.sectionHeaderLeft}>
 									<div style={{ ...styles.sectionNumber, ...(stepAvailability.step2 ? null : styles.sectionNumberDisabled) }}>2</div>
 									<div>
@@ -2346,7 +2354,7 @@ export const GitOverlay: React.FC<Props> = ({
 
 						{showDefaultFlowFollowUpSteps ? (
 						<section style={styles.sectionCard}>
-							<div style={styles.sectionHeader}>
+							<div style={getSectionHeaderStyle('step3')}>
 								<div style={styles.sectionHeaderLeft}>
 									<div style={{ ...styles.sectionNumber, ...(stepAvailability.step3 ? null : styles.sectionNumberDisabled) }}>3</div>
 									<div>
@@ -2404,7 +2412,7 @@ export const GitOverlay: React.FC<Props> = ({
 
 						{showDefaultFlowFollowUpSteps ? (
 						<section style={styles.sectionCard}>
-							<div style={styles.sectionHeader}>
+							<div style={getSectionHeaderStyle('step4')}>
 								<div style={styles.sectionHeaderLeft}>
 									<div style={{ ...styles.sectionNumber, ...(stepAvailability.step4 ? null : styles.sectionNumberDisabled) }}>4</div>
 									<div>
@@ -2642,7 +2650,7 @@ export const GitOverlay: React.FC<Props> = ({
 
 						{showDefaultFlowFollowUpSteps ? (
 						<section style={styles.sectionCard}>
-							<div style={styles.sectionHeader}>
+							<div style={getSectionHeaderStyle('step5')}>
 								<div style={styles.sectionHeaderLeft}>
 									<div style={{ ...styles.sectionNumber, ...(stepAvailability.step5 ? null : styles.sectionNumberDisabled) }}>5</div>
 									<div>
@@ -2855,6 +2863,7 @@ const styles: Record<string, CSSProperties> = {
 		flexDirection: 'column',
 		alignItems: 'center',
 		gap: '12px',
+		boxShadow: GIT_OVERLAY_LEFT_ACCENT_SHADOW,
 	},
 	largeSpinner: {
 		width: '26px',
@@ -2895,6 +2904,7 @@ const styles: Record<string, CSSProperties> = {
 		borderRadius: '6px',
 		background: 'var(--vscode-editor-background)',
 		overflow: 'visible',
+		boxShadow: GIT_OVERLAY_LEFT_ACCENT_SHADOW,
 	},
 	sectionHeader: {
 		display: 'flex',
@@ -2904,6 +2914,18 @@ const styles: Record<string, CSSProperties> = {
 		padding: '10px 12px',
 		background: 'var(--vscode-sideBar-background)',
 		borderBottom: '1px solid var(--vscode-panel-border)',
+		boxShadow: GIT_OVERLAY_LEFT_ACCENT_SHADOW,
+		borderTopLeftRadius: '6px',
+		borderTopRightRadius: '6px',
+	},
+	sectionHeaderExpanded: {
+		borderBottomLeftRadius: 0,
+		borderBottomRightRadius: 0,
+	},
+	sectionHeaderCollapsed: {
+		borderBottomLeftRadius: '6px',
+		borderBottomRightRadius: '6px',
+		borderBottom: 'none',
 	},
 	sectionHeaderLeft: {
 		display: 'flex',
@@ -3322,6 +3344,7 @@ const styles: Record<string, CSSProperties> = {
 		borderRadius: '4px',
 		fontSize: '12px',
 		color: 'var(--vscode-descriptionForeground)',
+		boxShadow: GIT_OVERLAY_LEFT_ACCENT_SHADOW,
 	},
 	projectCards: {
 		display: 'flex',
@@ -3335,6 +3358,7 @@ const styles: Record<string, CSSProperties> = {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '10px',
+		boxShadow: GIT_OVERLAY_LEFT_ACCENT_SHADOW,
 	},
 	projectCardHeader: {
 		display: 'flex',
@@ -3607,6 +3631,7 @@ const styles: Record<string, CSSProperties> = {
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '4px',
 		background: 'var(--vscode-sideBar-background)',
+		boxShadow: GIT_OVERLAY_LEFT_ACCENT_SHADOW,
 	},
 	reviewRequestSummaryRow: {
 		display: 'flex',
@@ -3640,6 +3665,7 @@ const styles: Record<string, CSSProperties> = {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '4px',
+		boxShadow: GIT_OVERLAY_LEFT_ACCENT_SHADOW,
 	},
 	reviewCommentMeta: {
 		fontSize: '11px',

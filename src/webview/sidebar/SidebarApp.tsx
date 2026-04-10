@@ -383,6 +383,16 @@ export const SidebarApp: React.FC = () => {
     vscode.postMessage({ type: 'exportPrompt', id });
   };
 
+  const handleUpdateStatus = (id: string, status: PromptStatus) => {
+    setPrompts(prev => prev.map(prompt => (
+      prompt.id === id ? { ...prompt, status } : prompt
+    )));
+    setArchivedPrompts(prev => prev.map(prompt => (
+      prompt.id === id ? { ...prompt, status } : prompt
+    )));
+    vscode.postMessage({ type: 'updatePromptStatus', id, status });
+  };
+
   const handleToggleGroup = (name: string) => {
     if (shouldAutoExpandGroups) {
       return;
@@ -452,6 +462,7 @@ export const SidebarApp: React.FC = () => {
           onDuplicate={handleDuplicate}
           onToggleFavorite={handleToggleFavorite}
           onExport={handleExport}
+          onUpdateStatus={handleUpdateStatus}
         />
       </div>
       <div style={styles.footer}>

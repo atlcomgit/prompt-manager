@@ -1,7 +1,9 @@
 import {
 	buildStatisticsMarkdownWithReport,
+	normalizeStatisticsExportDisplayOptions,
 	buildStatisticsWordSection,
 	formatStatisticsExportNumber,
+	type StatisticsExportDisplayOptions,
 	type StatisticsExportStatus,
 } from './statisticsExport.js';
 
@@ -36,15 +38,45 @@ function calculateExportRowAmount(hours: number, hourlyRate: number): number {
 	return (Number.isFinite(hours) ? hours : 0) * resolveExportHourlyRate(hourlyRate);
 }
 
-function buildLabels(locale: string, formattedTotalHours: string, formattedHourlyRate: string) {
+function resolveStatisticsDocumentDisplayOptions(
+	totalHours: number,
+	hourlyRate: number | undefined,
+	options?: StatisticsExportDisplayOptions,
+): { showHours: boolean; showCost: boolean } {
+	const inferredShowHours = Number.isFinite(totalHours) && totalHours > 0;
+	const inferredShowCost = inferredShowHours && typeof hourlyRate === 'number' && Number.isFinite(hourlyRate) && hourlyRate > 0;
+
+	return normalizeStatisticsExportDisplayOptions({
+		showHours: options?.showHours ?? inferredShowHours,
+		showCost: options?.showCost ?? inferredShowCost,
+	});
+}
+
+function buildLabels(
+	locale: string,
+	formattedTotalHours: string,
+	formattedHourlyRate: string,
+	displayOptions: StatisticsExportDisplayOptions,
+) {
 	const isRu = locale.toLowerCase().startsWith('ru');
+	const { showHours, showCost } = normalizeStatisticsExportDisplayOptions(displayOptions);
+	const subtitle = showHours && showCost
+		? (isRu
+			? `Сводный отчёт с пропорциональным распределением до ${formattedTotalHours} часов по ставке ${formattedHourlyRate}`
+			: `Summary report with proportional distribution to ${formattedTotalHours} hours at a ${formattedHourlyRate} hourly rate`)
+		: showHours
+			? (isRu
+				? `Сводный отчёт с пропорциональным распределением до ${formattedTotalHours} часов.`
+				: `Summary report with proportional distribution to ${formattedTotalHours} hours.`)
+			: (isRu
+				? 'Сводный отчёт по выбранным задачам.'
+				: 'Summary report for selected tasks.');
+
 	return {
 		isRu,
 		lang: isRu ? 'ru' : 'en',
 		title: isRu ? 'Отчёт по статистике' : 'Statistics Report',
-		subtitle: isRu
-			? `Сводный отчёт с пропорциональным распределением до ${formattedTotalHours} часов по ставке ${formattedHourlyRate}`
-			: `Summary report with proportional distribution to ${formattedTotalHours} hours at a ${formattedHourlyRate} hourly rate`,
+		subtitle,
 		generated: isRu ? 'Сформировано' : 'Generated',
 		total: isRu ? 'Итого часов' : 'Total hours',
 		rate: isRu ? 'Ставка часа' : 'Hourly rate',
@@ -318,13 +350,16 @@ function buildStatisticsDocumentMarkup(
 	locale: string,
 	includeReport: boolean,
 	hourlyRate: number,
+	displayOptions?: StatisticsExportDisplayOptions,
 ): { lang: string; title: string; markup: string } {
+	const resolvedDisplayOptions = resolveStatisticsDocumentDisplayOptions(totalHours, hourlyRate, displayOptions);
+	const { showHours, showCost } = resolvedDisplayOptions;
 	const exportHourlyRate = resolveExportHourlyRate(hourlyRate);
 	const totalAmount = rows.reduce((sum, row) => sum + calculateExportRowAmount(row.hours, exportHourlyRate), 0);
 	const formattedHourlyRate = formatStatisticsExportNumber(exportHourlyRate, locale);
 	const formattedTotalHours = formatStatisticsExportNumber(totalHours, locale);
 	const formattedTotalAmount = formatStatisticsExportNumber(totalAmount, locale);
-	const labels = buildLabels(locale, formattedTotalHours, formattedHourlyRate);
+	const labels = buildLabels(locale, formattedTotalHours, formattedHourlyRate, resolvedDisplayOptions);
 	const formattedDate = buildFormattedDate(locale, labels.isRu);
 	const tableRows = rows.map((row, index) => {
 		const zebraClass = index % 2 === 0 ? 'pm-stats-export-row-even' : 'pm-stats-export-row-odd';
@@ -334,11 +369,57 @@ function buildStatisticsDocumentMarkup(
 			`<td class="pm-stats-export-col-task">${escapeHtml(row.taskNumber || '—')}</td>`,
 			`<td class="pm-stats-export-col-title">${escapeHtml(row.title)}</td>`,
 			...(includeReport ? [`<td class="pm-stats-export-col-report">${escapeHtml(row.reportSummary || '—')}</td>`] : []),
-			`<td class="pm-stats-export-col-hours">${escapeHtml(formatStatisticsExportNumber(row.hours, locale))}</td>`,
-			`<td class="pm-stats-export-col-amount">${escapeHtml(amount)}</td>`,
+			...(showHours ? [`<td class="pm-stats-export-col-hours">${escapeHtml(formatStatisticsExportNumber(row.hours, locale))}</td>`] : []),
+			...(showCost ? [`<td class="pm-stats-export-col-amount">${escapeHtml(amount)}</td>`] : []),
 			'</tr>',
 		].join('');
 	}).join('\n');
+	const metaCards = [
+		`<div class="pm-stats-export-meta-card">
+			<span class="pm-stats-export-meta-label">${escapeHtml(labels.generated)}</span>
+			<span class="pm-stats-export-meta-value">${escapeHtml(formattedDate)}</span>
+		</div>`,
+		`<div class="pm-stats-export-meta-card">
+			<span class="pm-stats-export-meta-label">${escapeHtml(labels.count)}</span>
+			<span class="pm-stats-export-meta-value">${rows.length}</span>
+		</div>`,
+	];
+
+	if (showHours) {
+		metaCards.push(`
+			<div class="pm-stats-export-meta-card">
+				<span class="pm-stats-export-meta-label">${escapeHtml(labels.total)}</span>
+				<span class="pm-stats-export-meta-value">${escapeHtml(formattedTotalHours)}</span>
+			</div>
+		`.trim());
+	}
+
+	if (showCost) {
+		metaCards.push(`
+			<div class="pm-stats-export-meta-card">
+				<span class="pm-stats-export-meta-label">${escapeHtml(labels.rate)}</span>
+				<span class="pm-stats-export-meta-value">${escapeHtml(formattedHourlyRate)}</span>
+			</div>
+		`.trim());
+		metaCards.push(`
+			<div class="pm-stats-export-meta-card">
+				<span class="pm-stats-export-meta-label">${escapeHtml(labels.totalAmount)}</span>
+				<span class="pm-stats-export-meta-value">${escapeHtml(formattedTotalAmount)}</span>
+			</div>
+		`.trim());
+	}
+
+	const footerRow = showHours || showCost
+		? `
+			<tfoot>
+				<tr>
+					<td colspan="${includeReport ? '3' : '2'}">${escapeHtml(labels.total)}</td>
+					${showHours ? `<td class="pm-stats-export-col-hours">${escapeHtml(formattedTotalHours)}</td>` : ''}
+					${showCost ? `<td class="pm-stats-export-col-amount">${escapeHtml(formattedTotalAmount)}</td>` : ''}
+				</tr>
+			</tfoot>
+		`.trim()
+		: '';
 
 	return {
 		lang: labels.lang,
@@ -352,26 +433,7 @@ function buildStatisticsDocumentMarkup(
 						<p class="pm-stats-export-subtitle">${escapeHtml(labels.subtitle)}</p>
 					</header>
 					<section class="pm-stats-export-meta">
-						<div class="pm-stats-export-meta-card">
-							<span class="pm-stats-export-meta-label">${escapeHtml(labels.generated)}</span>
-							<span class="pm-stats-export-meta-value">${escapeHtml(formattedDate)}</span>
-						</div>
-						<div class="pm-stats-export-meta-card">
-							<span class="pm-stats-export-meta-label">${escapeHtml(labels.count)}</span>
-							<span class="pm-stats-export-meta-value">${rows.length}</span>
-						</div>
-						<div class="pm-stats-export-meta-card">
-							<span class="pm-stats-export-meta-label">${escapeHtml(labels.total)}</span>
-							<span class="pm-stats-export-meta-value">${escapeHtml(formattedTotalHours)}</span>
-						</div>
-						<div class="pm-stats-export-meta-card">
-							<span class="pm-stats-export-meta-label">${escapeHtml(labels.rate)}</span>
-							<span class="pm-stats-export-meta-value">${escapeHtml(formattedHourlyRate)}</span>
-						</div>
-						<div class="pm-stats-export-meta-card">
-							<span class="pm-stats-export-meta-label">${escapeHtml(labels.totalAmount)}</span>
-							<span class="pm-stats-export-meta-value">${escapeHtml(formattedTotalAmount)}</span>
-						</div>
+						${metaCards.join('\n')}
 					</section>
 					<section class="pm-stats-export-table-wrap">
 						<table class="pm-stats-export-table">
@@ -380,20 +442,14 @@ function buildStatisticsDocumentMarkup(
 									<th>${escapeHtml(labels.taskNumber)}</th>
 									<th>${escapeHtml(labels.name)}</th>
 									${includeReport ? `<th>${escapeHtml(labels.report)}</th>` : ''}
-									<th class="pm-stats-export-col-hours-head">${escapeHtml(labels.hours)}</th>
-									<th class="pm-stats-export-col-amount-head">${escapeHtml(labels.amount)}</th>
+									${showHours ? `<th class="pm-stats-export-col-hours-head">${escapeHtml(labels.hours)}</th>` : ''}
+									${showCost ? `<th class="pm-stats-export-col-amount-head">${escapeHtml(labels.amount)}</th>` : ''}
 								</tr>
 							</thead>
 							<tbody>
 								${tableRows}
 							</tbody>
-							<tfoot>
-								<tr>
-									<td colspan="${includeReport ? '3' : '2'}">${escapeHtml(labels.total)}</td>
-									<td class="pm-stats-export-col-hours">${escapeHtml(formattedTotalHours)}</td>
-									<td class="pm-stats-export-col-amount">${escapeHtml(formattedTotalAmount)}</td>
-								</tr>
-							</tfoot>
+							${footerRow}
 						</table>
 					</section>
 					<div class="pm-stats-export-footer">${escapeHtml(labels.footer)}</div>
@@ -420,8 +476,9 @@ export function buildStatisticsExportHtmlDocument(
 	locale: string,
 	includeReport: boolean,
 	hourlyRate: number,
+	displayOptions?: StatisticsExportDisplayOptions,
 ): string {
-	const { lang, title, markup } = buildStatisticsDocumentMarkup(rows, totalHours, locale, includeReport, hourlyRate);
+	const { lang, title, markup } = buildStatisticsDocumentMarkup(rows, totalHours, locale, includeReport, hourlyRate, displayOptions);
 	const styles = buildStatisticsDocumentStyles();
 	return `<!DOCTYPE html>
 <html lang="${lang}">
@@ -443,8 +500,9 @@ export function buildStatisticsExportHtmlPreview(
 	locale: string,
 	includeReport: boolean,
 	hourlyRate: number,
+	displayOptions?: StatisticsExportDisplayOptions,
 ): string {
-	const { markup } = buildStatisticsDocumentMarkup(rows, totalHours, locale, includeReport, hourlyRate);
+	const { markup } = buildStatisticsDocumentMarkup(rows, totalHours, locale, includeReport, hourlyRate, displayOptions);
 	return `<style>${buildStatisticsDocumentStyles()}</style>${markup}`;
 }
 
@@ -454,7 +512,10 @@ export function buildStatisticsExportMarkdownDocument(
 	locale: string,
 	includeReport: boolean,
 	hourlyRate: number,
+	displayOptions?: StatisticsExportDisplayOptions,
 ): string {
+	const resolvedDisplayOptions = resolveStatisticsDocumentDisplayOptions(totalHours, hourlyRate, displayOptions);
+	const { showHours, showCost } = resolvedDisplayOptions;
 	const exportHourlyRate = resolveExportHourlyRate(hourlyRate);
 	const formattedTotalHours = formatStatisticsExportNumber(totalHours, locale);
 	const formattedHourlyRate = formatStatisticsExportNumber(exportHourlyRate, locale);
@@ -462,7 +523,7 @@ export function buildStatisticsExportMarkdownDocument(
 	const formattedTotalAmount = formatStatisticsExportNumber(totalAmount, locale);
 
 	if (includeReport) {
-		return buildStatisticsMarkdownWithReport(rows, totalHours, exportHourlyRate, locale);
+		return buildStatisticsMarkdownWithReport(rows, totalHours, exportHourlyRate, locale, resolvedDisplayOptions);
 	}
 
 	const isRu = locale.toLowerCase().startsWith('ru');
@@ -476,6 +537,17 @@ export function buildStatisticsExportMarkdownDocument(
 	const hoursLabel = isRu ? 'Часы' : 'Hours';
 	const amountLabel = isRu ? 'Сумма' : 'Amount';
 	const formattedDate = buildFormattedDate(locale, isRu);
+	const summaryLines = [`- ${generatedLabel}: ${formattedDate}`];
+
+	if (showHours) {
+		summaryLines.push(`- ${totalLabel}: ${formattedTotalHours}`);
+	}
+
+	if (showCost) {
+		summaryLines.push(`- ${hourlyRateLabel}: ${formattedHourlyRate}`);
+		summaryLines.push(`- ${totalAmountLabel}: ${formattedTotalAmount}`);
+	}
+
 	const tableRows = rows.map((row) => ({
 		taskNumber: escapeMarkdownCell(row.taskNumber || '—'),
 		title: escapeMarkdownCell(row.title),
@@ -485,45 +557,64 @@ export function buildStatisticsExportMarkdownDocument(
 	const totalTaskLabel = `**${isRu ? 'Итого' : 'Total'}**`;
 	const totalHoursLabel = `**${formattedTotalHours}**`;
 	const totalAmountRowLabel = `**${formattedTotalAmount}**`;
-	const taskNumberWidth = Math.max(
-		taskNumberLabel.length,
-		totalTaskLabel.length,
-		...tableRows.map((row) => row.taskNumber.length),
+	const columns: Array<{
+		key: 'taskNumber' | 'title' | 'hours' | 'amount';
+		label: string;
+		align: 'left' | 'right';
+		totalValue: string;
+	}> = [
+			{ key: 'taskNumber', label: taskNumberLabel, align: 'left', totalValue: totalTaskLabel },
+			{ key: 'title', label: titleLabel, align: 'left', totalValue: '' },
+			...(showHours ? [{ key: 'hours', label: hoursLabel, align: 'right', totalValue: totalHoursLabel } as const] : []),
+			...(showCost ? [{ key: 'amount', label: amountLabel, align: 'right', totalValue: totalAmountRowLabel } as const] : []),
+		];
+	const widths = Object.fromEntries(columns.map((column) => [
+		column.key,
+		Math.max(
+			column.label.length,
+			column.totalValue.length,
+			...tableRows.map((row) => String(row[column.key] || '').length),
+		),
+	])) as Record<'taskNumber' | 'title' | 'hours' | 'amount', number>;
+	const formatMarkdownRow = (row: Record<'taskNumber' | 'title' | 'hours' | 'amount', string>): string => (
+		`| ${columns.map((column) => padMarkdownCell(String(row[column.key] || ''), widths[column.key], column.align)).join(' | ')} |`
 	);
-	const titleWidth = Math.max(
-		titleLabel.length,
-		...tableRows.map((row) => row.title.length),
-	);
-	const hoursWidth = Math.max(
-		hoursLabel.length,
-		totalHoursLabel.length,
-		...tableRows.map((row) => row.hours.length),
-	);
-	const amountWidth = Math.max(
-		amountLabel.length,
-		totalAmountRowLabel.length,
-		...tableRows.map((row) => row.amount.length),
-	);
-	const separator = `| ${'-'.repeat(taskNumberWidth)} | ${'-'.repeat(titleWidth)} | ${'-'.repeat(Math.max(3, hoursWidth - 1))}: | ${'-'.repeat(Math.max(3, amountWidth - 1))}: |`;
-	const header = `| ${padMarkdownCell(taskNumberLabel, taskNumberWidth)} | ${padMarkdownCell(titleLabel, titleWidth)} | ${padMarkdownCell(hoursLabel, hoursWidth, 'right')} | ${padMarkdownCell(amountLabel, amountWidth, 'right')} |`;
-	const bodyRows = tableRows
-		.map((row) => `| ${padMarkdownCell(row.taskNumber, taskNumberWidth)} | ${padMarkdownCell(row.title, titleWidth)} | ${padMarkdownCell(row.hours, hoursWidth, 'right')} | ${padMarkdownCell(row.amount, amountWidth, 'right')} |`)
-		.join('\n');
-	const totalRow = `| ${padMarkdownCell(totalTaskLabel, taskNumberWidth)} | ${padMarkdownCell('', titleWidth)} | ${padMarkdownCell(totalHoursLabel, hoursWidth, 'right')} | ${padMarkdownCell(totalAmountRowLabel, amountWidth, 'right')} |`;
-	const wordSection = buildStatisticsWordSection(rows, exportHourlyRate, locale);
+	const separator = `| ${columns.map((column) => (
+		column.align === 'right'
+			? `${'-'.repeat(Math.max(3, widths[column.key] - 1))}:`
+			: `${'-'.repeat(widths[column.key])}`
+	)).join(' | ')} |`;
+	const header = formatMarkdownRow({
+		taskNumber: taskNumberLabel,
+		title: titleLabel,
+		hours: hoursLabel,
+		amount: amountLabel,
+	});
+	const bodyRows = tableRows.map((row) => formatMarkdownRow({
+		taskNumber: row.taskNumber,
+		title: row.title,
+		hours: row.hours,
+		amount: row.amount,
+	})).join('\n');
+	const totalRow = (showHours || showCost)
+		? formatMarkdownRow({
+			taskNumber: totalTaskLabel,
+			title: '',
+			hours: totalHoursLabel,
+			amount: totalAmountRowLabel,
+		})
+		: '';
+	const wordSection = buildStatisticsWordSection(rows, exportHourlyRate, locale, resolvedDisplayOptions);
 
 	return [
 		title,
 		'',
-		`- ${generatedLabel}: ${formattedDate}`,
-		`- ${totalLabel}: ${formattedTotalHours}`,
-		`- ${hourlyRateLabel}: ${formattedHourlyRate}`,
-		`- ${totalAmountLabel}: ${formattedTotalAmount}`,
+		...summaryLines,
 		'',
 		header,
 		separator,
 		bodyRows,
-		totalRow,
+		...(totalRow ? [totalRow] : []),
 		'',
 		wordSection,
 	].join('\n') + '\n';

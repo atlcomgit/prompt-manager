@@ -70,3 +70,14 @@ test('ActionBar renders plain save label when idle', () => {
 	assert.match(markup, /<span>Save<\/span>/);
 	assert.match(markup, /aria-busy="false"/);
 });
+
+test('ActionBar shows Go to chat once the chat panel is already open', () => {
+	const markup = renderActionBarMarkup({
+		status: 'in-progress',
+		hasChatSession: false,
+		isChatPanelOpen: true,
+	});
+
+	assert.match(markup, /Go to chat/);
+	assert.doesNotMatch(markup, /Start Chat/);
+});

@@ -73,6 +73,7 @@ export function activate(context: vscode.ExtensionContext) {
 		workspaceService,
 		gitService,
 		stateService,
+		() => chatMemoryInstructionService,
 	);
 
 	const editorPanelManager = new EditorPanelManager(
@@ -93,6 +94,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const statisticsPanelManager = new StatisticsPanelManager(
 		context.extensionUri,
 		storageService,
+		stateService,
 	);
 
 	const aboutPanelManager = new AboutPanelManager(
@@ -389,6 +391,11 @@ export function activate(context: vscode.ExtensionContext) {
 
 	trackerPanelManager.onDidSave(async () => {
 		await sidebarProvider.refreshList();
+	});
+
+	sidebarProvider.onDidSave(async (changes) => {
+		await editorPanelManager.handleExternalPromptConfigChanges(changes);
+		await trackerPanelManager.refresh();
 	});
 
 	editorPanelManager.onDidSaveStateChange(({ id, saving }) => {

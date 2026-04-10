@@ -1,7 +1,7 @@
 /**
  * Editor App — Main component for prompt configuration form
  */
-import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
@@ -10,7 +10,7 @@ import { TextArea } from './components/TextArea';
 import { RichTextEditor } from './components/RichTextEditor';
 import { MultiSelect } from './components/MultiSelect';
 import { StatusSelect } from './components/StatusSelect';
-import { ActionBar } from './components/ActionBar';
+import { ActionBar, resolveChatEntryState } from './components/ActionBar';
 import { TimerDisplay } from './components/TimerDisplay';
 import { ContextFileCard } from './components/ContextFileCard';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
@@ -52,9 +52,11 @@ type ChatEntryAction = 'start' | 'open';
 type GitOverlayMode = 'default' | 'start-chat-preflight' | 'open-chat-preflight';
 
 const CHAT_START_TIMEOUT_MS = 15000;
+const CHAT_LAUNCH_COMPLETION_HOLD_MS = 2000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
 const EDITOR_FORM_CONTENT_WIDTH_PX = 800;
 const EDITOR_PROMPT_TABS: EditorPromptTab[] = ['main', 'process'];
+const PANEL_LEFT_ACCENT_SHADOW = 'inset 3px 0 0 var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))';
 
 const ensureTrailingNewline = (text: string): string => (text.endsWith('\n') ? text : `${text}\n`);
 
@@ -192,6 +194,19 @@ const VoiceMicIcon: React.FC = () => (
     <path
       fill="currentColor"
       d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a1 1 0 1 1 2 0 7 7 0 0 1-6 6.93V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-3.07A7 7 0 0 1 5 11a1 1 0 1 1 2 0 5 5 0 1 0 10 0z"
+    />
+  </svg>
+);
+
+const OpenFileIcon: React.FC = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" style={styles.inlineIcon}>
+    <path
+      fill="currentColor"
+      d="M4 1.5A1.5 1.5 0 0 0 2.5 3v10A1.5 1.5 0 0 0 4 14.5h8A1.5 1.5 0 0 0 13.5 13V5.88a1.5 1.5 0 0 0-.44-1.06L10.12 1.94a1.5 1.5 0 0 0-1.06-.44H4ZM4 3h4.25v2.25A1.75 1.75 0 0 0 10 7h2v6H4V3Z"
+    />
+    <path
+      fill="currentColor"
+      d="M6.75 10.75a.75.75 0 0 1 0-1.5h2.44L6.97 7.03a.75.75 0 1 1 1.06-1.06l2.22 2.22V5.75a.75.75 0 0 1 1.5 0V10a.75.75 0 0 1-.75.75H6.75Z"
     />
   </svg>
 );
@@ -359,6 +374,39 @@ export const EditorApp: React.FC = () => {
     || prompt.status === 'completed'
     || prompt.status === 'report'
     || prompt.status === 'review';
+  const hasChatSession = prompt.chatSessionIds.length > 0;
+  const chatEntryState = resolveChatEntryState({
+    status: prompt.status,
+    hasChatSession,
+    isChatPanelOpen,
+  });
+  const [chatLaunchCompletionHold, setChatLaunchCompletionHold] = useState(false);
+  const chatLaunchCompletionTimerRef = useRef<number | null>(null);
+  const previousChatEntryAvailabilityRef = useRef(chatEntryState.hasChatEntry);
+  const showChatLaunchCompletionState = prompt.status === 'in-progress'
+    && chatEntryState.hasChatEntry
+    && chatLaunchCompletionHold;
+  const shouldShowChatLaunchBlock = prompt.status === 'in-progress'
+    && (!chatEntryState.hasChatEntry || showChatLaunchCompletionState);
+  const chatLaunchPhase: 'opening' | 'binding' | 'ready' = showChatLaunchCompletionState
+    ? 'ready'
+    : isStartingChat
+      ? 'opening'
+      : 'binding';
+  const chatLaunchStateLabel = chatLaunchPhase === 'ready'
+    ? t('editor.chatLaunchStatusReady')
+    : chatLaunchPhase === 'opening'
+      ? t('editor.chatLaunchStatusStarting')
+      : t('editor.chatLaunchStatusWaiting');
+  const chatLaunchDescription = chatLaunchPhase === 'ready'
+    ? t('editor.chatLaunchDescriptionReady')
+    : chatLaunchPhase === 'opening'
+      ? t('editor.chatLaunchDescriptionStarting')
+      : t('editor.chatLaunchDescriptionWaiting');
+  const chatLaunchHint = chatLaunchPhase === 'ready'
+    ? t('editor.chatLaunchHintReady')
+    : t('editor.chatLaunchHint');
+  const [chatLaunchActivityFrame, setChatLaunchActivityFrame] = useState(0);
   const shouldDockGitOverlaySecondHalf = pageWidth >= EDITOR_FORM_SHELL_WIDTH_PX * 2;
   const editorProgressMode = resolveEditorProgressMode({
     isSaving,
@@ -1720,12 +1768,12 @@ export const EditorApp: React.FC = () => {
         {
         const reviewProjects = Array.isArray(msg.snapshot?.projects)
           ? msg.snapshot.projects
-            .filter(project => Boolean(project.review.remote)
+            .filter((project: GitOverlaySnapshot['projects'][number]) => Boolean(project.review.remote)
               || Boolean(project.review.setupAction)
               || Boolean(project.review.request)
               || Boolean(project.review.unsupportedReason)
               || Boolean(project.review.error))
-            .map(project => ({
+            .map((project: GitOverlaySnapshot['projects'][number]) => ({
               project: project.project,
               host: project.review.remote?.host || null,
               provider: project.review.remote?.provider || null,
@@ -2784,20 +2832,107 @@ export const EditorApp: React.FC = () => {
     setExpandedSections(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const renderSection = (key: SectionKey, title: string, summaryItems: string[], content: React.ReactNode) => {
+  const openActionLabel = `📝 ${t('editor.open')}`;
+  const hasPlanContent = promptPlanState.exists && promptPlanState.content.trim().length > 0;
+  const chatLaunchSteps: Array<{ key: string; label: string; state: 'done' | 'active' | 'pending' }> = [
+    {
+      key: 'prepare',
+      label: t('editor.chatLaunchStepPrepare'),
+      state: 'done',
+    },
+    {
+      key: 'open',
+      label: t('editor.chatLaunchStepOpen'),
+      state: chatLaunchPhase === 'opening' ? 'active' : 'done',
+    },
+    {
+      key: 'bind',
+      label: t('editor.chatLaunchStepBind'),
+      state: chatLaunchPhase === 'ready'
+        ? 'done'
+        : chatLaunchPhase === 'binding'
+          ? 'active'
+          : 'pending',
+    },
+  ];
+  const completedChatLaunchStepCount = chatLaunchSteps.filter((step) => step.state === 'done').length;
+
+  useLayoutEffect(() => {
+    const canTrackCompletion = prompt.status === 'in-progress';
+    const previousHadChatEntry = previousChatEntryAvailabilityRef.current;
+
+    if (canTrackCompletion && !previousHadChatEntry && chatEntryState.hasChatEntry) {
+      if (chatLaunchCompletionTimerRef.current !== null) {
+        window.clearTimeout(chatLaunchCompletionTimerRef.current);
+      }
+
+      setChatLaunchCompletionHold(true);
+      chatLaunchCompletionTimerRef.current = window.setTimeout(() => {
+        setChatLaunchCompletionHold(false);
+        chatLaunchCompletionTimerRef.current = null;
+      }, CHAT_LAUNCH_COMPLETION_HOLD_MS);
+    } else if ((!canTrackCompletion || !chatEntryState.hasChatEntry) && chatLaunchCompletionHold) {
+      if (chatLaunchCompletionTimerRef.current !== null) {
+        window.clearTimeout(chatLaunchCompletionTimerRef.current);
+        chatLaunchCompletionTimerRef.current = null;
+      }
+
+      setChatLaunchCompletionHold(false);
+    }
+
+    previousChatEntryAvailabilityRef.current = chatEntryState.hasChatEntry;
+  }, [chatEntryState.hasChatEntry, chatLaunchCompletionHold, prompt.status]);
+
+  useEffect(() => {
+    if (!shouldShowChatLaunchBlock || chatLaunchPhase === 'ready') {
+      setChatLaunchActivityFrame(0);
+      return;
+    }
+
+    const intervalMs = chatLaunchPhase === 'opening' ? 220 : 360;
+    const timer = window.setInterval(() => {
+      setChatLaunchActivityFrame(prev => (prev + 1) % 6);
+    }, intervalMs);
+
+    return () => window.clearInterval(timer);
+  }, [chatLaunchPhase, shouldShowChatLaunchBlock]);
+
+  useEffect(() => {
+    return () => {
+      if (chatLaunchCompletionTimerRef.current !== null) {
+        window.clearTimeout(chatLaunchCompletionTimerRef.current);
+        chatLaunchCompletionTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const renderSection = (
+    key: SectionKey,
+    title: string,
+    summaryItems: string[],
+    content: React.ReactNode,
+    headerActions?: React.ReactNode,
+  ) => {
     const visibleItems = summaryItems.slice(0, 3);
     const hiddenCount = Math.max(0, summaryItems.length - visibleItems.length);
+    const isExpanded = expandedSections[key];
 
     return (
       <section style={styles.sectionCard}>
+      <div
+        style={{
+          ...styles.sectionHeaderRow,
+          ...(isExpanded ? styles.sectionHeaderRowExpanded : styles.sectionHeaderRowCollapsed),
+        }}
+      >
       <button
         type="button"
         style={styles.sectionHeaderBtn}
         onClick={() => toggleSection(key)}
-        aria-expanded={expandedSections[key]}
+        aria-expanded={isExpanded}
       >
         <span style={styles.sectionHeaderLeft}>
-          <span style={styles.sectionArrow}>{expandedSections[key] ? '▾' : '▸'}</span>
+          <span style={styles.sectionArrow}>{isExpanded ? '▾' : '▸'}</span>
           <span style={styles.sectionTitle}>{title}</span>
         </span>
         <span
@@ -2822,7 +2957,18 @@ export const EditorApp: React.FC = () => {
           )}
         </span>
       </button>
-      {expandedSections[key] && (
+      {headerActions ? (
+        <div
+          style={{
+            ...styles.sectionHeaderActions,
+            ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden),
+          }}
+        >
+          {headerActions}
+        </div>
+      ) : null}
+      </div>
+      {isExpanded && (
         <div style={styles.sectionBody}>
           <div
             style={{
@@ -2899,7 +3045,7 @@ export const EditorApp: React.FC = () => {
                 title={t('editor.openConfigTooltip')}
                 aria-label={t('editor.openConfigTooltip')}
               >
-                ⚙
+                <OpenFileIcon />
               </button>
             </div>
           </div>
@@ -3136,7 +3282,7 @@ export const EditorApp: React.FC = () => {
                         });
                       }}
                     >
-                      {`📝 ${t('editor.open')}`}
+                      {openActionLabel}
                     </button>
                     <label style={styles.autoCompleteLabelInline}>
                       <input
@@ -3464,6 +3610,54 @@ export const EditorApp: React.FC = () => {
           ) : (
             <>
 
+            {renderSection('notes', t('editor.notes'), notesSummary, (
+            <>
+              <div style={styles.field}>
+              <label style={styles.label}>{t('editor.notes')}</label>
+              <TextArea
+                value={prompt.notes || ''}
+                onChange={v => updateField('notes', v)}
+                placeholder={t('editor.notesPlaceholder')}
+                rows={6}
+              />
+              </div>
+            </>
+            ))}
+
+          {shouldShowPlanSection ? renderSection('plan', 'План', planSummary, (
+            <>
+              {hasPlanContent ? (
+                <div style={styles.planRawContent} role="log" aria-live="polite" aria-atomic="false">
+                  {planLineSegments.map((segment, segmentIndex) => (
+                    <div
+                      key={`plan-segment-${segment.lines[0]?.index ?? segmentIndex}`}
+                      style={segment.highlighted ? styles.planRawHighlightedBlock : styles.planRawSegment}
+                    >
+                      {segment.lines.map((line) => (
+                        <div key={`plan-line-${line.index}`} style={styles.planRawLine}>
+                          {line.text.length > 0 ? line.text : '\u00A0'}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+                ) : promptPlanState.exists ? (
+                <div style={styles.planRawContentEmpty}>{t('editor.planEmpty')}</div>
+              ) : (
+                <div style={styles.planRawContentEmpty}>{t('editor.planMissing')}</div>
+              )}
+            </>
+          ), hasPlanContent ? (
+            <button
+              type="button"
+              style={styles.linkBtn}
+              onClick={handleOpenPromptPlanInEditor}
+              title={t('editor.open')}
+            >
+              {openActionLabel}
+            </button>
+          ) : null) : null}
+
           {renderSection('report', 'Отчет', reportSummary, (
             <>
               <div style={styles.field}>
@@ -3521,61 +3715,126 @@ export const EditorApp: React.FC = () => {
                       ? `${t('editor.openInEditor')} ${prompt.httpExamples.trim()}`
                       : t('editor.openInEditor')}
                   >
-                    ↗ {t('editor.open')}
+                    {openActionLabel}
                   </button>
                 </div>
               </div>
             </>
           ))}
 
-            {renderSection('notes', t('editor.notes'), notesSummary, (
-            <>
-              <div style={styles.field}>
-              <label style={styles.label}>{t('editor.notes')}</label>
-              <TextArea
-                value={prompt.notes || ''}
-                onChange={v => updateField('notes', v)}
-                placeholder={t('editor.notesPlaceholder')}
-                rows={6}
-              />
-              </div>
-            </>
-            ))}
-
-          {shouldShowPlanSection ? renderSection('plan', 'План', planSummary, (
-            <>
-              {promptPlanState.exists && promptPlanState.content.trim().length > 0 ? (
-                <div style={styles.planRawContent} role="log" aria-live="polite" aria-atomic="false">
-                  {planLineSegments.map((segment, segmentIndex) => (
-                    <div
-                      key={`plan-segment-${segment.lines[0]?.index ?? segmentIndex}`}
-                      style={segment.highlighted ? styles.planRawHighlightedBlock : styles.planRawSegment}
+          {shouldShowChatLaunchBlock ? (
+            <div style={styles.chatLaunchDock}>
+              <section style={styles.chatLaunchCard} aria-live="polite">
+                <div style={styles.chatLaunchTopRow}>
+                  <div style={styles.chatLaunchStatusRow}>
+                    <span style={styles.chatLaunchStatusDot} aria-hidden="true" />
+                    <span style={styles.chatLaunchStatusText}>{chatLaunchStateLabel}</span>
+                  </div>
+                  <div style={styles.chatLaunchTopMeta}>
+                    {chatLaunchPhase !== 'ready' ? (
+                      <div style={styles.chatLaunchActivity} aria-hidden="true">
+                        {Array.from({ length: 6 }, (_, index) => {
+                          const isActive = index === chatLaunchActivityFrame;
+                          const isTrailing = index === ((chatLaunchActivityFrame + 5) % 6);
+                          return (
+                            <span
+                              key={`chat-launch-activity-${index}`}
+                              style={{
+                                ...styles.chatLaunchActivityBar,
+                                ...(isActive
+                                  ? styles.chatLaunchActivityBarActive
+                                  : isTrailing
+                                    ? styles.chatLaunchActivityBarTrailing
+                                    : null),
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                    <span
+                      style={{
+                        ...styles.chatLaunchProgressBadge,
+                        ...(chatLaunchPhase === 'ready'
+                          ? styles.chatLaunchProgressBadgeDone
+                          : styles.chatLaunchProgressBadgeActive),
+                      }}
                     >
-                      {segment.lines.map((line) => (
-                        <div key={`plan-line-${line.index}`} style={styles.planRawLine}>
-                          {line.text.length > 0 ? line.text : '\u00A0'}
-                        </div>
-                      ))}
-                    </div>
-                  ))}
+                      {`${completedChatLaunchStepCount}/${chatLaunchSteps.length}`}
+                    </span>
+                  </div>
                 </div>
-                ) : promptPlanState.exists ? (
-                <div style={styles.planRawContentEmpty}>{t('editor.planEmpty')}</div>
-              ) : (
-                <div style={styles.planRawContentEmpty}>{t('editor.planMissing')}</div>
-              )}
-              <div style={styles.fieldActionGroup}>
-                <button
-                  type="button"
-                  style={styles.fieldActionBtn}
-                  onClick={handleOpenPromptPlanInEditor}
-                  title={t('editor.open')}
+
+                <div style={styles.chatLaunchBody}>
+                  <div style={styles.chatLaunchHeaderCopy}>
+                    <h3 style={styles.chatLaunchTitle}>{t('editor.chatLaunchTitle')}</h3>
+                    <p style={styles.chatLaunchDescription}>{chatLaunchDescription}</p>
+                  </div>
+
+                  <div style={styles.chatLaunchSteps}>
+                    {chatLaunchSteps.map((step, index) => (
+                      <div
+                        key={step.key}
+                        style={{
+                          ...styles.chatLaunchStep,
+                          ...(step.state === 'done'
+                            ? styles.chatLaunchStepDone
+                            : step.state === 'active'
+                              ? styles.chatLaunchStepActive
+                              : styles.chatLaunchStepPending),
+                        }}
+                      >
+                        <span style={styles.chatLaunchStepLine} aria-hidden="true">
+                          {index < chatLaunchSteps.length - 1 ? <span style={styles.chatLaunchStepLineInner} /> : null}
+                        </span>
+                        <span
+                          style={{
+                            ...styles.chatLaunchStepMarker,
+                            ...(step.state === 'done'
+                              ? styles.chatLaunchStepMarkerDone
+                              : step.state === 'active'
+                                ? styles.chatLaunchStepMarkerActive
+                                : styles.chatLaunchStepMarkerPending),
+                          }}
+                          aria-hidden="true"
+                        >
+                          {step.state === 'done' ? '✓' : step.state === 'active' ? <span style={styles.chatLaunchStepLoader} /> : '•'}
+                        </span>
+                        <div style={styles.chatLaunchStepBody}>
+                          <span style={styles.chatLaunchStepLabel}>{step.label}</span>
+                          <span
+                            style={{
+                              ...styles.chatLaunchStepBadge,
+                              ...(step.state === 'done'
+                                ? styles.chatLaunchStepBadgeDone
+                                : step.state === 'active'
+                                  ? styles.chatLaunchStepBadgeActive
+                                  : styles.chatLaunchStepBadgePending),
+                            }}
+                          >
+                            {step.state === 'done'
+                              ? t('editor.chatLaunchStepStateDone')
+                              : step.state === 'active'
+                                ? t('editor.chatLaunchStepStateActive')
+                                : t('editor.chatLaunchStepStatePending')}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    ...styles.chatLaunchHint,
+                    ...(chatLaunchPhase === 'ready' ? styles.chatLaunchHintDone : null),
+                  }}
                 >
-                  ↗ {t('editor.open')}
-                </button>
-              </div>
-            </>
-          )) : null}
+                  {chatLaunchHint}
+                </div>
+              </section>
+            </div>
+          ) : null}
             </>
           )}
           </div>
@@ -3612,7 +3871,7 @@ export const EditorApp: React.FC = () => {
             onMarkStopped={handleStopChatAndSetStatus}
             showStatusActions={prompt.status === 'in-progress'}
             showGitFlowAction={shouldShowFooterGitFlow}
-            hasChatSession={prompt.chatSessionIds.length > 0}
+            hasChatSession={hasChatSession}
             isChatPanelOpen={isChatPanelOpen}
             isSaving={isSaving}
             isStartingChat={isStartingChat}
@@ -3850,20 +4109,289 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '12px',
     maxWidth: `${EDITOR_FORM_CONTENT_WIDTH_PX}px`,
   },
+  chatLaunchDock: {
+    position: 'sticky',
+    bottom: 0,
+    zIndex: 2,
+    paddingTop: '12px',
+    background: 'var(--vscode-editor-background)',
+  },
+  chatLaunchCard: {
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '10px',
+    padding: '14px 16px 16px',
+    background: 'var(--vscode-editor-background)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+    boxShadow: PANEL_LEFT_ACCENT_SHADOW,
+  },
+  chatLaunchTopRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
+    paddingBottom: '10px',
+    borderBottom: '1px solid var(--vscode-panel-border)',
+  },
+  chatLaunchStatusRow: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    minWidth: 0,
+  },
+  chatLaunchStatusDot: {
+    width: '7px',
+    height: '7px',
+    borderRadius: '50%',
+    background: 'var(--vscode-progressBar-background, var(--vscode-textLink-foreground))',
+    flexShrink: 0,
+  },
+  chatLaunchStatusText: {
+    color: 'var(--vscode-foreground)',
+    fontSize: '12px',
+    fontWeight: 600,
+  },
+  chatLaunchTopMeta: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    flexShrink: 0,
+  },
+  chatLaunchActivity: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    flexShrink: 0,
+  },
+  chatLaunchActivityBar: {
+    width: '10px',
+    height: '4px',
+    borderRadius: '999px',
+    background: 'color-mix(in srgb, var(--vscode-descriptionForeground) 16%, transparent)',
+    transition: 'background-color 0.18s ease, transform 0.18s ease',
+  },
+  chatLaunchActivityBarActive: {
+    background: 'var(--vscode-progressBar-background, var(--vscode-textLink-foreground))',
+    transform: 'scaleX(1.15)',
+  },
+  chatLaunchActivityBarTrailing: {
+    background: 'color-mix(in srgb, var(--vscode-progressBar-background, var(--vscode-textLink-foreground)) 45%, transparent)',
+  },
+  chatLaunchProgressBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    borderRadius: '999px',
+    minWidth: '50px',
+    padding: '4px 10px',
+    fontSize: '11px',
+    fontWeight: 700,
+    letterSpacing: '0.03em',
+    border: '1px solid transparent',
+  },
+  chatLaunchProgressBadgeActive: {
+    background: 'var(--vscode-badge-background)',
+    color: 'var(--vscode-badge-foreground)',
+  },
+  chatLaunchProgressBadgeDone: {
+    background: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 16%, transparent)',
+    borderColor: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 40%, transparent)',
+    color: 'var(--vscode-testing-iconPassed)',
+  },
+  chatLaunchBody: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '14px',
+  },
+  chatLaunchHeaderCopy: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    minWidth: 0,
+  },
+  chatLaunchTitle: {
+    margin: 0,
+    fontSize: '16px',
+    fontWeight: 700,
+    color: 'var(--vscode-foreground)',
+  },
+  chatLaunchDescription: {
+    margin: 0,
+    fontSize: '12px',
+    lineHeight: 1.5,
+    color: 'var(--vscode-descriptionForeground)',
+  },
+  chatLaunchSteps: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    padding: '10px',
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '10px',
+    background: 'var(--vscode-input-background, var(--vscode-editor-background))',
+  },
+  chatLaunchStep: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '12px',
+    padding: '10px 12px',
+    minHeight: '44px',
+    position: 'relative',
+    borderRadius: '8px',
+    border: '1px solid transparent',
+  },
+  chatLaunchStepDone: {
+    color: 'var(--vscode-foreground)',
+    background: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 10%, transparent)',
+    borderColor: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 24%, transparent)',
+  },
+  chatLaunchStepActive: {
+    color: 'var(--vscode-foreground)',
+    background: 'color-mix(in srgb, var(--vscode-progressBar-background, var(--vscode-textLink-foreground)) 10%, transparent)',
+    borderColor: 'color-mix(in srgb, var(--vscode-progressBar-background, var(--vscode-textLink-foreground)) 28%, transparent)',
+  },
+  chatLaunchStepPending: {
+    color: 'var(--vscode-descriptionForeground)',
+    background: 'transparent',
+    borderColor: 'color-mix(in srgb, var(--vscode-panel-border) 70%, transparent)',
+  },
+  chatLaunchStepLine: {
+    position: 'relative',
+    width: '12px',
+    alignSelf: 'stretch',
+    display: 'inline-flex',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  chatLaunchStepLineInner: {
+    width: '1px',
+    flex: 1,
+    background: 'var(--vscode-panel-border)',
+  },
+  chatLaunchStepMarker: {
+    width: '18px',
+    height: '18px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    fontWeight: 700,
+    borderRadius: '50%',
+    boxSizing: 'border-box',
+  },
+  chatLaunchStepMarkerDone: {
+    background: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 16%, transparent)',
+    border: '1px solid color-mix(in srgb, var(--vscode-testing-iconPassed) 40%, transparent)',
+    color: 'var(--vscode-testing-iconPassed)',
+  },
+  chatLaunchStepMarkerActive: {
+    background: 'color-mix(in srgb, var(--vscode-progressBar-background, var(--vscode-textLink-foreground)) 16%, transparent)',
+    border: '1px solid color-mix(in srgb, var(--vscode-progressBar-background, var(--vscode-textLink-foreground)) 44%, transparent)',
+    color: 'var(--vscode-progressBar-background, var(--vscode-textLink-foreground))',
+  },
+  chatLaunchStepMarkerPending: {
+    background: 'transparent',
+    border: '1px solid var(--vscode-panel-border)',
+    color: 'var(--vscode-descriptionForeground)',
+  },
+  chatLaunchStepLoader: {
+    width: '10px',
+    height: '10px',
+    border: '2px solid color-mix(in srgb, var(--vscode-progressBar-background, var(--vscode-textLink-foreground)) 30%, transparent)',
+    borderTopColor: 'var(--vscode-progressBar-background, var(--vscode-textLink-foreground))',
+    borderRadius: '50%',
+    animation: 'pm-spin 0.8s linear infinite',
+    boxSizing: 'border-box',
+  },
+  chatLaunchStepBody: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
+    flex: 1,
+    minWidth: 0,
+  },
+  chatLaunchStepLabel: {
+    fontSize: '12px',
+    lineHeight: 1.4,
+    color: 'inherit',
+    minWidth: 0,
+  },
+  chatLaunchStepBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '3px 8px',
+    borderRadius: '999px',
+    fontSize: '10px',
+    fontWeight: 700,
+    letterSpacing: '0.03em',
+    textTransform: 'uppercase',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+  },
+  chatLaunchStepBadgeDone: {
+    background: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 14%, transparent)',
+    color: 'var(--vscode-testing-iconPassed)',
+  },
+  chatLaunchStepBadgeActive: {
+    background: 'color-mix(in srgb, var(--vscode-progressBar-background, var(--vscode-textLink-foreground)) 14%, transparent)',
+    color: 'var(--vscode-progressBar-background, var(--vscode-textLink-foreground))',
+  },
+  chatLaunchStepBadgePending: {
+    background: 'color-mix(in srgb, var(--vscode-descriptionForeground) 10%, transparent)',
+    color: 'var(--vscode-descriptionForeground)',
+  },
+  chatLaunchHint: {
+    fontSize: '11px',
+    lineHeight: 1.5,
+    color: 'var(--vscode-descriptionForeground)',
+    padding: '10px 12px',
+    borderRadius: '8px',
+    background: 'var(--vscode-editor-background)',
+    border: '1px solid var(--vscode-panel-border)',
+  },
+  chatLaunchHintDone: {
+    background: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 10%, var(--vscode-editor-background))',
+    borderColor: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 22%, transparent)',
+  },
   sectionCard: {
     border: '1px solid var(--vscode-panel-border)',
     borderRadius: '6px',
     background: 'var(--vscode-editor-background)',
     overflow: 'visible',
+    boxShadow: PANEL_LEFT_ACCENT_SHADOW,
+  },
+  sectionHeaderRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    paddingRight: '12px',
+    background: 'var(--vscode-sideBar-background)',
+    boxShadow: PANEL_LEFT_ACCENT_SHADOW,
+    borderTopLeftRadius: '6px',
+    borderTopRightRadius: '6px',
+  },
+  sectionHeaderRowExpanded: {
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+  },
+  sectionHeaderRowCollapsed: {
+    borderBottomLeftRadius: '6px',
+    borderBottomRightRadius: '6px',
   },
   sectionHeaderBtn: {
-    width: '100%',
+    width: 'auto',
+    flex: 1,
+    minWidth: 0,
     display: 'flex',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
     gap: '10px',
     border: 'none',
-    background: 'var(--vscode-sideBar-background)',
+    background: 'transparent',
     color: 'var(--vscode-foreground)',
     cursor: 'pointer',
     padding: '10px 12px',
@@ -3875,6 +4403,12 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: '8px',
     minWidth: 0,
+  },
+  sectionHeaderActions: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    flexShrink: 0,
   },
   sectionArrow: {
     color: 'var(--vscode-descriptionForeground)',

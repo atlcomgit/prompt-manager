@@ -20,6 +20,20 @@ export interface StatisticsWordExportRow {
 	hours: number;
 }
 
+export interface StatisticsExportDisplayOptions {
+	showHours?: boolean;
+	showCost?: boolean;
+}
+
+export function normalizeStatisticsExportDisplayOptions(
+	options?: StatisticsExportDisplayOptions,
+): { showHours: boolean; showCost: boolean } {
+	const showHours = options?.showHours !== false;
+	const showCost = showHours && options?.showCost !== false;
+
+	return { showHours, showCost };
+}
+
 function parseDateOnly(value?: string | null): Date | null {
 	if (!value) {
 		return null;
@@ -133,13 +147,24 @@ export function buildStatisticsWordSection(
 	rows: StatisticsWordExportRow[],
 	hourlyRate: number,
 	locale: string,
+	options: StatisticsExportDisplayOptions = {},
 ): string {
+	const { showHours, showCost } = normalizeStatisticsExportDisplayOptions(options);
 	const isRu = locale.toLowerCase().startsWith('ru');
 	const taskFallback = isRu ? '—' : '-';
 	const unitLabel = isRu ? 'ч.' : 'h.';
 	const headers = isRu
-		? ['№', 'Номер задачи: Название', 'Количество часов', 'ч.', 'Стоимость часа', 'Сумма']
-		: ['#', 'Task number: Title', 'Hours', 'h.', 'Hourly rate', 'Amount'];
+		? ['№', 'Номер задачи: Название']
+		: ['#', 'Task number: Title'];
+
+	if (showHours) {
+		headers.push(isRu ? 'Количество часов' : 'Hours', unitLabel);
+	}
+
+	if (showCost) {
+		headers.push(isRu ? 'Стоимость часа' : 'Hourly rate', isRu ? 'Сумма' : 'Amount');
+	}
+
 	const safeHourlyRate = Number.isFinite(hourlyRate) ? hourlyRate : 0;
 	const lines = rows.map((row, index) => {
 		const taskNumber = sanitizeStatisticsWordCell(row.taskNumber || '') || taskFallback;
@@ -147,14 +172,23 @@ export function buildStatisticsWordSection(
 		const hours = Number.isFinite(row.hours) ? row.hours : 0;
 		const amount = hours * safeHourlyRate;
 
-		return [
+		const columns = [
 			String(index + 1),
 			`${taskNumber}: ${title}`,
-			formatStatisticsWordNumber(hours, locale),
-			unitLabel,
-			formatStatisticsWordNumber(safeHourlyRate, locale),
-			formatStatisticsWordNumber(amount, locale),
-		].join('\t');
+		];
+
+		if (showHours) {
+			columns.push(formatStatisticsWordNumber(hours, locale), unitLabel);
+		}
+
+		if (showCost) {
+			columns.push(
+				formatStatisticsWordNumber(safeHourlyRate, locale),
+				formatStatisticsWordNumber(amount, locale),
+			);
+		}
+
+		return columns.join('\t');
 	});
 
 	return [
@@ -248,7 +282,9 @@ export function buildStatisticsMarkdownWithReport(
 	totalHours: number,
 	hourlyRate: number,
 	locale: string,
+	options: StatisticsExportDisplayOptions = {},
 ): string {
+	const { showHours, showCost } = normalizeStatisticsExportDisplayOptions(options);
 	const isRu = locale.toLowerCase().startsWith('ru');
 	const title = isRu ? '# Отчёт по статистике' : '# Statistics Report';
 	const generatedLabel = isRu ? 'Сформировано' : 'Generated';
@@ -263,7 +299,7 @@ export function buildStatisticsMarkdownWithReport(
 	const amountLabel = isRu ? 'Сумма' : 'Amount';
 	const emptyValue = isRu ? '—' : '-';
 	const totalAmount = rows.reduce((sum, row) => sum + ((Number.isFinite(row.hours) ? row.hours : 0) * (Number.isFinite(hourlyRate) ? hourlyRate : 0)), 0);
-	const wordSection = buildStatisticsWordSection(rows, hourlyRate, locale);
+	const wordSection = buildStatisticsWordSection(rows, hourlyRate, locale, { showHours, showCost });
 	const formattedDate = new Date().toLocaleString(isRu ? 'ru-RU' : 'en-US', {
 		year: 'numeric',
 		month: '2-digit',
@@ -271,6 +307,16 @@ export function buildStatisticsMarkdownWithReport(
 		hour: '2-digit',
 		minute: '2-digit',
 	});
+	const summaryLines = [`- ${generatedLabel}: ${formattedDate}`];
+
+	if (showHours) {
+		summaryLines.push(`- ${totalLabel}: ${formatStatisticsExportNumber(totalHours, locale)}`);
+	}
+
+	if (showCost) {
+		summaryLines.push(`- ${hourlyRateLabel}: ${formatStatisticsExportNumber(hourlyRate, locale)}`);
+		summaryLines.push(`- ${totalAmountLabel}: ${formatStatisticsExportNumber(totalAmount, locale)}`);
+	}
 
 	const blocks = rows.map((row) => {
 		const taskNumber = (row.taskNumber || '').trim() || emptyValue;
@@ -279,24 +325,29 @@ export function buildStatisticsMarkdownWithReport(
 		const statusPercent = getStatisticsStatusPercent(row.status);
 		const hours = formatStatisticsExportNumber(row.hours, locale);
 		const amount = formatStatisticsExportNumber(row.hours * hourlyRate, locale);
-
-		return [
+		const lines = [
 			`${taskNumberLabel}: ${taskNumber}`,
 			`${nameLabel}: ${taskTitle}`,
-			`${hoursLabel}: ${hours}`,
-			`${amountLabel}: ${amount}`,
-			`${summaryLabel}: ${reportSummary}`,
-			`${statusLabel}: ${statusPercent}%`,
-		].join('\n');
+		];
+
+		if (showHours) {
+			lines.push(`${hoursLabel}: ${hours}`);
+		}
+
+		if (showCost) {
+			lines.push(`${amountLabel}: ${amount}`);
+		}
+
+		lines.push(`${summaryLabel}: ${reportSummary}`);
+		lines.push(`${statusLabel}: ${statusPercent}%`);
+
+		return lines.join('\n');
 	});
 
 	return [
 		title,
 		'',
-		`- ${generatedLabel}: ${formattedDate}`,
-		`- ${totalLabel}: ${formatStatisticsExportNumber(totalHours, locale)}`,
-		`- ${hourlyRateLabel}: ${formatStatisticsExportNumber(hourlyRate, locale)}`,
-		`- ${totalAmountLabel}: ${formatStatisticsExportNumber(totalAmount, locale)}`,
+		...summaryLines,
 		'',
 		blocks.join('\n\n'),
 		'',

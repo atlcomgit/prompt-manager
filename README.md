@@ -87,8 +87,13 @@ This README is intentionally modular. The extension is still evolving, and the p
 ### Track delivery, not just prompt writing
 
 - Move prompts through a full lifecycle in the tracker panel.
+- Change a prompt status directly from the sidebar item menu, including the More button and the context menu.
+- Review the Process tab in workflow order with notes first, then the plan, and the report after that.
+- New prompts open on the Main tab, while the Process tab keeps a dedicated launch state for chat binding above the footer.
+- Open plan and report content through consistent inline Open actions across the prompt editor.
 - Track writing time, implementation time, overall time on task, and untracked corrections.
 - Open statistics and export delivery-friendly summaries in HTML or Markdown.
+- Auto-fill report hours from working days in the selected period, persist the hourly rate per workspace, and omit hour or cost sections when those values are empty or zero.
 - Keep reports inside the prompt workflow instead of treating them as a separate afterthought.
 
 ### Build project memory from real repository history

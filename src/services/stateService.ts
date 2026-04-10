@@ -28,6 +28,7 @@ const GLOBAL_AGENT_CONTEXT_KEY = 'promptManager.globalAgentContext';
 const STARTUP_EDITOR_OPEN_KEY = 'promptManager.startup.editorOpen';
 const STARTUP_EDITOR_PROMPT_ID_KEY = 'promptManager.startup.editorPromptId';
 const PROMPT_EDITOR_VIEW_STATE_KEY = 'promptManager.editorPromptViewState';
+const STATISTICS_UI_STATE_KEY = 'promptManager.statisticsUiState';
 
 export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
@@ -812,6 +813,19 @@ export class StateService {
 			StateService.GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY,
 			Object.keys(nextBranchesByProject).length > 0 ? nextBranchesByProject : undefined,
 		);
+	}
+
+	getStatisticsUiState(): { hourlyRateInput: string } {
+		const saved = this.context.workspaceState.get<Record<string, unknown>>(STATISTICS_UI_STATE_KEY, {});
+		return {
+			hourlyRateInput: typeof saved?.hourlyRateInput === 'string' ? saved.hourlyRateInput : '',
+		};
+	}
+
+	async saveStatisticsUiState(state: { hourlyRateInput: string }): Promise<void> {
+		await this.context.workspaceState.update(STATISTICS_UI_STATE_KEY, {
+			hourlyRateInput: typeof state.hourlyRateInput === 'string' ? state.hourlyRateInput : '',
+		});
 	}
 
 	/** Generic get */

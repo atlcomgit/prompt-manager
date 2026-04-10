@@ -890,7 +890,7 @@ export const RichTextEditor: React.FC<Props> = ({
               onClick={onOpen}
               title={openTitle || openLabel || 'Открыть'}
             >
-              {`↗ ${openLabel || 'Открыть'}`}
+              {`📝 ${openLabel || 'Открыть'}`}
             </button>
           )}
           {onSecondaryAction && secondaryActionLabel && (

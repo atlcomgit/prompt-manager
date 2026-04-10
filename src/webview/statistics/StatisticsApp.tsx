@@ -8,6 +8,7 @@ import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
 import { DateRangeCalendar } from './DateRangeCalendar';
 import type { PromptStatistics, PromptStatus } from '../../types/prompt';
+import { calculateStatisticsExportTargetHours } from '../../utils/statisticsExport.js';
 import {
   buildStatisticsExportHtmlPreview,
   buildStatisticsExportMarkdownDocument,
@@ -17,6 +18,7 @@ import {
 const vscode = getVsCodeApi();
 const DEFAULT_EXPORT_HOURS = 165;
 const DEFAULT_EXPORT_HOURLY_RATE = 1743;
+const STATISTICS_HOURLY_RATE_WEBVIEW_STATE_KEY = 'pm.statistics.hourlyRateInput';
 
 /** Format milliseconds as human-readable duration */
 function formatDuration(ms: number): string {
@@ -44,15 +46,30 @@ type ReportColumn = 'taskNumber' | 'title' | 'status' | 'timeWriting' | 'timeImp
 
 type ExportFormat = 'html' | 'md';
 
-function parseExportHours(value: string): number {
-  const parsed = Number.parseInt(value.trim(), 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_EXPORT_HOURS;
+function readInitialHourlyRateInput(): string {
+  const state = (vscode.getState() || {}) as Record<string, unknown>;
+  const savedValue = state[STATISTICS_HOURLY_RATE_WEBVIEW_STATE_KEY];
+  return typeof savedValue === 'string' ? savedValue : String(DEFAULT_EXPORT_HOURLY_RATE);
 }
 
-function parseExportHourlyRate(value: string): number {
+function parseOptionalExportHours(value: string): number | null {
+  const normalized = value.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(normalized, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function parseOptionalExportHourlyRate(value: string): number | null {
   const normalized = value.trim().replace(',', '.');
+  if (!normalized) {
+    return null;
+  }
+
   const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_EXPORT_HOURLY_RATE;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function buildScaledExportRows(
@@ -141,7 +158,8 @@ export const StatisticsApp: React.FC = () => {
   const [minFiveMin, setMinFiveMin] = useState(false);
   const [includeReportInExport, setIncludeReportInExport] = useState(false);
   const [exportHoursInput, setExportHoursInput] = useState<string>(String(DEFAULT_EXPORT_HOURS));
-  const [hourlyRateInput, setHourlyRateInput] = useState<string>(String(DEFAULT_EXPORT_HOURLY_RATE));
+  const [hourlyRateInput, setHourlyRateInput] = useState<string>(() => readInitialHourlyRateInput());
+  const [statisticsUiHydrated, setStatisticsUiHydrated] = useState(false);
 
   // --- Table sorting (multi-column) ---
   const [sortCriteria, setSortCriteria] = useState<SortCriterion[]>([]);
@@ -163,10 +181,58 @@ export const StatisticsApp: React.FC = () => {
     loadStatistics();
   }, [loadStatistics]);
 
+  useEffect(() => {
+    vscode.postMessage({ type: 'getStatisticsUiState' });
+  }, []);
+
+  useEffect(() => {
+    if (!dateFrom && !dateTo) {
+      const fallbackHours = String(DEFAULT_EXPORT_HOURS);
+      setExportHoursInput((prev) => prev === fallbackHours ? prev : fallbackHours);
+      return;
+    }
+
+    if (!dateFrom || !dateTo) {
+      return;
+    }
+
+    const nextHours = String(calculateStatisticsExportTargetHours({
+      dateFrom,
+      dateTo,
+      fallbackHours: DEFAULT_EXPORT_HOURS,
+    }));
+    setExportHoursInput((prev) => prev === nextHours ? prev : nextHours);
+  }, [dateFrom, dateTo]);
+
+  useEffect(() => {
+    const currentState = (vscode.getState() || {}) as Record<string, unknown>;
+    if (currentState[STATISTICS_HOURLY_RATE_WEBVIEW_STATE_KEY] === hourlyRateInput) {
+      return;
+    }
+
+    vscode.setState({
+      ...currentState,
+      [STATISTICS_HOURLY_RATE_WEBVIEW_STATE_KEY]: hourlyRateInput,
+    });
+  }, [hourlyRateInput]);
+
+  useEffect(() => {
+    if (!statisticsUiHydrated) {
+      return;
+    }
+
+    vscode.postMessage({ type: 'saveStatisticsUiState', hourlyRateInput });
+  }, [hourlyRateInput, statisticsUiHydrated]);
+
   /** Handle messages from extension */
   const handleMessage = useCallback((msg: any) => {
     if (msg.type === 'statistics') {
       setStats(msg.data);
+    }
+
+    if (msg.type === 'statisticsUiState') {
+      setHourlyRateInput(typeof msg.hourlyRateInput === 'string' ? msg.hourlyRateInput : String(DEFAULT_EXPORT_HOURLY_RATE));
+      setStatisticsUiHydrated(true);
     }
   }, []);
 
@@ -265,8 +331,13 @@ export const StatisticsApp: React.FC = () => {
     });
   }, [stats?.reportRows, sortCriteria]);
 
-  const exportTargetHours = useMemo(() => parseExportHours(exportHoursInput), [exportHoursInput]);
-  const exportHourlyRate = useMemo(() => parseExportHourlyRate(hourlyRateInput), [hourlyRateInput]);
+  const parsedExportHours = useMemo(() => parseOptionalExportHours(exportHoursInput), [exportHoursInput]);
+  const showHours = parsedExportHours !== null && parsedExportHours > 0;
+  const exportTargetHours = showHours && parsedExportHours !== null ? parsedExportHours : 0;
+  const parsedExportHourlyRate = useMemo(() => parseOptionalExportHourlyRate(hourlyRateInput), [hourlyRateInput]);
+  const showCost = showHours && parsedExportHourlyRate !== null && parsedExportHourlyRate > 0;
+  const exportHourlyRate = showCost && parsedExportHourlyRate !== null ? parsedExportHourlyRate : 0;
+  const exportDisplayOptions = useMemo(() => ({ showHours, showCost }), [showCost, showHours]);
 
   const exportRows = useMemo(
     () => buildScaledExportRows(sortedReportRows, exportTargetHours),
@@ -289,8 +360,9 @@ export const StatisticsApp: React.FC = () => {
       uiLocale,
       includeReportInExport,
       exportHourlyRate,
+      exportDisplayOptions,
     ),
-    [exportHourlyRate, uiLocale, exportRows, exportRowsTotal, includeReportInExport],
+    [exportDisplayOptions, exportHourlyRate, uiLocale, exportRows, exportRowsTotal, includeReportInExport],
   );
   const exportMarkdownPreview = useMemo(
     () => buildStatisticsExportMarkdownDocument(
@@ -299,8 +371,9 @@ export const StatisticsApp: React.FC = () => {
       uiLocale,
       includeReportInExport,
       exportHourlyRate,
+      exportDisplayOptions,
     ),
-    [exportHourlyRate, uiLocale, exportRows, exportRowsTotal, includeReportInExport],
+    [exportDisplayOptions, exportHourlyRate, uiLocale, exportRows, exportRowsTotal, includeReportInExport],
   );
 
   const handleExport = useCallback((format: ExportFormat) => {
@@ -311,8 +384,10 @@ export const StatisticsApp: React.FC = () => {
       rows: exportRows,
       hourlyRate: exportHourlyRate,
       includeReport: includeReportInExport,
+      showHours,
+      showCost,
     });
-  }, [exportHourlyRate, exportRows, includeReportInExport]);
+  }, [exportHourlyRate, exportRows, includeReportInExport, showCost, showHours]);
 
   /** Status labels map */
   const statusLabels: Record<string, string> = {
@@ -773,11 +848,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   documentPreviewHtmlCanvas: {
     minWidth: '840px',
+    transform: 'scale(0.6667)',
+    transformOrigin: 'top left',
+    width: '150%',
   },
   documentPreviewSource: {
     margin: 0,
     padding: '22px 26px',
-    background: 'var(--vscode-editor-background)',
+    background: 'transparent',
     color: 'var(--vscode-editor-foreground)',
     fontFamily: 'var(--vscode-editor-font-family, monospace)',
     fontSize: '12px',

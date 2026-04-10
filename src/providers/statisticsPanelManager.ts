@@ -5,10 +5,12 @@
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import type { StorageService } from '../services/storageService.js';
+import type { StateService } from '../services/stateService.js';
 import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from '../types/messages.js';
 import {
 	buildStatisticsExportHtmlDocument,
 	buildStatisticsExportMarkdownDocument,
+	type StatisticsExportDisplayOptions,
 	type StatisticsExportDocumentRow,
 } from '../utils/statisticsDocumentTemplate.js';
 
@@ -59,6 +61,7 @@ export class StatisticsPanelManager {
 	constructor(
 		private readonly extensionUri: vscode.Uri,
 		private readonly storageService: StorageService,
+		private readonly stateService: StateService,
 	) { }
 
 	/** Open or focus the statistics panel */
@@ -104,12 +107,27 @@ export class StatisticsPanelManager {
 				const response: ExtensionToWebviewMessage = { type: 'statistics', data: stats };
 				panel.webview.postMessage(response);
 			}
+			if (msg.type === 'getStatisticsUiState') {
+				const state = this.stateService.getStatisticsUiState();
+				const response: ExtensionToWebviewMessage = {
+					type: 'statisticsUiState',
+					hourlyRateInput: state.hourlyRateInput,
+				};
+				panel.webview.postMessage(response);
+			}
+			if (msg.type === 'saveStatisticsUiState') {
+				await this.stateService.saveStatisticsUiState({ hourlyRateInput: msg.hourlyRateInput });
+			}
 			if (msg.type === 'exportReport') {
 				const rows = normalizeExportRows(msg.rows);
 				const total = rows.reduce((sum, row) => sum + row.hours, 0);
+				const displayOptions: StatisticsExportDisplayOptions = {
+					showHours: typeof msg.showHours === 'boolean' ? msg.showHours : undefined,
+					showCost: typeof msg.showCost === 'boolean' ? msg.showCost : undefined,
+				};
 				const content = msg.format === 'md'
-					? buildStatisticsExportMarkdownDocument(rows, total, vscode.env.language, Boolean(msg.includeReport), msg.hourlyRate)
-					: buildStatisticsExportHtmlDocument(rows, total, vscode.env.language, Boolean(msg.includeReport), msg.hourlyRate);
+					? buildStatisticsExportMarkdownDocument(rows, total, vscode.env.language, Boolean(msg.includeReport), msg.hourlyRate, displayOptions)
+					: buildStatisticsExportHtmlDocument(rows, total, vscode.env.language, Boolean(msg.includeReport), msg.hourlyRate, displayOptions);
 				try {
 					await openExportDocument(content, msg.format === 'md' ? 'markdown' : 'html');
 				} catch (error) {

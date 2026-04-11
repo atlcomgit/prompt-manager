@@ -65,6 +65,24 @@ function countGitOverlayActionableProjectChanges<T extends GitOverlayActionableP
 		+ project.changeGroups.untracked.length;
 }
 
+/** Собирает scope snapshot-а: сначала выбранные проекты, затем остальные workspace-проекты. */
+export function resolveGitOverlaySnapshotProjectScope(
+	selectedProjects: string[],
+	workspaceProjects: string[],
+): string[] {
+	const normalizedSelectedProjects = selectedProjects
+		.map(project => project.trim())
+		.filter(Boolean);
+	const normalizedWorkspaceProjects = workspaceProjects
+		.map(project => project.trim())
+		.filter(Boolean);
+
+	return Array.from(new Set([
+		...normalizedSelectedProjects,
+		...normalizedWorkspaceProjects,
+	]));
+}
+
 function normalizeInteractiveTerminalCommand(command: string): string {
 	return command.replace(/\t/g, '    ');
 }

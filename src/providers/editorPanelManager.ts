@@ -26,10 +26,14 @@ import type { StateService } from '../services/stateService.js';
 import { TimeTrackingService } from '../services/timeTrackingService.js';
 import { decideFileReportSync, isLatestPersistedReport } from '../utils/reportSync.js';
 import { buildChatContextFiles, getChatMemoryDirectoryPath } from '../utils/chatContextFiles.js';
-import { buildGitOverlayReviewCliSetupCommand } from '../utils/gitOverlay.js';
+import {
+	buildGitOverlayReviewCliSetupCommand,
+	resolveGitOverlaySnapshotProjectScope,
+} from '../utils/gitOverlay.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { filterPromptHookIdsForPhase } from '../utils/promptHookPhase.js';
+import { resolvePromptEditorPanelSwitchStrategy } from '../utils/editorPanelSwitch.js';
 import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 import { fetchRemoteText } from '../utils/remoteText.js';
@@ -73,7 +77,8 @@ type GitOverlayRefreshMode = 'local' | 'fetch' | 'sync';
 interface GitOverlaySession {
 	active: boolean;
 	promptBranch: string;
-	projects: string[];
+	selectedProjects: string[];
+	snapshotProjects: string[];
 	postMessage: (message: ExtensionToWebviewMessage) => void;
 	refreshTimer: NodeJS.Timeout | null;
 	refreshInFlight: boolean;
@@ -1912,7 +1917,7 @@ export class EditorPanelManager {
 
 	private doesGitOverlayPathMatchSessionProjects(session: GitOverlaySession, targetPath: string): boolean {
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
-		for (const projectName of this.resolveGitOverlaySessionProjectNames(session.projects)) {
+		for (const projectName of this.resolveGitOverlaySessionProjectNames(session.snapshotProjects)) {
 			const projectRootPath = projectPaths.get(projectName);
 			if (!projectRootPath) {
 				continue;
@@ -1929,7 +1934,7 @@ export class EditorPanelManager {
 	private shouldIgnoreGitOverlaySessionFileChange(session: GitOverlaySession, changedPath: string): boolean {
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
 		const excludedPaths = this.getGitOverlayExcludedPathsSetting();
-		for (const projectName of this.resolveGitOverlaySessionProjectNames(session.projects)) {
+		for (const projectName of this.resolveGitOverlaySessionProjectNames(session.snapshotProjects)) {
 			const projectRootPath = projectPaths.get(projectName);
 			if (!projectRootPath) {
 				continue;
@@ -2039,6 +2044,14 @@ export class EditorPanelManager {
 		return this.workspaceService.getWorkspaceFolders();
 	}
 
+	/** Для snapshot-а Git Flow всегда добавляем workspace-проекты сверх выбранных. */
+	private resolveGitOverlaySnapshotProjects(requestedProjects: string[], currentPrompt: Prompt): string[] {
+		return resolveGitOverlaySnapshotProjectScope(
+			this.resolveGitOverlayProjects(requestedProjects, currentPrompt),
+			this.workspaceService.getWorkspaceFolders(),
+		);
+	}
+
 	private resolveGitOverlayPromptBranch(requestedBranch: string | undefined, currentPrompt: Prompt): string {
 		return (requestedBranch || currentPrompt.branch || '').trim();
 	}
@@ -2050,7 +2063,7 @@ export class EditorPanelManager {
 		projects: string[],
 	): Promise<void> {
 		const paths = this.workspaceService.getWorkspaceFolderPaths();
-		const snapshotProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
+		const snapshotProjects = this.resolveGitOverlaySnapshotProjects(projects, currentPrompt);
 		const snapshot = await this.gitService.getGitOverlaySnapshot(
 			paths,
 			snapshotProjects,
@@ -2143,7 +2156,7 @@ export class EditorPanelManager {
 					session.postMessage,
 					currentPrompt,
 					session.promptBranch,
-					session.projects,
+					session.selectedProjects,
 					'local',
 					true,
 					busyReason,
@@ -2293,11 +2306,13 @@ export class EditorPanelManager {
 		open: boolean,
 	): Promise<void> {
 		const normalizedPromptBranch = this.resolveGitOverlayPromptBranch(promptBranch, currentPrompt);
-		const normalizedProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
+		const normalizedSelectedProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
+		const normalizedSnapshotProjects = this.resolveGitOverlaySnapshotProjects(projects, currentPrompt);
 		const session = this.gitOverlaySessions.get(panelKey) || {
 			active: false,
 			promptBranch: normalizedPromptBranch,
-			projects: normalizedProjects,
+			selectedProjects: normalizedSelectedProjects,
+			snapshotProjects: normalizedSnapshotProjects,
 			postMessage,
 			refreshTimer: null,
 			refreshInFlight: false,
@@ -2308,7 +2323,8 @@ export class EditorPanelManager {
 
 		session.active = open;
 		session.promptBranch = normalizedPromptBranch;
-		session.projects = normalizedProjects;
+		session.selectedProjects = normalizedSelectedProjects;
+		session.snapshotProjects = normalizedSnapshotProjects;
 		session.postMessage = postMessage;
 		this.gitOverlaySessions.set(panelKey, session);
 
@@ -2354,13 +2370,15 @@ export class EditorPanelManager {
 		busyReason: Extract<ExtensionToWebviewMessage, { type: 'gitOverlayBusy' }>['reason'] = null,
 	): Promise<void> {
 		const normalizedPromptBranch = this.resolveGitOverlayPromptBranch(promptBranch, currentPrompt);
-		const normalizedProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
+		const normalizedSelectedProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
+		const normalizedSnapshotProjects = this.resolveGitOverlaySnapshotProjects(projects, currentPrompt);
 		const session = this.gitOverlaySessions.get(panelKey);
 
 		if (session) {
 			session.postMessage = postMessage;
 			session.promptBranch = normalizedPromptBranch;
-			session.projects = normalizedProjects;
+			session.selectedProjects = normalizedSelectedProjects;
+			session.snapshotProjects = normalizedSnapshotProjects;
 			if (session.refreshInFlight) {
 				session.refreshQueued = true;
 				session.queuedMode = this.resolveGitOverlayQueuedMode(session.queuedMode, mode);
@@ -2377,7 +2395,7 @@ export class EditorPanelManager {
 		try {
 			const paths = this.workspaceService.getWorkspaceFolderPaths();
 			if (mode === 'fetch') {
-				const result = await this.gitService.fetchProjects(paths, normalizedProjects);
+				const result = await this.gitService.fetchProjects(paths, normalizedSelectedProjects);
 				if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
 					postMessage({
 						type: result.errors.length > 0 ? 'error' : 'info',
@@ -2385,7 +2403,7 @@ export class EditorPanelManager {
 					});
 				}
 			} else if (mode === 'sync') {
-				const result = await this.gitService.syncProjects(paths, normalizedProjects);
+				const result = await this.gitService.syncProjects(paths, normalizedSelectedProjects);
 				if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
 					postMessage({
 						type: result.errors.length > 0 ? 'error' : 'info',
@@ -2399,7 +2417,7 @@ export class EditorPanelManager {
 				return;
 			}
 
-			await this.postGitOverlaySnapshot(postMessage, currentPrompt, normalizedPromptBranch, normalizedProjects);
+			await this.postGitOverlaySnapshot(postMessage, currentPrompt, normalizedPromptBranch, normalizedSelectedProjects);
 		} catch (error) {
 			if (announceBusy) {
 				postMessage({ type: 'gitOverlayBusy', action: null });
@@ -2428,7 +2446,7 @@ export class EditorPanelManager {
 					currentSession.postMessage,
 					queuedPrompt,
 					currentSession.promptBranch,
-					currentSession.projects,
+					currentSession.selectedProjects,
 					queuedMode,
 					queuedMode === 'local',
 					queuedBusyReason,
@@ -2657,7 +2675,7 @@ export class EditorPanelManager {
 				session.postMessage,
 				latestPrompt,
 				session.promptBranch,
-				session.projects,
+				session.selectedProjects,
 			).then(() => {
 				this.logReportDebug('gitOverlay.reviewCliSetup.terminalClosed.snapshotPosted', {
 					project: normalizedProject,
@@ -4062,6 +4080,35 @@ export class EditorPanelManager {
 		this.pendingPanelMessages.delete(panelKey);
 	}
 
+	private async switchPromptInExistingPanel(
+		panelKey: string,
+		panel: vscode.WebviewPanel,
+		prompt: Prompt,
+		options: { dirty: boolean; isRu: boolean },
+	): Promise<void> {
+		try {
+			await panel.webview.postMessage({ type: 'promptLoading' } satisfies ExtensionToWebviewMessage);
+		} catch {
+			// If the webview is still booting, the ready cycle will hydrate the latest prompt.
+		}
+
+		this.updateEditorWebviewOptions(panel, prompt.contextFiles);
+		this.updatePromptPanelTitle(panel, prompt, options);
+
+		try {
+			await panel.webview.postMessage(this.buildPromptMessage(prompt, {
+				reason: 'open',
+				editorViewState: this.getPromptEditorViewState(panelKey, prompt),
+			}));
+		} catch {
+			// Ignore boot-time postMessage failures; the eventual ready event replays current state.
+		}
+
+		this.flushPendingPanelMessages(panelKey, panel, prompt);
+		panel.reveal(vscode.ViewColumn.One);
+		this.syncStartupEditorRestoreState();
+	}
+
 	async openPromptAndStartChat(promptId: string): Promise<void> {
 		const normalizedPromptId = (promptId || '').trim();
 		if (!normalizedPromptId) {
@@ -4094,7 +4141,12 @@ export class EditorPanelManager {
 			? singletonPanel
 			: undefined;
 		const singletonPrompt = reusableSingletonPanel ? this.panelPromptRefs.get(panelKey) : undefined;
-		if (!isNew && reusableSingletonPanel && singletonPrompt?.id === promptId) {
+		const panelSwitchStrategy = resolvePromptEditorPanelSwitchStrategy({
+			hasReusableSingletonPanel: Boolean(reusableSingletonPanel),
+			currentPromptId: singletonPrompt?.id,
+			nextPromptId: promptId,
+		});
+		if (panelSwitchStrategy === 'noop' && reusableSingletonPanel) {
 			try {
 				await reusableSingletonPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
 			} catch {
@@ -4216,28 +4268,12 @@ export class EditorPanelManager {
 			this.panelDirtyFlags.set(panelKey, v);
 		};
 
-		if (reusableSingletonPanel) {
-			try {
-				await reusableSingletonPanel.webview.postMessage({ type: 'promptLoading' } satisfies ExtensionToWebviewMessage);
-				await new Promise(resolve => setTimeout(resolve, 40));
-			} catch {
-				// panel may already be reloading; continue with fresh html
-			}
-			this.updateEditorWebviewOptions(reusableSingletonPanel, prompt.contextFiles);
+		if (panelSwitchStrategy === 'reuse' && reusableSingletonPanel) {
 			this.panelDirtySetters.set(panelKey, setPanelDirty);
-			const bootId = this.createPanelBootId();
-			this.panelBootIds.set(panelKey, bootId);
-			this.updatePromptPanelTitle(reusableSingletonPanel, prompt, { dirty: restoredUnsaved, isRu });
-			reusableSingletonPanel.webview.html = getWebviewHtml(
-				reusableSingletonPanel.webview,
-				this.extensionUri,
-				'dist/webview/editor.js',
-				`Prompt: ${title}`,
-				vscode.env.language,
-				bootId,
-			);
-			reusableSingletonPanel.reveal(vscode.ViewColumn.One);
-			this.syncStartupEditorRestoreState();
+			await this.switchPromptInExistingPanel(panelKey, reusableSingletonPanel, prompt, {
+				dirty: restoredUnsaved,
+				isRu,
+			});
 
 			for (const existingPanel of panelsToDispose) {
 				this.silentClosePanels.add(existingPanel);

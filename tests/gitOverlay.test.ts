@@ -21,6 +21,7 @@ import {
 	resolveGitOverlayTrackedBranchOptions,
 	resolveExistingGitOverlayTrackedBranches,
 	resolveGitOverlayBranchNames,
+	resolveGitOverlaySnapshotProjectScope,
 } from '../src/utils/gitOverlay.js';
 import {
 	areGitOverlayProjectsOnTrackedOrPrompt,
@@ -3362,6 +3363,16 @@ test('GitOverlay shows changed projects outside selected prompt projects in a se
 	assert.match(markup, /docs-dirty/);
 	assert.match(markup, /editor\.gitOverlayAddProject/);
 	assert.match(markup, /editor\.gitOverlayShowChanges/);
+});
+
+test('resolveGitOverlaySnapshotProjectScope keeps selected projects first and appends workspace peers', () => {
+	assert.deepEqual(
+		resolveGitOverlaySnapshotProjectScope(
+			['selected-clean', 'selected-clean', 'docs-dirty'],
+			['docs-dirty', 'api', 'selected-clean', 'worker'],
+		),
+		['selected-clean', 'docs-dirty', 'api', 'worker'],
+	);
 });
 
 test('GitOverlay shows exclude action instead of inactive switch for clean selected projects without step 1 work', () => {

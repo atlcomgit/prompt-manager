@@ -83,6 +83,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 
 - View, switch, and create branches in workspace projects.
 - Guard branch actions with dirty-worktree checks.
+- Surface dirty workspace projects in Git Flow step 1 even when they are not yet attached to the prompt.
 - Keep branch references and task metadata near the prompt itself.
 - Use the Git-oriented editor flow to support commits, review preparation, and related prompt execution.
 

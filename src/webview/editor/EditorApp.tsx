@@ -17,7 +17,16 @@ import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
 import type { ClipboardImagePayload } from '../../types/messages';
-import type { EditorPromptTab, EditorPromptViewState, Prompt, PromptContextFileCard, PromptStatus } from '../../types/prompt';
+import type {
+  EditorPromptExpandedSections,
+  EditorPromptManualSectionOverrides,
+  EditorPromptSectionKey,
+  EditorPromptTab,
+  EditorPromptViewState,
+  Prompt,
+  PromptContextFileCard,
+  PromptStatus,
+} from '../../types/prompt';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
 import {
   createDefaultEditorPromptViewState,
@@ -36,6 +45,12 @@ import {
 } from '../../utils/contextFiles.js';
 import { diffPromptConfigSyncFields, PROMPT_CONFIG_SYNC_FIELDS } from '../../utils/promptExternalSync.js';
 import { shouldApplyPromptAiEnrichmentState, shouldApplyPromptSaveResult } from '../../utils/promptSaveFeedback.js';
+import {
+  resolvePromptEditorExpandedSections,
+  resolvePromptChatLaunchTrackingKey,
+  shouldShowPromptChatLaunchBlock,
+  togglePromptEditorSectionExpansion,
+} from '../../utils/promptEditorBehavior.js';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -46,7 +61,6 @@ interface SelectOption {
   description?: string;
 }
 
-type SectionKey = 'basic' | 'workspace' | 'prompt' | 'globalPrompt' | 'report' | 'notes' | 'plan' | 'tech' | 'integrations' | 'agent' | 'files' | 'time';
 type InlineNotice = { kind: 'error' | 'info'; message: string };
 type ChatEntryAction = 'start' | 'open';
 type GitOverlayMode = 'default' | 'start-chat-preflight' | 'open-chat-preflight';
@@ -351,8 +365,11 @@ export const EditorApp: React.FC = () => {
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
   const [isRecalculating, setIsRecalculating] = useState(false);
-  const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>(
+  const [expandedSections, setExpandedSections] = useState<EditorPromptExpandedSections>(
     () => initialEditorViewStateRef.current?.expandedSections || createDefaultEditorPromptViewState().expandedSections,
+  );
+  const [manualSectionOverrides, setManualSectionOverrides] = useState<EditorPromptManualSectionOverrides>(
+    () => initialEditorViewStateRef.current?.manualSectionOverrides || createDefaultEditorPromptViewState().manualSectionOverrides,
   );
   const [activeTab, setActiveTab] = useState<EditorPromptTab>(
     () => initialEditorViewStateRef.current?.activeTab || createDefaultEditorPromptViewState().activeTab,
@@ -383,11 +400,16 @@ export const EditorApp: React.FC = () => {
   const [chatLaunchCompletionHold, setChatLaunchCompletionHold] = useState(false);
   const chatLaunchCompletionTimerRef = useRef<number | null>(null);
   const previousChatEntryAvailabilityRef = useRef(chatEntryState.hasChatEntry);
+  const chatLaunchTrackingKey = resolvePromptChatLaunchTrackingKey(prompt);
+  const previousChatLaunchTrackingKeyRef = useRef(chatLaunchTrackingKey);
   const showChatLaunchCompletionState = prompt.status === 'in-progress'
     && chatEntryState.hasChatEntry
     && chatLaunchCompletionHold;
-  const shouldShowChatLaunchBlock = prompt.status === 'in-progress'
-    && (!chatEntryState.hasChatEntry || showChatLaunchCompletionState);
+  const shouldShowChatLaunchBlock = shouldShowPromptChatLaunchBlock({
+    status: prompt.status,
+    hasChatEntry: chatEntryState.hasChatEntry,
+    chatLaunchCompletionHold: showChatLaunchCompletionState,
+  });
   const chatLaunchPhase: 'opening' | 'binding' | 'ready' = showChatLaunchCompletionState
     ? 'ready'
     : isStartingChat
@@ -873,20 +895,32 @@ export const EditorApp: React.FC = () => {
 
   const hasGlobalContext = globalContext.trim().length > 0;
 
+  const normalizedReportText = useMemo(
+    () => (prompt.report || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(),
+    [prompt.report],
+  );
+
+  const hasReportContent = normalizedReportText.length > 0 || prompt.httpExamples.trim().length > 0;
+
   const reportSummary = useMemo(() => {
     const chunks: string[] = [];
-    const reportText = (prompt.report || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    if (reportText) chunks.push(`Результат: ${toShortText(reportText, 64)}`);
+    if (normalizedReportText) chunks.push(`Результат: ${toShortText(normalizedReportText, 64)}`);
     if (prompt.httpExamples.trim()) chunks.push(`HTTP: ${toShortText(prompt.httpExamples.trim(), 56)}`);
     return chunks;
-  }, [prompt.report, prompt.httpExamples]);
+  }, [normalizedReportText, prompt.httpExamples]);
+
+  const normalizedNotesText = useMemo(
+    () => (prompt.notes || '').replace(/\s+/g, ' ').trim(),
+    [prompt.notes],
+  );
+
+  const hasNotesContent = normalizedNotesText.length > 0;
 
   const notesSummary = useMemo(() => {
     const chunks: string[] = [];
-    const notesText = (prompt.notes || '').replace(/\s+/g, ' ').trim();
-    if (notesText) chunks.push(`Заметки: ${toShortText(notesText, 64)}`);
+    if (normalizedNotesText) chunks.push(`Заметки: ${toShortText(normalizedNotesText, 64)}`);
     return chunks;
-  }, [prompt.notes]);
+  }, [normalizedNotesText]);
 
   const planSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -1238,6 +1272,7 @@ export const EditorApp: React.FC = () => {
             setPrompt(msg.prompt);
             setActiveTab(nextEditorViewState.activeTab);
             setExpandedSections(nextEditorViewState.expandedSections);
+            setManualSectionOverrides(nextEditorViewState.manualSectionOverrides);
             setIsDescriptionExpanded(nextEditorViewState.descriptionExpanded);
             localReportDirtyRef.current = false;
             currentPromptIdRef.current = incomingPromptId;
@@ -2077,6 +2112,7 @@ export const EditorApp: React.FC = () => {
     const nextEditorViewState = normalizeEditorPromptViewState({
       activeTab,
       expandedSections,
+      manualSectionOverrides,
       descriptionExpanded: isDescriptionExpanded,
     });
     const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
@@ -2084,9 +2120,13 @@ export const EditorApp: React.FC = () => {
     if (storage) {
       storage.setItem('pm.editor.viewState', JSON.stringify(nextEditorViewState));
     }
-  }, [activeTab, expandedSections, isDescriptionExpanded, storage]);
+  }, [activeTab, expandedSections, manualSectionOverrides, isDescriptionExpanded, storage]);
 
   useEffect(() => {
+    if (!isLoaded) {
+      return;
+    }
+
     vscode.postMessage({
       type: 'savePromptEditorViewState',
       promptId: promptRef.current.id || undefined,
@@ -2094,10 +2134,11 @@ export const EditorApp: React.FC = () => {
       state: normalizeEditorPromptViewState({
         activeTab,
         expandedSections,
+        manualSectionOverrides,
         descriptionExpanded: isDescriptionExpanded,
       }),
     });
-  }, [activeTab, expandedSections, isDescriptionExpanded]);
+  }, [activeTab, expandedSections, manualSectionOverrides, isDescriptionExpanded, isLoaded]);
 
   useEffect(() => {
     if (!globalContextTextareaRef.current || typeof ResizeObserver === 'undefined') {
@@ -2672,7 +2713,14 @@ export const EditorApp: React.FC = () => {
   const handleStartChat = () => {
     const latestPrompt = promptRef.current;
     const shouldForceRebindChat = latestPrompt.status === 'draft';
-    if (startChatLockRef.current || isStartingChat || !latestPrompt.content || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)) {
+    if (
+      startChatLockRef.current
+      || isStartingChat
+      || isGeneratingTitle
+      || isGeneratingDescription
+      || !latestPrompt.content
+      || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)
+    ) {
       return;
     }
 
@@ -2858,12 +2906,31 @@ export const EditorApp: React.FC = () => {
     setShowBranches(false);
   };
 
-  const toggleSection = (key: SectionKey) => {
-    setExpandedSections(prev => ({ ...prev, [key]: !prev[key] }));
-  };
-
   const openActionLabel = `📝 ${t('editor.open')}`;
   const hasPlanContent = promptPlanState.exists && promptPlanState.content.trim().length > 0;
+  const effectiveExpandedSections = useMemo(
+    () => resolvePromptEditorExpandedSections({
+      expandedSections,
+      manualSectionOverrides,
+      hasNotesContent,
+      hasPlanContent,
+      hasReportContent,
+    }),
+    [expandedSections, manualSectionOverrides, hasNotesContent, hasPlanContent, hasReportContent],
+  );
+
+  const toggleSection = (key: EditorPromptSectionKey) => {
+    const nextSectionState = togglePromptEditorSectionExpansion({
+      key,
+      effectiveExpandedSections,
+      expandedSections,
+      manualSectionOverrides,
+    });
+
+    setExpandedSections(nextSectionState.expandedSections);
+    setManualSectionOverrides(nextSectionState.manualSectionOverrides);
+  };
+
   const chatLaunchSteps: Array<{ key: string; label: string; state: 'done' | 'active' | 'pending' }> = [
     {
       key: 'prepare',
@@ -2886,6 +2953,21 @@ export const EditorApp: React.FC = () => {
     },
   ];
   const completedChatLaunchStepCount = chatLaunchSteps.filter((step) => step.state === 'done').length;
+
+  useLayoutEffect(() => {
+    if (previousChatLaunchTrackingKeyRef.current === chatLaunchTrackingKey) {
+      return;
+    }
+
+    previousChatLaunchTrackingKeyRef.current = chatLaunchTrackingKey;
+    previousChatEntryAvailabilityRef.current = chatEntryState.hasChatEntry;
+    if (chatLaunchCompletionTimerRef.current !== null) {
+      window.clearTimeout(chatLaunchCompletionTimerRef.current);
+      chatLaunchCompletionTimerRef.current = null;
+    }
+
+    setChatLaunchCompletionHold(false);
+  }, [chatEntryState.hasChatEntry, chatLaunchTrackingKey]);
 
   useLayoutEffect(() => {
     const canTrackCompletion = prompt.status === 'in-progress';
@@ -2937,7 +3019,7 @@ export const EditorApp: React.FC = () => {
   }, []);
 
   const renderSection = (
-    key: SectionKey,
+    key: EditorPromptSectionKey,
     title: string,
     summaryItems: string[],
     content: React.ReactNode,
@@ -2945,7 +3027,7 @@ export const EditorApp: React.FC = () => {
   ) => {
     const visibleItems = summaryItems.slice(0, 3);
     const hiddenCount = Math.max(0, summaryItems.length - visibleItems.length);
-    const isExpanded = expandedSections[key];
+    const isExpanded = effectiveExpandedSections[key];
 
     return (
       <section style={styles.sectionCard}>
@@ -3907,6 +3989,8 @@ export const EditorApp: React.FC = () => {
             isChatPanelOpen={isChatPanelOpen}
             isSaving={isSaving}
             isStartingChat={isStartingChat}
+            isGeneratingTitle={isGeneratingTitle}
+            isGeneratingDescription={isGeneratingDescription}
             hasContent={!!prompt.content}
             status={prompt.status}
           />

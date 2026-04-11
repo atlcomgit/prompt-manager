@@ -92,7 +92,12 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Move prompts through a full lifecycle in the tracker panel.
 - Change a prompt status directly from the sidebar item menu, including the More button and the context menu.
 - Review the Process tab in workflow order with notes first, then the plan, and the report after that.
-- New prompts open on the Main tab, while the Process tab keeps a dedicated launch state for chat binding above the footer.
+- New prompts always open on the Main tab with Basic, Time tracking, Workspace, Prompt,
+  and Agent expanded by default, Notes starts collapsed but reopens automatically when it
+  receives content before any manual toggle, Plan and Report do the same while they stay
+  untouched, Start Chat waits for title and description enrichment to finish, and prompt
+  folders stay stable after chat start while the Process tab only shows launch progress until
+  the chat binding is actually unfinished.
 - Open plan and report content through consistent inline Open actions across the prompt editor.
 - Track writing time, implementation time, overall time on task, and untracked corrections.
 - Open statistics and export delivery-friendly summaries in HTML or Markdown.

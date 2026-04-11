@@ -10,10 +10,28 @@ import {
 	resolveEditorPromptViewStateStorageKey,
 } from '../src/types/prompt.js';
 
+test('createDefaultEditorPromptExpandedSections opens the main authoring blocks by default', () => {
+	assert.deepEqual(createDefaultEditorPromptExpandedSections(), {
+		basic: true,
+		workspace: true,
+		prompt: true,
+		globalPrompt: false,
+		report: false,
+		notes: false,
+		plan: false,
+		tech: false,
+		integrations: false,
+		agent: true,
+		files: false,
+		time: true,
+	});
+});
+
 test('createDefaultEditorPromptViewState returns main tab by default', () => {
 	assert.deepEqual(createDefaultEditorPromptViewState(), {
 		activeTab: 'main',
 		expandedSections: createDefaultEditorPromptExpandedSections(),
+		manualSectionOverrides: {},
 		descriptionExpanded: false,
 	});
 });
@@ -22,6 +40,7 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 	assert.deepEqual(normalizeEditorPromptViewState({
 		activeTab: 'process',
 		expandedSections: { basic: false, plan: true },
+		manualSectionOverrides: { report: true, notes: false },
 		descriptionExpanded: true,
 	}), {
 		activeTab: 'process',
@@ -30,6 +49,7 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 			basic: false,
 			plan: true,
 		},
+		manualSectionOverrides: { report: true },
 		descriptionExpanded: true,
 	});
 	assert.deepEqual(
@@ -37,12 +57,14 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 		{
 			activeTab: 'main',
 			expandedSections: createDefaultEditorPromptExpandedSections(),
+			manualSectionOverrides: {},
 			descriptionExpanded: false,
 		},
 	);
 	assert.deepEqual(normalizeEditorPromptViewState(null), {
 		activeTab: 'main',
 		expandedSections: createDefaultEditorPromptExpandedSections(),
+		manualSectionOverrides: {},
 		descriptionExpanded: false,
 	});
 });
@@ -83,6 +105,7 @@ test('moveEditorPromptViewStateEntries migrates transient panel state to promptU
 		'promptUuid:uuid-1': {
 			activeTab: 'process',
 			expandedSections: createDefaultEditorPromptExpandedSections(),
+			manualSectionOverrides: {},
 			descriptionExpanded: false,
 		},
 	});
@@ -107,6 +130,7 @@ test('moveEditorPromptViewStateEntries keeps stable target state and removes dup
 		'promptUuid:uuid-1': {
 			activeTab: 'process',
 			expandedSections: createDefaultEditorPromptExpandedSections(),
+			manualSectionOverrides: {},
 			descriptionExpanded: false,
 		},
 	});

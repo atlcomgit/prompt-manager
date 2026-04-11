@@ -48,6 +48,10 @@ import {
 	shouldApplySavedPromptToPanel,
 	shouldNotifyReservedArchiveRename,
 } from '../utils/promptSaveFeedback.js';
+import {
+	resolvePromptOpenEditorViewState,
+	shouldPreservePromptIdAfterChatStart,
+} from '../utils/promptEditorBehavior.js';
 import type { ExternalPromptConfigChange } from '../services/storageService.js';
 import {
 	dedupeContextFileReferences,
@@ -118,6 +122,8 @@ export class EditorPanelManager {
 	}>();
 	private panelBootIds = new Map<string, string>();
 	private pendingPanelMessages = new Map<string, ExtensionToWebviewMessage[]>();
+	private panelForceMainTabOnNextOpen = new Set<string>();
+	private promptIdLocksAfterChatStart = new Set<string>();
 	private pendingReportPersistByPromptId = new Map<string, Promise<Prompt | null>>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
 	private gitOverlaySessions = new Map<string, GitOverlaySession>();
@@ -240,6 +246,26 @@ export class EditorPanelManager {
 
 	private getPromptEditorViewState(panelKey: string, prompt?: Partial<Prompt> | null): EditorPromptViewState {
 		return this.stateService.getPromptEditorViewState(this.getPromptEditorViewStateSource(panelKey, prompt));
+	}
+
+	/** Force the next prompt-open payload for a panel to land on the main tab. */
+	private markPanelForceMainTabOnNextOpen(panelKey: string, shouldForce: boolean): void {
+		if (shouldForce) {
+			this.panelForceMainTabOnNextOpen.add(panelKey);
+			return;
+		}
+
+		this.panelForceMainTabOnNextOpen.delete(panelKey);
+	}
+
+	/** Consume one-shot main-tab forcing for a panel open payload. */
+	private consumePanelForceMainTabOnNextOpen(panelKey: string): boolean {
+		if (!this.panelForceMainTabOnNextOpen.has(panelKey)) {
+			return false;
+		}
+
+		this.panelForceMainTabOnNextOpen.delete(panelKey);
+		return true;
 	}
 
 	private postPromptPlanSnapshot(panelKey: string, promptId: string | undefined, exists: boolean, content: string): void {
@@ -2851,6 +2877,15 @@ export class EditorPanelManager {
 	private async ensurePromptIdMatchesTitle(promptToSave: Prompt, previousId?: string): Promise<string | undefined> {
 		const normalizedPreviousId = (previousId || promptToSave.id || '').trim() || undefined;
 		const requestedIdBase = this.resolvePromptIdBase(promptToSave);
+		const stablePromptId = (normalizedPreviousId || promptToSave.id || '').trim();
+		if (shouldPreservePromptIdAfterChatStart({
+			stableId: stablePromptId,
+			chatSessionIds: promptToSave.chatSessionIds,
+			hasRuntimeChatStartLock: this.hasRuntimePromptIdLock(promptToSave),
+		})) {
+			promptToSave.id = stablePromptId;
+			return undefined;
+		}
 
 		if (!requestedIdBase) {
 			if (normalizedPreviousId) {
@@ -3974,6 +4009,38 @@ export class EditorPanelManager {
 		};
 	}
 
+	/** Detect an active runtime lock that freezes prompt id after chat start. */
+	private hasRuntimePromptIdLock(prompt?: Pick<Prompt, 'id' | 'promptUuid'> | null): boolean {
+		const key = this.resolvePromptAiEnrichmentKey(prompt?.id, prompt?.promptUuid);
+		return Boolean(key && this.promptIdLocksAfterChatStart.has(key));
+	}
+
+	/** Freeze prompt id for the current prompt once chat start should own the folder path. */
+	private lockPromptIdAfterChatStart(prompt?: Pick<Prompt, 'id' | 'promptUuid'> | null): void {
+		const key = this.resolvePromptAiEnrichmentKey(prompt?.id, prompt?.promptUuid);
+		if (!key) {
+			return;
+		}
+
+		this.promptIdLocksAfterChatStart.add(key);
+	}
+
+	/** Drop the runtime freeze only when chat start did not end up with a bound session. */
+	private unlockPromptIdAfterChatStart(
+		prompt?: Pick<Prompt, 'id' | 'promptUuid' | 'chatSessionIds'> | null,
+	): void {
+		if ((prompt?.chatSessionIds?.length || 0) > 0) {
+			return;
+		}
+
+		const key = this.resolvePromptAiEnrichmentKey(prompt?.id, prompt?.promptUuid);
+		if (!key) {
+			return;
+		}
+
+		this.promptIdLocksAfterChatStart.delete(key);
+	}
+
 	private setPendingPromptAiEnrichmentState(
 		promptId?: string | null,
 		promptUuid?: string | null,
@@ -4084,7 +4151,7 @@ export class EditorPanelManager {
 		panelKey: string,
 		panel: vscode.WebviewPanel,
 		prompt: Prompt,
-		options: { dirty: boolean; isRu: boolean },
+		options: { dirty: boolean; isRu: boolean; forceMainTab?: boolean },
 	): Promise<void> {
 		try {
 			await panel.webview.postMessage({ type: 'promptLoading' } satisfies ExtensionToWebviewMessage);
@@ -4098,7 +4165,10 @@ export class EditorPanelManager {
 		try {
 			await panel.webview.postMessage(this.buildPromptMessage(prompt, {
 				reason: 'open',
-				editorViewState: this.getPromptEditorViewState(panelKey, prompt),
+				editorViewState: resolvePromptOpenEditorViewState(
+					this.getPromptEditorViewState(panelKey, prompt),
+					{ forceMainTab: options.forceMainTab === true },
+				),
 			}));
 		} catch {
 			// Ignore boot-time postMessage failures; the eventual ready event replays current state.
@@ -4240,6 +4310,8 @@ export class EditorPanelManager {
 			}
 		}
 
+		this.markPanelForceMainTabOnNextOpen(panelKey, isNew && !restoredUnsaved);
+
 		if (isNew && !restoredUnsaved) {
 			await this.stateService.savePromptEditorViewState(
 				this.getPromptEditorViewStateSource(panelKey, null),
@@ -4273,6 +4345,7 @@ export class EditorPanelManager {
 			await this.switchPromptInExistingPanel(panelKey, reusableSingletonPanel, prompt, {
 				dirty: restoredUnsaved,
 				isRu,
+				forceMainTab: this.consumePanelForceMainTabOnNextOpen(panelKey),
 			});
 
 			for (const existingPanel of panelsToDispose) {
@@ -4340,6 +4413,7 @@ export class EditorPanelManager {
 				openPanels.delete(key);
 				this.panelPromptRefs.delete(key);
 				this.panelBootIds.delete(key);
+				this.panelForceMainTabOnNextOpen.delete(key);
 				this.pendingPanelMessages.delete(key);
 				this.chatTrackingDisposables.get(key)?.dispose();
 				this.chatTrackingDisposables.delete(key);
@@ -4634,7 +4708,10 @@ export class EditorPanelManager {
 				postMessage(availableLanguageAndFrameworkMessages.frameworksMessage);
 				postMessage(this.buildPromptMessage(currentPrompt, {
 					reason: 'open',
-					editorViewState: this.getPromptEditorViewState(panelKey, currentPrompt),
+					editorViewState: resolvePromptOpenEditorViewState(
+						this.getPromptEditorViewState(panelKey, currentPrompt),
+						{ forceMainTab: this.consumePanelForceMainTabOnNextOpen(panelKey) },
+					),
 				}));
 				this.flushPendingPanelMessages(panelKey, panel, currentPrompt);
 				this.scheduleAvailableModelsRefreshAfterReady(panelKey, panel, currentPrompt, readyBootId, models);
@@ -5191,6 +5268,7 @@ export class EditorPanelManager {
 					promptFromStorage.status = initialStatus;
 					promptFromStorage.chatSessionIds = restoredChatSessionIds;
 					await this.storageService.savePrompt(promptFromStorage, { historyReason: 'status-change' });
+					this.unlockPromptIdAfterChatStart(promptFromStorage);
 					Object.assign(prompt, promptFromStorage);
 					if (currentPrompt.id === promptFromStorage.id) {
 						Object.assign(currentPrompt, promptFromStorage);
@@ -5264,6 +5342,7 @@ export class EditorPanelManager {
 					}
 
 					prompt.status = 'in-progress';
+					this.lockPromptIdAfterChatStart(prompt);
 
 					const bindSessionToPrompt = async (sessionId: string): Promise<void> => {
 						const normalizedSessionId = (sessionId || '').trim();
@@ -5289,6 +5368,7 @@ export class EditorPanelManager {
 
 						promptFromStorage.chatSessionIds = updatedChatSessionIds;
 						await this.storageService.savePrompt(promptFromStorage, { historyReason: 'start-chat' });
+						this.lockPromptIdAfterChatStart(promptFromStorage);
 						try {
 							await this.chatMemoryInstructionService()?.bindChatSession(promptFromStorage.promptUuid, normalizedSessionId);
 						} catch (error) {
@@ -5323,6 +5403,7 @@ export class EditorPanelManager {
 						historyReason: 'start-chat',
 						previousId: renameFromId,
 					});
+					this.lockPromptIdAfterChatStart(prompt);
 					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();
 					const shouldSyncCurrentPanel = !normalizedCurrentPromptId
 						|| normalizedCurrentPromptId === prompt.id

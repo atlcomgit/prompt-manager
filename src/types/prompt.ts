@@ -54,14 +54,33 @@ export type EditorPromptSectionKey =
 	| 'files'
 	| 'time';
 
+/** Sections whose default state can still be overridden by content until manual interaction. */
+export const PROMPT_EDITOR_AUTO_MANAGED_SECTION_KEYS = ['notes', 'plan', 'report'] as const;
+
+/** Sections that stay under automatic default/content rules until manually changed. */
+export type EditorPromptAutoManagedSectionKey = typeof PROMPT_EDITOR_AUTO_MANAGED_SECTION_KEYS[number];
+
+const PROMPT_EDITOR_AUTO_MANAGED_SECTION_KEY_SET = new Set<EditorPromptSectionKey>(
+	PROMPT_EDITOR_AUTO_MANAGED_SECTION_KEYS,
+);
+
+export function isPromptEditorAutoManagedSection(
+	key: EditorPromptSectionKey,
+): key is EditorPromptAutoManagedSectionKey {
+	return PROMPT_EDITOR_AUTO_MANAGED_SECTION_KEY_SET.has(key);
+}
+
 /** Persisted expanded/collapsed state for prompt editor sections */
 export type EditorPromptExpandedSections = Record<EditorPromptSectionKey, boolean>;
+
+/** Marks sections that were toggled manually and should stop following automatic rules. */
+export type EditorPromptManualSectionOverrides = Partial<Record<EditorPromptAutoManagedSectionKey, boolean>>;
 
 /** Create default expanded/collapsed state for prompt editor sections */
 export function createDefaultEditorPromptExpandedSections(): EditorPromptExpandedSections {
 	return {
 		basic: true,
-		workspace: false,
+		workspace: true,
 		prompt: true,
 		globalPrompt: false,
 		report: false,
@@ -69,21 +88,28 @@ export function createDefaultEditorPromptExpandedSections(): EditorPromptExpande
 		plan: false,
 		tech: false,
 		integrations: false,
-		agent: false,
+		agent: true,
 		files: false,
-		time: false,
+		time: true,
 	};
+}
+
+/** Create default manual override flags for prompt editor sections. */
+export function createDefaultEditorPromptManualSectionOverrides(): EditorPromptManualSectionOverrides {
+	return {};
 }
 
 /** Persisted per-prompt editor view state */
 export interface EditorPromptViewState {
 	activeTab: EditorPromptTab;
 	expandedSections: EditorPromptExpandedSections;
+	manualSectionOverrides: EditorPromptManualSectionOverrides;
 	descriptionExpanded: boolean;
 }
 
 type PartialEditorPromptViewState = Partial<Omit<EditorPromptViewState, 'expandedSections'>> & {
 	expandedSections?: Partial<EditorPromptExpandedSections> | null;
+	manualSectionOverrides?: EditorPromptManualSectionOverrides | null;
 };
 
 /** Key source used for resolving persisted editor view state */
@@ -98,6 +124,7 @@ export function createDefaultEditorPromptViewState(): EditorPromptViewState {
 	return {
 		activeTab: 'main',
 		expandedSections: createDefaultEditorPromptExpandedSections(),
+		manualSectionOverrides: createDefaultEditorPromptManualSectionOverrides(),
 		descriptionExpanded: false,
 	};
 }
@@ -126,6 +153,20 @@ function normalizeEditorPromptExpandedSections(
 	};
 }
 
+function normalizeEditorPromptManualSectionOverrides(
+	state?: Partial<Record<EditorPromptAutoManagedSectionKey, unknown>> | null,
+): EditorPromptManualSectionOverrides {
+	const normalized: EditorPromptManualSectionOverrides = {};
+
+	for (const key of PROMPT_EDITOR_AUTO_MANAGED_SECTION_KEYS) {
+		if (state?.[key] === true) {
+			normalized[key] = true;
+		}
+	}
+
+	return normalized;
+}
+
 /** Normalize potentially partial persisted editor view state */
 export function normalizeEditorPromptViewState(
 	state?: PartialEditorPromptViewState | null,
@@ -138,6 +179,7 @@ export function normalizeEditorPromptViewState(
 	return {
 		activeTab: state.activeTab === 'process' ? 'process' : defaults.activeTab,
 		expandedSections: normalizeEditorPromptExpandedSections(state.expandedSections),
+		manualSectionOverrides: normalizeEditorPromptManualSectionOverrides(state.manualSectionOverrides),
 		descriptionExpanded: typeof state.descriptionExpanded === 'boolean'
 			? state.descriptionExpanded
 			: defaults.descriptionExpanded,

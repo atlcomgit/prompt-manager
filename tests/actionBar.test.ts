@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { ActionBar } from '../src/webview/editor/components/ActionBar.js';
+import { ActionBar, resolveStartChatDisabledState } from '../src/webview/editor/components/ActionBar.js';
 
 function withLocale<T>(locale: string, callback: () => T): T {
 	const previousWindow = globalThis.window;
@@ -80,4 +80,27 @@ test('ActionBar shows Go to chat once the chat panel is already open', () => {
 
 	assert.match(markup, /Go to chat/);
 	assert.doesNotMatch(markup, /Start Chat/);
+});
+
+test('resolveStartChatDisabledState blocks chat start while prompt metadata is generating', () => {
+	assert.equal(resolveStartChatDisabledState({
+		hasContent: true,
+		isStartingChat: false,
+		isGeneratingTitle: true,
+		isGeneratingDescription: false,
+	}), true);
+
+	assert.equal(resolveStartChatDisabledState({
+		hasContent: true,
+		isStartingChat: false,
+		isGeneratingTitle: false,
+		isGeneratingDescription: true,
+	}), true);
+
+	assert.equal(resolveStartChatDisabledState({
+		hasContent: true,
+		isStartingChat: false,
+		isGeneratingTitle: false,
+		isGeneratingDescription: false,
+	}), false);
 });

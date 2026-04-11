@@ -16,6 +16,8 @@ interface Props {
   isChatPanelOpen: boolean;
   isSaving: boolean;
   isStartingChat: boolean;
+  isGeneratingTitle?: boolean;
+  isGeneratingDescription?: boolean;
   hasContent: boolean;
   status: PromptStatus;
 }
@@ -45,6 +47,15 @@ export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSess
   };
 }
 
+export function resolveStartChatDisabledState(
+  input: Pick<Props, 'hasContent' | 'isStartingChat' | 'isGeneratingTitle' | 'isGeneratingDescription'>,
+): boolean {
+  return !input.hasContent
+    || input.isStartingChat
+    || input.isGeneratingTitle === true
+    || input.isGeneratingDescription === true;
+}
+
 function splitLeadingIconLabel(label: string): { icon: string; text: string } {
   const trimmedLabel = label.trim();
   const firstSpaceIndex = trimmedLabel.indexOf(' ');
@@ -63,11 +74,16 @@ function splitLeadingIconLabel(label: string): { icon: string; text: string } {
 }
 
 export const ActionBar: React.FC<Props> = ({
-  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isSaving, isStartingChat, hasContent, status,
+  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isSaving, isStartingChat, isGeneratingTitle = false, isGeneratingDescription = false, hasContent, status,
 }) => {
   const t = useT();
   const saveLabel = splitLeadingIconLabel(t('actions.save'));
-  const startChatDisabled = !hasContent || isStartingChat;
+  const startChatDisabled = resolveStartChatDisabledState({
+    hasContent,
+    isStartingChat,
+    isGeneratingTitle,
+    isGeneratingDescription,
+  });
   const chatEntryState = resolveChatEntryState({ status, hasChatSession, isChatPanelOpen });
   return (
     <div style={styles.bar}>

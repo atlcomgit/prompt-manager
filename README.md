@@ -75,6 +75,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 
 - Start a GitHub Copilot chat directly from a selected prompt.
 - Reopen existing chat sessions linked to the prompt.
+- Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context.
 - Keep the prompt, report, and editor state tied to the same workflow instead of splitting them across tools.
 
 ### Work with Git without leaving the prompt flow

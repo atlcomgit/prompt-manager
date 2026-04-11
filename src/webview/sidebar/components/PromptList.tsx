@@ -180,13 +180,13 @@ const styles: Record<string, React.CSSProperties> = {
     flex: 1,
   },
   groupCount: {
-    background: 'var(--vscode-badge-background)',
+    background: 'color-mix(in srgb, var(--vscode-badge-background) 58%, var(--vscode-sideBarSectionHeader-background))',
     color: 'var(--vscode-badge-foreground)',
     borderRadius: '4px',
     padding: '0 6px',
-    fontSize: '10px',
+    fontSize: '12px',
     fontWeight: 600,
-    minWidth: '16px',
+    minWidth: '18px',
     textAlign: 'center',
   },
 };

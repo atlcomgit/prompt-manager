@@ -25,7 +25,7 @@ import { GitService } from '../services/gitService.js';
 import type { StateService } from '../services/stateService.js';
 import { TimeTrackingService } from '../services/timeTrackingService.js';
 import { decideFileReportSync, isLatestPersistedReport } from '../utils/reportSync.js';
-import { buildChatContextFiles } from '../utils/chatContextFiles.js';
+import { buildChatContextFiles, getChatMemoryDirectoryPath } from '../utils/chatContextFiles.js';
 import { buildGitOverlayReviewCliSetupCommand } from '../utils/gitOverlay.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
@@ -5325,9 +5325,11 @@ export class EditorPanelManager {
 					parts.push(prompt.content);
 
 					const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+					const storageDir = this.storageService.getStorageDirectoryPath();
+					const chatMemoryDirectory = getChatMemoryDirectoryPath(storageDir);
 					const chatContextFiles = buildChatContextFiles({
 						workspaceRoot,
-						storageDir: this.storageService.getStorageDirectoryPath(),
+						storageDir,
 						promptContextFiles: prompt.contextFiles,
 						sessionInstructionFilePath: sessionInstructionRecord?.instructionFilePath,
 					});
@@ -5355,6 +5357,9 @@ export class EditorPanelManager {
 					if (prompt.branch) ctx.push(`Branch: ${prompt.branch}`);
 					if (chatContextFiles.promptContextReferences.length > 0) {
 						ctx.push(`Context files: ${chatContextFiles.promptContextReferences.join(' ')}`);
+					}
+					if (chatMemoryDirectory) {
+						ctx.push(`Chat memory directory: ${chatMemoryDirectory}`);
 					}
 					if (chatContextFiles.instructionReferences.length > 0) {
 						ctx.push(`Memory instruction files: ${chatContextFiles.instructionReferences.join(' ')}`);

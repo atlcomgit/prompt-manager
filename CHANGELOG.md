@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Improved
+- Copilot Chat start context now includes the absolute chat-memory directory together with generated memory instruction file references.
+
 ## [0.1.88] - 2026-04-10
 
 ### Added

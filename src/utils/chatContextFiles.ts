@@ -18,7 +18,12 @@ const CHAT_MEMORY_DIR_NAME = 'chat-memory';
 const AI_INSTRUCTIONS_FILE_NAME = 'ai.instructions.md';
 const CODEMAP_INSTRUCTIONS_FILE_NAME = 'codemap.instructions.md';
 
+export function getChatMemoryDirectoryPath(storageDir: string): string {
+	return path.join(storageDir, CHAT_MEMORY_DIR_NAME);
+}
+
 export function buildChatContextFiles(options: BuildChatContextFilesOptions): ChatContextFilesResult {
+	const chatMemoryDirectory = getChatMemoryDirectoryPath(options.storageDir);
 	const promptContextAbsolutePaths = dedupe(
 		(options.promptContextFiles || [])
 			.map(filePath => toAbsolutePath(filePath, options.workspaceRoot))
@@ -26,9 +31,9 @@ export function buildChatContextFiles(options: BuildChatContextFilesOptions): Ch
 	);
 
 	const instructionAbsolutePaths = dedupe([
-		path.join(options.storageDir, CHAT_MEMORY_DIR_NAME, AI_INSTRUCTIONS_FILE_NAME),
+		path.join(chatMemoryDirectory, AI_INSTRUCTIONS_FILE_NAME),
 		(options.sessionInstructionFilePath || '').trim(),
-		path.join(options.storageDir, CHAT_MEMORY_DIR_NAME, CODEMAP_INSTRUCTIONS_FILE_NAME),
+		path.join(chatMemoryDirectory, CODEMAP_INSTRUCTIONS_FILE_NAME),
 	].filter(filePath => Boolean(filePath) && fs.existsSync(filePath)));
 
 	return {

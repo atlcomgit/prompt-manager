@@ -2400,7 +2400,6 @@ export const GitOverlay: React.FC<Props> = ({
 														onClick={() => onPush(promptBranch || undefined, projectsNeedingPush.map(project => project.project))}
 											disabled={isReadOnlyFlow || !canPush}
 											loading={isPushing}
-											hidden={shouldHideActionWhileWaiting('pushPromptBranch')}
 											variant="primary"
 										/>
 									) : null}

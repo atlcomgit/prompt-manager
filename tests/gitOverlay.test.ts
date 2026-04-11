@@ -2583,6 +2583,34 @@ test('GitOverlay hides project and bulk commit actions while waiting for the glo
 	assert.match(markup, /editor\.gitOverlayGenerateCommitMessage/);
 });
 
+test('GitOverlay keeps bulk push button visible and loading while waiting for push snapshot refresh', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'pushPromptBranch',
+		waitingForSnapshotAction: 'pushPromptBranch',
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					upstream: 'origin/feature/task-42',
+					ahead: 1,
+					changeGroups: {
+						merge: [],
+						staged: [],
+						workingTree: [],
+						untracked: [],
+					},
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /<button[^>]*disabled=""[^>]*aria-busy="true"[^>]*>.*editor\.gitOverlayPushPromptBranch/s);
+});
+
 test('GitOverlay step 4 renders bulk create and copy-link actions from the current snapshot', () => {
 	const remoteApi: NonNullable<GitOverlayProjectSnapshot['review']['remote']> = {
 		provider: 'gitlab',

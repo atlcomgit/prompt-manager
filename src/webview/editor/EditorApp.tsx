@@ -2447,7 +2447,7 @@ export const EditorApp: React.FC = () => {
     setGitOverlayBusyState(
       project ? `generateCommitMessage:${project}` : 'generateCommitMessage:all',
       project ? `${t('editor.gitOverlayGenerateCommitMessage')}: ${project}` : t('editor.gitOverlayGenerateAllCommitMessages'),
-      true,
+      false,
     );
     vscode.postMessage({
       type: 'gitOverlayGenerateCommitMessage',

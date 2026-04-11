@@ -1,4 +1,4 @@
-# General Instructions (v.03)
+# General Instructions (v.04)
 
 - Respond, reason, and write everything in the localization language of `vscode`.
 - Before implementation, save the action plan to the file `plan.md` in the project folder `Prompt directory`.

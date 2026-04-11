@@ -12,7 +12,12 @@ import { PromptList } from './components/PromptList';
 import { Toolbar } from './components/Toolbar';
 import { createDefaultPrompt, PROMPT_STATUS_ORDER } from '../../types/prompt';
 import { matchesCreatedAtFilter } from '../../utils/sidebarDateFilter.js';
-import { makeSidebarGroupCollapseKey, shouldAutoExpandSidebarGroups } from '../../utils/sidebarGrouping.js';
+import {
+  makeSidebarGroupCollapseKey,
+  resolveEffectiveSidebarCollapsedGroups,
+  shouldAutoExpandSidebarGroups,
+  toggleSidebarGroupCollapsedState,
+} from '../../utils/sidebarGrouping.js';
 import { reconcileSidebarDeletionState, reconcileSidebarSelection } from '../../utils/sidebarSelection.js';
 import type {
   PromptConfig,
@@ -53,6 +58,7 @@ export const SidebarApp: React.FC = () => {
   const [viewMode, setViewMode] = useState<SidebarViewMode>('detailed');
   const [groupBy, setGroupBy] = useState<GroupBy>('none');
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [filteredCollapsedGroups, setFilteredCollapsedGroups] = useState<Record<string, boolean>>({});
   const [showFilters, setShowFilters] = useState(false);
   const [showViewSettings, setShowViewSettings] = useState(false);
   const [hasHydratedState, setHasHydratedState] = useState(false);
@@ -86,9 +92,19 @@ export const SidebarApp: React.FC = () => {
   );
 
   const effectiveCollapsedGroups = useMemo(
-    () => (shouldAutoExpandGroups ? {} : collapsedGroups),
-    [shouldAutoExpandGroups, collapsedGroups],
+    () => resolveEffectiveSidebarCollapsedGroups(
+      collapsedGroups,
+      filteredCollapsedGroups,
+      shouldAutoExpandGroups,
+    ),
+    [shouldAutoExpandGroups, collapsedGroups, filteredCollapsedGroups],
   );
+
+  useEffect(() => {
+    if (!shouldAutoExpandGroups && Object.keys(filteredCollapsedGroups).length > 0) {
+      setFilteredCollapsedGroups({});
+    }
+  }, [shouldAutoExpandGroups, filteredCollapsedGroups]);
 
   const applyDeletedPromptState = useCallback((deletedId: string | null | undefined) => {
     const nextState = reconcileSidebarDeletionState({
@@ -164,6 +180,7 @@ export const SidebarApp: React.FC = () => {
         setViewMode(state.viewMode || 'detailed');
         setGroupBy(state.groupBy || 'none');
         setCollapsedGroups(state.collapsedGroups || {});
+        setFilteredCollapsedGroups({});
         setHasHydratedState(true);
         break;
       }
@@ -394,12 +411,14 @@ export const SidebarApp: React.FC = () => {
   };
 
   const handleToggleGroup = (name: string) => {
+    const collapseKey = makeSidebarGroupCollapseKey(groupBy, name);
+
     if (shouldAutoExpandGroups) {
+      setFilteredCollapsedGroups(prev => toggleSidebarGroupCollapsedState(prev, collapseKey));
       return;
     }
 
-    const collapseKey = makeSidebarGroupCollapseKey(groupBy, name);
-    setCollapsedGroups(prev => ({ ...prev, [collapseKey]: !prev[collapseKey] }));
+    setCollapsedGroups(prev => toggleSidebarGroupCollapsedState(prev, collapseKey));
   };
 
   const totalPromptCount = useMemo(() => {

@@ -2558,8 +2558,9 @@ test('GitOverlay allows push on tracked branches without prompt branch after com
 	assert.doesNotMatch(markup, /<div style="[^"]*background:var\(--vscode-button-background\);color:var\(--vscode-button-foreground\)[^"]*">5<\/div>/);
 });
 
-test('GitOverlay hides project and bulk commit actions while waiting for the global commit snapshot', () => {
+test('GitOverlay keeps bulk commit visible with loader while waiting for the global commit snapshot', () => {
 	const markup = renderGitOverlayMarkup({
+		busyAction: 'commitStaged:all',
 		waitingForSnapshotAction: 'commitStaged:all',
 		snapshot: createTestSnapshot({
 			promptBranch: 'feature/task-42',
@@ -2578,15 +2579,55 @@ test('GitOverlay hides project and bulk commit actions while waiting for the glo
 		}),
 	});
 
-	assert.doesNotMatch(markup, /editor\.gitOverlayCommitProject/);
-	assert.doesNotMatch(markup, /editor\.gitOverlayCommitAll/);
+	assert.match(markup, /<button[^>]*disabled=""[^>]*aria-busy="false"[^>]*>.*editor\.gitOverlayCommitProject/s);
+	assert.match(markup, /<button[^>]*disabled=""[^>]*aria-busy="true"[^>]*>.*editor\.gitOverlayCommitAll/s);
 	assert.match(markup, /editor\.gitOverlayGenerateCommitMessage/);
 });
 
-test('GitOverlay keeps bulk push button visible and loading while waiting for push snapshot refresh', () => {
+test('GitOverlay keeps project commit visible with loader while waiting for that project snapshot', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'commitStaged:api',
+		waitingForSnapshotAction: 'commitStaged:api',
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'api', group: 'staged' })],
+					},
+				}),
+				createTestProject({
+					project: 'web',
+					repositoryPath: '/tmp/web',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'web', path: 'src/web.ts', group: 'staged' })],
+					},
+				}),
+			],
+		}),
+		commitMessages: {
+			api: 'feat: update api flow',
+			web: 'feat: update web flow',
+		},
+	});
+
+	assert.equal(markup.match(/editor\.gitOverlayCommitProject/g)?.length || 0, 2);
+	assert.match(markup, /<button[^>]*disabled=""[^>]*aria-busy="true"[^>]*>.*editor\.gitOverlayCommitProject/s);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*aria-busy="false"[^>]*>.*editor\.gitOverlayCommitProject/s);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*aria-busy="false"[^>]*>.*editor\.gitOverlayCommitAll/s);
+});
+
+test('GitOverlay keeps bulk push button visible and loading after push snapshot until push completion is acknowledged', () => {
 	const markup = renderGitOverlayMarkup({
 		busyAction: 'pushPromptBranch',
-		waitingForSnapshotAction: 'pushPromptBranch',
 		snapshot: createTestSnapshot({
 			promptBranch: 'feature/task-42',
 			trackedBranches: ['main'],
@@ -2596,7 +2637,7 @@ test('GitOverlay keeps bulk push button visible and loading while waiting for pu
 					currentBranch: 'feature/task-42',
 					promptBranch: 'feature/task-42',
 					upstream: 'origin/feature/task-42',
-					ahead: 1,
+					ahead: 0,
 					changeGroups: {
 						merge: [],
 						staged: [],
@@ -2609,6 +2650,7 @@ test('GitOverlay keeps bulk push button visible and loading while waiting for pu
 	});
 
 	assert.match(markup, /<button[^>]*disabled=""[^>]*aria-busy="true"[^>]*>.*editor\.gitOverlayPushPromptBranch/s);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPushAlreadyPublished/);
 });
 
 test('GitOverlay step 4 renders bulk create and copy-link actions from the current snapshot', () => {

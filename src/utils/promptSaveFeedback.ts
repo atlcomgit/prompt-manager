@@ -23,6 +23,58 @@ export function shouldApplyPromptAiEnrichmentState(
 		|| normalizedPromptId === normalizedActiveSaveId;
 }
 
+export function shouldApplyPromptSaveResult(
+	promptId: string | null | undefined,
+	promptUuid: string | null | undefined,
+	previousPromptId?: string | null,
+	currentPromptId?: string | null,
+	currentPromptUuid?: string | null,
+	activeSaveId?: string | null,
+): boolean {
+	const normalizedPromptUuid = (promptUuid || '').trim();
+	const normalizedCurrentPromptUuid = (currentPromptUuid || '').trim();
+	if (normalizedPromptUuid && normalizedCurrentPromptUuid && normalizedPromptUuid === normalizedCurrentPromptUuid) {
+		return true;
+	}
+
+	const normalizedPromptId = (promptId || '').trim();
+	const normalizedPreviousPromptId = (previousPromptId || '').trim();
+	const normalizedCurrentPromptId = (currentPromptId || '').trim();
+	const normalizedActiveSaveId = (activeSaveId || '').trim();
+
+	return Boolean(
+		(normalizedPromptId && normalizedPromptId === normalizedCurrentPromptId)
+		|| (normalizedPreviousPromptId && normalizedPreviousPromptId === normalizedCurrentPromptId)
+		|| (normalizedActiveSaveId && normalizedPromptId === normalizedActiveSaveId)
+		|| (normalizedActiveSaveId && normalizedPreviousPromptId === normalizedActiveSaveId),
+	);
+}
+
+export function shouldApplySavedPromptToPanel(
+	savedPromptId: string | null | undefined,
+	savedPromptUuid: string | null | undefined,
+	livePromptId?: string | null,
+	livePromptUuid?: string | null,
+	previousPromptId?: string | null,
+): boolean {
+	const normalizedSavedPromptUuid = (savedPromptUuid || '').trim();
+	const normalizedLivePromptUuid = (livePromptUuid || '').trim();
+	if (normalizedSavedPromptUuid && normalizedLivePromptUuid && normalizedSavedPromptUuid === normalizedLivePromptUuid) {
+		return true;
+	}
+
+	const normalizedLivePromptId = (livePromptId || '').trim();
+	if (!normalizedLivePromptId) {
+		return true;
+	}
+
+	const normalizedSavedPromptId = (savedPromptId || '').trim();
+	const normalizedPreviousPromptId = (previousPromptId || '').trim();
+
+	return normalizedLivePromptId === normalizedSavedPromptId
+		|| Boolean(normalizedPreviousPromptId && normalizedLivePromptId === normalizedPreviousPromptId);
+}
+
 export function shouldNotifyReservedArchiveRename(
 	requestedIdBase: string | null | undefined,
 	savedId: string | null | undefined,

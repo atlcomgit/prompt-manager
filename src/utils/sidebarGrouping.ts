@@ -16,6 +16,30 @@ export function shouldAutoExpandSidebarGroups(groupBy: GroupBy, filters: FilterS
 	return groupBy !== 'none' && hasActiveSidebarFilters(filters);
 }
 
+export function resolveEffectiveSidebarCollapsedGroups(
+	collapsedGroups: Record<string, boolean>,
+	filteredCollapsedGroups: Record<string, boolean>,
+	shouldAutoExpandGroups: boolean,
+): Record<string, boolean> {
+	return shouldAutoExpandGroups ? filteredCollapsedGroups : collapsedGroups;
+}
+
+export function toggleSidebarGroupCollapsedState(
+	collapsedGroups: Record<string, boolean>,
+	collapseKey: string,
+): Record<string, boolean> {
+	if (collapsedGroups[collapseKey]) {
+		const nextCollapsedGroups = { ...collapsedGroups };
+		delete nextCollapsedGroups[collapseKey];
+		return nextCollapsedGroups;
+	}
+
+	return {
+		...collapsedGroups,
+		[collapseKey]: true,
+	};
+}
+
 export function makeSidebarGroupCollapseKey(group: GroupBy, name: string): string {
 	return `${group}::${name}`;
 }

@@ -894,12 +894,23 @@ export const GitOverlay: React.FC<Props> = ({
 	const isReadOnlyFlow = !isChatPreflightMode && promptStatus === 'in-progress';
 	const isWaitingForSnapshot = Boolean(waitingForSnapshotAction);
 	const shouldHideActionWhileWaiting = (actionName: string): boolean => isWaitingForSnapshot && waitingForSnapshotAction === actionName;
-	const shouldHideCommitActionWhileWaiting = (projectName?: string): boolean => {
-		if (shouldHideActionWhileWaiting('commitStaged:all')) {
+	const activeCommitAction = useMemo(() => {
+		if (busyAction?.startsWith('commitStaged:')) {
+			return busyAction;
+		}
+
+		if (waitingForSnapshotAction?.startsWith('commitStaged:')) {
+			return waitingForSnapshotAction;
+		}
+
+		return null;
+	}, [busyAction, waitingForSnapshotAction]);
+	const shouldDisableCommitActionWhileBusy = (actionName: string): boolean => {
+		if (activeCommitAction === 'commitStaged:all') {
 			return true;
 		}
 
-		return Boolean(projectName) && shouldHideActionWhileWaiting(`commitStaged:${projectName}`);
+		return false;
 	};
 	const promptBranch = (snapshot?.promptBranch || '').trim();
 	const allProjects = snapshot?.projects || [];
@@ -2315,9 +2326,8 @@ export const GitOverlay: React.FC<Props> = ({
 													<ActionButton
 														label={t('editor.gitOverlayCommitProject')}
 														onClick={() => onCommitStaged([{ project: project.project, message: projectCommitMessage.trim() }])}
-														disabled={isReadOnlyFlow || !validation?.committable}
+														disabled={isReadOnlyFlow || !validation?.committable || shouldDisableCommitActionWhileBusy(`commitStaged:${project.project}`)}
 														loading={isCommittingProject}
-														hidden={shouldHideCommitActionWhileWaiting(project.project)}
 														variant="primary"
 													/>
 												</div>
@@ -2340,9 +2350,8 @@ export const GitOverlay: React.FC<Props> = ({
 										<ActionButton
 											label={t('editor.gitOverlayCommitAll')}
 											onClick={() => onCommitStaged(commitAllMessages)}
-											disabled={isReadOnlyFlow || !canCommitAllProjects}
+											disabled={isReadOnlyFlow || !canCommitAllProjects || shouldDisableCommitActionWhileBusy('commitStaged:all')}
 											loading={isCommittingAll}
-											hidden={shouldHideCommitActionWhileWaiting()}
 											variant="primary"
 										/>
 									) : null}
@@ -2391,10 +2400,10 @@ export const GitOverlay: React.FC<Props> = ({
 								{hasConflicts ? <InlineHint message={t('editor.gitOverlayMergeBlocked')} tone="error" /> : null}
 
 								<div style={styles.mergeHint}>{t('editor.gitOverlayPushHintDetail')}</div>
-								{canAttemptPush && !pushRequired ? <div style={styles.successText}>{t('editor.gitOverlayPushAlreadyPublished')}</div> : null}
+								{canAttemptPush && !pushRequired && !isPushing ? <div style={styles.successText}>{t('editor.gitOverlayPushAlreadyPublished')}</div> : null}
 
 								<div style={styles.actionRowEnd}>
-									{pushRequired ? (
+									{(pushRequired || isPushing) ? (
 										<ActionButton
 											label={t('editor.gitOverlayPushPromptBranch')}
 														onClick={() => onPush(promptBranch || undefined, projectsNeedingPush.map(project => project.project))}

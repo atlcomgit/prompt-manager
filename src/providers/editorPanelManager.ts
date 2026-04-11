@@ -41,6 +41,7 @@ import {
 } from '../utils/promptExternalSync.js';
 import {
 	buildReservedArchiveRenameNotice,
+	shouldApplySavedPromptToPanel,
 	shouldNotifyReservedArchiveRename,
 } from '../utils/promptSaveFeedback.js';
 import type { ExternalPromptConfigChange } from '../services/storageService.js';
@@ -121,6 +122,7 @@ export class EditorPanelManager {
 	private openPromptQueue: Promise<void> | null = null;
 	private pendingOpenPromptId: string | null = null;
 	private openPromptRequestVersion = 0;
+	private pendingPromptSaveByPanelKey = new Map<string, Promise<void>>();
 	private isShuttingDown = false;
 	/** Stable keys промптов, для которых уже запущено фоновое AI-обогащение (дедупликация) */
 	private pendingEnrichmentPromptKeys = new Set<string>();
@@ -4114,8 +4116,9 @@ export class EditorPanelManager {
 			if (latestSnapshot) {
 				const isDirty = this.panelDirtyFlags.get(existingKey) || false;
 				const hasUnsavedDraftData = !latestSnapshot.id && this.hasPromptDataWithoutId(latestSnapshot);
-				let shouldPersistBeforeSwitch = isDirty || hasUnsavedDraftData;
-				if (!shouldPersistBeforeSwitch && latestSnapshot.id) {
+				const hasPendingPromptSave = this.pendingPromptSaveByPanelKey.has(existingKey);
+				let shouldPersistBeforeSwitch = !hasPendingPromptSave && (isDirty || hasUnsavedDraftData);
+				if (!shouldPersistBeforeSwitch && latestSnapshot.id && !hasPendingPromptSave) {
 					const persistedSnapshot = await this.storageService.getPrompt(latestSnapshot.id);
 					shouldPersistBeforeSwitch = !persistedSnapshot
 						|| this.normalizePromptForCompare(latestSnapshot) !== this.normalizePromptForCompare(persistedSnapshot);
@@ -4603,234 +4606,240 @@ export class EditorPanelManager {
 			}
 
 			case 'savePrompt': {
-				if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.prompt?.id)) {
-					break;
-				}
-				const saveStateId = (msg.prompt.id || currentPrompt.id || '__new__').trim() || '__new__';
-				this.logReportDebug('savePrompt.received', {
-					panelKey,
-					source: msg.source || 'manual',
-					promptId: msg.prompt.id || currentPrompt.id || '',
-					reportLength: (msg.prompt.report || '').length,
-					reportPreview: this.reportDebugPreview(msg.prompt.report || ''),
-				});
-				this._onDidSaveStateChange.fire({ id: saveStateId, saving: true });
-				postMessage({ type: 'promptSaving', id: saveStateId, saving: true });
-				try {
-					let promptToSave = msg.prompt;
-					await this.awaitPendingReportPersist(promptToSave.id || currentPrompt.id);
-					const saveSource = msg.source || 'manual';
-					const previousPromptId = (currentPrompt.id || msg.prompt.id || '').trim() || undefined;
-
-					const contentWordCount = promptToSave.content ? EditorPanelManager.wordCount(promptToSave.content) : 0;
-					const isUntitledWithEnoughContent = promptToSave.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
-						&& !!promptToSave.content
-						&& contentWordCount > 10;
-					const hasEnoughContentForTitle = !!promptToSave.content && contentWordCount > 10;
-					const isFallbackTitle = !!promptToSave.title
-						&& hasEnoughContentForTitle
-						&& EditorPanelManager.isTitleFallback(promptToSave.title, promptToSave.content);
-					const needsTitle = (!promptToSave.title || isUntitledWithEnoughContent || isFallbackTitle) && !!promptToSave.content;
-					const hasEnoughContentForDescription = !!promptToSave.content && contentWordCount > 10;
-					const isFallbackDescription = !!promptToSave.description
-						&& hasEnoughContentForDescription
-						&& EditorPanelManager.isDescriptionFallback(promptToSave.description, promptToSave.content);
-					const needsDescription = ((!promptToSave.description && hasEnoughContentForDescription) || isFallbackDescription);
-
-					// [AI-ENRICHMENT-LOG] Диагностика для отладки AI-обогащения
-					this.hooksOutput.appendLine(
-						`[ai-enrichment] save: promptId=${promptToSave.id || currentPrompt.id || '?'}`
-						+ ` title=${JSON.stringify((promptToSave.title || '').slice(0, 40))}`
-						+ ` needsTitle=${needsTitle}`
-						+ ` (empty=${!promptToSave.title}, untitled=${isUntitledWithEnoughContent}, fallback=${isFallbackTitle})`
-						+ ` needsDesc=${needsDescription}`
-						+ ` words=${contentWordCount}`,
-					);
-
-					// Мгновенные fallback-значения вместо ожидания AI (AI обогатит в фоне после save)
-					// Если AI-обогащение уже запущено — не перезаписываем title/description, иначе race condition
-					const enrichmentKey = this.resolvePromptAiEnrichmentKey(
-						promptToSave.id || currentPrompt.id,
-						promptToSave.promptUuid || currentPrompt.promptUuid,
-					);
-					const enrichmentAlreadyRunning = Boolean(
-						enrichmentKey && this.pendingEnrichmentPromptKeys.has(enrichmentKey),
-					);
-					if (needsTitle && !enrichmentAlreadyRunning) {
-						promptToSave.title = this.makeTitleFallbackFromContent(promptToSave.content);
+				const saveTask = (async (): Promise<void> => {
+					if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.prompt?.id)) {
+						return;
 					}
-					if (needsDescription && !enrichmentAlreadyRunning) {
-						promptToSave.description = this.makeDescriptionFallbackFromContent(promptToSave.content);
-					}
-					const needsAiEnrichment = (needsTitle || needsDescription) && !enrichmentAlreadyRunning;
-					const requestedIdBase = this.resolvePromptIdBase(promptToSave);
-
-					const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
-					await this.reconcileReportWithExtensionState(panelKey, promptToSave, currentPrompt);
-					const basePrompt = this.panelBasePrompts.get(panelKey);
-					await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, basePrompt || null);
-
-					const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(renameFromId || promptToSave.id) : null;
-					const hasConcurrentUpdate = Boolean(existingPrompt && promptToSave.updatedAt && existingPrompt.updatedAt !== promptToSave.updatedAt);
-					const allowStatusOverwrite = saveSource === 'status-change';
-					if (existingPrompt && hasConcurrentUpdate && !allowStatusOverwrite) {
-						if (this.statusRank(existingPrompt.status) >= this.statusRank(promptToSave.status)) {
-							promptToSave.status = existingPrompt.status;
-						}
-					}
-					if (existingPrompt) {
-						if (
-							basePrompt
-							&& promptToSave.report === (basePrompt.report || '')
-							&& existingPrompt.report !== (basePrompt.report || '')
-						) {
-							promptToSave.report = existingPrompt.report;
-						}
-						promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
-						promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
-						promptToSave.timeSpentOnTask = Math.max(promptToSave.timeSpentOnTask || 0, existingPrompt.timeSpentOnTask || 0);
-						promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
-							? Math.max(0, promptToSave.timeSpentUntracked || 0)
-							: (existingPrompt.timeSpentUntracked || 0);
-						promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
-							? promptToSave.chatSessionIds
-							: (existingPrompt.chatSessionIds || []);
-					} else {
-						promptToSave.timeSpentOnTask = Math.max(0, promptToSave.timeSpentOnTask || 0);
-						promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
-					}
-
-					const saved = await this.storageService.savePrompt(promptToSave, {
-						historyReason: saveSource,
-						previousId: renameFromId,
-					});
-					const shouldNotifyArchiveRename = shouldNotifyReservedArchiveRename(requestedIdBase, saved.id, previousPromptId);
-					this.logReportDebug('savePrompt.saved', {
+					const saveStateId = (msg.prompt.id || currentPrompt.id || '__new__').trim() || '__new__';
+					this.logReportDebug('savePrompt.received', {
 						panelKey,
-						promptId: promptToSave.id,
-						source: saveSource,
-						reportLength: (promptToSave.report || '').length,
-						reportPreview: this.reportDebugPreview(promptToSave.report || ''),
+						source: msg.source || 'manual',
+						promptId: msg.prompt.id || currentPrompt.id || '',
+						reportLength: (msg.prompt.report || '').length,
+						reportPreview: this.reportDebugPreview(msg.prompt.report || ''),
 					});
-					// savePrompt теперь возвращает полный Prompt — повторный getPrompt не нужен
-					const promptForPanel = saved;
-					if (needsAiEnrichment && !enrichmentAlreadyRunning) {
-						this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, {
-							title: needsTitle,
-							description: needsDescription,
-						});
-					} else if (!enrichmentAlreadyRunning) {
-						this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, null);
-					}
-					await this.stateService.migratePromptEditorViewState(
-						[
-							this.getPromptEditorViewStateSource(panelKey, currentPrompt),
-							previousPromptId
-								? this.getPromptEditorViewStateSource(panelKey, null, { promptId: previousPromptId })
-								: null,
-						],
-						this.getPromptEditorViewStateSource(panelKey, promptForPanel),
-					);
+					this._onDidSaveStateChange.fire({ id: saveStateId, saving: true });
+					postMessage({ type: 'promptSaving', id: saveStateId, saving: true });
+					try {
+						let promptToSave = msg.prompt;
+						await this.awaitPendingReportPersist(promptToSave.id || currentPrompt.id);
+						const saveSource = msg.source || 'manual';
+						const previousPromptId = (currentPrompt.id || msg.prompt.id || '').trim() || undefined;
 
-					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();
-					const shouldApplyToCurrentPanel = !normalizedCurrentPromptId
-						|| normalizedCurrentPromptId === promptToSave.id
-						|| Boolean(previousPromptId && normalizedCurrentPromptId === previousPromptId);
+						const contentWordCount = promptToSave.content ? EditorPanelManager.wordCount(promptToSave.content) : 0;
+						const isUntitledWithEnoughContent = promptToSave.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
+							&& !!promptToSave.content
+							&& contentWordCount > 10;
+						const hasEnoughContentForTitle = !!promptToSave.content && contentWordCount > 10;
+						const isFallbackTitle = !!promptToSave.title
+							&& hasEnoughContentForTitle
+							&& EditorPanelManager.isTitleFallback(promptToSave.title, promptToSave.content);
+						const needsTitle = (!promptToSave.title || isUntitledWithEnoughContent || isFallbackTitle) && !!promptToSave.content;
+						const hasEnoughContentForDescription = !!promptToSave.content && contentWordCount > 10;
+						const isFallbackDescription = !!promptToSave.description
+							&& hasEnoughContentForDescription
+							&& EditorPanelManager.isDescriptionFallback(promptToSave.description, promptToSave.content);
+						const needsDescription = ((!promptToSave.description && hasEnoughContentForDescription) || isFallbackDescription);
 
-					if (shouldApplyToCurrentPanel) {
-						setIsDirty(false);
-						// Update current prompt reference
-						Object.assign(currentPrompt, promptForPanel);
-						this.setPanelPromptRef(panelKey, currentPrompt);
-						this.ensureContentEditorBinding(panelKey, currentPrompt);
-						this.ensureReportEditorBinding(panelKey, currentPrompt);
-						await this.syncPersistedActivePromptState(promptForPanel, renameFromId);
-					}
-
-					// Update panel tracking
-					if (shouldApplyToCurrentPanel && panelKey.startsWith('new-')) {
-						openPanels.delete(panelKey);
-						openPanels.set(promptToSave.id, panel);
-						const dirtySetter = this.panelDirtySetters.get(panelKey);
-						if (dirtySetter) {
-							this.panelDirtySetters.delete(panelKey);
-							this.panelDirtySetters.set(promptToSave.id, dirtySetter);
-						}
-						const dirtyFlag = this.panelDirtyFlags.get(panelKey);
-						this.panelDirtyFlags.delete(panelKey);
-						this.panelDirtyFlags.set(promptToSave.id, Boolean(dirtyFlag));
-						const configFieldChangedAt = this.panelPromptConfigFieldChangedAt.get(panelKey);
-						this.panelPromptConfigFieldChangedAt.delete(panelKey);
-						this.setPanelPromptConfigFieldChangedAt(promptToSave.id, configFieldChangedAt || null);
-						const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
-						this.panelLatestPromptSnapshots.delete(panelKey);
-						this.panelLatestPromptSnapshots.set(promptToSave.id, latestSnapshot ? JSON.parse(JSON.stringify(latestSnapshot)) : null);
-						const basePrompt = this.panelBasePrompts.get(panelKey);
-						this.panelBasePrompts.delete(panelKey);
-						this.panelBasePrompts.set(promptToSave.id, basePrompt ? JSON.parse(JSON.stringify(basePrompt)) : JSON.parse(JSON.stringify(promptForPanel)));
-						this.rebindContentEditorPanelKey(panelKey, promptToSave.id);
-						this.rebindReportEditorPanelKey(panelKey, promptToSave.id);
-					}
-
-					if (shouldApplyToCurrentPanel) {
-						const stateKey = panelKey.startsWith('new-') ? promptToSave.id : panelKey;
-						this.panelDirtyFlags.set(stateKey, false);
-						this.setPanelPromptConfigFieldChangedAt(stateKey, null);
-						this.panelLatestPromptSnapshots.set(stateKey, null);
-						this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptForPanel)));
-					}
-
-					if (shouldApplyToCurrentPanel) {
-						this.updatePromptPanelTitle(panel, saved);
-						await postMessage({ type: 'promptSaved', prompt: saved, previousId: renameFromId });
-						await postMessage(this.buildPromptMessage(promptForPanel, {
-							reason: 'save',
-							previousId: renameFromId,
-						}));
-						if (shouldNotifyArchiveRename) {
-							await postMessage({
-								type: 'info',
-								message: buildReservedArchiveRenameNotice(saved.id, this.getPromptSaveFeedbackLocale()),
-							});
-						}
-					}
-
-					// Фоновые операции — не блокируют UI сохранения
-					void this.broadcastAvailableLanguagesAndFrameworks().catch(() => { });
-					if (promptForPanel.status !== 'in-progress') {
-						void (async () => {
-							try {
-								await this.chatMemoryInstructionService()?.handlePromptStatusChange(promptForPanel);
-							} catch (error) {
-								this.hooksOutput.appendLine(`[chat-memory] status cleanup after save failed: ${error instanceof Error ? error.message : String(error)}`);
-							}
-						})();
-					}
-
-					// Фоновое AI-обогащение title и description (после save)
-					if (needsAiEnrichment) {
-						void this.scheduleBackgroundAiEnrichment(
-							promptToSave.id,
-							promptToSave.promptUuid || currentPrompt.promptUuid,
-							promptToSave.content,
-							needsTitle,
-							needsDescription,
-							postMessage,
-							panelKey,
+						this.hooksOutput.appendLine(
+							`[ai-enrichment] save: promptId=${promptToSave.id || currentPrompt.id || '?'}`
+							+ ` title=${JSON.stringify((promptToSave.title || '').slice(0, 40))}`
+							+ ` needsTitle=${needsTitle}`
+							+ ` (empty=${!promptToSave.title}, untitled=${isUntitledWithEnoughContent}, fallback=${isFallbackTitle})`
+							+ ` needsDesc=${needsDescription}`
+							+ ` words=${contentWordCount}`,
 						);
-					}
 
-					this._onDidSave.fire(promptToSave.id);
-					if (promptToSave.id && promptToSave.id !== saveStateId) {
-						this._onDidSaveStateChange.fire({ id: promptToSave.id, saving: false });
+						const enrichmentKey = this.resolvePromptAiEnrichmentKey(
+							promptToSave.id || currentPrompt.id,
+							promptToSave.promptUuid || currentPrompt.promptUuid,
+						);
+						const enrichmentAlreadyRunning = Boolean(
+							enrichmentKey && this.pendingEnrichmentPromptKeys.has(enrichmentKey),
+						);
+						if (needsTitle && !enrichmentAlreadyRunning) {
+							promptToSave.title = this.makeTitleFallbackFromContent(promptToSave.content);
+						}
+						if (needsDescription && !enrichmentAlreadyRunning) {
+							promptToSave.description = this.makeDescriptionFallbackFromContent(promptToSave.content);
+						}
+						const needsAiEnrichment = (needsTitle || needsDescription) && !enrichmentAlreadyRunning;
+						const requestedIdBase = this.resolvePromptIdBase(promptToSave);
+
+						const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
+						await this.reconcileReportWithExtensionState(panelKey, promptToSave, currentPrompt);
+						const basePrompt = this.panelBasePrompts.get(panelKey);
+						await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, basePrompt || null);
+
+						const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(renameFromId || promptToSave.id) : null;
+						const hasConcurrentUpdate = Boolean(existingPrompt && promptToSave.updatedAt && existingPrompt.updatedAt !== promptToSave.updatedAt);
+						const allowStatusOverwrite = saveSource === 'status-change';
+						if (existingPrompt && hasConcurrentUpdate && !allowStatusOverwrite) {
+							if (this.statusRank(existingPrompt.status) >= this.statusRank(promptToSave.status)) {
+								promptToSave.status = existingPrompt.status;
+							}
+						}
+						if (existingPrompt) {
+							if (
+								basePrompt
+								&& promptToSave.report === (basePrompt.report || '')
+								&& existingPrompt.report !== (basePrompt.report || '')
+							) {
+								promptToSave.report = existingPrompt.report;
+							}
+							promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
+							promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
+							promptToSave.timeSpentOnTask = Math.max(promptToSave.timeSpentOnTask || 0, existingPrompt.timeSpentOnTask || 0);
+							promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
+								? Math.max(0, promptToSave.timeSpentUntracked || 0)
+								: (existingPrompt.timeSpentUntracked || 0);
+							promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
+								? promptToSave.chatSessionIds
+								: (existingPrompt.chatSessionIds || []);
+						} else {
+							promptToSave.timeSpentOnTask = Math.max(0, promptToSave.timeSpentOnTask || 0);
+							promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
+						}
+
+						const saved = await this.storageService.savePrompt(promptToSave, {
+							historyReason: saveSource,
+							previousId: renameFromId,
+						});
+						const shouldNotifyArchiveRename = shouldNotifyReservedArchiveRename(requestedIdBase, saved.id, previousPromptId);
+						this.logReportDebug('savePrompt.saved', {
+							panelKey,
+							promptId: promptToSave.id,
+							source: saveSource,
+							reportLength: (promptToSave.report || '').length,
+							reportPreview: this.reportDebugPreview(promptToSave.report || ''),
+						});
+						const promptForPanel = saved;
+						if (needsAiEnrichment && !enrichmentAlreadyRunning) {
+							this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, {
+								title: needsTitle,
+								description: needsDescription,
+							});
+						} else if (!enrichmentAlreadyRunning) {
+							this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, null);
+						}
+						await this.stateService.migratePromptEditorViewState(
+							[
+								this.getPromptEditorViewStateSource(panelKey, currentPrompt),
+								previousPromptId
+									? this.getPromptEditorViewStateSource(panelKey, null, { promptId: previousPromptId })
+									: null,
+							],
+							this.getPromptEditorViewStateSource(panelKey, promptForPanel),
+						);
+
+						const livePanelPrompt = this.panelPromptRefs.get(panelKey);
+						const shouldApplyToCurrentPanel = Boolean(livePanelPrompt) && shouldApplySavedPromptToPanel(
+							promptForPanel.id,
+							promptForPanel.promptUuid,
+							livePanelPrompt?.id,
+							livePanelPrompt?.promptUuid,
+							previousPromptId,
+						);
+
+						if (shouldApplyToCurrentPanel && livePanelPrompt) {
+							setIsDirty(false);
+							Object.assign(livePanelPrompt, promptForPanel);
+							this.setPanelPromptRef(panelKey, livePanelPrompt);
+							this.ensureContentEditorBinding(panelKey, livePanelPrompt);
+							this.ensureReportEditorBinding(panelKey, livePanelPrompt);
+							await this.syncPersistedActivePromptState(promptForPanel, renameFromId);
+						}
+
+						if (shouldApplyToCurrentPanel && panelKey.startsWith('new-')) {
+							openPanels.delete(panelKey);
+							openPanels.set(promptToSave.id, panel);
+							const dirtySetter = this.panelDirtySetters.get(panelKey);
+							if (dirtySetter) {
+								this.panelDirtySetters.delete(panelKey);
+								this.panelDirtySetters.set(promptToSave.id, dirtySetter);
+							}
+							const dirtyFlag = this.panelDirtyFlags.get(panelKey);
+							this.panelDirtyFlags.delete(panelKey);
+							this.panelDirtyFlags.set(promptToSave.id, Boolean(dirtyFlag));
+							const configFieldChangedAt = this.panelPromptConfigFieldChangedAt.get(panelKey);
+							this.panelPromptConfigFieldChangedAt.delete(panelKey);
+							this.setPanelPromptConfigFieldChangedAt(promptToSave.id, configFieldChangedAt || null);
+							const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
+							this.panelLatestPromptSnapshots.delete(panelKey);
+							this.panelLatestPromptSnapshots.set(promptToSave.id, latestSnapshot ? JSON.parse(JSON.stringify(latestSnapshot)) : null);
+							const basePrompt = this.panelBasePrompts.get(panelKey);
+							this.panelBasePrompts.delete(panelKey);
+							this.panelBasePrompts.set(promptToSave.id, basePrompt ? JSON.parse(JSON.stringify(basePrompt)) : JSON.parse(JSON.stringify(promptForPanel)));
+							this.rebindContentEditorPanelKey(panelKey, promptToSave.id);
+							this.rebindReportEditorPanelKey(panelKey, promptToSave.id);
+						}
+
+						if (shouldApplyToCurrentPanel) {
+							const stateKey = panelKey.startsWith('new-') ? promptToSave.id : panelKey;
+							this.panelDirtyFlags.set(stateKey, false);
+							this.setPanelPromptConfigFieldChangedAt(stateKey, null);
+							this.panelLatestPromptSnapshots.set(stateKey, null);
+							this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptForPanel)));
+						}
+
+						if (shouldApplyToCurrentPanel) {
+							this.updatePromptPanelTitle(panel, saved);
+							await postMessage({ type: 'promptSaved', prompt: saved, previousId: renameFromId });
+							await postMessage(this.buildPromptMessage(promptForPanel, {
+								reason: 'save',
+								previousId: renameFromId,
+							}));
+							if (shouldNotifyArchiveRename) {
+								await postMessage({
+									type: 'info',
+									message: buildReservedArchiveRenameNotice(saved.id, this.getPromptSaveFeedbackLocale()),
+								});
+							}
+						}
+
+						void this.broadcastAvailableLanguagesAndFrameworks().catch(() => { });
+						if (promptForPanel.status !== 'in-progress') {
+							void (async () => {
+								try {
+									await this.chatMemoryInstructionService()?.handlePromptStatusChange(promptForPanel);
+								} catch (error) {
+									this.hooksOutput.appendLine(`[chat-memory] status cleanup after save failed: ${error instanceof Error ? error.message : String(error)}`);
+								}
+							})();
+						}
+
+						if (needsAiEnrichment) {
+							void this.scheduleBackgroundAiEnrichment(
+								promptToSave.id,
+								promptToSave.promptUuid || currentPrompt.promptUuid,
+								promptToSave.content,
+								needsTitle,
+								needsDescription,
+								postMessage,
+								panelKey,
+							);
+						}
+
+						this._onDidSave.fire(promptToSave.id);
+						if (promptToSave.id && promptToSave.id !== saveStateId) {
+							this._onDidSaveStateChange.fire({ id: promptToSave.id, saving: false });
+						}
+					} catch (error) {
+						const message = this.formatSaveConflictMessage(error);
+						postMessage({ type: 'error', message: `Save failed: ${message}` });
+					} finally {
+						this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
+						postMessage({ type: 'promptSaving', id: saveStateId, saving: false });
 					}
-					// vscode.window.showInformationMessage(`Промпт "${saved.title || saved.id}" сохранён.`);
-				} catch (error) {
-					const message = this.formatSaveConflictMessage(error);
-					postMessage({ type: 'error', message: `Save failed: ${message}` });
+				})();
+
+				this.pendingPromptSaveByPanelKey.set(panelKey, saveTask);
+				try {
+					await saveTask;
 				} finally {
-					this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
-					postMessage({ type: 'promptSaving', id: saveStateId, saving: false });
+					if (this.pendingPromptSaveByPanelKey.get(panelKey) === saveTask) {
+						this.pendingPromptSaveByPanelKey.delete(panelKey);
+					}
 				}
 				break;
 			}

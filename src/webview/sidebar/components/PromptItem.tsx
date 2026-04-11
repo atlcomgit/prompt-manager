@@ -1,10 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import { PROMPT_STATUS_ORDER, type PromptConfig, type PromptStatus, type SidebarViewMode } from '../../../types/prompt';
+import {
+  normalizeCompactTaskNumber,
+  resolveCompactPromptGridTemplateColumns,
+  resolveCompactTaskColumnTrack,
+} from '../../../utils/sidebarCompactLayout.js';
 import { useT } from '../../shared/i18n';
 
 interface Props {
   prompt: PromptConfig;
   viewMode: SidebarViewMode;
+  compactTaskColumnTrack?: string;
   isSelected: boolean;
   isSaving?: boolean;
   onOpen: (id: string) => void;
@@ -62,6 +68,7 @@ function statusTranslationKey(status: PromptStatus): string {
 export const PromptItem: React.FC<Props> = ({
   prompt,
   viewMode,
+  compactTaskColumnTrack,
   isSelected,
   isSaving = false,
   onOpen,
@@ -112,7 +119,8 @@ export const PromptItem: React.FC<Props> = ({
   const selFg = isSelected ? 'var(--vscode-list-activeSelectionForeground)' : undefined;
   const selBg = isSelected ? 'var(--vscode-list-activeSelectionBackground)' : undefined;
   const statusAccent = STATUS_COLORS[prompt.status] || 'var(--vscode-descriptionForeground)';
-  const compactTaskNumber = prompt.taskNumber?.trim() || '—';
+  const compactTaskNumber = normalizeCompactTaskNumber(prompt.taskNumber);
+  const resolvedCompactTaskColumnTrack = compactTaskColumnTrack || resolveCompactTaskColumnTrack(prompt.taskNumber);
   const compactTitle = prompt.title?.trim() || prompt.id;
   const statusMenuIndex = 2;
   const menuItems: Array<{
@@ -234,6 +242,7 @@ export const PromptItem: React.FC<Props> = ({
         <div
           style={{
             ...styles.compactRow,
+            gridTemplateColumns: resolveCompactPromptGridTemplateColumns(resolvedCompactTaskColumnTrack),
             ...(showActions ? styles.compactRowWithActions : {}),
           }}
         >
@@ -518,9 +527,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   compactRow: {
     display: 'grid',
-    gridTemplateColumns: '44px minmax(0, 1fr) max-content',
     alignItems: 'center',
-    columnGap: '16px',
     minHeight: '22px',
     width: '100%',
     boxSizing: 'border-box',
@@ -531,6 +538,7 @@ const styles: Record<string, React.CSSProperties> = {
     paddingRight: '40px',
   },
   compactTask: {
+    gridColumn: '1',
     minWidth: 0,
     textAlign: 'left',
     fontSize: '12px',
@@ -542,6 +550,7 @@ const styles: Record<string, React.CSSProperties> = {
     textOverflow: 'ellipsis',
   },
   compactTitle: {
+    gridColumn: '3',
     minWidth: 0,
     display: 'flex',
     alignItems: 'center',
@@ -558,6 +567,7 @@ const styles: Record<string, React.CSSProperties> = {
     textOverflow: 'ellipsis',
   },
   compactStatus: {
+    gridColumn: '5',
     minWidth: 0,
     fontSize: '11px',
     fontWeight: 600,

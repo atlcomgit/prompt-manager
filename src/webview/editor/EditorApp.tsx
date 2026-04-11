@@ -35,7 +35,7 @@ import {
   normalizeContextFileReference,
 } from '../../utils/contextFiles.js';
 import { diffPromptConfigSyncFields, PROMPT_CONFIG_SYNC_FIELDS } from '../../utils/promptExternalSync.js';
-import { shouldApplyPromptAiEnrichmentState } from '../../utils/promptSaveFeedback.js';
+import { shouldApplyPromptAiEnrichmentState, shouldApplyPromptSaveResult } from '../../utils/promptSaveFeedback.js';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -429,6 +429,8 @@ export const EditorApp: React.FC = () => {
   const hasReportedGitOverlayVisibilityRef = useRef(false);
   const gitOverlayBusyActionRef = useRef<string | null>(null);
   const gitOverlayHoldBusyUntilSnapshotRef = useRef(false);
+  const gitOverlayPendingCommitMessageGenerationRef = useRef(false);
+  const gitOverlayPendingCompletionActionRef = useRef<GitOverlayActionKind | null>(null);
   const handleStartChatRef = useRef<() => void>(() => undefined);
   const handleOpenChatRef = useRef<() => void>(() => undefined);
   const globalContextTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -484,6 +486,8 @@ export const EditorApp: React.FC = () => {
 
   const clearGitOverlayBusyState = useCallback(() => {
     gitOverlayHoldBusyUntilSnapshotRef.current = false;
+    gitOverlayPendingCommitMessageGenerationRef.current = false;
+    gitOverlayPendingCompletionActionRef.current = null;
     setGitOverlayWaitingForSnapshotAction(null);
     setGitOverlayBusyAction(null);
     setGitOverlayProcessLabel(null);
@@ -493,8 +497,10 @@ export const EditorApp: React.FC = () => {
     action: string | null,
     processLabel: string | null,
     holdUntilSnapshot: boolean = false,
+    pendingCompletionAction: GitOverlayActionKind | null = null,
   ) => {
     gitOverlayHoldBusyUntilSnapshotRef.current = holdUntilSnapshot;
+    gitOverlayPendingCompletionActionRef.current = pendingCompletionAction;
     if (action) {
       setGitOverlayWaitingForSnapshotAction(null);
     }
@@ -1407,6 +1413,16 @@ export const EditorApp: React.FC = () => {
         }
         break;
       case 'promptSaved':
+        if (!shouldApplyPromptSaveResult(
+          msg.prompt?.id,
+          msg.prompt?.promptUuid,
+          msg.previousId,
+          currentPromptIdRef.current,
+          promptRef.current.promptUuid,
+          activeSaveIdRef.current,
+        )) {
+          break;
+        }
         setIsSaving(false);
         // Only clear isDirty if user hasn't changed anything since save started
         if (userChangeCounterRef.current === saveStartCounterRef.current) {
@@ -1810,6 +1826,10 @@ export const EditorApp: React.FC = () => {
           }
           return next;
         });
+        if (gitOverlayPendingCommitMessageGenerationRef.current || gitOverlayPendingCompletionActionRef.current) {
+          setGitOverlayWaitingForSnapshotAction(null);
+          break;
+        }
         clearGitOverlayBusyState();
         break;
         }
@@ -1829,6 +1849,10 @@ export const EditorApp: React.FC = () => {
           }
           return next;
         });
+        if (gitOverlayPendingCommitMessageGenerationRef.current) {
+          clearGitOverlayBusyState();
+          break;
+        }
         if (!gitOverlayHoldBusyUntilSnapshotRef.current) {
           clearGitOverlayBusyState();
         }
@@ -1838,6 +1862,9 @@ export const EditorApp: React.FC = () => {
           ...prev,
           [msg.action]: true,
         }));
+        if (gitOverlayPendingCompletionActionRef.current === msg.action) {
+          clearGitOverlayBusyState();
+        }
         break;
       case 'contextFileCards': {
         const requestId = (msg.requestId || '').trim();
@@ -1933,7 +1960,9 @@ export const EditorApp: React.FC = () => {
 						setGitOverlayWaitingForSnapshotAction(activeBusyAction);
 					}
 				}
-        if (!gitOverlayHoldBusyUntilSnapshotRef.current) {
+        if (!gitOverlayHoldBusyUntilSnapshotRef.current
+          && !gitOverlayPendingCommitMessageGenerationRef.current
+          && !gitOverlayPendingCompletionActionRef.current) {
           clearGitOverlayBusyState();
         }
         showInlineNotice('info', msg.message);
@@ -2324,7 +2353,7 @@ export const EditorApp: React.FC = () => {
   }, [prompt.branch, prompt.projects, setGitOverlayBusyState, t]);
 
   const handleGitOverlayPush = useCallback((branch?: string, projects?: string[]) => {
-    setGitOverlayBusyState('pushPromptBranch', t('editor.gitOverlayPushPromptBranch'), true);
+    setGitOverlayBusyState('pushPromptBranch', t('editor.gitOverlayPushPromptBranch'), true, 'push');
     vscode.postMessage({
       type: 'gitOverlayPush',
       promptBranch: prompt.branch.trim(),
@@ -2444,6 +2473,7 @@ export const EditorApp: React.FC = () => {
   }, []);
 
   const handleGitOverlayGenerateCommitMessage = useCallback((project?: string) => {
+    gitOverlayPendingCommitMessageGenerationRef.current = true;
     setGitOverlayBusyState(
       project ? `generateCommitMessage:${project}` : 'generateCommitMessage:all',
       project ? `${t('editor.gitOverlayGenerateCommitMessage')}: ${project}` : t('editor.gitOverlayGenerateAllCommitMessages'),

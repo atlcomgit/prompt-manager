@@ -67,6 +67,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 ### Design prompts as reusable project assets
 
 - Create, edit, duplicate, archive, import, and export prompts from a dedicated VS Code sidebar.
+- Keep filtered grouped sidebar views flexible: temporary collapse changes made while filters are active do not overwrite the remembered expansion state restored after filters are cleared.
 - Store prompt content in Markdown and keep prompt metadata in JSON inside `.vscode/prompt-manager/`.
 - Attach projects, languages, frameworks, skills, MCP tools, hooks, task references, branches, notes, plans, and reports.
 - Reuse prompt context across sessions without rebuilding the same setup every time.

@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import type { GroupBy, PromptConfig, PromptStatus, SidebarViewMode } from '../../../types/prompt';
+import { resolveSharedCompactTaskColumnTrack } from '../../../utils/sidebarCompactLayout.js';
 import { makeSidebarGroupCollapseKey } from '../../../utils/sidebarGrouping.js';
 import { PromptItem } from './PromptItem';
 import { useT } from '../../shared/i18n';
@@ -40,6 +41,20 @@ export const PromptList: React.FC<Props> = ({
   const t = useT();
   const groupNames = Object.keys(groups);
   const hasGroups = !(groupNames.length === 1 && groupNames[0] === '');
+  const compactTaskColumnTrack = useMemo(() => {
+    if (viewMode !== 'compact') {
+      return undefined;
+    }
+
+    const visiblePrompts = hasGroups
+      ? groupNames.flatMap(name => (
+        collapsedGroups[makeSidebarGroupCollapseKey(groupBy, name)] ? [] : (groups[name] || [])
+      ))
+      : (groups[''] || []);
+
+    return resolveSharedCompactTaskColumnTrack(visiblePrompts.map(prompt => prompt.taskNumber));
+  }, [collapsedGroups, groupBy, groupNames, groups, hasGroups, viewMode]);
+
   const getGroupDisplayName = (name: string): string => {
     if (groupBy !== 'status') {
       return name;
@@ -92,6 +107,7 @@ export const PromptList: React.FC<Props> = ({
             key={p.id}
             prompt={p}
             viewMode={viewMode}
+            compactTaskColumnTrack={compactTaskColumnTrack}
             isSelected={p.id === selectedId}
             isSaving={savingPromptIds.includes(p.id)}
             onOpen={onOpen}
@@ -123,6 +139,7 @@ export const PromptList: React.FC<Props> = ({
               key={p.id}
               prompt={p}
               viewMode={viewMode}
+              compactTaskColumnTrack={compactTaskColumnTrack}
               isSelected={p.id === selectedId}
               isSaving={savingPromptIds.includes(p.id)}
               onOpen={onOpen}

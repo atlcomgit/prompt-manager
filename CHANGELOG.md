@@ -4,6 +4,7 @@
 
 ### Fixed
 - Codemap instruction refresh now updates locale-specific records deterministically and selected delta refresh resolves the chosen branch against its own head/tree references instead of mixing them with the active workspace branch.
+- Grouped prompt lists now allow temporary collapse changes while filters are active without overwriting the remembered group expansion state that returns after filters are cleared.
 
 ### Improved
 - Copilot Chat start context now includes the absolute chat-memory directory together with generated memory instruction file references.

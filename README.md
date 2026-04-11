@@ -103,6 +103,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Run AI-powered history analysis with configurable models.
 - Use semantic search over embeddings to find similar work by meaning, not just by text.
 - Inspect knowledge-graph style relationships and code-oriented instruction snapshots.
+- Refresh codemap instructions from the instructions view with locale-specific persistence, including selected-branch delta snapshots that stay tied to the branch you actually chose.
 
 ### Monitor Copilot usage inside VS Code
 

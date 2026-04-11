@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Codemap instruction refresh now updates locale-specific records deterministically and selected delta refresh resolves the chosen branch against its own head/tree references instead of mixing them with the active workspace branch.
+
 ### Improved
 - Copilot Chat start context now includes the absolute chat-memory directory together with generated memory instruction file references.
 

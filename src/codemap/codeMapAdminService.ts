@@ -227,17 +227,26 @@ export class CodeMapAdminService {
 			return null;
 		}
 
-		const currentBranch = await this.gitService.getCurrentBranch(projectPath) || instruction.branchName;
-		const currentHeadSha = await this.branchResolver.getHeadSha(projectPath, currentBranch);
+		const activeBranch = await this.gitService.getCurrentBranch(projectPath) || instruction.branchName;
+		const currentBranch = instruction.instructionKind === 'delta'
+			? instruction.branchName
+			: activeBranch;
 		const resolvedBranchName = instruction.instructionKind === 'base'
 			? instruction.branchName
 			: instruction.resolvedBranchName;
+		const currentHeadSha = await this.branchResolver.getHeadSha(projectPath, currentBranch);
+		const currentTreeSha = await this.branchResolver.getTreeSha(projectPath, currentBranch);
 		const resolvedHeadSha = await this.branchResolver.getHeadSha(projectPath, resolvedBranchName);
+		const resolvedTreeSha = await this.branchResolver.getTreeSha(projectPath, resolvedBranchName);
+
+		if (!currentHeadSha || !resolvedHeadSha) {
+			return null;
+		}
 
 		return {
 			repository: instruction.repository,
 			projectPath,
-			currentBranch: instruction.instructionKind === 'delta' ? instruction.branchName : currentBranch,
+			currentBranch,
 			resolvedBranchName,
 			baseBranchName: instruction.baseBranchName,
 			branchRole: instruction.instructionKind === 'delta' ? 'current' : instruction.branchRole,
@@ -245,6 +254,8 @@ export class CodeMapAdminService {
 			hasUncommittedChanges: (await this.gitService.hasUncommittedChanges(projectPath)).hasChanges,
 			resolvedHeadSha,
 			currentHeadSha,
+			resolvedTreeSha: resolvedTreeSha || resolvedHeadSha,
+			currentTreeSha: currentTreeSha || currentHeadSha,
 		};
 	}
 }

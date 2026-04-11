@@ -335,6 +335,7 @@ export class CodeMapDatabaseService {
 		repository: string,
 		branchName: string,
 		instructionKind: CodeMapInstructionRecord['instructionKind'],
+		locale: string,
 	): StoredCodeMapInstruction | null {
 		const db = this.requireDb();
 		const result = db.exec(
@@ -366,8 +367,10 @@ export class CodeMapDatabaseService {
 			WHERE repository = ?
 				AND branch_name = ?
 				AND instruction_kind = ?
+				AND locale = ?
+			ORDER BY updated_at DESC, generated_at DESC, id DESC
 			LIMIT 1;`,
-			[repository, branchName, instructionKind],
+			[repository, branchName, instructionKind, locale],
 		);
 
 		if (result.length === 0 || result[0].values.length === 0) {
@@ -640,7 +643,7 @@ export class CodeMapDatabaseService {
 		const contentBuffer = Buffer.from(record.content, 'utf-8');
 		const compressed = gzipSync(contentBuffer);
 		const metadataJson = JSON.stringify(record.metadata || {});
-		const existing = this.getLatestInstruction(record.repository, record.branchName, record.instructionKind);
+		const existing = this.getLatestInstruction(record.repository, record.branchName, record.instructionKind, record.locale);
 
 		if (existing) {
 			db.run(
@@ -681,7 +684,7 @@ export class CodeMapDatabaseService {
 			this.insertVersion(existing.id, compressed, record.contentHash, record.generatedAt, metadataJson);
 			this.pruneVersions(existing.id, maxVersionsPerInstruction);
 			this.save();
-			return this.getLatestInstruction(record.repository, record.branchName, record.instructionKind) as StoredCodeMapInstruction;
+			return this.getLatestInstruction(record.repository, record.branchName, record.instructionKind, record.locale) as StoredCodeMapInstruction;
 		}
 
 		db.run(
@@ -730,7 +733,7 @@ export class CodeMapDatabaseService {
 		this.pruneVersions(insertedId, maxVersionsPerInstruction);
 		this.save();
 
-		return this.getLatestInstruction(record.repository, record.branchName, record.instructionKind) as StoredCodeMapInstruction;
+		return this.getLatestInstruction(record.repository, record.branchName, record.instructionKind, record.locale) as StoredCodeMapInstruction;
 	}
 
 	insertJob(job: CodeMapJobRecord): number {

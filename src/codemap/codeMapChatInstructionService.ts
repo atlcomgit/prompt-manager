@@ -41,6 +41,7 @@ export class CodeMapChatInstructionService {
 
 	async prepareInstruction(prompt: Pick<Prompt, 'projects'>): Promise<void> {
 		const settings = getCodeMapSettings();
+		const locale = vscode.env.language;
 		const filePath = this.getInstructionFilePath();
 		await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(filePath)));
 
@@ -55,9 +56,9 @@ export class CodeMapChatInstructionService {
 		const materializationTargets: CodeMapMaterializationTarget[] = [];
 
 		for (const resolution of resolutions) {
-			const baseInstruction = this.db.getLatestInstruction(resolution.repository, resolution.resolvedBranchName, 'base');
+			const baseInstruction = this.db.getLatestInstruction(resolution.repository, resolution.resolvedBranchName, 'base', locale);
 			const currentInstruction = resolution.currentBranch !== resolution.resolvedBranchName
-				? this.db.getLatestInstruction(resolution.repository, resolution.currentBranch, 'delta')
+				? this.db.getLatestInstruction(resolution.repository, resolution.currentBranch, 'delta', locale)
 				: null;
 
 			const queuedBaseRefresh = Boolean(settings.aiModel) && await this.shouldQueueBaseRefresh(resolution, baseInstruction)
@@ -80,7 +81,7 @@ export class CodeMapChatInstructionService {
 			});
 		}
 
-		const content = this.materializer.compose(materializationTargets, new Date().toISOString(), vscode.env.language);
+		const content = this.materializer.compose(materializationTargets, new Date().toISOString(), locale);
 		await vscode.workspace.fs.writeFile(vscode.Uri.file(filePath), Buffer.from(content, 'utf-8'));
 	}
 
@@ -248,10 +249,11 @@ export class CodeMapChatInstructionService {
 			return;
 		}
 
+		const locale = vscode.env.language;
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
 		const resolutions = await this.branchResolver.resolveTrackedBranchSnapshots(projectPaths, trackedBranches);
 		for (const resolution of resolutions) {
-			const latestInstruction = this.db.getLatestInstruction(resolution.repository, resolution.resolvedBranchName, 'base');
+			const latestInstruction = this.db.getLatestInstruction(resolution.repository, resolution.resolvedBranchName, 'base', locale);
 			if (await this.shouldQueueBaseRefresh(resolution, latestInstruction)) {
 				this.orchestrator.queueInstruction(resolution, 'base', 'startup', updatePriority);
 			}

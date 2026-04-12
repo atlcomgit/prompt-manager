@@ -40,7 +40,7 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 	assert.deepEqual(normalizeEditorPromptViewState({
 		activeTab: 'process',
 		expandedSections: { basic: false, plan: true },
-		manualSectionOverrides: { report: true, notes: false },
+		manualSectionOverrides: { report: 'manual', notes: false as never },
 		descriptionExpanded: true,
 	}), {
 		activeTab: 'process',
@@ -49,7 +49,7 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 			basic: false,
 			plan: true,
 		},
-		manualSectionOverrides: { report: true },
+		manualSectionOverrides: { report: 'manual' },
 		descriptionExpanded: true,
 	});
 	assert.deepEqual(
@@ -65,6 +65,24 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 		activeTab: 'main',
 		expandedSections: createDefaultEditorPromptExpandedSections(),
 		manualSectionOverrides: {},
+		descriptionExpanded: false,
+	});
+});
+
+test('normalizeEditorPromptViewState keeps legacy manual overrides and accepts until-content only for plan and report', () => {
+	assert.deepEqual(normalizeEditorPromptViewState({
+		manualSectionOverrides: {
+			report: true,
+			plan: 'until-content',
+			notes: 'until-content',
+		} as any,
+	}), {
+		activeTab: 'main',
+		expandedSections: createDefaultEditorPromptExpandedSections(),
+		manualSectionOverrides: {
+			report: 'manual',
+			plan: 'until-content',
+		},
 		descriptionExpanded: false,
 	});
 });

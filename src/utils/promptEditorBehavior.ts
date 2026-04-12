@@ -1,5 +1,6 @@
 import type {
 	EditorPromptExpandedSections,
+	EditorPromptManualSectionOverrideMode,
 	EditorPromptManualSectionOverrides,
 	EditorPromptSectionKey,
 	EditorPromptViewState,
@@ -29,6 +30,9 @@ interface TogglePromptEditorSectionExpansionInput {
 	effectiveExpandedSections: EditorPromptExpandedSections;
 	expandedSections?: EditorPromptExpandedSections | null;
 	manualSectionOverrides?: EditorPromptManualSectionOverrides | null;
+	hasNotesContent?: boolean;
+	hasPlanContent?: boolean;
+	hasReportContent?: boolean;
 }
 
 interface ShouldPreservePromptIdAfterChatStartInput {
@@ -60,6 +64,56 @@ function resolvePromptEditorAutoSectionExpandedState(
 	return input.hasReportContent;
 }
 
+function resolvePromptEditorSectionHasContent(
+	key: 'notes' | 'plan' | 'report',
+	input: Pick<ResolvePromptEditorExpandedSectionsInput, 'hasNotesContent' | 'hasPlanContent' | 'hasReportContent'>,
+): boolean {
+	if (key === 'notes') {
+		return input.hasNotesContent;
+	}
+
+	if (key === 'plan') {
+		return input.hasPlanContent;
+	}
+
+	return input.hasReportContent;
+}
+
+function shouldApplyPromptEditorAutoSectionState(
+	key: 'notes' | 'plan' | 'report',
+	overrideMode: EditorPromptManualSectionOverrideMode | undefined,
+	input: ResolvePromptEditorExpandedSectionsInput,
+): boolean {
+	if (overrideMode === 'manual') {
+		return false;
+	}
+
+	if (overrideMode === 'until-content') {
+		return resolvePromptEditorSectionHasContent(key, input);
+	}
+
+	return true;
+}
+
+function resolvePromptEditorNextManualSectionOverride(
+	key: EditorPromptSectionKey,
+	input: Pick<TogglePromptEditorSectionExpansionInput, 'hasNotesContent' | 'hasPlanContent' | 'hasReportContent'>,
+): EditorPromptManualSectionOverrideMode | undefined {
+	if (!isPromptEditorAutoManagedSection(key)) {
+		return undefined;
+	}
+
+	if ((key === 'plan' || key === 'report') && !resolvePromptEditorSectionHasContent(key, {
+		hasNotesContent: input.hasNotesContent === true,
+		hasPlanContent: input.hasPlanContent === true,
+		hasReportContent: input.hasReportContent === true,
+	})) {
+		return 'until-content';
+	}
+
+	return 'manual';
+}
+
 /** Normalize view state for prompt open and optionally force the main tab. */
 export function resolvePromptOpenEditorViewState(
 	state?: EditorPromptViewState | null,
@@ -89,7 +143,7 @@ export function resolvePromptEditorExpandedSections(
 	};
 
 	for (const key of ['notes', 'plan', 'report'] as const) {
-		if (normalized.manualSectionOverrides[key] === true) {
+		if (!shouldApplyPromptEditorAutoSectionState(key, normalized.manualSectionOverrides[key], input)) {
 			continue;
 		}
 
@@ -108,16 +162,21 @@ export function togglePromptEditorSectionExpansion(
 		manualSectionOverrides: input.manualSectionOverrides || undefined,
 	});
 	const nextExpanded = !input.effectiveExpandedSections[input.key];
+	const nextManualOverride = resolvePromptEditorNextManualSectionOverride(input.key, {
+		hasNotesContent: input.hasNotesContent,
+		hasPlanContent: input.hasPlanContent,
+		hasReportContent: input.hasReportContent,
+	});
 
 	return {
 		expandedSections: {
 			...normalized.expandedSections,
 			[input.key]: nextExpanded,
 		},
-		manualSectionOverrides: isPromptEditorAutoManagedSection(input.key)
+		manualSectionOverrides: nextManualOverride
 			? {
 				...normalized.manualSectionOverrides,
-				[input.key]: true,
+				[input.key]: nextManualOverride,
 			}
 			: normalized.manualSectionOverrides,
 	};

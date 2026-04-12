@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { spawn, type ChildProcessByStdio } from 'child_process';
+import type { Readable } from 'stream';
 import * as vscode from 'vscode';
 import {
   DEFAULT_PROMPT_VOICE_WAVE_BARS,
@@ -75,7 +76,7 @@ export type PromptVoiceRecordingResult = {
 };
 
 export class PromptVoiceRecorder {
-  private process: ChildProcessWithoutNullStreams | null = null;
+  private process: ChildProcessByStdio<null, Readable, Readable> | null = null;
   private state: RecorderState = 'idle';
   private chunks: Buffer[] = [];
   private totalBytes = 0;
@@ -227,7 +228,7 @@ export class PromptVoiceRecorder {
     });
   }
 
-  private attachProcess(child: ChildProcessWithoutNullStreams): void {
+  private attachProcess(child: ChildProcessByStdio<null, Readable, Readable>): void {
     this.process = child;
 
     child.stdout.on('data', (chunk: Buffer) => {

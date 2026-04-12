@@ -428,6 +428,11 @@ const en: Record<string, string> = {
 	'editor.resetGlobalContext': 'Reset',
 	'editor.loadGlobalContext': 'Load',
 	'editor.loadingGlobalContext': 'Loading...',
+	'editor.projectInstructions': 'Project instructions',
+	'editor.projectInstructionsPlaceholder': 'Project-specific instructions for the chat agent...',
+	'editor.projectInstructionsHint': 'Saved to .vscode/prompt-manager/chat-memory/project.instructions.md and connected when starting chat',
+	'editor.projectInstructionsMissingHint': 'The file will be created in .vscode/prompt-manager/chat-memory/project.instructions.md after the first save',
+	'editor.openProjectInstructionsTooltip': 'Open project instructions file project.instructions.md',
 	'editor.valueFor': 'Value for',
 	'editor.openInEditor': 'Open in editor',
 
@@ -1343,6 +1348,11 @@ const ru: Record<string, string> = {
 	'editor.resetGlobalContext': 'Сбросить',
 	'editor.loadGlobalContext': 'Загрузить',
 	'editor.loadingGlobalContext': 'Загрузка...',
+	'editor.projectInstructions': 'Инструкция проекта',
+	'editor.projectInstructionsPlaceholder': 'Инструкции проекта для чат-агента...',
+	'editor.projectInstructionsHint': 'Сохраняется в .vscode/prompt-manager/chat-memory/project.instructions.md и подключается при запуске чата',
+	'editor.projectInstructionsMissingHint': 'Файл будет создан в .vscode/prompt-manager/chat-memory/project.instructions.md после первого сохранения',
+	'editor.openProjectInstructionsTooltip': 'Открыть файл инструкции проекта project.instructions.md',
 	'editor.valueFor': 'Значение для',
 	'editor.openInEditor': 'Открыть в редакторе',
 

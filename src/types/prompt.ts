@@ -73,8 +73,11 @@ export function isPromptEditorAutoManagedSection(
 /** Persisted expanded/collapsed state for prompt editor sections */
 export type EditorPromptExpandedSections = Record<EditorPromptSectionKey, boolean>;
 
-/** Marks sections that were toggled manually and should stop following automatic rules. */
-export type EditorPromptManualSectionOverrides = Partial<Record<EditorPromptAutoManagedSectionKey, boolean>>;
+/** Persisted mode for a manually toggled auto-managed section. */
+export type EditorPromptManualSectionOverrideMode = 'manual' | 'until-content';
+
+/** Marks sections that were toggled manually and how long the override should win. */
+export type EditorPromptManualSectionOverrides = Partial<Record<EditorPromptAutoManagedSectionKey, EditorPromptManualSectionOverrideMode>>;
 
 /** Create default expanded/collapsed state for prompt editor sections */
 export function createDefaultEditorPromptExpandedSections(): EditorPromptExpandedSections {
@@ -159,8 +162,14 @@ function normalizeEditorPromptManualSectionOverrides(
 	const normalized: EditorPromptManualSectionOverrides = {};
 
 	for (const key of PROMPT_EDITOR_AUTO_MANAGED_SECTION_KEYS) {
-		if (state?.[key] === true) {
-			normalized[key] = true;
+		const rawValue = state?.[key];
+		if (rawValue === true || rawValue === 'manual') {
+			normalized[key] = 'manual';
+			continue;
+		}
+
+		if ((key === 'plan' || key === 'report') && rawValue === 'until-content') {
+			normalized[key] = 'until-content';
 		}
 	}
 

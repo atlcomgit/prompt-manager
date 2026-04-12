@@ -19,7 +19,7 @@ test('resolvePromptOpenEditorViewState can force the main tab without losing oth
 			plan: true,
 		},
 		manualSectionOverrides: {
-			report: true,
+			report: 'manual',
 		},
 		descriptionExpanded: true,
 	}, {
@@ -31,7 +31,7 @@ test('resolvePromptOpenEditorViewState can force the main tab without losing oth
 			plan: true,
 		},
 		manualSectionOverrides: {
-			report: true,
+			report: 'manual',
 		},
 		descriptionExpanded: true,
 	});
@@ -78,8 +78,8 @@ test('resolvePromptEditorExpandedSections applies auto-open rules until notes, p
 			report: false,
 		},
 		manualSectionOverrides: {
-			notes: true,
-			report: true,
+			notes: 'manual',
+			report: 'manual',
 		},
 		hasNotesContent: true,
 		hasPlanContent: false,
@@ -106,13 +106,16 @@ test('togglePromptEditorSectionExpansion uses effective section state and marks 
 		effectiveExpandedSections,
 		expandedSections: defaults,
 		manualSectionOverrides: {},
+		hasNotesContent: false,
+		hasPlanContent: false,
+		hasReportContent: true,
 	}), {
 		expandedSections: {
 			...defaults,
 			report: false,
 		},
 		manualSectionOverrides: {
-			report: true,
+			report: 'manual',
 		},
 	});
 
@@ -127,14 +130,63 @@ test('togglePromptEditorSectionExpansion uses effective section state and marks 
 		}),
 		expandedSections: defaults,
 		manualSectionOverrides: {},
+		hasNotesContent: false,
+		hasPlanContent: false,
+		hasReportContent: false,
 	}), {
 		expandedSections: {
 			...defaults,
 			plan: true,
 		},
 		manualSectionOverrides: {
-			plan: true,
+			plan: 'until-content',
 		},
+	});
+});
+
+test('resolvePromptEditorExpandedSections reopens plan and report once content appears after an empty manual override', () => {
+	const defaults = createDefaultEditorPromptExpandedSections();
+
+	assert.deepEqual(resolvePromptEditorExpandedSections({
+		expandedSections: {
+			...defaults,
+			plan: false,
+			report: false,
+		},
+		manualSectionOverrides: {
+			plan: 'until-content',
+			report: 'until-content',
+		},
+		hasNotesContent: false,
+		hasPlanContent: true,
+		hasReportContent: true,
+	}), {
+		...defaults,
+		plan: true,
+		report: true,
+	});
+});
+
+test('resolvePromptEditorExpandedSections keeps manual collapse when plan and report already had content', () => {
+	const defaults = createDefaultEditorPromptExpandedSections();
+
+	assert.deepEqual(resolvePromptEditorExpandedSections({
+		expandedSections: {
+			...defaults,
+			plan: false,
+			report: false,
+		},
+		manualSectionOverrides: {
+			plan: 'manual',
+			report: 'manual',
+		},
+		hasNotesContent: false,
+		hasPlanContent: true,
+		hasReportContent: true,
+	}), {
+		...defaults,
+		plan: false,
+		report: false,
 	});
 });
 

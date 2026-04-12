@@ -13,7 +13,12 @@ import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { generateSmartTitle } from '../utils/smartTitle.js';
 import type { EditorPromptViewState, EditorPromptViewStateKeySource, Prompt, PromptContextFileCard } from '../types/prompt.js';
 import { createDefaultEditorPromptViewState, createDefaultPrompt, shouldShowPromptPlanForStatus } from '../types/prompt.js';
-import type { ClipboardImagePayload, WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
+import type {
+	ClipboardImagePayload,
+	WebviewToExtensionMessage,
+	ExtensionToWebviewMessage,
+	GitOverlayBusyReason,
+} from '../types/messages.js';
 import type { GitOverlaySnapshot } from '../types/git.js';
 import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
@@ -25,7 +30,11 @@ import { GitService } from '../services/gitService.js';
 import type { StateService } from '../services/stateService.js';
 import { TimeTrackingService } from '../services/timeTrackingService.js';
 import { decideFileReportSync, isLatestPersistedReport } from '../utils/reportSync.js';
-import { buildChatContextFiles, getChatMemoryDirectoryPath } from '../utils/chatContextFiles.js';
+import {
+	buildChatContextFiles,
+	getChatMemoryDirectoryPath,
+	getProjectInstructionsFilePath,
+} from '../utils/chatContextFiles.js';
 import {
 	buildGitOverlayReviewCliSetupCommand,
 	resolveGitOverlaySnapshotProjectScope,
@@ -88,7 +97,7 @@ interface GitOverlaySession {
 	refreshInFlight: boolean;
 	refreshQueued: boolean;
 	queuedMode: GitOverlayRefreshMode | null;
-	queuedBusyReason: ExtensionToWebviewMessage extends { type: 'gitOverlayBusy'; reason?: infer T } ? T : null;
+	queuedBusyReason: GitOverlayBusyReason | null;
 }
 
 export class EditorPanelManager {
@@ -375,6 +384,45 @@ export class EditorPanelManager {
 		await this.readPromptPlanSnapshot(panelKey, promptId, fileUri);
 	}
 
+	private async clearPromptPlanFileIfExists(panelKey: string, promptId: string): Promise<void> {
+		const normalizedPromptId = (promptId || '').trim();
+		if (!normalizedPromptId) {
+			return;
+		}
+
+		const planUri = this.storageService.getPromptPlanUri(normalizedPromptId);
+		try {
+			await vscode.workspace.fs.stat(planUri);
+		} catch {
+			return;
+		}
+
+		try {
+			const openDocument = vscode.workspace.textDocuments.find(document => document.uri.toString() === planUri.toString());
+			if (openDocument) {
+				const documentRange = new vscode.Range(
+					openDocument.positionAt(0),
+					openDocument.positionAt(openDocument.getText().length),
+				);
+				const edit = new vscode.WorkspaceEdit();
+				edit.replace(planUri, documentRange, '');
+				await vscode.workspace.applyEdit(edit);
+				if (openDocument.isDirty) {
+					await openDocument.save();
+				}
+			} else {
+				await vscode.workspace.fs.writeFile(planUri, Buffer.from('', 'utf-8'));
+			}
+
+			const trackedEntry = this.promptPlanByPanelKey.get(panelKey);
+			if (trackedEntry && trackedEntry.uri.toString() === planUri.toString()) {
+				await this.readPromptPlanSnapshot(panelKey, normalizedPromptId, planUri);
+			}
+		} catch (error) {
+			this.hooksOutput.appendLine(`[plan-clear] failed for prompt=${normalizedPromptId}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
 	private clearGlobalAgentContextSyncTimer(): void {
 		if (!this.globalAgentContextSyncTimer) {
 			return;
@@ -444,6 +492,99 @@ export class EditorPanelManager {
 			// keep the queue usable for subsequent saves
 		});
 		await nextPersist;
+	}
+
+	private getProjectInstructionsUri(): vscode.Uri {
+		return vscode.Uri.file(getProjectInstructionsFilePath(this.storageService.getStorageDirectoryPath()));
+	}
+
+	private async ensureProjectInstructionsDirectory(): Promise<void> {
+		await this.storageService.ensureStorageDir();
+		const chatMemoryDirectory = getChatMemoryDirectoryPath(this.storageService.getStorageDirectoryPath());
+		await vscode.workspace.fs.createDirectory(vscode.Uri.file(chatMemoryDirectory));
+	}
+
+	private async readProjectInstructionsState(): Promise<{ exists: boolean; content: string }> {
+		const fileUri = this.getProjectInstructionsUri();
+		try {
+			const fileBytes = await vscode.workspace.fs.readFile(fileUri);
+			return {
+				exists: true,
+				content: Buffer.from(fileBytes).toString('utf-8'),
+			};
+		} catch {
+			return {
+				exists: false,
+				content: '',
+			};
+		}
+	}
+
+	private async buildProjectInstructionsMessage(): Promise<ExtensionToWebviewMessage> {
+		const state = await this.readProjectInstructionsState();
+		return {
+			type: 'projectInstructions',
+			content: state.content,
+			exists: state.exists,
+		};
+	}
+
+	private async broadcastProjectInstructionsState(): Promise<void> {
+		const message = await this.buildProjectInstructionsMessage();
+		for (const panel of openPanels.values()) {
+			void panel.webview.postMessage(message);
+		}
+	}
+
+	private async persistProjectInstructions(content: string): Promise<void> {
+		await this.ensureProjectInstructionsDirectory();
+		const fileUri = this.getProjectInstructionsUri();
+		const nextContent = typeof content === 'string' ? content : '';
+
+		try {
+			const currentBytes = await vscode.workspace.fs.readFile(fileUri);
+			const currentContent = Buffer.from(currentBytes).toString('utf-8');
+			if (currentContent === nextContent) {
+				return;
+			}
+		} catch {
+			// File does not exist yet.
+		}
+
+		await vscode.workspace.fs.writeFile(fileUri, Buffer.from(nextContent, 'utf-8'));
+		await this.broadcastProjectInstructionsState();
+	}
+
+	private async openProjectInstructionsInEditor(): Promise<void> {
+		await this.ensureProjectInstructionsDirectory();
+		const fileUri = this.getProjectInstructionsUri();
+
+		try {
+			await vscode.workspace.fs.stat(fileUri);
+		} catch {
+			await vscode.workspace.fs.writeFile(fileUri, Buffer.from('', 'utf-8'));
+		}
+
+		const openDocument = vscode.workspace.textDocuments.find(document => document.uri.toString() === fileUri.toString());
+		if (openDocument) {
+			await vscode.window.showTextDocument(openDocument, {
+				viewColumn: vscode.ViewColumn.Beside,
+				preview: false,
+				preserveFocus: false,
+			});
+			return;
+		}
+
+		const doc = await vscode.workspace.openTextDocument(fileUri);
+		await vscode.window.showTextDocument(doc, {
+			viewColumn: vscode.ViewColumn.Beside,
+			preview: false,
+			preserveFocus: false,
+		});
+	}
+
+	private isProjectInstructionsUri(uri: vscode.Uri): boolean {
+		return uri.toString() === this.getProjectInstructionsUri().toString();
 	}
 
 	private getRemoteGlobalContextUrl(): string {
@@ -1523,12 +1664,68 @@ export class EditorPanelManager {
 		}
 	}
 
-	private normalizePromptForCompare(p: Prompt): string {
+	private normalizePromptForCompare(
+		p: Prompt,
+		options: { pendingAiEnrichment?: { title: boolean; description: boolean } | null } = {},
+	): string {
 		const normalized = {
 			...p,
 			updatedAt: '',
 		};
+		const pendingAiEnrichment = options.pendingAiEnrichment || null;
+		if (pendingAiEnrichment?.title) {
+			const content = normalized.content || '';
+			if (!normalized.title || (content && EditorPanelManager.isTitleFallback(normalized.title, content))) {
+				normalized.title = '';
+			}
+		}
+		if (pendingAiEnrichment?.description) {
+			const content = normalized.content || '';
+			if (!normalized.description || (content && EditorPanelManager.isDescriptionFallback(normalized.description, content))) {
+				normalized.description = '';
+			}
+		}
 		return JSON.stringify(normalized);
+	}
+
+	private hasMeaningfulPromptDiff(snapshot: Prompt, persistedPrompt: Prompt | null): boolean {
+		if (!persistedPrompt) {
+			return true;
+		}
+
+		if (this.normalizePromptForCompare(snapshot) === this.normalizePromptForCompare(persistedPrompt)) {
+			return false;
+		}
+
+		const pendingAiEnrichment = this.getPendingPromptAiEnrichmentState(snapshot);
+		if (!pendingAiEnrichment) {
+			return true;
+		}
+
+		const snapshotForCompare: Prompt = JSON.parse(JSON.stringify(snapshot));
+		const persistedForCompare: Prompt = JSON.parse(JSON.stringify(persistedPrompt));
+		const content = snapshotForCompare.content || '';
+
+		if (pendingAiEnrichment.title) {
+			const snapshotUsesFallbackTitle = !snapshotForCompare.title
+				|| (content && EditorPanelManager.isTitleFallback(snapshotForCompare.title, content));
+			if (snapshotUsesFallbackTitle) {
+				snapshotForCompare.title = '';
+				persistedForCompare.title = '';
+			}
+		}
+
+		if (pendingAiEnrichment.description) {
+			const snapshotUsesFallbackDescription = !snapshotForCompare.description
+				|| (content && EditorPanelManager.isDescriptionFallback(snapshotForCompare.description, content));
+			if (snapshotUsesFallbackDescription) {
+				snapshotForCompare.description = '';
+				persistedForCompare.description = '';
+			}
+		}
+
+		return this.normalizePromptForCompare(snapshotForCompare)
+			!== this.normalizePromptForCompare(persistedForCompare);
 	}
 
 	private hasPromptDataWithoutId(p: Prompt): boolean {
@@ -1706,16 +1903,11 @@ export class EditorPanelManager {
 		}
 
 		await this.awaitPendingReportPersist(promptToSave.id);
+		const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(promptToSave, baseSnapshot || snapshot);
+		this.applyPromptFallbacksForPendingAiEnrichment(promptToSave, aiEnrichmentPlan);
 
 		this._onDidSaveStateChange.fire({ id: saveStateId, saving: true });
 		try {
-
-			if (!promptToSave.title && promptToSave.content) {
-				promptToSave.title = await this.aiService.generateTitle(promptToSave.content);
-			}
-			if (!promptToSave.description && promptToSave.content) {
-				promptToSave.description = await this.aiService.generateDescription(promptToSave.content);
-			}
 			const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
 			await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, baseSnapshot || null);
 
@@ -1736,16 +1928,31 @@ export class EditorPanelManager {
 				promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
 			}
 
-			await this.storageService.savePrompt(promptToSave, {
+			const savedPrompt = await this.storageService.savePrompt(promptToSave, {
 				historyReason: 'switch',
 				forceHistory: true,
 				previousId: renameFromId,
 			});
-			this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
-			if (promptToSave.id && promptToSave.id !== saveStateId) {
-				this._onDidSaveStateChange.fire({ id: promptToSave.id, saving: false });
+			if (aiEnrichmentPlan.needsAiEnrichment) {
+				this.setPendingPromptAiEnrichmentState(savedPrompt.id, savedPrompt.promptUuid, {
+					title: aiEnrichmentPlan.needsTitle,
+					description: aiEnrichmentPlan.needsDescription,
+				});
+				void this.scheduleBackgroundAiEnrichment(
+					savedPrompt.id,
+					savedPrompt.promptUuid,
+					savedPrompt.content,
+					aiEnrichmentPlan.needsTitle,
+					aiEnrichmentPlan.needsDescription,
+					(message) => this.postMessageToCurrentPanel(panelKey || SINGLE_EDITOR_PANEL_KEY, message),
+					panelKey || SINGLE_EDITOR_PANEL_KEY,
+				);
 			}
-			return promptToSave;
+			this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
+			if (savedPrompt.id && savedPrompt.id !== saveStateId) {
+				this._onDidSaveStateChange.fire({ id: savedPrompt.id, saving: false });
+			}
+			return savedPrompt;
 		} catch (error) {
 			this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
 			throw error;
@@ -1787,6 +1994,9 @@ export class EditorPanelManager {
 				if (this.panelKeyByReportEditorUri.has(document.uri.toString())) {
 					void this.syncPromptReportFromDocument(document);
 				}
+				if (this.isProjectInstructionsUri(document.uri)) {
+					void this.broadcastProjectInstructionsState();
+				}
 				void this.handleContentEditorSaved(document);
 			}),
 			vscode.workspace.onDidCloseTextDocument((document) => {
@@ -1807,6 +2017,22 @@ export class EditorPanelManager {
 			}),
 			reportWatcher.onDidDelete((uri) => {
 				void this.syncPromptReportFromFileUri(uri, '');
+			})
+		);
+
+		const projectInstructionsWatcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(this.storageService.getStorageDirectoryPath(), 'chat-memory/project.instructions.md')
+		);
+		this.contentSyncDisposables.push(
+			projectInstructionsWatcher,
+			projectInstructionsWatcher.onDidCreate(() => {
+				void this.broadcastProjectInstructionsState();
+			}),
+			projectInstructionsWatcher.onDidChange(() => {
+				void this.broadcastProjectInstructionsState();
+			}),
+			projectInstructionsWatcher.onDidDelete(() => {
+				void this.broadcastProjectInstructionsState();
 			})
 		);
 	}
@@ -2874,6 +3100,58 @@ export class EditorPanelManager {
 		return vscode.env.language.startsWith('ru') ? 'ru' : 'en';
 	}
 
+	private resolvePromptAiEnrichmentPlan(
+		promptToSave: Pick<Prompt, 'id' | 'promptUuid' | 'title' | 'description' | 'content'>,
+		currentPrompt?: Pick<Prompt, 'id' | 'promptUuid'> | null,
+	): { needsTitle: boolean; needsDescription: boolean; needsAiEnrichment: boolean; enrichmentAlreadyRunning: boolean } {
+		const contentWordCount = promptToSave.content ? EditorPanelManager.wordCount(promptToSave.content) : 0;
+		const isUntitledWithEnoughContent = promptToSave.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
+			&& !!promptToSave.content
+			&& contentWordCount > 10;
+		const hasEnoughContentForTitle = !!promptToSave.content && contentWordCount > 10;
+		const isFallbackTitle = !!promptToSave.title
+			&& hasEnoughContentForTitle
+			&& EditorPanelManager.isTitleFallback(promptToSave.title, promptToSave.content);
+		const needsTitle = (!promptToSave.title || isUntitledWithEnoughContent || isFallbackTitle) && !!promptToSave.content;
+		const hasEnoughContentForDescription = !!promptToSave.content && contentWordCount > 10;
+		const isFallbackDescription = !!promptToSave.description
+			&& hasEnoughContentForDescription
+			&& EditorPanelManager.isDescriptionFallback(promptToSave.description, promptToSave.content);
+		const needsDescription = ((!promptToSave.description && hasEnoughContentForDescription) || isFallbackDescription);
+
+		const enrichmentKey = this.resolvePromptAiEnrichmentKey(
+			promptToSave.id || currentPrompt?.id,
+			promptToSave.promptUuid || currentPrompt?.promptUuid,
+		);
+		const enrichmentAlreadyRunning = Boolean(
+			enrichmentKey && this.pendingEnrichmentPromptKeys.has(enrichmentKey),
+		);
+
+		return {
+			needsTitle,
+			needsDescription,
+			needsAiEnrichment: (needsTitle || needsDescription) && !enrichmentAlreadyRunning,
+			enrichmentAlreadyRunning,
+		};
+	}
+
+	private applyPromptFallbacksForPendingAiEnrichment(
+		promptToSave: Pick<Prompt, 'title' | 'description' | 'content'>,
+		plan: { needsTitle: boolean; needsDescription: boolean; enrichmentAlreadyRunning: boolean },
+	): void {
+		if (plan.enrichmentAlreadyRunning || !promptToSave.content) {
+			return;
+		}
+
+		if (plan.needsTitle) {
+			promptToSave.title = this.makeTitleFallbackFromContent(promptToSave.content);
+		}
+
+		if (plan.needsDescription) {
+			promptToSave.description = this.makeDescriptionFallbackFromContent(promptToSave.content);
+		}
+	}
+
 	private async ensurePromptIdMatchesTitle(promptToSave: Prompt, previousId?: string): Promise<string | undefined> {
 		const normalizedPreviousId = (previousId || promptToSave.id || '').trim() || undefined;
 		const requestedIdBase = this.resolvePromptIdBase(promptToSave);
@@ -2916,6 +3194,19 @@ export class EditorPanelManager {
 			if (timeoutHandle) {
 				clearTimeout(timeoutHandle);
 			}
+		}
+	}
+
+	private async postMessageToCurrentPanel(panelKey: string, message: ExtensionToWebviewMessage): Promise<void> {
+		const panel = this.resolveOpenEditorPanel(panelKey);
+		if (!panel || this.silentClosePanels.has(panel)) {
+			return;
+		}
+
+		try {
+			await panel.webview.postMessage(message);
+		} catch {
+			// Panel may be reloading while a background task finishes.
 		}
 	}
 
@@ -4242,8 +4533,7 @@ export class EditorPanelManager {
 				let shouldPersistBeforeSwitch = !hasPendingPromptSave && (isDirty || hasUnsavedDraftData);
 				if (!shouldPersistBeforeSwitch && latestSnapshot.id && !hasPendingPromptSave) {
 					const persistedSnapshot = await this.storageService.getPrompt(latestSnapshot.id);
-					shouldPersistBeforeSwitch = !persistedSnapshot
-						|| this.normalizePromptForCompare(latestSnapshot) !== this.normalizePromptForCompare(persistedSnapshot);
+					shouldPersistBeforeSwitch = this.hasMeaningfulPromptDiff(latestSnapshot, persistedSnapshot);
 				}
 				if (shouldPersistBeforeSwitch) {
 					try {
@@ -4447,8 +4737,7 @@ export class EditorPanelManager {
 				if (currentSnapshot.id) {
 					const persisted = await this.storageService.getPrompt(currentSnapshot.id);
 					this.mergeExternalReportIfUnchanged(currentSnapshot, persisted, basePromptSnapshot);
-					hasUnsavedChanges = !persisted
-						|| this.normalizePromptForCompare(currentSnapshot) !== this.normalizePromptForCompare(persisted);
+					hasUnsavedChanges = this.hasMeaningfulPromptDiff(currentSnapshot, persisted);
 				} else {
 					hasUnsavedChanges = Boolean(
 						currentSnapshot.title
@@ -4477,25 +4766,36 @@ export class EditorPanelManager {
 						: basePromptSnapshot
 							? JSON.parse(JSON.stringify(basePromptSnapshot))
 							: createDefaultPrompt('');
+				const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(dirtySnapshot, promptRefSnapshot || basePromptSnapshot);
+				this.applyPromptFallbacksForPendingAiEnrichment(dirtySnapshot, aiEnrichmentPlan);
 				try {
-					if (!dirtySnapshot.title && dirtySnapshot.content) {
-						dirtySnapshot.title = await this.aiService.generateTitle(dirtySnapshot.content);
-					}
-					if (!dirtySnapshot.description && dirtySnapshot.content) {
-						dirtySnapshot.description = await this.aiService.generateDescription(dirtySnapshot.content);
-					}
 					const renameFromId = await this.ensurePromptIdMatchesTitle(dirtySnapshot, dirtySnapshot.id || undefined);
 					await this.guardReportOverwriteBeforeSave(panelKey, dirtySnapshot, basePromptSnapshot);
 					const persistedPrompt = dirtySnapshot.id ? await this.storageService.getPrompt(renameFromId || dirtySnapshot.id) : null;
 					this.mergeExternalReportIfUnchanged(dirtySnapshot, persistedPrompt, basePromptSnapshot);
 					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
 					dirtySnapshot.timeSpentOnTask = Math.max(0, dirtySnapshot.timeSpentOnTask || 0);
-					await this.storageService.savePrompt(dirtySnapshot, { previousId: renameFromId });
+					const savedPrompt = await this.storageService.savePrompt(dirtySnapshot, { previousId: renameFromId });
 					this.panelDirtyFlags.set(panelKey, false);
 					this.panelLatestPromptSnapshots.set(panelKey, null);
-					this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(dirtySnapshot)));
+					this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(savedPrompt)));
+					if (aiEnrichmentPlan.needsAiEnrichment) {
+						this.setPendingPromptAiEnrichmentState(savedPrompt.id, savedPrompt.promptUuid, {
+							title: aiEnrichmentPlan.needsTitle,
+							description: aiEnrichmentPlan.needsDescription,
+						});
+						void this.scheduleBackgroundAiEnrichment(
+							savedPrompt.id,
+							savedPrompt.promptUuid,
+							savedPrompt.content,
+							aiEnrichmentPlan.needsTitle,
+							aiEnrichmentPlan.needsDescription,
+							(message) => this.postMessageToCurrentPanel(panelKey, message),
+							panelKey,
+						);
+					}
 					await this.broadcastAvailableLanguagesAndFrameworks();
-					this._onDidSave.fire(dirtySnapshot.id);
+					this._onDidSave.fire(savedPrompt.id);
 				} catch (err) {
 					const message = this.formatSaveConflictMessage(err);
 					vscode.window.showErrorMessage(
@@ -4669,6 +4969,11 @@ export class EditorPanelManager {
 					languagesMessage: { type: 'availableLanguages', options: [] },
 					frameworksMessage: { type: 'availableFrameworks', options: [] },
 				};
+				let projectInstructionsMessage: ExtensionToWebviewMessage = {
+					type: 'projectInstructions',
+					content: '',
+					exists: false,
+				};
 
 				try {
 					const results = await Promise.all([
@@ -4677,6 +4982,7 @@ export class EditorPanelManager {
 						this.withTimeout(this.workspaceService.getMcpTools(), 2000, [] as any),
 						this.withTimeout(this.workspaceService.getHooks(), 2000, [] as any),
 						this.withTimeout(this.buildAvailableLanguagesAndFrameworksMessages(), 2000, availableLanguageAndFrameworkMessages),
+						this.withTimeout(this.buildProjectInstructionsMessage(), 2000, projectInstructionsMessage),
 					]);
 
 					models = results[0] || [];
@@ -4684,6 +4990,7 @@ export class EditorPanelManager {
 					mcpTools = results[2] || [];
 					hooks = results[3] || [];
 					availableLanguageAndFrameworkMessages = results[4] || availableLanguageAndFrameworkMessages;
+					projectInstructionsMessage = results[5] || projectInstructionsMessage;
 				} catch (err) {
 					console.error('[PromptManager] ready initialization partially failed:', err);
 				}
@@ -4693,6 +5000,7 @@ export class EditorPanelManager {
 				}
 
 				postMessage(this.buildGlobalContextMessage());
+				postMessage(projectInstructionsMessage);
 				postMessage({ type: 'workspaceFolders', folders: this.workspaceService.getWorkspaceFolders() });
 				postMessage({ type: 'availableModels', models });
 				postMessage({ type: 'availableSkills', skills });
@@ -4738,45 +5046,17 @@ export class EditorPanelManager {
 						await this.awaitPendingReportPersist(promptToSave.id || currentPrompt.id);
 						const saveSource = msg.source || 'manual';
 						const previousPromptId = (currentPrompt.id || msg.prompt.id || '').trim() || undefined;
-
-						const contentWordCount = promptToSave.content ? EditorPanelManager.wordCount(promptToSave.content) : 0;
-						const isUntitledWithEnoughContent = promptToSave.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
-							&& !!promptToSave.content
-							&& contentWordCount > 10;
-						const hasEnoughContentForTitle = !!promptToSave.content && contentWordCount > 10;
-						const isFallbackTitle = !!promptToSave.title
-							&& hasEnoughContentForTitle
-							&& EditorPanelManager.isTitleFallback(promptToSave.title, promptToSave.content);
-						const needsTitle = (!promptToSave.title || isUntitledWithEnoughContent || isFallbackTitle) && !!promptToSave.content;
-						const hasEnoughContentForDescription = !!promptToSave.content && contentWordCount > 10;
-						const isFallbackDescription = !!promptToSave.description
-							&& hasEnoughContentForDescription
-							&& EditorPanelManager.isDescriptionFallback(promptToSave.description, promptToSave.content);
-						const needsDescription = ((!promptToSave.description && hasEnoughContentForDescription) || isFallbackDescription);
+						const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(promptToSave, currentPrompt);
 
 						this.hooksOutput.appendLine(
 							`[ai-enrichment] save: promptId=${promptToSave.id || currentPrompt.id || '?'}`
 							+ ` title=${JSON.stringify((promptToSave.title || '').slice(0, 40))}`
-							+ ` needsTitle=${needsTitle}`
-							+ ` (empty=${!promptToSave.title}, untitled=${isUntitledWithEnoughContent}, fallback=${isFallbackTitle})`
-							+ ` needsDesc=${needsDescription}`
-							+ ` words=${contentWordCount}`,
+							+ ` needsTitle=${aiEnrichmentPlan.needsTitle}`
+							+ ` needsDesc=${aiEnrichmentPlan.needsDescription}`
+							+ ` words=${promptToSave.content ? EditorPanelManager.wordCount(promptToSave.content) : 0}`,
 						);
-
-						const enrichmentKey = this.resolvePromptAiEnrichmentKey(
-							promptToSave.id || currentPrompt.id,
-							promptToSave.promptUuid || currentPrompt.promptUuid,
-						);
-						const enrichmentAlreadyRunning = Boolean(
-							enrichmentKey && this.pendingEnrichmentPromptKeys.has(enrichmentKey),
-						);
-						if (needsTitle && !enrichmentAlreadyRunning) {
-							promptToSave.title = this.makeTitleFallbackFromContent(promptToSave.content);
-						}
-						if (needsDescription && !enrichmentAlreadyRunning) {
-							promptToSave.description = this.makeDescriptionFallbackFromContent(promptToSave.content);
-						}
-						const needsAiEnrichment = (needsTitle || needsDescription) && !enrichmentAlreadyRunning;
+						this.applyPromptFallbacksForPendingAiEnrichment(promptToSave, aiEnrichmentPlan);
+						const needsAiEnrichment = aiEnrichmentPlan.needsAiEnrichment;
 						const requestedIdBase = this.resolvePromptIdBase(promptToSave);
 
 						const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
@@ -4827,12 +5107,12 @@ export class EditorPanelManager {
 							reportPreview: this.reportDebugPreview(promptToSave.report || ''),
 						});
 						const promptForPanel = saved;
-						if (needsAiEnrichment && !enrichmentAlreadyRunning) {
+						if (needsAiEnrichment) {
 							this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, {
-								title: needsTitle,
-								description: needsDescription,
+								title: aiEnrichmentPlan.needsTitle,
+								description: aiEnrichmentPlan.needsDescription,
 							});
-						} else if (!enrichmentAlreadyRunning) {
+						} else if (!aiEnrichmentPlan.enrichmentAlreadyRunning) {
 							this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, null);
 						}
 						await this.stateService.migratePromptEditorViewState(
@@ -4923,11 +5203,11 @@ export class EditorPanelManager {
 
 						if (needsAiEnrichment) {
 							void this.scheduleBackgroundAiEnrichment(
-								promptToSave.id,
-								promptToSave.promptUuid || currentPrompt.promptUuid,
-								promptToSave.content,
-								needsTitle,
-								needsDescription,
+								saved.id,
+								saved.promptUuid || currentPrompt.promptUuid,
+								saved.content,
+								aiEnrichmentPlan.needsTitle,
+								aiEnrichmentPlan.needsDescription,
 								postMessage,
 								panelKey,
 							);
@@ -5349,8 +5629,12 @@ export class EditorPanelManager {
 						if (!normalizedSessionId) {
 							return;
 						}
+						const promptForSessionBinding = prompt;
+						if (!promptForSessionBinding) {
+							return;
+						}
 
-						const promptFromStorage = await this.storageService.getPrompt(prompt.id);
+						const promptFromStorage = await this.storageService.getPrompt(promptForSessionBinding.id);
 						if (!promptFromStorage) {
 							return;
 						}
@@ -5374,7 +5658,7 @@ export class EditorPanelManager {
 						} catch (error) {
 							this.hooksOutput.appendLine(`[chat-memory] bindChatSession failed for prompt=${promptFromStorage.id}: ${error instanceof Error ? error.message : String(error)}`);
 						}
-						Object.assign(prompt, promptFromStorage);
+						Object.assign(promptForSessionBinding, promptFromStorage);
 						if (currentPrompt.id === promptFromStorage.id) {
 							Object.assign(currentPrompt, promptFromStorage);
 							postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
@@ -5422,6 +5706,7 @@ export class EditorPanelManager {
 						}
 					}
 					this._onDidSave.fire(prompt.id);
+					await this.clearPromptPlanFileIfExists(panelKey, prompt.id);
 
 					// Compose query with prompt content and metadata
 					const globalContext = this.stateService.getGlobalAgentContext();
@@ -5585,7 +5870,7 @@ export class EditorPanelManager {
 							requestModelIdentifier
 							|| requestModelSelector?.id
 							|| requestModelSelector?.family
-							|| prompt.model
+							|| prompt?.model
 							|| '',
 						).trim() || 'default';
 						if (requestModelSelector) {
@@ -5870,8 +6155,8 @@ export class EditorPanelManager {
 							}
 
 							await this.scheduleChatSessionRename(
-								String(completion.sessionId || trackedSessionId || promptForTiming.chatSessionIds?.[0] || ''),
-								promptForTiming.id,
+								String(completion.sessionId || trackedSessionId || promptForTiming?.chatSessionIds?.[0] || ''),
+								promptForTiming?.id || prompt.id,
 								' (fallback)',
 							);
 
@@ -6872,8 +7157,18 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'getProjectInstructions': {
+				postMessage(await this.buildProjectInstructionsMessage());
+				break;
+			}
+
 			case 'saveGlobalContext': {
 				await this.persistGlobalAgentContext(msg.context);
+				break;
+			}
+
+			case 'saveProjectInstructions': {
+				await this.persistProjectInstructions(msg.content);
 				break;
 			}
 
@@ -6897,6 +7192,11 @@ export class EditorPanelManager {
 						message: `Не удалось загрузить общую инструкцию: ${message}`,
 					});
 				}
+				break;
+			}
+
+			case 'openProjectInstructionsInEditor': {
+				await this.openProjectInstructionsInEditor();
 				break;
 			}
 

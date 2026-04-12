@@ -103,12 +103,15 @@ export type WebviewToExtensionMessage =
 	| { type: 'moveSelectedPromptsToStatus'; ids: string[]; status: PromptStatus }
 	| { type: 'archivePrompts'; ids: string[] }
 	| { type: 'getGlobalContext' }
+	| { type: 'getProjectInstructions' }
 	| { type: 'saveGlobalContext'; context: string }
+	| { type: 'saveProjectInstructions'; content: string }
 	| { type: 'loadRemoteGlobalContext' }
 	| { type: 'createBranch'; branch: string; projects: string[] }
 	| { type: 'openPromptContentInEditor'; content: string; promptId?: string; title?: string }
 	| { type: 'openPromptReportInEditor'; report: string; promptId?: string; title?: string }
 	| { type: 'openPromptConfigInEditor'; promptId?: string }
+	| { type: 'openProjectInstructionsInEditor' }
 	| { type: 'openPromptPlanInEditor'; promptId?: string }
 	| { type: 'requestPromptPlanState'; promptId?: string }
 	| { type: 'showPromptHistory'; id: string }
@@ -176,6 +179,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'globalContext'; context: string; canLoadRemote: boolean }
 	| { type: 'globalContextLoaded'; context: string; canLoadRemote: boolean }
 	| { type: 'globalContextLoadFailed'; message: string }
+	| { type: 'projectInstructions'; content: string; exists: boolean }
 	| { type: 'gitOverlayTrackedBranchPreference'; branch: string; branchesByProject?: Record<string, string> }
 	| { type: 'availableLanguages'; options: Array<{ id: string; name: string }> }
 	| { type: 'availableFrameworks'; options: Array<{ id: string; name: string }> }

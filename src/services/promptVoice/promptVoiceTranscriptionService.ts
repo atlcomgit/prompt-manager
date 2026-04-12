@@ -1,6 +1,16 @@
 import * as fs from 'fs';
-import type { AutomaticSpeechRecognitionPipelineType } from '@xenova/transformers';
 import { preparePromptVoiceSamplesForTranscription } from '../../shared/promptVoice.js';
+
+type AutomaticSpeechRecognitionPipelineType = (
+  samples: Float32Array,
+  options: {
+    language: string;
+    task: 'transcribe';
+    chunk_length_s: number;
+    stride_length_s: number;
+    return_timestamps: boolean;
+  },
+) => Promise<{ text?: string } | Array<{ text?: string }>>;
 
 export type PromptVoiceTranscriptionState = {
   stage: 'preparing-model' | 'processing';

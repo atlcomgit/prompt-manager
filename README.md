@@ -76,7 +76,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 
 - Start a GitHub Copilot chat directly from a selected prompt.
 - Reopen existing chat sessions linked to the prompt.
-- Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context.
+- Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.
 - Keep the prompt, report, and editor state tied to the same workflow instead of splitting them across tools.
 
 ### Work with Git without leaving the prompt flow
@@ -94,12 +94,15 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Review the Process tab in workflow order with notes first, then the plan, and the report after that.
 - New prompts always open on the Main tab with Basic, Time tracking, Workspace, Prompt,
   and Agent expanded by default, Notes starts collapsed but reopens automatically when it
-  receives content before any manual toggle, Plan and Report do the same while they stay
-  untouched, Start Chat waits for title and description enrichment to finish, and prompt
-  folders stay stable after chat start while the Process tab only shows launch progress until
-  the chat binding is actually unfinished.
+  receives content before any manual toggle, and Plan and Report now also reopen when they
+  were manually toggled while still empty and content appears later, while non-empty sections
+  keep respecting later manual collapse changes, Start Chat waits for title and description
+  enrichment to finish, and prompt folders stay stable after chat start while the Process tab
+  only shows launch progress until the chat binding is actually unfinished.
 - Open plan and report content through consistent inline Open actions across the prompt editor.
+- Edit shared agent context and a dedicated project instructions file directly from the General instruction block, and open both from the editor without leaving the workflow.
 - Track writing time, implementation time, overall time on task, and untracked corrections.
+- Let the report editor expand to the content automatically without blanking the webview when the section opens, while a new Start Chat run clears the previous plan after the launch preflight succeeds.
 - Open statistics and export delivery-friendly summaries in HTML or Markdown.
 - Auto-fill report hours from working days in the selected period, persist the hourly rate per workspace, and omit hour or cost sections when those values are empty or zero.
 - Keep reports inside the prompt workflow instead of treating them as a separate afterthought.

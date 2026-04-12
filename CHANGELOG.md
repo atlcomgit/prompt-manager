@@ -8,9 +8,13 @@
 - Git Flow step 1 now includes dirty workspace projects outside the current prompt selection so they can be added directly from the overlay.
 - New prompts now always open on the Main tab, Start Chat stays disabled while title or description AI enrichment is still running, prompt folders stop renaming after chat start fixes the directory path, and completed chat-launch blocks no longer reappear just because status was manually switched back to In Progress.
 - New prompt editor disclosure rules now open Basic, Time tracking, Workspace, Prompt, and Agent by default, while Notes starts collapsed and Notes, Plan, and Report expand automatically when content appears until the section is toggled manually.
+- Starting a fresh chat now clears an existing prompt plan only after the start preflight succeeds, so stale plan steps do not leak into the next run.
+- Plan and Report now reopen automatically when their section was still empty at the time of a manual toggle and content appears later, while non-empty sections continue to respect the user's manual collapse state.
+- Opening the Report section no longer risks blanking the editor webview when the auto-resizing report editor mounts.
 
 ### Improved
 - Copilot Chat start context now includes the absolute chat-memory directory together with generated memory instruction file references.
+- The prompt editor header can open a dedicated chat-memory project.instructions.md file, the General instruction block can edit it directly, and report editing now grows with content automatically instead of relying on manual resize.
 
 ## [0.1.88] - 2026-04-10
 

@@ -225,6 +225,15 @@ const OpenFileIcon: React.FC = () => (
   </svg>
 );
 
+const ProjectInstructionsIcon: React.FC = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" style={styles.inlineIcon}>
+    <path
+      fill="currentColor"
+      d="M3 2.25A1.25 1.25 0 0 1 4.25 1h6.69c.33 0 .65.13.88.37l1.81 1.8c.23.24.37.56.37.89v9.69A1.25 1.25 0 0 1 12.75 15h-8.5A1.25 1.25 0 0 1 3 13.75v-11.5Zm1.5.25v11h8V4.56L10.94 3H4.5Zm1.25 3a.75.75 0 0 1 .75-.75h4a.75.75 0 0 1 0 1.5h-4a.75.75 0 0 1-.75-.75Zm0 2.75a.75.75 0 0 1 .75-.75h4a.75.75 0 0 1 0 1.5h-4a.75.75 0 0 1-.75-.75Zm0 2.75a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5H6.5a.75.75 0 0 1-.75-.75Z"
+    />
+  </svg>
+);
+
 export const EditorApp: React.FC = () => {
   const t = useT();
   const bootIdRef = useRef<string>(initialBootId);
@@ -364,6 +373,8 @@ export const EditorApp: React.FC = () => {
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
+  const [projectInstructions, setProjectInstructions] = useState('');
+  const [projectInstructionsExists, setProjectInstructionsExists] = useState(false);
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [expandedSections, setExpandedSections] = useState<EditorPromptExpandedSections>(
     () => initialEditorViewStateRef.current?.expandedSections || createDefaultEditorPromptViewState().expandedSections,
@@ -381,6 +392,7 @@ export const EditorApp: React.FC = () => {
   const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
   const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
+  const [projectInstructionsHeight, setProjectInstructionsHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.projectInstructionsHeight'));
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(
     () => initialEditorViewStateRef.current?.descriptionExpanded || createDefaultEditorPromptViewState().descriptionExpanded,
@@ -456,6 +468,7 @@ export const EditorApp: React.FC = () => {
   const handleStartChatRef = useRef<() => void>(() => undefined);
   const handleOpenChatRef = useRef<() => void>(() => undefined);
   const globalContextTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const projectInstructionsTextareaRef = useRef<HTMLTextAreaElement>(null);
   const saveTimeoutRef = useRef<number | null>(null);
   const currentPromptIdRef = useRef<string>('__new__');
   const activeSaveIdRef = useRef<string | null>(null);
@@ -600,6 +613,11 @@ export const EditorApp: React.FC = () => {
   const persistGlobalContext = useCallback((context: string) => {
     setGlobalContext(context);
     vscode.postMessage({ type: 'saveGlobalContext', context });
+  }, []);
+
+  const persistProjectInstructions = useCallback((content: string) => {
+    setProjectInstructions(content);
+    vscode.postMessage({ type: 'saveProjectInstructions', content });
   }, []);
 
   const handleResetGlobalContext = useCallback(() => {
@@ -890,11 +908,11 @@ export const EditorApp: React.FC = () => {
   const globalPromptSummary = useMemo(() => {
     const chunks: string[] = [];
     if (globalContext.trim()) chunks.push(`Контекст: ${toShortText(globalContext, 64)}`);
+    if (projectInstructions.trim()) chunks.push(`Инструкция проекта: ${toShortText(projectInstructions, 64)}`);
     return chunks;
-  }, [globalContext]);
+  }, [globalContext, projectInstructions]);
 
   const hasGlobalContext = globalContext.trim().length > 0;
-
   const normalizedReportText = useMemo(
     () => (prompt.report || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(),
     [prompt.report],
@@ -1107,6 +1125,10 @@ export const EditorApp: React.FC = () => {
   const handleOpenPromptConfigInEditor = useCallback(() => {
     vscode.postMessage({ type: 'openPromptConfigInEditor', promptId: prompt.id });
   }, [prompt.id]);
+
+  const handleOpenProjectInstructionsInEditor = useCallback(() => {
+    vscode.postMessage({ type: 'openProjectInstructionsInEditor' });
+  }, []);
 
   useEffect(() => {
     const readyTimer = window.setTimeout(() => {
@@ -1628,6 +1650,10 @@ export const EditorApp: React.FC = () => {
         setIsLoadingGlobalContext(false);
         showInlineNotice('error', msg.message || 'Не удалось загрузить общую инструкцию.');
         break;
+      case 'projectInstructions':
+        setProjectInstructions(msg.content || '');
+        setProjectInstructionsExists(msg.exists === true);
+        break;
       case 'promptAiEnrichmentState':
         if (!shouldApplyPromptAiEnrichmentState(
           msg.promptId,
@@ -2109,6 +2135,17 @@ export const EditorApp: React.FC = () => {
   }, [globalContextHeight, storage]);
 
   useEffect(() => {
+    if (!projectInstructionsHeight) {
+      return;
+    }
+    const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
+    vscode.setState?.({ ...currentState, 'pm.editor.projectInstructionsHeight': projectInstructionsHeight });
+    if (storage) {
+      storage.setItem('pm.editor.projectInstructionsHeight', String(projectInstructionsHeight));
+    }
+  }, [projectInstructionsHeight, storage]);
+
+  useEffect(() => {
     const nextEditorViewState = normalizeEditorPromptViewState({
       activeTab,
       expandedSections,
@@ -2149,6 +2186,21 @@ export const EditorApp: React.FC = () => {
       const nextHeight = Math.round(textarea.getBoundingClientRect().height);
       if (nextHeight > 0) {
         setGlobalContextHeight(nextHeight);
+      }
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!projectInstructionsTextareaRef.current || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+    const textarea = projectInstructionsTextareaRef.current;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = Math.round(textarea.getBoundingClientRect().height);
+      if (nextHeight > 0) {
+        setProjectInstructionsHeight(nextHeight);
       }
     });
     observer.observe(textarea);
@@ -2925,6 +2977,9 @@ export const EditorApp: React.FC = () => {
       effectiveExpandedSections,
       expandedSections,
       manualSectionOverrides,
+	  hasNotesContent,
+	  hasPlanContent,
+	  hasReportContent,
     });
 
     setExpandedSections(nextSectionState.expandedSections);
@@ -3260,6 +3315,15 @@ export const EditorApp: React.FC = () => {
                   </button>
                 ))}
               </div>
+              <button
+                type="button"
+                style={styles.headerIconBtn}
+                onClick={handleOpenProjectInstructionsInEditor}
+                title={t('editor.openProjectInstructionsTooltip')}
+                aria-label={t('editor.openProjectInstructionsTooltip')}
+              >
+                <ProjectInstructionsIcon />
+              </button>
               <button
                 type="button"
                 style={{
@@ -3683,6 +3747,42 @@ export const EditorApp: React.FC = () => {
                 />
                 <span style={styles.varHint}>{t('editor.globalContextHint')}</span>
               </div>
+
+              <div style={styles.field}>
+                <div style={styles.promptFieldHeader}>
+                  <div style={styles.promptFieldLabelRow}>
+                    <label style={styles.label}>{t('editor.projectInstructions')}</label>
+                  </div>
+                  <div style={styles.promptFieldActions}>
+                    <button
+                      type="button"
+                      style={styles.linkBtn}
+                      onClick={handleOpenProjectInstructionsInEditor}
+                      title={t('editor.openProjectInstructionsTooltip')}
+                    >
+                      {openActionLabel}
+                    </button>
+                  </div>
+                </div>
+                <textarea
+                  ref={projectInstructionsTextareaRef}
+                  value={projectInstructions}
+                  onChange={e => {
+                    persistProjectInstructions(e.target.value);
+                  }}
+                  placeholder={t('editor.projectInstructionsPlaceholder')}
+                  rows={3}
+                  style={{
+                    ...styles.globalContextTextarea,
+                    height: projectInstructionsHeight ? `${projectInstructionsHeight}px` : undefined,
+                  }}
+                />
+                <span style={styles.varHint}>
+                  {projectInstructionsExists
+                    ? t('editor.projectInstructionsHint')
+                    : t('editor.projectInstructionsMissingHint')}
+                </span>
+              </div>
             </>
           ))}
 
@@ -3893,6 +3993,7 @@ export const EditorApp: React.FC = () => {
                   onChange={v => updateField('report', v)}
                   onDebug={logMainRichTextDebug}
                   autoModeKey={prompt.id}
+                  autoResize
                   placeholder={t('editor.reportPlaceholder')}
                   contentPadding="compact"
                   persistedHeight={reportHeight}

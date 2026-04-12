@@ -22,6 +22,7 @@ interface Props {
   secondaryActionTitle?: string;
   secondaryActionDisabled?: boolean;
   fillHeight?: boolean;
+  autoResize?: boolean;
   showFormattingToolbar?: boolean;
   contentPadding?: 'default' | 'compact';
 }
@@ -262,10 +263,13 @@ export const RichTextEditor: React.FC<Props> = ({
   secondaryActionTitle,
   secondaryActionDisabled,
   fillHeight,
+  autoResize = false,
   showFormattingToolbar,
   contentPadding = 'default',
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
+  const sourceRef = useRef<HTMLTextAreaElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
   const lastLocalValueRef = useRef<string | null>(null);
   const isModeManuallySelectedRef = useRef(false);
   const [mode, setMode] = useState<Mode>(() => detectPreferredMode(value || ''));
@@ -311,6 +315,38 @@ export const RichTextEditor: React.FC<Props> = ({
   useEffect(() => {
     onHeightChange?.(currentHeight);
   }, [currentHeight, onHeightChange]);
+
+  const resolveAutoResizeTarget = useCallback((): HTMLElement | null => {
+    if (mode === 'visual') {
+      return editorRef.current;
+    }
+    if (mode === 'html') {
+      return sourceRef.current;
+    }
+    return previewRef.current;
+  }, [mode]);
+
+  const syncAutoResizeHeight = useCallback(() => {
+    if (fillHeight || !autoResize) {
+      return;
+    }
+
+    const target = resolveAutoResizeTarget();
+    if (!target || !target.isConnected) {
+      return;
+    }
+
+    const measuredHeight = Math.ceil(target.scrollHeight || 0);
+    if (measuredHeight <= 0) {
+      return;
+    }
+
+    const nextHeight = Math.max(
+      MIN_HEIGHT,
+      Math.min(MAX_HEIGHT, measuredHeight + 2),
+    );
+    setCurrentHeight((previousHeight) => previousHeight === nextHeight ? previousHeight : nextHeight);
+  }, [autoResize, fillHeight, resolveAutoResizeTarget]);
 
   useEffect(() => {
     const nextValue = value || '';
@@ -445,6 +481,10 @@ export const RichTextEditor: React.FC<Props> = ({
       });
     }
   }, [mode, onDebug, value]);
+
+  useEffect(() => {
+    syncAutoResizeHeight();
+  }, [htmlSource, markdownPreviewHtml, mode, syncAutoResizeHeight, value]);
 
   useEffect(() => {
     if (!showFormattingToolbar) {
@@ -1115,11 +1155,13 @@ export const RichTextEditor: React.FC<Props> = ({
             height: fillHeight ? undefined : `${currentHeight}px`,
             minHeight: undefined,
             maxHeight: undefined,
+            overflow: autoResize ? 'hidden' : undefined,
           }}
         />
       ) : mode === 'markdown' ? (
         markdownPreviewHtml ? (
           <div
+            ref={previewRef}
             className="pm-rich-markdown-preview"
             style={{
               ...styles.preview,
@@ -1128,11 +1170,13 @@ export const RichTextEditor: React.FC<Props> = ({
               height: fillHeight ? undefined : `${currentHeight}px`,
               minHeight: undefined,
               maxHeight: undefined,
+              overflow: autoResize ? 'hidden' : undefined,
             }}
             dangerouslySetInnerHTML={{ __html: markdownPreviewHtml }}
           />
         ) : (
           <div
+            ref={previewRef}
             style={{
               ...styles.previewEmpty,
               ...(isCompactPadding ? styles.previewCompactPadding : null),
@@ -1140,6 +1184,7 @@ export const RichTextEditor: React.FC<Props> = ({
               height: fillHeight ? undefined : `${currentHeight}px`,
               minHeight: undefined,
               maxHeight: undefined,
+              overflow: autoResize ? 'hidden' : undefined,
             }}
           >
             {translate('editor.markdownPreviewEmpty', 'Markdown preview is empty. Switch to Text mode to edit the content.')}
@@ -1147,6 +1192,7 @@ export const RichTextEditor: React.FC<Props> = ({
         )
       ) : (
         <textarea
+          ref={sourceRef}
           value={htmlSource}
           onChange={(e) => {
             const next = normalizeText(e.target.value);
@@ -1167,13 +1213,14 @@ export const RichTextEditor: React.FC<Props> = ({
             height: fillHeight ? undefined : `${currentHeight}px`,
             minHeight: undefined,
             maxHeight: undefined,
+            overflow: autoResize ? 'hidden' : undefined,
           }}
           spellCheck={false}
         />
       )}
 
       {/* Drag handle for resizing */}
-      {!fillHeight && (
+      {!fillHeight && !autoResize && (
         <div
           onMouseDown={handleDragStart}
           style={styles.resizeHandle}

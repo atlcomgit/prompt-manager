@@ -17,9 +17,14 @@ interface ChatContextFilesResult {
 const CHAT_MEMORY_DIR_NAME = 'chat-memory';
 const AI_INSTRUCTIONS_FILE_NAME = 'ai.instructions.md';
 const CODEMAP_INSTRUCTIONS_FILE_NAME = 'codemap.instructions.md';
+export const PROJECT_INSTRUCTIONS_FILE_NAME = 'project.instructions.md';
 
 export function getChatMemoryDirectoryPath(storageDir: string): string {
 	return path.join(storageDir, CHAT_MEMORY_DIR_NAME);
+}
+
+export function getProjectInstructionsFilePath(storageDir: string): string {
+	return path.join(getChatMemoryDirectoryPath(storageDir), PROJECT_INSTRUCTIONS_FILE_NAME);
 }
 
 export function buildChatContextFiles(options: BuildChatContextFilesOptions): ChatContextFilesResult {
@@ -33,6 +38,7 @@ export function buildChatContextFiles(options: BuildChatContextFilesOptions): Ch
 	const instructionAbsolutePaths = dedupe([
 		path.join(chatMemoryDirectory, AI_INSTRUCTIONS_FILE_NAME),
 		(options.sessionInstructionFilePath || '').trim(),
+		getProjectInstructionsFilePath(options.storageDir),
 		path.join(chatMemoryDirectory, CODEMAP_INSTRUCTIONS_FILE_NAME),
 	].filter(filePath => Boolean(filePath) && fs.existsSync(filePath)));
 

@@ -85,7 +85,7 @@ export class PromptVoiceRecorder {
   private limitReached = false;
   private lastWaveLevels = createIdleWaveLevels();
 
-  constructor(private readonly options: PromptVoiceRecorderOptions = {}) {}
+  constructor(private readonly options: PromptVoiceRecorderOptions = {}) { }
 
   getElapsedMs(): number {
     return bytesToMs(this.totalBytes);

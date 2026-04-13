@@ -15,6 +15,7 @@ export type PromptVoiceStatus =
   | 'paused'
   | 'preparing-model'
   | 'processing'
+  | 'correcting'
   | 'error';
 
 type PromptVoiceControllerOptions = {
@@ -193,8 +194,15 @@ export const usePromptVoiceController = ({
 
         case 'preparing-model':
         case 'processing':
+        case 'correcting':
           setStatus(msg.status);
-          setProgressMessage(msg.message || (msg.status === 'processing' ? 'Обрабатывается' : 'Подготавливается модель'));
+          setProgressMessage(msg.message || (
+            msg.status === 'correcting'
+              ? 'AI коррекция'
+              : msg.status === 'processing'
+                ? 'Обрабатывается'
+                : 'Подготавливается модель'
+          ));
           setProgressPercent(typeof msg.progress === 'number' ? msg.progress : null);
           setLevels(DEFAULT_WAVE);
           break;

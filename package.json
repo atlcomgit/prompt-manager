@@ -428,6 +428,26 @@
           "description": "Enable semantic search via Transformers.js embeddings. The model (~30 MB) will be downloaded in the background.",
           "default": true
         },
+        "promptManager.voice.whisperModel": {
+          "type": "string",
+          "enum": [
+            "tiny",
+            "base",
+            "small"
+          ],
+          "description": "Whisper model size for speech recognition: tiny (~39 MB, fast, lower quality), base (~74 MB), small (~244 MB quantized to ~60 MB with q8, best quality for Russian).",
+          "default": "small"
+        },
+        "promptManager.voice.language": {
+          "type": "string",
+          "description": "Language for speech recognition (e.g. russian, english, german).",
+          "default": "russian"
+        },
+        "promptManager.voice.aiPostCorrection": {
+          "type": "boolean",
+          "description": "Enable AI post-correction of transcribed text using Copilot LM API. Fixes punctuation, phonetic errors, and whitespace issues after Whisper recognition.",
+          "default": true
+        },
         "promptManager.memory.knowledgeGraph.enabled": {
           "type": "boolean",
           "description": "Enable knowledge graph construction from deep analysis.",
@@ -617,11 +637,11 @@
     "test": "npm run test:compile && npm run test:run",
     "test:compile": "node -e \"require('fs').rmSync('out-tests', { recursive: true, force: true })\" && tsc -p tsconfig.tests.json",
     "test:run": "node --test out-tests/tests/*.test.js",
-    "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@xenova/transformers --format=cjs --platform=node --minify",
+    "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@huggingface/transformers --format=cjs --platform=node --minify",
     "build:webview": "node esbuild.webview.mjs",
     "copy:wasm": "cp node_modules/sql.js/dist/sql-wasm.wasm dist/sql-wasm.wasm",
     "watch:esbuild": "npm run watch:extension & npm run watch:webview",
-    "watch:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@xenova/transformers --format=cjs --platform=node --sourcemap --watch",
+    "watch:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@huggingface/transformers --format=cjs --platform=node --sourcemap --watch",
     "watch:webview": "node esbuild.webview.mjs --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "watch-tests": "tsc -p . -w --outDir out",
@@ -643,7 +663,7 @@
   },
   "dependencies": {
     "@vscode/codicons": "^0.0.44",
-    "@xenova/transformers": "^2.17.2",
+    "@huggingface/transformers": "^4.0.1",
     "3d-force-graph": "^1.79.1",
     "ignore": "^7.0.5",
     "markdown-it": "^14.1.1",

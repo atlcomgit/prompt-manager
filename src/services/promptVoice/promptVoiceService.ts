@@ -2,6 +2,7 @@ import type { ExtensionToWebviewMessage } from '../../types/messages.js';
 import { createIdleWaveLevels, createSilentWaveLevels } from '../../shared/promptVoice.js';
 import { getPromptManagerOutputChannel } from '../../utils/promptManagerOutput.js';
 import { PromptVoiceRecorder } from './promptVoiceRecorder.js';
+import { PromptVoicePostCorrectionService } from './promptVoicePostCorrectionService.js';
 import { PromptVoiceTranscriptionService } from './promptVoiceTranscriptionService.js';
 
 type PostMessage = (message: ExtensionToWebviewMessage) => void;
@@ -99,6 +100,8 @@ export class PromptVoiceService {
   private readonly sessions = new Map<string, PromptVoiceSessionEntry>();
   private readonly output = getPromptManagerOutputChannel();
   private readonly transcriptionService: PromptVoiceTranscriptionService;
+  /** Сервис AI пост-коррекции распознанного текста */
+  private readonly postCorrectionService = new PromptVoicePostCorrectionService();
 
   constructor(cacheDir: string) {
     this.transcriptionService = new PromptVoiceTranscriptionService(cacheDir);
@@ -249,6 +252,21 @@ export class PromptVoiceService {
         throw new Error('PROMPT_VOICE_EMPTY_TRANSCRIPTION');
       }
 
+      // AI пост-коррекция распознанного текста
+      const correctionSession = this.getSession(panelKey, sessionId);
+      if (!correctionSession) {
+        return;
+      }
+      correctionSession.postMessage({
+        type: 'promptVoiceState',
+        sessionId,
+        status: 'correcting',
+        elapsedMs: result.durationMs,
+        message: 'AI коррекция',
+        progress: null,
+      });
+      const correctedText = await this.postCorrectionService.correct(text);
+
       const activeSession = this.getSession(panelKey, sessionId);
       if (!activeSession) {
         return;
@@ -258,7 +276,7 @@ export class PromptVoiceService {
         type: 'promptVoiceState',
         sessionId,
         status: 'transcribed',
-        text,
+        text: correctedText,
       });
       this.sessions.delete(panelKey);
     } catch (error) {

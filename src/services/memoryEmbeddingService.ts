@@ -32,17 +32,17 @@ export class MemoryEmbeddingService {
 		this.setStatus('downloading');
 
 		try {
-			// Dynamic import to avoid bundling issues
-			const { pipeline, env } = await import('@xenova/transformers');
+			// Динамический импорт для корректной работы бандлера
+			const { pipeline, env } = await import('@huggingface/transformers');
 
 			// Configure cache directory
 			env.cacheDir = cacheDir;
 			env.allowLocalModels = true;
 			env.allowRemoteModels = true;
 
-			// Load feature-extraction pipeline (downloads model on first call)
+			// Загрузка pipeline для генерации эмбеддингов (скачивает модель при первом вызове)
 			this.pipeline = await pipeline('feature-extraction', this.MODEL_ID, {
-				quantized: true,
+				dtype: 'q8',
 			});
 
 			this.setStatus('ready');

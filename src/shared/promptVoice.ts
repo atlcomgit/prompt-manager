@@ -1,11 +1,27 @@
+/** Максимальная длительность записи голоса (5 минут) */
 export const MAX_PROMPT_VOICE_RECORDING_MS = 5 * 60 * 1000;
+/** Количество баров визуализации волны по умолчанию */
 export const DEFAULT_PROMPT_VOICE_WAVE_BARS = 24;
+/** Целевая частота дискретизации для Whisper (16 кГц) */
 export const PROMPT_VOICE_TARGET_SAMPLE_RATE = 16000;
+/** Количество каналов аудио (моно) */
 export const PROMPT_VOICE_CHANNELS = 1;
+/** Байт на сэмпл для PCM16 */
 export const PROMPT_VOICE_BYTES_PER_SAMPLE = 2;
+/** Максимальный размер записи в байтах */
 export const MAX_PROMPT_VOICE_RECORDING_BYTES = Math.floor(
   (PROMPT_VOICE_TARGET_SAMPLE_RATE * PROMPT_VOICE_CHANNELS * PROMPT_VOICE_BYTES_PER_SAMPLE * MAX_PROMPT_VOICE_RECORDING_MS) / 1000,
 );
+
+/** Допустимые размеры модели Whisper для настройки */
+export type WhisperModelSize = 'tiny' | 'base' | 'small';
+
+/** Маппинг размера модели на ONNX-оптимизированный ID для HuggingFace Hub */
+export const WHISPER_MODEL_MAP: Record<WhisperModelSize, string> = {
+  tiny: 'onnx-community/whisper-tiny',
+  base: 'onnx-community/whisper-base',
+  small: 'onnx-community/whisper-small',
+} as const;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const softClip = (value: number, drive: number): number => Math.tanh(value * drive) / Math.tanh(drive);

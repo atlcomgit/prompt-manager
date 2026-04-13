@@ -205,7 +205,7 @@ export type ExtensionToWebviewMessage =
 	| {
 		type: 'promptVoiceState';
 		sessionId: string;
-		status: 'recording' | 'paused' | 'preparing-model' | 'processing' | 'error' | 'cancelled' | 'transcribed';
+		status: 'recording' | 'paused' | 'preparing-model' | 'processing' | 'correcting' | 'error' | 'cancelled' | 'transcribed';
 		elapsedMs?: number;
 		level?: number;
 		levels?: number[];

@@ -281,7 +281,7 @@ export const PromptVoiceOverlay: React.FC<Props> = ({
 }) => {
   const isPaused = status === 'paused';
   const isRecording = status === 'recording' || status === 'paused';
-  const isBusy = status === 'preparing-model' || status === 'processing';
+  const isBusy = status === 'preparing-model' || status === 'processing' || status === 'correcting';
   const isError = status === 'error';
 
   return (

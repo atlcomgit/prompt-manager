@@ -1,11 +1,11 @@
-import type { AutomaticSpeechRecognitionPipelineType } from '@xenova/transformers';
-
+/** Состояние подготовки модели или обработки аудио */
 export type PromptVoicePreparationState = {
   stage: 'preparing-model' | 'processing';
   message: string;
   progress?: number | null;
 };
 
+/** Интерфейс провайдера распознавания речи */
 export interface PromptVoiceSttProvider {
   transcribe(
     samples: Float32Array,
@@ -13,19 +13,29 @@ export interface PromptVoiceSttProvider {
   ): Promise<string>;
 }
 
-const DEFAULT_WHISPER_MODEL_ID = 'Xenova/whisper-tiny';
+/** Вызываемый тип ASR-pipeline (результат pipeline()) */
+type AsrPipelineCallable = (
+  audio: Float32Array,
+  options: Record<string, unknown>,
+) => Promise<{ text?: string } | Array<{ text?: string }>>;
+
+/** ID модели Whisper для распознавания в webview (onnx-community, квантизованная) */
+const DEFAULT_WHISPER_MODEL_ID = 'onnx-community/whisper-small';
+/** Длина чанка в секундах для потоковой обработки длинных аудио */
 const DEFAULT_CHUNK_LENGTH_SECONDS = 20;
+/** Перекрытие чанков в секундах для плавного склеивания */
 const DEFAULT_STRIDE_SECONDS = 4;
 
-let pipelinePromise: Promise<AutomaticSpeechRecognitionPipelineType> | null = null;
+/** Кэшированный promise для ленивой инициализации pipeline */
+let pipelinePromise: Promise<AsrPipelineCallable> | null = null;
 
+/** Описание прогресса загрузки модели для UI */
 const describeProgress = (status: string, file?: string): string => {
   const prettyFile = file ? ` ${file.split('/').pop()}` : '';
   switch (status) {
     case 'initiate':
       return 'Подготавливается модель';
     case 'download':
-      return `Загружается${prettyFile}`;
     case 'progress':
       return `Загружается${prettyFile}`;
     case 'done':
@@ -35,22 +45,25 @@ const describeProgress = (status: string, file?: string): string => {
   }
 };
 
+/** Ленивая инициализация ASR-pipeline с квантизацией q8 */
 const ensurePipeline = async (
   onStateChange?: (state: PromptVoicePreparationState) => void,
-): Promise<AutomaticSpeechRecognitionPipelineType> => {
+): Promise<AsrPipelineCallable> => {
   if (!pipelinePromise) {
     pipelinePromise = (async () => {
-      const { env, pipeline } = await import('@xenova/transformers');
+      const { env, pipeline } = await import('@huggingface/transformers');
+      // Настройка среды: загрузка с HuggingFace Hub, кэш в браузере
       env.allowRemoteModels = true;
       env.allowLocalModels = false;
       env.useBrowserCache = true;
+      // Ограничение WASM-потоков для стабильности в webview
       if (env.backends?.onnx?.wasm) {
         env.backends.onnx.wasm.numThreads = 1;
         env.backends.onnx.wasm.proxy = false;
       }
 
       return pipeline('automatic-speech-recognition', DEFAULT_WHISPER_MODEL_ID, {
-        quantized: true,
+        dtype: 'q8',
         progress_callback: (progress: { status?: string; file?: string; progress?: number }) => {
           const status = progress.status || 'initiate';
           onStateChange?.({
@@ -59,7 +72,7 @@ const ensurePipeline = async (
             progress: typeof progress.progress === 'number' ? progress.progress : null,
           });
         },
-      }) as Promise<AutomaticSpeechRecognitionPipelineType>;
+      }) as unknown as AsrPipelineCallable;
     })().catch((error) => {
       pipelinePromise = null;
       throw error;

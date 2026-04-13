@@ -12,6 +12,8 @@ export type GitOverlayReviewUnsupportedReason = 'missing-remote' | 'unrecognized
 
 export type GitOverlayActionKind = 'push' | 'review-request' | 'merge';
 
+export type GitOverlayActionScope = 'single' | 'all';
+
 export interface GitOverlayReviewComment {
 	id: string;
 	author: string;
@@ -120,6 +122,7 @@ export interface GitOverlayProjectSnapshot {
 	repositoryPath: string;
 	available: boolean;
 	error: string;
+	commitError?: string;
 	currentBranch: string;
 	promptBranch: string;
 	dirty: boolean;

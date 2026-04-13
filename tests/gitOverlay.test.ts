@@ -12,11 +12,16 @@ import {
 	buildGitOverlayReviewRequestTitle,
 	buildGitOverlayGraph,
 	canDeleteGitOverlayBranch,
+	isGitOverlayProjectCommitActionEnabled,
+	isGitOverlayProjectGenerateActionEnabled,
 	isGitOverlayDefaultStepBranchAllowed,
 	isGitOverlayStartChatBranchAllowed,
 	normalizeGitOverlayReviewRequestState,
 	normalizeCommitMessageGenerationInstructions,
 	parseGitOverlayRemoteUrl,
+	resolveGitOverlayBusyActionName,
+	resolveGitOverlayBulkCommitMessages,
+	resolveGitOverlayBulkGenerateProjects,
 	resolveGitOverlayDoneStatus,
 	resolveGitOverlayTrackedBranchOptions,
 	resolveExistingGitOverlayTrackedBranches,
@@ -65,6 +70,7 @@ function createTestProject(overrides: TestProjectOverrides = {}): GitOverlayProj
 		repositoryPath: '/tmp/api',
 		available: true,
 		error: '',
+		commitError: '',
 		currentBranch: 'main',
 		promptBranch: 'feature/task-42',
 		dirty: false,
@@ -236,6 +242,95 @@ test('resolveExistingGitOverlayTrackedBranches falls back to discovered existing
 	);
 
 	assert.deepEqual(branches, ['main', 'develop']);
+});
+
+test('resolveGitOverlayBusyActionName keeps explicit bulk scope even for a single project', () => {
+	assert.equal(
+		resolveGitOverlayBusyActionName('generateCommitMessage', [{ project: 'api' }], 'all'),
+		'generateCommitMessage:all',
+	);
+	assert.equal(
+		resolveGitOverlayBusyActionName('commitStaged', [{ project: 'api' }], 'all'),
+		'commitStaged:all',
+	);
+	assert.equal(
+		resolveGitOverlayBusyActionName('createReviewRequest', [{ project: 'api' }], 'all'),
+		'createReviewRequest:all',
+	);
+	assert.equal(
+		resolveGitOverlayBusyActionName('commitStaged', [{ project: 'api' }], 'single'),
+		'commitStaged:api',
+	);
+});
+
+test('resolveGitOverlayBulkGenerateProjects keeps only project buttons that are still active', () => {
+	const projects = [
+		{ project: 'api', available: true, hasConflicts: false, branchMismatch: false, committable: true },
+		{ project: 'web', available: true, hasConflicts: false, branchMismatch: false, committable: true },
+		{ project: 'docs', available: true, hasConflicts: true, branchMismatch: false, committable: false },
+	];
+
+	assert.deepEqual(
+		resolveGitOverlayBulkGenerateProjects(projects, {
+			isReadOnlyFlow: false,
+			pendingGenerateProjects: ['api'],
+			pendingCommitProjects: [],
+		}),
+		['web'],
+	);
+	assert.equal(
+		isGitOverlayProjectGenerateActionEnabled(projects[1], {
+			isReadOnlyFlow: false,
+			pendingGenerateProjects: ['api'],
+			pendingCommitProjects: [],
+		}),
+		true,
+	);
+	assert.equal(
+		isGitOverlayProjectGenerateActionEnabled(projects[0], {
+			isReadOnlyFlow: false,
+			pendingGenerateProjects: ['api'],
+			pendingCommitProjects: [],
+		}),
+		false,
+	);
+});
+
+test('resolveGitOverlayBulkCommitMessages keeps only project buttons that are still active', () => {
+	const projects = [
+		{ project: 'api', available: true, hasConflicts: false, branchMismatch: false, committable: true },
+		{ project: 'web', available: true, hasConflicts: false, branchMismatch: false, committable: true },
+		{ project: 'docs', available: true, hasConflicts: false, branchMismatch: false, committable: false },
+	];
+
+	assert.deepEqual(
+		resolveGitOverlayBulkCommitMessages(projects, {
+			api: 'feat: api',
+			web: 'feat: web',
+			docs: 'feat: docs',
+		}, {
+			isReadOnlyFlow: false,
+			pendingGenerateProjects: [],
+			pendingCommitProjects: ['api'],
+		}),
+		[{ project: 'web', message: 'feat: web' }],
+	);
+	assert.equal(
+		isGitOverlayProjectCommitActionEnabled(projects[1], {
+			isReadOnlyFlow: false,
+			pendingGenerateProjects: [],
+			pendingCommitProjects: ['api'],
+		}),
+		true,
+	);
+	assert.equal(
+		isGitOverlayProjectCommitActionEnabled(projects[0], {
+			isReadOnlyFlow: false,
+			pendingGenerateProjects: [],
+			pendingCommitProjects: ['api'],
+		}),
+		false,
+	);
 });
 
 test('resolveGitOverlayTrackedBranchOptions falls back to current branches and preferred tracked branch', () => {
@@ -1888,6 +1983,7 @@ test('GitOverlay shows blocking prompt-branch warning for non-draft prompts on t
 					repositoryPath: '/tmp/tracked',
 					available: true,
 					error: '',
+					commitError: '',
 					currentBranch: 'main',
 					promptBranch: 'feature/task-42',
 					dirty: true,
@@ -2576,13 +2672,106 @@ test('GitOverlay keeps bulk commit visible with loader while waiting for the glo
 						staged: [createTestChange({ project: 'api', group: 'staged' })],
 					},
 				}),
+				createTestProject({
+					project: 'web',
+					repositoryPath: '/tmp/web',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'web', path: 'src/web.ts', group: 'staged' })],
+					},
+				}),
 			],
 		}),
+		commitMessages: {
+			api: 'feat: update api flow',
+			web: 'feat: update web flow',
+		},
 	});
 
-	assert.match(markup, /<button[^>]*disabled=""[^>]*aria-busy="false"[^>]*>.*editor\.gitOverlayCommitProject/s);
+	assert.equal(markup.match(/<button[^>]*disabled=""[^>]*aria-busy="false"[^>]*>[\s\S]*?<span>editor\.gitOverlayCommitProject<\/span>/g)?.length || 0, 2);
 	assert.match(markup, /<button[^>]*disabled=""[^>]*aria-busy="true"[^>]*>.*editor\.gitOverlayCommitAll/s);
+	assert.equal(markup.match(/<textarea[^>]*disabled[^>]*>/g)?.length || 0, 2);
 	assert.match(markup, /editor\.gitOverlayGenerateCommitMessage/);
+});
+
+test('GitOverlay disables only the current project commit field while generating its commit message', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'generateCommitMessage:api',
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'api', group: 'staged' })],
+					},
+				}),
+				createTestProject({
+					project: 'web',
+					repositoryPath: '/tmp/web',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'web', path: 'src/web.ts', group: 'staged' })],
+					},
+				}),
+			],
+		}),
+		commitMessages: {
+			api: 'feat: update api flow',
+			web: 'feat: update web flow',
+		},
+	});
+
+	assert.equal(markup.match(/<textarea[^>]*disabled[^>]*>/g)?.length || 0, 1);
+	assert.match(markup, /<button[^>]*disabled=""[^>]*aria-busy="true"[^>]*>.*editor\.gitOverlayGenerateCommitMessage/s);
+});
+
+test('GitOverlay disables project action buttons while generating commit messages for all projects', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'generateCommitMessage:all',
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'api', group: 'staged' })],
+					},
+				}),
+				createTestProject({
+					project: 'web',
+					repositoryPath: '/tmp/web',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'web', path: 'src/web.ts', group: 'staged' })],
+					},
+				}),
+			],
+		}),
+		commitMessages: {
+			api: 'feat: update api flow',
+			web: 'feat: update web flow',
+		},
+	});
+
+	assert.match(markup, /<button[^>]*disabled=""[^>]*aria-busy="true"[^>]*>.*editor\.gitOverlayGenerateAllCommitMessages/s);
+	assert.equal(markup.match(/<button[^>]*disabled=""[^>]*aria-busy="false"[^>]*>[\s\S]*?<span>editor\.gitOverlayGenerateCommitMessage<\/span>/g)?.length || 0, 2);
+	assert.equal(markup.match(/<button[^>]*disabled=""[^>]*aria-busy="false"[^>]*>[\s\S]*?<span>editor\.gitOverlayCommitProject<\/span>/g)?.length || 0, 2);
+	assert.equal(markup.match(/<textarea[^>]*disabled[^>]*>/g)?.length || 0, 2);
 });
 
 test('GitOverlay keeps project commit visible with loader while waiting for that project snapshot', () => {
@@ -2816,6 +3005,32 @@ test('GitOverlay disables commit textarea with the same gating as commit message
 	}));
 
 	assert.match(markup, /<textarea[^>]*disabled[^>]*placeholder="Сообщение коммита\.\.\."/);
+});
+
+test('GitOverlay shows project commit error in the commit step card', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					commitError: 'remote rejected the commit',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'api', group: 'staged' })],
+					},
+				}),
+			],
+		}),
+		commitMessages: {
+			api: 'feat: update api flow',
+		},
+	});
+
+	assert.match(markup, /remote rejected the commit/);
 });
 
 test('GitOverlay shows progress line during automatic refresh', () => {

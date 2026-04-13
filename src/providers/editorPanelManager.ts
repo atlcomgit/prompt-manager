@@ -2372,6 +2372,10 @@ export class EditorPanelManager {
 		currentPrompt: Prompt,
 		promptBranch: string,
 		projects: string[],
+		options?: {
+			commitErrorsByProject?: Record<string, string>;
+			requestId?: string;
+		},
 	): Promise<void> {
 		const paths = this.workspaceService.getWorkspaceFolderPaths();
 		const snapshotProjects = this.resolveGitOverlaySnapshotProjects(projects, currentPrompt);
@@ -2381,13 +2385,32 @@ export class EditorPanelManager {
 			promptBranch,
 			this.getTrackedBranchesSetting(),
 		);
+		const snapshotWithErrors = this.applyGitOverlaySnapshotProjectErrors(snapshot, options?.commitErrorsByProject);
 		this.logReportDebug('gitOverlay.snapshot.computed', {
 			promptId: currentPrompt.id,
-			promptBranch: snapshot.promptBranch || null,
-			projectCount: snapshot.projects.length,
-			reviewProjects: this.buildGitOverlayReviewDebugSummary(snapshot),
+			promptBranch: snapshotWithErrors.promptBranch || null,
+			projectCount: snapshotWithErrors.projects.length,
+			reviewProjects: this.buildGitOverlayReviewDebugSummary(snapshotWithErrors),
 		});
-		postMessage({ type: 'gitOverlaySnapshot', snapshot });
+		postMessage({ type: 'gitOverlaySnapshot', snapshot: snapshotWithErrors, requestId: options?.requestId });
+	}
+
+	/** Накладывает project-level ошибки операций на snapshot для адресного показа в UI. */
+	private applyGitOverlaySnapshotProjectErrors(
+		snapshot: GitOverlaySnapshot,
+		commitErrorsByProject?: Record<string, string>,
+	): GitOverlaySnapshot {
+		if (!commitErrorsByProject || Object.keys(commitErrorsByProject).length === 0) {
+			return snapshot;
+		}
+
+		return {
+			...snapshot,
+			projects: snapshot.projects.map(project => ({
+				...project,
+				commitError: commitErrorsByProject[project.project] || '',
+			})),
+		};
 	}
 
 	private clearGitOverlaySessionRefreshTimer(session: GitOverlaySession): void {
@@ -2794,6 +2817,35 @@ export class EditorPanelManager {
 			parts.push(`Ошибки: ${result.errors.join('; ')}`);
 		}
 		return parts.filter(Boolean).join('. ');
+	}
+
+	/** Преобразует ошибки вида "project: message" в map по проектам. */
+	private mapGitOverlayProjectErrors(errors: string[]): Record<string, string> {
+		const result: Record<string, string> = {};
+
+		for (const item of errors) {
+			const normalizedItem = item.trim();
+			if (!normalizedItem) {
+				continue;
+			}
+
+			const separatorIndex = normalizedItem.indexOf(':');
+			if (separatorIndex <= 0) {
+				continue;
+			}
+
+			const project = normalizedItem.slice(0, separatorIndex).trim();
+			const message = normalizedItem.slice(separatorIndex + 1).trim();
+			if (!project || !message) {
+				continue;
+			}
+
+			result[project] = result[project]
+				? `${result[project]}; ${message}`
+				: message;
+		}
+
+		return result;
 	}
 
 	private async resolveProjectFileUri(project: string, filePath: string): Promise<vscode.Uri> {
@@ -7022,7 +7074,10 @@ export class EditorPanelManager {
 				const promptSnapshot = msg.prompt;
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
 				const projects = this.resolveGitOverlayProjects(promptSnapshot.projects || [], currentPrompt);
-				const generationProjects = msg.project ? [msg.project] : projects;
+				const requestId = (msg.requestId || '').trim();
+				const generationProjects = Array.isArray(msg.projects) && msg.projects.length > 0
+					? msg.projects.map(project => (project || '').trim()).filter(Boolean)
+					: msg.project ? [msg.project] : projects;
 				const promptBranch = this.resolveGitOverlayPromptBranch(promptSnapshot.branch, currentPrompt);
 				if (msg.includeAllChanges === true) {
 					const stagedAll = await this.gitService.stageAll(paths, generationProjects, false);
@@ -7030,15 +7085,16 @@ export class EditorPanelManager {
 						postMessage({
 							type: 'error',
 							message: this.describeGitMultiProjectResult(stagedAll, 'Не удалось подготовить все изменения к генерации commit message'),
+							requestId: requestId || undefined,
 						});
-						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, { requestId });
 						break;
 					}
 				}
 				const stagedProjects = await this.gitService.getStagedCommitProjectData(paths, generationProjects);
 				if (stagedProjects.length === 0) {
-					postMessage({ type: 'error', message: 'Нет staged-изменений для генерации commit message.' });
-					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+					postMessage({ type: 'error', message: 'Нет staged-изменений для генерации commit message.', requestId: requestId || undefined });
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, { requestId });
 					break;
 				}
 
@@ -7054,9 +7110,9 @@ export class EditorPanelManager {
 					generatedMessages.push({ project: projectData.project, message: generatedMessage });
 				}
 
-				postMessage({ type: 'gitOverlayCommitMessagesGenerated', messages: generatedMessages });
+				postMessage({ type: 'gitOverlayCommitMessagesGenerated', messages: generatedMessages, requestId: requestId || undefined });
 				if (msg.includeAllChanges === true) {
-					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+					await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, { requestId });
 				}
 				break;
 			}
@@ -7071,27 +7127,32 @@ export class EditorPanelManager {
 				const projects = this.resolveGitOverlayProjects(promptSnapshot.projects || [], currentPrompt);
 				const commitProjects = Array.from(new Set((msg.messages || []).map(item => (item.project || '').trim()).filter(Boolean)));
 				const promptBranch = this.resolveGitOverlayPromptBranch(promptSnapshot.branch, currentPrompt);
+				const requestId = (msg.requestId || '').trim();
 				if (commitProjects.length === 0) {
-					postMessage({ type: 'error', message: 'Не выбраны проекты для коммита.' });
+					postMessage({ type: 'error', message: 'Не выбраны проекты для коммита.', requestId: requestId || undefined });
 					break;
 				}
 				if (msg.includeAllChanges === true) {
 					const stagedAll = await this.gitService.stageAll(paths, commitProjects, false);
 					if (stagedAll.errors.length > 0) {
+						const commitErrorsByProject = this.mapGitOverlayProjectErrors(stagedAll.errors);
 						postMessage({
 							type: 'error',
 							message: this.describeGitMultiProjectResult(stagedAll, 'Не удалось подготовить все изменения к коммиту'),
+							requestId: requestId || undefined,
 						});
-						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, { commitErrorsByProject, requestId });
 						break;
 					}
 				}
 				const result = await this.gitService.commitStagedChanges(paths, msg.messages);
+				const commitErrorsByProject = this.mapGitOverlayProjectErrors(result.errors);
 				postMessage({
 					type: result.errors.length > 0 ? 'error' : 'info',
 					message: this.describeGitMultiProjectResult(result, 'Коммит создан'),
+					requestId: requestId || undefined,
 				});
-				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, { commitErrorsByProject, requestId });
 				break;
 			}
 

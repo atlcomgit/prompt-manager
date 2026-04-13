@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react';
 
 import type {
 	GitOverlayActionKind,
+	GitOverlayActionScope,
 	GitOverlayChangeFile,
 	GitOverlayProjectCommitMessage,
 	GitOverlayProjectReviewRequestInput,
@@ -18,7 +19,11 @@ import {
 	collectGitOverlayDefaultStepBranchMismatches,
 	collectGitOverlayProjectsNeedingSync,
 	collectGitOverlayStartChatBranchMismatches,
+	isGitOverlayProjectCommitActionEnabled,
+	isGitOverlayProjectGenerateActionEnabled,
 	isGitOverlayStartChatBranchAllowed,
+	resolveGitOverlayBulkCommitMessages,
+	resolveGitOverlayBulkGenerateProjects,
 	resolveGitOverlayTrackedBranchOptions,
 	resolveGitOverlayDoneStatus,
 } from '../../../utils/gitOverlay.js';
@@ -32,6 +37,10 @@ type Props = {
 	busyAction: string | null;
 	waitingForSnapshotAction?: string | null;
 	processLabel?: string | null;
+	pendingCommitMessageGenerationProjects?: string[];
+	pendingCommitProjects?: string[];
+	pendingBulkCommitMessageGeneration?: boolean;
+	pendingBulkCommit?: boolean;
 	completedActions: Record<GitOverlayActionKind, boolean>;
 	promptStatus: PromptStatus;
 	promptTitle: string;
@@ -52,7 +61,7 @@ type Props = {
 	onSwitchBranch?: (trackedBranchesByProject: Record<string, string>) => void;
 	onEnsurePromptBranch: (trackedBranchesByProject: Record<string, string>) => void;
 	onPush: (branch?: string, projects?: string[]) => void;
-	onCreateReviewRequest: (requests: GitOverlayProjectReviewRequestInput[]) => void;
+	onCreateReviewRequest: (requests: GitOverlayProjectReviewRequestInput[], scope?: GitOverlayActionScope) => void;
 	onMergePromptBranch: (trackedBranchesByProject: Record<string, string>, stayOnTrackedBranch: boolean, projects?: string[]) => void;
 	onDiscardFile: (project: string, filePath: string, group: GitOverlayChangeFile['group'], previousPath?: string) => void;
 	onDiscardProjectChanges?: (project: string, changes: GitOverlayChangeFile[]) => void;
@@ -62,8 +71,8 @@ type Props = {
 	onSetupReviewCli: (request: GitOverlayReviewCliSetupRequest) => void;
 	onAssignReviewProvider: (host: string, provider: 'github' | 'gitlab') => void;
 	onOpenMergeEditor: (project: string, filePath: string) => void;
-	onGenerateCommitMessage: (project?: string) => void;
-	onCommitStaged: (messages: GitOverlayProjectCommitMessage[]) => void;
+	onGenerateCommitMessage: (project?: string, projects?: string[], scope?: GitOverlayActionScope) => void;
+	onCommitStaged: (messages: GitOverlayProjectCommitMessage[], scope?: GitOverlayActionScope) => void;
 	onCommitMessageChange: (project: string, value: string) => void;
 	onUpdateProjects?: (projects: string[]) => void;
 	onTrackedBranchChange?: (trackedBranchesByProject: Record<string, string>) => void;
@@ -843,6 +852,10 @@ export const GitOverlay: React.FC<Props> = ({
 	busyAction,
 	waitingForSnapshotAction = null,
 	processLabel = null,
+	pendingCommitMessageGenerationProjects = [],
+	pendingCommitProjects = [],
+	pendingBulkCommitMessageGeneration = false,
+	pendingBulkCommit = false,
 	completedActions,
 	promptStatus,
 	promptTitle,
@@ -905,13 +918,13 @@ export const GitOverlay: React.FC<Props> = ({
 
 		return null;
 	}, [busyAction, waitingForSnapshotAction]);
-	const shouldDisableCommitActionWhileBusy = (actionName: string): boolean => {
-		if (activeCommitAction === 'commitStaged:all') {
-			return true;
+	const activeCommitMessageGenerationAction = useMemo(() => {
+		if (busyAction?.startsWith('generateCommitMessage:')) {
+			return busyAction;
 		}
 
-		return false;
-	};
+		return null;
+	}, [busyAction]);
 	const promptBranch = (snapshot?.promptBranch || '').trim();
 	const allProjects = snapshot?.projects || [];
 	const normalizedSelectedProjects = useMemo(
@@ -1239,6 +1252,107 @@ export const GitOverlay: React.FC<Props> = ({
 		[projectValidations, projectsWithChanges],
 	);
 	const allChangedProjectsReadyForCommit = projectsWithChanges.length > 0 && projectsReadyForCommit.length === projectsWithChanges.length;
+	const pendingGenerateProjectNames = useMemo(() => {
+		const result = new Set(normalizeGitOverlayProjectNames(pendingCommitMessageGenerationProjects));
+		if (activeCommitMessageGenerationAction === 'generateCommitMessage:all') {
+			for (const project of projectsReadyForGenerate) {
+				result.add(project.project);
+			}
+		} else if (activeCommitMessageGenerationAction?.startsWith('generateCommitMessage:')) {
+			const projectName = activeCommitMessageGenerationAction.slice('generateCommitMessage:'.length).trim();
+			if (projectName) {
+				result.add(projectName);
+			}
+		}
+		return [...result];
+	}, [activeCommitMessageGenerationAction, pendingCommitMessageGenerationProjects, projectsReadyForGenerate]);
+	const pendingCommitProjectNames = useMemo(() => {
+		const result = new Set(normalizeGitOverlayProjectNames(pendingCommitProjects));
+		if (activeCommitAction === 'commitStaged:all') {
+			for (const project of projectsReadyForCommit) {
+				result.add(project.project);
+			}
+		} else if (activeCommitAction?.startsWith('commitStaged:')) {
+			const projectName = activeCommitAction.slice('commitStaged:'.length).trim();
+			if (projectName) {
+				result.add(projectName);
+			}
+		}
+		return [...result];
+	}, [activeCommitAction, pendingCommitProjects, projectsReadyForCommit]);
+	const pendingGenerateProjectNameSet = useMemo(
+		() => new Set(pendingGenerateProjectNames),
+		[pendingGenerateProjectNames],
+	);
+	const pendingCommitProjectNameSet = useMemo(
+		() => new Set(pendingCommitProjectNames),
+		[pendingCommitProjectNames],
+	);
+	const hasPendingBulkGenerate = pendingBulkCommitMessageGeneration || activeCommitMessageGenerationAction === 'generateCommitMessage:all';
+	const hasPendingBulkCommit = pendingBulkCommit || activeCommitAction === 'commitStaged:all';
+	const projectActionAvailability = useMemo(
+		() => projectsWithChanges.map((project) => {
+			const validation = projectValidations.get(project.project);
+			return {
+				project: project.project,
+				available: Boolean(validation?.available),
+				hasConflicts: Boolean(validation?.hasConflicts),
+				branchMismatch: Boolean(validation?.branchMismatch),
+				committable: Boolean(validation?.committable),
+			};
+		}),
+		[projectValidations, projectsWithChanges],
+	);
+	const bulkGenerateProjects = useMemo(
+		() => resolveGitOverlayBulkGenerateProjects(projectActionAvailability, {
+			isReadOnlyFlow,
+			pendingGenerateProjects: pendingGenerateProjectNames,
+			pendingCommitProjects: pendingCommitProjectNames,
+		}),
+		[isReadOnlyFlow, pendingCommitProjectNames, pendingGenerateProjectNames, projectActionAvailability],
+	);
+	const bulkCommitMessages = useMemo(
+		() => resolveGitOverlayBulkCommitMessages(projectActionAvailability, commitMessages, {
+			isReadOnlyFlow,
+			pendingGenerateProjects: pendingGenerateProjectNames,
+			pendingCommitProjects: pendingCommitProjectNames,
+		}),
+		[commitMessages, isReadOnlyFlow, pendingCommitProjectNames, pendingGenerateProjectNames, projectActionAvailability],
+	);
+	const shouldDisableCommitFieldWhileBusy = (projectName: string): boolean => (
+		hasPendingBulkCommit
+		|| hasPendingBulkGenerate
+		|| pendingCommitProjectNameSet.has(projectName)
+		|| pendingGenerateProjectNameSet.has(projectName)
+	);
+	const isProjectGenerateActionDisabled = (projectName: string): boolean => {
+		const validation = projectValidations.get(projectName);
+		return !isGitOverlayProjectGenerateActionEnabled({
+			project: projectName,
+			available: Boolean(validation?.available),
+			hasConflicts: Boolean(validation?.hasConflicts),
+			branchMismatch: Boolean(validation?.branchMismatch),
+			committable: Boolean(validation?.committable),
+		}, {
+			isReadOnlyFlow,
+			pendingGenerateProjects: pendingGenerateProjectNames,
+			pendingCommitProjects: pendingCommitProjectNames,
+		});
+	};
+	const isProjectCommitActionDisabled = (projectName: string): boolean => {
+		const validation = projectValidations.get(projectName);
+		return !isGitOverlayProjectCommitActionEnabled({
+			project: projectName,
+			available: Boolean(validation?.available),
+			hasConflicts: Boolean(validation?.hasConflicts),
+			branchMismatch: Boolean(validation?.branchMismatch),
+			committable: Boolean(validation?.committable),
+		}, {
+			isReadOnlyFlow,
+			pendingGenerateProjects: pendingGenerateProjectNames,
+			pendingCommitProjects: pendingCommitProjectNames,
+		});
+	};
 	const canUpdatePromptProjects = Boolean(onUpdateProjects);
 	const canPreparePromptBranch = Boolean(promptBranch) && step1AvailableProjects.length > 0 && step1MissingTrackedBranchProjects.length === 0;
 	const canSwitchToTrackedBranch = step1MissingTrackedBranchProjects.length === 0
@@ -1304,8 +1418,8 @@ export const GitOverlay: React.FC<Props> = ({
 		&& !syncRequired
 		&& !shouldShowStep1Success;
 	const canApplyAllBranchTargets = step1ProjectsReadyForApply.length > 0 && step1ProjectsBlockedForApply.length === 0;
-	const canGenerateAllCommitMessages = projectsReadyForGenerate.length > 0;
-	const canCommitAllProjects = allChangedProjectsReadyForCommit;
+	const canGenerateAllCommitMessages = bulkGenerateProjects.length > 0;
+	const canCommitAllProjects = bulkCommitMessages.length > 0;
 	const canPushTrackedBranchesWithoutPromptBranch = !promptBranch && allStep1ProjectsOnTrackedBranches;
 	const allFlowProjectsOnTrackedOrPrompt = useMemo(
 		() => areGitOverlayProjectsOnTrackedOrPrompt(flowAvailableProjects, promptBranch, trackedBranchOptions),
@@ -1663,7 +1777,7 @@ export const GitOverlay: React.FC<Props> = ({
 			title: draft.title.trim(),
 			draft: true,
 			removeSourceBranch: false,
-		}]);
+		}], 'single');
 	}, [onCreateReviewRequest, reviewDrafts]);
 
 	const handleCreateAllReviewRequests = useCallback(() => {
@@ -1671,7 +1785,7 @@ export const GitOverlay: React.FC<Props> = ({
 			return;
 		}
 
-		onCreateReviewRequest(bulkReviewRequests);
+		onCreateReviewRequest(bulkReviewRequests, 'all');
 	}, [bulkReviewRequests, onCreateReviewRequest]);
 
 	const handleCopyAllReviewRequestLinks = useCallback(() => {
@@ -1705,8 +1819,8 @@ export const GitOverlay: React.FC<Props> = ({
 	const isEnsuringPromptBranch = busyAction === 'ensurePromptBranch';
 	const isPushing = busyAction === 'pushPromptBranch';
 	const isMerging = busyAction === 'mergePromptBranch';
-	const isGeneratingAll = busyAction === 'generateCommitMessage:all';
-	const isCommittingAll = busyAction === 'commitStaged:all';
+	const isGeneratingAll = hasPendingBulkGenerate;
+	const isCommittingAll = hasPendingBulkCommit;
 	const isCreatingAllReviewRequests = busyAction === 'createReviewRequest:all';
 
 	const refreshProgressMode: RefreshProgressMode = isLoadingOverlay
@@ -1733,13 +1847,6 @@ export const GitOverlay: React.FC<Props> = ({
 		if (!open) {
 			return null;
 		}
-
-	const commitAllMessages = projectsWithChanges
-		.map((project) => ({
-			project: project.project,
-			message: (commitMessages[project.project] || '').trim(),
-		}))
-		.filter(item => Boolean(item.message));
 
 	const toggleProject = (projectName: string) => {
 		setExpandedProjects((prev) => ({
@@ -2200,15 +2307,15 @@ export const GitOverlay: React.FC<Props> = ({
 							) : (
 							<div style={styles.sectionBody}>
 								{projectsWithChanges.length === 0 ? <div style={styles.emptyStateInline}>{t('editor.gitOverlayNoProjectsWithChanges')}</div> : null}
-								{projectsWithChanges.length > 0 && !allChangedProjectsReadyForCommit ? <InlineHint message={t('editor.gitOverlayAllProjectsMustBeReady')} tone="error" /> : null}
+								{projectsWithChanges.length > 0 && !allChangedProjectsReadyForCommit && !canCommitAllProjects ? <InlineHint message={t('editor.gitOverlayAllProjectsMustBeReady')} tone="error" /> : null}
 
 								<div style={styles.projectCards}>
 									{projectsWithChanges.map((project) => {
 										const validation = projectValidations.get(project.project);
 										const projectCommitMessage = commitMessages[project.project] || '';
 										const projectChanges = collectProjectChanges(project);
-										const isGeneratingProject = busyAction === `generateCommitMessage:${project.project}`;
-										const isCommittingProject = busyAction === `commitStaged:${project.project}`;
+										const isGeneratingProject = pendingGenerateProjectNameSet.has(project.project);
+										const isCommittingProject = pendingCommitProjectNameSet.has(project.project);
 											const isDiscardingProject = busyAction === `discardProject:${project.project}`;
 										const expanded = Boolean(expandedProjects[project.project]);
 										return (
@@ -2299,14 +2406,15 @@ export const GitOverlay: React.FC<Props> = ({
 												{validation?.branchMismatch ? <InlineHint message={t('editor.gitOverlayProjectNeedsSwitch')} tone="error" /> : null}
 												{validation?.hasConflicts ? <InlineHint message={t('editor.gitOverlayProjectHasConflicts')} tone="error" /> : null}
 												{validation?.needsMessage ? <InlineHint message={t('editor.gitOverlayCommitMessageRequired')} tone="error" /> : null}
+												{project.commitError ? <InlineHint message={project.commitError} tone="error" /> : null}
 
 												<div style={styles.fieldBlock}>
 													<label style={styles.label}>{t('editor.gitOverlayCommit')}</label>
 													<textarea
-														disabled={isReadOnlyFlow || !validation?.available || validation.branchMismatch || validation.hasConflicts}
+														disabled={isReadOnlyFlow || !validation?.available || validation.branchMismatch || validation.hasConflicts || shouldDisableCommitFieldWhileBusy(project.project)}
 														style={{
 															...styles.textArea,
-															...((isReadOnlyFlow || !validation?.available || validation.branchMismatch || validation.hasConflicts) ? styles.textAreaDisabled : null),
+															...((isReadOnlyFlow || !validation?.available || validation.branchMismatch || validation.hasConflicts || shouldDisableCommitFieldWhileBusy(project.project)) ? styles.textAreaDisabled : null),
 														}}
 														value={projectCommitMessage}
 														onChange={(event) => onCommitMessageChange(project.project, event.target.value)}
@@ -2318,15 +2426,15 @@ export const GitOverlay: React.FC<Props> = ({
 												<div style={styles.projectCardFooter}>
 													<ActionButton
 														label={t('editor.gitOverlayGenerateCommitMessage')}
-														onClick={() => onGenerateCommitMessage(project.project)}
-														disabled={isReadOnlyFlow || !validation?.available || validation.branchMismatch || validation.hasConflicts}
+														onClick={() => onGenerateCommitMessage(project.project, undefined, 'single')}
+														disabled={isProjectGenerateActionDisabled(project.project)}
 														loading={isGeneratingProject}
 														hidden={shouldHideActionWhileWaiting(`generateCommitMessage:${project.project}`)}
 													/>
 													<ActionButton
 														label={t('editor.gitOverlayCommitProject')}
-														onClick={() => onCommitStaged([{ project: project.project, message: projectCommitMessage.trim() }])}
-														disabled={isReadOnlyFlow || !validation?.committable || shouldDisableCommitActionWhileBusy(`commitStaged:${project.project}`)}
+														onClick={() => onCommitStaged([{ project: project.project, message: projectCommitMessage.trim() }], 'single')}
+														disabled={isProjectCommitActionDisabled(project.project)}
 														loading={isCommittingProject}
 														variant="primary"
 													/>
@@ -2340,7 +2448,7 @@ export const GitOverlay: React.FC<Props> = ({
 									{projectsReadyForGenerate.length > 0 ? (
 										<ActionButton
 											label={t('editor.gitOverlayGenerateAllCommitMessages')}
-											onClick={() => onGenerateCommitMessage()}
+											onClick={() => onGenerateCommitMessage(undefined, bulkGenerateProjects, 'all')}
 											disabled={isReadOnlyFlow || !canGenerateAllCommitMessages}
 											loading={isGeneratingAll}
 											hidden={shouldHideActionWhileWaiting('generateCommitMessage:all')}
@@ -2349,8 +2457,8 @@ export const GitOverlay: React.FC<Props> = ({
 									{projectsWithChanges.length > 0 ? (
 										<ActionButton
 											label={t('editor.gitOverlayCommitAll')}
-											onClick={() => onCommitStaged(commitAllMessages)}
-											disabled={isReadOnlyFlow || !canCommitAllProjects || shouldDisableCommitActionWhileBusy('commitStaged:all')}
+											onClick={() => onCommitStaged(bulkCommitMessages, 'all')}
+											disabled={isReadOnlyFlow || !canCommitAllProjects}
 											loading={isCommittingAll}
 											variant="primary"
 										/>

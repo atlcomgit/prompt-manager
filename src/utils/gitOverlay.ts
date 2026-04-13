@@ -1,6 +1,8 @@
 import type {
 	GitOverlayActionKind,
+	GitOverlayActionScope,
 	GitOverlayBranchKind,
+	GitOverlayProjectCommitMessage,
 	GitOverlayGraphEdge,
 	GitOverlayGraphNode,
 	GitOverlayReviewProvider,
@@ -48,6 +50,7 @@ type GitOverlaySyncProject = {
 };
 
 type GitOverlayActionableProject = {
+	project: string;
 	available: boolean;
 	currentBranch: string;
 	changeGroups: {
@@ -63,6 +66,104 @@ function countGitOverlayActionableProjectChanges<T extends GitOverlayActionableP
 		+ project.changeGroups.staged.length
 		+ project.changeGroups.workingTree.length
 		+ project.changeGroups.untracked.length;
+}
+
+/** Нормализует busy action для bulk/single операций git overlay. */
+export function resolveGitOverlayBusyActionName<T extends { project: string }>(
+	actionPrefix: 'commitStaged' | 'createReviewRequest' | 'generateCommitMessage',
+	items: T[],
+	scope?: GitOverlayActionScope,
+): string | null {
+	const normalizedProjects = items
+		.map(item => item.project.trim())
+		.filter(Boolean);
+
+	if (normalizedProjects.length === 0) {
+		return null;
+	}
+
+	if (scope === 'all') {
+		return `${actionPrefix}:all`;
+	}
+
+	if (scope === 'single') {
+		return `${actionPrefix}:${normalizedProjects[0]}`;
+	}
+
+	return normalizedProjects.length > 1
+		? `${actionPrefix}:all`
+		: `${actionPrefix}:${normalizedProjects[0]}`;
+}
+
+type GitOverlayProjectActionAvailability = {
+	project: string;
+	available: boolean;
+	hasConflicts: boolean;
+	branchMismatch: boolean;
+	committable: boolean;
+};
+
+type GitOverlayProjectActionStateOptions = {
+	isReadOnlyFlow: boolean;
+	pendingGenerateProjects?: string[];
+	pendingCommitProjects?: string[];
+};
+
+function createGitOverlayProjectActionPendingSets(options: GitOverlayProjectActionStateOptions): {
+	pendingGenerateProjects: Set<string>;
+	pendingCommitProjects: Set<string>;
+} {
+	return {
+		pendingGenerateProjects: new Set((options.pendingGenerateProjects || []).map(project => project.trim()).filter(Boolean)),
+		pendingCommitProjects: new Set((options.pendingCommitProjects || []).map(project => project.trim()).filter(Boolean)),
+	};
+}
+
+export function isGitOverlayProjectGenerateActionEnabled(
+	project: GitOverlayProjectActionAvailability,
+	options: GitOverlayProjectActionStateOptions,
+): boolean {
+	const { pendingGenerateProjects, pendingCommitProjects } = createGitOverlayProjectActionPendingSets(options);
+	return !options.isReadOnlyFlow
+		&& project.available
+		&& !project.hasConflicts
+		&& !project.branchMismatch
+		&& !pendingGenerateProjects.has(project.project)
+		&& !pendingCommitProjects.has(project.project);
+}
+
+export function isGitOverlayProjectCommitActionEnabled(
+	project: GitOverlayProjectActionAvailability,
+	options: GitOverlayProjectActionStateOptions,
+): boolean {
+	const { pendingGenerateProjects, pendingCommitProjects } = createGitOverlayProjectActionPendingSets(options);
+	return !options.isReadOnlyFlow
+		&& project.committable
+		&& !pendingCommitProjects.has(project.project)
+		&& !pendingGenerateProjects.has(project.project);
+}
+
+export function resolveGitOverlayBulkGenerateProjects(
+	projects: GitOverlayProjectActionAvailability[],
+	options: GitOverlayProjectActionStateOptions,
+): string[] {
+	return projects
+		.filter(project => isGitOverlayProjectGenerateActionEnabled(project, options))
+		.map(project => project.project);
+}
+
+export function resolveGitOverlayBulkCommitMessages(
+	projects: GitOverlayProjectActionAvailability[],
+	commitMessages: Record<string, string>,
+	options: GitOverlayProjectActionStateOptions,
+): GitOverlayProjectCommitMessage[] {
+	return projects
+		.filter(project => isGitOverlayProjectCommitActionEnabled(project, options))
+		.map((project) => ({
+			project: project.project,
+			message: (commitMessages[project.project] || '').trim(),
+		}))
+		.filter(item => Boolean(item.message));
 }
 
 /** Собирает scope snapshot-а: сначала выбранные проекты, затем остальные workspace-проекты. */

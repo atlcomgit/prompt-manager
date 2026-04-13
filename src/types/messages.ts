@@ -72,8 +72,8 @@ export type WebviewToExtensionMessage =
 	| { type: 'gitOverlayOpenReviewRequest'; url: string }
 	| { type: 'gitOverlaySetupReviewCli'; request: GitOverlayReviewCliSetupRequest }
 	| { type: 'gitOverlayAssignReviewProvider'; host: string; provider: 'github' | 'gitlab'; promptBranch: string; projects: string[] }
-	| { type: 'gitOverlayGenerateCommitMessage'; prompt: Prompt; project?: string; includeAllChanges?: boolean }
-	| { type: 'gitOverlayCommitStaged'; prompt: Prompt; messages: GitOverlayProjectCommitMessage[]; includeAllChanges?: boolean }
+	| { type: 'gitOverlayGenerateCommitMessage'; prompt: Prompt; project?: string; projects?: string[]; includeAllChanges?: boolean; requestId?: string }
+	| { type: 'gitOverlayCommitStaged'; prompt: Prompt; messages: GitOverlayProjectCommitMessage[]; includeAllChanges?: boolean; requestId?: string }
 	| { type: 'gitOverlayCreateReviewRequest'; prompt: Prompt; requests: GitOverlayProjectReviewRequestInput[] }
 	| { type: 'updateTimeSpent'; id: string; field: 'timeSpentWriting' | 'timeSpentImplementing'; delta: number }
 	| { type: 'pickFile' }
@@ -159,15 +159,15 @@ export type ExtensionToWebviewMessage =
 	| { type: 'generatedSlug'; slug: string }
 	| { type: 'improvedPromptText'; content: string }
 	| { type: 'generatedReport'; report: string }
-	| { type: 'gitOverlaySnapshot'; snapshot: GitOverlaySnapshot }
+	| { type: 'gitOverlaySnapshot'; snapshot: GitOverlaySnapshot; requestId?: string }
 	| { type: 'gitOverlayBusy'; action: string | null; reason?: GitOverlayBusyReason | null }
 	| { type: 'gitOverlayFileHistory'; history: GitOverlayFileHistoryPayload }
-	| { type: 'gitOverlayCommitMessagesGenerated'; messages: GitOverlayProjectCommitMessage[] }
+	| { type: 'gitOverlayCommitMessagesGenerated'; messages: GitOverlayProjectCommitMessage[]; requestId?: string }
 	| { type: 'gitOverlayActionCompleted'; action: GitOverlayActionKind }
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
 	| { type: 'branchStatus'; hasChanges: boolean; details: string }
 	| { type: 'error'; message: string; requestId?: string }
-	| { type: 'info'; message: string }
+	| { type: 'info'; message: string; requestId?: string }
 	| { type: 'clearNotice' }
 	| { type: 'pickedFiles'; files: string[] }
 	| { type: 'contextFileCards'; files: PromptContextFileCard[]; requestId?: string }

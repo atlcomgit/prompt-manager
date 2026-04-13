@@ -233,7 +233,7 @@ function extractDoneSection(text: string): string {
 	return normalizeSummaryLine(candidate.replace(/\r?\n/g, ' '));
 }
 
-export function summarizePromptReport(report: string, maxLength: number = 200): string {
+export function summarizePromptReport(report: string, maxLength: number = 500): string {
 	const normalized = extractDoneSection(decodeBasicHtmlEntities(
 		(report || '')
 			.replace(/<br\s*\/?>/gi, '\n')

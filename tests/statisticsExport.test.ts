@@ -33,7 +33,7 @@ test('calculateStatisticsExportTargetHours uses working days times eight for arb
 test('summarizePromptReport strips html and limits output length', () => {
 	const summary = summarizePromptReport('<p><strong>Сделано:</strong> Исправлен экспорт <br/> и добавлен чекбокс.</p>');
 	assert.equal(summary, 'Исправлен экспорт и добавлен чекбокс.');
-	assert.ok(summary.length <= 200);
+	assert.ok(summary.length <= 500);
 });
 
 test('summarizePromptReport extracts only the done section without repeating its title', () => {
@@ -50,8 +50,8 @@ test('summarizePromptReport extracts only the done section without repeating its
 });
 
 test('summarizePromptReport truncates long content with ellipsis', () => {
-	const summary = summarizePromptReport('a'.repeat(260));
-	assert.equal(summary.length, 200);
+	const summary = summarizePromptReport('a'.repeat(560));
+	assert.equal(summary.length, 500);
 	assert.ok(summary.endsWith('…'));
 });
 

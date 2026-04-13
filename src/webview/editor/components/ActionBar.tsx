@@ -19,23 +19,28 @@ interface Props {
   isGeneratingTitle?: boolean;
   isGeneratingDescription?: boolean;
   hasContent: boolean;
+  isPersistedPrompt: boolean;
   status: PromptStatus;
 }
 
-export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSession' | 'isChatPanelOpen'>): {
+export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSession' | 'isChatPanelOpen' | 'isPersistedPrompt'>): {
   canStartChat: boolean;
   canOpenChat: boolean;
   hasChatEntry: boolean;
   shouldShowOpenChat: boolean;
   shouldShowStartChat: boolean;
 } {
-  const canStartChat = input.status === 'draft'
+  const canStartChat = input.isPersistedPrompt && (
+    input.status === 'draft'
     || input.status === 'in-progress'
     || input.status === 'stopped'
-    || input.status === 'cancelled';
-  const canOpenChat = input.status === 'in-progress'
+    || input.status === 'cancelled'
+  );
+  const canOpenChat = input.isPersistedPrompt && (
+    input.status === 'in-progress'
     || input.status === 'stopped'
-    || input.status === 'cancelled';
+    || input.status === 'cancelled'
+  );
   const hasChatEntry = canOpenChat && (input.hasChatSession || input.isChatPanelOpen);
 
   return {
@@ -74,7 +79,7 @@ function splitLeadingIconLabel(label: string): { icon: string; text: string } {
 }
 
 export const ActionBar: React.FC<Props> = ({
-  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isSaving, isStartingChat, isGeneratingTitle = false, isGeneratingDescription = false, hasContent, status,
+  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isSaving, isStartingChat, isGeneratingTitle = false, isGeneratingDescription = false, hasContent, isPersistedPrompt, status,
 }) => {
   const t = useT();
   const saveLabel = splitLeadingIconLabel(t('actions.save'));
@@ -84,7 +89,7 @@ export const ActionBar: React.FC<Props> = ({
     isGeneratingTitle,
     isGeneratingDescription,
   });
-  const chatEntryState = resolveChatEntryState({ status, hasChatSession, isChatPanelOpen });
+  const chatEntryState = resolveChatEntryState({ status, hasChatSession, isChatPanelOpen, isPersistedPrompt });
   return (
     <div style={styles.bar}>
       <div style={styles.left}>

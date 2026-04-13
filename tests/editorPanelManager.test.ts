@@ -276,3 +276,19 @@ test('hasMeaningfulPromptDiff ignores title and description changes while AI enr
 		true,
 	);
 });
+
+test('project instructions are wrapped with applyTo frontmatter and stripped for webview state', async () => {
+	const { EditorPanelManager } = await importEditorPanelManager();
+	const body = '# Project rules\n\nUse repository conventions.';
+
+	const wrapped = (EditorPanelManager as any).wrapInstructionWithFrontmatter(body);
+	assert.equal(
+		wrapped,
+		"---\napplyTo: '**'\n---\n\n# Project rules\n\nUse repository conventions.\n",
+	);
+	assert.equal((EditorPanelManager as any).stripInstructionFrontmatter(wrapped), body);
+	assert.equal(
+		(EditorPanelManager as any).wrapInstructionWithFrontmatter(''),
+		"---\napplyTo: '**'\n---\n\n",
+	);
+});

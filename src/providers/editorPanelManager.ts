@@ -313,8 +313,10 @@ export class EditorPanelManager {
 		const promptRef = this.panelPromptRefs.get(panelKey);
 		const currentPromptId = (promptRef?.id || '').trim();
 		if (!promptRef || !shouldShowPromptPlanForStatus(promptRef.status) || currentPromptId !== promptId) {
+			// При несовпадении ID (например, после rename папки) — только чистим tracking.
+			// Не отправляем пустой snapshot: актуальный план придёт через requestPromptPlanState
+			// после обработки save-ответа в webview, что предотвращает мигание пустого плана.
 			this.clearPromptPlanTracking(panelKey);
-			this.postPromptPlanSnapshot(panelKey, currentPromptId || undefined, false, '');
 			return;
 		}
 
@@ -508,9 +510,10 @@ export class EditorPanelManager {
 		const fileUri = this.getProjectInstructionsUri();
 		try {
 			const fileBytes = await vscode.workspace.fs.readFile(fileUri);
+			const raw = Buffer.from(fileBytes).toString('utf-8');
 			return {
 				exists: true,
-				content: Buffer.from(fileBytes).toString('utf-8'),
+				content: EditorPanelManager.stripInstructionFrontmatter(raw),
 			};
 		} catch {
 			return {
@@ -539,19 +542,33 @@ export class EditorPanelManager {
 	private async persistProjectInstructions(content: string): Promise<void> {
 		await this.ensureProjectInstructionsDirectory();
 		const fileUri = this.getProjectInstructionsUri();
-		const nextContent = typeof content === 'string' ? content : '';
+		const trimmed = (typeof content === 'string' ? content : '').trim();
+		const fileContent = EditorPanelManager.wrapInstructionWithFrontmatter(trimmed);
 
 		try {
 			const currentBytes = await vscode.workspace.fs.readFile(fileUri);
 			const currentContent = Buffer.from(currentBytes).toString('utf-8');
-			if (currentContent === nextContent) {
+			if (currentContent === fileContent) {
 				return;
 			}
 		} catch {
 			// File does not exist yet.
 		}
 
-		await vscode.workspace.fs.writeFile(fileUri, Buffer.from(nextContent, 'utf-8'));
+		await vscode.workspace.fs.writeFile(fileUri, Buffer.from(fileContent, 'utf-8'));
+		await this.broadcastProjectInstructionsState();
+	}
+
+	private async normalizeSavedProjectInstructions(document: vscode.TextDocument): Promise<void> {
+		if (!this.isProjectInstructionsUri(document.uri)) {
+			return;
+		}
+
+		const normalizedContent = EditorPanelManager.wrapInstructionWithFrontmatter(document.getText());
+		if (normalizedContent !== document.getText()) {
+			await vscode.workspace.fs.writeFile(document.uri, Buffer.from(normalizedContent, 'utf-8'));
+		}
+
 		await this.broadcastProjectInstructionsState();
 	}
 
@@ -562,7 +579,10 @@ export class EditorPanelManager {
 		try {
 			await vscode.workspace.fs.stat(fileUri);
 		} catch {
-			await vscode.workspace.fs.writeFile(fileUri, Buffer.from('', 'utf-8'));
+			await vscode.workspace.fs.writeFile(
+				fileUri,
+				Buffer.from(EditorPanelManager.wrapInstructionWithFrontmatter(''), 'utf-8'),
+			);
 		}
 
 		const openDocument = vscode.workspace.textDocuments.find(document => document.uri.toString() === fileUri.toString());
@@ -862,6 +882,13 @@ export class EditorPanelManager {
 		}
 	}
 
+	private async syncTrackedPromptFilesForPanel(panelKey: string, prompt: Prompt, previousId?: string): Promise<void> {
+		this.ensureContentEditorBinding(panelKey, prompt);
+		this.ensureReportEditorBinding(panelKey, prompt);
+		await this.syncPersistedActivePromptState(prompt, previousId);
+		await this.syncPromptPlanSnapshot(panelKey, prompt);
+	}
+
 	prepareForShutdown(): void {
 		this.isShuttingDown = true;
 		this.disposeGitOverlayReactiveSources();
@@ -924,8 +951,7 @@ export class EditorPanelManager {
 
 		Object.assign(currentPrompt, mergedPrompt);
 		this.setPanelPromptRef(panelKey, currentPrompt);
-		this.ensureContentEditorBinding(panelKey, currentPrompt);
-		this.ensureReportEditorBinding(panelKey, currentPrompt);
+		await this.syncTrackedPromptFilesForPanel(panelKey, currentPrompt);
 		this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(promptFromStorage)));
 		if (isDirty) {
 			this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(mergedPrompt)));
@@ -1995,7 +2021,7 @@ export class EditorPanelManager {
 					void this.syncPromptReportFromDocument(document);
 				}
 				if (this.isProjectInstructionsUri(document.uri)) {
-					void this.broadcastProjectInstructionsState();
+					void this.normalizeSavedProjectInstructions(document);
 				}
 				void this.handleContentEditorSaved(document);
 			}),
@@ -3034,6 +3060,22 @@ export class EditorPanelManager {
 	}
 
 	private static readonly UNTITLED_PROMPT_TITLE = 'Промпт без названия';
+	private static readonly INSTRUCTION_FRONTMATTER = "---\napplyTo: '**'\n---";
+
+	private static stripInstructionFrontmatter(text: string): string {
+		const raw = typeof text === 'string' ? text : '';
+		const stripped = raw.replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*(?:\r?\n)?/, '');
+		return stripped.trim();
+	}
+
+	private static wrapInstructionWithFrontmatter(text: string): string {
+		const stripped = EditorPanelManager.stripInstructionFrontmatter(text);
+		if (!stripped) {
+			return `${EditorPanelManager.INSTRUCTION_FRONTMATTER}\n\n`;
+		}
+
+		return `${EditorPanelManager.INSTRUCTION_FRONTMATTER}\n\n${stripped}\n`;
+	}
 
 	private static wordCount(text: string): number {
 		return text.trim().split(/\s+/).filter(Boolean).length;
@@ -3359,9 +3401,7 @@ export class EditorPanelManager {
 			if (activePrompt && activePromptMatches) {
 				Object.assign(activePrompt, enriched);
 				this.setPanelPromptRef(panelKey, activePrompt);
-				this.ensureContentEditorBinding(panelKey, activePrompt);
-				this.ensureReportEditorBinding(panelKey, activePrompt);
-				await this.syncPersistedActivePromptState(enriched, renameFromId);
+				await this.syncTrackedPromptFilesForPanel(panelKey, activePrompt, renameFromId);
 				const panel = openPanels.get(panelKey);
 				if (panel) {
 					this.updatePromptPanelTitle(panel, enriched);
@@ -4167,7 +4207,8 @@ export class EditorPanelManager {
 
 	private async openPromptPlanInEditor(panelKey: string, currentPrompt: Prompt): Promise<void> {
 		const promptId = (currentPrompt.id || '').trim();
-		if (!promptId) {
+		const promptUuid = (currentPrompt.promptUuid || '').trim();
+		if (!promptId || !promptUuid) {
 			vscode.window.showWarningMessage('Сначала сохраните промпт, затем откройте план.');
 			return;
 		}
@@ -4201,7 +4242,8 @@ export class EditorPanelManager {
 
 	private async openPromptConfigInEditor(currentPrompt: Prompt): Promise<void> {
 		const promptId = (currentPrompt.id || '').trim();
-		if (!promptId) {
+		const promptUuid = (currentPrompt.promptUuid || '').trim();
+		if (!promptId || !promptUuid) {
 			vscode.window.showWarningMessage('Сначала сохраните промпт, затем откройте config.json.');
 			return;
 		}
@@ -5138,9 +5180,7 @@ export class EditorPanelManager {
 							setIsDirty(false);
 							Object.assign(livePanelPrompt, promptForPanel);
 							this.setPanelPromptRef(panelKey, livePanelPrompt);
-							this.ensureContentEditorBinding(panelKey, livePanelPrompt);
-							this.ensureReportEditorBinding(panelKey, livePanelPrompt);
-							await this.syncPersistedActivePromptState(promptForPanel, renameFromId);
+							await this.syncTrackedPromptFilesForPanel(panelKey, livePanelPrompt, renameFromId);
 						}
 
 						if (shouldApplyToCurrentPanel && panelKey.startsWith('new-')) {
@@ -5695,9 +5735,7 @@ export class EditorPanelManager {
 					if (shouldSyncCurrentPanel) {
 						Object.assign(currentPrompt, prompt);
 						this.setPanelPromptRef(panelKey, currentPrompt);
-						this.ensureContentEditorBinding(panelKey, currentPrompt);
-						this.ensureReportEditorBinding(panelKey, currentPrompt);
-						await this.syncPersistedActivePromptState(prompt, renameFromId);
+						await this.syncTrackedPromptFilesForPanel(panelKey, currentPrompt, renameFromId);
 						if (renameFromId && renameFromId !== prompt.id) {
 							postMessage({ type: 'promptSaved', prompt, previousId: renameFromId });
 							postMessage({ type: 'prompt', prompt, reason: 'save', previousId: renameFromId });

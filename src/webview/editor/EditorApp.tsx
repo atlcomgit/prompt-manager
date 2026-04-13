@@ -403,11 +403,13 @@ export const EditorApp: React.FC = () => {
     || prompt.status === 'completed'
     || prompt.status === 'report'
     || prompt.status === 'review';
+  const isPersistedPrompt = Boolean((prompt.promptUuid || '').trim());
   const hasChatSession = prompt.chatSessionIds.length > 0;
   const chatEntryState = resolveChatEntryState({
     status: prompt.status,
     hasChatSession,
     isChatPanelOpen,
+    isPersistedPrompt,
   });
   const [chatLaunchCompletionHold, setChatLaunchCompletionHold] = useState(false);
   const chatLaunchCompletionTimerRef = useRef<number | null>(null);
@@ -729,9 +731,10 @@ export const EditorApp: React.FC = () => {
 
   const dispatchStartChat = useCallback((requestId: string, options?: { skipBranchMismatchCheck?: boolean }) => {
     const latestPrompt = promptRef.current;
+    const isPersisted = Boolean((latestPrompt.promptUuid || '').trim());
     const originalStatus = latestPrompt.status;
     const shouldForceRebindChat = latestPrompt.status === 'draft';
-    if (!latestPrompt.content || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)) {
+    if (!isPersisted || !latestPrompt.content || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)) {
       return;
     }
 
@@ -979,7 +982,7 @@ export const EditorApp: React.FC = () => {
     return segments;
   }, [planLines, planHighlightedLineIndexes]);
 
-  const shouldShowPlanSection = shouldShowPromptPlanForStatus(prompt.status);
+  const shouldShowPlanSection = isPersistedPrompt && shouldShowPromptPlanForStatus(prompt.status);
 
   const workspaceSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -1119,10 +1122,16 @@ export const EditorApp: React.FC = () => {
   }, []);
 
   const handleOpenPromptPlanInEditor = useCallback(() => {
+    if (!(promptRef.current.promptUuid || '').trim()) {
+      return;
+    }
     vscode.postMessage({ type: 'openPromptPlanInEditor', promptId: prompt.id });
   }, [prompt.id]);
 
   const handleOpenPromptConfigInEditor = useCallback(() => {
+    if (!(promptRef.current.promptUuid || '').trim()) {
+      return;
+    }
     vscode.postMessage({ type: 'openPromptConfigInEditor', promptId: prompt.id });
   }, [prompt.id]);
 
@@ -1447,6 +1456,12 @@ export const EditorApp: React.FC = () => {
         {
           const incomingPromptId = String(msg.promptId || '').trim();
           const currentPromptId = String(currentPromptIdRef.current || '').trim();
+          // Отклоняем snapshot с пустым promptId, если у webview уже есть непустой ID.
+          // Это защищает от race condition, когда старый FileSystemWatcher после rename
+          // отправляет пустой snapshot до обновления watcher на новый путь.
+          if (currentPromptId && !incomingPromptId) {
+            break;
+          }
           if (incomingPromptId && currentPromptId && incomingPromptId !== currentPromptId) {
             break;
           }
@@ -2764,12 +2779,14 @@ export const EditorApp: React.FC = () => {
 
   const handleStartChat = () => {
     const latestPrompt = promptRef.current;
+    const isPersisted = Boolean((latestPrompt.promptUuid || '').trim());
     const shouldForceRebindChat = latestPrompt.status === 'draft';
     if (
       startChatLockRef.current
       || isStartingChat
       || isGeneratingTitle
       || isGeneratingDescription
+      || !isPersisted
       || !latestPrompt.content
       || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)
     ) {
@@ -3328,10 +3345,10 @@ export const EditorApp: React.FC = () => {
                 type="button"
                 style={{
                   ...styles.headerIconBtn,
-                  ...(!(prompt.id || '').trim() ? styles.headerIconBtnDisabled : null),
+                  ...(!isPersistedPrompt ? styles.headerIconBtnDisabled : null),
                 }}
                 onClick={handleOpenPromptConfigInEditor}
-                disabled={!(prompt.id || '').trim()}
+                disabled={!isPersistedPrompt}
                 title={t('editor.openConfigTooltip')}
                 aria-label={t('editor.openConfigTooltip')}
               >
@@ -4093,6 +4110,7 @@ export const EditorApp: React.FC = () => {
             isGeneratingTitle={isGeneratingTitle}
             isGeneratingDescription={isGeneratingDescription}
             hasContent={!!prompt.content}
+            isPersistedPrompt={isPersistedPrompt}
             status={prompt.status}
           />
         </div>

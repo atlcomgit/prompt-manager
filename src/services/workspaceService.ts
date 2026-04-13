@@ -267,33 +267,35 @@ export class WorkspaceService {
 		return resolved;
 	}
 
-	/** Sync global agent context into the workspace instruction file under .github/instructions/. */
+	/** Sync global agent context into the chat-memory instruction file. */
 	async syncGlobalAgentInstructionsFile(globalContext: string): Promise<void> {
 		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 		if (!workspaceFolder) {
 			return;
 		}
 
-		const instructionsFile = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager', 'chat-memory', 'ai.instructions.md');
-		const legacyInstructionsFile = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager', 'ai.instructions.md');
-		const projectInstructionsDir = vscode.Uri.joinPath(workspaceFolder.uri, '.github', 'instructions');
-		const projectInstructionsFile = vscode.Uri.joinPath(
-			workspaceFolder.uri,
-			'.github',
-			'instructions',
-			WorkspaceService.PROJECT_INSTRUCTIONS_FILE_NAME,
-		);
+		// Целевой файл — в chat-memory
+		const chatMemoryDir = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager', 'chat-memory');
+		const targetFile = vscode.Uri.joinPath(chatMemoryDir, WorkspaceService.PROJECT_INSTRUCTIONS_FILE_NAME);
 
-		await vscode.workspace.fs.createDirectory(projectInstructionsDir);
+		// Устаревшие файлы (удаляются при миграции)
+		const legacyGithubFile = vscode.Uri.joinPath(
+			workspaceFolder.uri, '.github', 'instructions', WorkspaceService.PROJECT_INSTRUCTIONS_FILE_NAME,
+		);
+		const legacyChatMemoryAiFile = vscode.Uri.joinPath(chatMemoryDir, 'ai.instructions.md');
+		const legacyAiFile = vscode.Uri.joinPath(workspaceFolder.uri, '.vscode', 'prompt-manager', 'ai.instructions.md');
+
+		await vscode.workspace.fs.createDirectory(chatMemoryDir);
 
 		const trimmedContext = (globalContext || '').trim();
 		const fileContent = trimmedContext
 			? `---\napplyTo: '**'\n---\n\n# Prompt Manager Agent Instructions\n\n${trimmedContext}\n`
 			: '';
 
-		await this.writeFileIfChanged(projectInstructionsFile, fileContent);
-		await this.deleteFileIfExists(instructionsFile);
-		await this.deleteFileIfExists(legacyInstructionsFile);
+		await this.writeFileIfChanged(targetFile, fileContent);
+		await this.deleteFileIfExists(legacyGithubFile);
+		await this.deleteFileIfExists(legacyChatMemoryAiFile);
+		await this.deleteFileIfExists(legacyAiFile);
 	}
 
 	/** Ensure .github/instructions is registered in chat.instructionsFilesLocations. */

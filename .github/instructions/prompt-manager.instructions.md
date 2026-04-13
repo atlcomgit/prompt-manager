@@ -4,7 +4,7 @@ applyTo: '**'
 
 # Prompt Manager Agent Instructions
 
-# Общая инструкция (v.74)
+# Общая инструкция (v.74)123
 
 ## Характеристика агента
 

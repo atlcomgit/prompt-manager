@@ -15,7 +15,7 @@ interface ChatContextFilesResult {
 }
 
 const CHAT_MEMORY_DIR_NAME = 'chat-memory';
-const AI_INSTRUCTIONS_FILE_NAME = 'ai.instructions.md';
+const GLOBAL_AGENT_INSTRUCTIONS_FILE_NAME = 'prompt-manager.instructions.md';
 const CODEMAP_INSTRUCTIONS_FILE_NAME = 'codemap.instructions.md';
 export const PROJECT_INSTRUCTIONS_FILE_NAME = 'project.instructions.md';
 
@@ -36,7 +36,7 @@ export function buildChatContextFiles(options: BuildChatContextFilesOptions): Ch
 	);
 
 	const instructionAbsolutePaths = dedupe([
-		path.join(chatMemoryDirectory, AI_INSTRUCTIONS_FILE_NAME),
+		path.join(chatMemoryDirectory, GLOBAL_AGENT_INSTRUCTIONS_FILE_NAME),
 		(options.sessionInstructionFilePath || '').trim(),
 		getProjectInstructionsFilePath(options.storageDir),
 		path.join(chatMemoryDirectory, CODEMAP_INSTRUCTIONS_FILE_NAME),

@@ -24,13 +24,13 @@ test('buildChatContextFiles returns prompt files and existing memory instruction
 	const workspaceRoot = path.join(tempDir, 'workspace');
 	const chatMemoryDirectory = getChatMemoryDirectoryPath(storageDir);
 	const sessionInstructionFilePath = path.join(chatMemoryDirectory, 'session.instructions.md');
-	const aiInstructionsPath = path.join(chatMemoryDirectory, 'ai.instructions.md');
+	const globalAgentInstructionsPath = path.join(chatMemoryDirectory, 'prompt-manager.instructions.md');
 	const projectInstructionsPath = path.join(chatMemoryDirectory, 'project.instructions.md');
 	const codeMapInstructionsPath = path.join(chatMemoryDirectory, 'codemap.instructions.md');
 
 	try {
 		fs.mkdirSync(chatMemoryDirectory, { recursive: true });
-		fs.writeFileSync(aiInstructionsPath, '# ai', 'utf-8');
+		fs.writeFileSync(globalAgentInstructionsPath, '# global agent', 'utf-8');
 		fs.writeFileSync(projectInstructionsPath, '# project', 'utf-8');
 		fs.writeFileSync(codeMapInstructionsPath, '# codemap', 'utf-8');
 		fs.writeFileSync(sessionInstructionFilePath, '# session', 'utf-8');
@@ -47,7 +47,7 @@ test('buildChatContextFiles returns prompt files and existing memory instruction
 			`#file:${path.join(tempDir, 'notes.md')}`,
 		]);
 		assert.deepEqual(result.instructionReferences, [
-			`#file:${aiInstructionsPath}`,
+			`#file:${globalAgentInstructionsPath}`,
 			`#file:${sessionInstructionFilePath}`,
 			`#file:${projectInstructionsPath}`,
 			`#file:${codeMapInstructionsPath}`,
@@ -55,7 +55,7 @@ test('buildChatContextFiles returns prompt files and existing memory instruction
 		assert.deepEqual(result.allAbsolutePaths, [
 			path.join(workspaceRoot, 'README.md'),
 			path.join(tempDir, 'notes.md'),
-			aiInstructionsPath,
+			globalAgentInstructionsPath,
 			sessionInstructionFilePath,
 			projectInstructionsPath,
 			codeMapInstructionsPath,

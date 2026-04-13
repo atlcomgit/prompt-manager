@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { ActionBar, resolveStartChatDisabledState } from '../src/webview/editor/components/ActionBar.js';
+import { ActionBar, resolveChatEntryState, resolveStartChatDisabledState } from '../src/webview/editor/components/ActionBar.js';
 
 function withLocale<T>(locale: string, callback: () => T): T {
 	const previousWindow = globalThis.window;
@@ -44,6 +44,7 @@ function renderActionBarMarkup(overrides: Partial<React.ComponentProps<typeof Ac
 		isSaving: false,
 		isStartingChat: false,
 		hasContent: true,
+		isPersistedPrompt: true,
 		status: 'draft',
 		...overrides,
 	})));
@@ -79,6 +80,23 @@ test('ActionBar shows Go to chat once the chat panel is already open', () => {
 	});
 
 	assert.match(markup, /Go to chat/);
+	assert.doesNotMatch(markup, /Start Chat/);
+});
+
+test('ActionBar hides Start Chat until prompt is persisted', () => {
+	const state = resolveChatEntryState({
+		status: 'draft',
+		hasChatSession: false,
+		isChatPanelOpen: false,
+		isPersistedPrompt: false,
+	});
+
+	assert.equal(state.shouldShowStartChat, false);
+	const markup = renderActionBarMarkup({
+		status: 'draft',
+		isPersistedPrompt: false,
+		hasContent: true,
+	});
 	assert.doesNotMatch(markup, /Start Chat/);
 });
 

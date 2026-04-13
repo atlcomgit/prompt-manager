@@ -118,26 +118,31 @@ test('WorkspaceService syncGlobalAgentInstructionsFile writes only the project i
 	mockState.chatInstructionsFilesLocations = { existing: true };
 	mockState.updateCalls = [];
 
-	const projectFile = path.join(mockState.workspaceRoot, '.github', 'instructions', 'prompt-manager.instructions.md');
-	const hiddenFile = path.join(mockState.workspaceRoot, '.vscode', 'prompt-manager', 'chat-memory', 'ai.instructions.md');
-	const legacyFile = path.join(mockState.workspaceRoot, '.vscode', 'prompt-manager', 'ai.instructions.md');
+	const chatMemoryDir = path.join(mockState.workspaceRoot, '.vscode', 'prompt-manager', 'chat-memory');
+	const targetFile = path.join(chatMemoryDir, 'prompt-manager.instructions.md');
+	const legacyGithubFile = path.join(mockState.workspaceRoot, '.github', 'instructions', 'prompt-manager.instructions.md');
+	const legacyChatMemoryAiFile = path.join(chatMemoryDir, 'ai.instructions.md');
+	const legacyAiFile = path.join(mockState.workspaceRoot, '.vscode', 'prompt-manager', 'ai.instructions.md');
 	const { WorkspaceService } = await importWorkspaceService();
 	const service = new WorkspaceService();
 
 	try {
-		fs.mkdirSync(path.dirname(hiddenFile), { recursive: true });
-		fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
-		fs.writeFileSync(hiddenFile, 'old hidden content', 'utf-8');
-		fs.writeFileSync(legacyFile, 'old legacy content', 'utf-8');
+		fs.mkdirSync(path.dirname(legacyGithubFile), { recursive: true });
+		fs.mkdirSync(path.dirname(legacyAiFile), { recursive: true });
+		fs.mkdirSync(chatMemoryDir, { recursive: true });
+		fs.writeFileSync(legacyGithubFile, 'old github content', 'utf-8');
+		fs.writeFileSync(legacyChatMemoryAiFile, 'old hidden content', 'utf-8');
+		fs.writeFileSync(legacyAiFile, 'old legacy content', 'utf-8');
 
 		await service.syncGlobalAgentInstructionsFile('Always answer in Russian.');
 
 		assert.equal(
-			fs.readFileSync(projectFile, 'utf-8'),
+			fs.readFileSync(targetFile, 'utf-8'),
 			"---\napplyTo: '**'\n---\n\n# Prompt Manager Agent Instructions\n\nAlways answer in Russian.\n",
 		);
-		assert.equal(fs.existsSync(hiddenFile), false);
-		assert.equal(fs.existsSync(legacyFile), false);
+		assert.equal(fs.existsSync(legacyGithubFile), false);
+		assert.equal(fs.existsSync(legacyChatMemoryAiFile), false);
+		assert.equal(fs.existsSync(legacyAiFile), false);
 		assert.deepEqual(mockState.updateCalls, []);
 	} finally {
 		service.dispose();

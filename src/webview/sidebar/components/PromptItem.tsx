@@ -271,7 +271,22 @@ export const PromptItem: React.FC<Props> = ({
               color: selFg || statusAccent,
             }}
           >
-            {STATUS_LABELS[prompt.status]}
+            {prompt.status === 'in-progress' && typeof prompt.progress === 'number' ? (
+              <div style={styles.progressBarContainer} title={`${prompt.progress}%`}>
+                <div
+                  style={{
+                    ...styles.progressBarFill,
+                    width: `${prompt.progress}%`,
+                    background: prompt.progress >= 100
+                      ? 'var(--vscode-testing-iconPassed, #73c991)'
+                      : (selFg || 'var(--vscode-editorInfo-foreground, #3794ff)'),
+                  }}
+                />
+                <span style={styles.progressBarText}>{prompt.progress}%</span>
+              </div>
+            ) : (
+              STATUS_LABELS[prompt.status]
+            )}
           </div>
         </div>
       ) : (
@@ -311,16 +326,31 @@ export const PromptItem: React.FC<Props> = ({
                   <span>·</span>
                 </>
               )}
-              <span
-                style={{
-                  ...styles.statusBadge,
-                  color: selFg || statusAccent,
-                  borderColor: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
-                  background: selBg ? 'color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 14%, var(--vscode-list-activeSelectionBackground))' : 'transparent',
-                }}
-              >
-                <span>{STATUS_LABELS[prompt.status]}</span>
-              </span>
+              {prompt.status === 'in-progress' && typeof prompt.progress === 'number' ? (
+                <div style={styles.detailedProgressBarContainer} title={`${prompt.progress}%`}>
+                  <div
+                    style={{
+                      ...styles.detailedProgressBarFill,
+                      width: `${prompt.progress}%`,
+                      background: prompt.progress >= 100
+                        ? 'var(--vscode-testing-iconPassed, #73c991)'
+                        : (selFg || statusAccent),
+                    }}
+                  />
+                  <span style={styles.detailedProgressBarText}>{prompt.progress}%</span>
+                </div>
+              ) : (
+                <span
+                  style={{
+                    ...styles.statusBadge,
+                    color: selFg || statusAccent,
+                    borderColor: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
+                    background: selBg ? 'color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 14%, var(--vscode-list-activeSelectionBackground))' : 'transparent',
+                  }}
+                >
+                  <span>{STATUS_LABELS[prompt.status]}</span>
+                </span>
+              )}
               {prompt.archived && (
                 <>
                   <span>·</span>
@@ -837,5 +867,74 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '999px',
     boxShadow: '0 0 0 1px color-mix(in srgb, var(--vscode-button-background) 70%, var(--vscode-panel-border))',
     whiteSpace: 'nowrap',
+  },
+
+  /* ── Compact progress bar ── */
+  progressBarContainer: {
+    position: 'relative',
+    width: '54px',
+    height: '14px',
+    borderRadius: '2px',
+    background: 'color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 18%, transparent)',
+    overflow: 'hidden',
+    flexShrink: 0,
+    marginLeft: 'auto',
+  },
+  progressBarFill: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    height: '100%',
+    borderRadius: '2px',
+    opacity: 0.55,
+    transition: 'width 0.3s ease',
+  },
+  progressBarText: {
+    position: 'relative',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '100%',
+    fontSize: '9px',
+    fontWeight: 700,
+    lineHeight: 1,
+    color: 'var(--vscode-foreground)',
+    userSelect: 'none',
+  },
+
+  /* ── Detailed progress bar ── */
+  detailedProgressBarContainer: {
+    position: 'relative',
+    display: 'inline-flex',
+    alignItems: 'center',
+    width: '64px',
+    height: '16px',
+    borderRadius: '2px',
+    background: 'color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 18%, transparent)',
+    overflow: 'hidden',
+    flexShrink: 0,
+    verticalAlign: 'middle',
+  },
+  detailedProgressBarFill: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    height: '100%',
+    borderRadius: '2px',
+    opacity: 0.55,
+    transition: 'width 0.3s ease',
+  },
+  detailedProgressBarText: {
+    position: 'relative',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    height: '100%',
+    fontSize: '10px',
+    fontWeight: 700,
+    lineHeight: 1,
+    color: 'var(--vscode-foreground)',
+    userSelect: 'none',
   },
 };

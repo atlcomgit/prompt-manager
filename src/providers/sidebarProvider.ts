@@ -16,6 +16,8 @@ import type { StateService } from '../services/stateService.js';
 export class SidebarProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'promptManager.sidebar';
 
+	private static readonly AGENT_JSON_DEBOUNCE_MS = 300;
+
 	private _view?: vscode.WebviewView;
 	private _onDidOpenPrompt = new vscode.EventEmitter<string>();
 	public readonly onDidOpenPrompt = this._onDidOpenPrompt.event;
@@ -23,6 +25,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 	public readonly onDidDeletePrompt = this._onDidDeletePrompt.event;
 	private _onDidSave = new vscode.EventEmitter<ExternalPromptConfigChange[]>();
 	public readonly onDidSave = this._onDidSave.event;
+
+	/** FileSystemWatcher for agent.json changes (progress updates) */
+	private agentJsonWatcher: vscode.FileSystemWatcher | null = null;
+	private agentJsonWatcherDisposables: vscode.Disposable[] = [];
+	private agentJsonDebounceTimer: NodeJS.Timeout | null = null;
 
 	constructor(
 		private readonly extensionUri: vscode.Uri,
@@ -32,7 +39,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		private readonly gitService: GitService,
 		private readonly stateService: StateService,
 		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
-	) { }
+	) {
+		this.initializeAgentJsonWatcher();
+	}
 
 	private async updateStoredPromptStatus(promptId: string, status: PromptStatus): Promise<ExternalPromptConfigChange[] | null> {
 		const prompt = await this.storageService.getPrompt(promptId);
@@ -106,6 +115,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			this.storageService.listPrompts(),
 			this.storageService.listArchivedPrompts(),
 		]);
+
+		/* Enrich in-progress prompts with agent.json progress */
+		const inProgressPrompts = prompts.filter(p => p.status === 'in-progress');
+		if (inProgressPrompts.length > 0) {
+			const progressResults = await Promise.all(
+				inProgressPrompts.map(p => this.storageService.readAgentProgress(p.id)),
+			);
+			for (let i = 0; i < inProgressPrompts.length; i++) {
+				inProgressPrompts[i].progress = progressResults[i];
+			}
+		}
+
 		this.postMessage({ type: 'prompts', prompts, archivedPrompts });
 	}
 
@@ -264,5 +285,52 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			default:
 				break;
 		}
+	}
+
+	/** Initialize FileSystemWatcher for agent.json changes to update progress in real time */
+	private initializeAgentJsonWatcher(): void {
+		if (this.agentJsonWatcher) {
+			return;
+		}
+
+		const storageDir = this.storageService.getStorageDirectoryPath();
+		const watcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(storageDir, '**/agent.json'),
+		);
+
+		this.agentJsonWatcher = watcher;
+
+		const handleChange = () => {
+			if (this.agentJsonDebounceTimer) {
+				clearTimeout(this.agentJsonDebounceTimer);
+			}
+			this.agentJsonDebounceTimer = setTimeout(() => {
+				this.agentJsonDebounceTimer = null;
+				void this.refreshList();
+			}, SidebarProvider.AGENT_JSON_DEBOUNCE_MS);
+		};
+
+		this.agentJsonWatcherDisposables = [
+			watcher,
+			watcher.onDidCreate(handleChange),
+			watcher.onDidChange(handleChange),
+			watcher.onDidDelete(handleChange),
+		];
+	}
+
+	/** Dispose watcher resources */
+	dispose(): void {
+		if (this.agentJsonDebounceTimer) {
+			clearTimeout(this.agentJsonDebounceTimer);
+			this.agentJsonDebounceTimer = null;
+		}
+		for (const disposable of this.agentJsonWatcherDisposables) {
+			disposable.dispose();
+		}
+		this.agentJsonWatcherDisposables = [];
+		this.agentJsonWatcher = null;
+		this._onDidOpenPrompt.dispose();
+		this._onDidDeletePrompt.dispose();
+		this._onDidSave.dispose();
 	}
 }

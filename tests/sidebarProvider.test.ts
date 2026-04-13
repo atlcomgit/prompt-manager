@@ -31,6 +31,17 @@ function createVsCodeMock() {
 		env: {
 			language: 'en',
 		},
+		RelativePattern: class {
+			constructor(public base: string, public pattern: string) { }
+		},
+		workspace: {
+			createFileSystemWatcher: () => ({
+				onDidCreate: () => ({ dispose() { } }),
+				onDidChange: () => ({ dispose() { } }),
+				onDidDelete: () => ({ dispose() { } }),
+				dispose() { },
+			}),
+		},
 	};
 }
 
@@ -107,6 +118,8 @@ test('SidebarProvider updates prompt status with status-change history and clean
 		},
 		listPrompts: async () => Array.from(stored.values()).map(({ content, report, ...prompt }) => ({ ...prompt })),
 		listArchivedPrompts: async () => [],
+		getStorageDirectoryPath: () => '/tmp/prompt-manager-storage',
+		readAgentProgress: async () => undefined,
 	};
 
 	const provider = new SidebarProvider(

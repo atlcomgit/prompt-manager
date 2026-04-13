@@ -1329,6 +1329,47 @@ export class StorageService implements vscode.Disposable {
 		}
 	}
 
+	/** Get absolute URI to agent.json for prompt id */
+	getPromptAgentUri(id: string): vscode.Uri {
+		return vscode.Uri.file(path.join(this.getPromptDirectoryPath(id), 'agent.json'));
+	}
+
+	/**
+	 * Read agent progress from agent.json in the prompt directory.
+	 * Returns a number 0–100, or undefined if the file does not exist or is invalid.
+	 */
+	async readAgentProgress(id: string): Promise<number | undefined> {
+		const agentUri = this.getPromptAgentUri(id);
+		try {
+			const raw = await vscode.workspace.fs.readFile(agentUri);
+			const parsed = JSON.parse(Buffer.from(raw).toString('utf-8'));
+			const value = parsed?.progress;
+			if (typeof value === 'number' && Number.isFinite(value)) {
+				return Math.max(0, Math.min(100, Math.round(value)));
+			}
+			return undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Create agent.json with initial progress value in the prompt directory.
+	 * Does nothing if the file already exists.
+	 */
+	async createAgentFile(id: string): Promise<void> {
+		const agentUri = this.getPromptAgentUri(id);
+		try {
+			await vscode.workspace.fs.stat(agentUri);
+			return;
+		} catch {
+			// File does not exist — create it
+		}
+
+		const content = JSON.stringify({ progress: 0 }, null, 2) + '\n';
+		await vscode.workspace.fs.writeFile(agentUri, Buffer.from(content, 'utf-8'));
+	}
+
 	dispose(): void {
 		this.cancelBackgroundCacheRefresh();
 		this.clearExternalConfigChangeTimer();

@@ -345,6 +345,10 @@ export interface PromptConfig {
 	/** Process notes for the prompt execution */
 	notes: string;
 
+	// --- Agent progress ---
+	/** Task completion progress (0–100) read from agent.json at runtime; not persisted in config.json */
+	progress?: number;
+
 	// --- Timestamps ---
 	createdAt: string;
 	updatedAt: string;

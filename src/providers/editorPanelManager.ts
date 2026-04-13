@@ -5708,6 +5708,13 @@ export class EditorPanelManager {
 					this._onDidSave.fire(prompt.id);
 					await this.clearPromptPlanFileIfExists(panelKey, prompt.id);
 
+					/* Create agent.json with initial progress when starting a chat */
+					try {
+						await this.storageService.createAgentFile(prompt.id);
+					} catch (error) {
+						this.hooksOutput.appendLine(`[agent-file] create agent.json failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+					}
+
 					// Compose query with prompt content and metadata
 					const globalContext = this.stateService.getGlobalAgentContext();
 					const parts: string[] = [];

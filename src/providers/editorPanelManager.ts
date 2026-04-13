@@ -58,6 +58,11 @@ import {
 	shouldNotifyReservedArchiveRename,
 } from '../utils/promptSaveFeedback.js';
 import {
+	buildSaveQueueKey,
+	findPendingSaveEntry,
+	type PendingSaveEntry,
+} from '../utils/promptSaveQueue.js';
+import {
 	resolvePromptOpenEditorViewState,
 	shouldPreservePromptIdAfterChatStart,
 } from '../utils/promptEditorBehavior.js';
@@ -143,6 +148,8 @@ export class EditorPanelManager {
 	private pendingOpenPromptId: string | null = null;
 	private openPromptRequestVersion = 0;
 	private pendingPromptSaveByPanelKey = new Map<string, Promise<void>>();
+	/** Очередь ожидающих сохранений по составному ключу (uuid::id). Хранит снимок и промис завершения. */
+	private pendingSaveQueue = new Map<string, PendingSaveEntry>();
 	private isShuttingDown = false;
 	/** Stable keys промптов, для которых уже запущено фоновое AI-обогащение (дедупликация) */
 	private pendingEnrichmentPromptKeys = new Set<string>();
@@ -1932,6 +1939,15 @@ export class EditorPanelManager {
 		const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(promptToSave, baseSnapshot || snapshot);
 		this.applyPromptFallbacksForPendingAiEnrichment(promptToSave, aiEnrichmentPlan);
 
+		/** Регистрируем снимок в очереди сохранений для доступа из openPromptInternal */
+		let switchSaveQueueResolve: (value: Prompt | null) => void;
+		const switchSaveQueuePromise = new Promise<Prompt | null>(resolve => { switchSaveQueueResolve = resolve; });
+		const switchSaveQueueKey = buildSaveQueueKey(promptToSave.promptUuid, promptToSave.id);
+		this.pendingSaveQueue.set(switchSaveQueueKey, {
+			snapshot: promptToSave,
+			promise: switchSaveQueuePromise,
+		});
+
 		this._onDidSaveStateChange.fire({ id: saveStateId, saving: true });
 		try {
 			const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
@@ -1959,6 +1975,15 @@ export class EditorPanelManager {
 				forceHistory: true,
 				previousId: renameFromId,
 			});
+
+			/** Обновляем ключ очереди если id изменился (переименование) и резолвим промис */
+			const updatedSwitchKey = buildSaveQueueKey(savedPrompt.promptUuid, savedPrompt.id);
+			if (updatedSwitchKey !== switchSaveQueueKey) {
+				this.pendingSaveQueue.delete(switchSaveQueueKey);
+				this.pendingSaveQueue.set(updatedSwitchKey, { snapshot: savedPrompt, promise: switchSaveQueuePromise });
+			}
+			switchSaveQueueResolve!(savedPrompt);
+
 			if (aiEnrichmentPlan.needsAiEnrichment) {
 				this.setPendingPromptAiEnrichmentState(savedPrompt.id, savedPrompt.promptUuid, {
 					title: aiEnrichmentPlan.needsTitle,
@@ -1980,8 +2005,16 @@ export class EditorPanelManager {
 			}
 			return savedPrompt;
 		} catch (error) {
+			switchSaveQueueResolve!(null);
 			this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
 			throw error;
+		} finally {
+			/** Очистка очереди: удаляем по исходному и возможно обновлённому ключу */
+			this.pendingSaveQueue.delete(switchSaveQueueKey);
+			const finalKey = buildSaveQueueKey(promptToSave.promptUuid, promptToSave.id);
+			if (finalKey !== switchSaveQueueKey) {
+				this.pendingSaveQueue.delete(finalKey);
+			}
 		}
 	}
 
@@ -4572,6 +4605,13 @@ export class EditorPanelManager {
 				const isDirty = this.panelDirtyFlags.get(existingKey) || false;
 				const hasUnsavedDraftData = !latestSnapshot.id && this.hasPromptDataWithoutId(latestSnapshot);
 				const hasPendingPromptSave = this.pendingPromptSaveByPanelKey.has(existingKey);
+				/** Дождаться завершения текущего сохранения, чтобы не было race condition */
+				if (hasPendingPromptSave) {
+					const pendingSave = this.pendingPromptSaveByPanelKey.get(existingKey);
+					if (pendingSave) {
+						try { await pendingSave; } catch { /* ошибка обработана в saveTask */ }
+					}
+				}
 				let shouldPersistBeforeSwitch = !hasPendingPromptSave && (isDirty || hasUnsavedDraftData);
 				if (!shouldPersistBeforeSwitch && latestSnapshot.id && !hasPendingPromptSave) {
 					const persistedSnapshot = await this.storageService.getPrompt(latestSnapshot.id);
@@ -4622,7 +4662,20 @@ export class EditorPanelManager {
 				prompt.model = lastPromptConfig.model || '';
 			}
 		} else {
-			const loaded = await this.storageService.getPrompt(promptId);
+			/**
+			 * Проверяем очередь ожидающих сохранений: если для этого промпта ещё
+			 * идёт запись на диск, дожидаемся результата и используем свежие данные
+			 * вместо потенциально устаревшего чтения с диска.
+			 */
+			const pendingSaveEntry = findPendingSaveEntry(this.pendingSaveQueue, promptId, undefined);
+			let loaded: Prompt | null = null;
+			if (pendingSaveEntry) {
+				const savedResult = await pendingSaveEntry.promise;
+				loaded = savedResult && savedResult.id === promptId ? savedResult : null;
+			}
+			if (!loaded) {
+				loaded = await this.storageService.getPrompt(promptId);
+			}
 			if (!loaded) {
 				vscode.window.showErrorMessage(`Промпт "${promptId}" не найден.`);
 				return;
@@ -5069,8 +5122,21 @@ export class EditorPanelManager {
 			}
 
 			case 'savePrompt': {
+				/** Deferred-промис для регистрации в очереди сохранений по идентификатору промпта */
+				let saveQueueResolve: (value: Prompt | null) => void;
+				const saveQueuePromise = new Promise<Prompt | null>(resolve => { saveQueueResolve = resolve; });
+				const saveQueueKey = buildSaveQueueKey(
+					msg.prompt.promptUuid || currentPrompt.promptUuid,
+					msg.prompt.id || currentPrompt.id,
+				);
+				this.pendingSaveQueue.set(saveQueueKey, {
+					snapshot: JSON.parse(JSON.stringify(msg.prompt)),
+					promise: saveQueuePromise,
+				});
+
 				const saveTask = (async (): Promise<void> => {
 					if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.prompt?.id)) {
+						saveQueueResolve!(null);
 						return;
 					}
 					const saveStateId = (msg.prompt.id || currentPrompt.id || '__new__').trim() || '__new__';
@@ -5140,6 +5206,15 @@ export class EditorPanelManager {
 							historyReason: saveSource,
 							previousId: renameFromId,
 						});
+
+						/** Обновляем ключ очереди, если id изменился после сохранения (переименование, генерация id) */
+						const updatedSaveQueueKey = buildSaveQueueKey(saved.promptUuid, saved.id);
+						if (updatedSaveQueueKey !== saveQueueKey) {
+							this.pendingSaveQueue.delete(saveQueueKey);
+							this.pendingSaveQueue.set(updatedSaveQueueKey, { snapshot: saved, promise: saveQueuePromise });
+						}
+						saveQueueResolve!(saved);
+
 						const shouldNotifyArchiveRename = shouldNotifyReservedArchiveRename(requestedIdBase, saved.id, previousPromptId);
 						this.logReportDebug('savePrompt.saved', {
 							panelKey,
@@ -5258,6 +5333,7 @@ export class EditorPanelManager {
 							this._onDidSaveStateChange.fire({ id: promptToSave.id, saving: false });
 						}
 					} catch (error) {
+						saveQueueResolve!(null);
 						const message = this.formatSaveConflictMessage(error);
 						postMessage({ type: 'error', message: `Save failed: ${message}` });
 					} finally {
@@ -5272,6 +5348,15 @@ export class EditorPanelManager {
 				} finally {
 					if (this.pendingPromptSaveByPanelKey.get(panelKey) === saveTask) {
 						this.pendingPromptSaveByPanelKey.delete(panelKey);
+					}
+					/** Очистка записи из очереди по обоим возможным ключам */
+					this.pendingSaveQueue.delete(saveQueueKey);
+					const updatedKey = buildSaveQueueKey(
+						msg.prompt.promptUuid || currentPrompt.promptUuid,
+						currentPrompt.id || msg.prompt.id,
+					);
+					if (updatedKey !== saveQueueKey) {
+						this.pendingSaveQueue.delete(updatedKey);
 					}
 				}
 				break;

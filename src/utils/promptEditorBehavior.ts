@@ -22,6 +22,7 @@ interface ResolvePromptEditorExpandedSectionsInput {
 	manualSectionOverrides?: EditorPromptManualSectionOverrides | null;
 	hasNotesContent: boolean;
 	hasPlanContent: boolean;
+	shouldExpandPlanSection?: boolean;
 	hasReportContent: boolean;
 }
 
@@ -47,6 +48,16 @@ interface ShouldShowPromptChatLaunchBlockInput {
 	chatLaunchCompletionHold: boolean;
 }
 
+/** Input for resolving the empty-state placeholder shown in the Plan section. */
+interface ResolvePromptPlanPlaceholderStateInput {
+	chatMode?: Prompt['chatMode'] | null;
+	planExists: boolean;
+	hasPlanContent: boolean;
+}
+
+/** Placeholder variants available for the Plan section when no plan content exists yet. */
+export type PromptPlanPlaceholderState = 'plan-mode' | 'empty' | 'missing' | null;
+
 function resolvePromptEditorAutoSectionExpandedState(
 	key: 'notes' | 'plan' | 'report',
 	input: ResolvePromptEditorExpandedSectionsInput,
@@ -58,7 +69,7 @@ function resolvePromptEditorAutoSectionExpandedState(
 	}
 
 	if (key === 'plan') {
-		return input.hasPlanContent;
+		return input.hasPlanContent || input.shouldExpandPlanSection === true;
 	}
 
 	return input.hasReportContent;
@@ -199,6 +210,21 @@ export function shouldShowPromptChatLaunchBlock(
 	input: ShouldShowPromptChatLaunchBlockInput,
 ): boolean {
 	return input.status === 'in-progress' && (!input.hasChatEntry || input.chatLaunchCompletionHold);
+}
+
+/** Resolve which placeholder the Plan section should display before plan content appears. */
+export function resolvePromptPlanPlaceholderState(
+	input: ResolvePromptPlanPlaceholderStateInput,
+): PromptPlanPlaceholderState {
+	if (input.hasPlanContent) {
+		return null;
+	}
+
+	if (input.chatMode === 'plan') {
+		return 'plan-mode';
+	}
+
+	return input.planExists ? 'empty' : 'missing';
 }
 
 /** Build a stable key for prompt-scoped launch tracking across prompt switches. */

@@ -47,6 +47,7 @@ import { diffPromptConfigSyncFields, PROMPT_CONFIG_SYNC_FIELDS } from '../../uti
 import { shouldApplyPromptAiEnrichmentState, shouldApplyPromptSaveResult } from '../../utils/promptSaveFeedback.js';
 import {
   resolvePromptEditorExpandedSections,
+  resolvePromptPlanPlaceholderState,
   resolvePromptChatLaunchTrackingKey,
   shouldShowPromptChatLaunchBlock,
   togglePromptEditorSectionExpansion,
@@ -1267,7 +1268,9 @@ export const EditorApp: React.FC = () => {
           const previousPromptId = (String(msg.previousId || '').trim() || '');
           const reason: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config' | undefined = msg.reason;
           const isOpenPayload = reason === 'open';
-          const isNewPromptSaveResponse = currentPromptId === '__new__' && reason === 'save';
+          /** Принимаем save-ответ для нового промпта только если UUID совпадает или отсутствует */
+          const isNewPromptSaveResponse = currentPromptId === '__new__' && reason === 'save'
+            && (incomingPromptUuid === '' || currentPromptUuid === '' || incomingPromptUuid === currentPromptUuid);
           const isRelatedToCurrentPrompt = incomingPromptId === currentPromptId
             || (incomingPromptUuid !== '' && currentPromptUuid !== '' && incomingPromptUuid === currentPromptUuid)
             || previousPromptId === currentPromptId
@@ -2977,15 +2980,22 @@ export const EditorApp: React.FC = () => {
 
   const openActionLabel = `📝 ${t('editor.open')}`;
   const hasPlanContent = promptPlanState.exists && promptPlanState.content.trim().length > 0;
+  const planPlaceholderState = resolvePromptPlanPlaceholderState({
+    chatMode: prompt.chatMode,
+    planExists: promptPlanState.exists,
+    hasPlanContent,
+  });
+  const shouldAutoExpandPlanSection = planPlaceholderState === 'plan-mode';
   const effectiveExpandedSections = useMemo(
     () => resolvePromptEditorExpandedSections({
       expandedSections,
       manualSectionOverrides,
       hasNotesContent,
       hasPlanContent,
+      shouldExpandPlanSection: shouldAutoExpandPlanSection,
       hasReportContent,
     }),
-    [expandedSections, manualSectionOverrides, hasNotesContent, hasPlanContent, hasReportContent],
+    [expandedSections, manualSectionOverrides, hasNotesContent, hasPlanContent, hasReportContent, shouldAutoExpandPlanSection],
   );
 
   const toggleSection = (key: EditorPromptSectionKey) => {
@@ -3978,13 +3988,18 @@ export const EditorApp: React.FC = () => {
                     >
                       {segment.lines.map((line) => (
                         <div key={`plan-line-${line.index}`} style={styles.planRawLine}>
-                          {line.text.length > 0 ? line.text : '\u00A0'}
+							{line.text.length > 0 ? line.text : '\u00A0'}
                         </div>
                       ))}
                     </div>
                   ))}
                 </div>
-                ) : promptPlanState.exists ? (
+          ) : planPlaceholderState === 'plan-mode' ? (
+            <div style={styles.planModeNotice} role="status" aria-live="polite">
+              <span style={styles.planModeNoticeBadge}>PLAN</span>
+              <span style={styles.planModeNoticeText}>{t('editor.planModeStarted')}</span>
+            </div>
+		      ) : planPlaceholderState === 'empty' ? (
                 <div style={styles.planRawContentEmpty}>{t('editor.planEmpty')}</div>
               ) : (
                 <div style={styles.planRawContentEmpty}>{t('editor.planMissing')}</div>
@@ -4743,6 +4758,37 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '6px',
     color: 'var(--vscode-descriptionForeground)',
     fontSize: '12px',
+  },
+  planModeNotice: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '12px 14px',
+    borderRadius: '10px',
+    border: '1px solid color-mix(in srgb, var(--vscode-progressBar-background, var(--vscode-textLink-foreground)) 38%, transparent)',
+    background: 'color-mix(in srgb, var(--vscode-progressBar-background, var(--vscode-textLink-foreground)) 16%, transparent)',
+    boxShadow: 'inset 4px 0 0 var(--vscode-progressBar-background, var(--vscode-textLink-foreground))',
+    color: 'var(--vscode-foreground)',
+  },
+  planModeNoticeBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    minWidth: '48px',
+    padding: '4px 8px',
+    borderRadius: '999px',
+    background: 'var(--vscode-progressBar-background, var(--vscode-textLink-foreground))',
+    color: 'var(--vscode-button-foreground, #ffffff)',
+    fontSize: '11px',
+    fontWeight: 800,
+    letterSpacing: '0.08em',
+  },
+  planModeNoticeText: {
+    fontSize: '12px',
+    lineHeight: 1.5,
+    fontWeight: 700,
+    color: 'var(--vscode-foreground)',
   },
   fieldRow: {
     display: 'flex',

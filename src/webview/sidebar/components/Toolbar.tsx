@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback, useState } from 'react';
 import { useT } from '../../shared/i18n';
 
 const FilterIcon: React.FC = () => (
@@ -28,6 +28,14 @@ interface Props {
   showViewSettings: boolean;
 }
 
+/** Общий резолвер палитры для служебных кнопок sidebar toolbar. */
+export function resolveToolbarUtilityButtonStyle(isActive: boolean): React.CSSProperties {
+  return {
+    ...styles.btnSec,
+    ...(isActive ? styles.btnSecActive : styles.btnSecIdle),
+  };
+}
+
 export const Toolbar: React.FC<Props> = ({
   onCreateNew,
   onImport,
@@ -37,23 +45,66 @@ export const Toolbar: React.FC<Props> = ({
   showViewSettings,
 }) => {
   const t = useT();
+  const [isImportPressed, setIsImportPressed] = useState(false);
+
+  /** Временное pressed-состояние импорта затемняется только на время взаимодействия. */
+  const releaseImportPressedState = useCallback(() => {
+    setIsImportPressed(false);
+  }, []);
+
+  /** Pointer/keyboard press переводит кнопку импорта в тёмную палитру. */
+  const handleImportPressStart = useCallback(() => {
+    setIsImportPressed(true);
+  }, []);
+
+  /** Сброс pressed-состояния перед открытием системного import flow. */
+  const handleImportClick = useCallback(() => {
+    setIsImportPressed(false);
+    onImport();
+  }, [onImport]);
+
+  /** Клавиатурный запуск тоже должен давать краткий pressed-state. */
+  const handleImportKeyDown = useCallback((event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      setIsImportPressed(true);
+    }
+  }, []);
+
+  /** Отпускание клавиши возвращает светлую палитру. */
+  const handleImportKeyUp = useCallback((event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      setIsImportPressed(false);
+    }
+  }, []);
+
   return (
     <div style={styles.container}>
       <button style={styles.btn} onClick={onCreateNew} title={t('sidebar.newTooltip')}>
         {t('sidebar.new')}
       </button>
-      <button style={styles.btnSec} onClick={onImport} title={t('sidebar.importTooltip')}>
+      <button
+        style={resolveToolbarUtilityButtonStyle(isImportPressed)}
+        onClick={handleImportClick}
+        onPointerDown={handleImportPressStart}
+        onPointerUp={releaseImportPressedState}
+        onPointerCancel={releaseImportPressedState}
+        onPointerLeave={releaseImportPressedState}
+        onBlur={releaseImportPressedState}
+        onKeyDown={handleImportKeyDown}
+        onKeyUp={handleImportKeyUp}
+        title={t('sidebar.importTooltip')}
+      >
         <ImportIcon />
       </button>
       <button
-        style={{ ...styles.btnSec, ...(showFilters ? styles.btnActive : {}) }}
+        style={resolveToolbarUtilityButtonStyle(showFilters)}
         onClick={onToggleFilters}
         title={t('sidebar.filtersTooltip')}
       >
         <FilterIcon />
       </button>
       <button
-        style={{ ...styles.btnSec, ...(showViewSettings ? styles.btnActive : {}) }}
+        style={resolveToolbarUtilityButtonStyle(showViewSettings)}
         onClick={onToggleViewSettings}
         title={t('sidebar.viewSettingsTooltip')}
       >
@@ -88,16 +139,18 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     justifyContent: 'center',
     padding: '4px 8px',
-    background: 'var(--vscode-button-secondaryBackground)',
-    color: 'var(--vscode-button-secondaryForeground)',
     border: 'none',
     borderRadius: '4px',
     cursor: 'pointer',
     fontSize: '14px',
   },
-  btnActive: {
+  btnSecIdle: {
     background: 'var(--vscode-badge-background)',
     color: 'var(--vscode-badge-foreground)',
+  },
+  btnSecActive: {
+    background: 'var(--vscode-button-secondaryBackground)',
+    color: 'var(--vscode-button-secondaryForeground)',
   },
   icon: {
     width: '14px',

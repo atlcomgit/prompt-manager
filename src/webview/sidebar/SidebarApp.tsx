@@ -340,13 +340,6 @@ export const SidebarApp: React.FC = () => {
         }
       }
     }
-
-    // Add favorites group
-    const favoritePrompts = filteredPrompts.filter(p => p.favorite);
-    if (favoritePrompts.length > 0) {
-      orderedGroups[`⭐ ${t('filter.favoritesOnly')}`] = favoritePrompts;
-    }
-
     return orderedGroups;
   }, [filteredPrompts, groupBy]);
 

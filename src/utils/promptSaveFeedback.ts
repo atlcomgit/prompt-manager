@@ -59,20 +59,34 @@ export function shouldApplySavedPromptToPanel(
 ): boolean {
 	const normalizedSavedPromptUuid = (savedPromptUuid || '').trim();
 	const normalizedLivePromptUuid = (livePromptUuid || '').trim();
-	if (normalizedSavedPromptUuid && normalizedLivePromptUuid && normalizedSavedPromptUuid === normalizedLivePromptUuid) {
-		return true;
-	}
-
-	const normalizedLivePromptId = (livePromptId || '').trim();
-	if (!normalizedLivePromptId) {
-		return true;
-	}
-
 	const normalizedSavedPromptId = (savedPromptId || '').trim();
+	const normalizedLivePromptId = (livePromptId || '').trim();
 	const normalizedPreviousPromptId = (previousPromptId || '').trim();
 
-	return normalizedLivePromptId === normalizedSavedPromptId
+	const uuidMatch = Boolean(normalizedSavedPromptUuid && normalizedLivePromptUuid && normalizedSavedPromptUuid === normalizedLivePromptUuid);
+
+	/** Новый промпт (ещё нет id/директории) — совпадение определяется только по UUID */
+	if (!normalizedLivePromptId) {
+		if (uuidMatch) {
+			return true;
+		}
+		/** UUID не совпали или отсутствуют — отклоняем для безопасности */
+		return false;
+	}
+
+	const idMatch = normalizedLivePromptId === normalizedSavedPromptId
 		|| Boolean(normalizedPreviousPromptId && normalizedLivePromptId === normalizedPreviousPromptId);
+
+	/**
+	 * Существующий промпт: если оба UUID доступны — требуем совпадение И uuid, И id/path.
+	 * Это предотвращает применение результата при совпадении UUID, но расхождении папки.
+	 */
+	if (normalizedSavedPromptUuid && normalizedLivePromptUuid) {
+		return uuidMatch && idMatch;
+	}
+
+	/** Нет UUID (легаси) — используем только сопоставление по id/path */
+	return idMatch;
 }
 
 export function shouldNotifyReservedArchiveRename(

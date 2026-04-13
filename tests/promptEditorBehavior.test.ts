@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createDefaultEditorPromptExpandedSections } from '../src/types/prompt.js';
 import {
 	resolvePromptEditorExpandedSections,
+	resolvePromptPlanPlaceholderState,
 	resolvePromptChatLaunchTrackingKey,
 	resolvePromptOpenEditorViewState,
 	shouldPreservePromptIdAfterChatStart,
@@ -45,6 +46,7 @@ test('resolvePromptEditorExpandedSections applies auto-open rules until notes, p
 		manualSectionOverrides: {},
 		hasNotesContent: true,
 		hasPlanContent: false,
+		shouldExpandPlanSection: false,
 		hasReportContent: false,
 	}), {
 		...defaults,
@@ -56,6 +58,7 @@ test('resolvePromptEditorExpandedSections applies auto-open rules until notes, p
 		manualSectionOverrides: {},
 		hasNotesContent: false,
 		hasPlanContent: false,
+		shouldExpandPlanSection: false,
 		hasReportContent: false,
 	}), defaults);
 
@@ -64,6 +67,7 @@ test('resolvePromptEditorExpandedSections applies auto-open rules until notes, p
 		manualSectionOverrides: {},
 		hasNotesContent: false,
 		hasPlanContent: true,
+		shouldExpandPlanSection: false,
 		hasReportContent: true,
 	}), {
 		...defaults,
@@ -83,6 +87,7 @@ test('resolvePromptEditorExpandedSections applies auto-open rules until notes, p
 		},
 		hasNotesContent: true,
 		hasPlanContent: false,
+		shouldExpandPlanSection: false,
 		hasReportContent: true,
 	}), {
 		...defaults,
@@ -98,6 +103,7 @@ test('togglePromptEditorSectionExpansion uses effective section state and marks 
 		manualSectionOverrides: {},
 		hasNotesContent: false,
 		hasPlanContent: true,
+		shouldExpandPlanSection: false,
 		hasReportContent: true,
 	});
 
@@ -126,6 +132,7 @@ test('togglePromptEditorSectionExpansion uses effective section state and marks 
 			manualSectionOverrides: {},
 			hasNotesContent: false,
 			hasPlanContent: false,
+			shouldExpandPlanSection: false,
 			hasReportContent: false,
 		}),
 		expandedSections: defaults,
@@ -159,6 +166,7 @@ test('resolvePromptEditorExpandedSections reopens plan and report once content a
 		},
 		hasNotesContent: false,
 		hasPlanContent: true,
+		shouldExpandPlanSection: false,
 		hasReportContent: true,
 	}), {
 		...defaults,
@@ -182,12 +190,82 @@ test('resolvePromptEditorExpandedSections keeps manual collapse when plan and re
 		},
 		hasNotesContent: false,
 		hasPlanContent: true,
+		shouldExpandPlanSection: false,
 		hasReportContent: true,
 	}), {
 		...defaults,
 		plan: false,
 		report: false,
 	});
+});
+
+test('resolvePromptEditorExpandedSections auto-opens Plan when plan-mode placeholder should be shown', () => {
+	const defaults = createDefaultEditorPromptExpandedSections();
+
+	assert.deepEqual(resolvePromptEditorExpandedSections({
+		expandedSections: defaults,
+		manualSectionOverrides: {},
+		hasNotesContent: false,
+		hasPlanContent: false,
+		shouldExpandPlanSection: true,
+		hasReportContent: false,
+	}), {
+		...defaults,
+		plan: true,
+	});
+
+	assert.deepEqual(resolvePromptEditorExpandedSections({
+		expandedSections: {
+			...defaults,
+			plan: false,
+		},
+		manualSectionOverrides: {
+			plan: 'until-content',
+		},
+		hasNotesContent: false,
+		hasPlanContent: false,
+		shouldExpandPlanSection: true,
+		hasReportContent: false,
+	}), {
+		...defaults,
+		plan: false,
+	});
+});
+
+test('resolvePromptPlanPlaceholderState returns plan-mode for empty plan section in Plan chat mode', () => {
+	assert.equal(resolvePromptPlanPlaceholderState({
+		chatMode: 'plan',
+		planExists: false,
+		hasPlanContent: false,
+	}), 'plan-mode');
+
+	assert.equal(resolvePromptPlanPlaceholderState({
+		chatMode: 'plan',
+		planExists: true,
+		hasPlanContent: false,
+	}), 'plan-mode');
+});
+
+test('resolvePromptPlanPlaceholderState keeps existing empty and missing states outside Plan chat mode', () => {
+	assert.equal(resolvePromptPlanPlaceholderState({
+		chatMode: 'agent',
+		planExists: true,
+		hasPlanContent: false,
+	}), 'empty');
+
+	assert.equal(resolvePromptPlanPlaceholderState({
+		chatMode: 'agent',
+		planExists: false,
+		hasPlanContent: false,
+	}), 'missing');
+});
+
+test('resolvePromptPlanPlaceholderState returns null once plan content exists', () => {
+	assert.equal(resolvePromptPlanPlaceholderState({
+		chatMode: 'plan',
+		planExists: true,
+		hasPlanContent: true,
+	}), null);
 });
 
 test('shouldPreservePromptIdAfterChatStart freezes prompt id after runtime chat lock or bound sessions', () => {

@@ -412,7 +412,8 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 	const now = new Date().toISOString();
 	return {
 		id,
-		promptUuid: '',
+		/** Генерируем UUID сразу при создании, чтобы однозначно идентифицировать промпт до первого сохранения */
+		promptUuid: crypto.randomUUID(),
 		title: '',
 		description: '',
 		status: 'draft',

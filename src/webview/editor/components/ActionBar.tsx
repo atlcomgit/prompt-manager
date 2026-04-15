@@ -21,6 +21,7 @@ interface Props {
   hasContent: boolean;
   isPersistedPrompt: boolean;
   status: PromptStatus;
+  activeTab?: string;
 }
 
 export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSession' | 'isChatPanelOpen' | 'isPersistedPrompt'>): {
@@ -79,7 +80,7 @@ function splitLeadingIconLabel(label: string): { icon: string; text: string } {
 }
 
 export const ActionBar: React.FC<Props> = ({
-  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isSaving, isStartingChat, isGeneratingTitle = false, isGeneratingDescription = false, hasContent, isPersistedPrompt, status,
+  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isSaving, isStartingChat, isGeneratingTitle = false, isGeneratingDescription = false, hasContent, isPersistedPrompt, status, activeTab,
 }) => {
   const t = useT();
   const saveLabel = splitLeadingIconLabel(t('actions.save'));
@@ -105,6 +106,7 @@ export const ActionBar: React.FC<Props> = ({
           <span>{saveLabel.text}</span>
         </button>
 
+        {activeTab !== 'process' && (
         <button
           style={{ ...styles.btn, ...styles.btnChat }}
           onClick={onShowHistory}
@@ -113,6 +115,7 @@ export const ActionBar: React.FC<Props> = ({
         >
           🕘 История
         </button>
+        )}
 
         {chatEntryState.shouldShowOpenChat ? (
           <button style={{ ...styles.btn, ...styles.btnChat }} onClick={onOpenChat}>

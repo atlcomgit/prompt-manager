@@ -1645,6 +1645,7 @@ export const EditorApp: React.FC = () => {
       case 'promptContentUpdated':
         // Content updated from external editor — show changes but do NOT auto-save
         // (user decides when to save in the external editor)
+        promptRef.current = { ...promptRef.current, content: msg.content || '' };
         setPrompt(prev => {
           const nextContent = msg.content || '';
           const activityDeltaMs = Number.isFinite(msg.writingDeltaMs) ? Math.max(0, Number(msg.writingDeltaMs)) : 0;
@@ -2072,7 +2073,11 @@ export const EditorApp: React.FC = () => {
           [msg.action]: true,
         }));
         if (gitOverlayPendingCompletionActionRef.current === msg.action) {
-          clearGitOverlayBusyState();
+          gitOverlayPendingCompletionActionRef.current = null;
+          // Keep busy until snapshot confirms the side-effects (e.g. push updates remote state)
+          if (!preserveGitOverlayBusyStateUntilSnapshot()) {
+            clearGitOverlayBusyState();
+          }
         }
         break;
       case 'contextFileCards': {
@@ -2411,6 +2416,8 @@ export const EditorApp: React.FC = () => {
     setShowPreview(false);
     setInlineSuggestion('');
     setInlineSuggestions([]);
+    const nextContent = appendRecognizedPromptText(promptRef.current.content, normalized);
+    promptRef.current = { ...promptRef.current, content: nextContent };
     setPrompt(prev => ({
       ...prev,
       content: appendRecognizedPromptText(prev.content, normalized),
@@ -2432,6 +2439,7 @@ export const EditorApp: React.FC = () => {
 
   /** Update a text field with debounced auto-save (1.5 s). */
   const updateField = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
+    promptRef.current = { ...promptRef.current, [field]: value };
     setPrompt(prev => ({ ...prev, [field]: value }));
     if (field === 'report') {
       localReportDirtyRef.current = true;
@@ -2439,12 +2447,16 @@ export const EditorApp: React.FC = () => {
     if (field !== 'timeSpentWriting' && field !== 'timeSpentImplementing') {
       userChangeCounterRef.current++;
       setIsDirty(true);
-      scheduleAutoSave(1500);
+      // Content field saves on blur, not on every keystroke
+      if (field !== 'content') {
+        scheduleAutoSave(1500);
+      }
     }
   };
 
   /** Update a select/toggle field with near-immediate auto-save. */
   const updateFieldAndSaveNow = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
+    promptRef.current = { ...promptRef.current, [field]: value };
     setPrompt(prev => ({ ...prev, [field]: value }));
     if (field === 'report') {
       localReportDirtyRef.current = true;
@@ -3862,6 +3874,7 @@ export const EditorApp: React.FC = () => {
                     <TextArea
                       value={prompt.content}
                       onChange={v => { updateField('content', v); setInlineSuggestion(''); setInlineSuggestions([]); }}
+                      onBlur={() => { if (isDirty) { scheduleAutoSave(300); } }}
                       placeholder={t('editor.promptPlaceholder')}
                       rows={12}
                       required
@@ -4323,6 +4336,7 @@ export const EditorApp: React.FC = () => {
             hasContent={!!prompt.content}
             isPersistedPrompt={isPersistedPrompt}
             status={prompt.status}
+            activeTab={activeTab}
           />
         </div>
       </div>

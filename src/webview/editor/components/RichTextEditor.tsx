@@ -483,7 +483,10 @@ export const RichTextEditor: React.FC<Props> = ({
   }, [mode, onDebug, value]);
 
   useEffect(() => {
-    syncAutoResizeHeight();
+    // Delay measurement until after mode-switch DOM render is committed
+    requestAnimationFrame(() => {
+      syncAutoResizeHeight();
+    });
   }, [htmlSource, markdownPreviewHtml, mode, syncAutoResizeHeight, value]);
 
   useEffect(() => {

@@ -1161,7 +1161,7 @@ const ru: Record<string, string> = {
 	'editor.gitOverlayStateNeedsSync': 'Нужен pull',
 	'editor.gitOverlayStateCurrentSelected': 'Выбрана текущая',
 	'editor.gitOverlayStateNoChanges': 'Нет изменений',
-	'editor.gitOverlayStateOnPrompt': 'На ветке промпта',
+	'editor.gitOverlayStateOnPrompt': 'Готов',
 	'editor.gitOverlayStateReady': 'Готово',
 	'editor.gitOverlayStateNeedsSwitch': 'Нужно переключить',
 	'editor.gitOverlayStateUnavailable': 'Недоступно',

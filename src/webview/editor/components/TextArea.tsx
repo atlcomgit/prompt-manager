@@ -183,6 +183,7 @@ interface Props {
   label?: string;
   value: string;
   onChange: (value: string) => void;
+  onBlur?: () => void;
   placeholder?: string;
   required?: boolean;
   rows?: number;
@@ -208,7 +209,7 @@ interface Props {
  * background so the ghost text shows through.
  */
 export const TextArea: React.FC<Props> = ({
-  label, value, onChange, placeholder, required, rows = 8,
+  label, value, onChange, onBlur, placeholder, required, rows = 8,
   onRequestSuggestion, suggestion, suggestions,
   autoCompleteEnabled = false, onAutoCompleteChange,
   showControls = true, requestSuggestionSignal,
@@ -505,6 +506,7 @@ export const TextArea: React.FC<Props> = ({
           onPaste={handlePaste}
           onSelect={handleSelect}
           onScroll={syncScroll}
+          onBlur={onBlur}
           placeholder={placeholder}
           rows={rows}
           style={{

@@ -7,9 +7,11 @@ node_modules/**
 !dist/sql-wasm.wasm
 esbuild.webview.mjs
 tsconfig.json
+tsconfig.tests.json
 .gitignore
 .env
 **/*.ts
 **/*.tsx
 **/*.map
 .qodo/**
+.tmp/**

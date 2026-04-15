@@ -1822,6 +1822,8 @@ export const GitOverlay: React.FC<Props> = ({
 	const isGeneratingAll = hasPendingBulkGenerate;
 	const isCommittingAll = hasPendingBulkCommit;
 	const isCreatingAllReviewRequests = busyAction === 'createReviewRequest:all';
+	/** Флаг: любая операция создания review request (индивидуальная или массовая) в процессе */
+	const isAnyReviewRequestCreating = busyAction?.startsWith('createReviewRequest:') ?? false;
 
 	const refreshProgressMode: RefreshProgressMode = isLoadingOverlay
 		? 'loading'
@@ -2719,14 +2721,14 @@ export const GitOverlay: React.FC<Props> = ({
 														<ActionButton
 															label={t('editor.gitOverlayGenerateReviewRequestTitle')}
 															onClick={() => regenerateReviewDraftTitle(project.project)}
-															disabled={isReadOnlyFlow || !project.review.remote?.cliAvailable}
+															disabled={isReadOnlyFlow || !project.review.remote?.cliAvailable || isCreatingReviewRequest}
 														/>
 													) : null}
 													{!hasRequest ? (
 														<ActionButton
 															label={t('editor.gitOverlayCreateReviewRequest').replace('{label}', actionLabel)}
 															onClick={() => handleCreateReviewRequest(project)}
-															disabled={isReadOnlyFlow || !canCreateReviewRequest}
+															disabled={isReadOnlyFlow || !canCreateReviewRequest || isCreatingReviewRequest}
 															loading={isCreatingReviewRequest}
 															hidden={shouldHideActionWhileWaiting(`createReviewRequest:${project.project}`) || shouldHideActionWhileWaiting('createReviewRequest:all')}
 															variant="primary"
@@ -2751,7 +2753,7 @@ export const GitOverlay: React.FC<Props> = ({
 													<ActionButton
 														label={t('editor.gitOverlayCreateAllReviewRequests')}
 														onClick={handleCreateAllReviewRequests}
-														disabled={isReadOnlyFlow || !canCreateAllReviewRequests}
+														disabled={isReadOnlyFlow || !canCreateAllReviewRequests || isAnyReviewRequestCreating}
 														loading={isCreatingAllReviewRequests}
 														hidden={shouldHideActionWhileWaiting('createReviewRequest:all')}
 														variant="primary"
@@ -3754,7 +3756,7 @@ const styles: Record<string, CSSProperties> = {
 		justifyContent: 'space-between',
 		alignItems: 'center',
 		gap: '8px',
-		flexWrap: 'wrap',
+		flexWrap: 'nowrap',
 	},
 	reviewRequestTitle: {
 		fontSize: '12px',

@@ -88,7 +88,7 @@ const openPanels = new Map<string, vscode.WebviewPanel>();
 const SINGLE_EDITOR_PANEL_KEY = '__prompt_editor_singleton__';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
-const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 250;
+const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 600;
 
 type GitOverlayRefreshMode = 'local' | 'fetch' | 'sync';
 

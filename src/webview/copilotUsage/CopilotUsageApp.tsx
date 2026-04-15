@@ -2,7 +2,10 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 
+/** Точка timeline: дата + кумулятивное использование + лимит */
 type TimelinePoint = { date: string; used: number; limit: number };
+
+/** Состояние переключения аккаунта */
 type AccountSwitchState = {
 	isSwitching: boolean;
 	phase: 'idle' | 'detected' | 'syncing-extension' | 'awaiting-session' | 'refreshing-usage' | 'completed' | 'error';
@@ -11,6 +14,8 @@ type AccountSwitchState = {
 	startedAt: string | null;
 	updatedAt: string;
 };
+
+/** View-модель данных, получаемая из extension host */
 type UsageViewModel = {
 	used: number;
 	limit: number;
@@ -39,21 +44,25 @@ type UsageViewModel = {
 
 const vscode = getVsCodeApi();
 
+/** Форматирует ISO-дату в локализованный формат дд.мм.гггг */
 function formatDate(value: string): string {
 	const date = new Date(value);
 	return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('ru-RU');
 }
 
+/** Форматирует ISO-дату+время в локализованный формат */
 function formatDateTime(value: string): string {
 	const date = new Date(value);
 	return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ru-RU');
 }
 
+/** Форматирует число как процент с 2 знаками */
 function formatPercent(value: number): string {
 	const safe = Number.isFinite(value) ? Math.max(0, value) : 0;
 	return `${new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(safe)}%`;
 }
 
+/** Форматирует число с заданной точностью */
 function formatNumber(value: number, maximumFractionDigits = 1): string {
 	const safe = Number.isFinite(value) ? value : 0;
 	return new Intl.NumberFormat('ru-RU', {
@@ -62,6 +71,16 @@ function formatNumber(value: number, maximumFractionDigits = 1): string {
 	}).format(safe);
 }
 
+/** Форматирует дату в короткий вид дд.мм */
+function formatShortDate(value: string): string {
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return value;
+	const d = String(date.getDate()).padStart(2, '0');
+	const m = String(date.getMonth() + 1).padStart(2, '0');
+	return `${d}.${m}`;
+}
+
+/** Возвращает цвет тона в зависимости от процента использования */
 const getToneColor = (percent: number): string => {
 	if (percent >= 91) return 'var(--vscode-errorForeground)';
 	if (percent >= 76) return 'var(--vscode-charts-orange)';
@@ -69,6 +88,15 @@ const getToneColor = (percent: number): string => {
 	return 'var(--vscode-foreground)';
 };
 
+/** Возвращает цвет бара в зависимости от delta и рекомендованного значения */
+function getBarColor(delta: number, recommended: number): string {
+	if (recommended <= 0) return 'var(--vscode-textLink-foreground)';
+	if (delta > recommended * 2) return 'var(--vscode-errorForeground)';
+	if (delta > recommended) return 'var(--vscode-charts-orange)';
+	return 'var(--vscode-testing-iconPassed)';
+}
+
+/** Заголовок для оверлея переключения аккаунта */
 function getAccountSwitchTitle(state: AccountSwitchState | null): string {
 	switch (state?.phase) {
 		case 'syncing-extension':
@@ -87,21 +115,111 @@ function getAccountSwitchTitle(state: AccountSwitchState | null): string {
 	}
 }
 
-const MiniLineChart: React.FC<{ points: TimelinePoint[] }> = ({ points }) => {
-	const { path, maxY } = useMemo(() => {
-		if (points.length <= 1) {
-			return { path: '', maxY: Math.max(points[0]?.used ?? 0, 1) };
+/**
+ * Генерирует Catmull-Rom сплайн через точки — возвращает SVG path data.
+ * Даёт плавную кривую, проходящую через все точки.
+ */
+function catmullRomPath(
+	points: Array<{ x: number; y: number }>,
+	tension = 0.3,
+): string {
+	if (points.length < 2) return '';
+	if (points.length === 2) {
+		return `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)} L ${points[1].x.toFixed(2)} ${points[1].y.toFixed(2)}`;
+	}
+
+	const segments: string[] = [`M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`];
+
+	for (let i = 0; i < points.length - 1; i++) {
+		const p0 = points[Math.max(0, i - 1)];
+		const p1 = points[i];
+		const p2 = points[i + 1];
+		const p3 = points[Math.min(points.length - 1, i + 2)];
+
+		/** Контрольные точки по Catmull-Rom */
+		const cp1x = p1.x + (p2.x - p0.x) * tension / 3;
+		const cp1y = p1.y + (p2.y - p0.y) * tension / 3;
+		const cp2x = p2.x - (p3.x - p1.x) * tension / 3;
+		const cp2y = p2.y - (p3.y - p1.y) * tension / 3;
+
+		segments.push(`C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)}, ${cp2x.toFixed(2)} ${cp2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`);
+	}
+
+	return segments.join(' ');
+}
+
+// ---------------------------------------------------------------------------
+//  TrendAreaChart — SVG area chart с градиентом, сеткой и линией лимита
+// ---------------------------------------------------------------------------
+
+/** Area chart с Catmull-Rom сглаживанием, градиентом и линией лимита */
+const TrendAreaChart: React.FC<{ points: TimelinePoint[]; limit: number }> = ({ points, limit }) => {
+	const chartId = useMemo(() => `trend-${Date.now()}`, []);
+
+	const { linePath, areaPath, maxY, yTicks, xLabels, limitY, hoverPoints } = useMemo(() => {
+		if (points.length === 0) {
+			return { linePath: '', areaPath: '', maxY: 1, yTicks: [] as number[], xLabels: [] as Array<{ x: number; label: string }>, limitY: 0, hoverPoints: [] as Array<{ cx: number; cy: number; label: string; used: number }> };
 		}
-		const width = 100;
-		const height = 32;
-		const maxValue = Math.max(1, ...points.map(point => point.used));
-		const commands = points.map((point, index) => {
-			const x = (index / (points.length - 1)) * width;
-			const y = height - (point.used / maxValue) * height;
-			return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
-		}).join(' ');
-		return { path: commands, maxY: maxValue };
-	}, [points]);
+
+		/** Настройки размеров SVG viewBox */
+		const W = 600;
+		const H = 200;
+		const padL = 48;
+		const padR = 12;
+		const padT = 16;
+		const padB = 28;
+		const chartW = W - padL - padR;
+		const chartH = H - padT - padB;
+
+		/** Определяем максимум оси Y: максимум из used и limit */
+		const maxUsed = Math.max(1, ...points.map(p => p.used));
+		const rawMax = Math.max(maxUsed, limit > 0 ? limit : 0);
+		/** Округление вверх до ближайших 50 */
+		const maxVal = Math.ceil(rawMax / 50) * 50 || rawMax;
+
+		/** Горизонтальные линии сетки: 0, 25%, 50%, 75%, 100% от maxVal */
+		const ticks = [0, 0.25, 0.5, 0.75, 1].map(frac => Math.round(frac * maxVal));
+
+		/** Преобразование точек в координаты SVG */
+		const svgPoints = points.map((p, i) => ({
+			x: padL + (points.length > 1 ? (i / (points.length - 1)) * chartW : chartW / 2),
+			y: padT + chartH - (p.used / maxVal) * chartH,
+		}));
+
+		/** Подписи оси X — прореживаем, показываем не более 8 */
+		const maxXLabels = 8;
+		const step = Math.max(1, Math.floor(points.length / maxXLabels));
+		const xLbls: Array<{ x: number; label: string }> = [];
+		for (let i = 0; i < points.length; i += step) {
+			xLbls.push({ x: svgPoints[i].x, label: formatShortDate(points[i].date) });
+		}
+		/** Всегда добавляем последнюю точку если не уже включена */
+		const lastIdx = points.length - 1;
+		if (lastIdx % step !== 0) {
+			xLbls.push({ x: svgPoints[lastIdx].x, label: formatShortDate(points[lastIdx].date) });
+		}
+
+		/** SVG path для сглаженной линии */
+		const line = catmullRomPath(svgPoints);
+
+		/** SVG path для области под линией (закрашенный градиент) */
+		const area = svgPoints.length > 0
+			? `${line} L ${svgPoints[svgPoints.length - 1].x.toFixed(2)} ${padT + chartH} L ${svgPoints[0].x.toFixed(2)} ${padT + chartH} Z`
+			: '';
+
+		/** Координата Y для горизонтальной линии лимита */
+		const limY = limit > 0 ? padT + chartH - (limit / maxVal) * chartH : -10;
+
+		/** Точки для hover-эффекта */
+		const hPts = svgPoints.map((pt, i) => ({
+			cx: pt.x,
+			cy: pt.y,
+			label: formatShortDate(points[i].date),
+			used: points[i].used,
+		}));
+
+		return { linePath: line, areaPath: area, maxY: maxVal, yTicks: ticks, xLabels: xLbls, limitY: limY, hoverPoints: hPts };
+	}, [points, limit, chartId]);
 
 	if (points.length === 0) {
 		return <div style={styles.emptyChart}>Нет данных для графика</div>;
@@ -109,25 +227,76 @@ const MiniLineChart: React.FC<{ points: TimelinePoint[] }> = ({ points }) => {
 
 	return (
 		<div style={styles.chartWrap}>
-			<svg viewBox="0 0 100 32" preserveAspectRatio="none" style={styles.chartSvg}>
-				<line x1="0" y1="31" x2="100" y2="31" stroke="var(--vscode-panel-border)" strokeWidth="1" />
-				<path d={path} fill="none" stroke="var(--vscode-textLink-foreground)" strokeWidth="1.25" />
+			<svg viewBox="0 0 600 200" preserveAspectRatio="xMidYMid meet" style={styles.chartSvg}>
+				<defs>
+					{/* Вертикальный градиент: от полупрозрачного цвета линии до прозрачного */}
+					<linearGradient id={`${chartId}-grad`} x1="0" y1="0" x2="0" y2="1">
+						<stop offset="0%" stopColor="var(--vscode-textLink-foreground)" stopOpacity="0.35" />
+						<stop offset="100%" stopColor="var(--vscode-textLink-foreground)" stopOpacity="0.03" />
+					</linearGradient>
+				</defs>
+
+				{/* Горизонтальные grid-линии + подписи оси Y */}
+				{yTicks.map((tick, i) => {
+					const y = 16 + (200 - 16 - 28) - (tick / maxY) * (200 - 16 - 28);
+					return (
+						<g key={`ytick-${i}`}>
+							<line x1="48" y1={y} x2="588" y2={y} stroke="var(--vscode-panel-border)" strokeWidth="0.5" strokeDasharray={i > 0 ? '4,3' : undefined} />
+							<text x="44" y={y + 3} textAnchor="end" fill="var(--vscode-descriptionForeground)" fontSize="9" fontFamily="var(--vscode-font-family)">{tick}</text>
+						</g>
+					);
+				})}
+
+				{/* Подписи оси X */}
+				{xLabels.map((lbl, i) => (
+					<text key={`xlabel-${i}`} x={lbl.x} y={196} textAnchor="middle" fill="var(--vscode-descriptionForeground)" fontSize="9" fontFamily="var(--vscode-font-family)">{lbl.label}</text>
+				))}
+
+				{/* Закрашенная область под линией */}
+				{areaPath && <path d={areaPath} fill={`url(#${chartId}-grad)`} />}
+
+				{/* Основная линия тренда */}
+				<path d={linePath} fill="none" stroke="var(--vscode-textLink-foreground)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+
+				{/* Пунктирная линия лимита */}
+				{limit > 0 && limitY >= 0 && limitY <= 200 && (
+					<>
+						<line x1="48" y1={limitY} x2="588" y2={limitY} stroke="var(--vscode-errorForeground)" strokeWidth="1" strokeDasharray="6,4" opacity="0.6" />
+						<text x="588" y={limitY - 4} textAnchor="end" fill="var(--vscode-errorForeground)" fontSize="9" opacity="0.7" fontFamily="var(--vscode-font-family)">лимит: {limit}</text>
+					</>
+				)}
+
+				{/* Hover-точки */}
+				{hoverPoints.map((pt, i) => (
+					<circle key={`pt-${i}`} cx={pt.cx} cy={pt.cy} r="3" fill="var(--vscode-textLink-foreground)" opacity="0" stroke="none">
+						<title>{`${pt.label}: ${pt.used}`}</title>
+						<set attributeName="opacity" to="1" begin="mouseover" end="mouseout" />
+					</circle>
+				))}
 			</svg>
+
+			{/* Мета-подписи под графиком */}
 			<div style={styles.chartMeta}>
-				<span>max: {maxY}</span>
 				<span>{formatDate(points[0].date)} → {formatDate(points[points.length - 1].date)}</span>
+				<span>max: {Math.max(...points.map(p => p.used))}</span>
 			</div>
 		</div>
 	);
 };
 
-const DailyBars: React.FC<{ points: TimelinePoint[] }> = ({ points }) => {
+// ---------------------------------------------------------------------------
+//  DailyBars — столбчатая диаграмма запросов по дням
+// ---------------------------------------------------------------------------
+
+/** Столбчатая диаграмма дневных приростов с цветовым кодированием */
+const DailyBars: React.FC<{ points: TimelinePoint[]; recommendedPerDay: number }> = ({ points, recommendedPerDay }) => {
 	const bars = useMemo(() => {
 		if (points.length === 0) return [] as Array<{ date: string; delta: number }>;
 		const rows: Array<{ date: string; delta: number }> = [];
 		for (let index = 0; index < points.length; index += 1) {
 			const current = points[index];
 			const previous = points[index - 1];
+			/** Delta = прирост использования за день */
 			const delta = previous ? Math.max(0, current.used - previous.used) : 0;
 			rows.push({ date: current.date, delta });
 		}
@@ -142,20 +311,32 @@ const DailyBars: React.FC<{ points: TimelinePoint[] }> = ({ points }) => {
 
 	return (
 		<div style={styles.barChart}>
-			{bars.map(item => (
-				<div key={item.date} style={styles.barItem} title={`${formatDate(item.date)}: +${item.delta}`}>
-					<div
-						style={{
-							...styles.barValue,
-							height: `${Math.max(8, (item.delta / maxDelta) * 100)}%`,
-						}}
-					/>
-					<span style={styles.barLabel}>{new Date(item.date).getDate()}</span>
-				</div>
-			))}
+			{bars.map(item => {
+				/** Цвет бара зависит от delta относительно рекомендованного значения */
+				const barColor = getBarColor(item.delta, recommendedPerDay);
+				return (
+					<div key={item.date} style={styles.barItem} title={`${formatShortDate(item.date)}: +${item.delta}`}>
+						{/* Значение delta над баром */}
+						<span style={styles.barDeltaLabel}>{item.delta > 0 ? `+${item.delta}` : ''}</span>
+						<div
+							style={{
+								...styles.barValue,
+								height: `${Math.max(4, (item.delta / maxDelta) * 100)}%`,
+								background: barColor,
+							}}
+						/>
+						{/* Подпись даты дд.мм */}
+						<span style={styles.barLabel}>{formatShortDate(item.date)}</span>
+					</div>
+				);
+			})}
 		</div>
 	);
 };
+
+// ---------------------------------------------------------------------------
+//  CopilotUsageApp — корневой компонент страницы
+// ---------------------------------------------------------------------------
 
 export const CopilotUsageApp: React.FC = () => {
 	const [data, setData] = useState<UsageViewModel | null>(null);
@@ -163,22 +344,28 @@ export const CopilotUsageApp: React.FC = () => {
 	const [accountSwitchState, setAccountSwitchState] = useState<AccountSwitchState | null>(null);
 	const [refreshedAt, setRefreshedAt] = useState<string>('');
 	const [accountSwitchMessage, setAccountSwitchMessage] = useState<string>('');
+	/** Видимость debug-лога (аккордеон) */
+	const [debugOpen, setDebugOpen] = useState(false);
 	const isSwitchingAccount = Boolean(accountSwitchState?.isSwitching);
 
+	/** Запрос принудительного обновления данных */
 	const requestData = useCallback(() => {
 		setIsRefreshing(true);
 		vscode.postMessage({ type: 'copilotUsage.refresh' });
 	}, []);
 
+	/** Запрос смены аккаунта */
 	const switchAccount = useCallback(() => {
 		setAccountSwitchMessage('');
 		vscode.postMessage({ type: 'copilotUsage.switchAccount' });
 	}, []);
 
+	/** Сигнализируем extension-host о готовности webview */
 	useEffect(() => {
 		vscode.postMessage({ type: 'copilotUsage.ready' });
 	}, []);
 
+	/** Обработка входящих сообщений от extension host */
 	useMessageListener((msg: any) => {
 		if (msg?.type === 'copilotUsage.data') {
 			const nextData = msg.data as UsageViewModel;
@@ -202,10 +389,12 @@ export const CopilotUsageApp: React.FC = () => {
 		}
 	});
 
+	/** Состояние загрузки */
 	if (!data) {
 		return <div style={styles.loading}>Загрузка статистики Copilot Premium...</div>;
 	}
 
+	/** Оверлей переключения аккаунта */
 	const switchingOverlay = isSwitchingAccount ? (
 		<div style={styles.switchingOverlay}>
 			<style>{`@keyframes copilot-spin { to { transform: rotate(360deg); } }`}</style>
@@ -218,6 +407,7 @@ export const CopilotUsageApp: React.FC = () => {
 		</div>
 	) : null;
 
+	/** Экран авторизации */
 	if (!data.authenticated) {
 		return (
 			<div style={styles.page}>
@@ -240,6 +430,7 @@ export const CopilotUsageApp: React.FC = () => {
 		);
 	}
 
+	/** Вычисление прогноза расхода */
 	const toneColor = getToneColor(data.percent);
 	const percentText = formatPercent(data.percent);
 	const forecast = (() => {
@@ -283,6 +474,8 @@ export const CopilotUsageApp: React.FC = () => {
 	return (
 		<div style={styles.page}>
 			{switchingOverlay}
+
+			{/* ─── Шапка ─── */}
 			<div style={styles.headerRow}>
 				<div>
 					<h2 style={styles.title}>Copilot Premium Usage</h2>
@@ -300,119 +493,128 @@ export const CopilotUsageApp: React.FC = () => {
 			{accountSwitchMessage ? <div style={styles.infoBox}>{accountSwitchMessage}</div> : null}
 			{data.githubSessionIssue ? <div style={styles.warningBox}>{data.githubSessionIssue}</div> : null}
 
-			<div style={styles.mainGrid}>
-				<div style={styles.leftCol}>
-					<div style={styles.cards}>
-						<div style={styles.card}>
-							<div style={{ ...styles.cardValue, color: toneColor }}>{data.used}/{data.limit}</div>
-							<div style={styles.cardLabel}>Использовано</div>
-						</div>
-						<div style={styles.card}>
-							<div style={styles.cardValue}>{percentText}</div>
-							<div style={styles.cardLabel}>Заполнение лимита</div>
-						</div>
-						<div style={styles.card}>
-							<div style={styles.cardValue}>{data.remaining}</div>
-							<div style={styles.cardLabel}>Осталось запросов</div>
-						</div>
-						<div style={styles.card}>
-							<div style={styles.cardValue}>{data.avgPerDay}</div>
-							<div style={styles.cardLabel}>Среднее в день</div>
-						</div>
-					</div>
+			{/* ─── Карточки основных метрик ─── */}
+			<div style={styles.cards}>
+				<div style={styles.card}>
+					<div style={{ ...styles.cardValue, color: toneColor }}>{data.used}/{data.limit}</div>
+					<div style={styles.cardLabel}>Использовано</div>
+				</div>
+				<div style={styles.card}>
+					<div style={styles.cardValue}>{percentText}</div>
+					<div style={styles.cardLabel}>Заполнение лимита</div>
+				</div>
+				<div style={styles.card}>
+					<div style={styles.cardValue}>{data.remaining}</div>
+					<div style={styles.cardLabel}>Осталось запросов</div>
+				</div>
+				<div style={styles.card}>
+					<div style={styles.cardValue}>{data.avgPerDay}</div>
+					<div style={styles.cardLabel}>Среднее в день</div>
+				</div>
+			</div>
 
-					<div style={styles.progressSection}>
-						<div style={styles.progressHeader}>
-							<span>Прогресс месяца</span>
-							<span style={{ color: toneColor }}>{percentText}</span>
-						</div>
-						<div style={styles.progressTrack}>
-							<div style={{ ...styles.progressFill, width: `${Math.min(100, data.percent)}%`, backgroundColor: toneColor }} />
-						</div>
-						<div style={styles.metaGrid}>
-							<div>Подписка: <b>{data.planType}</b></div>
-							<div>Осталось дней: <b>{data.daysRemaining}</b></div>
-							<div>Реком. темп: <b>{data.recommendedPerDay}/день</b></div>
-							<div>Источник: <b>{data.source}</b></div>
-						</div>
-					</div>
+			{/* ─── Прогресс-бар месяца ─── */}
+			<div style={styles.progressSection}>
+				<div style={styles.progressHeader}>
+					<span>Прогресс месяца</span>
+					<span style={{ color: toneColor }}>{percentText}</span>
+				</div>
+				<div style={styles.progressTrack}>
+					<div style={{ ...styles.progressFill, width: `${Math.min(100, data.percent)}%`, backgroundColor: toneColor }} />
+				</div>
+				<div style={styles.metaGrid}>
+					<div>Подписка: <b>{data.planType}</b></div>
+					<div>Осталось дней: <b>{data.daysRemaining}</b></div>
+					<div>Реком. темп: <b>{data.recommendedPerDay}/день</b></div>
+					<div>Источник: <b>{data.source}</b></div>
+				</div>
+			</div>
 
-					<div style={styles.forecastSection}>
-						<h3 style={styles.sectionTitle}>Прогноз расхода и остатка</h3>
-						<div style={styles.forecastGrid}>
-							<div style={styles.forecastCard}>
-								<div style={styles.forecastValue}>{formatNumber(forecast.projectedUsed)}</div>
-								<div style={styles.cardLabel}>Прогноз usage к концу месяца</div>
-							</div>
-							<div style={styles.forecastCard}>
-								<div style={{ ...styles.forecastValue, color: forecast.projectedRemaining < 0 ? 'var(--vscode-errorForeground)' : 'var(--vscode-foreground)' }}>
-									{formatNumber(forecast.projectedRemaining)}
-								</div>
-								<div style={styles.cardLabel}>Прогноз остатка к концу месяца</div>
-							</div>
-							<div style={styles.forecastCard}>
-								<div style={{ ...styles.forecastValue, color: forecast.fitsMonth ? 'var(--vscode-testing-iconPassed)' : 'var(--vscode-errorForeground)' }}>
-									{forecast.fitsMonth ? 'Хватит' : 'Не хватит'}
-								</div>
-								<div style={styles.cardLabel}>Лимит при текущем темпе</div>
-							</div>
-						</div>
-						<div style={styles.forecastMetaGrid}>
-							<div>Текущий темп: <b>{formatNumber(forecast.recentAverage)} / день</b></div>
-							<div>Безопасный темп: <b>{formatNumber(forecast.safeDailyBudget)} / день</b></div>
-							<div>До исчерпания: <b>{Number.isFinite(forecast.daysUntilLimit) ? `${formatNumber(forecast.daysUntilLimit)} дн.` : 'запас большой'}</b></div>
-						</div>
-						<div style={styles.recommendationBox}>{forecast.recommendation}</div>
+			{/* ─── Прогноз расхода ─── */}
+			<div style={styles.forecastSection}>
+				<h3 style={styles.sectionTitle}>Прогноз расхода и остатка</h3>
+				<div style={styles.forecastGrid}>
+					<div style={styles.forecastCard}>
+						<div style={styles.forecastValue}>{formatNumber(forecast.projectedUsed)}</div>
+						<div style={styles.cardLabel}>Прогноз usage к концу месяца</div>
 					</div>
-
-					<div style={styles.trendSection}>
-						<h3 style={styles.sectionTitle}>Тренд накопления usage</h3>
-						<MiniLineChart points={data.timeline} />
+					<div style={styles.forecastCard}>
+						<div style={{ ...styles.forecastValue, color: forecast.projectedRemaining < 0 ? 'var(--vscode-errorForeground)' : 'var(--vscode-foreground)' }}>
+							{formatNumber(forecast.projectedRemaining)}
+						</div>
+						<div style={styles.cardLabel}>Прогноз остатка к концу месяца</div>
+					</div>
+					<div style={styles.forecastCard}>
+						<div style={{ ...styles.forecastValue, color: forecast.fitsMonth ? 'var(--vscode-testing-iconPassed)' : 'var(--vscode-errorForeground)' }}>
+							{forecast.fitsMonth ? 'Хватит' : 'Не хватит'}
+						</div>
+						<div style={styles.cardLabel}>Лимит при текущем темпе</div>
 					</div>
 				</div>
+				<div style={styles.forecastMetaGrid}>
+					<div>Текущий темп: <b>{formatNumber(forecast.recentAverage)} / день</b></div>
+					<div>Безопасный темп: <b>{formatNumber(forecast.safeDailyBudget)} / день</b></div>
+					<div>До исчерпания: <b>{Number.isFinite(forecast.daysUntilLimit) ? `${formatNumber(forecast.daysUntilLimit)} дн.` : 'запас большой'}</b></div>
+				</div>
+				<div style={styles.recommendationBox}>{forecast.recommendation}</div>
+			</div>
 
-				<div style={styles.rightCol}>
-					<div style={styles.sectionTall}>
-						<h3 style={styles.sectionTitle}>Запросы по дням (последние 14)</h3>
-						<DailyBars points={data.timeline} />
-					</div>
-					<div style={styles.sectionInfo}>
-						<h3 style={styles.sectionTitle}>Статус источника данных</h3>
-						<div style={styles.infoText}>GitHub API usage может не возвращать данные из токена VS Code (ограничение scopes / endpoint-доступа).</div>
-						<div style={styles.infoText}>Если API недоступен, используются локальные источники state.vscdb и кэш расширения.</div>
-						<div style={styles.infoText}>Текущий источник: <b>{data.source}</b></div>
-						<div style={styles.infoText}>Copilot Chat account: <b>{data.copilotPreferredGitHubLabel || 'не определён'}</b></div>
-						<div style={styles.infoText}>Prompt Manager preference: <b>{data.promptManagerPreferredGitHubLabel || 'не определён'}</b></div>
-						<div style={styles.infoText}>Активная GitHub-session: <b>{data.activeGithubSessionAccountLabel || 'недоступна'}</b></div>
-						<div style={styles.infoText}>GitHub-аккаунтов в VS Code: <b>{data.availableGitHubAccounts?.length || 0}</b></div>
-					</div>
-					<div style={styles.footerInfo}>
-						<div>Последнее обновление: {formatDateTime(data.lastUpdated)}</div>
-						<div>Ручное обновление: {refreshedAt ? formatDateTime(refreshedAt) : '—'}</div>
-						<div style={styles.debugLine}>Диагностика API: {data.lastSyncStatus || 'n/a'}</div>
-						<div style={styles.debugHeaderRow}>
-							<b>Debug log</b>
+			{/* ─── Запросы по дням (полная ширина) ─── */}
+			<div style={styles.section}>
+				<h3 style={styles.sectionTitle}>Запросы по дням (последние 14)</h3>
+				<DailyBars points={data.timeline} recommendedPerDay={data.recommendedPerDay} />
+			</div>
+
+			{/* ─── Тренд накопления (полная ширина) ─── */}
+			<div style={styles.section}>
+				<h3 style={styles.sectionTitle}>Тренд накопления usage</h3>
+				<TrendAreaChart points={data.timeline} limit={data.limit} />
+			</div>
+
+			{/* ─── Статус + Обновление + Debug (объединённый footer) ─── */}
+			<div style={styles.statusFooter}>
+				<div style={styles.statusRow}>
+					<span>Источник: <b>{data.source}</b></span>
+					<span>Copilot Chat: <b>{data.copilotPreferredGitHubLabel || 'не определён'}</b></span>
+					<span>Session: <b>{data.activeGithubSessionAccountLabel || 'недоступна'}</b></span>
+					<span>GitHub-аккаунтов: <b>{data.availableGitHubAccounts?.length || 0}</b></span>
+				</div>
+				<div style={styles.statusRow}>
+					<span>Последнее обновление: {formatDateTime(data.lastUpdated)}</span>
+					<span>Ручное обновление: {refreshedAt ? formatDateTime(refreshedAt) : '—'}</span>
+					<span style={styles.debugLine}>API: {data.lastSyncStatus || 'n/a'}</span>
+				</div>
+				{/* Debug log — аккордеон */}
+				<div style={styles.debugAccordion}>
+					<button style={styles.debugToggle} onClick={() => setDebugOpen(prev => !prev)}>
+						{debugOpen ? '▾' : '▸'} Debug log
+					</button>
+					{debugOpen && (
+						<>
 							<button
 								style={styles.copyButton}
 								onClick={() => {
 									const text = data.debugLog || '';
-									if (text) {
-										navigator.clipboard?.writeText(text).catch(() => undefined);
-									}
+									if (text) navigator.clipboard?.writeText(text).catch(() => undefined);
 								}}
 							>
 								Копировать
 							</button>
-						</div>
-						<pre style={styles.debugLogBlock}>{data.debugLog || 'no debug log'}</pre>
-					</div>
+							<pre style={styles.debugLogBlock}>{data.debugLog || 'no debug log'}</pre>
+						</>
+					)}
 				</div>
 			</div>
 		</div>
 	);
 };
 
+// ---------------------------------------------------------------------------
+//  Стили
+// ---------------------------------------------------------------------------
+
 const styles: Record<string, React.CSSProperties> = {
+	/** Корневая обёртка страницы */
 	page: {
 		padding: '14px 16px',
 		height: '100vh',
@@ -425,10 +627,12 @@ const styles: Record<string, React.CSSProperties> = {
 		flexDirection: 'column',
 		gap: '12px',
 	},
+	/** Индикатор загрузки */
 	loading: {
 		padding: '32px',
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	/** Шапка с заголовком и кнопками */
 	headerRow: {
 		display: 'flex',
 		justifyContent: 'space-between',
@@ -441,40 +645,25 @@ const styles: Record<string, React.CSSProperties> = {
 		zIndex: 2,
 		background: 'var(--vscode-editor-background)',
 	},
-	mainGrid: {
-		display: 'grid',
-		gridTemplateColumns: '2fr 1fr',
-		gap: '12px',
-		flex: 1,
-		minHeight: 0,
-	},
-	leftCol: {
-		display: 'grid',
-		gap: '12px',
-		alignContent: 'start',
-		minHeight: 0,
-	},
-	rightCol: {
-		display: 'grid',
-		gridTemplateRows: '1fr auto',
-		gap: '12px',
-		minHeight: 0,
-	},
+	/** Заголовок страницы */
 	title: {
 		margin: 0,
 		fontSize: '20px',
 		fontWeight: 700,
 	},
+	/** Подзаголовок */
 	subTitle: {
 		marginTop: '6px',
 		color: 'var(--vscode-descriptionForeground)',
 		fontSize: '12px',
 	},
+	/** Строка с кнопками действий */
 	actionsRow: {
 		display: 'flex',
 		gap: '8px',
 		flexWrap: 'wrap',
 	},
+	/** Основная кнопка */
 	primaryButton: {
 		padding: '6px 12px',
 		background: 'var(--vscode-button-background)',
@@ -484,6 +673,7 @@ const styles: Record<string, React.CSSProperties> = {
 		cursor: 'pointer',
 		fontFamily: 'var(--vscode-font-family)',
 	},
+	/** Вторичная кнопка */
 	secondaryButton: {
 		padding: '6px 12px',
 		background: 'var(--vscode-button-secondaryBackground)',
@@ -493,43 +683,38 @@ const styles: Record<string, React.CSSProperties> = {
 		cursor: 'pointer',
 		fontFamily: 'var(--vscode-font-family)',
 	},
+	/** Сетка карточек метрик */
 	cards: {
 		display: 'grid',
 		gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
 		gap: '12px',
-		marginBottom: '16px',
 	},
+	/** Карточка метрики */
 	card: {
 		padding: '12px',
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '8px',
 		background: 'var(--vscode-sideBar-background)',
 	},
+	/** Значение в карточке */
 	cardValue: {
 		fontSize: '24px',
 		fontWeight: 700,
 		lineHeight: 1.2,
 	},
+	/** Подпись в карточке */
 	cardLabel: {
 		marginTop: '6px',
 		fontSize: '12px',
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	/** Секция прогресс-бара */
 	progressSection: {
 		padding: '14px',
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '8px',
-		marginBottom: '16px',
 	},
-	forecastSection: {
-		padding: '14px',
-		border: '1px solid var(--vscode-panel-border)',
-		borderRadius: '8px',
-		background: 'var(--vscode-editor-background)',
-		marginBottom: '16px',
-		display: 'grid',
-		gap: '12px',
-	},
+	/** Заголовок прогресса с процентом */
 	progressHeader: {
 		display: 'flex',
 		justifyContent: 'space-between',
@@ -537,17 +722,20 @@ const styles: Record<string, React.CSSProperties> = {
 		marginBottom: '8px',
 		fontWeight: 600,
 	},
+	/** Трек прогресс-бара */
 	progressTrack: {
 		height: '10px',
 		background: 'var(--vscode-editorWidget-border)',
 		borderRadius: '999px',
 		overflow: 'hidden',
 	},
+	/** Заполнение прогресс-бара */
 	progressFill: {
 		height: '100%',
 		borderRadius: '999px',
 		transition: 'width .2s ease',
 	},
+	/** Сетка мета-информации */
 	metaGrid: {
 		marginTop: '10px',
 		display: 'grid',
@@ -555,28 +743,42 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '8px',
 		fontSize: '12px',
 	},
+	/** Секция прогноза */
+	forecastSection: {
+		padding: '14px',
+		border: '1px solid var(--vscode-panel-border)',
+		borderRadius: '8px',
+		background: 'var(--vscode-editor-background)',
+		display: 'grid',
+		gap: '12px',
+	},
+	/** Сетка карточек прогноза */
 	forecastGrid: {
 		display: 'grid',
 		gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
 		gap: '12px',
 	},
+	/** Карточка прогноза */
 	forecastCard: {
 		padding: '12px',
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '8px',
 		background: 'var(--vscode-sideBar-background)',
 	},
+	/** Значение прогноза */
 	forecastValue: {
 		fontSize: '22px',
 		fontWeight: 700,
 		lineHeight: 1.2,
 	},
+	/** Мета-сетка прогноза */
 	forecastMetaGrid: {
 		display: 'grid',
 		gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
 		gap: '8px',
 		fontSize: '12px',
 	},
+	/** Блок рекомендации */
 	recommendationBox: {
 		padding: '10px 12px',
 		borderRadius: '8px',
@@ -586,91 +788,78 @@ const styles: Record<string, React.CSSProperties> = {
 		lineHeight: 1.45,
 		color: 'var(--vscode-foreground)',
 	},
+	/** Универсальная секция */
 	section: {
 		padding: '14px',
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '8px',
 		background: 'var(--vscode-editor-background)',
 	},
-	trendSection: {
-		padding: '14px',
-		border: '1px solid var(--vscode-panel-border)',
-		borderRadius: '8px',
-		background: 'var(--vscode-editor-background)',
-		minHeight: '260px',
-	},
-	sectionTall: {
-		padding: '14px',
-		border: '1px solid var(--vscode-panel-border)',
-		borderRadius: '8px',
-		background: 'var(--vscode-editor-background)',
-		display: 'flex',
-		flexDirection: 'column',
-		minHeight: 0,
-	},
-	sectionInfo: {
-		padding: '14px',
-		border: '1px solid var(--vscode-panel-border)',
-		borderRadius: '8px',
-		background: 'var(--vscode-editor-background)',
-		display: 'grid',
-		gap: '6px',
-	},
-	infoText: {
-		fontSize: '12px',
-		color: 'var(--vscode-descriptionForeground)',
-		lineHeight: 1.35,
-	},
+	/** Заголовок секции */
 	sectionTitle: {
 		margin: '0 0 10px',
 		fontSize: '14px',
 		fontWeight: 700,
 	},
+	/** Обёртка графика тренда */
 	chartWrap: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '8px',
 	},
+	/** SVG-элемент графика */
 	chartSvg: {
 		width: '100%',
-		height: '190px',
+		height: '220px',
 		background: 'var(--vscode-editor-background)',
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '6px',
 	},
+	/** Мета-подписи под графиком */
 	chartMeta: {
 		display: 'flex',
 		justifyContent: 'space-between',
 		fontSize: '11px',
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	/** Сетка столбцов дневных запросов */
 	barChart: {
 		display: 'grid',
 		gridTemplateColumns: 'repeat(14, minmax(12px, 1fr))',
 		alignItems: 'end',
 		gap: '6px',
 		height: '220px',
-		flex: 1,
 		padding: '8px 0',
 	},
+	/**单 столбец бара */
 	barItem: {
 		display: 'flex',
 		flexDirection: 'column',
 		alignItems: 'center',
 		height: '100%',
 		justifyContent: 'flex-end',
-		gap: '4px',
+		gap: '2px',
 	},
+	/** Значение delta над баром */
+	barDeltaLabel: {
+		fontSize: '9px',
+		color: 'var(--vscode-descriptionForeground)',
+		fontWeight: 600,
+		minHeight: '12px',
+	},
+	/** Тело бара */
 	barValue: {
 		width: '100%',
-		background: 'var(--vscode-textLink-foreground)',
-		minHeight: '6px',
+		minHeight: '4px',
 		borderRadius: '4px 4px 0 0',
+		transition: 'height 0.15s ease',
 	},
+	/** Подпись даты под баром */
 	barLabel: {
-		fontSize: '10px',
+		fontSize: '9px',
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	/** Пустой график */
 	emptyChart: {
 		padding: '12px',
 		fontSize: '12px',
@@ -678,6 +867,7 @@ const styles: Record<string, React.CSSProperties> = {
 		border: '1px dashed var(--vscode-panel-border)',
 		borderRadius: '6px',
 	},
+	/** Карточка авторизации */
 	authCard: {
 		marginTop: '16px',
 		padding: '16px',
@@ -687,14 +877,17 @@ const styles: Record<string, React.CSSProperties> = {
 		display: 'grid',
 		gap: '10px',
 	},
+	/** Заголовок авторизации */
 	authTitle: {
 		fontWeight: 700,
 		fontSize: '16px',
 	},
+	/** Текст авторизации */
 	authText: {
 		color: 'var(--vscode-descriptionForeground)',
 		fontSize: '13px',
 	},
+	/** Информационный блок */
 	infoBox: {
 		padding: '10px 12px',
 		borderRadius: '8px',
@@ -703,6 +896,7 @@ const styles: Record<string, React.CSSProperties> = {
 		fontSize: '12px',
 		lineHeight: 1.45,
 	},
+	/** Предупреждение */
 	warningBox: {
 		padding: '10px 12px',
 		borderRadius: '8px',
@@ -711,28 +905,48 @@ const styles: Record<string, React.CSSProperties> = {
 		fontSize: '12px',
 		lineHeight: 1.45,
 	},
-	footerInfo: {
-		fontSize: '12px',
-		color: 'var(--vscode-descriptionForeground)',
-		display: 'grid',
-		gap: '4px',
-		padding: '10px 12px',
+	/** Футер со статусом и debug */
+	statusFooter: {
+		padding: '12px 14px',
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '8px',
-		background: 'var(--vscode-editor-background)',
+		background: 'var(--vscode-sideBar-background)',
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '6px',
+		fontSize: '12px',
+		color: 'var(--vscode-descriptionForeground)',
 	},
+	/** Строка статуса */
+	statusRow: {
+		display: 'flex',
+		flexWrap: 'wrap',
+		gap: '12px',
+	},
+	/** Моноширинная строка диагностики */
 	debugLine: {
 		fontFamily: 'var(--vscode-editor-font-family, var(--vscode-font-family))',
 		fontSize: '11px',
 		wordBreak: 'break-all',
 	},
-	debugHeaderRow: {
+	/** Аккордеон debug-лога */
+	debugAccordion: {
 		display: 'flex',
-		justifyContent: 'space-between',
-		alignItems: 'center',
-		gap: '8px',
-		marginTop: '4px',
+		flexDirection: 'column',
+		gap: '4px',
 	},
+	/** Кнопка переключения debug-лога */
+	debugToggle: {
+		background: 'none',
+		border: 'none',
+		color: 'var(--vscode-descriptionForeground)',
+		cursor: 'pointer',
+		fontSize: '11px',
+		padding: '2px 0',
+		textAlign: 'left',
+		fontFamily: 'var(--vscode-font-family)',
+	},
+	/** Кнопка копирования */
 	copyButton: {
 		padding: '2px 8px',
 		background: 'var(--vscode-button-secondaryBackground)',
@@ -742,11 +956,13 @@ const styles: Record<string, React.CSSProperties> = {
 		cursor: 'pointer',
 		fontSize: '11px',
 		fontFamily: 'var(--vscode-font-family)',
+		alignSelf: 'flex-start',
 	},
+	/** Блок debug-лога */
 	debugLogBlock: {
 		margin: 0,
 		padding: '8px',
-		maxHeight: '220px',
+		maxHeight: '180px',
 		overflow: 'auto',
 		background: 'var(--vscode-editor-background)',
 		border: '1px solid var(--vscode-panel-border)',
@@ -756,6 +972,7 @@ const styles: Record<string, React.CSSProperties> = {
 		whiteSpace: 'pre-wrap',
 		wordBreak: 'break-word',
 	},
+	/** Оверлей переключения аккаунта */
 	switchingOverlay: {
 		position: 'fixed',
 		top: 0,
@@ -769,6 +986,7 @@ const styles: Record<string, React.CSSProperties> = {
 		zIndex: 100,
 		backdropFilter: 'blur(2px)',
 	},
+	/** Карточка переключения */
 	switchingCard: {
 		padding: '24px 32px',
 		border: '1px solid var(--vscode-panel-border)',
@@ -780,10 +998,12 @@ const styles: Record<string, React.CSSProperties> = {
 		alignItems: 'center',
 		gap: '8px',
 	},
+	/** Заголовок оверлея */
 	switchingTitle: {
 		fontSize: '16px',
 		fontWeight: 700,
 	},
+	/** Текст оверлея */
 	switchingText: {
 		fontSize: '12px',
 		color: 'var(--vscode-descriptionForeground)',

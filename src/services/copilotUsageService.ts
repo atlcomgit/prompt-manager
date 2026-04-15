@@ -898,10 +898,12 @@ export class CopilotUsageService implements vscode.Disposable {
 	private restoreState(): void {
 		const saved = this.context.globalState.get<CopilotUsageData>(STATE_KEY_USAGE);
 		if (saved) {
-			const sanitizedSnapshots = this.sanitizeSnapshots(
-				Array.isArray(saved.snapshots) ? saved.snapshots : [],
-				Number(saved.used || 0),
-				Number(saved.limit || 0),
+			const sanitizedSnapshots = this.fillSnapshotGaps(
+				this.sanitizeSnapshots(
+					Array.isArray(saved.snapshots) ? saved.snapshots : [],
+					Number(saved.used || 0),
+					Number(saved.limit || 0),
+				),
 			);
 			this.cachedData = {
 				...saved,
@@ -2264,15 +2266,21 @@ export class CopilotUsageService implements vscode.Disposable {
 			.slice(-62);
 	}
 
+	/**
+	 * Нормализует и дедуплицирует массив snapshot-записей.
+	 * Обеспечивает монотонный рост used внутри последовательности дней,
+	 * не зажимая исторические значения до текущего currentUsed.
+	 */
 	private sanitizeSnapshots(
 		snapshots: Array<{ date: string; used: number; limit: number }>,
-		currentUsed: number,
+		_currentUsed: number,
 		currentLimit: number,
 	): Array<{ date: string; used: number; limit: number }> {
 		if (!Array.isArray(snapshots) || snapshots.length === 0) {
 			return [];
 		}
 
+		/** Нормализация: извлекаем дату, фильтруем невалидные записи */
 		const normalized = snapshots
 			.map((item) => {
 				const dateOnly = String(item.date || '').slice(0, 10);
@@ -2283,24 +2291,81 @@ export class CopilotUsageService implements vscode.Disposable {
 				}
 				return {
 					date: dateOnly,
-					used: Math.max(0, Math.min(rawUsed, Math.max(0, currentUsed))),
+					used: Math.max(0, rawUsed),
 					limit: Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : currentLimit,
 				};
 			})
 			.filter((item): item is { date: string; used: number; limit: number } => !!item)
 			.sort((a, b) => a.date.localeCompare(b.date));
 
+		/** Дедупликация по дате — сохраняем запись с максимальным used */
 		const dedup = new Map<string, { date: string; used: number; limit: number }>();
 		for (const item of normalized) {
-			dedup.set(item.date, item);
+			const existing = dedup.get(item.date);
+			if (!existing || item.used > existing.used) {
+				dedup.set(item.date, item);
+			}
 		}
 
+		/** Обеспечиваем монотонный рост used по дням */
 		const result: Array<{ date: string; used: number; limit: number }> = [];
 		let prevUsed = 0;
 		for (const item of Array.from(dedup.values()).sort((a, b) => a.date.localeCompare(b.date))) {
-			const used = Math.max(prevUsed, Math.min(item.used, currentUsed));
+			const used = Math.max(prevUsed, item.used);
 			result.push({ ...item, used });
 			prevUsed = used;
+		}
+
+		return result.slice(-62);
+	}
+
+	/**
+	 * Заполняет пропуски между snapshot-днями методом forward-fill.
+	 * Для каждого пропущенного дня ставит used = значение предыдущего дня.
+	 * Гарантирует, что DailyBars получит корректные delta между последовательными днями.
+	 */
+	private fillSnapshotGaps(
+		snapshots: Array<{ date: string; used: number; limit: number }>,
+	): Array<{ date: string; used: number; limit: number }> {
+		if (snapshots.length <= 1) {
+			return snapshots;
+		}
+
+		const result: Array<{ date: string; used: number; limit: number }> = [];
+		for (let i = 0; i < snapshots.length; i++) {
+			const current = snapshots[i];
+			result.push(current);
+
+			/** Если есть следующий snapshot, заполняем дни между текущим и следующим */
+			if (i < snapshots.length - 1) {
+				const next = snapshots[i + 1];
+				const currentDate = new Date(current.date + 'T00:00:00');
+				const nextDate = new Date(next.date + 'T00:00:00');
+				const gapDays = Math.round((nextDate.getTime() - currentDate.getTime()) / (1000 * 60 * 60 * 24));
+
+				/** Вставляем пропущенные дни с used = текущим значением (forward-fill) */
+				for (let dayOffset = 1; dayOffset < gapDays; dayOffset++) {
+					const fillDate = new Date(currentDate);
+					fillDate.setDate(fillDate.getDate() + dayOffset);
+					const fillDateStr = fillDate.toISOString().slice(0, 10);
+					result.push({ date: fillDateStr, used: current.used, limit: current.limit });
+				}
+			}
+		}
+
+		/** Заполняем от последнего snapshot до сегодня */
+		const last = result[result.length - 1];
+		const today = new Date().toISOString().slice(0, 10);
+		if (last && last.date < today) {
+			const lastDate = new Date(last.date + 'T00:00:00');
+			const todayDate = new Date(today + 'T00:00:00');
+			const gapDays = Math.round((todayDate.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
+			for (let dayOffset = 1; dayOffset <= gapDays; dayOffset++) {
+				const fillDate = new Date(lastDate);
+				fillDate.setDate(fillDate.getDate() + dayOffset);
+				const fillDateStr = fillDate.toISOString().slice(0, 10);
+				result.push({ date: fillDateStr, used: last.used, limit: last.limit });
+			}
 		}
 
 		return result.slice(-62);
@@ -2665,7 +2730,9 @@ export class CopilotUsageService implements vscode.Disposable {
 			const snapshotsRaw = snapshotsFromApi.length > 0
 				? snapshotsFromApi.slice(-62)
 				: this.mergeSnapshot(used, limit);
-			const snapshots = this.sanitizeSnapshots(snapshotsRaw, used, limit);
+			const sanitized = this.sanitizeSnapshots(snapshotsRaw, used, limit);
+			/** Заполняем пропущенные дни, чтобы DailyBars корректно считал delta */
+			const snapshots = this.fillSnapshotGaps(sanitized);
 
 			const data: CopilotUsageData = {
 				used,

@@ -4116,9 +4116,6 @@ export const EditorApp: React.FC = () => {
               <div style={styles.field}>
                 <label style={styles.label}>{t('editor.contextFiles')}</label>
                 <div style={styles.fileList}>
-                  {visibleContextFileCards.length === 0 ? (
-                    <div style={styles.fileEmptyState}>{t('editor.contextFilesEmpty')}</div>
-                  ) : null}
                   <div style={styles.fileGrid}>
                     {visibleContextFileCards.map((fileCard) => (
                       <ContextFileCard
@@ -5313,15 +5310,6 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '10px',
-  },
-  fileEmptyState: {
-    padding: '12px 14px',
-    borderRadius: '10px',
-    border: '1px dashed var(--vscode-input-border, var(--vscode-panel-border))',
-    background: 'color-mix(in srgb, var(--vscode-editor-background) 76%, var(--vscode-input-background))',
-    color: 'var(--vscode-descriptionForeground)',
-    fontSize: '12px',
-    lineHeight: 1.5,
   },
   fileGrid: {
     display: 'grid',

@@ -671,15 +671,42 @@ export class EditorPanelManager {
 
 	private getEditorWebviewLocalResourceRoots(contextFiles: string[] = []): vscode.Uri[] {
 		const roots = new Map<string, vscode.Uri>();
+
+		/** Проверяет, что parentPath совпадает с candidatePath или покрывает его как предок. */
+		const isSameOrParentPath = (parentPath: string, candidatePath: string): boolean => {
+			if (parentPath === candidatePath) {
+				return true;
+			}
+
+			const relative = path.relative(parentPath, candidatePath);
+			return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+		};
+
 		const addRoot = (uri?: vscode.Uri | null): void => {
 			if (!uri) {
 				return;
 			}
 
-			roots.set(uri.toString(), uri);
+			const candidatePath = path.resolve(uri.fsPath);
+
+			/** Не расширяем набор roots вложенными директориями, если предок уже добавлен. */
+			for (const [existingKey, existingUri] of roots.entries()) {
+				const existingPath = path.resolve(existingUri.fsPath);
+				if (isSameOrParentPath(existingPath, candidatePath)) {
+					return;
+				}
+
+				/** Если новый root шире, удаляем ранее добавленный вложенный root. */
+				if (isSameOrParentPath(candidatePath, existingPath)) {
+					roots.delete(existingKey);
+				}
+			}
+
+			roots.set(candidatePath, uri);
 		};
 
 		addRoot(this.extensionUri);
+		addRoot(vscode.Uri.file(this.storageService.getStorageDirectoryPath()));
 		for (const workspaceFolder of vscode.workspace.workspaceFolders || []) {
 			addRoot(workspaceFolder.uri);
 		}
@@ -703,8 +730,30 @@ export class EditorPanelManager {
 		};
 	}
 
+	/** Сравнивает localResourceRoots по нормализованным путям. */
+	private areEditorWebviewLocalResourceRootsEqual(
+		currentRoots: readonly vscode.Uri[] | undefined,
+		nextRoots: readonly vscode.Uri[] | undefined,
+	): boolean {
+		const left = (currentRoots || []).map((uri) => path.resolve(uri.fsPath));
+		const right = (nextRoots || []).map((uri) => path.resolve(uri.fsPath));
+		if (left.length !== right.length) {
+			return false;
+		}
+
+		return left.every((value, index) => value === right[index]);
+	}
+
 	private updateEditorWebviewOptions(panel: vscode.WebviewPanel, contextFiles: string[] = []): void {
-		panel.webview.options = this.getEditorWebviewOptions(contextFiles);
+		const nextOptions = this.getEditorWebviewOptions(contextFiles);
+		if (this.areEditorWebviewLocalResourceRootsEqual(
+			panel.webview.options.localResourceRoots,
+			nextOptions.localResourceRoots,
+		)) {
+			return;
+		}
+
+		panel.webview.options = nextOptions;
 	}
 
 	private async collectExistingContextFiles(files: string[]): Promise<{ accepted: string[]; skipped: string[] }> {

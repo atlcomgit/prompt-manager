@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage AI prompt workflows, launch GitHub Copilot chats, and build project memory directly inside VS Code",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -26,9 +26,9 @@
     "template",
     "workflow",
     "memory",
-    "git",
     "tracker",
     "statusbar",
+    "copilot status bar",
     "premium request usage",
     "project memory",
     "prompt engineering",
@@ -41,7 +41,13 @@
     "использование премиум запросов",
     "память проекта",
     "промпт инженерия",
-    "премиум запрос"
+    "премиум запрос",
+    "github copilot",
+    "copilot chat",
+    "prompt library",
+    "semantic search",
+    "knowledge graph",
+    "codemap"
   ],
   "icon": "media/icon.png",
   "galleryBanner": {
@@ -103,7 +109,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.2.4",
+        "title": "About 0.2.6",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },

@@ -292,3 +292,63 @@ test('project instructions are wrapped with applyTo frontmatter and stripped for
 		"---\napplyTo: '**'\n---\n\n",
 	);
 });
+
+test('getEditorWebviewLocalResourceRoots skips redundant child roots for clipboard files in workspace storage', async () => {
+	const { manager } = await createManager();
+	const roots = (manager as any).getEditorWebviewLocalResourceRoots([
+		'/tmp/workspace/.vscode/prompt-manager/clipboard-context/clipboard-image.png',
+	]);
+	const rootPaths = roots.map((uri: { fsPath: string }) => uri.fsPath);
+
+	assert.ok(rootPaths.includes('/tmp/workspace'));
+	assert.ok(rootPaths.includes('/tmp/extension'));
+	assert.ok(!rootPaths.includes('/tmp/workspace/.vscode/prompt-manager/clipboard-context'));
+});
+
+test('updateEditorWebviewOptions avoids resetting identical roots for clipboard previews inside workspace', async () => {
+	const { manager } = await createManager();
+	const initialOptions = (manager as any).getEditorWebviewOptions([]);
+	let assignedCount = 0;
+	let storedOptions = initialOptions;
+	const panel = {
+		webview: {
+			get options() {
+				return storedOptions;
+			},
+			set options(value: typeof initialOptions) {
+				assignedCount += 1;
+				storedOptions = value;
+			},
+		},
+	};
+
+	(manager as any).updateEditorWebviewOptions(panel as any, [
+		'/tmp/workspace/.vscode/prompt-manager/clipboard-context/clipboard-image.png',
+	]);
+
+	assert.equal(assignedCount, 0);
+});
+
+test('updateEditorWebviewOptions still expands roots for files outside current workspace coverage', async () => {
+	const { manager } = await createManager();
+	const initialOptions = (manager as any).getEditorWebviewOptions([]);
+	let assignedCount = 0;
+	let storedOptions = initialOptions;
+	const panel = {
+		webview: {
+			get options() {
+				return storedOptions;
+			},
+			set options(value: typeof initialOptions) {
+				assignedCount += 1;
+				storedOptions = value;
+			},
+		},
+	};
+
+	(manager as any).updateEditorWebviewOptions(panel as any, [
+		'/tmp/external-assets/clipboard-image.png',
+	]);
+
+	assert.equal(assignedCount, 1);
+});

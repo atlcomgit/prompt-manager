@@ -487,6 +487,8 @@ export const EditorApp: React.FC = () => {
   const pendingChatPreflightActionRef = useRef<ChatEntryAction | ''>('');
   const hasReportedGitOverlayVisibilityRef = useRef(false);
   const gitOverlayBusyActionRef = useRef<string | null>(null);
+  /** Timestamp when the busy state was last set (used for min display time). */
+  const gitOverlayBusyStartTimeRef = useRef<number>(0);
   const gitOverlayTrackedRequestsRef = useRef<Record<string, GitOverlayTrackedRequest>>({});
   const gitOverlayHoldBusyUntilSnapshotRef = useRef(false);
   const gitOverlayPendingCommitMessageGenerationRef = useRef(false);
@@ -606,6 +608,9 @@ export const EditorApp: React.FC = () => {
     syncGitOverlayTrackedRequestState();
   }, [syncGitOverlayTrackedRequestState]);
 
+  /** Minimum time (ms) the busy spinner remains visible so the user can see it. */
+  const GIT_OVERLAY_MIN_BUSY_DISPLAY_MS = 350;
+
   const resetGitOverlayBusyState = useCallback(() => {
     gitOverlayHoldBusyUntilSnapshotRef.current = false;
     gitOverlayPendingCommitMessageGenerationRef.current = false;
@@ -629,6 +634,15 @@ export const EditorApp: React.FC = () => {
       }
     }
 
+    // Ensure the spinner stays visible for at least GIT_OVERLAY_MIN_BUSY_DISPLAY_MS
+    // so the user can perceive it even for fast git operations.
+    const elapsed = Date.now() - gitOverlayBusyStartTimeRef.current;
+    const remaining = GIT_OVERLAY_MIN_BUSY_DISPLAY_MS - elapsed;
+    if (remaining > 0 && gitOverlayBusyStartTimeRef.current > 0) {
+      setTimeout(() => resetGitOverlayBusyState(), remaining);
+      return;
+    }
+
     resetGitOverlayBusyState();
   }, [getLatestGitOverlayTrackedRequest, resetGitOverlayBusyState]);
 
@@ -645,6 +659,7 @@ export const EditorApp: React.FC = () => {
     gitOverlayHoldBusyUntilSnapshotRef.current = holdUntilSnapshot;
     gitOverlayPendingCompletionActionRef.current = pendingCompletionAction;
     if (action) {
+      gitOverlayBusyStartTimeRef.current = Date.now();
       setGitOverlayWaitingForSnapshotAction(null);
     }
     setGitOverlayBusyAction(action);
@@ -3190,6 +3205,7 @@ export const EditorApp: React.FC = () => {
   const hasPlanContent = promptPlanState.exists && promptPlanState.content.trim().length > 0;
   const planPlaceholderState = resolvePromptPlanPlaceholderState({
     chatMode: prompt.chatMode,
+    status: prompt.status,
     planExists: promptPlanState.exists,
     hasPlanContent,
   });

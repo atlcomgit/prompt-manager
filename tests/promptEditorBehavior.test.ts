@@ -232,18 +232,42 @@ test('resolvePromptEditorExpandedSections auto-opens Plan when plan-mode placeho
 	});
 });
 
-test('resolvePromptPlanPlaceholderState returns plan-mode for empty plan section in Plan chat mode', () => {
+test('resolvePromptPlanPlaceholderState returns plan-mode for empty plan section in Plan chat mode when status is in-progress', () => {
 	assert.equal(resolvePromptPlanPlaceholderState({
 		chatMode: 'plan',
+		status: 'in-progress',
 		planExists: false,
 		hasPlanContent: false,
 	}), 'plan-mode');
 
 	assert.equal(resolvePromptPlanPlaceholderState({
 		chatMode: 'plan',
+		status: 'in-progress',
 		planExists: true,
 		hasPlanContent: false,
 	}), 'plan-mode');
+});
+
+test('resolvePromptPlanPlaceholderState does not return plan-mode when status is not in-progress', () => {
+	assert.equal(resolvePromptPlanPlaceholderState({
+		chatMode: 'plan',
+		status: 'completed',
+		planExists: false,
+		hasPlanContent: false,
+	}), 'missing');
+
+	assert.equal(resolvePromptPlanPlaceholderState({
+		chatMode: 'plan',
+		status: 'draft',
+		planExists: true,
+		hasPlanContent: false,
+	}), 'empty');
+
+	assert.equal(resolvePromptPlanPlaceholderState({
+		chatMode: 'plan',
+		planExists: false,
+		hasPlanContent: false,
+	}), 'missing');
 });
 
 test('resolvePromptPlanPlaceholderState keeps existing empty and missing states outside Plan chat mode', () => {
@@ -263,6 +287,7 @@ test('resolvePromptPlanPlaceholderState keeps existing empty and missing states 
 test('resolvePromptPlanPlaceholderState returns null once plan content exists', () => {
 	assert.equal(resolvePromptPlanPlaceholderState({
 		chatMode: 'plan',
+		status: 'in-progress',
 		planExists: true,
 		hasPlanContent: true,
 	}), null);

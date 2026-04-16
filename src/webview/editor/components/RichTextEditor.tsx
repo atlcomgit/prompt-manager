@@ -336,7 +336,14 @@ export const RichTextEditor: React.FC<Props> = ({
       return;
     }
 
+    // Temporarily reset explicit height so scrollHeight reflects actual content size.
+    // Without this, scrollHeight returns max(content, explicit height) and the block
+    // can never shrink when content is reduced.
+    const previousHeight = target.style.height;
+    target.style.height = 'auto';
     const measuredHeight = Math.ceil(target.scrollHeight || 0);
+    target.style.height = previousHeight;
+
     if (measuredHeight <= 0) {
       return;
     }
@@ -345,7 +352,7 @@ export const RichTextEditor: React.FC<Props> = ({
       MIN_HEIGHT,
       Math.min(MAX_HEIGHT, measuredHeight + 2),
     );
-    setCurrentHeight((previousHeight) => previousHeight === nextHeight ? previousHeight : nextHeight);
+    setCurrentHeight((prev) => prev === nextHeight ? prev : nextHeight);
   }, [autoResize, fillHeight, resolveAutoResizeTarget]);
 
   useEffect(() => {

@@ -51,6 +51,7 @@ interface ShouldShowPromptChatLaunchBlockInput {
 /** Input for resolving the empty-state placeholder shown in the Plan section. */
 interface ResolvePromptPlanPlaceholderStateInput {
 	chatMode?: Prompt['chatMode'] | null;
+	status?: PromptStatus | null;
 	planExists: boolean;
 	hasPlanContent: boolean;
 }
@@ -220,7 +221,8 @@ export function resolvePromptPlanPlaceholderState(
 		return null;
 	}
 
-	if (input.chatMode === 'plan') {
+	// Show the PLAN badge only when the prompt is actively in progress
+	if (input.chatMode === 'plan' && input.status === 'in-progress') {
 		return 'plan-mode';
 	}
 

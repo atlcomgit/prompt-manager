@@ -77,6 +77,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 
 - Start a GitHub Copilot chat directly from a selected prompt.
 - Reopen existing chat sessions linked to the prompt.
+- See the selected AI model directly in the Process tab launch step, so the opening step confirms which model will be used.
 - Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.
 - Keep the prompt, report, and editor state tied to the same workflow instead of splitting them across tools.
 
@@ -85,6 +86,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - View, switch, and create branches in workspace projects.
 - Guard branch actions with dirty-worktree checks.
 - Surface dirty workspace projects in Git Flow step 1 even when they are not yet attached to the prompt.
+- Keep the Git Flow Done action consistent with Save by persisting the final derived prompt status before the overlay closes.
 - Keep branch references and task metadata near the prompt itself.
 - Use the Git-oriented editor flow to support commits, review preparation, and related prompt execution.
 

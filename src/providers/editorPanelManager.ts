@@ -35,6 +35,8 @@ import {
 	getChatMemoryDirectoryPath,
 	getProjectInstructionsFilePath,
 } from '../utils/chatContextFiles.js';
+import { buildChatMessage } from '../utils/chatMessageBuilder.js';
+import type { ChatMessageContext } from '../utils/chatMessageBuilder.js';
 import {
 	buildGitOverlayReviewCliSetupCommand,
 	resolveGitOverlaySnapshotProjectScope,
@@ -5964,8 +5966,6 @@ export class EditorPanelManager {
 						this.hooksOutput.appendLine(`[chat-memory] prepareSessionInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 					}
 
-					parts.push(prompt.content);
-
 					const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 					const storageDir = this.storageService.getStorageDirectoryPath();
 					const chatMemoryDirectory = getChatMemoryDirectoryPath(storageDir);
@@ -5977,42 +5977,21 @@ export class EditorPanelManager {
 					});
 					const fileUris = chatContextFiles.allAbsolutePaths.map(filePath => vscode.Uri.file(filePath));
 
-					// Add context metadata
-					const ctx: string[] = [];
-					if (prompt.id) ctx.push(`Prompt ID: ${prompt.id}`);
-					if (prompt.title) ctx.push(`Prompt title: ${prompt.title}`);
-					if (prompt.id) {
-						const promptDirectory = this.storageService.getPromptDirectoryPath(prompt.id);
-						ctx.push(`Prompt directory: ${promptDirectory}`);
-						ctx.push(`Prompt file: ${this.storageService.getPromptMarkdownUri(prompt.id).fsPath}`);
-						ctx.push(`Report file: ${promptDirectory}/report.txt`);
-						ctx.push(`Plan file: ${promptDirectory}/plan.md`);
-					}
-					if (prompt.projects.length > 0) ctx.push(`Projects: ${prompt.projects.join(', ')}`);
-					if (prompt.languages.length > 0) ctx.push(`Languages: ${prompt.languages.join(', ')}`);
-					if (prompt.frameworks.length > 0) ctx.push(`Frameworks: ${prompt.frameworks.join(', ')}`);
-					if (prompt.skills.length > 0) ctx.push(`Skills: ${prompt.skills.join(', ')}`);
-					if (prompt.mcpTools.length > 0) ctx.push(`MCP Tools: ${prompt.mcpTools.join(', ')}`);
-					if (prompt.hooks.length > 0) ctx.push(`Hooks: ${prompt.hooks.join(', ')}`);
-					if (prompt.model) ctx.push(`Preferred model: ${prompt.model}`);
-					if (prompt.taskNumber) ctx.push(`Task: ${prompt.taskNumber}`);
-					if (prompt.branch) ctx.push(`Branch: ${prompt.branch}`);
-					if (chatContextFiles.promptContextReferences.length > 0) {
-						ctx.push(`Context files: ${chatContextFiles.promptContextReferences.join(' ')}`);
-					}
-					if (chatMemoryDirectory) {
-						ctx.push(`Chat memory directory: ${chatMemoryDirectory}`);
-					}
-					if (chatContextFiles.instructionReferences.length > 0) {
-						ctx.push(`Memory instruction files: ${chatContextFiles.instructionReferences.join(' ')}`);
-					}
-
-					if (ctx.length > 0) {
-						parts.push('');
-						parts.push('---');
-						parts.push('Context:');
-						ctx.forEach(c => parts.push(`- ${c}`));
-					}
+					// Build structured markdown message via chatMessageBuilder
+					const promptDirectory = prompt.id
+						? this.storageService.getPromptDirectoryPath(prompt.id)
+						: '';
+					const promptFilePath = prompt.id
+						? this.storageService.getPromptMarkdownUri(prompt.id).fsPath
+						: '';
+					const messageContext: ChatMessageContext = {
+						promptDirectory,
+						promptFilePath,
+						chatMemoryDirectory,
+						promptContextReferences: chatContextFiles.promptContextReferences,
+						instructionReferences: chatContextFiles.instructionReferences,
+					};
+					parts.push(buildChatMessage(prompt, messageContext, vscode.env.language));
 
 					// Change status to in-progress and save
 					if (prompt.status !== 'in-progress') {

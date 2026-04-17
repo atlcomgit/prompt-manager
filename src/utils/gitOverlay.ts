@@ -786,6 +786,23 @@ export function resolveGitOverlayDoneStatus(completedActions: Record<GitOverlayA
 	return null;
 }
 
+export function resolveGitOverlayDonePersistence(
+	doneStatus: PromptStatus | null,
+	currentStatus: PromptStatus,
+): { source: 'manual' | 'status-change'; nextStatus: PromptStatus | null } {
+	if (doneStatus && doneStatus !== currentStatus) {
+		return {
+			source: 'status-change',
+			nextStatus: doneStatus,
+		};
+	}
+
+	return {
+		source: 'manual',
+		nextStatus: null,
+	};
+}
+
 export function normalizeCommitMessageGenerationInstructions(value: unknown): string {
 	if (typeof value === 'string') {
 		return value.trim();

@@ -11,6 +11,7 @@ import { RichTextEditor } from './components/RichTextEditor';
 import { MultiSelect } from './components/MultiSelect';
 import { StatusSelect } from './components/StatusSelect';
 import { ActionBar, resolveChatEntryState } from './components/ActionBar';
+import { ChatLaunchOpenStepLabel } from './components/ChatLaunchOpenStepLabel';
 import { TimerDisplay } from './components/TimerDisplay';
 import { ContextFileCard } from './components/ContextFileCard';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
@@ -52,7 +53,7 @@ import {
   shouldShowPromptChatLaunchBlock,
   togglePromptEditorSectionExpansion,
 } from '../../utils/promptEditorBehavior.js';
-import { resolveGitOverlayBusyActionName } from '../../utils/gitOverlay.js';
+import { resolveGitOverlayBusyActionName, resolveGitOverlayDonePersistence } from '../../utils/gitOverlay.js';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -830,6 +831,14 @@ export const EditorApp: React.FC = () => {
   }, []);
 
   const buildPromptForSave = useCallback((): Prompt => buildPromptForSaveFrom(promptRef.current), [buildPromptForSaveFrom]);
+
+  // Preserve elapsed time in the current status bucket before switching status.
+  const buildPromptForStatusChange = useCallback((status: PromptStatus): Prompt => {
+    const timeSpent = Date.now() - openedAtRef.current;
+    const updatedPrompt = TimeTrackingService.applyElapsedBeforeStatusChange(promptRef.current, status, timeSpent);
+    openedAtRef.current = Date.now();
+    return updatedPrompt;
+  }, []);
 
   const createStartChatRequestId = useCallback(
     (): string => `start-chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -2924,19 +2933,34 @@ export const EditorApp: React.FC = () => {
     });
   }, [prompt.branch, prompt.projects]);
 
-  const handleSave = (source: 'manual' | 'status-change' | 'autosave' | unknown = 'manual') => {
+  const handleSave = (
+    source: 'manual' | 'status-change' | 'autosave' | unknown = 'manual',
+    promptOverride?: Prompt,
+  ) => {
     const normalizedSource: 'manual' | 'status-change' | 'autosave' =
       source === 'status-change' || source === 'autosave' || source === 'manual'
         ? source
         : 'manual';
-    const updatedPrompt = buildPromptForSave();
+    const promptBase = promptOverride ?? promptRef.current;
+    const updatedPrompt = buildPromptForSaveFrom(promptBase);
+
+    if (promptOverride) {
+      promptRef.current = updatedPrompt;
+      setPrompt(updatedPrompt);
+    }
 
     // First manual save unlocks auto-save for this prompt
     if (normalizedSource === 'manual' || normalizedSource === 'status-change') {
       hasBeenSavedRef.current = true;
     }
 
-    activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
+    if (autoSaveTimerRef.current) {
+      window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+
+    saveStartCounterRef.current = userChangeCounterRef.current;
+    activeSaveIdRef.current = (updatedPrompt.id || promptBase.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
     vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: normalizedSource });
   };
@@ -3083,23 +3107,23 @@ export const EditorApp: React.FC = () => {
   };
 
   const handleSetStatus = (status: PromptStatus) => {
-    const updatedPrompt = {
-      ...prompt,
-      status,
-    };
+    const updatedPrompt = buildPromptForStatusChange(status);
+    promptRef.current = updatedPrompt;
     setPrompt(updatedPrompt);
     // For never-saved prompts, just mark dirty — don't trigger save
     if (!hasBeenSavedRef.current) {
       setIsDirty(true);
       return;
     }
-    // Use buildPromptForSave to also update timeSpentWriting (like manual save)
-    const promptToSave = { ...buildPromptForSave(), status };
-    setPrompt(promptToSave);
-    activeSaveIdRef.current = (promptToSave.id || prompt.id || '__new__').trim() || '__new__';
+    if (autoSaveTimerRef.current) {
+      window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    saveStartCounterRef.current = userChangeCounterRef.current;
+    activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
     setIsSaving(true);
     setIsDirty(false);
-    vscode.postMessage({ type: 'savePrompt', prompt: promptToSave, source: 'status-change' });
+    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'status-change' });
   };
 
   const handleFooterMarkCompleted = () => {
@@ -3237,7 +3261,7 @@ export const EditorApp: React.FC = () => {
     setManualSectionOverrides(nextSectionState.manualSectionOverrides);
   };
 
-  const chatLaunchSteps: Array<{ key: string; label: string; state: 'done' | 'active' | 'pending' }> = [
+  const chatLaunchSteps: Array<{ key: string; label: React.ReactNode; state: 'done' | 'active' | 'pending' }> = [
     {
       key: 'prepare',
       label: t('editor.chatLaunchStepPrepare'),
@@ -3245,7 +3269,12 @@ export const EditorApp: React.FC = () => {
     },
     {
       key: 'open',
-      label: t('editor.chatLaunchStepOpen'),
+      label: (
+        <ChatLaunchOpenStepLabel
+          label={t('editor.chatLaunchStepOpen')}
+          modelName={selectedModelName}
+        />
+      ),
       state: chatLaunchPhase === 'opening' ? 'active' : 'done',
     },
     {
@@ -4409,10 +4438,13 @@ export const EditorApp: React.FC = () => {
         }}
         onMarkCompletedInPlace={handleFooterMarkCompleted}
         onDone={(status) => {
+          const donePersistence = resolveGitOverlayDonePersistence(status, promptRef.current.status);
           closeGitOverlay();
-          if (status) {
-            handleSetStatus(status);
+          if (donePersistence.source === 'status-change' && donePersistence.nextStatus) {
+            handleSetStatus(donePersistence.nextStatus);
+            return;
           }
+          handleSave('manual');
         }}
         t={t}
       />

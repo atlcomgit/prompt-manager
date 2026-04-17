@@ -22,6 +22,7 @@ import {
 	resolveGitOverlayBusyActionName,
 	resolveGitOverlayBulkCommitMessages,
 	resolveGitOverlayBulkGenerateProjects,
+	resolveGitOverlayDonePersistence,
 	resolveGitOverlayDoneStatus,
 	resolveGitOverlayTrackedBranchOptions,
 	resolveExistingGitOverlayTrackedBranches,
@@ -555,6 +556,23 @@ test('resolveGitOverlayDoneStatus changes prompt status only after completed git
 	assert.equal(resolveGitOverlayDoneStatus({ push: true, 'review-request': false, merge: false }), 'report');
 	assert.equal(resolveGitOverlayDoneStatus({ push: true, 'review-request': true, merge: false }), 'review');
 	assert.equal(resolveGitOverlayDoneStatus({ push: true, 'review-request': true, merge: true }), 'closed');
+});
+
+test('resolveGitOverlayDonePersistence keeps save enabled even when status does not change', () => {
+	assert.deepEqual(resolveGitOverlayDonePersistence(null, 'in-progress'), {
+		source: 'manual',
+		nextStatus: null,
+	});
+
+	assert.deepEqual(resolveGitOverlayDonePersistence('report', 'report'), {
+		source: 'manual',
+		nextStatus: null,
+	});
+
+	assert.deepEqual(resolveGitOverlayDonePersistence('review', 'report'), {
+		source: 'status-change',
+		nextStatus: 'review',
+	});
 });
 
 test('GitOverlay renders safely when mounted closed', () => {

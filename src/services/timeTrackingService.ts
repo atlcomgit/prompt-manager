@@ -49,4 +49,15 @@ export class TimeTrackingService {
 			timeSpentOnTask: (prompt.timeSpentOnTask || 0) + (patch.timeSpentOnTask || 0),
 		};
 	}
+
+	static applyElapsedBeforeStatusChange<T extends { status: PromptStatus; timeSpentWriting?: number; timeSpentOnTask?: number }>(
+		prompt: T,
+		nextStatus: PromptStatus,
+		elapsedMs: number,
+	): T {
+		return {
+			...TimeTrackingService.applyElapsedToPrompt(prompt, elapsedMs),
+			status: nextStatus,
+		};
+	}
 }

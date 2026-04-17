@@ -924,6 +924,22 @@ const en: Record<string, string> = {
 	'memory.analysisUnknown': 'Unknown',
 	'memory.categoriesLabel': 'Categories',
 	'memory.cleared': 'Memory cleared',
+
+	// --- Chat message builder ---
+	'chatMessage.task': 'Task',
+	'chatMessage.workMode': 'Work mode',
+	'chatMessage.workModeAgent': '**Agent** — Proceed with implementation immediately, without preliminary planning.',
+	'chatMessage.workModePlan': '**Plan** — Create a detailed implementation plan first, do not start implementation.',
+	'chatMessage.projects': 'Projects',
+	'chatMessage.taskDescription': 'Task description',
+	'chatMessage.context': 'Context',
+	'chatMessage.promptMetadata': 'Prompt metadata',
+	'chatMessage.technologies': 'Technologies',
+	'chatMessage.tools': 'Tools',
+	'chatMessage.taskAndGit': 'Task and Git',
+	'chatMessage.contextFiles': 'Context files',
+	'chatMessage.instructions': 'Instructions',
+	'chatMessage.instructionsNote': 'When implementing the task, consider the instructions from the attached files:',
 };
 
 const ru: Record<string, string> = {
@@ -1845,6 +1861,22 @@ const ru: Record<string, string> = {
 	'memory.analysisUnknown': 'Неизвестно',
 	'memory.categoriesLabel': 'Категории',
 	'memory.cleared': 'Память очищена',
+
+	// --- Chat message builder ---
+	'chatMessage.task': 'Задача',
+	'chatMessage.workMode': 'Режим работы',
+	'chatMessage.workModeAgent': '**Agent** — Приступай к реализации задачи сразу, без предварительного планирования.',
+	'chatMessage.workModePlan': '**Plan** — Составь детальный план реализации, не приступай к выполнению.',
+	'chatMessage.projects': 'Проекты',
+	'chatMessage.taskDescription': 'Описание задачи',
+	'chatMessage.context': 'Контекст',
+	'chatMessage.promptMetadata': 'Метаданные промпта',
+	'chatMessage.technologies': 'Технологии',
+	'chatMessage.tools': 'Инструменты',
+	'chatMessage.taskAndGit': 'Задача и Git',
+	'chatMessage.contextFiles': 'Файлы контекста',
+	'chatMessage.instructions': 'Инструкции',
+	'chatMessage.instructionsNote': 'При реализации задачи учитывай инструкции из приложенных файлов:',
 };
 
 export const translations: Record<string, Record<string, string>> = { en, ru };

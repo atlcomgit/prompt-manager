@@ -118,6 +118,19 @@ export class StateService {
 		return ordered;
 	}
 
+	private scopeWorkspaceStateDbPathsToCurrentWorkspace(dbPaths: string[]): string[] {
+		if (dbPaths.length === 0) {
+			return [];
+		}
+
+		const preferredPath = this.getPreferredWorkspaceStateDbPath();
+		if (!preferredPath) {
+			return dbPaths;
+		}
+
+		return dbPaths.filter(dbPath => dbPath === preferredPath);
+	}
+
 	private getStateDbCandidates(): string[] {
 		const home = os.homedir();
 		if (process.platform === 'linux') {
@@ -158,7 +171,7 @@ export class StateService {
 	}
 
 	private async resolveWorkspaceStateDbPath(): Promise<string | null> {
-		const paths = await this.resolveWorkspaceStateDbPaths();
+		const paths = this.scopeWorkspaceStateDbPathsToCurrentWorkspace(await this.resolveWorkspaceStateDbPaths());
 		return paths[0] || null;
 	}
 
@@ -176,21 +189,48 @@ export class StateService {
 		}
 	}
 
-	private getPreferredAndFallbackDbPaths(dbPaths: string[]): { preferred: string[]; fallback: string[] } {
-		if (dbPaths.length === 0) {
-			return { preferred: [], fallback: [] };
+	/** Keep only sessions that started or still had request activity after the tracked start timestamp. */
+	private static isChatSessionRelevantToReference(entry: any, referenceTimestampMs: number): boolean {
+		const started = Number(entry?.timing?.lastRequestStarted || 0);
+		const ended = Number(entry?.timing?.lastRequestEnded || 0);
+		if (started <= 0) {
+			return false;
 		}
 
-		const preferredPath = this.getPreferredWorkspaceStateDbPath();
-		if (!preferredPath) {
-			return { preferred: [dbPaths[0]], fallback: dbPaths.slice(1) };
+		if (started >= referenceTimestampMs) {
+			return true;
 		}
 
-		const preferred = dbPaths.includes(preferredPath)
-			? [preferredPath]
-			: [dbPaths[0]];
-		const fallback = dbPaths.filter(dbPath => !preferred.includes(dbPath));
-		return { preferred, fallback };
+		return ended >= referenceTimestampMs;
+	}
+
+	/** When a session id is known, never silently fall back to another recent session. */
+	private static selectRecentChatSessionCandidate(sessions: any[], sessionIdHint?: string): any | null {
+		const normalizedHint = String(sessionIdHint || '').trim();
+		if (!normalizedHint) {
+			return sessions[0] || null;
+		}
+
+		return sessions.find((entry: any) => String(entry?.sessionId || '').trim() === normalizedHint) || null;
+	}
+
+	/** Pick an active chat session from workspace memento while skipping explicitly excluded sessions. */
+	private static selectActiveChatSessionIdCandidate(parsed: any, excludedSessionIds?: Set<string>): string {
+		const excluded = excludedSessionIds || new Set<string>();
+		const direct = String(parsed?.sessionId || '').trim();
+		if (direct && !excluded.has(direct)) {
+			return direct;
+		}
+
+		const historyCopilot = Array.isArray(parsed?.history?.copilot) ? parsed.history.copilot : [];
+		for (let index = historyCopilot.length - 1; index >= 0; index -= 1) {
+			const candidate = String(historyCopilot[index]?.sessionId || '').trim();
+			if (candidate && !excluded.has(candidate)) {
+				return candidate;
+			}
+		}
+
+		return '';
 	}
 
 	private async readWorkspaceItemValue(dbPath: string, key: string): Promise<string> {
@@ -206,12 +246,17 @@ export class StateService {
 	async getActiveChatSessionId(
 		timeoutMs: number = 5000,
 		pollIntervalMs: number = 250,
+		options: { excludeSessionIds?: string[] } = {},
 	): Promise<string> {
-		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		const dbPaths = this.scopeWorkspaceStateDbPathsToCurrentWorkspace(await this.resolveWorkspaceStateDbPaths());
 		if (dbPaths.length === 0) {
 			return '';
 		}
-		const { preferred, fallback } = this.getPreferredAndFallbackDbPaths(dbPaths);
+		const excludedSessionIds = new Set(
+			(options.excludeSessionIds || [])
+				.map(value => String(value || '').trim())
+				.filter(Boolean),
+		);
 
 		const startedAt = Date.now();
 		while (Date.now() - startedAt <= timeoutMs) {
@@ -221,43 +266,23 @@ export class StateService {
 				'memento/interactive-session',
 			];
 
-			const scanGroup = async (paths: string[]): Promise<string> => {
-				for (const dbPath of paths) {
-					for (const key of keysToCheck) {
-						const raw = await this.readWorkspaceItemValue(dbPath, key);
-						if (!raw) {
-							continue;
-						}
+			for (const dbPath of dbPaths) {
+				for (const key of keysToCheck) {
+					const raw = await this.readWorkspaceItemValue(dbPath, key);
+					if (!raw) {
+						continue;
+					}
 
-						try {
-							const parsed = JSON.parse(raw);
-							const direct = String(parsed?.sessionId || '').trim();
-							if (direct) {
-								return direct;
-							}
-
-							const historyCopilot = parsed?.history?.copilot;
-							if (Array.isArray(historyCopilot) && historyCopilot.length > 0) {
-								const candidate = String(historyCopilot[historyCopilot.length - 1]?.sessionId || '').trim();
-								if (candidate) {
-									return candidate;
-								}
-							}
-						} catch {
-							// continue with next key
+					try {
+						const parsed = JSON.parse(raw);
+						const candidate = StateService.selectActiveChatSessionIdCandidate(parsed, excludedSessionIds);
+						if (candidate) {
+							return candidate;
 						}
+					} catch {
+						// continue with next key
 					}
 				}
-				return '';
-			};
-
-			const preferredSession = await scanGroup(preferred);
-			if (preferredSession) {
-				return preferredSession;
-			}
-			const fallbackSession = await scanGroup(fallback);
-			if (fallbackSession) {
-				return fallbackSession;
 			}
 
 			await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
@@ -273,10 +298,7 @@ export class StateService {
 		}
 
 		return Object.values(entries)
-			.filter((entry: any) => {
-				const started = Number(entry?.timing?.lastRequestStarted || 0);
-				return started >= referenceTimestampMs - 5000;
-			})
+			.filter((entry: any) => StateService.isChatSessionRelevantToReference(entry, referenceTimestampMs))
 			.sort((a: any, b: any) => Number(b?.timing?.lastRequestStarted || 0) - Number(a?.timing?.lastRequestStarted || 0));
 	}
 
@@ -286,7 +308,7 @@ export class StateService {
 		pollIntervalMs: number = 500,
 		sessionIdHint?: string,
 	): Promise<{ ok: boolean; sessionId?: string; lastRequestStarted?: number; dbPath?: string; reason?: string }> {
-		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		const dbPaths = this.scopeWorkspaceStateDbPathsToCurrentWorkspace(await this.resolveWorkspaceStateDbPaths());
 		if (dbPaths.length === 0) {
 			return { ok: false, reason: 'workspace-db-not-found' };
 		}
@@ -300,10 +322,7 @@ export class StateService {
 			for (const dbPath of dbPaths) {
 				const index = await this.readChatSessionStoreIndex(dbPath);
 				const sessions = this.getRecentChatSessionsFromIndex(index, referenceTimestampMs);
-				const hinted = normalizedHint
-					? sessions.find((entry: any) => String(entry?.sessionId || '').trim() === normalizedHint)
-					: undefined;
-				const candidate = hinted || sessions[0];
+				const candidate = StateService.selectRecentChatSessionCandidate(sessions, normalizedHint);
 				if (!candidate) {
 					continue;
 				}
@@ -335,7 +354,7 @@ export class StateService {
 			return false;
 		}
 
-		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		const dbPaths = this.scopeWorkspaceStateDbPathsToCurrentWorkspace(await this.resolveWorkspaceStateDbPaths());
 		if (dbPaths.length === 0) {
 			return false;
 		}
@@ -369,7 +388,7 @@ export class StateService {
 		hasPendingEdits?: boolean;
 		dbPath?: string;
 	}> {
-		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		const dbPaths = this.scopeWorkspaceStateDbPathsToCurrentWorkspace(await this.resolveWorkspaceStateDbPaths());
 		if (dbPaths.length === 0) {
 			return { ok: false, reason: 'workspace-db-not-found' };
 		}
@@ -391,10 +410,7 @@ export class StateService {
 			for (const dbPath of dbPaths) {
 				const index = await this.readChatSessionStoreIndex(dbPath);
 				const sessions = this.getRecentChatSessionsFromIndex(index, referenceTimestampMs);
-				const hinted = normalizedHint
-					? sessions.find((entry: any) => String(entry?.sessionId || '').trim() === normalizedHint)
-					: undefined;
-				const candidate = hinted || sessions[0];
+				const candidate = StateService.selectRecentChatSessionCandidate(sessions, normalizedHint);
 				if (!candidate) {
 					continue;
 				}
@@ -567,7 +583,7 @@ export class StateService {
 	 * Find the JSONL file path for a given chat session ID.
 	 */
 	private async findChatSessionJsonlPath(sessionId: string): Promise<string | null> {
-		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		const dbPaths = this.scopeWorkspaceStateDbPathsToCurrentWorkspace(await this.resolveWorkspaceStateDbPaths());
 
 		for (const dbPath of dbPaths) {
 			const candidate = path.join(path.dirname(dbPath), 'chatSessions', `${sessionId}.jsonl`);
@@ -636,7 +652,7 @@ export class StateService {
 			}
 		}
 
-		const dbPaths = await this.resolveWorkspaceStateDbPaths();
+		const dbPaths = this.scopeWorkspaceStateDbPathsToCurrentWorkspace(await this.resolveWorkspaceStateDbPaths());
 		let indexOk = false;
 		let indexReason = 'index-entry-not-found';
 		const sessionPathSegment = this.escapeSqlJsonPathSegment(normalizedId);

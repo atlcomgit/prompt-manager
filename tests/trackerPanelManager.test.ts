@@ -3,6 +3,13 @@ import assert from 'node:assert/strict';
 import Module from 'node:module';
 
 const originalLoad = (Module as any)._load;
+const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
+let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<unknown>) | undefined;
+
+function resetVsCodeCommandMock() {
+	vscodeCommandCalls.length = 0;
+	vscodeExecuteCommandHandler = undefined;
+}
 
 function createVsCodeMock() {
 	class EventEmitter<T> {
@@ -26,13 +33,25 @@ function createVsCodeMock() {
 			joinPath: (base: { fsPath?: string }, ...parts: string[]) => ({
 				fsPath: [base.fsPath || '', ...parts].join('/'),
 			}),
-			parse: (value: string) => ({ value }),
+			parse: (value: string) => ({
+				value,
+				toString: () => value,
+			}),
+		},
+		window: {
+			showWarningMessage: async () => undefined,
 		},
 		env: {
 			language: 'en',
 		},
 		commands: {
-			executeCommand: async () => undefined,
+			executeCommand: async (id: string, ...args: unknown[]) => {
+				vscodeCommandCalls.push({ id, args });
+				if (vscodeExecuteCommandHandler) {
+					return vscodeExecuteCommandHandler(id, ...args);
+				}
+				return undefined;
+			},
 		},
 	};
 }
@@ -242,4 +261,79 @@ test('TrackerPanelManager archives only closed prompts from the requested ids', 
 	assert.deepEqual(archivedIds, ['closed-a']);
 	assert.equal(stored.get('closed-a')?.archived, true);
 	assert.equal(stored.get('completed-a')?.archived, false);
+});
+
+test('TrackerPanelManager openChat uses the validated stored session instead of a stale UI session id', async () => {
+	const { TrackerPanelManager } = await importTrackerPanelManager();
+	const stored = new Map([
+		['prompt-a', {
+			...makePrompt('prompt-a', 'draft'),
+			chatSessionIds: ['session-fresh'],
+		}],
+	]);
+	let openedSessionId = '';
+
+	const storageService = {
+		getPrompt: async (id: string) => {
+			const prompt = stored.get(id);
+			return prompt ? { ...prompt } : null;
+		},
+		savePrompt: async (prompt: ReturnType<typeof makePrompt>) => {
+			stored.set(prompt.id, { ...prompt });
+			return prompt;
+		},
+	};
+	const stateService = {
+		saveLastPromptId: async () => undefined,
+		hasChatSession: async (sessionId: string) => sessionId === 'session-fresh',
+	};
+
+	const manager = new TrackerPanelManager(
+		{ fsPath: '/tmp/prompt-manager-extension' } as any,
+		storageService as any,
+		stateService as any,
+	);
+	(manager as any).refresh = async () => undefined;
+	(manager as any).openBoundChatSession = async (sessionId: string) => {
+		openedSessionId = sessionId;
+		return true;
+	};
+
+	await (manager as any).handleMessage({
+		type: 'openChat',
+		id: 'prompt-a',
+		sessionId: 'session-stale',
+	});
+
+	assert.equal(openedSessionId, 'session-fresh');
+	assert.deepEqual(stored.get('prompt-a')?.chatSessionIds, ['session-fresh']);
+	assert.equal(stored.get('prompt-a')?.status, 'in-progress');
+});
+
+test('TrackerPanelManager openBoundChatSession uses only the direct session-resource open path', async () => {
+	resetVsCodeCommandMock();
+	vscodeExecuteCommandHandler = async (id: string) => {
+		if (id === 'vscode.open') {
+			return undefined;
+		}
+
+		throw new Error(`Unexpected command: ${id}`);
+	};
+
+	const { TrackerPanelManager } = await importTrackerPanelManager();
+	const manager = new TrackerPanelManager(
+		{ fsPath: '/tmp/prompt-manager-extension' } as any,
+		{} as any,
+		{} as any,
+	);
+
+	const opened = await (manager as any).openBoundChatSession('session-fresh');
+
+	assert.equal(opened, true);
+	assert.deepEqual(vscodeCommandCalls.map(call => call.id), ['vscode.open']);
+	assert.match(
+		String((vscodeCommandCalls[0]?.args[0] as { toString?: () => string })?.toString?.() || ''),
+		/^vscode-chat-session:\/\/local\//,
+	);
+	resetVsCodeCommandMock();
 });

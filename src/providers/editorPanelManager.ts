@@ -45,6 +45,7 @@ import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { filterPromptHookIdsForPhase } from '../utils/promptHookPhase.js';
 import { resolvePromptEditorPanelSwitchStrategy } from '../utils/editorPanelSwitch.js';
+import { resolveBoundChatSessionToOpen } from '../utils/chatSessionSelection.js';
 import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 import { fetchRemoteText } from '../utils/remoteText.js';
@@ -947,6 +948,29 @@ export class EditorPanelManager {
 		}
 	}
 
+	/** Sync an authoritative persisted prompt back into panel caches and flags. */
+	private applyPersistedPromptToPanelState(
+		panelKey: string,
+		currentPrompt: Prompt,
+		persistedPrompt: Prompt,
+		options: { clearDirty?: boolean } = {},
+	): void {
+		Object.assign(currentPrompt, persistedPrompt);
+		this.setPanelPromptRef(panelKey, currentPrompt);
+		this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(persistedPrompt)));
+
+		if (options.clearDirty) {
+			this.panelDirtyFlags.set(panelKey, false);
+			this.setPanelPromptConfigFieldChangedAt(panelKey, null);
+			this.panelLatestPromptSnapshots.set(panelKey, null);
+			return;
+		}
+
+		if (!this.panelDirtyFlags.get(panelKey)) {
+			this.panelLatestPromptSnapshots.set(panelKey, null);
+		}
+	}
+
 	private async syncTrackedPromptFilesForPanel(panelKey: string, prompt: Prompt, previousId?: string): Promise<void> {
 		this.ensureContentEditorBinding(panelKey, prompt);
 		this.ensureReportEditorBinding(panelKey, prompt);
@@ -1388,46 +1412,61 @@ export class EditorPanelManager {
 		}
 
 		const sessionResource = this.buildChatSessionResource(trimmed);
-		const isTargetSessionActive = async (): Promise<boolean> => {
-			const activeSessionId = await this.stateService.getActiveChatSessionId(4500, 150);
-			return activeSessionId === trimmed;
-		};
 
+		// Chat editors reopen by resource URI and do not reliably update panel view mementos.
 		try {
 			await vscode.commands.executeCommand('vscode.open', sessionResource);
-			if (await isTargetSessionActive()) {
-				return true;
-			}
+			return true;
 		} catch {
-			// continue with compatibility variants
+			return false;
 		}
+	}
 
-		const openChatCmds = ['workbench.action.chat.openAgent', 'workbench.action.chat.open'];
-		const argCandidates: unknown[] = [
-			sessionResource,
-			{ resource: sessionResource },
-			{ uri: sessionResource },
-			{ sessionId: trimmed },
-			{ id: trimmed },
-			{ chatSessionId: trimmed },
-			{ session: trimmed },
-			{ sessionId: trimmed, resource: sessionResource },
-		];
+	/** Resolve the cancel commands currently exposed by the running VS Code build. */
+	private async getAvailableStopChatCommands(): Promise<string[]> {
+		const commands = await vscode.commands.getCommands(true);
+		return [
+			'workbench.action.chat.cancel',
+			'workbench.action.chat.stop',
+		].filter(commandId => commands.includes(commandId));
+	}
 
-		for (const openCmd of openChatCmds) {
-			for (const arg of argCandidates) {
-				try {
-					await vscode.commands.executeCommand(openCmd, arg);
-					if (await isTargetSessionActive()) {
-						return true;
-					}
-				} catch {
-					// try next argument variant
-				}
+	/** Try every supported stop command until one executes successfully. */
+	private async executeStopChatCommands(stopChatCommands: string[]): Promise<boolean> {
+		for (const commandId of stopChatCommands) {
+			try {
+				await vscode.commands.executeCommand(commandId);
+				return true;
+			} catch {
+				// Try the next available stop command.
 			}
 		}
 
 		return false;
+	}
+
+	/** Focus a bound chat session first so VS Code cancels the correct agent request. */
+	private async stopBoundChatSession(sessionId: string, stopChatCommands?: string[]): Promise<boolean> {
+		const trimmed = (sessionId || '').trim();
+		if (!trimmed) {
+			return false;
+		}
+
+		const commandsToRun = stopChatCommands || await this.getAvailableStopChatCommands();
+		if (commandsToRun.length === 0) {
+			return false;
+		}
+
+		const sessionResource = this.buildChatSessionResource(trimmed);
+		try {
+			await vscode.commands.executeCommand('vscode.open', sessionResource);
+		} catch {
+			return false;
+		}
+
+		// Let the reopened chat editor restore its widget before dispatching cancel.
+		await new Promise(resolve => setTimeout(resolve, 150));
+		return this.executeStopChatCommands(commandsToRun);
 	}
 
 	private buildChatSessionRenameTitle(prompt: Pick<Prompt, 'id' | 'title' | 'taskNumber'> | null): string {
@@ -1755,6 +1794,73 @@ export class EditorPanelManager {
 		}
 	}
 
+	/** Keep the started prompt state once launch persistence or dispatch already succeeded. */
+	private static resolveStartChatFailureRecovery(input: {
+		startStatePersisted: boolean;
+		chatMessageDispatched: boolean;
+	}): 'restore' | 'keep-started' {
+		return input.startStatePersisted || input.chatMessageDispatched ? 'keep-started' : 'restore';
+	}
+
+	/** Auto-complete chat only when the launch flow has already confirmed a bound session. */
+	private static shouldFinalizeTrackedChatCompletion(input: {
+		sessionBindingSucceeded: boolean;
+		trackedSessionId?: string;
+		completionSessionId?: string;
+	}): boolean {
+		if (!input.sessionBindingSucceeded) {
+			return false;
+		}
+
+		return Boolean(
+			String(input.trackedSessionId || '').trim()
+			|| String(input.completionSessionId || '').trim(),
+		);
+	}
+
+	/** Preserve newer persisted prompt state when an older editor snapshot is being saved. */
+	private mergePersistedPromptStateBeforeSave(
+		promptToSave: Prompt,
+		existingPrompt: Prompt | null,
+		basePrompt: Prompt | null,
+		options: { allowStatusOverwrite?: boolean } = {},
+	): void {
+		if (existingPrompt) {
+			const hasConcurrentUpdate = Boolean(
+				promptToSave.updatedAt
+				&& existingPrompt.updatedAt
+				&& existingPrompt.updatedAt !== promptToSave.updatedAt,
+			);
+			if (hasConcurrentUpdate && !options.allowStatusOverwrite) {
+				if (this.statusRank(existingPrompt.status) >= this.statusRank(promptToSave.status)) {
+					promptToSave.status = existingPrompt.status;
+				}
+			}
+
+			const baseReport = basePrompt?.report || '';
+			if (basePrompt && promptToSave.report === baseReport && existingPrompt.report !== baseReport) {
+				promptToSave.report = existingPrompt.report;
+			}
+
+			promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
+			promptToSave.timeSpentImplementing = Math.max(
+				promptToSave.timeSpentImplementing || 0,
+				existingPrompt.timeSpentImplementing || 0,
+			);
+			promptToSave.timeSpentOnTask = Math.max(promptToSave.timeSpentOnTask || 0, existingPrompt.timeSpentOnTask || 0);
+			promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
+				? Math.max(0, promptToSave.timeSpentUntracked || 0)
+				: (existingPrompt.timeSpentUntracked || 0);
+			promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
+				? promptToSave.chatSessionIds
+				: (existingPrompt.chatSessionIds || []);
+			return;
+		}
+
+		promptToSave.timeSpentOnTask = Math.max(0, promptToSave.timeSpentOnTask || 0);
+		promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
+	}
+
 	private normalizePromptForCompare(
 		p: Prompt,
 		options: { pendingAiEnrichment?: { title: boolean; description: boolean } | null } = {},
@@ -2012,21 +2118,7 @@ export class EditorPanelManager {
 			await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, baseSnapshot || null);
 
 			const existingPrompt = await this.storageService.getPrompt(renameFromId || promptToSave.id);
-			this.mergeExternalReportIfUnchanged(promptToSave, existingPrompt, baseSnapshot || null);
-			if (existingPrompt) {
-				promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
-				promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
-				promptToSave.timeSpentOnTask = Math.max(promptToSave.timeSpentOnTask || 0, existingPrompt.timeSpentOnTask || 0);
-				promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
-					? Math.max(0, promptToSave.timeSpentUntracked || 0)
-					: (existingPrompt.timeSpentUntracked || 0);
-				promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
-					? promptToSave.chatSessionIds
-					: (existingPrompt.chatSessionIds || []);
-			} else {
-				promptToSave.timeSpentOnTask = Math.max(0, promptToSave.timeSpentOnTask || 0);
-				promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
-			}
+			this.mergePersistedPromptStateBeforeSave(promptToSave, existingPrompt, baseSnapshot || null);
 
 			const savedPrompt = await this.storageService.savePrompt(promptToSave, {
 				historyReason: 'switch',
@@ -3268,8 +3360,8 @@ export class EditorPanelManager {
 		return singleLine.length > 140 ? `${singleLine.slice(0, 139)}…` : singleLine;
 	}
 
-	private resolvePromptIdBase(promptToSave: Pick<Prompt, 'taskNumber' | 'title' | 'description' | 'content' | 'report'>): string | undefined {
-		const slugSource = (promptToSave.title || promptToSave.description || promptToSave.content || promptToSave.report || '').trim();
+	private resolvePromptIdBase(promptToSave: Pick<Prompt, 'taskNumber' | 'title' | 'description' | 'content'>): string | undefined {
+		const slugSource = (promptToSave.title || promptToSave.description || promptToSave.content || '').trim();
 		if (!slugSource) {
 			return undefined;
 		}
@@ -3277,7 +3369,7 @@ export class EditorPanelManager {
 		return this.makePromptIdBase(
 			promptToSave.taskNumber,
 			promptToSave.title,
-			promptToSave.description || promptToSave.content || promptToSave.report,
+			promptToSave.description || promptToSave.content,
 		);
 	}
 
@@ -3379,19 +3471,6 @@ export class EditorPanelManager {
 			if (timeoutHandle) {
 				clearTimeout(timeoutHandle);
 			}
-		}
-	}
-
-	private async postMessageToCurrentPanel(panelKey: string, message: ExtensionToWebviewMessage): Promise<void> {
-		const panel = this.resolveOpenEditorPanel(panelKey);
-		if (!panel || this.silentClosePanels.has(panel)) {
-			return;
-		}
-
-		try {
-			await panel.webview.postMessage(message);
-		} catch {
-			// Panel may be reloading while a background task finishes.
 		}
 	}
 
@@ -4613,6 +4692,20 @@ export class EditorPanelManager {
 		}
 	}
 
+	/** Post a message to the current panel if it still exists and is not silently closing. */
+	private async postMessageToCurrentPanel(panelKey: string, message: ExtensionToWebviewMessage): Promise<void> {
+		const panel = this.resolveOpenEditorPanel(panelKey) || openPanels.get(panelKey);
+		if (!panel || this.silentClosePanels.has(panel)) {
+			return;
+		}
+
+		try {
+			await panel.webview.postMessage(message);
+		} catch {
+			// Ignore transient postMessage failures while the webview reloads.
+		}
+	}
+
 	private flushPendingPanelMessages(panelKey: string, panel: vscode.WebviewPanel, currentPrompt: Prompt): void {
 		const pending = this.pendingPanelMessages.get(panelKey);
 		if (!pending?.length) {
@@ -5315,34 +5408,13 @@ export class EditorPanelManager {
 						await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, basePrompt || null);
 
 						const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(renameFromId || promptToSave.id) : null;
-						const hasConcurrentUpdate = Boolean(existingPrompt && promptToSave.updatedAt && existingPrompt.updatedAt !== promptToSave.updatedAt);
 						const allowStatusOverwrite = saveSource === 'status-change';
-						if (existingPrompt && hasConcurrentUpdate && !allowStatusOverwrite) {
-							if (this.statusRank(existingPrompt.status) >= this.statusRank(promptToSave.status)) {
-								promptToSave.status = existingPrompt.status;
-							}
-						}
-						if (existingPrompt) {
-							if (
-								basePrompt
-								&& promptToSave.report === (basePrompt.report || '')
-								&& existingPrompt.report !== (basePrompt.report || '')
-							) {
-								promptToSave.report = existingPrompt.report;
-							}
-							promptToSave.timeSpentWriting = Math.max(promptToSave.timeSpentWriting || 0, existingPrompt.timeSpentWriting || 0);
-							promptToSave.timeSpentImplementing = Math.max(promptToSave.timeSpentImplementing || 0, existingPrompt.timeSpentImplementing || 0);
-							promptToSave.timeSpentOnTask = Math.max(promptToSave.timeSpentOnTask || 0, existingPrompt.timeSpentOnTask || 0);
-							promptToSave.timeSpentUntracked = Number.isFinite(promptToSave.timeSpentUntracked)
-								? Math.max(0, promptToSave.timeSpentUntracked || 0)
-								: (existingPrompt.timeSpentUntracked || 0);
-							promptToSave.chatSessionIds = (promptToSave.chatSessionIds && promptToSave.chatSessionIds.length > 0)
-								? promptToSave.chatSessionIds
-								: (existingPrompt.chatSessionIds || []);
-						} else {
-							promptToSave.timeSpentOnTask = Math.max(0, promptToSave.timeSpentOnTask || 0);
-							promptToSave.timeSpentUntracked = Math.max(0, promptToSave.timeSpentUntracked || 0);
-						}
+						this.mergePersistedPromptStateBeforeSave(
+							promptToSave,
+							existingPrompt,
+							basePrompt || null,
+							{ allowStatusOverwrite },
+						);
 
 						const saved = await this.storageService.savePrompt(promptToSave, {
 							historyReason: saveSource,
@@ -5797,6 +5869,9 @@ export class EditorPanelManager {
 				const startChatRequestId = (msg.requestId || '').trim();
 				const initialStatus = msg.originalStatus || prompt?.status || 'draft';
 				const initialChatSessionIds = [...(prompt?.chatSessionIds || [])];
+				let startStatePersisted = false;
+				let chatMessageDispatched = false;
+				let sessionBindingSucceeded = false;
 				let hookPayloadBase: Record<string, unknown> | null = null;
 				let trackedSessionId = '';
 				const defaultStartChatError = 'Не удалось запустить чат. Проверьте, что Copilot Chat доступен, и повторите попытку.';
@@ -5812,6 +5887,13 @@ export class EditorPanelManager {
 					return `Не удалось запустить чат: ${normalized}`;
 				};
 				const restorePromptAfterStartFailure = async (): Promise<void> => {
+					if (EditorPanelManager.resolveStartChatFailureRecovery({
+						startStatePersisted,
+						chatMessageDispatched,
+					}) !== 'restore') {
+						return;
+					}
+
 					if (!prompt?.id) {
 						return;
 					}
@@ -5831,7 +5913,9 @@ export class EditorPanelManager {
 					this.unlockPromptIdAfterChatStart(promptFromStorage);
 					Object.assign(prompt, promptFromStorage);
 					if (currentPrompt.id === promptFromStorage.id) {
-						Object.assign(currentPrompt, promptFromStorage);
+						this.applyPersistedPromptToPanelState(panelKey, currentPrompt, promptFromStorage, {
+							clearDirty: true,
+						});
 						postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
 					}
 					this._onDidSave.fire(promptFromStorage.id);
@@ -5904,19 +5988,21 @@ export class EditorPanelManager {
 					prompt.status = 'in-progress';
 					this.lockPromptIdAfterChatStart(prompt);
 
-					const bindSessionToPrompt = async (sessionId: string): Promise<void> => {
+					const bindSessionToPrompt = async (sessionId: string): Promise<boolean> => {
 						const normalizedSessionId = (sessionId || '').trim();
 						if (!normalizedSessionId) {
-							return;
+							this.hooksOutput.appendLine(`[chat-start] bind skipped for prompt=${prompt?.id || '-'}: empty session id`);
+							return false;
 						}
 						const promptForSessionBinding = prompt;
 						if (!promptForSessionBinding) {
-							return;
+							return false;
 						}
 
 						const promptFromStorage = await this.storageService.getPrompt(promptForSessionBinding.id);
 						if (!promptFromStorage) {
-							return;
+							this.hooksOutput.appendLine(`[chat-start] bind skipped for prompt=${promptForSessionBinding.id}: prompt missing in storage`);
+							return false;
 						}
 
 						const updatedChatSessionIds = shouldForceRebindChat
@@ -5927,7 +6013,7 @@ export class EditorPanelManager {
 							];
 						const changed = JSON.stringify(updatedChatSessionIds) !== JSON.stringify(promptFromStorage.chatSessionIds || []);
 						if (!changed) {
-							return;
+							return true;
 						}
 
 						promptFromStorage.chatSessionIds = updatedChatSessionIds;
@@ -5940,10 +6026,12 @@ export class EditorPanelManager {
 						}
 						Object.assign(promptForSessionBinding, promptFromStorage);
 						if (currentPrompt.id === promptFromStorage.id) {
-							Object.assign(currentPrompt, promptFromStorage);
+							this.applyPersistedPromptToPanelState(panelKey, currentPrompt, promptFromStorage);
 							postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
 						}
 						this._onDidSave.fire(promptFromStorage.id);
+						this.hooksOutput.appendLine(`[chat-start] prompt=${promptFromStorage.id} bound to session=${normalizedSessionId}`);
+						return true;
 					};
 
 					// Ensure prompt has id and persist latest editor state before starting chat
@@ -5967,14 +6055,16 @@ export class EditorPanelManager {
 						historyReason: 'start-chat',
 						previousId: renameFromId,
 					});
+					startStatePersisted = true;
 					this.lockPromptIdAfterChatStart(prompt);
 					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();
 					const shouldSyncCurrentPanel = !normalizedCurrentPromptId
 						|| normalizedCurrentPromptId === prompt.id
 						|| Boolean(renameFromId && normalizedCurrentPromptId === renameFromId);
 					if (shouldSyncCurrentPanel) {
-						Object.assign(currentPrompt, prompt);
-						this.setPanelPromptRef(panelKey, currentPrompt);
+						this.applyPersistedPromptToPanelState(panelKey, currentPrompt, prompt, {
+							clearDirty: true,
+						});
 						await this.syncTrackedPromptFilesForPanel(panelKey, currentPrompt, renameFromId);
 						if (renameFromId && renameFromId !== prompt.id) {
 							postMessage({ type: 'promptSaved', prompt, previousId: renameFromId });
@@ -5984,14 +6074,6 @@ export class EditorPanelManager {
 						}
 					}
 					this._onDidSave.fire(prompt.id);
-					await this.clearPromptPlanFileIfExists(panelKey, prompt.id);
-
-					/* Create agent.json with initial progress when starting a chat */
-					try {
-						await this.storageService.createAgentFile(prompt.id);
-					} catch (error) {
-						this.hooksOutput.appendLine(`[agent-file] create agent.json failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
-					}
 
 					// Compose query with prompt content and metadata
 					const globalContext = this.stateService.getGlobalAgentContext();
@@ -6216,6 +6298,11 @@ export class EditorPanelManager {
 
 					await new Promise(resolve => setTimeout(resolve, 150));
 					const commands = await vscode.commands.getCommands(true);
+					const sessionIdsToExclude = new Set<string>(initialChatSessionIds.filter(Boolean));
+					const activeSessionBeforeStart = await this.stateService.getActiveChatSessionId(1200, 150);
+					if (activeSessionBeforeStart) {
+						sessionIdsToExclude.add(activeSessionBeforeStart);
+					}
 					if (shouldForceRebindChat) {
 						await forceNewChatSession();
 						await new Promise(resolve => setTimeout(resolve, 120));
@@ -6257,28 +6344,72 @@ export class EditorPanelManager {
 					}
 
 					await sendMessage(query);
+					chatMessageDispatched = true;
+					await this.clearPromptPlanFileIfExists(panelKey, prompt.id);
+
+					/* Create agent.json only after the chat message was dispatched. */
+					try {
+						await this.storageService.createAgentFile(prompt.id);
+					} catch (error) {
+						this.hooksOutput.appendLine(`[agent-file] create agent.json failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+					}
 					postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
 
 					void (async () => {
-						const startedSession = await this.stateService.waitForChatSessionStarted(
-							requestStartTimestamp,
-							15000,
-							500,
-							trackedSessionId || undefined,
-						);
-						if (startedSession.ok && startedSession.sessionId) {
-							trackedSessionId = startedSession.sessionId;
-							await bindSessionToPrompt(startedSession.sessionId);
-							postMessage({ type: 'chatOpened', promptId: prompt.id, requestId: startChatRequestId || undefined });
-						} else {
+						const trackedPromptId = prompt?.id || '';
+						let chatOpenedNotified = false;
+						const notifyChatOpened = (): void => {
+							if (chatOpenedNotified) {
+								return;
+							}
+							chatOpenedNotified = true;
+							postMessage({ type: 'chatOpened', promptId: trackedPromptId, requestId: startChatRequestId || undefined });
+						};
+
+						const bindConfirmedSession = async (sessionId: string, source: string): Promise<boolean> => {
+							const normalizedSessionId = (sessionId || '').trim();
+							if (!normalizedSessionId) {
+								return false;
+							}
+							trackedSessionId = normalizedSessionId;
+							this.hooksOutput.appendLine(`[chat-start] binding prompt=${trackedPromptId || '-'} via ${source} session=${normalizedSessionId}`);
+							sessionBindingSucceeded = await bindSessionToPrompt(normalizedSessionId);
+							if (sessionBindingSucceeded) {
+								notifyChatOpened();
+							}
+							return sessionBindingSucceeded;
+						};
+
+						if (shouldForceRebindChat) {
+							const freshActiveSessionId = await this.stateService.getActiveChatSessionId(7000, 150, {
+								excludeSessionIds: Array.from(sessionIdsToExclude),
+							});
+							if (await bindConfirmedSession(freshActiveSessionId, 'active-session-rebind')) {
+								sessionIdsToExclude.add(freshActiveSessionId);
+							}
+						}
+
+						if (!sessionBindingSucceeded) {
+							this.hooksOutput.appendLine(`[chat-start] waiting for indexed session start for prompt=${prompt.id}`);
+							const startedSession = await this.stateService.waitForChatSessionStarted(
+								requestStartTimestamp,
+								shouldForceRebindChat ? 20000 : 15000,
+								500,
+								trackedSessionId || undefined,
+							);
+							this.hooksOutput.appendLine(`[chat-start] indexed session result for prompt=${prompt.id}: ok=${String(startedSession.ok)} session=${startedSession.sessionId || '-'} reason=${startedSession.reason || '-'}`);
+							if (startedSession.ok && startedSession.sessionId) {
+								await bindConfirmedSession(startedSession.sessionId, 'session-index');
+							}
+						}
+
+						if (!sessionBindingSucceeded && !shouldForceRebindChat) {
 							const activeSessionId = await this.stateService.getActiveChatSessionId(5000, 250);
-							if (activeSessionId) {
-								trackedSessionId = trackedSessionId || activeSessionId;
-								await bindSessionToPrompt(activeSessionId);
-								postMessage({ type: 'chatOpened', promptId: prompt.id, requestId: startChatRequestId || undefined });
-							} else {
+							if (!(await bindConfirmedSession(activeSessionId, 'active-session-fallback'))) {
 								this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; chat message was dispatched but session was not detected yet`);
 							}
+						} else if (!sessionBindingSucceeded) {
+							this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; new chat session was not confirmed after rebind request`);
 						}
 
 						const completion = await this.stateService.waitForChatRequestCompletion(
@@ -6292,10 +6423,16 @@ export class EditorPanelManager {
 						const chatReportText = chatResponse.markdown;
 						const chatReportHtml = chatResponse.html;
 						const completionObserved = Number(completion.lastRequestEnded || 0) > Number(completion.lastRequestStarted || 0);
+						const completionSessionId = String(completion.sessionId || '').trim();
+						const shouldFinalizeTrackedChat = EditorPanelManager.shouldFinalizeTrackedChatCompletion({
+							sessionBindingSucceeded,
+							trackedSessionId,
+							completionSessionId,
+						});
 						this.hooksOutput.appendLine(
-							`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} completionOk=${completion.ok} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatReportHtml ? 'yes' : 'no'}`
+							`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} binding=${String(sessionBindingSucceeded)} completionOk=${completion.ok} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatReportHtml ? 'yes' : 'no'} finalize=${String(shouldFinalizeTrackedChat)}`
 						);
-						if (completion.ok || completionObserved) {
+						if ((completion.ok || completionObserved) && shouldFinalizeTrackedChat) {
 							const promptToComplete = await this.storageService.getPrompt(prompt.id);
 							if (promptToComplete) {
 								const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
@@ -6373,6 +6510,10 @@ export class EditorPanelManager {
 								this.hooksOutput.appendLine(`[chat-memory] completeChatSession failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 							}
 							return;
+						}
+
+						if ((completion.ok || completionObserved) && !shouldFinalizeTrackedChat) {
+							this.hooksOutput.appendLine(`[chat-track] skip auto-complete for prompt=${prompt.id}: chat completion observed before session binding was confirmed`);
 						}
 
 						if (chatReportHtml) {
@@ -6487,9 +6628,13 @@ export class EditorPanelManager {
 			}
 
 			case 'openChat': {
+				let sessionIdToOpen = String(msg.sessionId || '').trim();
+				let hadBoundSessionRequest = Boolean(sessionIdToOpen);
+				const promptIdToOpen = String(msg.id || currentPrompt.id || '').trim();
 				if (msg.id) {
 					const promptFromStorage = await this.storageService.getPrompt(msg.id);
 					if (promptFromStorage) {
+						hadBoundSessionRequest = hadBoundSessionRequest || (promptFromStorage.chatSessionIds || []).length > 0;
 						// --- Branch mismatch check ---
 						if (promptFromStorage.projects.length > 0) {
 							const paths = this.workspaceService.getWorkspaceFolderPaths();
@@ -6523,6 +6668,7 @@ export class EditorPanelManager {
 							}
 							this._onDidSave.fire(promptFromStorage.id);
 						}
+						sessionIdToOpen = resolveBoundChatSessionToOpen(msg.sessionId, existingSessionIds);
 
 						if (promptFromStorage.status !== 'in-progress') {
 							promptFromStorage.status = 'in-progress';
@@ -6535,16 +6681,30 @@ export class EditorPanelManager {
 						}
 					}
 				}
+				this.hooksOutput.appendLine(
+					`[chat-open] prompt=${promptIdToOpen || '-'} requested=${String(msg.sessionId || '').trim() || '-'} resolved=${sessionIdToOpen || '-'} bound=${String(hadBoundSessionRequest)}`,
+				);
 
-				const openedBoundSession = await this.openBoundChatSession(msg.sessionId);
+				const openedBoundSession = sessionIdToOpen
+					? await this.openBoundChatSession(sessionIdToOpen)
+					: false;
+				if (openedBoundSession) {
+					postMessage({ type: 'chatOpened', promptId: promptIdToOpen || currentPrompt.id });
+					break;
+				}
+				this.hooksOutput.appendLine(
+					`[chat-open] open failed for prompt=${promptIdToOpen || '-'} resolved=${sessionIdToOpen || '-'} bound=${String(hadBoundSessionRequest)}`,
+				);
 				if (!openedBoundSession) {
-					if (msg.sessionId) {
+					if (hadBoundSessionRequest) {
 						postMessage({ type: 'error', message: 'Не удалось открыть привязанный чат. Возможно, он удалён или недоступен.' });
 					} else {
 						try {
 							await vscode.commands.executeCommand('workbench.action.chat.openAgent');
+							postMessage({ type: 'chatOpened', promptId: promptIdToOpen || currentPrompt.id });
 						} catch {
 							await vscode.commands.executeCommand('workbench.action.chat.open');
+							postMessage({ type: 'chatOpened', promptId: promptIdToOpen || currentPrompt.id });
 						}
 					}
 				}
@@ -6564,9 +6724,11 @@ export class EditorPanelManager {
 				}
 				try {
 					await vscode.commands.executeCommand('workbench.action.chat.openAgent');
+					postMessage({ type: 'chatOpened', promptId: currentPrompt.id });
 				} catch {
 					try {
 						await vscode.commands.executeCommand('workbench.action.chat.open');
+						postMessage({ type: 'chatOpened', promptId: currentPrompt.id });
 					} catch {
 						// ignore
 					}
@@ -6575,19 +6737,44 @@ export class EditorPanelManager {
 			}
 
 			case 'stopChat': {
-				const commands = await vscode.commands.getCommands(true);
-				const stopChatCommands = [
-					'workbench.action.chat.cancel',
-					'workbench.action.chat.stop',
-				].filter(commandId => commands.includes(commandId));
+				const stopChatCommands = await this.getAvailableStopChatCommands();
+				let sessionIdToStop = '';
+				let hadBoundSessionRequest = false;
+				const promptIdToStop = String(msg.id || currentPrompt.id || '').trim();
 
-				for (const commandId of stopChatCommands) {
-					try {
-						await vscode.commands.executeCommand(commandId);
-						break;
-					} catch {
-						// try next command
+				if (promptIdToStop) {
+					const promptFromStorage = await this.storageService.getPrompt(promptIdToStop);
+					if (promptFromStorage) {
+						hadBoundSessionRequest = (promptFromStorage.chatSessionIds || []).length > 0;
+						const existingSessionIds: string[] = [];
+						for (const sessionId of promptFromStorage.chatSessionIds || []) {
+							if (await this.stateService.hasChatSession(sessionId)) {
+								existingSessionIds.push(sessionId);
+							}
+						}
+
+						if (existingSessionIds.length !== (promptFromStorage.chatSessionIds || []).length) {
+							promptFromStorage.chatSessionIds = existingSessionIds;
+							await this.storageService.savePrompt(promptFromStorage);
+							this._onDidSave.fire(promptFromStorage.id);
+						}
+
+						sessionIdToStop = resolveBoundChatSessionToOpen('', existingSessionIds);
 					}
+				}
+
+				this.hooksOutput.appendLine(
+					`[chat-stop] prompt=${promptIdToStop || '-'} resolved=${sessionIdToStop || '-'} bound=${String(hadBoundSessionRequest)}`,
+				);
+
+				const stopped = sessionIdToStop
+					? await this.stopBoundChatSession(sessionIdToStop, stopChatCommands)
+					: await this.executeStopChatCommands(stopChatCommands);
+
+				if (!stopped) {
+					this.hooksOutput.appendLine(
+						`[chat-stop] stop failed for prompt=${promptIdToStop || '-'} resolved=${sessionIdToStop || '-'} bound=${String(hadBoundSessionRequest)}`,
+					);
 				}
 				break;
 			}

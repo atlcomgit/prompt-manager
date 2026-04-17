@@ -16,6 +16,7 @@ interface Props {
   isChatPanelOpen: boolean;
   isSaving: boolean;
   isStartingChat: boolean;
+  isOpeningChat?: boolean;
   isGeneratingTitle?: boolean;
   isGeneratingDescription?: boolean;
   hasContent: boolean;
@@ -111,7 +112,7 @@ function splitLeadingIconLabel(label: string): { icon: string; text: string } {
 }
 
 export const ActionBar: React.FC<Props> = ({
-  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isSaving, isStartingChat, isGeneratingTitle = false, isGeneratingDescription = false, hasContent, isPersistedPrompt, status, activeTab,
+  onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isSaving, isStartingChat, isOpeningChat = false, isGeneratingTitle = false, isGeneratingDescription = false, hasContent, isPersistedPrompt, status, activeTab,
 }) => {
   const t = useT();
   const saveLabel = splitLeadingIconLabel(t('actions.save'));
@@ -163,8 +164,18 @@ export const ActionBar: React.FC<Props> = ({
           )}
 
           {chatEntryState.shouldShowOpenChat ? (
-            <button style={{ ...styles.btn, ...styles.btnChat }} onClick={onOpenChat}>
-              {t('actions.openChat')}
+            <button
+              style={{ ...styles.btn, ...styles.btnChat, ...(isOpeningChat ? styles.btnDisabled : {}) }}
+              onClick={onOpenChat}
+              disabled={isOpeningChat}
+              aria-busy={isOpeningChat}
+            >
+              {isOpeningChat ? (
+                <>
+                  <span style={styles.btnSpinner} aria-hidden="true" />
+                  <span>{t('actions.openChat')}</span>
+                </>
+              ) : t('actions.openChat')}
             </button>
           ) : chatEntryState.shouldShowStartChat ? (
             <button

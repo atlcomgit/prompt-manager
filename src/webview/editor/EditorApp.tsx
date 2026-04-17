@@ -350,6 +350,7 @@ export const EditorApp: React.FC = () => {
   const showLoaderTimerRef = useRef<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingChat, setIsStartingChat] = useState(false);
+  const [isOpeningChat, setIsOpeningChat] = useState(false);
   const [pendingExternalStartChatPromptId, setPendingExternalStartChatPromptId] = useState<string | null>(null);
   const [isChatPanelOpen, setIsChatPanelOpen] = useState(false);
   const [workspaceFolders, setWorkspaceFolders] = useState<string[]>([]);
@@ -509,6 +510,7 @@ export const EditorApp: React.FC = () => {
   const promptRef = useRef<Prompt>(prompt);
   const isDirtyRef = useRef(false);
   const isSavingRef = useRef(false);
+  const isOpeningChatRef = useRef(false);
   const localReportDirtyRef = useRef(false);
   const pendingReportOverrideRef = useRef<string | null>(null);
   const autoSaveTimerRef = useRef<number | null>(null);
@@ -914,7 +916,15 @@ export const EditorApp: React.FC = () => {
   }, [buildPromptForSave, handleEditorTabChange, scheduleChatStartTimeout]);
 
   const continueOpenChat = useCallback(() => {
+    if (isOpeningChatRef.current) {
+      return;
+    }
+
     const latestPrompt = promptRef.current;
+    const requestedSessionId = String(latestPrompt.chatSessionIds[0] || '').trim();
+
+    setNotice(null);
+    setIsOpeningChat(true);
 
     if (latestPrompt.status !== 'in-progress') {
       const promptToSave = { ...buildPromptForSaveFrom(latestPrompt), status: 'in-progress' as const };
@@ -928,11 +938,13 @@ export const EditorApp: React.FC = () => {
       }
     }
 
-    if (latestPrompt.id && latestPrompt.chatSessionIds.length > 0) {
-      vscode.postMessage({ type: 'openChat', id: latestPrompt.id, sessionId: latestPrompt.chatSessionIds[0] });
+    /* Let the host resolve the latest bound session from persisted storage. */
+    if (latestPrompt.id) {
+      vscode.postMessage({ type: 'openChat', id: latestPrompt.id, sessionId: requestedSessionId });
       return;
     }
 
+    setIsOpeningChat(false);
     vscode.postMessage({ type: 'openChatPanel' });
   }, [buildPromptForSaveFrom]);
 
@@ -1326,6 +1338,7 @@ export const EditorApp: React.FC = () => {
   useEffect(() => { promptRef.current = prompt; }, [prompt]);
   useEffect(() => { isDirtyRef.current = isDirty; }, [isDirty]);
   useEffect(() => { isSavingRef.current = isSaving; }, [isSaving]);
+  useEffect(() => { isOpeningChatRef.current = isOpeningChat; }, [isOpeningChat]);
 
   useEffect(() => {
     const previousPrompt = previousPromptConfigSnapshotRef.current;
@@ -1915,6 +1928,7 @@ export const EditorApp: React.FC = () => {
           setPrompt(nextPrompt);
         }
         releaseStartChatPendingState();
+        setIsOpeningChat(false);
         setIsChatPanelOpen(true);
         break;
       case 'generatedTitle':
@@ -2184,6 +2198,7 @@ export const EditorApp: React.FC = () => {
           }
         }
         releaseStartChatPendingState({ resetSaving: true });
+        setIsOpeningChat(false);
         setIsSaving(false);
         setIsGeneratingTitle(false);
         setIsGeneratingDescription(false);
@@ -2220,6 +2235,7 @@ export const EditorApp: React.FC = () => {
         clearChatStartTimeout();
         startChatLockRef.current = false;
         setIsStartingChat(false);
+        setIsOpeningChat(false);
         resetChatStartRequestTracking();
         resetStartChatPreflightTracking();
         setNotice(null);
@@ -4373,6 +4389,7 @@ export const EditorApp: React.FC = () => {
             isChatPanelOpen={isChatPanelOpen}
             isSaving={isSaving}
             isStartingChat={isStartingChat}
+            isOpeningChat={isOpeningChat}
             isGeneratingTitle={isGeneratingTitle}
             isGeneratingDescription={isGeneratingDescription}
             hasContent={!!prompt.content}

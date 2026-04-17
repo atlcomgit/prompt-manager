@@ -3,9 +3,18 @@ import assert from 'node:assert/strict';
 import Module from 'node:module';
 
 const originalLoad = (Module as any)._load;
+const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
+let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<unknown>) | undefined;
+let vscodeAvailableCommands: string[] | undefined;
 
 function createDisposable() {
 	return { dispose() { } };
+}
+
+function resetVsCodeCommandMock() {
+	vscodeCommandCalls.length = 0;
+	vscodeExecuteCommandHandler = undefined;
+	vscodeAvailableCommands = undefined;
 }
 
 function createVsCodeMock() {
@@ -61,6 +70,10 @@ function createVsCodeMock() {
 				fsPath: value,
 				toString: () => value,
 			}),
+			parse: (value: string) => ({
+				value,
+				toString: () => value,
+			}),
 			joinPath: (base: { fsPath?: string }, ...parts: string[]) => {
 				const fsPath = [base.fsPath || '', ...parts].join('/');
 				return {
@@ -91,6 +104,16 @@ function createVsCodeMock() {
 			onDidChangeActiveTextEditor: () => createDisposable(),
 			createOutputChannel: () => outputChannel,
 			showErrorMessage: () => undefined,
+		},
+		commands: {
+			executeCommand: async (id: string, ...args: unknown[]) => {
+				vscodeCommandCalls.push({ id, args });
+				if (vscodeExecuteCommandHandler) {
+					return vscodeExecuteCommandHandler(id, ...args);
+				}
+				return undefined;
+			},
+			getCommands: async () => vscodeAvailableCommands || [],
 		},
 		env: {
 			language: 'en',
@@ -167,9 +190,14 @@ async function createManager(options?: {
 	generateTitle?: (content: string) => Promise<string>;
 	generateDescription?: (content: string) => Promise<string>;
 	initialPrompt?: Record<string, unknown> | null;
+	stateService?: Record<string, unknown>;
 }) {
 	const { EditorPanelManager } = await importEditorPanelManager();
 	let storedPrompt = options?.initialPrompt ? createPrompt(options.initialPrompt) : null;
+	const stateService = {
+		saveStartupEditorRestoreState: async () => undefined,
+		...options?.stateService,
+	};
 
 	const storageService = {
 		getStorageDirectoryPath: () => '/tmp/workspace/.vscode/prompt-manager',
@@ -207,7 +235,7 @@ async function createManager(options?: {
 		aiService as any,
 		{} as any,
 		{} as any,
-		{ saveStartupEditorRestoreState: async () => undefined } as any,
+		stateService as any,
 		{} as any,
 		undefined,
 		undefined,
@@ -243,6 +271,385 @@ test('persistPromptSnapshotForSwitch finishes without waiting for AI enrichment'
 	assert.notEqual(((result as any).description || '').trim(), '');
 
 	await new Promise(resolve => setTimeout(resolve, 60));
+});
+
+test('persistPromptSnapshotForSwitch preserves newer persisted status and report', async () => {
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'prompt-a',
+			status: 'in-progress',
+			report: 'Persisted report',
+			updatedAt: '2026-04-13T00:00:02.000Z',
+		},
+	});
+
+	const baseSnapshot = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'prompt-a',
+		status: 'draft',
+		report: '',
+		updatedAt: '2026-04-13T00:00:00.000Z',
+	});
+	const snapshot = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'prompt-a',
+		status: 'draft',
+		report: '',
+		updatedAt: '2026-04-13T00:00:00.000Z',
+	});
+
+	const saved = await (manager as any).persistPromptSnapshotForSwitch(
+		snapshot,
+		baseSnapshot,
+		'__prompt_editor_singleton__',
+	);
+
+	assert.equal(saved?.status, 'in-progress');
+	assert.equal(saved?.report, 'Persisted report');
+	assert.equal(getStoredPrompt()?.status, 'in-progress');
+	assert.equal(getStoredPrompt()?.report, 'Persisted report');
+});
+
+test('resolvePromptIdBase ignores report-only fallback', async () => {
+	const { manager } = await createManager();
+
+	assert.equal(
+		(manager as any).resolvePromptIdBase({
+			taskNumber: '77',
+			title: '',
+			description: '',
+			content: '',
+			report: 'Filled report should not affect prompt id',
+		}),
+		undefined,
+	);
+});
+
+test('resolveStartChatFailureRecovery keeps started state after persistence or dispatch', async () => {
+	const { EditorPanelManager } = await importEditorPanelManager();
+
+	assert.equal(
+		(EditorPanelManager as any).resolveStartChatFailureRecovery({
+			startStatePersisted: false,
+			chatMessageDispatched: false,
+		}),
+		'restore',
+	);
+	assert.equal(
+		(EditorPanelManager as any).resolveStartChatFailureRecovery({
+			startStatePersisted: true,
+			chatMessageDispatched: false,
+		}),
+		'keep-started',
+	);
+	assert.equal(
+		(EditorPanelManager as any).resolveStartChatFailureRecovery({
+			startStatePersisted: false,
+			chatMessageDispatched: true,
+		}),
+		'keep-started',
+	);
+});
+
+test('shouldFinalizeTrackedChatCompletion requires a confirmed session binding', async () => {
+	const { EditorPanelManager } = await importEditorPanelManager();
+
+	assert.equal(
+		(EditorPanelManager as any).shouldFinalizeTrackedChatCompletion({
+			sessionBindingSucceeded: false,
+			trackedSessionId: 'session-1',
+			completionSessionId: 'session-1',
+		}),
+		false,
+	);
+	assert.equal(
+		(EditorPanelManager as any).shouldFinalizeTrackedChatCompletion({
+			sessionBindingSucceeded: true,
+			trackedSessionId: '',
+			completionSessionId: '',
+		}),
+		false,
+	);
+	assert.equal(
+		(EditorPanelManager as any).shouldFinalizeTrackedChatCompletion({
+			sessionBindingSucceeded: true,
+			trackedSessionId: 'session-1',
+			completionSessionId: '',
+		}),
+		true,
+	);
+});
+
+test('openChat opens the validated stored session instead of a stale UI session id', async () => {
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			status: 'draft',
+			chatSessionIds: ['session-fresh'],
+		},
+		stateService: {
+			hasChatSession: async (sessionId: string) => sessionId === 'session-fresh',
+		},
+	});
+	const postedMessages: any[] = [];
+	let openedSessionId = '';
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	};
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		status: 'draft',
+		chatSessionIds: ['session-stale'],
+	});
+
+	(manager as any).openBoundChatSession = async (sessionId: string) => {
+		openedSessionId = sessionId;
+		return true;
+	};
+
+	await (manager as any).handleMessage(
+		{ type: 'openChat', id: 'prompt-a', sessionId: 'session-stale' },
+		panel as any,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(openedSessionId, 'session-fresh');
+	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-fresh']);
+	assert.deepEqual(currentPrompt.chatSessionIds, ['session-fresh']);
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'prompt'));
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatOpened'));
+});
+
+test('openChat resolves the stored session even when the UI no longer has a session id', async () => {
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			status: 'in-progress',
+			chatSessionIds: ['session-fresh'],
+		},
+		stateService: {
+			hasChatSession: async (sessionId: string) => sessionId === 'session-fresh',
+		},
+	});
+	const postedMessages: any[] = [];
+	let openedSessionId = '';
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	};
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		status: 'in-progress',
+		chatSessionIds: [],
+	});
+
+	(manager as any).openBoundChatSession = async (sessionId: string) => {
+		openedSessionId = sessionId;
+		return true;
+	};
+
+	await (manager as any).handleMessage(
+		{ type: 'openChat', id: 'prompt-a', sessionId: '' },
+		panel as any,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(openedSessionId, 'session-fresh');
+	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-fresh']);
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatOpened'));
+});
+
+test('openChat reports an error instead of opening an empty chat when all stored sessions are stale', async () => {
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			status: 'in-progress',
+			chatSessionIds: ['session-stale'],
+		},
+		stateService: {
+			hasChatSession: async () => false,
+		},
+	});
+	const postedMessages: any[] = [];
+	let openCalls = 0;
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	};
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		status: 'in-progress',
+		chatSessionIds: ['session-stale'],
+	});
+
+	(manager as any).openBoundChatSession = async () => {
+		openCalls += 1;
+		return true;
+	};
+
+	await (manager as any).handleMessage(
+		{ type: 'openChat', id: 'prompt-a', sessionId: 'session-stale' },
+		panel as any,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(openCalls, 0);
+	assert.ok(
+		postedMessages.some(message =>
+			(message as any)?.type === 'error'
+			&& String((message as any)?.message || '').includes('Не удалось открыть привязанный чат')),
+	);
+});
+
+test('openBoundChatSession accepts a direct session-resource open without falling back to generic chat commands', async () => {
+	resetVsCodeCommandMock();
+	vscodeExecuteCommandHandler = async (id: string) => {
+		if (id === 'vscode.open') {
+			return undefined;
+		}
+
+		throw new Error(`Unexpected command: ${id}`);
+	};
+
+	const { manager } = await createManager();
+	const opened = await (manager as any).openBoundChatSession('session-fresh');
+
+	assert.equal(opened, true);
+	assert.deepEqual(vscodeCommandCalls.map(call => call.id), ['vscode.open']);
+	assert.match(
+		String((vscodeCommandCalls[0]?.args[0] as { toString?: () => string })?.toString?.() || ''),
+		/^vscode-chat-session:\/\/local\//,
+	);
+	resetVsCodeCommandMock();
+});
+
+test('openBoundChatSession stops after a direct open failure instead of opening a generic empty chat', async () => {
+	resetVsCodeCommandMock();
+	vscodeExecuteCommandHandler = async (id: string) => {
+		if (id === 'vscode.open') {
+			throw new Error('direct open failed');
+		}
+
+		throw new Error(`Unexpected command: ${id}`);
+	};
+
+	const { manager } = await createManager();
+	const opened = await (manager as any).openBoundChatSession('session-fresh');
+
+	assert.equal(opened, false);
+	assert.deepEqual(vscodeCommandCalls.map(call => call.id), ['vscode.open']);
+	resetVsCodeCommandMock();
+});
+
+test('stopChat focuses the bound session before canceling the running agent request', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['workbench.action.chat.cancel'];
+	vscodeExecuteCommandHandler = async (id: string) => {
+		if (id === 'vscode.open' || id === 'workbench.action.chat.cancel') {
+			return undefined;
+		}
+
+		throw new Error(`Unexpected command: ${id}`);
+	};
+
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			status: 'in-progress',
+			chatSessionIds: ['session-fresh'],
+		},
+		stateService: {
+			hasChatSession: async (sessionId: string) => sessionId === 'session-fresh',
+		},
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'stopChat', id: 'prompt-a' },
+		{ webview: { postMessage: async () => true } } as any,
+		createPrompt({
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			status: 'in-progress',
+			chatSessionIds: ['session-fresh'],
+		}),
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(vscodeCommandCalls.map(call => call.id), ['vscode.open', 'workbench.action.chat.cancel']);
+	assert.match(
+		String((vscodeCommandCalls[0]?.args[0] as { toString?: () => string })?.toString?.() || ''),
+		/^vscode-chat-session:\/\/local\//,
+	);
+	resetVsCodeCommandMock();
+});
+
+test('applyPersistedPromptToPanelState refreshes base prompt and clears dirty flags when requested', async () => {
+	const { manager } = await createManager();
+	const panelKey = '__prompt_editor_singleton__';
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		status: 'draft',
+		report: '',
+	});
+	const persistedPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		status: 'in-progress',
+		report: 'Persisted report',
+		updatedAt: '2026-04-13T00:00:02.000Z',
+	});
+
+	(manager as any).panelPromptRefs.set(panelKey, currentPrompt);
+	(manager as any).panelDirtyFlags.set(panelKey, true);
+	(manager as any).panelLatestPromptSnapshots.set(panelKey, createPrompt({ status: 'draft', report: '' }));
+	(manager as any).panelBasePrompts.set(panelKey, createPrompt({ status: 'draft', report: '' }));
+
+	(manager as any).applyPersistedPromptToPanelState(panelKey, currentPrompt, persistedPrompt, {
+		clearDirty: true,
+	});
+
+	assert.equal((manager as any).panelPromptRefs.get(panelKey).status, 'in-progress');
+	assert.equal((manager as any).panelPromptRefs.get(panelKey).report, 'Persisted report');
+	assert.equal((manager as any).panelDirtyFlags.get(panelKey), false);
+	assert.equal((manager as any).panelLatestPromptSnapshots.get(panelKey), null);
+	assert.equal((manager as any).panelBasePrompts.get(panelKey).status, 'in-progress');
+	assert.equal((manager as any).panelBasePrompts.get(panelKey).report, 'Persisted report');
 });
 
 test('hasMeaningfulPromptDiff ignores title and description changes while AI enrichment is pending', async () => {

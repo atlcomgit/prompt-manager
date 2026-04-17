@@ -9,6 +9,9 @@
 - Copilot Premium Usage page redesigned: single-column layout, area chart with gradient and Catmull-Rom smoothing for trend visualization, color-coded daily bars (green/orange/red vs recommended pace), merged status footer with collapsible debug log.
 
 ### Fixed
+- Reopening a prompt-bound chat session no longer falls back to a generic empty chat window just because the chat view memento is stale; bound sessions now reopen directly by session resource.
+- Prompt-bound chat detection is now scoped to the current workspace storage bucket, preventing prompts from binding to active Copilot sessions from unrelated VS Code workspaces.
+- The editor Stop button now cancels the active agent request for a prompt-bound chat by focusing the bound session before dispatching the chat cancel command.
 - The editor now shows a more readable inline explanation above a disabled Start Chat button on every tab so it is clear whether prompt text is missing, metadata enrichment is still running, or chat launch is already in progress.
 - The Process tab chat launch block now shows the selected AI model directly inside the "Open Copilot Chat" step, with the model name emphasized for quicker visual confirmation.
 - Copilot Premium Usage now correctly shows daily request counts by forward-filling snapshot gaps for days the extension was not running, and no longer clamps historical usage values to current-day counter.

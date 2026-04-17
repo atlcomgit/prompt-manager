@@ -88,6 +88,19 @@ test('ActionBar shows Go to chat once the chat panel is already open', () => {
 	assert.doesNotMatch(markup, /Start Chat/);
 });
 
+test('ActionBar disables Go to chat and shows spinner while an existing chat is opening', () => {
+	const markup = renderActionBarMarkup({
+		status: 'in-progress',
+		hasChatSession: true,
+		isOpeningChat: true,
+	});
+
+	assert.match(markup, /Go to chat/);
+	assert.match(markup, /disabled=""/);
+	assert.match(markup, /aria-busy="true"/);
+	assert.match(markup, /animation:pm-spin 0\.8s linear infinite/);
+});
+
 test('ActionBar hides Start Chat until prompt is persisted', () => {
 	const state = resolveChatEntryState({
 		status: 'draft',

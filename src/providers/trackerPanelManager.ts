@@ -13,6 +13,7 @@ import type { ChatMemoryInstructionService } from '../services/chatMemoryInstruc
 import type { StorageService } from '../services/storageService.js';
 import type { StateService } from '../services/stateService.js';
 import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from '../types/messages.js';
+import { resolveBoundChatSessionToOpen } from '../utils/chatSessionSelection.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
@@ -146,23 +147,48 @@ export class TrackerPanelManager {
 			}
 
 			case 'openChat': {
+				let sessionIdToOpen = String(msg.sessionId || '').trim();
+				let hadBoundSessionRequest = Boolean(sessionIdToOpen);
 				if (msg.id) {
 					await this.stateService.saveLastPromptId(msg.id);
 					const prompt = await this.storageService.getPrompt(msg.id);
-					if (prompt && prompt.status !== 'in-progress') {
-						prompt.status = 'in-progress';
-						await this.storageService.savePrompt(prompt, { historyReason: 'status-change' });
-						this._onDidSave.fire(prompt.id);
-						await this.refresh();
+					if (prompt) {
+						hadBoundSessionRequest = hadBoundSessionRequest || (prompt.chatSessionIds || []).length > 0;
+						const existingSessionIds: string[] = [];
+						for (const sessionId of prompt.chatSessionIds || []) {
+							if (await this.stateService.hasChatSession(sessionId)) {
+								existingSessionIds.push(sessionId);
+							}
+						}
+						if (existingSessionIds.length !== (prompt.chatSessionIds || []).length) {
+							prompt.chatSessionIds = existingSessionIds;
+							await this.storageService.savePrompt(prompt);
+							this._onDidSave.fire(prompt.id);
+							await this.refresh();
+						}
+						sessionIdToOpen = resolveBoundChatSessionToOpen(msg.sessionId, existingSessionIds);
+
+						if (prompt.status !== 'in-progress') {
+							prompt.status = 'in-progress';
+							await this.storageService.savePrompt(prompt, { historyReason: 'status-change' });
+							this._onDidSave.fire(prompt.id);
+							await this.refresh();
+						}
 					}
 				}
 
-				const openedBoundSession = await this.openBoundChatSession(msg.sessionId);
+				const openedBoundSession = sessionIdToOpen
+					? await this.openBoundChatSession(sessionIdToOpen)
+					: false;
 				if (!openedBoundSession) {
-					try {
-						await vscode.commands.executeCommand('workbench.action.chat.openAgent');
-					} catch {
-						await vscode.commands.executeCommand('workbench.action.chat.open');
+					if (hadBoundSessionRequest) {
+						void vscode.window.showWarningMessage('Не удалось открыть привязанный чат. Возможно, он удалён или недоступен.');
+					} else {
+						try {
+							await vscode.commands.executeCommand('workbench.action.chat.openAgent');
+						} catch {
+							await vscode.commands.executeCommand('workbench.action.chat.open');
+						}
 					}
 				}
 				break;
@@ -265,46 +291,14 @@ export class TrackerPanelManager {
 		}
 
 		const sessionResource = this.buildChatSessionResource(trimmed);
-		const isTargetSessionActive = async (): Promise<boolean> => {
-			const activeSessionId = await this.stateService.getActiveChatSessionId(4500, 150);
-			return activeSessionId === trimmed;
-		};
 
+		// Chat editors reopen by resource URI and do not reliably update panel view mementos.
 		try {
 			await vscode.commands.executeCommand('vscode.open', sessionResource);
-			if (await isTargetSessionActive()) {
-				return true;
-			}
+			return true;
 		} catch {
-			// continue with compatibility variants
+			return false;
 		}
-
-		const openChatCmds = ['workbench.action.chat.openAgent', 'workbench.action.chat.open'];
-		const argCandidates: unknown[] = [
-			sessionResource,
-			{ resource: sessionResource },
-			{ uri: sessionResource },
-			{ sessionId: trimmed },
-			{ id: trimmed },
-			{ chatSessionId: trimmed },
-			{ session: trimmed },
-			{ sessionId: trimmed, resource: sessionResource },
-		];
-
-		for (const openCmd of openChatCmds) {
-			for (const arg of argCandidates) {
-				try {
-					await vscode.commands.executeCommand(openCmd, arg);
-					if (await isTargetSessionActive()) {
-						return true;
-					}
-				} catch {
-					// try next argument variant
-				}
-			}
-		}
-
-		return false;
 	}
 
 	dispose(): void {

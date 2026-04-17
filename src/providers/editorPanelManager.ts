@@ -1479,6 +1479,84 @@ export class EditorPanelManager {
 		return taskNumber ? `${taskNumber} | ${title}` : title;
 	}
 
+	/** Resolve the latest prompt snapshot for chat rename, even if the prompt id has changed. */
+	private async resolvePromptForChatSessionRename(
+		prompt: Pick<Prompt, 'id' | 'promptUuid' | 'title' | 'taskNumber'> | null,
+	): Promise<Pick<Prompt, 'id' | 'title' | 'taskNumber'> | null> {
+		const normalizedPromptId = String(prompt?.id || '').trim();
+		if (normalizedPromptId) {
+			const storedById = await this.storageService.getPrompt(normalizedPromptId);
+			if (storedById) {
+				return storedById;
+			}
+		}
+
+		const normalizedPromptUuid = String(prompt?.promptUuid || '').trim();
+		if (normalizedPromptUuid) {
+			const storedByUuid = await this.storageService.getPromptByUuid(normalizedPromptUuid);
+			if (storedByUuid) {
+				return storedByUuid;
+			}
+		}
+
+		const fallbackTitle = String(prompt?.title || '').trim();
+		const fallbackTaskNumber = String(prompt?.taskNumber || '').trim();
+		if (!normalizedPromptId && !normalizedPromptUuid && !fallbackTitle && !fallbackTaskNumber) {
+			return null;
+		}
+
+		return prompt;
+	}
+
+	/** Sync all still-valid bound chat sessions when a saved prompt changes its chat-visible title. */
+	private async scheduleBoundChatSessionRenames(
+		prompt: Pick<Prompt, 'id' | 'promptUuid' | 'title' | 'taskNumber' | 'chatSessionIds'> | null,
+		previousPrompt: Pick<Prompt, 'id' | 'title' | 'taskNumber'> | null,
+		logSuffix: string = ' (save)',
+	): Promise<void> {
+		const normalizedPromptId = String(prompt?.id || '').trim();
+		const nextTitle = this.buildChatSessionRenameTitle(prompt);
+		const previousTitle = this.buildChatSessionRenameTitle(previousPrompt);
+		if (!normalizedPromptId || !nextTitle || nextTitle === previousTitle) {
+			return;
+		}
+
+		const candidateSessionIds = Array.from(new Set(
+			(prompt?.chatSessionIds || [])
+				.map(sessionId => String(sessionId || '').trim())
+				.filter(Boolean),
+		));
+		if (candidateSessionIds.length === 0) {
+			return;
+		}
+
+		const existingSessionIds: string[] = [];
+		for (const sessionId of candidateSessionIds) {
+			if (await this.stateService.hasChatSession(sessionId)) {
+				existingSessionIds.push(sessionId);
+			}
+		}
+
+		if (existingSessionIds.length === 0) {
+			this.hooksOutput.appendLine(
+				`[chat-rename]${logSuffix} skipped: no valid bound sessions for prompt=${normalizedPromptId}`,
+			);
+			return;
+		}
+
+		this.hooksOutput.appendLine(
+			`[chat-rename]${logSuffix} scheduling ${existingSessionIds.length} bound session rename(s) for prompt=${normalizedPromptId} title="${nextTitle}"`,
+		);
+		await Promise.all(existingSessionIds.map((sessionId, index) =>
+			this.scheduleChatSessionRename(
+				sessionId,
+				prompt,
+				`${logSuffix} session=${index + 1}`,
+				{ notifyOnSuccess: index === 0 },
+			),
+		));
+	}
+
 	private truncatePromptPanelTitle(title: string): string {
 		const normalized = String(title || '').replace(/\s+/g, ' ').trim();
 		if (normalized.length <= PROMPT_PANEL_TITLE_MAX_LENGTH) {
@@ -1512,20 +1590,32 @@ export class EditorPanelManager {
 
 	private async scheduleChatSessionRename(
 		sessionId: string,
-		promptId: string,
+		prompt: string | Pick<Prompt, 'id' | 'promptUuid' | 'title' | 'taskNumber'> | null,
 		logSuffix: string = '',
+		options?: { notifyOnSuccess?: boolean },
 	): Promise<void> {
 		const normalizedSessionId = (sessionId || '').trim();
-		const normalizedPromptId = (promptId || '').trim();
-		if (!normalizedSessionId || !normalizedPromptId) {
-			this.hooksOutput.appendLine(`[chat-rename]${logSuffix} skipped: missing sessionId or promptId`);
+		const promptSnapshot = typeof prompt === 'string'
+			? {
+				id: prompt,
+				promptUuid: '',
+				title: '',
+				taskNumber: '',
+			}
+			: prompt;
+		const normalizedPromptId = String(promptSnapshot?.id || '').trim();
+		const normalizedPromptUuid = String(promptSnapshot?.promptUuid || '').trim();
+		if (!normalizedSessionId || (!normalizedPromptId && !normalizedPromptUuid)) {
+			this.hooksOutput.appendLine(`[chat-rename]${logSuffix} skipped: missing sessionId or prompt identity`);
 			return;
 		}
 
-		const latestPrompt = await this.storageService.getPrompt(normalizedPromptId);
+		const latestPrompt = await this.resolvePromptForChatSessionRename(promptSnapshot);
 		const renameTitle = this.buildChatSessionRenameTitle(latestPrompt);
 		if (!renameTitle) {
-			this.hooksOutput.appendLine(`[chat-rename]${logSuffix} skipped: empty title for prompt=${normalizedPromptId}`);
+			this.hooksOutput.appendLine(
+				`[chat-rename]${logSuffix} skipped: empty title for prompt=${normalizedPromptId || '-'} uuid=${normalizedPromptUuid || '-'}`,
+			);
 			return;
 		}
 
@@ -1546,7 +1636,7 @@ export class EditorPanelManager {
 					`[chat-rename]${logSuffix} attempt=${attemptIndex + 1} result: ok=${result.ok} reason=${result.reason || '-'}`,
 				);
 				if (result.ok) {
-					if (attemptIndex === 0) {
+					if (attemptIndex === 0 && options?.notifyOnSuccess !== false) {
 						void vscode.window.showInformationMessage(
 							`Chat session renamed to "${renameTitle}". Title may appear after chat list refresh or window reload.`,
 						);
@@ -5438,6 +5528,12 @@ export class EditorPanelManager {
 							reportPreview: this.reportDebugPreview(promptToSave.report || ''),
 						});
 						const promptForPanel = saved;
+						void this.scheduleBoundChatSessionRenames(promptForPanel, existingPrompt, ' (save)')
+							.catch(error => {
+								this.hooksOutput.appendLine(
+									`[chat-rename] (save) error: ${error instanceof Error ? error.message : String(error)}`,
+								);
+							});
 						if (needsAiEnrichment) {
 							this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, {
 								title: aiEnrichmentPlan.needsTitle,
@@ -6463,7 +6559,7 @@ export class EditorPanelManager {
 								this._onDidSave.fire(promptToComplete.id);
 								await this.scheduleChatSessionRename(
 									String(completion.sessionId || trackedSessionId || promptToComplete.chatSessionIds?.[0] || ''),
-									promptToComplete.id,
+									promptToComplete,
 								);
 								// Recalc implementing time from JSONL after VS Code finishes writing session data
 								const recalcPromptId = promptToComplete.id;
@@ -6559,7 +6655,7 @@ export class EditorPanelManager {
 
 							await this.scheduleChatSessionRename(
 								String(completion.sessionId || trackedSessionId || promptForTiming?.chatSessionIds?.[0] || ''),
-								promptForTiming?.id || prompt.id,
+								promptForTiming || prompt,
 								' (fallback)',
 							);
 

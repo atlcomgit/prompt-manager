@@ -618,6 +618,102 @@ test('stopChat focuses the bound session before canceling the running agent requ
 	resetVsCodeCommandMock();
 });
 
+test('resolvePromptForChatSessionRename falls back to promptUuid when the prompt id has changed', async () => {
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-b',
+			promptUuid: 'uuid-a',
+			title: 'Renamed prompt',
+			taskNumber: '77',
+		},
+	});
+
+	const resolved = await (manager as any).resolvePromptForChatSessionRename({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Old prompt',
+		taskNumber: '',
+	});
+
+	assert.equal(resolved?.id, 'prompt-b');
+	assert.equal(resolved?.title, 'Renamed prompt');
+	assert.equal(resolved?.taskNumber, '77');
+});
+
+test('savePrompt schedules bound chat session rename when the saved prompt title changes', async () => {
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Old prompt',
+			chatSessionIds: ['session-fresh', 'session-stale'],
+		},
+		stateService: {
+			hasChatSession: async (sessionId: string) => sessionId === 'session-fresh',
+		},
+	});
+
+	const scheduledRenames: Array<{
+		sessionId: string;
+		prompt: any;
+		logSuffix: string;
+		options?: { notifyOnSuccess?: boolean };
+	}> = [];
+	(manager as any).scheduleChatSessionRename = async (
+		sessionId: string,
+		prompt: any,
+		logSuffix: string = '',
+		options?: { notifyOnSuccess?: boolean },
+	) => {
+		scheduledRenames.push({ sessionId, prompt, logSuffix, options });
+	};
+
+	const postedMessages: any[] = [];
+	const panelKey = '__prompt_editor_singleton__';
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Old prompt',
+		chatSessionIds: ['session-fresh', 'session-stale'],
+	});
+	(manager as any).panelPromptRefs.set(panelKey, currentPrompt);
+
+	await (manager as any).handleMessage(
+		{
+			type: 'savePrompt',
+			source: 'manual',
+			prompt: createPrompt({
+				id: 'prompt-a',
+				promptUuid: 'uuid-a',
+				title: 'New prompt title',
+				chatSessionIds: ['session-fresh', 'session-stale'],
+			}),
+		},
+		panel,
+		currentPrompt,
+		panelKey,
+		() => false,
+		() => undefined,
+	);
+
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	assert.equal(getStoredPrompt()?.title, 'New prompt title');
+	assert.deepEqual(scheduledRenames.map(item => item.sessionId), ['session-fresh']);
+	assert.equal(scheduledRenames[0]?.prompt?.id, 'prompt-a');
+	assert.equal(scheduledRenames[0]?.prompt?.promptUuid, 'uuid-a');
+	assert.equal(scheduledRenames[0]?.prompt?.title, 'New prompt title');
+	assert.equal(scheduledRenames[0]?.options?.notifyOnSuccess, true);
+});
+
 test('applyPersistedPromptToPanelState refreshes base prompt and clears dirty flags when requested', async () => {
 	const { manager } = await createManager();
 	const panelKey = '__prompt_editor_singleton__';

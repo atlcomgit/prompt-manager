@@ -81,6 +81,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Reopen bound chat sessions directly by their saved session resource, without falling back to a generic empty chat when the chat view state is stale.
 - Scope prompt-bound chat discovery to the current workspace storage, so prompts do not accidentally attach to Copilot sessions from another open project.
 - Stop an in-progress bound chat from the prompt editor, even after the conversation has been rebound to its saved chat session.
+- Rename already bound chat sessions after the prompt title or task number changes, even if the prompt id was renamed in the meantime.
 - See a clear explanation above the action buttons on every editor tab when Start Chat is temporarily disabled because the prompt is empty, metadata is still generating, or chat launch is already running.
 - See the selected AI model directly in the Process tab launch step, so the opening step confirms which model will be used.
 - Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.

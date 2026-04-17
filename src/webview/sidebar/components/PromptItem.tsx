@@ -12,13 +12,39 @@ interface Props {
   viewMode: SidebarViewMode;
   compactTaskColumnTrack?: string;
   isSelected: boolean;
-  isSaving?: boolean;
+  isBusy?: boolean;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
   onDuplicate: (id: string) => void;
   onToggleFavorite: (id: string) => void;
   onExport: (id: string) => void;
   onUpdateStatus: (id: string, status: PromptStatus) => void;
+}
+
+/** Small inline SVG spinner that works inside webview static markup. */
+function BusySpinner({ size = 18 }: { size?: number }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      width={size}
+      height={size}
+      style={styles.busySpinnerSvg}
+    >
+      <circle cx="10" cy="10" r="6.8" fill="none" opacity="0.24" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M16.8 10a6.8 6.8 0 0 0-6.8-6.8" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.9">
+        <animateTransform
+          attributeName="transform"
+          attributeType="XML"
+          dur="0.75s"
+          from="0 10 10"
+          repeatCount="indefinite"
+          to="360 10 10"
+          type="rotate"
+        />
+      </path>
+    </svg>
+  );
 }
 
 const STATUS_ICONS: Record<PromptStatus, string> = {
@@ -70,7 +96,7 @@ export const PromptItem: React.FC<Props> = ({
   viewMode,
   compactTaskColumnTrack,
   isSelected,
-  isSaving = false,
+  isBusy = false,
   onOpen,
   onDelete,
   onDuplicate,
@@ -119,6 +145,11 @@ export const PromptItem: React.FC<Props> = ({
   const selFg = isSelected ? 'var(--vscode-list-activeSelectionForeground)' : undefined;
   const selBg = isSelected ? 'var(--vscode-list-activeSelectionBackground)' : undefined;
   const statusAccent = STATUS_COLORS[prompt.status] || 'var(--vscode-descriptionForeground)';
+  const statusTone = selFg || statusAccent;
+  const busyTone = isSelected
+    ? 'var(--vscode-list-activeSelectionForeground)'
+    : 'var(--vscode-progressBar-background, var(--vscode-editorInfo-foreground, #4da3ff))';
+  const busyTitle = t('sidebar.promptBusy');
   const compactTaskNumber = normalizeCompactTaskNumber(prompt.taskNumber);
   const resolvedCompactTaskColumnTrack = compactTaskColumnTrack || resolveCompactTaskColumnTrack(prompt.taskNumber);
   const compactTitle = prompt.title?.trim() || prompt.id;
@@ -268,10 +299,14 @@ export const PromptItem: React.FC<Props> = ({
           <div
             style={{
               ...styles.compactStatus,
-              color: selFg || statusAccent,
+              color: isBusy ? busyTone : statusTone,
             }}
           >
-            {prompt.status === 'in-progress' && typeof prompt.progress === 'number' ? (
+            {isBusy ? (
+              <span style={styles.compactBusyIndicator} title={busyTitle} aria-label={busyTitle}>
+                <BusySpinner size={18} />
+              </span>
+            ) : prompt.status === 'in-progress' && typeof prompt.progress === 'number' ? (
               <div style={styles.progressBarContainer} title={`${prompt.progress}%`}>
                 <div
                   style={{
@@ -292,15 +327,21 @@ export const PromptItem: React.FC<Props> = ({
       ) : (
         <div style={styles.row}>
           <span style={styles.statusIcon}>
-            <span
-              style={{
-                ...styles.statusIconGlyph,
-                color: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
-                textShadow: isSelected ? '0 0 1px var(--vscode-list-activeSelectionBackground)' : 'none',
-              }}
-            >
-              {STATUS_ICONS[prompt.status] || '◇'}
-            </span>
+            {isBusy ? (
+              <span style={{ ...styles.busyIconWrap, color: busyTone }} title={busyTitle} aria-label={busyTitle}>
+                <BusySpinner size={18} />
+              </span>
+            ) : (
+              <span
+                style={{
+                  ...styles.statusIconGlyph,
+                  color: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
+                  textShadow: isSelected ? '0 0 1px var(--vscode-list-activeSelectionBackground)' : 'none',
+                }}
+              >
+                {STATUS_ICONS[prompt.status] || '◇'}
+              </span>
+            )}
           </span>
           <div style={styles.content}>
             <div style={{ ...styles.title, ...(selFg ? { color: selFg } : {}) }}>
@@ -326,7 +367,22 @@ export const PromptItem: React.FC<Props> = ({
                   <span>·</span>
                 </>
               )}
-              {prompt.status === 'in-progress' && typeof prompt.progress === 'number' ? (
+              {isBusy ? (
+                <span
+                  style={{
+                    ...styles.busyStatusBadge,
+                    color: busyTone,
+                    borderColor: isSelected ? 'var(--vscode-list-activeSelectionForeground)' : statusAccent,
+                    background: selBg
+                      ? 'color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 14%, var(--vscode-list-activeSelectionBackground))'
+                      : 'transparent',
+                  }}
+                  title={busyTitle}
+                  aria-label={busyTitle}
+                >
+                  <BusySpinner size={18} />
+                </span>
+              ) : prompt.status === 'in-progress' && typeof prompt.progress === 'number' ? (
                 <div style={styles.detailedProgressBarContainer} title={`${prompt.progress}%`}>
                   <div
                     style={{
@@ -526,11 +582,6 @@ export const PromptItem: React.FC<Props> = ({
           })}
         </div>
       ) : null}
-      {isSaving && (
-        <div style={styles.savingOverlay}>
-          <div style={styles.savingLabel}>Сохранение...</div>
-        </div>
-      )}
     </div>
   );
 };
@@ -611,6 +662,18 @@ const styles: Record<string, React.CSSProperties> = {
     flexShrink: 0,
     fontSize: '10px',
   },
+  compactBusyIndicator: {
+    display: 'inline-flex',
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '20px',
+    minWidth: '20px',
+    height: '16px',
+    minHeight: '16px',
+    marginLeft: 'auto',
+    overflow: 'visible',
+  },
   compactArchiveBadge: {
     flexShrink: 0,
     padding: '1px 5px',
@@ -639,6 +702,15 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  busyIconWrap: {
+    display: 'inline-flex',
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '20px',
+    height: '20px',
+    overflow: 'visible',
   },
   content: {
     flex: 1,
@@ -693,6 +765,18 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '10px',
     lineHeight: '14px',
     fontWeight: 600,
+  },
+  busyStatusBadge: {
+    display: 'inline-flex',
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '32px',
+    minWidth: '32px',
+    height: '18px',
+    border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
+    borderRadius: '999px',
+    overflow: 'visible',
   },
   metaBadgeText: {
     display: 'inline-flex',
@@ -848,25 +932,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     flexShrink: 0,
   },
-  savingOverlay: {
+  busySpinnerSvg: {
     position: 'absolute',
-    inset: 0,
-    background: 'color-mix(in srgb, var(--vscode-editor-background) 40%, transparent)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+    left: '50%',
+    top: '50%',
+    display: 'block',
+    flexShrink: 0,
+    overflow: 'visible',
+    transformOrigin: 'center',
+    transform: 'translate(-50%, -50%)',
     pointerEvents: 'none',
-    zIndex: 2,
-  },
-  savingLabel: {
-    fontSize: '12px',
-    fontWeight: 700,
-    color: 'var(--vscode-button-foreground)',
-    background: 'var(--vscode-button-background)',
-    padding: '3px 8px',
-    borderRadius: '999px',
-    boxShadow: '0 0 0 1px color-mix(in srgb, var(--vscode-button-background) 70%, var(--vscode-panel-border))',
-    whiteSpace: 'nowrap',
   },
 
   /* ── Compact progress bar ── */

@@ -185,7 +185,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'availableFrameworks'; options: Array<{ id: string; name: string }> }
 	| { type: 'startChatPreflightResult'; requestId?: string; shouldOpenGitFlow: boolean; snapshot?: GitOverlaySnapshot }
 	| { type: 'triggerStartChat'; promptId?: string }
-	| { type: 'promptSaving'; id: string; saving: boolean }
+	| { type: 'promptSaving'; id: string; promptUuid?: string; saving: boolean }
 	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string; requestId?: string }
 	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number }

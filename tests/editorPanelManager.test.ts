@@ -277,6 +277,41 @@ test('hasMeaningfulPromptDiff ignores title and description changes while AI enr
 	);
 });
 
+test('setPendingPromptAiEnrichmentState emits sidebar-friendly state changes only when flags change', async () => {
+	const { manager } = await createManager();
+	const snapshot = createPrompt();
+	const events: Array<{ promptId: string; promptUuid?: string; title: boolean; description: boolean }> = [];
+
+	manager.onDidPromptAiEnrichmentStateChange((event) => {
+		events.push(event);
+	});
+
+	(manager as any).setPendingPromptAiEnrichmentState(snapshot.id, snapshot.promptUuid, {
+		title: true,
+		description: false,
+	});
+	(manager as any).setPendingPromptAiEnrichmentState(snapshot.id, snapshot.promptUuid, {
+		title: true,
+		description: false,
+	});
+	(manager as any).setPendingPromptAiEnrichmentState(snapshot.id, snapshot.promptUuid, null);
+
+	assert.deepEqual(events, [
+		{
+			promptId: snapshot.id,
+			promptUuid: snapshot.promptUuid,
+			title: true,
+			description: false,
+		},
+		{
+			promptId: snapshot.id,
+			promptUuid: snapshot.promptUuid,
+			title: false,
+			description: false,
+		},
+	]);
+});
+
 test('project instructions are wrapped with applyTo frontmatter and stripped for webview state', async () => {
 	const { EditorPanelManager } = await importEditorPanelManager();
 	const body = '# Project rules\n\nUse repository conventions.';

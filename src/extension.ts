@@ -398,8 +398,23 @@ export function activate(context: vscode.ExtensionContext) {
 		await trackerPanelManager.refresh();
 	});
 
-	editorPanelManager.onDidSaveStateChange(({ id, saving }) => {
-		sidebarProvider.postMessage({ type: 'promptSaving', id, saving });
+	editorPanelManager.onDidSaveStateChange(({ id, promptUuid, saving }) => {
+		sidebarProvider.postMessage({
+			type: 'promptSaving',
+			id,
+			...(promptUuid ? { promptUuid } : {}),
+			saving,
+		});
+	});
+
+	editorPanelManager.onDidPromptAiEnrichmentStateChange(({ promptId, promptUuid, title, description }) => {
+		sidebarProvider.postMessage({
+			type: 'promptAiEnrichmentState',
+			promptId,
+			...(promptUuid ? { promptUuid } : {}),
+			title,
+			description,
+		});
 	});
 
 	const pendingExternalPromptConfigChanges = new Map<string, ExternalPromptConfigChange>();

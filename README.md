@@ -69,6 +69,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Create, edit, duplicate, archive, import, and export prompts from a dedicated VS Code sidebar.
 - Keep filtered grouped sidebar views flexible: temporary collapse changes made while filters are active do not overwrite the remembered expansion state restored after filters are cleared.
 - Keep grouped sidebar results free from an extra Favorites section, while sidebar utility buttons stay light at rest and switch to a darker feedback state when active or pressed.
+- Busy prompts in the sidebar now show a loader instead of stale status or progress while saving or while AI is still generating title and description fields.
 - Store prompt content in Markdown and keep prompt metadata in JSON inside `.vscode/prompt-manager/`.
 - Attach projects, languages, frameworks, skills, MCP tools, hooks, task references, branches, notes, plans, and reports.
 - Reuse prompt context across sessions without rebuilding the same setup every time.

@@ -18,6 +18,7 @@ import {
   shouldAutoExpandSidebarGroups,
   toggleSidebarGroupCollapsedState,
 } from '../../utils/sidebarGrouping.js';
+import { updateSidebarPromptActivityKeys } from '../../utils/sidebarPromptActivity.js';
 import { reconcileSidebarDeletionState, reconcileSidebarSelection } from '../../utils/sidebarSelection.js';
 import type {
   PromptConfig,
@@ -64,7 +65,8 @@ export const SidebarApp: React.FC = () => {
   const [hasHydratedState, setHasHydratedState] = useState(false);
   const [showOptimisticNewPrompt, setShowOptimisticNewPrompt] = useState(false);
   const [optimisticBaselineIds, setOptimisticBaselineIds] = useState<string[] | null>(null);
-  const [savingPromptIds, setSavingPromptIds] = useState<string[]>([]);
+  const [savingPromptKeys, setSavingPromptKeys] = useState<string[]>([]);
+  const [aiEnrichmentPromptKeys, setAiEnrichmentPromptKeys] = useState<string[]>([]);
   const openPromptTimerRef = useRef<number | null>(null);
 
   const optimisticPrompt = useMemo<PromptConfig>(() => {
@@ -201,15 +203,23 @@ export const SidebarApp: React.FC = () => {
         break;
       case 'promptSaving': {
         const id = String(msg.id || '').trim();
-        if (!id) {
+        const promptUuid = String(msg.promptUuid || '').trim();
+        if (!id && !promptUuid) {
           break;
         }
-        setSavingPromptIds(prev => {
-          if (msg.saving) {
-            return prev.includes(id) ? prev : [...prev, id];
-          }
-          return prev.filter(existingId => existingId !== id);
-        });
+        setSavingPromptKeys(prev => updateSidebarPromptActivityKeys(prev, { id, promptUuid }, Boolean(msg.saving)));
+        break;
+      }
+      case 'promptAiEnrichmentState': {
+        const promptId = String(msg.promptId || '').trim();
+        const promptUuid = String(msg.promptUuid || '').trim();
+        if (!promptId && !promptUuid) {
+          break;
+        }
+        setAiEnrichmentPromptKeys(prev => updateSidebarPromptActivityKeys(prev, {
+          id: promptId,
+          promptUuid,
+        }, Boolean(msg.title || msg.description)));
         break;
       }
     }
@@ -466,7 +476,8 @@ export const SidebarApp: React.FC = () => {
           viewMode={viewMode}
           collapsedGroups={effectiveCollapsedGroups}
           selectedId={selectedId}
-          savingPromptIds={savingPromptIds}
+          savingPromptKeys={savingPromptKeys}
+          aiEnrichmentPromptKeys={aiEnrichmentPromptKeys}
           isLoading={isLoading}
           onToggleGroup={handleToggleGroup}
           onOpen={handleOpenPrompt}

@@ -35,6 +35,7 @@ const en: Record<string, string> = {
 	'sidebar.noPrompts': 'No prompts found',
 	'sidebar.createFirst': 'Create your first prompt',
 	'sidebar.archivedBadge': 'Archived',
+	'sidebar.promptBusy': 'Saving or generating fields...',
 	'sidebar.promptCount': 'prompts',
 
 	// --- FilterBar ---
@@ -977,6 +978,7 @@ const ru: Record<string, string> = {
 	'sidebar.noPrompts': 'Промптов не найдено',
 	'sidebar.createFirst': 'Создайте первый промпт',
 	'sidebar.archivedBadge': 'Архив',
+	'sidebar.promptBusy': 'Сохранение или генерация полей...',
 	'sidebar.promptCount': 'промптов',
 
 	// --- FilterBar ---

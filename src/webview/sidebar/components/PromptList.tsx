@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import type { GroupBy, PromptConfig, PromptStatus, SidebarViewMode } from '../../../types/prompt';
 import { resolveSharedCompactTaskColumnTrack } from '../../../utils/sidebarCompactLayout.js';
+import { isSidebarPromptActivityActive } from '../../../utils/sidebarPromptActivity.js';
 import { makeSidebarGroupCollapseKey } from '../../../utils/sidebarGrouping.js';
 import { PromptItem } from './PromptItem';
 import { useT } from '../../shared/i18n';
@@ -11,7 +12,8 @@ interface Props {
   viewMode: SidebarViewMode;
   collapsedGroups: Record<string, boolean>;
   selectedId: string | null;
-  savingPromptIds?: string[];
+  savingPromptKeys?: string[];
+  aiEnrichmentPromptKeys?: string[];
   isLoading?: boolean;
   onToggleGroup: (name: string) => void;
   onOpen: (id: string) => void;
@@ -28,7 +30,8 @@ export const PromptList: React.FC<Props> = ({
   viewMode,
   collapsedGroups,
   selectedId,
-  savingPromptIds = [],
+  savingPromptKeys = [],
+  aiEnrichmentPromptKeys = [],
   isLoading,
   onToggleGroup,
   onOpen,
@@ -41,6 +44,10 @@ export const PromptList: React.FC<Props> = ({
   const t = useT();
   const groupNames = Object.keys(groups);
   const hasGroups = !(groupNames.length === 1 && groupNames[0] === '');
+  const isPromptBusy = (prompt: PromptConfig): boolean => (
+    isSidebarPromptActivityActive(prompt, savingPromptKeys)
+    || isSidebarPromptActivityActive(prompt, aiEnrichmentPromptKeys)
+  );
   const compactTaskColumnTrack = useMemo(() => {
     if (viewMode !== 'compact') {
       return undefined;
@@ -109,7 +116,7 @@ export const PromptList: React.FC<Props> = ({
             viewMode={viewMode}
             compactTaskColumnTrack={compactTaskColumnTrack}
             isSelected={p.id === selectedId}
-            isSaving={savingPromptIds.includes(p.id)}
+            isBusy={isPromptBusy(p)}
             onOpen={onOpen}
             onDelete={onDelete}
             onDuplicate={onDuplicate}
@@ -141,7 +148,7 @@ export const PromptList: React.FC<Props> = ({
               viewMode={viewMode}
               compactTaskColumnTrack={compactTaskColumnTrack}
               isSelected={p.id === selectedId}
-              isSaving={savingPromptIds.includes(p.id)}
+              isBusy={isPromptBusy(p)}
               onOpen={onOpen}
               onDelete={onDelete}
               onDuplicate={onDuplicate}

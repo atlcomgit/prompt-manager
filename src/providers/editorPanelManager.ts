@@ -110,8 +110,15 @@ interface GitOverlaySession {
 export class EditorPanelManager {
 	private _onDidSave = new vscode.EventEmitter<string>();
 	public readonly onDidSave = this._onDidSave.event;
-	private _onDidSaveStateChange = new vscode.EventEmitter<{ id: string; saving: boolean }>();
+	private _onDidSaveStateChange = new vscode.EventEmitter<{ id: string; promptUuid?: string; saving: boolean }>();
 	public readonly onDidSaveStateChange = this._onDidSaveStateChange.event;
+	private _onDidPromptAiEnrichmentStateChange = new vscode.EventEmitter<{
+		promptId: string;
+		promptUuid?: string;
+		title: boolean;
+		description: boolean;
+	}>();
+	public readonly onDidPromptAiEnrichmentStateChange = this._onDidPromptAiEnrichmentStateChange.event;
 	private panelPromptConfigFieldChangedAt = new Map<string, PromptConfigFieldChangedAt>();
 	private chatTrackingDisposables = new Map<string, vscode.Disposable>();
 	private panelDirtySetters = new Map<string, (v: boolean) => void>();
@@ -1999,7 +2006,7 @@ export class EditorPanelManager {
 			promise: switchSaveQueuePromise,
 		});
 
-		this._onDidSaveStateChange.fire({ id: saveStateId, saving: true });
+		this._onDidSaveStateChange.fire({ id: saveStateId, promptUuid: promptToSave.promptUuid, saving: true });
 		try {
 			const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
 			await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, baseSnapshot || null);
@@ -2050,14 +2057,14 @@ export class EditorPanelManager {
 					panelKey || SINGLE_EDITOR_PANEL_KEY,
 				);
 			}
-			this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
+			this._onDidSaveStateChange.fire({ id: saveStateId, promptUuid: promptToSave.promptUuid, saving: false });
 			if (savedPrompt.id && savedPrompt.id !== saveStateId) {
-				this._onDidSaveStateChange.fire({ id: savedPrompt.id, saving: false });
+				this._onDidSaveStateChange.fire({ id: savedPrompt.id, promptUuid: savedPrompt.promptUuid, saving: false });
 			}
 			return savedPrompt;
 		} catch (error) {
 			switchSaveQueueResolve!(null);
-			this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
+			this._onDidSaveStateChange.fire({ id: saveStateId, promptUuid: promptToSave.promptUuid, saving: false });
 			throw error;
 		} finally {
 			/** Очистка очереди: удаляем по исходному и возможно обновлённому ключу */
@@ -4520,15 +4527,38 @@ export class EditorPanelManager {
 			return;
 		}
 
-		if (state && (state.title || state.description)) {
-			this.pendingPromptAiEnrichmentStates.set(key, {
+		const previousState = this.pendingPromptAiEnrichmentStates.get(key);
+		const nextState = state && (state.title || state.description)
+			? {
 				title: Boolean(state.title),
 				description: Boolean(state.description),
-			});
+			}
+			: null;
+		const hasStateChanged = (previousState?.title || false) !== (nextState?.title || false)
+			|| (previousState?.description || false) !== (nextState?.description || false);
+
+		if (nextState) {
+			this.pendingPromptAiEnrichmentStates.set(key, nextState);
+		} else {
+			this.pendingPromptAiEnrichmentStates.delete(key);
+		}
+
+		if (!hasStateChanged) {
 			return;
 		}
 
-		this.pendingPromptAiEnrichmentStates.delete(key);
+		const normalizedPromptId = (promptId || '').trim();
+		if (!normalizedPromptId) {
+			return;
+		}
+
+		const normalizedPromptUuid = (promptUuid || '').trim();
+		this._onDidPromptAiEnrichmentStateChange.fire({
+			promptId: normalizedPromptId,
+			...(normalizedPromptUuid ? { promptUuid: normalizedPromptUuid } : {}),
+			title: Boolean(nextState?.title),
+			description: Boolean(nextState?.description),
+		});
 	}
 
 	private buildPromptMessage(
@@ -5250,8 +5280,17 @@ export class EditorPanelManager {
 						reportLength: (msg.prompt.report || '').length,
 						reportPreview: this.reportDebugPreview(msg.prompt.report || ''),
 					});
-					this._onDidSaveStateChange.fire({ id: saveStateId, saving: true });
-					postMessage({ type: 'promptSaving', id: saveStateId, saving: true });
+					this._onDidSaveStateChange.fire({
+						id: saveStateId,
+						promptUuid: msg.prompt.promptUuid || currentPrompt.promptUuid,
+						saving: true,
+					});
+					postMessage({
+						type: 'promptSaving',
+						id: saveStateId,
+						promptUuid: msg.prompt.promptUuid || currentPrompt.promptUuid,
+						saving: true,
+					});
 					try {
 						let promptToSave = msg.prompt;
 						await this.awaitPendingReportPersist(promptToSave.id || currentPrompt.id);
@@ -5433,15 +5472,28 @@ export class EditorPanelManager {
 
 						this._onDidSave.fire(promptToSave.id);
 						if (promptToSave.id && promptToSave.id !== saveStateId) {
-							this._onDidSaveStateChange.fire({ id: promptToSave.id, saving: false });
+							this._onDidSaveStateChange.fire({
+								id: promptToSave.id,
+								promptUuid: promptToSave.promptUuid || currentPrompt.promptUuid,
+								saving: false,
+							});
 						}
 					} catch (error) {
 						saveQueueResolve!(null);
 						const message = this.formatSaveConflictMessage(error);
 						postMessage({ type: 'error', message: `Save failed: ${message}` });
 					} finally {
-						this._onDidSaveStateChange.fire({ id: saveStateId, saving: false });
-						postMessage({ type: 'promptSaving', id: saveStateId, saving: false });
+						this._onDidSaveStateChange.fire({
+							id: saveStateId,
+							promptUuid: msg.prompt.promptUuid || currentPrompt.promptUuid,
+							saving: false,
+						});
+						postMessage({
+							type: 'promptSaving',
+							id: saveStateId,
+							promptUuid: msg.prompt.promptUuid || currentPrompt.promptUuid,
+							saving: false,
+						});
 					}
 				})();
 

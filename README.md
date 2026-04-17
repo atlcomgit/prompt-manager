@@ -77,6 +77,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 
 - Start a GitHub Copilot chat directly from a selected prompt.
 - Reopen existing chat sessions linked to the prompt.
+- See a clear explanation above the action buttons on every editor tab when Start Chat is temporarily disabled because the prompt is empty, metadata is still generating, or chat launch is already running.
 - See the selected AI model directly in the Process tab launch step, so the opening step confirms which model will be used.
 - Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.
 - Keep the prompt, report, and editor state tied to the same workflow instead of splitting them across tools.

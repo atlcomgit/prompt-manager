@@ -24,6 +24,13 @@ interface Props {
   activeTab?: string;
 }
 
+type StartChatDisabledReasonKey =
+  | 'actions.startChatDisabledEmpty'
+  | 'actions.startChatDisabledLaunching'
+  | 'actions.startChatDisabledGeneratingTitle'
+  | 'actions.startChatDisabledGeneratingDescription'
+  | 'actions.startChatDisabledGeneratingMetadata';
+
 export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSession' | 'isChatPanelOpen' | 'isPersistedPrompt'>): {
   canStartChat: boolean;
   canOpenChat: boolean;
@@ -56,10 +63,34 @@ export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSess
 export function resolveStartChatDisabledState(
   input: Pick<Props, 'hasContent' | 'isStartingChat' | 'isGeneratingTitle' | 'isGeneratingDescription'>,
 ): boolean {
-  return !input.hasContent
-    || input.isStartingChat
-    || input.isGeneratingTitle === true
-    || input.isGeneratingDescription === true;
+  return resolveStartChatDisabledReason(input) !== null;
+}
+
+/** Returns the translation key for the current chat start lock reason. */
+export function resolveStartChatDisabledReason(
+  input: Pick<Props, 'hasContent' | 'isStartingChat' | 'isGeneratingTitle' | 'isGeneratingDescription'>,
+): StartChatDisabledReasonKey | null {
+  if (input.isStartingChat) {
+    return 'actions.startChatDisabledLaunching';
+  }
+
+  if (!input.hasContent) {
+    return 'actions.startChatDisabledEmpty';
+  }
+
+  if (input.isGeneratingTitle === true && input.isGeneratingDescription === true) {
+    return 'actions.startChatDisabledGeneratingMetadata';
+  }
+
+  if (input.isGeneratingTitle === true) {
+    return 'actions.startChatDisabledGeneratingTitle';
+  }
+
+  if (input.isGeneratingDescription === true) {
+    return 'actions.startChatDisabledGeneratingDescription';
+  }
+
+  return null;
 }
 
 function splitLeadingIconLabel(label: string): { icon: string; text: string } {
@@ -84,88 +115,108 @@ export const ActionBar: React.FC<Props> = ({
 }) => {
   const t = useT();
   const saveLabel = splitLeadingIconLabel(t('actions.save'));
-  const startChatDisabled = resolveStartChatDisabledState({
+  const startChatDisabledReasonKey = resolveStartChatDisabledReason({
     hasContent,
     isStartingChat,
     isGeneratingTitle,
     isGeneratingDescription,
   });
+  const startChatDisabled = startChatDisabledReasonKey !== null;
   const chatEntryState = resolveChatEntryState({ status, hasChatSession, isChatPanelOpen, isPersistedPrompt });
+  const startChatDisabledNotice = chatEntryState.shouldShowStartChat
+    && startChatDisabledReasonKey
+    ? t(startChatDisabledReasonKey)
+    : '';
+
   return (
-    <div style={styles.bar}>
-      <div style={styles.left}>
-        <button
-          style={{ ...styles.btn, ...styles.btnPrimary }}
-          onClick={onSave}
-          disabled={isSaving}
-          aria-busy={isSaving}
-        >
-          <span style={styles.btnLeadSlot} aria-hidden="true">
-            {isSaving ? <span style={styles.btnSpinner} /> : saveLabel.icon}
-          </span>
-          <span>{saveLabel.text}</span>
-        </button>
+    <div style={styles.wrap}>
+      {startChatDisabledNotice ? (
+        <div style={styles.startChatNotice} role="status">
+          <span style={styles.startChatNoticeIcon} aria-hidden="true">ⓘ</span>
+          <span style={styles.startChatNoticeText}>{startChatDisabledNotice}</span>
+        </div>
+      ) : null}
 
-        {activeTab !== 'process' && (
-        <button
-          style={{ ...styles.btn, ...styles.btnChat }}
-          onClick={onShowHistory}
-          disabled={isSaving}
-          title="История версий"
-        >
-          🕘 История
-        </button>
-        )}
-
-        {chatEntryState.shouldShowOpenChat ? (
-          <button style={{ ...styles.btn, ...styles.btnChat }} onClick={onOpenChat}>
-            {t('actions.openChat')}
-          </button>
-        ) : chatEntryState.shouldShowStartChat ? (
+      <div style={styles.bar}>
+        <div style={styles.left}>
           <button
-            style={{ ...styles.btn, ...styles.btnChat, ...(startChatDisabled ? styles.btnDisabled : {}) }}
-            onClick={onStartChat}
-            disabled={startChatDisabled}
-            aria-disabled={startChatDisabled}
-            aria-busy={isStartingChat}
-            title={!hasContent ? t('actions.enterText') : t('actions.startChatTooltip')}
+            style={{ ...styles.btn, ...styles.btnPrimary }}
+            onClick={onSave}
+            disabled={isSaving}
+            aria-busy={isSaving}
           >
-            {isStartingChat ? (
-              <>
-                <span style={styles.btnSpinner} aria-hidden="true" />
-                <span>{t('actions.startChat')}</span>
-              </>
-            ) : t('actions.startChat')}
+            <span style={styles.btnLeadSlot} aria-hidden="true">
+              {isSaving ? <span style={styles.btnSpinner} /> : saveLabel.icon}
+            </span>
+            <span>{saveLabel.text}</span>
           </button>
-        ) : null}
-      </div>
 
-      <div style={styles.right}>
-        {showStatusActions && (
-          <>
-            <button style={{ ...styles.btn, ...styles.btnSuccess }} onClick={onMarkCompleted}>
-              ✅ {t('status.completed')}
-            </button>
-            <button style={{ ...styles.btn, ...styles.btnWarn }} onClick={onMarkStopped}>
-              ▣ {t('status.stopped')}
-            </button>
-          </>
-        )}
-        {showGitFlowAction && onOpenGitFlow && (
+          {activeTab !== 'process' && (
           <button
             style={{ ...styles.btn, ...styles.btnChat }}
-            onClick={onOpenGitFlow}
+            onClick={onShowHistory}
             disabled={isSaving}
+            title="История версий"
           >
-            {t('editor.gitOverlay')}
+            🕘 История
           </button>
-        )}
+          )}
+
+          {chatEntryState.shouldShowOpenChat ? (
+            <button style={{ ...styles.btn, ...styles.btnChat }} onClick={onOpenChat}>
+              {t('actions.openChat')}
+            </button>
+          ) : chatEntryState.shouldShowStartChat ? (
+            <button
+              style={{ ...styles.btn, ...styles.btnChat, ...(startChatDisabled ? styles.btnDisabled : {}) }}
+              onClick={onStartChat}
+              disabled={startChatDisabled}
+              aria-disabled={startChatDisabled}
+              aria-busy={isStartingChat}
+              title={startChatDisabledReasonKey ? t(startChatDisabledReasonKey) : t('actions.startChatTooltip')}
+            >
+              {isStartingChat ? (
+                <>
+                  <span style={styles.btnSpinner} aria-hidden="true" />
+                  <span>{t('actions.startChat')}</span>
+                </>
+              ) : t('actions.startChat')}
+            </button>
+          ) : null}
+        </div>
+
+        <div style={styles.right}>
+          {showStatusActions && (
+            <>
+              <button style={{ ...styles.btn, ...styles.btnSuccess }} onClick={onMarkCompleted}>
+                ✅ {t('status.completed')}
+              </button>
+              <button style={{ ...styles.btn, ...styles.btnWarn }} onClick={onMarkStopped}>
+                ▣ {t('status.stopped')}
+              </button>
+            </>
+          )}
+          {showGitFlowAction && onOpenGitFlow && (
+            <button
+              style={{ ...styles.btn, ...styles.btnChat }}
+              onClick={onOpenGitFlow}
+              disabled={isSaving}
+            >
+              {t('editor.gitOverlay')}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
 };
 
 const styles: Record<string, React.CSSProperties> = {
+  wrap: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+  },
   bar: {
     display: 'flex',
     alignItems: 'center',
@@ -173,6 +224,29 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '10px 20px',
     borderTop: '1px solid var(--vscode-panel-border)',
     background: 'var(--vscode-editor-background)',
+  },
+  startChatNotice: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '10px',
+    margin: '0 20px',
+    padding: '10px 12px',
+    borderRadius: '8px',
+    border: '1px solid color-mix(in srgb, var(--vscode-editorInfo-foreground, var(--vscode-focusBorder)) 52%, var(--vscode-panel-border))',
+    background: 'color-mix(in srgb, var(--vscode-editorInfo-foreground, var(--vscode-focusBorder)) 20%, var(--vscode-editor-background))',
+    color: 'var(--vscode-editor-foreground)',
+    boxShadow: 'inset 3px 0 0 var(--vscode-editorInfo-foreground, var(--vscode-focusBorder))',
+  },
+  startChatNoticeIcon: {
+    color: 'var(--vscode-editorInfo-foreground, var(--vscode-focusBorder))',
+    fontSize: '14px',
+    lineHeight: 1.3,
+    flexShrink: 0,
+  },
+  startChatNoticeText: {
+    fontSize: '12px',
+    fontWeight: 500,
+    lineHeight: 1.5,
   },
   left: {
     display: 'flex',

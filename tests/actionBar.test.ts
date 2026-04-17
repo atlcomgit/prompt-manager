@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { ActionBar, resolveChatEntryState, resolveStartChatDisabledState } from '../src/webview/editor/components/ActionBar.js';
+import {
+	ActionBar,
+	resolveChatEntryState,
+	resolveStartChatDisabledReason,
+	resolveStartChatDisabledState,
+} from '../src/webview/editor/components/ActionBar.js';
 
 function withLocale<T>(locale: string, callback: () => T): T {
 	const previousWindow = globalThis.window;
@@ -121,4 +126,49 @@ test('resolveStartChatDisabledState blocks chat start while prompt metadata is g
 		isGeneratingTitle: false,
 		isGeneratingDescription: false,
 	}), false);
+});
+
+test('resolveStartChatDisabledReason returns the active lock reason', () => {
+	assert.equal(resolveStartChatDisabledReason({
+		hasContent: true,
+		isStartingChat: true,
+		isGeneratingTitle: false,
+		isGeneratingDescription: false,
+	}), 'actions.startChatDisabledLaunching');
+
+	assert.equal(resolveStartChatDisabledReason({
+		hasContent: false,
+		isStartingChat: false,
+		isGeneratingTitle: false,
+		isGeneratingDescription: false,
+	}), 'actions.startChatDisabledEmpty');
+
+	assert.equal(resolveStartChatDisabledReason({
+		hasContent: true,
+		isStartingChat: false,
+		isGeneratingTitle: true,
+		isGeneratingDescription: true,
+	}), 'actions.startChatDisabledGeneratingMetadata');
+});
+
+test('ActionBar shows start chat lock reason above actions', () => {
+	const markup = renderActionBarMarkup({
+		hasContent: false,
+	});
+
+	assert.match(markup, /role="status"/);
+	assert.match(markup, /ⓘ/);
+	assert.match(markup, /Start chat is unavailable until prompt text is filled in\./);
+	assert.match(markup, /title="Start chat is unavailable until prompt text is filled in\."/);
+	assert.match(markup, /display:flex;flex-direction:column;gap:10px/);
+});
+
+test('ActionBar shows start chat lock reason on non-process tabs too', () => {
+	const markup = renderActionBarMarkup({
+		activeTab: 'main',
+		hasContent: false,
+	});
+
+	assert.match(markup, /role="status"/);
+	assert.match(markup, /Start chat is unavailable until prompt text is filled in\./);
 });

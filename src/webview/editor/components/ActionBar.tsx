@@ -32,7 +32,7 @@ type StartChatDisabledReasonKey =
   | 'actions.startChatDisabledGeneratingDescription'
   | 'actions.startChatDisabledGeneratingMetadata';
 
-export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSession' | 'isChatPanelOpen' | 'isPersistedPrompt'>): {
+export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSession' | 'isChatPanelOpen' | 'isPersistedPrompt' | 'isStartingChat'>): {
   canStartChat: boolean;
   canOpenChat: boolean;
   hasChatEntry: boolean;
@@ -41,7 +41,6 @@ export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSess
 } {
   const canStartChat = input.isPersistedPrompt && (
     input.status === 'draft'
-    || input.status === 'in-progress'
     || input.status === 'stopped'
     || input.status === 'cancelled'
   );
@@ -51,13 +50,16 @@ export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSess
     || input.status === 'cancelled'
   );
   const hasChatEntry = canOpenChat && (input.hasChatSession || input.isChatPanelOpen);
+  const shouldKeepStartChatVisibleWhileLaunching = input.isPersistedPrompt
+    && input.isStartingChat
+    && input.status === 'in-progress';
 
   return {
     canStartChat,
     canOpenChat,
     hasChatEntry,
     shouldShowOpenChat: hasChatEntry,
-    shouldShowStartChat: canStartChat && !hasChatEntry,
+    shouldShowStartChat: (canStartChat || shouldKeepStartChatVisibleWhileLaunching) && !hasChatEntry,
   };
 }
 
@@ -123,8 +125,16 @@ export const ActionBar: React.FC<Props> = ({
     isGeneratingDescription,
   });
   const startChatDisabled = startChatDisabledReasonKey !== null;
-  const chatEntryState = resolveChatEntryState({ status, hasChatSession, isChatPanelOpen, isPersistedPrompt });
-  const startChatDisabledNotice = chatEntryState.shouldShowStartChat
+  const chatEntryState = resolveChatEntryState({
+    status,
+    hasChatSession,
+    isChatPanelOpen,
+    isPersistedPrompt,
+    isStartingChat,
+  });
+  const startChatDisabledNotice = status === 'draft'
+    && !isStartingChat
+    && chatEntryState.shouldShowStartChat
     && startChatDisabledReasonKey
     ? t(startChatDisabledReasonKey)
     : '';

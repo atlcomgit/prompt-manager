@@ -435,6 +435,7 @@ export const EditorApp: React.FC = () => {
     hasChatSession,
     isChatPanelOpen,
     isPersistedPrompt,
+    isStartingChat,
   });
   const [chatLaunchRenameState, setChatLaunchRenameState] = useState<'idle' | 'active' | 'completed'>('idle');
   const [chatLaunchCompletionHold, setChatLaunchCompletionHold] = useState(false);

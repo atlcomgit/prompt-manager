@@ -107,6 +107,7 @@ test('ActionBar hides Start Chat until prompt is persisted', () => {
 		hasChatSession: false,
 		isChatPanelOpen: false,
 		isPersistedPrompt: false,
+		isStartingChat: false,
 	});
 
 	assert.equal(state.shouldShowStartChat, false);
@@ -116,6 +117,28 @@ test('ActionBar hides Start Chat until prompt is persisted', () => {
 		hasContent: true,
 	});
 	assert.doesNotMatch(markup, /Start Chat/);
+});
+
+test('resolveChatEntryState keeps Start Chat visible only while in-progress launch is still pending', () => {
+	const launchingState = resolveChatEntryState({
+		status: 'in-progress',
+		hasChatSession: false,
+		isChatPanelOpen: false,
+		isPersistedPrompt: true,
+		isStartingChat: true,
+	});
+
+	assert.equal(launchingState.shouldShowStartChat, true);
+
+	const settledState = resolveChatEntryState({
+		status: 'in-progress',
+		hasChatSession: false,
+		isChatPanelOpen: false,
+		isPersistedPrompt: true,
+		isStartingChat: false,
+	});
+
+	assert.equal(settledState.shouldShowStartChat, false);
 });
 
 test('resolveStartChatDisabledState blocks chat start while prompt metadata is generating', () => {
@@ -184,4 +207,31 @@ test('ActionBar shows start chat lock reason on non-process tabs too', () => {
 
 	assert.match(markup, /role="status"/);
 	assert.match(markup, /Start chat is unavailable until prompt text is filled in\./);
+});
+
+test('ActionBar hides Start Chat after launch loader finishes for in-progress prompt', () => {
+	const markup = renderActionBarMarkup({
+		status: 'in-progress',
+		hasChatSession: false,
+		isChatPanelOpen: false,
+		isStartingChat: false,
+	});
+
+	assert.doesNotMatch(markup, /Start Chat/);
+	assert.doesNotMatch(markup, /Go to chat/);
+	assert.doesNotMatch(markup, /role="status"/);
+});
+
+test('ActionBar keeps launch spinner without notice while chat start is still pending', () => {
+	const markup = renderActionBarMarkup({
+		status: 'in-progress',
+		hasChatSession: false,
+		isChatPanelOpen: false,
+		isStartingChat: true,
+	});
+
+	assert.match(markup, /Start chat/i);
+	assert.match(markup, /aria-busy="true"/);
+	assert.doesNotMatch(markup, /role="status"/);
+	assert.match(markup, /animation:pm-spin 0\.8s linear infinite/);
 });

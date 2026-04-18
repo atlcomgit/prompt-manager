@@ -16,6 +16,7 @@ import { TimerDisplay } from './components/TimerDisplay';
 import { ContextFileCard } from './components/ContextFileCard';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
+import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
 import type { ClipboardImagePayload } from '../../types/messages';
 import type {
@@ -26,6 +27,7 @@ import type {
   EditorPromptViewState,
   Prompt,
   PromptContextFileCard,
+  PromptCustomGroup,
   PromptStatus,
 } from '../../types/prompt';
 import type { GitOverlayActionKind, GitOverlayActionScope, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
@@ -358,6 +360,8 @@ export const EditorApp: React.FC = () => {
   const [availableSkills, setAvailableSkills] = useState<SelectOption[]>([]);
   const [availableMcpTools, setAvailableMcpTools] = useState<SelectOption[]>([]);
   const [availableHooks, setAvailableHooks] = useState<SelectOption[]>([]);
+  const [customGroups, setCustomGroups] = useState<PromptCustomGroup[]>([]);
+  const [showCustomGroupsManager, setShowCustomGroupsManager] = useState(false);
   const [availableLanguages, setAvailableLanguages] = useState<SelectOption[]>([]);
   const [availableFrameworks, setAvailableFrameworks] = useState<SelectOption[]>([]);
   const [allowedBranchesSetting, setAllowedBranchesSetting] = useState<string[]>(['master', 'main', 'prod', 'develop', 'dev']);
@@ -1189,6 +1193,20 @@ export const EditorApp: React.FC = () => {
     return chunks;
   }, [selectedModelName, prompt.chatMode]);
 
+  const groupsSummary = useMemo(() => {
+    const chunks: string[] = [];
+    const ids = prompt.customGroupIds || [];
+    if (ids.length === 0) {
+      return chunks;
+    }
+    const names = ids.map(id => {
+      const group = customGroups.find(item => item.id === id);
+      return group?.name || id;
+    });
+    chunks.push(`${t('editor.groups')}: ${toShortText(names.join(', '), 80)}`);
+    return chunks;
+  }, [prompt.customGroupIds, customGroups, t]);
+
   const filesSummary = useMemo(() => {
     const chunks: string[] = [];
     const files = dedupeContextFileReferences(prompt.contextFiles)
@@ -1311,6 +1329,7 @@ export const EditorApp: React.FC = () => {
   useEffect(() => {
     const readyTimer = window.setTimeout(() => {
       vscode.postMessage({ type: 'ready', bootId: bootIdRef.current });
+      vscode.postMessage({ type: 'getCustomGroups' });
     }, 0);
 
     // Track writing time
@@ -1813,6 +1832,9 @@ export const EditorApp: React.FC = () => {
         break;
       case 'availableHooks':
         setAvailableHooks(msg.hooks);
+        break;
+      case 'customGroups':
+        setCustomGroups(Array.isArray(msg.groups) ? msg.groups : []);
         break;
       case 'availableLanguages':
         setAvailableLanguages(msg.options);
@@ -4203,6 +4225,59 @@ export const EditorApp: React.FC = () => {
             </>
           ))}
 
+          {renderSection('groups', t('editor.groups'), groupsSummary, (
+            <>
+              <div style={styles.field}>
+                <div style={styles.promptFieldHeader}>
+                  <div style={styles.promptFieldLabelRow}>
+                    <label style={styles.label}>{t('editor.groupsLabel')}</label>
+                  </div>
+                  <div style={styles.promptFieldActions}>
+                    <button
+                      type="button"
+                      onClick={() => setShowCustomGroupsManager(true)}
+                      style={styles.linkBtn}
+                      title={t('editor.groupsManageTitle')}
+                    >
+                      {t('editor.groupsManage')}
+                    </button>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                  {customGroups.length === 0 && (
+                    <span style={{ color: 'var(--vscode-descriptionForeground)', fontSize: 12 }}>
+                      {t('editor.groupsEmptyHint')}
+                    </span>
+                  )}
+                  {customGroups.map(group => {
+                    const isSelected = (prompt.customGroupIds || []).includes(group.id);
+                    return (
+                      <button
+                        key={group.id}
+                        type="button"
+                        onClick={() => {
+                          const current = prompt.customGroupIds || [];
+                          const next = isSelected
+                            ? current.filter(id => id !== group.id)
+                            : [...current, group.id];
+                          updateFieldAndSaveNow('customGroupIds', next);
+                        }}
+                        style={{
+                          ...styles.toggleBtn,
+                          ...(isSelected ? styles.toggleBtnActive : {}),
+                          borderLeft: `3px solid ${group.color || 'var(--vscode-charts-blue)'}`,
+                        }}
+                        title={group.name}
+                      >
+                        {isSelected ? '✓ ' : ''}{group.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          ))}
+
           {renderSection('files', 'Файлы', filesSummary, (
             <>
               <div style={styles.field}>
@@ -4495,6 +4570,14 @@ export const EditorApp: React.FC = () => {
           handleSave('manual');
         }}
         t={t}
+      />
+      <CustomGroupsManagerModal
+        open={showCustomGroupsManager}
+        groups={customGroups}
+        onClose={() => setShowCustomGroupsManager(false)}
+        onSave={(groups) => {
+          vscode.postMessage({ type: 'replaceCustomGroups', groups });
+        }}
       />
     </div>
   );

@@ -7,6 +7,7 @@ import { getWebviewHtml } from '../utils/webviewHtml.js';
 import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
 import { isPromptStatus, type PromptStatus } from '../types/prompt.js';
 import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
+import type { CustomGroupsService } from '../services/customGroupsService.js';
 import type { ExternalPromptConfigChange, StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
@@ -39,8 +40,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		private readonly gitService: GitService,
 		private readonly stateService: StateService,
 		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
+		private readonly customGroupsService?: CustomGroupsService,
 	) {
 		this.initializeAgentJsonWatcher();
+		if (this.customGroupsService) {
+			this.customGroupsService.onDidChangeGroups(groups => {
+				this.postMessage({ type: 'customGroups', groups });
+			});
+		}
 	}
 
 	private async updateStoredPromptStatus(promptId: string, status: PromptStatus): Promise<ExternalPromptConfigChange[] | null> {
@@ -159,6 +166,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 				await this.refreshList();
 				const state = this.stateService.getSidebarState();
 				this.postMessage({ type: 'sidebarState', state });
+				if (this.customGroupsService) {
+					try {
+						const groups = await this.customGroupsService.listGroups();
+						this.postMessage({ type: 'customGroups', groups });
+					} catch {
+						// keep sidebar resilient if custom groups storage is broken
+					}
+				}
 				break;
 			}
 
@@ -279,6 +294,76 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
 				const branches = await this.gitService.getBranches(paths, msg.projects);
 				this.postMessage({ type: 'branches', branches });
+				break;
+			}
+
+			case 'getCustomGroups': {
+				if (this.customGroupsService) {
+					try {
+						const groups = await this.customGroupsService.listGroups();
+						this.postMessage({ type: 'customGroups', groups });
+					} catch (error) {
+						this.postMessage({ type: 'error', message: `Custom groups load failed: ${(error as Error).message}` });
+					}
+				}
+				break;
+			}
+
+			case 'createCustomGroup': {
+				if (this.customGroupsService) {
+					try {
+						await this.customGroupsService.createGroup(msg.group);
+					} catch (error) {
+						this.postMessage({ type: 'error', message: `Custom group create failed: ${(error as Error).message}` });
+					}
+				}
+				break;
+			}
+
+			case 'updateCustomGroup': {
+				if (this.customGroupsService) {
+					try {
+						await this.customGroupsService.updateGroup(msg.id, msg.patch);
+					} catch (error) {
+						this.postMessage({ type: 'error', message: `Custom group update failed: ${(error as Error).message}` });
+					}
+				}
+				break;
+			}
+
+			case 'deleteCustomGroup': {
+				if (this.customGroupsService) {
+					try {
+						await this.customGroupsService.deleteGroup(msg.id);
+					} catch (error) {
+						this.postMessage({ type: 'error', message: `Custom group delete failed: ${(error as Error).message}` });
+					}
+				}
+				break;
+			}
+
+			case 'replaceCustomGroups': {
+				if (this.customGroupsService) {
+					try {
+						await this.customGroupsService.replaceAll(msg.groups);
+					} catch (error) {
+						this.postMessage({ type: 'error', message: `Custom groups save failed: ${(error as Error).message}` });
+					}
+				}
+				break;
+			}
+
+			case 'updatePromptCustomGroups': {
+				try {
+					const prompt = await this.storageService.getPrompt(msg.id);
+					if (prompt) {
+						prompt.customGroupIds = Array.from(new Set(msg.customGroupIds.filter(id => typeof id === 'string' && id.trim().length > 0)));
+						await this.storageService.savePrompt(prompt);
+						await this.refreshList();
+					}
+				} catch (error) {
+					this.postMessage({ type: 'error', message: `Prompt custom groups update failed: ${(error as Error).message}` });
+				}
 				break;
 			}
 

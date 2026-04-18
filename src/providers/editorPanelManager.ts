@@ -25,6 +25,7 @@ import type { AiService } from '../services/aiService.js';
 import type { PromptVoiceService } from '../services/promptVoice/promptVoiceService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
+import type { CustomGroupsService } from '../services/customGroupsService.js';
 import type { CodeMapChatInstructionService } from '../codemap/codeMapChatInstructionService.js';
 import { GitService } from '../services/gitService.js';
 import type { StateService } from '../services/stateService.js';
@@ -1504,6 +1505,29 @@ export class EditorPanelManager {
 			return false;
 		}
 
+		// Сразу пробуем дёшево пинговать стандартные команды обновления списка чатов,
+		// чтобы VS Code перечитал customTitle из jsonl/хранилища без ожидания финала чата.
+		const refreshCandidates = [
+			'workbench.action.chat.refreshHistory',
+			'workbench.action.chat.refreshSessions',
+			'workbench.action.chat.refresh',
+		];
+		for (const refreshCommand of refreshCandidates) {
+			if (!availableCommands.includes(refreshCommand)) {
+				continue;
+			}
+			try {
+				await vscode.commands.executeCommand(refreshCommand);
+				this.hooksOutput.appendLine(
+					`[chat-rename]${logSuffix} live-refresh broadcast via ${refreshCommand}`,
+				);
+			} catch (error) {
+				this.hooksOutput.appendLine(
+					`[chat-rename]${logSuffix} live-refresh broadcast failed (${refreshCommand}): ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+
 		const promptCommandIds = providerCandidates
 			.map(provider => `workbench.action.chat.openSessionWithPrompt.${provider}`)
 			.filter(commandId => availableCommands.includes(commandId));
@@ -1696,7 +1720,7 @@ export class EditorPanelManager {
 		);
 		const attemptDelaysMs = options?.attemptDelaysMs?.length
 			? [...options.attemptDelaysMs]
-			: [5000, 12000, 25000];
+			: [500, 5000, 15000];
 		const keepRetryingLiveRefreshAfterPersist = options?.keepRetryingLiveRefreshAfterPersist === true;
 		let initialAttemptCompleted = false;
 		let renamePersisted = false;
@@ -2389,6 +2413,7 @@ export class EditorPanelManager {
 		private readonly promptVoiceService: PromptVoiceService,
 		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
 		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined,
+		private readonly customGroupsService?: CustomGroupsService,
 	) {
 		this.contentSyncDisposables.push(
 			vscode.window.onDidChangeActiveTextEditor(() => {
@@ -4725,6 +4750,51 @@ export class EditorPanelManager {
 		await this.openPromptQueue;
 	}
 
+	/**
+	 * Быстро создаёт черновик промпта из сырых введённых данных без открытия editor panel.
+	 * Текст попадает в content, а title/description проходят тот же fallback + AI enrichment,
+	 * что и при сохранении нового промпта из страницы редактора.
+	 */
+	public async createQuickAddPrompt(content: string): Promise<Prompt | null> {
+		const normalizedContent = content.trim();
+		if (!normalizedContent) {
+			return null;
+		}
+
+		const promptToSave = createDefaultPrompt('');
+		promptToSave.content = normalizedContent;
+		promptToSave.status = 'draft';
+
+		const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(promptToSave, null);
+		this.applyPromptFallbacksForPendingAiEnrichment(promptToSave, aiEnrichmentPlan);
+
+		await this.ensurePromptIdMatchesTitle(promptToSave);
+		const saved = await this.storageService.savePrompt(promptToSave, {
+			historyReason: 'create',
+		});
+
+		if (aiEnrichmentPlan.needsAiEnrichment) {
+			this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, {
+				title: aiEnrichmentPlan.needsTitle,
+				description: aiEnrichmentPlan.needsDescription,
+			});
+			void this.scheduleBackgroundAiEnrichment(
+				saved.id,
+				saved.promptUuid,
+				saved.content,
+				aiEnrichmentPlan.needsTitle,
+				aiEnrichmentPlan.needsDescription,
+				async () => undefined,
+				SINGLE_EDITOR_PANEL_KEY,
+			);
+		} else if (!aiEnrichmentPlan.enrichmentAlreadyRunning) {
+			this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, null);
+		}
+
+		this._onDidSave.fire(saved.id);
+		return saved;
+	}
+
 	private async processPendingOpenPromptRequests(): Promise<void> {
 		while (this.pendingOpenPromptId) {
 			const promptId = this.pendingOpenPromptId;
@@ -5171,6 +5241,31 @@ export class EditorPanelManager {
 			});
 
 			for (const existingPanel of panelsToDispose) {
+				this.silentClosePanels.add(existingPanel);
+				existingPanel.dispose();
+			}
+			return;
+		}
+
+		/**
+		 * Защита от дубликата окна редактора: пока выше выполнялись awaits
+		 * (загрузка промпта с диска, ожидание pending save), параллельный вызов
+		 * openPrompt мог уже создать singleton-панель. В этом случае повторно
+		 * её создавать нельзя — переключаемся на reuse существующей.
+		 */
+		const raceWonSingletonPanel = openPanels.get(panelKey);
+		if (raceWonSingletonPanel && !this.silentClosePanels.has(raceWonSingletonPanel)) {
+			this.panelDirtySetters.set(panelKey, setPanelDirty);
+			await this.switchPromptInExistingPanel(panelKey, raceWonSingletonPanel, prompt, {
+				dirty: restoredUnsaved,
+				isRu,
+				forceMainTab: this.consumePanelForceMainTabOnNextOpen(panelKey),
+			});
+
+			for (const existingPanel of panelsToDispose) {
+				if (existingPanel === raceWonSingletonPanel) {
+					continue;
+				}
 				this.silentClosePanels.add(existingPanel);
 				existingPanel.dispose();
 			}
@@ -6012,6 +6107,70 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'getCustomGroups': {
+				if (this.customGroupsService) {
+					try {
+						const groups = await this.customGroupsService.listGroups();
+						postMessage({ type: 'customGroups', groups });
+					} catch (error) {
+						postMessage({ type: 'error', message: `Custom groups load failed: ${(error as Error).message}` });
+					}
+				}
+				break;
+			}
+
+			case 'createCustomGroup': {
+				if (this.customGroupsService) {
+					try {
+						await this.customGroupsService.createGroup(msg.group);
+						const groups = await this.customGroupsService.listGroups();
+						postMessage({ type: 'customGroups', groups });
+					} catch (error) {
+						postMessage({ type: 'error', message: `Custom group create failed: ${(error as Error).message}` });
+					}
+				}
+				break;
+			}
+
+			case 'updateCustomGroup': {
+				if (this.customGroupsService) {
+					try {
+						await this.customGroupsService.updateGroup(msg.id, msg.patch);
+						const groups = await this.customGroupsService.listGroups();
+						postMessage({ type: 'customGroups', groups });
+					} catch (error) {
+						postMessage({ type: 'error', message: `Custom group update failed: ${(error as Error).message}` });
+					}
+				}
+				break;
+			}
+
+			case 'deleteCustomGroup': {
+				if (this.customGroupsService) {
+					try {
+						await this.customGroupsService.deleteGroup(msg.id);
+						const groups = await this.customGroupsService.listGroups();
+						postMessage({ type: 'customGroups', groups });
+					} catch (error) {
+						postMessage({ type: 'error', message: `Custom group delete failed: ${(error as Error).message}` });
+					}
+				}
+				break;
+			}
+
+			case 'replaceCustomGroups': {
+				if (this.customGroupsService) {
+					try {
+						await this.customGroupsService.replaceAll(msg.groups);
+						const groups = await this.customGroupsService.listGroups();
+						postMessage({ type: 'customGroups', groups });
+					} catch (error) {
+						postMessage({ type: 'error', message: `Custom groups save failed: ${(error as Error).message}` });
+					}
+				}
+				break;
+			}
+
 			case 'getAvailableSkills': {
 				const skills = await this.workspaceService.getSkills();
 				postMessage({ type: 'availableSkills', skills });
@@ -6588,19 +6747,18 @@ export class EditorPanelManager {
 					} catch (error) {
 						this.hooksOutput.appendLine(`[agent-file] create agent.json failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 					}
+					let chatOpenedNotified = false;
+					const trackedPromptId = prompt?.id || '';
+					const notifyChatOpened = (): void => {
+						if (chatOpenedNotified) {
+							return;
+						}
+						chatOpenedNotified = true;
+						postMessage({ type: 'chatOpened', promptId: trackedPromptId, requestId: startChatRequestId || undefined });
+					};
 					postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
 
 					void (async () => {
-						const trackedPromptId = prompt?.id || '';
-						let chatOpenedNotified = false;
-						const notifyChatOpened = (): void => {
-							if (chatOpenedNotified) {
-								return;
-							}
-							chatOpenedNotified = true;
-							postMessage({ type: 'chatOpened', promptId: trackedPromptId, requestId: startChatRequestId || undefined });
-						};
-
 						const bindConfirmedSession = async (sessionId: string, source: string): Promise<boolean> => {
 							const normalizedSessionId = (sessionId || '').trim();
 							if (!normalizedSessionId) {
@@ -6638,13 +6796,24 @@ export class EditorPanelManager {
 							}
 						}
 
-						if (!sessionBindingSucceeded && !shouldForceRebindChat) {
-							const activeSessionId = await this.stateService.getActiveChatSessionId(5000, 250);
-							if (!(await bindConfirmedSession(activeSessionId, 'active-session-fallback'))) {
+						if (!sessionBindingSucceeded) {
+							const activeSessionId = shouldForceRebindChat
+								? await this.stateService.getActiveChatSessionId(15000, 250, {
+									excludeSessionIds: Array.from(sessionIdsToExclude),
+								})
+								: await this.stateService.getActiveChatSessionId(10000, 250);
+							const activeSessionSource = shouldForceRebindChat
+								? 'active-session-late-rebind'
+								: 'active-session-fallback';
+							if (await bindConfirmedSession(activeSessionId, activeSessionSource)) {
+								if (shouldForceRebindChat) {
+									sessionIdsToExclude.add(activeSessionId);
+								}
+							} else if (shouldForceRebindChat) {
+								this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; new chat session was not confirmed after rebind request`);
+							} else {
 								this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; chat message was dispatched but session was not detected yet`);
 							}
-						} else if (!sessionBindingSucceeded) {
-							this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; new chat session was not confirmed after rebind request`);
 						}
 
 						const completion = await this.stateService.waitForChatRequestCompletion(
@@ -6657,6 +6826,9 @@ export class EditorPanelManager {
 						const chatResponse = await this.tryReadChatMarkdownFromClipboard();
 						const chatReportText = chatResponse.markdown;
 						const chatReportHtml = chatResponse.html;
+						if (!sessionBindingSucceeded && completion.sessionId) {
+							await bindConfirmedSession(completion.sessionId, 'request-completion');
+						}
 						const completionObserved = Number(completion.lastRequestEnded || 0) > Number(completion.lastRequestStarted || 0);
 						const completionSessionId = String(completion.sessionId || '').trim();
 						const shouldFinalizeTrackedChat = EditorPanelManager.shouldFinalizeTrackedChatCompletion({

@@ -42,6 +42,14 @@ export function normalizeStoredPromptConfig(
 		trackedBranchesByProject: normalizeTrackedBranchesByProject(parsed.trackedBranchesByProject),
 		timeSpentOnTask: typeof parsed.timeSpentOnTask === 'number' ? parsed.timeSpentOnTask : 0,
 		timeSpentUntracked: typeof parsed.timeSpentUntracked === 'number' ? parsed.timeSpentUntracked : 0,
+		customGroupIds: Array.isArray(parsed.customGroupIds)
+			? Array.from(new Set(
+				parsed.customGroupIds
+					.filter((value): value is string => typeof value === 'string')
+					.map(value => value.trim())
+					.filter(value => value.length > 0),
+			))
+			: [],
 	};
 
 	return {

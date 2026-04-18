@@ -2307,13 +2307,23 @@ export class CopilotUsageService implements vscode.Disposable {
 			}
 		}
 
-		/** Обеспечиваем монотонный рост used по дням */
+		/** Обеспечиваем монотонный рост used по дням ВНУТРИ одного месяца.
+		 *  При переходе на новый месяц или при явном падении used (более чем на 50%)
+		 *  сбрасываем baseline, чтобы не «надувать» дельты после reset месяца. */
 		const result: Array<{ date: string; used: number; limit: number }> = [];
 		let prevUsed = 0;
+		let prevMonth = '';
 		for (const item of Array.from(dedup.values()).sort((a, b) => a.date.localeCompare(b.date))) {
+			const month = item.date.slice(0, 7);
+			const monthChanged = month !== prevMonth;
+			const looksLikeMonthReset = !monthChanged && prevUsed > 0 && item.used < prevUsed * 0.5;
+			if (monthChanged || looksLikeMonthReset) {
+				prevUsed = 0;
+			}
 			const used = Math.max(prevUsed, item.used);
 			result.push({ ...item, used });
 			prevUsed = used;
+			prevMonth = month;
 		}
 
 		return result.slice(-62);

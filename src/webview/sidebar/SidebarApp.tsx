@@ -10,7 +10,7 @@ import { SearchBar } from './components/SearchBar';
 import { FilterBar } from './components/FilterBar';
 import { PromptList } from './components/PromptList';
 import { Toolbar } from './components/Toolbar';
-import { createDefaultPrompt, PROMPT_STATUS_ORDER } from '../../types/prompt';
+import { createDefaultPrompt, PROMPT_STATUS_ORDER, PROMPT_CUSTOM_GROUP_NONE_KEY } from '../../types/prompt';
 import { matchesCreatedAtFilter } from '../../utils/sidebarDateFilter.js';
 import {
   makeSidebarGroupCollapseKey,
@@ -30,6 +30,7 @@ import type {
   PromptStatus,
   CreatedAtFilter,
   SidebarViewMode,
+  PromptCustomGroup,
 } from '../../types/prompt';
 
 const vscode = getVsCodeApi();
@@ -67,6 +68,7 @@ export const SidebarApp: React.FC = () => {
   const [optimisticBaselineIds, setOptimisticBaselineIds] = useState<string[] | null>(null);
   const [savingPromptKeys, setSavingPromptKeys] = useState<string[]>([]);
   const [aiEnrichmentPromptKeys, setAiEnrichmentPromptKeys] = useState<string[]>([]);
+  const [customGroups, setCustomGroups] = useState<PromptCustomGroup[]>([]);
   const openPromptTimerRef = useRef<number | null>(null);
 
   const optimisticPrompt = useMemo<PromptConfig>(() => {
@@ -222,6 +224,11 @@ export const SidebarApp: React.FC = () => {
         }, Boolean(msg.title || msg.description)));
         break;
       }
+      case 'customGroups': {
+        const groups = Array.isArray(msg.groups) ? msg.groups as PromptCustomGroup[] : [];
+        setCustomGroups(groups);
+        break;
+      }
     }
   }, [applyDeletedPromptState, selectedId, selectedPromptUuid, showOptimisticNewPrompt, optimisticBaselineIds, prompts, archivedPrompts]);
 
@@ -329,6 +336,11 @@ export const SidebarApp: React.FC = () => {
         case 'framework':
           keys = p.frameworks.length > 0 ? p.frameworks : [t('filter.noGroup')];
           break;
+        case 'custom':
+          keys = (p.customGroupIds && p.customGroupIds.length > 0)
+            ? p.customGroupIds
+            : [PROMPT_CUSTOM_GROUP_NONE_KEY];
+          break;
       }
       for (const key of keys) {
         if (!groups[key]) { groups[key] = []; }
@@ -349,9 +361,26 @@ export const SidebarApp: React.FC = () => {
           orderedGroups[groupName] = groupPrompts;
         }
       }
+    } else if (groupBy === 'custom') {
+      orderedGroups = {};
+      for (const customGroup of customGroups) {
+        if (groups[customGroup.id]) {
+          orderedGroups[customGroup.id] = groups[customGroup.id];
+        }
+      }
+      // Fallback bucket for prompts that don't belong to any custom group
+      if (groups[PROMPT_CUSTOM_GROUP_NONE_KEY]) {
+        orderedGroups[PROMPT_CUSTOM_GROUP_NONE_KEY] = groups[PROMPT_CUSTOM_GROUP_NONE_KEY];
+      }
+      // Прокидываем остатки (например, удалённые группы, на которые ещё ссылается промпт)
+      for (const [groupName, groupPrompts] of Object.entries(groups)) {
+        if (!(groupName in orderedGroups)) {
+          orderedGroups[groupName] = groupPrompts;
+        }
+      }
     }
     return orderedGroups;
-  }, [filteredPrompts, groupBy]);
+  }, [filteredPrompts, groupBy, customGroups]);
 
   const handleOpenPrompt = (id: string) => {
     const matchingPrompt = [...prompts, ...archivedPrompts].find(prompt => prompt.id === id) || null;
@@ -479,6 +508,7 @@ export const SidebarApp: React.FC = () => {
           savingPromptKeys={savingPromptKeys}
           aiEnrichmentPromptKeys={aiEnrichmentPromptKeys}
           isLoading={isLoading}
+          customGroups={customGroups}
           onToggleGroup={handleToggleGroup}
           onOpen={handleOpenPrompt}
           onDelete={handleDelete}

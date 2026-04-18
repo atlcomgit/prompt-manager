@@ -324,6 +324,37 @@ test('persistPromptSnapshotForSwitch preserves newer persisted status and report
 	assert.equal(getStoredPrompt()?.report, 'Persisted report');
 });
 
+test('createQuickAddPrompt stores input as content and finishes title/description enrichment in background', async () => {
+	const content = [
+		'Нужно реализовать быстрый сценарий создания промпта из сырого текста.',
+		'Заголовок и описание должны появиться автоматически, как в обычном редакторе.',
+	].join(' ');
+	const aiStates: Array<{ promptId: string; title: boolean; description: boolean }> = [];
+	const { manager, getStoredPrompt } = await createManager({
+		generateTitle: async () => 'AI generated title',
+		generateDescription: async () => 'AI generated description',
+	});
+
+	manager.onDidPromptAiEnrichmentStateChange((state) => {
+		aiStates.push(state);
+	});
+
+	const saved = await manager.createQuickAddPrompt(content);
+
+	assert.equal(saved?.content, content);
+	assert.ok((saved?.title || '').trim().length > 0);
+	assert.ok((saved?.description || '').trim().length > 0);
+	assert.equal(getStoredPrompt()?.content, content);
+	assert.ok(aiStates.some(state => state.title && state.description));
+
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	assert.equal(getStoredPrompt()?.title, 'AI generated title');
+	assert.equal(getStoredPrompt()?.description, 'AI generated description');
+	assert.ok(aiStates.some(state => !state.title && !state.description));
+});
+
 test('resolvePromptIdBase ignores report-only fallback', async () => {
 	const { manager } = await createManager();
 
@@ -896,6 +927,150 @@ test('startChat schedules an early rename after the chat session is bound', asyn
 	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatLaunchRenameState' && (message as any)?.state === 'completed'));
 	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-new']);
 	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatOpened'));
+	resetVsCodeCommandMock();
+});
+
+test('startChat does not report chatOpened until a chat session is actually bound', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+			getActiveChatSessionId: async () => '',
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: '',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-bind-timeout' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatStarted'));
+	assert.ok(!postedMessages.some(message => (message as any)?.type === 'chatOpened'));
+	assert.deepEqual(getStoredPrompt()?.chatSessionIds, []);
+	resetVsCodeCommandMock();
+});
+
+test('startChat binds a new chat session through late rebind fallback before reporting chatOpened', async () => {
+	resetVsCodeCommandMock();
+
+	let activeSessionLookupCallCount = 0;
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+			getActiveChatSessionId: async () => {
+				activeSessionLookupCallCount += 1;
+				return activeSessionLookupCallCount >= 2 ? 'session-late' : '';
+			},
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: '',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+	// Убираем фоновую retry-цепочку rename, чтобы late rebind тест не держал процесс 42 секунды.
+	(manager as any).scheduleChatSessionRename = async () => undefined;
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-late-rebind', forceRebindChat: true },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatStarted'));
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatOpened'));
+	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-late']);
 	resetVsCodeCommandMock();
 });
 

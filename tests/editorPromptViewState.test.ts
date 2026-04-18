@@ -24,6 +24,7 @@ test('createDefaultEditorPromptExpandedSections opens the main authoring blocks 
 		agent: true,
 		files: false,
 		time: true,
+		groups: false,
 	});
 });
 

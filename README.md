@@ -69,6 +69,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Create, edit, duplicate, archive, import, and export prompts from a dedicated VS Code sidebar.
 - Keep filtered grouped sidebar views flexible: temporary collapse changes made while filters are active do not overwrite the remembered expansion state restored after filters are cleared.
 - Keep grouped sidebar results free from an extra Favorites section, while sidebar utility buttons stay light at rest and switch to a darker feedback state when active or pressed.
+- Custom groups can now tint their sidebar section header with an auto-contrasted black or white title, so bright and dark group colors both stay readable.
 - Busy prompts in the sidebar now show a loader instead of stale status or progress while saving or while AI is still generating title and description fields.
 - Store prompt content in Markdown and keep prompt metadata in JSON inside `.vscode/prompt-manager/`.
 - Attach projects, languages, frameworks, skills, MCP tools, hooks, task references, branches, notes, plans, and reports.
@@ -162,11 +163,12 @@ This README is intentionally modular. The extension is still evolving, and the p
 
 1. Open **Prompt Manager** from the Activity Bar.
 2. Create a new prompt from the sidebar.
-3. Fill in the brief: title, description, workspace projects, languages, frameworks, branch, task number, and AI model.
-4. Add prompt content in Markdown and attach context files if needed.
-5. Save the prompt and launch GitHub Copilot Chat directly from the editor.
-6. Use the tracker and statistics panels to move the task forward and keep reporting aligned.
-7. If you want long-term recall, open **Project Memory** and start building repository history into a searchable assistant layer.
+3. Use Quick Add Prompt from the PM icon in the editor title actions near the tab bar when you want to paste raw prompt text into a new draft and let the extension auto-fill title and description in the background.
+4. Fill in the brief: title, description, workspace projects, languages, frameworks, branch, task number, and AI model.
+5. Add prompt content in Markdown and attach context files if needed.
+6. Save the prompt and launch GitHub Copilot Chat directly from the editor.
+7. Use the tracker and statistics panels to move the task forward and keep reporting aligned.
+8. If you want long-term recall, open **Project Memory** and start building repository history into a searchable assistant layer.
 
 ## Storage and Configuration
 

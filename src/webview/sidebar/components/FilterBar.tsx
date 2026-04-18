@@ -61,6 +61,7 @@ export const FilterBar: React.FC<Props> = (props) => {
     { value: 'project', label: t('filter.byProject') },
     { value: 'language', label: t('filter.byLanguage') },
     { value: 'framework', label: t('filter.byFramework') },
+    { value: 'custom', label: t('filter.byCustom') },
   ];
 
   const VIEW_MODE_OPTIONS: { value: SidebarViewMode; label: string }[] = [

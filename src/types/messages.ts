@@ -2,7 +2,7 @@
  * Message types for communication between extension and webviews
  */
 
-import type { EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
+import type { EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 
 export type GitOverlayBusyReason =
@@ -128,6 +128,13 @@ export type WebviewToExtensionMessage =
 	| { type: 'reportEditorSave'; promptId: string; report: string; previousReport?: string; activityDeltaMs?: number }
 	| { type: 'reportEditorGenerate'; promptId: string }
 	| { type: 'mainReportUpdate'; promptId: string; report: string }
+	| { type: 'getCustomGroups' }
+	| { type: 'createCustomGroup'; group: { name: string; color?: string; order?: number } }
+	| { type: 'updateCustomGroup'; id: string; patch: { name?: string; color?: string; order?: number } }
+	| { type: 'deleteCustomGroup'; id: string }
+	| { type: 'replaceCustomGroups'; groups: Array<Partial<PromptCustomGroup>> }
+	| { type: 'updatePromptCustomGroups'; id: string; customGroupIds: string[] }
+	| { type: 'quickAddPrompt'; content: string }
 	| { type: 'debugLog'; scope: string; message: string; payload?: unknown };
 
 // ---- Messages FROM extension TO webview ----
@@ -203,6 +210,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'nextTaskNumber'; taskNumber: string }
 	| { type: 'chatOpened'; promptId: string; requestId?: string }
 	| { type: 'chatLaunchRenameState'; promptId: string; requestId?: string; state: 'started' | 'completed' }
+	| { type: 'customGroups'; groups: PromptCustomGroup[] }
 	| {
 		type: 'promptVoiceState';
 		sessionId: string;

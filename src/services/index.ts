@@ -1,4 +1,5 @@
 export { StorageService } from './storageService.js';
+export { CustomGroupsService } from './customGroupsService.js';
 export { AiService } from './aiService.js';
 export { WorkspaceService } from './workspaceService.js';
 export { GitService } from './gitService.js';

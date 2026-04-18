@@ -1,5 +1,7 @@
 import React, { useMemo } from 'react';
-import type { GroupBy, PromptConfig, PromptStatus, SidebarViewMode } from '../../../types/prompt';
+import type { GroupBy, PromptConfig, PromptCustomGroup, PromptStatus, SidebarViewMode } from '../../../types/prompt';
+import { PROMPT_CUSTOM_GROUP_NONE_KEY } from '../../../types/prompt';
+import { resolveReadableTextColor } from '../../../utils/colorContrast.js';
 import { resolveSharedCompactTaskColumnTrack } from '../../../utils/sidebarCompactLayout.js';
 import { isSidebarPromptActivityActive } from '../../../utils/sidebarPromptActivity.js';
 import { makeSidebarGroupCollapseKey } from '../../../utils/sidebarGrouping.js';
@@ -15,6 +17,7 @@ interface Props {
   savingPromptKeys?: string[];
   aiEnrichmentPromptKeys?: string[];
   isLoading?: boolean;
+  customGroups?: PromptCustomGroup[];
   onToggleGroup: (name: string) => void;
   onOpen: (id: string) => void;
   onDelete: (id: string) => void;
@@ -33,6 +36,7 @@ export const PromptList: React.FC<Props> = ({
   savingPromptKeys = [],
   aiEnrichmentPromptKeys = [],
   isLoading,
+  customGroups = [],
   onToggleGroup,
   onOpen,
   onDelete,
@@ -63,6 +67,17 @@ export const PromptList: React.FC<Props> = ({
   }, [collapsedGroups, groupBy, groupNames, groups, hasGroups, viewMode]);
 
   const getGroupDisplayName = (name: string): string => {
+    if (groupBy === 'custom') {
+      if (name === PROMPT_CUSTOM_GROUP_NONE_KEY) {
+        return t('filter.customGroupNone');
+      }
+      const customGroup = customGroups.find(group => group.id === name);
+      if (customGroup) {
+        return customGroup.name;
+      }
+      return t('filter.customGroupMissing');
+    }
+
     if (groupBy !== 'status') {
       return name;
     }
@@ -87,6 +102,25 @@ export const PromptList: React.FC<Props> = ({
       default:
         return name;
     }
+  };
+
+  // Для пользовательских групп красим только текст заголовка, не меняя badge и фон секции.
+  const getGroupDisplayColor = (name: string): string | undefined => {
+    if (groupBy !== 'custom' || name === PROMPT_CUSTOM_GROUP_NONE_KEY) {
+      return undefined;
+    }
+
+    return customGroups.find(group => group.id === name)?.color || undefined;
+  };
+
+  // Для цветных пользовательских групп выбираем белый или чёрный текст по контрасту.
+  const getGroupReadableTextColor = (name: string): string | undefined => {
+    const backgroundColor = getGroupDisplayColor(name);
+    if (!backgroundColor) {
+      return undefined;
+    }
+
+    return resolveReadableTextColor(backgroundColor);
   };
 
   if (isLoading) {
@@ -131,34 +165,54 @@ export const PromptList: React.FC<Props> = ({
 
   return (
     <div style={styles.list}>
-      {groupNames.map(name => (
-        <div key={name}>
-          <button
-            style={styles.groupHeader}
-            onClick={() => onToggleGroup(name)}
-          >
-            <span>{collapsedGroups[makeSidebarGroupCollapseKey(groupBy, name)] ? '▸' : '▾'}</span>
-            <span style={styles.groupName}>{getGroupDisplayName(name)}</span>
-            <span style={styles.groupCount}>{groups[name].length}</span>
-          </button>
-          {!collapsedGroups[makeSidebarGroupCollapseKey(groupBy, name)] && groups[name].map(p => (
-            <PromptItem
-              key={p.id}
-              prompt={p}
-              viewMode={viewMode}
-              compactTaskColumnTrack={compactTaskColumnTrack}
-              isSelected={p.id === selectedId}
-              isBusy={isPromptBusy(p)}
-              onOpen={onOpen}
-              onDelete={onDelete}
-              onDuplicate={onDuplicate}
-              onToggleFavorite={onToggleFavorite}
-              onExport={onExport}
-              onUpdateStatus={onUpdateStatus}
-            />
-          ))}
-        </div>
-      ))}
+      {groupNames.map(name => {
+        const groupBackgroundColor = getGroupDisplayColor(name);
+        const groupTextColor = getGroupReadableTextColor(name);
+        const groupHeaderStyle = {
+          ...styles.groupHeader,
+          ...(groupBackgroundColor ? { background: groupBackgroundColor } : {}),
+          ...(groupTextColor ? { color: groupTextColor } : {}),
+        };
+        const groupCountStyle = {
+          ...styles.groupCount,
+          ...(groupTextColor ? {
+            background: 'color-mix(in srgb, rgba(255, 255, 255, 0.2) 55%, transparent)',
+            color: groupTextColor,
+            border: `1px solid ${groupTextColor === '#000000' ? 'rgba(0, 0, 0, 0.18)' : 'rgba(255, 255, 255, 0.22)'}`,
+          } : {}),
+        };
+
+        return (
+          <div key={name}>
+            <button
+              style={groupHeaderStyle}
+              onClick={() => onToggleGroup(name)}
+            >
+              <span>{collapsedGroups[makeSidebarGroupCollapseKey(groupBy, name)] ? '▸' : '▾'}</span>
+              <span style={styles.groupName}>
+                {getGroupDisplayName(name)}
+              </span>
+              <span style={groupCountStyle}>{groups[name].length}</span>
+            </button>
+            {!collapsedGroups[makeSidebarGroupCollapseKey(groupBy, name)] && groups[name].map(p => (
+              <PromptItem
+                key={p.id}
+                prompt={p}
+                viewMode={viewMode}
+                compactTaskColumnTrack={compactTaskColumnTrack}
+                isSelected={p.id === selectedId}
+                isBusy={isPromptBusy(p)}
+                onOpen={onOpen}
+                onDelete={onDelete}
+                onDuplicate={onDuplicate}
+                onToggleFavorite={onToggleFavorite}
+                onExport={onExport}
+                onUpdateStatus={onUpdateStatus}
+              />
+            ))}
+          </div>
+        );
+      })}
     </div>
   );
 };
@@ -206,6 +260,7 @@ const styles: Record<string, React.CSSProperties> = {
   groupCount: {
     background: 'color-mix(in srgb, var(--vscode-badge-background) 58%, var(--vscode-sideBarSectionHeader-background))',
     color: 'var(--vscode-badge-foreground)',
+    border: '1px solid transparent',
     borderRadius: '4px',
     padding: '0 6px',
     fontSize: '12px',

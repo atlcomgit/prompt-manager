@@ -1,0 +1,19 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path
+    d="M4.1 3H19.9C20.95 3 21.8 3.85 21.8 4.9V15.1C21.8 16.15 20.95 17 19.9 17H14.2L12 20.4L9.8 17H4.1C3.05 17 2.2 16.15 2.2 15.1V4.9C2.2 3.85 3.05 3 4.1 3Z"
+    stroke="#202020"
+    stroke-width="1.6"
+    stroke-linejoin="round"
+    fill="none"
+  />
+  <text
+    x="12"
+    y="10"
+    dy="0.35em"
+    fill="#202020"
+    font-family="'DejaVu Sans Mono', 'Liberation Mono', monospace"
+    font-size="12"
+    font-weight="600"
+    text-anchor="middle"
+  >PM</text>
+</svg>

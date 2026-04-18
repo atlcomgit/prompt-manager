@@ -3,7 +3,7 @@
  */
 
 import * as vscode from 'vscode';
-import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService, PromptVoiceService } from './services/index.js';
+import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService, PromptVoiceService, CustomGroupsService } from './services/index.js';
 import {
 	MemoryDatabaseService,
 	MemoryCleanupService,
@@ -53,6 +53,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Initialize services
 	const storageService = new StorageService(workspaceRoot);
+	const customGroupsService = new CustomGroupsService(workspaceRoot);
 	const aiService = new AiService(context);
 	const workspaceService = new WorkspaceService();
 	const gitService = new GitService();
@@ -74,6 +75,7 @@ export function activate(context: vscode.ExtensionContext) {
 		gitService,
 		stateService,
 		() => chatMemoryInstructionService,
+		customGroupsService,
 	);
 
 	const editorPanelManager = new EditorPanelManager(
@@ -86,6 +88,7 @@ export function activate(context: vscode.ExtensionContext) {
 		promptVoiceService,
 		() => chatMemoryInstructionService,
 		() => codeMapChatInstructionService,
+		customGroupsService,
 	);
 	context.subscriptions.push(new vscode.Disposable(() => {
 		void promptVoiceService.dispose();
@@ -474,6 +477,25 @@ export function activate(context: vscode.ExtensionContext) {
 			if (!triggeredInSidebar) {
 				editorPanelManager.openPrompt('__new__');
 			}
+		}),
+
+		vscode.commands.registerCommand('promptManager.quickAddPrompt', async () => {
+			// Quick add: весь ввод трактуем как текст промпта, а title/description
+			// заполняются тем же fallback + AI enrichment, что и в editor page.
+			const rawPromptText = await vscode.window.showInputBox({
+				prompt: 'Введите текст промпта (можно вставить многострочный текст)',
+				placeHolder: 'Текст промпта или черновик задачи',
+				ignoreFocusOut: true,
+				validateInput: value => (value && value.trim().length > 0 ? null : 'Текст промпта не может быть пустым'),
+			});
+			if (!rawPromptText) {
+				return;
+			}
+			const savedPrompt = await editorPanelManager.createQuickAddPrompt(rawPromptText);
+			if (!savedPrompt) {
+				return;
+			}
+			vscode.window.showInformationMessage('Черновик промпта добавлен. Название и описание заполнятся автоматически.');
 		}),
 
 		vscode.commands.registerCommand('promptManager.openPrompt', async () => {

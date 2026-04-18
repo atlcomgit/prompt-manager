@@ -51,6 +51,7 @@ export type EditorPromptSectionKey =
 	| 'tech'
 	| 'integrations'
 	| 'agent'
+	| 'groups'
 	| 'files'
 	| 'time';
 
@@ -92,6 +93,7 @@ export function createDefaultEditorPromptExpandedSections(): EditorPromptExpande
 		tech: false,
 		integrations: false,
 		agent: true,
+		groups: false,
 		files: false,
 		time: true,
 	};
@@ -151,6 +153,7 @@ function normalizeEditorPromptExpandedSections(
 		tech: typeof state.tech === 'boolean' ? state.tech : defaults.tech,
 		integrations: typeof state.integrations === 'boolean' ? state.integrations : defaults.integrations,
 		agent: typeof state.agent === 'boolean' ? state.agent : defaults.agent,
+		groups: typeof state.groups === 'boolean' ? state.groups : defaults.groups,
 		files: typeof state.files === 'boolean' ? state.files : defaults.files,
 		time: typeof state.time === 'boolean' ? state.time : defaults.time,
 	};
@@ -349,6 +352,10 @@ export interface PromptConfig {
 	/** Task completion progress (0–100) read from agent.json at runtime; not persisted in config.json */
 	progress?: number;
 
+	// --- Custom groups ---
+	/** IDs of custom user-defined groups this prompt belongs to */
+	customGroupIds?: string[];
+
 	// --- Timestamps ---
 	createdAt: string;
 	updatedAt: string;
@@ -439,6 +446,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		timeSpentOnTask: 0,
 		timeSpentUntracked: 0,
 		notes: '',
+		customGroupIds: [],
 		createdAt: now,
 		updatedAt: now,
 		content: '',
@@ -454,7 +462,7 @@ export type SortOrder = 'asc' | 'desc';
 export type SidebarViewMode = 'detailed' | 'compact';
 
 /** Sidebar group options */
-export type GroupBy = 'none' | 'status' | 'project' | 'language' | 'framework';
+export type GroupBy = 'none' | 'status' | 'project' | 'language' | 'framework' | 'custom';
 
 /** Sidebar created-at period filter */
 export type CreatedAtFilter =
@@ -553,4 +561,58 @@ export interface PromptStatistics {
 	recentActivity: Array<{ id: string; title: string; updatedAt: string }>;
 	/** Brief report rows: taskNumber, title, total time */
 	reportRows: Array<{ taskNumber: string; title: string; timeWriting: number; timeImplementing: number; timeOnTask: number; totalTime: number; status: PromptStatus; reportSummary: string }>;
+}
+
+/** User-defined custom group for prompts. Independent from PromptStatus. */
+export interface PromptCustomGroup {
+	/** Stable unique identifier (uuid) */
+	id: string;
+	/** Display name shown in UI */
+	name: string;
+	/** Optional CSS color (e.g. '#ff8800' or 'var(--vscode-charts-blue)'). Empty = default */
+	color: string;
+	/** Sort order (ascending). Lower values appear first. */
+	order: number;
+	/** ISO 8601 creation timestamp */
+	createdAt: string;
+	/** ISO 8601 last update timestamp */
+	updatedAt: string;
+}
+
+/** Sentinel ID used in the 'custom' group view to bucket prompts without any custom group. */
+export const PROMPT_CUSTOM_GROUP_NONE_KEY = '__prompt-manager:no-custom-group__';
+
+/** Normalize raw partial PromptCustomGroup payload (e.g. coming from disk JSON or message) */
+export function normalizePromptCustomGroup(
+	raw: Partial<PromptCustomGroup> | null | undefined,
+): PromptCustomGroup | null {
+	if (!raw || typeof raw !== 'object') {
+		return null;
+	}
+
+	const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+	const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+	if (!id || !name) {
+		return null;
+	}
+
+	const now = new Date().toISOString();
+	return {
+		id,
+		name,
+		color: typeof raw.color === 'string' ? raw.color.trim() : '',
+		order: Number.isFinite(raw.order) ? Number(raw.order) : 0,
+		createdAt: typeof raw.createdAt === 'string' && raw.createdAt ? raw.createdAt : now,
+		updatedAt: typeof raw.updatedAt === 'string' && raw.updatedAt ? raw.updatedAt : now,
+	};
+}
+
+/** Sort custom groups by (order, name). Stable for equal order via name fallback. */
+export function sortPromptCustomGroups(groups: PromptCustomGroup[]): PromptCustomGroup[] {
+	return [...groups].sort((a, b) => {
+		if (a.order !== b.order) {
+			return a.order - b.order;
+		}
+		return a.name.localeCompare(b.name);
+	});
 }

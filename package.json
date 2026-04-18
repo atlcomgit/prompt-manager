@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage AI prompt workflows, launch GitHub Copilot chats, and build project memory directly inside VS Code",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -90,6 +90,15 @@
         "icon": "$(add)"
       },
       {
+        "command": "promptManager.quickAddPrompt",
+        "title": "Quick Add Prompt",
+        "category": "Prompt Manager",
+        "icon": {
+          "light": "media/commands/quick-add-light.svg",
+          "dark": "media/commands/quick-add-dark.svg"
+        }
+      },
+      {
         "command": "promptManager.deletePrompt",
         "title": "Delete Prompt",
         "category": "Prompt Manager",
@@ -109,7 +118,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.2.7",
+        "title": "About 0.2.8",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },
@@ -181,6 +190,18 @@
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "promptManager.quickAddPrompt",
+          "group": "navigation@90"
+        }
+      ],
+      "file/newFile": [
+        {
+          "command": "promptManager.quickAddPrompt",
+          "group": "navigation@2"
+        }
+      ],
       "view/title": [
         {
           "command": "promptManager.createPrompt",

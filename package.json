@@ -440,6 +440,17 @@
           "minimum": 1,
           "maximum": 500
         },
+        "promptManager.memory.backgroundPriority": {
+          "type": "string",
+          "enum": [
+            "lowest",
+            "lower",
+            "normal",
+            "higher"
+          ],
+          "description": "Scheduling priority for manual history analysis and its background git work. Use lowest to keep it closer to idle CPU time.",
+          "default": "lowest"
+        },
         "promptManager.memory.autoCleanup": {
           "type": "boolean",
           "description": "Automatically clean up old data on activation and periodically.",
@@ -638,12 +649,13 @@
         "promptManager.codemap.updatePriority": {
           "type": "string",
           "enum": [
+            "lowest",
             "lower",
             "normal",
             "higher"
           ],
           "description": "Background refresh priority for codemap jobs.",
-          "default": "normal"
+          "default": "lowest"
         },
         "promptManager.codemap.aiDelayMs": {
           "type": "number",

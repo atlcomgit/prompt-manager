@@ -13,6 +13,7 @@ import {
 	computeManualAnalysisThroughput,
 	MANUAL_ANALYSIS_EVENT_LIMIT,
 } from '../utils/manualAnalysisRuntime.js';
+import { yieldForBackgroundTask } from '../utils/backgroundTaskPriority.js';
 import { logMemoryGraphDebug, showMemoryGraphDebugChannel } from '../utils/memoryGraphDebug.js';
 import { getCodeMapSettings, saveCodeMapSettings } from '../codemap/codeMapConfig.js';
 import type { AiService } from '../services/aiService.js';
@@ -67,7 +68,7 @@ export class MemoryPanelManager {
 		private readonly analyzer: MemoryAnalyzerService,
 		private readonly gitHook: MemoryGitHookService,
 		private readonly aiService?: AiService,
-			private readonly codeMapAdmin?: CodeMapAdminService,
+		private readonly codeMapAdmin?: CodeMapAdminService,
 	) { }
 
 	private isRussianLocale(): boolean {
@@ -1000,6 +1001,9 @@ export class MemoryPanelManager {
 			}
 
 			await this.processManualAnalysisRow(session, nextRow);
+			if (session.status === 'running' && session.commitRows.some((row) => row.status === 'queued')) {
+				await yieldForBackgroundTask(getMemorySettings().backgroundPriority, 'between-items');
+			}
 
 			const updatedStatus = session.status;
 			if (updatedStatus === 'pausing') {
@@ -1043,6 +1047,7 @@ export class MemoryPanelManager {
 			message: `Analysing ${row.repository} ${row.sha.substring(0, 7)}`,
 		});
 		this.postManualAnalysisSnapshot();
+		await yieldForBackgroundTask(getMemorySettings().backgroundPriority, 'checkpoint');
 
 		const commitData = await this.gitHook.getCommitData(row.repoPath, row.sha);
 		if (!commitData) {
@@ -1118,6 +1123,7 @@ export class MemoryPanelManager {
 
 		try {
 			this.analyzer.setModelFamily(aiModel);
+			await yieldForBackgroundTask(getMemorySettings().backgroundPriority, 'checkpoint');
 			const result = await this.analyzer.analyzeCommit(payload, depth, diffLimit);
 			this.db.insertAnalysis(result.analysis);
 			this.db.insertFileChanges(result.fileChanges);
@@ -1130,6 +1136,7 @@ export class MemoryPanelManager {
 
 			if (this.embedding.isReady()) {
 				const text = `${commitData.message}\n${result.analysis.summary}\n${result.analysis.keywords.join(' ')}`;
+				await yieldForBackgroundTask(getMemorySettings().backgroundPriority, 'checkpoint');
 				const vector = await this.embedding.generateEmbedding(text);
 				if (vector) {
 					this.db.insertEmbedding({

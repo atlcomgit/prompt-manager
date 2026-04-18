@@ -1,6 +1,10 @@
 import type { CodeMapSettings } from '../types/codemap.js';
 import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { resolveConfigurationScope } from '../utils/configurationScope.js';
+import {
+	normalizeBackgroundTaskPriority,
+	serializeBackgroundTaskPriority,
+} from '../utils/backgroundTaskPriority.js';
 
 export const CODEMAP_CHAT_INSTRUCTION_FILE_NAME = 'codemap.instructions.md';
 export const DEFAULT_CODEMAP_EXCLUDED_PATHS = ['node_modules', 'vendor', '.vscode', '.github', '.nuxt', '.qodo'];
@@ -42,7 +46,7 @@ export const DEFAULT_CODEMAP_SETTINGS: CodeMapSettings = {
 	areaBatchMaxItems: 6,
 	symbolBatchMaxItems: 24,
 	symbolBatchMaxFiles: 8,
-	updatePriority: 'normal',
+	updatePriority: 'lowest',
 	aiDelayMs: 1000,
 	startupDelayMs: 15000,
 	maxVersionsPerInstruction: 3,
@@ -107,7 +111,7 @@ export async function saveCodeMapSettings(settings: Partial<CodeMapSettings>): P
 			scope === 'workspace'
 				? (vscodeApi?.ConfigurationTarget?.Workspace ?? false)
 				: (vscodeApi?.ConfigurationTarget?.Global ?? true),
-			);
+		);
 	});
 
 	return getCodeMapSettings();
@@ -157,7 +161,7 @@ export async function saveCodeMapSettingsToConfiguration(
 		await updateValue('symbolBatchMaxFiles', normalizeCodeMapInteger(settings.symbolBatchMaxFiles, DEFAULT_CODEMAP_SETTINGS.symbolBatchMaxFiles, 1, 40), resolveSettingScope(config, 'symbolBatchMaxFiles'));
 	}
 	if (settings.updatePriority !== undefined) {
-		const value = settings.updatePriority === 'low' ? 'lower' : settings.updatePriority === 'high' ? 'higher' : 'normal';
+		const value = serializeBackgroundTaskPriority(settings.updatePriority);
 		await updateValue('updatePriority', value, resolveSettingScope(config, 'updatePriority'));
 	}
 	if (settings.aiDelayMs !== undefined) { await updateValue('aiDelayMs', settings.aiDelayMs, resolveSettingScope(config, 'aiDelayMs')); }
@@ -202,16 +206,7 @@ function normalizeExcludedPaths(value: string[]): string[] {
 }
 
 function normalizePriority(value: string): CodeMapSettings['updatePriority'] {
-	switch ((value || '').trim().toLowerCase()) {
-		case 'lower':
-		case 'low':
-			return 'low';
-		case 'higher':
-		case 'high':
-			return 'high';
-		default:
-			return 'normal';
-	}
+	return normalizeBackgroundTaskPriority(value, DEFAULT_CODEMAP_SETTINGS.updatePriority);
 }
 
 function normalizeModelFamily(value: string): string {

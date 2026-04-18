@@ -33,6 +33,8 @@ const translations: Record<string, string> = {
 	'memory.shortTermLimitDescription': 'Задаёт, сколько последних коммитов держать под рукой для быстрых сводок и контекста.',
 	'memory.historyAnalysisLimit': 'Лимит анализа истории',
 	'memory.historyAnalysisLimitDescription': 'Определяет максимум коммитов, которые обрабатываются за один ручной запуск анализа истории.',
+	'memory.backgroundPriority': 'Фоновый приоритет',
+	'memory.backgroundPriorityDescription': 'Снижает планировочную нагрузку ручного анализа истории и его git-подпроцессов. Lowest рассчитан на работу ближе к idle CPU.',
 	'memory.autoCleanup': 'Автоочистка',
 	'memory.autoCleanupDescription': 'Запускает периодическую очистку, чтобы контролировать размер базы и удалять устаревшие данные.',
 	'memory.notificationsEnabled': 'Уведомления включены',

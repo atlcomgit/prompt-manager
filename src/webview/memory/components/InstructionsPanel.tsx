@@ -1027,6 +1027,7 @@ export const InstructionsPanel: React.FC<Props> = ({
 										description={t('memory.instructions.updatePriority.help')}
 									>
 										<select style={styles.select} value={localSettings.updatePriority} onChange={e => updateSetting('updatePriority', e.target.value as CodeMapSettings['updatePriority'])}>
+											<option value="lowest">lowest</option>
 											<option value="low">low</option>
 											<option value="normal">normal</option>
 											<option value="high">high</option>

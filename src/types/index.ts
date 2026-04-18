@@ -1,3 +1,4 @@
+export * from './backgroundTaskPriority.js';
 export * from './prompt.js';
 export * from './messages.js';
 export * from './memory.js';

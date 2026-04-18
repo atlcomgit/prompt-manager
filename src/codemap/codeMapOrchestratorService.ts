@@ -4,6 +4,10 @@ import type { CodeMapBranchResolution, CodeMapInstructionKind, CodeMapRuntimeCyc
 import { CodeMapDatabaseService } from './codeMapDatabaseService.js';
 import { CodeMapInstructionService } from './codeMapInstructionService.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
+import {
+	getBackgroundTaskPriorityWeight,
+	yieldForBackgroundTask,
+} from '../utils/backgroundTaskPriority.js';
 
 interface QueueItem {
 	jobId: number;
@@ -97,8 +101,10 @@ export class CodeMapOrchestratorService {
 			priority,
 			phase: 'queued',
 		};
-		if (priority === 'high') {
-			this.queue.unshift(item);
+		const priorityWeight = getBackgroundTaskPriorityWeight(priority);
+		const insertAt = this.queue.findIndex(existing => getBackgroundTaskPriorityWeight(existing.priority) < priorityWeight);
+		if (insertAt >= 0) {
+			this.queue.splice(insertAt, 0, item);
 		} else {
 			this.queue.push(item);
 		}
@@ -238,6 +244,10 @@ export class CodeMapOrchestratorService {
 				this.pendingKeys.delete(this.getDedupeKey(item.resolution.repository, branchName, item.instructionKind));
 				this.currentItem = null;
 				this.touchActivity();
+			}
+
+			if (this.queue.length > 0) {
+				await yieldForBackgroundTask(settings.updatePriority, 'between-items');
 			}
 
 			if (settings.aiDelayMs > 0 && this.queue.length > 0) {

@@ -88,7 +88,6 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Reuse the AI model from the most recently updated prompt when you create a draft through Quick Add Prompt, so quick capture starts with the same model you used last.
 - Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.
 - Keep generated global, project, session, and codemap instruction files as plain Markdown without auto-injected `applyTo` frontmatter.
-- Keep the codemap file-tree block optional through a dedicated setting, with the default behavior now favoring shorter instructions.
 - Keep the prompt, report, and editor state tied to the same workflow instead of splitting them across tools.
 
 ### Work with Git without leaving the prompt flow
@@ -123,10 +122,10 @@ This README is intentionally modular. The extension is still evolving, and the p
 ### Build project memory from real repository history
 
 - Open the Project Memory panel to browse commits, file changes, and stored analysis.
-- Run AI-powered history analysis with configurable models.
+- Run AI-powered history analysis with configurable models and a dedicated background priority control that defaults to the new `lowest` mode.
 - Use semantic search over embeddings to find similar work by meaning, not just by text.
 - Inspect knowledge-graph style relationships and code-oriented instruction snapshots.
-- Refresh codemap instructions from the instructions view with locale-specific persistence, including selected-branch delta snapshots that stay tied to the branch you actually chose.
+- Refresh codemap instructions from the instructions view with locale-specific persistence, selected-branch delta snapshots that stay tied to the branch you actually chose, and a default `lowest` priority tuned to stay closer to idle CPU time.
 
 ### Monitor Copilot usage inside VS Code
 

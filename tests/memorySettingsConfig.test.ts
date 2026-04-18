@@ -52,15 +52,27 @@ test('getMemorySettingsFromConfiguration normalizes invalid historyAnalysisLimit
 	assert.equal(settings.historyAnalysisLimit, 100);
 });
 
+test('getMemorySettingsFromConfiguration normalizes background priority values and defaults to lowest', () => {
+	const normalized = getMemorySettingsFromConfiguration(new FakeConfig({
+		'memory.backgroundPriority': 'higher',
+	}));
+	const fallback = getMemorySettingsFromConfiguration(new FakeConfig({}));
+
+	assert.equal(normalized.backgroundPriority, 'high');
+	assert.equal(fallback.backgroundPriority, 'lowest');
+});
+
 test('saveMemorySettingsToConfiguration preserves workspace scope and normalizes saved historyAnalysisLimit', async () => {
 	const config = new FakeConfig(
 		{
 			'memory.enabled': true,
 			'memory.historyAnalysisLimit': 20,
+			'memory.backgroundPriority': 'lowest',
 		},
 		{
 			'memory.enabled': 'workspace',
 			'memory.historyAnalysisLimit': 'workspace',
+			'memory.backgroundPriority': 'workspace',
 		},
 	);
 	const updates: Array<{ key: string; value: unknown; scope: Scope }> = [];
@@ -70,6 +82,7 @@ test('saveMemorySettingsToConfiguration preserves workspace scope and normalizes
 		{
 			enabled: false,
 			historyAnalysisLimit: 0,
+			backgroundPriority: 'high',
 		},
 		async (key, value, scope) => {
 			updates.push({ key, value, scope });
@@ -80,7 +93,9 @@ test('saveMemorySettingsToConfiguration preserves workspace scope and normalizes
 	assert.deepEqual(updates, [
 		{ key: 'memory.enabled', value: false, scope: 'workspace' },
 		{ key: 'memory.historyAnalysisLimit', value: 1, scope: 'workspace' },
+		{ key: 'memory.backgroundPriority', value: 'higher', scope: 'workspace' },
 	]);
 	assert.equal(settings.enabled, false);
 	assert.equal(settings.historyAnalysisLimit, 1);
+	assert.equal(settings.backgroundPriority, 'high');
 });

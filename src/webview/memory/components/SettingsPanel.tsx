@@ -213,6 +213,21 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 				</div>
 
 				<div style={styles.field}>
+					<label style={styles.label}>{t('memory.backgroundPriority')}</label>
+					<SettingHelpText text={t('memory.backgroundPriorityDescription')} />
+					<select
+						style={styles.select}
+						value={local.backgroundPriority}
+						onChange={e => update('backgroundPriority', e.target.value as MemorySettings['backgroundPriority'])}
+					>
+						<option value="lowest">lowest</option>
+						<option value="low">low</option>
+						<option value="normal">normal</option>
+						<option value="high">high</option>
+					</select>
+				</div>
+
+				<div style={styles.field}>
 					<label style={styles.label}>
 						<input
 							type="checkbox"

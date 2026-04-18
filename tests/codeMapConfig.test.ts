@@ -43,19 +43,25 @@ class FakeConfig {
 }
 
 test('getCodeMapSettingsFromConfiguration normalizes stored update priority values', () => {
-	const config = new FakeConfig({
+	const higherConfig = new FakeConfig({
 		updatePriority: 'higher',
 	});
+	const lowestConfig = new FakeConfig({
+		updatePriority: 'lowest',
+	});
 
-	const settings = getCodeMapSettingsFromConfiguration(config);
+	const higherSettings = getCodeMapSettingsFromConfiguration(higherConfig);
+	const lowestSettings = getCodeMapSettingsFromConfiguration(lowestConfig);
 
-	assert.equal(settings.updatePriority, 'high');
+	assert.equal(higherSettings.updatePriority, 'high');
+	assert.equal(lowestSettings.updatePriority, 'lowest');
 });
 
 test('getCodeMapSettingsFromConfiguration keeps file tree disabled by default', () => {
 	const settings = getCodeMapSettingsFromConfiguration(new FakeConfig({}));
 
 	assert.equal(settings.includeFileTree, false);
+	assert.equal(settings.updatePriority, 'lowest');
 });
 
 test('getCodeMapSettingsFromConfiguration clamps batching limits to safe ranges', () => {

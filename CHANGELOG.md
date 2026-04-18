@@ -10,6 +10,7 @@
 - Quick Add Prompt is now also available as an editor title action near the tab bar using the Prompt Manager PM icon, it now stores the pasted input as prompt text instead of the Title field and runs the same automatic title and description enrichment used by the editor page, and custom-group sections in the sidebar now use each group color as the header background with automatic black-or-white contrast for the label.
 
 ### Fixed
+- Background codemap refresh and manual history analysis now default to the new `lowest` background priority, lower the scheduling priority of their git subprocesses, and insert extra idle-friendly pauses between heavy batches so Memory page work no longer competes as aggressively with active CPU use.
 - Quick Add Prompt now preselects the AI model from the most recently updated saved prompt, matching the default model behavior of the regular new-prompt flow.
 - Reopening a prompt-bound chat session no longer falls back to a generic empty chat window just because the chat view memento is stale; bound sessions now reopen directly by session resource.
 - Prompt-bound chat detection is now scoped to the current workspace storage bucket, preventing prompts from binding to active Copilot sessions from unrelated VS Code workspaces.
@@ -19,7 +20,6 @@
 - The inline Start Chat notice is now limited to draft prompts before launch, and prompts already in progress no longer briefly re-show Start Chat after the launch spinner finishes.
 - The Process tab chat launch block now shows the selected AI model directly inside the "Open Copilot Chat" step, with the model name emphasized for quicker visual confirmation.
 - Generated global, project, session, and codemap instruction files no longer auto-inject an `applyTo` frontmatter block, while legacy project instruction files are still normalized on read and save.
-- Codemap instructions now support an explicit `includeFileTree` setting, disabled by default and exposed on the Memory -> Instructions -> Settings page.
 - Copilot Premium Usage now correctly shows daily request counts by forward-filling snapshot gaps for days the extension was not running, and no longer clamps historical usage values to current-day counter.
 - Git Flow now captures elapsed prompt time before switching to the final Done status, and even when Done does not change the status it still runs the regular save path so elapsed prompt time is persisted.
 - Sidebar prompt items now show a loader instead of stale status or progress while a prompt is being saved or its title/description AI enrichment is still running.

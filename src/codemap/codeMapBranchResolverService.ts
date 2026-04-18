@@ -2,6 +2,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { GitService } from '../services/gitService.js';
 import type { CodeMapBranchResolution } from '../types/codemap.js';
+import { getCodeMapSettings } from './codeMapConfig.js';
+import { applyPriorityToExecFilePromise } from '../utils/backgroundTaskPriority.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -111,7 +113,8 @@ export class CodeMapBranchResolverService {
 
 	async getHeadSha(projectPath: string, ref: string): Promise<string> {
 		try {
-			const { stdout } = await execFileAsync('git', ['rev-parse', ref], { cwd: projectPath });
+			const task = execFileAsync('git', ['rev-parse', ref], { cwd: projectPath });
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return stdout.trim();
 		} catch {
 			return '';
@@ -120,7 +123,8 @@ export class CodeMapBranchResolverService {
 
 	async getTreeSha(projectPath: string, ref: string): Promise<string> {
 		try {
-			const { stdout } = await execFileAsync('git', ['rev-parse', `${ref}^{tree}`], { cwd: projectPath });
+			const task = execFileAsync('git', ['rev-parse', `${ref}^{tree}`], { cwd: projectPath });
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return stdout.trim();
 		} catch {
 			return '';
@@ -173,7 +177,8 @@ export class CodeMapBranchResolverService {
 
 	private async branchExists(projectPath: string, branch: string): Promise<boolean> {
 		try {
-			await execFileAsync('git', ['rev-parse', '--verify', branch], { cwd: projectPath });
+			const task = execFileAsync('git', ['rev-parse', '--verify', branch], { cwd: projectPath });
+			await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return true;
 		} catch {
 			return false;

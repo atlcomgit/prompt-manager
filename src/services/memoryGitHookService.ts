@@ -9,6 +9,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { getMemorySettings } from './memorySettingsConfig.js';
+import { applyPriorityToExecFilePromise } from '../utils/backgroundTaskPriority.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -142,10 +144,12 @@ export class MemoryGitHookService {
 		files: Array<{ status: string; path: string; oldPath?: string }>;
 	} | null> {
 		try {
+			const priority = getMemorySettings().backgroundPriority;
 			// Get commit metadata
-			const { stdout: logOutput } = await execFileAsync('git', [
+			const logTask = execFileAsync('git', [
 				'log', '-1', '--format=%an%n%ae%n%aI%n%P%n%B', sha,
 			], { cwd: repoPath, maxBuffer: 8 * 1024 * 1024 });
+			const { stdout: logOutput } = await applyPriorityToExecFilePromise(logTask, priority);
 
 			const lines = logOutput.split('\n');
 			const author = lines[0] || '';
@@ -157,9 +161,10 @@ export class MemoryGitHookService {
 			// Get current branch
 			let branch = '';
 			try {
-				const { stdout: branchOutput } = await execFileAsync('git', [
+				const branchTask = execFileAsync('git', [
 					'branch', '--contains', sha, '--format=%(refname:short)',
 				], { cwd: repoPath });
+				const { stdout: branchOutput } = await applyPriorityToExecFilePromise(branchTask, priority);
 				branch = branchOutput.split('\n')[0]?.trim() || '';
 			} catch {
 				branch = 'unknown';
@@ -171,10 +176,11 @@ export class MemoryGitHookService {
 				: ['diff', '--root', sha];
 			let diff = '';
 			try {
-				const { stdout: diffOutput } = await execFileAsync('git', diffArgs, {
+				const diffTask = execFileAsync('git', diffArgs, {
 					cwd: repoPath,
 					maxBuffer: 8 * 1024 * 1024,
 				});
+				const { stdout: diffOutput } = await applyPriorityToExecFilePromise(diffTask, priority);
 				diff = diffOutput;
 			} catch {
 				diff = '';
@@ -186,10 +192,11 @@ export class MemoryGitHookService {
 				: ['diff', '--name-status', '--root', sha];
 			let files: Array<{ status: string; path: string; oldPath?: string }> = [];
 			try {
-				const { stdout: filesOutput } = await execFileAsync('git', filesArgs, {
+				const filesTask = execFileAsync('git', filesArgs, {
 					cwd: repoPath,
 					maxBuffer: 8 * 1024 * 1024,
 				});
+				const { stdout: filesOutput } = await applyPriorityToExecFilePromise(filesTask, priority);
 				files = filesOutput
 					.split('\n')
 					.filter(Boolean)
@@ -223,14 +230,16 @@ export class MemoryGitHookService {
 		fromSha?: string,
 	): Promise<string[]> {
 		try {
+			const priority = getMemorySettings().backgroundPriority;
 			const args = ['log', '--format=%H', `-n${limit}`];
 			if (fromSha) {
 				args.push(`${fromSha}..HEAD`);
 			}
-			const { stdout } = await execFileAsync('git', args, {
+			const task = execFileAsync('git', args, {
 				cwd: repoPath,
 				maxBuffer: 8 * 1024 * 1024,
 			});
+			const { stdout } = await applyPriorityToExecFilePromise(task, priority);
 			return stdout.split('\n').filter(Boolean);
 		} catch {
 			return [];

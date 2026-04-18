@@ -1,3 +1,5 @@
+import type { BackgroundTaskPriority } from './backgroundTaskPriority.js';
+
 export type CodeMapInstructionKind = 'base' | 'delta';
 
 export type CodeMapBranchRole = 'tracked' | 'resolved-base' | 'current';
@@ -16,7 +18,7 @@ export type CodeMapUpdateTrigger =
 	| 'post-checkout'
 	| 'workspace-open';
 
-export type CodeMapUpdatePriority = 'low' | 'normal' | 'high';
+export type CodeMapUpdatePriority = BackgroundTaskPriority;
 
 export type CodeMapBlockDescriptionMode = 'short' | 'medium' | 'long';
 

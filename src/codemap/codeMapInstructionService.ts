@@ -22,6 +22,10 @@ import { getCodeMapSettings } from './codeMapConfig.js';
 import { buildCodeMapGenerationFingerprint, resolveInstructionSnapshotToken } from './codeMapRefreshPolicy.js';
 import { buildCodeMapRelationBlock, buildLegacyRelationsFromRelationBlock } from './codeMapRelationBuilder.js';
 import type { CodeMapDatabaseService } from './codeMapDatabaseService.js';
+import {
+	applyPriorityToExecFilePromise,
+	yieldForBackgroundTask,
+} from '../utils/backgroundTaskPriority.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_TREE_ITEMS = 400;
@@ -306,6 +310,7 @@ export class CodeMapInstructionService {
 		});
 		const snapshot = await this.collectRefSnapshot(resolution.projectPath, branchName, headSha);
 		const excludedCount = Math.max(0, snapshot.rawFiles.length - snapshot.filteredFiles.length);
+		await yieldForBackgroundTask(settings.updatePriority, 'checkpoint');
 		onProgress?.({
 			stage: 'collecting-files',
 			detail: isRussianLocale
@@ -471,11 +476,12 @@ export class CodeMapInstructionService {
 
 	private async getGitTreeSnapshot(projectPath: string, ref: string): Promise<Map<string, string>> {
 		try {
-			const { stdout } = await execFileAsync('git', ['-c', 'core.quotepath=false', 'ls-tree', '-r', '-z', ref], {
+			const task = execFileAsync('git', ['-c', 'core.quotepath=false', 'ls-tree', '-r', '-z', ref], {
 				cwd: projectPath,
 				maxBuffer: 12 * 1024 * 1024,
 				encoding: 'buffer',
 			});
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return parseGitLsTreeSnapshot(stdout);
 		} catch {
 			return new Map();
@@ -484,7 +490,8 @@ export class CodeMapInstructionService {
 
 	private async readJsonAtRef<T>(projectPath: string, ref: string, filePath: string): Promise<T | null> {
 		try {
-			const { stdout } = await execFileAsync('git', ['show', `${ref}:${filePath}`], { cwd: projectPath, maxBuffer: 2 * 1024 * 1024 });
+			const task = execFileAsync('git', ['show', `${ref}:${filePath}`], { cwd: projectPath, maxBuffer: 2 * 1024 * 1024 });
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return JSON.parse(stdout) as T;
 		} catch {
 			return null;
@@ -553,7 +560,8 @@ export class CodeMapInstructionService {
 
 	private async getHeadShaAtRef(projectPath: string, ref: string): Promise<string> {
 		try {
-			const { stdout } = await execFileAsync('git', ['rev-parse', ref], { cwd: projectPath });
+			const task = execFileAsync('git', ['rev-parse', ref], { cwd: projectPath });
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return stdout.trim();
 		} catch {
 			return '';
@@ -562,7 +570,8 @@ export class CodeMapInstructionService {
 
 	private async getTreeShaAtRef(projectPath: string, ref: string): Promise<string> {
 		try {
-			const { stdout } = await execFileAsync('git', ['rev-parse', `${ref}^{tree}`], { cwd: projectPath });
+			const task = execFileAsync('git', ['rev-parse', `${ref}^{tree}`], { cwd: projectPath });
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return stdout.trim();
 		} catch {
 			return '';
@@ -571,7 +580,8 @@ export class CodeMapInstructionService {
 
 	private async getNameStatusDiff(projectPath: string, fromRef: string, toRef: string): Promise<CodeMapRefDiffEntry[]> {
 		try {
-			const { stdout } = await execFileAsync('git', ['diff', '--name-status', '--find-renames', fromRef, toRef], { cwd: projectPath, maxBuffer: 4 * 1024 * 1024 });
+			const task = execFileAsync('git', ['diff', '--name-status', '--find-renames', fromRef, toRef], { cwd: projectPath, maxBuffer: 4 * 1024 * 1024 });
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return stdout
 				.split(/\r?\n/)
 				.map(line => line.trim())
@@ -737,7 +747,8 @@ export class CodeMapInstructionService {
 
 	private async getMergeBase(projectPath: string, left: string, right: string): Promise<string> {
 		try {
-			const { stdout } = await execFileAsync('git', ['merge-base', left, right], { cwd: projectPath });
+			const task = execFileAsync('git', ['merge-base', left, right], { cwd: projectPath });
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return stdout.trim();
 		} catch {
 			return '';
@@ -746,7 +757,8 @@ export class CodeMapInstructionService {
 
 	private async getRevisionCount(projectPath: string, revisionRange: string): Promise<number> {
 		try {
-			const { stdout } = await execFileAsync('git', ['rev-list', '--count', revisionRange], { cwd: projectPath });
+			const task = execFileAsync('git', ['rev-list', '--count', revisionRange], { cwd: projectPath });
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return Number.parseInt(stdout.trim(), 10) || 0;
 		} catch {
 			return Number.MAX_SAFE_INTEGER;
@@ -1046,6 +1058,7 @@ export class CodeMapInstructionService {
 				completed: index + 1,
 				total: detailFilesToGenerate.length,
 			});
+			await yieldForBackgroundTask(settings.updatePriority, 'checkpoint');
 		}
 		const { fileDescriptionsById, symbolDescriptionsById } = await this.buildFileSymbolDescriptions({
 			repository,
@@ -1156,6 +1169,7 @@ export class CodeMapInstructionService {
 		let completed = 0;
 
 		for (const [batchIndex, batch] of batches.entries()) {
+			await yieldForBackgroundTask(getCodeMapSettings().updatePriority, 'checkpoint');
 			input.onProgress?.({
 				stage: 'describing-areas',
 				detail: formatAreaBatchStartDetail(input.locale.toLowerCase().startsWith('ru'), batchIndex, batches.length, batch),
@@ -1263,6 +1277,7 @@ export class CodeMapInstructionService {
 
 		let completed = 0;
 		for (const [batchIndex, batch] of batches.entries()) {
+			await yieldForBackgroundTask(getCodeMapSettings().updatePriority, 'checkpoint');
 			input.onProgress?.({
 				stage: 'describing-files',
 				detail: formatSymbolBatchStartDetail(isRussianLocale, batchIndex, batches.length, batch),
@@ -1385,6 +1400,7 @@ export class CodeMapInstructionService {
 
 		let completed = 0;
 		for (const [batchIndex, batch] of batches.entries()) {
+			await yieldForBackgroundTask(getCodeMapSettings().updatePriority, 'checkpoint');
 			input.onProgress?.({
 				stage: 'describing-files',
 				detail: formatFrontendBatchStartDetail(isRussianLocale, batchIndex, batches.length, batch),
@@ -1449,11 +1465,12 @@ export class CodeMapInstructionService {
 
 		try {
 			const targets = new Set(files);
-			const { stdout } = await execFileAsync('git', ['-c', 'core.quotepath=false', 'ls-tree', '-r', '-z', ref], {
+			const task = execFileAsync('git', ['-c', 'core.quotepath=false', 'ls-tree', '-r', '-z', ref], {
 				cwd: projectPath,
 				maxBuffer: 12 * 1024 * 1024,
 				encoding: 'buffer',
 			});
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			const snapshot = parseGitLsTreeSnapshot(stdout);
 			const shas = new Map<string, string>();
 			for (const [filePath, sha] of snapshot) {
@@ -1471,6 +1488,7 @@ export class CodeMapInstructionService {
 	private async readFileTexts(projectPath: string, ref: string, files: string[]): Promise<Map<string, string>> {
 		const texts = new Map<string, string>();
 		for (const filePath of files) {
+			await yieldForBackgroundTask(getCodeMapSettings().updatePriority, 'checkpoint');
 			if (isBinaryLikeFile(filePath)) {
 				texts.set(filePath, '');
 				continue;
@@ -1484,11 +1502,12 @@ export class CodeMapInstructionService {
 
 	private async readRecentChanges(projectPath: string, ref: string, isRussianLocale: boolean): Promise<string[]> {
 		try {
-			const { stdout } = await execFileAsync(
+			const task = execFileAsync(
 				'git',
 				['log', '--date=iso', `-n${MAX_RECENT_CHANGES}`, '--format=%H\t%ad\t%s', '--name-only', ref],
 				{ cwd: projectPath, maxBuffer: 4 * 1024 * 1024 },
 			);
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return parseRecentChanges(stdout, isRussianLocale);
 		} catch {
 			return [];
@@ -1497,7 +1516,8 @@ export class CodeMapInstructionService {
 
 	private async readTextAtRef(projectPath: string, ref: string, filePath: string): Promise<string> {
 		try {
-			const { stdout } = await execFileAsync('git', ['show', `${ref}:${filePath}`], { cwd: projectPath, maxBuffer: MAX_FILE_SNIPPET_BYTES });
+			const task = execFileAsync('git', ['show', `${ref}:${filePath}`], { cwd: projectPath, maxBuffer: MAX_FILE_SNIPPET_BYTES });
+			const { stdout } = await applyPriorityToExecFilePromise(task, getCodeMapSettings().updatePriority);
 			return stdout;
 		} catch {
 			return '';

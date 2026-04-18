@@ -6,6 +6,7 @@
 
 import type { CodeMapActivity, CodeMapInstructionDetail, CodeMapInstructionListItem, CodeMapSettings, CodeMapStatistics } from './codemap.js';
 import { DEFAULT_COPILOT_MODEL_FAMILY } from '../constants/ai.js';
+import type { BackgroundTaskPriority } from './backgroundTaskPriority.js';
 
 // ---- Enums & Constants ----
 
@@ -286,6 +287,8 @@ export interface MemorySettings {
 	shortTermLimit: number;
 	/** Maximum commits for manual history analysis */
 	historyAnalysisLimit: number;
+	/** Scheduling priority for background history analysis work */
+	backgroundPriority: BackgroundTaskPriority;
 	/** Whether auto-cleanup is enabled */
 	autoCleanup: boolean;
 	/** Whether notifications are enabled */
@@ -310,6 +313,7 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
 	retentionDays: 365,
 	shortTermLimit: 50,
 	historyAnalysisLimit: 500,
+	backgroundPriority: 'lowest',
 	autoCleanup: true,
 	notificationsEnabled: true,
 	notificationType: 'statusbar',

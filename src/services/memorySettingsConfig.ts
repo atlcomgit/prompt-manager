@@ -2,6 +2,10 @@ import type { MemorySettings } from '../types/memory.js';
 import { DEFAULT_MEMORY_SETTINGS } from '../types/memory.js';
 import { normalizeHistoryAnalysisLimit } from '../utils/historyAnalysisLimit.js';
 import { resolveConfigurationScope } from '../utils/configurationScope.js';
+import {
+	normalizeBackgroundTaskPriority,
+	serializeBackgroundTaskPriority,
+} from '../utils/backgroundTaskPriority.js';
 
 export type MemoryConfiguration = {
 	get<T>(section: string, defaultValue?: T): T;
@@ -42,6 +46,10 @@ export function getMemorySettingsFromConfiguration(config: Pick<MemoryConfigurat
 			undefined,
 			config?.get<number>('memory.historyAnalysisLimit', DEFAULT_MEMORY_SETTINGS.historyAnalysisLimit) ?? DEFAULT_MEMORY_SETTINGS.historyAnalysisLimit,
 		),
+		backgroundPriority: normalizeBackgroundTaskPriority(
+			config?.get<string>('memory.backgroundPriority', DEFAULT_MEMORY_SETTINGS.backgroundPriority) ?? DEFAULT_MEMORY_SETTINGS.backgroundPriority,
+			DEFAULT_MEMORY_SETTINGS.backgroundPriority,
+		),
 		autoCleanup: config?.get<boolean>('memory.autoCleanup', DEFAULT_MEMORY_SETTINGS.autoCleanup) ?? DEFAULT_MEMORY_SETTINGS.autoCleanup,
 		notificationsEnabled: config?.get<boolean>('memory.notifications.enabled', DEFAULT_MEMORY_SETTINGS.notificationsEnabled) ?? DEFAULT_MEMORY_SETTINGS.notificationsEnabled,
 		notificationType: config?.get<MemorySettings['notificationType']>('memory.notifications.type', DEFAULT_MEMORY_SETTINGS.notificationType) ?? DEFAULT_MEMORY_SETTINGS.notificationType,
@@ -65,7 +73,7 @@ export async function saveMemorySettings(settings: Partial<MemorySettings>): Pro
 			scope === 'workspace'
 				? (vscodeApi?.ConfigurationTarget?.Workspace ?? false)
 				: (vscodeApi?.ConfigurationTarget?.Global ?? true),
-			);
+		);
 	});
 
 	return getMemorySettings();
@@ -88,6 +96,13 @@ export async function saveMemorySettingsToConfiguration(
 			'memory.historyAnalysisLimit',
 			normalizeHistoryAnalysisLimit(settings.historyAnalysisLimit, DEFAULT_MEMORY_SETTINGS.historyAnalysisLimit),
 			resolveSettingScope(config, 'memory.historyAnalysisLimit'),
+		);
+	}
+	if (settings.backgroundPriority !== undefined) {
+		await updateValue(
+			'memory.backgroundPriority',
+			serializeBackgroundTaskPriority(settings.backgroundPriority),
+			resolveSettingScope(config, 'memory.backgroundPriority'),
 		);
 	}
 	if (settings.autoCleanup !== undefined) { await updateValue('memory.autoCleanup', settings.autoCleanup, resolveSettingScope(config, 'memory.autoCleanup')); }

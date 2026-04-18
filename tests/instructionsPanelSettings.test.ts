@@ -54,4 +54,5 @@ test('InstructionsPanel renders helper descriptions for settings without previou
 	for (const description of Object.values(translations)) {
 		assert.ok(markup.includes(description), `Expected description to be rendered: ${description}`);
 	}
+	assert.ok(markup.includes('lowest'), 'Expected the lowest priority option to be rendered.');
 });

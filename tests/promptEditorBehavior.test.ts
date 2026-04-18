@@ -324,24 +324,35 @@ test('shouldShowPromptChatLaunchBlock only keeps the launch block while launch i
 		status: 'in-progress',
 		hasChatEntry: false,
 		chatLaunchCompletionHold: false,
+		chatRenameInFlight: false,
 	}), true);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'in-progress',
 		hasChatEntry: true,
 		chatLaunchCompletionHold: true,
+		chatRenameInFlight: false,
 	}), true);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'in-progress',
 		hasChatEntry: true,
 		chatLaunchCompletionHold: false,
+		chatRenameInFlight: true,
+	}), true);
+
+	assert.equal(shouldShowPromptChatLaunchBlock({
+		status: 'in-progress',
+		hasChatEntry: true,
+		chatLaunchCompletionHold: false,
+		chatRenameInFlight: false,
 	}), false);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'draft',
 		hasChatEntry: false,
 		chatLaunchCompletionHold: false,
+		chatRenameInFlight: false,
 	}), false);
 });
 

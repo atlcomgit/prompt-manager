@@ -104,6 +104,7 @@ function createVsCodeMock() {
 			onDidChangeActiveTextEditor: () => createDisposable(),
 			createOutputChannel: () => outputChannel,
 			showErrorMessage: () => undefined,
+			showInformationMessage: () => undefined,
 		},
 		commands: {
 			executeCommand: async (id: string, ...args: unknown[]) => {
@@ -201,6 +202,14 @@ async function createManager(options?: {
 
 	const storageService = {
 		getStorageDirectoryPath: () => '/tmp/workspace/.vscode/prompt-manager',
+		getPromptDirectoryPath: (id: string) => `/tmp/workspace/.vscode/prompt-manager/prompts/${id}`,
+		getPromptMarkdownUri: (id: string) => {
+			const fsPath = `/tmp/workspace/.vscode/prompt-manager/prompts/${id}/prompt.md`;
+			return {
+				fsPath,
+				toString: () => fsPath,
+			};
+		},
 		uniqueId: async (base: string) => base,
 		getPrompt: async (id: string) => {
 			if (!storedPrompt || storedPrompt.id !== id) {
@@ -222,6 +231,7 @@ async function createManager(options?: {
 			});
 			return clonePrompt(storedPrompt);
 		},
+		createAgentFile: async () => undefined,
 	};
 
 	const aiService = {
@@ -712,6 +722,181 @@ test('savePrompt schedules bound chat session rename when the saved prompt title
 	assert.equal(scheduledRenames[0]?.prompt?.promptUuid, 'uuid-a');
 	assert.equal(scheduledRenames[0]?.prompt?.title, 'New prompt title');
 	assert.equal(scheduledRenames[0]?.options?.notifyOnSuccess, true);
+});
+
+test('tryRefreshChatSessionTitleInUi dispatches the built-in panel prompt command for local sessions', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['workbench.action.chat.openSessionWithPrompt.local'];
+
+	const { manager } = await createManager();
+	const refreshed = await (manager as any).tryRefreshChatSessionTitleInUi(
+		'session-fresh',
+		'77 | Renamed prompt',
+	);
+
+	assert.equal(refreshed, true);
+	assert.deepEqual(vscodeCommandCalls.map(call => call.id), ['workbench.action.chat.openSessionWithPrompt.local']);
+	assert.equal((vscodeCommandCalls[0]?.args[0] as { prompt?: string })?.prompt, '/rename 77 | Renamed prompt');
+	assert.match(
+		String((vscodeCommandCalls[0]?.args[0] as { resource?: { toString?: () => string } })?.resource?.toString?.() || ''),
+		/^vscode-chat-session:\/\/local\//,
+	);
+	resetVsCodeCommandMock();
+});
+
+test('scheduleChatSessionRename keeps retrying live refresh after the title patch is already persisted', async () => {
+	resetVsCodeCommandMock();
+	const renameCalls: string[] = [];
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			taskNumber: '77',
+		},
+		stateService: {
+			renameChatSession: async (_sessionId: string, newTitle: string) => {
+				renameCalls.push(newTitle);
+				return { ok: true, reason: 'persisted' };
+			},
+		},
+	});
+
+	const liveRefreshCalls: string[] = [];
+	(manager as any).tryRefreshChatSessionTitleInUi = async (_sessionId: string, title: string) => {
+		liveRefreshCalls.push(title);
+		return true;
+	};
+
+	await (manager as any).scheduleChatSessionRename(
+		'session-fresh',
+		createPrompt({
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			taskNumber: '77',
+		}),
+		' (bind)',
+		{
+			notifyOnSuccess: false,
+			attemptDelaysMs: [0, 1, 1],
+			keepRetryingLiveRefreshAfterPersist: true,
+		},
+	);
+
+	assert.deepEqual(renameCalls, ['77 | Prompt title']);
+	assert.deepEqual(liveRefreshCalls, ['77 | Prompt title', '77 | Prompt title', '77 | Prompt title']);
+	resetVsCodeCommandMock();
+});
+
+test('startChat schedules an early rename after the chat session is bound', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			taskNumber: '77',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+			getActiveChatSessionId: async () => '',
+			waitForChatSessionStarted: async () => ({ ok: true, sessionId: 'session-new', reason: '' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: 'session-new',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+
+	const scheduledRenames: Array<{
+		sessionId: string;
+		prompt: any;
+		logSuffix: string;
+		options?: {
+			notifyOnSuccess?: boolean;
+			attemptDelaysMs?: number[];
+			onInitialAttemptStateChange?: (state: 'started' | 'completed') => void;
+		};
+	}> = [];
+	(manager as any).scheduleChatSessionRename = async (
+		sessionId: string,
+		prompt: any,
+		logSuffix: string = '',
+		options?: {
+			notifyOnSuccess?: boolean;
+			attemptDelaysMs?: number[];
+			onInitialAttemptStateChange?: (state: 'started' | 'completed') => void;
+		},
+	) => {
+		options?.onInitialAttemptStateChange?.('started');
+		options?.onInitialAttemptStateChange?.('completed');
+		scheduledRenames.push({ sessionId, prompt, logSuffix, options });
+	};
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		taskNumber: '77',
+		status: 'draft',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-1' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await new Promise(resolve => setTimeout(resolve, 0));
+	const renameWaitDeadline = Date.now() + 500;
+	while (
+		Date.now() < renameWaitDeadline
+		&& !scheduledRenames.some(item => item.sessionId === 'session-new' && item.logSuffix === ' (bind)')
+	) {
+		await new Promise(resolve => setTimeout(resolve, 10));
+	}
+
+	assert.ok(
+		scheduledRenames.some(item =>
+			item.sessionId === 'session-new'
+			&& item.logSuffix === ' (bind)'
+			&& item.options?.notifyOnSuccess === false),
+	);
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatLaunchRenameState' && (message as any)?.state === 'started'));
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatLaunchRenameState' && (message as any)?.state === 'completed'));
+	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-new']);
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatOpened'));
+	resetVsCodeCommandMock();
 });
 
 test('applyPersistedPromptToPanelState refreshes base prompt and clears dirty flags when requested', async () => {

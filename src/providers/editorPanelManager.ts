@@ -1469,6 +1469,73 @@ export class EditorPanelManager {
 		return this.executeStopChatCommands(commandsToRun);
 	}
 
+	private resolveChatSessionPromptProviderType(sessionResource: vscode.Uri): string {
+		const rawResource = String(sessionResource?.toString?.() || '');
+		const match = rawResource.match(/^vscode-chat-session:\/\/([^/]+)\//i);
+		return String(match?.[1] || 'local').trim() || 'local';
+	}
+
+	/** Best-effort live title refresh through VS Code's built-in panel session prompt command. */
+	private async tryRefreshChatSessionTitleInUi(
+		sessionId: string,
+		renameTitle: string,
+		logSuffix: string = '',
+	): Promise<boolean> {
+		const normalizedSessionId = String(sessionId || '').trim();
+		const normalizedTitle = String(renameTitle || '').replace(/\s+/g, ' ').trim();
+		if (!normalizedSessionId || !normalizedTitle) {
+			return false;
+		}
+
+		const sessionResource = this.buildChatSessionResource(normalizedSessionId);
+		const providerType = this.resolveChatSessionPromptProviderType(sessionResource);
+		const providerCandidates = Array.from(new Set([
+			providerType,
+			providerType === 'local' ? '' : 'local',
+		].filter(Boolean)));
+
+		let availableCommands: string[] = [];
+		try {
+			availableCommands = await vscode.commands.getCommands(true);
+		} catch (error) {
+			this.hooksOutput.appendLine(
+				`[chat-rename]${logSuffix} live-refresh command lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return false;
+		}
+
+		const promptCommandIds = providerCandidates
+			.map(provider => `workbench.action.chat.openSessionWithPrompt.${provider}`)
+			.filter(commandId => availableCommands.includes(commandId));
+		if (promptCommandIds.length === 0) {
+			this.hooksOutput.appendLine(
+				`[chat-rename]${logSuffix} live-refresh skipped: no panel prompt command for provider=${providerType}`,
+			);
+			return false;
+		}
+
+		const prompt = `/rename ${normalizedTitle}`;
+		for (const commandId of promptCommandIds) {
+			try {
+				await vscode.commands.executeCommand(commandId, {
+					resource: sessionResource,
+					prompt,
+					attachedContext: [],
+				});
+				this.hooksOutput.appendLine(
+					`[chat-rename]${logSuffix} live-refresh dispatched via ${commandId}`,
+				);
+				return true;
+			} catch (error) {
+				this.hooksOutput.appendLine(
+					`[chat-rename]${logSuffix} live-refresh command failed (${commandId}): ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+
+		return false;
+	}
+
 	private buildChatSessionRenameTitle(prompt: Pick<Prompt, 'id' | 'title' | 'taskNumber'> | null): string {
 		const title = String(prompt?.title || prompt?.id || '').trim();
 		if (!title) {
@@ -1592,7 +1659,12 @@ export class EditorPanelManager {
 		sessionId: string,
 		prompt: string | Pick<Prompt, 'id' | 'promptUuid' | 'title' | 'taskNumber'> | null,
 		logSuffix: string = '',
-		options?: { notifyOnSuccess?: boolean },
+		options?: {
+			notifyOnSuccess?: boolean;
+			attemptDelaysMs?: number[];
+			onInitialAttemptStateChange?: (state: 'started' | 'completed') => void;
+			keepRetryingLiveRefreshAfterPersist?: boolean;
+		},
 	): Promise<void> {
 		const normalizedSessionId = (sessionId || '').trim();
 		const promptSnapshot = typeof prompt === 'string'
@@ -1622,8 +1694,24 @@ export class EditorPanelManager {
 		this.hooksOutput.appendLine(
 			`[chat-rename]${logSuffix} scheduling rename session=${normalizedSessionId} title="${renameTitle}"`,
 		);
-		const attemptDelaysMs = [5000, 12000, 25000];
+		const attemptDelaysMs = options?.attemptDelaysMs?.length
+			? [...options.attemptDelaysMs]
+			: [5000, 12000, 25000];
+		const keepRetryingLiveRefreshAfterPersist = options?.keepRetryingLiveRefreshAfterPersist === true;
+		let initialAttemptCompleted = false;
+		let renamePersisted = false;
+		const notifyInitialAttemptStateChange = options?.onInitialAttemptStateChange;
+		const completeInitialAttempt = (): void => {
+			if (initialAttemptCompleted) {
+				return;
+			}
+			initialAttemptCompleted = true;
+			notifyInitialAttemptStateChange?.('completed');
+		};
 		for (let attemptIndex = 0; attemptIndex < attemptDelaysMs.length; attemptIndex += 1) {
+			if (attemptIndex === 0) {
+				notifyInitialAttemptStateChange?.('started');
+			}
 			const delayMs = attemptDelaysMs[attemptIndex];
 			this.hooksOutput.appendLine(
 				`[chat-rename]${logSuffix} attempt=${attemptIndex + 1}/${attemptDelaysMs.length} waiting ${delayMs}ms`,
@@ -1631,22 +1719,55 @@ export class EditorPanelManager {
 			await new Promise(resolve => setTimeout(resolve, delayMs));
 
 			try {
-				const result = await this.stateService.renameChatSession(normalizedSessionId, renameTitle);
-				this.hooksOutput.appendLine(
-					`[chat-rename]${logSuffix} attempt=${attemptIndex + 1} result: ok=${result.ok} reason=${result.reason || '-'}`,
-				);
-				if (result.ok) {
-					if (attemptIndex === 0 && options?.notifyOnSuccess !== false) {
+				if (!renamePersisted) {
+					const result = await this.stateService.renameChatSession(normalizedSessionId, renameTitle);
+					this.hooksOutput.appendLine(
+						`[chat-rename]${logSuffix} attempt=${attemptIndex + 1} result: ok=${result.ok} reason=${result.reason || '-'}`,
+					);
+					renamePersisted = result.ok;
+				} else {
+					this.hooksOutput.appendLine(
+						`[chat-rename]${logSuffix} attempt=${attemptIndex + 1} reuse persisted storage rename`,
+					);
+				}
+				if (renamePersisted) {
+					const liveRefreshTriggered = await this.tryRefreshChatSessionTitleInUi(
+						normalizedSessionId,
+						renameTitle,
+						logSuffix,
+					);
+					this.hooksOutput.appendLine(
+						`[chat-rename]${logSuffix} live-refresh attempt=${attemptIndex + 1}/${attemptDelaysMs.length} dispatched=${String(liveRefreshTriggered)}`,
+					);
+					if (attemptIndex === 0) {
+						completeInitialAttempt();
+					}
+					if (attemptIndex === 0 && options?.notifyOnSuccess !== false && !keepRetryingLiveRefreshAfterPersist) {
 						void vscode.window.showInformationMessage(
-							`Chat session renamed to "${renameTitle}". Title may appear after chat list refresh or window reload.`,
+							liveRefreshTriggered
+								? `Chat session renamed to "${renameTitle}".`
+								: `Chat session renamed to "${renameTitle}". Title may appear after chat list refresh or window reload.`,
 						);
 					}
-					return;
+					if (!keepRetryingLiveRefreshAfterPersist || attemptIndex === attemptDelaysMs.length - 1) {
+						if (options?.notifyOnSuccess !== false && keepRetryingLiveRefreshAfterPersist) {
+							void vscode.window.showInformationMessage(
+								liveRefreshTriggered
+									? `Chat session renamed to "${renameTitle}".`
+									: `Chat session renamed to "${renameTitle}". Title may appear after chat list refresh or window reload.`,
+							);
+						}
+						return;
+					}
+					continue;
 				}
 			} catch (error) {
 				this.hooksOutput.appendLine(
 					`[chat-rename]${logSuffix} attempt=${attemptIndex + 1} error: ${error instanceof Error ? error.message : String(error)}`,
 				);
+			}
+			if (attemptIndex === 0) {
+				completeInitialAttempt();
 			}
 		}
 	}
@@ -6126,6 +6247,24 @@ export class EditorPanelManager {
 							postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
 						}
 						this._onDidSave.fire(promptFromStorage.id);
+						void this.scheduleChatSessionRename(
+							normalizedSessionId,
+							promptFromStorage,
+							' (bind)',
+							{
+								notifyOnSuccess: false,
+								attemptDelaysMs: [0, 5000, 12000, 25000],
+								onInitialAttemptStateChange: (state) => {
+									postMessage({
+										type: 'chatLaunchRenameState',
+										promptId: promptFromStorage.id,
+										requestId: startChatRequestId || undefined,
+										state,
+									});
+								},
+								keepRetryingLiveRefreshAfterPersist: true,
+							},
+						);
 						this.hooksOutput.appendLine(`[chat-start] prompt=${promptFromStorage.id} bound to session=${normalizedSessionId}`);
 						return true;
 					};

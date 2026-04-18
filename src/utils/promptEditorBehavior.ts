@@ -46,6 +46,7 @@ interface ShouldShowPromptChatLaunchBlockInput {
 	status: PromptStatus;
 	hasChatEntry: boolean;
 	chatLaunchCompletionHold: boolean;
+	chatRenameInFlight: boolean;
 }
 
 /** Input for resolving the empty-state placeholder shown in the Plan section. */
@@ -210,7 +211,8 @@ export function shouldPreservePromptIdAfterChatStart(
 export function shouldShowPromptChatLaunchBlock(
 	input: ShouldShowPromptChatLaunchBlockInput,
 ): boolean {
-	return input.status === 'in-progress' && (!input.hasChatEntry || input.chatLaunchCompletionHold);
+	return input.status === 'in-progress'
+		&& (input.chatRenameInFlight || !input.hasChatEntry || input.chatLaunchCompletionHold);
 }
 
 /** Resolve which placeholder the Plan section should display before plan content appears. */

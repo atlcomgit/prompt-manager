@@ -202,6 +202,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptLoading' }
 	| { type: 'nextTaskNumber'; taskNumber: string }
 	| { type: 'chatOpened'; promptId: string; requestId?: string }
+	| { type: 'chatLaunchRenameState'; promptId: string; requestId?: string; state: 'started' | 'completed' }
 	| {
 		type: 'promptVoiceState';
 		sessionId: string;

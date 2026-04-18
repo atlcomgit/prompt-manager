@@ -85,7 +85,10 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Rename bound chat sessions both right after the session is first attached during chat launch and later after prompt title or task number changes, even if the prompt id was renamed in the meantime, keep retrying the live chat title refresh across the early launch timing window without waiting for a VS Code reload, and show that rename as a dedicated fourth step in the Process launch block.
 - See a clear explanation above the action buttons on every editor tab when Start Chat is temporarily disabled because the prompt is empty, metadata is still generating, or chat launch is already running.
 - See the selected AI model directly in the Process tab launch step, so the opening step confirms which model will be used.
+- Reuse the AI model from the most recently updated prompt when you create a draft through Quick Add Prompt, so quick capture starts with the same model you used last.
 - Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.
+- Keep generated global, project, session, and codemap instruction files as plain Markdown without auto-injected `applyTo` frontmatter.
+- Keep the codemap file-tree block optional through a dedicated setting, with the default behavior now favoring shorter instructions.
 - Keep the prompt, report, and editor state tied to the same workflow instead of splitting them across tools.
 
 ### Work with Git without leaving the prompt flow

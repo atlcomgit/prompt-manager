@@ -95,10 +95,6 @@ export function buildChatMemoryInstruction(input: ChatMemoryInstructionBuildInpu
 		: [text.contextTitle, '', text.emptyContext];
 
 	return [
-		'---',
-		"applyTo: '**'",
-		'---',
-		'',
 		text.heading,
 		'',
 		text.purposeTitle,

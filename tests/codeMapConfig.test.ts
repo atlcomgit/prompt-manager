@@ -52,6 +52,12 @@ test('getCodeMapSettingsFromConfiguration normalizes stored update priority valu
 	assert.equal(settings.updatePriority, 'high');
 });
 
+test('getCodeMapSettingsFromConfiguration keeps file tree disabled by default', () => {
+	const settings = getCodeMapSettingsFromConfiguration(new FakeConfig({}));
+
+	assert.equal(settings.includeFileTree, false);
+});
+
 test('getCodeMapSettingsFromConfiguration clamps batching limits to safe ranges', () => {
 	const config = new FakeConfig({
 		areaBatchMaxItems: 99,
@@ -98,6 +104,7 @@ test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves works
 		{
 			trackedBranches: [' main ', '', 'dev', 'main'],
 			excludedPaths: [' ./vendor ', '.github/', 'vendor'],
+			includeFileTree: true,
 			updatePriority: 'high',
 			notificationsEnabled: false,
 			areaBatchMaxItems: 4,
@@ -113,6 +120,7 @@ test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves works
 	assert.deepEqual(updates, [
 		{ key: 'trackedBranches', value: ['main', 'dev'], scope: 'workspace' },
 		{ key: 'excludedPaths', value: ['vendor', '.github'], scope: 'workspace' },
+		{ key: 'includeFileTree', value: true, scope: 'global' },
 		{ key: 'notifications.enabled', value: false, scope: 'global' },
 		{ key: 'areaBatchMaxItems', value: 4, scope: 'global' },
 		{ key: 'symbolBatchMaxItems', value: 18, scope: 'global' },
@@ -121,6 +129,7 @@ test('saveCodeMapSettingsToConfiguration trims tracked branches, preserves works
 	]);
 	assert.deepEqual(settings.trackedBranches, ['main', 'dev']);
 	assert.deepEqual(settings.excludedPaths, ['vendor', '.github']);
+	assert.equal(settings.includeFileTree, true);
 	assert.equal(settings.notificationsEnabled, false);
 	assert.equal(settings.areaBatchMaxItems, 4);
 	assert.equal(settings.symbolBatchMaxItems, 18);

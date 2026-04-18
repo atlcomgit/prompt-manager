@@ -58,6 +58,7 @@ test('buildCodeMapChatInstructions renders stored base instructions and queued c
 	assert.match(output, /# Base instruction/);
 	assert.match(output, /feature\/test: обновление поставлено в очередь/);
 	assert.match(output, /Незакомиченные изменения/);
+	assert.doesNotMatch(output, /applyTo:/);
 });
 
 test('buildCodeMapChatInstructions renders missing placeholder for absent instructions', () => {
@@ -70,6 +71,7 @@ test('buildCodeMapChatInstructions renders missing placeholder for absent instru
 	assert.match(output, /Instruction not ready yet/);
 	assert.match(output, /refresh queued/);
 	assert.doesNotMatch(output, /Uncommitted changes/);
+	assert.doesNotMatch(output, /applyTo:/);
 });
 
 test('buildCodeMapChatInstructions includes focused usage rules in purpose section', () => {
@@ -84,4 +86,5 @@ test('buildCodeMapChatInstructions includes focused usage rules in purpose secti
 	assert.match(output, /По возможности используй grep по файлу\./);
 	assert.match(output, /Не зацикливайся на этом файле и обращайся к нему точечно\./);
 	assert.match(output, /Не держи в памяти целиком данный файл\./);
+	assert.doesNotMatch(output, /applyTo:/);
 });

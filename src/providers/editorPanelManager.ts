@@ -47,6 +47,10 @@ import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { filterPromptHookIdsForPhase } from '../utils/promptHookPhase.js';
 import { resolvePromptEditorPanelSwitchStrategy } from '../utils/editorPanelSwitch.js';
 import { resolveBoundChatSessionToOpen } from '../utils/chatSessionSelection.js';
+import {
+	normalizeInstructionMarkdownContent,
+	stripLegacyInstructionFrontmatter,
+} from '../utils/instructionFrontmatter.js';
 import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 import { fetchRemoteText } from '../utils/remoteText.js';
@@ -561,7 +565,7 @@ export class EditorPanelManager {
 		await this.ensureProjectInstructionsDirectory();
 		const fileUri = this.getProjectInstructionsUri();
 		const trimmed = (typeof content === 'string' ? content : '').trim();
-		const fileContent = EditorPanelManager.wrapInstructionWithFrontmatter(trimmed);
+		const fileContent = EditorPanelManager.normalizeInstructionContent(trimmed);
 
 		try {
 			const currentBytes = await vscode.workspace.fs.readFile(fileUri);
@@ -582,7 +586,7 @@ export class EditorPanelManager {
 			return;
 		}
 
-		const normalizedContent = EditorPanelManager.wrapInstructionWithFrontmatter(document.getText());
+		const normalizedContent = EditorPanelManager.normalizeInstructionContent(document.getText());
 		if (normalizedContent !== document.getText()) {
 			await vscode.workspace.fs.writeFile(document.uri, Buffer.from(normalizedContent, 'utf-8'));
 		}
@@ -599,7 +603,7 @@ export class EditorPanelManager {
 		} catch {
 			await vscode.workspace.fs.writeFile(
 				fileUri,
-				Buffer.from(EditorPanelManager.wrapInstructionWithFrontmatter(''), 'utf-8'),
+				Buffer.from(EditorPanelManager.normalizeInstructionContent(''), 'utf-8'),
 			);
 		}
 
@@ -3531,21 +3535,13 @@ export class EditorPanelManager {
 	}
 
 	private static readonly UNTITLED_PROMPT_TITLE = 'Промпт без названия';
-	private static readonly INSTRUCTION_FRONTMATTER = "---\napplyTo: '**'\n---";
 
 	private static stripInstructionFrontmatter(text: string): string {
-		const raw = typeof text === 'string' ? text : '';
-		const stripped = raw.replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*(?:\r?\n)?/, '');
-		return stripped.trim();
+		return stripLegacyInstructionFrontmatter(text).trim();
 	}
 
-	private static wrapInstructionWithFrontmatter(text: string): string {
-		const stripped = EditorPanelManager.stripInstructionFrontmatter(text);
-		if (!stripped) {
-			return `${EditorPanelManager.INSTRUCTION_FRONTMATTER}\n\n`;
-		}
-
-		return `${EditorPanelManager.INSTRUCTION_FRONTMATTER}\n\n${stripped}\n`;
+	private static normalizeInstructionContent(text: string): string {
+		return normalizeInstructionMarkdownContent(text);
 	}
 
 	private static wordCount(text: string): number {
@@ -4762,6 +4758,11 @@ export class EditorPanelManager {
 		}
 
 		const promptToSave = createDefaultPrompt('');
+		try {
+			await this.applyRecentPromptDefaults(promptToSave);
+		} catch {
+			// Quick Add should still create a draft even if recent defaults cannot be loaded.
+		}
 		promptToSave.content = normalizedContent;
 		promptToSave.status = 'draft';
 
@@ -4793,6 +4794,23 @@ export class EditorPanelManager {
 
 		this._onDidSave.fire(saved.id);
 		return saved;
+	}
+
+	/** Reuse the most recent prompt selections when creating a new draft prompt. */
+	private async applyRecentPromptDefaults(prompt: Prompt): Promise<void> {
+		const promptConfigs = await this.storageService.listPrompts();
+		const lastPromptConfig = [...promptConfigs]
+			.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())[0];
+		if (!lastPromptConfig) {
+			return;
+		}
+
+		prompt.languages = [...(lastPromptConfig.languages || [])];
+		prompt.frameworks = [...(lastPromptConfig.frameworks || [])];
+		prompt.skills = [...(lastPromptConfig.skills || [])];
+		prompt.mcpTools = [...(lastPromptConfig.mcpTools || [])];
+		prompt.hooks = [...(lastPromptConfig.hooks || [])];
+		prompt.model = lastPromptConfig.model || '';
 	}
 
 	private async processPendingOpenPromptRequests(): Promise<void> {
@@ -5157,17 +5175,7 @@ export class EditorPanelManager {
 		let prompt: Prompt;
 		if (isNew) {
 			prompt = createDefaultPrompt('');
-			const promptConfigs = await this.storageService.listPrompts();
-			const lastPromptConfig = [...promptConfigs]
-				.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())[0];
-			if (lastPromptConfig) {
-				prompt.languages = [...(lastPromptConfig.languages || [])];
-				prompt.frameworks = [...(lastPromptConfig.frameworks || [])];
-				prompt.skills = [...(lastPromptConfig.skills || [])];
-				prompt.mcpTools = [...(lastPromptConfig.mcpTools || [])];
-				prompt.hooks = [...(lastPromptConfig.hooks || [])];
-				prompt.model = lastPromptConfig.model || '';
-			}
+			await this.applyRecentPromptDefaults(prompt);
 		} else {
 			/**
 			 * Проверяем очередь ожидающих сохранений: если для этого промпта ещё

@@ -32,6 +32,7 @@ export const DEFAULT_CODEMAP_SETTINGS: CodeMapSettings = {
 	trackedBranches: [],
 	excludedPaths: [...DEFAULT_CODEMAP_EXCLUDED_PATHS],
 	autoUpdate: true,
+	includeFileTree: false,
 	notificationsEnabled: true,
 	aiModel: DEFAULT_COPILOT_MODEL_FAMILY,
 	instructionMaxChars: 120000,
@@ -60,6 +61,7 @@ export function getCodeMapSettingsFromConfiguration(config: Pick<CodeMapConfigur
 		trackedBranches,
 		excludedPaths,
 		autoUpdate: config?.get<boolean>('autoUpdate', DEFAULT_CODEMAP_SETTINGS.autoUpdate) ?? DEFAULT_CODEMAP_SETTINGS.autoUpdate,
+		includeFileTree: config?.get<boolean>('includeFileTree', DEFAULT_CODEMAP_SETTINGS.includeFileTree) ?? DEFAULT_CODEMAP_SETTINGS.includeFileTree,
 		notificationsEnabled: config?.get<boolean>('notifications.enabled', DEFAULT_CODEMAP_SETTINGS.notificationsEnabled) ?? DEFAULT_CODEMAP_SETTINGS.notificationsEnabled,
 		aiModel: normalizeModelFamily(config?.get<string>('aiModel', DEFAULT_CODEMAP_SETTINGS.aiModel) ?? DEFAULT_CODEMAP_SETTINGS.aiModel),
 		instructionMaxChars: Math.max(5000, config?.get<number>('instructionMaxChars', DEFAULT_CODEMAP_SETTINGS.instructionMaxChars) ?? DEFAULT_CODEMAP_SETTINGS.instructionMaxChars),
@@ -124,6 +126,9 @@ export async function saveCodeMapSettingsToConfiguration(
 		await updateValue('excludedPaths', normalizeExcludedPaths(settings.excludedPaths), resolveSettingScope(config, 'excludedPaths'));
 	}
 	if (settings.autoUpdate !== undefined) { await updateValue('autoUpdate', settings.autoUpdate, resolveSettingScope(config, 'autoUpdate')); }
+	if (settings.includeFileTree !== undefined) {
+		await updateValue('includeFileTree', settings.includeFileTree, resolveSettingScope(config, 'includeFileTree'));
+	}
 	if (settings.notificationsEnabled !== undefined) {
 		await updateValue('notifications.enabled', settings.notificationsEnabled, resolveSettingScope(config, 'notifications.enabled'));
 	}

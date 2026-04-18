@@ -56,10 +56,6 @@ export function buildCodeMapChatInstructions(input: {
 
 	if (input.targets.length === 0) {
 		return [
-			'---',
-			"applyTo: '**'",
-			'---',
-			'',
 			text.heading,
 			'',
 			text.purposeTitle,
@@ -102,10 +98,6 @@ export function buildCodeMapChatInstructions(input: {
 	});
 
 	return [
-		'---',
-		"applyTo: '**'",
-		'---',
-		'',
 		text.heading,
 		'',
 		text.purposeTitle,

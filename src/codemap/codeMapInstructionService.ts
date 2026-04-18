@@ -353,8 +353,12 @@ export class CodeMapInstructionService {
 		onProgress?.({
 			stage: 'assembling-instruction',
 			detail: isRussianLocale
-				? 'Собираются итоговые разделы инструкции и дерево структуры проекта'
-				: 'Assembling final instruction sections and the project structure tree',
+				? (settings.includeFileTree
+					? 'Собираются итоговые разделы инструкции и дерево структуры проекта'
+					: 'Собираются итоговые разделы инструкции')
+				: (settings.includeFileTree
+					? 'Assembling final instruction sections and the project structure tree'
+					: 'Assembling final instruction sections'),
 		});
 		const content = instructionKind === 'delta' && resolution.currentBranch !== resolution.resolvedBranchName
 			? buildCodeMapDeltaInstruction({
@@ -385,6 +389,7 @@ export class CodeMapInstructionService {
 				files: snapshot.filteredFiles,
 				manifest: snapshot.manifest,
 				composerManifest: snapshot.composerManifest,
+				includeFileTree: settings.includeFileTree,
 				codeDescription,
 			});
 		this.persistBranchArtifact(
@@ -1513,18 +1518,24 @@ export function buildCodeMapProjectInstruction(input: {
 	files: string[];
 	manifest: PackageManifest | null;
 	composerManifest?: ComposerManifest | null;
+	includeFileTree?: boolean;
 	codeDescription?: ProjectCodeDescription;
 }): string {
 	const isRussianLocale = input.locale.toLowerCase().startsWith('ru');
+	const includeFileTree = input.includeFileTree === true;
 	const files = input.files;
 	const analysisFiles = selectFilesForAnalysis(files);
-	const treeSourceFiles = analysisFiles.length > 0 ? analysisFiles : files.filter(filePath => !isBinaryLikeFile(filePath));
-	const limitedFiles = treeSourceFiles.slice(0, MAX_TREE_ITEMS);
-	const treeItems: AsciiTreeItem[] = limitedFiles.map(filePath => ({
-		path: `${input.repository}/${filePath}`,
-		kind: 'file',
-	}));
-	const tree = treeItems.length > 0 ? buildAsciiTree(treeItems) : '';
+	const treeSourceFiles = includeFileTree
+		? (analysisFiles.length > 0 ? analysisFiles : files.filter(filePath => !isBinaryLikeFile(filePath)))
+		: [];
+	const limitedFiles = includeFileTree ? treeSourceFiles.slice(0, MAX_TREE_ITEMS) : [];
+	const treeItems: AsciiTreeItem[] = includeFileTree
+		? limitedFiles.map(filePath => ({
+			path: `${input.repository}/${filePath}`,
+			kind: 'file',
+		}))
+		: [];
+	const tree = includeFileTree && treeItems.length > 0 ? buildAsciiTree(treeItems) : '';
 	const languages = summarizeExtensions(analysisFiles);
 	const frameworks = detectFrameworks(input.manifest, input.composerManifest || null, analysisFiles);
 	const scripts = collectProjectScripts(input.manifest, input.composerManifest || null).slice(0, MAX_SCRIPT_ITEMS);
@@ -1547,7 +1558,7 @@ export function buildCodeMapProjectInstruction(input: {
 		: 'Codemap now focuses on files that carry architectural signal for AI navigation: temporary, cached, and generated artifacts are excluded from the analytical sections to keep the instruction useful.';
 	const codeDescription = input.codeDescription || buildFallbackCodeDescription(files, input.manifest, input.composerManifest || null, isRussianLocale);
 	const detailedFileOmissions = Math.max(0, analysisFiles.length - codeDescription.fileSummaries.length);
-	const filteredTreeOmissions = Math.max(0, files.length - limitedFiles.length);
+	const filteredTreeOmissions = includeFileTree ? Math.max(0, files.length - limitedFiles.length) : 0;
 
 	return [
 		heading,
@@ -1676,17 +1687,21 @@ export function buildCodeMapProjectInstruction(input: {
 		...(codeDescription.recentChanges.length > 0
 			? codeDescription.recentChanges.map(item => `- ${item}`)
 			: [isRussianLocale ? '- История изменений для ветки не получена.' : '- No recent change timeline was collected for the branch.']),
-		'',
-		structureTitle,
-		...(filteredTreeOmissions > 0
-			? [isRussianLocale
-				? `- Дерево ниже показывает ${limitedFiles.length} релевантных файлов; временные, бинарные и сгенерированные артефакты исключены.`
-				: `- The tree below shows ${limitedFiles.length} relevant files; temporary, binary, and generated artifacts are excluded.`]
+		...(includeFileTree
+			? [
+				'',
+				structureTitle,
+				...(filteredTreeOmissions > 0
+					? [isRussianLocale
+						? `- Дерево ниже показывает ${limitedFiles.length} релевантных файлов; временные, бинарные и сгенерированные артефакты исключены.`
+						: `- The tree below shows ${limitedFiles.length} relevant files; temporary, binary, and generated artifacts are excluded.`]
+					: []),
+				tree ? '```text' : (isRussianLocale ? 'Структура файлов не обнаружена.' : 'No file structure detected.'),
+				tree || '',
+				tree ? '```' : '',
+				files.length > limitedFiles.length ? (isRussianLocale ? `... ещё ${files.length - limitedFiles.length} файлов скрыто` : `... ${files.length - limitedFiles.length} more files omitted`) : '',
+			]
 			: []),
-		tree ? '```text' : (isRussianLocale ? 'Структура файлов не обнаружена.' : 'No file structure detected.'),
-		tree || '',
-		tree ? '```' : '',
-		files.length > limitedFiles.length ? (isRussianLocale ? `... ещё ${files.length - limitedFiles.length} файлов скрыто` : `... ${files.length - limitedFiles.length} more files omitted`) : '',
 		'',
 		notesTitle,
 		implementationNote,

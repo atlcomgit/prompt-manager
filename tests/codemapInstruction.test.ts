@@ -86,7 +86,38 @@ class FakeCodeMapSummaryCache {
 	}
 }
 
-test('buildCodeMapProjectInstruction renders repository summary and file tree', () => {
+test('buildCodeMapProjectInstruction renders repository summary and file tree when enabled', () => {
+	const output = buildCodeMapProjectInstruction({
+		repository: 'prompt-manager',
+		branchName: 'main',
+		resolvedBranchName: 'main',
+		baseBranchName: 'main',
+		instructionKind: 'base',
+		branchRole: 'tracked',
+		generatedAt: '2026-03-14T00:00:00.000Z',
+		headSha: 'abc123',
+		locale: 'ru',
+		files: ['src/extension.ts', 'src/services/gitService.ts', 'package.json'],
+		includeFileTree: true,
+		manifest: {
+			name: 'copilot-prompt-manager',
+			description: 'Prompt manager extension',
+			scripts: { build: 'npm run build', test: 'npm test' },
+			dependencies: { react: '^18.2.0', vscode: '^1.95.0' },
+			devDependencies: { typescript: '^5.3.3' },
+		},
+	});
+
+	assert.match(output, /Code Map проекта prompt-manager/);
+	assert.match(output, /- Ветка: main/);
+	assert.match(output, /VS Code extension/);
+	assert.match(output, /## Описание кода/);
+	assert.match(output, /src\/services/);
+	assert.match(output, /extension\.ts/);
+	assert.match(output, /Codemap теперь старается показывать только сигнальные для ИИ файлы/);
+});
+
+test('buildCodeMapProjectInstruction omits file tree by default', () => {
 	const output = buildCodeMapProjectInstruction({
 		repository: 'prompt-manager',
 		branchName: 'main',
@@ -107,13 +138,8 @@ test('buildCodeMapProjectInstruction renders repository summary and file tree', 
 		},
 	});
 
-	assert.match(output, /Code Map проекта prompt-manager/);
-	assert.match(output, /- Ветка: main/);
-	assert.match(output, /VS Code extension/);
-	assert.match(output, /## Описание кода/);
-	assert.match(output, /src\/services/);
-	assert.match(output, /extension\.ts/);
-	assert.match(output, /Codemap теперь старается показывать только сигнальные для ИИ файлы/);
+	assert.doesNotMatch(output, /## Структура файлов/);
+	assert.doesNotMatch(output, /```text/);
 });
 
 test('buildFileSummary produces contextual PHP symbols without false method detections', () => {

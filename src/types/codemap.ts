@@ -37,6 +37,7 @@ export interface CodeMapSettings {
 	trackedBranches: string[];
 	excludedPaths: string[];
 	autoUpdate: boolean;
+	includeFileTree: boolean;
 	notificationsEnabled: boolean;
 	aiModel: string;
 	instructionMaxChars: number;

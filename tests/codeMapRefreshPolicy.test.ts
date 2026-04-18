@@ -154,6 +154,21 @@ test('isInstructionFreshForResolution detects generation fingerprint mismatch wh
 	assert.equal(stale, false);
 });
 
+test('buildCodeMapGenerationFingerprint changes when file tree setting changes', () => {
+	const withoutTree = buildCodeMapGenerationFingerprint({
+		blockDescriptionMode: 'medium',
+		blockMaxChars: 2000,
+		includeFileTree: false,
+	});
+	const withTree = buildCodeMapGenerationFingerprint({
+		blockDescriptionMode: 'medium',
+		blockMaxChars: 2000,
+		includeFileTree: true,
+	});
+
+	assert.notEqual(withoutTree, withTree);
+});
+
 test('isInstructionFreshForResolution keeps legacy instructions fresh when head still matches and fingerprint is missing', () => {
 	const fresh = isInstructionFreshForResolution({
 		instruction: {

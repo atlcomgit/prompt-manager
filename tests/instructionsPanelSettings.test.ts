@@ -9,6 +9,7 @@ import { InstructionsPanel } from '../src/webview/memory/components/Instructions
 const translations: Record<string, string> = {
 	'memory.instructions.enabled.help': 'Включает систему codemap-инструкций, которая готовит карту кода по веткам для чатов.',
 	'memory.instructions.autoUpdate.help': 'Автоматически обновляет отслеживаемые codemap-инструкции в фоне, когда срабатывают подходящие триггеры.',
+	'memory.instructions.includeFileTree.help': 'Добавляет в сохранённые codemap-инструкции необязательный блок со структурой файлов. По умолчанию лучше держать выключенным, чтобы инструкция оставалась компактнее.',
 	'memory.instructions.notificationsEnabled.help': 'Показывает статусы, когда задания обновления codemap запускаются, завершаются или падают с ошибкой.',
 	'memory.instructions.trackedBranches.help': 'По одной ветке на строку. Для этих веток в фоне поддерживаются базовые инструкции, которые служат опорой для остальных веток.',
 	'memory.instructions.instructionMaxChars.help': 'Задаёт целевой максимальный размер одной сохранённой codemap-инструкции.',
@@ -19,6 +20,7 @@ const translations: Record<string, string> = {
 	'memory.instructions.updatePriority.help': 'Определяет приоритет фоновой очереди для заданий обновления codemap.',
 	'memory.instructions.aiDelayMs.help': 'Добавляет паузу между AI-задачами codemap, чтобы снизить плотность запросов.',
 	'memory.instructions.startupDelayMs.help': 'Задаёт паузу после активации расширения перед первым автоматическим обновлением codemap.',
+	'memory.instructions.includeFileTree': 'Добавлять дерево файлов',
 };
 
 function t(key: string): string {

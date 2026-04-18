@@ -568,6 +568,11 @@
           "description": "Automatically refresh tracked codemap instructions in the background.",
           "default": true
         },
+        "promptManager.codemap.includeFileTree": {
+          "type": "boolean",
+          "description": "Include the optional file tree block in persisted codemap instructions. Disabled by default to keep instructions shorter.",
+          "default": false
+        },
         "promptManager.codemap.notifications.enabled": {
           "type": "boolean",
           "description": "Show notifications for codemap refresh state changes.",

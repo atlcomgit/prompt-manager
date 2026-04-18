@@ -23,4 +23,5 @@ test('buildChatMemoryInstruction includes focused usage rules in purpose section
 	assert.match(output, /Если нет явной необходимости — игнорируй codemap\./);
 	assert.match(output, /По возможности используй grep по файлу\./);
 	assert.match(output, /Не держи в памяти целиком данный файл\./);
+	assert.doesNotMatch(output, /applyTo:/);
 });

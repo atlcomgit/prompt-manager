@@ -3,7 +3,7 @@ import type { CodeMapBranchResolution, CodeMapInstructionKind, CodeMapSettings, 
 
 const CODEMAP_GENERATION_SCHEMA_VERSION = '2026-03-17.1';
 
-type RefreshRelevantSettings = Pick<CodeMapSettings, 'blockDescriptionMode' | 'blockMaxChars'> & Partial<Pick<CodeMapSettings, 'excludedPaths'>>;
+type RefreshRelevantSettings = Pick<CodeMapSettings, 'blockDescriptionMode' | 'blockMaxChars'> & Partial<Pick<CodeMapSettings, 'excludedPaths' | 'includeFileTree'>>;
 
 export function buildCodeMapGenerationFingerprint(settings: RefreshRelevantSettings): string {
 	return createHash('sha1')
@@ -11,6 +11,7 @@ export function buildCodeMapGenerationFingerprint(settings: RefreshRelevantSetti
 			schema: CODEMAP_GENERATION_SCHEMA_VERSION,
 			blockDescriptionMode: settings.blockDescriptionMode,
 			blockMaxChars: Math.max(0, Math.floor(settings.blockMaxChars || 0)),
+			includeFileTree: Boolean(settings.includeFileTree),
 			excludedPaths: Array.isArray(settings.excludedPaths)
 				? settings.excludedPaths.map(item => String(item || '').trim()).filter(Boolean).sort()
 				: [],

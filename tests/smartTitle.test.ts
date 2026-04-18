@@ -16,7 +16,7 @@ describe('generateSmartTitle', () => {
 
 	it('strips YAML frontmatter and extracts heading after it', () => {
 		const text = `---
-applyTo: '**'
+title: Instructions for Agent
 ---
 
 # Instructions for Agent
@@ -111,7 +111,7 @@ Real content follows`;
 
 	it('handles YAML frontmatter followed by content without heading', () => {
 		const text = `---
-applyTo: '**'
+scope: chat
 ---
 
 Ты должен анализировать проекты и выполнять задачи, следуя указанным условиям и рекомендациям.`;

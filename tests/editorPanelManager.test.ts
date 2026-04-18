@@ -191,6 +191,7 @@ async function createManager(options?: {
 	generateTitle?: (content: string) => Promise<string>;
 	generateDescription?: (content: string) => Promise<string>;
 	initialPrompt?: Record<string, unknown> | null;
+	listPrompts?: Array<Record<string, unknown>>;
 	stateService?: Record<string, unknown>;
 }) {
 	const { EditorPanelManager } = await importEditorPanelManager();
@@ -223,6 +224,7 @@ async function createManager(options?: {
 			}
 			return clonePrompt(storedPrompt);
 		},
+		listPrompts: async () => (options?.listPrompts || []).map(item => createPrompt(item)),
 		savePrompt: async (prompt: any) => {
 			storedPrompt = clonePrompt({
 				...prompt,
@@ -353,6 +355,30 @@ test('createQuickAddPrompt stores input as content and finishes title/descriptio
 	assert.equal(getStoredPrompt()?.title, 'AI generated title');
 	assert.equal(getStoredPrompt()?.description, 'AI generated description');
 	assert.ok(aiStates.some(state => !state.title && !state.description));
+});
+
+test('createQuickAddPrompt reuses the latest saved AI model', async () => {
+	const { manager, getStoredPrompt } = await createManager({
+		listPrompts: [
+			{
+				id: 'prompt-old',
+				promptUuid: 'uuid-old',
+				model: 'copilot/gpt-4o',
+				updatedAt: '2026-04-11T00:00:00.000Z',
+			},
+			{
+				id: 'prompt-new',
+				promptUuid: 'uuid-new',
+				model: 'copilot/claude-sonnet-4',
+				updatedAt: '2026-04-13T00:00:00.000Z',
+			},
+		],
+	});
+
+	const saved = await manager.createQuickAddPrompt('Быстро создать новый промпт из буфера обмена.');
+
+	assert.equal(saved?.model, 'copilot/claude-sonnet-4');
+	assert.equal(getStoredPrompt()?.model, 'copilot/claude-sonnet-4');
 });
 
 test('resolvePromptIdBase ignores report-only fallback', async () => {
@@ -1175,20 +1201,20 @@ test('setPendingPromptAiEnrichmentState emits sidebar-friendly state changes onl
 	]);
 });
 
-test('project instructions are wrapped with applyTo frontmatter and stripped for webview state', async () => {
+test('project instructions are normalized without applyTo frontmatter and stripped for webview state', async () => {
 	const { EditorPanelManager } = await importEditorPanelManager();
 	const body = '# Project rules\n\nUse repository conventions.';
+	const legacyWrapped = "---\napplyTo: '**'\n---\n\n# Project rules\n\nUse repository conventions.\n";
+	const customFrontmatter = `---\ntitle: Project rules\n---\n\n${body}`;
 
-	const wrapped = (EditorPanelManager as any).wrapInstructionWithFrontmatter(body);
 	assert.equal(
-		wrapped,
-		"---\napplyTo: '**'\n---\n\n# Project rules\n\nUse repository conventions.\n",
+		(EditorPanelManager as any).stripInstructionFrontmatter(legacyWrapped),
+		body,
 	);
-	assert.equal((EditorPanelManager as any).stripInstructionFrontmatter(wrapped), body);
-	assert.equal(
-		(EditorPanelManager as any).wrapInstructionWithFrontmatter(''),
-		"---\napplyTo: '**'\n---\n\n",
-	);
+	assert.equal((EditorPanelManager as any).normalizeInstructionContent(body), `${body}\n`);
+	assert.equal((EditorPanelManager as any).normalizeInstructionContent(legacyWrapped), `${body}\n`);
+	assert.equal((EditorPanelManager as any).normalizeInstructionContent(customFrontmatter), `${customFrontmatter}\n`);
+	assert.equal((EditorPanelManager as any).normalizeInstructionContent(''), '');
 });
 
 test('getEditorWebviewLocalResourceRoots skips redundant child roots for clipboard files in workspace storage', async () => {

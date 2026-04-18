@@ -884,6 +884,12 @@ export const InstructionsPanel: React.FC<Props> = ({
 										onChange={value => updateSetting('autoUpdate', value)}
 									/>
 									<CheckboxSetting
+										label={t('memory.instructions.includeFileTree')}
+										description={t('memory.instructions.includeFileTree.help')}
+										checked={localSettings.includeFileTree}
+										onChange={value => updateSetting('includeFileTree', value)}
+									/>
+									<CheckboxSetting
 										label={t('memory.notificationsEnabled')}
 										description={t('memory.instructions.notificationsEnabled.help')}
 										checked={localSettings.notificationsEnabled}

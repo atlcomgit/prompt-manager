@@ -138,12 +138,40 @@ test('WorkspaceService syncGlobalAgentInstructionsFile writes only the project i
 
 		assert.equal(
 			fs.readFileSync(targetFile, 'utf-8'),
-			"---\napplyTo: '**'\n---\n\n# Prompt Manager Agent Instructions\n\nAlways answer in Russian.\n",
+			"# Prompt Manager Agent Instructions\n\nAlways answer in Russian.\n",
 		);
 		assert.equal(fs.existsSync(legacyGithubFile), false);
 		assert.equal(fs.existsSync(legacyChatMemoryAiFile), false);
 		assert.equal(fs.existsSync(legacyAiFile), false);
 		assert.deepEqual(mockState.updateCalls, []);
+	} finally {
+		service.dispose();
+		fs.rmSync(mockState.workspaceRoot, { recursive: true, force: true });
+	}
+});
+
+test('WorkspaceService syncGlobalAgentInstructionsFile strips legacy applyTo frontmatter from incoming context', async () => {
+	mockState.workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'prompt-manager-workspace-service-'));
+	mockState.chatInstructionsFilesLocations = { existing: true };
+	mockState.updateCalls = [];
+
+	const targetFile = path.join(
+		mockState.workspaceRoot,
+		'.vscode',
+		'prompt-manager',
+		'chat-memory',
+		'prompt-manager.instructions.md',
+	);
+	const { WorkspaceService } = await importWorkspaceService();
+	const service = new WorkspaceService();
+
+	try {
+		await service.syncGlobalAgentInstructionsFile("---\napplyTo: '**'\n---\n\nAlways answer in Russian.");
+
+		assert.equal(
+			fs.readFileSync(targetFile, 'utf-8'),
+			"# Prompt Manager Agent Instructions\n\nAlways answer in Russian.\n",
+		);
 	} finally {
 		service.dispose();
 		fs.rmSync(mockState.workspaceRoot, { recursive: true, force: true });

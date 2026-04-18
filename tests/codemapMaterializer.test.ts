@@ -71,3 +71,17 @@ test('buildCodeMapChatInstructions renders missing placeholder for absent instru
 	assert.match(output, /refresh queued/);
 	assert.doesNotMatch(output, /Uncommitted changes/);
 });
+
+test('buildCodeMapChatInstructions includes focused usage rules in purpose section', () => {
+	const output = buildCodeMapChatInstructions({
+		generatedAt: '2026-03-14T00:00:00.000Z',
+		locale: 'ru',
+		targets: [createTarget()],
+	});
+
+	assert.match(output, /НЕ анализируй весь файл целиком\./);
+	assert.match(output, /Используй только релевантные части\./);
+	assert.match(output, /По возможности используй grep по файлу\./);
+	assert.match(output, /Не зацикливайся на этом файле и обращайся к нему точечно\./);
+	assert.match(output, /Не держи в памяти целиком данный файл\./);
+});

@@ -33,6 +33,7 @@ interface Props {
 	onDeleteObsolete: () => void;
 	isRefreshing: boolean;
 	t: (key: string) => string;
+	initialActiveTab?: InstructionTab;
 }
 
 const PIPELINE_PHASES: CodeMapRuntimePhase[] = [
@@ -138,6 +139,42 @@ const SliderSetting: React.FC<SliderSettingProps> = ({
 	</div>
 );
 
+type CheckboxSettingProps = {
+	label: string;
+	description: string;
+	checked: boolean;
+	onChange: (checked: boolean) => void;
+};
+
+// Render a checkbox setting with a secondary helper description.
+const CheckboxSetting: React.FC<CheckboxSettingProps> = ({ label, description, checked, onChange }) => (
+	<div style={styles.settingBlock}>
+		<label style={styles.checkboxLabel}>
+			<input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} />
+			{label}
+		</label>
+		<div style={styles.settingCheckboxDescription}>{description}</div>
+	</div>
+);
+
+type ControlSettingProps = {
+	label: string;
+	description: string;
+	children: React.ReactNode;
+	multiline?: boolean;
+};
+
+// Render an input/select/textarea setting with a label and helper text.
+const ControlSetting: React.FC<ControlSettingProps> = ({ label, description, children, multiline = false }) => (
+	<div style={multiline ? styles.settingBlock : styles.settingRow}>
+		<div style={styles.settingText}>
+			<div style={styles.infoPrimary}>{label}</div>
+			<div style={styles.infoSecondary}>{description}</div>
+		</div>
+		<div style={multiline ? styles.settingControlStack : styles.settingControl}>{children}</div>
+	</div>
+);
+
 function resolveBatchPreset(value: number, conservativeMax: number, balancedMax: number): BatchPreset {
 	if (value <= conservativeMax) {
 		return 'conservative';
@@ -205,8 +242,9 @@ export const InstructionsPanel: React.FC<Props> = ({
 	onDeleteObsolete,
 	isRefreshing,
 	t,
+	initialActiveTab,
 }) => {
-	const [activeTab, setActiveTab] = useState<InstructionTab>('browse');
+	const [activeTab, setActiveTab] = useState<InstructionTab>(initialActiveTab || 'browse');
 	const [localSettings, setLocalSettings] = useState<CodeMapSettings | null>(settings);
 
 	useEffect(() => {
@@ -833,18 +871,39 @@ export const InstructionsPanel: React.FC<Props> = ({
 							<>
 								<div style={styles.section}>
 									<h4 style={styles.sectionTitle}>{t('memory.settingsGeneral')}</h4>
-									<label style={styles.checkboxLabel}><input type="checkbox" checked={localSettings.enabled} onChange={e => updateSetting('enabled', e.target.checked)} />{t('memory.enabled')}</label>
-									<label style={styles.checkboxLabel}><input type="checkbox" checked={localSettings.autoUpdate} onChange={e => updateSetting('autoUpdate', e.target.checked)} />{t('memory.instructions.autoUpdate')}</label>
-									<label style={styles.checkboxLabel}><input type="checkbox" checked={localSettings.notificationsEnabled} onChange={e => updateSetting('notificationsEnabled', e.target.checked)} />{t('memory.notificationsEnabled')}</label>
+									<CheckboxSetting
+										label={t('memory.enabled')}
+										description={t('memory.instructions.enabled.help')}
+										checked={localSettings.enabled}
+										onChange={value => updateSetting('enabled', value)}
+									/>
+									<CheckboxSetting
+										label={t('memory.instructions.autoUpdate')}
+										description={t('memory.instructions.autoUpdate.help')}
+										checked={localSettings.autoUpdate}
+										onChange={value => updateSetting('autoUpdate', value)}
+									/>
+									<CheckboxSetting
+										label={t('memory.notificationsEnabled')}
+										description={t('memory.instructions.notificationsEnabled.help')}
+										checked={localSettings.notificationsEnabled}
+										onChange={value => updateSetting('notificationsEnabled', value)}
+									/>
 								</div>
 
 								<div style={styles.section}>
 									<h4 style={styles.sectionTitle}>{t('memory.instructions.trackedBranches')}</h4>
-									<textarea
-										style={styles.textarea}
-										value={localSettings.trackedBranches.join('\n')}
-										onChange={e => updateSetting('trackedBranches', e.target.value.split('\n'))}
-									/>
+									<ControlSetting
+										label={t('memory.instructions.trackedBranches')}
+										description={t('memory.instructions.trackedBranches.help')}
+										multiline
+									>
+										<textarea
+											style={styles.textarea}
+											value={localSettings.trackedBranches.join('\n')}
+											onChange={e => updateSetting('trackedBranches', e.target.value.split('\n'))}
+										/>
+									</ControlSetting>
 								</div>
 
 								<div style={styles.section}>
@@ -859,9 +918,24 @@ export const InstructionsPanel: React.FC<Props> = ({
 
 								<div style={styles.section}>
 									<h4 style={styles.sectionTitle}>{t('memory.instructions.limits')}</h4>
-									<div style={styles.fieldRow}><span>{t('memory.instructions.instructionMaxChars')}</span><input type="number" style={styles.input} value={localSettings.instructionMaxChars} onChange={e => updateSetting('instructionMaxChars', Number(e.target.value))} /></div>
-									<div style={styles.fieldRow}><span>{t('memory.instructions.blockMaxChars')}</span><input type="number" style={styles.input} value={localSettings.blockMaxChars} onChange={e => updateSetting('blockMaxChars', Number(e.target.value))} /></div>
-									<div style={styles.fieldRow}><span>{t('memory.instructions.maxVersions')}</span><input type="number" style={styles.input} value={localSettings.maxVersionsPerInstruction} onChange={e => updateSetting('maxVersionsPerInstruction', Number(e.target.value))} /></div>
+									<ControlSetting
+										label={t('memory.instructions.instructionMaxChars')}
+										description={t('memory.instructions.instructionMaxChars.help')}
+									>
+										<input type="number" style={styles.input} value={localSettings.instructionMaxChars} onChange={e => updateSetting('instructionMaxChars', Number(e.target.value))} />
+									</ControlSetting>
+									<ControlSetting
+										label={t('memory.instructions.blockMaxChars')}
+										description={t('memory.instructions.blockMaxChars.help')}
+									>
+										<input type="number" style={styles.input} value={localSettings.blockMaxChars} onChange={e => updateSetting('blockMaxChars', Number(e.target.value))} />
+									</ControlSetting>
+									<ControlSetting
+										label={t('memory.instructions.maxVersions')}
+										description={t('memory.instructions.maxVersions.help')}
+									>
+										<input type="number" style={styles.input} value={localSettings.maxVersionsPerInstruction} onChange={e => updateSetting('maxVersionsPerInstruction', Number(e.target.value))} />
+									</ControlSetting>
 								</div>
 
 								<div style={styles.section}>
@@ -917,8 +991,10 @@ export const InstructionsPanel: React.FC<Props> = ({
 
 								<div style={styles.section}>
 									<h4 style={styles.sectionTitle}>{t('memory.instructions.ai')}</h4>
-									<div style={styles.fieldRow}>
-										<span>{t('memory.aiModel')}</span>
+									<ControlSetting
+										label={t('memory.aiModel')}
+										description={t('memory.instructions.aiModel.help')}
+									>
 										<select
 											style={styles.select}
 											value={selectedModel}
@@ -929,25 +1005,39 @@ export const InstructionsPanel: React.FC<Props> = ({
 												<option key={model.id} value={model.id}>{model.name}</option>
 											))}
 										</select>
-									</div>
-									<div style={styles.fieldRow}>
-										<span>{t('memory.instructions.blockDescriptionMode')}</span>
+									</ControlSetting>
+									<ControlSetting
+										label={t('memory.instructions.blockDescriptionMode')}
+										description={t('memory.instructions.blockDescriptionMode.help')}
+									>
 										<select style={styles.select} value={localSettings.blockDescriptionMode} onChange={e => updateSetting('blockDescriptionMode', e.target.value as CodeMapSettings['blockDescriptionMode'])}>
 											<option value="short">short</option>
 											<option value="medium">medium</option>
 											<option value="long">long</option>
 										</select>
-									</div>
-									<div style={styles.fieldRow}>
-										<span>{t('memory.instructions.updatePriority')}</span>
+									</ControlSetting>
+									<ControlSetting
+										label={t('memory.instructions.updatePriority')}
+										description={t('memory.instructions.updatePriority.help')}
+									>
 										<select style={styles.select} value={localSettings.updatePriority} onChange={e => updateSetting('updatePriority', e.target.value as CodeMapSettings['updatePriority'])}>
 											<option value="low">low</option>
 											<option value="normal">normal</option>
 											<option value="high">high</option>
 										</select>
-									</div>
-									<div style={styles.fieldRow}><span>{t('memory.instructions.aiDelayMs')}</span><input type="number" style={styles.input} value={localSettings.aiDelayMs} onChange={e => updateSetting('aiDelayMs', Number(e.target.value))} /></div>
-									<div style={styles.fieldRow}><span>{t('memory.instructions.startupDelayMs')}</span><input type="number" style={styles.input} value={localSettings.startupDelayMs} onChange={e => updateSetting('startupDelayMs', Number(e.target.value))} /></div>
+									</ControlSetting>
+									<ControlSetting
+										label={t('memory.instructions.aiDelayMs')}
+										description={t('memory.instructions.aiDelayMs.help')}
+									>
+										<input type="number" style={styles.input} value={localSettings.aiDelayMs} onChange={e => updateSetting('aiDelayMs', Number(e.target.value))} />
+									</ControlSetting>
+									<ControlSetting
+										label={t('memory.instructions.startupDelayMs')}
+										description={t('memory.instructions.startupDelayMs.help')}
+									>
+										<input type="number" style={styles.input} value={localSettings.startupDelayMs} onChange={e => updateSetting('startupDelayMs', Number(e.target.value))} />
+									</ControlSetting>
 								</div>
 							</>
 						) : (
@@ -1053,6 +1143,12 @@ const styles: Record<string, React.CSSProperties> = {
 	emptyPane: { display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--vscode-descriptionForeground)', textAlign: 'center' },
 	emptyInline: { color: 'var(--vscode-descriptionForeground)', fontSize: '12px' },
 	checkboxLabel: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', marginBottom: '10px' },
+	settingBlock: { display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' },
+	settingRow: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px', marginBottom: '12px' },
+	settingText: { display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, minWidth: 0 },
+	settingControl: { flex: '0 0 auto' },
+	settingControlStack: { width: '100%' },
+	settingCheckboxDescription: { color: 'var(--vscode-descriptionForeground)', fontSize: '11px', lineHeight: 1.4, marginTop: '-6px', marginLeft: '26px', maxWidth: '720px' },
 	textarea: { width: '100%', minHeight: '120px', padding: '8px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '4px', fontSize: '12px', fontFamily: 'var(--vscode-editor-font-family)' },
 	fieldRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '10px', fontSize: '12px' },
 	input: { width: '180px', padding: '4px 8px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '3px', fontSize: '12px' },

@@ -42,6 +42,42 @@ const MAX_REUSE_CHANGED_RATIO = 0.35;
 const ANONYMOUS_CLASS_SYMBOL_NAME = '__anonymous_class__';
 const VOID_HTML_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
 
+function splitNullSeparatedBuffer(buffer: Buffer): Buffer[] {
+	const parts: Buffer[] = [];
+	let start = 0;
+	for (let index = 0; index < buffer.length; index += 1) {
+		if (buffer[index] !== 0) {
+			continue;
+		}
+		if (index > start) {
+			parts.push(buffer.subarray(start, index));
+		}
+		start = index + 1;
+	}
+	if (start < buffer.length) {
+		parts.push(buffer.subarray(start));
+	}
+	return parts;
+}
+
+export function parseGitLsTreeSnapshot(stdout: string | Buffer): Map<string, string> {
+	const records = Buffer.isBuffer(stdout)
+		? splitNullSeparatedBuffer(stdout).map(chunk => chunk.toString('utf-8'))
+		: (stdout.includes('\0') ? stdout.split('\0') : stdout.split(/\r?\n/));
+	const snapshot = new Map<string, string>();
+	for (const record of records) {
+		if (!record) {
+			continue;
+		}
+		const match = record.match(/^[0-9]+\s+blob\s+([0-9a-f]{40})\t([\s\S]+)$/i);
+		if (!match?.[1] || !match[2]) {
+			continue;
+		}
+		snapshot.set(match[2], match[1]);
+	}
+	return snapshot;
+}
+
 interface PackageManifest {
 	name?: string;
 	description?: string;
@@ -430,16 +466,12 @@ export class CodeMapInstructionService {
 
 	private async getGitTreeSnapshot(projectPath: string, ref: string): Promise<Map<string, string>> {
 		try {
-			const { stdout } = await execFileAsync('git', ['ls-tree', '-r', ref], { cwd: projectPath, maxBuffer: 12 * 1024 * 1024 });
-			const snapshot = new Map<string, string>();
-			for (const line of stdout.split(/\r?\n/)) {
-				const match = line.match(/^[0-9]+\s+blob\s+([0-9a-f]{40})\t(.+)$/i);
-				if (!match?.[1] || !match[2]) {
-					continue;
-				}
-				snapshot.set(match[2], match[1]);
-			}
-			return snapshot;
+			const { stdout } = await execFileAsync('git', ['-c', 'core.quotepath=false', 'ls-tree', '-r', '-z', ref], {
+				cwd: projectPath,
+				maxBuffer: 12 * 1024 * 1024,
+				encoding: 'buffer',
+			});
+			return parseGitLsTreeSnapshot(stdout);
 		} catch {
 			return new Map();
 		}
@@ -1412,17 +1444,18 @@ export class CodeMapInstructionService {
 
 		try {
 			const targets = new Set(files);
-			const { stdout } = await execFileAsync('git', ['ls-tree', '-r', ref], { cwd: projectPath, maxBuffer: 12 * 1024 * 1024 });
+			const { stdout } = await execFileAsync('git', ['-c', 'core.quotepath=false', 'ls-tree', '-r', '-z', ref], {
+				cwd: projectPath,
+				maxBuffer: 12 * 1024 * 1024,
+				encoding: 'buffer',
+			});
+			const snapshot = parseGitLsTreeSnapshot(stdout);
 			const shas = new Map<string, string>();
-			for (const line of stdout.split(/\r?\n/)) {
-				const match = line.match(/^[0-9]+\s+blob\s+([0-9a-f]{40})\t(.+)$/i);
-				if (!match?.[1] || !match[2]) {
+			for (const [filePath, sha] of snapshot) {
+				if (!targets.has(filePath)) {
 					continue;
 				}
-				if (!targets.has(match[2])) {
-					continue;
-				}
-				shas.set(match[2], match[1]);
+				shas.set(filePath, sha);
 			}
 			return shas;
 		} catch {

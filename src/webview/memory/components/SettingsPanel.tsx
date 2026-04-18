@@ -14,8 +14,18 @@ interface Props {
 	t: (key: string) => string;
 }
 
+type SettingHelpTextProps = {
+	text: string;
+	checkbox?: boolean;
+};
+
+// Render secondary helper text below a setting title.
+const SettingHelpText: React.FC<SettingHelpTextProps> = ({ text, checkbox = false }) => (
+	<div style={checkbox ? styles.checkboxDescription : styles.description}>{text}</div>
+);
+
 export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSave, onRefresh, t }) => {
-	const [local, setLocal] = useState<MemorySettings | null>(null);
+	const [local, setLocal] = useState<MemorySettings | null>(() => (settings ? { ...settings } : null));
 
 	// Sync local state with incoming settings
 	useEffect(() => {
@@ -86,10 +96,12 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						/>
 						{t('memory.enabled')}
 					</label>
+					<SettingHelpText text={t('memory.enabledDescription')} checkbox />
 				</div>
 
 				<div style={styles.field}>
 					<label style={styles.label}>{t('memory.aiModel')}</label>
+					<SettingHelpText text={t('memory.aiModelDescription')} />
 					<select
 						style={styles.select}
 						value={selectedModel}
@@ -104,6 +116,7 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 
 				<div style={styles.field}>
 					<label style={styles.label}>{t('memory.analysisDepth')}</label>
+					<SettingHelpText text={t('memory.analysisDepthDescription')} />
 					<select
 						style={styles.select}
 						value={local.analysisDepth}
@@ -117,6 +130,7 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 
 				<div style={styles.field}>
 					<label style={styles.label}>{t('memory.diffLimit')}</label>
+					<SettingHelpText text={t('memory.diffLimitDescription')} />
 					<input
 						type="number"
 						style={styles.input}
@@ -129,6 +143,7 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 
 				<div style={styles.field}>
 					<label style={styles.label}>{t('memory.httpPort')}</label>
+					<SettingHelpText text={t('memory.httpPortDescription')} />
 					<input
 						type="number"
 						style={styles.input}
@@ -147,6 +162,7 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 
 				<div style={styles.field}>
 					<label style={styles.label}>{t('memory.maxRecords')}</label>
+					<SettingHelpText text={t('memory.maxRecordsDescription')} />
 					<input
 						type="number"
 						style={styles.input}
@@ -159,6 +175,7 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 
 				<div style={styles.field}>
 					<label style={styles.label}>{t('memory.retentionDays')}</label>
+					<SettingHelpText text={t('memory.retentionDaysDescription')} />
 					<input
 						type="number"
 						style={styles.input}
@@ -171,6 +188,7 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 
 				<div style={styles.field}>
 					<label style={styles.label}>{t('memory.shortTermLimit')}</label>
+					<SettingHelpText text={t('memory.shortTermLimitDescription')} />
 					<input
 						type="number"
 						style={styles.input}
@@ -183,6 +201,7 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 
 				<div style={styles.field}>
 					<label style={styles.label}>{t('memory.historyAnalysisLimit')}</label>
+					<SettingHelpText text={t('memory.historyAnalysisLimitDescription')} />
 					<input
 						type="number"
 						style={styles.input}
@@ -202,6 +221,7 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						/>
 						{t('memory.autoCleanup')}
 					</label>
+					<SettingHelpText text={t('memory.autoCleanupDescription')} checkbox />
 				</div>
 			</div>
 
@@ -218,10 +238,12 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						/>
 						{t('memory.notificationsEnabled')}
 					</label>
+					<SettingHelpText text={t('memory.notificationsEnabledDescription')} checkbox />
 				</div>
 
 				<div style={styles.field}>
 					<label style={styles.label}>{t('memory.notificationType')}</label>
+					<SettingHelpText text={t('memory.notificationTypeDescription')} />
 					<select
 						style={styles.select}
 						value={local.notificationType}
@@ -247,6 +269,7 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						/>
 						{t('memory.embeddingsEnabled')}
 					</label>
+					<SettingHelpText text={t('memory.embeddingsEnabledDescription')} checkbox />
 				</div>
 
 				<div style={styles.field}>
@@ -258,6 +281,7 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						/>
 						{t('memory.knowledgeGraphEnabled')}
 					</label>
+					<SettingHelpText text={t('memory.knowledgeGraphEnabledDescription')} checkbox />
 				</div>
 			</div>
 		</div>
@@ -281,6 +305,21 @@ const styles: Record<string, React.CSSProperties> = {
 	label: {
 		display: 'flex', alignItems: 'center', gap: '6px',
 		fontSize: '12px', marginBottom: '4px',
+	},
+	description: {
+		fontSize: '11px',
+		color: 'var(--vscode-descriptionForeground)',
+		marginBottom: '6px',
+		maxWidth: '560px',
+		lineHeight: 1.4,
+	},
+	checkboxDescription: {
+		fontSize: '11px',
+		color: 'var(--vscode-descriptionForeground)',
+		marginBottom: '6px',
+		marginLeft: '24px',
+		maxWidth: '560px',
+		lineHeight: 1.4,
 	},
 	input: {
 		display: 'block', width: '100%', maxWidth: '300px',

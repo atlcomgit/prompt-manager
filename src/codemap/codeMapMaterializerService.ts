@@ -1,4 +1,5 @@
 import type { CodeMapMaterializationTarget } from '../types/codemap.js';
+import { getInstructionUsageRules } from '../utils/instructionUsageRules.js';
 
 export class CodeMapMaterializerService {
 	compose(
@@ -20,11 +21,12 @@ export function buildCodeMapChatInstructions(input: {
 	targets: CodeMapMaterializationTarget[];
 }): string {
 	const isRussianLocale = input.locale.toLowerCase().startsWith('ru');
+	const usageRules = getInstructionUsageRules(input.locale);
 	const text = isRussianLocale
 		? {
 			heading: '# Code Map инструкции для текущего чата',
 			purposeTitle: '## Назначение',
-			purposeText: 'Этот файл содержит актуальные или последние сохраненные codemap-инструкции по выбранным проектам и веткам. Используй его как фоновую карту кода при работе в чате.',
+			purposeText: 'Этот файл содержит актуальные или последние сохраненные codemap-инструкции по выбранным проектам и веткам.',
 			generatedAt: 'Сформировано',
 			missingTitle: '### Инструкция пока не готова',
 			missingText: 'Для этой пары проект+ветка сохраненная инструкция еще не найдена. Обновление поставлено в очередь и будет выполнено в фоне.',
@@ -39,7 +41,7 @@ export function buildCodeMapChatInstructions(input: {
 		: {
 			heading: '# Code Map Instructions for the Current Chat',
 			purposeTitle: '## Purpose',
-			purposeText: 'This file contains current or last persisted codemap instructions for the selected projects and branches. Use it as background code-map context while working in chat.',
+			purposeText: 'This file contains current or last persisted codemap instructions for the selected projects and branches.',
 			generatedAt: 'Generated at',
 			missingTitle: '### Instruction not ready yet',
 			missingText: 'No persisted instruction was found for this project+branch pair yet. A refresh job has been queued and will run in the background.',
@@ -62,6 +64,8 @@ export function buildCodeMapChatInstructions(input: {
 			'',
 			text.purposeTitle,
 			text.purposeText,
+			'',
+			...usageRules.map(rule => `- ${rule}`),
 			'',
 			`- ${text.generatedAt}: ${input.generatedAt}`,
 			'',
@@ -106,6 +110,8 @@ export function buildCodeMapChatInstructions(input: {
 		'',
 		text.purposeTitle,
 		text.purposeText,
+		'',
+		...usageRules.map(rule => `- ${rule}`),
 		'',
 		`- ${text.generatedAt}: ${input.generatedAt}`,
 		'',

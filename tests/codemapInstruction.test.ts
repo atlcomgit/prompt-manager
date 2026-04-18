@@ -1,7 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CodeMapInstructionService, buildCodeMapProjectInstruction, buildFileSummary } from '../src/codemap/codeMapInstructionService.js';
+import { CodeMapInstructionService, buildCodeMapProjectInstruction, buildFileSummary, parseGitLsTreeSnapshot } from '../src/codemap/codeMapInstructionService.js';
+
+test('parseGitLsTreeSnapshot parses nul-delimited output with unicode paths', () => {
+	const output = Buffer.from([
+		`100644 blob ${'a'.repeat(40)}\tsrc/пример.ts\0`,
+		`100644 blob ${'b'.repeat(40)}\tstatic/tests/themes/index.css\0`,
+	].join(''), 'utf-8');
+	const snapshot = parseGitLsTreeSnapshot(output);
+
+	assert.deepEqual(Array.from(snapshot.entries()), [
+		['src/пример.ts', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+		['static/tests/themes/index.css', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'],
+	]);
+});
 
 class FakeCodeMapSummaryCache {
 	private readonly fileSummaries = new Map<string, unknown>();

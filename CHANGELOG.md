@@ -6,8 +6,17 @@
 - AI post-correction of Whisper transcriptions via Copilot Language Model API (`promptManager.voice.aiPostCorrection`, enabled by default). Automatically corrects STT errors, restores punctuation and casing after speech-to-text processing.
 
 ### Changed
+- Memory webview fully redesigned with a flat design language: all shadows removed, panels use thin 8% foreground-opacity borders, accent lines (3-4px colored left/top borders) replace heavy shadows for visual hierarchy, buttons are flat solid backgrounds without gradients, segmented tabs use a subtle contained bar, metric cards have a 3px top accent border, badge/pill shapes changed from pill (999px) to 6px radius rectangles, progress bars thinned to 6-8px, typography upgraded with uppercase labels, tighter letter-spacing, and larger metric numbers (32px), and dialog overlays use stronger backdrop blur with no box-shadow.
+- Memory header card now uses a left accent border with a subtle gradient tint instead of heavy box-shadow and old gradient; eyebrow labels use the accent color for visual hierarchy.
+- Navigation tabs (segmented tabs) now display inactive labels at 60% foreground opacity for better readability; active tab gets a subtle shadow lift for clearer distinction.
+- Commit list in the History section now includes an inline search bar at the top for quick full-text/semantic search without switching to a separate tab.
+- Settings panel labels increased to 12px bold foreground, descriptions use 70% opacity foreground for better readability, and field spacing reduced for a denser layout.
+- Memory metric cards use a tinted background (2% foreground mix) for subtle depth, and the Dashboard hero panel has a soft gradient toward the accent color.
+- List items in History and Instructions no longer leave border artifacts when switching selection; borders are removed in favor of clean left accent marks on active items.
+- Custom scrollbar styling added to the Memory webview with thin 6px tracks and subtle foreground-colored thumbs.
 - Copilot Premium Usage page redesigned: single-column layout, area chart with gradient and Catmull-Rom smoothing for trend visualization, color-coded daily bars (green/orange/red vs recommended pace), merged status footer with collapsible debug log.
 - Quick Add Prompt is now also available as an editor title action near the tab bar using the Prompt Manager PM icon, it now stores the pasted input as prompt text instead of the Title field and runs the same automatic title and description enrichment used by the editor page, and custom-group sections in the sidebar now use each group color as the header background with automatic black-or-white contrast for the label.
+- Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
 - Prompt-local context files stored under .vscode/prompt-manager/<prompt>/context now survive prompt folder renames and reopen correctly after the editor page is closed and opened again; stale config.json references are auto-repaired on load and on the next save.

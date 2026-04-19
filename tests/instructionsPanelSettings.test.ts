@@ -4,7 +4,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { DEFAULT_CODEMAP_SETTINGS } from '../src/codemap/codeMapConfig.js';
-import { InstructionsPanel } from '../src/webview/memory/components/InstructionsPanel.js';
+import { InstructionSettingsPanel } from '../src/webview/memory/components/InstructionSettingsPanel.js';
 
 const translations: Record<string, string> = {
 	'memory.instructions.enabled.help': 'Включает систему codemap-инструкций, которая готовит карту кода по веткам для чатов.',
@@ -27,28 +27,13 @@ function t(key: string): string {
 	return translations[key] || key;
 }
 
-test('InstructionsPanel renders helper descriptions for settings without previous explanations', () => {
-	const markup = renderToStaticMarkup(React.createElement(InstructionsPanel, {
-		instructions: [],
-		selectedInstructionId: null,
-		detail: null,
-		statistics: null,
-		activity: null,
+test('InstructionSettingsPanel renders helper descriptions for extracted codemap settings', () => {
+	const markup = renderToStaticMarkup(React.createElement(InstructionSettingsPanel, {
 		settings: { ...DEFAULT_CODEMAP_SETTINGS, aiModel: 'gpt-5.4' },
 		availableModels: [{ id: 'gpt-5.4', name: 'GPT-5.4' }],
-		onSelectInstruction: () => { },
-		onRefreshInstructions: () => { },
-		onRefreshWorkspace: () => { },
-		onRefreshInstruction: () => { },
-		onRefreshStatistics: () => { },
-		onRefreshActivity: () => { },
-		onRefreshSettings: () => { },
-		onSaveSettings: () => { },
-		onDeleteInstruction: () => { },
-		onDeleteObsolete: () => { },
-		isRefreshing: false,
+		onRefresh: () => { },
+		onSave: () => { },
 		t,
-		initialActiveTab: 'settings',
 	}));
 
 	for (const description of Object.values(translations)) {

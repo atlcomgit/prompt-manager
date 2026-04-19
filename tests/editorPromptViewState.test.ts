@@ -18,6 +18,7 @@ test('createDefaultEditorPromptExpandedSections opens the main authoring blocks 
 		globalPrompt: false,
 		report: false,
 		notes: false,
+		memory: false,
 		plan: false,
 		tech: false,
 		integrations: false,

@@ -47,6 +47,7 @@ export type EditorPromptSectionKey =
 	| 'globalPrompt'
 	| 'report'
 	| 'notes'
+	| 'memory'
 	| 'plan'
 	| 'tech'
 	| 'integrations'
@@ -89,6 +90,7 @@ export function createDefaultEditorPromptExpandedSections(): EditorPromptExpande
 		globalPrompt: false,
 		report: false,
 		notes: false,
+		memory: false,
 		plan: false,
 		tech: false,
 		integrations: false,
@@ -149,6 +151,7 @@ function normalizeEditorPromptExpandedSections(
 		globalPrompt: typeof state.globalPrompt === 'boolean' ? state.globalPrompt : defaults.globalPrompt,
 		report: typeof state.report === 'boolean' ? state.report : defaults.report,
 		notes: typeof state.notes === 'boolean' ? state.notes : defaults.notes,
+		memory: typeof state.memory === 'boolean' ? state.memory : defaults.memory,
 		plan: typeof state.plan === 'boolean' ? state.plan : defaults.plan,
 		tech: typeof state.tech === 'boolean' ? state.tech : defaults.tech,
 		integrations: typeof state.integrations === 'boolean' ? state.integrations : defaults.integrations,
@@ -615,4 +618,34 @@ export function sortPromptCustomGroups(groups: PromptCustomGroup[]): PromptCusto
 		}
 		return a.name.localeCompare(b.name);
 	});
+}
+
+// ---- Chat Memory Summary (displayed in Process tab) ----
+
+/** Instruction file attached to the chat session */
+export interface ChatMemoryInstructionFile {
+	/** Short label for display (e.g. "Глобальные инструкции") */
+	label: string;
+	/** File name on disk */
+	fileName: string;
+}
+
+/** Summary of the memory context passed to the chat */
+export interface ChatMemorySummary {
+	/** Total character count of the raw memory context block */
+	totalChars: number;
+	/** Number of recent/relevant commits included */
+	shortTermCommits: number;
+	/** Number of architecture summaries included */
+	longTermSummaries: number;
+	/** Whether the project structure map was included */
+	hasProjectMap: boolean;
+	/** Number of uncommitted-change projects included */
+	uncommittedProjects: number;
+	/** Instruction files attached to the chat */
+	instructionFiles: ChatMemoryInstructionFile[];
+	/** User context files count */
+	contextFilesCount: number;
+	/** ISO timestamp when the summary was built */
+	generatedAt: string;
 }

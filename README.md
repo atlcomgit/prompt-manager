@@ -122,10 +122,12 @@ This README is intentionally modular. The extension is still evolving, and the p
 
 ### Build project memory from real repository history
 
+- Start on a dashboard-first Memory landing page with a shared visual layout, top-level navigation for Dashboard, Histories, Instructions, and Settings, and at-a-glance metrics for coverage, storage, activity, authors, files, and recent histories.
 - Open the Project Memory panel to browse commits, file changes, and stored analysis.
 - Run AI-powered history analysis with configurable models and a dedicated background priority control that defaults to the new `lowest` mode.
 - Use semantic search over embeddings to find similar work by meaning, not just by text.
 - Inspect knowledge-graph style relationships and code-oriented instruction snapshots.
+- Manage history-memory and codemap-instruction options from one unified Settings screen with internal tabs instead of jumping between separate settings views.
 - Refresh codemap instructions from the instructions view with locale-specific persistence, selected-branch delta snapshots that stay tied to the branch you actually chose, and a default `lowest` priority tuned to stay closer to idle CPU time.
 
 ### Monitor Copilot usage inside VS Code

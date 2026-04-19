@@ -5,6 +5,7 @@
 import React, { useState, useEffect } from 'react';
 import type { MemoryAvailableModel, MemorySettings, MemoryAnalysisDepth, MemoryNotificationType } from '../../../types/memory';
 import { memoryButtonStyles } from './buttonStyles';
+import { MemoryPanel, memoryUiStyles } from './memoryUi';
 
 interface Props {
 	settings: MemorySettings | null;
@@ -83,11 +84,10 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 				</button>
 			</div>
 
-			{/* General */}
-			<div style={styles.section}>
-				<h4 style={styles.sectionTitle}>{t('memory.settingsGeneral')}</h4>
-
-				<div style={styles.field}>
+			<div style={memoryUiStyles.pageStack}>
+				<MemoryPanel title={t('memory.settingsGeneral')}>
+					<div style={styles.fieldsStack}>
+						<div style={styles.field}>
 					<label style={styles.label}>
 						<input
 							type="checkbox"
@@ -97,9 +97,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						{t('memory.enabled')}
 					</label>
 					<SettingHelpText text={t('memory.enabledDescription')} checkbox />
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>{t('memory.aiModel')}</label>
 					<SettingHelpText text={t('memory.aiModelDescription')} />
 					<select
@@ -112,9 +112,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 							<option key={model.id} value={model.id}>{model.name}</option>
 						))}
 					</select>
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>{t('memory.analysisDepth')}</label>
 					<SettingHelpText text={t('memory.analysisDepthDescription')} />
 					<select
@@ -126,9 +126,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						<option value="standard">Standard</option>
 						<option value="deep">Deep</option>
 					</select>
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>{t('memory.diffLimit')}</label>
 					<SettingHelpText text={t('memory.diffLimitDescription')} />
 					<input
@@ -139,9 +139,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						min={1000}
 						max={50000}
 					/>
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>{t('memory.httpPort')}</label>
 					<SettingHelpText text={t('memory.httpPortDescription')} />
 					<input
@@ -153,14 +153,13 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						max={65535}
 					/>
 					<span style={styles.hint}>{t('memory.httpPortHint')}</span>
-				</div>
-			</div>
+						</div>
+					</div>
+				</MemoryPanel>
 
-			{/* Data management */}
-			<div style={styles.section}>
-				<h4 style={styles.sectionTitle}>{t('memory.settingsData')}</h4>
-
-				<div style={styles.field}>
+				<MemoryPanel title={t('memory.settingsData')}>
+					<div style={styles.fieldsStack}>
+						<div style={styles.field}>
 					<label style={styles.label}>{t('memory.maxRecords')}</label>
 					<SettingHelpText text={t('memory.maxRecordsDescription')} />
 					<input
@@ -171,9 +170,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						min={100}
 						max={100000}
 					/>
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>{t('memory.retentionDays')}</label>
 					<SettingHelpText text={t('memory.retentionDaysDescription')} />
 					<input
@@ -184,9 +183,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						min={7}
 						max={3650}
 					/>
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>{t('memory.shortTermLimit')}</label>
 					<SettingHelpText text={t('memory.shortTermLimitDescription')} />
 					<input
@@ -197,9 +196,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						min={10}
 						max={500}
 					/>
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>{t('memory.historyAnalysisLimit')}</label>
 					<SettingHelpText text={t('memory.historyAnalysisLimitDescription')} />
 					<input
@@ -210,9 +209,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						min={1}
 						max={500}
 					/>
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>{t('memory.backgroundPriority')}</label>
 					<SettingHelpText text={t('memory.backgroundPriorityDescription')} />
 					<select
@@ -225,9 +224,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						<option value="normal">normal</option>
 						<option value="high">high</option>
 					</select>
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>
 						<input
 							type="checkbox"
@@ -237,14 +236,13 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						{t('memory.autoCleanup')}
 					</label>
 					<SettingHelpText text={t('memory.autoCleanupDescription')} checkbox />
-				</div>
-			</div>
+						</div>
+					</div>
+				</MemoryPanel>
 
-			{/* Notifications */}
-			<div style={styles.section}>
-				<h4 style={styles.sectionTitle}>{t('memory.settingsNotifications')}</h4>
-
-				<div style={styles.field}>
+				<MemoryPanel title={t('memory.settingsNotifications')}>
+					<div style={styles.fieldsStack}>
+						<div style={styles.field}>
 					<label style={styles.label}>
 						<input
 							type="checkbox"
@@ -254,9 +252,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						{t('memory.notificationsEnabled')}
 					</label>
 					<SettingHelpText text={t('memory.notificationsEnabledDescription')} checkbox />
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>{t('memory.notificationType')}</label>
 					<SettingHelpText text={t('memory.notificationTypeDescription')} />
 					<select
@@ -268,14 +266,13 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						<option value="statusbar">Status bar</option>
 						<option value="silent">Silent (log only)</option>
 					</select>
-				</div>
-			</div>
+						</div>
+					</div>
+				</MemoryPanel>
 
-			{/* Embeddings */}
-			<div style={styles.section}>
-				<h4 style={styles.sectionTitle}>{t('memory.settingsEmbeddings')}</h4>
-
-				<div style={styles.field}>
+				<MemoryPanel title={t('memory.settingsEmbeddings')}>
+					<div style={styles.fieldsStack}>
+						<div style={styles.field}>
 					<label style={styles.label}>
 						<input
 							type="checkbox"
@@ -285,9 +282,9 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						{t('memory.embeddingsEnabled')}
 					</label>
 					<SettingHelpText text={t('memory.embeddingsEnabledDescription')} checkbox />
-				</div>
+						</div>
 
-				<div style={styles.field}>
+						<div style={styles.field}>
 					<label style={styles.label}>
 						<input
 							type="checkbox"
@@ -297,56 +294,64 @@ export const SettingsPanel: React.FC<Props> = ({ settings, availableModels, onSa
 						{t('memory.knowledgeGraphEnabled')}
 					</label>
 					<SettingHelpText text={t('memory.knowledgeGraphEnabledDescription')} checkbox />
-				</div>
+						</div>
+					</div>
+				</MemoryPanel>
 			</div>
 		</div>
 	);
 };
 
+// Стили панели настроек — плоский дизайн, тонкие разделители.
 const styles: Record<string, React.CSSProperties> = {
-	container: { padding: '16px', overflow: 'auto', height: '100%' },
+	container: { padding: '20px', overflow: 'auto', height: '100%', boxSizing: 'border-box' },
 	loading: {
 		display: 'flex', alignItems: 'center', justifyContent: 'center',
-		height: '100%', color: 'var(--vscode-descriptionForeground)',
+		height: '100%', color: 'var(--vscode-descriptionForeground)', fontSize: '12px',
 	},
-	actions: { display: 'flex', gap: '8px', marginBottom: '16px' },
-	section: {
-		marginBottom: '16px', padding: '12px',
-		background: 'var(--vscode-editor-background)',
-		border: '1px solid var(--vscode-panel-border)', borderRadius: '4px',
+	actions: { display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' },
+	// Стек полей — компактнее, без лишних пустот.
+	fieldsStack: { display: 'flex', flexDirection: 'column', gap: '8px' },
+	field: {
+		paddingBottom: '10px',
+		borderBottom: '1px solid color-mix(in srgb, var(--vscode-foreground) 6%, transparent)',
 	},
-	sectionTitle: { margin: '0 0 10px 0', fontSize: '13px' },
-	field: { marginBottom: '10px' },
+	// Лейбл поля — яркий, хорошо читаемый.
 	label: {
 		display: 'flex', alignItems: 'center', gap: '6px',
-		fontSize: '12px', marginBottom: '4px',
+		fontSize: '12px', marginBottom: '4px', fontWeight: 700,
+		textTransform: 'uppercase', letterSpacing: '0.04em',
+		color: 'var(--vscode-foreground)',
 	},
+	// Описание — контрастнее для лёгкой читаемости.
 	description: {
-		fontSize: '11px',
-		color: 'var(--vscode-descriptionForeground)',
+		fontSize: '12px',
+		color: 'color-mix(in srgb, var(--vscode-foreground) 70%, transparent)',
 		marginBottom: '6px',
-		maxWidth: '560px',
-		lineHeight: 1.4,
+		maxWidth: '72ch',
+		lineHeight: 1.5,
 	},
 	checkboxDescription: {
-		fontSize: '11px',
-		color: 'var(--vscode-descriptionForeground)',
+		fontSize: '12px',
+		color: 'color-mix(in srgb, var(--vscode-foreground) 70%, transparent)',
 		marginBottom: '6px',
 		marginLeft: '24px',
-		maxWidth: '560px',
-		lineHeight: 1.4,
+		maxWidth: '72ch',
+		lineHeight: 1.5,
 	},
 	input: {
-		display: 'block', width: '100%', maxWidth: '300px',
-		padding: '4px 8px',
+		display: 'block', width: '100%', maxWidth: '260px',
+		padding: '8px 12px',
 		background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)',
-		border: '1px solid var(--vscode-input-border)', borderRadius: '3px', fontSize: '12px',
+		border: '1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent)', borderRadius: '8px', fontSize: '13px',
+		transition: 'border-color 160ms ease',
 	},
 	select: {
-		display: 'block', width: '100%', maxWidth: '300px',
-		padding: '4px 8px',
+		display: 'block', width: '100%', maxWidth: '260px',
+		padding: '8px 12px',
 		background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)',
-		border: '1px solid var(--vscode-input-border)', borderRadius: '3px', fontSize: '12px',
+		border: '1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent)', borderRadius: '8px', fontSize: '13px',
+		transition: 'border-color 160ms ease',
 	},
-	hint: { fontSize: '10px', color: 'var(--vscode-descriptionForeground)', marginLeft: '4px' },
+	hint: { fontSize: '10px', color: 'color-mix(in srgb, var(--vscode-foreground) 55%, transparent)', marginLeft: '4px' },
 };

@@ -2,7 +2,7 @@
  * Message types for communication between extension and webviews
  */
 
-import type { EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
+import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 
 export type GitOverlayBusyReason =
@@ -195,6 +195,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptSaving'; id: string; promptUuid?: string; saving: boolean }
 	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string; requestId?: string }
+	| { type: 'chatMemorySummary'; promptId: string; memorySummary: ChatMemorySummary }
 	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number }
 	| { type: 'reportContentUpdated'; report: string; timeSpentWriting?: number; timeSpentOnTask?: number; updatedAt?: string }
 	| { type: 'promptPlanUpdated'; promptId?: string; exists: boolean; content: string }

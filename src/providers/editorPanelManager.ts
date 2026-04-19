@@ -11,7 +11,7 @@ import * as path from 'path';
 import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { generateSmartTitle } from '../utils/smartTitle.js';
-import type { EditorPromptViewState, EditorPromptViewStateKeySource, Prompt, PromptContextFileCard } from '../types/prompt.js';
+import type { ChatMemoryInstructionFile, ChatMemorySummary, EditorPromptViewState, EditorPromptViewStateKeySource, Prompt, PromptContextFileCard } from '../types/prompt.js';
 import { createDefaultEditorPromptViewState, createDefaultPrompt, shouldShowPromptPlanForStatus } from '../types/prompt.js';
 import type {
 	ClipboardImagePayload,
@@ -24,7 +24,7 @@ import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
 import type { PromptVoiceService } from '../services/promptVoice/promptVoiceService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
-import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
+import type { ChatMemoryInstructionService, ChatMemorySessionRecord } from '../services/chatMemoryInstructionService.js';
 import type { CustomGroupsService } from '../services/customGroupsService.js';
 import type { CodeMapChatInstructionService } from '../codemap/codeMapChatInstructionService.js';
 import { GitService } from '../services/gitService.js';
@@ -1983,7 +1983,10 @@ export class EditorPanelManager {
 		};
 	}
 
-	private resolveStatusFromHooks(hooks: string[]): 'completed' | 'stopped' | null {
+	private resolveTerminalStatusFromHooks(
+		hooks: string[],
+		phase: 'afterChatCompleted' | 'chatError',
+	): 'completed' | 'stopped' | null {
 		const values = hooks.map(h => h.toLowerCase());
 		const completed = values.some(h =>
 			h.includes('status-completed')
@@ -2001,9 +2004,13 @@ export class EditorPanelManager {
 			|| h.includes('chat-failed')
 		);
 
-		if (completed && !stopped) {
-			return 'completed';
+		if (phase === 'afterChatCompleted') {
+			if (completed && !stopped) {
+				return 'completed';
+			}
+			return null;
 		}
+
 		if (stopped && !completed) {
 			return 'stopped';
 		}
@@ -6766,6 +6773,18 @@ export class EditorPanelManager {
 					};
 					postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
 
+					// Send memory summary to the Process tab
+					try {
+						const memorySummary = this.buildChatMemorySummary(
+							sessionInstructionRecord,
+							chatContextFiles,
+							prompt,
+						);
+						postMessage({ type: 'chatMemorySummary', memorySummary, promptId: prompt.id });
+					} catch {
+						// Non-critical: summary display failure must not block chat
+					}
+
 					void (async () => {
 						const bindConfirmedSession = async (sessionId: string, source: string): Promise<boolean> => {
 							const normalizedSessionId = (sessionId || '').trim();
@@ -6844,10 +6863,11 @@ export class EditorPanelManager {
 							trackedSessionId,
 							completionSessionId,
 						});
+						const shouldFinalizeTrackedCompletion = completion.ok && shouldFinalizeTrackedChat;
 						this.hooksOutput.appendLine(
-							`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} binding=${String(sessionBindingSucceeded)} completionOk=${completion.ok} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatReportHtml ? 'yes' : 'no'} finalize=${String(shouldFinalizeTrackedChat)}`
+							`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} binding=${String(sessionBindingSucceeded)} completionOk=${completion.ok} observed=${String(completionObserved)} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatReportHtml ? 'yes' : 'no'} finalize=${String(shouldFinalizeTrackedCompletion)}`
 						);
-						if ((completion.ok || completionObserved) && shouldFinalizeTrackedChat) {
+						if (shouldFinalizeTrackedCompletion) {
 							const promptToComplete = await this.storageService.getPrompt(prompt.id);
 							if (promptToComplete) {
 								const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
@@ -6867,8 +6887,12 @@ export class EditorPanelManager {
 								if (shouldCaptureAgentFinalResponse && chatReportHtml) {
 									promptToComplete.report = chatReportHtml;
 								}
-								if (promptToComplete.status !== 'completed') {
-									promptToComplete.status = 'completed';
+								const completionStatus = this.resolveTerminalStatusFromHooks(
+									prompt?.hooks || [],
+									'afterChatCompleted',
+								) || 'completed';
+								if (promptToComplete.status !== completionStatus) {
+									promptToComplete.status = completionStatus;
 								}
 								await this.storageService.savePrompt(promptToComplete);
 								if (currentPrompt.id === promptToComplete.id) {
@@ -6927,7 +6951,7 @@ export class EditorPanelManager {
 							return;
 						}
 
-						if ((completion.ok || completionObserved) && !shouldFinalizeTrackedChat) {
+						if (completion.ok && !shouldFinalizeTrackedChat) {
 							this.hooksOutput.appendLine(`[chat-track] skip auto-complete for prompt=${prompt.id}: chat completion observed before session binding was confirmed`);
 						}
 
@@ -7002,11 +7026,42 @@ export class EditorPanelManager {
 							return;
 						}
 
+						let chatErrorStatus = prompt?.status || 'in-progress';
+						const terminalErrorStatus = this.resolveTerminalStatusFromHooks(
+							prompt?.hooks || [],
+							'chatError',
+						);
+						if (terminalErrorStatus && prompt?.id) {
+							const promptToStop = await this.storageService.getPrompt(prompt.id);
+							if (promptToStop) {
+								chatErrorStatus = promptToStop.status;
+								if (promptToStop.status !== terminalErrorStatus) {
+									promptToStop.status = terminalErrorStatus;
+									const savedStoppedPrompt = await this.storageService.savePrompt(promptToStop, {
+										historyReason: 'status-change',
+									});
+									chatErrorStatus = savedStoppedPrompt.status;
+									try {
+										await this.chatMemoryInstructionService()?.handlePromptStatusChange(savedStoppedPrompt);
+									} catch (error) {
+										this.hooksOutput.appendLine(`[chat-memory] chatError status cleanup failed for prompt=${savedStoppedPrompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+									}
+									if (currentPrompt.id === savedStoppedPrompt.id) {
+										Object.assign(currentPrompt, savedStoppedPrompt);
+										postMessage({ type: 'prompt', prompt: savedStoppedPrompt, reason: 'sync' });
+									}
+									this._onDidSave.fire(savedStoppedPrompt.id);
+									Object.assign(prompt, savedStoppedPrompt);
+								}
+							}
+						}
+
 						await this.runConfiguredHooks(prompt?.hooks || [], {
 							event: 'chatError',
 							error: `Chat completion not detected (${completion.reason || 'unknown'})`,
 							chatCompletion: completion,
 							...hookPayloadBase,
+							status: chatErrorStatus,
 						}, 'chatError');
 						try {
 							await this.chatMemoryInstructionService()?.noteChatError(
@@ -7019,23 +7074,6 @@ export class EditorPanelManager {
 						}
 						this.hooksOutput.appendLine(`[chat-track] chatError fired for prompt=${prompt.id}: completion not detected`);
 					})();
-
-					// Optional hook-based status policy (no modal)
-					const hookStatus = this.resolveStatusFromHooks(prompt.hooks || []);
-					if (hookStatus) {
-						prompt.status = hookStatus;
-						await this.storageService.savePrompt(prompt);
-						try {
-							await this.chatMemoryInstructionService()?.handlePromptStatusChange(prompt);
-						} catch (error) {
-							this.hooksOutput.appendLine(`[chat-memory] hook status cleanup failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
-						}
-						this._onDidSave.fire(prompt.id);
-						if (currentPrompt.id === prompt.id) {
-							Object.assign(currentPrompt, prompt);
-							postMessage({ type: 'prompt', prompt, reason: 'sync' });
-						}
-					}
 				} catch (error) {
 					await reportStartChatFailure(formatStartChatErrorMessage(error));
 				}
@@ -8242,5 +8280,48 @@ export class EditorPanelManager {
 		this.panelDirtySetters.get(SINGLE_EDITOR_PANEL_KEY)?.(false);
 		this.silentClosePanels.add(panel);
 		panel.dispose();
+	}
+
+	/** Build a compact ChatMemorySummary from data available after chat context generation */
+	private buildChatMemorySummary(
+		sessionRecord: ChatMemorySessionRecord | null,
+		contextFiles: { instructionReferences: string[]; promptContextReferences: string[]; allAbsolutePaths: string[] },
+		prompt: Prompt,
+	): ChatMemorySummary {
+		const isRu = vscode.env.language.toLowerCase().startsWith('ru');
+		const instructionFiles: ChatMemoryInstructionFile[] = contextFiles.instructionReferences.map(ref => {
+			const filePath = ref.replace(/^#file:/, '');
+			const baseName = filePath.split(/[\\/]/).pop() || filePath;
+			return { label: this.labelForInstructionFile(baseName, isRu), fileName: baseName };
+		});
+
+		const stats = sessionRecord?.contextStats;
+		return {
+			totalChars: stats?.totalChars ?? 0,
+			shortTermCommits: stats?.shortTermCommits ?? 0,
+			longTermSummaries: stats?.longTermSummaries ?? 0,
+			hasProjectMap: stats?.hasProjectMap ?? false,
+			uncommittedProjects: stats?.uncommittedProjects ?? 0,
+			instructionFiles,
+			contextFilesCount: (prompt.contextFiles || []).filter(f => f.trim()).length,
+			generatedAt: new Date().toISOString(),
+		};
+	}
+
+	/** Map instruction file name to a human-readable label */
+	private labelForInstructionFile(baseName: string, isRu: boolean): string {
+		if (baseName === 'prompt-manager.instructions.md') {
+			return isRu ? 'Глобальные инструкции агента' : 'Global agent instructions';
+		}
+		if (baseName === 'project.instructions.md') {
+			return isRu ? 'Проектные инструкции' : 'Project instructions';
+		}
+		if (baseName === 'codemap.instructions.md') {
+			return isRu ? 'Карта кода' : 'Code map';
+		}
+		if (baseName.startsWith('session-') && baseName.endsWith('.instructions.md')) {
+			return isRu ? 'Память сессии' : 'Session memory';
+		}
+		return baseName;
 	}
 }

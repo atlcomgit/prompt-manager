@@ -20,6 +20,7 @@ import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal'
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
 import type { ClipboardImagePayload } from '../../types/messages';
 import type {
+  ChatMemorySummary,
   EditorPromptExpandedSections,
   EditorPromptManualSectionOverrides,
   EditorPromptSectionKey,
@@ -443,6 +444,7 @@ export const EditorApp: React.FC = () => {
   });
   const [chatLaunchRenameState, setChatLaunchRenameState] = useState<'idle' | 'active' | 'completed'>('idle');
   const [chatLaunchCompletionHold, setChatLaunchCompletionHold] = useState(false);
+  const [chatMemorySummary, setChatMemorySummary] = useState<ChatMemorySummary | null>(null);
   const chatLaunchCompletionTimerRef = useRef<number | null>(null);
   const previousChatEntryAvailabilityRef = useRef(chatEntryState.hasChatEntry);
   const chatLaunchTrackingKey = resolvePromptChatLaunchTrackingKey(prompt);
@@ -1974,6 +1976,11 @@ export const EditorApp: React.FC = () => {
         }
         setChatLaunchRenameState(msg.state === 'started' ? 'active' : 'completed');
         break;
+      case 'chatMemorySummary':
+        if (msg.memorySummary) {
+          setChatMemorySummary(msg.memorySummary as ChatMemorySummary);
+        }
+        break;
       case 'generatedTitle':
         setIsGeneratingTitle(false);
         setPrompt(prev => ({ ...prev, title: msg.title }));
@@ -3500,6 +3507,32 @@ export const EditorApp: React.FC = () => {
     );
   };
 
+  // ---- Memory section for the Process tab (uses renderSection) ----
+  const showMemorySection = prompt.status !== 'draft' && chatMemorySummary !== null;
+
+  /** Format character count as a short human-readable label (e.g. "5.8k") */
+  const formatChars = (count: number): string => {
+    if (count >= 1000) {
+      return `${(count / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+    }
+    return String(count);
+  };
+
+  const memorySummary = useMemo(() => {
+    if (!chatMemorySummary) { return []; }
+    const chunks: string[] = [];
+    if (chatMemorySummary.totalChars > 0) {
+      chunks.push(`${formatChars(chatMemorySummary.totalChars)} ${t('editor.memoryBlockChars')}`);
+    }
+    if (chatMemorySummary.instructionFiles.length > 0) {
+      chunks.push(`${chatMemorySummary.instructionFiles.length} ${t('editor.memoryBlockInstructionFiles').toLowerCase()}`);
+    }
+    if (chatMemorySummary.shortTermCommits > 0) {
+      chunks.push(`${chatMemorySummary.shortTermCommits} ${t('editor.memoryBlockCommits')}`);
+    }
+    return chunks;
+  }, [chatMemorySummary]);
+
   const footerChatLaunchBlock = shouldShowChatLaunchBlock ? (
     <div style={styles.chatLaunchDock}>
       <section style={styles.chatLaunchCard} aria-live="polite">
@@ -4350,6 +4383,62 @@ export const EditorApp: React.FC = () => {
             </>
             ))}
 
+          {showMemorySection && chatMemorySummary ? renderSection('memory', t('editor.memoryBlockTitle'), memorySummary, (
+            <>
+              {chatMemorySummary.totalChars === 0 && chatMemorySummary.instructionFiles.length === 0 ? (
+                <div style={styles.planRawContentEmpty}>{t('editor.memoryBlockEmpty')}</div>
+              ) : (
+                <div style={styles.memoryBlockContent}>
+                  {/* History section */}
+                  {(chatMemorySummary.shortTermCommits > 0 || chatMemorySummary.longTermSummaries > 0 || chatMemorySummary.hasProjectMap || chatMemorySummary.uncommittedProjects > 0) ? (
+                    <div style={styles.memoryBlockRow}>
+                      <span style={styles.memoryBlockRowLabel}>{t('editor.memoryBlockHistory')}</span>
+                      <div style={styles.memoryBlockChips}>
+                        {chatMemorySummary.shortTermCommits > 0 ? (
+                          <span style={styles.memoryBlockChip}>{chatMemorySummary.shortTermCommits} {t('editor.memoryBlockCommits')}</span>
+                        ) : null}
+                        {chatMemorySummary.longTermSummaries > 0 ? (
+                          <span style={styles.memoryBlockChip}>{chatMemorySummary.longTermSummaries} {t('editor.memoryBlockSummaries')}</span>
+                        ) : null}
+                        {chatMemorySummary.hasProjectMap ? (
+                          <span style={styles.memoryBlockChip}>{t('editor.memoryBlockProjectMap')} — {t('editor.memoryBlockIncluded')}</span>
+                        ) : null}
+                        {chatMemorySummary.uncommittedProjects > 0 ? (
+                          <span style={styles.memoryBlockChip}>{t('editor.memoryBlockUncommitted')}: {chatMemorySummary.uncommittedProjects} {t('editor.memoryBlockProjects')}</span>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                  {/* Instructions section */}
+                  {chatMemorySummary.instructionFiles.length > 0 ? (
+                    <div style={styles.memoryBlockRow}>
+                      <span style={styles.memoryBlockRowLabel}>{t('editor.memoryBlockInstructionFiles')}</span>
+                      <div style={styles.memoryBlockChips}>
+                        {chatMemorySummary.instructionFiles.map((file, index) => (
+                          <span key={`mem-instr-${index}`} style={styles.memoryBlockChip} title={file.fileName}>{file.label}</span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {/* Context files */}
+                  {chatMemorySummary.contextFilesCount > 0 ? (
+                    <div style={styles.memoryBlockRow}>
+                      <span style={styles.memoryBlockRowLabel}>{t('editor.memoryBlockContextFiles')}</span>
+                      <span style={styles.memoryBlockChip}>{chatMemorySummary.contextFilesCount}</span>
+                    </div>
+                  ) : null}
+                  {/* Volume */}
+                  {chatMemorySummary.totalChars > 0 ? (
+                    <div style={styles.memoryBlockRow}>
+                      <span style={styles.memoryBlockRowLabel}>{t('editor.memoryBlockVolume')}</span>
+                      <span style={styles.memoryBlockChip}>{formatChars(chatMemorySummary.totalChars)} {t('editor.memoryBlockChars')}</span>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </>
+          )) : null}
+
           {shouldShowPlanSection ? renderSection('plan', 'План', planSummary, (
             <>
               {hasPlanContent ? (
@@ -5000,6 +5089,40 @@ const styles: Record<string, React.CSSProperties> = {
   chatLaunchHintDone: {
     background: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 10%, var(--vscode-editor-background))',
     borderColor: 'color-mix(in srgb, var(--vscode-testing-iconPassed) 22%, transparent)',
+  },
+  // ---- Memory section content styles (Process tab) ----
+  memoryBlockContent: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+  },
+  memoryBlockRow: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '8px',
+  },
+  memoryBlockRowLabel: {
+    fontSize: '12px',
+    fontWeight: 600,
+    color: 'var(--vscode-descriptionForeground)',
+    whiteSpace: 'nowrap',
+    minWidth: '110px',
+    paddingTop: '2px',
+  },
+  memoryBlockChips: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '4px',
+  },
+  memoryBlockChip: {
+    display: 'inline-block',
+    padding: '2px 8px',
+    borderRadius: '4px',
+    fontSize: '11px',
+    lineHeight: 1.5,
+    background: 'color-mix(in srgb, var(--vscode-foreground) 6%, transparent)',
+    color: 'var(--vscode-foreground)',
+    whiteSpace: 'nowrap',
   },
   sectionCard: {
     border: '1px solid var(--vscode-panel-border)',

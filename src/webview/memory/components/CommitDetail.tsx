@@ -218,67 +218,146 @@ function getStatusColor(status?: string): string {
 	return colorByStatus[status || ''] || 'var(--vscode-foreground)';
 }
 
+// Стили деталей коммита — плоские секции, тонкие разделители, чистые теги.
 const styles: Record<string, React.CSSProperties> = {
-	container: { padding: '16px', overflow: 'auto' },
+	container: {
+		padding: '20px 24px',
+		overflow: 'auto',
+		height: '100%',
+		boxSizing: 'border-box',
+	},
+	// Секция — без рамки, нижний разделитель.
 	section: {
-		marginBottom: '16px', padding: '12px',
-		background: 'var(--vscode-editor-background)',
-		border: '1px solid var(--vscode-panel-border)', borderRadius: '4px',
+		marginBottom: '16px',
+		paddingBottom: '16px',
+		borderBottom: '1px solid color-mix(in srgb, var(--vscode-foreground) 6%, transparent)',
 	},
-	heading: { margin: '0 0 8px 0', fontSize: '14px' },
-	subHeading: { margin: '0 0 8px 0', fontSize: '13px', color: 'var(--vscode-foreground)' },
+	heading: {
+		margin: '0 0 10px 0',
+		fontSize: '15px',
+		fontWeight: 800,
+		lineHeight: 1.35,
+		letterSpacing: '-0.01em',
+	},
+	subHeading: {
+		margin: '0 0 10px 0',
+		fontSize: '11px',
+		fontWeight: 700,
+		color: 'var(--vscode-descriptionForeground)',
+		lineHeight: 1.35,
+		textTransform: 'uppercase',
+		letterSpacing: '0.06em',
+	},
 	meta: {
-		display: 'flex', justifyContent: 'space-between',
-		fontSize: '12px', color: 'var(--vscode-descriptionForeground)', marginBottom: '4px',
-	},
-	message: {
-		margin: '8px 0 0 0', padding: '8px',
-		background: 'var(--vscode-textCodeBlock-background)', borderRadius: '3px',
-		fontSize: '12px', fontFamily: 'var(--vscode-editor-font-family)',
-		whiteSpace: 'pre-wrap' as const, wordBreak: 'break-word' as const,
-	},
-	summary: { margin: '0 0 8px 0', fontSize: '13px' },
-	block: { marginTop: '8px' },
-	label: { fontSize: '12px', fontWeight: 600, color: 'var(--vscode-descriptionForeground)' },
-	text: { margin: '4px 0', fontSize: '12px' },
-	list: { margin: '4px 0', paddingLeft: '20px', fontSize: '12px' },
-	tags: { display: 'flex', flexWrap: 'wrap' as const, gap: '4px', marginTop: '8px' },
-	tag: {
-		fontSize: '10px', padding: '2px 6px', borderRadius: '3px',
-		background: 'var(--vscode-badge-background)', color: 'var(--vscode-badge-foreground)',
-	},
-	tagLayer: {
-		background: 'var(--vscode-editorInfo-background)',
-	},
-	keywords: { display: 'flex', flexWrap: 'wrap' as const, gap: '4px', marginTop: '8px' },
-	keyword: {
-		fontSize: '10px', padding: '1px 4px', borderRadius: '2px',
-		background: 'var(--vscode-textCodeBlock-background)', color: 'var(--vscode-foreground)',
-	},
-	warning: {
-		marginTop: '8px', padding: '6px 10px', borderRadius: '3px',
-		background: 'var(--vscode-inputValidation-warningBackground)',
-		color: 'var(--vscode-inputValidation-warningForeground)',
+		display: 'flex',
+		justifyContent: 'space-between',
 		fontSize: '12px',
+		color: 'var(--vscode-descriptionForeground)',
+		marginBottom: '4px',
+		lineHeight: 1.45,
 	},
+	// Блок сообщения коммита — моноширинный, мягкий фон.
+	message: {
+		margin: '10px 0 0 0',
+		padding: '12px 14px',
+		background: 'color-mix(in srgb, var(--vscode-foreground) 3%, transparent)',
+		borderRadius: '8px',
+		border: '1px solid color-mix(in srgb, var(--vscode-foreground) 6%, transparent)',
+		fontSize: '12px',
+		fontFamily: 'var(--vscode-editor-font-family)',
+		whiteSpace: 'pre-wrap' as const,
+		wordBreak: 'break-word' as const,
+		lineHeight: 1.6,
+	},
+	summary: {
+		margin: '0 0 10px 0',
+		fontSize: '13px',
+		lineHeight: 1.55,
+	},
+	block: {
+		marginTop: '10px',
+	},
+	label: {
+		fontSize: '11px',
+		fontWeight: 700,
+		color: 'var(--vscode-descriptionForeground)',
+		letterSpacing: '0.04em',
+		textTransform: 'uppercase',
+	},
+	text: {
+		margin: '6px 0',
+		fontSize: '12px',
+		lineHeight: 1.55,
+	},
+	list: {
+		margin: '6px 0',
+		paddingLeft: '20px',
+		fontSize: '12px',
+		lineHeight: 1.6,
+	},
+	tags: {
+		display: 'flex',
+		flexWrap: 'wrap' as const,
+		gap: '6px',
+		marginTop: '10px',
+	},
+	// Тег категории — плоский бейдж.
+	tag: {
+		fontSize: '10px',
+		fontWeight: 700,
+		padding: '3px 8px',
+		borderRadius: '6px',
+		background: 'color-mix(in srgb, var(--vscode-button-background) 10%, transparent)',
+		color: 'var(--vscode-foreground)',
+		letterSpacing: '0.03em',
+	},
+	// Тег слоя — альтернативный акцентный цвет.
+	tagLayer: {
+		background: 'color-mix(in srgb, var(--vscode-terminal-ansiBlue) 12%, transparent)',
+	},
+	keywords: {
+		display: 'flex',
+		flexWrap: 'wrap' as const,
+		gap: '6px',
+		marginTop: '10px',
+	},
+	// Ключевое слово — плоский, моноширинный акцент.
+	keyword: {
+		fontSize: '10px',
+		fontWeight: 600,
+		padding: '3px 8px',
+		borderRadius: '6px',
+		background: 'color-mix(in srgb, var(--vscode-foreground) 4%, transparent)',
+		color: 'var(--vscode-foreground)',
+		border: '1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent)',
+	},
+	// Предупреждение о breaking change.
+	warning: {
+		marginTop: '10px',
+		padding: '10px 14px',
+		borderRadius: '8px',
+		background: 'color-mix(in srgb, var(--vscode-editorWarning-foreground) 8%, transparent)',
+		color: 'var(--vscode-editorWarning-foreground)',
+		fontSize: '12px',
+		fontWeight: 600,
+		border: '1px solid color-mix(in srgb, var(--vscode-editorWarning-foreground) 16%, transparent)',
+	},
+	// Дерево файлов — моноширинный блок.
 	fileTree: {
 		margin: 0,
-		padding: '10px 12px',
-		background: 'var(--vscode-textCodeBlock-background)',
-		borderRadius: '4px',
-		border: '1px solid var(--vscode-panel-border)',
+		padding: '12px 14px',
+		background: 'color-mix(in srgb, var(--vscode-foreground) 3%, transparent)',
+		borderRadius: '8px',
+		border: '1px solid color-mix(in srgb, var(--vscode-foreground) 6%, transparent)',
 		display: 'flex',
 		flexDirection: 'column' as const,
-		// Явно указываем моноширинные шрифты с поддержкой Unicode box-drawing символов,
-		// чтобы │, ─, ├, └ выглядели ровно вне зависимости от системного шрифта.
 		fontFamily: '"JetBrains Mono", "DejaVu Sans Mono", "Fira Code", monospace',
 	},
 	fileTreeRow: {
 		display: 'flex',
 		alignItems: 'baseline',
-		minHeight: '20px',
+		minHeight: '22px',
 	},
-	// Префикс (отступы + коннектор) в режиме pre — символы моноширинные и выровнены строго.
 	fileTreePrefix: {
 		fontSize: '12px',
 		lineHeight: 1.6,
@@ -303,19 +382,23 @@ const styles: Record<string, React.CSSProperties> = {
 		minWidth: 0,
 		flex: 1,
 	},
+	// Бейдж статуса файла (A/M/D/R).
 	fileStatusBadge: {
 		marginLeft: 'auto',
 		padding: '1px 7px',
-		borderRadius: '999px',
+		borderRadius: '6px',
 		border: '1px solid var(--vscode-panel-border)',
 		fontSize: '10px',
 		fontWeight: 700,
 		fontFamily: 'var(--vscode-editor-font-family)',
-		background: 'color-mix(in srgb, var(--vscode-editor-background) 82%, transparent)',
+		background: 'transparent',
 		flexShrink: 0,
 	},
 	bugRelation: {
-		padding: '6px', marginBottom: '4px',
-		background: 'var(--vscode-textCodeBlock-background)', borderRadius: '3px',
+		padding: '10px 14px',
+		marginBottom: '6px',
+		background: 'color-mix(in srgb, var(--vscode-foreground) 3%, transparent)',
+		borderRadius: '8px',
+		border: '1px solid color-mix(in srgb, var(--vscode-foreground) 6%, transparent)',
 	},
 };

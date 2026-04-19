@@ -14,9 +14,11 @@ import { CommitDetailDialog } from './components/CommitDetailDialog';
 import { SearchPanel } from './components/SearchPanel';
 import { KnowledgeGraph } from './components/KnowledgeGraph';
 import { StatisticsPanel } from './components/StatisticsPanel';
-import { SettingsPanel } from './components/SettingsPanel';
 import { InstructionsPanel } from './components/InstructionsPanel';
 import { memoryButtonStyles } from './components/buttonStyles';
+import { MemoryDashboard } from './components/MemoryDashboard';
+import { MemorySettingsWorkspace, type MemorySettingsWorkspaceTab } from './components/MemorySettingsWorkspace';
+import { MemorySegmentedTabs } from './components/memoryUi';
 import { isManualAnalysisBusy, isManualAnalysisTerminal } from '../../utils/manualAnalysisRuntime';
 import type {
 	ManualAnalysisSnapshot,
@@ -65,18 +67,43 @@ const MEMORY_APP_GLOBAL_STYLES = `
 	.pm-memory-root button:active {
 		filter: brightness(0.96);
 	}
+
+	/* Hover для элементов списков коммитов и инструкций */
+	.pm-memory-root [style*="cursor: pointer"]:hover {
+		filter: brightness(0.97);
+	}
+
+	/* Плавный скроллбар */
+	.pm-memory-root ::-webkit-scrollbar {
+		width: 6px;
+		height: 6px;
+	}
+	.pm-memory-root ::-webkit-scrollbar-track {
+		background: transparent;
+	}
+	.pm-memory-root ::-webkit-scrollbar-thumb {
+		background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+		border-radius: 999px;
+	}
+	.pm-memory-root ::-webkit-scrollbar-thumb:hover {
+		background: color-mix(in srgb, var(--vscode-foreground) 20%, transparent);
+	}
 `;
 
-type Section = 'histories' | 'instructions';
-type HistoryTab = 'commits' | 'search' | 'graph' | 'statistics' | 'settings';
+type Section = 'dashboard' | 'histories' | 'instructions' | 'settings';
+type HistoryTab = 'commits' | 'search' | 'graph' | 'statistics';
+
+const MEMORY_SECTIONS: Section[] = ['dashboard', 'histories', 'instructions', 'settings'];
+const MEMORY_HISTORY_TABS: HistoryTab[] = ['commits', 'search', 'graph', 'statistics'];
 
 const CODEMAP_BUSY_POLL_INTERVAL_MS = 1500;
 const CODEMAP_IDLE_POLL_INTERVAL_MS = 5000;
 
 export const MemoryApp: React.FC = () => {
 	const t = useT();
-	const [activeSection, setActiveSection] = useState<Section>('histories');
+	const [activeSection, setActiveSection] = useState<Section>('dashboard');
 	const [activeHistoryTab, setActiveHistoryTab] = useState<HistoryTab>('commits');
+	const [activeSettingsTab, setActiveSettingsTab] = useState<MemorySettingsWorkspaceTab>('history');
 
 	// Commits state
 	const [commits, setCommits] = useState<MemoryCommit[]>([]);
@@ -353,11 +380,6 @@ export const MemoryApp: React.FC = () => {
 		vscode.postMessage({ type: 'getCodeMapInstructions' });
 	};
 
-	const onRequestCodeMapDetail = (id: number) => {
-		setSelectedCodeMapInstructionId(id);
-		vscode.postMessage({ type: 'getCodeMapInstructionDetail', id });
-	};
-
 	const onRequestCodeMapStatistics = () => {
 		vscode.postMessage({ type: 'getCodeMapStatistics' });
 	};
@@ -376,6 +398,29 @@ export const MemoryApp: React.FC = () => {
 
 	const onSaveCodeMapSettings = (newSettings: Partial<CodeMapSettings>) => {
 		vscode.postMessage({ type: 'saveCodeMapSettings', settings: newSettings });
+	};
+
+	const onRefreshDashboard = () => {
+		vscode.postMessage({ type: 'getMemoryCommits', filter: { ...filter, limit: 50 } });
+		vscode.postMessage({ type: 'requestManualAnalysisSnapshot' });
+		onRequestStatistics();
+		onRequestCodeMapInstructions();
+		onRequestCodeMapStatistics();
+		onRequestCodeMapActivity();
+	};
+
+	const onOpenHistories = (tab: HistoryTab = 'commits') => {
+		setActiveSection('histories');
+		setActiveHistoryTab(tab);
+	};
+
+	const onOpenInstructions = () => {
+		setActiveSection('instructions');
+	};
+
+	const onOpenSettings = (tab: MemorySettingsWorkspaceTab = 'history') => {
+		setActiveSection('settings');
+		setActiveSettingsTab(tab);
 	};
 
 	const onRefreshCodeMapWorkspace = () => {
@@ -447,21 +492,35 @@ export const MemoryApp: React.FC = () => {
 			case 'statistics':
 				onRequestStatistics();
 				break;
-			case 'settings':
-				onRequestSettings();
-				break;
 		}
 	}, [activeHistoryTab, activeSection]);
 
 	useEffect(() => {
-		if (activeSection !== 'instructions') {
+		if (activeSection !== 'instructions' && activeSection !== 'dashboard') {
 			return;
 		}
 
 		onRequestCodeMapInstructions();
 		onRequestCodeMapStatistics();
-		onRequestCodeMapSettings();
 		onRequestCodeMapActivity();
+	}, [activeSection]);
+
+	useEffect(() => {
+		if (activeSection !== 'dashboard') {
+			return;
+		}
+
+		onRequestStatistics();
+		vscode.postMessage({ type: 'requestManualAnalysisSnapshot' });
+	}, [activeSection]);
+
+	useEffect(() => {
+		if (activeSection !== 'settings') {
+			return;
+		}
+
+		onRequestSettings();
+		onRequestCodeMapSettings();
 	}, [activeSection]);
 
 	useEffect(() => {
@@ -483,7 +542,7 @@ export const MemoryApp: React.FC = () => {
 	}, [codeMapIsBusy, shouldPollCodeMapActivity]);
 
 	useEffect(() => {
-		if (activeSection !== 'instructions') {
+		if (activeSection !== 'instructions' && activeSection !== 'dashboard') {
 			return;
 		}
 
@@ -507,25 +566,24 @@ export const MemoryApp: React.FC = () => {
 	return (
 		<div style={styles.container} className="pm-memory-root">
 			<style>{MEMORY_APP_GLOBAL_STYLES}</style>
-			{/* Header with sections */}
 			<div style={styles.header}>
-				<div style={styles.tabs}>
-					{(['histories', 'instructions'] as Section[]).map(section => (
-						<button
-							key={section}
-							style={{
-								...memoryButtonStyles.tab,
-								...(activeSection === section ? memoryButtonStyles.tabActive : {}),
-							}}
-							onClick={() => setActiveSection(section)}
-						>
-							{t(`memory.section.${section}`)}
-						</button>
-					))}
+				<div style={styles.headerCard}>
+					<div style={styles.headerCopy}>
+						<div style={styles.headerEyebrow}>{t('memory.title')}</div>
+						<h1 style={styles.headerTitle}>{t('memory.headline')}</h1>
+						<div style={styles.headerDescription}>{t('memory.subtitle')}</div>
+					</div>
+					<div style={styles.headerTabs}>
+						<MemorySegmentedTabs
+							ariaLabel={t('memory.sections')}
+							items={MEMORY_SECTIONS.map(section => ({ value: section, label: t(`memory.section.${section}`) }))}
+							activeValue={activeSection}
+							onChange={setActiveSection}
+						/>
+					</div>
 				</div>
 			</div>
 
-			{/* Status / error messages */}
 			<div style={styles.messageHost}>
 				{errorMessage ? (
 					<div style={styles.errorBar}>{errorMessage}</div>
@@ -536,50 +594,64 @@ export const MemoryApp: React.FC = () => {
 				)}
 			</div>
 
-			{/* Tab content */}
 			<div style={styles.content}>
+				{activeSection === 'dashboard' && (
+					<MemoryDashboard
+						statistics={statistics}
+						recentCommits={commits}
+						codeMapStatistics={codeMapStatistics}
+						codeMapActivity={codeMapActivity}
+						analysisSnapshot={analysisSnapshot}
+						onOpenHistories={() => onOpenHistories('commits')}
+						onOpenInstructions={onOpenInstructions}
+						onOpenSettings={() => onOpenSettings('history')}
+						onRunAnalysis={onRunAnalysis}
+						onRefresh={onRefreshDashboard}
+						t={t}
+					/>
+				)}
+
 				{activeSection === 'histories' && (
 					<div style={styles.sectionLayout}>
-						<div style={styles.sectionHeader}>
-							<div style={styles.tabs}>
-								{(['commits', 'search', 'graph', 'statistics', 'settings'] as HistoryTab[]).map(tab => (
-									<button
-										key={tab}
-										style={{
-											...memoryButtonStyles.tab,
-											...(activeHistoryTab === tab ? memoryButtonStyles.tabActive : {}),
-										}}
-										onClick={() => setActiveHistoryTab(tab)}
-									>
-										{t(`memory.tab.${tab}`)}
-									</button>
-								))}
+						<div style={styles.sectionCard}>
+							<div style={styles.sectionHeader}>
+								<div style={styles.sectionHeaderCopy}>
+									<div style={styles.sectionEyebrow}>{t('memory.section.histories')}</div>
+									<div style={styles.sectionTitle}>{t('memory.historiesHeadline')}</div>
+								</div>
+								<div style={styles.sectionHeaderControls}>
+									<MemorySegmentedTabs
+										ariaLabel={t('memory.historiesTabs')}
+										items={MEMORY_HISTORY_TABS.map(tab => ({ value: tab, label: t(`memory.tab.${tab}`) }))}
+										activeValue={activeHistoryTab}
+										onChange={setActiveHistoryTab}
+									/>
+									<div style={styles.headerActions}>
+										<button
+											style={memoryButtonStyles.secondary}
+											onClick={onRunAnalysis}
+											title={t('memory.runAnalysis')}
+										>
+											{analysisButtonLabel}
+										</button>
+										<button
+											style={memoryButtonStyles.secondary}
+											onClick={() => onExport('json')}
+											title={t('memory.export')}
+										>
+											📥 JSON
+										</button>
+										<button
+											style={memoryButtonStyles.secondary}
+											onClick={() => onExport('csv')}
+											title={t('memory.export')}
+										>
+											📥 CSV
+										</button>
+									</div>
+								</div>
 							</div>
-							<div style={styles.headerActions}>
-								<button
-									style={memoryButtonStyles.secondary}
-									onClick={onRunAnalysis}
-									title={t('memory.runAnalysis')}
-								>
-									{analysisButtonLabel}
-								</button>
-								<button
-									style={memoryButtonStyles.secondary}
-									onClick={() => onExport('json')}
-									title={t('memory.export')}
-								>
-									📥 JSON
-								</button>
-								<button
-									style={memoryButtonStyles.secondary}
-									onClick={() => onExport('csv')}
-									title={t('memory.export')}
-								>
-									📥 CSV
-								</button>
-							</div>
-						</div>
-						<div style={styles.sectionContent}>
+							<div style={styles.sectionContent}>
 							{activeHistoryTab === 'commits' && (
 								<div style={styles.splitViewContainer}>
 									<div style={styles.splitView}>
@@ -596,6 +668,7 @@ export const MemoryApp: React.FC = () => {
 												branches={availableBranches}
 												categories={availableCategories}
 												repositories={availableRepositories}
+												onSearch={onSearch}
 												t={t}
 											/>
 										</div>
@@ -676,16 +749,7 @@ export const MemoryApp: React.FC = () => {
 									t={t}
 								/>
 							)}
-
-							{activeHistoryTab === 'settings' && (
-								<SettingsPanel
-									settings={settings}
-									availableModels={availableModels}
-									onSave={onSaveSettings}
-									onRefresh={onRequestSettings}
-									t={t}
-								/>
-							)}
+							</div>
 						</div>
 					</div>
 				)}
@@ -697,7 +761,6 @@ export const MemoryApp: React.FC = () => {
 						detail={codeMapInstructionDetail}
 						statistics={codeMapStatistics}
 						activity={codeMapActivity}
-						settings={codeMapSettings}
 						availableModels={availableModels}
 						onSelectInstruction={onSelectCodeMapInstruction}
 						onRefreshInstructions={onRequestCodeMapInstructions}
@@ -705,11 +768,24 @@ export const MemoryApp: React.FC = () => {
 						onRefreshInstruction={onRefreshCodeMapInstruction}
 						onRefreshStatistics={onRequestCodeMapStatistics}
 						onRefreshActivity={onRequestCodeMapActivity}
-						onRefreshSettings={onRequestCodeMapSettings}
-						onSaveSettings={onSaveCodeMapSettings}
 						onDeleteInstruction={onDeleteCodeMapInstruction}
 						onDeleteObsolete={onDeleteObsoleteCodeMapInstructions}
 						isRefreshing={codeMapIsBusy}
+						t={t}
+					/>
+				)}
+
+				{activeSection === 'settings' && (
+					<MemorySettingsWorkspace
+						activeTab={activeSettingsTab}
+						onTabChange={setActiveSettingsTab}
+						memorySettings={settings}
+						codeMapSettings={codeMapSettings}
+						availableModels={availableModels}
+						onSaveMemorySettings={onSaveSettings}
+						onRefreshMemorySettings={onRequestSettings}
+						onSaveInstructionSettings={onSaveCodeMapSettings}
+						onRefreshInstructionSettings={onRequestCodeMapSettings}
 						t={t}
 					/>
 				)}
@@ -728,40 +804,90 @@ const styles: Record<string, React.CSSProperties> = {
 		color: 'var(--vscode-foreground)',
 		fontFamily: 'var(--vscode-font-family)',
 		fontSize: 'var(--vscode-font-size)',
+		background: 'var(--vscode-editor-background)',
 	},
+	// Контейнер шапки — фиксированный, без визуального шума.
 	header: {
+		padding: '20px 20px 12px',
+		flexShrink: 0,
+	},
+	// Карточка шапки — плоская, акцент-полоска слева, градиент к акценту.
+	headerCard: {
 		display: 'flex',
 		justifyContent: 'space-between',
 		alignItems: 'center',
-		padding: '8px 16px',
-		borderBottom: '1px solid var(--vscode-panel-border)',
-		flexShrink: 0,
-	},
-	tabs: {
-		display: 'flex',
-		gap: '8px',
+		gap: '20px',
+		padding: '22px 24px',
+		borderRadius: '14px',
+		borderLeft: '4px solid var(--vscode-button-background)',
+		border: '1px solid color-mix(in srgb, var(--vscode-foreground) 30%, transparent)',
+		borderLeftWidth: '4px',
+		borderLeftColor: 'var(--vscode-button-background)',
+		background: 'linear-gradient(100deg, color-mix(in srgb, var(--vscode-button-background) 5%, var(--vscode-editor-background)), var(--vscode-editor-background) 60%)',
+		boxShadow: '0 1px 4px 0 color-mix(in srgb, var(--vscode-foreground) 10%, transparent)',
 		flexWrap: 'wrap',
+	},
+	headerCopy: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '6px',
+		minWidth: 0,
+	},
+	// Мелкий uppercase-лейбл над заголовком.
+	headerEyebrow: {
+		fontSize: '10px',
+		textTransform: 'uppercase',
+		letterSpacing: '0.1em',
+		color: 'var(--vscode-button-background)',
+		fontWeight: 700,
+	},
+	headerTitle: {
+		margin: 0,
+		fontSize: '24px',
+		fontWeight: 800,
+		lineHeight: 1.15,
+		letterSpacing: '-0.02em',
+		color: 'var(--vscode-foreground)',
+	},
+	headerDescription: {
+		fontSize: '12px',
+		lineHeight: 1.55,
+		color: 'var(--vscode-descriptionForeground)',
+		maxWidth: '60ch',
+	},
+	headerTabs: {
+		display: 'flex',
+		alignItems: 'center',
+		justifyContent: 'flex-end',
+		flexWrap: 'wrap',
+		minWidth: 0,
 	},
 	headerActions: {
 		display: 'flex',
 		gap: '8px',
+		flexWrap: 'wrap',
 	},
 	messageHost: {
-		minHeight: '28px',
+		minHeight: '38px',
+		padding: '0 20px 8px',
 		flexShrink: 0,
 	},
 	statusBar: {
-		padding: '4px 16px',
-		background: 'var(--vscode-editorInfo-background)',
+		padding: '8px 14px',
+		background: 'color-mix(in srgb, var(--vscode-editorInfo-background) 84%, var(--vscode-editor-background) 16%)',
 		color: 'var(--vscode-editorInfo-foreground)',
+		borderRadius: '12px',
+		border: '1px solid color-mix(in srgb, var(--vscode-editorInfo-foreground) 16%, transparent)',
 		fontSize: '12px',
 		height: '100%',
 		boxSizing: 'border-box',
 	},
 	errorBar: {
-		padding: '4px 16px',
-		background: 'var(--vscode-inputValidation-errorBackground)',
+		padding: '8px 14px',
+		background: 'color-mix(in srgb, var(--vscode-inputValidation-errorBackground) 84%, var(--vscode-editor-background) 16%)',
 		color: 'var(--vscode-inputValidation-errorForeground)',
+		borderRadius: '12px',
+		border: '1px solid color-mix(in srgb, var(--vscode-inputValidation-errorForeground) 16%, transparent)',
 		fontSize: '12px',
 		height: '100%',
 		boxSizing: 'border-box',
@@ -772,20 +898,61 @@ const styles: Record<string, React.CSSProperties> = {
 	content: {
 		flex: 1,
 		overflow: 'hidden',
+		minHeight: 0,
 	},
 	sectionLayout: {
 		display: 'flex',
 		flexDirection: 'column',
 		height: '100%',
+		padding: '20px',
+		boxSizing: 'border-box',
+	},
+	// Карточка секции — тонкая рамка, лёгкая тень.
+	sectionCard: {
+		display: 'flex',
+		flexDirection: 'column',
+		height: '100%',
+		minHeight: 0,
+		borderRadius: '14px',
+		border: '1px solid color-mix(in srgb, var(--vscode-foreground) 30%, transparent)',
+		boxShadow: '0 1px 4px 0 color-mix(in srgb, var(--vscode-foreground) 10%, transparent)',
+		background: 'var(--vscode-editor-background)',
+		overflow: 'hidden',
 	},
 	sectionHeader: {
 		display: 'flex',
 		justifyContent: 'space-between',
-		alignItems: 'center',
-		gap: '12px',
-		padding: '8px 16px',
-		borderBottom: '1px solid var(--vscode-panel-border)',
+		alignItems: 'flex-start',
+		gap: '16px',
+		padding: '16px 20px',
+		borderBottom: '1px solid color-mix(in srgb, var(--vscode-foreground) 6%, transparent)',
 		flexShrink: 0,
+		flexWrap: 'wrap',
+	},
+	sectionHeaderCopy: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '6px',
+		minWidth: 0,
+	},
+	sectionEyebrow: {
+		fontSize: '11px',
+		textTransform: 'uppercase',
+		letterSpacing: '0.08em',
+		color: 'var(--vscode-descriptionForeground)',
+	},
+	sectionTitle: {
+		fontSize: '18px',
+		fontWeight: 700,
+		lineHeight: 1.2,
+	},
+	sectionHeaderControls: {
+		display: 'flex',
+		alignItems: 'center',
+		justifyContent: 'flex-end',
+		gap: '12px',
+		flexWrap: 'wrap',
+		minWidth: 0,
 	},
 	sectionContent: {
 		flex: 1,
@@ -802,7 +969,7 @@ const styles: Record<string, React.CSSProperties> = {
 	listPane: {
 		width: '40%',
 		minWidth: '280px',
-		borderRight: '1px solid var(--vscode-panel-border)',
+		borderRight: '1px solid color-mix(in srgb, var(--vscode-foreground) 6%, transparent)',
 		overflow: 'auto',
 	},
 	detailPane: {

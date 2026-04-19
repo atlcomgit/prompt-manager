@@ -50,6 +50,20 @@ const DEFAULT_OPTIONS: Required<MemoryContextOptions> = {
 	filter: {},
 };
 
+/** Stats about the context sections built for the chat */
+export interface MemoryContextStats {
+	/** Number of short-term commits included */
+	shortTermCommits: number;
+	/** Number of long-term architecture summaries included */
+	longTermSummaries: number;
+	/** Whether the project map was included */
+	hasProjectMap: boolean;
+	/** Number of uncommitted-change projects included */
+	uncommittedProjects: number;
+	/** Total character count of the composed block */
+	totalChars: number;
+}
+
 export class MemoryContextService {
 	private readonly projectStructureMapService: ProjectStructureMapService;
 
@@ -191,32 +205,48 @@ export class MemoryContextService {
 	 * Combines short-term memory (recent commits) and long-term memory
 	 * (architecture summaries). When embeddings are available and the
 	 * user prompt is provided, semantic search prioritises relevant commits.
+	 * Returns the composed text and section-level stats.
 	 */
 	async getContextForChat(
 		prompt: string,
 		options?: MemoryContextOptions,
-	): Promise<string> {
+	): Promise<{ context: string; stats: MemoryContextStats }> {
 		const opts = { ...DEFAULT_OPTIONS, ...options };
 		const text = this.getLocaleText();
 		const sections: string[] = [];
+		const stats: MemoryContextStats = {
+			shortTermCommits: 0,
+			longTermSummaries: 0,
+			hasProjectMap: false,
+			uncommittedProjects: 0,
+			totalChars: 0,
+		};
 
 		// 1) Long-term context (architecture summaries)
 		if (opts.includeLongTerm) {
-			const longTermBlock = await this.buildLongTermContext(opts);
-			if (longTermBlock) { sections.push(longTermBlock); }
+			const { block, count } = await this.buildLongTermContextWithStats(opts);
+			if (block) { sections.push(block); }
+			stats.longTermSummaries = count;
 		}
 
 		const projectMapBlock = await this.buildProjectMapContext(opts);
-		if (projectMapBlock) { sections.push(projectMapBlock); }
+		if (projectMapBlock) {
+			sections.push(projectMapBlock);
+			stats.hasProjectMap = true;
+		}
 
-		const uncommittedBlock = this.buildUncommittedChangesContext(opts);
+		const { block: uncommittedBlock, projectCount } = this.buildUncommittedChangesContextWithStats(opts);
 		if (uncommittedBlock) { sections.push(uncommittedBlock); }
+		stats.uncommittedProjects = projectCount;
 
 		// 3) Short-term context — semantically relevant or recent
-		const shortTermBlock = await this.buildShortTermContext(prompt, opts);
+		const { block: shortTermBlock, commitCount } = await this.buildShortTermContextWithStats(prompt, opts);
 		if (shortTermBlock) { sections.push(shortTermBlock); }
+		stats.shortTermCommits = commitCount;
 
-		if (sections.length === 0) { return ''; }
+		if (sections.length === 0) {
+			return { context: '', stats };
+		}
 
 		// Compose the final block
 		let context = `${text.rootTitle}\n\n${sections.join('\n\n')}`;
@@ -226,7 +256,8 @@ export class MemoryContextService {
 			context = context.substring(0, opts.maxChars - 3) + '...';
 		}
 
-		return context;
+		stats.totalChars = context.length;
+		return { context, stats };
 	}
 
 	/**
@@ -238,6 +269,15 @@ export class MemoryContextService {
 		prompt: string,
 		opts: Required<MemoryContextOptions>,
 	): Promise<string> {
+		const { block } = await this.buildShortTermContextWithStats(prompt, opts);
+		return block;
+	}
+
+	/** Short-term block with commit count stats */
+	private async buildShortTermContextWithStats(
+		prompt: string,
+		opts: Required<MemoryContextOptions>,
+	): Promise<{ block: string; commitCount: number }> {
 		const text = this.getLocaleText();
 		let results: MemorySearchResult[] = [];
 
@@ -258,10 +298,10 @@ export class MemoryContextService {
 
 		results = dedupeMemorySearchResults(results).slice(0, opts.shortTermLimit);
 
-		if (results.length === 0) { return ''; }
+		if (results.length === 0) { return { block: '', commitCount: 0 }; }
 
 		const lines = results.map(r => this.formatCommitEntry(r));
-		return `${text.shortTermTitle}\n\n${lines.join('\n')}`;
+		return { block: `${text.shortTermTitle}\n\n${lines.join('\n')}`, commitCount: results.length };
 	}
 
 	/**
@@ -270,16 +310,21 @@ export class MemoryContextService {
 	private async buildLongTermContext(
 		opts: Required<MemoryContextOptions>,
 	): Promise<string> {
+		const { block } = await this.buildLongTermContextWithStats(opts);
+		return block;
+	}
+
+	/** Long-term block with summary count stats */
+	private async buildLongTermContextWithStats(
+		opts: Required<MemoryContextOptions>,
+	): Promise<{ block: string; count: number }> {
 		const text = this.getLocaleText();
-		// Get project-level summaries
 		const summaries = await this.db.getSummaries('project', '');
-		if (summaries.length === 0) { return ''; }
+		if (summaries.length === 0) { return { block: '', count: 0 }; }
 
-		const blocks = summaries
-			.slice(0, 5)
-			.map(s => `${text.repositorySummary(s.repository, s.commitCount)} ${s.summary}`);
-
-		return `${text.longTermTitle}\n\n${blocks.join('\n\n')}`;
+		const limited = summaries.slice(0, 5);
+		const blocks = limited.map(s => `${text.repositorySummary(s.repository, s.commitCount)} ${s.summary}`);
+		return { block: `${text.longTermTitle}\n\n${blocks.join('\n\n')}`, count: limited.length };
 	}
 
 	private async buildProjectMapContext(
@@ -309,8 +354,13 @@ export class MemoryContextService {
 	}
 
 	private buildUncommittedChangesContext(opts: Required<MemoryContextOptions>): string {
+		return this.buildUncommittedChangesContextWithStats(opts).block;
+	}
+
+	/** Uncommitted changes block with project count stats */
+	private buildUncommittedChangesContextWithStats(opts: Required<MemoryContextOptions>): { block: string; projectCount: number } {
 		if (opts.projectNames.length === 0 || opts.uncommittedProjects.length === 0) {
-			return '';
+			return { block: '', projectCount: 0 };
 		}
 
 		const text = this.getLocaleText();
@@ -322,7 +372,7 @@ export class MemoryContextService {
 		});
 
 		if (summary.projects.length === 0) {
-			return '';
+			return { block: '', projectCount: 0 };
 		}
 
 		const lines: string[] = [
@@ -361,7 +411,8 @@ export class MemoryContextService {
 			lines.push(`- ${text.uncommittedHiddenProjects(summary.hiddenProjects)}`);
 		}
 
-		return this.limitUncommittedBlock(lines, Math.min(1800, Math.max(900, Math.floor(opts.maxChars * 0.3))), text.uncommittedTruncated);
+		const block = this.limitUncommittedBlock(lines, Math.min(1800, Math.max(900, Math.floor(opts.maxChars * 0.3))), text.uncommittedTruncated);
+		return { block, projectCount: summary.projects.length + summary.hiddenProjects };
 	}
 
 	private formatUncommittedFileHint(file: {

@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import type { Prompt } from '../types/prompt.js';
 import type { StorageService } from './storageService.js';
-import type { MemoryContextService } from './memoryContextService.js';
+import type { MemoryContextService, MemoryContextStats } from './memoryContextService.js';
 import type { ChatMemoryInstructionComposer } from './chatMemoryInstructionComposer.js';
 import type { GitService } from './gitService.js';
 import type { WorkspaceService } from './workspaceService.js';
@@ -15,7 +15,7 @@ const SESSION_FILE_PREFIX = 'session-';
 const SESSION_FILE_SUFFIX = '.instructions.md';
 const DEFAULT_STALE_TTL_MS = 60 * 60 * 1000;
 
-interface ChatMemorySessionRecord {
+export interface ChatMemorySessionRecord {
 	promptUuid: string;
 	promptId: string;
 	instructionFilePath: string;
@@ -23,6 +23,8 @@ interface ChatMemorySessionRecord {
 	updatedAt: string;
 	chatSessionId?: string;
 	lastError?: string;
+	/** Section-level stats collected during context generation */
+	contextStats?: MemoryContextStats;
 }
 
 interface ChatMemorySessionRegistry {
@@ -110,7 +112,7 @@ export class ChatMemoryInstructionService {
 			)
 			: [];
 
-		const rawMemoryContext = await this.memoryContextService.getContextForChat(prompt.content, {
+		const { context: rawMemoryContext, stats: contextStats } = await this.memoryContextService.getContextForChat(prompt.content, {
 			maxChars: 6000,
 			shortTermLimit: 15,
 			projectNames: prompt.projects,
@@ -142,6 +144,7 @@ export class ChatMemoryInstructionService {
 			instructionFilePath: filePath,
 			createdAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString(),
+			contextStats,
 		};
 		registry.sessions = registry.sessions.filter(session => session.promptUuid !== prompt.promptUuid);
 		registry.sessions.push(record);

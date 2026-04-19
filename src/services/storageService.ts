@@ -11,6 +11,7 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'path';
 import type {
 	Prompt,
@@ -21,6 +22,11 @@ import type {
 	PromptStatus,
 } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
+import {
+	dedupeContextFileReferences,
+	isAbsoluteContextFileReference,
+	normalizeContextFileReference,
+} from '../utils/contextFiles.js';
 import { normalizeStoredPromptConfig } from '../utils/promptConfig.js';
 import { normalizePromptExternalChangedAt } from '../utils/promptExternalSync.js';
 import { summarizePromptReport } from '../utils/statisticsExport.js';
@@ -202,6 +208,105 @@ export class StorageService implements vscode.Disposable {
 		} catch {
 			return false;
 		}
+	}
+
+	/** Проверяет, что путь существует и указывает на файл. */
+	private fileExistsSync(filePath: string): boolean {
+		try {
+			return fs.statSync(filePath).isFile();
+		} catch {
+			return false;
+		}
+	}
+
+	/** Приводит абсолютный путь файла к формату, который хранится в config.json. */
+	private toStoredContextFileReference(filePath: string): string {
+		const normalizedFsPath = path.normalize(filePath);
+		if (this.workspaceRoot) {
+			const relativePath = path.relative(this.workspaceRoot, normalizedFsPath);
+			if (relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath)) {
+				return normalizeContextFileReference(relativePath);
+			}
+		}
+
+		return normalizeContextFileReference(normalizedFsPath);
+	}
+
+	/** Разворачивает сохранённую ссылку на context file в абсолютный путь. */
+	private resolveStoredContextFilePath(filePath: string): string | null {
+		const normalizedReference = normalizeContextFileReference(filePath);
+		if (!normalizedReference) {
+			return null;
+		}
+
+		const expandedHomePath = normalizedReference.startsWith('~/')
+			? path.join(os.homedir(), normalizedReference.slice(2))
+			: normalizedReference.startsWith('~\\')
+				? path.join(os.homedir(), normalizedReference.slice(2))
+				: normalizedReference;
+
+		if (isAbsoluteContextFileReference(expandedHomePath) || expandedHomePath.startsWith('//')) {
+			return path.normalize(expandedHomePath);
+		}
+
+		if (!this.workspaceRoot) {
+			return null;
+		}
+
+		return path.normalize(path.join(this.workspaceRoot, expandedHomePath));
+	}
+
+	/**
+	 * Восстанавливает prompt-local ссылки на context files после rename/move папки prompt.
+	 * Если старый путь уже не существует, но файл есть в текущем prompt/context, ссылка переписывается.
+	 */
+	private repairPromptContextFileReferences(
+		contextFiles: string[] | undefined,
+		promptDirPath: string,
+	): { contextFiles: string[]; changed: boolean } {
+		const rawNormalizedFiles = (contextFiles || [])
+			.map(filePath => normalizeContextFileReference(filePath))
+			.filter(Boolean);
+		const normalizedFiles = dedupeContextFileReferences(rawNormalizedFiles);
+		const nextFiles: string[] = [];
+		const normalizedPromptDirPath = path.normalize(promptDirPath);
+		const storageRoots = [this.storageDir, this.archiveStorageDir].map(root => path.normalize(root));
+		let changed = JSON.stringify(rawNormalizedFiles) !== JSON.stringify(normalizedFiles);
+
+		for (const filePath of normalizedFiles) {
+			const resolvedPath = this.resolveStoredContextFilePath(filePath);
+			let nextReference = filePath;
+
+			if (resolvedPath && !this.fileExistsSync(resolvedPath)) {
+				for (const storageRoot of storageRoots) {
+					const relativePath = path.relative(storageRoot, resolvedPath);
+					if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+						continue;
+					}
+
+					const segments = relativePath.split(path.sep).filter(Boolean);
+					if (segments.length < 3 || segments[1] !== 'context') {
+						continue;
+					}
+
+					const candidatePath = path.join(normalizedPromptDirPath, 'context', ...segments.slice(2));
+					if (!this.fileExistsSync(candidatePath)) {
+						continue;
+					}
+
+					nextReference = this.toStoredContextFileReference(candidatePath);
+					break;
+				}
+			}
+
+			if (nextReference !== filePath) {
+				changed = true;
+			}
+
+			nextFiles.push(nextReference);
+		}
+
+		return { contextFiles: nextFiles, changed };
 	}
 
 	private resolvePromptStorageLocationSync(id: string): PromptStorageLocation | null {
@@ -753,11 +858,15 @@ export class StorageService implements vscode.Disposable {
 				parsed,
 				() => crypto.randomUUID(),
 			);
+			const repairedContextFiles = this.repairPromptContextFileReferences(config.contextFiles, dirPath);
+			if (repairedContextFiles.changed) {
+				config.contextFiles = repairedContextFiles.contextFiles;
+			}
 
 			config.archived = archived;
 			const shouldBackfillArchived = archived ? parsed.archived !== true : parsed.archived === true;
 
-			if (shouldBackfillPromptUuid || shouldBackfillArchived) {
+			if (shouldBackfillPromptUuid || shouldBackfillArchived || repairedContextFiles.changed) {
 				try {
 					this.markInternalConfigWrite(configPath);
 					await vscode.workspace.fs.writeFile(
@@ -862,6 +971,8 @@ export class StorageService implements vscode.Disposable {
 
 		const dir = await this.ensurePromptDirectory(prompt.id, targetArchived);
 		await this.ensurePromptReportFile(prompt.id, '', targetArchived);
+		const repairedContextFiles = this.repairPromptContextFileReferences(prompt.contextFiles, dir);
+		prompt.contextFiles = repairedContextFiles.contextFiles;
 
 		// Save config.json (without content field)
 		const { content, report, ...config } = prompt;

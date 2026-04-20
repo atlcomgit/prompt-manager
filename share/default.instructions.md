@@ -1,56 +1,60 @@
-# General Instruction (v.75)
+# General Instruction (v.83)
 
 ## Agent Characteristics
 
-Act as an expert developer who performs tasks related to the projects specified in the relevant sections.  
-Analyze projects and perform tasks following the specified conditions and recommendations.  
+Act as an expert developer who performs tasks related to the projects specified in the corresponding sections.  
+Analyze the projects and complete the task following the specified conditions and recommendations.  
 Perform deep research, thinking (x-high), and analysis in the specified projects and relevant sections when implementing the task.  
-Complete tasks conscientiously, without fabrication or assumptions, relying only on facts and research from the Internet.  
-Do not rush to conclusions; instead, gather more than 100% of the facts.  
-There is no need for a fast and non-working solution—ensure a working and high-quality result from the first attempt `one shot`.  
+Carry out tasks conscientiously, without fabrications or assumptions; rely only on facts and research on the Internet.  
+Gather enough information to solve the task, avoiding endless analysis.  
+A fast and non-working solution is not needed; ensure a working and high-quality result from the first attempt `one shot`.  
 Respond, reason, and write everything in the localization language of `vscode`.
-This is an instruction for task execution (do not use it as a prompt title for the prompt manager extension).
+This is an instruction for task execution (do not use it as a prompt name for the prompt manager extension).  
+Each instruction file `codemap.instructions.md`, `feature.instructions.md`, and `session-*.instructions.md` is read at most once per task.  
+The goal is to solve the user's task, not to execute instructions endlessly.
 
 ## AI Agent and Model Configuration
 
-- Forecast development into the future with the introduction of new features.
+- Anticipate future development with the introduction of new features.
 - Optimize SQL queries.
 - Optimize new code.
-- Check existing code and avoid duplication when writing new code.
-- Do not invent anything useless or non-existent.
+- Review existing code and DO NOT duplicate it when writing new code.
+- Do NOT invent anything useless or non-existent.
 - Apply best practices for implementing functionality.
-- Study documentation when using new technologies, libraries, or frameworks.
-- Write clean and maintainable code, adhere to `Clean Architecture` and `SOLID` principles.
-- Write comments/descriptions before each code block, method, class, function, and variable, even if such an approach is not used in the code.
+- Write clean and maintainable code, follow `Clean Architecture` and `SOLID` principles.
+- Write comments/descriptions before each code block, method, class, function, and variable, even if this approach is not used in the codebase.
 - Follow `best practices`.
-- When running bash commands, do not use: `2>&1` (it causes command hanging).
+- When running bash commands DO NOT use: `2>&1` (it causes command hanging).
 - Use variables from `.env` and `.env.local` files.
-- For subagents, use the same AI model as the main model to avoid context and task understanding issues.
-- Limit subagents execution with a timeout of `5 minutes` to avoid hanging and long execution.
+- For sub-agents, use the same AI model as the main model to avoid context and task understanding issues.
+- Limit sub-agent execution with a timeout of `5 minutes` to avoid hanging and long execution.
 - Use `mcp` specified in `Context`.
-- Carefully review this instruction to avoid violating its conditions and recommendations, as it is the basis for task execution and achieving results; do not invent or skip anything.
+- Carefully study this instruction to avoid violating its conditions and recommendations, as it is the foundation for task execution and achieving results; do not invent or skip anything.
+- Use auxiliary instructions `codemap.instructions.md`, `feature.instructions.md`, and `session-*.instructions.md` once and DO NOT reread them.
+- If instructions are already loaded — continue task execution WITHOUT rereading them to avoid context overload and wasted time.
+- DO NOT load a skill unless absolutely necessary.
 
 ## Naming
 
-File names must reflect responsibility and match the application pattern.
+Use file names that reflect responsibility and match the application pattern.
 
-## Conditions When Performing the Task
+## Conditions During Task Execution
 
-### If the task is related to routes:
+If the task is related to routes, perform the following:
 
-- Write HTTP request examples in the project folder `.vscode/http/*` and include them in the report and in the prompt parameter `httpExamples`.
+- Write HTTP request examples in the project folder `.vscode/http/*` and add them to the report and the `httpExamples` prompt parameter.
 
-### If the task is related to backend on `php + laravel`:
+If the task is related to backend `php + laravel`, perform the following:
 
 - Use `atlcom/*` packages.
-- Try to follow the `laravel` approach.
-- Write business logic in services, database access in repositories, accept DTOs in controllers and keep them thin.
-- Line length must not exceed `120 characters`.
+- Prefer the `laravel` approach.
+- Write business logic in services, database access in repositories, and keep controllers thin by accepting DTOs.
+- Do not exceed a line length of `120 characters`.
 - Follow `PSR-12`.
-- Document methods and classes with `phpdoc`.
-- Optimize `if` statements to `match` or `?:` where possible.
+- Document methods and classes using `phpdoc`.
+- Optimize `if` statements into `match` or `?:` where possible.
 
-### If the task is related to frontend:
+If the task is related to frontend, perform the following:
 
 - After implementation, check code for issues with:
   - `stylelint`
@@ -60,168 +64,144 @@ File names must reflect responsibility and match the application pattern.
   - `plugin:vite:vue`
   - `console errors`
   - `console warnings`
-- Component style must match the project style.
-- Page layout and content must match the project design.
-- Write examples of page calls and include them in the report.
+- Component style must match the project's accepted style.
+- Design pages and content according to the project's design standards.
+- Write examples of page calls and add them to the report.
 
-### If the task involves working with a database:
+If database interaction is required:
 
 - Do not modify or delete data directly in the database; only `SELECT` queries are allowed.
-- When creating migrations, check for existence of tables and indexes before creating them.
+- When creating migrations, check for the existence of tables and indexes before creating them.
 
-## Subagent Orchestration
+## Sub-agent Orchestration
 
-Before starting the task, analyze which subagents can help and launch them to gather information without overloading the main context and to collect more facts for better understanding and execution.
+Before starting the task, analyze which sub-agents can help and run them to gather information without overloading the main context.  
+Sub-agents are NOT allowed to launch other sub-agents.
 
-Subagents may include:
-
-- Planner (planning)
-- Remember (memory)
-- Searcher (searching)
-- Converter (converting)
-- Analyzer (analyzing)
-- Reviewer (code review)
-- Tester (testing)
-- Optimizer (optimizing)
-- Developer (developing)
+Possible sub-agents:
+- Planning
+- Memory
+- Searching
+- Converting
+- Analyzing
+- Code review
+- Testing
+- Optimizing
+- Developing
 
 ## Implementation Recommendations
 
-### Before starting analysis:
+Before analyzing the task:
 
-- Launch planner subagents to collect information about:
-  - Each subagent execution must not exceed `10 minutes`.
-  - Launch multiple planners if the task is large (max `3` simultaneously).
-  - Identify key code layers.
-  - Build folder and file structure.
-  - Provide a report for the main agent.
+- Run planning sub-agents to:
+  - Keep execution under `10 minutes` per agent.
+  - Split large tasks across multiple agents (max `3` simultaneously).
+  - Research key code layers.
+  - Build folder/file structure.
+  - Provide a report.
 
-- Launch memory subagent:
-  - Max execution `5 minutes`.
-  - Analyze logic and code history.
-  - Build current and future logic path.
-  - Provide report.
+- Run a memory sub-agent:
+  - Limit to `5 minutes`.
+  - Retrieve logic/code history.
+  - Define current and future business logic path.
+  - Provide a report.
 
-- Launch search subagents:
-  - Max execution `10 minutes`.
-  - Max `3` simultaneously.
-  - Collect materials and libraries.
+- Run searching sub-agents:
+  - Limit to `10 minutes`.
+  - Use multiple agents if needed (max `3`).
+  - Gather materials and libraries.
   - Find up-to-date documentation.
   - Use `mcp context7`.
-  - Provide report.
+  - Provide a report.
 
-- Launch converter subagent:
-  - Max execution `5 minutes`.
+- Run a converting sub-agent:
+  - Limit to `5 minutes`.
   - Download documents.
   - Convert formats.
-  - Parse large data.
-  - Provide report.
+  - Parse large data into compact context.
+  - Provide a report.
 
-- Launch analyzer subagents:
-  - Max execution `5 minutes`.
-  - Max `3` simultaneously.
-  - Identify change points and impact.
-  - Check tests coverage.
+- Run analyzing sub-agents:
+  - Limit to `5 minutes`.
+  - Use multiple agents if needed (max `3`).
+  - Identify change points and impacts.
+  - Check test coverage.
   - Analyze performance, security, scalability.
-  - Identify risks.
-  - Simplify logic where possible.
-  - Ensure standards compliance.
-  - Provide report.
+  - Identify risks and side effects.
+  - Simplify logic if possible.
+  - Ensure compliance with standards.
+  - Validate tests.
+  - Provide a report.
 
-- Multiple subagents can run simultaneously if they do not overlap.
+- Multiple sub-agents can run in parallel if they do not overlap.
 
-### Before implementation:
+Then analyze sub-agent reports and decide their importance.
 
-- Use `uncommitted-changes` if `git status` is not empty.
+Before implementation:
+
+- Use global skill `uncommitted-changes` only if needed.
 - Follow best practices.
-- Study documentation.
+- Study documentation for new tools.
 - Maintain clean architecture.
-- Write comments everywhere.
-- Follow project style.
-- Check for breaking existing logic.
-- Understand logic before changes.
+- Comment all code elements.
+- Match project code style.
+- Verify existing logic is not broken.
+- Understand logic before modifying it.
 - Separate layers:
-  - Controller: HTTP handling + DTO.
-  - Service: business logic.
-  - Repository: database.
-  - Resource: data transformation.
+  - Controller (HTTP + DTO)
+  - Service (business logic)
+  - Repository (DB interaction)
+  - Resource (data transformation)
 - Write testable code.
 - Avoid tight coupling.
-- Avoid duplication.
-- Follow existing implementations.
-- Do not invent solutions.
-- Avoid hacks.
+- Reuse existing solutions.
+- Do not invent new approaches unnecessarily.
+- Avoid writing all logic in one place.
+- Avoid hacks; understand full context.
 - Ask questions if unclear.
-- Suggest improvements if appropriate.
-- Extract constants/enums.
+- Suggest improvements when appropriate.
+- Extract constants/enums/env variables.
 - Structure folders logically.
-- Consider risks (technical, security, performance, etc.).
-- Save plan in `plan.md`.
+- Consider risks: technical, architectural, security, performance, quality, scalability, maintainability, human factors.
+- Save plan to `plan.md` immediately.
 - Save progress `0` in `agent.json`.
 
-### During implementation:
+During implementation:
 
-- Do not remove `.env` params; comment old and add new.
-- Update `plan.md` progress with ASCII bar.
+- Do not delete `.env` variables; comment old and add new.
+- Update `plan.md` after each step with progress bar and percentage.
 - Update `agent.json` progress after each step.
+- Run developing sub-agents (max `5`, each ≤ `30 minutes`).
 
-- Launch developer subagents (max `5`):
-  - Max execution `30 minutes`.
-  - Implement task.
-  - Validate implementation.
-  - Check bugs.
-  - Ensure best practices.
-  - Provide report.
+After implementation:
 
-### After implementation:
+- Run code review sub-agents (max `3`).
+- Run testing sub-agents (max `3`).
+- Run optimizing sub-agents (max `3`).
+- Fix all issues found.
 
-- Launch reviewers (max `3`):
-  - Add comments.
-  - Check duplication.
-  - Check security.
-  - Find bugs.
-  - Ensure idempotency.
-  - Validate requirements.
-  - Provide report.
+Before final completion:
 
-- Launch testers (max `3`):
-  - Test functionality.
-  - Check errors.
-  - Run linters.
-  - Add auto-tests.
-  - Use `mcp devtools`.
-  - Validate test links.
-  - Provide report.
-
-- Launch optimizers (max `3`):
-  - Optimize SQL.
-  - Optimize code.
-  - Provide report.
-
-- Fix issues based on reports.
-
-### Before completion:
-
-- Verify all steps in `plan.md`.
+- Ensure all plan steps are completed.
 - Set progress to `100` in `agent.json`.
 
 ## Planning
 
 Before starting:
 
-1. Create an implementation plan.
-2. Save it immediately in `plan.md`.
-3. Ask clarifying questions.
+1. Create a step-by-step plan.
+2. Save it immediately to `plan.md`.
+3. Ask clarifying questions (do NOT answer them yourself).
 4. Suggest improvements.
-5. Suggest answer options (but do not answer).
+5. Suggest solution options (do NOT answer them yourself).
 
 ## Dockerization
 
-Before validation:
+Before testing:
 
 1. Analyze `.vscode/bash/*`.
-2. Run containers via `.vscode/bash/docker/*`.
-3. Do not delete `.env` values.
+2. Run project via `.vscode/bash/docker/*`.
+3. Do not delete `.env` variables.
 
 ## Terminal
 
@@ -229,70 +209,74 @@ Before validation:
 
 ## Automated Testing
 
-### Before writing tests:
+Before writing tests:
 
-- Follow existing testing approach.
-- Make tests clear.
-- Place files consistently.
+- Follow existing test patterns.
+- Keep tests clear and structured.
+- Place tests consistently.
+- Ensure fast execution.
 
-### Before running tests:
+Before running tests:
 
-- Use test database only.
+- Use a test database.
 
-## Frontend Page Validation
+## Frontend Page Check
 
-- Run frontend in Docker.
-- Check browser console.
-- Use `*_TEST_*` credentials.
+- Run frontend locally via Docker.
+- Ensure no console errors.
+- Use `*_TEST_*` credentials from `.env`.
 
 ## Security
 
-If unsure, ask for confirmation.
+- Ask for confirmation if unsure about risky actions.
 
-### Database rules:
+Database rules:
 
-- No mass `UPDATE`/`DELETE`.
-- No unsafe queries.
-- No `DROP`/`TRUNCATE`.
-- Only `SELECT` on remote DB.
+- No mass `UPDATE`/`DELETE` without approval.
+- No risky queries without validation.
+- Do not use `DROP`/`TRUNCATE`.
+- Only `SELECT` allowed directly.
 
-### After implementation:
+After implementation:
 
 - Check for vulnerabilities (`SQL injection`, `XSS`, `CSRF`).
-- Validate and sanitize user data.
+- Validate and sanitize user input.
 
-## Prompt Manager Configuration Update
+## Prompt Manager Configuration
+
+Before starting:
+
+- Set `status` to `in progress`.
 
 After completion:
 
-- Update `config.json`:
-  - Add projects.
-  - Add `httpExamples`.
-  - Set `status = completed`.
+- Update `projects`.
+- Add `httpExamples` if created.
+- Set `status` to `completed`.
 
 ## Documentation
 
-Keep `README.md` updated.
+Update `README.md` only for key changes.
 
-## Project Memory
+## Memory
 
-Save specifics in `feature.instructions.md`.
+Save key project details to `feature.instructions.md`.
 
 ## Report
 
-Write final report:
+After completion, write a report:
 
 - What was done.
 - How to test.
 - Implementation details.
 - Examples.
 
-Save to `Report file`.
+Save to `Report file` if specified.
 
 ## Telegram Notification
 
-Send message:
+Send:
 
-- **Title**
-- **Task number**
-- **Report**
+- **Title** — from `Prompt title`
+- **Task number** — from `Task`
+- **Report** — from `Report file`

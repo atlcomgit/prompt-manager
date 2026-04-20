@@ -19,6 +19,7 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- The Process tab report editor no longer clips long Markdown or HTML output at the old 800px auto-resize ceiling, and it now recalculates height when the editor width changes so wrapped content stays fully visible.
 - Session and codemap chat-memory instruction files now resolve prompt project scope against the current workspace, fall back to all workspace projects when saved selections are stale, and keep generated Markdown headings nested under a single document root instead of dropping embedded H1 sections into project blocks.
 - Prompt chat launch confirmation now waits for a detected chat session before the Process block marks "Open Copilot Chat" as done, the false "Chat launch was not confirmed" notice is shown only after real confirmation timeout, and the launch block completion delay now starts after the final rename step finishes.
 - Prompt editor background refresh and debounce timers now detach from the Node event loop when they are running as best-effort follow-up work, so test runs and other short-lived processes no longer sit idle for up to two minutes waiting for delayed chat/session refresh retries to expire.

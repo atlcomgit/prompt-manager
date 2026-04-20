@@ -122,7 +122,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Open plan and report content through consistent inline Open actions across the prompt editor.
 - Edit shared agent context and a dedicated project instructions file directly from the General instruction block, and open both from the editor without leaving the workflow.
 - Track writing time, implementation time, overall time on task, and untracked corrections.
-- Let the report editor expand to the content automatically without blanking the webview when the section opens, while a new Start Chat run clears the previous plan after the launch preflight succeeds.
+- Let the report editor expand to the content automatically without blanking the webview when the section opens, keep that height in sync when the editor width changes, and avoid clipping the bottom of long reports, while a new Start Chat run clears the previous plan after the launch preflight succeeds.
 - Open statistics and export delivery-friendly summaries in HTML or Markdown.
 - Auto-fill report hours from working days in the selected period, persist the hourly rate per workspace, and omit hour or cost sections when those values are empty or zero.
 - Keep reports inside the prompt workflow instead of treating them as a separate afterthought.

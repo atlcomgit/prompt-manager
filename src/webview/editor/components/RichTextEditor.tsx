@@ -55,6 +55,33 @@ interface ToolbarButtonProps {
 const DEFAULT_HEIGHT = 180;
 const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 800;
+const AUTO_RESIZE_HEIGHT_PADDING = 2;
+
+// Resolves the effective editor height for manual and automatic sizing modes.
+export function resolveRichTextEditorHeight(input: {
+  measuredHeight: number;
+  autoResize: boolean;
+  minHeight?: number;
+  maxHeight?: number;
+}): number | null {
+  const {
+    measuredHeight,
+    autoResize,
+    minHeight = MIN_HEIGHT,
+    maxHeight = MAX_HEIGHT,
+  } = input;
+
+  if (!Number.isFinite(measuredHeight) || measuredHeight <= 0) {
+    return null;
+  }
+
+  const paddedHeight = Math.ceil(measuredHeight) + AUTO_RESIZE_HEIGHT_PADDING;
+  if (autoResize) {
+    return Math.max(minHeight, paddedHeight);
+  }
+
+  return Math.max(minHeight, Math.min(maxHeight, paddedHeight));
+}
 
 const markdownRenderer = new MarkdownIt({
   html: false,
@@ -267,11 +294,13 @@ export const RichTextEditor: React.FC<Props> = ({
   showFormattingToolbar,
   contentPadding = 'default',
 }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
   const sourceRef = useRef<HTMLTextAreaElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const lastLocalValueRef = useRef<string | null>(null);
   const isModeManuallySelectedRef = useRef(false);
+  const pendingAutoResizeFrameRef = useRef<number | null>(null);
   const [mode, setMode] = useState<Mode>(() => detectPreferredMode(value || ''));
   const [htmlSource, setHtmlSource] = useState(value || '');
   const [formattingState, setFormattingState] = useState<FormattingState>(DEFAULT_FORMATTING_STATE);
@@ -348,12 +377,45 @@ export const RichTextEditor: React.FC<Props> = ({
       return;
     }
 
-    const nextHeight = Math.max(
-      MIN_HEIGHT,
-      Math.min(MAX_HEIGHT, measuredHeight + 2),
-    );
+    const nextHeight = resolveRichTextEditorHeight({
+      measuredHeight,
+      autoResize,
+    });
+    if (!nextHeight) {
+      return;
+    }
+
     setCurrentHeight((prev) => prev === nextHeight ? prev : nextHeight);
   }, [autoResize, fillHeight, resolveAutoResizeTarget]);
+
+  // Schedules a single measurement per frame while the layout is stabilizing.
+  const scheduleAutoResizeHeightSync = useCallback(() => {
+    if (fillHeight || !autoResize) {
+      return;
+    }
+
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+      syncAutoResizeHeight();
+      return;
+    }
+
+    if (pendingAutoResizeFrameRef.current !== null) {
+      window.cancelAnimationFrame(pendingAutoResizeFrameRef.current);
+    }
+
+    pendingAutoResizeFrameRef.current = window.requestAnimationFrame(() => {
+      pendingAutoResizeFrameRef.current = null;
+      syncAutoResizeHeight();
+    });
+  }, [autoResize, fillHeight, syncAutoResizeHeight]);
+
+  useEffect(() => {
+    return () => {
+      if (pendingAutoResizeFrameRef.current !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(pendingAutoResizeFrameRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const nextValue = value || '';
@@ -490,11 +552,42 @@ export const RichTextEditor: React.FC<Props> = ({
   }, [mode, onDebug, value]);
 
   useEffect(() => {
-    // Delay measurement until after mode-switch DOM render is committed
-    requestAnimationFrame(() => {
-      syncAutoResizeHeight();
-    });
-  }, [htmlSource, markdownPreviewHtml, mode, syncAutoResizeHeight, value]);
+    // Wait for DOM updates before measuring content-driven height.
+    scheduleAutoResizeHeightSync();
+  }, [htmlSource, markdownPreviewHtml, mode, scheduleAutoResizeHeightSync, value]);
+
+  useEffect(() => {
+    if (fillHeight || !autoResize) {
+      return;
+    }
+
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    // Recalculate height when the available width changes and line wrapping shifts.
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(() => {
+        scheduleAutoResizeHeightSync();
+      });
+      observer.observe(container);
+      return () => observer.disconnect();
+    }
+
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handleWindowResize = () => {
+      scheduleAutoResizeHeightSync();
+    };
+    window.addEventListener('resize', handleWindowResize);
+
+    return () => {
+      window.removeEventListener('resize', handleWindowResize);
+    };
+  }, [autoResize, fillHeight, scheduleAutoResizeHeightSync]);
 
   useEffect(() => {
     if (!showFormattingToolbar) {
@@ -680,7 +773,10 @@ export const RichTextEditor: React.FC<Props> = ({
   }, [mode, translate]);
 
   return (
-    <div style={{ ...styles.root, ...(fillHeight ? styles.rootFillHeight : null) }}>
+    <div
+      ref={containerRef}
+      style={{ ...styles.root, ...(fillHeight ? styles.rootFillHeight : null) }}
+    >
       <style>
         {`
           .pm-rich-editor-content,

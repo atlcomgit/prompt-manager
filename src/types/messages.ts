@@ -196,6 +196,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptSaving'; id: string; promptUuid?: string; saving: boolean; requestId?: string }
 	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string; requestId?: string }
+	| { type: 'chatRequestStarted'; promptId: string; requestId?: string; sessionId?: string }
 	| { type: 'chatMemorySummary'; promptId: string; memorySummary: ChatMemorySummary }
 	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number }
 	| { type: 'reportContentUpdated'; report: string; timeSpentWriting?: number; timeSpentOnTask?: number; updatedAt?: string }

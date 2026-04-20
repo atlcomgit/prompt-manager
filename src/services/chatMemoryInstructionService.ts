@@ -7,6 +7,7 @@ import type { ChatMemoryInstructionComposer } from './chatMemoryInstructionCompo
 import type { GitService } from './gitService.js';
 import type { WorkspaceService } from './workspaceService.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
+import { resolveEffectiveProjectNames } from '../utils/projectScope.js';
 
 const SESSION_FOLDER_NAME = 'chat-memory';
 const SESSION_FOLDER_RELATIVE_PATH = '.vscode/prompt-manager/chat-memory';
@@ -105,17 +106,18 @@ export class ChatMemoryInstructionService {
 		await this.cleanupStaleSessions();
 		await this.removePromptSessionInstructions(prompt.promptUuid, 'new-chat');
 
-		const uncommittedProjects = prompt.projects.length > 0
-			? await this.gitService.getUncommittedProjectData(
-				this.workspaceService.getWorkspaceFolderPaths(),
-				prompt.projects,
-			)
-			: [];
+		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
+		const effectiveProjectNames = resolveEffectiveProjectNames(prompt.projects, Array.from(projectPaths.keys()));
+
+		const uncommittedProjects = await this.gitService.getUncommittedProjectData(
+			projectPaths,
+			effectiveProjectNames,
+		);
 
 		const { context: rawMemoryContext, stats: contextStats } = await this.memoryContextService.getContextForChat(prompt.content, {
 			maxChars: 6000,
 			shortTermLimit: 15,
-			projectNames: prompt.projects,
+			projectNames: effectiveProjectNames,
 			uncommittedProjects,
 		});
 
@@ -131,6 +133,7 @@ export class ChatMemoryInstructionService {
 		const filePath = path.join(this.getSessionDirectoryPath(), fileName);
 		const content = this.composer.compose({
 			prompt,
+			effectiveProjectNames,
 			rawMemoryContext,
 			generatedAt: new Date().toISOString(),
 		});

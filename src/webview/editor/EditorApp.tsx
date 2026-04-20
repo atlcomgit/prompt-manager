@@ -51,12 +51,16 @@ import {
 import { diffPromptConfigSyncFields, PROMPT_CONFIG_SYNC_FIELDS } from '../../utils/promptExternalSync.js';
 import { shouldApplyPromptAiEnrichmentState, shouldApplyPromptSaveResult } from '../../utils/promptSaveFeedback.js';
 import {
+  isPromptChatLaunchComplete,
+  resolvePromptChatLaunchPhase,
+  resolvePromptChatLaunchStepStates,
   resolvePromptEditorExpandedSections,
   resolvePromptPlanPlaceholderState,
   resolvePromptChatLaunchTrackingKey,
   shouldShowPromptChatLaunchBlock,
   togglePromptEditorSectionExpansion,
 } from '../../utils/promptEditorBehavior.js';
+import type { PromptChatLaunchRenameState } from '../../utils/promptEditorBehavior.js';
 import { resolveGitOverlayBusyActionName, resolveGitOverlayDonePersistence } from '../../utils/gitOverlay.js';
 
 const vscode = getVsCodeApi();
@@ -83,7 +87,6 @@ type GitOverlayTrackedRequest = {
   createdAt: number;
 };
 
-const CHAT_START_TIMEOUT_MS = 15000;
 const CHAT_LAUNCH_COMPLETION_HOLD_MS = 2000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
 const EDITOR_FORM_CONTENT_WIDTH_PX = 800;
@@ -443,29 +446,35 @@ export const EditorApp: React.FC = () => {
     isPersistedPrompt,
     isStartingChat,
   });
-  const [chatLaunchRenameState, setChatLaunchRenameState] = useState<'idle' | 'active' | 'completed'>('idle');
+  const [chatLaunchRequestStarted, setChatLaunchRequestStarted] = useState(false);
+  const [chatLaunchRenameState, setChatLaunchRenameState] = useState<PromptChatLaunchRenameState>('idle');
   const [chatLaunchCompletionHold, setChatLaunchCompletionHold] = useState(false);
   const [chatMemorySummary, setChatMemorySummary] = useState<ChatMemorySummary | null>(null);
   const chatLaunchCompletionTimerRef = useRef<number | null>(null);
-  const previousChatEntryAvailabilityRef = useRef(chatEntryState.hasChatEntry);
   const chatLaunchTrackingKey = resolvePromptChatLaunchTrackingKey(prompt);
   const previousChatLaunchTrackingKeyRef = useRef(chatLaunchTrackingKey);
+  const isChatLaunchComplete = isPromptChatLaunchComplete({
+    hasChatEntry: chatEntryState.hasChatEntry,
+    chatRequestStarted: chatLaunchRequestStarted,
+    chatRenameState: chatLaunchRenameState,
+  });
+  const previousChatLaunchCompletionRef = useRef(isChatLaunchComplete);
   const showChatLaunchCompletionState = prompt.status === 'in-progress'
-    && chatEntryState.hasChatEntry
+    && isChatLaunchComplete
     && chatLaunchCompletionHold;
   const shouldShowChatLaunchBlock = shouldShowPromptChatLaunchBlock({
     status: prompt.status,
     hasChatEntry: chatEntryState.hasChatEntry,
+    chatRequestStarted: chatLaunchRequestStarted,
     chatLaunchCompletionHold: showChatLaunchCompletionState,
-    chatRenameInFlight: chatLaunchRenameState === 'active',
+    chatRenameState: chatLaunchRenameState,
   });
-  const chatLaunchPhase: 'opening' | 'binding' | 'renaming' | 'ready' = chatLaunchRenameState === 'active'
-    ? 'renaming'
-    : showChatLaunchCompletionState
-      ? 'ready'
-      : isStartingChat
-        ? 'opening'
-        : 'binding';
+  const chatLaunchPhase = resolvePromptChatLaunchPhase({
+    hasChatEntry: chatEntryState.hasChatEntry,
+    chatRequestStarted: chatLaunchRequestStarted,
+    chatRenameState: chatLaunchRenameState,
+    chatLaunchCompletionHold: showChatLaunchCompletionState,
+  });
   const chatLaunchStateLabel = chatLaunchPhase === 'ready'
     ? t('editor.chatLaunchStatusReady')
     : chatLaunchPhase === 'renaming'
@@ -831,20 +840,6 @@ export const EditorApp: React.FC = () => {
     setNotice({ kind, message: normalizedMessage });
   }, []);
 
-  const handleChatStartTimeout = useCallback(() => {
-    if (!startChatLockRef.current) {
-      return;
-    }
-    releaseStartChatPendingState({ resetSaving: true });
-    resetChatStartRequestTracking();
-    showInlineNotice('error', t('actions.startChatTimeout'));
-  }, [releaseStartChatPendingState, resetChatStartRequestTracking, showInlineNotice, t]);
-
-  const scheduleChatStartTimeout = useCallback(() => {
-    clearChatStartTimeout();
-    chatStartTimeoutRef.current = window.setTimeout(handleChatStartTimeout, CHAT_START_TIMEOUT_MS);
-  }, [clearChatStartTimeout, handleChatStartTimeout]);
-
   const buildPromptForSaveFrom = useCallback((basePrompt: Prompt): Prompt => {
     const timeSpent = Date.now() - openedAtRef.current;
     const updatedPrompt = applyElapsedTimeByContext(basePrompt, timeSpent);
@@ -911,6 +906,7 @@ export const EditorApp: React.FC = () => {
     acceptedChatStartRequestIdRef.current = '';
     pendingChatStartPreflightRequestIdRef.current = '';
     pendingGitOverlayStartChatRequestIdRef.current = '';
+    setChatLaunchRequestStarted(false);
     setChatLaunchRenameState('idle');
     setNotice(null);
     setIsChatPanelOpen(false);
@@ -924,7 +920,6 @@ export const EditorApp: React.FC = () => {
 
     startChatLockRef.current = true;
     setIsStartingChat(true);
-    scheduleChatStartTimeout();
     vscode.postMessage({
       type: 'startChat',
       id: updatedPrompt.id || '__new__',
@@ -934,7 +929,7 @@ export const EditorApp: React.FC = () => {
       skipBranchMismatchCheck: options?.skipBranchMismatchCheck === true,
       originalStatus,
     });
-  }, [buildPromptForSave, handleEditorTabChange, scheduleChatStartTimeout]);
+  }, [buildPromptForSave, handleEditorTabChange]);
 
   const continueOpenChat = useCallback(() => {
     if (isOpeningChatRef.current) {
@@ -1431,6 +1426,7 @@ export const EditorApp: React.FC = () => {
         clearChatStartTimeout();
         startChatLockRef.current = false;
         setIsStartingChat(false);
+        setChatLaunchRequestStarted(false);
         setChatLaunchRenameState('idle');
         resetChatStartRequestTracking();
         resetStartChatPreflightTracking();
@@ -1492,6 +1488,7 @@ export const EditorApp: React.FC = () => {
             setShowLoader(false);
             setIsGeneratingTitle(Boolean(msg.aiEnrichment?.title));
             setIsGeneratingDescription(Boolean(msg.aiEnrichment?.description));
+            setChatLaunchRequestStarted(false);
             setChatLaunchRenameState('idle');
             setNotice(null);
             setGitOverlayOpen(false);
@@ -1980,6 +1977,16 @@ export const EditorApp: React.FC = () => {
         setChatLaunchRenameState('idle');
         releaseStartChatPendingState();
         break;
+      case 'chatRequestStarted':
+        if (!shouldHandleChatStartMessage(msg.requestId)) {
+          break;
+        }
+        if ((msg.requestId || '').trim() === pendingChatStartRequestIdRef.current) {
+          acceptedChatStartRequestIdRef.current = pendingChatStartRequestIdRef.current;
+          pendingChatStartRequestIdRef.current = '';
+        }
+        setChatLaunchRequestStarted(true);
+        break;
       case 'chatOpened':
         if (!shouldHandleChatStartMessage(msg.requestId)) {
           break;
@@ -2264,7 +2271,7 @@ export const EditorApp: React.FC = () => {
         if ((msg.requestId || '').trim()) {
           const requestId = (msg.requestId || '').trim();
           const matchesSaveRequest = requestId === (activeSaveRequestIdRef.current || '').trim();
-          const matchesPendingRequest = requestId === pendingChatStartRequestIdRef.current;
+          const matchesChatStartRequest = shouldHandleChatStartMessage(requestId);
           const matchesPreflightRequest = requestId === pendingChatStartPreflightRequestIdRef.current;
           const matchesGitOverlayTrackedRequest = hasGitOverlayTrackedRequest(requestId);
           if (matchesSaveRequest) {
@@ -2278,15 +2285,18 @@ export const EditorApp: React.FC = () => {
             showInlineNotice('error', msg.message);
             break;
           }
-          if (!matchesPendingRequest && !matchesPreflightRequest && !matchesGitOverlayTrackedRequest) {
+          if (!matchesChatStartRequest && !matchesPreflightRequest && !matchesGitOverlayTrackedRequest) {
             break;
           }
-          if (!matchesPendingRequest && !matchesPreflightRequest && matchesGitOverlayTrackedRequest) {
+          if (!matchesChatStartRequest && !matchesPreflightRequest && matchesGitOverlayTrackedRequest) {
             showInlineNotice('error', msg.message);
             break;
           }
         }
         releaseStartChatPendingState({ resetSaving: true });
+        setChatLaunchRequestStarted(false);
+        setChatLaunchRenameState('idle');
+        setChatLaunchCompletionHold(false);
         setIsOpeningChat(false);
         setIsSaving(false);
         setIsGeneratingTitle(false);
@@ -2326,6 +2336,9 @@ export const EditorApp: React.FC = () => {
         clearChatStartTimeout();
         startChatLockRef.current = false;
         setIsStartingChat(false);
+        setChatLaunchRequestStarted(false);
+        setChatLaunchRenameState('idle');
+        setChatLaunchCompletionHold(false);
         setIsOpeningChat(false);
         resetChatStartRequestTracking();
         resetStartChatPreflightTracking();
@@ -2351,6 +2364,9 @@ export const EditorApp: React.FC = () => {
       clearChatStartTimeout();
       startChatLockRef.current = false;
       setIsStartingChat(false);
+      setChatLaunchRequestStarted(false);
+      setChatLaunchRenameState('idle');
+      setChatLaunchCompletionHold(false);
       resetChatStartRequestTracking();
       resetStartChatPreflightTracking();
       setNotice(null);
@@ -3375,11 +3391,17 @@ export const EditorApp: React.FC = () => {
     setManualSectionOverrides(nextSectionState.manualSectionOverrides);
   };
 
+  const chatLaunchStepStates = resolvePromptChatLaunchStepStates({
+    hasChatEntry: chatEntryState.hasChatEntry,
+    chatRequestStarted: chatLaunchRequestStarted,
+    chatRenameState: chatLaunchRenameState,
+  });
+
   const chatLaunchSteps: Array<{ key: string; label: React.ReactNode; state: 'done' | 'active' | 'pending' }> = [
     {
       key: 'prepare',
       label: t('editor.chatLaunchStepPrepare'),
-      state: 'done',
+      state: chatLaunchStepStates.prepare,
     },
     {
       key: 'open',
@@ -3389,25 +3411,17 @@ export const EditorApp: React.FC = () => {
           modelName={selectedModelName}
         />
       ),
-      state: chatLaunchPhase === 'opening' ? 'active' : 'done',
+      state: chatLaunchStepStates.open,
     },
     {
       key: 'bind',
       label: t('editor.chatLaunchStepBind'),
-      state: chatLaunchPhase === 'ready' || chatLaunchPhase === 'renaming'
-        ? 'done'
-        : chatLaunchPhase === 'binding'
-          ? 'active'
-          : 'pending',
+      state: chatLaunchStepStates.bind,
     },
     {
       key: 'rename',
       label: t('editor.chatLaunchStepRename'),
-      state: chatLaunchRenameState === 'completed'
-        ? 'done'
-        : chatLaunchPhase === 'renaming'
-          ? 'active'
-          : 'pending',
+      state: chatLaunchStepStates.rename,
     },
   ];
   const completedChatLaunchStepCount = chatLaunchSteps.filter((step) => step.state === 'done').length;
@@ -3418,21 +3432,23 @@ export const EditorApp: React.FC = () => {
     }
 
     previousChatLaunchTrackingKeyRef.current = chatLaunchTrackingKey;
-    previousChatEntryAvailabilityRef.current = chatEntryState.hasChatEntry;
+    previousChatLaunchCompletionRef.current = false;
     if (chatLaunchCompletionTimerRef.current !== null) {
       window.clearTimeout(chatLaunchCompletionTimerRef.current);
       chatLaunchCompletionTimerRef.current = null;
     }
 
     setChatLaunchCompletionHold(false);
+    setChatLaunchRequestStarted(false);
     setChatLaunchRenameState('idle');
-  }, [chatEntryState.hasChatEntry, chatLaunchTrackingKey]);
+  }, [chatLaunchTrackingKey]);
 
   useLayoutEffect(() => {
     const canTrackCompletion = prompt.status === 'in-progress';
-    const previousHadChatEntry = previousChatEntryAvailabilityRef.current;
+    const launchCompleted = canTrackCompletion && isChatLaunchComplete;
+    const previousLaunchCompleted = previousChatLaunchCompletionRef.current;
 
-    if (canTrackCompletion && !previousHadChatEntry && chatEntryState.hasChatEntry) {
+    if (launchCompleted && !previousLaunchCompleted) {
       if (chatLaunchCompletionTimerRef.current !== null) {
         window.clearTimeout(chatLaunchCompletionTimerRef.current);
       }
@@ -3451,8 +3467,8 @@ export const EditorApp: React.FC = () => {
       setChatLaunchCompletionHold(false);
     }
 
-    previousChatEntryAvailabilityRef.current = chatEntryState.hasChatEntry;
-  }, [chatEntryState.hasChatEntry, chatLaunchCompletionHold, prompt.status]);
+    previousChatLaunchCompletionRef.current = launchCompleted;
+  }, [chatLaunchCompletionHold, isChatLaunchComplete, prompt.status]);
 
   useEffect(() => {
     if (!shouldShowChatLaunchBlock || chatLaunchPhase === 'ready') {

@@ -90,6 +90,8 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Reuse the AI model from the most recently updated prompt when you create a draft through Quick Add Prompt, so quick capture starts with the same model you used last.
 - Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.
 - Keep generated global, project, session, and codemap instruction files as plain Markdown without auto-injected `applyTo` frontmatter.
+- Resolve generated session and codemap chat-memory instructions against the current workspace: valid prompt project selections stay scoped, while empty or stale selections fall back to all workspace projects.
+- Rebase embedded codemap markdown headings under per-project sections so generated instruction files keep a single top-level H1 and stable nested H2/H3/H4 structure.
 - Let prompt auto-complete wait for terminal result markers from the persisted Copilot chat session, so plan-mode or still-streaming chats do not jump to Completed just because the session index already has an end timestamp.
 - When a prompt is moved back to In Progress manually or by reopening chat, auto-complete now waits for the next chat request that starts after that status change, so an older completed request in the same bound chat session does not immediately flip the prompt back to Completed.
 - Keep best-effort prompt refresh, model refresh, and git overlay debounce timers detached from the Node event loop, so short-lived test and utility runs do not hang waiting for delayed background retries.

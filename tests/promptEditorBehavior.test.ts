@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 
 import { createDefaultEditorPromptExpandedSections } from '../src/types/prompt.js';
 import {
+	isPromptChatLaunchComplete,
+	resolvePromptChatLaunchPhase,
+	resolvePromptChatLaunchStepStates,
 	resolvePromptEditorExpandedSections,
 	resolvePromptPlanPlaceholderState,
 	resolvePromptChatLaunchTrackingKey,
@@ -323,37 +326,152 @@ test('shouldShowPromptChatLaunchBlock only keeps the launch block while launch i
 	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'in-progress',
 		hasChatEntry: false,
+		chatRequestStarted: false,
 		chatLaunchCompletionHold: false,
-		chatRenameInFlight: false,
+		chatRenameState: 'idle',
 	}), true);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'in-progress',
 		hasChatEntry: true,
+		chatRequestStarted: true,
 		chatLaunchCompletionHold: true,
-		chatRenameInFlight: false,
+		chatRenameState: 'completed',
 	}), true);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'in-progress',
 		hasChatEntry: true,
+		chatRequestStarted: true,
 		chatLaunchCompletionHold: false,
-		chatRenameInFlight: true,
+		chatRenameState: 'active',
 	}), true);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'in-progress',
 		hasChatEntry: true,
+		chatRequestStarted: true,
 		chatLaunchCompletionHold: false,
-		chatRenameInFlight: false,
+		chatRenameState: 'completed',
 	}), false);
+
+	assert.equal(shouldShowPromptChatLaunchBlock({
+		status: 'in-progress',
+		hasChatEntry: true,
+		chatRequestStarted: false,
+		chatLaunchCompletionHold: false,
+		chatRenameState: 'completed',
+	}), true);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'draft',
 		hasChatEntry: false,
+		chatRequestStarted: false,
 		chatLaunchCompletionHold: false,
-		chatRenameInFlight: false,
+		chatRenameState: 'idle',
 	}), false);
+});
+
+test('isPromptChatLaunchComplete requires request start, bind, and rename completion', () => {
+	assert.equal(isPromptChatLaunchComplete({
+		hasChatEntry: false,
+		chatRequestStarted: false,
+		chatRenameState: 'idle',
+	}), false);
+
+	assert.equal(isPromptChatLaunchComplete({
+		hasChatEntry: true,
+		chatRequestStarted: false,
+		chatRenameState: 'completed',
+	}), false);
+
+	assert.equal(isPromptChatLaunchComplete({
+		hasChatEntry: true,
+		chatRequestStarted: true,
+		chatRenameState: 'active',
+	}), false);
+
+	assert.equal(isPromptChatLaunchComplete({
+		hasChatEntry: true,
+		chatRequestStarted: true,
+		chatRenameState: 'completed',
+	}), true);
+});
+
+test('resolvePromptChatLaunchPhase follows the earliest incomplete milestone', () => {
+	assert.equal(resolvePromptChatLaunchPhase({
+		hasChatEntry: false,
+		chatRequestStarted: false,
+		chatRenameState: 'idle',
+		chatLaunchCompletionHold: false,
+	}), 'opening');
+
+	assert.equal(resolvePromptChatLaunchPhase({
+		hasChatEntry: false,
+		chatRequestStarted: true,
+		chatRenameState: 'idle',
+		chatLaunchCompletionHold: false,
+	}), 'binding');
+
+	assert.equal(resolvePromptChatLaunchPhase({
+		hasChatEntry: true,
+		chatRequestStarted: true,
+		chatRenameState: 'active',
+		chatLaunchCompletionHold: false,
+	}), 'renaming');
+
+	assert.equal(resolvePromptChatLaunchPhase({
+		hasChatEntry: true,
+		chatRequestStarted: true,
+		chatRenameState: 'completed',
+		chatLaunchCompletionHold: true,
+	}), 'ready');
+});
+
+test('resolvePromptChatLaunchStepStates keeps later steps pending until earlier milestones finish', () => {
+	assert.deepEqual(resolvePromptChatLaunchStepStates({
+		hasChatEntry: false,
+		chatRequestStarted: false,
+		chatRenameState: 'idle',
+	}), {
+		prepare: 'done',
+		open: 'active',
+		bind: 'pending',
+		rename: 'pending',
+	});
+
+	assert.deepEqual(resolvePromptChatLaunchStepStates({
+		hasChatEntry: false,
+		chatRequestStarted: true,
+		chatRenameState: 'idle',
+	}), {
+		prepare: 'done',
+		open: 'done',
+		bind: 'active',
+		rename: 'pending',
+	});
+
+	assert.deepEqual(resolvePromptChatLaunchStepStates({
+		hasChatEntry: true,
+		chatRequestStarted: false,
+		chatRenameState: 'completed',
+	}), {
+		prepare: 'done',
+		open: 'active',
+		bind: 'pending',
+		rename: 'pending',
+	});
+
+	assert.deepEqual(resolvePromptChatLaunchStepStates({
+		hasChatEntry: true,
+		chatRequestStarted: true,
+		chatRenameState: 'completed',
+	}), {
+		prepare: 'done',
+		open: 'done',
+		bind: 'done',
+		rename: 'done',
+	});
 });
 
 test('resolvePromptChatLaunchTrackingKey prefers promptUuid and falls back to prompt id', () => {

@@ -2,6 +2,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import type { Prompt } from '../types/prompt.js';
 import { summarizeUncommittedProjects } from '../utils/uncommittedChangesSummary.js';
+import { resolveEffectiveProjectNames } from '../utils/projectScope.js';
 import type { StorageService } from '../services/storageService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { GitService } from '../services/gitService.js';
@@ -51,8 +52,9 @@ export class CodeMapChatInstructionService {
 		}
 
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
-		const resolutions = await this.branchResolver.resolveProjects(projectPaths, prompt.projects, settings.trackedBranches);
-		const uncommittedSnapshots = await this.gitService.getUncommittedProjectData(projectPaths, resolutions.map(item => item.repository));
+		const effectiveProjectNames = resolveEffectiveProjectNames(prompt.projects, Array.from(projectPaths.keys()));
+		const resolutions = await this.branchResolver.resolveProjects(projectPaths, effectiveProjectNames, settings.trackedBranches);
+		const uncommittedSnapshots = await this.gitService.getUncommittedProjectData(projectPaths, effectiveProjectNames);
 		const materializationTargets: CodeMapMaterializationTarget[] = [];
 
 		for (const resolution of resolutions) {

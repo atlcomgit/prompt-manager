@@ -7019,14 +7019,32 @@ export class EditorPanelManager {
 					} catch (error) {
 						this.hooksOutput.appendLine(`[agent-file] create agent.json failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 					}
+					let chatRequestStartedNotified = false;
 					let chatOpenedNotified = false;
 					const trackedPromptId = prompt?.id || '';
+					const notifyChatRequestStarted = (sessionId?: string): void => {
+						if (chatRequestStartedNotified) {
+							return;
+						}
+						chatRequestStartedNotified = true;
+						postMessage({
+							type: 'chatRequestStarted',
+							promptId: trackedPromptId,
+							requestId: startChatRequestId || undefined,
+							sessionId: (sessionId || '').trim() || undefined,
+						});
+					};
 					const notifyChatOpened = (): void => {
 						if (chatOpenedNotified) {
 							return;
 						}
 						chatOpenedNotified = true;
 						postMessage({ type: 'chatOpened', promptId: trackedPromptId, requestId: startChatRequestId || undefined });
+					};
+					const notifySessionConfirmationTimeout = (): void => {
+						const message = 'Запуск чата не подтвердился. Можно попробовать ещё раз.';
+						this.hooksOutput.appendLine(`[chat-start] confirmation timeout for prompt=${prompt?.id || '-'}; request did not produce a detectable chat session`);
+						postMessage({ type: 'error', message, requestId: startChatRequestId || undefined });
 					};
 					postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
 
@@ -7049,6 +7067,7 @@ export class EditorPanelManager {
 								return false;
 							}
 							trackedSessionId = normalizedSessionId;
+							notifyChatRequestStarted(normalizedSessionId);
 							this.hooksOutput.appendLine(`[chat-start] binding prompt=${trackedPromptId || '-'} via ${source} session=${normalizedSessionId}`);
 							sessionBindingSucceeded = await bindSessionToPrompt(normalizedSessionId);
 							if (sessionBindingSucceeded) {
@@ -7085,7 +7104,9 @@ export class EditorPanelManager {
 								? await this.stateService.getActiveChatSessionId(15000, 250, {
 									excludeSessionIds: Array.from(sessionIdsToExclude),
 								})
-								: await this.stateService.getActiveChatSessionId(10000, 250);
+								: await this.stateService.getActiveChatSessionId(10000, 250, {
+									excludeSessionIds: Array.from(sessionIdsToExclude),
+								});
 							const activeSessionSource = shouldForceRebindChat
 								? 'active-session-late-rebind'
 								: 'active-session-fallback';
@@ -7093,10 +7114,13 @@ export class EditorPanelManager {
 								if (shouldForceRebindChat) {
 									sessionIdsToExclude.add(activeSessionId);
 								}
-							} else if (shouldForceRebindChat) {
-								this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; new chat session was not confirmed after rebind request`);
 							} else {
-								this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; chat message was dispatched but session was not detected yet`);
+								if (shouldForceRebindChat) {
+									this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; new chat session was not confirmed after rebind request`);
+								} else {
+									this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; chat message was dispatched but session was not detected yet`);
+								}
+								notifySessionConfirmationTimeout();
 							}
 						}
 
@@ -7106,6 +7130,9 @@ export class EditorPanelManager {
 							1000,
 							trackedSessionId || undefined,
 						);
+						if (Number(completion.lastRequestStarted || 0) > 0) {
+							notifyChatRequestStarted(completion.sessionId || trackedSessionId);
+						}
 						const shouldCaptureAgentFinalResponse = this.shouldCaptureAgentFinalResponse();
 						const chatResponse = await this.tryReadChatMarkdownFromClipboard();
 						const chatReportText = chatResponse.markdown;

@@ -45,9 +45,26 @@ interface ShouldPreservePromptIdAfterChatStartInput {
 interface ShouldShowPromptChatLaunchBlockInput {
 	status: PromptStatus;
 	hasChatEntry: boolean;
+	chatRequestStarted: boolean;
 	chatLaunchCompletionHold: boolean;
-	chatRenameInFlight: boolean;
+	chatRenameState: PromptChatLaunchRenameState;
 }
+
+export type PromptChatLaunchRenameState = 'idle' | 'active' | 'completed';
+export type PromptChatLaunchStepState = 'done' | 'active' | 'pending';
+export type PromptChatLaunchPhase = 'opening' | 'binding' | 'renaming' | 'ready';
+
+interface IsPromptChatLaunchCompleteInput {
+	hasChatEntry: boolean;
+	chatRequestStarted: boolean;
+	chatRenameState: PromptChatLaunchRenameState;
+}
+
+interface ResolvePromptChatLaunchPhaseInput extends IsPromptChatLaunchCompleteInput {
+	chatLaunchCompletionHold: boolean;
+}
+
+interface ResolvePromptChatLaunchStepStatesInput extends IsPromptChatLaunchCompleteInput { }
 
 /** Input for resolving the empty-state placeholder shown in the Plan section. */
 interface ResolvePromptPlanPlaceholderStateInput {
@@ -212,7 +229,55 @@ export function shouldShowPromptChatLaunchBlock(
 	input: ShouldShowPromptChatLaunchBlockInput,
 ): boolean {
 	return input.status === 'in-progress'
-		&& (input.chatRenameInFlight || !input.hasChatEntry || input.chatLaunchCompletionHold);
+		&& (!isPromptChatLaunchComplete(input) || input.chatLaunchCompletionHold);
+}
+
+/** Treat launch as complete only after request start, bind, and rename all finished. */
+export function isPromptChatLaunchComplete(
+	input: IsPromptChatLaunchCompleteInput,
+): boolean {
+	return input.chatRequestStarted
+		&& input.hasChatEntry
+		&& input.chatRenameState === 'completed';
+}
+
+/** Resolve the top-level launch phase from the earliest incomplete milestone. */
+export function resolvePromptChatLaunchPhase(
+	input: ResolvePromptChatLaunchPhaseInput,
+): PromptChatLaunchPhase {
+	if (input.chatLaunchCompletionHold || isPromptChatLaunchComplete(input)) {
+		return 'ready';
+	}
+
+	if (!input.chatRequestStarted) {
+		return 'opening';
+	}
+
+	if (!input.hasChatEntry) {
+		return 'binding';
+	}
+
+	return 'renaming';
+}
+
+/** Resolve step states so later milestones cannot complete before earlier ones. */
+export function resolvePromptChatLaunchStepStates(
+	input: ResolvePromptChatLaunchStepStatesInput,
+): Record<'prepare' | 'open' | 'bind' | 'rename', PromptChatLaunchStepState> {
+	return {
+		prepare: 'done',
+		open: input.chatRequestStarted ? 'done' : 'active',
+		bind: !input.chatRequestStarted
+			? 'pending'
+			: input.hasChatEntry
+				? 'done'
+				: 'active',
+		rename: !input.chatRequestStarted || !input.hasChatEntry
+			? 'pending'
+			: input.chatRenameState === 'completed'
+				? 'done'
+				: 'active',
+	};
 }
 
 /** Resolve which placeholder the Plan section should display before plan content appears. */

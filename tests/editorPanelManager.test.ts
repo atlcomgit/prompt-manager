@@ -1140,6 +1140,7 @@ test('startChat schedules an early rename after the chat session is bound', asyn
 			&& item.logSuffix === ' (bind)'
 			&& item.options?.notifyOnSuccess === false),
 	);
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatRequestStarted' && (message as any)?.sessionId === 'session-new'));
 	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatLaunchRenameState' && (message as any)?.state === 'started'));
 	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatLaunchRenameState' && (message as any)?.state === 'completed'));
 	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-new']);
@@ -1147,7 +1148,7 @@ test('startChat schedules an early rename after the chat session is bound', asyn
 	resetVsCodeCommandMock();
 });
 
-test('startChat does not report chatOpened until a chat session is actually bound', async () => {
+test('startChat reports a real timeout notice only after session confirmation fails', async () => {
 	resetVsCodeCommandMock();
 
 	const { manager, getStoredPrompt } = await createManager({
@@ -1211,7 +1212,12 @@ test('startChat does not report chatOpened until a chat session is actually boun
 	await new Promise(resolve => setTimeout(resolve, 0));
 
 	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatStarted'));
+	assert.ok(!postedMessages.some(message => (message as any)?.type === 'chatRequestStarted'));
 	assert.ok(!postedMessages.some(message => (message as any)?.type === 'chatOpened'));
+	assert.ok(postedMessages.some(message =>
+		(message as any)?.type === 'error'
+		&& (message as any)?.requestId === 'req-bind-timeout'
+		&& (message as any)?.message === 'Запуск чата не подтвердился. Можно попробовать ещё раз.'));
 	assert.deepEqual(getStoredPrompt()?.chatSessionIds, []);
 	resetVsCodeCommandMock();
 });
@@ -1826,6 +1832,7 @@ test('startChat binds a new chat session through late rebind fallback before rep
 	await new Promise(resolve => setTimeout(resolve, 0));
 
 	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatStarted'));
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatRequestStarted' && (message as any)?.sessionId === 'session-late'));
 	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatOpened'));
 	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-late']);
 	resetVsCodeCommandMock();

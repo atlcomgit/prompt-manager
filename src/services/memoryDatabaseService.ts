@@ -1059,18 +1059,23 @@ export class MemoryDatabaseService {
 	// ---- Search (keyword-based fallback) ----
 
 	/** Search commits by keyword in message, summary, and keywords fields */
-	searchByKeyword(query: string, limit = 20): MemoryCommit[] {
+	searchByKeyword(query: string, limit = 20, repositories: string[] = []): MemoryCommit[] {
 		if (!this.db || !query.trim()) { return []; }
 		const pattern = `%${query.trim()}%`;
+		const normalizedRepositories = Array.from(new Set((repositories || []).map(repository => repository.trim()).filter(Boolean)));
+		const repositoryCondition = normalizedRepositories.length > 0
+			? ` AND c.repository IN (${normalizedRepositories.map(() => '?').join(',')})`
+			: '';
 		const result = this.db.exec(
 			`SELECT DISTINCT c.* FROM commits c
 			 LEFT JOIN analyses a ON c.sha = a.commitSha
-			 WHERE c.message LIKE ?
+			 WHERE (c.message LIKE ?
 				OR a.summary LIKE ?
 				OR a.keywords LIKE ?
-				OR a.components LIKE ?
+				OR a.components LIKE ?)
+			 ${repositoryCondition}
 			 ORDER BY c.date DESC LIMIT ?;`,
-			[pattern, pattern, pattern, pattern, limit],
+			[pattern, pattern, pattern, pattern, ...normalizedRepositories, limit],
 		);
 		if (result.length === 0) { return []; }
 		const columns = result[0].columns;

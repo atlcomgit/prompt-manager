@@ -74,7 +74,7 @@ export function buildCodeMapChatInstructions(input: {
 		const content: string[] = [...baseHeader, ''];
 
 		if (target.baseInstruction) {
-			content.push(target.baseInstruction.content);
+			content.push(rebaseMarkdownHeadings(target.baseInstruction.content, 3));
 		} else {
 			content.push(text.missingTitle, text.missingText);
 		}
@@ -84,7 +84,7 @@ export function buildCodeMapChatInstructions(input: {
 				'',
 				target.currentInstruction.instructionKind === 'delta' ? text.currentDeltaTitle : text.currentSnapshotTitle,
 				'',
-				target.currentInstruction.content,
+				rebaseMarkdownHeadings(target.currentInstruction.content, 4),
 			);
 		} else if (target.queuedCurrentRefresh && target.resolution.currentBranch !== target.resolution.resolvedBranchName) {
 			content.push('', text.queueLine, `- ${target.resolution.currentBranch}: ${text.queued}`);
@@ -109,4 +109,30 @@ export function buildCodeMapChatInstructions(input: {
 		'',
 		...sections,
 	].join('\n');
+}
+
+function rebaseMarkdownHeadings(content: string, targetLevelForTopHeading: number): string {
+	const lines = content.split('\n');
+	let insideFence = false;
+
+	return lines.map((line) => {
+		const trimmedLine = line.trimStart();
+		if (/^(```|~~~)/.test(trimmedLine)) {
+			insideFence = !insideFence;
+			return line;
+		}
+
+		if (insideFence) {
+			return line;
+		}
+
+		const headingMatch = /^(\s*)(#{1,6})(\s+.*)$/.exec(line);
+		if (!headingMatch) {
+			return line;
+		}
+
+		const [, indent, hashes, suffix] = headingMatch;
+		const nextLevel = Math.min(6, hashes.length + Math.max(0, targetLevelForTopHeading - 1));
+		return `${indent}${'#'.repeat(nextLevel)}${suffix}`;
+	}).join('\n');
 }

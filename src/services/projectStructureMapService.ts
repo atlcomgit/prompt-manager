@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import ignore from 'ignore';
 import { buildAsciiTree, type AsciiTreeItem } from '../utils/asciiTree.js';
+import { resolveEffectiveProjectNames } from '../utils/projectScope.js';
 
 const DEFAULT_EXCLUDED_FOLDERS = [
 	'.git',
@@ -56,11 +57,11 @@ export class ProjectStructureMapService {
 			return null;
 		}
 
-		const selectedNames = new Set((options.projectNames || []).map(name => name.trim()).filter(Boolean));
-		const targets = selectedNames.size > 0
-			? workspaceFolders.filter(folder => selectedNames.has(folder.name))
-			: workspaceFolders;
-		const effectiveTargets = targets.length > 0 ? targets : workspaceFolders;
+		const effectiveProjectNames = resolveEffectiveProjectNames(
+			options.projectNames || [],
+			workspaceFolders.map(folder => folder.name),
+		);
+		const effectiveTargets = workspaceFolders.filter(folder => effectiveProjectNames.includes(folder.name));
 		const state: ScanState = {
 			items: [],
 			entryCount: 0,

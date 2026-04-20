@@ -1,8 +1,10 @@
 import type { Prompt } from '../types/prompt.js';
 import { getInstructionUsageRules } from './instructionUsageRules.js';
+import { normalizeProjectNames } from './projectScope.js';
 
 export interface ChatMemoryInstructionBuildInput {
 	prompt: Pick<Prompt, 'id' | 'promptUuid' | 'title' | 'taskNumber' | 'projects' | 'branch'>;
+	effectiveProjectNames?: string[];
 	rawMemoryContext: string;
 	generatedAt?: string;
 	locale?: string;
@@ -82,7 +84,13 @@ export function buildChatMemoryInstruction(input: ChatMemoryInstructionBuildInpu
 			usageLine2: 'It may become stale if the code changes significantly during the chat.',
 		};
 	const generatedAt = input.generatedAt || new Date().toISOString();
-	const projectScope = input.prompt.projects.length > 0 ? input.prompt.projects.join(', ') : text.emptyScope;
+	const requestedProjectNames = normalizeProjectNames(input.prompt.projects);
+	const effectiveProjectNames = normalizeProjectNames(input.effectiveProjectNames || requestedProjectNames);
+	const projectScope = requestedProjectNames.length === 0
+		? text.emptyScope
+		: effectiveProjectNames.length > 0
+			? effectiveProjectNames.join(', ')
+			: text.emptyScope;
 	const taskRef = input.prompt.taskNumber ? `${text.taskReference}: ${input.prompt.taskNumber}` : text.taskRef;
 	const branchRef = input.prompt.branch ? `${text.branch}: ${input.prompt.branch}` : text.branchRef;
 	const titleRef = input.prompt.title ? `${text.promptTitle}: ${input.prompt.title}` : text.titleRef;

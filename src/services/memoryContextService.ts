@@ -279,21 +279,22 @@ export class MemoryContextService {
 		opts: Required<MemoryContextOptions>,
 	): Promise<{ block: string; commitCount: number }> {
 		const text = this.getLocaleText();
+		const repositoryScope = this.resolveRepositoryScope(opts);
 		let results: MemorySearchResult[] = [];
 
 		// Try semantic search first
 		if (prompt && opts.useSemantic && this.embedding.isReady()) {
-			results = await this.semanticSearchCommits(prompt, opts.shortTermLimit);
+			results = await this.semanticSearchCommits(prompt, opts.shortTermLimit, repositoryScope);
 		}
 
 		// Fallback: keyword search
 		if (results.length === 0 && prompt) {
-			results = await this.keywordSearchCommits(prompt, opts.shortTermLimit);
+			results = await this.keywordSearchCommits(prompt, opts.shortTermLimit, repositoryScope);
 		}
 
 		// Fallback: just recent commits
 		if (results.length === 0) {
-			results = await this.getRecentCommits(opts.shortTermLimit, opts.filter);
+			results = await this.getRecentCommits(opts.shortTermLimit, this.buildScopedFilter(opts, repositoryScope));
 		}
 
 		results = dedupeMemorySearchResults(results).slice(0, opts.shortTermLimit);
@@ -319,7 +320,13 @@ export class MemoryContextService {
 		opts: Required<MemoryContextOptions>,
 	): Promise<{ block: string; count: number }> {
 		const text = this.getLocaleText();
-		const summaries = await this.db.getSummaries('project', '');
+		const repositoryScope = this.resolveRepositoryScope(opts);
+		const targetRepositories = repositoryScope.length > 0
+			? repositoryScope
+			: this.normalizeRepositoryScope(this.db.getRepositories());
+		const summaries = targetRepositories
+			.flatMap(repository => this.db.getSummaries('project', repository, 1))
+			.sort((left, right) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt));
 		if (summaries.length === 0) { return { block: '', count: 0 }; }
 
 		const limited = summaries.slice(0, 5);
@@ -468,6 +475,7 @@ export class MemoryContextService {
 	private async semanticSearchCommits(
 		query: string,
 		limit: number,
+		repositories: string[] = [],
 	): Promise<MemorySearchResult[]> {
 		const queryVector = await this.embedding.generateEmbedding(query);
 		if (!queryVector) { return []; }
@@ -475,15 +483,27 @@ export class MemoryContextService {
 		const allEmbeddings = await this.db.getAllEmbeddings();
 		if (allEmbeddings.length === 0) { return []; }
 
-		const scored = this.embedding.semanticSearch(queryVector, allEmbeddings, limit, 0.3);
+		const repositorySet = new Set(this.normalizeRepositoryScope(repositories));
+		const scored = this.embedding.semanticSearch(
+			queryVector,
+			allEmbeddings,
+			repositorySet.size > 0 ? allEmbeddings.length : limit,
+			0.3,
+		);
 
 		// Load commit + analysis for each result
 		const results: MemorySearchResult[] = [];
 		for (const item of scored) {
 			const commit = await this.db.getCommit(item.commitSha);
 			if (!commit) { continue; }
+			if (repositorySet.size > 0 && !repositorySet.has(commit.repository)) {
+				continue;
+			}
 			const analysis = await this.db.getAnalysis(item.commitSha);
 			results.push({ commit, analysis: analysis || undefined, score: item.score });
+			if (results.length >= limit) {
+				break;
+			}
 		}
 
 		return results;
@@ -495,8 +515,9 @@ export class MemoryContextService {
 	private async keywordSearchCommits(
 		query: string,
 		limit: number,
+		repositories: string[] = [],
 	): Promise<MemorySearchResult[]> {
-		const commits = await this.db.searchByKeyword(query);
+		const commits = await this.db.searchByKeyword(query, limit, repositories);
 		const results: MemorySearchResult[] = [];
 		for (const commit of commits.slice(0, limit)) {
 			const analysis = await this.db.getAnalysis(commit.sha);
@@ -525,6 +546,40 @@ export class MemoryContextService {
 		}
 
 		return results;
+	}
+
+	/** Build a repository-aware filter without losing explicit caller filters. */
+	private buildScopedFilter(
+		opts: Required<MemoryContextOptions>,
+		repositoryScope: string[],
+	): MemoryFilter {
+		return repositoryScope.length > 0
+			? { ...opts.filter, repositories: repositoryScope }
+			: { ...opts.filter };
+	}
+
+	/** Merge projectNames and explicit filter.repositories into a single repository scope. */
+	private resolveRepositoryScope(opts: Required<MemoryContextOptions>): string[] {
+		const projectRepositories = this.normalizeRepositoryScope(opts.projectNames || []);
+		const filteredRepositories = this.normalizeRepositoryScope(opts.filter.repositories || []);
+
+		if (projectRepositories.length === 0) {
+			return filteredRepositories;
+		}
+
+		if (filteredRepositories.length === 0) {
+			return projectRepositories;
+		}
+
+		const filteredRepositorySet = new Set(filteredRepositories);
+		return projectRepositories.filter(repository => filteredRepositorySet.has(repository));
+	}
+
+	/** Normalize repository names and preserve first-seen order. */
+	private normalizeRepositoryScope(repositories: string[]): string[] {
+		return Array.from(new Set((repositories || [])
+			.map(repository => repository.trim())
+			.filter(Boolean)));
 	}
 
 	/**

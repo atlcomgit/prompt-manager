@@ -105,6 +105,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Move prompts through a full lifecycle in the tracker panel.
 - Change a prompt status directly from the sidebar item menu, including the More button and the context menu.
 - Review the Process tab in workflow order with notes first, then the plan, and the report after that.
+- See the current prompt status directly inside the Process tab Notes section: it is shown in the section header and again at the top of the block, using the same compact color treatment as the sidebar prompt list.
 - New prompts always open on the Main tab with Basic, Time tracking, Workspace, Prompt,
   and Agent expanded by default, Notes starts collapsed but reopens automatically when it
   receives content before any manual toggle, and Plan and Report now also reopen when they

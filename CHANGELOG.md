@@ -19,6 +19,7 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- The Process tab Notes section now shows the current prompt status both in the section header and at the top of the block, reusing the same compact status color contract as the sidebar prompt list.
 - Prompt-local context files stored under .vscode/prompt-manager/<prompt>/context now survive prompt folder renames and reopen correctly after the editor page is closed and opened again; stale config.json references are auto-repaired on load and on the next save.
 - Background codemap refresh and manual history analysis now default to the new `lowest` background priority, lower the scheduling priority of their git subprocesses, and insert extra idle-friendly pauses between heavy batches so Memory page work no longer competes as aggressively with active CPU use.
 - Quick Add Prompt now preselects the AI model from the most recently updated saved prompt, matching the default model behavior of the regular new-prompt flow.

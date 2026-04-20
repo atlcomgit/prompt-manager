@@ -6,6 +6,12 @@ import {
   resolveCompactTaskColumnTrack,
 } from '../../../utils/sidebarCompactLayout.js';
 import { useT } from '../../shared/i18n';
+import {
+  buildPromptStatusOptions,
+  getPromptStatusLabel,
+  PROMPT_STATUS_COLORS,
+  PROMPT_STATUS_ICONS,
+} from '../../shared/promptStatus';
 
 interface Props {
   prompt: PromptConfig;
@@ -47,50 +53,6 @@ function BusySpinner({ size = 18 }: { size?: number }) {
   );
 }
 
-const STATUS_ICONS: Record<PromptStatus, string> = {
-  'draft': '📝',
-  'in-progress': '🚀',
-  'stopped': '▣',
-  'cancelled': '❌',
-  'completed': '✅',
-  'report': '🧾',
-  'review': '🔎',
-  'closed': '🔒',
-};
-
-const STATUS_COLORS: Record<PromptStatus, string> = {
-  'draft': 'var(--vscode-descriptionForeground)',
-  'in-progress': 'var(--vscode-editorInfo-foreground, #3794ff)',
-  'stopped': 'var(--vscode-editorWarning-foreground, #cca700)',
-  'cancelled': 'var(--vscode-errorForeground, #f44747)',
-  'completed': 'var(--vscode-testing-iconPassed, #73c991)',
-  'report': 'var(--vscode-textLink-foreground)',
-  'review': 'var(--vscode-editorWarning-foreground, #cca700)',
-  'closed': 'var(--vscode-disabledForeground)',
-};
-
-function statusTranslationKey(status: PromptStatus): string {
-  switch (status) {
-    case 'draft':
-      return 'status.draft';
-    case 'in-progress':
-      return 'status.inProgress';
-    case 'stopped':
-      return 'status.stopped';
-    case 'cancelled':
-      return 'status.cancelled';
-    case 'completed':
-      return 'status.completed';
-    case 'report':
-      return 'status.report';
-    case 'review':
-      return 'status.review';
-    case 'closed':
-      return 'status.closed';
-  }
-}
-
-
 export const PromptItem: React.FC<Props> = ({
   prompt,
   viewMode,
@@ -110,29 +72,7 @@ export const PromptItem: React.FC<Props> = ({
   const MENU_GAP = 4;
 
   const t = useT();
-  const statusOptions = useMemo(() => (
-    PROMPT_STATUS_ORDER.map(status => ({
-      value: status,
-      label: t(statusTranslationKey(status)),
-      icon: STATUS_ICONS[status],
-      color: STATUS_COLORS[status],
-    }))
-  ), [t]);
-  const STATUS_LABELS: Record<PromptStatus, string> = useMemo(() => (
-    statusOptions.reduce<Record<PromptStatus, string>>((acc, option) => {
-      acc[option.value] = option.label;
-      return acc;
-    }, {
-      'draft': '',
-      'in-progress': '',
-      'stopped': '',
-      'cancelled': '',
-      'completed': '',
-      'report': '',
-      'review': '',
-      'closed': '',
-    })
-  ), [statusOptions]);
+  const statusOptions = useMemo(() => buildPromptStatusOptions(t), [t]);
   const [showActions, setShowActions] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
@@ -144,7 +84,8 @@ export const PromptItem: React.FC<Props> = ({
 
   const selFg = isSelected ? 'var(--vscode-list-activeSelectionForeground)' : undefined;
   const selBg = isSelected ? 'var(--vscode-list-activeSelectionBackground)' : undefined;
-  const statusAccent = STATUS_COLORS[prompt.status] || 'var(--vscode-descriptionForeground)';
+  const statusAccent = PROMPT_STATUS_COLORS[prompt.status] || 'var(--vscode-descriptionForeground)';
+  const currentStatusLabel = getPromptStatusLabel(prompt.status, t);
   const statusTone = selFg || statusAccent;
   const busyTone = isSelected
     ? 'var(--vscode-list-activeSelectionForeground)'
@@ -176,7 +117,7 @@ export const PromptItem: React.FC<Props> = ({
     },
     {
       id: 'status',
-      icon: STATUS_ICONS[prompt.status],
+      icon: PROMPT_STATUS_ICONS[prompt.status],
       label: t('filter.status'),
       hasSubmenu: true,
     },
@@ -320,7 +261,7 @@ export const PromptItem: React.FC<Props> = ({
                 <span style={styles.progressBarText}>{prompt.progress}%</span>
               </div>
             ) : (
-              STATUS_LABELS[prompt.status]
+              currentStatusLabel
             )}
           </div>
         </div>
@@ -339,7 +280,7 @@ export const PromptItem: React.FC<Props> = ({
                   textShadow: isSelected ? '0 0 1px var(--vscode-list-activeSelectionBackground)' : 'none',
                 }}
               >
-                {STATUS_ICONS[prompt.status] || '◇'}
+                {PROMPT_STATUS_ICONS[prompt.status] || '◇'}
               </span>
             )}
           </span>
@@ -404,7 +345,7 @@ export const PromptItem: React.FC<Props> = ({
                     background: selBg ? 'color-mix(in srgb, var(--vscode-list-activeSelectionForeground) 14%, var(--vscode-list-activeSelectionBackground))' : 'transparent',
                   }}
                 >
-                  <span>{STATUS_LABELS[prompt.status]}</span>
+                  <span>{currentStatusLabel}</span>
                 </span>
               )}
               {prompt.archived && (

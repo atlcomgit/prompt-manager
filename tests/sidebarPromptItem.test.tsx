@@ -106,3 +106,16 @@ test('PromptItem renders loader instead of compact progress while busy in compac
 	assert.doesNotMatch(markup, />42%</);
 	assert.match(markup, /animateTransform/);
 });
+
+test('PromptItem renders the shared compact status label for non-progress states', () => {
+	const markup = renderPromptItemMarkup({
+		viewMode: 'compact',
+		prompt: makePrompt({
+			status: 'report',
+			progress: undefined,
+		}),
+	});
+
+	assert.match(markup, />Report</);
+	assert.match(markup, /var\(--vscode-textLink-foreground\)/);
+});

@@ -5,6 +5,7 @@ import React, { useState, useCallback, useEffect, useLayoutEffect, useRef, useMe
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
+import { PromptStatusText } from '../shared/PromptStatusText';
 import { TextField } from './components/TextField';
 import { TextArea } from './components/TextArea';
 import { RichTextEditor } from './components/RichTextEditor';
@@ -4371,6 +4372,11 @@ export const EditorApp: React.FC = () => {
 
             {renderSection('notes', t('editor.notes'), notesSummary, (
             <>
+              {/* Show the prompt status first inside notes, matching the prompt list color contract. */}
+              <div style={styles.notesStatusRow}>
+                <span style={styles.notesStatusLabel}>{t('filter.status')}:</span>
+                <PromptStatusText status={prompt.status} style={styles.notesStatusText} />
+              </div>
               <div style={styles.field}>
               <label style={styles.label}>{t('editor.notes')}</label>
               <TextArea
@@ -4381,6 +4387,9 @@ export const EditorApp: React.FC = () => {
               />
               </div>
             </>
+            ), (
+              /* Keep the section title unchanged and surface the status as a right-side header action. */
+              <PromptStatusText status={prompt.status} variant="badge" style={styles.sectionStatusText} />
             ))}
 
           {showMemorySection && chatMemorySummary ? renderSection('memory', t('editor.memoryBlockTitle'), memorySummary, (
@@ -5177,6 +5186,10 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '8px',
     flexShrink: 0,
   },
+  sectionStatusText: {
+    fontSize: '11px',
+    fontWeight: 600,
+  },
   sectionArrow: {
     color: 'var(--vscode-descriptionForeground)',
     width: '10px',
@@ -5343,6 +5356,20 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     color: 'var(--vscode-foreground)',
     marginBottom: '2px',
+  },
+  notesStatusRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    flexWrap: 'wrap',
+  },
+  notesStatusLabel: {
+    fontSize: '12px',
+    fontWeight: 500,
+    color: 'var(--vscode-descriptionForeground)',
+  },
+  notesStatusText: {
+    fontSize: '12px',
   },
   textInput: {
     width: '100%',

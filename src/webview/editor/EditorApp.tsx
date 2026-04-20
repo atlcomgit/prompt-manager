@@ -520,6 +520,8 @@ export const EditorApp: React.FC = () => {
   const saveTimeoutRef = useRef<number | null>(null);
   const currentPromptIdRef = useRef<string>('__new__');
   const activeSaveIdRef = useRef<string | null>(null);
+  const activeSaveRequestIdRef = useRef<string | null>(null);
+  const activeSaveClearedDirtyRef = useRef(false);
   const recalcTriggeredForRef = useRef<string>('');
   const promptPlanStateRef = useRef<{ exists: boolean; content: string }>({ exists: false, content: '' });
   const hasSeenPromptPlanSnapshotRef = useRef(false);
@@ -1458,9 +1460,14 @@ export const EditorApp: React.FC = () => {
           const currentPromptId = (currentPromptIdRef.current || '__new__').trim() || '__new__';
           const currentPromptUuid = (String(promptRef.current.promptUuid || '').trim() || '');
           const activeSaveId = (activeSaveIdRef.current || '').trim();
+          const activeSaveRequestId = (activeSaveRequestIdRef.current || '').trim();
           const previousPromptId = (String(msg.previousId || '').trim() || '');
           const reason: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config' | undefined = msg.reason;
+          const incomingRequestId = (String(msg.requestId || '').trim() || '');
           const isOpenPayload = reason === 'open';
+          if (reason === 'save' && activeSaveRequestId && incomingRequestId !== activeSaveRequestId) {
+            break;
+          }
           /** Принимаем save-ответ для нового промпта только если UUID совпадает или отсутствует */
           const isNewPromptSaveResponse = currentPromptId === '__new__' && reason === 'save'
             && (incomingPromptUuid === '' || currentPromptUuid === '' || incomingPromptUuid === currentPromptUuid);
@@ -1511,6 +1518,8 @@ export const EditorApp: React.FC = () => {
             setIsLoaded(true);
             setIsSaving(false);
             activeSaveIdRef.current = null;
+            activeSaveRequestIdRef.current = null;
+            activeSaveClearedDirtyRef.current = false;
             if ((msg.prompt.chatSessionIds || []).length > 0) {
               releaseStartChatPendingState();
               const pid = String(msg.prompt.id || '').trim();
@@ -1632,6 +1641,8 @@ export const EditorApp: React.FC = () => {
           setIsLoaded(true);
           setIsSaving(false);
           activeSaveIdRef.current = null;
+          activeSaveRequestIdRef.current = null;
+          activeSaveClearedDirtyRef.current = false;
           if (reason === 'save' && msg.aiEnrichment) {
             setIsGeneratingTitle(Boolean(msg.aiEnrichment.title));
             setIsGeneratingDescription(Boolean(msg.aiEnrichment.description));
@@ -1682,6 +1693,12 @@ export const EditorApp: React.FC = () => {
         }
         break;
       case 'promptSaved':
+        if ((activeSaveRequestIdRef.current || '').trim()) {
+          const incomingRequestId = (String(msg.requestId || '').trim() || '');
+          if (incomingRequestId !== (activeSaveRequestIdRef.current || '').trim()) {
+            break;
+          }
+        }
         if (!shouldApplyPromptSaveResult(
           msg.prompt?.id,
           msg.prompt?.promptUuid,
@@ -1702,6 +1719,13 @@ export const EditorApp: React.FC = () => {
         break;
       case 'promptSaving':
         {
+          const activeSaveRequestId = (activeSaveRequestIdRef.current || '').trim();
+          if (activeSaveRequestId) {
+            const incomingRequestId = (String(msg.requestId || '').trim() || '');
+            if (incomingRequestId !== activeSaveRequestId) {
+              break;
+            }
+          }
           const incomingId = String(msg.id || '').trim() || '__new__';
           const currentId = currentPromptIdRef.current || '__new__';
           const activeSaveId = activeSaveIdRef.current;
@@ -1712,6 +1736,8 @@ export const EditorApp: React.FC = () => {
           setIsSaving(Boolean(msg.saving));
           if (!msg.saving) {
             activeSaveIdRef.current = null;
+            activeSaveRequestIdRef.current = null;
+            activeSaveClearedDirtyRef.current = false;
           }
         }
         break;
@@ -2237,9 +2263,21 @@ export const EditorApp: React.FC = () => {
       case 'error':
         if ((msg.requestId || '').trim()) {
           const requestId = (msg.requestId || '').trim();
+          const matchesSaveRequest = requestId === (activeSaveRequestIdRef.current || '').trim();
           const matchesPendingRequest = requestId === pendingChatStartRequestIdRef.current;
           const matchesPreflightRequest = requestId === pendingChatStartPreflightRequestIdRef.current;
           const matchesGitOverlayTrackedRequest = hasGitOverlayTrackedRequest(requestId);
+          if (matchesSaveRequest) {
+            setIsSaving(false);
+            if (activeSaveClearedDirtyRef.current) {
+              setIsDirty(true);
+            }
+            activeSaveIdRef.current = null;
+            activeSaveRequestIdRef.current = null;
+            activeSaveClearedDirtyRef.current = false;
+            showInlineNotice('error', msg.message);
+            break;
+          }
           if (!matchesPendingRequest && !matchesPreflightRequest && !matchesGitOverlayTrackedRequest) {
             break;
           }
@@ -2260,6 +2298,8 @@ export const EditorApp: React.FC = () => {
           clearGitOverlayBusyState();
         }
         activeSaveIdRef.current = null;
+        activeSaveRequestIdRef.current = null;
+        activeSaveClearedDirtyRef.current = false;
         resetChatStartRequestTracking();
         resetStartChatPreflightTracking();
         showInlineNotice('error', msg.message);
@@ -2490,11 +2530,7 @@ export const EditorApp: React.FC = () => {
       const timeSpent = Date.now() - openedAtRef.current;
       const updatedPrompt = applyElapsedTimeByContext(currentPrompt, timeSpent);
       openedAtRef.current = Date.now();
-      saveStartCounterRef.current = userChangeCounterRef.current;
-      activeSaveIdRef.current = (updatedPrompt.id || '__new__').trim() || '__new__';
-      setIsSaving(true);
-      setIsDirty(false);
-      vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
+      dispatchPromptSave(updatedPrompt, 'autosave', { clearDirty: true });
     }, delayMs);
   };
 
@@ -3000,6 +3036,23 @@ export const EditorApp: React.FC = () => {
     });
   }, [prompt.branch, prompt.projects]);
 
+  const dispatchPromptSave = useCallback((
+    updatedPrompt: Prompt,
+    source: 'manual' | 'status-change' | 'autosave',
+    options: { clearDirty?: boolean } = {},
+  ) => {
+    const requestId = crypto.randomUUID();
+    saveStartCounterRef.current = userChangeCounterRef.current;
+    activeSaveIdRef.current = (updatedPrompt.id || '__new__').trim() || '__new__';
+    activeSaveRequestIdRef.current = requestId;
+    activeSaveClearedDirtyRef.current = Boolean(options.clearDirty);
+    setIsSaving(true);
+    if (options.clearDirty) {
+      setIsDirty(false);
+    }
+    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source, requestId });
+  }, []);
+
   const handleSave = (
     source: 'manual' | 'status-change' | 'autosave' | unknown = 'manual',
     promptOverride?: Prompt,
@@ -3026,10 +3079,7 @@ export const EditorApp: React.FC = () => {
       autoSaveTimerRef.current = null;
     }
 
-    saveStartCounterRef.current = userChangeCounterRef.current;
-    activeSaveIdRef.current = (updatedPrompt.id || promptBase.id || prompt.id || '__new__').trim() || '__new__';
-    setIsSaving(true);
-    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: normalizedSource });
+    dispatchPromptSave(updatedPrompt, normalizedSource);
   };
 
   const handleResetReport = () => {
@@ -3071,15 +3121,11 @@ export const EditorApp: React.FC = () => {
     }
 
     hasBeenSavedRef.current = true;
-    saveStartCounterRef.current = userChangeCounterRef.current;
-    activeSaveIdRef.current = (nextPrompt.id || '__new__').trim() || '__new__';
-    setIsSaving(true);
-    setIsDirty(false);
     logReportDebug('reset.save-dispatched', {
       promptId: nextPrompt.id || '__new__',
       reportLength: nextPrompt.report.length,
     });
-    vscode.postMessage({ type: 'savePrompt', prompt: nextPrompt, source: 'manual' });
+    dispatchPromptSave(nextPrompt, 'manual', { clearDirty: true });
   };
 
   const handleOpenHttpExamples = useCallback(() => {
@@ -3186,11 +3232,7 @@ export const EditorApp: React.FC = () => {
       window.clearTimeout(autoSaveTimerRef.current);
       autoSaveTimerRef.current = null;
     }
-    saveStartCounterRef.current = userChangeCounterRef.current;
-    activeSaveIdRef.current = (updatedPrompt.id || prompt.id || '__new__').trim() || '__new__';
-    setIsSaving(true);
-    setIsDirty(false);
-    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'status-change' });
+    dispatchPromptSave(updatedPrompt, 'status-change', { clearDirty: true });
   };
 
   const handleFooterMarkCompleted = () => {
@@ -3220,7 +3262,12 @@ export const EditorApp: React.FC = () => {
 
     saveTimeoutRef.current = window.setTimeout(() => {
       setIsSaving(false);
+      if (activeSaveClearedDirtyRef.current) {
+        setIsDirty(true);
+      }
       activeSaveIdRef.current = null;
+      activeSaveRequestIdRef.current = null;
+      activeSaveClearedDirtyRef.current = false;
     }, 15000);
 
     return () => {

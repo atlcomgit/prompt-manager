@@ -167,3 +167,110 @@ test('StateService scopes chat session storage to the current workspace bucket',
 		[],
 	);
 });
+
+test('StateService extracts the latest request state from JSONL snapshots and patches', async () => {
+	const { StateService } = await importStateService();
+	const raw = [
+		JSON.stringify({
+			kind: 0,
+			v: {
+				requests: [
+					{ modelState: { value: 0 }, result: null },
+					{ modelState: { value: 0 }, result: null },
+				],
+			},
+		}),
+		JSON.stringify({ kind: 2, k: ['requests', 1, 'response'], v: [{ kind: 'progressTaskSerialized' }] }),
+		JSON.stringify({ kind: 1, k: ['requests', 1, 'result'], v: { timings: { totalElapsed: 1234 } } }),
+		JSON.stringify({ kind: 1, k: ['requests', 1, 'modelState'], v: { value: 3 } }),
+	].join('\n');
+
+	assert.deepEqual((StateService as any).extractLatestChatRequestStateFromJsonl(raw), {
+		requestIndex: 1,
+		requestModelState: 3,
+		hasRequestResult: true,
+	});
+});
+
+test('StateService keeps progress-only requests non-terminal when JSONL has no result marker', async () => {
+	const { StateService } = await importStateService();
+	const raw = [
+		JSON.stringify({
+			kind: 0,
+			v: {
+				requests: [
+					{ modelState: { value: 0 }, result: null },
+				],
+			},
+		}),
+		JSON.stringify({ kind: 2, k: ['requests', 0, 'response'], v: [{ kind: 'progressTaskSerialized' }] }),
+		JSON.stringify({ kind: 2, k: ['requests', 0, 'response'], v: [{ kind: 'markdownContent' }] }),
+	].join('\n');
+
+	assert.deepEqual((StateService as any).extractLatestChatRequestStateFromJsonl(raw), {
+		requestIndex: 0,
+		requestModelState: 0,
+		hasRequestResult: false,
+	});
+});
+
+test('StateService completion snapshot selects the newest tracked session with a terminal result marker', async () => {
+	const { StateService } = await importStateService();
+	const service = new StateService({
+		storageUri: {
+			fsPath: '/tmp/workspaceStorage/current/storage',
+		},
+	} as any);
+
+	(service as any).resolveWorkspaceStateDbPaths = async () => ['/tmp/workspaceStorage/current/state.vscdb'];
+	(service as any).scopeWorkspaceStateDbPathsToCurrentWorkspace = (paths: string[]) => paths;
+	(service as any).readChatSessionStoreIndex = async () => ({
+		entries: {
+			old: {
+				sessionId: 'session-old',
+				timing: {
+					lastRequestStarted: 100,
+					lastRequestEnded: 200,
+				},
+				lastResponseState: 1,
+				hasPendingEdits: false,
+			},
+			newest: {
+				sessionId: 'session-new',
+				timing: {
+					lastRequestStarted: 300,
+					lastRequestEnded: 900,
+				},
+				lastResponseState: 2,
+				hasPendingEdits: false,
+			},
+		},
+	});
+	(service as any).readLatestChatRequestState = async (sessionId: string) => {
+		if (sessionId === 'session-new') {
+			return {
+				requestIndex: 2,
+				requestModelState: 1,
+				hasRequestResult: true,
+			};
+		}
+
+		return {
+			requestIndex: 0,
+			requestModelState: 0,
+			hasRequestResult: false,
+		};
+	};
+
+	assert.deepEqual(await service.getLatestTrackedChatRequestCompletion(['session-old', 'session-new']), {
+		ok: true,
+		sessionId: 'session-new',
+		lastRequestStarted: 300,
+		lastRequestEnded: 900,
+		lastResponseState: 2,
+		requestModelState: 1,
+		hasRequestResult: true,
+		hasPendingEdits: false,
+		dbPath: '/tmp/workspaceStorage/current/state.vscdb',
+	});
+});

@@ -338,6 +338,8 @@ export interface PromptConfig {
 	// --- Chat integration ---
 	/** Associated Copilot chat session IDs */
 	chatSessionIds: string[];
+	/** Auto-complete only after a chat request started at/after this timestamp (ms). */
+	chatRequestAutoCompleteAfter?: number;
 
 	// --- Time tracking ---
 	/** Time spent writing the prompt (ms) */
@@ -455,6 +457,49 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		content: '',
 		report: '',
 	};
+}
+
+/** Normalize the auto-complete request gate stored in prompt config. */
+function normalizePromptChatRequestAutoCompleteAfter(value: unknown): number | undefined {
+	const normalized = Number(value);
+	if (!Number.isFinite(normalized) || normalized <= 0) {
+		return undefined;
+	}
+
+	return normalized;
+}
+
+/** Record that prompt auto-complete should wait for the next chat request after this moment. */
+export function markPromptChatAutoCompleteAfter<T extends { chatRequestAutoCompleteAfter?: number }>(
+	prompt: T,
+	timestampMs: number = Date.now(),
+): T {
+	const normalizedTimestamp = normalizePromptChatRequestAutoCompleteAfter(timestampMs);
+	if (normalizedTimestamp === undefined) {
+		delete prompt.chatRequestAutoCompleteAfter;
+		return prompt;
+	}
+
+	prompt.chatRequestAutoCompleteAfter = normalizedTimestamp;
+	return prompt;
+}
+
+/** Allow auto-complete only for chat requests that started after the in-progress gate. */
+export function shouldAutoCompletePromptFromChatRequest(
+	prompt: Pick<PromptConfig, 'chatRequestAutoCompleteAfter'>,
+	requestStartedAt?: number,
+): boolean {
+	const gateTimestamp = normalizePromptChatRequestAutoCompleteAfter(prompt.chatRequestAutoCompleteAfter);
+	if (gateTimestamp === undefined) {
+		return true;
+	}
+
+	const normalizedRequestStartedAt = Number(requestStartedAt || 0);
+	if (!Number.isFinite(normalizedRequestStartedAt) || normalizedRequestStartedAt <= 0) {
+		return false;
+	}
+
+	return normalizedRequestStartedAt >= gateTimestamp;
 }
 
 /** Sidebar sort options */

@@ -14,6 +14,8 @@ export interface PendingSaveEntry {
 	readonly snapshot: Prompt;
 	/** Промис завершения: резолвится сохранённым промптом или null при ошибке */
 	readonly promise: Promise<Prompt | null>;
+	/** Уникальный идентификатор операции, чтобы поздний finally не удалял более новую запись */
+	readonly operationId: string;
 }
 
 /**

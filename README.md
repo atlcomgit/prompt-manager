@@ -71,6 +71,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Keep grouped sidebar results free from an extra Favorites section, while sidebar utility buttons stay light at rest and switch to a darker feedback state when active or pressed.
 - Custom groups can now tint their sidebar section header with an auto-contrasted black or white title, so bright and dark group colors both stay readable.
 - Busy prompts in the sidebar now show a loader instead of stale status or progress while saving or while AI is still generating title and description fields.
+- Selected in-progress prompts keep the sidebar progress bar readable with an outlined inverse track, and fully completed progress uses a more saturated green fill.
 - Store prompt content in Markdown and keep prompt metadata in JSON inside `.vscode/prompt-manager/`.
 - Keep prompt-local context files valid after prompt title or task-number driven folder renames, including auto-repair of stale saved file references on reopen.
 - Attach projects, languages, frameworks, skills, MCP tools, hooks, task references, branches, notes, plans, and reports.
@@ -89,6 +90,9 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Reuse the AI model from the most recently updated prompt when you create a draft through Quick Add Prompt, so quick capture starts with the same model you used last.
 - Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.
 - Keep generated global, project, session, and codemap instruction files as plain Markdown without auto-injected `applyTo` frontmatter.
+- Let prompt auto-complete wait for terminal result markers from the persisted Copilot chat session, so plan-mode or still-streaming chats do not jump to Completed just because the session index already has an end timestamp.
+- When a prompt is moved back to In Progress manually or by reopening chat, auto-complete now waits for the next chat request that starts after that status change, so an older completed request in the same bound chat session does not immediately flip the prompt back to Completed.
+- Keep best-effort prompt refresh, model refresh, and git overlay debounce timers detached from the Node event loop, so short-lived test and utility runs do not hang waiting for delayed background retries.
 - Keep the prompt, report, and editor state tied to the same workflow instead of splitting them across tools.
 
 ### Work with Git without leaving the prompt flow

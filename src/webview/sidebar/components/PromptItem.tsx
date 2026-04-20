@@ -53,6 +53,39 @@ function BusySpinner({ size = 18 }: { size?: number }) {
   );
 }
 
+/** Duplicate progress text into track and fill layers so each part keeps its own contrast. */
+function ProgressValueLabel({
+  value,
+  baseStyle,
+  overlayStyle,
+  trackTone,
+  fillTone,
+}: {
+  value: number;
+  baseStyle: React.CSSProperties;
+  overlayStyle: React.CSSProperties;
+  trackTone: string;
+  fillTone: string;
+}) {
+  const normalizedValue = Math.max(0, Math.min(value, 100));
+
+  return (
+    <>
+      <span style={{ ...baseStyle, color: trackTone }}>{value}%</span>
+      <span
+        aria-hidden="true"
+        style={{
+          ...overlayStyle,
+          color: fillTone,
+          clipPath: `inset(0 ${100 - normalizedValue}% 0 0)`,
+        }}
+      >
+        {value}%
+      </span>
+    </>
+  );
+}
+
 export const PromptItem: React.FC<Props> = ({
   prompt,
   viewMode,
@@ -90,6 +123,24 @@ export const PromptItem: React.FC<Props> = ({
   const busyTone = isSelected
     ? 'var(--vscode-list-activeSelectionForeground)'
     : 'var(--vscode-progressBar-background, var(--vscode-editorInfo-foreground, #4da3ff))';
+  const progressValue = typeof prompt.progress === 'number' ? prompt.progress : 0;
+  const completedProgressTone = 'var(--vscode-charts-green, var(--vscode-terminal-ansiGreen, var(--vscode-testing-iconPassed, #2e7d32)))';
+  const progressFillTone = progressValue >= 100
+    ? completedProgressTone
+    : (isSelected ? 'var(--vscode-list-activeSelectionBackground)' : statusAccent);
+  const progressTrackBackground = isSelected
+    ? 'var(--vscode-sideBar-background, var(--vscode-editor-background))'
+    : 'color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 10%, var(--vscode-sideBar-background, var(--vscode-editor-background)))';
+  const progressTrackBorder = isSelected
+    ? 'color-mix(in srgb, var(--vscode-list-activeSelectionBackground) 76%, var(--vscode-list-activeSelectionForeground))'
+    : 'color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 48%, var(--vscode-panel-border))';
+  const progressFillOpacity = progressValue >= 100 ? 0.96 : (isSelected ? 0.82 : 0.72);
+  const progressTrackTextTone = 'var(--vscode-sideBar-foreground, var(--vscode-foreground))';
+  const progressFillTextTone = progressValue >= 100
+    ? 'var(--vscode-button-foreground, #ffffff)'
+    : (isSelected
+      ? 'var(--vscode-list-activeSelectionForeground)'
+      : 'var(--vscode-button-foreground, #ffffff)');
   const busyTitle = t('sidebar.promptBusy');
   const compactTaskNumber = normalizeCompactTaskNumber(prompt.taskNumber);
   const resolvedCompactTaskColumnTrack = compactTaskColumnTrack || resolveCompactTaskColumnTrack(prompt.taskNumber);
@@ -248,17 +299,29 @@ export const PromptItem: React.FC<Props> = ({
                 <BusySpinner size={18} />
               </span>
             ) : prompt.status === 'in-progress' && typeof prompt.progress === 'number' ? (
-              <div style={styles.progressBarContainer} title={`${prompt.progress}%`}>
+              <div
+                style={{
+                  ...styles.progressBarContainer,
+                  background: progressTrackBackground,
+                  borderColor: progressTrackBorder,
+                }}
+                title={`${prompt.progress}%`}
+              >
                 <div
                   style={{
                     ...styles.progressBarFill,
                     width: `${prompt.progress}%`,
-                    background: prompt.progress >= 100
-                      ? 'var(--vscode-testing-iconPassed, #73c991)'
-                      : (selFg || 'var(--vscode-editorInfo-foreground, #3794ff)'),
+                    background: progressFillTone,
+                    opacity: progressFillOpacity,
                   }}
                 />
-                <span style={styles.progressBarText}>{prompt.progress}%</span>
+                <ProgressValueLabel
+                  value={prompt.progress}
+                  baseStyle={styles.progressBarText}
+                  overlayStyle={styles.progressBarTextOverlay}
+                  trackTone={progressTrackTextTone}
+                  fillTone={progressFillTextTone}
+                />
               </div>
             ) : (
               currentStatusLabel
@@ -324,17 +387,29 @@ export const PromptItem: React.FC<Props> = ({
                   <BusySpinner size={18} />
                 </span>
               ) : prompt.status === 'in-progress' && typeof prompt.progress === 'number' ? (
-                <div style={styles.detailedProgressBarContainer} title={`${prompt.progress}%`}>
+                <div
+                  style={{
+                    ...styles.detailedProgressBarContainer,
+                    background: progressTrackBackground,
+                    borderColor: progressTrackBorder,
+                  }}
+                  title={`${prompt.progress}%`}
+                >
                   <div
                     style={{
                       ...styles.detailedProgressBarFill,
                       width: `${prompt.progress}%`,
-                      background: prompt.progress >= 100
-                        ? 'var(--vscode-testing-iconPassed, #73c991)'
-                        : (selFg || statusAccent),
+                      background: progressFillTone,
+                      opacity: progressFillOpacity,
                     }}
                   />
-                  <span style={styles.detailedProgressBarText}>{prompt.progress}%</span>
+                  <ProgressValueLabel
+                    value={prompt.progress}
+                    baseStyle={styles.detailedProgressBarText}
+                    overlayStyle={styles.detailedProgressBarTextOverlay}
+                    trackTone={progressTrackTextTone}
+                    fillTone={progressFillTextTone}
+                  />
                 </div>
               ) : (
                 <span
@@ -892,6 +967,8 @@ const styles: Record<string, React.CSSProperties> = {
     height: '14px',
     borderRadius: '2px',
     background: 'color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 18%, transparent)',
+    border: '1px solid var(--vscode-panel-border)',
+    boxSizing: 'border-box',
     overflow: 'hidden',
     flexShrink: 0,
     marginLeft: 'auto',
@@ -910,12 +987,31 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    width: '100%',
     height: '100%',
     fontSize: '9px',
     fontWeight: 700,
     lineHeight: 1,
-    color: 'var(--vscode-foreground)',
+    color: 'var(--vscode-sideBar-foreground, var(--vscode-foreground))',
+    textShadow: '0 0 1px color-mix(in srgb, var(--vscode-sideBar-background, var(--vscode-editor-background)) 78%, transparent)',
     userSelect: 'none',
+    zIndex: 1,
+  },
+  progressBarTextOverlay: {
+    position: 'absolute',
+    inset: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    height: '100%',
+    fontSize: '9px',
+    fontWeight: 700,
+    lineHeight: 1,
+    textShadow: '0 0 1px color-mix(in srgb, var(--vscode-button-background, #0e639c) 68%, transparent)',
+    userSelect: 'none',
+    pointerEvents: 'none',
+    zIndex: 2,
   },
 
   /* ── Detailed progress bar ── */
@@ -927,6 +1023,8 @@ const styles: Record<string, React.CSSProperties> = {
     height: '16px',
     borderRadius: '2px',
     background: 'color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 18%, transparent)',
+    border: '1px solid var(--vscode-panel-border)',
+    boxSizing: 'border-box',
     overflow: 'hidden',
     flexShrink: 0,
     verticalAlign: 'middle',
@@ -950,7 +1048,25 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '10px',
     fontWeight: 700,
     lineHeight: 1,
-    color: 'var(--vscode-foreground)',
+    color: 'var(--vscode-sideBar-foreground, var(--vscode-foreground))',
+    textShadow: '0 0 1px color-mix(in srgb, var(--vscode-sideBar-background, var(--vscode-editor-background)) 78%, transparent)',
     userSelect: 'none',
+    zIndex: 1,
+  },
+  detailedProgressBarTextOverlay: {
+    position: 'absolute',
+    inset: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    height: '100%',
+    fontSize: '10px',
+    fontWeight: 700,
+    lineHeight: 1,
+    textShadow: '0 0 1px color-mix(in srgb, var(--vscode-button-background, #0e639c) 68%, transparent)',
+    userSelect: 'none',
+    pointerEvents: 'none',
+    zIndex: 2,
   },
 };

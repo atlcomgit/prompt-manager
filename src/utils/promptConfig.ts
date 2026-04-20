@@ -52,6 +52,13 @@ export function normalizeStoredPromptConfig(
 			: [],
 	};
 
+	const normalizedChatRequestAutoCompleteAfter = Number(parsed.chatRequestAutoCompleteAfter);
+	if (Number.isFinite(normalizedChatRequestAutoCompleteAfter) && normalizedChatRequestAutoCompleteAfter > 0) {
+		config.chatRequestAutoCompleteAfter = normalizedChatRequestAutoCompleteAfter;
+	} else {
+		delete config.chatRequestAutoCompleteAfter;
+	}
+
 	return {
 		config,
 		shouldBackfillPromptUuid: promptUuid !== rawPromptUuid,

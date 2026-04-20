@@ -12,29 +12,7 @@ import {
 	isContextFilePreviewSupported,
 } from '../src/utils/contextFiles.js';
 import { ContextFileCard } from '../src/webview/editor/components/ContextFileCard.js';
-
-function withLocale<T>(locale: string, callback: () => T): T {
-	const previousWindow = globalThis.window;
-	Object.defineProperty(globalThis, 'window', {
-		value: { __LOCALE__: locale },
-		configurable: true,
-		writable: true,
-	});
-
-	try {
-		return callback();
-	} finally {
-		if (previousWindow === undefined) {
-			Reflect.deleteProperty(globalThis as Record<string, unknown>, 'window');
-		} else {
-			Object.defineProperty(globalThis, 'window', {
-				value: previousWindow,
-				configurable: true,
-				writable: true,
-			});
-		}
-	}
-}
+import { withLocale } from './testLocale.js';
 
 test('extractContextFilePathsFromClipboardText normalizes, parses file URLs and deduplicates values', () => {
 	const result = extractContextFilePathsFromClipboardText([

@@ -72,7 +72,7 @@ async function importTrackerPanelManager() {
 	}
 }
 
-function makePrompt(id: string, status: 'draft' | 'completed' | 'closed') {
+function makePrompt(id: string, status: 'draft' | 'in-progress' | 'completed' | 'closed') {
 	return {
 		id,
 		promptUuid: `${id}-uuid`,
@@ -106,6 +106,45 @@ function makePrompt(id: string, status: 'draft' | 'completed' | 'closed') {
 		report: '',
 	};
 }
+
+test('TrackerPanelManager updates in-progress status with a next-request auto-complete gate', async () => {
+	const { TrackerPanelManager } = await importTrackerPanelManager();
+	const stored = new Map([
+		['prompt-a', {
+			...makePrompt('prompt-a', 'completed'),
+			chatSessionIds: ['session-new'],
+		}],
+	]);
+	const savedPrompts: Array<ReturnType<typeof makePrompt> & { chatRequestAutoCompleteAfter?: number }> = [];
+
+	const storageService = {
+		listPrompts: async () => Array.from(stored.values())
+			.filter(prompt => !prompt.archived)
+			.map(({ content, report, ...prompt }) => ({ ...prompt })),
+		getPrompt: async (id: string) => stored.get(id) || null,
+		savePrompt: async (prompt: ReturnType<typeof makePrompt> & { chatRequestAutoCompleteAfter?: number }) => {
+			stored.set(prompt.id, { ...prompt } as any);
+			savedPrompts.push({ ...prompt });
+			return prompt;
+		},
+	};
+
+	const manager = new TrackerPanelManager(
+		{ fsPath: '/tmp/prompt-manager-extension' } as any,
+		storageService as any,
+		{} as any,
+	);
+
+	await (manager as any).handleMessage({
+		type: 'updatePromptStatus',
+		id: 'prompt-a',
+		status: 'in-progress',
+	});
+
+	assert.equal(savedPrompts.length, 1);
+	assert.equal(savedPrompts[0]?.status, 'in-progress');
+	assert.ok(Number(savedPrompts[0]?.chatRequestAutoCompleteAfter || 0) > 0);
+});
 
 test('TrackerPanelManager moves all prompts from source status to the next status', async () => {
 	const { TrackerPanelManager } = await importTrackerPanelManager();

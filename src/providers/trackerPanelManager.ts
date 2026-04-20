@@ -7,6 +7,7 @@ import { getWebviewHtml } from '../utils/webviewHtml.js';
 import {
 	getNextPromptStatus,
 	isPromptStatus,
+	markPromptChatAutoCompleteAfter,
 	type PromptStatus,
 } from '../types/prompt.js';
 import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
@@ -96,6 +97,9 @@ export class TrackerPanelManager {
 		}
 
 		prompt.status = status;
+		if (status === 'in-progress') {
+			markPromptChatAutoCompleteAfter(prompt);
+		}
 		await this.storageService.savePrompt(prompt);
 		this._onDidSave.fire(prompt.id);
 		if (prompt.status !== 'in-progress') {
@@ -170,6 +174,7 @@ export class TrackerPanelManager {
 
 						if (prompt.status !== 'in-progress') {
 							prompt.status = 'in-progress';
+							markPromptChatAutoCompleteAfter(prompt);
 							await this.storageService.savePrompt(prompt, { historyReason: 'status-change' });
 							this._onDidSave.fire(prompt.id);
 							await this.refresh();

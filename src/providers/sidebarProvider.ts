@@ -5,7 +5,7 @@
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
-import { isPromptStatus, type PromptStatus } from '../types/prompt.js';
+import { isPromptStatus, markPromptChatAutoCompleteAfter, type PromptStatus } from '../types/prompt.js';
 import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
 import type { CustomGroupsService } from '../services/customGroupsService.js';
 import type { ExternalPromptConfigChange, StorageService } from '../services/storageService.js';
@@ -57,6 +57,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		}
 
 		prompt.status = status;
+		if (status === 'in-progress') {
+			markPromptChatAutoCompleteAfter(prompt);
+		}
 		const savedPrompt = await this.storageService.savePrompt(prompt, { historyReason: 'status-change' });
 		if (savedPrompt.status !== 'in-progress') {
 			try {

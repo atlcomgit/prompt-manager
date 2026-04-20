@@ -4,29 +4,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { PromptStatusText } from '../src/webview/shared/PromptStatusText.js';
-
-function withLocale<T>(locale: string, callback: () => T): T {
-	const previousWindow = globalThis.window;
-	Object.defineProperty(globalThis, 'window', {
-		value: { __LOCALE__: locale },
-		configurable: true,
-		writable: true,
-	});
-
-	try {
-		return callback();
-	} finally {
-		if (previousWindow === undefined) {
-			Reflect.deleteProperty(globalThis as Record<string, unknown>, 'window');
-		} else {
-			Object.defineProperty(globalThis, 'window', {
-				value: previousWindow,
-				configurable: true,
-				writable: true,
-			});
-		}
-	}
-}
+import { withLocale } from './testLocale.js';
 
 test('PromptStatusText renders the shared label and color for in-progress status', () => {
 	const markup = withLocale('en', () => renderToStaticMarkup(React.createElement(PromptStatusText, {
@@ -56,7 +34,7 @@ test('PromptStatusText badge variant renders border and tinted background for he
 	})));
 
 	assert.match(markup, /border:1px solid var\(--vscode-panel-border\)/);
-	assert.match(markup, /border-color:color-mix\(in srgb, var\(--vscode-textLink-foreground\) 46%, var\(--vscode-panel-border\)\)/);
-	assert.match(markup, /background:color-mix\(in srgb, var\(--vscode-textLink-foreground\) 18%, var\(--vscode-sideBar-background\)\)/);
+	assert.match(markup, /border-color:color-mix\(in srgb, var\(--vscode-textLink-foreground\) 70%, var\(--vscode-panel-border\)\)/);
+	assert.match(markup, /background:color-mix\(in srgb, var\(--vscode-textLink-foreground\) 5%, white\)/);
 	assert.match(markup, />Report</);
 });

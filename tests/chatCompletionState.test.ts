@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	COMPLETED_CHAT_MODEL_STATE,
 	COMPLETED_CHAT_RESPONSE_STATE,
 	FALLBACK_COMPLETION_QUIET_PERIOD_MS,
 	isCompletedChatResponse,
 	observeStableChatCompletion,
 } from '../src/utils/chatCompletionState.js';
 
-test('isCompletedChatResponse requires ended request and no pending edits', () => {
+test('isCompletedChatResponse requires terminal request markers, ended request, and no pending edits', () => {
 	assert.equal(isCompletedChatResponse({
 		lastRequestStarted: 100,
 		lastRequestEnded: 200,
@@ -27,13 +28,26 @@ test('isCompletedChatResponse requires ended request and no pending edits', () =
 		lastRequestStarted: 100,
 		lastRequestEnded: 200,
 		lastResponseState: 2,
+		requestModelState: 0,
+		hasRequestResult: false,
+		hasPendingEdits: false,
+	}), false);
+
+	assert.equal(isCompletedChatResponse({
+		lastRequestStarted: 100,
+		lastRequestEnded: 200,
+		lastResponseState: 2,
+		requestModelState: COMPLETED_CHAT_MODEL_STATE,
+		hasRequestResult: true,
 		hasPendingEdits: false,
 	}), true);
 
 	assert.equal(isCompletedChatResponse({
 		lastRequestStarted: 100,
 		lastRequestEnded: 200,
-		lastResponseState: COMPLETED_CHAT_RESPONSE_STATE,
+		lastResponseState: 2,
+		requestModelState: COMPLETED_CHAT_MODEL_STATE,
+		hasRequestResult: true,
 		hasPendingEdits: true,
 	}), false);
 });
@@ -43,7 +57,9 @@ test('observeStableChatCompletion waits for the same completion snapshot to stay
 		sessionId: 'session-1',
 		lastRequestStarted: 100,
 		lastRequestEnded: 200,
-		lastResponseState: COMPLETED_CHAT_RESPONSE_STATE,
+		lastResponseState: COMPLETED_CHAT_MODEL_STATE,
+		requestModelState: COMPLETED_CHAT_MODEL_STATE,
+		hasRequestResult: true,
 		hasPendingEdits: false,
 	};
 
@@ -65,7 +81,9 @@ test('observeStableChatCompletion resets candidate when the snapshot changes or 
 		sessionId: 'session-1',
 		lastRequestStarted: 100,
 		lastRequestEnded: 200,
-		lastResponseState: COMPLETED_CHAT_RESPONSE_STATE,
+		lastResponseState: COMPLETED_CHAT_MODEL_STATE,
+		requestModelState: COMPLETED_CHAT_MODEL_STATE,
+		hasRequestResult: true,
 		hasPendingEdits: false,
 	}, 1000, 1500);
 
@@ -73,7 +91,9 @@ test('observeStableChatCompletion resets candidate when the snapshot changes or 
 		sessionId: 'session-1',
 		lastRequestStarted: 100,
 		lastRequestEnded: 250,
-		lastResponseState: COMPLETED_CHAT_RESPONSE_STATE,
+		lastResponseState: COMPLETED_CHAT_MODEL_STATE,
+		requestModelState: COMPLETED_CHAT_MODEL_STATE,
+		hasRequestResult: true,
 		hasPendingEdits: false,
 	}, 1200, 1500);
 	assert.equal(changed.completed, false);
@@ -85,27 +105,54 @@ test('observeStableChatCompletion resets candidate when the snapshot changes or 
 		lastRequestStarted: 300,
 		lastRequestEnded: 300,
 		lastResponseState: 2,
+		requestModelState: 0,
+		hasRequestResult: false,
 		hasPendingEdits: false,
 	}, 1500, 1500);
 	assert.equal(incomplete.completed, false);
 	assert.equal(incomplete.candidate, null);
 });
 
-test('observeStableChatCompletion uses a longer quiet fallback when response state is not explicitly completed', () => {
+test('observeStableChatCompletion ignores non-terminal live snapshots even after the fallback quiet period', () => {
 	const snapshot = {
 		sessionId: 'session-1',
 		lastRequestStarted: 100,
 		lastRequestEnded: 200,
 		lastResponseState: 2,
+		requestModelState: 0,
+		hasRequestResult: false,
 		hasPendingEdits: false,
 	};
 
 	const first = observeStableChatCompletion(null, snapshot, 1000, 1500);
 	assert.equal(first.completed, false);
+	assert.equal(first.candidate, null);
 
 	const tooEarly = observeStableChatCompletion(first.candidate, snapshot, 1000 + FALLBACK_COMPLETION_QUIET_PERIOD_MS - 1, 1500);
 	assert.equal(tooEarly.completed, false);
+	assert.equal(tooEarly.candidate, null);
 
-	const completed = observeStableChatCompletion(first.candidate, snapshot, 1000 + FALLBACK_COMPLETION_QUIET_PERIOD_MS, 1500);
+	const stillIncomplete = observeStableChatCompletion(tooEarly.candidate, snapshot, 1000 + FALLBACK_COMPLETION_QUIET_PERIOD_MS, 1500);
+	assert.equal(stillIncomplete.completed, false);
+	assert.equal(stillIncomplete.candidate, null);
+});
+
+test('observeStableChatCompletion treats the legacy terminal response state as an explicit completion marker', () => {
+	const snapshot = {
+		sessionId: 'session-legacy',
+		lastRequestStarted: 100,
+		lastRequestEnded: 200,
+		lastResponseState: COMPLETED_CHAT_RESPONSE_STATE,
+		hasPendingEdits: false,
+	};
+
+	const first = observeStableChatCompletion(null, snapshot, 1000, 1500);
+	assert.equal(first.completed, false);
+	assert.ok(first.candidate);
+
+	const tooEarly = observeStableChatCompletion(first.candidate, snapshot, 2499, 1500);
+	assert.equal(tooEarly.completed, false);
+
+	const completed = observeStableChatCompletion(first.candidate, snapshot, 2500, 1500);
 	assert.equal(completed.completed, true);
 });

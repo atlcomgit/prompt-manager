@@ -17,6 +17,7 @@ function makeEntry(id: string, uuid: string, resolvedPrompt?: ReturnType<typeof 
 	return {
 		snapshot,
 		promise: Promise.resolve(resolvedPrompt ?? snapshot),
+		operationId: `${uuid || 'empty'}::${id || 'empty'}`,
 	};
 }
 

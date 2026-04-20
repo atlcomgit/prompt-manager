@@ -5,29 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { PromptConfig } from '../src/types/prompt.js';
 import { PromptItem } from '../src/webview/sidebar/components/PromptItem.js';
-
-function withLocale<T>(locale: string, callback: () => T): T {
-	const previousWindow = globalThis.window;
-	Object.defineProperty(globalThis, 'window', {
-		value: { __LOCALE__: locale },
-		configurable: true,
-		writable: true,
-	});
-
-	try {
-		return callback();
-	} finally {
-		if (previousWindow === undefined) {
-			Reflect.deleteProperty(globalThis as Record<string, unknown>, 'window');
-		} else {
-			Object.defineProperty(globalThis, 'window', {
-				value: previousWindow,
-				configurable: true,
-				writable: true,
-			});
-		}
-	}
-}
+import { withLocale } from './testLocale.js';
 
 function makePrompt(overrides: Partial<PromptConfig> = {}): PromptConfig {
 	const now = '2026-04-17T12:00:00.000Z';
@@ -118,4 +96,44 @@ test('PromptItem renders the shared compact status label for non-progress states
 
 	assert.match(markup, />Report</);
 	assert.match(markup, /var\(--vscode-textLink-foreground\)/);
+});
+
+test('PromptItem renders selected compact progress with inverse track and outline', () => {
+	const markup = renderPromptItemMarkup({
+		viewMode: 'compact',
+		isSelected: true,
+		prompt: makePrompt({ progress: 42 }),
+	});
+
+	assert.match(markup, /title="42%"/);
+	assert.match(markup, /background:var\(--vscode-sideBar-background, var\(--vscode-editor-background\)\)/);
+	assert.match(markup, /border:1px solid var\(--vscode-panel-border\)/);
+	assert.match(markup, /border-color:color-mix\(in srgb, var\(--vscode-list-activeSelectionBackground\) 76%, var\(--vscode-list-activeSelectionForeground\)\)/);
+	assert.match(markup, /color:var\(--vscode-sideBar-foreground, var\(--vscode-foreground\)\)/);
+	assert.match(markup, /color:var\(--vscode-list-activeSelectionForeground\)/);
+	assert.match(markup, /clip-path:inset\(0 58% 0 0\)/);
+});
+
+test('PromptItem renders selected detailed progress with inverse track and outline', () => {
+	const markup = renderPromptItemMarkup({
+		isSelected: true,
+		prompt: makePrompt({ progress: 42 }),
+	});
+
+	assert.match(markup, /title="42%"/);
+	assert.match(markup, /background:var\(--vscode-sideBar-background, var\(--vscode-editor-background\)\)/);
+	assert.match(markup, /border-color:color-mix\(in srgb, var\(--vscode-list-activeSelectionBackground\) 76%, var\(--vscode-list-activeSelectionForeground\)\)/);
+	assert.match(markup, /color:var\(--vscode-sideBar-foreground, var\(--vscode-foreground\)\)/);
+	assert.match(markup, /color:var\(--vscode-list-activeSelectionForeground\)/);
+	assert.match(markup, /clip-path:inset\(0 58% 0 0\)/);
+});
+
+test('PromptItem uses a more saturated green fill for 100% progress', () => {
+	const markup = renderPromptItemMarkup({
+		prompt: makePrompt({ progress: 100 }),
+	});
+
+	assert.match(markup, /var\(--vscode-charts-green, var\(--vscode-terminal-ansiGreen, var\(--vscode-testing-iconPassed, #2e7d32\)\)\)/);
+	assert.match(markup, /color:var\(--vscode-button-foreground, #ffffff\)/);
+	assert.match(markup, /clip-path:inset\(0 0% 0 0\)/);
 });

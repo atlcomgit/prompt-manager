@@ -61,7 +61,7 @@ async function importSidebarProvider() {
 	}
 }
 
-function makePrompt(id: string, status: 'in-progress' | 'review') {
+function makePrompt(id: string, status: 'in-progress' | 'review' | 'completed') {
 	return {
 		id,
 		promptUuid: `${id}-uuid`,
@@ -148,4 +148,48 @@ test('SidebarProvider updates prompt status with status-change history and clean
 	assert.deepEqual(cleanupCalls, ['prompt-a:review']);
 	assert.equal(emittedChanges.length, 1);
 	assert.equal(emittedChanges[0]?.config.status, 'review');
+});
+
+test('SidebarProvider marks in-progress status changes to wait for the next chat request', async () => {
+	const { SidebarProvider } = await importSidebarProvider();
+	const stored = new Map([
+		['prompt-a', {
+			...makePrompt('prompt-a', 'completed'),
+			chatSessionIds: ['session-new'],
+		}],
+	]);
+	const savedPrompts: Array<ReturnType<typeof makePrompt> & { chatRequestAutoCompleteAfter?: number }> = [];
+
+	const storageService = {
+		getPrompt: async (id: string) => stored.get(id) || null,
+		savePrompt: async (prompt: ReturnType<typeof makePrompt> & { chatRequestAutoCompleteAfter?: number }, options?: { historyReason?: string }) => {
+			const saved = {
+				...prompt,
+				updatedAt: '2026-04-10T01:00:00.000Z',
+			};
+			stored.set(prompt.id, saved as any);
+			savedPrompts.push(saved);
+			return saved;
+		},
+		listPrompts: async () => Array.from(stored.values()).map(({ content, report, ...prompt }) => ({ ...prompt })),
+		listArchivedPrompts: async () => [],
+		getStorageDirectoryPath: () => '/tmp/prompt-manager-storage',
+		readAgentProgress: async () => undefined,
+	};
+
+	const provider = new SidebarProvider(
+		{ fsPath: '/tmp/prompt-manager-extension' } as any,
+		storageService as any,
+		{} as any,
+		{} as any,
+		{} as any,
+		{} as any,
+		undefined,
+	);
+
+	await (provider as any).handleMessage({ type: 'updatePromptStatus', id: 'prompt-a', status: 'in-progress' });
+
+	assert.equal(savedPrompts.length, 1);
+	assert.equal(savedPrompts[0]?.status, 'in-progress');
+	assert.ok(Number(savedPrompts[0]?.chatRequestAutoCompleteAfter || 0) > 0);
 });

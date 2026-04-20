@@ -21,7 +21,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'ready'; bootId?: string }
 	| { type: 'getPrompts' }
 	| { type: 'getPrompt'; id: string }
-	| { type: 'savePrompt'; prompt: Prompt; source?: 'manual' | 'status-change' | 'autosave' }
+	| { type: 'savePrompt'; prompt: Prompt; source?: 'manual' | 'status-change' | 'autosave'; requestId?: string }
 	| { type: 'deletePrompt'; id: string }
 	| { type: 'duplicatePrompt'; id: string }
 	| { type: 'createPrompt' }
@@ -146,10 +146,11 @@ export type ExtensionToWebviewMessage =
 		prompt: Prompt | null;
 		reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config';
 		previousId?: string;
+		requestId?: string;
 		editorViewState?: EditorPromptViewState;
 		aiEnrichment?: { title: boolean; description: boolean };
 	}
-	| { type: 'promptSaved'; prompt: PromptConfig; previousId?: string }
+	| { type: 'promptSaved'; prompt: PromptConfig; previousId?: string; requestId?: string }
 	| { type: 'promptAiEnrichmentState'; promptId: string; promptUuid?: string; title: boolean; description: boolean }
 	| { type: 'promptDeleted'; id: string }
 	| { type: 'promptDuplicated'; prompt: PromptConfig }
@@ -192,7 +193,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'availableFrameworks'; options: Array<{ id: string; name: string }> }
 	| { type: 'startChatPreflightResult'; requestId?: string; shouldOpenGitFlow: boolean; snapshot?: GitOverlaySnapshot }
 	| { type: 'triggerStartChat'; promptId?: string }
-	| { type: 'promptSaving'; id: string; promptUuid?: string; saving: boolean }
+	| { type: 'promptSaving'; id: string; promptUuid?: string; saving: boolean; requestId?: string }
 	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string; requestId?: string }
 	| { type: 'chatMemorySummary'; promptId: string; memorySummary: ChatMemorySummary }

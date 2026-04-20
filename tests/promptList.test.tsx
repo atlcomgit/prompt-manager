@@ -5,29 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { PromptConfig, PromptCustomGroup } from '../src/types/prompt.js';
 import { PromptList } from '../src/webview/sidebar/components/PromptList.js';
-
-function withLocale<T>(locale: string, callback: () => T): T {
-	const previousWindow = globalThis.window;
-	Object.defineProperty(globalThis, 'window', {
-		value: { __LOCALE__: locale },
-		configurable: true,
-		writable: true,
-	});
-
-	try {
-		return callback();
-	} finally {
-		if (previousWindow === undefined) {
-			Reflect.deleteProperty(globalThis as Record<string, unknown>, 'window');
-		} else {
-			Object.defineProperty(globalThis, 'window', {
-				value: previousWindow,
-				configurable: true,
-				writable: true,
-			});
-		}
-	}
-}
+import { withLocale } from './testLocale.js';
 
 function makePrompt(overrides: Partial<PromptConfig> = {}): PromptConfig {
 	const now = '2026-04-18T12:00:00.000Z';

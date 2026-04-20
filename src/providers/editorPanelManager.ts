@@ -12,7 +12,13 @@ import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { generateSmartTitle } from '../utils/smartTitle.js';
 import type { ChatMemoryInstructionFile, ChatMemorySummary, EditorPromptViewState, EditorPromptViewStateKeySource, Prompt, PromptContextFileCard } from '../types/prompt.js';
-import { createDefaultEditorPromptViewState, createDefaultPrompt, shouldShowPromptPlanForStatus } from '../types/prompt.js';
+import {
+	createDefaultEditorPromptViewState,
+	createDefaultPrompt,
+	markPromptChatAutoCompleteAfter,
+	shouldAutoCompletePromptFromChatRequest,
+	shouldShowPromptPlanForStatus,
+} from '../types/prompt.js';
 import type {
 	ClipboardImagePayload,
 	WebviewToExtensionMessage,
@@ -163,6 +169,7 @@ export class EditorPanelManager {
 	private pendingOpenPromptId: string | null = null;
 	private openPromptRequestVersion = 0;
 	private pendingPromptSaveByPanelKey = new Map<string, Promise<void>>();
+	private pendingPromptSaveChainByPromptKey = new Map<string, Promise<void>>();
 	/** Очередь ожидающих сохранений по составному ключу (uuid::id). Хранит снимок и промис завершения. */
 	private pendingSaveQueue = new Map<string, PendingSaveEntry>();
 	private isShuttingDown = false;
@@ -193,6 +200,63 @@ export class EditorPanelManager {
 		this.panelPromptRefs.set(panelKey, prompt);
 		if (panelKey === SINGLE_EDITOR_PANEL_KEY) {
 			this.syncStartupEditorRestoreState();
+		}
+	}
+
+	private resolvePromptSaveSerializationKey(prompt: Pick<Prompt, 'id' | 'promptUuid'>): string {
+		const normalizedPromptUuid = (prompt.promptUuid || '').trim();
+		if (normalizedPromptUuid) {
+			return normalizedPromptUuid;
+		}
+
+		return (prompt.id || '').trim() || '__unknown_prompt__';
+	}
+
+	private enqueuePromptSaveOperation<T>(
+		prompt: Pick<Prompt, 'id' | 'promptUuid'>,
+		operation: () => Promise<T>,
+	): Promise<T> {
+		const serializationKey = this.resolvePromptSaveSerializationKey(prompt);
+		const previousOperation = this.pendingPromptSaveChainByPromptKey.get(serializationKey) || Promise.resolve();
+		const currentOperation = previousOperation
+			.catch(() => undefined)
+			.then(() => operation());
+
+		const barrier = currentOperation
+			.catch(() => undefined)
+			.then(() => undefined);
+
+		this.pendingPromptSaveChainByPromptKey.set(serializationKey, barrier);
+		void barrier.finally(() => {
+			if (this.pendingPromptSaveChainByPromptKey.get(serializationKey) === barrier) {
+				this.pendingPromptSaveChainByPromptKey.delete(serializationKey);
+			}
+		});
+
+		return currentOperation;
+	}
+
+	private setPendingSaveEntry(queueKey: string, entry: PendingSaveEntry): void {
+		this.pendingSaveQueue.set(queueKey, entry);
+	}
+
+	private movePendingSaveEntry(currentKey: string, nextKey: string, entry: PendingSaveEntry): void {
+		const currentEntry = this.pendingSaveQueue.get(currentKey);
+		if (!currentEntry || currentEntry.operationId !== entry.operationId) {
+			return;
+		}
+
+		if (currentKey !== nextKey) {
+			this.pendingSaveQueue.delete(currentKey);
+		}
+
+		this.pendingSaveQueue.set(nextKey, entry);
+	}
+
+	private clearPendingSaveEntry(queueKey: string, operationId: string): void {
+		const entry = this.pendingSaveQueue.get(queueKey);
+		if (entry?.operationId === operationId) {
+			this.pendingSaveQueue.delete(queueKey);
 		}
 	}
 
@@ -456,6 +520,12 @@ export class EditorPanelManager {
 		this.globalAgentContextSyncTimer = null;
 	}
 
+	/** Detach best-effort background timers so they do not keep the Node event loop alive on their own. */
+	private unrefBackgroundTimer(timer: ReturnType<typeof setTimeout> | null | undefined): void {
+		const maybeNodeTimer = timer as { unref?: () => void } | null | undefined;
+		maybeNodeTimer?.unref?.();
+	}
+
 	private scheduleGlobalAgentContextSync(context: string): void {
 		if (this.isShuttingDown) {
 			return;
@@ -475,6 +545,7 @@ export class EditorPanelManager {
 			this.globalAgentContextSyncTimer = null;
 			void this.flushGlobalAgentContextSync();
 		}, GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS);
+		this.unrefBackgroundTimer(this.globalAgentContextSyncTimer);
 	}
 
 	private async flushGlobalAgentContextSync(): Promise<void> {
@@ -2064,6 +2135,120 @@ export class EditorPanelManager {
 		);
 	}
 
+	private async refreshPromptFromTrackedChatSessions(
+		promptId: string,
+		currentPrompt?: Prompt | null,
+		postMessage?: (message: ExtensionToWebviewMessage) => void,
+		source: string = 'refresh',
+	): Promise<{ totalMs: number; sessionsCount: number; completionOk: boolean }> {
+		const freshPrompt = await this.storageService.getPrompt(promptId);
+		if (!freshPrompt) {
+			return { totalMs: 0, sessionsCount: 0, completionOk: false };
+		}
+
+		const sessionIds = Array.from(new Set(
+			(freshPrompt.chatSessionIds || [])
+				.map(value => String(value || '').trim())
+				.filter(Boolean),
+		));
+		if (sessionIds.length === 0) {
+			return {
+				totalMs: freshPrompt.timeSpentImplementing || 0,
+				sessionsCount: 0,
+				completionOk: false,
+			};
+		}
+
+		let totalMs = 0;
+		if (typeof this.stateService.getChatSessionsTotalElapsed === 'function') {
+			totalMs = await this.stateService.getChatSessionsTotalElapsed(sessionIds);
+		}
+
+		const completion = typeof this.stateService.getLatestTrackedChatRequestCompletion === 'function'
+			? await this.stateService.getLatestTrackedChatRequestCompletion(sessionIds)
+			: { ok: false, reason: 'completion-snapshot-unavailable' as const };
+
+		this.hooksOutput.appendLine(
+			`[chat-track] refresh prompt=${freshPrompt.id} source=${source} completionOk=${completion.ok} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} responseState=${completion.lastResponseState ?? -1} requestModelState=${completion.requestModelState ?? -1} hasResult=${String(completion.hasRequestResult)} pendingEdits=${String(completion.hasPendingEdits)} totalMs=${totalMs}`,
+		);
+
+		let changed = false;
+		if (totalMs > 0 && freshPrompt.timeSpentImplementing !== totalMs) {
+			freshPrompt.timeSpentImplementing = totalMs;
+			changed = true;
+		}
+
+		const completionSessionId = String(completion.sessionId || '').trim();
+		const completionAllowedByRequestGate = shouldAutoCompletePromptFromChatRequest(
+			freshPrompt,
+			completion.lastRequestStarted,
+		);
+		if (completion.ok && freshPrompt.status === 'in-progress' && completionAllowedByRequestGate) {
+			const completionStatus = this.resolveTerminalStatusFromHooks(
+				freshPrompt.hooks || [],
+				'afterChatCompleted',
+			) || 'completed';
+			freshPrompt.status = completionStatus;
+			changed = true;
+		} else if (completion.ok && freshPrompt.status === 'in-progress' && !completionAllowedByRequestGate) {
+			this.hooksOutput.appendLine(
+				`[chat-track] refresh skipped completed status for prompt=${freshPrompt.id} source=${source}: no newer request after gate=${freshPrompt.chatRequestAutoCompleteAfter || 0}`,
+			);
+		}
+
+		if (completionSessionId) {
+			const reorderedSessionIds = [
+				completionSessionId,
+				...sessionIds.filter(id => id !== completionSessionId),
+			];
+			if (JSON.stringify(reorderedSessionIds) !== JSON.stringify(freshPrompt.chatSessionIds || [])) {
+				freshPrompt.chatSessionIds = reorderedSessionIds;
+				changed = true;
+			}
+		}
+
+		if (changed) {
+			await this.storageService.savePrompt(freshPrompt);
+			if (currentPrompt?.id === freshPrompt.id) {
+				Object.assign(currentPrompt, freshPrompt);
+				postMessage?.({ type: 'prompt', prompt: freshPrompt, reason: 'sync' });
+			}
+			this._onDidSave.fire(freshPrompt.id);
+		}
+
+		return {
+			totalMs: totalMs > 0 ? totalMs : (freshPrompt.timeSpentImplementing || 0),
+			sessionsCount: sessionIds.length,
+			completionOk: completion.ok,
+		};
+	}
+
+	private scheduleTrackedChatStateRefresh(
+		promptId: string,
+		currentPrompt?: Prompt | null,
+		postMessage?: (message: ExtensionToWebviewMessage) => void,
+		source: string = 'refresh',
+		attemptDelaysMs: number[] = [3000, 15000, 45000, 120000],
+	): void {
+		attemptDelaysMs.forEach((delayMs, index) => {
+			const refreshTimer = setTimeout(async () => {
+				try {
+					await this.refreshPromptFromTrackedChatSessions(
+						promptId,
+						currentPrompt,
+						postMessage,
+						`${source}#${index + 1}`,
+					);
+				} catch (error) {
+					this.hooksOutput.appendLine(
+						`[chat-track] refresh error for prompt=${promptId} source=${source} attempt=${index + 1}: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}, delayMs);
+			this.unrefBackgroundTimer(refreshTimer);
+		});
+	}
+
 	/** Preserve newer persisted prompt state when an older editor snapshot is being saved. */
 	private mergePersistedPromptStateBeforeSave(
 		promptToSave: Prompt,
@@ -2210,6 +2395,37 @@ export class EditorPanelManager {
 		return false;
 	}
 
+	private async resolvePromptSaveContext(
+		currentPrompt: Prompt,
+		incomingPrompt: Prompt,
+	): Promise<{ prompt: Prompt; detached: boolean }> {
+		const detached = this.isStalePromptMessage(currentPrompt, incomingPrompt, incomingPrompt.id);
+		if (!detached) {
+			return { prompt: currentPrompt, detached: false };
+		}
+
+		const normalizedPromptUuid = (incomingPrompt.promptUuid || '').trim();
+		if (normalizedPromptUuid) {
+			const promptByUuid = await this.storageService.getPromptByUuid(normalizedPromptUuid);
+			if (promptByUuid) {
+				return { prompt: promptByUuid, detached: true };
+			}
+		}
+
+		const normalizedPromptId = (incomingPrompt.id || '').trim();
+		if (normalizedPromptId) {
+			const promptById = await this.storageService.getPrompt(normalizedPromptId);
+			if (promptById) {
+				return { prompt: promptById, detached: true };
+			}
+		}
+
+		return {
+			prompt: JSON.parse(JSON.stringify(incomingPrompt)),
+			detached: true,
+		};
+	}
+
 	private mergeExternalReportIfUnchanged(snapshot: Prompt, persistedPrompt: Prompt | null, basePrompt: Prompt | null): void {
 		if (!persistedPrompt || !basePrompt) {
 			return;
@@ -2350,68 +2566,78 @@ export class EditorPanelManager {
 		this.applyPromptFallbacksForPendingAiEnrichment(promptToSave, aiEnrichmentPlan);
 
 		/** Регистрируем снимок в очереди сохранений для доступа из openPromptInternal */
+		const operationId = crypto.randomUUID();
 		let switchSaveQueueResolve: (value: Prompt | null) => void;
 		const switchSaveQueuePromise = new Promise<Prompt | null>(resolve => { switchSaveQueueResolve = resolve; });
 		const switchSaveQueueKey = buildSaveQueueKey(promptToSave.promptUuid, promptToSave.id);
-		this.pendingSaveQueue.set(switchSaveQueueKey, {
+		let finalSwitchSaveQueueKey = switchSaveQueueKey;
+		const switchQueueEntry: PendingSaveEntry = {
 			snapshot: promptToSave,
 			promise: switchSaveQueuePromise,
+			operationId,
+		};
+		this.setPendingSaveEntry(switchSaveQueueKey, switchQueueEntry);
+
+
+		const switchSaveTask = this.enqueuePromptSaveOperation(promptToSave, async () => {
+			this._onDidSaveStateChange.fire({ id: saveStateId, promptUuid: promptToSave.promptUuid, saving: true });
+			try {
+				const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
+				await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, baseSnapshot || null);
+
+				const existingPrompt = await this.storageService.getPrompt(renameFromId || promptToSave.id);
+				this.mergePersistedPromptStateBeforeSave(promptToSave, existingPrompt, baseSnapshot || null);
+
+				const savedPrompt = await this.storageService.savePrompt(promptToSave, {
+					historyReason: 'switch',
+					forceHistory: true,
+					previousId: renameFromId,
+				});
+
+				/** Обновляем ключ очереди если id изменился (переименование) и резолвим промис */
+				const updatedSwitchKey = buildSaveQueueKey(savedPrompt.promptUuid, savedPrompt.id);
+				finalSwitchSaveQueueKey = updatedSwitchKey;
+				this.movePendingSaveEntry(switchSaveQueueKey, updatedSwitchKey, {
+					snapshot: savedPrompt,
+					promise: switchSaveQueuePromise,
+					operationId,
+				});
+				switchSaveQueueResolve!(savedPrompt);
+
+				if (aiEnrichmentPlan.needsAiEnrichment) {
+					this.setPendingPromptAiEnrichmentState(savedPrompt.id, savedPrompt.promptUuid, {
+						title: aiEnrichmentPlan.needsTitle,
+						description: aiEnrichmentPlan.needsDescription,
+					});
+					void this.scheduleBackgroundAiEnrichment(
+						savedPrompt.id,
+						savedPrompt.promptUuid,
+						savedPrompt.content,
+						aiEnrichmentPlan.needsTitle,
+						aiEnrichmentPlan.needsDescription,
+						(message) => this.postMessageToCurrentPanel(panelKey || SINGLE_EDITOR_PANEL_KEY, message),
+						panelKey || SINGLE_EDITOR_PANEL_KEY,
+					);
+				}
+				this._onDidSaveStateChange.fire({ id: saveStateId, promptUuid: promptToSave.promptUuid, saving: false });
+				if (savedPrompt.id && savedPrompt.id !== saveStateId) {
+					this._onDidSaveStateChange.fire({ id: savedPrompt.id, promptUuid: savedPrompt.promptUuid, saving: false });
+				}
+				return savedPrompt;
+			} catch (error) {
+				switchSaveQueueResolve!(null);
+				this._onDidSaveStateChange.fire({ id: saveStateId, promptUuid: promptToSave.promptUuid, saving: false });
+				throw error;
+			} finally {
+				/** Очистка очереди: удаляем только свою запись, не задевая более новые операции */
+				this.clearPendingSaveEntry(switchSaveQueueKey, operationId);
+				if (finalSwitchSaveQueueKey !== switchSaveQueueKey) {
+					this.clearPendingSaveEntry(finalSwitchSaveQueueKey, operationId);
+				}
+			}
 		});
 
-		this._onDidSaveStateChange.fire({ id: saveStateId, promptUuid: promptToSave.promptUuid, saving: true });
-		try {
-			const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
-			await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, baseSnapshot || null);
-
-			const existingPrompt = await this.storageService.getPrompt(renameFromId || promptToSave.id);
-			this.mergePersistedPromptStateBeforeSave(promptToSave, existingPrompt, baseSnapshot || null);
-
-			const savedPrompt = await this.storageService.savePrompt(promptToSave, {
-				historyReason: 'switch',
-				forceHistory: true,
-				previousId: renameFromId,
-			});
-
-			/** Обновляем ключ очереди если id изменился (переименование) и резолвим промис */
-			const updatedSwitchKey = buildSaveQueueKey(savedPrompt.promptUuid, savedPrompt.id);
-			if (updatedSwitchKey !== switchSaveQueueKey) {
-				this.pendingSaveQueue.delete(switchSaveQueueKey);
-				this.pendingSaveQueue.set(updatedSwitchKey, { snapshot: savedPrompt, promise: switchSaveQueuePromise });
-			}
-			switchSaveQueueResolve!(savedPrompt);
-
-			if (aiEnrichmentPlan.needsAiEnrichment) {
-				this.setPendingPromptAiEnrichmentState(savedPrompt.id, savedPrompt.promptUuid, {
-					title: aiEnrichmentPlan.needsTitle,
-					description: aiEnrichmentPlan.needsDescription,
-				});
-				void this.scheduleBackgroundAiEnrichment(
-					savedPrompt.id,
-					savedPrompt.promptUuid,
-					savedPrompt.content,
-					aiEnrichmentPlan.needsTitle,
-					aiEnrichmentPlan.needsDescription,
-					(message) => this.postMessageToCurrentPanel(panelKey || SINGLE_EDITOR_PANEL_KEY, message),
-					panelKey || SINGLE_EDITOR_PANEL_KEY,
-				);
-			}
-			this._onDidSaveStateChange.fire({ id: saveStateId, promptUuid: promptToSave.promptUuid, saving: false });
-			if (savedPrompt.id && savedPrompt.id !== saveStateId) {
-				this._onDidSaveStateChange.fire({ id: savedPrompt.id, promptUuid: savedPrompt.promptUuid, saving: false });
-			}
-			return savedPrompt;
-		} catch (error) {
-			switchSaveQueueResolve!(null);
-			this._onDidSaveStateChange.fire({ id: saveStateId, promptUuid: promptToSave.promptUuid, saving: false });
-			throw error;
-		} finally {
-			/** Очистка очереди: удаляем по исходному и возможно обновлённому ключу */
-			this.pendingSaveQueue.delete(switchSaveQueueKey);
-			const finalKey = buildSaveQueueKey(promptToSave.promptUuid, promptToSave.id);
-			if (finalKey !== switchSaveQueueKey) {
-				this.pendingSaveQueue.delete(finalKey);
-			}
-		}
+		return await switchSaveTask;
 	}
 
 	constructor(
@@ -2893,6 +3119,7 @@ export class EditorPanelManager {
 					busyReason,
 				);
 			}, GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS + (reason === 'git' ? 50 : 0));
+			this.unrefBackgroundTimer(session.refreshTimer);
 		}
 	}
 
@@ -3937,7 +4164,7 @@ export class EditorPanelManager {
 		let lastModels = [...initialModels];
 
 		for (const delayMs of delaysMs) {
-			setTimeout(() => {
+			const refreshTimer = setTimeout(() => {
 				void (async () => {
 					if (!this.isReadyCycleActive(panelKey, currentPrompt, readyBootId)) {
 						return;
@@ -3960,6 +4187,7 @@ export class EditorPanelManager {
 					}
 				})();
 			}, delayMs);
+			this.unrefBackgroundTimer(refreshTimer);
 		}
 	}
 
@@ -4951,6 +5179,7 @@ export class EditorPanelManager {
 		options: {
 			reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config';
 			previousId?: string;
+			requestId?: string;
 			editorViewState?: EditorPromptViewState;
 		} = {},
 	): ExtensionToWebviewMessage {
@@ -5130,7 +5359,9 @@ export class EditorPanelManager {
 		const panelsToDispose: vscode.WebviewPanel[] = [];
 
 		for (const [existingKey, existingPanel] of existingEntries) {
+			const livePromptSnapshot = this.panelPromptRefs.get(existingKey);
 			const latestSnapshot = this.panelLatestPromptSnapshots.get(existingKey)
+				|| (livePromptSnapshot ? JSON.parse(JSON.stringify(livePromptSnapshot)) : null)
 				|| this.panelBasePrompts.get(existingKey)
 				|| null;
 			if (latestSnapshot) {
@@ -5670,23 +5901,27 @@ export class EditorPanelManager {
 
 			case 'savePrompt': {
 				/** Deferred-промис для регистрации в очереди сохранений по идентификатору промпта */
+				const operationId = crypto.randomUUID();
+				const saveRequestId = (msg.requestId || '').trim() || undefined;
 				let saveQueueResolve: (value: Prompt | null) => void;
 				const saveQueuePromise = new Promise<Prompt | null>(resolve => { saveQueueResolve = resolve; });
 				const saveQueueKey = buildSaveQueueKey(
 					msg.prompt.promptUuid || currentPrompt.promptUuid,
 					msg.prompt.id || currentPrompt.id,
 				);
-				this.pendingSaveQueue.set(saveQueueKey, {
+				let finalSaveQueueKey = saveQueueKey;
+				this.setPendingSaveEntry(saveQueueKey, {
 					snapshot: JSON.parse(JSON.stringify(msg.prompt)),
 					promise: saveQueuePromise,
+					operationId,
 				});
 
-				const saveTask = (async (): Promise<void> => {
-					if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.prompt?.id)) {
-						saveQueueResolve!(null);
-						return;
-					}
-					const saveStateId = (msg.prompt.id || currentPrompt.id || '__new__').trim() || '__new__';
+				const saveTask = this.enqueuePromptSaveOperation(msg.prompt, async (): Promise<void> => {
+					const saveContext = await this.resolvePromptSaveContext(currentPrompt, msg.prompt);
+					const currentPromptForSave = saveContext.prompt;
+					const detachedSave = saveContext.detached;
+					const saveStateId = (msg.prompt.id || currentPromptForSave.id || '__new__').trim() || '__new__';
+					const savePromptUuid = msg.prompt.promptUuid || currentPromptForSave.promptUuid;
 					this.logReportDebug('savePrompt.received', {
 						panelKey,
 						source: msg.source || 'manual',
@@ -5696,21 +5931,25 @@ export class EditorPanelManager {
 					});
 					this._onDidSaveStateChange.fire({
 						id: saveStateId,
-						promptUuid: msg.prompt.promptUuid || currentPrompt.promptUuid,
+						promptUuid: savePromptUuid,
 						saving: true,
 					});
 					postMessage({
 						type: 'promptSaving',
 						id: saveStateId,
-						promptUuid: msg.prompt.promptUuid || currentPrompt.promptUuid,
+						promptUuid: savePromptUuid,
 						saving: true,
+						...(saveRequestId ? { requestId: saveRequestId } : {}),
 					});
 					try {
 						let promptToSave = msg.prompt;
-						await this.awaitPendingReportPersist(promptToSave.id || currentPrompt.id);
+						await this.awaitPendingReportPersist(promptToSave.id || currentPromptForSave.id);
 						const saveSource = msg.source || 'manual';
-						const previousPromptId = (currentPrompt.id || msg.prompt.id || '').trim() || undefined;
-						const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(promptToSave, currentPrompt);
+						if (saveSource === 'status-change' && promptToSave.status === 'in-progress') {
+							markPromptChatAutoCompleteAfter(promptToSave);
+						}
+						const previousPromptId = (currentPromptForSave.id || msg.prompt.id || '').trim() || undefined;
+						const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(promptToSave, currentPromptForSave);
 
 						this.hooksOutput.appendLine(
 							`[ai-enrichment] save: promptId=${promptToSave.id || currentPrompt.id || '?'}`
@@ -5724,9 +5963,15 @@ export class EditorPanelManager {
 						const requestedIdBase = this.resolvePromptIdBase(promptToSave);
 
 						const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
-						await this.reconcileReportWithExtensionState(panelKey, promptToSave, currentPrompt);
-						const basePrompt = this.panelBasePrompts.get(panelKey);
-						await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, basePrompt || null);
+						if (!detachedSave) {
+							await this.reconcileReportWithExtensionState(panelKey, promptToSave, currentPromptForSave);
+						}
+						const basePrompt = detachedSave
+							? currentPromptForSave
+							: (this.panelBasePrompts.get(panelKey) || null);
+						if (!detachedSave) {
+							await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, basePrompt || null);
+						}
 
 						const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(renameFromId || promptToSave.id) : null;
 						const allowStatusOverwrite = saveSource === 'status-change';
@@ -5744,10 +5989,12 @@ export class EditorPanelManager {
 
 						/** Обновляем ключ очереди, если id изменился после сохранения (переименование, генерация id) */
 						const updatedSaveQueueKey = buildSaveQueueKey(saved.promptUuid, saved.id);
-						if (updatedSaveQueueKey !== saveQueueKey) {
-							this.pendingSaveQueue.delete(saveQueueKey);
-							this.pendingSaveQueue.set(updatedSaveQueueKey, { snapshot: saved, promise: saveQueuePromise });
-						}
+						finalSaveQueueKey = updatedSaveQueueKey;
+						this.movePendingSaveEntry(saveQueueKey, updatedSaveQueueKey, {
+							snapshot: saved,
+							promise: saveQueuePromise,
+							operationId,
+						});
 						saveQueueResolve!(saved);
 
 						const shouldNotifyArchiveRename = shouldNotifyReservedArchiveRename(requestedIdBase, saved.id, previousPromptId);
@@ -5773,24 +6020,26 @@ export class EditorPanelManager {
 						} else if (!aiEnrichmentPlan.enrichmentAlreadyRunning) {
 							this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, null);
 						}
-						await this.stateService.migratePromptEditorViewState(
-							[
-								this.getPromptEditorViewStateSource(panelKey, currentPrompt),
-								previousPromptId
-									? this.getPromptEditorViewStateSource(panelKey, null, { promptId: previousPromptId })
-									: null,
-							],
-							this.getPromptEditorViewStateSource(panelKey, promptForPanel),
-						);
-
 						const livePanelPrompt = this.panelPromptRefs.get(panelKey);
-						const shouldApplyToCurrentPanel = Boolean(livePanelPrompt) && shouldApplySavedPromptToPanel(
+						const shouldApplyToCurrentPanel = !detachedSave && Boolean(livePanelPrompt) && shouldApplySavedPromptToPanel(
 							promptForPanel.id,
 							promptForPanel.promptUuid,
 							livePanelPrompt?.id,
 							livePanelPrompt?.promptUuid,
 							previousPromptId,
 						);
+
+						if (shouldApplyToCurrentPanel) {
+							await this.stateService.migratePromptEditorViewState(
+								[
+									this.getPromptEditorViewStateSource(panelKey, currentPromptForSave),
+									previousPromptId
+										? this.getPromptEditorViewStateSource(panelKey, null, { promptId: previousPromptId })
+										: null,
+								],
+								this.getPromptEditorViewStateSource(panelKey, promptForPanel),
+							);
+						}
 
 						if (shouldApplyToCurrentPanel && livePanelPrompt) {
 							setIsDirty(false);
@@ -5833,10 +6082,16 @@ export class EditorPanelManager {
 
 						if (shouldApplyToCurrentPanel) {
 							this.updatePromptPanelTitle(panel, saved);
-							await postMessage({ type: 'promptSaved', prompt: saved, previousId: renameFromId });
+							await postMessage({
+								type: 'promptSaved',
+								prompt: saved,
+								previousId: renameFromId,
+								...(saveRequestId ? { requestId: saveRequestId } : {}),
+							});
 							await postMessage(this.buildPromptMessage(promptForPanel, {
 								reason: 'save',
 								previousId: renameFromId,
+								...(saveRequestId ? { requestId: saveRequestId } : {}),
 							}));
 							if (shouldNotifyArchiveRename) {
 								await postMessage({
@@ -5873,28 +6128,37 @@ export class EditorPanelManager {
 						if (promptToSave.id && promptToSave.id !== saveStateId) {
 							this._onDidSaveStateChange.fire({
 								id: promptToSave.id,
-								promptUuid: promptToSave.promptUuid || currentPrompt.promptUuid,
+								promptUuid: promptToSave.promptUuid || currentPromptForSave.promptUuid,
 								saving: false,
 							});
 						}
 					} catch (error) {
 						saveQueueResolve!(null);
 						const message = this.formatSaveConflictMessage(error);
-						postMessage({ type: 'error', message: `Save failed: ${message}` });
+						postMessage({
+							type: 'error',
+							message: `Save failed: ${message}`,
+							...(saveRequestId ? { requestId: saveRequestId } : {}),
+						});
 					} finally {
 						this._onDidSaveStateChange.fire({
 							id: saveStateId,
-							promptUuid: msg.prompt.promptUuid || currentPrompt.promptUuid,
+							promptUuid: savePromptUuid,
 							saving: false,
 						});
 						postMessage({
 							type: 'promptSaving',
 							id: saveStateId,
-							promptUuid: msg.prompt.promptUuid || currentPrompt.promptUuid,
+							promptUuid: savePromptUuid,
 							saving: false,
+							...(saveRequestId ? { requestId: saveRequestId } : {}),
 						});
+						this.clearPendingSaveEntry(saveQueueKey, operationId);
+						if (finalSaveQueueKey !== saveQueueKey) {
+							this.clearPendingSaveEntry(finalSaveQueueKey, operationId);
+						}
 					}
-				})();
+				});
 
 				this.pendingPromptSaveByPanelKey.set(panelKey, saveTask);
 				try {
@@ -5903,15 +6167,7 @@ export class EditorPanelManager {
 					if (this.pendingPromptSaveByPanelKey.get(panelKey) === saveTask) {
 						this.pendingPromptSaveByPanelKey.delete(panelKey);
 					}
-					/** Очистка записи из очереди по обоим возможным ключам */
-					this.pendingSaveQueue.delete(saveQueueKey);
-					const updatedKey = buildSaveQueueKey(
-						msg.prompt.promptUuid || currentPrompt.promptUuid,
-						currentPrompt.id || msg.prompt.id,
-					);
-					if (updatedKey !== saveQueueKey) {
-						this.pendingSaveQueue.delete(updatedKey);
-					}
+					/** Cleanup уже сделан внутри serial save operation; здесь ничего дополнительно не удаляем. */
 				}
 				break;
 			}
@@ -6377,6 +6633,7 @@ export class EditorPanelManager {
 					}
 
 					prompt.status = 'in-progress';
+					markPromptChatAutoCompleteAfter(prompt);
 					this.lockPromptIdAfterChatStart(prompt);
 
 					const bindSessionToPrompt = async (sessionId: string): Promise<boolean> => {
@@ -6865,7 +7122,7 @@ export class EditorPanelManager {
 						});
 						const shouldFinalizeTrackedCompletion = completion.ok && shouldFinalizeTrackedChat;
 						this.hooksOutput.appendLine(
-							`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} binding=${String(sessionBindingSucceeded)} completionOk=${completion.ok} observed=${String(completionObserved)} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatReportHtml ? 'yes' : 'no'} finalize=${String(shouldFinalizeTrackedCompletion)}`
+							`[chat-track] prompt=${prompt.id} trackedSessionId=${trackedSessionId || '-'} binding=${String(sessionBindingSucceeded)} completionOk=${completion.ok} observed=${String(completionObserved)} reason=${completion.reason || '-'} sessionId=${completion.sessionId || '-'} started=${completion.lastRequestStarted || 0} ended=${completion.lastRequestEnded || 0} responseState=${completion.lastResponseState ?? -1} requestModelState=${completion.requestModelState ?? -1} hasResult=${String(completion.hasRequestResult)} pendingEdits=${String(completion.hasPendingEdits)} markdown=${chatReportHtml ? 'yes' : 'no'} finalize=${String(shouldFinalizeTrackedCompletion)}`
 						);
 						if (shouldFinalizeTrackedCompletion) {
 							const promptToComplete = await this.storageService.getPrompt(prompt.id);
@@ -6904,27 +7161,13 @@ export class EditorPanelManager {
 									String(completion.sessionId || trackedSessionId || promptToComplete.chatSessionIds?.[0] || ''),
 									promptToComplete,
 								);
-								// Recalc implementing time from JSONL after VS Code finishes writing session data
-								const recalcPromptId = promptToComplete.id;
-								setTimeout(async () => {
-									try {
-										const freshPrompt = await this.storageService.getPrompt(recalcPromptId);
-										if (freshPrompt && (freshPrompt.chatSessionIds || []).length > 0) {
-											const totalMs = await this.stateService.getChatSessionsTotalElapsed(freshPrompt.chatSessionIds);
-											if (totalMs > 0) {
-												freshPrompt.timeSpentImplementing = totalMs;
-												await this.storageService.savePrompt(freshPrompt);
-												if (currentPrompt.id === freshPrompt.id) {
-													Object.assign(currentPrompt, freshPrompt);
-													postMessage({ type: 'prompt', prompt: freshPrompt, reason: 'sync' });
-												}
-												this._onDidSave.fire(freshPrompt.id);
-											}
-										}
-									} catch (e: any) {
-										this.hooksOutput.appendLine(`[chat-track] recalc implementing time error: ${e?.message || e}`);
-									}
-								}, 3000);
+								this.scheduleTrackedChatStateRefresh(
+									promptToComplete.id,
+									currentPrompt,
+									postMessage,
+									'afterChatCompleted',
+									[3000],
+								);
 							}
 
 							this.hooksOutput.appendLine(`[chat-track] afterChatCompleted fired for prompt=${prompt.id}`);
@@ -6973,27 +7216,12 @@ export class EditorPanelManager {
 									postMessage({ type: 'prompt', prompt: promptForTiming, reason: 'sync' });
 								}
 								this._onDidSave.fire(promptForTiming.id);
-								// Recalc implementing time from JSONL (markdown fallback path)
-								const recalcPromptId2 = promptForTiming.id;
-								setTimeout(async () => {
-									try {
-										const freshPrompt = await this.storageService.getPrompt(recalcPromptId2);
-										if (freshPrompt && (freshPrompt.chatSessionIds || []).length > 0) {
-											const totalMs = await this.stateService.getChatSessionsTotalElapsed(freshPrompt.chatSessionIds);
-											if (totalMs > 0) {
-												freshPrompt.timeSpentImplementing = totalMs;
-												await this.storageService.savePrompt(freshPrompt);
-												if (currentPrompt.id === freshPrompt.id) {
-													Object.assign(currentPrompt, freshPrompt);
-													postMessage({ type: 'prompt', prompt: freshPrompt, reason: 'sync' });
-												}
-												this._onDidSave.fire(freshPrompt.id);
-											}
-										}
-									} catch (e: any) {
-										this.hooksOutput.appendLine(`[chat-track] recalc implementing time (fallback) error: ${e?.message || e}`);
-									}
-								}, 3000);
+								this.scheduleTrackedChatStateRefresh(
+									promptForTiming.id,
+									currentPrompt,
+									postMessage,
+									'afterChatCompleted-fallback',
+								);
 							}
 
 							await this.scheduleChatSessionRename(
@@ -7072,6 +7300,14 @@ export class EditorPanelManager {
 						} catch (error) {
 							this.hooksOutput.appendLine(`[chat-memory] noteChatError completion failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 						}
+						if (prompt?.id) {
+							this.scheduleTrackedChatStateRefresh(
+								prompt.id,
+								currentPrompt,
+								postMessage,
+								'chatError-catch-up',
+							);
+						}
 						this.hooksOutput.appendLine(`[chat-track] chatError fired for prompt=${prompt.id}: completion not detected`);
 					})();
 				} catch (error) {
@@ -7125,6 +7361,7 @@ export class EditorPanelManager {
 
 						if (promptFromStorage.status !== 'in-progress') {
 							promptFromStorage.status = 'in-progress';
+							markPromptChatAutoCompleteAfter(promptFromStorage);
 							await this.storageService.savePrompt(promptFromStorage, { historyReason: 'status-change' });
 							if (currentPrompt.id === promptFromStorage.id) {
 								Object.assign(currentPrompt, promptFromStorage);
@@ -7169,6 +7406,7 @@ export class EditorPanelManager {
 					const promptFromStorage = await this.storageService.getPrompt(currentPrompt.id);
 					if (promptFromStorage && promptFromStorage.status !== 'in-progress') {
 						promptFromStorage.status = 'in-progress';
+						markPromptChatAutoCompleteAfter(promptFromStorage);
 						await this.storageService.savePrompt(promptFromStorage, { historyReason: 'status-change' });
 						Object.assign(currentPrompt, promptFromStorage);
 						postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
@@ -8170,8 +8408,13 @@ export class EditorPanelManager {
 					break;
 				}
 				try {
-					const totalMs = await this.stateService.getChatSessionsTotalElapsed(sessionIds);
-					if (totalMs <= 0) {
+					const refreshResult = await this.refreshPromptFromTrackedChatSessions(
+						prompt.id,
+						currentPrompt,
+						postMessage,
+						isSilentRecalc ? 'silent-recalc' : 'manual-recalc',
+					);
+					if (refreshResult.totalMs <= 0) {
 						if (isSilentRecalc) {
 							this.hooksOutput.appendLine(`[chat-track] silent recalc skipped for prompt=${prompt.id}: no session timing files available yet`);
 							postMessage({
@@ -8185,14 +8428,12 @@ export class EditorPanelManager {
 						}
 						break;
 					}
-					prompt.timeSpentImplementing = totalMs;
-					await this.storageService.savePrompt(prompt);
-					if (currentPrompt.id === prompt.id) {
-						Object.assign(currentPrompt, prompt);
-						postMessage({ type: 'prompt', prompt, reason: 'sync' });
-					}
-					this._onDidSave.fire(prompt.id);
-					postMessage({ type: 'implementingTimeRecalculated', id: prompt.id, timeMs: totalMs, sessionsCount: sessionIds.length });
+					postMessage({
+						type: 'implementingTimeRecalculated',
+						id: prompt.id,
+						timeMs: refreshResult.totalMs,
+						sessionsCount: refreshResult.sessionsCount,
+					});
 				} catch (err: any) {
 					if (isSilentRecalc) {
 						this.hooksOutput.appendLine(`[chat-track] silent recalc error for prompt=${prompt.id}: ${err?.message || err}`);

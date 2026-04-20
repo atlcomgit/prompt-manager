@@ -18,7 +18,13 @@ import {
 	getEditorPromptViewStateStorageKeys,
 	resolveEditorPromptViewStateStorageKey,
 } from '../types/prompt.js';
-import { observeStableChatCompletion, type StableChatCompletionCandidate } from '../utils/chatCompletionState.js';
+import { observeStableChatCompletion, isCompletedChatResponse, type StableChatCompletionCandidate } from '../utils/chatCompletionState.js';
+
+interface ChatSessionLatestRequestState {
+	requestIndex: number;
+	requestModelState?: number;
+	hasRequestResult?: boolean;
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -189,6 +195,90 @@ export class StateService {
 		}
 	}
 
+	/** Read the latest request state from a chat session JSONL to avoid false completion from noisy index timing. */
+	private static extractLatestChatRequestStateFromJsonl(raw: string): ChatSessionLatestRequestState | null {
+		const requestStates = new Map<number, ChatSessionLatestRequestState>();
+
+		const ensureRequestState = (requestIndex: number): ChatSessionLatestRequestState => {
+			const existing = requestStates.get(requestIndex);
+			if (existing) {
+				return existing;
+			}
+			const created: ChatSessionLatestRequestState = { requestIndex };
+			requestStates.set(requestIndex, created);
+			return created;
+		};
+
+		const toOptionalNumber = (value: unknown): number | undefined => {
+			const numeric = Number(value);
+			return Number.isFinite(numeric) ? numeric : undefined;
+		};
+
+		for (const line of raw.split('\n')) {
+			const trimmed = line.trim();
+			if (!trimmed) {
+				continue;
+			}
+
+			let parsed: any;
+			try {
+				parsed = JSON.parse(trimmed);
+			} catch {
+				continue;
+			}
+
+			if (parsed?.kind === 0) {
+				const requests = Array.isArray(parsed?.v?.requests) ? parsed.v.requests : [];
+				for (let requestIndex = 0; requestIndex < requests.length; requestIndex += 1) {
+					const requestState = ensureRequestState(requestIndex);
+					const request = requests[requestIndex] || {};
+					requestState.requestModelState = toOptionalNumber(request?.modelState?.value ?? request?.modelState);
+					if (Object.prototype.hasOwnProperty.call(request, 'result')) {
+						requestState.hasRequestResult = request.result != null;
+					}
+				}
+				continue;
+			}
+
+			const keyPath = Array.isArray(parsed?.k) ? parsed.k : null;
+			if (!keyPath || keyPath[0] !== 'requests' || typeof keyPath[1] !== 'number' || keyPath.length < 3) {
+				continue;
+			}
+
+			const requestState = ensureRequestState(keyPath[1]);
+			if (keyPath[2] === 'result') {
+				requestState.hasRequestResult = parsed?.v != null;
+				continue;
+			}
+
+			if (keyPath[2] === 'modelState') {
+				requestState.requestModelState = toOptionalNumber(parsed?.v?.value ?? parsed?.v);
+			}
+		}
+
+		if (requestStates.size === 0) {
+			return null;
+		}
+
+		return Array.from(requestStates.values())
+			.sort((left, right) => right.requestIndex - left.requestIndex)[0] || null;
+	}
+
+	/** Read terminal request markers from the persisted chat session JSONL. */
+	private async readLatestChatRequestState(sessionId: string): Promise<ChatSessionLatestRequestState | null> {
+		const jsonlPath = await this.findChatSessionJsonlPath(sessionId);
+		if (!jsonlPath) {
+			return null;
+		}
+
+		try {
+			const raw = await fs.readFile(jsonlPath, 'utf-8');
+			return StateService.extractLatestChatRequestStateFromJsonl(raw);
+		} catch {
+			return null;
+		}
+	}
+
 	/** Keep only sessions that started or still had request activity after the tracked start timestamp. */
 	private static isChatSessionRelevantToReference(entry: any, referenceTimestampMs: number): boolean {
 		const started = Number(entry?.timing?.lastRequestStarted || 0);
@@ -302,6 +392,26 @@ export class StateService {
 			.sort((a: any, b: any) => Number(b?.timing?.lastRequestStarted || 0) - Number(a?.timing?.lastRequestStarted || 0));
 	}
 
+	private getTrackedChatSessionsFromIndex(index: any, sessionIds: string[]): any[] {
+		const entries = index?.entries as Record<string, any> | undefined;
+		if (!entries || typeof entries !== 'object') {
+			return [];
+		}
+
+		const trackedSessionIds = new Set(
+			sessionIds
+				.map(value => String(value || '').trim())
+				.filter(Boolean),
+		);
+		if (trackedSessionIds.size === 0) {
+			return [];
+		}
+
+		return Object.values(entries)
+			.filter((entry: any) => trackedSessionIds.has(String(entry?.sessionId || '').trim()))
+			.sort((a: any, b: any) => Number(b?.timing?.lastRequestStarted || 0) - Number(a?.timing?.lastRequestStarted || 0));
+	}
+
 	async waitForChatSessionStarted(
 		referenceTimestampMs: number,
 		timeoutMs: number = 15000,
@@ -385,6 +495,8 @@ export class StateService {
 		lastRequestStarted?: number;
 		lastRequestEnded?: number;
 		lastResponseState?: number;
+		requestModelState?: number;
+		hasRequestResult?: boolean;
 		hasPendingEdits?: boolean;
 		dbPath?: string;
 	}> {
@@ -399,6 +511,8 @@ export class StateService {
 		let lastObservedRequestStarted = 0;
 		let lastObservedRequestEnded = 0;
 		let lastObservedResponseState: number | undefined;
+		let lastObservedRequestModelState: number | undefined;
+		let lastObservedHasRequestResult: boolean | undefined;
 		let lastObservedHasPendingEdits: boolean | undefined;
 		let lastObservedDbPath = '';
 		let stableCompletionCandidate: StableChatCompletionCandidate | null = null;
@@ -428,9 +542,16 @@ export class StateService {
 				const lastResponseState = Number(current?.lastResponseState ?? -1);
 				const hasPendingEdits = Boolean(current?.hasPendingEdits);
 				lastObservedSessionId = String(current?.sessionId || '').trim();
+				const latestRequestState = lastObservedSessionId
+					? await this.readLatestChatRequestState(lastObservedSessionId)
+					: null;
+				const requestModelState = latestRequestState?.requestModelState;
+				const hasRequestResult = latestRequestState?.hasRequestResult;
 				lastObservedRequestStarted = lastRequestStarted;
 				lastObservedRequestEnded = lastRequestEnded;
 				lastObservedResponseState = lastResponseState;
+				lastObservedRequestModelState = requestModelState;
+				lastObservedHasRequestResult = hasRequestResult;
 				lastObservedHasPendingEdits = hasPendingEdits;
 				lastObservedDbPath = matchedDbPath;
 				const completionObservation = observeStableChatCompletion(
@@ -440,6 +561,8 @@ export class StateService {
 						lastRequestStarted,
 						lastRequestEnded,
 						lastResponseState,
+						requestModelState,
+						hasRequestResult,
 						hasPendingEdits,
 					},
 					Date.now(),
@@ -454,6 +577,8 @@ export class StateService {
 						lastRequestStarted,
 						lastRequestEnded,
 						lastResponseState,
+						requestModelState,
+						hasRequestResult,
 						hasPendingEdits,
 						dbPath: matchedDbPath,
 					};
@@ -472,8 +597,95 @@ export class StateService {
 			lastRequestStarted: lastObservedRequestStarted || undefined,
 			lastRequestEnded: lastObservedRequestEnded || undefined,
 			lastResponseState: lastObservedResponseState,
+			requestModelState: lastObservedRequestModelState,
+			hasRequestResult: lastObservedHasRequestResult,
 			hasPendingEdits: lastObservedHasPendingEdits,
 			dbPath: lastObservedDbPath || dbPaths[0],
+		};
+	}
+
+	async getLatestTrackedChatRequestCompletion(
+		sessionIds: string[],
+	): Promise<{
+		ok: boolean;
+		reason?: string;
+		sessionId?: string;
+		lastRequestStarted?: number;
+		lastRequestEnded?: number;
+		lastResponseState?: number;
+		requestModelState?: number;
+		hasRequestResult?: boolean;
+		hasPendingEdits?: boolean;
+		dbPath?: string;
+	}> {
+		const normalizedSessionIds = Array.from(new Set(
+			sessionIds
+				.map(value => String(value || '').trim())
+				.filter(Boolean),
+		));
+		if (normalizedSessionIds.length === 0) {
+			return { ok: false, reason: 'session-id-not-provided' };
+		}
+
+		const dbPaths = this.scopeWorkspaceStateDbPathsToCurrentWorkspace(await this.resolveWorkspaceStateDbPaths());
+		if (dbPaths.length === 0) {
+			return { ok: false, reason: 'workspace-db-not-found' };
+		}
+
+		let current: any;
+		let matchedDbPath = '';
+
+		for (const dbPath of dbPaths) {
+			const index = await this.readChatSessionStoreIndex(dbPath);
+			const sessions = this.getTrackedChatSessionsFromIndex(index, normalizedSessionIds);
+			const candidate = sessions[0];
+			if (!candidate) {
+				continue;
+			}
+
+			const candidateStarted = Number(candidate?.timing?.lastRequestStarted || 0);
+			const currentStarted = Number(current?.timing?.lastRequestStarted || 0);
+			if (!current || candidateStarted > currentStarted) {
+				current = candidate;
+				matchedDbPath = dbPath;
+			}
+		}
+
+		if (!current) {
+			return { ok: false, reason: 'session-not-found', dbPath: dbPaths[0] };
+		}
+
+		const sessionId = String(current?.sessionId || '').trim();
+		const lastRequestStarted = Number(current?.timing?.lastRequestStarted || 0);
+		const lastRequestEnded = Number(current?.timing?.lastRequestEnded || 0);
+		const lastResponseState = Number(current?.lastResponseState ?? -1);
+		const hasPendingEdits = Boolean(current?.hasPendingEdits);
+		const latestRequestState = sessionId
+			? await this.readLatestChatRequestState(sessionId)
+			: null;
+		const requestModelState = latestRequestState?.requestModelState;
+		const hasRequestResult = latestRequestState?.hasRequestResult;
+		const ok = isCompletedChatResponse({
+			sessionId,
+			lastRequestStarted,
+			lastRequestEnded,
+			lastResponseState,
+			requestModelState,
+			hasRequestResult,
+			hasPendingEdits,
+		});
+
+		return {
+			ok,
+			...(ok ? {} : { reason: 'not-completed' }),
+			sessionId: sessionId || undefined,
+			lastRequestStarted: lastRequestStarted || undefined,
+			lastRequestEnded: lastRequestEnded || undefined,
+			lastResponseState,
+			requestModelState,
+			hasRequestResult,
+			hasPendingEdits,
+			dbPath: matchedDbPath || dbPaths[0],
 		};
 	}
 
@@ -526,7 +738,6 @@ export class StateService {
 		if (!normalizedId) {
 			return 0;
 		}
-
 		const jsonlPath = await this.findChatSessionJsonlPath(normalizedId);
 		if (!jsonlPath) {
 			return 0;

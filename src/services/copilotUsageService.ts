@@ -88,6 +88,22 @@ export interface CopilotAccountSwitchCompletionResult extends CopilotUsageSnapsh
 	message: string;
 }
 
+/** Результат чтения usage-метрик или явной ошибки авторизации GitHub API. */
+type CopilotUsageMetricsFetchResult =
+	| {
+		kind: 'metrics';
+		used: number;
+		limit: number;
+		source: 'api' | 'inferred';
+		planType?: string;
+		snapshots?: Array<{ date: string; used: number; limit: number }>;
+		statusText: string;
+	}
+	| {
+		kind: 'auth-error';
+		statusText: string;
+	};
+
 /** Ключи для хранения состояния в globalState */
 const STATE_KEY_USAGE = 'promptManager.copilotUsage';
 
@@ -1994,7 +2010,7 @@ export class CopilotUsageService implements vscode.Disposable {
 	 * @param token — OAuth токен авторизации
 	 * @returns Ответ API или null при ошибке
 	 */
-	private async fetchGitHubApi<T>(url: string, token: string): Promise<{ ok: boolean; status: number; data: T | null; message?: string }> {
+	private async fetchGitHubApi<T>(url: string, token: string): Promise<{ ok: boolean; status: number; data: T | null; message?: string; authError: boolean }> {
 		try {
 			const response = await fetch(url, {
 				method: 'GET',
@@ -2005,18 +2021,21 @@ export class CopilotUsageService implements vscode.Disposable {
 				},
 			});
 
+			const rawText = await response.text();
 			let data: T | null = null;
 			let message = '';
-			try {
-				data = await response.json() as T;
-				if (data && typeof data === 'object') {
-					const maybeMessage = (data as Record<string, unknown>)['message'];
-					if (typeof maybeMessage === 'string') {
-						message = maybeMessage;
+			if (rawText.trim()) {
+				try {
+					data = JSON.parse(rawText) as T;
+					if (data && typeof data === 'object') {
+						const maybeMessage = (data as Record<string, unknown>)['message'];
+						if (typeof maybeMessage === 'string') {
+							message = maybeMessage;
+						}
 					}
+				} catch {
+					message = rawText.trim();
 				}
-			} catch {
-				data = null;
 			}
 
 			return {
@@ -2024,9 +2043,10 @@ export class CopilotUsageService implements vscode.Disposable {
 				status: response.status,
 				data,
 				message,
+				authError: this.isAuthenticationFailure(response.status, message),
 			};
 		} catch {
-			return { ok: false, status: 0, data: null, message: 'network-error' };
+			return { ok: false, status: 0, data: null, message: 'network-error', authError: false };
 		}
 	}
 
@@ -2070,7 +2090,7 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 	}
 
-	private async fetchCopilotInternalQuota(token: string): Promise<{ used: number; limit: number; source: 'api'; planType?: string; statusText: string } | null> {
+	private async fetchCopilotInternalQuota(token: string): Promise<CopilotUsageMetricsFetchResult | null> {
 		try {
 			const response = await fetch('https://api.github.com/copilot_internal/user', {
 				method: 'GET',
@@ -2082,11 +2102,34 @@ export class CopilotUsageService implements vscode.Disposable {
 				},
 			});
 
+			const rawText = await response.text();
+			let data: Record<string, unknown> | null = null;
+			let message = '';
+			if (rawText.trim()) {
+				try {
+					data = JSON.parse(rawText) as Record<string, unknown>;
+					const maybeMessage = data['message'];
+					if (typeof maybeMessage === 'string') {
+						message = maybeMessage;
+					}
+				} catch {
+					message = rawText.trim();
+				}
+			}
+
 			if (!response.ok) {
+				if (this.isAuthenticationFailure(response.status, message)) {
+					return {
+						kind: 'auth-error',
+						statusText: `github-auth-error:${this.formatApiStatus('api:copilot_internal/user', response.status, message)}`,
+					};
+				}
 				return null;
 			}
 
-			const data = await response.json() as Record<string, unknown>;
+			if (!data) {
+				return null;
+			}
 			const quotaSnapshots = data['quota_snapshots'];
 			if (!quotaSnapshots || typeof quotaSnapshots !== 'object') {
 				return null;
@@ -2107,6 +2150,7 @@ export class CopilotUsageService implements vscode.Disposable {
 			const planRaw = String(data['copilot_plan'] || '');
 			const planType = this.mapInternalPlan(planRaw);
 			return {
+				kind: 'metrics',
 				used,
 				limit: entitlement,
 				source: 'api',
@@ -2118,10 +2162,16 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 	}
 
-	private async fetchCopilotBillingPremiumUsage(token: string): Promise<{ used: number; limit: number; source: 'api'; statusText: string } | null> {
+	private async fetchCopilotBillingPremiumUsage(token: string): Promise<CopilotUsageMetricsFetchResult | null> {
 		try {
 			const user = await this.fetchGitHubApi<Record<string, unknown>>('https://api.github.com/user', token);
 			if (!user.ok || !user.data) {
+				if (user.authError) {
+					return {
+						kind: 'auth-error',
+						statusText: `github-auth-error:${this.formatApiStatus('api:user', user.status, user.message)}`,
+					};
+				}
 				return null;
 			}
 			const login = String(user.data['login'] || '').trim();
@@ -2132,6 +2182,12 @@ export class CopilotUsageService implements vscode.Disposable {
 			const url = `https://api.github.com/users/${encodeURIComponent(login)}/settings/billing/premium_request/usage`;
 			const billing = await this.fetchGitHubApi<Record<string, unknown>>(url, token);
 			if (!billing.ok || !billing.data) {
+				if (billing.authError) {
+					return {
+						kind: 'auth-error',
+						statusText: `github-auth-error:${this.formatApiStatus('api:billing/premium_request/usage', billing.status, billing.message)}`,
+					};
+				}
 				return null;
 			}
 
@@ -2142,6 +2198,7 @@ export class CopilotUsageService implements vscode.Disposable {
 			}
 
 			return {
+				kind: 'metrics',
 				used,
 				limit,
 				source: 'api',
@@ -2381,7 +2438,7 @@ export class CopilotUsageService implements vscode.Disposable {
 		return result.slice(-62);
 	}
 
-	private async fetchCopilotUsageMetrics(token: string): Promise<{ used: number; limit: number; source: 'api' | 'inferred'; planType?: string; snapshots?: Array<{ date: string; used: number; limit: number }>; statusText: string } | null> {
+	private async fetchCopilotUsageMetrics(token: string): Promise<CopilotUsageMetricsFetchResult | null> {
 		const internal = await this.fetchCopilotInternalQuota(token);
 		if (internal) {
 			return internal;
@@ -2404,10 +2461,14 @@ export class CopilotUsageService implements vscode.Disposable {
 
 		for (const url of endpoints) {
 			const response = await this.fetchGitHubApi<Record<string, unknown> | Array<Record<string, unknown>>>(url, token);
-			const statusChunk = response.message
-				? `${url} -> ${response.status} (${response.message})`
-				: `${url} -> ${response.status}`;
+			const statusChunk = this.formatApiStatus(url, response.status, response.message);
 			statuses.push(statusChunk);
+			if (response.authError) {
+				return {
+					kind: 'auth-error',
+					statusText: `github-auth-error:${statuses.join('; ')}`,
+				};
+			}
 			if (!response.ok || !response.data) {
 				continue;
 			}
@@ -2444,6 +2505,7 @@ export class CopilotUsageService implements vscode.Disposable {
 
 			if (usedResolved !== null && limitResolved !== null && limitResolved > 0) {
 				return {
+					kind: 'metrics',
 					used: usedResolved,
 					limit: limitResolved,
 					source: 'api',
@@ -2454,6 +2516,7 @@ export class CopilotUsageService implements vscode.Disposable {
 
 			if (usedResolved !== null && usedResolved > 0) {
 				return {
+					kind: 'metrics',
 					used: usedResolved,
 					limit: 0,
 					source: 'inferred',
@@ -2529,6 +2592,56 @@ export class CopilotUsageService implements vscode.Disposable {
 		const month = String(now.getMonth() + 1).padStart(2, '0');
 		const day = String(now.getDate()).padStart(2, '0');
 		return `${year}-${month}-${day}`;
+	}
+
+	/** Определяет, что ответ GitHub API указывает именно на проблему входа. */
+	private isAuthenticationFailure(status: number, message?: string): boolean {
+		if (status === 401) {
+			return true;
+		}
+
+		if (status !== 403) {
+			return false;
+		}
+
+		const normalizedMessage = String(message || '').trim().toLowerCase();
+		if (!normalizedMessage) {
+			return false;
+		}
+
+		return normalizedMessage.includes('bad credentials')
+			|| normalizedMessage.includes('requires authentication')
+			|| normalizedMessage.includes('require authentication')
+			|| normalizedMessage.includes('must authenticate')
+			|| normalizedMessage.includes('authentication required')
+			|| normalizedMessage.includes('invalid token')
+			|| normalizedMessage.includes('expired token');
+	}
+
+	/** Приводит статус API к компактному диагностическому виду. */
+	private formatApiStatus(source: string, status: number, message?: string): string {
+		const normalizedMessage = String(message || '').trim();
+		return normalizedMessage
+			? `${source} -> ${status} (${normalizedMessage})`
+			: `${source} -> ${status}`;
+	}
+
+	/** Собирает состояние без авторизации, чтобы UI не показывал устаревший usage. */
+	private buildUnauthenticatedUsageData(statusText: string): CopilotUsageData {
+		const period = this.getCurrentPeriod();
+		return {
+			used: 0,
+			limit: 0,
+			periodStart: period.start,
+			periodEnd: period.end,
+			lastUpdated: new Date().toISOString(),
+			avgPerDay: 0,
+			authenticated: false,
+			planType: this.cachedData?.planType || 'unknown',
+			source: 'local',
+			lastSyncStatus: statusText,
+			snapshots: this.cachedData?.snapshots || [],
+		};
 	}
 
 	/**
@@ -2616,20 +2729,9 @@ export class CopilotUsageService implements vscode.Disposable {
 
 			// Если пользователь не авторизован — возвращаем данные без авторизации
 			if (!session) {
-				const period = this.getCurrentPeriod();
-				const unauthData: CopilotUsageData = {
-					used: 0,
-					limit: 0,
-					periodStart: period.start,
-					periodEnd: period.end,
-					lastUpdated: new Date().toISOString(),
-					avgPerDay: 0,
-					authenticated: false,
-					planType: 'unknown',
-					source: 'local',
-					lastSyncStatus: this.lastGitHubSessionIssue || 'github-session-not-found',
-					snapshots: this.cachedData?.snapshots || [],
-				};
+				const unauthData = this.buildUnauthenticatedUsageData(
+					this.lastGitHubSessionIssue || 'github-session-not-found',
+				);
 				this.cachedData = unauthData;
 				this.lastKnownAuthenticated = false;
 				this.lastDebugLog = this.formatDebugLog(debugLines.concat('[result] unauthenticated'));
@@ -2647,12 +2749,31 @@ export class CopilotUsageService implements vscode.Disposable {
 			debugLines.push(`[subscription] planType=${planType}`);
 
 			// Получаем данные об использовании из API
-			const usageMetrics = shouldCallApi
+			const usageMetricsResult = shouldCallApi
 				? await this.fetchCopilotUsageMetrics(session.accessToken)
 				: null;
-			debugLines.push(`[api] usageMetrics=${usageMetrics ? `used=${usageMetrics.used},limit=${usageMetrics.limit},source=${usageMetrics.source}` : 'none'}`);
+			const usageMetrics = usageMetricsResult?.kind === 'metrics'
+				? usageMetricsResult
+				: null;
+			const usageAuthError = usageMetricsResult?.kind === 'auth-error'
+				? usageMetricsResult.statusText
+				: null;
+			debugLines.push(`[api] usageMetrics=${usageMetrics
+				? `used=${usageMetrics.used},limit=${usageMetrics.limit},source=${usageMetrics.source}`
+				: usageAuthError || 'none'}`);
 			if (shouldCallApi) {
 				this.lastApiCallTimestamp = now;
+			}
+			if (usageAuthError) {
+				this.lastGitHubSessionIssue = usageAuthError;
+				const unauthData = this.buildUnauthenticatedUsageData(usageAuthError);
+				this.cachedData = unauthData;
+				this.lastKnownAuthenticated = false;
+				this.lastDebugLog = this.formatDebugLog(debugLines.concat(`[result] unauthenticated-auth-error:${usageAuthError}`));
+				this.lastFullRefreshTimestamp = now;
+				await this.persistState();
+				this._onDidChangeUsage.fire(unauthData);
+				return unauthData;
 			}
 			const localUsageMetrics = !usageMetrics
 				? await this.readLocalUsageFromStateDb()

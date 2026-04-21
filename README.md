@@ -143,6 +143,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 ### Monitor Copilot usage inside VS Code
 
 - See Copilot Premium request usage in the status bar.
+- When the saved GitHub session becomes stale or invalid, the status bar now switches to an explicit sign-in error state instead of showing inflated fallback usage numbers.
 - Open a detailed usage panel with quota signals, refresh health, and account binding diagnostics.
 - Keep usage awareness close to the same workflow where prompts and chats are executed.
 

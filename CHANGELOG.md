@@ -19,6 +19,7 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- Copilot Premium Usage no longer falls back to inflated local counters when the GitHub session is stale or invalid; the status bar now shows a dedicated sign-in error state instead of misleading percentages.
 - Git Flow step 1 now shows a dedicated “No others” marker in rows where the expected branch field is hidden because there are no alternative target branches to choose from.
 - The Process tab report editor no longer clips long Markdown or HTML output at the old 800px auto-resize ceiling, and it now recalculates height when the editor width changes so wrapped content stays fully visible.
 - Session and codemap chat-memory instruction files now resolve prompt project scope against the current workspace, fall back to all workspace projects when saved selections are stale, and keep generated Markdown headings nested under a single document root instead of dropping embedded H1 sections into project blocks.

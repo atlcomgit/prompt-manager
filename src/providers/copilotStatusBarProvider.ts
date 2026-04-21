@@ -254,11 +254,20 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 
 		// Для неавторизованных пользователей
 		if (!data.authenticated) {
-			this.statusBarItem.text = '$(copilot) Авторизуйтесь';
-			this.statusBarItem.tooltip = 'Авторизуйтесь для просмотра статистики Copilot Premium';
+			const hasAuthenticationError = this.isAuthenticationError(data);
+			this.statusBarItem.text = hasAuthenticationError
+				? '$(error) Ошибка входа'
+				: '$(copilot) Авторизуйтесь';
+			this.statusBarItem.tooltip = hasAuthenticationError
+				? 'Сессия GitHub устарела или недействительна. Нажмите, чтобы выполнить вход заново.'
+				: 'Авторизуйтесь для просмотра статистики Copilot Premium';
 			this.statusBarItem.command = AUTH_COMMAND_ID;
-			this.statusBarItem.color = undefined;
-			this.statusBarItem.backgroundColor = undefined;
+			this.statusBarItem.color = hasAuthenticationError
+				? new vscode.ThemeColor('errorForeground')
+				: undefined;
+			this.statusBarItem.backgroundColor = hasAuthenticationError
+				? new vscode.ThemeColor('statusBarItem.errorBackground')
+				: undefined;
 			this.statusBarItem.show();
 			return;
 		}
@@ -311,6 +320,11 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 			return new vscode.ThemeColor('editorWarning.foreground');
 		}
 		return undefined; // Стандартный белый цвет
+	}
+
+	/** Отличает реальную проблему входа от обычного отсутствия авторизации. */
+	private isAuthenticationError(data: CopilotUsageData): boolean {
+		return String(data.lastSyncStatus || '').toLowerCase().startsWith('github-auth-error:');
 	}
 
 	private formatPercent(percent: number): string {

@@ -360,8 +360,8 @@ test('shouldShowPromptChatLaunchBlock only keeps the launch block while launch i
 		hasChatEntry: true,
 		chatRequestStarted: false,
 		chatLaunchCompletionHold: false,
-		chatRenameState: 'completed',
-	}), true);
+		chatRenameState: 'idle',
+	}), false);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'draft',
@@ -372,7 +372,7 @@ test('shouldShowPromptChatLaunchBlock only keeps the launch block while launch i
 	}), false);
 });
 
-test('isPromptChatLaunchComplete requires request start, bind, and rename completion', () => {
+test('isPromptChatLaunchComplete treats an already bound chat as complete when rename is idle', () => {
 	assert.equal(isPromptChatLaunchComplete({
 		hasChatEntry: false,
 		chatRequestStarted: false,
@@ -382,8 +382,8 @@ test('isPromptChatLaunchComplete requires request start, bind, and rename comple
 	assert.equal(isPromptChatLaunchComplete({
 		hasChatEntry: true,
 		chatRequestStarted: false,
-		chatRenameState: 'completed',
-	}), false);
+		chatRenameState: 'idle',
+	}), true);
 
 	assert.equal(isPromptChatLaunchComplete({
 		hasChatEntry: true,
@@ -422,6 +422,13 @@ test('resolvePromptChatLaunchPhase follows the earliest incomplete milestone', (
 
 	assert.equal(resolvePromptChatLaunchPhase({
 		hasChatEntry: true,
+		chatRequestStarted: false,
+		chatRenameState: 'idle',
+		chatLaunchCompletionHold: false,
+	}), 'ready');
+
+	assert.equal(resolvePromptChatLaunchPhase({
+		hasChatEntry: true,
 		chatRequestStarted: true,
 		chatRenameState: 'completed',
 		chatLaunchCompletionHold: true,
@@ -454,12 +461,12 @@ test('resolvePromptChatLaunchStepStates keeps later steps pending until earlier 
 	assert.deepEqual(resolvePromptChatLaunchStepStates({
 		hasChatEntry: true,
 		chatRequestStarted: false,
-		chatRenameState: 'completed',
+		chatRenameState: 'idle',
 	}), {
 		prepare: 'done',
-		open: 'active',
-		bind: 'pending',
-		rename: 'pending',
+		open: 'done',
+		bind: 'done',
+		rename: 'done',
 	});
 
 	assert.deepEqual(resolvePromptChatLaunchStepStates({

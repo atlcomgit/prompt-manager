@@ -85,6 +85,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Scope prompt-bound chat discovery to the current workspace storage, so prompts do not accidentally attach to Copilot sessions from another open project.
 - Stop an in-progress bound chat from the prompt editor, even after the conversation has been rebound to its saved chat session.
 - Rename bound chat sessions both right after the session is first attached during chat launch and later after prompt title or task number changes, even if the prompt id was renamed in the meantime, keep retrying the live chat title refresh across the early launch timing window without waiting for a VS Code reload, and show that rename as a dedicated fourth step in the Process launch block.
+- Hide the Process launch block as soon as a bound or reopened chat entry is already available again, so restored chat state does not stay stuck on the opening step.
 - See a clear explanation above the action buttons on every editor tab when Start Chat is temporarily disabled because the prompt is empty, metadata is still generating, or chat launch is already running.
 - See the selected AI model directly in the Process tab launch step, so the opening step confirms which model will be used.
 - Reuse the AI model from the most recently updated prompt when you create a draft through Quick Add Prompt, so quick capture starts with the same model you used last.

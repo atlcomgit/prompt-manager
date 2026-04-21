@@ -232,13 +232,16 @@ export function shouldShowPromptChatLaunchBlock(
 		&& (!isPromptChatLaunchComplete(input) || input.chatLaunchCompletionHold);
 }
 
-/** Treat launch as complete only after request start, bind, and rename all finished. */
+/**
+ * Treat launch as complete once a chat entry exists and no live rename step is still running.
+ *
+ * A persisted or restored bound chat entry already proves that open/bind finished successfully,
+ * even if transient runtime flags were lost during sync or prompt reopen.
+ */
 export function isPromptChatLaunchComplete(
 	input: IsPromptChatLaunchCompleteInput,
 ): boolean {
-	return input.chatRequestStarted
-		&& input.hasChatEntry
-		&& input.chatRenameState === 'completed';
+	return input.hasChatEntry && input.chatRenameState !== 'active';
 }
 
 /** Resolve the top-level launch phase from the earliest incomplete milestone. */
@@ -249,7 +252,7 @@ export function resolvePromptChatLaunchPhase(
 		return 'ready';
 	}
 
-	if (!input.chatRequestStarted) {
+	if (!input.chatRequestStarted && !input.hasChatEntry) {
 		return 'opening';
 	}
 
@@ -260,23 +263,27 @@ export function resolvePromptChatLaunchPhase(
 	return 'renaming';
 }
 
-/** Resolve step states so later milestones cannot complete before earlier ones. */
+/** Resolve step states so restored chat entries still mark already-finished milestones as done. */
 export function resolvePromptChatLaunchStepStates(
 	input: ResolvePromptChatLaunchStepStatesInput,
 ): Record<'prepare' | 'open' | 'bind' | 'rename', PromptChatLaunchStepState> {
+	const hasOpenedChat = input.chatRequestStarted || input.hasChatEntry;
+	const hasBoundChat = input.hasChatEntry;
+	const isRenameActive = input.chatRenameState === 'active';
+
 	return {
 		prepare: 'done',
-		open: input.chatRequestStarted ? 'done' : 'active',
-		bind: !input.chatRequestStarted
+		open: hasOpenedChat ? 'done' : 'active',
+		bind: !hasOpenedChat
 			? 'pending'
-			: input.hasChatEntry
+			: hasBoundChat
 				? 'done'
 				: 'active',
-		rename: !input.chatRequestStarted || !input.hasChatEntry
+		rename: !hasBoundChat
 			? 'pending'
-			: input.chatRenameState === 'completed'
-				? 'done'
-				: 'active',
+			: isRenameActive
+				? 'active'
+				: 'done',
 	};
 }
 

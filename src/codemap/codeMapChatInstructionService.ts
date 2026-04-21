@@ -1,19 +1,30 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import type { Prompt } from '../types/prompt.js';
+import type {
+	ChatMemoryCodemapInstructionSummary,
+	ChatMemoryCodemapRepositorySummary,
+	ChatMemoryCodemapSummary,
+	Prompt,
+} from '../types/prompt.js';
 import { summarizeUncommittedProjects } from '../utils/uncommittedChangesSummary.js';
 import { resolveEffectiveProjectNames } from '../utils/projectScope.js';
 import type { StorageService } from '../services/storageService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { GitService } from '../services/gitService.js';
-import type { CodeMapInstructionKind, CodeMapMaterializationTarget, CodeMapRealtimeScheduledRefresh } from '../types/codemap.js';
+import type {
+	CodeMapArtifactKind,
+	CodeMapInstructionKind,
+	CodeMapMaterializationTarget,
+	CodeMapRealtimeScheduledRefresh,
+	StoredCodeMapInstruction,
+} from '../types/codemap.js';
 import { CodeMapDatabaseService } from './codeMapDatabaseService.js';
 import { CodeMapBranchResolverService } from './codeMapBranchResolverService.js';
 import { CodeMapInstructionService } from './codeMapInstructionService.js';
 import { CodeMapMaterializerService } from './codeMapMaterializerService.js';
 import { CodeMapOrchestratorService } from './codeMapOrchestratorService.js';
 import { CODEMAP_CHAT_INSTRUCTION_FILE_NAME, getCodeMapSettings } from './codeMapConfig.js';
-import { isInstructionFreshForResolution } from './codeMapRefreshPolicy.js';
+import { buildCodeMapGenerationFingerprint, isInstructionFreshForResolution } from './codeMapRefreshPolicy.js';
 import { computeRealtimeRefreshTargetTime, shouldIgnoreRealtimeRefreshPath } from './codeMapRealtimeRefresh.js';
 
 export class CodeMapChatInstructionService {
@@ -40,7 +51,7 @@ export class CodeMapChatInstructionService {
 		this.realtimeScheduledRefreshes.clear();
 	}
 
-	async prepareInstruction(prompt: Pick<Prompt, 'projects'>): Promise<void> {
+	async prepareInstruction(prompt: Pick<Prompt, 'projects'>): Promise<ChatMemoryCodemapSummary | null> {
 		const settings = getCodeMapSettings();
 		const locale = vscode.env.language;
 		const filePath = this.getInstructionFilePath();
@@ -48,7 +59,7 @@ export class CodeMapChatInstructionService {
 
 		if (!settings.enabled) {
 			await vscode.workspace.fs.writeFile(vscode.Uri.file(filePath), Buffer.from('', 'utf-8'));
-			return;
+			return null;
 		}
 
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
@@ -85,6 +96,141 @@ export class CodeMapChatInstructionService {
 
 		const content = this.materializer.compose(materializationTargets, new Date().toISOString(), locale);
 		await vscode.workspace.fs.writeFile(vscode.Uri.file(filePath), Buffer.from(content, 'utf-8'));
+		return this.buildChatMemoryCodemapSummary(materializationTargets, locale);
+	}
+
+	/** Build a compact codemap summary for the editor memory block. */
+	private buildChatMemoryCodemapSummary(
+		targets: CodeMapMaterializationTarget[],
+		locale: string,
+	): ChatMemoryCodemapSummary {
+		const generationFingerprint = buildCodeMapGenerationFingerprint(getCodeMapSettings());
+		const repositories = targets.map(target => this.buildChatMemoryCodemapRepositorySummary(target, locale, generationFingerprint));
+		const sections = repositories.flatMap(repository => repository.sections);
+
+		return {
+			repositoryCount: repositories.length,
+			instructionCount: sections.filter(section => section.exists || section.queuedRefresh).length,
+			queuedRefreshCount: sections.filter(section => section.queuedRefresh).length,
+			totalFileCount: sections.reduce((sum, section) => sum + section.fileCount, 0),
+			describedFilesCount: sections.reduce((sum, section) => sum + section.describedFilesCount, 0),
+			describedSymbolsCount: sections.reduce((sum, section) => sum + section.describedSymbolsCount, 0),
+			describedMethodLikeCount: sections.reduce((sum, section) => sum + section.describedMethodLikeCount, 0),
+			totalSizeBytes: sections.reduce((sum, section) => sum + section.sizeBytes, 0),
+			totalCompressedSizeBytes: sections.reduce((sum, section) => sum + section.compressedSizeBytes, 0),
+			repositories,
+		};
+	}
+
+	/** Summarize codemap sections that can appear for a repository in the materialized chat file. */
+	private buildChatMemoryCodemapRepositorySummary(
+		target: CodeMapMaterializationTarget,
+		locale: string,
+		generationFingerprint: string,
+	): ChatMemoryCodemapRepositorySummary {
+		const sections: ChatMemoryCodemapInstructionSummary[] = [];
+		const baseSection = this.buildChatMemoryCodemapInstructionSummary(
+			target,
+			target.baseInstruction,
+			'base',
+			target.queuedBaseRefresh,
+			locale,
+			generationFingerprint,
+		);
+		if (baseSection) {
+			sections.push(baseSection);
+		}
+
+		if (target.resolution.currentBranch !== target.resolution.resolvedBranchName) {
+			const currentSection = this.buildChatMemoryCodemapInstructionSummary(
+				target,
+				target.currentInstruction,
+				'delta',
+				target.queuedCurrentRefresh,
+				locale,
+				generationFingerprint,
+			);
+			if (currentSection) {
+				sections.push(currentSection);
+			}
+		}
+
+		return {
+			repository: target.resolution.repository,
+			currentBranch: target.resolution.currentBranch,
+			resolvedBranchName: target.resolution.resolvedBranchName,
+			baseBranchName: target.resolution.baseBranchName,
+			sections,
+		};
+	}
+
+	/** Summarize one codemap instruction section using persisted instruction metadata and branch artifacts. */
+	private buildChatMemoryCodemapInstructionSummary(
+		target: CodeMapMaterializationTarget,
+		instruction: StoredCodeMapInstruction | null,
+		fallbackKind: CodeMapInstructionKind,
+		queuedRefresh: boolean,
+		locale: string,
+		generationFingerprint: string,
+	): ChatMemoryCodemapInstructionSummary | null {
+		if (!instruction && fallbackKind === 'delta' && !queuedRefresh) {
+			return null;
+		}
+
+		const artifact = instruction
+			? this.getBranchArtifactForInstruction(instruction, generationFingerprint)
+			: null;
+		const fileSummaries = artifact?.payload.codeDescription.fileSummaries || [];
+		const describedSymbolsCount = fileSummaries.reduce((sum, file) => sum + file.symbols.length, 0);
+		const describedMethodLikeCount = fileSummaries.reduce(
+			(sum, file) => sum + file.symbols.filter(symbol => isMethodLikeCodemapSymbol(symbol.kind)).length,
+			0,
+		);
+
+		return {
+			branchName: instruction?.branchName || (fallbackKind === 'base'
+				? target.resolution.resolvedBranchName
+				: target.resolution.currentBranch),
+			resolvedBranchName: instruction?.resolvedBranchName || target.resolution.resolvedBranchName,
+			instructionKind: instruction?.instructionKind || fallbackKind,
+			exists: Boolean(instruction),
+			queuedRefresh,
+			fileCount: instruction?.fileCount || 0,
+			describedFilesCount: fileSummaries.length,
+			describedSymbolsCount,
+			describedMethodLikeCount,
+			sizeBytes: instruction?.uncompressedSize || 0,
+			compressedSizeBytes: instruction?.compressedSize || 0,
+			generatedAt: instruction?.generatedAt,
+			sourceCommitSha: instruction?.sourceCommitSha,
+		};
+	}
+
+	/** Resolve the persisted branch artifact that matches the stored instruction. */
+	private getBranchArtifactForInstruction(
+		instruction: StoredCodeMapInstruction,
+		fallbackGenerationFingerprint: string,
+	) {
+		const metadataGenerationFingerprint = typeof instruction.metadata?.generationFingerprint === 'string'
+			? instruction.metadata.generationFingerprint.trim()
+			: '';
+		const generationFingerprint = metadataGenerationFingerprint || fallbackGenerationFingerprint;
+		const metadataArtifactKind = typeof instruction.metadata?.artifactKind === 'string'
+			? instruction.metadata.artifactKind.trim()
+			: '';
+		const artifactKind: CodeMapArtifactKind = metadataArtifactKind === 'delta' || metadataArtifactKind === 'full'
+			? metadataArtifactKind
+			: instruction.instructionKind === 'delta'
+				? 'delta'
+				: 'full';
+
+		return this.db.getBranchArtifact(
+			instruction.repository,
+			instruction.branchName,
+			artifactKind,
+			instruction.locale,
+			generationFingerprint,
+		);
 	}
 
 	queueWorkspaceRefresh(): void {
@@ -289,4 +435,14 @@ function buildUncommittedSummary(
 	});
 
 	return JSON.stringify(summary, null, 2);
+}
+
+/** Heuristic grouping for symbol kinds that behave like methods or functions in UI copy. */
+function isMethodLikeCodemapSymbol(kind: string): boolean {
+	const normalizedKind = String(kind || '').trim().toLowerCase();
+	if (!normalizedKind) {
+		return false;
+	}
+
+	return /(method|function|constructor|hook|procedure|callback|handler|getter|setter)/.test(normalizedKind);
 }

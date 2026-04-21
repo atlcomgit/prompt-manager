@@ -15,6 +15,7 @@ import { ActionBar, resolveChatEntryState } from './components/ActionBar';
 import { ChatLaunchOpenStepLabel } from './components/ChatLaunchOpenStepLabel';
 import { TimerDisplay } from './components/TimerDisplay';
 import { ContextFileCard } from './components/ContextFileCard';
+import { ChatMemoryBlock } from './components/ChatMemoryBlock';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
 import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal';
@@ -1354,6 +1355,10 @@ export const EditorApp: React.FC = () => {
   }, [prompt.id]);
 
   useEffect(() => {
+    setChatMemorySummary(null);
+  }, [prompt.id]);
+
+  useEffect(() => {
     if (normalizedContextFiles.length === 0) {
       contextFileCardRequestIdRef.current = '';
       setContextFileCards([]);
@@ -2012,6 +2017,11 @@ export const EditorApp: React.FC = () => {
         break;
       case 'chatMemorySummary':
         if (msg.memorySummary) {
+          const targetPromptId = (msg.promptId || '__new__').trim() || '__new__';
+          const currentPromptId = (currentPromptIdRef.current || '__new__').trim() || '__new__';
+          if (targetPromptId !== currentPromptId) {
+            break;
+          }
           setChatMemorySummary(msg.memorySummary as ChatMemorySummary);
         }
         break;
@@ -3588,14 +3598,17 @@ export const EditorApp: React.FC = () => {
     if (chatMemorySummary.totalChars > 0) {
       chunks.push(`${formatChars(chatMemorySummary.totalChars)} ${t('editor.memoryBlockChars')}`);
     }
-    if (chatMemorySummary.instructionFiles.length > 0) {
-      chunks.push(`${chatMemorySummary.instructionFiles.length} ${t('editor.memoryBlockInstructionFiles').toLowerCase()}`);
+    if (chatMemorySummary.totals.attachedFilesCount > 0) {
+      chunks.push(`${chatMemorySummary.totals.attachedFilesCount} ${t('editor.memoryBlockFiles').toLowerCase()}`);
     }
-    if (chatMemorySummary.shortTermCommits > 0) {
-      chunks.push(`${chatMemorySummary.shortTermCommits} ${t('editor.memoryBlockCommits')}`);
+    if (chatMemorySummary.totals.describedFilesCount > 0) {
+      chunks.push(`${chatMemorySummary.totals.describedFilesCount} ${t('editor.memoryBlockDescribedFiles').toLowerCase()}`);
+    }
+    if (chatMemorySummary.shortTermCommits > 0 || chatMemorySummary.longTermSummaries > 0) {
+      chunks.push(`${chatMemorySummary.shortTermCommits + chatMemorySummary.longTermSummaries} ${t('editor.memoryBlockHistory').toLowerCase()}`);
     }
     return chunks;
-  }, [chatMemorySummary]);
+  }, [chatMemorySummary, t]);
 
   const footerChatLaunchBlock = shouldShowChatLaunchBlock ? (
     <div style={styles.chatLaunchDock}>
@@ -4456,59 +4469,7 @@ export const EditorApp: React.FC = () => {
             ))}
 
           {showMemorySection && chatMemorySummary ? renderSection('memory', t('editor.memoryBlockTitle'), memorySummary, (
-            <>
-              {chatMemorySummary.totalChars === 0 && chatMemorySummary.instructionFiles.length === 0 ? (
-                <div style={styles.planRawContentEmpty}>{t('editor.memoryBlockEmpty')}</div>
-              ) : (
-                <div style={styles.memoryBlockContent}>
-                  {/* History section */}
-                  {(chatMemorySummary.shortTermCommits > 0 || chatMemorySummary.longTermSummaries > 0 || chatMemorySummary.hasProjectMap || chatMemorySummary.uncommittedProjects > 0) ? (
-                    <div style={styles.memoryBlockRow}>
-                      <span style={styles.memoryBlockRowLabel}>{t('editor.memoryBlockHistory')}</span>
-                      <div style={styles.memoryBlockChips}>
-                        {chatMemorySummary.shortTermCommits > 0 ? (
-                          <span style={styles.memoryBlockChip}>{chatMemorySummary.shortTermCommits} {t('editor.memoryBlockCommits')}</span>
-                        ) : null}
-                        {chatMemorySummary.longTermSummaries > 0 ? (
-                          <span style={styles.memoryBlockChip}>{chatMemorySummary.longTermSummaries} {t('editor.memoryBlockSummaries')}</span>
-                        ) : null}
-                        {chatMemorySummary.hasProjectMap ? (
-                          <span style={styles.memoryBlockChip}>{t('editor.memoryBlockProjectMap')} — {t('editor.memoryBlockIncluded')}</span>
-                        ) : null}
-                        {chatMemorySummary.uncommittedProjects > 0 ? (
-                          <span style={styles.memoryBlockChip}>{t('editor.memoryBlockUncommitted')}: {chatMemorySummary.uncommittedProjects} {t('editor.memoryBlockProjects')}</span>
-                        ) : null}
-                      </div>
-                    </div>
-                  ) : null}
-                  {/* Instructions section */}
-                  {chatMemorySummary.instructionFiles.length > 0 ? (
-                    <div style={styles.memoryBlockRow}>
-                      <span style={styles.memoryBlockRowLabel}>{t('editor.memoryBlockInstructionFiles')}</span>
-                      <div style={styles.memoryBlockChips}>
-                        {chatMemorySummary.instructionFiles.map((file, index) => (
-                          <span key={`mem-instr-${index}`} style={styles.memoryBlockChip} title={file.fileName}>{file.label}</span>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                  {/* Context files */}
-                  {chatMemorySummary.contextFilesCount > 0 ? (
-                    <div style={styles.memoryBlockRow}>
-                      <span style={styles.memoryBlockRowLabel}>{t('editor.memoryBlockContextFiles')}</span>
-                      <span style={styles.memoryBlockChip}>{chatMemorySummary.contextFilesCount}</span>
-                    </div>
-                  ) : null}
-                  {/* Volume */}
-                  {chatMemorySummary.totalChars > 0 ? (
-                    <div style={styles.memoryBlockRow}>
-                      <span style={styles.memoryBlockRowLabel}>{t('editor.memoryBlockVolume')}</span>
-                      <span style={styles.memoryBlockChip}>{formatChars(chatMemorySummary.totalChars)} {t('editor.memoryBlockChars')}</span>
-                    </div>
-                  ) : null}
-                </div>
-              )}
-            </>
+            <ChatMemoryBlock summary={chatMemorySummary} />
           )) : null}
 
           {shouldShowPlanSection ? renderSection('plan', 'План', planSummary, (

@@ -667,12 +667,147 @@ export function sortPromptCustomGroups(groups: PromptCustomGroup[]): PromptCusto
 
 // ---- Chat Memory Summary (displayed in Process tab) ----
 
+/** Source kind for an instruction file attached to the chat session. */
+export type ChatMemoryInstructionSourceKind = 'global' | 'session' | 'project' | 'codemap' | 'unknown';
+
 /** Instruction file attached to the chat session */
 export interface ChatMemoryInstructionFile {
 	/** Short label for display (e.g. "Глобальные инструкции") */
 	label: string;
 	/** File name on disk */
 	fileName: string;
+	/** Stable source kind for UI grouping and badges */
+	sourceKind: ChatMemoryInstructionSourceKind;
+	/** Short explanation of what the source adds to the chat */
+	description: string;
+	/** Whether the file existed at the time of summary generation */
+	exists: boolean;
+	/** File size in bytes, when available */
+	sizeBytes?: number;
+	/** Human-readable file size */
+	sizeLabel: string;
+	/** ISO timestamp of the last modification, when available */
+	modifiedAt?: string;
+}
+
+/** Aggregated count for an attached context-file kind. */
+export interface ChatMemoryContextKindSummary {
+	/** Canonical kind used by PromptContextFileCard */
+	kind: PromptContextFileKind;
+	/** Localized kind label for direct rendering */
+	label: string;
+	/** Number of existing files of this kind */
+	count: number;
+}
+
+/** Detailed snapshot of prompt context files for the last chat start. */
+export interface ChatMemoryContextFilesSummary {
+	/** Detailed cards for each referenced context file */
+	files: PromptContextFileCard[];
+	/** Number of referenced context files after normalization/deduplication */
+	totalCount: number;
+	/** Number of files that existed and could be attached */
+	existingCount: number;
+	/** Number of missing or unreadable files */
+	missingCount: number;
+	/** Combined size of existing context files in bytes */
+	totalSizeBytes: number;
+	/** Human-readable combined size of existing context files */
+	totalSizeLabel: string;
+	/** Breakdown of existing files by kind */
+	kindBreakdown: ChatMemoryContextKindSummary[];
+}
+
+/** Summary of one codemap instruction section included in chat memory. */
+export interface ChatMemoryCodemapInstructionSummary {
+	/** Branch name used for the rendered instruction */
+	branchName: string;
+	/** Tracked branch resolved for the repository */
+	resolvedBranchName: string;
+	/** Instruction kind represented by the section */
+	instructionKind: 'base' | 'delta';
+	/** Whether a persisted instruction existed when the summary was generated */
+	exists: boolean;
+	/** Whether a refresh for this section was queued during chat preparation */
+	queuedRefresh: boolean;
+	/** Number of files declared by the persisted instruction metadata */
+	fileCount: number;
+	/** Number of described files found in the stored branch artifact */
+	describedFilesCount: number;
+	/** Number of described symbols found in the stored branch artifact */
+	describedSymbolsCount: number;
+	/** Number of method/function-like described symbols */
+	describedMethodLikeCount: number;
+	/** Uncompressed instruction size in bytes */
+	sizeBytes: number;
+	/** Compressed instruction size in bytes */
+	compressedSizeBytes: number;
+	/** When the persisted instruction was generated, if available */
+	generatedAt?: string;
+	/** Source commit sha for the persisted instruction, if available */
+	sourceCommitSha?: string;
+}
+
+/** Codemap coverage snapshot for one repository in the attached chat memory. */
+export interface ChatMemoryCodemapRepositorySummary {
+	/** Repository name as resolved from the workspace */
+	repository: string;
+	/** Current branch at chat-start time */
+	currentBranch: string;
+	/** Resolved tracked branch for the repository */
+	resolvedBranchName: string;
+	/** Base branch used for codemap comparisons */
+	baseBranchName: string;
+	/** Included codemap sections for this repository */
+	sections: ChatMemoryCodemapInstructionSummary[];
+}
+
+/** Aggregated codemap coverage included in the chat memory snapshot. */
+export interface ChatMemoryCodemapSummary {
+	/** Number of repositories represented in the codemap snapshot */
+	repositoryCount: number;
+	/** Number of persisted or queued codemap instruction sections */
+	instructionCount: number;
+	/** Number of codemap instruction sections queued for refresh */
+	queuedRefreshCount: number;
+	/** Combined fileCount across included codemap instruction sections */
+	totalFileCount: number;
+	/** Combined described file count across included codemap artifacts */
+	describedFilesCount: number;
+	/** Combined described symbol count across included codemap artifacts */
+	describedSymbolsCount: number;
+	/** Combined method/function-like described symbol count */
+	describedMethodLikeCount: number;
+	/** Combined uncompressed codemap instruction size in bytes */
+	totalSizeBytes: number;
+	/** Combined compressed codemap instruction size in bytes */
+	totalCompressedSizeBytes: number;
+	/** Per-repository codemap snapshot details */
+	repositories: ChatMemoryCodemapRepositorySummary[];
+}
+
+/** Top-level aggregate counters for the memory snapshot shown in the editor. */
+export interface ChatMemoryTotalsSummary {
+	/** Number of files that were available for attachment */
+	attachedFilesCount: number;
+	/** Number of instruction files attached to the chat */
+	instructionFilesCount: number;
+	/** Number of referenced prompt context files */
+	contextFilesCount: number;
+	/** Number of prompt context files that existed */
+	contextExistingCount: number;
+	/** Combined size of all attached files in bytes */
+	totalSizeBytes: number;
+	/** Combined size of attached instruction files in bytes */
+	instructionSizeBytes: number;
+	/** Combined size of attached context files in bytes */
+	contextSizeBytes: number;
+	/** Combined described file count surfaced by codemap */
+	describedFilesCount: number;
+	/** Combined described symbol count surfaced by codemap */
+	describedSymbolsCount: number;
+	/** Combined method/function-like described symbol count surfaced by codemap */
+	describedMethodLikeCount: number;
 }
 
 /** Summary of the memory context passed to the chat */
@@ -693,4 +828,10 @@ export interface ChatMemorySummary {
 	contextFilesCount: number;
 	/** ISO timestamp when the summary was built */
 	generatedAt: string;
+	/** Detailed prompt context files snapshot for the last chat generation */
+	contextFiles: ChatMemoryContextFilesSummary;
+	/** Aggregated codemap coverage for the last chat generation */
+	codemap: ChatMemoryCodemapSummary | null;
+	/** Top-level file and codemap counters for quick metric rendering */
+	totals: ChatMemoryTotalsSummary;
 }

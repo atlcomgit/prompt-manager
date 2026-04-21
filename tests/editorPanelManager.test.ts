@@ -2205,3 +2205,114 @@ test('updateEditorWebviewOptions still expands roots for files outside current w
 
 	assert.equal(assignedCount, 1);
 });
+
+test('buildChatMemorySummary aggregates attached files, missing context and codemap counters', async () => {
+	const { manager } = await createManager();
+	const prompt = createPrompt({
+		contextFiles: ['/tmp/workspace/src/services/memory.ts', '/tmp/workspace/docs/missing.md'],
+	});
+	const sessionRecord = {
+		contextStats: {
+			totalChars: 3200,
+			shortTermCommits: 4,
+			longTermSummaries: 2,
+			hasProjectMap: true,
+			uncommittedProjects: 1,
+		},
+	};
+	const instructionFiles = [
+		{
+			label: 'Global agent instructions',
+			fileName: 'prompt-manager.instructions.md',
+			sourceKind: 'global',
+			description: 'Core rules',
+			exists: true,
+			sizeBytes: 1536,
+			sizeLabel: '1.5 KB',
+			modifiedAt: '2026-04-13T11:59:00.000Z',
+		},
+		{
+			label: 'Project instructions',
+			fileName: 'feature.instructions.md',
+			sourceKind: 'project',
+			description: 'Workspace rules',
+			exists: false,
+			sizeBytes: 0,
+			sizeLabel: '-',
+		},
+	];
+	const contextFileCards = [
+		{
+			path: '/tmp/workspace/src/services/memory.ts',
+			displayName: 'memory.ts',
+			directoryLabel: 'src/services',
+			extension: '.ts',
+			tileLabel: 'TS',
+			kind: 'code',
+			typeLabel: 'TypeScript',
+			exists: true,
+			sizeBytes: 2048,
+			sizeLabel: '2 KB',
+			modifiedAt: '2026-04-13T11:58:00.000Z',
+		},
+		{
+			path: '/tmp/workspace/docs/missing.md',
+			displayName: 'missing.md',
+			directoryLabel: 'docs',
+			extension: '.md',
+			tileLabel: 'MD',
+			kind: 'text',
+			typeLabel: 'Markdown',
+			exists: false,
+			sizeBytes: 0,
+			sizeLabel: '-',
+		},
+	];
+	const codemap = {
+		repositoryCount: 1,
+		instructionCount: 2,
+		queuedRefreshCount: 1,
+		totalFileCount: 9,
+		describedFilesCount: 7,
+		describedSymbolsCount: 22,
+		describedMethodLikeCount: 13,
+		totalSizeBytes: 8192,
+		totalCompressedSizeBytes: 4096,
+		repositories: [],
+	};
+
+	(manager as any).buildInstructionFileSummaries = async () => instructionFiles;
+	(manager as any).buildContextFileCards = async () => contextFileCards;
+
+	const summary = await (manager as any).buildChatMemorySummary(
+		sessionRecord,
+		{
+			instructionReferences: ['#file:/tmp/workspace/.vscode/prompt-manager/prompt-manager.instructions.md'],
+			promptContextReferences: ['/tmp/workspace/src/services/memory.ts', '/tmp/workspace/docs/missing.md'],
+			allAbsolutePaths: ['/tmp/workspace/src/services/memory.ts', '/tmp/workspace/docs/missing.md'],
+		},
+		prompt,
+		{} as any,
+		codemap,
+	);
+
+	assert.equal(summary.totalChars, 3200);
+	assert.equal(summary.shortTermCommits, 4);
+	assert.equal(summary.longTermSummaries, 2);
+	assert.equal(summary.hasProjectMap, true);
+	assert.equal(summary.uncommittedProjects, 1);
+	assert.equal(summary.instructionFiles.length, 2);
+	assert.equal(summary.contextFiles.totalCount, 2);
+	assert.equal(summary.contextFiles.existingCount, 1);
+	assert.equal(summary.contextFiles.missingCount, 1);
+	assert.equal(summary.contextFiles.kindBreakdown.length, 1);
+	assert.equal(summary.contextFiles.kindBreakdown[0]?.kind, 'code');
+	assert.equal(summary.totals.instructionFilesCount, 1);
+	assert.equal(summary.totals.attachedFilesCount, 2);
+	assert.equal(summary.totals.totalSizeBytes, 3584);
+	assert.equal(summary.totals.describedFilesCount, 7);
+	assert.equal(summary.totals.describedSymbolsCount, 22);
+	assert.equal(summary.totals.describedMethodLikeCount, 13);
+	assert.equal(summary.codemap, codemap);
+	assert.ok(!Number.isNaN(Date.parse(summary.generatedAt)));
+});

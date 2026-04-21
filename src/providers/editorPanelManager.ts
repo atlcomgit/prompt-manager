@@ -11,7 +11,18 @@ import * as path from 'path';
 import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { generateSmartTitle } from '../utils/smartTitle.js';
-import type { ChatMemoryInstructionFile, ChatMemorySummary, EditorPromptViewState, EditorPromptViewStateKeySource, Prompt, PromptContextFileCard } from '../types/prompt.js';
+import type {
+	ChatMemoryCodemapSummary,
+	ChatMemoryContextFilesSummary,
+	ChatMemoryInstructionFile,
+	ChatMemoryInstructionSourceKind,
+	ChatMemorySummary,
+	EditorPromptViewState,
+	EditorPromptViewStateKeySource,
+	Prompt,
+	PromptContextFileCard,
+	PromptContextFileKind,
+} from '../types/prompt.js';
 import {
 	createDefaultEditorPromptViewState,
 	createDefaultPrompt,
@@ -916,24 +927,7 @@ export class EditorPanelManager {
 			const fileUri = this.resolveContextFileUri(normalizedPath);
 			const kind = getContextFileKind(normalizedPath);
 			const extension = getContextFileExtension(normalizedPath);
-			let exists = false;
-			let sizeBytes: number | undefined;
-			let modifiedAt: string | undefined;
-			let previewUri: string | undefined;
-
-			if (fileUri) {
-				try {
-					const stat = await vscode.workspace.fs.stat(fileUri);
-					exists = (stat.type & vscode.FileType.Directory) === 0;
-					sizeBytes = stat.size;
-					modifiedAt = stat.mtime > 0 ? new Date(stat.mtime).toISOString() : undefined;
-					if (exists && isContextFilePreviewSupported(kind)) {
-						previewUri = webview.asWebviewUri(fileUri).toString();
-					}
-				} catch {
-					exists = false;
-				}
-			}
+			const attachmentDetails = await this.resolveFileAttachmentDetails(fileUri, kind, webview);
 
 			cards.push({
 				path: normalizedPath,
@@ -943,15 +937,51 @@ export class EditorPanelManager {
 				tileLabel: getContextFileTileLabel(normalizedPath, kind),
 				kind,
 				typeLabel: getContextFileTypeLabel(kind, extension),
-				exists,
-				sizeBytes,
-				sizeLabel: exists ? formatContextFileSize(sizeBytes) : '—',
-				modifiedAt,
-				previewUri,
+				exists: attachmentDetails.exists,
+				sizeBytes: attachmentDetails.sizeBytes,
+				sizeLabel: attachmentDetails.exists ? formatContextFileSize(attachmentDetails.sizeBytes) : '-',
+				modifiedAt: attachmentDetails.modifiedAt,
+				previewUri: attachmentDetails.previewUri,
 			});
 		}
 
 		return cards;
+	}
+
+	/** Collect file-system-backed metadata for an attachment that may be rendered in the editor. */
+	private async resolveFileAttachmentDetails(
+		fileUri: vscode.Uri | null,
+		previewKind?: PromptContextFileKind,
+		webview?: vscode.Webview,
+	): Promise<{ exists: boolean; sizeBytes?: number; modifiedAt?: string; previewUri?: string }> {
+		const directoryFlag = typeof vscode.FileType?.Directory === 'number'
+			? vscode.FileType.Directory
+			: 2;
+		let exists = false;
+		let sizeBytes: number | undefined;
+		let modifiedAt: string | undefined;
+		let previewUri: string | undefined;
+
+		if (!fileUri) {
+			return { exists, sizeBytes, modifiedAt, previewUri };
+		}
+
+		try {
+			const stat = await vscode.workspace.fs.stat(fileUri);
+			const fileType = typeof stat.type === 'number' ? stat.type : 0;
+			exists = (fileType & directoryFlag) === 0;
+			sizeBytes = typeof stat.size === 'number' ? stat.size : undefined;
+			modifiedAt = typeof stat.mtime === 'number' && stat.mtime > 0
+				? new Date(stat.mtime).toISOString()
+				: undefined;
+			if (exists && previewKind && webview && isContextFilePreviewSupported(previewKind)) {
+				previewUri = webview.asWebviewUri(fileUri).toString();
+			}
+		} catch {
+			exists = false;
+		}
+
+		return { exists, sizeBytes, modifiedAt, previewUri };
 	}
 
 	private getClipboardImageDirectory(promptId?: string): string {
@@ -6795,8 +6825,9 @@ export class EditorPanelManager {
 					} catch (error) {
 						this.hooksOutput.appendLine(`[global-context] register .github/instructions failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 					}
+					let codeMapSummary: ChatMemoryCodemapSummary | null = null;
 					try {
-						await this.codeMapChatInstructionService()?.prepareInstruction(prompt);
+						codeMapSummary = await this.codeMapChatInstructionService()?.prepareInstruction(prompt) ?? null;
 					} catch (error) {
 						this.hooksOutput.appendLine(`[codemap] prepareInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 					}
@@ -7091,10 +7122,12 @@ export class EditorPanelManager {
 
 					// Send memory summary to the Process tab
 					try {
-						const memorySummary = this.buildChatMemorySummary(
+						const memorySummary = await this.buildChatMemorySummary(
 							sessionInstructionRecord,
 							chatContextFiles,
 							prompt,
+							panel.webview,
+							codeMapSummary,
 						);
 						postMessage({ type: 'chatMemorySummary', memorySummary, promptId: prompt.id });
 					} catch {
@@ -8590,18 +8623,101 @@ export class EditorPanelManager {
 		panel.dispose();
 	}
 
+	/** Build detailed instruction-file entries for the last chat memory snapshot. */
+	private async buildInstructionFileSummaries(
+		instructionReferences: string[],
+	): Promise<ChatMemoryInstructionFile[]> {
+		const isRu = vscode.env.language.toLowerCase().startsWith('ru');
+		const files: ChatMemoryInstructionFile[] = [];
+
+		for (const reference of instructionReferences) {
+			const filePath = reference.replace(/^#file:/, '');
+			const fileUri = filePath ? vscode.Uri.file(filePath) : null;
+			const baseName = filePath.split(/[\\/]/).pop() || filePath;
+			const attachmentDetails = await this.resolveFileAttachmentDetails(fileUri);
+			const descriptor = this.describeInstructionFile(baseName, isRu);
+
+			files.push({
+				label: descriptor.label,
+				fileName: baseName,
+				sourceKind: descriptor.sourceKind,
+				description: descriptor.description,
+				exists: attachmentDetails.exists,
+				sizeBytes: attachmentDetails.sizeBytes,
+				sizeLabel: attachmentDetails.exists ? formatContextFileSize(attachmentDetails.sizeBytes) : '-',
+				modifiedAt: attachmentDetails.modifiedAt,
+			});
+		}
+
+		return files;
+	}
+
+	/** Summarize prompt context files included for the last chat start. */
+	private buildChatMemoryContextFilesSummary(
+		files: PromptContextFileCard[],
+	): ChatMemoryContextFilesSummary {
+		const isRu = vscode.env.language.toLowerCase().startsWith('ru');
+		const existingFiles = files.filter(file => file.exists);
+		const totalSizeBytes = existingFiles.reduce((sum, file) => sum + (file.sizeBytes || 0), 0);
+		const kindBreakdownMap = new Map<PromptContextFileKind, number>();
+
+		for (const file of existingFiles) {
+			kindBreakdownMap.set(file.kind, (kindBreakdownMap.get(file.kind) || 0) + 1);
+		}
+
+		const kindBreakdown = Array.from(kindBreakdownMap.entries())
+			.map(([kind, count]) => ({
+				kind,
+				label: this.labelForContextFileKind(kind, isRu),
+				count,
+			}))
+			.sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+
+		return {
+			files,
+			totalCount: files.length,
+			existingCount: existingFiles.length,
+			missingCount: Math.max(0, files.length - existingFiles.length),
+			totalSizeBytes,
+			totalSizeLabel: formatContextFileSize(totalSizeBytes),
+			kindBreakdown,
+		};
+	}
+
+	/** Summarize top-level file and codemap counters for the detailed memory block. */
+	private buildChatMemoryTotals(
+		instructionFiles: ChatMemoryInstructionFile[],
+		contextFiles: ChatMemoryContextFilesSummary,
+		codemap: ChatMemoryCodemapSummary | null,
+	) {
+		const instructionSizeBytes = instructionFiles.reduce((sum, file) => sum + (file.sizeBytes || 0), 0);
+		const instructionFilesCount = instructionFiles.filter(file => file.exists).length;
+		return {
+			attachedFilesCount: instructionFilesCount + contextFiles.existingCount,
+			instructionFilesCount,
+			contextFilesCount: contextFiles.totalCount,
+			contextExistingCount: contextFiles.existingCount,
+			totalSizeBytes: instructionSizeBytes + contextFiles.totalSizeBytes,
+			instructionSizeBytes,
+			contextSizeBytes: contextFiles.totalSizeBytes,
+			describedFilesCount: codemap?.describedFilesCount || 0,
+			describedSymbolsCount: codemap?.describedSymbolsCount || 0,
+			describedMethodLikeCount: codemap?.describedMethodLikeCount || 0,
+		};
+	}
+
 	/** Build a compact ChatMemorySummary from data available after chat context generation */
-	private buildChatMemorySummary(
+	private async buildChatMemorySummary(
 		sessionRecord: ChatMemorySessionRecord | null,
 		contextFiles: { instructionReferences: string[]; promptContextReferences: string[]; allAbsolutePaths: string[] },
 		prompt: Prompt,
-	): ChatMemorySummary {
-		const isRu = vscode.env.language.toLowerCase().startsWith('ru');
-		const instructionFiles: ChatMemoryInstructionFile[] = contextFiles.instructionReferences.map(ref => {
-			const filePath = ref.replace(/^#file:/, '');
-			const baseName = filePath.split(/[\\/]/).pop() || filePath;
-			return { label: this.labelForInstructionFile(baseName, isRu), fileName: baseName };
-		});
+		webview: vscode.Webview,
+		codemap: ChatMemoryCodemapSummary | null,
+	): Promise<ChatMemorySummary> {
+		const instructionFiles = await this.buildInstructionFileSummaries(contextFiles.instructionReferences);
+		const contextFileCards = await this.buildContextFileCards(prompt.contextFiles || [], webview);
+		const contextFilesSummary = this.buildChatMemoryContextFilesSummary(contextFileCards);
+		const totals = this.buildChatMemoryTotals(instructionFiles, contextFilesSummary, codemap);
 
 		const stats = sessionRecord?.contextStats;
 		return {
@@ -8611,25 +8727,88 @@ export class EditorPanelManager {
 			hasProjectMap: stats?.hasProjectMap ?? false,
 			uncommittedProjects: stats?.uncommittedProjects ?? 0,
 			instructionFiles,
-			contextFilesCount: (prompt.contextFiles || []).filter(f => f.trim()).length,
+			contextFilesCount: contextFilesSummary.totalCount,
 			generatedAt: new Date().toISOString(),
+			contextFiles: contextFilesSummary,
+			codemap,
+			totals,
 		};
 	}
 
-	/** Map instruction file name to a human-readable label */
-	private labelForInstructionFile(baseName: string, isRu: boolean): string {
+	/** Map instruction file name to a localized descriptor used by the memory summary. */
+	private describeInstructionFile(baseName: string, isRu: boolean): {
+		label: string;
+		sourceKind: ChatMemoryInstructionSourceKind;
+		description: string;
+	} {
 		if (baseName === 'prompt-manager.instructions.md') {
-			return isRu ? 'Глобальные инструкции агента' : 'Global agent instructions';
+			return {
+				label: isRu ? 'Глобальные инструкции агента' : 'Global agent instructions',
+				sourceKind: 'global',
+				description: isRu
+					? 'Общие правила агента и рабочие ограничения для всех задач.'
+					: 'Shared agent rules and working constraints for every task.',
+			};
 		}
 		if (baseName === 'project.instructions.md') {
-			return isRu ? 'Проектные инструкции' : 'Project instructions';
+			return {
+				label: isRu ? 'Проектные инструкции' : 'Project instructions',
+				sourceKind: 'project',
+				description: isRu
+					? 'Общие инструкции рабочей области, разделяемые между промптами.'
+					: 'Workspace-level instructions shared across prompts.',
+			};
 		}
 		if (baseName === 'codemap.instructions.md') {
-			return isRu ? 'Карта кода' : 'Code map';
+			return {
+				label: isRu ? 'Карта кода' : 'Code map',
+				sourceKind: 'codemap',
+				description: isRu
+					? 'Материализованная codemap-сводка по выбранным репозиториям и веткам.'
+					: 'Materialized codemap summary for the selected repositories and branches.',
+			};
 		}
 		if (baseName.startsWith('session-') && baseName.endsWith('.instructions.md')) {
-			return isRu ? 'Память сессии' : 'Session memory';
+			return {
+				label: isRu ? 'Память сессии' : 'Session memory',
+				sourceKind: 'session',
+				description: isRu
+					? 'Сгенерированный snapshot памяти по текущему промпту и релевантной истории.'
+					: 'Generated snapshot of memory for the current prompt and relevant history.',
+			};
 		}
-		return baseName;
+		return {
+			label: baseName,
+			sourceKind: 'unknown',
+			description: isRu ? 'Дополнительный источник инструкций.' : 'Additional instruction source.',
+		};
+	}
+
+	/** Map a context-file kind to a short localized label for metric chips. */
+	private labelForContextFileKind(kind: PromptContextFileKind, isRu: boolean): string {
+		switch (kind) {
+			case 'code':
+				return isRu ? 'Код' : 'Code';
+			case 'text':
+				return isRu ? 'Текст' : 'Text';
+			case 'image':
+				return isRu ? 'Изображения' : 'Images';
+			case 'video':
+				return isRu ? 'Видео' : 'Video';
+			case 'audio':
+				return isRu ? 'Аудио' : 'Audio';
+			case 'pdf':
+				return isRu ? 'PDF' : 'PDF';
+			case 'archive':
+				return isRu ? 'Архивы' : 'Archives';
+			case 'document':
+				return isRu ? 'Документы' : 'Documents';
+			case 'sheet':
+				return isRu ? 'Таблицы' : 'Sheets';
+			case 'slides':
+				return isRu ? 'Презентации' : 'Slides';
+			default:
+				return isRu ? 'Другое' : 'Other';
+		}
 	}
 }

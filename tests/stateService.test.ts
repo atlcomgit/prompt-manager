@@ -45,6 +45,56 @@ async function importStateService() {
 	}
 }
 
+function createWorkspaceStateMock(initial: Record<string, unknown> = {}) {
+	const store = new Map<string, unknown>(Object.entries(initial));
+	return {
+		get<T>(key: string, defaultValue?: T): T | undefined {
+			return store.has(key) ? store.get(key) as T : defaultValue;
+		},
+		async update(key: string, value: unknown): Promise<void> {
+			if (typeof value === 'undefined') {
+				store.delete(key);
+				return;
+			}
+
+			store.set(key, value);
+		},
+		store,
+	};
+}
+
+test('StateService treats legacy non-empty global context as manual source', async () => {
+	const { StateService } = await importStateService();
+	const workspaceState = createWorkspaceStateMock({
+		'promptManager.globalAgentContext': 'Legacy instructions',
+	});
+	const service = new StateService({ workspaceState } as any);
+
+	assert.equal(service.getGlobalAgentContext(), 'Legacy instructions');
+	assert.equal(service.getGlobalAgentContextSource(), 'manual');
+});
+
+test('StateService saveGlobalAgentContext persists inferred and explicit sources', async () => {
+	const { StateService } = await importStateService();
+	const workspaceState = createWorkspaceStateMock();
+	const service = new StateService({ workspaceState } as any);
+
+	await service.saveGlobalAgentContext('Remote instructions', 'remote');
+	assert.equal(service.getGlobalAgentContext(), 'Remote instructions');
+	assert.equal(service.getGlobalAgentContextSource(), 'remote');
+	assert.equal(workspaceState.store.get('promptManager.globalAgentContextSource'), 'remote');
+
+	await service.saveGlobalAgentContext('Manual override');
+	assert.equal(service.getGlobalAgentContext(), 'Manual override');
+	assert.equal(service.getGlobalAgentContextSource(), 'manual');
+	assert.equal(workspaceState.store.get('promptManager.globalAgentContextSource'), 'manual');
+
+	await service.saveGlobalAgentContext('');
+	assert.equal(service.getGlobalAgentContext(), '');
+	assert.equal(service.getGlobalAgentContextSource(), 'empty');
+	assert.equal(workspaceState.store.get('promptManager.globalAgentContextSource'), 'empty');
+});
+
 test('StateService chat session relevance ignores sessions completed before the tracked start', async () => {
 	const { StateService } = await importStateService();
 

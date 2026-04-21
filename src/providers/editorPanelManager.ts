@@ -34,7 +34,7 @@ import type { ChatMemoryInstructionService, ChatMemorySessionRecord } from '../s
 import type { CustomGroupsService } from '../services/customGroupsService.js';
 import type { CodeMapChatInstructionService } from '../codemap/codeMapChatInstructionService.js';
 import { GitService } from '../services/gitService.js';
-import type { StateService } from '../services/stateService.js';
+import type { GlobalAgentContextSource, StateService } from '../services/stateService.js';
 import { TimeTrackingService } from '../services/timeTrackingService.js';
 import { decideFileReportSync, isLatestPersistedReport } from '../utils/reportSync.js';
 import {
@@ -576,9 +576,9 @@ export class EditorPanelManager {
 		}
 	}
 
-	private async persistGlobalAgentContext(context: string): Promise<void> {
+	private async persistGlobalAgentContext(context: string, source?: GlobalAgentContextSource): Promise<void> {
 		const persist = async () => {
-			await this.stateService.saveGlobalAgentContext(context);
+			await this.stateService.saveGlobalAgentContext(context, source);
 			this.scheduleGlobalAgentContextSync(context);
 		};
 
@@ -709,6 +709,44 @@ export class EditorPanelManager {
 
 	private canLoadRemoteGlobalContext(): boolean {
 		return this.getRemoteGlobalContextUrl().length > 0;
+	}
+
+	/** Check whether Start Chat may refresh the shared agent context automatically. */
+	private shouldAutoRefreshRemoteGlobalContextOnStartChat(): boolean {
+		if (!this.canLoadRemoteGlobalContext()) {
+			return false;
+		}
+
+		return vscode.workspace
+			.getConfiguration('promptManager')
+			.get<boolean>('editor.autoLoadContext', true) === true
+			&& this.stateService.getGlobalAgentContextSource() === 'remote';
+	}
+
+	/** Load remote context and persist it as a remote snapshot. */
+	private async loadAndPersistRemoteGlobalAgentContext(): Promise<string> {
+		const context = await this.loadRemoteGlobalAgentContext();
+		await this.persistGlobalAgentContext(context, 'remote');
+		return context;
+	}
+
+	/** Resolve the shared agent context for chat start with safe remote-refresh fallback. */
+	private async resolveGlobalAgentContextForChatStart(promptId: string): Promise<string> {
+		const persistedContext = this.stateService.getGlobalAgentContext();
+		if (!this.shouldAutoRefreshRemoteGlobalContextOnStartChat()) {
+			return persistedContext;
+		}
+
+		try {
+			const refreshedContext = await this.loadAndPersistRemoteGlobalAgentContext();
+			this.broadcastGlobalContextState();
+			return refreshedContext;
+		} catch (error) {
+			this.hooksOutput.appendLine(
+				`[global-context] auto refresh failed for prompt=${promptId || '-'}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return persistedContext;
+		}
 	}
 
 	private getWorkspaceRootPath(): string {
@@ -974,9 +1012,12 @@ export class EditorPanelManager {
 		};
 	}
 
-	private broadcastGlobalContextState(): void {
+	private broadcastGlobalContextState(exceptPanel?: vscode.WebviewPanel): void {
 		const message = this.buildGlobalContextMessage();
 		for (const panel of openPanels.values()) {
+			if (panel === exceptPanel) {
+				continue;
+			}
 			void panel.webview.postMessage(message);
 		}
 	}
@@ -6742,7 +6783,7 @@ export class EditorPanelManager {
 					this._onDidSave.fire(prompt.id);
 
 					// Compose query with prompt content and metadata
-					const globalContext = this.stateService.getGlobalAgentContext();
+					const globalContext = await this.resolveGlobalAgentContextForChatStart(prompt.id);
 					const parts: string[] = [];
 					try {
 						await this.workspaceService.syncGlobalAgentInstructionsFile(globalContext);
@@ -8340,6 +8381,7 @@ export class EditorPanelManager {
 
 			case 'saveGlobalContext': {
 				await this.persistGlobalAgentContext(msg.context);
+				this.broadcastGlobalContextState(panel);
 				break;
 			}
 
@@ -8350,15 +8392,13 @@ export class EditorPanelManager {
 
 			case 'loadRemoteGlobalContext': {
 				try {
-					const context = await this.loadRemoteGlobalAgentContext();
+					const context = await this.loadAndPersistRemoteGlobalAgentContext();
 					postMessage({
 						type: 'globalContextLoaded',
 						context,
 						canLoadRemote: this.canLoadRemoteGlobalContext(),
 					});
-					void this.persistGlobalAgentContext(context).catch((error) => {
-						this.hooksOutput.appendLine(`[global-context] persist after remote load failed: ${error instanceof Error ? error.message : String(error)}`);
-					});
+					this.broadcastGlobalContextState(panel);
 				} catch (error) {
 					const message = error instanceof Error && error.message.trim()
 						? error.message.trim()

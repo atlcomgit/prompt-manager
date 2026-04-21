@@ -6,6 +6,7 @@ const originalLoad = (Module as any)._load;
 const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
 let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<unknown>) | undefined;
 let vscodeAvailableCommands: string[] | undefined;
+const vscodeConfigurationValues = new Map<string, unknown>();
 
 function createDisposable() {
 	return { dispose() { } };
@@ -15,6 +16,17 @@ function resetVsCodeCommandMock() {
 	vscodeCommandCalls.length = 0;
 	vscodeExecuteCommandHandler = undefined;
 	vscodeAvailableCommands = undefined;
+}
+
+function resetVsCodeConfigurationMock() {
+	vscodeConfigurationValues.clear();
+}
+
+function setVsCodeConfigurationValues(values?: Record<string, unknown>) {
+	resetVsCodeConfigurationMock();
+	for (const [key, value] of Object.entries(values || {})) {
+		vscodeConfigurationValues.set(key, value);
+	}
 }
 
 function createVsCodeMock() {
@@ -85,8 +97,14 @@ function createVsCodeMock() {
 		workspace: {
 			workspaceFolders: [{ uri: { fsPath: '/tmp/workspace' } }],
 			textDocuments: [],
-			getConfiguration: () => ({
-				get: (_key: string, defaultValue: unknown) => defaultValue,
+			getConfiguration: (section?: string) => ({
+				get: (key: string, defaultValue: unknown) => {
+					const fullKey = section ? `${section}.${key}` : key;
+					return vscodeConfigurationValues.has(fullKey)
+						? vscodeConfigurationValues.get(fullKey)
+						: defaultValue;
+				},
+				update: async () => undefined,
 			}),
 			onDidChangeConfiguration: () => createDisposable(),
 			onDidChangeTextDocument: () => createDisposable(),
@@ -204,12 +222,24 @@ async function createManager(options?: {
 	listPrompts?: Array<Record<string, unknown>>;
 	savePrompt?: (prompt: any, options?: any) => Promise<any>;
 	stateService?: Record<string, unknown>;
+	workspaceService?: Record<string, unknown>;
+	configurationValues?: Record<string, unknown>;
 }) {
+	setVsCodeConfigurationValues(options?.configurationValues);
 	const { EditorPanelManager } = await importEditorPanelManager();
 	let storedPrompt = options?.initialPrompt ? createPrompt(options.initialPrompt) : null;
 	const stateService = {
 		saveStartupEditorRestoreState: async () => undefined,
+		getGlobalAgentContext: () => '',
+		getGlobalAgentContextSource: () => 'empty',
+		saveGlobalAgentContext: async () => undefined,
 		...options?.stateService,
+	};
+	const workspaceService = {
+		syncGlobalAgentInstructionsFile: async () => undefined,
+		ensureProjectInstructionsFolderRegistered: async () => undefined,
+		getWorkspaceFolderPaths: () => ['/tmp/workspace'],
+		...options?.workspaceService,
 	};
 
 	const storageService = {
@@ -261,7 +291,7 @@ async function createManager(options?: {
 		{ fsPath: '/tmp/extension' } as any,
 		storageService as any,
 		aiService as any,
-		{} as any,
+		workspaceService as any,
 		{} as any,
 		stateService as any,
 		{} as any,
@@ -1145,6 +1175,167 @@ test('startChat schedules an early rename after the chat session is bound', asyn
 	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatLaunchRenameState' && (message as any)?.state === 'completed'));
 	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-new']);
 	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatOpened'));
+	resetVsCodeCommandMock();
+});
+
+test('startChat refreshes remote global context before syncing instructions when auto-load is enabled', async () => {
+	resetVsCodeCommandMock();
+
+	const syncedContexts: string[] = [];
+	const savedGlobalContexts: Array<{ context: string; source?: string }> = [];
+	const { manager } = await createManager({
+		configurationValues: {
+			'promptManager.editor.globalContextUrl': 'https://example.com/default.instructions.md',
+			'promptManager.editor.autoLoadContext': true,
+		},
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		},
+		workspaceService: {
+			syncGlobalAgentInstructionsFile: async (context: string) => {
+				syncedContexts.push(context);
+			},
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => 'Stored remote context',
+			getGlobalAgentContextSource: () => 'remote',
+			saveGlobalAgentContext: async (context: string, source?: string) => {
+				savedGlobalContexts.push({ context, source });
+			},
+			getActiveChatSessionId: async () => '',
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: '',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	(manager as any).loadRemoteGlobalAgentContext = async () => 'Refreshed remote context';
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async () => true,
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-autoload-1' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(savedGlobalContexts, [{ context: 'Refreshed remote context', source: 'remote' }]);
+	assert.equal(syncedContexts[0], 'Refreshed remote context');
+	resetVsCodeCommandMock();
+});
+
+test('startChat falls back to the stored global context when remote auto-refresh fails', async () => {
+	resetVsCodeCommandMock();
+
+	const syncedContexts: string[] = [];
+	const savedGlobalContexts: Array<{ context: string; source?: string }> = [];
+	const postedMessages: any[] = [];
+	const { manager } = await createManager({
+		configurationValues: {
+			'promptManager.editor.globalContextUrl': 'https://example.com/default.instructions.md',
+			'promptManager.editor.autoLoadContext': true,
+		},
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		},
+		workspaceService: {
+			syncGlobalAgentInstructionsFile: async (context: string) => {
+				syncedContexts.push(context);
+			},
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => 'Stored remote context',
+			getGlobalAgentContextSource: () => 'remote',
+			saveGlobalAgentContext: async (context: string, source?: string) => {
+				savedGlobalContexts.push({ context, source });
+			},
+			getActiveChatSessionId: async () => '',
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: '',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	(manager as any).loadRemoteGlobalAgentContext = async () => {
+		throw new Error('offline');
+	};
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-autoload-2' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(savedGlobalContexts, []);
+	assert.equal(syncedContexts[0], 'Stored remote context');
+	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatStarted'));
 	resetVsCodeCommandMock();
 });
 

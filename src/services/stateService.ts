@@ -26,11 +26,15 @@ interface ChatSessionLatestRequestState {
 	hasRequestResult?: boolean;
 }
 
+/** Tracks whether the shared agent context came from remote load or manual input. */
+export type GlobalAgentContextSource = 'empty' | 'manual' | 'remote';
+
 const execFileAsync = promisify(execFile);
 
 const SIDEBAR_STATE_KEY = 'promptManager.sidebarState';
 const LAST_PROMPT_KEY = 'promptManager.lastPromptId';
 const GLOBAL_AGENT_CONTEXT_KEY = 'promptManager.globalAgentContext';
+const GLOBAL_AGENT_CONTEXT_SOURCE_KEY = 'promptManager.globalAgentContextSource';
 const STARTUP_EDITOR_OPEN_KEY = 'promptManager.startup.editorOpen';
 const STARTUP_EDITOR_PROMPT_ID_KEY = 'promptManager.startup.editorPromptId';
 const PROMPT_EDITOR_VIEW_STATE_KEY = 'promptManager.editorPromptViewState';
@@ -39,6 +43,19 @@ const STATISTICS_UI_STATE_KEY = 'promptManager.statisticsUiState';
 export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
 	private static readonly GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchesByProjectPreference';
+
+	/** Normalize persisted global-context source and keep legacy workspaces predictable. */
+	private static normalizeGlobalAgentContextSource(
+		source: unknown,
+		context: string,
+	): GlobalAgentContextSource {
+		const hasContext = context.trim().length > 0;
+		if (!hasContext) {
+			return 'empty';
+		}
+
+		return source === 'remote' ? 'remote' : 'manual';
+	}
 
 	constructor(private readonly context: vscode.ExtensionContext) { }
 
@@ -942,9 +959,21 @@ export class StateService {
 		return this.context.workspaceState.get<string>(GLOBAL_AGENT_CONTEXT_KEY) || '';
 	}
 
-	/** Save global agent context */
-	async saveGlobalAgentContext(context: string): Promise<void> {
-		await this.context.workspaceState.update(GLOBAL_AGENT_CONTEXT_KEY, context);
+	/** Get the saved source for the shared agent context with a safe legacy fallback. */
+	getGlobalAgentContextSource(): GlobalAgentContextSource {
+		const context = this.getGlobalAgentContext();
+		const storedSource = this.context.workspaceState.get<string>(GLOBAL_AGENT_CONTEXT_SOURCE_KEY);
+		return StateService.normalizeGlobalAgentContextSource(storedSource, context);
+	}
+
+	/** Save global agent context together with its source metadata. */
+	async saveGlobalAgentContext(context: string, source?: GlobalAgentContextSource): Promise<void> {
+		const normalizedContext = typeof context === 'string' ? context : '';
+		const normalizedSource = StateService.normalizeGlobalAgentContextSource(source, normalizedContext);
+		await Promise.all([
+			this.context.workspaceState.update(GLOBAL_AGENT_CONTEXT_KEY, normalizedContext),
+			this.context.workspaceState.update(GLOBAL_AGENT_CONTEXT_SOURCE_KEY, normalizedSource),
+		]);
 	}
 
 	getPromptEditorViewState(source?: EditorPromptViewStateKeySource | null): EditorPromptViewState {

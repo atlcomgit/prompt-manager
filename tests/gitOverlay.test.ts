@@ -2316,6 +2316,41 @@ test('GitOverlay excludes the current branch from expected branch options', () =
 	assert.equal(markup.match(/<select/g)?.length || 0, 1);
 });
 
+test('GitOverlay shows a no-other-branches label when no explicit target options remain', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: '',
+			trackedBranches: ['release/current-only'],
+			projects: [
+				createTestProject({
+					project: 'tracked-clean',
+					currentBranch: 'release/current-only',
+					promptBranch: '',
+					branches: [
+						{
+							name: 'release/current-only',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/release/current-only',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayNoOtherExpectedBranches/);
+	assert.equal(markup.match(/<select/g)?.length || 0, 0);
+	assert.match(markup, /editor\.gitOverlayStateNoChanges/);
+});
+
 test('GitOverlay hides switch-all action while the overlay is waiting for a fresh snapshot', () => {
 	const markup = renderGitOverlayMarkup({
 		busyAction: 'applyBranchTargets:all',

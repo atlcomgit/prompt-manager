@@ -2129,6 +2129,12 @@ export const GitOverlay: React.FC<Props> = ({
 												|| (Boolean(effectiveTargetBranch) && !targetRequiresSource);
 											const hideExpectedBranchField = projectExpectedBranchOptions.length === 0
 												&& (!currentBranch || (!selectedTargetBranch && !projectActionableForApply));
+											const hiddenExpectedBranchValue = hideExpectedBranchField
+												&& !selectedTargetBranch
+												&& !projectActionableForApply
+												&& effectiveTargetBranch
+													? t('editor.gitOverlayNoOtherExpectedBranches')
+													: '—';
 											const rowOnPrompt = Boolean(promptBranch) && currentBranch === promptBranch && effectiveTargetBranch === promptBranch;
 											const rowCanApply = project.available
 												&& projectActionableForApply
@@ -2147,6 +2153,7 @@ export const GitOverlay: React.FC<Props> = ({
 												: !projectActionableForApply
 													? t('editor.gitOverlayStateNoChanges')
 												: projectNeedsSync
+												
 													? t('editor.gitOverlayStateNeedsSync')
 														: (targetRequiresSource && !selectedTrackedBranch)
 														? t('editor.gitOverlayStateNeedsSource')
@@ -2209,7 +2216,7 @@ export const GitOverlay: React.FC<Props> = ({
 												</span>
 													<span style={styles.branchValue}>
 														{hideExpectedBranchField ? (
-															<span style={styles.projectTableCellCentered}>—</span>
+															<span style={styles.projectTableCellCentered}>{hiddenExpectedBranchValue}</span>
 														) : (
 															<select
 																style={{

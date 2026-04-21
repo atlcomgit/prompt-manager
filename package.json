@@ -368,6 +368,11 @@
           "description": "URL for loading the shared agent context into the \"Общая инструкция\" block. Leave empty to hide the load button.",
           "default": "https://raw.githubusercontent.com/atlcomgit/prompt-manager/refs/heads/master/share/default.instructions.md"
         },
+        "promptManager.editor.autoLoadContext": {
+          "type": "boolean",
+          "description": "Automatically refresh the shared agent context before Start Chat when the field was last loaded from the remote source.",
+          "default": true
+        },
         "promptManager.startup.openTracker": {
           "type": "boolean",
           "description": "Automatically open the Prompt Tracker panel when VS Code starts.",

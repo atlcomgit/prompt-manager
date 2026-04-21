@@ -63,7 +63,7 @@
 ### Improved
 - Copilot Chat start context now includes the absolute chat-memory directory together with generated memory instruction file references.
 - The prompt editor header can open a dedicated chat-memory project.instructions.md file, the General instruction block can edit it directly, and report editing now grows with content automatically instead of relying on manual resize.
-- Start Chat now refreshes the shared agent context automatically only when that field was last loaded from the configured remote source; manual edits disable the auto-refresh until the remote context is loaded again, and failed refresh attempts fall back to the last saved value without blocking chat launch.
+- Start Chat now refreshes the shared agent context from the latest editor state instead of relying on stale persisted metadata, empty shared-context values still trigger a fresh remote load on launch, manual edits disable the auto-refresh until the remote context is loaded again, failed refresh attempts fall back to the last saved value without blocking chat launch, and the Process tab now shows that auto-load state inline as a launch step.
 
 ## [0.1.88] - 2026-04-10
 

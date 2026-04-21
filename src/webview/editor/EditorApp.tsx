@@ -20,7 +20,7 @@ import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { GitOverlay } from './components/GitOverlay';
 import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
-import type { ClipboardImagePayload } from '../../types/messages';
+import type { ClipboardImagePayload, GlobalContextSourceMessage } from '../../types/messages';
 import type {
   ChatMemorySummary,
   EditorPromptExpandedSections,
@@ -52,7 +52,9 @@ import {
 import { diffPromptConfigSyncFields, PROMPT_CONFIG_SYNC_FIELDS } from '../../utils/promptExternalSync.js';
 import { shouldApplyPromptAiEnrichmentState, shouldApplyPromptSaveResult } from '../../utils/promptSaveFeedback.js';
 import {
+  resolvePromptChatContextAutoLoadDisplay,
   isPromptChatLaunchComplete,
+  type PromptChatContextAutoLoadRuntimeState,
   resolvePromptChatLaunchPhase,
   resolvePromptChatLaunchStepStates,
   resolvePromptEditorExpandedSections,
@@ -405,9 +407,11 @@ export const EditorApp: React.FC = () => {
   const [isGeneratingDescription, setIsGeneratingDescription] = useState(false);
   const [isLoadingGlobalContext, setIsLoadingGlobalContext] = useState(false);
   const [canLoadRemoteGlobalContext, setCanLoadRemoteGlobalContext] = useState(false);
+  const [globalContextAutoLoadEnabled, setGlobalContextAutoLoadEnabled] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [globalContext, setGlobalContext] = useState('');
+  const [globalContextSource, setGlobalContextSource] = useState<GlobalContextSourceMessage>('empty');
   const [projectInstructions, setProjectInstructions] = useState('');
   const [projectInstructionsExists, setProjectInstructionsExists] = useState(false);
   const [isRecalculating, setIsRecalculating] = useState(false);
@@ -450,6 +454,7 @@ export const EditorApp: React.FC = () => {
   const [chatLaunchRequestStarted, setChatLaunchRequestStarted] = useState(false);
   const [chatLaunchRenameState, setChatLaunchRenameState] = useState<PromptChatLaunchRenameState>('idle');
   const [chatLaunchCompletionHold, setChatLaunchCompletionHold] = useState(false);
+  const [chatContextAutoLoadState, setChatContextAutoLoadState] = useState<PromptChatContextAutoLoadRuntimeState>('idle');
   const [chatMemorySummary, setChatMemorySummary] = useState<ChatMemorySummary | null>(null);
   const chatLaunchCompletionTimerRef = useRef<number | null>(null);
   const chatLaunchTrackingKey = resolvePromptChatLaunchTrackingKey(prompt);
@@ -783,6 +788,7 @@ export const EditorApp: React.FC = () => {
 
   const persistGlobalContext = useCallback((context: string) => {
     setGlobalContext(context);
+    setGlobalContextSource(context.trim() ? 'manual' : 'empty');
     vscode.postMessage({ type: 'saveGlobalContext', context });
   }, []);
 
@@ -909,6 +915,7 @@ export const EditorApp: React.FC = () => {
     pendingGitOverlayStartChatRequestIdRef.current = '';
     setChatLaunchRequestStarted(false);
     setChatLaunchRenameState('idle');
+    setChatContextAutoLoadState('idle');
     setNotice(null);
     setIsChatPanelOpen(false);
     hasBeenSavedRef.current = true;
@@ -929,8 +936,10 @@ export const EditorApp: React.FC = () => {
       requestId,
       skipBranchMismatchCheck: options?.skipBranchMismatchCheck === true,
       originalStatus,
+      globalContext,
+      globalContextSource,
     });
-  }, [buildPromptForSave, handleEditorTabChange]);
+  }, [buildPromptForSave, globalContext, globalContextSource, handleEditorTabChange]);
 
   const continueOpenChat = useCallback(() => {
     if (isOpeningChatRef.current) {
@@ -1883,12 +1892,16 @@ export const EditorApp: React.FC = () => {
       case 'globalContext':
         setGlobalContext(msg.context || '');
         setCanLoadRemoteGlobalContext(msg.canLoadRemote === true);
+        setGlobalContextAutoLoadEnabled(msg.autoLoadEnabled === true);
+        setGlobalContextSource(msg.source || 'empty');
         break;
       case 'globalContextLoaded':
         setIsLoadingGlobalContext(false);
         setNotice(null);
         setGlobalContext(msg.context || '');
         setCanLoadRemoteGlobalContext(msg.canLoadRemote === true);
+        setGlobalContextAutoLoadEnabled(msg.autoLoadEnabled === true);
+        setGlobalContextSource(msg.source || 'empty');
         break;
       case 'globalContextLoadFailed':
         setIsLoadingGlobalContext(false);
@@ -1981,6 +1994,18 @@ export const EditorApp: React.FC = () => {
         }
         setChatLaunchRenameState('idle');
         releaseStartChatPendingState();
+        break;
+      case 'chatContextAutoLoadState':
+        if (!shouldHandleChatStartMessage(msg.requestId)) {
+          break;
+        }
+        setChatContextAutoLoadState(
+          msg.state === 'started'
+            ? 'active'
+            : msg.state === 'completed'
+              ? 'completed'
+              : 'fallback',
+        );
         break;
       case 'chatRequestStarted':
         if (!shouldHandleChatStartMessage(msg.requestId)) {
@@ -3407,11 +3432,40 @@ export const EditorApp: React.FC = () => {
     chatRenameState: chatLaunchRenameState,
   });
 
+  const chatContextAutoLoadDisplay = resolvePromptChatContextAutoLoadDisplay({
+    enabled: globalContextAutoLoadEnabled,
+    canLoadRemote: canLoadRemoteGlobalContext,
+    source: globalContextSource,
+    runtimeState: chatContextAutoLoadState,
+  });
+  const chatContextAutoLoadSummary = chatContextAutoLoadDisplay.kind === 'active'
+    ? t('editor.chatLaunchAutoLoadStatusActive')
+    : chatContextAutoLoadDisplay.kind === 'completed'
+      ? t('editor.chatLaunchAutoLoadStatusCompleted')
+      : chatContextAutoLoadDisplay.kind === 'fallback'
+        ? t('editor.chatLaunchAutoLoadStatusFallback')
+        : chatContextAutoLoadDisplay.kind === 'enabled'
+          ? t('editor.chatLaunchAutoLoadStatusEnabled')
+          : chatContextAutoLoadDisplay.kind === 'disabled-setting'
+            ? t('editor.chatLaunchAutoLoadStatusDisabledSetting')
+            : chatContextAutoLoadDisplay.kind === 'disabled-no-url'
+              ? t('editor.chatLaunchAutoLoadStatusDisabledNoUrl')
+              : t('editor.chatLaunchAutoLoadStatusDisabledManual');
+
   const chatLaunchSteps: Array<{ key: string; label: React.ReactNode; state: 'done' | 'active' | 'pending' }> = [
     {
       key: 'prepare',
       label: t('editor.chatLaunchStepPrepare'),
       state: chatLaunchStepStates.prepare,
+    },
+    {
+      key: 'autoload',
+      label: (
+        <span style={styles.chatLaunchStepLabelSingleLine}>
+          {`${t('editor.chatLaunchAutoLoadLabel')}: ${chatContextAutoLoadSummary}`}
+        </span>
+      ),
+      state: chatContextAutoLoadDisplay.stepState,
     },
     {
       key: 'open',
@@ -3451,6 +3505,7 @@ export const EditorApp: React.FC = () => {
     setChatLaunchCompletionHold(false);
     setChatLaunchRequestStarted(false);
     setChatLaunchRenameState('idle');
+    setChatContextAutoLoadState('idle');
   }, [chatLaunchTrackingKey]);
 
   useLayoutEffect(() => {
@@ -5084,6 +5139,13 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.4,
     color: 'inherit',
     minWidth: 0,
+  },
+  chatLaunchStepLabelSingleLine: {
+    display: 'inline-block',
+    maxWidth: '100%',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
   },
   chatLaunchStepBadge: {
     display: 'inline-flex',

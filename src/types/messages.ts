@@ -5,6 +5,9 @@
 import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 
+export type GlobalContextSourceMessage = 'empty' | 'manual' | 'remote';
+export type ChatContextAutoLoadStateMessage = 'started' | 'completed' | 'fallback';
+
 export type GitOverlayBusyReason =
 	| { kind: 'label'; label: string }
 	| { kind: 'file'; filePath: string }
@@ -29,7 +32,17 @@ export type WebviewToExtensionMessage =
 	| { type: 'importPrompt' }
 	| { type: 'exportPrompt'; id: string }
 	| { type: 'startChatPreflight'; id: string; prompt?: Prompt; forceRebindChat?: boolean; requestId?: string }
-	| { type: 'startChat'; id: string; prompt?: Prompt; forceRebindChat?: boolean; requestId?: string; skipBranchMismatchCheck?: boolean; originalStatus?: PromptStatus }
+	| {
+		type: 'startChat';
+		id: string;
+		prompt?: Prompt;
+		forceRebindChat?: boolean;
+		requestId?: string;
+		skipBranchMismatchCheck?: boolean;
+		originalStatus?: PromptStatus;
+		globalContext?: string;
+		globalContextSource?: GlobalContextSourceMessage;
+	}
 	| { type: 'openChat'; id: string; sessionId: string }
 	| { type: 'stopChat'; id?: string }
 	| { type: 'generateTitle'; content: string }
@@ -184,8 +197,20 @@ export type ExtensionToWebviewMessage =
 	| { type: 'inlineSuggestions'; suggestions: string[] }
 	| { type: 'statistics'; data: PromptStatistics }
 	| { type: 'statisticsUiState'; hourlyRateInput: string }
-	| { type: 'globalContext'; context: string; canLoadRemote: boolean }
-	| { type: 'globalContextLoaded'; context: string; canLoadRemote: boolean }
+	| {
+		type: 'globalContext';
+		context: string;
+		canLoadRemote: boolean;
+		autoLoadEnabled: boolean;
+		source: GlobalContextSourceMessage;
+	}
+	| {
+		type: 'globalContextLoaded';
+		context: string;
+		canLoadRemote: boolean;
+		autoLoadEnabled: boolean;
+		source: GlobalContextSourceMessage;
+	}
 	| { type: 'globalContextLoadFailed'; message: string }
 	| { type: 'projectInstructions'; content: string; exists: boolean }
 	| { type: 'gitOverlayTrackedBranchPreference'; branch: string; branchesByProject?: Record<string, string> }
@@ -196,6 +221,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptSaving'; id: string; promptUuid?: string; saving: boolean; requestId?: string }
 	| { type: 'triggerCreatePrompt' }
 	| { type: 'chatStarted'; promptId: string; requestId?: string }
+	| { type: 'chatContextAutoLoadState'; promptId: string; requestId?: string; state: ChatContextAutoLoadStateMessage }
 	| { type: 'chatRequestStarted'; promptId: string; requestId?: string; sessionId?: string }
 	| { type: 'chatMemorySummary'; promptId: string; memorySummary: ChatMemorySummary }
 	| { type: 'promptContentUpdated'; content: string; writingDeltaMs?: number }

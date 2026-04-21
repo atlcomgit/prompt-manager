@@ -66,6 +66,23 @@ interface ResolvePromptChatLaunchPhaseInput extends IsPromptChatLaunchCompleteIn
 
 interface ResolvePromptChatLaunchStepStatesInput extends IsPromptChatLaunchCompleteInput { }
 
+export type PromptGlobalContextSource = 'empty' | 'manual' | 'remote';
+export type PromptChatContextAutoLoadRuntimeState = 'idle' | 'active' | 'completed' | 'fallback';
+export type PromptChatContextAutoLoadTone = 'done' | 'active' | 'pending';
+
+interface ResolvePromptChatContextAutoLoadDisplayInput {
+	enabled: boolean;
+	canLoadRemote: boolean;
+	source: PromptGlobalContextSource;
+	runtimeState: PromptChatContextAutoLoadRuntimeState;
+}
+
+export interface PromptChatContextAutoLoadDisplay {
+	kind: 'disabled-setting' | 'disabled-no-url' | 'disabled-manual' | 'enabled' | 'active' | 'completed' | 'fallback';
+	badgeTone: PromptChatContextAutoLoadTone;
+	stepState: PromptChatLaunchStepState;
+}
+
 /** Input for resolving the empty-state placeholder shown in the Plan section. */
 interface ResolvePromptPlanPlaceholderStateInput {
 	chatMode?: Prompt['chatMode'] | null;
@@ -284,6 +301,73 @@ export function resolvePromptChatLaunchStepStates(
 			: isRenameActive
 				? 'active'
 				: 'done',
+	};
+}
+
+/** Resolve the UI state for the shared-context auto-load notice in the chat launch block. */
+export function resolvePromptChatContextAutoLoadDisplay(
+	input: ResolvePromptChatContextAutoLoadDisplayInput,
+): PromptChatContextAutoLoadDisplay {
+	if (!input.enabled) {
+		return {
+			kind: 'disabled-setting',
+			badgeTone: 'pending',
+			stepState: 'done',
+		};
+	}
+
+	if (!input.canLoadRemote) {
+		return {
+			kind: 'disabled-no-url',
+			badgeTone: 'pending',
+			stepState: 'done',
+		};
+	}
+
+	if (input.runtimeState === 'active') {
+		return {
+			kind: 'active',
+			badgeTone: 'active',
+			stepState: 'active',
+		};
+	}
+
+	if (input.runtimeState === 'completed') {
+		return {
+			kind: 'completed',
+			badgeTone: 'done',
+			stepState: 'done',
+		};
+	}
+
+	if (input.runtimeState === 'fallback') {
+		return {
+			kind: 'fallback',
+			badgeTone: 'pending',
+			stepState: 'done',
+		};
+	}
+
+	if (input.source === 'remote') {
+		return {
+			kind: 'enabled',
+			badgeTone: 'done',
+			stepState: 'pending',
+		};
+	}
+
+	if (input.source === 'manual') {
+		return {
+			kind: 'disabled-manual',
+			badgeTone: 'pending',
+			stepState: 'done',
+		};
+	}
+
+	return {
+		kind: 'enabled',
+		badgeTone: 'done',
+		stepState: 'pending',
 	};
 }
 

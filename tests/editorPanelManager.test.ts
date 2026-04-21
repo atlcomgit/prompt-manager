@@ -1255,6 +1255,186 @@ test('startChat refreshes remote global context before syncing instructions when
 	resetVsCodeCommandMock();
 });
 
+test('startChat uses the latest webview global context source before deciding whether to auto-load', async () => {
+	resetVsCodeCommandMock();
+
+	const syncedContexts: string[] = [];
+	const savedGlobalContexts: Array<{ context: string; source?: string }> = [];
+	let storedGlobalContext = 'Stored manual context';
+	let storedGlobalContextSource: 'manual' | 'remote' | 'empty' = 'manual';
+	const { manager } = await createManager({
+		configurationValues: {
+			'promptManager.editor.globalContextUrl': 'https://example.com/default.instructions.md',
+			'promptManager.editor.autoLoadContext': true,
+		},
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		},
+		workspaceService: {
+			syncGlobalAgentInstructionsFile: async (context: string) => {
+				syncedContexts.push(context);
+			},
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => storedGlobalContext,
+			getGlobalAgentContextSource: () => storedGlobalContextSource,
+			saveGlobalAgentContext: async (context: string, source?: string) => {
+				storedGlobalContext = context;
+				storedGlobalContextSource = (source as typeof storedGlobalContextSource | undefined) ?? 'manual';
+				savedGlobalContexts.push({ context, source });
+			},
+			getActiveChatSessionId: async () => '',
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: '',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	(manager as any).loadRemoteGlobalAgentContext = async () => 'Refreshed remote context';
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async () => true,
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{
+			type: 'startChat',
+			id: 'prompt-a',
+			requestId: 'req-autoload-3',
+			globalContext: 'Webview remote context',
+			globalContextSource: 'remote',
+		},
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(savedGlobalContexts, [
+		{ context: 'Webview remote context', source: 'remote' },
+		{ context: 'Refreshed remote context', source: 'remote' },
+	]);
+	assert.equal(syncedContexts[0], 'Refreshed remote context');
+	resetVsCodeCommandMock();
+});
+
+test('startChat refreshes remote global context when the latest webview context is empty', async () => {
+	resetVsCodeCommandMock();
+
+	const syncedContexts: string[] = [];
+	const savedGlobalContexts: Array<{ context: string; source?: string }> = [];
+	let storedGlobalContext = 'Stored manual context';
+	let storedGlobalContextSource: 'manual' | 'remote' | 'empty' = 'manual';
+	const { manager } = await createManager({
+		configurationValues: {
+			'promptManager.editor.globalContextUrl': 'https://example.com/default.instructions.md',
+			'promptManager.editor.autoLoadContext': true,
+		},
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		},
+		workspaceService: {
+			syncGlobalAgentInstructionsFile: async (context: string) => {
+				syncedContexts.push(context);
+			},
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => storedGlobalContext,
+			getGlobalAgentContextSource: () => storedGlobalContextSource,
+			saveGlobalAgentContext: async (context: string, source?: string) => {
+				storedGlobalContext = context;
+				storedGlobalContextSource = (source as typeof storedGlobalContextSource | undefined) ?? 'manual';
+				savedGlobalContexts.push({ context, source });
+			},
+			getActiveChatSessionId: async () => '',
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: '',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	(manager as any).loadRemoteGlobalAgentContext = async () => 'Refreshed remote context';
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async () => true,
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{
+			type: 'startChat',
+			id: 'prompt-a',
+			requestId: 'req-autoload-empty',
+			globalContext: '',
+			globalContextSource: 'empty',
+		},
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(savedGlobalContexts, [
+		{ context: '', source: 'empty' },
+		{ context: 'Refreshed remote context', source: 'remote' },
+	]);
+	assert.equal(syncedContexts[0], 'Refreshed remote context');
+	resetVsCodeCommandMock();
+});
+
 test('startChat falls back to the stored global context when remote auto-refresh fails', async () => {
 	resetVsCodeCommandMock();
 

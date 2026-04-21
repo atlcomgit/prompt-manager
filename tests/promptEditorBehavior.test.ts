@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createDefaultEditorPromptExpandedSections } from '../src/types/prompt.js';
 import {
 	isPromptChatLaunchComplete,
+	resolvePromptChatContextAutoLoadDisplay,
 	resolvePromptChatLaunchPhase,
 	resolvePromptChatLaunchStepStates,
 	resolvePromptEditorExpandedSections,
@@ -478,6 +479,96 @@ test('resolvePromptChatLaunchStepStates keeps later steps pending until earlier 
 		open: 'done',
 		bind: 'done',
 		rename: 'done',
+	});
+});
+
+test('resolvePromptChatContextAutoLoadDisplay reflects launch-time and source states', () => {
+	assert.deepEqual(resolvePromptChatContextAutoLoadDisplay({
+		enabled: false,
+		canLoadRemote: true,
+		source: 'remote',
+		runtimeState: 'idle',
+	}), {
+		kind: 'disabled-setting',
+		badgeTone: 'pending',
+		stepState: 'done',
+	});
+
+	assert.deepEqual(resolvePromptChatContextAutoLoadDisplay({
+		enabled: true,
+		canLoadRemote: false,
+		source: 'remote',
+		runtimeState: 'idle',
+	}), {
+		kind: 'disabled-no-url',
+		badgeTone: 'pending',
+		stepState: 'done',
+	});
+
+	assert.deepEqual(resolvePromptChatContextAutoLoadDisplay({
+		enabled: true,
+		canLoadRemote: true,
+		source: 'remote',
+		runtimeState: 'idle',
+	}), {
+		kind: 'enabled',
+		badgeTone: 'done',
+		stepState: 'pending',
+	});
+
+	assert.deepEqual(resolvePromptChatContextAutoLoadDisplay({
+		enabled: true,
+		canLoadRemote: true,
+		source: 'manual',
+		runtimeState: 'idle',
+	}), {
+		kind: 'disabled-manual',
+		badgeTone: 'pending',
+		stepState: 'done',
+	});
+
+	assert.deepEqual(resolvePromptChatContextAutoLoadDisplay({
+		enabled: true,
+		canLoadRemote: true,
+		source: 'empty',
+		runtimeState: 'idle',
+	}), {
+		kind: 'enabled',
+		badgeTone: 'done',
+		stepState: 'pending',
+	});
+
+	assert.deepEqual(resolvePromptChatContextAutoLoadDisplay({
+		enabled: true,
+		canLoadRemote: true,
+		source: 'remote',
+		runtimeState: 'active',
+	}), {
+		kind: 'active',
+		badgeTone: 'active',
+		stepState: 'active',
+	});
+
+	assert.deepEqual(resolvePromptChatContextAutoLoadDisplay({
+		enabled: true,
+		canLoadRemote: true,
+		source: 'remote',
+		runtimeState: 'completed',
+	}), {
+		kind: 'completed',
+		badgeTone: 'done',
+		stepState: 'done',
+	});
+
+	assert.deepEqual(resolvePromptChatContextAutoLoadDisplay({
+		enabled: true,
+		canLoadRemote: true,
+		source: 'remote',
+		runtimeState: 'fallback',
+	}), {
+		kind: 'fallback',
+		badgeTone: 'pending',
+		stepState: 'done',
 	});
 });
 

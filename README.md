@@ -122,7 +122,7 @@ This README is intentionally modular. The extension is still evolving, and the p
   only shows launch progress until the chat binding is actually unfinished.
 - Open plan and report content through consistent inline Open actions across the prompt editor.
 - Edit shared agent context and a dedicated project instructions file directly from the General instruction block, and open both from the editor without leaving the workflow.
-- Let Start Chat refresh the shared agent context automatically when it was last loaded from the configured remote source, while any manual edit freezes that snapshot until you load it again yourself.
+- Let Start Chat refresh the shared agent context automatically when the field is still remote-backed or has been reset to empty, keep manual edits as an explicit freeze on that snapshot until you load it again yourself, and see the current auto-load state directly in the Process tab while chat launch is running.
 - See a clear “No others” marker in Git Flow step 1 rows where the expected branch field is hidden because there are no alternative target branches to choose from.
 - Track writing time, implementation time, overall time on task, and untracked corrections.
 - Let the report editor expand to the content automatically without blanking the webview when the section opens, keep that height in sync when the editor width changes, and avoid clipping the bottom of long reports, while a new Start Chat run clears the previous plan after the launch preflight succeeds.

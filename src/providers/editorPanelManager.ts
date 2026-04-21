@@ -722,16 +722,60 @@ export class EditorPanelManager {
 		return this.getRemoteGlobalContextUrl().length > 0;
 	}
 
+	/** Check whether the shared-context auto-load flag is enabled in workspace settings. */
+	private isRemoteGlobalContextAutoLoadEnabled(): boolean {
+		return vscode.workspace
+			.getConfiguration('promptManager')
+			.get<boolean>('editor.autoLoadContext', true) === true;
+	}
+
+	/** Normalize source values arriving from the webview before they are persisted. */
+	private normalizeIncomingGlobalAgentContextSource(
+		source: unknown,
+		context: string,
+	): GlobalAgentContextSource {
+		const trimmedContext = (context || '').trim();
+		if (!trimmedContext) {
+			return 'empty';
+		}
+
+		return source === 'remote' ? 'remote' : 'manual';
+	}
+
+	/** Persist the latest webview-side context/source before start-chat decisions use workspace state. */
+	private async syncIncomingGlobalAgentContextState(
+		context: string | undefined,
+		source: unknown,
+		exceptPanel?: vscode.WebviewPanel,
+	): Promise<void> {
+		if (typeof context !== 'string' && typeof source !== 'string') {
+			return;
+		}
+
+		const nextContext = typeof context === 'string'
+			? context
+			: this.stateService.getGlobalAgentContext();
+		const nextSource = this.normalizeIncomingGlobalAgentContextSource(source, nextContext);
+		if (
+			nextContext === this.stateService.getGlobalAgentContext()
+			&& nextSource === this.stateService.getGlobalAgentContextSource()
+		) {
+			return;
+		}
+
+		await this.persistGlobalAgentContext(nextContext, nextSource);
+		this.broadcastGlobalContextState(exceptPanel);
+	}
+
 	/** Check whether Start Chat may refresh the shared agent context automatically. */
 	private shouldAutoRefreshRemoteGlobalContextOnStartChat(): boolean {
 		if (!this.canLoadRemoteGlobalContext()) {
 			return false;
 		}
 
-		return vscode.workspace
-			.getConfiguration('promptManager')
-			.get<boolean>('editor.autoLoadContext', true) === true
-			&& this.stateService.getGlobalAgentContextSource() === 'remote';
+		const source = this.stateService.getGlobalAgentContextSource();
+		return this.isRemoteGlobalContextAutoLoadEnabled()
+			&& source !== 'manual';
 	}
 
 	/** Load remote context and persist it as a remote snapshot. */
@@ -742,17 +786,23 @@ export class EditorPanelManager {
 	}
 
 	/** Resolve the shared agent context for chat start with safe remote-refresh fallback. */
-	private async resolveGlobalAgentContextForChatStart(promptId: string): Promise<string> {
+	private async resolveGlobalAgentContextForChatStart(
+		promptId: string,
+		notifyState?: (state: 'started' | 'completed' | 'fallback') => void,
+	): Promise<string> {
 		const persistedContext = this.stateService.getGlobalAgentContext();
 		if (!this.shouldAutoRefreshRemoteGlobalContextOnStartChat()) {
 			return persistedContext;
 		}
 
 		try {
+			notifyState?.('started');
 			const refreshedContext = await this.loadAndPersistRemoteGlobalAgentContext();
+			notifyState?.('completed');
 			this.broadcastGlobalContextState();
 			return refreshedContext;
 		} catch (error) {
+			notifyState?.('fallback');
 			this.hooksOutput.appendLine(
 				`[global-context] auto refresh failed for prompt=${promptId || '-'}: ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -1039,6 +1089,8 @@ export class EditorPanelManager {
 			type: 'globalContext',
 			context: this.stateService.getGlobalAgentContext(),
 			canLoadRemote: this.canLoadRemoteGlobalContext(),
+			autoLoadEnabled: this.isRemoteGlobalContextAutoLoadEnabled(),
+			source: this.stateService.getGlobalAgentContextSource(),
 		};
 	}
 
@@ -2730,7 +2782,10 @@ export class EditorPanelManager {
 				}
 			}),
 			vscode.workspace.onDidChangeConfiguration((event) => {
-				if (!event.affectsConfiguration('promptManager.editor.globalContextUrl')) {
+				if (
+					!event.affectsConfiguration('promptManager.editor.globalContextUrl')
+					&& !event.affectsConfiguration('promptManager.editor.autoLoadContext')
+				) {
 					return;
 				}
 
@@ -6679,6 +6734,12 @@ export class EditorPanelManager {
 					break;
 				}
 
+				await this.syncIncomingGlobalAgentContextState(
+					msg.globalContext,
+					msg.globalContextSource,
+					panel,
+				);
+
 				try {
 					// --- Branch mismatch check ---
 					if (!skipBranchMismatchCheck && prompt.projects.length > 0) {
@@ -6813,7 +6874,17 @@ export class EditorPanelManager {
 					this._onDidSave.fire(prompt.id);
 
 					// Compose query with prompt content and metadata
-					const globalContext = await this.resolveGlobalAgentContextForChatStart(prompt.id);
+					const globalContext = await this.resolveGlobalAgentContextForChatStart(
+						prompt.id,
+						(state) => {
+							postMessage({
+								type: 'chatContextAutoLoadState',
+								promptId: prompt?.id || '',
+								requestId: startChatRequestId || undefined,
+								state,
+							});
+						},
+					);
 					const parts: string[] = [];
 					try {
 						await this.workspaceService.syncGlobalAgentInstructionsFile(globalContext);
@@ -8430,6 +8501,8 @@ export class EditorPanelManager {
 						type: 'globalContextLoaded',
 						context,
 						canLoadRemote: this.canLoadRemoteGlobalContext(),
+						autoLoadEnabled: this.isRemoteGlobalContextAutoLoadEnabled(),
+						source: this.stateService.getGlobalAgentContextSource(),
 					});
 					this.broadcastGlobalContextState(panel);
 				} catch (error) {

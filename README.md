@@ -86,6 +86,10 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Stop an in-progress bound chat from the prompt editor, even after the conversation has been rebound to its saved chat session.
 - Rename bound chat sessions both right after the session is first attached during chat launch and later after prompt title or task number changes, even if the prompt id was renamed in the meantime, keep retrying the live chat title refresh across the early launch timing window without waiting for a VS Code reload, and show that rename as a dedicated fourth step in the Process launch block.
 - Hide the Process launch block as soon as a bound or reopened chat entry is already available again, so restored chat state does not stay stuck on the opening step.
+- Keep the prompt editor page from failing into a blank webview when Process-tab chat-launch UI regressions happen during the initial render path.
+- Suppress the false launch-timeout notice when the new chat session appears in tracked request state slightly later than in the early session index.
+- Keep each visible launch stage on screen for up to one second before the next stage appears, so very fast bind and rename transitions still read clearly.
+- Prevent the launch block from flashing again later for the same launch when background sync briefly loses and then restores the bound chat-entry signal.
 - See a clear explanation above the action buttons on every editor tab when Start Chat is temporarily disabled because the prompt is empty, metadata is still generating, or chat launch is already running.
 - See the selected AI model directly in the Process tab launch step, so the opening step confirms which model will be used.
 - Reuse the AI model from the most recently updated prompt when you create a draft through Quick Add Prompt, so quick capture starts with the same model you used last.

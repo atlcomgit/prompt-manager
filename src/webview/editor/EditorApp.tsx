@@ -52,18 +52,19 @@ import {
 import { diffPromptConfigSyncFields, PROMPT_CONFIG_SYNC_FIELDS } from '../../utils/promptExternalSync.js';
 import { shouldApplyPromptAiEnrichmentState, shouldApplyPromptSaveResult } from '../../utils/promptSaveFeedback.js';
 import {
+  PROMPT_CHAT_LAUNCH_PHASE_ORDER,
   resolvePromptChatContextAutoLoadDisplay,
-  isPromptChatLaunchComplete,
+  resolveNextPromptChatLaunchPhase,
   type PromptChatContextAutoLoadRuntimeState,
   resolvePromptChatLaunchPhase,
-  resolvePromptChatLaunchStepStates,
+  resolvePromptChatLaunchStepStatesFromPhase,
   resolvePromptEditorExpandedSections,
   resolvePromptPlanPlaceholderState,
   resolvePromptChatLaunchTrackingKey,
   shouldShowPromptChatLaunchBlock,
   togglePromptEditorSectionExpansion,
 } from '../../utils/promptEditorBehavior.js';
-import type { PromptChatLaunchRenameState } from '../../utils/promptEditorBehavior.js';
+import type { PromptChatLaunchPhase, PromptChatLaunchRenameState } from '../../utils/promptEditorBehavior.js';
 import { resolveGitOverlayBusyActionName, resolveGitOverlayDonePersistence } from '../../utils/gitOverlay.js';
 
 const vscode = getVsCodeApi();
@@ -91,6 +92,7 @@ type GitOverlayTrackedRequest = {
 };
 
 const CHAT_LAUNCH_COMPLETION_HOLD_MS = 2000;
+const CHAT_LAUNCH_MIN_PHASE_VISIBLE_MS = 1000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
 const EDITOR_FORM_CONTENT_WIDTH_PX = 800;
 const EDITOR_PROMPT_TABS: EditorPromptTab[] = ['main', 'process'];
@@ -457,16 +459,20 @@ export const EditorApp: React.FC = () => {
   const [chatContextAutoLoadState, setChatContextAutoLoadState] = useState<PromptChatContextAutoLoadRuntimeState>('idle');
   const [chatMemorySummary, setChatMemorySummary] = useState<ChatMemorySummary | null>(null);
   const chatLaunchCompletionTimerRef = useRef<number | null>(null);
-  const chatLaunchTrackingKey = resolvePromptChatLaunchTrackingKey(prompt);
-  const previousChatLaunchTrackingKeyRef = useRef(chatLaunchTrackingKey);
-  const isChatLaunchComplete = isPromptChatLaunchComplete({
+  const chatLaunchPhaseTimerRef = useRef<number | null>(null);
+  const chatLaunchPhaseVisibleSinceRef = useRef<number>(Date.now());
+  const rawChatLaunchPhase = resolvePromptChatLaunchPhase({
     hasChatEntry: chatEntryState.hasChatEntry,
     chatRequestStarted: chatLaunchRequestStarted,
     chatRenameState: chatLaunchRenameState,
+    chatLaunchCompletionHold: false,
   });
-  const previousChatLaunchCompletionRef = useRef(isChatLaunchComplete);
+  const chatLaunchCompletionShownForKeyRef = useRef(rawChatLaunchPhase === 'ready');
+  const chatLaunchTrackingKey = resolvePromptChatLaunchTrackingKey(prompt);
+  const previousChatLaunchTrackingKeyRef = useRef(chatLaunchTrackingKey);
+  const [displayedChatLaunchPhase, setDisplayedChatLaunchPhase] = useState<PromptChatLaunchPhase>(rawChatLaunchPhase);
   const showChatLaunchCompletionState = prompt.status === 'in-progress'
-    && isChatLaunchComplete
+    && displayedChatLaunchPhase === 'ready'
     && chatLaunchCompletionHold;
   const shouldShowChatLaunchBlock = shouldShowPromptChatLaunchBlock({
     status: prompt.status,
@@ -474,13 +480,9 @@ export const EditorApp: React.FC = () => {
     chatRequestStarted: chatLaunchRequestStarted,
     chatLaunchCompletionHold: showChatLaunchCompletionState,
     chatRenameState: chatLaunchRenameState,
+    completionShownOnce: chatLaunchCompletionShownForKeyRef.current,
   });
-  const chatLaunchPhase = resolvePromptChatLaunchPhase({
-    hasChatEntry: chatEntryState.hasChatEntry,
-    chatRequestStarted: chatLaunchRequestStarted,
-    chatRenameState: chatLaunchRenameState,
-    chatLaunchCompletionHold: showChatLaunchCompletionState,
-  });
+  const chatLaunchPhase = displayedChatLaunchPhase;
   const chatLaunchStateLabel = chatLaunchPhase === 'ready'
     ? t('editor.chatLaunchStatusReady')
     : chatLaunchPhase === 'renaming'
@@ -913,6 +915,7 @@ export const EditorApp: React.FC = () => {
     acceptedChatStartRequestIdRef.current = '';
     pendingChatStartPreflightRequestIdRef.current = '';
     pendingGitOverlayStartChatRequestIdRef.current = '';
+    chatLaunchCompletionShownForKeyRef.current = false;
     setChatLaunchRequestStarted(false);
     setChatLaunchRenameState('idle');
     setChatContextAutoLoadState('idle');
@@ -3426,11 +3429,7 @@ export const EditorApp: React.FC = () => {
     setManualSectionOverrides(nextSectionState.manualSectionOverrides);
   };
 
-  const chatLaunchStepStates = resolvePromptChatLaunchStepStates({
-    hasChatEntry: chatEntryState.hasChatEntry,
-    chatRequestStarted: chatLaunchRequestStarted,
-    chatRenameState: chatLaunchRenameState,
-  });
+  const chatLaunchStepStates = resolvePromptChatLaunchStepStatesFromPhase(chatLaunchPhase);
 
   const chatContextAutoLoadDisplay = resolvePromptChatContextAutoLoadDisplay({
     enabled: globalContextAutoLoadEnabled,
@@ -3496,34 +3495,85 @@ export const EditorApp: React.FC = () => {
     }
 
     previousChatLaunchTrackingKeyRef.current = chatLaunchTrackingKey;
-    previousChatLaunchCompletionRef.current = false;
+    chatLaunchCompletionShownForKeyRef.current = rawChatLaunchPhase === 'ready';
     if (chatLaunchCompletionTimerRef.current !== null) {
       window.clearTimeout(chatLaunchCompletionTimerRef.current);
       chatLaunchCompletionTimerRef.current = null;
     }
+    if (chatLaunchPhaseTimerRef.current !== null) {
+      window.clearTimeout(chatLaunchPhaseTimerRef.current);
+      chatLaunchPhaseTimerRef.current = null;
+    }
 
+    chatLaunchPhaseVisibleSinceRef.current = Date.now();
+    setDisplayedChatLaunchPhase(rawChatLaunchPhase);
     setChatLaunchCompletionHold(false);
     setChatLaunchRequestStarted(false);
     setChatLaunchRenameState('idle');
     setChatContextAutoLoadState('idle');
-  }, [chatLaunchTrackingKey]);
+  }, [chatLaunchTrackingKey, rawChatLaunchPhase]);
+
+  useLayoutEffect(() => {
+    const displayedPhaseIndex = PROMPT_CHAT_LAUNCH_PHASE_ORDER.indexOf(displayedChatLaunchPhase);
+    const targetPhaseIndex = PROMPT_CHAT_LAUNCH_PHASE_ORDER.indexOf(rawChatLaunchPhase);
+
+    if (chatLaunchPhaseTimerRef.current !== null) {
+      window.clearTimeout(chatLaunchPhaseTimerRef.current);
+      chatLaunchPhaseTimerRef.current = null;
+    }
+
+    if (prompt.status !== 'in-progress' || displayedPhaseIndex < 0 || targetPhaseIndex < 0) {
+      if (displayedChatLaunchPhase !== rawChatLaunchPhase) {
+        chatLaunchPhaseVisibleSinceRef.current = Date.now();
+        setDisplayedChatLaunchPhase(rawChatLaunchPhase);
+      }
+      return;
+    }
+
+    if (targetPhaseIndex < displayedPhaseIndex) {
+      chatLaunchPhaseVisibleSinceRef.current = Date.now();
+      setDisplayedChatLaunchPhase(rawChatLaunchPhase);
+      return;
+    }
+
+    if (targetPhaseIndex === displayedPhaseIndex) {
+      return;
+    }
+
+    const nextPhase = resolveNextPromptChatLaunchPhase(displayedChatLaunchPhase, rawChatLaunchPhase);
+    const elapsedMs = Date.now() - chatLaunchPhaseVisibleSinceRef.current;
+    const remainingMs = Math.max(0, CHAT_LAUNCH_MIN_PHASE_VISIBLE_MS - elapsedMs);
+    const applyNextPhase = () => {
+      chatLaunchPhaseVisibleSinceRef.current = Date.now();
+      setDisplayedChatLaunchPhase(nextPhase);
+      chatLaunchPhaseTimerRef.current = null;
+    };
+
+    if (remainingMs === 0) {
+      applyNextPhase();
+      return;
+    }
+
+    chatLaunchPhaseTimerRef.current = window.setTimeout(applyNextPhase, remainingMs);
+  }, [displayedChatLaunchPhase, rawChatLaunchPhase, prompt.status]);
 
   useLayoutEffect(() => {
     const canTrackCompletion = prompt.status === 'in-progress';
-    const launchCompleted = canTrackCompletion && isChatLaunchComplete;
-    const previousLaunchCompleted = previousChatLaunchCompletionRef.current;
+    const launchCompleted = canTrackCompletion && displayedChatLaunchPhase === 'ready';
+    const completionAlreadyShownForKey = chatLaunchCompletionShownForKeyRef.current;
 
-    if (launchCompleted && !previousLaunchCompleted) {
+    if (launchCompleted && !completionAlreadyShownForKey) {
       if (chatLaunchCompletionTimerRef.current !== null) {
         window.clearTimeout(chatLaunchCompletionTimerRef.current);
       }
 
+      chatLaunchCompletionShownForKeyRef.current = true;
       setChatLaunchCompletionHold(true);
       chatLaunchCompletionTimerRef.current = window.setTimeout(() => {
         setChatLaunchCompletionHold(false);
         chatLaunchCompletionTimerRef.current = null;
       }, CHAT_LAUNCH_COMPLETION_HOLD_MS);
-    } else if ((!canTrackCompletion || !chatEntryState.hasChatEntry) && chatLaunchCompletionHold) {
+    } else if ((!canTrackCompletion || displayedChatLaunchPhase !== 'ready') && chatLaunchCompletionHold) {
       if (chatLaunchCompletionTimerRef.current !== null) {
         window.clearTimeout(chatLaunchCompletionTimerRef.current);
         chatLaunchCompletionTimerRef.current = null;
@@ -3532,8 +3582,7 @@ export const EditorApp: React.FC = () => {
       setChatLaunchCompletionHold(false);
     }
 
-    previousChatLaunchCompletionRef.current = launchCompleted;
-  }, [chatLaunchCompletionHold, isChatLaunchComplete, prompt.status]);
+  }, [chatLaunchCompletionHold, displayedChatLaunchPhase, prompt.status]);
 
   useEffect(() => {
     if (!shouldShowChatLaunchBlock || chatLaunchPhase === 'ready') {
@@ -3554,6 +3603,10 @@ export const EditorApp: React.FC = () => {
       if (chatLaunchCompletionTimerRef.current !== null) {
         window.clearTimeout(chatLaunchCompletionTimerRef.current);
         chatLaunchCompletionTimerRef.current = null;
+      }
+      if (chatLaunchPhaseTimerRef.current !== null) {
+        window.clearTimeout(chatLaunchPhaseTimerRef.current);
+        chatLaunchPhaseTimerRef.current = null;
       }
     };
   }, []);

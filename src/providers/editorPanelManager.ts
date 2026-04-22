@@ -7221,6 +7221,28 @@ export class EditorPanelManager {
 							return sessionBindingSucceeded;
 						};
 
+						const waitForCompletionSnapshot = async (
+							timeoutMs: number,
+							pollIntervalMs: number,
+							source: string,
+						): Promise<Awaited<ReturnType<StateService['waitForChatRequestCompletion']>>> => {
+							const completion = await this.stateService.waitForChatRequestCompletion(
+								requestStartTimestamp,
+								timeoutMs,
+								pollIntervalMs,
+								trackedSessionId || undefined,
+							);
+							if (Number(completion.lastRequestStarted || 0) > 0) {
+								notifyChatRequestStarted(completion.sessionId || trackedSessionId);
+							}
+							if (!sessionBindingSucceeded && completion.sessionId) {
+								await bindConfirmedSession(completion.sessionId, source);
+							}
+							return completion;
+						};
+
+						let completion: Awaited<ReturnType<StateService['waitForChatRequestCompletion']>> | null = null;
+
 						if (shouldForceRebindChat) {
 							const freshActiveSessionId = await this.stateService.getActiveChatSessionId(7000, 150, {
 								excludeSessionIds: Array.from(sessionIdsToExclude),
@@ -7260,31 +7282,37 @@ export class EditorPanelManager {
 									sessionIdsToExclude.add(activeSessionId);
 								}
 							} else {
-								if (shouldForceRebindChat) {
-									this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; new chat session was not confirmed after rebind request`);
+								const launchConfirmation = await waitForCompletionSnapshot(
+									shouldForceRebindChat ? 7000 : 5000,
+									500,
+									'request-completion-confirmation',
+								);
+								const requestObserved = Number(launchConfirmation.lastRequestStarted || 0) > 0;
+								if (sessionBindingSucceeded || requestObserved) {
+									completion = launchConfirmation;
+									this.hooksOutput.appendLine(
+										`[chat-start] confirmation fallback observed request activity for prompt=${prompt.id}; session=${launchConfirmation.sessionId || '-'} started=${launchConfirmation.lastRequestStarted || 0}`,
+									);
 								} else {
-									this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; chat message was dispatched but session was not detected yet`);
+									if (shouldForceRebindChat) {
+										this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; new chat session was not confirmed after rebind request`);
+									} else {
+										this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; chat message was dispatched but session was not detected yet`);
+									}
+									notifySessionConfirmationTimeout();
 								}
-								notifySessionConfirmationTimeout();
 							}
 						}
 
-						const completion = await this.stateService.waitForChatRequestCompletion(
-							requestStartTimestamp,
+						completion = completion || await waitForCompletionSnapshot(
 							180000,
 							1000,
-							trackedSessionId || undefined,
+							'request-completion',
 						);
-						if (Number(completion.lastRequestStarted || 0) > 0) {
-							notifyChatRequestStarted(completion.sessionId || trackedSessionId);
-						}
 						const shouldCaptureAgentFinalResponse = this.shouldCaptureAgentFinalResponse();
 						const chatResponse = await this.tryReadChatMarkdownFromClipboard();
 						const chatReportText = chatResponse.markdown;
 						const chatReportHtml = chatResponse.html;
-						if (!sessionBindingSucceeded && completion.sessionId) {
-							await bindConfirmedSession(completion.sessionId, 'request-completion');
-						}
 						const completionObserved = Number(completion.lastRequestEnded || 0) > Number(completion.lastRequestStarted || 0);
 						const completionSessionId = String(completion.sessionId || '').trim();
 						const shouldFinalizeTrackedChat = EditorPanelManager.shouldFinalizeTrackedChatCompletion({

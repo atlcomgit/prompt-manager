@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 
 import { createDefaultEditorPromptExpandedSections } from '../src/types/prompt.js';
 import {
+	PROMPT_CHAT_LAUNCH_PHASE_ORDER,
 	isPromptChatLaunchComplete,
+	resolveNextPromptChatLaunchPhase,
 	resolvePromptChatContextAutoLoadDisplay,
 	resolvePromptChatLaunchPhase,
+	resolvePromptChatLaunchStepStatesFromPhase,
 	resolvePromptChatLaunchStepStates,
 	resolvePromptEditorExpandedSections,
 	resolvePromptPlanPlaceholderState,
@@ -365,6 +368,15 @@ test('shouldShowPromptChatLaunchBlock only keeps the launch block while launch i
 	}), false);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
+		status: 'in-progress',
+		hasChatEntry: false,
+		chatRequestStarted: true,
+		chatLaunchCompletionHold: false,
+		chatRenameState: 'idle',
+		completionShownOnce: true,
+	}), false);
+
+	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'draft',
 		hasChatEntry: false,
 		chatRequestStarted: false,
@@ -475,6 +487,45 @@ test('resolvePromptChatLaunchStepStates keeps later steps pending until earlier 
 		chatRequestStarted: true,
 		chatRenameState: 'completed',
 	}), {
+		prepare: 'done',
+		open: 'done',
+		bind: 'done',
+		rename: 'done',
+	});
+});
+
+test('resolveNextPromptChatLaunchPhase advances forward one visual step at a time', () => {
+	assert.deepEqual(PROMPT_CHAT_LAUNCH_PHASE_ORDER, ['opening', 'binding', 'renaming', 'ready']);
+	assert.equal(resolveNextPromptChatLaunchPhase('opening', 'binding'), 'binding');
+	assert.equal(resolveNextPromptChatLaunchPhase('opening', 'ready'), 'binding');
+	assert.equal(resolveNextPromptChatLaunchPhase('binding', 'ready'), 'renaming');
+	assert.equal(resolveNextPromptChatLaunchPhase('renaming', 'ready'), 'ready');
+	assert.equal(resolveNextPromptChatLaunchPhase('ready', 'opening'), 'opening');
+});
+
+test('resolvePromptChatLaunchStepStatesFromPhase mirrors the visible launch phase', () => {
+	assert.deepEqual(resolvePromptChatLaunchStepStatesFromPhase('opening'), {
+		prepare: 'done',
+		open: 'active',
+		bind: 'pending',
+		rename: 'pending',
+	});
+
+	assert.deepEqual(resolvePromptChatLaunchStepStatesFromPhase('binding'), {
+		prepare: 'done',
+		open: 'done',
+		bind: 'active',
+		rename: 'pending',
+	});
+
+	assert.deepEqual(resolvePromptChatLaunchStepStatesFromPhase('renaming'), {
+		prepare: 'done',
+		open: 'done',
+		bind: 'done',
+		rename: 'active',
+	});
+
+	assert.deepEqual(resolvePromptChatLaunchStepStatesFromPhase('ready'), {
 		prepare: 'done',
 		open: 'done',
 		bind: 'done',

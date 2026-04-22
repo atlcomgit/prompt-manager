@@ -19,6 +19,10 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- Prompt pages no longer open as a blank webview after the recent Process-tab launch-block refactor; the editor render path now avoids the launch-state runtime failures that could break initial load.
+- Prompt chat launch no longer shows the false "Chat launch was not confirmed" notice when the early session index lags behind and the same launch is confirmed a moment later by the tracked chat request state.
+- The Process tab chat launch block now keeps each visual stage visible for at least one second before advancing, so fast bind and rename steps do not flip to Done instantly.
+- The Process tab chat launch block no longer reappears later for the same launch just because a transient prompt sync briefly dropped chat-entry state and then restored it.
 - Copilot Premium Usage no longer falls back to inflated local counters when the GitHub session is stale or invalid; the status bar now shows a dedicated sign-in error state instead of misleading percentages.
 - Git Flow step 1 now shows a dedicated “No others” marker in rows where the expected branch field is hidden because there are no alternative target branches to choose from.
 - The Process tab report editor no longer clips long Markdown or HTML output at the old 800px auto-resize ceiling, and it now recalculates height when the editor width changes so wrapped content stays fully visible.

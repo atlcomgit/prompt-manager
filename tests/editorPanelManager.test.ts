@@ -1593,6 +1593,85 @@ test('startChat reports a real timeout notice only after session confirmation fa
 	resetVsCodeCommandMock();
 });
 
+test('startChat does not report timeout when request completion later confirms the session', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+			getActiveChatSessionId: async () => '',
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: 'session-new',
+				lastRequestStarted: 100,
+				lastRequestEnded: 0,
+				hasPendingEdits: true,
+			}),
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+	(manager as any).scheduleChatSessionRename = async () => undefined;
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-completion-fallback' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await new Promise(resolve => setTimeout(resolve, 0));
+
+	assert.ok(postedMessages.some(message =>
+		(message as any)?.type === 'chatRequestStarted'
+		&& (message as any)?.requestId === 'req-completion-fallback'
+		&& (message as any)?.sessionId === 'session-new'));
+	assert.ok(postedMessages.some(message =>
+		(message as any)?.type === 'chatOpened'
+		&& (message as any)?.requestId === 'req-completion-fallback'));
+	assert.ok(!postedMessages.some(message =>
+		(message as any)?.type === 'error'
+		&& (message as any)?.requestId === 'req-completion-fallback'
+		&& (message as any)?.message === 'Запуск чата не подтвердился. Можно попробовать ещё раз.'));
+	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-new']);
+	resetVsCodeCommandMock();
+});
+
 test('startChat does not apply completion hook tokens immediately at launch', async () => {
 	resetVsCodeCommandMock();
 

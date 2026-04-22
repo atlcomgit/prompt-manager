@@ -48,11 +48,19 @@ interface ShouldShowPromptChatLaunchBlockInput {
 	chatRequestStarted: boolean;
 	chatLaunchCompletionHold: boolean;
 	chatRenameState: PromptChatLaunchRenameState;
+	completionShownOnce?: boolean;
 }
 
 export type PromptChatLaunchRenameState = 'idle' | 'active' | 'completed';
 export type PromptChatLaunchStepState = 'done' | 'active' | 'pending';
 export type PromptChatLaunchPhase = 'opening' | 'binding' | 'renaming' | 'ready';
+
+export const PROMPT_CHAT_LAUNCH_PHASE_ORDER: PromptChatLaunchPhase[] = [
+	'opening',
+	'binding',
+	'renaming',
+	'ready',
+];
 
 interface IsPromptChatLaunchCompleteInput {
 	hasChatEntry: boolean;
@@ -245,8 +253,15 @@ export function shouldPreservePromptIdAfterChatStart(
 export function shouldShowPromptChatLaunchBlock(
 	input: ShouldShowPromptChatLaunchBlockInput,
 ): boolean {
-	return input.status === 'in-progress'
-		&& (!isPromptChatLaunchComplete(input) || input.chatLaunchCompletionHold);
+	if (input.status !== 'in-progress') {
+		return false;
+	}
+
+	if (input.completionShownOnce === true && !input.chatLaunchCompletionHold) {
+		return false;
+	}
+
+	return !isPromptChatLaunchComplete(input) || input.chatLaunchCompletionHold;
 }
 
 /**
@@ -280,28 +295,73 @@ export function resolvePromptChatLaunchPhase(
 	return 'renaming';
 }
 
+/** Advance visual launch progress by a single phase while keeping backward jumps immediate. */
+export function resolveNextPromptChatLaunchPhase(
+	current: PromptChatLaunchPhase,
+	target: PromptChatLaunchPhase,
+): PromptChatLaunchPhase {
+	const currentIndex = PROMPT_CHAT_LAUNCH_PHASE_ORDER.indexOf(current);
+	const targetIndex = PROMPT_CHAT_LAUNCH_PHASE_ORDER.indexOf(target);
+	if (currentIndex < 0 || targetIndex < 0) {
+		return target;
+	}
+
+	if (targetIndex <= currentIndex) {
+		return target;
+	}
+
+	return PROMPT_CHAT_LAUNCH_PHASE_ORDER[currentIndex + 1] || target;
+}
+
+/** Resolve launch step badges for an already chosen visual phase. */
+export function resolvePromptChatLaunchStepStatesFromPhase(
+	phase: PromptChatLaunchPhase,
+): Record<'prepare' | 'open' | 'bind' | 'rename', PromptChatLaunchStepState> {
+	if (phase === 'opening') {
+		return {
+			prepare: 'done',
+			open: 'active',
+			bind: 'pending',
+			rename: 'pending',
+		};
+	}
+
+	if (phase === 'binding') {
+		return {
+			prepare: 'done',
+			open: 'done',
+			bind: 'active',
+			rename: 'pending',
+		};
+	}
+
+	if (phase === 'renaming') {
+		return {
+			prepare: 'done',
+			open: 'done',
+			bind: 'done',
+			rename: 'active',
+		};
+	}
+
+	return {
+		prepare: 'done',
+		open: 'done',
+		bind: 'done',
+		rename: 'done',
+	};
+}
+
 /** Resolve step states so restored chat entries still mark already-finished milestones as done. */
 export function resolvePromptChatLaunchStepStates(
 	input: ResolvePromptChatLaunchStepStatesInput,
 ): Record<'prepare' | 'open' | 'bind' | 'rename', PromptChatLaunchStepState> {
-	const hasOpenedChat = input.chatRequestStarted || input.hasChatEntry;
-	const hasBoundChat = input.hasChatEntry;
-	const isRenameActive = input.chatRenameState === 'active';
-
-	return {
-		prepare: 'done',
-		open: hasOpenedChat ? 'done' : 'active',
-		bind: !hasOpenedChat
-			? 'pending'
-			: hasBoundChat
-				? 'done'
-				: 'active',
-		rename: !hasBoundChat
-			? 'pending'
-			: isRenameActive
-				? 'active'
-				: 'done',
-	};
+	return resolvePromptChatLaunchStepStatesFromPhase(resolvePromptChatLaunchPhase({
+		hasChatEntry: input.hasChatEntry,
+		chatRequestStarted: input.chatRequestStarted,
+		chatRenameState: input.chatRenameState,
+		chatLaunchCompletionHold: false,
+	}));
 }
 
 /** Resolve the UI state for the shared-context auto-load notice in the chat launch block. */

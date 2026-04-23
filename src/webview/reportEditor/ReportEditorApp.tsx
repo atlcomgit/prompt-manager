@@ -3,7 +3,10 @@ import { RichTextEditor } from '../editor/components/RichTextEditor';
 import { useT } from '../shared/i18n';
 import { useMessageListener } from '../shared/useMessageListener';
 import { getVsCodeApi } from '../shared/vscodeApi';
-import { shouldIgnoreReportEditorExternalUpdate } from '../../utils/reportSync.js';
+import {
+  shouldFlushReportEditorOnUnmount,
+  shouldIgnoreReportEditorExternalUpdate,
+} from '../../utils/reportSync.js';
 
 const vscode = getVsCodeApi();
 
@@ -209,15 +212,21 @@ export const ReportEditorApp: React.FC = () => {
   useEffect(() => {
     return () => {
       const hadPendingFlush = flushTimerRef.current !== null;
+      const shouldFlushOnUnmount = shouldFlushReportEditorOnUnmount({
+        hasPendingFlush: hadPendingFlush,
+        hasUnsyncedLocalChanges: hasUnsyncedLocalChangesRef.current,
+      });
       if (flushTimerRef.current) {
         window.clearTimeout(flushTimerRef.current);
         flushTimerRef.current = null;
       }
       clearSaveFeedbackTimer();
-      if (hadPendingFlush) {
-        logReportDebug('cleanup.flushPendingOnUnmount', {
+      if (shouldFlushOnUnmount) {
+        logReportDebug('cleanup.flushOnUnmount', {
           promptId,
           reportLength: reportRef.current.length,
+          hadPendingFlush,
+          hasUnsyncedLocalChanges: hasUnsyncedLocalChangesRef.current,
         });
         flushReport(reportRef.current);
       }

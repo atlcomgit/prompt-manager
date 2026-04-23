@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
 	decideFileReportSync,
 	isLatestPersistedReport,
+	shouldFlushReportEditorOnUnmount,
 	shouldIgnoreReportEditorExternalUpdate,
 } from '../src/utils/reportSync.js';
 
@@ -68,6 +69,24 @@ test('shouldIgnoreReportEditorExternalUpdate accepts no-op updates even with uns
 	});
 
 	assert.equal(ignored, false);
+});
+
+test('shouldFlushReportEditorOnUnmount flushes when a manual save cleared the timer but local changes are still unsynced', () => {
+	const shouldFlush = shouldFlushReportEditorOnUnmount({
+		hasPendingFlush: false,
+		hasUnsyncedLocalChanges: true,
+	});
+
+	assert.equal(shouldFlush, true);
+});
+
+test('shouldFlushReportEditorOnUnmount skips flush when nothing is pending and local state is already synced', () => {
+	const shouldFlush = shouldFlushReportEditorOnUnmount({
+		hasPendingFlush: false,
+		hasUnsyncedLocalChanges: false,
+	});
+
+	assert.equal(shouldFlush, false);
 });
 
 test('isLatestPersistedReport returns true for current persisted report', () => {

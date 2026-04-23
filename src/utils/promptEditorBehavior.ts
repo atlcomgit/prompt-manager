@@ -53,9 +53,11 @@ interface ShouldShowPromptChatLaunchBlockInput {
 
 export type PromptChatLaunchRenameState = 'idle' | 'active' | 'completed';
 export type PromptChatLaunchStepState = 'done' | 'active' | 'pending';
-export type PromptChatLaunchPhase = 'opening' | 'binding' | 'renaming' | 'ready';
+export type PromptChatLaunchPhase = 'prepare' | 'autoload' | 'opening' | 'binding' | 'renaming' | 'ready';
 
 export const PROMPT_CHAT_LAUNCH_PHASE_ORDER: PromptChatLaunchPhase[] = [
+	'prepare',
+	'autoload',
 	'opening',
 	'binding',
 	'renaming',
@@ -313,10 +315,35 @@ export function resolveNextPromptChatLaunchPhase(
 	return PROMPT_CHAT_LAUNCH_PHASE_ORDER[currentIndex + 1] || target;
 }
 
+/** Keep inactive launch UI parked on the first row until the tracked launch is actually visible. */
+export function resolvePromptChatLaunchInactivePhase(
+	target: PromptChatLaunchPhase,
+): PromptChatLaunchPhase {
+	return target === 'ready' ? 'ready' : 'prepare';
+}
+
 /** Resolve launch step badges for an already chosen visual phase. */
 export function resolvePromptChatLaunchStepStatesFromPhase(
 	phase: PromptChatLaunchPhase,
 ): Record<'prepare' | 'open' | 'bind' | 'rename', PromptChatLaunchStepState> {
+	if (phase === 'prepare') {
+		return {
+			prepare: 'active',
+			open: 'pending',
+			bind: 'pending',
+			rename: 'pending',
+		};
+	}
+
+	if (phase === 'autoload') {
+		return {
+			prepare: 'done',
+			open: 'pending',
+			bind: 'pending',
+			rename: 'pending',
+		};
+	}
+
 	if (phase === 'opening') {
 		return {
 			prepare: 'done',
@@ -458,4 +485,24 @@ export function resolvePromptChatLaunchTrackingKey(
 
 	const promptId = (prompt?.id || '').trim() || '__new__';
 	return `id:${promptId}`;
+}
+
+/** Reset launch-cycle state only when prompt identity truly changes, not when missing ids arrive later. */
+export function shouldResetPromptChatLaunchTracking(
+	previousPrompt?: Pick<Prompt, 'id' | 'promptUuid'> | null,
+	nextPrompt?: Pick<Prompt, 'id' | 'promptUuid'> | null,
+): boolean {
+	const previousPromptUuid = (previousPrompt?.promptUuid || '').trim();
+	const nextPromptUuid = (nextPrompt?.promptUuid || '').trim();
+	if (previousPromptUuid && nextPromptUuid) {
+		return previousPromptUuid !== nextPromptUuid;
+	}
+
+	const previousPromptId = (previousPrompt?.id || '').trim();
+	const nextPromptId = (nextPrompt?.id || '').trim();
+	if (previousPromptId && nextPromptId) {
+		return previousPromptId !== nextPromptId;
+	}
+
+	return previousPromptId !== nextPromptId || previousPromptUuid !== nextPromptUuid;
 }

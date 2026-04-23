@@ -54,13 +54,14 @@ import { shouldApplyPromptAiEnrichmentState, shouldApplyPromptSaveResult } from 
 import {
   PROMPT_CHAT_LAUNCH_PHASE_ORDER,
   resolvePromptChatContextAutoLoadDisplay,
+  resolvePromptChatLaunchInactivePhase,
   resolveNextPromptChatLaunchPhase,
   type PromptChatContextAutoLoadRuntimeState,
   resolvePromptChatLaunchPhase,
   resolvePromptChatLaunchStepStatesFromPhase,
   resolvePromptEditorExpandedSections,
   resolvePromptPlanPlaceholderState,
-  resolvePromptChatLaunchTrackingKey,
+  shouldResetPromptChatLaunchTracking,
   shouldShowPromptChatLaunchBlock,
   togglePromptEditorSectionExpansion,
 } from '../../utils/promptEditorBehavior.js';
@@ -468,9 +469,13 @@ export const EditorApp: React.FC = () => {
     chatLaunchCompletionHold: false,
   });
   const chatLaunchCompletionShownForKeyRef = useRef(rawChatLaunchPhase === 'ready');
-  const chatLaunchTrackingKey = resolvePromptChatLaunchTrackingKey(prompt);
-  const previousChatLaunchTrackingKeyRef = useRef(chatLaunchTrackingKey);
-  const [displayedChatLaunchPhase, setDisplayedChatLaunchPhase] = useState<PromptChatLaunchPhase>(rawChatLaunchPhase);
+  const previousChatLaunchTrackingPromptRef = useRef<Pick<Prompt, 'id' | 'promptUuid'>>({
+    id: prompt.id,
+    promptUuid: prompt.promptUuid,
+  });
+  const [displayedChatLaunchPhase, setDisplayedChatLaunchPhase] = useState<PromptChatLaunchPhase>(
+    resolvePromptChatLaunchInactivePhase(rawChatLaunchPhase),
+  );
   const showChatLaunchCompletionState = prompt.status === 'in-progress'
     && displayedChatLaunchPhase === 'ready'
     && chatLaunchCompletionHold;
@@ -483,18 +488,23 @@ export const EditorApp: React.FC = () => {
     completionShownOnce: chatLaunchCompletionShownForKeyRef.current,
   });
   const chatLaunchPhase = displayedChatLaunchPhase;
+  const chatLaunchAutoloadStepState = chatLaunchPhase === 'prepare'
+    ? 'pending'
+    : chatLaunchPhase === 'autoload'
+      ? 'active'
+      : 'done';
   const chatLaunchStateLabel = chatLaunchPhase === 'ready'
     ? t('editor.chatLaunchStatusReady')
     : chatLaunchPhase === 'renaming'
       ? t('editor.chatLaunchStatusRenaming')
-    : chatLaunchPhase === 'opening'
+    : chatLaunchPhase === 'prepare' || chatLaunchPhase === 'autoload' || chatLaunchPhase === 'opening'
       ? t('editor.chatLaunchStatusStarting')
       : t('editor.chatLaunchStatusWaiting');
   const chatLaunchDescription = chatLaunchPhase === 'ready'
     ? t('editor.chatLaunchDescriptionReady')
     : chatLaunchPhase === 'renaming'
       ? t('editor.chatLaunchDescriptionRenaming')
-    : chatLaunchPhase === 'opening'
+    : chatLaunchPhase === 'prepare' || chatLaunchPhase === 'autoload' || chatLaunchPhase === 'opening'
       ? t('editor.chatLaunchDescriptionStarting')
       : t('editor.chatLaunchDescriptionWaiting');
   const chatLaunchHint = chatLaunchPhase === 'ready'
@@ -3464,7 +3474,7 @@ export const EditorApp: React.FC = () => {
           {`${t('editor.chatLaunchAutoLoadLabel')}: ${chatContextAutoLoadSummary}`}
         </span>
       ),
-      state: chatContextAutoLoadDisplay.stepState,
+      state: chatLaunchAutoloadStepState,
     },
     {
       key: 'open',
@@ -3490,11 +3500,16 @@ export const EditorApp: React.FC = () => {
   const completedChatLaunchStepCount = chatLaunchSteps.filter((step) => step.state === 'done').length;
 
   useLayoutEffect(() => {
-    if (previousChatLaunchTrackingKeyRef.current === chatLaunchTrackingKey) {
+    const nextTrackingPrompt = {
+      id: prompt.id,
+      promptUuid: prompt.promptUuid,
+    };
+    if (!shouldResetPromptChatLaunchTracking(previousChatLaunchTrackingPromptRef.current, nextTrackingPrompt)) {
+      previousChatLaunchTrackingPromptRef.current = nextTrackingPrompt;
       return;
     }
 
-    previousChatLaunchTrackingKeyRef.current = chatLaunchTrackingKey;
+    previousChatLaunchTrackingPromptRef.current = nextTrackingPrompt;
     chatLaunchCompletionShownForKeyRef.current = rawChatLaunchPhase === 'ready';
     if (chatLaunchCompletionTimerRef.current !== null) {
       window.clearTimeout(chatLaunchCompletionTimerRef.current);
@@ -3506,12 +3521,12 @@ export const EditorApp: React.FC = () => {
     }
 
     chatLaunchPhaseVisibleSinceRef.current = Date.now();
-    setDisplayedChatLaunchPhase(rawChatLaunchPhase);
+    setDisplayedChatLaunchPhase(resolvePromptChatLaunchInactivePhase(rawChatLaunchPhase));
     setChatLaunchCompletionHold(false);
     setChatLaunchRequestStarted(false);
     setChatLaunchRenameState('idle');
     setChatContextAutoLoadState('idle');
-  }, [chatLaunchTrackingKey, rawChatLaunchPhase]);
+  }, [prompt.id, prompt.promptUuid, rawChatLaunchPhase]);
 
   useLayoutEffect(() => {
     const displayedPhaseIndex = PROMPT_CHAT_LAUNCH_PHASE_ORDER.indexOf(displayedChatLaunchPhase);
@@ -3523,9 +3538,10 @@ export const EditorApp: React.FC = () => {
     }
 
     if (prompt.status !== 'in-progress' || displayedPhaseIndex < 0 || targetPhaseIndex < 0) {
-      if (displayedChatLaunchPhase !== rawChatLaunchPhase) {
+      const inactivePhase = resolvePromptChatLaunchInactivePhase(rawChatLaunchPhase);
+      if (displayedChatLaunchPhase !== inactivePhase) {
         chatLaunchPhaseVisibleSinceRef.current = Date.now();
-        setDisplayedChatLaunchPhase(rawChatLaunchPhase);
+        setDisplayedChatLaunchPhase(inactivePhase);
       }
       return;
     }
@@ -3590,7 +3606,9 @@ export const EditorApp: React.FC = () => {
       return;
     }
 
-    const intervalMs = chatLaunchPhase === 'opening' ? 220 : 360;
+    const intervalMs = chatLaunchPhase === 'prepare' || chatLaunchPhase === 'autoload' || chatLaunchPhase === 'opening'
+      ? 220
+      : 360;
     const timer = window.setInterval(() => {
       setChatLaunchActivityFrame(prev => (prev + 1) % 6);
     }, intervalMs);

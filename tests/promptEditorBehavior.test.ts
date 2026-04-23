@@ -7,6 +7,7 @@ import {
 	isPromptChatLaunchComplete,
 	resolveNextPromptChatLaunchPhase,
 	resolvePromptChatContextAutoLoadDisplay,
+	resolvePromptChatLaunchInactivePhase,
 	resolvePromptChatLaunchPhase,
 	resolvePromptChatLaunchStepStatesFromPhase,
 	resolvePromptChatLaunchStepStates,
@@ -14,6 +15,7 @@ import {
 	resolvePromptPlanPlaceholderState,
 	resolvePromptChatLaunchTrackingKey,
 	resolvePromptOpenEditorViewState,
+	shouldResetPromptChatLaunchTracking,
 	shouldPreservePromptIdAfterChatStart,
 	shouldShowPromptChatLaunchBlock,
 	togglePromptEditorSectionExpansion,
@@ -495,7 +497,9 @@ test('resolvePromptChatLaunchStepStates keeps later steps pending until earlier 
 });
 
 test('resolveNextPromptChatLaunchPhase advances forward one visual step at a time', () => {
-	assert.deepEqual(PROMPT_CHAT_LAUNCH_PHASE_ORDER, ['opening', 'binding', 'renaming', 'ready']);
+	assert.deepEqual(PROMPT_CHAT_LAUNCH_PHASE_ORDER, ['prepare', 'autoload', 'opening', 'binding', 'renaming', 'ready']);
+	assert.equal(resolveNextPromptChatLaunchPhase('prepare', 'opening'), 'autoload');
+	assert.equal(resolveNextPromptChatLaunchPhase('autoload', 'opening'), 'opening');
 	assert.equal(resolveNextPromptChatLaunchPhase('opening', 'binding'), 'binding');
 	assert.equal(resolveNextPromptChatLaunchPhase('opening', 'ready'), 'binding');
 	assert.equal(resolveNextPromptChatLaunchPhase('binding', 'ready'), 'renaming');
@@ -503,7 +507,30 @@ test('resolveNextPromptChatLaunchPhase advances forward one visual step at a tim
 	assert.equal(resolveNextPromptChatLaunchPhase('ready', 'opening'), 'opening');
 });
 
+test('resolvePromptChatLaunchInactivePhase keeps inactive launch UI parked on the first step', () => {
+	assert.equal(resolvePromptChatLaunchInactivePhase('prepare'), 'prepare');
+	assert.equal(resolvePromptChatLaunchInactivePhase('autoload'), 'prepare');
+	assert.equal(resolvePromptChatLaunchInactivePhase('opening'), 'prepare');
+	assert.equal(resolvePromptChatLaunchInactivePhase('binding'), 'prepare');
+	assert.equal(resolvePromptChatLaunchInactivePhase('renaming'), 'prepare');
+	assert.equal(resolvePromptChatLaunchInactivePhase('ready'), 'ready');
+});
+
 test('resolvePromptChatLaunchStepStatesFromPhase mirrors the visible launch phase', () => {
+	assert.deepEqual(resolvePromptChatLaunchStepStatesFromPhase('prepare'), {
+		prepare: 'active',
+		open: 'pending',
+		bind: 'pending',
+		rename: 'pending',
+	});
+
+	assert.deepEqual(resolvePromptChatLaunchStepStatesFromPhase('autoload'), {
+		prepare: 'done',
+		open: 'pending',
+		bind: 'pending',
+		rename: 'pending',
+	});
+
 	assert.deepEqual(resolvePromptChatLaunchStepStatesFromPhase('opening'), {
 		prepare: 'done',
 		open: 'active',
@@ -638,4 +665,38 @@ test('resolvePromptChatLaunchTrackingKey prefers promptUuid and falls back to pr
 		id: '',
 		promptUuid: '',
 	}), 'id:__new__');
+});
+
+test('shouldResetPromptChatLaunchTracking only resets when the prompt identity actually changes', () => {
+	assert.equal(shouldResetPromptChatLaunchTracking({
+		id: 'prompt-id',
+		promptUuid: '',
+	}, {
+		id: 'prompt-id',
+		promptUuid: 'uuid-1',
+	}), false);
+
+	assert.equal(shouldResetPromptChatLaunchTracking({
+		id: 'prompt-id',
+		promptUuid: 'uuid-1',
+	}, {
+		id: 'renamed-prompt-id',
+		promptUuid: 'uuid-1',
+	}), false);
+
+	assert.equal(shouldResetPromptChatLaunchTracking({
+		id: 'prompt-id',
+		promptUuid: 'uuid-1',
+	}, {
+		id: 'other-prompt-id',
+		promptUuid: 'uuid-2',
+	}), true);
+
+	assert.equal(shouldResetPromptChatLaunchTracking({
+		id: 'prompt-id',
+		promptUuid: 'uuid-1',
+	}, {
+		id: 'prompt-id',
+		promptUuid: 'uuid-2',
+	}), true);
 });

@@ -88,8 +88,8 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Hide the Process launch block as soon as a bound or reopened chat entry is already available again, so restored chat state does not stay stuck on the opening step.
 - Keep the prompt editor page from failing into a blank webview when Process-tab chat-launch UI regressions happen during the initial render path.
 - Suppress the false launch-timeout notice when the new chat session appears in tracked request state slightly later than in the early session index.
-- Keep each visible launch stage on screen for up to one second before the next stage appears, so very fast bind and rename transitions still read clearly.
-- Prevent the launch block from flashing again later for the same launch when background sync briefly loses and then restores the bound chat-entry signal.
+- Keep each visible launch stage on screen for up to one second before the next stage appears, including the initial prepare and auto-load rows, so fast launch progress stays readable from the first step to the last one.
+- Prevent the launch block from flashing again later for the same launch when background sync briefly loses and then restores the bound chat-entry signal or the same prompt is reidentified by a later id/UUID normalization step.
 - See a clear explanation above the action buttons on every editor tab when Start Chat is temporarily disabled because the prompt is empty, metadata is still generating, or chat launch is already running.
 - See the selected AI model directly in the Process tab launch step, so the opening step confirms which model will be used.
 - Reuse the AI model from the most recently updated prompt when you create a draft through Quick Add Prompt, so quick capture starts with the same model you used last.
@@ -130,6 +130,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - See a clear “No others” marker in Git Flow step 1 rows where the expected branch field is hidden because there are no alternative target branches to choose from.
 - Track writing time, implementation time, overall time on task, and untracked corrections.
 - Let the report editor expand to the content automatically without blanking the webview when the section opens, keep that height in sync when the editor width changes, and avoid clipping the bottom of long reports, while a new Start Chat run clears the previous plan after the launch preflight succeeds.
+- Closing the separate report editor right after Save now keeps the latest edits by flushing any still-unsynced local report state before the window goes away.
 - Open statistics and export delivery-friendly summaries in HTML or Markdown.
 - Auto-fill report hours from working days in the selected period, persist the hourly rate per workspace, and omit hour or cost sections when those values are empty or zero.
 - Keep reports inside the prompt workflow instead of treating them as a separate afterthought.

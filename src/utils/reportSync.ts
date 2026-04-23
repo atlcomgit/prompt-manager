@@ -18,6 +18,11 @@ export interface PersistedReportSyncInput {
 	persistedReport: string;
 }
 
+export interface ReportEditorUnmountFlushInput {
+	hasPendingFlush: boolean;
+	hasUnsyncedLocalChanges: boolean;
+}
+
 export const decideFileReportSync = ({
 	previousSyncedReport,
 	incomingReport,
@@ -42,6 +47,13 @@ export const shouldIgnoreReportEditorExternalUpdate = ({
 	currentReport,
 }: ReportEditorExternalUpdateInput): boolean => {
 	return hasUnsyncedLocalChanges && incomingReport !== currentReport;
+};
+
+export const shouldFlushReportEditorOnUnmount = ({
+	hasPendingFlush,
+	hasUnsyncedLocalChanges,
+}: ReportEditorUnmountFlushInput): boolean => {
+	return hasPendingFlush || hasUnsyncedLocalChanges;
 };
 
 export const isLatestPersistedReport = ({

@@ -1,4 +1,4 @@
-# Общая инструкция (v.87)
+# Общая инструкция (v.88)
 
 ## Характеристика агента
 
@@ -343,3 +343,11 @@
   Значение из параметра промпта `Task`.
 - **Отчет**.
   Значение из параметра промпта `Report file`.
+
+## Документация по пакетам
+
+При реализации задач на языке php с использованием фреймворка Laravel учитывай свежую документацию по пакетам:
+- Используй документацию [Laravel](https://laravel.com/docs/12.x).
+- Используй документацию для вспомогательных функций [Hlp](https://github.com/atlcomgit/helper), примеры в [тестах](https://github.com/atlcomgit/helper/tree/master/tests).
+- Используй документацию для [Dto](https://github.com/atlcomgit/dto), примеры в [тестах](https://github.com/atlcomgit/dto/tree/master/tests/Examples).
+- Используй документацию для [Lh](https://github.com/atlcomgit/laravel-helper).

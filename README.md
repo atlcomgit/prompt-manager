@@ -107,6 +107,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - View, switch, and create branches in workspace projects.
 - Guard branch actions with dirty-worktree checks.
 - Surface dirty workspace projects in Git Flow step 1 even when they are not yet attached to the prompt.
+- Hide selected generated or noisy paths from the Git Flow step 1 “Changes in other projects” block with `promptManager.gitOverlay.otherProjectsExcludedPaths`, without changing the selected prompt projects themselves.
 - Keep the Git Flow Done action consistent with Save by persisting the final derived prompt status before the overlay closes.
 - Keep branch references and task metadata near the prompt itself.
 - Use the Git-oriented editor flow to support commits, review preparation, and related prompt execution.
@@ -232,6 +233,7 @@ Useful configuration ideas:
 - Keep skills and hooks curated so repeated workflows stay consistent.
 - Use branches and task numbers to connect prompts with delivery artifacts.
 - Keep reports and plans with the prompt so review context stays local to the repository.
+- Use `promptManager.gitOverlay.otherProjectsExcludedPaths` when Git Flow step 1 should ignore generated folders or path prefixes in the “Changes in other projects” block.
 - Enable Project Memory when your repository history is valuable enough to search semantically.
 
 ## Actively Evolving Areas

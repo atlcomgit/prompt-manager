@@ -56,7 +56,9 @@ import {
 import { buildChatMessage } from '../utils/chatMessageBuilder.js';
 import type { ChatMessageContext } from '../utils/chatMessageBuilder.js';
 import {
+	applyGitOverlayOtherProjectsExcludedPaths,
 	buildGitOverlayReviewCliSetupCommand,
+	normalizeGitOverlayOtherProjectsExcludedPaths,
 	resolveGitOverlaySnapshotProjectScope,
 } from '../utils/gitOverlay.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
@@ -2957,6 +2959,18 @@ export class EditorPanelManager {
 			.filter(Boolean);
 	}
 
+	private getGitOverlayOtherProjectsExcludedPathsSetting(): string[] {
+		try {
+			return normalizeGitOverlayOtherProjectsExcludedPaths(
+				vscode.workspace
+					.getConfiguration('promptManager.gitOverlay')
+					.get<string[]>('otherProjectsExcludedPaths', []) ?? [],
+			);
+		} catch {
+			return [];
+		}
+	}
+
 	private resolveGitOverlaySessionProjectNames(projects: string[]): string[] {
 		const normalizedProjects = (projects || []).map(project => project.trim()).filter(Boolean);
 		return normalizedProjects.length > 0
@@ -3127,6 +3141,7 @@ export class EditorPanelManager {
 		},
 	): Promise<void> {
 		const paths = this.workspaceService.getWorkspaceFolderPaths();
+		const selectedProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
 		const snapshotProjects = this.resolveGitOverlaySnapshotProjects(projects, currentPrompt);
 		const snapshot = await this.gitService.getGitOverlaySnapshot(
 			paths,
@@ -3134,7 +3149,12 @@ export class EditorPanelManager {
 			promptBranch,
 			this.getTrackedBranchesSetting(),
 		);
-		const snapshotWithErrors = this.applyGitOverlaySnapshotProjectErrors(snapshot, options?.commitErrorsByProject);
+		const filteredSnapshot = applyGitOverlayOtherProjectsExcludedPaths(
+			snapshot,
+			selectedProjects,
+			this.getGitOverlayOtherProjectsExcludedPathsSetting(),
+		);
+		const snapshotWithErrors = this.applyGitOverlaySnapshotProjectErrors(filteredSnapshot, options?.commitErrorsByProject);
 		this.logReportDebug('gitOverlay.snapshot.computed', {
 			promptId: currentPrompt.id,
 			promptBranch: snapshotWithErrors.promptBranch || null,

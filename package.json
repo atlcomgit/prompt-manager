@@ -337,6 +337,14 @@
           "description": "Prefix prepended to generated MR/PR titles in Git Flow step 4. If empty, Prompt Manager falls back to git user.name for each repository.",
           "default": ""
         },
+        "promptManager.gitOverlay.otherProjectsExcludedPaths": {
+          "type": "array",
+          "description": "Repo-relative folder names or path prefixes to hide from Git Flow step 1 in the 'Changes in other projects' block only.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "promptManager.copilotStatusBar.enabled": {
           "type": "boolean",
           "description": "Enable/disable Copilot Premium usage progress bar in the status bar.",

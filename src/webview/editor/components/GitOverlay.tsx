@@ -118,6 +118,20 @@ function countProjectLikeChanges(project: Pick<GitOverlayProjectSnapshot, 'chang
 		+ project.changeGroups.untracked.length;
 }
 
+export function shouldShowGitOverlayExcludeProjectAction(input: {
+	isChatPreflightMode: boolean;
+	projectAvailable: boolean;
+	projectHasChanges: boolean;
+	canUpdatePromptProjects: boolean;
+	isExplicitlySelectedProject: boolean;
+}): boolean {
+	return !input.isChatPreflightMode
+		&& input.projectAvailable
+		&& !input.projectHasChanges
+		&& input.canUpdatePromptProjects
+		&& input.isExplicitlySelectedProject;
+}
+
 function doesGitOverlayBranchExist(
 	project: Pick<GitOverlayProjectSnapshot, 'branches'>,
 	branchName: string,
@@ -940,6 +954,10 @@ export const GitOverlay: React.FC<Props> = ({
 	const selectedProjectNameSet = useMemo(
 		() => new Set(effectiveSelectedProjectNames),
 		[effectiveSelectedProjectNames],
+	);
+	const explicitlySelectedProjectNameSet = useMemo(
+		() => new Set(normalizedSelectedProjects),
+		[normalizedSelectedProjects],
 	);
 	const selectedSnapshotProjects = useMemo(
 		() => allProjects.filter(project => selectedProjectNameSet.has(project.project)),
@@ -2165,11 +2183,13 @@ export const GitOverlay: React.FC<Props> = ({
 																	? t('editor.gitOverlayStateReady')
 																	: t('editor.gitOverlayStateNeedsSwitch');
 											const rowActionLoading = busyAction === `applyBranchTargets:${project.project}` || isApplyingAllBranchTargets;
-														const showExcludeProjectAction = !isChatPreflightMode
-															&& project.available
-															&& !projectHasChanges
-															&& !rowCanApply
-															&& canUpdatePromptProjects;
+														const showExcludeProjectAction = shouldShowGitOverlayExcludeProjectAction({
+															isChatPreflightMode,
+															projectAvailable: project.available,
+															projectHasChanges,
+															canUpdatePromptProjects,
+															isExplicitlySelectedProject: explicitlySelectedProjectNameSet.has(project.project),
+														});
 											const rowStyle = rowOnPrompt
 												? styles.projectTableRowSuccess
 												: (!project.available ? styles.projectTableRowMuted : rowNeedsDecision ? styles.projectTableRowDecision : null);

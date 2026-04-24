@@ -2,14 +2,17 @@ import type {
 	GitOverlayActionKind,
 	GitOverlayActionScope,
 	GitOverlayBranchKind,
+	GitOverlayProjectSnapshot,
 	GitOverlayProjectCommitMessage,
 	GitOverlayGraphEdge,
 	GitOverlayGraphNode,
 	GitOverlayReviewProvider,
 	GitOverlayReviewRequestState,
 	GitOverlayReviewSetupAction,
+	GitOverlaySnapshot,
 } from '../types/git.js';
 import type { PromptStatus } from '../types/prompt.js';
+import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 
 type ParsedGitOverlayRemote = {
 	provider: GitOverlayReviewProvider;
@@ -182,6 +185,80 @@ export function resolveGitOverlaySnapshotProjectScope(
 		...normalizedSelectedProjects,
 		...normalizedWorkspaceProjects,
 	]));
+}
+
+/** Нормализует path-prefix список для фильтра step-1 блока других проектов. */
+export function normalizeGitOverlayOtherProjectsExcludedPaths(paths: string[]): string[] {
+	return Array.from(new Set(
+		(paths || [])
+			.map(item => String(item || '').trim().replace(/^\.\/+/, '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''))
+			.filter(Boolean),
+	));
+}
+
+function filterGitOverlayProjectChangeGroup(
+	changes: GitOverlayProjectSnapshot['changeGroups'][keyof GitOverlayProjectSnapshot['changeGroups']],
+	excludedPaths: string[],
+): typeof changes {
+	return changes.filter(change => !shouldIgnoreRealtimeRefreshPath(change.path, excludedPaths));
+}
+
+/**
+ * Применяет дополнительные path-prefix исключения только к невыбранным проектам
+ * для step-1 блока "Изменения в других проектах".
+ */
+export function applyGitOverlayOtherProjectsExcludedPaths(
+	snapshot: GitOverlaySnapshot,
+	selectedProjects: string[],
+	excludedPaths: string[],
+): GitOverlaySnapshot {
+	const normalizedExcludedPaths = normalizeGitOverlayOtherProjectsExcludedPaths(excludedPaths);
+	if (normalizedExcludedPaths.length === 0 || snapshot.projects.length === 0) {
+		return snapshot;
+	}
+
+	const normalizedSelectedProjects = selectedProjects
+		.map(project => project.trim())
+		.filter(Boolean);
+	const effectiveSelectedProjects = normalizedSelectedProjects.length > 0
+		? normalizedSelectedProjects
+		: snapshot.projects.map(project => project.project.trim()).filter(Boolean);
+	const selectedProjectNameSet = new Set(effectiveSelectedProjects);
+	let changed = false;
+
+	const projects = snapshot.projects.map((project) => {
+		if (selectedProjectNameSet.has(project.project.trim())) {
+			return project;
+		}
+
+		const nextChangeGroups: GitOverlayProjectSnapshot['changeGroups'] = {
+			merge: filterGitOverlayProjectChangeGroup(project.changeGroups.merge, normalizedExcludedPaths),
+			staged: filterGitOverlayProjectChangeGroup(project.changeGroups.staged, normalizedExcludedPaths),
+			workingTree: filterGitOverlayProjectChangeGroup(project.changeGroups.workingTree, normalizedExcludedPaths),
+			untracked: filterGitOverlayProjectChangeGroup(project.changeGroups.untracked, normalizedExcludedPaths),
+		};
+		if (
+			nextChangeGroups.merge.length === project.changeGroups.merge.length
+			&& nextChangeGroups.staged.length === project.changeGroups.staged.length
+			&& nextChangeGroups.workingTree.length === project.changeGroups.workingTree.length
+			&& nextChangeGroups.untracked.length === project.changeGroups.untracked.length
+		) {
+			return project;
+		}
+
+		changed = true;
+		return {
+			...project,
+			changeGroups: nextChangeGroups,
+		};
+	});
+
+	return changed
+		? {
+			...snapshot,
+			projects,
+		}
+		: snapshot;
 }
 
 function normalizeInteractiveTerminalCommand(command: string): string {

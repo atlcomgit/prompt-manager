@@ -19,6 +19,7 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- Git Flow step 1 can now hide configured repo-relative path prefixes from the “Changes in other projects” block via `promptManager.gitOverlay.otherProjectsExcludedPaths`, and explicitly selected projects with zero changes now show “Exclude” instead of “Switch”.
 - Closing the separate report editor right after Save no longer drops the latest edits; the webview now flushes unsynced local report state during shutdown so the first save survives the window close.
 - Prompt pages no longer open as a blank webview after the recent Process-tab launch-block refactor; the editor render path now avoids the launch-state runtime failures that could break initial load.
 - Prompt chat launch no longer shows the false "Chat launch was not confirmed" notice when the early session index lags behind and the same launch is confirmed a moment later by the tracked chat request state.

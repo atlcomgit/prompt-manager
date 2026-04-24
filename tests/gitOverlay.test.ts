@@ -28,6 +28,8 @@ import {
 	resolveExistingGitOverlayTrackedBranches,
 	resolveGitOverlayBranchNames,
 	resolveGitOverlaySnapshotProjectScope,
+	applyGitOverlayOtherProjectsExcludedPaths,
+	normalizeGitOverlayOtherProjectsExcludedPaths,
 } from '../src/utils/gitOverlay.js';
 import {
 	areGitOverlayProjectsOnTrackedOrPrompt,
@@ -40,6 +42,7 @@ import {
 	resolveGitOverlayEffectiveExpectedBranch,
 	resolveChangeDiffStats,
 	resolveGitOverlayPostCommitProjects,
+	shouldShowGitOverlayExcludeProjectAction,
 } from '../src/webview/editor/components/GitOverlay.js';
 import type { GitOverlayChangeFile, GitOverlayProjectSnapshot, GitOverlaySnapshot } from '../src/types/git.js';
 
@@ -3643,6 +3646,49 @@ test('resolveGitOverlaySnapshotProjectScope keeps selected projects first and ap
 	);
 });
 
+test('normalizeGitOverlayOtherProjectsExcludedPaths trims, normalizes and deduplicates values', () => {
+	assert.deepEqual(
+		normalizeGitOverlayOtherProjectsExcludedPaths([' ./dist ', 'logs/', '', 'logs', 'nested\\tmp']),
+		['dist', 'logs', 'nested/tmp'],
+	);
+});
+
+test('applyGitOverlayOtherProjectsExcludedPaths filters only unselected project changes', () => {
+	const snapshot = createTestSnapshot({
+		projects: [
+			createTestProject({
+				project: 'selected-clean',
+				changeGroups: {
+					staged: [createTestChange({ project: 'selected-clean', path: 'dist/keep-me.txt' })],
+				},
+			}),
+			createTestProject({
+				project: 'docs-dirty',
+				changeGroups: {
+					staged: [
+						createTestChange({ project: 'docs-dirty', path: 'dist/generated.md' }),
+						createTestChange({ project: 'docs-dirty', path: 'README.md' }),
+					],
+					untracked: [createTestChange({ project: 'docs-dirty', path: 'logs/debug.txt', group: 'untracked', staged: false })],
+				},
+			}),
+		],
+	});
+
+	const filtered = applyGitOverlayOtherProjectsExcludedPaths(
+		snapshot,
+		['selected-clean'],
+		['dist', './logs/'],
+	);
+
+	assert.equal(filtered.projects[0]?.changeGroups.staged.length, 1);
+	assert.deepEqual(
+		filtered.projects[1]?.changeGroups.staged.map(change => change.path),
+		['README.md'],
+	);
+	assert.equal(filtered.projects[1]?.changeGroups.untracked.length, 0);
+});
+
 test('GitOverlay shows exclude action instead of inactive switch for clean selected projects without step 1 work', () => {
 	const markup = renderGitOverlayMarkup({
 		selectedProjects: ['selected-clean'],
@@ -3661,4 +3707,22 @@ test('GitOverlay shows exclude action instead of inactive switch for clean selec
 
 	assert.match(markup, /editor\.gitOverlayExcludeProject/);
 	assert.doesNotMatch(markup, /<button[^>]*disabled[^>]*><span[^>]*><span>editor\.gitOverlaySwitch<\/span><\/span><\/button>/);
+});
+
+
+test('shouldShowGitOverlayExcludeProjectAction keeps exclude action for a clean explicitly selected project', () => {
+	assert.equal(shouldShowGitOverlayExcludeProjectAction({
+		isChatPreflightMode: false,
+		projectAvailable: true,
+		projectHasChanges: false,
+		canUpdatePromptProjects: true,
+		isExplicitlySelectedProject: true,
+	}), true);
+	assert.equal(shouldShowGitOverlayExcludeProjectAction({
+		isChatPreflightMode: false,
+		projectAvailable: true,
+		projectHasChanges: false,
+		canUpdatePromptProjects: true,
+		isExplicitlySelectedProject: false,
+	}), false);
 });

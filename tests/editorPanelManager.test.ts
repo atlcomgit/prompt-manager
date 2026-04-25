@@ -5,9 +5,23 @@ import Module from 'node:module';
 const originalLoad = (Module as any)._load;
 const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
 const vscodeCreatedWebviewPanels: any[] = [];
+const vscodeClosedTabs: any[] = [];
+const vscodeTabChangeListeners: Array<(event: { opened: any[]; closed: any[]; changed: any[] }) => void> = [];
+const vscodeTabs: any[] = [];
 let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<unknown>) | undefined;
 let vscodeAvailableCommands: string[] | undefined;
 const vscodeConfigurationValues = new Map<string, unknown>();
+
+const vscodePrimaryTabGroup: any = {
+	isActive: true,
+	viewColumn: 1,
+	get activeTab() {
+		return vscodeTabs.find(tab => tab.isActive);
+	},
+	get tabs() {
+		return vscodeTabs;
+	},
+};
 
 function createDisposable() {
 	return { dispose() { } };
@@ -16,8 +30,55 @@ function createDisposable() {
 function resetVsCodeCommandMock() {
 	vscodeCommandCalls.length = 0;
 	vscodeCreatedWebviewPanels.length = 0;
+	vscodeClosedTabs.length = 0;
+	vscodeTabChangeListeners.length = 0;
+	vscodeTabs.length = 0;
 	vscodeExecuteCommandHandler = undefined;
 	vscodeAvailableCommands = undefined;
+}
+
+function emitVsCodeTabChange(event: { opened?: any[]; closed?: any[]; changed?: any[] }) {
+	const normalized = {
+		opened: event.opened || [],
+		closed: event.closed || [],
+		changed: event.changed || [],
+	};
+	for (const listener of vscodeTabChangeListeners) {
+		listener(normalized);
+	}
+}
+
+function removeVsCodeTab(tab: any) {
+	const index = vscodeTabs.indexOf(tab);
+	if (index >= 0) {
+		vscodeTabs.splice(index, 1);
+		emitVsCodeTabChange({ closed: [tab] });
+	}
+}
+
+function createVsCodeTab(viewType: string, label: string, active = true, panel?: any) {
+	if (active) {
+		for (const tab of vscodeTabs) {
+			tab.isActive = false;
+		}
+	}
+	const tab: any = {
+		label,
+		group: vscodePrimaryTabGroup,
+		input: { viewType },
+		isActive: active,
+		isDirty: false,
+		isPinned: false,
+		isPreview: false,
+		panel,
+	};
+	vscodeTabs.push(tab);
+	emitVsCodeTabChange({ opened: [tab] });
+	return tab;
+}
+
+function seedPromptEditorTab(label = 'Prompt: Prompt A', active = true) {
+	return createVsCodeTab('promptManager.editor', label, active);
 }
 
 function resetVsCodeConfigurationMock() {
@@ -75,11 +136,12 @@ function createVsCodeMock() {
 		dispose() { },
 	});
 
-	const createWebviewPanel = (_viewType: string, title: string, _column: unknown, options: unknown) => {
+	const createWebviewPanel = (viewType: string, title: string, _column: unknown, options: unknown) => {
 		const disposeListeners: Array<() => void | Promise<void>> = [];
 		const viewStateListeners: Array<(event: { webviewPanel: any }) => void> = [];
 		const messageListeners: Array<(message: unknown) => void | Promise<void>> = [];
 		const panel: any = {
+			viewType,
 			title,
 			options,
 			iconPath: undefined,
@@ -109,10 +171,23 @@ function createVsCodeMock() {
 				return createDisposable();
 			},
 			reveal: () => {
+				for (const tab of vscodeTabs) {
+					tab.isActive = false;
+				}
+				if (panel.tab) {
+					panel.tab.isActive = true;
+					emitVsCodeTabChange({ changed: [panel.tab] });
+				}
 				panel.revealed = true;
 			},
 			dispose: () => {
+				if (panel.disposed) {
+					return;
+				}
 				panel.disposed = true;
+				if (panel.tab) {
+					removeVsCodeTab(panel.tab);
+				}
 				for (const listener of disposeListeners) {
 					void listener();
 				}
@@ -128,6 +203,7 @@ function createVsCodeMock() {
 				}
 			},
 		};
+		panel.tab = createVsCodeTab(viewType, title, true, panel);
 		vscodeCreatedWebviewPanels.push(panel);
 		return panel;
 	};
@@ -179,6 +255,30 @@ function createVsCodeMock() {
 		},
 		window: {
 			onDidChangeActiveTextEditor: () => createDisposable(),
+			tabGroups: {
+				get all() {
+					return [vscodePrimaryTabGroup];
+				},
+				get activeTabGroup() {
+					return vscodePrimaryTabGroup;
+				},
+				onDidChangeTabs: (listener: (event: { opened: any[]; closed: any[]; changed: any[] }) => void) => {
+					vscodeTabChangeListeners.push(listener);
+					return createDisposable();
+				},
+				close: async (tabOrTabs: any | any[]) => {
+					const tabsToClose = Array.isArray(tabOrTabs) ? tabOrTabs : [tabOrTabs];
+					vscodeClosedTabs.push(...tabsToClose);
+					for (const tab of tabsToClose) {
+						if (tab.panel && !tab.panel.disposed) {
+							tab.panel.dispose();
+						} else {
+							removeVsCodeTab(tab);
+						}
+					}
+					return true;
+				},
+			},
 			createWebviewPanel,
 			createOutputChannel: () => outputChannel,
 			showErrorMessage: () => undefined,
@@ -513,6 +613,42 @@ test('openPrompt posts targeted loading before delayed target prompt resolves', 
 	assert.equal(openMessage?.prompt?.id, 'prompt-b');
 	assert.equal(openMessage?.openRequestVersion, loadingMessage.openRequestVersion);
 	panel.dispose();
+});
+
+test('manager startup collapses duplicate prompt editor webview tabs', async () => {
+	resetVsCodeCommandMock();
+	seedPromptEditorTab('Prompt: Prompt A', true);
+	seedPromptEditorTab('Prompt: Prompt A copy', false);
+
+	await createManager();
+	await flushTurns(2);
+
+	const promptEditorTabs = vscodeTabs.filter(tab => tab.input?.viewType === 'promptManager.editor');
+	assert.equal(promptEditorTabs.length, 1);
+	assert.equal(promptEditorTabs[0]?.label, 'Prompt: Prompt A');
+	assert.equal(vscodeClosedTabs.length, 1);
+});
+
+test('openPrompt closes orphan duplicate prompt editor tab after creating singleton panel', async () => {
+	resetVsCodeCommandMock();
+	seedPromptEditorTab('Prompt: Prompt A orphan', true);
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+	});
+
+	await (manager as any).openPrompt('prompt-a');
+	await flushTurns(2);
+
+	const promptEditorTabs = vscodeTabs.filter(tab => tab.input?.viewType === 'promptManager.editor');
+	assert.equal(vscodeCreatedWebviewPanels.length, 1);
+	assert.equal(promptEditorTabs.length, 1);
+	assert.equal(promptEditorTabs[0]?.panel, vscodeCreatedWebviewPanels[0]);
+	assert.equal(vscodeClosedTabs.length, 1);
+	vscodeCreatedWebviewPanels[0]?.dispose();
 });
 
 test('ready posts prompt before slow ready hydration messages', async () => {

@@ -1,6 +1,5 @@
 /**
- * Editor webview panel — shows prompt configuration form in a separate editor tab.
- * Multiple instances can be open simultaneously (one per prompt).
+ * Webview-редактор промпта — одна переиспользуемая страница настройки промпта в VS Code.
  */
 
 import * as vscode from 'vscode';
@@ -113,6 +112,7 @@ import {
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
 const SINGLE_EDITOR_PANEL_KEY = '__prompt_editor_singleton__';
+const EDITOR_PANEL_VIEW_TYPE = 'promptManager.editor';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
 const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 600;
@@ -175,6 +175,10 @@ export class EditorPanelManager {
 	private reportEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string; lastModifiedMs: number | null }>();
 	private panelKeyByReportEditorUri = new Map<string, string>();
 	private reportEditorPanels = new Map<string, vscode.WebviewPanel>();
+	/** Панели prompt editor, созданные текущим extension host, для silent cleanup дублей. */
+	private promptEditorPanels = new Set<vscode.WebviewPanel>();
+	/** Debounce cleanup вкладок, чтобы дождаться обновления VS Code tabGroups после reveal/create. */
+	private promptEditorTabCleanupTimer: NodeJS.Timeout | null = null;
 	private promptPlanByPanelKey = new Map<string, {
 		uri: vscode.Uri;
 		lastSyncedContent: string;
@@ -220,6 +224,75 @@ export class EditorPanelManager {
 
 		const promptId = (this.panelPromptRefs.get(SINGLE_EDITOR_PANEL_KEY)?.id || '').trim() || null;
 		void this.stateService.saveStartupEditorRestoreState(Boolean(openPanels.get(SINGLE_EDITOR_PANEL_KEY)), promptId);
+	}
+
+	/** Проверяет, что вкладка VS Code принадлежит editor webview промптов. */
+	private isPromptEditorTab(tab: vscode.Tab): boolean {
+		const input = tab.input as { viewType?: unknown } | null | undefined;
+		return Boolean(input && typeof input === 'object' && input.viewType === EDITOR_PANEL_VIEW_TYPE);
+	}
+
+	/** Возвращает все видимые вкладки prompt editor независимо от внутреннего Map-трекинга. */
+	private getPromptEditorTabs(): vscode.Tab[] {
+		return vscode.window.tabGroups.all
+			.flatMap(group => [...group.tabs])
+			.filter(tab => this.isPromptEditorTab(tab));
+	}
+
+	/** Выбирает вкладку prompt editor, которую нужно оставить открытой. */
+	private resolvePromptEditorTabToKeep(tabs: vscode.Tab[]): vscode.Tab | undefined {
+		const activeGroupTab = vscode.window.tabGroups.activeTabGroup.activeTab;
+		if (activeGroupTab && tabs.includes(activeGroupTab)) {
+			return activeGroupTab;
+		}
+
+		return tabs.find(tab => tab.isActive) || tabs[0];
+	}
+
+	/** Закрывает лишние VS Code вкладки prompt editor, даже если они выпали из openPanels. */
+	private closeDuplicatePromptEditorTabs(): void {
+		const tabs = this.getPromptEditorTabs();
+		if (tabs.length <= 1) {
+			return;
+		}
+
+		const tabToKeep = this.resolvePromptEditorTabToKeep(tabs);
+		const tabsToClose = tabToKeep ? tabs.filter(tab => tab !== tabToKeep) : tabs.slice(1);
+		if (tabsToClose.length === 0) {
+			return;
+		}
+
+		void vscode.window.tabGroups.close(tabsToClose, true);
+	}
+
+	/** Планирует cleanup дублей после того, как VS Code применит изменение tabGroups. */
+	private schedulePromptEditorTabCleanup(): void {
+		if (this.promptEditorTabCleanupTimer) {
+			clearTimeout(this.promptEditorTabCleanupTimer);
+		}
+
+		this.promptEditorTabCleanupTimer = setTimeout(() => {
+			this.promptEditorTabCleanupTimer = null;
+			this.closeDuplicatePromptEditorTabs();
+		}, 0);
+	}
+
+	/** Silent-dispose известных дублей, чтобы их dispose-handler не перезаписал активный промпт. */
+	private disposeTrackedDuplicatePromptEditorPanels(panelToKeep: vscode.WebviewPanel): void {
+		for (const panel of [...this.promptEditorPanels]) {
+			if (panel === panelToKeep || this.silentClosePanels.has(panel)) {
+				continue;
+			}
+
+			this.silentClosePanels.add(panel);
+			panel.dispose();
+		}
+	}
+
+	/** Закрепляет singleton prompt editor на уровне WebviewPanel и вкладок VS Code. */
+	private enforceSinglePromptEditorPage(panelToKeep: vscode.WebviewPanel): void {
+		this.disposeTrackedDuplicatePromptEditorPanels(panelToKeep);
+		this.schedulePromptEditorTabCleanup();
 	}
 
 	private setPanelPromptRef(panelKey: string, prompt: Prompt): void {
@@ -2845,6 +2918,13 @@ export class EditorPanelManager {
 					this.scheduleGlobalAgentContextSync(this.pendingGlobalAgentContextSync);
 				}
 			}),
+			vscode.window.tabGroups.onDidChangeTabs((event) => {
+				const hasPromptEditorTabChange = [...event.opened, ...event.changed]
+					.some(tab => this.isPromptEditorTab(tab));
+				if (hasPromptEditorTabChange || this.getPromptEditorTabs().length > 1) {
+					this.schedulePromptEditorTabCleanup();
+				}
+			}),
 			vscode.workspace.onDidChangeConfiguration((event) => {
 				if (
 					!event.affectsConfiguration('promptManager.editor.globalContextUrl')
@@ -2875,6 +2955,8 @@ export class EditorPanelManager {
 				void this.handleContentEditorClosed(document);
 			})
 		);
+
+		this.schedulePromptEditorTabCleanup();
 
 		const reportWatcher = vscode.workspace.createFileSystemWatcher(
 			new vscode.RelativePattern(this.storageService.getStorageDirectoryPath(), '**/report.txt')
@@ -6121,6 +6203,7 @@ export class EditorPanelManager {
 
 		this.flushPendingPanelMessages(panelKey, panel, prompt);
 		panel.reveal(vscode.ViewColumn.One);
+		this.enforceSinglePromptEditorPage(panel);
 		this.syncStartupEditorRestoreState();
 	}
 
@@ -6182,6 +6265,7 @@ export class EditorPanelManager {
 			}
 			this.syncStartupEditorRestoreState();
 			reusableSingletonPanel.reveal();
+			this.enforceSinglePromptEditorPage(reusableSingletonPanel);
 			return;
 		}
 
@@ -6367,7 +6451,7 @@ export class EditorPanelManager {
 		}
 
 		const panel = vscode.window.createWebviewPanel(
-			'promptManager.editor',
+			EDITOR_PANEL_VIEW_TYPE,
 			`⚡ ${title}`,
 			vscode.ViewColumn.One,
 			{
@@ -6375,6 +6459,10 @@ export class EditorPanelManager {
 				...this.getEditorWebviewOptions(prompt.contextFiles),
 			}
 		);
+		this.promptEditorPanels.add(panel);
+		panel.onDidDispose(() => {
+			this.promptEditorPanels.delete(panel);
+		});
 
 		panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'sidebar-icon.svg');
 		const bootId = this.createPanelBootId();
@@ -6392,6 +6480,7 @@ export class EditorPanelManager {
 		openPanels.set(panelKey, panel);
 		this.panelDirtySetters.set(panelKey, setPanelDirty);
 		this.syncStartupEditorRestoreState();
+		this.enforceSinglePromptEditorPage(panel);
 
 		for (const existingPanel of panelsToDispose) {
 			this.silentClosePanels.add(existingPanel);
@@ -9501,6 +9590,10 @@ export class EditorPanelManager {
 	/** Close all open panels */
 	disposeAll(): void {
 		this.clearGlobalAgentContextSyncTimer();
+		if (this.promptEditorTabCleanupTimer) {
+			clearTimeout(this.promptEditorTabCleanupTimer);
+			this.promptEditorTabCleanupTimer = null;
+		}
 		this.pendingGlobalAgentContextSync = null;
 		this.isGlobalAgentContextSyncInProgress = false;
 		for (const d of this.contentSyncDisposables) {
@@ -9511,10 +9604,12 @@ export class EditorPanelManager {
 			d.dispose();
 		}
 		this.chatTrackingDisposables.clear();
-		for (const panel of openPanels.values()) {
+		const editorPanelsToDispose = new Set([...openPanels.values(), ...this.promptEditorPanels]);
+		for (const panel of editorPanelsToDispose) {
 			panel.dispose();
 		}
 		openPanels.clear();
+		this.promptEditorPanels.clear();
 		this.panelDirtySetters.clear();
 		this.panelPromptRefs.clear();
 		this.silentClosePanels.clear();

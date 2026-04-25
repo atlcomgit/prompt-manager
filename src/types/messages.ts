@@ -3,7 +3,7 @@
  */
 
 import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
-import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
+import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 
 export type GlobalContextSourceMessage = 'empty' | 'manual' | 'remote';
 export type ChatContextAutoLoadStateMessage = 'started' | 'completed' | 'fallback';
@@ -65,6 +65,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'openGitOverlay'; promptBranch: string; projects: string[] }
 	| { type: 'gitOverlayVisibility'; open: boolean; promptBranch: string; projects: string[] }
 	| { type: 'refreshGitOverlay'; promptBranch: string; projects: string[]; mode?: 'local' | 'fetch' | 'sync' }
+	| { type: 'gitOverlayHydrateProjectDetails'; promptBranch: string; projects: string[]; project: string; snapshotGeneratedAt: string }
 	| { type: 'saveGitOverlayTrackedBranchPreference'; branch: string; branchesByProject?: Record<string, string> }
 	| { type: 'gitOverlayApplyBranchTargets'; promptBranch: string; projects: string[]; sourceBranchesByProject?: Record<string, string>; targetBranchesByProject?: Record<string, string> }
 	| { type: 'gitOverlaySwitchBranch'; promptBranch: string; projects: string[]; branch?: string; trackedBranchesByProject?: Record<string, string> }
@@ -181,6 +182,8 @@ export type ExtensionToWebviewMessage =
 	| { type: 'improvedPromptText'; content: string }
 	| { type: 'generatedReport'; report: string }
 	| { type: 'gitOverlaySnapshot'; snapshot: GitOverlaySnapshot; requestId?: string }
+	| { type: 'gitOverlayOtherProjectsSnapshot'; otherProjects: GitOverlaySnapshot['projects'] }
+	| { type: 'gitOverlayProjectSnapshot'; projectSnapshot: GitOverlayProjectSnapshot; snapshotGeneratedAt: string }
 	| { type: 'gitOverlayBusy'; action: string | null; reason?: GitOverlayBusyReason | null }
 	| { type: 'gitOverlayFileHistory'; history: GitOverlayFileHistoryPayload }
 	| { type: 'gitOverlayCommitMessagesGenerated'; messages: GitOverlayProjectCommitMessage[]; requestId?: string }

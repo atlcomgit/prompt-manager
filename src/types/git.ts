@@ -139,6 +139,9 @@ export interface GitOverlayProjectSnapshot {
 		workingTree: GitOverlayChangeFile[];
 		untracked: GitOverlayChangeFile[];
 	};
+	changeDetailsHydrated?: boolean;
+	branchDetailsHydrated?: boolean;
+	reviewHydrated?: boolean;
 	review: GitOverlayReviewState;
 	recentCommits: GitOverlayCommit[];
 	staleLocalBranches: string[];
@@ -150,9 +153,11 @@ export interface GitOverlayProjectSnapshot {
 
 export interface GitOverlaySnapshot {
 	generatedAt: string;
+	detailLevel?: 'full' | 'summary';
 	promptBranch: string;
 	trackedBranches: string[];
 	projects: GitOverlayProjectSnapshot[];
+	otherProjects?: GitOverlayProjectSnapshot[];
 }
 
 export interface GitOverlayProjectCommitMessage {

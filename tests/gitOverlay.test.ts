@@ -28,6 +28,7 @@ import {
 	resolveExistingGitOverlayTrackedBranches,
 	resolveGitOverlayBranchNames,
 	resolveGitOverlaySnapshotProjectScope,
+	shouldResetGitOverlayStateOnPromptOpen,
 	applyGitOverlayOtherProjectsExcludedPaths,
 	normalizeGitOverlayOtherProjectsExcludedPaths,
 } from '../src/utils/gitOverlay.js';
@@ -91,6 +92,8 @@ function createTestProject(overrides: TestProjectOverrides = {}): GitOverlayProj
 			workingTree: [],
 			untracked: [],
 		},
+		branchDetailsHydrated: true,
+		reviewHydrated: true,
 		review: {
 			remote: null,
 			request: null,
@@ -127,9 +130,11 @@ function createTestProject(overrides: TestProjectOverrides = {}): GitOverlayProj
 function createTestSnapshot(overrides: Partial<GitOverlaySnapshot> = {}): GitOverlaySnapshot {
 	return {
 		generatedAt: '2026-04-02T00:00:00.000Z',
+		detailLevel: 'full',
 		promptBranch: 'feature/task-42',
 		trackedBranches: ['main'],
 		projects: [],
+		otherProjects: [],
 		...overrides,
 	};
 }
@@ -248,6 +253,150 @@ test('resolveExistingGitOverlayTrackedBranches falls back to discovered existing
 	assert.deepEqual(branches, ['main', 'develop']);
 });
 
+test('GitOverlay shows review loading state until deferred review hydration completes', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			projects: [createTestProject({
+				currentBranch: 'feature/task-42',
+				promptBranch: 'feature/task-42',
+				reviewHydrated: false,
+			})],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayLoading/);
+	assert.match(markup, /data-pm-git-overlay-section-loader="true"/);
+	assert.match(markup, /data-pm-git-overlay-summary-loader="true"/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayReviewRequestUnsupported/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayReviewRequestTargetBranch/);
+});
+
+test('GitOverlay keeps follow-up steps in loading mode while the summary snapshot is still hydrating', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			detailLevel: 'summary',
+			projects: [createTestProject({
+				currentBranch: 'feature/task-42',
+				promptBranch: 'feature/task-42',
+				changeDetailsHydrated: false,
+				branchDetailsHydrated: false,
+				reviewHydrated: false,
+			})],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayLoading/);
+	assert.match(markup, /data-pm-git-overlay-section-loader="true"/);
+	assert.match(markup, /data-pm-git-overlay-summary-loader="true"/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayNoProjectsWithChanges/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPushAlreadyPublished/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayReviewRequestUnsupported/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayWaitingPreviousStep/);
+});
+
+test('GitOverlay masks stale snapshot content with loaders while a fresh open snapshot is pending', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'overlay:loading',
+		snapshot: createTestSnapshot({
+			projects: [createTestProject({
+				currentBranch: 'feature/task-42',
+				promptBranch: 'feature/task-42',
+				upstream: 'origin/feature/task-42',
+			})],
+		}),
+	});
+
+	assert.match(markup, /data-pm-git-overlay-section-loader="true"/);
+	assert.match(markup, /data-pm-git-overlay-summary-loader="true"/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayNoProjectsWithChanges/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPushAlreadyPublished/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayReviewRequestUnsupported/);
+});
+
+test('GitOverlay keeps step content visible during automatic refresh and shows only header progress', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'refresh:auto',
+		selectedProjects: ['api'],
+		snapshot: createTestSnapshot({
+			projects: [createTestProject({
+				project: 'api',
+				currentBranch: 'feature/task-42',
+				promptBranch: 'feature/task-42',
+				upstream: 'origin/feature/task-42',
+			})],
+		}),
+	});
+
+	assert.match(markup, /data-pm-git-overlay-progress="auto"/);
+	assert.match(markup, /editor\.gitOverlayProjects: 1/);
+	assert.doesNotMatch(markup, /data-pm-git-overlay-section-loader="true"/);
+	assert.doesNotMatch(markup, /data-pm-git-overlay-summary-loader="true"/);
+});
+
+test('GitOverlay suppresses provisional no-changes hint during automatic refresh', () => {
+	const markup = renderGitOverlayMarkup({
+		busyAction: 'refresh:auto',
+		snapshot: createTestSnapshot({
+			trackedBranches: ['main'],
+			projects: [createTestProject({
+				currentBranch: 'main',
+				promptBranch: 'feature/task-42',
+			})],
+		}),
+	});
+
+	assert.match(markup, /data-pm-git-overlay-progress="auto"/);
+	assert.doesNotMatch(markup, /data-pm-git-overlay-section-loader="true"/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayStepSwitchNoChangesToCommit/);
+});
+
+test('GitOverlay keeps loader cards visible until deferred branch hydration completes', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			projects: [createTestProject({
+				currentBranch: 'feature/task-42',
+				promptBranch: 'feature/task-42',
+				branchDetailsHydrated: false,
+				review: {
+					remote: {
+						provider: 'github',
+						host: 'github.com',
+						remoteName: 'origin',
+						remoteUrl: 'https://github.com/acme/api.git',
+						repositoryPath: 'acme/api',
+						owner: 'acme',
+						name: 'api',
+						supported: true,
+						cliCommand: 'gh',
+						cliAvailable: true,
+						actionLabel: 'Pull request',
+					},
+					request: {
+						id: '1',
+						url: 'https://github.com/acme/api/pull/1',
+						state: 'open',
+						title: 'Task 42',
+						number: '1',
+						sourceBranch: 'feature/task-42',
+						targetBranch: 'main',
+						isDraft: false,
+						comments: [],
+					},
+					titlePrefix: 'PM',
+				},
+			})],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayLoading/);
+	assert.match(markup, /data-pm-git-overlay-section-loader="true"/);
+	assert.match(markup, /data-pm-git-overlay-summary-loader="true"/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayProjectCurrentBranch/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayProjectExpectedBranch/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPushPromptBranch/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPushAlreadyPublished/);
+});
+
 test('resolveGitOverlayBusyActionName keeps explicit bulk scope even for a single project', () => {
 	assert.equal(
 		resolveGitOverlayBusyActionName('generateCommitMessage', [{ project: 'api' }], 'all'),
@@ -265,6 +414,79 @@ test('resolveGitOverlayBusyActionName keeps explicit bulk scope even for a singl
 		resolveGitOverlayBusyActionName('commitStaged', [{ project: 'api' }], 'single'),
 		'commitStaged:api',
 	);
+});
+
+test('shouldResetGitOverlayStateOnPromptOpen preserves an already open overlay for the same prompt', () => {
+	assert.equal(
+		shouldResetGitOverlayStateOnPromptOpen({
+			overlayOpen: true,
+			currentPromptId: 'prompt-a',
+			currentPromptUuid: 'uuid-a',
+			incomingPromptId: 'prompt-a',
+			incomingPromptUuid: 'uuid-a',
+		}),
+		false,
+	);
+	assert.equal(
+		shouldResetGitOverlayStateOnPromptOpen({
+			overlayOpen: true,
+			currentPromptId: 'old-slug',
+			currentPromptUuid: 'uuid-a',
+			incomingPromptId: 'new-slug',
+			incomingPromptUuid: 'uuid-a',
+			previousPromptId: 'old-slug',
+		}),
+		false,
+	);
+});
+
+test('shouldResetGitOverlayStateOnPromptOpen resets the overlay for a different prompt or closed overlay', () => {
+	assert.equal(
+		shouldResetGitOverlayStateOnPromptOpen({
+			overlayOpen: true,
+			currentPromptId: 'prompt-a',
+			currentPromptUuid: 'uuid-a',
+			incomingPromptId: 'prompt-b',
+			incomingPromptUuid: 'uuid-b',
+		}),
+		true,
+	);
+	assert.equal(
+		shouldResetGitOverlayStateOnPromptOpen({
+			overlayOpen: true,
+			currentPromptId: 'prompt-a',
+			incomingPromptId: 'prompt-b',
+			previousPromptId: 'prompt-a',
+		}),
+		true,
+	);
+	assert.equal(
+		shouldResetGitOverlayStateOnPromptOpen({
+			overlayOpen: false,
+			currentPromptId: 'prompt-a',
+			currentPromptUuid: 'uuid-a',
+			incomingPromptId: 'prompt-a',
+			incomingPromptUuid: 'uuid-a',
+		}),
+		true,
+	);
+});
+
+test('GitOverlay auto-collapses completed warning-free sections on first open', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			projects: [createTestProject({
+				currentBranch: 'feature/task-42',
+				promptBranch: 'feature/task-42',
+				upstream: 'origin/feature/task-42',
+				reviewHydrated: false,
+			})],
+		}),
+	});
+
+	assert.doesNotMatch(markup, /editor\.gitOverlayNoProjectsWithChanges/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPushHintDetail/);
+	assert.match(markup, /editor\.gitOverlayLoading/);
 });
 
 test('resolveGitOverlayBulkGenerateProjects keeps only project buttons that are still active', () => {
@@ -372,6 +594,27 @@ test('resolveGitOverlayTrackedBranchOptions falls back to current branches and p
 			'feature/task-42',
 		),
 		['main', 'develop'],
+	);
+});
+
+test('resolveGitOverlayTrackedBranchOptions prefers hydrated tracked branches before current branch fallback', () => {
+	assert.deepEqual(
+		resolveGitOverlayTrackedBranchOptions(
+			[],
+			[
+				{
+					available: true,
+					currentBranch: 'release',
+					branches: [
+						{ name: 'release', kind: 'current', exists: true },
+						{ name: 'main', kind: 'tracked', exists: true },
+						{ name: 'feature/task-42', kind: 'tracked', exists: true },
+					],
+				},
+			],
+			'feature/task-42',
+		),
+		['main'],
 	);
 });
 
@@ -2270,6 +2513,53 @@ test('GitOverlay does not show generic no-project-changes hint when another step
 	assert.doesNotMatch(markup, /editor\.gitOverlayStepNoProjectChanges/);
 });
 
+test('GitOverlay does not show no-changes commit hint from current-branch fallback after branch hydration', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			trackedBranches: [],
+			projects: [
+				createTestProject({
+					project: 'selected-clean',
+					currentBranch: 'release',
+					promptBranch: 'feature/task-42',
+					branches: [
+						{
+							name: 'release',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: '',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: false,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'main',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+					branchDetailsHydrated: true,
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayProjectNeedsTrackedOrPromptSwitch/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayStepSwitchNoChangesToCommit/);
+});
+
 test('GitOverlay excludes the current branch from expected branch options', () => {
 	const markup = renderGitOverlayMarkup({
 		snapshot: createTestSnapshot({
@@ -3617,6 +3907,8 @@ test('GitOverlay shows changed projects outside selected prompt projects in a se
 					project: 'selected-clean',
 					currentBranch: 'feature/task-42',
 				}),
+			],
+			otherProjects: [
 				createTestProject({
 					project: 'docs-dirty',
 					currentBranch: 'feature/task-42',
@@ -3662,6 +3954,8 @@ test('applyGitOverlayOtherProjectsExcludedPaths filters only unselected project 
 					staged: [createTestChange({ project: 'selected-clean', path: 'dist/keep-me.txt' })],
 				},
 			}),
+		],
+		otherProjects: [
 			createTestProject({
 				project: 'docs-dirty',
 				changeGroups: {
@@ -3683,10 +3977,10 @@ test('applyGitOverlayOtherProjectsExcludedPaths filters only unselected project 
 
 	assert.equal(filtered.projects[0]?.changeGroups.staged.length, 1);
 	assert.deepEqual(
-		filtered.projects[1]?.changeGroups.staged.map(change => change.path),
+		filtered.otherProjects?.[0]?.changeGroups.staged.map(change => change.path),
 		['README.md'],
 	);
-	assert.equal(filtered.projects[1]?.changeGroups.untracked.length, 0);
+	assert.equal(filtered.otherProjects?.[0]?.changeGroups.untracked.length, 0);
 });
 
 test('GitOverlay shows exclude action instead of inactive switch for clean selected projects without step 1 work', () => {

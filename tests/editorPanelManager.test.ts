@@ -325,6 +325,749 @@ async function withImmediateTimers<T>(run: () => Promise<T>): Promise<T> {
 	}
 }
 
+function createGitOverlayProjectSnapshot(project: string, overrides: Record<string, unknown> = {}) {
+	return {
+		project,
+		repositoryPath: `/tmp/${project}`,
+		available: true,
+		error: '',
+		commitError: '',
+		currentBranch: 'feature/task-42',
+		promptBranch: 'feature/task-42',
+		dirty: false,
+		hasConflicts: false,
+		upstream: 'origin/feature/task-42',
+		ahead: 0,
+		behind: 0,
+		lastCommit: null,
+		branches: [],
+		cleanupBranches: [],
+		changeGroups: {
+			merge: [],
+			staged: [],
+			workingTree: [],
+			untracked: [],
+		},
+		changeDetailsHydrated: true,
+		branchDetailsHydrated: true,
+		reviewHydrated: true,
+		review: { remote: null, request: null, error: '', setupAction: null, titlePrefix: '', unsupportedReason: null },
+		recentCommits: [],
+		staleLocalBranches: [],
+		graph: { nodes: [], edges: [] },
+		...overrides,
+	} as any;
+}
+
+test('postGitOverlaySnapshot posts selected projects first and other projects later', async () => {
+	const { manager } = await createManager();
+	const postedMessages: any[] = [];
+	const debugEvents: Array<{ event: string; payload?: Record<string, unknown> }> = [];
+	const deferredOtherProjects = createDeferred<any[]>();
+	const postMessage = (message: unknown) => {
+		postedMessages.push(message);
+	};
+	(manager as any).logReportDebug = (event: string, payload?: Record<string, unknown>) => {
+		debugEvents.push({ event, payload });
+	};
+	const currentPrompt = createPrompt({
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+			['peer', '/tmp/peer'],
+		]),
+		getWorkspaceFolders: () => ['selected', 'peer'],
+	};
+	(manager as any).gitService = {
+		getGitOverlaySnapshot: async () => ({
+			generatedAt: '2026-04-24T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [createGitOverlayProjectSnapshot('selected')],
+		}),
+		getGitOverlayOtherProjectsSnapshot: async () => deferredOtherProjects.promise,
+	};
+	(manager as any).gitOverlaySessions.set('panel-a', {
+		active: true,
+		promptBranch: 'feature/task-42',
+		selectedProjects: ['selected'],
+		snapshotProjects: ['selected', 'peer'],
+		snapshotVersion: 0,
+		postMessage,
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+
+	await withImmediateTimers(async () => {
+		await (manager as any).postGitOverlaySnapshot(postMessage, currentPrompt, 'feature/task-42', ['selected'], {
+			metricSource: 'open',
+		});
+	});
+
+	assert.equal(postedMessages.length, 1);
+	assert.equal(postedMessages[0]?.type, 'gitOverlaySnapshot');
+	assert.deepEqual(postedMessages[0]?.snapshot?.projects.map((project: any) => project.project), ['selected']);
+	assert.deepEqual(postedMessages[0]?.snapshot?.otherProjects || [], []);
+
+	deferredOtherProjects.resolve([
+		createGitOverlayProjectSnapshot('peer', {
+			dirty: true,
+			changeGroups: {
+				merge: [],
+				staged: [{
+					project: 'peer',
+					path: 'README.md',
+					status: 'M',
+					group: 'staged',
+					conflicted: false,
+					staged: true,
+					fileSizeBytes: 0,
+					additions: null,
+					deletions: null,
+					isBinary: false,
+				}],
+				workingTree: [],
+				untracked: [],
+			},
+		}),
+	]);
+	await flushTurns();
+
+	assert.equal(postedMessages.length, 2);
+	assert.equal(postedMessages[1]?.type, 'gitOverlayOtherProjectsSnapshot');
+	assert.deepEqual(postedMessages[1]?.otherProjects.map((project: any) => project.project), ['peer']);
+	const snapshotMetric = debugEvents.find(item => item.event === 'gitOverlay.snapshot.computed');
+	const otherProjectsMetric = debugEvents.find(item => item.event === 'gitOverlay.otherProjectsSnapshot.computed');
+	assert.ok(snapshotMetric);
+	assert.ok(otherProjectsMetric);
+	assert.equal(snapshotMetric.payload?.source, 'open');
+	assert.equal(otherProjectsMetric.payload?.source, 'open');
+	assert.equal(typeof snapshotMetric.payload?.durationMs, 'number');
+	assert.equal(typeof otherProjectsMetric.payload?.durationMs, 'number');
+});
+
+test('postGitOverlaySnapshot can skip lazy other-project scheduling for initial summary open', async () => {
+	const { manager } = await createManager();
+	const postedMessages: any[] = [];
+	const postMessage = (message: unknown) => {
+		postedMessages.push(message);
+	};
+	const currentPrompt = createPrompt({
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+			['peer', '/tmp/peer'],
+		]),
+		getWorkspaceFolders: () => ['selected', 'peer'],
+	};
+	(manager as any).gitService = {
+		getGitOverlaySnapshot: async () => ({
+			generatedAt: '2026-04-24T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [createGitOverlayProjectSnapshot('selected')],
+		}),
+		getGitOverlayOtherProjectsSnapshot: async () => {
+			throw new Error('other projects should not be scheduled');
+		},
+	};
+	(manager as any).gitOverlaySessions.set('panel-a', {
+		active: true,
+		promptBranch: 'feature/task-42',
+		selectedProjects: ['selected'],
+		snapshotProjects: ['selected', 'peer'],
+		snapshotVersion: 0,
+		postMessage,
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+
+	await withImmediateTimers(async () => {
+		await (manager as any).postGitOverlaySnapshot(postMessage, currentPrompt, 'feature/task-42', ['selected'], {
+			metricSource: 'open',
+			detailLevel: 'summary',
+			skipOtherProjects: true,
+		});
+		await flushTurns();
+	});
+
+	assert.equal(postedMessages.length, 1);
+	assert.equal(postedMessages[0]?.type, 'gitOverlaySnapshot');
+	assert.deepEqual(postedMessages[0]?.snapshot?.otherProjects || [], []);
+});
+
+test('postGitOverlaySnapshot keeps open summary snapshot alive when panel postMessage callback is refreshed', async () => {
+	const { manager } = await createManager();
+	const deferredSnapshot = createDeferred<any>();
+	const postedMessagesA: any[] = [];
+	const postedMessagesB: any[] = [];
+	const postMessageA = (message: unknown) => {
+		postedMessagesA.push(message);
+	};
+	const postMessageB = (message: unknown) => {
+		postedMessagesB.push(message);
+	};
+	const currentPrompt = createPrompt({
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+
+	(manager as any).ensureGitOverlayReactiveSources = async () => undefined;
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+		]),
+		getWorkspaceFolders: () => ['selected'],
+	};
+	(manager as any).gitService = {
+		getGitOverlaySnapshot: async () => deferredSnapshot.promise,
+	};
+	(manager as any).gitOverlaySessions.set('panel-a', {
+		active: true,
+		promptBranch: 'feature/task-42',
+		selectedProjects: ['selected'],
+		snapshotProjects: ['selected'],
+		snapshotVersion: 0,
+		postMessage: postMessageA,
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+
+	const snapshotPromise = (manager as any).postGitOverlaySnapshot(
+		postMessageA,
+		currentPrompt,
+		'feature/task-42',
+		['selected'],
+		{
+			metricSource: 'open',
+			detailLevel: 'summary',
+			skipOtherProjects: true,
+		},
+	);
+
+	await flushTurns();
+	await (manager as any).setGitOverlaySessionVisibility(
+		'panel-a',
+		postMessageB,
+		currentPrompt,
+		'feature/task-42',
+		['selected'],
+		true,
+	);
+	deferredSnapshot.resolve({
+		generatedAt: '2026-04-24T00:00:00.000Z',
+		promptBranch: 'feature/task-42',
+		trackedBranches: ['main'],
+		projects: [createGitOverlayProjectSnapshot('selected')],
+	});
+	await snapshotPromise;
+
+	assert.equal(postedMessagesA.length, 1);
+	assert.equal(postedMessagesA[0]?.type, 'gitOverlaySnapshot');
+	assert.equal(postedMessagesB.length, 0);
+});
+
+test('scheduleGitOverlayOpenHydration defers branch and review state into lightweight follow-up patches', async () => {
+	const { manager } = await createManager();
+	const capturedSnapshotOptions: any[] = [];
+	const capturedBranchCalls: any[] = [];
+	const capturedReviewCalls: any[] = [];
+	const deferredBranchHydration = createDeferred<{
+		upstream: string;
+		ahead: number;
+		behind: number;
+		lastCommit: null;
+		branches: never[];
+		cleanupBranches: never[];
+		staleLocalBranches: never[];
+		graph: { nodes: never[]; edges: never[] };
+	}>();
+	const postedMessages: any[] = [];
+	const postMessage = (message: unknown) => {
+		postedMessages.push(message);
+	};
+	const currentPrompt = createPrompt({
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+		]),
+		getWorkspaceFolders: () => ['selected'],
+	};
+	(manager as any).gitService = {
+		getGitOverlaySnapshot: async (
+			_paths: unknown,
+			_selectedProjects: unknown,
+			_promptBranch: unknown,
+			_trackedBranches: unknown,
+			options: unknown,
+		) => {
+			capturedSnapshotOptions.push(options);
+			return {
+				generatedAt: '2026-04-24T00:00:00.000Z',
+				promptBranch: 'feature/task-42',
+				trackedBranches: ['main'],
+				projects: [createGitOverlayProjectSnapshot('selected', {
+					reviewHydrated: false,
+					branchDetailsHydrated: false,
+					changeDetailsHydrated: false,
+				})],
+			};
+		},
+		getGitOverlayProjectBranchDetails: async (
+			_paths: unknown,
+			_projectName: unknown,
+			_promptBranch: unknown,
+			_trackedBranches: unknown,
+		) => {
+			capturedBranchCalls.push({
+				projectName: _projectName,
+				promptBranch: _promptBranch,
+				trackedBranches: _trackedBranches,
+			});
+			return deferredBranchHydration.promise;
+		},
+		getGitOverlayProjectReviewState: async (
+			_paths: unknown,
+			_projectName: unknown,
+			_promptBranch: unknown,
+		) => {
+			capturedReviewCalls.push({
+				projectName: _projectName,
+				promptBranch: _promptBranch,
+			});
+			return {
+				upstream: 'origin/feature/task-42',
+				ahead: 0,
+				behind: 0,
+				lastCommit: null,
+				branches: [],
+				cleanupBranches: [],
+				staleLocalBranches: [],
+				graph: { nodes: [], edges: [] },
+			};
+		},
+		getGitOverlayProjectSnapshot: async (
+			_paths: unknown,
+			_projectName: unknown,
+			_promptBranch: unknown,
+			_trackedBranches: unknown,
+			_options: unknown,
+		) => {
+			return createGitOverlayProjectSnapshot('selected', {
+				reviewHydrated: true,
+				changeDetailsHydrated: false,
+			});
+		},
+	};
+	(manager as any).gitOverlaySessions.set('panel-a', {
+		active: true,
+		promptBranch: 'feature/task-42',
+		selectedProjects: ['selected'],
+		snapshotProjects: ['selected'],
+		snapshotVersion: 0,
+		postMessage,
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+
+	await withImmediateTimers(async () => {
+		(manager as any).scheduleGitOverlayOpenHydration(
+			postMessage,
+			currentPrompt,
+			'feature/task-42',
+			['selected'],
+		);
+		await flushTurns();
+	});
+
+	assert.equal(capturedSnapshotOptions.length, 1);
+	assert.equal(capturedSnapshotOptions[0]?.prefetchedReviewStatesByProject, undefined);
+	assert.equal(capturedSnapshotOptions[0]?.detailLevel, 'full');
+	assert.equal(capturedSnapshotOptions[0]?.includeChangeDetails, false);
+	assert.equal(capturedSnapshotOptions[0]?.includeBranchDetails, false);
+	assert.equal(capturedSnapshotOptions[0]?.includeReviewState, false);
+	assert.equal(capturedBranchCalls.length, 1);
+	assert.equal(capturedBranchCalls[0]?.projectName, 'selected');
+	assert.equal(capturedBranchCalls[0]?.promptBranch, 'feature/task-42');
+	assert.equal(capturedReviewCalls.length, 1);
+	assert.equal(capturedReviewCalls[0]?.projectName, 'selected');
+	assert.equal(capturedReviewCalls[0]?.promptBranch, 'feature/task-42');
+
+	deferredBranchHydration.resolve({
+		upstream: 'origin/feature/task-42',
+		ahead: 0,
+		behind: 0,
+		lastCommit: null,
+		branches: [],
+		cleanupBranches: [],
+		staleLocalBranches: [],
+		graph: { nodes: [], edges: [] },
+	});
+	await flushTurns();
+
+	assert.equal(postedMessages.filter(message => (message as any)?.type === 'gitOverlayProjectSnapshot').length, 2);
+});
+
+test('scheduleGitOverlayOpenHydration starts review hydration without waiting for branch hydration', async () => {
+	const { manager } = await createManager();
+	const deferredBranchHydration = createDeferred<{
+		upstream: string;
+		ahead: number;
+		behind: number;
+		lastCommit: null;
+		branches: never[];
+		cleanupBranches: never[];
+		staleLocalBranches: never[];
+		graph: { nodes: never[]; edges: never[] };
+	}>();
+	const capturedReviewCalls: any[] = [];
+	const postMessage = () => undefined;
+	const currentPrompt = createPrompt({
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+		]),
+		getWorkspaceFolders: () => ['selected'],
+	};
+	(manager as any).gitService = {
+		getGitOverlaySnapshot: async () => ({
+			generatedAt: '2026-04-24T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [createGitOverlayProjectSnapshot('selected', {
+				reviewHydrated: false,
+				branchDetailsHydrated: false,
+				changeDetailsHydrated: false,
+			})],
+		}),
+		getGitOverlayProjectBranchDetails: async () => deferredBranchHydration.promise,
+		getGitOverlayProjectReviewState: async () => {
+			return {
+				remote: null,
+				request: null,
+				error: '',
+				setupAction: null,
+				titlePrefix: '',
+				unsupportedReason: null,
+			};
+		},
+	};
+	(manager as any).gitService.getGitOverlayProjectReviewState = async (
+		_paths: unknown,
+		_projectName: unknown,
+		_promptBranch: unknown,
+	) => {
+		capturedReviewCalls.push({
+			projectName: _projectName,
+			promptBranch: _promptBranch,
+		});
+		return {
+			remote: null,
+			request: null,
+			error: '',
+			setupAction: null,
+			titlePrefix: '',
+			unsupportedReason: null,
+		};
+	};
+	(manager as any).gitOverlaySessions.set('panel-a', {
+		active: true,
+		promptBranch: 'feature/task-42',
+		selectedProjects: ['selected'],
+		snapshotProjects: ['selected'],
+		snapshotVersion: 0,
+		postMessage,
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+
+	await withImmediateTimers(async () => {
+		(manager as any).scheduleGitOverlayOpenHydration(
+			postMessage,
+			currentPrompt,
+			'feature/task-42',
+			['selected'],
+		);
+		await flushTurns();
+	});
+
+	assert.equal(capturedReviewCalls.length, 1);
+	assert.equal(capturedReviewCalls[0]?.projectName, 'selected');
+	assert.equal(capturedReviewCalls[0]?.promptBranch, 'feature/task-42');
+
+	deferredBranchHydration.resolve({
+		upstream: 'origin/feature/task-42',
+		ahead: 0,
+		behind: 0,
+		lastCommit: null,
+		branches: [],
+		cleanupBranches: [],
+		staleLocalBranches: [],
+		graph: { nodes: [], edges: [] },
+	});
+	await flushTurns();
+});
+
+test('postGitOverlayProjectSnapshot posts a single hydrated project patch for the current overlay snapshot', async () => {
+	const { manager } = await createManager();
+	const postedMessages: any[] = [];
+	const postMessage = (message: unknown) => {
+		postedMessages.push(message);
+	};
+	const currentPrompt = createPrompt({
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+		]),
+		getWorkspaceFolders: () => ['selected'],
+	};
+	(manager as any).gitService = {
+		getGitOverlayProjectSnapshot: async () => createGitOverlayProjectSnapshot('selected', {
+			changeDetailsHydrated: true,
+			changeGroups: {
+				merge: [],
+				staged: [{
+					project: 'selected',
+					path: 'src/index.ts',
+					status: 'M',
+					group: 'staged',
+					conflicted: false,
+					staged: true,
+					fileSizeBytes: 120,
+					additions: 12,
+					deletions: 2,
+					isBinary: false,
+				}],
+				workingTree: [],
+				untracked: [],
+			},
+		}),
+	};
+	(manager as any).gitOverlaySessions.set('panel-a', {
+		active: true,
+		promptBranch: 'feature/task-42',
+		selectedProjects: ['selected'],
+		snapshotProjects: ['selected'],
+		snapshotVersion: 0,
+		postMessage,
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+
+	await (manager as any).postGitOverlayProjectSnapshot(
+		postMessage,
+		currentPrompt,
+		'feature/task-42',
+		['selected'],
+		'selected',
+		'2026-04-24T00:00:00.000Z',
+	);
+
+	assert.equal(postedMessages.length, 1);
+	assert.equal(postedMessages[0]?.type, 'gitOverlayProjectSnapshot');
+	assert.equal(postedMessages[0]?.snapshotGeneratedAt, '2026-04-24T00:00:00.000Z');
+	assert.equal(postedMessages[0]?.projectSnapshot?.project, 'selected');
+	assert.equal(postedMessages[0]?.projectSnapshot?.changeDetailsHydrated, true);
+	assert.equal(postedMessages[0]?.projectSnapshot?.changeGroups?.staged?.[0]?.additions, 12);
+});
+
+test('postGitOverlaySnapshot drops stale lazy other-project updates after snapshot version changes', async () => {
+	const { manager } = await createManager();
+	const postedMessages: any[] = [];
+	const deferredOtherProjects = createDeferred<any[]>();
+	const postMessage = (message: unknown) => {
+		postedMessages.push(message);
+	};
+	const currentPrompt = createPrompt({
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+			['peer', '/tmp/peer'],
+		]),
+		getWorkspaceFolders: () => ['selected', 'peer'],
+	};
+	(manager as any).gitService = {
+		getGitOverlaySnapshot: async () => ({
+			generatedAt: '2026-04-24T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [createGitOverlayProjectSnapshot('selected')],
+		}),
+		getGitOverlayOtherProjectsSnapshot: async () => deferredOtherProjects.promise,
+	};
+	(manager as any).gitOverlaySessions.set('panel-a', {
+		active: true,
+		promptBranch: 'feature/task-42',
+		selectedProjects: ['selected'],
+		snapshotProjects: ['selected', 'peer'],
+		snapshotVersion: 0,
+		postMessage,
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+
+	await (manager as any).postGitOverlaySnapshot(postMessage, currentPrompt, 'feature/task-42', ['selected']);
+	(manager as any).gitOverlaySessions.get('panel-a').snapshotVersion += 1;
+
+	deferredOtherProjects.resolve([createGitOverlayProjectSnapshot('peer', { dirty: true })]);
+	await flushTurns();
+
+	assert.equal(postedMessages.length, 1);
+	assert.equal(postedMessages[0]?.type, 'gitOverlaySnapshot');
+});
+
+test('scheduleGitOverlayAutoRefreshForActiveSessions refreshes only other projects for peer-only file changes', async () => {
+	const { manager } = await createManager();
+	const currentPrompt = createPrompt({
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+	let otherProjectsRefreshCalls = 0;
+	let fullRefreshCalls = 0;
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+			['peer', '/tmp/peer'],
+		]),
+		getWorkspaceFolders: () => ['selected', 'peer'],
+	};
+	(manager as any).panelPromptRefs.set('panel-a', currentPrompt);
+	(manager as any).postGitOverlayOtherProjectsSnapshot = async () => {
+		otherProjectsRefreshCalls += 1;
+	};
+	(manager as any).runGitOverlayRefresh = async () => {
+		fullRefreshCalls += 1;
+	};
+	(manager as any).gitOverlaySessions.set('panel-a', {
+		active: true,
+		promptBranch: 'feature/task-42',
+		selectedProjects: ['selected'],
+		snapshotProjects: ['selected', 'peer'],
+		snapshotVersion: 1,
+		postMessage: () => undefined,
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+
+	await withImmediateTimers(async () => {
+		(manager as any).scheduleGitOverlayAutoRefreshForActiveSessions('file', '/tmp/peer/src/changed.ts');
+		await flushTurns();
+	});
+
+	assert.equal(otherProjectsRefreshCalls, 1);
+	assert.equal(fullRefreshCalls, 0);
+});
+
+test('runGitOverlayRefresh emits refresh timing metrics with snapshot source refresh', async () => {
+	const { manager } = await createManager();
+	const debugEvents: Array<{ event: string; payload?: Record<string, unknown> }> = [];
+	const currentPrompt = createPrompt({
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+
+	(manager as any).logReportDebug = (event: string, payload?: Record<string, unknown>) => {
+		debugEvents.push({ event, payload });
+	};
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+		]),
+		getWorkspaceFolders: () => ['selected'],
+	};
+	const postMessage = () => undefined;
+	(manager as any).gitOverlaySessions.set('panel-a', {
+		active: true,
+		promptBranch: 'feature/task-42',
+		selectedProjects: ['selected'],
+		snapshotProjects: ['selected'],
+		snapshotVersion: 0,
+		postMessage,
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+	(manager as any).gitService = {
+		fetchProjects: async () => ({ success: true, errors: [], changedProjects: ['selected'], skippedProjects: [] }),
+		getGitOverlaySnapshot: async () => ({
+			generatedAt: '2026-04-24T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [createGitOverlayProjectSnapshot('selected')],
+		}),
+	};
+
+	await (manager as any).runGitOverlayRefresh(
+		'panel-a',
+		postMessage,
+		currentPrompt,
+		'feature/task-42',
+		['selected'],
+		'fetch',
+		false,
+	);
+
+	const snapshotMetric = debugEvents.find(item => item.event === 'gitOverlay.snapshot.computed');
+	const refreshMetric = debugEvents.find(item => item.event === 'gitOverlay.refresh.completed');
+	assert.ok(snapshotMetric);
+	assert.ok(refreshMetric);
+	assert.equal(snapshotMetric.payload?.source, 'refresh');
+	assert.equal(refreshMetric.payload?.mode, 'fetch');
+	assert.equal(typeof refreshMetric.payload?.durationMs, 'number');
+	assert.equal(typeof refreshMetric.payload?.gitOperationDurationMs, 'number');
+});
+
 test('persistPromptSnapshotForSwitch finishes without waiting for AI enrichment', async () => {
 	const { manager } = await createManager({
 		generateTitle: async () => new Promise(resolve => setTimeout(() => resolve('AI title'), 40)),

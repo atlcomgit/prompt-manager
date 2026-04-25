@@ -71,6 +71,41 @@ function countGitOverlayActionableProjectChanges<T extends GitOverlayActionableP
 		+ project.changeGroups.untracked.length;
 }
 
+type GitOverlayPromptOpenResetInput = {
+	overlayOpen: boolean;
+	currentPromptId?: string;
+	currentPromptUuid?: string;
+	incomingPromptId?: string;
+	incomingPromptUuid?: string;
+	previousPromptId?: string;
+};
+
+/**
+ * Same-prompt reopen messages can arrive after a local overlay open. Preserve the
+ * current overlay state in that case and reset only for a real prompt switch.
+ */
+export function shouldResetGitOverlayStateOnPromptOpen(input: GitOverlayPromptOpenResetInput): boolean {
+	if (!input.overlayOpen) {
+		return true;
+	}
+
+	const currentPromptId = String(input.currentPromptId || '').trim() || '__new__';
+	const currentPromptUuid = String(input.currentPromptUuid || '').trim();
+	const incomingPromptId = String(input.incomingPromptId || '').trim() || '__new__';
+	const incomingPromptUuid = String(input.incomingPromptUuid || '').trim();
+
+	const matchesPersistedPromptId = currentPromptId !== '__new__'
+		&& incomingPromptId !== '__new__'
+		&& currentPromptId === incomingPromptId;
+	const matchesPromptUuid = currentPromptUuid !== ''
+		&& incomingPromptUuid !== ''
+		&& currentPromptUuid === incomingPromptUuid;
+
+	// previousId can describe rename/switch transport metadata, so prompt identity must
+	// still be proven by the active id or prompt UUID before preserving overlay state.
+	return !(matchesPersistedPromptId || matchesPromptUuid);
+}
+
 /** Нормализует busy action для bulk/single операций git overlay. */
 export function resolveGitOverlayBusyActionName<T extends { project: string }>(
 	actionPrefix: 'commitStaged' | 'createReviewRequest' | 'generateCommitMessage',
@@ -213,8 +248,41 @@ export function applyGitOverlayOtherProjectsExcludedPaths(
 	excludedPaths: string[],
 ): GitOverlaySnapshot {
 	const normalizedExcludedPaths = normalizeGitOverlayOtherProjectsExcludedPaths(excludedPaths);
-	if (normalizedExcludedPaths.length === 0 || snapshot.projects.length === 0) {
+	if (normalizedExcludedPaths.length === 0 || (snapshot.projects.length === 0 && (snapshot.otherProjects?.length || 0) === 0)) {
 		return snapshot;
+	}
+
+	if (snapshot.otherProjects && snapshot.otherProjects.length > 0) {
+		let changed = false;
+		const otherProjects = snapshot.otherProjects.map((project) => {
+			const nextChangeGroups: GitOverlayProjectSnapshot['changeGroups'] = {
+				merge: filterGitOverlayProjectChangeGroup(project.changeGroups.merge, normalizedExcludedPaths),
+				staged: filterGitOverlayProjectChangeGroup(project.changeGroups.staged, normalizedExcludedPaths),
+				workingTree: filterGitOverlayProjectChangeGroup(project.changeGroups.workingTree, normalizedExcludedPaths),
+				untracked: filterGitOverlayProjectChangeGroup(project.changeGroups.untracked, normalizedExcludedPaths),
+			};
+			if (
+				nextChangeGroups.merge.length === project.changeGroups.merge.length
+				&& nextChangeGroups.staged.length === project.changeGroups.staged.length
+				&& nextChangeGroups.workingTree.length === project.changeGroups.workingTree.length
+				&& nextChangeGroups.untracked.length === project.changeGroups.untracked.length
+			) {
+				return project;
+			}
+
+			changed = true;
+			return {
+				...project,
+				changeGroups: nextChangeGroups,
+			};
+		});
+
+		return changed
+			? {
+				...snapshot,
+				otherProjects,
+			}
+			: snapshot;
 	}
 
 	const normalizedSelectedProjects = selectedProjects
@@ -716,13 +784,25 @@ export function resolveGitOverlayTrackedBranchOptions<T extends GitOverlayTracke
 	const projectsToInspect = availableProjects.length > 0 ? availableProjects : projects;
 	const normalizedPromptBranch = promptBranch.trim();
 	const preferredBranch = preferredTrackedBranch.trim();
+	// Prefer hydrated tracked branch metadata before falling back to transient current branches.
+	const discoveredTrackedBranches = projectsToInspect
+		.flatMap(project => project.branches
+			.filter(branch => branch.kind === 'tracked' && branch.exists)
+			.map(branch => branch.name.trim()))
+		.filter(Boolean)
+		.filter(branch => branch !== normalizedPromptBranch);
 	const fallbackBranches = projectsToInspect
 		.map(project => project.currentBranch.trim())
 		.filter(Boolean)
 		.filter(branch => branch !== normalizedPromptBranch);
-	const options = Array.from(new Set(fallbackBranches.length > 0 ? fallbackBranches : projectsToInspect
+	const fallbackCurrentBranches = projectsToInspect
 		.map(project => project.currentBranch.trim())
-		.filter(Boolean)));
+		.filter(Boolean);
+	const options = Array.from(new Set(
+		discoveredTrackedBranches.length > 0
+			? discoveredTrackedBranches
+			: (fallbackBranches.length > 0 ? fallbackBranches : fallbackCurrentBranches),
+	));
 
 	if (!preferredBranch) {
 		return options;

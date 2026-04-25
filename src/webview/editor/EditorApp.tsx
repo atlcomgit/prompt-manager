@@ -33,7 +33,7 @@ import type {
   PromptCustomGroup,
   PromptStatus,
 } from '../../types/prompt';
-import type { GitOverlayActionKind, GitOverlayActionScope, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
+import type { GitOverlayActionKind, GitOverlayActionScope, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
 import {
   createDefaultEditorPromptViewState,
   createDefaultPrompt,
@@ -66,7 +66,11 @@ import {
   togglePromptEditorSectionExpansion,
 } from '../../utils/promptEditorBehavior.js';
 import type { PromptChatLaunchPhase, PromptChatLaunchRenameState } from '../../utils/promptEditorBehavior.js';
-import { resolveGitOverlayBusyActionName, resolveGitOverlayDonePersistence } from '../../utils/gitOverlay.js';
+import {
+  resolveGitOverlayBusyActionName,
+  resolveGitOverlayDonePersistence,
+  shouldResetGitOverlayStateOnPromptOpen,
+} from '../../utils/gitOverlay.js';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -394,6 +398,7 @@ export const EditorApp: React.FC = () => {
   const [gitOverlayPendingCommitProjects, setGitOverlayPendingCommitProjects] = useState<string[]>([]);
   const [gitOverlayHasPendingBulkGenerate, setGitOverlayHasPendingBulkGenerate] = useState(false);
   const [gitOverlayHasPendingBulkCommit, setGitOverlayHasPendingBulkCommit] = useState(false);
+  const gitOverlayPendingProjectDetailsRef = useRef<Record<string, true>>({});
   const [gitOverlayCompletedActions, setGitOverlayCompletedActions] = useState<Record<GitOverlayActionKind, boolean>>({
     push: false,
     'review-request': false,
@@ -533,6 +538,7 @@ export const EditorApp: React.FC = () => {
   const pendingGitOverlayStartChatRequestIdRef = useRef<string>('');
   const pendingChatPreflightActionRef = useRef<ChatEntryAction | ''>('');
   const hasReportedGitOverlayVisibilityRef = useRef(false);
+  const gitOverlayOpenRef = useRef(false);
   const gitOverlayBusyActionRef = useRef<string | null>(null);
   /** Timestamp when the busy state was last set (used for min display time). */
   const gitOverlayBusyStartTimeRef = useRef<number>(0);
@@ -884,9 +890,14 @@ export const EditorApp: React.FC = () => {
   const closeGitOverlay = useCallback(() => {
     setGitOverlayOpen(false);
     setGitOverlayMode('default');
+    gitOverlayPendingProjectDetailsRef.current = {};
     clearGitOverlayBusyState();
     resetStartChatPreflightTracking();
   }, [clearGitOverlayBusyState, resetStartChatPreflightTracking]);
+
+  useEffect(() => {
+    gitOverlayPendingProjectDetailsRef.current = {};
+  }, [gitOverlaySnapshot?.generatedAt]);
 
   useEffect(() => {
     if (!hasReportedGitOverlayVisibilityRef.current && !gitOverlayOpen) {
@@ -1397,6 +1408,7 @@ export const EditorApp: React.FC = () => {
   useEffect(() => { isDirtyRef.current = isDirty; }, [isDirty]);
   useEffect(() => { isSavingRef.current = isSaving; }, [isSaving]);
   useEffect(() => { isOpeningChatRef.current = isOpeningChat; }, [isOpeningChat]);
+  useEffect(() => { gitOverlayOpenRef.current = gitOverlayOpen; }, [gitOverlayOpen]);
 
   useEffect(() => {
     const previousPrompt = previousPromptConfigSnapshotRef.current;
@@ -1511,6 +1523,14 @@ export const EditorApp: React.FC = () => {
 
           if (isOpenPayload) {
             const nextEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
+            const shouldResetGitOverlayState = shouldResetGitOverlayStateOnPromptOpen({
+              overlayOpen: gitOverlayOpenRef.current,
+              currentPromptId,
+              currentPromptUuid,
+              incomingPromptId,
+              incomingPromptUuid,
+              previousPromptId,
+            });
             if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); showLoaderTimerRef.current = null; }
             setShowLoader(false);
             setIsGeneratingTitle(Boolean(msg.aiEnrichment?.title));
@@ -1518,14 +1538,16 @@ export const EditorApp: React.FC = () => {
             setChatLaunchRequestStarted(false);
             setChatLaunchRenameState('idle');
             setNotice(null);
-            setGitOverlayOpen(false);
-            setGitOverlayMode('default');
-            resetStartChatPreflightTracking();
-            setGitOverlaySnapshot(null);
-            setGitOverlayFileHistory(null);
-            setGitOverlayCommitMessages({});
-            clearGitOverlayBusyState();
-            setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
+            if (shouldResetGitOverlayState) {
+              setGitOverlayOpen(false);
+              setGitOverlayMode('default');
+              resetStartChatPreflightTracking();
+              setGitOverlaySnapshot(null);
+              setGitOverlayFileHistory(null);
+              setGitOverlayCommitMessages({});
+              clearGitOverlayBusyState();
+              setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
+            }
             skipNextPromptConfigTrackingRef.current = true;
             promptRef.current = msg.prompt;
             setPrompt(msg.prompt);
@@ -2209,6 +2231,99 @@ export const EditorApp: React.FC = () => {
         clearGitOverlayBusyState();
         break;
         }
+      case 'gitOverlayOtherProjectsSnapshot':
+        setGitOverlaySnapshot((prev) => {
+          if (!prev) {
+            return prev;
+          }
+
+          return {
+            ...prev,
+            otherProjects: Array.isArray(msg.otherProjects) ? msg.otherProjects : [],
+          };
+        });
+        break;
+      case 'gitOverlayProjectSnapshot':
+        {
+        const snapshotGeneratedAt = String(msg.snapshotGeneratedAt || '').trim();
+        const projectSnapshot = (msg.projectSnapshot || null) as GitOverlayProjectSnapshot | null;
+        const projectName = (projectSnapshot?.project || '').trim();
+        if (snapshotGeneratedAt && projectName) {
+          delete gitOverlayPendingProjectDetailsRef.current[`${snapshotGeneratedAt}:${projectName}`];
+        }
+
+        setGitOverlaySnapshot((prev) => {
+          if (!prev || !projectSnapshot || prev.generatedAt !== snapshotGeneratedAt) {
+            return prev;
+          }
+
+            const mergeProjectSnapshot = (currentProject: GitOverlayProjectSnapshot): GitOverlayProjectSnapshot => {
+            let mergedProjectSnapshot = projectSnapshot;
+
+            if (currentProject.changeDetailsHydrated && mergedProjectSnapshot.changeDetailsHydrated === false) {
+            mergedProjectSnapshot = {
+              ...mergedProjectSnapshot,
+              changeGroups: currentProject.changeGroups,
+              changeDetailsHydrated: true,
+            };
+            }
+
+            if (currentProject.branchDetailsHydrated && mergedProjectSnapshot.branchDetailsHydrated === false) {
+            mergedProjectSnapshot = {
+              ...mergedProjectSnapshot,
+              upstream: currentProject.upstream,
+              ahead: currentProject.ahead,
+              behind: currentProject.behind,
+              lastCommit: currentProject.lastCommit,
+              branches: currentProject.branches,
+              cleanupBranches: currentProject.cleanupBranches,
+              staleLocalBranches: currentProject.staleLocalBranches,
+              graph: currentProject.graph,
+              branchDetailsHydrated: true,
+            };
+            }
+
+            if (currentProject.reviewHydrated && mergedProjectSnapshot.reviewHydrated === false) {
+            mergedProjectSnapshot = {
+              ...mergedProjectSnapshot,
+              review: currentProject.review,
+              reviewHydrated: true,
+            };
+            }
+
+            return mergedProjectSnapshot;
+            };
+
+          let selectedChanged = false;
+          const nextProjects = prev.projects.map((project) => {
+            if (project.project !== projectSnapshot.project) {
+              return project;
+            }
+            selectedChanged = true;
+              return mergeProjectSnapshot(project);
+          });
+
+          let otherChanged = false;
+          const nextOtherProjects = (prev.otherProjects || []).map((project) => {
+            if (project.project !== projectSnapshot.project) {
+              return project;
+            }
+            otherChanged = true;
+              return mergeProjectSnapshot(project);
+          });
+
+          if (!selectedChanged && !otherChanged) {
+            return prev;
+          }
+
+          return {
+            ...prev,
+            projects: nextProjects,
+            otherProjects: nextOtherProjects,
+          };
+        });
+        break;
+        }
       case 'gitOverlayFileHistory':
         setGitOverlayFileHistory(msg.history || null);
         clearGitOverlayBusyState();
@@ -2723,6 +2838,28 @@ export const EditorApp: React.FC = () => {
       mode,
     });
   }, [prompt.branch, prompt.projects, setGitOverlayBusyState, t]);
+
+  const handleGitOverlayHydrateProjectDetails = useCallback((projectName: string) => {
+    const snapshotGeneratedAt = (gitOverlaySnapshot?.generatedAt || '').trim();
+    const normalizedProjectName = projectName.trim();
+    if (!snapshotGeneratedAt || !normalizedProjectName) {
+      return;
+    }
+
+    const requestKey = `${snapshotGeneratedAt}:${normalizedProjectName}`;
+    if (gitOverlayPendingProjectDetailsRef.current[requestKey]) {
+      return;
+    }
+
+    gitOverlayPendingProjectDetailsRef.current[requestKey] = true;
+    vscode.postMessage({
+      type: 'gitOverlayHydrateProjectDetails',
+      promptBranch: prompt.branch.trim(),
+      projects: prompt.projects,
+      project: normalizedProjectName,
+      snapshotGeneratedAt,
+    });
+  }, [gitOverlaySnapshot, prompt.branch, prompt.projects]);
 
   const handleGitOverlaySwitchBranch = useCallback((trackedBranchesByProject: Record<string, string>) => {
     const normalizedTrackedBranchesByProject = normalizeTrackedBranchesByProject(trackedBranchesByProject);
@@ -4798,6 +4935,7 @@ export const EditorApp: React.FC = () => {
         onCommitMessageChange={handleGitOverlayCommitMessageChange}
         onUpdateProjects={(projects) => updateFieldAndSaveNow('projects', projects)}
         onTrackedBranchChange={handleGitOverlayTrackedBranchChange}
+        onHydrateProjectDetails={handleGitOverlayHydrateProjectDetails}
         onContinueStartChat={() => {
           const requestId = pendingGitOverlayStartChatRequestIdRef.current || createStartChatRequestId();
           closeGitOverlay();

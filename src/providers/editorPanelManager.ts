@@ -36,7 +36,7 @@ import type {
 	ExtensionToWebviewMessage,
 	GitOverlayBusyReason,
 } from '../types/messages.js';
-import type { GitOverlaySnapshot } from '../types/git.js';
+import type { GitOverlayProjectSnapshot, GitOverlaySnapshot } from '../types/git.js';
 import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
 import type { PromptVoiceService } from '../services/promptVoice/promptVoiceService.js';
@@ -116,15 +116,23 @@ const SINGLE_EDITOR_PANEL_KEY = '__prompt_editor_singleton__';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
 const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 600;
+const GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS = 250;
+const GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS = 250;
+const GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT = 4;
 
 type GitOverlayRefreshMode = 'local' | 'fetch' | 'sync';
+type GitOverlaySnapshotDetailLevel = 'full' | 'summary';
+type GitOverlaySnapshotMetricSource = 'open' | 'refresh' | 'action';
+type GitOverlayOtherProjectsMetricSource = GitOverlaySnapshotMetricSource | 'peer-refresh';
 
 interface GitOverlaySession {
 	active: boolean;
 	promptBranch: string;
 	selectedProjects: string[];
 	snapshotProjects: string[];
+	snapshotVersion: number;
 	postMessage: (message: ExtensionToWebviewMessage) => void;
+	postMessageHistory?: Array<(message: ExtensionToWebviewMessage) => void>;
 	refreshTimer: NodeJS.Timeout | null;
 	refreshInFlight: boolean;
 	refreshQueued: boolean;
@@ -1396,6 +1404,23 @@ export class EditorPanelManager {
 		const timestamp = new Date().toISOString();
 		const serializedPayload = payload ? ` ${JSON.stringify(payload)}` : '';
 		this.reportDebugOutput.appendLine(`[${timestamp}] [report-debug] ${event}${serializedPayload}`);
+	}
+
+	/** Возвращает неотрицательную длительность для debug-метрик Git Flow. */
+	private resolveGitOverlayDurationMs(startedAtMs: number): number {
+		return Math.max(0, Date.now() - startedAtMs);
+	}
+
+	/** Пишет Git Flow debug-метрику с общей схемой durationMs. */
+	private logGitOverlayTiming(
+		event: string,
+		startedAtMs: number,
+		payload?: Record<string, unknown>,
+	): void {
+		this.logReportDebug(event, {
+			...(payload || {}),
+			durationMs: this.resolveGitOverlayDurationMs(startedAtMs),
+		});
 	}
 
 	private isDebugLoggingEnabled(): boolean {
@@ -2989,40 +3014,45 @@ export class EditorPanelManager {
 		return relativePath.replace(/\\/g, '/');
 	}
 
-	private doesGitOverlayPathMatchSessionProjects(session: GitOverlaySession, targetPath: string): boolean {
+	/** Определяет, к какому проекту overlay относится изменённый путь и входит ли он в selected scope. */
+	private resolveGitOverlaySessionPathMatch(
+		session: GitOverlaySession,
+		targetPath: string,
+	): { projectName: string; relativePath: string; selected: boolean } | null {
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
+		const selectedProjectNameSet = new Set(this.resolveGitOverlaySessionProjectNames(session.selectedProjects));
 		for (const projectName of this.resolveGitOverlaySessionProjectNames(session.snapshotProjects)) {
 			const projectRootPath = projectPaths.get(projectName);
 			if (!projectRootPath) {
 				continue;
 			}
 
-			if (this.resolveGitOverlayProjectRelativePath(targetPath, projectRootPath) !== null) {
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	private shouldIgnoreGitOverlaySessionFileChange(session: GitOverlaySession, changedPath: string): boolean {
-		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
-		const excludedPaths = this.getGitOverlayExcludedPathsSetting();
-		for (const projectName of this.resolveGitOverlaySessionProjectNames(session.snapshotProjects)) {
-			const projectRootPath = projectPaths.get(projectName);
-			if (!projectRootPath) {
-				continue;
-			}
-
-			const relativePath = this.resolveGitOverlayProjectRelativePath(changedPath, projectRootPath);
+			const relativePath = this.resolveGitOverlayProjectRelativePath(targetPath, projectRootPath);
 			if (relativePath === null) {
 				continue;
 			}
 
-			return shouldIgnoreRealtimeRefreshPath(relativePath, excludedPaths);
+			return {
+				projectName,
+				relativePath,
+				selected: selectedProjectNameSet.has(projectName),
+			};
 		}
 
-		return true;
+		return null;
+	}
+
+	private doesGitOverlayPathMatchSessionProjects(session: GitOverlaySession, targetPath: string): boolean {
+		return this.resolveGitOverlaySessionPathMatch(session, targetPath) !== null;
+	}
+
+	private shouldIgnoreGitOverlaySessionFileChange(session: GitOverlaySession, changedPath: string): boolean {
+		const pathMatch = this.resolveGitOverlaySessionPathMatch(session, changedPath);
+		if (!pathMatch) {
+			return true;
+		}
+
+		return shouldIgnoreRealtimeRefreshPath(pathMatch.relativePath, this.getGitOverlayExcludedPathsSetting());
 	}
 
 	private getGitOverlayTrackedBranchPreference(): string {
@@ -3130,6 +3160,369 @@ export class EditorPanelManager {
 		return (requestedBranch || currentPrompt.branch || '').trim();
 	}
 
+	/** Находит активную overlay-сессию по postMessage callback текущей панели. */
+	private resolveGitOverlaySessionByPostMessage(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+	): GitOverlaySession | null {
+		for (const session of this.gitOverlaySessions.values()) {
+			if (this.isGitOverlaySessionPostMessageMatch(session, postMessage)) {
+				return session;
+			}
+		}
+
+		return null;
+	}
+
+	/** Сопоставляет callback c текущей панельной overlay-сессией даже после промежуточных visibility sync. */
+	private isGitOverlaySessionPostMessageMatch(
+		session: GitOverlaySession,
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+	): boolean {
+		if (session.postMessage === postMessage) {
+			return true;
+		}
+
+		return (session.postMessageHistory || []).includes(postMessage);
+	}
+
+	/** Запоминает несколько последних postMessage callbacks одной панели для async snapshot lifecycle. */
+	private rememberGitOverlaySessionPostMessage(
+		session: GitOverlaySession,
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+	): void {
+		const nextHistory: Array<(message: ExtensionToWebviewMessage) => void> = [];
+		for (const candidate of [postMessage, session.postMessage, ...(session.postMessageHistory || [])]) {
+			if (nextHistory.includes(candidate)) {
+				continue;
+			}
+			nextHistory.push(candidate);
+			if (nextHistory.length >= GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT) {
+				break;
+			}
+		}
+
+		session.postMessage = postMessage;
+		session.postMessageHistory = nextHistory;
+	}
+
+	/** Проверяет, что фоновый snapshot всё ещё относится к актуальной overlay-сессии. */
+	private canPostGitOverlaySessionSnapshotUpdate(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		snapshotVersion: number,
+	): boolean {
+		const session = this.resolveGitOverlaySessionByPostMessage(postMessage);
+		return Boolean(session && session.active && session.snapshotVersion === snapshotVersion);
+	}
+
+	/** Дозагружает соседние проекты после основного selected-project snapshot. */
+	private async postGitOverlayOtherProjectsSnapshot(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		selectedProjects: string[],
+		snapshotProjects: string[],
+		promptBranch: string,
+		snapshotVersion: number,
+		metricSource: GitOverlayOtherProjectsMetricSource = 'action',
+	): Promise<void> {
+		const startedAtMs = Date.now();
+		if (snapshotProjects.length <= selectedProjects.length) {
+			postMessage({ type: 'gitOverlayOtherProjectsSnapshot', otherProjects: [] });
+			this.logGitOverlayTiming('gitOverlay.otherProjectsSnapshot.computed', startedAtMs, {
+				source: metricSource,
+				selectedProjectCount: selectedProjects.length,
+				snapshotProjectCount: snapshotProjects.length,
+				otherProjectCount: 0,
+			});
+			return;
+		}
+
+		if (!this.canPostGitOverlaySessionSnapshotUpdate(postMessage, snapshotVersion)) {
+			return;
+		}
+
+		const paths = this.workspaceService.getWorkspaceFolderPaths();
+		const otherProjects = await this.gitService.getGitOverlayOtherProjectsSnapshot(
+			paths,
+			snapshotProjects,
+			selectedProjects,
+			promptBranch,
+		);
+
+		if (!this.canPostGitOverlaySessionSnapshotUpdate(postMessage, snapshotVersion)) {
+			return;
+		}
+
+		const filteredSnapshot = applyGitOverlayOtherProjectsExcludedPaths(
+			{
+				generatedAt: '',
+				promptBranch,
+				trackedBranches: [],
+				projects: [],
+				otherProjects,
+			},
+			selectedProjects,
+			this.getGitOverlayOtherProjectsExcludedPathsSetting(),
+		);
+
+		postMessage({
+			type: 'gitOverlayOtherProjectsSnapshot',
+			otherProjects: filteredSnapshot.otherProjects || [],
+		});
+		this.logGitOverlayTiming('gitOverlay.otherProjectsSnapshot.computed', startedAtMs, {
+			source: metricSource,
+			selectedProjectCount: selectedProjects.length,
+			snapshotProjectCount: snapshotProjects.length,
+			otherProjectCount: filteredSnapshot.otherProjects?.length || 0,
+		});
+	}
+
+	/** Запускает lazy snapshot для соседних проектов на следующем tick, чтобы не задерживать первый payload. */
+	private scheduleGitOverlayOtherProjectsSnapshot(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		selectedProjects: string[],
+		snapshotProjects: string[],
+		promptBranch: string,
+		snapshotVersion: number,
+		metricSource: GitOverlayOtherProjectsMetricSource,
+	): void {
+		const timer = setTimeout(() => {
+			void this.postGitOverlayOtherProjectsSnapshot(
+				postMessage,
+				selectedProjects,
+				snapshotProjects,
+				promptBranch,
+				snapshotVersion,
+				metricSource,
+			);
+		}, GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS);
+		this.unrefBackgroundTimer(timer);
+	}
+
+	/** Повторно догружает полный selected snapshot после быстрого initial open summary. */
+	private scheduleGitOverlayOpenHydration(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		currentPrompt: Prompt,
+		promptBranch: string,
+		projects: string[],
+	): void {
+		const timer = setTimeout(() => {
+			const session = this.resolveGitOverlaySessionByPostMessage(postMessage);
+			if (!session?.active) {
+				return;
+			}
+
+			void this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, {
+				metricSource: 'open',
+				detailLevel: 'full',
+				includeChangeDetails: false,
+				includeBranchDetails: false,
+				includeReviewState: false,
+			}).then((snapshot) => {
+				if (!snapshot) {
+					return;
+				}
+
+				this.postDeferredGitOverlayProjectHydration(
+					postMessage,
+					currentPrompt,
+					promptBranch,
+					projects,
+					snapshot,
+				);
+			});
+		}, GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS);
+		this.unrefBackgroundTimer(timer);
+	}
+
+	/** Догружает branch metadata и review state после первого full payload, чтобы open latency не ждала эти git шаги. */
+	private postDeferredGitOverlayProjectHydration(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		currentPrompt: Prompt,
+		promptBranch: string,
+		selectedProjects: string[],
+		snapshot: GitOverlaySnapshot,
+	): void {
+		for (const project of snapshot.projects) {
+			void (async () => {
+				const normalizedPromptBranch = promptBranch.trim();
+				const branchHydrationPromise = project.branchDetailsHydrated === false
+					? this.postGitOverlayProjectBranchSnapshot(
+						postMessage,
+						currentPrompt,
+						promptBranch,
+						selectedProjects,
+						project,
+						snapshot.generatedAt,
+					)
+					: Promise.resolve(project);
+				const reviewHydrationPromise = normalizedPromptBranch
+					&& project.available
+					&& project.currentBranch === normalizedPromptBranch
+					&& project.reviewHydrated === false
+					? this.postGitOverlayProjectReviewSnapshot(
+						postMessage,
+						currentPrompt,
+						promptBranch,
+						selectedProjects,
+						project,
+						snapshot.generatedAt,
+					)
+					: Promise.resolve();
+
+				await Promise.all([branchHydrationPromise, reviewHydrationPromise]);
+			})();
+		}
+	}
+
+	/** Догружает только branch metadata поверх уже известного project snapshot без повторного change/review hydrate. */
+	private async postGitOverlayProjectBranchSnapshot(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		currentPrompt: Prompt,
+		promptBranch: string,
+		selectedProjects: string[],
+		projectSnapshot: GitOverlayProjectSnapshot,
+		snapshotGeneratedAt: string,
+	): Promise<GitOverlayProjectSnapshot | null> {
+		const normalizedProjectName = projectSnapshot.project.trim();
+		const normalizedSnapshotGeneratedAt = snapshotGeneratedAt.trim();
+		if (!normalizedProjectName || !normalizedSnapshotGeneratedAt) {
+			return null;
+		}
+
+		const session = this.resolveGitOverlaySessionByPostMessage(postMessage);
+		if (!session?.active) {
+			return null;
+		}
+
+		const normalizedSelectedProjects = this.resolveGitOverlayProjects(selectedProjects, currentPrompt);
+		const snapshotProjects = this.resolveGitOverlaySnapshotProjects(selectedProjects, currentPrompt);
+		if (!snapshotProjects.includes(normalizedProjectName)) {
+			return null;
+		}
+
+		const startedAtMs = Date.now();
+		const branchDetails = await this.gitService.getGitOverlayProjectBranchDetails(
+			this.workspaceService.getWorkspaceFolderPaths(),
+			normalizedProjectName,
+			promptBranch,
+			this.getTrackedBranchesSetting(),
+			projectSnapshot.currentBranch,
+		);
+		if (!branchDetails) {
+			return null;
+		}
+
+		if (!this.resolveGitOverlaySessionByPostMessage(postMessage)?.active) {
+			return null;
+		}
+
+		const branchSnapshot: GitOverlayProjectSnapshot = {
+			...projectSnapshot,
+			...branchDetails,
+			branchDetailsHydrated: true,
+		};
+		const isSelectedProject = normalizedSelectedProjects.includes(normalizedProjectName);
+		const projectSnapshotToPost = isSelectedProject
+			? branchSnapshot
+			: (applyGitOverlayOtherProjectsExcludedPaths(
+				{
+					generatedAt: normalizedSnapshotGeneratedAt,
+					promptBranch,
+					trackedBranches: [],
+					projects: [],
+					otherProjects: [branchSnapshot],
+				},
+				normalizedSelectedProjects,
+				this.getGitOverlayOtherProjectsExcludedPathsSetting(),
+			).otherProjects?.[0] || branchSnapshot);
+
+		postMessage({
+			type: 'gitOverlayProjectSnapshot',
+			projectSnapshot: projectSnapshotToPost,
+			snapshotGeneratedAt: normalizedSnapshotGeneratedAt,
+		});
+		this.logGitOverlayTiming('gitOverlay.projectSnapshot.computed', startedAtMs, {
+			source: 'open-branches',
+			promptId: currentPrompt.id,
+			project: normalizedProjectName,
+			selected: isSelectedProject,
+		});
+
+		return branchSnapshot;
+	}
+
+	/** Догружает только review state поверх уже известного project snapshot без повторного branch/change hydrate. */
+	private async postGitOverlayProjectReviewSnapshot(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		currentPrompt: Prompt,
+		promptBranch: string,
+		selectedProjects: string[],
+		projectSnapshot: GitOverlayProjectSnapshot,
+		snapshotGeneratedAt: string,
+	): Promise<void> {
+		const normalizedProjectName = projectSnapshot.project.trim();
+		const normalizedSnapshotGeneratedAt = snapshotGeneratedAt.trim();
+		if (!normalizedProjectName || !normalizedSnapshotGeneratedAt) {
+			return;
+		}
+
+		const session = this.resolveGitOverlaySessionByPostMessage(postMessage);
+		if (!session?.active) {
+			return;
+		}
+
+		const normalizedSelectedProjects = this.resolveGitOverlayProjects(selectedProjects, currentPrompt);
+		const snapshotProjects = this.resolveGitOverlaySnapshotProjects(selectedProjects, currentPrompt);
+		if (!snapshotProjects.includes(normalizedProjectName)) {
+			return;
+		}
+
+		const startedAtMs = Date.now();
+		const reviewState = await this.gitService.getGitOverlayProjectReviewState(
+			this.workspaceService.getWorkspaceFolderPaths(),
+			normalizedProjectName,
+			promptBranch,
+		);
+		if (!reviewState) {
+			return;
+		}
+
+		if (!this.resolveGitOverlaySessionByPostMessage(postMessage)?.active) {
+			return;
+		}
+
+		const reviewSnapshot: GitOverlayProjectSnapshot = {
+			...projectSnapshot,
+			reviewHydrated: true,
+			review: reviewState,
+		};
+		const isSelectedProject = normalizedSelectedProjects.includes(normalizedProjectName);
+		const projectSnapshotToPost = isSelectedProject
+			? reviewSnapshot
+			: (applyGitOverlayOtherProjectsExcludedPaths(
+				{
+					generatedAt: normalizedSnapshotGeneratedAt,
+					promptBranch,
+					trackedBranches: [],
+					projects: [],
+					otherProjects: [reviewSnapshot],
+				},
+				normalizedSelectedProjects,
+				this.getGitOverlayOtherProjectsExcludedPathsSetting(),
+			).otherProjects?.[0] || reviewSnapshot);
+
+		postMessage({
+			type: 'gitOverlayProjectSnapshot',
+			projectSnapshot: projectSnapshotToPost,
+			snapshotGeneratedAt: normalizedSnapshotGeneratedAt,
+		});
+		this.logGitOverlayTiming('gitOverlay.projectSnapshot.computed', startedAtMs, {
+			source: 'open-review',
+			promptId: currentPrompt.id,
+			project: normalizedProjectName,
+			selected: isSelectedProject,
+		});
+	}
+
 	private async postGitOverlaySnapshot(
 		postMessage: (message: ExtensionToWebviewMessage) => void,
 		currentPrompt: Prompt,
@@ -3138,30 +3531,177 @@ export class EditorPanelManager {
 		options?: {
 			commitErrorsByProject?: Record<string, string>;
 			requestId?: string;
+			metricSource?: GitOverlaySnapshotMetricSource;
+			detailLevel?: GitOverlaySnapshotDetailLevel;
+			includeChangeDetails?: boolean;
+			includeBranchDetails?: boolean;
+			includeReviewState?: boolean;
+			skipOtherProjects?: boolean;
+			prefetchedReviewStatesByProject?: Record<string, GitOverlaySnapshot['projects'][number]['review']>;
 		},
-	): Promise<void> {
+	): Promise<GitOverlaySnapshot | null> {
+		const startedAtMs = Date.now();
 		const paths = this.workspaceService.getWorkspaceFolderPaths();
 		const selectedProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
 		const snapshotProjects = this.resolveGitOverlaySnapshotProjects(projects, currentPrompt);
+		const session = this.resolveGitOverlaySessionByPostMessage(postMessage);
+		const snapshotVersion = session ? session.snapshotVersion + 1 : 0;
+		if (session) {
+			session.snapshotVersion = snapshotVersion;
+		}
+
 		const snapshot = await this.gitService.getGitOverlaySnapshot(
 			paths,
-			snapshotProjects,
+			selectedProjects,
 			promptBranch,
 			this.getTrackedBranchesSetting(),
+			{
+				detailLevel: options?.detailLevel || 'full',
+				includeChangeDetails: options?.includeChangeDetails,
+				includeBranchDetails: options?.includeBranchDetails,
+				includeReviewState: options?.includeReviewState,
+				prefetchedReviewStatesByProject: options?.prefetchedReviewStatesByProject,
+			},
 		);
+		this.logGitOverlayTiming('gitOverlay.snapshot.ready', startedAtMs, {
+			source: options?.metricSource || 'action',
+			detailLevel: options?.detailLevel || 'full',
+			changeDetails: options?.includeChangeDetails === false ? 'light' : 'full',
+			promptId: currentPrompt.id,
+			selectedProjectCount: selectedProjects.length,
+			snapshotProjectCount: snapshotProjects.length,
+			projectCount: snapshot.projects.length,
+		});
+
+		if (!this.canPostGitOverlaySessionSnapshotUpdate(postMessage, snapshotVersion)) {
+			this.logGitOverlayTiming('gitOverlay.snapshot.skippedStale', startedAtMs, {
+				source: options?.metricSource || 'action',
+				detailLevel: options?.detailLevel || 'full',
+				changeDetails: options?.includeChangeDetails === false ? 'light' : 'full',
+				promptId: currentPrompt.id,
+				selectedProjectCount: selectedProjects.length,
+				snapshotProjectCount: snapshotProjects.length,
+				projectCount: snapshot.projects.length,
+			});
+			return null;
+		}
+
 		const filteredSnapshot = applyGitOverlayOtherProjectsExcludedPaths(
 			snapshot,
 			selectedProjects,
 			this.getGitOverlayOtherProjectsExcludedPathsSetting(),
 		);
 		const snapshotWithErrors = this.applyGitOverlaySnapshotProjectErrors(filteredSnapshot, options?.commitErrorsByProject);
-		this.logReportDebug('gitOverlay.snapshot.computed', {
+		this.logGitOverlayTiming('gitOverlay.snapshot.computed', startedAtMs, {
+			source: options?.metricSource || 'action',
+			detailLevel: options?.detailLevel || 'full',
+			changeDetails: options?.includeChangeDetails === false ? 'light' : 'full',
 			promptId: currentPrompt.id,
 			promptBranch: snapshotWithErrors.promptBranch || null,
+			selectedProjectCount: selectedProjects.length,
+			snapshotProjectCount: snapshotProjects.length,
 			projectCount: snapshotWithErrors.projects.length,
+			otherProjectCount: snapshotWithErrors.otherProjects?.length || 0,
 			reviewProjects: this.buildGitOverlayReviewDebugSummary(snapshotWithErrors),
 		});
 		postMessage({ type: 'gitOverlaySnapshot', snapshot: snapshotWithErrors, requestId: options?.requestId });
+
+		if (options?.skipOtherProjects) {
+			return snapshotWithErrors;
+		}
+
+		if (snapshotProjects.length <= selectedProjects.length) {
+			return snapshotWithErrors;
+		}
+
+		this.scheduleGitOverlayOtherProjectsSnapshot(
+			postMessage,
+			selectedProjects,
+			snapshotProjects,
+			promptBranch,
+			snapshotVersion,
+			options?.metricSource || 'action',
+		);
+
+		return snapshotWithErrors;
+	}
+
+	/** Догружает полный snapshot одного раскрытого проекта без перерендера всего overlay. */
+	private async postGitOverlayProjectSnapshot(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		currentPrompt: Prompt,
+		promptBranch: string,
+		selectedProjects: string[],
+		projectName: string,
+		snapshotGeneratedAt: string,
+		options?: {
+			includeChangeDetails?: boolean;
+			includeReviewState?: boolean;
+			source?: 'expand' | 'open-review';
+		},
+	): Promise<void> {
+		const normalizedProjectName = projectName.trim();
+		const normalizedSnapshotGeneratedAt = snapshotGeneratedAt.trim();
+		if (!normalizedProjectName || !normalizedSnapshotGeneratedAt) {
+			return;
+		}
+
+		const session = this.resolveGitOverlaySessionByPostMessage(postMessage);
+		if (!session?.active) {
+			return;
+		}
+
+		const normalizedSelectedProjects = this.resolveGitOverlayProjects(selectedProjects, currentPrompt);
+		const snapshotProjects = this.resolveGitOverlaySnapshotProjects(selectedProjects, currentPrompt);
+		if (!snapshotProjects.includes(normalizedProjectName)) {
+			return;
+		}
+
+		const startedAtMs = Date.now();
+		const projectSnapshot = await this.gitService.getGitOverlayProjectSnapshot(
+			this.workspaceService.getWorkspaceFolderPaths(),
+			normalizedProjectName,
+			promptBranch,
+			this.getTrackedBranchesSetting(),
+			{
+				includeChangeDetails: options?.includeChangeDetails,
+				includeReviewState: options?.includeReviewState,
+			},
+		);
+		if (!projectSnapshot) {
+			return;
+		}
+
+		if (!this.resolveGitOverlaySessionByPostMessage(postMessage)?.active) {
+			return;
+		}
+
+		const isSelectedProject = normalizedSelectedProjects.includes(normalizedProjectName);
+		const projectSnapshotToPost = isSelectedProject
+			? projectSnapshot
+			: (applyGitOverlayOtherProjectsExcludedPaths(
+				{
+					generatedAt: normalizedSnapshotGeneratedAt,
+					promptBranch,
+					trackedBranches: [],
+					projects: [],
+					otherProjects: [projectSnapshot],
+				},
+				normalizedSelectedProjects,
+				this.getGitOverlayOtherProjectsExcludedPathsSetting(),
+			).otherProjects?.[0] || projectSnapshot);
+
+		postMessage({
+			type: 'gitOverlayProjectSnapshot',
+			projectSnapshot: projectSnapshotToPost,
+			snapshotGeneratedAt: normalizedSnapshotGeneratedAt,
+		});
+		this.logGitOverlayTiming('gitOverlay.projectSnapshot.computed', startedAtMs, {
+			source: options?.source || 'expand',
+			promptId: currentPrompt.id,
+			project: normalizedProjectName,
+			selected: isSelectedProject,
+		});
 	}
 
 	/** Накладывает project-level ошибки операций на snapshot для адресного показа в UI. */
@@ -3234,13 +3774,17 @@ export class EditorPanelManager {
 				continue;
 			}
 
+			let shouldRefreshOnlyOtherProjects = false;
+
 			if (changedPath) {
-				if (!this.doesGitOverlayPathMatchSessionProjects(session, changedPath)) {
+				const pathMatch = this.resolveGitOverlaySessionPathMatch(session, changedPath);
+				if (!pathMatch) {
 					continue;
 				}
 				if (reason === 'file' && this.shouldIgnoreGitOverlaySessionFileChange(session, changedPath)) {
 					continue;
 				}
+				shouldRefreshOnlyOtherProjects = !pathMatch.selected;
 			}
 
 			this.clearGitOverlaySessionRefreshTimer(session);
@@ -3253,6 +3797,18 @@ export class EditorPanelManager {
 				const busyReason = reason === 'file' && changedPath
 					? { kind: 'file', filePath: changedPath } as const
 					: { kind: 'git' } as const;
+
+				if (shouldRefreshOnlyOtherProjects && !session.refreshInFlight) {
+					void this.postGitOverlayOtherProjectsSnapshot(
+						session.postMessage,
+						session.selectedProjects,
+						session.snapshotProjects,
+						session.promptBranch,
+						session.snapshotVersion,
+						'peer-refresh',
+					);
+					return;
+				}
 
 				void this.runGitOverlayRefresh(
 					panelKey,
@@ -3417,7 +3973,9 @@ export class EditorPanelManager {
 			promptBranch: normalizedPromptBranch,
 			selectedProjects: normalizedSelectedProjects,
 			snapshotProjects: normalizedSnapshotProjects,
+			snapshotVersion: 0,
 			postMessage,
+			postMessageHistory: [postMessage],
 			refreshTimer: null,
 			refreshInFlight: false,
 			refreshQueued: false,
@@ -3429,11 +3987,12 @@ export class EditorPanelManager {
 		session.promptBranch = normalizedPromptBranch;
 		session.selectedProjects = normalizedSelectedProjects;
 		session.snapshotProjects = normalizedSnapshotProjects;
-		session.postMessage = postMessage;
+		this.rememberGitOverlaySessionPostMessage(session, postMessage);
 		this.gitOverlaySessions.set(panelKey, session);
 
 		if (!open) {
 			this.clearGitOverlaySessionRefreshTimer(session);
+			session.snapshotVersion += 1;
 			session.refreshQueued = false;
 			session.queuedMode = null;
 			session.queuedBusyReason = null;
@@ -3473,10 +4032,12 @@ export class EditorPanelManager {
 		announceBusy: boolean,
 		busyReason: Extract<ExtensionToWebviewMessage, { type: 'gitOverlayBusy' }>['reason'] = null,
 	): Promise<void> {
+		const startedAtMs = Date.now();
 		const normalizedPromptBranch = this.resolveGitOverlayPromptBranch(promptBranch, currentPrompt);
 		const normalizedSelectedProjects = this.resolveGitOverlayProjects(projects, currentPrompt);
 		const normalizedSnapshotProjects = this.resolveGitOverlaySnapshotProjects(projects, currentPrompt);
 		const session = this.gitOverlaySessions.get(panelKey);
+		let gitOperationDurationMs: number | null = null;
 
 		if (session) {
 			session.postMessage = postMessage;
@@ -3499,7 +4060,9 @@ export class EditorPanelManager {
 		try {
 			const paths = this.workspaceService.getWorkspaceFolderPaths();
 			if (mode === 'fetch') {
+				const gitOperationStartedAtMs = Date.now();
 				const result = await this.gitService.fetchProjects(paths, normalizedSelectedProjects);
+				gitOperationDurationMs = this.resolveGitOverlayDurationMs(gitOperationStartedAtMs);
 				if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
 					postMessage({
 						type: result.errors.length > 0 ? 'error' : 'info',
@@ -3507,7 +4070,9 @@ export class EditorPanelManager {
 					});
 				}
 			} else if (mode === 'sync') {
+				const gitOperationStartedAtMs = Date.now();
 				const result = await this.gitService.syncProjects(paths, normalizedSelectedProjects);
+				gitOperationDurationMs = this.resolveGitOverlayDurationMs(gitOperationStartedAtMs);
 				if (result.changedProjects.length > 0 || result.skippedProjects.length > 0 || result.errors.length > 0) {
 					postMessage({
 						type: result.errors.length > 0 ? 'error' : 'info',
@@ -3521,7 +4086,17 @@ export class EditorPanelManager {
 				return;
 			}
 
-			await this.postGitOverlaySnapshot(postMessage, currentPrompt, normalizedPromptBranch, normalizedSelectedProjects);
+			await this.postGitOverlaySnapshot(postMessage, currentPrompt, normalizedPromptBranch, normalizedSelectedProjects, {
+				metricSource: 'refresh',
+			});
+			this.logGitOverlayTiming('gitOverlay.refresh.completed', startedAtMs, {
+				mode,
+				announceBusy,
+				busyReasonKind: busyReason?.kind || null,
+				selectedProjectCount: normalizedSelectedProjects.length,
+				snapshotProjectCount: normalizedSnapshotProjects.length,
+				gitOperationDurationMs,
+			});
 		} catch (error) {
 			if (announceBusy) {
 				postMessage({ type: 'gitOverlayBusy', action: null });
@@ -7741,7 +8316,17 @@ export class EditorPanelManager {
 					msg.projects,
 					true,
 				);
-				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, msg.projects);
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, msg.projects, {
+					metricSource: 'open',
+					detailLevel: 'summary',
+					skipOtherProjects: true,
+				});
+				this.scheduleGitOverlayOpenHydration(
+					postMessage,
+					currentPrompt,
+					promptBranch,
+					msg.projects,
+				);
 				break;
 			}
 
@@ -7777,6 +8362,19 @@ export class EditorPanelManager {
 					projects,
 					msg.mode || 'local',
 					false,
+				);
+				break;
+			}
+
+			case 'gitOverlayHydrateProjectDetails': {
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch, currentPrompt);
+				void this.postGitOverlayProjectSnapshot(
+					postMessage,
+					currentPrompt,
+					promptBranch,
+					msg.projects,
+					msg.project,
+					msg.snapshotGeneratedAt,
 				);
 				break;
 			}

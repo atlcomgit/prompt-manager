@@ -127,14 +127,100 @@ interface BuiltInGitExtensionExports {
 	getAPI(version: 1): BuiltInGitApi;
 }
 
+/** Определяет глубину данных snapshot для быстрого initial open и полного hydrate. */
+type GitOverlaySnapshotDetailLevel = 'full' | 'summary';
+
+/** Управляет глубиной перечисления untracked путей в git status. */
+type GitOverlayUntrackedMode = 'all' | 'normal' | 'none';
+
+/** Описывает branch metadata, которую можно догружать отдельно от change/review snapshot. */
+type GitOverlayProjectBranchDetails = Pick<
+	GitOverlayProjectSnapshot,
+	'upstream' | 'ahead' | 'behind' | 'lastCommit' | 'branches' | 'cleanupBranches' | 'staleLocalBranches' | 'graph'
+>;
+
+type GitServiceTimedCacheEntry<T> = {
+	value: T;
+	expiresAtMs: number;
+};
+
+/** Возвращает пустые change groups для быстрого initial snapshot без git status. */
+function createEmptyGitOverlayChangeGroups(): GitOverlayProjectSnapshot['changeGroups'] {
+	return {
+		merge: [],
+		staged: [],
+		workingTree: [],
+		untracked: [],
+	};
+}
+
+/** Возвращает placeholder branch metadata для быстрого full-open без перечисления локальных и remote веток. */
+function createDeferredGitOverlayBranchDetails(): GitOverlayProjectBranchDetails {
+	return {
+		upstream: '',
+		ahead: 0,
+		behind: 0,
+		lastCommit: null,
+		branches: [],
+		cleanupBranches: [],
+		staleLocalBranches: [],
+		graph: { nodes: [], edges: [] },
+	};
+}
+
 export class GitService {
 	private static readonly DIFF_MAX_BUFFER = 8 * 1024 * 1024;
+	// Limit parallel project mutations so bulk actions accelerate without flooding the workspace.
+	private static readonly PROJECT_MUTATION_CONCURRENCY = 4;
+	private static readonly REVIEW_CACHE_TTL_MS = 30_000;
 	private readonly reviewCliAvailability = new Map<'gh' | 'glab', boolean>();
 	private readonly gitLabProjectIdCache = new Map<string, string>();
+	private readonly reviewRemoteContextCache = new Map<string, GitServiceTimedCacheEntry<{
+		remote: GitOverlayReviewRemote | null;
+		unsupportedReason: GitOverlayReviewUnsupportedReason | null;
+	}>>();
+	private readonly reviewTitlePrefixCache = new Map<string, GitServiceTimedCacheEntry<string>>();
 
 	private logDebug(event: string, payload?: Record<string, unknown>): void {
 		const serializedPayload = payload ? ` ${JSON.stringify(payload)}` : '';
 		appendPromptManagerLog(`[${new Date().toISOString()}] [git-service] ${event}${serializedPayload}`);
+	}
+
+	/** Возвращает неотрицательную длительность для debug-метрик git операций. */
+	private resolveDebugDurationMs(startedAtMs: number): number {
+		return Math.max(0, Date.now() - startedAtMs);
+	}
+
+	/** Пишет унифицированную debug-метрику для multi-project git операции. */
+	private logMultiProjectOperationCompleted(
+		operation: string,
+		startedAtMs: number,
+		result: GitMultiProjectResult,
+		payload?: Record<string, unknown>,
+	): void {
+		this.logDebug(`${operation}.completed`, {
+			...(payload || {}),
+			durationMs: this.resolveDebugDurationMs(startedAtMs),
+			success: result.success,
+			changedProjectCount: result.changedProjects.length,
+			skippedProjectCount: result.skippedProjects.length,
+			errorCount: result.errors.length,
+		});
+	}
+
+	/** Пишет per-project тайминг этапа Git Flow snapshot, чтобы локализовать медленный git шаг. */
+	private logGitOverlayProjectStageTiming(
+		project: string,
+		stage: 'review' | 'localBranches' | 'remoteBranches' | 'changeGroups',
+		startedAtMs: number,
+		payload?: Record<string, unknown>,
+	): void {
+		this.logDebug('gitOverlay.projectStage.resolved', {
+			project,
+			stage,
+			...(payload || {}),
+			durationMs: this.resolveDebugDurationMs(startedAtMs),
+		});
 	}
 
 	private previewDebugValue(value: unknown, maxLength: number = 220): string {
@@ -148,6 +234,28 @@ export class GitService {
 			return normalized;
 		}
 		return `${normalized.slice(0, maxLength - 1)}…`;
+	}
+
+	private getCachedTimedValue<T>(cache: Map<string, GitServiceTimedCacheEntry<T>>, key: string): T | undefined {
+		const cached = cache.get(key);
+		if (!cached) {
+			return undefined;
+		}
+
+		if (cached.expiresAtMs <= Date.now()) {
+			cache.delete(key);
+			return undefined;
+		}
+
+		return cached.value;
+	}
+
+	private setCachedTimedValue<T>(cache: Map<string, GitServiceTimedCacheEntry<T>>, key: string, value: T): T {
+		cache.set(key, {
+			value,
+			expiresAtMs: Date.now() + GitService.REVIEW_CACHE_TTL_MS,
+		});
+		return value;
 	}
 
 	private parseStagedNameStatus(raw: string): StagedFileChange[] {
@@ -490,6 +598,13 @@ export class GitService {
 		branchName: string,
 	): Promise<{ remote: GitOverlayReviewRemote | null; unsupportedReason: GitOverlayReviewUnsupportedReason | null }> {
 		const projectLabel = path.basename(projectPath) || projectPath;
+		const providerHosts = GitService.getReviewProviderHostsSetting();
+		const cacheKey = `${path.resolve(projectPath)}\u0000${branchName.trim()}\u0000${JSON.stringify(providerHosts)}`;
+		const cachedContext = this.getCachedTimedValue(this.reviewRemoteContextCache, cacheKey);
+		if (cachedContext) {
+			return cachedContext;
+		}
+
 		const remoteName = await this.getBranchRemote(projectPath, branchName);
 		if (!remoteName) {
 			this.logDebug('reviewRemote.missing', {
@@ -500,7 +615,6 @@ export class GitService {
 		}
 
 		const remoteUrl = await this.runGitFileCommandOptional(projectPath, ['remote', 'get-url', remoteName]);
-		const providerHosts = GitService.getReviewProviderHostsSetting();
 		const parsed = parseGitOverlayRemoteUrl(remoteUrl, providerHosts);
 		if (!parsed) {
 			this.logDebug('reviewRemote.unrecognized', {
@@ -533,10 +647,10 @@ export class GitService {
 			cliAvailable,
 		});
 
-		return {
+		return this.setCachedTimedValue(this.reviewRemoteContextCache, cacheKey, {
 			remote,
 			unsupportedReason: parsed.supported ? null : 'unsupported-provider',
-		};
+		});
 	}
 
 	private async getReviewRemote(projectPath: string, branchName: string): Promise<GitOverlayReviewRemote | null> {
@@ -744,8 +858,13 @@ export class GitService {
 
 	private async getProjectReviewState(projectPath: string, branchName: string): Promise<GitOverlayReviewState> {
 		const projectLabel = path.basename(projectPath) || projectPath;
-		const titlePrefix = await this.resolveReviewRequestTitlePrefix(projectPath);
-		const { remote, unsupportedReason } = await this.resolveReviewRemoteContext(projectPath, branchName);
+		const [
+			titlePrefix,
+			{ remote, unsupportedReason },
+		] = await Promise.all([
+			this.resolveReviewRequestTitlePrefix(projectPath),
+			this.resolveReviewRemoteContext(projectPath, branchName),
+		]);
 		if (!remote) {
 			this.logDebug('reviewState.resolved', {
 				project: projectLabel,
@@ -857,6 +976,18 @@ export class GitService {
 				unsupportedReason: null,
 			};
 		}
+	}
+
+	/** Возвращает placeholder review state для быстрого first paint без git/CLI lookup. */
+	private buildDeferredReviewState(): GitOverlayReviewState {
+		return {
+			remote: null,
+			request: null,
+			error: '',
+			setupAction: null,
+			titlePrefix: this.getReviewRequestTitlePrefixSetting(),
+			unsupportedReason: null,
+		};
 	}
 
 	private buildReviewRequestBody(prompt: Prompt): string {
@@ -1137,14 +1268,36 @@ export class GitService {
 		return result;
 	}
 
-	private async getChangeGroups(project: string, projectPath: string): Promise<GitOverlayProjectSnapshot['changeGroups']> {
+	private async getChangeGroups(
+		project: string,
+		projectPath: string,
+		options?: {
+			includeDetails?: boolean;
+			untrackedMode?: GitOverlayUntrackedMode;
+		},
+	): Promise<GitOverlayProjectSnapshot['changeGroups']> {
 		const excludedPaths = getCodeMapSettings().excludedPaths;
+		const includeDetails = options?.includeDetails !== false;
+		const untrackedMode = options?.untrackedMode || 'all';
+		const statusArgs = ['status', '--porcelain'];
+		if (untrackedMode === 'none') {
+			statusArgs.push('--untracked-files=no');
+		} else if (untrackedMode === 'normal') {
+			statusArgs.push('--untracked-files=normal');
+		} else {
+			statusArgs.push('--untracked-files=all');
+		}
 		const shouldTrackPath = (filePath: string): boolean => {
 			const normalizedFilePath = String(filePath || '').trim();
 			return Boolean(normalizedFilePath) && !shouldIgnoreRealtimeRefreshPath(normalizedFilePath, excludedPaths);
 		};
-		const [statusOutput, conflictOutput, stagedOutput, workingTreeOutput] = await Promise.all([
-			this.runGitFileCommandOptional(projectPath, ['status', '--porcelain', '--untracked-files=all']),
+		const statusOutput = await this.runGitFileCommandOptional(projectPath, statusArgs);
+		// Clean repositories do not need extra diff commands for lightweight overlay snapshots.
+		if (!statusOutput.trim()) {
+			return createEmptyGitOverlayChangeGroups();
+		}
+
+		const [conflictOutput, stagedOutput, workingTreeOutput] = await Promise.all([
 			this.runGitFileCommandOptional(projectPath, ['diff', '--name-only', '--diff-filter=U']),
 			this.runGitFileCommandOptional(projectPath, [
 				'diff',
@@ -1230,6 +1383,10 @@ export class GitService {
 			}
 		}
 
+		if (!includeDetails) {
+			return changeGroups;
+		}
+
 		const [merge, staged, workingTree, untracked] = await Promise.all([
 			Promise.all(changeGroups.merge.map(item => this.enrichOverlayChangeFile(projectPath, item))),
 			Promise.all(changeGroups.staged.map(item => this.enrichOverlayChangeFile(projectPath, item))),
@@ -1265,6 +1422,153 @@ export class GitService {
 				};
 			})
 			.filter(commit => Boolean(commit.sha));
+	}
+
+	/** Преобразует локальную ветку в commit payload для overlay без отдельного git log. */
+	private buildCommitFromLocalBranchRecord(record: GitLocalBranchRecord | null): GitOverlayCommit | null {
+		if (!record) {
+			return null;
+		}
+
+		return {
+			sha: record.sha,
+			shortSha: record.sha.slice(0, 7),
+			author: record.author,
+			committedAt: record.committedAt,
+			refNames: [record.name],
+			subject: record.subject,
+		};
+	}
+
+	/** Собирает branch metadata для overlay из уже прочитанных local/remote веток. */
+	private buildProjectBranchDetails(
+		promptBranch: string,
+		trackedBranches: string[],
+		currentBranch: string,
+		localBranches: Map<string, GitLocalBranchRecord>,
+		remoteBranches: Set<string>,
+	): GitOverlayProjectBranchDetails {
+		const currentBranchRecord = localBranches.get(currentBranch) || null;
+		const availableTrackedBranches = trackedBranches.filter((branchName) => {
+			const normalizedBranchName = branchName.trim();
+			if (!normalizedBranchName) {
+				return false;
+			}
+
+			return Boolean(localBranches.get(normalizedBranchName)) || remoteBranches.has(normalizedBranchName);
+		});
+		const trackedBranchSet = new Set(availableTrackedBranches);
+		const visibleBranchNames = resolveGitOverlayBranchNames(availableTrackedBranches, promptBranch, currentBranch);
+		const branches: GitOverlayBranchInfo[] = visibleBranchNames.map((branchName) => {
+			const localBranch = localBranches.get(branchName) || null;
+			const kind = branchName === promptBranch.trim()
+				? 'prompt'
+				: branchName === currentBranch
+					? 'current'
+					: trackedBranchSet.has(branchName)
+						? 'tracked'
+						: 'local';
+
+			return {
+				name: branchName,
+				current: branchName === currentBranch,
+				exists: Boolean(localBranch) || remoteBranches.has(branchName),
+				kind,
+				upstream: localBranch?.upstream || '',
+				ahead: localBranch?.ahead || 0,
+				behind: localBranch?.behind || 0,
+				lastCommit: this.buildCommitFromLocalBranchRecord(localBranch),
+				canSwitch: Boolean(localBranch) || remoteBranches.has(branchName),
+				canDelete: Boolean(localBranch)
+					&& canDeleteGitOverlayBranch(branchName, currentBranch, availableTrackedBranches, promptBranch),
+				stale: Boolean(localBranch?.stale),
+			};
+		});
+
+		const cleanupBranches = [...localBranches.values()]
+			.filter(branch => canDeleteGitOverlayBranch(branch.name, currentBranch, availableTrackedBranches, promptBranch))
+			.map((branch): GitOverlayBranchInfo => ({
+				name: branch.name,
+				current: false,
+				exists: true,
+				kind: 'cleanup',
+				upstream: branch.upstream,
+				ahead: branch.ahead,
+				behind: branch.behind,
+				lastCommit: this.buildCommitFromLocalBranchRecord(branch),
+				canSwitch: true,
+				canDelete: true,
+				stale: branch.stale,
+			}))
+			.sort((left, right) => {
+				if (left.stale !== right.stale) {
+					return left.stale ? -1 : 1;
+				}
+				return left.name.localeCompare(right.name, 'ru', { sensitivity: 'base' });
+			});
+
+		const graph = buildGitOverlayGraph({
+			branchNames: [...new Set([...branches.map(branch => branch.name), ...cleanupBranches.map(branch => branch.name)])],
+			trackedBranches: availableTrackedBranches,
+			promptBranch,
+			currentBranch,
+			currentUpstream: currentBranchRecord?.upstream,
+		});
+
+		return {
+			upstream: currentBranchRecord?.upstream || '',
+			ahead: currentBranchRecord?.ahead || 0,
+			behind: currentBranchRecord?.behind || 0,
+			lastCommit: this.buildCommitFromLocalBranchRecord(currentBranchRecord),
+			branches,
+			cleanupBranches,
+			staleLocalBranches: cleanupBranches.filter(branch => branch.stale).map(branch => branch.name),
+			graph,
+		};
+	}
+
+	/** Загружает branch metadata для overlay отдельно от change/review snapshot. */
+	private async resolveProjectBranchDetails(
+		project: string,
+		projectPath: string,
+		promptBranch: string,
+		trackedBranches: string[],
+		currentBranch: string,
+		detailLevel: GitOverlaySnapshotDetailLevel,
+	): Promise<GitOverlayProjectBranchDetails> {
+		const logProjectStageTiming = detailLevel === 'full';
+		const localBranchesPromise = (async () => {
+			const stageStartedAtMs = Date.now();
+			const localBranches = await this.listLocalBranches(projectPath);
+			if (logProjectStageTiming) {
+				this.logGitOverlayProjectStageTiming(project, 'localBranches', stageStartedAtMs, {
+					detailLevel,
+					branchCount: localBranches.size,
+				});
+			}
+			return localBranches;
+		})();
+		const remoteBranchesPromise = (async () => {
+			const stageStartedAtMs = Date.now();
+			const remoteBranches = await this.listRemoteBranchNames(projectPath);
+			if (logProjectStageTiming) {
+				this.logGitOverlayProjectStageTiming(project, 'remoteBranches', stageStartedAtMs, {
+					detailLevel,
+					branchCount: remoteBranches.size,
+				});
+			}
+			return remoteBranches;
+		})();
+
+		const [localBranches, remoteBranches] = await Promise.all([localBranchesPromise, remoteBranchesPromise]);
+
+		return this.buildProjectBranchDetails(
+			promptBranch,
+			trackedBranches,
+			currentBranch,
+			localBranches,
+			remoteBranches,
+		);
 	}
 
 	private async getRecentCommits(projectPath: string, ref: string, limit: number): Promise<GitOverlayCommit[]> {
@@ -1321,8 +1625,21 @@ export class GitService {
 		projectPath: string,
 		promptBranch: string,
 		trackedBranches: string[],
+		options?: {
+			detailLevel?: GitOverlaySnapshotDetailLevel;
+			includeChangeDetails?: boolean;
+			includeBranchDetails?: boolean;
+			includeReviewState?: boolean;
+			prefetchedReviewState?: GitOverlayReviewState;
+		},
 	): Promise<GitOverlayProjectSnapshot> {
 		try {
+			const startedAtMs = Date.now();
+			const detailLevel = options?.detailLevel || 'full';
+			const includeChangeDetails = options?.includeChangeDetails !== false;
+			const includeBranchDetails = detailLevel !== 'summary' && options?.includeBranchDetails !== false;
+			const includeReviewState = options?.includeReviewState !== false;
+			const normalizedPromptBranch = promptBranch.trim();
 			const currentBranch = await this.getCurrentBranch(projectPath);
 			if (!currentBranch) {
 				return {
@@ -1332,7 +1649,7 @@ export class GitService {
 					error: 'Not a git repository',
 					commitError: '',
 					currentBranch: '',
-					promptBranch: promptBranch.trim(),
+					promptBranch: normalizedPromptBranch,
 					dirty: false,
 					hasConflicts: false,
 					upstream: '',
@@ -1342,6 +1659,9 @@ export class GitService {
 					branches: [],
 					cleanupBranches: [],
 					changeGroups: { merge: [], staged: [], workingTree: [], untracked: [] },
+					changeDetailsHydrated: true,
+					branchDetailsHydrated: true,
+					reviewHydrated: true,
 					review: { remote: null, request: null, error: '', setupAction: null, titlePrefix: '', unsupportedReason: null },
 					recentCommits: [],
 					staleLocalBranches: [],
@@ -1349,100 +1669,108 @@ export class GitService {
 				};
 			}
 
-			const [localBranches, remoteBranches, changeGroups, recentCommits, review] = await Promise.all([
-				this.listLocalBranches(projectPath),
-				this.listRemoteBranchNames(projectPath),
-				this.getChangeGroups(project, projectPath),
-				this.getRecentCommits(projectPath, currentBranch, 12),
-				this.getProjectReviewState(projectPath, promptBranch.trim() || currentBranch),
-			]);
-
-			const currentBranchRecord = localBranches.get(currentBranch) || null;
-			const availableTrackedBranches = trackedBranches.filter((branchName) => {
-				const normalizedBranchName = branchName.trim();
-				if (!normalizedBranchName) {
-					return false;
+			const reviewBranchName = normalizedPromptBranch || currentBranch;
+			const reviewHydrated = Boolean(options?.prefetchedReviewState) || (detailLevel !== 'summary' && includeReviewState);
+			const logProjectStageTiming = detailLevel === 'full';
+			// Summary first paint keeps review state deferred so open latency is not gated by review probing.
+			const reviewPromise = (async () => {
+				const stageStartedAtMs = Date.now();
+				const review = options?.prefetchedReviewState
+					? await Promise.resolve(options.prefetchedReviewState)
+					: detailLevel === 'summary' || !includeReviewState
+						? await Promise.resolve(this.buildDeferredReviewState())
+						: await this.getProjectReviewState(projectPath, reviewBranchName);
+				if (logProjectStageTiming) {
+					this.logGitOverlayProjectStageTiming(project, 'review', stageStartedAtMs, {
+						detailLevel,
+						reviewHydrated,
+						hasRemote: Boolean(review.remote),
+						hasRequest: Boolean(review.request),
+						setupAction: review.setupAction || null,
+						unsupportedReason: review.unsupportedReason || null,
+					});
 				}
+				return review;
+			})();
 
-				return Boolean(localBranches.get(normalizedBranchName)) || remoteBranches.has(normalizedBranchName);
-			});
-			const trackedBranchSet = new Set(availableTrackedBranches);
-			const visibleBranchNames = resolveGitOverlayBranchNames(availableTrackedBranches, promptBranch, currentBranch);
-			const branches: GitOverlayBranchInfo[] = visibleBranchNames.map((branchName) => {
-				const localBranch = localBranches.get(branchName) || null;
-				const kind = branchName === promptBranch.trim()
-					? 'prompt'
-					: branchName === currentBranch
-						? 'current'
-						: trackedBranchSet.has(branchName)
-							? 'tracked'
-							: 'local';
-
+			if (detailLevel === 'summary') {
+				const review = await reviewPromise;
 				return {
-					name: branchName,
-					current: branchName === currentBranch,
-					exists: Boolean(localBranch) || remoteBranches.has(branchName),
-					kind,
-					upstream: localBranch?.upstream || '',
-					ahead: localBranch?.ahead || 0,
-					behind: localBranch?.behind || 0,
-					lastCommit: localBranch
-						? {
-							sha: localBranch.sha,
-							shortSha: localBranch.sha.slice(0, 7),
-							author: localBranch.author,
-							committedAt: localBranch.committedAt,
-							refNames: [localBranch.name],
-							subject: localBranch.subject,
-						}
-						: null,
-					canSwitch: Boolean(localBranch) || remoteBranches.has(branchName),
-					canDelete: Boolean(localBranch) && canDeleteGitOverlayBranch(branchName, currentBranch, availableTrackedBranches, promptBranch),
-					stale: Boolean(localBranch?.stale),
+					project,
+					repositoryPath: projectPath,
+					available: true,
+					error: '',
+					commitError: '',
+					currentBranch,
+					promptBranch: normalizedPromptBranch,
+					dirty: false,
+					hasConflicts: false,
+					upstream: '',
+					ahead: 0,
+					behind: 0,
+					lastCommit: null,
+					branches: [],
+					cleanupBranches: [],
+					changeGroups: createEmptyGitOverlayChangeGroups(),
+					changeDetailsHydrated: false,
+					branchDetailsHydrated: false,
+					reviewHydrated,
+					review,
+					recentCommits: [],
+					staleLocalBranches: [],
+					graph: { nodes: [], edges: [] },
 				};
-			});
+			}
 
-			const cleanupBranches = [...localBranches.values()]
-				.filter(branch => canDeleteGitOverlayBranch(branch.name, currentBranch, availableTrackedBranches, promptBranch))
-				.map((branch): GitOverlayBranchInfo => ({
-					name: branch.name,
-					current: false,
-					exists: true,
-					kind: 'cleanup',
-					upstream: branch.upstream,
-					ahead: branch.ahead,
-					behind: branch.behind,
-					lastCommit: {
-						sha: branch.sha,
-						shortSha: branch.sha.slice(0, 7),
-						author: branch.author,
-						committedAt: branch.committedAt,
-						refNames: [branch.name],
-						subject: branch.subject,
-					},
-					canSwitch: true,
-					canDelete: true,
-					stale: branch.stale,
-				}))
-				.sort((left, right) => {
-					if (left.stale !== right.stale) {
-						return left.stale ? -1 : 1;
-					}
-					return left.name.localeCompare(right.name, 'ru', { sensitivity: 'base' });
-				});
+			const branchDetailsPromise = includeBranchDetails
+				? this.resolveProjectBranchDetails(
+					project,
+					projectPath,
+					promptBranch,
+					trackedBranches,
+					currentBranch,
+					detailLevel,
+				)
+				: Promise.resolve(createDeferredGitOverlayBranchDetails());
+			const changeGroupsPromise = (async () => {
+				const stageStartedAtMs = Date.now();
+				const changeGroups = await this.getChangeGroups(project, projectPath, { includeDetails: includeChangeDetails });
+				if (logProjectStageTiming) {
+					this.logGitOverlayProjectStageTiming(project, 'changeGroups', stageStartedAtMs, {
+						detailLevel,
+						includeChangeDetails,
+						mergeCount: changeGroups.merge.length,
+						stagedCount: changeGroups.staged.length,
+						workingTreeCount: changeGroups.workingTree.length,
+						untrackedCount: changeGroups.untracked.length,
+					});
+				}
+				return changeGroups;
+			})();
 
-			const graph = buildGitOverlayGraph({
-				branchNames: [...new Set([...branches.map(branch => branch.name), ...cleanupBranches.map(branch => branch.name)])],
-				trackedBranches: availableTrackedBranches,
-				promptBranch,
-				currentBranch,
-				currentUpstream: currentBranchRecord?.upstream,
-			});
+			const [review, branchDetails, changeGroups] = await Promise.all([
+				reviewPromise,
+				branchDetailsPromise,
+				changeGroupsPromise,
+			]);
 
 			const hasChanges = changeGroups.merge.length > 0
 				|| changeGroups.staged.length > 0
 				|| changeGroups.workingTree.length > 0
 				|| changeGroups.untracked.length > 0;
+			if (logProjectStageTiming) {
+				this.logDebug('gitOverlay.projectSnapshot.resolved', {
+					project,
+					detailLevel,
+					includeChangeDetails,
+					branchDetailsHydrated: includeBranchDetails,
+					reviewHydrated,
+					visibleBranchCount: branchDetails.branches.length,
+					cleanupBranchCount: branchDetails.cleanupBranches.length,
+					hasChanges,
+					durationMs: this.resolveDebugDurationMs(startedAtMs),
+				});
+			}
 
 			return {
 				project,
@@ -1451,20 +1779,16 @@ export class GitService {
 				error: '',
 				commitError: '',
 				currentBranch,
-				promptBranch: promptBranch.trim(),
+				promptBranch: normalizedPromptBranch,
 				dirty: hasChanges,
 				hasConflicts: changeGroups.merge.length > 0,
-				upstream: currentBranchRecord?.upstream || '',
-				ahead: currentBranchRecord?.ahead || 0,
-				behind: currentBranchRecord?.behind || 0,
-				lastCommit: recentCommits[0] || null,
-				branches,
-				cleanupBranches,
+				...branchDetails,
 				changeGroups,
+				changeDetailsHydrated: includeChangeDetails,
+				branchDetailsHydrated: includeBranchDetails,
+				reviewHydrated,
 				review,
-				recentCommits,
-				staleLocalBranches: cleanupBranches.filter(branch => branch.stale).map(branch => branch.name),
-				graph,
+				recentCommits: [],
 			};
 		} catch (error) {
 			return {
@@ -1484,6 +1808,9 @@ export class GitService {
 				branches: [],
 				cleanupBranches: [],
 				changeGroups: { merge: [], staged: [], workingTree: [], untracked: [] },
+				changeDetailsHydrated: true,
+				branchDetailsHydrated: true,
+				reviewHydrated: true,
 				review: { remote: null, request: null, error: '', setupAction: null, titlePrefix: '', unsupportedReason: null },
 				recentCommits: [],
 				staleLocalBranches: [],
@@ -1492,34 +1819,148 @@ export class GitService {
 		}
 	}
 
+	/** Лёгкий snapshot для блока other projects без review, branch graph и diff-enrich. */
+	private async buildOtherProjectSnapshot(
+		project: string,
+		projectPath: string,
+		promptBranch: string,
+	): Promise<GitOverlayProjectSnapshot | null> {
+		try {
+			// Short-circuit clean peer repositories before running the heavier multi-command change scan.
+			const lightweightStatus = await this.runGitFileCommandOptional(projectPath, [
+				'status',
+				'--porcelain',
+				'--untracked-files=normal',
+			]);
+			if (!lightweightStatus.trim()) {
+				return null;
+			}
+
+			const changeGroups = await this.getChangeGroups(project, projectPath, {
+				includeDetails: false,
+				untrackedMode: 'normal',
+			});
+			const hasChanges = changeGroups.merge.length > 0
+				|| changeGroups.staged.length > 0
+				|| changeGroups.workingTree.length > 0
+				|| changeGroups.untracked.length > 0;
+
+			if (!hasChanges) {
+				return null;
+			}
+
+			return {
+				project,
+				repositoryPath: projectPath,
+				available: true,
+				error: '',
+				commitError: '',
+				currentBranch: '',
+				promptBranch: promptBranch.trim(),
+				dirty: true,
+				hasConflicts: changeGroups.merge.length > 0,
+				upstream: '',
+				ahead: 0,
+				behind: 0,
+				lastCommit: null,
+				branches: [],
+				cleanupBranches: [],
+				changeGroups,
+				changeDetailsHydrated: false,
+				reviewHydrated: true,
+				review: { remote: null, request: null, error: '', setupAction: null, titlePrefix: '', unsupportedReason: null },
+				recentCommits: [],
+				staleLocalBranches: [],
+				graph: { nodes: [], edges: [] },
+			};
+		} catch {
+			return null;
+		}
+	}
+
 	private async runProjectMutation(
+		operation: string,
 		projectPaths: Map<string, string>,
 		projectNames: string[],
 		runner: (project: string, projectPath: string) => Promise<boolean | void>,
 	): Promise<GitMultiProjectResult> {
+		const startedAtMs = Date.now();
+		const effectiveProjects = this.getEffectiveProjects(projectPaths, projectNames);
 		const errors: string[] = [];
 		const changedProjects: string[] = [];
 		const skippedProjects: string[] = [];
-
-		for (const { project, projectPath } of this.getEffectiveProjects(projectPaths, projectNames)) {
-			try {
-				const result = await runner(project, projectPath);
-				if (result === false) {
-					skippedProjects.push(project);
-					continue;
-				}
-				changedProjects.push(project);
-			} catch (error) {
-				errors.push(`${project}: ${error instanceof Error ? error.message : String(error)}`);
-			}
+		if (effectiveProjects.length === 0) {
+			const result = {
+				success: true,
+				errors,
+				changedProjects,
+				skippedProjects,
+			};
+			this.logMultiProjectOperationCompleted(operation, startedAtMs, result, { projectCount: 0 });
+			return result;
 		}
 
-		return {
+		// Keep the UI result order stable even when per-project mutations finish out of order.
+		type ProjectMutationOutcome =
+			| { kind: 'changed'; project: string }
+			| { kind: 'skipped'; project: string }
+			| { kind: 'error'; project: string; message: string };
+
+		const outcomes: ProjectMutationOutcome[] = new Array(effectiveProjects.length);
+		const concurrency = Math.min(GitService.PROJECT_MUTATION_CONCURRENCY, effectiveProjects.length);
+		let nextIndex = 0;
+
+		const worker = async (): Promise<void> => {
+			while (true) {
+				const currentIndex = nextIndex;
+				nextIndex += 1;
+				if (currentIndex >= effectiveProjects.length) {
+					return;
+				}
+
+				const { project, projectPath } = effectiveProjects[currentIndex];
+				try {
+					const result = await runner(project, projectPath);
+					outcomes[currentIndex] = result === false
+						? { kind: 'skipped', project }
+						: { kind: 'changed', project };
+				} catch (error) {
+					outcomes[currentIndex] = {
+						kind: 'error',
+						project,
+						message: `${project}: ${error instanceof Error ? error.message : String(error)}`,
+					};
+				}
+			}
+		};
+
+		await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+		for (const outcome of outcomes) {
+			if (!outcome) {
+				continue;
+			}
+			if (outcome.kind === 'changed') {
+				changedProjects.push(outcome.project);
+				continue;
+			}
+			if (outcome.kind === 'skipped') {
+				skippedProjects.push(outcome.project);
+				continue;
+			}
+			errors.push(outcome.message);
+		}
+
+		const result = {
 			success: errors.length === 0,
 			errors,
 			changedProjects,
 			skippedProjects,
 		};
+		this.logMultiProjectOperationCompleted(operation, startedAtMs, result, {
+			projectCount: effectiveProjects.length,
+		});
+		return result;
 	}
 
 	async getMergeBase(projectPath: string, left: string, right: string): Promise<string> {
@@ -2126,7 +2567,7 @@ export class GitService {
 			allowedBaseBranches: Array.from(allowedBaseBranches),
 		});
 
-		return this.runProjectMutation(projectPaths, effectiveProjects, async (project, projectPath) => {
+		return this.runProjectMutation('applyBranchTargetsByProject', projectPaths, effectiveProjects, async (project, projectPath) => {
 			const targetBranch = (targetSelections[project] || '').trim();
 			if (!targetBranch) {
 				throw new Error('Не выбрана ожидаемая ветка.');
@@ -2312,7 +2753,13 @@ export class GitService {
 			return configuredPrefix;
 		}
 
-		return await this.getGitUserName(projectPath);
+		const cacheKey = path.resolve(projectPath);
+		const cachedPrefix = this.getCachedTimedValue(this.reviewTitlePrefixCache, cacheKey);
+		if (cachedPrefix !== undefined) {
+			return cachedPrefix;
+		}
+
+		return this.setCachedTimedValue(this.reviewTitlePrefixCache, cacheKey, await this.getGitUserName(projectPath));
 	}
 
 	/**
@@ -2394,22 +2841,166 @@ export class GitService {
 		projectNames: string[],
 		promptBranch: string,
 		trackedBranches: string[],
+		options?: {
+			detailLevel?: GitOverlaySnapshotDetailLevel;
+			includeChangeDetails?: boolean;
+			includeBranchDetails?: boolean;
+			includeReviewState?: boolean;
+			prefetchedReviewStatesByProject?: Record<string, GitOverlayReviewState>;
+		},
 	): Promise<GitOverlaySnapshot> {
 		const normalizedTrackedBranches = Array.from(new Set(
 			trackedBranches.map(branch => branch.trim()).filter(Boolean),
 		));
 		const projects = await Promise.all(
 			this.getEffectiveProjects(projectPaths, projectNames)
-				.map(({ project, projectPath }) => this.buildProjectSnapshot(project, projectPath, promptBranch, normalizedTrackedBranches)),
+				.map(({ project, projectPath }) => this.buildProjectSnapshot(
+					project,
+					projectPath,
+					promptBranch,
+					normalizedTrackedBranches,
+					{
+						detailLevel: options?.detailLevel,
+						includeChangeDetails: options?.includeChangeDetails,
+						includeBranchDetails: options?.includeBranchDetails,
+						includeReviewState: options?.includeReviewState,
+						prefetchedReviewState: options?.prefetchedReviewStatesByProject?.[project],
+					},
+				)),
 		);
-		const resolvedTrackedBranches = resolveExistingGitOverlayTrackedBranches(normalizedTrackedBranches, projects);
+		const resolvedTrackedBranches = options?.detailLevel === 'summary'
+			? normalizedTrackedBranches
+			: resolveExistingGitOverlayTrackedBranches(normalizedTrackedBranches, projects);
 
 		return {
 			generatedAt: new Date().toISOString(),
+			// Expose the snapshot phase so the webview can keep summary placeholders out of the final-state path.
+			detailLevel: options?.detailLevel || 'full',
 			promptBranch: promptBranch.trim(),
 			trackedBranches: resolvedTrackedBranches,
 			projects,
 		};
+	}
+
+	/** Догружает полный snapshot одного проекта с per-file diff-метриками по требованию UI. */
+	async getGitOverlayProjectSnapshot(
+		projectPaths: Map<string, string>,
+		projectName: string,
+		promptBranch: string,
+		trackedBranches: string[],
+		options?: {
+			includeChangeDetails?: boolean;
+			includeBranchDetails?: boolean;
+			includeReviewState?: boolean;
+			prefetchedReviewState?: GitOverlayReviewState;
+		},
+	): Promise<GitOverlayProjectSnapshot | null> {
+		const normalizedProjectName = projectName.trim();
+		if (!normalizedProjectName) {
+			return null;
+		}
+
+		const projectPath = projectPaths.get(normalizedProjectName);
+		if (!projectPath) {
+			return null;
+		}
+
+		const normalizedTrackedBranches = Array.from(new Set(
+			trackedBranches.map(branch => branch.trim()).filter(Boolean),
+		));
+
+		return this.buildProjectSnapshot(
+			normalizedProjectName,
+			projectPath,
+			promptBranch,
+			normalizedTrackedBranches,
+			{
+				detailLevel: 'full',
+				includeChangeDetails: options?.includeChangeDetails,
+				includeBranchDetails: options?.includeBranchDetails,
+				includeReviewState: options?.includeReviewState,
+				prefetchedReviewState: options?.prefetchedReviewState,
+			},
+		);
+	}
+
+	/** Догружает только branch metadata для уже известного project snapshot без change/review команд. */
+	async getGitOverlayProjectBranchDetails(
+		projectPaths: Map<string, string>,
+		projectName: string,
+		promptBranch: string,
+		trackedBranches: string[],
+		currentBranchHint?: string,
+	): Promise<GitOverlayProjectBranchDetails | null> {
+		const normalizedProjectName = projectName.trim();
+		if (!normalizedProjectName) {
+			return null;
+		}
+
+		const projectPath = projectPaths.get(normalizedProjectName);
+		if (!projectPath) {
+			return null;
+		}
+
+		const currentBranch = currentBranchHint?.trim() || await this.getCurrentBranch(projectPath);
+		if (!currentBranch) {
+			return null;
+		}
+
+		const normalizedTrackedBranches = Array.from(new Set(
+			trackedBranches.map(branch => branch.trim()).filter(Boolean),
+		));
+
+		return this.resolveProjectBranchDetails(
+			normalizedProjectName,
+			projectPath,
+			promptBranch,
+			normalizedTrackedBranches,
+			currentBranch,
+			'full',
+		);
+	}
+
+	/** Догружает только review state для уже известного project snapshot без пересчёта веток и change groups. */
+	async getGitOverlayProjectReviewState(
+		projectPaths: Map<string, string>,
+		projectName: string,
+		promptBranch: string,
+	): Promise<GitOverlayReviewState | null> {
+		const normalizedProjectName = projectName.trim();
+		if (!normalizedProjectName) {
+			return null;
+		}
+
+		const projectPath = projectPaths.get(normalizedProjectName);
+		if (!projectPath) {
+			return null;
+		}
+
+		const reviewBranchName = promptBranch.trim() || await this.getCurrentBranch(projectPath);
+		if (!reviewBranchName) {
+			return null;
+		}
+
+		return this.getProjectReviewState(projectPath, reviewBranchName);
+	}
+
+	async getGitOverlayOtherProjectsSnapshot(
+		projectPaths: Map<string, string>,
+		projectNames: string[],
+		selectedProjects: string[],
+		promptBranch: string,
+	): Promise<GitOverlayProjectSnapshot[]> {
+		const selectedProjectNameSet = new Set(
+			selectedProjects.map(project => project.trim()).filter(Boolean),
+		);
+		const projects = await Promise.all(
+			this.getEffectiveProjects(projectPaths, projectNames)
+				.filter(({ project }) => !selectedProjectNameSet.has(project))
+				.map(({ project, projectPath }) => this.buildOtherProjectSnapshot(project, projectPath, promptBranch)),
+		);
+
+		return projects.filter((project): project is GitOverlayProjectSnapshot => Boolean(project));
 	}
 
 	async stageAll(
@@ -2419,7 +3010,7 @@ export class GitService {
 		projectFilter?: string,
 	): Promise<GitMultiProjectResult> {
 		const filteredProjects = projectFilter ? projectNames.filter(project => project === projectFilter) : projectNames;
-		return this.runProjectMutation(projectPaths, filteredProjects, async (_project, projectPath) => {
+		return this.runProjectMutation('stageAll', projectPaths, filteredProjects, async (_project, projectPath) => {
 			await this.runGitFileMutation(projectPath, trackedOnly ? ['add', '--update'] : ['add', '--all']);
 		});
 	}
@@ -2430,7 +3021,7 @@ export class GitService {
 		projectFilter?: string,
 	): Promise<GitMultiProjectResult> {
 		const filteredProjects = projectFilter ? projectNames.filter(project => project === projectFilter) : projectNames;
-		return this.runProjectMutation(projectPaths, filteredProjects, async (_project, projectPath) => {
+		return this.runProjectMutation('unstageAll', projectPaths, filteredProjects, async (_project, projectPath) => {
 			await this.runGitFileMutation(projectPath, ['restore', '--staged', '--', '.']);
 		});
 	}
@@ -2440,7 +3031,7 @@ export class GitService {
 		projectName: string,
 		filePath: string,
 	): Promise<GitMultiProjectResult> {
-		return this.runProjectMutation(projectPaths, [projectName], async (_project, projectPath) => {
+		return this.runProjectMutation('stageFile', projectPaths, [projectName], async (_project, projectPath) => {
 			await this.runGitFileMutation(projectPath, ['add', '--', filePath]);
 		});
 	}
@@ -2450,7 +3041,7 @@ export class GitService {
 		projectName: string,
 		filePath: string,
 	): Promise<GitMultiProjectResult> {
-		return this.runProjectMutation(projectPaths, [projectName], async (_project, projectPath) => {
+		return this.runProjectMutation('unstageFile', projectPaths, [projectName], async (_project, projectPath) => {
 			await this.runGitFileMutation(projectPath, ['restore', '--staged', '--', filePath]);
 		});
 	}
@@ -2494,7 +3085,7 @@ export class GitService {
 			? [filePath, previousPath]
 			: [filePath];
 
-		return this.runProjectMutation(projectPaths, [projectName], async (_project, projectPath) => {
+		return this.runProjectMutation('discardFile', projectPaths, [projectName], async (_project, projectPath) => {
 			await this.discardProjectChange(projectPath, affectedPaths[0], group, affectedPaths[1]);
 		});
 	}
@@ -2513,7 +3104,7 @@ export class GitService {
 			}),
 		).values());
 
-		return this.runProjectMutation(projectPaths, [projectName], async (_project, projectPath) => {
+		return this.runProjectMutation('discardProjectChanges', projectPaths, [projectName], async (_project, projectPath) => {
 			if (uniqueChanges.length === 0) {
 				return false;
 			}
@@ -2544,7 +3135,7 @@ export class GitService {
 			return { success: false, errors: ['Название ветки промпта пустое.'], changedProjects: [], skippedProjects: [] };
 		}
 
-		return this.runProjectMutation(projectPaths, effectiveProjects, async (project, projectPath) => {
+		return this.runProjectMutation('ensurePromptBranchFromTracked', projectPaths, effectiveProjects, async (project, projectPath) => {
 			const trackedBranchForProject = (branchSelections[project] || '').trim();
 			if (!trackedBranchForProject) {
 				throw new Error('Не выбрана tracked-ветка.');
@@ -2635,7 +3226,7 @@ export class GitService {
 			return { success: false, errors: ['Название ветки пустое.'], changedProjects: [], skippedProjects: [] };
 		}
 
-		return this.runProjectMutation(projectPaths, projectNames, async (_project, projectPath) => {
+		return this.runProjectMutation('deleteLocalBranch', projectPaths, projectNames, async (_project, projectPath) => {
 			const currentBranch = await this.getCurrentBranch(projectPath);
 			if (!canDeleteGitOverlayBranch(normalizedBranchName, currentBranch, trackedBranches, promptBranch)) {
 				throw new Error('Эту ветку нельзя удалить по текущим правилам.');
@@ -2653,7 +3244,7 @@ export class GitService {
 		branchName?: string,
 	): Promise<GitMultiProjectResult> {
 		const normalizedBranchName = (branchName || '').trim();
-		return this.runProjectMutation(projectPaths, projectNames, async (_project, projectPath) => {
+		return this.runProjectMutation('pushBranch', projectPaths, projectNames, async (_project, projectPath) => {
 			const currentBranch = await this.getCurrentBranch(projectPath);
 			const targetBranch = normalizedBranchName || currentBranch;
 			if (!targetBranch) {
@@ -2708,56 +3299,111 @@ export class GitService {
 			changedProjects: [],
 			skippedProjects: [],
 		};
+		const startedAtMs = Date.now();
 
 		const body = this.buildReviewRequestBody(prompt);
 
-		for (const item of normalizedRequests) {
-			const projectPath = projectPaths.get(item.project);
-			if (!projectPath) {
-				result.errors.push(`${item.project}: workspace folder not found`);
+		// Preserve the requested project order in the overlay result while review creation runs concurrently.
+		type ReviewRequestOutcome =
+			| { kind: 'changed'; project: string }
+			| { kind: 'skipped'; project: string }
+			| { kind: 'error'; message: string };
+
+		const outcomes: ReviewRequestOutcome[] = new Array(normalizedRequests.length);
+		const concurrency = Math.min(GitService.PROJECT_MUTATION_CONCURRENCY, normalizedRequests.length);
+		let nextIndex = 0;
+
+		const worker = async (): Promise<void> => {
+			while (true) {
+				const currentIndex = nextIndex;
+				nextIndex += 1;
+				if (currentIndex >= normalizedRequests.length) {
+					return;
+				}
+
+				const item = normalizedRequests[currentIndex];
+				const projectPath = projectPaths.get(item.project);
+				if (!projectPath) {
+					outcomes[currentIndex] = { kind: 'error', message: `${item.project}: workspace folder not found` };
+					continue;
+				}
+
+				try {
+					const remote = await this.getReviewRemote(projectPath, promptBranch);
+					if (!remote || !remote.supported) {
+						outcomes[currentIndex] = {
+							kind: 'error',
+							message: `${item.project}: поддержка MR/PR доступна только для GitHub и GitLab.`,
+						};
+						continue;
+					}
+					if (!remote.cliAvailable) {
+						outcomes[currentIndex] = {
+							kind: 'error',
+							message: `${item.project}: CLI ${remote.cliCommand} не найден.`,
+						};
+						continue;
+					}
+					const cliCommand = remote.cliCommand;
+					if (cliCommand !== 'gh' && cliCommand !== 'glab') {
+						outcomes[currentIndex] = {
+							kind: 'error',
+							message: `${item.project}: CLI для этого провайдера не поддерживается.`,
+						};
+						continue;
+					}
+					const authenticated = await this.isCliAuthenticated(cliCommand, projectPath, remote.host);
+					if (!authenticated) {
+						outcomes[currentIndex] = {
+							kind: 'error',
+							message: `${item.project}: CLI ${cliCommand} не авторизован.`,
+						};
+						continue;
+					}
+
+					const existingRequest = await this.getExistingReviewRequest(projectPath, remote, promptBranch);
+					if (existingRequest) {
+						outcomes[currentIndex] = { kind: 'skipped', project: item.project };
+						continue;
+					}
+
+					if (remote.provider === 'github') {
+						await this.createGitHubReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body, item.draft);
+					} else {
+						await this.createGitLabReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body, item.draft, item.removeSourceBranch);
+					}
+
+					outcomes[currentIndex] = { kind: 'changed', project: item.project };
+				} catch (error) {
+					outcomes[currentIndex] = {
+						kind: 'error',
+						message: `${item.project}: ${error instanceof Error ? error.message : String(error)}`,
+					};
+				}
+			}
+		};
+
+		await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+		for (const outcome of outcomes) {
+			if (!outcome) {
 				continue;
 			}
-
-			try {
-				const remote = await this.getReviewRemote(projectPath, promptBranch);
-				if (!remote || !remote.supported) {
-					result.errors.push(`${item.project}: поддержка MR/PR доступна только для GitHub и GitLab.`);
-					continue;
-				}
-				if (!remote.cliAvailable) {
-					result.errors.push(`${item.project}: CLI ${remote.cliCommand} не найден.`);
-					continue;
-				}
-				const cliCommand = remote.cliCommand;
-				if (cliCommand !== 'gh' && cliCommand !== 'glab') {
-					result.errors.push(`${item.project}: CLI для этого провайдера не поддерживается.`);
-					continue;
-				}
-				const authenticated = await this.isCliAuthenticated(cliCommand, projectPath, remote.host);
-				if (!authenticated) {
-					result.errors.push(`${item.project}: CLI ${cliCommand} не авторизован.`);
-					continue;
-				}
-
-				const existingRequest = await this.getExistingReviewRequest(projectPath, remote, promptBranch);
-				if (existingRequest) {
-					result.skippedProjects.push(item.project);
-					continue;
-				}
-
-				if (remote.provider === 'github') {
-					await this.createGitHubReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body, item.draft);
-				} else {
-					await this.createGitLabReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body, item.draft, item.removeSourceBranch);
-				}
-
-				result.changedProjects.push(item.project);
-			} catch (error) {
-				result.errors.push(`${item.project}: ${error instanceof Error ? error.message : String(error)}`);
+			if (outcome.kind === 'changed') {
+				result.changedProjects.push(outcome.project);
+				continue;
 			}
+			if (outcome.kind === 'skipped') {
+				result.skippedProjects.push(outcome.project);
+				continue;
+			}
+			result.errors.push(outcome.message);
 		}
 
 		result.success = result.errors.length === 0;
+		this.logMultiProjectOperationCompleted('createReviewRequests', startedAtMs, result, {
+			projectCount: normalizedRequests.length,
+		});
 		return result;
 	}
 
@@ -2765,7 +3411,7 @@ export class GitService {
 		projectPaths: Map<string, string>,
 		projectNames: string[],
 	): Promise<GitMultiProjectResult> {
-		return this.runProjectMutation(projectPaths, projectNames, async (_project, projectPath) => {
+		return this.runProjectMutation('fetchProjects', projectPaths, projectNames, async (_project, projectPath) => {
 			await this.runGitFileMutation(projectPath, ['fetch', '--all', '--prune']);
 		});
 	}
@@ -2774,7 +3420,7 @@ export class GitService {
 		projectPaths: Map<string, string>,
 		projectNames: string[],
 	): Promise<GitMultiProjectResult> {
-		return this.runProjectMutation(projectPaths, projectNames, async (_project, projectPath) => {
+		return this.runProjectMutation('syncProjects', projectPaths, projectNames, async (_project, projectPath) => {
 			const currentBranchRecord = await this.getCurrentLocalBranchRecord(projectPath);
 			if (!currentBranchRecord) {
 				return false;
@@ -2804,45 +3450,89 @@ export class GitService {
 			return { success: false, errors: ['Не переданы сообщения коммита по проектам.'], changedProjects: [], skippedProjects: [] };
 		}
 
+		const startedAtMs = Date.now();
 		const changedProjects: string[] = [];
 		const skippedProjects: string[] = [];
 		const errors: string[] = [];
 
-		for (const item of normalizedMessages) {
-			const projectPath = projectPaths.get(item.project);
-			if (!projectPath) {
-				errors.push(`${item.project}: workspace folder not found`);
-				continue;
-			}
+		// Preserve the original project order even when commit preparation finishes in parallel.
+		type CommitOutcome =
+			| { kind: 'changed'; project: string }
+			| { kind: 'skipped'; project: string }
+			| { kind: 'error'; message: string };
 
-			try {
-				const stagedStatus = await this.runGitFileCommandOptional(projectPath, ['diff', '--cached', '--name-only']);
-				if (!stagedStatus.trim()) {
-					skippedProjects.push(item.project);
+		const outcomes: CommitOutcome[] = new Array(normalizedMessages.length);
+		const concurrency = Math.min(GitService.PROJECT_MUTATION_CONCURRENCY, normalizedMessages.length);
+		let nextIndex = 0;
+
+		const worker = async (): Promise<void> => {
+			while (true) {
+				const currentIndex = nextIndex;
+				nextIndex += 1;
+				if (currentIndex >= normalizedMessages.length) {
+					return;
+				}
+
+				const item = normalizedMessages[currentIndex];
+				const projectPath = projectPaths.get(item.project);
+				if (!projectPath) {
+					outcomes[currentIndex] = { kind: 'error', message: `${item.project}: workspace folder not found` };
 					continue;
 				}
 
-				const paragraphs = item.message
-					.split(/\n\s*\n/g)
-					.map(part => part.trim())
-					.filter(Boolean);
-				const commitArgs = ['commit'];
-				for (const paragraph of (paragraphs.length > 0 ? paragraphs : [item.message.trim()])) {
-					commitArgs.push('-m', paragraph);
+				try {
+					const stagedStatus = await this.runGitFileCommandOptional(projectPath, ['diff', '--cached', '--name-only']);
+					if (!stagedStatus.trim()) {
+						outcomes[currentIndex] = { kind: 'skipped', project: item.project };
+						continue;
+					}
+
+					const paragraphs = item.message
+						.split(/\n\s*\n/g)
+						.map(part => part.trim())
+						.filter(Boolean);
+					const commitArgs = ['commit'];
+					for (const paragraph of (paragraphs.length > 0 ? paragraphs : [item.message.trim()])) {
+						commitArgs.push('-m', paragraph);
+					}
+					await this.runGitFileMutation(projectPath, commitArgs);
+					outcomes[currentIndex] = { kind: 'changed', project: item.project };
+				} catch (error) {
+					outcomes[currentIndex] = {
+						kind: 'error',
+						message: `${item.project}: ${error instanceof Error ? error.message : String(error)}`,
+					};
 				}
-				await this.runGitFileMutation(projectPath, commitArgs);
-				changedProjects.push(item.project);
-			} catch (error) {
-				errors.push(`${item.project}: ${error instanceof Error ? error.message : String(error)}`);
 			}
+		};
+
+		await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+		for (const outcome of outcomes) {
+			if (!outcome) {
+				continue;
+			}
+			if (outcome.kind === 'changed') {
+				changedProjects.push(outcome.project);
+				continue;
+			}
+			if (outcome.kind === 'skipped') {
+				skippedProjects.push(outcome.project);
+				continue;
+			}
+			errors.push(outcome.message);
 		}
 
-		return {
+		const result = {
 			success: errors.length === 0,
 			errors,
 			changedProjects,
 			skippedProjects,
 		};
+		this.logMultiProjectOperationCompleted('commitStagedChanges', startedAtMs, result, {
+			projectCount: normalizedMessages.length,
+		});
+		return result;
 	}
 
 	async getFileHistoryPayload(

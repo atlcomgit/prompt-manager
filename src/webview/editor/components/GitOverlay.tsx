@@ -76,6 +76,7 @@ type Props = {
 	onCommitMessageChange: (project: string, value: string) => void;
 	onUpdateProjects?: (projects: string[]) => void;
 	onTrackedBranchChange?: (trackedBranchesByProject: Record<string, string>) => void;
+	onHydrateProjectDetails?: (project: string) => void;
 	onContinueStartChat?: () => void;
 	onContinueOpenChat?: () => void;
 	t: (key: string) => string;
@@ -655,7 +656,15 @@ export function resolveChangeDiffStats(change: Pick<GitOverlayChangeFile, 'confl
 	};
 }
 
-function renderChangeMetrics(change: GitOverlayChangeFile, t: (key: string) => string): React.ReactNode {
+function renderChangeMetrics(
+	change: GitOverlayChangeFile,
+	changeDetailsHydrated: boolean,
+	t: (key: string) => string,
+): React.ReactNode {
+	if (!changeDetailsHydrated && !change.conflicted) {
+		return <span style={styles.changeMetricsInfo}>{t('editor.gitOverlayLoading')}</span>;
+	}
+
 	const diffStats = resolveChangeDiffStats(change);
 
 	return (
@@ -858,6 +867,26 @@ const InlineHint: React.FC<{
 	</div>
 );
 
+const SectionLoader: React.FC<{
+	title: string;
+	subtitle?: string;
+}> = ({ title, subtitle }) => (
+	<div style={styles.sectionLoaderCard} data-pm-git-overlay-section-loader="true" aria-busy="true">
+		<div style={styles.sectionLoaderHeader}>
+			<span style={styles.largeSpinner} aria-hidden="true" />
+			<div style={styles.sectionLoaderCopy}>
+				<div style={styles.sectionLoaderTitle}>{title}</div>
+				{subtitle ? <div style={styles.sectionLoaderSubtitle}>{subtitle}</div> : null}
+			</div>
+		</div>
+		<ProgressLine
+			mode="loading"
+			trackStyle={styles.sectionLoaderProgressTrack}
+			lineStyle={styles.sectionLoaderProgressLine}
+		/>
+	</div>
+);
+
 export const GitOverlay: React.FC<Props> = ({
 	open,
 	mode = 'default',
@@ -901,6 +930,7 @@ export const GitOverlay: React.FC<Props> = ({
 	onCommitMessageChange,
 	onUpdateProjects,
 	onTrackedBranchChange,
+	onHydrateProjectDetails,
 	onContinueStartChat,
 	onContinueOpenChat,
 	t,
@@ -939,8 +969,24 @@ export const GitOverlay: React.FC<Props> = ({
 
 		return null;
 	}, [busyAction]);
+	// Summary snapshots carry only the stable first-paint frame, so follow-up steps stay in loading mode until the full hydrate arrives.
+	const isSummarySnapshot = snapshot?.detailLevel === 'summary';
+	// Refresh keeps only the header progress line; step loaders are reserved for open hydration.
+	const isRefreshSnapshotPending = Boolean(busyAction?.startsWith('refresh:'))
+		|| Boolean(waitingForSnapshotAction?.startsWith('refresh:'));
+	// Opening snapshots can be provisional, so body content stays masked until hydrate finishes.
+	const isOpenSnapshotHydrationPending = Boolean(snapshot) && (
+		isSummarySnapshot
+		|| busyAction === 'overlay:loading'
+		|| waitingForSnapshotAction === 'overlay:loading'
+	);
 	const promptBranch = (snapshot?.promptBranch || '').trim();
-	const allProjects = snapshot?.projects || [];
+	const selectedProjectsSnapshot = snapshot?.projects || [];
+	const otherProjectsSnapshot = snapshot?.otherProjects || [];
+	const allProjects = useMemo(
+		() => [...selectedProjectsSnapshot, ...otherProjectsSnapshot],
+		[selectedProjectsSnapshot, otherProjectsSnapshot],
+	);
 	const normalizedSelectedProjects = useMemo(
 		() => normalizeGitOverlayProjectNames(selectedProjects),
 		[selectedProjects],
@@ -960,8 +1006,8 @@ export const GitOverlay: React.FC<Props> = ({
 		[normalizedSelectedProjects],
 	);
 	const selectedSnapshotProjects = useMemo(
-		() => allProjects.filter(project => selectedProjectNameSet.has(project.project)),
-		[allProjects, selectedProjectNameSet],
+		() => selectedProjectsSnapshot.filter(project => selectedProjectNameSet.has(project.project)),
+		[selectedProjectNameSet, selectedProjectsSnapshot],
 	);
 	const trackedBranchOptions = useMemo(
 		() => resolveGitOverlayTrackedBranchOptions(
@@ -1012,6 +1058,10 @@ export const GitOverlay: React.FC<Props> = ({
 		() => availableProjects,
 		[availableProjects],
 	);
+	const step1BranchHydrationPending = useMemo(
+		() => step1AvailableProjects.some(project => project.branchDetailsHydrated === false),
+		[step1AvailableProjects],
+	);
 	const step1Projects = useMemo(
 		() => isChatPreflightMode
 			? selectedSnapshotProjects
@@ -1019,8 +1069,8 @@ export const GitOverlay: React.FC<Props> = ({
 		[isChatPreflightMode, selectedSnapshotProjects, step1AvailableProjects],
 	);
 	const otherChangedProjects = useMemo(
-		() => allProjects.filter(project => !selectedProjectNameSet.has(project.project) && countProjectChanges(project) > 0),
-		[allProjects, selectedProjectNameSet],
+		() => otherProjectsSnapshot.filter(project => countProjectChanges(project) > 0),
+		[otherProjectsSnapshot],
 	);
 	const startChatBranchMismatches = useMemo(
 		() => collectGitOverlayStartChatBranchMismatches(availableProjects, promptBranch, trackedBranchOptions),
@@ -1180,19 +1230,27 @@ export const GitOverlay: React.FC<Props> = ({
 		() => promptBranchProjects,
 		[promptBranchProjects],
 	);
-	const reviewProjectsWithCli = useMemo(
-		() => reviewProjects.filter(project => Boolean(project.review.remote?.supported) && Boolean(project.review.remote?.cliAvailable)),
+	const reviewProjectsPendingHydration = useMemo(
+		() => reviewProjects.filter(project => project.reviewHydrated === false),
 		[reviewProjects],
+	);
+	const hydratedReviewProjects = useMemo(
+		() => reviewProjects.filter(project => project.reviewHydrated !== false),
+		[reviewProjects],
+	);
+	const reviewProjectsWithCli = useMemo(
+		() => hydratedReviewProjects.filter(project => Boolean(project.review.remote?.supported) && Boolean(project.review.remote?.cliAvailable)),
+		[hydratedReviewProjects],
 	);
 	const reviewProjectsMissingRequest = useMemo(
 		() => reviewProjectsWithCli.filter(project => !project.review.request),
 		[reviewProjectsWithCli],
 	);
 	const reviewRequestLinks = useMemo(
-		() => reviewProjects
+		() => hydratedReviewProjects
 			.map(project => (project.review.request?.url || '').trim())
 			.filter((url): url is string => Boolean(url)),
-		[reviewProjects],
+		[hydratedReviewProjects],
 	);
 	const reviewRequestLinksText = useMemo(
 		() => reviewRequestLinks.join('\n'),
@@ -1406,6 +1464,7 @@ export const GitOverlay: React.FC<Props> = ({
 			? defaultStep1BranchMismatches.length > 0 || syncRequired
 			: showPromptBranchMissingError || showProjectNeedsTrackedOrPromptSwitchHint || syncRequired);
 	const shouldShowStep1Success = !step1Pending
+		&& !step1BranchHydrationPending
 		&& (
 			isChatPreflightMode
 				? startChatBranchCheckDone
@@ -1418,23 +1477,6 @@ export const GitOverlay: React.FC<Props> = ({
 	const shouldShowSwitchToPromptButton = Boolean(promptBranch)
 		&& !allProjectsOnPromptBranch
 		&& (!isChatPreflightMode || isStartChatPreflightMode);
-	const showNoChangesToCommitHint = !isChatPreflightMode
-		&& step1AvailableProjects.length > 0
-		&& projectsWithChanges.length === 0
-		&& step1ProjectsOffPromptBranch.length > 0
-		&& defaultStep1BranchMismatches.length === 0
-		&& !syncRequired;
-	const showStep1NoProjectChangesHint = !isChatPreflightMode
-		&& step1Projects.length > 0
-		&& projectsWithChanges.length === 0
-		&& trackedBranchOptions.length > 0
-		&& !showPromptBranchFallbackInfo
-		&& !showPromptBranchMissingError
-		&& !defaultStep1ReadyOnTrackedBranches
-		&& !showProjectNeedsTrackedOrPromptSwitchHint
-		&& !showNoChangesToCommitHint
-		&& !syncRequired
-		&& !shouldShowStep1Success;
 	const canApplyAllBranchTargets = step1ProjectsReadyForApply.length > 0 && step1ProjectsBlockedForApply.length === 0;
 	const canGenerateAllCommitMessages = bulkGenerateProjects.length > 0;
 	const canCommitAllProjects = bulkCommitMessages.length > 0;
@@ -1449,8 +1491,41 @@ export const GitOverlay: React.FC<Props> = ({
 			: (canPushTrackedBranchesWithoutPromptBranch ? step1AvailableProjects : []),
 		[canPushTrackedBranchesWithoutPromptBranch, promptBranch, promptBranchProjects, step1AvailableProjects],
 	);
+	const step3BranchHydrationPending = useMemo(
+		() => pushTargetProjects.some(project => project.branchDetailsHydrated === false),
+		[pushTargetProjects],
+	);
+	// Keep full loader cards up until automatic branch/review hydrate patches have landed.
+	const shouldShowSnapshotLoaders = !isRefreshSnapshotPending && (
+		isOpenSnapshotHydrationPending
+		|| step1BranchHydrationPending
+		|| step3BranchHydrationPending
+		|| reviewProjectsPendingHydration.length > 0
+	);
+	// Final clean-state hints wait until open hydration and refresh replacement can no longer invalidate them.
+	const step1FinalHintPending = isRefreshSnapshotPending || shouldShowSnapshotLoaders;
+	const showNoChangesToCommitHint = !isChatPreflightMode
+		&& !step1FinalHintPending
+		&& step1AvailableProjects.length > 0
+		&& projectsWithChanges.length === 0
+		&& step1ProjectsOffPromptBranch.length > 0
+		&& defaultStep1BranchMismatches.length === 0
+		&& !syncRequired;
+	const showStep1NoProjectChangesHint = !isChatPreflightMode
+		&& !step1FinalHintPending
+		&& step1Projects.length > 0
+		&& projectsWithChanges.length === 0
+		&& trackedBranchOptions.length > 0
+		&& !showPromptBranchFallbackInfo
+		&& !showPromptBranchMissingError
+		&& !defaultStep1ReadyOnTrackedBranches
+		&& !showProjectNeedsTrackedOrPromptSwitchHint
+		&& !showNoChangesToCommitHint
+		&& !syncRequired
+		&& !shouldShowStep1Success;
 	const showPushNeedsPromptBranchHint = !promptBranch && !canPushTrackedBranchesWithoutPromptBranch;
-	const canAttemptPush = pushTargetProjects.length > 0
+	const canAttemptPush = !step3BranchHydrationPending
+		&& pushTargetProjects.length > 0
 		&& !step1Pending
 		&& (!promptBranch || flowProjectsOffPromptBranch.length === 0)
 		&& !hasConflicts
@@ -1461,13 +1536,56 @@ export const GitOverlay: React.FC<Props> = ({
 	);
 	const pushRequired = canAttemptPush && projectsNeedingPush.length > 0;
 	const canPush = pushRequired;
-	const step2Pending = !step1Pending && projectsWithChanges.length > 0;
-	const step3Pending = !step1Pending && !step2Pending && pushRequired;
+	const step2Pending = !step1Pending && (shouldShowSnapshotLoaders || projectsWithChanges.length > 0);
+	const step3Pending = !step1Pending && !step2Pending && (step3BranchHydrationPending || pushRequired);
 	const step4Pending = !step1Pending
 		&& !step2Pending
 		&& !step3Pending
-		&& reviewProjectsWithCli.length > 0
-		&& reviewProjectsMissingRequest.length > 0;
+		&& (reviewProjectsPendingHydration.length > 0 || (reviewProjectsWithCli.length > 0 && reviewProjectsMissingRequest.length > 0));
+	const step1HasWarnings = isReadOnlyFlow
+		|| trackedBranchOptions.length === 0
+		|| showPromptBranchMissingError
+		|| syncRequired
+		|| (isChatPreflightMode
+			? startChatBranchMismatches.length > 0
+			: showProjectNeedsTrackedOrPromptSwitchHint || (defaultStep1ReadyOnTrackedBranches && !isDraftPrompt));
+	const step2HasWarnings = projectsWithChanges.some((project) => {
+		const validation = projectValidations.get(project.project);
+		return !validation?.available
+			|| Boolean(validation?.branchMismatch)
+			|| Boolean(validation?.hasConflicts)
+			|| Boolean(validation?.needsMessage)
+			|| Boolean(project.commitError);
+	});
+	const step2Busy = Boolean(
+		activeCommitAction
+		|| activeCommitMessageGenerationAction
+		|| hasPendingBulkGenerate
+		|| hasPendingBulkCommit
+		|| pendingGenerateProjectNames.length > 0
+		|| pendingCommitProjectNames.length > 0
+		|| waitingForSnapshotAction?.startsWith('commitStaged:')
+		|| waitingForSnapshotAction?.startsWith('generateCommitMessage:'),
+	);
+	const step3HasWarnings = showPushNeedsPromptBranchHint
+		|| projectsWithChangesOutsideTrackedOrPrompt.length > 0
+		|| projectsWithChanges.length > 0
+		|| hasConflicts;
+	const step3Busy = busyAction === 'pushPromptBranch' || waitingForSnapshotAction === 'pushPromptBranch';
+	const step4HasWarnings = !promptBranch
+		|| flowProjectsOffPromptBranch.length > 0
+		|| projectsWithChanges.length > 0
+		|| hydratedReviewProjects.some((project) => Boolean(project.review.error && !project.review.setupAction) || project.currentBranch !== promptBranch);
+	const step4Busy = Boolean(
+		busyAction?.startsWith('createReviewRequest:')
+		|| waitingForSnapshotAction?.startsWith('createReviewRequest:'),
+	);
+	const step4Completed = Boolean(promptBranch)
+		&& !step1Pending
+		&& !step2Pending
+		&& !step3Pending
+		&& !step4Pending
+		&& (reviewProjects.length === 0 || hydratedReviewProjects.every((project) => Boolean(project.review.request)));
 	const uniqueTrackedBranches = useMemo(
 		() => Array.from(new Set(
 			Object.values(resolvedTrackedBranchesByProject)
@@ -1483,25 +1601,79 @@ export const GitOverlay: React.FC<Props> = ({
 		&& !hasConflicts
 		&& projectsWithChanges.length === 0
 		&& !step4Pending;
-	const showEmptyStep1Hint = !isChatPreflightMode && step1Projects.length === 0;
+	const step5HasWarnings = !promptBranch
+		|| flowMissingTrackedBranchProjects.length > 0
+		|| flowProjectsOffPromptBranch.length > 0
+		|| projectsWithChanges.length > 0
+		|| hasConflicts
+		|| step4Pending;
+	const showEmptyStep1Hint = !isChatPreflightMode && !step1FinalHintPending && step1Projects.length === 0;
 	const canProceedToReviewAndMerge = Boolean(promptBranch);
-	const stepAvailability: Record<SectionKey, boolean> = {
-		step1: true,
-		step2: !step1Pending,
-		step3: !step1Pending && !step2Pending,
-		step4: canProceedToReviewAndMerge && !step1Pending && !step2Pending && !step3Pending,
-		step5: canProceedToReviewAndMerge && !step1Pending && !step2Pending && !step3Pending && !step4Pending,
-	};
+	const stepAvailability: Record<SectionKey, boolean> = shouldShowSnapshotLoaders
+		? { step1: true, step2: true, step3: true, step4: true, step5: true }
+		: {
+			step1: true,
+			step2: !step1Pending,
+			step3: !step1Pending && !step2Pending,
+			step4: canProceedToReviewAndMerge && !step1Pending && !step2Pending && !step3Pending,
+			step5: canProceedToReviewAndMerge && !step1Pending && !step2Pending && !step3Pending && !step4Pending,
+		};
 	const firstPendingStep = step1Pending ? 1 : step2Pending ? 2 : step3Pending ? 3 : step4Pending ? 4 : null;
-	const autoCollapsedSections = useMemo<Record<SectionKey, boolean>>(
-		() => ({
+	const waitingCollapsedSections = useMemo<Record<SectionKey, boolean>>(
+		() => shouldShowSnapshotLoaders ? ({
+			step1: false,
+			step2: false,
+			step3: false,
+			step4: false,
+			step5: false,
+		}) : ({
 			step1: false,
 			step2: firstPendingStep !== null && 2 > firstPendingStep,
 			step3: firstPendingStep !== null && 3 > firstPendingStep,
 			step4: firstPendingStep !== null && 4 > firstPendingStep,
 			step5: firstPendingStep !== null && 5 > firstPendingStep,
 		}),
-		[firstPendingStep],
+		[firstPendingStep, shouldShowSnapshotLoaders],
+	);
+	const completedCollapsedSections = useMemo<Record<SectionKey, boolean>>(
+		() => shouldShowSnapshotLoaders ? ({
+			step1: false,
+			step2: false,
+			step3: false,
+			step4: false,
+			step5: false,
+		}) : ({
+			step1: false,
+			step2: !step2Pending && !step2Busy && !step2HasWarnings,
+			step3: !step3Pending && !step3Busy && !step3BranchHydrationPending && !step3HasWarnings,
+			step4: step4Completed && !step4Busy && !step4HasWarnings,
+			step5: completedActions.merge && !step5HasWarnings,
+		}),
+		[
+			completedActions.merge,
+			step2Busy,
+			step2HasWarnings,
+			step2Pending,
+			step3BranchHydrationPending,
+			step3Busy,
+			step3HasWarnings,
+			step3Pending,
+			step4Busy,
+			step4Completed,
+			step4HasWarnings,
+			step5HasWarnings,
+			shouldShowSnapshotLoaders,
+		],
+	);
+	const defaultCollapsedSections = useMemo<Record<SectionKey, boolean>>(
+		() => ({
+			step1: waitingCollapsedSections.step1 || completedCollapsedSections.step1,
+			step2: waitingCollapsedSections.step2 || completedCollapsedSections.step2,
+			step3: waitingCollapsedSections.step3 || completedCollapsedSections.step3,
+			step4: waitingCollapsedSections.step4 || completedCollapsedSections.step4,
+			step5: waitingCollapsedSections.step5 || completedCollapsedSections.step5,
+		}),
+		[completedCollapsedSections, waitingCollapsedSections],
 	);
 	const doneStatus = resolveGitOverlayDoneStatus(completedActions);
 	const doneStatusLabel = doneStatus === 'closed'
@@ -1529,7 +1701,6 @@ export const GitOverlay: React.FC<Props> = ({
 		: isOpenChatPreflightMode
 			? (startChatBranchCheckDone ? t('editor.gitOverlayOpenChatReadyHint') : t('editor.gitOverlayOpenChatBlockedHint'))
 		: (doneStatus ? t('editor.gitOverlayDoneStatusHint').replace('{status}', doneStatusLabel) : t('editor.gitOverlayDoneNoStatusHint'));
-
 	useEffect(() => {
 		if (!snapshot) {
 			setReviewDrafts({});
@@ -1582,6 +1753,7 @@ export const GitOverlay: React.FC<Props> = ({
 			setSelectedTrackedBranchesByProject({});
 			setSelectedTargetBranchesByProject({});
 			setSelectedChangeKey('');
+			setCollapsedSections({});
 			lastSyncedTrackedBranchesRef.current = {};
 			return;
 		}
@@ -1607,14 +1779,14 @@ export const GitOverlay: React.FC<Props> = ({
 			return;
 		}
 
-		const hasSelectedChange = snapshot.projects.some(project => collectProjectChanges(project).some(
+		const hasSelectedChange = allProjects.some(project => collectProjectChanges(project).some(
 			change => buildGitOverlayChangeSelectionKey(project.project, change) === selectedChangeKey,
 		));
 
 		if (!hasSelectedChange) {
 			setSelectedChangeKey('');
 		}
-	}, [selectedChangeKey, snapshot]);
+	}, [allProjects, selectedChangeKey, snapshot]);
 
 	const handleTrackedBranchSelection = useCallback((projectName: string, trackedBranch: string) => {
 		const normalizedTrackedBranch = trackedBranch.trim();
@@ -1742,6 +1914,22 @@ export const GitOverlay: React.FC<Props> = ({
 		});
 	}, [allProjects, otherChangedProjects.length, projectValidations, projectsWithChanges.length, selectedProjectNameSet, snapshot]);
 
+	useEffect(() => {
+		if (!snapshot || !onHydrateProjectDetails) {
+			return;
+		}
+
+		for (const project of allProjects) {
+			if (!expandedProjects[project.project]) {
+				continue;
+			}
+			if (project.changeDetailsHydrated !== false || countProjectChanges(project) === 0) {
+				continue;
+			}
+			onHydrateProjectDetails(project.project);
+		}
+	}, [allProjects, expandedProjects, onHydrateProjectDetails, snapshot]);
+
 	const updateReviewDraftTargetBranch = useCallback((projectName: string, targetBranch: string) => {
 		setReviewDrafts((prev) => ({
 			...prev,
@@ -1861,8 +2049,19 @@ export const GitOverlay: React.FC<Props> = ({
 		? `${t('editor.gitOverlayProcessPrefix')} ${processLabel}`
 		: t('editor.gitOverlaySubtitle');
 	const isProcessSubtitleActive = Boolean(processLabel && busyAction);
-	const isSectionCollapsed = (section: SectionKey): boolean => collapsedSections[section] ?? autoCollapsedSections[section];
-	const isSectionAutoCollapsed = (section: SectionKey): boolean => collapsedSections[section] === undefined && autoCollapsedSections[section];
+	const isSectionCollapsed = (section: SectionKey): boolean => shouldShowSnapshotLoaders ? false : (collapsedSections[section] ?? defaultCollapsedSections[section]);
+	const isSectionAutoCollapsed = (section: SectionKey): boolean => collapsedSections[section] === undefined && waitingCollapsedSections[section];
+	const renderAutoCollapsedSectionHint = (section: SectionKey): React.ReactNode => {
+		if (!isSectionAutoCollapsed(section)) {
+			return null;
+		}
+
+		if (shouldShowSnapshotLoaders && section !== 'step1') {
+			return <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayLoading')}</div>;
+		}
+
+		return <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div>;
+	};
 
 		if (!open) {
 			return null;
@@ -1878,7 +2077,7 @@ export const GitOverlay: React.FC<Props> = ({
 	const toggleSectionCollapse = (section: SectionKey) => {
 		setCollapsedSections((prev) => ({
 			...prev,
-			[section]: !(prev[section] ?? autoCollapsedSections[section]),
+			[section]: !(prev[section] ?? defaultCollapsedSections[section]),
 		}));
 	};
 
@@ -1933,13 +2132,22 @@ export const GitOverlay: React.FC<Props> = ({
 					<>
 					<div style={styles.body}>
 						<div style={styles.summaryRow}>
-							<div style={styles.summaryChip}>{`${t('editor.gitOverlayProjects')}: ${step1Projects.length}`}</div>
-							<div style={styles.summaryChip}>{`${t('editor.gitOverlayProjectsWithChanges')}: ${projectsWithChanges.length}`}</div>
-							<div style={styles.summaryChip}>{`${t('editor.gitOverlayProjectChanges')}: ${totalChangedFiles}`}</div>
-							<div style={styles.summaryChip}>{`${t('editor.gitOverlayConflicts')}: ${projectsWithChanges.filter(project => project.changeGroups.merge.length > 0).length}`}</div>
-							{!isChatPreflightMode && otherChangedProjects.length > 0 ? (
-								<div style={styles.summaryChip}>{`${t('editor.gitOverlayOtherProjectsTitle')}: ${otherChangedProjects.length}`}</div>
-							) : null}
+							{shouldShowSnapshotLoaders ? (
+								<div style={styles.summaryLoadingChip} data-pm-git-overlay-summary-loader="true" aria-busy="true">
+									<span style={styles.buttonSpinner} aria-hidden="true" />
+									<span>{t('editor.gitOverlayLoading')}</span>
+								</div>
+							) : (
+								<>
+									<div style={styles.summaryChip}>{`${t('editor.gitOverlayProjects')}: ${step1Projects.length}`}</div>
+									<div style={styles.summaryChip}>{`${t('editor.gitOverlayProjectsWithChanges')}: ${projectsWithChanges.length}`}</div>
+									<div style={styles.summaryChip}>{`${t('editor.gitOverlayProjectChanges')}: ${totalChangedFiles}`}</div>
+									<div style={styles.summaryChip}>{`${t('editor.gitOverlayConflicts')}: ${projectsWithChanges.filter(project => project.changeGroups.merge.length > 0).length}`}</div>
+									{!isChatPreflightMode && otherChangedProjects.length > 0 ? (
+										<div style={styles.summaryChip}>{`${t('editor.gitOverlayOtherProjectsTitle')}: ${otherChangedProjects.length}`}</div>
+									) : null}
+								</>
+							)}
 						</div>
 
 						<section style={styles.sectionCard}>
@@ -1965,6 +2173,8 @@ export const GitOverlay: React.FC<Props> = ({
 								isSectionAutoCollapsed('step1') ? <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div> : null
 							) : (
 							<div style={styles.sectionBody}>
+								{shouldShowSnapshotLoaders ? <SectionLoader title={t('editor.gitOverlayLoading')} subtitle={step1Hint} /> : (
+									<>
 								{isReadOnlyFlow ? <InlineHint message={t('editor.gitOverlayReadOnlyModeHint')} tone="error" /> : null}
 								{isReadOnlyFlow && onMarkCompletedInPlace ? (
 									<div style={styles.inlineActionRow}>
@@ -2009,6 +2219,8 @@ export const GitOverlay: React.FC<Props> = ({
 											: syncRequired
 												? <InlineHint message={t('editor.gitOverlayPullChangesRequired')} tone="error" />
 											: null)}
+
+								{step1BranchHydrationPending ? <div style={styles.emptyStateInline}>{t('editor.gitOverlayLoading')}</div> : null}
 
 								{syncRequired ? (
 									<div style={styles.inlineActionRow}>
@@ -2062,6 +2274,7 @@ export const GitOverlay: React.FC<Props> = ({
 															{expanded ? (
 																<div style={styles.projectChangesWrap}>
 																	<div style={styles.projectChangesTitle}>{t('editor.gitOverlayChangedFiles')}</div>
+																	{project.changeDetailsHydrated === false ? <div style={styles.projectChangesHint}>{t('editor.gitOverlayLoading')}</div> : null}
 																	<div style={styles.changeList}>
 																		{projectChanges.map((change, index) => {
 																			const changeSelectionKey = buildGitOverlayChangeSelectionKey(project.project, change);
@@ -2094,7 +2307,7 @@ export const GitOverlay: React.FC<Props> = ({
 																								<div style={styles.changePath}>{change.path}</div>
 																								{change.previousPath ? <div style={styles.changePreviousPath}>{`← ${change.previousPath}`}</div> : null}
 																							</div>
-																							<div style={styles.changeMetrics}>{renderChangeMetrics(change, t)}</div>
+																							<div style={styles.changeMetrics}>{renderChangeMetrics(change, project.changeDetailsHydrated !== false, t)}</div>
 																						</button>
 																					</div>
 																					<div style={styles.changeActions}>
@@ -2128,43 +2341,62 @@ export const GitOverlay: React.FC<Props> = ({
 									</div>
 									{step1Projects.map((project) => {
 											const currentBranch = project.currentBranch.trim();
+													const branchDetailsPending = project.branchDetailsHydrated === false;
 											const projectHasChanges = countProjectChanges(project) > 0;
 											const selectedTrackedBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
 											const selectedTargetBranch = (resolvedTargetBranchesByProject[project.project] || '').trim();
-											const projectTrackedBranchOptions = buildProjectTrackedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
-											const projectExpectedBranchOptions = buildProjectExpectedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
-											const projectNeedsSync = project.available && Boolean(project.upstream.trim()) && project.behind > 0;
+													const projectTrackedBranchOptions = branchDetailsPending
+														? []
+														: buildProjectTrackedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
+													const projectExpectedBranchOptions = branchDetailsPending
+														? []
+														: buildProjectExpectedBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
+													const projectNeedsSync = !branchDetailsPending
+														&& project.available
+														&& Boolean(project.upstream.trim())
+														&& project.behind > 0;
 											const currentTargetSelected = isGitOverlayCurrentExpectedBranchSelection(selectedTargetBranch);
-											const effectiveTargetBranch = resolveGitOverlayEffectiveExpectedBranch(project, selectedTargetBranch, promptBranch, trackedBranchOptions);
+													const effectiveTargetBranch = branchDetailsPending
+														? ''
+														: resolveGitOverlayEffectiveExpectedBranch(project, selectedTargetBranch, promptBranch, trackedBranchOptions);
 											const projectNeedsTargetSwitch = Boolean(effectiveTargetBranch) && currentBranch !== effectiveTargetBranch;
 											const projectActionableForApply = currentTargetSelected
 												? false
 												: projectNeedsTargetSwitch
 												|| isGitOverlayStep1ProjectActionable(project, promptBranch, trackedBranchOptions);
-											const targetRequiresSource = shouldGitOverlayRequireSourceBranch(project, effectiveTargetBranch);
-											const hideSourceBranchField = projectTrackedBranchOptions.length === 0
+													const targetRequiresSource = !branchDetailsPending
+														&& shouldGitOverlayRequireSourceBranch(project, effectiveTargetBranch);
+													const hideSourceBranchField = branchDetailsPending
+														|| projectTrackedBranchOptions.length === 0
 												|| currentTargetSelected
 												|| (Boolean(effectiveTargetBranch) && !targetRequiresSource);
-											const hideExpectedBranchField = projectExpectedBranchOptions.length === 0
+													const hideExpectedBranchField = branchDetailsPending
+														|| projectExpectedBranchOptions.length === 0
 												&& (!currentBranch || (!selectedTargetBranch && !projectActionableForApply));
-											const hiddenExpectedBranchValue = hideExpectedBranchField
+													const hiddenExpectedBranchValue = branchDetailsPending
+														? t('editor.gitOverlayLoading')
+														: hideExpectedBranchField
 												&& !selectedTargetBranch
 												&& !projectActionableForApply
 												&& effectiveTargetBranch
 													? t('editor.gitOverlayNoOtherExpectedBranches')
 													: '—';
 											const rowOnPrompt = Boolean(promptBranch) && currentBranch === promptBranch && effectiveTargetBranch === promptBranch;
-											const rowCanApply = project.available
+													const rowCanApply = !branchDetailsPending
+														&& project.available
 												&& projectActionableForApply
 												&& !projectNeedsSync
 												&& Boolean(effectiveTargetBranch)
 												&& (!targetRequiresSource || Boolean(selectedTrackedBranch))
 												&& projectNeedsTargetSwitch;
-											const rowNeedsDecision = project.available
+													const rowNeedsDecision = !branchDetailsPending
+														&& project.available
 												&& projectActionableForApply
 												&& !rowOnPrompt
 												&& ((targetRequiresSource && !selectedTrackedBranch) || !effectiveTargetBranch || projectNeedsSync || projectNeedsTargetSwitch);
-											const rowStatusLabel = !project.available
+													const rowStatusLabel = branchDetailsPending
+														? t('editor.gitOverlayLoading')
+														: !project.available
 												? t('editor.gitOverlayStateUnavailable')
 												: currentTargetSelected
 													? t('editor.gitOverlayStateCurrentSelected')
@@ -2193,7 +2425,9 @@ export const GitOverlay: React.FC<Props> = ({
 											const rowStyle = rowOnPrompt
 												? styles.projectTableRowSuccess
 												: (!project.available ? styles.projectTableRowMuted : rowNeedsDecision ? styles.projectTableRowDecision : null);
-											const rowStatusStyle = !project.available
+													const rowStatusStyle = branchDetailsPending
+														? styles.projectStatusTextInfo
+														: !project.available
 												? styles.projectStatusTextMuted
 												: !projectActionableForApply
 													? styles.projectStatusTextMuted
@@ -2212,7 +2446,9 @@ export const GitOverlay: React.FC<Props> = ({
 														{currentBranch || '—'}
 													</span>
 													<span style={styles.branchValue}>
-													{hideSourceBranchField ? (
+												{branchDetailsPending ? (
+													<span style={{ ...styles.projectStatusText, ...styles.projectStatusTextInfo }}>{t('editor.gitOverlayLoading')}</span>
+												) : hideSourceBranchField ? (
 														<span style={styles.projectTableCellCentered}>—</span>
 													) : (
 														<select
@@ -2268,7 +2504,9 @@ export const GitOverlay: React.FC<Props> = ({
 														</span>
 													</span>
 													<span style={styles.projectRowActionCell}>
-														{showExcludeProjectAction ? (
+														{branchDetailsPending ? (
+															<span style={{ ...styles.projectStatusText, ...styles.projectStatusTextInfo }}>{t('editor.gitOverlayLoading')}</span>
+														) : showExcludeProjectAction ? (
 															<ActionButton
 																label={t('editor.gitOverlayExcludeProject')}
 																onClick={() => handleExcludeProjectFromPrompt(project.project)}
@@ -2307,6 +2545,8 @@ export const GitOverlay: React.FC<Props> = ({
 										/>
 									) : null}
 								</div>
+									</>
+								)}
 							</div>
 							)}
 						</section>
@@ -2332,9 +2572,11 @@ export const GitOverlay: React.FC<Props> = ({
 								</button>
 							</div>
 							{isSectionCollapsed('step2') ? (
-								isSectionAutoCollapsed('step2') ? <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div> : null
+								renderAutoCollapsedSectionHint('step2')
 							) : (
 							<div style={styles.sectionBody}>
+								{shouldShowSnapshotLoaders ? <SectionLoader title={t('editor.gitOverlayLoading')} subtitle={t('editor.gitOverlayStepCommitHint')} /> : (
+									<>
 								{projectsWithChanges.length === 0 ? <div style={styles.emptyStateInline}>{t('editor.gitOverlayNoProjectsWithChanges')}</div> : null}
 								{projectsWithChanges.length > 0 && !allChangedProjectsReadyForCommit && !canCommitAllProjects ? <InlineHint message={t('editor.gitOverlayAllProjectsMustBeReady')} tone="error" /> : null}
 
@@ -2374,6 +2616,7 @@ export const GitOverlay: React.FC<Props> = ({
 												{expanded ? (
 													<div style={styles.projectChangesWrap}>
 														<div style={styles.projectChangesTitle}>{t('editor.gitOverlayChangedFiles')}</div>
+														{project.changeDetailsHydrated === false ? <div style={styles.projectChangesHint}>{t('editor.gitOverlayLoading')}</div> : null}
 														<div style={styles.changeList}>
 															{projectChanges.map((change, index) => {
 																const isDiscarding = busyAction === `discardFile:${project.project}:${change.group}:${change.path}`;
@@ -2408,7 +2651,7 @@ export const GitOverlay: React.FC<Props> = ({
 																					<div style={styles.changePath}>{change.path}</div>
 																					{change.previousPath ? <div style={styles.changePreviousPath}>{`← ${change.previousPath}`}</div> : null}
 																				</div>
-																				<div style={styles.changeMetrics}>{renderChangeMetrics(change, t)}</div>
+																				<div style={styles.changeMetrics}>{renderChangeMetrics(change, project.changeDetailsHydrated !== false, t)}</div>
 																			</button>
 																		</div>
 																		<div style={styles.changeActions}>
@@ -2493,6 +2736,8 @@ export const GitOverlay: React.FC<Props> = ({
 										/>
 									) : null}
 								</div>
+									</>
+								)}
 							</div>
 							)}
 						</section>
@@ -2519,9 +2764,11 @@ export const GitOverlay: React.FC<Props> = ({
 								</button>
 							</div>
 							{isSectionCollapsed('step3') ? (
-								isSectionAutoCollapsed('step3') ? <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div> : null
+								renderAutoCollapsedSectionHint('step3')
 							) : (
 							<div style={styles.sectionBody}>
+								{shouldShowSnapshotLoaders ? <SectionLoader title={t('editor.gitOverlayLoading')} subtitle={t('editor.gitOverlayStepPushHint')} /> : (
+									<>
 								{showPushNeedsPromptBranchHint ? <InlineHint message={t('editor.gitOverlayPushNeedsPromptBranch')} tone="error" /> : null}
 								{projectsWithChangesOutsideTrackedOrPrompt.length > 0 ? <InlineHint message={t('editor.gitOverlayPushNeedsTrackedOrPromptBranch')} tone="error" /> : null}
 								{projectsWithChangesOnTrackedBranches.map(project => (
@@ -2536,11 +2783,11 @@ export const GitOverlay: React.FC<Props> = ({
 								{projectsWithChanges.length > 0 ? <InlineHint message={t('editor.gitOverlayPushNeedsCleanState')} tone="error" /> : null}
 								{hasConflicts ? <InlineHint message={t('editor.gitOverlayMergeBlocked')} tone="error" /> : null}
 
-								<div style={styles.mergeHint}>{t('editor.gitOverlayPushHintDetail')}</div>
-								{canAttemptPush && !pushRequired && !isPushing ? <div style={styles.successText}>{t('editor.gitOverlayPushAlreadyPublished')}</div> : null}
+								{step3BranchHydrationPending ? <div style={styles.emptyStateInline}>{t('editor.gitOverlayLoading')}</div> : <div style={styles.mergeHint}>{t('editor.gitOverlayPushHintDetail')}</div>}
+								{!step3BranchHydrationPending && canAttemptPush && !pushRequired && !isPushing ? <div style={styles.successText}>{t('editor.gitOverlayPushAlreadyPublished')}</div> : null}
 
 								<div style={styles.actionRowEnd}>
-									{(pushRequired || isPushing) ? (
+									{!step3BranchHydrationPending && (pushRequired || isPushing) ? (
 										<ActionButton
 											label={t('editor.gitOverlayPushPromptBranch')}
 														onClick={() => onPush(promptBranch || undefined, projectsNeedingPush.map(project => project.project))}
@@ -2550,6 +2797,8 @@ export const GitOverlay: React.FC<Props> = ({
 										/>
 									) : null}
 								</div>
+									</>
+								)}
 							</div>
 							)}
 						</section>
@@ -2576,16 +2825,19 @@ export const GitOverlay: React.FC<Props> = ({
 								</button>
 							</div>
 							{isSectionCollapsed('step4') ? (
-								isSectionAutoCollapsed('step4') ? <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div> : null
+								renderAutoCollapsedSectionHint('step4')
 							) : (
 							<div style={styles.sectionBody}>
+								{shouldShowSnapshotLoaders ? <SectionLoader title={t('editor.gitOverlayLoading')} subtitle={t('editor.gitOverlayStepReviewRequestHint')} /> : (
+									<>
 								{!promptBranch ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsPromptBranch')} tone="error" /> : null}
 								{flowProjectsOffPromptBranch.length > 0 ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsPromptCheckout')} tone="error" /> : null}
 								{projectsWithChanges.length > 0 ? <InlineHint message={t('editor.gitOverlayReviewRequestNeedsCleanState')} tone="error" /> : null}
+								{reviewProjectsPendingHydration.length > 0 ? <div style={styles.emptyStateInline}>{t('editor.gitOverlayLoading')}</div> : null}
 								{reviewProjects.length === 0 ? <div style={styles.emptyStateInline}>{t('editor.gitOverlayReviewRequestUnsupported')}</div> : null}
 
 								<div style={styles.projectCards}>
-									{reviewProjects.map((project) => {
+									{hydratedReviewProjects.map((project) => {
 										const actionLabel = project.review.remote?.actionLabel || t('editor.gitOverlayReviewRequest');
 										const selectedTrackedBranch = (resolvedTrackedBranchesByProject[project.project] || '').trim();
 										const targetBranchOptions = buildProjectTargetBranchOptions(project, trackedBranchOptions, selectedTrackedBranch || preferredTrackedBranch);
@@ -2689,11 +2941,17 @@ export const GitOverlay: React.FC<Props> = ({
 													</div>
 													<div style={styles.fieldBlock}>
 														<label style={styles.label}>{t('editor.gitOverlayReviewRequestTargetBranch')}</label>
+																		{project.branchDetailsHydrated === false ? <div style={styles.projectChangesHint}>{t('editor.gitOverlayLoading')}</div> : null}
 														<select
 															style={styles.select}
 															value={draft.targetBranch}
 															onChange={(event) => updateReviewDraftTargetBranch(project.project, event.target.value)}
-															disabled={isReadOnlyFlow || hasRequest || !project.review.remote?.cliAvailable}
+																			disabled={
+																				isReadOnlyFlow
+																				|| hasRequest
+																				|| !project.review.remote?.cliAvailable
+																				|| project.branchDetailsHydrated === false
+																			}
 														>
 															<option value="">{t('editor.gitOverlayTrackedBranchMissing')}</option>
 															{targetBranchOptions.map(branch => (
@@ -2788,6 +3046,8 @@ export const GitOverlay: React.FC<Props> = ({
 												) : null}
 											</div>
 										) : null}
+									</>
+								)}
 							</div>
 							)}
 						</section>
@@ -2814,9 +3074,11 @@ export const GitOverlay: React.FC<Props> = ({
 								</button>
 							</div>
 							{isSectionCollapsed('step5') ? (
-								isSectionAutoCollapsed('step5') ? <div style={styles.collapsedSectionHint}>{t('editor.gitOverlayWaitingPreviousStep')}</div> : null
+								renderAutoCollapsedSectionHint('step5')
 							) : (
 							<div style={styles.sectionBody}>
+								{shouldShowSnapshotLoaders ? <SectionLoader title={t('editor.gitOverlayLoading')} subtitle={t('editor.gitOverlayStepMergeHint')} /> : (
+									<>
 								<label style={styles.checkboxRow}>
 									<input
 										type="checkbox"
@@ -2854,6 +3116,8 @@ export const GitOverlay: React.FC<Props> = ({
 										/>
 									) : null}
 								</div>
+									</>
+								)}
 							</div>
 							)}
 						</section>
@@ -3023,6 +3287,45 @@ const styles: Record<string, CSSProperties> = {
 		fontSize: '13px',
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	sectionLoaderCard: {
+		padding: '14px 16px',
+		border: '1px solid var(--vscode-panel-border)',
+		borderRadius: '6px',
+		background: 'color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-inputValidation-infoBackground) 10%)',
+		boxShadow: GIT_OVERLAY_LEFT_ACCENT_SHADOW,
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '10px',
+	},
+	sectionLoaderHeader: {
+		display: 'flex',
+		alignItems: 'center',
+		gap: '12px',
+	},
+	sectionLoaderCopy: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '2px',
+		minWidth: 0,
+	},
+	sectionLoaderTitle: {
+		fontSize: '12px',
+		fontWeight: 600,
+		color: 'var(--vscode-foreground)',
+	},
+	sectionLoaderSubtitle: {
+		fontSize: '12px',
+		color: 'var(--vscode-descriptionForeground)',
+		lineHeight: 1.4,
+	},
+	sectionLoaderProgressTrack: {
+		height: '2px',
+		borderRadius: '999px',
+		background: 'color-mix(in srgb, var(--vscode-descriptionForeground) 20%, transparent)',
+	},
+	sectionLoaderProgressLine: {
+		background: 'linear-gradient(90deg, transparent 0%, var(--vscode-progressBar-background, var(--vscode-focusBorder)) 25%, var(--vscode-focusBorder, var(--vscode-progressBar-background)) 65%, transparent 100%)',
+	},
 	body: {
 		flex: 1,
 		minHeight: 0,
@@ -3043,6 +3346,16 @@ const styles: Record<string, CSSProperties> = {
 		background: 'var(--vscode-badge-background)',
 		borderRadius: '4px',
 		padding: '2px 8px',
+	},
+	summaryLoadingChip: {
+		fontSize: '11px',
+		color: 'var(--vscode-foreground)',
+		background: 'var(--vscode-badge-background)',
+		borderRadius: '4px',
+		padding: '2px 8px',
+		display: 'inline-flex',
+		alignItems: 'center',
+		gap: '6px',
 	},
 	sectionCard: {
 		border: '1px solid var(--vscode-panel-border)',
@@ -3589,6 +3902,10 @@ const styles: Record<string, CSSProperties> = {
 	projectChangesTitle: {
 		fontSize: '12px',
 		fontWeight: 600,
+	},
+	projectChangesHint: {
+		fontSize: '11px',
+		color: 'var(--vscode-descriptionForeground)',
 	},
 	projectCardFooter: {
 		display: 'flex',

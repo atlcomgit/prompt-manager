@@ -36,7 +36,7 @@ function buildTooltip(file: PromptContextFileCard, t: (key: string) => string): 
 	return lines.join('\n');
 }
 
-export const ContextFileCard: React.FC<Props> = ({ file, onOpen, onRemove }) => {
+const ContextFileCardComponent: React.FC<Props> = ({ file, onOpen, onRemove }) => {
 	const t = useT();
 	const rootLabel = file.directoryLabel || t('editor.contextFileRoot');
 	const tooltip = buildTooltip(file, t);
@@ -59,9 +59,15 @@ export const ContextFileCard: React.FC<Props> = ({ file, onOpen, onRemove }) => 
 							<div style={styles.tileType}>{file.typeLabel}</div>
 						</div>
 					) : file.kind === 'image' ? (
-						<img src={file.previewUri} alt={file.displayName} style={styles.imagePreview} />
+						<img
+							src={file.previewUri}
+							alt={file.displayName}
+							loading="lazy"
+							decoding="async"
+							style={styles.imagePreview}
+						/>
 					) : (
-						<video src={file.previewUri} muted playsInline preload="metadata" style={styles.videoPreview} />
+						<video src={file.previewUri} muted playsInline preload="none" style={styles.videoPreview} />
 					)}
 				</div>
 				<div style={styles.content}>
@@ -88,6 +94,8 @@ export const ContextFileCard: React.FC<Props> = ({ file, onOpen, onRemove }) => 
 		</div>
 	);
 };
+
+export const ContextFileCard = React.memo(ContextFileCardComponent);
 
 const styles: Record<string, CSSProperties> = {
 	card: {

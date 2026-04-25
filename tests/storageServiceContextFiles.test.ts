@@ -7,6 +7,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 const originalLoad = (Module as any)._load;
+const vscodeFsWritePaths: string[] = [];
+const vscodeFsStatPaths: string[] = [];
+const vscodeFsReadPaths: string[] = [];
 
 function createDisposable() {
 	return { dispose() { } };
@@ -65,12 +68,17 @@ function createVsCodeMock() {
 		},
 		workspace: {
 			fs: {
-				readFile: async (uri: { fsPath: string }) => fsp.readFile(uri.fsPath),
+				readFile: async (uri: { fsPath: string }) => {
+					vscodeFsReadPaths.push(uri.fsPath);
+					return fsp.readFile(uri.fsPath);
+				},
 				writeFile: async (uri: { fsPath: string }, data: Uint8Array) => {
+					vscodeFsWritePaths.push(uri.fsPath);
 					await fsp.mkdir(path.dirname(uri.fsPath), { recursive: true });
 					await fsp.writeFile(uri.fsPath, Buffer.from(data));
 				},
 				stat: async (uri: { fsPath: string }) => {
+					vscodeFsStatPaths.push(uri.fsPath);
 					const stat = await fsp.stat(uri.fsPath);
 					return {
 						type: toFileType(stat),
@@ -266,6 +274,69 @@ test('savePrompt rewrites prompt-local context file references when prompt id ch
 
 		const savedConfig = await readJson(path.join(newPromptDir, 'config.json'));
 		assert.deepEqual(savedConfig.contextFiles, saved.contextFiles);
+	} finally {
+		fs.rmSync(workspaceRoot, { recursive: true, force: true });
+	}
+});
+
+test('savePrompt keeps same-id saves on direct identity path before uuid list scan', async () => {
+	const { StorageService } = await importStorageService();
+	const workspaceRoot = createTempWorkspace();
+
+	try {
+		const promptId = 'status-save-existing-prompt';
+		await seedPrompt(workspaceRoot, promptId, []);
+
+		const service = new (StorageService as any)(workspaceRoot);
+		const prompt = await service.getPrompt(promptId);
+		assert.ok(prompt, 'prompt should be loaded before save');
+
+		service.findPromptIdByUuid = async () => {
+			throw new Error('same-id save should not scan all prompt configs by uuid');
+		};
+
+		prompt.status = 'completed';
+		const saved = await service.savePrompt(prompt, { skipHistory: true });
+
+		assert.equal(saved.id, promptId);
+		assert.equal(saved.status, 'completed');
+	} finally {
+		fs.rmSync(workspaceRoot, { recursive: true, force: true });
+	}
+});
+
+test('savePrompt skips unchanged content and report files for status-only saves', async () => {
+	const { StorageService } = await importStorageService();
+	const workspaceRoot = createTempWorkspace();
+
+	try {
+		const promptId = 'status-only-file-write-skip';
+		await seedPrompt(workspaceRoot, promptId, []);
+
+		const service = new (StorageService as any)(workspaceRoot);
+		const prompt = await service.getPrompt(promptId);
+		assert.ok(prompt, 'prompt should be loaded before save');
+
+		vscodeFsWritePaths.length = 0;
+		vscodeFsStatPaths.length = 0;
+		vscodeFsReadPaths.length = 0;
+		const existingPrompt = { ...prompt };
+		prompt.status = 'completed';
+		await service.savePrompt(prompt, { skipHistory: true, existingPrompt });
+		const storedConfig = await readJson(path.join(
+			workspaceRoot,
+			'.vscode/prompt-manager',
+			promptId,
+			'config.json',
+		));
+
+		assert.equal(vscodeFsWritePaths.some(filePath => filePath.endsWith('/prompt.md')), false);
+		assert.equal(vscodeFsWritePaths.some(filePath => filePath.endsWith('/report.txt')), false);
+		assert.equal(vscodeFsWritePaths.some(filePath => filePath.endsWith('/config.json')), false);
+		assert.equal(vscodeFsStatPaths.some(filePath => filePath.endsWith('/report.txt')), false);
+		assert.equal(vscodeFsStatPaths.some(filePath => filePath.endsWith('/context')), false);
+		assert.equal(vscodeFsReadPaths.some(filePath => filePath.endsWith('/config.json')), false);
+		assert.equal(storedConfig.status, 'completed');
 	} finally {
 		fs.rmSync(workspaceRoot, { recursive: true, force: true });
 	}

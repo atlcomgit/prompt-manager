@@ -13,7 +13,7 @@ import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { buildDescriptionGenerationUserPrompt, buildPromptFieldLanguageRule, buildTitleGenerationUserPrompt } from '../utils/aiPromptBuilders.js';
 import { normalizeCommitMessageGenerationInstructions } from '../utils/gitOverlay.js';
-import { readSqliteItemTable } from '../utils/sqliteItemTable.js';
+import { readSqliteItemValue } from '../utils/sqliteItemTable.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1240,8 +1240,7 @@ export class AiService {
 
 			const cached = this.stateDbItemCache.get(dbPath);
 			if (!cached || cached.fingerprint !== fingerprint) {
-				const items = await readSqliteItemTable(dbPath, wasmPath);
-				this.stateDbItemCache.set(dbPath, { fingerprint, items });
+				return await readSqliteItemValue(dbPath, wasmPath, key);
 			}
 
 			return this.stateDbItemCache.get(dbPath)?.items.get(key) ?? '';

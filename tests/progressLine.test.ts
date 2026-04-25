@@ -53,6 +53,22 @@ test('resolveEditorProgressMode returns processing for non-save non-ai busy stat
 	assert.equal(mode, 'processing');
 });
 
+test('resolveEditorProgressMode keeps manual implementing-time recalc visible', () => {
+	const mode = resolveEditorProgressMode({
+		isSaving: false,
+		isStartingChat: false,
+		isImprovingPromptText: false,
+		isGeneratingReport: false,
+		isGeneratingTitle: false,
+		isGeneratingDescription: false,
+		isSuggestionLoading: false,
+		isRecalculating: true,
+		isLoadingGlobalContext: false,
+	});
+
+	assert.equal(mode, 'processing');
+});
+
 test('ProgressLine keeps the track mounted while idle', () => {
 	const markup = renderToStaticMarkup(React.createElement(ProgressLine, {
 		mode: 'idle',

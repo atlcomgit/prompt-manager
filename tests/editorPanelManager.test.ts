@@ -4,6 +4,7 @@ import Module from 'node:module';
 
 const originalLoad = (Module as any)._load;
 const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
+const vscodeCreatedWebviewPanels: any[] = [];
 let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<unknown>) | undefined;
 let vscodeAvailableCommands: string[] | undefined;
 const vscodeConfigurationValues = new Map<string, unknown>();
@@ -14,6 +15,7 @@ function createDisposable() {
 
 function resetVsCodeCommandMock() {
 	vscodeCommandCalls.length = 0;
+	vscodeCreatedWebviewPanels.length = 0;
 	vscodeExecuteCommandHandler = undefined;
 	vscodeAvailableCommands = undefined;
 }
@@ -73,6 +75,63 @@ function createVsCodeMock() {
 		dispose() { },
 	});
 
+	const createWebviewPanel = (_viewType: string, title: string, _column: unknown, options: unknown) => {
+		const disposeListeners: Array<() => void | Promise<void>> = [];
+		const viewStateListeners: Array<(event: { webviewPanel: any }) => void> = [];
+		const messageListeners: Array<(message: unknown) => void | Promise<void>> = [];
+		const panel: any = {
+			title,
+			options,
+			iconPath: undefined,
+			disposed: false,
+			revealed: false,
+			postedMessages: [] as unknown[],
+			webview: {
+				html: '',
+				options,
+				cspSource: 'vscode-resource:',
+				asWebviewUri: (uri: unknown) => uri,
+				postMessage: async (message: unknown) => {
+					panel.postedMessages.push(message);
+					return true;
+				},
+				onDidReceiveMessage: (listener: (message: unknown) => void | Promise<void>) => {
+					messageListeners.push(listener);
+					return createDisposable();
+				},
+			},
+			onDidDispose: (listener: () => void | Promise<void>) => {
+				disposeListeners.push(listener);
+				return createDisposable();
+			},
+			onDidChangeViewState: (listener: (event: { webviewPanel: any }) => void) => {
+				viewStateListeners.push(listener);
+				return createDisposable();
+			},
+			reveal: () => {
+				panel.revealed = true;
+			},
+			dispose: () => {
+				panel.disposed = true;
+				for (const listener of disposeListeners) {
+					void listener();
+				}
+			},
+			emitMessage: async (message: unknown) => {
+				for (const listener of messageListeners) {
+					await listener(message);
+				}
+			},
+			emitVisible: () => {
+				for (const listener of viewStateListeners) {
+					listener({ webviewPanel: panel });
+				}
+			},
+		};
+		vscodeCreatedWebviewPanels.push(panel);
+		return panel;
+	};
+
 	return {
 		EventEmitter,
 		Disposable,
@@ -120,6 +179,7 @@ function createVsCodeMock() {
 		},
 		window: {
 			onDidChangeActiveTextEditor: () => createDisposable(),
+			createWebviewPanel,
 			createOutputChannel: () => outputChannel,
 			showErrorMessage: () => undefined,
 			showInformationMessage: () => undefined,
@@ -230,6 +290,33 @@ async function createManager(options?: {
 	let storedPrompt = options?.initialPrompt ? createPrompt(options.initialPrompt) : null;
 	const stateService = {
 		saveStartupEditorRestoreState: async () => undefined,
+		getPromptEditorViewState: () => ({
+			activeTab: 'main',
+			expandedSections: {
+				basic: true,
+				workspace: true,
+				prompt: true,
+				globalPrompt: false,
+				report: false,
+				notes: false,
+				memory: false,
+				plan: false,
+				tech: false,
+				integrations: false,
+				agent: true,
+				groups: false,
+				files: false,
+				time: true,
+			},
+			manualSectionOverrides: {},
+			descriptionExpanded: false,
+		}),
+		savePromptEditorViewState: async () => undefined,
+		migratePromptEditorViewState: async () => undefined,
+		hasChatSession: async () => true,
+		getGitOverlayTrackedBranchPreference: () => '',
+		getGitOverlayTrackedBranchesByProjectPreference: () => ({}),
+		saveGitOverlayTrackedBranchPreference: async () => undefined,
 		getGlobalAgentContext: () => '',
 		getGlobalAgentContextSource: () => 'empty',
 		saveGlobalAgentContext: async () => undefined,
@@ -239,6 +326,10 @@ async function createManager(options?: {
 		syncGlobalAgentInstructionsFile: async () => undefined,
 		ensureProjectInstructionsFolderRegistered: async () => undefined,
 		getWorkspaceFolderPaths: () => ['/tmp/workspace'],
+		getWorkspaceFolders: () => ['workspace'],
+		getSkills: async () => [],
+		getMcpTools: async () => [],
+		getHooks: async () => [],
 		...options?.workspaceService,
 	};
 
@@ -247,6 +338,13 @@ async function createManager(options?: {
 		getPromptDirectoryPath: (id: string) => `/tmp/workspace/.vscode/prompt-manager/prompts/${id}`,
 		getPromptMarkdownUri: (id: string) => {
 			const fsPath = `/tmp/workspace/.vscode/prompt-manager/prompts/${id}/prompt.md`;
+			return {
+				fsPath,
+				toString: () => fsPath,
+			};
+		},
+		getPromptReportUri: (id: string) => {
+			const fsPath = `/tmp/workspace/.vscode/prompt-manager/prompts/${id}/report.txt`;
 			return {
 				fsPath,
 				toString: () => fsPath,
@@ -285,6 +383,14 @@ async function createManager(options?: {
 	const aiService = {
 		generateTitle: options?.generateTitle || (async () => 'AI title'),
 		generateDescription: options?.generateDescription || (async () => 'AI description'),
+		getAvailableModels: async () => [],
+	};
+	const promptVoiceService = {
+		start: async () => undefined,
+		pause: async () => undefined,
+		resume: async () => undefined,
+		confirm: async () => undefined,
+		cancel: async () => undefined,
 	};
 
 	const manager = new EditorPanelManager(
@@ -294,7 +400,7 @@ async function createManager(options?: {
 		workspaceService as any,
 		{} as any,
 		stateService as any,
-		{} as any,
+		promptVoiceService as any,
 		undefined,
 		undefined,
 	);
@@ -358,6 +464,120 @@ function createGitOverlayProjectSnapshot(project: string, overrides: Record<stri
 		...overrides,
 	} as any;
 }
+
+test('openPrompt posts targeted loading before delayed target prompt resolves', async () => {
+	resetVsCodeCommandMock();
+	const { manager, storageService } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+	});
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+	panel.postedMessages.length = 0;
+
+	const deferredPrompt = createDeferred<any>();
+	let promptBReadStarted = false;
+	(storageService as any).getPrompt = async (id: string) => {
+		if (id === 'prompt-a') {
+			return createPrompt({ id: 'prompt-a', promptUuid: 'uuid-a', title: 'Prompt A' });
+		}
+		if (id === 'prompt-b') {
+			promptBReadStarted = true;
+			return deferredPrompt.promise;
+		}
+		return null;
+	};
+
+	const openPromise = (manager as any).openPrompt('prompt-b');
+	await flushTurns(2);
+
+	const loadingMessage = panel.postedMessages[0] as any;
+	assert.equal(promptBReadStarted, true);
+	assert.equal(loadingMessage?.type, 'promptLoading');
+	assert.equal(loadingMessage?.promptId, 'prompt-b');
+	assert.equal(typeof loadingMessage?.openRequestVersion, 'number');
+
+	deferredPrompt.resolve(createPrompt({
+		id: 'prompt-b',
+		promptUuid: 'uuid-b',
+		title: 'Prompt B',
+	}));
+	await openPromise;
+
+	const openMessage = panel.postedMessages.find((message: any) => message?.type === 'prompt') as any;
+	assert.equal(openMessage?.prompt?.id, 'prompt-b');
+	assert.equal(openMessage?.openRequestVersion, loadingMessage.openRequestVersion);
+	panel.dispose();
+});
+
+test('ready posts prompt before slow ready hydration messages', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+	});
+	const modelsDeferred = createDeferred<Array<{ id: string; name: string }>>();
+	(manager as any).aiService = {
+		generateTitle: async () => 'AI title',
+		generateDescription: async () => 'AI description',
+		getAvailableModels: async () => modelsDeferred.promise,
+	};
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+	panel.postedMessages.length = 0;
+
+	const bootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
+	await panel.emitMessage({ type: 'ready', bootId });
+
+	assert.equal(panel.postedMessages[0]?.type, 'prompt');
+	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'availableModels'), false);
+
+	modelsDeferred.resolve([{ id: 'model-a', name: 'Model A' }]);
+	await flushTurns(2);
+
+	const modelsMessage = panel.postedMessages.find((message: any) => message?.type === 'availableModels') as any;
+	assert.deepEqual(modelsMessage?.models, [{ id: 'model-a', name: 'Model A' }]);
+	panel.dispose();
+});
+
+test('clean prompt switch does not reread current prompt from disk', async () => {
+	resetVsCodeCommandMock();
+	const { manager, storageService } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+	});
+	const readCounts = new Map<string, number>();
+	(storageService as any).getPrompt = async (id: string) => {
+		readCounts.set(id, (readCounts.get(id) || 0) + 1);
+		if (id === 'prompt-a') {
+			return createPrompt({ id: 'prompt-a', promptUuid: 'uuid-a', title: 'Prompt A' });
+		}
+		if (id === 'prompt-b') {
+			return createPrompt({ id: 'prompt-b', promptUuid: 'uuid-b', title: 'Prompt B' });
+		}
+		return null;
+	};
+
+	await (manager as any).openPrompt('prompt-a');
+	await (manager as any).openPrompt('prompt-b');
+
+	assert.equal(readCounts.get('prompt-a'), 1);
+	assert.equal(readCounts.get('prompt-b'), 1);
+	vscodeCreatedWebviewPanels[0]?.dispose();
+});
 
 test('postGitOverlaySnapshot posts selected projects first and other projects later', async () => {
 	const { manager } = await createManager();
@@ -2952,6 +3172,205 @@ test('savePrompt status-change to in-progress stores chat auto-complete gate', a
 
 	assert.equal(getStoredPrompt()?.status, 'in-progress');
 	assert.ok(Number(getStoredPrompt()?.chatRequestAutoCompleteAfter || 0) > 0);
+	resetVsCodeCommandMock();
+});
+
+test('manual savePrompt reuses one report binding refresh for reconcile and overwrite guard', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			report: 'Stored report',
+		},
+	});
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		report: 'Stored report',
+	});
+	let refreshCount = 0;
+
+	(manager as any).panelBasePrompts.set('__prompt_editor_singleton__', clonePrompt(currentPrompt));
+	(manager as any).refreshReportBindingFromDisk = async () => {
+		refreshCount += 1;
+		return { content: 'Stored report', lastModifiedMs: 123 };
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'savePrompt',
+			source: 'manual',
+			requestId: 'save-report-refresh',
+			prompt: createPrompt({
+				id: 'prompt-a',
+				promptUuid: 'uuid-a',
+				title: 'Prompt title',
+				status: 'completed',
+				report: 'Stored report',
+			}),
+		},
+		{ visible: true, webview: { postMessage: async () => true } } as any,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(refreshCount, 1);
+	resetVsCodeCommandMock();
+});
+
+test('status-change savePrompt uses cached report binding and loaded base prompt', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager, storageService } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			report: 'Stored report',
+		},
+	});
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		report: 'Stored report',
+	});
+
+	(manager as any).panelBasePrompts.set('__prompt_editor_singleton__', clonePrompt(currentPrompt));
+	(manager as any).reportEditorByPanelKey.set('__prompt_editor_singleton__', {
+		uri: { fsPath: '/tmp/workspace/.vscode/prompt-manager/prompts/prompt-a/report.txt', toString: () => 'report-a' },
+		lastSyncedContent: 'Stored report',
+		lastModifiedMs: 123,
+	});
+	let refreshCount = 0;
+	(manager as any).refreshReportBindingFromDisk = async () => {
+		refreshCount += 1;
+		return { content: 'Stored report', lastModifiedMs: 123 };
+	};
+	let getPromptCount = 0;
+	(storageService as any).getPrompt = async () => {
+		getPromptCount += 1;
+		return clonePrompt(currentPrompt);
+	};
+	let awaitReportPersistCount = 0;
+	(manager as any).awaitPendingReportPersist = async () => {
+		awaitReportPersistCount += 1;
+	};
+	let uniqueIdCount = 0;
+	const originalUniqueId = (storageService as any).uniqueId.bind(storageService);
+	(storageService as any).uniqueId = async (...args: unknown[]) => {
+		uniqueIdCount += 1;
+		return originalUniqueId(...args as [string, string | undefined]);
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'savePrompt',
+			source: 'status-change',
+			requestId: 'save-status-fast-path',
+			prompt: createPrompt({
+				id: 'prompt-a',
+				promptUuid: 'uuid-a',
+				title: 'Prompt title',
+				status: 'completed',
+				report: 'Stored report',
+			}),
+		},
+		{ visible: true, webview: { postMessage: async () => true } } as any,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(refreshCount, 0);
+	assert.equal(getPromptCount, 0);
+	assert.equal(awaitReportPersistCount, 0);
+	assert.equal(uniqueIdCount, 0);
+
+	resetVsCodeCommandMock();
+});
+
+test('status-change savePrompt clears visible saving before post-save sync completes', async () => {
+	resetVsCodeCommandMock();
+
+	const postSaveSync = createDeferred<void>();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			report: 'Stored report',
+		},
+		stateService: {
+			migratePromptEditorViewState: async () => postSaveSync.promise,
+		},
+	});
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		report: 'Stored report',
+	});
+	(manager as any).panelPromptRefs.set('__prompt_editor_singleton__', currentPrompt);
+	(manager as any).panelBasePrompts.set('__prompt_editor_singleton__', clonePrompt(currentPrompt));
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: any) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+
+	const savePromise = (manager as any).handleMessage(
+		{
+			type: 'savePrompt',
+			source: 'status-change',
+			requestId: 'save-status-visible-finish',
+			prompt: createPrompt({
+				id: 'prompt-a',
+				promptUuid: 'uuid-a',
+				title: 'Prompt title',
+				status: 'completed',
+				report: 'Stored report',
+			}),
+		},
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	await flushTurns(3);
+	const savingMessages = postedMessages.filter(message => message?.type === 'promptSaving');
+	assert.deepEqual(savingMessages.map(message => message.saving), [true, false]);
+	assert.equal(postedMessages.some(message => message?.type === 'promptSaved'), false);
+
+	let saveSettled = false;
+	void savePromise.then(() => { saveSettled = true; });
+	await flushTurns(1);
+	assert.equal(saveSettled, false);
+
+	postSaveSync.resolve();
+	await savePromise;
+	assert.equal(saveSettled, true);
+
 	resetVsCodeCommandMock();
 });
 

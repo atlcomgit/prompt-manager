@@ -161,6 +161,7 @@ export type ExtensionToWebviewMessage =
 		reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config';
 		previousId?: string;
 		requestId?: string;
+		openRequestVersion?: number;
 		editorViewState?: EditorPromptViewState;
 		aiEnrichment?: { title: boolean; description: boolean };
 	}
@@ -238,7 +239,8 @@ export type ExtensionToWebviewMessage =
 	| { type: 'reportEditorSynced'; report: string; updatedAt?: string }
 	| { type: 'reportEditorSaved'; updatedAt?: string }
 	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number }
-	| { type: 'promptLoading' }
+	| { type: 'promptLoading'; promptId?: string; promptUuid?: string; openRequestVersion?: number }
+	| { type: 'promptLoadingCancelled'; promptId?: string; openRequestVersion?: number }
 	| { type: 'nextTaskNumber'; taskNumber: string }
 	| { type: 'chatOpened'; promptId: string; requestId?: string }
 	| { type: 'chatLaunchRenameState'; promptId: string; requestId?: string; state: 'started' | 'completed' }

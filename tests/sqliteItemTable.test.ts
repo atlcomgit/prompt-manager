@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import initSqlJs from 'sql.js';
 
-import { readSqliteItemTable } from '../src/utils/sqliteItemTable.js';
+import { readSqliteItemTable, readSqliteItemValue } from '../src/utils/sqliteItemTable.js';
 
 async function createStateDbWithItems(items: Array<[string, string]>): Promise<{ tempDir: string; dbPath: string; wasmPath: string }> {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'prompt-manager-sqlite-item-table-'));
@@ -52,6 +52,23 @@ test('readSqliteItemTable reads ItemTable values without external sqlite binary'
 			items.get('chat.modelsControl'),
 			'{"free":{"gpt-5-mini":{"id":"copilot/gpt-5-mini","label":"GPT-5 mini","featured":true}}}',
 		);
+	} finally {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	}
+});
+
+test('readSqliteItemValue reads one ItemTable value without scanning all rows', async () => {
+	const { tempDir, dbPath, wasmPath } = await createStateDbWithItems([
+		['github.copilot-chat-github', 'atlcomgit'],
+		['chat.cachedLanguageModels.v2', '[{"identifier":"copilot/gpt-5-mini"}]'],
+	]);
+
+	try {
+		const value = await readSqliteItemValue(dbPath, wasmPath, 'github.copilot-chat-github');
+		const missing = await readSqliteItemValue(dbPath, wasmPath, 'missing-key');
+
+		assert.equal(value, 'atlcomgit');
+		assert.equal(missing, null);
 	} finally {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	}

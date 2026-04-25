@@ -123,15 +123,14 @@ export class CopilotStatusBarProvider implements vscode.Disposable {
 		const cached = this.usageService.getCachedData();
 		if (cached) {
 			this.updateStatusBar(cached);
-			void this.refreshAccountSummary(true);
 		} else {
 			this.showLoadingState();
-		}
 
-		// Запрашиваем свежие данные в фоне
-		void this.usageService.fetchUsage().then((data) => {
-			void this.updateStatusBarWithAccountSummary(data);
-		});
+			// Запрашиваем свежие данные только если нет кэша для немедленного отображения.
+			void this.usageService.fetchUsage().then((data) => {
+				void this.updateStatusBarWithAccountSummary(data);
+			});
+		}
 
 		// Запускаем автообновление
 		this.usageService.startAutoRefresh({ intervalMs: STATUSBAR_REFRESH_INTERVAL_MS, forceRefresh: false });

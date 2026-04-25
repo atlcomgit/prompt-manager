@@ -260,6 +260,159 @@ test('CopilotUsageService treats GitHub auth errors as unauthenticated state', a
 	}
 });
 
+test('CopilotUsageService returns cached usage during in-flight force refresh', async () => {
+	const { state, serviceModule } = await loadModules();
+	const { CopilotUsageService } = serviceModule;
+	state.globalState.clear();
+
+	const originalStartPolling = (CopilotUsageService.prototype as any).startCopilotPreferencePolling;
+	const originalStopPolling = (CopilotUsageService.prototype as any).stopCopilotPreferencePolling;
+	(CopilotUsageService.prototype as any).startCopilotPreferencePolling = function noop() { };
+	(CopilotUsageService.prototype as any).stopCopilotPreferencePolling = function noop() { };
+
+	try {
+		const service = new CopilotUsageService(createExtensionContext(state) as any);
+		(service as any).cachedData = {
+			used: 42,
+			limit: 300,
+			periodStart: '2026-04-01T00:00:00.000Z',
+			periodEnd: '2026-04-30T23:59:59.999Z',
+			lastUpdated: '2026-04-21T12:00:00.000Z',
+			avgPerDay: 2,
+			authenticated: true,
+			planType: 'Pro',
+			source: 'api',
+			lastSyncStatus: 'api-cache',
+			snapshots: [{ date: '2026-04-21', used: 42, limit: 300 }],
+		};
+		(service as any).isFetching = true;
+		(service as any).refreshCopilotGitHubPreference = async () => false;
+		(service as any).getGitHubSession = async () => {
+			throw new Error('in-flight force refresh should not request a new GitHub session');
+		};
+
+		const data = await service.fetchUsage(true);
+
+		assert.equal(data.used, 42);
+		assert.equal(data.limit, 300);
+		assert.match(data.lastSyncStatus || '', /fetch-in-flight/);
+		service.dispose();
+	} finally {
+		(CopilotUsageService.prototype as any).startCopilotPreferencePolling = originalStartPolling;
+		(CopilotUsageService.prototype as any).stopCopilotPreferencePolling = originalStopPolling;
+	}
+});
+
+test('CopilotUsageService activation binding reuses cache without startup force fetch', async () => {
+	const { state, serviceModule } = await loadModules();
+	const { CopilotUsageService } = serviceModule;
+	state.globalState.clear();
+
+	const originalStartPolling = (CopilotUsageService.prototype as any).startCopilotPreferencePolling;
+	const originalStopPolling = (CopilotUsageService.prototype as any).stopCopilotPreferencePolling;
+	(CopilotUsageService.prototype as any).startCopilotPreferencePolling = function noop() { };
+	(CopilotUsageService.prototype as any).stopCopilotPreferencePolling = function noop() { };
+
+	try {
+		const service = new CopilotUsageService(createExtensionContext(state) as any);
+		(service as any).cachedData = {
+			used: 17,
+			limit: 100,
+			periodStart: '2026-04-01T00:00:00.000Z',
+			periodEnd: '2026-04-30T23:59:59.999Z',
+			lastUpdated: '2026-04-21T12:00:00.000Z',
+			avgPerDay: 1,
+			authenticated: true,
+			planType: 'Pro',
+			source: 'api',
+			lastSyncStatus: 'restored-from-cache',
+			snapshots: [{ date: '2026-04-21', used: 17, limit: 100 }],
+		};
+		(service as any).syncPreferenceFromCopilotChat = async () => false;
+		(service as any).fetchUsage = async () => {
+			throw new Error('activation should not run a startup usage fetch');
+		};
+
+		await service.checkAuthenticationBindingOnActivation();
+
+		assert.equal(service.getCachedData()?.used, 17);
+		assert.equal(service.getCachedData()?.lastSyncStatus, 'activation-cache');
+		service.dispose();
+	} finally {
+		(CopilotUsageService.prototype as any).startCopilotPreferencePolling = originalStartPolling;
+		(CopilotUsageService.prototype as any).stopCopilotPreferencePolling = originalStopPolling;
+	}
+});
+
+test('CopilotStatusBarProvider uses cached startup usage without immediate auth summary refresh', async () => {
+	const { state, providerModule } = await loadModules();
+	const { CopilotStatusBarProvider } = providerModule;
+	state.lastStatusBarItem = null;
+	state.statusBarItems.length = 0;
+
+	const cachedData = {
+		used: 21,
+		limit: 300,
+		periodStart: '2026-04-01T00:00:00.000Z',
+		periodEnd: '2026-04-30T23:59:59.999Z',
+		lastUpdated: '2026-04-21T12:00:00.000Z',
+		avgPerDay: 2,
+		authenticated: true,
+		planType: 'Pro',
+		source: 'api' as const,
+		lastSyncStatus: 'restored-from-cache',
+		snapshots: [{ date: '2026-04-21', used: 21, limit: 300 }],
+	};
+	let fetchUsageCount = 0;
+	let accountSummaryCount = 0;
+	let autoRefreshCount = 0;
+
+	const usageService = {
+		onDidChangeUsage: () => ({ dispose() { } }),
+		onDidChangeAccountSwitchState: () => ({ dispose() { } }),
+		getAccountSwitchState: () => ({
+			isSwitching: false,
+			phase: 'idle',
+			message: '',
+			accountLabel: null,
+			startedAt: null,
+			updatedAt: '2026-04-21T12:00:00.000Z',
+		}),
+		getCachedData: () => cachedData,
+		fetchUsage: async () => {
+			fetchUsageCount += 1;
+			return cachedData;
+		},
+		getAccountBindingSummary: async () => {
+			accountSummaryCount += 1;
+			return {
+				copilotPreferredGitHubLabel: 'atlcomgit',
+				promptManagerPreferredGitHubLabel: 'atlcomgit',
+				activeGithubSessionAccountLabel: 'atlcomgit',
+				githubSessionIssue: null,
+				availableGitHubAccounts: [{ id: '1', label: 'atlcomgit' }],
+			};
+		},
+		startAutoRefresh: () => { autoRefreshCount += 1; },
+		stopAutoRefresh: () => undefined,
+		authenticate: async () => true,
+	};
+
+	const provider = new CopilotStatusBarProvider(
+		usageService as any,
+		{ show: async () => undefined } as any,
+	);
+
+	assert.equal(fetchUsageCount, 0);
+	assert.equal(accountSummaryCount, 0);
+	assert.equal(autoRefreshCount, 1);
+	const statusBarItem = state.lastStatusBarItem as StatusBarItemMock | null;
+	assert.ok(statusBarItem);
+	assert.equal(statusBarItem.visible, true);
+
+	provider.dispose();
+});
+
 test('CopilotStatusBarProvider shows explicit sign-in error label for auth-error usage data', async () => {
 	const { state, providerModule } = await loadModules();
 	const { CopilotStatusBarProvider } = providerModule;

@@ -119,11 +119,16 @@ const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 600;
 const GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS = 250;
 const GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS = 250;
 const GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT = 4;
+/** Limit parallel file metadata probes during prompt editor hydration. */
+const CONTEXT_FILE_CARD_HYDRATION_CONCURRENCY = 8;
 
 type GitOverlayRefreshMode = 'local' | 'fetch' | 'sync';
 type GitOverlaySnapshotDetailLevel = 'full' | 'summary';
 type GitOverlaySnapshotMetricSource = 'open' | 'refresh' | 'action';
 type GitOverlayOtherProjectsMetricSource = GitOverlaySnapshotMetricSource | 'peer-refresh';
+
+/** Snapshot of the external report editor binding observed during a save pass. */
+type ReportBindingSnapshot = { content: string; lastModifiedMs: number | null };
 
 interface GitOverlaySession {
 	active: boolean;
@@ -980,32 +985,42 @@ export class EditorPanelManager {
 	}
 
 	private async buildContextFileCards(files: string[], webview: vscode.Webview): Promise<PromptContextFileCard[]> {
-		const cards: PromptContextFileCard[] = [];
+		const normalizedPaths = dedupeContextFileReferences(files).map(filePath => normalizeContextFileReference(filePath));
+		const cards = new Array<PromptContextFileCard>(normalizedPaths.length);
+		let nextIndex = 0;
 
-		for (const filePath of dedupeContextFileReferences(files)) {
-			const normalizedPath = normalizeContextFileReference(filePath);
-			const fileUri = this.resolveContextFileUri(normalizedPath);
-			const kind = getContextFileKind(normalizedPath);
-			const extension = getContextFileExtension(normalizedPath);
-			const attachmentDetails = await this.resolveFileAttachmentDetails(fileUri, kind, webview);
+		/** Hydrate card metadata in stable source order while workers run in parallel. */
+		const hydrateNextCard = async (): Promise<void> => {
+			while (nextIndex < normalizedPaths.length) {
+				const cardIndex = nextIndex;
+				nextIndex += 1;
 
-			cards.push({
-				path: normalizedPath,
-				displayName: getContextFileDisplayName(normalizedPath),
-				directoryLabel: getContextFileDirectoryLabel(normalizedPath),
-				extension,
-				tileLabel: getContextFileTileLabel(normalizedPath, kind),
-				kind,
-				typeLabel: getContextFileTypeLabel(kind, extension),
-				exists: attachmentDetails.exists,
-				sizeBytes: attachmentDetails.sizeBytes,
-				sizeLabel: attachmentDetails.exists ? formatContextFileSize(attachmentDetails.sizeBytes) : '-',
-				modifiedAt: attachmentDetails.modifiedAt,
-				previewUri: attachmentDetails.previewUri,
-			});
-		}
+				const normalizedPath = normalizedPaths[cardIndex];
+				const fileUri = this.resolveContextFileUri(normalizedPath);
+				const kind = getContextFileKind(normalizedPath);
+				const extension = getContextFileExtension(normalizedPath);
+				const attachmentDetails = await this.resolveFileAttachmentDetails(fileUri, kind, webview);
 
-		return cards;
+				cards[cardIndex] = {
+					path: normalizedPath,
+					displayName: getContextFileDisplayName(normalizedPath),
+					directoryLabel: getContextFileDirectoryLabel(normalizedPath),
+					extension,
+					tileLabel: getContextFileTileLabel(normalizedPath, kind),
+					kind,
+					typeLabel: getContextFileTypeLabel(kind, extension),
+					exists: attachmentDetails.exists,
+					sizeBytes: attachmentDetails.sizeBytes,
+					sizeLabel: attachmentDetails.exists ? formatContextFileSize(attachmentDetails.sizeBytes) : '-',
+					modifiedAt: attachmentDetails.modifiedAt,
+					previewUri: attachmentDetails.previewUri,
+				};
+			}
+		};
+
+		const workerCount = Math.min(CONTEXT_FILE_CARD_HYDRATION_CONCURRENCY, normalizedPaths.length);
+		await Promise.all(Array.from({ length: workerCount }, () => hydrateNextCard()));
+		return cards.filter(Boolean);
 	}
 
 	/** Collect file-system-backed metadata for an attachment that may be rendered in the editor. */
@@ -2587,7 +2602,7 @@ export class EditorPanelManager {
 		}
 	}
 
-	private async refreshReportBindingFromDisk(panelKey: string): Promise<{ content: string; lastModifiedMs: number | null } | null> {
+	private async refreshReportBindingFromDisk(panelKey: string): Promise<ReportBindingSnapshot | null> {
 		const binding = this.reportEditorByPanelKey.get(panelKey);
 		if (!binding) {
 			return null;
@@ -2616,16 +2631,35 @@ export class EditorPanelManager {
 		};
 	}
 
+	private getReportBindingSnapshot(panelKey: string | undefined): ReportBindingSnapshot | null {
+		if (!panelKey) {
+			return null;
+		}
+
+		const binding = this.reportEditorByPanelKey.get(panelKey);
+		if (!binding) {
+			return null;
+		}
+
+		return {
+			content: binding.lastSyncedContent,
+			lastModifiedMs: binding.lastModifiedMs,
+		};
+	}
+
 	private async guardReportOverwriteBeforeSave(
 		panelKey: string | undefined,
 		promptToSave: Prompt,
 		baseSnapshot: Prompt | null,
+		preloadedBindingState?: ReportBindingSnapshot | null,
 	): Promise<void> {
 		if (!panelKey || !baseSnapshot || !promptToSave.id) {
 			return;
 		}
 
-		const bindingState = await this.refreshReportBindingFromDisk(panelKey);
+		const bindingState = preloadedBindingState !== undefined
+			? preloadedBindingState
+			: await this.refreshReportBindingFromDisk(panelKey);
 		if (!bindingState) {
 			return;
 		}
@@ -2654,12 +2688,15 @@ export class EditorPanelManager {
 		panelKey: string | undefined,
 		promptToSave: Prompt,
 		currentPrompt: Prompt,
+		preloadedBindingState?: ReportBindingSnapshot | null,
 	): Promise<void> {
 		if (!panelKey) {
 			return;
 		}
 
-		const bindingState = await this.refreshReportBindingFromDisk(panelKey);
+		const bindingState = preloadedBindingState !== undefined
+			? preloadedBindingState
+			: await this.refreshReportBindingFromDisk(panelKey);
 		const diskReport = bindingState?.content;
 		const extensionReport = this.panelPromptRefs.get(panelKey)?.report ?? currentPrompt.report;
 		const nextReport = promptToSave.report || '';
@@ -5901,6 +5938,7 @@ export class EditorPanelManager {
 			reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config';
 			previousId?: string;
 			requestId?: string;
+			openRequestVersion?: number;
 			editorViewState?: EditorPromptViewState;
 		} = {},
 	): ExtensionToWebviewMessage {
@@ -5912,6 +5950,54 @@ export class EditorPanelManager {
 			...options,
 			...(pendingAiEnrichment ? { aiEnrichment: pendingAiEnrichment } : {}),
 		};
+	}
+
+	/** Build a prompt-loading message tied to one open request. */
+	private buildPromptLoadingMessage(
+		promptId: string,
+		promptUuid?: string | null,
+		openRequestVersion?: number,
+	): ExtensionToWebviewMessage {
+		const normalizedPromptId = (promptId || '__new__').trim() || '__new__';
+		const normalizedPromptUuid = (promptUuid || '').trim();
+
+		return {
+			type: 'promptLoading',
+			promptId: normalizedPromptId,
+			...(normalizedPromptUuid ? { promptUuid: normalizedPromptUuid } : {}),
+			...(typeof openRequestVersion === 'number' ? { openRequestVersion } : {}),
+		};
+	}
+
+	/** Notify the current webview that a prompt switch is waiting on host-side work. */
+	private async postPromptLoading(
+		panel: vscode.WebviewPanel,
+		promptId: string,
+		promptUuid?: string | null,
+		openRequestVersion?: number,
+	): Promise<void> {
+		try {
+			await panel.webview.postMessage(this.buildPromptLoadingMessage(promptId, promptUuid, openRequestVersion));
+		} catch {
+			// If the webview is still booting, the ready cycle will hydrate the latest prompt.
+		}
+	}
+
+	/** Restore the current prompt shell if an active prompt switch cannot finish. */
+	private async cancelPromptLoading(
+		panel: vscode.WebviewPanel,
+		promptId: string,
+		openRequestVersion: number,
+	): Promise<void> {
+		try {
+			await panel.webview.postMessage({
+				type: 'promptLoadingCancelled',
+				promptId: (promptId || '__new__').trim() || '__new__',
+				openRequestVersion,
+			} satisfies ExtensionToWebviewMessage);
+		} catch {
+			// Ignore transient postMessage failures while the webview reloads.
+		}
 	}
 
 	private enqueuePendingPanelMessage(panelKey: string, message: ExtensionToWebviewMessage): void {
@@ -5999,12 +6085,22 @@ export class EditorPanelManager {
 		panelKey: string,
 		panel: vscode.WebviewPanel,
 		prompt: Prompt,
-		options: { dirty: boolean; isRu: boolean; forceMainTab?: boolean },
+		options: {
+			dirty: boolean;
+			isRu: boolean;
+			forceMainTab?: boolean;
+			loadingAlreadySent?: boolean;
+			openRequestVersion?: number;
+			targetPromptId?: string;
+		},
 	): Promise<void> {
-		try {
-			await panel.webview.postMessage({ type: 'promptLoading' } satisfies ExtensionToWebviewMessage);
-		} catch {
-			// If the webview is still booting, the ready cycle will hydrate the latest prompt.
+		if (!options.loadingAlreadySent) {
+			await this.postPromptLoading(
+				panel,
+				options.targetPromptId || prompt.id || '__new__',
+				prompt.promptUuid,
+				options.openRequestVersion,
+			);
 		}
 
 		this.updateEditorWebviewOptions(panel, prompt.contextFiles);
@@ -6013,6 +6109,7 @@ export class EditorPanelManager {
 		try {
 			await panel.webview.postMessage(this.buildPromptMessage(prompt, {
 				reason: 'open',
+				openRequestVersion: options.openRequestVersion,
 				editorViewState: resolvePromptOpenEditorViewState(
 					this.getPromptEditorViewState(panelKey, prompt),
 					{ forceMainTab: options.forceMainTab === true },
@@ -6025,6 +6122,19 @@ export class EditorPanelManager {
 		this.flushPendingPanelMessages(panelKey, panel, prompt);
 		panel.reveal(vscode.ViewColumn.One);
 		this.syncStartupEditorRestoreState();
+	}
+
+	/** Load a saved prompt for opening, preferring an in-flight save result over stale disk data. */
+	private async loadPromptForOpen(promptId: string): Promise<Prompt | null> {
+		const pendingSaveEntry = findPendingSaveEntry(this.pendingSaveQueue, promptId, undefined);
+		if (pendingSaveEntry) {
+			const savedResult = await pendingSaveEntry.promise;
+			if (savedResult && savedResult.id === promptId) {
+				return savedResult;
+			}
+		}
+
+		return this.storageService.getPrompt(promptId);
 	}
 
 	async openPromptAndStartChat(promptId: string): Promise<void> {
@@ -6075,15 +6185,27 @@ export class EditorPanelManager {
 			return;
 		}
 
+		let promptLoadingSentToReusablePanel = false;
+		if (panelSwitchStrategy === 'reuse' && reusableSingletonPanel) {
+			await this.postPromptLoading(reusableSingletonPanel, promptId, null, requestVersion);
+			promptLoadingSentToReusablePanel = true;
+		}
+
+		const targetPromptLoadTask = isNew ? null : this.loadPromptForOpen(promptId)
+			.then(prompt => ({ prompt, error: null as unknown }))
+			.catch(error => ({ prompt: null, error }));
+
 		const existingEntries = [...openPanels.entries()]
 			.filter(([, existingPanel]) => !this.silentClosePanels.has(existingPanel));
 		const panelsToDispose: vscode.WebviewPanel[] = [];
 
 		for (const [existingKey, existingPanel] of existingEntries) {
 			const livePromptSnapshot = this.panelPromptRefs.get(existingKey);
+			const latestPanelSnapshot = this.panelLatestPromptSnapshots.get(existingKey) || null;
+			const basePanelSnapshot = this.panelBasePrompts.get(existingKey) || null;
 			const latestSnapshot = this.panelLatestPromptSnapshots.get(existingKey)
 				|| (livePromptSnapshot ? JSON.parse(JSON.stringify(livePromptSnapshot)) : null)
-				|| this.panelBasePrompts.get(existingKey)
+				|| basePanelSnapshot
 				|| null;
 			if (latestSnapshot) {
 				const isDirty = this.panelDirtyFlags.get(existingKey) || false;
@@ -6098,8 +6220,14 @@ export class EditorPanelManager {
 				}
 				let shouldPersistBeforeSwitch = !hasPendingPromptSave && (isDirty || hasUnsavedDraftData);
 				if (!shouldPersistBeforeSwitch && latestSnapshot.id && !hasPendingPromptSave) {
-					const persistedSnapshot = await this.storageService.getPrompt(latestSnapshot.id);
-					shouldPersistBeforeSwitch = this.hasMeaningfulPromptDiff(latestSnapshot, persistedSnapshot);
+					const canTrustBaseSnapshot = !isDirty
+						&& !hasUnsavedDraftData
+						&& Boolean(basePanelSnapshot)
+						&& !this.hasMeaningfulPromptDiff(latestPanelSnapshot || latestSnapshot, basePanelSnapshot);
+					if (!canTrustBaseSnapshot) {
+						const persistedSnapshot = await this.storageService.getPrompt(latestSnapshot.id);
+						shouldPersistBeforeSwitch = this.hasMeaningfulPromptDiff(latestSnapshot, persistedSnapshot);
+					}
 				}
 				if (shouldPersistBeforeSwitch) {
 					try {
@@ -6136,21 +6264,15 @@ export class EditorPanelManager {
 			prompt = createDefaultPrompt('');
 			await this.applyRecentPromptDefaults(prompt);
 		} else {
-			/**
-			 * Проверяем очередь ожидающих сохранений: если для этого промпта ещё
-			 * идёт запись на диск, дожидаемся результата и используем свежие данные
-			 * вместо потенциально устаревшего чтения с диска.
-			 */
-			const pendingSaveEntry = findPendingSaveEntry(this.pendingSaveQueue, promptId, undefined);
-			let loaded: Prompt | null = null;
-			if (pendingSaveEntry) {
-				const savedResult = await pendingSaveEntry.promise;
-				loaded = savedResult && savedResult.id === promptId ? savedResult : null;
+			const loadedResult = await targetPromptLoadTask;
+			if (loadedResult?.error) {
+				throw loadedResult.error;
 			}
+			const loaded = loadedResult?.prompt || null;
 			if (!loaded) {
-				loaded = await this.storageService.getPrompt(promptId);
-			}
-			if (!loaded) {
+				if (promptLoadingSentToReusablePanel && reusableSingletonPanel && !this.isOpenPromptRequestStale(requestVersion)) {
+					await this.cancelPromptLoading(reusableSingletonPanel, promptId, requestVersion);
+				}
 				vscode.window.showErrorMessage(`Промпт "${promptId}" не найден.`);
 				return;
 			}
@@ -6205,6 +6327,9 @@ export class EditorPanelManager {
 				dirty: restoredUnsaved,
 				isRu,
 				forceMainTab: this.consumePanelForceMainTabOnNextOpen(panelKey),
+				loadingAlreadySent: promptLoadingSentToReusablePanel,
+				openRequestVersion: requestVersion,
+				targetPromptId: promptId,
 			});
 
 			for (const existingPanel of panelsToDispose) {
@@ -6227,6 +6352,8 @@ export class EditorPanelManager {
 				dirty: restoredUnsaved,
 				isRu,
 				forceMainTab: this.consumePanelForceMainTabOnNextOpen(panelKey),
+				openRequestVersion: requestVersion,
+				targetPromptId: promptId,
 			});
 
 			for (const existingPanel of panelsToDispose) {
@@ -6534,80 +6661,7 @@ export class EditorPanelManager {
 					break;
 				}
 
-				if (currentPrompt.chatSessionIds?.length) {
-					const existingSessionIds: string[] = [];
-					for (const sessionId of currentPrompt.chatSessionIds) {
-						if (await this.stateService.hasChatSession(sessionId)) {
-							existingSessionIds.push(sessionId);
-						}
-					}
-					if (isReadyCycleStale()) {
-						break;
-					}
-					if (existingSessionIds.length !== currentPrompt.chatSessionIds.length) {
-						currentPrompt.chatSessionIds = existingSessionIds;
-						await this.storageService.savePrompt(currentPrompt);
-						if (isReadyCycleStale()) {
-							break;
-						}
-						this._onDidSave.fire(currentPrompt.id);
-					}
-				}
-
-				// Make ready initialization resilient: timebox and tolerate errors
-				let models: Array<{ id: string; name: string }> = [];
-				let skills: any[] = [];
-				let mcpTools: any[] = [];
-				let hooks: any[] = [];
-				let availableLanguageAndFrameworkMessages: any = {
-					languagesMessage: { type: 'availableLanguages', options: [] },
-					frameworksMessage: { type: 'availableFrameworks', options: [] },
-				};
-				let projectInstructionsMessage: ExtensionToWebviewMessage = {
-					type: 'projectInstructions',
-					content: '',
-					exists: false,
-				};
-
-				try {
-					const results = await Promise.all([
-						this.withTimeout(this.aiService.getAvailableModels(), 2000, [] as any),
-						this.withTimeout(this.workspaceService.getSkills(), 2000, [] as any),
-						this.withTimeout(this.workspaceService.getMcpTools(), 2000, [] as any),
-						this.withTimeout(this.workspaceService.getHooks(), 2000, [] as any),
-						this.withTimeout(this.buildAvailableLanguagesAndFrameworksMessages(), 2000, availableLanguageAndFrameworkMessages),
-						this.withTimeout(this.buildProjectInstructionsMessage(), 2000, projectInstructionsMessage),
-					]);
-
-					models = results[0] || [];
-					skills = results[1] || [];
-					mcpTools = results[2] || [];
-					hooks = results[3] || [];
-					availableLanguageAndFrameworkMessages = results[4] || availableLanguageAndFrameworkMessages;
-					projectInstructionsMessage = results[5] || projectInstructionsMessage;
-				} catch (err) {
-					console.error('[PromptManager] ready initialization partially failed:', err);
-				}
-
-				if (isReadyCycleStale()) {
-					break;
-				}
-
-				postMessage(this.buildGlobalContextMessage());
-				postMessage(projectInstructionsMessage);
-				postMessage({ type: 'workspaceFolders', folders: this.workspaceService.getWorkspaceFolders() });
-				postMessage({ type: 'availableModels', models });
-				postMessage({ type: 'availableSkills', skills });
-				postMessage({ type: 'availableMcpTools', tools: mcpTools });
-				postMessage({ type: 'availableHooks', hooks });
-				postMessage({ type: 'allowedBranches', branches: this.getAllowedBranchesSetting() });
-				postMessage({
-					type: 'gitOverlayTrackedBranchPreference',
-					branch: this.getGitOverlayTrackedBranchPreference(),
-					branchesByProject: this.getGitOverlayTrackedBranchesByProjectPreference(),
-				});
-				postMessage(availableLanguageAndFrameworkMessages.languagesMessage);
-				postMessage(availableLanguageAndFrameworkMessages.frameworksMessage);
+				// Send the editable prompt first; slower metadata follows in guarded background tasks.
 				postMessage(this.buildPromptMessage(currentPrompt, {
 					reason: 'open',
 					editorViewState: resolvePromptOpenEditorViewState(
@@ -6616,7 +6670,110 @@ export class EditorPanelManager {
 					),
 				}));
 				this.flushPendingPanelMessages(panelKey, panel, currentPrompt);
-				this.scheduleAvailableModelsRefreshAfterReady(panelKey, panel, currentPrompt, readyBootId, models);
+
+				postMessage(this.buildGlobalContextMessage());
+				postMessage({ type: 'workspaceFolders', folders: this.workspaceService.getWorkspaceFolders() });
+				postMessage({ type: 'allowedBranches', branches: this.getAllowedBranchesSetting() });
+				postMessage({
+					type: 'gitOverlayTrackedBranchPreference',
+					branch: this.getGitOverlayTrackedBranchPreference(),
+					branchesByProject: this.getGitOverlayTrackedBranchesByProjectPreference(),
+				});
+
+				void (async () => {
+					if (!currentPrompt.chatSessionIds?.length) {
+						return;
+					}
+
+					const existingSessionIds: string[] = [];
+					for (const sessionId of currentPrompt.chatSessionIds) {
+						if (await this.stateService.hasChatSession(sessionId)) {
+							existingSessionIds.push(sessionId);
+						}
+					}
+
+					if (isReadyCycleStale() || existingSessionIds.length === currentPrompt.chatSessionIds.length) {
+						return;
+					}
+
+					currentPrompt.chatSessionIds = existingSessionIds;
+					await this.storageService.savePrompt(currentPrompt);
+					if (isReadyCycleStale()) {
+						return;
+					}
+
+					this._onDidSave.fire(currentPrompt.id);
+					postMessage(this.buildPromptMessage(currentPrompt, { reason: 'sync' }));
+				})().catch(error => {
+					console.error('[PromptManager] ready chat session validation failed:', error);
+				});
+
+				void (async () => {
+					const models = await this.withTimeout(this.aiService.getAvailableModels(), 2000, [] as Array<{ id: string; name: string }>);
+					if (isReadyCycleStale()) {
+						return;
+					}
+
+					postMessage({ type: 'availableModels', models });
+					this.scheduleAvailableModelsRefreshAfterReady(panelKey, panel, currentPrompt, readyBootId, models);
+				})().catch(error => {
+					console.error('[PromptManager] ready models hydration failed:', error);
+				});
+
+				void (async () => {
+					const skills = await this.withTimeout(this.workspaceService.getSkills(), 2000, [] as any[]);
+					if (!isReadyCycleStale()) {
+						postMessage({ type: 'availableSkills', skills });
+					}
+				})().catch(error => {
+					console.error('[PromptManager] ready skills hydration failed:', error);
+				});
+
+				void (async () => {
+					const tools = await this.withTimeout(this.workspaceService.getMcpTools(), 2000, [] as any[]);
+					if (!isReadyCycleStale()) {
+						postMessage({ type: 'availableMcpTools', tools });
+					}
+				})().catch(error => {
+					console.error('[PromptManager] ready MCP tools hydration failed:', error);
+				});
+
+				void (async () => {
+					const hooks = await this.withTimeout(this.workspaceService.getHooks(), 2000, [] as any[]);
+					if (!isReadyCycleStale()) {
+						postMessage({ type: 'availableHooks', hooks });
+					}
+				})().catch(error => {
+					console.error('[PromptManager] ready hooks hydration failed:', error);
+				});
+
+				void (async () => {
+					const fallbackMessages = {
+						languagesMessage: { type: 'availableLanguages', options: [] } satisfies ExtensionToWebviewMessage,
+						frameworksMessage: { type: 'availableFrameworks', options: [] } satisfies ExtensionToWebviewMessage,
+					};
+					const messages = await this.withTimeout(this.buildAvailableLanguagesAndFrameworksMessages(), 2000, fallbackMessages);
+					if (!isReadyCycleStale()) {
+						postMessage(messages.languagesMessage);
+						postMessage(messages.frameworksMessage);
+					}
+				})().catch(error => {
+					console.error('[PromptManager] ready language/framework hydration failed:', error);
+				});
+
+				void (async () => {
+					const fallbackMessage: ExtensionToWebviewMessage = {
+						type: 'projectInstructions',
+						content: '',
+						exists: false,
+					};
+					const projectInstructionsMessage = await this.withTimeout(this.buildProjectInstructionsMessage(), 2000, fallbackMessage);
+					if (!isReadyCycleStale()) {
+						postMessage(projectInstructionsMessage);
+					}
+				})().catch(error => {
+					console.error('[PromptManager] ready project instructions hydration failed:', error);
+				});
 				break;
 			}
 
@@ -6650,6 +6807,7 @@ export class EditorPanelManager {
 						reportLength: (msg.prompt.report || '').length,
 						reportPreview: this.reportDebugPreview(msg.prompt.report || ''),
 					});
+					const saveStartedAt = Date.now();
 					this._onDidSaveStateChange.fire({
 						id: saveStateId,
 						promptUuid: savePromptUuid,
@@ -6662,10 +6820,46 @@ export class EditorPanelManager {
 						saving: true,
 						...(saveRequestId ? { requestId: saveRequestId } : {}),
 					});
+					let visibleSaveFinished = false;
+					const finishVisibleSave = (savedPrompt?: Pick<Prompt, 'id' | 'promptUuid'> | null): void => {
+						if (visibleSaveFinished) {
+							return;
+						}
+
+						visibleSaveFinished = true;
+						this._onDidSaveStateChange.fire({
+							id: saveStateId,
+							promptUuid: savePromptUuid,
+							saving: false,
+						});
+						const savedPromptId = (savedPrompt?.id || '').trim();
+						if (savedPromptId && savedPromptId !== saveStateId) {
+							this._onDidSaveStateChange.fire({
+								id: savedPromptId,
+								promptUuid: savedPrompt?.promptUuid || savePromptUuid,
+								saving: false,
+							});
+						}
+						void postMessage({
+							type: 'promptSaving',
+							id: saveStateId,
+							promptUuid: savePromptUuid,
+							saving: false,
+							...(saveRequestId ? { requestId: saveRequestId } : {}),
+						});
+						this.logReportDebug('savePrompt.visibleDone', {
+							panelKey,
+							promptId: savedPromptId || saveStateId,
+							source: msg.source || 'manual',
+						});
+					};
 					try {
 						let promptToSave = msg.prompt;
-						await this.awaitPendingReportPersist(promptToSave.id || currentPromptForSave.id);
 						const saveSource = msg.source || 'manual';
+						const canUseCachedReportBinding = saveSource === 'status-change';
+						if (!canUseCachedReportBinding) {
+							await this.awaitPendingReportPersist(promptToSave.id || currentPromptForSave.id);
+						}
 						if (saveSource === 'status-change' && promptToSave.status === 'in-progress') {
 							markPromptChatAutoCompleteAfter(promptToSave);
 						}
@@ -6683,19 +6877,39 @@ export class EditorPanelManager {
 						const needsAiEnrichment = aiEnrichmentPlan.needsAiEnrichment;
 						const requestedIdBase = this.resolvePromptIdBase(promptToSave);
 
-						const renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
+						let renameFromId: string | undefined;
+						const statusChangePromptId = canUseCachedReportBinding
+							? (promptToSave.id || currentPromptForSave.id || '').trim()
+							: '';
+						if (statusChangePromptId) {
+							promptToSave.id = statusChangePromptId;
+						} else {
+							renameFromId = await this.ensurePromptIdMatchesTitle(promptToSave, previousPromptId);
+						}
+						const reportBindingState = detachedSave
+							? null
+							: (canUseCachedReportBinding
+								? this.getReportBindingSnapshot(panelKey)
+								: await this.refreshReportBindingFromDisk(panelKey));
 						if (!detachedSave) {
-							await this.reconcileReportWithExtensionState(panelKey, promptToSave, currentPromptForSave);
+							await this.reconcileReportWithExtensionState(
+								panelKey,
+								promptToSave,
+								currentPromptForSave,
+								reportBindingState,
+							);
 						}
 						const basePrompt = detachedSave
 							? currentPromptForSave
 							: (this.panelBasePrompts.get(panelKey) || null);
 						if (!detachedSave) {
-							await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, basePrompt || null);
+							await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, basePrompt || null, reportBindingState);
 						}
 
-						const existingPrompt = promptToSave.id ? await this.storageService.getPrompt(renameFromId || promptToSave.id) : null;
-						const allowStatusOverwrite = saveSource === 'status-change';
+						const existingPrompt = canUseCachedReportBinding
+							? (basePrompt || currentPromptForSave || null)
+							: (promptToSave.id ? await this.storageService.getPrompt(renameFromId || promptToSave.id) : null);
+						const allowStatusOverwrite = canUseCachedReportBinding;
 						this.mergePersistedPromptStateBeforeSave(
 							promptToSave,
 							existingPrompt,
@@ -6703,10 +6917,13 @@ export class EditorPanelManager {
 							{ allowStatusOverwrite },
 						);
 
+						const storageSaveStartedAt = Date.now();
 						const saved = await this.storageService.savePrompt(promptToSave, {
 							historyReason: saveSource,
-							previousId: renameFromId,
+							previousId: renameFromId || previousPromptId,
+							existingPrompt,
 						});
+						const storageDurationMs = Date.now() - storageSaveStartedAt;
 
 						/** Обновляем ключ очереди, если id изменился после сохранения (переименование, генерация id) */
 						const updatedSaveQueueKey = buildSaveQueueKey(saved.promptUuid, saved.id);
@@ -6723,10 +6940,14 @@ export class EditorPanelManager {
 							panelKey,
 							promptId: promptToSave.id,
 							source: saveSource,
+							durationMs: Date.now() - saveStartedAt,
+							storageDurationMs,
+							fastStatusPath: canUseCachedReportBinding,
 							reportLength: (promptToSave.report || '').length,
 							reportPreview: this.reportDebugPreview(promptToSave.report || ''),
 						});
 						const promptForPanel = saved;
+						finishVisibleSave(promptForPanel);
 						void this.scheduleBoundChatSessionRenames(promptForPanel, existingPrompt, ' (save)')
 							.catch(error => {
 								this.hooksOutput.appendLine(
@@ -6846,13 +7067,6 @@ export class EditorPanelManager {
 						}
 
 						this._onDidSave.fire(promptToSave.id);
-						if (promptToSave.id && promptToSave.id !== saveStateId) {
-							this._onDidSaveStateChange.fire({
-								id: promptToSave.id,
-								promptUuid: promptToSave.promptUuid || currentPromptForSave.promptUuid,
-								saving: false,
-							});
-						}
 					} catch (error) {
 						saveQueueResolve!(null);
 						const message = this.formatSaveConflictMessage(error);
@@ -6862,18 +7076,7 @@ export class EditorPanelManager {
 							...(saveRequestId ? { requestId: saveRequestId } : {}),
 						});
 					} finally {
-						this._onDidSaveStateChange.fire({
-							id: saveStateId,
-							promptUuid: savePromptUuid,
-							saving: false,
-						});
-						postMessage({
-							type: 'promptSaving',
-							id: saveStateId,
-							promptUuid: savePromptUuid,
-							saving: false,
-							...(saveRequestId ? { requestId: saveRequestId } : {}),
-						});
+						finishVisibleSave();
 						this.clearPendingSaveEntry(saveQueueKey, operationId);
 						if (finalSaveQueueKey !== saveQueueKey) {
 							this.clearPendingSaveEntry(finalSaveQueueKey, operationId);

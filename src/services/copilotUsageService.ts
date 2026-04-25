@@ -13,7 +13,7 @@ import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
-import { readSqliteItemTable } from '../utils/sqliteItemTable.js';
+import { readSqliteItemTable, readSqliteItemValue } from '../utils/sqliteItemTable.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -795,9 +795,17 @@ export class CopilotUsageService implements vscode.Disposable {
 		const synced = await this.syncPreferenceFromCopilotChat('activation');
 		appendPromptManagerLog(`[${ts}] [activation] syncPreferenceFromCopilotChat: synced=${synced}`);
 
-		await this.refreshAuthenticationBinding('activation');
+		if (this.cachedData) {
+			this.cachedData = {
+				...this.cachedData,
+				lastUpdated: new Date().toISOString(),
+				lastSyncStatus: 'activation-cache',
+			};
+			this.lastFullRefreshTimestamp = Date.now();
+			this._onDidChangeUsage.fire(this.cachedData);
+		}
 		appendPromptManagerLog(
-			`[${ts}] [activation] after refresh: authenticated=${this.cachedData?.authenticated}, account=${this.lastKnownCopilotGitHubPreference || 'none'}, issue=${this.lastGitHubSessionIssue || 'none'}`,
+			`[${ts}] [activation] after cache sync: authenticated=${this.cachedData?.authenticated}, account=${this.lastKnownCopilotGitHubPreference || 'none'}, issue=${this.lastGitHubSessionIssue || 'none'}`,
 		);
 	}
 
@@ -907,6 +915,42 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 	}
 
+	/** Возвращает текущий usage-кэш, если другой refresh уже выполняет дорогое обновление. */
+	private resolveInFlightCachedUsage(forceRefresh: boolean, debugLines: string[]): CopilotUsageData | null {
+		if (!this.isFetching || !this.cachedData || this.isSwitchingAccount) {
+			return null;
+		}
+
+		const cachedData: CopilotUsageData = {
+			...this.cachedData,
+			lastUpdated: new Date().toISOString(),
+			lastSyncStatus: `${this.cachedData.lastSyncStatus || 'api-cache'}; fetch-in-flight`,
+		};
+		this.lastDebugLog = this.formatDebugLog(debugLines.concat(
+			`[cache] reuse-in-flight forceRefresh=${forceRefresh}`,
+			`[result] used=${cachedData.used} limit=${cachedData.limit} source=${cachedData.source} planType=${cachedData.planType}`,
+		));
+		return cachedData;
+	}
+
+	private resolveRecentCachedUsage(forceRefresh: boolean, now: number): CopilotUsageData | null {
+		if (forceRefresh || !this.cachedData || this.isSwitchingAccount) {
+			return null;
+		}
+
+		const cacheAgeMs = now - this.lastFullRefreshTimestamp;
+		if (cacheAgeMs < 0 || cacheAgeMs >= MIN_FULL_REFRESH_INTERVAL_MS) {
+			return null;
+		}
+
+		this.lastDebugLog = this.formatDebugLog([
+			`[fetch] forceRefresh=${forceRefresh} recentCache=true now=${new Date(now).toISOString()}`,
+			`[cache] reuse-recent-full-refresh ageMs=${cacheAgeMs}`,
+			`[result] used=${this.cachedData.used} limit=${this.cachedData.limit} source=${this.cachedData.source} planType=${this.cachedData.planType}`,
+		]);
+		return this.cachedData;
+	}
+
 	/**
 	 * Восстанавливает сохранённое состояние из globalState.
 	 * Если данные были сохранены ранее, они используются как начальные значения.
@@ -927,6 +971,7 @@ export class CopilotUsageService implements vscode.Disposable {
 				snapshots: sanitizedSnapshots,
 				lastSyncStatus: saved.lastSyncStatus || 'restored-from-cache',
 			};
+			this.lastFullRefreshTimestamp = Date.now();
 			this.lastKnownAuthenticated = !!saved.authenticated;
 		}
 	}
@@ -1203,15 +1248,22 @@ export class CopilotUsageService implements vscode.Disposable {
 	}
 
 	private async readStateValueWithSqlJs(dbPath: string, key: string): Promise<{ ok: boolean; value: string | null }> {
-		const items = await this.getStateDbItems(dbPath);
-		if (!items) {
+		const wasmPath = this.getSqlJsWasmPath();
+		if (!wasmPath) {
 			return { ok: false, value: null };
 		}
 
-		return {
-			ok: true,
-			value: items.get(key) ?? null,
-		};
+		try {
+			const fingerprint = this.getStateDbFingerprint(dbPath);
+			const cached = fingerprint ? this.stateDbItemCache.get(dbPath) : null;
+			if (cached && cached.fingerprint === fingerprint) {
+				return { ok: true, value: cached.items.get(key) ?? null };
+			}
+
+			return { ok: true, value: await readSqliteItemValue(dbPath, wasmPath, key) };
+		} catch {
+			return { ok: false, value: null };
+		}
 	}
 
 	private async getStateDbItems(dbPath: string): Promise<Map<string, string> | null> {
@@ -2666,6 +2718,19 @@ export class CopilotUsageService implements vscode.Disposable {
 	 * @returns Данные об использовании
 	 */
 	async fetchUsage(forceRefresh: boolean = false): Promise<CopilotUsageData> {
+		const earlyNow = Date.now();
+		const earlyCachedData = this.resolveInFlightCachedUsage(forceRefresh, [
+			`[fetch] forceRefresh=${forceRefresh} inFlight=true now=${new Date(earlyNow).toISOString()}`,
+		]);
+		if (earlyCachedData) {
+			return earlyCachedData;
+		}
+
+		const recentCachedData = this.resolveRecentCachedUsage(forceRefresh, earlyNow);
+		if (recentCachedData) {
+			return recentCachedData;
+		}
+
 		const copilotPreferenceChanged = await this.refreshCopilotGitHubPreference();
 		if (copilotPreferenceChanged) {
 			forceRefresh = true;
@@ -2697,12 +2762,14 @@ export class CopilotUsageService implements vscode.Disposable {
 
 		// Защита от параллельных запросов
 		if (this.isFetching) {
-			if (forceRefresh) {
-				appendPromptManagerLog(`[${new Date().toISOString()}] [fetch] waiting for in-flight request before force refresh`);
-				await this.waitForFetchToFinish(10_000);
+			const cachedData = this.resolveInFlightCachedUsage(forceRefresh, debugLines);
+			if (cachedData) {
+				return cachedData;
 			}
-			if (this.isFetching && this.cachedData) {
-				return this.cachedData;
+
+			if (forceRefresh) {
+				appendPromptManagerLog(`[${new Date().toISOString()}] [fetch] waiting briefly for in-flight request before force refresh`);
+				await this.waitForFetchToFinish(1_000);
 			}
 		}
 

@@ -100,6 +100,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Let prompt auto-complete wait for terminal result markers from the persisted Copilot chat session, so plan-mode or still-streaming chats do not jump to Completed just because the session index already has an end timestamp.
 - When a prompt is moved back to In Progress manually or by reopening chat, auto-complete now waits for the next chat request that starts after that status change, so an older completed request in the same bound chat session does not immediately flip the prompt back to Completed.
 - Keep best-effort prompt refresh, model refresh, and git overlay debounce timers detached from the Node event loop, so short-lived test and utility runs do not hang waiting for delayed background retries.
+- Open, switch, and status-save prompt editor pages faster: the editor shows request-aware loading immediately, paints prompts before slower metadata hydration, keeps silent chat-time refresh off the visible progress line, keeps status-change saves on cached report/base prompt state instead of report.txt refreshes and prompt rereads, skips pending report persist waits and slug/id recalculation for already-open prompts, avoids unchanged prompt.md/report.txt writes and stable report/context file probes for status-only saves, writes stable status-only config updates through a short synchronous local file write, ends the visible save indicator before slower post-save sync work, uses a direct existing-prompt id/UUID path before any broader prompt-list scan, and keeps startup Copilot usage/account refresh from blocking the first prompt save.
 - Keep the prompt, report, and editor state tied to the same workflow instead of splitting them across tools.
 
 ### Work with Git without leaving the prompt flow
@@ -162,6 +163,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 
 - See Copilot Premium request usage in the status bar.
 - When the saved GitHub session becomes stale or invalid, the status bar now switches to an explicit sign-in error state instead of showing inflated fallback usage numbers.
+- During startup, cached usage state is reused while background refreshes settle, and the status bar does not immediately run account-summary auth checks when cached usage is available, so prompt editor saves are not held behind Copilot usage/account diagnostics.
 - Open a detailed usage panel with quota signals, refresh health, and account binding diagnostics.
 - Keep usage awareness close to the same workflow where prompts and chats are executed.
 

@@ -99,6 +99,8 @@ type GitOverlayTrackedRequest = {
 const CHAT_LAUNCH_COMPLETION_HOLD_MS = 2000;
 const CHAT_LAUNCH_MIN_PHASE_VISIBLE_MS = 1000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
+// Small delay avoids loader flashes while still hiding stale prompt content quickly.
+const PROMPT_OPEN_LOADER_DELAY_MS = 100;
 const EDITOR_FORM_CONTENT_WIDTH_PX = 800;
 const EDITOR_PROMPT_TABS: EditorPromptTab[] = ['main', 'process'];
 const PANEL_LEFT_ACCENT_SHADOW = 'inset 3px 0 0 var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))';
@@ -552,6 +554,8 @@ export const EditorApp: React.FC = () => {
   const projectInstructionsTextareaRef = useRef<HTMLTextAreaElement>(null);
   const saveTimeoutRef = useRef<number | null>(null);
   const currentPromptIdRef = useRef<string>('__new__');
+  // Tracks the latest host open request so stale switch payloads cannot repaint the editor.
+  const activePromptOpenRequestVersionRef = useRef(0);
   const activeSaveIdRef = useRef<string | null>(null);
   const activeSaveRequestIdRef = useRef<string | null>(null);
   const activeSaveClearedDirtyRef = useRef(false);
@@ -828,6 +832,17 @@ export const EditorApp: React.FC = () => {
     setIsLoadingGlobalContext(true);
     vscode.postMessage({ type: 'loadRemoteGlobalContext' });
   }, [canLoadRemoteGlobalContext, isLoadingGlobalContext]);
+
+  // Refresh bound chat timing after open without turning on the global editor progress line.
+  const requestBackgroundImplementingTimeRefresh = useCallback((nextPrompt: Prompt) => {
+    const promptId = String(nextPrompt.id || '').trim();
+    if (!promptId || !(nextPrompt.chatSessionIds || []).length || recalcTriggeredForRef.current === promptId) {
+      return;
+    }
+
+    recalcTriggeredForRef.current = promptId;
+    vscode.postMessage({ type: 'recalcImplementingTime', id: promptId, silent: true });
+  }, []);
 
   const releaseStartChatPendingState = useCallback((options?: { resetSaving?: boolean }) => {
     clearChatStartTimeout();
@@ -1462,6 +1477,15 @@ export const EditorApp: React.FC = () => {
   const handleMessage = useCallback((msg: any) => {
     switch (msg.type) {
       case 'promptLoading':
+        {
+          const nextOpenRequestVersion = Number(msg.openRequestVersion || 0);
+          if (nextOpenRequestVersion > 0 && nextOpenRequestVersion < activePromptOpenRequestVersionRef.current) {
+            break;
+          }
+          if (nextOpenRequestVersion > 0) {
+            activePromptOpenRequestVersionRef.current = nextOpenRequestVersion;
+          }
+        }
         clearChatStartTimeout();
         startChatLockRef.current = false;
         setIsStartingChat(false);
@@ -1473,6 +1497,7 @@ export const EditorApp: React.FC = () => {
         setIsChatPanelOpen(false);
         setNotice(null);
         setIsLoadingGlobalContext(false);
+        setIsRecalculating(false);
         setIsGeneratingTitle(false);
         setIsGeneratingDescription(false);
         setGitOverlayOpen(false);
@@ -1486,7 +1511,23 @@ export const EditorApp: React.FC = () => {
         setPromptPlanState({ exists: false, content: '' });
         // Delay showing the loader so fast loads don't flash
         if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); }
-        showLoaderTimerRef.current = window.setTimeout(() => { setShowLoader(true); }, 300);
+        showLoaderTimerRef.current = window.setTimeout(() => { setShowLoader(true); }, PROMPT_OPEN_LOADER_DELAY_MS);
+        break;
+      case 'promptLoadingCancelled':
+        {
+          const cancelledOpenRequestVersion = Number(msg.openRequestVersion || 0);
+          if (cancelledOpenRequestVersion > 0 && cancelledOpenRequestVersion !== activePromptOpenRequestVersionRef.current) {
+            break;
+          }
+
+          if (showLoaderTimerRef.current) {
+            window.clearTimeout(showLoaderTimerRef.current);
+            showLoaderTimerRef.current = null;
+          }
+          activePromptOpenRequestVersionRef.current = 0;
+          setShowLoader(false);
+          setIsLoaded(true);
+        }
         break;
       case 'prompt':
         if (msg.prompt) {
@@ -1500,6 +1541,11 @@ export const EditorApp: React.FC = () => {
           const reason: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config' | undefined = msg.reason;
           const incomingRequestId = (String(msg.requestId || '').trim() || '');
           const isOpenPayload = reason === 'open';
+          const incomingOpenRequestVersion = Number(msg.openRequestVersion || 0);
+          if (isOpenPayload && incomingOpenRequestVersion > 0
+            && incomingOpenRequestVersion < activePromptOpenRequestVersionRef.current) {
+            break;
+          }
           if (reason === 'save' && activeSaveRequestId && incomingRequestId !== activeSaveRequestId) {
             break;
           }
@@ -1522,6 +1568,9 @@ export const EditorApp: React.FC = () => {
           }
 
           if (isOpenPayload) {
+            if (incomingOpenRequestVersion > 0) {
+              activePromptOpenRequestVersionRef.current = incomingOpenRequestVersion;
+            }
             const nextEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
             const shouldResetGitOverlayState = shouldResetGitOverlayStateOnPromptOpen({
               overlayOpen: gitOverlayOpenRef.current,
@@ -1568,12 +1617,7 @@ export const EditorApp: React.FC = () => {
             activeSaveClearedDirtyRef.current = false;
             if ((msg.prompt.chatSessionIds || []).length > 0) {
               releaseStartChatPendingState();
-              const pid = String(msg.prompt.id || '').trim();
-              if (pid && recalcTriggeredForRef.current !== pid) {
-                recalcTriggeredForRef.current = pid;
-                vscode.postMessage({ type: 'recalcImplementingTime', id: pid, silent: true });
-                setIsRecalculating(true);
-              }
+              requestBackgroundImplementingTimeRefresh(msg.prompt);
             }
             requestPromptPlanState(msg.prompt.id);
             break;
@@ -1695,13 +1739,7 @@ export const EditorApp: React.FC = () => {
           }
           if ((msg.prompt.chatSessionIds || []).length > 0) {
             releaseStartChatPendingState();
-            // Auto-recalc implementing time on first load
-            const pid = String(msg.prompt.id || '').trim();
-            if (pid && recalcTriggeredForRef.current !== pid) {
-              recalcTriggeredForRef.current = pid;
-              vscode.postMessage({ type: 'recalcImplementingTime', id: pid, silent: true });
-              setIsRecalculating(true);
-            }
+            requestBackgroundImplementingTimeRefresh(msg.prompt);
           }
           requestPromptPlanState(msg.prompt.id);
         }
@@ -2511,7 +2549,7 @@ export const EditorApp: React.FC = () => {
         setIsRecalculating(false);
         break;
     }
-  }, [clearChatStartTimeout, createStartChatRequestId, dispatchStartChat, releaseStartChatPendingState, resetChatStartRequestTracking, resetStartChatPreflightTracking, shouldHandleChatStartMessage, showInlineNotice]);
+  }, [clearChatStartTimeout, createStartChatRequestId, dispatchStartChat, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, shouldHandleChatStartMessage, showInlineNotice]);
 
   useMessageListener(handleMessage);
 
@@ -4891,72 +4929,74 @@ export const EditorApp: React.FC = () => {
         </div>
       </div>
 
-      <GitOverlay
-        open={gitOverlayOpen}
-        mode={gitOverlayMode}
-        snapshot={gitOverlaySnapshot}
-        commitMessages={gitOverlayCommitMessages}
-        busyAction={gitOverlayBusyAction}
-        waitingForSnapshotAction={gitOverlayWaitingForSnapshotAction}
-        processLabel={gitOverlayProcessLabel}
-        pendingCommitMessageGenerationProjects={gitOverlayPendingGenerateProjects}
-        pendingCommitProjects={gitOverlayPendingCommitProjects}
-        pendingBulkCommitMessageGeneration={gitOverlayHasPendingBulkGenerate}
-        pendingBulkCommit={gitOverlayHasPendingBulkCommit}
-        completedActions={gitOverlayCompletedActions}
-        promptStatus={prompt.status}
-        promptTitle={prompt.title}
-        promptTaskNumber={prompt.taskNumber}
-        selectedProjects={prompt.projects}
-        dockToSecondHalf={shouldDockGitOverlaySecondHalf}
-        preferredTrackedBranch={(prompt.trackedBranch || '').trim() || workspaceTrackedBranchPreference}
-        preferredTrackedBranchesByProject={{
-          ...workspaceTrackedBranchesByProjectPreference,
-          ...(prompt.trackedBranchesByProject || {}),
-        }}
-        onClose={closeGitOverlay}
-        onRefresh={handleRefreshGitOverlay}
-        onApplyBranchTargets={handleGitOverlayApplyBranchTargets}
-        onSwitchBranch={handleGitOverlaySwitchBranch}
-        onEnsurePromptBranch={handleGitOverlayEnsurePromptBranch}
-        onPush={handleGitOverlayPush}
-        onCreateReviewRequest={handleGitOverlayCreateReviewRequest}
-        onMergePromptBranch={handleGitOverlayMergePromptBranch}
-        onDiscardFile={handleGitOverlayDiscardFile}
-        onDiscardProjectChanges={handleGitOverlayDiscardProjectChanges}
-        onOpenFile={handleGitOverlayOpenFile}
-        onOpenDiff={handleGitOverlayOpenDiff}
-        onOpenReviewRequest={handleGitOverlayOpenReviewRequest}
-        onSetupReviewCli={handleGitOverlaySetupReviewCli}
-        onAssignReviewProvider={handleGitOverlayAssignReviewProvider}
-        onOpenMergeEditor={handleGitOverlayOpenMergeEditor}
-        onGenerateCommitMessage={handleGitOverlayGenerateCommitMessage}
-        onCommitStaged={handleGitOverlayCommitStaged}
-        onCommitMessageChange={handleGitOverlayCommitMessageChange}
-        onUpdateProjects={(projects) => updateFieldAndSaveNow('projects', projects)}
-        onTrackedBranchChange={handleGitOverlayTrackedBranchChange}
-        onHydrateProjectDetails={handleGitOverlayHydrateProjectDetails}
-        onContinueStartChat={() => {
-          const requestId = pendingGitOverlayStartChatRequestIdRef.current || createStartChatRequestId();
-          closeGitOverlay();
-          dispatchStartChat(requestId, { skipBranchMismatchCheck: true });
-        }}
-        onContinueOpenChat={() => {
-          closeGitOverlay();
-          handleOpenChatRef.current();
-        }}
-        onMarkCompletedInPlace={handleFooterMarkCompleted}
-        onDone={(status) => {
-          const donePersistence = resolveGitOverlayDonePersistence(status, promptRef.current.status);
-          closeGitOverlay();
-          if (donePersistence.source === 'status-change' && donePersistence.nextStatus) {
-            handleSetStatus(donePersistence.nextStatus);
-            return;
-          }
-          handleSave('manual');
-        }}
-        t={t}
-      />
+      {gitOverlayOpen ? (
+        <GitOverlay
+          open={gitOverlayOpen}
+          mode={gitOverlayMode}
+          snapshot={gitOverlaySnapshot}
+          commitMessages={gitOverlayCommitMessages}
+          busyAction={gitOverlayBusyAction}
+          waitingForSnapshotAction={gitOverlayWaitingForSnapshotAction}
+          processLabel={gitOverlayProcessLabel}
+          pendingCommitMessageGenerationProjects={gitOverlayPendingGenerateProjects}
+          pendingCommitProjects={gitOverlayPendingCommitProjects}
+          pendingBulkCommitMessageGeneration={gitOverlayHasPendingBulkGenerate}
+          pendingBulkCommit={gitOverlayHasPendingBulkCommit}
+          completedActions={gitOverlayCompletedActions}
+          promptStatus={prompt.status}
+          promptTitle={prompt.title}
+          promptTaskNumber={prompt.taskNumber}
+          selectedProjects={prompt.projects}
+          dockToSecondHalf={shouldDockGitOverlaySecondHalf}
+          preferredTrackedBranch={(prompt.trackedBranch || '').trim() || workspaceTrackedBranchPreference}
+          preferredTrackedBranchesByProject={{
+            ...workspaceTrackedBranchesByProjectPreference,
+            ...(prompt.trackedBranchesByProject || {}),
+          }}
+          onClose={closeGitOverlay}
+          onRefresh={handleRefreshGitOverlay}
+          onApplyBranchTargets={handleGitOverlayApplyBranchTargets}
+          onSwitchBranch={handleGitOverlaySwitchBranch}
+          onEnsurePromptBranch={handleGitOverlayEnsurePromptBranch}
+          onPush={handleGitOverlayPush}
+          onCreateReviewRequest={handleGitOverlayCreateReviewRequest}
+          onMergePromptBranch={handleGitOverlayMergePromptBranch}
+          onDiscardFile={handleGitOverlayDiscardFile}
+          onDiscardProjectChanges={handleGitOverlayDiscardProjectChanges}
+          onOpenFile={handleGitOverlayOpenFile}
+          onOpenDiff={handleGitOverlayOpenDiff}
+          onOpenReviewRequest={handleGitOverlayOpenReviewRequest}
+          onSetupReviewCli={handleGitOverlaySetupReviewCli}
+          onAssignReviewProvider={handleGitOverlayAssignReviewProvider}
+          onOpenMergeEditor={handleGitOverlayOpenMergeEditor}
+          onGenerateCommitMessage={handleGitOverlayGenerateCommitMessage}
+          onCommitStaged={handleGitOverlayCommitStaged}
+          onCommitMessageChange={handleGitOverlayCommitMessageChange}
+          onUpdateProjects={(projects) => updateFieldAndSaveNow('projects', projects)}
+          onTrackedBranchChange={handleGitOverlayTrackedBranchChange}
+          onHydrateProjectDetails={handleGitOverlayHydrateProjectDetails}
+          onContinueStartChat={() => {
+            const requestId = pendingGitOverlayStartChatRequestIdRef.current || createStartChatRequestId();
+            closeGitOverlay();
+            dispatchStartChat(requestId, { skipBranchMismatchCheck: true });
+          }}
+          onContinueOpenChat={() => {
+            closeGitOverlay();
+            handleOpenChatRef.current();
+          }}
+          onMarkCompletedInPlace={handleFooterMarkCompleted}
+          onDone={(status) => {
+            const donePersistence = resolveGitOverlayDonePersistence(status, promptRef.current.status);
+            closeGitOverlay();
+            if (donePersistence.source === 'status-change' && donePersistence.nextStatus) {
+              handleSetStatus(donePersistence.nextStatus);
+              return;
+            }
+            handleSave('manual');
+          }}
+          t={t}
+        />
+      ) : null}
       <CustomGroupsManagerModal
         open={showCustomGroupsManager}
         groups={customGroups}

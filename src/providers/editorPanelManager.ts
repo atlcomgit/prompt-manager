@@ -25,7 +25,9 @@ import type {
 import {
 	createDefaultEditorPromptViewState,
 	createDefaultPrompt,
+	getEditorPromptViewStateStorageKeys,
 	markPromptChatAutoCompleteAfter,
+	normalizeEditorPromptViewState,
 	shouldAutoCompletePromptFromChatRequest,
 	shouldShowPromptPlanForStatus,
 } from '../types/prompt.js';
@@ -34,6 +36,7 @@ import type {
 	WebviewToExtensionMessage,
 	ExtensionToWebviewMessage,
 	GitOverlayBusyReason,
+	PromptOpenTarget,
 } from '../types/messages.js';
 import type { GitOverlayProjectSnapshot, GitOverlaySnapshot } from '../types/git.js';
 import type { StorageService } from '../services/storageService.js';
@@ -196,10 +199,17 @@ export class EditorPanelManager {
 	private gitOverlayBuiltInRepositoryDisposables = new Map<string, vscode.Disposable>();
 	private gitOverlayReactiveSourcesReady: Promise<void> | null = null;
 	private openPromptQueue: Promise<void> | null = null;
-	private pendingOpenPromptId: string | null = null;
+	private pendingOpenPromptTarget: PromptOpenTarget | null = null;
 	private openPromptRequestVersion = 0;
 	private pendingPromptSaveByPanelKey = new Map<string, Promise<void>>();
 	private pendingPromptSaveChainByPromptKey = new Map<string, Promise<void>>();
+	private pendingPromptEditorViewStateSaves = new Map<string, {
+		source: EditorPromptViewStateKeySource | null | undefined;
+		state: EditorPromptViewState;
+	}>();
+	private latestPromptEditorViewStateByQueueKey = new Map<string, EditorPromptViewState>();
+	private promptEditorViewStateSaveFlushScheduled = false;
+	private promptEditorViewStateSaveQueue: Promise<void> = Promise.resolve();
 	/** Очередь ожидающих сохранений по составному ключу (uuid::id). Хранит снимок и промис завершения. */
 	private pendingSaveQueue = new Map<string, PendingSaveEntry>();
 	private isShuttingDown = false;
@@ -438,8 +448,39 @@ export class EditorPanelManager {
 		};
 	}
 
-	private getPromptEditorViewState(panelKey: string, prompt?: Partial<Prompt> | null): EditorPromptViewState {
-		return this.stateService.getPromptEditorViewState(this.getPromptEditorViewStateSource(panelKey, prompt));
+	private getPromptEditorViewState(
+		panelKey: string,
+		prompt?: Partial<Prompt> | null,
+		overrides?: { promptId?: string | null; promptUuid?: string | null },
+	): EditorPromptViewState {
+		const source = this.getPromptEditorViewStateSource(panelKey, prompt, overrides);
+		for (const queueKey of this.getPromptEditorViewStateSaveQueueKeys(source)) {
+			const latestQueuedState = this.latestPromptEditorViewStateByQueueKey.get(queueKey);
+			if (latestQueuedState) {
+				return normalizeEditorPromptViewState(latestQueuedState);
+			}
+		}
+
+		return this.stateService.getPromptEditorViewState(source);
+	}
+
+	/** Resolve all in-memory queue keys for a prompt editor view-state source. */
+	private getPromptEditorViewStateSaveQueueKeys(source: EditorPromptViewStateKeySource | null | undefined): string[] {
+		const keys = getEditorPromptViewStateStorageKeys(source);
+		return keys.length > 0 ? keys : ['fallback:editor'];
+	}
+
+	/** Resolve the primary in-memory queue key for a prompt editor view-state save. */
+	private getPromptEditorViewStateSaveQueueKey(source: EditorPromptViewStateKeySource | null | undefined): string {
+		return this.getPromptEditorViewStateSaveQueueKeys(source)[0] || 'fallback:editor';
+	}
+
+	/** Resolve the target view state before the prompt payload is loaded. */
+	private getPromptLoadingEditorViewState(panelKey: string, target: PromptOpenTarget): EditorPromptViewState {
+		return this.getPromptEditorViewState(panelKey, null, {
+			promptId: target.id,
+			promptUuid: target.promptUuid,
+		});
 	}
 
 	/** Force the next prompt-open payload for a panel to land on the main tab. */
@@ -5807,9 +5848,22 @@ export class EditorPanelManager {
 		}
 	}
 
-	/** Open or focus an editor panel for a prompt */
-	async openPrompt(promptId: string): Promise<void> {
-		this.pendingOpenPromptId = promptId;
+	/** Normalize legacy string callers and metadata-aware prompt open targets. */
+	private normalizePromptOpenTarget(target: string | PromptOpenTarget): PromptOpenTarget {
+		const rawId = typeof target === 'string' ? target : target.id;
+		const rawPromptUuid = typeof target === 'string' ? '' : target.promptUuid;
+		const id = (rawId || '__new__').trim() || '__new__';
+		const promptUuid = (rawPromptUuid || '').trim();
+
+		return {
+			id,
+			...(promptUuid ? { promptUuid } : {}),
+		};
+	}
+
+	/** Open or focus an editor panel for a prompt. */
+	async openPrompt(target: string | PromptOpenTarget): Promise<void> {
+		this.pendingOpenPromptTarget = this.normalizePromptOpenTarget(target);
 		this.openPromptRequestVersion += 1;
 
 		if (!this.openPromptQueue) {
@@ -5889,11 +5943,11 @@ export class EditorPanelManager {
 	}
 
 	private async processPendingOpenPromptRequests(): Promise<void> {
-		while (this.pendingOpenPromptId) {
-			const promptId = this.pendingOpenPromptId;
+		while (this.pendingOpenPromptTarget) {
+			const target = this.pendingOpenPromptTarget;
 			const requestVersion = this.openPromptRequestVersion;
-			this.pendingOpenPromptId = null;
-			await this.openPromptInternal(promptId, requestVersion);
+			this.pendingOpenPromptTarget = null;
+			await this.openPromptInternal(target, requestVersion);
 		}
 	}
 
@@ -6039,6 +6093,7 @@ export class EditorPanelManager {
 		promptId: string,
 		promptUuid?: string | null,
 		openRequestVersion?: number,
+		editorViewState?: EditorPromptViewState,
 	): ExtensionToWebviewMessage {
 		const normalizedPromptId = (promptId || '__new__').trim() || '__new__';
 		const normalizedPromptUuid = (promptUuid || '').trim();
@@ -6048,18 +6103,45 @@ export class EditorPanelManager {
 			promptId: normalizedPromptId,
 			...(normalizedPromptUuid ? { promptUuid: normalizedPromptUuid } : {}),
 			...(typeof openRequestVersion === 'number' ? { openRequestVersion } : {}),
+			...(editorViewState ? { editorViewState } : {}),
 		};
 	}
 
 	/** Notify the current webview that a prompt switch is waiting on host-side work. */
-	private async postPromptLoading(
+	private postPromptLoading(
 		panel: vscode.WebviewPanel,
 		promptId: string,
 		promptUuid?: string | null,
 		openRequestVersion?: number,
-	): Promise<void> {
+		editorViewState?: EditorPromptViewState,
+	): void {
+		const startedAt = Date.now();
+		const normalizedPromptId = (promptId || '__new__').trim() || '__new__';
+		this.logReportDebug('promptLoading.post', {
+			promptId: normalizedPromptId,
+			promptUuid: (promptUuid || '').trim(),
+			openRequestVersion: openRequestVersion ?? null,
+			activeTab: editorViewState?.activeTab,
+			branchesExpanded: editorViewState?.branchesExpanded ?? false,
+			branchesExpandedManual: editorViewState?.branchesExpandedManual ?? false,
+			contentHeights: editorViewState?.contentHeights || {},
+			sectionHeights: editorViewState?.sectionHeights || {},
+			sectionCount: Object.keys(editorViewState?.sectionHeights || {}).length,
+		});
 		try {
-			await panel.webview.postMessage(this.buildPromptLoadingMessage(promptId, promptUuid, openRequestVersion));
+			const postResult = panel.webview.postMessage(this.buildPromptLoadingMessage(
+				promptId,
+				promptUuid,
+				openRequestVersion,
+				editorViewState,
+			));
+			void Promise.resolve(postResult).then(() => {
+				this.logReportDebug('promptLoading.posted', {
+					promptId: normalizedPromptId,
+					openRequestVersion: openRequestVersion ?? null,
+					durationMs: Date.now() - startedAt,
+				});
+			}, () => undefined);
 		} catch {
 			// If the webview is still booting, the ready cycle will hydrate the latest prompt.
 		}
@@ -6080,6 +6162,58 @@ export class EditorPanelManager {
 		} catch {
 			// Ignore transient postMessage failures while the webview reloads.
 		}
+	}
+
+	/** Queue editor layout-state persistence outside prompt open/save critical paths. */
+	private enqueuePromptEditorViewStateSave(
+		source: EditorPromptViewStateKeySource | null | undefined,
+		state: EditorPromptViewState,
+	): void {
+		const queueKey = this.getPromptEditorViewStateSaveQueueKey(source);
+		const normalizedState = normalizeEditorPromptViewState(state);
+		this.pendingPromptEditorViewStateSaves.set(
+			queueKey,
+			{ source, state: normalizedState },
+		);
+		this.latestPromptEditorViewStateByQueueKey.set(queueKey, normalizedState);
+		this.logReportDebug('editorViewStateSave.queued', {
+			queueKey,
+			promptId: source?.promptId || '',
+			promptUuid: source?.promptUuid || '',
+			activeTab: normalizedState.activeTab,
+			branchesExpanded: normalizedState.branchesExpanded,
+			branchesExpandedManual: normalizedState.branchesExpandedManual,
+			contentHeights: normalizedState.contentHeights,
+			sectionHeights: normalizedState.sectionHeights,
+			sectionCount: Object.keys(normalizedState.sectionHeights || {}).length,
+			queueSize: this.pendingPromptEditorViewStateSaves.size,
+		});
+		if (this.promptEditorViewStateSaveFlushScheduled) {
+			return;
+		}
+		this.promptEditorViewStateSaveFlushScheduled = true;
+		this.promptEditorViewStateSaveQueue = this.promptEditorViewStateSaveQueue
+			.catch(() => undefined)
+			.then(async () => {
+				this.promptEditorViewStateSaveFlushScheduled = false;
+				const pendingSaves = Array.from(this.pendingPromptEditorViewStateSaves.values());
+				this.pendingPromptEditorViewStateSaves.clear();
+				for (const pendingSave of pendingSaves) {
+					const saveStartedAt = Date.now();
+					try {
+						await this.stateService.savePromptEditorViewState(pendingSave.source, pendingSave.state);
+						this.logReportDebug('editorViewStateSave.persisted', {
+							promptId: pendingSave.source?.promptId || '',
+							promptUuid: pendingSave.source?.promptUuid || '',
+							durationMs: Date.now() - saveStartedAt,
+							sectionCount: Object.keys(pendingSave.state.sectionHeights || {}).length,
+						});
+					} catch {
+						// Layout state is opportunistic; prompt open/save must not fail because of it.
+					}
+				}
+			});
+		void this.promptEditorViewStateSaveQueue.catch(() => undefined);
 	}
 
 	private enqueuePendingPanelMessage(panelKey: string, message: ExtensionToWebviewMessage): void {
@@ -6176,12 +6310,18 @@ export class EditorPanelManager {
 			targetPromptId?: string;
 		},
 	): Promise<void> {
+		const openEditorViewState = resolvePromptOpenEditorViewState(
+			this.getPromptEditorViewState(panelKey, prompt),
+			{ forceMainTab: options.forceMainTab === true },
+		);
+
 		if (!options.loadingAlreadySent) {
-			await this.postPromptLoading(
+			this.postPromptLoading(
 				panel,
 				options.targetPromptId || prompt.id || '__new__',
 				prompt.promptUuid,
 				options.openRequestVersion,
+				openEditorViewState,
 			);
 		}
 
@@ -6192,10 +6332,7 @@ export class EditorPanelManager {
 			await panel.webview.postMessage(this.buildPromptMessage(prompt, {
 				reason: 'open',
 				openRequestVersion: options.openRequestVersion,
-				editorViewState: resolvePromptOpenEditorViewState(
-					this.getPromptEditorViewState(panelKey, prompt),
-					{ forceMainTab: options.forceMainTab === true },
-				),
+				editorViewState: openEditorViewState,
 			}));
 		} catch {
 			// Ignore boot-time postMessage failures; the eventual ready event replays current state.
@@ -6243,7 +6380,9 @@ export class EditorPanelManager {
 		await this.openPrompt(normalizedPromptId);
 	}
 
-	private async openPromptInternal(promptId: string, requestVersion: number): Promise<void> {
+	private async openPromptInternal(target: PromptOpenTarget, requestVersion: number): Promise<void> {
+		const openStartedAt = Date.now();
+		const promptId = target.id;
 		const isNew = promptId === '__new__';
 		const panelKey = SINGLE_EDITOR_PANEL_KEY;
 
@@ -6256,6 +6395,15 @@ export class EditorPanelManager {
 			hasReusableSingletonPanel: Boolean(reusableSingletonPanel),
 			currentPromptId: singletonPrompt?.id,
 			nextPromptId: promptId,
+		});
+		this.logReportDebug('openPrompt.stage', {
+			stage: 'start',
+			promptId,
+			promptUuid: target.promptUuid || '',
+			requestVersion,
+			panelSwitchStrategy,
+			hasReusableSingletonPanel: Boolean(reusableSingletonPanel),
+			elapsedMs: Date.now() - openStartedAt,
 		});
 		if (panelSwitchStrategy === 'noop' && reusableSingletonPanel) {
 			try {
@@ -6271,13 +6419,37 @@ export class EditorPanelManager {
 
 		let promptLoadingSentToReusablePanel = false;
 		if (panelSwitchStrategy === 'reuse' && reusableSingletonPanel) {
-			await this.postPromptLoading(reusableSingletonPanel, promptId, null, requestVersion);
+			this.postPromptLoading(
+				reusableSingletonPanel,
+				promptId,
+				target.promptUuid,
+				requestVersion,
+				this.getPromptLoadingEditorViewState(panelKey, target),
+			);
 			promptLoadingSentToReusablePanel = true;
 		}
 
 		const targetPromptLoadTask = isNew ? null : this.loadPromptForOpen(promptId)
-			.then(prompt => ({ prompt, error: null as unknown }))
-			.catch(error => ({ prompt: null, error }));
+			.then(prompt => {
+				this.logReportDebug('openPrompt.stage', {
+					stage: 'targetLoaded',
+					promptId,
+					requestVersion,
+					found: Boolean(prompt),
+					elapsedMs: Date.now() - openStartedAt,
+				});
+				return { prompt, error: null as unknown };
+			})
+			.catch(error => {
+				this.logReportDebug('openPrompt.stage', {
+					stage: 'targetLoadFailed',
+					promptId,
+					requestVersion,
+					elapsedMs: Date.now() - openStartedAt,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return { prompt: null, error };
+			});
 
 		const existingEntries = [...openPanels.entries()]
 			.filter(([, existingPanel]) => !this.silentClosePanels.has(existingPanel));
@@ -6299,7 +6471,16 @@ export class EditorPanelManager {
 				if (hasPendingPromptSave) {
 					const pendingSave = this.pendingPromptSaveByPanelKey.get(existingKey);
 					if (pendingSave) {
+						const waitStartedAt = Date.now();
 						try { await pendingSave; } catch { /* ошибка обработана в saveTask */ }
+						this.logReportDebug('openPrompt.stage', {
+							stage: 'pendingSaveWaited',
+							promptId,
+							requestVersion,
+							existingKey,
+							waitMs: Date.now() - waitStartedAt,
+							elapsedMs: Date.now() - openStartedAt,
+						});
 					}
 				}
 				let shouldPersistBeforeSwitch = !hasPendingPromptSave && (isDirty || hasUnsavedDraftData);
@@ -6309,17 +6490,35 @@ export class EditorPanelManager {
 						&& Boolean(basePanelSnapshot)
 						&& !this.hasMeaningfulPromptDiff(latestPanelSnapshot || latestSnapshot, basePanelSnapshot);
 					if (!canTrustBaseSnapshot) {
+						const persistedReadStartedAt = Date.now();
 						const persistedSnapshot = await this.storageService.getPrompt(latestSnapshot.id);
+						this.logReportDebug('openPrompt.stage', {
+							stage: 'currentPromptReread',
+							promptId,
+							requestVersion,
+							latestSnapshotId: latestSnapshot.id,
+							durationMs: Date.now() - persistedReadStartedAt,
+							elapsedMs: Date.now() - openStartedAt,
+						});
 						shouldPersistBeforeSwitch = this.hasMeaningfulPromptDiff(latestSnapshot, persistedSnapshot);
 					}
 				}
 				if (shouldPersistBeforeSwitch) {
 					try {
+						const persistStartedAt = Date.now();
 						const saved = await this.persistPromptSnapshotForSwitch(
 							latestSnapshot,
 							this.panelBasePrompts.get(existingKey) || null,
 							existingKey,
 						);
+						this.logReportDebug('openPrompt.stage', {
+							stage: 'persistBeforeSwitch',
+							promptId,
+							requestVersion,
+							existingKey,
+							durationMs: Date.now() - persistStartedAt,
+							elapsedMs: Date.now() - openStartedAt,
+						});
 						if (saved?.id) {
 							this._onDidSave.fire(saved.id);
 						}
@@ -6339,6 +6538,12 @@ export class EditorPanelManager {
 		}
 
 		if (this.isOpenPromptRequestStale(requestVersion)) {
+			this.logReportDebug('openPrompt.stage', {
+				stage: 'staleBeforeLoadApply',
+				promptId,
+				requestVersion,
+				elapsedMs: Date.now() - openStartedAt,
+			});
 			return;
 		}
 
@@ -6388,6 +6593,12 @@ export class EditorPanelManager {
 		const isRu = vscode.env.language.startsWith('ru');
 
 		if (this.isOpenPromptRequestStale(requestVersion)) {
+			this.logReportDebug('openPrompt.stage', {
+				stage: 'staleBeforePanelApply',
+				promptId,
+				requestVersion,
+				elapsedMs: Date.now() - openStartedAt,
+			});
 			return;
 		}
 
@@ -6407,6 +6618,7 @@ export class EditorPanelManager {
 
 		if (panelSwitchStrategy === 'reuse' && reusableSingletonPanel) {
 			this.panelDirtySetters.set(panelKey, setPanelDirty);
+			const switchStartedAt = Date.now();
 			await this.switchPromptInExistingPanel(panelKey, reusableSingletonPanel, prompt, {
 				dirty: restoredUnsaved,
 				isRu,
@@ -6414,6 +6626,13 @@ export class EditorPanelManager {
 				loadingAlreadySent: promptLoadingSentToReusablePanel,
 				openRequestVersion: requestVersion,
 				targetPromptId: promptId,
+			});
+			this.logReportDebug('openPrompt.stage', {
+				stage: 'switchPosted',
+				promptId,
+				requestVersion,
+				durationMs: Date.now() - switchStartedAt,
+				elapsedMs: Date.now() - openStartedAt,
 			});
 
 			for (const existingPanel of panelsToDispose) {
@@ -7218,7 +7437,7 @@ export class EditorPanelManager {
 			}
 
 			case 'savePromptEditorViewState': {
-				await this.stateService.savePromptEditorViewState(
+				this.enqueuePromptEditorViewStateSave(
 					this.getPromptEditorViewStateSource(panelKey, currentPrompt, {
 						promptId: msg.promptId ?? currentPrompt.id,
 						promptUuid: msg.promptUuid ?? currentPrompt.promptUuid,

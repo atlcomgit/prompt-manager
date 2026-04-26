@@ -70,6 +70,15 @@ export const SidebarApp: React.FC = () => {
   const [aiEnrichmentPromptKeys, setAiEnrichmentPromptKeys] = useState<string[]>([]);
   const [customGroups, setCustomGroups] = useState<PromptCustomGroup[]>([]);
   const openPromptTimerRef = useRef<number | null>(null);
+  const promptCollectionsRef = useRef<{ prompts: PromptConfig[]; archivedPrompts: PromptConfig[] }>({
+    prompts: [],
+    archivedPrompts: [],
+  });
+
+  /** Keep the debounced open callback tied to the newest prompt UUIDs. */
+  useEffect(() => {
+    promptCollectionsRef.current = { prompts, archivedPrompts };
+  }, [archivedPrompts, prompts]);
 
   const optimisticPrompt = useMemo<PromptConfig>(() => {
     const draft = createDefaultPrompt('__new__');
@@ -391,7 +400,10 @@ export const SidebarApp: React.FC = () => {
     }
     openPromptTimerRef.current = window.setTimeout(() => {
       openPromptTimerRef.current = null;
-      vscode.postMessage({ type: 'openPrompt', id });
+      const latestCollections = promptCollectionsRef.current;
+      const latestPrompt = [...latestCollections.prompts, ...latestCollections.archivedPrompts]
+        .find(prompt => prompt.id === id) || null;
+      vscode.postMessage({ type: 'openPrompt', id, promptUuid: latestPrompt?.promptUuid || undefined });
     }, OPEN_PROMPT_DEBOUNCE_MS);
   };
 

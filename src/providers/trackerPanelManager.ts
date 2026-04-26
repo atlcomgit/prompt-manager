@@ -13,13 +13,13 @@ import {
 import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
 import type { StorageService } from '../services/storageService.js';
 import type { StateService } from '../services/stateService.js';
-import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from '../types/messages.js';
+import type { ExtensionToWebviewMessage, PromptOpenTarget, WebviewToExtensionMessage } from '../types/messages.js';
 import { resolveBoundChatSessionToOpen } from '../utils/chatSessionSelection.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
 export class TrackerPanelManager {
-	private _onDidOpenPrompt = new vscode.EventEmitter<string>();
+	private _onDidOpenPrompt = new vscode.EventEmitter<PromptOpenTarget>();
 	public readonly onDidOpenPrompt = this._onDidOpenPrompt.event;
 	private _onDidSave = new vscode.EventEmitter<string>();
 	public readonly onDidSave = this._onDidSave.event;
@@ -134,13 +134,13 @@ export class TrackerPanelManager {
 			}
 
 			case 'createPrompt': {
-				this._onDidOpenPrompt.fire('__new__');
+				this._onDidOpenPrompt.fire({ id: '__new__' });
 				break;
 			}
 
 			case 'openPrompt': {
 				await this.stateService.saveLastPromptId(msg.id);
-				this._onDidOpenPrompt.fire(msg.id);
+				this._onDidOpenPrompt.fire({ id: msg.id, promptUuid: msg.promptUuid });
 				break;
 			}
 

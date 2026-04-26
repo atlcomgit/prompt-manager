@@ -15,6 +15,7 @@ import {
 	resolvePromptPlanPlaceholderState,
 	resolvePromptChatLaunchTrackingKey,
 	resolvePromptOpenEditorViewState,
+	shouldAutoExpandPromptBranchList,
 	shouldResetPromptChatLaunchTracking,
 	shouldPreservePromptIdAfterChatStart,
 	shouldShowPromptChatLaunchBlock,
@@ -32,6 +33,14 @@ test('resolvePromptOpenEditorViewState can force the main tab without losing oth
 			report: 'manual',
 		},
 		descriptionExpanded: true,
+		branchesExpanded: true,
+		branchesExpandedManual: true,
+		contentHeights: {
+			promptContent: 360,
+		},
+		sectionHeights: {
+			prompt: 480,
+		},
 	}, {
 		forceMainTab: true,
 	}), {
@@ -44,6 +53,14 @@ test('resolvePromptOpenEditorViewState can force the main tab without losing oth
 			report: 'manual',
 		},
 		descriptionExpanded: true,
+		branchesExpanded: true,
+		branchesExpandedManual: true,
+		contentHeights: {
+			promptContent: 360,
+		},
+		sectionHeights: {
+			prompt: 480,
+		},
 	});
 });
 
@@ -103,6 +120,29 @@ test('resolvePromptEditorExpandedSections applies auto-open rules until notes, p
 		notes: false,
 		report: false,
 	});
+});
+
+test('shouldAutoExpandPromptBranchList respects manual user branch-list state', () => {
+	assert.equal(shouldAutoExpandPromptBranchList({
+		branchesResolved: true,
+		hasBranchMismatch: true,
+		branchesExpandedManual: false,
+		autoExpanded: false,
+	}), true);
+
+	assert.equal(shouldAutoExpandPromptBranchList({
+		branchesResolved: true,
+		hasBranchMismatch: true,
+		branchesExpandedManual: true,
+		autoExpanded: false,
+	}), false);
+
+	assert.equal(shouldAutoExpandPromptBranchList({
+		branchesResolved: true,
+		hasBranchMismatch: true,
+		branchesExpandedManual: false,
+		autoExpanded: true,
+	}), false);
 });
 
 test('togglePromptEditorSectionExpansion uses effective section state and marks auto-managed sections as manual', () => {

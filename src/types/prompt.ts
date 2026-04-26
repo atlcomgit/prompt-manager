@@ -39,22 +39,26 @@ export function shouldShowPromptPlanForStatus(status: PromptStatus): boolean {
 /** Editor tab in prompt settings page */
 export type EditorPromptTab = 'main' | 'process';
 
-/** Expandable section keys in prompt settings page */
-export type EditorPromptSectionKey =
-	| 'basic'
-	| 'workspace'
-	| 'prompt'
-	| 'globalPrompt'
-	| 'report'
-	| 'notes'
-	| 'memory'
-	| 'plan'
-	| 'tech'
-	| 'integrations'
-	| 'agent'
-	| 'groups'
-	| 'files'
-	| 'time';
+/** Expandable section keys in prompt settings page. */
+export const PROMPT_EDITOR_SECTION_KEYS = [
+	'basic',
+	'workspace',
+	'prompt',
+	'globalPrompt',
+	'report',
+	'notes',
+	'memory',
+	'plan',
+	'tech',
+	'integrations',
+	'agent',
+	'groups',
+	'files',
+	'time',
+] as const;
+
+/** Expandable section key in prompt settings page. */
+export type EditorPromptSectionKey = typeof PROMPT_EDITOR_SECTION_KEYS[number];
 
 /** Sections whose default state can still be overridden by content until manual interaction. */
 export const PROMPT_EDITOR_AUTO_MANAGED_SECTION_KEYS = ['notes', 'plan', 'report'] as const;
@@ -80,6 +84,18 @@ export type EditorPromptManualSectionOverrideMode = 'manual' | 'until-content';
 
 /** Marks sections that were toggled manually and how long the override should win. */
 export type EditorPromptManualSectionOverrides = Partial<Record<EditorPromptAutoManagedSectionKey, EditorPromptManualSectionOverrideMode>>;
+
+/** Large prompt editor content boxes with user-controlled heights. */
+export type EditorPromptContentHeightKey = 'promptContent' | 'report' | 'globalContext' | 'projectInstructions';
+
+/** Persisted heights for large prompt editor content boxes. */
+export type EditorPromptContentHeights = Partial<Record<EditorPromptContentHeightKey, number>>;
+
+/** Persisted rendered heights for prompt editor section cards. */
+export type EditorPromptSectionHeights = Partial<Record<EditorPromptSectionKey, number>>;
+
+/** Upper bound that filters corrupted persisted editor layout values. */
+const PROMPT_EDITOR_LAYOUT_HEIGHT_MAX = 10000;
 
 /** Create default expanded/collapsed state for prompt editor sections */
 export function createDefaultEditorPromptExpandedSections(): EditorPromptExpandedSections {
@@ -112,11 +128,17 @@ export interface EditorPromptViewState {
 	expandedSections: EditorPromptExpandedSections;
 	manualSectionOverrides: EditorPromptManualSectionOverrides;
 	descriptionExpanded: boolean;
+	branchesExpanded: boolean;
+	branchesExpandedManual: boolean;
+	contentHeights: EditorPromptContentHeights;
+	sectionHeights: EditorPromptSectionHeights;
 }
 
-type PartialEditorPromptViewState = Partial<Omit<EditorPromptViewState, 'expandedSections'>> & {
+type PartialEditorPromptViewState = Partial<Omit<EditorPromptViewState, 'expandedSections' | 'contentHeights' | 'sectionHeights'>> & {
 	expandedSections?: Partial<EditorPromptExpandedSections> | null;
 	manualSectionOverrides?: EditorPromptManualSectionOverrides | null;
+	contentHeights?: Partial<Record<EditorPromptContentHeightKey, unknown>> | null;
+	sectionHeights?: Partial<Record<EditorPromptSectionKey, unknown>> | null;
 };
 
 /** Key source used for resolving persisted editor view state */
@@ -133,7 +155,61 @@ export function createDefaultEditorPromptViewState(): EditorPromptViewState {
 		expandedSections: createDefaultEditorPromptExpandedSections(),
 		manualSectionOverrides: createDefaultEditorPromptManualSectionOverrides(),
 		descriptionExpanded: false,
+		branchesExpanded: false,
+		branchesExpandedManual: false,
+		contentHeights: {},
+		sectionHeights: {},
 	};
+}
+
+/** Normalize a persisted editor layout height. */
+function normalizeEditorPromptLayoutHeight(value: unknown): number | undefined {
+	const parsed = typeof value === 'number'
+		? value
+		: (typeof value === 'string' ? Number.parseInt(value, 10) : NaN);
+	if (!Number.isFinite(parsed) || parsed <= 0 || parsed > PROMPT_EDITOR_LAYOUT_HEIGHT_MAX) {
+		return undefined;
+	}
+
+	return Math.round(parsed);
+}
+
+/** Normalize persisted heights for large editor content boxes. */
+function normalizeEditorPromptContentHeights(
+	heights?: Partial<Record<EditorPromptContentHeightKey, unknown>> | null,
+): EditorPromptContentHeights {
+	const normalized: EditorPromptContentHeights = {};
+	if (!heights || typeof heights !== 'object') {
+		return normalized;
+	}
+
+	for (const key of ['promptContent', 'report', 'globalContext', 'projectInstructions'] as const) {
+		const height = normalizeEditorPromptLayoutHeight(heights[key]);
+		if (height) {
+			normalized[key] = height;
+		}
+	}
+
+	return normalized;
+}
+
+/** Normalize persisted rendered heights for prompt editor sections. */
+function normalizeEditorPromptSectionHeights(
+	heights?: Partial<Record<EditorPromptSectionKey, unknown>> | null,
+): EditorPromptSectionHeights {
+	const normalized: EditorPromptSectionHeights = {};
+	if (!heights || typeof heights !== 'object') {
+		return normalized;
+	}
+
+	for (const key of PROMPT_EDITOR_SECTION_KEYS) {
+		const height = normalizeEditorPromptLayoutHeight(heights[key]);
+		if (height) {
+			normalized[key] = height;
+		}
+	}
+
+	return normalized;
 }
 
 function normalizeEditorPromptExpandedSections(
@@ -198,6 +274,14 @@ export function normalizeEditorPromptViewState(
 		descriptionExpanded: typeof state.descriptionExpanded === 'boolean'
 			? state.descriptionExpanded
 			: defaults.descriptionExpanded,
+		branchesExpanded: typeof state.branchesExpanded === 'boolean'
+			? state.branchesExpanded
+			: defaults.branchesExpanded,
+		branchesExpandedManual: typeof state.branchesExpandedManual === 'boolean'
+			? state.branchesExpandedManual
+			: defaults.branchesExpandedManual,
+		contentHeights: normalizeEditorPromptContentHeights(state.contentHeights),
+		sectionHeights: normalizeEditorPromptSectionHeights(state.sectionHeights),
 	};
 }
 
@@ -205,13 +289,17 @@ export function normalizeEditorPromptViewState(
 export function getEditorPromptViewStateStorageKeys(source?: EditorPromptViewStateKeySource | null): string[] {
 	const keys: string[] = [];
 	const promptUuid = typeof source?.promptUuid === 'string' ? source.promptUuid.trim() : '';
-	if (promptUuid) {
-		keys.push(`promptUuid:${promptUuid}`);
+	const promptId = typeof source?.promptId === 'string' ? source.promptId.trim() : '';
+	if (promptUuid && promptId) {
+		keys.push(`promptUuid:${promptUuid}|promptId:${promptId}`);
 	}
 
-	const promptId = typeof source?.promptId === 'string' ? source.promptId.trim() : '';
 	if (promptId) {
 		keys.push(`promptId:${promptId}`);
+	}
+
+	if (promptUuid && !promptId) {
+		keys.push(`promptUuid:${promptUuid}`);
 	}
 
 	const fallbackKey = typeof source?.fallbackKey === 'string' ? source.fallbackKey.trim() : '';
@@ -247,12 +335,24 @@ export function moveEditorPromptViewStateEntries(
 	if (!primaryTargetKey) {
 		return next;
 	}
+	const targetPromptUuid = typeof toSource?.promptUuid === 'string' ? toSource.promptUuid.trim() : '';
+	const targetPromptId = typeof toSource?.promptId === 'string' ? toSource.promptId.trim() : '';
+	const targetCarryKeys = [
+		primaryTargetKey,
+		...(targetPromptUuid ? [`promptUuid:${targetPromptUuid}`] : []),
+		...(targetPromptId ? [`promptId:${targetPromptId}`] : []),
+	];
 
 	const sourceKeys = Array.from(new Set(
 		fromSources.flatMap(source => getEditorPromptViewStateStorageKeys(source)),
 	));
 
-	let stateToCarry = next[primaryTargetKey];
+	let stateToCarry: EditorPromptViewState | undefined;
+	for (const targetCarryKey of targetCarryKeys) {
+		if (!stateToCarry && next[targetCarryKey]) {
+			stateToCarry = next[targetCarryKey];
+		}
+	}
 	for (const sourceKey of sourceKeys) {
 		if (!stateToCarry && next[sourceKey]) {
 			stateToCarry = next[sourceKey];
@@ -269,7 +369,11 @@ export function moveEditorPromptViewStateEntries(
 			delete next[sourceKey];
 		}
 	}
-	for (const targetKey of targetKeys.slice(1)) {
+	const cleanupTargetKeys = Array.from(new Set([
+		...targetKeys.slice(1),
+		...targetCarryKeys.slice(1),
+	]));
+	for (const targetKey of cleanupTargetKeys) {
 		if (targetKey !== primaryTargetKey) {
 			delete next[targetKey];
 		}

@@ -189,6 +189,12 @@ export const TrackerApp: React.FC = () => {
   const openPromptTimerRef = useRef<number | null>(null);
   const requestedPromptIdRef = useRef<string | null>(null);
   const suppressCardClickRef = useRef(false);
+  const promptsRef = useRef<PromptConfig[]>([]);
+
+  /** Keep debounced open requests tied to the latest prompt UUID list. */
+  useEffect(() => {
+    promptsRef.current = prompts;
+  }, [prompts]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -217,7 +223,8 @@ export const TrackerApp: React.FC = () => {
 
     openPromptTimerRef.current = window.setTimeout(() => {
       openPromptTimerRef.current = null;
-      vscode.postMessage({ type: 'openPrompt', id: promptId });
+      const matchingPrompt = promptsRef.current.find(prompt => prompt.id === promptId) || null;
+      vscode.postMessage({ type: 'openPrompt', id: promptId, promptUuid: matchingPrompt?.promptUuid || undefined });
     }, OPEN_PROMPT_DEBOUNCE_MS);
   }, []);
 

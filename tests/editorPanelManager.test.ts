@@ -365,6 +365,35 @@ function clonePrompt<T>(value: T): T {
 	return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function createEditorViewState(overrides: Record<string, unknown> = {}) {
+	return {
+		activeTab: 'main',
+		expandedSections: {
+			basic: true,
+			workspace: true,
+			prompt: true,
+			globalPrompt: false,
+			report: false,
+			notes: false,
+			memory: false,
+			plan: false,
+			tech: false,
+			integrations: false,
+			agent: true,
+			groups: false,
+			files: false,
+			time: true,
+		},
+		manualSectionOverrides: {},
+		descriptionExpanded: false,
+		branchesExpanded: false,
+		branchesExpandedManual: false,
+		contentHeights: {},
+		sectionHeights: {},
+		...overrides,
+	} as any;
+}
+
 function createDeferred<T>() {
 	let resolve!: (value: T | PromiseLike<T>) => void;
 	let reject!: (reason?: unknown) => void;
@@ -390,27 +419,7 @@ async function createManager(options?: {
 	let storedPrompt = options?.initialPrompt ? createPrompt(options.initialPrompt) : null;
 	const stateService = {
 		saveStartupEditorRestoreState: async () => undefined,
-		getPromptEditorViewState: () => ({
-			activeTab: 'main',
-			expandedSections: {
-				basic: true,
-				workspace: true,
-				prompt: true,
-				globalPrompt: false,
-				report: false,
-				notes: false,
-				memory: false,
-				plan: false,
-				tech: false,
-				integrations: false,
-				agent: true,
-				groups: false,
-				files: false,
-				time: true,
-			},
-			manualSectionOverrides: {},
-			descriptionExpanded: false,
-		}),
+		getPromptEditorViewState: () => createEditorViewState(),
 		savePromptEditorViewState: async () => undefined,
 		migratePromptEditorViewState: async () => undefined,
 		hasChatSession: async () => true,
@@ -573,6 +582,34 @@ test('openPrompt posts targeted loading before delayed target prompt resolves', 
 			promptUuid: 'uuid-a',
 			title: 'Prompt A',
 		},
+		stateService: {
+			getPromptEditorViewState: (source: any) => {
+				if (source?.promptUuid === 'uuid-b') {
+					return createEditorViewState({
+						activeTab: 'process',
+						expandedSections: {
+							...createEditorViewState().expandedSections,
+							notes: true,
+							plan: true,
+							report: true,
+						},
+						descriptionExpanded: true,
+						branchesExpanded: false,
+						branchesExpandedManual: true,
+						contentHeights: {
+							promptContent: 444,
+							report: 620,
+						},
+						sectionHeights: {
+							prompt: 520,
+							report: 710,
+						},
+					});
+				}
+
+				return createEditorViewState();
+			},
+		},
 	});
 
 	await (manager as any).openPrompt('prompt-a');
@@ -593,14 +630,22 @@ test('openPrompt posts targeted loading before delayed target prompt resolves', 
 		return null;
 	};
 
-	const openPromise = (manager as any).openPrompt('prompt-b');
+	const openPromise = (manager as any).openPrompt({ id: 'prompt-b', promptUuid: 'uuid-b' });
 	await flushTurns(2);
 
 	const loadingMessage = panel.postedMessages[0] as any;
 	assert.equal(promptBReadStarted, true);
 	assert.equal(loadingMessage?.type, 'promptLoading');
 	assert.equal(loadingMessage?.promptId, 'prompt-b');
+	assert.equal(loadingMessage?.promptUuid, 'uuid-b');
 	assert.equal(typeof loadingMessage?.openRequestVersion, 'number');
+	assert.equal(loadingMessage?.editorViewState?.activeTab, 'process');
+	assert.equal(loadingMessage?.editorViewState?.expandedSections?.plan, true);
+	assert.equal(loadingMessage?.editorViewState?.descriptionExpanded, true);
+	assert.equal(loadingMessage?.editorViewState?.branchesExpanded, false);
+	assert.equal(loadingMessage?.editorViewState?.branchesExpandedManual, true);
+	assert.equal(loadingMessage?.editorViewState?.contentHeights?.promptContent, 444);
+	assert.equal(loadingMessage?.editorViewState?.sectionHeights?.report, 710);
 
 	deferredPrompt.resolve(createPrompt({
 		id: 'prompt-b',
@@ -612,6 +657,148 @@ test('openPrompt posts targeted loading before delayed target prompt resolves', 
 	const openMessage = panel.postedMessages.find((message: any) => message?.type === 'prompt') as any;
 	assert.equal(openMessage?.prompt?.id, 'prompt-b');
 	assert.equal(openMessage?.openRequestVersion, loadingMessage.openRequestVersion);
+	panel.dispose();
+});
+
+test('openPrompt starts target prompt load without waiting for slow promptLoading postMessage', async () => {
+	resetVsCodeCommandMock();
+	const { manager, storageService } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+	});
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+	panel.postedMessages.length = 0;
+
+	const deferredPromptLoadingPost = createDeferred<boolean>();
+	panel.webview.postMessage = async (message: unknown) => {
+		panel.postedMessages.push(message);
+		if ((message as any)?.type === 'promptLoading') {
+			return deferredPromptLoadingPost.promise;
+		}
+		return true;
+	};
+
+	let promptBReadStarted = false;
+	(storageService as any).getPrompt = async (id: string) => {
+		if (id === 'prompt-a') {
+			return createPrompt({ id: 'prompt-a', promptUuid: 'uuid-a', title: 'Prompt A' });
+		}
+		if (id === 'prompt-b') {
+			promptBReadStarted = true;
+			return createPrompt({ id: 'prompt-b', promptUuid: 'uuid-b', title: 'Prompt B' });
+		}
+		return null;
+	};
+
+	const openPromise = (manager as any).openPrompt({ id: 'prompt-b', promptUuid: 'uuid-b' });
+	await flushTurns(2);
+
+	assert.equal(promptBReadStarted, true);
+	assert.equal((panel.postedMessages[0] as any)?.type, 'promptLoading');
+	assert.equal((panel.postedMessages.find((message: any) => message?.type === 'prompt') as any)?.prompt?.id, 'prompt-b');
+
+	deferredPromptLoadingPost.resolve(true);
+	await openPromise;
+	panel.dispose();
+});
+
+test('savePromptEditorViewState message queues persistence without blocking handler', async () => {
+	resetVsCodeCommandMock();
+	const deferredSave = createDeferred<void>();
+	const savedSources: any[] = [];
+	const savedStates: any[] = [];
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+		stateService: {
+			savePromptEditorViewState: async (source: any, state: any) => {
+				savedSources.push(source);
+				savedStates.push(state);
+				await deferredSave.promise;
+			},
+		},
+	});
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+
+	const emitPromise = panel.emitMessage({
+		type: 'savePromptEditorViewState',
+		promptId: 'prompt-a',
+		promptUuid: 'uuid-a',
+		state: createEditorViewState({ activeTab: 'process' }),
+	});
+
+	const handlerResult = await Promise.race([
+		emitPromise.then(() => 'resolved'),
+		new Promise(resolve => setTimeout(() => resolve('blocked'), 10)),
+	]);
+	assert.equal(handlerResult, 'resolved');
+
+	await flushTurns(1);
+	assert.equal(savedSources.length, 1);
+	assert.equal(savedSources[0]?.promptUuid, 'uuid-a');
+	assert.equal(savedSources[0]?.promptId, 'prompt-a');
+	assert.equal(savedStates[0]?.activeTab, 'process');
+	const latestQueuedState = (manager as any).getPromptLoadingEditorViewState('__prompt_editor_singleton__', {
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+	});
+	assert.equal(latestQueuedState?.activeTab, 'process');
+
+	deferredSave.resolve();
+	await flushTurns(1);
+	panel.dispose();
+});
+
+test('savePromptEditorViewState queue coalesces latest state for same prompt', async () => {
+	resetVsCodeCommandMock();
+	const savedStates: any[] = [];
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+		stateService: {
+			savePromptEditorViewState: async (_source: any, state: any) => {
+				savedStates.push(state);
+			},
+		},
+	});
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+
+	const firstEmit = panel.emitMessage({
+		type: 'savePromptEditorViewState',
+		promptId: 'prompt-a',
+		promptUuid: 'uuid-a',
+		state: createEditorViewState({ activeTab: 'main' }),
+	});
+	const secondEmit = panel.emitMessage({
+		type: 'savePromptEditorViewState',
+		promptId: 'prompt-a',
+		promptUuid: 'uuid-a',
+		state: createEditorViewState({ activeTab: 'process' }),
+	});
+
+	await Promise.all([firstEmit, secondEmit]);
+	await flushTurns(2);
+
+	assert.equal(savedStates.length, 1);
+	assert.equal(savedStates[0]?.activeTab, 'process');
 	panel.dispose();
 });
 

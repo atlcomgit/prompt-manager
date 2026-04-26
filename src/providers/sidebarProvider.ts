@@ -4,7 +4,7 @@
 
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
-import type { WebviewToExtensionMessage, ExtensionToWebviewMessage } from '../types/messages.js';
+import type { WebviewToExtensionMessage, ExtensionToWebviewMessage, PromptOpenTarget } from '../types/messages.js';
 import { isPromptStatus, markPromptChatAutoCompleteAfter, type PromptStatus } from '../types/prompt.js';
 import type { ChatMemoryInstructionService } from '../services/chatMemoryInstructionService.js';
 import type { CustomGroupsService } from '../services/customGroupsService.js';
@@ -20,7 +20,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 	private static readonly AGENT_JSON_DEBOUNCE_MS = 300;
 
 	private _view?: vscode.WebviewView;
-	private _onDidOpenPrompt = new vscode.EventEmitter<string>();
+	private _onDidOpenPrompt = new vscode.EventEmitter<PromptOpenTarget>();
 	public readonly onDidOpenPrompt = this._onDidOpenPrompt.event;
 	private _onDidDeletePrompt = new vscode.EventEmitter<string>();
 	public readonly onDidDeletePrompt = this._onDidDeletePrompt.event;
@@ -181,14 +181,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			}
 
 			case 'openPrompt': {
-				this._onDidOpenPrompt.fire(msg.id);
+				this._onDidOpenPrompt.fire({ id: msg.id, promptUuid: msg.promptUuid });
 				await this.stateService.saveLastPromptId(msg.id);
 				await this.syncSelectedPrompt(msg.id);
 				break;
 			}
 
 			case 'createPrompt': {
-				this._onDidOpenPrompt.fire('__new__');
+				this._onDidOpenPrompt.fire({ id: '__new__' });
 				break;
 			}
 
@@ -211,7 +211,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 					const { content, ...config } = dup;
 					this.postMessage({ type: 'promptDuplicated', prompt: config });
 					await this.refreshList();
-					this._onDidOpenPrompt.fire(slug);
+					this._onDidOpenPrompt.fire({ id: slug, promptUuid: dup.promptUuid });
 				}
 				break;
 			}
@@ -237,7 +237,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 					const imported = await this.storageService.importPrompt(uris[0].fsPath);
 					if (imported) {
 						await this.refreshList();
-						this._onDidOpenPrompt.fire(imported.id);
+						this._onDidOpenPrompt.fire({ id: imported.id, promptUuid: imported.promptUuid });
 						vscode.window.showInformationMessage(`Промпт "${imported.title || imported.id}" импортирован.`);
 					}
 				}

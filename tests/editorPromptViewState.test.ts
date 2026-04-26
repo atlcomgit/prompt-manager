@@ -35,6 +35,10 @@ test('createDefaultEditorPromptViewState returns main tab by default', () => {
 		expandedSections: createDefaultEditorPromptExpandedSections(),
 		manualSectionOverrides: {},
 		descriptionExpanded: false,
+		branchesExpanded: false,
+		branchesExpandedManual: false,
+		contentHeights: {},
+		sectionHeights: {},
 	});
 });
 
@@ -44,6 +48,18 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 		expandedSections: { basic: false, plan: true },
 		manualSectionOverrides: { report: 'manual', notes: false as never },
 		descriptionExpanded: true,
+		branchesExpanded: true,
+		branchesExpandedManual: true,
+		contentHeights: {
+			promptContent: 420,
+			report: '640' as never,
+			globalContext: -1,
+		},
+		sectionHeights: {
+			basic: 160,
+			prompt: '520' as never,
+			report: 0,
+		},
 	}), {
 		activeTab: 'process',
 		expandedSections: {
@@ -53,6 +69,16 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 		},
 		manualSectionOverrides: { report: 'manual' },
 		descriptionExpanded: true,
+		branchesExpanded: true,
+		branchesExpandedManual: true,
+		contentHeights: {
+			promptContent: 420,
+			report: 640,
+		},
+		sectionHeights: {
+			basic: 160,
+			prompt: 520,
+		},
 	});
 	assert.deepEqual(
 		normalizeEditorPromptViewState({ activeTab: 'unknown' as 'main' }),
@@ -61,6 +87,10 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 			expandedSections: createDefaultEditorPromptExpandedSections(),
 			manualSectionOverrides: {},
 			descriptionExpanded: false,
+			branchesExpanded: false,
+			branchesExpandedManual: false,
+			contentHeights: {},
+			sectionHeights: {},
 		},
 	);
 	assert.deepEqual(normalizeEditorPromptViewState(null), {
@@ -68,6 +98,10 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 		expandedSections: createDefaultEditorPromptExpandedSections(),
 		manualSectionOverrides: {},
 		descriptionExpanded: false,
+		branchesExpanded: false,
+		branchesExpandedManual: false,
+		contentHeights: {},
+		sectionHeights: {},
 	});
 });
 
@@ -86,16 +120,20 @@ test('normalizeEditorPromptViewState keeps legacy manual overrides and accepts u
 			plan: 'until-content',
 		},
 		descriptionExpanded: false,
+		branchesExpanded: false,
+		branchesExpandedManual: false,
+		contentHeights: {},
+		sectionHeights: {},
 	});
 });
 
-test('editor prompt view state keys prefer promptUuid and keep fallbacks deduplicated', () => {
+test('editor prompt view state keys use promptUuid and promptId composite primary key', () => {
 	assert.deepEqual(getEditorPromptViewStateStorageKeys({
 		promptUuid: ' uuid-1 ',
 		promptId: 'prompt-a',
 		fallbackKey: 'panel:singleton',
 	}), [
-		'promptUuid:uuid-1',
+		'promptUuid:uuid-1|promptId:prompt-a',
 		'promptId:prompt-a',
 		'panel:singleton',
 	]);
@@ -103,10 +141,10 @@ test('editor prompt view state keys prefer promptUuid and keep fallbacks dedupli
 		promptUuid: 'uuid-1',
 		promptId: 'prompt-a',
 		fallbackKey: 'panel:singleton',
-	}), 'promptUuid:uuid-1');
+	}), 'promptUuid:uuid-1|promptId:prompt-a');
 });
 
-test('moveEditorPromptViewStateEntries migrates transient panel state to promptUuid key', () => {
+test('moveEditorPromptViewStateEntries migrates transient panel state to composite prompt key', () => {
 	const next = moveEditorPromptViewStateEntries(
 		{
 			'panel:__prompt_editor_singleton__': { activeTab: 'process' },
@@ -122,16 +160,50 @@ test('moveEditorPromptViewStateEntries migrates transient panel state to promptU
 	);
 
 	assert.deepEqual(next, {
-		'promptUuid:uuid-1': {
+		'promptUuid:uuid-1|promptId:prompt-a': {
 			activeTab: 'process',
 			expandedSections: createDefaultEditorPromptExpandedSections(),
 			manualSectionOverrides: {},
 			descriptionExpanded: false,
+			branchesExpanded: false,
+			branchesExpandedManual: false,
+			contentHeights: {},
+			sectionHeights: {},
 		},
 	});
 });
 
 test('moveEditorPromptViewStateEntries keeps stable target state and removes duplicate promptId keys', () => {
+	const next = moveEditorPromptViewStateEntries(
+		{
+			'promptUuid:uuid-1': { activeTab: 'process' },
+			'promptId:prompt-a': { activeTab: 'main' },
+			'promptUuid:uuid-1|promptId:prompt-a': { activeTab: 'process' },
+		},
+		[
+			{ promptId: 'prompt-a' },
+		],
+		{
+			promptUuid: 'uuid-1',
+			promptId: 'prompt-a',
+		},
+	);
+
+	assert.deepEqual(next, {
+		'promptUuid:uuid-1|promptId:prompt-a': {
+			activeTab: 'process',
+			expandedSections: createDefaultEditorPromptExpandedSections(),
+			manualSectionOverrides: {},
+			descriptionExpanded: false,
+			branchesExpanded: false,
+			branchesExpandedManual: false,
+			contentHeights: {},
+			sectionHeights: {},
+		},
+	});
+});
+
+test('moveEditorPromptViewStateEntries prefers legacy promptUuid state over promptId duplicate', () => {
 	const next = moveEditorPromptViewStateEntries(
 		{
 			'promptUuid:uuid-1': { activeTab: 'process' },
@@ -147,11 +219,15 @@ test('moveEditorPromptViewStateEntries keeps stable target state and removes dup
 	);
 
 	assert.deepEqual(next, {
-		'promptUuid:uuid-1': {
+		'promptUuid:uuid-1|promptId:prompt-a': {
 			activeTab: 'process',
 			expandedSections: createDefaultEditorPromptExpandedSections(),
 			manualSectionOverrides: {},
 			descriptionExpanded: false,
+			branchesExpanded: false,
+			branchesExpandedManual: false,
+			contentHeights: {},
+			sectionHeights: {},
 		},
 	});
 });

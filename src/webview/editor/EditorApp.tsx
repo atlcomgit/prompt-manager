@@ -2,6 +2,7 @@
  * Editor App — Main component for prompt configuration form
  */
 import React, { useState, useCallback, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
+import { unstable_batchedUpdates } from 'react-dom';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
@@ -23,9 +24,11 @@ import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLi
 import type { ClipboardImagePayload, GlobalContextSourceMessage } from '../../types/messages';
 import type {
   ChatMemorySummary,
+  EditorPromptContentHeights,
   EditorPromptExpandedSections,
   EditorPromptManualSectionOverrides,
   EditorPromptSectionKey,
+  EditorPromptSectionHeights,
   EditorPromptTab,
   EditorPromptViewState,
   Prompt,
@@ -38,6 +41,7 @@ import {
   createDefaultEditorPromptViewState,
   createDefaultPrompt,
   normalizeEditorPromptViewState,
+  PROMPT_EDITOR_SECTION_KEYS,
   shouldShowPromptPlanForStatus,
 } from '../../types/prompt';
 import { TimeTrackingService } from '../../services/timeTrackingService';
@@ -56,6 +60,7 @@ import {
   resolvePromptChatContextAutoLoadDisplay,
   resolvePromptChatLaunchInactivePhase,
   resolveNextPromptChatLaunchPhase,
+  shouldAutoExpandPromptBranchList,
   type PromptChatContextAutoLoadRuntimeState,
   resolvePromptChatLaunchPhase,
   resolvePromptChatLaunchStepStatesFromPhase,
@@ -101,9 +106,35 @@ const CHAT_LAUNCH_MIN_PHASE_VISIBLE_MS = 1000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
 // Small delay avoids loader flashes while still hiding stale prompt content quickly.
 const PROMPT_OPEN_LOADER_DELAY_MS = 100;
+// Keep blank switch placeholders visible long enough to make the target layout readable.
+const PROMPT_SWITCH_PLACEHOLDER_MIN_VISIBLE_MS = 450;
+const PROMPT_OPEN_SECTION_MEASURE_SETTLE_MS = 640;
+// Process tab has large report/plan blocks whose child layout stabilizes after markdown render.
+const PROMPT_PROCESS_OPEN_SECTION_MEASURE_SETTLE_MS = 1400;
+// Plan content arrives through a separate host message, so keep its saved space reserved.
+const PROMPT_PROCESS_PLAN_HYDRATION_TIMEOUT_MS = 5000;
 const EDITOR_FORM_CONTENT_WIDTH_PX = 800;
 const EDITOR_PROMPT_TABS: EditorPromptTab[] = ['main', 'process'];
 const PANEL_LEFT_ACCENT_SHADOW = 'inset 3px 0 0 var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))';
+const PROMPT_EDITOR_SECTION_KEY_SET = new Set<EditorPromptSectionKey>(PROMPT_EDITOR_SECTION_KEYS);
+
+/** Check that a DOM section key belongs to the prompt editor section contract. */
+const isEditorPromptSectionKey = (value: string | null): value is EditorPromptSectionKey => (
+  Boolean(value && PROMPT_EDITOR_SECTION_KEY_SET.has(value as EditorPromptSectionKey))
+);
+
+/** Keep persisted layout heights finite and positive before using them in inline styles. */
+const normalizeEditorLayoutHeight = (value: unknown): number | undefined => {
+  const parsed = typeof value === 'number'
+    ? value
+    : (typeof value === 'string' ? Number.parseInt(value, 10) : NaN);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : undefined;
+};
+
+/** Post a debug log event through the extension host diagnostics channel. */
+const postEditorDebugLog = (scope: string, message: string, payload?: Record<string, unknown>): void => {
+  vscode.postMessage({ type: 'debugLog', scope, message, payload });
+};
 
 const ensureTrailingNewline = (text: string): string => (text.endsWith('\n') ? text : `${text}\n`);
 
@@ -361,12 +392,23 @@ export const EditorApp: React.FC = () => {
 
   const [prompt, setPrompt] = useState<Prompt>(createDefaultPrompt());
   const [isLoaded, setIsLoaded] = useState(false);
+  const [isPromptSwitchPlaceholderVisible, setIsPromptSwitchPlaceholderVisible] = useState(false);
+  const [isPromptOpenLayoutSettling, setIsPromptOpenLayoutSettling] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   // Start with loader visible: on new panel creation promptLoading is never sent
   // (only sent when reusing an existing singleton panel), so we show the loader
   // immediately and hide it once the first 'prompt' message with reason='open' arrives.
   const [showLoader, setShowLoader] = useState(true);
   const showLoaderTimerRef = useRef<number | null>(null);
+  const isPromptSwitchPlaceholderVisibleRef = useRef(false);
+  const promptSwitchPlaceholderStartedAtRef = useRef(0);
+  const promptSwitchPlaceholderTimerRef = useRef<number | null>(null);
+  const promptOpenLayoutSettleTimerRef = useRef<number | null>(null);
+  const sectionMeasurementResumeTimerRef = useRef<number | null>(null);
+  const sectionMeasurementSuspendedUntilRef = useRef(0);
+  const pendingPromptOpenMessageRef = useRef<any | null>(null);
+  const handleMessageRef = useRef<(msg: any) => void>(() => undefined);
+  const promptSwitchRestoreViewStateRef = useRef<EditorPromptViewState | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingChat, setIsStartingChat] = useState(false);
   const [isOpeningChat, setIsOpeningChat] = useState(false);
@@ -387,7 +429,13 @@ export const EditorApp: React.FC = () => {
   const [pageWidth, setPageWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : EDITOR_FORM_SHELL_WIDTH_PX));
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
   const [branchesResolved, setBranchesResolved] = useState(false);
-  const [showBranches, setShowBranches] = useState(false);
+  const [showBranches, setShowBranches] = useState(
+    () => initialEditorViewStateRef.current?.branchesExpanded ?? createDefaultEditorPromptViewState().branchesExpanded,
+  );
+  const [branchesExpandedManual, setBranchesExpandedManual] = useState(
+    () => initialEditorViewStateRef.current?.branchesExpandedManual
+      ?? createDefaultEditorPromptViewState().branchesExpandedManual,
+  );
   const [gitOverlayOpen, setGitOverlayOpen] = useState(false);
   const [gitOverlayMode, setGitOverlayMode] = useState<GitOverlayMode>('default');
   const [gitOverlaySnapshot, setGitOverlaySnapshot] = useState<GitOverlaySnapshot | null>(null);
@@ -435,17 +483,39 @@ export const EditorApp: React.FC = () => {
     () => initialEditorViewStateRef.current?.activeTab || createDefaultEditorPromptViewState().activeTab,
   );
   const [promptPlanState, setPromptPlanState] = useState<{ exists: boolean; content: string }>({ exists: false, content: '' });
+  const [isPromptPlanHydrating, setIsPromptPlanHydrating] = useState(false);
   const [planHighlightedLineIndexes, setPlanHighlightedLineIndexes] = useState<number[]>([]);
   const [notice, setNotice] = useState<InlineNotice | null>(null);
   const [contextFileCards, setContextFileCards] = useState<PromptContextFileCard[]>([]);
-  const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.promptContentHeight'));
-  const [reportHeight, setReportHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.reportHeight'));
-  const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.globalContextHeight'));
-  const [projectInstructionsHeight, setProjectInstructionsHeight] = useState<number | undefined>(() => readStoredHeight('pm.editor.projectInstructionsHeight'));
+  const [promptContentHeight, setPromptContentHeight] = useState<number | undefined>(
+    () => initialEditorViewStateRef.current?.contentHeights.promptContent || readStoredHeight('pm.editor.promptContentHeight'),
+  );
+  const [reportHeight, setReportHeight] = useState<number | undefined>(
+    () => initialEditorViewStateRef.current?.contentHeights.report || readStoredHeight('pm.editor.reportHeight'),
+  );
+  const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(
+    () => initialEditorViewStateRef.current?.contentHeights.globalContext || readStoredHeight('pm.editor.globalContextHeight'),
+  );
+  const [projectInstructionsHeight, setProjectInstructionsHeight] = useState<number | undefined>(
+    () => initialEditorViewStateRef.current?.contentHeights.projectInstructions || readStoredHeight('pm.editor.projectInstructionsHeight'),
+  );
+  const [sectionHeights, setSectionHeights] = useState<EditorPromptSectionHeights>(
+    () => initialEditorViewStateRef.current?.sectionHeights || {},
+  );
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(
     () => initialEditorViewStateRef.current?.descriptionExpanded || createDefaultEditorPromptViewState().descriptionExpanded,
   );
+  const editorViewStateRef = useRef<EditorPromptViewState>(normalizeEditorPromptViewState({
+    activeTab,
+    expandedSections,
+    manualSectionOverrides,
+    descriptionExpanded: isDescriptionExpanded,
+    branchesExpanded: showBranches,
+    branchesExpandedManual,
+    contentHeights: initialEditorViewStateRef.current?.contentHeights,
+    sectionHeights: initialEditorViewStateRef.current?.sectionHeights,
+  }));
   const contextFileCardRequestIdRef = useRef('');
   const shouldShowFooterGitFlow = prompt.status === 'draft'
     || prompt.status === 'in-progress'
@@ -559,9 +629,17 @@ export const EditorApp: React.FC = () => {
   const activeSaveIdRef = useRef<string | null>(null);
   const activeSaveRequestIdRef = useRef<string | null>(null);
   const activeSaveClearedDirtyRef = useRef(false);
-  const recalcTriggeredForRef = useRef<string>('');
+  const recalcTriggeredForRef = useRef<Set<string>>(new Set());
+  const pendingBackgroundRecalcTimerRef = useRef<number | null>(null);
   const promptPlanStateRef = useRef<{ exists: boolean; content: string }>({ exists: false, content: '' });
   const hasSeenPromptPlanSnapshotRef = useRef(false);
+  const promptPlanHydrationTimerRef = useRef<number | null>(null);
+  const promptPlanHydrationRequestRef = useRef<{
+    promptId: string;
+    promptUuid: string;
+    openRequestVersion: number;
+    startedAt: number;
+  } | null>(null);
 
   // Auto-save refs
   const promptRef = useRef<Prompt>(prompt);
@@ -579,6 +657,263 @@ export const EditorApp: React.FC = () => {
   const promptConfigFieldChangedAtRef = useRef<Record<string, number>>({});
   const previousPromptConfigSnapshotRef = useRef<Prompt>(prompt);
   const skipNextPromptConfigTrackingRef = useRef(false);
+  const pendingEditorViewStateSaveRef = useRef<{
+    promptId?: string;
+    promptUuid?: string;
+    state: EditorPromptViewState;
+  } | null>(null);
+  const editorViewStateSaveTimerRef = useRef<number | null>(null);
+  const promptSwitchTimingRef = useRef<{
+    promptId?: string;
+    promptUuid?: string;
+    openRequestVersion: number;
+    startedAt: number;
+  } | null>(null);
+  const lastLoggedSectionHeightsRef = useRef<string>('');
+
+  /** Keep live section measurement paused while prompt content settles after open. */
+  const getSectionMeasurementResumeDelay = useCallback((): number => {
+    const delay = sectionMeasurementSuspendedUntilRef.current - Date.now();
+    return delay > 0 ? delay : 0;
+  }, []);
+
+  /** Clear the post-open layout lock timer. */
+  const clearPromptOpenLayoutSettleTimer = useCallback(() => {
+    if (promptOpenLayoutSettleTimerRef.current !== null) {
+      window.clearTimeout(promptOpenLayoutSettleTimerRef.current);
+      promptOpenLayoutSettleTimerRef.current = null;
+    }
+  }, []);
+
+  /** Clear pending Process plan hydration timeout without changing the visible state. */
+  const clearPromptPlanHydrationTimer = useCallback(() => {
+    if (promptPlanHydrationTimerRef.current !== null) {
+      window.clearTimeout(promptPlanHydrationTimerRef.current);
+      promptPlanHydrationTimerRef.current = null;
+    }
+  }, []);
+
+  /** Stop the temporary Plan placeholder once the host has answered or the request changed. */
+  const finishPromptPlanHydration = useCallback((reason: string, payload?: Record<string, unknown>) => {
+    const currentRequest = promptPlanHydrationRequestRef.current;
+    clearPromptPlanHydrationTimer();
+    promptPlanHydrationRequestRef.current = null;
+    setIsPromptPlanHydrating(false);
+
+    if (!currentRequest) {
+      return;
+    }
+
+    postEditorDebugLog('editor-layout', 'promptPlan.hydrationFinished', {
+      reason,
+      promptId: currentRequest.promptId,
+      promptUuid: currentRequest.promptUuid,
+      openRequestVersion: currentRequest.openRequestVersion,
+      durationMs: Date.now() - currentRequest.startedAt,
+      ...(payload || {}),
+    });
+  }, [clearPromptPlanHydrationTimer]);
+
+  /** Reserve the saved Process Plan height until the async plan snapshot is loaded. */
+  const startPromptPlanHydration = useCallback((
+    nextPrompt: Prompt,
+    nextViewState: EditorPromptViewState,
+    openRequestVersion: number,
+  ) => {
+    clearPromptPlanHydrationTimer();
+    promptPlanHydrationRequestRef.current = null;
+    setIsPromptPlanHydrating(false);
+
+    const savedPlanSectionHeight = normalizeEditorLayoutHeight(nextViewState.sectionHeights?.plan);
+    const shouldHydratePlan = nextViewState.activeTab === 'process'
+      && shouldShowPromptPlanForStatus(nextPrompt.status)
+      && Boolean(savedPlanSectionHeight);
+    if (!shouldHydratePlan) {
+      return;
+    }
+
+    const promptId = String(nextPrompt.id || '__new__').trim() || '__new__';
+    const promptUuid = String(nextPrompt.promptUuid || '').trim();
+    promptPlanHydrationRequestRef.current = {
+      promptId,
+      promptUuid,
+      openRequestVersion,
+      startedAt: Date.now(),
+    };
+    setIsPromptPlanHydrating(true);
+
+    postEditorDebugLog('editor-layout', 'promptPlan.hydrationStarted', {
+      promptId,
+      promptUuid,
+      openRequestVersion,
+      savedPlanSectionHeight,
+      timeoutMs: PROMPT_PROCESS_PLAN_HYDRATION_TIMEOUT_MS,
+    });
+
+    promptPlanHydrationTimerRef.current = window.setTimeout(() => {
+      const currentRequest = promptPlanHydrationRequestRef.current;
+      promptPlanHydrationTimerRef.current = null;
+      if (!currentRequest || currentRequest.promptId !== promptId) {
+        return;
+      }
+
+      promptPlanHydrationRequestRef.current = null;
+      setIsPromptPlanHydrating(false);
+      postEditorDebugLog('editor-layout', 'promptPlan.hydrationTimeout', {
+        promptId,
+        promptUuid,
+        openRequestVersion,
+        durationMs: Date.now() - currentRequest.startedAt,
+      });
+    }, PROMPT_PROCESS_PLAN_HYDRATION_TIMEOUT_MS);
+  }, [clearPromptPlanHydrationTimer]);
+
+  /** Lock saved section heights briefly until child editors finish their first layout pass. */
+  const startPromptOpenLayoutSettle = useCallback((tab: EditorPromptTab = 'main') => {
+    clearPromptOpenLayoutSettleTimer();
+    if (sectionMeasurementResumeTimerRef.current !== null) {
+      window.clearTimeout(sectionMeasurementResumeTimerRef.current);
+      sectionMeasurementResumeTimerRef.current = null;
+    }
+    const settleMs = tab === 'process'
+      ? PROMPT_PROCESS_OPEN_SECTION_MEASURE_SETTLE_MS
+      : PROMPT_OPEN_SECTION_MEASURE_SETTLE_MS;
+    sectionMeasurementSuspendedUntilRef.current = Date.now() + settleMs;
+    setIsPromptOpenLayoutSettling(true);
+    promptOpenLayoutSettleTimerRef.current = window.setTimeout(() => {
+      promptOpenLayoutSettleTimerRef.current = null;
+      setIsPromptOpenLayoutSettling(false);
+    }, settleMs);
+  }, [clearPromptOpenLayoutSettleTimer]);
+
+  /** Read the currently rendered section card heights from the live editor DOM. */
+  const captureRenderedSectionHeights = useCallback((): EditorPromptSectionHeights => {
+    const nextHeights: EditorPromptSectionHeights = { ...editorViewStateRef.current.sectionHeights };
+    if (typeof document === 'undefined'
+      || isPromptSwitchPlaceholderVisibleRef.current
+      || getSectionMeasurementResumeDelay() > 0) {
+      return nextHeights;
+    }
+
+    document.querySelectorAll<HTMLElement>('[data-pm-editor-section]').forEach((section) => {
+      if (section.getAttribute('data-pm-editor-section-placeholder') === 'true') {
+        return;
+      }
+      const sectionKey = section.getAttribute('data-pm-editor-section');
+      if (!isEditorPromptSectionKey(sectionKey)) {
+        return;
+      }
+      const height = normalizeEditorLayoutHeight(section.getBoundingClientRect().height);
+      if (height) {
+        nextHeights[sectionKey] = height;
+      }
+    });
+
+    return nextHeights;
+  }, [getSectionMeasurementResumeDelay]);
+
+  /** Build a latest editor view state snapshot with live field and section heights. */
+  const captureEditorViewStateSnapshot = useCallback((): EditorPromptViewState => normalizeEditorPromptViewState({
+    activeTab,
+    branchesExpanded: showBranches,
+    branchesExpandedManual,
+    expandedSections,
+    manualSectionOverrides,
+    descriptionExpanded: isDescriptionExpanded,
+    contentHeights: {
+      ...editorViewStateRef.current.contentHeights,
+      ...(promptContentHeight ? { promptContent: promptContentHeight } : {}),
+      ...(reportHeight ? { report: reportHeight } : {}),
+      ...(globalContextHeight ? { globalContext: globalContextHeight } : {}),
+      ...(projectInstructionsHeight ? { projectInstructions: projectInstructionsHeight } : {}),
+    },
+    sectionHeights: captureRenderedSectionHeights(),
+  }), [
+    activeTab,
+    branchesExpandedManual,
+    captureRenderedSectionHeights,
+    expandedSections,
+    globalContextHeight,
+    isDescriptionExpanded,
+    manualSectionOverrides,
+    projectInstructionsHeight,
+    promptContentHeight,
+    reportHeight,
+    showBranches,
+  ]);
+
+  /** Flush one queued layout-state save to the extension without awaiting host persistence. */
+  const flushEditorViewStateSaveQueue = useCallback(() => {
+    if (editorViewStateSaveTimerRef.current !== null) {
+      window.clearTimeout(editorViewStateSaveTimerRef.current);
+      editorViewStateSaveTimerRef.current = null;
+    }
+    const pendingSave = pendingEditorViewStateSaveRef.current;
+    pendingEditorViewStateSaveRef.current = null;
+    if (!pendingSave) {
+      return;
+    }
+
+    vscode.postMessage({
+      type: 'savePromptEditorViewState',
+      promptId: pendingSave.promptId,
+      promptUuid: pendingSave.promptUuid,
+      state: pendingSave.state,
+    });
+  }, []);
+
+  /** Queue a layout-state save separately from prompt save/open critical paths. */
+  const enqueueEditorViewStateSave = useCallback((options?: { prompt?: Prompt; flush?: boolean; reason?: string }) => {
+    const targetPrompt = options?.prompt || promptRef.current;
+    const captureStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const state = captureEditorViewStateSnapshot();
+    const captureFinishedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    editorViewStateRef.current = state;
+
+    const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
+    vscode.setState?.({ ...currentState, 'pm.editor.viewState': state });
+    if (storage) {
+      storage.setItem('pm.editor.viewState', JSON.stringify(state));
+    }
+
+    pendingEditorViewStateSaveRef.current = {
+      promptId: targetPrompt.id || undefined,
+      promptUuid: targetPrompt.promptUuid || undefined,
+      state,
+    };
+
+    if (options?.reason) {
+      postEditorDebugLog('editor-layout', 'viewState.capture', {
+        reason: options.reason,
+        promptId: targetPrompt.id || '__new__',
+        promptUuid: targetPrompt.promptUuid || '',
+        flush: options.flush === true,
+        captureDurationMs: Math.round(captureFinishedAt - captureStartedAt),
+        activeTab: state.activeTab,
+        branchesExpanded: state.branchesExpanded,
+        branchesExpandedManual: state.branchesExpandedManual,
+        contentHeights: state.contentHeights,
+        sectionHeights: state.sectionHeights,
+        sectionCount: Object.keys(state.sectionHeights || {}).length,
+        isLoaded,
+        placeholderVisible: isPromptSwitchPlaceholderVisibleRef.current,
+      });
+    }
+
+    if (options?.flush) {
+      flushEditorViewStateSaveQueue();
+      return;
+    }
+
+    if (editorViewStateSaveTimerRef.current === null) {
+      editorViewStateSaveTimerRef.current = window.setTimeout(flushEditorViewStateSaveQueue, 0);
+    }
+  }, [captureEditorViewStateSnapshot, flushEditorViewStateSaveQueue, isLoaded, storage]);
+
+  const enqueueEditorViewStateSaveRef = useRef(enqueueEditorViewStateSave);
+  useEffect(() => {
+    enqueueEditorViewStateSaveRef.current = enqueueEditorViewStateSave;
+  }, [enqueueEditorViewStateSave]);
 
   // Time tracking
   const openedAtRef = useRef<number>(Date.now());
@@ -833,16 +1168,32 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'loadRemoteGlobalContext' });
   }, [canLoadRemoteGlobalContext, isLoadingGlobalContext]);
 
+  /** Cancel delayed silent chat-time refresh while the user keeps switching prompts. */
+  const clearPendingBackgroundRecalc = useCallback(() => {
+    if (pendingBackgroundRecalcTimerRef.current !== null) {
+      window.clearTimeout(pendingBackgroundRecalcTimerRef.current);
+      pendingBackgroundRecalcTimerRef.current = null;
+    }
+  }, []);
+
   // Refresh bound chat timing after open without turning on the global editor progress line.
   const requestBackgroundImplementingTimeRefresh = useCallback((nextPrompt: Prompt) => {
     const promptId = String(nextPrompt.id || '').trim();
-    if (!promptId || !(nextPrompt.chatSessionIds || []).length || recalcTriggeredForRef.current === promptId) {
+    if (!promptId || !(nextPrompt.chatSessionIds || []).length || recalcTriggeredForRef.current.has(promptId)) {
       return;
     }
 
-    recalcTriggeredForRef.current = promptId;
-    vscode.postMessage({ type: 'recalcImplementingTime', id: promptId, silent: true });
-  }, []);
+    clearPendingBackgroundRecalc();
+    pendingBackgroundRecalcTimerRef.current = window.setTimeout(() => {
+      pendingBackgroundRecalcTimerRef.current = null;
+      const currentPromptId = String(promptRef.current.id || '').trim();
+      if (currentPromptId !== promptId || recalcTriggeredForRef.current.has(promptId)) {
+        return;
+      }
+      recalcTriggeredForRef.current.add(promptId);
+      vscode.postMessage({ type: 'recalcImplementingTime', id: promptId, silent: true });
+    }, 900);
+  }, [clearPendingBackgroundRecalc]);
 
   const releaseStartChatPendingState = useCallback((options?: { resetSaving?: boolean }) => {
     clearChatStartTimeout();
@@ -999,6 +1350,7 @@ export const EditorApp: React.FC = () => {
         activeSaveIdRef.current = (promptToSave.id || latestPrompt.id || '__new__').trim() || '__new__';
         setIsSaving(true);
         setIsDirty(false);
+        enqueueEditorViewStateSave({ prompt: promptToSave, reason: 'before-save:continue-open-chat' });
         vscode.postMessage({ type: 'savePrompt', prompt: promptToSave, source: 'status-change' });
       }
     }
@@ -1011,7 +1363,7 @@ export const EditorApp: React.FC = () => {
 
     setIsOpeningChat(false);
     vscode.postMessage({ type: 'openChatPanel' });
-  }, [buildPromptForSaveFrom]);
+  }, [buildPromptForSaveFrom, enqueueEditorViewStateSave]);
 
   const requestChatEntryPreflight = useCallback((action: ChatEntryAction): string | null => {
     const latestPrompt = promptRef.current;
@@ -1383,7 +1735,7 @@ export const EditorApp: React.FC = () => {
 
     // Track writing time
     const interval = setInterval(() => {
-      if (document.hasFocus() && prompt.id) {
+      if (document.hasFocus() && promptRef.current.id) {
         const delta = Date.now() - lastFocusRef.current;
         if (delta < 5000) { // Only count if <5s since last check (to avoid counting idle time)
           // Will be saved when prompt is saved
@@ -1396,7 +1748,7 @@ export const EditorApp: React.FC = () => {
       window.clearTimeout(readyTimer);
       clearInterval(interval);
     };
-  }, [prompt.id]);
+  }, []);
 
   useEffect(() => {
     currentPromptIdRef.current = (prompt.id || '__new__').trim() || '__new__';
@@ -1471,7 +1823,49 @@ export const EditorApp: React.FC = () => {
       if (showLoaderTimerRef.current) {
         window.clearTimeout(showLoaderTimerRef.current);
       }
+      if (promptSwitchPlaceholderTimerRef.current) {
+        window.clearTimeout(promptSwitchPlaceholderTimerRef.current);
+      }
+      if (editorViewStateSaveTimerRef.current !== null) {
+        window.clearTimeout(editorViewStateSaveTimerRef.current);
+        editorViewStateSaveTimerRef.current = null;
+      }
+      clearPromptOpenLayoutSettleTimer();
+      if (sectionMeasurementResumeTimerRef.current !== null) {
+        window.clearTimeout(sectionMeasurementResumeTimerRef.current);
+        sectionMeasurementResumeTimerRef.current = null;
+      }
+      clearPromptPlanHydrationTimer();
+      clearPendingBackgroundRecalc();
     };
+  }, [clearPendingBackgroundRecalc, clearPromptOpenLayoutSettleTimer, clearPromptPlanHydrationTimer]);
+
+  const setPromptSwitchPlaceholderActive = useCallback((active: boolean) => {
+    isPromptSwitchPlaceholderVisibleRef.current = active;
+    setIsPromptSwitchPlaceholderVisible(active);
+  }, []);
+
+  const clearPromptSwitchPlaceholderDelay = useCallback(() => {
+    if (promptSwitchPlaceholderTimerRef.current !== null) {
+      window.clearTimeout(promptSwitchPlaceholderTimerRef.current);
+      promptSwitchPlaceholderTimerRef.current = null;
+    }
+    pendingPromptOpenMessageRef.current = null;
+  }, []);
+
+  /** Apply prompt-specific saved heights before real prompt fields arrive. */
+  const applyPromptLayoutHeights = useCallback((viewState: EditorPromptViewState) => {
+    const contentHeights = viewState.contentHeights || {};
+    const nextPromptContentHeight = normalizeEditorLayoutHeight(contentHeights.promptContent);
+    const nextReportHeight = normalizeEditorLayoutHeight(contentHeights.report);
+    const nextGlobalContextHeight = normalizeEditorLayoutHeight(contentHeights.globalContext);
+    const nextProjectInstructionsHeight = normalizeEditorLayoutHeight(contentHeights.projectInstructions);
+
+    if (nextPromptContentHeight) { setPromptContentHeight(nextPromptContentHeight); }
+    if (nextReportHeight) { setReportHeight(nextReportHeight); }
+    if (nextGlobalContextHeight) { setGlobalContextHeight(nextGlobalContextHeight); }
+    if (nextProjectInstructionsHeight) { setProjectInstructionsHeight(nextProjectInstructionsHeight); }
+    setSectionHeights(viewState.sectionHeights || {});
   }, []);
 
   const handleMessage = useCallback((msg: any) => {
@@ -1485,7 +1879,47 @@ export const EditorApp: React.FC = () => {
           if (nextOpenRequestVersion > 0) {
             activePromptOpenRequestVersionRef.current = nextOpenRequestVersion;
           }
+          promptSwitchTimingRef.current = {
+            promptId: String(msg.promptId || '').trim() || undefined,
+            promptUuid: String(msg.promptUuid || '').trim() || undefined,
+            openRequestVersion: nextOpenRequestVersion,
+            startedAt: Date.now(),
+          };
         }
+        enqueueEditorViewStateSave({ prompt: promptRef.current, flush: true, reason: 'before-switch' });
+        finishPromptPlanHydration('switch');
+        clearPromptOpenLayoutSettleTimer();
+        if (sectionMeasurementResumeTimerRef.current !== null) {
+          window.clearTimeout(sectionMeasurementResumeTimerRef.current);
+          sectionMeasurementResumeTimerRef.current = null;
+        }
+        sectionMeasurementSuspendedUntilRef.current = Number.MAX_SAFE_INTEGER;
+        setIsPromptOpenLayoutSettling(false);
+        clearPendingBackgroundRecalc();
+        clearPromptSwitchPlaceholderDelay();
+        promptSwitchRestoreViewStateRef.current = editorViewStateRef.current;
+        const loadingEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
+        postEditorDebugLog('editor-layout', 'promptLoading.apply', {
+          promptId: String(msg.promptId || '').trim() || '__new__',
+          promptUuid: String(msg.promptUuid || '').trim(),
+          openRequestVersion: Number(msg.openRequestVersion || 0),
+          activeTab: loadingEditorViewState.activeTab,
+          branchesExpanded: loadingEditorViewState.branchesExpanded,
+          branchesExpandedManual: loadingEditorViewState.branchesExpandedManual,
+          contentHeights: loadingEditorViewState.contentHeights,
+          sectionHeights: loadingEditorViewState.sectionHeights,
+          sectionCount: Object.keys(loadingEditorViewState.sectionHeights || {}).length,
+        });
+        setActiveTab(loadingEditorViewState.activeTab);
+        setExpandedSections(loadingEditorViewState.expandedSections);
+        setManualSectionOverrides(loadingEditorViewState.manualSectionOverrides);
+        setIsDescriptionExpanded(loadingEditorViewState.descriptionExpanded);
+        setShowBranches(loadingEditorViewState.branchesExpanded);
+        setBranchesExpandedManual(loadingEditorViewState.branchesExpandedManual);
+        applyPromptLayoutHeights(loadingEditorViewState);
+        promptSwitchPlaceholderStartedAtRef.current = Date.now();
+        setPromptSwitchPlaceholderActive(true);
+        setShowLoader(false);
         clearChatStartTimeout();
         startChatLockRef.current = false;
         setIsStartingChat(false);
@@ -1509,14 +1943,13 @@ export const EditorApp: React.FC = () => {
         clearGitOverlayBusyState({ force: true });
         setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
         setPromptPlanState({ exists: false, content: '' });
-        // Delay showing the loader so fast loads don't flash
-        if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); }
-        showLoaderTimerRef.current = window.setTimeout(() => { setShowLoader(true); }, PROMPT_OPEN_LOADER_DELAY_MS);
+        if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); showLoaderTimerRef.current = null; }
         break;
       case 'promptLoadingCancelled':
         {
           const cancelledOpenRequestVersion = Number(msg.openRequestVersion || 0);
-          if (cancelledOpenRequestVersion > 0 && cancelledOpenRequestVersion !== activePromptOpenRequestVersionRef.current) {
+          if (cancelledOpenRequestVersion === 0
+            || cancelledOpenRequestVersion !== activePromptOpenRequestVersionRef.current) {
             break;
           }
 
@@ -1524,6 +1957,21 @@ export const EditorApp: React.FC = () => {
             window.clearTimeout(showLoaderTimerRef.current);
             showLoaderTimerRef.current = null;
           }
+          clearPromptSwitchPlaceholderDelay();
+          const restoreViewState = promptSwitchRestoreViewStateRef.current;
+          if (restoreViewState) {
+            setActiveTab(restoreViewState.activeTab);
+            setExpandedSections(restoreViewState.expandedSections);
+            setManualSectionOverrides(restoreViewState.manualSectionOverrides);
+            setIsDescriptionExpanded(restoreViewState.descriptionExpanded);
+            setShowBranches(restoreViewState.branchesExpanded);
+            setBranchesExpandedManual(restoreViewState.branchesExpandedManual);
+            applyPromptLayoutHeights(restoreViewState);
+          }
+          promptSwitchRestoreViewStateRef.current = null;
+          finishPromptPlanHydration('cancelled');
+          sectionMeasurementSuspendedUntilRef.current = 0;
+          setPromptSwitchPlaceholderActive(false);
           activePromptOpenRequestVersionRef.current = 0;
           setShowLoader(false);
           setIsLoaded(true);
@@ -1545,6 +1993,36 @@ export const EditorApp: React.FC = () => {
           if (isOpenPayload && incomingOpenRequestVersion > 0
             && incomingOpenRequestVersion < activePromptOpenRequestVersionRef.current) {
             break;
+          }
+          if (isOpenPayload
+            && incomingOpenRequestVersion > 0
+            && isPromptSwitchPlaceholderVisibleRef.current
+            && promptSwitchPlaceholderStartedAtRef.current > 0) {
+            const placeholderVisibleMs = Date.now() - promptSwitchPlaceholderStartedAtRef.current;
+            const remainingPlaceholderMs = PROMPT_SWITCH_PLACEHOLDER_MIN_VISIBLE_MS - placeholderVisibleMs;
+            if (remainingPlaceholderMs > 0) {
+              pendingPromptOpenMessageRef.current = msg;
+              if (promptSwitchPlaceholderTimerRef.current !== null) {
+                window.clearTimeout(promptSwitchPlaceholderTimerRef.current);
+              }
+              postEditorDebugLog('editor-layout', 'promptOpen.delayed', {
+                promptId: incomingPromptId,
+                promptUuid: incomingPromptUuid,
+                openRequestVersion: incomingOpenRequestVersion,
+                placeholderVisibleMs,
+                delayMs: remainingPlaceholderMs,
+                minVisibleMs: PROMPT_SWITCH_PLACEHOLDER_MIN_VISIBLE_MS,
+              });
+              promptSwitchPlaceholderTimerRef.current = window.setTimeout(() => {
+                promptSwitchPlaceholderTimerRef.current = null;
+                const pendingPromptOpenMessage = pendingPromptOpenMessageRef.current;
+                pendingPromptOpenMessageRef.current = null;
+                if (pendingPromptOpenMessage) {
+                  unstable_batchedUpdates(() => handleMessageRef.current(pendingPromptOpenMessage));
+                }
+              }, remainingPlaceholderMs);
+              break;
+            }
           }
           if (reason === 'save' && activeSaveRequestId && incomingRequestId !== activeSaveRequestId) {
             break;
@@ -1572,6 +2050,21 @@ export const EditorApp: React.FC = () => {
               activePromptOpenRequestVersionRef.current = incomingOpenRequestVersion;
             }
             const nextEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
+            const promptSwitchTiming = promptSwitchTimingRef.current;
+            postEditorDebugLog('editor-layout', 'promptOpen.apply', {
+              promptId: incomingPromptId,
+              promptUuid: incomingPromptUuid,
+              openRequestVersion: incomingOpenRequestVersion,
+              durationMs: promptSwitchTiming ? Date.now() - promptSwitchTiming.startedAt : null,
+              placeholderVisible: isPromptSwitchPlaceholderVisibleRef.current,
+              activeTab: nextEditorViewState.activeTab,
+              branchesExpanded: nextEditorViewState.branchesExpanded,
+              branchesExpandedManual: nextEditorViewState.branchesExpandedManual,
+              contentHeights: nextEditorViewState.contentHeights,
+              sectionHeights: nextEditorViewState.sectionHeights,
+              sectionCount: Object.keys(nextEditorViewState.sectionHeights || {}).length,
+            });
+            promptSwitchTimingRef.current = null;
             const shouldResetGitOverlayState = shouldResetGitOverlayStateOnPromptOpen({
               overlayOpen: gitOverlayOpenRef.current,
               currentPromptId,
@@ -1581,6 +2074,9 @@ export const EditorApp: React.FC = () => {
               previousPromptId,
             });
             if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); showLoaderTimerRef.current = null; }
+            clearPromptSwitchPlaceholderDelay();
+            promptSwitchRestoreViewStateRef.current = null;
+            setPromptSwitchPlaceholderActive(false);
             setShowLoader(false);
             setIsGeneratingTitle(Boolean(msg.aiEnrichment?.title));
             setIsGeneratingDescription(Boolean(msg.aiEnrichment?.description));
@@ -1604,6 +2100,11 @@ export const EditorApp: React.FC = () => {
             setExpandedSections(nextEditorViewState.expandedSections);
             setManualSectionOverrides(nextEditorViewState.manualSectionOverrides);
             setIsDescriptionExpanded(nextEditorViewState.descriptionExpanded);
+            setShowBranches(nextEditorViewState.branchesExpanded);
+            setBranchesExpandedManual(nextEditorViewState.branchesExpandedManual);
+            applyPromptLayoutHeights(nextEditorViewState);
+            startPromptOpenLayoutSettle(nextEditorViewState.activeTab);
+            startPromptPlanHydration(msg.prompt, nextEditorViewState, incomingOpenRequestVersion);
             localReportDirtyRef.current = false;
             currentPromptIdRef.current = incomingPromptId;
             hasBeenSavedRef.current = Boolean(msg.prompt.id);
@@ -1774,6 +2275,11 @@ export const EditorApp: React.FC = () => {
           promptPlanStateRef.current = nextPlanState;
           setPlanHighlightedLineIndexes(nextHighlightedLineIndexes);
           setPromptPlanState(nextPlanState);
+          finishPromptPlanHydration('updated', {
+            promptId: incomingPromptId || currentPromptId || '__new__',
+            exists: nextPlanState.exists,
+            contentLength: nextPlanState.content.length,
+          });
         }
         break;
       case 'promptSaved':
@@ -2165,6 +2671,7 @@ export const EditorApp: React.FC = () => {
             activeSaveIdRef.current = (updatedPrompt.id || '__new__').trim() || '__new__';
             setIsSaving(true);
             setIsDirty(false);
+            enqueueEditorViewStateSave({ prompt: updatedPrompt, reason: 'before-save:improved-prompt-autosave' });
             vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source: 'autosave' });
           } else {
             setIsDirty(true);
@@ -2549,9 +3056,15 @@ export const EditorApp: React.FC = () => {
         setIsRecalculating(false);
         break;
     }
-  }, [clearChatStartTimeout, createStartChatRequestId, dispatchStartChat, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, shouldHandleChatStartMessage, showInlineNotice]);
+  }, [applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
 
-  useMessageListener(handleMessage);
+  handleMessageRef.current = handleMessage;
+
+  const batchedHandleMessage = useCallback((msg: any) => {
+    unstable_batchedUpdates(() => handleMessage(msg));
+  }, [handleMessage]);
+
+  useMessageListener(batchedHandleMessage);
 
   useEffect(() => () => {
     clearChatStartTimeout();
@@ -2562,6 +3075,7 @@ export const EditorApp: React.FC = () => {
       if (document.visibilityState !== 'hidden') {
         return;
       }
+      enqueueEditorViewStateSaveRef.current({ flush: true, reason: 'page-hidden' });
       clearChatStartTimeout();
       startChatLockRef.current = false;
       setIsStartingChat(false);
@@ -2573,9 +3087,18 @@ export const EditorApp: React.FC = () => {
       setNotice(null);
     };
 
+    const handlePageExit = () => {
+      enqueueEditorViewStateSaveRef.current({ flush: true, reason: 'page-exit' });
+    };
+
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageExit);
+    window.addEventListener('beforeunload', handlePageExit);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handlePageExit);
+      window.removeEventListener('beforeunload', handlePageExit);
+      enqueueEditorViewStateSaveRef.current({ flush: true, reason: 'effect-cleanup' });
     };
   }, [clearChatStartTimeout, resetChatStartRequestTracking, resetStartChatPreflightTracking]);
 
@@ -2598,6 +3121,7 @@ export const EditorApp: React.FC = () => {
       setBranchesResolved(false);
       setBranches([]);
       setShowBranches(false);
+      setBranchesExpandedManual(false);
       return;
     }
     setBranchesResolved(false);
@@ -2607,11 +3131,16 @@ export const EditorApp: React.FC = () => {
 
   // Auto-expand branch list on first resolve if mismatch detected
   useEffect(() => {
-    if (branchesResolved && hasBranchMismatch && !branchAutoExpandedRef.current) {
+    if (shouldAutoExpandPromptBranchList({
+      branchesResolved,
+      hasBranchMismatch,
+      branchesExpandedManual,
+      autoExpanded: branchAutoExpandedRef.current,
+    })) {
       branchAutoExpandedRef.current = true;
       setShowBranches(true);
     }
-  }, [branchesResolved, hasBranchMismatch]);
+  }, [branchesExpandedManual, branchesResolved, hasBranchMismatch]);
 
   useEffect(() => {
     if (!promptContentHeight) {
@@ -2657,37 +3186,34 @@ export const EditorApp: React.FC = () => {
     }
   }, [projectInstructionsHeight, storage]);
 
+  /** Current large-field heights that should travel with per-prompt editor view state. */
+  const editorContentHeights = useMemo<EditorPromptContentHeights>(() => {
+    const nextHeights: EditorPromptContentHeights = {};
+    if (promptContentHeight) { nextHeights.promptContent = promptContentHeight; }
+    if (reportHeight) { nextHeights.report = reportHeight; }
+    if (globalContextHeight) { nextHeights.globalContext = globalContextHeight; }
+    if (projectInstructionsHeight) { nextHeights.projectInstructions = projectInstructionsHeight; }
+    return nextHeights;
+  }, [globalContextHeight, projectInstructionsHeight, promptContentHeight, reportHeight]);
+
   useEffect(() => {
     const nextEditorViewState = normalizeEditorPromptViewState({
       activeTab,
       expandedSections,
       manualSectionOverrides,
       descriptionExpanded: isDescriptionExpanded,
+      branchesExpanded: showBranches,
+      branchesExpandedManual,
+      contentHeights: editorContentHeights,
+      sectionHeights,
     });
+    editorViewStateRef.current = nextEditorViewState;
     const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
     vscode.setState?.({ ...currentState, 'pm.editor.viewState': nextEditorViewState });
     if (storage) {
       storage.setItem('pm.editor.viewState', JSON.stringify(nextEditorViewState));
     }
-  }, [activeTab, expandedSections, manualSectionOverrides, isDescriptionExpanded, storage]);
-
-  useEffect(() => {
-    if (!isLoaded) {
-      return;
-    }
-
-    vscode.postMessage({
-      type: 'savePromptEditorViewState',
-      promptId: promptRef.current.id || undefined,
-      promptUuid: promptRef.current.promptUuid || undefined,
-      state: normalizeEditorPromptViewState({
-        activeTab,
-        expandedSections,
-        manualSectionOverrides,
-        descriptionExpanded: isDescriptionExpanded,
-      }),
-    });
-  }, [activeTab, expandedSections, manualSectionOverrides, isDescriptionExpanded, isLoaded]);
+  }, [activeTab, branchesExpandedManual, editorContentHeights, expandedSections, manualSectionOverrides, isDescriptionExpanded, sectionHeights, showBranches, storage]);
 
   useEffect(() => {
     if (!globalContextTextareaRef.current || typeof ResizeObserver === 'undefined') {
@@ -3280,6 +3806,7 @@ export const EditorApp: React.FC = () => {
     source: 'manual' | 'status-change' | 'autosave',
     options: { clearDirty?: boolean } = {},
   ) => {
+    enqueueEditorViewStateSave({ prompt: updatedPrompt, reason: `before-save:${source}` });
     const requestId = crypto.randomUUID();
     saveStartCounterRef.current = userChangeCounterRef.current;
     activeSaveIdRef.current = (updatedPrompt.id || '__new__').trim() || '__new__';
@@ -3290,7 +3817,7 @@ export const EditorApp: React.FC = () => {
       setIsDirty(false);
     }
     vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source, requestId });
-  }, []);
+  }, [enqueueEditorViewStateSave]);
 
   const handleSave = (
     source: 'manual' | 'status-change' | 'autosave' | unknown = 'manual',
@@ -3569,12 +4096,14 @@ export const EditorApp: React.FC = () => {
   const handleShowBranches = () => {
     if (prompt.projects.length > 0) {
       vscode.postMessage({ type: 'getBranches', projects: prompt.projects });
+      setBranchesExpandedManual(true);
       setShowBranches(!showBranches);
     }
   };
 
   const handleSwitchBranch = (branch: string) => {
     vscode.postMessage({ type: 'switchBranch', branch, projects: prompt.projects });
+    setBranchesExpandedManual(true);
     setShowBranches(false);
   };
 
@@ -3804,6 +4333,305 @@ export const EditorApp: React.FC = () => {
     };
   }, []);
 
+  const shouldShowPromptSwitchPlaceholder = isPromptSwitchPlaceholderVisible && !isLoaded;
+  const shouldShowProcessMemoryPlaceholder = shouldShowPromptSwitchPlaceholder
+    && Boolean(normalizeEditorLayoutHeight(sectionHeights.memory));
+  const shouldShowProcessPlanHydrationPlaceholder = isPromptPlanHydrating
+    && activeTab === 'process'
+    && isLoaded
+    && !shouldShowPromptSwitchPlaceholder
+    && Boolean(normalizeEditorLayoutHeight(sectionHeights.plan));
+
+  /** Capture rendered section heights so the next prompt switch can reserve exact blank space. */
+  useEffect(() => {
+    if (!isLoaded || shouldShowPromptSwitchPlaceholder || typeof document === 'undefined') {
+      return;
+    }
+
+    const scheduleMeasurementAfterSettle = (): boolean => {
+      const delayMs = getSectionMeasurementResumeDelay();
+      if (delayMs <= 0) {
+        return false;
+      }
+      if (sectionMeasurementResumeTimerRef.current === null) {
+        sectionMeasurementResumeTimerRef.current = window.setTimeout(() => {
+          sectionMeasurementResumeTimerRef.current = null;
+          collectSectionHeights();
+        }, delayMs + 16);
+      }
+      return true;
+    };
+
+    const collectSectionHeights = () => {
+      if (isPromptSwitchPlaceholderVisibleRef.current) {
+        return;
+      }
+      if (scheduleMeasurementAfterSettle()) {
+        return;
+      }
+      const nextHeights: EditorPromptSectionHeights = {};
+      const sections = document.querySelectorAll<HTMLElement>('[data-pm-editor-section]');
+      sections.forEach((section) => {
+        if (isPromptSwitchPlaceholderVisibleRef.current
+          || section.getAttribute('data-pm-editor-section-placeholder') === 'true') {
+          return;
+        }
+        const sectionKey = section.getAttribute('data-pm-editor-section');
+        if (!isEditorPromptSectionKey(sectionKey)) {
+          return;
+        }
+        const height = normalizeEditorLayoutHeight(section.getBoundingClientRect().height);
+        if (height) {
+          nextHeights[sectionKey] = height;
+        }
+      });
+
+      if (Object.keys(nextHeights).length === 0) {
+        return;
+      }
+      setSectionHeights((previous) => {
+        let changed = false;
+        const merged: EditorPromptSectionHeights = { ...previous };
+        for (const key of PROMPT_EDITOR_SECTION_KEYS) {
+          const nextHeight = nextHeights[key];
+          if (!nextHeight) {
+            continue;
+          }
+          if (Math.abs((previous[key] || 0) - nextHeight) > 1) {
+            merged[key] = nextHeight;
+            changed = true;
+          }
+        }
+        if (changed) {
+          const serializedHeights = JSON.stringify(merged);
+          if (serializedHeights !== lastLoggedSectionHeightsRef.current) {
+            lastLoggedSectionHeightsRef.current = serializedHeights;
+            postEditorDebugLog('editor-layout', 'sectionHeights.measured', {
+              promptId: promptRef.current.id || '__new__',
+              promptUuid: promptRef.current.promptUuid || '',
+              activeTab,
+              sectionHeights: merged,
+              sectionCount: Object.keys(merged).length,
+            });
+          }
+        }
+        return changed ? merged : previous;
+      });
+    };
+
+    collectSectionHeights();
+    if (typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const observer = new ResizeObserver(collectSectionHeights);
+    document.querySelectorAll<HTMLElement>('[data-pm-editor-section]').forEach(section => observer.observe(section));
+    return () => {
+      observer.disconnect();
+      if (sectionMeasurementResumeTimerRef.current !== null) {
+        window.clearTimeout(sectionMeasurementResumeTimerRef.current);
+        sectionMeasurementResumeTimerRef.current = null;
+      }
+    };
+  }, [activeTab, effectiveExpandedSections, getSectionMeasurementResumeDelay, isLoaded, prompt.id, shouldShowPromptSwitchPlaceholder]);
+
+  /** Render a transparent blank block with stable dimensions. */
+  const renderBlankPlaceholderBlock = (
+    key: string,
+    width: React.CSSProperties['width'] = '100%',
+    height: React.CSSProperties['height'] = '14px',
+    extraStyle?: React.CSSProperties,
+  ) => (
+    <span
+      key={key}
+      aria-hidden="true"
+      data-pm-editor-placeholder-block="true"
+      style={{
+        ...styles.blankPlaceholderBlock,
+        width,
+        height,
+        ...extraStyle,
+      }}
+    />
+  );
+
+  /** Render blank label/control space matching a compact form field. */
+  const renderBlankPlaceholderField = (key: string, width: React.CSSProperties['width'] = '100%') => (
+    <div key={key} style={{ ...styles.blankPlaceholderField, width }}>
+      {renderBlankPlaceholderBlock(`${key}-label`, '42%', '12px')}
+      {renderBlankPlaceholderBlock(`${key}-control`, '100%', '32px')}
+    </div>
+  );
+
+  /** Render empty header summary space with a fixed visual footprint. */
+  const renderSectionSummaryPlaceholder = (key: EditorPromptSectionKey) => (
+    <>
+      {renderBlankPlaceholderBlock(`${key}-summary-a`, '96px', '20px', styles.sectionSummaryPlaceholderChip)}
+      {renderBlankPlaceholderBlock(`${key}-summary-b`, '72px', '20px', styles.sectionSummaryPlaceholderChip)}
+    </>
+  );
+
+  /** Render blank fixed-height content for each prompt editor section. */
+  const renderSectionBlankPlaceholderBody = (key: EditorPromptSectionKey) => {
+    const promptTextHeight = promptContentHeight ? `${promptContentHeight}px` : '260px';
+    const reportEditorHeight = reportHeight ? `${reportHeight}px` : '280px';
+    const globalTextHeight = globalContextHeight ? `${globalContextHeight}px` : '72px';
+    const projectInstructionTextHeight = projectInstructionsHeight ? `${projectInstructionsHeight}px` : '72px';
+
+    switch (key) {
+      case 'basic':
+        return (
+          <div data-pm-editor-section-placeholder-body="basic" style={styles.blankPlaceholderStack}>
+            <div style={styles.blankPlaceholderFieldRow}>
+              {renderBlankPlaceholderField('basic-title')}
+              {renderBlankPlaceholderBlock('basic-title-ai', '36px', '32px')}
+            </div>
+            <div style={styles.blankPlaceholderFieldRow}>
+              {renderBlankPlaceholderField('basic-description')}
+              {renderBlankPlaceholderBlock('basic-description-ai', '36px', '32px')}
+            </div>
+            {renderBlankPlaceholderBlock('basic-status', '100%', '34px')}
+          </div>
+        );
+      case 'time':
+        return (
+          <div data-pm-editor-section-placeholder-body="time" style={styles.blankPlaceholderStack}>
+            <div style={styles.blankPlaceholderFourCol}>
+              {['writing', 'implementing', 'task', 'untracked'].map(item => renderBlankPlaceholderBlock(`time-${item}`, '100%', '54px'))}
+            </div>
+            {renderBlankPlaceholderBlock('time-controls', '48%', '30px')}
+          </div>
+        );
+      case 'workspace':
+        return (
+          <div data-pm-editor-section-placeholder-body="workspace" style={styles.blankPlaceholderStack}>
+            {renderBlankPlaceholderField('workspace-projects')}
+            <div style={styles.blankPlaceholderTwoCol}>
+              {renderBlankPlaceholderField('workspace-task')}
+              {renderBlankPlaceholderField('workspace-branch')}
+            </div>
+          </div>
+        );
+      case 'prompt':
+        return (
+          <div data-pm-editor-section-placeholder-body="prompt" style={styles.blankPlaceholderStack}>
+            <div style={styles.blankPlaceholderToolbarRow}>
+              {renderBlankPlaceholderBlock('prompt-label', '120px', '14px')}
+              {renderBlankPlaceholderBlock('prompt-actions', '46%', '24px')}
+            </div>
+            {renderBlankPlaceholderBlock('prompt-textarea', '100%', promptTextHeight, styles.blankPlaceholderTextarea)}
+          </div>
+        );
+      case 'globalPrompt':
+        return (
+          <div data-pm-editor-section-placeholder-body="globalPrompt" style={styles.blankPlaceholderStack}>
+            {renderBlankPlaceholderBlock('global-context', '100%', globalTextHeight, styles.blankPlaceholderTextarea)}
+            {renderBlankPlaceholderBlock('project-instructions', '100%', projectInstructionTextHeight, styles.blankPlaceholderTextarea)}
+          </div>
+        );
+      case 'tech':
+      case 'integrations':
+        return (
+          <div data-pm-editor-section-placeholder-body={key} style={styles.blankPlaceholderStack}>
+            {renderBlankPlaceholderField(`${key}-first`)}
+            {renderBlankPlaceholderField(`${key}-second`)}
+            {key === 'integrations' ? renderBlankPlaceholderField(`${key}-third`) : null}
+          </div>
+        );
+      case 'agent':
+        return (
+          <div data-pm-editor-section-placeholder-body="agent" style={styles.blankPlaceholderTwoCol}>
+            {renderBlankPlaceholderField('agent-model')}
+            {renderBlankPlaceholderField('agent-mode')}
+          </div>
+        );
+      case 'groups':
+        return (
+          <div data-pm-editor-section-placeholder-body="groups" style={styles.blankPlaceholderChipRow}>
+            {renderBlankPlaceholderBlock('groups-a', '84px', '28px')}
+            {renderBlankPlaceholderBlock('groups-b', '118px', '28px')}
+            {renderBlankPlaceholderBlock('groups-c', '74px', '28px')}
+          </div>
+        );
+      case 'files':
+        return (
+          <div data-pm-editor-section-placeholder-body="files" style={styles.blankPlaceholderCardGrid}>
+            {renderBlankPlaceholderBlock('files-a', '100%', '196px', styles.blankPlaceholderCard)}
+            {renderBlankPlaceholderBlock('files-b', '100%', '196px', styles.blankPlaceholderCard)}
+          </div>
+        );
+      case 'notes':
+        return (
+          <div data-pm-editor-section-placeholder-body="notes" style={styles.blankPlaceholderStack}>
+            {renderBlankPlaceholderBlock('notes-status', '40%', '22px')}
+            {renderBlankPlaceholderBlock('notes-textarea', '100%', '144px', styles.blankPlaceholderTextarea)}
+          </div>
+        );
+      case 'memory':
+        return (
+          <div data-pm-editor-section-placeholder-body="memory" style={styles.blankPlaceholderStack}>
+            {renderBlankPlaceholderBlock('memory-row-a', '100%', '28px')}
+            {renderBlankPlaceholderBlock('memory-row-b', '82%', '28px')}
+            {renderBlankPlaceholderBlock('memory-row-c', '68%', '28px')}
+          </div>
+        );
+      case 'plan':
+        return renderBlankPlaceholderBlock('plan-content', '100%', '150px', styles.blankPlaceholderTextarea);
+      case 'report':
+        return (
+          <div data-pm-editor-section-placeholder-body="report" style={styles.blankPlaceholderStack}>
+            {renderBlankPlaceholderBlock('report-editor', '100%', reportEditorHeight, styles.blankPlaceholderTextarea)}
+            {renderBlankPlaceholderField('report-http')}
+          </div>
+        );
+      default:
+        return (
+          <div data-pm-editor-section-placeholder-body={key} style={styles.blankPlaceholderStack}>
+            {renderBlankPlaceholderBlock(`${key}-line-a`, '100%', '28px')}
+            {renderBlankPlaceholderBlock(`${key}-line-b`, '72%', '28px')}
+          </div>
+        );
+    }
+  };
+
+  /** Resolve the best known section height for blank prompt-switch placeholders. */
+  const resolveBlankPlaceholderSectionMinHeight = (key: EditorPromptSectionKey): number | undefined => {
+    const savedHeight = normalizeEditorLayoutHeight(sectionHeights[key]);
+    if (savedHeight) {
+      return savedHeight;
+    }
+
+    const collapsedHeaderHeight = 42;
+    if (!effectiveExpandedSections[key]) {
+      return collapsedHeaderHeight;
+    }
+
+    switch (key) {
+      case 'prompt':
+        return collapsedHeaderHeight + 56 + (promptContentHeight || 260);
+      case 'globalPrompt':
+        return collapsedHeaderHeight + 46 + (globalContextHeight || 72) + (projectInstructionsHeight || 72);
+      case 'report':
+        return collapsedHeaderHeight + 72 + (reportHeight || 280);
+      case 'files':
+        return collapsedHeaderHeight + 232;
+      case 'basic':
+        return collapsedHeaderHeight + 150;
+      case 'workspace':
+        return collapsedHeaderHeight + 122;
+      case 'time':
+        return collapsedHeaderHeight + 108;
+      case 'notes':
+        return collapsedHeaderHeight + 198;
+      case 'memory':
+        return collapsedHeaderHeight + 112;
+      case 'plan':
+        return collapsedHeaderHeight + 184;
+      default:
+        return collapsedHeaderHeight + 104;
+    }
+  };
+
   const renderSection = (
     key: EditorPromptSectionKey,
     title: string,
@@ -3814,9 +4642,34 @@ export const EditorApp: React.FC = () => {
     const visibleItems = summaryItems.slice(0, 3);
     const hiddenCount = Math.max(0, summaryItems.length - visibleItems.length);
     const isExpanded = effectiveExpandedSections[key];
+    const shouldShowSectionPlaceholder = shouldShowPromptSwitchPlaceholder
+      || (key === 'plan' && shouldShowProcessPlanHydrationPlaceholder);
+    const isContentVisible = isLoaded || shouldShowSectionPlaceholder;
+    const savedSectionHeight = normalizeEditorLayoutHeight(sectionHeights[key]);
+    const placeholderSectionHeight = shouldShowSectionPlaceholder
+      ? resolveBlankPlaceholderSectionMinHeight(key)
+      : undefined;
+    const lockedSectionHeight = savedSectionHeight && (shouldShowSectionPlaceholder || (isPromptOpenLayoutSettling && isLoaded))
+      ? savedSectionHeight
+      : undefined;
+    const fallbackPlaceholderMinHeight = !lockedSectionHeight ? placeholderSectionHeight : undefined;
 
     return (
-      <section style={styles.sectionCard}>
+      <section
+        style={{
+          ...styles.sectionCard,
+          ...(fallbackPlaceholderMinHeight ? { minHeight: `${fallbackPlaceholderMinHeight}px` } : {}),
+          ...(lockedSectionHeight ? {
+            height: `${lockedSectionHeight}px`,
+            minHeight: `${lockedSectionHeight}px`,
+            maxHeight: `${lockedSectionHeight}px`,
+            boxSizing: 'border-box' as const,
+            overflow: 'hidden',
+          } : {}),
+        }}
+        data-pm-editor-section={key}
+        data-pm-editor-section-placeholder={shouldShowSectionPlaceholder ? 'true' : undefined}
+      >
       <div
         style={{
           ...styles.sectionHeaderRow,
@@ -3836,10 +4689,13 @@ export const EditorApp: React.FC = () => {
         <span
           style={{
             ...styles.sectionSummaryWrap,
-            ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden),
+            ...(isContentVisible ? styles.blockContentVisible : styles.blockContentHidden),
           }}
+          data-pm-editor-summary-placeholder={shouldShowSectionPlaceholder ? 'true' : undefined}
         >
-          {visibleItems.length > 0 ? (
+          {shouldShowSectionPlaceholder ? (
+            renderSectionSummaryPlaceholder(key)
+          ) : visibleItems.length > 0 ? (
             <>
               {visibleItems.map((item, index) => (
                 <span key={`${key}-summary-${index}`} style={styles.sectionSummaryChip} title={item}>
@@ -3859,10 +4715,12 @@ export const EditorApp: React.FC = () => {
         <div
           style={{
             ...styles.sectionHeaderActions,
-            ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden),
+            ...(isContentVisible ? styles.blockContentVisible : styles.blockContentHidden),
           }}
         >
-          {headerActions}
+          {shouldShowSectionPlaceholder
+            ? renderBlankPlaceholderBlock(`${key}-header-action`, '78px', '24px')
+            : headerActions}
         </div>
       ) : null}
       </div>
@@ -3871,10 +4729,10 @@ export const EditorApp: React.FC = () => {
           <div
             style={{
               ...styles.sectionBodyContent,
-              ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden),
+              ...(isContentVisible ? styles.blockContentVisible : styles.blockContentHidden),
             }}
           >
-            {content}
+            {shouldShowSectionPlaceholder ? renderSectionBlankPlaceholderBody(key) : content}
           </div>
         </div>
       )}
@@ -3884,6 +4742,7 @@ export const EditorApp: React.FC = () => {
 
   // ---- Memory section for the Process tab (uses renderSection) ----
   const showMemorySection = prompt.status !== 'draft' && chatMemorySummary !== null;
+  const shouldRenderMemorySection = shouldShowProcessMemoryPlaceholder || showMemorySection;
 
   /** Format character count as a short human-readable label (e.g. "5.8k") */
   const formatChars = (count: number): string => {
@@ -4028,7 +4887,7 @@ export const EditorApp: React.FC = () => {
   return (
     <div style={styles.container}>
       {/* Loading overlay — covers only the form area width */}
-      {showLoader && !isLoaded && (
+      {showLoader && !isLoaded && !shouldShowPromptSwitchPlaceholder && (
         <div style={styles.loadingOverlay}>
           <div style={styles.loadingSpinner} />
         </div>
@@ -4040,10 +4899,12 @@ export const EditorApp: React.FC = () => {
           <h2
             style={{
               ...styles.headerTitle,
-              ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden),
+              ...((isLoaded || shouldShowPromptSwitchPlaceholder) ? styles.blockContentVisible : styles.blockContentHidden),
             }}
           >
-            {prompt.title || prompt.id || t('editor.newPrompt')}
+            {shouldShowPromptSwitchPlaceholder
+              ? renderBlankPlaceholderBlock('header-title', '52%', '18px', styles.headerTitlePlaceholder)
+              : (prompt.title || prompt.id || t('editor.newPrompt'))}
           </h2>
           <div
             style={{
@@ -4769,11 +5630,11 @@ export const EditorApp: React.FC = () => {
               <PromptStatusText status={prompt.status} variant="badge" style={styles.sectionStatusText} />
             ))}
 
-          {showMemorySection && chatMemorySummary ? renderSection('memory', t('editor.memoryBlockTitle'), memorySummary, (
-            <ChatMemoryBlock summary={chatMemorySummary} />
+          {shouldRenderMemorySection ? renderSection('memory', t('editor.memoryBlockTitle'), memorySummary, (
+            chatMemorySummary ? <ChatMemoryBlock summary={chatMemorySummary} /> : null
           )) : null}
 
-          {shouldShowPlanSection ? renderSection('plan', 'План', planSummary, (
+          {(shouldShowPromptSwitchPlaceholder || shouldShowPlanSection) ? renderSection('plan', 'План', planSummary, (
             <>
               {hasPlanContent ? (
                 <div style={styles.planRawContent} role="log" aria-live="polite" aria-atomic="false">
@@ -4817,11 +5678,13 @@ export const EditorApp: React.FC = () => {
               <div style={styles.field}>
                 <label style={styles.label}>{t('editor.workResult')}</label>
                 <RichTextEditor
+                  key={`${prompt.id || '__new__'}:report`}
                   value={prompt.report || ''}
                   onChange={v => updateField('report', v)}
                   onDebug={logMainRichTextDebug}
                   autoModeKey={prompt.id}
                   autoResize
+                  suspendAutoResize={shouldShowPromptSwitchPlaceholder || isPromptOpenLayoutSettling}
                   placeholder={t('editor.reportPlaceholder')}
                   contentPadding="compact"
                   persistedHeight={reportHeight}
@@ -5030,6 +5893,78 @@ const styles: Record<string, React.CSSProperties> = {
   },
   blockContentHidden: {
     visibility: 'hidden',
+  },
+  blankPlaceholderBlock: {
+    display: 'inline-block',
+    flexShrink: 0,
+    borderRadius: '4px',
+    background: 'transparent',
+    border: '1px solid transparent',
+    boxSizing: 'border-box' as const,
+  },
+  headerTitlePlaceholder: {
+    verticalAlign: 'middle',
+  },
+  sectionSummaryPlaceholderChip: {
+    borderRadius: '999px',
+  },
+  blankPlaceholderStack: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+    width: '100%',
+  },
+  blankPlaceholderField: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    minWidth: 0,
+  },
+  blankPlaceholderFieldRow: {
+    display: 'flex',
+    alignItems: 'flex-end',
+    gap: '8px',
+    width: '100%',
+  },
+  blankPlaceholderTwoCol: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: '12px',
+    width: '100%',
+  },
+  blankPlaceholderFourCol: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+    gap: '8px',
+    width: '100%',
+  },
+  blankPlaceholderToolbarRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
+    width: '100%',
+  },
+  blankPlaceholderTextarea: {
+    display: 'block',
+    borderRadius: '4px',
+    minHeight: '60px',
+  },
+  blankPlaceholderChipRow: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: '8px',
+    width: '100%',
+  },
+  blankPlaceholderCardGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+    gap: '12px',
+    width: '100%',
+  },
+  blankPlaceholderCard: {
+    borderRadius: '10px',
   },
   loadingOverlay: {
     position: 'absolute',

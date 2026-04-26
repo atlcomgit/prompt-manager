@@ -18,6 +18,12 @@ export interface ClipboardImagePayload {
 	dataBase64: string;
 }
 
+/** Target prompt identity used by prompt-open flows before full prompt data loads. */
+export interface PromptOpenTarget {
+	id: string;
+	promptUuid?: string;
+}
+
 // ---- Messages FROM webview TO extension ----
 
 export type WebviewToExtensionMessage =
@@ -28,7 +34,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'deletePrompt'; id: string }
 	| { type: 'duplicatePrompt'; id: string }
 	| { type: 'createPrompt' }
-	| { type: 'openPrompt'; id: string }
+	| ({ type: 'openPrompt' } & PromptOpenTarget)
 	| { type: 'importPrompt' }
 	| { type: 'exportPrompt'; id: string }
 	| { type: 'startChatPreflight'; id: string; prompt?: Prompt; forceRebindChat?: boolean; requestId?: string }
@@ -239,7 +245,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'reportEditorSynced'; report: string; updatedAt?: string }
 	| { type: 'reportEditorSaved'; updatedAt?: string }
 	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number }
-	| { type: 'promptLoading'; promptId?: string; promptUuid?: string; openRequestVersion?: number }
+	| { type: 'promptLoading'; promptId?: string; promptUuid?: string; openRequestVersion?: number; editorViewState?: EditorPromptViewState }
 	| { type: 'promptLoadingCancelled'; promptId?: string; openRequestVersion?: number }
 	| { type: 'nextTaskNumber'; taskNumber: string }
 	| { type: 'chatOpened'; promptId: string; requestId?: string }

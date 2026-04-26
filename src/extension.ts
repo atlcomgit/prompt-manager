@@ -26,6 +26,7 @@ import {
 } from './services/index.js';
 import { SidebarProvider, AboutPanelManager, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager, CopilotStatusBarProvider, CopilotUsagePanelManager, MemoryPanelManager } from './providers/index.js';
 import type { MemoryCommit, HookCommitPayload, MemoryAnalysisDepth } from './types/index.js';
+import type { PromptOpenTarget } from './types/messages.js';
 import { DEFAULT_COPILOT_MODEL_FAMILY } from './constants/ai.js';
 import {
 	appendPromptManagerLog,
@@ -360,8 +361,22 @@ export function activate(context: vscode.ExtensionContext) {
 		)
 	);
 
-	const openPromptOutsideSidebar = async (id: string): Promise<void> => {
-		await editorPanelManager.openPrompt(id);
+	const normalizePromptOpenTarget = (target: string | PromptOpenTarget): PromptOpenTarget => {
+		const rawId = typeof target === 'string' ? target : target.id;
+		const rawPromptUuid = typeof target === 'string' ? '' : target.promptUuid;
+		const id = (rawId || '__new__').trim() || '__new__';
+		const promptUuid = (rawPromptUuid || '').trim();
+
+		return {
+			id,
+			...(promptUuid ? { promptUuid } : {}),
+		};
+	};
+
+	const openPromptOutsideSidebar = async (target: string | PromptOpenTarget): Promise<void> => {
+		const promptTarget = normalizePromptOpenTarget(target);
+		const id = promptTarget.id;
+		await editorPanelManager.openPrompt(promptTarget);
 		if (id !== '__new__') {
 			await stateService.saveLastPromptId(id);
 		}
@@ -377,8 +392,8 @@ export function activate(context: vscode.ExtensionContext) {
 	};
 
 	// Open prompt when selected in sidebar
-	sidebarProvider.onDidOpenPrompt(async (id) => {
-		await editorPanelManager.openPrompt(id);
+	sidebarProvider.onDidOpenPrompt(async (target) => {
+		await editorPanelManager.openPrompt(target);
 	});
 
 	// Close prompt editor tab immediately when prompt is deleted from sidebar
@@ -509,12 +524,13 @@ export function activate(context: vscode.ExtensionContext) {
 				description: p.description,
 				detail: `Статус: ${p.status} | Обновлён: ${new Date(p.updatedAt).toLocaleDateString()}`,
 				id: p.id,
+				promptUuid: p.promptUuid,
 			}));
 			const selected = await vscode.window.showQuickPick(items, {
 				placeHolder: 'Выберите промпт для открытия',
 			});
 			if (selected) {
-				await openPromptOutsideSidebar(selected.id);
+				await openPromptOutsideSidebar({ id: selected.id, promptUuid: selected.promptUuid });
 			}
 		}),
 

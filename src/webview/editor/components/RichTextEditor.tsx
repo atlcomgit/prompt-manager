@@ -23,6 +23,7 @@ interface Props {
   secondaryActionDisabled?: boolean;
   fillHeight?: boolean;
   autoResize?: boolean;
+  suspendAutoResize?: boolean;
   showFormattingToolbar?: boolean;
   contentPadding?: 'default' | 'compact';
 }
@@ -291,6 +292,7 @@ export const RichTextEditor: React.FC<Props> = ({
   secondaryActionDisabled,
   fillHeight,
   autoResize = false,
+  suspendAutoResize = false,
   showFormattingToolbar,
   contentPadding = 'default',
 }) => {
@@ -356,7 +358,7 @@ export const RichTextEditor: React.FC<Props> = ({
   }, [mode]);
 
   const syncAutoResizeHeight = useCallback(() => {
-    if (fillHeight || !autoResize) {
+    if (fillHeight || !autoResize || suspendAutoResize) {
       return;
     }
 
@@ -385,12 +387,23 @@ export const RichTextEditor: React.FC<Props> = ({
       return;
     }
 
-    setCurrentHeight((prev) => prev === nextHeight ? prev : nextHeight);
-  }, [autoResize, fillHeight, resolveAutoResizeTarget]);
+    setCurrentHeight((prev) => {
+      if (prev === nextHeight) {
+        return prev;
+      }
+      onDebug?.('autoResize.heightChanged', {
+        previousHeight: prev,
+        measuredHeight,
+        nextHeight,
+        mode,
+      });
+      return nextHeight;
+    });
+  }, [autoResize, fillHeight, mode, onDebug, resolveAutoResizeTarget, suspendAutoResize]);
 
   // Schedules a single measurement per frame while the layout is stabilizing.
   const scheduleAutoResizeHeightSync = useCallback(() => {
-    if (fillHeight || !autoResize) {
+    if (fillHeight || !autoResize || suspendAutoResize) {
       return;
     }
 
@@ -407,7 +420,7 @@ export const RichTextEditor: React.FC<Props> = ({
       pendingAutoResizeFrameRef.current = null;
       syncAutoResizeHeight();
     });
-  }, [autoResize, fillHeight, syncAutoResizeHeight]);
+  }, [autoResize, fillHeight, suspendAutoResize, syncAutoResizeHeight]);
 
   useEffect(() => {
     return () => {
@@ -557,7 +570,7 @@ export const RichTextEditor: React.FC<Props> = ({
   }, [htmlSource, markdownPreviewHtml, mode, scheduleAutoResizeHeightSync, value]);
 
   useEffect(() => {
-    if (fillHeight || !autoResize) {
+    if (fillHeight || !autoResize || suspendAutoResize) {
       return;
     }
 
@@ -587,7 +600,7 @@ export const RichTextEditor: React.FC<Props> = ({
     return () => {
       window.removeEventListener('resize', handleWindowResize);
     };
-  }, [autoResize, fillHeight, scheduleAutoResizeHeightSync]);
+  }, [autoResize, fillHeight, scheduleAutoResizeHeightSync, suspendAutoResize]);
 
   useEffect(() => {
     if (!showFormattingToolbar) {

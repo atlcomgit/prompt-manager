@@ -36,6 +36,13 @@ interface TogglePromptEditorSectionExpansionInput {
 	hasReportContent?: boolean;
 }
 
+interface ShouldAutoExpandPromptBranchListInput {
+	branchesResolved: boolean;
+	hasBranchMismatch: boolean;
+	branchesExpandedManual: boolean;
+	autoExpanded: boolean;
+}
+
 interface ShouldPreservePromptIdAfterChatStartInput {
 	stableId?: string | null;
 	chatSessionIds?: readonly string[] | null;
@@ -208,6 +215,14 @@ export function resolvePromptEditorExpandedSections(
 	}
 
 	return nextExpandedSections;
+}
+
+/** Decide whether branch mismatch may auto-open the per-project branches list. */
+export function shouldAutoExpandPromptBranchList(input: ShouldAutoExpandPromptBranchListInput): boolean {
+	return input.branchesResolved
+		&& input.hasBranchMismatch
+		&& !input.branchesExpandedManual
+		&& !input.autoExpanded;
 }
 
 /** Toggle a section and mark auto-managed sections as manually controlled. */

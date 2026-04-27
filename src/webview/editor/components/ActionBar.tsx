@@ -39,27 +39,23 @@ export function resolveChatEntryState(input: Pick<Props, 'status' | 'hasChatSess
   shouldShowOpenChat: boolean;
   shouldShowStartChat: boolean;
 } {
-  const canStartChat = input.isPersistedPrompt && (
-    input.status === 'draft'
-    || input.status === 'stopped'
-    || input.status === 'cancelled'
-  );
-  const canOpenChat = input.isPersistedPrompt && (
-    input.status === 'in-progress'
-    || input.status === 'stopped'
-    || input.status === 'cancelled'
-  );
+  // Draft prompts start a chat, while every other active status can reopen it.
+  const canStartChat = input.isPersistedPrompt && input.status === 'draft';
+  const canOpenChat = input.isPersistedPrompt
+    && input.status !== 'draft'
+    && input.status !== 'closed';
   const hasChatEntry = canOpenChat && (input.hasChatSession || input.isChatPanelOpen);
   const shouldKeepStartChatVisibleWhileLaunching = input.isPersistedPrompt
     && input.isStartingChat
     && input.status === 'in-progress';
+  const shouldShowOpenChat = canOpenChat && !shouldKeepStartChatVisibleWhileLaunching;
 
   return {
     canStartChat,
     canOpenChat,
     hasChatEntry,
-    shouldShowOpenChat: hasChatEntry,
-    shouldShowStartChat: (canStartChat || shouldKeepStartChatVisibleWhileLaunching) && !hasChatEntry,
+    shouldShowOpenChat,
+    shouldShowStartChat: (canStartChat || shouldKeepStartChatVisibleWhileLaunching) && !shouldShowOpenChat,
   };
 }
 

@@ -91,6 +91,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Keep each visible launch stage on screen for up to one second before the next stage appears, including the initial prepare and auto-load rows, so fast launch progress stays readable from the first step to the last one.
 - Prevent the launch block from flashing again later for the same launch when background sync briefly loses and then restores the bound chat-entry signal or the same prompt is reidentified by a later id/UUID normalization step.
 - See a clear explanation above the action buttons on every editor tab when Start Chat is temporarily disabled because the prompt is empty, metadata is still generating, or chat launch is already running.
+- See Go to chat on every persisted prompt status except Draft and Closed, so reopening the bound Copilot chat stays available outside the initial draft stage.
 - See the selected AI model directly in the Process tab launch step, so the opening step confirms which model will be used.
 - Reuse the AI model from the most recently updated prompt when you create a draft through Quick Add Prompt, so quick capture starts with the same model you used last.
 - Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.

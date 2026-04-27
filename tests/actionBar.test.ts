@@ -119,6 +119,32 @@ test('resolveChatEntryState keeps Start Chat visible only while in-progress laun
 	assert.equal(settledState.shouldShowStartChat, false);
 });
 
+test('resolveChatEntryState shows Go to chat for every non-draft active status', () => {
+	for (const status of ['in-progress', 'stopped', 'cancelled', 'completed', 'report', 'review'] as const) {
+		const state = resolveChatEntryState({
+			status,
+			hasChatSession: false,
+			isChatPanelOpen: false,
+			isPersistedPrompt: true,
+			isStartingChat: false,
+		});
+
+		assert.equal(state.shouldShowOpenChat, true, status);
+		assert.equal(state.shouldShowStartChat, false, status);
+	}
+
+	const closedState = resolveChatEntryState({
+		status: 'closed',
+		hasChatSession: false,
+		isChatPanelOpen: false,
+		isPersistedPrompt: true,
+		isStartingChat: false,
+	});
+
+	assert.equal(closedState.shouldShowOpenChat, false);
+	assert.equal(closedState.shouldShowStartChat, false);
+});
+
 test('resolveStartChatDisabledState blocks chat start while prompt metadata is generating', () => {
 	assert.equal(resolveStartChatDisabledState({
 		hasContent: true,
@@ -196,7 +222,7 @@ test('ActionBar hides Start Chat after launch loader finishes for in-progress pr
 	});
 
 	assert.doesNotMatch(markup, /Start Chat/);
-	assert.doesNotMatch(markup, /Go to chat/);
+	assert.match(markup, /Go to chat/);
 	assert.doesNotMatch(markup, /role="status"/);
 });
 

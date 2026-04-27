@@ -104,8 +104,6 @@ type GitOverlayTrackedRequest = {
 const CHAT_LAUNCH_COMPLETION_HOLD_MS = 2000;
 const CHAT_LAUNCH_MIN_PHASE_VISIBLE_MS = 1000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
-// Small delay avoids loader flashes while still hiding stale prompt content quickly.
-const PROMPT_OPEN_LOADER_DELAY_MS = 100;
 // Keep blank switch placeholders visible long enough to make the target layout readable.
 const PROMPT_SWITCH_PLACEHOLDER_MIN_VISIBLE_MS = 450;
 const PROMPT_OPEN_SECTION_MEASURE_SETTLE_MS = 640;
@@ -399,7 +397,6 @@ export const EditorApp: React.FC = () => {
   // (only sent when reusing an existing singleton panel), so we show the loader
   // immediately and hide it once the first 'prompt' message with reason='open' arrives.
   const [showLoader, setShowLoader] = useState(true);
-  const showLoaderTimerRef = useRef<number | null>(null);
   const isPromptSwitchPlaceholderVisibleRef = useRef(false);
   const promptSwitchPlaceholderStartedAtRef = useRef(0);
   const promptSwitchPlaceholderTimerRef = useRef<number | null>(null);
@@ -1820,9 +1817,6 @@ export const EditorApp: React.FC = () => {
       if (autoSaveTimerRef.current) {
         window.clearTimeout(autoSaveTimerRef.current);
       }
-      if (showLoaderTimerRef.current) {
-        window.clearTimeout(showLoaderTimerRef.current);
-      }
       if (promptSwitchPlaceholderTimerRef.current) {
         window.clearTimeout(promptSwitchPlaceholderTimerRef.current);
       }
@@ -1919,7 +1913,7 @@ export const EditorApp: React.FC = () => {
         applyPromptLayoutHeights(loadingEditorViewState);
         promptSwitchPlaceholderStartedAtRef.current = Date.now();
         setPromptSwitchPlaceholderActive(true);
-        setShowLoader(false);
+        setShowLoader(true);
         clearChatStartTimeout();
         startChatLockRef.current = false;
         setIsStartingChat(false);
@@ -1943,7 +1937,6 @@ export const EditorApp: React.FC = () => {
         clearGitOverlayBusyState({ force: true });
         setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
         setPromptPlanState({ exists: false, content: '' });
-        if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); showLoaderTimerRef.current = null; }
         break;
       case 'promptLoadingCancelled':
         {
@@ -1953,10 +1946,6 @@ export const EditorApp: React.FC = () => {
             break;
           }
 
-          if (showLoaderTimerRef.current) {
-            window.clearTimeout(showLoaderTimerRef.current);
-            showLoaderTimerRef.current = null;
-          }
           clearPromptSwitchPlaceholderDelay();
           const restoreViewState = promptSwitchRestoreViewStateRef.current;
           if (restoreViewState) {
@@ -2073,7 +2062,6 @@ export const EditorApp: React.FC = () => {
               incomingPromptUuid,
               previousPromptId,
             });
-            if (showLoaderTimerRef.current) { window.clearTimeout(showLoaderTimerRef.current); showLoaderTimerRef.current = null; }
             clearPromptSwitchPlaceholderDelay();
             promptSwitchRestoreViewStateRef.current = null;
             setPromptSwitchPlaceholderActive(false);
@@ -4886,14 +4874,14 @@ export const EditorApp: React.FC = () => {
 
   return (
     <div style={styles.container}>
-      {/* Loading overlay — covers only the form area width */}
-      {showLoader && !isLoaded && !shouldShowPromptSwitchPlaceholder && (
-        <div style={styles.loadingOverlay}>
-          <div style={styles.loadingSpinner} />
-        </div>
-      )}
-
       <div style={styles.contentShell}>
+        {/* Loading overlay — stays centered within the prompt form shell */}
+        {showLoader && !isLoaded && (
+          <div style={styles.loadingOverlay} data-pm-editor-loading-overlay="true">
+            <div style={styles.loadingSpinner} />
+          </div>
+        )}
+
         {/* Header */}
         <div style={styles.header}>
           <h2
@@ -5885,6 +5873,7 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     flex: 1,
     minHeight: 0,
+    position: 'relative',
     width: `${EDITOR_FORM_SHELL_WIDTH_PX}px`,
     maxWidth: '100%',
   },
@@ -5971,13 +5960,13 @@ const styles: Record<string, React.CSSProperties> = {
     top: 0,
     bottom: 0,
     left: 0,
-    width: `${EDITOR_FORM_SHELL_WIDTH_PX}px`,
-    maxWidth: '100%',
+    right: 0,
     zIndex: 1000,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    background: 'color-mix(in srgb, var(--vscode-editor-background) 70%, transparent)',
+    background: 'color-mix(in srgb, var(--vscode-editor-background) 82%, transparent)',
+    backdropFilter: 'blur(2px)',
     pointerEvents: 'all',
     animation: 'pm-fade-in 0.2s ease-out',
   },

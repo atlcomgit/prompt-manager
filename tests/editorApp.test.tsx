@@ -103,6 +103,7 @@ test('EditorApp renders the initial prompt page without throwing', async () => {
 		const markup = renderToStaticMarkup(React.createElement(EditorApp));
 
 		assert.ok(markup.length > 0);
+		assert.match(markup, /data-pm-editor-loading-overlay="true"/);
 		assert.match(markup, /Prompt details|Prompt content|Description/i);
 	});
 });

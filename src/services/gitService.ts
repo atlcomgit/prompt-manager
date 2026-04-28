@@ -2868,7 +2868,9 @@ export class GitService {
 					},
 				)),
 		);
-		const resolvedTrackedBranches = options?.detailLevel === 'summary'
+		// До branch hydration держим исходный список tracked-веток стабильным, чтобы
+		// open snapshot не терял допустимые ветки между summary и follow-up hydrate.
+		const resolvedTrackedBranches = options?.detailLevel === 'summary' || options?.includeBranchDetails === false
 			? normalizedTrackedBranches
 			: resolveExistingGitOverlayTrackedBranches(normalizedTrackedBranches, projects);
 

@@ -30,6 +30,7 @@ import {
 	resolveGitOverlaySnapshotProjectScope,
 	shouldResetGitOverlayStateOnPromptOpen,
 	applyGitOverlayOtherProjectsExcludedPaths,
+	mergeGitOverlaySnapshotPreservingOtherProjects,
 	normalizeGitOverlayOtherProjectsExcludedPaths,
 } from '../src/utils/gitOverlay.js';
 import {
@@ -2494,6 +2495,64 @@ test('GitOverlay hides prompt-branch warning when prompt branch is empty and the
 	assert.equal(markup.match(/<select/g)?.length || 0, 0);
 });
 
+test('GitOverlay keeps prompt-branch fallback state when tracked snapshot also has alternative tracked branches', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: '',
+			trackedBranches: ['master', 'dev'],
+			projects: [
+				createTestProject({
+					project: 'marketcoin-api',
+					currentBranch: 'master',
+					promptBranch: '',
+					dirty: true,
+					changeGroups: {
+						workingTree: [createTestChange({ project: 'marketcoin-api', staged: false, group: 'working-tree' })],
+					},
+					branches: [
+						{
+							name: 'master',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/master',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'dev',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/dev',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+		commitMessages: {
+			'marketcoin-api': 'tracked commit message',
+		},
+	});
+
+	assert.match(markup, /editor\.gitOverlayPromptBranchFallbackInfo/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayPromptBranchMissing/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayProjectNeedsTrackedOrPromptSwitch/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayStateNeedsSwitch/);
+	assert.doesNotMatch(markup, /editor\.gitOverlayStateNeedsTarget/);
+	assert.match(markup, /editor\.gitOverlayStateReady/);
+});
+
 test('GitOverlay does not show generic no-project-changes hint when another step 1 info already applies', () => {
 	const markup = renderGitOverlayMarkup({
 		snapshot: createTestSnapshot({
@@ -3981,6 +4040,46 @@ test('applyGitOverlayOtherProjectsExcludedPaths filters only unselected project 
 		['README.md'],
 	);
 	assert.equal(filtered.otherProjects?.[0]?.changeGroups.untracked.length, 0);
+});
+
+test('mergeGitOverlaySnapshotPreservingOtherProjects keeps peer projects during selected refresh', () => {
+	const previousSnapshot = createTestSnapshot({
+		generatedAt: '2026-04-24T00:00:00.000Z',
+		projects: [createTestProject({ project: 'selected' })],
+		otherProjects: [createTestProject({
+			project: 'peer',
+			changeGroups: {
+				staged: [createTestChange({ project: 'peer', path: 'README.md' })],
+			},
+		})],
+	});
+	const nextSnapshot = createTestSnapshot({
+		generatedAt: '2026-04-24T00:00:01.000Z',
+		projects: [createTestProject({ project: 'selected' })],
+		otherProjects: [],
+	});
+
+	const mergedSnapshot = mergeGitOverlaySnapshotPreservingOtherProjects(previousSnapshot, nextSnapshot);
+
+	assert.deepEqual(mergedSnapshot?.otherProjects?.map(project => project.project), ['peer']);
+});
+
+test('mergeGitOverlaySnapshotPreservingOtherProjects does not retain stale peers when full scope is selected', () => {
+	const previousSnapshot = createTestSnapshot({
+		projects: [createTestProject({ project: 'selected' })],
+		otherProjects: [createTestProject({ project: 'peer' })],
+	});
+	const nextSnapshot = createTestSnapshot({
+		projects: [
+			createTestProject({ project: 'selected' }),
+			createTestProject({ project: 'peer' }),
+		],
+		otherProjects: [],
+	});
+
+	const mergedSnapshot = mergeGitOverlaySnapshotPreservingOtherProjects(previousSnapshot, nextSnapshot);
+
+	assert.deepEqual(mergedSnapshot?.otherProjects || [], []);
 });
 
 test('GitOverlay shows exclude action instead of inactive switch for clean selected projects without step 1 work', () => {

@@ -3996,11 +3996,9 @@ export class EditorPanelManager {
 			return;
 		}
 
-		const disposables: vscode.Disposable[] = [
-			repository.state.onDidChange(() => {
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('git', repository.rootUri.fsPath);
-			}),
-		];
+		// Built-in repository state pulses are noisy during status rescans and can
+		// keep auto-refresh queued even when nothing user-visible changed.
+		const disposables: vscode.Disposable[] = [];
 
 		if (repository.onDidCommit) {
 			disposables.push(repository.onDidCommit(() => {

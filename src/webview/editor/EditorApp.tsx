@@ -72,6 +72,7 @@ import {
 } from '../../utils/promptEditorBehavior.js';
 import type { PromptChatLaunchPhase, PromptChatLaunchRenameState } from '../../utils/promptEditorBehavior.js';
 import {
+  mergeGitOverlaySnapshotPreservingOtherProjects,
   resolveGitOverlayBusyActionName,
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
@@ -2734,7 +2735,7 @@ export const EditorApp: React.FC = () => {
           trackedBranchCount: Array.isArray(msg.snapshot?.trackedBranches) ? msg.snapshot.trackedBranches.length : 0,
           reviewProjects,
         });
-        setGitOverlaySnapshot(msg.snapshot || null);
+        setGitOverlaySnapshot((prev) => mergeGitOverlaySnapshotPreservingOtherProjects(prev, msg.snapshot || null));
         setGitOverlayCommitMessages((prev) => {
           if (!msg.snapshot) {
             return {};

@@ -846,6 +846,67 @@ test('GitService buildProjectSnapshot reuses prefetched review state when provid
 	assert.equal(snapshot.projects[0]?.review.unsupportedReason, 'unsupported-provider');
 });
 
+test('GitService getGitOverlaySnapshot preserves tracked branches until branch hydration is ready', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.buildProjectSnapshot = async () => ({
+		project: 'api',
+		repositoryPath: '/tmp/api',
+		available: true,
+		error: '',
+		commitError: '',
+		currentBranch: 'master',
+		promptBranch: '',
+		dirty: true,
+		hasConflicts: false,
+		upstream: '',
+		ahead: 0,
+		behind: 0,
+		lastCommit: null,
+		branches: [],
+		cleanupBranches: [],
+		changeGroups: {
+			merge: [],
+			staged: [],
+			workingTree: [],
+			untracked: [],
+		},
+		changeDetailsHydrated: false,
+		branchDetailsHydrated: false,
+		reviewHydrated: false,
+		review: {
+			remote: null,
+			request: null,
+			error: '',
+			setupAction: null,
+			titlePrefix: '',
+			unsupportedReason: null,
+		},
+		recentCommits: [],
+		staleLocalBranches: [],
+		graph: { nodes: [], edges: [] },
+	});
+
+	const summarySnapshot = await service.getGitOverlaySnapshot(
+		new Map([['api', '/tmp/api']]),
+		['api'],
+		'',
+		['main', 'master'],
+		{ detailLevel: 'summary' },
+	);
+	const lightFullSnapshot = await service.getGitOverlaySnapshot(
+		new Map([['api', '/tmp/api']]),
+		['api'],
+		'',
+		['main', 'master'],
+		{ detailLevel: 'full', includeBranchDetails: false },
+	);
+
+	assert.deepEqual(summarySnapshot.trackedBranches, ['main', 'master']);
+	assert.deepEqual(lightFullSnapshot.trackedBranches, ['main', 'master']);
+});
+
 test('GitService buildProjectSnapshot can defer review resolution during full hydration', async () => {
 	const { GitService } = await importGitService();
 	const service = new GitService() as any;

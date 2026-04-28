@@ -329,6 +329,37 @@ export function applyGitOverlayOtherProjectsExcludedPaths(
 		: snapshot;
 }
 
+/**
+ * Сохраняет уже загруженные otherProjects, пока новый основной snapshot ещё ждёт
+ * lazy-обновление для step-1 блока "Изменения в других проектах".
+ */
+export function mergeGitOverlaySnapshotPreservingOtherProjects(
+	previousSnapshot: GitOverlaySnapshot | null,
+	nextSnapshot: GitOverlaySnapshot | null,
+): GitOverlaySnapshot | null {
+	if (!nextSnapshot) {
+		return null;
+	}
+
+	const nextOtherProjects = Array.isArray(nextSnapshot.otherProjects)
+		? nextSnapshot.otherProjects
+		: [];
+	const previousOtherProjects = previousSnapshot?.otherProjects || [];
+	if (nextOtherProjects.length > 0 || previousOtherProjects.length === 0) {
+		return nextSnapshot;
+	}
+
+	const previousKnownProjectCount = (previousSnapshot?.projects.length || 0) + previousOtherProjects.length;
+	if (nextSnapshot.projects.length >= previousKnownProjectCount) {
+		return nextSnapshot;
+	}
+
+	return {
+		...nextSnapshot,
+		otherProjects: previousOtherProjects,
+	};
+}
+
 function normalizeInteractiveTerminalCommand(command: string): string {
 	return command.replace(/\t/g, '    ');
 }

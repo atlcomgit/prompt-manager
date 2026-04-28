@@ -111,6 +111,14 @@ function createVsCodeMock() {
 	class Disposable {
 		constructor(private readonly callback: () => void) { }
 
+		static from(...disposables: Array<{ dispose(): void }>) {
+			return new Disposable(() => {
+				for (const disposable of disposables) {
+					disposable.dispose();
+				}
+			});
+		}
+
 		dispose(): void {
 			this.callback();
 		}
@@ -1609,6 +1617,48 @@ test('runGitOverlayRefresh emits refresh timing metrics with snapshot source ref
 	assert.equal(refreshMetric.payload?.mode, 'fetch');
 	assert.equal(typeof refreshMetric.payload?.durationMs, 'number');
 	assert.equal(typeof refreshMetric.payload?.gitOperationDurationMs, 'number');
+});
+
+test('registerGitOverlayBuiltInRepositoryWatcher ignores noisy repository state changes', async () => {
+	const { manager } = await createManager();
+	const scheduledRefreshes: Array<{ reason: string; changedPath?: string }> = [];
+	let stateSubscriptionCount = 0;
+	let commitListener: (() => void) | undefined;
+	let checkoutListener: (() => void) | undefined;
+
+	(manager as any).scheduleGitOverlayAutoRefreshForActiveSessions = (reason: string, changedPath?: string) => {
+		scheduledRefreshes.push({ reason, changedPath });
+	};
+
+	(manager as any).registerGitOverlayBuiltInRepositoryWatcher({
+		rootUri: { fsPath: '/tmp/repo' },
+		state: {
+			onDidChange: () => {
+				stateSubscriptionCount += 1;
+				return createDisposable();
+			},
+		},
+		onDidCommit: (listener: () => void) => {
+			commitListener = listener;
+			return createDisposable();
+		},
+		onDidCheckout: (listener: () => void) => {
+			checkoutListener = listener;
+			return createDisposable();
+		},
+	});
+
+	assert.equal(stateSubscriptionCount, 0);
+	assert.ok(commitListener);
+	assert.ok(checkoutListener);
+
+	commitListener?.();
+	checkoutListener?.();
+
+	assert.deepEqual(scheduledRefreshes, [
+		{ reason: 'git', changedPath: '/tmp/repo' },
+		{ reason: 'git', changedPath: '/tmp/repo' },
+	]);
 });
 
 test('persistPromptSnapshotForSwitch finishes without waiting for AI enrichment', async () => {

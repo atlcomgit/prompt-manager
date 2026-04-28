@@ -18,6 +18,7 @@ import { TimerDisplay } from './components/TimerDisplay';
 import { ContextFileCard } from './components/ContextFileCard';
 import { ChatMemoryBlock } from './components/ChatMemoryBlock';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
+import { PromptVoiceQueueIndicator } from './components/PromptVoiceQueueIndicator';
 import { GitOverlay } from './components/GitOverlay';
 import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
@@ -501,6 +502,7 @@ export const EditorApp: React.FC = () => {
     () => initialEditorViewStateRef.current?.sectionHeights || {},
   );
   const [promptContentFocusSignal, setPromptContentFocusSignal] = useState(0);
+  const [promptContentScrollToBottomSignal, setPromptContentScrollToBottomSignal] = useState(0);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(
     () => initialEditorViewStateRef.current?.descriptionExpanded || createDefaultEditorPromptViewState().descriptionExpanded,
   );
@@ -3285,6 +3287,7 @@ export const EditorApp: React.FC = () => {
     setIsDirty(true);
     scheduleAutoSave(1500);
     setPromptContentFocusSignal(prev => prev + 1);
+    setPromptContentScrollToBottomSignal(prev => prev + 1);
   };
 
   const voiceController = usePromptVoiceController({
@@ -5239,6 +5242,7 @@ export const EditorApp: React.FC = () => {
                         errorMessage={voiceController.errorMessage}
                         errorBadge={voiceController.errorBadge}
                         errorHint={voiceController.errorHint}
+                        onConfirmIntent={voiceController.markConfirmIntent}
                         onConfirm={voiceController.confirmRecording}
                         onPause={voiceController.pauseRecording}
                         onResume={voiceController.resumeRecording}
@@ -5260,6 +5264,14 @@ export const EditorApp: React.FC = () => {
                       onHeightChange={setPromptContentHeight}
                       requestSuggestionSignal={requestSuggestionSignal}
                       onSuggestionLoadingChange={setIsSuggestionLoading}
+                      bottomOverlay={voiceController.queueItems.length > 0 ? (
+                        <PromptVoiceQueueIndicator
+                          items={voiceController.queueItems}
+                          onDismiss={voiceController.dismissQueueItem}
+                          t={t}
+                        />
+                      ) : undefined}
+                      bottomInsetPx={42}
                       onRequestSuggestion={(textBefore) => {
                         vscode.postMessage({
                           type: 'requestSuggestion',
@@ -5270,6 +5282,7 @@ export const EditorApp: React.FC = () => {
                       suggestion={inlineSuggestion}
                       suggestions={inlineSuggestions}
                       focusSignal={promptContentFocusSignal}
+                      scrollToBottomSignal={promptContentScrollToBottomSignal}
                     />
                   </div>
                 )}

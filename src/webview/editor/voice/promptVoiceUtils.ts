@@ -7,4 +7,5 @@ export {
   createIdleWaveLevels,
   createSilentWaveLevels,
   createWaveLevelsFromScalar,
+  shouldIgnoreStalePromptVoiceRecorderState,
 } from '../../../shared/promptVoice';

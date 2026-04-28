@@ -73,6 +73,9 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Busy prompts in the sidebar now show a loader instead of stale status or progress while saving or while AI is still generating title and description fields.
 - Selected in-progress prompts keep the sidebar progress bar readable with an outlined inverse track, and fully completed progress uses a more saturated green fill.
 - Store prompt content in Markdown and keep prompt metadata in JSON inside `.vscode/prompt-manager/`.
+- Dictate prompt text from the microphone: confirmed recordings collapse into a compact in-field queue indicator while Whisper recognition and AI post-correction continue in the background, so you can start the next recording immediately.
+- Let long voice capture continue smoothly: when the five-minute recording limit is reached without a button press, the finished audio is queued for recognition and a fresh recording starts automatically; pressing OK near that limit suppresses the restart.
+- Troubleshoot voice overlay races by copying `[prompt-voice][trace]` lines from the `Prompt Manager` Output channel.
 - Keep prompt-local context files valid after prompt title or task-number driven folder renames, including auto-repair of stale saved file references on reopen.
 - Attach projects, languages, frameworks, skills, MCP tools, hooks, task references, branches, notes, plans, and reports.
 - Reuse prompt context across sessions without rebuilding the same setup every time.
@@ -255,13 +258,14 @@ Useful configuration ideas:
 - Use branches and task numbers to connect prompts with delivery artifacts.
 - Keep reports and plans with the prompt so review context stays local to the repository.
 - Use `promptManager.gitOverlay.otherProjectsExcludedPaths` when Git Flow step 1 should ignore generated folders or path prefixes in the “Changes in other projects” block.
+- Tune voice input with `promptManager.voice.whisperModel`, `promptManager.voice.language`, and `promptManager.voice.aiPostCorrection` when local STT speed or quality needs adjustment.
 - Enable Project Memory when your repository history is valuable enough to search semantically.
 
 ## Actively Evolving Areas
 
 The extension already covers a broad daily workflow, but some surfaces are still expanding and should be treated as evolving capabilities rather than a fixed end state.
 
-- Voice-assisted prompt input and transcription workflows
+- Voice-assisted prompt input and transcription workflows, including the background recognition queue
 - Codemap-oriented instruction refresh and project structure guidance
 - Deeper report generation and review handoff workflows
 - More advanced automation around project memory and repository analysis

@@ -16,6 +16,12 @@ export const MAX_PROMPT_VOICE_RECORDING_BYTES = Math.floor(
 /** Допустимые размеры модели Whisper для настройки */
 export type WhisperModelSize = 'tiny' | 'base' | 'small';
 
+/** UI statuses where recorder updates are stale after OK was already pressed. */
+export type PromptVoiceBusyUiStatus = 'preparing-model' | 'processing' | 'correcting';
+
+/** Recorder statuses that can arrive late from already buffered recording events. */
+export type PromptVoiceRecorderUiStatus = 'recording' | 'paused';
+
 /** Маппинг размера модели на ONNX-оптимизированный ID для HuggingFace Hub */
 export const WHISPER_MODEL_MAP: Record<WhisperModelSize, string> = {
   tiny: 'onnx-community/whisper-tiny',
@@ -56,6 +62,15 @@ export const appendRecognizedPromptText = (existing: string, recognized: string)
     : '\n';
 
   return `${existing}${separator}${nextChunk}`;
+};
+
+export const shouldIgnoreStalePromptVoiceRecorderState = (
+  currentStatus: string,
+  incomingStatus: string,
+): boolean => {
+  const isBusy = currentStatus === 'preparing-model' || currentStatus === 'processing' || currentStatus === 'correcting';
+  const isRecorderState = incomingStatus === 'recording' || incomingStatus === 'paused';
+  return isBusy && isRecorderState;
 };
 
 export const formatPromptVoiceDuration = (valueMs: number): string => {
@@ -187,12 +202,18 @@ export const preparePromptVoiceSamplesForTranscription = (samples: Float32Array)
 
   const activeRms = activeCount > 0 ? Math.sqrt(activeSumSquares / activeCount) : rms;
   const peakGain = 0.96 / peak;
-  const rmsGain = rms > 1e-5 ? 0.22 / rms : peakGain;
-  const activeGain = activeRms > 1e-5 ? 0.34 / activeRms : rmsGain;
-  const gain = clamp(Math.min(peakGain, Math.max(rmsGain, activeGain)), 0.85, 10);
+  const isVeryQuiet = activeRms < 0.035 && peak < 0.08;
+  const isQuiet = activeRms < 0.07 && peak < 0.16;
+  const rmsTarget = isVeryQuiet ? 0.34 : (isQuiet ? 0.28 : 0.22);
+  const activeTarget = isVeryQuiet ? 0.52 : (isQuiet ? 0.42 : 0.34);
+  const maxGain = isVeryQuiet ? 22 : (isQuiet ? 16 : 10);
+  const rmsGain = rms > 1e-5 ? rmsTarget / rms : peakGain;
+  const activeGain = activeRms > 1e-5 ? activeTarget / activeRms : rmsGain;
+  const gain = clamp(Math.min(peakGain, Math.max(rmsGain, activeGain)), 0.85, maxGain);
   const noiseFloor = clamp(activityThreshold * 0.52, 0.0018, 0.012);
 
   const normalized = new Float32Array(centered.length);
+  let normalizedMean = 0;
   for (let index = 0; index < centered.length; index += 1) {
     const value = centered[index];
     const absolute = Math.abs(value);
@@ -204,7 +225,17 @@ export const preparePromptVoiceSamplesForTranscription = (samples: Float32Array)
       gate = 0.16 + (((absolute - noiseFloor) / Math.max(1e-5, activityThreshold - noiseFloor)) * 0.84);
     }
 
-    normalized[index] = clamp(softClip(value * gain * gate, 1.6), -1, 1);
+    const drive = isQuiet ? 1.42 : 1.6;
+    const nextValue = clamp(softClip(value * gain * gate, drive), -1, 1);
+    normalized[index] = nextValue;
+    normalizedMean += nextValue;
+  }
+
+  normalizedMean /= normalized.length;
+  if (Math.abs(normalizedMean) > 1e-5) {
+    for (let index = 0; index < normalized.length; index += 1) {
+      normalized[index] = clamp(normalized[index] - normalizedMean, -1, 1);
+    }
   }
 
   return normalized;

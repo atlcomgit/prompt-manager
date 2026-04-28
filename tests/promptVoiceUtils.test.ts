@@ -6,6 +6,7 @@ import {
   blendPromptVoiceWaveLevels,
   createWaveLevelsFromPcm16,
   preparePromptVoiceSamplesForTranscription,
+  shouldIgnoreStalePromptVoiceRecorderState,
 } from '../src/shared/promptVoice.js';
 
 const encodePcm16 = (samples: number[]): Uint8Array => {
@@ -43,6 +44,14 @@ test('appendRecognizedPromptText respects existing trailing newline', () => {
 test('formatPromptVoiceDuration formats minutes and seconds', () => {
   assert.equal(formatPromptVoiceDuration(0), '00:00');
   assert.equal(formatPromptVoiceDuration(61000), '01:01');
+});
+
+test('shouldIgnoreStalePromptVoiceRecorderState blocks recording after OK processing starts', () => {
+  assert.equal(shouldIgnoreStalePromptVoiceRecorderState('processing', 'recording'), true);
+  assert.equal(shouldIgnoreStalePromptVoiceRecorderState('processing', 'paused'), true);
+  assert.equal(shouldIgnoreStalePromptVoiceRecorderState('recording', 'recording'), false);
+  assert.equal(shouldIgnoreStalePromptVoiceRecorderState('hidden', 'recording'), false);
+  assert.equal(shouldIgnoreStalePromptVoiceRecorderState('processing', 'error'), false);
 });
 
 test('createWaveLevelsFromPcm16 reacts to louder speech with a stronger wave', () => {
@@ -101,5 +110,25 @@ test('preparePromptVoiceSamplesForTranscription boosts quiet speech more than su
   );
 
   assert.ok(speechPeak > 0.18);
+  assert.ok(speechPeak > silencePeak * 8);
+});
+
+test('preparePromptVoiceSamplesForTranscription gives extra gain to very quiet speech', () => {
+  const source = new Float32Array([
+    ...Array.from({ length: 120 }, () => 0),
+    ...Array.from({ length: 360 }, (_, index) => Math.sin(index / 7) * 0.0065),
+    ...Array.from({ length: 120 }, () => 0),
+  ]);
+
+  const prepared = preparePromptVoiceSamplesForTranscription(source);
+  const speechPeak = prepared
+    .slice(120, 480)
+    .reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+  const silencePeak = Math.max(
+    prepared.slice(0, 120).reduce((max, value) => Math.max(max, Math.abs(value)), 0),
+    prepared.slice(480).reduce((max, value) => Math.max(max, Math.abs(value)), 0),
+  );
+
+  assert.ok(speechPeak > 0.13);
   assert.ok(speechPeak > silencePeak * 8);
 });

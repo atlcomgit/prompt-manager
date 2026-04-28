@@ -7476,6 +7476,11 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'markPromptVoiceManualConfirmIntent': {
+				this.promptVoiceService.markManualConfirmIntent(panelKey, msg.sessionId);
+				break;
+			}
+
 			case 'confirmPromptVoiceRecording': {
 				await this.promptVoiceService.confirm(panelKey, msg.sessionId);
 				break;
@@ -7483,6 +7488,11 @@ export class EditorPanelManager {
 
 			case 'cancelPromptVoiceRecording': {
 				await this.promptVoiceService.cancel(panelKey, msg.sessionId);
+				break;
+			}
+
+			case 'promptVoiceDebugEvent': {
+				this.promptVoiceService.logWebviewTrace(panelKey, msg.sessionId, msg.event, msg.status, msg.details);
 				break;
 			}
 

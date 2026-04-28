@@ -4,8 +4,11 @@
 
 ### Added
 - AI post-correction of Whisper transcriptions via Copilot Language Model API (`promptManager.voice.aiPostCorrection`, enabled by default). Automatically corrects STT errors, restores punctuation and casing after speech-to-text processing.
+- Background voice-recognition queue for prompt text input: pressing OK now queues the captured audio, collapses recognition into a compact in-field progress indicator, and lets the user start another microphone recording immediately. Recordings that hit the five-minute limit are queued automatically and a new recording starts right away.
+- Prompt voice trace logging now writes `[prompt-voice][trace]` lines for webview and extension-host recording events, making OK/limit/auto-restart overlay races easier to diagnose from the `Prompt Manager` Output channel.
 
 ### Changed
+- Voice queue recognition jobs now process in parallel while completed text is released to the prompt field strictly in original queue order, quiet recordings receive stronger transcription gain, the queue indicator sits at the bottom of the prompt field, and the prompt textarea scrolls to the bottom after recognized text is appended.
 - Memory webview fully redesigned with a flat design language: all shadows removed, panels use thin 8% foreground-opacity borders, accent lines (3-4px colored left/top borders) replace heavy shadows for visual hierarchy, buttons are flat solid backgrounds without gradients, segmented tabs use a subtle contained bar, metric cards have a 3px top accent border, badge/pill shapes changed from pill (999px) to 6px radius rectangles, progress bars thinned to 6-8px, typography upgraded with uppercase labels, tighter letter-spacing, and larger metric numbers (32px), and dialog overlays use stronger backdrop blur with no box-shadow.
 - Memory header card now uses a left accent border with a subtle gradient tint instead of heavy box-shadow and old gradient; eyebrow labels use the accent color for visual hierarchy.
 - Navigation tabs (segmented tabs) now display inactive labels at 60% foreground opacity for better readability; active tab gets a subtle shadow lift for clearer distinction.
@@ -19,6 +22,10 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- Voice queue recognition no longer inserts Copilot post-correction placeholder replies such as “Пожалуйста, предоставьте текст для исправления.” or “Пожалуйста, предоставьте текст для корректуры.” for later queued recordings; the correction prompt now sends instructions and transcription together, and placeholder replies fall back to the raw Whisper text.
+- Pressing OK near the recording time limit no longer closes, reopens, and closes the recording overlay through the auto-restart path; manual confirmation intent is registered on press-down before the click event, so it wins over the limit auto-restart race.
+- Pressing OK no longer lets a delayed recorder `recording` or `paused` state switch the overlay back from “processing” to the recording UI while `recorder.stop()` is already in flight.
+- Packaged the external `@huggingface/transformers` runtime dependencies needed by Whisper recognition into the VSIX, preventing installed extensions from failing with `Cannot find package '@huggingface/transformers'` at speech-recognition time.
 - Git Flow start-chat preflight now shows a dedicated `Start on current branches` action whenever the regular Start button is visible but disabled, so chat can continue without waiting for the standard branch-check path.
 - Git Flow no longer shows transient step-1 prompt-branch and tracked-branch blockers during summary or light open hydration; summary/light snapshots now keep their tracked-branch list stable until branch metadata is ready, and built-in repository state pulses no longer keep auto-refresh looping while the overlay is already refreshing.
 - Git Flow step 1 no longer hides and re-shows the “Changes in other projects” block during snapshot refreshes; the editor now keeps the last loaded peer-project snapshot visible until the next lazy other-project update arrives.

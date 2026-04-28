@@ -12,7 +12,7 @@ import {
   createWaveLevelsFromPcm16,
 } from '../../shared/promptVoice.js';
 
-type PromptVoiceRecorderOptions = {
+export type PromptVoiceRecorderOptions = {
   onLevel?: (level: number, elapsedMs: number, levels: number[]) => void;
   onLimitReached?: () => void;
   onError?: (error: Error) => void;

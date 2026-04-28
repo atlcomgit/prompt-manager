@@ -199,6 +199,9 @@ interface Props {
   onHeightChange?: (height: number) => void;
   normalizePastedText?: boolean;
   focusSignal?: number;
+  bottomOverlay?: React.ReactNode;
+  bottomInsetPx?: number;
+  scrollToBottomSignal?: number;
 }
 
 /**
@@ -218,6 +221,9 @@ export const TextArea: React.FC<Props> = ({
   onHeightChange,
   normalizePastedText = false,
   focusSignal,
+  bottomOverlay,
+  bottomInsetPx,
+  scrollToBottomSignal,
 }) => {
   const t = useT();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -229,6 +235,7 @@ export const TextArea: React.FC<Props> = ({
   const [allVariants, setAllVariants] = useState<string[]>([]);
   const [currentVariantIdx, setCurrentVariantIdx] = useState(0);
   const lastHandledSuggestionSignalRef = useRef<number>(0);
+  const lastHandledScrollToBottomSignalRef = useRef<number>(0);
 
   // Show ghost text when suggestion arrives
   useEffect(() => {
@@ -440,11 +447,31 @@ export const TextArea: React.FC<Props> = ({
     const position = textareaRef.current.value.length;
     textareaRef.current.selectionStart = position;
     textareaRef.current.selectionEnd = position;
+    textareaRef.current.scrollTop = textareaRef.current.scrollHeight;
+    syncScroll();
   }, [focusSignal]);
+
+  useEffect(() => {
+    if (!scrollToBottomSignal || !textareaRef.current) {
+      return;
+    }
+    if (lastHandledScrollToBottomSignalRef.current === scrollToBottomSignal) {
+      return;
+    }
+    lastHandledScrollToBottomSignalRef.current = scrollToBottomSignal;
+    requestAnimationFrame(() => {
+      if (!textareaRef.current) {
+        return;
+      }
+      textareaRef.current.scrollTop = textareaRef.current.scrollHeight;
+      syncScroll();
+    });
+  }, [scrollToBottomSignal, syncScroll]);
 
   const textBeforeCursor = value.substring(0, cursorPos);
   const textAfterCursor = value.substring(cursorPos);
   const showLabelRow = Boolean(label) || showControls;
+  const bottomOverlayInset = bottomOverlay ? Math.max(0, bottomInsetPx ?? 42) : 0;
 
   return (
     <div style={styles.field}>
@@ -489,8 +516,21 @@ export const TextArea: React.FC<Props> = ({
       )}
 
       <div style={styles.editorContainer}>
+        {bottomOverlay && (
+          <div style={styles.bottomOverlaySlot}>
+            {bottomOverlay}
+          </div>
+        )}
+
         {/* Mirror div behind textarea — renders ghost text */}
-        <div ref={mirrorRef} style={styles.mirror} aria-hidden="true">
+        <div
+          ref={mirrorRef}
+          style={{
+            ...styles.mirror,
+            paddingBottom: bottomOverlayInset ? `${8 + bottomOverlayInset}px` : undefined,
+          }}
+          aria-hidden="true"
+        >
           <span>{textBeforeCursor}</span>
           {ghostText && <span style={styles.ghostText}>{ghostText}</span>}
           <span>{textAfterCursor}</span>
@@ -512,12 +552,16 @@ export const TextArea: React.FC<Props> = ({
           style={{
             ...styles.textarea,
             height: persistedHeight ? `${persistedHeight}px` : undefined,
+            paddingBottom: bottomOverlayInset ? `${8 + bottomOverlayInset}px` : undefined,
           }}
           spellCheck={false}
         />
 
         {ghostText && (
-          <div style={styles.ghostHint}>
+          <div style={{
+            ...styles.ghostHint,
+            bottom: bottomOverlayInset ? `${bottomOverlayInset + 4}px` : styles.ghostHint.bottom,
+          }}>
             {t('textArea.tabAccept')} · {t('textArea.escDismiss')}{allVariants.length > 1 ? ` · ↑↓ — ${t('textArea.variant')} ${currentVariantIdx + 1}/${allVariants.length}` : ''}
           </div>
         )}
@@ -583,6 +627,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   editorContainer: {
     position: 'relative',
+  },
+  bottomOverlaySlot: {
+    position: 'absolute',
+    bottom: '6px',
+    left: '6px',
+    right: '6px',
+    zIndex: 3,
+    pointerEvents: 'auto',
   },
   mirror: {
     position: 'absolute',

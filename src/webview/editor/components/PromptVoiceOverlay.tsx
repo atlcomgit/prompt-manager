@@ -11,6 +11,7 @@ type Props = {
   errorMessage: string;
   errorBadge: string;
   errorHint: string;
+  onConfirmIntent: () => void;
   onConfirm: () => void | Promise<void>;
   onPause: () => void;
   onResume: () => void;
@@ -35,11 +36,17 @@ const ICONS = {
 const VoiceButton: React.FC<{
   label: string;
   icon: keyof typeof ICONS;
+  onPressStart?: () => void;
   onClick: () => void | Promise<void>;
   variant?: 'primary' | 'secondary' | 'danger';
-}> = ({ label, icon, onClick, variant = 'secondary' }) => (
+}> = ({ label, icon, onPressStart, onClick, variant = 'secondary' }) => (
   <button
     type="button"
+    onPointerDown={(event) => {
+      if (event.button === 0) {
+        onPressStart?.();
+      }
+    }}
     onClick={() => { void onClick(); }}
     style={{
       ...styles.actionButton,
@@ -273,6 +280,7 @@ export const PromptVoiceOverlay: React.FC<Props> = ({
   errorMessage,
   errorBadge,
   errorHint,
+  onConfirmIntent,
   onConfirm,
   onPause,
   onResume,
@@ -298,7 +306,9 @@ export const PromptVoiceOverlay: React.FC<Props> = ({
                 : (isBusy ? (progressMessage || t('editor.voiceProcessing')) : t('editor.voiceRecordingTitle'))}
             </strong>
             {isRecording && (
-              <span style={styles.subtitle}>{`${elapsedLabel} / ${maxDurationLabel}`}</span>
+              <span style={styles.timerPill} aria-label={t('editor.voiceTimerLabel')}>
+                {`${elapsedLabel} / ${maxDurationLabel}`}
+              </span>
             )}
             {isBusy && progressPercent !== null && (
               <span style={styles.subtitle}>{`${Math.round(progressPercent)}%`}</span>
@@ -338,7 +348,7 @@ export const PromptVoiceOverlay: React.FC<Props> = ({
       <div style={styles.actions}>
         {isRecording && (
           <>
-            <VoiceButton label={t('editor.voiceOk')} icon="ok" onClick={onConfirm} variant="primary" />
+            <VoiceButton label={t('editor.voiceOk')} icon="ok" onPressStart={onConfirmIntent} onClick={onConfirm} variant="primary" />
             {!isPaused && (
               <VoiceButton label={t('editor.voicePause')} icon="pause" onClick={onPause} />
             )}
@@ -412,6 +422,22 @@ const styles: Record<string, React.CSSProperties> = {
   subtitle: {
     fontSize: '11px',
     color: 'var(--vscode-descriptionForeground)',
+  },
+  timerPill: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    width: 'fit-content',
+    minHeight: '24px',
+    padding: '2px 9px',
+    borderRadius: '999px',
+    border: '1px solid color-mix(in srgb, var(--vscode-focusBorder) 52%, transparent)',
+    background: 'color-mix(in srgb, var(--vscode-focusBorder) 18%, var(--vscode-editor-background))',
+    color: 'var(--vscode-foreground)',
+    fontSize: '16px',
+    fontWeight: 800,
+    lineHeight: 1.2,
+    fontVariantNumeric: 'tabular-nums',
+    letterSpacing: 0,
   },
   body: {
     minHeight: '82px',

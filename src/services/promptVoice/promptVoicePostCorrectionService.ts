@@ -33,6 +33,32 @@ const MODEL_SELECTOR: vscode.LanguageModelChatSelector = {
 	vendor: 'copilot',
 };
 
+/** Нормализует текст для безопасного сравнения служебных ответов LM */
+const normalizeCorrectionResponse = (value: string): string => value
+	.trim()
+	.toLocaleLowerCase('ru')
+	.replace(/[«»"'`]/g, '')
+	.replace(/[.!?]+$/g, '')
+	.replace(/\s+/g, ' ');
+
+/** Проверяет, не вернула ли модель просьбу прислать текст вместо исправленного текста */
+export const isPromptVoicePostCorrectionPlaceholder = (value: string): boolean => {
+	const normalized = normalizeCorrectionResponse(value);
+	return /^пожалуйста,?\s*(предоставьте|пришлите|отправьте|укажите)\s+(исходный\s+)?текст(\s|$)/.test(normalized)
+		|| /^(предоставьте|пришлите|отправьте|укажите)\s+(исходный\s+)?текст(\s|$)/.test(normalized)
+		|| /^please\s+(provide|send|enter|share)\s+(the\s+)?(source\s+|original\s+)?text(\s|$)/.test(normalized);
+};
+
+/** Возвращает безопасный результат коррекции или исходную транскрипцию */
+export const normalizePromptVoicePostCorrectionResult = (rawText: string, correctedText: string): string => {
+	const fallback = rawText.trim();
+	const corrected = correctedText.trim();
+	if (corrected.length < MIN_TEXT_LENGTH || isPromptVoicePostCorrectionPlaceholder(corrected)) {
+		return fallback;
+	}
+	return corrected;
+};
+
 export class PromptVoicePostCorrectionService {
 	/**
 	 * Исправляет ошибки транскрипции через Copilot LM API.
@@ -57,7 +83,7 @@ export class PromptVoicePostCorrectionService {
 		}
 
 		try {
-			return await this.requestCorrection(trimmed);
+			return normalizePromptVoicePostCorrectionResult(trimmed, await this.requestCorrection(trimmed));
 		} catch (err) {
 			console.warn('[PromptManager/Voice] AI post-correction failed, using raw text:', err);
 			return trimmed;
@@ -71,10 +97,17 @@ export class PromptVoicePostCorrectionService {
 			return text;
 		}
 
-		// Формируем запрос к LM
+		// Формируем запрос к LM одним сообщением, чтобы модель не отвечала на инструкции отдельно от текста.
 		const messages = [
-			vscode.LanguageModelChatMessage.User(SYSTEM_PROMPT),
-			vscode.LanguageModelChatMessage.User(text),
+			vscode.LanguageModelChatMessage.User([
+				SYSTEM_PROMPT,
+				'',
+				'Текст для исправления находится строго внутри блока <transcription>.',
+				'Не проси прислать текст: он уже приведен ниже.',
+				'<transcription>',
+				text,
+				'</transcription>',
+			].join('\n')),
 		];
 
 		// CancellationToken с таймаутом для защиты от зависания
@@ -87,9 +120,7 @@ export class PromptVoicePostCorrectionService {
 			for await (const chunk of response.text) {
 				result += chunk;
 			}
-			const corrected = result.trim();
-			// LM может вернуть пустую строку или мусор — fallback на оригинал
-			return corrected.length >= MIN_TEXT_LENGTH ? corrected : text;
+			return result.trim();
 		} finally {
 			clearTimeout(timer);
 			cts.dispose();

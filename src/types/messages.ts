@@ -7,6 +7,7 @@ import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup,
 
 export type GlobalContextSourceMessage = 'empty' | 'manual' | 'remote';
 export type ChatContextAutoLoadStateMessage = 'started' | 'completed' | 'fallback';
+export type PromptVoiceDebugDetails = Record<string, string | number | boolean | null | undefined>;
 
 export type GitOverlayBusyReason =
 	| { kind: 'label'; label: string }
@@ -141,8 +142,10 @@ export type WebviewToExtensionMessage =
 	| { type: 'startPromptVoiceRecording'; sessionId: string }
 	| { type: 'pausePromptVoiceRecording'; sessionId: string }
 	| { type: 'resumePromptVoiceRecording'; sessionId: string }
+	| { type: 'markPromptVoiceManualConfirmIntent'; sessionId: string }
 	| { type: 'confirmPromptVoiceRecording'; sessionId: string }
 	| { type: 'cancelPromptVoiceRecording'; sessionId: string }
+	| { type: 'promptVoiceDebugEvent'; sessionId?: string; event: string; status?: string; details?: PromptVoiceDebugDetails }
 	| { type: 'reportEditorReady'; promptId: string }
 	| { type: 'reportEditorUpdate'; promptId: string; report: string; previousReport?: string; activityDeltaMs?: number }
 	| { type: 'reportEditorSave'; promptId: string; report: string; previousReport?: string; activityDeltaMs?: number }
@@ -263,4 +266,16 @@ export type ExtensionToWebviewMessage =
 		errorBadge?: string;
 		errorHint?: string;
 		text?: string;
+	}
+	| {
+		type: 'promptVoiceQueueState';
+		sessionId: string;
+		status: 'queued' | 'preparing-model' | 'processing' | 'correcting' | 'completed' | 'error';
+		elapsedMs?: number;
+		message?: string;
+		progress?: number | null;
+		errorBadge?: string;
+		errorHint?: string;
+		text?: string;
+		autoRestart?: boolean;
 	};

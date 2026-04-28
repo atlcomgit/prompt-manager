@@ -4,6 +4,15 @@ src/**
 out/**
 out-tests/**
 node_modules/**
+!node_modules/
+!node_modules/@huggingface/
+!node_modules/@huggingface/**
+!node_modules/@img/
+!node_modules/@img/**
+!node_modules/detect-libc/
+!node_modules/detect-libc/**
+!node_modules/semver/
+!node_modules/semver/**
 !dist/sql-wasm.wasm
 esbuild.webview.mjs
 tsconfig.json

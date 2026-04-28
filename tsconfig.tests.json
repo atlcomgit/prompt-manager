@@ -13,6 +13,6 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true
   },
-  "include": ["tests/**/*.ts", "tests/**/*.tsx"],
+  "include": ["tests/**/*.ts", "tests/**/*.tsx", "src/**/*.d.ts"],
   "exclude": ["node_modules", "dist", "out", "out-tests"]
 }

@@ -22,6 +22,7 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- Local test and publish workflows no longer fail when the installed `@huggingface/transformers` package is missing its advertised declaration files; Prompt Manager now ships a local declaration shim for the runtime APIs it uses, and the Linux publish script rebuilds dependencies with `npm ci` before tests and after runtime pruning.
 - Voice queue recognition no longer inserts Copilot post-correction placeholder replies such as “Пожалуйста, предоставьте текст для исправления.” or “Пожалуйста, предоставьте текст для корректуры.” for later queued recordings; the correction prompt now sends instructions and transcription together, and placeholder replies fall back to the raw Whisper text.
 - Pressing OK near the recording time limit no longer closes, reopens, and closes the recording overlay through the auto-restart path; manual confirmation intent is registered on press-down before the click event, so it wins over the limit auto-restart race.
 - Pressing OK no longer lets a delayed recorder `recording` or `paused` state switch the overlay back from “processing” to the recording UI while `recorder.stop()` is already in flight.

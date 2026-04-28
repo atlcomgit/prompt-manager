@@ -1434,6 +1434,9 @@ export const GitOverlay: React.FC<Props> = ({
 	const canSwitchToTrackedBranch = step1MissingTrackedBranchProjects.length === 0
 		&& (isChatPreflightMode ? startChatBranchMismatches.length > 0 : step1ProjectsOffSelectedTrackedBranch.length > 0);
 	const startChatBranchCheckDone = availableProjects.length > 0 && startChatBranchMismatches.length === 0;
+	// Mirror the disabled Start button in start-chat preflight with an explicit continue action.
+	const canContinueStartChatOnCurrentBranches = isStartChatPreflightMode
+		&& !startChatBranchCheckDone;
 	const syncRequired = projectsNeedingSync.length > 0;
 	const defaultStep1ReadyOnTrackedBranches = !isChatPreflightMode
 		&& Boolean(promptBranch)
@@ -1697,7 +1700,9 @@ export const GitOverlay: React.FC<Props> = ({
 			: t('editor.gitOverlayStepSwitchHint');
 	const step1SuccessMessage = isChatPreflightMode ? t('editor.gitOverlayStartChatBranchCheckReady') : t('editor.gitOverlayAllProjectsOnPrompt');
 	const dialogFooterHint = isStartChatPreflightMode
-		? (startChatBranchCheckDone ? t('editor.gitOverlayStartChatReadyHint') : t('editor.gitOverlayStartChatBlockedHint'))
+		? (canContinueStartChatOnCurrentBranches
+			? t('editor.gitOverlayStartOnCurrentBranchesHint')
+			: (startChatBranchCheckDone ? t('editor.gitOverlayStartChatReadyHint') : t('editor.gitOverlayStartChatBlockedHint')))
 		: isOpenChatPreflightMode
 			? (startChatBranchCheckDone ? t('editor.gitOverlayOpenChatReadyHint') : t('editor.gitOverlayOpenChatBlockedHint'))
 		: (doneStatus ? t('editor.gitOverlayDoneStatusHint').replace('{status}', doneStatusLabel) : t('editor.gitOverlayDoneNoStatusHint'));
@@ -3127,12 +3132,21 @@ export const GitOverlay: React.FC<Props> = ({
 						<div style={styles.dialogFooterHint}>{dialogFooterHint}</div>
 						<div style={styles.dialogFooterActions}>
 							{isStartChatPreflightMode ? (
-								<ActionButton
-									label={t('editor.gitOverlayStart')}
-									onClick={() => onContinueStartChat?.()}
-									disabled={!startChatBranchCheckDone}
-									variant="primary"
-								/>
+								<>
+									{canContinueStartChatOnCurrentBranches ? (
+										<ActionButton
+											label={t('editor.gitOverlayStartOnCurrentBranches')}
+											onClick={() => onContinueStartChat?.()}
+											variant="success"
+										/>
+									) : null}
+									<ActionButton
+										label={t('editor.gitOverlayStart')}
+										onClick={() => onContinueStartChat?.()}
+										disabled={!startChatBranchCheckDone}
+										variant="primary"
+									/>
+								</>
 							) : isOpenChatPreflightMode ? (
 								<ActionButton
 									label={t('actions.openChat')}

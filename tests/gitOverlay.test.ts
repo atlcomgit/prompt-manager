@@ -940,6 +940,139 @@ test('GitOverlay shows switch-to-prompt action during start chat preflight when 
 	assert.match(markup, /editor\.gitOverlaySwitchAll/);
 });
 
+test('GitOverlay shows start-on-current-branches action when prompt branch is set and the start button is disabled', () => {
+	const markup = renderGitOverlayMarkup({
+		mode: 'start-chat-preflight',
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'feature/legacy',
+					promptBranch: 'feature/task-42',
+					branches: [
+						{
+							name: 'feature/legacy',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/feature/legacy',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'main',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayStartOnCurrentBranches/);
+	assert.match(markup, /<button[^>]*disabled=""[^>]*><span[^>]*><span>editor\.gitOverlayStart<\/span><\/span><\/button>/);
+});
+
+test('GitOverlay shows start-on-current-branches action when the start button is visible but disabled', () => {
+	const markup = renderGitOverlayMarkup({
+		mode: 'start-chat-preflight',
+		snapshot: createTestSnapshot({
+			promptBranch: '',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'feature/legacy',
+					promptBranch: '',
+					branches: [
+						{
+							name: 'feature/legacy',
+							current: true,
+							exists: true,
+							kind: 'current',
+							upstream: 'origin/feature/legacy',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+						{
+							name: 'main',
+							current: false,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.match(markup, /editor\.gitOverlayStartOnCurrentBranchesHint/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlayStartOnCurrentBranches<\/span><\/span><\/button>/);
+	assert.match(markup, /<button[^>]*disabled=""[^>]*><span[^>]*><span>editor\.gitOverlayStart<\/span><\/span><\/button>/);
+});
+
+test('GitOverlay hides start-on-current-branches action when start chat preflight already passes on a tracked branch', () => {
+	const markup = renderGitOverlayMarkup({
+		mode: 'start-chat-preflight',
+		snapshot: createTestSnapshot({
+			promptBranch: '',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'api',
+					currentBranch: 'main',
+					promptBranch: '',
+					branches: [
+						{
+							name: 'main',
+							current: true,
+							exists: true,
+							kind: 'tracked',
+							upstream: 'origin/main',
+							ahead: 0,
+							behind: 0,
+							lastCommit: null,
+							canSwitch: true,
+							canDelete: false,
+							stale: false,
+						},
+					],
+				}),
+			],
+		}),
+	});
+
+	assert.doesNotMatch(markup, /editor\.gitOverlayStartOnCurrentBranches/);
+	assert.match(markup, /editor\.gitOverlayStartChatReadyHint/);
+	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlayStart<\/span><\/span><\/button>/);
+});
+
 test('GitOverlay renders tracked branch options separately for each project', () => {
 	const markup = renderToStaticMarkup(React.createElement(GitOverlay, {
 		open: true,

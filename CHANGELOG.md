@@ -19,6 +19,7 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- Git Flow start-chat preflight now shows a dedicated `Start on current branches` action whenever the regular Start button is visible but disabled, so chat can continue without waiting for the standard branch-check path.
 - Git Flow no longer shows transient step-1 prompt-branch and tracked-branch blockers during summary or light open hydration; summary/light snapshots now keep their tracked-branch list stable until branch metadata is ready, and built-in repository state pulses no longer keep auto-refresh looping while the overlay is already refreshing.
 - Git Flow step 1 no longer hides and re-shows the “Changes in other projects” block during snapshot refreshes; the editor now keeps the last loaded peer-project snapshot visible until the next lazy other-project update arrives.
 - The prompt editor footer now keeps Go to chat visible for every persisted prompt status except Draft and Closed, while a fresh chat launch still keeps the Start Chat spinner visible until the launch settles.

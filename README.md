@@ -113,6 +113,12 @@ This README is intentionally modular. The extension is still evolving, and the p
 ### Work with Git without leaving the prompt flow
 
 - View, switch, and create branches in workspace projects.
+- Keep a live compact masonry-style prompt editor overview dashboard in the empty right-side space beside the fixed-width prompt form when the editor is wide enough.
+- Review today's prompts and the most recent previous active day with more than five minutes of work, including clickable task rows, the current prompt status as a larger color-coded chip with a prompt-list-style progress bar only while In Progress, and independently loading project widgets that refresh after prompt switching without blocking the main editor flow or continuing stale background widget work after you switch away.
+- Use a compact `Ветки проектов` widget for bulk branch switching with immediate `Ветка промпта` and `Tracked-ветка` presets, prompt-branch-first default selection when that branch exists, per-project apply actions and busy indicators, automatic widget refresh after branch switching, and automatic fallback to all workspace repos when the saved prompt selection becomes stale or invalid.
+- Inspect separate widgets for project commits, MR/PR, and `Параллельные ветки`.
+- Open commit and branch changes from an explorer-style compressed file tree with rename/conflict metadata and an inline open-file loader, while the diff itself opens the exact commit or branch change in the standard side-by-side VS Code diff editor.
+- Let AI review update automatically only when the prompt or Git dashboard fingerprint changes, while reusing the cached result immediately after prompt switches, pausing stale review/widget jobs as soon as prompt switching starts, and keeping pipeline status bound to the latest workflow or pipeline run for each project's actual current branch.
 - Guard branch actions with dirty-worktree checks.
 - Surface dirty workspace projects in Git Flow step 1 even when they are not yet attached to the prompt.
 - Hide selected generated or noisy paths from the Git Flow step 1 “Changes in other projects” block with `promptManager.gitOverlay.otherProjectsExcludedPaths`, without changing the selected prompt projects themselves.

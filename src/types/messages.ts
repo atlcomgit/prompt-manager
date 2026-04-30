@@ -4,6 +4,7 @@
 
 import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
+import type { PromptDashboardAnalysisState, PromptDashboardSnapshot, PromptDashboardWidgetSnapshot } from './promptDashboard.js';
 
 export type GlobalContextSourceMessage = 'empty' | 'manual' | 'remote';
 export type ChatContextAutoLoadStateMessage = 'started' | 'completed' | 'fallback';
@@ -69,6 +70,12 @@ export type WebviewToExtensionMessage =
 	| { type: 'checkBranchStatus'; branch: string; projects: string[] }
 	| { type: 'switchBranch'; branch: string; projects: string[] }
 	| { type: 'getBranches'; projects: string[] }
+	| { type: 'getPromptDashboardSnapshot'; prompt: Prompt; requestId?: string; forceRefresh?: boolean }
+	| { type: 'refreshPromptDashboard'; prompt: Prompt; requestId?: string }
+	| { type: 'promptDashboardSwitchBranch'; prompt: Prompt; project: string; branch: string; requestId?: string }
+	| { type: 'promptDashboardSwitchBranches'; prompt: Prompt; branchesByProject: Record<string, string>; requestId?: string }
+	| { type: 'promptDashboardOpenFilePatch'; project: string; filePath: string; previousPath?: string; mode: 'commit' | 'branch'; ref: string; baseRef?: string }
+	| { type: 'analyzePromptDashboardReview'; prompt: Prompt; requestId?: string }
 	| { type: 'openGitOverlay'; promptBranch: string; projects: string[] }
 	| { type: 'gitOverlayVisibility'; open: boolean; promptBranch: string; projects: string[] }
 	| { type: 'refreshGitOverlay'; promptBranch: string; projects: string[]; mode?: 'local' | 'fetch' | 'sync' }
@@ -199,6 +206,9 @@ export type ExtensionToWebviewMessage =
 	| { type: 'gitOverlayCommitMessagesGenerated'; messages: GitOverlayProjectCommitMessage[]; requestId?: string }
 	| { type: 'gitOverlayActionCompleted'; action: GitOverlayActionKind }
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
+	| { type: 'promptDashboardSnapshot'; snapshot: PromptDashboardSnapshot; requestId?: string }
+	| { type: 'promptDashboardWidgetSnapshot'; promptId: string; promptUuid?: string; widget: PromptDashboardWidgetSnapshot<unknown>; requestId?: string }
+	| { type: 'promptDashboardAnalysis'; promptId: string; promptUuid?: string; analysis: PromptDashboardAnalysisState; requestId?: string }
 	| { type: 'branchStatus'; hasChanges: boolean; details: string }
 	| { type: 'error'; message: string; requestId?: string }
 	| { type: 'info'; message: string; requestId?: string }

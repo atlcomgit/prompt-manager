@@ -20,6 +20,7 @@ import { ChatMemoryBlock } from './components/ChatMemoryBlock';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { PromptVoiceQueueIndicator } from './components/PromptVoiceQueueIndicator';
 import { GitOverlay } from './components/GitOverlay';
+import { PromptDashboard, type PromptDashboardFilePatchRequest } from './components/PromptDashboard';
 import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
 import type { ClipboardImagePayload, GlobalContextSourceMessage } from '../../types/messages';
@@ -38,6 +39,7 @@ import type {
   PromptStatus,
 } from '../../types/prompt';
 import type { GitOverlayActionKind, GitOverlayActionScope, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
+import type { PromptDashboardSnapshot, PromptDashboardWidgetSnapshot } from '../../types/promptDashboard';
 import {
   createDefaultEditorPromptViewState,
   createDefaultPrompt,
@@ -78,6 +80,7 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
+import { resolvePromptDashboardMode } from '../../utils/promptDashboard.js';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -426,6 +429,9 @@ export const EditorApp: React.FC = () => {
   const [workspaceTrackedBranchPreference, setWorkspaceTrackedBranchPreference] = useState('');
   const [workspaceTrackedBranchesByProjectPreference, setWorkspaceTrackedBranchesByProjectPreference] = useState<Record<string, string>>({});
   const [pageWidth, setPageWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : EDITOR_FORM_SHELL_WIDTH_PX));
+  const [promptDashboardSnapshot, setPromptDashboardSnapshot] = useState<PromptDashboardSnapshot | null>(null);
+  const [promptDashboardBusyAction, setPromptDashboardBusyAction] = useState<string | null>(null);
+  const promptDashboardRequestIdRef = useRef('');
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
   const [branchesResolved, setBranchesResolved] = useState(false);
   const [showBranches, setShowBranches] = useState(
@@ -591,6 +597,40 @@ export const EditorApp: React.FC = () => {
     : t('editor.chatLaunchHint');
   const [chatLaunchActivityFrame, setChatLaunchActivityFrame] = useState(0);
   const shouldDockGitOverlaySecondHalf = pageWidth >= EDITOR_FORM_SHELL_WIDTH_PX * 2;
+  const promptDashboardMode = resolvePromptDashboardMode(pageWidth, EDITOR_FORM_SHELL_WIDTH_PX);
+  const promptDashboardScopeFingerprint = useMemo(() => JSON.stringify({
+    id: prompt.id,
+    promptUuid: prompt.promptUuid,
+    projects: prompt.projects,
+    branch: prompt.branch,
+    trackedBranch: prompt.trackedBranch,
+    trackedBranchesByProject: prompt.trackedBranchesByProject || {},
+    status: prompt.status,
+    progress: prompt.progress,
+    taskNumber: prompt.taskNumber,
+    timeSpentWriting: prompt.timeSpentWriting,
+    timeSpentImplementing: prompt.timeSpentImplementing,
+    timeSpentOnTask: prompt.timeSpentOnTask,
+    timeSpentUntracked: prompt.timeSpentUntracked,
+    model: prompt.model,
+    updatedAt: prompt.updatedAt,
+  }), [
+    prompt.id,
+    prompt.promptUuid,
+    prompt.projects,
+    prompt.branch,
+    prompt.trackedBranch,
+    prompt.trackedBranchesByProject,
+    prompt.status,
+    prompt.progress,
+    prompt.taskNumber,
+    prompt.timeSpentWriting,
+    prompt.timeSpentImplementing,
+    prompt.timeSpentOnTask,
+    prompt.timeSpentUntracked,
+    prompt.model,
+    prompt.updatedAt,
+  ]);
   const editorProgressMode = resolveEditorProgressMode({
     isSaving,
     isStartingChat,
@@ -2949,6 +2989,70 @@ export const EditorApp: React.FC = () => {
         setBranches(msg.branches);
         setBranchesResolved(true);
         break;
+      case 'promptDashboardSnapshot':
+        if (!msg.requestId || msg.requestId === promptDashboardRequestIdRef.current) {
+          postEditorDebugLog('editor-dashboard', 'snapshot.received', {
+            requestId: String(msg.requestId || ''),
+            promptId: String(msg.snapshot?.promptId || ''),
+            scopeKey: String(msg.snapshot?.scopeKey || ''),
+            activityStatus: String(msg.snapshot?.activity?.cache?.status || 'idle'),
+            statusStatus: String(msg.snapshot?.status?.cache?.status || 'idle'),
+            projectsStatus: String(msg.snapshot?.projects?.cache?.status || 'idle'),
+            aiStatus: String(msg.snapshot?.aiAnalysis?.cache?.status || 'idle'),
+          });
+          setPromptDashboardSnapshot(msg.snapshot || null);
+          setPromptDashboardBusyAction(null);
+        }
+        break;
+      case 'promptDashboardWidgetSnapshot':
+        if (msg.requestId && msg.requestId !== promptDashboardRequestIdRef.current) {
+          break;
+        }
+        setPromptDashboardSnapshot(prev => {
+          const widget = msg.widget as PromptDashboardWidgetSnapshot<unknown> | null;
+          if (!prev || !widget || !widget.kind) {
+            return prev;
+          }
+          if ((msg.promptUuid || '') && prev.promptUuid && msg.promptUuid !== prev.promptUuid) {
+            return prev;
+          }
+          if ((msg.promptId || '') && prev.promptId && msg.promptId !== prev.promptId) {
+            return prev;
+          }
+          return {
+            ...prev,
+            [widget.kind]: widget,
+            generatedAt: new Date().toISOString(),
+          } as PromptDashboardSnapshot;
+        });
+        break;
+      case 'promptDashboardAnalysis':
+        if (msg.requestId && msg.requestId !== promptDashboardRequestIdRef.current) {
+          break;
+        }
+        setPromptDashboardSnapshot(prev => {
+          if (!prev) {
+            return prev;
+          }
+          if ((msg.promptUuid || '') && prev.promptUuid && msg.promptUuid !== prev.promptUuid) {
+            return prev;
+          }
+          return {
+            ...prev,
+            aiAnalysis: {
+              kind: 'aiAnalysis',
+              data: msg.analysis,
+              cache: {
+                status: msg.analysis.status === 'running' ? 'loading' : msg.analysis.status === 'error' ? 'error' : 'fresh',
+                source: 'refresh',
+                updatedAt: msg.analysis.updatedAt || new Date().toISOString(),
+                error: msg.analysis.error,
+              },
+            },
+            generatedAt: new Date().toISOString(),
+          };
+        });
+        break;
       case 'nextTaskNumber':
         setPrompt(prev => ({ ...prev, taskNumber: msg.taskNumber }));
         userChangeCounterRef.current++;
@@ -3119,6 +3223,33 @@ export const EditorApp: React.FC = () => {
     branchAutoExpandedRef.current = false;
     vscode.postMessage({ type: 'getBranches', projects: prompt.projects });
   }, [prompt.projects]);
+
+  useEffect(() => {
+    if (promptDashboardMode !== 'full') {
+      postEditorDebugLog('editor-dashboard', 'snapshot.skipped', {
+        reason: 'dashboard-hidden',
+        mode: promptDashboardMode,
+        promptId: String(prompt.id || '__new__'),
+        promptUuid: String(prompt.promptUuid || ''),
+      });
+      promptDashboardRequestIdRef.current = '';
+      setPromptDashboardSnapshot(null);
+      setPromptDashboardBusyAction(null);
+      return;
+    }
+    const requestId = `prompt-dashboard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    promptDashboardRequestIdRef.current = requestId;
+    setPromptDashboardBusyAction(null);
+    postEditorDebugLog('editor-dashboard', 'snapshot.requested', {
+      requestId,
+      mode: promptDashboardMode,
+      promptId: String(prompt.id || '__new__'),
+      promptUuid: String(prompt.promptUuid || ''),
+      projectCount: prompt.projects.length,
+      promptBranch: String(prompt.branch || ''),
+    });
+    vscode.postMessage({ type: 'getPromptDashboardSnapshot', prompt, requestId });
+  }, [promptDashboardMode, promptDashboardScopeFingerprint]);
 
   // Auto-expand branch list on first resolve if mismatch detected
   useEffect(() => {
@@ -3437,6 +3568,46 @@ export const EditorApp: React.FC = () => {
       trackedBranchesByProject: normalizedTrackedBranchesByProject,
     });
   }, [gitOverlayBusyAction, gitOverlayMode, logGitOverlayDebug, prompt.branch, prompt.projects, setGitOverlayBusyState, t]);
+
+  const handlePromptDashboardRefresh = useCallback(() => {
+    const requestId = `prompt-dashboard-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    promptDashboardRequestIdRef.current = requestId;
+    setPromptDashboardBusyAction('refresh');
+    vscode.postMessage({ type: 'refreshPromptDashboard', prompt: promptRef.current, requestId });
+  }, []);
+
+  const handlePromptDashboardOpenPrompt = useCallback((id: string, promptUuid?: string) => {
+    vscode.postMessage({ type: 'openPrompt', id, promptUuid });
+  }, []);
+
+  const handlePromptDashboardSwitchBranch = useCallback((project: string, branch: string) => {
+    const requestId = `prompt-dashboard-switch-project-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    promptDashboardRequestIdRef.current = requestId;
+    setPromptDashboardBusyAction(`switch-project:${project}`);
+    vscode.postMessage({
+      type: 'promptDashboardSwitchBranch',
+      prompt: promptRef.current,
+      project,
+      branch,
+      requestId,
+    });
+  }, []);
+
+  const handlePromptDashboardSwitchBranches = useCallback((branchesByProject: Record<string, string>, source: 'bulk' | 'prompt' | 'tracked' = 'bulk') => {
+    const requestId = `prompt-dashboard-switch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    promptDashboardRequestIdRef.current = requestId;
+    setPromptDashboardBusyAction(source === 'bulk' ? 'switch-all' : `preset:${source}`);
+    vscode.postMessage({
+      type: 'promptDashboardSwitchBranches',
+      prompt: promptRef.current,
+      branchesByProject,
+      requestId,
+    });
+  }, []);
+
+  const handlePromptDashboardOpenFilePatch = useCallback((request: PromptDashboardFilePatchRequest) => {
+    vscode.postMessage({ type: 'promptDashboardOpenFilePatch', ...request });
+  }, []);
 
   const handleGitOverlayEnsurePromptBranch = useCallback((trackedBranchesByProject: Record<string, string>) => {
     const normalizedTrackedBranchesByProject = normalizeTrackedBranchesByProject(trackedBranchesByProject);
@@ -4877,8 +5048,14 @@ export const EditorApp: React.FC = () => {
   ) : null;
 
   return (
-    <div style={styles.container}>
-      <div style={styles.contentShell}>
+    <div style={{
+      ...styles.container,
+      ...(promptDashboardMode === 'full' ? styles.containerWithDashboard : null),
+    }}>
+      <div style={{
+        ...styles.contentShell,
+        ...(promptDashboardMode === 'full' ? styles.contentShellWithDashboard : null),
+      }}>
         {/* Loading overlay — stays centered within the prompt form shell */}
         {showLoader && !isLoaded && (
           <div style={styles.loadingOverlay} data-pm-editor-loading-overlay="true">
@@ -5794,6 +5971,18 @@ export const EditorApp: React.FC = () => {
         </div>
       </div>
 
+      <PromptDashboard
+        snapshot={promptDashboardSnapshot}
+        busyAction={promptDashboardBusyAction}
+        mode={promptDashboardMode}
+        onRefresh={handlePromptDashboardRefresh}
+        onOpenPrompt={handlePromptDashboardOpenPrompt}
+        onSwitchBranch={handlePromptDashboardSwitchBranch}
+        onSwitchBranches={handlePromptDashboardSwitchBranches}
+        onOpenDiff={handleGitOverlayOpenDiff}
+        onOpenFilePatch={handlePromptDashboardOpenFilePatch}
+      />
+
       {gitOverlayOpen ? (
         <GitOverlay
           open={gitOverlayOpen}
@@ -5881,6 +6070,15 @@ const styles: Record<string, React.CSSProperties> = {
     height: '100vh',
     overflow: 'hidden',
     position: 'relative',
+  },
+  containerWithDashboard: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: '24px',
+  },
+  contentShellWithDashboard: {
+    flex: `0 0 ${EDITOR_FORM_SHELL_WIDTH_PX}px`,
+    maxWidth: `${EDITOR_FORM_SHELL_WIDTH_PX}px`,
   },
   contentShell: {
     display: 'flex',

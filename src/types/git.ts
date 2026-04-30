@@ -42,6 +42,8 @@ export interface GitOverlayReviewRequest {
 	title: string;
 	url: string;
 	state: GitOverlayReviewRequestState;
+	createdAt: string;
+	updatedAt: string;
 	sourceBranch: string;
 	targetBranch: string;
 	isDraft: boolean;
@@ -64,6 +66,51 @@ export interface GitOverlayCommit {
 	author: string;
 	committedAt: string;
 	refNames: string[];
+}
+
+export interface GitOverlayCommitChangedFile {
+	status: string;
+	path: string;
+	previousPath?: string;
+}
+
+export type GitOverlayPipelineState = 'unknown' | 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped' | 'unavailable';
+
+export interface GitOverlayPipelineCheck {
+	id: string;
+	name: string;
+	state: GitOverlayPipelineState;
+	conclusion: string;
+	startedAt: string;
+	completedAt: string;
+	detailsUrl: string;
+	workflow: string;
+}
+
+export interface GitOverlayPipelineStatus {
+	provider: GitOverlayReviewProvider;
+	branch: string;
+	state: GitOverlayPipelineState;
+	updatedAt: string;
+	url: string;
+	checks: GitOverlayPipelineCheck[];
+	error: string;
+	unavailableReason?: string;
+}
+
+export interface GitOverlayPotentialConflict {
+	path: string;
+	reason: string;
+}
+
+export interface GitOverlayParallelBranchSummary {
+	name: string;
+	baseBranch: string;
+	ahead: number;
+	behind: number;
+	lastCommit: GitOverlayCommit | null;
+	affectedFiles: GitOverlayCommitChangedFile[];
+	potentialConflicts: GitOverlayPotentialConflict[];
 }
 
 export interface GitOverlayChangeFile {

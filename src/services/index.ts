@@ -17,4 +17,5 @@ export { MemoryNotificationService } from './memoryNotificationService.js';
 export { ChatMemoryInstructionComposer } from './chatMemoryInstructionComposer.js';
 export { ChatMemoryInstructionService } from './chatMemoryInstructionService.js';
 export { PromptVoiceService } from './promptVoice/promptVoiceService.js';
+export { PromptDashboardService } from './promptDashboardService.js';
 export * from '../codemap/index.js';

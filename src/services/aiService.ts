@@ -14,6 +14,7 @@ import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { buildDescriptionGenerationUserPrompt, buildPromptFieldLanguageRule, buildTitleGenerationUserPrompt } from '../utils/aiPromptBuilders.js';
 import { normalizeCommitMessageGenerationInstructions } from '../utils/gitOverlay.js';
 import { readSqliteItemValue } from '../utils/sqliteItemTable.js';
+import type { PromptDashboardProjectSummary } from '../types/promptDashboard.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -386,6 +387,71 @@ export class AiService {
 			'generate-commit-message',
 			'AiService.generateCommitMessage',
 		);
+	}
+
+	async analyzePromptDashboardReview(input: {
+		promptTitle: string;
+		promptContent: string;
+		projects: PromptDashboardProjectSummary[];
+	}): Promise<string> {
+		const fallback = [
+			'### Итог',
+			'Недостаточно данных для автоматического анализа параллельных веток.',
+			'### Риски',
+			'- Проверьте локальные изменения, pipeline и MR/PR вручную.',
+			'### Следующие действия',
+			'- Обновите dashboard и повторите анализ после загрузки Git-данных.',
+		].join('\n');
+
+		const systemPrompt = [
+			'Ты анализируешь состояние параллельных веток, pipeline и merge requests в редакторе задач.',
+			'Пиши на русском языке, коротко и прикладно.',
+			'Используй только переданные данные, ничего не выдумывай.',
+			'Сфокусируйся на рисках конфликтов, сломанных проверках, незавершенных MR/PR и безопасном порядке действий.',
+			'Верни Markdown с разделами: ### Итог, ### Риски, ### Следующие действия.',
+		].join(' ');
+
+		const projectSummary = input.projects.map(project => ({
+			project: project.project,
+			currentBranch: project.currentBranch,
+			promptBranch: project.promptBranch,
+			trackedBranch: project.trackedBranch,
+			dirty: project.dirty,
+			hasConflicts: project.hasConflicts,
+			ahead: project.ahead,
+			behind: project.behind,
+			recentCommits: project.recentCommits.slice(0, 2).map(commit => ({
+				sha: commit.shortSha,
+				subject: commit.subject,
+			})),
+			review: {
+				provider: project.review.remote?.provider || null,
+				requestState: project.review.request?.state || null,
+				requestUrl: project.review.request?.url || '',
+				error: project.review.error || '',
+			},
+			pipeline: project.pipeline ? {
+				provider: project.pipeline.provider,
+				state: project.pipeline.state,
+				checks: project.pipeline.checks.map(check => ({ name: check.name, state: check.state })),
+				error: project.pipeline.error,
+			} : null,
+			parallelBranches: project.parallelBranches.map(branch => ({
+				name: branch.name,
+				ahead: branch.ahead,
+				behind: branch.behind,
+				affectedFiles: branch.affectedFiles.slice(0, 20).map(file => `${file.status}:${file.previousPath || ''}:${file.path}`),
+				potentialConflicts: branch.potentialConflicts.slice(0, 10),
+			})),
+		}));
+
+		const userPrompt = [
+			`Задача: ${input.promptTitle || 'Без названия'}`,
+			input.promptContent.trim() ? `Текст промпта:\n${input.promptContent.trim().slice(0, 4000)}` : '',
+			`Данные dashboard:\n${JSON.stringify(projectSummary, null, 2).slice(0, 24000)}`,
+		].filter(Boolean).join('\n\n');
+
+		return this.chat(systemPrompt, userPrompt, fallback, 'prompt-dashboard-review', 'AiService.analyzePromptDashboardReview');
 	}
 
 	async generateCodeMapAreaDescription(

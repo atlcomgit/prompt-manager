@@ -42,6 +42,7 @@ import type { GitOverlayProjectSnapshot, GitOverlaySnapshot } from '../types/git
 import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
 import type { PromptVoiceService } from '../services/promptVoice/promptVoiceService.js';
+import type { PromptDashboardService } from '../services/promptDashboardService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { ChatMemoryInstructionService, ChatMemorySessionRecord } from '../services/chatMemoryInstructionService.js';
 import type { CustomGroupsService } from '../services/customGroupsService.js';
@@ -2949,6 +2950,7 @@ export class EditorPanelManager {
 		private readonly gitService: GitService,
 		private readonly stateService: StateService,
 		private readonly promptVoiceService: PromptVoiceService,
+		private readonly promptDashboardService: PromptDashboardService,
 		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
 		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined,
 		private readonly customGroupsService?: CustomGroupsService,
@@ -4437,6 +4439,66 @@ export class EditorPanelManager {
 		}
 
 		await this.openGitOverlayFile(project, filePath, false);
+	}
+
+	/** Opens an exact dashboard file comparison using VS Code's standard diff editor. */
+	private async openPromptDashboardFilePatch(input: {
+		project: string;
+		filePath: string;
+		previousPath?: string;
+		mode: 'commit' | 'branch';
+		ref: string;
+		baseRef?: string;
+	}): Promise<void> {
+		const projectPath = this.workspaceService.getWorkspaceFolderPaths().get(input.project);
+		if (!projectPath) {
+			throw new Error(`Проект "${input.project}" не найден.`);
+		}
+		const leftRef = input.mode === 'commit'
+			? `${input.ref}^`
+			: await this.resolvePromptDashboardBranchDiffBase(projectPath, input.baseRef || 'HEAD', input.ref);
+		const rightRef = input.ref;
+		const leftPath = input.previousPath || input.filePath;
+		const [leftContent, rightContent] = await Promise.all([
+			this.gitService.getFileContentAtRef(projectPath, leftRef, leftPath),
+			this.gitService.getFileContentAtRef(projectPath, rightRef, input.filePath),
+		]);
+		const rangeLabel = input.mode === 'commit' ? input.ref : `${leftRef}...${rightRef}`;
+		const diffDirectory = vscode.Uri.file(path.join(
+			os.tmpdir(),
+			'prompt-manager-dashboard-diff',
+			`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		));
+		await vscode.workspace.fs.createDirectory(diffDirectory);
+		const leftUri = await this.writePromptDashboardDiffSide(diffDirectory, 'left', leftPath, leftContent);
+		const rightUri = await this.writePromptDashboardDiffSide(diffDirectory, 'right', input.filePath, rightContent);
+		await vscode.commands.executeCommand(
+			'vscode.diff',
+			leftUri,
+			rightUri,
+			`${input.project}: ${input.filePath} (${rangeLabel})`,
+			{ preview: false, viewColumn: vscode.ViewColumn.Beside },
+		);
+	}
+
+	/** Resolves a branch comparison base with merge-base semantics. */
+	private async resolvePromptDashboardBranchDiffBase(projectPath: string, baseRef: string, branchRef: string): Promise<string> {
+		const mergeBase = await this.gitService.getMergeBase(projectPath, baseRef, branchRef);
+		return mergeBase || baseRef;
+	}
+
+	/** Writes one side of a dashboard diff to a temporary file URI. */
+	private async writePromptDashboardDiffSide(
+		directory: vscode.Uri,
+		side: 'left' | 'right',
+		filePath: string,
+		content: string,
+	): Promise<vscode.Uri> {
+		const basename = path.basename(filePath.trim() || 'file.txt');
+		const safeName = basename.replace(/[^a-zA-Z0-9._-]/g, '_') || 'file.txt';
+		const uri = vscode.Uri.joinPath(directory, `${side}-${safeName}`);
+		await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf-8'));
+		return uri;
 	}
 
 	private async openGitOverlayReviewRequest(url: string): Promise<void> {
@@ -6344,15 +6406,51 @@ export class EditorPanelManager {
 
 	/** Load a saved prompt for opening, preferring an in-flight save result over stale disk data. */
 	private async loadPromptForOpen(promptId: string): Promise<Prompt | null> {
+		const loadStartedAt = Date.now();
+		this.logReportDebug('openPrompt.loadTarget.started', {
+			promptId,
+		});
+
 		const pendingSaveEntry = findPendingSaveEntry(this.pendingSaveQueue, promptId, undefined);
 		if (pendingSaveEntry) {
+			const pendingSnapshotId = (pendingSaveEntry.snapshot.id || '').trim();
+			if (pendingSnapshotId === promptId) {
+				const pendingSnapshot = JSON.parse(JSON.stringify(pendingSaveEntry.snapshot)) as Prompt;
+				this.logReportDebug('openPrompt.loadTarget.pendingSaveSnapshot', {
+					promptId,
+					contentSize: pendingSnapshot.content.length,
+					reportSize: pendingSnapshot.report.length,
+					contextFileCount: pendingSnapshot.contextFiles.length,
+					durationMs: Date.now() - loadStartedAt,
+				});
+				return pendingSnapshot;
+			}
+
+			const pendingSaveStartedAt = Date.now();
 			const savedResult = await pendingSaveEntry.promise;
+			this.logReportDebug('openPrompt.loadTarget.pendingSaveResolved', {
+				promptId,
+				resolvedPromptId: savedResult?.id || '',
+				waitMs: Date.now() - pendingSaveStartedAt,
+				durationMs: Date.now() - loadStartedAt,
+			});
 			if (savedResult && savedResult.id === promptId) {
 				return savedResult;
 			}
 		}
 
-		return this.storageService.getPrompt(promptId);
+		const storageReadStartedAt = Date.now();
+		const prompt = await this.storageService.getPrompt(promptId);
+		this.logReportDebug('openPrompt.loadTarget.storageRead', {
+			promptId,
+			found: Boolean(prompt),
+			readMs: Date.now() - storageReadStartedAt,
+			durationMs: Date.now() - loadStartedAt,
+			contentSize: prompt?.content.length || 0,
+			reportSize: prompt?.report.length || 0,
+			contextFileCount: prompt?.contextFiles.length || 0,
+		});
+		return prompt;
 	}
 
 	async openPromptAndStartChat(promptId: string): Promise<void> {
@@ -6403,6 +6501,12 @@ export class EditorPanelManager {
 			hasReusableSingletonPanel: Boolean(reusableSingletonPanel),
 			elapsedMs: Date.now() - openStartedAt,
 		});
+		if (panelSwitchStrategy !== 'noop') {
+			this.promptDashboardService.pauseActiveScope('prompt-switch', {
+				nextPromptId: promptId,
+				requestVersion,
+			});
+		}
 		if (panelSwitchStrategy === 'noop' && reusableSingletonPanel) {
 			try {
 				await reusableSingletonPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
@@ -7431,6 +7535,11 @@ export class EditorPanelManager {
 						report: nextReport,
 					} satisfies ExtensionToWebviewMessage);
 				}
+				break;
+			}
+
+			case 'openPrompt': {
+				await this.openPrompt({ id: msg.id, promptUuid: msg.promptUuid });
 				break;
 			}
 
@@ -8822,6 +8931,89 @@ export class EditorPanelManager {
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
 				const branches = await this.gitService.getBranches(paths, msg.projects);
 				postMessage({ type: 'branches', branches });
+				break;
+			}
+
+			case 'getPromptDashboardSnapshot': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				const snapshot = this.promptDashboardService.getSnapshot(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+					msg.forceRefresh === true,
+				);
+				postMessage({ type: 'promptDashboardSnapshot', snapshot, requestId: msg.requestId });
+				break;
+			}
+
+			case 'refreshPromptDashboard': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				const snapshot = await this.promptDashboardService.refreshPrompt(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+				);
+				postMessage({ type: 'promptDashboardSnapshot', snapshot, requestId: msg.requestId });
+				break;
+			}
+
+			case 'promptDashboardSwitchBranch': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				const result = await this.promptDashboardService.switchProjectBranch(dashboardPrompt, msg.project, msg.branch);
+				if (result.success) {
+					postMessage({ type: 'info', message: `Ветка "${msg.branch}" активирована.`, requestId: msg.requestId });
+				} else {
+					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
+				}
+				const snapshot = await this.promptDashboardService.refreshPrompt(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+				);
+				postMessage({ type: 'promptDashboardSnapshot', snapshot, requestId: msg.requestId });
+				break;
+			}
+
+			case 'promptDashboardSwitchBranches': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				const result = await this.promptDashboardService.switchProjectBranches(dashboardPrompt, msg.branchesByProject);
+				if (result.success) {
+					postMessage({ type: 'info', message: 'Ветки проектов активированы.', requestId: msg.requestId });
+				} else {
+					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
+				}
+				const snapshot = await this.promptDashboardService.refreshPrompt(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+				);
+				postMessage({ type: 'promptDashboardSnapshot', snapshot, requestId: msg.requestId });
+				break;
+			}
+
+			case 'promptDashboardOpenFilePatch': {
+				try {
+					await this.openPromptDashboardFilePatch({
+						project: msg.project,
+						filePath: msg.filePath,
+						previousPath: msg.previousPath,
+						mode: msg.mode,
+						ref: msg.ref,
+						baseRef: msg.baseRef,
+					});
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
+				}
+				break;
+			}
+
+			case 'analyzePromptDashboardReview': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				void this.promptDashboardService.analyzeParallelReview(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+				);
 				break;
 			}
 

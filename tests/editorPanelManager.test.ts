@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
+import { buildSaveQueueKey } from '../src/utils/promptSaveQueue.js';
 
 const originalLoad = (Module as any)._load;
 const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
@@ -509,6 +510,14 @@ async function createManager(options?: {
 		confirm: async () => undefined,
 		cancel: async () => undefined,
 	};
+	const promptDashboardService = {
+		getSnapshot: () => null,
+		refreshPrompt: async () => null,
+		switchProjectBranch: async () => ({ success: true, errors: [] }),
+		switchProjectBranches: async () => ({ success: true, errors: [] }),
+		pauseActiveScope: () => undefined,
+		analyzeParallelReview: async () => ({ status: 'idle', model: '', content: '' }),
+	};
 
 	const manager = new EditorPanelManager(
 		{ fsPath: '/tmp/extension' } as any,
@@ -518,6 +527,7 @@ async function createManager(options?: {
 		{} as any,
 		stateService as any,
 		promptVoiceService as any,
+		promptDashboardService as any,
 		undefined,
 		undefined,
 	);
@@ -714,6 +724,46 @@ test('openPrompt starts target prompt load without waiting for slow promptLoadin
 	deferredPromptLoadingPost.resolve(true);
 	await openPromise;
 	panel.dispose();
+});
+
+test('loadPromptForOpen returns a pending save snapshot without waiting for disk', async () => {
+	resetVsCodeCommandMock();
+	const { manager, storageService } = await createManager();
+	const deferredSave = createDeferred<any>();
+	let diskReadCount = 0;
+	(storageService as any).getPrompt = async () => {
+		diskReadCount += 1;
+		return createPrompt({
+			id: 'prompt-b',
+			promptUuid: 'uuid-b',
+			title: 'Prompt B from disk',
+		});
+	};
+
+	(manager as any).pendingSaveQueue.set(buildSaveQueueKey('uuid-b', 'prompt-b'), {
+		snapshot: createPrompt({
+			id: 'prompt-b',
+			promptUuid: 'uuid-b',
+			title: 'Prompt B pending',
+			content: 'pending content',
+			report: 'pending report',
+		}),
+		promise: deferredSave.promise,
+		operationId: 'op-1',
+	});
+
+	const loaded = await (manager as any).loadPromptForOpen('prompt-b');
+
+	assert.equal(loaded?.title, 'Prompt B pending');
+	assert.equal(loaded?.content, 'pending content');
+	assert.equal(diskReadCount, 0);
+
+	deferredSave.resolve(createPrompt({
+		id: 'prompt-b',
+		promptUuid: 'uuid-b',
+		title: 'Prompt B saved',
+	}));
+	await flushTurns(1);
 });
 
 test('savePromptEditorViewState message queues persistence without blocking handler', async () => {

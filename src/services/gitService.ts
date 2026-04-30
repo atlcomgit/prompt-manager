@@ -13,16 +13,22 @@ import type {
 	GitOverlayChangeFile,
 	GitOverlayBranchInfo,
 	GitOverlayCommit,
+	GitOverlayCommitChangedFile,
 	GitOverlayFileHistoryEntry,
 	GitOverlayFileHistoryPayload,
 	GitOverlayProjectReviewRequestInput,
 	GitOverlayProjectCommitMessage,
 	GitOverlayProjectSnapshot,
 	GitOverlayReviewComment,
+	GitOverlayReviewProvider,
 	GitOverlayReviewRemote,
 	GitOverlayReviewRequest,
 	GitOverlayReviewState,
 	GitOverlayReviewUnsupportedReason,
+	GitOverlayPipelineCheck,
+	GitOverlayPipelineState,
+	GitOverlayPipelineStatus,
+	GitOverlayParallelBranchSummary,
 	GitOverlaySnapshot,
 } from '../types/git.js';
 import type { Prompt } from '../types/prompt.js';
@@ -353,6 +359,30 @@ export class GitService {
 			.map(part => part.trim())
 			.filter(Boolean)
 			.join('\n');
+	}
+
+	/** Converts noisy remote CLI failures into compact UI-safe messages. */
+	private formatRemoteCliError(
+		error: unknown,
+		provider: GitOverlayReviewProvider,
+		fallback: string,
+		notFoundMessage = 'Активный MR/PR для ветки не найден.',
+	): string {
+		const output = this.extractCliErrorOutput(error);
+		const normalizedOutput = output.toLowerCase();
+		const providerLabel = provider === 'github' ? 'GitHub' : provider === 'gitlab' ? 'GitLab' : 'Git';
+		if (/error connecting|check your internet|could not resolve host|failed to connect|network is unreachable|timed?\s*out|timeout|enotfound/.test(normalizedOutput)) {
+			return `${providerLabel} API недоступен: проверьте интернет или статус сервиса.`;
+		}
+		if (/no pull requests? found|could not find.*pull request|no merge requests? found/.test(normalizedOutput)) {
+			return notFoundMessage;
+		}
+		const readableLine = output
+			.split(/\r?\n/)
+			.map(line => line.trim())
+			.find(line => line && !/^command failed:/i.test(line));
+		const message = readableLine || fallback;
+		return message.length > 180 ? `${message.slice(0, 177)}...` : message;
 	}
 
 	private extractGitLabProjectId(payload: unknown): string {
@@ -743,6 +773,7 @@ export class GitService {
 				html_url?: string;
 				state?: string;
 				merged_at?: string | null;
+				created_at?: string;
 				updated_at?: string;
 				draft?: boolean;
 				head?: { ref?: string };
@@ -774,6 +805,8 @@ export class GitService {
 				state: String(selected.state || ''),
 				mergedAt: selected.merged_at || null,
 			}),
+			createdAt: String(selected.created_at || '').trim(),
+			updatedAt: String(selected.updated_at || '').trim(),
 			sourceBranch: String(selected.head?.ref || sourceBranch).trim(),
 			targetBranch: String(selected.base?.ref || '').trim(),
 			isDraft: Boolean(selected.draft),
@@ -801,6 +834,7 @@ export class GitService {
 				web_url?: string;
 				state?: string;
 				merged_at?: string | null;
+				created_at?: string;
 				updated_at?: string;
 				source_branch?: string;
 				target_branch?: string;
@@ -833,6 +867,8 @@ export class GitService {
 				state: String(selected.state || ''),
 				mergedAt: selected.merged_at || null,
 			}),
+			createdAt: String(selected.created_at || '').trim(),
+			updatedAt: String(selected.updated_at || '').trim(),
 			sourceBranch: String(selected.source_branch || sourceBranch).trim(),
 			targetBranch: String(selected.target_branch || '').trim(),
 			isDraft: Boolean(selected.draft || selected.work_in_progress),
@@ -960,6 +996,7 @@ export class GitService {
 			});
 			return { remote, request, error: '', setupAction: null, titlePrefix, unsupportedReason: null };
 		} catch (error) {
+			const message = this.formatRemoteCliError(error, remote.provider, 'MR/PR данные недоступны.');
 			this.logDebug('reviewState.request.error', {
 				project: projectLabel,
 				branchName,
@@ -970,7 +1007,7 @@ export class GitService {
 			return {
 				remote,
 				request: null,
-				error: error instanceof Error ? error.message : String(error),
+				error: message,
 				setupAction: null,
 				titlePrefix,
 				unsupportedReason: null,
@@ -1583,6 +1620,71 @@ export class GitService {
 		return this.parseCommitLog(stdout);
 	}
 
+	async getCommitChangedFiles(projectPath: string, sha: string): Promise<GitOverlayCommitChangedFile[]> {
+		const normalizedSha = sha.trim();
+		if (!normalizedSha) {
+			return [];
+		}
+		const stdout = await this.runGitFileCommandOptional(projectPath, [
+			'show',
+			'--name-status',
+			'--find-renames',
+			'--diff-filter=ACDMR',
+			'--format=',
+			normalizedSha,
+		]);
+		return this.parseStagedNameStatus(stdout);
+	}
+
+	async getCommitFilePatch(projectPath: string, sha: string, filePath: string): Promise<string> {
+		const normalizedSha = sha.trim();
+		const normalizedFilePath = filePath.trim();
+		if (!normalizedSha || !normalizedFilePath) {
+			return '';
+		}
+		return this.runGitFileCommandOptional(projectPath, [
+			'show',
+			'--find-renames',
+			'--format=',
+			'--patch',
+			normalizedSha,
+			'--',
+			normalizedFilePath,
+		]);
+	}
+
+	/** Reads a file version at a Git ref and returns empty content when it is absent. */
+	async getFileContentAtRef(projectPath: string, ref: string, filePath: string): Promise<string> {
+		const normalizedRef = ref.trim();
+		const normalizedFilePath = filePath.trim();
+		if (!normalizedRef || !normalizedFilePath) {
+			return '';
+		}
+		try {
+			return await this.runGitFileCommandRaw(projectPath, ['show', `${normalizedRef}:${normalizedFilePath}`]);
+		} catch {
+			return '';
+		}
+	}
+
+	async getBranchFilePatch(projectPath: string, baseRef: string, branchRef: string, filePath: string): Promise<string> {
+		const normalizedBranchRef = branchRef.trim();
+		const normalizedBaseRef = baseRef.trim();
+		const normalizedFilePath = filePath.trim();
+		if (!normalizedBranchRef || !normalizedFilePath) {
+			return '';
+		}
+		const range = normalizedBaseRef ? `${normalizedBaseRef}...${normalizedBranchRef}` : normalizedBranchRef;
+		return this.runGitFileCommandOptional(projectPath, [
+			'diff',
+			'--find-renames',
+			'--patch',
+			range,
+			'--',
+			normalizedFilePath,
+		]);
+	}
+
 	private async getLastCommit(projectPath: string, ref: string): Promise<GitOverlayCommit | null> {
 		return (await this.getRecentCommits(projectPath, ref, 1))[0] || null;
 	}
@@ -1630,6 +1732,8 @@ export class GitService {
 			includeChangeDetails?: boolean;
 			includeBranchDetails?: boolean;
 			includeReviewState?: boolean;
+			includeRecentCommits?: boolean;
+			recentCommitsLimit?: number;
 			prefetchedReviewState?: GitOverlayReviewState;
 		},
 	): Promise<GitOverlayProjectSnapshot> {
@@ -1639,6 +1743,8 @@ export class GitService {
 			const includeChangeDetails = options?.includeChangeDetails !== false;
 			const includeBranchDetails = detailLevel !== 'summary' && options?.includeBranchDetails !== false;
 			const includeReviewState = options?.includeReviewState !== false;
+			const includeRecentCommits = options?.includeRecentCommits === true;
+			const recentCommitsLimit = Math.max(1, Math.min(10, options?.recentCommitsLimit || 2));
 			const normalizedPromptBranch = promptBranch.trim();
 			const currentBranch = await this.getCurrentBranch(projectPath);
 			if (!currentBranch) {
@@ -1748,10 +1854,15 @@ export class GitService {
 				return changeGroups;
 			})();
 
-			const [review, branchDetails, changeGroups] = await Promise.all([
+			const recentCommitsPromise = includeRecentCommits
+				? this.getRecentCommits(projectPath, currentBranch, recentCommitsLimit)
+				: Promise.resolve([]);
+
+			const [review, branchDetails, changeGroups, recentCommits] = await Promise.all([
 				reviewPromise,
 				branchDetailsPromise,
 				changeGroupsPromise,
+				recentCommitsPromise,
 			]);
 
 			const hasChanges = changeGroups.merge.length > 0
@@ -1788,7 +1899,7 @@ export class GitService {
 				branchDetailsHydrated: includeBranchDetails,
 				reviewHydrated,
 				review,
-				recentCommits: [],
+				recentCommits,
 			};
 		} catch (error) {
 			return {
@@ -2846,6 +2957,8 @@ export class GitService {
 			includeChangeDetails?: boolean;
 			includeBranchDetails?: boolean;
 			includeReviewState?: boolean;
+			includeRecentCommits?: boolean;
+			recentCommitsLimit?: number;
 			prefetchedReviewStatesByProject?: Record<string, GitOverlayReviewState>;
 		},
 	): Promise<GitOverlaySnapshot> {
@@ -2864,6 +2977,8 @@ export class GitService {
 						includeChangeDetails: options?.includeChangeDetails,
 						includeBranchDetails: options?.includeBranchDetails,
 						includeReviewState: options?.includeReviewState,
+						includeRecentCommits: options?.includeRecentCommits,
+						recentCommitsLimit: options?.recentCommitsLimit,
 						prefetchedReviewState: options?.prefetchedReviewStatesByProject?.[project],
 					},
 				)),
@@ -2894,6 +3009,8 @@ export class GitService {
 			includeChangeDetails?: boolean;
 			includeBranchDetails?: boolean;
 			includeReviewState?: boolean;
+			includeRecentCommits?: boolean;
+			recentCommitsLimit?: number;
 			prefetchedReviewState?: GitOverlayReviewState;
 		},
 	): Promise<GitOverlayProjectSnapshot | null> {
@@ -2921,9 +3038,371 @@ export class GitService {
 				includeChangeDetails: options?.includeChangeDetails,
 				includeBranchDetails: options?.includeBranchDetails,
 				includeReviewState: options?.includeReviewState,
+				includeRecentCommits: options?.includeRecentCommits,
+				recentCommitsLimit: options?.recentCommitsLimit,
 				prefetchedReviewState: options?.prefetchedReviewState,
 			},
 		);
+	}
+
+	private normalizePipelineState(value: unknown): GitOverlayPipelineState {
+		const normalized = String(value || '').trim().toLowerCase();
+		if (!normalized) {
+			return 'unknown';
+		}
+		if (['success', 'passed', 'pass', 'completed'].includes(normalized)) {
+			return 'success';
+		}
+		if (['failure', 'failed', 'error', 'action_required', 'timed_out'].includes(normalized)) {
+			return 'failed';
+		}
+		if (['pending', 'queued', 'waiting', 'requested'].includes(normalized)) {
+			return 'pending';
+		}
+		if (['in_progress', 'running', 'created', 'preparing', 'scheduled'].includes(normalized)) {
+			return 'running';
+		}
+		if (['cancelled', 'canceled', 'manual'].includes(normalized)) {
+			return 'cancelled';
+		}
+		if (['skipped', 'neutral'].includes(normalized)) {
+			return 'skipped';
+		}
+		return 'unknown';
+	}
+
+	private resolvePipelineState(checks: GitOverlayPipelineCheck[]): GitOverlayPipelineState {
+		if (checks.length === 0) {
+			return 'unknown';
+		}
+		if (checks.some(check => check.state === 'failed')) {
+			return 'failed';
+		}
+		if (checks.some(check => check.state === 'running')) {
+			return 'running';
+		}
+		if (checks.some(check => check.state === 'pending')) {
+			return 'pending';
+		}
+		if (checks.every(check => check.state === 'success' || check.state === 'skipped')) {
+			return 'success';
+		}
+		if (checks.every(check => check.state === 'cancelled')) {
+			return 'cancelled';
+		}
+		return 'unknown';
+	}
+
+	private createUnavailablePipelineStatus(
+		provider: GitOverlayPipelineStatus['provider'],
+		branch: string,
+		reason: string,
+		error = '',
+	): GitOverlayPipelineStatus {
+		return {
+			provider,
+			branch,
+			state: 'unavailable',
+			updatedAt: new Date().toISOString(),
+			url: '',
+			checks: [],
+			error,
+			unavailableReason: reason,
+		};
+	}
+
+	private normalizeGitHubPipelineChecks(payload: unknown): GitOverlayPipelineCheck[] {
+		return Array.isArray(payload)
+			? payload.map((item, index): GitOverlayPipelineCheck => {
+				const record = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+				const state = this.normalizePipelineState(record.state || record.conclusion || record.bucket || record.status || record.workflowState);
+				const workflow = String(record.workflow || '').trim();
+				return {
+					id: String(record.bucket || record.name || index),
+					name: String(record.name || workflow || 'check').trim(),
+					state,
+					conclusion: String(record.conclusion || record.state || record.bucket || '').trim(),
+					startedAt: String(record.startedAt || '').trim(),
+					completedAt: String(record.completedAt || '').trim(),
+					detailsUrl: String(record.link || record.detailsUrl || '').trim(),
+					workflow,
+				};
+			})
+			: [];
+	}
+
+	/** Normalizes GitHub workflow run jobs into dashboard-friendly pipeline checks. */
+	private normalizeGitHubWorkflowRunJobs(payload: unknown): GitOverlayPipelineCheck[] {
+		const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+		return Array.isArray(record.jobs)
+			? (record.jobs as unknown[]).map((item, index): GitOverlayPipelineCheck => {
+				const job = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+				return {
+					id: String(job.databaseId || job.id || index),
+					name: String(job.name || 'job').trim(),
+					state: this.normalizePipelineState(job.conclusion || job.status || job.state),
+					conclusion: String(job.conclusion || job.status || job.state || '').trim(),
+					startedAt: String(job.startedAt || job.started_at || '').trim(),
+					completedAt: String(job.completedAt || job.completed_at || '').trim(),
+					detailsUrl: String(job.url || job.detailsUrl || '').trim(),
+					workflow: String(job.workflowName || job.name || '').trim(),
+				};
+			})
+			: [];
+	}
+
+	/** Normalizes a GitHub workflow run into the shared pipeline status contract. */
+	private normalizeGitHubWorkflowRunStatus(branch: string, runSummary: unknown, runDetails?: unknown): GitOverlayPipelineStatus {
+		const summary = runSummary && typeof runSummary === 'object' ? runSummary as Record<string, unknown> : {};
+		const details = runDetails && typeof runDetails === 'object' ? runDetails as Record<string, unknown> : summary;
+		const checks = this.normalizeGitHubWorkflowRunJobs(runDetails);
+		const fallbackState = this.normalizePipelineState(details.conclusion || details.status || summary.conclusion || summary.status);
+		const fallbackCheck: GitOverlayPipelineCheck = {
+			id: String(details.databaseId || summary.databaseId || details.number || summary.number || branch).trim() || branch,
+			name: String(details.workflowName || summary.workflowName || details.name || summary.name || details.displayTitle || summary.displayTitle || 'workflow').trim(),
+			state: fallbackState,
+			conclusion: String(details.conclusion || details.status || summary.conclusion || summary.status || '').trim(),
+			startedAt: String(details.startedAt || summary.startedAt || '').trim(),
+			completedAt: String(details.updatedAt || summary.updatedAt || details.createdAt || summary.createdAt || '').trim(),
+			detailsUrl: String(details.url || summary.url || '').trim(),
+			workflow: String(details.workflowName || summary.workflowName || details.name || summary.name || '').trim(),
+		};
+
+		return {
+			provider: 'github',
+			branch,
+			state: fallbackState === 'unknown'
+				? this.resolvePipelineState(checks.length > 0 ? checks : [fallbackCheck])
+				: fallbackState,
+			updatedAt: String(details.updatedAt || summary.updatedAt || details.createdAt || summary.createdAt || new Date().toISOString()).trim(),
+			url: String(details.url || summary.url || '').trim(),
+			checks: checks.length > 0 ? checks : [fallbackCheck],
+			error: '',
+		};
+	}
+
+	/** Extracts the first GitLab pipeline from CLI list payloads with stable fallback. */
+	private getLatestGitLabPipelineRecord(payload: unknown): Record<string, unknown> | null {
+		if (Array.isArray(payload)) {
+			return payload[0] && typeof payload[0] === 'object' ? payload[0] as Record<string, unknown> : null;
+		}
+
+		const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+		if (Array.isArray(record.pipelines)) {
+			const latest = record.pipelines[0];
+			return latest && typeof latest === 'object' ? latest as Record<string, unknown> : null;
+		}
+
+		return Object.keys(record).length > 0 ? record : null;
+	}
+
+	private normalizeGitLabPipelineStatus(branch: string, payload: unknown): GitOverlayPipelineStatus {
+		const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+		const checks = Array.isArray(record.jobs)
+			? (record.jobs as unknown[]).map((item, index): GitOverlayPipelineCheck => {
+				const job = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+				return {
+					id: String(job.id || index),
+					name: String(job.name || 'job').trim(),
+					state: this.normalizePipelineState(job.status),
+					conclusion: String(job.status || '').trim(),
+					startedAt: String(job.started_at || job.startedAt || '').trim(),
+					completedAt: String(job.finished_at || job.completedAt || '').trim(),
+					detailsUrl: String(job.web_url || job.webUrl || '').trim(),
+					workflow: String(job.stage || '').trim(),
+				};
+			})
+			: [];
+
+		return {
+			provider: 'gitlab',
+			branch,
+			state: this.normalizePipelineState(record.status) === 'unknown'
+				? this.resolvePipelineState(checks)
+				: this.normalizePipelineState(record.status),
+			updatedAt: String(record.updated_at || record.updatedAt || new Date().toISOString()).trim(),
+			url: String(record.web_url || record.webUrl || '').trim(),
+			checks,
+			error: '',
+		};
+	}
+
+	async getGitOverlayProjectPipelineStatus(
+		projectPaths: Map<string, string>,
+		projectName: string,
+		branchName: string,
+	): Promise<GitOverlayPipelineStatus | null> {
+		const normalizedProjectName = projectName.trim();
+		const projectPath = projectPaths.get(normalizedProjectName);
+		const normalizedBranchName = branchName.trim();
+		if (!normalizedProjectName || !projectPath || !normalizedBranchName) {
+			return null;
+		}
+
+		const { remote } = await this.resolveReviewRemoteContext(projectPath, normalizedBranchName);
+		if (!remote) {
+			return null;
+		}
+		if (!remote.cliAvailable) {
+			return this.createUnavailablePipelineStatus(remote.provider, normalizedBranchName, `${remote.cliCommand} is unavailable`);
+		}
+
+		try {
+			if (remote.provider === 'github') {
+				const payload = await this.runJsonCliCommand('gh', projectPath, [
+					'run', 'list',
+					'--branch', normalizedBranchName,
+					'--limit', '1',
+					'--json', 'attempt,conclusion,createdAt,databaseId,displayTitle,event,headBranch,headSha,name,number,startedAt,status,updatedAt,url,workflowDatabaseId,workflowName',
+				]);
+				const latestRun = Array.isArray(payload)
+					? payload[0]
+					: payload && typeof payload === 'object' && Array.isArray((payload as { workflowRuns?: unknown[] }).workflowRuns)
+						? (payload as { workflowRuns?: unknown[] }).workflowRuns?.[0]
+						: null;
+				if (!latestRun || typeof latestRun !== 'object') {
+					return this.createUnavailablePipelineStatus(remote.provider, normalizedBranchName, 'Последний workflow run для ветки не найден.');
+				}
+				const runId = String((latestRun as { databaseId?: number | string }).databaseId || '').trim();
+				const runDetails = runId
+					? await this.runJsonCliCommand('gh', projectPath, [
+						'run', 'view', runId,
+						'--json', 'attempt,conclusion,createdAt,databaseId,displayTitle,event,headBranch,headSha,jobs,name,number,startedAt,status,updatedAt,url,workflowDatabaseId,workflowName',
+					]).catch(() => latestRun)
+					: latestRun;
+				return this.normalizeGitHubWorkflowRunStatus(normalizedBranchName, latestRun, runDetails);
+			}
+
+			const payload = await this.runJsonCliCommand('glab', projectPath, [
+				'ci', 'list',
+				'--ref', normalizedBranchName,
+				'--per-page', '1',
+				'--output', 'json',
+			]);
+			const latestPipeline = this.getLatestGitLabPipelineRecord(payload);
+			if (!latestPipeline) {
+				return this.createUnavailablePipelineStatus(remote.provider, normalizedBranchName, 'Последний pipeline для ветки не найден.');
+			}
+			const pipelineId = String((latestPipeline as { id?: number | string }).id || '').trim();
+			const pipelineDetails = pipelineId
+				? await this.runJsonCliCommand('glab', projectPath, [
+					'ci', 'get',
+					'--pipeline-id', pipelineId,
+					'--output', 'json',
+					'--with-job-details',
+				]).catch(() => latestPipeline)
+				: latestPipeline;
+			return this.normalizeGitLabPipelineStatus(normalizedBranchName, pipelineDetails);
+		} catch (error) {
+			const message = this.formatRemoteCliError(error, remote.provider, 'Pipeline-статус недоступен.', 'Последний pipeline для ветки не найден.');
+			return this.createUnavailablePipelineStatus(
+				remote.provider,
+				normalizedBranchName,
+				message,
+				'',
+			);
+		}
+	}
+
+	private parseBranchRevisionCounts(output: string): { ahead: number; behind: number } {
+		const [leftRaw, rightRaw] = output.trim().split(/\s+/);
+		return {
+			behind: Number.parseInt(leftRaw || '0', 10) || 0,
+			ahead: Number.parseInt(rightRaw || '0', 10) || 0,
+		};
+	}
+
+	async getGitOverlayParallelBranchSummaries(
+		projectPaths: Map<string, string>,
+		projectName: string,
+		baseBranch: string,
+		trackedBranches: string[],
+		limit = 8,
+	): Promise<GitOverlayParallelBranchSummary[]> {
+		const normalizedProjectName = projectName.trim();
+		const projectPath = projectPaths.get(normalizedProjectName);
+		if (!normalizedProjectName || !projectPath) {
+			return [];
+		}
+
+		const currentBranch = await this.getCurrentBranch(projectPath);
+		const normalizedBaseBranch = baseBranch.trim() || currentBranch;
+		if (!normalizedBaseBranch) {
+			return [];
+		}
+
+		const protectedBranches = new Set([
+			normalizedBaseBranch,
+			currentBranch,
+			...trackedBranches.map(branch => branch.trim()).filter(Boolean),
+		]);
+		const output = await this.runGitFileCommandOptional(projectPath, [
+			'for-each-ref',
+			'--sort=-committerdate',
+			'--format=%(refname:short)',
+			'refs/heads',
+		]);
+		const candidateBranches = output
+			.split(/\r?\n/)
+			.map(line => line.trim())
+			.filter(branch => Boolean(branch) && !protectedBranches.has(branch))
+			;
+
+		const summaries = await Promise.all(candidateBranches.map(async (branch): Promise<GitOverlayParallelBranchSummary> => {
+			const countOutput = await this.runGitFileCommandOptional(projectPath, [
+				'rev-list',
+				'--left-right',
+				'--count',
+				`${normalizedBaseBranch}...${branch}`,
+			]);
+			const { ahead, behind } = this.parseBranchRevisionCounts(countOutput);
+			const comparisonBaseRef = await this.getMergeBase(projectPath, normalizedBaseBranch, branch) || normalizedBaseBranch;
+			const currentFiles = (await this.getNameStatusDiff(projectPath, comparisonBaseRef, currentBranch || normalizedBaseBranch))
+				.flatMap(entry => [entry.oldPath || '', entry.path])
+				.map(item => item.trim())
+				.filter(Boolean);
+			const currentFileSet = new Set(currentFiles);
+			const affectedFiles = (await this.getNameStatusDiff(projectPath, comparisonBaseRef, branch))
+				.map((entry) => ({
+					status: entry.status,
+					path: entry.path,
+					previousPath: entry.oldPath || undefined,
+				}))
+				.filter(file => Boolean(file.path));
+			const potentialConflicts = affectedFiles
+				.filter(file => currentFileSet.has(file.path) || Boolean(file.previousPath && currentFileSet.has(file.previousPath)))
+				.slice(0, 20)
+				.map(file => ({ path: file.path, reason: 'changed in current and parallel branch' }));
+
+			return {
+				name: branch,
+				baseBranch: normalizedBaseBranch,
+				ahead,
+				behind,
+				lastCommit: await this.getLastCommit(projectPath, branch),
+				affectedFiles: affectedFiles.slice(0, 50),
+				potentialConflicts,
+			};
+		}));
+
+		return summaries
+			.filter(summary => summary.ahead > 0 || summary.affectedFiles.length > 0 || summary.potentialConflicts.length > 0)
+			.sort((left, right) => {
+				const conflictDelta = right.potentialConflicts.length - left.potentialConflicts.length;
+				if (conflictDelta !== 0) {
+					return conflictDelta;
+				}
+				const affectedDelta = right.affectedFiles.length - left.affectedFiles.length;
+				if (affectedDelta !== 0) {
+					return affectedDelta;
+				}
+				const aheadDelta = right.ahead - left.ahead;
+				if (aheadDelta !== 0) {
+					return aheadDelta;
+				}
+				return String(right.lastCommit?.committedAt || '').localeCompare(String(left.lastCommit?.committedAt || ''));
+			})
+			.slice(0, Math.max(1, limit));
 	}
 
 	/** Догружает только branch metadata для уже известного project snapshot без change/review команд. */

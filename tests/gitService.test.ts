@@ -1277,6 +1277,210 @@ test('GitService getProjectReviewState includes resolved title prefix in review 
 	assert.equal(reviewState.unsupportedReason, 'missing-remote');
 });
 
+test('GitService getGitOverlayProjectPipelineStatus uses the latest GitHub workflow run with jobs', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const capturedCalls: string[][] = [];
+
+	service.resolveReviewRemoteContext = async () => ({
+		remote: {
+			provider: 'github',
+			cliAvailable: true,
+			cliCommand: 'gh',
+		},
+	});
+	service.runJsonCliCommand = async (_command: string, _projectPath: string, args: string[]) => {
+		capturedCalls.push(args);
+		if (args[0] === 'run' && args[1] === 'list') {
+			return [{
+				databaseId: 42,
+				workflowName: 'ci',
+				status: 'completed',
+				conclusion: 'success',
+				updatedAt: '2026-04-29T10:00:00.000Z',
+				url: 'https://example.test/run/42',
+			}];
+		}
+
+		return {
+			databaseId: 42,
+			workflowName: 'ci',
+			status: 'completed',
+			conclusion: 'success',
+			updatedAt: '2026-04-29T10:00:00.000Z',
+			url: 'https://example.test/run/42',
+			jobs: [{
+				databaseId: 7,
+				name: 'build',
+				status: 'completed',
+				conclusion: 'success',
+				startedAt: '2026-04-29T09:55:00.000Z',
+				completedAt: '2026-04-29T10:00:00.000Z',
+				url: 'https://example.test/job/7',
+			}],
+		};
+	};
+
+	const status = await service.getGitOverlayProjectPipelineStatus(new Map([['api', '/tmp/api']]), 'api', 'master');
+
+	assert.deepEqual(capturedCalls, [
+		[
+			'run', 'list',
+			'--branch', 'master',
+			'--limit', '1',
+			'--json', 'attempt,conclusion,createdAt,databaseId,displayTitle,event,headBranch,headSha,name,number,startedAt,status,updatedAt,url,workflowDatabaseId,workflowName',
+		],
+		[
+			'run', 'view', '42',
+			'--json', 'attempt,conclusion,createdAt,databaseId,displayTitle,event,headBranch,headSha,jobs,name,number,startedAt,status,updatedAt,url,workflowDatabaseId,workflowName',
+		],
+	]);
+	assert.equal(status?.state, 'success');
+	assert.equal(status?.checks[0]?.workflow, 'build');
+	assert.equal(status?.checks[0]?.detailsUrl, 'https://example.test/job/7');
+	assert.equal(status?.url, 'https://example.test/run/42');
+});
+
+test('GitService getGitOverlayProjectPipelineStatus hides noisy GitHub network errors', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.resolveReviewRemoteContext = async () => ({
+		remote: {
+			provider: 'github',
+			cliAvailable: true,
+			cliCommand: 'gh',
+		},
+	});
+	service.runJsonCliCommand = async () => {
+		throw new Error('Command failed: gh run list --branch master --limit 1 error connecting to api.github.com check your internet connection or https://githubstatus.com');
+	};
+
+	const status = await service.getGitOverlayProjectPipelineStatus(new Map([['api', '/tmp/api']]), 'api', 'master');
+
+	assert.equal(status?.state, 'unavailable');
+	assert.equal(status?.error, '');
+	assert.equal(status?.unavailableReason, 'GitHub API недоступен: проверьте интернет или статус сервиса.');
+});
+
+test('GitService getGitOverlayProjectPipelineStatus uses the latest GitLab pipeline with job details', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const capturedCalls: string[][] = [];
+
+	service.resolveReviewRemoteContext = async () => ({
+		remote: {
+			provider: 'gitlab',
+			cliAvailable: true,
+			cliCommand: 'glab',
+		},
+	});
+	service.runJsonCliCommand = async (_command: string, _projectPath: string, args: string[]) => {
+		capturedCalls.push(args);
+		if (args[0] === 'ci' && args[1] === 'list') {
+			return [{
+				id: 51,
+				ref: 'master',
+				status: 'success',
+				updated_at: '2026-04-29T11:00:00.000Z',
+				web_url: 'https://gitlab.example.test/pipeline/51',
+			}];
+		}
+
+		return {
+			id: 51,
+			ref: 'master',
+			status: 'success',
+			updated_at: '2026-04-29T11:00:00.000Z',
+			web_url: 'https://gitlab.example.test/pipeline/51',
+			jobs: [{
+				id: 9,
+				name: 'test',
+				status: 'success',
+				started_at: '2026-04-29T10:50:00.000Z',
+				finished_at: '2026-04-29T11:00:00.000Z',
+				web_url: 'https://gitlab.example.test/job/9',
+				stage: 'test',
+			}],
+		};
+	};
+
+	const status = await service.getGitOverlayProjectPipelineStatus(new Map([['api', '/tmp/api']]), 'api', 'master');
+
+	assert.deepEqual(capturedCalls, [
+		['ci', 'list', '--ref', 'master', '--per-page', '1', '--output', 'json'],
+		['ci', 'get', '--pipeline-id', '51', '--output', 'json', '--with-job-details'],
+	]);
+	assert.equal(status?.state, 'success');
+	assert.equal(status?.checks[0]?.name, 'test');
+	assert.equal(status?.checks[0]?.detailsUrl, 'https://gitlab.example.test/job/9');
+	assert.equal(status?.url, 'https://gitlab.example.test/pipeline/51');
+});
+
+test('GitService getProjectReviewState hides noisy GitHub network errors', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.resolveReviewRequestTitlePrefix = async () => 'MR';
+	service.resolveReviewRemoteContext = async () => ({
+		remote: {
+			provider: 'github',
+			host: 'github.com',
+			supported: true,
+			cliAvailable: true,
+			cliCommand: 'gh',
+		},
+		unsupportedReason: null,
+	});
+	service.isCliAuthenticated = async () => true;
+	service.getExistingReviewRequest = async () => {
+		throw new Error('Command failed: gh api repos/acme/api/pulls?state=all&head=acme%3Amaster error connecting to api.github.com check your internet connection or https://githubstatus.com');
+	};
+
+	const reviewState = await service.getProjectReviewState('/tmp/api', 'master');
+
+	assert.equal(reviewState.request, null);
+	assert.equal(reviewState.error, 'GitHub API недоступен: проверьте интернет или статус сервиса.');
+});
+
+test('GitService getGitOverlayParallelBranchSummaries lists files changed from merge base', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const diffCalls: Array<[string, string]> = [];
+
+	service.getCurrentBranch = async () => 'feature/current';
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'for-each-ref') {
+			return 'main\nfeature/current\nfeature/parallel';
+		}
+		if (args[0] === 'rev-list') {
+			return '0\t2';
+		}
+		return '';
+	};
+	service.getMergeBase = async () => 'base-sha';
+	service.getNameStatusDiff = async (_projectPath: string, fromRef: string, toRef: string) => {
+		diffCalls.push([fromRef, toRef]);
+		if (fromRef === 'base-sha' && toRef === 'feature/current') {
+			return [{ status: 'M', path: 'src/shared.ts' }];
+		}
+		if (fromRef === 'base-sha' && toRef === 'feature/parallel') {
+			return [{ status: 'M', path: 'src/branch-only.ts' }, { status: 'M', path: 'src/shared.ts' }];
+		}
+		return [{ status: 'M', path: 'src/base-tip-only.ts' }];
+	};
+	service.getLastCommit = async () => null;
+
+	const summaries = await service.getGitOverlayParallelBranchSummaries(new Map([['api', '/tmp/api']]), 'api', 'main', ['main']);
+
+	assert.deepEqual(summaries[0]?.affectedFiles, [
+		{ status: 'M', path: 'src/branch-only.ts', previousPath: undefined },
+		{ status: 'M', path: 'src/shared.ts', previousPath: undefined },
+	]);
+	assert.deepEqual(summaries[0]?.potentialConflicts.map((file: { path: string }) => file.path), ['src/shared.ts']);
+	assert.deepEqual(diffCalls, [['base-sha', 'feature/current'], ['base-sha', 'feature/parallel']]);
+});
+
 test('GitService resolveGitLabProjectId extracts numeric id from moved-project redirect output', async () => {
 	const { GitService } = await importGitService();
 	const service = new GitService() as any;

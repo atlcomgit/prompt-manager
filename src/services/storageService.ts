@@ -27,6 +27,7 @@ import {
 	isAbsoluteContextFileReference,
 	normalizeContextFileReference,
 } from '../utils/contextFiles.js';
+import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 import { normalizeStoredPromptConfig } from '../utils/promptConfig.js';
 import { normalizePromptExternalChangedAt } from '../utils/promptExternalSync.js';
 import { summarizePromptReport } from '../utils/statisticsExport.js';
@@ -77,6 +78,12 @@ export class StorageService implements vscode.Disposable {
 	private externalConfigChangeTimer: NodeJS.Timeout | null = null;
 	private pendingExternalConfigChanges = new Map<string, ExternalPromptConfigChange>();
 	private internalConfigWriteSuppressionByPath = new Map<string, number>();
+
+	/** Writes prompt-load diagnostics into the shared Prompt Manager output channel. */
+	private logStoragePerf(event: string, payload?: Record<string, unknown>): void {
+		const serializedPayload = payload ? ` ${JSON.stringify(payload)}` : '';
+		appendPromptManagerLog(`[${new Date().toISOString()}] [storage-perf] ${event}${serializedPayload}`);
+	}
 
 	public readonly onDidExternalPromptConfigChange = this._onDidExternalPromptConfigChange.event;
 
@@ -890,21 +897,41 @@ export class StorageService implements vscode.Disposable {
 
 	/** Read full prompt (config + markdown) */
 	async getPrompt(id: string): Promise<Prompt | null> {
+		const promptStartedAt = Date.now();
+		const normalizedPromptId = (id || '').trim();
 		const location = this.resolvePromptStorageLocationSync(id);
-		if (!location) { return null; }
+		if (!location) {
+			this.logStoragePerf('getPrompt.missingLocation', {
+				promptId: normalizedPromptId,
+				durationMs: Date.now() - promptStartedAt,
+			});
+			return null;
+		}
 
+		const configStartedAt = Date.now();
 		const config = await this.readConfig(id, location);
-		if (!config) { return null; }
+		const configDurationMs = Date.now() - configStartedAt;
+		if (!config) {
+			this.logStoragePerf('getPrompt.missingConfig', {
+				promptId: normalizedPromptId,
+				archived: location.archived,
+				configDurationMs,
+				durationMs: Date.now() - promptStartedAt,
+			});
+			return null;
+		}
 
 		const mdPath = path.join(location.dirPath, 'prompt.md');
 		const reportPath = path.join(location.dirPath, 'report.txt');
 		const legacyReportPath = path.join(location.dirPath, 'report.md');
 
 		// Параллельное чтение content и report для ускорения
+		const fileReadStartedAt = Date.now();
 		const [contentResult, reportResult] = await Promise.allSettled([
 			vscode.workspace.fs.readFile(vscode.Uri.file(mdPath)),
 			vscode.workspace.fs.readFile(vscode.Uri.file(reportPath)),
 		]);
+		const parallelReadDurationMs = Date.now() - fileReadStartedAt;
 
 		const content = contentResult.status === 'fulfilled'
 			? Buffer.from(contentResult.value).toString('utf-8')
@@ -912,21 +939,43 @@ export class StorageService implements vscode.Disposable {
 
 		let report = '';
 		let hasReportTxt = true;
+		let legacyReportReadDurationMs = 0;
 		if (reportResult.status === 'fulfilled') {
 			report = Buffer.from(reportResult.value).toString('utf-8');
 		} else {
 			hasReportTxt = false;
+			const legacyReportStartedAt = Date.now();
 			try {
 				const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(legacyReportPath));
 				report = Buffer.from(raw).toString('utf-8');
 			} catch {
 				// No report file yet
+			} finally {
+				legacyReportReadDurationMs = Date.now() - legacyReportStartedAt;
 			}
 		}
 
+		let ensureReportDurationMs = 0;
 		if (!hasReportTxt) {
+			const ensureReportStartedAt = Date.now();
 			await this.ensurePromptReportFile(id, report, location.archived);
+			ensureReportDurationMs = Date.now() - ensureReportStartedAt;
 		}
+
+		this.logStoragePerf('getPrompt.completed', {
+			promptId: normalizedPromptId,
+			archived: location.archived,
+			configDurationMs,
+			parallelReadDurationMs,
+			legacyReportReadDurationMs,
+			ensureReportDurationMs,
+			contentReadStatus: contentResult.status,
+			reportReadStatus: reportResult.status,
+			contentSize: content.length,
+			reportSize: report.length,
+			contextFileCount: config.contextFiles.length,
+			durationMs: Date.now() - promptStartedAt,
+		});
 
 		return { ...config, content, report };
 	}

@@ -2,7 +2,15 @@ import * as vscode from 'vscode';
 
 type ConsoleMethod = 'debug' | 'info' | 'log' | 'warn' | 'error';
 
-const NOOP_DISPOSABLE = new vscode.Disposable(() => { });
+function createDisposable(dispose: () => void): vscode.Disposable {
+	if (typeof vscode.Disposable === 'function') {
+		return new vscode.Disposable(dispose);
+	}
+
+	return { dispose } as vscode.Disposable;
+}
+
+const NOOP_DISPOSABLE = createDisposable(() => { });
 const CONSOLE_METHODS: ConsoleMethod[] = ['debug', 'info', 'log', 'warn', 'error'];
 
 export const PROMPT_MANAGER_OUTPUT_CHANNEL_NAME = 'Prompt Manager';
@@ -11,9 +19,12 @@ let outputChannel: vscode.OutputChannel | undefined;
 let restoreConsoleMethods: (() => void) | undefined;
 
 function isPromptManagerDebugLoggingEnabled(): boolean {
-	return vscode.workspace
-		.getConfiguration('promptManager')
-		.get<boolean>('debugLogging.enabled', false) === true;
+	const getConfiguration = vscode.workspace?.getConfiguration;
+	if (typeof getConfiguration !== 'function') {
+		return false;
+	}
+
+	return getConfiguration('promptManager').get<boolean>('debugLogging.enabled', false) === true;
 }
 
 export function getPromptManagerOutputChannel(): vscode.OutputChannel {
@@ -68,7 +79,7 @@ export function installPromptManagerConsoleInterceptor(): vscode.Disposable {
 		restoreConsoleMethods = undefined;
 	};
 
-	return new vscode.Disposable(() => {
+	return createDisposable(() => {
 		restoreConsoleMethods?.();
 	});
 }

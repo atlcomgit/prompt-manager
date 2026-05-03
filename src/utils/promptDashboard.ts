@@ -1,6 +1,6 @@
-import type { PromptDashboardAnalysisState, PromptDashboardBranchAction, PromptDashboardCacheState, PromptDashboardLoadStatus, PromptDashboardProjectsData, PromptDashboardProjectSummary, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../types/promptDashboard.js';
+import type { PromptDashboardAnalysisState, PromptDashboardBranchAction, PromptDashboardCacheState, PromptDashboardLoadStatus, PromptDashboardProjectsData, PromptDashboardProjectSummary, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSnapshot, PromptDashboardStatusData, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../types/promptDashboard.js';
 import type { GitOverlayBranchInfo, GitOverlayChangeFile, GitOverlayCommitChangedFile } from '../types/git.js';
-import type { PromptStatus } from '../types/prompt.js';
+import type { Prompt, PromptStatus } from '../types/prompt.js';
 
 export const PROMPT_DASHBOARD_WARM_INTERVAL_MS = 5 * 60 * 1000;
 export const PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS = 5 * 60 * 1000;
@@ -166,6 +166,114 @@ export function getPromptDashboardStatusProgress(status: PromptStatus, progress?
 		case 'closed': return 100;
 		default: return 0;
 	}
+}
+
+export function getPromptDashboardTotalTimeMs(prompt: Pick<Prompt, 'timeSpentWriting' | 'timeSpentImplementing' | 'timeSpentOnTask' | 'timeSpentUntracked'>): number {
+	return Math.max(0,
+		(prompt.timeSpentWriting || 0)
+		+ (prompt.timeSpentImplementing || 0)
+		+ (prompt.timeSpentOnTask || 0)
+		+ (prompt.timeSpentUntracked || 0),
+	);
+}
+
+export function buildPromptDashboardStatusDataFromPrompt(
+	prompt: Pick<Prompt, 'status' | 'progress' | 'updatedAt' | 'timeSpentWriting' | 'timeSpentImplementing' | 'timeSpentOnTask' | 'timeSpentUntracked'>,
+): PromptDashboardStatusData {
+	// Rebuild the widget payload from prompt fields when the dashboard scope itself stays unchanged.
+	return {
+		status: prompt.status,
+		progress: getPromptDashboardStatusProgress(prompt.status, prompt.progress),
+		totalTimeMs: getPromptDashboardTotalTimeMs(prompt),
+		updatedAt: prompt.updatedAt || new Date().toISOString(),
+	};
+}
+
+/** Control how prompt-side status sync should treat runtime progress from other dashboard sources. */
+export interface PromptDashboardStatusSyncOptions {
+	progressOverride?: number;
+	preserveInProgressSnapshotProgress?: boolean;
+}
+
+/** Reuse the freshest known in-progress percent unless an explicit runtime override is available. */
+function resolvePromptDashboardStatusSyncProgress(
+	status: PromptStatus,
+	promptProgress: number | undefined,
+	snapshotProgress: number | undefined,
+	options?: PromptDashboardStatusSyncOptions,
+): number {
+	if (typeof options?.progressOverride === 'number' && Number.isFinite(options.progressOverride)) {
+		return Math.max(0, Math.min(100, Math.round(options.progressOverride)));
+	}
+
+	const normalizedPromptProgress = typeof promptProgress === 'number' && Number.isFinite(promptProgress)
+		? Math.max(0, Math.min(100, Math.round(promptProgress)))
+		: undefined;
+	const fallbackProgress = getPromptDashboardStatusProgress(status);
+
+	if (
+		options?.preserveInProgressSnapshotProgress
+		&& status === 'in-progress'
+		&& typeof snapshotProgress === 'number'
+		&& Number.isFinite(snapshotProgress)
+		&& (normalizedPromptProgress === undefined || normalizedPromptProgress === fallbackProgress)
+	) {
+		return Math.max(0, Math.min(100, Math.round(snapshotProgress)));
+	}
+
+	return getPromptDashboardStatusProgress(status, normalizedPromptProgress);
+}
+
+export function syncPromptDashboardStatusFromPrompt(
+	snapshot: PromptDashboardSnapshot | null,
+	prompt: Pick<Prompt, 'id' | 'promptUuid' | 'status' | 'progress' | 'updatedAt' | 'timeSpentWriting' | 'timeSpentImplementing' | 'timeSpentOnTask' | 'timeSpentUntracked'>,
+	options?: PromptDashboardStatusSyncOptions,
+): PromptDashboardSnapshot | null {
+	if (!snapshot) {
+		return snapshot;
+	}
+
+	const promptId = String(prompt.id || '__new__').trim() || '__new__';
+	const snapshotId = String(snapshot.promptId || '__new__').trim() || '__new__';
+	if (promptId !== snapshotId) {
+		return snapshot;
+	}
+
+	const promptUuid = String(prompt.promptUuid || '').trim();
+	const snapshotUuid = String(snapshot.promptUuid || '').trim();
+	if (promptUuid && snapshotUuid && promptUuid !== snapshotUuid) {
+		return snapshot;
+	}
+
+	const nextData: PromptDashboardStatusData = {
+		status: prompt.status,
+		progress: resolvePromptDashboardStatusSyncProgress(
+			prompt.status,
+			prompt.progress,
+			snapshot.status.data.progress,
+			options,
+		),
+		totalTimeMs: getPromptDashboardTotalTimeMs(prompt),
+		updatedAt: prompt.updatedAt || new Date().toISOString(),
+	};
+	const currentData = snapshot.status.data;
+	if (
+		currentData.status === nextData.status
+		&& currentData.progress === nextData.progress
+		&& currentData.totalTimeMs === nextData.totalTimeMs
+		&& currentData.updatedAt === nextData.updatedAt
+	) {
+		return snapshot;
+	}
+
+	return {
+		...snapshot,
+		status: {
+			...snapshot.status,
+			data: nextData,
+		},
+		generatedAt: new Date().toISOString(),
+	};
 }
 
 export function formatPromptDashboardDuration(valueMs: number): string {

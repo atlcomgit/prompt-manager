@@ -24,3 +24,4 @@ tsconfig.tests.json
 **/*.map
 .qodo/**
 .tmp/**
+media/icon-variants/**

@@ -1,0 +1,22 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="22" y1="18" x2="228" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B2A40"/>
+      <stop offset="0.58" stop-color="#101827"/>
+      <stop offset="1" stop-color="#080C13"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="166" y1="166" x2="216" y2="216" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#77EFFF"/>
+      <stop offset="1" stop-color="#309FFF"/>
+    </linearGradient>
+    <mask id="mark14" maskUnits="userSpaceOnUse" x="40" y="40" width="176" height="176">
+      <rect x="40" y="40" width="176" height="176" rx="44" fill="white"/>
+      <rect x="94" y="94" width="68" height="68" rx="18" fill="black"/>
+      <rect x="166" y="40" width="50" height="58" fill="black"/>
+    </mask>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="40" fill="url(#bg)"/>
+  <rect x="16.75" y="16.75" width="222.5" height="222.5" rx="39.25" stroke="#31465F" stroke-width="1.5"/>
+  <rect x="40" y="40" width="176" height="176" rx="44" fill="#F6F8FC" mask="url(#mark14)"/>
+  <rect x="166" y="166" width="50" height="50" rx="16" fill="url(#accent)"/>
+</svg>

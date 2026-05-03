@@ -1,0 +1,9 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <mask id="mark14s" maskUnits="userSpaceOnUse" x="2.6" y="2.6" width="18.8" height="18.8">
+    <rect x="2.6" y="2.6" width="18.8" height="18.8" rx="4.3" fill="white"/>
+    <rect x="8.4" y="8.4" width="7.2" height="7.2" rx="1.8" fill="black"/>
+    <rect x="15.2" y="2.6" width="6.2" height="6.2" fill="black"/>
+  </mask>
+  <rect x="2.6" y="2.6" width="18.8" height="18.8" rx="4.3" fill="currentColor" mask="url(#mark14s)"/>
+  <rect x="15.2" y="15.2" width="6.2" height="6.2" rx="1.7" fill="currentColor"/>
+</svg>

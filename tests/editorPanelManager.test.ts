@@ -140,11 +140,39 @@ function createVsCodeMock() {
 		dispose() { },
 	};
 
-	const createWatcher = () => {
+	const createWatcher = (pattern?: unknown) => {
+		const createListeners: Array<(uri?: unknown) => void> = [];
+		const changeListeners: Array<(uri?: unknown) => void> = [];
+		const deleteListeners: Array<(uri?: unknown) => void> = [];
 		const watcher = {
-			onDidCreate: () => createDisposable(),
-			onDidChange: () => createDisposable(),
-			onDidDelete: () => createDisposable(),
+			pattern,
+			onDidCreate: (listener: (uri?: unknown) => void) => {
+				createListeners.push(listener);
+				return createDisposable();
+			},
+			onDidChange: (listener: (uri?: unknown) => void) => {
+				changeListeners.push(listener);
+				return createDisposable();
+			},
+			onDidDelete: (listener: (uri?: unknown) => void) => {
+				deleteListeners.push(listener);
+				return createDisposable();
+			},
+			emitCreate: (uri?: unknown) => {
+				for (const listener of createListeners) {
+					listener(uri);
+				}
+			},
+			emitChange: (uri?: unknown) => {
+				for (const listener of changeListeners) {
+					listener(uri);
+				}
+			},
+			emitDelete: (uri?: unknown) => {
+				for (const listener of deleteListeners) {
+					listener(uri);
+				}
+			},
 			dispose() { },
 		};
 		vscodeCreatedWatchers.push(watcher);
@@ -263,7 +291,7 @@ function createVsCodeMock() {
 			onDidChangeTextDocument: () => createDisposable(),
 			onDidSaveTextDocument: () => createDisposable(),
 			onDidCloseTextDocument: () => createDisposable(),
-			createFileSystemWatcher: () => createWatcher(),
+			createFileSystemWatcher: (pattern?: unknown) => createWatcher(pattern),
 			fs: {
 				stat: async () => ({ mtime: Date.now() }),
 				createDirectory: async () => undefined,
@@ -428,6 +456,7 @@ async function createManager(options?: {
 	initialPrompt?: Record<string, unknown> | null;
 	listPrompts?: Array<Record<string, unknown>>;
 	savePrompt?: (prompt: any, options?: any) => Promise<any>;
+	readAgentProgress?: (id: string) => Promise<number | undefined>;
 	stateService?: Record<string, unknown>;
 	workspaceService?: Record<string, unknown>;
 	configurationValues?: Record<string, unknown>;
@@ -504,6 +533,7 @@ async function createManager(options?: {
 			});
 			return clonePrompt(storedPrompt);
 		},
+		readAgentProgress: options?.readAgentProgress || (async () => undefined),
 		createAgentFile: async () => undefined,
 	};
 
@@ -1798,6 +1828,47 @@ test('ensureGitOverlayReactiveSources starts watchers for a visible prompt edito
 	assert.ok(vscodeCreatedWatchers.length > 0);
 });
 
+test('agent.json watcher posts promptAgentProgress to the open editor panel', async () => {
+	resetVsCodeCommandMock();
+	let agentProgress = 14;
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			status: 'in-progress',
+			title: 'Prompt A',
+		},
+		readAgentProgress: async () => agentProgress,
+	});
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = (manager as any).resolveOpenEditorPanel('__prompt_editor_singleton__') || vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+	panel.postedMessages.length = 0;
+
+	const agentWatcher = vscodeCreatedWatchers.find((watcher: any) => watcher?.pattern?.pattern === '**/agent.json');
+	assert.ok(agentWatcher);
+
+	agentProgress = 67;
+	await withImmediateTimers(async () => {
+		agentWatcher.emitChange({
+			fsPath: '/tmp/workspace/.vscode/prompt-manager/prompts/prompt-a/agent.json',
+			toString() {
+				return this.fsPath;
+			},
+		});
+		await flushTurns(3);
+	});
+
+	assert.equal(panel.postedMessages.some((message: any) => (
+		message?.type === 'promptAgentProgress'
+		&& message.promptId === 'prompt-a'
+		&& message.promptUuid === 'uuid-a'
+		&& message.progress === 67
+	)), true);
+	assert.equal((manager as any).panelPromptRefs.get('__prompt_editor_singleton__')?.progress, 67);
+});
+
 test('built-in git openRepository bootstrap does not schedule reactive refresh', async () => {
 	const { manager } = await createManager();
 	const scheduledRefreshes: Array<{ reason: string; changedPath?: string }> = [];
@@ -1892,6 +1963,7 @@ test('getPromptDashboardSnapshot ignores boot-time placeholder prompt payload wh
 test('hydratePromptDashboardProjectsDetails refreshes only the projects widget in details mode', async () => {
 	const { manager } = await createManager();
 	const receivedModes: string[] = [];
+	const receivedProjects: string[][] = [];
 	const panelMessages: any[] = [];
 	const panel = {
 		webview: {
@@ -1908,8 +1980,10 @@ test('hydratePromptDashboardProjectsDetails refreshes only the projects widget i
 			postMessage?: (message: unknown) => void,
 			_requestId?: string,
 			mode?: string,
+			projects?: string[],
 		) => {
 			receivedModes.push(mode || '');
+			receivedProjects.push([...(projects || [])]);
 			postMessage?.({
 				type: 'promptDashboardWidgetSnapshot',
 				promptId: 'task-42',
@@ -1928,6 +2002,7 @@ test('hydratePromptDashboardProjectsDetails refreshes only the projects widget i
 		{
 			type: 'hydratePromptDashboardProjectsDetails',
 			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			projects: ['api'],
 			requestId: 'dashboard-hydrate-1',
 		} as any,
 		panel as any,
@@ -1938,6 +2013,7 @@ test('hydratePromptDashboardProjectsDetails refreshes only the projects widget i
 	);
 
 	assert.deepEqual(receivedModes, ['details']);
+	assert.deepEqual(receivedProjects, [['api']]);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 });
 

@@ -650,6 +650,29 @@ export class GitService {
 		return this.parseNumstatOutput(output);
 	}
 
+	private async getTrackedChangeDiffStatsByPath(
+		projectPath: string,
+		changes: ReadonlyArray<Pick<GitOverlayChangeFile, 'path' | 'previousPath'>>,
+		cached: boolean,
+	): Promise<Map<string, GitNumstatStats>> {
+		const candidates = Array.from(new Set(
+			changes.flatMap(change => [change.path, change.previousPath || ''])
+				.map(item => item.trim())
+				.filter(Boolean),
+		));
+		if (candidates.length === 0) {
+			return new Map();
+		}
+
+		const args = ['diff'];
+		if (cached) {
+			args.push('--cached');
+		}
+		args.push('--numstat', '--find-renames', '--', ...candidates);
+		const output = await this.runGitFileCommandOptional(projectPath, args);
+		return this.parseNumstatByPath(output);
+	}
+
 	private async getUntrackedChangeDiffStats(projectPath: string, filePath: string): Promise<{ additions: number | null; deletions: number | null; isBinary: boolean }> {
 		try {
 			const content = await fs.readFile(path.join(projectPath, filePath));
@@ -685,6 +708,32 @@ export class GitService {
 			deletions: diffStats.deletions,
 			isBinary: diffStats.isBinary,
 		};
+	}
+
+	private async enrichOverlayChangeGroupFiles(
+		projectPath: string,
+		changes: ReadonlyArray<GitOverlayChangeFile>,
+		cached: boolean,
+	): Promise<GitOverlayChangeFile[]> {
+		if (changes.length === 0) {
+			return [];
+		}
+
+		const statsByPath = await this.getTrackedChangeDiffStatsByPath(projectPath, changes, cached);
+		return Promise.all(changes.map(async (change) => {
+			const fileSizeBytes = await this.resolveOverlayFileSize(projectPath, change.path, change.previousPath);
+			const diffStats = statsByPath.get(change.path)
+				|| (change.previousPath ? statsByPath.get(change.previousPath) : undefined)
+				|| { additions: 0, deletions: 0, isBinary: false };
+
+			return {
+				...change,
+				fileSizeBytes,
+				additions: diffStats.additions,
+				deletions: diffStats.deletions,
+				isBinary: diffStats.isBinary,
+			};
+		}));
 	}
 
 	private async resolveReviewRemoteContext(
@@ -1489,9 +1538,9 @@ export class GitService {
 		}
 
 		const [merge, staged, workingTree, untracked] = await Promise.all([
-			Promise.all(changeGroups.merge.map(item => this.enrichOverlayChangeFile(projectPath, item))),
-			Promise.all(changeGroups.staged.map(item => this.enrichOverlayChangeFile(projectPath, item))),
-			Promise.all(changeGroups.workingTree.map(item => this.enrichOverlayChangeFile(projectPath, item))),
+			this.enrichOverlayChangeGroupFiles(projectPath, changeGroups.merge, false),
+			this.enrichOverlayChangeGroupFiles(projectPath, changeGroups.staged, true),
+			this.enrichOverlayChangeGroupFiles(projectPath, changeGroups.workingTree, false),
 			Promise.all(changeGroups.untracked.map(item => this.enrichOverlayChangeFile(projectPath, item))),
 		]);
 
@@ -2528,11 +2577,14 @@ export class GitService {
 		projectPath: string,
 		targetBranch: string,
 		allowedBaseBranches: Set<string>,
+		options?: { createIfMissing?: boolean },
 	): Promise<void> {
+		const createIfMissing = options?.createIfMissing !== false;
 		this.logDebug('switchBranch.project.start', {
 			project,
 			projectPath,
 			targetBranch,
+			createIfMissing,
 		});
 
 		const hasLocalBranch = await this.branchExistsLocally(projectPath, targetBranch);
@@ -2560,6 +2612,15 @@ export class GitService {
 					targetBranch,
 				});
 				return;
+			}
+
+			// Tracked dashboard switches must fail instead of creating an unrelated local branch.
+			if (!createIfMissing) {
+				this.logDebug('switchBranch.project.createSkippedMissingBranch', {
+					project,
+					targetBranch,
+				});
+				throw new Error(`ветка "${targetBranch}" не существует и не будет создана автоматически.`);
 			}
 
 			const currentBranch = await this.getCurrentBranch(projectPath);
@@ -2705,7 +2766,7 @@ export class GitService {
 			}
 
 			try {
-				await this.switchProjectBranch(project, projectPath, targetBranch, allowedBaseBranches);
+				await this.switchProjectBranch(project, projectPath, targetBranch, allowedBaseBranches, { createIfMissing: false });
 				changedProjects.push(project);
 			} catch (err: any) {
 				errors.push(`${project}: ${err.message || 'Unknown error'}`);

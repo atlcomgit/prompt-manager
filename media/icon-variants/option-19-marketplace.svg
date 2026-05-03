@@ -1,0 +1,21 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="22" y1="18" x2="228" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B2A40"/>
+      <stop offset="0.58" stop-color="#101827"/>
+      <stop offset="1" stop-color="#080C13"/>
+    </linearGradient>
+    <linearGradient id="cap" x1="150" y1="50" x2="202" y2="76" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#77EFFF"/>
+      <stop offset="1" stop-color="#309FFF"/>
+    </linearGradient>
+    <mask id="archMask" maskUnits="userSpaceOnUse" x="34" y="34" width="188" height="188">
+      <rect x="34" y="34" width="188" height="188" rx="48" fill="white"/>
+      <path d="M86 94C86 70.804 104.804 52 128 52C151.196 52 170 70.804 170 94V222H86V94Z" fill="black"/>
+    </mask>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="40" fill="url(#bg)"/>
+  <rect x="16.75" y="16.75" width="222.5" height="222.5" rx="39.25" stroke="#31465F" stroke-width="1.5"/>
+  <rect x="34" y="34" width="188" height="188" rx="48" fill="#F6F8FC" mask="url(#archMask)"/>
+  <rect x="150" y="50" width="52" height="26" rx="13" fill="url(#cap)"/>
+</svg>

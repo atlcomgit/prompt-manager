@@ -72,7 +72,13 @@ export type WebviewToExtensionMessage =
 	| { type: 'getBranches'; projects: string[] }
 	| { type: 'getPromptDashboardSnapshot'; prompt: Prompt; requestId?: string; forceRefresh?: boolean }
 	| { type: 'refreshPromptDashboard'; prompt: Prompt; requestId?: string }
-	| { type: 'hydratePromptDashboardProjectsDetails'; prompt: Prompt; requestId?: string }
+	| {
+		type: 'hydratePromptDashboardProjectsDetails';
+		prompt: Prompt;
+		projects?: string[];
+		requestId?: string;
+		reason?: 'details' | 'dirty-files';
+	}
 	| { type: 'promptDashboardSwitchBranch'; prompt: Prompt; project: string; branch: string; requestId?: string }
 	| { type: 'promptDashboardSwitchBranches'; prompt: Prompt; branchesByProject: Record<string, string>; requestId?: string }
 	| { type: 'promptDashboardOpenFilePatch'; project: string; filePath: string; previousPath?: string; mode: 'commit' | 'branch'; ref: string; baseRef?: string }
@@ -182,6 +188,7 @@ export type ExtensionToWebviewMessage =
 		editorViewState?: EditorPromptViewState;
 		aiEnrichment?: { title: boolean; description: boolean };
 	}
+	| { type: 'promptAgentProgress'; promptId: string; promptUuid?: string; progress?: number }
 	| { type: 'promptSaved'; prompt: PromptConfig; previousId?: string; requestId?: string }
 	| { type: 'promptAiEnrichmentState'; promptId: string; promptUuid?: string; title: boolean; description: boolean }
 	| { type: 'promptDeleted'; id: string }

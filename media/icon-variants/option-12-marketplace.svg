@@ -1,0 +1,17 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="22" y1="18" x2="228" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B2A40"/>
+      <stop offset="0.58" stop-color="#101827"/>
+      <stop offset="1" stop-color="#080C13"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="170" y1="52" x2="208" y2="90" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#77EFFF"/>
+      <stop offset="1" stop-color="#309FFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="40" fill="url(#bg)"/>
+  <rect x="16.75" y="16.75" width="222.5" height="222.5" rx="39.25" stroke="#31465F" stroke-width="1.5"/>
+  <path fill-rule="evenodd" clip-rule="evenodd" d="M128 42C80.5035 42 42 80.5035 42 128C42 175.497 80.5035 214 128 214C175.497 214 214 175.497 214 128C214 116.638 211.798 105.791 207.798 95.8636L170.714 110.808C172.859 116.002 174 121.693 174 127.65C174 153.948 152.681 175.267 126.383 175.267C100.085 175.267 78.7666 153.948 78.7666 127.65C78.7666 101.352 100.085 80.0332 126.383 80.0332C132.34 80.0332 138.031 81.1741 143.225 83.3185L158.169 46.2348C148.242 42.2341 137.395 40.0322 126.033 40.0322L128 42Z" fill="#F6F8FC"/>
+  <rect x="167" y="52" width="38" height="38" rx="12" fill="url(#accent)"/>
+</svg>

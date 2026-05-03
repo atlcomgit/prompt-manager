@@ -1,3 +1,129 @@
+## 128: Keep hydrated parallel-branch rows stable when prompt branch is missing
+
+- Дата: 2026-05-04.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлено раскрытие строк в виджете `Параллельные ветки`, чтобы placeholder branch row не исчезал во время lazy details hydration, если `Ветка Git` промпта отсутствует в конкретном репозитории; заодно в `PromptDashboard.tsx` над `styles` добавлено более заметное описание групп inline-стилей.
+- Ключевые моменты: `PromptDashboardService` выбирает base branch для parallel hydration только из реально доступных branch names текущего project snapshot, предпочитая `prompt -> tracked -> current` только если такая ветка действительно существует в проекте; display и details paths теперь используют один и тот же helper, поэтому opened row не схлопывается из-за пустого hydrated result; regression test покрывает сценарий отсутствующей prompt branch в проекте и подтверждает, что detail refresh остается на `main`; `PromptDashboard.tsx` получил явный блок-комментарий перед `styles` и дополнительные subgroup comments рядом с branch controls и AI review styles.
+- Файлы: src/services/promptDashboardService.ts, src/webview/editor/components/PromptDashboard.tsx, tests/promptDashboardService.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 127: Fix dirty disclosure routing after dashboard loading
+
+- Дата: 2026-05-04.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлен routing lazy hydration для `dirty:<project>` disclosure в prompt dashboard, чтобы правые line counters реально догружались через dedicated dirty path, даже если блок был открыт во время `projects` loading; заодно папки в shared file tree сделаны чуть тусклее по цвету.
+- Ключевые моменты: `PromptDashboard` больше не отбрасывает dirty toggle key из-за пустого хвоста после `project` segment, переводит hydration expanded-blocks на effect после render и повторяет lazy hydrate для уже раскрытых commit/parallel/dirty секций после завершения widget refresh; regression test покрывает `resolveExpandedDetailsHydrationRequest('dirty:<project>')` и защищает dedicated route `dirty-files`.
+- Файлы: src/webview/editor/components/PromptDashboard.tsx, tests/promptDashboardComponent.test.tsx, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 126: Speed up dirty-file counters and document dashboard file-row styles
+
+- Дата: 2026-05-04.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Раскрытие блока `Незакоммиченные файлы` в prompt dashboard переведено на отдельный узкий dirty-only hydrate path, tracked line counters теперь собираются batched `git diff --numstat` по change groups, а в `PromptDashboard.tsx` добавлены описания style-групп и обновлена типографика/contrast status badges для file rows.
+- Ключевые моменты: `PromptDashboard` передает в `hydratePromptDashboardProjectsDetails` причину `dirty-files`, чтобы `EditorPanelManager` и `PromptDashboardService` запускали новый mode `dirty-details`; этот mode использует `GitService.getGitOverlayProjectSnapshot` без branch/review/recent-commit hydration и merge-ит только свежие dirty-file данные обратно в cached project row; `GitService.getChangeGroups(includeDetails: true)` теперь батчит tracked numstat lookup на весь merge/staged/working-tree group вместо отдельных git diff вызовов на каждый файл; regression tests покрывают и dirty-only refresh path, и batched numstat enrichment.
+- Файлы: src/types/messages.ts, src/webview/editor/EditorApp.tsx, src/webview/editor/components/PromptDashboard.tsx, src/providers/editorPanelManager.ts, src/services/promptDashboardService.ts, src/services/gitService.ts, tests/promptDashboardService.test.ts, tests/gitService.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 125: Narrow dashboard file-detail hydration and reuse cached review state
+
+- Дата: 2026-05-04.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Гидрация commit / parallel / dirty file lists в prompt dashboard стала project-scoped, а follow-up AI review теперь переиспользует уже загруженный MR/PR state вместо повторного review CLI прохода по тем же репозиториям.
+- Ключевые моменты: `PromptDashboard` и `EditorApp` передают в `hydratePromptDashboardProjectsDetails` конкретный список раскрытых проектов; `PromptDashboardService` умеет частично обновлять только эти проекты и merge-ить result обратно в общий projects widget cache без full details refresh по всем workspace repos; `loadProjectsData('details')` больше не тащит review state, а `loadProjectsData('analysis')` подсовывает `prefetchedReviewStatesByProject` из свежего projects cache, чтобы follow-up AI review не повторял дорогие `gh`/`glab` запросы; regression tests покрывают и project-scoped details refresh, и reuse cached review state.
+- Файлы: src/types/messages.ts, src/webview/editor/components/PromptDashboard.tsx, src/webview/editor/EditorApp.tsx, src/providers/editorPanelManager.ts, src/services/promptDashboardService.ts, tests/editorPanelManager.test.ts, tests/promptDashboardService.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 124: Restore dirty-file counters with lazy hydration
+
+- Дата: 2026-05-04.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Для disclosure-блока `Незакоммиченные файлы` возвращены правые line counters через existing lazy `details` hydration path, а spacing и контраст flat file rows дополнительно поджаты и усилены по screenshot feedback.
+- Ключевые моменты: `PromptDashboardService` больше не просит `includeChangeDetails` на обычном `display` refresh и включает его только в `details` mode, поэтому первый paint остаётся лёгким; `PromptDashboard` теперь триггерит `hydratePromptDashboardProjectsDetails` и при раскрытии `dirty:` block, если у tracked/staged/working-tree файлов ещё нет `additions/deletions`; flat dirty-file rows используют цветной status badge вместо блеклого file glyph, вторичные подписи читаются контрастнее, а интервалы между файлами и папками в shared tree renderer ещё уменьшены.
+- Файлы: src/services/promptDashboardService.ts, src/webview/editor/components/PromptDashboard.tsx, tests/promptDashboardService.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 123: Improve dashboard file-row readability
+
+- Дата: 2026-05-04.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Повышена читаемость списка незакоммиченных файлов и остальных file-tree rows в dashboard: шрифт и иконки увеличены, вертикальные интервалы стали компактнее, а шумные `—` для неизвестных dirty-file stats убраны из disclosure list.
+- Ключевые моменты: `PromptDashboard` расширяет `DashboardFileTreeEntry` флагами для плоских file rows без branch prefix и для скрытия unknown line stats; dirty-files disclosure продолжает использовать shared clickable file-row renderer с `open diff`/highlight, но без лишних префиксов и без `work`-style noise; общие tree/file-row styles получили более крупную типографику и иконки при меньшем `minHeight`, чтобы на реальном screenshot UI читался лучше.
+- Файлы: src/webview/editor/components/PromptDashboard.tsx, tests/promptDashboardComponent.test.tsx, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 122: Polish dashboard branch-widget warning cards
+
+- Дата: 2026-05-04.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: В `Ветки проектов` ошибки переключения веток и уведомление о незакоммиченных файлах оформлены как отдельные outline-блоки, а раскрытый список dirty files теперь использует тот же clickable file-row UI, что и остальные dashboard file trees.
+- Ключевые моменты: `PromptDashboard` больше не показывает плоский список dirty files с непонятной меткой `work`; disclosure block теперь рендерит существующие dashboard file rows с `open diff`, `открыт`/`просмотрен` highlight и правыми `+ / ~ / -` line stats, заголовок `Незакоммиченные файлы` получил более яркий warning accent, а untracked/conflict file status badges в shared file-row tone mapping теперь читаются понятнее.
+- Файлы: src/webview/editor/components/PromptDashboard.tsx, tests/promptDashboardComponent.test.tsx, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 121: Show branch-switch errors and dirty files inside dashboard branch widget
+
+- Дата: 2026-05-03.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: В виджете `Ветки проектов` теперь показываются ошибки переключения веток прямо под полем нужного проекта, а при наличии локальных незакоммиченных файлов отображается раскрываемое предупреждение со списком файлов.
+- Ключевые моменты: `PromptDashboardService` хранит per-project ошибки переключения веток локально на уровне dashboard scope и накладывает их поверх projects widget без загрязнения shared projects cache; project summaries теперь содержат список `uncommittedFiles` из `merge/staged/working-tree/untracked` change groups; `PromptDashboard` показывает под селектором ветки branch-switch error и disclosure block `Незакоммиченные файлы`, а regression tests покрывают и mapping ошибок к project row, и рендер нового уведомления.
+- Файлы: src/types/promptDashboard.ts, src/services/promptDashboardService.ts, src/webview/editor/components/PromptDashboard.tsx, tests/promptDashboard.test.ts, tests/promptDashboardService.test.ts, tests/promptDashboardComponent.test.tsx, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 120: Prefer current tracked branch in dashboard project widget
+
+- Дата: 2026-05-03.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлено определение `tracked`-ветки в виджете `Ветки проектов`, когда в настройке `Prompt Manager › Codemap: Tracked Branches` указано несколько веток и текущая ветка проекта уже входит в этот список.
+- Ключевые моменты: `PromptDashboardService` теперь берёт список tracked-веток из Codemap settings с тем же fallback, что и остальной Git/Codemap flow, а при отсутствии explicit tracked override предпочитает текущую ветку проекта, если она уже есть среди tracked-веток; добавлен regression test на сценарий `master` + `develop`, где проект уже стоит на `develop`, чтобы виджет не закреплял `master` как единственную tracked-ветку только из-за порядка в настройке.
+- Файлы: src/services/promptDashboardService.ts, tests/promptDashboardService.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 119: Align dashboard toolbar with prompt form header
+
+- Дата: 2026-05-03.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Верхний toolbar правого dashboard prompt editor визуально выровнен по горизонтали с header-кнопками над формой промпта.
+- Ключевые моменты: `PromptDashboard` теперь начинает rail с того же верхнего padding, что и header формы (`12px` вместо `16px`), поэтому иконка `pm`, заголовок `Обзор` и кнопка refresh больше не выглядят опущенными относительно кнопок в header слева; логика и размеры самих header action buttons не менялись.
+- Файлы: src/webview/editor/components/PromptDashboard.tsx, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 118: Fix prompt dashboard progress fallback after agent sync
+
+- Дата: 2026-05-03.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлено расхождение между progress bar в списке промптов и карточке `Статус промпта` в dashboard prompt editor для in-progress промптов, у которых `agent.json` уже содержит runtime progress, а `config.json` ещё не хранит поле `progress`.
+- Ключевые моменты: `syncPromptDashboardStatusFromPrompt` теперь умеет переиспользовать самый свежий percent из уже загруженного status snapshot или explicit runtime override вместо fallback `50` для `in-progress`; `EditorApp` передаёт этот режим во все status-widget reconciliation paths (`promptAgentProgress`, полный snapshot, widget patch, локальные prompt edits); добавлен regression test на реальный сценарий `config.json` без progress и `agent.json` со значением `100`.
+- Файлы: src/utils/promptDashboard.ts, src/webview/editor/EditorApp.tsx, tests/promptDashboard.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 117: Runtime progress sync для status widget prompt dashboard
+
+- Дата: 2026-05-03.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: В prompt editor карточка `Статус промпта` теперь обновляется не только от локальных полей prompt и dashboard snapshot/widget сообщений, но и от runtime-поля `progress` в `agent.json`, когда агент меняет его вне обычного сохранения `config.json`.
+- Ключевые моменты: `EditorPanelManager` подписывается на `**/agent.json`, дебаунсит внешние изменения и шлёт в webview отдельный message `promptAgentProgress`, не подменяя весь prompt payload; `EditorApp` применяет этот runtime progress только в status-widget reconciliation path, чтобы не записывать transient `agent.json` значение обратно в prompt config, а входящие dashboard snapshot/widget сообщения продолжают переиспользовать тот же override до следующего normal prompt open; добавлен host-level regression test на watcher sync и обновлены README/CHANGELOG.
+- Файлы: src/providers/editorPanelManager.ts, src/types/messages.ts, src/webview/editor/EditorApp.tsx, tests/editorPanelManager.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 116: Доработка dashboard prompt editor: статус, tracked-ветки и размер бренд-иконки
+
+- Дата: 2026-05-03.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: В правом dashboard prompt editor бренд-иконка над виджетами выровнена по размеру с header action button формы, `Tracked-ветка` в виджете `Ветки проектов` больше не создаёт отсутствующую локальную ветку автоматически, а карточка `Статус промпта` теперь синхронизируется сразу по локальным изменениям статуса и времени и не откатывается от более поздних snapshot/widget сообщений.
+- Ключевые моменты: `PromptDashboardService` отделяет tracked-targets от prompt-branch/direct branch targets и отправляет их через no-create путь `GitService.switchBranchesByProject`; `GitService` для tracked dashboard switch сначала пытается local/remote checkout и при отсутствии ветки возвращает ошибку вместо `checkout -b`; `EditorApp` локально пересобирает `status` widget из текущего `prompt` и повторно применяет эту синхронизацию при входящих `promptDashboardSnapshot` и `promptDashboardWidgetSnapshot`, чтобы асинхронные обновления не перетирали более свежий статус; `PromptDashboard` теперь автоматически вычищает только те `branchDrafts`, которые после refresh уже совпали с новой текущей веткой или стали невалидными, поэтому поля в `Ветки проектов` возвращаются к фактической current branch после bulk/preset apply, а кнопка `Ветка промпта` деактивируется, если у промпта не задана `Ветка Git`; README и CHANGELOG обновлены под новую UX-логику dashboard.
+- Файлы: src/services/gitService.ts, src/services/promptDashboardService.ts, src/utils/promptDashboard.ts, src/webview/editor/EditorApp.tsx, src/webview/editor/components/PromptDashboard.tsx, tests/gitService.test.ts, tests/promptDashboard.test.ts, tests/promptDashboardComponent.test.tsx, tests/promptDashboardService.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
+## 115: Обновить иконки расширения: панель, маркет, README
+
+- Дата: 2026-05-03.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Обновлены брендовые иконки расширения: для Marketplace, README и About подготовлен новый color master asset с компактным lowercase pm wordmark и подчеркивающим accent-bar, а для Activity Bar и panel tabs подготовлен отдельный monochrome currentColor SVG в том же новом визуальном языке.
+- Ключевые моменты: `media/icon.svg` и `media/icon-marketplace.svg` хранят редактируемый цветной мастер, `media/icon.png` пересобирается из цветного SVG при обновлении брендинга, `package.json`, README и showcase используют этот PNG, `media/sidebar-icon.svg` остаётся source of truth для Activity Bar container и webview panel tabs, а новая геометрия намеренно опирается на компактный lowercase pm wordmark и короткий underline-accent ради малых размеров.
+- Файлы: media/icon.svg, media/icon-marketplace.svg, media/icon.png, media/sidebar-icon.svg, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md, .vscode/prompt-manager/chat-memory/feature.instructions.md.
+
 ## 114: Переработка виджетов: ветки, ИИ-обзор и файловое дерево
 
 - Дата: 2026-05-03.

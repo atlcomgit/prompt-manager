@@ -1,4 +1,4 @@
-import type { GitOverlayCommit, GitOverlayCommitChangedFile, GitOverlayPipelineStatus, GitOverlayProjectSnapshot, GitOverlayReviewState, GitOverlayParallelBranchSummary } from './git.js';
+import type { GitOverlayChangeFile, GitOverlayCommit, GitOverlayCommitChangedFile, GitOverlayPipelineStatus, GitOverlayProjectSnapshot, GitOverlayReviewState, GitOverlayParallelBranchSummary } from './git.js';
 import type { PromptStatus } from './prompt.js';
 
 export type PromptDashboardWidgetKind = 'activity' | 'status' | 'projects' | 'aiAnalysis';
@@ -61,6 +61,7 @@ export interface PromptDashboardProjectSummary {
 	repositoryPath: string;
 	available: boolean;
 	error: string;
+	branchSwitchError: string;
 	currentBranch: string;
 	promptBranch: string;
 	trackedBranch: string;
@@ -75,6 +76,7 @@ export interface PromptDashboardProjectSummary {
 	pipeline: GitOverlayPipelineStatus | null;
 	parallelBranches: GitOverlayParallelBranchSummary[];
 	conflictFiles: string[];
+	uncommittedFiles: GitOverlayChangeFile[];
 }
 
 export interface PromptDashboardProjectsData {

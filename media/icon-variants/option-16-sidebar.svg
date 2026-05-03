@@ -1,0 +1,7 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <mask id="mark16s" maskUnits="userSpaceOnUse" x="2.2" y="2.2" width="19.6" height="19.6">
+    <rect x="2.2" y="2.2" width="19.6" height="19.6" rx="4.6" fill="white"/>
+    <rect x="10.9" y="-1.2" width="3.8" height="28" rx="1.9" transform="rotate(45 10.9 -1.2)" fill="black"/>
+  </mask>
+  <rect x="2.2" y="2.2" width="19.6" height="19.6" rx="4.6" fill="currentColor" mask="url(#mark16s)"/>
+</svg>

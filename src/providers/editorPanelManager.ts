@@ -125,6 +125,7 @@ const PROMPT_DASHBOARD_INITIAL_VISIBLE_REFRESH_GRACE_MS = 1500;
 const GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS = 250;
 const GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS = 250;
 const GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT = 4;
+const PROMPT_AGENT_JSON_SYNC_DEBOUNCE_MS = 300;
 /** Limit parallel file metadata probes during prompt editor hydration. */
 const CONTEXT_FILE_CARD_HYDRATION_CONCURRENCY = 8;
 
@@ -207,6 +208,7 @@ export class EditorPanelManager {
 	private gitOverlayReactiveDisposables: vscode.Disposable[] = [];
 	private gitOverlayBuiltInRepositoryDisposables = new Map<string, vscode.Disposable>();
 	private gitOverlayReactiveSourcesReady: Promise<void> | null = null;
+	private agentProgressSyncTimer: NodeJS.Timeout | null = null;
 	private openPromptQueue: Promise<void> | null = null;
 	private pendingOpenPromptTarget: PromptOpenTarget | null = null;
 	private openPromptRequestVersion = 0;
@@ -1419,6 +1421,7 @@ export class EditorPanelManager {
 			prompt: currentPrompt,
 			reason: 'external-config',
 		} satisfies ExtensionToWebviewMessage);
+		void this.syncAgentProgressForPanel(panelKey);
 	}
 
 	private async runConfiguredHooks(
@@ -3052,6 +3055,72 @@ export class EditorPanelManager {
 				void this.broadcastProjectInstructionsState();
 			})
 		);
+
+		const agentJsonWatcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(this.storageService.getStorageDirectoryPath(), '**/agent.json')
+		);
+		const scheduleAgentProgressSync = () => {
+			this.scheduleAgentProgressSyncForOpenPanels();
+		};
+		this.contentSyncDisposables.push(
+			agentJsonWatcher,
+			agentJsonWatcher.onDidCreate(scheduleAgentProgressSync),
+			agentJsonWatcher.onDidChange(scheduleAgentProgressSync),
+			agentJsonWatcher.onDidDelete(scheduleAgentProgressSync),
+		);
+	}
+
+	/** Debounce agent.json progress refreshes so rapid agent writes do not spam the webview. */
+	private scheduleAgentProgressSyncForOpenPanels(): void {
+		if (this.agentProgressSyncTimer) {
+			clearTimeout(this.agentProgressSyncTimer);
+		}
+
+		this.agentProgressSyncTimer = setTimeout(() => {
+			this.agentProgressSyncTimer = null;
+			void this.syncAgentProgressForOpenPanels();
+		}, PROMPT_AGENT_JSON_SYNC_DEBOUNCE_MS);
+		this.agentProgressSyncTimer.unref?.();
+	}
+
+	/** Refresh runtime agent progress for every open prompt editor panel. */
+	private async syncAgentProgressForOpenPanels(): Promise<void> {
+		for (const panelKey of this.panelPromptRefs.keys()) {
+			await this.syncAgentProgressForPanel(panelKey);
+		}
+	}
+
+	/** Push only the runtime agent progress patch without replacing the full prompt payload. */
+	private async syncAgentProgressForPanel(panelKey: string): Promise<void> {
+		const currentPrompt = this.panelPromptRefs.get(panelKey);
+		const panel = this.resolveOpenEditorPanel(panelKey);
+		const promptId = (currentPrompt?.id || '').trim();
+		if (!currentPrompt || !panel || !promptId || promptId === '__new__') {
+			return;
+		}
+
+		const nextProgress = await this.storageService.readAgentProgress(promptId);
+		const currentProgress = typeof currentPrompt.progress === 'number' && Number.isFinite(currentPrompt.progress)
+			? Math.max(0, Math.min(100, Math.round(currentPrompt.progress)))
+			: undefined;
+		if (currentProgress === nextProgress) {
+			return;
+		}
+
+		currentPrompt.progress = nextProgress;
+		this.setPanelPromptRef(panelKey, currentPrompt);
+		const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
+		if (latestSnapshot) {
+			latestSnapshot.progress = nextProgress;
+			this.panelLatestPromptSnapshots.set(panelKey, latestSnapshot);
+		}
+
+		await panel.webview.postMessage({
+			type: 'promptAgentProgress',
+			promptId,
+			promptUuid: (currentPrompt.promptUuid || '').trim() || undefined,
+			progress: nextProgress,
+		} satisfies ExtensionToWebviewMessage);
 	}
 
 	private chatMemoryInstructionService(): ChatMemoryInstructionService | undefined {
@@ -6555,6 +6624,7 @@ export class EditorPanelManager {
 				openRequestVersion: options.openRequestVersion,
 				editorViewState: openEditorViewState,
 			}));
+			void this.syncAgentProgressForPanel(panelKey);
 		} catch {
 			// Ignore boot-time postMessage failures; the eventual ready event replays current state.
 		}
@@ -7263,6 +7333,7 @@ export class EditorPanelManager {
 						{ forceMainTab: this.consumePanelForceMainTabOnNextOpen(panelKey) },
 					),
 				}));
+				void this.syncAgentProgressForPanel(panelKey);
 				this.flushPendingPanelMessages(panelKey, panel, currentPrompt);
 
 				postMessage(this.buildGlobalContextMessage());
@@ -9152,7 +9223,8 @@ export class EditorPanelManager {
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
-					'details',
+					msg.reason === 'dirty-files' ? 'dirty-details' : 'details',
+					msg.projects,
 				);
 				break;
 			}
@@ -10224,6 +10296,10 @@ export class EditorPanelManager {
 		if (this.promptEditorTabCleanupTimer) {
 			clearTimeout(this.promptEditorTabCleanupTimer);
 			this.promptEditorTabCleanupTimer = null;
+		}
+		if (this.agentProgressSyncTimer) {
+			clearTimeout(this.agentProgressSyncTimer);
+			this.agentProgressSyncTimer = null;
 		}
 		this.pendingGlobalAgentContextSync = null;
 		this.isGlobalAgentContextSyncInProgress = false;

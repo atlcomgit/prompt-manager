@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { PromptStatusText } from '../../shared/PromptStatusText';
 import { getPromptStatusColor } from '../../shared/promptStatus';
+import type { GitOverlayChangeFile } from '../../../types/git.js';
 import type { GitOverlayParallelBranchSummary } from '../../../types/git.js';
 import type { PromptDashboardAnalysisState, PromptDashboardLoadStatus, PromptDashboardProjectSummary, PromptDashboardRecentCommit, PromptDashboardSnapshot } from '../../../types/promptDashboard.js';
 import { formatPromptDashboardDuration } from '../../../utils/promptDashboard.js';
@@ -22,7 +23,7 @@ interface PromptDashboardProps {
 	busyAction?: string | null;
 	mode: 'full' | 'compact';
 	onRefresh: () => void;
-	onHydrateProjectsDetails: () => void;
+	onHydrateProjectsDetails: (projects: string[], reason?: 'details' | 'dirty-files') => void;
 	onOpenPrompt: (id: string, promptUuid?: string) => void;
 	onSwitchBranch: (project: string, branch: string) => void;
 	onSwitchBranches: (branchesByProject: Record<string, string>, source?: 'bulk' | 'prompt' | 'tracked') => void;
@@ -61,6 +62,8 @@ interface DashboardFileTreeEntry {
 	additions?: number | null;
 	deletions?: number | null;
 	isBinary?: boolean;
+	hideUnknownLineStats?: boolean;
+	showBranchPrefix?: boolean;
 	warn?: boolean;
 	opening?: boolean;
 	active?: boolean;
@@ -95,6 +98,12 @@ interface DashboardFileTone {
 	accentColor: string;
 	borderColor: string;
 	background: string;
+}
+
+/** Stores a pending lazy-hydration request for one expanded dashboard block. */
+interface DashboardHydrationRequest {
+	projects: string[];
+	reason: 'details' | 'dirty-files';
 }
 
 /** Right-side prompt dashboard visible only when the editor has enough horizontal space. */
@@ -166,18 +175,27 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		setViewedFileKeys({});
 	}, [snapshot?.scopeKey]);
 
+	// Drop stale branch drafts once refreshed project data confirms the branch is current again.
+	useEffect(() => {
+		setBranchDrafts(previous => reconcileBranchDrafts(projects, previous));
+	}, [projects]);
+
+	// Retry lazy details hydration for already-open blocks once the projects widget finishes refreshing.
+	useEffect(() => {
+		for (const [key, isExpanded] of Object.entries(expanded)) {
+			if (!isExpanded) {
+				continue;
+			}
+			maybeHydrateExpandedDetails(key, projects, projectsCacheStatus, onHydrateProjectsDetails);
+		}
+	}, [expanded, onHydrateProjectsDetails, projects, projectsCacheStatus]);
+
 	if (mode !== 'full') {
 		return null;
 	}
 
 	const toggleExpanded = (key: string) => {
-		setExpanded(previous => {
-			const nextExpanded = !previous[key];
-			if (nextExpanded) {
-				maybeHydrateExpandedDetails(key, projects, projectsCacheStatus, onHydrateProjectsDetails);
-			}
-			return { ...previous, [key]: nextExpanded };
-		});
+		setExpanded(previous => ({ ...previous, [key]: !previous[key] }));
 	};
 
 	const applyBranchTargets = (branchesByProject: Record<string, string>, source: DashboardBranchApplySource = 'bulk') => {
@@ -211,9 +229,12 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	return (
 		<aside style={styles.rail} data-pm-prompt-dashboard="true">
 			<div style={styles.toolbar}>
-				<div>
-					<div style={styles.title}>Обзор</div>
-					<div style={styles.subtitle}>{resolveCacheLabel(snapshot)}</div>
+				<div style={styles.titleRow}>
+					<PromptDashboardMark />
+					<div style={styles.titleBlock}>
+						<div style={styles.title}>Обзор</div>
+						<div style={styles.subtitle}>{resolveCacheLabel(snapshot)}</div>
+					</div>
 				</div>
 				<button type="button" style={{ ...styles.iconButton, ...(isRefreshBusy ? styles.busyButton : null) }} onClick={onRefresh} title="Обновить" aria-label="Обновить" disabled={isRefreshBusy}>
 					{isRefreshBusy ? <span style={styles.buttonSpinner} aria-hidden="true" /> : '↻'}
@@ -223,7 +244,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			<div style={styles.widgetGrid}>
 				{renderStatus(snapshot, statusCacheStatus)}
 				{renderActivity(snapshot, onOpenPrompt, activityCacheStatus)}
-				{renderProjectBranches(projects, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, setBranchDrafts, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch)}
+				{renderProjectBranches(projects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch)}
 				{renderProjectCommits(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus)}
 				{renderReviewRequests(projects, projectsCacheStatus)}
 				{renderParallelBranchFiles(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus)}
@@ -233,41 +254,91 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	);
 };
 
+/** Renders the colored marketplace pm mark used in the dashboard heading. */
+function PromptDashboardMark() {
+	return (
+		<svg viewBox="0 0 256 256" style={styles.titleIcon} aria-hidden="true" data-pm-dashboard-logo="true" focusable="false">
+			<defs>
+				<linearGradient id="pm-dashboard-logo-bg" x1="22" y1="18" x2="228" y2="238" gradientUnits="userSpaceOnUse">
+					<stop offset="0" stopColor="#1B2A40" />
+					<stop offset="0.58" stopColor="#101827" />
+					<stop offset="1" stopColor="#080C13" />
+				</linearGradient>
+				<linearGradient id="pm-dashboard-logo-accent" x1="52" y1="180" x2="204" y2="198" gradientUnits="userSpaceOnUse">
+					<stop offset="0" stopColor="#77EFFF" />
+					<stop offset="1" stopColor="#309FFF" />
+				</linearGradient>
+			</defs>
+			<rect x="16" y="16" width="224" height="224" rx="40" fill="url(#pm-dashboard-logo-bg)" />
+			<rect x="16.75" y="16.75" width="222.5" height="222.5" rx="39.25" stroke="#31465F" strokeWidth="1.5" />
+			<text x="128" y="167" textAnchor="middle" fill="#F6F8FC" stroke="url(#pm-dashboard-logo-bg)" strokeWidth="10" strokeLinejoin="round" paintOrder="stroke fill" fontFamily="'DejaVu Sans', 'Liberation Sans', sans-serif" fontSize="154" fontWeight="800" letterSpacing="-6">pm</text>
+			<rect x="52" y="180" width="152" height="18" rx="9" fill="url(#pm-dashboard-logo-accent)" />
+		</svg>
+	);
+}
+
 /** Requests lazy project detail hydration only when the user opens an unloaded detail block. */
 function maybeHydrateExpandedDetails(
 	key: string,
 	projects: PromptDashboardProjectSummary[],
 	cacheStatus: PromptDashboardLoadStatus,
-	onHydrateProjectsDetails: () => void,
+	onHydrateProjectsDetails: (projects: string[], reason?: 'details' | 'dirty-files') => void,
 ): void {
 	if (cacheStatus === 'loading') {
 		return;
 	}
 
-	const [kind, projectName, ...rest] = key.split(':');
-	if (!kind || !projectName || rest.length === 0) {
+	const request = resolveExpandedDetailsHydrationRequest(key, projects);
+	if (!request) {
 		return;
+	}
+
+	onHydrateProjectsDetails(request.projects, request.reason);
+}
+
+
+/** Resolves which expanded block still needs lazy details and which host route should hydrate it. */
+export function resolveExpandedDetailsHydrationRequest(
+	key: string,
+	projects: PromptDashboardProjectSummary[],
+): DashboardHydrationRequest | null {
+	const [kind, projectName, ...rest] = key.split(':');
+	if (!kind || !projectName) {
+		return null;
 	}
 
 	const project = projects.find(item => item.project === projectName);
 	if (!project) {
-		return;
+		return null;
+	}
+
+	if (kind === 'dirty') {
+		return project.uncommittedFiles.some(file => file.group !== 'untracked' && file.isBinary !== true && (file.additions === null || file.deletions === null))
+			? { projects: [project.project], reason: 'dirty-files' }
+			: null;
+	}
+
+	if (rest.length === 0) {
+		return null;
 	}
 
 	if (kind === 'commit') {
 		const commitSha = rest.join(':');
 		if (project.recentCommits.some(commit => commit.sha === commitSha && commit.changedFilesHydrated === false)) {
-			onHydrateProjectsDetails();
+			return { projects: [project.project], reason: 'details' };
 		}
-		return;
+		return null;
 	}
 
 	if (kind === 'parallel') {
 		const branchName = rest.join(':');
 		if (project.parallelBranches.some(branch => branch.name === branchName && branch.detailsHydrated === false)) {
-			onHydrateProjectsDetails();
+			return { projects: [project.project], reason: 'details' };
 		}
+		return null;
 	}
+
+	return null;
 }
 
 function resolveCacheLabel(snapshot: PromptDashboardSnapshot | null): string {
@@ -390,11 +461,14 @@ function renderActivityGroup(
 
 function renderProjectBranches(
 	projects: PromptDashboardProjectSummary[],
+	expanded: ExpandedState,
 	branchDrafts: Record<string, string>,
 	bulkBranchDraft: string,
 	busyAction: DashboardBusyAction,
 	cacheStatus: PromptDashboardLoadStatus,
+	fileHandlers: FileRowActionHandlers,
 	setBranchDrafts: React.Dispatch<React.SetStateAction<Record<string, string>>>,
+	toggleExpanded: (key: string) => void,
 	applyBulkBranchDraft: (branch: string) => void,
 	applyBranchDrafts: () => void,
 	applyBranchPreset: (kind: 'prompt' | 'tracked') => void,
@@ -403,9 +477,11 @@ function renderProjectBranches(
 	const changedCount = Object.keys(buildChangedBranchTargets(projects, branchDrafts)).length;
 	const sharedOptions = buildSharedBranchOptions(projects);
 	const isSwitchBusy = isBranchSwitchBusy(busyAction);
+	const hasPromptPresetBranch = projects.some(project => Boolean(project.promptBranch.trim()));
 	const isPromptPresetBusy = busyAction === 'preset:prompt';
 	const isTrackedPresetBusy = busyAction === 'preset:tracked';
 	const isBulkSwitchBusy = busyAction === 'switch-all';
+	const isPromptPresetDisabled = isSwitchBusy || !hasPromptPresetBranch;
 	return (
 		<section style={styles.section}>
 			<div style={styles.sectionHeader}>
@@ -428,7 +504,7 @@ function renderProjectBranches(
 					</select>
 				</label>
 				<div style={styles.branchToolbar}>
-					<button type="button" style={{ ...styles.secondaryButton, ...(isPromptPresetBusy ? styles.busyButton : null), ...(isSwitchBusy && !isPromptPresetBusy ? styles.disabledButton : null) }} onClick={() => applyBranchPreset('prompt')} title="Сразу переключить каждый проект на его ветку из поля prompt branch" disabled={isSwitchBusy}>
+					<button type="button" style={{ ...styles.secondaryButton, ...(isPromptPresetBusy ? styles.busyButton : null), ...(isPromptPresetDisabled && !isPromptPresetBusy ? styles.disabledButton : null) }} onClick={() => applyBranchPreset('prompt')} title={hasPromptPresetBranch ? 'Сразу переключить каждый проект на его ветку из поля prompt branch' : 'У промпта не задана ветка Git'} disabled={isPromptPresetDisabled}>
 						{isPromptPresetBusy ? <span style={styles.inlineSpinnerLabel}><span style={styles.buttonSpinner} aria-hidden="true" /> Применяем</span> : 'Ветка промпта'}
 					</button>
 					<button type="button" style={{ ...styles.secondaryButton, ...(isTrackedPresetBusy ? styles.busyButton : null), ...(isSwitchBusy && !isTrackedPresetBusy ? styles.disabledButton : null) }} onClick={() => applyBranchPreset('tracked')} title="Сразу переключить каждый проект на его собственную tracked-ветку" disabled={isSwitchBusy}>
@@ -443,7 +519,7 @@ function renderProjectBranches(
 					cacheStatus === 'loading'
 						? renderLoadingEmptyState('Git-данные загружаются')
 						: <div style={styles.emptyText}>Нет Git-данных по проектам</div>
-				) : projects.map((project, index) => renderBranchProject(project, index, branchDrafts, busyAction, setBranchDrafts, applyProjectBranch))}
+				) : projects.map((project, index) => renderBranchProject(project, index, expanded, branchDrafts, busyAction, fileHandlers, setBranchDrafts, toggleExpanded, applyProjectBranch))}
 			</div>
 		</section>
 	);
@@ -452,9 +528,12 @@ function renderProjectBranches(
 function renderBranchProject(
 	project: PromptDashboardProjectSummary,
 	index: number,
+	expanded: ExpandedState,
 	branchDrafts: Record<string, string>,
 	busyAction: DashboardBusyAction,
+	fileHandlers: FileRowActionHandlers,
 	setBranchDrafts: React.Dispatch<React.SetStateAction<Record<string, string>>>,
+	toggleExpanded: (key: string) => void,
 	applyProjectBranch: (project: PromptDashboardProjectSummary) => void,
 ): React.ReactNode {
 	const branchOptions = buildBranchOptions(project);
@@ -463,6 +542,9 @@ function renderBranchProject(
 	const isSwitchBusy = isBranchSwitchBusy(busyAction);
 	const isProjectBusy = busyAction === `switch-project:${project.project}`;
 	const selectedLabel = isChanged ? 'выбрана' : 'текущая';
+	const dirtyFilesToggleKey = `dirty:${project.project}`;
+	const hasUncommittedFiles = project.uncommittedFiles.length > 0;
+	const uncommittedFilesExpanded = expanded[dirtyFilesToggleKey] === true;
 	return (
 		<div key={project.project} style={{ ...styles.branchProjectRow, ...(index === 0 ? styles.branchProjectRowFirst : null) }}>
 			<div style={styles.projectName} title={`Текущая ветка: ${project.currentBranch || 'n/a'}`}>{project.project}</div>
@@ -495,9 +577,95 @@ function renderBranchProject(
 			>
 				{isProjectBusy ? <span style={styles.inlineSpinnerLabel}><span style={styles.buttonSpinner} aria-hidden="true" /> Применяем</span> : 'Применить'}
 			</button>
-			{project.error ? <div style={{ ...styles.errorText, ...styles.branchProjectError }}>{project.error}</div> : null}
+			{project.branchSwitchError ? renderBranchProjectErrorBlock(project.branchSwitchError) : null}
+			{hasUncommittedFiles ? renderBranchProjectUncommittedFiles(project, dirtyFilesToggleKey, uncommittedFilesExpanded, fileHandlers, toggleExpanded) : null}
+			{project.error ? renderBranchProjectErrorBlock(project.error) : null}
 		</div>
 	);
+}
+
+/** Renders one outlined branch-switch error under the affected project row. */
+function renderBranchProjectErrorBlock(message: string): React.ReactNode {
+	return (
+		<div style={styles.branchProjectErrorBlock}>
+			<div style={styles.branchProjectErrorTitle}>Ошибка переключения ветки</div>
+			<div style={styles.errorText}>{message}</div>
+		</div>
+	);
+}
+
+/** Renders a collapsible outlined notice about local uncommitted files under the branch selector row. */
+function renderBranchProjectUncommittedFiles(
+	project: PromptDashboardProjectSummary,
+	toggleKey: string,
+	expanded: boolean,
+	fileHandlers: FileRowActionHandlers,
+	toggleExpanded: (key: string) => void,
+): React.ReactNode {
+	const files = project.uncommittedFiles;
+	return (
+		<div style={styles.branchProjectNoticeBlock}>
+			<button
+				type="button"
+				style={styles.branchProjectNoticeToggle}
+				onClick={() => toggleExpanded(toggleKey)}
+				title={expanded ? 'Скрыть список незакоммиченных файлов' : 'Показать список незакоммиченных файлов'}
+			>
+				<span style={styles.detailChevron}>{expanded ? '▾' : '▸'}</span>
+				<span style={styles.branchProjectNoticeText}>Незакоммиченные файлы</span>
+				<span style={{ ...styles.fileCount, ...styles.fileCountWarn }}>{files.length}</span>
+			</button>
+			{expanded ? (
+				renderBranchProjectUncommittedFileList(project, files, fileHandlers)
+			) : null}
+		</div>
+	);
+}
+
+/** Reuses the dashboard file-row renderer so dirty files open diffs with active-state highlighting. */
+function renderBranchProjectUncommittedFileList(
+	project: PromptDashboardProjectSummary,
+	files: GitOverlayChangeFile[],
+	fileHandlers: FileRowActionHandlers,
+): React.ReactNode {
+	const entries = [...files]
+		.sort((left, right) => left.path.localeCompare(right.path, 'ru'))
+		.map((file, index) => {
+			const fileKey = `${project.project}:dirty:${file.group}:${file.previousPath || ''}:${file.path}`;
+			return {
+				key: `${file.group}:${file.status}:${file.previousPath || ''}:${file.path}:${index}`,
+				path: file.path,
+				status: file.status,
+				label: file.previousPath ? `${file.previousPath} -> ${file.path}` : file.path,
+				secondaryLabel: file.previousPath ? `было: ${file.previousPath}` : resolveBranchProjectSecondaryLabel(file),
+				additions: file.additions,
+				deletions: file.deletions,
+				isBinary: file.isBinary,
+				showBranchPrefix: false,
+				warn: file.conflicted,
+				opening: fileHandlers.openingFileKey === fileKey,
+				active: fileHandlers.activeFileKey === fileKey,
+				viewed: fileHandlers.viewedFileKeys[fileKey] === true,
+				onOpenPatch: () => fileHandlers.onOpenDiff(project.project, file.path, fileKey),
+			} satisfies DashboardFileTreeEntry;
+		});
+
+	return (
+		<div style={styles.branchProjectNoticeList}>
+			{entries.map((entry, index) => renderChangedFileRow(entry, { ancestorHasSibling: [], isLast: index === entries.length - 1 }))}
+		</div>
+	);
+}
+
+/** Adds a short readable hint instead of opaque group shorthands like "work". */
+function resolveBranchProjectSecondaryLabel(file: GitOverlayChangeFile): string | undefined {
+	switch (file.group) {
+		case 'merge': return 'конфликт при merge';
+		case 'staged': return 'подготовлено к коммиту';
+		case 'working-tree': return 'локальные изменения';
+		case 'untracked': return 'новый файл';
+		default: return undefined;
+	}
 }
 
 function renderReviewRequests(projects: PromptDashboardProjectSummary[], cacheStatus: PromptDashboardLoadStatus): React.ReactNode {
@@ -678,6 +846,41 @@ function resolveBranchDraft(project: PromptDashboardProjectSummary, branchDrafts
 		}
 	}
 	return options.find(option => option.available)?.branch || options[0]?.branch || '';
+}
+
+/** Removes only drafts that already became the refreshed current branch or are no longer valid. */
+export function reconcileBranchDrafts(
+	projects: PromptDashboardProjectSummary[],
+	branchDrafts: Record<string, string>,
+): Record<string, string> {
+	const entries = Object.entries(branchDrafts);
+	if (entries.length === 0) {
+		return branchDrafts;
+	}
+
+	const projectsByName = new Map(projects.map(project => [project.project, project] as const));
+	let changed = false;
+	const nextDrafts: Record<string, string> = {};
+
+	for (const [projectName, rawDraft] of entries) {
+		const draft = String(rawDraft || '').trim();
+		const project = projectsByName.get(projectName);
+		if (!draft || !project) {
+			changed = true;
+			continue;
+		}
+
+		const isAvailable = buildBranchOptions(project).some(option => option.branch === draft && option.available);
+		if (!isAvailable || draft === String(project.currentBranch || '').trim()) {
+			changed = true;
+			continue;
+		}
+
+		nextDrafts[projectName] = draft;
+		changed = changed || draft !== rawDraft;
+	}
+
+	return changed ? nextDrafts : branchDrafts;
 }
 
 function buildChangedBranchTargets(projects: PromptDashboardProjectSummary[], branchDrafts: Record<string, string>): Record<string, string> {
@@ -950,39 +1153,55 @@ function resolveFileTone(status: string, warn = false): DashboardFileTone {
 		return {
 			label: '!',
 			accentColor: 'var(--vscode-charts-yellow)',
-			borderColor: 'color-mix(in srgb, var(--vscode-charts-yellow) 62%, var(--vscode-panel-border))',
-			background: 'color-mix(in srgb, var(--vscode-charts-yellow) 10%, var(--vscode-editor-background))',
+			borderColor: 'color-mix(in srgb, var(--vscode-charts-yellow) 74%, var(--vscode-panel-border))',
+			background: 'color-mix(in srgb, var(--vscode-charts-yellow) 18%, var(--vscode-editor-background))',
 		};
 	}
 
 	switch ((status || '').trim().toUpperCase()) {
 		case 'A':
 			return {
-				label: 'A',
+				label: '+',
 				accentColor: 'var(--vscode-charts-green)',
-				borderColor: 'color-mix(in srgb, var(--vscode-charts-green) 50%, var(--vscode-panel-border))',
-				background: 'color-mix(in srgb, var(--vscode-charts-green) 9%, var(--vscode-editor-background))',
+				borderColor: 'color-mix(in srgb, var(--vscode-charts-green) 68%, var(--vscode-panel-border))',
+				background: 'color-mix(in srgb, var(--vscode-charts-green) 16%, var(--vscode-editor-background))',
 			};
 		case 'D':
 			return {
-				label: 'D',
+				label: '-',
 				accentColor: 'var(--vscode-charts-red)',
-				borderColor: 'color-mix(in srgb, var(--vscode-charts-red) 48%, var(--vscode-panel-border))',
-				background: 'color-mix(in srgb, var(--vscode-charts-red) 8%, var(--vscode-editor-background))',
+				borderColor: 'color-mix(in srgb, var(--vscode-charts-red) 66%, var(--vscode-panel-border))',
+				background: 'color-mix(in srgb, var(--vscode-charts-red) 16%, var(--vscode-editor-background))',
 			};
 		case 'R':
 			return {
-				label: 'R',
+				label: '↺',
 				accentColor: 'var(--vscode-textLink-foreground)',
-				borderColor: 'color-mix(in srgb, var(--vscode-textLink-foreground) 52%, var(--vscode-panel-border))',
-				background: 'color-mix(in srgb, var(--vscode-textLink-foreground) 8%, var(--vscode-editor-background))',
+				borderColor: 'color-mix(in srgb, var(--vscode-textLink-foreground) 66%, var(--vscode-panel-border))',
+				background: 'color-mix(in srgb, var(--vscode-textLink-foreground) 16%, var(--vscode-editor-background))',
+			};
+		case '??':
+		case '?':
+			return {
+				label: '+',
+				accentColor: 'var(--vscode-charts-green)',
+				borderColor: 'color-mix(in srgb, var(--vscode-charts-green) 68%, var(--vscode-panel-border))',
+				background: 'color-mix(in srgb, var(--vscode-charts-green) 16%, var(--vscode-editor-background))',
+			};
+		case 'U':
+		case 'UU':
+			return {
+				label: '!',
+				accentColor: 'var(--vscode-charts-yellow)',
+				borderColor: 'color-mix(in srgb, var(--vscode-charts-yellow) 74%, var(--vscode-panel-border))',
+				background: 'color-mix(in srgb, var(--vscode-charts-yellow) 18%, var(--vscode-editor-background))',
 			};
 		default:
 			return {
-				label: 'M',
+				label: '~',
 				accentColor: 'var(--vscode-charts-orange, var(--vscode-charts-yellow))',
-				borderColor: 'color-mix(in srgb, var(--vscode-charts-orange, var(--vscode-charts-yellow)) 52%, var(--vscode-panel-border))',
-				background: 'color-mix(in srgb, var(--vscode-charts-orange, var(--vscode-charts-yellow)) 9%, var(--vscode-editor-background))',
+				borderColor: 'color-mix(in srgb, var(--vscode-charts-orange, var(--vscode-charts-yellow)) 70%, var(--vscode-panel-border))',
+				background: 'color-mix(in srgb, var(--vscode-charts-orange, var(--vscode-charts-yellow)) 18%, var(--vscode-editor-background))',
 			};
 	}
 }
@@ -1042,20 +1261,37 @@ function renderChangedFileRow(input: DashboardFileTreeEntry, context: DashboardF
 	const renameHint = cleanTreeSecondaryLabel(input.secondaryLabel);
 	const isActive = input.active === true;
 	const isViewed = input.viewed === true;
+	const showBranchPrefix = input.showBranchPrefix !== false;
+	const fileLead = showBranchPrefix
+		? <span style={{ ...styles.fileTreeFileBullet, color: input.warn ? 'var(--vscode-charts-yellow)' : isActive ? 'var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground))' : tone.accentColor }}>🗋</span>
+		: (
+			<span
+				style={{
+					...styles.fileStatus,
+					...(input.warn ? styles.fileStatusWarn : null),
+					color: isActive ? 'var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground))' : tone.accentColor,
+					borderColor: isActive ? 'color-mix(in srgb, var(--vscode-textLink-foreground) 58%, var(--vscode-panel-border))' : tone.borderColor,
+					background: isActive ? 'color-mix(in srgb, var(--vscode-textLink-foreground) 16%, transparent)' : tone.background,
+				}}
+			>
+				{tone.label}
+			</span>
+		);
 	return (
 		<button
 			key={`file:${input.key}`}
 			type="button"
 			style={{
 				...styles.fileTreeFileRow,
+				...(showBranchPrefix ? null : styles.fileTreeFileRowFlat),
 				...(isViewed ? styles.fileTreeFileRowViewed : null),
 				...(isActive ? styles.fileTreeFileRowActive : null),
 			}}
 			onClick={input.onOpenPatch}
 			title={input.path}
 		>
-			<span style={styles.fileTreeBranchPrefix}>{buildTreeBranchPrefix(context)}</span>
-			<span style={{ ...styles.fileTreeFileBullet, color: input.warn ? 'var(--vscode-charts-yellow)' : isActive ? 'var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground))' : tone.accentColor }}>🗋</span>
+			{showBranchPrefix ? <span style={styles.fileTreeBranchPrefix}>{buildTreeBranchPrefix(context)}</span> : null}
+			{fileLead}
 			<span style={styles.fileTreeFileMain}>
 				<span style={{ ...styles.fileGraphFileName, ...(isViewed ? styles.fileGraphFileNameViewed : null), ...(isActive ? styles.fileGraphFileNameActive : null) }}>{fileName}</span>
 				{renameHint ? <span style={styles.fileTreeRenameHint}>{`← ${renameHint}`}</span> : null}
@@ -1063,7 +1299,7 @@ function renderChangedFileRow(input: DashboardFileTreeEntry, context: DashboardF
 				{isActive ? <span style={styles.fileTreeStateBadgeActive}>открыт</span> : null}
 				{!isActive && isViewed ? <span style={styles.fileTreeStateBadgeViewed}>просмотрен</span> : null}
 			</span>
-			{renderLineStats(lineStats)}
+			{renderLineStats(lineStats, false, { hideUnknown: input.hideUnknownLineStats === true })}
 		</button>
 	);
 }
@@ -1140,11 +1376,18 @@ function mergeLineStats(
 	target.deleted += stats.deleted;
 }
 
-function renderLineStats(stats: DashboardLineStats, compact = false): React.ReactNode {
+function renderLineStats(
+	stats: DashboardLineStats,
+	compact = false,
+	options?: { hideUnknown?: boolean },
+): React.ReactNode {
 	if (stats.kind === 'binary') {
 		return <span style={styles.fileLineStatsSpecial}>(bin)</span>;
 	}
 	if (stats.kind === 'unknown') {
+		if (options?.hideUnknown) {
+			return null;
+		}
 		return <span style={styles.fileLineStatsSpecial}>(—)</span>;
 	}
 	return (
@@ -1319,16 +1562,20 @@ function renderAnalysisLines(lines: string[]): React.ReactNode {
 	});
 }
 
+/** Groups inline dashboard styles by layout, widget cards, branch controls, shared trees, and analysis blocks. */
 const styles: Record<string, React.CSSProperties> = {
+	// Rail layout, toolbar chrome, and the shared dashboard header.
+	// Корневая правая колонка дашборда с вертикальной прокруткой.
 	rail: {
 		flex: '1 1 360px',
 		minWidth: '280px',
 		height: '100vh',
 		overflowY: 'auto',
-		padding: '16px 20px 16px 0',
+		padding: '12px 20px 16px 0',
 		boxSizing: 'border-box',
 		background: 'transparent',
 	},
+	// Верхняя строка с заголовком и кнопкой ручного обновления.
 	toolbar: {
 		display: 'flex',
 		alignItems: 'center',
@@ -1336,15 +1583,38 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '12px',
 		marginBottom: '12px',
 	},
+	// Ряд с логотипом и текстовым блоком заголовка.
+	titleRow: {
+		display: 'flex',
+		alignItems: 'center',
+		gap: '10px',
+		minWidth: 0,
+	},
+	// Колонка из основного заголовка и подписи времени кеша.
+	titleBlock: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '2px',
+		minWidth: 0,
+	},
+	// Размер бренд-иконки возле заголовка обзора.
+	titleIcon: {
+		width: '32px',
+		height: '32px',
+		flexShrink: 0,
+	},
+	// Основной текст заголовка панели обзора.
 	title: {
 		fontSize: '14px',
 		fontWeight: 700,
 		color: 'var(--vscode-foreground)',
 	},
+	// Вторая строка под заголовком с меткой обновления.
 	subtitle: {
 		fontSize: '11px',
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	// Базовый вид круглой кнопки в тулбаре.
 	iconButton: {
 		width: '28px',
 		height: '28px',
@@ -1355,9 +1625,11 @@ const styles: Record<string, React.CSSProperties> = {
 		cursor: 'pointer',
 		fontFamily: 'var(--vscode-font-family)',
 	},
+	// Небольшое затемнение кнопки во время фонового действия.
 	busyButton: {
 		opacity: 0.9,
 	},
+	// Общий маленький спиннер для загрузки и busy-кнопок.
 	buttonSpinner: {
 		display: 'inline-block',
 		width: '12px',
@@ -1369,17 +1641,20 @@ const styles: Record<string, React.CSSProperties> = {
 		verticalAlign: 'middle',
 		flexShrink: 0,
 	},
+	// Ряд, который выравнивает спиннер и текст на кнопке.
 	inlineSpinnerLabel: {
 		display: 'inline-flex',
 		alignItems: 'center',
 		gap: '6px',
 		justifyContent: 'center',
 	},
+	// Masonry-сетка карточек внутри правой панели.
 	widgetGrid: {
 		columnWidth: '360px',
 		columnCount: 2,
 		columnGap: '12px',
 	},
+	// Общая карточка любого виджета дашборда.
 	section: {
 		display: 'inline-block',
 		width: '100%',
@@ -1394,6 +1669,7 @@ const styles: Record<string, React.CSSProperties> = {
 		overflow: 'visible',
 		boxShadow: DASHBOARD_LEFT_ACCENT_SHADOW,
 	},
+	// Шапка карточки с названием и правой мета-информацией.
 	sectionHeader: {
 		display: 'flex',
 		alignItems: 'center',
@@ -1406,18 +1682,21 @@ const styles: Record<string, React.CSSProperties> = {
 		borderTopRightRadius: '6px',
 		borderBottom: '1px solid var(--vscode-panel-border)',
 	},
+	// Текст названия виджета в шапке карточки.
 	sectionTitle: {
 		fontSize: '13px',
 		fontWeight: 600,
 		color: 'var(--vscode-foreground)',
 		whiteSpace: 'nowrap',
 	},
+	// Правая компактная метка со счетчиком или статусом секции.
 	sectionMeta: {
 		fontSize: '11px',
 		fontWeight: 600,
 		color: 'var(--vscode-descriptionForeground)',
 		whiteSpace: 'nowrap',
 	},
+	// Метка секции в состоянии загрузки со спиннером.
 	sectionMetaLoading: {
 		display: 'inline-flex',
 		alignItems: 'center',
@@ -1427,33 +1706,39 @@ const styles: Record<string, React.CSSProperties> = {
 		color: 'var(--vscode-descriptionForeground)',
 		whiteSpace: 'nowrap',
 	},
+	// Основное содержимое карточки с вертикальным стеком элементов.
 	sectionBody: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '10px',
 		padding: '12px',
 	},
+	// Вертикальное центрирование контента карточки статуса.
 	statusBody: {
 		minHeight: '72px',
 		justifyContent: 'center',
 	},
+	// Ряд с badge статуса и вторичными значениями.
 	statusChipRow: {
 		display: 'flex',
 		alignItems: 'center',
 		justifyContent: 'space-between',
 		gap: '12px',
 	},
+	// Визуальный badge статуса промпта.
 	statusChip: {
 		fontSize: '13px',
 		fontWeight: 700,
 		padding: '5px 10px',
 		lineHeight: 1.25,
 	},
+	// Ряд, в котором лежит прогресс-бар статуса.
 	statusProgressRow: {
 		display: 'flex',
 		alignItems: 'center',
 		gap: '8px',
 	},
+	// Контейнер полосы прогресса с рамкой и фоном.
 	progressBarContainer: {
 		position: 'relative',
 		display: 'inline-flex',
@@ -1468,6 +1753,7 @@ const styles: Record<string, React.CSSProperties> = {
 		overflow: 'hidden',
 		flexShrink: 0,
 	},
+	// Цветная заливка внутри полосы прогресса.
 	progressBarFill: {
 		position: 'absolute',
 		left: 0,
@@ -1476,6 +1762,7 @@ const styles: Record<string, React.CSSProperties> = {
 		borderRadius: '2px',
 		transition: 'width 0.3s ease',
 	},
+	// Основной текст процента поверх прогресс-бара.
 	progressBarText: {
 		position: 'relative',
 		display: 'flex',
@@ -1491,6 +1778,7 @@ const styles: Record<string, React.CSSProperties> = {
 		userSelect: 'none',
 		zIndex: 1,
 	},
+	// Дублирующий текст процента поверх закрашенной части.
 	progressBarTextOverlay: {
 		position: 'absolute',
 		inset: 0,
@@ -1507,17 +1795,20 @@ const styles: Record<string, React.CSSProperties> = {
 		pointerEvents: 'none',
 		zIndex: 2,
 	},
+	// Колонка одной группы активных промптов по дню.
 	activityGroup: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '5px',
 		minWidth: 0,
 	},
+	// Подзаголовок группы внутри карточки активности.
 	groupTitle: {
 		fontSize: '11px',
 		fontWeight: 700,
 		color: 'var(--vscode-foreground)',
 	},
+	// Кликабельная строка одного активного промпта.
 	activityButton: {
 		width: '100%',
 		display: 'grid',
@@ -1533,6 +1824,7 @@ const styles: Record<string, React.CSSProperties> = {
 		textAlign: 'left',
 		cursor: 'pointer',
 	},
+	// Ряд массового выбора ветки для всех проектов.
 	bulkBranchRow: {
 		display: 'grid',
 		gridTemplateColumns: '64px minmax(0, 1fr)',
@@ -1540,39 +1832,46 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '8px',
 		minWidth: 0,
 	},
+	// Короткая подпись слева от общего селекта ветки.
 	bulkBranchLabel: {
 		fontSize: '11px',
 		fontWeight: 700,
 		color: 'var(--vscode-descriptionForeground)',
 		whiteSpace: 'nowrap',
 	},
+	// Небольшой badge с номером задачи в списке активности.
 	taskBadge: {
 		fontSize: '11px',
 		fontWeight: 700,
 		color: 'var(--vscode-textLink-foreground)',
 		whiteSpace: 'nowrap',
 	},
+	// Основной текст элемента списка с обрезкой длинных строк.
 	itemTitle: {
 		minWidth: 0,
 		overflow: 'hidden',
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
 	},
+	// Небольшое числовое значение справа в строке.
 	statValue: {
 		fontSize: '11px',
 		color: 'var(--vscode-descriptionForeground)',
 		whiteSpace: 'nowrap',
 	},
+	// Короткая подпись для компактных числовых метрик.
 	inlineMetricText: {
 		fontSize: '10px',
 		color: 'var(--vscode-descriptionForeground)',
 		lineHeight: 1.4,
 	},
+	// Вторичная поясняющая строка под метрикой.
 	metricNote: {
 		fontSize: '10px',
 		color: 'var(--vscode-descriptionForeground)',
 		lineHeight: 1.4,
 	},
+	// Вертикальный блок проекта внутри мини-графика.
 	chartProjectRow: {
 		display: 'flex',
 		flexDirection: 'column',
@@ -1580,16 +1879,19 @@ const styles: Record<string, React.CSSProperties> = {
 		paddingBottom: '8px',
 		borderBottom: '1px solid color-mix(in srgb, var(--vscode-panel-border) 68%, transparent)',
 	},
+	// Название проекта над мини-графиком или метриками.
 	chartProjectTitle: {
 		fontSize: '11px',
 		fontWeight: 700,
 		color: 'var(--vscode-foreground)',
 	},
+	// Вертикальный список мини-метрик внутри блока проекта.
 	chartMiniList: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '4px',
 	},
+	// Сетка одной метрики с label, треком и значением.
 	metricRow: {
 		display: 'grid',
 		gridTemplateColumns: '52px minmax(0, 1fr) auto',
@@ -1597,17 +1899,20 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '8px',
 		minWidth: 0,
 	},
+	// Подпись метрики в верхнем регистре.
 	metricLabel: {
 		fontSize: '10px',
 		fontWeight: 700,
 		color: 'var(--vscode-descriptionForeground)',
 		textTransform: 'uppercase',
 	},
+	// Текстовое значение метрики справа.
 	metricValue: {
 		fontSize: '10px',
 		color: 'var(--vscode-descriptionForeground)',
 		whiteSpace: 'nowrap',
 	},
+	// Общий трек сравнения ahead и behind.
 	divergenceTrack: {
 		position: 'relative',
 		display: 'grid',
@@ -1618,16 +1923,19 @@ const styles: Record<string, React.CSSProperties> = {
 		overflow: 'hidden',
 		background: 'color-mix(in srgb, var(--vscode-panel-border) 42%, transparent)',
 	},
+	// Левая красная часть трека для behind.
 	divergenceBehind: {
 		justifySelf: 'end',
 		height: '100%',
 		background: 'color-mix(in srgb, var(--vscode-charts-red) 80%, transparent)',
 	},
+	// Правая зеленая часть трека для ahead.
 	divergenceAhead: {
 		justifySelf: 'start',
 		height: '100%',
 		background: 'color-mix(in srgb, var(--vscode-charts-green) 82%, transparent)',
 	},
+	// Центральная разделительная линия в divergence-треке.
 	divergenceMidline: {
 		position: 'absolute',
 		left: '50%',
@@ -1637,6 +1945,7 @@ const styles: Record<string, React.CSSProperties> = {
 		background: 'color-mix(in srgb, var(--vscode-panel-border) 80%, transparent)',
 		transform: 'translateX(-0.5px)',
 	},
+	// Горизонтальный stacked bar для составных метрик.
 	stackedBar: {
 		display: 'flex',
 		alignItems: 'stretch',
@@ -1646,15 +1955,18 @@ const styles: Record<string, React.CSSProperties> = {
 		overflow: 'hidden',
 		background: 'color-mix(in srgb, var(--vscode-panel-border) 42%, transparent)',
 	},
+	// Один цветной сегмент внутри stacked bar.
 	stackedBarSegment: {
 		height: '100%',
 		minWidth: '4px',
 	},
+	// Двухколоночный список легенды для мини-графиков.
 	legendList: {
 		display: 'grid',
 		gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
 		gap: '6px 12px',
 	},
+	// Одна строка легенды со swatch, подписью и числом.
 	legendItem: {
 		display: 'grid',
 		gridTemplateColumns: '10px minmax(0, 1fr) auto',
@@ -1662,54 +1974,64 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '6px',
 		minWidth: 0,
 	},
+	// Маленькая цветная точка в легенде.
 	legendSwatch: {
 		width: '10px',
 		height: '10px',
 		borderRadius: '999px',
 	},
+	// Серый трек индикатора возраста или давности.
 	ageBarTrack: {
 		height: '8px',
 		borderRadius: '999px',
 		overflow: 'hidden',
 		background: 'color-mix(in srgb, var(--vscode-panel-border) 42%, transparent)',
 	},
+	// Стандартная синяя заливка age bar.
 	ageBarFill: {
 		display: 'block',
 		height: '100%',
 		borderRadius: '999px',
 		background: 'var(--vscode-charts-blue, var(--vscode-textLink-foreground))',
 	},
+	// Желтая заливка age bar для устаревших значений.
 	ageBarFillStale: {
 		background: 'var(--vscode-charts-yellow)',
 	},
+	// Вертикальный блок для горячего файла или hotspot-метрики.
 	hotspotRow: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '4px',
 	},
+	// Верхняя строка hotspot с названием и значением.
 	hotspotHeader: {
 		display: 'grid',
 		gridTemplateColumns: 'minmax(0, 1fr) auto',
 		alignItems: 'center',
 		gap: '8px',
 	},
+	// Серый трек под полосой hotspot.
 	hotspotBarTrack: {
 		height: '8px',
 		borderRadius: '999px',
 		overflow: 'hidden',
 		background: 'color-mix(in srgb, var(--vscode-panel-border) 42%, transparent)',
 	},
+	// Градиентная заливка hotspot-полосы.
 	hotspotBarFill: {
 		display: 'block',
 		height: '100%',
 		borderRadius: '999px',
 		background: 'color-mix(in srgb, var(--vscode-charts-yellow) 70%, var(--vscode-charts-red))',
 	},
+	// Универсальный текст для пустого состояния карточки.
 	emptyText: {
 		fontSize: '12px',
 		color: 'var(--vscode-descriptionForeground)',
 		lineHeight: 1.45,
 	},
+	// Пустое состояние со спиннером во время загрузки.
 	loadingEmptyState: {
 		display: 'inline-flex',
 		alignItems: 'center',
@@ -1718,16 +2040,20 @@ const styles: Record<string, React.CSSProperties> = {
 		color: 'var(--vscode-descriptionForeground)',
 		lineHeight: 1.45,
 	},
+	// Branch widget controls, presets, and per-project action rows.
+	// Сетка из трех управляющих кнопок над списком проектов.
 	branchToolbar: {
 		display: 'grid',
 		gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
 		gap: '6px',
 	},
+	// Короткая подсказка под тулбаром пресетов веток.
 	branchToolbarHint: {
 		fontSize: '11px',
 		lineHeight: 1.45,
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	// Основная цветная кнопка действия внутри виджета.
 	primaryButton: {
 		minWidth: 0,
 		padding: '5px 8px',
@@ -1740,6 +2066,7 @@ const styles: Record<string, React.CSSProperties> = {
 		fontWeight: 600,
 		cursor: 'pointer',
 	},
+	// Вторичная спокойная кнопка для вспомогательных действий.
 	secondaryButton: {
 		minWidth: 0,
 		padding: '5px 8px',
@@ -1752,10 +2079,12 @@ const styles: Record<string, React.CSSProperties> = {
 		fontWeight: 600,
 		cursor: 'pointer',
 	},
+	// Снижение контраста и блокировка у неактивного элемента.
 	disabledButton: {
 		opacity: 0.55,
 		cursor: 'default',
 	},
+	// Блок одного проекта внутри commit/review/parallel карточек.
 	projectBlock: {
 		display: 'flex',
 		flexDirection: 'column',
@@ -1764,10 +2093,12 @@ const styles: Record<string, React.CSSProperties> = {
 		borderTop: '1px solid var(--vscode-panel-border)',
 		minWidth: 0,
 	},
+	// Убирает верхний разделитель у первого блока проекта.
 	projectBlockFirst: {
 		paddingTop: 0,
 		borderTop: 'none',
 	},
+	// Сетка строки проекта в виджете переключения веток.
 	branchProjectRow: {
 		display: 'grid',
 		gridTemplateColumns: 'minmax(86px, 0.78fr) minmax(0, 1.22fr) auto auto',
@@ -1777,18 +2108,85 @@ const styles: Record<string, React.CSSProperties> = {
 		borderTop: '1px solid color-mix(in srgb, var(--vscode-panel-border) 68%, transparent)',
 		minWidth: 0,
 	},
+	// Первый проект в списке веток без верхней границы.
 	branchProjectRowFirst: {
 		borderTop: 'none',
 	},
+	// Растягивает ошибку переключения на всю ширину строки.
 	branchProjectError: {
 		gridColumn: '1 / -1',
 	},
+	// Карточка ошибки переключения ветки под проектом.
+	branchProjectErrorBlock: {
+		gridColumn: '1 / -1',
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '4px',
+		padding: '8px 10px',
+		borderRadius: '6px',
+		border: '1px solid color-mix(in srgb, var(--vscode-errorForeground) 52%, var(--vscode-panel-border))',
+		background: 'color-mix(in srgb, var(--vscode-errorForeground) 10%, var(--vscode-editor-background))',
+	},
+	// Заголовок внутри карточки ошибки переключения.
+	branchProjectErrorTitle: {
+		fontSize: '11px',
+		fontWeight: 700,
+		color: 'var(--vscode-errorForeground)',
+	},
+	// Контейнер предупреждения о незакоммиченных файлах.
+	branchProjectNoticeBlock: {
+		gridColumn: '1 / -1',
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '4px',
+		padding: '7px 9px',
+		borderRadius: '6px',
+		border: '1px solid color-mix(in srgb, var(--vscode-charts-yellow) 48%, var(--vscode-panel-border))',
+		background: 'color-mix(in srgb, var(--vscode-charts-yellow) 8%, var(--vscode-editor-background))',
+	},
+	// Project-level warnings and dirty-file disclosures that sit below the branch selector.
+	// Кнопка раскрытия списка незакоммиченных файлов.
+	branchProjectNoticeToggle: {
+		display: 'grid',
+		gridTemplateColumns: '12px minmax(0, 1fr) auto',
+		alignItems: 'center',
+		gap: '5px',
+		padding: 0,
+		border: 'none',
+		background: 'transparent',
+		color: 'var(--vscode-foreground)',
+		fontFamily: 'var(--vscode-font-family)',
+		fontSize: '11px',
+		textAlign: 'left',
+		cursor: 'pointer',
+		minWidth: 0,
+	},
+	// Текст заголовка предупреждения о dirty-файлах.
+	branchProjectNoticeText: {
+		minWidth: 0,
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
+		fontWeight: 700,
+		color: 'var(--vscode-charts-yellow)',
+	},
+	// Вертикальный список dirty-файлов под предупреждением.
+	branchProjectNoticeList: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '1px',
+		paddingTop: '4px',
+		borderTop: '1px solid color-mix(in srgb, var(--vscode-charts-yellow) 26%, transparent)',
+		minWidth: 0,
+	},
+	// Верхняя строка блока проекта с названием и badge.
 	projectHeader: {
 		display: 'flex',
 		alignItems: 'center',
 		justifyContent: 'space-between',
 		gap: '8px',
 	},
+	// Основное название проекта в любой карточке.
 	projectName: {
 		fontWeight: 700,
 		minWidth: 0,
@@ -1796,6 +2194,7 @@ const styles: Record<string, React.CSSProperties> = {
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
 	},
+	// Базовый маленький badge для статусов и ролей.
 	badge: {
 		fontSize: '10px',
 		lineHeight: '14px',
@@ -1805,10 +2204,15 @@ const styles: Record<string, React.CSSProperties> = {
 		textTransform: 'uppercase',
 		whiteSpace: 'nowrap',
 	},
+	// Зеленый вариант badge для успешного состояния.
 	badgeOk: { color: 'var(--vscode-charts-green)', borderColor: 'var(--vscode-charts-green)' },
+	// Желтый вариант badge для предупреждений.
 	badgeWarn: { color: 'var(--vscode-charts-yellow)', borderColor: 'var(--vscode-charts-yellow)' },
+	// Красный вариант badge для ошибок и риска.
 	badgeDanger: { color: 'var(--vscode-charts-red)', borderColor: 'var(--vscode-charts-red)' },
+	// Нейтральный badge для вторичных состояний.
 	badgeNeutral: { color: 'var(--vscode-descriptionForeground)', borderColor: 'var(--vscode-panel-border)' },
+	// Компактный вертикальный блок проекта без крупной шапки.
 	compactProjectRow: {
 		display: 'flex',
 		flexDirection: 'column',
@@ -1817,11 +2221,13 @@ const styles: Record<string, React.CSSProperties> = {
 		borderBottom: '1px solid color-mix(in srgb, var(--vscode-panel-border) 68%, transparent)',
 		minWidth: 0,
 	},
+	// Вертикальный список коротких чеков или статусов.
 	checkList: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '3px',
 	},
+	// Одна строка чек-листа с подписью и значением.
 	checkRow: {
 		display: 'grid',
 		gridTemplateColumns: 'minmax(0, 1fr) auto',
@@ -1829,12 +2235,14 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '8px',
 		fontSize: '11px',
 	},
+	// Вертикальный стек деталей по MR или PR.
 	reviewDetails: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '3px',
 		minWidth: 0,
 	},
+	// Подпись над селектом ветки в полном вертикальном варианте.
 	branchSelectLabel: {
 		display: 'flex',
 		flexDirection: 'column',
@@ -1843,10 +2251,12 @@ const styles: Record<string, React.CSSProperties> = {
 		fontSize: '11px',
 		minWidth: 0,
 	},
+	// Обертка инлайнового селекта ветки в строке проекта.
 	branchSelectInlineLabel: {
 		display: 'block',
 		minWidth: 0,
 	},
+	// Базовый select со списком доступных веток.
 	branchSelect: {
 		width: '100%',
 		minWidth: 0,
@@ -1858,35 +2268,43 @@ const styles: Record<string, React.CSSProperties> = {
 		fontFamily: 'var(--vscode-font-family)',
 		fontSize: '12px',
 	},
+	// Адаптивная сетка мелких метаданных по проекту.
 	metaGrid: {
 		display: 'grid',
 		gridTemplateColumns: 'repeat(auto-fit, minmax(96px, 1fr))',
 		gap: '8px 12px',
 		fontSize: '11px',
 	},
+	// Значение метаданных с обрезкой длинного текста.
 	metaValue: {
 		display: 'block',
 		overflow: 'hidden',
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
 	},
+	// Универсальный приглушенный цвет для вторичного текста.
 	muted: {
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	// Expandable commit and parallel-branch blocks rendered inside each project card.
+	// Вертикальная группа раскрываемых элементов внутри проекта.
 	detailGroup: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '4px',
 		minWidth: 0,
 	},
+	// Заголовок отдельной detail-группы внутри проекта.
 	detailGroupTitle: {
 		fontSize: '11px',
 		fontWeight: 700,
 		color: 'var(--vscode-foreground)',
 	},
+	// Обертка одного раскрываемого detail-элемента.
 	detailBlock: {
 		minWidth: 0,
 	},
+	// Кнопка строки коммита или параллельной ветки.
 	detailButton: {
 		width: '100%',
 		display: 'grid',
@@ -1903,20 +2321,24 @@ const styles: Record<string, React.CSSProperties> = {
 		textAlign: 'left',
 		cursor: 'pointer',
 	},
+	// Маленькая стрелка раскрытия рядом с detail-строкой.
 	detailChevron: {
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	// Короткий SHA коммита с моноширинным акцентом.
 	commitSha: {
 		fontFamily: 'var(--vscode-editor-font-family)',
 		color: 'var(--vscode-textLink-foreground)',
 		whiteSpace: 'nowrap',
 	},
+	// Тема коммита с обрезкой длинного текста.
 	commitSubject: {
 		minWidth: 0,
 		overflow: 'hidden',
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
 	},
+	// Название параллельной ветки в detail-строке.
 	branchName: {
 		minWidth: 0,
 		overflow: 'hidden',
@@ -1924,6 +2346,7 @@ const styles: Record<string, React.CSSProperties> = {
 		whiteSpace: 'nowrap',
 		fontFamily: 'var(--vscode-editor-font-family)',
 	},
+	// Маленький счетчик файлов справа в раскрываемой строке.
 	fileCount: {
 		minWidth: '22px',
 		padding: '1px 5px',
@@ -1933,164 +2356,198 @@ const styles: Record<string, React.CSSProperties> = {
 		textAlign: 'center',
 		fontSize: '10px',
 	},
+	// Предупреждающий вариант счетчика файлов.
 	fileCountWarn: {
 		color: 'var(--vscode-charts-yellow)',
 		borderColor: 'var(--vscode-charts-yellow)',
 	},
+	// Shared file-tree primitives reused by commits, parallel branches, conflicts, and dirty files.
+	// Корневой контейнер общего дерева файлов.
 	fileGraphTree: {
 		display: 'flex',
 		flexDirection: 'column',
-		gap: '1px',
-		paddingTop: '4px',
+		gap: 0,
+		paddingTop: '1px',
 		minWidth: 0,
 	},
+	// Обертка одной группы узла дерева.
 	fileTreeNodeGroup: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '0',
 		minWidth: 0,
 	},
+	// Контейнер для дочерних строк текущего узла.
 	fileTreeChildren: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '0',
 		minWidth: 0,
 	},
+	// Строка каталога с branch-guide и иконкой папки.
 	fileTreeDirectoryRow: {
 		display: 'grid',
 		gridTemplateColumns: 'auto 18px minmax(0, 1fr)',
 		alignItems: 'center',
-		gap: '4px',
-		minHeight: '20px',
+		gap: '3px',
+		minHeight: '18px',
+		lineHeight: '15px',
 		padding: '0',
 		borderRadius: '3px',
 		color: 'var(--vscode-descriptionForeground)',
-		fontSize: '10px',
+		fontSize: '12px',
 		minWidth: 0,
 	},
+	// Текстовый префикс ветвления дерева вроде ├─ и └─.
 	fileTreeBranchPrefix: {
 		fontFamily: 'var(--vscode-editor-font-family)',
-		fontSize: '11px',
+		fontSize: '9px',
 		whiteSpace: 'pre',
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	// Иконка папки в строке дерева.
 	fileTreeDirectoryIcon: {
 		display: 'inline-flex',
 		alignItems: 'center',
 		justifyContent: 'center',
-		fontSize: '12px',
+		fontSize: '14px',
+		lineHeight: 1,
 		color: 'var(--vscode-textLink-foreground)',
 	},
+	// Название папки в дереве файлов.
 	fileGraphDirectoryName: {
 		minWidth: 0,
 		overflow: 'hidden',
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
 		fontFamily: 'var(--vscode-font-family)',
-		fontWeight: 500,
-		color: 'var(--vscode-foreground)',
+		fontSize: '12px',
+		lineHeight: '15px',
+		fontWeight: 400,
+		color: 'color-mix(in srgb, var(--vscode-foreground) 35%, var(--vscode-descriptionForeground))',
 	},
+	// Базовая кликабельная строка файла в общем дереве.
 	fileTreeFileRow: {
 		width: '100%',
 		display: 'grid',
 		gridTemplateColumns: 'auto 18px minmax(0, 1fr) auto',
 		alignItems: 'center',
-		gap: '4px',
-		minHeight: '20px',
+		gap: '3px',
+		minHeight: '18px',
 		padding: '0',
 		border: 'none',
 		borderRadius: '3px',
 		background: 'transparent',
 		color: 'var(--vscode-foreground)',
 		fontFamily: 'var(--vscode-font-family)',
-		fontSize: '10px',
+		fontSize: '12px',
 		textAlign: 'left',
 		cursor: 'pointer',
 		minWidth: 0,
 	},
+	// Упрощенная сетка плоской строки без branch prefix.
+	fileTreeFileRowFlat: {
+		gridTemplateColumns: 'auto minmax(0, 1fr) auto',
+	},
+	// Слабый фон для уже просмотренного файла.
 	fileTreeFileRowViewed: {
 		background: 'color-mix(in srgb, var(--vscode-textLink-foreground) 5%, transparent)',
 	},
+	// Более заметный фон и контур для открытого файла.
 	fileTreeFileRowActive: {
 		background: 'color-mix(in srgb, var(--vscode-textLink-foreground) 12%, transparent)',
 		outline: '1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 38%, transparent)',
 	},
+	// Иконка файла перед названием в дереве.
 	fileTreeFileBullet: {
 		display: 'inline-flex',
 		alignItems: 'center',
 		justifyContent: 'center',
-		fontSize: '12px',
+		fontSize: '14px',
 		lineHeight: 1,
 	},
+	// Основная inline-область имени файла и его меток.
 	fileTreeFileMain: {
 		display: 'inline-flex',
 		alignItems: 'baseline',
-		gap: '4px',
+		gap: '2px',
 		minWidth: 0,
 		whiteSpace: 'nowrap',
 		overflow: 'hidden',
 	},
+	// Подсказка о rename рядом с текущим именем файла.
 	fileTreeRenameHint: {
 		minWidth: 0,
 		overflow: 'hidden',
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
-		fontSize: '9px',
-		color: 'var(--vscode-descriptionForeground)',
+		fontSize: '10px',
+		fontWeight: 500,
+		color: 'color-mix(in srgb, var(--vscode-foreground) 30%, var(--vscode-descriptionForeground))',
 	},
+	// Текстовый маркер, что файл сейчас открывается.
 	fileTreeOpeningHint: {
-		fontSize: '9px',
-		color: 'var(--vscode-descriptionForeground)',
+		fontSize: '10px',
+		color: 'color-mix(in srgb, var(--vscode-foreground) 30%, var(--vscode-descriptionForeground))',
 		whiteSpace: 'nowrap',
 	},
+	// Badge для файла, который сейчас открыт в редакторе.
 	fileTreeStateBadgeActive: {
 		padding: '1px 4px',
 		borderRadius: '3px',
 		background: 'color-mix(in srgb, var(--vscode-textLink-foreground) 14%, transparent)',
 		color: 'var(--vscode-textLink-foreground)',
-		fontSize: '9px',
+		fontSize: '10px',
 		fontWeight: 600,
 		whiteSpace: 'nowrap',
 	},
+	// Badge для файла, который уже открывали ранее.
 	fileTreeStateBadgeViewed: {
 		padding: '1px 4px',
 		borderRadius: '3px',
 		background: 'color-mix(in srgb, var(--vscode-descriptionForeground) 12%, transparent)',
 		color: 'var(--vscode-descriptionForeground)',
-		fontSize: '9px',
+		fontSize: '10px',
 		fontWeight: 500,
 		whiteSpace: 'nowrap',
 	},
+	// Вертикальный стек имени файла и вспомогательного пути.
 	fileGraphFileCopy: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '1px',
 		minWidth: 0,
 	},
+	// Основное имя файла в строке дерева.
 	fileGraphFileName: {
 		minWidth: 0,
 		overflow: 'hidden',
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
 		fontFamily: 'var(--vscode-font-family)',
+		fontSize: '12px',
 		fontWeight: 500,
 		color: 'var(--vscode-foreground)',
 	},
+	// Цвет имени файла после того, как его уже смотрели.
 	fileGraphFileNameViewed: {
 		color: 'color-mix(in srgb, var(--vscode-foreground) 82%, var(--vscode-descriptionForeground))',
 	},
+	// Акцентный цвет имени активного открытого файла.
 	fileGraphFileNameActive: {
 		color: 'var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground))',
 		fontWeight: 600,
 	},
+	// Дополнительный путь или подпись под именем файла.
 	fileGraphFilePath: {
 		minWidth: 0,
 		overflow: 'hidden',
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
-		fontSize: '10px',
+		fontSize: '11px',
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	// Правая inline-зона для счетчиков и action badges.
 	fileGraphActions: {
 		display: 'inline-flex',
 		alignItems: 'center',
@@ -2098,59 +2555,73 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '4px',
 		whiteSpace: 'nowrap',
 	},
+	// Compact diff counters and status badges for flat dirty-file rows.
+	// Полный набор счетчиков + / ~ / - у файла.
 	fileLineStats: {
 		display: 'inline-flex',
 		alignItems: 'center',
 		gap: '3px',
 		whiteSpace: 'nowrap',
-		fontSize: '10px',
+		fontSize: '11px',
+		fontWeight: 600,
 	},
+	// Компактная версия тех же счетчиков для узких мест.
 	fileLineStatsCompact: {
 		display: 'inline-flex',
 		alignItems: 'center',
 		gap: '3px',
 		whiteSpace: 'nowrap',
-		fontSize: '9px',
+		fontSize: '10px',
+		fontWeight: 600,
 	},
+	// Специальная подпись для bin или неизвестных diff-данных.
 	fileLineStatsSpecial: {
-		fontSize: '9px',
+		fontSize: '10px',
 		color: 'var(--vscode-descriptionForeground)',
 		whiteSpace: 'nowrap',
 	},
+	// Зеленый счетчик добавленных строк.
 	fileLineStatAdded: {
 		color: 'var(--vscode-charts-green)',
 	},
+	// Желтый счетчик измененных строк.
 	fileLineStatChanged: {
 		color: 'var(--vscode-charts-yellow)',
 	},
+	// Красный счетчик удаленных строк.
 	fileLineStatDeleted: {
 		color: 'var(--vscode-charts-red)',
 	},
+	// Серые скобки вокруг блока line stats.
 	fileLineStatParen: {
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	// Квадратный badge статуса файла для плоских строк.
 	fileStatus: {
 		display: 'inline-flex',
 		alignItems: 'center',
 		justifyContent: 'center',
-		minWidth: '22px',
-		height: '22px',
-		padding: '0 6px',
+		minWidth: '18px',
+		width: '18px',
+		height: '18px',
+		padding: 0,
 		fontFamily: 'var(--vscode-editor-font-family)',
-		fontWeight: 700,
+		fontWeight: 800,
 		color: 'var(--vscode-descriptionForeground)',
 		textAlign: 'center',
 		border: '1px solid color-mix(in srgb, var(--vscode-panel-border) 82%, transparent)',
-		borderRadius: '999px',
+		borderRadius: '6px',
 		lineHeight: 1,
-		fontSize: '9px',
-		textTransform: 'uppercase',
-		letterSpacing: '0.04em',
+		fontSize: '11px',
+		textTransform: 'none',
+		letterSpacing: 0,
 	},
+	// Предупреждающий вид status-badge для конфликтов.
 	fileStatusWarn: {
 		color: 'var(--vscode-charts-yellow)',
 		borderColor: 'var(--vscode-charts-yellow)',
 	},
+	// Capsule badge для уже открытого файла.
 	fileOpenBadge: {
 		padding: '2px 7px',
 		borderRadius: '999px',
@@ -2161,6 +2632,7 @@ const styles: Record<string, React.CSSProperties> = {
 		textTransform: 'uppercase',
 		whiteSpace: 'nowrap',
 	},
+	// Capsule badge для файла в процессе открытия.
 	fileOpenBadgeBusy: {
 		padding: '2px 7px',
 		borderRadius: '999px',
@@ -2171,6 +2643,7 @@ const styles: Record<string, React.CSSProperties> = {
 		textTransform: 'uppercase',
 		whiteSpace: 'nowrap',
 	},
+	// Желтый badge для конфликтного или рискованного файла.
 	fileWarnBadge: {
 		padding: '3px 7px',
 		borderRadius: '999px',
@@ -2182,6 +2655,7 @@ const styles: Record<string, React.CSSProperties> = {
 		textTransform: 'uppercase',
 		whiteSpace: 'nowrap',
 	},
+	// Небольшая текстовая кнопка действия внутри строки проекта.
 	inlineButton: {
 		padding: '1px 6px',
 		border: '1px solid var(--vscode-panel-border)',
@@ -2193,11 +2667,14 @@ const styles: Record<string, React.CSSProperties> = {
 		cursor: 'pointer',
 		whiteSpace: 'nowrap',
 	},
+	// Текст под раскрытой строкой, пока список файлов пуст или грузится.
 	emptyDetails: {
 		padding: '5px 0 2px 19px',
 		fontSize: '11px',
 		color: 'var(--vscode-descriptionForeground)',
 	},
+	// AI review summary cards and lightweight instructional copy.
+	// Вводный блок статуса AI review над основными секциями.
 	analysisIntro: {
 		display: 'grid',
 		gridTemplateColumns: 'auto minmax(0, 1fr)',
@@ -2208,11 +2685,13 @@ const styles: Record<string, React.CSSProperties> = {
 		borderRadius: '5px',
 		background: 'color-mix(in srgb, var(--vscode-textLink-foreground) 7%, var(--vscode-editor-background))',
 	},
+	// Основной текст пояснения рядом с AI state badge.
 	analysisIntroText: {
 		fontSize: '12px',
 		lineHeight: 1.45,
 		color: 'var(--vscode-foreground)',
 	},
+	// Badge состояния, когда AI еще обрабатывает данные.
 	analysisStateRunning: {
 		padding: '2px 6px',
 		borderRadius: '4px',
@@ -2222,6 +2701,7 @@ const styles: Record<string, React.CSSProperties> = {
 		fontWeight: 700,
 		whiteSpace: 'nowrap',
 	},
+	// Badge состояния, когда AI уже отдал результат.
 	analysisStateReady: {
 		padding: '2px 6px',
 		borderRadius: '4px',
@@ -2231,16 +2711,19 @@ const styles: Record<string, React.CSSProperties> = {
 		fontWeight: 700,
 		whiteSpace: 'nowrap',
 	},
+	// Вертикальный список секций AI review.
 	analysisSections: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '8px',
 	},
+	// Карточка одной секции AI summary.
 	analysisSection: {
 		border: '1px solid color-mix(in srgb, var(--vscode-panel-border) 74%, transparent)',
 		borderRadius: '5px',
 		overflow: 'hidden',
 	},
+	// Шапка отдельной секции AI review.
 	analysisTitle: {
 		padding: '6px 8px',
 		background: 'var(--vscode-sideBar-background)',
@@ -2249,17 +2732,20 @@ const styles: Record<string, React.CSSProperties> = {
 		fontWeight: 700,
 		color: 'var(--vscode-foreground)',
 	},
+	// Тело секции AI review со списком строк.
 	analysisBody: {
 		display: 'flex',
 		flexDirection: 'column',
 		gap: '5px',
 		padding: '8px',
 	},
+	// Обычная строка текста внутри секции AI review.
 	analysisLine: {
 		fontSize: '12px',
 		lineHeight: 1.45,
 		color: 'var(--vscode-foreground)',
 	},
+	// Строка списка с bullet-маркером в AI summary.
 	analysisBullet: {
 		display: 'grid',
 		gridTemplateColumns: '12px minmax(0, 1fr)',
@@ -2268,9 +2754,11 @@ const styles: Record<string, React.CSSProperties> = {
 		lineHeight: 1.45,
 		color: 'var(--vscode-foreground)',
 	},
+	// Цветной маркер bullet внутри AI review.
 	analysisBulletMarker: {
 		color: 'var(--vscode-textLink-foreground)',
 	},
+	// Общий красный текст для ошибок внутри виджета.
 	errorText: {
 		fontSize: '12px',
 		color: 'var(--vscode-errorForeground)',

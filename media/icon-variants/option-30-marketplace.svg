@@ -1,0 +1,25 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bg" x1="22" y1="18" x2="228" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B2A40"/>
+      <stop offset="0.58" stop-color="#101827"/>
+      <stop offset="1" stop-color="#080C13"/>
+    </linearGradient>
+    <!-- Accent cap gradient -->
+    <linearGradient id="accent" x1="54" y1="52" x2="132" y2="82" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#77EFFF"/>
+      <stop offset="1" stop-color="#309FFF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background tile -->
+  <rect x="16" y="16" width="224" height="224" rx="40" fill="url(#bg)"/>
+  <rect x="16.75" y="16.75" width="222.5" height="222.5" rx="39.25" stroke="#31465F" stroke-width="1.5"/>
+
+  <!-- Framed PM mark -->
+  <rect x="34" y="34" width="188" height="188" rx="46" fill="#F6F8FC"/>
+  <rect x="66" y="66" width="124" height="124" rx="28" fill="#0E1625"/>
+  <rect x="54" y="52" width="72" height="18" rx="9" fill="url(#accent)"/>
+  <text x="73" y="156" fill="#F6F8FC" font-family="'DejaVu Sans', 'Liberation Sans', sans-serif" font-size="92" font-weight="900" letter-spacing="-8">PM</text>
+</svg>

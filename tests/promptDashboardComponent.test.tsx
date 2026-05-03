@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { PromptDashboard } from '../src/webview/editor/components/PromptDashboard.js';
+import {
+	PromptDashboard,
+	reconcileBranchDrafts,
+	resolveExpandedDetailsHydrationRequest,
+} from '../src/webview/editor/components/PromptDashboard.js';
 import type { PromptDashboardProjectSummary, PromptDashboardSnapshot } from '../src/types/promptDashboard.js';
 
 type TestWindow = Window & { __LOCALE__?: string };
@@ -59,6 +63,7 @@ function createProject(overrides: Partial<PromptDashboardProjectSummary> = {}): 
 			{ name: 'feature/task-107', current: false, exists: true, kind: 'prompt', upstream: 'origin/feature/task-107', ahead: 5, behind: 0, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
 			{ name: 'develop', current: false, exists: true, kind: 'tracked', upstream: 'origin/develop', ahead: 0, behind: 3, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
 		],
+		branchSwitchError: '',
 		branchActions: [
 			{ kind: 'prompt', branch: 'feature/task-107', available: true },
 			{ kind: 'tracked', branch: 'develop', available: true },
@@ -110,6 +115,7 @@ function createProject(overrides: Partial<PromptDashboardProjectSummary> = {}): 
 			],
 		}],
 		conflictFiles: ['src/webview/editor/App.tsx'],
+		uncommittedFiles: [],
 		...overrides,
 	};
 }
@@ -184,6 +190,41 @@ test('PromptDashboard selects current branch first and renders the redesigned fi
 	assert.match(markup, /Что происходит/);
 });
 
+test('reconcileBranchDrafts drops drafts that already became the refreshed current branch', () => {
+	const nextDrafts = reconcileBranchDrafts([
+		createProject({ currentBranch: 'feature/task-107' }),
+		createProject({ project: 'web', repositoryPath: '/workspace/web' }),
+	], {
+		api: 'feature/task-107',
+		web: 'develop',
+		ghost: 'main',
+	});
+
+	assert.deepEqual(nextDrafts, { web: 'develop' });
+});
+
+test('resolveExpandedDetailsHydrationRequest keeps dirty file hydration on the dedicated route', () => {
+	const request = resolveExpandedDetailsHydrationRequest('dirty:api', [createProject({
+		uncommittedFiles: [{
+			project: 'api',
+			path: 'src/app.ts',
+			status: 'M',
+			group: 'working-tree',
+			conflicted: false,
+			staged: false,
+			fileSizeBytes: 0,
+			additions: null,
+			deletions: null,
+			isBinary: false,
+		}],
+	})]);
+
+	assert.deepEqual(request, {
+		projects: ['api'],
+		reason: 'dirty-files',
+	});
+});
+
 test('PromptDashboard shows loading labels for project-based widgets while data refreshes', () => {
 	const markup = renderDashboard(createSnapshot([], 'loading'));
 
@@ -204,6 +245,75 @@ test('PromptDashboard keeps existing project rows visible while refreshed Git da
 	assert.doesNotMatch(markup, /Git-данные загружаются/);
 	assert.doesNotMatch(markup, /MR\/PR-данные загружаются/);
 	assert.doesNotMatch(markup, /Данные по веткам загружаются/);
+});
+
+test('PromptDashboard renders the marketplace icon before the overview title and cache label', () => {
+	const markup = renderDashboard(createSnapshot([createProject()]));
+
+	assert.match(markup, /data-pm-dashboard-logo="true"/);
+	assert.match(markup, /viewBox="0 0 256 256"/);
+	assert.match(markup, /width:32px;height:32px/);
+	assert.match(markup, /pm-dashboard-logo-bg/);
+	assert.match(markup, /data-pm-dashboard-logo="true"[\s\S]*Обзор[\s\S]*Обновлено/);
+});
+
+test('PromptDashboard disables the prompt branch preset when the prompt Git branch is missing', () => {
+	const markup = renderDashboard(createSnapshot([
+		createProject({
+			promptBranch: '',
+			branchActions: [
+				{ kind: 'tracked', branch: 'develop', available: true },
+			],
+			branches: [
+				{ name: 'main', current: true, exists: true, kind: 'current', upstream: 'origin/main', ahead: 2, behind: 1, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
+				{ name: 'develop', current: false, exists: true, kind: 'tracked', upstream: 'origin/develop', ahead: 0, behind: 3, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
+			],
+		}),
+	]));
+
+	assert.match(markup, /title="У промпта не задана ветка Git" disabled="">Ветка промпта<\/button>/);
+	assert.match(markup, /Tracked-ветка/);
+});
+
+test('PromptDashboard shows branch-switch errors and a dirty-files disclosure under the project selector', () => {
+	const markup = renderDashboard(createSnapshot([
+		createProject({
+			branchSwitchError: 'рабочее дерево не чистое, переключение отменено.',
+			uncommittedFiles: [
+				{
+					project: 'api',
+					path: 'src/app.ts',
+					status: 'M',
+					group: 'working-tree',
+					conflicted: false,
+					staged: false,
+					fileSizeBytes: 0,
+					additions: 3,
+					deletions: 1,
+					isBinary: false,
+				},
+				{
+					project: 'api',
+					path: 'src/new-file.ts',
+					status: '??',
+					group: 'untracked',
+					conflicted: false,
+					staged: false,
+					fileSizeBytes: 0,
+					additions: null,
+					deletions: null,
+					isBinary: false,
+				},
+			],
+		}),
+	]));
+
+	assert.match(markup, /Ошибка переключения ветки/);
+	assert.match(markup, /рабочее дерево не чистое, переключение отменено/);
+	assert.match(markup, /Незакоммиченные файлы/);
+	assert.match(markup, /title="Показать список незакоммиченных файлов"/);
+	assert.match(markup, />2<\/span>/);
+	assert.doesNotMatch(markup, /work/);
 });
 
 test('PromptDashboard shows a quick preliminary summary while AI review is still running', () => {

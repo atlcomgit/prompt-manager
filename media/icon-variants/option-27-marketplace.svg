@@ -1,0 +1,28 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bg" x1="22" y1="18" x2="228" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B2A40"/>
+      <stop offset="0.58" stop-color="#101827"/>
+      <stop offset="1" stop-color="#080C13"/>
+    </linearGradient>
+    <!-- Accent bar gradient -->
+    <linearGradient id="accent" x1="48" y1="48" x2="126" y2="78" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#77EFFF"/>
+      <stop offset="1" stop-color="#309FFF"/>
+    </linearGradient>
+    <!-- Knockout PM mask -->
+    <mask id="cut27" maskUnits="userSpaceOnUse" x="38" y="38" width="180" height="180">
+      <rect x="38" y="38" width="180" height="180" rx="44" fill="white"/>
+      <text x="56" y="158" fill="black" font-family="'DejaVu Sans', 'Liberation Sans', sans-serif" font-size="118" font-weight="900" letter-spacing="-11">PM</text>
+    </mask>
+  </defs>
+
+  <!-- Background tile -->
+  <rect x="16" y="16" width="224" height="224" rx="40" fill="url(#bg)"/>
+  <rect x="16.75" y="16.75" width="222.5" height="222.5" rx="39.25" stroke="#31465F" stroke-width="1.5"/>
+
+  <!-- Cutout PM block -->
+  <rect x="38" y="38" width="180" height="180" rx="44" fill="#F6F8FC" mask="url(#cut27)"/>
+  <rect x="48" y="48" width="72" height="20" rx="10" fill="url(#accent)"/>
+</svg>

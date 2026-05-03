@@ -1,0 +1,28 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bg" x1="22" y1="18" x2="228" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B2A40"/>
+      <stop offset="0.58" stop-color="#101827"/>
+      <stop offset="1" stop-color="#080C13"/>
+    </linearGradient>
+    <!-- Accent dot gradient -->
+    <linearGradient id="accent" x1="176" y1="56" x2="206" y2="86" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#77EFFF"/>
+      <stop offset="1" stop-color="#309FFF"/>
+    </linearGradient>
+    <!-- Lowercase cutout mask -->
+    <mask id="cut33" maskUnits="userSpaceOnUse" x="34" y="42" width="188" height="172">
+      <rect x="34" y="42" width="188" height="172" rx="38" fill="white"/>
+      <text x="70" y="154" fill="black" font-family="'DejaVu Sans', 'Liberation Sans', sans-serif" font-size="118" font-weight="800" letter-spacing="-8">pm</text>
+    </mask>
+  </defs>
+
+  <!-- Background tile -->
+  <rect x="16" y="16" width="224" height="224" rx="40" fill="url(#bg)"/>
+  <rect x="16.75" y="16.75" width="222.5" height="222.5" rx="39.25" stroke="#31465F" stroke-width="1.5"/>
+
+  <!-- Loop tile mark -->
+  <rect x="34" y="42" width="188" height="172" rx="38" fill="#F6F8FC" mask="url(#cut33)"/>
+  <circle cx="190" cy="72" r="14" fill="url(#accent)"/>
+</svg>

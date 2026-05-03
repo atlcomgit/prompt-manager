@@ -78,7 +78,7 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
-import { preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldRequestPromptDashboardSnapshot } from '../../utils/promptDashboard.js';
+import { preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldRequestPromptDashboardSnapshot, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
 
@@ -140,6 +140,15 @@ const postEditorDebugLog = (scope: string, message: string, payload?: Record<str
 };
 
 const ensureTrailingNewline = (text: string): string => (text.endsWith('\n') ? text : `${text}\n`);
+
+/** Clamp runtime agent progress updates to the widget-safe 0-100 range. */
+const normalizePromptAgentProgress = (value?: number): number | undefined => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(value)));
+};
 
 const normalizeTrackedBranchesByProject = (value?: Record<string, string>): Record<string, string> => {
   const result: Record<string, string> = {};
@@ -434,6 +443,7 @@ export const EditorApp: React.FC = () => {
   const [promptDashboardRefreshVersion, setPromptDashboardRefreshVersion] = useState(0);
   const promptDashboardRequestIdRef = useRef('');
   const promptDashboardSnapshotRef = useRef<PromptDashboardSnapshot | null>(null);
+  const promptDashboardProgressOverrideRef = useRef<number | undefined>(undefined);
   const lastPromptDashboardRequestFingerprintRef = useRef('');
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
   const [branchesResolved, setBranchesResolved] = useState(false);
@@ -2134,6 +2144,7 @@ export const EditorApp: React.FC = () => {
               setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
             }
             skipNextPromptConfigTrackingRef.current = true;
+            promptDashboardProgressOverrideRef.current = undefined;
             promptRef.current = msg.prompt;
             setPrompt(msg.prompt);
             setActiveTab(nextEditorViewState.activeTab);
@@ -2377,6 +2388,30 @@ export const EditorApp: React.FC = () => {
             activeSaveRequestIdRef.current = null;
             activeSaveClearedDirtyRef.current = false;
           }
+        }
+        break;
+      case 'promptAgentProgress':
+        {
+          const targetPromptId = (String(msg.promptId || '__new__').trim() || '__new__');
+          const currentPromptId = (currentPromptIdRef.current || '__new__').trim() || '__new__';
+          const targetPromptUuid = (String(msg.promptUuid || '').trim() || '');
+          const currentPromptUuid = (String(promptRef.current.promptUuid || '').trim() || '');
+          if (targetPromptId !== currentPromptId) {
+            break;
+          }
+          if (targetPromptUuid && currentPromptUuid && targetPromptUuid !== currentPromptUuid) {
+            break;
+          }
+
+          promptDashboardProgressOverrideRef.current = normalizePromptAgentProgress(msg.progress);
+          setPromptDashboardSnapshot(previous => syncPromptDashboardStatusFromPrompt(
+            previous,
+            promptRef.current,
+            {
+              progressOverride: promptDashboardProgressOverrideRef.current,
+              preserveInProgressSnapshotProgress: true,
+            },
+          ));
         }
         break;
       case 'promptContentUpdated':
@@ -3018,7 +3053,15 @@ export const EditorApp: React.FC = () => {
             projectsStatus: String(msg.snapshot?.projects?.cache?.status || 'idle'),
             aiStatus: String(msg.snapshot?.aiAnalysis?.cache?.status || 'idle'),
           });
-          setPromptDashboardSnapshot(msg.snapshot || null);
+          // Preserve fresher local prompt status fields when an async snapshot arrives later.
+          setPromptDashboardSnapshot(syncPromptDashboardStatusFromPrompt(
+            msg.snapshot || null,
+            promptRef.current,
+            {
+              progressOverride: promptDashboardProgressOverrideRef.current,
+              preserveInProgressSnapshotProgress: true,
+            },
+          ));
           setPromptDashboardBusyAction(null);
         }
         break;
@@ -3044,11 +3087,20 @@ export const EditorApp: React.FC = () => {
               widget as PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>,
             )
             : widget;
-          return {
+			// Preserve the current prompt status when a partial widget patch lands out of order.
+			const nextSnapshot = {
             ...prev,
             [nextWidget.kind]: nextWidget,
             generatedAt: new Date().toISOString(),
-          } as PromptDashboardSnapshot;
+			} as PromptDashboardSnapshot;
+      return syncPromptDashboardStatusFromPrompt(
+        nextSnapshot,
+        promptRef.current,
+        {
+          progressOverride: promptDashboardProgressOverrideRef.current,
+          preserveInProgressSnapshotProgress: true,
+        },
+      ) || nextSnapshot;
         });
         // Branch apply actions complete on the projects widget refresh, not on a full dashboard snapshot.
         if (widget?.kind) {
@@ -3293,6 +3345,28 @@ export const EditorApp: React.FC = () => {
     branchAutoExpandedRef.current = false;
     vscode.postMessage({ type: 'getBranches', projects: prompt.projects });
   }, [prompt.projects]);
+
+  // Keep the status widget current for local prompt edits without waiting for a full snapshot refresh.
+  useEffect(() => {
+    setPromptDashboardSnapshot(previous => syncPromptDashboardStatusFromPrompt(
+      previous,
+      prompt,
+      {
+        progressOverride: promptDashboardProgressOverrideRef.current,
+        preserveInProgressSnapshotProgress: true,
+      },
+    ));
+  }, [
+    prompt.id,
+    prompt.promptUuid,
+    prompt.status,
+    prompt.progress,
+    prompt.updatedAt,
+    prompt.timeSpentWriting,
+    prompt.timeSpentImplementing,
+    prompt.timeSpentOnTask,
+    prompt.timeSpentUntracked,
+  ]);
 
   useEffect(() => {
     if (promptDashboardMode !== 'full') {
@@ -3679,13 +3753,19 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'refreshPromptDashboard', prompt: promptRef.current, requestId });
   }, []);
 
-  const handlePromptDashboardHydrateProjectsDetails = useCallback(() => {
+  const handlePromptDashboardHydrateProjectsDetails = useCallback((projects: string[], reason: 'details' | 'dirty-files' = 'details') => {
     if (promptDashboardSnapshot?.projects.cache.status === 'loading') {
+      return;
+    }
+    const targetProjects = Array.from(new Set((projects || [])
+      .map(project => String(project || '').trim())
+      .filter(Boolean)));
+    if (targetProjects.length === 0) {
       return;
     }
     const requestId = `prompt-dashboard-projects-details-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     promptDashboardRequestIdRef.current = requestId;
-    vscode.postMessage({ type: 'hydratePromptDashboardProjectsDetails', prompt: promptRef.current, requestId });
+    vscode.postMessage({ type: 'hydratePromptDashboardProjectsDetails', prompt: promptRef.current, projects: targetProjects, requestId, reason });
   }, [promptDashboardSnapshot?.projects.cache.status]);
 
   const handlePromptDashboardOpenPrompt = useCallback((id: string, promptUuid?: string) => {

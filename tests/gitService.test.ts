@@ -182,6 +182,32 @@ test('GitService applyBranchTargetsByProject creates missing prompt branch from 
 	]);
 });
 
+test('GitService switchBranchesByProject does not create a missing tracked branch', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const calls: string[][] = [];
+
+	service.branchExistsLocally = async () => false;
+	service.findRemoteBranchRef = async () => '';
+	service.getCurrentBranch = async () => 'main';
+	service.getAllowedBaseBranches = () => new Set(['main', 'develop']);
+	service.runGitFileMutation = async (_projectPath: string, args: string[]) => {
+		calls.push(args);
+	};
+
+	const result = await service.switchBranchesByProject(
+		new Map([['api', '/tmp/api']]),
+		['api'],
+		'',
+		{ api: 'develop' },
+		['main', 'develop'],
+	);
+
+	assert.equal(result.success, false);
+	assert.match(result.errors[0] || '', /не будет создана автоматически/);
+	assert.deepEqual(calls, []);
+});
+
 test('GitService syncProjects pulls only branches that are behind their upstream', async () => {
 	const { GitService } = await importGitService();
 	const service = new GitService() as any;
@@ -499,6 +525,52 @@ test('GitService getChangeGroups skips diff enrichment when lightweight details 
 	assert.equal(groups.staged[0]?.fileSizeBytes, 0);
 	assert.equal(groups.workingTree[0]?.fileSizeBytes, 0);
 	assert.equal(groups.untracked[0]?.fileSizeBytes, 0);
+});
+
+test('GitService getChangeGroups batches tracked numstat lookups per change group', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const numstatCommands: string[][] = [];
+
+	service.resolveOverlayFileSize = async () => 128;
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'status') {
+			return 'M  src/staged.ts\n M src/one.ts\nRM src/old.ts -> src/two.ts';
+		}
+		if (args[0] === 'diff' && args.includes('--diff-filter=U')) {
+			return '';
+		}
+		if (args[0] === 'diff' && args.includes('--numstat')) {
+			numstatCommands.push(args);
+			if (args.includes('--cached')) {
+				return '2\t1\tsrc/staged.ts';
+			}
+			return '5\t2\tsrc/one.ts\n1\t0\tsrc/{old.ts => two.ts}';
+		}
+		if (args[0] === 'diff' && args.includes('--name-status') && args.includes('--cached')) {
+			return 'M\tsrc/staged.ts';
+		}
+		if (args[0] === 'diff' && args.includes('--name-status')) {
+			return 'M\tsrc/one.ts\nR100\tsrc/old.ts\tsrc/two.ts';
+		}
+		return '';
+	};
+
+	const groups = await service.getChangeGroups('api', '/tmp/api', { includeDetails: true });
+
+	assert.equal(numstatCommands.length, 2);
+	assert(numstatCommands.some(args => args.includes('--cached') && args.includes('src/staged.ts')));
+	const workingTreeNumstat = numstatCommands.find(args => !args.includes('--cached')) || [];
+	assert(workingTreeNumstat.includes('src/one.ts'));
+	assert(workingTreeNumstat.includes('src/two.ts'));
+	assert(workingTreeNumstat.includes('src/old.ts'));
+	assert.equal(groups.staged[0]?.additions, 2);
+	assert.equal(groups.staged[0]?.deletions, 1);
+	assert.equal(groups.workingTree[0]?.additions, 5);
+	assert.equal(groups.workingTree[0]?.deletions, 2);
+	assert.equal(groups.workingTree[1]?.path, 'src/two.ts');
+	assert.equal(groups.workingTree[1]?.additions, 1);
+	assert.equal(groups.workingTree[1]?.deletions, 0);
 });
 
 test('GitService getChangeGroups short-circuits extra diff commands for clean repositories', async () => {

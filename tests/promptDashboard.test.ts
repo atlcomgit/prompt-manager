@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 
 import {
 	buildPromptDashboardAnalysisFingerprint,
+	buildPromptDashboardStatusDataFromPrompt,
 	buildPromptDashboardBranchActions,
 	buildPromptDashboardScopeKey,
 	createPromptDashboardWidgetSnapshot,
 	getPromptDashboardStatusProgress,
+	syncPromptDashboardStatusFromPrompt,
 	preservePromptDashboardProjectsLoadingSnapshot,
 	PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS,
 	resolvePromptDashboardCacheState,
@@ -16,7 +18,7 @@ import {
 	shouldRequestPromptDashboardSnapshot,
 	splitPromptDashboardActivityByDay,
 } from '../src/utils/promptDashboard.js';
-import type { PromptDashboardProjectSummary, PromptDashboardProjectsData, PromptDashboardPromptActivityItem, PromptDashboardScope } from '../src/types/promptDashboard.js';
+import type { PromptDashboardProjectSummary, PromptDashboardProjectsData, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSnapshot } from '../src/types/promptDashboard.js';
 
 test('resolvePromptDashboardMode switches to full only when the right side can fit widgets', () => {
 	assert.equal(resolvePromptDashboardMode(1119, 840), 'compact');
@@ -100,6 +102,23 @@ test('getPromptDashboardStatusProgress clamps in-progress agent progress and fal
 	assert.equal(getPromptDashboardStatusProgress('closed'), 100);
 });
 
+test('buildPromptDashboardStatusDataFromPrompt recalculates the status widget payload from prompt fields', () => {
+	const data = buildPromptDashboardStatusDataFromPrompt({
+		status: 'review',
+		progress: 37,
+		updatedAt: '2026-05-03T09:30:00.000Z',
+		timeSpentWriting: 60_000,
+		timeSpentImplementing: 120_000,
+		timeSpentOnTask: 180_000,
+		timeSpentUntracked: 30_000,
+	});
+
+	assert.equal(data.status, 'review');
+	assert.equal(data.progress, 90);
+	assert.equal(data.totalTimeMs, 390_000);
+	assert.equal(data.updatedAt, '2026-05-03T09:30:00.000Z');
+});
+
 test('buildPromptDashboardBranchActions exposes tracked and prompt switch targets only when named', () => {
 	const actions = buildPromptDashboardBranchActions({
 		promptBranch: 'feature/task',
@@ -152,6 +171,7 @@ test('preservePromptDashboardProjectsLoadingSnapshot keeps previous rows during 
 		repositoryPath: `/workspace/${project}`,
 		available: true,
 		error: '',
+		branchSwitchError: '',
 		currentBranch: 'main',
 		promptBranch: 'feature/task-1',
 		trackedBranch: 'main',
@@ -166,6 +186,7 @@ test('preservePromptDashboardProjectsLoadingSnapshot keeps previous rows during 
 		pipeline: null,
 		parallelBranches: [],
 		conflictFiles: [],
+		uncommittedFiles: [],
 	});
 	const previousWidget = createPromptDashboardWidgetSnapshot('projects', {
 		projects: [createProject('api')],
@@ -191,6 +212,114 @@ test('preservePromptDashboardProjectsLoadingSnapshot keeps previous rows during 
 		preservePromptDashboardProjectsLoadingSnapshot(previousWidget, readyWidget).data.projects,
 		readyWidget.data.projects,
 	);
+});
+
+test('syncPromptDashboardStatusFromPrompt updates only the matching snapshot status widget', () => {
+	const snapshot: PromptDashboardSnapshot = {
+		promptId: 'task-1',
+		promptUuid: 'uuid-1',
+		generatedAt: '2026-05-03T10:00:00.000Z',
+		scopeKey: 'task-1::dashboard',
+		activity: createPromptDashboardWidgetSnapshot('activity', { thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, today: [], yesterday: [] }),
+		status: createPromptDashboardWidgetSnapshot('status', { status: 'draft', progress: 10, totalTimeMs: 60_000, updatedAt: '2026-05-03T10:00:00.000Z' }),
+		projects: createPromptDashboardWidgetSnapshot('projects', { projects: [] }),
+		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
+	};
+
+	const unchanged = syncPromptDashboardStatusFromPrompt(snapshot, {
+		id: 'other-task',
+		promptUuid: 'uuid-2',
+		status: 'completed',
+		progress: 100,
+		updatedAt: '2026-05-03T10:30:00.000Z',
+		timeSpentWriting: 60_000,
+		timeSpentImplementing: 60_000,
+		timeSpentOnTask: 60_000,
+		timeSpentUntracked: 0,
+	});
+	assert.equal(unchanged, snapshot);
+
+	const next = syncPromptDashboardStatusFromPrompt(snapshot, {
+		id: 'task-1',
+		promptUuid: 'uuid-1',
+		status: 'completed',
+		progress: 100,
+		updatedAt: '2026-05-03T10:30:00.000Z',
+		timeSpentWriting: 60_000,
+		timeSpentImplementing: 60_000,
+		timeSpentOnTask: 300_000,
+		timeSpentUntracked: 0,
+	});
+
+	assert.notEqual(next, snapshot);
+	assert.equal(next?.status.data.status, 'completed');
+	assert.equal(next?.status.data.progress, 70);
+	assert.equal(next?.status.data.totalTimeMs, 420_000);
+	assert.equal(next?.status.data.updatedAt, '2026-05-03T10:30:00.000Z');
+});
+
+test('syncPromptDashboardStatusFromPrompt keeps the loaded in-progress snapshot percent when prompt config has no progress', () => {
+	const snapshot: PromptDashboardSnapshot = {
+		promptId: 'task-144',
+		promptUuid: 'uuid-144',
+		generatedAt: '2026-05-03T16:05:00.000Z',
+		scopeKey: 'task-144::dashboard',
+		activity: createPromptDashboardWidgetSnapshot('activity', { thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, today: [], yesterday: [] }),
+		status: createPromptDashboardWidgetSnapshot('status', { status: 'in-progress', progress: 100, totalTimeMs: 1_000, updatedAt: '2026-05-03T16:05:00.000Z' }),
+		projects: createPromptDashboardWidgetSnapshot('projects', { projects: [] }),
+		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
+	};
+
+	const next = syncPromptDashboardStatusFromPrompt(snapshot, {
+		id: 'task-144',
+		promptUuid: 'uuid-144',
+		status: 'in-progress',
+		progress: undefined,
+		updatedAt: '2026-05-03T16:06:57.168Z',
+		timeSpentWriting: 1_648_389,
+		timeSpentImplementing: 88_659,
+		timeSpentOnTask: 4_926_656,
+		timeSpentUntracked: 0,
+	}, {
+		preserveInProgressSnapshotProgress: true,
+	});
+
+	assert.notEqual(next, snapshot);
+	assert.equal(next?.status.data.status, 'in-progress');
+	assert.equal(next?.status.data.progress, 100);
+	assert.equal(next?.status.data.totalTimeMs, 6_663_704);
+	assert.equal(next?.status.data.updatedAt, '2026-05-03T16:06:57.168Z');
+});
+
+test('syncPromptDashboardStatusFromPrompt still uses an explicit prompt percent when the snapshot only has the default fallback', () => {
+	const snapshot: PromptDashboardSnapshot = {
+		promptId: 'task-200',
+		promptUuid: 'uuid-200',
+		generatedAt: '2026-05-03T16:10:00.000Z',
+		scopeKey: 'task-200::dashboard',
+		activity: createPromptDashboardWidgetSnapshot('activity', { thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, today: [], yesterday: [] }),
+		status: createPromptDashboardWidgetSnapshot('status', { status: 'in-progress', progress: 50, totalTimeMs: 1_000, updatedAt: '2026-05-03T16:10:00.000Z' }),
+		projects: createPromptDashboardWidgetSnapshot('projects', { projects: [] }),
+		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
+	};
+
+	const next = syncPromptDashboardStatusFromPrompt(snapshot, {
+		id: 'task-200',
+		promptUuid: 'uuid-200',
+		status: 'in-progress',
+		progress: 80,
+		updatedAt: '2026-05-03T16:10:30.000Z',
+		timeSpentWriting: 1_000,
+		timeSpentImplementing: 2_000,
+		timeSpentOnTask: 3_000,
+		timeSpentUntracked: 0,
+	}, {
+		preserveInProgressSnapshotProgress: true,
+	});
+
+	assert.equal(next?.status.data.progress, 80);
+	assert.equal(next?.status.data.totalTimeMs, 6_000);
+	assert.equal(next?.status.data.updatedAt, '2026-05-03T16:10:30.000Z');
 });
 
 test('shouldAcceptPromptDashboardAnalysisMessage accepts same-fingerprint completion after a newer snapshot request', () => {

@@ -1,0 +1,17 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="22" y1="18" x2="228" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B2A40"/>
+      <stop offset="0.58" stop-color="#101827"/>
+      <stop offset="1" stop-color="#080C13"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="58" y1="70" x2="198" y2="174" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#77EFFF"/>
+      <stop offset="1" stop-color="#309FFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="40" fill="url(#bg)"/>
+  <rect x="16.75" y="16.75" width="222.5" height="222.5" rx="39.25" stroke="#31465F" stroke-width="1.5"/>
+  <path fill-rule="evenodd" clip-rule="evenodd" d="M44 84C44 61.9086 61.9086 44 84 44H120C142.091 44 160 61.9086 160 84V92H172C194.091 92 212 109.909 212 132V172C212 194.091 194.091 212 172 212H136C113.909 212 96 194.091 96 172V164H84C61.9086 164 44 146.091 44 124V84ZM84 84H120V124H84V84ZM136 132H172V172H136V132Z" fill="#F6F8FC"/>
+  <path d="M120 84H172C194.091 84 212 101.909 212 124V132H172C149.909 132 132 114.091 132 92V84H120Z" fill="url(#fold)"/>
+</svg>

@@ -1,0 +1,7 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <mask id="archMaskS" maskUnits="userSpaceOnUse" x="2.2" y="2.2" width="19.6" height="19.6">
+    <rect x="2.2" y="2.2" width="19.6" height="19.6" rx="4.9" fill="white"/>
+    <path d="M8.2 9.7C8.2 6.94108 10.4361 4.705 13.195 4.705C15.9539 4.705 18.19 6.94108 18.19 9.7V22H8.2V9.7Z" fill="black"/>
+  </mask>
+  <rect x="2.2" y="2.2" width="19.6" height="19.6" rx="4.9" fill="currentColor" mask="url(#archMaskS)"/>
+</svg>

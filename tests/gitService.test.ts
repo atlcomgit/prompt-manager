@@ -1456,6 +1456,9 @@ test('GitService getGitOverlayParallelBranchSummaries lists files changed from m
 		if (args[0] === 'rev-list') {
 			return '0\t2';
 		}
+		if (args[0] === 'diff' && args.includes('--numstat')) {
+			return '8\t3\tsrc/branch-only.ts\n2\t2\tsrc/shared.ts';
+		}
 		return '';
 	};
 	service.getMergeBase = async () => 'base-sha';
@@ -1474,11 +1477,81 @@ test('GitService getGitOverlayParallelBranchSummaries lists files changed from m
 	const summaries = await service.getGitOverlayParallelBranchSummaries(new Map([['api', '/tmp/api']]), 'api', 'main', ['main']);
 
 	assert.deepEqual(summaries[0]?.affectedFiles, [
-		{ status: 'M', path: 'src/branch-only.ts', previousPath: undefined },
-		{ status: 'M', path: 'src/shared.ts', previousPath: undefined },
+		{ status: 'M', path: 'src/branch-only.ts', previousPath: undefined, additions: 8, deletions: 3, isBinary: false },
+		{ status: 'M', path: 'src/shared.ts', previousPath: undefined, additions: 2, deletions: 2, isBinary: false },
 	]);
 	assert.deepEqual(summaries[0]?.potentialConflicts.map((file: { path: string }) => file.path), ['src/shared.ts']);
 	assert.deepEqual(diffCalls, [['base-sha', 'feature/current'], ['base-sha', 'feature/parallel']]);
+});
+
+test('GitService getGitOverlayParallelBranchSummaries bounds expensive scans to the requested limit', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const scannedBranches: string[] = [];
+	const lastCommitBranches: string[] = [];
+
+	service.getCurrentBranch = async () => 'feature/current';
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'for-each-ref') {
+			return 'main\nfeature/current\nfeature/newest\nfeature/older\nfeature/oldest';
+		}
+		if (args[0] === 'rev-list') {
+			scannedBranches.push(String(args[3] || '').split('...')[1] || '');
+			return '0\t1';
+		}
+		if (args[0] === 'diff' && args.includes('--numstat')) {
+			return '1\t0\tsrc/feature.ts';
+		}
+		return '';
+	};
+	service.getMergeBase = async () => 'base-sha';
+	service.getNameStatusDiff = async (_projectPath: string, fromRef: string, toRef: string) => {
+		if (fromRef === 'base-sha' && toRef === 'feature/current') {
+			return [];
+		}
+		if (fromRef === 'base-sha') {
+			return [{ status: 'M', path: `src/${toRef}.ts` }];
+		}
+		return [];
+	};
+	service.getLastCommit = async (_projectPath: string, branch: string) => {
+		lastCommitBranches.push(branch);
+		return null;
+	};
+
+	const summaries = await service.getGitOverlayParallelBranchSummaries(
+		new Map([['api', '/tmp/api']]),
+		'api',
+		'main',
+		['main'],
+		1,
+	);
+
+	assert.equal(summaries.length, 1);
+	assert.deepEqual(scannedBranches, ['feature/newest']);
+	assert.deepEqual(lastCommitBranches, ['feature/newest']);
+});
+
+test('GitService getCommitChangedFiles includes numstat line metrics', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args.includes('--name-status')) {
+			return 'M\tsrc/app.ts\nR100\tsrc/old.ts\tsrc/new.ts';
+		}
+		if (args.includes('--numstat')) {
+			return '9\t4\tsrc/app.ts\n1\t1\tsrc/{old.ts => new.ts}';
+		}
+		return '';
+	};
+
+	const files = await service.getCommitChangedFiles('/tmp/api', 'abc123');
+
+	assert.deepEqual(files, [
+		{ status: 'M', path: 'src/app.ts', additions: 9, deletions: 4, isBinary: false },
+		{ status: 'R', previousPath: 'src/old.ts', path: 'src/new.ts', additions: 1, deletions: 1, isBinary: false },
+	]);
 });
 
 test('GitService resolveGitLabProjectId extracts numeric id from moved-project redirect output', async () => {

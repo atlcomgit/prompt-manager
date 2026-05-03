@@ -50,6 +50,11 @@ type CachedLanguageModelEntry = {
 	};
 };
 
+type CachedSelectedModelEntry = {
+	model: vscode.LanguageModelChat;
+	expiresAtMs: number;
+};
+
 export type ChatModelApplyStatus =
 	| 'applied'
 	| 'model-not-found'
@@ -152,6 +157,8 @@ export type CodeMapFrontendBlockBatchDescriptionInput = {
 };
 
 export class AiService {
+	/** Reuse the selected chat model briefly to avoid repeated selector latency on bursty requests. */
+	private static readonly SELECTED_MODEL_CACHE_TTL_MS = 60_000;
 	private static readonly DEFAULT_IMPROVE_PROMPT_INSTRUCTIONS = [
 		// 'Пиши на русском языке.',
 		'Пиши ответ с обращением к одному лицу.',
@@ -160,6 +167,7 @@ export class AiService {
 	constructor(private readonly context?: vscode.ExtensionContext) { }
 	private sqliteBinaryPath: string | null | undefined;
 	private readonly stateDbItemCache = new Map<string, { fingerprint: string; items: Map<string, string> }>();
+	private readonly selectedModelCache = new Map<string, CachedSelectedModelEntry>();
 	private readonly output = getPromptManagerOutputChannel();
 
 	private modelSelector: vscode.LanguageModelChatSelector = {
@@ -395,63 +403,100 @@ export class AiService {
 		projects: PromptDashboardProjectSummary[];
 	}): Promise<string> {
 		const fallback = [
-			'### Итог',
-			'Недостаточно данных для автоматического анализа параллельных веток.',
-			'### Риски',
+			'### Что происходит',
+			'Пока недостаточно данных, чтобы уверенно оценить состояние веток и проверок.',
+			'### На что обратить внимание',
 			'- Проверьте локальные изменения, pipeline и MR/PR вручную.',
-			'### Следующие действия',
-			'- Обновите dashboard и повторите анализ после загрузки Git-данных.',
+			'### Что сделать дальше',
+			'- Обновите dashboard и повторите AI review после загрузки Git-данных.',
 		].join('\n');
 
 		const systemPrompt = [
 			'Ты анализируешь состояние параллельных веток, pipeline и merge requests в редакторе задач.',
-			'Пиши на русском языке, коротко и прикладно.',
+			'Пиши на русском языке, коротко, понятно для обычного пользователя и без внутреннего жаргона.',
 			'Используй только переданные данные, ничего не выдумывай.',
-			'Сфокусируйся на рисках конфликтов, сломанных проверках, незавершенных MR/PR и безопасном порядке действий.',
-			'Верни Markdown с разделами: ### Итог, ### Риски, ### Следующие действия.',
+			'Объясняй не команды Git, а пользовательский смысл: можно продолжать, что мешает, что проверить.',
+			'Сфокусируйся на конфликтах, сломанных проверках, незавершенных MR/PR и безопасном порядке действий.',
+			'Верни Markdown с разделами: ### Что происходит, ### На что обратить внимание, ### Что сделать дальше.',
 		].join(' ');
 
-		const projectSummary = input.projects.map(project => ({
-			project: project.project,
-			currentBranch: project.currentBranch,
-			promptBranch: project.promptBranch,
-			trackedBranch: project.trackedBranch,
-			dirty: project.dirty,
-			hasConflicts: project.hasConflicts,
-			ahead: project.ahead,
-			behind: project.behind,
-			recentCommits: project.recentCommits.slice(0, 2).map(commit => ({
-				sha: commit.shortSha,
-				subject: commit.subject,
-			})),
-			review: {
-				provider: project.review.remote?.provider || null,
-				requestState: project.review.request?.state || null,
-				requestUrl: project.review.request?.url || '',
-				error: project.review.error || '',
-			},
-			pipeline: project.pipeline ? {
-				provider: project.pipeline.provider,
-				state: project.pipeline.state,
-				checks: project.pipeline.checks.map(check => ({ name: check.name, state: check.state })),
-				error: project.pipeline.error,
-			} : null,
-			parallelBranches: project.parallelBranches.map(branch => ({
-				name: branch.name,
-				ahead: branch.ahead,
-				behind: branch.behind,
-				affectedFiles: branch.affectedFiles.slice(0, 20).map(file => `${file.status}:${file.previousPath || ''}:${file.path}`),
-				potentialConflicts: branch.potentialConflicts.slice(0, 10),
-			})),
-		}));
+		const projectSummary = input.projects.map(project => {
+			const pipelineChecks = project.pipeline?.checks || [];
+			const failingChecks = pipelineChecks
+				.filter(check => ['failed', 'error', 'cancelled'].includes(String(check.state || '').toLowerCase()))
+				.slice(0, 5)
+				.map(check => check.name);
+			const runningChecks = pipelineChecks
+				.filter(check => ['pending', 'queued', 'running', 'in_progress'].includes(String(check.state || '').toLowerCase()))
+				.slice(0, 5)
+				.map(check => check.name);
+
+			return {
+				project: project.project,
+				currentBranch: project.currentBranch,
+				promptBranch: project.promptBranch,
+				trackedBranch: project.trackedBranch,
+				dirty: project.dirty,
+				hasConflicts: project.hasConflicts,
+				conflictFileCount: project.conflictFiles.length,
+				conflictFiles: project.conflictFiles.slice(0, 5),
+				ahead: project.ahead,
+				behind: project.behind,
+				recentCommits: project.recentCommits.slice(0, 2).map(commit => ({
+					sha: commit.shortSha,
+					subject: commit.subject,
+					changedFileCount: commit.changedFiles.length,
+					topFiles: commit.changedFiles.slice(0, 4).map(file => this.formatPromptDashboardAiFileSummary(file)),
+				})),
+				review: {
+					provider: project.review.remote?.provider || null,
+					requestState: project.review.request?.state || null,
+					unsupportedReason: project.review.unsupportedReason || null,
+					error: project.review.error || '',
+				},
+				pipeline: project.pipeline ? {
+					provider: project.pipeline.provider,
+					state: project.pipeline.state,
+					totalChecks: pipelineChecks.length,
+					failingChecks,
+					runningChecks,
+					error: project.pipeline.error,
+				} : null,
+				parallelBranches: project.parallelBranches.slice(0, 3).map(branch => ({
+					name: branch.name,
+					ahead: branch.ahead,
+					behind: branch.behind,
+					affectedFileCount: branch.affectedFiles.length,
+					topFiles: branch.affectedFiles.slice(0, 4).map(file => this.formatPromptDashboardAiFileSummary(file)),
+					conflictCount: branch.potentialConflicts.length,
+					topConflicts: branch.potentialConflicts.slice(0, 5).map(item => item.path),
+				})),
+			};
+		});
 
 		const userPrompt = [
 			`Задача: ${input.promptTitle || 'Без названия'}`,
 			input.promptContent.trim() ? `Текст промпта:\n${input.promptContent.trim().slice(0, 4000)}` : '',
-			`Данные dashboard:\n${JSON.stringify(projectSummary, null, 2).slice(0, 24000)}`,
+			`Данные dashboard (сжатая выжимка):\n${JSON.stringify(projectSummary, null, 2).slice(0, 12000)}`,
 		].filter(Boolean).join('\n\n');
 
 		return this.chat(systemPrompt, userPrompt, fallback, 'prompt-dashboard-review', 'AiService.analyzePromptDashboardReview');
+	}
+
+	private formatPromptDashboardAiFileSummary(file: {
+		status: string;
+		path: string;
+		previousPath?: string;
+		additions?: number | null;
+		deletions?: number | null;
+		isBinary?: boolean;
+	}): string {
+		const rename = file.previousPath ? `${file.previousPath} -> ${file.path}` : file.path;
+		const binarySuffix = file.isBinary === true ? ' (bin)' : '';
+		const statsSuffix = typeof file.additions === 'number' && typeof file.deletions === 'number'
+			? ` (+${file.additions}/-${file.deletions})`
+			: '';
+		return `${file.status} ${rename}${statsSuffix}${binarySuffix}`;
 	}
 
 	async generateCodeMapAreaDescription(
@@ -778,10 +823,17 @@ export class AiService {
 	): Promise<string> {
 		const requestLabel = options?.requestLabel || 'generic-chat';
 		const callerMethod = options?.callerMethod || `AiService.${requestLabel}`;
+		const selectorCacheKey = this.getSelectorCacheKey(selector);
 		try {
 			const allowFreeCopilotFallback = options?.allowFreeCopilotFallback ?? true;
+			const cachedModel = this.getCachedSelectedModel(selector);
+			if (cachedModel) {
+				this.logAiRequest(`label=${requestLabel} result=model-cache-hit selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(cachedModel)}"`);
+				return this.chatWithModel(cachedModel, systemPrompt, userPrompt, fallback, requestLabel, selector, callerMethod);
+			}
 			const [model] = await vscode.lm.selectChatModels(selector);
 			if (!model) {
+				this.selectedModelCache.delete(selectorCacheKey);
 				if (!allowFreeCopilotFallback) {
 					this.logAiRequest(`label=${requestLabel} result=no-model selector="${this.formatSelectorForLog(selector)}" fallback=disabled`);
 					return fallback;
@@ -792,11 +844,14 @@ export class AiService {
 					this.logAiRequest(`label=${requestLabel} result=no-free-model selector="${this.formatSelectorForLog(selector)}" fallback=free-only`);
 					return fallback;
 				}
+				this.setCachedSelectedModel(selector, fallbackModel);
 				this.logAiRequest(`label=${requestLabel} result=free-fallback selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(fallbackModel)}"`);
 				return this.chatWithModel(fallbackModel, systemPrompt, userPrompt, fallback, requestLabel, selector, callerMethod);
 			}
+			this.setCachedSelectedModel(selector, model);
 			return this.chatWithModel(model, systemPrompt, userPrompt, fallback, requestLabel, selector, callerMethod);
 		} catch (err) {
+			this.selectedModelCache.delete(selectorCacheKey);
 			const message = err instanceof Error ? err.message : String(err);
 			this.logAiRequest(`label=${requestLabel} result=selector-error selector="${this.formatSelectorForLog(selector)}" error="${message}"`);
 			console.error('[PromptManager] AI error:', err);
@@ -814,13 +869,13 @@ export class AiService {
 		callerMethod: string,
 	): Promise<string> {
 		try {
-			this.logAiRequest(`label=${requestLabel} result=send-request selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(model)}"`);
-			await appendPromptAiLog({
+			this.logAiRequest(`label=${requestLabel} result=send-request selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(model)}" systemChars=${systemPrompt.length} userChars=${userPrompt.length}`);
+			void appendPromptAiLog({
 				kind: 'ai',
 				prompt: `SYSTEM: ${systemPrompt}\nUSER: ${userPrompt}`,
 				callerMethod,
 				model: this.getModelNameForPromptLog(model),
-			});
+			}).catch(() => undefined);
 			const messages = [
 				vscode.LanguageModelChatMessage.User(systemPrompt),
 				vscode.LanguageModelChatMessage.User(userPrompt),
@@ -832,10 +887,43 @@ export class AiService {
 			}
 			return result.trim() || fallback;
 		} catch (err) {
+			this.selectedModelCache.delete(this.getSelectorCacheKey(selector));
 			const message = err instanceof Error ? err.message : String(err);
 			this.logAiRequest(`label=${requestLabel} result=send-error selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(model)}" error="${message}"`);
 			return fallback;
 		}
+	}
+
+	private getSelectorCacheKey(selector: vscode.LanguageModelChatSelector): string {
+		/** Build a stable cache key for short-lived selected-model reuse. */
+		return JSON.stringify({
+			vendor: selector.vendor || '',
+			id: selector.id || '',
+			family: selector.family || '',
+			version: selector.version || '',
+		});
+	}
+
+	private getCachedSelectedModel(selector: vscode.LanguageModelChatSelector): vscode.LanguageModelChat | null {
+		/** Drop expired model entries before they can add stale-selector failures. */
+		const cacheKey = this.getSelectorCacheKey(selector);
+		const cached = this.selectedModelCache.get(cacheKey);
+		if (!cached) {
+			return null;
+		}
+		if (cached.expiresAtMs <= Date.now()) {
+			this.selectedModelCache.delete(cacheKey);
+			return null;
+		}
+		return cached.model;
+	}
+
+	private setCachedSelectedModel(selector: vscode.LanguageModelChatSelector, model: vscode.LanguageModelChat): void {
+		/** Keep the most recent selected model only for a short burst window. */
+		this.selectedModelCache.set(this.getSelectorCacheKey(selector), {
+			model,
+			expiresAtMs: Date.now() + AiService.SELECTED_MODEL_CACHE_TTL_MS,
+		});
 	}
 
 	private async selectFreeFallbackModel(

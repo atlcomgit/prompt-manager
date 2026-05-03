@@ -58,6 +58,18 @@ export interface StagedFileChange {
 	previousPath?: string;
 }
 
+/** Stores line-level Git stats used by dashboard file trees. */
+interface GitNumstatStats {
+	additions: number | null;
+	deletions: number | null;
+	isBinary: boolean;
+}
+
+/** Stores one parsed numstat row with a normalized display path. */
+interface GitNumstatEntry extends GitNumstatStats {
+	path: string;
+}
+
 export interface PreparedCommitProjectData {
 	project: string;
 	projectPath: string;
@@ -515,7 +527,25 @@ export class GitService {
 		}
 	}
 
-	private parseNumstatOutput(raw: string): { additions: number | null; deletions: number | null; isBinary: boolean } {
+	private parseNumstatLine(rawLine: string): GitNumstatEntry | null {
+		const parts = rawLine.trim().split('\t');
+		if (parts.length < 2) {
+			return null;
+		}
+
+		const additionsToken = (parts[0] || '').trim();
+		const deletionsToken = (parts[1] || '').trim();
+		const pathToken = parts.slice(2).join('\t').trim();
+		const isBinary = additionsToken === '-' || deletionsToken === '-';
+		return {
+			path: this.normalizeNumstatPath(pathToken),
+			additions: isBinary ? null : Number.parseInt(additionsToken || '0', 10) || 0,
+			deletions: isBinary ? null : Number.parseInt(deletionsToken || '0', 10) || 0,
+			isBinary,
+		};
+	}
+
+	private parseNumstatOutput(raw: string): GitNumstatStats {
 		const line = raw
 			.split(/\r?\n/)
 			.map(item => item.trim())
@@ -525,22 +555,56 @@ export class GitService {
 			return { additions: 0, deletions: 0, isBinary: false };
 		}
 
-		const parts = line.split('\t');
-		if (parts.length < 2) {
-			return { additions: 0, deletions: 0, isBinary: false };
+		const parsed = this.parseNumstatLine(line);
+		return parsed
+			? { additions: parsed.additions, deletions: parsed.deletions, isBinary: parsed.isBinary }
+			: { additions: 0, deletions: 0, isBinary: false };
+	}
+
+	private parseNumstatByPath(raw: string): Map<string, GitNumstatStats> {
+		const statsByPath = new Map<string, GitNumstatStats>();
+		for (const line of raw.split(/\r?\n/)) {
+			const parsed = this.parseNumstatLine(line);
+			if (!parsed?.path) {
+				continue;
+			}
+			statsByPath.set(parsed.path, {
+				additions: parsed.additions,
+				deletions: parsed.deletions,
+				isBinary: parsed.isBinary,
+			});
+		}
+		return statsByPath;
+	}
+
+	private normalizeNumstatPath(pathToken: string): string {
+		const trimmedPath = pathToken.trim();
+		const braceRename = trimmedPath.match(/^(.*)\{(.+) => (.+)\}(.*)$/);
+		if (braceRename) {
+			return `${braceRename[1] || ''}${braceRename[3] || ''}${braceRename[4] || ''}`.replace(/\/+/g, '/');
 		}
 
-		const additionsToken = (parts[0] || '').trim();
-		const deletionsToken = (parts[1] || '').trim();
-		if (additionsToken === '-' || deletionsToken === '-') {
-			return { additions: null, deletions: null, isBinary: true };
-		}
+		const arrowIndex = trimmedPath.lastIndexOf(' => ');
+		return arrowIndex >= 0 ? trimmedPath.slice(arrowIndex + 4).trim() : trimmedPath;
+	}
 
-		return {
-			additions: Number.parseInt(additionsToken || '0', 10) || 0,
-			deletions: Number.parseInt(deletionsToken || '0', 10) || 0,
-			isBinary: false,
-		};
+	private attachNumstatToChangedFile(
+		file: GitOverlayCommitChangedFile,
+		statsByPath: Map<string, GitNumstatStats>,
+	): GitOverlayCommitChangedFile {
+		const stats = statsByPath.get(file.path) || (file.previousPath ? statsByPath.get(file.previousPath) : undefined);
+		return stats ? { ...file, ...stats } : file;
+	}
+
+	private async getDiffNumstatByPath(projectPath: string, fromRef: string, toRef: string): Promise<Map<string, GitNumstatStats>> {
+		const stdout = await this.runGitFileCommandOptional(projectPath, [
+			'diff',
+			'--numstat',
+			'--find-renames',
+			fromRef,
+			toRef,
+		]);
+		return this.parseNumstatByPath(stdout);
 	}
 
 	private async resolveOverlayFileSize(projectPath: string, filePath: string, previousPath?: string): Promise<number> {
@@ -1625,15 +1689,27 @@ export class GitService {
 		if (!normalizedSha) {
 			return [];
 		}
-		const stdout = await this.runGitFileCommandOptional(projectPath, [
-			'show',
-			'--name-status',
-			'--find-renames',
-			'--diff-filter=ACDMR',
-			'--format=',
-			normalizedSha,
+		const [nameStatusOutput, numstatOutput] = await Promise.all([
+			this.runGitFileCommandOptional(projectPath, [
+				'show',
+				'--name-status',
+				'--find-renames',
+				'--diff-filter=ACDMR',
+				'--format=',
+				normalizedSha,
+			]),
+			this.runGitFileCommandOptional(projectPath, [
+				'show',
+				'--numstat',
+				'--find-renames',
+				'--diff-filter=ACDMR',
+				'--format=',
+				normalizedSha,
+			]),
 		]);
-		return this.parseStagedNameStatus(stdout);
+		const statsByPath = this.parseNumstatByPath(numstatOutput);
+		return this.parseStagedNameStatus(nameStatusOutput)
+			.map(file => this.attachNumstatToChangedFile(file, statsByPath));
 	}
 
 	async getCommitFilePatch(projectPath: string, sha: string, filePath: string): Promise<string> {
@@ -3342,10 +3418,13 @@ export class GitService {
 			'--format=%(refname:short)',
 			'refs/heads',
 		]);
+		const candidateLimit = Math.max(1, limit);
 		const candidateBranches = output
 			.split(/\r?\n/)
 			.map(line => line.trim())
 			.filter(branch => Boolean(branch) && !protectedBranches.has(branch))
+			// Bound expensive per-branch diff scans to the same number the widget can render.
+			.slice(0, candidateLimit)
 			;
 
 		const summaries = await Promise.all(candidateBranches.map(async (branch): Promise<GitOverlayParallelBranchSummary> => {
@@ -3357,17 +3436,23 @@ export class GitService {
 			]);
 			const { ahead, behind } = this.parseBranchRevisionCounts(countOutput);
 			const comparisonBaseRef = await this.getMergeBase(projectPath, normalizedBaseBranch, branch) || normalizedBaseBranch;
-			const currentFiles = (await this.getNameStatusDiff(projectPath, comparisonBaseRef, currentBranch || normalizedBaseBranch))
+			const [currentDiff, branchDiff, branchStats] = await Promise.all([
+				this.getNameStatusDiff(projectPath, comparisonBaseRef, currentBranch || normalizedBaseBranch),
+				this.getNameStatusDiff(projectPath, comparisonBaseRef, branch),
+				this.getDiffNumstatByPath(projectPath, comparisonBaseRef, branch),
+			]);
+			const currentFiles = currentDiff
 				.flatMap(entry => [entry.oldPath || '', entry.path])
 				.map(item => item.trim())
 				.filter(Boolean);
 			const currentFileSet = new Set(currentFiles);
-			const affectedFiles = (await this.getNameStatusDiff(projectPath, comparisonBaseRef, branch))
+			const affectedFiles = branchDiff
 				.map((entry) => ({
 					status: entry.status,
 					path: entry.path,
 					previousPath: entry.oldPath || undefined,
 				}))
+				.map(file => this.attachNumstatToChangedFile(file, branchStats))
 				.filter(file => Boolean(file.path));
 			const potentialConflicts = affectedFiles
 				.filter(file => currentFileSet.has(file.path) || Boolean(file.previousPath && currentFileSet.has(file.previousPath)))
@@ -3402,7 +3487,7 @@ export class GitService {
 				}
 				return String(right.lastCommit?.committedAt || '').localeCompare(String(left.lastCommit?.committedAt || ''));
 			})
-			.slice(0, Math.max(1, limit));
+			.slice(0, candidateLimit);
 	}
 
 	/** Догружает только branch metadata для уже известного project snapshot без change/review команд. */

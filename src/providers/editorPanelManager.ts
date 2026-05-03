@@ -87,6 +87,7 @@ import {
 	shouldApplySavedPromptToPanel,
 	shouldNotifyReservedArchiveRename,
 } from '../utils/promptSaveFeedback.js';
+import { resolveEffectiveProjectNames } from '../utils/projectScope.js';
 import {
 	buildSaveQueueKey,
 	findPendingSaveEntry,
@@ -120,6 +121,7 @@ const EDITOR_PANEL_VIEW_TYPE = 'promptManager.editor';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
 const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 600;
+const PROMPT_DASHBOARD_INITIAL_VISIBLE_REFRESH_GRACE_MS = 1500;
 const GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS = 250;
 const GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS = 250;
 const GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT = 4;
@@ -181,6 +183,12 @@ export class EditorPanelManager {
 	private reportEditorPanels = new Map<string, vscode.WebviewPanel>();
 	/** Панели prompt editor, созданные текущим extension host, для silent cleanup дублей. */
 	private promptEditorPanels = new Set<vscode.WebviewPanel>();
+	/** Debounces reactive dashboard project-widget refreshes per visible editor panel. */
+	private promptDashboardReactiveRefreshTimers = new Map<string, NodeJS.Timeout>();
+	/** Marks hidden prompt editors that must catch up on the next reveal. */
+	private promptDashboardPendingRefreshOnReveal = new Set<string>();
+	/** Skips the first visible dashboard refresh right after a prompt is opened or switched. */
+	private promptDashboardVisibleRefreshGraceUntilByPanel = new Map<string, number>();
 	/** Debounce cleanup вкладок, чтобы дождаться обновления VS Code tabGroups после reveal/create. */
 	private promptEditorTabCleanupTimer: NodeJS.Timeout | null = null;
 	private promptPlanByPanelKey = new Map<string, {
@@ -307,6 +315,18 @@ export class EditorPanelManager {
 	}
 
 	private setPanelPromptRef(panelKey: string, prompt: Prompt): void {
+		const previousPrompt = this.panelPromptRefs.get(panelKey);
+		const promptIdentityChanged = !previousPrompt
+			|| (previousPrompt.id || '').trim() !== (prompt.id || '').trim()
+			|| (previousPrompt.promptUuid || '').trim() !== (prompt.promptUuid || '').trim();
+		if (promptIdentityChanged) {
+			this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
+			this.promptDashboardVisibleRefreshGraceUntilByPanel.set(
+				panelKey,
+				Date.now() + PROMPT_DASHBOARD_INITIAL_VISIBLE_REFRESH_GRACE_MS,
+			);
+		}
+
 		this.panelPromptRefs.set(panelKey, prompt);
 		if (panelKey === SINGLE_EDITOR_PANEL_KEY) {
 			this.syncStartupEditorRestoreState();
@@ -3893,6 +3913,17 @@ export class EditorPanelManager {
 		session.refreshTimer = null;
 	}
 
+	/** Clears any queued dashboard auto-refresh for one editor panel. */
+	private clearPromptDashboardReactiveRefreshTimer(panelKey: string): void {
+		const timer = this.promptDashboardReactiveRefreshTimers.get(panelKey);
+		if (!timer) {
+			return;
+		}
+
+		clearTimeout(timer);
+		this.promptDashboardReactiveRefreshTimers.delete(panelKey);
+	}
+
 	private hasActiveGitOverlaySessions(): boolean {
 		for (const session of this.gitOverlaySessions.values()) {
 			if (session.active) {
@@ -3901,6 +3932,22 @@ export class EditorPanelManager {
 		}
 
 		return false;
+	}
+
+	/** Detects whether any prompt editor panel is currently visible on screen. */
+	private hasVisiblePromptEditorPanels(): boolean {
+		for (const panel of this.promptEditorPanels) {
+			if (panel.visible) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/** Reuses the same git watchers for overlay and dashboard consumers. */
+	private hasActiveGitReactiveConsumers(): boolean {
+		return this.hasActiveGitOverlaySessions() || this.hasVisiblePromptEditorPanels();
 	}
 
 	private disposeGitOverlayBuiltInRepositoryWatcher(repositoryRootPath: string): void {
@@ -3920,6 +3967,114 @@ export class EditorPanelManager {
 		}
 		this.gitOverlayBuiltInRepositoryDisposables.clear();
 		this.gitOverlayReactiveSourcesReady = null;
+	}
+
+	/** Checks whether a workspace change belongs to the prompt dashboard project scope. */
+	private doesPromptDashboardPathMatchPromptScope(prompt: Prompt, changedPath: string): boolean {
+		const workspacePaths = this.workspaceService.getWorkspaceFolderPaths();
+		const effectiveProjects = resolveEffectiveProjectNames(
+			prompt.projects || [],
+			this.workspaceService.getWorkspaceFolders(),
+		);
+		const normalizedChangedPath = path.resolve(changedPath);
+
+		for (const project of effectiveProjects) {
+			const projectRootPath = workspacePaths.get(project);
+			if (!projectRootPath) {
+				continue;
+			}
+			const normalizedProjectRootPath = path.resolve(projectRootPath);
+			if (
+				normalizedChangedPath === normalizedProjectRootPath
+				|| normalizedChangedPath.startsWith(`${normalizedProjectRootPath}${path.sep}`)
+			) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/** Ignore boot-time placeholder dashboard payloads once the host already knows the real prompt. */
+	private resolveDashboardPromptRequest(currentPrompt: Prompt, requestPrompt?: Prompt): Prompt {
+		if (!requestPrompt) {
+			return currentPrompt;
+		}
+
+		const currentPromptId = (currentPrompt.id || '').trim();
+		const requestPromptId = (requestPrompt.id || '').trim();
+		if (currentPromptId && !requestPromptId) {
+			return currentPrompt;
+		}
+
+		return requestPrompt;
+	}
+
+	/** Pushes a fresh dashboard projects widget into one visible prompt editor panel. */
+	private async refreshPromptDashboardProjectsForPanel(
+		panelKey: string,
+		panel: vscode.WebviewPanel,
+		prompt: Prompt,
+		mode: 'display' | 'details' | 'reactive-branches' = 'display',
+	): Promise<void> {
+		if (!panel.visible) {
+			return;
+		}
+
+		try {
+			await this.promptDashboardService.refreshProjectsWidget(
+				prompt,
+				(message) => {
+					void panel.webview.postMessage(message as ExtensionToWebviewMessage);
+				},
+				undefined,
+				mode,
+			);
+		} catch (error) {
+			this.hooksOutput.appendLine(`[dashboard-refresh] panel=${panelKey} failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	/** Schedules project-widget refreshes for visible prompt editors after git events. */
+	private schedulePromptDashboardAutoRefreshForVisiblePanels(reason: 'file' | 'git', changedPath?: string): void {
+		// Dashboard widgets should track Git state, not every workspace edit.
+		if (reason !== 'git') {
+			return;
+		}
+
+		for (const [panelKey, prompt] of this.panelPromptRefs.entries()) {
+			const panel = this.resolveOpenEditorPanel(panelKey);
+			if (!panel) {
+				continue;
+			}
+			if (changedPath && !this.doesPromptDashboardPathMatchPromptScope(prompt, changedPath)) {
+				continue;
+			}
+			if (!panel.visible) {
+				this.promptDashboardPendingRefreshOnReveal.add(panelKey);
+				continue;
+			}
+
+			this.clearPromptDashboardReactiveRefreshTimer(panelKey);
+			const timer = setTimeout(() => {
+				this.promptDashboardReactiveRefreshTimers.delete(panelKey);
+				const latestPrompt = this.panelPromptRefs.get(panelKey);
+				const latestPanel = this.resolveOpenEditorPanel(panelKey);
+				if (!latestPrompt || !latestPanel || !latestPanel.visible) {
+					return;
+				}
+
+				void this.refreshPromptDashboardProjectsForPanel(panelKey, latestPanel, latestPrompt, 'reactive-branches');
+			}, GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS + (reason === 'git' ? 50 : 0));
+			this.promptDashboardReactiveRefreshTimers.set(panelKey, timer);
+			this.unrefBackgroundTimer(timer);
+		}
+	}
+
+	/** Routes workspace git/file events into overlay and dashboard refresh paths. */
+	private scheduleGitReactiveAutoRefresh(reason: 'file' | 'git', changedPath?: string): void {
+		this.scheduleGitOverlayAutoRefreshForActiveSessions(reason, changedPath);
+		this.schedulePromptDashboardAutoRefreshForVisiblePanels(reason, changedPath);
 	}
 
 	private isGitOverlayMetadataPath(targetPath: string): boolean {
@@ -4004,13 +4159,13 @@ export class EditorPanelManager {
 
 		if (repository.onDidCommit) {
 			disposables.push(repository.onDidCommit(() => {
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('git', repository.rootUri.fsPath);
+				this.scheduleGitReactiveAutoRefresh('git', repository.rootUri.fsPath);
 			}));
 		}
 
 		if (repository.onDidCheckout) {
 			disposables.push(repository.onDidCheckout(() => {
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('git', repository.rootUri.fsPath);
+				this.scheduleGitReactiveAutoRefresh('git', repository.rootUri.fsPath);
 			}));
 		}
 
@@ -4021,7 +4176,7 @@ export class EditorPanelManager {
 	}
 
 	private async initializeGitOverlayReactiveSources(): Promise<void> {
-		if (!this.hasActiveGitOverlaySessions()) {
+		if (!this.hasActiveGitReactiveConsumers()) {
 			return;
 		}
 
@@ -4044,11 +4199,16 @@ export class EditorPanelManager {
 				new vscode.RelativePattern(workspaceRoot, '**/*'),
 			);
 			const handleWorkspaceFileChange = (uri: vscode.Uri) => {
+				// Only Git Overlay needs high-frequency file-level updates.
+				if (!this.hasActiveGitOverlaySessions()) {
+					return;
+				}
+
 				if (this.isGitOverlayMetadataPath(uri.fsPath)) {
 					return;
 				}
 
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('file', uri.fsPath);
+				this.scheduleGitReactiveAutoRefresh('file', uri.fsPath);
 			};
 
 			this.gitOverlayReactiveDisposables.push(
@@ -4063,7 +4223,7 @@ export class EditorPanelManager {
 					new vscode.RelativePattern(workspaceRoot, pattern),
 				);
 				const handleGitMetadataChange = () => {
-					this.scheduleGitOverlayAutoRefreshForActiveSessions('git', workspaceRoot);
+					this.scheduleGitReactiveAutoRefresh('git', workspaceRoot);
 				};
 
 				this.gitOverlayReactiveDisposables.push(
@@ -4075,7 +4235,9 @@ export class EditorPanelManager {
 			}
 		}
 
-		const gitApi = await this.gitService.getBuiltInGitApi();
+		const gitApi = typeof this.gitService.getBuiltInGitApi === 'function'
+			? await this.gitService.getBuiltInGitApi()
+			: null;
 		if (!gitApi) {
 			return;
 		}
@@ -4087,14 +4249,13 @@ export class EditorPanelManager {
 		if (gitApi.onDidOpenRepository) {
 			this.gitOverlayReactiveDisposables.push(gitApi.onDidOpenRepository((repository) => {
 				this.registerGitOverlayBuiltInRepositoryWatcher(repository);
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('git', repository.rootUri.fsPath);
 			}));
 		}
 
 		if (gitApi.onDidCloseRepository) {
 			this.gitOverlayReactiveDisposables.push(gitApi.onDidCloseRepository((repository) => {
 				this.disposeGitOverlayBuiltInRepositoryWatcher(repository.rootUri.fsPath);
-				this.scheduleGitOverlayAutoRefreshForActiveSessions('git', repository.rootUri.fsPath);
+				this.scheduleGitReactiveAutoRefresh('git', repository.rootUri.fsPath);
 			}));
 		}
 	}
@@ -4156,7 +4317,7 @@ export class EditorPanelManager {
 			session.refreshQueued = false;
 			session.queuedMode = null;
 			session.queuedBusyReason = null;
-			if (!this.hasActiveGitOverlaySessions()) {
+			if (!this.hasActiveGitReactiveConsumers()) {
 				this.disposeGitOverlayReactiveSources();
 			}
 			return;
@@ -4302,7 +4463,7 @@ export class EditorPanelManager {
 
 		this.clearGitOverlaySessionRefreshTimer(session);
 		this.gitOverlaySessions.delete(panelKey);
-		if (!this.hasActiveGitOverlaySessions()) {
+		if (!this.hasActiveGitReactiveConsumers()) {
 			this.disposeGitOverlayReactiveSources();
 		}
 	}
@@ -6708,7 +6869,7 @@ export class EditorPanelManager {
 
 		this.ensureContentEditorBinding(panelKey, prompt);
 		this.ensureReportEditorBinding(panelKey, prompt);
-		this.panelPromptRefs.set(panelKey, prompt);
+		this.setPanelPromptRef(panelKey, prompt);
 		this.panelDirtyFlags.set(panelKey, restoredUnsaved);
 		this.setPanelPromptConfigFieldChangedAt(panelKey, null);
 		this.panelLatestPromptSnapshots.set(panelKey, restoredUnsaved ? JSON.parse(JSON.stringify(prompt)) : null);
@@ -6799,6 +6960,7 @@ export class EditorPanelManager {
 		);
 
 		openPanels.set(panelKey, panel);
+		void this.ensureGitOverlayReactiveSources();
 		this.panelDirtySetters.set(panelKey, setPanelDirty);
 		this.syncStartupEditorRestoreState();
 		this.enforceSinglePromptEditorPage(panel);
@@ -6810,6 +6972,9 @@ export class EditorPanelManager {
 
 		// Handle panel close — autosave unsaved changes silently
 		panel.onDidDispose(async () => {
+			this.clearPromptDashboardReactiveRefreshTimer(panelKey);
+			this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
+			this.promptDashboardVisibleRefreshGraceUntilByPanel.delete(panelKey);
 			await this.promptVoiceService.cancel(panelKey);
 			const promptIdForWait = (this.panelPromptRefs.get(panelKey)?.id || '').trim();
 			await this.awaitPendingReportPersist(promptIdForWait);
@@ -6830,6 +6995,9 @@ export class EditorPanelManager {
 			this.silentClosePanels.delete(panel);
 			this.clearPromptPlanTracking(panelKey);
 			for (const key of linkedKeys) {
+				this.clearPromptDashboardReactiveRefreshTimer(key);
+				this.promptDashboardPendingRefreshOnReveal.delete(key);
+				this.promptDashboardVisibleRefreshGraceUntilByPanel.delete(key);
 				this.disposeGitOverlaySession(key);
 				openPanels.delete(key);
 				this.panelPromptRefs.delete(key);
@@ -6939,14 +7107,30 @@ export class EditorPanelManager {
 		panel.onDidChangeViewState((event) => {
 			if (!event.webviewPanel.visible) {
 				void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
+				this.clearPromptDashboardReactiveRefreshTimer(panelKey);
+				if (!this.hasActiveGitReactiveConsumers()) {
+					this.disposeGitOverlayReactiveSources();
+				}
 				return;
 			}
 
 			void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
 			void this.refreshPromptReportForPanel(panelKey, event.webviewPanel);
+			void this.ensureGitOverlayReactiveSources();
 			const promptRef = this.panelPromptRefs.get(panelKey);
+			const visibleRefreshGraceUntil = this.promptDashboardVisibleRefreshGraceUntilByPanel.get(panelKey) || 0;
+			const shouldSkipBootstrapDashboardRefresh = visibleRefreshGraceUntil > Date.now();
+			const shouldRefreshAfterHiddenChanges = this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
+			if (visibleRefreshGraceUntil > 0) {
+				this.promptDashboardVisibleRefreshGraceUntilByPanel.delete(panelKey);
+			}
 			if (promptRef) {
 				void this.syncPromptPlanSnapshot(panelKey, promptRef);
+				if (shouldRefreshAfterHiddenChanges) {
+					void this.refreshPromptDashboardProjectsForPanel(panelKey, event.webviewPanel, promptRef, 'reactive-branches');
+				} else if (!shouldSkipBootstrapDashboardRefresh) {
+					this.hooksOutput.appendLine(`[dashboard-refresh] panel=${panelKey} skipped visible refresh; no hidden git changes detected`);
+				}
 			}
 		});
 
@@ -8935,7 +9119,7 @@ export class EditorPanelManager {
 			}
 
 			case 'getPromptDashboardSnapshot': {
-				const dashboardPrompt = msg.prompt || currentPrompt;
+				const dashboardPrompt = this.resolveDashboardPromptRequest(currentPrompt, msg.prompt);
 				const snapshot = this.promptDashboardService.getSnapshot(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
@@ -8948,12 +9132,28 @@ export class EditorPanelManager {
 
 			case 'refreshPromptDashboard': {
 				const dashboardPrompt = msg.prompt || currentPrompt;
-				const snapshot = await this.promptDashboardService.refreshPrompt(
+				const snapshot = await this.promptDashboardService.refreshPromptSnapshot(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
 				);
 				postMessage({ type: 'promptDashboardSnapshot', snapshot, requestId: msg.requestId });
+				void this.promptDashboardService.analyzeParallelReview(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+				);
+				break;
+			}
+
+			case 'hydratePromptDashboardProjectsDetails': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				await this.promptDashboardService.refreshProjectsWidget(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+					'details',
+				);
 				break;
 			}
 
@@ -8965,12 +9165,18 @@ export class EditorPanelManager {
 				} else {
 					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
 				}
-				const snapshot = await this.promptDashboardService.refreshPrompt(
+				// Repaint the project widget first, then let AI review catch up without blocking Apply.
+				await this.promptDashboardService.refreshProjectsWidget(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+					'display',
+				);
+				void this.promptDashboardService.analyzeParallelReview(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
 				);
-				postMessage({ type: 'promptDashboardSnapshot', snapshot, requestId: msg.requestId });
 				break;
 			}
 
@@ -8982,12 +9188,18 @@ export class EditorPanelManager {
 				} else {
 					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
 				}
-				const snapshot = await this.promptDashboardService.refreshPrompt(
+				// Repaint the project widget first, then let AI review catch up without blocking Apply.
+				await this.promptDashboardService.refreshProjectsWidget(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+					'display',
+				);
+				void this.promptDashboardService.analyzeParallelReview(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
 				);
-				postMessage({ type: 'promptDashboardSnapshot', snapshot, requestId: msg.requestId });
 				break;
 			}
 
@@ -10023,6 +10235,13 @@ export class EditorPanelManager {
 			d.dispose();
 		}
 		this.chatTrackingDisposables.clear();
+		for (const timer of this.promptDashboardReactiveRefreshTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.promptDashboardReactiveRefreshTimers.clear();
+		this.promptDashboardPendingRefreshOnReveal.clear();
+		this.promptDashboardVisibleRefreshGraceUntilByPanel.clear();
+		this.disposeGitOverlayReactiveSources();
 		const editorPanelsToDispose = new Set([...openPanels.values(), ...this.promptEditorPanels]);
 		for (const panel of editorPanelsToDispose) {
 			panel.dispose();

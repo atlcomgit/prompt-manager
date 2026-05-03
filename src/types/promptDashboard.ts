@@ -53,6 +53,7 @@ export interface PromptDashboardBranchAction {
 
 export interface PromptDashboardRecentCommit extends GitOverlayCommit {
 	changedFiles: GitOverlayCommitChangedFile[];
+	changedFilesHydrated?: boolean;
 }
 
 export interface PromptDashboardProjectSummary {

@@ -38,24 +38,22 @@ import type {
   PromptCustomGroup,
   PromptStatus,
 } from '../../types/prompt';
-import type { GitOverlayActionKind, GitOverlayActionScope, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
-import type { PromptDashboardSnapshot, PromptDashboardWidgetSnapshot } from '../../types/promptDashboard';
 import {
   createDefaultEditorPromptViewState,
   createDefaultPrompt,
   normalizeEditorPromptViewState,
   PROMPT_EDITOR_SECTION_KEYS,
   shouldShowPromptPlanForStatus,
-} from '../../types/prompt';
-import { TimeTrackingService } from '../../services/timeTrackingService';
-import { appendRecognizedPromptText } from './voice/promptVoiceUtils';
-import { usePromptVoiceController } from './voice/usePromptVoiceController';
-import { getChangedLineIndexes } from '../../utils/planLineDiff.js';
+} from '../../types/prompt.js';
+import type { GitOverlayActionKind, GitOverlayActionScope, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
+import type { PromptDashboardAnalysisState, PromptDashboardProjectsData, PromptDashboardSnapshot, PromptDashboardWidgetSnapshot } from '../../types/promptDashboard';
 import {
   buildContextFileCardPlaceholder,
   dedupeContextFileReferences,
   normalizeContextFileReference,
 } from '../../utils/contextFiles.js';
+import { TimeTrackingService } from '../../services/timeTrackingService.js';
+import { getChangedLineIndexes } from '../../utils/planLineDiff.js';
 import { diffPromptConfigSyncFields, PROMPT_CONFIG_SYNC_FIELDS } from '../../utils/promptExternalSync.js';
 import { shouldApplyPromptAiEnrichmentState, shouldApplyPromptSaveResult } from '../../utils/promptSaveFeedback.js';
 import {
@@ -80,7 +78,9 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
-import { resolvePromptDashboardMode } from '../../utils/promptDashboard.js';
+import { preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldRequestPromptDashboardSnapshot } from '../../utils/promptDashboard.js';
+import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
+import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
 
 const vscode = getVsCodeApi();
 const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
@@ -431,7 +431,10 @@ export const EditorApp: React.FC = () => {
   const [pageWidth, setPageWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : EDITOR_FORM_SHELL_WIDTH_PX));
   const [promptDashboardSnapshot, setPromptDashboardSnapshot] = useState<PromptDashboardSnapshot | null>(null);
   const [promptDashboardBusyAction, setPromptDashboardBusyAction] = useState<string | null>(null);
+  const [promptDashboardRefreshVersion, setPromptDashboardRefreshVersion] = useState(0);
   const promptDashboardRequestIdRef = useRef('');
+  const promptDashboardSnapshotRef = useRef<PromptDashboardSnapshot | null>(null);
+  const lastPromptDashboardRequestFingerprintRef = useRef('');
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
   const [branchesResolved, setBranchesResolved] = useState(false);
   const [showBranches, setShowBranches] = useState(
@@ -614,6 +617,7 @@ export const EditorApp: React.FC = () => {
     timeSpentUntracked: prompt.timeSpentUntracked,
     model: prompt.model,
     updatedAt: prompt.updatedAt,
+    refreshVersion: promptDashboardRefreshVersion,
   }), [
     prompt.id,
     prompt.promptUuid,
@@ -630,6 +634,7 @@ export const EditorApp: React.FC = () => {
     prompt.timeSpentUntracked,
     prompt.model,
     prompt.updatedAt,
+    promptDashboardRefreshVersion,
   ]);
   const editorProgressMode = resolveEditorProgressMode({
     isSaving,
@@ -684,6 +689,10 @@ export const EditorApp: React.FC = () => {
   // Auto-save refs
   const promptRef = useRef<Prompt>(prompt);
   const isDirtyRef = useRef(false);
+
+  useEffect(() => {
+    promptDashboardSnapshotRef.current = promptDashboardSnapshot;
+  }, [promptDashboardSnapshot]);
   const isSavingRef = useRef(false);
   const isOpeningChatRef = useRef(false);
   const localReportDirtyRef = useRef(false);
@@ -2161,20 +2170,25 @@ export const EditorApp: React.FC = () => {
           if (reason === 'sync') {
             // Background sync (chat completion, recalc, status change) — merge only server-side fields, keep user edits
             skipNextPromptConfigTrackingRef.current = true;
-            setPrompt(prev => ({
-              ...prev,
-              chatSessionIds: msg.prompt.chatSessionIds ?? prev.chatSessionIds,
-              timeSpentImplementing: Math.max(msg.prompt.timeSpentImplementing || 0, prev.timeSpentImplementing || 0),
-              timeSpentOnTask: Math.max(msg.prompt.timeSpentOnTask || 0, prev.timeSpentOnTask || 0),
-              timeSpentUntracked: Math.max(msg.prompt.timeSpentUntracked || 0, prev.timeSpentUntracked || 0),
-              updatedAt: msg.prompt.updatedAt || prev.updatedAt,
-              status: msg.prompt.status || prev.status,
-              report: (prev.report || '').trim() ? prev.report : (msg.prompt.report || prev.report),
-            }));
+            setPrompt(prev => {
+              const mergedPrompt = {
+                ...prev,
+                chatSessionIds: msg.prompt.chatSessionIds ?? prev.chatSessionIds,
+                timeSpentImplementing: Math.max(msg.prompt.timeSpentImplementing || 0, prev.timeSpentImplementing || 0),
+                timeSpentOnTask: Math.max(msg.prompt.timeSpentOnTask || 0, prev.timeSpentOnTask || 0),
+                timeSpentUntracked: Math.max(msg.prompt.timeSpentUntracked || 0, prev.timeSpentUntracked || 0),
+                updatedAt: msg.prompt.updatedAt || prev.updatedAt,
+                status: msg.prompt.status || prev.status,
+                report: (prev.report || '').trim() ? prev.report : (msg.prompt.report || prev.report),
+              };
+              promptRef.current = mergedPrompt;
+              return mergedPrompt;
+            });
             // Don't touch isDirty — user's pending edits stay intact
             if ((msg.prompt.chatSessionIds || []).length > 0) {
               releaseStartChatPendingState();
             }
+            setPromptDashboardRefreshVersion(version => version + 1);
             requestPromptPlanState(msg.prompt.id);
             break;
           }
@@ -2192,6 +2206,7 @@ export const EditorApp: React.FC = () => {
               currentPromptIdRef.current = incomingPromptId;
             }
             setIsLoaded(true);
+            setPromptDashboardRefreshVersion(version => version + 1);
             requestPromptPlanState(msg.prompt.id);
             break;
           }
@@ -2219,6 +2234,7 @@ export const EditorApp: React.FC = () => {
             setIsGeneratingTitle(false);
             setIsGeneratingDescription(false);
             // Don't touch isDirty — user's pending edits stay intact
+            setPromptDashboardRefreshVersion(version => version + 1);
             requestPromptPlanState(msg.prompt.id);
             break;
           }
@@ -2273,6 +2289,7 @@ export const EditorApp: React.FC = () => {
             releaseStartChatPendingState();
             requestBackgroundImplementingTimeRefresh(msg.prompt);
           }
+          setPromptDashboardRefreshVersion(version => version + 1);
           requestPromptPlanState(msg.prompt.id);
         }
         break;
@@ -2392,6 +2409,7 @@ export const EditorApp: React.FC = () => {
             ...(nextTimePatch || {}),
           };
         });
+        setPromptDashboardRefreshVersion(version => version + 1);
         openedAtRef.current = Date.now();
         break;
       case 'reportContentUpdated':
@@ -3008,8 +3026,8 @@ export const EditorApp: React.FC = () => {
         if (msg.requestId && msg.requestId !== promptDashboardRequestIdRef.current) {
           break;
         }
+        const widget = msg.widget as PromptDashboardWidgetSnapshot<unknown> | null;
         setPromptDashboardSnapshot(prev => {
-          const widget = msg.widget as PromptDashboardWidgetSnapshot<unknown> | null;
           if (!prev || !widget || !widget.kind) {
             return prev;
           }
@@ -3019,22 +3037,74 @@ export const EditorApp: React.FC = () => {
           if ((msg.promptId || '') && prev.promptId && msg.promptId !== prev.promptId) {
             return prev;
           }
+          // Keep project-based widgets visually stable while the refreshed snapshot is still loading.
+          const nextWidget = widget.kind === 'projects'
+            ? preservePromptDashboardProjectsLoadingSnapshot(
+              prev.projects,
+              widget as PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>,
+            )
+            : widget;
           return {
             ...prev,
-            [widget.kind]: widget,
+            [nextWidget.kind]: nextWidget,
             generatedAt: new Date().toISOString(),
           } as PromptDashboardSnapshot;
         });
+        // Branch apply actions complete on the projects widget refresh, not on a full dashboard snapshot.
+        if (widget?.kind) {
+          setPromptDashboardBusyAction(previous => shouldClearPromptDashboardBusyActionFromWidget({
+            busyAction: previous,
+            widgetKind: widget.kind,
+            cacheStatus: widget.cache.status,
+          }) ? null : previous);
+        }
         break;
       case 'promptDashboardAnalysis':
-        if (msg.requestId && msg.requestId !== promptDashboardRequestIdRef.current) {
+        const currentDashboardSnapshot = promptDashboardSnapshotRef.current;
+        const currentAnalysis = currentDashboardSnapshot?.aiAnalysis?.data as PromptDashboardAnalysisState | null | undefined;
+        const shouldAcceptAnalysisMessage = shouldAcceptPromptDashboardAnalysisMessage({
+          activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+          messageRequestId: String(msg.requestId || ''),
+          currentPromptId: String(currentDashboardSnapshot?.promptId || ''),
+          currentPromptUuid: String(currentDashboardSnapshot?.promptUuid || ''),
+          messagePromptId: String(msg.promptId || ''),
+          messagePromptUuid: String(msg.promptUuid || ''),
+          currentAnalysisFingerprint: String(currentAnalysis?.inputFingerprint || ''),
+          messageAnalysisFingerprint: String(msg.analysis?.inputFingerprint || ''),
+          currentAnalysisStatus: currentAnalysis?.status,
+          messageAnalysisStatus: msg.analysis?.status,
+        });
+        if (!shouldAcceptAnalysisMessage) {
+          postEditorDebugLog('editor-dashboard', 'analysis.ignored-request-mismatch', {
+            activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+            requestId: String(msg.requestId || ''),
+            promptId: String(msg.promptId || ''),
+            promptUuid: String(msg.promptUuid || ''),
+            status: String(msg.analysis?.status || 'unknown'),
+            currentAnalysisStatus: String(currentAnalysis?.status || 'unknown'),
+            currentFingerprint: String(currentAnalysis?.inputFingerprint || ''),
+            messageFingerprint: String(msg.analysis?.inputFingerprint || ''),
+          });
           break;
         }
+        postEditorDebugLog('editor-dashboard', 'analysis.received', {
+          requestId: String(msg.requestId || ''),
+          promptId: String(msg.promptId || ''),
+          promptUuid: String(msg.promptUuid || ''),
+          status: String(msg.analysis?.status || 'unknown'),
+          hasError: Boolean(msg.analysis?.error),
+          contentLength: typeof msg.analysis?.content === 'string' ? msg.analysis.content.length : 0,
+          acceptReason: msg.requestId && msg.requestId !== promptDashboardRequestIdRef.current ? 'fingerprint-match' : 'request-match',
+          fingerprint: String(msg.analysis?.inputFingerprint || ''),
+        });
         setPromptDashboardSnapshot(prev => {
           if (!prev) {
             return prev;
           }
           if ((msg.promptUuid || '') && prev.promptUuid && msg.promptUuid !== prev.promptUuid) {
+            return prev;
+          }
+          if ((msg.promptId || '') && prev.promptId && msg.promptId !== prev.promptId) {
             return prev;
           }
           return {
@@ -3233,12 +3303,39 @@ export const EditorApp: React.FC = () => {
         promptUuid: String(prompt.promptUuid || ''),
       });
       promptDashboardRequestIdRef.current = '';
-      setPromptDashboardSnapshot(null);
+      setPromptDashboardBusyAction(null);
+      return;
+    }
+    if (!isLoaded) {
+      postEditorDebugLog('editor-dashboard', 'snapshot.skipped', {
+        reason: 'prompt-not-loaded',
+        mode: promptDashboardMode,
+        promptId: String(prompt.id || '__new__'),
+        promptUuid: String(prompt.promptUuid || ''),
+      });
+      promptDashboardRequestIdRef.current = '';
+      return;
+    }
+    if (!shouldRequestPromptDashboardSnapshot({
+      mode: promptDashboardMode,
+      isLoaded,
+      hasSnapshot: promptDashboardSnapshot !== null,
+      currentFingerprint: promptDashboardScopeFingerprint,
+      lastRequestedFingerprint: lastPromptDashboardRequestFingerprintRef.current,
+    })) {
+      postEditorDebugLog('editor-dashboard', 'snapshot.reused', {
+        mode: promptDashboardMode,
+        promptId: String(prompt.id || '__new__'),
+        promptUuid: String(prompt.promptUuid || ''),
+        fingerprint: promptDashboardScopeFingerprint,
+      });
+      promptDashboardRequestIdRef.current = '';
       setPromptDashboardBusyAction(null);
       return;
     }
     const requestId = `prompt-dashboard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     promptDashboardRequestIdRef.current = requestId;
+    lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
     setPromptDashboardBusyAction(null);
     postEditorDebugLog('editor-dashboard', 'snapshot.requested', {
       requestId,
@@ -3249,7 +3346,7 @@ export const EditorApp: React.FC = () => {
       promptBranch: String(prompt.branch || ''),
     });
     vscode.postMessage({ type: 'getPromptDashboardSnapshot', prompt, requestId });
-  }, [promptDashboardMode, promptDashboardScopeFingerprint]);
+  }, [isLoaded, promptDashboardMode, promptDashboardScopeFingerprint]);
 
   // Auto-expand branch list on first resolve if mismatch detected
   useEffect(() => {
@@ -3490,6 +3587,12 @@ export const EditorApp: React.FC = () => {
       !areTrackedBranchesByProjectEqual(normalizedTrackedBranchesByProject, currentTrackedBranchesByProject)
       || normalizedTrackedBranch !== currentTrackedBranch
     ) {
+      const nextPrompt = {
+        ...promptRef.current,
+        trackedBranch: normalizedTrackedBranch,
+        trackedBranchesByProject: normalizedTrackedBranchesByProject,
+      };
+      promptRef.current = nextPrompt;
       setPrompt(prev => ({
         ...prev,
         trackedBranch: normalizedTrackedBranch,
@@ -3575,6 +3678,15 @@ export const EditorApp: React.FC = () => {
     setPromptDashboardBusyAction('refresh');
     vscode.postMessage({ type: 'refreshPromptDashboard', prompt: promptRef.current, requestId });
   }, []);
+
+  const handlePromptDashboardHydrateProjectsDetails = useCallback(() => {
+    if (promptDashboardSnapshot?.projects.cache.status === 'loading') {
+      return;
+    }
+    const requestId = `prompt-dashboard-projects-details-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    promptDashboardRequestIdRef.current = requestId;
+    vscode.postMessage({ type: 'hydratePromptDashboardProjectsDetails', prompt: promptRef.current, requestId });
+  }, [promptDashboardSnapshot?.projects.cache.status]);
 
   const handlePromptDashboardOpenPrompt = useCallback((id: string, promptUuid?: string) => {
     vscode.postMessage({ type: 'openPrompt', id, promptUuid });
@@ -5976,6 +6088,7 @@ export const EditorApp: React.FC = () => {
         busyAction={promptDashboardBusyAction}
         mode={promptDashboardMode}
         onRefresh={handlePromptDashboardRefresh}
+        onHydrateProjectsDetails={handlePromptDashboardHydrateProjectsDetails}
         onOpenPrompt={handlePromptDashboardOpenPrompt}
         onSwitchBranch={handlePromptDashboardSwitchBranch}
         onSwitchBranches={handlePromptDashboardSwitchBranches}

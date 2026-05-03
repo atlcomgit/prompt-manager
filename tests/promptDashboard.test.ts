@@ -7,16 +7,51 @@ import {
 	buildPromptDashboardScopeKey,
 	createPromptDashboardWidgetSnapshot,
 	getPromptDashboardStatusProgress,
+	preservePromptDashboardProjectsLoadingSnapshot,
 	PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS,
 	resolvePromptDashboardCacheState,
 	resolvePromptDashboardMode,
+	shouldAcceptPromptDashboardAnalysisMessage,
+	shouldClearPromptDashboardBusyActionFromWidget,
+	shouldRequestPromptDashboardSnapshot,
 	splitPromptDashboardActivityByDay,
 } from '../src/utils/promptDashboard.js';
-import type { PromptDashboardPromptActivityItem, PromptDashboardScope } from '../src/types/promptDashboard.js';
+import type { PromptDashboardProjectSummary, PromptDashboardProjectsData, PromptDashboardPromptActivityItem, PromptDashboardScope } from '../src/types/promptDashboard.js';
 
 test('resolvePromptDashboardMode switches to full only when the right side can fit widgets', () => {
 	assert.equal(resolvePromptDashboardMode(1119, 840), 'compact');
 	assert.equal(resolvePromptDashboardMode(1120, 840), 'full');
+});
+
+test('shouldRequestPromptDashboardSnapshot reuses a matching snapshot after hidden or compact transitions', () => {
+	assert.equal(shouldRequestPromptDashboardSnapshot({
+		mode: 'compact',
+		isLoaded: true,
+		hasSnapshot: true,
+		currentFingerprint: 'same',
+		lastRequestedFingerprint: 'same',
+	}), false);
+	assert.equal(shouldRequestPromptDashboardSnapshot({
+		mode: 'full',
+		isLoaded: true,
+		hasSnapshot: true,
+		currentFingerprint: 'same',
+		lastRequestedFingerprint: 'same',
+	}), false);
+	assert.equal(shouldRequestPromptDashboardSnapshot({
+		mode: 'full',
+		isLoaded: true,
+		hasSnapshot: true,
+		currentFingerprint: 'next',
+		lastRequestedFingerprint: 'same',
+	}), true);
+	assert.equal(shouldRequestPromptDashboardSnapshot({
+		mode: 'full',
+		isLoaded: true,
+		hasSnapshot: false,
+		currentFingerprint: 'same',
+		lastRequestedFingerprint: 'same',
+	}), true);
 });
 
 test('resolvePromptDashboardCacheState marks cached widgets fresh until ttl expires', () => {
@@ -86,6 +121,117 @@ test('createPromptDashboardWidgetSnapshot keeps placeholder cache explicit', () 
 	assert.equal(snapshot.kind, 'projects');
 	assert.equal(snapshot.cache.status, 'idle');
 	assert.equal(snapshot.cache.source, 'placeholder');
+});
+
+test('shouldClearPromptDashboardBusyActionFromWidget waits for a finished projects refresh', () => {
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'switch-project:api',
+		widgetKind: 'projects',
+		cacheStatus: 'loading',
+	}), false);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'switch-project:api',
+		widgetKind: 'projects',
+		cacheStatus: 'fresh',
+	}), true);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'refresh',
+		widgetKind: 'projects',
+		cacheStatus: 'fresh',
+	}), false);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'preset:prompt',
+		widgetKind: 'status',
+		cacheStatus: 'fresh',
+	}), false);
+});
+
+test('preservePromptDashboardProjectsLoadingSnapshot keeps previous rows during loading refresh', () => {
+	const createProject = (project: string): PromptDashboardProjectSummary => ({
+		project,
+		repositoryPath: `/workspace/${project}`,
+		available: true,
+		error: '',
+		currentBranch: 'main',
+		promptBranch: 'feature/task-1',
+		trackedBranch: 'main',
+		dirty: false,
+		hasConflicts: false,
+		ahead: 0,
+		behind: 0,
+		branches: [],
+		branchActions: [],
+		recentCommits: [],
+		review: { remote: null, request: null, error: '', setupAction: null, titlePrefix: '', unsupportedReason: null },
+		pipeline: null,
+		parallelBranches: [],
+		conflictFiles: [],
+	});
+	const previousWidget = createPromptDashboardWidgetSnapshot('projects', {
+		projects: [createProject('api')],
+	} satisfies PromptDashboardProjectsData);
+	const loadingWidget = createPromptDashboardWidgetSnapshot('projects', {
+		projects: [],
+	} satisfies PromptDashboardProjectsData, {
+		status: 'loading',
+		source: 'refresh',
+	});
+	const readyWidget = createPromptDashboardWidgetSnapshot('projects', {
+		projects: [createProject('web')],
+	} satisfies PromptDashboardProjectsData, {
+		status: 'fresh',
+		source: 'refresh',
+	});
+
+	assert.deepEqual(
+		preservePromptDashboardProjectsLoadingSnapshot(previousWidget, loadingWidget).data.projects,
+		previousWidget.data.projects,
+	);
+	assert.deepEqual(
+		preservePromptDashboardProjectsLoadingSnapshot(previousWidget, readyWidget).data.projects,
+		readyWidget.data.projects,
+	);
+});
+
+test('shouldAcceptPromptDashboardAnalysisMessage accepts same-fingerprint completion after a newer snapshot request', () => {
+	assert.equal(shouldAcceptPromptDashboardAnalysisMessage({
+		activeRequestId: 'request-new',
+		messageRequestId: 'request-old',
+		currentPromptId: 'task-1',
+		currentPromptUuid: 'uuid-1',
+		messagePromptId: 'task-1',
+		messagePromptUuid: 'uuid-1',
+		currentAnalysisFingerprint: 'fp-1',
+		messageAnalysisFingerprint: 'fp-1',
+		currentAnalysisStatus: 'running',
+		messageAnalysisStatus: 'completed',
+	}), true);
+
+	assert.equal(shouldAcceptPromptDashboardAnalysisMessage({
+		activeRequestId: 'request-new',
+		messageRequestId: 'request-old',
+		currentPromptId: 'task-1',
+		currentPromptUuid: 'uuid-1',
+		messagePromptId: 'task-1',
+		messagePromptUuid: 'uuid-1',
+		currentAnalysisFingerprint: 'fp-current',
+		messageAnalysisFingerprint: 'fp-old',
+		currentAnalysisStatus: 'running',
+		messageAnalysisStatus: 'completed',
+	}), false);
+
+	assert.equal(shouldAcceptPromptDashboardAnalysisMessage({
+		activeRequestId: 'request-new',
+		messageRequestId: 'request-old',
+		currentPromptId: 'task-1',
+		currentPromptUuid: 'uuid-1',
+		messagePromptId: 'task-1',
+		messagePromptUuid: 'uuid-1',
+		currentAnalysisFingerprint: 'fp-1',
+		messageAnalysisFingerprint: 'fp-1',
+		currentAnalysisStatus: 'completed',
+		messageAnalysisStatus: 'running',
+	}), false);
 });
 
 test('buildPromptDashboardAnalysisFingerprint changes when prompt inputs change', () => {

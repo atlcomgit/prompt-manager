@@ -4,6 +4,7 @@ import type { GitService } from './gitService.js';
 import type { StorageService } from './storageService.js';
 import type { WorkspaceService } from './workspaceService.js';
 import type { Prompt, PromptConfig } from '../types/prompt.js';
+import type { GitOverlayProjectSnapshot } from '../types/git.js';
 import type {
 	PromptDashboardAnalysisState,
 	PromptDashboardPromptActivityData,
@@ -38,6 +39,8 @@ interface DashboardCacheEntry<TData> {
 	error?: string;
 }
 
+type PromptDashboardProjectsRefreshMode = 'display' | 'details' | 'analysis' | 'reactive-branches';
+
 type DashboardPostMessage = (message: unknown) => void;
 
 /** Signals that background widget work no longer matches the active prompt scope. */
@@ -50,8 +53,12 @@ class PromptDashboardStaleScopeError extends Error {
 
 export class PromptDashboardService implements vscode.Disposable {
 	private static readonly CACHE_TTL_MS = PROMPT_DASHBOARD_WARM_INTERVAL_MS;
-	private static readonly PROJECT_CONCURRENCY = 3;
-	private static readonly AUTO_REFRESH_DELAY_MS = 650;
+	private static readonly PROJECT_CONCURRENCY = 1;
+	private static readonly AUTO_REFRESH_DELAY_MS = 1200;
+	/** Show a local review preview before a slow LM response leaves the widget blank for too long. */
+	private static readonly ANALYSIS_PREVIEW_DELAY_MS = 4000;
+	private static readonly RECENT_COMMIT_LIMIT = 2;
+	private static readonly PARALLEL_BRANCH_LIMIT = 8;
 
 	private readonly cache = new Map<string, DashboardCacheEntry<unknown>>();
 	private readonly sharedProjectsCache = new Map<string, DashboardCacheEntry<PromptDashboardProjectsData>>();
@@ -98,7 +105,16 @@ export class PromptDashboardService implements vscode.Disposable {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
 		const snapshot = this.buildSnapshotFromCache(scope, prompt);
-		this.scheduleAutoRefresh(scope, postMessage, { force: forceRefresh, requestId, prompt, includeAiAnalysis: true });
+		// Initial open should avoid auto-running AI review on the prompt-open critical path.
+		this.scheduleAutoRefresh(scope, postMessage, {
+			force: forceRefresh,
+			requestId,
+			prompt,
+			includeAiAnalysis: false,
+			ensureBackgroundAiAnalysis: true,
+			analysisReason: 'initial-auto-refresh',
+			projectsMode: 'display',
+		});
 		return snapshot;
 	}
 
@@ -106,8 +122,42 @@ export class PromptDashboardService implements vscode.Disposable {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
 		this.cancelScheduledAutoRefresh('manual-refresh', scope, requestId);
-		await this.refreshScope(scope, postMessage, { force: true, requestId, prompt, includeAiAnalysis: true });
+		await this.refreshScope(scope, postMessage, {
+			force: true,
+			requestId,
+			prompt,
+			includeAiAnalysis: true,
+			projectsMode: 'analysis',
+		});
 		return this.buildSnapshotFromCache(scope, prompt);
+	}
+
+	/** Refreshes visible dashboard widgets without blocking on the follow-up AI review pass. */
+	async refreshPromptSnapshot(prompt: Prompt, postMessage?: DashboardPostMessage, requestId?: string): Promise<PromptDashboardSnapshot> {
+		const scope = this.createScope(prompt);
+		this.activeScope = scope;
+		this.cancelScheduledAutoRefresh('manual-refresh-snapshot', scope, requestId);
+		await this.refreshScope(scope, postMessage, {
+			force: true,
+			requestId,
+			prompt,
+			includeAiAnalysis: false,
+			projectsMode: 'display',
+		});
+		return this.buildSnapshotFromCache(scope, prompt);
+	}
+
+	/** Refreshes only Git-backed project widgets after external repo changes. */
+	async refreshProjectsWidget(
+		prompt: Prompt,
+		postMessage?: DashboardPostMessage,
+		requestId?: string,
+		mode: PromptDashboardProjectsRefreshMode = 'display',
+	): Promise<PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>> {
+		const scope = this.createScope(prompt);
+		this.activeScope = scope;
+		await this.refreshWidget(scope, 'projects', postMessage, { force: true, requestId, prompt, projectsMode: mode });
+		return this.buildProjectsWidgetFromCache(scope);
 	}
 
 	async switchProjectBranch(prompt: Prompt, project: string, branch: string): Promise<{ success: boolean; errors: string[] }> {
@@ -184,8 +234,109 @@ export class PromptDashboardService implements vscode.Disposable {
 	async analyzeParallelReview(prompt: Prompt, postMessage?: DashboardPostMessage, requestId?: string): Promise<PromptDashboardAnalysisState> {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
-		await this.refreshWidget(scope, 'projects', postMessage, { force: false, requestId, prompt });
+		// Keep the visible projects widget stable while AI refreshes deeper Git context in the background.
+		await this.refreshWidget(scope, 'projects', undefined, {
+			force: true,
+			requestId,
+			prompt,
+			projectsMode: 'analysis',
+		});
 		return this.refreshAnalysis(scope, prompt, postMessage, requestId, true);
+	}
+
+	private startBackgroundAnalysisIfNeeded(
+		scope: PromptDashboardScope,
+		prompt: Prompt,
+		postMessage?: DashboardPostMessage,
+		requestId?: string,
+		reason: string = 'auto-refresh',
+	): void {
+		const scopeKey = buildPromptDashboardScopeKey(scope);
+		if (!this.isScopeActive(scope)) {
+			this.logDashboardPerf('analysis.autostart.skipped', {
+				promptId: scope.promptId,
+				requestId: requestId || '',
+				scopeKey,
+				reason,
+				skipReason: 'inactive-scope',
+			});
+			return;
+		}
+
+		const projectsData = this.getProjectsDataForScope(scope);
+		const projectMetrics = this.summarizeAnalysisProjects(projectsData.projects);
+		const cached = this.getCachedData<PromptDashboardAnalysisState | null>(scope, 'aiAnalysis');
+		const inputFingerprint = buildPromptDashboardAnalysisFingerprint({
+			promptTitle: prompt.title,
+			promptContent: prompt.content || '',
+			promptBranch: scope.promptBranch,
+			projects: projectsData.projects,
+		});
+		const shared = this.getSharedAnalysis(inputFingerprint);
+		const cachedStatus = cached?.status || 'none';
+		const sharedStatus = shared?.status || 'none';
+		if (projectsData.projects.length === 0) {
+			this.logDashboardPerf('analysis.autostart.skipped', {
+				promptId: scope.promptId,
+				requestId: requestId || '',
+				scopeKey,
+				reason,
+				skipReason: 'no-projects',
+				cachedStatus,
+				sharedStatus,
+				inputFingerprint,
+				...projectMetrics,
+			});
+			return;
+		}
+
+		if ((cached && cached.status !== 'idle') || (shared && shared.status !== 'idle')) {
+			this.logDashboardPerf('analysis.autostart.skipped', {
+				promptId: scope.promptId,
+				requestId: requestId || '',
+				scopeKey,
+				reason,
+				skipReason: 'already-available',
+				cachedStatus,
+				sharedStatus,
+				inputFingerprint,
+				...projectMetrics,
+			});
+			return;
+		}
+
+		const startedAtMs = Date.now();
+		this.logDashboardPerf('analysis.autostart.queued', {
+			promptId: scope.promptId,
+			requestId: requestId || '',
+			scopeKey,
+			reason,
+			cachedStatus,
+			sharedStatus,
+			inputFingerprint,
+			...projectMetrics,
+		});
+		void this.analyzeParallelReview(prompt, postMessage, requestId)
+			.then((result) => {
+				this.logDashboardPerf('analysis.autostart.completed', {
+					promptId: scope.promptId,
+					requestId: requestId || '',
+					scopeKey,
+					reason,
+					status: result.status,
+					durationMs: Date.now() - startedAtMs,
+				});
+			})
+			.catch((error) => {
+				this.logDashboardPerf('analysis.autostart.failed', {
+					promptId: scope.promptId,
+					requestId: requestId || '',
+					scopeKey,
+					reason,
+					durationMs: Date.now() - startedAtMs,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 	}
 
 	private async refreshAnalysis(
@@ -213,6 +364,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 
 		const projectsData = this.getProjectsDataForScope(scope);
+		const projectMetrics = this.summarizeAnalysisProjects(projectsData.projects);
 		const inputFingerprint = buildPromptDashboardAnalysisFingerprint({
 			promptTitle: prompt.title,
 			promptContent: prompt.content || '',
@@ -220,12 +372,36 @@ export class PromptDashboardService implements vscode.Disposable {
 			projects: projectsData.projects,
 		});
 		const cached = this.getCachedData<PromptDashboardAnalysisState | null>(scope, 'aiAnalysis');
+		const sharedCached = this.getSharedAnalysis(inputFingerprint);
+		this.logDashboardPerf('analysis.requested', {
+			promptId: scope.promptId,
+			requestId: requestId || '',
+			scopeKey,
+			force,
+			inputFingerprint,
+			cachedStatus: cached?.status || 'none',
+			sharedStatus: sharedCached?.status || 'none',
+			...projectMetrics,
+		});
 		if (!force && cached?.inputFingerprint === inputFingerprint && cached.status !== 'idle') {
+			this.logDashboardPerf('analysis.reused-scope-cache', {
+				promptId: scope.promptId,
+				requestId: requestId || '',
+				scopeKey,
+				inputFingerprint,
+				status: cached.status,
+			});
 			return cached;
 		}
 
-		const sharedCached = this.getSharedAnalysis(inputFingerprint);
 		if (!force && sharedCached && sharedCached.status !== 'idle') {
+			this.logDashboardPerf('analysis.reused-shared-cache', {
+				promptId: scope.promptId,
+				requestId: requestId || '',
+				scopeKey,
+				inputFingerprint,
+				status: sharedCached.status,
+			});
 			this.setCache(scope, 'aiAnalysis', sharedCached, sharedCached.status === 'error' ? sharedCached.error : undefined);
 			this.postAnalysis(postMessage, prompt, sharedCached, requestId);
 			return sharedCached;
@@ -234,6 +410,12 @@ export class PromptDashboardService implements vscode.Disposable {
 		const analysisKey = inputFingerprint;
 		const existing = this.analysisInFlight.get(analysisKey);
 		if (existing) {
+			this.logDashboardPerf('analysis.waiting-in-flight', {
+				promptId: scope.promptId,
+				requestId: requestId || '',
+				scopeKey,
+				inputFingerprint,
+			});
 			return existing;
 		}
 
@@ -248,6 +430,44 @@ export class PromptDashboardService implements vscode.Disposable {
 		this.setSharedAnalysis(inputFingerprint, loading);
 		this.postAnalysis(postMessage, prompt, loading, requestId);
 		const analysisStartedAtMs = Date.now();
+		const previewContent = this.buildPromptDashboardAnalysisPreview(projectsData.projects);
+		let previewTimer: NodeJS.Timeout | null = null;
+		if (postMessage && previewContent) {
+			previewTimer = setTimeout(() => {
+				if (!this.isScopeActive(scope)) {
+					return;
+				}
+				const current = this.getCachedData<PromptDashboardAnalysisState | null>(scope, 'aiAnalysis');
+				if (!current || current.status !== 'running' || current.inputFingerprint !== inputFingerprint || current.content.trim()) {
+					return;
+				}
+				const previewState: PromptDashboardAnalysisState = {
+					...current,
+					content: previewContent,
+					updatedAt: new Date().toISOString(),
+				};
+				this.setCache(scope, 'aiAnalysis', previewState);
+				this.setSharedAnalysis(inputFingerprint, previewState);
+				this.postAnalysis(postMessage, prompt, previewState, requestId);
+				this.logDashboardPerf('analysis.preview-posted', {
+					promptId: scope.promptId,
+					requestId: requestId || '',
+					scopeKey,
+					inputFingerprint,
+					delayMs: this.resolvePromptDashboardAnalysisPreviewDelayMs(),
+					contentLength: previewContent.length,
+				});
+			}, this.resolvePromptDashboardAnalysisPreviewDelayMs());
+			previewTimer.unref?.();
+		}
+		this.logDashboardPerf('analysis.started', {
+			promptId: scope.promptId,
+			requestId: requestId || '',
+			scopeKey,
+			force,
+			inputFingerprint,
+			...projectMetrics,
+		});
 
 		const task = (async () => {
 			try {
@@ -276,6 +496,14 @@ export class PromptDashboardService implements vscode.Disposable {
 				}
 				this.setCache(scope, 'aiAnalysis', completed);
 				this.postAnalysis(postMessage, prompt, completed, requestId);
+				this.logDashboardPerf('analysis.completed', {
+					promptId: scope.promptId,
+					requestId: requestId || '',
+					scopeKey,
+					inputFingerprint,
+					durationMs: Date.now() - analysisStartedAtMs,
+					contentLength: content.length,
+				});
 				return completed;
 			} catch (error) {
 				if (error instanceof PromptDashboardStaleScopeError) {
@@ -310,6 +538,14 @@ export class PromptDashboardService implements vscode.Disposable {
 				this.setCache(scope, 'aiAnalysis', failed);
 				this.setSharedAnalysis(inputFingerprint, failed, failed.error);
 				this.postAnalysis(postMessage, prompt, failed, requestId);
+				this.logDashboardPerf('analysis.failed', {
+					promptId: scope.promptId,
+					requestId: requestId || '',
+					scopeKey,
+					inputFingerprint,
+					durationMs: Date.now() - analysisStartedAtMs,
+					error: failed.error,
+				});
 				return failed;
 			}
 		})();
@@ -317,6 +553,9 @@ export class PromptDashboardService implements vscode.Disposable {
 		try {
 			return await task;
 		} finally {
+			if (previewTimer) {
+				clearTimeout(previewTimer);
+			}
 			this.analysisInFlight.delete(analysisKey);
 		}
 	}
@@ -349,10 +588,26 @@ export class PromptDashboardService implements vscode.Disposable {
 			generatedAt: new Date().toISOString(),
 			scopeKey: buildPromptDashboardScopeKey(scope),
 			activity: this.buildWidgetFromCache(scope, 'activity', this.emptyActivity()),
-			status: this.buildWidgetFromCache(scope, 'status', this.statusFromPrompt(prompt)),
+			status: this.buildStatusWidgetFromPrompt(scope, prompt),
 			projects,
 			aiAnalysis: analysis,
 		};
+	}
+
+	/** Keeps the status widget data tied to the live prompt while reusing cache metadata. */
+	private buildStatusWidgetFromPrompt(
+		scope: PromptDashboardScope,
+		prompt: Prompt,
+	): PromptDashboardWidgetSnapshot<PromptDashboardStatusData> {
+		const cached = this.getCachedEntry<PromptDashboardStatusData>(scope, 'status');
+		const data = this.statusFromPrompt(prompt);
+		if (!cached) {
+			return createPromptDashboardWidgetSnapshot('status', data);
+		}
+		const cache = cached.error
+			? { ...resolvePromptDashboardCacheState(cached.updatedAtMs, PromptDashboardService.CACHE_TTL_MS), status: 'error' as const, error: cached.error }
+			: resolvePromptDashboardCacheState(cached.updatedAtMs, PromptDashboardService.CACHE_TTL_MS);
+		return createPromptDashboardWidgetSnapshot('status', data, cache);
 	}
 
 	private buildProjectsWidgetFromCache(scope: PromptDashboardScope): PromptDashboardWidgetSnapshot<PromptDashboardProjectsData> {
@@ -478,7 +733,15 @@ export class PromptDashboardService implements vscode.Disposable {
 	private scheduleAutoRefresh(
 		scope: PromptDashboardScope,
 		postMessage?: DashboardPostMessage,
-		options?: { force?: boolean; requestId?: string; prompt?: Prompt; includeAiAnalysis?: boolean },
+		options?: {
+			force?: boolean;
+			requestId?: string;
+			prompt?: Prompt;
+			includeAiAnalysis?: boolean;
+			ensureBackgroundAiAnalysis?: boolean;
+			analysisReason?: string;
+			projectsMode?: PromptDashboardProjectsRefreshMode;
+		},
 	): void {
 		const scopeKey = buildPromptDashboardScopeKey(scope);
 		const delayMs = options?.force ? 0 : PromptDashboardService.AUTO_REFRESH_DELAY_MS;
@@ -590,7 +853,15 @@ export class PromptDashboardService implements vscode.Disposable {
 	private async refreshScope(
 		scope: PromptDashboardScope,
 		postMessage?: DashboardPostMessage,
-		options?: { force?: boolean; requestId?: string; prompt?: Prompt; includeAiAnalysis?: boolean },
+		options?: {
+			force?: boolean;
+			requestId?: string;
+			prompt?: Prompt;
+			includeAiAnalysis?: boolean;
+			ensureBackgroundAiAnalysis?: boolean;
+			analysisReason?: string;
+			projectsMode?: PromptDashboardProjectsRefreshMode;
+		},
 	): Promise<void> {
 		const scopeKey = buildPromptDashboardScopeKey(scope);
 		const widgets: PromptDashboardWidgetKind[] = ['activity', 'status', 'projects'];
@@ -605,6 +876,16 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 		if (options?.includeAiAnalysis && options.prompt) {
 			await this.refreshAnalysis(scope, options.prompt, postMessage, options.requestId, false);
+			return;
+		}
+		if (options?.ensureBackgroundAiAnalysis && options.prompt) {
+			this.startBackgroundAnalysisIfNeeded(
+				scope,
+				options.prompt,
+				postMessage,
+				options.requestId,
+				options.analysisReason || 'auto-refresh',
+			);
 		}
 	}
 
@@ -612,7 +893,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		scope: PromptDashboardScope,
 		widget: PromptDashboardWidgetKind,
 		postMessage?: DashboardPostMessage,
-		options?: { force?: boolean; requestId?: string; prompt?: Prompt },
+		options?: { force?: boolean; requestId?: string; prompt?: Prompt; projectsMode?: PromptDashboardProjectsRefreshMode },
 	): Promise<void> {
 		const widgetStartedAtMs = Date.now();
 		const cacheKey = buildPromptDashboardWidgetCacheKey(scope, widget);
@@ -630,7 +911,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				return;
 			}
 		}
-		if (!options?.force && cached && Date.now() - cached.updatedAtMs < PromptDashboardService.CACHE_TTL_MS) {
+		if (!options?.force && widget !== 'status' && cached && Date.now() - cached.updatedAtMs < PromptDashboardService.CACHE_TTL_MS) {
 			this.logDashboardPerf('widget.skipped-fresh-cache', {
 				widget,
 				promptId: scope.promptId,
@@ -668,7 +949,7 @@ export class PromptDashboardService implements vscode.Disposable {
 
 		const task = (async () => {
 			try {
-				const data = await this.loadWidgetData(scope, widget, options?.prompt);
+				const data = await this.loadWidgetData(scope, widget, options?.prompt, options?.projectsMode);
 				this.ensureScopeActive(scope);
 				this.setCache(scope, widget, data);
 				const snapshot = this.buildWidgetFromCache(scope, widget, data);
@@ -728,11 +1009,16 @@ export class PromptDashboardService implements vscode.Disposable {
 		});
 	}
 
-	private async loadWidgetData(scope: PromptDashboardScope, widget: PromptDashboardWidgetKind, prompt?: Prompt): Promise<unknown> {
+	private async loadWidgetData(
+		scope: PromptDashboardScope,
+		widget: PromptDashboardWidgetKind,
+		prompt?: Prompt,
+		projectsMode: PromptDashboardProjectsRefreshMode = 'display',
+	): Promise<unknown> {
 		switch (widget) {
 			case 'activity': return this.loadActivityData();
 			case 'status': return this.loadStatusData(scope, prompt);
-			case 'projects': return this.loadProjectsData(scope);
+			case 'projects': return this.loadProjectsData(scope, projectsMode);
 			case 'aiAnalysis': return this.getCachedData<PromptDashboardAnalysisState | null>(scope, 'aiAnalysis');
 			default: return null;
 		}
@@ -863,10 +1149,19 @@ export class PromptDashboardService implements vscode.Disposable {
 		return `${previousDayKey.slice(8, 10)}.${previousDayKey.slice(5, 7)}`;
 	}
 
-	private async loadProjectsData(scope: PromptDashboardScope): Promise<PromptDashboardProjectsData> {
+	private async loadProjectsData(
+		scope: PromptDashboardScope,
+		mode: PromptDashboardProjectsRefreshMode = 'display',
+	): Promise<PromptDashboardProjectsData> {
 		const paths = this.workspaceService.getWorkspaceFolderPaths();
 		const projectNames = resolveEffectiveProjectNames(scope.projectNames, Array.from(paths.keys()));
 		const trackedBranches = this.resolveTrackedBranches(scope, projectNames);
+		const lightReactiveRefresh = mode === 'reactive-branches';
+		const includeExpandedDetails = mode === 'analysis' || mode === 'details';
+		const includePipeline = mode === 'analysis';
+		const cachedProjectsByName = new Map(
+			this.getProjectsDataForScope(scope).projects.map(project => [project.project, project] as const),
+		);
 		this.ensureScopeActive(scope);
 		const snapshot = await this.gitService.getGitOverlaySnapshot(
 			paths,
@@ -875,10 +1170,11 @@ export class PromptDashboardService implements vscode.Disposable {
 			trackedBranches,
 			{
 				detailLevel: 'full',
-				includeChangeDetails: true,
+				// Dashboard widgets only need dirty/conflict membership, not per-file diff enrichment.
+				includeChangeDetails: false,
 				includeBranchDetails: true,
-				includeReviewState: true,
-				includeRecentCommits: true,
+				includeReviewState: !lightReactiveRefresh,
+				includeRecentCommits: !lightReactiveRefresh,
 				recentCommitsLimit: 2,
 			},
 		);
@@ -887,20 +1183,34 @@ export class PromptDashboardService implements vscode.Disposable {
 		const projects = await this.mapLimited(snapshot.projects, PromptDashboardService.PROJECT_CONCURRENCY, async (project) => {
 			this.ensureScopeActive(scope);
 			const trackedBranch = this.resolveTrackedBranchForProject(scope, project.project, snapshot.trackedBranches);
+			const cachedProject = cachedProjectsByName.get(project.project);
+			if (lightReactiveRefresh) {
+				return this.buildReactiveProjectSummary(scope, project, snapshot.trackedBranches, cachedProject);
+			}
+			const canReuseCachedDetails = this.canReuseProjectDetails(project, trackedBranch, cachedProject);
 			const branchForRemote = project.currentBranch || project.promptBranch || scope.promptBranch;
-			const [pipeline, parallelBranches, recentCommits] = await Promise.all([
-				this.gitService.getGitOverlayProjectPipelineStatus(paths, project.project, branchForRemote).catch(() => null),
-				this.gitService.getGitOverlayParallelBranchSummaries(
+			// Keep pipeline CLI work off the normal dashboard-open path because only AI review consumes it.
+			const pipeline = includePipeline && branchForRemote
+				? await this.gitService.getGitOverlayProjectPipelineStatus(paths, project.project, branchForRemote).catch(() => null)
+				: null;
+			this.ensureScopeActive(scope);
+			const recentCommits = includeExpandedDetails
+				? await this.loadDetailedRecentCommits(project)
+				: canReuseCachedDetails
+					? cachedProject?.recentCommits || []
+					: this.buildDisplayRecentCommits(project);
+			this.ensureScopeActive(scope);
+			const parallelBranches = includeExpandedDetails
+				? (await this.gitService.getGitOverlayParallelBranchSummaries(
 					paths,
 					project.project,
 					scope.promptBranch || trackedBranch || project.currentBranch,
 					trackedBranches,
-				).catch(() => []),
-				Promise.all((project.recentCommits || []).slice(0, 2).map(async (commit) => ({
-					...commit,
-					changedFiles: await this.gitService.getCommitChangedFiles(project.repositoryPath, commit.sha).catch(() => []),
-				}))),
-			]);
+					PromptDashboardService.PARALLEL_BRANCH_LIMIT,
+				).catch(() => [])).map(branch => ({ ...branch, detailsHydrated: true }))
+				: canReuseCachedDetails
+					? cachedProject?.parallelBranches || []
+					: this.buildDisplayParallelBranches(scope, project, trackedBranch);
 			this.ensureScopeActive(scope);
 			const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
 			return {
@@ -931,6 +1241,125 @@ export class PromptDashboardService implements vscode.Disposable {
 		this.ensureScopeActive(scope);
 
 		return { projects };
+	}
+
+	/** Reuses already hydrated project details only while the branch context is unchanged. */
+	private canReuseProjectDetails(
+		project: GitOverlayProjectSnapshot,
+		trackedBranch: string,
+		cachedProject?: PromptDashboardProjectSummary,
+	): boolean {
+		if (!cachedProject || !project.available || Boolean(project.error)) {
+			return false;
+		}
+
+		return cachedProject.currentBranch === project.currentBranch
+			&& cachedProject.promptBranch === project.promptBranch
+			&& cachedProject.trackedBranch === trackedBranch
+			&& this.hasHydratedProjectDetails(cachedProject);
+	}
+
+	/** Detects whether the cached commit and branch details are already fully hydrated. */
+	private hasHydratedProjectDetails(project: PromptDashboardProjectSummary): boolean {
+		return project.recentCommits.every(commit => commit.changedFilesHydrated !== false)
+			&& project.parallelBranches.every(branch => branch.detailsHydrated !== false);
+	}
+
+	/** Builds lightweight recent-commit summaries for the first dashboard paint. */
+	private buildDisplayRecentCommits(project: GitOverlayProjectSnapshot): PromptDashboardProjectSummary['recentCommits'] {
+		return (project.recentCommits || [])
+			.slice(0, PromptDashboardService.RECENT_COMMIT_LIMIT)
+			.map(commit => ({
+				...commit,
+				changedFiles: [],
+				changedFilesHydrated: false,
+			}));
+	}
+
+	/** Loads full commit file details only for manual refreshes or explicit hydration requests. */
+	private async loadDetailedRecentCommits(project: GitOverlayProjectSnapshot): Promise<PromptDashboardProjectSummary['recentCommits']> {
+		const recentCommits = [] as PromptDashboardProjectSummary['recentCommits'];
+		for (const commit of (project.recentCommits || []).slice(0, PromptDashboardService.RECENT_COMMIT_LIMIT)) {
+			recentCommits.push({
+				...commit,
+				changedFiles: await this.gitService.getCommitChangedFiles(project.repositoryPath, commit.sha).catch(() => []),
+				changedFilesHydrated: true,
+			});
+		}
+		return recentCommits;
+	}
+
+	/** Builds lightweight parallel-branch rows from the fast branch snapshot without diff hydration. */
+	private buildDisplayParallelBranches(
+		scope: PromptDashboardScope,
+		project: GitOverlayProjectSnapshot,
+		trackedBranch: string,
+	): PromptDashboardProjectSummary['parallelBranches'] {
+		const baseBranch = scope.promptBranch || trackedBranch || project.currentBranch;
+		return [...(project.cleanupBranches || [])]
+			.sort((left, right) => {
+				if ((right.ahead || 0) !== (left.ahead || 0)) {
+					return (right.ahead || 0) - (left.ahead || 0);
+				}
+				const committedAtSort = String(right.lastCommit?.committedAt || '').localeCompare(String(left.lastCommit?.committedAt || ''));
+				if (committedAtSort !== 0) {
+					return committedAtSort;
+				}
+				return left.name.localeCompare(right.name, 'ru', { sensitivity: 'base' });
+			})
+			.slice(0, PromptDashboardService.PARALLEL_BRANCH_LIMIT)
+			.map(branch => ({
+				name: branch.name,
+				baseBranch,
+				ahead: branch.ahead,
+				behind: branch.behind,
+				lastCommit: branch.lastCommit,
+				affectedFiles: [],
+				potentialConflicts: [],
+				detailsHydrated: false,
+			}));
+	}
+
+	/** Keeps expensive sections cached during lightweight git-reactive branch refreshes. */
+	private buildReactiveProjectSummary(
+		scope: PromptDashboardScope,
+		project: GitOverlayProjectSnapshot,
+		snapshotTrackedBranches: string[],
+		cachedProject?: PromptDashboardProjectSummary,
+	): PromptDashboardProjectSummary {
+		const trackedBranch = this.resolveTrackedBranchForProject(scope, project.project, snapshotTrackedBranches);
+		const reusableCachedProject = cachedProject && project.available && !project.error
+			? cachedProject
+			: null;
+		const canReuseHeavySections = reusableCachedProject !== null
+			&& reusableCachedProject.currentBranch === project.currentBranch
+			&& reusableCachedProject.promptBranch === project.promptBranch
+			&& reusableCachedProject.trackedBranch === trackedBranch;
+		const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
+		return {
+			project: project.project,
+			repositoryPath: project.repositoryPath,
+			available: project.available,
+			error: project.error,
+			currentBranch: project.currentBranch,
+			promptBranch: project.promptBranch,
+			trackedBranch,
+			dirty: project.dirty,
+			hasConflicts: project.hasConflicts,
+			ahead: project.ahead,
+			behind: project.behind,
+			branches: project.branches,
+			branchActions: buildPromptDashboardBranchActions({
+				promptBranch: project.promptBranch,
+				trackedBranch,
+				branches: project.branches,
+			}),
+			recentCommits: canReuseHeavySections ? (reusableCachedProject?.recentCommits || []) : [],
+			review: canReuseHeavySections && reusableCachedProject ? reusableCachedProject.review : project.review,
+			pipeline: canReuseHeavySections && reusableCachedProject ? reusableCachedProject.pipeline : null,
+			parallelBranches: canReuseHeavySections ? (reusableCachedProject?.parallelBranches || []) : [],
+			conflictFiles,
+		};
 	}
 
 	private resolveTrackedBranches(scope: PromptDashboardScope, projectNames: string[]): string[] {
@@ -967,6 +1396,85 @@ export class PromptDashboardService implements vscode.Disposable {
 			+ (prompt.timeSpentOnTask || 0)
 			+ (prompt.timeSpentUntracked || 0),
 		);
+	}
+
+	private summarizeAnalysisProjects(projects: PromptDashboardProjectSummary[]): Record<string, number> {
+		return {
+			projectCount: projects.length,
+			availableProjectCount: projects.filter(project => project.available && !project.error).length,
+			pipelineProjectCount: projects.filter(project => Boolean(project.pipeline)).length,
+			recentCommitCount: projects.reduce((total, project) => total + project.recentCommits.length, 0),
+			parallelBranchCount: projects.reduce((total, project) => total + project.parallelBranches.length, 0),
+			conflictProjectCount: projects.filter(project => project.hasConflicts || project.conflictFiles.length > 0).length,
+		};
+	}
+
+	private resolvePromptDashboardAnalysisPreviewDelayMs(): number {
+		/** Keep the preview delay centralized so tests can override it cheaply. */
+		return PromptDashboardService.ANALYSIS_PREVIEW_DELAY_MS;
+	}
+
+	private buildPromptDashboardAnalysisPreview(projects: PromptDashboardProjectSummary[]): string {
+		/** Summarize the already loaded Git facts while the full AI review is still pending. */
+		const availableProjects = projects.filter(project => project.available && !project.error);
+		if (availableProjects.length === 0) {
+			return '';
+		}
+
+		const dirtyProjects = availableProjects.filter(project => project.dirty);
+		const conflictProjects = availableProjects.filter(project => project.hasConflicts || project.conflictFiles.length > 0);
+		const failedPipelines = availableProjects.filter(project => ['failed', 'cancelled'].includes(String(project.pipeline?.state || '').toLowerCase()));
+		const runningPipelines = availableProjects.filter(project => ['running', 'pending'].includes(String(project.pipeline?.state || '').toLowerCase()));
+		const unavailableReviewProjects = availableProjects.filter(project => Boolean(project.review.unsupportedReason || project.review.error));
+		const parallelProjects = availableProjects.filter(project => project.parallelBranches.length > 0);
+
+		const summaryLines = [
+			'### Что происходит',
+			`- Быстрый локальный вывод уже готов по ${availableProjects.length} проектам. Полный AI review ещё уточняется.`,
+			dirtyProjects.length > 0
+				? `- Локальные изменения есть в: ${this.formatPromptDashboardProjectList(dirtyProjects)}.`
+				: '- Незакоммиченных изменений по выбранным проектам не видно.',
+			'### На что обратить внимание',
+			conflictProjects.length > 0
+				? `- Есть конфликты или конфликтующие файлы в: ${this.formatPromptDashboardProjectList(conflictProjects)}.`
+				: failedPipelines.length > 0
+					? `- Упали или были отменены проверки в: ${this.formatPromptDashboardProjectList(failedPipelines)}.`
+					: runningPipelines.length > 0
+						? `- Проверки ещё выполняются в: ${this.formatPromptDashboardProjectList(runningPipelines)}.`
+						: '- По текущим Git-данным критичных блокеров пока не видно.',
+			unavailableReviewProjects.length > 0
+				? `- MR/PR-статус автоматически не определился для: ${this.formatPromptDashboardProjectList(unavailableReviewProjects)}.`
+				: '',
+			parallelProjects.length > 0
+				? `- Параллельные ветки найдены в: ${this.formatPromptDashboardProjectList(parallelProjects)}.`
+				: '',
+			'### Что сделать дальше',
+			conflictProjects.length > 0
+				? `- Сначала проверьте конфликтующие изменения в ${this.formatPromptDashboardProjectList(conflictProjects, 2)}.`
+				: dirtyProjects.length > 0
+					? `- Просмотрите локальные изменения в ${this.formatPromptDashboardProjectList(dirtyProjects, 2)} перед merge или публикацией.`
+					: '- Можно продолжать по текущим веткам и ориентироваться на Git-виджеты.',
+			runningPipelines.length > 0
+				? `- Дождитесь завершения проверок для ${this.formatPromptDashboardProjectList(runningPipelines, 2)}.`
+				: failedPipelines.length > 0
+					? `- Откройте Pipelines и проверьте причину падения для ${this.formatPromptDashboardProjectList(failedPipelines, 2)}.`
+					: '- Финальный AI review заменит этот быстрый вывод, когда модель ответит.',
+		].filter(Boolean);
+
+		return summaryLines.join('\n');
+	}
+
+	private formatPromptDashboardProjectList(projects: PromptDashboardProjectSummary[], maxItems: number = 3): string {
+		/** Keep preview sentences compact when a scope contains many repositories. */
+		const names = projects
+			.map(project => project.project.trim())
+			.filter(Boolean);
+		const visibleNames = names.slice(0, maxItems);
+		const remaining = Math.max(0, names.length - visibleNames.length);
+		if (visibleNames.length === 0) {
+			return 'выбранных проектах';
+		}
+		return remaining > 0 ? `${visibleNames.join(', ')} и ещё ${remaining}` : visibleNames.join(', ');
 	}
 
 	private postWidget<TData>(

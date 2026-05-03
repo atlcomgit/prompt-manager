@@ -1,5 +1,5 @@
-import type { PromptDashboardBranchAction, PromptDashboardCacheState, PromptDashboardProjectSummary, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../types/promptDashboard.js';
-import type { GitOverlayBranchInfo, GitOverlayChangeFile } from '../types/git.js';
+import type { PromptDashboardAnalysisState, PromptDashboardBranchAction, PromptDashboardCacheState, PromptDashboardLoadStatus, PromptDashboardProjectsData, PromptDashboardProjectSummary, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../types/promptDashboard.js';
+import type { GitOverlayBranchInfo, GitOverlayChangeFile, GitOverlayCommitChangedFile } from '../types/git.js';
 import type { PromptStatus } from '../types/prompt.js';
 
 export const PROMPT_DASHBOARD_WARM_INTERVAL_MS = 5 * 60 * 1000;
@@ -8,6 +8,92 @@ export const PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX = 280;
 
 export function resolvePromptDashboardMode(pageWidth: number, formShellWidth: number): 'full' | 'compact' {
 	return pageWidth - formShellWidth >= PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX ? 'full' : 'compact';
+}
+
+/** Reuses the current snapshot when visibility changed but prompt inputs stayed the same. */
+export function shouldRequestPromptDashboardSnapshot(input: {
+	mode: 'full' | 'compact';
+	isLoaded: boolean;
+	hasSnapshot: boolean;
+	currentFingerprint: string;
+	lastRequestedFingerprint: string;
+}): boolean {
+	if (input.mode !== 'full' || !input.isLoaded) {
+		return false;
+	}
+
+	if (!input.hasSnapshot) {
+		return true;
+	}
+
+	return input.currentFingerprint !== input.lastRequestedFingerprint;
+}
+
+/** Clears branch-apply loaders only after the projects widget finished its refresh. */
+export function shouldClearPromptDashboardBusyActionFromWidget(input: {
+	busyAction: string | null;
+	widgetKind: PromptDashboardWidgetKind;
+	cacheStatus: PromptDashboardLoadStatus;
+}): boolean {
+	if (!input.busyAction || input.widgetKind !== 'projects' || input.cacheStatus === 'loading') {
+		return false;
+	}
+
+	return input.busyAction === 'switch-all'
+		|| input.busyAction.startsWith('switch-project:')
+		|| input.busyAction.startsWith('preset:');
+}
+
+/** Keeps the last project rows mounted while a refresh is still loading new Git data. */
+export function preservePromptDashboardProjectsLoadingSnapshot(
+	previousWidget: PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>,
+	nextWidget: PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>,
+): PromptDashboardWidgetSnapshot<PromptDashboardProjectsData> {
+	if (nextWidget.cache.status !== 'loading' || nextWidget.data.projects.length > 0 || previousWidget.data.projects.length === 0) {
+		return nextWidget;
+	}
+
+	return {
+		...nextWidget,
+		data: previousWidget.data,
+	};
+}
+
+export function shouldAcceptPromptDashboardAnalysisMessage(input: {
+	activeRequestId: string;
+	messageRequestId?: string;
+	currentPromptId?: string;
+	currentPromptUuid?: string;
+	messagePromptId?: string;
+	messagePromptUuid?: string;
+	currentAnalysisFingerprint?: string;
+	messageAnalysisFingerprint?: string;
+	currentAnalysisStatus?: PromptDashboardAnalysisState['status'];
+	messageAnalysisStatus?: PromptDashboardAnalysisState['status'];
+}): boolean {
+	if (!input.messageRequestId || input.messageRequestId === input.activeRequestId) {
+		return true;
+	}
+
+	const samePromptId = !input.currentPromptId || !input.messagePromptId || input.currentPromptId === input.messagePromptId;
+	const samePromptUuid = !input.currentPromptUuid || !input.messagePromptUuid || input.currentPromptUuid === input.messagePromptUuid;
+	if (!samePromptId || !samePromptUuid) {
+		return false;
+	}
+
+	if (
+		!input.currentAnalysisFingerprint
+		|| !input.messageAnalysisFingerprint
+		|| input.currentAnalysisFingerprint !== input.messageAnalysisFingerprint
+	) {
+		return false;
+	}
+
+	if (input.currentAnalysisStatus === 'completed' && input.messageAnalysisStatus === 'running') {
+		return false;
+	}
+
+	return true;
 }
 
 export function buildPromptDashboardScopeKey(scope: PromptDashboardScope): string {
@@ -123,6 +209,17 @@ export function flattenPromptDashboardChangeFiles(groups: Array<GitOverlayChange
 	return Array.from(new Set(groups.flat().map(file => file.path).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'ru'));
 }
 
+function formatPromptDashboardChangedFileFingerprint(file: GitOverlayCommitChangedFile): string {
+	return [
+		file.status,
+		file.previousPath || '',
+		file.path,
+		file.additions ?? '',
+		file.deletions ?? '',
+		file.isBinary === true ? 'binary' : '',
+	].join(':');
+}
+
 export function buildPromptDashboardAnalysisFingerprint(input: {
 	promptTitle: string;
 	promptContent: string;
@@ -149,7 +246,7 @@ export function buildPromptDashboardAnalysisFingerprint(input: {
 			recentCommits: project.recentCommits.map(commit => ({
 				sha: commit.sha,
 				subject: commit.subject,
-				changedFiles: commit.changedFiles.map(file => `${file.status}:${file.previousPath || ''}:${file.path}`),
+				changedFiles: commit.changedFiles.map(formatPromptDashboardChangedFileFingerprint),
 			})),
 			parallelBranches: project.parallelBranches.map(branch => ({
 				name: branch.name,
@@ -157,7 +254,7 @@ export function buildPromptDashboardAnalysisFingerprint(input: {
 				ahead: branch.ahead,
 				behind: branch.behind,
 				lastCommit: branch.lastCommit?.sha || '',
-				affectedFiles: branch.affectedFiles.map(file => `${file.status}:${file.previousPath || ''}:${file.path}`),
+				affectedFiles: branch.affectedFiles.map(formatPromptDashboardChangedFileFingerprint),
 				potentialConflicts: branch.potentialConflicts.map(file => `${file.path}:${file.reason}`),
 			})),
 			conflictFiles: project.conflictFiles,

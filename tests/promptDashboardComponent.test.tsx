@@ -103,7 +103,7 @@ function createProject(overrides: Partial<PromptDashboardProjectSummary> = {}): 
 			behind: 1,
 			lastCommit: null,
 			affectedFiles: [
-				{ status: 'M', path: 'src/webview/editor/App.tsx' },
+				{ status: 'M', path: 'src/webview/editor/App.tsx', additions: 7, deletions: 2, isBinary: false },
 			],
 			potentialConflicts: [
 				{ path: 'src/webview/editor/App.tsx', reason: 'changed in current and parallel branch' },
@@ -151,6 +151,7 @@ function renderDashboard(snapshot: PromptDashboardSnapshot | null): string {
 		busyAction: null,
 		mode: 'full',
 		onRefresh: () => { },
+		onHydrateProjectsDetails: () => { },
 		onOpenPrompt: () => { },
 		onSwitchBranch: () => { },
 		onSwitchBranches: () => { },
@@ -159,7 +160,7 @@ function renderDashboard(snapshot: PromptDashboardSnapshot | null): string {
 	})));
 }
 
-test('PromptDashboard prefers prompt branch by default and renders the redesigned file tree', () => {
+test('PromptDashboard selects current branch first and renders the redesigned file tree', () => {
 	const markup = renderDashboard(createSnapshot([createProject()]));
 
 	assert.doesNotMatch(markup, /Branch Divergence/);
@@ -168,12 +169,19 @@ test('PromptDashboard prefers prompt branch by default and renders the redesigne
 	assert.doesNotMatch(markup, /MR\/PR Age/);
 	assert.doesNotMatch(markup, /Conflict Hotspots/);
 	assert.match(markup, /MR\/PR/);
-	assert.match(markup, /folder/);
-	assert.match(markup, /open diff/);
-	assert.match(markup, /folder: src\/webview\/editor/);
-	assert.match(markup, /value="feature\/task-107" selected=""/);
+	assert.match(markup, /\(—\)/);
+	assert.match(markup, /└─/);
+	assert.match(markup, /🗁/);
+	assert.match(markup, /🗋/);
+	assert.doesNotMatch(markup, /добавлено/);
+	assert.doesNotMatch(markup, /строки:/);
+	assert.doesNotMatch(markup, /conflict|opening|workspace root|diff/);
+	assert.match(markup, /value="main" selected=""/);
+	assert.doesNotMatch(markup, /value="feature\/task-107" selected=""/);
+	assert.match(markup, /api/);
 	assert.match(markup, /src\/webview\/editor/);
 	assert.match(markup, /App\.tsx/);
+	assert.match(markup, /Что происходит/);
 });
 
 test('PromptDashboard shows loading labels for project-based widgets while data refreshes', () => {
@@ -186,4 +194,35 @@ test('PromptDashboard shows loading labels for project-based widgets while data 
 	assert.doesNotMatch(markup, /Pipeline-статусы загружаются/);
 	assert.doesNotMatch(markup, /Собираем health pipeline/);
 	assert.doesNotMatch(markup, /Ищем конфликтующие файлы/);
+});
+
+test('PromptDashboard keeps existing project rows visible while refreshed Git data is loading', () => {
+	const markup = renderDashboard(createSnapshot([createProject()], 'loading'));
+
+	assert.match(markup, /обновляем/);
+	assert.match(markup, /api/);
+	assert.doesNotMatch(markup, /Git-данные загружаются/);
+	assert.doesNotMatch(markup, /MR\/PR-данные загружаются/);
+	assert.doesNotMatch(markup, /Данные по веткам загружаются/);
+});
+
+test('PromptDashboard shows a quick preliminary summary while AI review is still running', () => {
+	const snapshot = createSnapshot([createProject()]);
+	snapshot.aiAnalysis = {
+		kind: 'aiAnalysis',
+		cache: { status: 'loading', source: 'refresh', updatedAt: '2026-04-29T10:00:00.000Z' },
+		data: {
+			status: 'running',
+			model: 'copilot:gpt-5',
+			updatedAt: '2026-04-29T10:00:05.000Z',
+			content: '### Что происходит\n- Быстрый локальный вывод уже готов.\n### Что сделать дальше\n- Дождитесь финального AI review.',
+		},
+	};
+
+	const markup = renderDashboard(snapshot);
+
+	assert.match(markup, /предварительно/);
+	assert.match(markup, /Показываем быстрый локальный вывод/);
+	assert.match(markup, /Быстрый локальный вывод уже готов/);
+	assert.doesNotMatch(markup, /AI проверяет ветки и изменения/);
 });

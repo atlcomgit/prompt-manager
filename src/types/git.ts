@@ -72,6 +72,9 @@ export interface GitOverlayCommitChangedFile {
 	status: string;
 	path: string;
 	previousPath?: string;
+	additions?: number | null;
+	deletions?: number | null;
+	isBinary?: boolean;
 }
 
 export type GitOverlayPipelineState = 'unknown' | 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped' | 'unavailable';
@@ -111,6 +114,7 @@ export interface GitOverlayParallelBranchSummary {
 	lastCommit: GitOverlayCommit | null;
 	affectedFiles: GitOverlayCommitChangedFile[];
 	potentialConflicts: GitOverlayPotentialConflict[];
+	detailsHydrated?: boolean;
 }
 
 export interface GitOverlayChangeFile {

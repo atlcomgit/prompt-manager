@@ -6,6 +6,7 @@ import { buildSaveQueueKey } from '../src/utils/promptSaveQueue.js';
 const originalLoad = (Module as any)._load;
 const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
 const vscodeCreatedWebviewPanels: any[] = [];
+const vscodeCreatedWatchers: any[] = [];
 const vscodeClosedTabs: any[] = [];
 const vscodeTabChangeListeners: Array<(event: { opened: any[]; closed: any[]; changed: any[] }) => void> = [];
 const vscodeTabs: any[] = [];
@@ -31,6 +32,7 @@ function createDisposable() {
 function resetVsCodeCommandMock() {
 	vscodeCommandCalls.length = 0;
 	vscodeCreatedWebviewPanels.length = 0;
+	vscodeCreatedWatchers.length = 0;
 	vscodeClosedTabs.length = 0;
 	vscodeTabChangeListeners.length = 0;
 	vscodeTabs.length = 0;
@@ -138,12 +140,16 @@ function createVsCodeMock() {
 		dispose() { },
 	};
 
-	const createWatcher = () => ({
-		onDidCreate: () => createDisposable(),
-		onDidChange: () => createDisposable(),
-		onDidDelete: () => createDisposable(),
-		dispose() { },
-	});
+	const createWatcher = () => {
+		const watcher = {
+			onDidCreate: () => createDisposable(),
+			onDidChange: () => createDisposable(),
+			onDidDelete: () => createDisposable(),
+			dispose() { },
+		};
+		vscodeCreatedWatchers.push(watcher);
+		return watcher;
+	};
 
 	const createWebviewPanel = (viewType: string, title: string, _column: unknown, options: unknown) => {
 		const disposeListeners: Array<() => void | Promise<void>> = [];
@@ -153,6 +159,7 @@ function createVsCodeMock() {
 			viewType,
 			title,
 			options,
+			visible: true,
 			iconPath: undefined,
 			disposed: false,
 			revealed: false,
@@ -180,6 +187,7 @@ function createVsCodeMock() {
 				return createDisposable();
 			},
 			reveal: () => {
+				panel.visible = true;
 				for (const tab of vscodeTabs) {
 					tab.isActive = false;
 				}
@@ -207,6 +215,7 @@ function createVsCodeMock() {
 				}
 			},
 			emitVisible: () => {
+				panel.visible = true;
 				for (const listener of viewStateListeners) {
 					listener({ webviewPanel: panel });
 				}
@@ -513,6 +522,8 @@ async function createManager(options?: {
 	const promptDashboardService = {
 		getSnapshot: () => null,
 		refreshPrompt: async () => null,
+		refreshPromptSnapshot: async () => null,
+		refreshProjectsWidget: async () => null,
 		switchProjectBranch: async () => ({ success: true, errors: [] }),
 		switchProjectBranches: async () => ({ success: true, errors: [] }),
 		pauseActiveScope: () => undefined,
@@ -1606,6 +1617,476 @@ test('scheduleGitOverlayAutoRefreshForActiveSessions refreshes only other projec
 
 	assert.equal(otherProjectsRefreshCalls, 1);
 	assert.equal(fullRefreshCalls, 0);
+});
+
+test('scheduleGitReactiveAutoRefresh refreshes prompt dashboard only for git-scoped changes', async () => {
+	const { manager } = await createManager();
+	const currentPrompt = createPrompt({
+		id: 'task-42',
+		promptUuid: 'uuid-42',
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+	const postedMessages: any[] = [];
+	let refreshCalls = 0;
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+			['peer', '/tmp/peer'],
+		]),
+		getWorkspaceFolders: () => ['selected', 'peer'],
+	};
+	(manager as any).panelPromptRefs.set('panel-a', currentPrompt);
+	(manager as any).resolveOpenEditorPanel = () => panel;
+	const refreshModes: string[] = [];
+	(manager as any).promptDashboardService = {
+		refreshProjectsWidget: async (
+			_prompt: unknown,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			mode?: string,
+		) => {
+			refreshCalls += 1;
+			refreshModes.push(mode || '');
+			postMessage?.({
+				type: 'promptDashboardWidgetSnapshot',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				widget: {
+					kind: 'projects',
+					cache: { status: 'fresh', source: 'refresh' },
+					data: { projects: [] },
+				},
+			});
+			return null;
+		},
+	};
+
+	await withImmediateTimers(async () => {
+		(manager as any).scheduleGitReactiveAutoRefresh('file', '/tmp/selected/src/changed.ts');
+		await flushTurns();
+	});
+	assert.equal(refreshCalls, 0);
+
+	await withImmediateTimers(async () => {
+		(manager as any).scheduleGitReactiveAutoRefresh('git', '/tmp/peer');
+		await flushTurns();
+	});
+	assert.equal(refreshCalls, 0);
+
+	await withImmediateTimers(async () => {
+		(manager as any).scheduleGitReactiveAutoRefresh('git', '/tmp/selected');
+		await flushTurns();
+	});
+
+	assert.equal(refreshCalls, 1);
+	assert.deepEqual(refreshModes, ['reactive-branches']);
+	assert.equal(postedMessages.some(message => message?.type === 'promptDashboardWidgetSnapshot'), true);
+});
+
+test('first visible prompt editor event skips bootstrap dashboard projects refresh', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+			projects: ['api'],
+		},
+	});
+	let refreshCalls = 0;
+	(manager as any).promptDashboardService = {
+		getSnapshot: () => null,
+		refreshPrompt: async () => null,
+		refreshPromptSnapshot: async () => null,
+		refreshProjectsWidget: async () => {
+			refreshCalls += 1;
+			return null;
+		},
+		switchProjectBranch: async () => ({ success: true, errors: [] }),
+		switchProjectBranches: async () => ({ success: true, errors: [] }),
+		pauseActiveScope: () => undefined,
+		analyzeParallelReview: async () => ({ status: 'idle', model: '', content: '' }),
+	};
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+
+	panel.emitVisible();
+	await flushTurns();
+	assert.equal(refreshCalls, 0);
+
+	panel.emitVisible();
+	await flushTurns();
+	assert.equal(refreshCalls, 0);
+});
+
+test('revealed prompt editor refreshes the dashboard when hidden changes were queued', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+			projects: ['api'],
+		},
+	});
+	let refreshCalls = 0;
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['api', '/tmp/api'],
+		]),
+		getWorkspaceFolders: () => ['api'],
+	};
+	(manager as any).promptDashboardService = {
+		getSnapshot: () => null,
+		refreshPrompt: async () => null,
+		refreshPromptSnapshot: async () => null,
+		refreshProjectsWidget: async () => {
+			refreshCalls += 1;
+			return null;
+		},
+		switchProjectBranch: async () => ({ success: true, errors: [] }),
+		switchProjectBranches: async () => ({ success: true, errors: [] }),
+		pauseActiveScope: () => undefined,
+		analyzeParallelReview: async () => ({ status: 'idle', model: '', content: '' }),
+	};
+
+	(manager as any).resolveOpenEditorPanel('__prompt_editor_singleton__')?.dispose();
+	await flushTurns();
+	await (manager as any).openPrompt('prompt-a');
+	const panel = (manager as any).resolveOpenEditorPanel('__prompt_editor_singleton__') || vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+
+	panel.visible = false;
+	(manager as any).promptDashboardPendingRefreshOnReveal.add('__prompt_editor_singleton__');
+	assert.equal(refreshCalls, 0);
+
+	panel.emitVisible();
+	await flushTurns();
+	assert.equal(refreshCalls, 1);
+});
+
+test('ensureGitOverlayReactiveSources starts watchers for a visible prompt editor without Git Overlay', async () => {
+	const { manager } = await createManager();
+	vscodeCreatedWatchers.length = 0;
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+		]),
+		getWorkspaceFolders: () => ['selected'],
+	};
+	(manager as any).gitService = {
+		getBuiltInGitApi: async () => null,
+	};
+	(manager as any).promptEditorPanels.add({ visible: true });
+
+	await (manager as any).ensureGitOverlayReactiveSources();
+
+	assert.ok(vscodeCreatedWatchers.length > 0);
+});
+
+test('built-in git openRepository bootstrap does not schedule reactive refresh', async () => {
+	const { manager } = await createManager();
+	const scheduledRefreshes: Array<{ reason: string; changedPath?: string }> = [];
+	let openRepositoryListener: ((repository: any) => void) | undefined;
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+		]),
+		getWorkspaceFolders: () => ['selected'],
+	};
+	(manager as any).promptEditorPanels.add({ visible: true });
+	(manager as any).scheduleGitReactiveAutoRefresh = (reason: string, changedPath?: string) => {
+		scheduledRefreshes.push({ reason, changedPath });
+	};
+	(manager as any).gitService = {
+		getBuiltInGitApi: async () => ({
+			repositories: [],
+			onDidOpenRepository: (listener: (repository: any) => void) => {
+				openRepositoryListener = listener;
+				return createDisposable();
+			},
+			onDidCloseRepository: () => createDisposable(),
+		}),
+	};
+
+	await (manager as any).ensureGitOverlayReactiveSources();
+	openRepositoryListener?.({
+		rootUri: { fsPath: '/tmp/selected' },
+		state: { onDidChange: () => createDisposable() },
+		onDidCommit: () => createDisposable(),
+		onDidCheckout: () => createDisposable(),
+	});
+
+	assert.deepEqual(scheduledRefreshes, []);
+	assert.equal((manager as any).gitOverlayBuiltInRepositoryDisposables.has('/tmp/selected'), true);
+});
+
+test('getPromptDashboardSnapshot ignores boot-time placeholder prompt payload when host already has the real prompt', async () => {
+	const { manager } = await createManager();
+	const currentPrompt = createPrompt({
+		id: 'task-42',
+		promptUuid: 'uuid-42',
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+	const receivedPrompts: any[] = [];
+	const panelMessages: any[] = [];
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	(manager as any).promptDashboardService = {
+		getSnapshot: (prompt: unknown) => {
+			receivedPrompts.push(prompt);
+			return { projects: null };
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'getPromptDashboardSnapshot',
+			prompt: createPrompt({
+				id: '',
+				promptUuid: 'boot-placeholder-uuid',
+				title: '',
+				content: '',
+				projects: [],
+				branch: '',
+				trackedBranch: '',
+				trackedBranchesByProject: {},
+				model: '',
+			}),
+			requestId: 'dashboard-req-1',
+		} as any,
+		panel as any,
+		currentPrompt,
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(receivedPrompts[0]?.id, 'task-42');
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), true);
+});
+
+test('hydratePromptDashboardProjectsDetails refreshes only the projects widget in details mode', async () => {
+	const { manager } = await createManager();
+	const receivedModes: string[] = [];
+	const panelMessages: any[] = [];
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	(manager as any).promptDashboardService = {
+		refreshProjectsWidget: async (
+			_prompt: unknown,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			mode?: string,
+		) => {
+			receivedModes.push(mode || '');
+			postMessage?.({
+				type: 'promptDashboardWidgetSnapshot',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				widget: {
+					kind: 'projects',
+					cache: { status: 'fresh', source: 'refresh' },
+					data: { projects: [] },
+				},
+			});
+			return null;
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'hydratePromptDashboardProjectsDetails',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			requestId: 'dashboard-hydrate-1',
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(receivedModes, ['details']);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
+});
+
+test('promptDashboardSwitchBranch refreshes only the projects widget and starts AI review without full snapshot blocking', async () => {
+	const { manager } = await createManager();
+	const refreshModes: string[] = [];
+	const panelMessages: any[] = [];
+	let refreshPromptCalls = 0;
+	let analyzeCalls = 0;
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	(manager as any).promptDashboardService = {
+		switchProjectBranch: async () => ({ success: true, errors: [] }),
+		refreshPrompt: async () => {
+			refreshPromptCalls += 1;
+			return null;
+		},
+		refreshProjectsWidget: async (
+			_prompt: unknown,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			mode?: string,
+		) => {
+			refreshModes.push(mode || '');
+			postMessage?.({
+				type: 'promptDashboardWidgetSnapshot',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				widget: {
+					kind: 'projects',
+					cache: { status: 'fresh', source: 'refresh' },
+					data: { projects: [] },
+				},
+			});
+			return null;
+		},
+		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void) => {
+			analyzeCalls += 1;
+			postMessage?.({
+				type: 'promptDashboardAnalysis',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				analysis: {
+					status: 'running',
+					model: 'gpt-5',
+					content: '',
+				},
+			});
+			return { status: 'running', model: 'gpt-5', content: '' };
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'promptDashboardSwitchBranch',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			project: 'api',
+			branch: 'develop',
+			requestId: 'dashboard-switch-1',
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(refreshPromptCalls, 0);
+	assert.deepEqual(refreshModes, ['display']);
+	assert.equal(analyzeCalls, 1);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
+});
+
+test('refreshPromptDashboard posts a refreshed snapshot before AI review finishes', async () => {
+	const { manager } = await createManager();
+	const panelMessages: any[] = [];
+	let refreshPromptCalls = 0;
+	let refreshPromptSnapshotCalls = 0;
+	let analyzeCalls = 0;
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	(manager as any).promptDashboardService = {
+		refreshPrompt: async () => {
+			refreshPromptCalls += 1;
+			return null;
+		},
+		refreshPromptSnapshot: async () => {
+			refreshPromptSnapshotCalls += 1;
+			return {
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				generatedAt: '2026-05-03T12:00:00.000Z',
+				scopeKey: 'task-42::dashboard',
+				activity: { kind: 'activity', cache: { status: 'fresh', source: 'refresh' }, data: { thresholdMs: 300000, today: [], yesterday: [] } },
+				status: { kind: 'status', cache: { status: 'fresh', source: 'refresh' }, data: { status: 'in-progress', progress: 55, totalTimeMs: 0, updatedAt: '2026-05-03T12:00:00.000Z' } },
+				projects: { kind: 'projects', cache: { status: 'fresh', source: 'refresh' }, data: { projects: [] } },
+				aiAnalysis: { kind: 'aiAnalysis', cache: { status: 'fresh', source: 'cache' }, data: { status: 'idle', model: 'gpt-5', content: '' } },
+			};
+		},
+		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void) => {
+			analyzeCalls += 1;
+			postMessage?.({
+				type: 'promptDashboardAnalysis',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				analysis: {
+					status: 'running',
+					model: 'gpt-5',
+					content: '',
+				},
+			});
+			return { status: 'running', model: 'gpt-5', content: '' };
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'refreshPromptDashboard',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			requestId: 'dashboard-refresh-1',
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(refreshPromptCalls, 0);
+	assert.equal(refreshPromptSnapshotCalls, 1);
+	assert.equal(analyzeCalls, 1);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
 });
 
 test('runGitOverlayRefresh emits refresh timing metrics with snapshot source refresh', async () => {

@@ -96,9 +96,10 @@ test('splitPromptDashboardActivityByDay sorts today and yesterday by spent time'
 	assert.deepEqual(result.yesterday.map(item => item.id), ['c']);
 });
 
-test('getPromptDashboardStatusProgress clamps in-progress agent progress and falls back by status', () => {
+test('getPromptDashboardStatusProgress clamps in-progress agent progress and starts from zero without runtime progress', () => {
 	assert.equal(getPromptDashboardStatusProgress('in-progress', 144), 100);
 	assert.equal(getPromptDashboardStatusProgress('in-progress', -10), 0);
+	assert.equal(getPromptDashboardStatusProgress('in-progress'), 0);
 	assert.equal(getPromptDashboardStatusProgress('closed'), 100);
 });
 
@@ -291,6 +292,38 @@ test('syncPromptDashboardStatusFromPrompt keeps the loaded in-progress snapshot 
 	assert.equal(next?.status.data.updatedAt, '2026-05-03T16:06:57.168Z');
 });
 
+test('syncPromptDashboardStatusFromPrompt does not preserve draft progress when status switches to in-progress without runtime percent', () => {
+	const snapshot: PromptDashboardSnapshot = {
+		promptId: 'task-201',
+		promptUuid: 'uuid-201',
+		generatedAt: '2026-05-03T16:09:00.000Z',
+		scopeKey: 'task-201::dashboard',
+		activity: createPromptDashboardWidgetSnapshot('activity', { thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, today: [], yesterday: [] }),
+		status: createPromptDashboardWidgetSnapshot('status', { status: 'draft', progress: 10, totalTimeMs: 1_000, updatedAt: '2026-05-03T16:09:00.000Z' }),
+		projects: createPromptDashboardWidgetSnapshot('projects', { projects: [] }),
+		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
+	};
+
+	const next = syncPromptDashboardStatusFromPrompt(snapshot, {
+		id: 'task-201',
+		promptUuid: 'uuid-201',
+		status: 'in-progress',
+		progress: undefined,
+		updatedAt: '2026-05-03T16:09:30.000Z',
+		timeSpentWriting: 1_000,
+		timeSpentImplementing: 2_000,
+		timeSpentOnTask: 3_000,
+		timeSpentUntracked: 0,
+	}, {
+		preserveInProgressSnapshotProgress: true,
+	});
+
+	assert.equal(next?.status.data.status, 'in-progress');
+	assert.equal(next?.status.data.progress, 0);
+	assert.equal(next?.status.data.totalTimeMs, 6_000);
+	assert.equal(next?.status.data.updatedAt, '2026-05-03T16:09:30.000Z');
+});
+
 test('syncPromptDashboardStatusFromPrompt still uses an explicit prompt percent when the snapshot only has the default fallback', () => {
 	const snapshot: PromptDashboardSnapshot = {
 		promptId: 'task-200',
@@ -298,7 +331,7 @@ test('syncPromptDashboardStatusFromPrompt still uses an explicit prompt percent 
 		generatedAt: '2026-05-03T16:10:00.000Z',
 		scopeKey: 'task-200::dashboard',
 		activity: createPromptDashboardWidgetSnapshot('activity', { thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, today: [], yesterday: [] }),
-		status: createPromptDashboardWidgetSnapshot('status', { status: 'in-progress', progress: 50, totalTimeMs: 1_000, updatedAt: '2026-05-03T16:10:00.000Z' }),
+		status: createPromptDashboardWidgetSnapshot('status', { status: 'in-progress', progress: 0, totalTimeMs: 1_000, updatedAt: '2026-05-03T16:10:00.000Z' }),
 		projects: createPromptDashboardWidgetSnapshot('projects', { projects: [] }),
 		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
 	};

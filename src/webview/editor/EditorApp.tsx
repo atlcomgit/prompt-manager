@@ -6167,8 +6167,10 @@ export const EditorApp: React.FC = () => {
         snapshot={promptDashboardSnapshot}
         busyAction={promptDashboardBusyAction}
         mode={promptDashboardMode}
+        showGitFlowAction={shouldShowFooterGitFlow}
         onRefresh={handlePromptDashboardRefresh}
         onHydrateProjectsDetails={handlePromptDashboardHydrateProjectsDetails}
+        onOpenGitFlow={handleOpenGitOverlay}
         onOpenPrompt={handlePromptDashboardOpenPrompt}
         onSwitchBranch={handlePromptDashboardSwitchBranch}
         onSwitchBranches={handlePromptDashboardSwitchBranches}

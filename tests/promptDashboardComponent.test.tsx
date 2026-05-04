@@ -6,7 +6,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
 	PromptDashboard,
 	reconcileBranchDrafts,
+	resolveBranchWidgetProjects,
 	resolveExpandedDetailsHydrationRequest,
+	resolveVisibleLineStatsParts,
+	resolveVisibleParallelBranches,
 } from '../src/webview/editor/components/PromptDashboard.js';
 import type { PromptDashboardProjectSummary, PromptDashboardSnapshot } from '../src/types/promptDashboard.js';
 
@@ -121,7 +124,11 @@ function createProject(overrides: Partial<PromptDashboardProjectSummary> = {}): 
 }
 
 /** Builds a minimal dashboard snapshot with configurable project cache state. */
-function createSnapshot(projects: PromptDashboardProjectSummary[], projectsCacheStatus: PromptDashboardSnapshot['projects']['cache']['status'] = 'fresh'): PromptDashboardSnapshot {
+function createSnapshot(
+	projects: PromptDashboardProjectSummary[],
+	projectsCacheStatus: PromptDashboardSnapshot['projects']['cache']['status'] = 'fresh',
+	branchProjects?: PromptDashboardProjectSummary[],
+): PromptDashboardSnapshot {
 	return {
 		promptId: 'task-107',
 		promptUuid: 'uuid-107',
@@ -140,7 +147,7 @@ function createSnapshot(projects: PromptDashboardProjectSummary[], projectsCache
 		projects: {
 			kind: 'projects',
 			cache: { status: projectsCacheStatus, source: 'refresh', updatedAt: '2026-04-29T10:00:00.000Z' },
-			data: { projects },
+			data: { projects, ...(branchProjects ? { branchProjects } : {}) },
 		},
 		aiAnalysis: {
 			kind: 'aiAnalysis',
@@ -158,11 +165,13 @@ function renderDashboard(snapshot: PromptDashboardSnapshot | null): string {
 		mode: 'full',
 		onRefresh: () => { },
 		onHydrateProjectsDetails: () => { },
+		onOpenGitFlow: () => { },
 		onOpenPrompt: () => { },
 		onSwitchBranch: () => { },
 		onSwitchBranches: () => { },
 		onOpenDiff: () => { },
 		onOpenFilePatch: () => { },
+		showGitFlowAction: true,
 	})));
 }
 
@@ -201,6 +210,71 @@ test('reconcileBranchDrafts drops drafts that already became the refreshed curre
 	});
 
 	assert.deepEqual(nextDrafts, { web: 'develop' });
+});
+
+test('resolveBranchWidgetProjects switches between selected and workspace-wide branch rows', () => {
+	const selectedProjects = [createProject({ project: 'api' })];
+	const workspaceProjects = [
+		createProject({ project: 'api' }),
+		createProject({ project: 'web', repositoryPath: '/workspace/web' }),
+	];
+
+	assert.deepEqual(
+		resolveBranchWidgetProjects(selectedProjects, workspaceProjects, false).map(project => project.project),
+		['api'],
+	);
+	assert.deepEqual(
+		resolveBranchWidgetProjects(selectedProjects, workspaceProjects, true).map(project => project.project),
+		['api', 'web'],
+	);
+});
+
+test('resolveVisibleLineStatsParts hides zero-valued +0 and -0 counters', () => {
+	assert.deepEqual(
+		resolveVisibleLineStatsParts({ added: 0, changed: 2, deleted: 0, kind: 'diff' }),
+		['~2'],
+	);
+	assert.equal(
+		resolveVisibleLineStatsParts({ added: 0, changed: 0, deleted: 0, kind: 'diff' }),
+		null,
+	);
+});
+
+test('resolveVisibleParallelBranches hides hydrated rows without unique files', () => {
+	const visible = resolveVisibleParallelBranches([
+		{
+			name: 'feature/empty',
+			baseBranch: 'main',
+			ahead: 1,
+			behind: 0,
+			lastCommit: null,
+			affectedFiles: [],
+			potentialConflicts: [],
+			detailsHydrated: true,
+		},
+		{
+			name: 'feature/loading',
+			baseBranch: 'main',
+			ahead: 1,
+			behind: 0,
+			lastCommit: null,
+			affectedFiles: [],
+			potentialConflicts: [],
+			detailsHydrated: false,
+		},
+		{
+			name: 'feature/real',
+			baseBranch: 'main',
+			ahead: 2,
+			behind: 0,
+			lastCommit: null,
+			affectedFiles: [{ status: 'M', path: 'src/app.ts', additions: 2, deletions: 1, isBinary: false }],
+			potentialConflicts: [],
+			detailsHydrated: true,
+		},
+	]);
+
+	assert.deepEqual(visible.map(branch => branch.name), ['feature/loading', 'feature/real']);
 });
 
 test('resolveExpandedDetailsHydrationRequest keeps dirty file hydration on the dedicated route', () => {
@@ -273,6 +347,22 @@ test('PromptDashboard disables the prompt branch preset when the prompt Git bran
 
 	assert.match(markup, /title="У промпта не задана ветка Git" disabled="">Ветка промпта<\/button>/);
 	assert.match(markup, /Tracked-ветка/);
+});
+
+test('PromptDashboard renders the show-all button for branch rows and keeps selected projects by default', () => {
+	const markup = renderDashboard(createSnapshot(
+		[createProject({ project: 'api' })],
+		'fresh',
+		[
+			createProject({ project: 'api' }),
+			createProject({ project: 'web', repositoryPath: '/workspace/web' }),
+		],
+	));
+
+	assert.match(markup, /Показать все/);
+	assert.match(markup, /Git flow/);
+	assert.match(markup, /api/);
+	assert.doesNotMatch(markup, /title="Текущая ветка: main">web<\/div>/);
 });
 
 test('PromptDashboard shows branch-switch errors and a dirty-files disclosure under the project selector', () => {

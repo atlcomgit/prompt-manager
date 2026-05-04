@@ -81,6 +81,7 @@ export interface PromptDashboardProjectSummary {
 
 export interface PromptDashboardProjectsData {
 	projects: PromptDashboardProjectSummary[];
+	branchProjects?: PromptDashboardProjectSummary[];
 }
 
 export interface PromptDashboardAnalysisState {

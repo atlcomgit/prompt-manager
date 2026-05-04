@@ -300,6 +300,116 @@ test('PromptDashboardService getSnapshot reflects local prompt status changes ev
 	service.dispose();
 });
 
+test('PromptDashboardService starts in-progress status widget at zero when runtime progress is not available yet', async () => {
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project)),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'cached analysis',
+		} as any,
+	);
+
+	const snapshot = await service.refreshPrompt(createPrompt({
+		id: 'task-zero',
+		promptUuid: 'uuid-zero',
+		status: 'in-progress',
+		progress: undefined,
+	}));
+
+	assert.equal(snapshot.status.data.status, 'in-progress');
+	assert.equal(snapshot.status.data.progress, 0);
+	service.dispose();
+});
+
+test('PromptDashboardService hides closed prompts from the activity widget', async () => {
+	const todayKey = new Date().toISOString().slice(0, 10);
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [
+				createPrompt({
+					id: 'task-open',
+					promptUuid: 'uuid-open',
+					title: 'Open prompt',
+					status: 'in-progress',
+				}),
+				createPrompt({
+					id: 'task-closed',
+					promptUuid: 'uuid-closed',
+					title: 'Closed prompt',
+					status: 'closed',
+				}),
+			],
+			getDailyTime: async (promptId: string) => ({
+				[todayKey]: {
+					writing: promptId === 'task-open' ? 6 * 60 * 1000 : 8 * 60 * 1000,
+					implementing: 0,
+					onTask: 0,
+					untracked: 0,
+				},
+			}),
+			getDailyTimeTotalInRange: (
+				dailyTime: Record<string, { writing?: number; implementing?: number; onTask?: number; untracked?: number }>,
+				from: string,
+				to: string,
+			) => {
+				let total = 0;
+				for (const [day, entry] of Object.entries(dailyTime || {})) {
+					if (day < from || day > to) {
+						continue;
+					}
+					total += (entry.writing || 0) + (entry.implementing || 0) + (entry.onTask || 0) + (entry.untracked || 0);
+				}
+				return total;
+			},
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project)),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	const snapshot = await service.refreshPrompt(createPrompt({ projects: ['api'] }));
+
+	assert.deepEqual(snapshot.activity.data.today.map(item => item.id), ['task-open']);
+	service.dispose();
+});
+
 test('PromptDashboardService refreshProjectsWidget bypasses warm cache after repo changes', async () => {
 	let snapshotCalls = 0;
 	let pipelineCalls = 0;
@@ -364,6 +474,126 @@ test('PromptDashboardService refreshProjectsWidget bypasses warm cache after rep
 	assert.equal(widget.data.projects[0]?.currentBranch, 'develop');
 	assert.equal(postedMessages.some(message => message?.type === 'promptDashboardWidgetSnapshot' && message?.widget?.kind === 'projects'), true);
 	service.dispose();
+});
+
+test('PromptDashboardService exposes workspace-wide branchProjects without widening the other dashboard widgets', async () => {
+	const requestedProjectSets: string[][] = [];
+	const snapshotOptions: Array<Record<string, unknown> | undefined> = [];
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+		['web', '/workspace/web'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (
+				_paths: Map<string, string>,
+				projectNames: string[],
+				_promptBranch: string,
+				_trackedBranches: string[],
+				options?: Record<string, unknown>,
+			) => {
+				requestedProjectSets.push([...projectNames]);
+				snapshotOptions.push(options);
+				return {
+					trackedBranches: ['main'],
+					projects: projectNames.map(project => createSnapshotProject(project, {
+						changeGroups: {
+							merge: [],
+							staged: [{ project, path: `src/${project}.ts`, status: 'M', group: 'staged', conflicted: false, staged: true, fileSizeBytes: 0, additions: 2, deletions: 1, isBinary: false }],
+							workingTree: [],
+							untracked: [],
+						},
+					})),
+				};
+			},
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	const widget = await service.refreshProjectsWidget(createPrompt({ projects: ['api'] }));
+	const branchProjectsSnapshotOptions = snapshotOptions[snapshotOptions.length - 1] || {};
+
+	assert.deepEqual(requestedProjectSets, [['api'], ['api', 'web']]);
+	assert.deepEqual(widget.data.projects.map(project => project.project), ['api']);
+	assert.deepEqual(widget.data.branchProjects?.map(project => project.project), ['api', 'web']);
+	assert.equal(branchProjectsSnapshotOptions.includeChangeDetails, true);
+	assert.equal(branchProjectsSnapshotOptions.includeReviewState, false);
+	assert.equal(branchProjectsSnapshotOptions.includeRecentCommits, false);
+	service.dispose();
+});
+
+test('PromptDashboardService filters branch-widget uncommitted files by otherProjectsExcludedPaths', async () => {
+	resetConfigurationValues();
+	setConfigurationValues('promptManager.gitOverlay', {
+		otherProjectsExcludedPaths: ['dist', './logs/'],
+	});
+
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project, {
+					changeGroups: {
+						merge: [],
+						staged: [
+							{ project, path: 'dist/generated.ts', status: 'M', group: 'staged', conflicted: false, staged: true, fileSizeBytes: 0, additions: 1, deletions: 0, isBinary: false },
+							{ project, path: 'src/keep.ts', status: 'M', group: 'staged', conflicted: false, staged: true, fileSizeBytes: 0, additions: 2, deletions: 1, isBinary: false },
+						],
+						workingTree: [
+							{ project, path: 'logs/debug.txt', status: 'M', group: 'working-tree', conflicted: false, staged: false, fileSizeBytes: 0, additions: 1, deletions: 0, isBinary: false },
+						],
+						untracked: [],
+					},
+				})),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	try {
+		const widget = await service.refreshProjectsWidget(createPrompt({ projects: ['api'] }));
+
+		assert.deepEqual(
+			widget.data.projects[0]?.uncommittedFiles.map(file => file.path),
+			['src/keep.ts'],
+		);
+	} finally {
+		service.dispose();
+		resetConfigurationValues();
+	}
 });
 
 test('PromptDashboardService display refresh keeps commit and branch details lazy until requested', async () => {

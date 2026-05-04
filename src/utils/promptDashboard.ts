@@ -157,7 +157,7 @@ export function getPromptDashboardStatusProgress(status: PromptStatus, progress?
 
 	switch (status) {
 		case 'draft': return 10;
-		case 'in-progress': return 50;
+		case 'in-progress': return 0;
 		case 'stopped': return 60;
 		case 'cancelled': return 0;
 		case 'completed': return 70;
@@ -199,6 +199,7 @@ export interface PromptDashboardStatusSyncOptions {
 function resolvePromptDashboardStatusSyncProgress(
 	status: PromptStatus,
 	promptProgress: number | undefined,
+	snapshotStatus: PromptStatus,
 	snapshotProgress: number | undefined,
 	options?: PromptDashboardStatusSyncOptions,
 ): number {
@@ -214,6 +215,7 @@ function resolvePromptDashboardStatusSyncProgress(
 	if (
 		options?.preserveInProgressSnapshotProgress
 		&& status === 'in-progress'
+		&& snapshotStatus === 'in-progress'
 		&& typeof snapshotProgress === 'number'
 		&& Number.isFinite(snapshotProgress)
 		&& (normalizedPromptProgress === undefined || normalizedPromptProgress === fallbackProgress)
@@ -250,6 +252,7 @@ export function syncPromptDashboardStatusFromPrompt(
 		progress: resolvePromptDashboardStatusSyncProgress(
 			prompt.status,
 			prompt.progress,
+			snapshot.status.data.status,
 			snapshot.status.data.progress,
 			options,
 		),

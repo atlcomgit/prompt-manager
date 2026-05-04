@@ -22,8 +22,10 @@ interface PromptDashboardProps {
 	snapshot: PromptDashboardSnapshot | null;
 	busyAction?: string | null;
 	mode: 'full' | 'compact';
+	showGitFlowAction?: boolean;
 	onRefresh: () => void;
 	onHydrateProjectsDetails: (projects: string[], reason?: 'details' | 'dirty-files') => void;
+	onOpenGitFlow: () => void;
 	onOpenPrompt: (id: string, promptUuid?: string) => void;
 	onSwitchBranch: (project: string, branch: string) => void;
 	onSwitchBranches: (branchesByProject: Record<string, string>, source?: 'bulk' | 'prompt' | 'tracked') => void;
@@ -111,8 +113,10 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	snapshot,
 	busyAction,
 	mode,
+	showGitFlowAction = false,
 	onRefresh,
 	onHydrateProjectsDetails,
+	onOpenGitFlow,
 	onOpenPrompt,
 	onSwitchBranch,
 	onSwitchBranches,
@@ -122,11 +126,16 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const [expanded, setExpanded] = useState<ExpandedState>({});
 	const [branchDrafts, setBranchDrafts] = useState<Record<string, string>>({});
 	const [bulkBranchDraft, setBulkBranchDraft] = useState('');
+	const [showAllBranchProjects, setShowAllBranchProjects] = useState(false);
 	const [openingFileKey, setOpeningFileKey] = useState<string | null>(null);
 	const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
 	const [viewedFileKeys, setViewedFileKeys] = useState<Record<string, boolean>>({});
 	const openingFileTokenRef = useRef(0);
 	const projects = snapshot?.projects.data.projects || [];
+	const branchProjects = snapshot?.projects.data.branchProjects || projects;
+	const branchWidgetProjects = resolveBranchWidgetProjects(projects, branchProjects, showAllBranchProjects);
+	const hydrationProjects = mergePromptDashboardHydrationProjects(projects, branchProjects);
+	const canShowAllBranchProjects = branchProjects.length > projects.length;
 	const projectsCacheStatus = snapshot?.projects.cache.status || 'idle';
 	const activityCacheStatus = snapshot?.activity.cache.status || 'idle';
 	const statusCacheStatus = snapshot?.status.cache.status || 'idle';
@@ -171,14 +180,22 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	useEffect(() => {
 		setBranchDrafts({});
 		setBulkBranchDraft('');
+		setShowAllBranchProjects(false);
 		setActiveFileKey(null);
 		setViewedFileKeys({});
 	}, [snapshot?.scopeKey]);
 
 	// Drop stale branch drafts once refreshed project data confirms the branch is current again.
 	useEffect(() => {
-		setBranchDrafts(previous => reconcileBranchDrafts(projects, previous));
-	}, [projects]);
+		setBranchDrafts(previous => reconcileBranchDrafts(branchProjects, previous));
+	}, [branchProjects]);
+
+	// Collapse the workspace-wide view automatically when the current snapshot no longer exposes extra projects.
+	useEffect(() => {
+		if (!canShowAllBranchProjects) {
+			setShowAllBranchProjects(false);
+		}
+	}, [canShowAllBranchProjects]);
 
 	// Retry lazy details hydration for already-open blocks once the projects widget finishes refreshing.
 	useEffect(() => {
@@ -186,9 +203,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			if (!isExpanded) {
 				continue;
 			}
-			maybeHydrateExpandedDetails(key, projects, projectsCacheStatus, onHydrateProjectsDetails);
+			maybeHydrateExpandedDetails(key, hydrationProjects, projectsCacheStatus, onHydrateProjectsDetails);
 		}
-	}, [expanded, onHydrateProjectsDetails, projects, projectsCacheStatus]);
+	}, [expanded, hydrationProjects, onHydrateProjectsDetails, projectsCacheStatus]);
 
 	if (mode !== 'full') {
 		return null;
@@ -206,11 +223,11 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	};
 
 	const applyBranchDrafts = () => {
-		applyBranchTargets(buildChangedBranchTargets(projects, branchDrafts), 'bulk');
+		applyBranchTargets(buildChangedBranchTargets(branchWidgetProjects, branchDrafts), 'bulk');
 	};
 
 	const applyBranchPreset = (kind: 'prompt' | 'tracked') => {
-		applyBranchTargets(buildPresetBranchTargets(projects, kind), kind);
+		applyBranchTargets(buildPresetBranchTargets(branchWidgetProjects, kind), kind);
 	};
 
 	const applyProjectBranch = (project: PromptDashboardProjectSummary) => {
@@ -223,7 +240,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 
 	const applyBulkBranchDraft = (branch: string) => {
 		setBulkBranchDraft(branch);
-		setBranchDrafts(previous => buildBulkBranchDrafts(projects, previous, branch));
+		setBranchDrafts(previous => buildBulkBranchDrafts(branchWidgetProjects, previous, branch));
 	};
 
 	return (
@@ -244,7 +261,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			<div style={styles.widgetGrid}>
 				{renderStatus(snapshot, statusCacheStatus)}
 				{renderActivity(snapshot, onOpenPrompt, activityCacheStatus)}
-				{renderProjectBranches(projects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch)}
+				{renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow)}
 				{renderProjectCommits(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus)}
 				{renderReviewRequests(projects, projectsCacheStatus)}
 				{renderParallelBranchFiles(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus)}
@@ -253,6 +270,42 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		</aside>
 	);
 };
+
+/** Keeps the branch widget scoped to selected projects by default, with an optional workspace-wide toggle. */
+export function resolveBranchWidgetProjects(
+	selectedProjects: PromptDashboardProjectSummary[],
+	branchProjects: PromptDashboardProjectSummary[],
+	showAll: boolean,
+): PromptDashboardProjectSummary[] {
+	if (showAll || branchProjects.length === 0) {
+		return showAll ? branchProjects : selectedProjects;
+	}
+
+	const selectedNames = new Set(selectedProjects.map(project => project.project));
+	return branchProjects.filter(project => selectedNames.has(project.project));
+}
+
+/** Reuses richer branch-widget dirty-file stats without losing commit/parallel hydration state. */
+function mergePromptDashboardHydrationProjects(
+	selectedProjects: PromptDashboardProjectSummary[],
+	branchProjects: PromptDashboardProjectSummary[],
+): PromptDashboardProjectSummary[] {
+	const branchProjectsByName = new Map(branchProjects.map(project => [project.project, project] as const));
+	const mergedSelectedProjects = selectedProjects.map(project => {
+		const branchProject = branchProjectsByName.get(project.project);
+		if (!branchProject || branchProject.uncommittedFiles === project.uncommittedFiles) {
+			return project;
+		}
+
+		return {
+			...project,
+			uncommittedFiles: branchProject.uncommittedFiles,
+		};
+	});
+	const selectedNames = new Set(selectedProjects.map(project => project.project));
+	const extraBranchProjects = branchProjects.filter(project => !selectedNames.has(project.project));
+	return [...mergedSelectedProjects, ...extraBranchProjects];
+}
 
 /** Renders the colored marketplace pm mark used in the dashboard heading. */
 function PromptDashboardMark() {
@@ -461,6 +514,8 @@ function renderActivityGroup(
 
 function renderProjectBranches(
 	projects: PromptDashboardProjectSummary[],
+	showAllBranchProjects: boolean,
+	canShowAllBranchProjects: boolean,
 	expanded: ExpandedState,
 	branchDrafts: Record<string, string>,
 	bulkBranchDraft: string,
@@ -473,6 +528,9 @@ function renderProjectBranches(
 	applyBranchDrafts: () => void,
 	applyBranchPreset: (kind: 'prompt' | 'tracked') => void,
 	applyProjectBranch: (project: PromptDashboardProjectSummary) => void,
+	toggleShowAllBranchProjects: () => void,
+	showGitFlowAction: boolean,
+	onOpenGitFlow: () => void,
 ): React.ReactNode {
 	const changedCount = Object.keys(buildChangedBranchTargets(projects, branchDrafts)).length;
 	const sharedOptions = buildSharedBranchOptions(projects);
@@ -491,17 +549,31 @@ function renderProjectBranches(
 			<div style={styles.sectionBody}>
 				<label style={styles.bulkBranchRow}>
 					<span style={styles.bulkBranchLabel}>Для всех</span>
-					<select
-						value={bulkBranchDraft}
-						style={styles.branchSelect}
-						disabled={isSwitchBusy || projects.length === 0 || sharedOptions.length === 0}
-						onChange={event => applyBulkBranchDraft(event.target.value)}
-					>
-						<option value="">Не выбрано</option>
-						{sharedOptions.map(option => (
-							<option key={option.branch} value={option.branch}>{option.label}</option>
-						))}
-					</select>
+					<span style={styles.bulkBranchControls}>
+						<select
+							value={bulkBranchDraft}
+							style={styles.branchSelect}
+							disabled={isSwitchBusy || projects.length === 0 || sharedOptions.length === 0}
+							onChange={event => applyBulkBranchDraft(event.target.value)}
+						>
+							<option value="">Не выбрано</option>
+							{sharedOptions.map(option => (
+								<option key={option.branch} value={option.branch}>{option.label}</option>
+							))}
+						</select>
+						<button
+							type="button"
+							style={{
+								...styles.secondaryButton,
+								...((!canShowAllBranchProjects && !showAllBranchProjects) ? styles.disabledButton : null),
+							}}
+							disabled={!canShowAllBranchProjects && !showAllBranchProjects}
+							onClick={toggleShowAllBranchProjects}
+							title={showAllBranchProjects ? 'Вернуть только проекты из промпта' : 'Показать все проекты рабочей области'}
+						>
+							{showAllBranchProjects ? 'Только выбранные' : 'Показать все'}
+						</button>
+					</span>
 				</label>
 				<div style={styles.branchToolbar}>
 					<button type="button" style={{ ...styles.secondaryButton, ...(isPromptPresetBusy ? styles.busyButton : null), ...(isPromptPresetDisabled && !isPromptPresetBusy ? styles.disabledButton : null) }} onClick={() => applyBranchPreset('prompt')} title={hasPromptPresetBranch ? 'Сразу переключить каждый проект на его ветку из поля prompt branch' : 'У промпта не задана ветка Git'} disabled={isPromptPresetDisabled}>
@@ -520,6 +592,13 @@ function renderProjectBranches(
 						? renderLoadingEmptyState('Git-данные загружаются')
 						: <div style={styles.emptyText}>Нет Git-данных по проектам</div>
 				) : projects.map((project, index) => renderBranchProject(project, index, expanded, branchDrafts, busyAction, fileHandlers, setBranchDrafts, toggleExpanded, applyProjectBranch))}
+				{showGitFlowAction ? (
+					<div style={styles.branchFooterActions}>
+						<button type="button" style={styles.secondaryButton} onClick={onOpenGitFlow} title="Открыть Git flow">
+							Git flow
+						</button>
+					</div>
+				) : null}
 			</div>
 		</section>
 	);
@@ -717,26 +796,35 @@ function renderParallelBranchFiles(
 	fileHandlers: FileRowActionHandlers,
 	cacheStatus: PromptDashboardLoadStatus,
 ): React.ReactNode {
+	const projectGroups = projects
+		.map(project => ({ project, branches: resolveVisibleParallelBranches(project.parallelBranches) }))
+		.filter(item => item.branches.length > 0 || item.project.conflictFiles.length > 0);
+	const totalVisibleBranches = projectGroups.reduce((count, item) => count + item.branches.length, 0);
 	return (
 		<section style={styles.section}>
 			<div style={styles.sectionHeader}>
 				<span style={styles.sectionTitle}>Параллельные ветки</span>
-				{renderSectionMeta(projects.reduce((count, project) => count + project.parallelBranches.length, 0) || '...', cacheStatus, 'обновляем')}
+				{renderSectionMeta(totalVisibleBranches || '...', cacheStatus, 'обновляем')}
 			</div>
 			<div style={styles.sectionBody}>
-				{projects.length === 0 ? cacheStatus === 'loading' ? renderLoadingEmptyState('Данные по веткам загружаются') : <div style={styles.emptyText}>Нет данных по параллельным веткам</div> : projects.map(project => (
+				{projectGroups.length === 0 ? cacheStatus === 'loading' ? renderLoadingEmptyState('Данные по веткам загружаются') : <div style={styles.emptyText}>Нет данных по параллельным веткам</div> : projectGroups.map(({ project, branches }) => (
 					<div key={project.project} style={styles.projectBlock}>
 						<div style={styles.projectHeader}>
 							<div style={styles.projectName}>{project.project}</div>
-							<span style={styles.sectionMeta}>{project.parallelBranches.length}</span>
+							<span style={styles.sectionMeta}>{branches.length}</span>
 						</div>
-						{renderParallelBranches(project, expanded, toggleExpanded, fileHandlers)}
+						{renderParallelBranches(project, branches, expanded, toggleExpanded, fileHandlers)}
 						{renderConflictFiles(project, fileHandlers)}
 					</div>
 				))}
 			</div>
 		</section>
 	);
+}
+
+/** Hides hydrated parallel branches that ended up with no unique files compared to the base branch. */
+export function resolveVisibleParallelBranches(branches: GitOverlayParallelBranchSummary[]): GitOverlayParallelBranchSummary[] {
+	return branches.filter(branch => branch.detailsHydrated === false || branch.affectedFiles.length > 0 || branch.potentialConflicts.length > 0);
 }
 
 function renderProjectCommits(
@@ -984,16 +1072,17 @@ function renderCommit(
 
 function renderParallelBranches(
 	project: PromptDashboardProjectSummary,
+	branches: GitOverlayParallelBranchSummary[],
 	expanded: ExpandedState,
 	toggleExpanded: (key: string) => void,
 	fileHandlers: FileRowActionHandlers,
 ): React.ReactNode {
-	if (project.parallelBranches.length === 0) {
+	if (branches.length === 0) {
 		return null;
 	}
 	return (
 		<div style={styles.detailGroup}>
-			{project.parallelBranches.map(branch => renderParallelBranch(project, branch, expanded, toggleExpanded, fileHandlers))}
+			{branches.map(branch => renderParallelBranch(project, branch, expanded, toggleExpanded, fileHandlers))}
 		</div>
 	);
 }
@@ -1381,24 +1470,51 @@ function renderLineStats(
 	compact = false,
 	options?: { hideUnknown?: boolean },
 ): React.ReactNode {
-	if (stats.kind === 'binary') {
+	const visibleParts = resolveVisibleLineStatsParts(stats, options);
+	if (visibleParts === 'binary') {
 		return <span style={styles.fileLineStatsSpecial}>(bin)</span>;
 	}
-	if (stats.kind === 'unknown') {
-		if (options?.hideUnknown) {
-			return null;
-		}
+	if (visibleParts === 'unknown') {
 		return <span style={styles.fileLineStatsSpecial}>(—)</span>;
+	}
+	if (!visibleParts || visibleParts.length === 0) {
+		return null;
 	}
 	return (
 		<span style={compact ? styles.fileLineStatsCompact : styles.fileLineStats}>
 			<span style={styles.fileLineStatParen}>(</span>
-			<span style={styles.fileLineStatAdded}>+{stats.added}</span>
-			{stats.changed > 0 ? <span style={styles.fileLineStatChanged}>~{stats.changed}</span> : null}
-			<span style={styles.fileLineStatDeleted}>-{stats.deleted}</span>
+			{visibleParts.map(part => part.startsWith('+')
+				? <span key={part} style={styles.fileLineStatAdded}>{part}</span>
+				: part.startsWith('~')
+					? <span key={part} style={styles.fileLineStatChanged}>{part}</span>
+					: <span key={part} style={styles.fileLineStatDeleted}>{part}</span>)}
 			<span style={styles.fileLineStatParen}>)</span>
 		</span>
 	);
+}
+
+/** Removes zero-valued +0 and -0 counters while keeping binary and unknown states explicit. */
+export function resolveVisibleLineStatsParts(
+	stats: { added: number; changed: number; deleted: number; kind: 'diff' | 'binary' | 'unknown' },
+	options?: { hideUnknown?: boolean },
+): string[] | 'binary' | 'unknown' | null {
+	if (stats.kind === 'binary') {
+		return 'binary';
+	}
+	if (stats.kind === 'unknown') {
+		return options?.hideUnknown ? null : 'unknown';
+	}
+	const parts: string[] = [];
+	if (stats.added > 0) {
+		parts.push(`+${stats.added}`);
+	}
+	if (stats.changed > 0) {
+		parts.push(`~${stats.changed}`);
+	}
+	if (stats.deleted > 0) {
+		parts.push(`-${stats.deleted}`);
+	}
+	return parts.length > 0 ? parts : null;
 }
 
 function isBranchSwitchBusy(busyAction: DashboardBusyAction): boolean {
@@ -1832,6 +1948,14 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '8px',
 		minWidth: 0,
 	},
+	// Сетка селекта и toggle-кнопки в правой части общего branch-строка.
+	bulkBranchControls: {
+		display: 'grid',
+		gridTemplateColumns: 'minmax(0, 1fr) auto',
+		alignItems: 'center',
+		gap: '8px',
+		minWidth: 0,
+	},
 	// Короткая подпись слева от общего селекта ветки.
 	bulkBranchLabel: {
 		fontSize: '11px',
@@ -2052,6 +2176,11 @@ const styles: Record<string, React.CSSProperties> = {
 		fontSize: '11px',
 		lineHeight: 1.45,
 		color: 'var(--vscode-descriptionForeground)',
+	},
+	branchFooterActions: {
+		display: 'flex',
+		justifyContent: 'flex-end',
+		marginTop: '2px',
 	},
 	// Основная цветная кнопка действия внутри виджета.
 	primaryButton: {

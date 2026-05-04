@@ -1,3 +1,12 @@
+## 116: Скрывать закрытые промпты
+
+- Дата: 2026-05-04.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Dashboard prompt editor обновлён так, чтобы `Активные промпты` скрывали closed-подсказки, `Ветки проектов` могли временно показывать все workspace-проекты через отдельный branch-only scope, dirty-file disclosure игнорировал path prefixes из `Prompt Manager › Git Overlay: Other Projects Excluded Paths`, нулевые `+0` / `-0` counters не рендерились, а `Параллельные ветки` скрывали уже гидратированные ветки без уникальных файлов.
+- Ключевые моменты: `PromptDashboardProjectsData` получил отдельный `branchProjects` список только для branch widget, чтобы остальные dashboard cards оставались в prompt scope; `PromptDashboardService` собирает этот workspace-wide branch scope отдельным лёгким Git snapshot path с подробными dirty-file stats и одновременно отфильтровывает branch-widget uncommitted files по `otherProjectsExcludedPaths`; `PromptDashboard` по умолчанию оставляет branch widget prompt-scoped, переключает его на workspace rows только через локальный toggle `Показать все`, скрывает fully hydrated parallel rows без unique changes и больше не выводит нулевые `+0` / `-0` line-stat tokens; regression tests покрывают hidden closed activity rows, workspace-wide `branchProjects`, excluded-path filtering, show-all helper, zero-stat rendering и hidden empty parallel branches.
+- Файлы: src/types/promptDashboard.ts, src/services/promptDashboardService.ts, src/webview/editor/components/PromptDashboard.tsx, tests/promptDashboardService.test.ts, tests/promptDashboardComponent.test.tsx, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
 ## 128: Keep hydrated parallel-branch rows stable when prompt branch is missing
 
 - Дата: 2026-05-04.

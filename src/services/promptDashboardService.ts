@@ -4,6 +4,7 @@ import type { GitService } from './gitService.js';
 import type { StorageService } from './storageService.js';
 import type { WorkspaceService } from './workspaceService.js';
 import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
+import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 import type { Prompt, PromptConfig } from '../types/prompt.js';
 import type { GitOverlayChangeFile, GitOverlayProjectSnapshot } from '../types/git.js';
 import type {
@@ -31,6 +32,7 @@ import {
 	resolvePromptDashboardCacheState,
 	splitPromptDashboardActivityByDay,
 } from '../utils/promptDashboard.js';
+import { normalizeGitOverlayOtherProjectsExcludedPaths } from '../utils/gitOverlay.js';
 import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 import { resolveEffectiveProjectNames } from '../utils/projectScope.js';
 
@@ -674,7 +676,7 @@ export class PromptDashboardService implements vscode.Disposable {
 	): PromptDashboardProjectsData {
 		const scopeErrors = this.branchSwitchErrorsByScope.get(buildPromptDashboardScopeKey(scope));
 		let changed = false;
-		const projects = data.projects.map(project => {
+		const decorateProjectList = (projects: PromptDashboardProjectSummary[]): PromptDashboardProjectSummary[] => projects.map(project => {
 			const branchSwitchError = scopeErrors?.[project.project] || '';
 			if ((project.branchSwitchError || '') === branchSwitchError) {
 				return project;
@@ -685,7 +687,16 @@ export class PromptDashboardService implements vscode.Disposable {
 				branchSwitchError,
 			};
 		});
-		return changed ? { projects } : data;
+		const projects = decorateProjectList(data.projects);
+		const branchProjects = data.branchProjects
+			? decorateProjectList(data.branchProjects)
+			: data.branchProjects;
+		return changed
+			? {
+				projects,
+				...(branchProjects ? { branchProjects } : {}),
+			}
+			: data;
 	}
 
 	private buildAnalysisWidgetFromCache(
@@ -807,7 +818,31 @@ export class PromptDashboardService implements vscode.Disposable {
 			}
 		}
 
-		return { projects: mergedProjects };
+		return {
+			projects: mergedProjects,
+			...(nextData.branchProjects !== undefined
+				? { branchProjects: nextData.branchProjects }
+				: (currentData.branchProjects !== undefined ? { branchProjects: currentData.branchProjects } : {})),
+		};
+	}
+
+	/** Keeps branch-widget workspace scope stable without widening the other dashboard widgets. */
+	private hasSameProjectNameSet(left: string[], right: string[]): boolean {
+		if (left.length !== right.length) {
+			return false;
+		}
+
+		const leftSet = new Set(left.map(project => project.trim()).filter(Boolean));
+		return right.every(project => leftSet.has(project.trim()));
+	}
+
+	/** Reads the Git Overlay excluded-path prefixes that the branch widget should ignore. */
+	private getPromptDashboardExcludedPaths(): string[] {
+		return normalizeGitOverlayOtherProjectsExcludedPaths(
+			vscode.workspace
+				.getConfiguration('promptManager.gitOverlay')
+				.get<string[]>('otherProjectsExcludedPaths', []) ?? [],
+		);
 	}
 
 	/** Refreshes detailed file data only for selected projects instead of refetching every dashboard row. */
@@ -1274,6 +1309,10 @@ export class PromptDashboardService implements vscode.Disposable {
 		const items: PromptDashboardPromptActivityItem[] = [];
 
 		for (const { prompt, dailyData } of promptDailyData) {
+			if (prompt.status === 'closed') {
+				continue;
+			}
+
 			for (const [day, key] of [['today', todayKey], ['yesterday', previousDayKey]] as const) {
 				if (!key) {
 					continue;
@@ -1343,11 +1382,13 @@ export class PromptDashboardService implements vscode.Disposable {
 		projectNamesOverride?: string[],
 	): Promise<PromptDashboardProjectsData> {
 		const paths = this.workspaceService.getWorkspaceFolderPaths();
+		const workspaceProjectNames = resolveEffectiveProjectNames([], Array.from(paths.keys()));
 		const requestedProjectNames = projectNamesOverride && projectNamesOverride.length > 0
 			? projectNamesOverride
 			: scope.projectNames;
 		const projectNames = resolveEffectiveProjectNames(requestedProjectNames, Array.from(paths.keys()));
 		const trackedBranches = this.resolveTrackedBranches(scope, projectNames);
+		const excludedPaths = this.getPromptDashboardExcludedPaths();
 		const lightReactiveRefresh = mode === 'reactive-branches';
 		const dirtyOnlyDetailsRefresh = mode === 'dirty-details';
 		// Keep AI follow-up refreshes light and reuse cached trees until explicit details hydration runs.
@@ -1407,12 +1448,12 @@ export class PromptDashboardService implements vscode.Disposable {
 				? this.mergeCachedUncommittedFileDetails(
 					project,
 					trackedBranch,
-					this.collectProjectUncommittedFiles(project),
+					this.collectProjectUncommittedFiles(project, excludedPaths),
 					cachedProject,
 				)
-				: this.collectProjectUncommittedFiles(project);
+				: this.collectProjectUncommittedFiles(project, excludedPaths);
 			if (lightReactiveRefresh) {
-				return this.buildReactiveProjectSummary(scope, project, snapshot.trackedBranches, cachedProject);
+				return this.buildReactiveProjectSummary(scope, project, snapshot.trackedBranches, cachedProject, excludedPaths);
 			}
 			if (dirtyOnlyDetailsRefresh) {
 				return this.buildDirtyDetailsProjectSummary(scope, project, trackedBranch, uncommittedFiles, cachedProject);
@@ -1473,7 +1514,74 @@ export class PromptDashboardService implements vscode.Disposable {
 		});
 		this.ensureScopeActive(scope);
 
-		return { projects };
+		const branchProjects = projectNamesOverride && projectNamesOverride.length > 0
+			? undefined
+			: (this.hasSameProjectNameSet(projectNames, workspaceProjectNames)
+				? projects
+				: await this.loadBranchWidgetProjectsData(scope, paths, workspaceProjectNames, excludedPaths));
+
+		return branchProjects !== undefined
+			? { projects, branchProjects }
+			: { projects };
+	}
+
+	/** Loads lightweight branch-widget rows for every workspace project without widening the rest of the dashboard. */
+	private async loadBranchWidgetProjectsData(
+		scope: PromptDashboardScope,
+		paths: Map<string, string>,
+		projectNames: string[],
+		excludedPaths: string[],
+	): Promise<PromptDashboardProjectSummary[]> {
+		if (projectNames.length === 0) {
+			return [];
+		}
+
+		const trackedBranches = this.resolveTrackedBranches(scope, projectNames);
+		const snapshot = await this.gitService.getGitOverlaySnapshot(
+			paths,
+			projectNames,
+			scope.promptBranch,
+			trackedBranches,
+			{
+				detailLevel: 'full',
+				includeChangeDetails: true,
+				includeBranchDetails: true,
+				includeReviewState: false,
+				includeRecentCommits: false,
+			},
+		);
+		this.ensureScopeActive(scope);
+
+		return snapshot.projects.map((project) => {
+			const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshot.trackedBranches);
+			const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
+			return {
+				project: project.project,
+				repositoryPath: project.repositoryPath,
+				available: project.available,
+				error: project.error,
+				branchSwitchError: '',
+				currentBranch: project.currentBranch,
+				promptBranch: project.promptBranch,
+				trackedBranch,
+				dirty: project.dirty,
+				hasConflicts: project.hasConflicts,
+				ahead: project.ahead,
+				behind: project.behind,
+				branches: project.branches,
+				branchActions: buildPromptDashboardBranchActions({
+					promptBranch: project.promptBranch,
+					trackedBranch,
+					branches: project.branches,
+				}),
+				recentCommits: [],
+				review: project.review,
+				pipeline: null,
+				parallelBranches: [],
+				conflictFiles,
+				uncommittedFiles: this.collectProjectUncommittedFiles(project, excludedPaths),
+			} satisfies PromptDashboardProjectSummary;
+		});
 	}
 
 	/** Refresh only dirty-file counters for an expanded project row and preserve other cached widget sections. */
@@ -1781,9 +1889,10 @@ export class PromptDashboardService implements vscode.Disposable {
 		project: GitOverlayProjectSnapshot,
 		snapshotTrackedBranches: string[],
 		cachedProject?: PromptDashboardProjectSummary,
+		excludedPaths: string[] = [],
 	): PromptDashboardProjectSummary {
 		const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshotTrackedBranches);
-		const uncommittedFiles = this.collectProjectUncommittedFiles(project);
+		const uncommittedFiles = this.collectProjectUncommittedFiles(project, excludedPaths);
 		const reusableCachedProject = cachedProject && project.available && !project.error
 			? cachedProject
 			: null;
@@ -1821,13 +1930,15 @@ export class PromptDashboardService implements vscode.Disposable {
 	}
 
 	/** Collects all not-yet-committed project files for the branches widget notice. */
-	private collectProjectUncommittedFiles(project: GitOverlayProjectSnapshot): GitOverlayChangeFile[] {
+	private collectProjectUncommittedFiles(project: GitOverlayProjectSnapshot, excludedPaths: string[] = []): GitOverlayChangeFile[] {
 		return [
 			...(project.changeGroups.merge || []),
 			...(project.changeGroups.staged || []),
 			...(project.changeGroups.workingTree || []),
 			...(project.changeGroups.untracked || []),
-		].filter(file => Boolean(String(file.path || '').trim()));
+		]
+			.filter(file => Boolean(String(file.path || '').trim()))
+			.filter(file => excludedPaths.length === 0 || !shouldIgnoreRealtimeRefreshPath(file.path, excludedPaths));
 	}
 
 	/** Maps git-operation errors back to the project rows that triggered the branch switch. */

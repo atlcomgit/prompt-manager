@@ -399,7 +399,7 @@ test('shouldShowPromptChatLaunchBlock only keeps the launch block while launch i
 		chatRequestStarted: true,
 		chatLaunchCompletionHold: false,
 		chatRenameState: 'completed',
-	}), false);
+	}), true);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
 		status: 'in-progress',
@@ -407,6 +407,7 @@ test('shouldShowPromptChatLaunchBlock only keeps the launch block while launch i
 		chatRequestStarted: false,
 		chatLaunchCompletionHold: false,
 		chatRenameState: 'idle',
+		completionShownOnce: true,
 	}), false);
 
 	assert.equal(shouldShowPromptChatLaunchBlock({
@@ -424,6 +425,26 @@ test('shouldShowPromptChatLaunchBlock only keeps the launch block while launch i
 		chatRequestStarted: false,
 		chatLaunchCompletionHold: false,
 		chatRenameState: 'idle',
+	}), false);
+});
+
+test('shouldShowPromptChatLaunchBlock keeps the launch block visible on the first ready render before hold starts', () => {
+	assert.equal(shouldShowPromptChatLaunchBlock({
+		status: 'in-progress',
+		hasChatEntry: true,
+		chatRequestStarted: true,
+		chatLaunchCompletionHold: false,
+		chatRenameState: 'completed',
+		completionShownOnce: false,
+	}), true);
+
+	assert.equal(shouldShowPromptChatLaunchBlock({
+		status: 'in-progress',
+		hasChatEntry: true,
+		chatRequestStarted: true,
+		chatLaunchCompletionHold: false,
+		chatRenameState: 'completed',
+		completionShownOnce: true,
 	}), false);
 });
 

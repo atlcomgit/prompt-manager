@@ -17,9 +17,11 @@ export const ReportEditorApp: React.FC = () => {
   const [report, setReport] = useState('');
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
   const [reportHeight, setReportHeight] = useState<number | undefined>(undefined);
   const flushTimerRef = useRef<number | null>(null);
   const saveFeedbackTimerRef = useRef<number | null>(null);
+  const copyFeedbackTimerRef = useRef<number | null>(null);
   const lastActivityRef = useRef(Date.now());
   const pendingActivityRef = useRef(0);
   const lastSyncedReportRef = useRef('');
@@ -36,6 +38,13 @@ export const ReportEditorApp: React.FC = () => {
       saveFeedbackTimerRef.current = null;
     }
   }, []);
+
+  const clearCopyFeedbackTimer = useCallback(() => {
+		if (copyFeedbackTimerRef.current) {
+			window.clearTimeout(copyFeedbackTimerRef.current);
+			copyFeedbackTimerRef.current = null;
+		}
+	}, []);
 
   const flushReport = useCallback((nextReport: string) => {
     if (!promptId) {
@@ -87,6 +96,21 @@ export const ReportEditorApp: React.FC = () => {
     pendingActivityRef.current = 0;
   }, [clearSaveFeedbackTimer, logReportDebug, promptId, report, saveState]);
 
+  const copyReport = useCallback(() => {
+    if (!report.trim() || typeof navigator === 'undefined' || typeof navigator.clipboard?.writeText !== 'function') {
+      return;
+    }
+
+    navigator.clipboard.writeText(report).then(() => {
+      clearCopyFeedbackTimer();
+      setCopyState('copied');
+      copyFeedbackTimerRef.current = window.setTimeout(() => {
+        setCopyState('idle');
+        copyFeedbackTimerRef.current = null;
+      }, 1800);
+    }).catch(() => undefined);
+  }, [clearCopyFeedbackTimer, report]);
+
   const scheduleFlush = useCallback((nextReport: string, delayMs: number) => {
     if (flushTimerRef.current) {
       window.clearTimeout(flushTimerRef.current);
@@ -112,6 +136,8 @@ export const ReportEditorApp: React.FC = () => {
         hasUnsyncedLocalChangesRef.current = false;
         setIsGeneratingReport(false);
         clearSaveFeedbackTimer();
+    		clearCopyFeedbackTimer();
+    		setCopyState('idle');
         setSaveState('idle');
         lastActivityRef.current = Date.now();
         pendingActivityRef.current = 0;
@@ -125,6 +151,8 @@ export const ReportEditorApp: React.FC = () => {
         hasUnsyncedLocalChangesRef.current = false;
         setIsGeneratingReport(false);
         clearSaveFeedbackTimer();
+    		clearCopyFeedbackTimer();
+    		setCopyState('idle');
         setSaveState('idle');
         lastActivityRef.current = Date.now();
         pendingActivityRef.current = 0;
@@ -150,6 +178,8 @@ export const ReportEditorApp: React.FC = () => {
         lastSyncedReportRef.current = typeof msg.report === 'string' ? msg.report : '';
         hasUnsyncedLocalChangesRef.current = false;
         clearSaveFeedbackTimer();
+    		clearCopyFeedbackTimer();
+    		setCopyState('idle');
         setSaveState('idle');
         lastActivityRef.current = Date.now();
         pendingActivityRef.current = 0;
@@ -221,6 +251,7 @@ export const ReportEditorApp: React.FC = () => {
         flushTimerRef.current = null;
       }
       clearSaveFeedbackTimer();
+		clearCopyFeedbackTimer();
       if (shouldFlushOnUnmount) {
         logReportDebug('cleanup.flushOnUnmount', {
           promptId,
@@ -231,7 +262,7 @@ export const ReportEditorApp: React.FC = () => {
         flushReport(reportRef.current);
       }
     };
-  }, [clearSaveFeedbackTimer, flushReport, logReportDebug, promptId]);
+  }, [clearCopyFeedbackTimer, clearSaveFeedbackTimer, flushReport, logReportDebug, promptId]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -256,6 +287,7 @@ export const ReportEditorApp: React.FC = () => {
     : saveState === 'saved'
       ? t('editor.saved')
       : t('editor.save');
+  const copyLabel = copyState === 'copied' ? t('editor.copied') : t('editor.copy');
 
   return (
     <div style={styles.container}>
@@ -265,19 +297,33 @@ export const ReportEditorApp: React.FC = () => {
             <h2 style={styles.title}>{t('editor.workResult')}</h2>
             <div style={styles.subtitle}>{title || promptId || '...'}</div>
           </div>
-          <button
-            type="button"
-            style={{
-              ...styles.saveButton,
-              ...(saveState === 'saved' ? styles.saveButtonSaved : null),
-              ...((!promptId || saveState === 'saving') ? styles.saveButtonDisabled : null),
-            }}
-            onClick={saveReport}
-            disabled={!promptId || saveState === 'saving'}
-            title="Ctrl+S"
-          >
-            {saveLabel}
-          </button>
+          <div style={styles.headerActions}>
+            <button
+              type="button"
+              style={{
+                ...styles.copyButton,
+                ...(copyState === 'copied' ? styles.copyButtonCopied : null),
+                ...(!report.trim() ? styles.actionButtonDisabled : null),
+              }}
+              onClick={copyReport}
+              disabled={!report.trim()}
+            >
+              {copyLabel}
+            </button>
+            <button
+              type="button"
+              style={{
+                ...styles.saveButton,
+                ...(saveState === 'saved' ? styles.saveButtonSaved : null),
+                ...((!promptId || saveState === 'saving') ? styles.actionButtonDisabled : null),
+              }}
+              onClick={saveReport}
+              disabled={!promptId || saveState === 'saving'}
+              title="Ctrl+S"
+            >
+              {saveLabel}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -361,6 +407,11 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
     gap: '12px',
   },
+  headerActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
   headerText: {
     display: 'flex',
     flexDirection: 'column',
@@ -390,11 +441,24 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     whiteSpace: 'nowrap',
   },
+  copyButton: {
+    border: '1px solid var(--vscode-button-secondaryBorder, var(--vscode-button-border, transparent))',
+    background: 'var(--vscode-button-secondaryBackground)',
+    color: 'var(--vscode-button-secondaryForeground)',
+    borderRadius: '6px',
+    padding: '6px 12px',
+    fontSize: '12px',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
   saveButtonSaved: {
     background: 'var(--vscode-button-secondaryBackground)',
     color: 'var(--vscode-button-secondaryForeground)',
   },
-  saveButtonDisabled: {
+  copyButtonCopied: {
+    background: 'color-mix(in srgb, var(--vscode-button-secondaryBackground) 70%, var(--vscode-testing-iconPassed) 30%)',
+  },
+  actionButtonDisabled: {
     border: 'none',
     opacity: 0.6,
     cursor: 'not-allowed',

@@ -1095,6 +1095,90 @@ test('postGitOverlaySnapshot posts selected projects first and other projects la
 	assert.equal(typeof otherProjectsMetric.payload?.durationMs, 'number');
 });
 
+test('postGitOverlaySnapshot keeps freshly created review requests visible when the first reread is still stale', async () => {
+	const { manager } = await createManager();
+	const postedMessages: any[] = [];
+	const postMessage = (message: unknown) => {
+		postedMessages.push(message);
+	};
+	const currentPrompt = createPrompt({
+		projects: ['selected'],
+		branch: 'feature/task-42',
+	});
+	const optimisticRequest = {
+		id: '101',
+		number: '101',
+		title: 'Draft: Review overlay keeps progress',
+		url: 'https://gitlab.example.com/acme/selected/-/merge_requests/101',
+		state: 'open',
+		createdAt: '2026-04-24T10:00:00.000Z',
+		updatedAt: '2026-04-24T10:00:00.000Z',
+		sourceBranch: 'feature/task-42',
+		targetBranch: 'main',
+		isDraft: true,
+		comments: [],
+	};
+
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['selected', '/tmp/selected'],
+		]),
+		getWorkspaceFolders: () => ['selected'],
+	};
+	(manager as any).gitService = {
+		getGitOverlaySnapshot: async () => ({
+			generatedAt: '2026-04-24T00:00:00.000Z',
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [createGitOverlayProjectSnapshot('selected', {
+				review: {
+					remote: {
+						provider: 'gitlab',
+						host: 'gitlab.example.com',
+						remoteName: 'origin',
+						remoteUrl: 'https://gitlab.example.com/acme/selected.git',
+						repositoryPath: 'acme/selected',
+						owner: 'acme',
+						name: 'selected',
+						supported: true,
+						cliCommand: 'glab',
+						cliAvailable: true,
+						actionLabel: 'Merge request',
+					},
+					request: null,
+					error: '',
+					setupAction: null,
+					titlePrefix: '',
+					unsupportedReason: null,
+				},
+			})],
+		}),
+	};
+	(manager as any).gitOverlaySessions.set('panel-a', {
+		active: true,
+		promptBranch: 'feature/task-42',
+		selectedProjects: ['selected'],
+		snapshotProjects: ['selected'],
+		snapshotVersion: 0,
+		postMessage,
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+
+	await (manager as any).postGitOverlaySnapshot(postMessage, currentPrompt, 'feature/task-42', ['selected'], {
+		optimisticReviewRequestsByProject: {
+			selected: optimisticRequest,
+		},
+	});
+
+	assert.equal(postedMessages.length, 1);
+	assert.equal(postedMessages[0]?.type, 'gitOverlaySnapshot');
+	assert.deepEqual(postedMessages[0]?.snapshot?.projects?.[0]?.review?.request, optimisticRequest);
+});
+
 test('postGitOverlaySnapshot can skip lazy other-project scheduling for initial summary open', async () => {
 	const { manager } = await createManager();
 	const postedMessages: any[] = [];
@@ -4350,6 +4434,65 @@ test('status-change savePrompt clears visible saving before post-save sync compl
 	postSaveSync.resolve();
 	await savePromise;
 	assert.equal(saveSettled, true);
+
+	resetVsCodeCommandMock();
+});
+
+test('reportEditorSave pushes the saved report back into the main prompt panel state', async () => {
+	resetVsCodeCommandMock();
+	vscodeCreatedWebviewPanels.length = 0;
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'completed',
+			report: 'Stored report',
+		},
+	});
+
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'completed',
+		report: 'Stored report',
+	});
+	const postedMessages: any[] = [];
+	const mainPanel = {
+		title: 'Prompt title',
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+
+	await (manager as any).openPromptReportInEditor(
+		'__prompt_editor_singleton__',
+		currentPrompt,
+		(message: unknown) => {
+			postedMessages.push(message);
+		},
+		mainPanel,
+	);
+
+	const reportPanel = vscodeCreatedWebviewPanels[vscodeCreatedWebviewPanels.length - 1];
+	assert.ok(reportPanel);
+
+	await reportPanel.emitMessage({
+		type: 'reportEditorSave',
+		promptId: 'prompt-a',
+		report: 'Updated report',
+		previousReport: 'Stored report',
+		activityDeltaMs: 0,
+	});
+
+	assert.equal(getStoredPrompt()?.report, 'Updated report');
+	assert.equal(currentPrompt.report, 'Updated report');
+	assert.ok(postedMessages.some((message) => (message as any)?.type === 'reportContentUpdated' && (message as any)?.report === 'Updated report'));
 
 	resetVsCodeCommandMock();
 });

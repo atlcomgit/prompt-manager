@@ -4,6 +4,7 @@
  * statistics, and settings.
  */
 
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { normalizeHistoryAnalysisLimit } from '../utils/historyAnalysisLimit.js';
@@ -24,14 +25,20 @@ import type { MemoryEmbeddingService } from '../services/memoryEmbeddingService.
 import type { MemoryAnalyzerService } from '../services/memoryAnalyzerService.js';
 import type { MemoryGitHookService } from '../services/memoryGitHookService.js';
 import type { CodeMapAdminService } from '../codemap/codeMapAdminService.js';
+import type { WorkspaceService } from '../services/workspaceService.js';
 import type {
+	KnowledgeGraphData,
 	ManualAnalysisCommitRow,
 	ManualAnalysisEventEntry,
 	ManualAnalysisRepositoryProgress,
 	ManualAnalysisRunStatus,
 	ManualAnalysisSnapshot,
 	MemoryAvailableModel,
+	MemoryCategory,
+	MemoryCommit,
+	MemoryFilter,
 	MemorySettings,
+	MemoryStatistics,
 	MemoryWebviewToExtensionMessage,
 	MemoryExtensionToWebviewMessage,
 	MemorySearchResult,
@@ -39,6 +46,7 @@ import type {
 import { DEFAULT_MEMORY_SETTINGS } from '../types/memory.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
+const MEMORY_STATS_FETCH_LIMIT = 999999;
 
 interface ManualAnalysisCommitRuntime extends ManualAnalysisCommitRow {
 	repoPath: string;
@@ -67,9 +75,189 @@ export class MemoryPanelManager {
 		private readonly embedding: MemoryEmbeddingService,
 		private readonly analyzer: MemoryAnalyzerService,
 		private readonly gitHook: MemoryGitHookService,
+		private readonly workspaceService: WorkspaceService,
 		private readonly aiService?: AiService,
 		private readonly codeMapAdmin?: CodeMapAdminService,
 	) { }
+
+	private getExcludedRepositoryNames(): Set<string> {
+		return new Set(
+			this.workspaceService
+				.getExcludedRepositoryNames()
+				.map((repository) => repository.trim())
+				.filter(Boolean),
+		);
+	}
+
+	private isRepositoryExcluded(repository: string | undefined | null): boolean {
+		const normalizedRepository = (repository || '').trim();
+		return normalizedRepository.length > 0 && this.getExcludedRepositoryNames().has(normalizedRepository);
+	}
+
+	private getVisibleWorkspaceFolders(): readonly vscode.WorkspaceFolder[] {
+		const excluded = this.getExcludedRepositoryNames();
+		return (vscode.workspace.workspaceFolders || []).filter((folder) => {
+			return !excluded.has(folder.name) && !excluded.has(path.basename(folder.uri.fsPath));
+		});
+	}
+
+	private getAllowedRepositories(requestedRepositories?: string[]): string[] {
+		const excluded = this.getExcludedRepositoryNames();
+		const normalizedRequested = (requestedRepositories || [])
+			.map((repository) => repository.trim())
+			.filter(Boolean);
+
+		if (normalizedRequested.length > 0) {
+			return normalizedRequested.filter((repository) => !excluded.has(repository));
+		}
+
+		return this.db.getRepositories().filter((repository) => !excluded.has(repository));
+	}
+
+	private async getVisibleCommits(filter: MemoryFilter = {}): Promise<{ commits: MemoryCommit[]; total: number }> {
+		const excluded = this.getExcludedRepositoryNames();
+		if (excluded.size === 0) {
+			return this.db.getCommits(filter);
+		}
+
+		const repositories = this.getAllowedRepositories(filter.repositories);
+		if (repositories.length === 0) {
+			return { commits: [], total: 0 };
+		}
+
+		return this.db.getCommits({
+			...filter,
+			repositories,
+		});
+	}
+
+	private buildEmptyMemoryStatistics(): MemoryStatistics {
+		return {
+			totalCommits: 0,
+			totalAnalyses: 0,
+			totalEmbeddings: 0,
+			dbSizeBytes: this.db.getDbSize(),
+			topAuthors: [],
+			hotFiles: [],
+			categoryDistribution: [],
+			analysisModels: [],
+			commitsPerDay: [],
+		};
+	}
+
+	private async getVisibleStatistics(): Promise<MemoryStatistics> {
+		const excluded = this.getExcludedRepositoryNames();
+		if (excluded.size === 0) {
+			return this.db.getStatistics();
+		}
+
+		const repositories = this.getAllowedRepositories();
+		if (repositories.length === 0) {
+			return this.buildEmptyMemoryStatistics();
+		}
+
+		const { commits } = this.db.getCommits({
+			repositories,
+			limit: MEMORY_STATS_FETCH_LIMIT,
+			offset: 0,
+		});
+
+		const topAuthors = new Map<string, number>();
+		const hotFiles = new Map<string, number>();
+		const categories = new Map<MemoryCategory, number>();
+		const analysisModels = new Map<string, number>();
+		const commitsPerDay = new Map<string, number>();
+		const cutoffTime = Date.now() - (30 * 24 * 60 * 60 * 1000);
+		let totalAnalyses = 0;
+		let totalEmbeddings = 0;
+
+		for (const commit of commits) {
+			topAuthors.set(commit.author, (topAuthors.get(commit.author) || 0) + 1);
+			const commitDate = new Date(commit.date);
+			if (!Number.isNaN(commitDate.getTime()) && commitDate.getTime() >= cutoffTime) {
+				const dayKey = commit.date.slice(0, 10);
+				commitsPerDay.set(dayKey, (commitsPerDay.get(dayKey) || 0) + 1);
+			}
+
+			const analysis = this.db.getAnalysis(commit.sha);
+			if (analysis) {
+				totalAnalyses += 1;
+				for (const category of analysis.categories) {
+					categories.set(category, (categories.get(category) || 0) + 1);
+				}
+				if (analysis.aiModel) {
+					analysisModels.set(analysis.aiModel, (analysisModels.get(analysis.aiModel) || 0) + 1);
+				}
+			}
+
+			if (this.db.hasEmbedding(commit.sha)) {
+				totalEmbeddings += 1;
+			}
+
+			for (const fileChange of this.db.getFileChanges(commit.sha)) {
+				hotFiles.set(fileChange.filePath, (hotFiles.get(fileChange.filePath) || 0) + 1);
+			}
+		}
+
+		const toSortedEntries = <TKey extends string>(map: Map<TKey, number>) => {
+			return Array.from(map.entries())
+				.sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], 'ru', { sensitivity: 'base' }));
+		};
+
+		return {
+			totalCommits: commits.length,
+			totalAnalyses,
+			totalEmbeddings,
+			dbSizeBytes: this.db.getDbSize(),
+			topAuthors: toSortedEntries(topAuthors).slice(0, 10).map(([author, count]) => ({ author, count })),
+			hotFiles: toSortedEntries(hotFiles).slice(0, 10).map(([filePath, count]) => ({ filePath, count })),
+			categoryDistribution: toSortedEntries(categories).map(([category, count]) => ({ category, count })),
+			analysisModels: toSortedEntries(analysisModels).map(([model, count]) => ({ model, count })),
+			commitsPerDay: toSortedEntries(commitsPerDay).map(([date, count]) => ({ date, count })),
+		};
+	}
+
+	private filterKnowledgeGraph(graph: KnowledgeGraphData): KnowledgeGraphData {
+		const excluded = this.getExcludedRepositoryNames();
+		if (excluded.size === 0) {
+			return graph;
+		}
+
+		const nodes = graph.nodes.filter((node) => !node.repository || !excluded.has(node.repository));
+		const nodeIds = new Set(nodes.map((node) => node.id));
+		const edges = graph.edges
+			.map((edge) => ({
+				...edge,
+				repositories: edge.repositories.filter((repository) => !excluded.has(repository)),
+			}))
+			.filter((edge) => edge.repositories.length > 0 && nodeIds.has(String(edge.source)) && nodeIds.has(String(edge.target)));
+
+		return {
+			...graph,
+			nodes,
+			edges,
+			summary: {
+				nodeKinds: Array.from(new Set(nodes.map((node) => node.kind))),
+				layers: Array.from(new Set([
+					...nodes.map((node) => node.layer).filter((layer): layer is NonNullable<typeof layer> => Boolean(layer)),
+					...edges.flatMap((edge) => edge.layers),
+				])),
+				relationTypes: Array.from(new Set(edges.map((edge) => edge.type))),
+				repositories: Array.from(new Set([
+					...nodes.map((node) => node.repository).filter((repository): repository is string => Boolean(repository)),
+					...edges.flatMap((edge) => edge.repositories),
+				])),
+				maxNodeWeight: nodes.reduce((maxWeight, node) => Math.max(maxWeight, node.weight), 0),
+				maxEdgeWeight: edges.reduce((maxWeight, edge) => Math.max(maxWeight, edge.weight), 0),
+				totalImpact: nodes.reduce((totalImpact, node) => totalImpact + node.impactScore, 0),
+				nodeCounts: {
+					layer: nodes.filter((node) => node.kind === 'layer').length,
+					file: nodes.filter((node) => node.kind === 'file').length,
+					component: nodes.filter((node) => node.kind === 'component').length,
+				},
+			},
+		};
+	}
 
 	private isRussianLocale(): boolean {
 		return vscode.env.language.toLowerCase().startsWith('ru');
@@ -186,7 +374,7 @@ export class MemoryPanelManager {
 				}
 
 				case 'getMemoryCommits': {
-					const { commits, total } = await this.db.getCommits(msg.filter || {});
+					const { commits, total } = await this.getVisibleCommits(msg.filter || {});
 					panel.webview.postMessage({
 						type: 'memoryCommits',
 						commits,
@@ -199,6 +387,13 @@ export class MemoryPanelManager {
 				case 'getMemoryCommitDetail': {
 					const commit = await this.db.getCommit(msg.sha);
 					if (!commit) {
+						panel.webview.postMessage({
+							type: 'memoryError',
+							message: `Commit ${msg.sha} not found`,
+						} as MemoryExtensionToWebviewMessage);
+						break;
+					}
+					if (this.isRepositoryExcluded(commit.repository)) {
 						panel.webview.postMessage({
 							type: 'memoryError',
 							message: `Commit ${msg.sha} not found`,
@@ -219,7 +414,10 @@ export class MemoryPanelManager {
 				}
 
 				case 'searchMemory': {
-					const searchCommits = await this.db.searchByKeyword(msg.query);
+					const allowedRepositories = this.getAllowedRepositories();
+					const searchCommits = allowedRepositories.length > 0
+						? await this.db.searchByKeyword(msg.query, 20, allowedRepositories)
+						: [];
 					const results: MemorySearchResult[] = [];
 					for (const commit of searchCommits) {
 						const analysis = await this.db.getAnalysis(commit.sha);
@@ -240,7 +438,7 @@ export class MemoryPanelManager {
 						message: `Commit ${msg.sha.substring(0, 7)} deleted`,
 					} as MemoryExtensionToWebviewMessage);
 					// Refresh list
-					const { commits: refreshedCommits, total: refreshedTotal } = await this.db.getCommits({});
+					const { commits: refreshedCommits, total: refreshedTotal } = await this.getVisibleCommits({});
 					panel.webview.postMessage({
 						type: 'memoryCommits',
 						commits: refreshedCommits,
@@ -333,7 +531,7 @@ export class MemoryPanelManager {
 					logMemoryGraphDebug('extension:getKnowledgeGraph:request', {
 						repository: msg.repository || null,
 					});
-					const graph = await this.db.getKnowledgeGraph(msg.repository);
+					const graph = this.filterKnowledgeGraph(await this.db.getKnowledgeGraph(msg.repository));
 					logMemoryGraphDebug('extension:getKnowledgeGraph:response', {
 						repository: msg.repository || null,
 						nodes: graph.nodes.length,
@@ -350,7 +548,7 @@ export class MemoryPanelManager {
 				}
 
 				case 'getMemoryStatistics': {
-					const statistics = await this.db.getStatistics();
+					const statistics = await this.getVisibleStatistics();
 					panel.webview.postMessage({
 						type: 'memoryStatistics',
 						statistics,
@@ -359,7 +557,7 @@ export class MemoryPanelManager {
 				}
 
 				case 'getMemoryCategories': {
-					const catStats = await this.db.getStatistics();
+					const catStats = await this.getVisibleStatistics();
 					const categories = catStats.categoryDistribution.map(s => s.category);
 					panel.webview.postMessage({
 						type: 'memoryCategories',
@@ -369,7 +567,7 @@ export class MemoryPanelManager {
 				}
 
 				case 'getMemoryAuthors': {
-					const authorStats = await this.db.getStatistics();
+					const authorStats = await this.getVisibleStatistics();
 					const authors = authorStats.topAuthors.map(a => a.author);
 					panel.webview.postMessage({
 						type: 'memoryAuthors',
@@ -379,7 +577,8 @@ export class MemoryPanelManager {
 				}
 
 				case 'getMemoryBranches': {
-					const branches = await this.db.getBranches();
+					const { commits } = await this.getVisibleCommits({ limit: MEMORY_STATS_FETCH_LIMIT, offset: 0 });
+					const branches = Array.from(new Set(commits.map((commit) => commit.branch))).sort((left, right) => left.localeCompare(right, 'ru', { sensitivity: 'base' }));
 					panel.webview.postMessage({
 						type: 'memoryBranches',
 						branches,
@@ -388,7 +587,8 @@ export class MemoryPanelManager {
 				}
 
 				case 'getMemoryRepositories': {
-					const repositories = await this.db.getRepositories();
+					const repositories = this.getAllowedRepositories()
+						.sort((left, right) => left.localeCompare(right, 'ru', { sensitivity: 'base' }));
 					panel.webview.postMessage({
 						type: 'memoryRepositories',
 						repositories,
@@ -581,15 +781,19 @@ export class MemoryPanelManager {
 	}
 
 	private findWorkspaceFolder(repository: string): vscode.WorkspaceFolder | undefined {
-		const workspaceFolders = vscode.workspace.workspaceFolders || [];
+		if (this.isRepositoryExcluded(repository)) {
+			return undefined;
+		}
+
+		const workspaceFolders = this.getVisibleWorkspaceFolders();
 		return workspaceFolders.find(folder => folder.name === repository)
-			|| workspaceFolders.find(folder => folder.uri.fsPath.endsWith(`/${repository}`))
+			|| workspaceFolders.find(folder => path.basename(folder.uri.fsPath) === repository)
 			|| workspaceFolders[0];
 	}
 
 	/** Send initial data when webview becomes ready */
 	private async sendInitialData(panel: vscode.WebviewPanel): Promise<void> {
-		const stats = await this.db.getStatistics();
+		const stats = await this.getVisibleStatistics();
 		const memorySettings = await this.normalizeMemorySettings(getMemorySettings());
 		panel.webview.postMessage({
 			type: 'memoryAvailableModels',
@@ -604,7 +808,7 @@ export class MemoryPanelManager {
 			settings: memorySettings,
 		} as MemoryExtensionToWebviewMessage);
 
-		const { commits, total } = await this.db.getCommits({ limit: 50 });
+		const { commits, total } = await this.getVisibleCommits({ limit: 50 });
 		panel.webview.postMessage({
 			type: 'memoryCommits',
 			commits,
@@ -741,7 +945,7 @@ export class MemoryPanelManager {
 			return;
 		}
 
-		const workspaceFolders = vscode.workspace.workspaceFolders;
+		const workspaceFolders = this.getVisibleWorkspaceFolders();
 		if (!workspaceFolders || workspaceFolders.length === 0) {
 			panel.webview.postMessage({
 				type: 'memoryError',

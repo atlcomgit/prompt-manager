@@ -112,6 +112,7 @@ interface GitMultiProjectResult {
 	errors: string[];
 	changedProjects: string[];
 	skippedProjects: string[];
+	reviewRequestsByProject?: Record<string, GitOverlayReviewRequest>;
 }
 
 interface GitMergeProjectsResult extends GitMultiProjectResult {
@@ -909,22 +910,12 @@ export class GitService {
 			this.runJsonCliCommand('gh', projectPath, ['api', `repos/${remote.repositoryPath}/pulls/${number}/comments`]).catch(() => []),
 		]);
 
-		return {
-			id: String(selected.id || number),
-			number,
-			title: String(selected.title || '').trim(),
-			url: String(selected.html_url || '').trim(),
-			state: normalizeGitOverlayReviewRequestState({
-				state: String(selected.state || ''),
-				mergedAt: selected.merged_at || null,
-			}),
-			createdAt: String(selected.created_at || '').trim(),
-			updatedAt: String(selected.updated_at || '').trim(),
-			sourceBranch: String(selected.head?.ref || sourceBranch).trim(),
-			targetBranch: String(selected.base?.ref || '').trim(),
-			isDraft: Boolean(selected.draft),
-			comments: this.normalizeGitHubReviewComments(issueComments, reviewComments),
-		};
+		return this.normalizeGitHubReviewRequest(
+			selected,
+			sourceBranch,
+			issueComments,
+			reviewComments,
+		);
 	}
 
 	private async getGitLabReviewRequest(projectPath: string, remote: GitOverlayReviewRemote, sourceBranch: string): Promise<GitOverlayReviewRequest | null> {
@@ -971,21 +962,91 @@ export class GitService {
 			`projects/${gitLabProjectId}/merge_requests/${iid}/notes`,
 		]).catch(() => []);
 
+		return this.normalizeGitLabReviewRequest(selected, sourceBranch, notes);
+	}
+
+	private normalizeGitHubReviewRequest(
+		payload: {
+			id?: number | string;
+			number?: number | string;
+			title?: string;
+			html_url?: string;
+			state?: string;
+			merged_at?: string | null;
+			created_at?: string;
+			updated_at?: string;
+			draft?: boolean;
+			head?: { ref?: string };
+			base?: { ref?: string };
+		},
+		sourceBranch: string,
+		issueComments: unknown = [],
+		reviewComments: unknown = [],
+	): GitOverlayReviewRequest | null {
+		const number = String(payload.number || payload.id || '').trim();
+		if (!number) {
+			return null;
+		}
+		const normalizedIssueComments = Array.isArray(issueComments) ? issueComments : [];
+		const normalizedReviewComments = Array.isArray(reviewComments) ? reviewComments : [];
+
 		return {
-			id: String(selected.id || iid),
-			number: iid,
-			title: String(selected.title || '').trim(),
-			url: String(selected.web_url || '').trim(),
+			id: String(payload.id || number),
+			number,
+			title: String(payload.title || '').trim(),
+			url: String(payload.html_url || '').trim(),
 			state: normalizeGitOverlayReviewRequestState({
-				state: String(selected.state || ''),
-				mergedAt: selected.merged_at || null,
+				state: String(payload.state || ''),
+				mergedAt: payload.merged_at || null,
 			}),
-			createdAt: String(selected.created_at || '').trim(),
-			updatedAt: String(selected.updated_at || '').trim(),
-			sourceBranch: String(selected.source_branch || sourceBranch).trim(),
-			targetBranch: String(selected.target_branch || '').trim(),
-			isDraft: Boolean(selected.draft || selected.work_in_progress),
-			comments: this.normalizeGitLabReviewComments(notes),
+			createdAt: String(payload.created_at || '').trim(),
+			updatedAt: String(payload.updated_at || '').trim(),
+			sourceBranch: String(payload.head?.ref || sourceBranch).trim(),
+			targetBranch: String(payload.base?.ref || '').trim(),
+			isDraft: Boolean(payload.draft),
+			comments: this.normalizeGitHubReviewComments(normalizedIssueComments, normalizedReviewComments),
+		};
+	}
+
+	private normalizeGitLabReviewRequest(
+		payload: {
+			id?: number | string;
+			iid?: number | string;
+			title?: string;
+			web_url?: string;
+			state?: string;
+			merged_at?: string | null;
+			created_at?: string;
+			updated_at?: string;
+			source_branch?: string;
+			target_branch?: string;
+			work_in_progress?: boolean;
+			draft?: boolean;
+		},
+		sourceBranch: string,
+		notes: unknown = [],
+	): GitOverlayReviewRequest | null {
+		const iid = String(payload.iid || payload.id || '').trim();
+		if (!iid) {
+			return null;
+		}
+		const normalizedNotes = Array.isArray(notes) ? notes : [];
+
+		return {
+			id: String(payload.id || iid),
+			number: iid,
+			title: String(payload.title || '').trim(),
+			url: String(payload.web_url || '').trim(),
+			state: normalizeGitOverlayReviewRequestState({
+				state: String(payload.state || ''),
+				mergedAt: payload.merged_at || null,
+			}),
+			createdAt: String(payload.created_at || '').trim(),
+			updatedAt: String(payload.updated_at || '').trim(),
+			sourceBranch: String(payload.source_branch || sourceBranch).trim(),
+			targetBranch: String(payload.target_branch || '').trim(),
+			isDraft: Boolean(payload.draft || payload.work_in_progress),
+			comments: this.normalizeGitLabReviewComments(normalizedNotes),
 		};
 	}
 
@@ -1160,8 +1221,8 @@ export class GitService {
 		title: string,
 		body: string,
 		draft: boolean,
-	): Promise<void> {
-		await this.runJsonCliCommand('gh', projectPath, [
+	): Promise<GitOverlayReviewRequest | null> {
+		const payload = await this.runJsonCliCommand('gh', projectPath, [
 			'api',
 			'-X',
 			'POST',
@@ -1177,6 +1238,7 @@ export class GitService {
 			'-f',
 			`draft=${draft ? 'true' : 'false'}`,
 		]);
+		return this.normalizeGitHubReviewRequest(payload || {}, sourceBranch);
 	}
 
 	private async createGitLabReviewRequest(
@@ -1188,10 +1250,10 @@ export class GitService {
 		body: string,
 		draft: boolean,
 		removeSourceBranch: boolean,
-	): Promise<void> {
+	): Promise<GitOverlayReviewRequest | null> {
 		const gitLabProjectId = await this.resolveGitLabProjectId(projectPath, remote);
 		const resolvedTitle = this.ensureGitLabDraftTitle(title, draft);
-		await this.runJsonCliCommand('glab', projectPath, [
+		const payload = await this.runJsonCliCommand('glab', projectPath, [
 			'api',
 			'-X',
 			'POST',
@@ -1207,6 +1269,7 @@ export class GitService {
 			'-F',
 			`remove_source_branch=${removeSourceBranch ? 'true' : 'false'}`,
 		]);
+		return this.normalizeGitLabReviewRequest(payload || {}, sourceBranch);
 	}
 
 	public async getBuiltInGitApi(): Promise<BuiltInGitApi | null> {
@@ -3925,6 +3988,7 @@ export class GitService {
 			errors: [],
 			changedProjects: [],
 			skippedProjects: [],
+			reviewRequestsByProject: {},
 		};
 		const startedAtMs = Date.now();
 
@@ -3932,8 +3996,8 @@ export class GitService {
 
 		// Preserve the requested project order in the overlay result while review creation runs concurrently.
 		type ReviewRequestOutcome =
-			| { kind: 'changed'; project: string }
-			| { kind: 'skipped'; project: string }
+			| { kind: 'changed'; project: string; reviewRequest: GitOverlayReviewRequest | null }
+			| { kind: 'skipped'; project: string; reviewRequest: GitOverlayReviewRequest | null }
 			| { kind: 'error'; message: string };
 
 		const outcomes: ReviewRequestOutcome[] = new Array(normalizedRequests.length);
@@ -3990,17 +4054,18 @@ export class GitService {
 
 					const existingRequest = await this.getExistingReviewRequest(projectPath, remote, promptBranch);
 					if (existingRequest) {
-						outcomes[currentIndex] = { kind: 'skipped', project: item.project };
+						outcomes[currentIndex] = { kind: 'skipped', project: item.project, reviewRequest: existingRequest };
 						continue;
 					}
 
+					let createdRequest: GitOverlayReviewRequest | null;
 					if (remote.provider === 'github') {
-						await this.createGitHubReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body, item.draft);
+						createdRequest = await this.createGitHubReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body, item.draft);
 					} else {
-						await this.createGitLabReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body, item.draft, item.removeSourceBranch);
+						createdRequest = await this.createGitLabReviewRequest(projectPath, remote, promptBranch, item.targetBranch, item.title, body, item.draft, item.removeSourceBranch);
 					}
 
-					outcomes[currentIndex] = { kind: 'changed', project: item.project };
+					outcomes[currentIndex] = { kind: 'changed', project: item.project, reviewRequest: createdRequest };
 				} catch (error) {
 					outcomes[currentIndex] = {
 						kind: 'error',
@@ -4018,13 +4083,22 @@ export class GitService {
 			}
 			if (outcome.kind === 'changed') {
 				result.changedProjects.push(outcome.project);
+				if (outcome.reviewRequest) {
+					result.reviewRequestsByProject![outcome.project] = outcome.reviewRequest;
+				}
 				continue;
 			}
 			if (outcome.kind === 'skipped') {
 				result.skippedProjects.push(outcome.project);
+				if (outcome.reviewRequest) {
+					result.reviewRequestsByProject![outcome.project] = outcome.reviewRequest;
+				}
 				continue;
 			}
 			result.errors.push(outcome.message);
+		}
+		if (result.reviewRequestsByProject && Object.keys(result.reviewRequestsByProject).length === 0) {
+			delete result.reviewRequestsByProject;
 		}
 
 		result.success = result.errors.length === 0;

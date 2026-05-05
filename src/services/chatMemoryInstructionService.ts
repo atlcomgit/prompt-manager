@@ -107,7 +107,13 @@ export class ChatMemoryInstructionService {
 		await this.removePromptSessionInstructions(prompt.promptUuid, 'new-chat');
 
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
-		const effectiveProjectNames = resolveEffectiveProjectNames(prompt.projects, Array.from(projectPaths.keys()));
+		const effectiveProjectNames = typeof this.workspaceService.resolveEffectiveProjectNames === 'function'
+			? this.workspaceService.resolveEffectiveProjectNames(prompt.projects, {
+				fallbackToWorkspaceWhenSelectionInvalid: false,
+			})
+			: resolveEffectiveProjectNames(prompt.projects, Array.from(projectPaths.keys()), {
+				fallbackToWorkspaceWhenSelectionInvalid: false,
+			});
 
 		const uncommittedProjects = await this.gitService.getUncommittedProjectData(
 			projectPaths,

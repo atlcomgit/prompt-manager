@@ -63,7 +63,13 @@ export class CodeMapChatInstructionService {
 		}
 
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
-		const effectiveProjectNames = resolveEffectiveProjectNames(prompt.projects, Array.from(projectPaths.keys()));
+		const effectiveProjectNames = typeof this.workspaceService.resolveEffectiveProjectNames === 'function'
+			? this.workspaceService.resolveEffectiveProjectNames(prompt.projects, {
+				fallbackToWorkspaceWhenSelectionInvalid: false,
+			})
+			: resolveEffectiveProjectNames(prompt.projects, Array.from(projectPaths.keys()), {
+				fallbackToWorkspaceWhenSelectionInvalid: false,
+			});
 		const resolutions = await this.branchResolver.resolveProjects(projectPaths, effectiveProjectNames, settings.trackedBranches);
 		const uncommittedSnapshots = await this.gitService.getUncommittedProjectData(projectPaths, effectiveProjectNames);
 		const materializationTargets: CodeMapMaterializationTarget[] = [];

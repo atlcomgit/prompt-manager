@@ -410,6 +410,91 @@ test('PromptDashboardService hides closed prompts from the activity widget', asy
 	service.dispose();
 });
 
+test('PromptDashboardService refreshes the activity widget after a local prompt status change even with warm cache', async () => {
+	const todayKey = new Date().toISOString().slice(0, 10);
+	let prompts = [createPrompt({
+		id: 'task-open',
+		promptUuid: 'uuid-open',
+		title: 'Open prompt',
+		status: 'in-progress',
+		updatedAt: '2026-04-29T10:00:00.000Z',
+	})];
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => prompts,
+			getDailyTime: async () => ({
+				[todayKey]: {
+					writing: 6 * 60 * 1000,
+					implementing: 0,
+					onTask: 0,
+					untracked: 0,
+				},
+			}),
+			getDailyTimeTotalInRange: (
+				dailyTime: Record<string, { writing?: number; implementing?: number; onTask?: number; untracked?: number }>,
+				from: string,
+				to: string,
+			) => {
+				let total = 0;
+				for (const [day, entry] of Object.entries(dailyTime || {})) {
+					if (day < from || day > to) {
+						continue;
+					}
+					total += (entry.writing || 0) + (entry.implementing || 0) + (entry.onTask || 0) + (entry.untracked || 0);
+				}
+				return total;
+			},
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project)),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'cached analysis',
+		} as any,
+	);
+
+	const initialPrompt = prompts[0];
+	const initialScope = (service as any).createScope(initialPrompt);
+	(service as any).activeScope = initialScope;
+	await (service as any).refreshWidget(initialScope, 'activity', undefined, {
+		force: true,
+		prompt: initialPrompt,
+	});
+
+	prompts = [createPrompt({
+		id: 'task-open',
+		promptUuid: 'uuid-open',
+		title: 'Open prompt',
+		status: 'closed',
+		updatedAt: '2026-04-29T10:15:00.000Z',
+	})];
+	const closedPrompt = prompts[0];
+	const closedScope = (service as any).createScope(closedPrompt);
+	(service as any).activeScope = closedScope;
+	await (service as any).refreshWidget(closedScope, 'activity', undefined, {
+		force: false,
+		prompt: closedPrompt,
+	});
+	const snapshot = (service as any).buildWidgetFromCache(closedScope, 'activity', (service as any).emptyActivity());
+
+	assert.deepEqual(snapshot.data.today.map((item: { id: string }) => item.id), []);
+	service.dispose();
+});
+
 test('PromptDashboardService refreshProjectsWidget bypasses warm cache after repo changes', async () => {
 	let snapshotCalls = 0;
 	let pipelineCalls = 0;

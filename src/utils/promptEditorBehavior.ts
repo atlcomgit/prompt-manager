@@ -278,7 +278,7 @@ export function shouldShowPromptChatLaunchBlock(
 		return false;
 	}
 
-	return !isPromptChatLaunchComplete(input) || input.chatLaunchCompletionHold;
+	return true;
 }
 
 /**

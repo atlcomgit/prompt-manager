@@ -177,6 +177,22 @@ export function getPromptDashboardTotalTimeMs(prompt: Pick<Prompt, 'timeSpentWri
 	);
 }
 
+/** Detects prompt changes that must invalidate the global activity widget cache. */
+export function buildPromptDashboardActivityFingerprint(
+	prompt: Pick<Prompt, 'id' | 'promptUuid' | 'status' | 'progress' | 'updatedAt' | 'timeSpentWriting' | 'timeSpentImplementing' | 'timeSpentOnTask' | 'timeSpentUntracked'>,
+): string {
+	return [
+		prompt.promptUuid || prompt.id || '__new__',
+		prompt.status,
+		typeof prompt.progress === 'number' ? String(prompt.progress) : '',
+		prompt.updatedAt || '',
+		String(prompt.timeSpentWriting || 0),
+		String(prompt.timeSpentImplementing || 0),
+		String(prompt.timeSpentOnTask || 0),
+		String(prompt.timeSpentUntracked || 0),
+	].join('::');
+}
+
 export function buildPromptDashboardStatusDataFromPrompt(
 	prompt: Pick<Prompt, 'status' | 'progress' | 'updatedAt' | 'timeSpentWriting' | 'timeSpentImplementing' | 'timeSpentOnTask' | 'timeSpentUntracked'>,
 ): PromptDashboardStatusData {

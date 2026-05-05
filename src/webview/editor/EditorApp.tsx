@@ -646,6 +646,14 @@ export const EditorApp: React.FC = () => {
     prompt.updatedAt,
     promptDashboardRefreshVersion,
   ]);
+  const promptHeaderTitle = useMemo(() => {
+    const taskNumber = (prompt.taskNumber || '').trim();
+    const title = (prompt.title || '').trim();
+    const fallbackTitle = title || (prompt.id || '').trim() || t('editor.newPrompt');
+    return taskNumber && title
+      ? `${taskNumber} | ${title}`
+      : taskNumber || fallbackTitle;
+  }, [prompt.id, prompt.taskNumber, prompt.title, t]);
   const editorProgressMode = resolveEditorProgressMode({
     isSaving,
     isStartingChat,
@@ -5265,7 +5273,7 @@ export const EditorApp: React.FC = () => {
           >
             {shouldShowPromptSwitchPlaceholder
               ? renderBlankPlaceholderBlock('header-title', '52%', '18px', styles.headerTitlePlaceholder)
-              : (prompt.title || prompt.id || t('editor.newPrompt'))}
+              : promptHeaderTitle}
           </h2>
           <div
             style={{

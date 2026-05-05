@@ -748,14 +748,19 @@ function resolveBranchProjectSecondaryLabel(file: GitOverlayChangeFile): string 
 }
 
 function renderReviewRequests(projects: PromptDashboardProjectSummary[], cacheStatus: PromptDashboardLoadStatus): React.ReactNode {
+	const visibleProjects = projects.filter(project => Boolean(
+		project.review.request
+		|| project.review.error
+		|| project.review.unsupportedReason,
+	));
 	return (
 		<section style={styles.section}>
 			<div style={styles.sectionHeader}>
 				<span style={styles.sectionTitle}>MR/PR</span>
-				{renderSectionMeta(projects.length || '...', cacheStatus, 'обновляем')}
+				{renderSectionMeta(visibleProjects.length || '...', cacheStatus, 'обновляем')}
 			</div>
 			<div style={styles.sectionBody}>
-				{projects.length === 0 ? cacheStatus === 'loading' ? renderLoadingEmptyState('MR/PR-данные загружаются') : <div style={styles.emptyText}>MR/PR-данные недоступны</div> : projects.map(project => {
+				{visibleProjects.length === 0 ? cacheStatus === 'loading' ? renderLoadingEmptyState('MR/PR-данные загружаются') : <div style={styles.emptyText}>Нет активных MR/PR</div> : visibleProjects.map(project => {
 					const request = project.review.request;
 					const reviewMessage = project.review.error || formatReviewUnsupportedReason(project.review.unsupportedReason) || 'Активный MR/PR не найден';
 					const state = request?.state || (project.review.error ? 'недоступно' : project.review.unsupportedReason ? 'нет setup' : 'нет MR/PR');

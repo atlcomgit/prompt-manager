@@ -199,6 +199,27 @@ test('PromptDashboard selects current branch first and renders the redesigned fi
 	assert.match(markup, /Что происходит/);
 });
 
+test('PromptDashboard hides MR\/PR rows that only report missing active review requests', () => {
+	const markup = renderDashboard(createSnapshot([
+		createProject({ project: 'api' }),
+		createProject({
+			project: 'hidden-review-row',
+			repositoryPath: '/workspace/hidden-review-row',
+			review: {
+				remote: null,
+				request: null,
+				error: '',
+				setupAction: null,
+				titlePrefix: '',
+				unsupportedReason: null,
+			},
+		}),
+	], 'fresh', [createProject({ project: 'api' })]));
+
+	assert.match(markup, /Review dashboard polish/);
+	assert.doesNotMatch(markup, /Активный MR\/PR не найден/);
+});
+
 test('reconcileBranchDrafts drops drafts that already became the refreshed current branch', () => {
 	const nextDrafts = reconcileBranchDrafts([
 		createProject({ currentBranch: 'feature/task-107' }),

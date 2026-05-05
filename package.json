@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Copilot Prompt Manager",
   "description": "Manage AI prompt workflows, launch GitHub Copilot chats, and build project memory directly inside VS Code",
-  "version": "0.2.29",
+  "version": "0.2.30",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -118,7 +118,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.2.29",
+        "title": "About 0.2.30",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },
@@ -340,6 +340,14 @@
         "promptManager.gitOverlay.otherProjectsExcludedPaths": {
           "type": "array",
           "description": "Repo-relative folder names or path prefixes to hide from Git Flow step 1 in the 'Changes in other projects' block only.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "promptManager.excludedProjects": {
+          "type": "array",
+          "description": "Workspace project names to hide from the Projects picker, Git Flow, prompt dashboard, Project Memory, and CodeMap runtime flows.",
           "default": [],
           "items": {
             "type": "string"

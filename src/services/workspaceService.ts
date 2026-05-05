@@ -6,11 +6,21 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 import { stripLegacyInstructionFrontmatter } from '../utils/instructionFrontmatter.js';
+import {
+	excludeProjectNames,
+	normalizeProjectNames,
+	resolveEffectiveProjectNames as resolveProjectScope,
+} from '../utils/projectScope.js';
 
 export interface DiscoveredItem {
 	id: string;
 	name: string;
 	description: string;
+}
+
+export interface WorkspaceProjectScopeOptions {
+	includeExcluded?: boolean;
+	fallbackToWorkspaceWhenSelectionInvalid?: boolean;
 }
 
 export class WorkspaceService {
@@ -40,9 +50,38 @@ export class WorkspaceService {
 		this.mcpToolsCache = null;
 	}
 
+	/** Return raw workspace folders without applying Prompt Manager project filters. */
+	private getAllWorkspaceFolders(): readonly vscode.WorkspaceFolder[] {
+		return vscode.workspace.workspaceFolders || [];
+	}
+
+	/** Read globally excluded workspace project names from Prompt Manager settings. */
+	getExcludedProjectNames(): string[] {
+		return normalizeProjectNames(
+			vscode.workspace.getConfiguration('promptManager').get<string[]>('excludedProjects', []) || [],
+		);
+	}
+
+	/** Resolve repository identifiers used by memory ingestion for excluded workspace projects. */
+	getExcludedRepositoryNames(): string[] {
+		const excludedProjects = new Set(this.getExcludedProjectNames());
+		const repositories = new Set<string>();
+
+		for (const folder of this.getAllWorkspaceFolders()) {
+			if (!excludedProjects.has(folder.name)) {
+				continue;
+			}
+
+			repositories.add(folder.name);
+			repositories.add(path.basename(folder.uri.fsPath));
+		}
+
+		return Array.from(repositories);
+	}
+
 	private getHookSearchPaths(): string[] {
 		const searchPaths: string[] = [];
-		for (const folder of vscode.workspace.workspaceFolders || []) {
+		for (const folder of this.getAllWorkspaceFolders()) {
 			searchPaths.push(path.join(folder.uri.fsPath, '.vscode', 'hooks'));
 		}
 		searchPaths.push(path.join(os.homedir(), '.copilot', 'hooks'));
@@ -50,17 +89,38 @@ export class WorkspaceService {
 	}
 
 	/** Get all workspace folder names */
-	getWorkspaceFolders(): string[] {
-		return (vscode.workspace.workspaceFolders || []).map(f => f.name);
+	getWorkspaceFolders(includeExcluded = false): string[] {
+		const workspaceFolderNames = this.getAllWorkspaceFolders().map(folder => folder.name);
+		return includeExcluded
+			? normalizeProjectNames(workspaceFolderNames)
+			: excludeProjectNames(workspaceFolderNames, this.getExcludedProjectNames());
 	}
 
 	/** Get workspace folder paths */
-	getWorkspaceFolderPaths(): Map<string, string> {
+	getWorkspaceFolderPaths(includeExcluded = false): Map<string, string> {
 		const map = new Map<string, string>();
-		for (const f of vscode.workspace.workspaceFolders || []) {
-			map.set(f.name, f.uri.fsPath);
+		const excludedProjects = includeExcluded ? new Set<string>() : new Set(this.getExcludedProjectNames());
+		for (const folder of this.getAllWorkspaceFolders()) {
+			if (excludedProjects.has(folder.name)) {
+				continue;
+			}
+			map.set(folder.name, folder.uri.fsPath);
 		}
 		return map;
+	}
+
+	/** Resolve a prompt project selection against the visible workspace project set. */
+	resolveEffectiveProjectNames(
+		requestedProjectNames: string[],
+		options: WorkspaceProjectScopeOptions = {},
+	): string[] {
+		return resolveProjectScope(
+			requestedProjectNames,
+			this.getWorkspaceFolders(options.includeExcluded === true),
+			{
+				fallbackToWorkspaceWhenSelectionInvalid: options.fallbackToWorkspaceWhenSelectionInvalid,
+			},
+		);
 	}
 
 	/** Discover skills from .vscode/skills/ and ~/.copilot/skills/ */
@@ -71,7 +131,7 @@ export class WorkspaceService {
 		const searchPaths: string[] = [];
 
 		// Workspace-local skills
-		for (const folder of vscode.workspace.workspaceFolders || []) {
+		for (const folder of this.getAllWorkspaceFolders()) {
 			searchPaths.push(path.join(folder.uri.fsPath, '.vscode', 'skills'));
 		}
 
@@ -134,7 +194,7 @@ export class WorkspaceService {
 		const tools: DiscoveredItem[] = [];
 
 		// Read .vscode/mcp.json or settings
-		for (const folder of vscode.workspace.workspaceFolders || []) {
+		for (const folder of this.getAllWorkspaceFolders()) {
 			try {
 				const mcpConfigPath = path.join(folder.uri.fsPath, '.vscode', 'mcp.json');
 				const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(mcpConfigPath));

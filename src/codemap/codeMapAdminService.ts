@@ -25,9 +25,15 @@ export class CodeMapAdminService {
 		private readonly chatInstructionService?: CodeMapChatInstructionService,
 	) { }
 
+	private getVisibleRepositories(): Set<string> {
+		return new Set(this.workspaceService.getWorkspaceFolderPaths().keys());
+	}
+
 	async getInstructions(): Promise<CodeMapInstructionListItem[]> {
 		try {
-			const instructions = this.db.listLatestInstructions();
+			const visibleRepositories = this.getVisibleRepositories();
+			const instructions = this.db.listLatestInstructions()
+				.filter((item) => visibleRepositories.has(item.repository));
 			const obsoleteIds = await this.getObsoleteInstructionIds(instructions);
 			return instructions.map(item => ({
 				...item,
@@ -40,7 +46,10 @@ export class CodeMapAdminService {
 
 	getInstructionDetail(id: number): CodeMapInstructionDetail | null {
 		try {
-			return this.db.getInstructionDetail(id);
+			const detail = this.db.getInstructionDetail(id);
+			return detail && this.getVisibleRepositories().has(detail.instruction.repository)
+				? detail
+				: null;
 		} catch {
 			return null;
 		}
@@ -74,11 +83,17 @@ export class CodeMapAdminService {
 
 	getActivity(): CodeMapActivity {
 		const runtime = this.orchestrator.getRuntimeState();
+		const visibleRepositories = this.getVisibleRepositories();
 		return {
 			statistics: this.getStatistics(),
 			runtime: {
 				...runtime,
-				scheduledRealtimeRefreshes: this.chatInstructionService?.getScheduledRealtimeRefreshes() || [],
+				currentTask: runtime.currentTask && visibleRepositories.has(runtime.currentTask.repository)
+					? runtime.currentTask
+					: undefined,
+				queuedTasks: runtime.queuedTasks.filter((task) => visibleRepositories.has(task.repository)),
+				scheduledRealtimeRefreshes: (this.chatInstructionService?.getScheduledRealtimeRefreshes() || [])
+					.filter((refresh) => visibleRepositories.has(refresh.repository)),
 			},
 			recentJobs: this.getRecentJobs(),
 		};
@@ -170,7 +185,9 @@ export class CodeMapAdminService {
 
 	private getRecentJobs() {
 		try {
-			return this.db.getRecentJobs(20);
+			const visibleRepositories = this.getVisibleRepositories();
+			return this.db.getRecentJobs(20)
+				.filter((job) => visibleRepositories.has(job.repository));
 		} catch {
 			return [];
 		}

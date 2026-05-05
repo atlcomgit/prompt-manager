@@ -2183,18 +2183,42 @@ export class EditorPanelManager {
 		}
 	}
 
+	/** Resolve visible projects through the workspace service or the legacy test stub surface. */
+	private resolveVisibleWorkspaceProjects(
+		requestedProjects: string[],
+		fallbackToWorkspaceWhenSelectionInvalid = true,
+	): string[] {
+		if (typeof this.workspaceService.resolveEffectiveProjectNames === 'function') {
+			return this.workspaceService.resolveEffectiveProjectNames(requestedProjects, {
+				fallbackToWorkspaceWhenSelectionInvalid,
+			});
+		}
+
+		return resolveEffectiveProjectNames(
+			requestedProjects,
+			this.workspaceService.getWorkspaceFolders(),
+			{ fallbackToWorkspaceWhenSelectionInvalid },
+		);
+	}
+
 	private async buildProjectsContextSnapshot(projects: string[] = []): Promise<string> {
-		const workspaceFolders = vscode.workspace.workspaceFolders || [];
-		if (workspaceFolders.length === 0) {
+		const workspacePaths = this.workspaceService.getWorkspaceFolderPaths();
+		if (workspacePaths.size === 0) {
 			return '';
 		}
 
-		const selected = new Set((projects || []).map(p => p.trim()).filter(Boolean));
-		const targets = selected.size > 0
-			? workspaceFolders.filter(folder => selected.has(folder.name))
-			: workspaceFolders;
-
-		const effectiveTargets = targets.length > 0 ? targets : workspaceFolders;
+		const effectiveProjectNames = this.resolveVisibleWorkspaceProjects(projects || [], false);
+		const effectiveTargets = effectiveProjectNames
+			.map(projectName => {
+				const projectPath = workspacePaths.get(projectName);
+				return projectPath
+					? { name: projectName, uri: vscode.Uri.file(projectPath) }
+					: null;
+			})
+			.filter((target): target is { name: string; uri: vscode.Uri } => Boolean(target));
+		if (effectiveTargets.length === 0) {
+			return '';
+		}
 		const chunks: string[] = [];
 
 		for (const folder of effectiveTargets.slice(0, 8)) {
@@ -2288,9 +2312,10 @@ export class EditorPanelManager {
 
 	private async generateReportHtmlFromPrompt(promptSnapshot: Prompt): Promise<string> {
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
-		const selectedProjects = promptSnapshot.projects && promptSnapshot.projects.length > 0
-			? promptSnapshot.projects
-			: this.workspaceService.getWorkspaceFolders();
+		const selectedProjects = this.resolveVisibleWorkspaceProjects(
+			promptSnapshot.projects || [],
+			false,
+		);
 		const stagedProjects = await this.gitService.getPreparedCommitProjectData(projectPaths, selectedProjects);
 
 		if (stagedProjects.length === 0) {
@@ -3250,7 +3275,7 @@ export class EditorPanelManager {
 	private resolveGitOverlaySessionProjectNames(projects: string[]): string[] {
 		const normalizedProjects = (projects || []).map(project => project.trim()).filter(Boolean);
 		return normalizedProjects.length > 0
-			? normalizedProjects
+			? this.resolveVisibleWorkspaceProjects(normalizedProjects, false)
 			: this.workspaceService.getWorkspaceFolders();
 	}
 
@@ -3371,7 +3396,7 @@ export class EditorPanelManager {
 
 	private async getStartChatTrackedBranchMismatches(prompt: Prompt): Promise<Array<{ project: string; currentBranch: string }>> {
 		const promptBranch = (prompt.branch || '').trim();
-		const projectNames = (prompt.projects || []).map(project => project.trim()).filter(Boolean);
+		const projectNames = this.resolveVisibleWorkspaceProjects(prompt.projects || [], false);
 		if (!promptBranch || projectNames.length === 0) {
 			return [];
 		}
@@ -3388,12 +3413,12 @@ export class EditorPanelManager {
 	private resolveGitOverlayProjects(requestedProjects: string[], currentPrompt: Prompt): string[] {
 		const normalizedRequested = (requestedProjects || []).map(project => project.trim()).filter(Boolean);
 		if (normalizedRequested.length > 0) {
-			return Array.from(new Set(normalizedRequested));
+			return this.resolveVisibleWorkspaceProjects(normalizedRequested, false);
 		}
 
 		const promptProjects = (currentPrompt.projects || []).map(project => project.trim()).filter(Boolean);
 		if (promptProjects.length > 0) {
-			return Array.from(new Set(promptProjects));
+			return this.resolveVisibleWorkspaceProjects(promptProjects, false);
 		}
 
 		return this.workspaceService.getWorkspaceFolders();
@@ -3789,6 +3814,7 @@ export class EditorPanelManager {
 			includeReviewState?: boolean;
 			skipOtherProjects?: boolean;
 			prefetchedReviewStatesByProject?: Record<string, GitOverlaySnapshot['projects'][number]['review']>;
+			optimisticReviewRequestsByProject?: Record<string, NonNullable<GitOverlayProjectSnapshot['review']['request']>>;
 		},
 	): Promise<GitOverlaySnapshot | null> {
 		const startedAtMs = Date.now();
@@ -3843,26 +3869,27 @@ export class EditorPanelManager {
 			this.getGitOverlayOtherProjectsExcludedPathsSetting(),
 		);
 		const snapshotWithErrors = this.applyGitOverlaySnapshotProjectErrors(filteredSnapshot, options?.commitErrorsByProject);
+		const snapshotWithReviewRequests = this.applyGitOverlaySnapshotReviewRequests(snapshotWithErrors, options?.optimisticReviewRequestsByProject);
 		this.logGitOverlayTiming('gitOverlay.snapshot.computed', startedAtMs, {
 			source: options?.metricSource || 'action',
 			detailLevel: options?.detailLevel || 'full',
 			changeDetails: options?.includeChangeDetails === false ? 'light' : 'full',
 			promptId: currentPrompt.id,
-			promptBranch: snapshotWithErrors.promptBranch || null,
+			promptBranch: snapshotWithReviewRequests.promptBranch || null,
 			selectedProjectCount: selectedProjects.length,
 			snapshotProjectCount: snapshotProjects.length,
-			projectCount: snapshotWithErrors.projects.length,
-			otherProjectCount: snapshotWithErrors.otherProjects?.length || 0,
-			reviewProjects: this.buildGitOverlayReviewDebugSummary(snapshotWithErrors),
+			projectCount: snapshotWithReviewRequests.projects.length,
+			otherProjectCount: snapshotWithReviewRequests.otherProjects?.length || 0,
+			reviewProjects: this.buildGitOverlayReviewDebugSummary(snapshotWithReviewRequests),
 		});
-		postMessage({ type: 'gitOverlaySnapshot', snapshot: snapshotWithErrors, requestId: options?.requestId });
+		postMessage({ type: 'gitOverlaySnapshot', snapshot: snapshotWithReviewRequests, requestId: options?.requestId });
 
 		if (options?.skipOtherProjects) {
-			return snapshotWithErrors;
+			return snapshotWithReviewRequests;
 		}
 
 		if (snapshotProjects.length <= selectedProjects.length) {
-			return snapshotWithErrors;
+			return snapshotWithReviewRequests;
 		}
 
 		this.scheduleGitOverlayOtherProjectsSnapshot(
@@ -3874,7 +3901,36 @@ export class EditorPanelManager {
 			options?.metricSource || 'action',
 		);
 
-		return snapshotWithErrors;
+		return snapshotWithReviewRequests;
+	}
+
+	private applyGitOverlaySnapshotReviewRequests(
+		snapshot: GitOverlaySnapshot,
+		reviewRequestsByProject?: Record<string, NonNullable<GitOverlayProjectSnapshot['review']['request']>>,
+	): GitOverlaySnapshot {
+		if (!reviewRequestsByProject || Object.keys(reviewRequestsByProject).length === 0) {
+			return snapshot;
+		}
+
+		let changed = false;
+		const projects = snapshot.projects.map((project) => {
+			const reviewRequest = reviewRequestsByProject[project.project];
+			if (!reviewRequest || project.review.request) {
+				return project;
+			}
+
+			changed = true;
+			return {
+				...project,
+				review: {
+					...project.review,
+					request: reviewRequest,
+					error: '',
+				},
+			};
+		});
+
+		return changed ? { ...snapshot, projects } : snapshot;
 	}
 
 	/** Догружает полный snapshot одного раскрытого проекта без перерендера всего overlay. */
@@ -4041,10 +4097,7 @@ export class EditorPanelManager {
 	/** Checks whether a workspace change belongs to the prompt dashboard project scope. */
 	private doesPromptDashboardPathMatchPromptScope(prompt: Prompt, changedPath: string): boolean {
 		const workspacePaths = this.workspaceService.getWorkspaceFolderPaths();
-		const effectiveProjects = resolveEffectiveProjectNames(
-			prompt.projects || [],
-			this.workspaceService.getWorkspaceFolders(),
-		);
+		const effectiveProjects = this.resolveVisibleWorkspaceProjects(prompt.projects || [], false);
 		const normalizedChangedPath = path.resolve(changedPath);
 
 		for (const project of effectiveProjects) {
@@ -5960,6 +6013,22 @@ export class EditorPanelManager {
 							reportLength: typeof msg.report === 'string' ? msg.report.length : 0,
 							updatedAt: saved.updatedAt || null,
 						});
+
+						if (currentPrompt.id === targetPromptId) {
+							currentPrompt.report = typeof msg.report === 'string' ? msg.report : '';
+							currentPrompt.timeSpentWriting = Math.max(saved.timeSpentWriting || 0, currentPrompt.timeSpentWriting || 0);
+							currentPrompt.timeSpentOnTask = Math.max(saved.timeSpentOnTask || 0, currentPrompt.timeSpentOnTask || 0);
+							currentPrompt.updatedAt = saved.updatedAt || currentPrompt.updatedAt;
+							this.setPanelPromptRef(panelKey, currentPrompt);
+							this.ensureReportEditorBinding(panelKey, currentPrompt);
+							postMessage({
+								type: 'reportContentUpdated',
+								report: currentPrompt.report,
+								timeSpentWriting: saved.timeSpentWriting,
+								timeSpentOnTask: saved.timeSpentOnTask,
+								updatedAt: saved.updatedAt,
+							} satisfies ExtensionToWebviewMessage);
+						}
 
 						void reportPanel.webview.postMessage({
 							type: 'reportEditorSaved',
@@ -9946,7 +10015,9 @@ export class EditorPanelManager {
 					type: result.errors.length > 0 ? 'error' : 'info',
 					message: this.describeGitMultiProjectResult(result, 'MR/PR обработан'),
 				});
-				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, {
+					optimisticReviewRequestsByProject: result.reviewRequestsByProject,
+				});
 				if (result.errors.length === 0) {
 					postMessage({ type: 'gitOverlayActionCompleted', action: 'review-request' });
 				}

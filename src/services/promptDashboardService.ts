@@ -21,6 +21,7 @@ import type {
 } from '../types/promptDashboard.js';
 import {
 	buildPromptDashboardAnalysisFingerprint,
+	buildPromptDashboardActivityFingerprint,
 	buildPromptDashboardBranchActions,
 	buildPromptDashboardScopeKey,
 	buildPromptDashboardWidgetCacheKey,
@@ -76,6 +77,7 @@ export class PromptDashboardService implements vscode.Disposable {
 	private readonly sharedAnalysisCache = new Map<string, DashboardCacheEntry<PromptDashboardAnalysisState>>();
 	private readonly analysisInFlight = new Map<string, Promise<PromptDashboardAnalysisState>>();
 	private readonly branchSwitchErrorsByScope = new Map<string, Record<string, string>>();
+	private readonly activityFingerprintByScope = new Map<string, string>();
 	private activeScope: PromptDashboardScope | null = null;
 	private warmTimer: NodeJS.Timeout | null = null;
 	private autoRefreshTimer: NodeJS.Timeout | null = null;
@@ -111,6 +113,25 @@ export class PromptDashboardService implements vscode.Disposable {
 		this.sharedAnalysisCache.clear();
 		this.analysisInFlight.clear();
 		this.branchSwitchErrorsByScope.clear();
+		this.activityFingerprintByScope.clear();
+	}
+
+	/** Resolve visible projects through the workspace service or the legacy test stub surface. */
+	private resolveVisibleProjectNames(
+		requestedProjectNames: string[],
+		fallbackToWorkspaceWhenSelectionInvalid = true,
+	): string[] {
+		if (typeof this.workspaceService.resolveEffectiveProjectNames === 'function') {
+			return this.workspaceService.resolveEffectiveProjectNames(requestedProjectNames, {
+				fallbackToWorkspaceWhenSelectionInvalid,
+			});
+		}
+
+		return resolveEffectiveProjectNames(
+			requestedProjectNames,
+			this.workspaceService.getWorkspaceFolders(),
+			{ fallbackToWorkspaceWhenSelectionInvalid },
+		);
 	}
 
 	getSnapshot(prompt: Prompt, postMessage?: DashboardPostMessage, requestId?: string, forceRefresh = false): PromptDashboardSnapshot {
@@ -602,8 +623,7 @@ export class PromptDashboardService implements vscode.Disposable {
 	}
 
 	private createScope(prompt: Prompt): PromptDashboardScope {
-		const workspaceProjectNames = this.workspaceService.getWorkspaceFolders();
-		const projectNames = resolveEffectiveProjectNames(prompt.projects || [], workspaceProjectNames);
+		const projectNames = this.resolveVisibleProjectNames(prompt.projects || []);
 		const trackedBranchesByProject = Object.fromEntries(
 			Object.entries(prompt.trackedBranchesByProject || {})
 				.map(([project, branch]) => [project.trim(), String(branch || '').trim()] as const)
@@ -1118,6 +1138,9 @@ export class PromptDashboardService implements vscode.Disposable {
 		const cacheKey = buildPromptDashboardWidgetCacheKey(scope, widget);
 		const scopeKey = buildPromptDashboardScopeKey(scope);
 		const cached = this.cache.get(cacheKey);
+		const nextActivityFingerprint = widget === 'activity' && options?.prompt
+			? buildPromptDashboardActivityFingerprint(options.prompt)
+			: '';
 		if (!options?.force && widget === 'projects' && !cached) {
 			const shared = this.getSharedProjects(scope);
 			if (shared && Date.now() - shared.updatedAtMs < PromptDashboardService.CACHE_TTL_MS) {
@@ -1131,12 +1154,20 @@ export class PromptDashboardService implements vscode.Disposable {
 			}
 		}
 		if (!options?.force && widget !== 'status' && cached && Date.now() - cached.updatedAtMs < PromptDashboardService.CACHE_TTL_MS) {
-			this.logDashboardPerf('widget.skipped-fresh-cache', {
-				widget,
-				promptId: scope.promptId,
-				requestId: options?.requestId || '',
-			});
-			return;
+			if (
+				widget === 'activity'
+				&& nextActivityFingerprint
+				&& this.activityFingerprintByScope.get(scopeKey) !== nextActivityFingerprint
+			) {
+				// Refresh the activity widget when the current prompt changed fields that affect activity visibility.
+			} else {
+				this.logDashboardPerf('widget.skipped-fresh-cache', {
+					widget,
+					promptId: scope.promptId,
+					requestId: options?.requestId || '',
+				});
+				return;
+			}
 		}
 		if (postMessage) {
 			this.postWidget(postMessage, scope, this.buildLoadingWidgetSnapshot(scope, widget, options?.prompt), options?.requestId);
@@ -1171,6 +1202,9 @@ export class PromptDashboardService implements vscode.Disposable {
 				const data = await this.loadWidgetData(scope, widget, options?.prompt, options?.projectsMode);
 				this.ensureScopeActive(scope);
 				this.setCache(scope, widget, data);
+				if (widget === 'activity' && nextActivityFingerprint) {
+					this.activityFingerprintByScope.set(scopeKey, nextActivityFingerprint);
+				}
 				const snapshot = widget === 'projects'
 					? this.buildProjectsWidgetFromCache(scope)
 					: this.buildWidgetFromCache(scope, widget, data);
@@ -1382,11 +1416,13 @@ export class PromptDashboardService implements vscode.Disposable {
 		projectNamesOverride?: string[],
 	): Promise<PromptDashboardProjectsData> {
 		const paths = this.workspaceService.getWorkspaceFolderPaths();
-		const workspaceProjectNames = resolveEffectiveProjectNames([], Array.from(paths.keys()));
+		const workspaceProjectNames = Array.from(paths.keys());
 		const requestedProjectNames = projectNamesOverride && projectNamesOverride.length > 0
 			? projectNamesOverride
 			: scope.projectNames;
-		const projectNames = resolveEffectiveProjectNames(requestedProjectNames, Array.from(paths.keys()));
+		const projectNames = projectNamesOverride && projectNamesOverride.length > 0
+			? this.resolveVisibleProjectNames(requestedProjectNames, false)
+			: scope.projectNames;
 		const trackedBranches = this.resolveTrackedBranches(scope, projectNames);
 		const excludedPaths = this.getPromptDashboardExcludedPaths();
 		const lightReactiveRefresh = mode === 'reactive-branches';

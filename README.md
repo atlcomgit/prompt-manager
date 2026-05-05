@@ -270,6 +270,10 @@ Useful configuration ideas:
 - Tune voice input with `promptManager.voice.whisperModel`, `promptManager.voice.language`, and `promptManager.voice.aiPostCorrection` when local STT speed or quality needs adjustment.
 - Enable Project Memory when your repository history is valuable enough to search semantically.
 
+Полезная настройка для multi-root workspace:
+
+- `promptManager.excludedProjects` — список имен workspace folders, которые нужно полностью скрыть из `Projects`, `Git Flow`, prompt dashboard, Project Memory и runtime-путей CodeMap; новые memory/codemap данные по ним больше не строятся, а уже сохраненная история остается в хранилище.
+
 ## Actively Evolving Areas
 
 The extension already covers a broad daily workflow, but some surfaces are still expanding and should be treated as evolving capabilities rather than a fixed end state.

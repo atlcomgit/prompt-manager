@@ -217,6 +217,7 @@ export function activate(context: vscode.ExtensionContext) {
 		memoryEmbedding,
 		memoryAnalyzer,
 		memoryGitHook,
+		workspaceService,
 		aiService,
 		codeMapAdminService,
 	);
@@ -253,7 +254,7 @@ export function activate(context: vscode.ExtensionContext) {
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] starting HTTP server...`);
 				const { port, token } = await memoryHttpServer!.start();
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] HTTP server started on port=${port}`);
-				const folders = vscode.workspace.workspaceFolders?.map(f => f.uri.fsPath) || [];
+				const folders = Array.from(workspaceService.getWorkspaceFolderPaths().values());
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] installing git hooks for ${folders.length} folders`);
 				await memoryGitHook!.installHooksForWorkspace(folders, port, token);
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] git hooks installed`);
@@ -279,6 +280,10 @@ export function activate(context: vscode.ExtensionContext) {
 				// Wire up pipeline: HTTP server → analyze → store → embed
 				memoryHttpServer!.onCommitReceived(async (payload: HookCommitPayload) => {
 					try {
+						if (workspaceService.getExcludedRepositoryNames().includes(payload.repository)) {
+							appendPromptManagerLog(`[${new Date().toISOString()}] [memory] commit ${payload.sha.substring(0, 7)} SKIPPED — repository excluded (${payload.repository})`);
+							return;
+						}
 						if (memoryDb!.hasCommit(payload.sha)) { return; }
 
 						const config = vscode.workspace.getConfiguration('promptManager');

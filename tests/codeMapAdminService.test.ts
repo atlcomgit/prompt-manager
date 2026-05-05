@@ -58,6 +58,76 @@ function createInstructionDetail(branchName: string) {
 	};
 }
 
+test('CodeMapAdminService getInstructions hides excluded repositories from the list', async () => {
+	const { CodeMapAdminService } = await importCodeMapAdminService();
+	const service = new CodeMapAdminService(
+		{
+			getWorkspaceFolderPaths: () => new Map([['prompt-manager', '/workspace/prompt-manager']]),
+		} as any,
+		{
+			getCurrentBranch: async () => 'main',
+			hasUncommittedChanges: async () => ({ hasChanges: false }),
+		} as any,
+		{
+			listLatestInstructions: () => [
+				{
+					id: 1,
+					repository: 'prompt-manager',
+					branchName: 'main',
+					resolvedBranchName: 'main',
+					baseBranchName: 'main',
+					branchRole: 'tracked',
+					instructionKind: 'base',
+					locale: 'ru',
+					generatedAt: '2026-04-11T01:00:00.000Z',
+					updatedAt: '2026-04-11T01:00:00.000Z',
+					fileCount: 5,
+					sourceCommitSha: 'sha-visible',
+					versionCount: 1,
+				},
+				{
+					id: 2,
+					repository: 'hidden-project',
+					branchName: 'main',
+					resolvedBranchName: 'main',
+					baseBranchName: 'main',
+					branchRole: 'tracked',
+					instructionKind: 'base',
+					locale: 'ru',
+					generatedAt: '2026-04-11T01:00:00.000Z',
+					updatedAt: '2026-04-11T01:00:00.000Z',
+					fileCount: 3,
+					sourceCommitSha: 'sha-hidden',
+					versionCount: 1,
+				},
+			],
+		} as any,
+		{
+			resolveProjects: async () => [],
+			getHeadSha: async () => '',
+			getTreeSha: async () => '',
+		} as any,
+		{
+			queueInstruction: () => false,
+			getRuntimeState: () => ({
+				pendingCount: 0,
+				queuedCount: 0,
+				runningCount: 0,
+				isProcessing: false,
+				queuedTasks: [],
+				scheduledRealtimeRefreshes: [],
+				recentEvents: [],
+				cycle: { queuedTotal: 0, startedTotal: 0, completedTotal: 0, failedTotal: 0 },
+			}),
+		} as any,
+	);
+
+	const instructions = await service.getInstructions();
+
+	assert.equal(instructions.length, 1);
+	assert.equal(instructions[0]?.repository, 'prompt-manager');
+});
+
 test('CodeMapAdminService queueRefreshInstruction resolves delta refresh against the selected branch head', async () => {
 	const { CodeMapAdminService } = await importCodeMapAdminService();
 	const queueCalls: Array<{ resolution: any; instructionKind: string; trigger: string; priority: string }> = [];

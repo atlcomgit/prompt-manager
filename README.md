@@ -217,7 +217,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Git-enabled workspace folders for branch-aware features
 - Optional: Project Memory enabled in settings when you want AI-assisted repository memory features
 
-The bundled desktop publish flow packages Marketplace VSIX targets for Linux, Windows, and macOS. VS Code Web is still unsupported because the extension currently ships only a Node-based `main` entry and no `browser` host bundle.
+The bundled desktop publish flow packages Marketplace VSIX targets for Linux, Windows, and macOS first, then publishes those prebuilt VSIX files together in one Marketplace release so the same extension version can carry every desktop target. VS Code Web is still unsupported because the extension currently ships only a Node-based `main` entry and no `browser` host bundle.
 
 ## Quick Start
 

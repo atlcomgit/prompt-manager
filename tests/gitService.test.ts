@@ -315,6 +315,55 @@ test('GitService syncProjects skips stale upstream branches', async () => {
 	assert.deepEqual(calls, []);
 });
 
+test('GitService getIncomingBranchChangedFiles returns incoming upstream diff files for the current branch', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.getCurrentBranch = async () => 'main';
+	service.listLocalBranches = async () => new Map([
+		['main', {
+			name: 'main',
+			current: true,
+			upstream: 'origin/main',
+			ahead: 0,
+			behind: 3,
+			stale: false,
+			sha: 'abc1234',
+			author: 'Test User',
+			committedAt: '2026-04-06T00:00:00.000Z',
+			subject: 'Test commit',
+		}],
+	]);
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args[0] !== 'diff') {
+			return '';
+		}
+		if (args.includes('--name-status')) {
+			return [
+				'M\tsrc/app.ts',
+				'R100\tsrc/old-name.ts\tsrc/new-name.ts',
+				'A\tsrc/new-file.ts',
+			].join('\n');
+		}
+		if (args.includes('--numstat')) {
+			return [
+				'5\t1\tsrc/app.ts',
+				'12\t4\tsrc/{old-name.ts => new-name.ts}',
+				'7\t0\tsrc/new-file.ts',
+			].join('\n');
+		}
+		return '';
+	};
+
+	const files = await service.getIncomingBranchChangedFiles('/tmp/api');
+
+	assert.deepEqual(files, [
+		{ status: 'M', path: 'src/app.ts', additions: 5, deletions: 1, isBinary: false },
+		{ status: 'R', previousPath: 'src/old-name.ts', path: 'src/new-name.ts', additions: 12, deletions: 4, isBinary: false },
+		{ status: 'A', path: 'src/new-file.ts', additions: 7, deletions: 0, isBinary: false },
+	]);
+});
+
 test('GitService fetchProjects starts project mutations in parallel and keeps result order stable', async () => {
 	const { GitService } = await importGitService();
 	const service = new GitService() as any;

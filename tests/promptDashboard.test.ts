@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	compactPromptDashboardMiddleLabel,
 	buildPromptDashboardAnalysisFingerprint,
 	buildPromptDashboardStatusDataFromPrompt,
 	buildPromptDashboardBranchActions,
 	buildPromptDashboardScopeKey,
 	createPromptDashboardWidgetSnapshot,
+	formatPromptDashboardCompactPathParts,
 	getPromptDashboardStatusProgress,
 	syncPromptDashboardStatusFromPrompt,
 	preservePromptDashboardProjectsLoadingSnapshot,
@@ -23,6 +25,36 @@ import type { PromptDashboardProjectSummary, PromptDashboardProjectsData, Prompt
 test('resolvePromptDashboardMode switches to full only when the right side can fit widgets', () => {
 	assert.equal(resolvePromptDashboardMode(1119, 840), 'compact');
 	assert.equal(resolvePromptDashboardMode(1120, 840), 'full');
+});
+
+test('compactPromptDashboardMiddleLabel keeps the start and ending of a long project name', () => {
+	assert.equal(
+		compactPromptDashboardMiddleLabel('prompt-manager-internal-tools', 18),
+		'prompt-m...l-tools',
+	);
+	assert.equal(
+		compactPromptDashboardMiddleLabel('api', 18),
+		'api',
+	);
+});
+
+test('formatPromptDashboardCompactPathParts shortens long directory segments and keeps the file name', () => {
+	assert.deepEqual(
+		formatPromptDashboardCompactPathParts('app/Domain/Controllers/User.ts', 20),
+		{
+			fileName: 'User.ts',
+			directoryPath: 'app/Doma../Controll...',
+			displayPath: 'app/Doma../Controll.../User.ts',
+		},
+	);
+	assert.deepEqual(
+		formatPromptDashboardCompactPathParts('src/app.ts', 20),
+		{
+			fileName: 'app.ts',
+			directoryPath: 'src',
+			displayPath: 'src/app.ts',
+		},
+	);
 });
 
 test('shouldRequestPromptDashboardSnapshot reuses a matching snapshot after hidden or compact transitions', () => {
@@ -155,6 +187,11 @@ test('shouldClearPromptDashboardBusyActionFromWidget waits for a finished projec
 		cacheStatus: 'fresh',
 	}), true);
 	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'pull-project:api',
+		widgetKind: 'projects',
+		cacheStatus: 'fresh',
+	}), true);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
 		busyAction: 'refresh',
 		widgetKind: 'projects',
 		cacheStatus: 'fresh',
@@ -187,6 +224,7 @@ test('preservePromptDashboardProjectsLoadingSnapshot keeps previous rows during 
 		pipeline: null,
 		parallelBranches: [],
 		conflictFiles: [],
+		incomingFiles: [],
 		uncommittedFiles: [],
 	});
 	const previousWidget = createPromptDashboardWidgetSnapshot('projects', {

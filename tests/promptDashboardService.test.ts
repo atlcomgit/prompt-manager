@@ -622,6 +622,49 @@ test('PromptDashboardService exposes workspace-wide branchProjects without widen
 	service.dispose();
 });
 
+test('PromptDashboardService includes incoming upstream files in branch widget rows for pull-eligible projects', async () => {
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	const incomingFiles = [
+		{ status: 'A', path: 'src/incoming.ts', additions: 4, deletions: 0, isBinary: false },
+	];
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project, {
+					currentBranch: 'main',
+					behind: 2,
+					branches: [{ name: 'main', current: true, exists: true, kind: 'current', upstream: 'origin/main', ahead: 0, behind: 2, lastCommit: null, canSwitch: true, canDelete: false, stale: false }],
+				})),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+			getIncomingBranchChangedFiles: async () => incomingFiles,
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	const widget = await service.refreshProjectsWidget(createPrompt({ projects: ['api'] }));
+
+	assert.deepEqual((widget.data.branchProjects?.[0] as any)?.incomingFiles, incomingFiles);
+	service.dispose();
+});
+
 test('PromptDashboardService filters branch-widget uncommitted files by otherProjectsExcludedPaths', async () => {
 	resetConfigurationValues();
 	setConfigurationValues('promptManager.gitOverlay', {
@@ -1893,6 +1936,41 @@ test('PromptDashboardService uses applyBranchTargetsByProject when switching a p
 		trackedBranchesByProject: { web: 'main' },
 	}]);
 	assert.deepEqual(switchCalls, []);
+	service.dispose();
+});
+
+test('PromptDashboardService pulls a single project through syncProjects for the dashboard Get action', async () => {
+	const syncCalls: string[][] = [];
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+		['web', '/workspace/web'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			syncProjects: async (_paths: Map<string, string>, projects: string[]) => {
+				syncCalls.push(projects);
+				return { success: true, errors: [], changedProjects: ['api'], skippedProjects: [] };
+			},
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	const result = await (service as any).pullProject(createPrompt(), 'api');
+
+	assert.equal(result.success, true);
+	assert.deepEqual(syncCalls, [['api']]);
 	service.dispose();
 });
 

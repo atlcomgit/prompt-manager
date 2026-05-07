@@ -121,6 +121,7 @@ const EDITOR_PANEL_VIEW_TYPE = 'promptManager.editor';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
 const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 600;
+const PROMPT_DASHBOARD_FILE_AUTO_REFRESH_DELAY_MS = 1000;
 const PROMPT_DASHBOARD_INITIAL_VISIBLE_REFRESH_GRACE_MS = 1500;
 const GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS = 250;
 const GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS = 250;
@@ -4159,11 +4160,6 @@ export class EditorPanelManager {
 
 	/** Schedules project-widget refreshes for visible prompt editors after git events. */
 	private schedulePromptDashboardAutoRefreshForVisiblePanels(reason: 'file' | 'git', changedPath?: string): void {
-		// Dashboard widgets should track Git state, not every workspace edit.
-		if (reason !== 'git') {
-			return;
-		}
-
 		for (const [panelKey, prompt] of this.panelPromptRefs.entries()) {
 			const panel = this.resolveOpenEditorPanel(panelKey);
 			if (!panel) {
@@ -4178,6 +4174,9 @@ export class EditorPanelManager {
 			}
 
 			this.clearPromptDashboardReactiveRefreshTimer(panelKey);
+			const refreshDelayMs = reason === 'file'
+				? PROMPT_DASHBOARD_FILE_AUTO_REFRESH_DELAY_MS
+				: GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS + 50;
 			const timer = setTimeout(() => {
 				this.promptDashboardReactiveRefreshTimers.delete(panelKey);
 				const latestPrompt = this.panelPromptRefs.get(panelKey);
@@ -4187,7 +4186,7 @@ export class EditorPanelManager {
 				}
 
 				void this.refreshPromptDashboardProjectsForPanel(panelKey, latestPanel, latestPrompt, 'reactive-branches');
-			}, GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS + (reason === 'git' ? 50 : 0));
+			}, refreshDelayMs);
 			this.promptDashboardReactiveRefreshTimers.set(panelKey, timer);
 			this.unrefBackgroundTimer(timer);
 		}
@@ -4321,8 +4320,8 @@ export class EditorPanelManager {
 				new vscode.RelativePattern(workspaceRoot, '**/*'),
 			);
 			const handleWorkspaceFileChange = (uri: vscode.Uri) => {
-				// Only Git Overlay needs high-frequency file-level updates.
-				if (!this.hasActiveGitOverlaySessions()) {
+				// Reuse the shared watcher for both Git Overlay and visible dashboard consumers.
+				if (!this.hasActiveGitReactiveConsumers()) {
 					return;
 				}
 
@@ -8474,12 +8473,20 @@ export class EditorPanelManager {
 					const promptFilePath = prompt.id
 						? this.storageService.getPromptMarkdownUri(prompt.id).fsPath
 						: '';
+					const excludedProjectNames = typeof this.workspaceService.getExcludedProjectNames === 'function'
+						? this.workspaceService.getExcludedProjectNames()
+						: [];
+					const effectiveProjectNames = prompt.projects.length > 0
+						? this.resolveVisibleWorkspaceProjects(prompt.projects, false)
+						: [];
 					const messageContext: ChatMessageContext = {
 						promptDirectory,
 						promptFilePath,
 						chatMemoryDirectory,
 						promptContextReferences: chatContextFiles.promptContextReferences,
 						instructionReferences: chatContextFiles.instructionReferences,
+						effectiveProjectNames,
+						excludedProjectNames,
 					};
 					parts.push(buildChatMessage(prompt, messageContext, vscode.env.language));
 
@@ -9307,6 +9314,28 @@ export class EditorPanelManager {
 					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
 				}
 				// Repaint the project widget first, then let AI review catch up without blocking Apply.
+				await this.promptDashboardService.refreshProjectsWidget(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+					'display',
+				);
+				void this.promptDashboardService.analyzeParallelReview(
+					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+				);
+				break;
+			}
+
+			case 'promptDashboardPullProject': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				const result = await this.promptDashboardService.pullProject(dashboardPrompt, msg.project);
+				if (result.success) {
+					postMessage({ type: 'info', message: `Изменения для "${msg.project}" получены.`, requestId: msg.requestId });
+				} else {
+					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
+				}
 				await this.promptDashboardService.refreshProjectsWidget(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),

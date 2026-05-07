@@ -17,6 +17,8 @@ function makeContext(overrides?: Partial<ChatMessageContext>): ChatMessageContex
 		chatMemoryDirectory: '/workspace/.vscode/prompt-manager/chat-memory',
 		promptContextReferences: [],
 		instructionReferences: [],
+		effectiveProjectNames: undefined,
+		excludedProjectNames: [],
 		...overrides,
 	};
 }
@@ -141,6 +143,29 @@ test('buildChatMessage renders Agent and Plan mode sections correctly', () => {
 	);
 });
 
+test('buildChatMessage renders excluded projects after visible projects with readonly guidance', () => {
+	const result = buildChatMessage(
+		makePrompt({
+			projects: ['prompt-manager', 'legacy-admin'],
+			content: 'Implement the dashboard changes',
+		}),
+		makeContext({
+			effectiveProjectNames: ['prompt-manager'],
+			excludedProjectNames: ['legacy-admin', 'ops-scripts'],
+		}),
+		'en',
+	);
+
+	assert.ok(result.includes('## Projects'), 'должна быть секция Projects');
+	assert.ok(result.includes('## Excluded projects'), 'должна быть секция Excluded projects');
+	assert.ok(result.includes('Use these projects as read-only context only.'), 'должна быть readonly-подсказка');
+	assert.ok(result.indexOf('## Projects') < result.indexOf('## Excluded projects'), 'секция исключённых проектов должна идти после секции Projects');
+	assert.ok(result.includes('- prompt-manager'), 'видимый проект должен остаться в Projects');
+	assert.ok(result.includes('- legacy-admin'), 'исключённый проект должен попасть в отдельную секцию');
+	assert.ok(result.includes('- ops-scripts'), 'все excluded projects должны перечисляться');
+	assert.ok(!result.includes('## Excluded projects\n\n- prompt-manager'), 'видимый проект не должен дублироваться в excluded секции');
+});
+
 // ---- Тест: auto-detect markdown в content ----
 test('buildChatMessage auto-detects markdown in content and skips wrapper', () => {
 	const markdownContent = '# My custom heading\n\nSome detailed text';
@@ -190,6 +215,7 @@ test('buildChatMessage skips empty sections when data is missing', () => {
 
 	/* Пустые подсекции не должны отображаться */
 	assert.ok(!result.includes('## Projects'), 'пустые проекты не отображаются');
+	assert.ok(!result.includes('## Excluded projects'), 'пустая секция исключённых проектов не отображается');
 	assert.ok(!result.includes('### Technologies'), 'пустые технологии не отображаются');
 	assert.ok(!result.includes('### Tools'), 'пустые инструменты не отображаются');
 	assert.ok(!result.includes('### Task and Git'), 'пустая задача/git не отображается');

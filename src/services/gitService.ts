@@ -1796,32 +1796,73 @@ export class GitService {
 		return this.parseCommitLog(stdout);
 	}
 
+	/** Reuses the shared name-status and numstat parsers for one Git diff or show query. */
+	private async getChangedFilesWithNumstat(
+		projectPath: string,
+		nameStatusArgs: string[],
+		numstatArgs: string[],
+	): Promise<GitOverlayCommitChangedFile[]> {
+		const [nameStatusOutput, numstatOutput] = await Promise.all([
+			this.runGitFileCommandOptional(projectPath, nameStatusArgs),
+			this.runGitFileCommandOptional(projectPath, numstatArgs),
+		]);
+		const statsByPath = this.parseNumstatByPath(numstatOutput);
+		return this.parseStagedNameStatus(nameStatusOutput)
+			.map(file => this.attachNumstatToChangedFile(file, statsByPath));
+	}
+
 	async getCommitChangedFiles(projectPath: string, sha: string): Promise<GitOverlayCommitChangedFile[]> {
 		const normalizedSha = sha.trim();
 		if (!normalizedSha) {
 			return [];
 		}
-		const [nameStatusOutput, numstatOutput] = await Promise.all([
-			this.runGitFileCommandOptional(projectPath, [
+		return this.getChangedFilesWithNumstat(projectPath,
+			[
 				'show',
 				'--name-status',
 				'--find-renames',
 				'--diff-filter=ACDMR',
 				'--format=',
 				normalizedSha,
-			]),
-			this.runGitFileCommandOptional(projectPath, [
+			],
+			[
 				'show',
 				'--numstat',
 				'--find-renames',
 				'--diff-filter=ACDMR',
 				'--format=',
 				normalizedSha,
-			]),
-		]);
-		const statsByPath = this.parseNumstatByPath(numstatOutput);
-		return this.parseStagedNameStatus(nameStatusOutput)
-			.map(file => this.attachNumstatToChangedFile(file, statsByPath));
+			],
+		);
+	}
+
+	/** Reads incoming upstream file changes for the currently checked out branch without mutating the repository. */
+	async getIncomingBranchChangedFiles(projectPath: string): Promise<GitOverlayCommitChangedFile[]> {
+		const currentBranch = await this.getCurrentBranch(projectPath);
+		if (!currentBranch) {
+			return [];
+		}
+		const localBranches = await this.listLocalBranches(projectPath);
+		const branchInfo = localBranches.get(currentBranch);
+		if (!branchInfo?.upstream || branchInfo.behind <= 0 || branchInfo.stale) {
+			return [];
+		}
+		return this.getChangedFilesWithNumstat(projectPath,
+			[
+				'diff',
+				'--name-status',
+				'--find-renames',
+				'--diff-filter=ACDMR',
+				'HEAD..@{upstream}',
+			],
+			[
+				'diff',
+				'--numstat',
+				'--find-renames',
+				'--diff-filter=ACDMR',
+				'HEAD..@{upstream}',
+			],
+		);
 	}
 
 	async getCommitFilePatch(projectPath: string, sha: string, filePath: string): Promise<string> {

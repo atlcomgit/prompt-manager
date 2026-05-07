@@ -118,6 +118,7 @@ function createProject(overrides: Partial<PromptDashboardProjectSummary> = {}): 
 			],
 		}],
 		conflictFiles: ['src/webview/editor/App.tsx'],
+		incomingFiles: [],
 		uncommittedFiles: [],
 		...overrides,
 	};
@@ -384,6 +385,61 @@ test('PromptDashboard renders the show-all button for branch rows and keeps sele
 	assert.match(markup, /Git flow/);
 	assert.match(markup, /api/);
 	assert.doesNotMatch(markup, /title="Текущая ветка: main">web<\/div>/);
+});
+
+test('PromptDashboard applies middle ellipsis to long project names in branch rows', () => {
+	const markup = renderDashboard(createSnapshot([
+		createProject({
+			project: 'prompt-manager-internal-tools',
+			repositoryPath: '/workspace/prompt-manager-internal-tools',
+		}),
+	]));
+
+	assert.match(markup, /prompt-ma\.\.\.al-tools/);
+	assert.match(markup, /title="prompt-manager-internal-tools/);
+	assert.match(markup, /Текущая ветка: main"/);
+});
+
+test('PromptDashboard shows the Get action for the current branch when incoming pull data exists', () => {
+	const markup = renderDashboard(createSnapshot([
+		createProject({
+			currentBranch: 'main',
+			behind: 3,
+			incomingFiles: [
+				{ status: 'A', path: 'src/incoming.ts', additions: 4, deletions: 0, isBinary: false },
+			],
+			branches: [
+				{ name: 'main', current: true, exists: true, kind: 'current', upstream: 'origin/main', ahead: 0, behind: 3, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
+				{ name: 'develop', current: false, exists: true, kind: 'tracked', upstream: 'origin/develop', ahead: 0, behind: 0, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
+			],
+			uncommittedFiles: [],
+		}),
+	]));
+
+	assert.match(markup, />Получить<\/button>/);
+	assert.doesNotMatch(markup, />Применить<\/button>/);
+	assert.match(markup, /title="Получить входящие изменения для api"/);
+});
+
+test('PromptDashboard shows a green incoming-files disclosure for the current branch pull action', () => {
+	const markup = renderDashboard(createSnapshot([
+		createProject({
+			currentBranch: 'main',
+			behind: 2,
+			incomingFiles: [
+				{ status: 'A', path: 'src/incoming.ts', additions: 4, deletions: 0, isBinary: false },
+				{ status: 'M', path: 'src/updated.ts', additions: 8, deletions: 3, isBinary: false },
+			],
+			branches: [
+				{ name: 'main', current: true, exists: true, kind: 'current', upstream: 'origin/main', ahead: 0, behind: 2, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
+			],
+		}),
+	]));
+
+	assert.match(markup, /Опережающие файлы/);
+	assert.match(markup, /title="Показать список входящих файлов"/);
+	assert.match(markup, />2<\/span>/);
+	assert.match(markup, /var\(--vscode-charts-green\)/);
 });
 
 test('PromptDashboard shows branch-switch errors and a dirty-files disclosure under the project selector', () => {

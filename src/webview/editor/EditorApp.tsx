@@ -3793,6 +3793,18 @@ export const EditorApp: React.FC = () => {
     });
   }, []);
 
+  const handlePromptDashboardPullProject = useCallback((project: string) => {
+    const requestId = `prompt-dashboard-pull-project-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    promptDashboardRequestIdRef.current = requestId;
+    setPromptDashboardBusyAction(`pull-project:${project}`);
+    vscode.postMessage({
+      type: 'promptDashboardPullProject',
+      prompt: promptRef.current,
+      project,
+      requestId,
+    });
+  }, []);
+
   const handlePromptDashboardSwitchBranches = useCallback((branchesByProject: Record<string, string>, source: 'bulk' | 'prompt' | 'tracked' = 'bulk') => {
     const requestId = `prompt-dashboard-switch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     promptDashboardRequestIdRef.current = requestId;
@@ -6180,6 +6192,7 @@ export const EditorApp: React.FC = () => {
         onHydrateProjectsDetails={handlePromptDashboardHydrateProjectsDetails}
         onOpenGitFlow={handleOpenGitOverlay}
         onOpenPrompt={handlePromptDashboardOpenPrompt}
+        onPullProject={handlePromptDashboardPullProject}
         onSwitchBranch={handlePromptDashboardSwitchBranch}
         onSwitchBranches={handlePromptDashboardSwitchBranches}
         onOpenDiff={handleGitOverlayOpenDiff}

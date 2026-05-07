@@ -1,3 +1,21 @@
+## 130: Dashboard pull action and incoming files
+
+- Дата: 2026-05-07.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: В виджете `Ветки проектов` per-project action теперь переключается с `Применить` на зелёную кнопку `Получить`, если выбранная текущая ветка отстаёт от upstream, а под проектом показывается зелёный disclosure-блок `Опережающие файлы` со списком входящих upstream-изменений.
+- Ключевые моменты: `GitService` получил helper для `HEAD..@{upstream}` diff с rename/numstat-метаданными, `PromptDashboardService` прокидывает `incomingFiles` и выполняет dashboard-only pull одного проекта, `EditorPanelManager` и `EditorApp` добавили typed message flow `promptDashboardPullProject` с widget-first refresh и background AI review, `PromptDashboard` переиспользует existing branch patch viewer для incoming rows и очищает `pull-project:*` busy state только после готового `projects` widget; focused tests покрывают git/service/host/component/util слои.
+- Файлы: src/services/gitService.ts, src/services/promptDashboardService.ts, src/types/messages.ts, src/utils/promptDashboard.ts, src/providers/editorPanelManager.ts, src/webview/editor/EditorApp.tsx, src/webview/editor/components/PromptDashboard.tsx, tests/gitService.test.ts, tests/promptDashboard.test.ts, tests/promptDashboardService.test.ts, tests/editorPanelManager.test.ts, tests/promptDashboardComponent.test.tsx, README.md, CHANGELOG.md.
+
+## 129: Branch widget readability, excluded chat scope, and desktop publish targets
+
+- Дата: 2026-05-06.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: В dashboard-виджете `Ветки проектов` длинные project/file labels стали компактнее и понятнее, Start Chat теперь явно перечисляет `Исключенные проекты` как readonly-блок, а `.vscode/bash/publish.sh` публикует desktop VSIX для Linux, Windows и macOS вместо Linux-only потока; Web отдельно зафиксирован как пока не поддерживаемый runtime.
+- Ключевые моменты: `promptDashboard` util-слой получил helper-ы для middle-ellipsis project names и сокращения intermediate path segments у dirty-file rows; `PromptDashboard.tsx` показывает path prefix отдельно от file name и обновляет branch widget после scoped file changes через `setTimeout(1000)` reactive path в `EditorPanelManager`; `chatMessageBuilder` и `EditorPanelManager` передают в Start Chat отдельный раздел `Excluded projects` с readonly note; `publish.sh` теперь итерирует desktop target matrix и prunes ONNX runtime payload под каждый target вместо удаления всех darwin/win32 assets заранее; README и CHANGELOG задокументированы, а host/component/unit tests покрывают новые dashboard и chat contracts.
+- Файлы: src/utils/promptDashboard.ts, src/webview/editor/components/PromptDashboard.tsx, src/utils/chatMessageBuilder.ts, src/providers/editorPanelManager.ts, src/i18n/translations.ts, tests/promptDashboard.test.ts, tests/promptDashboardComponent.test.tsx, tests/chatMessageBuilder.test.ts, tests/editorPanelManager.test.ts, .vscode/bash/publish.sh, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md.
+
 ## 116: Скрывать закрытые промпты
 
 - Дата: 2026-05-04.

@@ -79,6 +79,7 @@ export type WebviewToExtensionMessage =
 		requestId?: string;
 		reason?: 'details' | 'dirty-files';
 	}
+	| { type: 'promptDashboardPullProject'; prompt: Prompt; project: string; requestId?: string }
 	| { type: 'promptDashboardSwitchBranch'; prompt: Prompt; project: string; branch: string; requestId?: string }
 	| { type: 'promptDashboardSwitchBranches'; prompt: Prompt; branchesByProject: Record<string, string>; requestId?: string }
 	| { type: 'promptDashboardOpenFilePatch'; project: string; filePath: string; previousPath?: string; mode: 'commit' | 'branch'; ref: string; baseRef?: string }

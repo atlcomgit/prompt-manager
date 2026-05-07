@@ -18,6 +18,10 @@ export interface ChatMessageContext {
 	promptContextReferences: string[];
 	/** Ссылки на instruction-файлы (формат #file:/path) */
 	instructionReferences: string[];
+	/** Видимые проекты, которые реально должны попасть в секцию "Проекты" */
+	effectiveProjectNames?: string[];
+	/** Проекты, исключённые глобальной настройкой и доступные только в readonly-контексте */
+	excludedProjectNames?: string[];
 }
 
 /**
@@ -31,6 +35,10 @@ export function buildChatMessage(
 ): string {
 	/** Хелпер перевода */
 	const t = (key: string): string => translate(locale, key);
+	const effectiveProjectNames = normalizeChatMessageProjectNames(
+		context.effectiveProjectNames !== undefined ? context.effectiveProjectNames : prompt.projects,
+	);
+	const excludedProjectNames = normalizeChatMessageProjectNames(context.excludedProjectNames || []);
 
 	const lines: string[] = [];
 
@@ -48,10 +56,22 @@ export function buildChatMessage(
 	lines.push('');
 
 	// --- Проекты ---
-	if (prompt.projects.length > 0) {
+	if (effectiveProjectNames.length > 0) {
 		lines.push(`## ${t('chatMessage.projects')}`);
 		lines.push('');
-		for (const project of prompt.projects) {
+		for (const project of effectiveProjectNames) {
+			lines.push(`- ${project}`);
+		}
+		lines.push('');
+	}
+
+	// --- Исключенные проекты ---
+	if (excludedProjectNames.length > 0) {
+		lines.push(`## ${t('chatMessage.excludedProjects')}`);
+		lines.push('');
+		lines.push(t('chatMessage.excludedProjectsNote'));
+		lines.push('');
+		for (const project of excludedProjectNames) {
 			lines.push(`- ${project}`);
 		}
 		lines.push('');
@@ -85,6 +105,13 @@ export function buildChatMessage(
 	}
 
 	return lines.join('\n').trimEnd();
+}
+
+/** Deduplicates project names while keeping the original order in chat sections. */
+function normalizeChatMessageProjectNames(projectNames: string[]): string[] {
+	return Array.from(new Set((projectNames || [])
+		.map(project => project.trim())
+		.filter(Boolean)));
 }
 
 /**

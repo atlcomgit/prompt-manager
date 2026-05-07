@@ -4,9 +4,14 @@ import { getPromptStatusColor } from '../../shared/promptStatus';
 import type { GitOverlayChangeFile } from '../../../types/git.js';
 import type { GitOverlayParallelBranchSummary } from '../../../types/git.js';
 import type { PromptDashboardAnalysisState, PromptDashboardLoadStatus, PromptDashboardProjectSummary, PromptDashboardRecentCommit, PromptDashboardSnapshot } from '../../../types/promptDashboard.js';
-import { formatPromptDashboardDuration } from '../../../utils/promptDashboard.js';
+import {
+	compactPromptDashboardMiddleLabel,
+	formatPromptDashboardCompactPathParts,
+	formatPromptDashboardDuration,
+} from '../../../utils/promptDashboard.js';
 
 const DASHBOARD_LEFT_ACCENT_SHADOW = 'inset 3px 0 0 var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))';
+const BRANCH_PROJECT_LABEL_MAX_LENGTH = 20;
 
 /** Describes an exact dashboard file comparison request. */
 export interface PromptDashboardFilePatchRequest {
@@ -29,6 +34,7 @@ interface PromptDashboardProps {
 	onOpenPrompt: (id: string, promptUuid?: string) => void;
 	onSwitchBranch: (project: string, branch: string) => void;
 	onSwitchBranches: (branchesByProject: Record<string, string>, source?: 'bulk' | 'prompt' | 'tracked') => void;
+	onPullProject?: (project: string) => void;
 	onOpenDiff: (project: string, filePath: string) => void;
 	onOpenFilePatch: (request: PromptDashboardFilePatchRequest) => void;
 }
@@ -60,6 +66,7 @@ interface DashboardFileTreeEntry {
 	path: string;
 	status: string;
 	label: string;
+	pathPrefix?: string;
 	secondaryLabel?: string;
 	additions?: number | null;
 	deletions?: number | null;
@@ -120,6 +127,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	onOpenPrompt,
 	onSwitchBranch,
 	onSwitchBranches,
+	onPullProject,
 	onOpenDiff,
 	onOpenFilePatch,
 }) => {
@@ -261,7 +269,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			<div style={styles.widgetGrid}>
 				{renderStatus(snapshot, statusCacheStatus)}
 				{renderActivity(snapshot, onOpenPrompt, activityCacheStatus)}
-				{renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow)}
+				{renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow)}
 				{renderProjectCommits(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus)}
 				{renderReviewRequests(projects, projectsCacheStatus)}
 				{renderParallelBranchFiles(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus)}
@@ -528,6 +536,7 @@ function renderProjectBranches(
 	applyBranchDrafts: () => void,
 	applyBranchPreset: (kind: 'prompt' | 'tracked') => void,
 	applyProjectBranch: (project: PromptDashboardProjectSummary) => void,
+	pullProject: (project: PromptDashboardProjectSummary) => void,
 	toggleShowAllBranchProjects: () => void,
 	showGitFlowAction: boolean,
 	onOpenGitFlow: () => void,
@@ -591,7 +600,7 @@ function renderProjectBranches(
 					cacheStatus === 'loading'
 						? renderLoadingEmptyState('Git-данные загружаются')
 						: <div style={styles.emptyText}>Нет Git-данных по проектам</div>
-				) : projects.map((project, index) => renderBranchProject(project, index, expanded, branchDrafts, busyAction, fileHandlers, setBranchDrafts, toggleExpanded, applyProjectBranch))}
+				) : projects.map((project, index) => renderBranchProject(project, index, expanded, branchDrafts, busyAction, fileHandlers, setBranchDrafts, toggleExpanded, applyProjectBranch, pullProject))}
 				{showGitFlowAction ? (
 					<div style={styles.branchFooterActions}>
 						<button type="button" style={styles.secondaryButton} onClick={onOpenGitFlow} title="Открыть Git flow">
@@ -614,19 +623,36 @@ function renderBranchProject(
 	setBranchDrafts: React.Dispatch<React.SetStateAction<Record<string, string>>>,
 	toggleExpanded: (key: string) => void,
 	applyProjectBranch: (project: PromptDashboardProjectSummary) => void,
+	pullProject: (project: PromptDashboardProjectSummary) => void,
 ): React.ReactNode {
 	const branchOptions = buildBranchOptions(project);
 	const selectedBranch = resolveBranchDraft(project, branchDrafts);
+	const selectedBranchInfo = project.branches.find(branch => branch.name === selectedBranch);
+	const projectLabel = compactPromptDashboardMiddleLabel(project.project, BRANCH_PROJECT_LABEL_MAX_LENGTH);
 	const isChanged = selectedBranch && selectedBranch !== project.currentBranch;
 	const isSwitchBusy = isBranchSwitchBusy(busyAction);
-	const isProjectBusy = busyAction === `switch-project:${project.project}`;
+	const isProjectBusy = busyAction === `switch-project:${project.project}` || busyAction === `pull-project:${project.project}`;
+	const canPullSelectedCurrentBranch = !isChanged
+		&& selectedBranchInfo?.current === true
+		&& Math.max(selectedBranchInfo?.behind ?? 0, project.behind) > 0;
+	const hasRowAction = isChanged || canPullSelectedCurrentBranch;
+	const actionLabel = canPullSelectedCurrentBranch ? 'Получить' : 'Применить';
+	const actionBusyLabel = canPullSelectedCurrentBranch ? 'Получаем' : 'Применяем';
+	const actionTitle = canPullSelectedCurrentBranch
+		? `Получить входящие изменения для ${project.project}`
+		: isChanged
+			? `Переключить ${project.project} на ${selectedBranch}`
+			: 'Ветка уже активна';
 	const selectedLabel = isChanged ? 'выбрана' : 'текущая';
+	const incomingFilesToggleKey = `incoming:${project.project}`;
 	const dirtyFilesToggleKey = `dirty:${project.project}`;
+	const hasIncomingFiles = canPullSelectedCurrentBranch && project.incomingFiles.length > 0;
+	const incomingFilesExpanded = expanded[incomingFilesToggleKey] === true;
 	const hasUncommittedFiles = project.uncommittedFiles.length > 0;
 	const uncommittedFilesExpanded = expanded[dirtyFilesToggleKey] === true;
 	return (
 		<div key={project.project} style={{ ...styles.branchProjectRow, ...(index === 0 ? styles.branchProjectRowFirst : null) }}>
-			<div style={styles.projectName} title={`Текущая ветка: ${project.currentBranch || 'n/a'}`}>{project.project}</div>
+			<div style={styles.projectName} title={`${project.project}\nТекущая ветка: ${project.currentBranch || 'n/a'}`}>{projectLabel}</div>
 			<label style={styles.branchSelectInlineLabel}>
 				<select
 					value={selectedBranch}
@@ -649,14 +675,26 @@ function renderBranchProject(
 			</span>
 			<button
 				type="button"
-				style={{ ...styles.inlineButton, ...(!isChanged || (isSwitchBusy && !isProjectBusy) ? styles.disabledButton : null), ...(isProjectBusy ? styles.busyButton : null) }}
-				disabled={!isChanged || isSwitchBusy}
-				onClick={() => applyProjectBranch(project)}
-				title={isChanged ? `Переключить ${project.project} на ${selectedBranch}` : 'Ветка уже активна'}
+				style={{
+					...styles.inlineButton,
+					...(canPullSelectedCurrentBranch ? styles.inlineButtonSuccess : null),
+					...(!hasRowAction || (isSwitchBusy && !isProjectBusy) ? styles.inlineButtonDisabled : null),
+					...(isProjectBusy ? styles.busyButton : null),
+				}}
+				disabled={!hasRowAction || isSwitchBusy}
+				onClick={() => {
+					if (canPullSelectedCurrentBranch) {
+						pullProject(project);
+						return;
+					}
+					applyProjectBranch(project);
+				}}
+				title={actionTitle}
 			>
-				{isProjectBusy ? <span style={styles.inlineSpinnerLabel}><span style={styles.buttonSpinner} aria-hidden="true" /> Применяем</span> : 'Применить'}
+				{isProjectBusy ? <span style={styles.inlineSpinnerLabel}><span style={styles.buttonSpinner} aria-hidden="true" /> {actionBusyLabel}</span> : actionLabel}
 			</button>
 			{project.branchSwitchError ? renderBranchProjectErrorBlock(project.branchSwitchError) : null}
+			{hasIncomingFiles ? renderBranchProjectIncomingFiles(project, selectedBranchInfo?.upstream || '@{upstream}', incomingFilesToggleKey, incomingFilesExpanded, fileHandlers, toggleExpanded) : null}
 			{hasUncommittedFiles ? renderBranchProjectUncommittedFiles(project, dirtyFilesToggleKey, uncommittedFilesExpanded, fileHandlers, toggleExpanded) : null}
 			{project.error ? renderBranchProjectErrorBlock(project.error) : null}
 		</div>
@@ -669,6 +707,79 @@ function renderBranchProjectErrorBlock(message: string): React.ReactNode {
 		<div style={styles.branchProjectErrorBlock}>
 			<div style={styles.branchProjectErrorTitle}>Ошибка переключения ветки</div>
 			<div style={styles.errorText}>{message}</div>
+		</div>
+	);
+}
+
+/** Renders a collapsible outlined notice about local uncommitted files under the branch selector row. */
+function renderBranchProjectIncomingFiles(
+	project: PromptDashboardProjectSummary,
+	upstreamRef: string,
+	toggleKey: string,
+	expanded: boolean,
+	fileHandlers: FileRowActionHandlers,
+	toggleExpanded: (key: string) => void,
+): React.ReactNode {
+	const files = project.incomingFiles;
+	return (
+		<div style={{ ...styles.branchProjectNoticeBlock, ...styles.branchProjectNoticeBlockSuccess }}>
+			<button
+				type="button"
+				style={styles.branchProjectNoticeToggle}
+				onClick={() => toggleExpanded(toggleKey)}
+				title={expanded ? 'Скрыть список входящих файлов' : 'Показать список входящих файлов'}
+			>
+				<span style={styles.detailChevron}>{expanded ? '▾' : '▸'}</span>
+				<span style={{ ...styles.branchProjectNoticeText, ...styles.branchProjectNoticeTextSuccess }}>Опережающие файлы</span>
+				<span style={{ ...styles.fileCount, ...styles.fileCountOk }}>{files.length}</span>
+			</button>
+			{expanded ? (
+				renderBranchProjectIncomingFileList(project, upstreamRef, files, fileHandlers)
+			) : null}
+		</div>
+	);
+}
+
+/** Renders incoming upstream changes through the same exact patch viewer used by branch comparisons. */
+function renderBranchProjectIncomingFileList(
+	project: PromptDashboardProjectSummary,
+	upstreamRef: string,
+	files: PromptDashboardProjectSummary['incomingFiles'],
+	fileHandlers: FileRowActionHandlers,
+): React.ReactNode {
+	const entries = [...files]
+		.sort((left, right) => left.path.localeCompare(right.path, 'ru'))
+		.map((file, index) => {
+			const pathParts = formatPromptDashboardCompactPathParts(file.path);
+			const fileKey = `${project.project}:incoming:${upstreamRef}:${file.previousPath || ''}:${file.path}`;
+			return {
+				key: `incoming:${file.status}:${file.previousPath || ''}:${file.path}:${index}`,
+				path: file.path,
+				status: file.status,
+				label: pathParts.fileName || file.path,
+				pathPrefix: pathParts.directoryPath ? `${pathParts.directoryPath}/` : undefined,
+				secondaryLabel: file.previousPath ? `было: ${file.previousPath}` : undefined,
+				additions: file.additions,
+				deletions: file.deletions,
+				isBinary: file.isBinary,
+				showBranchPrefix: false,
+				opening: fileHandlers.openingFileKey === fileKey,
+				active: fileHandlers.activeFileKey === fileKey,
+				viewed: fileHandlers.viewedFileKeys[fileKey] === true,
+				onOpenPatch: () => fileHandlers.onOpenFilePatch({
+					project: project.project,
+					filePath: file.path,
+					previousPath: file.previousPath,
+					mode: 'branch',
+					ref: upstreamRef,
+					baseRef: 'HEAD',
+				}, fileKey),
+			} satisfies DashboardFileTreeEntry;
+		});
+
+	return (
+		<div style={{ ...styles.branchProjectNoticeList, ...styles.branchProjectNoticeListSuccess }}>
+			{entries.map((entry, index) => renderChangedFileRow(entry, { ancestorHasSibling: [], isLast: index === entries.length - 1 }))}
 		</div>
 	);
 }
@@ -710,13 +821,15 @@ function renderBranchProjectUncommittedFileList(
 	const entries = [...files]
 		.sort((left, right) => left.path.localeCompare(right.path, 'ru'))
 		.map((file, index) => {
+			const pathParts = formatPromptDashboardCompactPathParts(file.path);
 			const fileKey = `${project.project}:dirty:${file.group}:${file.previousPath || ''}:${file.path}`;
 			return {
 				key: `${file.group}:${file.status}:${file.previousPath || ''}:${file.path}:${index}`,
 				path: file.path,
 				status: file.status,
-				label: file.previousPath ? `${file.previousPath} -> ${file.path}` : file.path,
-				secondaryLabel: file.previousPath ? `было: ${file.previousPath}` : resolveBranchProjectSecondaryLabel(file),
+				label: pathParts.fileName || file.path,
+				pathPrefix: pathParts.directoryPath ? `${pathParts.directoryPath}/` : undefined,
+				secondaryLabel: file.previousPath ? `было: ${file.previousPath}` : undefined,
 				additions: file.additions,
 				deletions: file.deletions,
 				isBinary: file.isBinary,
@@ -734,17 +847,6 @@ function renderBranchProjectUncommittedFileList(
 			{entries.map((entry, index) => renderChangedFileRow(entry, { ancestorHasSibling: [], isLast: index === entries.length - 1 }))}
 		</div>
 	);
-}
-
-/** Adds a short readable hint instead of opaque group shorthands like "work". */
-function resolveBranchProjectSecondaryLabel(file: GitOverlayChangeFile): string | undefined {
-	switch (file.group) {
-		case 'merge': return 'конфликт при merge';
-		case 'staged': return 'подготовлено к коммиту';
-		case 'working-tree': return 'локальные изменения';
-		case 'untracked': return 'новый файл';
-		default: return undefined;
-	}
 }
 
 function renderReviewRequests(projects: PromptDashboardProjectSummary[], cacheStatus: PromptDashboardLoadStatus): React.ReactNode {
@@ -1247,7 +1349,7 @@ function resolveFileTone(status: string, warn = false): DashboardFileTone {
 		return {
 			label: '!',
 			accentColor: 'var(--vscode-charts-yellow)',
-			borderColor: 'color-mix(in srgb, var(--vscode-charts-yellow) 74%, var(--vscode-panel-border))',
+			borderColor: 'color-mix(in srgb, var(--vscode-charts-yellow) 99%, var(--vscode-panel-border))',
 			background: 'color-mix(in srgb, var(--vscode-charts-yellow) 18%, var(--vscode-editor-background))',
 		};
 	}
@@ -1287,14 +1389,14 @@ function resolveFileTone(status: string, warn = false): DashboardFileTone {
 			return {
 				label: '!',
 				accentColor: 'var(--vscode-charts-yellow)',
-				borderColor: 'color-mix(in srgb, var(--vscode-charts-yellow) 74%, var(--vscode-panel-border))',
+				borderColor: 'color-mix(in srgb, var(--vscode-charts-yellow) 99%, var(--vscode-panel-border))',
 				background: 'color-mix(in srgb, var(--vscode-charts-yellow) 18%, var(--vscode-editor-background))',
 			};
 		default:
 			return {
 				label: '~',
 				accentColor: 'var(--vscode-charts-orange, var(--vscode-charts-yellow))',
-				borderColor: 'color-mix(in srgb, var(--vscode-charts-orange, var(--vscode-charts-yellow)) 70%, var(--vscode-panel-border))',
+				borderColor: 'color-mix(in srgb, var(--vscode-charts-orange, var(--vscode-charts-yellow)) 99%, var(--vscode-panel-border))',
 				background: 'color-mix(in srgb, var(--vscode-charts-orange, var(--vscode-charts-yellow)) 18%, var(--vscode-editor-background))',
 			};
 	}
@@ -1348,7 +1450,8 @@ function renderDirectoryTreeRow(
 
 /** Renders one clickable file leaf in the dashboard tree. */
 function renderChangedFileRow(input: DashboardFileTreeEntry, context: DashboardFileTreeRowContext): React.ReactNode {
-	const fileName = input.path.split('/').pop() || input.label;
+	const fileName = input.label || input.path.split('/').pop() || input.path;
+	const pathPrefix = input.pathPrefix || '';
 	const isOpening = input.opening === true;
 	const tone = resolveFileTone(input.status, input.warn === true);
 	const lineStats = resolveFileLineStats(input);
@@ -1387,6 +1490,7 @@ function renderChangedFileRow(input: DashboardFileTreeEntry, context: DashboardF
 			{showBranchPrefix ? <span style={styles.fileTreeBranchPrefix}>{buildTreeBranchPrefix(context)}</span> : null}
 			{fileLead}
 			<span style={styles.fileTreeFileMain}>
+				{pathPrefix ? <span style={styles.fileTreePathPrefix}>{pathPrefix}</span> : null}
 				<span style={{ ...styles.fileGraphFileName, ...(isViewed ? styles.fileGraphFileNameViewed : null), ...(isActive ? styles.fileGraphFileNameActive : null) }}>{fileName}</span>
 				{renameHint ? <span style={styles.fileTreeRenameHint}>{`← ${renameHint}`}</span> : null}
 				{isOpening ? <span style={styles.fileTreeOpeningHint}>opening…</span> : null}
@@ -2218,6 +2322,13 @@ const styles: Record<string, React.CSSProperties> = {
 		opacity: 0.55,
 		cursor: 'default',
 	},
+	inlineButtonDisabled: {
+		color: 'var(--vscode-descriptionForeground)',
+		opacity: 0.95,
+		background: 'transparent',
+		border: 'none',
+		cursor: 'default',
+	},
 	// Блок одного проекта внутри commit/review/parallel карточек.
 	projectBlock: {
 		display: 'flex',
@@ -2275,8 +2386,12 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '4px',
 		padding: '7px 9px',
 		borderRadius: '6px',
-		border: '1px solid color-mix(in srgb, var(--vscode-charts-yellow) 48%, var(--vscode-panel-border))',
+		border: '1px solid var(--vscode-charts-yellow)',
 		background: 'color-mix(in srgb, var(--vscode-charts-yellow) 8%, var(--vscode-editor-background))',
+	},
+	branchProjectNoticeBlockSuccess: {
+		border: '1px solid var(--vscode-charts-green)',
+		background: 'color-mix(in srgb, var(--vscode-charts-green) 8%, var(--vscode-editor-background))',
 	},
 	// Project-level warnings and dirty-file disclosures that sit below the branch selector.
 	// Кнопка раскрытия списка незакоммиченных файлов.
@@ -2301,8 +2416,11 @@ const styles: Record<string, React.CSSProperties> = {
 		overflow: 'hidden',
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
-		fontWeight: 700,
-		color: 'var(--vscode-charts-yellow)',
+		fontWeight: 600,
+		color: 'color-mix(in srgb, var(--vscode-charts-yellow) 70%, var(--vscode-foreground))',
+	},
+	branchProjectNoticeTextSuccess: {
+		color: 'color-mix(in srgb, var(--vscode-charts-green) 70%, var(--vscode-foreground))',
 	},
 	// Вертикальный список dirty-файлов под предупреждением.
 	branchProjectNoticeList: {
@@ -2312,6 +2430,9 @@ const styles: Record<string, React.CSSProperties> = {
 		paddingTop: '4px',
 		borderTop: '1px solid color-mix(in srgb, var(--vscode-charts-yellow) 26%, transparent)',
 		minWidth: 0,
+	},
+	branchProjectNoticeListSuccess: {
+		borderTop: '1px solid color-mix(in srgb, var(--vscode-charts-green) 26%, transparent)',
 	},
 	// Верхняя строка блока проекта с названием и badge.
 	projectHeader: {
@@ -2492,8 +2613,14 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	// Предупреждающий вариант счетчика файлов.
 	fileCountWarn: {
-		color: 'var(--vscode-charts-yellow)',
+		fontWeight: 500,
+		color: 'color-mix(in srgb, var(--vscode-charts-yellow) 70%, var(--vscode-foreground))',
 		borderColor: 'var(--vscode-charts-yellow)',
+	},
+	fileCountOk: {
+		fontWeight: 500,
+		color: 'color-mix(in srgb, var(--vscode-charts-green) 70%, var(--vscode-foreground))',
+		borderColor: 'var(--vscode-charts-green)',
 	},
 	// Shared file-tree primitives reused by commits, parallel branches, conflicts, and dirty files.
 	// Корневой контейнер общего дерева файлов.
@@ -2608,6 +2735,20 @@ const styles: Record<string, React.CSSProperties> = {
 		minWidth: 0,
 		whiteSpace: 'nowrap',
 		overflow: 'hidden',
+	},
+	// Compact relative directory path that stays before the file name in flat dirty rows.
+	// Компактный относительный путь, который стоит перед именем файла в плоских строках.
+	fileTreePathPrefix: {
+		minWidth: 0,
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
+		fontSize: '11px',
+		fontWeight: 400,
+		// color: 'var(--vscode-descriptionForeground)',
+		// color: 'color-mix(in srgb, var(--vscode--foreground) 3%, transparent)',
+		color: 'var(--vscode--foreground)',
+		opacity: 0.6,
 	},
 	// Подсказка о rename рядом с текущим именем файла.
 	fileTreeRenameHint: {
@@ -2791,15 +2932,26 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	// Небольшая текстовая кнопка действия внутри строки проекта.
 	inlineButton: {
-		padding: '1px 6px',
+		padding: '3px 6px',
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '4px',
-		background: 'transparent',
-		color: 'var(--vscode-textLink-foreground)',
+		// border: '1px solid var(--vscode-button-border, transparent)',
+		// borderRadius: '4px',
+		// background: 'var(--vscode-button-background)',
+		// color: 'var(--vscode-button-foreground)',
+		// background: 'transparent',
+		background: 'var(--vscode-textLink-foreground)',
+		color: 'var(--vscode-button-foreground)',
 		fontFamily: 'var(--vscode-font-family)',
 		fontSize: '10px',
 		cursor: 'pointer',
 		whiteSpace: 'nowrap',
+	},
+	// Зеленый вариант inline-кнопки для положительных действий. Получить
+	inlineButtonSuccess: {
+		color: 'var(--vscode-button-foreground)',
+		borderColor: 'var(--vscode-foreground)',
+		background: 'var(--vscode-charts-green)',
 	},
 	// Текст под раскрытой строкой, пока список файлов пуст или грузится.
 	emptyDetails: {

@@ -5,9 +5,71 @@ import type { Prompt, PromptStatus } from '../types/prompt.js';
 export const PROMPT_DASHBOARD_WARM_INTERVAL_MS = 5 * 60 * 1000;
 export const PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS = 5 * 60 * 1000;
 export const PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX = 280;
+const PROMPT_DASHBOARD_TEXT_ELLIPSIS = '...';
+const PROMPT_DASHBOARD_PATH_SHORT_SEGMENT_PREFIX = 4;
+const PROMPT_DASHBOARD_PATH_LONG_SEGMENT_PREFIX = 8;
+const PROMPT_DASHBOARD_PATH_COMPACT_THRESHOLD = 24;
+
+/** Stores compact path pieces for one dashboard file row. */
+export interface PromptDashboardCompactPathParts {
+	fileName: string;
+	directoryPath: string;
+	displayPath: string;
+}
 
 export function resolvePromptDashboardMode(pageWidth: number, formShellWidth: number): 'full' | 'compact' {
 	return pageWidth - formShellWidth >= PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX ? 'full' : 'compact';
+}
+
+/** Keeps both the start and the ending of a long label visible inside narrow dashboard rows. */
+export function compactPromptDashboardMiddleLabel(value: string, maxLength: number): string {
+	const normalized = (value || '').trim();
+	if (!normalized || normalized.length <= maxLength || maxLength <= PROMPT_DASHBOARD_TEXT_ELLIPSIS.length + 2) {
+		return normalized;
+	}
+
+	const visibleChars = maxLength - PROMPT_DASHBOARD_TEXT_ELLIPSIS.length;
+	const prefixLength = Math.ceil(visibleChars / 2);
+	const suffixLength = Math.floor(visibleChars / 2);
+	return `${normalized.slice(0, prefixLength)}${PROMPT_DASHBOARD_TEXT_ELLIPSIS}${normalized.slice(normalized.length - suffixLength)}`;
+}
+
+/** Shortens long intermediate path segments while keeping the file name intact. */
+function compactPromptDashboardPathSegment(segment: string): string {
+	if (segment.length > PROMPT_DASHBOARD_PATH_LONG_SEGMENT_PREFIX) {
+		return `${segment.slice(0, PROMPT_DASHBOARD_PATH_LONG_SEGMENT_PREFIX)}${PROMPT_DASHBOARD_TEXT_ELLIPSIS}`;
+	}
+	if (segment.length > PROMPT_DASHBOARD_PATH_SHORT_SEGMENT_PREFIX) {
+		return `${segment.slice(0, PROMPT_DASHBOARD_PATH_SHORT_SEGMENT_PREFIX)}..`;
+	}
+	return segment;
+}
+
+/** Builds compact directory and file-name parts for one branch-widget file row. */
+export function formatPromptDashboardCompactPathParts(
+	path: string,
+	compactThreshold = PROMPT_DASHBOARD_PATH_COMPACT_THRESHOLD,
+): PromptDashboardCompactPathParts {
+	const normalized = (path || '')
+		.split(/[\\/]+/)
+		.map(segment => segment.trim())
+		.filter(Boolean)
+		.join('/');
+	if (!normalized) {
+		return { fileName: '', directoryPath: '', displayPath: '' };
+	}
+
+	const segments = normalized.split('/');
+	const fileName = segments.pop() || normalized;
+	const directorySegments = normalized.length > compactThreshold
+		? segments.map(compactPromptDashboardPathSegment)
+		: segments;
+	const directoryPath = directorySegments.join('/');
+	return {
+		fileName,
+		directoryPath,
+		displayPath: directoryPath ? `${directoryPath}/${fileName}` : fileName,
+	};
 }
 
 /** Reuses the current snapshot when visibility changed but prompt inputs stayed the same. */
@@ -41,6 +103,7 @@ export function shouldClearPromptDashboardBusyActionFromWidget(input: {
 
 	return input.busyAction === 'switch-all'
 		|| input.busyAction.startsWith('switch-project:')
+		|| input.busyAction.startsWith('pull-project:')
 		|| input.busyAction.startsWith('preset:');
 }
 

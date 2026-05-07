@@ -6,7 +6,7 @@ import type { WorkspaceService } from './workspaceService.js';
 import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 import type { Prompt, PromptConfig } from '../types/prompt.js';
-import type { GitOverlayChangeFile, GitOverlayProjectSnapshot } from '../types/git.js';
+import type { GitOverlayChangeFile, GitOverlayCommitChangedFile, GitOverlayProjectSnapshot } from '../types/git.js';
 import type {
 	PromptDashboardAnalysisState,
 	PromptDashboardPromptActivityData,
@@ -201,6 +201,21 @@ export class PromptDashboardService implements vscode.Disposable {
 
 	async switchProjectBranch(prompt: Prompt, project: string, branch: string): Promise<PromptDashboardBranchSwitchResult> {
 		return this.switchProjectBranches(prompt, { [project]: branch });
+	}
+
+	async pullProject(prompt: Prompt, project: string): Promise<PromptDashboardBranchSwitchResult> {
+		const normalizedProject = String(project || '').trim();
+		if (!normalizedProject) {
+			return { success: false, errors: ['Не выбран проект для получения изменений.'], projectErrors: {} };
+		}
+
+		const paths = this.workspaceService.getWorkspaceFolderPaths();
+		const result = await this.gitService.syncProjects(paths, [normalizedProject]);
+		const scope = this.createScope(prompt);
+		const pullResult = this.buildBranchSwitchResult([normalizedProject], result.errors || []);
+		this.cancelScheduledAutoRefresh('pull-project', scope);
+		this.invalidateScope(scope);
+		return pullResult;
 	}
 
 	async switchProjectBranches(prompt: Prompt, branchesByProject: Record<string, string>): Promise<PromptDashboardBranchSwitchResult> {
@@ -1478,6 +1493,9 @@ export class PromptDashboardService implements vscode.Disposable {
 			this.ensureScopeActive(scope);
 			const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshot.trackedBranches);
 			const cachedProject = cachedProjectsByName.get(project.project);
+			const incomingFiles = dirtyOnlyDetailsRefresh || includeExpandedDetails
+				? (cachedProject?.incomingFiles || [])
+				: await this.loadIncomingFilesForProject(project, cachedProject);
 			const parallelBaseBranch = this.resolveParallelBranchBase(scope, project, trackedBranch);
 			const displayParallelBranches = this.resolveDisplayParallelBranches(scope, project, trackedBranch, cachedProject);
 			const uncommittedFiles = mode === 'analysis'
@@ -1489,7 +1507,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				)
 				: this.collectProjectUncommittedFiles(project, excludedPaths);
 			if (lightReactiveRefresh) {
-				return this.buildReactiveProjectSummary(scope, project, snapshot.trackedBranches, cachedProject, excludedPaths);
+				return this.buildReactiveProjectSummary(scope, project, snapshot.trackedBranches, cachedProject, excludedPaths, incomingFiles);
 			}
 			if (dirtyOnlyDetailsRefresh) {
 				return this.buildDirtyDetailsProjectSummary(scope, project, trackedBranch, uncommittedFiles, cachedProject);
@@ -1545,6 +1563,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				pipeline,
 				parallelBranches,
 				conflictFiles,
+				incomingFiles,
 				uncommittedFiles,
 			} satisfies PromptDashboardProjectSummary;
 		});
@@ -1588,9 +1607,10 @@ export class PromptDashboardService implements vscode.Disposable {
 		);
 		this.ensureScopeActive(scope);
 
-		return snapshot.projects.map((project) => {
+		return this.mapLimited(snapshot.projects, PromptDashboardService.PROJECT_CONCURRENCY, async (project) => {
 			const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshot.trackedBranches);
 			const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
+			const incomingFiles = await this.loadIncomingFilesForProject(project);
 			return {
 				project: project.project,
 				repositoryPath: project.repositoryPath,
@@ -1615,6 +1635,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				pipeline: null,
 				parallelBranches: [],
 				conflictFiles,
+				incomingFiles,
 				uncommittedFiles: this.collectProjectUncommittedFiles(project, excludedPaths),
 			} satisfies PromptDashboardProjectSummary;
 		});
@@ -1632,6 +1653,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		const preservedRecentCommits = cachedProject ? cachedProject.recentCommits : this.buildDisplayRecentCommits(project);
 		const preservedReview = cachedProject ? cachedProject.review : project.review;
 		const preservedPipeline = cachedProject ? cachedProject.pipeline : null;
+		const preservedIncomingFiles = cachedProject ? cachedProject.incomingFiles : [];
 		const preservedParallelBranches = cachedProject
 			? cachedProject.parallelBranches
 			: this.buildDisplayParallelBranches(scope, project, trackedBranch);
@@ -1660,6 +1682,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				pipeline: preservedPipeline,
 				parallelBranches: preservedParallelBranches,
 				conflictFiles,
+				incomingFiles: preservedIncomingFiles,
 				uncommittedFiles,
 			};
 		}
@@ -1674,8 +1697,29 @@ export class PromptDashboardService implements vscode.Disposable {
 			dirty: project.dirty,
 			hasConflicts: project.hasConflicts,
 			conflictFiles,
+			incomingFiles: cachedProject.incomingFiles,
 			uncommittedFiles,
 		};
+	}
+
+	/** Loads incoming upstream diff files only for the current branch rows that can actually be pulled. */
+	private async loadIncomingFilesForProject(
+		project: Pick<GitOverlayProjectSnapshot, 'repositoryPath' | 'currentBranch' | 'behind' | 'branches'>,
+		cachedProject?: PromptDashboardProjectSummary,
+	): Promise<GitOverlayCommitChangedFile[]> {
+		const currentBranch = String(project.currentBranch || '').trim();
+		const currentBranchInfo = (project.branches || []).find(branch => branch.current || branch.name === currentBranch);
+		if (!currentBranch || project.behind <= 0 || !currentBranchInfo?.upstream || currentBranchInfo.stale) {
+			return [];
+		}
+
+		try {
+			return await this.gitService.getIncomingBranchChangedFiles(project.repositoryPath);
+		} catch {
+			return cachedProject?.currentBranch === currentBranch
+				? cachedProject.incomingFiles
+				: [];
+		}
 	}
 
 	/** Reuse fully resolved review states during the immediate follow-up analysis pass. */
@@ -1926,6 +1970,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		snapshotTrackedBranches: string[],
 		cachedProject?: PromptDashboardProjectSummary,
 		excludedPaths: string[] = [],
+		incomingFiles: GitOverlayCommitChangedFile[] = [],
 	): PromptDashboardProjectSummary {
 		const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshotTrackedBranches);
 		const uncommittedFiles = this.collectProjectUncommittedFiles(project, excludedPaths);
@@ -1961,6 +2006,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			pipeline: canReuseHeavySections && reusableCachedProject ? reusableCachedProject.pipeline : null,
 			parallelBranches: canReuseHeavySections ? (reusableCachedProject?.parallelBranches || []) : [],
 			conflictFiles,
+			incomingFiles,
 			uncommittedFiles,
 		};
 	}

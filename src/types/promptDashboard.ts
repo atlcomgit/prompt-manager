@@ -76,6 +76,7 @@ export interface PromptDashboardProjectSummary {
 	pipeline: GitOverlayPipelineStatus | null;
 	parallelBranches: GitOverlayParallelBranchSummary[];
 	conflictFiles: string[];
+	incomingFiles: GitOverlayCommitChangedFile[];
 	uncommittedFiles: GitOverlayChangeFile[];
 }
 

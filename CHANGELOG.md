@@ -32,6 +32,8 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- The prompt-page `AI Models` picker now sorts the Copilot model list alphabetically, while still keeping the current prompt model visible even when it is not present in the latest fetched catalog yet.
+- The prompt-page `AI Models` picker now keeps curated visible Copilot models first but still appends newly available live chat models returned by the VS Code Language Model API, so fresh entries such as `GPT-5.5` appear immediately instead of waiting for the local visibility cache to catch up.
 - The `Ветки проектов` widget now shortens long project names in the middle, renders compact relative path prefixes for dirty files, and schedules a scoped one-second refresh after matching workspace file edits instead of waiting only for the next Git metadata event.
 - The `Ветки проектов` widget now turns the per-project action into `Получить` when the selected current branch is behind its upstream, runs a single-project pull through the same widget-first refresh path used by branch applies, keeps the busy state until the refreshed `projects` widget arrives, and shows incoming upstream changes in a green `Опережающие файлы` disclosure with clickable branch-diff rows.
 - Prompt dashboard MR/PR cards no longer show projects whose only review state is “active MR/PR not found”, and the `Активные промпты` widget now invalidates its warm cache when the prompt status or tracked activity changes locally.

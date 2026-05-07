@@ -1012,15 +1012,17 @@ export class AiService {
 			// Keep going: cached Copilot model state is still useful for the picker.
 		}
 
-		const visibleModels = await this.getVisibleCopilotModels(models);
-		if (visibleModels.length > 0) {
-			return visibleModels;
-		}
-
-		return this.normalizeAvailableModels(models.map(model => ({
+		const liveModels = this.normalizeAvailableModels(models.map(model => ({
 			id: this.getPreferredModelOptionId(model.id, String((model as any).identifier || '')),
 			name: (model.name || '').trim() || model.family || model.id,
 		})));
+
+		const visibleModels = await this.getVisibleCopilotModels(models);
+		if (visibleModels.length > 0) {
+			return this.mergeAvailableModelOptions(visibleModels, liveModels);
+		}
+
+		return liveModels;
 	}
 
 	async getAvailableFreeModels(): Promise<AvailableModelOption[]> {
@@ -1263,6 +1265,22 @@ export class AiService {
 
 			return left.name.localeCompare(right.name, 'ru', { sensitivity: 'base' });
 		});
+	}
+
+	/** Keep curated visible models first while appending live Copilot models that are not cached yet. */
+	private mergeAvailableModelOptions(
+		primary: AvailableModelOption[],
+		secondary: AvailableModelOption[],
+	): AvailableModelOption[] {
+		if (primary.length === 0) {
+			return this.normalizeAvailableModels(secondary);
+		}
+
+		if (secondary.length === 0) {
+			return this.normalizeAvailableModels(primary);
+		}
+
+		return this.normalizeAvailableModels([...primary, ...secondary]);
 	}
 
 	private normalizeAvailableModels(models: AvailableModelOption[]): AvailableModelOption[] {

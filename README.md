@@ -82,6 +82,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Keep prompt-local context files valid after prompt title or task-number driven folder renames, including auto-repair of stale saved file references on reopen.
 - Attach projects, languages, frameworks, skills, MCP tools, hooks, task references, branches, notes, plans, and reports.
 - Reuse prompt context across sessions without rebuilding the same setup every time.
+- Keep the prompt-page `AI Models` picker aligned with the current Copilot chat catalog: cached visible models still stay first, but newly exposed live models such as `GPT-5.5` are now appended immediately instead of waiting for VS Code's local model cache to refresh.
 
 ### Launch and reopen Copilot chats from context
 
@@ -100,6 +101,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - See Go to chat on every persisted prompt status except Draft and Closed, so reopening the bound Copilot chat stays available outside the initial draft stage.
 - See the selected AI model directly in the Process tab launch step, so the opening step confirms which model will be used.
 - Reuse the AI model from the most recently updated prompt when you create a draft through Quick Add Prompt, so quick capture starts with the same model you used last.
+- Keep the prompt-page `AI Models` dropdown alphabetically sorted, while still showing the current prompt model even if it has not reached the freshly fetched Copilot catalog yet.
 - Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.
 - Keep chat launch context explicit about scope: the generated Markdown now adds a dedicated `Excluded projects` section right after `Projects`, and that block is informational only so the model treats those folders as read-only exclusions instead of active task scope.
 - Keep generated global, project, session, and codemap instruction files as plain Markdown without auto-injected `applyTo` frontmatter.

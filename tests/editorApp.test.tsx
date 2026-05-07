@@ -107,3 +107,22 @@ test('EditorApp renders the initial prompt page without throwing', async () => {
 		assert.match(markup, /Prompt details|Prompt content|Description/i);
 	});
 });
+
+test('buildPromptModelOptions sorts prompt AI models alphabetically', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { buildPromptModelOptions } = await import('../src/webview/editor/EditorApp.js');
+		const options = buildPromptModelOptions(
+			[
+				{ id: 'copilot/gpt-5.5', name: 'GPT-5.5' },
+				{ id: 'claude-sonnet-4', name: 'Claude Sonnet 4' },
+				{ id: 'gpt-4.1', name: 'GPT-4.1' },
+			],
+			'o3',
+		);
+
+		assert.deepEqual(
+			options.map(option => option.name),
+			['Claude Sonnet 4', 'GPT-4.1', 'GPT-5.5', 'o3'],
+		);
+	});
+});

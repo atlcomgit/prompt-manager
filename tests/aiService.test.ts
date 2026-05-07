@@ -27,6 +27,8 @@ const mockModel = {
 	},
 };
 
+let selectChatModelsImpl: () => Promise<any[]> = async () => [mockModel];
+
 moduleLoader._load = (request, parent, isMain) => {
 	if (request === 'vscode') {
 		class CancellationTokenSource {
@@ -61,7 +63,7 @@ moduleLoader._load = (request, parent, isMain) => {
 			lm: {
 				selectChatModels: async () => {
 					selectChatModelsCalls += 1;
-					return [mockModel];
+					return selectChatModelsImpl();
 				},
 			},
 			LanguageModelChatMessage: {
@@ -81,6 +83,7 @@ test('AiService reuses the selected Copilot model across consecutive requests', 
 	selectChatModelsCalls = 0;
 	sendRequestCalls = 0;
 	outputLines.length = 0;
+	selectChatModelsImpl = async () => [mockModel];
 
 	const service = new AiService();
 	await service.generateTitle('Сгенерируй заголовок');
@@ -89,4 +92,32 @@ test('AiService reuses the selected Copilot model across consecutive requests', 
 	assert.equal(sendRequestCalls, 2);
 	assert.equal(selectChatModelsCalls, 1);
 	assert.equal(outputLines.some(line => line.includes('result=model-cache-hit')), true);
+});
+
+test('AiService keeps live Copilot models that are missing from visible cache state', async () => {
+	selectChatModelsCalls = 0;
+	selectChatModelsImpl = async () => [
+		mockModel,
+		{
+			vendor: 'copilot',
+			id: 'gpt-5.5',
+			family: 'gpt-5.5',
+			name: 'GPT-5.5',
+			identifier: 'copilot/gpt-5.5',
+		},
+	];
+
+	const service = new AiService();
+	(service as any).getVisibleCopilotModels = async () => [
+		{ id: 'gpt-5-mini', name: 'GPT-5 mini' },
+	];
+
+	const models = await service.getAvailableModels();
+
+	assert.equal(selectChatModelsCalls, 1);
+	assert.deepEqual(models, [
+		{ id: 'gpt-5-mini', name: 'GPT-5 mini' },
+		{ id: 'copilot/gpt-5.5', name: 'GPT-5.5' },
+	]);
+	selectChatModelsImpl = async () => [mockModel];
 });

@@ -91,6 +91,30 @@ interface SelectOption {
   description?: string;
 }
 
+/** Build prompt model options in a stable alphabetical order for the prompt page picker. */
+export const buildPromptModelOptions = (
+  availableModels: SelectOption[],
+  currentModel: string,
+): SelectOption[] => {
+  const normalizedCurrentModel = currentModel.trim();
+  const items = [...availableModels];
+
+  if (normalizedCurrentModel && !items.some(item => item.id === normalizedCurrentModel)) {
+    items.push({ id: normalizedCurrentModel, name: normalizedCurrentModel });
+  }
+
+  return [...items].sort((left, right) => {
+    const leftName = (left.name || left.id || '').trim();
+    const rightName = (right.name || right.id || '').trim();
+    const byName = leftName.localeCompare(rightName, 'ru', { sensitivity: 'base' });
+    if (byName !== 0) {
+      return byName;
+    }
+
+    return left.id.localeCompare(right.id, 'ru', { sensitivity: 'base' });
+  });
+};
+
 type InlineNotice = { kind: 'error' | 'info'; message: string };
 type ChatEntryAction = 'start' | 'open';
 type GitOverlayMode = 'default' | 'start-chat-preflight' | 'open-chat-preflight';
@@ -1517,12 +1541,7 @@ export const EditorApp: React.FC = () => {
     .join(', ');
 
   const modelOptions = useMemo(() => {
-    const items = [...availableModels];
-    const currentModel = prompt.model.trim();
-    if (currentModel && !items.some(item => item.id === currentModel)) {
-      items.unshift({ id: currentModel, name: currentModel });
-    }
-    return items;
+    return buildPromptModelOptions(availableModels, prompt.model);
   }, [availableModels, prompt.model]);
 
   const selectedModelName = useMemo(() => {

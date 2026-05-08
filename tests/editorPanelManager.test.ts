@@ -3413,6 +3413,84 @@ test('startChat refreshes remote global context before syncing instructions when
 	resetVsCodeCommandMock();
 });
 
+test('startChat excludes only workspace projects that still exist from the readonly section', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		},
+		workspaceService: {
+			getExcludedProjectNames: () => ['core', 'ghost-project'],
+			resolveEffectiveProjectNames: (requestedProjects: string[], options?: {
+				fallbackToWorkspaceWhenSelectionInvalid?: boolean;
+				includeExcluded?: boolean;
+			}) => {
+				assert.equal(options?.includeExcluded, true);
+				assert.equal(options?.fallbackToWorkspaceWhenSelectionInvalid, false);
+				return requestedProjects.filter(project => project === 'core');
+			},
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+			getActiveChatSessionId: async () => '',
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: '',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async () => true,
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-excluded-projects' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	const sentChatQuery = vscodeCommandCalls
+		.map(call => call.args[0] as { query?: string; prompt?: string; message?: string } | undefined)
+		.find(arg => typeof arg?.query === 'string')?.query;
+
+	assert.equal(typeof sentChatQuery, 'string');
+	assert.ok(sentChatQuery?.includes('## Excluded projects'));
+	assert.ok(sentChatQuery?.includes('- core'));
+	assert.ok(!sentChatQuery?.includes('ghost-project'));
+	resetVsCodeCommandMock();
+});
+
 test('startChat uses the latest webview global context source before deciding whether to auto-load', async () => {
 	resetVsCodeCommandMock();
 

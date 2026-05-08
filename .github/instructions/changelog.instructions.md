@@ -1,3 +1,12 @@
+## 123: Clean excluded projects chat context
+
+- Дата: 2026-05-08.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Start Chat now filters the `Excluded projects` chat section against the current workspace before sending the generated Markdown to Copilot, so stale excluded names that are no longer present as workspace folders do not leak into chat scope; a focused host-level regression test and user-facing docs were updated alongside the fix.
+- Ключевые моменты: `EditorPanelManager` now resolves excluded project names through the same workspace scope helper used for visible prompt projects, but with `includeExcluded=true` and `fallbackToWorkspaceWhenSelectionInvalid=false`, which preserves only real excluded workspace folders without widening the list back to the full workspace; the regression test asserts the final start-chat query contains the surviving excluded project and omits a missing one.
+- Файлы: src/providers/editorPanelManager.ts, tests/editorPanelManager.test.ts, README.md, CHANGELOG.md.
+
 ## 130: Dashboard pull action and incoming files
 
 - Дата: 2026-05-07.

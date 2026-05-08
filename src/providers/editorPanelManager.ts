@@ -2188,16 +2188,18 @@ export class EditorPanelManager {
 	private resolveVisibleWorkspaceProjects(
 		requestedProjects: string[],
 		fallbackToWorkspaceWhenSelectionInvalid = true,
+		includeExcluded = false,
 	): string[] {
 		if (typeof this.workspaceService.resolveEffectiveProjectNames === 'function') {
 			return this.workspaceService.resolveEffectiveProjectNames(requestedProjects, {
 				fallbackToWorkspaceWhenSelectionInvalid,
+				includeExcluded,
 			});
 		}
 
 		return resolveEffectiveProjectNames(
 			requestedProjects,
-			this.workspaceService.getWorkspaceFolders(),
+			this.workspaceService.getWorkspaceFolders(includeExcluded),
 			{ fallbackToWorkspaceWhenSelectionInvalid },
 		);
 	}
@@ -8474,7 +8476,11 @@ export class EditorPanelManager {
 						? this.storageService.getPromptMarkdownUri(prompt.id).fsPath
 						: '';
 					const excludedProjectNames = typeof this.workspaceService.getExcludedProjectNames === 'function'
-						? this.workspaceService.getExcludedProjectNames()
+						? this.resolveVisibleWorkspaceProjects(
+							this.workspaceService.getExcludedProjectNames(),
+							false,
+							true,
+						)
 						: [];
 					const effectiveProjectNames = prompt.projects.length > 0
 						? this.resolveVisibleWorkspaceProjects(prompt.projects, false)

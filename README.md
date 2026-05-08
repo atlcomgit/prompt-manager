@@ -103,7 +103,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Reuse the AI model from the most recently updated prompt when you create a draft through Quick Add Prompt, so quick capture starts with the same model you used last.
 - Keep the prompt-page `AI Models` dropdown alphabetically sorted, while still showing the current prompt model even if it has not reached the freshly fetched Copilot catalog yet.
 - Include prompt file paths, the chat-memory directory, and generated memory instruction file references in the chat start context, including dedicated project instructions stored in chat-memory when present.
-- Keep chat launch context explicit about scope: the generated Markdown now adds a dedicated `Excluded projects` section right after `Projects`, and that block is informational only so the model treats those folders as read-only exclusions instead of active task scope.
+- Keep chat launch context explicit about scope: the generated Markdown now adds a dedicated `Excluded projects` section right after `Projects`, that block is informational only so the model treats those folders as read-only exclusions instead of active task scope, and it now lists only excluded folders that still exist in the current workspace.
 - Keep generated global, project, session, and codemap instruction files as plain Markdown without auto-injected `applyTo` frontmatter.
 - Resolve generated session and codemap chat-memory instructions against the current workspace: valid prompt project selections stay scoped, while empty or stale selections fall back to all workspace projects.
 - Rebase embedded codemap markdown headings under per-project sections so generated instruction files keep a single top-level H1 and stable nested H2/H3/H4 structure.

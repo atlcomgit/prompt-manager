@@ -32,6 +32,7 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- Start Chat now drops missing workspace folders from the `Excluded projects` section before sending the generated chat context, so stale excluded names no longer leak into Copilot chat scope.
 - The prompt-page `AI Models` picker now sorts the Copilot model list alphabetically, while still keeping the current prompt model visible even when it is not present in the latest fetched catalog yet.
 - The prompt-page `AI Models` picker now keeps curated visible Copilot models first but still appends newly available live chat models returned by the VS Code Language Model API, so fresh entries such as `GPT-5.5` appear immediately instead of waiting for the local visibility cache to catch up.
 - The `Ветки проектов` widget now shortens long project names in the middle, renders compact relative path prefixes for dirty files, and schedules a scoped one-second refresh after matching workspace file edits instead of waiting only for the next Git metadata event.

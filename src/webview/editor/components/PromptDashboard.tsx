@@ -6,8 +6,9 @@ import type { GitOverlayParallelBranchSummary } from '../../../types/git.js';
 import type { PromptDashboardAnalysisState, PromptDashboardLoadStatus, PromptDashboardProjectSummary, PromptDashboardRecentCommit, PromptDashboardSnapshot } from '../../../types/promptDashboard.js';
 import {
 	compactPromptDashboardMiddleLabel,
-	formatPromptDashboardCompactPathParts,
+	fitPromptDashboardPathPartsToWidth,
 	formatPromptDashboardDuration,
+	splitPromptDashboardPathParts,
 } from '../../../utils/promptDashboard.js';
 
 const DASHBOARD_LEFT_ACCENT_SHADOW = 'inset 3px 0 0 var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))';
@@ -754,7 +755,7 @@ function renderBranchProjectIncomingFileList(
 	const entries = [...files]
 		.sort((left, right) => left.path.localeCompare(right.path, 'ru'))
 		.map((file, index) => {
-			const pathParts = formatPromptDashboardCompactPathParts(file.path);
+			const pathParts = splitPromptDashboardPathParts(file.path);
 			const fileKey = `${project.project}:incoming:${upstreamRef}:${file.previousPath || ''}:${file.path}`;
 			return {
 				key: `incoming:${file.status}:${file.previousPath || ''}:${file.path}:${index}`,
@@ -825,7 +826,7 @@ function renderBranchProjectUncommittedFileList(
 	const entries = [...files]
 		.sort((left, right) => left.path.localeCompare(right.path, 'ru'))
 		.map((file, index) => {
-			const pathParts = formatPromptDashboardCompactPathParts(file.path);
+			const pathParts = splitPromptDashboardPathParts(file.path);
 			const fileKey = `${project.project}:dirty:${file.group}:${file.previousPath || ''}:${file.path}`;
 			return {
 				key: `${file.group}:${file.status}:${file.previousPath || ''}:${file.path}:${index}`,
@@ -845,7 +846,6 @@ function renderBranchProjectUncommittedFileList(
 				onOpenPatch: () => fileHandlers.onOpenDiff(project.project, file.path, fileKey),
 			} satisfies DashboardFileTreeEntry;
 		});
-
 	return (
 		<div style={styles.branchProjectNoticeList}>
 			{entries.map((entry, index) => renderChangedFileRow(entry, { ancestorHasSibling: [], isLast: index === entries.length - 1 }))}
@@ -1452,8 +1452,113 @@ function renderDirectoryTreeRow(
 	);
 }
 
+/** Measures flat branch-widget rows and shortens only the overflowing directory prefix. */
+const PromptDashboardMeasuredFlatFileRow: React.FC<{ input: DashboardFileTreeEntry }> = ({ input }) => {
+	const tone = resolveFileTone(input.status, input.warn === true);
+	const lineStats = resolveFileLineStats(input);
+	const renameHint = cleanTreeSecondaryLabel(input.secondaryLabel);
+	const isActive = input.active === true;
+	const isViewed = input.viewed === true;
+	const isOpening = input.opening === true;
+	const baseParts = splitPromptDashboardPathParts(input.path);
+	const [pathPrefix, setPathPrefix] = useState(input.pathPrefix || '');
+	const fileMainRef = useRef<HTMLSpanElement | null>(null);
+	const pathPrefixRef = useRef<HTMLSpanElement | null>(null);
+
+	// Reset the visible prefix whenever the underlying file path changes.
+	useEffect(() => {
+		setPathPrefix(input.pathPrefix || '');
+	}, [input.path, input.pathPrefix]);
+
+	// Refit the directory prefix to the actual rendered width of this one flat row.
+	useEffect(() => {
+		if (!baseParts.directoryPath || typeof window === 'undefined') {
+			return;
+		}
+
+		const measureAndFit = () => {
+			const fileMain = fileMainRef.current;
+			if (!fileMain || fileMain.clientWidth <= 0) {
+				return;
+			}
+
+			const children = Array.from(fileMain.children) as HTMLElement[];
+			const prefixElement = pathPrefixRef.current;
+			const gapPx = resolvePromptDashboardElementGapPx(fileMain);
+			const reservedWidth = children
+				.filter(child => child !== prefixElement)
+				.reduce((total, child) => total + child.getBoundingClientRect().width, 0);
+			const totalGapWidth = gapPx * Math.max(0, children.length - 1);
+			const availableWidth = Math.max(0, fileMain.clientWidth - reservedWidth - totalGapWidth);
+			const measureText = createPromptDashboardTextMeasure(prefixElement || fileMain);
+			const fittedPath = fitPromptDashboardPathPartsToWidth(input.path, {
+				availableWidth,
+				measureText,
+			});
+			const nextPrefix = fittedPath.directoryPath ? `${fittedPath.directoryPath}/` : '';
+			setPathPrefix(current => current === nextPrefix ? current : nextPrefix);
+		};
+
+		measureAndFit();
+
+		if (typeof ResizeObserver !== 'undefined') {
+			const observer = new ResizeObserver(() => {
+				measureAndFit();
+			});
+
+			if (fileMainRef.current) {
+				observer.observe(fileMainRef.current);
+			}
+
+			return () => observer.disconnect();
+		}
+
+		window.addEventListener('resize', measureAndFit);
+		return () => window.removeEventListener('resize', measureAndFit);
+	}, [baseParts.directoryPath, input.path, isActive, isOpening, isViewed, renameHint]);
+
+	return (
+		<button
+			type="button"
+			style={{
+				...styles.fileTreeFileRow,
+				...styles.fileTreeFileRowFlat,
+				...(isViewed ? styles.fileTreeFileRowViewed : null),
+				...(isActive ? styles.fileTreeFileRowActive : null),
+			}}
+			onClick={input.onOpenPatch}
+			title={input.path}
+		>
+			<span
+				style={{
+					...styles.fileStatus,
+					...(input.warn ? styles.fileStatusWarn : null),
+					color: isActive ? 'var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground))' : tone.accentColor,
+					borderColor: isActive ? 'color-mix(in srgb, var(--vscode-textLink-foreground) 58%, var(--vscode-panel-border))' : tone.borderColor,
+					background: isActive ? 'color-mix(in srgb, var(--vscode-textLink-foreground) 16%, transparent)' : tone.background,
+				}}
+			>
+				{tone.label}
+			</span>
+			<span ref={fileMainRef} style={styles.fileTreeFileMain}>
+				{pathPrefix ? <span ref={pathPrefixRef} style={styles.fileTreePathPrefix}>{pathPrefix}</span> : null}
+				<span style={{ ...styles.fileGraphFileName, ...(isViewed ? styles.fileGraphFileNameViewed : null), ...(isActive ? styles.fileGraphFileNameActive : null), flexShrink: 0 }}>{baseParts.fileName}</span>
+				{renameHint ? <span style={styles.fileTreeRenameHint}>{`← ${renameHint}`}</span> : null}
+				{isOpening ? <span style={styles.fileTreeOpeningHint}>opening…</span> : null}
+				{isActive ? <span style={styles.fileTreeStateBadgeActive}>открыт</span> : null}
+				{!isActive && isViewed ? <span style={styles.fileTreeStateBadgeViewed}>просмотрен</span> : null}
+			</span>
+			{renderLineStats(lineStats, false, { hideUnknown: input.hideUnknownLineStats === true })}
+		</button>
+	);
+};
+
 /** Renders one clickable file leaf in the dashboard tree. */
 function renderChangedFileRow(input: DashboardFileTreeEntry, context: DashboardFileTreeRowContext): React.ReactNode {
+	if (input.showBranchPrefix === false) {
+		return <PromptDashboardMeasuredFlatFileRow key={`file:${input.key}`} input={input} />;
+	}
+
 	const fileName = input.label || input.path.split('/').pop() || input.path;
 	const pathPrefix = input.pathPrefix || '';
 	const isOpening = input.opening === true;
@@ -1462,7 +1567,7 @@ function renderChangedFileRow(input: DashboardFileTreeEntry, context: DashboardF
 	const renameHint = cleanTreeSecondaryLabel(input.secondaryLabel);
 	const isActive = input.active === true;
 	const isViewed = input.viewed === true;
-	const showBranchPrefix = input.showBranchPrefix !== false;
+	const showBranchPrefix = true;
 	const fileLead = showBranchPrefix
 		? <span style={{ ...styles.fileTreeFileBullet, color: input.warn ? 'var(--vscode-charts-yellow)' : isActive ? 'var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground))' : tone.accentColor }}>🗋</span>
 		: (
@@ -1504,6 +1609,32 @@ function renderChangedFileRow(input: DashboardFileTreeEntry, context: DashboardF
 			{renderLineStats(lineStats, false, { hideUnknown: input.hideUnknownLineStats === true })}
 		</button>
 	);
+}
+
+/** Reads the inline flex gap in pixels so the width budget matches the rendered row. */
+function resolvePromptDashboardElementGapPx(element: HTMLElement): number {
+	if (typeof window === 'undefined') {
+		return 0;
+	}
+	const computedStyle = window.getComputedStyle(element);
+	return Number.parseFloat(computedStyle.columnGap || computedStyle.gap || '0') || 0;
+}
+
+/** Creates a text measurer that mirrors the rendered font of the path-prefix span. */
+function createPromptDashboardTextMeasure(element: HTMLElement): (value: string) => number {
+	if (typeof document === 'undefined' || typeof window === 'undefined') {
+		return value => value.length;
+	}
+
+	const canvas = document.createElement('canvas');
+	const context = canvas.getContext('2d');
+	if (!context) {
+		return value => value.length;
+	}
+
+	const computedStyle = window.getComputedStyle(element);
+	context.font = computedStyle.font || `${computedStyle.fontWeight} ${computedStyle.fontSize} ${computedStyle.fontFamily}`;
+	return value => context.measureText(value).width;
 }
 
 /** Builds one ASCII-like branch prefix for the current tree row. */

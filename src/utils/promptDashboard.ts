@@ -10,11 +10,20 @@ const PROMPT_DASHBOARD_PATH_SHORT_SEGMENT_PREFIX = 4;
 const PROMPT_DASHBOARD_PATH_LONG_SEGMENT_PREFIX = 8;
 const PROMPT_DASHBOARD_PATH_COMPACT_THRESHOLD = 24;
 
+/** Measures one plain text fragment in the same font context as the rendered path prefix. */
+export type PromptDashboardTextMeasure = (value: string) => number;
+
 /** Stores compact path pieces for one dashboard file row. */
 export interface PromptDashboardCompactPathParts {
 	fileName: string;
 	directoryPath: string;
 	displayPath: string;
+}
+
+/** Describes one normalized path split into stable directory and file-name parts. */
+interface PromptDashboardNormalizedPath {
+	segments: string[];
+	parts: PromptDashboardCompactPathParts;
 }
 
 export function resolvePromptDashboardMode(pageWidth: number, formShellWidth: number): 'full' | 'compact' {
@@ -34,6 +43,76 @@ export function compactPromptDashboardMiddleLabel(value: string, maxLength: numb
 	return `${normalized.slice(0, prefixLength)}${PROMPT_DASHBOARD_TEXT_ELLIPSIS}${normalized.slice(normalized.length - suffixLength)}`;
 }
 
+/** Splits one path into normalized directory and file-name parts without shortening it. */
+export function splitPromptDashboardPathParts(path: string): PromptDashboardCompactPathParts {
+	return normalizePromptDashboardPath(path).parts;
+}
+
+/** Fits only the directory prefix into the measured width budget while keeping the file name intact. */
+export function fitPromptDashboardPathPartsToWidth(
+	path: string,
+	input: {
+		availableWidth: number;
+		measureText: PromptDashboardTextMeasure;
+	},
+): PromptDashboardCompactPathParts {
+	const normalizedPath = normalizePromptDashboardPath(path);
+	const { parts, segments } = normalizedPath;
+	if (!parts.directoryPath) {
+		return parts;
+	}
+
+	const availableWidth = Number.isFinite(input.availableWidth)
+		? Math.max(0, input.availableWidth)
+		: 0;
+	if (availableWidth <= 0) {
+		return {
+			...parts,
+			directoryPath: '',
+			displayPath: parts.fileName,
+		};
+	}
+
+	const measureText = input.measureText;
+	const currentSegments = [...segments];
+	const measureDirectory = (): number => measureText(currentSegments.join('/'));
+	if (measureDirectory() <= availableWidth) {
+		return parts;
+	}
+
+	while (measureDirectory() > availableWidth) {
+		let nextIndex = -1;
+		let nextSegment = '';
+		let nextWidth = -1;
+
+		for (let index = 0; index < currentSegments.length; index += 1) {
+			const candidate = buildPromptDashboardNextCompactSegment(segments[index], currentSegments[index], measureText);
+			if (!candidate) {
+				continue;
+			}
+			const candidateWidth = measureText(currentSegments[index]);
+			if (candidateWidth > nextWidth) {
+				nextIndex = index;
+				nextSegment = candidate;
+				nextWidth = candidateWidth;
+			}
+		}
+
+		if (nextIndex < 0) {
+			break;
+		}
+
+		currentSegments[nextIndex] = nextSegment;
+	}
+
+	const directoryPath = currentSegments.join('/');
+	return {
+		fileName: parts.fileName,
+		directoryPath,
+		displayPath: directoryPath ? `${directoryPath}/${parts.fileName}` : parts.fileName,
+	};
+}
+
 /** Shortens long intermediate path segments while keeping the file name intact. */
 function compactPromptDashboardPathSegment(segment: string): string {
 	if (segment.length > PROMPT_DASHBOARD_PATH_LONG_SEGMENT_PREFIX) {
@@ -45,23 +124,67 @@ function compactPromptDashboardPathSegment(segment: string): string {
 	return segment;
 }
 
-/** Builds compact directory and file-name parts for one branch-widget file row. */
-export function formatPromptDashboardCompactPathParts(
-	path: string,
-	compactThreshold = PROMPT_DASHBOARD_PATH_COMPACT_THRESHOLD,
-): PromptDashboardCompactPathParts {
+/** Normalizes raw file paths into stable directory/file-name parts for dashboard labels. */
+function normalizePromptDashboardPath(path: string): PromptDashboardNormalizedPath {
 	const normalized = (path || '')
 		.split(/[\\/]+/)
 		.map(segment => segment.trim())
 		.filter(Boolean)
 		.join('/');
 	if (!normalized) {
-		return { fileName: '', directoryPath: '', displayPath: '' };
+		return {
+			segments: [],
+			parts: { fileName: '', directoryPath: '', displayPath: '' },
+		};
 	}
 
-	const segments = normalized.split('/');
-	const fileName = segments.pop() || normalized;
-	const directorySegments = normalized.length > compactThreshold
+	const allSegments = normalized.split('/');
+	const fileName = allSegments.pop() || normalized;
+	const directoryPath = allSegments.join('/');
+	return {
+		segments: allSegments,
+		parts: {
+			fileName,
+			directoryPath,
+			displayPath: directoryPath ? `${directoryPath}/${fileName}` : fileName,
+		},
+	};
+}
+
+/** Finds the next shorter version of a directory segment without increasing its rendered width. */
+function buildPromptDashboardNextCompactSegment(
+	originalSegment: string,
+	currentSegment: string,
+	measureText: PromptDashboardTextMeasure,
+): string | null {
+	const currentWidth = measureText(currentSegment);
+	for (let visibleLength = Math.max(0, originalSegment.length - 1); visibleLength >= 1; visibleLength -= 1) {
+		const candidate = `${originalSegment.slice(0, visibleLength)}${PROMPT_DASHBOARD_TEXT_ELLIPSIS}`;
+		if (candidate === currentSegment) {
+			continue;
+		}
+		if (measureText(candidate) < currentWidth) {
+			return candidate;
+		}
+	}
+
+	if (measureText(PROMPT_DASHBOARD_TEXT_ELLIPSIS) < currentWidth) {
+		return PROMPT_DASHBOARD_TEXT_ELLIPSIS;
+	}
+
+	return null;
+}
+
+/** Builds compact directory and file-name parts for one branch-widget file row. */
+export function formatPromptDashboardCompactPathParts(
+	path: string,
+	compactThreshold = PROMPT_DASHBOARD_PATH_COMPACT_THRESHOLD,
+): PromptDashboardCompactPathParts {
+	const normalizedPath = normalizePromptDashboardPath(path);
+	const { parts } = normalizedPath;
+	const segments = [...normalizedPath.segments];
+	const fileName = parts.fileName;
+	const directorySegments = parts.displayPath.length > compactThreshold
 		? segments.map(compactPromptDashboardPathSegment)
 		: segments;
 	const directoryPath = directorySegments.join('/');
@@ -92,7 +215,7 @@ export function buildPromptDashboardFileDiffTitle(input: {
 	baseRef?: string;
 	author?: string;
 }): string {
-	const pathParts = formatPromptDashboardCompactPathParts(input.filePath, 42);
+	const pathParts = splitPromptDashboardPathParts(input.filePath);
 	const fileLabel = pathParts.fileName || pathParts.displayPath || String(input.filePath || '').trim() || 'file';
 	const normalizedProject = String(input.project || '').trim();
 	const normalizedAuthor = String(input.author || '').trim();

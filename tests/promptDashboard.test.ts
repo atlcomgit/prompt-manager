@@ -9,6 +9,7 @@ import {
 	buildPromptDashboardBranchActions,
 	buildPromptDashboardScopeKey,
 	createPromptDashboardWidgetSnapshot,
+	fitPromptDashboardPathPartsToWidth,
 	formatPromptDashboardCompactPathParts,
 	getPromptDashboardStatusProgress,
 	syncPromptDashboardStatusFromPrompt,
@@ -19,6 +20,7 @@ import {
 	shouldAcceptPromptDashboardAnalysisMessage,
 	shouldClearPromptDashboardBusyActionFromWidget,
 	shouldRequestPromptDashboardSnapshot,
+	splitPromptDashboardPathParts,
 	splitPromptDashboardActivityByDay,
 } from '../src/utils/promptDashboard.js';
 import type { PromptDashboardProjectSummary, PromptDashboardProjectsData, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSnapshot } from '../src/types/promptDashboard.js';
@@ -54,6 +56,73 @@ test('formatPromptDashboardCompactPathParts shortens long directory segments and
 			fileName: 'app.ts',
 			directoryPath: 'src',
 			displayPath: 'src/app.ts',
+		},
+	);
+});
+
+test('splitPromptDashboardPathParts keeps the full path intact without UI compaction', () => {
+	assert.deepEqual(
+		splitPromptDashboardPathParts('app/Domain/Controllers/User.ts'),
+		{
+			fileName: 'User.ts',
+			directoryPath: 'app/Domain/Controllers',
+			displayPath: 'app/Domain/Controllers/User.ts',
+		},
+	);
+});
+
+test('fitPromptDashboardPathPartsToWidth keeps the full path when the measured width fits', () => {
+	assert.deepEqual(
+		fitPromptDashboardPathPartsToWidth('src/features/editor/App.tsx', {
+			availableWidth: 64,
+			measureText: value => value.length,
+		}),
+		{
+			fileName: 'App.tsx',
+			directoryPath: 'src/features/editor',
+			displayPath: 'src/features/editor/App.tsx',
+		},
+	);
+});
+
+test('fitPromptDashboardPathPartsToWidth shortens the longest directory segment first', () => {
+	assert.deepEqual(
+		fitPromptDashboardPathPartsToWidth('src/VeryLongDirectoryName/lib/index.ts', {
+			availableWidth: 20,
+			measureText: value => value.length,
+		}),
+		{
+			fileName: 'index.ts',
+			directoryPath: 'src/VeryLongD.../lib',
+			displayPath: 'src/VeryLongD.../lib/index.ts',
+		},
+	);
+});
+
+test('fitPromptDashboardPathPartsToWidth keeps shrinking additional long segments when one is not enough', () => {
+	assert.deepEqual(
+		fitPromptDashboardPathPartsToWidth('modules/AnotherVeryLongFolderName/SecondMassiveDirectory/File.ts', {
+			availableWidth: 16,
+			measureText: value => value.length,
+		}),
+		{
+			fileName: 'File.ts',
+			directoryPath: 'm.../An.../Se...',
+			displayPath: 'm.../An.../Se.../File.ts',
+		},
+	);
+});
+
+test('fitPromptDashboardPathPartsToWidth can drop the directory prefix completely when there is no width budget', () => {
+	assert.deepEqual(
+		fitPromptDashboardPathPartsToWidth('src/features/editor/App.tsx', {
+			availableWidth: 0,
+			measureText: value => value.length,
+		}),
+		{
+			fileName: 'App.tsx',
+			directoryPath: '',
+			displayPath: 'App.tsx',
 		},
 	);
 });

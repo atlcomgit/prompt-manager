@@ -1,3 +1,12 @@
+## 126: Эллипсис путей в незакоммиченных файлах
+
+- Дата: 2026-05-10.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлено сокращение путей в flat-строках блоков `Незакоммиченные файлы` и `Опережающие файлы` виджета `Ветки проектов`: теперь путь не укорачивается, пока помещается рядом с именем файла, а при нехватке места сегменты каталога сжимаются по реальной ширине строки и в первую очередь режутся самые длинные части пути.
+- Ключевые моменты: `promptDashboard` util-слой теперь отдельно хранит normal path split и width-aware helper `fitPromptDashboardPathPartsToWidth()`, чтобы diff-title логика не зависела от UI compaction; `PromptDashboard.tsx` для flat incoming/dirty rows перешёл на runtime width measurement через `ResizeObserver` и canvas text measurement внутри row-local component, сохранив tree-view списки без изменений; focused util/component tests покрывают full-fit, longest-first shrink и SSR-safe rendering path.
+- Файлы: src/utils/promptDashboard.ts, src/webview/editor/components/PromptDashboard.tsx, tests/promptDashboard.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md, .vscode/prompt-manager/chat-memory/feature.instructions.md.
+
 ## 125: Добавить обязательные инструменты и автора
 
 - Дата: 2026-05-09.

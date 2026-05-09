@@ -1865,6 +1865,28 @@ export class GitService {
 		);
 	}
 
+	/** Reads unique authors of incoming upstream commits for the currently checked out branch. */
+	async getIncomingBranchAuthors(projectPath: string): Promise<string[]> {
+		const currentBranch = await this.getCurrentBranch(projectPath);
+		if (!currentBranch) {
+			return [];
+		}
+		const localBranches = await this.listLocalBranches(projectPath);
+		const branchInfo = localBranches.get(currentBranch);
+		if (!branchInfo?.upstream || branchInfo.behind <= 0 || branchInfo.stale) {
+			return [];
+		}
+		const output = await this.runGitFileCommandOptional(projectPath, [
+			'log',
+			'--format=%an',
+			'HEAD..@{upstream}',
+		]);
+		return Array.from(new Set(output
+			.split(/\r?\n/)
+			.map(author => author.trim())
+			.filter(Boolean)));
+	}
+
 	async getCommitFilePatch(projectPath: string, sha: string, filePath: string): Promise<string> {
 		const normalizedSha = sha.trim();
 		const normalizedFilePath = filePath.trim();
@@ -1894,6 +1916,23 @@ export class GitService {
 		} catch {
 			return '';
 		}
+	}
+
+	/** Resolves the latest visible author for one file at a specific Git ref. */
+	async getFileAuthorAtRef(projectPath: string, ref: string, filePath: string): Promise<string> {
+		const normalizedRef = ref.trim();
+		const normalizedFilePath = filePath.trim();
+		if (!normalizedRef || !normalizedFilePath) {
+			return '';
+		}
+		return (await this.runGitFileCommandOptional(projectPath, [
+			'log',
+			'-1',
+			'--format=%an',
+			normalizedRef,
+			'--',
+			normalizedFilePath,
+		])).trim();
 	}
 
 	async getBranchFilePatch(projectPath: string, baseRef: string, branchRef: string, filePath: string): Promise<string> {

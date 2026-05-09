@@ -218,7 +218,8 @@ function buildContextSections(
 		tools.push(`- **Preferred model**: ${prompt.model}`);
 	}
 	if (tools.length > 0) {
-		sections.push(`### ${t('chatMessage.tools')}\n${tools.join('\n')}`);
+		// Add a mandatory tool-usage instruction before the actual tool list.
+		sections.push(`### ${t('chatMessage.tools')}\n${t('chatMessage.toolsNote')}\n\n${tools.join('\n')}`);
 	}
 
 	// ### Задача и Git

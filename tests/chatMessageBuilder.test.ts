@@ -79,6 +79,14 @@ test('buildChatMessage produces correct markdown with all fields populated', () 
 	assert.ok(result.includes('### Метаданные промпта'), 'должна быть подсекция метаданных');
 	assert.ok(result.includes('### Технологии'), 'должна быть подсекция технологий');
 	assert.ok(result.includes('### Инструменты'), 'должна быть подсекция инструментов');
+	assert.ok(
+		result.includes('Считай их обязательными для этой задачи.'),
+		'должна быть обязательная подсказка перед списком инструментов',
+	);
+	assert.ok(
+		result.indexOf('Считай их обязательными для этой задачи.') < result.indexOf('- **Skills**: grep-timeout'),
+		'обязательная подсказка должна идти перед списком инструментов',
+	);
 	assert.ok(result.includes('### Задача и Git'), 'должна быть подсекция задачи и git');
 	assert.ok(result.includes('### Файлы контекста'), 'должна быть подсекция файлов контекста');
 

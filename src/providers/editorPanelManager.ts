@@ -82,6 +82,7 @@ import {
 	type PromptConfigFieldChangedAt,
 	type PromptConfigSyncField,
 } from '../utils/promptExternalSync.js';
+import { buildPromptDashboardFileDiffTitle } from '../utils/promptDashboard.js';
 import {
 	buildReservedArchiveRenameNotice,
 	shouldApplySavedPromptToPanel,
@@ -4743,11 +4744,20 @@ export class EditorPanelManager {
 			: await this.resolvePromptDashboardBranchDiffBase(projectPath, input.baseRef || 'HEAD', input.ref);
 		const rightRef = input.ref;
 		const leftPath = input.previousPath || input.filePath;
-		const [leftContent, rightContent] = await Promise.all([
+		// Resolve both file sides and the visible author metadata in one round-trip.
+		const [leftContent, rightContent, author] = await Promise.all([
 			this.gitService.getFileContentAtRef(projectPath, leftRef, leftPath),
 			this.gitService.getFileContentAtRef(projectPath, rightRef, input.filePath),
+			this.gitService.getFileAuthorAtRef(projectPath, rightRef, input.filePath),
 		]);
-		const rangeLabel = input.mode === 'commit' ? input.ref : `${leftRef}...${rightRef}`;
+		const diffTitle = buildPromptDashboardFileDiffTitle({
+			project: input.project,
+			filePath: input.filePath,
+			mode: input.mode,
+			ref: rightRef,
+			baseRef: input.baseRef || 'HEAD',
+			author,
+		});
 		const diffDirectory = vscode.Uri.file(path.join(
 			os.tmpdir(),
 			'prompt-manager-dashboard-diff',
@@ -4760,7 +4770,7 @@ export class EditorPanelManager {
 			'vscode.diff',
 			leftUri,
 			rightUri,
-			`${input.project}: ${input.filePath} (${rangeLabel})`,
+			diffTitle,
 			{ preview: false, viewColumn: vscode.ViewColumn.Beside },
 		);
 	}

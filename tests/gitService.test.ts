@@ -364,6 +364,60 @@ test('GitService getIncomingBranchChangedFiles returns incoming upstream diff fi
 	]);
 });
 
+test('GitService getIncomingBranchAuthors returns unique upstream authors in commit order', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+
+	service.getCurrentBranch = async () => 'main';
+	service.listLocalBranches = async () => new Map([
+		['main', {
+			name: 'main',
+			current: true,
+			upstream: 'origin/main',
+			ahead: 0,
+			behind: 3,
+			stale: false,
+			sha: 'abc1234',
+			author: 'Test User',
+			committedAt: '2026-04-06T00:00:00.000Z',
+			subject: 'Test commit',
+		}],
+	]);
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'log') {
+			return ['Jane Doe', 'John Smith', 'Jane Doe', '  ', 'Alex Roe'].join('\n');
+		}
+		return '';
+	};
+
+	const authors = await service.getIncomingBranchAuthors('/tmp/api');
+
+	assert.deepEqual(authors, ['Jane Doe', 'John Smith', 'Alex Roe']);
+});
+
+test('GitService getFileAuthorAtRef queries the latest author for the selected file ref', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	let capturedArgs: string[] | undefined;
+
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		capturedArgs = args;
+		return ' Jane Doe ';
+	};
+
+	const author = await service.getFileAuthorAtRef('/tmp/api', 'origin/main', 'src/app.ts');
+
+	assert.equal(author, 'Jane Doe');
+	assert.deepEqual(capturedArgs, [
+		'log',
+		'-1',
+		'--format=%an',
+		'origin/main',
+		'--',
+		'src/app.ts',
+	]);
+});
+
 test('GitService fetchProjects starts project mutations in parallel and keeps result order stable', async () => {
 	const { GitService } = await importGitService();
 	const service = new GitService() as any;

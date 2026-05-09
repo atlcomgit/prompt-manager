@@ -72,6 +72,46 @@ export function formatPromptDashboardCompactPathParts(
 	};
 }
 
+/** Shortens long Git refs for user-facing dashboard diff labels. */
+function shortenPromptDashboardGitRef(ref: string): string {
+	const normalized = String(ref || '').trim();
+	if (!normalized) {
+		return '';
+	}
+	return /^[0-9a-f]{12,}$/i.test(normalized)
+		? normalized.slice(0, 8)
+		: normalized;
+}
+
+/** Builds a readable diff title for dashboard file comparisons with short user-facing metadata. */
+export function buildPromptDashboardFileDiffTitle(input: {
+	project: string;
+	filePath: string;
+	mode: 'commit' | 'branch';
+	ref: string;
+	baseRef?: string;
+	author?: string;
+}): string {
+	const pathParts = formatPromptDashboardCompactPathParts(input.filePath, 42);
+	const fileLabel = pathParts.fileName || pathParts.displayPath || String(input.filePath || '').trim() || 'file';
+	const normalizedProject = String(input.project || '').trim();
+	const normalizedAuthor = String(input.author || '').trim();
+	const normalizedRef = shortenPromptDashboardGitRef(input.ref);
+	if (input.mode === 'branch') {
+		return [
+			normalizedAuthor ? `Опережающие файлы (${normalizedAuthor})` : 'Опережающие файлы',
+			fileLabel,
+			normalizedProject,
+		].filter(Boolean).join(' | ');
+	}
+	return [
+		fileLabel,
+		normalizedAuthor ? `by ${normalizedAuthor}` : '',
+		`commit ${normalizedRef}`,
+		normalizedProject,
+	].filter(Boolean).join(' | ');
+}
+
 /** Reuses the current snapshot when visibility changed but prompt inputs stayed the same. */
 export function shouldRequestPromptDashboardSnapshot(input: {
 	mode: 'full' | 'compact';

@@ -1,3 +1,12 @@
+## 125: Добавить обязательные инструменты и автора
+
+- Дата: 2026-05-09.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Start Chat теперь добавляет обязательную подсказку перед секцией `### Инструменты`, чтобы перечисленные Skills, MCP tools, hooks и preferred model воспринимались как обязательные инструменты задачи; дополнительно в видимом заголовке disclosure `Опережающие файлы` в виджете `Ветки проектов` теперь показываются авторы входящих upstream-коммитов, а открываемый diff сохраняет короткий понятный title с автором без длинного merge-base hash.
+- Ключевые моменты: `chatMessageBuilder` использует новый локализованный ключ `chatMessage.toolsNote` и вставляет его перед списком инструментов; `GitService.getIncomingBranchAuthors()` собирает unique author list для диапазона `HEAD..@{upstream}`, `PromptDashboardService` прокидывает `incomingAuthors` в branch widget rows, `PromptDashboard.tsx` рисует заголовок `Опережающие файлы (author1, author2)`, а `EditorPanelManager` при открытии dashboard diff по-прежнему запрашивает latest file author через `GitService.getFileAuthorAtRef()` и собирает короткий title через `buildPromptDashboardFileDiffTitle()`; focused tests покрывают mandatory tools note, incoming authors и diff-title helper.
+- Файлы: src/utils/chatMessageBuilder.ts, src/i18n/translations.ts, src/utils/promptDashboard.ts, src/services/gitService.ts, src/services/promptDashboardService.ts, src/providers/editorPanelManager.ts, src/webview/editor/components/PromptDashboard.tsx, src/types/promptDashboard.ts, tests/chatMessageBuilder.test.ts, tests/promptDashboard.test.ts, tests/gitService.test.ts, tests/promptDashboardService.test.ts, tests/promptDashboardComponent.test.tsx, README.md, CHANGELOG.md.
+
 ## 123: Clean excluded projects chat context
 
 - Дата: 2026-05-08.

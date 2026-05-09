@@ -426,6 +426,7 @@ test('PromptDashboard shows a green incoming-files disclosure for the current br
 		createProject({
 			currentBranch: 'main',
 			behind: 2,
+			incomingAuthors: ['Jane Doe', 'John Smith'],
 			incomingFiles: [
 				{ status: 'A', path: 'src/incoming.ts', additions: 4, deletions: 0, isBinary: false },
 				{ status: 'M', path: 'src/updated.ts', additions: 8, deletions: 3, isBinary: false },
@@ -436,7 +437,7 @@ test('PromptDashboard shows a green incoming-files disclosure for the current br
 		}),
 	]));
 
-	assert.match(markup, /Опережающие файлы/);
+	assert.match(markup, /Опережающие файлы \(Jane Doe, John Smith\)/);
 	assert.match(markup, /title="Показать список входящих файлов"/);
 	assert.match(markup, />2<\/span>/);
 	assert.match(markup, /var\(--vscode-charts-green\)/);

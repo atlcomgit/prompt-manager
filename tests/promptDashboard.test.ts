@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	buildPromptDashboardFileDiffTitle,
 	compactPromptDashboardMiddleLabel,
 	buildPromptDashboardAnalysisFingerprint,
 	buildPromptDashboardStatusDataFromPrompt,
@@ -54,6 +55,29 @@ test('formatPromptDashboardCompactPathParts shortens long directory segments and
 			directoryPath: 'src',
 			displayPath: 'src/app.ts',
 		},
+	);
+});
+
+test('buildPromptDashboardFileDiffTitle prefixes incoming diffs with a readable author title', () => {
+	assert.equal(
+		buildPromptDashboardFileDiffTitle({
+			project: 'api',
+			filePath: 'src/deep/path/app.ts',
+			mode: 'branch',
+			ref: 'origin/main',
+			baseRef: 'HEAD',
+			author: 'Jane Doe',
+		}),
+		'Опережающие файлы (Jane Doe) | app.ts | api',
+	);
+	assert.equal(
+		buildPromptDashboardFileDiffTitle({
+			project: 'api',
+			filePath: 'src/app.ts',
+			mode: 'commit',
+			ref: '8a13410a35a3289f44d7c36a58842be2a00c1f',
+		}),
+		'app.ts | commit 8a13410a | api',
 	);
 });
 

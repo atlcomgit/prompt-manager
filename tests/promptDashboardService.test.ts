@@ -653,6 +653,7 @@ test('PromptDashboardService includes incoming upstream files in branch widget r
 			getGitOverlayParallelBranchSummaries: async () => [],
 			getCommitChangedFiles: async () => [],
 			getIncomingBranchChangedFiles: async () => incomingFiles,
+			getIncomingBranchAuthors: async () => ['Jane Doe', 'John Smith'],
 		} as any,
 		{
 			analyzePromptDashboardReview: async () => 'ok',
@@ -662,6 +663,7 @@ test('PromptDashboardService includes incoming upstream files in branch widget r
 	const widget = await service.refreshProjectsWidget(createPrompt({ projects: ['api'] }));
 
 	assert.deepEqual((widget.data.branchProjects?.[0] as any)?.incomingFiles, incomingFiles);
+	assert.deepEqual((widget.data.branchProjects?.[0] as any)?.incomingAuthors, ['Jane Doe', 'John Smith']);
 	service.dispose();
 });
 

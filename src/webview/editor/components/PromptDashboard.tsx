@@ -721,6 +721,10 @@ function renderBranchProjectIncomingFiles(
 	toggleExpanded: (key: string) => void,
 ): React.ReactNode {
 	const files = project.incomingFiles;
+	const incomingAuthorsLabel = (project.incomingAuthors || []).map(author => author.trim()).filter(Boolean).join(', ');
+	const disclosureTitle = incomingAuthorsLabel
+		? `Опережающие файлы (${incomingAuthorsLabel})`
+		: 'Опережающие файлы';
 	return (
 		<div style={{ ...styles.branchProjectNoticeBlock, ...styles.branchProjectNoticeBlockSuccess }}>
 			<button
@@ -730,7 +734,7 @@ function renderBranchProjectIncomingFiles(
 				title={expanded ? 'Скрыть список входящих файлов' : 'Показать список входящих файлов'}
 			>
 				<span style={styles.detailChevron}>{expanded ? '▾' : '▸'}</span>
-				<span style={{ ...styles.branchProjectNoticeText, ...styles.branchProjectNoticeTextSuccess }}>Опережающие файлы</span>
+				<span style={{ ...styles.branchProjectNoticeText, ...styles.branchProjectNoticeTextSuccess }}>{disclosureTitle}</span>
 				<span style={{ ...styles.fileCount, ...styles.fileCountOk }}>{files.length}</span>
 			</button>
 			{expanded ? (

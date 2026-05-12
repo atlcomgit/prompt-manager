@@ -7,7 +7,6 @@ export interface SidebarSelectionState {
 
 export interface SidebarDeletionState extends SidebarSelectionState {
 	showOptimisticNewPrompt: boolean;
-	optimisticBaselineIds: string[] | null;
 }
 
 export function reconcileSidebarDeletionState(
@@ -24,9 +23,31 @@ export function reconcileSidebarDeletionState(
 
 	return {
 		showOptimisticNewPrompt: shouldClearOptimisticNewPrompt ? false : state.showOptimisticNewPrompt,
-		optimisticBaselineIds: shouldClearOptimisticNewPrompt ? null : state.optimisticBaselineIds,
 		selectedId: shouldClearSelection ? null : state.selectedId,
 		selectedPromptUuid: shouldClearSelection ? null : state.selectedPromptUuid,
+	};
+}
+
+export function reconcileSidebarPromptSavingSelection(
+	selection: SidebarSelectionState,
+	savingPrompt: { id: string | null | undefined; promptUuid: string | null | undefined },
+): SidebarSelectionState {
+	const selectedId = (selection.selectedId || '').trim() || null;
+	const selectedPromptUuid = (selection.selectedPromptUuid || '').trim() || null;
+	const savingId = (savingPrompt.id || '').trim() || null;
+	const savingPromptUuid = (savingPrompt.promptUuid || '').trim() || null;
+
+	// Capture the stable UUID for the optimistic "__new__" row as soon as host saving begins.
+	if (selectedId === '__new__' && savingId === '__new__' && savingPromptUuid) {
+		return {
+			selectedId,
+			selectedPromptUuid: savingPromptUuid,
+		};
+	}
+
+	return {
+		selectedId,
+		selectedPromptUuid,
 	};
 }
 
@@ -38,6 +59,17 @@ export function reconcileSidebarSelection(
 	const selectedPromptUuid = (selection.selectedPromptUuid || '').trim() || null;
 
 	if (selectedId === '__new__') {
+		// Remap the optimistic row only when the exact persisted prompt UUID is known.
+		if (selectedPromptUuid) {
+			const matchingPrompt = prompts.find(prompt => (prompt.promptUuid || '').trim() === selectedPromptUuid);
+			if (matchingPrompt) {
+				return {
+					selectedId: matchingPrompt.id,
+					selectedPromptUuid: (matchingPrompt.promptUuid || '').trim() || null,
+				};
+			}
+		}
+
 		return {
 			selectedId,
 			selectedPromptUuid,

@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 
 import type { PromptConfig } from '../src/types/prompt.js';
 import { normalizeSidebarState } from '../src/types/prompt.js';
-import { reconcileSidebarDeletionState, reconcileSidebarSelection } from '../src/utils/sidebarSelection.js';
+import {
+	reconcileSidebarDeletionState,
+	reconcileSidebarPromptSavingSelection,
+	reconcileSidebarSelection,
+} from '../src/utils/sidebarSelection.js';
 
 function makePrompt(overrides: Partial<PromptConfig>): PromptConfig {
 	const now = '2026-03-21T12:00:00.000Z';
@@ -127,17 +131,77 @@ test('reconcileSidebarSelection preserves optimistic new prompt selection', () =
 	});
 });
 
+test('reconcileSidebarSelection preserves optimistic new prompt until matching promptUuid appears', () => {
+	const prompts = [
+		makePrompt({ id: 'prompt-1', promptUuid: 'other-uuid' }),
+	];
+
+	const result = reconcileSidebarSelection(prompts, {
+		selectedId: '__new__',
+		selectedPromptUuid: 'stable-uuid',
+	});
+
+	assert.deepEqual(result, {
+		selectedId: '__new__',
+		selectedPromptUuid: 'stable-uuid',
+	});
+});
+
+test('reconcileSidebarSelection remaps optimistic new prompt to saved prompt by promptUuid', () => {
+	const prompts = [
+		makePrompt({ id: 'saved-prompt', promptUuid: 'stable-uuid' }),
+	];
+
+	const result = reconcileSidebarSelection(prompts, {
+		selectedId: '__new__',
+		selectedPromptUuid: 'stable-uuid',
+	});
+
+	assert.deepEqual(result, {
+		selectedId: 'saved-prompt',
+		selectedPromptUuid: 'stable-uuid',
+	});
+});
+
+test('reconcileSidebarPromptSavingSelection captures promptUuid for optimistic new prompt', () => {
+	const result = reconcileSidebarPromptSavingSelection({
+		selectedId: '__new__',
+		selectedPromptUuid: null,
+	}, {
+		id: '__new__',
+		promptUuid: 'stable-uuid',
+	});
+
+	assert.deepEqual(result, {
+		selectedId: '__new__',
+		selectedPromptUuid: 'stable-uuid',
+	});
+});
+
+test('reconcileSidebarPromptSavingSelection ignores unrelated saving prompt updates', () => {
+	const result = reconcileSidebarPromptSavingSelection({
+		selectedId: '__new__',
+		selectedPromptUuid: null,
+	}, {
+		id: 'prompt-1',
+		promptUuid: 'uuid-1',
+	});
+
+	assert.deepEqual(result, {
+		selectedId: '__new__',
+		selectedPromptUuid: null,
+	});
+});
+
 test('reconcileSidebarDeletionState clears optimistic new prompt and selection', () => {
 	const result = reconcileSidebarDeletionState({
 		showOptimisticNewPrompt: true,
-		optimisticBaselineIds: ['prompt-1', 'prompt-2'],
 		selectedId: '__new__',
 		selectedPromptUuid: null,
 	}, '__new__');
 
 	assert.deepEqual(result, {
 		showOptimisticNewPrompt: false,
-		optimisticBaselineIds: null,
 		selectedId: null,
 		selectedPromptUuid: null,
 	});
@@ -146,14 +210,12 @@ test('reconcileSidebarDeletionState clears optimistic new prompt and selection',
 test('reconcileSidebarDeletionState clears selected saved prompt only', () => {
 	const result = reconcileSidebarDeletionState({
 		showOptimisticNewPrompt: true,
-		optimisticBaselineIds: ['prompt-1'],
 		selectedId: 'prompt-1',
 		selectedPromptUuid: 'uuid-1',
 	}, 'prompt-1');
 
 	assert.deepEqual(result, {
 		showOptimisticNewPrompt: true,
-		optimisticBaselineIds: ['prompt-1'],
 		selectedId: null,
 		selectedPromptUuid: null,
 	});
@@ -162,14 +224,12 @@ test('reconcileSidebarDeletionState clears selected saved prompt only', () => {
 test('reconcileSidebarDeletionState ignores unrelated prompt deletion', () => {
 	const result = reconcileSidebarDeletionState({
 		showOptimisticNewPrompt: true,
-		optimisticBaselineIds: ['prompt-1'],
 		selectedId: 'prompt-1',
 		selectedPromptUuid: 'uuid-1',
 	}, 'prompt-2');
 
 	assert.deepEqual(result, {
 		showOptimisticNewPrompt: true,
-		optimisticBaselineIds: ['prompt-1'],
 		selectedId: 'prompt-1',
 		selectedPromptUuid: 'uuid-1',
 	});

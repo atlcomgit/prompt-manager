@@ -19,7 +19,11 @@ import {
   toggleSidebarGroupCollapsedState,
 } from '../../utils/sidebarGrouping.js';
 import { updateSidebarPromptActivityKeys } from '../../utils/sidebarPromptActivity.js';
-import { reconcileSidebarDeletionState, reconcileSidebarSelection } from '../../utils/sidebarSelection.js';
+import {
+  reconcileSidebarDeletionState,
+  reconcileSidebarPromptSavingSelection,
+  reconcileSidebarSelection,
+} from '../../utils/sidebarSelection.js';
 import type {
   PromptConfig,
   SidebarState,
@@ -65,7 +69,6 @@ export const SidebarApp: React.FC = () => {
   const [showViewSettings, setShowViewSettings] = useState(false);
   const [hasHydratedState, setHasHydratedState] = useState(false);
   const [showOptimisticNewPrompt, setShowOptimisticNewPrompt] = useState(false);
-  const [optimisticBaselineIds, setOptimisticBaselineIds] = useState<string[] | null>(null);
   const [savingPromptKeys, setSavingPromptKeys] = useState<string[]>([]);
   const [aiEnrichmentPromptKeys, setAiEnrichmentPromptKeys] = useState<string[]>([]);
   const [customGroups, setCustomGroups] = useState<PromptCustomGroup[]>([]);
@@ -122,16 +125,14 @@ export const SidebarApp: React.FC = () => {
   const applyDeletedPromptState = useCallback((deletedId: string | null | undefined) => {
     const nextState = reconcileSidebarDeletionState({
       showOptimisticNewPrompt,
-      optimisticBaselineIds,
       selectedId,
       selectedPromptUuid,
     }, deletedId);
 
     setShowOptimisticNewPrompt(nextState.showOptimisticNewPrompt);
-    setOptimisticBaselineIds(nextState.optimisticBaselineIds);
     setSelectedId(nextState.selectedId);
     setSelectedPromptUuid(nextState.selectedPromptUuid);
-  }, [showOptimisticNewPrompt, optimisticBaselineIds, selectedId, selectedPromptUuid]);
+  }, [showOptimisticNewPrompt, selectedId, selectedPromptUuid]);
 
   // Request initial data after message listener is attached.
   useEffect(() => {
@@ -156,24 +157,14 @@ export const SidebarApp: React.FC = () => {
         setArchivedPrompts(msg.archivedPrompts || []);
         const nextArchivedPrompts = (msg.archivedPrompts as PromptConfig[] | undefined) || [];
         const combinedPrompts = [...(msg.prompts as PromptConfig[]), ...nextArchivedPrompts];
-        let nextSelectedId = selectedId;
-        let nextSelectedPromptUuid = selectedPromptUuid;
-        if (showOptimisticNewPrompt && optimisticBaselineIds) {
-          const baselineSet = new Set(optimisticBaselineIds);
-          const newPrompt = (msg.prompts as PromptConfig[]).find(p => !baselineSet.has(p.id));
-          if (newPrompt) {
-            setShowOptimisticNewPrompt(false);
-            setOptimisticBaselineIds(null);
-            if (nextSelectedId === '__new__') {
-              nextSelectedId = newPrompt.id;
-              nextSelectedPromptUuid = newPrompt.promptUuid || null;
-            }
-          }
-        }
         const reconciledSelection = reconcileSidebarSelection(combinedPrompts, {
-          selectedId: nextSelectedId,
-          selectedPromptUuid: nextSelectedPromptUuid,
+          selectedId,
+          selectedPromptUuid,
         });
+        // Clear the optimistic placeholder only after the exact persisted prompt is resolved.
+        if (showOptimisticNewPrompt && reconciledSelection.selectedId !== '__new__') {
+          setShowOptimisticNewPrompt(false);
+        }
         setSelectedId(reconciledSelection.selectedId);
         setSelectedPromptUuid(reconciledSelection.selectedPromptUuid);
         setIsLoading(false);
@@ -218,6 +209,15 @@ export const SidebarApp: React.FC = () => {
         if (!id && !promptUuid) {
           break;
         }
+        const nextSavingSelection = reconcileSidebarPromptSavingSelection({
+          selectedId,
+          selectedPromptUuid,
+        }, {
+          id,
+          promptUuid,
+        });
+        setSelectedId(nextSavingSelection.selectedId);
+        setSelectedPromptUuid(nextSavingSelection.selectedPromptUuid);
         setSavingPromptKeys(prev => updateSidebarPromptActivityKeys(prev, { id, promptUuid }, Boolean(msg.saving)));
         break;
       }
@@ -239,7 +239,7 @@ export const SidebarApp: React.FC = () => {
         break;
       }
     }
-  }, [applyDeletedPromptState, selectedId, selectedPromptUuid, showOptimisticNewPrompt, optimisticBaselineIds, prompts, archivedPrompts]);
+  }, [applyDeletedPromptState, selectedId, selectedPromptUuid, showOptimisticNewPrompt, prompts, archivedPrompts]);
 
   useMessageListener(handleMessage);
 
@@ -412,7 +412,6 @@ export const SidebarApp: React.FC = () => {
       window.clearTimeout(openPromptTimerRef.current);
       openPromptTimerRef.current = null;
     }
-    setOptimisticBaselineIds(prompts.map(p => p.id));
     setShowOptimisticNewPrompt(true);
     setSelectedId('__new__');
     setSelectedPromptUuid(null);

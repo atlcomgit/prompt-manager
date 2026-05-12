@@ -1,3 +1,12 @@
+## 129: Автовыделение нового пункта
+
+- Дата: 2026-05-12.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлено автовыделение нового промпта в sidebar после нажатия `+ Новый`, когда открыта страница другого промпта; промежуточные refresh списка больше не могут перевести выделение на посторонний prompt до фактического сохранения нового черновика.
+- Ключевые моменты: `SidebarApp` больше не вычисляет новый selected id по `первому id вне baseline`; optimistic row `__new__` захватывает стабильный `promptUuid` из host-события `promptSaving` и переключается на реальный saved prompt только после точного совпадения UUID в обновлённом списке; `sidebarSelection` util покрыт регрессионными тестами на сохранение optimistic selection, захват `promptUuid` и точный remap только на соответствующий persisted draft.
+- Файлы: src/webview/sidebar/SidebarApp.tsx, src/utils/sidebarSelection.ts, tests/sidebarSelection.test.ts, README.md, CHANGELOG.md, .vscode/prompt-manager/chat-memory/feature.instructions.md.
+
 ## 130: Сброс скролла в поле «Результат работы»
 
 - Дата: 2026-05-12.

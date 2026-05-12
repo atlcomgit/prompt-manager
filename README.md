@@ -73,6 +73,7 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Keep grouped sidebar results free from an extra Favorites section, while sidebar utility buttons stay light at rest and switch to a darker feedback state when active or pressed.
 - Custom groups can now tint their sidebar section header with an auto-contrasted black or white title, so bright and dark group colors both stay readable.
 - Busy prompts in the sidebar now show a loader instead of stale status or progress while saving or while AI is still generating title and description fields.
+- Clicking `+ Новый` while another prompt page is open now keeps the optimistic draft pinned to the exact new prompt, so intermediate sidebar refreshes cannot jump the selection onto a different saved item before the real draft is persisted.
 - Selected in-progress prompts keep the sidebar progress bar readable with an outlined inverse track, and fully completed progress uses a more saturated green fill.
 - Store prompt content in Markdown and keep prompt metadata in JSON inside `.vscode/prompt-manager/`.
 - Dictate prompt text from the microphone: confirmed recordings collapse into a compact in-field queue indicator while Whisper recognition and AI post-correction continue in the background, so you can start the next recording immediately.

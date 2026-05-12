@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
 	PromptDashboard,
+	buildWidgetGridColumns,
 	reconcileBranchDrafts,
 	resolveBranchWidgetProjects,
 	resolveExpandedDetailsHydrationRequest,
@@ -179,6 +180,8 @@ function renderDashboard(snapshot: PromptDashboardSnapshot | null): string {
 test('PromptDashboard selects current branch first and renders the redesigned file tree', () => {
 	const markup = renderDashboard(createSnapshot([createProject()]));
 
+	assert.match(markup, /display:grid;grid-template-columns:repeat\(auto-fit,minmax\(min\(100%,360px\),1fr\)\);gap:12px;align-items:start/);
+	assert.match(markup, /display:flex;flex-direction:column;gap:12px;min-width:0;align-self:start/);
 	assert.doesNotMatch(markup, /Branch Divergence/);
 	assert.doesNotMatch(markup, /Pipelines/);
 	assert.doesNotMatch(markup, /Pipeline Health/);
@@ -198,6 +201,76 @@ test('PromptDashboard selects current branch first and renders the redesigned fi
 	assert.match(markup, /src\/webview\/editor/);
 	assert.match(markup, /App\.tsx/);
 	assert.match(markup, /Что происходит/);
+});
+
+test('buildWidgetGridColumns keeps dashboard widgets in stable alternating columns', () => {
+	const columns = buildWidgetGridColumns(['status', 'activity', 'branches', 'commits', 'parallel', 'analysis', 'reviews']);
+
+	assert.deepEqual(columns, [
+		['status', 'branches', 'parallel', 'reviews'],
+		['activity', 'commits', 'analysis'],
+	]);
+});
+
+test('PromptDashboard renders the parallel branch author after the branch name', () => {
+	const markup = renderDashboard(createSnapshot([createProject({
+		parallelBranches: [{
+			name: 'feature/parallel',
+			baseBranch: 'feature/task-107',
+			ahead: 4,
+			behind: 1,
+			lastCommit: {
+				sha: 'abc123456789',
+				shortSha: 'abc1234',
+				subject: 'Parallel branch update',
+				author: 'Jane Doe',
+				committedAt: '2026-04-29T10:00:00.000Z',
+				refNames: [],
+			},
+			affectedFiles: [{ status: 'M', path: 'src/app.ts', additions: 1, deletions: 0, isBinary: false }],
+			potentialConflicts: [],
+		}],
+	})]));
+
+	assert.match(markup, /feature\/parallel[\s\S]*Jane Doe/);
+});
+
+test('PromptDashboard shows lightweight commit file counts before details hydration', () => {
+	const markup = renderDashboard(createSnapshot([createProject({
+		recentCommits: [{
+			sha: 'abc123456789',
+			shortSha: 'abc1234',
+			subject: 'Initial commit',
+			author: 'Jane Doe',
+			committedAt: '2026-04-29T10:00:00.000Z',
+			refNames: [],
+			changedFiles: [],
+			changedFileCount: 12,
+			changedFilesHydrated: false,
+		}],
+	})]));
+
+	assert.match(markup, /abc1234[\s\S]*?>12</);
+	assert.doesNotMatch(markup, /abc1234[\s\S]*?>\.\.\.</);
+});
+
+test('PromptDashboard shows lightweight parallel-branch file counts before details hydration', () => {
+	const markup = renderDashboard(createSnapshot([createProject({
+		parallelBranches: [{
+			name: 'feature/parallel',
+			baseBranch: 'feature/task-107',
+			ahead: 4,
+			behind: 1,
+			lastCommit: null,
+			affectedFiles: [],
+			affectedFileCount: 73,
+			potentialConflicts: [],
+			detailsHydrated: false,
+		}],
+	})]));
+
+	assert.match(markup, /feature\/parallel[\s\S]*?>73</);
+	assert.doesNotMatch(markup, /feature\/parallel[\s\S]*?>\.\.\.</);
 });
 
 test('PromptDashboard hides MR\/PR rows that only report missing active review requests', () => {
@@ -262,7 +335,7 @@ test('resolveVisibleLineStatsParts hides zero-valued +0 and -0 counters', () => 
 	);
 });
 
-test('resolveVisibleParallelBranches hides hydrated rows without unique files', () => {
+test('resolveVisibleParallelBranches hides zero-file rows once lightweight or hydrated data confirms them', () => {
 	const visible = resolveVisibleParallelBranches([
 		{
 			name: 'feature/empty',
@@ -281,8 +354,31 @@ test('resolveVisibleParallelBranches hides hydrated rows without unique files', 
 			behind: 0,
 			lastCommit: null,
 			affectedFiles: [],
+			affectedFileCount: 0,
 			potentialConflicts: [],
 			detailsHydrated: false,
+		},
+		{
+			name: 'feature/loading-unknown',
+			baseBranch: 'main',
+			ahead: 1,
+			behind: 0,
+			lastCommit: null,
+			affectedFiles: [],
+			potentialConflicts: [],
+			detailsHydrated: false,
+		},
+		{
+			name: 'feature/kept-visible',
+			baseBranch: 'main',
+			ahead: 0,
+			behind: 0,
+			lastCommit: null,
+			affectedFiles: [],
+			affectedFileCount: 0,
+			potentialConflicts: [],
+			detailsHydrated: true,
+			detailsMissing: true,
 		},
 		{
 			name: 'feature/real',
@@ -296,7 +392,7 @@ test('resolveVisibleParallelBranches hides hydrated rows without unique files', 
 		},
 	]);
 
-	assert.deepEqual(visible.map(branch => branch.name), ['feature/loading', 'feature/real']);
+	assert.deepEqual(visible.map(branch => branch.name), ['feature/loading-unknown', 'feature/kept-visible', 'feature/real']);
 });
 
 test('resolveExpandedDetailsHydrationRequest keeps dirty file hydration on the dedicated route', () => {

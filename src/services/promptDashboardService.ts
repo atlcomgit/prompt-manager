@@ -1501,7 +1501,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				: await this.loadIncomingSummaryForProject(project, cachedProject);
 			const { incomingFiles, incomingAuthors } = incomingSummary;
 			const parallelBaseBranch = this.resolveParallelBranchBase(scope, project, trackedBranch);
-			const displayParallelBranches = this.resolveDisplayParallelBranches(scope, project, trackedBranch, cachedProject);
+			const displayParallelBranches = await this.resolveDisplayParallelBranches(scope, project, trackedBranch, cachedProject);
 			const uncommittedFiles = mode === 'analysis'
 				? this.mergeCachedUncommittedFileDetails(
 					project,
@@ -1535,7 +1535,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				? await this.loadDetailedRecentCommits(project)
 				: canReuseCachedDetails
 					? cachedProject?.recentCommits || []
-					: this.buildDisplayRecentCommits(project);
+					: await this.buildDisplayRecentCommits(scope, project);
 			this.ensureScopeActive(scope);
 			const parallelBranches = includeExpandedDetails
 				? this.mergeParallelBranchDetails(
@@ -1546,6 +1546,7 @@ export class PromptDashboardService implements vscode.Disposable {
 						parallelBaseBranch,
 						trackedBranches,
 						PromptDashboardService.PARALLEL_BRANCH_LIMIT,
+						displayParallelBranches.map(branch => branch.name),
 					).catch(() => [])).map(branch => ({ ...branch, detailsHydrated: true })),
 				)
 				: displayParallelBranches;
@@ -1664,14 +1665,14 @@ export class PromptDashboardService implements vscode.Disposable {
 		cachedProject?: PromptDashboardProjectSummary,
 	): PromptDashboardProjectSummary {
 		const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
-		const preservedRecentCommits = cachedProject ? cachedProject.recentCommits : this.buildDisplayRecentCommits(project);
+		const preservedRecentCommits = cachedProject ? cachedProject.recentCommits : this.buildPlaceholderRecentCommits(project);
 		const preservedReview = cachedProject ? cachedProject.review : project.review;
 		const preservedPipeline = cachedProject ? cachedProject.pipeline : null;
 		const preservedIncomingFiles = cachedProject ? cachedProject.incomingFiles : [];
 		const preservedIncomingAuthors = cachedProject ? (cachedProject.incomingAuthors || []) : [];
 		const preservedParallelBranches = cachedProject
 			? cachedProject.parallelBranches
-			: this.buildDisplayParallelBranches(scope, project, trackedBranch);
+			: this.buildPlaceholderParallelBranches(scope, project, trackedBranch);
 		if (!cachedProject || !this.hasSameProjectBranchContext(project, trackedBranch, cachedProject)) {
 			return {
 				project: project.project,
@@ -1861,8 +1862,8 @@ export class PromptDashboardService implements vscode.Disposable {
 			&& project.parallelBranches.every(branch => branch.detailsHydrated !== false);
 	}
 
-	/** Builds lightweight recent-commit summaries for the first dashboard paint. */
-	private buildDisplayRecentCommits(project: GitOverlayProjectSnapshot): PromptDashboardProjectSummary['recentCommits'] {
+	/** Builds placeholder recent-commit summaries for the first dashboard paint. */
+	private buildPlaceholderRecentCommits(project: GitOverlayProjectSnapshot): PromptDashboardProjectSummary['recentCommits'] {
 		return (project.recentCommits || [])
 			.slice(0, PromptDashboardService.RECENT_COMMIT_LIMIT)
 			.map(commit => ({
@@ -1872,21 +1873,53 @@ export class PromptDashboardService implements vscode.Disposable {
 			}));
 	}
 
+	/** Adds lightweight changed-file counts to visible commit rows without hydrating file details. */
+	private async buildDisplayRecentCommits(
+		scope: PromptDashboardScope,
+		project: GitOverlayProjectSnapshot,
+	): Promise<PromptDashboardProjectSummary['recentCommits']> {
+		const visibleCommits = this.buildPlaceholderRecentCommits(project);
+		if (visibleCommits.length === 0 || !project.available || Boolean(project.error) || !project.repositoryPath) {
+			return visibleCommits;
+		}
+
+		const getChangedFileCount = this.gitService.getCommitChangedFileCount;
+		if (typeof getChangedFileCount !== 'function') {
+			return visibleCommits;
+		}
+
+		const countEntries = await Promise.all(visibleCommits.map(async (commit) => ([
+			commit.sha,
+			await getChangedFileCount.call(this.gitService, project.repositoryPath, commit.sha),
+		] as const)));
+		this.ensureScopeActive(scope);
+
+		const countByCommit = new Map(countEntries);
+		return visibleCommits.map((commit) => {
+			const changedFileCount = countByCommit.get(commit.sha);
+			return changedFileCount === null || changedFileCount === undefined
+				? commit
+				: { ...commit, changedFileCount };
+		});
+	}
+
 	/** Loads full commit file details only for manual refreshes or explicit hydration requests. */
 	private async loadDetailedRecentCommits(project: GitOverlayProjectSnapshot): Promise<PromptDashboardProjectSummary['recentCommits']> {
 		const recentCommits = [] as PromptDashboardProjectSummary['recentCommits'];
 		for (const commit of (project.recentCommits || []).slice(0, PromptDashboardService.RECENT_COMMIT_LIMIT)) {
+			const changedFiles = await this.gitService.getCommitChangedFiles(project.repositoryPath, commit.sha).catch(() => []);
 			recentCommits.push({
 				...commit,
-				changedFiles: await this.gitService.getCommitChangedFiles(project.repositoryPath, commit.sha).catch(() => []),
+				changedFiles,
+				changedFileCount: changedFiles.length,
 				changedFilesHydrated: true,
 			});
 		}
 		return recentCommits;
 	}
 
-	/** Builds lightweight parallel-branch rows from the fast branch snapshot without diff hydration. */
-	private buildDisplayParallelBranches(
+	/** Builds placeholder parallel-branch rows from the fast branch snapshot without diff hydration. */
+	private buildPlaceholderParallelBranches(
 		scope: PromptDashboardScope,
 		project: GitOverlayProjectSnapshot,
 		trackedBranch: string,
@@ -1916,13 +1949,55 @@ export class PromptDashboardService implements vscode.Disposable {
 			}));
 	}
 
+	/** Adds lightweight file counts to visible placeholder rows without hydrating the file list. */
+	private async buildDisplayParallelBranches(
+		scope: PromptDashboardScope,
+		project: GitOverlayProjectSnapshot,
+		trackedBranch: string,
+	): Promise<PromptDashboardProjectSummary['parallelBranches']> {
+		const visibleBranches = this.buildPlaceholderParallelBranches(scope, project, trackedBranch);
+		if (visibleBranches.length === 0 || !project.available || Boolean(project.error) || !project.repositoryPath) {
+			return visibleBranches;
+		}
+
+		const baseBranch = visibleBranches[0]?.baseBranch || this.resolveParallelBranchBase(scope, project, trackedBranch);
+		if (!baseBranch) {
+			return visibleBranches;
+		}
+
+		const getAffectedFileCount = this.gitService.getGitOverlayParallelBranchAffectedFileCount;
+		if (typeof getAffectedFileCount !== 'function') {
+			return visibleBranches;
+		}
+
+		const countEntries = await Promise.all(visibleBranches.map(async (branch) => ([
+			branch.name,
+			await getAffectedFileCount.call(this.gitService, project.repositoryPath, baseBranch, branch.name),
+		] as const)));
+		this.ensureScopeActive(scope);
+
+		const countByBranch = new Map(countEntries);
+		return visibleBranches.flatMap((branch) => {
+			const affectedFileCount = countByBranch.get(branch.name);
+			if (affectedFileCount === 0) {
+				return [];
+			}
+
+			return [
+				affectedFileCount === null || affectedFileCount === undefined
+					? branch
+					: { ...branch, affectedFileCount },
+			];
+		});
+	}
+
 	/** Reuse the already visible placeholder branch rows so details hydration cannot blank the widget. */
-	private resolveDisplayParallelBranches(
+	private async resolveDisplayParallelBranches(
 		scope: PromptDashboardScope,
 		project: GitOverlayProjectSnapshot,
 		trackedBranch: string,
 		cachedProject?: PromptDashboardProjectSummary,
-	): PromptDashboardProjectSummary['parallelBranches'] {
+	): Promise<PromptDashboardProjectSummary['parallelBranches']> {
 		return cachedProject?.parallelBranches?.length
 			? cachedProject.parallelBranches
 			: this.buildDisplayParallelBranches(scope, project, trackedBranch);
@@ -1938,22 +2013,25 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 
 		const hydratedByName = new Map(hydratedBranches.map(branch => [branch.name, branch] as const));
-		const mergedBranches = visibleBranches.map(branch => {
+		const mergedBranches = visibleBranches.flatMap((branch) => {
 			const hydratedBranch = hydratedByName.get(branch.name);
 			if (hydratedBranch) {
-				return {
+				return [{
 					...branch,
 					...hydratedBranch,
 					detailsHydrated: true,
-				};
+					detailsMissing: false,
+				}];
 			}
 
-			return {
+			return [{
 				...branch,
 				affectedFiles: [],
 				potentialConflicts: [],
+				affectedFileCount: typeof branch.affectedFileCount === 'number' ? branch.affectedFileCount : 0,
 				detailsHydrated: true,
-			};
+				detailsMissing: true,
+			}];
 		});
 
 		for (const hydratedBranch of hydratedBranches) {
@@ -1961,6 +2039,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				mergedBranches.push({
 					...hydratedBranch,
 					detailsHydrated: true,
+					detailsMissing: false,
 				});
 			}
 		}

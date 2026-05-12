@@ -1811,6 +1811,53 @@ export class GitService {
 			.map(file => this.attachNumstatToChangedFile(file, statsByPath));
 	}
 
+	/** Counts unique branch files without hydrating the heavier parallel-branch diff payload. */
+	async getGitOverlayParallelBranchAffectedFileCount(
+		projectPath: string,
+		baseBranch: string,
+		branchName: string,
+	): Promise<number | null> {
+		const normalizedBaseBranch = baseBranch.trim();
+		const normalizedBranchName = branchName.trim();
+		if (!normalizedBaseBranch || !normalizedBranchName) {
+			return null;
+		}
+
+		try {
+			const output = await this.runGitFileCommand(projectPath, [
+				'diff',
+				'--name-only',
+				'--find-renames',
+				'--diff-filter=ACDMR',
+				`${normalizedBaseBranch}...${normalizedBranchName}`,
+			]);
+			return output
+				.split(/\r?\n/)
+				.map(line => line.trim())
+				.filter(Boolean)
+				.length;
+		} catch {
+			const comparisonBaseRef = await this.getMergeBase(projectPath, normalizedBaseBranch, normalizedBranchName) || normalizedBaseBranch;
+			try {
+				const fallbackOutput = await this.runGitFileCommand(projectPath, [
+					'diff',
+					'--name-only',
+					'--find-renames',
+					'--diff-filter=ACDMR',
+					comparisonBaseRef,
+					normalizedBranchName,
+				]);
+				return fallbackOutput
+					.split(/\r?\n/)
+					.map(line => line.trim())
+					.filter(Boolean)
+					.length;
+			} catch {
+				return null;
+			}
+		}
+	}
+
 	async getCommitChangedFiles(projectPath: string, sha: string): Promise<GitOverlayCommitChangedFile[]> {
 		const normalizedSha = sha.trim();
 		if (!normalizedSha) {
@@ -1834,6 +1881,32 @@ export class GitService {
 				normalizedSha,
 			],
 		);
+	}
+
+	/** Counts changed commit files without hydrating the heavier changed-file payload. */
+	async getCommitChangedFileCount(projectPath: string, sha: string): Promise<number | null> {
+		const normalizedSha = sha.trim();
+		if (!normalizedSha) {
+			return null;
+		}
+
+		try {
+			const output = await this.runGitFileCommand(projectPath, [
+				'show',
+				'--name-only',
+				'--find-renames',
+				'--diff-filter=ACDMR',
+				'--format=',
+				normalizedSha,
+			]);
+			return output
+				.split(/\r?\n/)
+				.map(line => line.trim())
+				.filter(Boolean)
+				.length;
+		} catch {
+			return null;
+		}
 	}
 
 	/** Reads incoming upstream file changes for the currently checked out branch without mutating the repository. */
@@ -3598,6 +3671,7 @@ export class GitService {
 		baseBranch: string,
 		trackedBranches: string[],
 		limit = 8,
+		preferredBranchNames?: string[],
 	): Promise<GitOverlayParallelBranchSummary[]> {
 		const normalizedProjectName = projectName.trim();
 		const projectPath = projectPaths.get(normalizedProjectName);
@@ -3623,13 +3697,22 @@ export class GitService {
 			'refs/heads',
 		]);
 		const candidateLimit = Math.max(1, limit);
-		const candidateBranches = output
+		const availableBranches = output
 			.split(/\r?\n/)
 			.map(line => line.trim())
 			.filter(branch => Boolean(branch) && !protectedBranches.has(branch))
-			// Bound expensive per-branch diff scans to the same number the widget can render.
-			.slice(0, candidateLimit)
 			;
+		const availableBranchSet = new Set(availableBranches);
+		const requestedBranches = (preferredBranchNames || [])
+			.map(branch => branch.trim())
+			.filter(Boolean)
+			.filter((branch, index, items) => items.indexOf(branch) === index)
+			.filter(branch => availableBranchSet.has(branch));
+		const candidateBranches = requestedBranches.length > 0
+			? requestedBranches.slice(0, candidateLimit)
+			: availableBranches
+				// Bound expensive per-branch diff scans to the same number the widget can render.
+				.slice(0, candidateLimit);
 
 		const summaries = await Promise.all(candidateBranches.map(async (branch): Promise<GitOverlayParallelBranchSummary> => {
 			const countOutput = await this.runGitFileCommandOptional(projectPath, [
@@ -3658,6 +3741,7 @@ export class GitService {
 				}))
 				.map(file => this.attachNumstatToChangedFile(file, branchStats))
 				.filter(file => Boolean(file.path));
+			const affectedFileCount = affectedFiles.length;
 			const potentialConflicts = affectedFiles
 				.filter(file => currentFileSet.has(file.path) || Boolean(file.previousPath && currentFileSet.has(file.previousPath)))
 				.slice(0, 20)
@@ -3669,19 +3753,20 @@ export class GitService {
 				ahead,
 				behind,
 				lastCommit: await this.getLastCommit(projectPath, branch),
+				affectedFileCount,
 				affectedFiles: affectedFiles.slice(0, 50),
 				potentialConflicts,
 			};
 		}));
 
 		return summaries
-			.filter(summary => summary.ahead > 0 || summary.affectedFiles.length > 0 || summary.potentialConflicts.length > 0)
+			.filter(summary => (summary.affectedFileCount || 0) > 0 || summary.potentialConflicts.length > 0)
 			.sort((left, right) => {
 				const conflictDelta = right.potentialConflicts.length - left.potentialConflicts.length;
 				if (conflictDelta !== 0) {
 					return conflictDelta;
 				}
-				const affectedDelta = right.affectedFiles.length - left.affectedFiles.length;
+				const affectedDelta = (right.affectedFileCount || 0) - (left.affectedFileCount || 0);
 				if (affectedDelta !== 0) {
 					return affectedDelta;
 				}

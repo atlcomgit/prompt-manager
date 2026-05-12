@@ -114,7 +114,9 @@ export interface GitOverlayParallelBranchSummary {
 	lastCommit: GitOverlayCommit | null;
 	affectedFiles: GitOverlayCommitChangedFile[];
 	potentialConflicts: GitOverlayPotentialConflict[];
+	affectedFileCount?: number;
 	detailsHydrated?: boolean;
+	detailsMissing?: boolean;
 }
 
 export interface GitOverlayChangeFile {

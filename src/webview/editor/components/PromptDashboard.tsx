@@ -251,6 +251,15 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		setBulkBranchDraft(branch);
 		setBranchDrafts(previous => buildBulkBranchDrafts(branchWidgetProjects, previous, branch));
 	};
+	const widgetColumns = buildWidgetGridColumns([
+		renderStatus(snapshot, statusCacheStatus),
+		renderActivity(snapshot, onOpenPrompt, activityCacheStatus),
+		renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow),
+		renderProjectCommits(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus),
+		renderParallelBranchFiles(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus),
+		renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle'),
+		renderReviewRequests(projects, projectsCacheStatus),
+	]);
 
 	return (
 		<aside style={styles.rail} data-pm-prompt-dashboard="true">
@@ -268,17 +277,33 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			</div>
 
 			<div style={styles.widgetGrid}>
-				{renderStatus(snapshot, statusCacheStatus)}
-				{renderActivity(snapshot, onOpenPrompt, activityCacheStatus)}
-				{renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow)}
-				{renderProjectCommits(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus)}
-				{renderReviewRequests(projects, projectsCacheStatus)}
-				{renderParallelBranchFiles(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus)}
-				{renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle')}
+				{widgetColumns.map((column, columnIndex) => (
+					<div key={`widget-column:${columnIndex}`} style={styles.widgetColumn}>
+						{column.map((section, sectionIndex) => (
+							<React.Fragment key={`widget-column:${columnIndex}:section:${sectionIndex}`}>
+								{section}
+							</React.Fragment>
+						))}
+					</div>
+				))}
 			</div>
 		</aside>
 	);
 };
+
+/** Splits dashboard widgets into stable independent columns so expanding one card does not create row gaps in the other column. */
+export function buildWidgetGridColumns(sections: React.ReactNode[]): React.ReactNode[][] {
+	const columns: React.ReactNode[][] = [[], []];
+	sections.forEach((section, index) => {
+		if (section === null || section === undefined || section === false) {
+			return;
+		}
+
+		columns[index % 2].push(section);
+	});
+
+	return columns.filter(column => column.length > 0);
+}
 
 /** Keeps the branch widget scoped to selected projects by default, with an optional workspace-wide toggle. */
 export function resolveBranchWidgetProjects(
@@ -933,9 +958,19 @@ function renderParallelBranchFiles(
 	);
 }
 
-/** Hides hydrated parallel branches that ended up with no unique files compared to the base branch. */
+/** Hides parallel branches once lightweight or hydrated data proves they have no unique files. */
 export function resolveVisibleParallelBranches(branches: GitOverlayParallelBranchSummary[]): GitOverlayParallelBranchSummary[] {
-	return branches.filter(branch => branch.detailsHydrated === false || branch.affectedFiles.length > 0 || branch.potentialConflicts.length > 0);
+	return branches.filter((branch) => {
+		if (branch.detailsMissing === true) {
+			return true;
+		}
+
+		if (typeof branch.affectedFileCount === 'number') {
+			return branch.affectedFileCount > 0 || branch.potentialConflicts.length > 0;
+		}
+
+		return branch.detailsHydrated === false || branch.affectedFiles.length > 0 || branch.potentialConflicts.length > 0;
+	});
 }
 
 function renderProjectCommits(
@@ -1167,7 +1202,7 @@ function renderCommit(
 ): React.ReactNode {
 	const expandKey = `commit:${project.project}:${commit.sha}`;
 	const isExpanded = expanded[expandKey] === true;
-	const changedFilesLabel = commit.changedFilesHydrated === false ? '...' : String(commit.changedFiles.length);
+	const changedFilesLabel = resolveCommitChangedFilesLabel(commit);
 	return (
 		<div key={commit.sha} style={styles.detailBlock}>
 			<button type="button" style={styles.detailButton} onClick={() => toggleExpanded(expandKey)}>
@@ -1179,6 +1214,15 @@ function renderCommit(
 			{isExpanded ? renderCommitChangedFiles(project, commit, fileHandlers) : null}
 		</div>
 	);
+}
+
+/** Prefers lightweight file-count summaries before the full commit file list hydrates. */
+function resolveCommitChangedFilesLabel(commit: PromptDashboardRecentCommit): string {
+	if (typeof commit.changedFileCount === 'number') {
+		return String(commit.changedFileCount);
+	}
+
+	return commit.changedFilesHydrated === false ? '...' : String(commit.changedFiles.length);
 }
 
 function renderParallelBranches(
@@ -1198,6 +1242,15 @@ function renderParallelBranches(
 	);
 }
 
+/** Prefers lightweight file-count summaries before the full parallel-branch diff list hydrates. */
+function resolveParallelBranchChangedFilesLabel(branch: GitOverlayParallelBranchSummary): string {
+	if (typeof branch.affectedFileCount === 'number') {
+		return String(branch.affectedFileCount);
+	}
+
+	return branch.detailsHydrated === false ? '...' : String(branch.affectedFiles.length);
+}
+
 function renderParallelBranch(
 	project: PromptDashboardProjectSummary,
 	branch: GitOverlayParallelBranchSummary,
@@ -1207,13 +1260,16 @@ function renderParallelBranch(
 ): React.ReactNode {
 	const expandKey = `parallel:${project.project}:${branch.name}`;
 	const isExpanded = expanded[expandKey] === true;
-	const changedFilesLabel = branch.detailsHydrated === false ? '...' : String(branch.affectedFiles.length);
+	const changedFilesLabel = resolveParallelBranchChangedFilesLabel(branch);
 	const hasConflictWarning = branch.detailsHydrated !== false && branch.potentialConflicts.length > 0;
 	return (
 		<div key={branch.name} style={styles.detailBlock}>
 			<button type="button" style={styles.detailButton} onClick={() => toggleExpanded(expandKey)}>
 				<span style={styles.detailChevron}>{isExpanded ? '▾' : '▸'}</span>
-				<span style={styles.branchName}>{branch.name}</span>
+				<span style={styles.branchLabelRow}>
+					<span style={styles.branchName}>{branch.name}</span>
+					{branch.lastCommit?.author ? <span style={styles.branchAuthor}>{branch.lastCommit.author}</span> : null}
+				</span>
 				<span style={styles.statValue}>+{branch.ahead} / -{branch.behind}</span>
 				<span style={{ ...styles.fileCount, ...(hasConflictWarning ? styles.fileCountWarn : null) }}>{changedFilesLabel}</span>
 			</button>
@@ -1253,6 +1309,12 @@ function renderCommitChangedFiles(project: PromptDashboardProjectSummary, commit
 function renderParallelFiles(project: PromptDashboardProjectSummary, branch: GitOverlayParallelBranchSummary, fileHandlers: FileRowActionHandlers): React.ReactNode {
 	if (branch.detailsHydrated === false) {
 		return <div style={styles.emptyDetails}>Файлы ветки загружаются...</div>;
+	}
+	if (branch.detailsMissing === true) {
+		const hasKnownPositiveCount = typeof branch.affectedFileCount === 'number' && branch.affectedFileCount > 0;
+		return <div style={styles.emptyDetails}>{hasKnownPositiveCount
+			? `Не удалось догрузить diff ветки относительно ${branch.baseBranch}`
+			: `Нет уникальных изменений относительно ${branch.baseBranch}`}</div>;
 	}
 	if (branch.affectedFiles.length === 0) {
 		return <div style={styles.emptyDetails}>{`Нет уникальных изменений относительно ${branch.baseBranch}`}</div>;
@@ -2008,20 +2070,26 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '6px',
 		justifyContent: 'center',
 	},
-	// Masonry-сетка карточек внутри правой панели.
+	// Two stable dashboard columns that avoid row-height gaps while keeping widgets in fixed columns.
 	widgetGrid: {
-		columnWidth: '360px',
-		columnCount: 2,
-		columnGap: '12px',
+		display: 'grid',
+		gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,360px),1fr))',
+		gap: '12px',
+		alignItems: 'start',
+	},
+	// Vertical stack inside each stable dashboard column.
+	widgetColumn: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '12px',
+		minWidth: 0,
+		alignSelf: 'start',
 	},
 	// Общая карточка любого виджета дашборда.
 	section: {
-		display: 'inline-block',
 		width: '100%',
-		marginBottom: '12px',
-		breakInside: 'avoid',
-		pageBreakInside: 'avoid',
 		verticalAlign: 'top',
+		alignSelf: 'start',
 		minWidth: 0,
 		border: '1px solid var(--vscode-panel-border)',
 		borderRadius: '6px',
@@ -2735,6 +2803,26 @@ const styles: Record<string, React.CSSProperties> = {
 		textOverflow: 'ellipsis',
 		whiteSpace: 'nowrap',
 		fontFamily: 'var(--vscode-editor-font-family)',
+	},
+	// Inline branch label row that keeps the branch name and author in one flexible grid cell.
+	branchLabelRow: {
+		display: 'flex',
+		alignItems: 'center',
+		gap: '6px',
+		minWidth: 0,
+		overflow: 'hidden',
+	},
+	// Secondary author label shown after the parallel branch name.
+	branchAuthor: {
+		flexShrink: 0,
+		maxWidth: '40%',
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
+		fontFamily: 'var(--vscode-font-family)',
+		fontSize: '10px',
+		fontWeight: 500,
+		color: 'var(--vscode-descriptionForeground)',
 	},
 	// Маленький счетчик файлов справа в раскрываемой строке.
 	fileCount: {

@@ -1651,12 +1651,94 @@ test('GitService getGitOverlayParallelBranchSummaries lists files changed from m
 
 	const summaries = await service.getGitOverlayParallelBranchSummaries(new Map([['api', '/tmp/api']]), 'api', 'main', ['main']);
 
+	assert.equal(summaries[0]?.affectedFileCount, 2);
 	assert.deepEqual(summaries[0]?.affectedFiles, [
 		{ status: 'M', path: 'src/branch-only.ts', previousPath: undefined, additions: 8, deletions: 3, isBinary: false },
 		{ status: 'M', path: 'src/shared.ts', previousPath: undefined, additions: 2, deletions: 2, isBinary: false },
 	]);
 	assert.deepEqual(summaries[0]?.potentialConflicts.map((file: { path: string }) => file.path), ['src/shared.ts']);
 	assert.deepEqual(diffCalls, [['base-sha', 'feature/current'], ['base-sha', 'feature/parallel']]);
+});
+
+test('GitService getGitOverlayParallelBranchAffectedFileCount uses a lightweight three-dot diff', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const gitCalls: string[][] = [];
+
+	service.runGitFileCommand = async (_projectPath: string, args: string[]) => {
+		gitCalls.push(args);
+		return 'src/alpha.ts\nsrc/beta.ts\n';
+	};
+
+	const affectedFileCount = await service.getGitOverlayParallelBranchAffectedFileCount('/tmp/api', 'main', 'feature/parallel');
+
+	assert.equal(affectedFileCount, 2);
+	assert.deepEqual(gitCalls, [[
+		'diff',
+		'--name-only',
+		'--find-renames',
+		'--diff-filter=ACDMR',
+		'main...feature/parallel',
+	]]);
+});
+
+test('GitService getGitOverlayParallelBranchAffectedFileCount falls back to merge-base diff when the three-dot query fails', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const gitCalls: string[][] = [];
+
+	service.runGitFileCommand = async (_projectPath: string, args: string[]) => {
+		gitCalls.push(args);
+		if (args[0] === 'diff' && args[4] === 'main...feature/parallel') {
+			throw new Error('no merge base shortcut');
+		}
+		if (args[0] === 'diff' && args[4] === 'base-sha' && args[5] === 'feature/parallel') {
+			return 'src/alpha.ts\nsrc/beta.ts\n';
+		}
+		return '';
+	};
+	service.getMergeBase = async () => 'base-sha';
+
+	const affectedFileCount = await service.getGitOverlayParallelBranchAffectedFileCount('/tmp/api', 'main', 'feature/parallel');
+
+	assert.equal(affectedFileCount, 2);
+	assert.deepEqual(gitCalls, [[
+		'diff',
+		'--name-only',
+		'--find-renames',
+		'--diff-filter=ACDMR',
+		'main...feature/parallel',
+	], [
+		'diff',
+		'--name-only',
+		'--find-renames',
+		'--diff-filter=ACDMR',
+		'base-sha',
+		'feature/parallel',
+	]]);
+});
+
+test('GitService getCommitChangedFileCount uses a lightweight show name-only query', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const gitCalls: string[][] = [];
+
+	service.runGitFileCommand = async (_projectPath: string, args: string[]) => {
+		gitCalls.push(args);
+		return 'src/alpha.ts\nsrc/beta.ts\n';
+	};
+
+	const changedFileCount = await service.getCommitChangedFileCount('/tmp/api', 'abc123');
+
+	assert.equal(changedFileCount, 2);
+	assert.deepEqual(gitCalls, [[
+		'show',
+		'--name-only',
+		'--find-renames',
+		'--diff-filter=ACDMR',
+		'--format=',
+		'abc123',
+	]]);
 });
 
 test('GitService getGitOverlayParallelBranchSummaries bounds expensive scans to the requested limit', async () => {
@@ -1705,6 +1787,51 @@ test('GitService getGitOverlayParallelBranchSummaries bounds expensive scans to 
 	assert.equal(summaries.length, 1);
 	assert.deepEqual(scannedBranches, ['feature/newest']);
 	assert.deepEqual(lastCommitBranches, ['feature/newest']);
+});
+
+test('GitService getGitOverlayParallelBranchSummaries hydrates explicitly requested branches instead of a different top-N candidate set', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const scannedBranches: string[] = [];
+
+	service.getCurrentBranch = async () => 'feature/current';
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'for-each-ref') {
+			return 'main\nfeature/current\nfeature/newest\nfeature/requested\nfeature/older';
+		}
+		if (args[0] === 'rev-list') {
+			scannedBranches.push(String(args[3] || '').split('...')[1] || '');
+			return '0\t1';
+		}
+		if (args[0] === 'diff' && args.includes('--numstat')) {
+			return '1\t0\tsrc/feature.ts';
+		}
+		return '';
+	};
+	service.getMergeBase = async () => 'base-sha';
+	service.getNameStatusDiff = async (_projectPath: string, fromRef: string, toRef: string) => {
+		if (fromRef === 'base-sha' && toRef === 'feature/current') {
+			return [];
+		}
+		if (fromRef === 'base-sha') {
+			return [{ status: 'M', path: `src/${toRef}.ts` }];
+		}
+		return [];
+	};
+	service.getLastCommit = async () => null;
+
+	const summaries = await service.getGitOverlayParallelBranchSummaries(
+		new Map([['api', '/tmp/api']]),
+		'api',
+		'main',
+		['main'],
+		1,
+		['feature/requested'],
+	);
+
+	assert.equal(summaries.length, 1);
+	assert.equal(summaries[0]?.name, 'feature/requested');
+	assert.deepEqual(scannedBranches, ['feature/requested']);
 });
 
 test('GitService getCommitChangedFiles includes numstat line metrics', async () => {

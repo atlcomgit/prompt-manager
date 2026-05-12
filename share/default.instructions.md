@@ -376,4 +376,4 @@ MANDATORILY ALWAYS save or update the change history with an AI-oriented English
 - Branch: {Git branch}.
 - What was done: {Brief description of completed changes and implemented functionality for AI}.
 - Key points: {Description of key points and implementation features that AI should consider when performing future tasks}.
-- Files: {List of affected files}.
+- Files: {List of affected files post-line by line}.

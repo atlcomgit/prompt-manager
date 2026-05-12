@@ -34,6 +34,15 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- The `Параллельные ветки` widget now keeps an already visible row mounted with an explicit empty/error state when a later details refresh cannot return a diff payload for that branch, instead of making the row disappear from the list.
+- The `Параллельные ветки` widget now falls back through merge-base when a lightweight three-dot diff count cannot be resolved, so zero-file branches stop lingering as visible placeholders that disappear only after expansion.
+- The `MR/PR` widget now renders as the last dashboard card instead of appearing earlier in the multi-column overview layout.
+- The `Параллельные ветки` widget no longer drops an already visible branch row on expand just because the heavy details refresh picked a different top-N candidate set to hydrate.
+- Multi-column prompt dashboard widgets now avoid the large empty vertical gaps that appeared under shorter cards after the stable-column layout change.
+- The `Коммиты проектов` widget now shows lightweight changed-file counts in collapsed commit rows immediately instead of rendering `...` until the file list hydration runs.
+- Multi-column prompt dashboard widgets now keep their column positions stable when commit, branch, or file disclosures expand, instead of jumping into different columns as card heights change.
+- The `Параллельные ветки` widget now shows the latest branch author after each branch name.
+- The `Параллельные ветки` widget now shows lightweight unique-file counts in collapsed branch rows immediately instead of rendering `...` everywhere until one branch expansion triggers the full details hydration, and branches whose lightweight or hydrated result resolves to `0` unique files are suppressed from the widget entirely instead of disappearing only after expansion.
 - The `Ветки проектов` widget now keeps full directory prefixes in flat `Незакоммиченные файлы` and `Опережающие файлы` rows while they still fit on one line, and only begins collapsing the longest folder segments first when the rendered row runs out of horizontal room instead of truncating every folder immediately.
 - Start Chat now drops missing workspace folders from the `Excluded projects` section before sending the generated chat context, so stale excluded names no longer leak into Copilot chat scope.
 - The prompt-page `AI Models` picker now sorts the Copilot model list alphabetically, while still keeping the current prompt model visible even when it is not present in the latest fetched catalog yet.

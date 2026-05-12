@@ -728,7 +728,9 @@ test('PromptDashboardService filters branch-widget uncommitted files by otherPro
 
 test('PromptDashboardService display refresh keeps commit and branch details lazy until requested', async () => {
 	let changedFilesCalls = 0;
+	let commitChangedFileCountCalls = 0;
 	let parallelBranchCalls = 0;
+	let parallelBranchCountCalls = 0;
 	const workspaceFolders = new Map([
 		['api', '/workspace/api'],
 	]);
@@ -775,6 +777,14 @@ test('PromptDashboardService display refresh keeps commit and branch details laz
 				parallelBranchCalls += 1;
 				return [];
 			},
+			getGitOverlayParallelBranchAffectedFileCount: async () => {
+				parallelBranchCountCalls += 1;
+				return 7;
+			},
+			getCommitChangedFileCount: async () => {
+				commitChangedFileCountCalls += 1;
+				return 5;
+			},
 			getCommitChangedFiles: async () => {
 				changedFilesCalls += 1;
 				return [];
@@ -788,10 +798,14 @@ test('PromptDashboardService display refresh keeps commit and branch details laz
 	const widget = await service.refreshProjectsWidget(createPrompt({ projects: ['api'] }), undefined, undefined, 'display');
 
 	assert.equal(changedFilesCalls, 0);
+	assert.equal(commitChangedFileCountCalls, 1);
 	assert.equal(parallelBranchCalls, 0);
+	assert.equal(parallelBranchCountCalls, 1);
 	assert.equal(widget.data.projects[0]?.recentCommits[0]?.changedFilesHydrated, false);
+	assert.equal(widget.data.projects[0]?.recentCommits[0]?.changedFileCount, 5);
 	assert.equal(widget.data.projects[0]?.parallelBranches[0]?.detailsHydrated, false);
 	assert.equal(widget.data.projects[0]?.parallelBranches[0]?.name, 'feature/parallel');
+	assert.equal(widget.data.projects[0]?.parallelBranches[0]?.affectedFileCount, 7);
 	service.dispose();
 });
 
@@ -955,6 +969,7 @@ test('PromptDashboardService details refresh limits hydration to the requested p
 
 test('PromptDashboardService details refresh keeps parallel branches when the prompt branch is absent in that project', async () => {
 	let requestedParallelBaseBranch = '';
+	let requestedParallelBranchNames: string[] = [];
 	const workspaceFolders = new Map([
 		['api', '/workspace/api'],
 	]);
@@ -1003,8 +1018,12 @@ test('PromptDashboardService details refresh keeps parallel branches when the pr
 				_paths: Map<string, string>,
 				_projectName: string,
 				baseBranch: string,
+				_trackedBranches: string[],
+				_limit?: number,
+				preferredBranchNames?: string[],
 			) => {
 				requestedParallelBaseBranch = baseBranch;
+				requestedParallelBranchNames = preferredBranchNames || [];
 				return [{
 					name: 'feature/parallel',
 					baseBranch,
@@ -1033,13 +1052,14 @@ test('PromptDashboardService details refresh keeps parallel branches when the pr
 
 	assert.equal(displayWidget.data.projects[0]?.parallelBranches[0]?.baseBranch, 'main');
 	assert.equal(requestedParallelBaseBranch, 'main');
+	assert.deepEqual(requestedParallelBranchNames, ['feature/parallel']);
 	assert.equal(detailsWidget.data.projects[0]?.parallelBranches[0]?.name, 'feature/parallel');
 	assert.equal(detailsWidget.data.projects[0]?.parallelBranches[0]?.baseBranch, 'main');
 	assert.equal(detailsWidget.data.projects[0]?.parallelBranches[0]?.detailsHydrated, true);
 	service.dispose();
 });
 
-test('PromptDashboardService details refresh preserves visible parallel rows when hydrated details omit them', async () => {
+test('PromptDashboardService keeps visible parallel rows mounted when details hydration omits them', async () => {
 	const workspaceFolders = new Map([
 		['api', '/workspace/api'],
 	]);
@@ -1082,6 +1102,73 @@ test('PromptDashboardService details refresh preserves visible parallel rows whe
 				})),
 			}),
 			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchAffectedFileCount: async () => 0,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'cached analysis',
+		} as any,
+	);
+
+	const prompt = createPrompt({
+		projects: ['api'],
+		branch: 'feature/task-107',
+		trackedBranch: 'main',
+		trackedBranchesByProject: { api: 'main' },
+	});
+	const displayWidget = await service.refreshProjectsWidget(prompt, undefined, undefined, 'display');
+	const detailsWidget = await service.refreshProjectsWidget(prompt, undefined, undefined, 'details', ['api']);
+
+	assert.deepEqual(displayWidget.data.projects[0]?.parallelBranches, []);
+	assert.deepEqual(detailsWidget.data.projects[0]?.parallelBranches, []);
+	service.dispose();
+});
+
+test('PromptDashboardService details refresh keeps already visible unresolved parallel rows instead of dropping them', async () => {
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (
+				_paths: Map<string, string>,
+				projectNames: string[],
+			) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project, {
+					currentBranch: 'main',
+					trackedBranch: 'main',
+					branches: [
+						{ name: 'main', current: true, exists: true, kind: 'current', upstream: 'origin/main', ahead: 0, behind: 0, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
+					],
+					cleanupBranches: [{
+						name: 'feature/parallel',
+						current: false,
+						exists: true,
+						kind: 'cleanup',
+						upstream: 'origin/feature/parallel',
+						ahead: 1,
+						behind: 0,
+						lastCommit: null,
+						canSwitch: true,
+						canDelete: true,
+						stale: false,
+					}],
+				})),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchAffectedFileCount: async () => null,
 			getGitOverlayParallelBranchSummaries: async () => [],
 			getCommitChangedFiles: async () => [],
 		} as any,
@@ -1103,6 +1190,8 @@ test('PromptDashboardService details refresh preserves visible parallel rows whe
 	assert.equal(displayWidget.data.projects[0]?.parallelBranches[0]?.detailsHydrated, false);
 	assert.equal(detailsWidget.data.projects[0]?.parallelBranches[0]?.name, 'feature/parallel');
 	assert.equal(detailsWidget.data.projects[0]?.parallelBranches[0]?.detailsHydrated, true);
+	assert.equal(detailsWidget.data.projects[0]?.parallelBranches[0]?.detailsMissing, true);
+	assert.equal(detailsWidget.data.projects[0]?.parallelBranches[0]?.affectedFileCount, 0);
 	assert.deepEqual(detailsWidget.data.projects[0]?.parallelBranches[0]?.affectedFiles, []);
 	service.dispose();
 });

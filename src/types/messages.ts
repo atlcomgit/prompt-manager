@@ -4,7 +4,7 @@
 
 import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
-import type { PromptDashboardAnalysisState, PromptDashboardSnapshot, PromptDashboardWidgetSnapshot } from './promptDashboard.js';
+import type { PromptDashboardAnalysisState, PromptDashboardSnapshot, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from './promptDashboard.js';
 
 export type GlobalContextSourceMessage = 'empty' | 'manual' | 'remote';
 export type ChatContextAutoLoadStateMessage = 'started' | 'completed' | 'fallback';
@@ -72,6 +72,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'getBranches'; projects: string[] }
 	| { type: 'getPromptDashboardSnapshot'; prompt: Prompt; requestId?: string; forceRefresh?: boolean }
 	| { type: 'refreshPromptDashboard'; prompt: Prompt; requestId?: string }
+	| { type: 'refreshPromptDashboardWidget'; prompt: Prompt; widget: PromptDashboardWidgetKind; requestId?: string }
 	| {
 		type: 'hydratePromptDashboardProjectsDetails';
 		prompt: Prompt;
@@ -110,7 +111,14 @@ export type WebviewToExtensionMessage =
 	| { type: 'gitOverlayAssignReviewProvider'; host: string; provider: 'github' | 'gitlab'; promptBranch: string; projects: string[] }
 	| { type: 'gitOverlayGenerateCommitMessage'; prompt: Prompt; project?: string; projects?: string[]; includeAllChanges?: boolean; requestId?: string }
 	| { type: 'gitOverlayCommitStaged'; prompt: Prompt; messages: GitOverlayProjectCommitMessage[]; includeAllChanges?: boolean; requestId?: string }
-	| { type: 'gitOverlayCreateReviewRequest'; prompt: Prompt; requests: GitOverlayProjectReviewRequestInput[] }
+	| {
+		type: 'gitOverlayCreateReviewRequest';
+		prompt: Prompt;
+		promptBranch?: string;
+		projects?: string[];
+		requests: GitOverlayProjectReviewRequestInput[];
+		requestId?: string;
+	}
 	| { type: 'updateTimeSpent'; id: string; field: 'timeSpentWriting' | 'timeSpentImplementing'; delta: number }
 	| { type: 'pickFile' }
 	| { type: 'pickHttpExamplesFile' }

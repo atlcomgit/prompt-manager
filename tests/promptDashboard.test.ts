@@ -294,6 +294,26 @@ test('shouldClearPromptDashboardBusyActionFromWidget waits for a finished projec
 		widgetKind: 'status',
 		cacheStatus: 'fresh',
 	}), false);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'refresh-widget:projects',
+		widgetKind: 'projects',
+		cacheStatus: 'fresh',
+	}), true);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'refresh-widget:status',
+		widgetKind: 'status',
+		cacheStatus: 'fresh',
+	}), true);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'refresh-widget:activity',
+		widgetKind: 'projects',
+		cacheStatus: 'fresh',
+	}), false);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'refresh-widget:activity',
+		widgetKind: 'activity',
+		cacheStatus: 'loading',
+	}), false);
 });
 
 test('preservePromptDashboardProjectsLoadingSnapshot keeps previous rows during loading refresh', () => {

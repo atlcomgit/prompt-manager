@@ -260,7 +260,15 @@ export function shouldClearPromptDashboardBusyActionFromWidget(input: {
 	widgetKind: PromptDashboardWidgetKind;
 	cacheStatus: PromptDashboardLoadStatus;
 }): boolean {
-	if (!input.busyAction || input.widgetKind !== 'projects' || input.cacheStatus === 'loading') {
+	if (!input.busyAction || input.cacheStatus === 'loading') {
+		return false;
+	}
+
+	if (input.busyAction === `refresh-widget:${input.widgetKind}`) {
+		return true;
+	}
+
+	if (input.widgetKind !== 'projects') {
 		return false;
 	}
 

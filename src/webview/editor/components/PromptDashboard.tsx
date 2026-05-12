@@ -3,7 +3,7 @@ import { PromptStatusText } from '../../shared/PromptStatusText';
 import { getPromptStatusColor } from '../../shared/promptStatus';
 import type { GitOverlayChangeFile } from '../../../types/git.js';
 import type { GitOverlayParallelBranchSummary } from '../../../types/git.js';
-import type { PromptDashboardAnalysisState, PromptDashboardLoadStatus, PromptDashboardProjectSummary, PromptDashboardRecentCommit, PromptDashboardSnapshot } from '../../../types/promptDashboard.js';
+import type { PromptDashboardAnalysisState, PromptDashboardLoadStatus, PromptDashboardProjectSummary, PromptDashboardRecentCommit, PromptDashboardSnapshot, PromptDashboardWidgetKind } from '../../../types/promptDashboard.js';
 import {
 	compactPromptDashboardMiddleLabel,
 	fitPromptDashboardPathPartsToWidth,
@@ -30,6 +30,7 @@ interface PromptDashboardProps {
 	mode: 'full' | 'compact';
 	showGitFlowAction?: boolean;
 	onRefresh: () => void;
+	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void;
 	onHydrateProjectsDetails: (projects: string[], reason?: 'details' | 'dirty-files') => void;
 	onOpenGitFlow: () => void;
 	onOpenPrompt: (id: string, promptUuid?: string) => void;
@@ -123,6 +124,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	mode,
 	showGitFlowAction = false,
 	onRefresh,
+	onRefreshWidget,
 	onHydrateProjectsDetails,
 	onOpenGitFlow,
 	onOpenPrompt,
@@ -252,13 +254,13 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		setBranchDrafts(previous => buildBulkBranchDrafts(branchWidgetProjects, previous, branch));
 	};
 	const widgetColumns = buildWidgetGridColumns([
-		renderStatus(snapshot, statusCacheStatus),
-		renderActivity(snapshot, onOpenPrompt, activityCacheStatus),
-		renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow),
-		renderProjectCommits(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus),
-		renderParallelBranchFiles(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus),
-		renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle'),
-		renderReviewRequests(projects, projectsCacheStatus),
+		renderStatus(snapshot, statusCacheStatus, busyAction, onRefreshWidget),
+		renderActivity(snapshot, onOpenPrompt, activityCacheStatus, busyAction, onRefreshWidget),
+		renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow, onRefreshWidget),
+		renderProjectCommits(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus, busyAction, onRefreshWidget),
+		renderParallelBranchFiles(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus, busyAction, onRefreshWidget),
+		renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, onRefreshWidget),
+		renderReviewRequests(projects, projectsCacheStatus, busyAction, onRefreshWidget),
 	]);
 
 	return (
@@ -443,7 +445,12 @@ function resolveCacheLabel(snapshot: PromptDashboardSnapshot | null): string {
 	return `Обновлено ${new Date(updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 }
 
-function renderStatus(snapshot: PromptDashboardSnapshot | null, cacheStatus: PromptDashboardLoadStatus): React.ReactNode {
+function renderStatus(
+	snapshot: PromptDashboardSnapshot | null,
+	cacheStatus: PromptDashboardLoadStatus,
+	busyAction: DashboardBusyAction,
+	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+): React.ReactNode {
 	const data = snapshot?.status.data;
 	const progress = Math.max(0, Math.min(100, data?.progress ?? 0));
 	const statusAccent = data ? getPromptStatusColor(data.status) : 'var(--vscode-descriptionForeground)';
@@ -455,7 +462,12 @@ function renderStatus(snapshot: PromptDashboardSnapshot | null, cacheStatus: Pro
 		<section style={styles.section}>
 			<div style={styles.sectionHeader}>
 				<span style={styles.sectionTitle}>Статус промпта</span>
-				{renderSectionMeta(formatPromptDashboardDuration(data?.totalTimeMs || 0), cacheStatus, 'обновляем')}
+				{renderSectionMeta(formatPromptDashboardDuration(data?.totalTimeMs || 0), cacheStatus, 'обновляем', {
+					widget: 'status',
+					title: 'Статус промпта',
+					busyAction,
+					onRefreshWidget,
+				})}
 			</div>
 			<div style={{ ...styles.sectionBody, ...styles.statusBody }}>
 				<div style={styles.statusChipRow}>
@@ -503,13 +515,24 @@ function ProgressValueLabel({ value, fillTone }: { value: number; fillTone: stri
 	);
 }
 
-function renderActivity(snapshot: PromptDashboardSnapshot | null, onOpenPrompt: (id: string, promptUuid?: string) => void, cacheStatus: PromptDashboardLoadStatus): React.ReactNode {
+function renderActivity(
+	snapshot: PromptDashboardSnapshot | null,
+	onOpenPrompt: (id: string, promptUuid?: string) => void,
+	cacheStatus: PromptDashboardLoadStatus,
+	busyAction: DashboardBusyAction,
+	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+): React.ReactNode {
 	const data = snapshot?.activity.data;
 	return (
 		<section style={styles.section}>
 			<div style={styles.sectionHeader}>
 				<span style={styles.sectionTitle}>Активные промпты</span>
-				{renderSectionMeta('5m+', cacheStatus, 'обновляем')}
+				{renderSectionMeta('5m+', cacheStatus, 'обновляем', {
+					widget: 'activity',
+					title: 'Активные промпты',
+					busyAction,
+					onRefreshWidget,
+				})}
 			</div>
 			<div style={styles.sectionBody}>
 				{renderActivityGroup('Сегодня', data?.today || [], onOpenPrompt)}
@@ -566,6 +589,7 @@ function renderProjectBranches(
 	toggleShowAllBranchProjects: () => void,
 	showGitFlowAction: boolean,
 	onOpenGitFlow: () => void,
+	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
 ): React.ReactNode {
 	const changedCount = Object.keys(buildChangedBranchTargets(projects, branchDrafts)).length;
 	const sharedOptions = buildSharedBranchOptions(projects);
@@ -579,7 +603,12 @@ function renderProjectBranches(
 		<section style={styles.section}>
 			<div style={styles.sectionHeader}>
 				<span style={styles.sectionTitle}>Ветки проектов</span>
-				{renderSectionMeta(projects.length || '...', cacheStatus, 'обновляем')}
+				{renderSectionMeta(projects.length || '...', cacheStatus, 'обновляем', {
+					widget: 'projects',
+					title: 'Ветки проектов',
+					busyAction,
+					onRefreshWidget,
+				})}
 			</div>
 			<div style={styles.sectionBody}>
 				<label style={styles.bulkBranchRow}>
@@ -878,7 +907,12 @@ function renderBranchProjectUncommittedFileList(
 	);
 }
 
-function renderReviewRequests(projects: PromptDashboardProjectSummary[], cacheStatus: PromptDashboardLoadStatus): React.ReactNode {
+function renderReviewRequests(
+	projects: PromptDashboardProjectSummary[],
+	cacheStatus: PromptDashboardLoadStatus,
+	busyAction: DashboardBusyAction,
+	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+): React.ReactNode {
 	const visibleProjects = projects.filter(project => Boolean(
 		project.review.request
 		|| project.review.error
@@ -888,7 +922,12 @@ function renderReviewRequests(projects: PromptDashboardProjectSummary[], cacheSt
 		<section style={styles.section}>
 			<div style={styles.sectionHeader}>
 				<span style={styles.sectionTitle}>MR/PR</span>
-				{renderSectionMeta(visibleProjects.length || '...', cacheStatus, 'обновляем')}
+				{renderSectionMeta(visibleProjects.length || '...', cacheStatus, 'обновляем', {
+					widget: 'projects',
+					title: 'MR/PR',
+					busyAction,
+					onRefreshWidget,
+				})}
 			</div>
 			<div style={styles.sectionBody}>
 				{visibleProjects.length === 0 ? cacheStatus === 'loading' ? renderLoadingEmptyState('MR/PR-данные загружаются') : <div style={styles.emptyText}>Нет активных MR/PR</div> : visibleProjects.map(project => {
@@ -931,6 +970,8 @@ function renderParallelBranchFiles(
 	toggleExpanded: (key: string) => void,
 	fileHandlers: FileRowActionHandlers,
 	cacheStatus: PromptDashboardLoadStatus,
+	busyAction: DashboardBusyAction,
+	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
 ): React.ReactNode {
 	const projectGroups = projects
 		.map(project => ({ project, branches: resolveVisibleParallelBranches(project.parallelBranches) }))
@@ -940,7 +981,12 @@ function renderParallelBranchFiles(
 		<section style={styles.section}>
 			<div style={styles.sectionHeader}>
 				<span style={styles.sectionTitle}>Параллельные ветки</span>
-				{renderSectionMeta(totalVisibleBranches || '...', cacheStatus, 'обновляем')}
+				{renderSectionMeta(totalVisibleBranches || '...', cacheStatus, 'обновляем', {
+					widget: 'projects',
+					title: 'Параллельные ветки',
+					busyAction,
+					onRefreshWidget,
+				})}
 			</div>
 			<div style={styles.sectionBody}>
 				{projectGroups.length === 0 ? cacheStatus === 'loading' ? renderLoadingEmptyState('Данные по веткам загружаются') : <div style={styles.emptyText}>Нет данных по параллельным веткам</div> : projectGroups.map(({ project, branches }) => (
@@ -979,12 +1025,19 @@ function renderProjectCommits(
 	toggleExpanded: (key: string) => void,
 	fileHandlers: FileRowActionHandlers,
 	cacheStatus: PromptDashboardLoadStatus,
+	busyAction: DashboardBusyAction,
+	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
 ): React.ReactNode {
 	return (
 		<section style={styles.section}>
 			<div style={styles.sectionHeader}>
 				<span style={styles.sectionTitle}>Коммиты проектов</span>
-				{renderSectionMeta(projects.length || '...', cacheStatus, 'обновляем')}
+				{renderSectionMeta(projects.length || '...', cacheStatus, 'обновляем', {
+					widget: 'projects',
+					title: 'Коммиты проектов',
+					busyAction,
+					onRefreshWidget,
+				})}
 			</div>
 			<div style={styles.sectionBody}>
 				{projects.length === 0 ? (
@@ -1205,11 +1258,16 @@ function renderCommit(
 	const changedFilesLabel = resolveCommitChangedFilesLabel(commit);
 	return (
 		<div key={commit.sha} style={styles.detailBlock}>
-			<button type="button" style={styles.detailButton} onClick={() => toggleExpanded(expandKey)}>
+			<button type="button" style={{ ...styles.detailButton, ...styles.commitDetailButton }} onClick={() => toggleExpanded(expandKey)}>
 				<span style={styles.detailChevron}>{isExpanded ? '▾' : '▸'}</span>
-				<span style={styles.commitSha}>{commit.shortSha}</span>
-				<span style={styles.commitSubject}>{commit.subject}</span>
-				<span style={styles.fileCount}>{changedFilesLabel}</span>
+				<span style={styles.commitContent}>
+					<span style={styles.commitMetaRow}>
+						<span style={styles.commitSha}>{commit.shortSha}</span>
+						{commit.author ? <span style={styles.commitAuthor}>{commit.author}</span> : null}
+					</span>
+					<span style={styles.commitSubject}>{commit.subject}</span>
+				</span>
+				<span style={{ ...styles.fileCount, ...styles.commitFileCount }}>{changedFilesLabel}</span>
 			</button>
 			{isExpanded ? renderCommitChangedFiles(project, commit, fileHandlers) : null}
 		</div>
@@ -1827,17 +1885,84 @@ function isBranchSwitchBusy(busyAction: DashboardBusyAction): boolean {
 	return Boolean(busyAction && busyAction !== 'refresh');
 }
 
-function renderSectionMeta(value: string | number, cacheStatus: PromptDashboardLoadStatus, loadingLabel: string): React.ReactNode {
-	if (cacheStatus === 'loading') {
-		return (
+
+function renderSectionMeta(
+	value: string | number,
+	cacheStatus: PromptDashboardLoadStatus,
+	loadingLabel: string,
+	options?: {
+		widget: PromptDashboardWidgetKind;
+		title: string;
+		busyAction: DashboardBusyAction;
+		onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void;
+	},
+): React.ReactNode {
+	const isBusy = options?.busyAction === 'refresh' || options?.busyAction === `refresh-widget:${options?.widget}`;
+	const metaNode = cacheStatus === 'loading' && options?.onRefreshWidget
+		? null
+		: cacheStatus === 'loading'
+		? (
 			<span style={styles.sectionMetaLoading}>
 				<span style={styles.buttonSpinner} aria-hidden="true" />
 				<span>{loadingLabel}</span>
 			</span>
-		);
+		)
+		: <span style={styles.sectionMeta}>{value}</span>;
+
+	if (!options?.onRefreshWidget) {
+		return metaNode;
 	}
-	return <span style={styles.sectionMeta}>{value}</span>;
+
+	return (
+		<span style={styles.sectionHeaderActions}>
+			{metaNode}
+			<button
+				type="button"
+				style={{ ...styles.iconButton, ...styles.sectionRefreshButton, ...(isBusy ? styles.busyButton : null) }}
+				onClick={() => options.onRefreshWidget?.(options.widget)}
+				title={`Обновить виджет «${options.title}»`}
+				aria-label={`Обновить виджет: ${options.title}`}
+				disabled={isBusy}
+			>
+				{isBusy ? <span style={styles.buttonSpinner} aria-hidden="true" /> : '↻'}
+			</button>
+		</span>
+	);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function renderLoadingEmptyState(label: string): React.ReactNode {
 	return (
@@ -1872,7 +1997,12 @@ function formatRelativeAge(ageMs: number): string {
 	return `${Math.floor(hours / 24)}d`;
 }
 
-function renderAnalysis(analysis: PromptDashboardAnalysisState | null, cacheStatus: string): React.ReactNode {
+function renderAnalysis(
+	analysis: PromptDashboardAnalysisState | null,
+	cacheStatus: PromptDashboardLoadStatus,
+	busyAction: DashboardBusyAction,
+	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+): React.ReactNode {
 	const isRunning = analysis?.status === 'running' || cacheStatus === 'loading';
 	const sections = parseAnalysisSections(analysis?.content || '');
 	const hasPreviewContent = isRunning && sections.length > 0;
@@ -1885,7 +2015,12 @@ function renderAnalysis(analysis: PromptDashboardAnalysisState | null, cacheStat
 		<section style={styles.section}>
 			<div style={styles.sectionHeader}>
 				<span style={styles.sectionTitle}>AI review</span>
-				<span style={styles.sectionMeta}>{stateLabel}</span>
+				{renderSectionMeta(stateLabel, isRunning ? 'loading' : 'fresh', 'обновляем', {
+					widget: 'aiAnalysis',
+					title: 'AI review',
+					busyAction,
+					onRefreshWidget,
+				})}
 			</div>
 			<div style={styles.sectionBody}>
 				<div style={styles.analysisIntro}>
@@ -1902,7 +2037,6 @@ function renderAnalysis(analysis: PromptDashboardAnalysisState | null, cacheStat
 						))}
 					</div>
 				) : (
-					/** Renders one aggregated directory row with file count and rolled-up line stats. */
 					<div style={styles.emptyText}>{isRunning ? 'AI проверяет ветки и изменения...' : 'AI review появится после загрузки Git-данных.'}</div>
 				)}
 				{analysis?.error ? <div style={styles.errorText}>{analysis.error}</div> : null}
@@ -2133,6 +2267,19 @@ const styles: Record<string, React.CSSProperties> = {
 		fontWeight: 600,
 		color: 'var(--vscode-descriptionForeground)',
 		whiteSpace: 'nowrap',
+	},
+	sectionHeaderActions: {
+		display: 'inline-flex',
+		alignItems: 'center',
+		gap: '8px',
+		minWidth: 0,
+	},
+	sectionRefreshButton: {
+		width: '20px',
+		height: '20px',
+		padding: 0,
+		fontSize: '11px',
+		lineHeight: 1,
 	},
 	// Основное содержимое карточки с вертикальным стеком элементов.
 	sectionBody: {
@@ -2779,9 +2926,26 @@ const styles: Record<string, React.CSSProperties> = {
 		textAlign: 'left',
 		cursor: 'pointer',
 	},
+	commitDetailButton: {
+		gridTemplateColumns: '12px minmax(0, 1fr) auto',
+		alignItems: 'start',
+	},
 	// Маленькая стрелка раскрытия рядом с detail-строкой.
 	detailChevron: {
 		color: 'var(--vscode-descriptionForeground)',
+	},
+	commitContent: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '3px',
+		minWidth: 0,
+	},
+	commitMetaRow: {
+		display: 'flex',
+		alignItems: 'center',
+		gap: '6px',
+		minWidth: 0,
+		flexWrap: 'wrap',
 	},
 	// Короткий SHA коммита с моноширинным акцентом.
 	commitSha: {
@@ -2789,12 +2953,17 @@ const styles: Record<string, React.CSSProperties> = {
 		color: 'var(--vscode-textLink-foreground)',
 		whiteSpace: 'nowrap',
 	},
-	// Тема коммита с обрезкой длинного текста.
+	commitAuthor: {
+		fontSize: '10px',
+		fontWeight: 500,
+		color: 'var(--vscode-descriptionForeground)',
+		whiteSpace: 'nowrap',
+	},
+	// Тема коммита под мета-строкой без усечения по длине.
 	commitSubject: {
 		minWidth: 0,
-		overflow: 'hidden',
-		textOverflow: 'ellipsis',
-		whiteSpace: 'nowrap',
+		whiteSpace: 'normal',
+		lineHeight: 1.35,
 	},
 	// Название параллельной ветки в detail-строке.
 	branchName: {
@@ -2833,6 +3002,10 @@ const styles: Record<string, React.CSSProperties> = {
 		color: 'var(--vscode-descriptionForeground)',
 		textAlign: 'center',
 		fontSize: '10px',
+	},
+	commitFileCount: {
+		alignSelf: 'flex-start',
+		marginTop: '1px',
 	},
 	// Предупреждающий вариант счетчика файлов.
 	fileCountWarn: {

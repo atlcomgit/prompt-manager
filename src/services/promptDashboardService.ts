@@ -199,6 +199,35 @@ export class PromptDashboardService implements vscode.Disposable {
 		return this.buildProjectsWidgetFromCache(scope);
 	}
 
+	/** Refreshes one visible widget without rebuilding the entire dashboard snapshot. */
+	async refreshWidgetSnapshot(
+		prompt: Prompt,
+		widget: PromptDashboardWidgetKind,
+		postMessage?: DashboardPostMessage,
+		requestId?: string,
+	): Promise<PromptDashboardWidgetSnapshot<unknown>> {
+		const scope = this.createScope(prompt);
+		this.activeScope = scope;
+		this.cancelScheduledAutoRefresh(`manual-widget-refresh:${widget}`, scope, requestId);
+		if (widget === 'projects') {
+			return this.refreshProjectsWidget(prompt, postMessage, requestId, 'display');
+		}
+		if (widget === 'aiAnalysis') {
+			await this.analyzeParallelReview(prompt, postMessage, requestId);
+			return this.buildWidgetFromCache(
+				scope,
+				'aiAnalysis',
+				this.getCachedData<PromptDashboardAnalysisState | null>(scope, 'aiAnalysis'),
+			);
+		}
+		await this.refreshWidget(scope, widget, postMessage, {
+			force: true,
+			requestId,
+			prompt,
+		});
+		return this.buildWidgetFromCache(scope, widget, this.getCachedData(scope, widget) || this.placeholderForWidget(widget, prompt));
+	}
+
 	async switchProjectBranch(prompt: Prompt, project: string, branch: string): Promise<PromptDashboardBranchSwitchResult> {
 		return this.switchProjectBranches(prompt, { [project]: branch });
 	}

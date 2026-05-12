@@ -13,6 +13,7 @@
 - Prompt voice trace logging now writes `[prompt-voice][trace]` lines for webview and extension-host recording events, making OK/limit/auto-restart overlay races easier to diagnose from the `Prompt Manager` Output channel.
 
 ### Changed
+- Dashboard section headers now expose a per-widget refresh button beside the counter, and the `Коммиты проектов` card shows `short SHA + author` on the first line with the full commit subject wrapped on the next line instead of truncating it into one row.
 - Dashboard branch-widget incoming disclosures now append the comma-separated list of unique upstream commit authors in the visible `Опережающие файлы` title, while the opened diff title still appends the latest file author resolved from the compared ref.
 - The custom desktop publish script now stages Linux, Windows, and macOS VSIX targets first and publishes those prebuilt packages together in one Marketplace call, avoiding same-version failures on later desktop targets while still pruning ONNX runtime assets per target instead of shipping Linux-only bundles; VS Code Web remains unsupported because the extension still has no browser entrypoint.
 - Dashboard dirty-file disclosure now keeps the normal first `projects` widget refresh lightweight but hydrates per-file change stats on demand when that block is expanded, retries that lazy hydration automatically for already opened rows after a projects refresh completes, and the dirty-file rows themselves use larger file names, slightly dimmer folder names, tighter spacing, higher-contrast secondary labels, stronger symbolic status badges, a compact unresolved-stat placeholder instead of an empty slot while counts are still hydrating, and matching folder/file row line height so the file list remains readable in narrow dashboard cards.
@@ -34,6 +35,7 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- Git Flow step 4 now refreshes the current overlay scope immediately after single-project or bulk MR/PR creation, keeping the review block and loader state in sync inside the same window.
 - The `Параллельные ветки` widget now keeps an already visible row mounted with an explicit empty/error state when a later details refresh cannot return a diff payload for that branch, instead of making the row disappear from the list.
 - The `Параллельные ветки` widget now falls back through merge-base when a lightweight three-dot diff count cannot be resolved, so zero-file branches stop lingering as visible placeholders that disappear only after expansion.
 - The `MR/PR` widget now renders as the last dashboard card instead of appearing earlier in the multi-column overview layout.
@@ -89,7 +91,7 @@
 - Git Flow step 1 can now hide configured repo-relative path prefixes from the “Changes in other projects” block via `promptManager.gitOverlay.otherProjectsExcludedPaths`, and explicitly selected projects with zero changes now show “Exclude” instead of “Switch”.
 - Closing the separate report editor right after Save no longer drops the latest edits; the webview now flushes unsynced local report state during shutdown so the first save survives the window close.
 - Prompt pages no longer open as a blank webview after the recent Process-tab launch-block refactor; the editor render path now avoids the launch-state runtime failures that could break initial load.
-- Prompt chat launch no longer shows the false "Chat launch was not confirmed" notice when the early session index lags behind and the same launch is confirmed a moment later by the tracked chat request state.
+- Prompt chat launch now waits through a short confirmation grace window before showing "Chat launch was not confirmed", so a late active chat session or tracked request marker can still confirm the same launch after the first session-index pass misses it.
 - The Process tab chat launch block now keeps each visual stage visible for at least one second before advancing, including the initial prepare and auto-load rows, so the whole sequence stays readable from the first step onward.
 - The Process tab chat launch block no longer reappears later for the same launch when a transient prompt sync briefly drops chat-entry state or when the same prompt is reidentified by a later id/UUID normalization pass.
 - Copilot Premium Usage no longer falls back to inflated local counters when the GitHub session is stale or invalid; the status bar now shows a dedicated sign-in error state instead of misleading percentages.

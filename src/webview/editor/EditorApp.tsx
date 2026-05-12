@@ -46,7 +46,7 @@ import {
   shouldShowPromptPlanForStatus,
 } from '../../types/prompt.js';
 import type { GitOverlayActionKind, GitOverlayActionScope, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
-import type { PromptDashboardAnalysisState, PromptDashboardProjectsData, PromptDashboardSnapshot, PromptDashboardWidgetSnapshot } from '../../types/promptDashboard';
+import type { PromptDashboardAnalysisState, PromptDashboardProjectsData, PromptDashboardSnapshot, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../../types/promptDashboard';
 import {
   buildContextFileCardPlaceholder,
   dedupeContextFileReferences,
@@ -3201,6 +3201,10 @@ export const EditorApp: React.FC = () => {
             generatedAt: new Date().toISOString(),
           };
         });
+        setPromptDashboardBusyAction(previous => previous === 'refresh-widget:aiAnalysis'
+          && msg.analysis?.status !== 'running'
+          ? null
+          : previous);
         break;
       case 'nextTaskNumber':
         setPrompt(prev => ({ ...prev, taskNumber: msg.taskNumber }));
@@ -3780,6 +3784,14 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'refreshPromptDashboard', prompt: promptRef.current, requestId });
   }, []);
 
+  /** Refreshes a single visible dashboard widget without reloading the whole dashboard. */
+  const handlePromptDashboardRefreshWidget = useCallback((widget: PromptDashboardWidgetKind) => {
+    const requestId = `prompt-dashboard-widget-refresh-${widget}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    promptDashboardRequestIdRef.current = requestId;
+    setPromptDashboardBusyAction(`refresh-widget:${widget}`);
+    vscode.postMessage({ type: 'refreshPromptDashboardWidget', prompt: promptRef.current, widget, requestId });
+  }, []);
+
   const handlePromptDashboardHydrateProjectsDetails = useCallback((projects: string[], reason: 'details' | 'dirty-files' = 'details') => {
     if (promptDashboardSnapshot?.projects.cache.status === 'loading') {
       return;
@@ -4136,19 +4148,36 @@ export const EditorApp: React.FC = () => {
       return;
     }
 
+    const requestId = createGitOverlayTrackedRequestId('commit');
+    const processLabel = busyAction === 'createReviewRequest:all'
+      ? t('editor.gitOverlayCreateAllReviewRequests')
+      : t('editor.gitOverlayCreateReviewRequest').replace('{label}', 'MR/PR');
+
+    registerGitOverlayTrackedRequest({
+      requestId,
+      kind: 'commit',
+      projects: normalizeGitOverlayTrackedRequestProjects(normalizedRequests.map(item => item.project)),
+      action: busyAction,
+      processLabel,
+      holdUntilSnapshot: true,
+      bulk: busyAction === 'createReviewRequest:all',
+      createdAt: Date.now(),
+    });
+
     setGitOverlayBusyState(
       busyAction,
-      busyAction === 'createReviewRequest:all'
-        ? t('editor.gitOverlayCreateAllReviewRequests')
-        : t('editor.gitOverlayCreateReviewRequest').replace('{label}', 'MR/PR'),
+      processLabel,
       true,
     );
     vscode.postMessage({
       type: 'gitOverlayCreateReviewRequest',
       prompt: buildPromptForSave(),
+      promptBranch: promptRef.current.branch.trim(),
+      projects: promptRef.current.projects,
       requests: normalizedRequests,
+      requestId,
     });
-  }, [buildPromptForSave, setGitOverlayBusyState, t]);
+  }, [buildPromptForSave, createGitOverlayTrackedRequestId, registerGitOverlayTrackedRequest, setGitOverlayBusyState, t]);
 
   const handleGitOverlayOpenReviewRequest = useCallback((url: string) => {
     vscode.postMessage({ type: 'gitOverlayOpenReviewRequest', url });
@@ -6208,6 +6237,7 @@ export const EditorApp: React.FC = () => {
         mode={promptDashboardMode}
         showGitFlowAction={shouldShowFooterGitFlow}
         onRefresh={handlePromptDashboardRefresh}
+        onRefreshWidget={handlePromptDashboardRefreshWidget}
         onHydrateProjectsDetails={handlePromptDashboardHydrateProjectsDetails}
         onOpenGitFlow={handleOpenGitOverlay}
         onOpenPrompt={handlePromptDashboardOpenPrompt}

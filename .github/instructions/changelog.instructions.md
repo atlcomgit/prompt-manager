@@ -1,3 +1,21 @@
+## 128: Git Flow refresh and dashboard widget controls
+
+- Дата: 2026-05-12.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлено обновление шага 4 в окне `Git flow` после создания одного или нескольких MR/PR, в виджете `Коммиты проектов` автор теперь показывается сразу после short SHA, а полное сообщение коммита переносится на отдельную строку без UI-усечения, и у каждого dashboard-виджета появилась собственная кнопка обновления в header справа от счётчика.
+- Ключевые моменты: `EditorApp` и `EditorPanelManager` выровняли `gitOverlayCreateReviewRequest` по tracked-request flow с `requestId`, текущими `promptBranch/projects` и scoped reread текущего overlay snapshot, поэтому step 4 перестал зависать после single/bulk create-review-request; `PromptDashboardService` открыл targeted refresh path для отдельных widget kinds, `PromptDashboard` добавил header refresh buttons и reuse shared `projects` refresh для `Ветки проектов` / `Коммиты проектов` / `MR/PR` / `Параллельные ветки`, а util `shouldClearPromptDashboardBusyActionFromWidget` теперь умеет снимать busy state после `refresh-widget:*`; focused host/component/util tests покрывают новый Git flow contract и dashboard UI/loader behavior.
+- Файлы: src/types/messages.ts, src/webview/editor/EditorApp.tsx, src/providers/editorPanelManager.ts, src/services/promptDashboardService.ts, src/utils/promptDashboard.ts, src/webview/editor/components/PromptDashboard.tsx, tests/editorPanelManager.test.ts, tests/promptDashboardComponent.test.tsx, tests/promptDashboard.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md, .vscode/prompt-manager/chat-memory/feature.instructions.md.
+
+## 127: Задержка подтверждения запуска Copilot Chat
+
+- Дата: 2026-05-12.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлено ложное зависание шага `Открываем Copilot Chat`, когда Prompt Manager слишком рано показывал ошибку неподтверждённого запуска, хотя VS Code отдавал новую chat session или request marker немного позже первой проверки; host-логика теперь даёт короткое grace-окно на позднее подтверждение и покрыта регрессионным тестом.
+- Ключевые моменты: `EditorPanelManager` после первичного confirmation timeout повторно проверяет поздно появившуюся активную chat session через `StateService.getActiveChatSessionId()` и делает короткий дополнительный poll `waitForChatRequestCompletion()` перед тем, как показывать пользователю timeout; успешная поздняя привязка по active session или tracked request activity больше не шлёт ложную ошибку и продолжает обычный bind/open flow; regression test фиксирует именно этот late-confirmation path.
+- Файлы: src/providers/editorPanelManager.ts, tests/editorPanelManager.test.ts, README.md, CHANGELOG.md, .github/instructions/changelog.instructions.md, .vscode/prompt-manager/chat-memory/feature.instructions.md.
+
 ## 126: Эллипсис путей в незакоммиченных файлах
 
 - Дата: 2026-05-10.

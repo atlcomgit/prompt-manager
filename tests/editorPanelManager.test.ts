@@ -1179,6 +1179,116 @@ test('postGitOverlaySnapshot keeps freshly created review requests visible when 
 	assert.deepEqual(postedMessages[0]?.snapshot?.projects?.[0]?.review?.request, optimisticRequest);
 });
 
+test('gitOverlayCreateReviewRequest refreshes the current overlay scope with the tracked request id', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+			branch: 'feature/task-128',
+			projects: ['api'],
+		},
+		workspaceService: {
+			getWorkspaceFolderPaths: () => new Map([['api', '/tmp/api']]),
+			getWorkspaceFolders: () => ['api'],
+		},
+	});
+
+	const postedMessages: any[] = [];
+	const snapshotCalls: any[] = [];
+	const optimisticRequest = {
+		id: '101',
+		number: '101',
+		title: 'Draft: Review refresh regression',
+		url: 'https://gitlab.example.com/acme/api/-/merge_requests/101',
+		state: 'open',
+		createdAt: '2026-05-12T11:00:00.000Z',
+		updatedAt: '2026-05-12T11:00:00.000Z',
+		sourceBranch: 'feature/task-128',
+		targetBranch: 'main',
+		isDraft: true,
+		comments: [],
+	};
+
+	(manager as any).gitService = {
+		createReviewRequests: async () => ({
+			success: true,
+			errors: [],
+			changedProjects: ['api'],
+			skippedProjects: [],
+			reviewRequestsByProject: {
+				api: optimisticRequest,
+			},
+		}),
+	};
+	(manager as any).postGitOverlaySnapshot = async (
+		_postMessage: unknown,
+		promptArg: unknown,
+		promptBranchArg: unknown,
+		projectsArg: unknown,
+		optionsArg: unknown,
+	) => {
+		snapshotCalls.push({
+			prompt: promptArg,
+			promptBranch: promptBranchArg,
+			projects: projectsArg,
+			options: optionsArg,
+		});
+		return null;
+	};
+
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt A',
+		branch: 'feature/task-128',
+		projects: ['api'],
+	});
+
+	await (manager as any).handleMessage(
+		{
+			type: 'gitOverlayCreateReviewRequest',
+			prompt: currentPrompt,
+			promptBranch: 'feature/task-128',
+			projects: ['api'],
+			requests: [{
+				project: 'api',
+				targetBranch: 'main',
+				title: '128 Review refresh regression',
+				draft: true,
+				removeSourceBranch: false,
+			}],
+			requestId: 'req-review-refresh',
+		},
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(snapshotCalls.length, 1);
+	assert.equal(snapshotCalls[0]?.promptBranch, 'feature/task-128');
+	assert.deepEqual(snapshotCalls[0]?.projects, ['api']);
+	assert.equal(snapshotCalls[0]?.options?.requestId, 'req-review-refresh');
+	assert.deepEqual(snapshotCalls[0]?.options?.optimisticReviewRequestsByProject, { api: optimisticRequest });
+	assert.equal(postedMessages.some(message =>
+		(message as any)?.type === 'info'
+		&& (message as any)?.requestId === 'req-review-refresh'
+	), true);
+	resetVsCodeCommandMock();
+});
+
 test('postGitOverlaySnapshot can skip lazy other-project scheduling for initial summary open', async () => {
 	const { manager } = await createManager();
 	const postedMessages: any[] = [];
@@ -3903,6 +4013,106 @@ test('startChat does not report timeout when request completion later confirms t
 	assert.ok(!postedMessages.some(message =>
 		(message as any)?.type === 'error'
 		&& (message as any)?.requestId === 'req-completion-fallback'
+		&& (message as any)?.message === 'Запуск чата не подтвердился. Можно попробовать ещё раз.'));
+	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-new']);
+	resetVsCodeCommandMock();
+});
+
+test('startChat waits through the confirmation grace window before reporting timeout', async () => {
+	resetVsCodeCommandMock();
+
+	let activeSessionLookupCount = 0;
+	let completionLookupCount = 0;
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+			getActiveChatSessionId: async () => {
+				activeSessionLookupCount += 1;
+				return activeSessionLookupCount >= 3 ? 'session-new' : '';
+			},
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => {
+				completionLookupCount += 1;
+				if (completionLookupCount === 1) {
+					return {
+						ok: false,
+						reason: 'timeout',
+						sessionId: '',
+						lastRequestStarted: 0,
+						lastRequestEnded: 0,
+						hasPendingEdits: false,
+					};
+				}
+
+				return {
+					ok: false,
+					reason: 'timeout',
+					sessionId: 'session-new',
+					lastRequestStarted: 100,
+					lastRequestEnded: 0,
+					hasPendingEdits: false,
+				};
+			},
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+	(manager as any).scheduleChatSessionRename = async () => undefined;
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-confirmation-grace' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	const waitDeadline = Date.now() + 500;
+	while (Date.now() < waitDeadline && getStoredPrompt()?.chatSessionIds?.[0] !== 'session-new') {
+		await new Promise(resolve => setTimeout(resolve, 10));
+	}
+
+	assert.ok(postedMessages.some(message =>
+		(message as any)?.type === 'chatRequestStarted'
+		&& (message as any)?.requestId === 'req-confirmation-grace'
+		&& (message as any)?.sessionId === 'session-new'));
+	assert.ok(postedMessages.some(message =>
+		(message as any)?.type === 'chatOpened'
+		&& (message as any)?.requestId === 'req-confirmation-grace'));
+	assert.ok(!postedMessages.some(message =>
+		(message as any)?.type === 'error'
+		&& (message as any)?.requestId === 'req-confirmation-grace'
 		&& (message as any)?.message === 'Запуск чата не подтвердился. Можно попробовать ещё раз.'));
 	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-new']);
 	resetVsCodeCommandMock();

@@ -128,6 +128,10 @@ const GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS = 250;
 const GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS = 250;
 const GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT = 4;
 const PROMPT_AGENT_JSON_SYNC_DEBOUNCE_MS = 300;
+/** Give VS Code a short extra window to surface a late chat session before showing a timeout. */
+const CHAT_START_CONFIRMATION_GRACE_TIMEOUT_MS = 2500;
+const CHAT_START_CONFIRMATION_GRACE_POLL_INTERVAL_MS = 250;
+const CHAT_START_CONFIRMATION_ACTIVE_SESSION_POLL_INTERVAL_MS = 150;
 /** Limit parallel file metadata probes during prompt editor hydration. */
 const CONTEXT_FILE_CARD_HYDRATION_CONCURRENCY = 8;
 
@@ -8811,6 +8815,45 @@ export class EditorPanelManager {
 							return completion;
 						};
 
+						/** Retry session confirmation once more before surfacing a user-visible timeout. */
+						const waitForLateSessionConfirmation = async (
+						): Promise<Awaited<ReturnType<StateService['waitForChatRequestCompletion']>> | null> => {
+							const lateActiveSessionId = await this.stateService.getActiveChatSessionId(
+								CHAT_START_CONFIRMATION_GRACE_TIMEOUT_MS,
+								CHAT_START_CONFIRMATION_ACTIVE_SESSION_POLL_INTERVAL_MS,
+								{
+									excludeSessionIds: Array.from(sessionIdsToExclude),
+								},
+							);
+							const lateActiveSessionSource = shouldForceRebindChat
+								? 'active-session-confirmation-grace-rebind'
+								: 'active-session-confirmation-grace';
+							if (await bindConfirmedSession(lateActiveSessionId, lateActiveSessionSource)) {
+								if (shouldForceRebindChat) {
+									sessionIdsToExclude.add(lateActiveSessionId);
+								}
+								this.hooksOutput.appendLine(
+									`[chat-start] confirmation grace bound late session for prompt=${trackedPromptId || '-'}; session=${lateActiveSessionId}`,
+								);
+								return null;
+							}
+
+							const graceCompletion = await waitForCompletionSnapshot(
+								CHAT_START_CONFIRMATION_GRACE_TIMEOUT_MS,
+								CHAT_START_CONFIRMATION_GRACE_POLL_INTERVAL_MS,
+								'request-completion-confirmation-grace',
+							);
+							const requestObserved = Number(graceCompletion.lastRequestStarted || 0) > 0;
+							if (sessionBindingSucceeded || requestObserved) {
+								this.hooksOutput.appendLine(
+									`[chat-start] confirmation grace observed late request activity for prompt=${trackedPromptId || '-'}; session=${graceCompletion.sessionId || '-'} started=${graceCompletion.lastRequestStarted || 0}`,
+								);
+								return graceCompletion;
+							}
+
+							return null;
+						};
+
 						let completion: Awaited<ReturnType<StateService['waitForChatRequestCompletion']>> | null = null;
 
 						if (shouldForceRebindChat) {
@@ -8864,12 +8907,17 @@ export class EditorPanelManager {
 										`[chat-start] confirmation fallback observed request activity for prompt=${prompt.id}; session=${launchConfirmation.sessionId || '-'} started=${launchConfirmation.lastRequestStarted || 0}`,
 									);
 								} else {
-									if (shouldForceRebindChat) {
-										this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; new chat session was not confirmed after rebind request`);
-									} else {
-										this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; chat message was dispatched but session was not detected yet`);
+									const lateConfirmation = await waitForLateSessionConfirmation();
+									if (lateConfirmation) {
+										completion = lateConfirmation;
+									} else if (!sessionBindingSucceeded) {
+										if (shouldForceRebindChat) {
+											this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; new chat session was not confirmed after rebind request`);
+										} else {
+											this.hooksOutput.appendLine(`[chat-start] session confirmation timeout for prompt=${prompt.id}; chat message was dispatched but session was not detected yet`);
+										}
+										notifySessionConfirmationTimeout();
 									}
-									notifySessionConfirmationTimeout();
 								}
 							}
 						}
@@ -9303,6 +9351,26 @@ export class EditorPanelManager {
 				postMessage({ type: 'promptDashboardSnapshot', snapshot, requestId: msg.requestId });
 				void this.promptDashboardService.analyzeParallelReview(
 					dashboardPrompt,
+					(message) => postMessage(message as ExtensionToWebviewMessage),
+					msg.requestId,
+				);
+				break;
+			}
+
+			case 'refreshPromptDashboardWidget': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				if (msg.widget === 'aiAnalysis') {
+					void this.promptDashboardService.analyzeParallelReview(
+						dashboardPrompt,
+						(message) => postMessage(message as ExtensionToWebviewMessage),
+						msg.requestId,
+					);
+					break;
+				}
+
+				await this.promptDashboardService.refreshWidgetSnapshot(
+					dashboardPrompt,
+					msg.widget,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
 				);
@@ -10048,10 +10116,10 @@ export class EditorPanelManager {
 
 				const promptSnapshot = msg.prompt;
 				const paths = this.workspaceService.getWorkspaceFolderPaths();
-				const projects = this.resolveGitOverlayProjects(promptSnapshot.projects || [], currentPrompt);
-				const promptBranch = this.resolveGitOverlayPromptBranch(promptSnapshot.branch, currentPrompt);
+				const projects = this.resolveGitOverlayProjects(msg.projects || promptSnapshot.projects || [], promptSnapshot);
+				const promptBranch = this.resolveGitOverlayPromptBranch(msg.promptBranch || promptSnapshot.branch, promptSnapshot);
 				if (!promptBranch) {
-					postMessage({ type: 'error', message: 'Сначала укажите ветку промпта.' });
+					postMessage({ type: 'error', message: 'Сначала укажите ветку промпта.', requestId: msg.requestId });
 					break;
 				}
 
@@ -10059,8 +10127,10 @@ export class EditorPanelManager {
 				postMessage({
 					type: result.errors.length > 0 ? 'error' : 'info',
 					message: this.describeGitMultiProjectResult(result, 'MR/PR обработан'),
+					requestId: msg.requestId,
 				});
-				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, {
+				await this.postGitOverlaySnapshot(postMessage, promptSnapshot, promptBranch, projects, {
+					requestId: msg.requestId,
 					optimisticReviewRequestsByProject: result.reviewRequestsByProject,
 				});
 				if (result.errors.length === 0) {

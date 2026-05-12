@@ -160,12 +160,13 @@ function createSnapshot(
 }
 
 /** Renders the dashboard component into static markup for regression checks. */
-function renderDashboard(snapshot: PromptDashboardSnapshot | null): string {
+function renderDashboard(snapshot: PromptDashboardSnapshot | null, options?: { busyAction?: string | null }): string {
 	return withDashboardEnvironment(() => renderToStaticMarkup(React.createElement(PromptDashboard, {
 		snapshot,
-		busyAction: null,
+		busyAction: options?.busyAction ?? null,
 		mode: 'full',
 		onRefresh: () => { },
+		onRefreshWidget: () => { },
 		onHydrateProjectsDetails: () => { },
 		onOpenGitFlow: () => { },
 		onOpenPrompt: () => { },
@@ -252,6 +253,38 @@ test('PromptDashboard shows lightweight commit file counts before details hydrat
 
 	assert.match(markup, /abc1234[\s\S]*?>12</);
 	assert.doesNotMatch(markup, /abc1234[\s\S]*?>\.\.\.</);
+});
+
+test('PromptDashboard renders widget refresh buttons in every section header', () => {
+	const markup = renderDashboard(createSnapshot([createProject()]));
+
+	assert.match(markup, /aria-label="Обновить виджет: Статус промпта"/);
+	assert.match(markup, /aria-label="Обновить виджет: Активные промпты"/);
+	assert.match(markup, /aria-label="Обновить виджет: Ветки проектов"/);
+	assert.match(markup, /aria-label="Обновить виджет: Коммиты проектов"/);
+	assert.match(markup, /aria-label="Обновить виджет: Параллельные ветки"/);
+	assert.match(markup, /aria-label="Обновить виджет: AI review"/);
+	assert.match(markup, /aria-label="Обновить виджет: MR\/PR"/);
+});
+
+test('PromptDashboard renders commit author beside sha and keeps the subject on a separate line', () => {
+	const markup = renderDashboard(createSnapshot([createProject({
+		recentCommits: [{
+			sha: 'abc123456789',
+			shortSha: 'abc1234',
+			subject: 'Initial commit message that should stay fully visible in the dashboard row',
+			author: 'Jane Doe',
+			committedAt: '2026-04-29T10:00:00.000Z',
+			refNames: [],
+			changedFiles: [],
+			changedFileCount: 3,
+			changedFilesHydrated: false,
+		}],
+	})]));
+
+	assert.match(markup, /abc1234[\s\S]*Jane Doe[\s\S]*Initial commit message that should stay fully visible in the dashboard row/);
+	assert.match(markup, /display:flex;flex-direction:column;gap:3px;min-width:0/);
+	assert.match(markup, /white-space:normal;line-height:1\.35/);
 });
 
 test('PromptDashboard shows lightweight parallel-branch file counts before details hydration', () => {
@@ -417,10 +450,10 @@ test('resolveExpandedDetailsHydrationRequest keeps dirty file hydration on the d
 	});
 });
 
-test('PromptDashboard shows loading labels for project-based widgets while data refreshes', () => {
+test('PromptDashboard hides header loading labels for project-based widgets while data refreshes', () => {
 	const markup = renderDashboard(createSnapshot([], 'loading'));
 
-	assert.match(markup, /обновляем/);
+	assert.doesNotMatch(markup, /обновляем/);
 	assert.match(markup, /Git-данные загружаются/);
 	assert.match(markup, /MR\/PR-данные загружаются/);
 	assert.match(markup, /Данные по веткам загружаются/);
@@ -432,8 +465,19 @@ test('PromptDashboard shows loading labels for project-based widgets while data 
 test('PromptDashboard keeps existing project rows visible while refreshed Git data is loading', () => {
 	const markup = renderDashboard(createSnapshot([createProject()], 'loading'));
 
-	assert.match(markup, /обновляем/);
+	assert.doesNotMatch(markup, /обновляем/);
 	assert.match(markup, /api/);
+	assert.doesNotMatch(markup, /Git-данные загружаются/);
+	assert.doesNotMatch(markup, /MR\/PR-данные загружаются/);
+	assert.doesNotMatch(markup, /Данные по веткам загружаются/);
+});
+
+test('PromptDashboard keeps only refresh-button spinners visible while widget refresh is running', () => {
+	const markup = renderDashboard(createSnapshot([createProject()], 'loading'), { busyAction: 'refresh-widget:projects' });
+
+	assert.doesNotMatch(markup, /обновляем/);
+	assert.match(markup, /aria-label="Обновить виджет: Ветки проектов"/);
+	assert.match(markup, /animation:pm-spin 0\.8s linear infinite/);
 	assert.doesNotMatch(markup, /Git-данные загружаются/);
 	assert.doesNotMatch(markup, /MR\/PR-данные загружаются/);
 	assert.doesNotMatch(markup, /Данные по веткам загружаются/);

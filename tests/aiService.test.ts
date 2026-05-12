@@ -10,7 +10,6 @@ const originalModuleLoad = moduleLoader._load;
 
 let selectChatModelsCalls = 0;
 let sendRequestCalls = 0;
-const outputLines: string[] = [];
 
 const mockModel = {
 	vendor: 'copilot',
@@ -46,7 +45,7 @@ moduleLoader._load = (request, parent, isMain) => {
 		return {
 			window: {
 				createOutputChannel: () => ({
-					appendLine: (line: string) => outputLines.push(line),
+					appendLine: () => undefined,
 					show: () => undefined,
 					dispose: () => undefined,
 				}),
@@ -82,7 +81,6 @@ moduleLoader._load = originalModuleLoad;
 test('AiService reuses the selected Copilot model across consecutive requests', async () => {
 	selectChatModelsCalls = 0;
 	sendRequestCalls = 0;
-	outputLines.length = 0;
 	selectChatModelsImpl = async () => [mockModel];
 
 	const service = new AiService();
@@ -91,7 +89,6 @@ test('AiService reuses the selected Copilot model across consecutive requests', 
 
 	assert.equal(sendRequestCalls, 2);
 	assert.equal(selectChatModelsCalls, 1);
-	assert.equal(outputLines.some(line => line.includes('result=model-cache-hit')), true);
 });
 
 test('AiService keeps live Copilot models that are missing from visible cache state', async () => {

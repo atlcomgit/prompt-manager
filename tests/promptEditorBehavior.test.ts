@@ -15,6 +15,7 @@ import {
 	resolvePromptPlanPlaceholderState,
 	resolvePromptChatLaunchTrackingKey,
 	resolvePromptOpenEditorViewState,
+	shouldPersistAutoExpandedReportSection,
 	shouldAutoExpandPromptBranchList,
 	shouldResetPromptChatLaunchTracking,
 	shouldPreservePromptIdAfterChatStart,
@@ -246,6 +247,55 @@ test('resolvePromptEditorExpandedSections keeps manual collapse when plan and re
 		plan: false,
 		report: false,
 	});
+});
+
+test('resolvePromptEditorExpandedSections keeps report expanded across transient empty content while it remains auto-managed', () => {
+	const defaults = createDefaultEditorPromptExpandedSections();
+
+	assert.deepEqual(resolvePromptEditorExpandedSections({
+		expandedSections: {
+			...defaults,
+			report: true,
+		},
+		manualSectionOverrides: {},
+		hasNotesContent: false,
+		hasPlanContent: false,
+		shouldExpandPlanSection: false,
+		hasReportContent: false,
+	}), {
+		...defaults,
+		report: true,
+	});
+});
+
+test('shouldPersistAutoExpandedReportSection latches auto-opened report only while it is still auto-managed', () => {
+	assert.equal(shouldPersistAutoExpandedReportSection({
+		expandedReport: false,
+		effectiveReport: true,
+		hasReportContent: true,
+		manualReportOverride: undefined,
+	}), true);
+
+	assert.equal(shouldPersistAutoExpandedReportSection({
+		expandedReport: true,
+		effectiveReport: true,
+		hasReportContent: true,
+		manualReportOverride: undefined,
+	}), false);
+
+	assert.equal(shouldPersistAutoExpandedReportSection({
+		expandedReport: false,
+		effectiveReport: true,
+		hasReportContent: true,
+		manualReportOverride: 'manual',
+	}), false);
+
+	assert.equal(shouldPersistAutoExpandedReportSection({
+		expandedReport: false,
+		effectiveReport: true,
+		hasReportContent: false,
+		manualReportOverride: undefined,
+	}), false);
 });
 
 test('resolvePromptEditorExpandedSections auto-opens Plan when plan-mode placeholder should be shown', () => {

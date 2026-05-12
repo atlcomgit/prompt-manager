@@ -126,3 +126,43 @@ test('buildPromptModelOptions sorts prompt AI models alphabetically', async () =
 		);
 	});
 });
+
+test('shouldDeferReportAutosave only blocks prompt autosave while the report editor owns local typing', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { shouldDeferReportAutosave } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.equal(shouldDeferReportAutosave({ reportEditorFocused: false, reportDraftActive: false }), false);
+		assert.equal(shouldDeferReportAutosave({ reportEditorFocused: true, reportDraftActive: false }), true);
+		assert.equal(shouldDeferReportAutosave({ reportEditorFocused: false, reportDraftActive: true }), true);
+	});
+});
+
+test('shouldPreserveLocalReportOnSave keeps equal saved report only while the inline editor still owns the draft', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { shouldPreserveLocalReportOnSave } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.equal(shouldPreserveLocalReportOnSave({
+			reason: 'save',
+			currentLocalReport: 'same',
+			incomingSavedReport: 'same',
+			reportEditorFocused: false,
+			reportDraftActive: false,
+		}), false);
+
+		assert.equal(shouldPreserveLocalReportOnSave({
+			reason: 'save',
+			currentLocalReport: 'same',
+			incomingSavedReport: 'same',
+			reportEditorFocused: true,
+			reportDraftActive: false,
+		}), true);
+
+		assert.equal(shouldPreserveLocalReportOnSave({
+			reason: 'save',
+			currentLocalReport: 'newer',
+			incomingSavedReport: 'older',
+			reportEditorFocused: false,
+			reportDraftActive: false,
+		}), true);
+	});
+});

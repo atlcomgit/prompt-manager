@@ -36,6 +36,13 @@ interface TogglePromptEditorSectionExpansionInput {
 	hasReportContent?: boolean;
 }
 
+interface ShouldPersistAutoExpandedReportSectionInput {
+	expandedReport: boolean;
+	effectiveReport: boolean;
+	hasReportContent: boolean;
+	manualReportOverride?: EditorPromptManualSectionOverrideMode | null;
+}
+
 interface ShouldAutoExpandPromptBranchListInput {
 	branchesResolved: boolean;
 	hasBranchMismatch: boolean;
@@ -211,10 +218,33 @@ export function resolvePromptEditorExpandedSections(
 			continue;
 		}
 
+		if (key === 'report' && !input.hasReportContent && normalized.expandedSections.report) {
+			nextExpandedSections.report = true;
+			continue;
+		}
+
 		nextExpandedSections[key] = resolvePromptEditorAutoSectionExpandedState(key, input);
 	}
 
 	return nextExpandedSections;
+}
+
+/**
+ * Latch the auto-opened Report section into persisted expanded state once real content exists.
+ * This prevents transient empty report values from collapsing the whole section mid-edit.
+ */
+export function shouldPersistAutoExpandedReportSection(
+	input: ShouldPersistAutoExpandedReportSectionInput,
+): boolean {
+	if (!input.hasReportContent) {
+		return false;
+	}
+
+	if (input.manualReportOverride === 'manual') {
+		return false;
+	}
+
+	return input.effectiveReport && !input.expandedReport;
 }
 
 /** Decide whether branch mismatch may auto-open the per-project branches list. */

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import MarkdownIt from 'markdown-it';
 
 import { detectReportContentMode } from '../../../utils/reportContentMode.js';
@@ -6,8 +6,12 @@ import { detectReportContentMode } from '../../../utils/reportContentMode.js';
 interface Props {
   value: string;
   onChange: (value: string) => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
+  onDirtyChange?: (isDirty: boolean) => void;
   onDebug?: (message: string, payload?: Record<string, unknown>) => void;
   autoModeKey?: string;
+  changeMode?: 'live' | 'blur';
   placeholder?: string;
   t?: (key: string) => string;
   persistedHeight?: number;
@@ -53,10 +57,33 @@ interface ToolbarButtonProps {
   textStyle?: React.CSSProperties;
 }
 
+interface ScrollSnapshot {
+  top: number;
+  left: number;
+  reason: string;
+  tagName: string;
+  element: HTMLElement | null;
+  recordedAt: number;
+}
+
+interface PendingModeSwitchState {
+  from: Mode;
+  to: Mode;
+  deferredMeasurements: number;
+}
+
+type ScrollRestoreResult = 'restored' | 'noop' | 'missing';
+
 const DEFAULT_HEIGHT = 180;
 const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 800;
 const AUTO_RESIZE_HEIGHT_PADDING = 2;
+const BLUR_COMMIT_DEFER_MS = 120;
+const MODE_SWITCH_MIN_UNSTABLE_HEIGHT = MIN_HEIGHT + 24;
+const MAX_MODE_SWITCH_DEFERRED_MEASUREMENTS = 2;
+const MODE_SWITCH_SCROLL_RESTORE_ATTEMPTS = 4;
+const BLUR_SCROLL_RESTORE_ATTEMPTS = 3;
+const PAGE_SCROLL_FALLBACK_MAX_AGE_MS = 4000;
 
 // Resolves the effective editor height for manual and automatic sizing modes.
 export function resolveRichTextEditorHeight(input: {
@@ -83,6 +110,166 @@ export function resolveRichTextEditorHeight(input: {
 
   return Math.max(minHeight, Math.min(maxHeight, paddedHeight));
 }
+
+// Ignores transient blur events that immediately return focus into the same editor surface.
+export function shouldCommitDeferredRichTextBlur(input: {
+  activeElementInsideEditor: boolean;
+  documentHasFocus: boolean;
+}): boolean {
+  if (input.activeElementInsideEditor) {
+    return false;
+  }
+
+  return input.documentHasFocus;
+}
+
+// Resolves whether restoring the surrounding page scroll would visibly move the viewport.
+export function shouldRestoreRichTextPageScroll(input: {
+  currentTop: number;
+  savedTop: number;
+  currentLeft: number;
+  savedLeft: number;
+}): boolean {
+  return Math.abs(input.currentTop - input.savedTop) > 1
+    || Math.abs(input.currentLeft - input.savedLeft) > 1;
+}
+
+// Keeps the saved page scroll alive across early no-op restore attempts while layout is still settling.
+export function shouldPreserveRichTextPageScrollSnapshotOnNoop(input: {
+  snapshotReason: string;
+  remainingAttempts: number;
+}): boolean {
+  if (input.remainingAttempts <= 1) {
+    return false;
+  }
+
+  return input.snapshotReason === 'mode.switch'
+    || input.snapshotReason === 'blur.pointerDown'
+    || input.snapshotReason === 'blur.defer'
+    || input.snapshotReason === 'blur.immediate';
+}
+
+// Retries scroll restoration only while the current attempt was a harmless no-op.
+export function shouldRetryRichTextPageScrollRestore(input: {
+  restoreResult: ScrollRestoreResult;
+  snapshotReason: string;
+  remainingAttempts: number;
+}): boolean {
+  return input.restoreResult === 'noop'
+    && shouldPreserveRichTextPageScrollSnapshotOnNoop({
+      snapshotReason: input.snapshotReason,
+      remainingAttempts: input.remainingAttempts,
+    });
+}
+
+// Reuses the last stable page scroll only when the current snapshot already collapsed to the top unexpectedly.
+export function shouldUseRichTextPageScrollFallback(input: {
+  reason: string;
+  currentTop: number;
+  currentLeft: number;
+  lastKnownTop: number | null;
+  lastKnownLeft: number | null;
+  lastKnownAgeMs: number | null;
+}): boolean {
+  const supportsFallback = input.reason === 'mode.switch'
+    || input.reason === 'blur.pointerDown'
+    || input.reason === 'blur.defer'
+    || input.reason === 'blur.immediate';
+
+  if (!supportsFallback) {
+    return false;
+  }
+
+  if (Math.abs(input.currentTop) > 1 || Math.abs(input.currentLeft) > 1) {
+    return false;
+  }
+
+  if ((input.lastKnownTop ?? 0) <= 1 && Math.abs(input.lastKnownLeft ?? 0) <= 1) {
+    return false;
+  }
+
+  if (input.lastKnownAgeMs === null) {
+    return false;
+  }
+
+  return input.lastKnownAgeMs <= PAGE_SCROLL_FALLBACK_MAX_AGE_MS;
+}
+
+// Rejects obviously stale first-pass auto-resize measurements after switching editor mode.
+export function shouldDeferRichTextModeSwitchAutoResize(input: {
+  modeSwitchPending: boolean;
+  sourceLength: number;
+  currentHeight: number;
+  measuredHeight: number;
+  deferredMeasurements: number;
+}): boolean {
+  if (!input.modeSwitchPending) {
+    return false;
+  }
+
+  if (input.deferredMeasurements >= MAX_MODE_SWITCH_DEFERRED_MEASUREMENTS) {
+    return false;
+  }
+
+  if (input.sourceLength < 200 || input.currentHeight < 200) {
+    return false;
+  }
+
+  return input.measuredHeight <= MODE_SWITCH_MIN_UNSTABLE_HEIGHT;
+}
+
+// Resolves what should be copied for the currently selected editor mode.
+export function resolveRichTextEditorCopyValue(input: {
+  mode: Mode;
+  rawValue: string;
+  visualHtml?: string | null;
+  sourceText?: string | null;
+}): string {
+  if (input.mode === 'visual') {
+    return sanitizeHtml(input.visualHtml || input.rawValue || '');
+  }
+
+  if (input.mode === 'html') {
+    return normalizeText(input.sourceText ?? input.rawValue);
+  }
+
+  return normalizeText(input.rawValue);
+}
+
+// Writes text into the clipboard from the webview, with a DOM fallback for restricted environments.
+const writeTextToClipboard = async (text: string): Promise<boolean> => {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall back to a temporary textarea copy below.
+    }
+  }
+
+  if (typeof document === 'undefined') {
+    return false;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '0';
+  textarea.style.left = '-9999px';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  try {
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(textarea);
+  }
+};
 
 const markdownRenderer = new MarkdownIt({
   html: false,
@@ -272,11 +459,61 @@ const sanitizeHtml = (rawHtml: string): string => {
   return wrapper.innerHTML.trim();
 };
 
+// Reads plain text from a contenteditable source surface while preserving line breaks.
+const readPlainTextFromEditableElement = (element: HTMLElement): string => {
+  const elementWithInnerText = element as HTMLElement & { innerText?: string };
+  const rawText = typeof elementWithInnerText.innerText === 'string'
+    ? elementWithInnerText.innerText || ''
+    : element.textContent || '';
+  return normalizeText(rawText);
+};
+
+// Inserts plain text into the active selection without bringing rich HTML into the source editor.
+const insertPlainTextIntoSelection = (text: string): boolean => {
+  if (!text || typeof document === 'undefined') {
+    return false;
+  }
+
+  try {
+    if (document.execCommand('insertText', false, text)) {
+      return true;
+    }
+  } catch {
+    // Fall back to a direct Range insertion when execCommand is unavailable.
+  }
+
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return false;
+  }
+
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+
+  const textNode = document.createTextNode(text);
+  range.insertNode(textNode);
+
+  const nextRange = document.createRange();
+  nextRange.setStartAfter(textNode);
+  nextRange.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(nextRange);
+  return true;
+};
+
 export const RichTextEditor: React.FC<Props> = ({
   value,
   onChange,
+  onFocus,
+  onBlur,
+  onDirtyChange,
   onDebug,
   autoModeKey,
+  changeMode = 'live',
   placeholder,
   t,
   persistedHeight,
@@ -298,11 +535,20 @@ export const RichTextEditor: React.FC<Props> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
-  const sourceRef = useRef<HTMLTextAreaElement>(null);
+  const sourceRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const lastLocalValueRef = useRef<string | null>(null);
+  const lastPropValueRef = useRef(value || '');
+  const htmlSourceRef = useRef(value || '');
   const isModeManuallySelectedRef = useRef(false);
   const pendingAutoResizeFrameRef = useRef<number | null>(null);
+  const pendingBlurCommitTimerRef = useRef<number | null>(null);
+  const pendingBlurRestoreFrameRef = useRef<number | null>(null);
+  const pendingModeSwitchRestoreFrameRef = useRef<number | null>(null);
+  const pendingPageScrollRestoreRef = useRef<ScrollSnapshot | null>(null);
+  const livePageScrollRef = useRef<ScrollSnapshot | null>(null);
+  const pendingModeSwitchRef = useRef<PendingModeSwitchState | null>(null);
+  const pendingLocalCommitRef = useRef(false);
   const [mode, setMode] = useState<Mode>(() => detectPreferredMode(value || ''));
   const [htmlSource, setHtmlSource] = useState(value || '');
   const [formattingState, setFormattingState] = useState<FormattingState>(DEFAULT_FORMATTING_STATE);
@@ -347,6 +593,264 @@ export const RichTextEditor: React.FC<Props> = ({
     onHeightChange?.(currentHeight);
   }, [currentHeight, onHeightChange]);
 
+  const resolveNearestScrollContainer = useCallback((): HTMLElement | null => {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    let current = containerRef.current?.parentElement || null;
+    while (current) {
+      const computedStyle = window.getComputedStyle(current);
+      const overflowValue = `${computedStyle.overflow} ${computedStyle.overflowY}`;
+      const canScroll = /(auto|scroll|overlay)/.test(overflowValue)
+        && current.scrollHeight > current.clientHeight + 1;
+      if (canScroll) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+
+    if (typeof document === 'undefined') {
+      return null;
+    }
+
+    const scrollingElement = document.scrollingElement;
+    return scrollingElement instanceof HTMLElement ? scrollingElement : null;
+  }, []);
+
+  const rememberCurrentScrollContainer = useCallback((reason: string, options?: { preserveZero?: boolean }): ScrollSnapshot | null => {
+    const scrollContainer = resolveNearestScrollContainer();
+    if (!scrollContainer) {
+      return null;
+    }
+
+    const top = scrollContainer.scrollTop;
+    const left = scrollContainer.scrollLeft;
+    if (!options?.preserveZero && Math.abs(top) <= 1 && Math.abs(left) <= 1) {
+      return livePageScrollRef.current;
+    }
+
+    const snapshot: ScrollSnapshot = {
+      top,
+      left,
+      reason,
+      tagName: scrollContainer.tagName,
+      element: scrollContainer,
+      recordedAt: Date.now(),
+    };
+    livePageScrollRef.current = snapshot;
+    return snapshot;
+  }, [resolveNearestScrollContainer]);
+
+  const snapshotNearestScrollContainer = useCallback((reason: string, options?: { preserveExisting?: boolean }) => {
+    if (options?.preserveExisting && pendingPageScrollRestoreRef.current) {
+      return pendingPageScrollRestoreRef.current;
+    }
+
+    const scrollContainer = resolveNearestScrollContainer();
+    if (!scrollContainer) {
+      return null;
+    }
+
+    const currentTop = scrollContainer.scrollTop;
+    const currentLeft = scrollContainer.scrollLeft;
+    const lastKnownSnapshot = livePageScrollRef.current;
+    const lastKnownAgeMs = lastKnownSnapshot ? Date.now() - lastKnownSnapshot.recordedAt : null;
+    const fallbackUsed = shouldUseRichTextPageScrollFallback({
+      reason,
+      currentTop,
+      currentLeft,
+      lastKnownTop: lastKnownSnapshot?.top ?? null,
+      lastKnownLeft: lastKnownSnapshot?.left ?? null,
+      lastKnownAgeMs,
+    });
+
+    const targetContainer = fallbackUsed && lastKnownSnapshot?.element?.isConnected
+      ? lastKnownSnapshot.element
+      : scrollContainer;
+    const targetTop = fallbackUsed ? (lastKnownSnapshot?.top ?? currentTop) : currentTop;
+    const targetLeft = fallbackUsed ? (lastKnownSnapshot?.left ?? currentLeft) : currentLeft;
+
+    const snapshot: ScrollSnapshot = {
+      top: targetTop,
+      left: targetLeft,
+      reason,
+      tagName: targetContainer.tagName,
+      element: targetContainer,
+      recordedAt: Date.now(),
+    };
+    pendingPageScrollRestoreRef.current = snapshot;
+    onDebug?.('pageScroll.snapshot', {
+      reason,
+      top: snapshot.top,
+      left: snapshot.left,
+      tagName: snapshot.tagName,
+      fallbackUsed,
+      liveTop: lastKnownSnapshot?.top ?? null,
+      liveTagName: lastKnownSnapshot?.tagName ?? null,
+      liveAgeMs: lastKnownAgeMs,
+    });
+    return snapshot;
+  }, [onDebug, resolveNearestScrollContainer]);
+
+  const restoreNearestScrollContainer = useCallback((reason: string, options?: {
+    expectedSnapshotReason?: string;
+    preserveSnapshotOnNoop?: boolean;
+  }): ScrollRestoreResult => {
+    const snapshot = pendingPageScrollRestoreRef.current;
+    if (!snapshot) {
+      return 'missing';
+    }
+
+    if (options?.expectedSnapshotReason && snapshot.reason !== options.expectedSnapshotReason) {
+      return 'missing';
+    }
+
+    const preferredContainer = snapshot.element?.isConnected ? snapshot.element : null;
+    const scrollContainer = preferredContainer || resolveNearestScrollContainer();
+    if (!scrollContainer) {
+      pendingPageScrollRestoreRef.current = null;
+      return 'missing';
+    }
+
+    if (!shouldRestoreRichTextPageScroll({
+      currentTop: scrollContainer.scrollTop,
+      savedTop: snapshot.top,
+      currentLeft: scrollContainer.scrollLeft,
+      savedLeft: snapshot.left,
+    })) {
+      if (!options?.preserveSnapshotOnNoop) {
+        pendingPageScrollRestoreRef.current = null;
+      }
+      return 'noop';
+    }
+
+    scrollContainer.scrollTop = snapshot.top;
+    scrollContainer.scrollLeft = snapshot.left;
+    pendingPageScrollRestoreRef.current = null;
+    livePageScrollRef.current = {
+      ...snapshot,
+      element: scrollContainer,
+      tagName: scrollContainer.tagName,
+      reason,
+      recordedAt: Date.now(),
+    };
+    onDebug?.('pageScroll.restore', {
+      reason,
+      snapshotReason: snapshot.reason,
+      top: snapshot.top,
+      left: snapshot.left,
+      tagName: scrollContainer.tagName,
+    });
+    return 'restored';
+  }, [onDebug, resolveNearestScrollContainer]);
+
+  const clearPendingBlurRestoreFrame = useCallback(() => {
+    if (pendingBlurRestoreFrameRef.current !== null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(pendingBlurRestoreFrameRef.current);
+      pendingBlurRestoreFrameRef.current = null;
+    }
+  }, []);
+
+  const clearPendingModeSwitchRestoreFrame = useCallback(() => {
+    if (pendingModeSwitchRestoreFrameRef.current !== null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(pendingModeSwitchRestoreFrameRef.current);
+      pendingModeSwitchRestoreFrameRef.current = null;
+    }
+  }, []);
+
+  const queueModeSwitchScrollRestore = useCallback((reason: string) => {
+    const scheduleAttempt = (remainingAttempts: number) => {
+      if (typeof window === 'undefined') {
+        restoreNearestScrollContainer(reason, {
+          expectedSnapshotReason: 'mode.switch',
+        });
+        return;
+      }
+
+      clearPendingModeSwitchRestoreFrame();
+      pendingModeSwitchRestoreFrameRef.current = window.requestAnimationFrame(() => {
+        pendingModeSwitchRestoreFrameRef.current = null;
+        const snapshotReason = pendingPageScrollRestoreRef.current?.reason;
+        if (snapshotReason !== 'mode.switch') {
+          return;
+        }
+
+        const result = restoreNearestScrollContainer(reason, {
+          expectedSnapshotReason: 'mode.switch',
+          preserveSnapshotOnNoop: shouldPreserveRichTextPageScrollSnapshotOnNoop({
+            snapshotReason,
+            remainingAttempts,
+          }),
+        });
+        onDebug?.('mode.switch.restoreAttempt', {
+          reason,
+          result,
+          remainingAttempts,
+          mode,
+        });
+
+        if (shouldRetryRichTextPageScrollRestore({
+          restoreResult: result,
+          snapshotReason,
+          remainingAttempts,
+        })) {
+          scheduleAttempt(remainingAttempts - 1);
+          return;
+        }
+
+        if (result === 'noop' && pendingPageScrollRestoreRef.current?.reason === 'mode.switch') {
+          pendingPageScrollRestoreRef.current = null;
+        }
+      });
+    };
+
+    scheduleAttempt(MODE_SWITCH_SCROLL_RESTORE_ATTEMPTS);
+  }, [clearPendingModeSwitchRestoreFrame, mode, onDebug, restoreNearestScrollContainer]);
+
+  const queueDeferredBlurScrollRestore = useCallback((reason: string) => {
+    const scheduleAttempt = (remainingAttempts: number) => {
+      if (typeof window === 'undefined') {
+        restoreNearestScrollContainer(reason);
+        return;
+      }
+
+      clearPendingBlurRestoreFrame();
+      pendingBlurRestoreFrameRef.current = window.requestAnimationFrame(() => {
+        pendingBlurRestoreFrameRef.current = null;
+        const snapshotReason = pendingPageScrollRestoreRef.current?.reason;
+        if (
+          snapshotReason !== 'blur.pointerDown'
+          && snapshotReason !== 'blur.defer'
+          && snapshotReason !== 'blur.immediate'
+        ) {
+          return;
+        }
+
+        const result = restoreNearestScrollContainer(reason, {
+          preserveSnapshotOnNoop: shouldPreserveRichTextPageScrollSnapshotOnNoop({
+            snapshotReason,
+            remainingAttempts,
+          }),
+        });
+        if (shouldRetryRichTextPageScrollRestore({
+          restoreResult: result,
+          snapshotReason,
+          remainingAttempts,
+        })) {
+          scheduleAttempt(remainingAttempts - 1);
+          return;
+        }
+
+        if (result === 'noop' && pendingPageScrollRestoreRef.current?.reason === snapshotReason) {
+          pendingPageScrollRestoreRef.current = null;
+        }
+      });
+    };
+
+    scheduleAttempt(BLUR_SCROLL_RESTORE_ATTEMPTS);
+  }, [clearPendingBlurRestoreFrame, restoreNearestScrollContainer]);
+
   const resolveAutoResizeTarget = useCallback((): HTMLElement | null => {
     if (mode === 'visual') {
       return editorRef.current;
@@ -387,19 +891,60 @@ export const RichTextEditor: React.FC<Props> = ({
       return;
     }
 
-    setCurrentHeight((prev) => {
-      if (prev === nextHeight) {
-        return prev;
+    const pendingModeSwitch = pendingModeSwitchRef.current;
+    if (shouldDeferRichTextModeSwitchAutoResize({
+      modeSwitchPending: pendingModeSwitch?.to === mode,
+      sourceLength: htmlSourceRef.current.length,
+      currentHeight,
+      measuredHeight,
+      deferredMeasurements: pendingModeSwitch?.deferredMeasurements ?? 0,
+    })) {
+      if (pendingModeSwitch) {
+        pendingModeSwitch.deferredMeasurements += 1;
       }
-      onDebug?.('autoResize.heightChanged', {
-        previousHeight: prev,
+      onDebug?.('autoResize.deferUnstableModeSwitchMeasurement', {
+        fromMode: pendingModeSwitch?.from || null,
+        toMode: pendingModeSwitch?.to || null,
         measuredHeight,
         nextHeight,
-        mode,
+        currentHeight,
+        sourceLength: htmlSourceRef.current.length,
+        attempt: pendingModeSwitch?.deferredMeasurements ?? 0,
       });
-      return nextHeight;
+      if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+        if (pendingAutoResizeFrameRef.current !== null) {
+          window.cancelAnimationFrame(pendingAutoResizeFrameRef.current);
+        }
+        pendingAutoResizeFrameRef.current = window.requestAnimationFrame(() => {
+          pendingAutoResizeFrameRef.current = null;
+          syncAutoResizeHeight();
+        });
+      }
+      return;
+    }
+
+    if (currentHeight === nextHeight) {
+      if (pendingModeSwitch?.to === mode) {
+        pendingModeSwitchRef.current = null;
+      }
+      return;
+    }
+
+    snapshotNearestScrollContainer('autoResize.heightChanged', {
+      preserveExisting: pendingPageScrollRestoreRef.current?.reason === 'mode.switch'
+        || pendingPageScrollRestoreRef.current?.reason === 'blur.pointerDown',
     });
-  }, [autoResize, fillHeight, mode, onDebug, resolveAutoResizeTarget, suspendAutoResize]);
+    onDebug?.('autoResize.heightChanged', {
+      previousHeight: currentHeight,
+      measuredHeight,
+      nextHeight,
+      mode,
+    });
+    if (pendingModeSwitch?.to === mode) {
+      pendingModeSwitchRef.current = null;
+    }
+    setCurrentHeight(nextHeight);
+  }, [autoResize, currentHeight, fillHeight, mode, onDebug, resolveAutoResizeTarget, snapshotNearestScrollContainer, suspendAutoResize]);
 
   // Schedules a single measurement per frame while the layout is stabilizing.
   const scheduleAutoResizeHeightSync = useCallback(() => {
@@ -423,23 +968,128 @@ export const RichTextEditor: React.FC<Props> = ({
   }, [autoResize, fillHeight, suspendAutoResize, syncAutoResizeHeight]);
 
   useEffect(() => {
+    htmlSourceRef.current = htmlSource;
+  }, [htmlSource]);
+
+  // Keeps the caller informed only when the local blur draft actually changes state.
+  const setPendingLocalCommit = useCallback((nextPending: boolean) => {
+    if (pendingLocalCommitRef.current === nextPending) {
+      return;
+    }
+
+    pendingLocalCommitRef.current = nextPending;
+    onDirtyChange?.(nextPending);
+  }, [onDirtyChange]);
+
+  const clearPendingBlurCommit = useCallback(() => {
+    if (pendingBlurCommitTimerRef.current !== null && typeof window !== 'undefined') {
+      window.clearTimeout(pendingBlurCommitTimerRef.current);
+      pendingBlurCommitTimerRef.current = null;
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    if (pendingPageScrollRestoreRef.current?.reason !== 'autoResize.heightChanged') {
+      return;
+    }
+    restoreNearestScrollContainer('autoResize.layout');
+  }, [currentHeight, restoreNearestScrollContainer]);
+
+  useEffect(() => {
     return () => {
       if (pendingAutoResizeFrameRef.current !== null && typeof window !== 'undefined') {
         window.cancelAnimationFrame(pendingAutoResizeFrameRef.current);
+      }
+      if (pendingBlurCommitTimerRef.current !== null && typeof window !== 'undefined') {
+        window.clearTimeout(pendingBlurCommitTimerRef.current);
+      }
+      if (pendingBlurRestoreFrameRef.current !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(pendingBlurRestoreFrameRef.current);
+      }
+      if (pendingModeSwitchRestoreFrameRef.current !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(pendingModeSwitchRestoreFrameRef.current);
       }
     };
   }, []);
 
   useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+
+    const handlePointerDownCapture = (event: PointerEvent) => {
+      const activeElement = document.activeElement;
+      if (!containerRef.current || !(activeElement instanceof Node) || !containerRef.current.contains(activeElement)) {
+        return;
+      }
+
+      const target = event.target;
+      if (target instanceof Node && containerRef.current.contains(target)) {
+        return;
+      }
+
+      snapshotNearestScrollContainer('blur.pointerDown', { preserveExisting: true });
+    };
+
+    document.addEventListener('pointerdown', handlePointerDownCapture, true);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDownCapture, true);
+    };
+  }, [snapshotNearestScrollContainer]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+
+    const handleTrackedScroll = () => {
+      const activeElement = document.activeElement;
+      const shouldTrack = Boolean(
+        containerRef.current
+        && ((activeElement instanceof Node && containerRef.current.contains(activeElement))
+          || pendingLocalCommitRef.current),
+      );
+      if (!shouldTrack) {
+        return;
+      }
+
+      rememberCurrentScrollContainer('scroll');
+    };
+
+    document.addEventListener('scroll', handleTrackedScroll, true);
+    return () => {
+      document.removeEventListener('scroll', handleTrackedScroll, true);
+    };
+  }, [rememberCurrentScrollContainer]);
+
+  useEffect(() => {
     const nextValue = value || '';
-    setHtmlSource(nextValue);
 
     onDebug?.('propValue.received', {
       nextLength: nextValue.length,
       lastLocalLength: lastLocalValueRef.current?.length ?? null,
       mode,
       autoModeKey: autoModeKey || '',
+      changeMode,
+      hasPendingLocalCommit: pendingLocalCommitRef.current,
     });
+
+    if (changeMode === 'blur' && pendingLocalCommitRef.current) {
+      if (nextValue === htmlSourceRef.current) {
+        lastPropValueRef.current = nextValue;
+        setPendingLocalCommit(false);
+      } else {
+        onDebug?.('propValue.skipPendingLocalDraft', {
+          nextLength: nextValue.length,
+          draftLength: htmlSourceRef.current.length,
+          mode,
+        });
+        return;
+      }
+    }
+
+    setHtmlSource(nextValue);
+    lastPropValueRef.current = nextValue;
 
     if (lastLocalValueRef.current === nextValue) {
       onDebug?.('propValue.skipSameAsLocal', {
@@ -452,17 +1102,19 @@ export const RichTextEditor: React.FC<Props> = ({
     if (!isModeManuallySelectedRef.current) {
       setMode(detectPreferredMode(nextValue));
     }
-  }, [value]);
+  }, [changeMode, value]);
 
   useEffect(() => {
     lastLocalValueRef.current = null;
+    lastPropValueRef.current = value || '';
     isModeManuallySelectedRef.current = false;
+    setPendingLocalCommit(false);
     onDebug?.('autoModeKey.reset', {
       autoModeKey: autoModeKey || '',
       valueLength: (value || '').length,
     });
     setMode(detectPreferredMode(value || ''));
-  }, [autoModeKey, onDebug]);
+  }, [autoModeKey]);
 
   const translate = useCallback((key: string, fallback: string) => t?.(key) || fallback, [t]);
 
@@ -474,6 +1126,10 @@ export const RichTextEditor: React.FC<Props> = ({
   const switchMode = useCallback((nextMode: Mode) => {
     isModeManuallySelectedRef.current = true;
     setMode(nextMode);
+  }, []);
+
+  const preventToolbarBlur = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
   }, []);
 
   const syncFormattingState = useCallback(() => {
@@ -565,6 +1221,38 @@ export const RichTextEditor: React.FC<Props> = ({
   }, [mode, onDebug, value]);
 
   useEffect(() => {
+    if (mode !== 'html' || !sourceRef.current) {
+      return;
+    }
+
+    if (document.activeElement === sourceRef.current && document.hasFocus()) {
+      onDebug?.('sourceDomSync.skipFocused', {
+        incomingLength: htmlSource.length,
+        domLength: readPlainTextFromEditableElement(sourceRef.current).length,
+        mode,
+      });
+      return;
+    }
+
+    const normalizedSource = normalizeText(htmlSource);
+    const currentSource = readPlainTextFromEditableElement(sourceRef.current);
+    if (currentSource !== normalizedSource) {
+      onDebug?.('sourceDomSync.apply', {
+        incomingLength: normalizedSource.length,
+        previousDomLength: currentSource.length,
+        mode,
+      });
+      sourceRef.current.textContent = normalizedSource;
+    } else {
+      onDebug?.('sourceDomSync.noop', {
+        incomingLength: normalizedSource.length,
+        domLength: currentSource.length,
+        mode,
+      });
+    }
+  }, [htmlSource, mode, onDebug]);
+
+  useEffect(() => {
     // Wait for DOM updates before measuring content-driven height.
     scheduleAutoResizeHeightSync();
   }, [htmlSource, markdownPreviewHtml, mode, scheduleAutoResizeHeightSync, value]);
@@ -646,20 +1334,61 @@ export const RichTextEditor: React.FC<Props> = ({
     }
   }, []);
 
-  const syncFromEditor = useCallback(() => {
+  // Applies a local editor value and only commits upstream when the selected mode requires it.
+  const applyNextValue = useCallback((nextValue: string, options: { commit?: boolean } = {}) => {
+    lastLocalValueRef.current = nextValue;
+    setHtmlSource(nextValue);
+
+    if (changeMode === 'blur' && !options.commit) {
+      setPendingLocalCommit(nextValue !== lastPropValueRef.current);
+      return;
+    }
+
+    lastPropValueRef.current = nextValue;
+    setPendingLocalCommit(false);
+    onChange(nextValue);
+  }, [changeMode, onChange, setPendingLocalCommit]);
+
+  const syncFromEditor = useCallback((options: { commit?: boolean } = {}) => {
     if (!editorRef.current) {
       return;
     }
+
     const sanitized = sanitizeHtml(editorRef.current.innerHTML);
     onDebug?.('visual.syncFromEditor', {
       domLength: editorRef.current.innerHTML.length,
       sanitizedLength: sanitized.length,
       mode,
+      commit: options.commit === true,
+      changeMode,
     });
-    lastLocalValueRef.current = sanitized;
-    setHtmlSource(sanitized);
-    onChange(sanitized);
-  }, [mode, onChange, onDebug]);
+    applyNextValue(sanitized, options);
+  }, [applyNextValue, changeMode, mode, onDebug]);
+
+  const syncFromSourceEditor = useCallback((options: { commit?: boolean } = {}) => {
+    if (!sourceRef.current) {
+      return;
+    }
+
+    const nextValue = readPlainTextFromEditableElement(sourceRef.current);
+    onDebug?.('text.syncFromSourceSurface', {
+      nextLength: nextValue.length,
+      previousLength: htmlSource.length,
+      mode,
+      changeMode,
+      commit: options.commit === true,
+    });
+    applyNextValue(nextValue, options);
+  }, [applyNextValue, changeMode, htmlSource.length, mode, onDebug]);
+
+  // Flushes a pending blur draft when the user leaves the editor surface.
+  const commitPendingValue = useCallback(() => {
+    if (!pendingLocalCommitRef.current) {
+      return;
+    }
+
+    applyNextValue(htmlSourceRef.current, { commit: true });
+  }, [applyNextValue]);
 
   const executeEditorCommand = useCallback((command: string, commandValue?: string) => {
     if (mode !== 'visual' || !editorRef.current) {
@@ -775,6 +1504,152 @@ export const RichTextEditor: React.FC<Props> = ({
     syncFromEditor();
   }, [insertHtmlAtCursor, mode, syncFromEditor]);
 
+  const handleSourcePaste = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
+    if (mode !== 'html') {
+      return;
+    }
+
+    const plain = normalizeText(e.clipboardData.getData('text/plain') || '');
+    if (!plain) {
+      return;
+    }
+
+    e.preventDefault();
+    if (!insertPlainTextIntoSelection(plain) && sourceRef.current) {
+      const currentValue = readPlainTextFromEditableElement(sourceRef.current);
+      sourceRef.current.textContent = `${currentValue}${plain}`;
+    }
+    syncFromSourceEditor();
+  }, [mode, syncFromSourceEditor]);
+
+  const handleCopyCurrentMode = useCallback(async () => {
+    const copyValue = resolveRichTextEditorCopyValue({
+      mode,
+      rawValue: htmlSource,
+      visualHtml: editorRef.current?.innerHTML || null,
+      sourceText: sourceRef.current ? readPlainTextFromEditableElement(sourceRef.current) : null,
+    });
+
+    const copied = await writeTextToClipboard(copyValue);
+    onDebug?.('copy.currentMode', {
+      mode,
+      copied,
+      length: copyValue.length,
+    });
+  }, [htmlSource, mode, onDebug]);
+
+  // Commits a pending blur draft before delegating to external button actions.
+  const flushPendingValue = useCallback(() => {
+    if (changeMode === 'blur') {
+      commitPendingValue();
+    }
+  }, [changeMode, commitPendingValue]);
+
+  const startModeSwitch = useCallback((nextMode: Mode) => {
+    if (nextMode === mode) {
+      return;
+    }
+
+    clearPendingBlurCommit();
+    clearPendingModeSwitchRestoreFrame();
+    snapshotNearestScrollContainer('mode.switch');
+    pendingModeSwitchRef.current = {
+      from: mode,
+      to: nextMode,
+      deferredMeasurements: 0,
+    };
+    onDebug?.('mode.switch.start', {
+      fromMode: mode,
+      toMode: nextMode,
+      currentHeight,
+      sourceLength: htmlSourceRef.current.length,
+    });
+    flushPendingValue();
+    switchMode(nextMode);
+    queueModeSwitchScrollRestore('mode.switch.raf');
+  }, [clearPendingBlurCommit, clearPendingModeSwitchRestoreFrame, currentHeight, flushPendingValue, mode, onDebug, queueModeSwitchScrollRestore, snapshotNearestScrollContainer, switchMode]);
+
+  const handleEditorFocus = useCallback(() => {
+    clearPendingBlurCommit();
+    clearPendingBlurRestoreFrame();
+    clearPendingModeSwitchRestoreFrame();
+    rememberCurrentScrollContainer('focus', { preserveZero: true });
+    restoreNearestScrollContainer('focus');
+    onFocus?.();
+  }, [clearPendingBlurCommit, clearPendingBlurRestoreFrame, clearPendingModeSwitchRestoreFrame, onFocus, rememberCurrentScrollContainer, restoreNearestScrollContainer]);
+
+  const handleEditorBlur = useCallback((event: React.FocusEvent<HTMLDivElement | HTMLTextAreaElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && containerRef.current?.contains(nextTarget)) {
+      onDebug?.('blur.skipInternalFocusMove', {
+        mode,
+        changeMode,
+      });
+      return;
+    }
+
+    if (nextTarget) {
+      snapshotNearestScrollContainer('blur.immediate', { preserveExisting: true });
+      onDebug?.('blur.commitImmediate', {
+        mode,
+        changeMode,
+      });
+      flushPendingValue();
+      onBlur?.();
+      queueDeferredBlurScrollRestore('blur.commitImmediate');
+      return;
+    }
+
+    clearPendingBlurCommit();
+    snapshotNearestScrollContainer('blur.defer', { preserveExisting: true });
+    onDebug?.('blur.defer', {
+      mode,
+      changeMode,
+      delayMs: BLUR_COMMIT_DEFER_MS,
+    });
+
+    if (typeof window === 'undefined') {
+      flushPendingValue();
+      onBlur?.();
+      restoreNearestScrollContainer('blur.deferImmediate');
+      return;
+    }
+
+    pendingBlurCommitTimerRef.current = window.setTimeout(() => {
+      pendingBlurCommitTimerRef.current = null;
+      const activeElement = typeof document !== 'undefined' ? document.activeElement : null;
+      const activeElementInsideEditor = Boolean(
+        containerRef.current
+        && activeElement
+        && containerRef.current.contains(activeElement),
+      );
+      const documentHasFocus = typeof document === 'undefined' || typeof document.hasFocus !== 'function'
+        ? true
+        : document.hasFocus();
+
+      if (!shouldCommitDeferredRichTextBlur({ activeElementInsideEditor, documentHasFocus })) {
+        onDebug?.('blur.cancelDeferred', {
+          mode,
+          changeMode,
+          activeElementInsideEditor,
+          documentHasFocus,
+        });
+        queueDeferredBlurScrollRestore('blur.cancelDeferred');
+        return;
+      }
+
+      onDebug?.('blur.commitDeferred', {
+        mode,
+        changeMode,
+        activeElementInsideEditor,
+        documentHasFocus,
+      });
+      flushPendingValue();
+      onBlur?.();
+      queueDeferredBlurScrollRestore('blur.commitDeferred');
+    }, BLUR_COMMIT_DEFER_MS);
+  }, [changeMode, clearPendingBlurCommit, flushPendingValue, mode, onBlur, onDebug, queueDeferredBlurScrollRestore, restoreNearestScrollContainer, snapshotNearestScrollContainer]);
+
   const modeHint = useMemo(() => {
     if (mode === 'visual') {
       return translate('editor.modeHintHtml', 'Html mode shows the rendered result with formatting, lists and tables.');
@@ -793,7 +1668,8 @@ export const RichTextEditor: React.FC<Props> = ({
       <style>
         {`
           .pm-rich-editor-content,
-          .pm-rich-markdown-preview {
+          .pm-rich-markdown-preview,
+          .pm-rich-source-editor {
             /*--pm-rich-surface: color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-input-background) 10%);*/
             --pm-rich-border: color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,0.35)) 88%, transparent);
             --pm-rich-border-strong: color-mix(in srgb, var(--vscode-panel-border, rgba(128,128,128,0.35)) 100%, black 6%);
@@ -808,8 +1684,21 @@ export const RichTextEditor: React.FC<Props> = ({
           }
 
           .pm-rich-editor-content *,
-          .pm-rich-markdown-preview * {
+          .pm-rich-markdown-preview *,
+          .pm-rich-source-editor * {
             box-sizing: border-box;
+          }
+
+          .pm-rich-source-editor {
+            white-space: pre-wrap;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+          }
+
+          .pm-rich-source-editor[data-empty="true"]::before {
+            content: attr(data-placeholder);
+            color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+            pointer-events: none;
           }
 
           .pm-rich-editor-content > :first-child,
@@ -1022,31 +1911,49 @@ export const RichTextEditor: React.FC<Props> = ({
           <button
             type="button"
             style={{ ...styles.modeBtn, ...(mode === 'html' ? styles.modeBtnActive : null) }}
-            onClick={() => switchMode('html')}
+            onMouseDown={preventToolbarBlur}
+            onClick={() => startModeSwitch('html')}
           >
             {translate('editor.modeText', 'Text')}
           </button>
           <button
             type="button"
             style={{ ...styles.modeBtn, ...(mode === 'visual' ? styles.modeBtnActive : null) }}
-            onClick={() => switchMode('visual')}
+            onMouseDown={preventToolbarBlur}
+            onClick={() => startModeSwitch('visual')}
           >
             {translate('editor.modeHtml', 'Html')}
           </button>
           <button
             type="button"
             style={{ ...styles.modeBtn, ...(mode === 'markdown' ? styles.modeBtnActive : null) }}
-            onClick={() => switchMode('markdown')}
+            onMouseDown={preventToolbarBlur}
+            onClick={() => startModeSwitch('markdown')}
           >
             {translate('editor.modeMarkdown', 'Markdown')}
           </button>
         </div>
         <div style={styles.actionGroup}>
+          <button
+            type="button"
+            style={styles.linkBtn}
+            onMouseDown={preventToolbarBlur}
+            onClick={() => {
+              void handleCopyCurrentMode();
+            }}
+            title={translate('editor.copyModeTitle', 'Копировать содержимое текущего режима')}
+          >
+            {`📋 ${translate('editor.copyMode', 'Копировать')}`}
+          </button>
           {onOpen && (
             <button
               type="button"
               style={styles.linkBtn}
-              onClick={onOpen}
+              onMouseDown={preventToolbarBlur}
+              onClick={() => {
+                flushPendingValue();
+                onOpen();
+              }}
               title={openTitle || openLabel || 'Открыть'}
             >
               {`📝 ${openLabel || 'Открыть'}`}
@@ -1056,7 +1963,11 @@ export const RichTextEditor: React.FC<Props> = ({
             <button
               type="button"
               style={{ ...styles.linkBtn, ...(secondaryActionDisabled ? styles.linkBtnDisabled : null) }}
-              onClick={onSecondaryAction}
+              onMouseDown={preventToolbarBlur}
+              onClick={() => {
+                flushPendingValue();
+                onSecondaryAction();
+              }}
               title={secondaryActionTitle || secondaryActionLabel}
               disabled={secondaryActionDisabled}
             >
@@ -1068,7 +1979,10 @@ export const RichTextEditor: React.FC<Props> = ({
               type="button"
               style={styles.resetBtn}
               onMouseDown={(event) => event.preventDefault()}
-              onClick={onReset}
+              onClick={() => {
+                setPendingLocalCommit(false);
+                onReset();
+              }}
               title="Очистить отчет"
             >
               ↺ Сбросить
@@ -1261,8 +2175,9 @@ export const RichTextEditor: React.FC<Props> = ({
           className="pm-rich-editor-content"
           contentEditable
           suppressContentEditableWarning
-          onInput={syncFromEditor}
-          onBlur={syncFromEditor}
+          onFocus={handleEditorFocus}
+          onInput={() => syncFromEditor()}
+          onBlur={handleEditorBlur}
           onKeyUp={syncFormattingState}
           onMouseUp={syncFormattingState}
           onPaste={handlePaste}
@@ -1310,21 +2225,23 @@ export const RichTextEditor: React.FC<Props> = ({
           </div>
         )
       ) : (
-        <textarea
+        <div
           ref={sourceRef}
-          value={htmlSource}
-          onChange={(e) => {
-            const next = normalizeText(e.target.value);
-            onDebug?.('text.syncFromTextarea', {
-              nextLength: next.length,
-              previousLength: htmlSource.length,
-              mode,
-            });
-            lastLocalValueRef.current = next;
-            setHtmlSource(next);
-            onChange(next);
+          className="pm-rich-source-editor"
+          contentEditable
+          suppressContentEditableWarning
+          role="textbox"
+          aria-multiline="true"
+          data-placeholder={placeholder || 'Введите отчет'}
+          data-empty={htmlSource.length === 0 ? 'true' : 'false'}
+          onFocus={handleEditorFocus}
+          onInput={() => syncFromSourceEditor()}
+          onBlur={(event) => {
+            syncFromSourceEditor();
+            handleEditorBlur(event);
           }}
-          placeholder={placeholder}
+          onPaste={handleSourcePaste}
+          spellCheck={false}
           style={{
             ...styles.source,
             ...(isCompactPadding ? styles.sourceCompactPadding : null),
@@ -1334,7 +2251,6 @@ export const RichTextEditor: React.FC<Props> = ({
             maxHeight: undefined,
             overflow: autoResize ? 'hidden' : undefined,
           }}
-          spellCheck={false}
         />
       )}
 
@@ -1519,15 +2435,18 @@ const styles: Record<string, React.CSSProperties> = {
     width: '100%',
     border: '1px solid var(--vscode-panel-border, transparent)',
     borderRadius: '12px 12px 0 0',
-    /*background: 'color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-input-background) 8%)',*/
+    background: 'color-mix(in srgb, var(--vscode-editor-background) 30%, white 70%)',
     color: 'var(--vscode-editor-foreground)',
     padding: '24px 28px',
     boxSizing: 'border-box',
     outline: 'none',
     lineHeight: 1.7,
     fontFamily: 'var(--vscode-editor-font-family, monospace)',
-    resize: 'none',
     fontSize: '13px',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    overflowWrap: 'anywhere',
+    cursor: 'text',
   },
   sourceCompactPadding: {
     padding: '10px 12px',

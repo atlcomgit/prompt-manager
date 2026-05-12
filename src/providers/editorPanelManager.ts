@@ -1556,8 +1556,29 @@ export class EditorPanelManager {
 		return `${normalized.slice(0, maxLength - 1)}…`;
 	}
 
+	private shouldWriteReportDebugEvent(event: string): boolean {
+		if (/(error|failed|exception)/i.test(event)) {
+			return true;
+		}
+
+		return event === 'webview.editor-layout.sectionHeights.measured'
+			|| event === 'webview.editor-report.mainRichText.autoResize.heightChanged'
+			|| event === 'webview.editor-report.mainRichText.autoResize.deferUnstableModeSwitchMeasurement'
+			|| event === 'webview.editor-report.mainRichText.mode.switch.start'
+			|| event === 'webview.editor-report.mainRichText.mode.switch.restoreAttempt'
+			|| event === 'webview.editor-report.mainRichText.pageScroll.snapshot'
+			|| event === 'webview.editor-report.mainRichText.pageScroll.restore'
+			|| event === 'webview.editor-report.mainRichText.blur.defer'
+			|| event === 'webview.editor-report.mainRichText.blur.cancelDeferred'
+			|| event === 'webview.editor-report.mainRichText.blur.commitDeferred'
+			|| event === 'webview.editor-report.mainRichText.text.syncFromSourceSurface';
+	}
+
 	private logReportDebug(event: string, payload?: Record<string, unknown>): void {
 		if (!this.isDebugLoggingEnabled()) {
+			return;
+		}
+		if (!this.shouldWriteReportDebugEvent(event)) {
 			return;
 		}
 		const timestamp = new Date().toISOString();

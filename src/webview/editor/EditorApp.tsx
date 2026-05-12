@@ -62,6 +62,7 @@ import {
   resolvePromptChatLaunchInactivePhase,
   resolveNextPromptChatLaunchPhase,
   shouldAutoExpandPromptBranchList,
+  shouldPersistAutoExpandedReportSection,
   type PromptChatContextAutoLoadRuntimeState,
   resolvePromptChatLaunchPhase,
   resolvePromptChatLaunchStepStatesFromPhase,
@@ -113,6 +114,31 @@ export const buildPromptModelOptions = (
 
     return left.id.localeCompare(right.id, 'ru', { sensitivity: 'base' });
   });
+};
+
+/** Defer prompt-wide save side effects while the inline report editor owns local typing state. */
+export const shouldDeferReportAutosave = (input: {
+  reportEditorFocused: boolean;
+  reportDraftActive: boolean;
+}): boolean => input.reportEditorFocused || input.reportDraftActive;
+
+/** Keep the local report when a save response cannot yet be trusted as the active editor state. */
+export const shouldPreserveLocalReportOnSave = (input: {
+  reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config';
+  currentLocalReport: string;
+  incomingSavedReport: string;
+  reportEditorFocused: boolean;
+  reportDraftActive: boolean;
+}): boolean => {
+  if (input.reason !== 'save') {
+    return false;
+  }
+
+  return input.currentLocalReport !== input.incomingSavedReport
+    || shouldDeferReportAutosave({
+      reportEditorFocused: input.reportEditorFocused,
+      reportDraftActive: input.reportDraftActive,
+    });
 };
 
 type InlineNotice = { kind: 'error' | 'info'; message: string };
@@ -469,6 +495,11 @@ export const EditorApp: React.FC = () => {
   const promptDashboardSnapshotRef = useRef<PromptDashboardSnapshot | null>(null);
   const promptDashboardProgressOverrideRef = useRef<number | undefined>(undefined);
   const lastPromptDashboardRequestFingerprintRef = useRef('');
+  const isReportEditorFocusedRef = useRef(false);
+  const isReportEditorDraftActiveRef = useRef(false);
+  const bufferedPromptDashboardSnapshotMessageRef = useRef<any | null>(null);
+  const bufferedPromptDashboardWidgetMessagesRef = useRef<Record<string, any>>({});
+  const bufferedPromptDashboardAnalysisMessageRef = useRef<any | null>(null);
   const [branches, setBranches] = useState<Array<{ name: string; current: boolean; project: string }>>([]);
   const [branchesResolved, setBranchesResolved] = useState(false);
   const [showBranches, setShowBranches] = useState(
@@ -535,6 +566,7 @@ export const EditorApp: React.FC = () => {
   const [reportHeight, setReportHeight] = useState<number | undefined>(
     () => initialEditorViewStateRef.current?.contentHeights.report || readStoredHeight('pm.editor.reportHeight'),
   );
+  const reportHeightLiveRef = useRef<number | undefined>(reportHeight);
   const [globalContextHeight, setGlobalContextHeight] = useState<number | undefined>(
     () => initialEditorViewStateRef.current?.contentHeights.globalContext || readStoredHeight('pm.editor.globalContextHeight'),
   );
@@ -735,6 +767,204 @@ export const EditorApp: React.FC = () => {
   useEffect(() => {
     promptDashboardSnapshotRef.current = promptDashboardSnapshot;
   }, [promptDashboardSnapshot]);
+
+  useEffect(() => {
+    reportHeightLiveRef.current = reportHeight;
+  }, [reportHeight]);
+
+  const shouldBufferPromptDashboardMessages = useCallback(() => shouldDeferReportAutosave({
+    reportEditorFocused: isReportEditorFocusedRef.current,
+    reportDraftActive: isReportEditorDraftActiveRef.current,
+  }), []);
+
+  const shouldDeferReportLayoutStateUpdates = useCallback(() => shouldDeferReportAutosave({
+    reportEditorFocused: isReportEditorFocusedRef.current,
+    reportDraftActive: isReportEditorDraftActiveRef.current,
+  }), []);
+
+  const handleReportHeightChange = useCallback((nextHeight: number) => {
+    const normalizedHeight = normalizeEditorLayoutHeight(nextHeight);
+    if (!normalizedHeight) {
+      return;
+    }
+
+    reportHeightLiveRef.current = normalizedHeight;
+    if (shouldDeferReportLayoutStateUpdates()) {
+      return;
+    }
+
+    setReportHeight(previous => Math.abs((previous || 0) - normalizedHeight) > 1 ? normalizedHeight : previous);
+  }, [shouldDeferReportLayoutStateUpdates]);
+
+  const applyPromptDashboardSnapshotMessage = useCallback((msg: any) => {
+    if (!msg.requestId || msg.requestId === promptDashboardRequestIdRef.current) {
+      postEditorDebugLog('editor-dashboard', 'snapshot.received', {
+        requestId: String(msg.requestId || ''),
+        promptId: String(msg.snapshot?.promptId || ''),
+        scopeKey: String(msg.snapshot?.scopeKey || ''),
+        activityStatus: String(msg.snapshot?.activity?.cache?.status || 'idle'),
+        statusStatus: String(msg.snapshot?.status?.cache?.status || 'idle'),
+        projectsStatus: String(msg.snapshot?.projects?.cache?.status || 'idle'),
+        aiStatus: String(msg.snapshot?.aiAnalysis?.cache?.status || 'idle'),
+      });
+      setPromptDashboardSnapshot(syncPromptDashboardStatusFromPrompt(
+        msg.snapshot || null,
+        promptRef.current,
+        {
+          progressOverride: promptDashboardProgressOverrideRef.current,
+          preserveInProgressSnapshotProgress: true,
+        },
+      ));
+      setPromptDashboardBusyAction(null);
+    }
+  }, []);
+
+  const applyPromptDashboardWidgetMessage = useCallback((msg: any) => {
+    if (msg.requestId && msg.requestId !== promptDashboardRequestIdRef.current) {
+      return;
+    }
+    const widget = msg.widget as PromptDashboardWidgetSnapshot<unknown> | null;
+    setPromptDashboardSnapshot(prev => {
+      if (!prev || !widget || !widget.kind) {
+        return prev;
+      }
+      if ((msg.promptUuid || '') && prev.promptUuid && msg.promptUuid !== prev.promptUuid) {
+        return prev;
+      }
+      if ((msg.promptId || '') && prev.promptId && msg.promptId !== prev.promptId) {
+        return prev;
+      }
+      const nextWidget = widget.kind === 'projects'
+        ? preservePromptDashboardProjectsLoadingSnapshot(
+          prev.projects,
+          widget as PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>,
+        )
+        : widget;
+      const nextSnapshot = {
+        ...prev,
+        [nextWidget.kind]: nextWidget,
+        generatedAt: new Date().toISOString(),
+      } as PromptDashboardSnapshot;
+      return syncPromptDashboardStatusFromPrompt(
+        nextSnapshot,
+        promptRef.current,
+        {
+          progressOverride: promptDashboardProgressOverrideRef.current,
+          preserveInProgressSnapshotProgress: true,
+        },
+      ) || nextSnapshot;
+    });
+    if (widget?.kind) {
+      setPromptDashboardBusyAction(previous => shouldClearPromptDashboardBusyActionFromWidget({
+        busyAction: previous,
+        widgetKind: widget.kind,
+        cacheStatus: widget.cache.status,
+      }) ? null : previous);
+    }
+  }, []);
+
+  const applyPromptDashboardAnalysisMessage = useCallback((msg: any) => {
+    const currentDashboardSnapshot = promptDashboardSnapshotRef.current;
+    const currentAnalysis = currentDashboardSnapshot?.aiAnalysis?.data as PromptDashboardAnalysisState | null | undefined;
+    const shouldAcceptAnalysisMessage = shouldAcceptPromptDashboardAnalysisMessage({
+      activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+      messageRequestId: String(msg.requestId || ''),
+      currentPromptId: String(currentDashboardSnapshot?.promptId || ''),
+      currentPromptUuid: String(currentDashboardSnapshot?.promptUuid || ''),
+      messagePromptId: String(msg.promptId || ''),
+      messagePromptUuid: String(msg.promptUuid || ''),
+      currentAnalysisFingerprint: String(currentAnalysis?.inputFingerprint || ''),
+      messageAnalysisFingerprint: String(msg.analysis?.inputFingerprint || ''),
+      currentAnalysisStatus: currentAnalysis?.status,
+      messageAnalysisStatus: msg.analysis?.status,
+    });
+    if (!shouldAcceptAnalysisMessage) {
+      postEditorDebugLog('editor-dashboard', 'analysis.ignored-request-mismatch', {
+        activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+        requestId: String(msg.requestId || ''),
+        promptId: String(msg.promptId || ''),
+        promptUuid: String(msg.promptUuid || ''),
+        status: String(msg.analysis?.status || 'unknown'),
+        currentAnalysisStatus: String(currentAnalysis?.status || 'unknown'),
+        currentFingerprint: String(currentAnalysis?.inputFingerprint || ''),
+        messageFingerprint: String(msg.analysis?.inputFingerprint || ''),
+      });
+      return;
+    }
+    postEditorDebugLog('editor-dashboard', 'analysis.received', {
+      requestId: String(msg.requestId || ''),
+      promptId: String(msg.promptId || ''),
+      promptUuid: String(msg.promptUuid || ''),
+      status: String(msg.analysis?.status || 'unknown'),
+      hasError: Boolean(msg.analysis?.error),
+      contentLength: typeof msg.analysis?.content === 'string' ? msg.analysis.content.length : 0,
+      acceptReason: msg.requestId && msg.requestId !== promptDashboardRequestIdRef.current ? 'fingerprint-match' : 'request-match',
+      fingerprint: String(msg.analysis?.inputFingerprint || ''),
+    });
+    setPromptDashboardSnapshot(prev => {
+      if (!prev) {
+        return prev;
+      }
+      if ((msg.promptUuid || '') && prev.promptUuid && msg.promptUuid !== prev.promptUuid) {
+        return prev;
+      }
+      if ((msg.promptId || '') && prev.promptId && msg.promptId !== prev.promptId) {
+        return prev;
+      }
+      return {
+        ...prev,
+        aiAnalysis: {
+          kind: 'aiAnalysis',
+          data: msg.analysis,
+          cache: {
+            status: msg.analysis.status === 'running' ? 'loading' : msg.analysis.status === 'error' ? 'error' : 'fresh',
+            source: 'refresh',
+            updatedAt: msg.analysis.updatedAt || new Date().toISOString(),
+            error: msg.analysis.error,
+          },
+        },
+        generatedAt: new Date().toISOString(),
+      };
+    });
+    setPromptDashboardBusyAction(previous => previous === 'refresh-widget:aiAnalysis'
+      && msg.analysis?.status !== 'running'
+      ? null
+      : previous);
+  }, []);
+
+  const flushBufferedPromptDashboardMessages = useCallback(() => {
+    if (shouldBufferPromptDashboardMessages()) {
+      return;
+    }
+
+    const snapshotMessage = bufferedPromptDashboardSnapshotMessageRef.current;
+    const widgetMessages = Object.values(bufferedPromptDashboardWidgetMessagesRef.current);
+    const analysisMessage = bufferedPromptDashboardAnalysisMessageRef.current;
+
+    bufferedPromptDashboardSnapshotMessageRef.current = null;
+    bufferedPromptDashboardWidgetMessagesRef.current = {};
+    bufferedPromptDashboardAnalysisMessageRef.current = null;
+
+    if (!snapshotMessage && widgetMessages.length === 0 && !analysisMessage) {
+      return;
+    }
+
+    postEditorDebugLog('editor-dashboard', 'buffer.flush', {
+      hasSnapshot: Boolean(snapshotMessage),
+      widgetCount: widgetMessages.length,
+      hasAnalysis: Boolean(analysisMessage),
+    });
+
+    if (snapshotMessage) {
+      applyPromptDashboardSnapshotMessage(snapshotMessage);
+    }
+    for (const widgetMessage of widgetMessages) {
+      applyPromptDashboardWidgetMessage(widgetMessage);
+    }
+    if (analysisMessage) {
+      applyPromptDashboardAnalysisMessage(analysisMessage);
+    }
+  }, [applyPromptDashboardAnalysisMessage, applyPromptDashboardSnapshotMessage, applyPromptDashboardWidgetMessage, shouldBufferPromptDashboardMessages]);
   const isSavingRef = useRef(false);
   const isOpeningChatRef = useRef(false);
   const localReportDirtyRef = useRef(false);
@@ -903,6 +1133,30 @@ export const EditorApp: React.FC = () => {
     return nextHeights;
   }, [getSectionMeasurementResumeDelay]);
 
+  const commitBufferedReportLayoutState = useCallback(() => {
+    const nextReportHeight = normalizeEditorLayoutHeight(reportHeightLiveRef.current);
+    if (nextReportHeight) {
+      setReportHeight(previous => Math.abs((previous || 0) - nextReportHeight) > 1 ? nextReportHeight : previous);
+    }
+
+    const nextSectionHeights = captureRenderedSectionHeights();
+    setSectionHeights(previous => {
+      let changed = false;
+      const merged: EditorPromptSectionHeights = { ...previous };
+      for (const key of PROMPT_EDITOR_SECTION_KEYS) {
+        const nextHeight = nextSectionHeights[key];
+        if (!nextHeight) {
+          continue;
+        }
+        if (Math.abs((previous[key] || 0) - nextHeight) > 1) {
+          merged[key] = nextHeight;
+          changed = true;
+        }
+      }
+      return changed ? merged : previous;
+    });
+  }, [captureRenderedSectionHeights]);
+
   /** Build a latest editor view state snapshot with live field and section heights. */
   const captureEditorViewStateSnapshot = useCallback((): EditorPromptViewState => normalizeEditorPromptViewState({
     activeTab,
@@ -914,7 +1168,7 @@ export const EditorApp: React.FC = () => {
     contentHeights: {
       ...editorViewStateRef.current.contentHeights,
       ...(promptContentHeight ? { promptContent: promptContentHeight } : {}),
-      ...(reportHeight ? { report: reportHeight } : {}),
+      ...(reportHeightLiveRef.current ? { report: reportHeightLiveRef.current } : {}),
       ...(globalContextHeight ? { globalContext: globalContextHeight } : {}),
       ...(projectInstructionsHeight ? { projectInstructions: projectInstructionsHeight } : {}),
     },
@@ -929,7 +1183,6 @@ export const EditorApp: React.FC = () => {
     manualSectionOverrides,
     projectInstructionsHeight,
     promptContentHeight,
-    reportHeight,
     showBranches,
   ]);
 
@@ -1945,7 +2198,10 @@ export const EditorApp: React.FC = () => {
     const nextProjectInstructionsHeight = normalizeEditorLayoutHeight(contentHeights.projectInstructions);
 
     if (nextPromptContentHeight) { setPromptContentHeight(nextPromptContentHeight); }
-    if (nextReportHeight) { setReportHeight(nextReportHeight); }
+    if (nextReportHeight) {
+      reportHeightLiveRef.current = nextReportHeight;
+      setReportHeight(nextReportHeight);
+    }
     if (nextGlobalContextHeight) { setGlobalContextHeight(nextGlobalContextHeight); }
     if (nextProjectInstructionsHeight) { setProjectInstructionsHeight(nextProjectInstructionsHeight); }
     setSectionHeights(viewState.sectionHeights || {});
@@ -2278,27 +2534,49 @@ export const EditorApp: React.FC = () => {
           }
 
           const userChangedAfterSave = userChangeCounterRef.current !== saveStartCounterRef.current;
-          const shouldMergeAfterSave = reason === 'save' && userChangedAfterSave && saveStartCounterRef.current > 0;
+          const currentLocalReport = promptRef.current.report || '';
+          const incomingSavedReport = msg.prompt.report || '';
+          const shouldPreserveLocalReportAfterSave = shouldPreserveLocalReportOnSave({
+            reason,
+            currentLocalReport,
+            incomingSavedReport,
+            reportEditorFocused: isReportEditorFocusedRef.current,
+            reportDraftActive: isReportEditorDraftActiveRef.current,
+          });
+          const shouldMergeAfterSave = reason === 'save'
+            && ((userChangedAfterSave && saveStartCounterRef.current > 0) || shouldPreserveLocalReportAfterSave);
           skipNextPromptConfigTrackingRef.current = true;
           if (shouldMergeAfterSave) {
             // User changed something after save started — merge only server-generated fields, keep user edits
-          const mergedPrompt = {
-            ...promptRef.current,
-            id: msg.prompt.id || promptRef.current.id,
-            title: promptRef.current.title || msg.prompt.title,
-            description: promptRef.current.description || msg.prompt.description,
-            updatedAt: msg.prompt.updatedAt,
-            chatSessionIds: msg.prompt.chatSessionIds || promptRef.current.chatSessionIds,
-            timeSpentWriting: Math.max(msg.prompt.timeSpentWriting || 0, promptRef.current.timeSpentWriting || 0),
-            timeSpentImplementing: Math.max(msg.prompt.timeSpentImplementing || 0, promptRef.current.timeSpentImplementing || 0),
-            timeSpentOnTask: Math.max(msg.prompt.timeSpentOnTask || 0, promptRef.current.timeSpentOnTask || 0),
-            timeSpentUntracked: Math.max(msg.prompt.timeSpentUntracked || 0, promptRef.current.timeSpentUntracked || 0),
-          };
-          promptRef.current = mergedPrompt;
-          setPrompt(mergedPrompt);
+            if (shouldPreserveLocalReportAfterSave) {
+              logReportDebug('prompt.saveResponseMergedLocalReport', {
+                promptId: incomingPromptId,
+                incomingLength: incomingSavedReport.length,
+                currentLength: currentLocalReport.length,
+                localReportDirty: localReportDirtyRef.current,
+                reportEditorFocused: isReportEditorFocusedRef.current,
+                reportDraftActive: isReportEditorDraftActiveRef.current,
+                userChangedAfterSave,
+              });
+            }
+            const mergedPrompt = {
+              ...promptRef.current,
+              id: msg.prompt.id || promptRef.current.id,
+              title: promptRef.current.title || msg.prompt.title,
+              description: promptRef.current.description || msg.prompt.description,
+              updatedAt: msg.prompt.updatedAt,
+              chatSessionIds: msg.prompt.chatSessionIds || promptRef.current.chatSessionIds,
+              timeSpentWriting: Math.max(msg.prompt.timeSpentWriting || 0, promptRef.current.timeSpentWriting || 0),
+              timeSpentImplementing: Math.max(msg.prompt.timeSpentImplementing || 0, promptRef.current.timeSpentImplementing || 0),
+              timeSpentOnTask: Math.max(msg.prompt.timeSpentOnTask || 0, promptRef.current.timeSpentOnTask || 0),
+              timeSpentUntracked: Math.max(msg.prompt.timeSpentUntracked || 0, promptRef.current.timeSpentUntracked || 0),
+            };
+            promptRef.current = mergedPrompt;
+            setPrompt(mergedPrompt);
+            setIsDirty(true);
             // Keep isDirty = true so next auto-save picks up user's changes
           } else {
-          promptRef.current = msg.prompt;
+            promptRef.current = msg.prompt;
             setPrompt(msg.prompt);
             localReportDirtyRef.current = false;
             setIsDirty(false);
@@ -3070,141 +3348,42 @@ export const EditorApp: React.FC = () => {
         setBranchesResolved(true);
         break;
       case 'promptDashboardSnapshot':
-        if (!msg.requestId || msg.requestId === promptDashboardRequestIdRef.current) {
-          postEditorDebugLog('editor-dashboard', 'snapshot.received', {
+        if (shouldBufferPromptDashboardMessages()) {
+          bufferedPromptDashboardSnapshotMessageRef.current = msg;
+          postEditorDebugLog('editor-dashboard', 'snapshot.buffered', {
             requestId: String(msg.requestId || ''),
             promptId: String(msg.snapshot?.promptId || ''),
-            scopeKey: String(msg.snapshot?.scopeKey || ''),
-            activityStatus: String(msg.snapshot?.activity?.cache?.status || 'idle'),
-            statusStatus: String(msg.snapshot?.status?.cache?.status || 'idle'),
-            projectsStatus: String(msg.snapshot?.projects?.cache?.status || 'idle'),
-            aiStatus: String(msg.snapshot?.aiAnalysis?.cache?.status || 'idle'),
           });
-          // Preserve fresher local prompt status fields when an async snapshot arrives later.
-          setPromptDashboardSnapshot(syncPromptDashboardStatusFromPrompt(
-            msg.snapshot || null,
-            promptRef.current,
-            {
-              progressOverride: promptDashboardProgressOverrideRef.current,
-              preserveInProgressSnapshotProgress: true,
-            },
-          ));
-          setPromptDashboardBusyAction(null);
-        }
-        break;
-      case 'promptDashboardWidgetSnapshot':
-        if (msg.requestId && msg.requestId !== promptDashboardRequestIdRef.current) {
           break;
         }
-        const widget = msg.widget as PromptDashboardWidgetSnapshot<unknown> | null;
-        setPromptDashboardSnapshot(prev => {
-          if (!prev || !widget || !widget.kind) {
-            return prev;
-          }
-          if ((msg.promptUuid || '') && prev.promptUuid && msg.promptUuid !== prev.promptUuid) {
-            return prev;
-          }
-          if ((msg.promptId || '') && prev.promptId && msg.promptId !== prev.promptId) {
-            return prev;
-          }
-          // Keep project-based widgets visually stable while the refreshed snapshot is still loading.
-          const nextWidget = widget.kind === 'projects'
-            ? preservePromptDashboardProjectsLoadingSnapshot(
-              prev.projects,
-              widget as PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>,
-            )
-            : widget;
-			// Preserve the current prompt status when a partial widget patch lands out of order.
-			const nextSnapshot = {
-            ...prev,
-            [nextWidget.kind]: nextWidget,
-            generatedAt: new Date().toISOString(),
-			} as PromptDashboardSnapshot;
-      return syncPromptDashboardStatusFromPrompt(
-        nextSnapshot,
-        promptRef.current,
-        {
-          progressOverride: promptDashboardProgressOverrideRef.current,
-          preserveInProgressSnapshotProgress: true,
-        },
-      ) || nextSnapshot;
-        });
-        // Branch apply actions complete on the projects widget refresh, not on a full dashboard snapshot.
-        if (widget?.kind) {
-          setPromptDashboardBusyAction(previous => shouldClearPromptDashboardBusyActionFromWidget({
-            busyAction: previous,
-            widgetKind: widget.kind,
-            cacheStatus: widget.cache.status,
-          }) ? null : previous);
+        applyPromptDashboardSnapshotMessage(msg);
+        break;
+      case 'promptDashboardWidgetSnapshot':
+        if (shouldBufferPromptDashboardMessages()) {
+          const widgetKind = String(msg.widget?.kind || 'unknown');
+          bufferedPromptDashboardWidgetMessagesRef.current[widgetKind] = msg;
+          postEditorDebugLog('editor-dashboard', 'widget.buffered', {
+            requestId: String(msg.requestId || ''),
+            widget: widgetKind,
+            promptId: String(msg.promptId || ''),
+            promptUuid: String(msg.promptUuid || ''),
+          });
+          break;
         }
+        applyPromptDashboardWidgetMessage(msg);
         break;
       case 'promptDashboardAnalysis':
-        const currentDashboardSnapshot = promptDashboardSnapshotRef.current;
-        const currentAnalysis = currentDashboardSnapshot?.aiAnalysis?.data as PromptDashboardAnalysisState | null | undefined;
-        const shouldAcceptAnalysisMessage = shouldAcceptPromptDashboardAnalysisMessage({
-          activeRequestId: String(promptDashboardRequestIdRef.current || ''),
-          messageRequestId: String(msg.requestId || ''),
-          currentPromptId: String(currentDashboardSnapshot?.promptId || ''),
-          currentPromptUuid: String(currentDashboardSnapshot?.promptUuid || ''),
-          messagePromptId: String(msg.promptId || ''),
-          messagePromptUuid: String(msg.promptUuid || ''),
-          currentAnalysisFingerprint: String(currentAnalysis?.inputFingerprint || ''),
-          messageAnalysisFingerprint: String(msg.analysis?.inputFingerprint || ''),
-          currentAnalysisStatus: currentAnalysis?.status,
-          messageAnalysisStatus: msg.analysis?.status,
-        });
-        if (!shouldAcceptAnalysisMessage) {
-          postEditorDebugLog('editor-dashboard', 'analysis.ignored-request-mismatch', {
-            activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+        if (shouldBufferPromptDashboardMessages()) {
+          bufferedPromptDashboardAnalysisMessageRef.current = msg;
+          postEditorDebugLog('editor-dashboard', 'analysis.buffered', {
             requestId: String(msg.requestId || ''),
             promptId: String(msg.promptId || ''),
             promptUuid: String(msg.promptUuid || ''),
             status: String(msg.analysis?.status || 'unknown'),
-            currentAnalysisStatus: String(currentAnalysis?.status || 'unknown'),
-            currentFingerprint: String(currentAnalysis?.inputFingerprint || ''),
-            messageFingerprint: String(msg.analysis?.inputFingerprint || ''),
           });
           break;
         }
-        postEditorDebugLog('editor-dashboard', 'analysis.received', {
-          requestId: String(msg.requestId || ''),
-          promptId: String(msg.promptId || ''),
-          promptUuid: String(msg.promptUuid || ''),
-          status: String(msg.analysis?.status || 'unknown'),
-          hasError: Boolean(msg.analysis?.error),
-          contentLength: typeof msg.analysis?.content === 'string' ? msg.analysis.content.length : 0,
-          acceptReason: msg.requestId && msg.requestId !== promptDashboardRequestIdRef.current ? 'fingerprint-match' : 'request-match',
-          fingerprint: String(msg.analysis?.inputFingerprint || ''),
-        });
-        setPromptDashboardSnapshot(prev => {
-          if (!prev) {
-            return prev;
-          }
-          if ((msg.promptUuid || '') && prev.promptUuid && msg.promptUuid !== prev.promptUuid) {
-            return prev;
-          }
-          if ((msg.promptId || '') && prev.promptId && msg.promptId !== prev.promptId) {
-            return prev;
-          }
-          return {
-            ...prev,
-            aiAnalysis: {
-              kind: 'aiAnalysis',
-              data: msg.analysis,
-              cache: {
-                status: msg.analysis.status === 'running' ? 'loading' : msg.analysis.status === 'error' ? 'error' : 'fresh',
-                source: 'refresh',
-                updatedAt: msg.analysis.updatedAt || new Date().toISOString(),
-                error: msg.analysis.error,
-              },
-            },
-            generatedAt: new Date().toISOString(),
-          };
-        });
-        setPromptDashboardBusyAction(previous => previous === 'refresh-widget:aiAnalysis'
-          && msg.analysis?.status !== 'running'
-          ? null
-          : previous);
+        applyPromptDashboardAnalysisMessage(msg);
         break;
       case 'nextTaskNumber':
         setPrompt(prev => ({ ...prev, taskNumber: msg.taskNumber }));
@@ -3593,6 +3772,14 @@ export const EditorApp: React.FC = () => {
         scheduleAutoSave(1500);
         return;
       }
+      // Keep report editing local until the user leaves the inline editor.
+      if (shouldDeferReportAutosave({
+        reportEditorFocused: isReportEditorFocusedRef.current,
+        reportDraftActive: isReportEditorDraftActiveRef.current,
+      })) {
+        scheduleAutoSave(1500);
+        return;
+      }
       const currentPrompt = promptRef.current;
       const timeSpent = Date.now() - openedAtRef.current;
       const updatedPrompt = applyElapsedTimeByContext(currentPrompt, timeSpent);
@@ -3643,7 +3830,7 @@ export const EditorApp: React.FC = () => {
       userChangeCounterRef.current++;
       setIsDirty(true);
       // Content field saves on blur, not on every keystroke
-      if (field !== 'content') {
+      if (field !== 'content' && field !== 'report') {
         scheduleAutoSave(1500);
       }
     }
@@ -4551,6 +4738,26 @@ export const EditorApp: React.FC = () => {
     [expandedSections, manualSectionOverrides, hasNotesContent, hasPlanContent, hasReportContent, shouldAutoExpandPlanSection],
   );
 
+  useEffect(() => {
+    if (!shouldPersistAutoExpandedReportSection({
+      expandedReport: expandedSections.report,
+      effectiveReport: effectiveExpandedSections.report,
+      hasReportContent,
+      manualReportOverride: manualSectionOverrides.report,
+    })) {
+      return;
+    }
+
+    setExpandedSections(previous => (
+      previous.report
+        ? previous
+        : {
+          ...previous,
+          report: true,
+        }
+    ));
+  }, [effectiveExpandedSections.report, expandedSections.report, hasReportContent, manualSectionOverrides.report]);
+
   const toggleSection = (key: EditorPromptSectionKey) => {
     const nextSectionState = togglePromptEditorSectionExpansion({
       key,
@@ -4790,6 +4997,9 @@ export const EditorApp: React.FC = () => {
         return;
       }
       if (scheduleMeasurementAfterSettle()) {
+        return;
+      }
+      if (shouldDeferReportLayoutStateUpdates()) {
         return;
       }
       const nextHeights: EditorPromptSectionHeights = {};
@@ -6119,7 +6329,27 @@ export const EditorApp: React.FC = () => {
                 <RichTextEditor
                   key={`${prompt.id || '__new__'}:report`}
                   value={prompt.report || ''}
+                  changeMode="blur"
                   onChange={v => updateField('report', v)}
+                  onFocus={() => {
+                    isReportEditorFocusedRef.current = true;
+                  }}
+                  onBlur={() => {
+                    isReportEditorFocusedRef.current = false;
+                    commitBufferedReportLayoutState();
+                    if (localReportDirtyRef.current || isDirty) {
+                      scheduleAutoSave(300);
+                    }
+                    flushBufferedPromptDashboardMessages();
+                  }}
+                  onDirtyChange={(hasPendingChanges) => {
+                    localReportDirtyRef.current = hasPendingChanges;
+                    isReportEditorDraftActiveRef.current = hasPendingChanges;
+                    if (!hasPendingChanges) {
+                      commitBufferedReportLayoutState();
+                      flushBufferedPromptDashboardMessages();
+                    }
+                  }}
                   onDebug={logMainRichTextDebug}
                   autoModeKey={prompt.id}
                   autoResize
@@ -6127,7 +6357,7 @@ export const EditorApp: React.FC = () => {
                   placeholder={t('editor.reportPlaceholder')}
                   contentPadding="compact"
                   persistedHeight={reportHeight}
-                  onHeightChange={setReportHeight}
+                  onHeightChange={handleReportHeightChange}
                   canReset={Boolean((prompt.report || '').trim())}
                   onOpen={() => {
                     vscode.postMessage({

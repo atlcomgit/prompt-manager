@@ -1,3 +1,12 @@
+## 130: Сброс скролла в поле «Результат работы»
+
+- Дата: 2026-05-12.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлен сброс скролла страницы редактора промпта и мерцание Process tab при наборе текста в блоке `Отчет` -> `Результат работы`; длинный отчет больше не возвращает страницу в начало из-за mid-edit autosave и не триггерит полный redraw промпта на каждом нажатии клавиши.
+- Ключевые моменты: `RichTextEditor` получил режим blur-commit, где `report` changes остаются локальными во время ввода и отдаются наружу только после blur/явных действий; `EditorApp` перевёл поле `report` на этот режим, откладывает любой уже поставленный autosave, пока inline report editor держит focus или локальный draft, и больше не оставляет prompt в ложном dirty loop, когда save response возвращает тот же report; узкая проверка выполняется через `npm run test:compile && node --test out-tests/tests/editorApp.test.js out-tests/tests/richTextEditor.test.js`, а финальная сборка проходит через проектный compile script.
+- Файлы: src/webview/editor/components/RichTextEditor.tsx, src/webview/editor/EditorApp.tsx, CHANGELOG.md, .github/instructions/changelog.instructions.md, .vscode/prompt-manager/chat-memory/feature.instructions.md.
+
 ## 128: Git Flow refresh and dashboard widget controls
 
 - Дата: 2026-05-12.

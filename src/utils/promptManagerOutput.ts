@@ -12,10 +12,13 @@ function createDisposable(dispose: () => void): vscode.Disposable {
 
 const NOOP_DISPOSABLE = createDisposable(() => { });
 const CONSOLE_METHODS: ConsoleMethod[] = ['debug', 'info', 'log', 'warn', 'error'];
+const PROMPT_MANAGER_ERROR_MESSAGE_RE = /\b(error|failed|exception)\b/i;
+const PROMPT_MANAGER_TASK_DEBUG_MESSAGE_RE = /\[report-debug\]\s+(?:webview\.editor-layout\.sectionHeights\.measured|webview\.editor-report\.mainRichText\.(?:autoResize\.heightChanged|pageScroll\.(?:snapshot|restore)|blur\.(?:defer|cancelDeferred|commitDeferred)|text\.syncFromSourceSurface))\b/;
 
 export const PROMPT_MANAGER_OUTPUT_CHANNEL_NAME = 'Prompt Manager';
 
 let outputChannel: vscode.OutputChannel | undefined;
+let rawOutputChannel: vscode.OutputChannel | undefined;
 let restoreConsoleMethods: (() => void) | undefined;
 
 function isPromptManagerDebugLoggingEnabled(): boolean {
@@ -27,15 +30,54 @@ function isPromptManagerDebugLoggingEnabled(): boolean {
 	return getConfiguration('promptManager').get<boolean>('debugLogging.enabled', false) === true;
 }
 
+function shouldWritePromptManagerLogMessage(message: string): boolean {
+	if (PROMPT_MANAGER_ERROR_MESSAGE_RE.test(message)) {
+		return true;
+	}
+
+	if (!isPromptManagerDebugLoggingEnabled()) {
+		return false;
+	}
+
+	return PROMPT_MANAGER_TASK_DEBUG_MESSAGE_RE.test(message);
+}
+
 export function getPromptManagerOutputChannel(): vscode.OutputChannel {
 	if (!outputChannel) {
-		outputChannel = vscode.window.createOutputChannel(PROMPT_MANAGER_OUTPUT_CHANNEL_NAME);
+		rawOutputChannel = vscode.window.createOutputChannel(PROMPT_MANAGER_OUTPUT_CHANNEL_NAME);
+		outputChannel = new Proxy(rawOutputChannel, {
+			get(target, property, receiver) {
+				if (property === 'appendLine') {
+					return (message: string) => {
+						if (!shouldWritePromptManagerLogMessage(String(message || ''))) {
+							return;
+						}
+						target.appendLine(message);
+					};
+				}
+
+				if (property === 'append') {
+					return (message: string) => {
+						if (!shouldWritePromptManagerLogMessage(String(message || ''))) {
+							return;
+						}
+						target.append(message);
+					};
+				}
+
+				const value = Reflect.get(target, property, receiver);
+				return typeof value === 'function' ? value.bind(target) : value;
+			},
+		}) as vscode.OutputChannel;
 	}
 	return outputChannel;
 }
 
 export function appendPromptManagerLog(message: string): void {
 	if (!isPromptManagerDebugLoggingEnabled()) {
+		return;
+	}
+	if (!shouldWritePromptManagerLogMessage(message)) {
 		return;
 	}
 	getPromptManagerOutputChannel().appendLine(message);
@@ -46,7 +88,8 @@ export function showPromptManagerOutputChannel(preserveFocus = true): void {
 }
 
 export function disposePromptManagerOutputChannel(): void {
-	outputChannel?.dispose();
+	rawOutputChannel?.dispose();
+	rawOutputChannel = undefined;
 	outputChannel = undefined;
 }
 

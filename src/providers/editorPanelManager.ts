@@ -2492,6 +2492,11 @@ export class EditorPanelManager {
 		);
 	}
 
+	/** Freeze derived timing once the prompt reaches the final closed state. */
+	private static shouldFreezeDerivedTime(status?: Prompt['status'] | null): boolean {
+		return status === 'closed';
+	}
+
 	private async refreshPromptFromTrackedChatSessions(
 		promptId: string,
 		currentPrompt?: Prompt | null,
@@ -2530,9 +2535,14 @@ export class EditorPanelManager {
 		);
 
 		let changed = false;
-		if (totalMs > 0 && freshPrompt.timeSpentImplementing !== totalMs) {
+		const shouldFreezeDerivedTime = EditorPanelManager.shouldFreezeDerivedTime(freshPrompt.status);
+		if (!shouldFreezeDerivedTime && totalMs > 0 && freshPrompt.timeSpentImplementing !== totalMs) {
 			freshPrompt.timeSpentImplementing = totalMs;
 			changed = true;
+		} else if (shouldFreezeDerivedTime && totalMs > 0 && freshPrompt.timeSpentImplementing !== totalMs) {
+			this.hooksOutput.appendLine(
+				`[chat-track] refresh skipped implementing sync for closed prompt=${freshPrompt.id} source=${source} current=${freshPrompt.timeSpentImplementing || 0} total=${totalMs}`,
+			);
 		}
 
 		const completionSessionId = String(completion.sessionId || '').trim();
@@ -8966,11 +8976,16 @@ export class EditorPanelManager {
 						if (shouldFinalizeTrackedCompletion) {
 							const promptToComplete = await this.storageService.getPrompt(prompt.id);
 							if (promptToComplete) {
+								const shouldFreezeDerivedTime = EditorPanelManager.shouldFreezeDerivedTime(promptToComplete.status);
 								const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
 								const endedAt = Number(completion.lastRequestEnded || Date.now());
 								const implementingDelta = Math.max(0, endedAt - startedAt);
-								if (implementingDelta > 0) {
+								if (!shouldFreezeDerivedTime && implementingDelta > 0) {
 									promptToComplete.timeSpentImplementing = (promptToComplete.timeSpentImplementing || 0) + implementingDelta;
+								} else if (shouldFreezeDerivedTime && implementingDelta > 0) {
+									this.hooksOutput.appendLine(
+										`[chat-track] completion skipped implementing increment for closed prompt=${promptToComplete.id} delta=${implementingDelta}`,
+									);
 								}
 
 								const sessionId = String(completion.sessionId || '').trim();
@@ -8987,7 +9002,7 @@ export class EditorPanelManager {
 									prompt?.hooks || [],
 									'afterChatCompleted',
 								) || 'completed';
-								if (promptToComplete.status !== completionStatus) {
+								if (!shouldFreezeDerivedTime && promptToComplete.status !== completionStatus) {
 									promptToComplete.status = completionStatus;
 								}
 								await this.storageService.savePrompt(promptToComplete);
@@ -9040,11 +9055,16 @@ export class EditorPanelManager {
 						if (chatReportHtml) {
 							const promptForTiming = await this.storageService.getPrompt(prompt.id);
 							if (promptForTiming) {
+								const shouldFreezeDerivedTime = EditorPanelManager.shouldFreezeDerivedTime(promptForTiming.status);
 								const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
 								const endedAt = Number(completion.lastRequestEnded || Date.now());
 								const implementingDelta = Math.max(0, endedAt - startedAt);
-								if (implementingDelta > 0) {
+								if (!shouldFreezeDerivedTime && implementingDelta > 0) {
 									promptForTiming.timeSpentImplementing = (promptForTiming.timeSpentImplementing || 0) + implementingDelta;
+								} else if (shouldFreezeDerivedTime && implementingDelta > 0) {
+									this.hooksOutput.appendLine(
+										`[chat-track] fallback skipped implementing increment for closed prompt=${promptForTiming.id} delta=${implementingDelta}`,
+									);
 								}
 								if (shouldCaptureAgentFinalResponse) {
 									promptForTiming.report = chatReportHtml;

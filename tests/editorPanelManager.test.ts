@@ -4609,6 +4609,151 @@ test('recalcImplementingTime keeps prompt in-progress when completion belongs to
 	resetVsCodeCommandMock();
 });
 
+test('recalcImplementingTime keeps closed prompt timing frozen', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'closed',
+			content: 'Implement the requested workflow changes.',
+			chatSessionIds: ['session-new'],
+			timeSpentImplementing: 120,
+		},
+		stateService: {
+			getChatSessionsTotalElapsed: async () => 900,
+			getLatestTrackedChatRequestCompletion: async () => ({
+				ok: true,
+				sessionId: 'session-new',
+				lastRequestStarted: 100,
+				lastRequestEnded: 1000,
+				lastResponseState: 2,
+				requestModelState: 1,
+				hasRequestResult: true,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'closed',
+		content: 'Implement the requested workflow changes.',
+		chatSessionIds: ['session-new'],
+		timeSpentImplementing: 120,
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'recalcImplementingTime', id: 'prompt-a', silent: true },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(getStoredPrompt()?.timeSpentImplementing, 120);
+	assert.equal(getStoredPrompt()?.status, 'closed');
+	assert.equal(postedMessages.some(message => (message as any)?.type === 'prompt' && (message as any)?.reason === 'sync'), false);
+	resetVsCodeCommandMock();
+});
+
+test('startChat keeps closed prompt timing frozen when completion lands after the prompt closes', async () => {
+	await withImmediateTimers(async () => {
+		resetVsCodeCommandMock();
+
+		const { manager, getStoredPrompt } = await createManager({
+			initialPrompt: {
+				id: 'prompt-a',
+				promptUuid: 'uuid-a',
+				title: 'Prompt title',
+				status: 'draft',
+				content: 'Implement the requested workflow changes.',
+				timeSpentImplementing: 120,
+			},
+			savePrompt: async (prompt: any, saveOptions?: any) => createPrompt({
+				...prompt,
+				status: saveOptions?.historyReason === 'start-chat' ? 'closed' : prompt.status,
+				timeSpentImplementing: saveOptions?.historyReason === 'start-chat'
+					? 120
+					: (prompt.timeSpentImplementing || 0),
+				updatedAt: '2026-04-13T00:00:01.000Z',
+			}),
+			stateService: {
+				saveLastPromptId: async () => undefined,
+				getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+				saveSidebarState: async () => undefined,
+				getGlobalAgentContext: () => '',
+				getActiveChatSessionId: async () => '',
+				waitForChatSessionStarted: async () => ({ ok: true, sessionId: 'session-new', reason: '' }),
+				waitForChatRequestCompletion: async () => ({
+					ok: true,
+					reason: '',
+					sessionId: 'session-new',
+					lastRequestStarted: 100,
+					lastRequestEnded: 400,
+					lastResponseState: 3,
+					requestModelState: 3,
+					hasRequestResult: true,
+					hasPendingEdits: false,
+				}),
+				getChatSessionsTotalElapsed: async () => 0,
+			},
+		});
+
+		(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+		(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+		(manager as any).tryReadChatMarkdownFromClipboard = async () => ({
+			markdown: 'final report',
+			html: '<p>final report</p>',
+		});
+		(manager as any).scheduleChatSessionRename = async () => undefined;
+		(manager as any).runConfiguredHooks = async () => undefined;
+
+		const currentPrompt = createPrompt({
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+			timeSpentImplementing: 120,
+		});
+
+		await (manager as any).handleMessage(
+			{ type: 'startChat', id: 'prompt-a', requestId: 'req-closed-after-start' },
+			{ visible: true, webview: { postMessage: async () => true } } as any,
+			currentPrompt,
+			'__prompt_editor_singleton__',
+			() => false,
+			() => undefined,
+		);
+
+		const waitDeadline = Date.now() + 200;
+		while (Date.now() < waitDeadline && getStoredPrompt()?.chatSessionIds?.[0] !== 'session-new') {
+			await flushTurns(1);
+		}
+
+		assert.equal(getStoredPrompt()?.status, 'closed');
+		assert.equal(getStoredPrompt()?.timeSpentImplementing, 120);
+		assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-new']);
+		resetVsCodeCommandMock();
+	});
+});
+
 test('savePrompt status-change to in-progress stores chat auto-complete gate', async () => {
 	resetVsCodeCommandMock();
 

@@ -1,3 +1,21 @@
+## 131: Не учитывать время при статусе «Закрыт»
+
+- Дата: 2026-05-13.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Закрытые промпты больше не получают автоматически вычисляемое `implementing`-время из background chat-session refresh, silent/manual recalc или позднего завершения чата; при этом ручная правка `Misc time` сохранена.
+- Ключевые моменты: `EditorPanelManager` теперь замораживает derived implementing-time и не уводит prompt из `closed`, если поздний tracked completion или refresh приходит уже после закрытия; `EditorApp` перестал запускать silent/manual `recalcImplementingTime` для `closed`, а `TimerDisplay` скрывает кнопку пересчёта для закрытых промптов; добавлены focused regression tests на bucket-логику, host completion/recalc path и editor/UI guard.
+- Файлы:
+  src/providers/editorPanelManager.ts
+  src/webview/editor/EditorApp.tsx
+  src/webview/editor/components/TimerDisplay.tsx
+  tests/editorPanelManager.test.ts
+  tests/editorApp.test.tsx
+  tests/timeTrackingService.test.ts
+  README.md
+  CHANGELOG.md
+  .vscode/prompt-manager/chat-memory/feature.instructions.md
+
 ## 129: Автовыделение нового пункта
 
 - Дата: 2026-05-12.

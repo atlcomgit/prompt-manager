@@ -8,6 +8,7 @@ interface Props {
   timeUntracked: number;
   onUntrackedChange: (ms: number) => void;
   hasChatSessions: boolean;
+  canRecalcImplementingTime: boolean;
   isRecalculating: boolean;
   onRecalcImplementingTime: () => void;
 }
@@ -28,7 +29,7 @@ function formatDuration(ms: number): string {
   return `${seconds}с`;
 }
 
-export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, timeOnTask, timeUntracked, onUntrackedChange, hasChatSessions, isRecalculating, onRecalcImplementingTime }) => {
+export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, timeOnTask, timeUntracked, onUntrackedChange, hasChatSessions, canRecalcImplementingTime, isRecalculating, onRecalcImplementingTime }) => {
   const t = useT();
   const totalTime = timeWriting + timeImplementing + timeOnTask + timeUntracked;
   const untrackedHours = Number((((timeUntracked || 0) / 3600000)).toFixed(2));
@@ -44,7 +45,7 @@ export const TimerDisplay: React.FC<Props> = ({ timeWriting, timeImplementing, t
         <div style={styles.stat}>
           <div style={styles.statHeaderRow}>
             <span style={styles.statLabel}>{t('timer.implementing')}</span>
-            {hasChatSessions && (
+            {hasChatSessions && canRecalcImplementingTime && (
               <button
                 type="button"
                 onClick={onRecalcImplementingTime}

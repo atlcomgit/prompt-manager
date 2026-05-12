@@ -127,6 +127,66 @@ test('buildPromptModelOptions sorts prompt AI models alphabetically', async () =
 	});
 });
 
+test('canRequestImplementingTimeRecalc blocks closed prompts and active recalculation', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { canRequestImplementingTimeRecalc } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.equal(canRequestImplementingTimeRecalc({
+			promptId: 'prompt-a',
+			status: 'in-progress',
+			chatSessionIds: ['session-a'],
+			isRecalculating: false,
+		}), true);
+
+		assert.equal(canRequestImplementingTimeRecalc({
+			promptId: 'prompt-a',
+			status: 'closed',
+			chatSessionIds: ['session-a'],
+			isRecalculating: false,
+		}), false);
+
+		assert.equal(canRequestImplementingTimeRecalc({
+			promptId: 'prompt-a',
+			status: 'in-progress',
+			chatSessionIds: ['session-a'],
+			isRecalculating: true,
+		}), false);
+	});
+});
+
+test('TimerDisplay hides implementing recalc action when recalculation is not allowed', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { TimerDisplay } = await import('../src/webview/editor/components/TimerDisplay.js');
+
+		const hiddenMarkup = renderToStaticMarkup(React.createElement(TimerDisplay, {
+			timeWriting: 0,
+			timeImplementing: 0,
+			timeOnTask: 0,
+			timeUntracked: 0,
+			onUntrackedChange: () => undefined,
+			hasChatSessions: true,
+			canRecalcImplementingTime: false,
+			isRecalculating: false,
+			onRecalcImplementingTime: () => undefined,
+		}));
+
+		const visibleMarkup = renderToStaticMarkup(React.createElement(TimerDisplay, {
+			timeWriting: 0,
+			timeImplementing: 0,
+			timeOnTask: 0,
+			timeUntracked: 0,
+			onUntrackedChange: () => undefined,
+			hasChatSessions: true,
+			canRecalcImplementingTime: true,
+			isRecalculating: false,
+			onRecalcImplementingTime: () => undefined,
+		}));
+
+		assert.equal(hiddenMarkup.includes('<button'), false);
+		assert.equal(visibleMarkup.includes('<button'), true);
+	});
+});
+
 test('shouldDeferReportAutosave only blocks prompt autosave while the report editor owns local typing', async () => {
 	await withEditorAppEnvironment(async () => {
 		const { shouldDeferReportAutosave } = await import('../src/webview/editor/EditorApp.js');

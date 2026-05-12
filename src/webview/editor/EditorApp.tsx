@@ -141,6 +141,29 @@ export const shouldPreserveLocalReportOnSave = (input: {
     });
 };
 
+/** Block derived implementing-time refresh once the prompt is explicitly closed. */
+export const canRequestImplementingTimeRecalc = (input: {
+  promptId?: string;
+  status: PromptStatus;
+  chatSessionIds?: string[];
+  isRecalculating?: boolean;
+}): boolean => {
+  const promptId = String(input.promptId || '').trim();
+  if (!promptId) {
+    return false;
+  }
+
+  if (input.status === 'closed') {
+    return false;
+  }
+
+  if ((input.chatSessionIds || []).length === 0) {
+    return false;
+  }
+
+  return input.isRecalculating !== true;
+};
+
 type InlineNotice = { kind: 'error' | 'info'; message: string };
 type ChatEntryAction = 'start' | 'open';
 type GitOverlayMode = 'default' | 'start-chat-preflight' | 'open-chat-preflight';
@@ -1523,7 +1546,11 @@ export const EditorApp: React.FC = () => {
   // Refresh bound chat timing after open without turning on the global editor progress line.
   const requestBackgroundImplementingTimeRefresh = useCallback((nextPrompt: Prompt) => {
     const promptId = String(nextPrompt.id || '').trim();
-    if (!promptId || !(nextPrompt.chatSessionIds || []).length || recalcTriggeredForRef.current.has(promptId)) {
+    if (!canRequestImplementingTimeRecalc({
+      promptId,
+      status: nextPrompt.status,
+      chatSessionIds: nextPrompt.chatSessionIds,
+    }) || recalcTriggeredForRef.current.has(promptId)) {
       return;
     }
 
@@ -4580,7 +4607,12 @@ export const EditorApp: React.FC = () => {
   };
 
   const handleRecalcImplementingTime = () => {
-    if (isRecalculating || !prompt.id || prompt.chatSessionIds.length === 0) {
+    if (!canRequestImplementingTimeRecalc({
+      promptId: prompt.id,
+      status: prompt.status,
+      chatSessionIds: prompt.chatSessionIds,
+      isRecalculating,
+    })) {
       return;
     }
     setIsRecalculating(true);
@@ -5697,6 +5729,11 @@ export const EditorApp: React.FC = () => {
               timeUntracked={prompt.timeSpentUntracked || 0}
               onUntrackedChange={(ms) => updateField('timeSpentUntracked', ms)}
               hasChatSessions={prompt.chatSessionIds.length > 0}
+              canRecalcImplementingTime={canRequestImplementingTimeRecalc({
+                promptId: prompt.id,
+                status: prompt.status,
+                chatSessionIds: prompt.chatSessionIds,
+              })}
               isRecalculating={isRecalculating}
               onRecalcImplementingTime={handleRecalcImplementingTime}
             />

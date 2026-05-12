@@ -30,3 +30,17 @@ test('applyElapsedBeforeStatusChange keeps elapsed time in the previous writing 
 		timeSpentOnTask: 0,
 	});
 });
+
+test('applyElapsedToPrompt keeps closed prompts frozen', () => {
+	const updated = TimeTrackingService.applyElapsedToPrompt({
+		status: 'closed' as const,
+		timeSpentWriting: 400,
+		timeSpentOnTask: 600,
+	}, 1200);
+
+	assert.deepEqual(updated, {
+		status: 'closed',
+		timeSpentWriting: 400,
+		timeSpentOnTask: 600,
+	});
+});

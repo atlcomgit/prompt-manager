@@ -179,6 +179,7 @@ type GitOverlayTrackedRequest = {
   createdAt: number;
 };
 
+const GIT_OVERLAY_STALE_TRACKED_REQUEST_MAX_AGE_MS = 15_000;
 const CHAT_LAUNCH_COMPLETION_HOLD_MS = 2000;
 const CHAT_LAUNCH_MIN_PHASE_VISIBLE_MS = 1000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
@@ -241,6 +242,53 @@ const normalizeGitOverlayTrackedRequestProjects = (projects: string[]): string[]
     .map(project => project.trim())
     .filter(Boolean),
 ));
+
+/** Count all local change entries that keep a Git overlay project dirty. */
+const countGitOverlayProjectChanges = (
+  project: Pick<GitOverlayProjectSnapshot, 'changeGroups'>,
+): number => (
+  project.changeGroups.merge.length
+  + project.changeGroups.staged.length
+  + project.changeGroups.workingTree.length
+  + project.changeGroups.untracked.length
+);
+
+/** Drop stale commit tracking once a fresh snapshot proves the request has already settled. */
+export const shouldPruneGitOverlayTrackedRequest = (input: {
+  request: Pick<GitOverlayTrackedRequest, 'kind' | 'projects' | 'createdAt'>;
+  snapshot: GitOverlaySnapshot | null | undefined;
+  now?: number;
+  staleAfterMs?: number;
+}): boolean => {
+  if (input.request.kind !== 'commit') {
+    return false;
+  }
+
+  const requestedProjects = normalizeGitOverlayTrackedRequestProjects(input.request.projects);
+  if (requestedProjects.length === 0) {
+    return true;
+  }
+
+  const snapshotProjects = new Map(
+    (input.snapshot?.projects || []).map(project => [project.project.trim(), project] as const),
+  );
+  const allRequestedProjectsAreClean = requestedProjects.every((projectName) => {
+    const snapshotProject = snapshotProjects.get(projectName);
+    if (!snapshotProject) {
+      return false;
+    }
+
+    return countGitOverlayProjectChanges(snapshotProject) === 0;
+  });
+
+  if (allRequestedProjectsAreClean) {
+    return true;
+  }
+
+  const staleAfterMs = input.staleAfterMs ?? GIT_OVERLAY_STALE_TRACKED_REQUEST_MAX_AGE_MS;
+  const now = typeof input.now === 'number' ? input.now : Date.now();
+  return staleAfterMs > 0 && now - input.request.createdAt >= staleAfterMs;
+};
 
 const areTrackedBranchesByProjectEqual = (
   left?: Record<string, string>,
@@ -1369,6 +1417,43 @@ export const EditorApp: React.FC = () => {
     gitOverlayTrackedRequestsRef.current = {};
     syncGitOverlayTrackedRequestState();
   }, [syncGitOverlayTrackedRequestState]);
+
+  /** Remove stale tracked commit requests once a fresh overlay snapshot makes them obsolete. */
+  const pruneGitOverlayTrackedRequestsFromSnapshot = useCallback((snapshot?: GitOverlaySnapshot | null): boolean => {
+    const trackedRequests = Object.entries(gitOverlayTrackedRequestsRef.current);
+    if (trackedRequests.length === 0) {
+      return false;
+    }
+
+    const now = Date.now();
+    const nextTrackedRequests: Record<string, GitOverlayTrackedRequest> = {};
+    const prunedRequests: Array<{ requestId: string; kind: GitOverlayTrackedRequestKind; projects: string[] }> = [];
+
+    for (const [requestId, request] of trackedRequests) {
+      if (shouldPruneGitOverlayTrackedRequest({ request, snapshot, now })) {
+        prunedRequests.push({
+          requestId,
+          kind: request.kind,
+          projects: [...request.projects],
+        });
+        continue;
+      }
+
+      nextTrackedRequests[requestId] = request;
+    }
+
+    if (prunedRequests.length === 0) {
+      return false;
+    }
+
+    gitOverlayTrackedRequestsRef.current = nextTrackedRequests;
+    syncGitOverlayTrackedRequestState();
+    logGitOverlayDebug('trackedRequest.prunedFromSnapshot', {
+      requestCount: prunedRequests.length,
+      requests: prunedRequests,
+    });
+    return true;
+  }, [logGitOverlayDebug, syncGitOverlayTrackedRequestState]);
 
   /** Minimum time (ms) the busy spinner remains visible so the user can see it. */
   const GIT_OVERLAY_MIN_BUSY_DISPLAY_MS = 350;
@@ -3180,7 +3265,9 @@ export const EditorApp: React.FC = () => {
           }
           return next;
         });
-        if (finishGitOverlayTrackedRequest(msg.requestId)) {
+        if (!finishGitOverlayTrackedRequest(msg.requestId)) {
+          pruneGitOverlayTrackedRequestsFromSnapshot(msg.snapshot || null);
+        } else {
           setGitOverlayWaitingForSnapshotAction(null);
           clearGitOverlayBusyState();
           break;

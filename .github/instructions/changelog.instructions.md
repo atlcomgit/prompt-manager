@@ -1,3 +1,18 @@
+## 132: Кнопки коммита сразу в загрузке
+
+- Дата: 2026-05-13.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлено залипание loading-состояния у кнопок коммита на шаге 2 окна Git Flow после повторного открытия overlay; свежий snapshot теперь умеет отбрасывать устаревшие tracked commit-request, если коммит уже фактически завершён или старый pending-запрос очевидно устарел.
+- Ключевые моменты: `EditorApp` получил helper `shouldPruneGitOverlayTrackedRequest()` и snapshot-side pruning для stale commit-request без вмешательства в актуальные in-flight операции; это не даёт шагу 2 наследовать ложный loading из предыдущей сессии overlay, но сохраняет реальный loading для свежих запросов; добавлены focused regression tests на чистый snapshot, недавний dirty snapshot и aged-out dirty snapshot, обновлены README/CHANGELOG и project memory note.
+- Файлы:
+  .github/instructions/changelog.instructions.md
+  .vscode/prompt-manager/chat-memory/feature.instructions.md
+  CHANGELOG.md
+  README.md
+  src/webview/editor/EditorApp.tsx
+  tests/editorApp.test.tsx
+
 ## 131: Не учитывать время при статусе «Закрыт»
 
 - Дата: 2026-05-13.

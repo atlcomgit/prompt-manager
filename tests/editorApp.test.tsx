@@ -154,6 +154,93 @@ test('canRequestImplementingTimeRecalc blocks closed prompts and active recalcul
 	});
 });
 
+test('shouldPruneGitOverlayTrackedRequest clears a stale commit loader when the snapshot is already clean', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { shouldPruneGitOverlayTrackedRequest } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.equal(shouldPruneGitOverlayTrackedRequest({
+			request: {
+				kind: 'commit',
+				projects: ['api'],
+				createdAt: 100,
+			},
+			snapshot: {
+				projects: [
+					{
+						project: 'api',
+						changeGroups: {
+							merge: [],
+							staged: [],
+							workingTree: [],
+							untracked: [],
+						},
+					},
+				],
+			} as any,
+			now: 200,
+			staleAfterMs: 10_000,
+		}), true);
+	});
+});
+
+test('shouldPruneGitOverlayTrackedRequest keeps a recent commit loader while the snapshot still has changes', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { shouldPruneGitOverlayTrackedRequest } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.equal(shouldPruneGitOverlayTrackedRequest({
+			request: {
+				kind: 'commit',
+				projects: ['api'],
+				createdAt: 100,
+			},
+			snapshot: {
+				projects: [
+					{
+						project: 'api',
+						changeGroups: {
+							merge: [],
+							staged: [{ path: 'src/api.ts' }],
+							workingTree: [],
+							untracked: [],
+						},
+					},
+				],
+			} as any,
+			now: 105,
+			staleAfterMs: 10_000,
+		}), false);
+	});
+});
+
+test('shouldPruneGitOverlayTrackedRequest clears an old commit loader even if the snapshot still looks dirty', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { shouldPruneGitOverlayTrackedRequest } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.equal(shouldPruneGitOverlayTrackedRequest({
+			request: {
+				kind: 'commit',
+				projects: ['api'],
+				createdAt: 100,
+			},
+			snapshot: {
+				projects: [
+					{
+						project: 'api',
+						changeGroups: {
+							merge: [],
+							staged: [{ path: 'src/api.ts' }],
+							workingTree: [],
+							untracked: [],
+						},
+					},
+				],
+			} as any,
+			now: 20_500,
+			staleAfterMs: 10_000,
+		}), true);
+	});
+});
+
 test('TimerDisplay hides implementing recalc action when recalculation is not allowed', async () => {
 	await withEditorAppEnvironment(async () => {
 		const { TimerDisplay } = await import('../src/webview/editor/components/TimerDisplay.js');

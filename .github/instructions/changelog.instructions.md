@@ -1,3 +1,18 @@
+## 133: Зависание при создании MR/PR для всех
+
+- Дата: 2026-05-14.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлено зависание шага 4 окна Git Flow при действии `Создать MR/PR для всех проектов`; manager теперь помнит актуальный panel `postMessage` callback для overlay-сессии и при сбое reread после создания MR/PR переиспользует последний cached snapshot с optimistic review request.
+- Ключевые моменты: `EditorPanelManager` на каждом `handleMessage` обновляет history callback-ов активной Git Overlay session, поэтому reread и fallback больше не теряют текущую панель; overlay session теперь хранит `lastSnapshot`, lazy other-project refresh поддерживает его в актуальном состоянии, а bulk/single create-review-request path при ошибке reread публикует cached `gitOverlaySnapshot` с наложенными review request-данными вместо вечного loader; добавлен focused regression test на fallback cached snapshot после сбоя reread, README/CHANGELOG и project feature memory обновлены.
+- Файлы:
+  .github/instructions/changelog.instructions.md
+  .vscode/prompt-manager/chat-memory/feature.instructions.md
+  CHANGELOG.md
+  README.md
+  src/providers/editorPanelManager.ts
+  tests/editorPanelManager.test.ts
+
 ## 132: Кнопки коммита сразу в загрузке
 
 - Дата: 2026-05-13.

@@ -1289,6 +1289,156 @@ test('gitOverlayCreateReviewRequest refreshes the current overlay scope with the
 	resetVsCodeCommandMock();
 });
 
+test('gitOverlayCreateReviewRequest replays the cached overlay snapshot when reread fails after bulk MR/PR creation', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+			branch: 'feature/task-133',
+			projects: ['api', 'web'],
+		},
+		workspaceService: {
+			getWorkspaceFolderPaths: () => new Map([
+				['api', '/tmp/api'],
+				['web', '/tmp/web'],
+			]),
+			getWorkspaceFolders: () => ['api', 'web'],
+		},
+	});
+
+	const postedMessages: any[] = [];
+	const optimisticRequest = {
+		id: '303',
+		number: '303',
+		title: 'Draft: Bulk fallback regression',
+		url: 'https://gitlab.example.com/acme/api/-/merge_requests/303',
+		state: 'open',
+		createdAt: '2026-05-14T10:00:00.000Z',
+		updatedAt: '2026-05-14T10:00:00.000Z',
+		sourceBranch: 'feature/task-133',
+		targetBranch: 'main',
+		isDraft: true,
+		comments: [],
+	};
+
+	(manager as any).gitService = {
+		createReviewRequests: async () => ({
+			success: true,
+			errors: [],
+			changedProjects: ['api'],
+			skippedProjects: [],
+			reviewRequestsByProject: {
+				api: optimisticRequest,
+			},
+		}),
+	};
+	(manager as any).postGitOverlaySnapshot = async () => {
+		throw new Error('snapshot refresh failed');
+	};
+
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt A',
+		branch: 'feature/task-133',
+		projects: ['api', 'web'],
+	});
+	const panelKey = '__prompt_editor_singleton__';
+	(manager as any).gitOverlaySessions.set(panelKey, {
+		active: true,
+		promptBranch: 'feature/task-133',
+		selectedProjects: ['api', 'web'],
+		snapshotProjects: ['api', 'web'],
+		snapshotVersion: 1,
+		lastSnapshot: {
+			generatedAt: '2026-05-14T09:59:00.000Z',
+			promptBranch: 'feature/task-133',
+			trackedBranches: ['main'],
+			projects: [
+				createGitOverlayProjectSnapshot('api', {
+					currentBranch: 'feature/task-133',
+					review: {
+						remote: {
+							provider: 'gitlab',
+							host: 'gitlab.example.com',
+							remoteName: 'origin',
+							remoteUrl: 'https://gitlab.example.com/acme/api.git',
+							repositoryPath: 'acme/api',
+							owner: 'acme',
+							name: 'api',
+							supported: true,
+							cliCommand: 'glab',
+							cliAvailable: true,
+							actionLabel: 'Merge request',
+						},
+						request: null,
+						error: '',
+						setupAction: null,
+						titlePrefix: '',
+						unsupportedReason: null,
+					},
+				}),
+				createGitOverlayProjectSnapshot('web', {
+					currentBranch: 'feature/task-133',
+				}),
+			],
+			otherProjects: [],
+		},
+		postMessage: (message: unknown) => {
+			postedMessages.push(message);
+		},
+		postMessageHistory: [],
+		refreshTimer: null,
+		refreshInFlight: false,
+		refreshQueued: false,
+		queuedMode: null,
+		queuedBusyReason: null,
+	});
+
+	await (manager as any).handleMessage(
+		{
+			type: 'gitOverlayCreateReviewRequest',
+			prompt: currentPrompt,
+			promptBranch: 'feature/task-133',
+			projects: ['api', 'web'],
+			requests: [{
+				project: 'api',
+				targetBranch: 'main',
+				title: '133 Bulk fallback regression',
+				draft: true,
+				removeSourceBranch: false,
+			}],
+			requestId: 'req-review-fallback',
+		},
+		panel,
+		currentPrompt,
+		panelKey,
+		() => false,
+		() => undefined,
+	);
+
+	const fallbackSnapshotMessage = postedMessages.find((message) => (message as any)?.type === 'gitOverlaySnapshot');
+	assert.ok(fallbackSnapshotMessage);
+	assert.equal((fallbackSnapshotMessage as any)?.requestId, 'req-review-fallback');
+	assert.deepEqual((fallbackSnapshotMessage as any)?.snapshot?.projects?.[0]?.review?.request, optimisticRequest);
+	assert.equal(postedMessages.some((message) =>
+		(message as any)?.type === 'gitOverlayActionCompleted'
+		&& (message as any)?.action === 'review-request'
+	), true);
+	resetVsCodeCommandMock();
+});
+
 test('postGitOverlaySnapshot can skip lazy other-project scheduling for initial summary open', async () => {
 	const { manager } = await createManager();
 	const postedMessages: any[] = [];

@@ -149,6 +149,7 @@ interface GitOverlaySession {
 	selectedProjects: string[];
 	snapshotProjects: string[];
 	snapshotVersion: number;
+	lastSnapshot: GitOverlaySnapshot | null;
 	postMessage: (message: ExtensionToWebviewMessage) => void;
 	postMessageHistory?: Array<(message: ExtensionToWebviewMessage) => void>;
 	refreshTimer: NodeJS.Timeout | null;
@@ -3582,6 +3583,13 @@ export class EditorPanelManager {
 			type: 'gitOverlayOtherProjectsSnapshot',
 			otherProjects: filteredSnapshot.otherProjects || [],
 		});
+		const session = this.resolveGitOverlaySessionByPostMessage(postMessage);
+		if (session?.lastSnapshot) {
+			session.lastSnapshot = {
+				...session.lastSnapshot,
+				otherProjects: filteredSnapshot.otherProjects || [],
+			};
+		}
 		this.logGitOverlayTiming('gitOverlay.otherProjectsSnapshot.computed', startedAtMs, {
 			source: metricSource,
 			selectedProjectCount: selectedProjects.length,
@@ -3909,6 +3917,9 @@ export class EditorPanelManager {
 		);
 		const snapshotWithErrors = this.applyGitOverlaySnapshotProjectErrors(filteredSnapshot, options?.commitErrorsByProject);
 		const snapshotWithReviewRequests = this.applyGitOverlaySnapshotReviewRequests(snapshotWithErrors, options?.optimisticReviewRequestsByProject);
+		if (session) {
+			session.lastSnapshot = snapshotWithReviewRequests;
+		}
 		this.logGitOverlayTiming('gitOverlay.snapshot.computed', startedAtMs, {
 			source: options?.metricSource || 'action',
 			detailLevel: options?.detailLevel || 'full',
@@ -3970,6 +3981,30 @@ export class EditorPanelManager {
 		});
 
 		return changed ? { ...snapshot, projects } : snapshot;
+	}
+
+	/** Reuse the latest overlay snapshot when the post-create reread fails. */
+	private postGitOverlayReviewRequestFallbackSnapshot(
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		requestId?: string,
+		reviewRequestsByProject?: Record<string, NonNullable<GitOverlayProjectSnapshot['review']['request']>>,
+	): boolean {
+		const session = this.resolveGitOverlaySessionByPostMessage(postMessage);
+		if (!session?.active || !session.lastSnapshot) {
+			return false;
+		}
+
+		const fallbackSnapshot = this.applyGitOverlaySnapshotReviewRequests(
+			session.lastSnapshot,
+			reviewRequestsByProject,
+		);
+		session.lastSnapshot = fallbackSnapshot;
+		postMessage({
+			type: 'gitOverlaySnapshot',
+			snapshot: fallbackSnapshot,
+			requestId,
+		});
+		return true;
 	}
 
 	/** Догружает полный snapshot одного раскрытого проекта без перерендера всего overlay. */
@@ -4454,6 +4489,7 @@ export class EditorPanelManager {
 			selectedProjects: normalizedSelectedProjects,
 			snapshotProjects: normalizedSnapshotProjects,
 			snapshotVersion: 0,
+			lastSnapshot: null,
 			postMessage,
 			postMessageHistory: [postMessage],
 			refreshTimer: null,
@@ -4473,6 +4509,7 @@ export class EditorPanelManager {
 		if (!open) {
 			this.clearGitOverlaySessionRefreshTimer(session);
 			session.snapshotVersion += 1;
+			session.lastSnapshot = null;
 			session.refreshQueued = false;
 			session.queuedMode = null;
 			session.queuedBusyReason = null;
@@ -7428,6 +7465,10 @@ export class EditorPanelManager {
 				// panel/webview might be disposed; ignore to keep background flows alive
 			}
 		};
+		const gitOverlaySession = this.gitOverlaySessions.get(panelKey);
+		if (gitOverlaySession) {
+			this.rememberGitOverlaySessionPostMessage(gitOverlaySession, postMessage);
+		}
 
 		switch (msg.type) {
 			case 'ready': {
@@ -10164,16 +10205,42 @@ export class EditorPanelManager {
 					break;
 				}
 
-				const result = await this.gitService.createReviewRequests(paths, promptSnapshot, msg.requests);
+				let result: Awaited<ReturnType<GitService['createReviewRequests']>>;
+				try {
+					result = await this.gitService.createReviewRequests(paths, promptSnapshot, msg.requests);
+				} catch (error) {
+					postMessage({
+						type: 'error',
+						message: error instanceof Error ? error.message : String(error),
+						requestId: msg.requestId,
+					});
+					this.postGitOverlayReviewRequestFallbackSnapshot(postMessage, msg.requestId);
+					break;
+				}
 				postMessage({
 					type: result.errors.length > 0 ? 'error' : 'info',
 					message: this.describeGitMultiProjectResult(result, 'MR/PR обработан'),
 					requestId: msg.requestId,
 				});
-				await this.postGitOverlaySnapshot(postMessage, promptSnapshot, promptBranch, projects, {
-					requestId: msg.requestId,
-					optimisticReviewRequestsByProject: result.reviewRequestsByProject,
-				});
+				try {
+					await this.postGitOverlaySnapshot(postMessage, promptSnapshot, promptBranch, projects, {
+						requestId: msg.requestId,
+						optimisticReviewRequestsByProject: result.reviewRequestsByProject,
+					});
+				} catch (error) {
+					const fallbackPosted = this.postGitOverlayReviewRequestFallbackSnapshot(
+						postMessage,
+						msg.requestId,
+						result.reviewRequestsByProject,
+					);
+					if (!fallbackPosted) {
+						postMessage({
+							type: 'error',
+							message: error instanceof Error ? error.message : String(error),
+							requestId: msg.requestId,
+						});
+					}
+				}
 				if (result.errors.length === 0) {
 					postMessage({ type: 'gitOverlayActionCompleted', action: 'review-request' });
 				}

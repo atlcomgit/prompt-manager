@@ -1,11 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
+import { createDefaultEditorPromptViewState } from '../src/types/prompt.js';
 
 const originalLoad = (Module as any)._load;
 
 function createDisposable() {
 	return { dispose() { } };
+}
+
+function createDeferred<T>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
 }
 
 function createVsCodeMock() {
@@ -45,13 +56,23 @@ async function importStateService() {
 	}
 }
 
-function createWorkspaceStateMock(initial: Record<string, unknown> = {}) {
+function createWorkspaceStateMock(
+	initial: Record<string, unknown> = {},
+	overrides?: {
+		update?: (store: Map<string, unknown>, key: string, value: unknown) => Promise<void>;
+	},
+) {
 	const store = new Map<string, unknown>(Object.entries(initial));
 	return {
 		get<T>(key: string, defaultValue?: T): T | undefined {
 			return store.has(key) ? store.get(key) as T : defaultValue;
 		},
 		async update(key: string, value: unknown): Promise<void> {
+			if (overrides?.update) {
+				await overrides.update(store, key, value);
+				return;
+			}
+
 			if (typeof value === 'undefined') {
 				store.delete(key);
 				return;
@@ -93,6 +114,79 @@ test('StateService saveGlobalAgentContext persists inferred and explicit sources
 	assert.equal(service.getGlobalAgentContext(), '');
 	assert.equal(service.getGlobalAgentContextSource(), 'empty');
 	assert.equal(workspaceState.store.get('promptManager.globalAgentContextSource'), 'empty');
+});
+
+test('StateService serializes prompt editor view-state save and migrate mutations', async () => {
+	const { StateService } = await importStateService();
+	const firstUpdateGate = createDeferred<void>();
+	let updateCount = 0;
+	const panelFallbackState = {
+		...createDefaultEditorPromptViewState(),
+		expandedSections: {
+			...createDefaultEditorPromptViewState().expandedSections,
+			report: true,
+		},
+	};
+	const workspaceState = createWorkspaceStateMock({
+		'promptManager.editorPromptViewState': {
+			'panel:__prompt_editor_singleton__': panelFallbackState,
+		},
+	}, {
+		update: async (store, key, value) => {
+			updateCount += 1;
+			if (updateCount === 1) {
+				await firstUpdateGate.promise;
+			}
+
+			if (typeof value === 'undefined') {
+				store.delete(key);
+				return;
+			}
+
+			store.set(key, value);
+		},
+	});
+	const service = new StateService({ workspaceState } as any);
+	const promptAState = {
+		...createDefaultEditorPromptViewState(),
+		expandedSections: {
+			...createDefaultEditorPromptViewState().expandedSections,
+			files: true,
+			workspace: false,
+		},
+	};
+
+	const savePromise = service.savePromptEditorViewState({
+		promptUuid: 'uuid-a',
+		promptId: 'prompt-a',
+	}, promptAState);
+	const migratePromise = service.migratePromptEditorViewState([
+		{ fallbackKey: 'panel:__prompt_editor_singleton__' },
+	], {
+		promptUuid: 'uuid-b',
+		promptId: 'prompt-b',
+		fallbackKey: 'panel:__prompt_editor_singleton__',
+	});
+
+	firstUpdateGate.resolve();
+	await Promise.all([savePromise, migratePromise]);
+
+	assert.equal(service.getPromptEditorViewState({
+		promptUuid: 'uuid-a',
+		promptId: 'prompt-a',
+	}).expandedSections.files, true);
+	assert.equal(service.getPromptEditorViewState({
+		promptUuid: 'uuid-a',
+		promptId: 'prompt-a',
+	}).expandedSections.workspace, false);
+	assert.equal(service.getPromptEditorViewState({
+		promptUuid: 'uuid-b',
+		promptId: 'prompt-b',
+	}).expandedSections.report, true);
+	assert.equal(service.getPromptEditorViewState({
+		promptUuid: 'uuid-b',
+		promptId: 'prompt-b',
+	}).expandedSections.files, false);
 });
 
 test('StateService chat session relevance ignores sessions completed before the tracked start', async () => {

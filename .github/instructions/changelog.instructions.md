@@ -1,3 +1,21 @@
+## 134: Поиск по файлам и сохранение состояния
+
+- Дата: 2026-05-15.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: В sidebar-поиск добавлен runtime-only полнотекстовый корпус по `plan.md`, `report.txt` и содержимому выбранного HTTP examples файла, а сохранение раскрытых секций редактора переведено на сериализованные мутации общей карты editor view state, чтобы блоки вроде `Файлы` не схлопывались после сохранения и переключения между промптами.
+- Ключевые моменты: `StorageService` теперь строит `sidebarSearchText` при чтении/сохранении prompt config, обновляет кэш prompt list при изменениях `plan.md` и `report.txt`, и не записывает runtime поля обратно в `config.json`; `SidebarApp` ищет по этому корпусу без чтения файлов на каждый ввод; `StateService` сериализует `savePromptEditorViewState` и `migratePromptEditorViewState`, поэтому конкурирующие async write-path больше не теряют состояние других prompt sections; добавлены focused regression tests на sidebar search corpus и на lost-update сценарий editor view state.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/services/stateService.ts
+  src/services/storageService.ts
+  src/types/prompt.ts
+  src/webview/sidebar/SidebarApp.tsx
+  tests/sidebarArchiveSearch.test.ts
+  tests/stateService.test.ts
+  tests/storageServiceSidebarSearch.test.ts
+
 ## 133: Зависание при создании MR/PR для всех
 
 - Дата: 2026-05-14.

@@ -47,6 +47,26 @@ export function getSidebarPromptSearchPool(
   return search.trim() ? [...prompts, ...archivedPrompts] : [...prompts];
 }
 
+/** Match a prompt against the sidebar full-text query using config fields and runtime search corpus. */
+export function matchesSidebarPromptSearch(prompt: PromptConfig, search: string): boolean {
+  const normalizedQuery = search.trim().toLocaleLowerCase();
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  return (prompt.title || '').toLocaleLowerCase().includes(normalizedQuery)
+    || (prompt.description || '').toLocaleLowerCase().includes(normalizedQuery)
+    || prompt.id.toLocaleLowerCase().includes(normalizedQuery)
+    || (prompt.taskNumber || '').toLocaleLowerCase().includes(normalizedQuery)
+    || (prompt.branch || '').toLocaleLowerCase().includes(normalizedQuery)
+    || prompt.status.toLocaleLowerCase().includes(normalizedQuery)
+    || prompt.languages.some(language => language.toLocaleLowerCase().includes(normalizedQuery))
+    || prompt.frameworks.some(framework => framework.toLocaleLowerCase().includes(normalizedQuery))
+    || prompt.projects.some(project => project.toLocaleLowerCase().includes(normalizedQuery))
+    || prompt.contextFiles.some(filePath => filePath.toLocaleLowerCase().includes(normalizedQuery))
+    || (prompt.sidebarSearchText || '').toLocaleLowerCase().includes(normalizedQuery);
+}
+
 export const SidebarApp: React.FC = () => {
   const OPEN_PROMPT_DEBOUNCE_MS = 120;
   const t = useT();
@@ -267,19 +287,7 @@ export const SidebarApp: React.FC = () => {
 
     // Search across all fields
     if (search) {
-      const q = search.toLowerCase();
-      result = result.filter(p =>
-        (p.title || '').toLowerCase().includes(q) ||
-        (p.description || '').toLowerCase().includes(q) ||
-        p.id.toLowerCase().includes(q) ||
-        (p.taskNumber || '').toLowerCase().includes(q) ||
-        (p.branch || '').toLowerCase().includes(q) ||
-        p.status.toLowerCase().includes(q) ||
-        p.languages.some(l => l.toLowerCase().includes(q)) ||
-        p.frameworks.some(f => f.toLowerCase().includes(q)) ||
-        p.projects.some(pr => pr.toLowerCase().includes(q)) ||
-        p.contextFiles.some(cf => cf.toLowerCase().includes(q))
-      );
+      result = result.filter(prompt => matchesSidebarPromptSearch(prompt, search));
     }
 
     // Status filter

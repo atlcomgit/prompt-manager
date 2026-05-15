@@ -32,6 +32,7 @@ function makePromptConfig(id: string, status: PromptStatus, archived: boolean): 
 		timeSpentOnTask: 0,
 		timeSpentUntracked: 0,
 		notes: '',
+		sidebarSearchText: '',
 		createdAt: '2026-04-09T00:00:00.000Z',
 		updatedAt: '2026-04-09T00:00:00.000Z',
 	};
@@ -70,4 +71,14 @@ test('getSidebarPromptSearchPool keeps archived prompts hidden until search is a
 		getSidebarPromptSearchPool(activePrompts, archivedPrompts, 'archived').map((prompt: PromptConfig) => prompt.id),
 		['active-a', 'archived-a'],
 	);
+});
+
+test('matchesSidebarPromptSearch also finds text from the runtime sidebar search corpus', async () => {
+	const { matchesSidebarPromptSearch } = await importSidebarHelpers();
+	const prompt = makePromptConfig('active-a', 'draft', false);
+	prompt.sidebarSearchText = 'plan line important report snippet POST /api/example';
+
+	assert.equal(matchesSidebarPromptSearch(prompt, 'important'), true);
+	assert.equal(matchesSidebarPromptSearch(prompt, 'POST /api/example'), true);
+	assert.equal(matchesSidebarPromptSearch(prompt, 'missing token'), false);
 });

@@ -460,6 +460,8 @@ export interface PromptConfig {
 	// --- Agent progress ---
 	/** Task completion progress (0–100) read from agent.json at runtime; not persisted in config.json */
 	progress?: number;
+	/** Sidebar-only search corpus built from plan/report/http example file contents at runtime */
+	sidebarSearchText?: string;
 
 	// --- Custom groups ---
 	/** IDs of custom user-defined groups this prompt belongs to */

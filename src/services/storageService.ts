@@ -61,6 +61,9 @@ interface PromptStorageLocation {
 export class StorageService implements vscode.Disposable {
 	private readonly STORAGE_DIR = '.vscode/prompt-manager';
 	private readonly ARCHIVE_DIR_NAME = 'archive';
+	private readonly PLAN_FILE_NAME = 'plan.md';
+	private readonly REPORT_FILE_NAME = 'report.txt';
+	private readonly CONFIG_FILE_NAME = 'config.json';
 	private readonly RESERVED_PROMPT_DIR_NAMES = new Set(['chat-memory', 'codemap', 'archive']);
 	private readonly HISTORY_DIR_NAME = 'history';
 	private readonly DAILY_TIME_FILE = 'daily-time.json';
@@ -212,6 +215,70 @@ export class StorageService implements vscode.Disposable {
 	/** Get path to a prompt folder */
 	private promptDir(id: string, archived: boolean = false): string {
 		return path.join(archived ? this.archiveStorageDir : this.storageDir, id);
+	}
+
+	/** Build a compact lowercase search corpus for sidebar full-text matching. */
+	private normalizeSidebarSearchText(...parts: Array<string | null | undefined>): string {
+		return parts
+			.map(part => typeof part === 'string' ? part : '')
+			.filter(Boolean)
+			.join('\n')
+			.replace(/\s+/g, ' ')
+			.trim()
+			.toLocaleLowerCase();
+	}
+
+	/** Read text file content with a safe empty-string fallback. */
+	private async readTextFileOrEmpty(filePath: string): Promise<string> {
+		try {
+			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(filePath));
+			return Buffer.from(raw).toString('utf-8');
+		} catch {
+			return '';
+		}
+	}
+
+	/** Resolve the stored HTTP examples path using the same workspace-relative semantics as other files. */
+	private resolveHttpExamplesPath(filePath: string): string | null {
+		return this.resolveStoredContextFilePath(filePath);
+	}
+
+	/** Build runtime-only sidebar search text from prompt-local support files. */
+	private async buildSidebarSearchText(promptDirPath: string, httpExamples: string): Promise<string> {
+		const [planText, reportText, httpExamplesText] = await Promise.all([
+			this.readTextFileOrEmpty(path.join(promptDirPath, this.PLAN_FILE_NAME)),
+			this.readTextFileOrEmpty(path.join(promptDirPath, this.REPORT_FILE_NAME)),
+			(async () => {
+				const resolvedHttpExamplesPath = this.resolveHttpExamplesPath(httpExamples);
+				if (!resolvedHttpExamplesPath) {
+					return '';
+				}
+
+				return this.readTextFileOrEmpty(resolvedHttpExamplesPath);
+			})(),
+		]);
+
+		return this.normalizeSidebarSearchText(planText, reportText, httpExamplesText);
+	}
+
+	/** Attach the runtime sidebar search corpus without mutating persisted config fields. */
+	private async attachSidebarSearchText(config: PromptConfig, promptDirPath: string): Promise<PromptConfig> {
+		const sidebarSearchText = await this.buildSidebarSearchText(promptDirPath, config.httpExamples || '');
+		return {
+			...config,
+			sidebarSearchText,
+		};
+	}
+
+	/** Serialize only persisted prompt-config fields and omit runtime-only state. */
+	private serializeStoredPromptConfig(config: PromptConfig): string {
+		const {
+			progress: _progress,
+			sidebarSearchText: _sidebarSearchText,
+			...storedConfig
+		} = config;
+
+		return JSON.stringify(storedConfig, null, 2);
 	}
 
 	private directoryExistsSync(dirPath: string): boolean {
@@ -458,21 +525,47 @@ export class StorageService implements vscode.Disposable {
 			return;
 		}
 
-		const watcher = vscode.workspace.createFileSystemWatcher(
-			new vscode.RelativePattern(this.workspaceRoot, `${this.STORAGE_DIR}/**/config.json`)
+		const configWatcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(this.workspaceRoot, `${this.STORAGE_DIR}/**/${this.CONFIG_FILE_NAME}`)
+		);
+		const planWatcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(this.workspaceRoot, `${this.STORAGE_DIR}/**/${this.PLAN_FILE_NAME}`)
+		);
+		const reportWatcher = vscode.workspace.createFileSystemWatcher(
+			new vscode.RelativePattern(this.workspaceRoot, `${this.STORAGE_DIR}/**/${this.REPORT_FILE_NAME}`)
 		);
 
-		this.promptConfigWatcher = watcher;
+		this.promptConfigWatcher = configWatcher;
 		this.promptConfigWatcherDisposables = [
-			watcher,
-			watcher.onDidCreate((uri) => {
+			configWatcher,
+			configWatcher.onDidCreate((uri) => {
 				void this.handleWatchedPromptConfigChange(uri, 'created');
 			}),
-			watcher.onDidChange((uri) => {
+			configWatcher.onDidChange((uri) => {
 				void this.handleWatchedPromptConfigChange(uri, 'changed');
 			}),
-			watcher.onDidDelete((uri) => {
+			configWatcher.onDidDelete((uri) => {
 				void this.handleWatchedPromptConfigChange(uri, 'deleted');
+			}),
+			planWatcher,
+			planWatcher.onDidCreate((uri) => {
+				void this.handleWatchedPromptSearchSupportFileChange(uri, this.PLAN_FILE_NAME);
+			}),
+			planWatcher.onDidChange((uri) => {
+				void this.handleWatchedPromptSearchSupportFileChange(uri, this.PLAN_FILE_NAME);
+			}),
+			planWatcher.onDidDelete((uri) => {
+				void this.handleWatchedPromptSearchSupportFileChange(uri, this.PLAN_FILE_NAME);
+			}),
+			reportWatcher,
+			reportWatcher.onDidCreate((uri) => {
+				void this.handleWatchedPromptSearchSupportFileChange(uri, this.REPORT_FILE_NAME);
+			}),
+			reportWatcher.onDidChange((uri) => {
+				void this.handleWatchedPromptSearchSupportFileChange(uri, this.REPORT_FILE_NAME);
+			}),
+			reportWatcher.onDidDelete((uri) => {
+				void this.handleWatchedPromptSearchSupportFileChange(uri, this.REPORT_FILE_NAME);
 			}),
 		];
 	}
@@ -509,7 +602,10 @@ export class StorageService implements vscode.Disposable {
 		return typeof expiresAt === 'number' && expiresAt > now;
 	}
 
-	private resolvePromptConfigPathDetails(uri: vscode.Uri): { id: string; archived: boolean } | null {
+	private resolvePromptStorageFilePathDetails(
+		uri: vscode.Uri,
+		expectedFileName: string,
+	): { id: string; archived: boolean } | null {
 		const normalizedFilePath = path.normalize(uri.fsPath);
 		const archiveRoot = path.normalize(this.archiveStorageDir);
 		const activeRoot = path.normalize(this.storageDir);
@@ -517,7 +613,7 @@ export class StorageService implements vscode.Disposable {
 		if (normalizedFilePath.startsWith(`${archiveRoot}${path.sep}`)) {
 			const relativePath = path.relative(archiveRoot, normalizedFilePath);
 			const segments = relativePath.split(path.sep).filter(Boolean);
-			if (segments.length === 2 && segments[1] === 'config.json' && !this.isReservedPromptDirName(segments[0])) {
+			if (segments.length === 2 && segments[1] === expectedFileName && !this.isReservedPromptDirName(segments[0])) {
 				return { id: segments[0], archived: true };
 			}
 			return null;
@@ -529,11 +625,15 @@ export class StorageService implements vscode.Disposable {
 
 		const relativePath = path.relative(activeRoot, normalizedFilePath);
 		const segments = relativePath.split(path.sep).filter(Boolean);
-		if (segments.length !== 2 || segments[1] !== 'config.json' || this.isReservedPromptDirName(segments[0])) {
+		if (segments.length !== 2 || segments[1] !== expectedFileName || this.isReservedPromptDirName(segments[0])) {
 			return null;
 		}
 
 		return { id: segments[0], archived: false };
+	}
+
+	private resolvePromptConfigPathDetails(uri: vscode.Uri): { id: string; archived: boolean } | null {
+		return this.resolvePromptStorageFilePathDetails(uri, this.CONFIG_FILE_NAME);
 	}
 
 	private queueExternalPromptConfigChange(change: ExternalPromptConfigChange): void {
@@ -622,6 +722,42 @@ export class StorageService implements vscode.Disposable {
 			config,
 			uri,
 			externalChangedAt: normalizePromptExternalChangedAt(config.updatedAt, fileMtimeMs),
+		});
+	}
+
+	/** Refresh cached sidebar search data when plan/report files change outside config.json. */
+	private async handleWatchedPromptSearchSupportFileChange(
+		uri: vscode.Uri,
+		expectedFileName: string,
+	): Promise<void> {
+		const pathDetails = this.resolvePromptStorageFilePathDetails(uri, expectedFileName);
+		if (!pathDetails) {
+			return;
+		}
+
+		const config = await this.readConfig(pathDetails.id, {
+			archived: pathDetails.archived,
+			dirPath: path.dirname(uri.fsPath),
+		});
+		if (!config) {
+			return;
+		}
+
+		if (!pathDetails.archived) {
+			if (this._listCache === null) {
+				await this.updateListCacheEntry(config);
+			} else {
+				this.updateListCacheEntryFast(config);
+			}
+		}
+
+		this.queueExternalPromptConfigChange({
+			id: pathDetails.id,
+			archived: pathDetails.archived,
+			kind: 'changed',
+			config,
+			uri,
+			externalChangedAt: Date.now(),
 		});
 	}
 
@@ -860,7 +996,7 @@ export class StorageService implements vscode.Disposable {
 	private async readConfig(id: string, options?: { archived?: boolean; dirPath?: string }): Promise<PromptConfig | null> {
 		const archived = options?.archived === true;
 		const dirPath = options?.dirPath || this.promptDir(id, archived);
-		const configPath = path.join(dirPath, 'config.json');
+		const configPath = path.join(dirPath, this.CONFIG_FILE_NAME);
 		try {
 			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(configPath));
 			const parsed = JSON.parse(Buffer.from(raw).toString('utf-8')) as Partial<PromptConfig>;
@@ -882,14 +1018,14 @@ export class StorageService implements vscode.Disposable {
 					this.markInternalConfigWrite(configPath);
 					await vscode.workspace.fs.writeFile(
 						vscode.Uri.file(configPath),
-						Buffer.from(JSON.stringify(config, null, 2), 'utf-8'),
+						Buffer.from(this.serializeStoredPromptConfig(config), 'utf-8'),
 					);
 				} catch {
 					// Ignore backfill failures and continue with in-memory config.
 				}
 			}
 
-			return config;
+			return this.attachSidebarSearchText(config, dirPath);
 		} catch {
 			return null;
 		}
@@ -1065,12 +1201,12 @@ export class StorageService implements vscode.Disposable {
 		prompt.contextFiles = repairedContextFiles.contextFiles;
 
 		// Save config.json (without content field)
-		const { content, report, ...config } = prompt;
+		const { content, report, progress: _progress, sidebarSearchText: _sidebarSearchText, ...config } = prompt;
 		config.updatedAt = new Date().toISOString();
 		config.archived = targetArchived;
 
-		const configPath = path.join(dir, 'config.json');
-		const configJson = JSON.stringify(config, null, 2);
+		const configPath = path.join(dir, this.CONFIG_FILE_NAME);
+		const configJson = this.serializeStoredPromptConfig(config);
 		const nextContent = content || '';
 		const nextReport = report || '';
 		const shouldWritePromptContent = !existingPrompt || (existingPrompt.content || '') !== nextContent;
@@ -1149,11 +1285,13 @@ export class StorageService implements vscode.Disposable {
 			);
 		}
 
+		const cachedConfig = await this.attachSidebarSearchText(config, dir);
+
 		// Обновление in-memory кэша — мгновенно; файловая запись в фоне
-		this.updateListCacheEntryFast(config, previousId && previousId !== prompt.id ? previousId : undefined);
+		this.updateListCacheEntryFast(cachedConfig, previousId && previousId !== prompt.id ? previousId : undefined);
 
 		// Возвращаем полный Prompt (config + content + report) чтобы не требовался повторный getPrompt()
-		return { ...config, content, report };
+		return { ...cachedConfig, content, report };
 	}
 
 	async listPromptHistory(promptId: string): Promise<Array<{ id: string; createdAt: string; reason: PromptHistoryReason }>> {

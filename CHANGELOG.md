@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Sidebar prompt search now also indexes prompt-local `plan.md`, `report.txt`, and the selected HTTP examples file contents through a runtime-only search corpus, so prompts can be found by saved plans, reports, and request samples without reading files on each keystroke.
 - Added `promptManager.excludedProjects` so selected workspace folders can be hidden from prompt project pickers, Git Flow, dashboard widgets, Project Memory, and new CodeMap/Memory runtime collection while previously stored history stays intact.
 - Start Chat context now adds an `Excluded projects` section immediately after `Projects`, so readonly workspace exclusions are visible to the model without mixing them into the active task scope.
 - Start Chat context now prepends a mandatory note before the `### Tools` list, so listed Skills, MCP tools, hooks, and the preferred model stay explicit required tooling whenever they are available and relevant.
@@ -35,6 +36,7 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- Prompt editor section expansion state no longer gets lost when saving one prompt, creating or saving another prompt, and then returning to the first one; editor view-state saves and migrations are now serialized so blocks like `Files` stay restored consistently across prompt switches.
 - Closed prompts no longer accumulate automatically derived implementing time from background chat-session refresh, silent/manual implementing-time recalculation, or late chat completion after the prompt has already been moved to `closed`; manual `Misc time` adjustments remain available.
 - Clicking `+ Новый` while another prompt page is open no longer lets an intermediate sidebar refresh select the wrong prompt; the optimistic `__new__` row now resolves only through the exact saved `promptUuid` instead of the first unseen prompt id.
 - The Process tab report editor now keeps the surrounding page scroll stable not only while typing but also while switching between Text / Html / Markdown views and while leaving the field on blur: the raw Text source surface was rewritten from a native textarea to a plain-text `contenteditable` editor, pending autosave still waits for the inline editor to really yield focus, mode switches snapshot and restore page scroll before the editor surface swap, clearly stale first-pass auto-resize measurements are retried instead of collapsing the editor to a false minimal height, and same-content save echoes still no longer leave the prompt in a fake dirty loop or trigger repeated dashboard churn.

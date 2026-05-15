@@ -43,6 +43,7 @@ const STATISTICS_UI_STATE_KEY = 'promptManager.statisticsUiState';
 export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
 	private static readonly GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchesByProjectPreference';
+	private promptEditorViewStateMutationQueue: Promise<void> = Promise.resolve();
 
 	/** Normalize persisted global-context source and keep legacy workspaces predictable. */
 	private static normalizeGlobalAgentContextSource(
@@ -976,6 +977,27 @@ export class StateService {
 		]);
 	}
 
+	/** Serialize mutations of the shared editor view-state map to avoid lost updates between async writes. */
+	private async mutatePromptEditorViewStateStore(
+		mutator: (current: Record<string, EditorPromptViewState>) => Record<string, EditorPromptViewState> | undefined,
+	): Promise<void> {
+		const applyMutation = async (): Promise<void> => {
+			const current = this.context.workspaceState.get<Record<string, EditorPromptViewState>>(
+				PROMPT_EDITOR_VIEW_STATE_KEY,
+				{},
+			);
+			const next = mutator(current);
+			await this.context.workspaceState.update(
+				PROMPT_EDITOR_VIEW_STATE_KEY,
+				next && Object.keys(next).length > 0 ? next : undefined,
+			);
+		};
+
+		const pendingMutation = this.promptEditorViewStateMutationQueue.then(applyMutation, applyMutation);
+		this.promptEditorViewStateMutationQueue = pendingMutation.catch(() => undefined);
+		await pendingMutation;
+	}
+
 	getPromptEditorViewState(source?: EditorPromptViewStateKeySource | null): EditorPromptViewState {
 		const saved = this.context.workspaceState.get<Record<string, EditorPromptViewState>>(PROMPT_EDITOR_VIEW_STATE_KEY, {});
 		for (const key of getEditorPromptViewStateStorageKeys(source)) {
@@ -997,23 +1019,17 @@ export class StateService {
 			return;
 		}
 
-		const current = this.context.workspaceState.get<Record<string, EditorPromptViewState>>(PROMPT_EDITOR_VIEW_STATE_KEY, {});
-		await this.context.workspaceState.update(PROMPT_EDITOR_VIEW_STATE_KEY, {
+		await this.mutatePromptEditorViewStateStore(current => ({
 			...current,
 			[key]: normalizeEditorPromptViewState(state),
-		});
+		}));
 	}
 
 	async migratePromptEditorViewState(
 		fromSources: Array<EditorPromptViewStateKeySource | null | undefined>,
 		toSource: EditorPromptViewStateKeySource | null | undefined,
 	): Promise<void> {
-		const current = this.context.workspaceState.get<Record<string, EditorPromptViewState>>(PROMPT_EDITOR_VIEW_STATE_KEY, {});
-		const next = moveEditorPromptViewStateEntries(current, fromSources, toSource);
-		await this.context.workspaceState.update(
-			PROMPT_EDITOR_VIEW_STATE_KEY,
-			Object.keys(next).length > 0 ? next : undefined,
-		);
+		await this.mutatePromptEditorViewStateStore(current => moveEditorPromptViewStateEntries(current, fromSources, toSource));
 	}
 
 	getGitOverlayTrackedBranchPreference(): string {

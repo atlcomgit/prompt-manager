@@ -705,13 +705,18 @@ function renderBranchProject(
 	const incomingFilesExpanded = expanded[incomingFilesToggleKey] === true;
 	const hasUncommittedFiles = project.uncommittedFiles.length > 0;
 	const uncommittedFilesExpanded = expanded[dirtyFilesToggleKey] === true;
+	const branchSelectStyle = {
+		...styles.branchSelect,
+		...(project.hasPromptBranchMismatch ? styles.branchSelectMismatch : null),
+	};
 	return (
 		<div key={project.project} style={{ ...styles.branchProjectRow, ...(index === 0 ? styles.branchProjectRowFirst : null) }}>
 			<div style={styles.projectName} title={`${project.project}\nТекущая ветка: ${project.currentBranch || 'n/a'}`}>{projectLabel}</div>
 			<label style={styles.branchSelectInlineLabel}>
 				<select
 					value={selectedBranch}
-					style={styles.branchSelect}
+					style={branchSelectStyle}
+					aria-invalid={project.hasPromptBranchMismatch || undefined}
 					disabled={isSwitchBusy || !project.available || branchOptions.length === 0}
 					onChange={event => {
 						const branch = event.target.value;
@@ -2872,6 +2877,10 @@ const styles: Record<string, React.CSSProperties> = {
 		color: 'var(--vscode-dropdown-foreground, var(--vscode-input-foreground))',
 		fontFamily: 'var(--vscode-font-family)',
 		fontSize: '12px',
+	},
+	// Highlights branch selects whose current branch does not match the prompt branch.
+	branchSelectMismatch: {
+		border: '1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground))',
 	},
 	// Адаптивная сетка мелких метаданных по проекту.
 	metaGrid: {

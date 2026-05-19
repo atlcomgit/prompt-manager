@@ -36,6 +36,7 @@
 - Project Memory now opens on a new dashboard-first landing page with top-level Dashboard / Histories / Instructions / Settings navigation, unified card styling across the Memory webview, richer overview charts and rankings, and a single Settings surface that combines history-memory and codemap instruction options under internal tabs.
 
 ### Fixed
+- The `Ветки проектов` dashboard widget now marks only the branch select with a red validation border when a selected prompt project is on a different current branch than the prompt Git branch, while workspace-only rows shown through `Показать все` stay neutral.
 - Prompt editor section expansion state no longer gets lost when saving one prompt, creating or saving another prompt, and then returning to the first one; editor view-state saves and migrations are now serialized so blocks like `Files` stay restored consistently across prompt switches.
 - Closed prompts no longer accumulate automatically derived implementing time from background chat-session refresh, silent/manual implementing-time recalculation, or late chat completion after the prompt has already been moved to `closed`; manual `Misc time` adjustments remain available.
 - Clicking `+ Новый` while another prompt page is open no longer lets an intermediate sidebar refresh select the wrong prompt; the optimistic `__new__` row now resolves only through the exact saved `promptUuid` instead of the first unseen prompt id.

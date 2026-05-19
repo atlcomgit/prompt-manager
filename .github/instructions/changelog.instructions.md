@@ -1,3 +1,20 @@
+## 136: Красная рамка для несоответствующих веток проектов
+
+- Дата: 2026-05-19.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: В виджете `Ветки проектов` добавлена строгая визуальная индикация несоответствия ветке промпта: если проект выбран в промпте, у промпта задана Git-ветка и текущая ветка проекта не равна `prompt.branch`, select выбора ветки получает красную рамку.
+- Ключевые моменты: `PromptDashboardService` теперь вычисляет явный `hasPromptBranchMismatch` только для проектов из `prompt.projects`, поэтому даже в режиме `Показать все` workspace-only строки не подсвечиваются; `PromptDashboard` применяет красный border только к select ветки и не меняет текущую логику Git Flow/start-chat preflight; добавлены focused regression tests на summary-state и SSR-render branch select.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/services/promptDashboardService.ts
+  src/types/promptDashboard.ts
+  src/webview/editor/components/PromptDashboard.tsx
+  tests/promptDashboard.test.ts
+  tests/promptDashboardComponent.test.tsx
+  tests/promptDashboardService.test.ts
+
 ## 134: Поиск по файлам и сохранение состояния
 
 - Дата: 2026-05-15.

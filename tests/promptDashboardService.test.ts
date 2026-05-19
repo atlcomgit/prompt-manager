@@ -1545,6 +1545,100 @@ test('PromptDashboardService analyzeParallelReview reuses cached review states f
 	service.dispose();
 });
 
+test('PromptDashboardService flags prompt-branch mismatches only for selected prompt projects', async () => {
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+		['web', '/workspace/web'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project, {
+					currentBranch: 'main',
+					promptBranch: 'feature/task-107',
+				})),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	try {
+		const widget = await service.refreshProjectsWidget(createPrompt({
+			projects: ['api'],
+			trackedBranchesByProject: { api: 'main' },
+		}));
+
+		assert.equal(widget.data.projects[0]?.project, 'api');
+		assert.equal(widget.data.projects[0]?.hasPromptBranchMismatch, true);
+		assert.equal(widget.data.branchProjects?.find(project => project.project === 'api')?.hasPromptBranchMismatch, true);
+		assert.equal(widget.data.branchProjects?.find(project => project.project === 'web')?.hasPromptBranchMismatch, false);
+	} finally {
+		service.dispose();
+	}
+});
+
+test('PromptDashboardService skips prompt-branch mismatches when the prompt branch is empty', async () => {
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project, {
+					currentBranch: 'main',
+					promptBranch: '',
+				})),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	try {
+		const widget = await service.refreshProjectsWidget(createPrompt({
+			projects: ['api'],
+			branch: '',
+			trackedBranchesByProject: { api: 'main' },
+		}));
+
+		assert.equal(widget.data.projects[0]?.hasPromptBranchMismatch, false);
+		assert.equal(widget.data.branchProjects?.find(project => project.project === 'api')?.hasPromptBranchMismatch, false);
+	} finally {
+		service.dispose();
+	}
+});
+
 test('PromptDashboardService keeps branch-switch errors on the matching project row and exposes uncommitted files', async () => {
 	let switchShouldFail = true;
 	const workspaceFolders = new Map([

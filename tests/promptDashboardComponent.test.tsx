@@ -55,6 +55,7 @@ function createProject(overrides: Partial<PromptDashboardProjectSummary> = {}): 
 		repositoryPath: '/workspace/api',
 		available: true,
 		error: '',
+		hasPromptBranchMismatch: false,
 		currentBranch: 'main',
 		promptBranch: 'feature/task-107',
 		trackedBranch: 'develop',
@@ -622,6 +623,29 @@ test('PromptDashboard shows branch-switch errors and a dirty-files disclosure un
 	assert.match(markup, /title="Показать список незакоммиченных файлов"/);
 	assert.match(markup, />2<\/span>/);
 	assert.doesNotMatch(markup, /work/);
+});
+
+test('PromptDashboard highlights the branch select for prompt-branch mismatches', () => {
+	const markup = renderDashboard(createSnapshot([
+		createProject({
+			hasPromptBranchMismatch: true,
+		}),
+	]));
+
+	assert.match(markup, /aria-invalid="true"/);
+	assert.match(markup, /--vscode-inputValidation-errorBorder/);
+});
+
+test('PromptDashboard keeps the branch select neutral when there is no prompt-branch mismatch', () => {
+	const markup = renderDashboard(createSnapshot([
+		createProject({
+			currentBranch: 'feature/task-107',
+			hasPromptBranchMismatch: false,
+		}),
+	]));
+
+	assert.doesNotMatch(markup, /aria-invalid="true"/);
+	assert.doesNotMatch(markup, /--vscode-inputValidation-errorBorder/);
 });
 
 test('PromptDashboard shows a quick preliminary summary while AI review is still running', () => {

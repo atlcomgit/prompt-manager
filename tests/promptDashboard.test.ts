@@ -323,6 +323,7 @@ test('preservePromptDashboardProjectsLoadingSnapshot keeps previous rows during 
 		available: true,
 		error: '',
 		branchSwitchError: '',
+		hasPromptBranchMismatch: false,
 		currentBranch: 'main',
 		promptBranch: 'feature/task-1',
 		trackedBranch: 'main',

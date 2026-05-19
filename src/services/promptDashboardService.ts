@@ -1581,12 +1581,14 @@ export class PromptDashboardService implements vscode.Disposable {
 				: displayParallelBranches;
 			this.ensureScopeActive(scope);
 			const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
+			const hasPromptBranchMismatch = this.hasPromptBranchMismatch(scope, project);
 			return {
 				project: project.project,
 				repositoryPath: project.repositoryPath,
 				available: project.available,
 				error: project.error,
 				branchSwitchError: '',
+				hasPromptBranchMismatch,
 				currentBranch: project.currentBranch,
 				promptBranch: project.promptBranch,
 				trackedBranch,
@@ -1654,12 +1656,14 @@ export class PromptDashboardService implements vscode.Disposable {
 			const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshot.trackedBranches);
 			const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
 			const { incomingFiles, incomingAuthors } = await this.loadIncomingSummaryForProject(project);
+			const hasPromptBranchMismatch = this.hasPromptBranchMismatch(scope, project);
 			return {
 				project: project.project,
 				repositoryPath: project.repositoryPath,
 				available: project.available,
 				error: project.error,
 				branchSwitchError: '',
+				hasPromptBranchMismatch,
 				currentBranch: project.currentBranch,
 				promptBranch: project.promptBranch,
 				trackedBranch,
@@ -1694,6 +1698,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		cachedProject?: PromptDashboardProjectSummary,
 	): PromptDashboardProjectSummary {
 		const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
+		const hasPromptBranchMismatch = this.hasPromptBranchMismatch(scope, project);
 		const preservedRecentCommits = cachedProject ? cachedProject.recentCommits : this.buildPlaceholderRecentCommits(project);
 		const preservedReview = cachedProject ? cachedProject.review : project.review;
 		const preservedPipeline = cachedProject ? cachedProject.pipeline : null;
@@ -1709,6 +1714,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				available: project.available,
 				error: project.error,
 				branchSwitchError: '',
+				hasPromptBranchMismatch,
 				currentBranch: project.currentBranch,
 				promptBranch: project.promptBranch,
 				trackedBranch,
@@ -1737,6 +1743,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			...cachedProject,
 			available: project.available,
 			error: project.error,
+			hasPromptBranchMismatch,
 			currentBranch: project.currentBranch || cachedProject.currentBranch,
 			promptBranch: project.promptBranch || cachedProject.promptBranch,
 			trackedBranch,
@@ -2032,6 +2039,24 @@ export class PromptDashboardService implements vscode.Disposable {
 			: this.buildDisplayParallelBranches(scope, project, trackedBranch);
 	}
 
+	/** Flag only selected prompt projects whose current branch differs from the prompt branch. */
+	private hasPromptBranchMismatch(
+		scope: PromptDashboardScope,
+		project: Pick<GitOverlayProjectSnapshot, 'project' | 'currentBranch' | 'available'>,
+	): boolean {
+		const promptBranch = scope.promptBranch.trim();
+		if (!promptBranch || !project.available) {
+			return false;
+		}
+
+		const projectName = project.project.trim();
+		if (!projectName || !scope.projectNames.includes(projectName)) {
+			return false;
+		}
+
+		return project.currentBranch.trim() !== promptBranch;
+	}
+
 	/** Merge hydrated branch details back into the visible placeholder rows by branch name. */
 	private mergeParallelBranchDetails(
 		visibleBranches: PromptDashboardProjectSummary['parallelBranches'],
@@ -2107,6 +2132,7 @@ export class PromptDashboardService implements vscode.Disposable {
 	): PromptDashboardProjectSummary {
 		const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshotTrackedBranches);
 		const uncommittedFiles = this.collectProjectUncommittedFiles(project, excludedPaths);
+		const hasPromptBranchMismatch = this.hasPromptBranchMismatch(scope, project);
 		const reusableCachedProject = cachedProject && project.available && !project.error
 			? cachedProject
 			: null;
@@ -2121,6 +2147,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			available: project.available,
 			error: project.error,
 			branchSwitchError: '',
+			hasPromptBranchMismatch,
 			currentBranch: project.currentBranch,
 			promptBranch: project.promptBranch,
 			trackedBranch,

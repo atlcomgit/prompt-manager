@@ -63,6 +63,8 @@ export interface PromptDashboardProjectSummary {
 	available: boolean;
 	error: string;
 	branchSwitchError: string;
+	/** Flags selected prompt projects whose current branch differs from the prompt branch. */
+	hasPromptBranchMismatch: boolean;
 	currentBranch: string;
 	promptBranch: string;
 	trackedBranch: string;

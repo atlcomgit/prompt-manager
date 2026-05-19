@@ -1639,6 +1639,53 @@ test('PromptDashboardService skips prompt-branch mismatches when the prompt bran
 	}
 });
 
+test('PromptDashboardService skips prompt-branch mismatches when the prompt does not list projects', async () => {
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+		['web', '/workspace/web'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project, {
+					currentBranch: 'main',
+					promptBranch: 'feature/task-107',
+				})),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	try {
+		const widget = await service.refreshProjectsWidget(createPrompt({
+			projects: [],
+			branch: 'feature/task-107',
+			trackedBranchesByProject: {},
+		}));
+
+		assert.equal(widget.data.projects.every(project => project.hasPromptBranchMismatch === false), true);
+		assert.equal((widget.data.branchProjects ?? []).every(project => project.hasPromptBranchMismatch === false), true);
+	} finally {
+		service.dispose();
+	}
+});
+
 test('PromptDashboardService keeps branch-switch errors on the matching project row and exposes uncommitted files', async () => {
 	let switchShouldFail = true;
 	const workspaceFolders = new Map([
@@ -1797,6 +1844,7 @@ test('PromptDashboardService posts a quick local preview while AI review is stil
 		promptId: 'task-107',
 		promptUuid: 'uuid-107',
 		projectNames: ['api'],
+		selectedProjectNames: ['api'],
 		promptBranch: 'feature/task-107',
 		trackedBranch: 'main',
 		trackedBranchesByProject: { api: 'main' },

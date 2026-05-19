@@ -102,6 +102,7 @@ export interface PromptDashboardScope {
 	promptId: string;
 	promptUuid: string;
 	projectNames: string[];
+	selectedProjectNames: string[];
 	promptBranch: string;
 	trackedBranch: string;
 	trackedBranchesByProject: Record<string, string>;

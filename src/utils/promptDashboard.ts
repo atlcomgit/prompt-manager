@@ -332,6 +332,7 @@ export function shouldAcceptPromptDashboardAnalysisMessage(input: {
 
 export function buildPromptDashboardScopeKey(scope: PromptDashboardScope): string {
 	const projects = [...scope.projectNames].map(item => item.trim()).filter(Boolean).sort((a, b) => a.localeCompare(b, 'ru')).join('|');
+	const selectedProjects = [...scope.selectedProjectNames].map(item => item.trim()).filter(Boolean).sort((a, b) => a.localeCompare(b, 'ru')).join('|');
 	const trackedByProject = Object.entries(scope.trackedBranchesByProject || {})
 		.map(([project, branch]) => `${project.trim()}:${String(branch || '').trim()}`)
 		.filter(item => item !== ':')
@@ -340,6 +341,7 @@ export function buildPromptDashboardScopeKey(scope: PromptDashboardScope): strin
 	return [
 		scope.promptUuid || scope.promptId || '__new__',
 		projects,
+		selectedProjects,
 		scope.promptBranch.trim(),
 		scope.trackedBranch.trim(),
 		trackedByProject,

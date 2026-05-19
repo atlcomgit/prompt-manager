@@ -667,7 +667,13 @@ export class PromptDashboardService implements vscode.Disposable {
 	}
 
 	private createScope(prompt: Prompt): PromptDashboardScope {
-		const projectNames = this.resolveVisibleProjectNames(prompt.projects || []);
+		const requestedProjectNames = Array.from(new Set((prompt.projects || [])
+			.map(project => project.trim())
+			.filter(Boolean)));
+		const selectedProjectNames = requestedProjectNames.length > 0
+			? this.resolveVisibleProjectNames(requestedProjectNames, false)
+			: [];
+		const projectNames = this.resolveVisibleProjectNames(requestedProjectNames);
 		const trackedBranchesByProject = Object.fromEntries(
 			Object.entries(prompt.trackedBranchesByProject || {})
 				.map(([project, branch]) => [project.trim(), String(branch || '').trim()] as const)
@@ -677,6 +683,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			promptId: (prompt.id || '__new__').trim() || '__new__',
 			promptUuid: (prompt.promptUuid || '').trim(),
 			projectNames,
+			selectedProjectNames,
 			promptBranch: (prompt.branch || '').trim(),
 			trackedBranch: (prompt.trackedBranch || '').trim(),
 			trackedBranchesByProject,
@@ -821,12 +828,13 @@ export class PromptDashboardService implements vscode.Disposable {
 
 	private getProjectScopeKey(scope: PromptDashboardScope): string {
 		const projects = [...scope.projectNames].map(item => item.trim()).filter(Boolean).sort((a, b) => a.localeCompare(b, 'ru')).join('|');
+		const selectedProjects = [...scope.selectedProjectNames].map(item => item.trim()).filter(Boolean).sort((a, b) => a.localeCompare(b, 'ru')).join('|');
 		const trackedByProject = Object.entries(scope.trackedBranchesByProject || {})
 			.map(([project, branch]) => `${project.trim()}:${String(branch || '').trim()}`)
 			.filter(item => item !== ':')
 			.sort((a, b) => a.localeCompare(b, 'ru'))
 			.join('|');
-		return [projects, scope.promptBranch.trim(), scope.trackedBranch.trim(), trackedByProject].join('::');
+		return [projects, selectedProjects, scope.promptBranch.trim(), scope.trackedBranch.trim(), trackedByProject].join('::');
 	}
 
 	private getSharedProjects(scope: PromptDashboardScope): DashboardCacheEntry<PromptDashboardProjectsData> | undefined {
@@ -2045,12 +2053,12 @@ export class PromptDashboardService implements vscode.Disposable {
 		project: Pick<GitOverlayProjectSnapshot, 'project' | 'currentBranch' | 'available'>,
 	): boolean {
 		const promptBranch = scope.promptBranch.trim();
-		if (!promptBranch || !project.available) {
+		if (!promptBranch || !project.available || scope.selectedProjectNames.length === 0) {
 			return false;
 		}
 
 		const projectName = project.project.trim();
-		if (!projectName || !scope.projectNames.includes(projectName)) {
+		if (!projectName || !scope.selectedProjectNames.includes(projectName)) {
 			return false;
 		}
 

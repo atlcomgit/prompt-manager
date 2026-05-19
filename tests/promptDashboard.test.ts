@@ -195,6 +195,7 @@ test('buildPromptDashboardScopeKey is stable for project and tracked branch orde
 		promptId: 'task-1',
 		promptUuid: 'uuid-1',
 		projectNames: ['web', 'api'],
+		selectedProjectNames: ['web', 'api'],
 		promptBranch: 'feature/task-1',
 		trackedBranch: 'main',
 		trackedBranchesByProject: { web: 'develop', api: 'main' },
@@ -203,6 +204,7 @@ test('buildPromptDashboardScopeKey is stable for project and tracked branch orde
 	const same: PromptDashboardScope = {
 		...base,
 		projectNames: ['api', 'web'],
+		selectedProjectNames: ['api', 'web'],
 		trackedBranchesByProject: { api: 'main', web: 'develop' },
 	};
 

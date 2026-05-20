@@ -1583,7 +1583,7 @@ export class PromptDashboardService implements vscode.Disposable {
 						parallelBaseBranch,
 						trackedBranches,
 						PromptDashboardService.PARALLEL_BRANCH_LIMIT,
-						displayParallelBranches.map(branch => branch.name),
+						displayParallelBranches.map(branch => branch.ref || branch.name),
 					).catch(() => [])).map(branch => ({ ...branch, detailsHydrated: true })),
 				)
 				: displayParallelBranches;
@@ -1969,7 +1969,17 @@ export class PromptDashboardService implements vscode.Disposable {
 		trackedBranch: string,
 	): PromptDashboardProjectSummary['parallelBranches'] {
 		const baseBranch = this.resolveParallelBranchBase(scope, project, trackedBranch);
-		return [...(project.cleanupBranches || [])]
+		const candidateBranches = project.parallelBranchCandidates?.length
+			? project.parallelBranchCandidates
+			: (project.cleanupBranches || []).map(branch => ({
+				name: branch.name,
+				ref: branch.name,
+				kind: 'local' as const,
+				ahead: branch.ahead,
+				behind: branch.behind,
+				lastCommit: branch.lastCommit,
+			}));
+		return [...candidateBranches]
 			.sort((left, right) => {
 				if ((right.ahead || 0) !== (left.ahead || 0)) {
 					return (right.ahead || 0) - (left.ahead || 0);
@@ -1983,6 +1993,8 @@ export class PromptDashboardService implements vscode.Disposable {
 			.slice(0, PromptDashboardService.PARALLEL_BRANCH_LIMIT)
 			.map(branch => ({
 				name: branch.name,
+				ref: branch.ref,
+				kind: branch.kind,
 				baseBranch,
 				ahead: branch.ahead,
 				behind: branch.behind,
@@ -2010,27 +2022,45 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 
 		const getAffectedFileCount = this.gitService.getGitOverlayParallelBranchAffectedFileCount;
-		if (typeof getAffectedFileCount !== 'function') {
+		const getRevisionCounts = this.gitService.getGitOverlayParallelBranchRevisionCounts;
+		if (typeof getAffectedFileCount !== 'function' && typeof getRevisionCounts !== 'function') {
 			return visibleBranches;
 		}
 
-		const countEntries = await Promise.all(visibleBranches.map(async (branch) => ([
-			branch.name,
-			await getAffectedFileCount.call(this.gitService, project.repositoryPath, baseBranch, branch.name),
-		] as const)));
+		const metricEntries = await Promise.all(visibleBranches.map(async (branch) => {
+			const branchRef = branch.ref || branch.name;
+			const [affectedFileCount, revisionCounts] = await Promise.all([
+				typeof getAffectedFileCount === 'function'
+					? getAffectedFileCount.call(this.gitService, project.repositoryPath, baseBranch, branchRef)
+					: Promise.resolve<number | null>(null),
+				typeof getRevisionCounts === 'function'
+					? getRevisionCounts.call(this.gitService, project.repositoryPath, baseBranch, branchRef)
+					: Promise.resolve<{ ahead: number; behind: number } | null>(null),
+			]);
+			return [branch.name, { affectedFileCount, revisionCounts }] as const;
+		}));
 		this.ensureScopeActive(scope);
 
-		const countByBranch = new Map(countEntries);
+		const metricsByBranch = new Map(metricEntries);
 		return visibleBranches.flatMap((branch) => {
-			const affectedFileCount = countByBranch.get(branch.name);
+			const metrics = metricsByBranch.get(branch.name);
+			const affectedFileCount = metrics?.affectedFileCount;
 			if (affectedFileCount === 0) {
 				return [];
 			}
 
+			const nextBranch = metrics?.revisionCounts
+				? {
+					...branch,
+					ahead: metrics.revisionCounts.ahead,
+					behind: metrics.revisionCounts.behind,
+				}
+				: branch;
+
 			return [
 				affectedFileCount === null || affectedFileCount === undefined
-					? branch
-					: { ...branch, affectedFileCount },
+					? nextBranch
+					: { ...nextBranch, affectedFileCount },
 			];
 		});
 	}

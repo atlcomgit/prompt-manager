@@ -106,8 +106,20 @@ export interface GitOverlayPotentialConflict {
 	reason: string;
 }
 
+/** Keeps a display name and the underlying Git ref for dashboard parallel-branch candidates. */
+export interface GitOverlayParallelBranchCandidate {
+	name: string;
+	ref: string;
+	kind: 'local' | 'remote';
+	ahead: number;
+	behind: number;
+	lastCommit: GitOverlayCommit | null;
+}
+
 export interface GitOverlayParallelBranchSummary {
 	name: string;
+	ref?: string;
+	kind?: 'local' | 'remote';
 	baseBranch: string;
 	ahead: number;
 	behind: number;
@@ -135,6 +147,7 @@ export interface GitOverlayChangeFile {
 
 export interface GitOverlayBranchInfo {
 	name: string;
+	ref?: string;
 	current: boolean;
 	exists: boolean;
 	kind: GitOverlayBranchKind;
@@ -186,6 +199,7 @@ export interface GitOverlayProjectSnapshot {
 	lastCommit: GitOverlayCommit | null;
 	branches: GitOverlayBranchInfo[];
 	cleanupBranches: GitOverlayBranchInfo[];
+	parallelBranchCandidates?: GitOverlayParallelBranchCandidate[];
 	changeGroups: {
 		merge: GitOverlayChangeFile[];
 		staged: GitOverlayChangeFile[];

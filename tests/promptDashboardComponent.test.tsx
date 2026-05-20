@@ -237,6 +237,99 @@ test('PromptDashboard renders the parallel branch author after the branch name',
 	assert.match(markup, /feature\/parallel[\s\S]*Jane Doe/);
 });
 
+test('PromptDashboard renders a horizontal parallel branch graph with remote lanes', () => {
+	const markup = renderDashboard(createSnapshot([createProject({
+		parallelBranches: [
+			{
+				name: 'feature/alice',
+				ref: 'origin/feature/alice',
+				kind: 'remote',
+				baseBranch: 'main',
+				ahead: 7,
+				behind: 3,
+				lastCommit: {
+					sha: 'abc123456789',
+					shortSha: 'abc1234',
+					subject: 'Alice branch update',
+					author: 'Alice',
+					committedAt: '2026-04-29T10:00:00.000Z',
+					refNames: ['origin/feature/alice'],
+				},
+				affectedFiles: [{ status: 'M', path: 'src/alice.ts', additions: 1, deletions: 0, isBinary: false }],
+				potentialConflicts: [],
+			},
+			{
+				name: 'feature/bob',
+				ref: 'feature/bob',
+				kind: 'local',
+				baseBranch: 'main',
+				ahead: 2,
+				behind: 0,
+				lastCommit: {
+					sha: 'def123456789',
+					shortSha: 'def1234',
+					subject: 'Bob branch update',
+					author: 'Bob',
+					committedAt: '2026-04-29T10:00:00.000Z',
+					refNames: ['feature/bob'],
+				},
+				affectedFiles: [{ status: 'M', path: 'src/bob.ts', additions: 1, deletions: 0, isBinary: false }],
+				potentialConflicts: [],
+			},
+		],
+	})]));
+
+	assert.match(markup, /data-pm-parallel-graph="api"/);
+	assert.match(markup, /data-pm-parallel-graph-row="feature\/alice"/);
+	assert.match(markup, /data-pm-parallel-graph-kind="remote"/);
+	assert.match(markup, /База[\s\S]*main/);
+	assert.match(markup, /красное слева, свои коммиты справа/);
+	assert.match(markup, /remote • база main/);
+	assert.match(markup, /local • база main/);
+
+	const aliceAheadMatch = markup.match(/data-pm-parallel-graph-row="feature\/alice"[\s\S]*?data-pm-parallel-graph-ahead-width="(\d+)"/);
+	const bobAheadMatch = markup.match(/data-pm-parallel-graph-row="feature\/bob"[\s\S]*?data-pm-parallel-graph-ahead-width="(\d+)"/);
+	const aliceBehindMatch = markup.match(/data-pm-parallel-graph-row="feature\/alice"[\s\S]*?data-pm-parallel-graph-behind-width="(\d+)"/);
+	const bobBehindMatch = markup.match(/data-pm-parallel-graph-row="feature\/bob"[\s\S]*?data-pm-parallel-graph-behind-width="(\d+)"/);
+
+	assert.ok(aliceAheadMatch);
+	assert.ok(bobAheadMatch);
+	assert.ok(aliceBehindMatch);
+	assert.ok(bobBehindMatch);
+	assert.ok(Number(aliceAheadMatch[1]) > Number(bobAheadMatch[1]));
+	assert.ok(Number(aliceBehindMatch[1]) > Number(bobBehindMatch[1]));
+});
+
+test('PromptDashboard keeps the branch lane color stable after conflict hydration', () => {
+	const markup = renderDashboard(createSnapshot([createProject({
+		parallelBranches: [{
+			name: 'feature/conflict',
+			ref: 'origin/feature/conflict',
+			kind: 'remote',
+			baseBranch: 'main',
+			ahead: 5,
+			behind: 2,
+			lastCommit: {
+				sha: 'abc123456789',
+				shortSha: 'abc1234',
+				subject: 'Conflict branch update',
+				author: 'Alice',
+				committedAt: '2026-04-29T10:00:00.000Z',
+				refNames: ['origin/feature/conflict'],
+			},
+			affectedFiles: [{ status: 'M', path: 'src/conflict.ts', additions: 1, deletions: 0, isBinary: false }],
+			potentialConflicts: [{ path: 'src/conflict.ts', reason: 'changed in current and parallel branch' }],
+			detailsHydrated: true,
+		}],
+	})]));
+
+	const laneMarkup = markup.match(/<svg[^>]*data-pm-parallel-graph-row="feature\/conflict"[\s\S]*?<\/svg>/)?.[0] || '';
+
+	assert.ok(laneMarkup);
+	assert.match(laneMarkup, /fill="var\(--vscode-charts-orange, #d19a66\)"/);
+	assert.doesNotMatch(laneMarkup, /fill="var\(--vscode-charts-yellow, #d7ba7d\)"/);
+});
+
 test('PromptDashboard shows lightweight commit file counts before details hydration', () => {
 	const markup = renderDashboard(createSnapshot([createProject({
 		recentCommits: [{

@@ -920,9 +920,16 @@ test('GitService buildProjectSnapshot starts review resolution in parallel with 
 			}],
 		]);
 	};
-	service.listRemoteBranchNames = async () => {
+	service.listRemoteBranchRecords = async () => {
 		listRemoteBranchNamesStarted = true;
-		return new Set<string>(['main']);
+		return [{
+			ref: 'origin/main',
+			name: 'main',
+			sha: '1111111111111111',
+			author: 'Main User',
+			committedAt: '2026-04-24T10:00:00.000Z',
+			subject: 'Main branch',
+		}];
 	};
 	service.getChangeGroups = async () => {
 		getChangeGroupsStarted = true;
@@ -1625,8 +1632,11 @@ test('GitService getGitOverlayParallelBranchSummaries lists files changed from m
 
 	service.getCurrentBranch = async () => 'feature/current';
 	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
-		if (args[0] === 'for-each-ref') {
+		if (args[0] === 'for-each-ref' && args[1] === 'refs/heads') {
 			return 'main\nfeature/current\nfeature/parallel';
+		}
+		if (args[0] === 'for-each-ref' && args[1] === 'refs/remotes') {
+			return 'origin/main\u00002026-04-29T09:00:00.000Z\u00001111111\u0000Main User\u0000Main';
 		}
 		if (args[0] === 'rev-list') {
 			return '0\t2';
@@ -1749,8 +1759,11 @@ test('GitService getGitOverlayParallelBranchSummaries bounds expensive scans to 
 
 	service.getCurrentBranch = async () => 'feature/current';
 	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
-		if (args[0] === 'for-each-ref') {
+		if (args[0] === 'for-each-ref' && args[1] === 'refs/heads') {
 			return 'main\nfeature/current\nfeature/newest\nfeature/older\nfeature/oldest';
+		}
+		if (args[0] === 'for-each-ref' && args[1] === 'refs/remotes') {
+			return 'origin/main\u00002026-04-29T09:00:00.000Z\u00001111111\u0000Main User\u0000Main';
 		}
 		if (args[0] === 'rev-list') {
 			scannedBranches.push(String(args[3] || '').split('...')[1] || '');
@@ -1796,8 +1809,11 @@ test('GitService getGitOverlayParallelBranchSummaries hydrates explicitly reques
 
 	service.getCurrentBranch = async () => 'feature/current';
 	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
-		if (args[0] === 'for-each-ref') {
+		if (args[0] === 'for-each-ref' && args[1] === 'refs/heads') {
 			return 'main\nfeature/current\nfeature/newest\nfeature/requested\nfeature/older';
+		}
+		if (args[0] === 'for-each-ref' && args[1] === 'refs/remotes') {
+			return 'origin/main\u00002026-04-29T09:00:00.000Z\u00001111111\u0000Main User\u0000Main';
 		}
 		if (args[0] === 'rev-list') {
 			scannedBranches.push(String(args[3] || '').split('...')[1] || '');
@@ -1832,6 +1848,68 @@ test('GitService getGitOverlayParallelBranchSummaries hydrates explicitly reques
 	assert.equal(summaries.length, 1);
 	assert.equal(summaries[0]?.name, 'feature/requested');
 	assert.deepEqual(scannedBranches, ['feature/requested']);
+});
+
+test('GitService getGitOverlayParallelBranchSummaries includes already fetched remote-only branches', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const scannedBranches: string[] = [];
+
+	service.getCurrentBranch = async () => 'feature/current';
+	service.runGitFileCommandOptional = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'for-each-ref' && args[1] === 'refs/heads') {
+			return [
+				'main\u0000\u0000origin/main\u0000\u00002026-05-20T08:00:00.000Z\u00001111111\u0000Main User\u0000Main',
+				'feature/current\u0000*\u0000origin/feature/current\u0000\u00002026-05-20T09:00:00.000Z\u00002222222\u0000Current User\u0000Current',
+			].join('\n');
+		}
+		if (args[0] === 'for-each-ref' && args[1] === 'refs/remotes') {
+			return [
+				'origin/main\u00002026-05-20T08:00:00.000Z\u00001111111\u0000Main User\u0000Main',
+				'origin/feature/alice\u00002026-05-20T10:00:00.000Z\u00003333333\u0000Alice\u0000Alice branch',
+			].join('\n');
+		}
+		if (args[0] === 'rev-list') {
+			scannedBranches.push(String(args[3] || '').split('...')[1] || '');
+			return '0\t1';
+		}
+		if (args[0] === 'diff' && args.includes('--numstat')) {
+			return '1\t0\tsrc/feature.ts';
+		}
+		return '';
+	};
+	service.getMergeBase = async () => 'base-sha';
+	service.getNameStatusDiff = async (_projectPath: string, fromRef: string, toRef: string) => {
+		if (fromRef === 'base-sha' && toRef === 'feature/current') {
+			return [];
+		}
+		if (fromRef === 'base-sha' && toRef === 'origin/feature/alice') {
+			return [{ status: 'M', path: 'src/feature.ts' }];
+		}
+		return [];
+	};
+	service.getLastCommit = async (_projectPath: string, branch: string) => ({
+		sha: '3333333',
+		shortSha: '3333333',
+		subject: 'Alice branch',
+		author: 'Alice',
+		committedAt: '2026-05-20T10:00:00.000Z',
+		refNames: [branch],
+	});
+
+	const summaries = await service.getGitOverlayParallelBranchSummaries(
+		new Map([['api', '/tmp/api']]),
+		'api',
+		'main',
+		['main'],
+		8,
+	);
+
+	assert.equal(summaries.length, 1);
+	assert.equal(summaries[0]?.name, 'feature/alice');
+	assert.equal(summaries[0]?.ref, 'origin/feature/alice');
+	assert.equal(summaries[0]?.kind, 'remote');
+	assert.deepEqual(scannedBranches, ['origin/feature/alice']);
 });
 
 test('GitService getCommitChangedFiles includes numstat line metrics', async () => {

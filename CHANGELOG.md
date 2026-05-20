@@ -6,6 +6,15 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-05-20
+
+#### Changed
+- The `Параллельные ветки` dashboard widget now renders each branch row with an inline horizontal lane graph, so behind distance stays visible on the left, ahead distance stays visible on the right, and the graph no longer collides with the branch list layout.
+
+#### Fixed
+- The `Параллельные ветки` dashboard widget no longer limits itself to local cleanup branches; it now includes already fetched remote-only branches from other authors, preserves the real Git ref during lazy hydration and diff opening, and keeps those remote branch rows stable through the lightweight and detailed refresh path.
+- The `Параллельные ветки` lane graph now keeps its branch-kind color stable before and after row expansion; conflict hydration still updates the row warning indicators, but no longer recolors the graph itself.
+
 ### 2026-05-19
 
 #### Fixed

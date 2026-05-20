@@ -1,3 +1,21 @@
+## 137: Показать ветки всех авторов
+
+- Дата: 2026-05-20.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Виджет `Параллельные ветки` перестал ограничиваться локальными cleanup-ветками и теперь показывает дополнительные ветки всех авторов из локальных head и уже fetched remote refs, сохраняет реальные Git ref для lazy hydration и открытия diff, а итоговый граф переделан в inline horizontal lane view прямо в строках веток, чтобы показывать ahead/behind без наложения на список и без смены цвета после раскрытия строки.
+- Ключевые моменты: `GitService` теперь формирует отдельный список `parallelBranchCandidates` из локальных и remote веток без смешивания с Git Flow cleanup semantics; `PromptDashboardService` использует реальные ref и lightweight `ahead/behind` при display/details hydration параллельных веток; `PromptDashboard` рисует row-based lane graph с разной длиной сегментов по `ahead` и `behind`, держит цвет lane по типу ветки, а conflict state выводит отдельными row indicators, поэтому remote-only ветки остаются рабочими и визуально стабильными и после раскрытия.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/services/gitService.ts
+  src/services/promptDashboardService.ts
+  src/types/git.ts
+  src/webview/editor/components/PromptDashboard.tsx
+  tests/gitService.test.ts
+  tests/promptDashboardComponent.test.tsx
+  tests/promptDashboardService.test.ts
+
 ## 136: Красная рамка для несоответствующих веток проектов
 
 - Дата: 2026-05-19.

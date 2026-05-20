@@ -1000,6 +1000,7 @@ function renderParallelBranchFiles(
 							<div style={styles.projectName}>{project.project}</div>
 							<span style={styles.sectionMeta}>{branches.length}</span>
 						</div>
+						{renderParallelBranchGraph(project, branches)}
 						{renderParallelBranches(project, branches, expanded, toggleExpanded, fileHandlers)}
 						{renderConflictFiles(project, fileHandlers)}
 					</div>
@@ -1298,10 +1299,197 @@ function renderParallelBranches(
 	if (branches.length === 0) {
 		return null;
 	}
+	const branchGraphScale = buildParallelBranchGraphScale(branches);
 	return (
-		<div style={styles.detailGroup}>
-			{branches.map(branch => renderParallelBranch(project, branch, expanded, toggleExpanded, fileHandlers))}
+		<div style={styles.parallelGraphRows}>
+			{branches.map((branch, index) => renderParallelBranch(
+				project,
+				branch,
+				index,
+				branches.length,
+				branchGraphScale,
+				expanded,
+				toggleExpanded,
+				fileHandlers,
+			))}
 		</div>
+	);
+}
+
+/** Keeps long SVG labels readable inside the narrow dashboard rail. */
+function truncateParallelGraphLabel(value: string, maxLength: number): string {
+	const normalizedValue = String(value || '').trim();
+	if (!normalizedValue || normalizedValue.length <= maxLength) {
+		return normalizedValue;
+	}
+
+	return `${normalizedValue.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+/** Keeps lane color stable by branch kind while conflicts use separate row indicators. */
+function resolveParallelGraphBranchColor(branch: GitOverlayParallelBranchSummary): string {
+	return branch.kind === 'remote'
+		? 'var(--vscode-charts-orange, #d19a66)'
+		: 'var(--vscode-charts-green, #89d185)';
+}
+
+interface ParallelBranchGraphScale {
+	maxAhead: number;
+	maxBehind: number;
+}
+
+/** Normalizes lane scaling so every row shows comparable ahead and behind spans. */
+function buildParallelBranchGraphScale(branches: GitOverlayParallelBranchSummary[]): ParallelBranchGraphScale {
+	const maxAhead = branches.reduce((value, branch) => Math.max(value, branch.ahead), 0);
+	const maxBehind = branches.reduce((value, branch) => Math.max(value, branch.behind), 0);
+	return {
+		maxAhead: Math.max(1, maxAhead),
+		maxBehind: Math.max(1, maxBehind),
+	};
+}
+
+/** Keeps visible graph segments readable even when one branch has only a small delta. */
+function resolveParallelGraphSegmentWidth(value: number, maxValue: number, maxWidth: number, minWidth: number): number {
+	if (value <= 0 || maxWidth <= 0) {
+		return 0;
+	}
+
+	if (maxValue <= 0) {
+		return minWidth;
+	}
+
+	return Math.min(maxWidth, Math.max(minWidth, Math.round((value / maxValue) * maxWidth)));
+}
+
+/** Builds the compact secondary label shown under each branch lane in the SVG graph. */
+function resolveParallelGraphMeta(branch: GitOverlayParallelBranchSummary): string {
+	const parts = [
+		branch.kind === 'remote' ? 'remote' : 'local',
+		branch.lastCommit?.author || '',
+		`+${branch.ahead} / -${branch.behind}`,
+	].filter(Boolean);
+	return truncateParallelGraphLabel(parts.join(' | '), 34);
+}
+
+/** Renders a compact horizontal branch map above the parallel branch list. */
+function renderParallelBranchGraph(
+	project: PromptDashboardProjectSummary,
+	branches: GitOverlayParallelBranchSummary[],
+): React.ReactNode {
+	if (branches.length === 0) {
+		return null;
+	}
+
+	const baseBranch = truncateParallelGraphLabel(
+		branches[0]?.baseBranch || project.currentBranch || project.promptBranch || project.trackedBranch,
+		26,
+	);
+
+	return (
+		<div style={styles.parallelGraphCard} data-pm-parallel-graph={project.project}>
+			<div style={styles.parallelGraphLegend}>
+				<span style={styles.parallelGraphLegendLabel}>База</span>
+				<span style={styles.parallelGraphBaseChip}>{baseBranch || 'n/a'}</span>
+				<span style={styles.parallelGraphLegendNote}>красное слева, свои коммиты справа</span>
+			</div>
+		</div>
+	);
+}
+
+/** Renders one horizontal lane with ahead and behind spans for a parallel branch row. */
+function renderParallelBranchLane(
+	branch: GitOverlayParallelBranchSummary,
+	branchIndex: number,
+	branchCount: number,
+	branchGraphScale: ParallelBranchGraphScale,
+): React.ReactNode {
+	const graphWidth = 118;
+	const graphHeight = 28;
+	const centerY = 14;
+	const trunkX = 12;
+	const midX = 58;
+	const maxBehindWidth = 18;
+	const maxAheadWidth = 42;
+	const laneColor = resolveParallelGraphBranchColor(branch);
+	const behindWidth = resolveParallelGraphSegmentWidth(branch.behind, branchGraphScale.maxBehind, maxBehindWidth, 8);
+	const aheadWidth = resolveParallelGraphSegmentWidth(branch.ahead, branchGraphScale.maxAhead, maxAheadWidth, 10);
+	const behindStartX = midX - behindWidth;
+	const headX = midX + aheadWidth;
+	const trunkStartY = branchIndex === 0 ? centerY : 0;
+	const trunkEndY = branchIndex === branchCount - 1 ? centerY : graphHeight;
+	const connectorEndX = Math.max(trunkX + 8, behindStartX);
+
+	return (
+		<svg
+			viewBox={`0 0 ${graphWidth} ${graphHeight}`}
+			style={styles.parallelGraphLane}
+			aria-hidden="true"
+			focusable="false"
+			data-pm-parallel-graph-row={branch.name}
+			data-pm-parallel-graph-kind={branch.kind || 'local'}
+			data-pm-parallel-graph-ahead={String(branch.ahead)}
+			data-pm-parallel-graph-behind={String(branch.behind)}
+			data-pm-parallel-graph-ahead-width={String(aheadWidth)}
+			data-pm-parallel-graph-behind-width={String(behindWidth)}
+		>
+			{branchCount > 1 ? (
+				<line
+					x1={trunkX}
+					y1={trunkStartY}
+					x2={trunkX}
+					y2={trunkEndY}
+					stroke="var(--vscode-textLink-foreground)"
+					strokeWidth="2"
+					strokeLinecap="round"
+					opacity="0.75"
+				/>
+			) : null}
+			<line
+				x1={trunkX}
+				y1={centerY}
+				x2={connectorEndX}
+				y2={centerY}
+				stroke={laneColor}
+				strokeWidth="2"
+				strokeLinecap="round"
+				opacity="0.45"
+			/>
+			<line
+				x1={midX}
+				y1={centerY - 7}
+				x2={midX}
+				y2={centerY + 7}
+				stroke="color-mix(in srgb, var(--vscode-panel-border) 88%, transparent)"
+				strokeWidth="1"
+			/>
+			{behindWidth > 0 ? (
+				<line
+					x1={behindStartX}
+					y1={centerY}
+					x2={midX}
+					y2={centerY}
+					stroke="var(--vscode-charts-red)"
+					strokeWidth="2.4"
+					strokeLinecap="round"
+					strokeDasharray="4 2"
+					opacity="0.95"
+				/>
+			) : null}
+			{aheadWidth > 0 ? (
+				<line
+					x1={midX}
+					y1={centerY}
+					x2={headX}
+					y2={centerY}
+					stroke={laneColor}
+					strokeWidth="2.8"
+					strokeLinecap="round"
+					opacity="0.95"
+				/>
+			) : null}
+			<circle cx={trunkX} cy={centerY} r={2.8} fill="var(--vscode-textLink-foreground)" opacity="0.95" />
+			<circle cx={headX} cy={centerY} r={4.2} fill={laneColor} />
+		</svg>
 	);
 }
 
@@ -1317,6 +1505,9 @@ function resolveParallelBranchChangedFilesLabel(branch: GitOverlayParallelBranch
 function renderParallelBranch(
 	project: PromptDashboardProjectSummary,
 	branch: GitOverlayParallelBranchSummary,
+	branchIndex: number,
+	branchCount: number,
+	branchGraphScale: ParallelBranchGraphScale,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string) => void,
 	fileHandlers: FileRowActionHandlers,
@@ -1327,11 +1518,20 @@ function renderParallelBranch(
 	const hasConflictWarning = branch.detailsHydrated !== false && branch.potentialConflicts.length > 0;
 	return (
 		<div key={branch.name} style={styles.detailBlock}>
-			<button type="button" style={styles.detailButton} onClick={() => toggleExpanded(expandKey)}>
+			<button
+				type="button"
+				style={{ ...styles.detailButton, ...styles.parallelDetailButton }}
+				onClick={() => toggleExpanded(expandKey)}
+				title={`${branch.ref || branch.name}\n${resolveParallelGraphMeta(branch)}`}
+			>
 				<span style={styles.detailChevron}>{isExpanded ? '▾' : '▸'}</span>
-				<span style={styles.branchLabelRow}>
-					<span style={styles.branchName}>{branch.name}</span>
-					{branch.lastCommit?.author ? <span style={styles.branchAuthor}>{branch.lastCommit.author}</span> : null}
+				{renderParallelBranchLane(branch, branchIndex, branchCount, branchGraphScale)}
+				<span style={styles.parallelBranchContent}>
+					<span style={styles.branchLabelRow}>
+						<span style={styles.branchName}>{branch.name}</span>
+						{branch.lastCommit?.author ? <span style={styles.branchAuthor}>{branch.lastCommit.author}</span> : null}
+					</span>
+					<span style={styles.parallelBranchMeta}>{`${branch.kind === 'remote' ? 'remote' : 'local'} • база ${branch.baseBranch}`}</span>
 				</span>
 				<span style={styles.statValue}>+{branch.ahead} / -{branch.behind}</span>
 				<span style={{ ...styles.fileCount, ...(hasConflictWarning ? styles.fileCountWarn : null) }}>{changedFilesLabel}</span>
@@ -1399,7 +1599,7 @@ function renderParallelFiles(project: PromptDashboardProjectSummary, branch: Git
 				opening: fileHandlers.openingFileKey === fileKey,
 				active: fileHandlers.activeFileKey === fileKey,
 				viewed: fileHandlers.viewedFileKeys[fileKey] === true,
-				onOpenPatch: () => fileHandlers.onOpenFilePatch({ project: project.project, filePath: file.path, previousPath: file.previousPath, mode: 'branch', ref: branch.name, baseRef: branch.baseBranch }, fileKey),
+					onOpenPatch: () => fileHandlers.onOpenFilePatch({ project: project.project, filePath: file.path, previousPath: file.previousPath, mode: 'branch', ref: branch.ref || branch.name, baseRef: branch.baseBranch }, fileKey),
 			};
 		}))
 	);
@@ -3001,6 +3201,89 @@ const styles: Record<string, React.CSSProperties> = {
 		fontSize: '10px',
 		fontWeight: 500,
 		color: 'var(--vscode-descriptionForeground)',
+	},
+	// Compact horizontal branch map rendered above the parallel branch list.
+	parallelGraphCard: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '8px',
+		padding: '2px 0 6px',
+		minWidth: 0,
+	},
+	parallelGraphLegend: {
+		display: 'flex',
+		alignItems: 'center',
+		gap: '8px',
+		minWidth: 0,
+	},
+	parallelGraphLegendLabel: {
+		fontSize: '10px',
+		fontWeight: 600,
+		color: 'var(--vscode-descriptionForeground)',
+		textTransform: 'uppercase',
+		letterSpacing: '0.04em',
+	},
+	parallelGraphLegendNote: {
+		fontSize: '10px',
+		color: 'var(--vscode-descriptionForeground)',
+		whiteSpace: 'nowrap',
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+	},
+	parallelGraphBaseChip: {
+		display: 'inline-flex',
+		alignItems: 'center',
+		maxWidth: '100%',
+		padding: '2px 8px',
+		borderRadius: '999px',
+		border: '1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 62%, var(--vscode-panel-border))',
+		background: 'color-mix(in srgb, var(--vscode-textLink-foreground) 12%, var(--vscode-editor-background))',
+		color: 'var(--vscode-foreground)',
+		fontFamily: 'var(--vscode-editor-font-family)',
+		fontSize: '10px',
+		whiteSpace: 'nowrap',
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+	},
+	parallelGraphRows: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '0',
+		minWidth: 0,
+	},
+	parallelGraphLane: {
+		width: '118px',
+		height: '28px',
+		display: 'block',
+		overflow: 'visible',
+		flexShrink: 0,
+	},
+	parallelGraphSvg: {
+		width: '100%',
+		height: 'auto',
+		display: 'block',
+		overflow: 'visible',
+		borderRadius: '8px',
+		background: 'linear-gradient(135deg, color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-textLink-foreground) 8%), color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-panel-border) 4%))',
+	},
+	parallelDetailButton: {
+		gridTemplateColumns: '12px 118px minmax(0, 1fr) auto auto',
+		alignItems: 'center',
+		gap: '8px',
+		padding: '6px 0',
+	},
+	parallelBranchContent: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '2px',
+		minWidth: 0,
+	},
+	parallelBranchMeta: {
+		fontSize: '10px',
+		color: 'var(--vscode-descriptionForeground)',
+		whiteSpace: 'nowrap',
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
 	},
 	// Маленький счетчик файлов справа в раскрываемой строке.
 	fileCount: {

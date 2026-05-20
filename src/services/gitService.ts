@@ -16,6 +16,7 @@ import type {
 	GitOverlayCommitChangedFile,
 	GitOverlayFileHistoryEntry,
 	GitOverlayFileHistoryPayload,
+	GitOverlayParallelBranchCandidate,
 	GitOverlayProjectReviewRequestInput,
 	GitOverlayProjectCommitMessage,
 	GitOverlayProjectSnapshot,
@@ -107,6 +108,16 @@ interface GitLocalBranchRecord {
 	subject: string;
 }
 
+/** Stores one remote-tracking branch ref with its normalized dashboard display metadata. */
+interface GitRemoteBranchRecord {
+	ref: string;
+	name: string;
+	sha: string;
+	author: string;
+	committedAt: string;
+	subject: string;
+}
+
 interface GitMultiProjectResult {
 	success: boolean;
 	errors: string[];
@@ -155,7 +166,7 @@ type GitOverlayUntrackedMode = 'all' | 'normal' | 'none';
 /** Описывает branch metadata, которую можно догружать отдельно от change/review snapshot. */
 type GitOverlayProjectBranchDetails = Pick<
 	GitOverlayProjectSnapshot,
-	'upstream' | 'ahead' | 'behind' | 'lastCommit' | 'branches' | 'cleanupBranches' | 'staleLocalBranches' | 'graph'
+	'upstream' | 'ahead' | 'behind' | 'lastCommit' | 'branches' | 'cleanupBranches' | 'parallelBranchCandidates' | 'staleLocalBranches' | 'graph'
 >;
 
 type GitServiceTimedCacheEntry<T> = {
@@ -182,6 +193,7 @@ function createDeferredGitOverlayBranchDetails(): GitOverlayProjectBranchDetails
 		lastCommit: null,
 		branches: [],
 		cleanupBranches: [],
+		parallelBranchCandidates: [],
 		staleLocalBranches: [],
 		graph: { nodes: [], edges: [] },
 	};
@@ -1337,20 +1349,53 @@ export class GitService {
 		};
 	}
 
-	private async listRemoteBranchNames(projectPath: string): Promise<Set<string>> {
-		const stdout = await this.runGitFileCommandOptional(projectPath, ['for-each-ref', 'refs/remotes', '--format=%(refname:short)']);
-		const result = new Set<string>();
+	/** Normalizes a remote ref like origin/feature/x into the dashboard branch name feature/x. */
+	private normalizeRemoteBranchName(remoteRef: string): string {
+		const normalizedRemoteRef = remoteRef.trim();
+		if (!normalizedRemoteRef) {
+			return '';
+		}
+
+		const parts = normalizedRemoteRef.split('/');
+		return parts.length > 1 ? parts.slice(1).join('/') : normalizedRemoteRef;
+	}
+
+	/** Reads fetched remote refs with commit metadata so dashboard widgets can include other authors' branches. */
+	private async listRemoteBranchRecords(projectPath: string): Promise<GitRemoteBranchRecord[]> {
+		const stdout = await this.runGitFileCommandOptional(projectPath, [
+			'for-each-ref',
+			'refs/remotes',
+			'--sort=-committerdate',
+			'--format=%(refname:short)%00%(committerdate:iso-strict)%00%(objectname)%00%(authorname)%00%(subject)',
+		]);
+		const result: GitRemoteBranchRecord[] = [];
+
 		for (const line of stdout.split(/\r?\n/)) {
-			const normalized = line.trim();
-			if (!normalized || normalized.endsWith('/HEAD')) {
+			if (!line) {
 				continue;
 			}
-			result.add(normalized);
-			const parts = normalized.split('/');
-			if (parts.length > 1) {
-				result.add(parts.slice(1).join('/'));
+
+			const [ref, committedAt, sha, author, subject] = line.split('\u0000');
+			const normalizedRef = String(ref || '').trim();
+			if (!normalizedRef || normalizedRef.endsWith('/HEAD')) {
+				continue;
 			}
+
+			const normalizedName = this.normalizeRemoteBranchName(normalizedRef);
+			if (!normalizedName) {
+				continue;
+			}
+
+			result.push({
+				ref: normalizedRef,
+				name: normalizedName,
+				sha: String(sha || '').trim(),
+				author: String(author || '').trim(),
+				committedAt: String(committedAt || '').trim(),
+				subject: String(subject || '').trim(),
+			});
 		}
+
 		return result;
 	}
 
@@ -1653,14 +1698,88 @@ export class GitService {
 		};
 	}
 
+	/** Converts a fetched remote-tracking ref into a lightweight commit payload for dashboard widgets. */
+	private buildCommitFromRemoteBranchRecord(record: GitRemoteBranchRecord | null): GitOverlayCommit | null {
+		if (!record) {
+			return null;
+		}
+
+		return {
+			sha: record.sha,
+			shortSha: record.sha.slice(0, 7),
+			author: record.author,
+			committedAt: record.committedAt,
+			refNames: [record.ref],
+			subject: record.subject,
+		};
+	}
+
+	/** Builds the dashboard-visible extra branch list from local heads plus fetched remote refs. */
+	private buildParallelBranchCandidates(
+		protectedBranchNames: Set<string>,
+		localBranches: Map<string, GitLocalBranchRecord>,
+		remoteBranches: GitRemoteBranchRecord[],
+	): GitOverlayParallelBranchCandidate[] {
+		const candidates = new Map<string, GitOverlayParallelBranchCandidate>();
+		const addCandidate = (candidate: GitOverlayParallelBranchCandidate): void => {
+			const normalizedName = candidate.name.trim();
+			if (!normalizedName || protectedBranchNames.has(normalizedName) || candidates.has(normalizedName)) {
+				return;
+			}
+
+			candidates.set(normalizedName, candidate);
+		};
+
+		for (const branch of localBranches.values()) {
+			addCandidate({
+				name: branch.name,
+				ref: branch.name,
+				kind: 'local',
+				ahead: branch.ahead,
+				behind: branch.behind,
+				lastCommit: this.buildCommitFromLocalBranchRecord(branch),
+			});
+		}
+
+		for (const branch of remoteBranches) {
+			if (localBranches.has(branch.name)) {
+				continue;
+			}
+
+			addCandidate({
+				name: branch.name,
+				ref: branch.ref,
+				kind: 'remote',
+				ahead: 0,
+				behind: 0,
+				lastCommit: this.buildCommitFromRemoteBranchRecord(branch),
+			});
+		}
+
+		return [...candidates.values()].sort((left, right) => {
+			if (right.ahead !== left.ahead) {
+				return right.ahead - left.ahead;
+			}
+			const committedAtSort = String(right.lastCommit?.committedAt || '').localeCompare(String(left.lastCommit?.committedAt || ''));
+			if (committedAtSort !== 0) {
+				return committedAtSort;
+			}
+			if (left.kind !== right.kind) {
+				return left.kind === 'local' ? -1 : 1;
+			}
+			return left.name.localeCompare(right.name, 'ru', { sensitivity: 'base' });
+		});
+	}
+
 	/** Собирает branch metadata для overlay из уже прочитанных local/remote веток. */
 	private buildProjectBranchDetails(
 		promptBranch: string,
 		trackedBranches: string[],
 		currentBranch: string,
 		localBranches: Map<string, GitLocalBranchRecord>,
-		remoteBranches: Set<string>,
+		remoteBranches: GitRemoteBranchRecord[],
 	): GitOverlayProjectBranchDetails {
+		const remoteBranchNames = new Set(remoteBranches.flatMap(branch => [branch.ref, branch.name]));
 		const currentBranchRecord = localBranches.get(currentBranch) || null;
 		const availableTrackedBranches = trackedBranches.filter((branchName) => {
 			const normalizedBranchName = branchName.trim();
@@ -1668,12 +1787,13 @@ export class GitService {
 				return false;
 			}
 
-			return Boolean(localBranches.get(normalizedBranchName)) || remoteBranches.has(normalizedBranchName);
+			return Boolean(localBranches.get(normalizedBranchName)) || remoteBranchNames.has(normalizedBranchName);
 		});
 		const trackedBranchSet = new Set(availableTrackedBranches);
 		const visibleBranchNames = resolveGitOverlayBranchNames(availableTrackedBranches, promptBranch, currentBranch);
 		const branches: GitOverlayBranchInfo[] = visibleBranchNames.map((branchName) => {
 			const localBranch = localBranches.get(branchName) || null;
+			const remoteBranch = remoteBranches.find(branch => branch.name === branchName || branch.ref === branchName) || null;
 			const kind = branchName === promptBranch.trim()
 				? 'prompt'
 				: branchName === currentBranch
@@ -1684,14 +1804,15 @@ export class GitService {
 
 			return {
 				name: branchName,
+				...(remoteBranch ? { ref: remoteBranch.ref } : {}),
 				current: branchName === currentBranch,
-				exists: Boolean(localBranch) || remoteBranches.has(branchName),
+				exists: Boolean(localBranch) || remoteBranchNames.has(branchName),
 				kind,
 				upstream: localBranch?.upstream || '',
 				ahead: localBranch?.ahead || 0,
 				behind: localBranch?.behind || 0,
 				lastCommit: this.buildCommitFromLocalBranchRecord(localBranch),
-				canSwitch: Boolean(localBranch) || remoteBranches.has(branchName),
+				canSwitch: Boolean(localBranch) || remoteBranchNames.has(branchName),
 				canDelete: Boolean(localBranch)
 					&& canDeleteGitOverlayBranch(branchName, currentBranch, availableTrackedBranches, promptBranch),
 				stale: Boolean(localBranch?.stale),
@@ -1720,6 +1841,17 @@ export class GitService {
 				return left.name.localeCompare(right.name, 'ru', { sensitivity: 'base' });
 			});
 
+		const protectedBranchNames = new Set([
+			currentBranch,
+			promptBranch,
+			...availableTrackedBranches,
+		].map(branch => branch.trim()).filter(Boolean));
+		const parallelBranchCandidates = this.buildParallelBranchCandidates(
+			protectedBranchNames,
+			localBranches,
+			remoteBranches,
+		);
+
 		const graph = buildGitOverlayGraph({
 			branchNames: [...new Set([...branches.map(branch => branch.name), ...cleanupBranches.map(branch => branch.name)])],
 			trackedBranches: availableTrackedBranches,
@@ -1735,6 +1867,7 @@ export class GitService {
 			lastCommit: this.buildCommitFromLocalBranchRecord(currentBranchRecord),
 			branches,
 			cleanupBranches,
+			parallelBranchCandidates,
 			staleLocalBranches: cleanupBranches.filter(branch => branch.stale).map(branch => branch.name),
 			graph,
 		};
@@ -1763,11 +1896,11 @@ export class GitService {
 		})();
 		const remoteBranchesPromise = (async () => {
 			const stageStartedAtMs = Date.now();
-			const remoteBranches = await this.listRemoteBranchNames(projectPath);
+			const remoteBranches = await this.listRemoteBranchRecords(projectPath);
 			if (logProjectStageTiming) {
 				this.logGitOverlayProjectStageTiming(project, 'remoteBranches', stageStartedAtMs, {
 					detailLevel,
-					branchCount: remoteBranches.size,
+					branchCount: remoteBranches.length,
 				});
 			}
 			return remoteBranches;
@@ -1855,6 +1988,31 @@ export class GitService {
 			} catch {
 				return null;
 			}
+		}
+	}
+
+	/** Reads ahead/behind counts for one parallel branch without hydrating its diff payload. */
+	async getGitOverlayParallelBranchRevisionCounts(
+		projectPath: string,
+		baseBranch: string,
+		branchName: string,
+	): Promise<{ ahead: number; behind: number } | null> {
+		const normalizedBaseBranch = baseBranch.trim();
+		const normalizedBranchName = branchName.trim();
+		if (!normalizedBaseBranch || !normalizedBranchName) {
+			return null;
+		}
+
+		try {
+			const output = await this.runGitFileCommand(projectPath, [
+				'rev-list',
+				'--left-right',
+				'--count',
+				`${normalizedBaseBranch}...${normalizedBranchName}`,
+			]);
+			return this.parseBranchRevisionCounts(output);
+		} catch {
+			return null;
 		}
 	}
 
@@ -3685,29 +3843,29 @@ export class GitService {
 			return [];
 		}
 
+		const [localBranches, remoteBranches] = await Promise.all([
+			this.listLocalBranches(projectPath),
+			this.listRemoteBranchRecords(projectPath),
+		]);
 		const protectedBranches = new Set([
 			normalizedBaseBranch,
 			currentBranch,
 			...trackedBranches.map(branch => branch.trim()).filter(Boolean),
 		]);
-		const output = await this.runGitFileCommandOptional(projectPath, [
-			'for-each-ref',
-			'--sort=-committerdate',
-			'--format=%(refname:short)',
-			'refs/heads',
-		]);
 		const candidateLimit = Math.max(1, limit);
-		const availableBranches = output
-			.split(/\r?\n/)
-			.map(line => line.trim())
-			.filter(branch => Boolean(branch) && !protectedBranches.has(branch))
-			;
-		const availableBranchSet = new Set(availableBranches);
+		const availableBranches = this.buildParallelBranchCandidates(protectedBranches, localBranches, remoteBranches);
+		const availableBranchSet = new Map<string, GitOverlayParallelBranchCandidate>();
+		for (const branch of availableBranches) {
+			availableBranchSet.set(branch.ref, branch);
+			availableBranchSet.set(branch.name, branch);
+		}
 		const requestedBranches = (preferredBranchNames || [])
 			.map(branch => branch.trim())
 			.filter(Boolean)
 			.filter((branch, index, items) => items.indexOf(branch) === index)
-			.filter(branch => availableBranchSet.has(branch));
+			.map(branch => availableBranchSet.get(branch) || null)
+			.filter((branch): branch is GitOverlayParallelBranchCandidate => Boolean(branch))
+			.filter((branch, index, items) => items.findIndex(item => item.ref === branch.ref) === index);
 		const candidateBranches = requestedBranches.length > 0
 			? requestedBranches.slice(0, candidateLimit)
 			: availableBranches
@@ -3719,14 +3877,14 @@ export class GitService {
 				'rev-list',
 				'--left-right',
 				'--count',
-				`${normalizedBaseBranch}...${branch}`,
+				`${normalizedBaseBranch}...${branch.ref}`,
 			]);
 			const { ahead, behind } = this.parseBranchRevisionCounts(countOutput);
-			const comparisonBaseRef = await this.getMergeBase(projectPath, normalizedBaseBranch, branch) || normalizedBaseBranch;
+			const comparisonBaseRef = await this.getMergeBase(projectPath, normalizedBaseBranch, branch.ref) || normalizedBaseBranch;
 			const [currentDiff, branchDiff, branchStats] = await Promise.all([
 				this.getNameStatusDiff(projectPath, comparisonBaseRef, currentBranch || normalizedBaseBranch),
-				this.getNameStatusDiff(projectPath, comparisonBaseRef, branch),
-				this.getDiffNumstatByPath(projectPath, comparisonBaseRef, branch),
+				this.getNameStatusDiff(projectPath, comparisonBaseRef, branch.ref),
+				this.getDiffNumstatByPath(projectPath, comparisonBaseRef, branch.ref),
 			]);
 			const currentFiles = currentDiff
 				.flatMap(entry => [entry.oldPath || '', entry.path])
@@ -3748,11 +3906,13 @@ export class GitService {
 				.map(file => ({ path: file.path, reason: 'changed in current and parallel branch' }));
 
 			return {
-				name: branch,
+				name: branch.name,
+				ref: branch.ref,
+				kind: branch.kind,
 				baseBranch: normalizedBaseBranch,
 				ahead,
 				behind,
-				lastCommit: await this.getLastCommit(projectPath, branch),
+				lastCommit: await this.getLastCommit(projectPath, branch.ref),
 				affectedFileCount,
 				affectedFiles: affectedFiles.slice(0, 50),
 				potentialConflicts,

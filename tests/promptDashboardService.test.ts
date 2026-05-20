@@ -1196,6 +1196,93 @@ test('PromptDashboardService details refresh keeps already visible unresolved pa
 	service.dispose();
 });
 
+test('PromptDashboardService keeps remote-only parallel branch refs during details hydration', async () => {
+	let requestedParallelBranchNames: string[] = [];
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project, {
+					currentBranch: 'main',
+					trackedBranch: 'main',
+					branches: [
+						{ name: 'main', current: true, exists: true, kind: 'current', upstream: 'origin/main', ahead: 0, behind: 0, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
+					],
+					cleanupBranches: [],
+					parallelBranchCandidates: [{
+						name: 'feature/alice',
+						ref: 'origin/feature/alice',
+						kind: 'remote',
+						ahead: 0,
+						behind: 0,
+						lastCommit: null,
+					}],
+				})),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchAffectedFileCount: async () => 2,
+			getGitOverlayParallelBranchRevisionCounts: async () => ({ ahead: 7, behind: 3 }),
+			getGitOverlayParallelBranchSummaries: async (
+				_paths: Map<string, string>,
+				_projectName: string,
+				_baseBranch: string,
+				_trackedBranches: string[],
+				_limit?: number,
+				preferredBranchNames?: string[],
+			) => {
+				requestedParallelBranchNames = preferredBranchNames || [];
+				return [{
+					name: 'feature/alice',
+					ref: 'origin/feature/alice',
+					kind: 'remote',
+					baseBranch: 'main',
+					ahead: 7,
+					behind: 3,
+					lastCommit: null,
+					affectedFiles: [{ status: 'M', path: 'src/feature.ts' }],
+					potentialConflicts: [],
+				}];
+			},
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'cached analysis',
+		} as any,
+	);
+
+	const prompt = createPrompt({
+		projects: ['api'],
+		branch: 'feature/task-107',
+		trackedBranch: 'main',
+		trackedBranchesByProject: { api: 'main' },
+	});
+	const displayWidget = await service.refreshProjectsWidget(prompt, undefined, undefined, 'display');
+	const detailsWidget = await service.refreshProjectsWidget(prompt, undefined, undefined, 'details', ['api']);
+
+	assert.equal(displayWidget.data.projects[0]?.parallelBranches[0]?.name, 'feature/alice');
+	assert.equal(displayWidget.data.projects[0]?.parallelBranches[0]?.ref, 'origin/feature/alice');
+	assert.equal(displayWidget.data.projects[0]?.parallelBranches[0]?.ahead, 7);
+	assert.equal(displayWidget.data.projects[0]?.parallelBranches[0]?.behind, 3);
+	assert.deepEqual(requestedParallelBranchNames, ['origin/feature/alice']);
+	assert.equal(detailsWidget.data.projects[0]?.parallelBranches[0]?.ref, 'origin/feature/alice');
+	assert.equal(detailsWidget.data.projects[0]?.parallelBranches[0]?.ahead, 7);
+	assert.equal(detailsWidget.data.projects[0]?.parallelBranches[0]?.behind, 3);
+	service.dispose();
+});
+
 test('PromptDashboardService dirty details refresh rehydrates uncommitted stats without full project overlay reload', async () => {
 	let fullSnapshotCalls = 0;
 	let projectSnapshotCalls = 0;

@@ -2294,6 +2294,76 @@ test('PromptDashboardService pulls a single project through syncProjects for the
 	service.dispose();
 });
 
+test('PromptDashboardService keeps pull errors on the matching project row and clears them after a retry', async () => {
+	let syncShouldFail = true;
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project, {
+					currentBranch: 'main',
+					branches: [
+						{ name: 'main', current: true, exists: true, kind: 'current', upstream: 'origin/main', ahead: 0, behind: 1, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
+					],
+				})),
+			}),
+			syncProjects: async (_paths: Map<string, string>, projects: string[]) => syncShouldFail
+				? { success: false, errors: projects.map(project => `${project}: origin недоступен`), changedProjects: [], skippedProjects: [] }
+				: { success: true, errors: [], changedProjects: projects, skippedProjects: [] },
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+			getIncomingBranchChangedFiles: async () => [],
+			getIncomingBranchAuthors: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	try {
+		const failedPull = await service.pullProject(
+			createPrompt({ projects: ['api'], trackedBranch: '', trackedBranchesByProject: {} }),
+			'api',
+		);
+		assert.equal(failedPull.success, false);
+		assert.equal(failedPull.projectErrors.api, 'origin недоступен');
+
+		const failedWidget = await service.refreshProjectsWidget(
+			createPrompt({ projects: ['api'], trackedBranch: '', trackedBranchesByProject: {} }),
+		);
+		assert.equal(failedWidget.data.projects[0]?.pullError, 'origin недоступен');
+		assert.equal((failedWidget.data.branchProjects || [])[0]?.pullError, 'origin недоступен');
+
+		syncShouldFail = false;
+		const successfulPull = await service.pullProject(
+			createPrompt({ projects: ['api'], trackedBranch: '', trackedBranchesByProject: {} }),
+			'api',
+		);
+		assert.equal(successfulPull.success, true);
+
+		const successWidget = await service.refreshProjectsWidget(
+			createPrompt({ projects: ['api'], trackedBranch: '', trackedBranchesByProject: {} }),
+		);
+		assert.equal(successWidget.data.projects[0]?.pullError, '');
+	} finally {
+		service.dispose();
+	}
+});
+
 test('PromptDashboardService falls back from yesterday to the latest previous active day', async () => {
 	const RealDate = Date;
 	(globalThis as typeof globalThis & { Date: DateConstructor }).Date = class extends RealDate {

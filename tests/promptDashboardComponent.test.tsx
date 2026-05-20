@@ -68,6 +68,7 @@ function createProject(overrides: Partial<PromptDashboardProjectSummary> = {}): 
 			{ name: 'feature/task-107', current: false, exists: true, kind: 'prompt', upstream: 'origin/feature/task-107', ahead: 5, behind: 0, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
 			{ name: 'develop', current: false, exists: true, kind: 'tracked', upstream: 'origin/develop', ahead: 0, behind: 3, lastCommit: null, canSwitch: true, canDelete: false, stale: false },
 		],
+		pullError: '',
 		branchSwitchError: '',
 		branchActions: [
 			{ kind: 'prompt', branch: 'feature/task-107', available: true },
@@ -716,6 +717,17 @@ test('PromptDashboard shows branch-switch errors and a dirty-files disclosure un
 	assert.match(markup, /title="Показать список незакоммиченных файлов"/);
 	assert.match(markup, />2<\/span>/);
 	assert.doesNotMatch(markup, /work/);
+});
+
+test('PromptDashboard shows pull errors under the matching project row', () => {
+	const markup = renderDashboard(createSnapshot([
+		createProject({
+			pullError: 'origin недоступен, получение отменено.',
+		}),
+	]));
+
+	assert.match(markup, /Ошибка получения опережающих файлов/);
+	assert.match(markup, /origin недоступен, получение отменено/);
 });
 
 test('PromptDashboard highlights the branch select for prompt-branch mismatches', () => {

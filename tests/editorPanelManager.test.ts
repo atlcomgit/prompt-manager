@@ -2571,6 +2571,84 @@ test('promptDashboardPullProject refreshes only the projects widget and starts A
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
 });
 
+test('promptDashboardPullProject still refreshes the projects widget when pull fails', async () => {
+	const { manager } = await createManager();
+	const refreshModes: string[] = [];
+	const panelMessages: any[] = [];
+	let pullCalls = 0;
+	let analyzeCalls = 0;
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	(manager as any).promptDashboardService = {
+		pullProject: async () => {
+			pullCalls += 1;
+			return { success: false, errors: ['api: origin недоступен'], projectErrors: { api: 'origin недоступен' } };
+		},
+		refreshProjectsWidget: async (
+			_prompt: unknown,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			mode?: string,
+		) => {
+			refreshModes.push(mode || '');
+			postMessage?.({
+				type: 'promptDashboardWidgetSnapshot',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				widget: {
+					kind: 'projects',
+					cache: { status: 'fresh', source: 'refresh' },
+					data: { projects: [] },
+				},
+			});
+			return null;
+		},
+		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void) => {
+			analyzeCalls += 1;
+			postMessage?.({
+				type: 'promptDashboardAnalysis',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				analysis: {
+					status: 'running',
+					model: 'gpt-5',
+					content: '',
+				},
+			});
+			return { status: 'running', model: 'gpt-5', content: '' };
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'promptDashboardPullProject',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			project: 'api',
+			requestId: 'dashboard-pull-1',
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(pullCalls, 1);
+	assert.deepEqual(refreshModes, ['display']);
+	assert.equal(analyzeCalls, 1);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'error' && String(message?.message || '').includes('origin недоступен')), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
+});
+
 test('refreshPromptDashboard posts a refreshed snapshot before AI review finishes', async () => {
 	const { manager } = await createManager();
 	const panelMessages: any[] = [];

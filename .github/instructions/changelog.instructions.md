@@ -1,3 +1,21 @@
+## 138: Показывать ошибку при получении опережающих файлов
+
+- Дата: 2026-05-20.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: В виджете `Ветки проектов` ошибка действия `Получить` для опережающих upstream-изменений теперь сохраняется на уровне строки проекта и показывается под тем же проектом отдельной карточкой `Ошибка получения опережающих файлов` вместо пропажи после refresh.
+- Ключевые моменты: `PromptDashboardService` хранит pull-action ошибки отдельно от branch-switch ошибок в scope-local map и подмешивает их в `PromptDashboardProjectSummary` через `decorateProjectsData()`, поэтому shared cache остаётся чистым; `PromptDashboard` рендерит отдельный inline error block с собственным заголовком для pull failure, а host flow `promptDashboardPullProject` по-прежнему делает widget-first refresh, чтобы ошибка приезжала через snapshot, а не через общий editor notice.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/services/promptDashboardService.ts
+  src/types/promptDashboard.ts
+  src/webview/editor/components/PromptDashboard.tsx
+  tests/editorPanelManager.test.ts
+  tests/promptDashboard.test.ts
+  tests/promptDashboardComponent.test.tsx
+  tests/promptDashboardService.test.ts
+
 ## 137: Показать ветки всех авторов
 
 - Дата: 2026-05-20.

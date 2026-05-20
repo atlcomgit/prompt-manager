@@ -753,19 +753,20 @@ function renderBranchProject(
 			>
 				{isProjectBusy ? <span style={styles.inlineSpinnerLabel}><span style={styles.buttonSpinner} aria-hidden="true" /> {actionBusyLabel}</span> : actionLabel}
 			</button>
-			{project.branchSwitchError ? renderBranchProjectErrorBlock(project.branchSwitchError) : null}
+			{project.branchSwitchError ? renderBranchProjectErrorBlock('Ошибка переключения ветки', project.branchSwitchError) : null}
+			{project.pullError ? renderBranchProjectErrorBlock('Ошибка получения опережающих файлов', project.pullError) : null}
 			{hasIncomingFiles ? renderBranchProjectIncomingFiles(project, selectedBranchInfo?.upstream || '@{upstream}', incomingFilesToggleKey, incomingFilesExpanded, fileHandlers, toggleExpanded) : null}
 			{hasUncommittedFiles ? renderBranchProjectUncommittedFiles(project, dirtyFilesToggleKey, uncommittedFilesExpanded, fileHandlers, toggleExpanded) : null}
-			{project.error ? renderBranchProjectErrorBlock(project.error) : null}
+			{project.error ? renderBranchProjectErrorBlock('Ошибка проекта', project.error) : null}
 		</div>
 	);
 }
 
-/** Renders one outlined branch-switch error under the affected project row. */
-function renderBranchProjectErrorBlock(message: string): React.ReactNode {
+/** Renders one outlined error block under the affected project row. */
+function renderBranchProjectErrorBlock(title: string, message: string): React.ReactNode {
 	return (
 		<div style={styles.branchProjectErrorBlock}>
-			<div style={styles.branchProjectErrorTitle}>Ошибка переключения ветки</div>
+			<div style={styles.branchProjectErrorTitle}>{title}</div>
 			<div style={styles.errorText}>{message}</div>
 		</div>
 	);

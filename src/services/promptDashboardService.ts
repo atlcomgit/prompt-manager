@@ -76,6 +76,8 @@ export class PromptDashboardService implements vscode.Disposable {
 	private readonly inFlight = new Map<string, Promise<unknown>>();
 	private readonly sharedAnalysisCache = new Map<string, DashboardCacheEntry<PromptDashboardAnalysisState>>();
 	private readonly analysisInFlight = new Map<string, Promise<PromptDashboardAnalysisState>>();
+	/** Stores project-scoped pull errors shown inline in the branches widget. */
+	private readonly pullErrorsByScope = new Map<string, Record<string, string>>();
 	private readonly branchSwitchErrorsByScope = new Map<string, Record<string, string>>();
 	private readonly activityFingerprintByScope = new Map<string, string>();
 	private activeScope: PromptDashboardScope | null = null;
@@ -112,6 +114,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		this.sharedProjectsCache.clear();
 		this.sharedAnalysisCache.clear();
 		this.analysisInFlight.clear();
+		this.pullErrorsByScope.clear();
 		this.branchSwitchErrorsByScope.clear();
 		this.activityFingerprintByScope.clear();
 	}
@@ -242,6 +245,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		const result = await this.gitService.syncProjects(paths, [normalizedProject]);
 		const scope = this.createScope(prompt);
 		const pullResult = this.buildBranchSwitchResult([normalizedProject], result.errors || []);
+		this.updateScopedProjectErrors(this.pullErrorsByScope, scope, [normalizedProject], pullResult.projectErrors);
 		this.cancelScheduledAutoRefresh('pull-project', scope);
 		this.invalidateScope(scope);
 		return pullResult;
@@ -313,7 +317,12 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 		const scope = this.createScope(prompt);
 		const branchSwitchResult = this.buildBranchSwitchResult(entries.map(([project]) => project), errors);
-		this.updateBranchSwitchErrors(scope, entries.map(([project]) => project), branchSwitchResult.projectErrors);
+		this.updateScopedProjectErrors(
+			this.branchSwitchErrorsByScope,
+			scope,
+			entries.map(([project]) => project),
+			branchSwitchResult.projectErrors,
+		);
 		this.cancelScheduledAutoRefresh('branch-switch', scope);
 		this.invalidateScope(scope);
 		return branchSwitchResult;
@@ -745,17 +754,21 @@ export class PromptDashboardService implements vscode.Disposable {
 		scope: PromptDashboardScope,
 		data: PromptDashboardProjectsData,
 	): PromptDashboardProjectsData {
-		const scopeErrors = this.branchSwitchErrorsByScope.get(buildPromptDashboardScopeKey(scope));
+		const scopeKey = buildPromptDashboardScopeKey(scope);
+		const branchSwitchErrors = this.branchSwitchErrorsByScope.get(scopeKey);
+		const pullErrors = this.pullErrorsByScope.get(scopeKey);
 		let changed = false;
 		const decorateProjectList = (projects: PromptDashboardProjectSummary[]): PromptDashboardProjectSummary[] => projects.map(project => {
-			const branchSwitchError = scopeErrors?.[project.project] || '';
-			if ((project.branchSwitchError || '') === branchSwitchError) {
+			const branchSwitchError = branchSwitchErrors?.[project.project] || '';
+			const pullError = pullErrors?.[project.project] || '';
+			if ((project.branchSwitchError || '') === branchSwitchError && (project.pullError || '') === pullError) {
 				return project;
 			}
 			changed = true;
 			return {
 				...project,
 				branchSwitchError,
+				pullError,
 			};
 		});
 		const projects = decorateProjectList(data.projects);
@@ -1596,6 +1609,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				available: project.available,
 				error: project.error,
 				branchSwitchError: '',
+				pullError: '',
 				hasPromptBranchMismatch,
 				currentBranch: project.currentBranch,
 				promptBranch: project.promptBranch,
@@ -1671,6 +1685,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				available: project.available,
 				error: project.error,
 				branchSwitchError: '',
+				pullError: '',
 				hasPromptBranchMismatch,
 				currentBranch: project.currentBranch,
 				promptBranch: project.promptBranch,
@@ -1722,6 +1737,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				available: project.available,
 				error: project.error,
 				branchSwitchError: '',
+				pullError: '',
 				hasPromptBranchMismatch,
 				currentBranch: project.currentBranch,
 				promptBranch: project.promptBranch,
@@ -2185,6 +2201,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			available: project.available,
 			error: project.error,
 			branchSwitchError: '',
+			pullError: '',
 			hasPromptBranchMismatch,
 			currentBranch: project.currentBranch,
 			promptBranch: project.promptBranch,
@@ -2273,14 +2290,15 @@ export class PromptDashboardService implements vscode.Disposable {
 		};
 	}
 
-	/** Keeps only the latest branch-switch error state for the projects involved in the last action. */
-	private updateBranchSwitchErrors(
+	/** Keeps only the latest inline action error state for the affected project rows. */
+	private updateScopedProjectErrors(
+		errorStore: Map<string, Record<string, string>>,
 		scope: PromptDashboardScope,
 		targetProjects: string[],
 		projectErrors: Record<string, string>,
 	): void {
 		const scopeKey = buildPromptDashboardScopeKey(scope);
-		const currentErrors = { ...(this.branchSwitchErrorsByScope.get(scopeKey) || {}) };
+		const currentErrors = { ...(errorStore.get(scopeKey) || {}) };
 		for (const project of Array.from(new Set(targetProjects.map(item => item.trim()).filter(Boolean)))) {
 			const nextError = String(projectErrors[project] || '').trim();
 			if (nextError) {
@@ -2290,10 +2308,10 @@ export class PromptDashboardService implements vscode.Disposable {
 			delete currentErrors[project];
 		}
 		if (Object.keys(currentErrors).length > 0) {
-			this.branchSwitchErrorsByScope.set(scopeKey, currentErrors);
+			errorStore.set(scopeKey, currentErrors);
 			return;
 		}
-		this.branchSwitchErrorsByScope.delete(scopeKey);
+		errorStore.delete(scopeKey);
 	}
 
 	private resolveTrackedBranches(scope: PromptDashboardScope, projectNames: string[]): string[] {

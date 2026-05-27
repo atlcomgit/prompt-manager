@@ -208,6 +208,106 @@ test('GitService switchBranchesByProject does not create a missing tracked branc
 	assert.deepEqual(calls, []);
 });
 
+test('GitService switchBranch starts project switches in parallel and preserves project order', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const release = createDeferred<void>();
+	const allStarted = createDeferred<void>();
+	const started: string[] = [];
+	let running = 0;
+	let maxRunning = 0;
+
+	service.getAllowedBaseBranches = () => new Set(['main', 'develop']);
+	service.switchProjectBranch = async (project: string) => {
+		started.push(project);
+		running += 1;
+		maxRunning = Math.max(maxRunning, running);
+		if (started.length === 3) {
+			allStarted.resolve();
+		}
+		await release.promise;
+		running -= 1;
+	};
+
+	const resultPromise = service.switchBranch(
+		new Map([
+			['api', '/tmp/api'],
+			['web', '/tmp/web'],
+			['worker', '/tmp/worker'],
+		]),
+		['api', 'web', 'worker'],
+		'feature/task-42',
+		['main', 'develop'],
+	);
+
+	await allStarted.promise;
+	assert.ok(maxRunning > 1);
+	release.resolve();
+
+	const result = await resultPromise;
+	assert.equal(result.success, true);
+	assert.deepEqual(started, ['api', 'web', 'worker']);
+	assert.deepEqual(result.changedProjects, ['api', 'web', 'worker']);
+});
+
+test('GitService switchBranchesByProject reuses resolved branch lookup during tracked checkout', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const calls: string[][] = [];
+	let currentBranch = 'main';
+	let localChecks = 0;
+	let remoteChecks = 0;
+
+	service.branchExistsLocally = async (_projectPath: string, branchName: string) => {
+		localChecks += 1;
+		return branchName === currentBranch;
+	};
+	service.findRemoteBranchRef = async (_projectPath: string, branchName: string) => {
+		remoteChecks += 1;
+		return branchName === 'develop' ? 'origin/develop' : '';
+	};
+	service.getCurrentBranch = async () => currentBranch;
+	service.listLocalBranches = async () => new Map([
+		[currentBranch, {
+			name: currentBranch,
+			current: true,
+			upstream: currentBranch === 'develop' ? 'origin/develop' : '',
+			ahead: 0,
+			behind: 0,
+			stale: false,
+			sha: 'abc1234',
+			author: 'Test User',
+			committedAt: '2026-04-06T00:00:00.000Z',
+			subject: 'Test commit',
+		}],
+	]);
+	service.getAllowedBaseBranches = () => new Set(['main', 'develop']);
+	service.runGitFileMutation = async (_projectPath: string, args: string[]) => {
+		if (args[0] === 'checkout') {
+			currentBranch = args[1] === '-b'
+				? (args[2] || currentBranch)
+				: (args[1] || currentBranch);
+		}
+		calls.push(args);
+	};
+
+	const result = await service.switchBranchesByProject(
+		new Map([['api', '/tmp/api']]),
+		['api'],
+		'',
+		{ api: 'develop' },
+		['main', 'develop'],
+	);
+
+	assert.equal(result.success, true);
+	assert.equal(localChecks, 1);
+	assert.equal(remoteChecks, 1);
+	assert.deepEqual(calls, [
+		['checkout', '-b', 'develop', '--track', 'origin/develop'],
+		['pull', '--ff-only'],
+	]);
+});
+
 test('GitService syncProjects pulls only branches that are behind their upstream', async () => {
 	const { GitService } = await importGitService();
 	const service = new GitService() as any;

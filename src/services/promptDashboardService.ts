@@ -194,7 +194,12 @@ export class PromptDashboardService implements vscode.Disposable {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
 		const targetProjects = this.resolveProjectsRefreshTargets(scope, projectNames);
-		if ((mode === 'details' || mode === 'dirty-details') && targetProjects.length > 0 && targetProjects.length < scope.projectNames.length) {
+		const shouldUsePartialProjectsRefresh = targetProjects.length > 0 && (
+			((mode === 'details' || mode === 'dirty-details') && targetProjects.length < scope.projectNames.length)
+			|| mode === 'reactive-branches'
+			|| mode === 'analysis'
+		);
+		if (shouldUsePartialProjectsRefresh) {
 			await this.refreshProjectsWidgetSubset(scope, prompt, postMessage, requestId, mode, targetProjects);
 			return this.buildProjectsWidgetFromCache(scope);
 		}
@@ -247,7 +252,6 @@ export class PromptDashboardService implements vscode.Disposable {
 		const pullResult = this.buildBranchSwitchResult([normalizedProject], result.errors || []);
 		this.updateScopedProjectErrors(this.pullErrorsByScope, scope, [normalizedProject], pullResult.projectErrors);
 		this.cancelScheduledAutoRefresh('pull-project', scope);
-		this.invalidateScope(scope);
 		return pullResult;
 	}
 
@@ -324,7 +328,6 @@ export class PromptDashboardService implements vscode.Disposable {
 			branchSwitchResult.projectErrors,
 		);
 		this.cancelScheduledAutoRefresh('branch-switch', scope);
-		this.invalidateScope(scope);
 		return branchSwitchResult;
 	}
 
@@ -346,16 +349,26 @@ export class PromptDashboardService implements vscode.Disposable {
 		});
 	}
 
-	async analyzeParallelReview(prompt: Prompt, postMessage?: DashboardPostMessage, requestId?: string): Promise<PromptDashboardAnalysisState> {
+	async analyzeParallelReview(
+		prompt: Prompt,
+		postMessage?: DashboardPostMessage,
+		requestId?: string,
+		options?: { projectNames?: string[] },
+	): Promise<PromptDashboardAnalysisState> {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
-		// Keep the visible projects widget stable while AI refreshes deeper Git context in the background.
-		await this.refreshWidget(scope, 'projects', undefined, {
-			force: true,
-			requestId,
-			prompt,
-			projectsMode: 'analysis',
-		});
+		const targetProjects = this.resolveProjectsRefreshTargets(scope, options?.projectNames);
+		// Rehydrate only affected project rows after branch actions so AI follow-up avoids a full workspace replay.
+		if (targetProjects.length > 0) {
+			await this.refreshProjectsWidget(prompt, undefined, requestId, 'analysis', targetProjects);
+		} else {
+			await this.refreshWidget(scope, 'projects', undefined, {
+				force: true,
+				requestId,
+				prompt,
+				projectsMode: 'analysis',
+			});
+		}
 		return this.refreshAnalysis(scope, prompt, postMessage, requestId, true);
 	}
 
@@ -886,6 +899,21 @@ export class PromptDashboardService implements vscode.Disposable {
 			.filter(project => scopeProjects.has(project))));
 	}
 
+	/** Merges refreshed project summaries by project name while keeping untouched rows stable. */
+	private mergeProjectSummaryList(
+		currentProjects: PromptDashboardProjectSummary[],
+		nextProjects: PromptDashboardProjectSummary[],
+	): PromptDashboardProjectSummary[] {
+		const nextProjectsByName = new Map(nextProjects.map(project => [project.project, project] as const));
+		const mergedProjects = currentProjects.map(project => nextProjectsByName.get(project.project) || project);
+		for (const project of nextProjects) {
+			if (!mergedProjects.some(existing => existing.project === project.project)) {
+				mergedProjects.push(project);
+			}
+		}
+		return mergedProjects;
+	}
+
 	/** Merges a partial projects refresh back into the full widget snapshot without blanking other rows. */
 	private mergeProjectsData(
 		currentData: PromptDashboardProjectsData,
@@ -895,19 +923,16 @@ export class PromptDashboardService implements vscode.Disposable {
 			return nextData;
 		}
 
-		const nextProjectsByName = new Map(nextData.projects.map(project => [project.project, project] as const));
-		const mergedProjects = currentData.projects.map(project => nextProjectsByName.get(project.project) || project);
-		for (const project of nextData.projects) {
-			if (!mergedProjects.some(existing => existing.project === project.project)) {
-				mergedProjects.push(project);
-			}
-		}
+		const mergedProjects = this.mergeProjectSummaryList(currentData.projects, nextData.projects);
+		const mergedBranchProjects = nextData.branchProjects !== undefined
+			? nextData.branchProjects
+			: (currentData.branchProjects !== undefined
+				? this.mergeProjectSummaryList(currentData.branchProjects, nextData.projects)
+				: undefined);
 
 		return {
 			projects: mergedProjects,
-			...(nextData.branchProjects !== undefined
-				? { branchProjects: nextData.branchProjects }
-				: (currentData.branchProjects !== undefined ? { branchProjects: currentData.branchProjects } : {})),
+			...(mergedBranchProjects !== undefined ? { branchProjects: mergedBranchProjects } : {}),
 		};
 	}
 
@@ -936,7 +961,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		prompt: Prompt,
 		postMessage: DashboardPostMessage | undefined,
 		requestId: string | undefined,
-		mode: Extract<PromptDashboardProjectsRefreshMode, 'details' | 'dirty-details'>,
+		mode: Extract<PromptDashboardProjectsRefreshMode, 'details' | 'dirty-details' | 'reactive-branches' | 'analysis'>,
 		targetProjects: string[],
 	): Promise<void> {
 		const widgetStartedAtMs = Date.now();
@@ -973,9 +998,20 @@ export class PromptDashboardService implements vscode.Disposable {
 
 		const task = (async () => {
 			try {
+				const currentData = this.getProjectsDataForScope(scope);
+				if (currentData.projects.length === 0) {
+					// Fall back to the full refresh path if a partial refresh has no stable base to merge into.
+					await this.refreshWidget(scope, 'projects', postMessage, {
+						force: true,
+						requestId,
+						prompt,
+						projectsMode: mode,
+					});
+					return;
+				}
 				const partialData = await this.loadProjectsData(scope, mode, targetProjects);
 				this.ensureScopeActive(scope);
-				const mergedData = this.mergeProjectsData(this.getProjectsDataForScope(scope), partialData);
+				const mergedData = this.mergeProjectsData(currentData, partialData);
 				this.setCache(scope, 'projects', mergedData);
 				const snapshot = this.buildProjectsWidgetFromCache(scope);
 				this.postWidget(postMessage, scope, snapshot, requestId);
@@ -2190,10 +2226,6 @@ export class PromptDashboardService implements vscode.Disposable {
 		const reusableCachedProject = cachedProject && project.available && !project.error
 			? cachedProject
 			: null;
-		const canReuseHeavySections = reusableCachedProject !== null
-			&& reusableCachedProject.currentBranch === project.currentBranch
-			&& reusableCachedProject.promptBranch === project.promptBranch
-			&& reusableCachedProject.trackedBranch === trackedBranch;
 		const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
 		return {
 			project: project.project,
@@ -2216,10 +2248,10 @@ export class PromptDashboardService implements vscode.Disposable {
 				trackedBranch,
 				branches: project.branches,
 			}),
-			recentCommits: canReuseHeavySections ? (reusableCachedProject?.recentCommits || []) : [],
-			review: canReuseHeavySections && reusableCachedProject ? reusableCachedProject.review : project.review,
-			pipeline: canReuseHeavySections && reusableCachedProject ? reusableCachedProject.pipeline : null,
-			parallelBranches: canReuseHeavySections ? (reusableCachedProject?.parallelBranches || []) : [],
+			recentCommits: reusableCachedProject?.recentCommits || [],
+			review: reusableCachedProject ? reusableCachedProject.review : project.review,
+			pipeline: reusableCachedProject ? reusableCachedProject.pipeline : null,
+			parallelBranches: reusableCachedProject?.parallelBranches || [],
 			conflictFiles,
 			incomingFiles,
 			incomingAuthors,

@@ -2418,6 +2418,8 @@ test('hydratePromptDashboardProjectsDetails refreshes only the projects widget i
 test('promptDashboardSwitchBranch refreshes only the projects widget and starts AI review without full snapshot blocking', async () => {
 	const { manager } = await createManager();
 	const refreshModes: string[] = [];
+	const refreshProjects: string[][] = [];
+	const analyzeProjects: string[][] = [];
 	const panelMessages: any[] = [];
 	let refreshPromptCalls = 0;
 	let analyzeCalls = 0;
@@ -2441,8 +2443,10 @@ test('promptDashboardSwitchBranch refreshes only the projects widget and starts 
 			postMessage?: (message: unknown) => void,
 			_requestId?: string,
 			mode?: string,
+			projects?: string[],
 		) => {
 			refreshModes.push(mode || '');
+			refreshProjects.push([...(projects || [])]);
 			postMessage?.({
 				type: 'promptDashboardWidgetSnapshot',
 				promptId: 'task-42',
@@ -2455,8 +2459,9 @@ test('promptDashboardSwitchBranch refreshes only the projects widget and starts 
 			});
 			return null;
 		},
-		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void) => {
+		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void, _requestId?: string, options?: { projectNames?: string[] }) => {
 			analyzeCalls += 1;
+			analyzeProjects.push([...(options?.projectNames || [])]);
 			postMessage?.({
 				type: 'promptDashboardAnalysis',
 				promptId: 'task-42',
@@ -2487,8 +2492,10 @@ test('promptDashboardSwitchBranch refreshes only the projects widget and starts 
 	);
 
 	assert.equal(refreshPromptCalls, 0);
-	assert.deepEqual(refreshModes, ['display']);
+	assert.deepEqual(refreshModes, ['reactive-branches']);
+	assert.deepEqual(refreshProjects, [['api']]);
 	assert.equal(analyzeCalls, 1);
+	assert.deepEqual(analyzeProjects, [['api']]);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
@@ -2497,6 +2504,8 @@ test('promptDashboardSwitchBranch refreshes only the projects widget and starts 
 test('promptDashboardPullProject refreshes only the projects widget and starts AI review without full snapshot blocking', async () => {
 	const { manager } = await createManager();
 	const refreshModes: string[] = [];
+	const refreshProjects: string[][] = [];
+	const analyzeProjects: string[][] = [];
 	const panelMessages: any[] = [];
 	let pullCalls = 0;
 	let analyzeCalls = 0;
@@ -2519,8 +2528,10 @@ test('promptDashboardPullProject refreshes only the projects widget and starts A
 			postMessage?: (message: unknown) => void,
 			_requestId?: string,
 			mode?: string,
+			projects?: string[],
 		) => {
 			refreshModes.push(mode || '');
+			refreshProjects.push([...(projects || [])]);
 			postMessage?.({
 				type: 'promptDashboardWidgetSnapshot',
 				promptId: 'task-42',
@@ -2533,8 +2544,9 @@ test('promptDashboardPullProject refreshes only the projects widget and starts A
 			});
 			return null;
 		},
-		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void) => {
+		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void, _requestId?: string, options?: { projectNames?: string[] }) => {
 			analyzeCalls += 1;
+			analyzeProjects.push([...(options?.projectNames || [])]);
 			postMessage?.({
 				type: 'promptDashboardAnalysis',
 				promptId: 'task-42',
@@ -2564,8 +2576,10 @@ test('promptDashboardPullProject refreshes only the projects widget and starts A
 	);
 
 	assert.equal(pullCalls, 1);
-	assert.deepEqual(refreshModes, ['display']);
+	assert.deepEqual(refreshModes, ['reactive-branches']);
+	assert.deepEqual(refreshProjects, [['api']]);
 	assert.equal(analyzeCalls, 1);
+	assert.deepEqual(analyzeProjects, [['api']]);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
@@ -2574,6 +2588,8 @@ test('promptDashboardPullProject refreshes only the projects widget and starts A
 test('promptDashboardPullProject still refreshes the projects widget when pull fails', async () => {
 	const { manager } = await createManager();
 	const refreshModes: string[] = [];
+	const refreshProjects: string[][] = [];
+	const analyzeProjects: string[][] = [];
 	const panelMessages: any[] = [];
 	let pullCalls = 0;
 	let analyzeCalls = 0;
@@ -2596,8 +2612,10 @@ test('promptDashboardPullProject still refreshes the projects widget when pull f
 			postMessage?: (message: unknown) => void,
 			_requestId?: string,
 			mode?: string,
+			projects?: string[],
 		) => {
 			refreshModes.push(mode || '');
+			refreshProjects.push([...(projects || [])]);
 			postMessage?.({
 				type: 'promptDashboardWidgetSnapshot',
 				promptId: 'task-42',
@@ -2610,8 +2628,9 @@ test('promptDashboardPullProject still refreshes the projects widget when pull f
 			});
 			return null;
 		},
-		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void) => {
+		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void, _requestId?: string, options?: { projectNames?: string[] }) => {
 			analyzeCalls += 1;
+			analyzeProjects.push([...(options?.projectNames || [])]);
 			postMessage?.({
 				type: 'promptDashboardAnalysis',
 				promptId: 'task-42',
@@ -2641,8 +2660,10 @@ test('promptDashboardPullProject still refreshes the projects widget when pull f
 	);
 
 	assert.equal(pullCalls, 1);
-	assert.deepEqual(refreshModes, ['display']);
+	assert.deepEqual(refreshModes, ['reactive-branches']);
+	assert.deepEqual(refreshProjects, [['api']]);
 	assert.equal(analyzeCalls, 1);
+	assert.deepEqual(analyzeProjects, [['api']]);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'error' && String(message?.message || '').includes('origin недоступен')), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
@@ -2716,6 +2737,85 @@ test('refreshPromptDashboard posts a refreshed snapshot before AI review finishe
 	assert.equal(analyzeCalls, 1);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
+});
+
+test('promptDashboardSwitchBranches refreshes only targeted project rows and starts AI review without full snapshot blocking', async () => {
+	const { manager } = await createManager();
+	const refreshModes: string[] = [];
+	const refreshProjects: string[][] = [];
+	const analyzeProjects: string[][] = [];
+	const panelMessages: any[] = [];
+	let analyzeCalls = 0;
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	(manager as any).promptDashboardService = {
+		switchProjectBranches: async () => ({ success: true, errors: [] }),
+		refreshProjectsWidget: async (
+			_prompt: unknown,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			mode?: string,
+			projects?: string[],
+		) => {
+			refreshModes.push(mode || '');
+			refreshProjects.push([...(projects || [])]);
+			postMessage?.({
+				type: 'promptDashboardWidgetSnapshot',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				widget: {
+					kind: 'projects',
+					cache: { status: 'fresh', source: 'refresh' },
+					data: { projects: [] },
+				},
+			});
+			return null;
+		},
+		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void, _requestId?: string, options?: { projectNames?: string[] }) => {
+			analyzeCalls += 1;
+			analyzeProjects.push([...(options?.projectNames || [])]);
+			postMessage?.({
+				type: 'promptDashboardAnalysis',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				analysis: {
+					status: 'running',
+					model: 'gpt-5',
+					content: '',
+				},
+			});
+			return { status: 'running', model: 'gpt-5', content: '' };
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'promptDashboardSwitchBranches',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api', 'web'] }),
+			branchesByProject: { api: 'develop', web: 'release' },
+			requestId: 'dashboard-switch-many-1',
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api', 'web'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(refreshModes, ['reactive-branches']);
+	assert.deepEqual(refreshProjects, [['api', 'web']]);
+	assert.equal(analyzeCalls, 1);
+	assert.deepEqual(analyzeProjects, [['api', 'web']]);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
 });
 
 test('runGitOverlayRefresh emits refresh timing metrics with snapshot source refresh', async () => {

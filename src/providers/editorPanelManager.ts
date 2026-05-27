@@ -9479,17 +9479,19 @@ export class EditorPanelManager {
 				} else {
 					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
 				}
-				// Repaint the project widget first, then let AI review catch up without blocking Apply.
+				// Keep the post-apply repaint narrow and reuse cached heavy sections until background review catches up.
 				await this.promptDashboardService.refreshProjectsWidget(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
-					'display',
+					'reactive-branches',
+					[msg.project],
 				);
 				void this.promptDashboardService.analyzeParallelReview(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
+					{ projectNames: [msg.project] },
 				);
 				break;
 			}
@@ -9506,12 +9508,14 @@ export class EditorPanelManager {
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
-					'display',
+					'reactive-branches',
+					[msg.project],
 				);
 				void this.promptDashboardService.analyzeParallelReview(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
+					{ projectNames: [msg.project] },
 				);
 				break;
 			}
@@ -9524,17 +9528,19 @@ export class EditorPanelManager {
 				} else {
 					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
 				}
-				// Repaint the project widget first, then let AI review catch up without blocking Apply.
+				// Keep the post-apply repaint narrow and reuse cached heavy sections until background review catches up.
 				await this.promptDashboardService.refreshProjectsWidget(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
-					'display',
+					'reactive-branches',
+					Object.keys(msg.branchesByProject || {}),
 				);
 				void this.promptDashboardService.analyzeParallelReview(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
+					{ projectNames: Object.keys(msg.branchesByProject || {}) },
 				);
 				break;
 			}

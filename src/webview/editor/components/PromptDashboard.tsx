@@ -552,7 +552,8 @@ function renderActivityGroup(
 			<div style={styles.groupTitle}>{title}</div>
 			{items.length === 0 ? (
 				<div style={styles.emptyText}>Нет промптов дольше 5 минут</div>
-			) : items.slice(0, 4).map(item => (
+			) : items.map(item => (
+				// Keep every active prompt visible instead of trimming the widget to a fixed row count.
 				<button
 					key={`${item.day}-${item.id}`}
 					type="button"

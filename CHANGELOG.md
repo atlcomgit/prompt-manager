@@ -6,6 +6,11 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-05-29
+
+#### Fixed
+- The `Активные промпты` dashboard widget no longer trims the `Сегодня` and previous active day groups to four rows, so every qualifying prompt remains visible in the card.
+
 ### 2026-05-20
 
 #### Changed

@@ -12,7 +12,11 @@ import {
 	resolveVisibleLineStatsParts,
 	resolveVisibleParallelBranches,
 } from '../src/webview/editor/components/PromptDashboard.js';
-import type { PromptDashboardProjectSummary, PromptDashboardSnapshot } from '../src/types/promptDashboard.js';
+import type {
+	PromptDashboardProjectSummary,
+	PromptDashboardPromptActivityItem,
+	PromptDashboardSnapshot,
+} from '../src/types/promptDashboard.js';
 
 type TestWindow = Window & { __LOCALE__?: string };
 
@@ -158,6 +162,25 @@ function createSnapshot(
 			cache: { status: 'fresh', source: 'cache', updatedAt: '2026-04-29T10:00:00.000Z' },
 			data: { status: 'completed', model: 'copilot:gpt-5', content: '## Summary\n- Ready', updatedAt: '2026-04-29T10:00:00.000Z' },
 		},
+	};
+}
+
+/** Builds one activity-row fixture for the dashboard widget tests. */
+function createActivityItem(
+	index: number,
+	overrides: Partial<PromptDashboardPromptActivityItem> = {},
+): PromptDashboardPromptActivityItem {
+	return {
+		id: `prompt-${index}`,
+		promptUuid: `uuid-${index}`,
+		taskNumber: `${100 + index}`,
+		title: `Активный промпт ${index}`,
+		status: 'in-progress',
+		day: 'today',
+		totalMs: (index + 1) * 600_000,
+		updatedAt: '2026-04-29T10:00:00.000Z',
+		progress: 10 * index,
+		...overrides,
 	};
 }
 
@@ -360,6 +383,40 @@ test('PromptDashboard renders widget refresh buttons in every section header', (
 	assert.match(markup, /aria-label="Обновить виджет: Параллельные ветки"/);
 	assert.match(markup, /aria-label="Обновить виджет: AI review"/);
 	assert.match(markup, /aria-label="Обновить виджет: MR\/PR"/);
+});
+
+test('PromptDashboard renders every today activity row without trimming the widget', () => {
+	const snapshot = createSnapshot([createProject()]);
+
+	// Fill the today group beyond the previous four-row UI cap.
+	snapshot.activity.data.today = [1, 2, 3, 4, 5].map(index => createActivityItem(index));
+
+	const markup = renderDashboard(snapshot);
+
+	assert.match(
+		markup,
+		/Сегодня[\s\S]*Активный промпт 1[\s\S]*Активный промпт 2[\s\S]*Активный промпт 3[\s\S]*Активный промпт 4[\s\S]*Активный промпт 5/,
+	);
+});
+
+test('PromptDashboard renders every previous-day activity row without trimming the widget', () => {
+	const snapshot = createSnapshot([createProject()]);
+
+	// Keep the custom previous-day label and verify the fifth row stays visible.
+	snapshot.activity.data.yesterdayLabel = '12 мая';
+	snapshot.activity.data.yesterday = [1, 2, 3, 4, 5].map(index => createActivityItem(index, {
+		id: `previous-${index}`,
+		promptUuid: `previous-uuid-${index}`,
+		title: `Вчерашний промпт ${index}`,
+		day: 'yesterday',
+	}));
+
+	const markup = renderDashboard(snapshot);
+
+	assert.match(
+		markup,
+		/12 мая[\s\S]*Вчерашний промпт 1[\s\S]*Вчерашний промпт 2[\s\S]*Вчерашний промпт 3[\s\S]*Вчерашний промпт 4[\s\S]*Вчерашний промпт 5/,
+	);
 });
 
 test('PromptDashboard renders commit author beside sha and keeps the subject on a separate line', () => {

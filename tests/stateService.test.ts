@@ -189,6 +189,51 @@ test('StateService serializes prompt editor view-state save and migrate mutation
 	}).expandedSections.files, false);
 });
 
+test('StateService saves shared dashboard collapsed sections through a serialized workspace mutation queue', async () => {
+	const { StateService } = await importStateService();
+	const firstUpdateGate = createDeferred<void>();
+	let updateCount = 0;
+	const workspaceState = createWorkspaceStateMock({}, {
+		update: async (store, key, value) => {
+			updateCount += 1;
+			if (updateCount === 1) {
+				await firstUpdateGate.promise;
+			}
+
+			if (typeof value === 'undefined') {
+				store.delete(key);
+				return;
+			}
+
+			store.set(key, value);
+		},
+	});
+	const service = new StateService({ workspaceState } as any);
+
+	const firstSave = service.savePromptDashboardCollapsedSections({
+		activity: true,
+		status: false,
+	});
+	const secondSave = service.savePromptDashboardCollapsedSections({
+		activity: false,
+		status: true,
+		parallelBranches: true,
+	});
+
+	firstUpdateGate.resolve();
+	await Promise.all([firstSave, secondSave]);
+
+	assert.equal(updateCount, 2);
+	assert.deepEqual(service.getPromptDashboardCollapsedSections(), {
+		status: true,
+		parallelBranches: true,
+	});
+	assert.deepEqual(workspaceState.store.get('promptManager.dashboardCollapsedSections'), {
+		status: true,
+		parallelBranches: true,
+	});
+});
+
 test('StateService chat session relevance ignores sessions completed before the tracked start', async () => {
 	const { StateService } = await importStateService();
 

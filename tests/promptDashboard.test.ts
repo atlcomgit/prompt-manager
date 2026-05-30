@@ -16,6 +16,7 @@ import {
 	preservePromptDashboardProjectsLoadingSnapshot,
 	PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS,
 	resolvePromptDashboardCacheState,
+	resolvePromptDashboardExpandRefreshTarget,
 	resolvePromptDashboardMode,
 	shouldAcceptPromptDashboardAnalysisMessage,
 	shouldAcceptPromptDashboardRequestMessage,
@@ -180,6 +181,128 @@ test('shouldRequestPromptDashboardSnapshot reuses a matching snapshot after hidd
 		currentFingerprint: 'same',
 		lastRequestedFingerprint: 'same',
 	}), true);
+
+	assert.equal(shouldRequestPromptDashboardSnapshot({
+		mode: 'full',
+		isLoaded: true,
+		hasSnapshot: false,
+		currentFingerprint: 'scope-a',
+		lastRequestedFingerprint: '',
+		hasPendingExplicitRequest: true,
+	}), false);
+});
+
+test('resolvePromptDashboardExpandRefreshTarget refreshes only stale or placeholder widgets after expand', () => {
+	const snapshot: PromptDashboardSnapshot = {
+		promptId: 'task-1',
+		promptUuid: 'uuid-1',
+		generatedAt: '2026-05-30T10:00:00.000Z',
+		scopeKey: 'task-1::dashboard',
+		activity: createPromptDashboardWidgetSnapshot('activity', {
+			thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS,
+			today: [],
+			yesterday: [],
+		}, { status: 'fresh', source: 'refresh' }),
+		status: createPromptDashboardWidgetSnapshot('status', {
+			status: 'draft',
+			totalTimeMs: 0,
+			updatedAt: '2026-05-30T10:00:00.000Z',
+		}, { status: 'idle', source: 'placeholder' }),
+		projects: createPromptDashboardWidgetSnapshot('projects', {
+			projects: [],
+			loadedSections: [],
+		}, { status: 'stale', source: 'cache' }),
+		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null, { status: 'error', source: 'refresh' }),
+	};
+
+	assert.equal(resolvePromptDashboardExpandRefreshTarget({
+		section: 'activity',
+		snapshot,
+	}), null);
+	assert.deepEqual(resolvePromptDashboardExpandRefreshTarget({
+		section: 'status',
+		snapshot,
+	}), { type: 'widget', widget: 'status' });
+	assert.deepEqual(resolvePromptDashboardExpandRefreshTarget({
+		section: 'projectBranches',
+		snapshot,
+	}), { type: 'widget', widget: 'projects' });
+	assert.deepEqual(resolvePromptDashboardExpandRefreshTarget({
+		section: 'aiAnalysis',
+		snapshot,
+	}), { type: 'widget', widget: 'aiAnalysis' });
+	assert.equal(resolvePromptDashboardExpandRefreshTarget({
+		section: 'status',
+		snapshot: null,
+	}), null);
+});
+
+test('resolvePromptDashboardExpandRefreshTarget refreshes a shared Git section that is still missing from loadedSections', () => {
+	const snapshot: PromptDashboardSnapshot = {
+		promptId: 'task-1',
+		promptUuid: 'uuid-1',
+		generatedAt: '2026-05-30T10:00:00.000Z',
+		scopeKey: 'task-1::dashboard',
+		activity: createPromptDashboardWidgetSnapshot('activity', {
+			thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS,
+			today: [],
+			yesterday: [],
+		}, { status: 'fresh', source: 'refresh' }),
+		status: createPromptDashboardWidgetSnapshot('status', {
+			status: 'draft',
+			totalTimeMs: 0,
+			updatedAt: '2026-05-30T10:00:00.000Z',
+		}, { status: 'fresh', source: 'refresh' }),
+		projects: createPromptDashboardWidgetSnapshot('projects', {
+			projects: [{
+				project: 'api',
+				repositoryPath: '/api',
+				available: true,
+				error: '',
+				branchSwitchError: '',
+				pullError: '',
+				hasPromptBranchMismatch: false,
+				currentBranch: 'feature/task-1',
+				promptBranch: 'feature/task-1',
+				trackedBranch: 'main',
+				dirty: false,
+				hasConflicts: false,
+				ahead: 0,
+				behind: 0,
+				branches: [],
+				branchActions: [],
+				recentCommits: [],
+				review: { remote: null, request: null, error: '', setupAction: null, unsupportedReason: null },
+				pipeline: null,
+				parallelBranches: [{
+					name: 'feature/parallel',
+					ref: 'origin/feature/parallel',
+					kind: 'remote',
+					baseBranch: 'main',
+					ahead: 1,
+					behind: 0,
+					lastCommit: null,
+					affectedFiles: [],
+					potentialConflicts: [],
+				}],
+				conflictFiles: [],
+				incomingFiles: [],
+				incomingAuthors: [],
+				uncommittedFiles: [],
+			}],
+			loadedSections: ['parallelBranches'],
+		}, { status: 'fresh', source: 'refresh' }),
+		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null, { status: 'idle', source: 'placeholder' }),
+	};
+
+	assert.deepEqual(resolvePromptDashboardExpandRefreshTarget({
+		section: 'projectBranches',
+		snapshot,
+	}), { type: 'widget', widget: 'projects' });
+	assert.equal(resolvePromptDashboardExpandRefreshTarget({
+		section: 'parallelBranches',
+		snapshot,
+	}), null);
 });
 
 test('shouldAcceptPromptDashboardRequestMessage keeps late payloads only for the current prompt without a newer request', () => {
@@ -332,7 +455,17 @@ test('shouldClearPromptDashboardBusyActionFromWidget waits for a finished projec
 		cacheStatus: 'fresh',
 	}), true);
 	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'refresh-section:projectBranches',
+		widgetKind: 'projects',
+		cacheStatus: 'fresh',
+	}), true);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
 		busyAction: 'refresh-widget:status',
+		widgetKind: 'status',
+		cacheStatus: 'fresh',
+	}), true);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'refresh-section:status',
 		widgetKind: 'status',
 		cacheStatus: 'fresh',
 	}), true);

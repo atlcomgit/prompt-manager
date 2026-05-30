@@ -4,7 +4,14 @@
 
 import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
-import type { PromptDashboardAnalysisState, PromptDashboardSnapshot, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from './promptDashboard.js';
+import type {
+	PromptDashboardAnalysisState,
+	PromptDashboardCollapsedSections,
+	PromptDashboardSectionKey,
+	PromptDashboardSnapshot,
+	PromptDashboardWidgetKind,
+	PromptDashboardWidgetSnapshot,
+} from './promptDashboard.js';
 
 export type GlobalContextSourceMessage = 'empty' | 'manual' | 'remote';
 export type ChatContextAutoLoadStateMessage = 'started' | 'completed' | 'fallback';
@@ -32,7 +39,13 @@ export type WebviewToExtensionMessage =
 	| { type: 'ready'; bootId?: string }
 	| { type: 'getPrompts' }
 	| { type: 'getPrompt'; id: string }
-	| { type: 'savePrompt'; prompt: Prompt; source?: 'manual' | 'status-change' | 'autosave'; requestId?: string }
+	| {
+		type: 'savePrompt';
+		prompt: Prompt;
+		source?: 'manual' | 'status-change' | 'autosave';
+		requestId?: string;
+		localRevision?: number;
+	}
 	| { type: 'deletePrompt'; id: string }
 	| { type: 'duplicatePrompt'; id: string }
 	| { type: 'createPrompt' }
@@ -60,6 +73,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'generateReportFromStagedChanges'; prompt: Prompt }
 	| { type: 'saveSidebarState'; state: SidebarState }
 	| { type: 'savePromptEditorViewState'; promptId?: string; promptUuid?: string; state: EditorPromptViewState }
+	| { type: 'savePromptDashboardCollapsedSections'; state: PromptDashboardCollapsedSections }
 	| { type: 'getSidebarState' }
 	| { type: 'getWorkspaceFolders' }
 	| { type: 'getAvailableModels' }
@@ -72,7 +86,13 @@ export type WebviewToExtensionMessage =
 	| { type: 'getBranches'; projects: string[] }
 	| { type: 'getPromptDashboardSnapshot'; prompt: Prompt; requestId?: string; forceRefresh?: boolean }
 	| { type: 'refreshPromptDashboard'; prompt: Prompt; requestId?: string }
-	| { type: 'refreshPromptDashboardWidget'; prompt: Prompt; widget: PromptDashboardWidgetKind; requestId?: string }
+	| {
+		type: 'refreshPromptDashboardWidget';
+		prompt: Prompt;
+		widget: PromptDashboardWidgetKind;
+		section?: PromptDashboardSectionKey;
+		requestId?: string;
+	}
 	| {
 		type: 'hydratePromptDashboardProjectsDetails';
 		prompt: Prompt;
@@ -140,7 +160,14 @@ export type WebviewToExtensionMessage =
 		showHours?: boolean;
 		showCost?: boolean;
 	}
-	| { type: 'markDirty'; dirty: boolean; prompt?: Prompt; promptId?: string; configFieldChangedAt?: Record<string, number> }
+	| {
+		type: 'markDirty';
+		dirty: boolean;
+		prompt?: Prompt;
+		promptId?: string;
+		configFieldChangedAt?: Record<string, number>;
+		localRevision?: number;
+	}
 	| { type: 'showStatistics' }
 	| { type: 'updatePromptStatus'; id: string; status: PromptStatus }
 	| { type: 'moveAllPromptsToNextStatus'; status: PromptStatus }
@@ -195,6 +222,7 @@ export type ExtensionToWebviewMessage =
 		requestId?: string;
 		openRequestVersion?: number;
 		editorViewState?: EditorPromptViewState;
+		promptDashboardCollapsedSections?: PromptDashboardCollapsedSections;
 		aiEnrichment?: { title: boolean; description: boolean };
 	}
 	| { type: 'promptAgentProgress'; promptId: string; promptUuid?: string; progress?: number }
@@ -275,7 +303,14 @@ export type ExtensionToWebviewMessage =
 	| { type: 'reportEditorSynced'; report: string; updatedAt?: string }
 	| { type: 'reportEditorSaved'; updatedAt?: string }
 	| { type: 'implementingTimeRecalculated'; id: string; timeMs: number; sessionsCount: number }
-	| { type: 'promptLoading'; promptId?: string; promptUuid?: string; openRequestVersion?: number; editorViewState?: EditorPromptViewState }
+	| {
+		type: 'promptLoading';
+		promptId?: string;
+		promptUuid?: string;
+		openRequestVersion?: number;
+		editorViewState?: EditorPromptViewState;
+		promptDashboardCollapsedSections?: PromptDashboardCollapsedSections;
+	}
 	| { type: 'promptLoadingCancelled'; promptId?: string; openRequestVersion?: number }
 	| { type: 'nextTaskNumber'; taskNumber: string }
 	| { type: 'chatOpened'; promptId: string; requestId?: string }

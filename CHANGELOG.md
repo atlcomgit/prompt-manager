@@ -8,9 +8,21 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ### 2026-05-30
 
+#### Changed
+- Prompt-dashboard cards can now be collapsed from their header with a workspace-shared persisted state instead of a per-prompt setting; collapsed sections hide their body and widget refresh button, and the host skips snapshot refresh, widget refresh, lazy hydration, and AI review work for those hidden cards.
+
 #### Fixed
+- Saving a prompt no longer auto-generates or overwrites `Description`; the field is now updated only through the explicit manual AI generation action.
+- Prompt save and switch flows now preserve newer local edits that arrive during an older in-flight save, and prompt reopen can resolve a pending saved snapshot by `promptUuid` even if the prompt id changes during the same switch.
+- Internal `plan.md` and `report.txt` writes no longer bounce through the external prompt-config watcher path, so self-authored support-file saves stop reapplying stale storage state back into the editor.
 - Reopening the currently visible prompt now rebuilds the singleton editor webview with a fresh boot cycle and replays the exact `prompt(open)` payload on the next `ready` handshake, so stale restored prompt tabs stop drifting into frozen duplicate pages.
 - Prompt dashboard snapshot and widget updates now accept late same-prompt payloads after a reused snapshot when no newer request is active, so branch and activity cards keep refreshing after compact or hidden transitions instead of getting stuck on stale data.
+- Reopening a collapsed prompt-dashboard card now immediately issues the correct full or targeted refresh when that card is the first visible section again and its data is still empty, stale, or errored, so expanding a hidden widget no longer leaves it blank until some unrelated dashboard refresh happens.
+- Widget-level dashboard refresh now keeps the loading spinner scoped to the clicked card even for shared Git-backed sections, auto-expand refresh reuses that same section-level indicator, and disabled branch-action buttons keep a stable bordered height instead of visually collapsing when they become inactive.
+- Prompt-dashboard cards now start from the persisted shared collapsed state on the very first editor paint instead of flashing open before the host message arrives, the first reopened Git-backed card on a fully collapsed page now bootstraps from its own widget payload instead of forcing a full shared `projects` refresh for the other still-collapsed Git cards, and the editor plus host now emit focused expand-refresh debug traces that also pass the Prompt Manager output filter so that first reopen path can be diagnosed from logs.
+- Shared Git-backed dashboard cards no longer reuse a skipped collapsed `projects` snapshot as if it had already been refreshed in the current open cycle, so reopening `Ветки проектов`, `Коммиты проектов`, `Параллельные ветки`, or `MR/PR` now triggers the expected first expand refresh even when older shared project data was still warm in cache.
+- Shared Git-backed dashboard cards now track which individual section actually loaded inside the shared `projects` payload, so refreshing `Параллельные ветки` no longer makes `Ветки проектов`, `MR/PR`, or `Коммиты проектов` look preloaded before their own first refresh.
+- The first reopened Git-backed card no longer loses its own targeted widget refresh to a competing automatic full dashboard snapshot request, so expanding `Ветки проектов` from a fully collapsed page now refreshes immediately instead of waiting for a later card open.
 
 ### 2026-05-29
 

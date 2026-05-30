@@ -1,9 +1,24 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PromptStatusText } from '../../shared/PromptStatusText';
 import { getPromptStatusColor } from '../../shared/promptStatus';
 import type { GitOverlayChangeFile } from '../../../types/git.js';
 import type { GitOverlayParallelBranchSummary } from '../../../types/git.js';
-import type { PromptDashboardAnalysisState, PromptDashboardLoadStatus, PromptDashboardProjectSummary, PromptDashboardRecentCommit, PromptDashboardSnapshot, PromptDashboardWidgetKind } from '../../../types/promptDashboard.js';
+import type {
+	PromptDashboardAnalysisState,
+	PromptDashboardCollapsedSections,
+	PromptDashboardLoadStatus,
+	PromptDashboardProjectSummary,
+	PromptDashboardRecentCommit,
+	PromptDashboardSectionKey,
+	PromptDashboardSnapshot,
+	PromptDashboardWidgetKind,
+} from '../../../types/promptDashboard.js';
+import {
+	createDefaultPromptDashboardCollapsedSections,
+	isPromptDashboardProjectsSectionLoaded,
+	isPromptDashboardSectionCollapsed,
+	normalizePromptDashboardCollapsedSections,
+} from '../../../types/promptDashboard.js';
 import {
 	compactPromptDashboardMiddleLabel,
 	fitPromptDashboardPathPartsToWidth,
@@ -27,10 +42,12 @@ export interface PromptDashboardFilePatchRequest {
 interface PromptDashboardProps {
 	snapshot: PromptDashboardSnapshot | null;
 	busyAction?: string | null;
+	collapsedSections?: PromptDashboardCollapsedSections;
 	mode: 'full' | 'compact';
 	showGitFlowAction?: boolean;
 	onRefresh: () => void;
-	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void;
+	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void;
+	onToggleSectionCollapse?: (section: PromptDashboardSectionKey) => void;
 	onHydrateProjectsDetails: (projects: string[], reason?: 'details' | 'dirty-files') => void;
 	onOpenGitFlow: () => void;
 	onOpenPrompt: (id: string, promptUuid?: string) => void;
@@ -121,10 +138,12 @@ interface DashboardHydrationRequest {
 export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	snapshot,
 	busyAction,
+	collapsedSections = createDefaultPromptDashboardCollapsedSections(),
 	mode,
 	showGitFlowAction = false,
 	onRefresh,
 	onRefreshWidget,
+	onToggleSectionCollapse,
 	onHydrateProjectsDetails,
 	onOpenGitFlow,
 	onOpenPrompt,
@@ -141,13 +160,33 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const [openingFileKey, setOpeningFileKey] = useState<string | null>(null);
 	const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
 	const [viewedFileKeys, setViewedFileKeys] = useState<Record<string, boolean>>({});
+	const normalizedCollapsedSections = useMemo(
+		() => normalizePromptDashboardCollapsedSections(collapsedSections),
+		[collapsedSections],
+	);
 	const openingFileTokenRef = useRef(0);
-	const projects = snapshot?.projects.data.projects || [];
-	const branchProjects = snapshot?.projects.data.branchProjects || projects;
-	const branchWidgetProjects = resolveBranchWidgetProjects(projects, branchProjects, showAllBranchProjects);
-	const hydrationProjects = mergePromptDashboardHydrationProjects(projects, branchProjects);
-	const canShowAllBranchProjects = branchProjects.length > projects.length;
+	const projectsData = snapshot?.projects.data;
+	const allProjects = projectsData?.projects || [];
+	const allBranchProjects = projectsData?.branchProjects || allProjects;
+	const isProjectBranchesLoaded = isPromptDashboardProjectsSectionLoaded(projectsData, 'projectBranches');
+	const isReviewRequestsLoaded = isPromptDashboardProjectsSectionLoaded(projectsData, 'reviewRequests');
+	const isParallelBranchesLoaded = isPromptDashboardProjectsSectionLoaded(projectsData, 'parallelBranches');
+	const isProjectCommitsLoaded = isPromptDashboardProjectsSectionLoaded(projectsData, 'projectCommits');
+	const branchProjects = isProjectBranchesLoaded ? allProjects : [];
+	const branchScopeProjects = isProjectBranchesLoaded ? allBranchProjects : [];
+	const reviewProjects = isReviewRequestsLoaded ? allProjects : [];
+	const parallelProjects = isParallelBranchesLoaded ? allProjects : [];
+	const commitProjects = isProjectCommitsLoaded ? allProjects : [];
+	const branchWidgetProjects = resolveBranchWidgetProjects(branchProjects, branchScopeProjects, showAllBranchProjects);
+	const hydrationProjects = mergePromptDashboardHydrationProjects(allProjects, allBranchProjects);
+	const canShowAllBranchProjects = branchScopeProjects.length > branchProjects.length;
 	const projectsCacheStatus = snapshot?.projects.cache.status || 'idle';
+	const hasVisibleProjectsPayload = allProjects.length > 0 || (projectsData?.branchProjects?.length || 0) > 0;
+	const unloadedProjectsSectionCacheStatus = projectsCacheStatus === 'loading' && !hasVisibleProjectsPayload ? 'loading' : 'idle';
+	const projectBranchesCacheStatus = isProjectBranchesLoaded ? projectsCacheStatus : unloadedProjectsSectionCacheStatus;
+	const reviewRequestsCacheStatus = isReviewRequestsLoaded ? projectsCacheStatus : unloadedProjectsSectionCacheStatus;
+	const parallelBranchesCacheStatus = isParallelBranchesLoaded ? projectsCacheStatus : unloadedProjectsSectionCacheStatus;
+	const projectCommitsCacheStatus = isProjectCommitsLoaded ? projectsCacheStatus : unloadedProjectsSectionCacheStatus;
 	const activityCacheStatus = snapshot?.activity.cache.status || 'idle';
 	const statusCacheStatus = snapshot?.status.cache.status || 'idle';
 	const runFileOpenAction = (fileKey: string, action: () => void) => {
@@ -214,9 +253,15 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			if (!isExpanded) {
 				continue;
 			}
-			maybeHydrateExpandedDetails(key, hydrationProjects, projectsCacheStatus, onHydrateProjectsDetails);
+			maybeHydrateExpandedDetails(
+				key,
+				hydrationProjects,
+				projectsCacheStatus,
+				onHydrateProjectsDetails,
+				normalizedCollapsedSections,
+			);
 		}
-	}, [expanded, hydrationProjects, onHydrateProjectsDetails, projectsCacheStatus]);
+	}, [expanded, hydrationProjects, normalizedCollapsedSections, onHydrateProjectsDetails, projectsCacheStatus]);
 
 	if (mode !== 'full') {
 		return null;
@@ -224,6 +269,11 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 
 	const toggleExpanded = (key: string) => {
 		setExpanded(previous => ({ ...previous, [key]: !previous[key] }));
+	};
+
+	/** Toggles one shared top-level dashboard section from the section header. */
+	const toggleSectionCollapse = (section: PromptDashboardSectionKey) => {
+		onToggleSectionCollapse?.(section);
 	};
 
 	const applyBranchTargets = (branchesByProject: Record<string, string>, source: DashboardBranchApplySource = 'bulk') => {
@@ -254,13 +304,13 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		setBranchDrafts(previous => buildBulkBranchDrafts(branchWidgetProjects, previous, branch));
 	};
 	const widgetColumns = buildWidgetGridColumns([
-		renderStatus(snapshot, statusCacheStatus, busyAction, onRefreshWidget),
-		renderActivity(snapshot, onOpenPrompt, activityCacheStatus, busyAction, onRefreshWidget),
-		renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectsCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow, onRefreshWidget),
-		renderProjectCommits(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus, busyAction, onRefreshWidget),
-		renderParallelBranchFiles(projects, expanded, toggleExpanded, fileHandlers, projectsCacheStatus, busyAction, onRefreshWidget),
-		renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, onRefreshWidget),
-		renderReviewRequests(projects, projectsCacheStatus, busyAction, onRefreshWidget),
+		renderStatus(snapshot, statusCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
+		renderActivity(snapshot, onOpenPrompt, activityCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
+		renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectBranchesCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
+		renderProjectCommits(commitProjects, expanded, toggleExpanded, fileHandlers, projectCommitsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
+		renderParallelBranchFiles(parallelProjects, expanded, toggleExpanded, fileHandlers, parallelBranchesCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
+		renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
+		renderReviewRequests(reviewProjects, reviewRequestsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
 	]);
 
 	return (
@@ -274,7 +324,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 					</div>
 				</div>
 				<button type="button" style={{ ...styles.iconButton, ...(isRefreshBusy ? styles.busyButton : null) }} onClick={onRefresh} title="Обновить" aria-label="Обновить" disabled={isRefreshBusy}>
-					{isRefreshBusy ? <span style={styles.buttonSpinner} aria-hidden="true" /> : '↻'}
+					{isRefreshBusy ? <span style={styles.buttonSpinner} aria-hidden="true" /> : <RefreshIcon />}
 				</button>
 			</div>
 
@@ -372,8 +422,13 @@ function maybeHydrateExpandedDetails(
 	projects: PromptDashboardProjectSummary[],
 	cacheStatus: PromptDashboardLoadStatus,
 	onHydrateProjectsDetails: (projects: string[], reason?: 'details' | 'dirty-files') => void,
+	collapsedSections: PromptDashboardCollapsedSections,
 ): void {
 	if (cacheStatus === 'loading') {
+		return;
+	}
+	const sectionKey = resolvePromptDashboardSectionKeyForExpandedKey(key);
+	if (sectionKey && isPromptDashboardSectionCollapsed(collapsedSections, sectionKey)) {
 		return;
 	}
 
@@ -383,6 +438,96 @@ function maybeHydrateExpandedDetails(
 	}
 
 	onHydrateProjectsDetails(request.projects, request.reason);
+}
+
+
+/** Maps one expanded inner disclosure key back to its top-level dashboard card. */
+function resolvePromptDashboardSectionKeyForExpandedKey(key: string): PromptDashboardSectionKey | null {
+	const [kind] = key.split(':');
+	if (kind === 'dirty' || kind === 'incoming') {
+		return 'projectBranches';
+	}
+	if (kind === 'commit') {
+		return 'projectCommits';
+	}
+	if (kind === 'parallel') {
+		return 'parallelBranches';
+	}
+
+	return null;
+}
+
+
+/** Renders the compact chevron used by dashboard section collapse toggles. */
+function SectionChevronIcon({ collapsed }: { collapsed: boolean }): React.ReactNode {
+	return (
+		<svg
+			viewBox="0 0 16 16"
+			aria-hidden="true"
+			focusable="false"
+			style={{
+				...styles.sectionCollapseIcon,
+				...(collapsed ? styles.sectionCollapseIconCollapsed : null),
+			}}
+		>
+			<path d="M3.5 6l4.5 4.5L12.5 6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+		</svg>
+	);
+}
+
+/** Renders the lightweight refresh icon used by dashboard toolbar and widget actions. */
+function RefreshIcon(): React.ReactNode {
+	return (
+		<svg
+			viewBox="0 0 16 16"
+			aria-hidden="true"
+			focusable="false"
+			style={styles.refreshIcon}
+		>
+			<path d="M12.5 7.25A4.75 4.75 0 1 0 8 12.75c1.67 0 3.17-.88 4.01-2.27" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
+			<path d="M9.75 2.75h3v3" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />
+		</svg>
+	);
+}
+
+/** Stops header-toggle bubbling when one of the explicit section action buttons is clicked. */
+function handleSectionHeaderActionClick(event: React.MouseEvent<HTMLButtonElement>, action: () => void): void {
+	event.stopPropagation();
+	action();
+}
+
+/** Renders one dashboard section header that toggles collapse when the title row is clicked. */
+function renderSectionHeader(
+	title: string,
+	metaNode: React.ReactNode,
+	options?: {
+		collapsed?: boolean;
+		onToggleCollapse?: () => void;
+	},
+): React.ReactNode {
+	const interactive = Boolean(options?.onToggleCollapse);
+	const toggleCollapse = () => options?.onToggleCollapse?.();
+	return (
+		<div
+			style={{
+				...styles.sectionHeader,
+				...(interactive ? styles.sectionHeaderInteractive : null),
+			}}
+			onClick={interactive ? toggleCollapse : undefined}
+			onKeyDown={interactive ? (event) => {
+				if (event.key === 'Enter' || event.key === ' ') {
+					event.preventDefault();
+					toggleCollapse();
+				}
+			} : undefined}
+			role={interactive ? 'button' : undefined}
+			tabIndex={interactive ? 0 : undefined}
+			aria-expanded={interactive ? !options?.collapsed : undefined}
+		>
+			<span style={styles.sectionTitle}>{title}</span>
+			{metaNode}
+		</div>
+	);
 }
 
 
@@ -449,9 +594,13 @@ function renderStatus(
 	snapshot: PromptDashboardSnapshot | null,
 	cacheStatus: PromptDashboardLoadStatus,
 	busyAction: DashboardBusyAction,
-	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+	collapsedSections: PromptDashboardCollapsedSections,
+	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
+	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
 ): React.ReactNode {
 	const data = snapshot?.status.data;
+	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'status');
+	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'status', 'status');
 	const progress = Math.max(0, Math.min(100, data?.progress ?? 0));
 	const statusAccent = data ? getPromptStatusColor(data.status) : 'var(--vscode-descriptionForeground)';
 	const progressFillTone = progress >= 100
@@ -460,16 +609,16 @@ function renderStatus(
 
 	return (
 		<section style={styles.section}>
-			<div style={styles.sectionHeader}>
-				<span style={styles.sectionTitle}>Статус промпта</span>
-				{renderSectionMeta(formatPromptDashboardDuration(data?.totalTimeMs || 0), cacheStatus, 'обновляем', {
+			{renderSectionHeader('Статус промпта', renderSectionMeta(formatPromptDashboardDuration(data?.totalTimeMs || 0), sectionCacheStatus, 'обновляем', {
+					section: 'status',
+					collapsed,
 					widget: 'status',
 					title: 'Статус промпта',
 					busyAction,
+					onToggleCollapse: () => onToggleSectionCollapse('status'),
 					onRefreshWidget,
-				})}
-			</div>
-			<div style={{ ...styles.sectionBody, ...styles.statusBody }}>
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('status') })}
+			{collapsed ? null : <div style={{ ...styles.sectionBody, ...styles.statusBody }}>
 				<div style={styles.statusChipRow}>
 					{data ? (
 						<PromptStatusText
@@ -491,7 +640,7 @@ function renderStatus(
 						</div>
 					</div>
 				) : null}
-			</div>
+			</div>}
 		</section>
 	);
 }
@@ -520,24 +669,28 @@ function renderActivity(
 	onOpenPrompt: (id: string, promptUuid?: string) => void,
 	cacheStatus: PromptDashboardLoadStatus,
 	busyAction: DashboardBusyAction,
-	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+	collapsedSections: PromptDashboardCollapsedSections,
+	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
+	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
 ): React.ReactNode {
 	const data = snapshot?.activity.data;
+	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'activity');
+	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'activity', 'activity');
 	return (
 		<section style={styles.section}>
-			<div style={styles.sectionHeader}>
-				<span style={styles.sectionTitle}>Активные промпты</span>
-				{renderSectionMeta('5m+', cacheStatus, 'обновляем', {
+			{renderSectionHeader('Активные промпты', renderSectionMeta('5m+', sectionCacheStatus, 'обновляем', {
+					section: 'activity',
+					collapsed,
 					widget: 'activity',
 					title: 'Активные промпты',
 					busyAction,
+					onToggleCollapse: () => onToggleSectionCollapse('activity'),
 					onRefreshWidget,
-				})}
-			</div>
-			<div style={styles.sectionBody}>
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('activity') })}
+			{collapsed ? null : <div style={styles.sectionBody}>
 				{renderActivityGroup('Сегодня', data?.today || [], onOpenPrompt)}
 				{renderActivityGroup(data?.yesterdayLabel || 'Вчера', data?.yesterday || [], onOpenPrompt)}
-			</div>
+			</div>}
 		</section>
 	);
 }
@@ -590,8 +743,12 @@ function renderProjectBranches(
 	toggleShowAllBranchProjects: () => void,
 	showGitFlowAction: boolean,
 	onOpenGitFlow: () => void,
-	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+	collapsedSections: PromptDashboardCollapsedSections,
+	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
+	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
 ): React.ReactNode {
+	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'projectBranches');
+	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'projectBranches', 'projects');
 	const changedCount = Object.keys(buildChangedBranchTargets(projects, branchDrafts)).length;
 	const sharedOptions = buildSharedBranchOptions(projects);
 	const isSwitchBusy = isBranchSwitchBusy(busyAction);
@@ -602,16 +759,16 @@ function renderProjectBranches(
 	const isPromptPresetDisabled = isSwitchBusy || !hasPromptPresetBranch;
 	return (
 		<section style={styles.section}>
-			<div style={styles.sectionHeader}>
-				<span style={styles.sectionTitle}>Ветки проектов</span>
-				{renderSectionMeta(projects.length || '...', cacheStatus, 'обновляем', {
+			{renderSectionHeader('Ветки проектов', renderSectionMeta(projects.length || '...', sectionCacheStatus, 'обновляем', {
+					section: 'projectBranches',
+					collapsed,
 					widget: 'projects',
 					title: 'Ветки проектов',
 					busyAction,
+					onToggleCollapse: () => onToggleSectionCollapse('projectBranches'),
 					onRefreshWidget,
-				})}
-			</div>
-			<div style={styles.sectionBody}>
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('projectBranches') })}
+			{collapsed ? null : <div style={styles.sectionBody}>
 				<label style={styles.bulkBranchRow}>
 					<span style={styles.bulkBranchLabel}>Для всех</span>
 					<span style={styles.bulkBranchControls}>
@@ -664,7 +821,7 @@ function renderProjectBranches(
 						</button>
 					</div>
 				) : null}
-			</div>
+			</div>}
 		</section>
 	);
 }
@@ -918,8 +1075,12 @@ function renderReviewRequests(
 	projects: PromptDashboardProjectSummary[],
 	cacheStatus: PromptDashboardLoadStatus,
 	busyAction: DashboardBusyAction,
-	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+	collapsedSections: PromptDashboardCollapsedSections,
+	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
+	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
 ): React.ReactNode {
+	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'reviewRequests');
+	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'reviewRequests', 'projects');
 	const visibleProjects = projects.filter(project => Boolean(
 		project.review.request
 		|| project.review.error
@@ -927,17 +1088,17 @@ function renderReviewRequests(
 	));
 	return (
 		<section style={styles.section}>
-			<div style={styles.sectionHeader}>
-				<span style={styles.sectionTitle}>MR/PR</span>
-				{renderSectionMeta(visibleProjects.length || '...', cacheStatus, 'обновляем', {
+			{renderSectionHeader('MR/PR', renderSectionMeta(visibleProjects.length || '...', sectionCacheStatus, 'обновляем', {
+					section: 'reviewRequests',
+					collapsed,
 					widget: 'projects',
 					title: 'MR/PR',
 					busyAction,
+					onToggleCollapse: () => onToggleSectionCollapse('reviewRequests'),
 					onRefreshWidget,
-				})}
-			</div>
-			<div style={styles.sectionBody}>
-				{visibleProjects.length === 0 ? cacheStatus === 'loading' ? renderLoadingEmptyState('MR/PR-данные загружаются') : <div style={styles.emptyText}>Нет активных MR/PR</div> : visibleProjects.map(project => {
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('reviewRequests') })}
+			{collapsed ? null : <div style={styles.sectionBody}>
+				{visibleProjects.length === 0 ? sectionCacheStatus === 'loading' ? renderLoadingEmptyState('MR/PR-данные загружаются') : <div style={styles.emptyText}>Нет активных MR/PR</div> : visibleProjects.map(project => {
 					const request = project.review.request;
 					const reviewMessage = project.review.error || formatReviewUnsupportedReason(project.review.unsupportedReason) || 'Активный MR/PR не найден';
 					const state = request?.state || (project.review.error ? 'недоступно' : project.review.unsupportedReason ? 'нет setup' : 'нет MR/PR');
@@ -957,7 +1118,7 @@ function renderReviewRequests(
 						</div>
 					);
 				})}
-			</div>
+			</div>}
 		</section>
 	);
 }
@@ -978,25 +1139,29 @@ function renderParallelBranchFiles(
 	fileHandlers: FileRowActionHandlers,
 	cacheStatus: PromptDashboardLoadStatus,
 	busyAction: DashboardBusyAction,
-	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+	collapsedSections: PromptDashboardCollapsedSections,
+	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
+	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
 ): React.ReactNode {
+	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'parallelBranches');
+	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'parallelBranches', 'projects');
 	const projectGroups = projects
 		.map(project => ({ project, branches: resolveVisibleParallelBranches(project.parallelBranches) }))
 		.filter(item => item.branches.length > 0 || item.project.conflictFiles.length > 0);
 	const totalVisibleBranches = projectGroups.reduce((count, item) => count + item.branches.length, 0);
 	return (
 		<section style={styles.section}>
-			<div style={styles.sectionHeader}>
-				<span style={styles.sectionTitle}>Параллельные ветки</span>
-				{renderSectionMeta(totalVisibleBranches || '...', cacheStatus, 'обновляем', {
+			{renderSectionHeader('Параллельные ветки', renderSectionMeta(totalVisibleBranches || '...', sectionCacheStatus, 'обновляем', {
+					section: 'parallelBranches',
+					collapsed,
 					widget: 'projects',
 					title: 'Параллельные ветки',
 					busyAction,
+					onToggleCollapse: () => onToggleSectionCollapse('parallelBranches'),
 					onRefreshWidget,
-				})}
-			</div>
-			<div style={styles.sectionBody}>
-				{projectGroups.length === 0 ? cacheStatus === 'loading' ? renderLoadingEmptyState('Данные по веткам загружаются') : <div style={styles.emptyText}>Нет данных по параллельным веткам</div> : projectGroups.map(({ project, branches }) => (
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('parallelBranches') })}
+			{collapsed ? null : <div style={styles.sectionBody}>
+				{projectGroups.length === 0 ? sectionCacheStatus === 'loading' ? renderLoadingEmptyState('Данные по веткам загружаются') : <div style={styles.emptyText}>Нет данных по параллельным веткам</div> : projectGroups.map(({ project, branches }) => (
 					<div key={project.project} style={styles.projectBlock}>
 						<div style={styles.projectHeader}>
 							<div style={styles.projectName}>{project.project}</div>
@@ -1007,7 +1172,7 @@ function renderParallelBranchFiles(
 						{renderConflictFiles(project, fileHandlers)}
 					</div>
 				))}
-			</div>
+			</div>}
 		</section>
 	);
 }
@@ -1034,22 +1199,26 @@ function renderProjectCommits(
 	fileHandlers: FileRowActionHandlers,
 	cacheStatus: PromptDashboardLoadStatus,
 	busyAction: DashboardBusyAction,
-	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+	collapsedSections: PromptDashboardCollapsedSections,
+	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
+	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
 ): React.ReactNode {
+	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'projectCommits');
+	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'projectCommits', 'projects');
 	return (
 		<section style={styles.section}>
-			<div style={styles.sectionHeader}>
-				<span style={styles.sectionTitle}>Коммиты проектов</span>
-				{renderSectionMeta(projects.length || '...', cacheStatus, 'обновляем', {
+			{renderSectionHeader('Коммиты проектов', renderSectionMeta(projects.length || '...', sectionCacheStatus, 'обновляем', {
+					section: 'projectCommits',
+					collapsed,
 					widget: 'projects',
 					title: 'Коммиты проектов',
 					busyAction,
+					onToggleCollapse: () => onToggleSectionCollapse('projectCommits'),
 					onRefreshWidget,
-				})}
-			</div>
-			<div style={styles.sectionBody}>
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('projectCommits') })}
+			{collapsed ? null : <div style={styles.sectionBody}>
 				{projects.length === 0 ? (
-					cacheStatus === 'loading' ? renderLoadingEmptyState('Коммиты загружаются') : <div style={styles.emptyText}>Коммиты пока недоступны</div>
+					sectionCacheStatus === 'loading' ? renderLoadingEmptyState('Коммиты загружаются') : <div style={styles.emptyText}>Коммиты пока недоступны</div>
 				) : projects.map((project, index) => (
 					<div key={project.project} style={{ ...styles.projectBlock, ...(index === 0 ? styles.projectBlockFirst : null) }}>
 						<div style={styles.projectHeader}>
@@ -1059,7 +1228,7 @@ function renderProjectCommits(
 						{renderCommitList(project, expanded, toggleExpanded, fileHandlers)}
 					</div>
 				))}
-			</div>
+			</div>}
 		</section>
 	);
 }
@@ -2092,19 +2261,62 @@ function isBranchSwitchBusy(busyAction: DashboardBusyAction): boolean {
 	return Boolean(busyAction && busyAction !== 'refresh');
 }
 
+/** Builds one section-scoped busy-action key for widget refresh indicators. */
+function buildSectionRefreshBusyAction(section: PromptDashboardSectionKey): string {
+	return `refresh-section:${section}`;
+}
+
+/** Resolves whether a specific section should show its own refresh spinner. */
+function isSectionRefreshBusy(busyAction: DashboardBusyAction, section: PromptDashboardSectionKey): boolean {
+	return busyAction === 'refresh' || busyAction === buildSectionRefreshBusyAction(section);
+}
+
+/** Masks shared loading status so only the actively refreshed section shows the refresh transition. */
+function resolveSectionCacheStatus(
+	cacheStatus: PromptDashboardLoadStatus,
+	busyAction: DashboardBusyAction,
+	section: PromptDashboardSectionKey,
+	widget: PromptDashboardWidgetKind,
+): PromptDashboardLoadStatus {
+	if (busyAction === buildSectionRefreshBusyAction(section)) {
+		return 'loading';
+	}
+	if (cacheStatus !== 'loading' || busyAction === 'refresh') {
+		return cacheStatus;
+	}
+	if (widget === 'projects' && busyAction?.startsWith('refresh-section:')) {
+		return 'fresh';
+	}
+	return cacheStatus;
+}
+
 
 function renderSectionMeta(
 	value: string | number,
 	cacheStatus: PromptDashboardLoadStatus,
 	loadingLabel: string,
 	options?: {
+		section: PromptDashboardSectionKey;
+		collapsed?: boolean;
 		widget: PromptDashboardWidgetKind;
 		title: string;
 		busyAction: DashboardBusyAction;
-		onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void;
+		onToggleCollapse?: () => void;
+		onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void;
 	},
 ): React.ReactNode {
-	const isBusy = options?.busyAction === 'refresh' || options?.busyAction === `refresh-widget:${options?.widget}`;
+	const isBusy = options ? isSectionRefreshBusy(options.busyAction, options.section) : false;
+	const collapseButton = options?.onToggleCollapse ? (
+		<button
+			type="button"
+			style={{ ...styles.iconButton, ...styles.sectionCollapseButton }}
+			onClick={(event) => handleSectionHeaderActionClick(event, () => options.onToggleCollapse?.())}
+			title={`${options?.collapsed ? 'Развернуть' : 'Свернуть'} виджет: ${options.title}`}
+			aria-label={`${options?.collapsed ? 'Развернуть' : 'Свернуть'} виджет: ${options.title}`}
+		>
+			<SectionChevronIcon collapsed={Boolean(options?.collapsed)} />
+		</button>
+	) : null;
 	const metaNode = cacheStatus === 'loading' && options?.onRefreshWidget
 		? null
 		: cacheStatus === 'loading'
@@ -2117,22 +2329,28 @@ function renderSectionMeta(
 		: <span style={styles.sectionMeta}>{value}</span>;
 
 	if (!options?.onRefreshWidget) {
-		return metaNode;
+		return (
+			<span style={styles.sectionHeaderActions}>
+				{metaNode}
+				{collapseButton}
+			</span>
+		);
 	}
 
 	return (
 		<span style={styles.sectionHeaderActions}>
 			{metaNode}
-			<button
+			{options?.collapsed ? null : <button
 				type="button"
 				style={{ ...styles.iconButton, ...styles.sectionRefreshButton, ...(isBusy ? styles.busyButton : null) }}
-				onClick={() => options.onRefreshWidget?.(options.widget)}
+				onClick={(event) => handleSectionHeaderActionClick(event, () => options.onRefreshWidget?.(options.section, options.widget))}
 				title={`Обновить виджет «${options.title}»`}
 				aria-label={`Обновить виджет: ${options.title}`}
 				disabled={isBusy}
 			>
-				{isBusy ? <span style={styles.buttonSpinner} aria-hidden="true" /> : '↻'}
-			</button>
+				{isBusy ? <span style={styles.buttonSpinner} aria-hidden="true" /> : <RefreshIcon />}
+			</button>}
+			{collapseButton}
 		</span>
 	);
 }
@@ -2208,9 +2426,13 @@ function renderAnalysis(
 	analysis: PromptDashboardAnalysisState | null,
 	cacheStatus: PromptDashboardLoadStatus,
 	busyAction: DashboardBusyAction,
-	onRefreshWidget?: (widget: PromptDashboardWidgetKind) => void,
+	collapsedSections: PromptDashboardCollapsedSections,
+	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
+	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
 ): React.ReactNode {
-	const isRunning = analysis?.status === 'running' || cacheStatus === 'loading';
+	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'aiAnalysis');
+	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'aiAnalysis', 'aiAnalysis');
+	const isRunning = analysis?.status === 'running' || sectionCacheStatus === 'loading';
 	const sections = parseAnalysisSections(analysis?.content || '');
 	const hasPreviewContent = isRunning && sections.length > 0;
 	const stateLabel = isRunning
@@ -2220,16 +2442,16 @@ function renderAnalysis(
 			: 'ожидание';
 	return (
 		<section style={styles.section}>
-			<div style={styles.sectionHeader}>
-				<span style={styles.sectionTitle}>AI review</span>
-				{renderSectionMeta(stateLabel, isRunning ? 'loading' : 'fresh', 'обновляем', {
+			{renderSectionHeader('AI review', renderSectionMeta(stateLabel, isRunning ? 'loading' : 'fresh', 'обновляем', {
+					section: 'aiAnalysis',
+					collapsed,
 					widget: 'aiAnalysis',
 					title: 'AI review',
 					busyAction,
+					onToggleCollapse: () => onToggleSectionCollapse('aiAnalysis'),
 					onRefreshWidget,
-				})}
-			</div>
-			<div style={styles.sectionBody}>
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('aiAnalysis') })}
+			{collapsed ? null : <div style={styles.sectionBody}>
 				<div style={styles.analysisIntro}>
 					<span style={isRunning ? styles.analysisStateRunning : styles.analysisStateReady}>{stateLabel}</span>
 					<span style={styles.analysisIntroText}>{resolveAnalysisIntroText(analysis, isRunning, hasPreviewContent)}</span>
@@ -2247,7 +2469,7 @@ function renderAnalysis(
 					<div style={styles.emptyText}>{isRunning ? 'AI проверяет ветки и изменения...' : 'AI review появится после загрузки Git-данных.'}</div>
 				)}
 				{analysis?.error ? <div style={styles.errorText}>{analysis.error}</div> : null}
-			</div>
+			</div>}
 		</section>
 	);
 }
@@ -2379,14 +2601,20 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	// Базовый вид круглой кнопки в тулбаре.
 	iconButton: {
-		width: '28px',
-		height: '28px',
-		border: '1px solid var(--vscode-button-border, transparent)',
-		borderRadius: '6px',
-		background: 'var(--vscode-button-secondaryBackground)',
-		color: 'var(--vscode-button-secondaryForeground)',
+		display: 'inline-flex',
+		alignItems: 'center',
+		justifyContent: 'center',
+		width: '24px',
+		height: '24px',
+		padding: 0,
+		border: 'none',
+		borderRadius: '4px',
+		background: 'transparent',
+		color: 'color-mix(in srgb, var(--vscode-foreground) 74%, var(--vscode-descriptionForeground))',
 		cursor: 'pointer',
 		fontFamily: 'var(--vscode-font-family)',
+		lineHeight: 1,
+		flexShrink: 0,
 	},
 	// Небольшое затемнение кнопки во время фонового действия.
 	busyButton: {
@@ -2451,6 +2679,10 @@ const styles: Record<string, React.CSSProperties> = {
 		borderTopRightRadius: '6px',
 		borderBottom: '1px solid var(--vscode-panel-border)',
 	},
+	sectionHeaderInteractive: {
+		cursor: 'pointer',
+		userSelect: 'none',
+	},
 	// Текст названия виджета в шапке карточки.
 	sectionTitle: {
 		fontSize: '13px',
@@ -2478,15 +2710,28 @@ const styles: Record<string, React.CSSProperties> = {
 	sectionHeaderActions: {
 		display: 'inline-flex',
 		alignItems: 'center',
-		gap: '8px',
+		gap: '6px',
 		minWidth: 0,
 	},
 	sectionRefreshButton: {
-		width: '20px',
-		height: '20px',
-		padding: 0,
-		fontSize: '11px',
-		lineHeight: 1,
+		width: '18px',
+		height: '18px',
+	},
+	sectionCollapseButton: {
+		width: '18px',
+		height: '18px',
+	},
+	refreshIcon: {
+		width: '13px',
+		height: '13px',
+	},
+	sectionCollapseIcon: {
+		width: '13px',
+		height: '13px',
+		transition: 'transform 0.18s ease',
+	},
+	sectionCollapseIconCollapsed: {
+		transform: 'rotate(-90deg)',
 	},
 	// Основное содержимое карточки с вертикальным стеком элементов.
 	sectionBody: {
@@ -2851,6 +3096,7 @@ const styles: Record<string, React.CSSProperties> = {
 	// Основная цветная кнопка действия внутри виджета.
 	primaryButton: {
 		minWidth: 0,
+		minHeight: '28px',
 		padding: '5px 8px',
 		border: '1px solid var(--vscode-button-border, transparent)',
 		borderRadius: '4px',
@@ -2859,11 +3105,15 @@ const styles: Record<string, React.CSSProperties> = {
 		fontFamily: 'var(--vscode-font-family)',
 		fontSize: '11px',
 		fontWeight: 600,
+		lineHeight: '16px',
+		boxSizing: 'border-box',
+		appearance: 'none',
 		cursor: 'pointer',
 	},
 	// Вторичная спокойная кнопка для вспомогательных действий.
 	secondaryButton: {
 		minWidth: 0,
+		minHeight: '28px',
 		padding: '5px 8px',
 		border: '1px solid var(--vscode-button-border, transparent)',
 		borderRadius: '4px',
@@ -2872,12 +3122,18 @@ const styles: Record<string, React.CSSProperties> = {
 		fontFamily: 'var(--vscode-font-family)',
 		fontSize: '11px',
 		fontWeight: 600,
+		lineHeight: '16px',
+		boxSizing: 'border-box',
+		appearance: 'none',
 		cursor: 'pointer',
 	},
 	// Снижение контраста и блокировка у неактивного элемента.
 	disabledButton: {
-		opacity: 0.55,
+		opacity: 1,
 		cursor: 'default',
+		borderColor: 'color-mix(in srgb, var(--vscode-panel-border) 78%, var(--vscode-descriptionForeground))',
+		background: 'color-mix(in srgb, var(--vscode-button-secondaryBackground) 58%, var(--vscode-editor-background))',
+		color: 'color-mix(in srgb, var(--vscode-descriptionForeground) 92%, var(--vscode-foreground) 8%)',
 	},
 	inlineButtonDisabled: {
 		color: 'var(--vscode-descriptionForeground)',

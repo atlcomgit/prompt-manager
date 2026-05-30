@@ -15,6 +15,7 @@ import {
 import type {
 	PromptDashboardProjectSummary,
 	PromptDashboardPromptActivityItem,
+	PromptDashboardSectionKey,
 	PromptDashboardSnapshot,
 } from '../src/types/promptDashboard.js';
 
@@ -136,6 +137,7 @@ function createSnapshot(
 	projects: PromptDashboardProjectSummary[],
 	projectsCacheStatus: PromptDashboardSnapshot['projects']['cache']['status'] = 'fresh',
 	branchProjects?: PromptDashboardProjectSummary[],
+	loadedSections?: PromptDashboardSectionKey[],
 ): PromptDashboardSnapshot {
 	return {
 		promptId: 'task-107',
@@ -155,7 +157,7 @@ function createSnapshot(
 		projects: {
 			kind: 'projects',
 			cache: { status: projectsCacheStatus, source: 'refresh', updatedAt: '2026-04-29T10:00:00.000Z' },
-			data: { projects, ...(branchProjects ? { branchProjects } : {}) },
+			data: { projects, ...(branchProjects ? { branchProjects } : {}), ...(loadedSections ? { loadedSections } : {}) },
 		},
 		aiAnalysis: {
 			kind: 'aiAnalysis',
@@ -185,13 +187,18 @@ function createActivityItem(
 }
 
 /** Renders the dashboard component into static markup for regression checks. */
-function renderDashboard(snapshot: PromptDashboardSnapshot | null, options?: { busyAction?: string | null }): string {
+function renderDashboard(
+	snapshot: PromptDashboardSnapshot | null,
+	options?: { busyAction?: string | null; collapsedSections?: Record<string, boolean> },
+): string {
 	return withDashboardEnvironment(() => renderToStaticMarkup(React.createElement(PromptDashboard, {
 		snapshot,
 		busyAction: options?.busyAction ?? null,
+		collapsedSections: options?.collapsedSections,
 		mode: 'full',
 		onRefresh: () => { },
 		onRefreshWidget: () => { },
+		onToggleSectionCollapse: () => { },
 		onHydrateProjectsDetails: () => { },
 		onOpenGitFlow: () => { },
 		onOpenPrompt: () => { },
@@ -385,6 +392,65 @@ test('PromptDashboard renders widget refresh buttons in every section header', (
 	assert.match(markup, /aria-label="Обновить виджет: MR\/PR"/);
 });
 
+test('PromptDashboard scopes a shared projects refresh spinner only to the clicked section header', () => {
+	const markup = renderDashboard(createSnapshot([createProject()], 'loading'), {
+		busyAction: 'refresh-section:projectBranches',
+	});
+
+	assert.match(
+		markup,
+		/Ветки проектов[\s\S]*?aria-label="Обновить виджет: Ветки проектов"[^>]*disabled=""/,
+	);
+	assert.match(
+		markup,
+		/MR\/PR[\s\S]*?<span style="font-size:11px;font-weight:600;color:var\(--vscode-descriptionForeground\);white-space:nowrap">1<\/span>[\s\S]*?aria-label="Обновить виджет: MR\/PR"/,
+	);
+	assert.doesNotMatch(
+		markup,
+		/MR\/PR[\s\S]*?aria-label="Обновить виджет: MR\/PR"[^>]*disabled=""/,
+	);
+});
+
+test('PromptDashboard keeps disabled branch action buttons bordered and height-stable', () => {
+	const markup = renderDashboard(createSnapshot([createProject()]), {
+		busyAction: 'switch-all',
+	});
+
+	assert.match(markup, /min-height:28px/);
+	assert.match(markup, /border-color:color-mix\(in srgb, var\(--vscode-panel-border\) 78%, var\(--vscode-descriptionForeground\)\)/);
+});
+
+test('PromptDashboard hides collapsed section body and its widget refresh button', () => {
+	const snapshot = createSnapshot([createProject()]);
+	snapshot.activity.data.today = [createActivityItem(1)];
+
+	const markup = renderDashboard(snapshot, {
+		collapsedSections: { activity: true },
+	});
+
+	assert.match(markup, /aria-label="Развернуть виджет: Активные промпты"/);
+	assert.doesNotMatch(markup, /aria-label="Обновить виджет: Активные промпты"/);
+	assert.doesNotMatch(markup, /Активный промпт 1/);
+	assert.match(markup, /Активные промпты/);
+});
+
+test('PromptDashboard keeps the collapse toggle as the rightmost header action', () => {
+	const markup = renderDashboard(createSnapshot([createProject()]));
+
+	assert.match(
+		markup,
+		/Активные промпты[\s\S]*?aria-label="Обновить виджет: Активные промпты"[\s\S]*?aria-label="Свернуть виджет: Активные промпты"/,
+	);
+});
+
+test('PromptDashboard renders section headers as interactive collapse toggles', () => {
+	const markup = renderDashboard(createSnapshot([createProject()]), {
+		collapsedSections: { activity: true },
+	});
+
+	assert.match(markup, /role="button"[^>]*aria-expanded="false"[^>]*>[\s\S]*?Активные промпты/);
+});
+
 test('PromptDashboard renders every today activity row without trimming the widget', () => {
 	const snapshot = createSnapshot([createProject()]);
 
@@ -477,6 +543,37 @@ test('PromptDashboard hides MR\/PR rows that only report missing active review r
 
 	assert.match(markup, /Review dashboard polish/);
 	assert.doesNotMatch(markup, /Активный MR\/PR не найден/);
+});
+
+test('PromptDashboard hides unloaded shared Git section data until that section refresh completes', () => {
+	const markup = renderDashboard(createSnapshot([
+		createProject({
+			review: {
+				remote: null,
+				request: {
+					id: '31',
+					number: '31',
+					title: 'Should stay hidden until review refresh',
+					url: 'https://example.test/pr/31',
+					state: 'open',
+					createdAt: '2026-04-26T09:00:00.000Z',
+					updatedAt: '2026-04-29T09:00:00.000Z',
+					sourceBranch: 'feature/task-107',
+					targetBranch: 'develop',
+					isDraft: false,
+					comments: [],
+				},
+				error: '',
+				setupAction: null,
+				titlePrefix: '',
+				unsupportedReason: null,
+			},
+		}),
+	], 'fresh', undefined, ['parallelBranches']));
+
+	assert.doesNotMatch(markup, /Should stay hidden until review refresh/);
+	assert.match(markup, /Нет активных MR\/PR/);
+	assert.match(markup, /feature\/parallel/);
 });
 
 test('reconcileBranchDrafts drops drafts that already became the refreshed current branch', () => {
@@ -625,7 +722,7 @@ test('PromptDashboard keeps existing project rows visible while refreshed Git da
 });
 
 test('PromptDashboard keeps only refresh-button spinners visible while widget refresh is running', () => {
-	const markup = renderDashboard(createSnapshot([createProject()], 'loading'), { busyAction: 'refresh-widget:projects' });
+	const markup = renderDashboard(createSnapshot([createProject()], 'loading'), { busyAction: 'refresh-section:projectBranches' });
 
 	assert.doesNotMatch(markup, /обновляем/);
 	assert.match(markup, /aria-label="Обновить виджет: Ветки проектов"/);

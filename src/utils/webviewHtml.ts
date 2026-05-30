@@ -12,6 +12,7 @@ export function getWebviewHtml(
   locale?: string,
   bootId?: string,
   extraScriptPaths: string[] = [],
+  bootGlobals: Record<string, unknown> = {},
 ): string {
   const lang = locale || vscode.env.language || 'en';
   const scriptUri = webview.asWebviewUri(
@@ -20,6 +21,10 @@ export function getWebviewHtml(
   const extraScriptUris = extraScriptPaths.map((extraScriptPath) => webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, extraScriptPath)
   ));
+  const bootGlobalsScript = JSON.stringify(bootGlobals)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026');
 
   const nonce = getNonce();
 
@@ -130,7 +135,7 @@ export function getWebviewHtml(
 </head>
 <body>
   <div id="root"></div>
-  <script nonce="${nonce}">window.__LOCALE__='${lang}';window.__WEBVIEW_BOOT_ID__='${bootId || ''}';</script>
+  <script nonce="${nonce}">window.__LOCALE__='${lang}';window.__WEBVIEW_BOOT_ID__='${bootId || ''}';Object.assign(window, ${bootGlobalsScript});</script>
   <script nonce="${nonce}">
     (() => {
       let pointerPressedButton = null;

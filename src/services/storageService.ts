@@ -80,7 +80,7 @@ export class StorageService implements vscode.Disposable {
 	private promptConfigWatcherDisposables: vscode.Disposable[] = [];
 	private externalConfigChangeTimer: NodeJS.Timeout | null = null;
 	private pendingExternalConfigChanges = new Map<string, ExternalPromptConfigChange>();
-	private internalConfigWriteSuppressionByPath = new Map<string, number>();
+	private internalWatchedFileWriteSuppressionByPath = new Map<string, number>();
 
 	/** Writes prompt-load diagnostics into the shared Prompt Manager output channel. */
 	private logStoragePerf(event: string, payload?: Record<string, unknown>): void {
@@ -486,6 +486,7 @@ export class StorageService implements vscode.Disposable {
 		try {
 			await vscode.workspace.fs.stat(reportUri);
 		} catch {
+			this.markInternalWatchedPromptFileWrite(reportUri);
 			await vscode.workspace.fs.writeFile(reportUri, Buffer.from(reportContent, 'utf-8'));
 		}
 	}
@@ -508,6 +509,11 @@ export class StorageService implements vscode.Disposable {
 	/** Get absolute URI to plan.md for prompt id */
 	getPromptPlanUri(id: string): vscode.Uri {
 		return vscode.Uri.file(path.join(this.getPromptDirectoryPath(id), 'plan.md'));
+	}
+
+	/** Mark an internally-authored watched prompt file write so external-sync watchers can ignore the echo. */
+	markInternalWatchedPromptFileWrite(uri: vscode.Uri): void {
+		this.markInternalWatchedFileWrite(uri.fsPath);
 	}
 
 	/** Get absolute path to storage directory */
@@ -579,27 +585,39 @@ export class StorageService implements vscode.Disposable {
 		this.externalConfigChangeTimer = null;
 	}
 
-	private cleanupInternalConfigWriteSuppression(now: number = Date.now()): void {
-		for (const [configPath, expiresAt] of this.internalConfigWriteSuppressionByPath.entries()) {
+	private cleanupInternalWatchedFileWriteSuppression(now: number = Date.now()): void {
+		for (const [filePath, expiresAt] of this.internalWatchedFileWriteSuppressionByPath.entries()) {
 			if (expiresAt <= now) {
-				this.internalConfigWriteSuppressionByPath.delete(configPath);
+				this.internalWatchedFileWriteSuppressionByPath.delete(filePath);
 			}
 		}
 	}
 
-	private markInternalConfigWrite(configPath: string): void {
-		const normalizedPath = path.normalize(configPath);
+	private markInternalWatchedFileWrite(filePath: string): void {
+		const normalizedPath = path.normalize(filePath);
 		const now = Date.now();
-		this.cleanupInternalConfigWriteSuppression(now);
-		this.internalConfigWriteSuppressionByPath.set(normalizedPath, now + this.INTERNAL_CONFIG_WRITE_SUPPRESS_MS);
+		this.cleanupInternalWatchedFileWriteSuppression(now);
+		this.internalWatchedFileWriteSuppressionByPath.set(normalizedPath, now + this.INTERNAL_CONFIG_WRITE_SUPPRESS_MS);
+	}
+
+	private shouldIgnoreInternalWatchedFileChange(uri: vscode.Uri): boolean {
+		const normalizedPath = path.normalize(uri.fsPath);
+		const now = Date.now();
+		this.cleanupInternalWatchedFileWriteSuppression(now);
+		const expiresAt = this.internalWatchedFileWriteSuppressionByPath.get(normalizedPath);
+		return typeof expiresAt === 'number' && expiresAt > now;
+	}
+
+	private markInternalConfigWrite(configPath: string): void {
+		this.markInternalWatchedFileWrite(configPath);
 	}
 
 	private shouldIgnoreWatchedPromptConfigChange(uri: vscode.Uri): boolean {
-		const normalizedPath = path.normalize(uri.fsPath);
-		const now = Date.now();
-		this.cleanupInternalConfigWriteSuppression(now);
-		const expiresAt = this.internalConfigWriteSuppressionByPath.get(normalizedPath);
-		return typeof expiresAt === 'number' && expiresAt > now;
+		return this.shouldIgnoreInternalWatchedFileChange(uri);
+	}
+
+	private shouldIgnoreWatchedPromptSearchSupportFileChange(uri: vscode.Uri): boolean {
+		return this.shouldIgnoreInternalWatchedFileChange(uri);
 	}
 
 	private resolvePromptStorageFilePathDetails(
@@ -730,6 +748,10 @@ export class StorageService implements vscode.Disposable {
 		uri: vscode.Uri,
 		expectedFileName: string,
 	): Promise<void> {
+		if (this.shouldIgnoreWatchedPromptSearchSupportFileChange(uri)) {
+			return;
+		}
+
 		const pathDetails = this.resolvePromptStorageFilePathDetails(uri, expectedFileName);
 		if (!pathDetails) {
 			return;
@@ -1240,6 +1262,7 @@ export class StorageService implements vscode.Disposable {
 		}
 
 		if (shouldWriteReportContent) {
+			this.markInternalWatchedPromptFileWrite(vscode.Uri.file(path.join(dir, 'report.txt')));
 			writeOperations.push(
 				vscode.workspace.fs.writeFile(
 					vscode.Uri.file(path.join(dir, 'report.txt')),

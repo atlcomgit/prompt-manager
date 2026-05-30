@@ -464,11 +464,25 @@ async function createManager(options?: {
 	setVsCodeConfigurationValues(options?.configurationValues);
 	const { EditorPanelManager } = await importEditorPanelManager();
 	let storedPrompt = options?.initialPrompt ? createPrompt(options.initialPrompt) : null;
+	let sidebarState = {
+		selectedPromptId: (storedPrompt?.id || '').trim() || null,
+		selectedPromptUuid: (storedPrompt?.promptUuid || '').trim() || null,
+	};
 	const stateService = {
 		saveStartupEditorRestoreState: async () => undefined,
 		getPromptEditorViewState: () => createEditorViewState(),
 		savePromptEditorViewState: async () => undefined,
 		migratePromptEditorViewState: async () => undefined,
+		getPromptDashboardCollapsedSections: () => ({}),
+		savePromptDashboardCollapsedSections: async () => undefined,
+		saveLastPromptId: async () => undefined,
+		getSidebarState: () => ({ ...sidebarState }),
+		saveSidebarState: async (state: { selectedPromptId?: string | null; selectedPromptUuid?: string | null }) => {
+			sidebarState = {
+				selectedPromptId: state.selectedPromptId ?? null,
+				selectedPromptUuid: state.selectedPromptUuid ?? null,
+			};
+		},
 		hasChatSession: async () => true,
 		getGitOverlayTrackedBranchPreference: () => '',
 		getGitOverlayTrackedBranchesByProjectPreference: () => ({}),
@@ -506,6 +520,14 @@ async function createManager(options?: {
 				toString: () => fsPath,
 			};
 		},
+		getPromptPlanUri: (id: string) => {
+			const fsPath = `/tmp/workspace/.vscode/prompt-manager/prompts/${id}/plan.md`;
+			return {
+				fsPath,
+				toString: () => fsPath,
+			};
+		},
+		markInternalWatchedPromptFileWrite: () => undefined,
 		uniqueId: async (base: string) => base,
 		getPrompt: async (id: string) => {
 			if (!storedPrompt || storedPrompt.id !== id) {
@@ -805,6 +827,43 @@ test('loadPromptForOpen returns a pending save snapshot without waiting for disk
 		title: 'Prompt B saved',
 	}));
 	await flushTurns(1);
+});
+
+test('loadPromptForOpen returns a renamed pending save snapshot by promptUuid without waiting for disk', async () => {
+	resetVsCodeCommandMock();
+	const { manager, storageService } = await createManager();
+	let diskReadCount = 0;
+	(storageService as any).getPrompt = async () => {
+		diskReadCount += 1;
+		return createPrompt({
+			id: 'prompt-b-old',
+			promptUuid: 'uuid-b',
+			title: 'Prompt B from disk',
+		});
+	};
+
+	(manager as any).pendingSaveQueue.set(buildSaveQueueKey('uuid-b', 'prompt-b-renamed'), {
+		snapshot: createPrompt({
+			id: 'prompt-b-renamed',
+			promptUuid: 'uuid-b',
+			title: 'Prompt B pending rename',
+			content: 'pending renamed content',
+			report: 'pending renamed report',
+		}),
+		promise: Promise.resolve(createPrompt({
+			id: 'prompt-b-renamed',
+			promptUuid: 'uuid-b',
+			title: 'Prompt B saved rename',
+		})),
+		operationId: 'op-rename',
+	});
+
+	const loaded = await (manager as any).loadPromptForOpen('prompt-b-old', 'uuid-b');
+
+	assert.equal(loaded?.id, 'prompt-b-renamed');
+	assert.equal(loaded?.title, 'Prompt B pending rename');
+	assert.equal(loaded?.content, 'pending renamed content');
+	assert.equal(diskReadCount, 0);
 });
 
 test('savePromptEditorViewState message queues persistence without blocking handler', async () => {
@@ -2858,6 +2917,92 @@ test('promptDashboardSwitchBranches refreshes only targeted project rows and sta
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
 });
 
+test('refreshPromptDashboardWidget uses the just-saved expanded dashboard state before collapse persistence finishes', async () => {
+	const saveGate = createDeferred<void>();
+	let refreshWidgetCalls = 0;
+	const refreshSections: string[] = [];
+	const { manager } = await createManager({
+		stateService: {
+			getPromptDashboardCollapsedSections: () => ({
+				projectBranches: true,
+				reviewRequests: true,
+				parallelBranches: true,
+				projectCommits: true,
+			}),
+			savePromptDashboardCollapsedSections: async () => {
+				await saveGate.promise;
+			},
+		},
+	});
+	const panelMessages: any[] = [];
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	(manager as any).promptDashboardService = {
+		refreshWidgetSnapshot: async (
+			_prompt: unknown,
+			_widget: unknown,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			section?: string,
+		) => {
+			refreshWidgetCalls += 1;
+			refreshSections.push(section || '');
+			postMessage?.({
+				type: 'promptDashboardWidgetSnapshot',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				widget: {
+					kind: 'projects',
+					cache: { status: 'fresh', source: 'refresh' },
+					data: { projects: [] },
+				},
+			});
+			return null;
+		},
+	};
+
+	const savePromise = (manager as any).handleMessage(
+		{
+			type: 'savePromptDashboardCollapsedSections',
+			state: {},
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	await (manager as any).handleMessage(
+		{
+			type: 'refreshPromptDashboardWidget',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			widget: 'projects',
+			section: 'projectBranches',
+			requestId: 'dashboard-widget-refresh-after-expand',
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	saveGate.resolve();
+	await savePromise;
+
+	assert.equal(refreshWidgetCalls, 1);
+	assert.deepEqual(refreshSections, ['projectBranches']);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
+});
+
 test('runGitOverlayRefresh emits refresh timing metrics with snapshot source refresh', async () => {
 	const { manager } = await createManager();
 	const debugEvents: Array<{ event: string; payload?: Record<string, unknown> }> = [];
@@ -2961,7 +3106,7 @@ test('registerGitOverlayBuiltInRepositoryWatcher ignores noisy repository state 
 	]);
 });
 
-test('persistPromptSnapshotForSwitch finishes without waiting for AI enrichment', async () => {
+test('persistPromptSnapshotForSwitch keeps Description empty while still avoiding save-time AI waits', async () => {
 	const { manager } = await createManager({
 		generateTitle: async () => new Promise(resolve => setTimeout(() => resolve('AI title'), 40)),
 		generateDescription: async () => new Promise(resolve => setTimeout(() => resolve('AI description'), 40)),
@@ -2979,8 +3124,7 @@ test('persistPromptSnapshotForSwitch finishes without waiting for AI enrichment'
 	assert.notEqual(result, 'timeout');
 	assert.equal(typeof (result as any).title, 'string');
 	assert.notEqual(((result as any).title || '').trim(), '');
-	assert.equal(typeof (result as any).description, 'string');
-	assert.notEqual(((result as any).description || '').trim(), '');
+	assert.equal(((result as any).description || '').trim(), '');
 
 	await new Promise(resolve => setTimeout(resolve, 60));
 });
@@ -3183,10 +3327,87 @@ test('savePrompt serializes overlapping saves for the same prompt', async () => 
 	assert.equal(getStoredPrompt()?.content, 'Second content');
 });
 
-test('createQuickAddPrompt stores input as content and finishes title/description enrichment in background', async () => {
+test('savePrompt keeps a newer dirty snapshot when it arrives during an in-flight save', async () => {
+	resetVsCodeCommandMock();
+	const deferredSave = createDeferred<any>();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+			content: 'Initial content',
+		},
+		savePrompt: async (prompt: any) => {
+			await deferredSave.promise;
+			return createPrompt({
+				...prompt,
+				updatedAt: '2026-04-13T00:00:02.000Z',
+			});
+		},
+	});
+
+	const panelKey = '__prompt_editor_singleton__';
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt A',
+		content: 'Initial content',
+	});
+	(manager as any).panelPromptRefs.set(panelKey, currentPrompt);
+	(manager as any).panelBasePrompts.set(panelKey, clonePrompt(currentPrompt));
+	(manager as any).panelLatestLocalPromptRevisions = new Map<string, number>();
+
+	const savePromise = (manager as any).handleMessage(
+		{
+			type: 'savePrompt',
+			source: 'manual',
+			requestId: 'save-keep-newer-local',
+			localRevision: 1,
+			prompt: createPrompt({
+				id: 'prompt-a',
+				promptUuid: 'uuid-a',
+				title: 'Prompt A',
+				content: 'Saved content',
+			}),
+		},
+		{ visible: true, webview: { postMessage: async () => true } } as any,
+		currentPrompt,
+		panelKey,
+		() => false,
+		() => undefined,
+	);
+
+	await flushTurns(2);
+
+	(manager as any).panelDirtyFlags.set(panelKey, true);
+	(manager as any).panelLatestPromptSnapshots.set(panelKey, createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt A',
+		content: 'Newer local content',
+	}));
+	(manager as any).panelLatestLocalPromptRevisions.set(panelKey, 2);
+
+	deferredSave.resolve(createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt A',
+		content: 'Saved content',
+		updatedAt: '2026-04-13T00:00:02.000Z',
+	}));
+
+	await savePromise;
+
+	assert.equal(currentPrompt.content, 'Saved content');
+	assert.equal((manager as any).panelDirtyFlags.get(panelKey), true);
+	assert.equal((manager as any).panelLatestPromptSnapshots.get(panelKey)?.content, 'Newer local content');
+	assert.equal((manager as any).panelBasePrompts.get(panelKey)?.content, 'Saved content');
+});
+
+test('createQuickAddPrompt stores input as content and only enriches title in background', async () => {
 	const content = [
 		'Нужно реализовать быстрый сценарий создания промпта из сырого текста.',
-		'Заголовок и описание должны появиться автоматически, как в обычном редакторе.',
+		'Заголовок больше не обязан ждать ручного описания перед первым сохранением.',
 	].join(' ');
 	const aiStates: Array<{ promptId: string; title: boolean; description: boolean }> = [];
 	const { manager, getStoredPrompt } = await createManager({
@@ -3202,15 +3423,15 @@ test('createQuickAddPrompt stores input as content and finishes title/descriptio
 
 	assert.equal(saved?.content, content);
 	assert.ok((saved?.title || '').trim().length > 0);
-	assert.ok((saved?.description || '').trim().length > 0);
+	assert.equal((saved?.description || '').trim(), '');
 	assert.equal(getStoredPrompt()?.content, content);
-	assert.ok(aiStates.some(state => state.title && state.description));
+	assert.ok(aiStates.some(state => state.title && !state.description));
 
 	await new Promise(resolve => setTimeout(resolve, 0));
 	await new Promise(resolve => setTimeout(resolve, 0));
 
 	assert.equal(getStoredPrompt()?.title, 'AI generated title');
-	assert.equal(getStoredPrompt()?.description, 'AI generated description');
+	assert.equal((getStoredPrompt()?.description || '').trim(), '');
 	assert.ok(aiStates.some(state => !state.title && !state.description));
 });
 

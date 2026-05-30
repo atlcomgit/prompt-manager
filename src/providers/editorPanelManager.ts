@@ -39,6 +39,15 @@ import type {
 	PromptOpenTarget,
 } from '../types/messages.js';
 import type { GitOverlayProjectSnapshot, GitOverlaySnapshot } from '../types/git.js';
+import type {
+	PromptDashboardCollapsedSections,
+	PromptDashboardWidgetKind,
+} from '../types/promptDashboard.js';
+import {
+	normalizePromptDashboardCollapsedSections,
+	resolveCollapsedPromptDashboardWidgets,
+	shouldSkipPromptDashboardWidgetRefresh,
+} from '../types/promptDashboard.js';
 import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
 import type { PromptVoiceService } from '../services/promptVoice/promptVoiceService.js';
@@ -118,6 +127,7 @@ import {
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
 const SINGLE_EDITOR_PANEL_KEY = '__prompt_editor_singleton__';
+const PROMPT_LOCAL_REVISION_DEFAULT = 0;
 const EDITOR_PANEL_VIEW_TYPE = 'promptManager.editor';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
@@ -172,6 +182,7 @@ export class EditorPanelManager {
 	}>();
 	public readonly onDidPromptAiEnrichmentStateChange = this._onDidPromptAiEnrichmentStateChange.event;
 	private panelPromptConfigFieldChangedAt = new Map<string, PromptConfigFieldChangedAt>();
+	private panelLatestLocalPromptRevisions = new Map<string, number>();
 	private chatTrackingDisposables = new Map<string, vscode.Disposable>();
 	private panelDirtySetters = new Map<string, (v: boolean) => void>();
 	private panelDirtyFlags = new Map<string, boolean>();
@@ -230,6 +241,7 @@ export class EditorPanelManager {
 	private latestPromptEditorViewStateByQueueKey = new Map<string, EditorPromptViewState>();
 	private promptEditorViewStateSaveFlushScheduled = false;
 	private promptEditorViewStateSaveQueue: Promise<void> = Promise.resolve();
+	private promptDashboardCollapsedSectionsState: PromptDashboardCollapsedSections = {};
 	/** Очередь ожидающих сохранений по составному ключу (uuid::id). Хранит снимок и промис завершения. */
 	private pendingSaveQueue = new Map<string, PendingSaveEntry>();
 	private isShuttingDown = false;
@@ -423,6 +435,22 @@ export class EditorPanelManager {
 		return this.normalizePromptConfigFieldChangedAt(this.panelPromptConfigFieldChangedAt.get(panelKey));
 	}
 
+	private normalizePromptLocalRevision(value?: number | null): number {
+		if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+			return PROMPT_LOCAL_REVISION_DEFAULT;
+		}
+
+		return Math.max(PROMPT_LOCAL_REVISION_DEFAULT, Math.trunc(value));
+	}
+
+	private getPanelLatestLocalPromptRevision(panelKey: string): number {
+		return this.normalizePromptLocalRevision(this.panelLatestLocalPromptRevisions.get(panelKey));
+	}
+
+	private setPanelLatestLocalPromptRevision(panelKey: string, value?: number | null): void {
+		this.panelLatestLocalPromptRevisions.set(panelKey, this.normalizePromptLocalRevision(value));
+	}
+
 	private setPanelPromptConfigFieldChangedAt(
 		panelKey: string,
 		changedAt?: Record<string, number> | PromptConfigFieldChangedAt | null,
@@ -462,6 +490,21 @@ export class EditorPanelManager {
 
 		const promptId = (this.panelPromptRefs.get(panelKey)?.id || '').trim();
 		return promptId ? openPanels.get(promptId) : undefined;
+	}
+
+	/** Read the shared workspace-wide dashboard collapse state. */
+	private getPromptDashboardCollapsedSections(): PromptDashboardCollapsedSections {
+		return this.promptDashboardCollapsedSectionsState;
+	}
+
+	/** Resolve host widget payloads hidden by the shared collapse state. */
+	private getCollapsedPromptDashboardWidgets(): PromptDashboardWidgetKind[] {
+		return resolveCollapsedPromptDashboardWidgets(this.getPromptDashboardCollapsedSections());
+	}
+
+	/** Check whether host-side work for one dashboard widget can be skipped. */
+	private isPromptDashboardWidgetCollapsed(widget: PromptDashboardWidgetKind): boolean {
+		return shouldSkipPromptDashboardWidgetRefresh(this.getPromptDashboardCollapsedSections(), widget);
 	}
 
 	private getPromptEditorViewFallbackKey(panelKey: string): string {
@@ -668,9 +711,11 @@ export class EditorPanelManager {
 				edit.replace(planUri, documentRange, '');
 				await vscode.workspace.applyEdit(edit);
 				if (openDocument.isDirty) {
+					this.storageService.markInternalWatchedPromptFileWrite(planUri);
 					await openDocument.save();
 				}
 			} else {
+				this.storageService.markInternalWatchedPromptFileWrite(planUri);
 				await vscode.workspace.fs.writeFile(planUri, Buffer.from('', 'utf-8'));
 			}
 
@@ -1561,6 +1606,10 @@ export class EditorPanelManager {
 
 	private shouldWriteReportDebugEvent(event: string): boolean {
 		if (/(error|failed|exception)/i.test(event)) {
+			return true;
+		}
+
+		if (/^(webview\.editor-dashboard\.|promptDashboard\.)/.test(event)) {
 			return true;
 		}
 
@@ -3045,6 +3094,8 @@ export class EditorPanelManager {
 		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined,
 		private readonly customGroupsService?: CustomGroupsService,
 	) {
+		this.promptDashboardCollapsedSectionsState = this.stateService.getPromptDashboardCollapsedSections();
+
 		this.contentSyncDisposables.push(
 			vscode.window.onDidChangeActiveTextEditor(() => {
 				if (this.pendingGlobalAgentContextSync !== null) {
@@ -4218,6 +4269,9 @@ export class EditorPanelManager {
 		if (!panel.visible) {
 			return;
 		}
+		if (this.isPromptDashboardWidgetCollapsed('projects')) {
+			return;
+		}
 
 		try {
 			await this.promptDashboardService.refreshProjectsWidget(
@@ -4236,6 +4290,11 @@ export class EditorPanelManager {
 	/** Schedules project-widget refreshes for visible prompt editors after git events. */
 	private schedulePromptDashboardAutoRefreshForVisiblePanels(reason: 'file' | 'git', changedPath?: string): void {
 		for (const [panelKey, prompt] of this.panelPromptRefs.entries()) {
+			if (this.isPromptDashboardWidgetCollapsed('projects')) {
+				this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
+				this.clearPromptDashboardReactiveRefreshTimer(panelKey);
+				continue;
+			}
 			const panel = this.resolveOpenEditorPanel(panelKey);
 			if (!panel) {
 				continue;
@@ -5165,11 +5224,7 @@ export class EditorPanelManager {
 			&& hasEnoughContentForTitle
 			&& EditorPanelManager.isTitleFallback(promptToSave.title, promptToSave.content);
 		const needsTitle = (!promptToSave.title || isUntitledWithEnoughContent || isFallbackTitle) && !!promptToSave.content;
-		const hasEnoughContentForDescription = !!promptToSave.content && contentWordCount > 10;
-		const isFallbackDescription = !!promptToSave.description
-			&& hasEnoughContentForDescription
-			&& EditorPanelManager.isDescriptionFallback(promptToSave.description, promptToSave.content);
-		const needsDescription = ((!promptToSave.description && hasEnoughContentForDescription) || isFallbackDescription);
+		const needsDescription = false;
 
 		const enrichmentKey = this.resolvePromptAiEnrichmentKey(
 			promptToSave.id || currentPrompt?.id,
@@ -5707,9 +5762,6 @@ export class EditorPanelManager {
 			if (!currentPrompt.title) {
 				currentPrompt.title = this.makeTitleFallbackFromContent(content || currentPrompt.content);
 			}
-			if (!currentPrompt.description) {
-				currentPrompt.description = this.makeDescriptionFallbackFromContent(content || currentPrompt.content);
-			}
 			currentPrompt.id = await this.storageService.uniqueId(
 				this.makePromptIdBase(currentPrompt.taskNumber, currentPrompt.title, currentPrompt.description || content || currentPrompt.content)
 			);
@@ -5816,9 +5868,6 @@ export class EditorPanelManager {
 
 		if (!currentPrompt.title) {
 			currentPrompt.title = this.makeTitleFallbackFromContent(currentPrompt.content || currentPrompt.report);
-		}
-		if (!currentPrompt.description) {
-			currentPrompt.description = this.makeDescriptionFallbackFromContent(currentPrompt.content || currentPrompt.report);
 		}
 		currentPrompt.id = await this.storageService.uniqueId(
 			this.makePromptIdBase(currentPrompt.taskNumber, currentPrompt.title, currentPrompt.description || currentPrompt.content || currentPrompt.report)
@@ -6242,6 +6291,7 @@ export class EditorPanelManager {
 		try {
 			await vscode.workspace.fs.stat(planUri);
 		} catch {
+			this.storageService.markInternalWatchedPromptFileWrite(planUri);
 			await vscode.workspace.fs.writeFile(planUri, Buffer.from('', 'utf-8'));
 			await this.readPromptPlanSnapshot(panelKey, promptId, planUri);
 		}
@@ -6412,6 +6462,9 @@ export class EditorPanelManager {
 	): void {
 		const promptTitle = prompt.id ? (prompt.title || prompt.id) : 'New prompt';
 		const bootId = this.createPanelBootId();
+		const promptDashboardCollapsedSections = 'promptDashboardCollapsedSections' in promptMessage
+			? promptMessage.promptDashboardCollapsedSections || this.getPromptDashboardCollapsedSections()
+			: this.getPromptDashboardCollapsedSections();
 		this.panelBootIds.set(panelKey, bootId);
 		this.pendingReadyPromptMessages.set(panelKey, promptMessage);
 		panel.webview.html = getWebviewHtml(
@@ -6421,6 +6474,10 @@ export class EditorPanelManager {
 			`Prompt: ${promptTitle}`,
 			vscode.env.language,
 			bootId,
+			[],
+			{
+				__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__: promptDashboardCollapsedSections,
+			},
 		);
 	}
 
@@ -6553,11 +6610,13 @@ export class EditorPanelManager {
 		} = {},
 	): ExtensionToWebviewMessage {
 		const pendingAiEnrichment = this.getPendingPromptAiEnrichmentState(prompt);
+		const promptDashboardCollapsedSections = this.getPromptDashboardCollapsedSections();
 
 		return {
 			type: 'prompt',
 			prompt,
 			...options,
+			...(Object.keys(promptDashboardCollapsedSections).length > 0 ? { promptDashboardCollapsedSections } : {}),
 			...(pendingAiEnrichment ? { aiEnrichment: pendingAiEnrichment } : {}),
 		};
 	}
@@ -6571,6 +6630,7 @@ export class EditorPanelManager {
 	): ExtensionToWebviewMessage {
 		const normalizedPromptId = (promptId || '__new__').trim() || '__new__';
 		const normalizedPromptUuid = (promptUuid || '').trim();
+		const promptDashboardCollapsedSections = this.getPromptDashboardCollapsedSections();
 
 		return {
 			type: 'promptLoading',
@@ -6578,6 +6638,7 @@ export class EditorPanelManager {
 			...(normalizedPromptUuid ? { promptUuid: normalizedPromptUuid } : {}),
 			...(typeof openRequestVersion === 'number' ? { openRequestVersion } : {}),
 			...(editorViewState ? { editorViewState } : {}),
+			...(Object.keys(promptDashboardCollapsedSections).length > 0 ? { promptDashboardCollapsedSections } : {}),
 		};
 	}
 
@@ -6826,19 +6887,23 @@ export class EditorPanelManager {
 	}
 
 	/** Load a saved prompt for opening, preferring an in-flight save result over stale disk data. */
-	private async loadPromptForOpen(promptId: string): Promise<Prompt | null> {
+	private async loadPromptForOpen(promptId: string, promptUuid?: string): Promise<Prompt | null> {
 		const loadStartedAt = Date.now();
 		this.logReportDebug('openPrompt.loadTarget.started', {
 			promptId,
+			promptUuid: promptUuid || '',
 		});
 
-		const pendingSaveEntry = findPendingSaveEntry(this.pendingSaveQueue, promptId, undefined);
+		const normalizedPromptUuid = (promptUuid || '').trim();
+		const pendingSaveEntry = findPendingSaveEntry(this.pendingSaveQueue, promptId, normalizedPromptUuid || undefined);
 		if (pendingSaveEntry) {
 			const pendingSnapshotId = (pendingSaveEntry.snapshot.id || '').trim();
-			if (pendingSnapshotId === promptId) {
+			const pendingSnapshotUuid = (pendingSaveEntry.snapshot.promptUuid || '').trim();
+			if (pendingSnapshotId === promptId || (normalizedPromptUuid && pendingSnapshotUuid === normalizedPromptUuid)) {
 				const pendingSnapshot = JSON.parse(JSON.stringify(pendingSaveEntry.snapshot)) as Prompt;
 				this.logReportDebug('openPrompt.loadTarget.pendingSaveSnapshot', {
 					promptId,
+					promptUuid: promptUuid || '',
 					contentSize: pendingSnapshot.content.length,
 					reportSize: pendingSnapshot.report.length,
 					contextFileCount: pendingSnapshot.contextFiles.length,
@@ -6851,19 +6916,28 @@ export class EditorPanelManager {
 			const savedResult = await pendingSaveEntry.promise;
 			this.logReportDebug('openPrompt.loadTarget.pendingSaveResolved', {
 				promptId,
+				promptUuid: promptUuid || '',
 				resolvedPromptId: savedResult?.id || '',
+				resolvedPromptUuid: savedResult?.promptUuid || '',
 				waitMs: Date.now() - pendingSaveStartedAt,
 				durationMs: Date.now() - loadStartedAt,
 			});
-			if (savedResult && savedResult.id === promptId) {
+			if (
+				savedResult
+				&& (savedResult.id === promptId || (normalizedPromptUuid && (savedResult.promptUuid || '').trim() === normalizedPromptUuid))
+			) {
 				return savedResult;
 			}
 		}
 
 		const storageReadStartedAt = Date.now();
-		const prompt = await this.storageService.getPrompt(promptId);
+		let prompt = await this.storageService.getPrompt(promptId);
+		if (!prompt && normalizedPromptUuid) {
+			prompt = await this.storageService.getPromptByUuid(normalizedPromptUuid);
+		}
 		this.logReportDebug('openPrompt.loadTarget.storageRead', {
 			promptId,
+			promptUuid: promptUuid || '',
 			found: Boolean(prompt),
 			readMs: Date.now() - storageReadStartedAt,
 			durationMs: Date.now() - loadStartedAt,
@@ -6974,7 +7048,7 @@ export class EditorPanelManager {
 			promptLoadingSentToReusablePanel = true;
 		}
 
-		const targetPromptLoadTask = isNew ? null : this.loadPromptForOpen(promptId)
+		const targetPromptLoadTask = isNew ? null : this.loadPromptForOpen(promptId, target.promptUuid)
 			.then(prompt => {
 				this.logReportDebug('openPrompt.stage', {
 					stage: 'targetLoaded',
@@ -7152,6 +7226,7 @@ export class EditorPanelManager {
 		this.ensureReportEditorBinding(panelKey, prompt);
 		this.setPanelPromptRef(panelKey, prompt);
 		this.panelDirtyFlags.set(panelKey, restoredUnsaved);
+		this.setPanelLatestLocalPromptRevision(panelKey, PROMPT_LOCAL_REVISION_DEFAULT);
 		this.setPanelPromptConfigFieldChangedAt(panelKey, null);
 		this.panelLatestPromptSnapshots.set(panelKey, restoredUnsaved ? JSON.parse(JSON.stringify(prompt)) : null);
 		this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(prompt)));
@@ -7444,6 +7519,7 @@ export class EditorPanelManager {
 					const previousCurrentReport = currentPrompt.report || '';
 
 					this.panelDirtyFlags.set(panelKey, msg.dirty);
+					this.setPanelLatestLocalPromptRevision(panelKey, msg.localRevision);
 					this.setPanelPromptConfigFieldChangedAt(panelKey, msg.dirty ? msg.configFieldChangedAt || null : null);
 					if (msg.prompt) {
 						Object.assign(currentPrompt, msg.prompt);
@@ -7662,6 +7738,11 @@ export class EditorPanelManager {
 				/** Deferred-промис для регистрации в очереди сохранений по идентификатору промпта */
 				const operationId = crypto.randomUUID();
 				const saveRequestId = (msg.requestId || '').trim() || undefined;
+				const saveLocalRevision = this.normalizePromptLocalRevision(msg.localRevision);
+				this.setPanelLatestLocalPromptRevision(
+					panelKey,
+					Math.max(this.getPanelLatestLocalPromptRevision(panelKey), saveLocalRevision),
+				);
 				let saveQueueResolve: (value: Prompt | null) => void;
 				const saveQueuePromise = new Promise<Prompt | null>(resolve => { saveQueueResolve = resolve; });
 				const saveQueueKey = buildSaveQueueKey(
@@ -7888,6 +7969,9 @@ export class EditorPanelManager {
 							const latestSnapshot = this.panelLatestPromptSnapshots.get(panelKey);
 							this.panelLatestPromptSnapshots.delete(panelKey);
 							this.panelLatestPromptSnapshots.set(promptToSave.id, latestSnapshot ? JSON.parse(JSON.stringify(latestSnapshot)) : null);
+							const latestLocalRevision = this.getPanelLatestLocalPromptRevision(panelKey);
+							this.panelLatestLocalPromptRevisions.delete(panelKey);
+							this.setPanelLatestLocalPromptRevision(promptToSave.id, latestLocalRevision);
 							const basePrompt = this.panelBasePrompts.get(panelKey);
 							this.panelBasePrompts.delete(panelKey);
 							this.panelBasePrompts.set(promptToSave.id, basePrompt ? JSON.parse(JSON.stringify(basePrompt)) : JSON.parse(JSON.stringify(promptForPanel)));
@@ -7897,9 +7981,13 @@ export class EditorPanelManager {
 
 						if (shouldApplyToCurrentPanel) {
 							const stateKey = panelKey.startsWith('new-') ? promptToSave.id : panelKey;
-							this.panelDirtyFlags.set(stateKey, false);
-							this.setPanelPromptConfigFieldChangedAt(stateKey, null);
-							this.panelLatestPromptSnapshots.set(stateKey, null);
+							const latestLocalRevision = this.getPanelLatestLocalPromptRevision(stateKey);
+							const hasNewerLocalSnapshot = latestLocalRevision > saveLocalRevision;
+							this.panelDirtyFlags.set(stateKey, hasNewerLocalSnapshot);
+							if (!hasNewerLocalSnapshot) {
+								this.setPanelPromptConfigFieldChangedAt(stateKey, null);
+								this.panelLatestPromptSnapshots.set(stateKey, null);
+							}
 							this.panelBasePrompts.set(stateKey, JSON.parse(JSON.stringify(promptForPanel)));
 						}
 
@@ -8022,6 +8110,16 @@ export class EditorPanelManager {
 					}),
 					msg.state,
 				);
+				break;
+			}
+
+			case 'savePromptDashboardCollapsedSections': {
+				this.promptDashboardCollapsedSectionsState = normalizePromptDashboardCollapsedSections(msg.state);
+				this.logReportDebug('promptDashboard.collapsedSections.saved', {
+					panelKey,
+					collapsedSections: this.promptDashboardCollapsedSectionsState,
+				});
+				await this.stateService.savePromptDashboardCollapsedSections(msg.state);
 				break;
 			}
 
@@ -9473,11 +9571,13 @@ export class EditorPanelManager {
 
 			case 'getPromptDashboardSnapshot': {
 				const dashboardPrompt = this.resolveDashboardPromptRequest(currentPrompt, msg.prompt);
+				const collapsedWidgets = this.getCollapsedPromptDashboardWidgets();
 				const snapshot = this.promptDashboardService.getSnapshot(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
 					msg.forceRefresh === true,
+					{ collapsedWidgets },
 				);
 				postMessage({ type: 'promptDashboardSnapshot', snapshot, requestId: msg.requestId });
 				break;
@@ -9485,23 +9585,65 @@ export class EditorPanelManager {
 
 			case 'refreshPromptDashboard': {
 				const dashboardPrompt = msg.prompt || currentPrompt;
+				const collapsedWidgets = this.getCollapsedPromptDashboardWidgets();
+				this.logReportDebug('promptDashboard.refresh.received', {
+					panelKey,
+					requestId: msg.requestId || '',
+					promptId: dashboardPrompt.id || currentPrompt.id || '',
+					promptUuid: dashboardPrompt.promptUuid || currentPrompt.promptUuid || '',
+					collapsedSections: this.getPromptDashboardCollapsedSections(),
+					collapsedWidgets,
+				});
 				const snapshot = await this.promptDashboardService.refreshPromptSnapshot(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
+					{ collapsedWidgets },
 				);
 				postMessage({ type: 'promptDashboardSnapshot', snapshot, requestId: msg.requestId });
-				void this.promptDashboardService.analyzeParallelReview(
-					dashboardPrompt,
-					(message) => postMessage(message as ExtensionToWebviewMessage),
-					msg.requestId,
-				);
+				if (!collapsedWidgets.includes('aiAnalysis')) {
+					this.logReportDebug('promptDashboard.refresh.analysis-dispatched', {
+						panelKey,
+						requestId: msg.requestId || '',
+						promptId: dashboardPrompt.id || currentPrompt.id || '',
+					});
+					void this.promptDashboardService.analyzeParallelReview(
+						dashboardPrompt,
+						(message) => postMessage(message as ExtensionToWebviewMessage),
+						msg.requestId,
+					);
+				}
 				break;
 			}
 
 			case 'refreshPromptDashboardWidget': {
 				const dashboardPrompt = msg.prompt || currentPrompt;
+				this.logReportDebug('promptDashboard.refreshWidget.received', {
+					panelKey,
+					requestId: msg.requestId || '',
+					widget: msg.widget,
+					section: msg.section || '',
+					promptId: dashboardPrompt.id || currentPrompt.id || '',
+					promptUuid: dashboardPrompt.promptUuid || currentPrompt.promptUuid || '',
+					collapsedSections: this.getPromptDashboardCollapsedSections(),
+					collapsed: this.isPromptDashboardWidgetCollapsed(msg.widget),
+				});
+				if (this.isPromptDashboardWidgetCollapsed(msg.widget)) {
+					this.logReportDebug('promptDashboard.refreshWidget.skipped-collapsed', {
+						panelKey,
+						requestId: msg.requestId || '',
+						widget: msg.widget,
+						collapsedSections: this.getPromptDashboardCollapsedSections(),
+					});
+					break;
+				}
 				if (msg.widget === 'aiAnalysis') {
+					this.logReportDebug('promptDashboard.refreshWidget.analysis-dispatched', {
+						panelKey,
+						requestId: msg.requestId || '',
+						widget: msg.widget,
+						promptId: dashboardPrompt.id || currentPrompt.id || '',
+					});
 					void this.promptDashboardService.analyzeParallelReview(
 						dashboardPrompt,
 						(message) => postMessage(message as ExtensionToWebviewMessage),
@@ -9510,17 +9652,27 @@ export class EditorPanelManager {
 					break;
 				}
 
+				this.logReportDebug('promptDashboard.refreshWidget.dispatched', {
+					panelKey,
+					requestId: msg.requestId || '',
+					widget: msg.widget,
+					promptId: dashboardPrompt.id || currentPrompt.id || '',
+				});
 				await this.promptDashboardService.refreshWidgetSnapshot(
 					dashboardPrompt,
 					msg.widget,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
 					msg.requestId,
+					msg.section,
 				);
 				break;
 			}
 
 			case 'hydratePromptDashboardProjectsDetails': {
 				const dashboardPrompt = msg.prompt || currentPrompt;
+				if (this.isPromptDashboardWidgetCollapsed('projects')) {
+					break;
+				}
 				await this.promptDashboardService.refreshProjectsWidget(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
@@ -9540,19 +9692,23 @@ export class EditorPanelManager {
 					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
 				}
 				// Keep the post-apply repaint narrow and reuse cached heavy sections until background review catches up.
-				await this.promptDashboardService.refreshProjectsWidget(
-					dashboardPrompt,
-					(message) => postMessage(message as ExtensionToWebviewMessage),
-					msg.requestId,
-					'reactive-branches',
-					[msg.project],
-				);
-				void this.promptDashboardService.analyzeParallelReview(
-					dashboardPrompt,
-					(message) => postMessage(message as ExtensionToWebviewMessage),
-					msg.requestId,
-					{ projectNames: [msg.project] },
-				);
+				if (!this.isPromptDashboardWidgetCollapsed('projects')) {
+					await this.promptDashboardService.refreshProjectsWidget(
+						dashboardPrompt,
+						(message) => postMessage(message as ExtensionToWebviewMessage),
+						msg.requestId,
+						'reactive-branches',
+						[msg.project],
+					);
+				}
+				if (!this.isPromptDashboardWidgetCollapsed('aiAnalysis')) {
+					void this.promptDashboardService.analyzeParallelReview(
+						dashboardPrompt,
+						(message) => postMessage(message as ExtensionToWebviewMessage),
+						msg.requestId,
+						{ projectNames: [msg.project] },
+					);
+				}
 				break;
 			}
 
@@ -9564,19 +9720,23 @@ export class EditorPanelManager {
 				} else {
 					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
 				}
-				await this.promptDashboardService.refreshProjectsWidget(
-					dashboardPrompt,
-					(message) => postMessage(message as ExtensionToWebviewMessage),
-					msg.requestId,
-					'reactive-branches',
-					[msg.project],
-				);
-				void this.promptDashboardService.analyzeParallelReview(
-					dashboardPrompt,
-					(message) => postMessage(message as ExtensionToWebviewMessage),
-					msg.requestId,
-					{ projectNames: [msg.project] },
-				);
+				if (!this.isPromptDashboardWidgetCollapsed('projects')) {
+					await this.promptDashboardService.refreshProjectsWidget(
+						dashboardPrompt,
+						(message) => postMessage(message as ExtensionToWebviewMessage),
+						msg.requestId,
+						'reactive-branches',
+						[msg.project],
+					);
+				}
+				if (!this.isPromptDashboardWidgetCollapsed('aiAnalysis')) {
+					void this.promptDashboardService.analyzeParallelReview(
+						dashboardPrompt,
+						(message) => postMessage(message as ExtensionToWebviewMessage),
+						msg.requestId,
+						{ projectNames: [msg.project] },
+					);
+				}
 				break;
 			}
 
@@ -9589,19 +9749,23 @@ export class EditorPanelManager {
 					postMessage({ type: 'error', message: `Ошибки: ${result.errors.join(', ')}`, requestId: msg.requestId });
 				}
 				// Keep the post-apply repaint narrow and reuse cached heavy sections until background review catches up.
-				await this.promptDashboardService.refreshProjectsWidget(
-					dashboardPrompt,
-					(message) => postMessage(message as ExtensionToWebviewMessage),
-					msg.requestId,
-					'reactive-branches',
-					Object.keys(msg.branchesByProject || {}),
-				);
-				void this.promptDashboardService.analyzeParallelReview(
-					dashboardPrompt,
-					(message) => postMessage(message as ExtensionToWebviewMessage),
-					msg.requestId,
-					{ projectNames: Object.keys(msg.branchesByProject || {}) },
-				);
+				if (!this.isPromptDashboardWidgetCollapsed('projects')) {
+					await this.promptDashboardService.refreshProjectsWidget(
+						dashboardPrompt,
+						(message) => postMessage(message as ExtensionToWebviewMessage),
+						msg.requestId,
+						'reactive-branches',
+						Object.keys(msg.branchesByProject || {}),
+					);
+				}
+				if (!this.isPromptDashboardWidgetCollapsed('aiAnalysis')) {
+					void this.promptDashboardService.analyzeParallelReview(
+						dashboardPrompt,
+						(message) => postMessage(message as ExtensionToWebviewMessage),
+						msg.requestId,
+						{ projectNames: Object.keys(msg.branchesByProject || {}) },
+					);
+				}
 				break;
 			}
 

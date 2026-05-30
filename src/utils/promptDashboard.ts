@@ -1,4 +1,6 @@
-import type { PromptDashboardAnalysisState, PromptDashboardBranchAction, PromptDashboardCacheState, PromptDashboardLoadStatus, PromptDashboardProjectsData, PromptDashboardProjectSummary, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSnapshot, PromptDashboardStatusData, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../types/promptDashboard.js';
+import type { PromptDashboardAnalysisState, PromptDashboardBranchAction, PromptDashboardCacheState, PromptDashboardLoadStatus, PromptDashboardProjectsData, PromptDashboardProjectSummary, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSectionKey, PromptDashboardSnapshot, PromptDashboardStatusData, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../types/promptDashboard.js';
+import { resolvePromptDashboardWidgetKindForSection } from '../types/promptDashboard.js';
+import { isPromptDashboardProjectsSectionLoaded } from '../types/promptDashboard.js';
 import type { GitOverlayBranchInfo, GitOverlayChangeFile, GitOverlayCommitChangedFile } from '../types/git.js';
 import type { Prompt, PromptStatus } from '../types/prompt.js';
 
@@ -242,8 +244,13 @@ export function shouldRequestPromptDashboardSnapshot(input: {
 	hasSnapshot: boolean;
 	currentFingerprint: string;
 	lastRequestedFingerprint: string;
+	hasPendingExplicitRequest?: boolean;
 }): boolean {
 	if (input.mode !== 'full' || !input.isLoaded) {
+		return false;
+	}
+
+	if (input.hasPendingExplicitRequest) {
 		return false;
 	}
 
@@ -252,6 +259,67 @@ export function shouldRequestPromptDashboardSnapshot(input: {
 	}
 
 	return input.currentFingerprint !== input.lastRequestedFingerprint;
+}
+
+/** Resolves whether expanding one dashboard section should request a fresh widget payload. */
+export function resolvePromptDashboardExpandRefreshTarget(input: {
+	section: PromptDashboardSectionKey;
+	snapshot: PromptDashboardSnapshot | null;
+}): { type: 'widget'; widget: PromptDashboardWidgetKind } | null {
+	if (!input.snapshot) {
+		return null;
+	}
+	if (
+		resolvePromptDashboardWidgetKindForSection(input.section) === 'projects'
+		&& !isPromptDashboardProjectsSectionLoaded(input.snapshot.projects.data, input.section)
+	) {
+		return {
+			type: 'widget',
+			widget: 'projects',
+		};
+	}
+
+	const widget = input.section === 'status'
+		? input.snapshot.status
+		: input.section === 'activity'
+			? input.snapshot.activity
+			: input.section === 'aiAnalysis'
+				? input.snapshot.aiAnalysis
+				: input.snapshot.projects;
+	const cacheStatus = widget.cache.status;
+	if (
+		cacheStatus !== 'idle'
+		&& cacheStatus !== 'stale'
+		&& cacheStatus !== 'error'
+		&& !isPromptDashboardWidgetEffectivelyEmpty(widget)
+	) {
+		return null;
+	}
+
+	return {
+		type: 'widget',
+		widget: widget.kind,
+	};
+}
+
+/** Detects widget snapshots that still carry only an empty placeholder-like payload when reopened. */
+function isPromptDashboardWidgetEffectivelyEmpty(
+	widget: PromptDashboardWidgetSnapshot<unknown>,
+): boolean {
+	switch (widget.kind) {
+		case 'projects': {
+			const data = widget.data as PromptDashboardProjectsData | null | undefined;
+			return !data || ((data.projects?.length || 0) === 0 && (data.branchProjects?.length || 0) === 0);
+		}
+		case 'aiAnalysis': {
+			const data = widget.data as PromptDashboardAnalysisState | null | undefined;
+			return !data || data.status === 'idle' || !String(data.content || '').trim();
+		}
+		case 'status':
+		case 'activity':
+		default:
+			return false;
+	}
 }
 
 /** Clears branch-apply loaders only after the projects widget finished its refresh. */
@@ -266,6 +334,11 @@ export function shouldClearPromptDashboardBusyActionFromWidget(input: {
 
 	if (input.busyAction === `refresh-widget:${input.widgetKind}`) {
 		return true;
+	}
+
+	if (input.busyAction.startsWith('refresh-section:')) {
+		const section = input.busyAction.slice('refresh-section:'.length) as PromptDashboardSectionKey;
+		return resolvePromptDashboardWidgetKindForSection(section) === input.widgetKind;
 	}
 
 	if (input.widgetKind !== 'projects') {

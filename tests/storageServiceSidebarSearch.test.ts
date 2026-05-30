@@ -5,6 +5,7 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const originalLoad = (Module as any)._load;
 
@@ -241,6 +242,37 @@ test('savePrompt keeps runtime sidebar search data out of persisted config.json'
 		assert.equal('sidebarSearchText' in storedConfig, false);
 		assert.equal('progress' in storedConfig, false);
 		assert.equal(storedConfig.title, 'Updated title');
+	} finally {
+		fs.rmSync(workspaceRoot, { recursive: true, force: true });
+	}
+});
+
+test('StorageService suppresses self-authored plan/report watcher echoes', async () => {
+	const { StorageService } = await importStorageService();
+	const workspaceRoot = createTempWorkspace();
+
+	try {
+		await seedPrompt(workspaceRoot, 'prompt-a', '');
+		const service = new (StorageService as any)(workspaceRoot);
+		const externalChanges: Array<{ id: string; uriPath: string }> = [];
+		service.onDidExternalPromptConfigChange((changes: Array<{ id: string; uri: { fsPath: string } }>) => {
+			for (const change of changes) {
+				externalChanges.push({ id: change.id, uriPath: change.uri.fsPath });
+			}
+		});
+
+		const reportUri = service.getPromptReportUri('prompt-a');
+		service.markInternalWatchedPromptFileWrite(reportUri);
+		await (service as any).handleWatchedPromptSearchSupportFileChange(reportUri, 'report.txt');
+
+		const planUri = service.getPromptPlanUri('prompt-a');
+		service.markInternalWatchedPromptFileWrite(planUri);
+		await (service as any).handleWatchedPromptSearchSupportFileChange(planUri, 'plan.md');
+
+		await delay(180);
+
+		assert.deepEqual(externalChanges, []);
+		service.dispose();
 	} finally {
 		fs.rmSync(workspaceRoot, { recursive: true, force: true });
 	}

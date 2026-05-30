@@ -46,7 +46,23 @@ import {
   shouldShowPromptPlanForStatus,
 } from '../../types/prompt.js';
 import type { GitOverlayActionKind, GitOverlayActionScope, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
-import type { PromptDashboardAnalysisState, PromptDashboardProjectsData, PromptDashboardSnapshot, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../../types/promptDashboard';
+import type {
+  PromptDashboardAnalysisState,
+  PromptDashboardCollapsedSections,
+  PromptDashboardProjectsData,
+  PromptDashboardSectionKey,
+  PromptDashboardSnapshot,
+  PromptDashboardWidgetKind,
+  PromptDashboardWidgetSnapshot,
+} from '../../types/promptDashboard';
+import {
+  hasVisiblePromptDashboardSections,
+  normalizePromptDashboardCollapsedSections,
+  resolveCollapsedPromptDashboardWidgets,
+  resolvePromptDashboardWidgetKindForSection,
+  shouldSkipPromptDashboardWidgetRefresh,
+  togglePromptDashboardSectionCollapsedState,
+} from '../../types/promptDashboard.js';
 import {
   buildContextFileCardPlaceholder,
   dedupeContextFileReferences,
@@ -79,12 +95,35 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
-import { preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldRequestPromptDashboardSnapshot, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
+import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldRequestPromptDashboardSnapshot, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
 
 const vscode = getVsCodeApi();
-const initialBootId = (window as typeof window & { __WEBVIEW_BOOT_ID__?: string }).__WEBVIEW_BOOT_ID__ || '';
+type EditorBootWindow = Window & {
+  __WEBVIEW_BOOT_ID__?: string;
+  __PROMPT_DASHBOARD_COLLAPSED_SECTIONS__?: PromptDashboardCollapsedSections;
+};
+
+const bootWindow = window as EditorBootWindow;
+const initialBootId = bootWindow.__WEBVIEW_BOOT_ID__ || '';
+
+/** Prefer host boot data for the first paint and only fall back to retained webview state when boot data is absent. */
+export const resolveInitialPromptDashboardCollapsedSections = (
+  bootState: unknown,
+  persistedState: unknown,
+): PromptDashboardCollapsedSections => {
+  if (bootState && typeof bootState === 'object') {
+    return normalizePromptDashboardCollapsedSections(bootState as PromptDashboardCollapsedSections);
+  }
+
+  return normalizePromptDashboardCollapsedSections(persistedState as PromptDashboardCollapsedSections);
+};
+
+const initialPromptDashboardCollapsedSections = resolveInitialPromptDashboardCollapsedSections(
+  bootWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__,
+  ((vscode.getState?.() || {}) as Record<string, unknown>)['pm.editor.promptDashboardCollapsedSections'],
+);
 
 interface SelectOption {
   id: string;
@@ -121,6 +160,146 @@ export const shouldDeferReportAutosave = (input: {
   reportEditorFocused: boolean;
   reportDraftActive: boolean;
 }): boolean => input.reportEditorFocused || input.reportDraftActive;
+
+/** Resolve which dashboard refresh request should run after one collapsed section is expanded. */
+export const resolvePromptDashboardExpandRequest = (input: {
+  previousCollapsedSections: PromptDashboardCollapsedSections;
+  nextCollapsedSections: PromptDashboardCollapsedSections;
+  section: PromptDashboardSectionKey;
+  mode: 'full' | 'compact';
+  snapshot: PromptDashboardSnapshot | null;
+}): { type: 'refresh' } | { type: 'widget'; widget: PromptDashboardWidgetKind } | null => {
+  const wasCollapsed = input.previousCollapsedSections[input.section] === true;
+  if (!wasCollapsed || input.mode !== 'full') {
+    return null;
+  }
+
+  if (!hasVisiblePromptDashboardSections(input.nextCollapsedSections)) {
+    return null;
+  }
+
+  if (!input.snapshot) {
+    const widget = resolvePromptDashboardWidgetKindForSection(input.section);
+    if (widget === 'projects') {
+      return { type: 'widget', widget };
+    }
+    return { type: 'refresh' };
+  }
+
+  const refreshTarget = resolvePromptDashboardExpandRefreshTarget({
+    section: input.section,
+    snapshot: input.snapshot,
+  });
+  if (!refreshTarget || shouldSkipPromptDashboardWidgetRefresh(input.nextCollapsedSections, refreshTarget.widget)) {
+    return null;
+  }
+
+  return refreshTarget;
+};
+
+/** Build one section-scoped busy action so shared project payloads do not light up every card. */
+export const buildPromptDashboardSectionRefreshBusyAction = (
+  section: PromptDashboardSectionKey,
+): `refresh-section:${PromptDashboardSectionKey}` => `refresh-section:${section}`;
+
+const buildPromptDashboardSnapshotDebugPayload = (
+  snapshot: PromptDashboardSnapshot | null,
+): Record<string, unknown> => ({
+  hasSnapshot: snapshot !== null,
+  activityStatus: String(snapshot?.activity?.cache?.status || 'missing'),
+  statusStatus: String(snapshot?.status?.cache?.status || 'missing'),
+  projectsStatus: String(snapshot?.projects?.cache?.status || 'missing'),
+  aiStatus: String(snapshot?.aiAnalysis?.cache?.status || 'missing'),
+});
+
+/** Build a minimal dashboard snapshot around the first widget payload after a fully collapsed open. */
+export const buildPromptDashboardBootstrapSnapshot = (input: {
+  prompt: Prompt;
+  widget: PromptDashboardWidgetSnapshot<unknown>;
+  promptId?: string;
+  promptUuid?: string;
+  progressOverride?: number;
+}): PromptDashboardSnapshot => {
+  const now = new Date().toISOString();
+  const scopeIdentity = [
+    String(input.promptId || input.prompt.id || '').trim(),
+    String(input.promptUuid || input.prompt.promptUuid || '').trim(),
+  ].filter(Boolean).join(':') || '__bootstrap__';
+  const snapshot: PromptDashboardSnapshot = {
+    promptId: String(input.promptId || input.prompt.id || '').trim(),
+    promptUuid: String(input.promptUuid || input.prompt.promptUuid || '').trim(),
+    generatedAt: now,
+    scopeKey: `bootstrap:${scopeIdentity}`,
+    activity: createPromptDashboardWidgetSnapshot('activity', {
+      thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS,
+      today: [],
+      yesterday: [],
+      yesterdayLabel: 'Вчера',
+    }),
+    status: createPromptDashboardWidgetSnapshot('status', {
+      status: input.prompt.status,
+      progress: getPromptDashboardStatusProgress(input.prompt.status, input.prompt.progress),
+      totalTimeMs: getPromptDashboardTotalTimeMs(input.prompt),
+      updatedAt: input.prompt.updatedAt || now,
+    }),
+      projects: createPromptDashboardWidgetSnapshot('projects', { projects: [], loadedSections: [] }),
+    aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
+  };
+
+  return syncPromptDashboardStatusFromPrompt(
+    {
+      ...snapshot,
+      [input.widget.kind]: input.widget,
+    },
+    input.prompt,
+    {
+      progressOverride: input.progressOverride,
+      preserveInProgressSnapshotProgress: true,
+    },
+  ) || snapshot;
+};
+
+/** Merge one widget payload into the current dashboard state, bootstrapping it when the first payload arrives. */
+export const mergePromptDashboardWidgetSnapshot = (input: {
+  previousSnapshot: PromptDashboardSnapshot | null;
+  widget: PromptDashboardWidgetSnapshot<unknown> | null;
+  prompt: Prompt;
+  promptId?: string;
+  promptUuid?: string;
+  progressOverride?: number;
+}): PromptDashboardSnapshot | null => {
+  if (!input.widget || !input.widget.kind) {
+    return input.previousSnapshot;
+  }
+
+  const baseSnapshot = input.previousSnapshot || buildPromptDashboardBootstrapSnapshot({
+    prompt: input.prompt,
+    widget: input.widget,
+    promptId: input.promptId,
+    promptUuid: input.promptUuid,
+    progressOverride: input.progressOverride,
+  });
+  const nextWidget = input.widget.kind === 'projects' && input.previousSnapshot
+    ? preservePromptDashboardProjectsLoadingSnapshot(
+      input.previousSnapshot.projects,
+      input.widget as PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>,
+    )
+    : input.widget;
+  const nextSnapshot = {
+    ...baseSnapshot,
+    [nextWidget.kind]: nextWidget,
+    generatedAt: new Date().toISOString(),
+  } as PromptDashboardSnapshot;
+
+  return syncPromptDashboardStatusFromPrompt(
+    nextSnapshot,
+    input.prompt,
+    {
+      progressOverride: input.progressOverride,
+      preserveInProgressSnapshotProgress: true,
+    },
+  ) || nextSnapshot;
+};
 
 /** Keep the local report when a save response cannot yet be trusted as the active editor state. */
 export const shouldPreserveLocalReportOnSave = (input: {
@@ -562,10 +741,14 @@ export const EditorApp: React.FC = () => {
   const [promptDashboardSnapshot, setPromptDashboardSnapshot] = useState<PromptDashboardSnapshot | null>(null);
   const [promptDashboardBusyAction, setPromptDashboardBusyAction] = useState<string | null>(null);
   const [promptDashboardRefreshVersion, setPromptDashboardRefreshVersion] = useState(0);
+  const [promptDashboardCollapsedSections, setPromptDashboardCollapsedSections] = useState<PromptDashboardCollapsedSections>(
+    () => initialPromptDashboardCollapsedSections,
+  );
   const promptDashboardRequestIdRef = useRef('');
   const promptDashboardSnapshotRef = useRef<PromptDashboardSnapshot | null>(null);
   const promptDashboardProgressOverrideRef = useRef<number | undefined>(undefined);
   const lastPromptDashboardRequestFingerprintRef = useRef('');
+  const skipNextPromptDashboardAutoSnapshotRef = useRef(false);
   const isReportEditorFocusedRef = useRef(false);
   const isReportEditorDraftActiveRef = useRef(false);
   const bufferedPromptDashboardSnapshotMessageRef = useRef<any | null>(null);
@@ -738,6 +921,18 @@ export const EditorApp: React.FC = () => {
   const [chatLaunchActivityFrame, setChatLaunchActivityFrame] = useState(0);
   const shouldDockGitOverlaySecondHalf = pageWidth >= EDITOR_FORM_SHELL_WIDTH_PX * 2;
   const promptDashboardMode = resolvePromptDashboardMode(pageWidth, EDITOR_FORM_SHELL_WIDTH_PX);
+  const promptDashboardCollapsedWidgets = useMemo(
+    () => resolveCollapsedPromptDashboardWidgets(promptDashboardCollapsedSections),
+    [promptDashboardCollapsedSections],
+  );
+  const promptDashboardHasVisibleSections = useMemo(
+    () => hasVisiblePromptDashboardSections(promptDashboardCollapsedSections),
+    [promptDashboardCollapsedSections],
+  );
+  const promptDashboardCollapsedWidgetsSignature = useMemo(
+    () => [...promptDashboardCollapsedWidgets].sort().join('|'),
+    [promptDashboardCollapsedWidgets],
+  );
   const promptDashboardScopeFingerprint = useMemo(() => JSON.stringify({
     id: prompt.id,
     promptUuid: prompt.promptUuid,
@@ -843,6 +1038,14 @@ export const EditorApp: React.FC = () => {
     reportHeightLiveRef.current = reportHeight;
   }, [reportHeight]);
 
+  useEffect(() => {
+    postEditorDebugLog('editor-dashboard', 'bootstrap.collapsed-sections', {
+      collapsedSections: initialPromptDashboardCollapsedSections,
+      hasBootState: bootWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__ !== undefined,
+      bootId: initialBootId,
+    });
+  }, []);
+
   const shouldBufferPromptDashboardMessages = useCallback(() => shouldDeferReportAutosave({
     reportEditorFocused: isReportEditorFocusedRef.current,
     reportDraftActive: isReportEditorDraftActiveRef.current,
@@ -852,6 +1055,17 @@ export const EditorApp: React.FC = () => {
     reportEditorFocused: isReportEditorFocusedRef.current,
     reportDraftActive: isReportEditorDraftActiveRef.current,
   }), []);
+
+  /** Applies the shared workspace-level dashboard collapse state received from the host. */
+  const applyPromptDashboardCollapsedSections = useCallback((state: unknown) => {
+    const normalizedState = normalizePromptDashboardCollapsedSections(
+      state as PromptDashboardCollapsedSections | null | undefined,
+    );
+    postEditorDebugLog('editor-dashboard', 'collapsed-sections.applied', {
+      collapsedSections: normalizedState,
+    });
+    setPromptDashboardCollapsedSections(normalizedState);
+  }, []);
 
   const handleReportHeightChange = useCallback((nextHeight: number) => {
     const normalizedHeight = normalizeEditorLayoutHeight(nextHeight);
@@ -897,6 +1111,7 @@ export const EditorApp: React.FC = () => {
       projectsStatus: String(msg.snapshot?.projects?.cache?.status || 'idle'),
       aiStatus: String(msg.snapshot?.aiAnalysis?.cache?.status || 'idle'),
     });
+    skipNextPromptDashboardAutoSnapshotRef.current = false;
     setPromptDashboardSnapshot(syncPromptDashboardStatusFromPrompt(
       msg.snapshot || null,
       promptRef.current,
@@ -929,35 +1144,25 @@ export const EditorApp: React.FC = () => {
       return;
     }
     const widget = msg.widget as PromptDashboardWidgetSnapshot<unknown> | null;
+    skipNextPromptDashboardAutoSnapshotRef.current = false;
     setPromptDashboardSnapshot(prev => {
-      if (!prev || !widget || !widget.kind) {
+      if (!widget || !widget.kind) {
         return prev;
       }
-      if ((msg.promptUuid || '') && prev.promptUuid && msg.promptUuid !== prev.promptUuid) {
+      if (prev && (msg.promptUuid || '') && prev.promptUuid && msg.promptUuid !== prev.promptUuid) {
         return prev;
       }
-      if ((msg.promptId || '') && prev.promptId && msg.promptId !== prev.promptId) {
+      if (prev && (msg.promptId || '') && prev.promptId && msg.promptId !== prev.promptId) {
         return prev;
       }
-      const nextWidget = widget.kind === 'projects'
-        ? preservePromptDashboardProjectsLoadingSnapshot(
-          prev.projects,
-          widget as PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>,
-        )
-        : widget;
-      const nextSnapshot = {
-        ...prev,
-        [nextWidget.kind]: nextWidget,
-        generatedAt: new Date().toISOString(),
-      } as PromptDashboardSnapshot;
-      return syncPromptDashboardStatusFromPrompt(
-        nextSnapshot,
-        promptRef.current,
-        {
-          progressOverride: promptDashboardProgressOverrideRef.current,
-          preserveInProgressSnapshotProgress: true,
-        },
-      ) || nextSnapshot;
+      return mergePromptDashboardWidgetSnapshot({
+        previousSnapshot: prev,
+        widget,
+        prompt: promptRef.current,
+        promptId: String(msg.promptId || ''),
+        promptUuid: String(msg.promptUuid || ''),
+        progressOverride: promptDashboardProgressOverrideRef.current,
+      });
     });
     if (widget?.kind) {
       setPromptDashboardBusyAction(previous => shouldClearPromptDashboardBusyActionFromWidget({
@@ -1031,10 +1236,16 @@ export const EditorApp: React.FC = () => {
         generatedAt: new Date().toISOString(),
       };
     });
-    setPromptDashboardBusyAction(previous => previous === 'refresh-widget:aiAnalysis'
-      && msg.analysis?.status !== 'running'
-      ? null
-      : previous);
+    setPromptDashboardBusyAction(previous => {
+      if (msg.analysis?.status === 'running') {
+        return previous;
+      }
+
+      return previous === 'refresh-widget:aiAnalysis'
+        || previous === buildPromptDashboardSectionRefreshBusyAction('aiAnalysis')
+        ? null
+        : previous;
+    });
   }, []);
 
   const flushBufferedPromptDashboardMessages = useCallback(() => {
@@ -2384,10 +2595,14 @@ export const EditorApp: React.FC = () => {
         clearPromptSwitchPlaceholderDelay();
         promptSwitchRestoreViewStateRef.current = editorViewStateRef.current;
         const loadingEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
+        applyPromptDashboardCollapsedSections(msg.promptDashboardCollapsedSections);
         postEditorDebugLog('editor-layout', 'promptLoading.apply', {
           promptId: String(msg.promptId || '').trim() || '__new__',
           promptUuid: String(msg.promptUuid || '').trim(),
           openRequestVersion: Number(msg.openRequestVersion || 0),
+          promptDashboardCollapsedSections: normalizePromptDashboardCollapsedSections(
+            msg.promptDashboardCollapsedSections as PromptDashboardCollapsedSections | null | undefined,
+          ),
           activeTab: loadingEditorViewState.activeTab,
           branchesExpanded: loadingEditorViewState.branchesExpanded,
           branchesExpandedManual: loadingEditorViewState.branchesExpandedManual,
@@ -2530,6 +2745,7 @@ export const EditorApp: React.FC = () => {
               activePromptOpenRequestVersionRef.current = incomingOpenRequestVersion;
             }
             const nextEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
+            applyPromptDashboardCollapsedSections(msg.promptDashboardCollapsedSections);
             const promptSwitchTiming = promptSwitchTimingRef.current;
             postEditorDebugLog('editor-layout', 'promptOpen.apply', {
               promptId: incomingPromptId,
@@ -2537,6 +2753,9 @@ export const EditorApp: React.FC = () => {
               openRequestVersion: incomingOpenRequestVersion,
               durationMs: promptSwitchTiming ? Date.now() - promptSwitchTiming.startedAt : null,
               placeholderVisible: isPromptSwitchPlaceholderVisibleRef.current,
+              promptDashboardCollapsedSections: normalizePromptDashboardCollapsedSections(
+                msg.promptDashboardCollapsedSections as PromptDashboardCollapsedSections | null | undefined,
+              ),
               activeTab: nextEditorViewState.activeTab,
               branchesExpanded: nextEditorViewState.branchesExpanded,
               branchesExpandedManual: nextEditorViewState.branchesExpandedManual,
@@ -3685,6 +3904,7 @@ export const EditorApp: React.FC = () => {
       prompt: isDirty ? prompt : undefined,
       promptId: currentPromptIdRef.current || '',
       configFieldChangedAt: isDirty ? promptConfigFieldChangedAtRef.current : undefined,
+      localRevision: userChangeCounterRef.current,
     });
   }, [isDirty, prompt]);
 
@@ -3734,6 +3954,20 @@ export const EditorApp: React.FC = () => {
         promptId: String(prompt.id || '__new__'),
         promptUuid: String(prompt.promptUuid || ''),
       });
+      skipNextPromptDashboardAutoSnapshotRef.current = false;
+      promptDashboardRequestIdRef.current = '';
+      setPromptDashboardBusyAction(null);
+      return;
+    }
+    if (!promptDashboardHasVisibleSections) {
+      postEditorDebugLog('editor-dashboard', 'snapshot.skipped', {
+        reason: 'all-sections-collapsed',
+        mode: promptDashboardMode,
+        promptId: String(prompt.id || '__new__'),
+        promptUuid: String(prompt.promptUuid || ''),
+        collapsedWidgets: promptDashboardCollapsedWidgetsSignature,
+      });
+      skipNextPromptDashboardAutoSnapshotRef.current = false;
       promptDashboardRequestIdRef.current = '';
       setPromptDashboardBusyAction(null);
       return;
@@ -3745,24 +3979,35 @@ export const EditorApp: React.FC = () => {
         promptId: String(prompt.id || '__new__'),
         promptUuid: String(prompt.promptUuid || ''),
       });
+      skipNextPromptDashboardAutoSnapshotRef.current = false;
       promptDashboardRequestIdRef.current = '';
       return;
     }
+    const hasPendingExplicitDashboardRequest = skipNextPromptDashboardAutoSnapshotRef.current;
     if (!shouldRequestPromptDashboardSnapshot({
       mode: promptDashboardMode,
       isLoaded,
       hasSnapshot: promptDashboardSnapshot !== null,
       currentFingerprint: promptDashboardScopeFingerprint,
       lastRequestedFingerprint: lastPromptDashboardRequestFingerprintRef.current,
+      hasPendingExplicitRequest: hasPendingExplicitDashboardRequest,
     })) {
+      if (hasPendingExplicitDashboardRequest) {
+        postEditorDebugLog('editor-dashboard', 'snapshot.skipped', {
+          reason: 'explicit-request-in-flight',
+          mode: promptDashboardMode,
+          promptId: String(prompt.id || '__new__'),
+          promptUuid: String(prompt.promptUuid || ''),
+        });
+        skipNextPromptDashboardAutoSnapshotRef.current = false;
+        return;
+      }
       postEditorDebugLog('editor-dashboard', 'snapshot.reused', {
         mode: promptDashboardMode,
         promptId: String(prompt.id || '__new__'),
         promptUuid: String(prompt.promptUuid || ''),
         fingerprint: promptDashboardScopeFingerprint,
       });
-      promptDashboardRequestIdRef.current = '';
-      setPromptDashboardBusyAction(null);
       return;
     }
     const requestId = `prompt-dashboard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -3776,9 +4021,17 @@ export const EditorApp: React.FC = () => {
       promptUuid: String(prompt.promptUuid || ''),
       projectCount: prompt.projects.length,
       promptBranch: String(prompt.branch || ''),
+      collapsedWidgets: promptDashboardCollapsedWidgetsSignature,
     });
     vscode.postMessage({ type: 'getPromptDashboardSnapshot', prompt, requestId });
-  }, [isLoaded, promptDashboardMode, promptDashboardScopeFingerprint]);
+  }, [
+    isLoaded,
+    prompt,
+    promptDashboardCollapsedWidgetsSignature,
+    promptDashboardHasVisibleSections,
+    promptDashboardMode,
+    promptDashboardScopeFingerprint,
+  ]);
 
   // Auto-expand branch list on first resolve if mismatch detected
   useEffect(() => {
@@ -3865,6 +4118,14 @@ export const EditorApp: React.FC = () => {
       storage.setItem('pm.editor.viewState', JSON.stringify(nextEditorViewState));
     }
   }, [activeTab, branchesExpandedManual, editorContentHeights, expandedSections, manualSectionOverrides, isDescriptionExpanded, sectionHeights, showBranches, storage]);
+
+  useEffect(() => {
+    const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
+    vscode.setState?.({
+      ...currentState,
+      'pm.editor.promptDashboardCollapsedSections': promptDashboardCollapsedSections,
+    });
+  }, [promptDashboardCollapsedSections]);
 
   useEffect(() => {
     if (!globalContextTextareaRef.current || typeof ResizeObserver === 'undefined') {
@@ -4113,21 +4374,49 @@ export const EditorApp: React.FC = () => {
   }, [gitOverlayBusyAction, gitOverlayMode, logGitOverlayDebug, prompt.branch, prompt.projects, setGitOverlayBusyState, t]);
 
   const handlePromptDashboardRefresh = useCallback(() => {
+    if (!promptDashboardHasVisibleSections) {
+      return;
+    }
     const requestId = `prompt-dashboard-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    postEditorDebugLog('editor-dashboard', 'refresh.requested', {
+      requestId,
+      collapsedSections: promptDashboardCollapsedSections,
+      ...buildPromptDashboardSnapshotDebugPayload(promptDashboardSnapshotRef.current),
+    });
     promptDashboardRequestIdRef.current = requestId;
+    lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
     setPromptDashboardBusyAction('refresh');
     vscode.postMessage({ type: 'refreshPromptDashboard', prompt: promptRef.current, requestId });
-  }, []);
+  }, [promptDashboardCollapsedSections, promptDashboardHasVisibleSections, promptDashboardScopeFingerprint]);
 
-  /** Refreshes a single visible dashboard widget without reloading the whole dashboard. */
-  const handlePromptDashboardRefreshWidget = useCallback((widget: PromptDashboardWidgetKind) => {
+  /** Refreshes a single visible dashboard section without reloading the whole dashboard. */
+  const handlePromptDashboardRefreshWidget = useCallback((section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => {
+    if (shouldSkipPromptDashboardWidgetRefresh(promptDashboardCollapsedSections, widget)) {
+      postEditorDebugLog('editor-dashboard', 'widget-refresh.skipped-collapsed', {
+        section,
+        widget,
+        collapsedSections: promptDashboardCollapsedSections,
+      });
+      return;
+    }
     const requestId = `prompt-dashboard-widget-refresh-${widget}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    postEditorDebugLog('editor-dashboard', 'widget-refresh.requested', {
+      section,
+      widget,
+      requestId,
+      collapsedSections: promptDashboardCollapsedSections,
+      ...buildPromptDashboardSnapshotDebugPayload(promptDashboardSnapshotRef.current),
+    });
     promptDashboardRequestIdRef.current = requestId;
-    setPromptDashboardBusyAction(`refresh-widget:${widget}`);
-    vscode.postMessage({ type: 'refreshPromptDashboardWidget', prompt: promptRef.current, widget, requestId });
-  }, []);
+    lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
+    setPromptDashboardBusyAction(buildPromptDashboardSectionRefreshBusyAction(section));
+    vscode.postMessage({ type: 'refreshPromptDashboardWidget', prompt: promptRef.current, widget, section, requestId });
+  }, [promptDashboardCollapsedSections, promptDashboardScopeFingerprint]);
 
   const handlePromptDashboardHydrateProjectsDetails = useCallback((projects: string[], reason: 'details' | 'dirty-files' = 'details') => {
+    if (shouldSkipPromptDashboardWidgetRefresh(promptDashboardCollapsedSections, 'projects')) {
+      return;
+    }
     if (promptDashboardSnapshot?.projects.cache.status === 'loading') {
       return;
     }
@@ -4140,7 +4429,78 @@ export const EditorApp: React.FC = () => {
     const requestId = `prompt-dashboard-projects-details-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     promptDashboardRequestIdRef.current = requestId;
     vscode.postMessage({ type: 'hydratePromptDashboardProjectsDetails', prompt: promptRef.current, projects: targetProjects, requestId, reason });
-  }, [promptDashboardSnapshot?.projects.cache.status]);
+  }, [promptDashboardCollapsedSections, promptDashboardSnapshot?.projects.cache.status]);
+
+  /** Persists one shared dashboard collapse toggle and refreshes newly expanded empty/stale widgets on demand. */
+  const handlePromptDashboardToggleSectionCollapse = useCallback((section: PromptDashboardSectionKey) => {
+    const nextState = togglePromptDashboardSectionCollapsedState(promptDashboardCollapsedSections, section);
+    const currentSnapshot = promptDashboardSnapshotRef.current;
+    const expandRequest = resolvePromptDashboardExpandRequest({
+      previousCollapsedSections: promptDashboardCollapsedSections,
+      nextCollapsedSections: nextState,
+      section,
+      mode: promptDashboardMode,
+      snapshot: currentSnapshot,
+    });
+
+    postEditorDebugLog('editor-dashboard', 'expand.evaluated', {
+      section,
+      mode: promptDashboardMode,
+      previousCollapsedSections: promptDashboardCollapsedSections,
+      nextCollapsedSections: nextState,
+      expandRequestType: expandRequest?.type || null,
+      expandRequestWidget: expandRequest?.type === 'widget' ? expandRequest.widget : null,
+      ...buildPromptDashboardSnapshotDebugPayload(currentSnapshot),
+    });
+
+    setPromptDashboardCollapsedSections(nextState);
+    vscode.postMessage({ type: 'savePromptDashboardCollapsedSections', state: nextState });
+
+    if (!expandRequest) {
+      postEditorDebugLog('editor-dashboard', 'expand.skipped', {
+        section,
+        mode: promptDashboardMode,
+        nextCollapsedSections: nextState,
+      });
+      return;
+    }
+
+    if (expandRequest.type === 'refresh') {
+      const requestId = `prompt-dashboard-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      postEditorDebugLog('editor-dashboard', 'expand.posted', {
+        section,
+        requestId,
+        requestType: 'refresh',
+        collapsedSections: nextState,
+      });
+      promptDashboardRequestIdRef.current = requestId;
+      lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
+      skipNextPromptDashboardAutoSnapshotRef.current = true;
+      setPromptDashboardBusyAction(buildPromptDashboardSectionRefreshBusyAction(section));
+      vscode.postMessage({ type: 'refreshPromptDashboard', prompt: promptRef.current, requestId });
+      return;
+    }
+
+    const requestId = `prompt-dashboard-widget-refresh-${expandRequest.widget}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    postEditorDebugLog('editor-dashboard', 'expand.posted', {
+      section,
+      requestId,
+      requestType: 'widget',
+      widget: expandRequest.widget,
+      collapsedSections: nextState,
+    });
+    promptDashboardRequestIdRef.current = requestId;
+    lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
+    skipNextPromptDashboardAutoSnapshotRef.current = true;
+    setPromptDashboardBusyAction(buildPromptDashboardSectionRefreshBusyAction(section));
+    vscode.postMessage({
+      type: 'refreshPromptDashboardWidget',
+      prompt: promptRef.current,
+      widget: expandRequest.widget,
+      section,
+      requestId,
+    });
+  }, [promptDashboardCollapsedSections, promptDashboardMode, promptDashboardScopeFingerprint]);
 
   const handlePromptDashboardOpenPrompt = useCallback((id: string, promptUuid?: string) => {
     vscode.postMessage({ type: 'openPrompt', id, promptUuid });
@@ -4542,7 +4902,6 @@ export const EditorApp: React.FC = () => {
       },
     });
     }, [logGitOverlayDebug]);
-
   /** Сохраняет привязку хоста к провайдеру и обновляет overlay */
   const handleGitOverlayAssignReviewProvider = useCallback((host: string, provider: 'github' | 'gitlab') => {
     const normalizedHost = (host || '').trim().toLowerCase();
@@ -4574,7 +4933,13 @@ export const EditorApp: React.FC = () => {
     if (options.clearDirty) {
       setIsDirty(false);
     }
-    vscode.postMessage({ type: 'savePrompt', prompt: updatedPrompt, source, requestId });
+    vscode.postMessage({
+      type: 'savePrompt',
+      prompt: updatedPrompt,
+      source,
+      requestId,
+      localRevision: userChangeCounterRef.current,
+    });
   }, [enqueueEditorViewStateSave]);
 
   const handleSave = (
@@ -6622,10 +6987,12 @@ export const EditorApp: React.FC = () => {
       <PromptDashboard
         snapshot={promptDashboardSnapshot}
         busyAction={promptDashboardBusyAction}
+        collapsedSections={promptDashboardCollapsedSections}
         mode={promptDashboardMode}
         showGitFlowAction={shouldShowFooterGitFlow}
         onRefresh={handlePromptDashboardRefresh}
         onRefreshWidget={handlePromptDashboardRefreshWidget}
+        onToggleSectionCollapse={handlePromptDashboardToggleSectionCollapse}
         onHydrateProjectsDetails={handlePromptDashboardHydrateProjectsDetails}
         onOpenGitFlow={handleOpenGitOverlay}
         onOpenPrompt={handlePromptDashboardOpenPrompt}

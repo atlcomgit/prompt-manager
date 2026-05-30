@@ -13,7 +13,7 @@ function createDisposable(dispose: () => void): vscode.Disposable {
 const NOOP_DISPOSABLE = createDisposable(() => { });
 const CONSOLE_METHODS: ConsoleMethod[] = ['debug', 'info', 'log', 'warn', 'error'];
 const PROMPT_MANAGER_ERROR_MESSAGE_RE = /\b(error|failed|exception)\b/i;
-const PROMPT_MANAGER_TASK_DEBUG_MESSAGE_RE = /\[report-debug\]\s+(?:webview\.editor-layout\.sectionHeights\.measured|webview\.editor-report\.mainRichText\.(?:autoResize\.heightChanged|pageScroll\.(?:snapshot|restore)|blur\.(?:defer|cancelDeferred|commitDeferred)|text\.syncFromSourceSurface))\b/;
+const PROMPT_MANAGER_TASK_DEBUG_MESSAGE_RE = /\[report-debug\]\s+(?:webview\.editor-layout\.sectionHeights\.measured|webview\.editor-report\.mainRichText\.(?:autoResize\.heightChanged|pageScroll\.(?:snapshot|restore)|blur\.(?:defer|cancelDeferred|commitDeferred)|text\.syncFromSourceSurface)|webview\.editor-dashboard\.[^\s]+|promptDashboard\.[^\s]+)\b/;
 
 export const PROMPT_MANAGER_OUTPUT_CHANNEL_NAME = 'Prompt Manager';
 

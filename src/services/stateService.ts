@@ -10,6 +10,7 @@ import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { EditorPromptViewState, EditorPromptViewStateKeySource, SidebarState } from '../types/prompt.js';
+import type { PromptDashboardCollapsedSections } from '../types/promptDashboard.js';
 import {
 	createDefaultEditorPromptViewState,
 	moveEditorPromptViewStateEntries,
@@ -18,6 +19,10 @@ import {
 	getEditorPromptViewStateStorageKeys,
 	resolveEditorPromptViewStateStorageKey,
 } from '../types/prompt.js';
+import {
+	createDefaultPromptDashboardCollapsedSections,
+	normalizePromptDashboardCollapsedSections,
+} from '../types/promptDashboard.js';
 import { observeStableChatCompletion, isCompletedChatResponse, type StableChatCompletionCandidate } from '../utils/chatCompletionState.js';
 
 interface ChatSessionLatestRequestState {
@@ -38,12 +43,14 @@ const GLOBAL_AGENT_CONTEXT_SOURCE_KEY = 'promptManager.globalAgentContextSource'
 const STARTUP_EDITOR_OPEN_KEY = 'promptManager.startup.editorOpen';
 const STARTUP_EDITOR_PROMPT_ID_KEY = 'promptManager.startup.editorPromptId';
 const PROMPT_EDITOR_VIEW_STATE_KEY = 'promptManager.editorPromptViewState';
+const PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY = 'promptManager.dashboardCollapsedSections';
 const STATISTICS_UI_STATE_KEY = 'promptManager.statisticsUiState';
 
 export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
 	private static readonly GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchesByProjectPreference';
 	private promptEditorViewStateMutationQueue: Promise<void> = Promise.resolve();
+	private promptDashboardCollapsedSectionsMutationQueue: Promise<void> = Promise.resolve();
 
 	/** Normalize persisted global-context source and keep legacy workspaces predictable. */
 	private static normalizeGlobalAgentContextSource(
@@ -996,6 +1003,35 @@ export class StateService {
 		const pendingMutation = this.promptEditorViewStateMutationQueue.then(applyMutation, applyMutation);
 		this.promptEditorViewStateMutationQueue = pendingMutation.catch(() => undefined);
 		await pendingMutation;
+	}
+
+	/** Serialize mutations of the shared dashboard collapse map to keep the latest toggle order stable. */
+	private async persistPromptDashboardCollapsedSections(
+		state: PromptDashboardCollapsedSections,
+	): Promise<void> {
+		const normalizedState = normalizePromptDashboardCollapsedSections(state);
+		const applyMutation = async (): Promise<void> => {
+			await this.context.workspaceState.update(
+				PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY,
+				Object.keys(normalizedState).length > 0 ? normalizedState : undefined,
+			);
+		};
+
+		const pendingMutation = this.promptDashboardCollapsedSectionsMutationQueue.then(applyMutation, applyMutation);
+		this.promptDashboardCollapsedSectionsMutationQueue = pendingMutation.catch(() => undefined);
+		await pendingMutation;
+	}
+
+	getPromptDashboardCollapsedSections(): PromptDashboardCollapsedSections {
+		const saved = this.context.workspaceState.get<PromptDashboardCollapsedSections>(
+			PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY,
+			createDefaultPromptDashboardCollapsedSections(),
+		);
+		return normalizePromptDashboardCollapsedSections(saved);
+	}
+
+	async savePromptDashboardCollapsedSections(state: PromptDashboardCollapsedSections): Promise<void> {
+		await this.persistPromptDashboardCollapsedSections(state);
 	}
 
 	getPromptEditorViewState(source?: EditorPromptViewStateKeySource | null): EditorPromptViewState {

@@ -7,6 +7,7 @@ type TestStorage = Pick<Storage, 'clear' | 'getItem' | 'key' | 'removeItem' | 's
 type TestWindow = Window & {
 	__LOCALE__?: string;
 	__WEBVIEW_BOOT_ID__?: string;
+	__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__?: Record<string, unknown>;
 	innerWidth?: number;
 	localStorage: TestStorage;
 };
@@ -37,6 +38,7 @@ async function withEditorAppEnvironment<T>(callback: (EditorApp: React.FC) => T 
 	const previousAcquire = (globalThis as Record<string, unknown>).acquireVsCodeApi;
 	const previousLocale = activeWindow.__LOCALE__;
 	const previousBootId = activeWindow.__WEBVIEW_BOOT_ID__;
+	const previousPromptDashboardCollapsedSections = activeWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__;
 	const previousInnerWidth = activeWindow.innerWidth;
 	const previousLocalStorage = activeWindow.localStorage;
 
@@ -50,6 +52,7 @@ async function withEditorAppEnvironment<T>(callback: (EditorApp: React.FC) => T 
 
 	activeWindow.__LOCALE__ = 'en';
 	activeWindow.__WEBVIEW_BOOT_ID__ = 'test-boot-id';
+	activeWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__ = undefined;
 	activeWindow.innerWidth = 1280;
 	activeWindow.localStorage = createStorage();
 	(globalThis as Record<string, unknown>).acquireVsCodeApi = () => ({
@@ -72,6 +75,12 @@ async function withEditorAppEnvironment<T>(callback: (EditorApp: React.FC) => T 
 			delete activeWindow.__WEBVIEW_BOOT_ID__;
 		} else {
 			activeWindow.__WEBVIEW_BOOT_ID__ = previousBootId;
+		}
+
+		if (previousPromptDashboardCollapsedSections === undefined) {
+			delete activeWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__;
+		} else {
+			activeWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__ = previousPromptDashboardCollapsedSections;
 		}
 
 		if (previousInnerWidth === undefined) {
@@ -108,6 +117,28 @@ test('EditorApp renders the initial prompt page without throwing', async () => {
 	});
 });
 
+test('resolveInitialPromptDashboardCollapsedSections prefers boot state over retained webview state', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { resolveInitialPromptDashboardCollapsedSections } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.deepEqual(
+			resolveInitialPromptDashboardCollapsedSections(
+				{ activity: true, aiAnalysis: true },
+				{ status: true },
+			),
+			{ activity: true, aiAnalysis: true },
+		);
+
+		assert.deepEqual(
+			resolveInitialPromptDashboardCollapsedSections(
+				undefined,
+				{ status: true, reviewRequests: true },
+			),
+			{ status: true, reviewRequests: true },
+		);
+	});
+});
+
 test('buildPromptModelOptions sorts prompt AI models alphabetically', async () => {
 	await withEditorAppEnvironment(async () => {
 		const { buildPromptModelOptions } = await import('../src/webview/editor/EditorApp.js');
@@ -124,6 +155,225 @@ test('buildPromptModelOptions sorts prompt AI models alphabetically', async () =
 			options.map(option => option.name),
 			['Claude Sonnet 4', 'GPT-4.1', 'GPT-5.5', 'o3'],
 		);
+	});
+});
+
+test('resolvePromptDashboardExpandRequest requests a full refresh when the first visible section reopens without a snapshot', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { resolvePromptDashboardExpandRequest } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.deepEqual(resolvePromptDashboardExpandRequest({
+			previousCollapsedSections: {
+				status: true,
+				activity: true,
+				projectBranches: true,
+				reviewRequests: true,
+				parallelBranches: true,
+				projectCommits: true,
+				aiAnalysis: true,
+			},
+			nextCollapsedSections: {
+				status: true,
+				projectBranches: true,
+				reviewRequests: true,
+				parallelBranches: true,
+				projectCommits: true,
+				aiAnalysis: true,
+			},
+			section: 'activity',
+			mode: 'full',
+			snapshot: null,
+		}), { type: 'refresh' });
+	});
+});
+
+test('resolvePromptDashboardExpandRequest keeps the first reopened project section widget-scoped without a snapshot', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { resolvePromptDashboardExpandRequest } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.deepEqual(resolvePromptDashboardExpandRequest({
+			previousCollapsedSections: {
+				status: true,
+				activity: true,
+				projectBranches: true,
+				reviewRequests: true,
+				parallelBranches: true,
+				projectCommits: true,
+				aiAnalysis: true,
+			},
+			nextCollapsedSections: {
+				status: true,
+				activity: true,
+				reviewRequests: true,
+				parallelBranches: true,
+				projectCommits: true,
+				aiAnalysis: true,
+			},
+			section: 'projectBranches',
+			mode: 'full',
+			snapshot: null,
+		}), { type: 'widget', widget: 'projects' });
+	});
+});
+
+test('mergePromptDashboardWidgetSnapshot bootstraps the first projects widget payload into a dashboard snapshot', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { mergePromptDashboardWidgetSnapshot } = await import('../src/webview/editor/EditorApp.js');
+		const { createPromptDashboardWidgetSnapshot } = await import('../src/utils/promptDashboard.js');
+		const prompt = {
+			id: 'task-1',
+			promptUuid: 'uuid-1',
+			status: 'draft',
+			progress: 0,
+			timeSpentWriting: 0,
+			timeSpentImplementing: 0,
+			timeSpentOnTask: 0,
+			timeSpentUntracked: 0,
+			updatedAt: '2026-05-30T10:00:00.000Z',
+		} as any;
+		const widget = createPromptDashboardWidgetSnapshot('projects', {
+			projects: [{
+				project: 'api',
+				repositoryPath: '/api',
+				available: true,
+				error: '',
+				branchSwitchError: '',
+				pullError: '',
+				hasPromptBranchMismatch: false,
+				currentBranch: 'feature/task-1',
+				promptBranch: 'feature/task-1',
+				trackedBranch: 'main',
+				dirty: false,
+				hasConflicts: false,
+				ahead: 0,
+				behind: 0,
+				branches: [],
+				branchActions: [],
+				recentCommits: [],
+				review: { remote: null, request: null, error: '', setupAction: null, unsupportedReason: null },
+				pipeline: null,
+				parallelBranches: [],
+				conflictFiles: [],
+				incomingFiles: [],
+				incomingAuthors: [],
+				uncommittedFiles: [],
+			}],
+		}, { status: 'fresh', source: 'refresh' });
+
+		const snapshot = mergePromptDashboardWidgetSnapshot({
+			previousSnapshot: null,
+			widget,
+			prompt,
+			promptId: 'task-1',
+			promptUuid: 'uuid-1',
+		});
+
+		assert.equal(snapshot?.projects.data.projects[0]?.project, 'api');
+		assert.equal(snapshot?.status.kind, 'status');
+		assert.equal(snapshot?.activity.kind, 'activity');
+		assert.equal(snapshot?.aiAnalysis.kind, 'aiAnalysis');
+	});
+});
+
+test('resolvePromptDashboardExpandRequest refreshes the stale projects widget when reopening it from fully collapsed state', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { resolvePromptDashboardExpandRequest } = await import('../src/webview/editor/EditorApp.js');
+		const { createPromptDashboardWidgetSnapshot, PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS } = await import('../src/utils/promptDashboard.js');
+
+		const snapshot = {
+			promptId: 'task-1',
+			promptUuid: 'uuid-1',
+			generatedAt: '2026-05-30T10:00:00.000Z',
+			scopeKey: 'task-1::dashboard',
+			activity: createPromptDashboardWidgetSnapshot('activity', {
+				thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS,
+				today: [],
+				yesterday: [],
+			}, { status: 'fresh', source: 'refresh' }),
+			status: createPromptDashboardWidgetSnapshot('status', {
+				status: 'draft',
+				totalTimeMs: 0,
+				updatedAt: '2026-05-30T10:00:00.000Z',
+			}, { status: 'fresh', source: 'refresh' }),
+			projects: createPromptDashboardWidgetSnapshot('projects', {
+				projects: [],
+			}, { status: 'stale', source: 'cache' }),
+			aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null, { status: 'fresh', source: 'refresh' }),
+		} as any;
+
+		assert.deepEqual(resolvePromptDashboardExpandRequest({
+			previousCollapsedSections: {
+				status: true,
+				activity: true,
+				projectBranches: true,
+				reviewRequests: true,
+				parallelBranches: true,
+				projectCommits: true,
+				aiAnalysis: true,
+			},
+			nextCollapsedSections: {
+				status: true,
+				activity: true,
+				reviewRequests: true,
+				parallelBranches: true,
+				projectCommits: true,
+				aiAnalysis: true,
+			},
+			section: 'projectBranches',
+			mode: 'full',
+			snapshot,
+		}), { type: 'widget', widget: 'projects' });
+	});
+});
+
+test('resolvePromptDashboardExpandRequest refreshes an empty projects widget even when its cache still looks fresh', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { resolvePromptDashboardExpandRequest } = await import('../src/webview/editor/EditorApp.js');
+		const { createPromptDashboardWidgetSnapshot, PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS } = await import('../src/utils/promptDashboard.js');
+
+		const snapshot = {
+			promptId: 'task-1',
+			promptUuid: 'uuid-1',
+			generatedAt: '2026-05-30T10:00:00.000Z',
+			scopeKey: 'task-1::dashboard',
+			activity: createPromptDashboardWidgetSnapshot('activity', {
+				thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS,
+				today: [],
+				yesterday: [],
+			}, { status: 'fresh', source: 'refresh' }),
+			status: createPromptDashboardWidgetSnapshot('status', {
+				status: 'draft',
+				totalTimeMs: 0,
+				updatedAt: '2026-05-30T10:00:00.000Z',
+			}, { status: 'fresh', source: 'refresh' }),
+			projects: createPromptDashboardWidgetSnapshot('projects', {
+				projects: [],
+			}, { status: 'fresh', source: 'cache' }),
+			aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null, { status: 'fresh', source: 'refresh' }),
+		} as any;
+
+		assert.deepEqual(resolvePromptDashboardExpandRequest({
+			previousCollapsedSections: {
+				status: true,
+				activity: true,
+				projectBranches: true,
+				reviewRequests: true,
+				parallelBranches: true,
+				projectCommits: true,
+				aiAnalysis: true,
+			},
+			nextCollapsedSections: {
+				status: true,
+				activity: true,
+				reviewRequests: true,
+				parallelBranches: true,
+				projectCommits: true,
+				aiAnalysis: true,
+			},
+			section: 'projectBranches',
+			mode: 'full',
+			snapshot,
+		}), { type: 'widget', widget: 'projects' });
 	});
 });
 

@@ -79,7 +79,7 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
-import { preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldRequestPromptDashboardSnapshot, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
+import { preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldRequestPromptDashboardSnapshot, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
 
@@ -868,30 +868,64 @@ export const EditorApp: React.FC = () => {
   }, [shouldDeferReportLayoutStateUpdates]);
 
   const applyPromptDashboardSnapshotMessage = useCallback((msg: any) => {
-    if (!msg.requestId || msg.requestId === promptDashboardRequestIdRef.current) {
-      postEditorDebugLog('editor-dashboard', 'snapshot.received', {
+    const currentDashboardSnapshot = promptDashboardSnapshotRef.current;
+    const shouldAcceptSnapshotMessage = shouldAcceptPromptDashboardRequestMessage({
+      activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+      messageRequestId: String(msg.requestId || ''),
+      currentPromptId: String(currentDashboardSnapshot?.promptId || promptRef.current.id || ''),
+      currentPromptUuid: String(currentDashboardSnapshot?.promptUuid || promptRef.current.promptUuid || ''),
+      messagePromptId: String(msg.snapshot?.promptId || ''),
+      messagePromptUuid: String(msg.snapshot?.promptUuid || ''),
+    });
+    if (!shouldAcceptSnapshotMessage) {
+      postEditorDebugLog('editor-dashboard', 'snapshot.ignored-request-mismatch', {
+        activeRequestId: String(promptDashboardRequestIdRef.current || ''),
         requestId: String(msg.requestId || ''),
         promptId: String(msg.snapshot?.promptId || ''),
+        promptUuid: String(msg.snapshot?.promptUuid || ''),
         scopeKey: String(msg.snapshot?.scopeKey || ''),
-        activityStatus: String(msg.snapshot?.activity?.cache?.status || 'idle'),
-        statusStatus: String(msg.snapshot?.status?.cache?.status || 'idle'),
-        projectsStatus: String(msg.snapshot?.projects?.cache?.status || 'idle'),
-        aiStatus: String(msg.snapshot?.aiAnalysis?.cache?.status || 'idle'),
       });
-      setPromptDashboardSnapshot(syncPromptDashboardStatusFromPrompt(
-        msg.snapshot || null,
-        promptRef.current,
-        {
-          progressOverride: promptDashboardProgressOverrideRef.current,
-          preserveInProgressSnapshotProgress: true,
-        },
-      ));
-      setPromptDashboardBusyAction(null);
+      return;
     }
+
+    postEditorDebugLog('editor-dashboard', 'snapshot.received', {
+      requestId: String(msg.requestId || ''),
+      promptId: String(msg.snapshot?.promptId || ''),
+      scopeKey: String(msg.snapshot?.scopeKey || ''),
+      activityStatus: String(msg.snapshot?.activity?.cache?.status || 'idle'),
+      statusStatus: String(msg.snapshot?.status?.cache?.status || 'idle'),
+      projectsStatus: String(msg.snapshot?.projects?.cache?.status || 'idle'),
+      aiStatus: String(msg.snapshot?.aiAnalysis?.cache?.status || 'idle'),
+    });
+    setPromptDashboardSnapshot(syncPromptDashboardStatusFromPrompt(
+      msg.snapshot || null,
+      promptRef.current,
+      {
+        progressOverride: promptDashboardProgressOverrideRef.current,
+        preserveInProgressSnapshotProgress: true,
+      },
+    ));
+    setPromptDashboardBusyAction(null);
   }, []);
 
   const applyPromptDashboardWidgetMessage = useCallback((msg: any) => {
-    if (msg.requestId && msg.requestId !== promptDashboardRequestIdRef.current) {
+    const currentDashboardSnapshot = promptDashboardSnapshotRef.current;
+    const shouldAcceptWidgetMessage = shouldAcceptPromptDashboardRequestMessage({
+      activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+      messageRequestId: String(msg.requestId || ''),
+      currentPromptId: String(currentDashboardSnapshot?.promptId || promptRef.current.id || ''),
+      currentPromptUuid: String(currentDashboardSnapshot?.promptUuid || promptRef.current.promptUuid || ''),
+      messagePromptId: String(msg.promptId || ''),
+      messagePromptUuid: String(msg.promptUuid || ''),
+    });
+    if (!shouldAcceptWidgetMessage) {
+      postEditorDebugLog('editor-dashboard', 'widget.ignored-request-mismatch', {
+        activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+        requestId: String(msg.requestId || ''),
+        promptId: String(msg.promptId || ''),
+        promptUuid: String(msg.promptUuid || ''),
+        widgetKind: String(msg.widget?.kind || ''),
+      });
       return;
     }
     const widget = msg.widget as PromptDashboardWidgetSnapshot<unknown> | null;

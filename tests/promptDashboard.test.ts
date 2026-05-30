@@ -18,6 +18,7 @@ import {
 	resolvePromptDashboardCacheState,
 	resolvePromptDashboardMode,
 	shouldAcceptPromptDashboardAnalysisMessage,
+	shouldAcceptPromptDashboardRequestMessage,
 	shouldClearPromptDashboardBusyActionFromWidget,
 	shouldRequestPromptDashboardSnapshot,
 	splitPromptDashboardPathParts,
@@ -179,6 +180,35 @@ test('shouldRequestPromptDashboardSnapshot reuses a matching snapshot after hidd
 		currentFingerprint: 'same',
 		lastRequestedFingerprint: 'same',
 	}), true);
+});
+
+test('shouldAcceptPromptDashboardRequestMessage keeps late payloads only for the current prompt without a newer request', () => {
+	assert.equal(shouldAcceptPromptDashboardRequestMessage({
+		activeRequestId: '',
+		messageRequestId: 'request-old',
+		currentPromptId: 'task-1',
+		currentPromptUuid: 'uuid-1',
+		messagePromptId: 'task-1',
+		messagePromptUuid: 'uuid-1',
+	}), true);
+
+	assert.equal(shouldAcceptPromptDashboardRequestMessage({
+		activeRequestId: 'request-new',
+		messageRequestId: 'request-old',
+		currentPromptId: 'task-1',
+		currentPromptUuid: 'uuid-1',
+		messagePromptId: 'task-1',
+		messagePromptUuid: 'uuid-1',
+	}), false);
+
+	assert.equal(shouldAcceptPromptDashboardRequestMessage({
+		activeRequestId: '',
+		messageRequestId: 'request-old',
+		currentPromptId: 'task-1',
+		currentPromptUuid: 'uuid-1',
+		messagePromptId: 'task-2',
+		messagePromptUuid: 'uuid-2',
+	}), false);
 });
 
 test('resolvePromptDashboardCacheState marks cached widgets fresh until ttl expires', () => {

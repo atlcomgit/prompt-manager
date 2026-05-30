@@ -293,6 +293,36 @@ export function preservePromptDashboardProjectsLoadingSnapshot(
 	};
 }
 
+/** Accepts late dashboard payloads when no newer request is active and the same prompt is still visible. */
+export function shouldAcceptPromptDashboardRequestMessage(input: {
+	activeRequestId: string;
+	messageRequestId?: string;
+	currentPromptId?: string;
+	currentPromptUuid?: string;
+	messagePromptId?: string;
+	messagePromptUuid?: string;
+}): boolean {
+	if (!input.messageRequestId || input.messageRequestId === input.activeRequestId) {
+		return true;
+	}
+
+	if (input.activeRequestId) {
+		return false;
+	}
+
+	const currentPromptId = (input.currentPromptId || '').trim();
+	const currentPromptUuid = (input.currentPromptUuid || '').trim();
+	const messagePromptId = (input.messagePromptId || '').trim();
+	const messagePromptUuid = (input.messagePromptUuid || '').trim();
+	if (!messagePromptId && !messagePromptUuid) {
+		return false;
+	}
+
+	const samePromptId = !currentPromptId || !messagePromptId || currentPromptId === messagePromptId;
+	const samePromptUuid = !currentPromptUuid || !messagePromptUuid || currentPromptUuid === messagePromptUuid;
+	return samePromptId && samePromptUuid;
+}
+
 export function shouldAcceptPromptDashboardAnalysisMessage(input: {
 	activeRequestId: string;
 	messageRequestId?: string;

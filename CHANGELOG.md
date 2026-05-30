@@ -6,6 +6,12 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-05-30
+
+#### Fixed
+- Reopening the currently visible prompt now rebuilds the singleton editor webview with a fresh boot cycle and replays the exact `prompt(open)` payload on the next `ready` handshake, so stale restored prompt tabs stop drifting into frozen duplicate pages.
+- Prompt dashboard snapshot and widget updates now accept late same-prompt payloads after a reused snapshot when no newer request is active, so branch and activity cards keep refreshing after compact or hidden transitions instead of getting stuck on stale data.
+
 ### 2026-05-29
 
 #### Fixed

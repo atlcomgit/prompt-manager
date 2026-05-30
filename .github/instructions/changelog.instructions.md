@@ -1,3 +1,19 @@
+## 141: Зависание страницы и дубликаты
+
+- Дата: 2026-05-30.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлена стабильность singleton prompt editor и dashboard-обновлений: повторное открытие уже видимого промпта теперь переводит editor webview на новый boot cycle с точным versioned `prompt(open)` payload на следующем `ready`, а dashboard snapshot/widget сообщения перестали теряться после reused snapshot, если поздний payload всё ещё относится к текущему промпту и для него нет более нового активного request.
+- Ключевые моменты: `EditorPanelManager` хранит pending ready prompt payload для rebooted panel и использует новый `bootId` при повторном открытии того же prompt, чтобы stale retained webview не зависал и не вел в дублирующую frozen вкладку; `promptDashboard` util-слой получил request-acceptance fallback для late same-prompt snapshot/widget payloads без активного нового request, а `EditorApp` логирует и применяет такие сообщения вместо прежнего жёсткого drop по `requestId` mismatch.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/providers/editorPanelManager.ts
+  src/utils/promptDashboard.ts
+  src/webview/editor/EditorApp.tsx
+  tests/editorPanelManager.test.ts
+  tests/promptDashboard.test.ts
+
 ## 140: Убрать лимит в виджете активных промптов
 
 - Дата: 2026-05-29.

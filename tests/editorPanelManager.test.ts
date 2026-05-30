@@ -972,6 +972,46 @@ test('ready posts prompt before slow ready hydration messages', async () => {
 	panel.dispose();
 });
 
+test('reopening the same prompt rotates the singleton boot cycle before the next ready event', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+	});
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+
+	const initialBootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
+	const initialHtml = panel.webview.html;
+	panel.postedMessages.length = 0;
+
+	await (manager as any).openPrompt('prompt-a');
+
+	const nextBootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
+	assert.notEqual(nextBootId, initialBootId);
+	assert.notEqual(panel.webview.html, initialHtml);
+	assert.equal(vscodeCreatedWebviewPanels.length, 1);
+	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'prompt'), false);
+
+	await panel.emitMessage({ type: 'ready', bootId: initialBootId });
+	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'prompt'), false);
+
+	await panel.emitMessage({ type: 'ready', bootId: nextBootId });
+
+	const promptMessage = panel.postedMessages.find((message: any) => message?.type === 'prompt') as any;
+	assert.equal(promptMessage?.type, 'prompt');
+	assert.equal(promptMessage?.reason, 'open');
+	assert.equal(promptMessage?.prompt?.id, 'prompt-a');
+	assert.equal(typeof promptMessage?.openRequestVersion, 'number');
+	assert.ok((promptMessage?.openRequestVersion || 0) > 0);
+	panel.dispose();
+});
+
 test('clean prompt switch does not reread current prompt from disk', async () => {
 	resetVsCodeCommandMock();
 	const { manager, storageService } = await createManager({

@@ -206,6 +206,8 @@ export class EditorPanelManager {
 		disposables: vscode.Disposable[];
 	}>();
 	private panelBootIds = new Map<string, string>();
+	/** Keeps the exact open payload until the next ready handshake after a webview reboot. */
+	private pendingReadyPromptMessages = new Map<string, ExtensionToWebviewMessage>();
 	private pendingPanelMessages = new Map<string, ExtensionToWebviewMessage[]>();
 	private panelForceMainTabOnNextOpen = new Set<string>();
 	private promptIdLocksAfterChatStart = new Set<string>();
@@ -6401,6 +6403,36 @@ export class EditorPanelManager {
 		return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 	}
 
+	/** Rebuilds the prompt webview so reused panels cannot keep a stale JS bundle alive. */
+	private rebootPromptPanelWebview(
+		panelKey: string,
+		panel: vscode.WebviewPanel,
+		prompt: Prompt,
+		promptMessage: ExtensionToWebviewMessage,
+	): void {
+		const promptTitle = prompt.id ? (prompt.title || prompt.id) : 'New prompt';
+		const bootId = this.createPanelBootId();
+		this.panelBootIds.set(panelKey, bootId);
+		this.pendingReadyPromptMessages.set(panelKey, promptMessage);
+		panel.webview.html = getWebviewHtml(
+			panel.webview,
+			this.extensionUri,
+			'dist/webview/editor.js',
+			`Prompt: ${promptTitle}`,
+			vscode.env.language,
+			bootId,
+		);
+	}
+
+	/** Consumes the next ready-cycle prompt payload if the panel was rebooted before ready arrived. */
+	private consumePendingReadyPromptMessage(panelKey: string): ExtensionToWebviewMessage | undefined {
+		const promptMessage = this.pendingReadyPromptMessages.get(panelKey);
+		if (promptMessage) {
+			this.pendingReadyPromptMessages.delete(panelKey);
+		}
+		return promptMessage;
+	}
+
 	private resolvePromptAiEnrichmentKey(promptId?: string | null, promptUuid?: string | null): string | null {
 		const normalizedPromptUuid = (promptUuid || '').trim();
 		if (normalizedPromptUuid) {
@@ -6749,6 +6781,7 @@ export class EditorPanelManager {
 			forceMainTab?: boolean;
 			loadingAlreadySent?: boolean;
 			openRequestVersion?: number;
+			rebootWebview?: boolean;
 			targetPromptId?: string;
 		},
 	): Promise<void> {
@@ -6769,19 +6802,24 @@ export class EditorPanelManager {
 
 		this.updateEditorWebviewOptions(panel, prompt.contextFiles);
 		this.updatePromptPanelTitle(panel, prompt, options);
+		const promptMessage = this.buildPromptMessage(prompt, {
+			reason: 'open',
+			openRequestVersion: options.openRequestVersion,
+			editorViewState: openEditorViewState,
+		});
 
-		try {
-			await panel.webview.postMessage(this.buildPromptMessage(prompt, {
-				reason: 'open',
-				openRequestVersion: options.openRequestVersion,
-				editorViewState: openEditorViewState,
-			}));
-			void this.syncAgentProgressForPanel(panelKey);
-		} catch {
-			// Ignore boot-time postMessage failures; the eventual ready event replays current state.
+		if (options.rebootWebview) {
+			this.rebootPromptPanelWebview(panelKey, panel, prompt, promptMessage);
+		} else {
+			try {
+				await panel.webview.postMessage(promptMessage);
+				void this.syncAgentProgressForPanel(panelKey);
+			} catch {
+				// Ignore boot-time postMessage failures; the eventual ready event replays current state.
+			}
+
+			this.flushPendingPanelMessages(panelKey, panel, prompt);
 		}
-
-		this.flushPendingPanelMessages(panelKey, panel, prompt);
 		panel.reveal(vscode.ViewColumn.One);
 		this.enforceSinglePromptEditorPage(panel);
 		this.syncStartupEditorRestoreState();
@@ -6864,6 +6902,7 @@ export class EditorPanelManager {
 		const promptId = target.id;
 		const isNew = promptId === '__new__';
 		const panelKey = SINGLE_EDITOR_PANEL_KEY;
+		const isRu = vscode.env.language.startsWith('ru');
 
 		const singletonPanel = openPanels.get(panelKey);
 		const reusableSingletonPanel = singletonPanel && !this.silentClosePanels.has(singletonPanel)
@@ -6891,6 +6930,27 @@ export class EditorPanelManager {
 			});
 		}
 		if (panelSwitchStrategy === 'noop' && reusableSingletonPanel) {
+			const currentPromptSnapshot = this.panelLatestPromptSnapshots.get(panelKey)
+				|| this.panelPromptRefs.get(panelKey)
+				|| singletonPrompt;
+			if (currentPromptSnapshot) {
+				await this.switchPromptInExistingPanel(
+					panelKey,
+					reusableSingletonPanel,
+					JSON.parse(JSON.stringify(currentPromptSnapshot)) as Prompt,
+					{
+						dirty: this.panelDirtyFlags.get(panelKey) || false,
+						isRu,
+						forceMainTab: this.consumePanelForceMainTabOnNextOpen(panelKey),
+						loadingAlreadySent: true,
+						openRequestVersion: requestVersion,
+						rebootWebview: true,
+						targetPromptId: promptId,
+					},
+				);
+				return;
+			}
+
 			try {
 				await reusableSingletonPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
 			} catch {
@@ -7075,7 +7135,6 @@ export class EditorPanelManager {
 		}
 
 		const title = isNew ? 'New prompt' : (prompt.title || prompt.id);
-		const isRu = vscode.env.language.startsWith('ru');
 
 		if (this.isOpenPromptRequestStale(requestVersion)) {
 			this.logReportDebug('openPrompt.stage', {
@@ -7169,17 +7228,15 @@ export class EditorPanelManager {
 		});
 
 		panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'sidebar-icon.svg');
-		const bootId = this.createPanelBootId();
-		this.panelBootIds.set(panelKey, bootId);
-
-		panel.webview.html = getWebviewHtml(
-			panel.webview,
-			this.extensionUri,
-			'dist/webview/editor.js',
-			`Prompt: ${title}`,
-			vscode.env.language,
-			bootId,
-		);
+		const initialPromptMessage = this.buildPromptMessage(prompt, {
+			reason: 'open',
+			openRequestVersion: requestVersion,
+			editorViewState: resolvePromptOpenEditorViewState(
+				this.getPromptEditorViewState(panelKey, prompt),
+				{ forceMainTab: this.consumePanelForceMainTabOnNextOpen(panelKey) },
+			),
+		});
+		this.rebootPromptPanelWebview(panelKey, panel, prompt, initialPromptMessage);
 
 		openPanels.set(panelKey, panel);
 		void this.ensureGitOverlayReactiveSources();
@@ -7224,6 +7281,7 @@ export class EditorPanelManager {
 				openPanels.delete(key);
 				this.panelPromptRefs.delete(key);
 				this.panelBootIds.delete(key);
+				this.pendingReadyPromptMessages.delete(key);
 				this.panelForceMainTabOnNextOpen.delete(key);
 				this.pendingPanelMessages.delete(key);
 				this.chatTrackingDisposables.get(key)?.dispose();
@@ -7481,14 +7539,16 @@ export class EditorPanelManager {
 					break;
 				}
 
-				// Send the editable prompt first; slower metadata follows in guarded background tasks.
-				postMessage(this.buildPromptMessage(currentPrompt, {
-					reason: 'open',
-					editorViewState: resolvePromptOpenEditorViewState(
-						this.getPromptEditorViewState(panelKey, currentPrompt),
-						{ forceMainTab: this.consumePanelForceMainTabOnNextOpen(panelKey) },
-					),
-				}));
+				// Send the exact open payload that triggered the reboot before any slower follow-up messages.
+				const promptMessage = this.consumePendingReadyPromptMessage(panelKey)
+					|| this.buildPromptMessage(currentPrompt, {
+						reason: 'open',
+						editorViewState: resolvePromptOpenEditorViewState(
+							this.getPromptEditorViewState(panelKey, currentPrompt),
+							{ forceMainTab: this.consumePanelForceMainTabOnNextOpen(panelKey) },
+						),
+					});
+				postMessage(promptMessage);
 				void this.syncAgentProgressForPanel(panelKey);
 				this.flushPendingPanelMessages(panelKey, panel, currentPrompt);
 

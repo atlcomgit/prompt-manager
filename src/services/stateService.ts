@@ -10,7 +10,7 @@ import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { EditorPromptViewState, EditorPromptViewStateKeySource, SidebarState } from '../types/prompt.js';
-import type { PromptDashboardCollapsedSections } from '../types/promptDashboard.js';
+import type { PromptDashboardCollapsedSections, PromptDashboardSectionOrder } from '../types/promptDashboard.js';
 import {
 	createDefaultEditorPromptViewState,
 	moveEditorPromptViewStateEntries,
@@ -21,7 +21,9 @@ import {
 } from '../types/prompt.js';
 import {
 	createDefaultPromptDashboardCollapsedSections,
+	createDefaultPromptDashboardSectionOrder,
 	normalizePromptDashboardCollapsedSections,
+	normalizePromptDashboardSectionOrder,
 } from '../types/promptDashboard.js';
 import { observeStableChatCompletion, isCompletedChatResponse, type StableChatCompletionCandidate } from '../utils/chatCompletionState.js';
 
@@ -44,6 +46,7 @@ const STARTUP_EDITOR_OPEN_KEY = 'promptManager.startup.editorOpen';
 const STARTUP_EDITOR_PROMPT_ID_KEY = 'promptManager.startup.editorPromptId';
 const PROMPT_EDITOR_VIEW_STATE_KEY = 'promptManager.editorPromptViewState';
 const PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY = 'promptManager.dashboardCollapsedSections';
+const PROMPT_DASHBOARD_SECTION_ORDER_KEY = 'promptManager.dashboardSectionOrder';
 const STATISTICS_UI_STATE_KEY = 'promptManager.statisticsUiState';
 
 export class StateService {
@@ -51,6 +54,7 @@ export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchesByProjectPreference';
 	private promptEditorViewStateMutationQueue: Promise<void> = Promise.resolve();
 	private promptDashboardCollapsedSectionsMutationQueue: Promise<void> = Promise.resolve();
+	private promptDashboardSectionOrderMutationQueue: Promise<void> = Promise.resolve();
 
 	/** Normalize persisted global-context source and keep legacy workspaces predictable. */
 	private static normalizeGlobalAgentContextSource(
@@ -1032,6 +1036,35 @@ export class StateService {
 
 	async savePromptDashboardCollapsedSections(state: PromptDashboardCollapsedSections): Promise<void> {
 		await this.persistPromptDashboardCollapsedSections(state);
+	}
+
+	/** Serialize mutations of the shared dashboard order so repeated drags keep the latest card order stable. */
+	private async persistPromptDashboardSectionOrder(
+		order: PromptDashboardSectionOrder,
+	): Promise<void> {
+		const normalizedOrder = normalizePromptDashboardSectionOrder(order);
+		const applyMutation = async (): Promise<void> => {
+			await this.context.workspaceState.update(
+				PROMPT_DASHBOARD_SECTION_ORDER_KEY,
+				normalizedOrder,
+			);
+		};
+
+		const pendingMutation = this.promptDashboardSectionOrderMutationQueue.then(applyMutation, applyMutation);
+		this.promptDashboardSectionOrderMutationQueue = pendingMutation.catch(() => undefined);
+		await pendingMutation;
+	}
+
+	getPromptDashboardSectionOrder(): PromptDashboardSectionOrder {
+		const saved = this.context.workspaceState.get<PromptDashboardSectionOrder>(
+			PROMPT_DASHBOARD_SECTION_ORDER_KEY,
+			createDefaultPromptDashboardSectionOrder(),
+		);
+		return normalizePromptDashboardSectionOrder(saved);
+	}
+
+	async savePromptDashboardSectionOrder(order: PromptDashboardSectionOrder): Promise<void> {
+		await this.persistPromptDashboardSectionOrder(order);
 	}
 
 	getPromptEditorViewState(source?: EditorPromptViewStateKeySource | null): EditorPromptViewState {

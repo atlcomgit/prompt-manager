@@ -8,6 +8,7 @@ type TestWindow = Window & {
 	__LOCALE__?: string;
 	__WEBVIEW_BOOT_ID__?: string;
 	__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__?: Record<string, unknown>;
+	__PROMPT_DASHBOARD_SECTION_ORDER__?: string[];
 	innerWidth?: number;
 	localStorage: TestStorage;
 };
@@ -39,6 +40,7 @@ async function withEditorAppEnvironment<T>(callback: (EditorApp: React.FC) => T 
 	const previousLocale = activeWindow.__LOCALE__;
 	const previousBootId = activeWindow.__WEBVIEW_BOOT_ID__;
 	const previousPromptDashboardCollapsedSections = activeWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__;
+	const previousPromptDashboardSectionOrder = activeWindow.__PROMPT_DASHBOARD_SECTION_ORDER__;
 	const previousInnerWidth = activeWindow.innerWidth;
 	const previousLocalStorage = activeWindow.localStorage;
 
@@ -53,6 +55,7 @@ async function withEditorAppEnvironment<T>(callback: (EditorApp: React.FC) => T 
 	activeWindow.__LOCALE__ = 'en';
 	activeWindow.__WEBVIEW_BOOT_ID__ = 'test-boot-id';
 	activeWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__ = undefined;
+	activeWindow.__PROMPT_DASHBOARD_SECTION_ORDER__ = undefined;
 	activeWindow.innerWidth = 1280;
 	activeWindow.localStorage = createStorage();
 	(globalThis as Record<string, unknown>).acquireVsCodeApi = () => ({
@@ -81,6 +84,12 @@ async function withEditorAppEnvironment<T>(callback: (EditorApp: React.FC) => T 
 			delete activeWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__;
 		} else {
 			activeWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__ = previousPromptDashboardCollapsedSections;
+		}
+
+		if (previousPromptDashboardSectionOrder === undefined) {
+			delete activeWindow.__PROMPT_DASHBOARD_SECTION_ORDER__;
+		} else {
+			activeWindow.__PROMPT_DASHBOARD_SECTION_ORDER__ = previousPromptDashboardSectionOrder;
 		}
 
 		if (previousInnerWidth === undefined) {
@@ -135,6 +144,34 @@ test('resolveInitialPromptDashboardCollapsedSections prefers boot state over ret
 				{ status: true, reviewRequests: true },
 			),
 			{ status: true, reviewRequests: true },
+		);
+	});
+});
+
+test('resolveInitialPromptDashboardSectionOrder prefers boot state over retained webview state', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { resolveInitialPromptDashboardSectionOrder } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.deepEqual(
+			resolveInitialPromptDashboardSectionOrder(
+				['aiAnalysis', 'status', 'activity'],
+				['projectBranches', 'status', 'activity'],
+			),
+			[
+				['aiAnalysis', 'activity', 'projectBranches', 'parallelBranches'],
+				['status', 'reviewRequests', 'projectCommits'],
+			],
+		);
+
+		assert.deepEqual(
+			resolveInitialPromptDashboardSectionOrder(
+				undefined,
+				['projectBranches', 'status', 'activity'],
+			),
+			[
+				['projectBranches', 'activity', 'parallelBranches', 'aiAnalysis'],
+				['status', 'reviewRequests', 'projectCommits'],
+			],
 		);
 	});
 });

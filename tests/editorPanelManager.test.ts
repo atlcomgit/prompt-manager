@@ -475,6 +475,11 @@ async function createManager(options?: {
 		migratePromptEditorViewState: async () => undefined,
 		getPromptDashboardCollapsedSections: () => ({}),
 		savePromptDashboardCollapsedSections: async () => undefined,
+		getPromptDashboardSectionOrder: () => [
+			['status', 'projectBranches', 'parallelBranches', 'aiAnalysis'],
+			['activity', 'reviewRequests', 'projectCommits'],
+		],
+		savePromptDashboardSectionOrder: async () => undefined,
 		saveLastPromptId: async () => undefined,
 		getSidebarState: () => ({ ...sidebarState }),
 		saveSidebarState: async (state: { selectedPromptId?: string | null; selectedPromptUuid?: string | null }) => {
@@ -3001,6 +3006,41 @@ test('refreshPromptDashboardWidget uses the just-saved expanded dashboard state 
 	assert.equal(refreshWidgetCalls, 1);
 	assert.deepEqual(refreshSections, ['projectBranches']);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
+});
+
+test('savePromptDashboardSectionOrder persists the shared widget order in the host state service', async () => {
+	const savedOrders: string[][][] = [];
+	const { manager } = await createManager({
+		stateService: {
+			savePromptDashboardSectionOrder: async (order: string[][]) => {
+				savedOrders.push(order.map(column => [...column]));
+			},
+		},
+	});
+
+	await (manager as any).handleMessage(
+		{
+			type: 'savePromptDashboardSectionOrder',
+			order: [
+				['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits'],
+				['status', 'projectBranches', 'parallelBranches'],
+			],
+		} as any,
+		{ webview: {} } as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42' }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(savedOrders, [[
+		['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits'],
+		['status', 'projectBranches', 'parallelBranches'],
+	]]);
+	assert.deepEqual((manager as any).getPromptDashboardSectionOrder(), [
+		['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits'],
+		['status', 'projectBranches', 'parallelBranches'],
+	]);
 });
 
 test('runGitOverlayRefresh emits refresh timing metrics with snapshot source refresh', async () => {

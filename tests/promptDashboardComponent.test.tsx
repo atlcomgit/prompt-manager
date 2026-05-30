@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
 	PromptDashboard,
 	buildWidgetGridColumns,
+	reorderPromptDashboardSections,
 	reconcileBranchDrafts,
 	resolveBranchWidgetProjects,
 	resolveExpandedDetailsHydrationRequest,
@@ -16,6 +17,7 @@ import type {
 	PromptDashboardProjectSummary,
 	PromptDashboardPromptActivityItem,
 	PromptDashboardSectionKey,
+	PromptDashboardSectionOrder,
 	PromptDashboardSnapshot,
 } from '../src/types/promptDashboard.js';
 
@@ -189,16 +191,18 @@ function createActivityItem(
 /** Renders the dashboard component into static markup for regression checks. */
 function renderDashboard(
 	snapshot: PromptDashboardSnapshot | null,
-	options?: { busyAction?: string | null; collapsedSections?: Record<string, boolean> },
+	options?: { busyAction?: string | null; collapsedSections?: Record<string, boolean>; sectionOrder?: PromptDashboardSectionOrder },
 ): string {
 	return withDashboardEnvironment(() => renderToStaticMarkup(React.createElement(PromptDashboard, {
 		snapshot,
 		busyAction: options?.busyAction ?? null,
 		collapsedSections: options?.collapsedSections,
+		sectionOrder: options?.sectionOrder,
 		mode: 'full',
 		onRefresh: () => { },
 		onRefreshWidget: () => { },
 		onToggleSectionCollapse: () => { },
+		onReorderSections: () => { },
 		onHydrateProjectsDetails: () => { },
 		onOpenGitFlow: () => { },
 		onOpenPrompt: () => { },
@@ -390,6 +394,65 @@ test('PromptDashboard renders widget refresh buttons in every section header', (
 	assert.match(markup, /aria-label="Обновить виджет: Параллельные ветки"/);
 	assert.match(markup, /aria-label="Обновить виджет: AI review"/);
 	assert.match(markup, /aria-label="Обновить виджет: MR\/PR"/);
+});
+
+test('PromptDashboard renders sections in the shared custom order', () => {
+	const markup = renderDashboard(createSnapshot([createProject()]), {
+		sectionOrder: [
+			['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits'],
+			['status', 'projectBranches', 'parallelBranches'],
+		],
+	});
+
+	const aiIndex = markup.indexOf('AI review');
+	const activityIndex = markup.indexOf('Активные промпты');
+	const statusIndex = markup.indexOf('Статус промпта');
+	const projectBranchesIndex = markup.indexOf('Ветки проектов');
+
+	assert.notEqual(aiIndex, -1);
+	assert.notEqual(activityIndex, -1);
+	assert.notEqual(statusIndex, -1);
+	assert.notEqual(projectBranchesIndex, -1);
+	assert.ok(aiIndex < activityIndex);
+	assert.ok(activityIndex < statusIndex);
+	assert.ok(statusIndex < projectBranchesIndex);
+	assert.match(markup, /aria-label="Перетащить виджет: AI review"/);
+	assert.match(markup, /data-pm-dashboard-section="aiAnalysis"/);
+	assert.match(markup, /data-pm-dashboard-section="projectBranches"/);
+});
+
+test('reorderPromptDashboardSections moves a dragged section around the target and normalizes missing sections', () => {
+	assert.deepEqual(
+		reorderPromptDashboardSections(
+			[
+				['status', 'projectBranches'],
+				['activity'],
+			],
+			'status',
+			'projectBranches',
+			'after',
+		),
+		[
+			['projectBranches', 'status', 'parallelBranches', 'aiAnalysis'],
+			['activity', 'reviewRequests', 'projectCommits'],
+		],
+	);
+
+	assert.deepEqual(
+		reorderPromptDashboardSections(
+			[
+				['status', 'projectBranches', 'parallelBranches', 'aiAnalysis'],
+				['activity', 'reviewRequests', 'projectCommits'],
+			],
+			'projectCommits',
+			'activity',
+			'before',
+		),
+		[
+			['status', 'projectBranches', 'parallelBranches', 'aiAnalysis'],
+			['projectCommits', 'activity', 'reviewRequests'],
+		],
+	);
 });
 
 test('PromptDashboard scopes a shared projects refresh spinner only to the clicked section header', () => {

@@ -41,10 +41,12 @@ import type {
 import type { GitOverlayProjectSnapshot, GitOverlaySnapshot } from '../types/git.js';
 import type {
 	PromptDashboardCollapsedSections,
+	PromptDashboardSectionOrder,
 	PromptDashboardWidgetKind,
 } from '../types/promptDashboard.js';
 import {
 	normalizePromptDashboardCollapsedSections,
+	normalizePromptDashboardSectionOrder,
 	resolveCollapsedPromptDashboardWidgets,
 	shouldSkipPromptDashboardWidgetRefresh,
 } from '../types/promptDashboard.js';
@@ -242,6 +244,7 @@ export class EditorPanelManager {
 	private promptEditorViewStateSaveFlushScheduled = false;
 	private promptEditorViewStateSaveQueue: Promise<void> = Promise.resolve();
 	private promptDashboardCollapsedSectionsState: PromptDashboardCollapsedSections = {};
+	private promptDashboardSectionOrderState: PromptDashboardSectionOrder = [];
 	/** Очередь ожидающих сохранений по составному ключу (uuid::id). Хранит снимок и промис завершения. */
 	private pendingSaveQueue = new Map<string, PendingSaveEntry>();
 	private isShuttingDown = false;
@@ -495,6 +498,11 @@ export class EditorPanelManager {
 	/** Read the shared workspace-wide dashboard collapse state. */
 	private getPromptDashboardCollapsedSections(): PromptDashboardCollapsedSections {
 		return this.promptDashboardCollapsedSectionsState;
+	}
+
+	/** Read the shared workspace-wide dashboard card order. */
+	private getPromptDashboardSectionOrder(): PromptDashboardSectionOrder {
+		return this.promptDashboardSectionOrderState;
 	}
 
 	/** Resolve host widget payloads hidden by the shared collapse state. */
@@ -3095,6 +3103,7 @@ export class EditorPanelManager {
 		private readonly customGroupsService?: CustomGroupsService,
 	) {
 		this.promptDashboardCollapsedSectionsState = this.stateService.getPromptDashboardCollapsedSections();
+		this.promptDashboardSectionOrderState = this.stateService.getPromptDashboardSectionOrder();
 
 		this.contentSyncDisposables.push(
 			vscode.window.onDidChangeActiveTextEditor(() => {
@@ -6465,6 +6474,9 @@ export class EditorPanelManager {
 		const promptDashboardCollapsedSections = 'promptDashboardCollapsedSections' in promptMessage
 			? promptMessage.promptDashboardCollapsedSections || this.getPromptDashboardCollapsedSections()
 			: this.getPromptDashboardCollapsedSections();
+		const promptDashboardSectionOrder = 'promptDashboardSectionOrder' in promptMessage
+			? promptMessage.promptDashboardSectionOrder || this.getPromptDashboardSectionOrder()
+			: this.getPromptDashboardSectionOrder();
 		this.panelBootIds.set(panelKey, bootId);
 		this.pendingReadyPromptMessages.set(panelKey, promptMessage);
 		panel.webview.html = getWebviewHtml(
@@ -6477,6 +6489,7 @@ export class EditorPanelManager {
 			[],
 			{
 				__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__: promptDashboardCollapsedSections,
+				__PROMPT_DASHBOARD_SECTION_ORDER__: promptDashboardSectionOrder,
 			},
 		);
 	}
@@ -6611,12 +6624,14 @@ export class EditorPanelManager {
 	): ExtensionToWebviewMessage {
 		const pendingAiEnrichment = this.getPendingPromptAiEnrichmentState(prompt);
 		const promptDashboardCollapsedSections = this.getPromptDashboardCollapsedSections();
+		const promptDashboardSectionOrder = this.getPromptDashboardSectionOrder();
 
 		return {
 			type: 'prompt',
 			prompt,
 			...options,
-			...(Object.keys(promptDashboardCollapsedSections).length > 0 ? { promptDashboardCollapsedSections } : {}),
+			promptDashboardCollapsedSections,
+			promptDashboardSectionOrder,
 			...(pendingAiEnrichment ? { aiEnrichment: pendingAiEnrichment } : {}),
 		};
 	}
@@ -6631,6 +6646,7 @@ export class EditorPanelManager {
 		const normalizedPromptId = (promptId || '__new__').trim() || '__new__';
 		const normalizedPromptUuid = (promptUuid || '').trim();
 		const promptDashboardCollapsedSections = this.getPromptDashboardCollapsedSections();
+		const promptDashboardSectionOrder = this.getPromptDashboardSectionOrder();
 
 		return {
 			type: 'promptLoading',
@@ -6638,7 +6654,8 @@ export class EditorPanelManager {
 			...(normalizedPromptUuid ? { promptUuid: normalizedPromptUuid } : {}),
 			...(typeof openRequestVersion === 'number' ? { openRequestVersion } : {}),
 			...(editorViewState ? { editorViewState } : {}),
-			...(Object.keys(promptDashboardCollapsedSections).length > 0 ? { promptDashboardCollapsedSections } : {}),
+			promptDashboardCollapsedSections,
+			promptDashboardSectionOrder,
 		};
 	}
 
@@ -8120,6 +8137,16 @@ export class EditorPanelManager {
 					collapsedSections: this.promptDashboardCollapsedSectionsState,
 				});
 				await this.stateService.savePromptDashboardCollapsedSections(msg.state);
+				break;
+			}
+
+			case 'savePromptDashboardSectionOrder': {
+				this.promptDashboardSectionOrderState = normalizePromptDashboardSectionOrder(msg.order);
+				this.logReportDebug('promptDashboard.sectionOrder.saved', {
+					panelKey,
+					sectionOrder: this.promptDashboardSectionOrderState,
+				});
+				await this.stateService.savePromptDashboardSectionOrder(msg.order);
 				break;
 			}
 

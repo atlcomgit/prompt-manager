@@ -16,6 +16,12 @@ export type PromptDashboardSectionKey =
 /** Persists only sections explicitly collapsed by the user. */
 export type PromptDashboardCollapsedSections = Partial<Record<PromptDashboardSectionKey, boolean>>;
 
+/** Persists the shared visible two-column layout of prompt-dashboard cards. */
+export type PromptDashboardSectionOrder = PromptDashboardSectionKey[][];
+
+/** Prompt dashboard keeps two stable columns in full mode. */
+export const PROMPT_DASHBOARD_SECTION_COLUMN_COUNT = 2;
+
 /** Stable ordered list of all collapsible prompt-page dashboard sections. */
 export const PROMPT_DASHBOARD_SECTION_KEYS: PromptDashboardSectionKey[] = [
 	'status',
@@ -40,6 +46,11 @@ export function createDefaultPromptDashboardCollapsedSections(): PromptDashboard
 	return {};
 }
 
+/** Creates the default shared dashboard widget order. */
+export function createDefaultPromptDashboardSectionOrder(): PromptDashboardSectionOrder {
+	return buildPromptDashboardSectionOrderFromFlatList(PROMPT_DASHBOARD_SECTION_KEYS);
+}
+
 /** Normalizes persisted collapse flags and keeps only explicit collapsed=true values. */
 export function normalizePromptDashboardCollapsedSections(
 	state?: Partial<Record<PromptDashboardSectionKey, unknown>> | null,
@@ -56,6 +67,102 @@ export function normalizePromptDashboardCollapsedSections(
 	}
 
 	return normalized;
+}
+
+/** Normalizes a persisted widget order and appends any missing dashboard cards in their default order. */
+export function normalizePromptDashboardSectionOrder(
+	state?: unknown,
+): PromptDashboardSectionOrder {
+	if (!Array.isArray(state)) {
+		return createDefaultPromptDashboardSectionOrder();
+	}
+
+	if (state.every(value => typeof value === 'string')) {
+		return normalizePromptDashboardSectionOrder(
+			buildPromptDashboardSectionOrderFromFlatList(state as readonly PromptDashboardSectionKey[]),
+		);
+	}
+
+	const defaultLayout = createDefaultPromptDashboardSectionOrder();
+	const seen = new Set<PromptDashboardSectionKey>();
+	const normalized: PromptDashboardSectionOrder = Array.from(
+		{ length: PROMPT_DASHBOARD_SECTION_COLUMN_COUNT },
+		() => [],
+	);
+	for (let columnIndex = 0; columnIndex < PROMPT_DASHBOARD_SECTION_COLUMN_COUNT; columnIndex += 1) {
+		const rawColumn = Array.isArray(state[columnIndex]) ? state[columnIndex] as readonly unknown[] : [];
+		for (const value of rawColumn) {
+			if (typeof value !== 'string') {
+				continue;
+			}
+			const section = PROMPT_DASHBOARD_SECTION_KEYS.find(key => key === value);
+			if (!section || seen.has(section)) {
+				continue;
+			}
+			seen.add(section);
+			normalized[columnIndex].push(section);
+		}
+	}
+
+	for (let columnIndex = 0; columnIndex < defaultLayout.length; columnIndex += 1) {
+		for (const section of defaultLayout[columnIndex]) {
+			if (!seen.has(section)) {
+				seen.add(section);
+				normalized[columnIndex].push(section);
+			}
+		}
+	}
+
+	return normalized;
+}
+
+/** Flattens the persisted two-column layout into the visible row-first order. */
+export function flattenPromptDashboardSectionOrder(
+	order: PromptDashboardSectionOrder,
+): PromptDashboardSectionKey[] {
+	const normalizedOrder = normalizePromptDashboardSectionOrder(order);
+	const flatOrder: PromptDashboardSectionKey[] = [];
+	const rowCount = Math.max(0, ...normalizedOrder.map(column => column.length));
+	for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+		for (let columnIndex = 0; columnIndex < normalizedOrder.length; columnIndex += 1) {
+			const section = normalizedOrder[columnIndex][rowIndex];
+			if (section) {
+				flatOrder.push(section);
+			}
+		}
+	}
+	return flatOrder;
+}
+
+/** Rebuilds the persisted two-column layout from a legacy flat row-first order. */
+export function buildPromptDashboardSectionOrderFromFlatList(
+	state?: readonly unknown[] | null,
+): PromptDashboardSectionOrder {
+	const columns: PromptDashboardSectionOrder = Array.from(
+		{ length: PROMPT_DASHBOARD_SECTION_COLUMN_COUNT },
+		() => [],
+	);
+	if (!Array.isArray(state)) {
+		return columns;
+	}
+
+	const seen = new Set<PromptDashboardSectionKey>();
+	for (const value of state) {
+		if (typeof value !== 'string') {
+			continue;
+		}
+		const section = PROMPT_DASHBOARD_SECTION_KEYS.find(key => key === value);
+		if (!section || seen.has(section)) {
+			continue;
+		}
+		const targetColumn = columns.reduce<number>((bestIndex, column, columnIndex, allColumns) => {
+			return column.length < allColumns[bestIndex].length ? columnIndex : bestIndex;
+		}, 0);
+		seen.add(section);
+		columns[targetColumn].push(section);
+	}
+
+	return columns;
 }
 
 /** Toggles one top-level dashboard section in the shared collapse state. */

@@ -234,6 +234,50 @@ test('StateService saves shared dashboard collapsed sections through a serialize
 	});
 });
 
+test('StateService saves shared dashboard section order through a serialized workspace mutation queue', async () => {
+	const { StateService } = await importStateService();
+	const firstUpdateGate = createDeferred<void>();
+	let updateCount = 0;
+	const workspaceState = createWorkspaceStateMock({}, {
+		update: async (store, key, value) => {
+			updateCount += 1;
+			if (updateCount === 1) {
+				await firstUpdateGate.promise;
+			}
+
+			if (typeof value === 'undefined') {
+				store.delete(key);
+				return;
+			}
+
+			store.set(key, value);
+		},
+	});
+	const service = new StateService({ workspaceState } as any);
+
+	const firstSave = service.savePromptDashboardSectionOrder([
+		['aiAnalysis', 'activity'],
+		['status'],
+	]);
+	const secondSave = service.savePromptDashboardSectionOrder([
+		['projectBranches', 'activity', 'parallelBranches'],
+		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
+	]);
+
+	firstUpdateGate.resolve();
+	await Promise.all([firstSave, secondSave]);
+
+	assert.equal(updateCount, 2);
+	assert.deepEqual(service.getPromptDashboardSectionOrder(), [
+		['projectBranches', 'activity', 'parallelBranches'],
+		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
+	]);
+	assert.deepEqual(workspaceState.store.get('promptManager.dashboardSectionOrder'), [
+		['projectBranches', 'activity', 'parallelBranches'],
+		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
+	]);
+});
+
 test('StateService chat session relevance ignores sessions completed before the tracked start', async () => {
 	const { StateService } = await importStateService();
 

@@ -10,6 +10,7 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 #### Changed
 - Prompt-dashboard cards can now be collapsed from their header with a workspace-shared persisted state instead of a per-prompt setting; collapsed sections hide their body and widget refresh button, and the host skips snapshot refresh, widget refresh, lazy hydration, and AI review work for those hidden cards.
+- Prompt-dashboard cards can now be reordered by dragging the handle in each section header; the new card order is shared across prompts in the workspace, persists through prompt switches and webview reloads, shows a visible drop indicator while a card is moving, and now preserves the exact visible column placement after drop instead of rebalancing cards into another position.
 
 #### Fixed
 - Saving a prompt no longer auto-generates or overwrites `Description`; the field is now updated only through the explicit manual AI generation action.

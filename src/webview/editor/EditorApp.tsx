@@ -51,13 +51,16 @@ import type {
   PromptDashboardCollapsedSections,
   PromptDashboardProjectsData,
   PromptDashboardSectionKey,
+  PromptDashboardSectionOrder,
   PromptDashboardSnapshot,
   PromptDashboardWidgetKind,
   PromptDashboardWidgetSnapshot,
 } from '../../types/promptDashboard';
 import {
+  createDefaultPromptDashboardSectionOrder,
   hasVisiblePromptDashboardSections,
   normalizePromptDashboardCollapsedSections,
+  normalizePromptDashboardSectionOrder,
   resolveCollapsedPromptDashboardWidgets,
   resolvePromptDashboardWidgetKindForSection,
   shouldSkipPromptDashboardWidgetRefresh,
@@ -103,6 +106,7 @@ const vscode = getVsCodeApi();
 type EditorBootWindow = Window & {
   __WEBVIEW_BOOT_ID__?: string;
   __PROMPT_DASHBOARD_COLLAPSED_SECTIONS__?: PromptDashboardCollapsedSections;
+  __PROMPT_DASHBOARD_SECTION_ORDER__?: PromptDashboardSectionOrder;
 };
 
 const bootWindow = window as EditorBootWindow;
@@ -120,9 +124,30 @@ export const resolveInitialPromptDashboardCollapsedSections = (
   return normalizePromptDashboardCollapsedSections(persistedState as PromptDashboardCollapsedSections);
 };
 
+/** Prefer host boot data for widget order and fall back to retained webview state when boot data is absent. */
+export const resolveInitialPromptDashboardSectionOrder = (
+  bootState: unknown,
+  persistedState: unknown,
+): PromptDashboardSectionOrder => {
+  if (Array.isArray(bootState)) {
+    return normalizePromptDashboardSectionOrder(bootState);
+  }
+
+  if (Array.isArray(persistedState)) {
+    return normalizePromptDashboardSectionOrder(persistedState);
+  }
+
+  return createDefaultPromptDashboardSectionOrder();
+};
+
 const initialPromptDashboardCollapsedSections = resolveInitialPromptDashboardCollapsedSections(
   bootWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__,
   ((vscode.getState?.() || {}) as Record<string, unknown>)['pm.editor.promptDashboardCollapsedSections'],
+);
+
+const initialPromptDashboardSectionOrder = resolveInitialPromptDashboardSectionOrder(
+  bootWindow.__PROMPT_DASHBOARD_SECTION_ORDER__,
+  ((vscode.getState?.() || {}) as Record<string, unknown>)['pm.editor.promptDashboardSectionOrder'],
 );
 
 interface SelectOption {
@@ -744,6 +769,9 @@ export const EditorApp: React.FC = () => {
   const [promptDashboardCollapsedSections, setPromptDashboardCollapsedSections] = useState<PromptDashboardCollapsedSections>(
     () => initialPromptDashboardCollapsedSections,
   );
+  const [promptDashboardSectionOrder, setPromptDashboardSectionOrder] = useState<PromptDashboardSectionOrder>(
+    () => initialPromptDashboardSectionOrder,
+  );
   const promptDashboardRequestIdRef = useRef('');
   const promptDashboardSnapshotRef = useRef<PromptDashboardSnapshot | null>(null);
   const promptDashboardProgressOverrideRef = useRef<number | undefined>(undefined);
@@ -1065,6 +1093,17 @@ export const EditorApp: React.FC = () => {
       collapsedSections: normalizedState,
     });
     setPromptDashboardCollapsedSections(normalizedState);
+  }, []);
+
+  /** Applies the shared workspace-level dashboard card order received from the host. */
+  const applyPromptDashboardSectionOrder = useCallback((state: unknown) => {
+    const normalizedState = normalizePromptDashboardSectionOrder(
+      Array.isArray(state) ? state : null,
+    );
+    postEditorDebugLog('editor-dashboard', 'section-order.applied', {
+      sectionOrder: normalizedState,
+    });
+    setPromptDashboardSectionOrder(normalizedState);
   }, []);
 
   const handleReportHeightChange = useCallback((nextHeight: number) => {
@@ -2596,12 +2635,16 @@ export const EditorApp: React.FC = () => {
         promptSwitchRestoreViewStateRef.current = editorViewStateRef.current;
         const loadingEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
         applyPromptDashboardCollapsedSections(msg.promptDashboardCollapsedSections);
+        applyPromptDashboardSectionOrder(msg.promptDashboardSectionOrder);
         postEditorDebugLog('editor-layout', 'promptLoading.apply', {
           promptId: String(msg.promptId || '').trim() || '__new__',
           promptUuid: String(msg.promptUuid || '').trim(),
           openRequestVersion: Number(msg.openRequestVersion || 0),
           promptDashboardCollapsedSections: normalizePromptDashboardCollapsedSections(
             msg.promptDashboardCollapsedSections as PromptDashboardCollapsedSections | null | undefined,
+          ),
+          promptDashboardSectionOrder: normalizePromptDashboardSectionOrder(
+            Array.isArray(msg.promptDashboardSectionOrder) ? msg.promptDashboardSectionOrder : null,
           ),
           activeTab: loadingEditorViewState.activeTab,
           branchesExpanded: loadingEditorViewState.branchesExpanded,
@@ -2746,6 +2789,7 @@ export const EditorApp: React.FC = () => {
             }
             const nextEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
             applyPromptDashboardCollapsedSections(msg.promptDashboardCollapsedSections);
+            applyPromptDashboardSectionOrder(msg.promptDashboardSectionOrder);
             const promptSwitchTiming = promptSwitchTimingRef.current;
             postEditorDebugLog('editor-layout', 'promptOpen.apply', {
               promptId: incomingPromptId,
@@ -2755,6 +2799,9 @@ export const EditorApp: React.FC = () => {
               placeholderVisible: isPromptSwitchPlaceholderVisibleRef.current,
               promptDashboardCollapsedSections: normalizePromptDashboardCollapsedSections(
                 msg.promptDashboardCollapsedSections as PromptDashboardCollapsedSections | null | undefined,
+              ),
+              promptDashboardSectionOrder: normalizePromptDashboardSectionOrder(
+                Array.isArray(msg.promptDashboardSectionOrder) ? msg.promptDashboardSectionOrder : null,
               ),
               activeTab: nextEditorViewState.activeTab,
               branchesExpanded: nextEditorViewState.branchesExpanded,
@@ -3850,7 +3897,7 @@ export const EditorApp: React.FC = () => {
         setIsRecalculating(false);
         break;
     }
-  }, [applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
+  }, [applyPromptDashboardCollapsedSections, applyPromptDashboardSectionOrder, applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
 
   handleMessageRef.current = handleMessage;
 
@@ -4124,8 +4171,9 @@ export const EditorApp: React.FC = () => {
     vscode.setState?.({
       ...currentState,
       'pm.editor.promptDashboardCollapsedSections': promptDashboardCollapsedSections,
+      'pm.editor.promptDashboardSectionOrder': promptDashboardSectionOrder,
     });
-  }, [promptDashboardCollapsedSections]);
+  }, [promptDashboardCollapsedSections, promptDashboardSectionOrder]);
 
   useEffect(() => {
     if (!globalContextTextareaRef.current || typeof ResizeObserver === 'undefined') {
@@ -4501,6 +4549,17 @@ export const EditorApp: React.FC = () => {
       requestId,
     });
   }, [promptDashboardCollapsedSections, promptDashboardMode, promptDashboardScopeFingerprint]);
+
+  /** Persists the shared prompt-dashboard card order after one header drag-and-drop move. */
+  const handlePromptDashboardReorderSections = useCallback((nextOrder: PromptDashboardSectionOrder) => {
+    const normalizedOrder = normalizePromptDashboardSectionOrder(nextOrder);
+    postEditorDebugLog('editor-dashboard', 'section-order.requested', {
+      previousOrder: promptDashboardSectionOrder,
+      nextOrder: normalizedOrder,
+    });
+    setPromptDashboardSectionOrder(normalizedOrder);
+    vscode.postMessage({ type: 'savePromptDashboardSectionOrder', order: normalizedOrder });
+  }, [promptDashboardSectionOrder]);
 
   const handlePromptDashboardOpenPrompt = useCallback((id: string, promptUuid?: string) => {
     vscode.postMessage({ type: 'openPrompt', id, promptUuid });
@@ -6988,11 +7047,13 @@ export const EditorApp: React.FC = () => {
         snapshot={promptDashboardSnapshot}
         busyAction={promptDashboardBusyAction}
         collapsedSections={promptDashboardCollapsedSections}
+        sectionOrder={promptDashboardSectionOrder}
         mode={promptDashboardMode}
         showGitFlowAction={shouldShowFooterGitFlow}
         onRefresh={handlePromptDashboardRefresh}
         onRefreshWidget={handlePromptDashboardRefreshWidget}
         onToggleSectionCollapse={handlePromptDashboardToggleSectionCollapse}
+        onReorderSections={handlePromptDashboardReorderSections}
         onHydrateProjectsDetails={handlePromptDashboardHydrateProjectsDetails}
         onOpenGitFlow={handleOpenGitOverlay}
         onOpenPrompt={handlePromptDashboardOpenPrompt}

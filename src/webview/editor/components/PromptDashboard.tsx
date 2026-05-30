@@ -10,14 +10,17 @@ import type {
 	PromptDashboardProjectSummary,
 	PromptDashboardRecentCommit,
 	PromptDashboardSectionKey,
+	PromptDashboardSectionOrder,
 	PromptDashboardSnapshot,
 	PromptDashboardWidgetKind,
 } from '../../../types/promptDashboard.js';
 import {
 	createDefaultPromptDashboardCollapsedSections,
+	createDefaultPromptDashboardSectionOrder,
 	isPromptDashboardProjectsSectionLoaded,
 	isPromptDashboardSectionCollapsed,
 	normalizePromptDashboardCollapsedSections,
+	normalizePromptDashboardSectionOrder,
 } from '../../../types/promptDashboard.js';
 import {
 	compactPromptDashboardMiddleLabel,
@@ -43,11 +46,13 @@ interface PromptDashboardProps {
 	snapshot: PromptDashboardSnapshot | null;
 	busyAction?: string | null;
 	collapsedSections?: PromptDashboardCollapsedSections;
+	sectionOrder?: PromptDashboardSectionOrder;
 	mode: 'full' | 'compact';
 	showGitFlowAction?: boolean;
 	onRefresh: () => void;
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void;
 	onToggleSectionCollapse?: (section: PromptDashboardSectionKey) => void;
+	onReorderSections?: (order: PromptDashboardSectionOrder) => void;
 	onHydrateProjectsDetails: (projects: string[], reason?: 'details' | 'dirty-files') => void;
 	onOpenGitFlow: () => void;
 	onOpenPrompt: (id: string, promptUuid?: string) => void;
@@ -134,16 +139,25 @@ interface DashboardHydrationRequest {
 	reason: 'details' | 'dirty-files';
 }
 
+type DragPlacement = 'before' | 'after';
+
+interface DashboardDropIndicator {
+	section: PromptDashboardSectionKey;
+	placement: DragPlacement;
+}
+
 /** Right-side prompt dashboard visible only when the editor has enough horizontal space. */
 export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	snapshot,
 	busyAction,
 	collapsedSections = createDefaultPromptDashboardCollapsedSections(),
+	sectionOrder = createDefaultPromptDashboardSectionOrder(),
 	mode,
 	showGitFlowAction = false,
 	onRefresh,
 	onRefreshWidget,
 	onToggleSectionCollapse,
+	onReorderSections,
 	onHydrateProjectsDetails,
 	onOpenGitFlow,
 	onOpenPrompt,
@@ -160,9 +174,16 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const [openingFileKey, setOpeningFileKey] = useState<string | null>(null);
 	const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
 	const [viewedFileKeys, setViewedFileKeys] = useState<Record<string, boolean>>({});
+	const [draggedSection, setDraggedSection] = useState<PromptDashboardSectionKey | null>(null);
+	const [dropIndicator, setDropIndicator] = useState<DashboardDropIndicator | null>(null);
+	const draggedSectionRef = useRef<PromptDashboardSectionKey | null>(null);
 	const normalizedCollapsedSections = useMemo(
 		() => normalizePromptDashboardCollapsedSections(collapsedSections),
 		[collapsedSections],
+	);
+	const normalizedSectionOrder = useMemo(
+		() => normalizePromptDashboardSectionOrder(sectionOrder),
+		[sectionOrder],
 	);
 	const openingFileTokenRef = useRef(0);
 	const projectsData = snapshot?.projects.data;
@@ -247,6 +268,12 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		}
 	}, [canShowAllBranchProjects]);
 
+	// Reset transient drag UI when the dashboard scope switches to another prompt.
+	useEffect(() => {
+		setDraggedSection(null);
+		setDropIndicator(null);
+	}, [snapshot?.scopeKey]);
+
 	// Retry lazy details hydration for already-open blocks once the projects widget finishes refreshing.
 	useEffect(() => {
 		for (const [key, isExpanded] of Object.entries(expanded)) {
@@ -303,15 +330,155 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		setBulkBranchDraft(branch);
 		setBranchDrafts(previous => buildBulkBranchDrafts(branchWidgetProjects, previous, branch));
 	};
-	const widgetColumns = buildWidgetGridColumns([
-		renderStatus(snapshot, statusCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
-		renderActivity(snapshot, onOpenPrompt, activityCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
-		renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectBranchesCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
-		renderProjectCommits(commitProjects, expanded, toggleExpanded, fileHandlers, projectCommitsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
-		renderParallelBranchFiles(parallelProjects, expanded, toggleExpanded, fileHandlers, parallelBranchesCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
-		renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
-		renderReviewRequests(reviewProjects, reviewRequestsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget),
-	]);
+
+	// Clear the temporary drag state once the current move operation finishes.
+	const clearDragState = () => {
+		draggedSectionRef.current = null;
+		setDraggedSection(null);
+		setDropIndicator(null);
+	};
+
+	const handleSectionDragStart = (
+		event: React.DragEvent<HTMLButtonElement>,
+		section: PromptDashboardSectionKey,
+	) => {
+		event.stopPropagation();
+		event.dataTransfer.effectAllowed = 'move';
+		event.dataTransfer.setData('text/plain', section);
+		draggedSectionRef.current = section;
+		setDraggedSection(section);
+		setDropIndicator(null);
+	};
+
+	const handleSectionDragEnd = () => {
+		clearDragState();
+	};
+
+	const resolveDropIndicator = (
+		event: React.DragEvent<HTMLDivElement>,
+		targetSection: PromptDashboardSectionKey,
+	): DashboardDropIndicator | null => {
+		const activeDraggedSection = draggedSectionRef.current;
+		if (!activeDraggedSection || activeDraggedSection === targetSection) {
+			return null;
+		}
+		const rect = event.currentTarget.getBoundingClientRect();
+		const placement: DragPlacement = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+		return { section: targetSection, placement };
+	};
+
+	const handleSectionDragOver = (
+		event: React.DragEvent<HTMLDivElement>,
+		targetSection: PromptDashboardSectionKey,
+	) => {
+		const activeDraggedSection = draggedSectionRef.current;
+		if (!activeDraggedSection || activeDraggedSection === targetSection) {
+			return;
+		}
+		event.preventDefault();
+		const nextIndicator = resolveDropIndicator(event, targetSection);
+		setDropIndicator(previous => previous?.section === nextIndicator?.section && previous?.placement === nextIndicator?.placement
+			? previous
+			: nextIndicator);
+	};
+
+	const handleSectionDragLeave = (
+		event: React.DragEvent<HTMLDivElement>,
+		targetSection: PromptDashboardSectionKey,
+	) => {
+		const relatedTarget = event.relatedTarget as Node | null;
+		if (relatedTarget && event.currentTarget.contains(relatedTarget)) {
+			return;
+		}
+		setDropIndicator(previous => previous?.section === targetSection ? null : previous);
+	};
+
+	const handleSectionDrop = (
+		event: React.DragEvent<HTMLDivElement>,
+		targetSection: PromptDashboardSectionKey,
+	) => {
+		event.preventDefault();
+		const activeDraggedSection = draggedSectionRef.current;
+		if (!activeDraggedSection || activeDraggedSection === targetSection) {
+			clearDragState();
+			return;
+		}
+		const indicator = resolveDropIndicator(event, targetSection);
+		if (!indicator) {
+			clearDragState();
+			return;
+		}
+		const nextOrder = reorderPromptDashboardSections(
+			normalizedSectionOrder,
+			activeDraggedSection,
+			indicator.section,
+			indicator.placement,
+		);
+		clearDragState();
+		if (!arePromptDashboardSectionOrdersEqual(normalizedSectionOrder, nextOrder)) {
+			onReorderSections?.(nextOrder);
+		}
+	};
+
+	// Render one dedicated header handle so dragging does not interfere with collapse or refresh actions.
+	const renderSectionDragHandle = (section: PromptDashboardSectionKey, title: string): React.ReactNode => (
+		<button
+			type="button"
+			draggable
+			style={{
+				...styles.sectionDragHandle,
+				...(draggedSection === section ? styles.sectionDragHandleDragging : null),
+			}}
+			onClick={(event) => event.stopPropagation()}
+			onMouseDown={(event) => event.stopPropagation()}
+			onDragStart={(event) => handleSectionDragStart(event, section)}
+			onDragEnd={handleSectionDragEnd}
+			title={`Перетащить виджет: ${title}`}
+			aria-label={`Перетащить виджет: ${title}`}
+		>
+			<DragHandleIcon />
+		</button>
+	);
+
+	// Build section nodes once and then place them through the shared persisted order.
+	const sectionNodesByKey: Record<PromptDashboardSectionKey, React.ReactNode> = {
+		status: renderStatus(snapshot, statusCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('status', 'Статус промпта')),
+		activity: renderActivity(snapshot, onOpenPrompt, activityCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('activity', 'Активные промпты')),
+		projectBranches: renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectBranchesCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('projectBranches', 'Ветки проектов')),
+		reviewRequests: renderReviewRequests(reviewProjects, reviewRequestsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('reviewRequests', 'MR/PR')),
+		parallelBranches: renderParallelBranchFiles(parallelProjects, expanded, toggleExpanded, fileHandlers, parallelBranchesCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('parallelBranches', 'Параллельные ветки')),
+		projectCommits: renderProjectCommits(commitProjects, expanded, toggleExpanded, fileHandlers, projectCommitsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('projectCommits', 'Коммиты проектов')),
+		aiAnalysis: renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('aiAnalysis', 'AI review')),
+	};
+	const widgetColumns = normalizedSectionOrder
+		.map(column => column
+			.map(sectionKey => {
+				const sectionNode = sectionNodesByKey[sectionKey];
+				if (sectionNode === null || sectionNode === undefined || sectionNode === false) {
+					return sectionNode;
+				}
+				const showDropBefore = dropIndicator?.section === sectionKey && dropIndicator.placement === 'before';
+				const showDropAfter = dropIndicator?.section === sectionKey && dropIndicator.placement === 'after';
+				return (
+					<div
+						key={`dashboard-section:${sectionKey}`}
+						style={{
+							...styles.sectionDragWrapper,
+							...(draggedSection === sectionKey ? styles.sectionDragWrapperDragging : null),
+						}}
+						onDragOver={(event) => handleSectionDragOver(event, sectionKey)}
+						onDragLeave={(event) => handleSectionDragLeave(event, sectionKey)}
+						onDrop={(event) => handleSectionDrop(event, sectionKey)}
+						data-pm-dashboard-section={sectionKey}
+					>
+						{showDropBefore ? <div style={styles.sectionDropIndicator} aria-hidden="true" /> : null}
+						{sectionNode}
+						{showDropAfter ? <div style={styles.sectionDropIndicator} aria-hidden="true" /> : null}
+					</div>
+				);
+			})
+			.filter(Boolean))
+		.filter(column => column.length > 0);
 
 	return (
 		<aside style={styles.rail} data-pm-prompt-dashboard="true">
@@ -490,6 +657,20 @@ function RefreshIcon(): React.ReactNode {
 	);
 }
 
+/** Renders the compact grab-handle glyph shown in every draggable section header. */
+function DragHandleIcon(): React.ReactNode {
+	return (
+		<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" style={styles.sectionDragHandleIcon}>
+			<circle cx="5" cy="4" r="1" fill="currentColor" />
+			<circle cx="5" cy="8" r="1" fill="currentColor" />
+			<circle cx="5" cy="12" r="1" fill="currentColor" />
+			<circle cx="11" cy="4" r="1" fill="currentColor" />
+			<circle cx="11" cy="8" r="1" fill="currentColor" />
+			<circle cx="11" cy="12" r="1" fill="currentColor" />
+		</svg>
+	);
+}
+
 /** Stops header-toggle bubbling when one of the explicit section action buttons is clicked. */
 function handleSectionHeaderActionClick(event: React.MouseEvent<HTMLButtonElement>, action: () => void): void {
 	event.stopPropagation();
@@ -503,6 +684,7 @@ function renderSectionHeader(
 	options?: {
 		collapsed?: boolean;
 		onToggleCollapse?: () => void;
+		dragHandle?: React.ReactNode;
 	},
 ): React.ReactNode {
 	const interactive = Boolean(options?.onToggleCollapse);
@@ -524,7 +706,10 @@ function renderSectionHeader(
 			tabIndex={interactive ? 0 : undefined}
 			aria-expanded={interactive ? !options?.collapsed : undefined}
 		>
-			<span style={styles.sectionTitle}>{title}</span>
+			<span style={styles.sectionTitleRow}>
+				{options?.dragHandle}
+				<span style={styles.sectionTitle}>{title}</span>
+			</span>
 			{metaNode}
 		</div>
 	);
@@ -597,6 +782,7 @@ function renderStatus(
 	collapsedSections: PromptDashboardCollapsedSections,
 	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
+	dragHandle?: React.ReactNode,
 ): React.ReactNode {
 	const data = snapshot?.status.data;
 	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'status');
@@ -617,7 +803,7 @@ function renderStatus(
 					busyAction,
 					onToggleCollapse: () => onToggleSectionCollapse('status'),
 					onRefreshWidget,
-				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('status') })}
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('status'), dragHandle })}
 			{collapsed ? null : <div style={{ ...styles.sectionBody, ...styles.statusBody }}>
 				<div style={styles.statusChipRow}>
 					{data ? (
@@ -672,6 +858,7 @@ function renderActivity(
 	collapsedSections: PromptDashboardCollapsedSections,
 	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
+	dragHandle?: React.ReactNode,
 ): React.ReactNode {
 	const data = snapshot?.activity.data;
 	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'activity');
@@ -686,7 +873,7 @@ function renderActivity(
 					busyAction,
 					onToggleCollapse: () => onToggleSectionCollapse('activity'),
 					onRefreshWidget,
-				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('activity') })}
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('activity'), dragHandle })}
 			{collapsed ? null : <div style={styles.sectionBody}>
 				{renderActivityGroup('Сегодня', data?.today || [], onOpenPrompt)}
 				{renderActivityGroup(data?.yesterdayLabel || 'Вчера', data?.yesterday || [], onOpenPrompt)}
@@ -746,6 +933,7 @@ function renderProjectBranches(
 	collapsedSections: PromptDashboardCollapsedSections,
 	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
+	dragHandle?: React.ReactNode,
 ): React.ReactNode {
 	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'projectBranches');
 	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'projectBranches', 'projects');
@@ -767,7 +955,7 @@ function renderProjectBranches(
 					busyAction,
 					onToggleCollapse: () => onToggleSectionCollapse('projectBranches'),
 					onRefreshWidget,
-				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('projectBranches') })}
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('projectBranches'), dragHandle })}
 			{collapsed ? null : <div style={styles.sectionBody}>
 				<label style={styles.bulkBranchRow}>
 					<span style={styles.bulkBranchLabel}>Для всех</span>
@@ -1078,6 +1266,7 @@ function renderReviewRequests(
 	collapsedSections: PromptDashboardCollapsedSections,
 	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
+	dragHandle?: React.ReactNode,
 ): React.ReactNode {
 	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'reviewRequests');
 	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'reviewRequests', 'projects');
@@ -1096,7 +1285,7 @@ function renderReviewRequests(
 					busyAction,
 					onToggleCollapse: () => onToggleSectionCollapse('reviewRequests'),
 					onRefreshWidget,
-				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('reviewRequests') })}
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('reviewRequests'), dragHandle })}
 			{collapsed ? null : <div style={styles.sectionBody}>
 				{visibleProjects.length === 0 ? sectionCacheStatus === 'loading' ? renderLoadingEmptyState('MR/PR-данные загружаются') : <div style={styles.emptyText}>Нет активных MR/PR</div> : visibleProjects.map(project => {
 					const request = project.review.request;
@@ -1142,6 +1331,7 @@ function renderParallelBranchFiles(
 	collapsedSections: PromptDashboardCollapsedSections,
 	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
+	dragHandle?: React.ReactNode,
 ): React.ReactNode {
 	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'parallelBranches');
 	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'parallelBranches', 'projects');
@@ -1159,7 +1349,7 @@ function renderParallelBranchFiles(
 					busyAction,
 					onToggleCollapse: () => onToggleSectionCollapse('parallelBranches'),
 					onRefreshWidget,
-				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('parallelBranches') })}
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('parallelBranches'), dragHandle })}
 			{collapsed ? null : <div style={styles.sectionBody}>
 				{projectGroups.length === 0 ? sectionCacheStatus === 'loading' ? renderLoadingEmptyState('Данные по веткам загружаются') : <div style={styles.emptyText}>Нет данных по параллельным веткам</div> : projectGroups.map(({ project, branches }) => (
 					<div key={project.project} style={styles.projectBlock}>
@@ -1202,6 +1392,7 @@ function renderProjectCommits(
 	collapsedSections: PromptDashboardCollapsedSections,
 	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
+	dragHandle?: React.ReactNode,
 ): React.ReactNode {
 	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'projectCommits');
 	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'projectCommits', 'projects');
@@ -1215,7 +1406,7 @@ function renderProjectCommits(
 					busyAction,
 					onToggleCollapse: () => onToggleSectionCollapse('projectCommits'),
 					onRefreshWidget,
-				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('projectCommits') })}
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('projectCommits'), dragHandle })}
 			{collapsed ? null : <div style={styles.sectionBody}>
 				{projects.length === 0 ? (
 					sectionCacheStatus === 'loading' ? renderLoadingEmptyState('Коммиты загружаются') : <div style={styles.emptyText}>Коммиты пока недоступны</div>
@@ -2266,6 +2457,67 @@ function buildSectionRefreshBusyAction(section: PromptDashboardSectionKey): stri
 	return `refresh-section:${section}`;
 }
 
+function arePromptDashboardSectionOrdersEqual(
+	left: PromptDashboardSectionOrder,
+	right: PromptDashboardSectionOrder,
+): boolean {
+	const normalizedLeft = normalizePromptDashboardSectionOrder(left);
+	const normalizedRight = normalizePromptDashboardSectionOrder(right);
+	if (normalizedLeft.length !== normalizedRight.length) {
+		return false;
+	}
+
+	return normalizedLeft.every((column, columnIndex) => {
+		const rightColumn = normalizedRight[columnIndex] || [];
+		return column.length === rightColumn.length
+			&& column.every((section, rowIndex) => section === rightColumn[rowIndex]);
+	});
+}
+
+/** Moves one section around the shared ordered dashboard list and keeps missing keys normalized. */
+export function reorderPromptDashboardSections(
+	order: PromptDashboardSectionOrder,
+	draggedSection: PromptDashboardSectionKey,
+	targetSection: PromptDashboardSectionKey,
+	placement: DragPlacement,
+): PromptDashboardSectionOrder {
+	const normalizedOrder = normalizePromptDashboardSectionOrder(order);
+	if (draggedSection === targetSection) {
+		return normalizedOrder;
+	}
+
+	let sourceColumnIndex = -1;
+	let sourceRowIndex = -1;
+	let targetColumnIndex = -1;
+	let targetRowIndex = -1;
+	for (let columnIndex = 0; columnIndex < normalizedOrder.length; columnIndex += 1) {
+		for (let rowIndex = 0; rowIndex < normalizedOrder[columnIndex].length; rowIndex += 1) {
+			const section = normalizedOrder[columnIndex][rowIndex];
+			if (section === draggedSection) {
+				sourceColumnIndex = columnIndex;
+				sourceRowIndex = rowIndex;
+			}
+			if (section === targetSection) {
+				targetColumnIndex = columnIndex;
+				targetRowIndex = rowIndex;
+			}
+		}
+	}
+
+	if (sourceColumnIndex < 0 || sourceRowIndex < 0 || targetColumnIndex < 0 || targetRowIndex < 0) {
+		return normalizedOrder;
+	}
+
+	const nextOrder = normalizedOrder.map(column => [...column]);
+	nextOrder[sourceColumnIndex].splice(sourceRowIndex, 1);
+	let insertionIndex = placement === 'before' ? targetRowIndex : targetRowIndex + 1;
+	if (sourceColumnIndex === targetColumnIndex && sourceRowIndex < insertionIndex) {
+		insertionIndex -= 1;
+	}
+	nextOrder[targetColumnIndex].splice(insertionIndex, 0, draggedSection);
+	return normalizePromptDashboardSectionOrder(nextOrder);
+}
+
 /** Resolves whether a specific section should show its own refresh spinner. */
 function isSectionRefreshBusy(busyAction: DashboardBusyAction, section: PromptDashboardSectionKey): boolean {
 	return busyAction === 'refresh' || busyAction === buildSectionRefreshBusyAction(section);
@@ -2429,6 +2681,7 @@ function renderAnalysis(
 	collapsedSections: PromptDashboardCollapsedSections,
 	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
+	dragHandle?: React.ReactNode,
 ): React.ReactNode {
 	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'aiAnalysis');
 	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'aiAnalysis', 'aiAnalysis');
@@ -2450,7 +2703,7 @@ function renderAnalysis(
 					busyAction,
 					onToggleCollapse: () => onToggleSectionCollapse('aiAnalysis'),
 					onRefreshWidget,
-				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('aiAnalysis') })}
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('aiAnalysis'), dragHandle })}
 			{collapsed ? null : <div style={styles.sectionBody}>
 				<div style={styles.analysisIntro}>
 					<span style={isRunning ? styles.analysisStateRunning : styles.analysisStateReady}>{stateLabel}</span>
@@ -2654,6 +2907,25 @@ const styles: Record<string, React.CSSProperties> = {
 		minWidth: 0,
 		alignSelf: 'start',
 	},
+	// Wrapper that owns drag-over highlighting around one dashboard card.
+	sectionDragWrapper: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '8px',
+		minWidth: 0,
+		transition: 'opacity 0.18s ease, transform 0.18s ease',
+	},
+	sectionDragWrapperDragging: {
+		opacity: 0.5,
+		transform: 'scale(0.985)',
+	},
+	// Visible insertion rail shown above or below the current drop target.
+	sectionDropIndicator: {
+		height: '4px',
+		borderRadius: '999px',
+		background: 'linear-gradient(90deg, var(--vscode-focusBorder, #3794ff), color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 40%, transparent))',
+		boxShadow: '0 0 0 1px color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 24%, transparent)',
+	},
 	// Общая карточка любого виджета дашборда.
 	section: {
 		width: '100%',
@@ -2682,6 +2954,38 @@ const styles: Record<string, React.CSSProperties> = {
 	sectionHeaderInteractive: {
 		cursor: 'pointer',
 		userSelect: 'none',
+	},
+	// Left title cluster that keeps the drag handle aligned with the section title.
+	sectionTitleRow: {
+		display: 'inline-flex',
+		alignItems: 'center',
+		gap: '8px',
+		minWidth: 0,
+	},
+	// Compact drag handle used to start section reordering from the header only.
+	sectionDragHandle: {
+		display: 'inline-flex',
+		alignItems: 'center',
+		justifyContent: 'center',
+		width: '18px',
+		height: '18px',
+		padding: 0,
+		border: 'none',
+		borderRadius: '4px',
+		background: 'transparent',
+		color: 'var(--vscode-descriptionForeground)',
+		cursor: 'grab',
+		flexShrink: 0,
+	},
+	sectionDragHandleDragging: {
+		cursor: 'grabbing',
+		color: 'var(--vscode-focusBorder, #3794ff)',
+		background: 'color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 12%, transparent)',
+	},
+	// Dot-grid glyph inside the section drag handle button.
+	sectionDragHandleIcon: {
+		width: '12px',
+		height: '12px',
 	},
 	// Текст названия виджета в шапке карточки.
 	sectionTitle: {

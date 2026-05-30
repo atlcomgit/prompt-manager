@@ -7,6 +7,7 @@ import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup,
 import type {
 	PromptDashboardAnalysisState,
 	PromptDashboardCollapsedSections,
+	PromptDashboardSectionOrder,
 	PromptDashboardSectionKey,
 	PromptDashboardSnapshot,
 	PromptDashboardWidgetKind,
@@ -74,6 +75,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'saveSidebarState'; state: SidebarState }
 	| { type: 'savePromptEditorViewState'; promptId?: string; promptUuid?: string; state: EditorPromptViewState }
 	| { type: 'savePromptDashboardCollapsedSections'; state: PromptDashboardCollapsedSections }
+	| { type: 'savePromptDashboardSectionOrder'; order: PromptDashboardSectionOrder }
 	| { type: 'getSidebarState' }
 	| { type: 'getWorkspaceFolders' }
 	| { type: 'getAvailableModels' }
@@ -223,6 +225,7 @@ export type ExtensionToWebviewMessage =
 		openRequestVersion?: number;
 		editorViewState?: EditorPromptViewState;
 		promptDashboardCollapsedSections?: PromptDashboardCollapsedSections;
+		promptDashboardSectionOrder?: PromptDashboardSectionOrder;
 		aiEnrichment?: { title: boolean; description: boolean };
 	}
 	| { type: 'promptAgentProgress'; promptId: string; promptUuid?: string; progress?: number }
@@ -310,6 +313,7 @@ export type ExtensionToWebviewMessage =
 		openRequestVersion?: number;
 		editorViewState?: EditorPromptViewState;
 		promptDashboardCollapsedSections?: PromptDashboardCollapsedSections;
+		promptDashboardSectionOrder?: PromptDashboardSectionOrder;
 	}
 	| { type: 'promptLoadingCancelled'; promptId?: string; openRequestVersion?: number }
 	| { type: 'nextTaskNumber'; taskNumber: string }

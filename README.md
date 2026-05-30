@@ -85,6 +85,9 @@ This README is intentionally modular. The extension is still evolving, and the p
 - Attach projects, languages, frameworks, skills, MCP tools, hooks, task references, branches, notes, plans, and reports.
 - Reuse prompt context across sessions without rebuilding the same setup every time.
 - Keep the prompt-page `AI Models` picker aligned with the current Copilot chat catalog: cached visible models still stay first, but newly exposed live models such as `GPT-5.5` are now appended immediately instead of waiting for VS Code's local model cache to refresh.
+- Keep every Prompt Manager AI-model picker aligned with the current VS Code Copilot catalog: when the modern visible-model cache is missing or slow, the extension now prefers the current `chat.modelsControl` list before falling back to stale legacy cache entries, so dropdowns stop drifting back to outdated options such as old `GPT-4.1` or `Raptor mini` catalogs.
+- Keep the prompt-page `AI Models` picker recovering after a slow first ready-cycle fetch: delayed model retries now stay attached to the active prompt identity even if the editor refreshes its prompt snapshot, so the dropdown repopulates with friendly Copilot model names instead of getting stuck on `Auto` plus a raw saved model id.
+- Keep open Prompt Manager AI-model pickers in sync after switching GitHub Copilot accounts from `Copilot Premium Usage`: the extension now clears short-lived model caches and re-broadcasts refreshed model catalogs with delayed retries, so account-specific model availability stops sticking to the previous account.
 
 ### Launch and reopen Copilot chats from context
 

@@ -116,15 +116,6 @@ export function activate(context: vscode.ExtensionContext) {
 		stateService,
 		() => chatMemoryInstructionService,
 	);
-
-	// Initialize Copilot Premium usage status bar
-	const copilotUsageService = new CopilotUsageService(context);
-	void copilotUsageService.checkAuthenticationBindingOnActivation();
-	const copilotUsagePanelManager = new CopilotUsagePanelManager(context.extensionUri, copilotUsageService);
-	const copilotStatusBarProvider = new CopilotStatusBarProvider(copilotUsageService, copilotUsagePanelManager);
-
-	// ---- Project Memory System ----
-	const memoryEnabled = vscode.workspace.getConfiguration('promptManager').get<boolean>('memory.enabled', false);
 	let memoryDb: MemoryDatabaseService | undefined;
 	let memoryCleanup: MemoryCleanupService | undefined;
 	let memoryHttpServer: MemoryHttpServerService | undefined;
@@ -140,6 +131,28 @@ export function activate(context: vscode.ExtensionContext) {
 	let codeMapChatInstructionService: CodeMapChatInstructionService | undefined;
 	let codeMapAdminService: CodeMapAdminService | undefined;
 	let codeMapRealtimeWatcherRegistered = false;
+
+	// Initialize Copilot Premium usage status bar
+	const copilotUsageService = new CopilotUsageService(context);
+	void copilotUsageService.checkAuthenticationBindingOnActivation();
+	// Refresh AI-model pickers after VS Code finishes rebinding the Copilot account catalog.
+	const refreshAiModelsAfterCopilotAccountSwitch = async (accountLabel: string): Promise<void> => {
+		appendPromptManagerLog(
+			`[${new Date().toISOString()}] [copilot-models] rebroadcasting AI models after account switch: ${accountLabel}`,
+		);
+		aiService.clearCopilotModelCaches();
+		editorPanelManager.refreshAvailableModelsAfterCopilotAccountSwitch();
+		memoryPanelManager?.refreshAvailableModelsAfterCopilotAccountSwitch();
+	};
+	const copilotUsagePanelManager = new CopilotUsagePanelManager(
+		context.extensionUri,
+		copilotUsageService,
+		refreshAiModelsAfterCopilotAccountSwitch,
+	);
+	const copilotStatusBarProvider = new CopilotStatusBarProvider(copilotUsageService, copilotUsagePanelManager);
+
+	// ---- Project Memory System ----
+	const memoryEnabled = vscode.workspace.getConfiguration('promptManager').get<boolean>('memory.enabled', false);
 	const codeMapSettings = getCodeMapSettings();
 	appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] enabled=${codeMapSettings.enabled} autoUpdate=${codeMapSettings.autoUpdate}`);
 

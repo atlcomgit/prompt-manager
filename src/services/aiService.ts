@@ -926,6 +926,12 @@ export class AiService {
 		});
 	}
 
+	/** Reset Copilot model caches after an account or catalog change. */
+	clearCopilotModelCaches(): void {
+		this.selectedModelCache.clear();
+		this.stateDbItemCache.clear();
+	}
+
 	private async selectFreeFallbackModel(
 		selector: vscode.LanguageModelChatSelector,
 	): Promise<vscode.LanguageModelChat | null> {
@@ -1035,6 +1041,14 @@ export class AiService {
 
 		const dbPath = await this.resolveStateDbPath();
 		if (dbPath) {
+			const controlFreeModels = await this.getVisibleCopilotModelsFromControl(dbPath, models, 'free');
+			if (controlFreeModels.length > 0) {
+				return this.normalizeAvailableModels(controlFreeModels.map(option => ({
+					id: normalizeCopilotModelFamily(option.id),
+					name: option.name,
+				})));
+			}
+
 			const cachedStandardModels = await this.getVisibleCopilotModelsFromCache(
 				dbPath,
 				models,
@@ -1088,11 +1102,29 @@ export class AiService {
 			return cachedModels;
 		}
 
+		const controlModels = await this.getVisibleCopilotModelsFromControl(dbPath, models, 'current');
+		if (controlModels.length > 0) {
+			return controlModels;
+		}
+
 		const legacyCachedModels = await this.getVisibleCopilotModelsFromLegacyCache(dbPath);
 		if (legacyCachedModels.length > 0) {
 			return legacyCachedModels;
 		}
 
+		if (workspaceSessionModels.length > 0) {
+			return workspaceSessionModels;
+		}
+
+		return [];
+	}
+
+	/** Build the current visible Copilot picker options from VS Code model control state. */
+	private async getVisibleCopilotModelsFromControl(
+		dbPath: string,
+		models: vscode.LanguageModelChat[],
+		mode: 'current' | 'free',
+	): Promise<AvailableModelOption[]> {
 		const [modelsControlRaw, modelPickerPreferencesRaw, copilotSkuRaw] = await Promise.all([
 			this.readStateItemValue(dbPath, 'chat.modelsControl'),
 			this.readStateItemValue(dbPath, 'chatModelPickerPreferences'),
@@ -1101,25 +1133,31 @@ export class AiService {
 
 		const modelsControl = this.parseJson<ChatModelsControl>(modelsControlRaw);
 		if (!modelsControl) {
-			return workspaceSessionModels;
+			return [];
 		}
 
-		const featuredEntries = this.getVisibleControlEntries(modelsControl, this.resolveCopilotTier(copilotSkuRaw));
+		const featuredEntries = mode === 'free'
+			? Object.values(modelsControl.free || {}).filter(entry => Boolean(entry?.featured))
+			: this.getVisibleControlEntries(modelsControl, this.resolveCopilotTier(copilotSkuRaw));
 		if (featuredEntries.length === 0) {
-			return workspaceSessionModels;
+			return [];
 		}
 
-		const preferences = this.parseJson<Record<string, boolean>>(modelPickerPreferencesRaw) || {};
-		const extraVisibleIdentifiers = Object.entries(preferences)
-			.filter(([identifier, isVisible]) => isVisible && identifier.toLowerCase().startsWith('copilot/'))
-			.map(([identifier]) => identifier);
+		const preferences = mode === 'free'
+			? {}
+			: (this.parseJson<Record<string, boolean>>(modelPickerPreferencesRaw) || {});
+		const extraVisibleIdentifiers = mode === 'free'
+			? []
+			: Object.entries(preferences)
+				.filter(([identifier, isVisible]) => isVisible && identifier.toLowerCase().startsWith('copilot/'))
+				.map(([identifier]) => identifier);
 		const result = await this.buildModelOptionsFromControlEntries(dbPath, models, featuredEntries, extraVisibleIdentifiers);
 
-		if (result.length > 0) {
-			return this.sortVisibleModels(result, featuredEntries);
+		if (result.length === 0) {
+			return [];
 		}
 
-		return workspaceSessionModels;
+		return this.sortVisibleModels(result, featuredEntries);
 	}
 
 	private async getVisibleCopilotModelsFromCache(

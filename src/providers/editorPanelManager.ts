@@ -5510,7 +5510,19 @@ export class EditorPanelManager {
 
 	private isReadyCycleActive(panelKey: string, currentPrompt: Prompt, readyBootId: string): boolean {
 		const activePromptRef = this.panelPromptRefs.get(panelKey);
-		if (activePromptRef !== currentPrompt) {
+		if (!activePromptRef) {
+			return false;
+		}
+
+		const activePromptUuid = (activePromptRef.promptUuid || '').trim();
+		const currentPromptUuid = (currentPrompt.promptUuid || '').trim();
+		if (activePromptUuid && currentPromptUuid && activePromptUuid !== currentPromptUuid) {
+			return false;
+		}
+
+		const activePromptId = (activePromptRef.id || '').trim();
+		const currentPromptId = (currentPrompt.id || '').trim();
+		if (!activePromptUuid && !currentPromptUuid && activePromptId && currentPromptId && activePromptId !== currentPromptId) {
 			return false;
 		}
 
@@ -5561,6 +5573,42 @@ export class EditorPanelManager {
 				})();
 			}, delayMs);
 			this.unrefBackgroundTimer(refreshTimer);
+		}
+	}
+
+	/** Re-broadcast model options after Copilot account changes settle in VS Code state. */
+	public refreshAvailableModelsAfterCopilotAccountSwitch(): void {
+		const delaysMs = [0, 1500, 5000];
+
+		for (const [panelKey, panel] of openPanels.entries()) {
+			let lastModels: Array<{ id: string; name: string }> | null = null;
+
+			for (const delayMs of delaysMs) {
+				const refreshTimer = setTimeout(() => {
+					void (async () => {
+						if (openPanels.get(panelKey) !== panel) {
+							return;
+						}
+
+						const refreshedModels = await this.aiService.getAvailableModels();
+						if (openPanels.get(panelKey) !== panel) {
+							return;
+						}
+
+						if (lastModels && this.areAvailableModelsEqual(lastModels, refreshedModels)) {
+							return;
+						}
+
+						lastModels = [...refreshedModels];
+						try {
+							await panel.webview.postMessage({ type: 'availableModels', models: refreshedModels } satisfies ExtensionToWebviewMessage);
+						} catch {
+							// panel/webview might be disposed; ignore
+						}
+					})();
+				}, delayMs);
+				this.unrefBackgroundTimer(refreshTimer);
+			}
 		}
 	}
 

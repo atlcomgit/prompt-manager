@@ -18,6 +18,7 @@ export class CopilotUsagePanelManager {
 	constructor(
 		private readonly extensionUri: vscode.Uri,
 		private readonly usageService: CopilotUsageService,
+		private readonly onAccountSwitchCompleted?: (accountLabel: string) => Promise<void> | void,
 	) {
 		this.disposables.push(
 			this.usageService.onDidChangeAccountSwitchState((state) => {
@@ -104,6 +105,16 @@ export class CopilotUsagePanelManager {
 				this.stopPanelRefresh();
 				try {
 					const completion = await this.usageService.completeAccountSwitch(result.accountLabel || '');
+					if (this.onAccountSwitchCompleted) {
+						try {
+							await this.onAccountSwitchCompleted(completion.accountLabel);
+						} catch (error) {
+							const refreshMessage = error instanceof Error ? error.message : String(error);
+							appendPromptManagerLog(
+								`[${new Date().toISOString()}] [panel] post-switch model refresh failed: ${refreshMessage}`,
+							);
+						}
+					}
 					await this.pushUsageToWebview(panel.webview, false, completion);
 					await panel.webview.postMessage({
 						type: 'copilotUsage.accountSwitchResult',

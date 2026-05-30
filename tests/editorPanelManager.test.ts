@@ -1036,6 +1036,97 @@ test('ready posts prompt before slow ready hydration messages', async () => {
 	panel.dispose();
 });
 
+test('ready retries available models after a same-prompt ref refresh', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+	});
+
+	let getAvailableModelsCalls = 0;
+	const refreshedModels = [
+		{ id: 'copilot/gpt-5.4', name: 'GPT-5.4' },
+		{ id: 'copilot/claude-sonnet-4.6', name: 'Claude Sonnet 4.6' },
+	];
+	const pendingInitialModels = createDeferred<Array<{ id: string; name: string }>>();
+	(manager as any).aiService = {
+		generateTitle: async () => 'AI title',
+		generateDescription: async () => 'AI description',
+		getAvailableModels: async () => {
+			getAvailableModelsCalls += 1;
+			if (getAvailableModelsCalls === 1) {
+				return pendingInitialModels.promise;
+			}
+			return refreshedModels;
+		},
+	};
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+	panel.postedMessages.length = 0;
+
+	const bootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
+	await withImmediateTimers(async () => {
+		await panel.emitMessage({ type: 'ready', bootId });
+		const currentPrompt = (manager as any).panelPromptRefs.get('__prompt_editor_singleton__');
+		(manager as any).setPanelPromptRef('__prompt_editor_singleton__', { ...currentPrompt });
+		await flushTurns(4);
+	});
+
+	const modelMessages = panel.postedMessages.filter((message: any) => message?.type === 'availableModels') as Array<{ models: Array<{ id: string; name: string }> }>;
+	assert.deepEqual(modelMessages[0]?.models, []);
+	assert.deepEqual(modelMessages[1]?.models, refreshedModels);
+	assert.ok(getAvailableModelsCalls >= 2);
+	panel.dispose();
+});
+
+test('account switch refresh re-broadcasts updated models for the open prompt editor', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+	});
+
+	let getAvailableModelsCalls = 0;
+	const initialModels = [
+		{ id: 'copilot/gpt-5.4', name: 'GPT-5.4' },
+	];
+	const refreshedModels = [
+		{ id: 'copilot/gpt-5.4', name: 'GPT-5.4' },
+		{ id: 'copilot/claude-sonnet-4.6', name: 'Claude Sonnet 4.6' },
+	];
+	(manager as any).aiService = {
+		generateTitle: async () => 'AI title',
+		generateDescription: async () => 'AI description',
+		getAvailableModels: async () => {
+			getAvailableModelsCalls += 1;
+			return getAvailableModelsCalls === 1 ? initialModels : refreshedModels;
+		},
+	};
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+	panel.postedMessages.length = 0;
+
+	await withImmediateTimers(async () => {
+		(manager as any).refreshAvailableModelsAfterCopilotAccountSwitch();
+		await flushTurns(4);
+	});
+
+	const modelMessages = panel.postedMessages.filter((message: any) => message?.type === 'availableModels') as Array<{ models: Array<{ id: string; name: string }> }>;
+	assert.deepEqual(modelMessages.map((message) => message.models), [initialModels, refreshedModels]);
+	assert.ok(getAvailableModelsCalls >= 2);
+	panel.dispose();
+});
+
 test('reopening the same prompt rotates the singleton boot cycle before the next ready event', async () => {
 	resetVsCodeCommandMock();
 	const { manager } = await createManager({

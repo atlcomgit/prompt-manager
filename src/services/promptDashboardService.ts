@@ -1433,7 +1433,7 @@ export class PromptDashboardService implements vscode.Disposable {
 
 		const scopeKey = buildPromptDashboardScopeKey(scope);
 		const delayMs = reason === 'snapshot' || reason === 'container' || reason === 'compose'
-			? 100
+			? Math.min(100, this.getDockerRefreshIntervalMs())
 			: this.getDockerRefreshIntervalMs();
 		this.dockerRefreshTimer = setTimeout(() => {
 			this.dockerRefreshTimer = null;

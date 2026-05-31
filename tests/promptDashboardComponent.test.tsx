@@ -11,6 +11,7 @@ import {
 	isPromptDashboardBranchActionBusy,
 	normalizePromptDashboardDockerWidgetState,
 	reorderPromptDashboardSections,
+	resolvePromptDashboardColumnDropIndicator,
 	reconcileBranchDrafts,
 	resolveFilteredDockerProjects,
 	resolvePromptDashboardDockerLiveMetricsVisible,
@@ -1557,6 +1558,29 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 			['status', 'projectBranches', 'parallelBranches', 'aiAnalysis', 'dockerContainers'],
 			['projectCommits', 'activity', 'reviewRequests'],
 		],
+	);
+});
+
+test('resolvePromptDashboardColumnDropIndicator keeps a valid drop target in column gaps and below the last card', () => {
+	const sectionBounds = [
+		{ section: 'status' as const, top: 0, bottom: 100 },
+		{ section: 'activity' as const, top: 112, bottom: 212 },
+		{ section: 'reviewRequests' as const, top: 224, bottom: 324 },
+	];
+
+	assert.deepEqual(
+		resolvePromptDashboardColumnDropIndicator('status', 106, sectionBounds),
+		{ section: 'activity', placement: 'before' },
+	);
+
+	assert.deepEqual(
+		resolvePromptDashboardColumnDropIndicator('status', 380, sectionBounds),
+		{ section: 'reviewRequests', placement: 'after' },
+	);
+
+	assert.equal(
+		resolvePromptDashboardColumnDropIndicator('status', 40, [{ section: 'status', top: 0, bottom: 100 }]),
+		null,
 	);
 });
 

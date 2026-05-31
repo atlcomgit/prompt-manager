@@ -41,6 +41,7 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 - Shared Git-backed dashboard cards no longer reuse a skipped collapsed `projects` snapshot as if it had already been refreshed in the current open cycle, so reopening `Ветки проектов`, `Коммиты проектов`, `Параллельные ветки`, or `MR/PR` now triggers the expected first expand refresh even when older shared project data was still warm in cache.
 - Shared Git-backed dashboard cards now track which individual section actually loaded inside the shared `projects` payload, so refreshing `Параллельные ветки` no longer makes `Ветки проектов`, `MR/PR`, or `Коммиты проектов` look preloaded before their own first refresh.
 - The first reopened Git-backed card no longer loses its own targeted widget refresh to a competing automatic full dashboard snapshot request, so expanding `Ветки проектов` from a fully collapsed page now refreshes immediately instead of waiting for a later card open.
+- Prompt-dashboard card dragging now accepts drops in the empty gap between cards and below the last card inside a column, so releasing the pointer slightly outside a widget body still commits the nearest visible reorder slot instead of silently snapping the card back to its old position.
 
 ### 2026-05-29
 

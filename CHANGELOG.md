@@ -8,6 +8,9 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ### 2026-05-31
 
+#### Changed
+- Reworked the Marketplace README into a short bilingual overview with a stronger hero, compact value proposition blocks, a smaller visual tour, and a clearer quick-start path so the extension is easier to understand at a glance.
+
 #### Fixed
 - The `Docker контейнеры` dashboard widget now requests Docker stats snapshots without `one-shot`, so Linux Docker daemons keep `precpu` counters and live CPU percentages no longer get rounded down to a constant `0%` under load.
 - The `Docker контейнеры` dashboard widget now normalizes CPU usage to a host-wide `0..100%` scale instead of Docker CLI's multi-core sum, so busy single containers no longer show values above `100%` in the dashboard UI.

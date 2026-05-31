@@ -9797,7 +9797,7 @@ export class EditorPanelManager {
 						dashboardPrompt,
 						(message) => postMessage(message as ExtensionToWebviewMessage),
 						msg.requestId,
-						{ projectNames: [msg.project] },
+						{ projectNames: [msg.project], skipProjectsRefresh: true },
 					);
 				}
 				break;
@@ -9825,7 +9825,7 @@ export class EditorPanelManager {
 						dashboardPrompt,
 						(message) => postMessage(message as ExtensionToWebviewMessage),
 						msg.requestId,
-						{ projectNames: [msg.project] },
+						{ projectNames: [msg.project], skipProjectsRefresh: true },
 					);
 				}
 				break;
@@ -9854,7 +9854,7 @@ export class EditorPanelManager {
 						dashboardPrompt,
 						(message) => postMessage(message as ExtensionToWebviewMessage),
 						msg.requestId,
-						{ projectNames: Object.keys(msg.branchesByProject || {}) },
+						{ projectNames: Object.keys(msg.branchesByProject || {}), skipProjectsRefresh: true },
 					);
 				}
 				break;
@@ -9896,6 +9896,70 @@ export class EditorPanelManager {
 						retainPromptDashboardBusy: true,
 					});
 					if (!this.isPromptDashboardWidgetCollapsed('docker')) {
+						await this.promptDashboardService.refreshWidgetSnapshot(
+							dashboardPrompt,
+							'docker',
+							(message) => postMessage(message as ExtensionToWebviewMessage),
+							msg.requestId,
+							'dockerContainers',
+						);
+					}
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error), requestId: msg.requestId });
+				}
+				break;
+			}
+
+			case 'promptDashboardDockerWorkspaceAction': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				try {
+					const result = await this.dockerContainersService.runWorkspaceAction(msg.action);
+					const failedNames = result.failedContainers.map(container => container.name).filter(Boolean);
+					if (msg.action === 'startPrevious') {
+						if (result.rememberedCount === 0) {
+							postMessage({ type: 'info', message: 'Нет сохранённых предыдущих контейнеров для запуска.', requestId: msg.requestId });
+							break;
+						}
+						if (result.requestedCount === 0 && result.failedContainers.length === 0) {
+							postMessage({ type: 'info', message: 'Сохранённые предыдущие контейнеры уже запущены или недоступны.', requestId: msg.requestId });
+							break;
+						}
+						postMessage({
+							type: result.failedContainers.length > 0 ? 'error' : 'info',
+							message: result.failedContainers.length > 0
+								? `Запуск предыдущих контейнеров завершился с ошибками: ${failedNames.join(', ')}.`
+								: `Запущены предыдущие контейнеры: ${result.completedCount}.`,
+							requestId: msg.requestId,
+							retainPromptDashboardBusy: true,
+						});
+					} else if (msg.action === 'restartAll') {
+						if (result.requestedCount === 0) {
+							postMessage({ type: 'info', message: 'В рабочей области нет запущенных контейнеров для перезапуска.', requestId: msg.requestId });
+							break;
+						}
+						postMessage({
+							type: result.failedContainers.length > 0 ? 'error' : 'info',
+							message: result.failedContainers.length > 0
+								? `Перезапуск контейнеров рабочей области завершился с ошибками: ${failedNames.join(', ')}.`
+								: `Перезапущены все запущенные контейнеры рабочей области: ${result.completedCount}.`,
+							requestId: msg.requestId,
+							retainPromptDashboardBusy: true,
+						});
+					} else {
+						if (result.requestedCount === 0) {
+							postMessage({ type: 'info', message: 'В рабочей области нет запущенных контейнеров для остановки.', requestId: msg.requestId });
+							break;
+						}
+						postMessage({
+							type: result.failedContainers.length > 0 ? 'error' : 'info',
+							message: result.failedContainers.length > 0
+								? `Остановка контейнеров рабочей области завершилась с ошибками: ${failedNames.join(', ')}.`
+								: `Остановлены все запущенные контейнеры рабочей области: ${result.completedCount}. Список сохранён для повторного запуска.`,
+							requestId: msg.requestId,
+							retainPromptDashboardBusy: true,
+						});
+					}
+					if ((result.completedCount > 0 || result.failedContainers.length > 0) && !this.isPromptDashboardWidgetCollapsed('docker')) {
 						await this.promptDashboardService.refreshWidgetSnapshot(
 							dashboardPrompt,
 							'docker',

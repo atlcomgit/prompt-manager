@@ -21,6 +21,7 @@ import type {
 	DockerContainersViewMode,
 	DockerContainerStatusTone,
 	DockerContainerSummary,
+	DockerWorkspaceActionKind,
 } from '../types/docker.js';
 import {
 	DockerEngineApiClient,
@@ -48,6 +49,10 @@ interface DockerContainersPersistentCacheEntry {
 	composeFingerprint: string;
 	savedAt: string;
 	data: DockerContainersData;
+	restorableComposeTargets?: DockerWorkspaceComposeRestoreTarget[];
+	restorableContainerIds?: string[];
+	restorableContainersCount?: number;
+	restorableContainerIdsPinned?: boolean;
 }
 
 export type DockerContainersChangeReason = 'compose' | 'container' | 'snapshot';
@@ -71,6 +76,13 @@ interface DockerContainerComposeMatch {
 	composeFilePaths: string[];
 }
 
+interface DockerWorkspaceComposeRestoreTarget {
+	projectPath: string;
+	composeFilePath: string;
+	serviceNames: string[];
+	containerCount: number;
+}
+
 type DockerComposeServiceNamesByFile = Map<string, string[]>;
 
 const DOCKER_COMPOSE_WORKING_DIR_LABEL = 'com.docker.compose.project.working_dir';
@@ -84,6 +96,7 @@ const DOCKER_PERSISTENT_CACHE_VERSION = 1;
 const DOCKER_PERSISTENT_CACHE_FILE = 'docker-containers-cache.json';
 const DOCKER_ACTION_SETTLE_TIMEOUT_MS = 20000;
 const DOCKER_ACTION_SETTLE_POLL_MS = 700;
+const DOCKER_EVENT_STREAM_RECONNECT_DELAY_MS = 1000;
 
 /** Aggregates local Docker Engine data into the prompt dashboard payload. */
 export class DockerContainersService implements vscode.Disposable {
@@ -92,12 +105,18 @@ export class DockerContainersService implements vscode.Disposable {
 	private cache: DockerContainersCacheEntry | null = null;
 	private eventSubscription: DockerEngineEventSubscription | null = null;
 	private eventStreamStarted = false;
+	private eventReconnectTimer: NodeJS.Timeout | null = null;
+	private disposed = false;
 	private readonly statsCache = new Map<string, DockerContainerStatsCacheEntry>();
 	private readonly networkTotalsByContainer = new Map<string, DockerContainerNetworkTotals>();
 	private readonly samplesByContainer = new Map<string, DockerContainerResourceSample[]>();
 	private persistentCacheLoaded = false;
 	private persistentCache: DockerContainersPersistentCacheEntry | null = null;
 	private composeActionError: DockerComposeActionError | null = null;
+	private restorableComposeTargets: DockerWorkspaceComposeRestoreTarget[] = [];
+	private restorableContainerIds = new Set<string>();
+	private restorableContainersCount = 0;
+	private restorableContainerIdsPinned = false;
 	private backgroundRefreshFingerprint = '';
 	private backgroundRefreshPromise: Promise<void> | null = null;
 
@@ -373,6 +392,96 @@ export class DockerContainersService implements vscode.Disposable {
 		this.onDidChangeEmitter.fire('container');
 	}
 
+	/** Runs one workspace-level Docker action from the summary tiles. */
+	async runWorkspaceAction(action: DockerWorkspaceActionKind): Promise<{
+		action: DockerWorkspaceActionKind;
+		rememberedCount: number;
+		requestedCount: number;
+		completedCount: number;
+		failedContainers: Array<{ containerId: string; name: string; message: string }>;
+	}> {
+		const data = await this.getCurrentRawDockerContainersData(true);
+		if (action === 'restartAll') {
+			const restartSnapshot = buildDockerWorkspaceRestoreSnapshot(data);
+			if (restartSnapshot.containerCount === 0) {
+				return { action, rememberedCount: 0, requestedCount: 0, completedCount: 0, failedContainers: [] };
+			}
+			const result = await this.restartWorkspaceRestoreSnapshot(data, restartSnapshot);
+			const refreshedData = await this.getCurrentRawDockerContainersData(true);
+			await this.savePersistentCache(this.cache?.composeFingerprint || '', refreshedData);
+			this.onDidChangeEmitter.fire('container');
+			return {
+				action,
+				rememberedCount: restartSnapshot.containerCount,
+				requestedCount: restartSnapshot.containerCount,
+				completedCount: result.completedCount,
+				failedContainers: result.failedContainers,
+			};
+		}
+
+		if (action === 'stopAll') {
+			const restoreSnapshot = buildDockerWorkspaceRestoreSnapshot(data);
+			if (restoreSnapshot.containerCount === 0) {
+				return { action, rememberedCount: this.restorableContainersCount, requestedCount: 0, completedCount: 0, failedContainers: [] };
+			}
+			this.setRestorableWorkspaceState(restoreSnapshot.composeTargets, restoreSnapshot.standaloneContainerIds, restoreSnapshot.containerCount, true);
+			await this.savePersistentCache(this.cache?.composeFingerprint || '', data);
+			const result = await this.stopWorkspaceRestoreSnapshot(data, restoreSnapshot);
+			const refreshedData = await this.getCurrentRawDockerContainersData(true);
+			await this.savePersistentCache(this.cache?.composeFingerprint || '', refreshedData);
+			this.onDidChangeEmitter.fire('container');
+			return {
+				action,
+				rememberedCount: restoreSnapshot.containerCount,
+				requestedCount: restoreSnapshot.containerCount,
+				completedCount: result.completedCount,
+				failedContainers: result.failedContainers,
+			};
+		}
+
+		if (this.restorableContainersCount === 0) {
+			return { action, rememberedCount: 0, requestedCount: 0, completedCount: 0, failedContainers: [] };
+		}
+
+		const pendingRestoreSnapshot = buildPendingDockerWorkspaceRestoreSnapshot(data, {
+			composeTargets: this.restorableComposeTargets,
+			standaloneContainerIds: Array.from(this.restorableContainerIds),
+			containerCount: this.restorableContainersCount,
+		});
+		if (pendingRestoreSnapshot.containerCount === 0) {
+			return {
+				action,
+				rememberedCount: this.restorableContainersCount,
+				requestedCount: 0,
+				completedCount: 0,
+				failedContainers: [],
+			};
+		}
+
+		const result = await this.startWorkspaceRestoreSnapshot(data, pendingRestoreSnapshot);
+		const refreshedData = await this.getCurrentRawDockerContainersData(true);
+		const unresolvedRestoreSnapshot = buildPendingDockerWorkspaceRestoreSnapshot(refreshedData, {
+			composeTargets: this.restorableComposeTargets,
+			standaloneContainerIds: Array.from(this.restorableContainerIds),
+			containerCount: this.restorableContainersCount,
+		});
+		if (unresolvedRestoreSnapshot.containerCount > 0) {
+			this.setRestorableWorkspaceState(unresolvedRestoreSnapshot.composeTargets, unresolvedRestoreSnapshot.standaloneContainerIds, unresolvedRestoreSnapshot.containerCount, true);
+		} else {
+			this.restorableContainerIdsPinned = false;
+			this.syncRestorableContainerIdsFromLiveData(refreshedData);
+		}
+		await this.savePersistentCache(this.cache?.composeFingerprint || '', refreshedData);
+		this.onDidChangeEmitter.fire('container');
+		return {
+			action,
+			rememberedCount: this.restorableContainersCount,
+			requestedCount: pendingRestoreSnapshot.containerCount,
+			completedCount: result.completedCount,
+			failedContainers: result.failedContainers,
+		};
+	}
+
 	/** Reads recent logs for one workspace-owned container. */
 	async getContainerLogs(containerId: string, tail = 500): Promise<{ container: DockerContainerSummary; content: string }> {
 		const container = await this.getWorkspaceContainer(containerId);
@@ -423,10 +532,59 @@ export class DockerContainersService implements vscode.Disposable {
 		composeFile: DockerComposeFileReference,
 		action: DockerComposeProjectActionKind,
 	): Promise<string> {
+		const actionArgs = action === 'up' ? ['up', '-d'] : [action];
+		return this.executeComposeFileCommand(
+			project,
+			composeFile,
+			actionArgs,
+			() => this.waitForComposeFileActionResult(project.projectPath || composeFile.projectPath, composeFile.filePath, action),
+		);
+	}
+
+	/** Runs `docker compose up -d` for a remembered subset of services. */
+	private async runComposeFileServicesUpAction(
+		project: DockerContainerProjectGroup,
+		composeFile: DockerComposeFileReference,
+		serviceNames: string[],
+	): Promise<string> {
+		const normalizedServiceNames = Array.from(new Set(serviceNames.map(serviceName => serviceName.trim()).filter(Boolean)));
+		const actionArgs = normalizedServiceNames.length > 0 ? ['up', '-d', ...normalizedServiceNames] : ['up', '-d'];
+		return this.executeComposeFileCommand(
+			project,
+			composeFile,
+			actionArgs,
+			() => this.waitForComposeFileServicesUpResult(project.projectPath || composeFile.projectPath, composeFile.filePath, normalizedServiceNames),
+		);
+	}
+
+	/** Runs `docker compose restart` for the currently running remembered services. */
+	private async runComposeFileServicesRestartAction(
+		project: DockerContainerProjectGroup,
+		composeFile: DockerComposeFileReference,
+		serviceNames: string[],
+	): Promise<string> {
+		const normalizedServiceNames = Array.from(new Set(serviceNames.map(serviceName => serviceName.trim()).filter(Boolean)));
+		if (normalizedServiceNames.length === 0) {
+			return this.runComposeFileAction(project, composeFile, 'restart');
+		}
+		return this.executeComposeFileCommand(
+			project,
+			composeFile,
+			['restart', ...normalizedServiceNames],
+			() => this.waitForComposeFileServicesUpResult(project.projectPath || composeFile.projectPath, composeFile.filePath, normalizedServiceNames),
+		);
+	}
+
+	/** Executes one hidden Docker Compose command and optionally waits for its post-condition. */
+	private async executeComposeFileCommand(
+		project: DockerContainerProjectGroup,
+		composeFile: DockerComposeFileReference,
+		actionArgs: string[],
+		waitForResult?: () => Promise<void>,
+	): Promise<string> {
 		this.clearComposeActionError();
 		const cwd = this.resolveComposeFileCwd(project, composeFile);
 		const command = await resolveDockerComposeCommand(cwd);
-		const actionArgs = action === 'up' ? ['up', '-d'] : [action];
 		const args = command.kind === 'docker'
 			? ['compose', '-f', composeFile.filePath, ...actionArgs]
 			: ['-f', composeFile.filePath, ...actionArgs];
@@ -436,7 +594,7 @@ export class DockerContainersService implements vscode.Disposable {
 				maxBuffer: 2 * 1024 * 1024,
 			});
 			this.invalidate(false, 'compose');
-			await this.waitForComposeFileActionResult(project.projectPath || composeFile.projectPath, composeFile.filePath, action);
+			await waitForResult?.();
 			this.onDidChangeEmitter.fire('compose');
 			this.clearComposeActionError();
 			return [stdout, stderr].filter(Boolean).join('\n').trim();
@@ -518,6 +676,34 @@ export class DockerContainersService implements vscode.Disposable {
 		}
 	}
 
+	/** Waits until remembered compose services are visibly running after `docker compose up`. */
+	private async waitForComposeFileServicesUpResult(
+		projectPath: string,
+		composeFilePath: string,
+		serviceNames: string[],
+	): Promise<void> {
+		if (serviceNames.length === 0) {
+			await this.waitForComposeFileActionResult(projectPath, composeFilePath, 'up');
+			return;
+		}
+		const normalizedProjectPath = normalizeFsPath(projectPath || path.dirname(composeFilePath));
+		const normalizedComposePath = normalizeFsPath(composeFilePath);
+		const deadlineMs = Date.now() + DOCKER_ACTION_SETTLE_TIMEOUT_MS;
+		while (Date.now() < deadlineMs) {
+			try {
+				const data = await this.getDockerContainersData(true, 'full');
+				const target = findComposeFileTarget(data, normalizedProjectPath, normalizedComposePath);
+				const group = target?.project.composeFileGroups.find(item => normalizeFsPath(item.composeFile.filePath) === normalizedComposePath);
+				if (areDockerComposeServicesRunning(group, serviceNames)) {
+					return;
+				}
+			} catch {
+				return;
+			}
+			await delay(DOCKER_ACTION_SETTLE_POLL_MS);
+		}
+	}
+
 	/** Reads the latest lifecycle status for one container directly from Docker inspect. */
 	private async readObservedContainerStatus(containerId: string): Promise<DockerContainerLifecycleStatus | null> {
 		try {
@@ -533,8 +719,15 @@ export class DockerContainersService implements vscode.Disposable {
 
 	/** Releases watchers, streams and event emitters. */
 	dispose(): void {
+		this.disposed = true;
+		if (this.eventReconnectTimer) {
+			clearTimeout(this.eventReconnectTimer);
+			this.eventReconnectTimer = null;
+		}
 		this.discoveryListener.dispose();
 		this.eventSubscription?.dispose();
+		this.eventSubscription = null;
+		this.eventStreamStarted = false;
 		this.composeDiscoveryService.dispose();
 		this.onDidChangeEmitter.dispose();
 	}
@@ -555,6 +748,7 @@ export class DockerContainersService implements vscode.Disposable {
 				return null;
 			}
 			this.persistentCache = parsed as DockerContainersPersistentCacheEntry;
+			this.loadRestorableContainerState(this.persistentCache);
 			return this.persistentCache;
 		} catch {
 			return null;
@@ -577,6 +771,7 @@ export class DockerContainersService implements vscode.Disposable {
 				return null;
 			}
 			this.persistentCache = parsed as DockerContainersPersistentCacheEntry;
+			this.loadRestorableContainerState(this.persistentCache);
 			return this.persistentCache;
 		} catch {
 			return null;
@@ -589,11 +784,16 @@ export class DockerContainersService implements vscode.Disposable {
 		if (!cachePath) {
 			return;
 		}
+		this.syncRestorableContainerIdsFromLiveData(data);
 		const entry: DockerContainersPersistentCacheEntry = {
 			version: DOCKER_PERSISTENT_CACHE_VERSION,
 			composeFingerprint,
 			savedAt: new Date().toISOString(),
 			data,
+			restorableComposeTargets: this.restorableComposeTargets,
+			restorableContainerIds: Array.from(this.restorableContainerIds),
+			restorableContainersCount: this.restorableContainersCount,
+			restorableContainerIdsPinned: this.restorableContainerIdsPinned,
 		};
 		this.persistentCache = entry;
 		this.persistentCacheLoaded = true;
@@ -851,14 +1051,227 @@ export class DockerContainersService implements vscode.Disposable {
 
 	/** Adds transient UI-only data without writing it into memory or disk caches. */
 	private decorateData(data: DockerContainersData): DockerContainersData {
-		return this.composeActionError
-			? { ...data, composeActionError: this.composeActionError }
-			: { ...data, composeActionError: undefined };
+		return {
+			...data,
+			restorableContainersCount: this.restorableContainersCount,
+			composeActionError: this.composeActionError || undefined,
+		};
+	}
+
+	/** Loads the persisted restore snapshot once Docker cache data becomes available. */
+	private loadRestorableContainerState(cache: DockerContainersPersistentCacheEntry | null): void {
+		if (!cache || this.restorableContainersCount > 0 || this.restorableContainerIdsPinned) {
+			return;
+		}
+		const legacyContainerIds = Array.isArray(cache.restorableContainerIds) ? cache.restorableContainerIds : [];
+		const composeTargets = Array.isArray(cache.restorableComposeTargets) ? cache.restorableComposeTargets : [];
+		const containerCount = typeof cache.restorableContainersCount === 'number'
+			? Math.max(0, Math.round(cache.restorableContainersCount))
+			: (composeTargets.reduce((total, target) => total + Math.max(0, Math.round(target.containerCount || 0)), 0) || legacyContainerIds.length || getRunningDockerContainerIds(cache.data).length);
+		const standaloneContainerIds = legacyContainerIds.length > 0 ? legacyContainerIds : getRunningDockerContainerIds(cache.data);
+		this.setRestorableWorkspaceState(composeTargets, standaloneContainerIds, containerCount, cache.restorableContainerIdsPinned === true);
+	}
+
+	/** Replaces the persisted restore snapshot with normalized compose targets and standalone ids. */
+	private setRestorableWorkspaceState(
+		composeTargets: DockerWorkspaceComposeRestoreTarget[],
+		containerIds: string[],
+		containerCount: number,
+		pinned: boolean,
+	): void {
+		this.restorableComposeTargets = composeTargets.map(target => ({
+			projectPath: target.projectPath,
+			composeFilePath: target.composeFilePath,
+			serviceNames: Array.from(new Set((target.serviceNames || []).map(serviceName => serviceName.trim()).filter(Boolean))),
+			containerCount: Math.max(0, Math.round(target.containerCount || 0)),
+		})).filter(target => target.composeFilePath);
+		this.restorableContainerIds = new Set(containerIds.map(containerId => containerId.trim()).filter(Boolean));
+		this.restorableContainersCount = Math.max(0, Math.round(containerCount));
+		this.restorableContainerIdsPinned = pinned;
+	}
+
+	/** Keeps the next-session restore set aligned with live running containers unless pinned. */
+	private syncRestorableContainerIdsFromLiveData(data: DockerContainersData): void {
+		if (this.restorableContainerIdsPinned) {
+			return;
+		}
+		const restoreSnapshot = buildDockerWorkspaceRestoreSnapshot(data);
+		this.setRestorableWorkspaceState(restoreSnapshot.composeTargets, restoreSnapshot.standaloneContainerIds, restoreSnapshot.containerCount, false);
+	}
+
+	/** Returns the latest undecorated Docker snapshot for internal mutations. */
+	private async getCurrentRawDockerContainersData(force = false): Promise<DockerContainersData> {
+		await this.getDockerContainersData(force, 'full');
+		return this.cache?.data || this.createEmptyData({ enabled: this.isEnabled(), available: false });
+	}
+
+	/** Stops remembered workspace targets by preferring compose down and then ordered standalone stops. */
+	private async stopWorkspaceRestoreSnapshot(
+		data: DockerContainersData,
+		restoreSnapshot: { composeTargets: DockerWorkspaceComposeRestoreTarget[]; standaloneContainerIds: string[]; containerCount: number },
+	): Promise<{ completedCount: number; failedContainers: Array<{ containerId: string; name: string; message: string }> }> {
+		let completedCount = 0;
+		const failedContainers: Array<{ containerId: string; name: string; message: string }> = [];
+		for (const target of restoreSnapshot.composeTargets) {
+			const composeTarget = findComposeFileTarget(data, normalizeFsPath(target.projectPath), normalizeFsPath(target.composeFilePath));
+			if (!composeTarget) {
+				failedContainers.push({
+					containerId: target.composeFilePath,
+					name: path.basename(target.composeFilePath),
+					message: 'Compose-файл больше не найден в рабочей области.',
+				});
+				continue;
+			}
+			try {
+				await this.runComposeFileAction(composeTarget.project, composeTarget.composeFile, 'down');
+				completedCount += target.containerCount;
+			} catch (error) {
+				failedContainers.push({
+					containerId: target.composeFilePath,
+					name: path.basename(target.composeFilePath),
+					message: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const standaloneContainers = resolveStandaloneDockerContainersForStop(data, restoreSnapshot.standaloneContainerIds);
+		for (const container of standaloneContainers) {
+			try {
+				await this.apiClient.stopContainer(container.id);
+				this.invalidate(false, 'container');
+				await this.waitForContainerActionResult(container.id, 'stop');
+				completedCount += 1;
+			} catch (error) {
+				failedContainers.push({
+					containerId: container.id,
+					name: container.name,
+					message: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		return { completedCount, failedContainers };
+	}
+
+	/** Starts remembered compose targets first and then any standalone containers still not running. */
+	private async startWorkspaceRestoreSnapshot(
+		data: DockerContainersData,
+		restoreSnapshot: { composeTargets: DockerWorkspaceComposeRestoreTarget[]; standaloneContainerIds: string[]; containerCount: number },
+	): Promise<{ completedCount: number; failedContainers: Array<{ containerId: string; name: string; message: string }> }> {
+		let completedCount = 0;
+		const failedContainers: Array<{ containerId: string; name: string; message: string }> = [];
+		for (const target of restoreSnapshot.composeTargets) {
+			const composeTarget = findComposeFileTarget(data, normalizeFsPath(target.projectPath), normalizeFsPath(target.composeFilePath));
+			if (!composeTarget) {
+				failedContainers.push({
+					containerId: target.composeFilePath,
+					name: path.basename(target.composeFilePath),
+					message: 'Compose-файл больше не найден в рабочей области.',
+				});
+				continue;
+			}
+			try {
+				await this.runComposeFileServicesUpAction(composeTarget.project, composeTarget.composeFile, target.serviceNames);
+				completedCount += target.containerCount;
+			} catch (error) {
+				failedContainers.push({
+					containerId: target.composeFilePath,
+					name: path.basename(target.composeFilePath),
+					message: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const containersById = new Map(getUniqueDockerContainers(data).map(container => [container.id, container]));
+		const standaloneContainers = restoreSnapshot.standaloneContainerIds
+			.map(containerId => containersById.get(containerId))
+			.filter((container): container is DockerContainerSummary => Boolean(container))
+			.filter(container => container.status !== 'running');
+		const standaloneResult = await this.runWorkspaceContainerBatch(standaloneContainers, 'start');
+		if (standaloneResult.completedContainers.length > 0) {
+			this.invalidate(false, 'container');
+			await Promise.all(standaloneResult.completedContainers.map(container => this.waitForContainerActionResult(container.id, 'start')));
+			completedCount += standaloneResult.completedContainers.length;
+		}
+		failedContainers.push(...standaloneResult.failedContainers);
+		return { completedCount, failedContainers };
+	}
+
+	/** Restarts the currently running workspace targets without changing the remembered restore set. */
+	private async restartWorkspaceRestoreSnapshot(
+		data: DockerContainersData,
+		restoreSnapshot: { composeTargets: DockerWorkspaceComposeRestoreTarget[]; standaloneContainerIds: string[]; containerCount: number },
+	): Promise<{ completedCount: number; failedContainers: Array<{ containerId: string; name: string; message: string }> }> {
+		let completedCount = 0;
+		const failedContainers: Array<{ containerId: string; name: string; message: string }> = [];
+		for (const target of restoreSnapshot.composeTargets) {
+			const composeTarget = findComposeFileTarget(data, normalizeFsPath(target.projectPath), normalizeFsPath(target.composeFilePath));
+			if (!composeTarget) {
+				failedContainers.push({
+					containerId: target.composeFilePath,
+					name: path.basename(target.composeFilePath),
+					message: 'Compose-файл больше не найден в рабочей области.',
+				});
+				continue;
+			}
+			try {
+				await this.runComposeFileServicesRestartAction(composeTarget.project, composeTarget.composeFile, target.serviceNames);
+				completedCount += target.containerCount;
+			} catch (error) {
+				failedContainers.push({
+					containerId: target.composeFilePath,
+					name: path.basename(target.composeFilePath),
+					message: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const standaloneContainers = resolveStandaloneDockerContainersForStop(data, restoreSnapshot.standaloneContainerIds);
+		for (const container of standaloneContainers) {
+			try {
+				await this.apiClient.restartContainer(container.id);
+				this.invalidate(false, 'container');
+				await this.waitForContainerActionResult(container.id, 'restart');
+				completedCount += 1;
+			} catch (error) {
+				failedContainers.push({
+					containerId: container.id,
+					name: container.name,
+					message: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		return { completedCount, failedContainers };
+	}
+
+	/** Runs the same low-level Docker API command across several standalone containers and collects local failures. */
+	private async runWorkspaceContainerBatch(
+		containers: DockerContainerSummary[],
+		action: 'start' | 'stop',
+	): Promise<{
+		completedContainers: DockerContainerSummary[];
+		failedContainers: Array<{ containerId: string; name: string; message: string }>;
+	}> {
+		const completedContainers: DockerContainerSummary[] = [];
+		const failedContainers: Array<{ containerId: string; name: string; message: string }> = [];
+		for (const container of containers) {
+			try {
+				if (action === 'start') {
+					await this.apiClient.startContainer(container.id);
+				} else {
+					await this.apiClient.stopContainer(container.id);
+				}
+				completedContainers.push(container);
+			} catch (error) {
+				failedContainers.push({
+					containerId: container.id,
+					name: container.name,
+					message: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		return { completedContainers, failedContainers };
 	}
 
 	/** Starts one Docker event stream that invalidates the widget on lifecycle changes. */
 	private ensureEventStream(): void {
-		if (this.eventStreamStarted || this.eventSubscription || !this.isEnabled()) {
+		if (this.disposed || this.eventStreamStarted || this.eventSubscription || !this.isEnabled()) {
 			return;
 		}
 
@@ -867,13 +1280,32 @@ export class DockerContainersService implements vscode.Disposable {
 			if (event.Type === 'container') {
 				this.invalidate(true, 'container');
 			}
+		}, () => {
+			this.eventSubscription = null;
+			this.eventStreamStarted = false;
+			this.scheduleEventStreamReconnect();
 		}).then((subscription) => {
 			this.eventSubscription = subscription;
 		}).catch((error) => {
+			this.eventSubscription = null;
+			this.eventStreamStarted = false;
+			this.scheduleEventStreamReconnect();
 			if (!(error instanceof DockerEngineApiError)) {
 				console.warn('[prompt-manager] Docker event stream unavailable:', error);
 			}
 		});
+	}
+
+	/** Retries one closed Docker event stream without creating reconnect storms. */
+	private scheduleEventStreamReconnect(): void {
+		if (this.disposed || this.eventReconnectTimer || !this.isEnabled()) {
+			return;
+		}
+		this.eventReconnectTimer = setTimeout(() => {
+			this.eventReconnectTimer = null;
+			this.ensureEventStream();
+		}, DOCKER_EVENT_STREAM_RECONNECT_DELAY_MS);
+		this.eventReconnectTimer.unref?.();
 	}
 }
 
@@ -1370,6 +1802,128 @@ function getUniqueDockerContainers(data: DockerContainersData): DockerContainerS
 		}
 	}
 	return Array.from(containersById.values());
+}
+
+/** Collects exact running container ids from one Docker widget snapshot. */
+function getRunningDockerContainerIds(data: DockerContainersData): string[] {
+	return getUniqueDockerContainers(data)
+		.filter(container => container.status === 'running')
+		.map(container => container.id);
+}
+
+/** Builds the persisted restore snapshot for remembered running workspace containers. */
+function buildDockerWorkspaceRestoreSnapshot(data: DockerContainersData): {
+	composeTargets: DockerWorkspaceComposeRestoreTarget[];
+	standaloneContainerIds: string[];
+	containerCount: number;
+} {
+	const rememberedContainerIds = new Set<string>();
+	const composeTargets: DockerWorkspaceComposeRestoreTarget[] = [];
+	for (const project of data.projects) {
+		for (const group of project.composeFileGroups) {
+			const runningContainers = group.containers.filter(container => container.status === 'running');
+			if (runningContainers.length === 0) {
+				continue;
+			}
+			for (const container of runningContainers) {
+				rememberedContainerIds.add(container.id);
+			}
+			composeTargets.push({
+				projectPath: group.composeFile.projectPath || project.projectPath,
+				composeFilePath: group.composeFile.filePath,
+				serviceNames: resolveDockerComposeRunningServiceNames(group, runningContainers),
+				containerCount: runningContainers.length,
+			});
+		}
+	}
+	const standaloneContainerIds = resolveStandaloneDockerContainersForStop(
+		data,
+		getUniqueDockerContainers(data)
+			.filter(container => container.status === 'running' && !rememberedContainerIds.has(container.id))
+			.map(container => container.id),
+	).map(container => container.id);
+	const containerCount = composeTargets.reduce((total, target) => total + target.containerCount, 0) + standaloneContainerIds.length;
+	return { composeTargets, standaloneContainerIds, containerCount };
+}
+
+/** Resolves only the remembered targets that are still not visibly running. */
+function buildPendingDockerWorkspaceRestoreSnapshot(
+	data: DockerContainersData,
+	restoreSnapshot: { composeTargets: DockerWorkspaceComposeRestoreTarget[]; standaloneContainerIds: string[]; containerCount: number },
+): {
+	composeTargets: DockerWorkspaceComposeRestoreTarget[];
+	standaloneContainerIds: string[];
+	containerCount: number;
+} {
+	const composeTargets = restoreSnapshot.composeTargets.flatMap(target => {
+		const composeTarget = findComposeFileTarget(data, normalizeFsPath(target.projectPath), normalizeFsPath(target.composeFilePath));
+		const group = composeTarget?.project.composeFileGroups.find(item => normalizeFsPath(item.composeFile.filePath) === normalizeFsPath(target.composeFilePath));
+		if (target.serviceNames.length === 0) {
+			return areDockerComposeServicesRunning(group, []) ? [] : [target];
+		}
+		const unresolvedServiceNames = (target.serviceNames || []).filter(serviceName => !isDockerComposeServiceRunning(group, serviceName));
+		if (unresolvedServiceNames.length === 0 && target.serviceNames.length > 0) {
+			return [];
+		}
+		return unresolvedServiceNames.length > 0
+			? [{ ...target, serviceNames: unresolvedServiceNames }]
+			: [];
+	});
+	const standaloneContainerIds = restoreSnapshot.standaloneContainerIds.filter(containerId => {
+		const container = findContainerSummary(data, containerId);
+		return container ? container.status !== 'running' : true;
+	});
+	const containerCount = composeTargets.reduce((total, target) => total + target.containerCount, 0) + standaloneContainerIds.length;
+	return { composeTargets, standaloneContainerIds, containerCount };
+}
+
+/** Preserves Compose file service order for remembered running services. */
+function resolveDockerComposeRunningServiceNames(
+	group: DockerComposeFileContainerGroup,
+	runningContainers: DockerContainerSummary[],
+): string[] {
+	const runningServices = new Set(runningContainers.flatMap(container => [container.service, container.name].map(value => value.trim()).filter(Boolean)));
+	const orderedServiceNames = (group.serviceNames || []).filter(serviceName => runningServices.has(serviceName.trim()));
+	for (const container of runningContainers) {
+		const serviceName = container.service.trim() || container.name.trim();
+		if (serviceName && !orderedServiceNames.includes(serviceName)) {
+			orderedServiceNames.push(serviceName);
+		}
+	}
+	return orderedServiceNames;
+}
+
+/** Resolves standalone containers in reverse stop order for safer teardown. */
+function resolveStandaloneDockerContainersForStop(data: DockerContainersData, containerIds: string[]): DockerContainerSummary[] {
+	const containersById = new Map(getUniqueDockerContainers(data).map(container => [container.id, container]));
+	return containerIds
+		.map(containerId => containersById.get(containerId))
+		.filter((container): container is DockerContainerSummary => Boolean(container))
+		.sort((left, right) => compareDockerContainers(right, left));
+}
+
+/** Checks whether one remembered compose service is already running in the current group. */
+function isDockerComposeServiceRunning(group: DockerComposeFileContainerGroup | undefined, serviceName: string): boolean {
+	const normalizedServiceName = serviceName.trim();
+	if (!group || !normalizedServiceName) {
+		return false;
+	}
+	return group.containers.some(container => {
+		const names = [container.service, container.name].map(value => value.trim()).filter(Boolean);
+		return names.includes(normalizedServiceName) && isDockerActiveLifecycleStatus(container.status);
+	});
+}
+
+/** Checks whether all requested compose services are already running. */
+function areDockerComposeServicesRunning(group: DockerComposeFileContainerGroup | undefined, serviceNames: string[]): boolean {
+	if (!group) {
+		return false;
+	}
+	const normalizedServiceNames = Array.from(new Set(serviceNames.map(serviceName => serviceName.trim()).filter(Boolean)));
+	if (normalizedServiceNames.length === 0) {
+		return group.containers.some(container => isDockerActiveLifecycleStatus(container.status));
+	}
+	return normalizedServiceNames.every(serviceName => isDockerComposeServiceRunning(group, serviceName));
 }
 
 /** Recomputes runtime-only Docker fields without refetching the full compose topology. */

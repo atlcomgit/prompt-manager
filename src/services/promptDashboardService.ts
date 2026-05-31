@@ -509,15 +509,17 @@ export class PromptDashboardService implements vscode.Disposable {
 		prompt: Prompt,
 		postMessage?: DashboardPostMessage,
 		requestId?: string,
-		options?: { projectNames?: string[] },
+		options?: { projectNames?: string[]; skipProjectsRefresh?: boolean },
 	): Promise<PromptDashboardAnalysisState> {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
 		const targetProjects = this.resolveProjectsRefreshTargets(scope, options?.projectNames);
+		const currentProjectsData = this.getProjectsDataForScope(scope);
+		const canReuseCurrentProjects = options?.skipProjectsRefresh === true && currentProjectsData.projects.length > 0;
 		// Rehydrate only affected project rows after branch actions so AI follow-up avoids a full workspace replay.
-		if (targetProjects.length > 0) {
+		if (!canReuseCurrentProjects && targetProjects.length > 0) {
 			await this.refreshProjectsWidget(prompt, undefined, requestId, 'analysis', targetProjects);
-		} else {
+		} else if (!canReuseCurrentProjects) {
 			await this.refreshWidget(scope, 'projects', undefined, {
 				force: true,
 				requestId,
@@ -1430,7 +1432,9 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 
 		const scopeKey = buildPromptDashboardScopeKey(scope);
-		const delayMs = reason === 'snapshot' ? 100 : this.getDockerRefreshIntervalMs();
+		const delayMs = reason === 'snapshot' || reason === 'container' || reason === 'compose'
+			? 100
+			: this.getDockerRefreshIntervalMs();
 		this.dockerRefreshTimer = setTimeout(() => {
 			this.dockerRefreshTimer = null;
 			if (!this.activeScope || buildPromptDashboardScopeKey(this.activeScope) !== scopeKey) {
@@ -2104,7 +2108,13 @@ export class PromptDashboardService implements vscode.Disposable {
 				? undefined
 				: (this.hasSameProjectNameSet(projectNames, workspaceProjectNames)
 					? projects
-					: await this.loadBranchWidgetProjectsData(scope, paths, workspaceProjectNames, excludedPaths));
+					: await this.loadBranchWidgetProjectsData(
+						scope,
+						paths,
+						workspaceProjectNames,
+						excludedPaths,
+						new Map(projects.map(project => [project.project, project] as const)),
+					));
 		const loadedSections = this.resolveLoadedProjectSectionsForMode(mode, currentProjectsData);
 
 		return branchProjects !== undefined
@@ -2169,15 +2179,32 @@ export class PromptDashboardService implements vscode.Disposable {
 		paths: Map<string, string>,
 		projectNames: string[],
 		excludedPaths: string[],
+		preloadedProjectsByName: ReadonlyMap<string, PromptDashboardProjectSummary> = new Map(),
 	): Promise<PromptDashboardProjectSummary[]> {
 		if (projectNames.length === 0) {
 			return [];
 		}
 
-		const trackedBranches = this.resolveTrackedBranches(scope, projectNames);
+		const branchProjectsByName = new Map<string, PromptDashboardProjectSummary>();
+		for (const projectName of projectNames) {
+			const preloadedProject = preloadedProjectsByName.get(projectName);
+			if (!preloadedProject) {
+				continue;
+			}
+			branchProjectsByName.set(projectName, this.buildBranchWidgetProjectSummaryFromCachedProject(preloadedProject));
+		}
+
+		const missingProjectNames = projectNames.filter(projectName => !branchProjectsByName.has(projectName));
+		if (missingProjectNames.length === 0) {
+			return projectNames
+				.map(projectName => branchProjectsByName.get(projectName))
+				.filter((project): project is PromptDashboardProjectSummary => Boolean(project));
+		}
+
+		const trackedBranches = this.resolveTrackedBranches(scope, missingProjectNames);
 		const snapshot = await this.gitService.getGitOverlaySnapshot(
 			paths,
-			projectNames,
+			missingProjectNames,
 			scope.promptBranch,
 			trackedBranches,
 			{
@@ -2190,42 +2217,75 @@ export class PromptDashboardService implements vscode.Disposable {
 		);
 		this.ensureScopeActive(scope);
 
-		return this.mapLimited(snapshot.projects, PromptDashboardService.PROJECT_CONCURRENCY, async (project) => {
-			const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshot.trackedBranches);
-			const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
-			const { incomingFiles, incomingAuthors } = await this.loadIncomingSummaryForProject(project);
-			const hasPromptBranchMismatch = this.hasPromptBranchMismatch(scope, project);
-			return {
-				project: project.project,
-				repositoryPath: project.repositoryPath,
-				available: project.available,
-				error: project.error,
-				branchSwitchError: '',
-				pullError: '',
-				hasPromptBranchMismatch,
-				currentBranch: project.currentBranch,
+		const fetchedBranchProjects = await this.mapLimited(
+			snapshot.projects,
+			PromptDashboardService.PROJECT_CONCURRENCY,
+			async (project) => {
+				const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshot.trackedBranches);
+				return this.buildBranchWidgetProjectSummaryFromSnapshot(scope, project, trackedBranch, excludedPaths);
+			},
+		);
+		for (const project of fetchedBranchProjects) {
+			branchProjectsByName.set(project.project, project);
+		}
+
+		return projectNames
+			.map(projectName => branchProjectsByName.get(projectName))
+			.filter((project): project is PromptDashboardProjectSummary => Boolean(project));
+	}
+
+	/** Reuses an already resolved project row when the branch widget needs the same repository. */
+	private buildBranchWidgetProjectSummaryFromCachedProject(
+		project: PromptDashboardProjectSummary,
+	): PromptDashboardProjectSummary {
+		return {
+			...project,
+			recentCommits: [],
+			pipeline: null,
+			parallelBranches: [],
+		};
+	}
+
+	/** Builds a lightweight branch-widget row from a fresh Git snapshot for a missing workspace project. */
+	private async buildBranchWidgetProjectSummaryFromSnapshot(
+		scope: PromptDashboardScope,
+		project: GitOverlayProjectSnapshot,
+		trackedBranch: string,
+		excludedPaths: string[],
+	): Promise<PromptDashboardProjectSummary> {
+		const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
+		const { incomingFiles, incomingAuthors } = await this.loadIncomingSummaryForProject(project);
+		const hasPromptBranchMismatch = this.hasPromptBranchMismatch(scope, project);
+		return {
+			project: project.project,
+			repositoryPath: project.repositoryPath,
+			available: project.available,
+			error: project.error,
+			branchSwitchError: '',
+			pullError: '',
+			hasPromptBranchMismatch,
+			currentBranch: project.currentBranch,
+			promptBranch: project.promptBranch,
+			trackedBranch,
+			dirty: project.dirty,
+			hasConflicts: project.hasConflicts,
+			ahead: project.ahead,
+			behind: project.behind,
+			branches: project.branches,
+			branchActions: buildPromptDashboardBranchActions({
 				promptBranch: project.promptBranch,
 				trackedBranch,
-				dirty: project.dirty,
-				hasConflicts: project.hasConflicts,
-				ahead: project.ahead,
-				behind: project.behind,
 				branches: project.branches,
-				branchActions: buildPromptDashboardBranchActions({
-					promptBranch: project.promptBranch,
-					trackedBranch,
-					branches: project.branches,
-				}),
-				recentCommits: [],
-				review: project.review,
-				pipeline: null,
-				parallelBranches: [],
-				conflictFiles,
-				incomingFiles,
-				incomingAuthors,
-				uncommittedFiles: this.collectProjectUncommittedFiles(project, excludedPaths),
-			} satisfies PromptDashboardProjectSummary;
-		});
+			}),
+			recentCommits: [],
+			review: project.review,
+			pipeline: null,
+			parallelBranches: [],
+			conflictFiles,
+			incomingFiles,
+			incomingAuthors,
+			uncommittedFiles: this.collectProjectUncommittedFiles(project, excludedPaths),
+		};
 	}
 
 	/** Refresh only dirty-file counters for an expanded project row and preserve other cached widget sections. */

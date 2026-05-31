@@ -14,6 +14,9 @@ export type DockerContainerStatusTone = 'ok' | 'neutral' | 'warning' | 'error' |
 /** Container action commands exposed by the prompt dashboard. */
 export type DockerContainerActionKind = 'start' | 'restart' | 'stop' | 'remove';
 
+/** Workspace-level Docker commands launched from the dashboard summary tiles. */
+export type DockerWorkspaceActionKind = 'startPrevious' | 'restartAll' | 'stopAll';
+
 /** Compose project orchestration commands launched from the Docker widget. */
 export type DockerComposeProjectActionKind = 'up' | 'down' | 'restart';
 
@@ -170,6 +173,7 @@ export interface DockerContainersData {
 	stoppedContainers: number;
 	warningContainers: number;
 	errorContainers: number;
+	restorableContainersCount?: number;
 	error?: string;
 	composeActionError?: DockerComposeActionError;
 }

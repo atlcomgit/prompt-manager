@@ -591,6 +591,7 @@ async function createManager(options?: {
 	const dockerContainersService = {
 		getWorkspaceContainer: async () => null,
 		runContainerAction: async () => undefined,
+		runWorkspaceAction: async () => ({ action: 'stopAll', rememberedCount: 0, requestedCount: 0, completedCount: 0, failedContainers: [] }),
 		getContainerLogs: async () => ({ container: null, content: '' }),
 		buildContainerTerminalCommand: () => 'docker exec -it container sh',
 		shouldConfirmRemove: () => false,
@@ -2631,6 +2632,7 @@ test('promptDashboardSwitchBranch refreshes only the projects widget and starts 
 	const refreshModes: string[] = [];
 	const refreshProjects: string[][] = [];
 	const analyzeProjects: string[][] = [];
+	const analyzeSkipProjectsRefresh: boolean[] = [];
 	const panelMessages: any[] = [];
 	let refreshPromptCalls = 0;
 	let analyzeCalls = 0;
@@ -2671,9 +2673,15 @@ test('promptDashboardSwitchBranch refreshes only the projects widget and starts 
 			});
 			return null;
 		},
-		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void, _requestId?: string, options?: { projectNames?: string[] }) => {
+		analyzeParallelReview: async (
+			_prompt: unknown,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			options?: { projectNames?: string[]; skipProjectsRefresh?: boolean },
+		) => {
 			analyzeCalls += 1;
 			analyzeProjects.push([...(options?.projectNames || [])]);
+			analyzeSkipProjectsRefresh.push(options?.skipProjectsRefresh === true);
 			postMessage?.({
 				type: 'promptDashboardAnalysis',
 				promptId: 'task-42',
@@ -2708,6 +2716,7 @@ test('promptDashboardSwitchBranch refreshes only the projects widget and starts 
 	assert.deepEqual(refreshProjects, [['api']]);
 	assert.equal(analyzeCalls, 1);
 	assert.deepEqual(analyzeProjects, [['api']]);
+	assert.deepEqual(analyzeSkipProjectsRefresh, [true]);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
@@ -2718,6 +2727,7 @@ test('promptDashboardPullProject refreshes only the projects widget and starts A
 	const refreshModes: string[] = [];
 	const refreshProjects: string[][] = [];
 	const analyzeProjects: string[][] = [];
+	const analyzeSkipProjectsRefresh: boolean[] = [];
 	const panelMessages: any[] = [];
 	let pullCalls = 0;
 	let analyzeCalls = 0;
@@ -2757,9 +2767,15 @@ test('promptDashboardPullProject refreshes only the projects widget and starts A
 			});
 			return null;
 		},
-		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void, _requestId?: string, options?: { projectNames?: string[] }) => {
+		analyzeParallelReview: async (
+			_prompt: unknown,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			options?: { projectNames?: string[]; skipProjectsRefresh?: boolean },
+		) => {
 			analyzeCalls += 1;
 			analyzeProjects.push([...(options?.projectNames || [])]);
+			analyzeSkipProjectsRefresh.push(options?.skipProjectsRefresh === true);
 			postMessage?.({
 				type: 'promptDashboardAnalysis',
 				promptId: 'task-42',
@@ -2793,8 +2809,163 @@ test('promptDashboardPullProject refreshes only the projects widget and starts A
 	assert.deepEqual(refreshProjects, [['api']]);
 	assert.equal(analyzeCalls, 1);
 	assert.deepEqual(analyzeProjects, [['api']]);
+	assert.deepEqual(analyzeSkipProjectsRefresh, [true]);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
+});
+
+test('promptDashboardDockerWorkspaceAction refreshes only the Docker widget after a workspace batch action', async () => {
+	const { manager } = await createManager();
+	const panelMessages: any[] = [];
+	const refreshTargets: string[] = [];
+	let workspaceActionCalls = 0;
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	(manager as any).dockerContainersService = {
+		runWorkspaceAction: async () => {
+			workspaceActionCalls += 1;
+			return { action: 'stopAll', rememberedCount: 2, requestedCount: 2, completedCount: 2, failedContainers: [] };
+		},
+	};
+	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
+		refreshWidgetSnapshot: async (
+			_prompt: unknown,
+			widget: string,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			section?: string,
+		) => {
+			refreshTargets.push(`${widget}:${section || ''}`);
+			postMessage?.({
+				type: 'promptDashboardWidgetSnapshot',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				widget: {
+					kind: 'docker',
+					cache: { status: 'fresh', source: 'refresh' },
+					data: {
+						enabled: true,
+						available: true,
+						generatedAt: '2026-05-31T10:00:00.000Z',
+						defaultViewMode: 'tree',
+						composeFilePatterns: [],
+						projects: [],
+						totalContainers: 0,
+						runningContainers: 0,
+						stoppedContainers: 0,
+						warningContainers: 0,
+						errorContainers: 0,
+					},
+				},
+			});
+			return null;
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'promptDashboardDockerWorkspaceAction',
+			action: 'stopAll',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			requestId: 'docker-workspace-1',
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(workspaceActionCalls, 1);
+	assert.deepEqual(refreshTargets, ['docker:dockerContainers']);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'info' && /Остановлены все запущенные контейнеры рабочей области: 2/.test(String(message?.message || ''))), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
+});
+
+test('promptDashboardDockerWorkspaceAction reports restartAll and refreshes only the Docker widget', async () => {
+	const { manager } = await createManager();
+	const panelMessages: any[] = [];
+	const refreshTargets: string[] = [];
+	let workspaceActionCalls = 0;
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	(manager as any).dockerContainersService = {
+		runWorkspaceAction: async () => {
+			workspaceActionCalls += 1;
+			return { action: 'restartAll', rememberedCount: 2, requestedCount: 2, completedCount: 2, failedContainers: [] };
+		},
+	};
+	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
+		refreshWidgetSnapshot: async (
+			_prompt: unknown,
+			widget: string,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			section?: string,
+		) => {
+			refreshTargets.push(`${widget}:${section || ''}`);
+			postMessage?.({
+				type: 'promptDashboardWidgetSnapshot',
+				promptId: 'task-42',
+				promptUuid: 'uuid-42',
+				widget: {
+					kind: 'docker',
+					cache: { status: 'fresh', source: 'refresh' },
+					data: {
+						enabled: true,
+						available: true,
+						generatedAt: '2026-05-31T10:00:00.000Z',
+						defaultViewMode: 'tree',
+						composeFilePatterns: [],
+						projects: [],
+						totalContainers: 0,
+						runningContainers: 0,
+						stoppedContainers: 0,
+						warningContainers: 0,
+						errorContainers: 0,
+					},
+				},
+			});
+			return null;
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'promptDashboardDockerWorkspaceAction',
+			action: 'restartAll',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			requestId: 'docker-workspace-restart-1',
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(workspaceActionCalls, 1);
+	assert.deepEqual(refreshTargets, ['docker:dockerContainers']);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
+	assert.equal(panelMessages.some((message: any) => message?.type === 'info' && /Перезапущены все запущенные контейнеры рабочей области: 2/.test(String(message?.message || ''))), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);
 });
 
@@ -2803,6 +2974,7 @@ test('promptDashboardPullProject still refreshes the projects widget when pull f
 	const refreshModes: string[] = [];
 	const refreshProjects: string[][] = [];
 	const analyzeProjects: string[][] = [];
+	const analyzeSkipProjectsRefresh: boolean[] = [];
 	const panelMessages: any[] = [];
 	let pullCalls = 0;
 	let analyzeCalls = 0;
@@ -2842,9 +3014,15 @@ test('promptDashboardPullProject still refreshes the projects widget when pull f
 			});
 			return null;
 		},
-		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void, _requestId?: string, options?: { projectNames?: string[] }) => {
+		analyzeParallelReview: async (
+			_prompt: unknown,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			options?: { projectNames?: string[]; skipProjectsRefresh?: boolean },
+		) => {
 			analyzeCalls += 1;
 			analyzeProjects.push([...(options?.projectNames || [])]);
+			analyzeSkipProjectsRefresh.push(options?.skipProjectsRefresh === true);
 			postMessage?.({
 				type: 'promptDashboardAnalysis',
 				promptId: 'task-42',
@@ -2878,6 +3056,7 @@ test('promptDashboardPullProject still refreshes the projects widget when pull f
 	assert.deepEqual(refreshProjects, [['api']]);
 	assert.equal(analyzeCalls, 1);
 	assert.deepEqual(analyzeProjects, [['api']]);
+	assert.deepEqual(analyzeSkipProjectsRefresh, [true]);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'error' && String(message?.message || '').includes('origin недоступен')), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
@@ -2960,6 +3139,7 @@ test('promptDashboardSwitchBranches refreshes only targeted project rows and sta
 	const refreshModes: string[] = [];
 	const refreshProjects: string[][] = [];
 	const analyzeProjects: string[][] = [];
+	const analyzeSkipProjectsRefresh: boolean[] = [];
 	const panelMessages: any[] = [];
 	let analyzeCalls = 0;
 	const panel = {
@@ -2995,9 +3175,15 @@ test('promptDashboardSwitchBranches refreshes only targeted project rows and sta
 			});
 			return null;
 		},
-		analyzeParallelReview: async (_prompt: unknown, postMessage?: (message: unknown) => void, _requestId?: string, options?: { projectNames?: string[] }) => {
+		analyzeParallelReview: async (
+			_prompt: unknown,
+			postMessage?: (message: unknown) => void,
+			_requestId?: string,
+			options?: { projectNames?: string[]; skipProjectsRefresh?: boolean },
+		) => {
 			analyzeCalls += 1;
 			analyzeProjects.push([...(options?.projectNames || [])]);
+			analyzeSkipProjectsRefresh.push(options?.skipProjectsRefresh === true);
 			postMessage?.({
 				type: 'promptDashboardAnalysis',
 				promptId: 'task-42',
@@ -3030,6 +3216,7 @@ test('promptDashboardSwitchBranches refreshes only targeted project rows and sta
 	assert.deepEqual(refreshProjects, [['api', 'web']]);
 	assert.equal(analyzeCalls, 1);
 	assert.deepEqual(analyzeProjects, [['api', 'web']]);
+	assert.deepEqual(analyzeSkipProjectsRefresh, [true]);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardAnalysis'), true);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardSnapshot'), false);

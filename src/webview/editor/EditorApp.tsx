@@ -46,7 +46,7 @@ import {
   shouldShowPromptPlanForStatus,
 } from '../../types/prompt.js';
 import type { GitOverlayActionKind, GitOverlayActionScope, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
-import type { DockerComposeProjectActionKind, DockerContainerActionKind } from '../../types/docker';
+import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerWorkspaceActionKind } from '../../types/docker';
 import type {
   PromptDashboardAnalysisState,
   PromptDashboardCollapsedSections,
@@ -100,7 +100,7 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
-import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
+import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
 
@@ -4668,6 +4668,19 @@ export const EditorApp: React.FC = () => {
     });
   }, []);
 
+  /** Launches one workspace-level Docker summary action from the dashboard. */
+  const handlePromptDashboardDockerWorkspaceAction = useCallback((action: DockerWorkspaceActionKind) => {
+    const requestId = `prompt-dashboard-docker-workspace-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    promptDashboardRequestIdRef.current = requestId;
+    setPromptDashboardBusyAction(buildPromptDashboardDockerWorkspaceBusyAction({ action }));
+    vscode.postMessage({
+      type: 'promptDashboardDockerWorkspaceAction',
+      prompt: promptRef.current,
+      action,
+      requestId,
+    });
+  }, []);
+
   /** Launches one compose-level Docker orchestration command from the dashboard. */
   const handlePromptDashboardDockerComposeAction = useCallback((projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => {
     const requestId = `prompt-dashboard-docker-compose-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -7156,6 +7169,7 @@ export const EditorApp: React.FC = () => {
         onOpenDiff={handleGitOverlayOpenDiff}
         onOpenFilePatch={handlePromptDashboardOpenFilePatch}
         onDockerAction={handlePromptDashboardDockerAction}
+        onDockerWorkspaceAction={handlePromptDashboardDockerWorkspaceAction}
         onDockerComposeAction={handlePromptDashboardDockerComposeAction}
         onOpenDockerComposeFile={handlePromptDashboardOpenDockerComposeFile}
         onOpenDockerLogs={handlePromptDashboardOpenDockerLogs}

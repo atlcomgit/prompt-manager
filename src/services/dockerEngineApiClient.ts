@@ -238,7 +238,10 @@ export class DockerEngineApiClient {
 	}
 
 	/** Opens a Docker container event stream and parses JSON-line events. */
-	async streamContainerEvents(listener: (event: DockerEngineEventMessage) => void): Promise<DockerEngineEventSubscription> {
+	async streamContainerEvents(
+		listener: (event: DockerEngineEventMessage) => void,
+		onClosed?: (error?: unknown) => void,
+	): Promise<DockerEngineEventSubscription> {
 		const requestPath = await this.buildRequestPath('/events', {
 			query: { filters: JSON.stringify({ type: ['container'] }) },
 		});
@@ -252,15 +255,24 @@ export class DockerEngineApiClient {
 
 		return new Promise<DockerEngineEventSubscription>((resolve, reject) => {
 			let settled = false;
+			let disposed = false;
+			let closeNotified = false;
+			const notifyClosed = (error?: unknown) => {
+				if (disposed || closeNotified) {
+					return;
+				}
+				closeNotified = true;
+				onClosed?.(error);
+			};
 			const request = http.request(requestOptions);
-			request.setTimeout(DEFAULT_DOCKER_HTTP_TIMEOUT_MS, () => {
-				request.destroy(new DockerEngineApiError('Docker event stream timeout.'));
-			});
+			request.setTimeout(0);
 			request.once('error', (error) => {
 				if (!settled) {
 					settled = true;
 					reject(error);
+					return;
 				}
+				notifyClosed(error);
 			});
 			request.once('response', (response) => {
 				if ((response.statusCode || 0) >= 400) {
@@ -273,6 +285,11 @@ export class DockerEngineApiClient {
 					});
 					return;
 				}
+
+				response.once('aborted', () => notifyClosed(new DockerEngineApiError('Docker event stream aborted.')));
+				response.once('close', () => notifyClosed());
+				response.once('end', () => notifyClosed());
+				response.once('error', (error) => notifyClosed(error));
 
 				let pendingText = '';
 				response.on('data', (chunk: Buffer) => {
@@ -296,6 +313,7 @@ export class DockerEngineApiClient {
 					settled = true;
 					resolve({
 						dispose: () => {
+							disposed = true;
 							response.destroy();
 							request.destroy();
 						},

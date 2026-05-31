@@ -378,6 +378,13 @@ export function buildPromptDashboardDockerContainerBusyAction(input: {
 	return `docker:${input.action}:${input.containerId}`;
 }
 
+/** Builds a stable busy key for one Docker workspace summary action button. */
+export function buildPromptDashboardDockerWorkspaceBusyAction(input: {
+	action: string;
+}): string {
+	return `docker:workspace:${input.action}`;
+}
+
 /** Keeps Docker action spinners visible until the matching widget refresh finishes. */
 export function shouldRetainPromptDashboardBusyActionOnNotice(input: {
 	busyAction: string | null | undefined;

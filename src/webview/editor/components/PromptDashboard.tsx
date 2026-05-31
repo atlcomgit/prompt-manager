@@ -17,6 +17,7 @@ import type {
 	DockerContainersData,
 	DockerContainersStatusFilter,
 	DockerContainersViewMode,
+	DockerWorkspaceActionKind,
 } from '../../../types/docker.js';
 import type {
 	PromptDashboardAnalysisState,
@@ -41,6 +42,7 @@ import {
 import {
 	buildPromptDashboardDockerComposeBusyAction,
 	buildPromptDashboardDockerContainerBusyAction,
+	buildPromptDashboardDockerWorkspaceBusyAction,
 	compactPromptDashboardMiddleLabel,
 	fitPromptDashboardPathPartsToWidth,
 	formatPromptDashboardDuration,
@@ -80,6 +82,7 @@ interface PromptDashboardProps {
 	onOpenDiff: (project: string, filePath: string) => void;
 	onOpenFilePatch: (request: PromptDashboardFilePatchRequest) => void;
 	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void;
+	onDockerWorkspaceAction: (action: DockerWorkspaceActionKind) => void;
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void;
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void;
 	onOpenDockerLogs: (containerId: string) => void;
@@ -112,6 +115,9 @@ type DockerContainerSortBy = 'name' | 'status' | 'uptime' | 'cpu' | 'memory';
 
 export interface DashboardDockerWidgetState {
 	viewMode?: DockerContainersViewMode;
+	statusFilter: DockerContainersStatusFilter;
+	search: string;
+	sortBy: DockerContainerSortBy;
 	expandedContainerIds: string[];
 }
 
@@ -131,18 +137,31 @@ type DockerTableViewRow =
 
 const DOCKER_WIDGET_STATE_STORAGE_KEY = 'pm.promptDashboard.dockerWidgetState.v1';
 
+/** Checks whether an unknown value is one of the supported Docker status filters. */
+function isDockerStatusFilter(value: unknown): value is DockerContainersStatusFilter {
+	return value === 'all' || value === 'running' || value === 'stopped';
+}
+
+/** Checks whether an unknown value is one of the supported Docker sort keys. */
+function isDockerContainerSortBy(value: unknown): value is DockerContainerSortBy {
+	return value === 'name' || value === 'status' || value === 'uptime' || value === 'cpu' || value === 'memory';
+}
+
 /** Normalizes persisted Docker widget UI state from webview storage. */
 export function normalizePromptDashboardDockerWidgetState(value: unknown): DashboardDockerWidgetState {
 	if (!value || typeof value !== 'object') {
-		return { expandedContainerIds: [] };
+		return { statusFilter: 'all', search: '', sortBy: 'status', expandedContainerIds: [] };
 	}
 
 	const input = value as Partial<DashboardDockerWidgetState>;
 	const viewMode = isDockerViewMode(input.viewMode) ? input.viewMode : undefined;
+	const statusFilter = isDockerStatusFilter(input.statusFilter) ? input.statusFilter : 'all';
+	const search = typeof input.search === 'string' ? input.search : '';
+	const sortBy = isDockerContainerSortBy(input.sortBy) ? input.sortBy : 'status';
 	const expandedContainerIds = Array.isArray(input.expandedContainerIds)
 		? Array.from(new Set(input.expandedContainerIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)))
 		: [];
-	return viewMode ? { viewMode, expandedContainerIds } : { expandedContainerIds };
+	return viewMode ? { viewMode, statusFilter, search, sortBy, expandedContainerIds } : { statusFilter, search, sortBy, expandedContainerIds };
 }
 
 /** Reads Docker widget UI state from local webview storage. */
@@ -310,6 +329,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	onOpenDiff,
 	onOpenFilePatch,
 	onDockerAction,
+	onDockerWorkspaceAction,
 	onDockerComposeAction,
 	onOpenDockerComposeFile,
 	onOpenDockerLogs,
@@ -326,9 +346,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
 	const [viewedFileKeys, setViewedFileKeys] = useState<Record<string, boolean>>({});
 	const [dockerViewMode, setDockerViewMode] = useState<DockerContainersViewMode>(initialDockerWidgetState.viewMode || 'tree');
-	const [dockerStatusFilter, setDockerStatusFilter] = useState<DockerContainersStatusFilter>('all');
-	const [dockerSearch, setDockerSearch] = useState('');
-	const [dockerSortBy, setDockerSortBy] = useState<DockerContainerSortBy>('status');
+	const [dockerStatusFilter, setDockerStatusFilter] = useState<DockerContainersStatusFilter>(initialDockerWidgetState.statusFilter);
+	const [dockerSearch, setDockerSearch] = useState(initialDockerWidgetState.search);
+	const [dockerSortBy, setDockerSortBy] = useState<DockerContainerSortBy>(initialDockerWidgetState.sortBy);
 	const [draggedSection, setDraggedSection] = useState<PromptDashboardSectionKey | null>(null);
 	const [dropIndicator, setDropIndicator] = useState<DashboardDropIndicator | null>(null);
 	const [isDockerSectionInView, setIsDockerSectionInView] = useState(false);
@@ -425,9 +445,6 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		setShowAllBranchProjects(false);
 		setActiveFileKey(null);
 		setViewedFileKeys({});
-		setDockerSearch('');
-		setDockerStatusFilter('all');
-		setDockerSortBy('status');
 	}, [snapshot?.scopeKey]);
 
 	// Apply the configured default mode only until the user saves their own Docker view preference.
@@ -467,8 +484,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 
 	// Drop stale branch drafts once refreshed project data confirms the branch is current again.
 	useEffect(() => {
-		setBranchDrafts(previous => reconcileBranchDrafts(branchProjects, previous));
-	}, [branchProjects]);
+		setBranchDrafts(previous => reconcileBranchDrafts(resolveBranchDraftRefreshProjects(branchProjects, branchScopeProjects), previous));
+	}, [branchProjects, branchScopeProjects]);
 
 	// Collapse the workspace-wide view automatically when the current snapshot no longer exposes extra projects.
 	useEffect(() => {
@@ -556,6 +573,29 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		setHasSavedDockerViewMode(true);
 		setDockerViewMode(mode);
 		writePromptDashboardDockerWidgetStatePatch({ viewMode: mode });
+	};
+
+	/** Changes and persists the Docker widget status filter. */
+	const changeDockerStatusFilter = (filter: DockerContainersStatusFilter) => {
+		setDockerStatusFilter(filter);
+		writePromptDashboardDockerWidgetStatePatch({ statusFilter: filter });
+	};
+
+	/** Changes and persists the Docker widget free-text search. */
+	const changeDockerSearch = (searchValue: string) => {
+		setDockerSearch(searchValue);
+		writePromptDashboardDockerWidgetStatePatch({ search: searchValue });
+	};
+
+	/** Clears the persisted Docker widget search value. */
+	const clearDockerSearch = () => {
+		changeDockerSearch('');
+	};
+
+	/** Changes and persists the Docker widget sort key. */
+	const changeDockerSortBy = (sortBy: DockerContainerSortBy) => {
+		setDockerSortBy(sortBy);
+		writePromptDashboardDockerWidgetStatePatch({ sortBy });
 	};
 
 	/** Toggles one shared top-level dashboard section from the section header. */
@@ -771,7 +811,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		reviewRequests: renderReviewRequests(reviewProjects, reviewRequestsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('reviewRequests', 'MR/PR')),
 		parallelBranches: renderParallelBranchFiles(parallelProjects, expanded, toggleExpanded, fileHandlers, parallelBranchesCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('parallelBranches', 'Параллельные ветки')),
 		projectCommits: renderProjectCommits(commitProjects, expanded, toggleExpanded, fileHandlers, projectCommitsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('projectCommits', 'Коммиты проектов')),
-		dockerContainers: renderDockerContainers(snapshot?.docker.data, dockerViewMode, dockerStatusFilter, dockerSearch, dockerSortBy, expanded, dockerCacheStatus, busyAction, changeDockerViewMode, setDockerStatusFilter, setDockerSearch, setDockerSortBy, toggleExpanded, onDockerAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('dockerContainers', 'Docker контейнеры')),
+		dockerContainers: renderDockerContainers(snapshot?.docker.data, dockerViewMode, dockerStatusFilter, dockerSearch, dockerSortBy, expanded, dockerCacheStatus, busyAction, changeDockerViewMode, changeDockerStatusFilter, changeDockerSearch, clearDockerSearch, changeDockerSortBy, toggleExpanded, onDockerAction, onDockerWorkspaceAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('dockerContainers', 'Docker контейнеры')),
 		aiAnalysis: renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('aiAnalysis', 'AI review')),
 	};
 	const widgetColumns = normalizedSectionOrder
@@ -1833,6 +1873,14 @@ function resolveBranchDraft(project: PromptDashboardProjectSummary, branchDrafts
 		}
 	}
 	return options.find(option => option.available)?.branch || options[0]?.branch || '';
+}
+
+/** Keeps draft reconciliation aligned with the full branch widget scope during refreshes. */
+export function resolveBranchDraftRefreshProjects(
+	selectedProjects: PromptDashboardProjectSummary[],
+	branchScopeProjects: PromptDashboardProjectSummary[],
+): PromptDashboardProjectSummary[] {
+	return branchScopeProjects.length > 0 ? branchScopeProjects : selectedProjects;
 }
 
 /** Removes only drafts that already became the refreshed current branch or are no longer valid. */
@@ -2990,9 +3038,11 @@ function renderDockerContainers(
 	setViewMode: (mode: DockerContainersViewMode) => void,
 	setStatusFilter: (filter: DockerContainersStatusFilter) => void,
 	setSearch: (search: string) => void,
+	clearSearch: () => void,
 	setSortBy: (sortBy: DockerContainerSortBy) => void,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
 	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void,
+	onDockerWorkspaceAction: (action: DockerWorkspaceActionKind) => void,
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
 	onOpenDockerLogs: (containerId: string) => void,
@@ -3028,8 +3078,8 @@ function renderDockerContainers(
 					onRefreshWidget,
 				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('dockerContainers'), dragHandle })}
 			{collapsed ? null : <div style={styles.sectionBody}>
-				{renderDockerSummary(data, sectionCacheStatus)}
-				{renderDockerControls(viewMode, statusFilter, search, sortBy, setViewMode, setStatusFilter, setSearch, setSortBy)}
+				{renderDockerSummary(data, sectionCacheStatus, busyAction, onDockerWorkspaceAction)}
+				{renderDockerControls(viewMode, statusFilter, search, sortBy, setViewMode, setStatusFilter, setSearch, clearSearch, setSortBy)}
 				{renderDockerContainerContent(data, projects, containers, viewMode, sectionCacheStatus, busyAction, expanded, toggleExpanded, onDockerAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal)}
 			</div>}
 		</section>
@@ -3037,7 +3087,12 @@ function renderDockerContainers(
 }
 
 /** Renders Docker daemon availability and aggregate lifecycle counters. */
-function renderDockerSummary(data: DockerContainersData | undefined, cacheStatus: PromptDashboardLoadStatus): React.ReactNode {
+function renderDockerSummary(
+	data: DockerContainersData | undefined,
+	cacheStatus: PromptDashboardLoadStatus,
+	busyAction: DashboardBusyAction,
+	onDockerWorkspaceAction: (action: DockerWorkspaceActionKind) => void,
+): React.ReactNode {
 	if ((cacheStatus === 'loading' || !data) && !data?.totalContainers) {
 		return renderLoadingEmptyState('Docker-контейнеры загружаются');
 	}
@@ -3047,23 +3102,66 @@ function renderDockerSummary(data: DockerContainersData | undefined, cacheStatus
 	if (data.available === false) {
 		return <div style={styles.errorText}>{data.error || 'Docker Engine API недоступен.'}</div>;
 	}
+	const restartAllBusy = busyAction === buildPromptDashboardDockerWorkspaceBusyAction({ action: 'restartAll' });
+	const startPreviousBusy = busyAction === buildPromptDashboardDockerWorkspaceBusyAction({ action: 'startPrevious' });
+	const stopAllBusy = busyAction === buildPromptDashboardDockerWorkspaceBusyAction({ action: 'stopAll' });
+	const restorableContainersCount = data.restorableContainersCount || 0;
+	const runningSummaryAction = data.runningContainers > 0
+		? renderDockerIconButton(
+			'restart',
+			'Перезапустить все запущенные контейнеры рабочей области',
+			() => onDockerWorkspaceAction('restartAll'),
+			restartAllBusy,
+			false,
+			restartAllBusy,
+		)
+		: renderDockerIconButton(
+			'start',
+			restorableContainersCount > 0
+				? `Запустить предыдущие контейнеры (${restorableContainersCount})`
+				: 'Запустить предыдущие контейнеры',
+			() => onDockerWorkspaceAction('startPrevious'),
+			restorableContainersCount <= 0 || startPreviousBusy,
+			false,
+			startPreviousBusy,
+		);
 
 	return (
 		<div style={styles.dockerSummaryGrid}>
 			{renderDockerSummaryMetric('Всего', data.totalContainers)}
-			{renderDockerSummaryMetric('Запущено', data.runningContainers, 'ok')}
-			{renderDockerSummaryMetric('Остановлено', data.stoppedContainers, 'neutral')}
+			{renderDockerSummaryMetric(
+				'Запущено',
+				data.runningContainers,
+				'ok',
+				runningSummaryAction,
+			)}
+			{renderDockerSummaryMetric(
+				'Остановлено',
+				data.stoppedContainers,
+				'neutral',
+				renderDockerIconButton(
+					'stop',
+					'Остановить все контейнеры рабочей области',
+					() => onDockerWorkspaceAction('stopAll'),
+					data.runningContainers <= 0 || stopAllBusy,
+					false,
+					stopAllBusy,
+				),
+			)}
 			{renderDockerSummaryMetric('Проблемы', data.warningContainers + data.errorContainers, data.errorContainers > 0 ? 'error' : 'warning')}
 		</div>
 	);
 }
 
 /** Renders one compact Docker counter tile. */
-function renderDockerSummaryMetric(label: string, value: number, tone: DockerContainerStatusTone = 'neutral'): React.ReactNode {
+function renderDockerSummaryMetric(label: string, value: number, tone: DockerContainerStatusTone = 'neutral', action?: React.ReactNode): React.ReactNode {
 	return (
 		<div style={styles.dockerSummaryMetric}>
 			<span style={styles.dockerSummaryLabel}>{label}</span>
-			<span style={{ ...styles.dockerSummaryValue, color: resolveDockerToneColor(tone) }}>{value}</span>
+			<span style={styles.dockerSummaryMetricValueRow}>
+				<span style={{ ...styles.dockerSummaryValue, color: resolveDockerToneColor(tone) }}>{value}</span>
+				{action ? <span style={styles.dockerSummaryMetricAction}>{action}</span> : null}
+			</span>
 		</div>
 	);
 }
@@ -3077,6 +3175,7 @@ function renderDockerControls(
 	setViewMode: (mode: DockerContainersViewMode) => void,
 	setStatusFilter: (filter: DockerContainersStatusFilter) => void,
 	setSearch: (search: string) => void,
+	clearSearch: () => void,
 	setSortBy: (sortBy: DockerContainerSortBy) => void,
 ): React.ReactNode {
 	return (
@@ -3108,13 +3207,27 @@ function renderDockerControls(
 					<option value="memory">RAM</option>
 				</select>
 			</div>
-			<input
-				value={search}
-				style={styles.dockerSearchInput}
-				onChange={event => setSearch(event.target.value)}
-				placeholder="Поиск"
-				title="Поиск по контейнерам"
-			/>
+			<div style={styles.dockerSearchField}>
+				<input
+					value={search}
+					style={{
+						...styles.dockerSearchInput,
+						...(search ? styles.dockerSearchInputWithClear : null),
+					}}
+					onChange={event => setSearch(event.target.value)}
+					placeholder="Поиск"
+					title="Поиск по контейнерам"
+				/>
+				{search
+					? <button
+						type="button"
+						style={styles.dockerSearchClearButton}
+						onClick={clearSearch}
+						title="Сбросить поиск"
+						aria-label="Сбросить поиск"
+					>x</button>
+					: null}
+			</div>
 		</div>
 	);
 }
@@ -3752,21 +3865,40 @@ function renderDockerTableRow(
 	}
 
 	const container = row.container;
+	const displayName = resolveDockerContainerDisplayName(container);
 	const expandKey = `docker:${container.id}`;
 	const isExpanded = expanded[expandKey] === true;
+	const toggleLabel = `${isExpanded ? 'Скрыть детали контейнера' : 'Показать детали контейнера'} ${displayName}`;
 	return (
 		<div key={row.key} style={styles.dockerTableBlock}>
 			<div style={styles.dockerTableRow}>
-				{renderDockerProjectComposeCell(row.label, resolveDockerContainerDisplayName(container))}
+				{renderDockerProjectComposeCell(row.label, displayName, {
+					leadingControl: <button
+						type="button"
+						style={{ ...styles.dockerExpandButton, ...styles.dockerTableExpandButton }}
+						onClick={() => toggleExpanded(expandKey)}
+						title={toggleLabel}
+						aria-label={toggleLabel}
+						aria-expanded={isExpanded}
+					>{isExpanded ? '▾' : '▸'}</button>,
+					showIcon: false,
+					onPrimaryClick: () => toggleExpanded(expandKey),
+					primaryActionLabel: toggleLabel,
+					expanded: isExpanded,
+					primaryTone: isDockerContainerActiveStatus(container.status) ? 'active' : 'muted',
+					showSecondaryLabel: false,
+				})}
 				{renderDockerStatusIcon(container.status, container.statusTone, container.statusText)}
 				{renderDockerTableMetricCell(formatDockerTableMetric(container, container.stats?.cpuPercent))}
 				{renderDockerTableMetricCell(hasDockerRuntimeStats(container) ? formatDockerMemoryMegabytes(container.stats?.memoryUsageBytes) : '—')}
 				<div style={styles.dockerTableActions}>
-					<button type="button" style={styles.dockerIconButton} onClick={() => toggleExpanded(expandKey)} title={isExpanded ? 'Скрыть детали' : 'Показать детали'} aria-label={isExpanded ? 'Скрыть детали контейнера' : 'Показать детали контейнера'}>{isExpanded ? '▾' : '▸'}</button>
 					{renderDockerContainerActionButtons(container, busyAction, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal)}
 				</div>
 			</div>
-			{isExpanded ? <div style={styles.dockerTableDetails}>{renderDockerContainerDetails(container)}</div> : null}
+			{isExpanded ? <div style={styles.dockerTableDetails}>{renderDockerContainerDetails(container, {
+				includeResources: true,
+				containerPathLabel: row.label,
+			})}</div> : null}
 		</div>
 	);
 }
@@ -3858,15 +3990,53 @@ function renderDockerDeclaredServiceActionButtons(
 	return renderDockerComposeActionButtons(row.project, row.group, busyAction, onDockerComposeAction, onOpenDockerComposeFile);
 }
 
-/** Renders a compact project/compose/container table cell with a compose icon. */
-function renderDockerProjectComposeCell(label: string, primaryLabel?: string): React.ReactNode {
+
+/** Returns true when a Docker container should be emphasized as an active runtime surface. */
+function isDockerContainerActiveStatus(status: DockerContainerLifecycleStatus): boolean {
+	return status === 'running' || status === 'starting' || status === 'restarting' || status === 'paused';
+}
+
+/** Renders a compact project/compose/container table cell with optional disclosure controls. */
+function renderDockerProjectComposeCell(
+	label: string,
+	primaryLabel?: string,
+	options: {
+		leadingControl?: React.ReactNode;
+		showIcon?: boolean;
+		showSecondaryLabel?: boolean;
+		onPrimaryClick?: () => void;
+		primaryActionLabel?: string;
+		expanded?: boolean;
+		primaryTone?: 'default' | 'active' | 'muted';
+	} = {},
+): React.ReactNode {
+	const primaryText = primaryLabel || label;
+	const primaryTextStyle = options.primaryTone === 'active'
+		? styles.dockerProjectComposePrimaryLabelActive
+		: options.primaryTone === 'muted'
+			? styles.dockerProjectComposePrimaryLabelMuted
+			: undefined;
+	const labelBlock = options.onPrimaryClick
+		? <button
+			type="button"
+			style={styles.dockerProjectComposeLabelButton}
+			onClick={options.onPrimaryClick}
+			title={options.primaryActionLabel || primaryText}
+			aria-label={options.primaryActionLabel || primaryText}
+			aria-expanded={options.expanded}
+		>
+			<span style={{ ...styles.dockerServiceName, ...(primaryTextStyle || null) }}>{primaryText}</span>
+			{options.showSecondaryLabel === false ? null : <span style={styles.dockerProjectComposeLabel}>{label}</span>}
+		</button>
+		: <span style={styles.dockerProjectComposeLabelBlock} title={label}>
+			<span style={{ ...styles.dockerServiceName, ...(primaryTextStyle || null) }}>{primaryText}</span>
+			{options.showSecondaryLabel === false ? null : <span style={styles.dockerProjectComposeLabel}>{label}</span>}
+		</span>;
 	return (
-		<span style={styles.dockerProjectComposeCell} title={label}>
-			<DockerContainerActionIcon icon="composeFile" />
-			<span style={styles.dockerProjectComposeLabelBlock}>
-				<span style={styles.dockerServiceName}>{primaryLabel || label}</span>
-				<span style={styles.dockerProjectComposeLabel}>{label}</span>
-			</span>
+		<span style={styles.dockerProjectComposeCell}>
+			{options.leadingControl || null}
+			{options.showIcon === false ? null : <DockerContainerActionIcon icon="composeFile" />}
+			{labelBlock}
 		</span>
 	);
 }
@@ -4293,7 +4463,7 @@ function DockerContainerActionIcon({ icon }: { icon: DockerContainerIconKind }):
 /** Renders Docker inspect details that are useful without opening another view. */
 function renderDockerContainerDetails(
 	container: DockerContainerSummary,
-	options: { includeResources?: boolean } = {},
+	options: { includeResources?: boolean; containerPathLabel?: string } = {},
 ): React.ReactNode {
 	return (
 		<div style={styles.dockerDetails}>
@@ -4306,6 +4476,7 @@ function renderDockerContainerDetails(
 			</div>
 			{container.mounts.length > 0 ? <div style={styles.dockerDetailsLine}>Тома: {container.mounts.slice(0, 3).map(mount => `${mount.source || mount.type} -> ${mount.destination}`).join('; ')}</div> : null}
 			{container.error ? <div style={styles.errorText}>{container.error}</div> : null}
+			{options.containerPathLabel ? <div style={styles.dockerDetailsLine}><span style={styles.dockerDetailsInlineLabel}>Контейнер:</span> {options.containerPathLabel}</div> : null}
 		</div>
 	);
 }
@@ -4465,8 +4636,11 @@ export function resolveFilteredDockerProjects(
 			? project.composeFileGroups
 			: buildDockerComposeFileGroupsForView(project.composeFiles, project.containers, sortBy);
 		const composeFileGroups = sourceGroups.flatMap(sourceGroup => {
-			const groupContainers = sortDockerContainers(sourceGroup.containers.filter(container => visibleContainerIds.has(container.id)), sortBy);
-			const group = buildDockerComposeFileGroupForView(sourceGroup, groupContainers);
+			const sourceGroupContainers = normalizedSearch
+				? resolveDockerComposeGroupSourceContainers(project, sourceGroup, sortBy)
+				: sourceGroup.containers;
+			const groupContainers = sourceGroupContainers.filter(container => visibleContainerIds.has(container.id));
+			const group = buildDockerComposeFileGroupForView({ ...sourceGroup, containers: sourceGroupContainers }, groupContainers, normalizedSearch);
 			if (group.containers.length > 0) {
 				return [group];
 			}
@@ -4495,6 +4669,35 @@ export function resolveFilteredDockerProjects(
 			errorCount: containers.filter(container => container.statusTone === 'error').length,
 		};
 	});
+}
+
+/** Resolves the full source container set for one compose file group from project-level Docker rows. */
+function resolveDockerComposeGroupSourceContainers(
+	project: DockerContainerProjectGroup,
+	group: DockerComposeFileContainerGroup,
+	sortBy: DockerContainerSortBy,
+): DockerContainerSummary[] {
+	const composeFilePath = normalizeDashboardPath(group.composeFile.filePath);
+	const containersById = new Map<string, DockerContainerSummary>();
+	for (const container of group.containers) {
+		containersById.set(container.id, container);
+	}
+	for (const container of project.containers) {
+		if (container.composeFilePaths.some(filePath => normalizeDashboardPath(filePath) === composeFilePath)) {
+			containersById.set(container.id, container);
+		}
+	}
+	return sortDockerContainers(Array.from(containersById.values()), sortBy);
+}
+
+/** Resolves compose services that are declared but still have no actual Docker container row. */
+function resolveDockerDeclaredServiceNamesForView(group: DockerComposeFileContainerGroup): string[] {
+	const actualServices = new Set(group.containers.flatMap(container => [container.service, container.name].map(value => value.trim()).filter(Boolean)));
+	return (group.serviceNames || [])
+		.map(serviceName => serviceName.trim())
+		.filter(Boolean)
+		.filter(serviceName => !actualServices.has(serviceName))
+		.sort((left, right) => left.localeCompare(right, 'ru'));
 }
 
 /** Resolves whether Docker CPU/RAM/network blocks are actually visible and worth live polling. */
@@ -4547,7 +4750,7 @@ export function matchesDockerContainerStatusFilter(
 	if (statusFilter === 'all') {
 		return true;
 	}
-	const isActive = status === 'running' || status === 'starting' || status === 'restarting' || status === 'paused';
+	const isActive = isDockerContainerActiveStatus(status);
 	return statusFilter === 'running' ? isActive : !isActive;
 }
 
@@ -4582,11 +4785,17 @@ function buildDockerComposeFileGroupsForView(
 function buildDockerComposeFileGroupForView(
 	group: DockerComposeFileContainerGroup,
 	containers: DockerContainerSummary[],
+	normalizedSearch = '',
 ): DockerComposeFileContainerGroup {
-	const status = resolveDockerComposeGroupStatus(containers, group.serviceNames || []);
+	const declaredServiceNames = resolveDockerDeclaredServiceNamesForView(group);
+	const visibleDeclaredServiceNames = normalizedSearch
+		? declaredServiceNames.filter(serviceName => serviceName.toLowerCase().includes(normalizedSearch))
+		: declaredServiceNames;
+	const status = resolveDockerComposeGroupStatus(containers, declaredServiceNames);
 	return {
 		...group,
 		containers,
+		serviceNames: visibleDeclaredServiceNames,
 		status: status.status,
 		statusTone: status.statusTone,
 		statusText: status.statusText,
@@ -6354,11 +6563,23 @@ const styles: Record<string, React.CSSProperties> = {
 		background: 'color-mix(in srgb, var(--vscode-sideBar-background) 68%, transparent)',
 		minWidth: 0,
 	},
+	dockerSummaryMetricValueRow: {
+		display: 'flex',
+		alignItems: 'center',
+		justifyContent: 'space-between',
+		gap: '6px',
+		minWidth: 0,
+	},
 	dockerSummaryLabel: {
 		fontSize: '10px',
 		fontWeight: 700,
 		color: 'var(--vscode-descriptionForeground)',
 		textTransform: 'uppercase',
+	},
+	dockerSummaryMetricAction: {
+		flexShrink: 0,
+		display: 'inline-flex',
+		alignItems: 'center',
 	},
 	dockerSummaryValue: {
 		fontSize: '15px',
@@ -6414,7 +6635,6 @@ const styles: Record<string, React.CSSProperties> = {
 		fontSize: '11px',
 	},
 	dockerSearchInput: {
-		gridColumn: '1 / -1',
 		width: '100%',
 		minWidth: 0,
 		padding: '6px 8px',
@@ -6425,6 +6645,32 @@ const styles: Record<string, React.CSSProperties> = {
 		fontFamily: 'var(--vscode-font-family)',
 		fontSize: '12px',
 		boxSizing: 'border-box',
+	},
+	dockerSearchField: {
+		gridColumn: '1 / -1',
+		position: 'relative',
+		minWidth: 0,
+	},
+	dockerSearchInputWithClear: {
+		paddingRight: '30px',
+	},
+	dockerSearchClearButton: {
+		position: 'absolute',
+		top: '50%',
+		right: '6px',
+		transform: 'translateY(-50%)',
+		width: '18px',
+		height: '18px',
+		padding: 0,
+		border: 'none',
+		borderRadius: '999px',
+		background: 'transparent',
+		color: 'var(--vscode-descriptionForeground)',
+		fontFamily: 'var(--vscode-font-family)',
+		fontSize: '12px',
+		fontWeight: 700,
+		lineHeight: 1,
+		cursor: 'pointer',
 	},
 	dockerTree: {
 		display: 'flex',
@@ -6680,6 +6926,11 @@ const styles: Record<string, React.CSSProperties> = {
 		fontFamily: 'var(--vscode-font-family)',
 		cursor: 'pointer',
 	},
+	dockerTableExpandButton: {
+		height: '18px',
+		alignSelf: 'start',
+		marginTop: '1px',
+	},
 	dockerTreeExpandButton: {
 		height: '18px',
 		alignSelf: 'start',
@@ -6820,6 +7071,10 @@ const styles: Record<string, React.CSSProperties> = {
 		color: 'var(--vscode-descriptionForeground)',
 		wordBreak: 'break-word',
 	},
+	dockerDetailsInlineLabel: {
+		fontWeight: 600,
+		color: 'var(--vscode-foreground)',
+	},
 	dockerTable: {
 		display: 'flex',
 		flexDirection: 'column',
@@ -6834,7 +7089,7 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	dockerTableRow: {
 		display: 'grid',
-		gridTemplateColumns: 'minmax(0, 1fr) 32px 46px 46px 162px',
+		gridTemplateColumns: 'minmax(0, 1fr) 32px 46px 46px 132px',
 		alignItems: 'center',
 		gap: '8px',
 		padding: '5px 0',
@@ -6862,8 +7117,8 @@ const styles: Record<string, React.CSSProperties> = {
 		justifyContent: 'flex-start',
 		flexWrap: 'nowrap',
 		gap: '3px',
-		width: '162px',
-		minWidth: '162px',
+		width: '132px',
+		minWidth: '132px',
 	},
 	dockerTableMetricCell: {
 		justifySelf: 'end',
@@ -6872,16 +7127,40 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	dockerProjectComposeCell: {
 		display: 'inline-flex',
-		alignItems: 'center',
-		gap: '4px',
+		alignItems: 'flex-start',
+		gap: '6px',
 		minWidth: 0,
 		color: 'var(--vscode-descriptionForeground)',
+	},
+	dockerProjectComposeLabelButton: {
+		display: 'flex',
+		flexDirection: 'column',
+		alignItems: 'flex-start',
+		flex: '1 1 auto',
+		gap: '1px',
+		minWidth: 0,
+		overflow: 'hidden',
+		padding: 0,
+		border: 'none',
+		background: 'transparent',
+		color: 'inherit',
+		fontFamily: 'var(--vscode-font-family)',
+		textAlign: 'left',
+		cursor: 'pointer',
 	},
 	dockerProjectComposeLabelBlock: {
 		display: 'flex',
 		flexDirection: 'column',
+		flex: '1 1 auto',
 		gap: '1px',
 		minWidth: 0,
+		overflow: 'hidden',
+	},
+	dockerProjectComposePrimaryLabelActive: {
+		color: 'var(--vscode-foreground)',
+	},
+	dockerProjectComposePrimaryLabelMuted: {
+		color: 'var(--vscode-descriptionForeground)',
 	},
 	dockerProjectComposeLabel: {
 		minWidth: 0,

@@ -6,6 +6,15 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-05-31
+
+#### Fixed
+- The `Ветки проектов` dashboard widget now reuses already loaded prompt-project rows when it widens branch visibility to all workspace repositories, so the shared `projects` refresh fetches fresh Git snapshots only for missing repositories instead of repeating the selected-project snapshot.
+- Post-action AI review for `Получить` and `Переключить` now reuses the preceding reactive branch-row refresh and skips a second targeted project snapshot before the background review starts, so those actions settle faster while the review catches up.
+- The `Ветки проектов` dashboard widget now keeps manually chosen but unapplied branch targets across widget refreshes and `Показать все` scope changes until refreshed Git data confirms the branch became current, so background refreshes no longer reset pending switch choices.
+- The `Docker контейнеры` dashboard widget now moves the table disclosure control into the first column, lets the container name toggle the same details block, removes the extra leading compose icon from container rows, keeps only the one-line container name in the table title with ellipsis for long values, moves the `project/compose/container` path into the bottom of expanded details as `Контейнер: ...`, keeps running container titles brighter than stopped ones, and renders the same live resource bars plus history chart inside expanded table details.
+- The `Docker контейнеры` dashboard widget now keeps Docker search text, status filter, and sort order in persisted webview state, shows a clear-search button whenever the field is non-empty, no longer leaves stale inactive declared-service rows visible after filtering compose groups by search, still finds non-running containers even when the host compose-group payload only lists active rows, switches the `Запущено` summary-tile action to a workspace-wide restart whenever containers are already running, keeps the restore-previous action only when no container is running, stops running workspace containers via `docker compose down` for compose-managed groups plus reverse-order standalone stops while remembering them, restores the remembered compose services and standalone containers after a VS Code restart, and repaints Docker widget state faster after external `docker start/stop/restart` commands by keeping the Docker Engine event stream alive without the old idle timeout and automatically reconnecting it after close/error.
+
 ### 2026-05-30
 
 #### Added

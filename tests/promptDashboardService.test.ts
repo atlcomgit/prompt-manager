@@ -914,7 +914,7 @@ test('PromptDashboardService exposes workspace-wide branchProjects without widen
 	const widget = await service.refreshProjectsWidget(createPrompt({ projects: ['api'] }));
 	const branchProjectsSnapshotOptions = snapshotOptions[snapshotOptions.length - 1] || {};
 
-	assert.deepEqual(requestedProjectSets, [['api'], ['api', 'web']]);
+	assert.deepEqual(requestedProjectSets, [['api'], ['web']]);
 	assert.deepEqual(widget.data.projects.map(project => project.project), ['api']);
 	assert.deepEqual(widget.data.branchProjects?.map(project => project.project), ['api', 'web']);
 	assert.equal(branchProjectsSnapshotOptions.includeChangeDetails, true);
@@ -2936,7 +2936,7 @@ test('PromptDashboardService refreshProjectsWidget uses lightweight branch-react
 	service.dispose();
 });
 
-test('PromptDashboardService targeted reactive refresh preserves branch widget cache and avoids a second workspace snapshot', async () => {
+test('PromptDashboardService targeted reactive refresh preserves branch widget cache and reuses already loaded branch projects', async () => {
 	const requestedProjectSets: string[][] = [];
 	let currentBranch = 'main';
 	const workspaceFolders = new Map([
@@ -3000,7 +3000,7 @@ test('PromptDashboardService targeted reactive refresh preserves branch widget c
 		['api'],
 	);
 
-	assert.deepEqual(requestedProjectSets, [['api'], ['api', 'web'], ['api']]);
+	assert.deepEqual(requestedProjectSets, [['api'], ['web'], ['api']]);
 	assert.equal(widget.data.projects[0]?.currentBranch, 'develop');
 	assert.equal(widget.data.projects[0]?.recentCommits[0]?.subject, 'Commit api');
 	assert.equal(widget.data.branchProjects?.length, 2);
@@ -3064,11 +3064,76 @@ test('PromptDashboardService analyzeParallelReview refreshes only targeted proje
 	const result = await service.analyzeParallelReview(prompt, undefined, undefined, { projectNames: ['api'] });
 	const cachedWidget = (service as any).buildProjectsWidgetFromCache((service as any).createScope(prompt));
 
-	assert.deepEqual(requestedProjectSets, [['api'], ['api', 'web'], ['api']]);
+	assert.deepEqual(requestedProjectSets, [['api'], ['web'], ['api']]);
 	assert.equal(pipelineCalls, 1);
 	assert.equal(result.status, 'completed');
 	assert.equal(cachedWidget.data.projects.length, 1);
 	assert.equal(cachedWidget.data.branchProjects?.length, 2);
+	service.dispose();
+});
+
+test('PromptDashboardService analyzeParallelReview reuses already refreshed project rows when requested', async () => {
+	const requestedProjectSets: string[][] = [];
+	let pipelineCalls = 0;
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+		['web', '/workspace/web'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (
+				_paths: Map<string, string>,
+				projectNames: string[],
+			) => {
+				requestedProjectSets.push([...projectNames]);
+				return {
+					trackedBranches: ['main'],
+					projects: projectNames.map(project => createSnapshotProject(project, {
+						recentCommits: [{
+							sha: `${project}-sha`,
+							shortSha: `${project}-sha`,
+							subject: `Commit ${project}`,
+							author: 'Dev',
+							committedAt: '2026-04-29T10:00:00.000Z',
+							refNames: [],
+						}],
+					})),
+				};
+			},
+			getGitOverlayProjectPipelineStatus: async () => {
+				pipelineCalls += 1;
+				return null;
+			},
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	const prompt = createPrompt({ projects: ['api'] });
+	await service.refreshProjectsWidget(prompt, undefined, undefined, 'display');
+	const result = await service.analyzeParallelReview(
+		prompt,
+		undefined,
+		undefined,
+		{ projectNames: ['api'], skipProjectsRefresh: true } as any,
+	);
+
+	assert.deepEqual(requestedProjectSets, [['api'], ['web']]);
+	assert.equal(pipelineCalls, 0);
+	assert.equal(result.status, 'completed');
 	service.dispose();
 });
 

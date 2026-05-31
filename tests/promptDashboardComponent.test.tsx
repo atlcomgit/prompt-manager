@@ -11,6 +11,7 @@ import {
 	isPromptDashboardBranchActionBusy,
 	normalizePromptDashboardDockerWidgetState,
 	reorderPromptDashboardSections,
+	resolveBranchDraftRefreshProjects,
 	resolvePromptDashboardColumnDropIndicator,
 	reconcileBranchDrafts,
 	resolveFilteredDockerProjects,
@@ -28,7 +29,7 @@ import type {
 	PromptDashboardSnapshot,
 } from '../src/types/promptDashboard.js';
 import type { DockerContainerSummary } from '../src/types/docker.js';
-import { buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction } from '../src/utils/promptDashboard.js';
+import { buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction } from '../src/utils/promptDashboard.js';
 
 type TestWindow = Window & { __LOCALE__?: string };
 
@@ -308,6 +309,7 @@ function renderDashboard(
 		onOpenDiff: () => { },
 		onOpenFilePatch: () => { },
 		onDockerAction: () => { },
+		onDockerWorkspaceAction: () => { },
 		onDockerComposeAction: () => { },
 		onOpenDockerComposeFile: () => { },
 		onOpenDockerLogs: () => { },
@@ -319,15 +321,27 @@ function renderDashboard(
 test('normalizePromptDashboardDockerWidgetState keeps valid view mode and unique expanded containers', () => {
 	assert.deepEqual(normalizePromptDashboardDockerWidgetState({
 		viewMode: 'table',
+		statusFilter: 'stopped',
+		search: 'worker',
+		sortBy: 'memory',
 		expandedContainerIds: ['container-a', '', 'container-a', 42],
 	}), {
 		viewMode: 'table',
+		statusFilter: 'stopped',
+		search: 'worker',
+		sortBy: 'memory',
 		expandedContainerIds: ['container-a'],
 	});
 	assert.deepEqual(normalizePromptDashboardDockerWidgetState({
 		viewMode: 'invalid',
+		statusFilter: 'invalid',
+		search: null,
+		sortBy: 'invalid',
 		expandedContainerIds: null,
 	}), {
+		statusFilter: 'all',
+		search: '',
+		sortBy: 'status',
 		expandedContainerIds: [],
 	});
 });
@@ -389,6 +403,184 @@ test('resolveFilteredDockerProjects excludes active lifecycle states from the st
 	assert.equal(projects[0].containers[0].id, 'container-stopped');
 	assert.equal(projects[0].composeFileGroups.length, 0);
 	assert.equal(projects[0].composeFiles.length, 0);
+});
+
+test('resolveFilteredDockerProjects search hides inactive declared-service leftovers from filtered compose groups', () => {
+	const runningContainer = createDockerContainer({
+		id: 'container-running-live',
+		name: 'api-live-1',
+		service: 'api-service',
+	});
+	const stoppedContainer = createDockerContainer({
+		id: 'container-stopped-hidden',
+		name: 'worker-hidden-1',
+		service: 'worker-service',
+		status: 'stopped',
+		statusTone: 'neutral',
+		statusText: 'Exited 2 minutes ago',
+		startedAt: undefined,
+		uptimeMs: 0,
+		stats: undefined,
+		samples: [],
+	});
+	const composeFile = { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' };
+	const filteredProjects = resolveFilteredDockerProjects({
+		enabled: true,
+		available: true,
+		generatedAt: '2026-04-29T10:00:00.000Z',
+		defaultViewMode: 'table',
+		composeFilePatterns: [],
+		projects: [{
+			project: 'api',
+			projectPath: '/workspace/api',
+			composeFiles: [composeFile],
+			composeFileGroups: [{
+				composeFile,
+				containers: [runningContainer, stoppedContainer],
+				serviceNames: ['api-service', 'worker-service', 'db'],
+				runningCount: 1,
+				stoppedCount: 1,
+				warningCount: 0,
+				errorCount: 0,
+			}],
+			containers: [runningContainer, stoppedContainer],
+			runningCount: 1,
+			stoppedCount: 1,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		totalContainers: 2,
+		runningContainers: 1,
+		stoppedContainers: 1,
+		warningContainers: 0,
+		errorContainers: 0,
+	}, 'all', 'api-live-1', 'status');
+
+	assert.equal(filteredProjects[0].composeFileGroups[0].containers.length, 1);
+	assert.equal(filteredProjects[0].composeFileGroups[0].containers[0].id, 'container-running-live');
+	assert.deepEqual(filteredProjects[0].composeFileGroups[0].serviceNames, []);
+	assert.deepEqual(buildDockerTableRows(filteredProjects).map(row => row.kind === 'container' ? row.container.id : row.kind), ['container-running-live']);
+});
+
+test('resolveFilteredDockerProjects search keeps stopped containers even when host compose groups omit them', () => {
+	const runningContainer = createDockerContainer({
+		id: 'container-running-visible',
+		name: 'api-live-1',
+		service: 'api-service',
+	});
+	const stoppedContainer = createDockerContainer({
+		id: 'container-stopped-searchable',
+		name: 'worker-stopped-1',
+		service: 'worker-service',
+		status: 'stopped',
+		statusTone: 'neutral',
+		statusText: 'Exited 3 minutes ago',
+		startedAt: undefined,
+		uptimeMs: 0,
+		stats: undefined,
+		samples: [],
+	});
+	const composeFile = { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' };
+	const filteredProjects = resolveFilteredDockerProjects({
+		enabled: true,
+		available: true,
+		generatedAt: '2026-04-29T10:00:00.000Z',
+		defaultViewMode: 'table',
+		composeFilePatterns: [],
+		projects: [{
+			project: 'api',
+			projectPath: '/workspace/api',
+			composeFiles: [composeFile],
+			composeFileGroups: [{
+				composeFile,
+				containers: [runningContainer],
+				serviceNames: ['api-service', 'worker-service'],
+				runningCount: 1,
+				stoppedCount: 0,
+				warningCount: 0,
+				errorCount: 0,
+			}],
+			containers: [runningContainer, stoppedContainer],
+			runningCount: 1,
+			stoppedCount: 1,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		totalContainers: 2,
+		runningContainers: 1,
+		stoppedContainers: 1,
+		warningContainers: 0,
+		errorContainers: 0,
+	}, 'all', 'worker-stopped-1', 'status');
+
+	assert.equal(filteredProjects[0].containers.length, 1);
+	assert.equal(filteredProjects[0].containers[0].id, 'container-stopped-searchable');
+	assert.equal(filteredProjects[0].composeFileGroups.length, 1);
+	assert.equal(filteredProjects[0].composeFileGroups[0].containers[0].id, 'container-stopped-searchable');
+	assert.deepEqual(buildDockerTableRows(filteredProjects).map(row => row.kind === 'container' ? row.container.id : row.kind), ['container-stopped-searchable']);
+});
+
+test('PromptDashboard restores persisted Docker search controls and shows a clear-search button', () => {
+	const runningContainer = createDockerContainer({
+		id: 'container-running-alpha',
+		name: 'alpha-live-1',
+		service: 'alpha-service',
+	});
+	const stoppedContainer = createDockerContainer({
+		id: 'container-stopped-worker',
+		name: 'worker-match-1',
+		service: 'worker-service',
+		status: 'stopped',
+		statusTone: 'neutral',
+		statusText: 'Exited 1 minute ago',
+		startedAt: undefined,
+		uptimeMs: 0,
+		stats: undefined,
+		samples: [],
+	});
+	const composeFile = { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' };
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [composeFile],
+		composeFileGroups: [{
+			composeFile,
+			containers: [runningContainer, stoppedContainer],
+			serviceNames: ['alpha-service', 'worker-service'],
+			runningCount: 1,
+			stoppedCount: 1,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [runningContainer, stoppedContainer],
+		runningCount: 1,
+		stoppedCount: 1,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 2;
+	snapshot.docker.data.runningContainers = 1;
+	snapshot.docker.data.stoppedContainers = 1;
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({
+				viewMode: 'table',
+				statusFilter: 'stopped',
+				search: 'worker-match-1',
+				sortBy: 'name',
+				expandedContainerIds: [],
+			}),
+		}),
+	});
+
+	assert.match(markup, /value="worker-match-1"/);
+	assert.match(markup, /aria-label="Сбросить поиск"/);
+	assert.match(markup, /<option value="stopped" selected="">Остановлены<\/option>/);
+	assert.match(markup, /<option value="name" selected="">Имя<\/option>/);
+	assert.match(markup, /worker-match-1/);
+	assert.doesNotMatch(markup, /alpha-live-1/);
 });
 
 test('buildDockerTableRows keeps the sorted row order supplied by visible Docker groups', () => {
@@ -474,7 +666,7 @@ test('PromptDashboard restores Docker view and renders row action icons in the c
 	assert.match(markup, /aria-label="Удалить остановленный контейнер"/);
 	assert.match(markup, /<button[^>]*style="[^"]*color:var\(--vscode-icon-foreground, var\(--vscode-foreground\)\)[^"]*"[^>]*aria-label="Открыть логи контейнера"/);
 	assert.match(markup, /<button[^>]*style="[^"]*color:var\(--vscode-disabledForeground, var\(--vscode-descriptionForeground\)\)[^"]*"[^>]*aria-label="Удалить остановленный контейнер"/);
-	assert.match(markup, /width:162px/);
+	assert.match(markup, /width:132px/);
 	assert.match(markup, /12\.5%/);
 	assert.match(markup, /Порты/);
 	assert.doesNotMatch(markup, /aria-label="Открыть compose-файл docker-compose\.yml"/);
@@ -489,6 +681,38 @@ test('PromptDashboard restores Docker view and renders row action icons in the c
 		}),
 	});
 	assert.match(busyMarkup, /aria-label="Перезапустить контейнер" disabled=""[\s\S]*pm-spin/);
+});
+
+test('PromptDashboard renders Docker summary restart action for running containers and restore action otherwise', () => {
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.totalContainers = 4;
+	snapshot.docker.data.runningContainers = 3;
+	snapshot.docker.data.stoppedContainers = 1;
+	snapshot.docker.data.restorableContainersCount = 2;
+
+	const enabledMarkup = renderDashboard(snapshot, {
+		busyAction: buildPromptDashboardDockerWorkspaceBusyAction({ action: 'restartAll' }),
+	});
+	assert.match(enabledMarkup, /aria-label="Перезапустить все запущенные контейнеры рабочей области" disabled=""[\s\S]*pm-spin/);
+	assert.match(enabledMarkup, /aria-label="Остановить все контейнеры рабочей области"/);
+
+	const disabledSnapshot = createSnapshot([]);
+	disabledSnapshot.docker.data.totalContainers = 1;
+	disabledSnapshot.docker.data.runningContainers = 0;
+	disabledSnapshot.docker.data.stoppedContainers = 1;
+	disabledSnapshot.docker.data.restorableContainersCount = 2;
+	const disabledMarkup = renderDashboard(disabledSnapshot);
+	assert.match(disabledMarkup, /aria-label="Запустить предыдущие контейнеры \(2\)"/);
+	assert.doesNotMatch(disabledMarkup, /aria-label="Перезапустить все запущенные контейнеры рабочей области"/);
+
+	const unavailableSnapshot = createSnapshot([]);
+	unavailableSnapshot.docker.data.totalContainers = 1;
+	unavailableSnapshot.docker.data.runningContainers = 0;
+	unavailableSnapshot.docker.data.stoppedContainers = 1;
+	unavailableSnapshot.docker.data.restorableContainersCount = 0;
+	const unavailableMarkup = renderDashboard(unavailableSnapshot);
+	assert.match(unavailableMarkup, /aria-label="Запустить предыдущие контейнеры"[^>]*disabled=""/);
+	assert.match(disabledMarkup, /aria-label="Остановить все контейнеры рабочей области"[^>]*disabled=""/);
 });
 
 test('PromptDashboard renders Docker Compose project orchestration icon buttons', () => {
@@ -1239,8 +1463,82 @@ test('PromptDashboard flattens Docker table rows while keeping empty compose fil
 	});
 
 	assert.match(markup, /Проект\/Compose\/Контейнер/);
-	assert.match(markup, /api\/docker-compose\.yml[\s\S]*web\/docker-compose\.yml[\s\S]*api-service/);
+	assert.match(markup, /api\/docker-compose\.yml[\s\S]*api-service/);
 	assert.doesNotMatch(markup, /Проект\/Compose<\/span>[\s\S]*<span>Сервис<\/span>/);
+});
+
+test('PromptDashboard table view moves Docker disclosure into the first column and renders expanded runtime charts', () => {
+	const runningContainer = createDockerContainer({
+		name: 'api-service-1-with-a-very-long-container-name-for-ellipsis-check',
+		samples: [
+			{
+				readAt: '2026-04-29T09:56:00.000Z',
+				cpuPercent: 8,
+				memoryPercent: 8.4,
+				memoryUsageBytes: 88 * 1024 * 1024,
+				networkRxRateBytesPerSecond: 120,
+				networkTxRateBytesPerSecond: 80,
+			},
+			{
+				readAt: '2026-04-29T10:00:00.000Z',
+				cpuPercent: 12.5,
+				memoryPercent: 9.8,
+				memoryUsageBytes: 100 * 1024 * 1024,
+				networkRxRateBytesPerSecond: 100,
+				networkTxRateBytesPerSecond: 200,
+			},
+		],
+	});
+	const stoppedContainer = createDockerContainer({
+		id: 'container-stopped123456',
+		shortId: 'container-st',
+		name: 'worker-service-1',
+		service: 'worker-service',
+		status: 'stopped',
+		statusTone: 'neutral',
+		statusText: 'Exited (0) 2 minutes ago',
+		finishedAt: '2026-04-29T09:58:00.000Z',
+		uptimeMs: 0,
+		stats: undefined,
+		samples: [],
+	});
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [runningContainer, stoppedContainer],
+			runningCount: 1,
+			stoppedCount: 1,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [runningContainer, stoppedContainer],
+		runningCount: 1,
+		stoppedCount: 1,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 2;
+	snapshot.docker.data.runningContainers = 1;
+	snapshot.docker.data.stoppedContainers = 1;
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'table', expandedContainerIds: [runningContainer.id] }),
+		}),
+	});
+
+	assert.match(markup, /aria-label="Скрыть детали контейнера api-service-1-with-a-very-long-container-name-for-ellipsis-check"[^>]*aria-expanded="true"[^>]*>▾<\/button>/);
+	assert.match(markup, /<button[^>]*aria-label="Скрыть детали контейнера api-service-1-with-a-very-long-container-name-for-ellipsis-check"[^>]*aria-expanded="true"[^>]*>[\s\S]*api-service-1-with-a-very-long-container-name-for-ellipsis-check[\s\S]*<\/button>/);
+	assert.doesNotMatch(markup, /api-service-1-with-a-very-long-container-name-for-ellipsis-check<\/span><span style="[^"]*font-size:11px[^"]*">api\/docker-compose\.yml\/api-service-1-with-a-very-long-container-name-for-ellipsis-check<\/span>/);
+	assert.doesNotMatch(markup, /M3\.5 3\.25h3\.25l1 1\.35h4\.75v8\.15h-9z/);
+	assert.match(markup, /<span style="[^"]*overflow:hidden[^"]*text-overflow:ellipsis[^"]*white-space:nowrap[^"]*font-weight:700[^"]*color:var\(--vscode-foreground\)[^"]*">api-service-1-with-a-very-long-container-name-for-ellipsis-check<\/span>/);
+	assert.match(markup, /<span style="[^"]*font-weight:700[^"]*color:var\(--vscode-descriptionForeground\)[^"]*">worker-service-1<\/span>/);
+	assert.match(markup, /Контейнер:<\/span> api\/docker-compose\.yml\/api-service-1-with-a-very-long-container-name-for-ellipsis-check/);
+	assert.match(markup, /СЕТЬ[\s\S]*5 мин/);
 });
 
 test('PromptDashboard list view keeps containers grouped under their compose file', () => {
@@ -1779,6 +2077,25 @@ test('reconcileBranchDrafts drops drafts that already became the refreshed curre
 	});
 
 	assert.deepEqual(nextDrafts, { web: 'develop' });
+});
+
+test('resolveBranchDraftRefreshProjects keeps workspace-wide drafts available during refreshes', () => {
+	const selectedProjects = [createProject({ project: 'api' })];
+	const branchScopeProjects = [
+		createProject({ project: 'api' }),
+		createProject({ project: 'web', repositoryPath: '/workspace/web', currentBranch: 'main' }),
+	];
+
+	const nextDrafts = reconcileBranchDrafts(
+		resolveBranchDraftRefreshProjects(selectedProjects, branchScopeProjects),
+		{ web: 'develop' },
+	);
+
+	assert.deepEqual(nextDrafts, { web: 'develop' });
+	assert.deepEqual(
+		resolveBranchDraftRefreshProjects(selectedProjects, branchScopeProjects).map(project => project.project),
+		['api', 'web'],
+	);
 });
 
 test('resolveBranchWidgetProjects switches between selected and workspace-wide branch rows', () => {

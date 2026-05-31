@@ -4,7 +4,7 @@
 
 import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
-import type { DockerComposeProjectActionKind, DockerContainerActionKind } from './docker.js';
+import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerWorkspaceActionKind } from './docker.js';
 import type {
 	PromptDashboardAnalysisState,
 	PromptDashboardCollapsedSections,
@@ -107,6 +107,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'promptDashboardSwitchBranch'; prompt: Prompt; project: string; branch: string; requestId?: string }
 	| { type: 'promptDashboardSwitchBranches'; prompt: Prompt; branchesByProject: Record<string, string>; requestId?: string }
 	| { type: 'promptDashboardDockerAction'; prompt?: Prompt; containerId: string; action: DockerContainerActionKind; requestId?: string }
+	| { type: 'promptDashboardDockerWorkspaceAction'; prompt?: Prompt; action: DockerWorkspaceActionKind; requestId?: string }
 	| { type: 'promptDashboardDockerComposeAction'; prompt?: Prompt; projectPath: string; composeFilePath: string; action: DockerComposeProjectActionKind; requestId?: string }
 	| { type: 'promptDashboardOpenDockerComposeFile'; projectPath: string; composeFilePath: string; requestId?: string }
 	| { type: 'promptDashboardOpenDockerLogs'; containerId: string; requestId?: string }

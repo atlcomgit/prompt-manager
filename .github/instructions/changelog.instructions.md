@@ -1,3 +1,20 @@
+## 144: Ускорение виджета Ветки проектов
+
+- Дата: 2026-05-31.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Ускорен виджет `Ветки проектов`: shared refresh секции `projects` теперь переиспользует уже собранные строки выбранных prompt-проектов и догружает Git snapshot только для отсутствующих workspace-репозиториев, а post-action AI follow-up после `Получить` и `Переключить` больше не запускает второй targeted refresh сразу после `reactive-branches` repaint; дополнительно локально выбранная, но ещё не применённая ветка больше не сбрасывается при refresh и после возврата из режима `Показать все`.
+- Ключевые моменты: `PromptDashboardService.loadBranchWidgetProjectsData()` принимает уже гидратированные prompt-project summaries и собирает `branchProjects` из них плюс только недостающих workspace-проектов, чтобы не повторять selected snapshot при расширении branch widget до `Показать все`; `analyzeParallelReview()` получил safe reuse-path `skipProjectsRefresh`, а `EditorPanelManager` использует его после branch switch/pull flows, поэтому быстрый repaint строк и фоновый AI review больше не дублируют один и тот же targeted Git refresh; `PromptDashboard` теперь reconcile-ит локальные branch drafts по полному branch scope вместо одних selected rows, поэтому refresh не теряет workspace-only выбор до фактического подтверждения новой current branch.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/webview/editor/components/PromptDashboard.tsx
+  src/providers/editorPanelManager.ts
+  src/services/promptDashboardService.ts
+  tests/promptDashboardComponent.test.tsx
+  tests/editorPanelManager.test.ts
+  tests/promptDashboardService.test.ts
+
 ## 141: Зависание страницы и дубликаты
 
 - Дата: 2026-05-30.

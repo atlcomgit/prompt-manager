@@ -5,9 +5,15 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
 	PromptDashboard,
+	buildDockerSparklineVisibleSamples,
+	buildDockerTableRows,
 	buildWidgetGridColumns,
+	isPromptDashboardBranchActionBusy,
+	normalizePromptDashboardDockerWidgetState,
 	reorderPromptDashboardSections,
 	reconcileBranchDrafts,
+	resolveFilteredDockerProjects,
+	resolvePromptDashboardDockerLiveMetricsVisible,
 	resolveBranchWidgetProjects,
 	resolveExpandedDetailsHydrationRequest,
 	resolveVisibleLineStatsParts,
@@ -20,15 +26,18 @@ import type {
 	PromptDashboardSectionOrder,
 	PromptDashboardSnapshot,
 } from '../src/types/promptDashboard.js';
+import type { DockerContainerSummary } from '../src/types/docker.js';
+import { buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction } from '../src/utils/promptDashboard.js';
 
 type TestWindow = Window & { __LOCALE__?: string };
 
 /** Provides minimal webview globals required by shared i18n hooks. */
-function withDashboardEnvironment<T>(callback: () => T): T {
+function withDashboardEnvironment<T>(callback: () => T, options?: { localStorage?: Storage }): T {
 	const globalScope = globalThis as typeof globalThis & { window?: TestWindow };
 	const previousWindow = globalScope.window;
 	const activeWindow = previousWindow || {} as TestWindow;
 	const previousLocale = activeWindow.__LOCALE__;
+	const previousLocalStorage = Object.getOwnPropertyDescriptor(activeWindow, 'localStorage');
 
 	if (previousWindow === undefined) {
 		Object.defineProperty(globalScope, 'window', {
@@ -39,10 +48,24 @@ function withDashboardEnvironment<T>(callback: () => T): T {
 	}
 
 	activeWindow.__LOCALE__ = 'ru';
+	if (options?.localStorage) {
+		Object.defineProperty(activeWindow, 'localStorage', {
+			value: options.localStorage,
+			configurable: true,
+		});
+	}
 
 	try {
 		return callback();
 	} finally {
+		if (options?.localStorage) {
+			if (previousLocalStorage) {
+				Object.defineProperty(activeWindow, 'localStorage', previousLocalStorage);
+			} else {
+				Reflect.deleteProperty(activeWindow as unknown as Record<string, unknown>, 'localStorage');
+			}
+		}
+
 		if (previousLocale === undefined) {
 			delete activeWindow.__LOCALE__;
 		} else {
@@ -53,6 +76,19 @@ function withDashboardEnvironment<T>(callback: () => T): T {
 			Reflect.deleteProperty(globalScope as Record<string, unknown>, 'window');
 		}
 	}
+}
+
+/** Creates a small Storage implementation for SSR dashboard tests. */
+function createStorageMock(initial: Record<string, string> = {}): Storage {
+	const values = new Map(Object.entries(initial));
+	return {
+		get length() { return values.size; },
+		clear: () => values.clear(),
+		getItem: (key: string) => values.get(key) ?? null,
+		key: (index: number) => Array.from(values.keys())[index] ?? null,
+		removeItem: (key: string) => { values.delete(key); },
+		setItem: (key: string, value: string) => { values.set(key, value); },
+	};
 }
 
 /** Builds a stable dashboard project fixture for UI render assertions. */
@@ -134,6 +170,44 @@ function createProject(overrides: Partial<PromptDashboardProjectSummary> = {}): 
 	};
 }
 
+/** Builds a Docker container fixture for dashboard widget render assertions. */
+function createDockerContainer(overrides: Partial<DockerContainerSummary> = {}): DockerContainerSummary {
+	return {
+		id: 'container-abc123456789',
+		shortId: 'container-ab',
+		name: 'api-service-1',
+		project: 'api',
+		service: 'api-service',
+		image: 'example/api:latest',
+		imageId: 'sha256:image',
+		command: 'node server.js',
+		createdAt: '2026-04-29T09:00:00.000Z',
+		startedAt: '2026-04-29T09:05:00.000Z',
+		uptimeMs: 300000,
+		status: 'running',
+		statusTone: 'ok',
+		statusText: 'Up 5 minutes',
+		composeWorkingDir: '/workspace/api',
+		composeFilePaths: ['/workspace/api/docker-compose.yml'],
+		ports: [],
+		mounts: [],
+		labels: {},
+		stats: {
+			readAt: '2026-04-29T10:00:00.000Z',
+			cpuPercent: 12.5,
+			memoryUsageBytes: 104857600,
+			memoryLimitBytes: 1073741824,
+			memoryPercent: 9.8,
+			networkRxBytes: 1000,
+			networkTxBytes: 2000,
+			networkRxRateBytesPerSecond: 100,
+			networkTxRateBytesPerSecond: 200,
+		},
+		samples: [],
+		...overrides,
+	};
+}
+
 /** Builds a minimal dashboard snapshot with configurable project cache state. */
 function createSnapshot(
 	projects: PromptDashboardProjectSummary[],
@@ -160,6 +234,23 @@ function createSnapshot(
 			kind: 'projects',
 			cache: { status: projectsCacheStatus, source: 'refresh', updatedAt: '2026-04-29T10:00:00.000Z' },
 			data: { projects, ...(branchProjects ? { branchProjects } : {}), ...(loadedSections ? { loadedSections } : {}) },
+		},
+		docker: {
+			kind: 'docker',
+			cache: { status: 'fresh', source: 'cache', updatedAt: '2026-04-29T10:00:00.000Z' },
+			data: {
+				enabled: true,
+				available: true,
+				generatedAt: '2026-04-29T10:00:00.000Z',
+				defaultViewMode: 'tree',
+				composeFilePatterns: [],
+				projects: [],
+				totalContainers: 0,
+				runningContainers: 0,
+				stoppedContainers: 0,
+				warningContainers: 0,
+				errorContainers: 0,
+			},
 		},
 		aiAnalysis: {
 			kind: 'aiAnalysis',
@@ -191,7 +282,12 @@ function createActivityItem(
 /** Renders the dashboard component into static markup for regression checks. */
 function renderDashboard(
 	snapshot: PromptDashboardSnapshot | null,
-	options?: { busyAction?: string | null; collapsedSections?: Record<string, boolean>; sectionOrder?: PromptDashboardSectionOrder },
+	options?: {
+		busyAction?: string | null;
+		collapsedSections?: Record<string, boolean>;
+		sectionOrder?: PromptDashboardSectionOrder;
+		localStorage?: Storage;
+	},
 ): string {
 	return withDashboardEnvironment(() => renderToStaticMarkup(React.createElement(PromptDashboard, {
 		snapshot,
@@ -210,9 +306,1018 @@ function renderDashboard(
 		onSwitchBranches: () => { },
 		onOpenDiff: () => { },
 		onOpenFilePatch: () => { },
+		onDockerAction: () => { },
+		onDockerComposeAction: () => { },
+		onOpenDockerComposeFile: () => { },
+		onOpenDockerLogs: () => { },
+		onOpenDockerTerminal: () => { },
 		showGitFlowAction: true,
-	})));
+	})), { localStorage: options?.localStorage });
 }
+
+test('normalizePromptDashboardDockerWidgetState keeps valid view mode and unique expanded containers', () => {
+	assert.deepEqual(normalizePromptDashboardDockerWidgetState({
+		viewMode: 'table',
+		expandedContainerIds: ['container-a', '', 'container-a', 42],
+	}), {
+		viewMode: 'table',
+		expandedContainerIds: ['container-a'],
+	});
+	assert.deepEqual(normalizePromptDashboardDockerWidgetState({
+		viewMode: 'invalid',
+		expandedContainerIds: null,
+	}), {
+		expandedContainerIds: [],
+	});
+});
+
+test('resolveFilteredDockerProjects excludes active lifecycle states from the stopped filter', () => {
+	const restartingContainer = createDockerContainer({
+		id: 'container-restarting',
+		name: 'worker-service-1',
+		service: 'worker-service',
+		status: 'restarting',
+		statusTone: 'warning',
+	});
+	const stoppedContainer = createDockerContainer({
+		id: 'container-stopped',
+		name: 'db-service-1',
+		service: 'db-service',
+		status: 'stopped',
+		statusTone: 'neutral',
+		startedAt: undefined,
+		uptimeMs: 0,
+	});
+	const composeFile = { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' };
+	const projects = resolveFilteredDockerProjects({
+		enabled: true,
+		available: true,
+		generatedAt: '2026-04-29T10:00:00.000Z',
+		defaultViewMode: 'tree',
+		composeFilePatterns: [],
+		projects: [{
+			project: 'api',
+			projectPath: '/workspace/api',
+			composeFiles: [composeFile],
+			composeFileGroups: [{
+				composeFile,
+				containers: [restartingContainer],
+				serviceNames: [],
+				status: 'running',
+				statusTone: 'ok',
+				statusText: 'Запущено 1/1',
+				runningCount: 1,
+				stoppedCount: 0,
+				warningCount: 1,
+				errorCount: 0,
+			}],
+			containers: [restartingContainer, stoppedContainer],
+			runningCount: 1,
+			stoppedCount: 1,
+			warningCount: 1,
+			errorCount: 0,
+		}],
+		totalContainers: 2,
+		runningContainers: 1,
+		stoppedContainers: 1,
+		warningContainers: 1,
+		errorContainers: 0,
+	}, 'stopped', '', 'name');
+
+	assert.equal(projects[0].containers.length, 1);
+	assert.equal(projects[0].containers[0].id, 'container-stopped');
+	assert.equal(projects[0].composeFileGroups.length, 0);
+	assert.equal(projects[0].composeFiles.length, 0);
+});
+
+test('buildDockerTableRows keeps the sorted row order supplied by visible Docker groups', () => {
+	const baseStats = createDockerContainer().stats!;
+	const highCpuContainer = createDockerContainer({
+		id: 'container-high',
+		name: 'zzz-service-1',
+		service: 'zzz-service',
+		stats: { ...baseStats, cpuPercent: 92.4 },
+	});
+	const lowCpuContainer = createDockerContainer({
+		id: 'container-low',
+		name: 'aaa-service-1',
+		service: 'aaa-service',
+		stats: { ...baseStats, cpuPercent: 4.1 },
+	});
+	const composeFile = { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' };
+	const rows = buildDockerTableRows([{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [composeFile],
+		composeFileGroups: [{
+			composeFile,
+			containers: [highCpuContainer, lowCpuContainer],
+			serviceNames: [],
+			status: 'running',
+			statusTone: 'ok',
+			statusText: 'Запущено 2/2',
+			runningCount: 2,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [highCpuContainer, lowCpuContainer],
+		runningCount: 2,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}]);
+
+	assert.equal(rows.length, 2);
+	assert.match(rows[0].label, /zzz-service-1/);
+	assert.match(rows[1].label, /aaa-service-1/);
+});
+
+test('PromptDashboard restores Docker view and renders row action icons in the container title row', () => {
+	const container = createDockerContainer();
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [container],
+			runningCount: 1,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [container],
+		runningCount: 1,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 1;
+	snapshot.docker.data.runningContainers = 1;
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({
+				viewMode: 'table',
+				expandedContainerIds: [container.id],
+			}),
+		}),
+	});
+
+	assert.match(markup, /Проект\/Compose\/Контейнер/);
+	assert.match(markup, /api-service[\s\S]*aria-label="Открыть логи контейнера"/);
+	assert.match(markup, /api-service[\s\S]*aria-label="Up 5 minutes"/);
+	assert.match(markup, /<span[^>]*style="[^"]*width:18px;height:18px[^"]*border-radius:4px[^"]*"[^>]*aria-label="Up 5 minutes"/);
+	assert.match(markup, /aria-label="Удалить остановленный контейнер"/);
+	assert.match(markup, /<button[^>]*style="[^"]*color:var\(--vscode-icon-foreground, var\(--vscode-foreground\)\)[^"]*"[^>]*aria-label="Открыть логи контейнера"/);
+	assert.match(markup, /<button[^>]*style="[^"]*color:var\(--vscode-disabledForeground, var\(--vscode-descriptionForeground\)\)[^"]*"[^>]*aria-label="Удалить остановленный контейнер"/);
+	assert.match(markup, /width:162px/);
+	assert.match(markup, /12\.5%/);
+	assert.match(markup, /Порты/);
+	assert.doesNotMatch(markup, /aria-label="Открыть compose-файл docker-compose\.yml"/);
+	assert.doesNotMatch(markup, />Логи</);
+	assert.doesNotMatch(markup, />Терминал</);
+	assert.doesNotMatch(markup, />Рестарт</);
+
+	const busyMarkup = renderDashboard(snapshot, {
+		busyAction: buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'restart' }),
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'table', expandedContainerIds: [] }),
+		}),
+	});
+	assert.match(busyMarkup, /aria-label="Перезапустить контейнер" disabled=""[\s\S]*pm-spin/);
+});
+
+test('PromptDashboard renders Docker Compose project orchestration icon buttons', () => {
+	const container = createDockerContainer();
+	const workerContainer = createDockerContainer({
+		id: 'container-worker987654321',
+		shortId: 'container-wo',
+		name: 'worker-service-1',
+		service: 'worker-service',
+		composeFilePaths: ['/workspace/api/compose.worker.yml'],
+	});
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [
+			{
+				project: 'api',
+				projectPath: '/workspace/api',
+				filePath: '/workspace/api/docker-compose.yml',
+				relativePath: 'docker-compose.yml',
+			},
+			{
+				project: 'api',
+				projectPath: '/workspace/api',
+				filePath: '/workspace/api/compose.worker.yml',
+				relativePath: 'compose.worker.yml',
+			},
+		],
+		composeFileGroups: [
+			{
+				composeFile: {
+					project: 'api',
+					projectPath: '/workspace/api',
+					filePath: '/workspace/api/docker-compose.yml',
+					relativePath: 'docker-compose.yml',
+				},
+				containers: [container],
+				runningCount: 1,
+				stoppedCount: 0,
+				warningCount: 0,
+				errorCount: 0,
+			},
+			{
+				composeFile: {
+					project: 'api',
+					projectPath: '/workspace/api',
+					filePath: '/workspace/api/compose.worker.yml',
+					relativePath: 'compose.worker.yml',
+				},
+				containers: [workerContainer],
+				runningCount: 1,
+				stoppedCount: 0,
+				warningCount: 0,
+				errorCount: 0,
+			},
+		],
+		containers: [container, workerContainer],
+		runningCount: 2,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 2;
+	snapshot.docker.data.runningContainers = 2;
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({
+				expandedContainerIds: [
+					'project:/workspace/api',
+					'compose:/workspace/api:/workspace/api/docker-compose.yml',
+					'compose:/workspace/api:/workspace/api/compose.worker.yml',
+				],
+			}),
+		}),
+	});
+
+	assert.match(markup, /api[\s\S]*docker-compose\.yml[\s\S]*api-service/);
+	assert.match(markup, /api-service[\s\S]*compose\.worker\.yml[\s\S]*worker-service/);
+	assert.match(markup, /aria-label="Открыть compose-файл docker-compose.yml"/);
+	assert.match(markup, /aria-label="Открыть compose-файл compose.worker.yml"/);
+	assert.match(markup, /aria-label="Перезапустить compose-файл docker-compose.yml"/);
+	assert.match(markup, /aria-label="Остановить compose-файл docker-compose.yml"/);
+	assert.doesNotMatch(markup, /aria-label="Запустить compose-файл docker-compose.yml"/);
+	assert.match(markup, /<button[^>]*style="[^"]*background:transparent[^"]*"[^>]*aria-label="Открыть логи контейнера"/);
+	assert.doesNotMatch(markup, />up</);
+	assert.doesNotMatch(markup, />down</);
+});
+
+test('PromptDashboard renders Docker tree project and compose disclosures', () => {
+	const container = createDockerContainer();
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [container],
+			runningCount: 1,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [container],
+		runningCount: 1,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 1;
+	snapshot.docker.data.runningContainers = 1;
+
+	const collapsedMarkup = renderDashboard(snapshot);
+	assert.match(collapsedMarkup, /aria-label="Раскрыть Docker-проект"/);
+	assert.doesNotMatch(collapsedMarkup, /docker-compose\.yml/);
+
+	const fileExpandedStorage = createStorageMock({
+		'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({
+			expandedContainerIds: [
+				'project:/workspace/api',
+				'compose:/workspace/api:/workspace/api/docker-compose.yml',
+			],
+		}),
+	});
+	const expandedMarkup = renderDashboard(snapshot, { localStorage: fileExpandedStorage });
+	assert.match(expandedMarkup, /aria-label="Свернуть Docker-проект"/);
+	assert.match(expandedMarkup, /aria-label="Свернуть compose-файл"/);
+	assert.match(expandedMarkup, /docker-compose\.yml[\s\S]*api-service/);
+	assert.match(expandedMarkup, /grid-template-columns:auto 18px minmax\(0, 1fr\) auto;align-items:start/);
+	assert.match(expandedMarkup, /api-service-1[\s\S]*aria-label="Up 5 minutes"/);
+	assert.doesNotMatch(expandedMarkup, /api-service-1[\s\S]*>запущен<\/span>/);
+	assert.match(expandedMarkup, /└─[\s\S]*docker-compose\.yml/);
+	assert.doesNotMatch(expandedMarkup, /СЕТЬ/);
+
+	const detailsExpandedMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({
+				expandedContainerIds: [
+					'project:/workspace/api',
+					'compose:/workspace/api:/workspace/api/docker-compose.yml',
+					container.id,
+				],
+			}),
+		}),
+	});
+	assert.match(detailsExpandedMarkup, /СЕТЬ[\s\S]*>ID</);
+});
+
+test('PromptDashboard hides stopped container resource metrics and shows start action', () => {
+	const container = createDockerContainer({
+		status: 'stopped',
+		statusTone: 'neutral',
+		statusText: 'Exited 2 minutes ago',
+		startedAt: undefined,
+		finishedAt: '2026-04-29T09:55:00.000Z',
+		uptimeMs: 0,
+		stats: undefined,
+		samples: [],
+	});
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [container],
+			serviceNames: ['api-service'],
+			status: 'stopped',
+			statusTone: 'neutral',
+			statusText: 'Остановлен',
+			runningCount: 0,
+			stoppedCount: 1,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [container],
+		runningCount: 0,
+		stoppedCount: 1,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 1;
+	snapshot.docker.data.stoppedContainers = 1;
+
+	const expandedTreeMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({
+				expandedContainerIds: [
+					'project:/workspace/api',
+					'compose:/workspace/api:/workspace/api/docker-compose.yml',
+					container.id,
+				],
+			}),
+		}),
+	});
+	assert.doesNotMatch(expandedTreeMarkup, />СЕТЬ<\/span>/);
+	assert.doesNotMatch(expandedTreeMarkup, />CPU<\/span>/);
+	assert.match(expandedTreeMarkup, /api-service-1[\s\S]*aria-label="Exited 2 minutes ago"/);
+	assert.match(expandedTreeMarkup, /<span[^>]*style="[^"]*width:18px;height:18px[^"]*border-radius:4px[^"]*"[^>]*aria-label="Exited 2 minutes ago"/);
+	assert.doesNotMatch(expandedTreeMarkup, /api-service-1[\s\S]*>остановлен<\/span>/);
+	assert.match(expandedTreeMarkup, /aria-label="Запустить контейнер"/);
+	assert.doesNotMatch(expandedTreeMarkup, /aria-label="Перезапустить контейнер"/);
+
+	const cardsMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'cards', expandedContainerIds: [container.id] }),
+		}),
+	});
+	assert.doesNotMatch(cardsMarkup, />СЕТЬ<\/span>/);
+	assert.doesNotMatch(cardsMarkup, />CPU<\/span>/);
+	assert.doesNotMatch(cardsMarkup, />RAM<\/span>/);
+
+	const tableMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'table', expandedContainerIds: [] }),
+		}),
+	});
+	assert.match(tableMarkup, /api-service[\s\S]*aria-label="Exited 2 minutes ago"[\s\S]*>—<\/span>[\s\S]*>—<\/span>/);
+});
+
+test('PromptDashboard formats running Docker RAM values in MiB instead of percent', () => {
+	const baseStats = createDockerContainer().stats!;
+	const container = createDockerContainer({
+		stats: {
+			...baseStats,
+			memoryUsageBytes: 4.4 * 1024 * 1024,
+			memoryPercent: 9.8,
+		},
+	});
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [container],
+			runningCount: 1,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [container],
+		runningCount: 1,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 1;
+	snapshot.docker.data.runningContainers = 1;
+
+	const cardsMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'cards', expandedContainerIds: [container.id] }),
+		}),
+	});
+	assert.match(cardsMarkup, />CPU<\/span>[\s\S]*>12\.5%<\/span>/);
+	assert.match(cardsMarkup, />RAM<\/span>[\s\S]*>4\.4 МБ<\/span>/);
+	assert.doesNotMatch(cardsMarkup, />9\.8%<\/span>/);
+
+	const tableMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'table', expandedContainerIds: [] }),
+		}),
+	});
+	assert.match(tableMarkup, /api-service[\s\S]*>4\.4 МБ<\/span>/);
+});
+
+test('PromptDashboard formats Docker RAM above 1000 MiB as GiB with two decimals', () => {
+	const baseStats = createDockerContainer().stats!;
+	const container = createDockerContainer({
+		stats: {
+			...baseStats,
+			memoryUsageBytes: 1123 * 1024 * 1024,
+			memoryPercent: 55.4,
+		},
+	});
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [container],
+			runningCount: 1,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [container],
+		runningCount: 1,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 1;
+	snapshot.docker.data.runningContainers = 1;
+
+	const cardsMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'cards', expandedContainerIds: [container.id] }),
+		}),
+	});
+	assert.match(cardsMarkup, />RAM<\/span>[\s\S]*>1\.12 ГБ<\/span>/);
+	assert.doesNotMatch(cardsMarkup, />1123 МБ<\/span>/);
+
+	const tableMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'table', expandedContainerIds: [] }),
+		}),
+	});
+	assert.match(tableMarkup, /api-service[\s\S]*>1\.12 ГБ<\/span>/);
+});
+
+test('PromptDashboard renders a lightweight five-minute Docker trend chart with network history', () => {
+	const samples = Array.from({ length: 90 }, (_, index) => ({
+		readAt: new Date(Date.parse('2026-04-29T10:00:00.000Z') - ((89 - index) * 3000)).toISOString(),
+		cpuPercent: 0.2 + ((index % 9) * 0.15),
+		memoryPercent: 6 + (index % 4),
+		memoryUsageBytes: (900 + (index * 3)) * 1024 * 1024,
+		networkRxRateBytesPerSecond: 6000 + (index * 40),
+		networkTxRateBytesPerSecond: 4000 + (index * 25),
+	}));
+	const container = createDockerContainer({ samples });
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [container],
+			runningCount: 1,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [container],
+		runningCount: 1,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 1;
+	snapshot.docker.data.runningContainers = 1;
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'cards', expandedContainerIds: [container.id] }),
+		}),
+	});
+	assert.match(markup, /preserveAspectRatio="none"/);
+	assert.match(markup, />5 мин<\/text>/);
+	assert.match(markup, /stroke="var\(--vscode-charts-blue, var\(--vscode-textLink-foreground\)\)"/);
+	assert.match(markup, /stroke="var\(--vscode-charts-green\)"/);
+	assert.match(markup, /stroke="#f97316"/);
+	assert.doesNotMatch(markup, /Недостаточно замеров/);
+});
+
+test('PromptDashboard splits Docker trend lines across long refresh gaps after hidden periods', () => {
+	const baseTimeMs = Date.parse('2026-04-29T10:00:00.000Z');
+	const samples = [
+		{ readAt: new Date(baseTimeMs).toISOString(), cpuPercent: 20, memoryPercent: 25, memoryUsageBytes: 256 * 1024 * 1024, networkRxRateBytesPerSecond: 1024, networkTxRateBytesPerSecond: 1024 },
+		{ readAt: new Date(baseTimeMs + 1000).toISOString(), cpuPercent: 21, memoryPercent: 25, memoryUsageBytes: 258 * 1024 * 1024, networkRxRateBytesPerSecond: 1024, networkTxRateBytesPerSecond: 1024 },
+		{ readAt: new Date(baseTimeMs + 60000).toISOString(), cpuPercent: 19, memoryPercent: 24, memoryUsageBytes: 260 * 1024 * 1024, networkRxRateBytesPerSecond: 1024, networkTxRateBytesPerSecond: 1024 },
+		{ readAt: new Date(baseTimeMs + 290000).toISOString(), cpuPercent: 31, memoryPercent: 28, memoryUsageBytes: 280 * 1024 * 1024, networkRxRateBytesPerSecond: 1024, networkTxRateBytesPerSecond: 1024 },
+		{ readAt: new Date(baseTimeMs + 300000).toISOString(), cpuPercent: 33, memoryPercent: 29, memoryUsageBytes: 282 * 1024 * 1024, networkRxRateBytesPerSecond: 1024, networkTxRateBytesPerSecond: 1024 },
+	];
+	const container = createDockerContainer({
+		samples,
+		stats: {
+			readAt: new Date(baseTimeMs + 300000).toISOString(),
+			cpuPercent: 33,
+			memoryPercent: 29,
+			memoryUsageBytes: 282 * 1024 * 1024,
+			memoryLimitBytes: 1024 * 1024 * 1024,
+			networkRxBytes: 4096,
+			networkTxBytes: 4096,
+			networkRxRateBytesPerSecond: 1024,
+			networkTxRateBytesPerSecond: 1024,
+		},
+	});
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [],
+		composeFileGroups: [],
+		containers: [container],
+		runningCount: 1,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 1;
+	snapshot.docker.data.runningContainers = 1;
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'cards', expandedContainerIds: [container.id] }),
+		}),
+	});
+	assert.equal((markup.match(/stroke="#f97316"/g) || []).length, 2);
+	assert.doesNotMatch(markup, /points="0,.*74,.*148,/);
+});
+
+test('buildDockerSparklineVisibleSamples keeps historical buckets stable when a new sample arrives', () => {
+	const baseTimeMs = Date.parse('2026-04-29T10:00:00.000Z');
+	const samples = Array.from({ length: 90 }, (_, index) => ({
+		readAt: new Date(baseTimeMs + (index * 3000)).toISOString(),
+		cpuPercent: 10 + (index % 6),
+		memoryPercent: 20,
+		memoryUsageBytes: (200 + index) * 1024 * 1024,
+		networkRxRateBytesPerSecond: 2000 + (index * 15),
+		networkTxRateBytesPerSecond: 1000 + (index * 10),
+	}));
+	const before = buildDockerSparklineVisibleSamples(samples);
+	const after = buildDockerSparklineVisibleSamples([
+		...samples,
+		{
+			readAt: new Date(baseTimeMs + (90 * 3000)).toISOString(),
+			cpuPercent: 14,
+			memoryPercent: 20,
+			memoryUsageBytes: 290 * 1024 * 1024,
+			networkRxRateBytesPerSecond: 3400,
+			networkTxRateBytesPerSecond: 2200,
+		},
+	]);
+	assert.deepEqual(after.slice(0, before.length), before);
+});
+
+test('resolvePromptDashboardDockerLiveMetricsVisible follows actual Docker resource-block visibility', () => {
+	const container = createDockerContainer();
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [container],
+			runningCount: 1,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [container],
+		runningCount: 1,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 1;
+	snapshot.docker.data.runningContainers = 1;
+
+	assert.equal(resolvePromptDashboardDockerLiveMetricsVisible({
+		data: snapshot.docker.data,
+		viewMode: 'table',
+		statusFilter: 'all',
+		search: '',
+		sortBy: 'status',
+		expanded: {},
+		collapsedSections: {},
+		mode: 'full',
+	}), true);
+
+	assert.equal(resolvePromptDashboardDockerLiveMetricsVisible({
+		data: snapshot.docker.data,
+		viewMode: 'list',
+		statusFilter: 'all',
+		search: '',
+		sortBy: 'status',
+		expanded: {},
+		collapsedSections: {},
+		mode: 'full',
+	}), true);
+
+	assert.equal(resolvePromptDashboardDockerLiveMetricsVisible({
+		data: snapshot.docker.data,
+		viewMode: 'tree',
+		statusFilter: 'all',
+		search: '',
+		sortBy: 'status',
+		expanded: {},
+		collapsedSections: {},
+		mode: 'full',
+	}), false);
+
+	assert.equal(resolvePromptDashboardDockerLiveMetricsVisible({
+		data: snapshot.docker.data,
+		viewMode: 'tree',
+		statusFilter: 'all',
+		search: '',
+		sortBy: 'status',
+		expanded: {
+			'docker:project:/workspace/api': true,
+			'docker:compose:/workspace/api:/workspace/api/docker-compose.yml': true,
+			[`docker:${container.id}`]: true,
+		},
+		collapsedSections: {},
+		mode: 'full',
+	}), true);
+
+	assert.equal(resolvePromptDashboardDockerLiveMetricsVisible({
+		data: snapshot.docker.data,
+		viewMode: 'cards',
+		statusFilter: 'all',
+		search: '',
+		sortBy: 'status',
+		expanded: {},
+		collapsedSections: { dockerContainers: true } as any,
+		mode: 'full',
+	}), false);
+});
+
+test('PromptDashboard keeps empty Docker compose projects visible and disables inactive compose actions', () => {
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [],
+			serviceNames: ['api-service', 'db'],
+			status: 'stopped',
+			statusTone: 'neutral',
+			statusText: 'Остановлен',
+			runningCount: 0,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [],
+		runningCount: 0,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({
+				expandedContainerIds: [
+					'project:/workspace/api',
+					'compose:/workspace/api:/workspace/api/docker-compose.yml',
+				],
+			}),
+		}),
+	});
+
+	assert.match(markup, /api[\s\S]*docker-compose\.yml[\s\S]*api-service[\s\S]*db/);
+	assert.match(markup, /aria-label="Запустить compose-файл docker-compose.yml"/);
+	assert.match(markup, /aria-label="Открыть compose-файл docker-compose.yml"/);
+	assert.doesNotMatch(markup, /Контейнеров нет/);
+	assert.match(markup, /aria-label="Остановить compose-файл docker-compose\.yml" disabled=""/);
+	assert.doesNotMatch(markup, /aria-label="Перезапустить compose-файл docker-compose\.yml"/);
+	assert.doesNotMatch(markup, /aria-label="Запустить compose-файл docker-compose\.yml" disabled=""/);
+
+	const cardsMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'cards' }),
+		}),
+	});
+	assert.match(cardsMarkup, /api-service[\s\S]*api\/docker-compose\.yml/);
+	assert.match(cardsMarkup, /aria-label="Запустить compose-файл docker-compose.yml"/);
+	assert.doesNotMatch(cardsMarkup, /Контейнеров нет/);
+
+	const tableMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'table' }),
+		}),
+	});
+	assert.match(tableMarkup, /Проект\/Compose\/Контейнер/);
+	assert.match(tableMarkup, /api\/docker-compose\.yml\/api-service[\s\S]*aria-label="Контейнер не создан или остановлен"[\s\S]*>—<\/span>[\s\S]*>—<\/span>/);
+});
+
+test('PromptDashboard tree service rows keep the disclosure column width and outlined stopped status', () => {
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [],
+			serviceNames: ['db', 'redis'],
+			status: 'stopped',
+			statusTone: 'neutral',
+			statusText: 'Остановлен',
+			runningCount: 0,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [],
+		runningCount: 0,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({
+				expandedContainerIds: [
+					'project:/workspace/api',
+					'compose:/workspace/api:/workspace/api/docker-compose.yml',
+				],
+			}),
+		}),
+	});
+
+	assert.match(markup, /db[\s\S]*aria-label="Контейнер не создан или остановлен"/);
+	assert.doesNotMatch(markup, /db[\s\S]*>остановлен<\/span>/);
+	assert.match(markup, /grid-template-columns:auto 18px minmax\(0, 1fr\) auto;align-items:start/);
+	assert.match(markup, /<span[^>]*style="[^"]*width:18px;height:18px[^"]*border-radius:4px[^"]*"[^>]*aria-label="Контейнер не создан или остановлен"/);
+});
+
+test('PromptDashboard card view shows container names and compose context', () => {
+	const apiContainer = createDockerContainer({
+		name: '',
+		service: 'api',
+		composeFilePaths: ['/workspace/api/docker-compose.yml'],
+	});
+	const workerContainer = createDockerContainer({
+		id: 'container-worker123456789',
+		shortId: 'container-wo',
+		name: 'api-container-2',
+		service: 'api',
+		composeFilePaths: ['/workspace/api/compose.worker.yml'],
+	});
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [
+			{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/compose.worker.yml', relativePath: 'compose.worker.yml' },
+		],
+		composeFileGroups: [],
+		containers: [apiContainer, workerContainer],
+		runningCount: 2,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 2;
+	snapshot.docker.data.runningContainers = 2;
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'cards' }),
+		}),
+	});
+
+	assert.match(markup, /api[\s\S]*docker-compose\.yml/);
+	assert.match(markup, /api-container-2[\s\S]*compose\.worker\.yml/);
+	assert.doesNotMatch(markup, /Контейнеров нет/);
+});
+
+test('PromptDashboard shows loader and inline error for a hidden Docker compose action', () => {
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.composeActionError = {
+		projectPath: '/workspace/api',
+		composeFilePath: '/workspace/api/docker-compose.yml',
+		action: 'up',
+		message: 'service api failed to start',
+		createdAt: '2026-04-29T10:05:00.000Z',
+	};
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+		composeFileGroups: [{
+			composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			containers: [],
+			runningCount: 0,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		containers: [],
+		runningCount: 0,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+
+	const markup = renderDashboard(snapshot, {
+		busyAction: buildPromptDashboardDockerComposeBusyAction({
+			projectPath: '/workspace/api',
+			composeFilePath: '/workspace/api/docker-compose.yml',
+			action: 'up',
+		}),
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({
+				expandedContainerIds: [
+					'project:/workspace/api',
+					'compose:/workspace/api:/workspace/api/docker-compose.yml',
+				],
+			}),
+		}),
+	});
+
+	assert.match(markup, /aria-label="Запустить compose-файл docker-compose\.yml" disabled=""[\s\S]*pm-spin/);
+	assert.match(markup, /Ошибка docker compose up[\s\S]*service api failed to start/);
+});
+
+test('PromptDashboard flattens Docker table rows while keeping empty compose files visible', () => {
+	const container = createDockerContainer({ project: 'web', composeWorkingDir: '/workspace/web', composeFilePaths: ['/workspace/web/docker-compose.yml'] });
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [
+		{
+			project: 'api',
+			projectPath: '/workspace/api',
+			composeFiles: [{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+			composeFileGroups: [{ composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' }, containers: [], runningCount: 0, stoppedCount: 0, warningCount: 0, errorCount: 0 }],
+			containers: [],
+			runningCount: 0,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		},
+		{
+			project: 'web',
+			projectPath: '/workspace/web',
+			composeFiles: [{ project: 'web', projectPath: '/workspace/web', filePath: '/workspace/web/docker-compose.yml', relativePath: 'docker-compose.yml' }],
+			composeFileGroups: [{ composeFile: { project: 'web', projectPath: '/workspace/web', filePath: '/workspace/web/docker-compose.yml', relativePath: 'docker-compose.yml' }, containers: [container], runningCount: 1, stoppedCount: 0, warningCount: 0, errorCount: 0 }],
+			containers: [container],
+			runningCount: 1,
+			stoppedCount: 0,
+			warningCount: 0,
+			errorCount: 0,
+		},
+	];
+	snapshot.docker.data.totalContainers = 1;
+	snapshot.docker.data.runningContainers = 1;
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'table', expandedContainerIds: [] }),
+		}),
+	});
+
+	assert.match(markup, /Проект\/Compose\/Контейнер/);
+	assert.match(markup, /api\/docker-compose\.yml[\s\S]*web\/docker-compose\.yml[\s\S]*api-service/);
+	assert.doesNotMatch(markup, /Проект\/Compose<\/span>[\s\S]*<span>Сервис<\/span>/);
+});
+
+test('PromptDashboard list view keeps containers grouped under their compose file', () => {
+	const apiContainer = createDockerContainer({
+		composeFilePaths: ['/workspace/api/docker-compose.yml'],
+	});
+	const workerContainer = createDockerContainer({
+		id: 'container-worker123456789',
+		shortId: 'container-wo',
+		name: 'worker-service-1',
+		service: 'worker-service',
+		composeFilePaths: ['/workspace/api/compose.worker.yml'],
+	});
+	const snapshot = createSnapshot([]);
+	snapshot.docker.data.projects = [{
+		project: 'api',
+		projectPath: '/workspace/api',
+		composeFiles: [
+			{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+			{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/compose.worker.yml', relativePath: 'compose.worker.yml' },
+		],
+		composeFileGroups: [
+			{
+				composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+				containers: [apiContainer],
+				runningCount: 1,
+				stoppedCount: 0,
+				warningCount: 0,
+				errorCount: 0,
+			},
+			{
+				composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/compose.worker.yml', relativePath: 'compose.worker.yml' },
+				containers: [workerContainer],
+				runningCount: 1,
+				stoppedCount: 0,
+				warningCount: 0,
+				errorCount: 0,
+			},
+		],
+		containers: [apiContainer, workerContainer],
+		runningCount: 2,
+		stoppedCount: 0,
+		warningCount: 0,
+		errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 2;
+	snapshot.docker.data.runningContainers = 2;
+
+	const markup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'list', expandedContainerIds: [] }),
+		}),
+	});
+
+	assert.match(markup, /docker-compose\.yml[\s\S]*api-service-1[\s\S]*compose\.worker\.yml[\s\S]*worker-service-1/);
+	assert.match(markup, /grid-template-columns:minmax\(0, 1fr\) auto/);
+	assert.doesNotMatch(markup, /docker-compose\.yml[\s\S]*compose\.worker\.yml[\s\S]*api-service-1/);
+});
+
+test('PromptDashboard keeps Docker startup placeholder out of unavailable state', () => {
+	const snapshot = createSnapshot([]);
+	snapshot.docker.cache = { status: 'idle', source: 'cache', updatedAt: '2026-04-29T10:00:00.000Z' };
+	snapshot.docker.data.available = true;
+
+	const markup = renderDashboard(snapshot);
+
+	assert.doesNotMatch(markup, /Docker Engine API недоступен/);
+	assert.match(markup, /Compose-файлы рабочей области не найдены/);
+});
+
+test('isPromptDashboardBranchActionBusy ignores unrelated widget refreshes', () => {
+	assert.equal(isPromptDashboardBranchActionBusy('refresh-section:activity'), false);
+	assert.equal(isPromptDashboardBranchActionBusy('refresh-section:dockerContainers'), false);
+	assert.equal(isPromptDashboardBranchActionBusy('docker:restart:container-abc123456789'), false);
+	assert.equal(isPromptDashboardBranchActionBusy('switch-all'), true);
+	assert.equal(isPromptDashboardBranchActionBusy('switch-project:api'), true);
+	assert.equal(isPromptDashboardBranchActionBusy('pull-project:api'), true);
+});
 
 test('PromptDashboard selects current branch first and renders the redesigned file tree', () => {
 	const markup = renderDashboard(createSnapshot([createProject()]));
@@ -433,8 +1538,8 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 			'after',
 		),
 		[
-			['projectBranches', 'status', 'parallelBranches', 'aiAnalysis'],
-			['activity', 'reviewRequests', 'projectCommits'],
+			['projectBranches', 'status', 'parallelBranches', 'dockerContainers'],
+			['activity', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
 		],
 	);
 
@@ -449,7 +1554,7 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 			'before',
 		),
 		[
-			['status', 'projectBranches', 'parallelBranches', 'aiAnalysis'],
+			['status', 'projectBranches', 'parallelBranches', 'aiAnalysis', 'dockerContainers'],
 			['projectCommits', 'activity', 'reviewRequests'],
 		],
 	);

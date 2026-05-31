@@ -285,7 +285,9 @@ export function resolvePromptDashboardExpandRefreshTarget(input: {
 			? input.snapshot.activity
 			: input.section === 'aiAnalysis'
 				? input.snapshot.aiAnalysis
-				: input.snapshot.projects;
+				: input.section === 'dockerContainers'
+					? input.snapshot.docker
+					: input.snapshot.projects;
 	const cacheStatus = widget.cache.status;
 	if (
 		cacheStatus !== 'idle'
@@ -307,6 +309,10 @@ function isPromptDashboardWidgetEffectivelyEmpty(
 	widget: PromptDashboardWidgetSnapshot<unknown>,
 ): boolean {
 	switch (widget.kind) {
+		case 'docker': {
+			const data = widget.data as { totalContainers?: number; projects?: unknown[] } | null | undefined;
+			return !data || ((data.totalContainers || 0) === 0 && (data.projects?.length || 0) === 0);
+		}
 		case 'projects': {
 			const data = widget.data as PromptDashboardProjectsData | null | undefined;
 			return !data || ((data.projects?.length || 0) === 0 && (data.branchProjects?.length || 0) === 0);
@@ -341,6 +347,10 @@ export function shouldClearPromptDashboardBusyActionFromWidget(input: {
 		return resolvePromptDashboardWidgetKindForSection(section) === input.widgetKind;
 	}
 
+	if (input.widgetKind === 'docker') {
+		return input.busyAction.startsWith('docker:');
+	}
+
 	if (input.widgetKind !== 'projects') {
 		return false;
 	}
@@ -349,6 +359,46 @@ export function shouldClearPromptDashboardBusyActionFromWidget(input: {
 		|| input.busyAction.startsWith('switch-project:')
 		|| input.busyAction.startsWith('pull-project:')
 		|| input.busyAction.startsWith('preset:');
+}
+
+/** Builds a stable busy key for one hidden Docker Compose action button. */
+export function buildPromptDashboardDockerComposeBusyAction(input: {
+	projectPath: string;
+	composeFilePath: string;
+	action: string;
+}): string {
+	return `docker:compose:${input.action}:${encodeURIComponent(input.projectPath)}:${encodeURIComponent(input.composeFilePath)}`;
+}
+
+/** Builds a stable busy key for one Docker container action button. */
+export function buildPromptDashboardDockerContainerBusyAction(input: {
+	containerId: string;
+	action: string;
+}): string {
+	return `docker:${input.action}:${input.containerId}`;
+}
+
+/** Keeps Docker action spinners visible until the matching widget refresh finishes. */
+export function shouldRetainPromptDashboardBusyActionOnNotice(input: {
+	busyAction: string | null | undefined;
+	retainPromptDashboardBusy?: boolean;
+}): boolean {
+	return input.retainPromptDashboardBusy === true && Boolean(input.busyAction?.startsWith('docker:'));
+}
+
+/** Releases one active dashboard request after the matching completed payload is applied. */
+export function shouldReleasePromptDashboardRequestId(input: {
+	activeRequestId: string;
+	messageRequestId?: string;
+	cacheStatus?: PromptDashboardLoadStatus;
+}): boolean {
+	if (!input.activeRequestId || input.activeRequestId !== String(input.messageRequestId || '')) {
+		return false;
+	}
+	if (!input.cacheStatus) {
+		return true;
+	}
+	return input.cacheStatus !== 'loading';
 }
 
 /** Keeps the last project rows mounted while a refresh is still loading new Git data. */

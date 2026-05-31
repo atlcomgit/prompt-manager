@@ -269,11 +269,11 @@ test('StateService saves shared dashboard section order through a serialized wor
 
 	assert.equal(updateCount, 2);
 	assert.deepEqual(service.getPromptDashboardSectionOrder(), [
-		['projectBranches', 'activity', 'parallelBranches'],
+		['projectBranches', 'activity', 'parallelBranches', 'dockerContainers'],
 		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
 	]);
 	assert.deepEqual(workspaceState.store.get('promptManager.dashboardSectionOrder'), [
-		['projectBranches', 'activity', 'parallelBranches'],
+		['projectBranches', 'activity', 'parallelBranches', 'dockerContainers'],
 		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
 	]);
 });

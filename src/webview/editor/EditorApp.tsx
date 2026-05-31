@@ -46,6 +46,7 @@ import {
   shouldShowPromptPlanForStatus,
 } from '../../types/prompt.js';
 import type { GitOverlayActionKind, GitOverlayActionScope, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from '../../types/git';
+import type { DockerComposeProjectActionKind, DockerContainerActionKind } from '../../types/docker';
 import type {
   PromptDashboardAnalysisState,
   PromptDashboardCollapsedSections,
@@ -56,6 +57,7 @@ import type {
   PromptDashboardWidgetKind,
   PromptDashboardWidgetSnapshot,
 } from '../../types/promptDashboard';
+import type { DockerContainersData } from '../../types/docker';
 import {
   createDefaultPromptDashboardSectionOrder,
   hasVisiblePromptDashboardSections,
@@ -98,7 +100,7 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
-import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldRequestPromptDashboardSnapshot, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
+import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
 
@@ -234,7 +236,22 @@ const buildPromptDashboardSnapshotDebugPayload = (
   activityStatus: String(snapshot?.activity?.cache?.status || 'missing'),
   statusStatus: String(snapshot?.status?.cache?.status || 'missing'),
   projectsStatus: String(snapshot?.projects?.cache?.status || 'missing'),
+  dockerStatus: String(snapshot?.docker?.cache?.status || 'missing'),
   aiStatus: String(snapshot?.aiAnalysis?.cache?.status || 'missing'),
+});
+
+const createEmptyDockerContainersData = (generatedAt: string): DockerContainersData => ({
+  enabled: true,
+  available: true,
+  generatedAt,
+  defaultViewMode: 'tree',
+  composeFilePatterns: [],
+  projects: [],
+  totalContainers: 0,
+  runningContainers: 0,
+  stoppedContainers: 0,
+  warningContainers: 0,
+  errorContainers: 0,
 });
 
 /** Build a minimal dashboard snapshot around the first widget payload after a fully collapsed open. */
@@ -267,7 +284,8 @@ export const buildPromptDashboardBootstrapSnapshot = (input: {
       totalTimeMs: getPromptDashboardTotalTimeMs(input.prompt),
       updatedAt: input.prompt.updatedAt || now,
     }),
-      projects: createPromptDashboardWidgetSnapshot('projects', { projects: [], loadedSections: [] }),
+    projects: createPromptDashboardWidgetSnapshot('projects', { projects: [], loadedSections: [] }),
+    docker: createPromptDashboardWidgetSnapshot('docker', createEmptyDockerContainersData(now)),
     aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
   };
 
@@ -1159,6 +1177,12 @@ export const EditorApp: React.FC = () => {
         preserveInProgressSnapshotProgress: true,
       },
     ));
+    if (shouldReleasePromptDashboardRequestId({
+      activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+      messageRequestId: String(msg.requestId || ''),
+    })) {
+      promptDashboardRequestIdRef.current = '';
+    }
     setPromptDashboardBusyAction(null);
   }, []);
 
@@ -1204,6 +1228,13 @@ export const EditorApp: React.FC = () => {
       });
     });
     if (widget?.kind) {
+      if (shouldReleasePromptDashboardRequestId({
+        activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+        messageRequestId: String(msg.requestId || ''),
+        cacheStatus: widget.cache.status,
+      })) {
+        promptDashboardRequestIdRef.current = '';
+      }
       setPromptDashboardBusyAction(previous => shouldClearPromptDashboardBusyActionFromWidget({
         busyAction: previous,
         widgetKind: widget.kind,
@@ -3823,6 +3854,7 @@ export const EditorApp: React.FC = () => {
           const matchesChatStartRequest = shouldHandleChatStartMessage(requestId);
           const matchesPreflightRequest = requestId === pendingChatStartPreflightRequestIdRef.current;
           const matchesGitOverlayTrackedRequest = hasGitOverlayTrackedRequest(requestId);
+          const matchesPromptDashboardRequest = requestId === promptDashboardRequestIdRef.current;
           if (matchesSaveRequest) {
             setIsSaving(false);
             if (activeSaveClearedDirtyRef.current) {
@@ -3831,6 +3863,14 @@ export const EditorApp: React.FC = () => {
             activeSaveIdRef.current = null;
             activeSaveRequestIdRef.current = null;
             activeSaveClearedDirtyRef.current = false;
+            showInlineNotice('error', msg.message);
+            break;
+          }
+          if (matchesPromptDashboardRequest) {
+            setPromptDashboardBusyAction(previous => shouldRetainPromptDashboardBusyActionOnNotice({
+              busyAction: previous,
+              retainPromptDashboardBusy: msg.retainPromptDashboardBusy,
+            }) ? previous : null);
             showInlineNotice('error', msg.message);
             break;
           }
@@ -3864,6 +3904,14 @@ export const EditorApp: React.FC = () => {
         showInlineNotice('error', msg.message);
         break;
       case 'info':
+        if ((msg.requestId || '').trim() && (msg.requestId || '').trim() === promptDashboardRequestIdRef.current) {
+          setPromptDashboardBusyAction(previous => shouldRetainPromptDashboardBusyActionOnNotice({
+            busyAction: previous,
+            retainPromptDashboardBusy: msg.retainPromptDashboardBusy,
+          }) ? previous : null);
+          showInlineNotice('info', msg.message);
+          break;
+        }
         if (hasGitOverlayTrackedRequest(msg.requestId)) {
           showInlineNotice('info', msg.message);
           break;
@@ -4561,6 +4609,11 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'savePromptDashboardSectionOrder', order: normalizedOrder });
   }, [promptDashboardSectionOrder]);
 
+  /** Sync Docker live polling with the actual visibility of resource blocks inside the dashboard. */
+  const handlePromptDashboardDockerLiveMetricsVisibilityChange = useCallback((visible: boolean) => {
+    vscode.postMessage({ type: 'promptDashboardDockerLiveMetricsVisibility', visible });
+  }, []);
+
   const handlePromptDashboardOpenPrompt = useCallback((id: string, promptUuid?: string) => {
     vscode.postMessage({ type: 'openPrompt', id, promptUuid });
   }, []);
@@ -4600,6 +4653,46 @@ export const EditorApp: React.FC = () => {
       branchesByProject,
       requestId,
     });
+  }, []);
+
+  const handlePromptDashboardDockerAction = useCallback((containerId: string, action: DockerContainerActionKind) => {
+    const requestId = `prompt-dashboard-docker-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    promptDashboardRequestIdRef.current = requestId;
+    setPromptDashboardBusyAction(buildPromptDashboardDockerContainerBusyAction({ containerId, action }));
+    vscode.postMessage({
+      type: 'promptDashboardDockerAction',
+      prompt: promptRef.current,
+      containerId,
+      action,
+      requestId,
+    });
+  }, []);
+
+  /** Launches one compose-level Docker orchestration command from the dashboard. */
+  const handlePromptDashboardDockerComposeAction = useCallback((projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => {
+    const requestId = `prompt-dashboard-docker-compose-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    promptDashboardRequestIdRef.current = requestId;
+    setPromptDashboardBusyAction(buildPromptDashboardDockerComposeBusyAction({ projectPath, composeFilePath, action }));
+    vscode.postMessage({
+      type: 'promptDashboardDockerComposeAction',
+      prompt: promptRef.current,
+      projectPath,
+      composeFilePath,
+      action,
+      requestId,
+    });
+  }, []);
+
+  const handlePromptDashboardOpenDockerComposeFile = useCallback((projectPath: string, composeFilePath: string) => {
+    vscode.postMessage({ type: 'promptDashboardOpenDockerComposeFile', projectPath, composeFilePath });
+  }, []);
+
+  const handlePromptDashboardOpenDockerLogs = useCallback((containerId: string) => {
+    vscode.postMessage({ type: 'promptDashboardOpenDockerLogs', containerId });
+  }, []);
+
+  const handlePromptDashboardOpenDockerTerminal = useCallback((containerId: string) => {
+    vscode.postMessage({ type: 'promptDashboardOpenDockerTerminal', containerId });
   }, []);
 
   const handlePromptDashboardOpenFilePatch = useCallback((request: PromptDashboardFilePatchRequest) => {
@@ -7062,6 +7155,12 @@ export const EditorApp: React.FC = () => {
         onSwitchBranches={handlePromptDashboardSwitchBranches}
         onOpenDiff={handleGitOverlayOpenDiff}
         onOpenFilePatch={handlePromptDashboardOpenFilePatch}
+        onDockerAction={handlePromptDashboardDockerAction}
+        onDockerComposeAction={handlePromptDashboardDockerComposeAction}
+        onOpenDockerComposeFile={handlePromptDashboardOpenDockerComposeFile}
+        onOpenDockerLogs={handlePromptDashboardOpenDockerLogs}
+        onOpenDockerTerminal={handlePromptDashboardOpenDockerTerminal}
+        onDockerLiveMetricsVisibilityChange={handlePromptDashboardDockerLiveMetricsVisibilityChange}
       />
 
       {gitOverlayOpen ? (

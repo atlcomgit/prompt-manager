@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { AiService } from './aiService.js';
+import type { DockerContainersChangeReason, DockerContainersRefreshMode, DockerContainersService } from './dockerContainersService.js';
 import type { GitService } from './gitService.js';
 import type { StorageService } from './storageService.js';
 import type { WorkspaceService } from './workspaceService.js';
@@ -7,6 +8,7 @@ import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 import type { Prompt, PromptConfig } from '../types/prompt.js';
 import type { GitOverlayChangeFile, GitOverlayCommitChangedFile, GitOverlayProjectSnapshot } from '../types/git.js';
+import type { DockerContainersData } from '../types/docker.js';
 import type {
 	PromptDashboardAnalysisState,
 	PromptDashboardPromptActivityData,
@@ -77,6 +79,8 @@ type PromptDashboardRefreshOptions = {
 	ensureBackgroundAiAnalysis?: boolean;
 	analysisReason?: string;
 	projectsMode?: PromptDashboardProjectsRefreshMode;
+	refreshMode?: DockerContainersRefreshMode;
+	showLoadingState?: boolean;
 	collapsedWidgets?: PromptDashboardWidgetKind[];
 };
 
@@ -109,20 +113,35 @@ export class PromptDashboardService implements vscode.Disposable {
 	private activeScope: PromptDashboardScope | null = null;
 	private warmTimer: NodeJS.Timeout | null = null;
 	private autoRefreshTimer: NodeJS.Timeout | null = null;
+	private dockerRefreshTimer: NodeJS.Timeout | null = null;
+	private dockerStatsTimer: NodeJS.Timeout | null = null;
+	/** Keeps external Docker changes queued while the Docker widget stays collapsed. */
+	private hasPendingCollapsedDockerRefresh = false;
+	/** Tracks whether the Docker widget itself is collapsed in the current dashboard state. */
+	private activeDockerWidgetCollapsed = false;
+	/** Tracks whether Docker CPU/RAM/network blocks are currently visible in the webview. */
+	private activeDockerLiveMetricsVisible = false;
+	private activeDockerLiveMetricsScopeKey = '';
 	private autoRefreshGeneration = 0;
+	private activePrompt: Prompt | null = null;
+	private activePostMessage: DashboardPostMessage | undefined;
+	private readonly dockerChangeListener: vscode.Disposable | undefined;
 
 	constructor(
 		private readonly storageService: StorageService,
 		private readonly workspaceService: WorkspaceService,
 		private readonly gitService: GitService,
 		private readonly aiService: AiService,
+		private readonly dockerContainersService?: DockerContainersService,
 	) {
+		this.dockerChangeListener = this.dockerContainersService?.onDidChange(reason => this.scheduleDockerAutoRefresh(reason));
 		this.warmTimer = setInterval(() => {
 			const scope = this.activeScope;
-			if (!scope) {
+			const prompt = this.activePrompt;
+			if (!scope || !prompt) {
 				return;
 			}
-			void this.refreshScope(scope, undefined, { force: false, includeAiAnalysis: true });
+			void this.refreshScope(scope, undefined, { force: false, prompt, includeAiAnalysis: true });
 		}, PROMPT_DASHBOARD_WARM_INTERVAL_MS);
 		this.warmTimer.unref?.();
 	}
@@ -136,6 +155,15 @@ export class PromptDashboardService implements vscode.Disposable {
 			clearTimeout(this.autoRefreshTimer);
 			this.autoRefreshTimer = null;
 		}
+		if (this.dockerRefreshTimer) {
+			clearTimeout(this.dockerRefreshTimer);
+			this.dockerRefreshTimer = null;
+		}
+		if (this.dockerStatsTimer) {
+			clearTimeout(this.dockerStatsTimer);
+			this.dockerStatsTimer = null;
+		}
+		this.dockerChangeListener?.dispose();
 		this.inFlight.clear();
 		this.sharedProjectsCache.clear();
 		this.sharedAnalysisCache.clear();
@@ -172,7 +200,10 @@ export class PromptDashboardService implements vscode.Disposable {
 	): PromptDashboardSnapshot {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
+		this.activePrompt = prompt;
+		this.activePostMessage = postMessage || this.activePostMessage;
 		const snapshot = this.buildSnapshotFromCache(scope, prompt, options?.collapsedWidgets);
+		this.primeDockerWidget(scope, prompt, postMessage, requestId, options?.collapsedWidgets);
 		// Initial open should avoid auto-running AI review on the prompt-open critical path.
 		this.scheduleAutoRefresh(scope, postMessage, {
 			force: forceRefresh,
@@ -190,6 +221,8 @@ export class PromptDashboardService implements vscode.Disposable {
 	async refreshPrompt(prompt: Prompt, postMessage?: DashboardPostMessage, requestId?: string): Promise<PromptDashboardSnapshot> {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
+		this.activePrompt = prompt;
+		this.activePostMessage = postMessage || this.activePostMessage;
 		this.cancelScheduledAutoRefresh('manual-refresh', scope, requestId);
 		await this.refreshScope(scope, postMessage, {
 			force: true,
@@ -210,6 +243,8 @@ export class PromptDashboardService implements vscode.Disposable {
 	): Promise<PromptDashboardSnapshot> {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
+		this.activePrompt = prompt;
+		this.activePostMessage = postMessage || this.activePostMessage;
 		this.cancelScheduledAutoRefresh('manual-refresh-snapshot', scope, requestId);
 		await this.refreshScope(scope, postMessage, {
 			force: true,
@@ -232,6 +267,8 @@ export class PromptDashboardService implements vscode.Disposable {
 	): Promise<PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>> {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
+		this.activePrompt = prompt;
+		this.activePostMessage = postMessage || this.activePostMessage;
 		const targetProjects = this.resolveProjectsRefreshTargets(scope, projectNames);
 		const sectionScopedRefresh = this.isSectionScopedProjectsRefreshMode(mode);
 		const shouldUsePartialProjectsRefresh = targetProjects.length > 0 && (
@@ -262,7 +299,12 @@ export class PromptDashboardService implements vscode.Disposable {
 	): Promise<PromptDashboardWidgetSnapshot<unknown>> {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
+		this.activePrompt = prompt;
+		this.activePostMessage = postMessage || this.activePostMessage;
 		this.cancelScheduledAutoRefresh(`manual-widget-refresh:${widget}`, scope, requestId);
+		if (widget === 'docker') {
+			this.cancelScheduledDockerStatsRefresh(`manual-widget-refresh:${widget}`);
+		}
 		if (widget === 'projects') {
 			return this.refreshProjectsWidget(prompt, postMessage, requestId, this.resolveProjectsRefreshModeForSection(section));
 		}
@@ -385,13 +427,81 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 
 		this.cancelScheduledAutoRefresh(reason, scope);
+		this.cancelScheduledDockerAutoRefresh(reason);
+		this.cancelScheduledDockerStatsRefresh(reason);
+		this.hasPendingCollapsedDockerRefresh = false;
+		this.activeDockerWidgetCollapsed = false;
+		this.activeDockerLiveMetricsVisible = false;
+		this.activeDockerLiveMetricsScopeKey = '';
 		this.activeScope = null;
+		this.activePrompt = null;
 		this.logDashboardPerf('scope.paused', {
 			reason,
 			promptId: scope.promptId,
 			scopeKey: buildPromptDashboardScopeKey(scope),
 			nextPromptId: options?.nextPromptId || '',
 			requestVersion: options?.requestVersion ?? 0,
+		});
+	}
+
+	/** Sync the host-side Docker auto-refresh policy with the widget collapsed state. */
+	setDockerWidgetCollapsed(collapsed: boolean): void {
+		const wasCollapsed = this.activeDockerWidgetCollapsed;
+		this.activeDockerWidgetCollapsed = collapsed;
+		if (collapsed) {
+			if (this.dockerRefreshTimer) {
+				this.cancelScheduledDockerAutoRefresh('collapsed-docker-widget');
+				this.hasPendingCollapsedDockerRefresh = true;
+			}
+			return;
+		}
+		if (!wasCollapsed || !this.hasPendingCollapsedDockerRefresh) {
+			return;
+		}
+		const scope = this.activeScope;
+		const prompt = this.activePrompt;
+		const postMessage = this.activePostMessage;
+		if (!scope || !prompt || !postMessage || !this.shouldTriggerPendingDockerRefreshOnExpand(scope)) {
+			return;
+		}
+		this.hasPendingCollapsedDockerRefresh = false;
+		void this.refreshWidget(scope, 'docker', postMessage, {
+			force: true,
+			prompt,
+			requestId: 'docker-expand-refresh',
+			refreshMode: 'full',
+			showLoadingState: false,
+		});
+	}
+
+	/** Sync live Docker polling with the resource block visibility reported by the webview. */
+	setDockerLiveMetricsVisibility(visible: boolean): void {
+		const scope = this.activeScope;
+		const scopeKey = scope ? buildPromptDashboardScopeKey(scope) : '';
+		const becameVisible = visible && (!this.activeDockerLiveMetricsVisible || this.activeDockerLiveMetricsScopeKey !== scopeKey);
+		this.activeDockerLiveMetricsVisible = visible;
+		this.activeDockerLiveMetricsScopeKey = scopeKey;
+		if (!visible) {
+			this.cancelScheduledDockerStatsRefresh('hidden-docker-metrics');
+			return;
+		}
+		if (!becameVisible || !scope || !this.activePrompt || !this.activePostMessage) {
+			return;
+		}
+		const widget = this.buildWidgetFromCache(
+			scope,
+			'docker',
+			this.getCachedData<DockerContainersData>(scope, 'docker'),
+		) as PromptDashboardWidgetSnapshot<DockerContainersData>;
+		if (!widget.data.available || widget.data.runningContainers <= 0) {
+			return;
+		}
+		void this.refreshWidget(scope, 'docker', this.activePostMessage, {
+			force: true,
+			prompt: this.activePrompt,
+			requestId: 'docker-visible-refresh',
+			refreshMode: 'stats',
+			showLoadingState: false,
 		});
 	}
 
@@ -774,6 +884,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			activity: this.buildWidgetFromCache(scope, 'activity', this.emptyActivity()),
 			status: this.buildStatusWidgetFromPrompt(scope, prompt),
 			projects,
+			docker: this.buildDockerWidgetFromCache(scope),
 			aiAnalysis: analysis,
 		};
 
@@ -784,8 +895,32 @@ export class PromptDashboardService implements vscode.Disposable {
 				status: 'idle',
 			});
 		}
+		if (collapsedWidgets.includes('docker')) {
+			snapshot.docker = createPromptDashboardWidgetSnapshot('docker', snapshot.docker.data, {
+				...snapshot.docker.cache,
+				status: 'idle',
+			});
+		}
 
 		return snapshot;
+	}
+
+	/** Reuses a validated Docker startup snapshot before the async widget cache is hydrated. */
+	private buildDockerWidgetFromCache(scope: PromptDashboardScope): PromptDashboardWidgetSnapshot<DockerContainersData> {
+		const cached = this.getCachedEntry<DockerContainersData>(scope, 'docker');
+		if (cached) {
+			const cache = this.resolveWidgetCacheState('docker', cached);
+			return createPromptDashboardWidgetSnapshot('docker', cached.data, cache);
+		}
+		const bootstrapData = this.dockerContainersService?.getBootstrapDockerContainersData();
+		if (!bootstrapData) {
+			return createPromptDashboardWidgetSnapshot('docker', this.emptyDockerContainersData());
+		}
+		return createPromptDashboardWidgetSnapshot('docker', bootstrapData, {
+			status: 'stale',
+			source: 'cache',
+			updatedAt: bootstrapData.generatedAt,
+		});
 	}
 
 	/** Keeps the status widget data tied to the live prompt while reusing cache metadata. */
@@ -798,27 +933,21 @@ export class PromptDashboardService implements vscode.Disposable {
 		if (!cached) {
 			return createPromptDashboardWidgetSnapshot('status', data);
 		}
-		const cache = cached.error
-			? { ...resolvePromptDashboardCacheState(cached.updatedAtMs, PromptDashboardService.CACHE_TTL_MS), status: 'error' as const, error: cached.error }
-			: resolvePromptDashboardCacheState(cached.updatedAtMs, PromptDashboardService.CACHE_TTL_MS);
+		const cache = this.resolveWidgetCacheState('status', cached);
 		return createPromptDashboardWidgetSnapshot('status', data, cache);
 	}
 
 	private buildProjectsWidgetFromCache(scope: PromptDashboardScope): PromptDashboardWidgetSnapshot<PromptDashboardProjectsData> {
 		const cached = this.getCachedEntry<PromptDashboardProjectsData>(scope, 'projects');
 		if (cached) {
-			const cache = cached.error
-				? { ...resolvePromptDashboardCacheState(cached.updatedAtMs, PromptDashboardService.CACHE_TTL_MS), status: 'error' as const, error: cached.error }
-				: resolvePromptDashboardCacheState(cached.updatedAtMs, PromptDashboardService.CACHE_TTL_MS);
+			const cache = this.resolveWidgetCacheState('projects', cached);
 			return createPromptDashboardWidgetSnapshot('projects', this.decorateProjectsData(scope, cached.data), cache);
 		}
 		const shared = this.getSharedProjects(scope);
 		if (!shared) {
 			return createPromptDashboardWidgetSnapshot('projects', { projects: [], loadedSections: [] });
 		}
-		const cache = shared.error
-			? { ...resolvePromptDashboardCacheState(shared.updatedAtMs, PromptDashboardService.CACHE_TTL_MS), status: 'error' as const, error: shared.error }
-			: resolvePromptDashboardCacheState(shared.updatedAtMs, PromptDashboardService.CACHE_TTL_MS);
+		const cache = this.resolveWidgetCacheState('projects', shared);
 		return createPromptDashboardWidgetSnapshot('projects', this.decorateProjectsData(scope, shared.data), cache);
 	}
 
@@ -876,9 +1005,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		if (!shared) {
 			return createPromptDashboardWidgetSnapshot('aiAnalysis', null);
 		}
-		const cache = shared.error
-			? { ...resolvePromptDashboardCacheState(shared.updatedAtMs, PromptDashboardService.CACHE_TTL_MS), status: 'error' as const, error: shared.error }
-			: resolvePromptDashboardCacheState(shared.updatedAtMs, PromptDashboardService.CACHE_TTL_MS);
+		const cache = this.resolveWidgetCacheState('aiAnalysis', shared);
 		return createPromptDashboardWidgetSnapshot('aiAnalysis', shared.data, cache);
 	}
 
@@ -892,10 +1019,30 @@ export class PromptDashboardService implements vscode.Disposable {
 		if (!cached) {
 			return createPromptDashboardWidgetSnapshot(widget, placeholder);
 		}
-		const cache = cached.error
-			? { ...resolvePromptDashboardCacheState(cached.updatedAtMs, PromptDashboardService.CACHE_TTL_MS), status: 'error' as const, error: cached.error }
-			: resolvePromptDashboardCacheState(cached.updatedAtMs, PromptDashboardService.CACHE_TTL_MS);
+		const cache = this.resolveWidgetCacheState(widget, cached);
 		return createPromptDashboardWidgetSnapshot(widget, cached.data, cache);
+	}
+
+	/** Resolves widget-specific cache TTLs so Docker stats can become stale faster than Git data. */
+	private resolveWidgetCacheState<TData>(
+		widget: PromptDashboardWidgetKind,
+		entry: DashboardCacheEntry<TData>,
+	) {
+		const cache = resolvePromptDashboardCacheState(entry.updatedAtMs, this.getCacheTtlMsForWidget(widget));
+		return entry.error
+			? { ...cache, status: 'error' as const, error: entry.error }
+			: cache;
+	}
+
+	/** Returns the outer dashboard cache TTL for each widget kind. */
+	private getCacheTtlMsForWidget(widget: PromptDashboardWidgetKind): number {
+		if (widget !== 'docker') {
+			return PromptDashboardService.CACHE_TTL_MS;
+		}
+		const configured = vscode.workspace
+			.getConfiguration('promptManager')
+			.get<number>('docker.cacheTtlMs', 300000);
+		return Number.isFinite(configured) ? Math.max(1000, Math.min(3600000, configured)) : 300000;
 	}
 
 	private getCachedEntry<TData>(scope: PromptDashboardScope, widget: PromptDashboardWidgetKind): DashboardCacheEntry<TData> | undefined {
@@ -1219,6 +1366,29 @@ export class PromptDashboardService implements vscode.Disposable {
 		this.autoRefreshTimer.unref?.();
 	}
 
+	/** Starts Docker widget refresh immediately so persisted startup data can revalidate in the background. */
+	private primeDockerWidget(
+		scope: PromptDashboardScope,
+		prompt: Prompt,
+		postMessage?: DashboardPostMessage,
+		requestId?: string,
+		collapsedWidgets: PromptDashboardWidgetKind[] = [],
+	): void {
+		if (!this.dockerContainersService || collapsedWidgets.includes('docker')) {
+			return;
+		}
+		const cached = this.getCachedEntry<DockerContainersData>(scope, 'docker');
+		if (cached && Date.now() - cached.updatedAtMs < this.getCacheTtlMsForWidget('docker')) {
+			return;
+		}
+		const targetPostMessage = postMessage || this.activePostMessage;
+		void this.refreshWidget(scope, 'docker', targetPostMessage, {
+			force: false,
+			requestId,
+			prompt,
+		});
+	}
+
 	/** Cancel any queued automatic refresh that no longer matches the active prompt scope. */
 	private cancelScheduledAutoRefresh(reason: string, scope?: PromptDashboardScope, requestId?: string): void {
 		this.autoRefreshGeneration += 1;
@@ -1233,6 +1403,144 @@ export class PromptDashboardService implements vscode.Disposable {
 			requestId: requestId || '',
 			scopeKey: scope ? buildPromptDashboardScopeKey(scope) : '',
 		});
+	}
+
+	/** Debounces Docker event stream refreshes so container changes appear without flooding the UI. */
+	private scheduleDockerAutoRefresh(reason: DockerContainersChangeReason = 'container'): void {
+		this.cancelScheduledDockerStatsRefresh(`docker-change:${reason}`);
+		if (!this.dockerContainersService) {
+			return;
+		}
+		const scope = this.activeScope;
+		const prompt = this.activePrompt;
+		if (!scope || !prompt) {
+			return;
+		}
+		if (this.activeDockerWidgetCollapsed) {
+			this.hasPendingCollapsedDockerRefresh = true;
+			this.logDashboardPerf('docker-auto-refresh.deferred-collapsed', {
+				promptId: scope.promptId,
+				reason,
+				scopeKey: buildPromptDashboardScopeKey(scope),
+			});
+			return;
+		}
+		if (this.dockerRefreshTimer) {
+			return;
+		}
+
+		const scopeKey = buildPromptDashboardScopeKey(scope);
+		const delayMs = reason === 'snapshot' ? 100 : this.getDockerRefreshIntervalMs();
+		this.dockerRefreshTimer = setTimeout(() => {
+			this.dockerRefreshTimer = null;
+			if (!this.activeScope || buildPromptDashboardScopeKey(this.activeScope) !== scopeKey) {
+				return;
+			}
+			void this.refreshWidget(scope, 'docker', this.activePostMessage, {
+				force: true,
+				prompt,
+				requestId: 'docker-auto-refresh',
+				refreshMode: 'full',
+				showLoadingState: false,
+			});
+		}, delayMs);
+		this.dockerRefreshTimer.unref?.();
+	}
+
+	/** Cancels one queued Docker full refresh when the widget becomes hidden or stale. */
+	private cancelScheduledDockerAutoRefresh(reason: string): void {
+		if (!this.dockerRefreshTimer) {
+			return;
+		}
+		clearTimeout(this.dockerRefreshTimer);
+		this.dockerRefreshTimer = null;
+		this.logDashboardPerf('docker-auto-refresh.cancelled', { reason });
+	}
+
+	/** Cancels one queued Docker stats refresh when a more recent widget update supersedes it. */
+	private cancelScheduledDockerStatsRefresh(reason: string): void {
+		if (!this.dockerStatsTimer) {
+			return;
+		}
+		clearTimeout(this.dockerStatsTimer);
+		this.dockerStatsTimer = null;
+		this.logDashboardPerf('docker-stats.cancelled', { reason });
+	}
+
+	/** Schedules a lightweight Docker stats refresh only while running containers remain visible. */
+	private scheduleDockerStatsRefresh(
+		scope: PromptDashboardScope,
+		prompt: Prompt | undefined,
+		snapshot: PromptDashboardWidgetSnapshot<unknown>,
+	): void {
+		this.cancelScheduledDockerStatsRefresh('reschedule');
+		if (!this.dockerContainersService || !prompt || snapshot.kind !== 'docker' || snapshot.cache.status !== 'fresh' || !this.activePostMessage) {
+			return;
+		}
+		if (!this.isDockerLiveMetricsVisibleForScope(scope)) {
+			return;
+		}
+		const data = snapshot.data as DockerContainersData;
+		if (!data.available || data.runningContainers <= 0) {
+			return;
+		}
+
+		const scopeKey = buildPromptDashboardScopeKey(scope);
+		const delayMs = this.getDockerStatsIntervalMs();
+		this.dockerStatsTimer = setTimeout(() => {
+			this.dockerStatsTimer = null;
+			if (!this.activeScope || buildPromptDashboardScopeKey(this.activeScope) !== scopeKey) {
+				return;
+			}
+			if (!this.isDockerLiveMetricsVisibleForScope(scope)) {
+				return;
+			}
+			void this.refreshWidget(scope, 'docker', this.activePostMessage, {
+				force: true,
+				prompt,
+				requestId: 'docker-live-refresh',
+				refreshMode: 'stats',
+				showLoadingState: false,
+			});
+		}, delayMs);
+		this.dockerStatsTimer.unref?.();
+	}
+
+	/** Check whether Docker live metrics should continue polling for the current scope. */
+	private isDockerLiveMetricsVisibleForScope(scope: PromptDashboardScope): boolean {
+		return this.activeDockerLiveMetricsVisible === true
+			&& this.activeDockerLiveMetricsScopeKey === buildPromptDashboardScopeKey(scope);
+	}
+
+	/** Avoid duplicate expand refreshes when the webview will already request one from stale or empty data. */
+	private shouldTriggerPendingDockerRefreshOnExpand(scope: PromptDashboardScope): boolean {
+		if (this.inFlight.has(buildPromptDashboardWidgetCacheKey(scope, 'docker'))) {
+			return false;
+		}
+		const snapshot = this.buildWidgetFromCache(
+			scope,
+			'docker',
+			this.getCachedData<DockerContainersData>(scope, 'docker'),
+		) as PromptDashboardWidgetSnapshot<DockerContainersData>;
+		const data = snapshot.data;
+		const hasRenderedData = (data?.totalContainers || 0) > 0 || (data?.projects?.length || 0) > 0;
+		return snapshot.cache.status === 'fresh' && hasRenderedData;
+	}
+
+	/** Reads the configured Docker refresh debounce interval. */
+	private getDockerRefreshIntervalMs(): number {
+		const configured = vscode.workspace
+			.getConfiguration('promptManager')
+			.get<number>('docker.refreshIntervalMs', 5000);
+		return Number.isFinite(configured) ? Math.max(1000, Math.min(60000, configured)) : 5000;
+	}
+
+	/** Reads the configured Docker stats polling interval for live resource updates. */
+	private getDockerStatsIntervalMs(): number {
+		const configured = vscode.workspace
+			.getConfiguration('promptManager')
+			.get<number>('docker.statsIntervalMs', 1000);
+		return Number.isFinite(configured) ? Math.max(1000, Math.min(60000, configured)) : 1000;
 	}
 
 	/** Write dashboard performance diagnostics into the shared Prompt Manager output channel. */
@@ -1265,7 +1573,7 @@ export class PromptDashboardService implements vscode.Disposable {
 	): Promise<void> {
 		const scopeKey = buildPromptDashboardScopeKey(scope);
 		const collapsedWidgets = new Set(options?.collapsedWidgets || []);
-		const widgets = (['activity', 'status', 'projects'] as PromptDashboardWidgetKind[])
+		const widgets = (['activity', 'status', 'projects', 'docker'] as PromptDashboardWidgetKind[])
 			.filter((widget): widget is PromptDashboardWidgetKind => !collapsedWidgets.has(widget));
 		await Promise.all(widgets.map(widget => this.refreshWidget(scope, widget, postMessage, options)));
 		if (!this.isScopeActive(scope)) {
@@ -1319,7 +1627,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				return;
 			}
 		}
-		if (!options?.force && widget !== 'status' && cached && Date.now() - cached.updatedAtMs < PromptDashboardService.CACHE_TTL_MS) {
+		if (!options?.force && widget !== 'status' && cached && Date.now() - cached.updatedAtMs < this.getCacheTtlMsForWidget(widget)) {
 			if (
 				widget === 'activity'
 				&& nextActivityFingerprint
@@ -1335,7 +1643,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				return;
 			}
 		}
-		if (postMessage) {
+		if (postMessage && options?.showLoadingState !== false) {
 			this.postWidget(postMessage, scope, this.buildLoadingWidgetSnapshot(scope, widget, options?.prompt), options?.requestId);
 		}
 
@@ -1365,9 +1673,12 @@ export class PromptDashboardService implements vscode.Disposable {
 
 		const task = (async () => {
 			try {
-				const data = await this.loadWidgetData(scope, widget, options?.prompt, options?.projectsMode);
+				const data = await this.loadWidgetData(scope, widget, options?.prompt, options?.projectsMode, options?.force === true, options?.refreshMode || 'full');
 				this.ensureScopeActive(scope);
 				this.setCache(scope, widget, data);
+				if (widget === 'docker') {
+					this.hasPendingCollapsedDockerRefresh = false;
+				}
 				if (widget === 'activity' && nextActivityFingerprint) {
 					this.activityFingerprintByScope.set(scopeKey, nextActivityFingerprint);
 				}
@@ -1375,6 +1686,9 @@ export class PromptDashboardService implements vscode.Disposable {
 					? this.buildProjectsWidgetFromCache(scope)
 					: this.buildWidgetFromCache(scope, widget, data);
 				this.postWidget(postMessage, scope, snapshot, options?.requestId);
+				if (widget === 'docker') {
+					this.scheduleDockerStatsRefresh(scope, options?.prompt, snapshot);
+				}
 				this.logDashboardPerf('widget.completed', {
 					widget,
 					promptId: scope.promptId,
@@ -1398,6 +1712,9 @@ export class PromptDashboardService implements vscode.Disposable {
 					? this.buildProjectsWidgetFromCache(scope)
 					: this.buildWidgetFromCache(scope, widget, fallback);
 				this.postWidget(postMessage, scope, snapshot, options?.requestId);
+				if (widget === 'docker') {
+					this.scheduleDockerStatsRefresh(scope, options?.prompt, snapshot);
+				}
 				this.logDashboardPerf('widget.failed', {
 					widget,
 					promptId: scope.promptId,
@@ -1437,11 +1754,14 @@ export class PromptDashboardService implements vscode.Disposable {
 		widget: PromptDashboardWidgetKind,
 		prompt?: Prompt,
 		projectsMode: PromptDashboardProjectsRefreshMode = 'display',
+		force = false,
+		refreshMode: DockerContainersRefreshMode = 'full',
 	): Promise<unknown> {
 		switch (widget) {
 			case 'activity': return this.loadActivityData();
 			case 'status': return this.loadStatusData(scope, prompt);
 			case 'projects': return this.loadProjectsData(scope, projectsMode);
+			case 'docker': return this.loadDockerContainersData(force, refreshMode);
 			case 'aiAnalysis': return this.getCachedData<PromptDashboardAnalysisState | null>(scope, 'aiAnalysis');
 			default: return null;
 		}
@@ -1452,6 +1772,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			case 'activity': return this.emptyActivity();
 			case 'status': return prompt ? this.statusFromPrompt(prompt) : this.emptyStatus();
 			case 'projects': return { projects: [], loadedSections: [] };
+			case 'docker': return this.emptyDockerContainersData();
 			case 'aiAnalysis': return null;
 			default: return null;
 		}
@@ -1468,6 +1789,29 @@ export class PromptDashboardService implements vscode.Disposable {
 
 	private emptyStatus(): PromptDashboardStatusData {
 		return { status: 'draft', progress: 10, totalTimeMs: 0, updatedAt: new Date().toISOString() };
+	}
+
+	private emptyDockerContainersData(): DockerContainersData {
+		return {
+			enabled: Boolean(this.dockerContainersService),
+			available: true,
+			generatedAt: new Date().toISOString(),
+			defaultViewMode: 'tree',
+			composeFilePatterns: [],
+			projects: [],
+			totalContainers: 0,
+			runningContainers: 0,
+			stoppedContainers: 0,
+			warningContainers: 0,
+			errorContainers: 0,
+		};
+	}
+
+	private async loadDockerContainersData(force: boolean, refreshMode: DockerContainersRefreshMode = 'full'): Promise<DockerContainersData> {
+		if (!this.dockerContainersService) {
+			return this.emptyDockerContainersData();
+		}
+		return this.dockerContainersService.getDockerContainersData(force, refreshMode);
 	}
 
 	private statusFromPrompt(prompt: Prompt): PromptDashboardStatusData {

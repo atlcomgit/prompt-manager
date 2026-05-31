@@ -338,6 +338,215 @@ test('PromptDashboardService marks reused projects data idle when the projects w
 	service.dispose();
 });
 
+test('PromptDashboardService getSnapshot reuses bootstrap Docker data and primes background refresh immediately', async () => {
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	let dockerRefreshCalls = 0;
+	let resolveRefreshStarted: (() => void) | null = null;
+	const refreshStarted = new Promise<void>(resolve => {
+		resolveRefreshStarted = resolve;
+	});
+	const dockerData = {
+		enabled: true,
+		available: true,
+		generatedAt: '2026-05-30T11:00:00.000Z',
+		defaultViewMode: 'list' as const,
+		composeFilePatterns: ['docker-compose.yml'],
+		projects: [],
+		totalContainers: 3,
+		runningContainers: 2,
+		stoppedContainers: 1,
+		warningContainers: 0,
+		errorContainers: 0,
+	};
+	const dockerContainersService = {
+		onDidChange: () => ({ dispose: () => undefined }),
+		getBootstrapDockerContainersData: () => dockerData,
+		getDockerContainersData: async () => {
+			dockerRefreshCalls += 1;
+			resolveRefreshStarted?.();
+			return dockerData;
+		},
+	};
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project)),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'cached analysis',
+		} as any,
+		dockerContainersService as any,
+	);
+
+	const snapshot = service.getSnapshot(createPrompt({ projects: ['api'] }));
+
+	assert.equal(snapshot.docker.data.totalContainers, 3);
+	assert.equal(snapshot.docker.data.defaultViewMode, 'list');
+	assert.equal(snapshot.docker.cache.source, 'cache');
+	assert.equal(snapshot.docker.cache.status, 'stale');
+	await refreshStarted;
+	assert.equal(dockerRefreshCalls, 1);
+	service.dispose();
+});
+
+test('PromptDashboardService polls Docker live stats only while metrics remain visible', async () => {
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	let dockerRefreshCalls = 0;
+	const dockerData = {
+		enabled: true,
+		available: true,
+		generatedAt: '2026-05-31T11:00:00.000Z',
+		defaultViewMode: 'tree' as const,
+		composeFilePatterns: ['docker-compose.yml'],
+		projects: [],
+		totalContainers: 2,
+		runningContainers: 2,
+		stoppedContainers: 0,
+		warningContainers: 0,
+		errorContainers: 0,
+	};
+	const dockerContainersService = {
+		onDidChange: () => ({ dispose: () => undefined }),
+		getDockerContainersData: async () => {
+			dockerRefreshCalls += 1;
+			return dockerData;
+		},
+	};
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project)),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'cached analysis',
+		} as any,
+		dockerContainersService as any,
+	);
+	(service as any).getDockerStatsIntervalMs = () => 10;
+
+	await service.refreshWidgetSnapshot(createPrompt({ projects: ['api'] }), 'docker', () => undefined, 'docker-hidden');
+	await new Promise(resolve => setTimeout(resolve, 25));
+	assert.equal(dockerRefreshCalls, 1);
+
+	service.setDockerLiveMetricsVisibility(true);
+	await new Promise(resolve => setTimeout(resolve, 25));
+	assert.ok(dockerRefreshCalls >= 2);
+
+	service.setDockerLiveMetricsVisibility(false);
+	const callsAfterHide = dockerRefreshCalls;
+	await new Promise(resolve => setTimeout(resolve, 25));
+	assert.equal(dockerRefreshCalls, callsAfterHide);
+	service.dispose();
+});
+
+test('PromptDashboardService defers external Docker refreshes while the widget is collapsed and replays them on expand', async () => {
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	let dockerRefreshCalls = 0;
+	let handleDockerChange: ((reason: 'compose' | 'container' | 'snapshot') => void) | undefined;
+	const dockerData = {
+		enabled: true,
+		available: true,
+		generatedAt: '2026-05-31T11:10:00.000Z',
+		defaultViewMode: 'list' as const,
+		composeFilePatterns: ['docker-compose.yml'],
+		projects: [],
+		totalContainers: 2,
+		runningContainers: 1,
+		stoppedContainers: 1,
+		warningContainers: 0,
+		errorContainers: 0,
+	};
+	const dockerContainersService = {
+		onDidChange: (listener: (reason: 'compose' | 'container' | 'snapshot') => void) => {
+			handleDockerChange = listener;
+			return { dispose: () => undefined };
+		},
+		getDockerContainersData: async () => {
+			dockerRefreshCalls += 1;
+			return dockerData;
+		},
+	};
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (_paths: Map<string, string>, projectNames: string[]) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => createSnapshotProject(project)),
+			}),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'cached analysis',
+		} as any,
+		dockerContainersService as any,
+	);
+	(service as any).getDockerRefreshIntervalMs = () => 10;
+
+	await service.refreshWidgetSnapshot(createPrompt({ projects: ['api'] }), 'docker', () => undefined, 'docker-initial', 'dockerContainers');
+	assert.equal(dockerRefreshCalls, 1);
+
+	service.setDockerWidgetCollapsed(true);
+	handleDockerChange?.('container');
+	await new Promise(resolve => setTimeout(resolve, 25));
+	assert.equal(dockerRefreshCalls, 1);
+
+	service.setDockerWidgetCollapsed(false);
+	await new Promise(resolve => setTimeout(resolve, 25));
+	assert.equal(dockerRefreshCalls, 2);
+
+	handleDockerChange?.('container');
+	await new Promise(resolve => setTimeout(resolve, 25));
+	assert.equal(dockerRefreshCalls, 3);
+	service.dispose();
+});
+
 test('PromptDashboardService getSnapshot reflects local prompt status changes even with warm cache', async () => {
 	const workspaceFolders = new Map([
 		['api', '/workspace/api'],

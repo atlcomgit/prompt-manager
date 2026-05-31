@@ -1,0 +1,35 @@
+[H[2J[3J
+[48;5;22m[97m[1m >>> КОМАНДА ЗАПУЩЕНА (B[m[1m compile (B[m
+
+
+> copilot-prompt-manager@0.2.39 compile
+> npm run build
+
+
+> copilot-prompt-manager@0.2.39 prebuild
+> npm run sync:about-title
+
+
+> copilot-prompt-manager@0.2.39 sync:about-title
+> node scripts/sync-about-command-title.mjs
+
+
+> copilot-prompt-manager@0.2.39 build
+> npm run build:extension && npm run build:webview && npm run copy:wasm
+
+
+> copilot-prompt-manager@0.2.39 build:extension
+> esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@huggingface/transformers --format=cjs --platform=node --minify
+
+
+> copilot-prompt-manager@0.2.39 build:webview
+> node esbuild.webview.mjs
+
+[webview] Build complete.
+
+> copilot-prompt-manager@0.2.39 copy:wasm
+> cp node_modules/sql.js/dist/sql-wasm.wasm dist/sql-wasm.wasm
+
+
+[48;5;22m[97m[1m <<< СКРИПТ ВЫПОЛНЕН УСПЕШНО (B[m[1m за 1 сек (B[m
+

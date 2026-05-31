@@ -379,6 +379,70 @@
           "description": "Save the final agent chat response to the prompt report and include it in afterChatCompleted hooks (for example, Telegram integrations).",
           "default": false
         },
+        "promptManager.docker.enabled": {
+          "type": "boolean",
+          "description": "Enable the Docker containers widget in the prompt dashboard.",
+          "default": true
+        },
+        "promptManager.docker.composeFilePatterns": {
+          "type": "array",
+          "description": "Root-level workspace project glob patterns used to discover Docker Compose files for the Docker containers widget. Excluded Paths are ignored.",
+          "default": [
+            "docker-compose.yml",
+            "*.docker-compose.yml",
+            "compose.yml",
+            "*.compose.yml",
+            "docker-compose.yaml",
+            "*.docker-compose.yaml",
+            "compose.yaml",
+            "*.compose.yaml"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "promptManager.docker.refreshIntervalMs": {
+          "type": "number",
+          "description": "Minimum interval for automatic Docker containers refreshes in the prompt dashboard.",
+          "default": 5000,
+          "minimum": 1000,
+          "maximum": 60000
+        },
+        "promptManager.docker.statsIntervalMs": {
+          "type": "number",
+          "description": "Minimum interval for Docker resource statistics sampling in the prompt dashboard.",
+          "default": 1000,
+          "minimum": 1000,
+          "maximum": 60000
+        },
+        "promptManager.docker.cacheTtlMs": {
+          "type": "number",
+          "description": "How long Docker widget data stays fresh before a non-forced refresh recomputes it.",
+          "default": 300000,
+          "minimum": 1000,
+          "maximum": 3600000
+        },
+        "promptManager.docker.defaultViewMode": {
+          "type": "string",
+          "enum": [
+            "tree",
+            "cards",
+            "table",
+            "list"
+          ],
+          "description": "Default display mode for the Docker containers widget.",
+          "default": "tree"
+        },
+        "promptManager.docker.terminalShell": {
+          "type": "string",
+          "description": "Shell command used by the Docker terminal action. Leave empty to auto-detect a shell inside the container.",
+          "default": ""
+        },
+        "promptManager.docker.confirmRemove": {
+          "type": "boolean",
+          "description": "Ask for confirmation before removing a stopped Docker container from the prompt dashboard.",
+          "default": true
+        },
         "promptManager.editor.globalContextUrl": {
           "type": "string",
           "description": "URL for loading the shared agent context into the \"Общая инструкция\" block. Leave empty to hide the load button.",

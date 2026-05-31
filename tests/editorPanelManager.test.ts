@@ -580,11 +580,20 @@ async function createManager(options?: {
 		getSnapshot: () => null,
 		refreshPrompt: async () => null,
 		refreshPromptSnapshot: async () => null,
+		refreshWidgetSnapshot: async () => null,
 		refreshProjectsWidget: async () => null,
 		switchProjectBranch: async () => ({ success: true, errors: [] }),
 		switchProjectBranches: async () => ({ success: true, errors: [] }),
+		setDockerWidgetCollapsed: () => undefined,
 		pauseActiveScope: () => undefined,
 		analyzeParallelReview: async () => ({ status: 'idle', model: '', content: '' }),
+	};
+	const dockerContainersService = {
+		getWorkspaceContainer: async () => null,
+		runContainerAction: async () => undefined,
+		getContainerLogs: async () => ({ container: null, content: '' }),
+		buildContainerTerminalCommand: () => 'docker exec -it container sh',
+		shouldConfirmRemove: () => false,
 	};
 
 	const manager = new EditorPanelManager(
@@ -596,6 +605,7 @@ async function createManager(options?: {
 		stateService as any,
 		promptVoiceService as any,
 		promptDashboardService as any,
+		dockerContainersService as any,
 		undefined,
 		undefined,
 	);
@@ -2219,6 +2229,7 @@ test('scheduleGitReactiveAutoRefresh refreshes prompt dashboard for scoped file 
 	(manager as any).resolveOpenEditorPanel = () => panel;
 	const refreshModes: string[] = [];
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		refreshProjectsWidget: async (
 			_prompt: unknown,
 			postMessage?: (message: unknown) => void,
@@ -2281,6 +2292,7 @@ test('first visible prompt editor event skips bootstrap dashboard projects refre
 	});
 	let refreshCalls = 0;
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		getSnapshot: () => null,
 		refreshPrompt: async () => null,
 		refreshPromptSnapshot: async () => null,
@@ -2325,6 +2337,7 @@ test('revealed prompt editor refreshes the dashboard when hidden changes were qu
 		getWorkspaceFolders: () => ['api'],
 	};
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		getSnapshot: () => null,
 		refreshPrompt: async () => null,
 		refreshPromptSnapshot: async () => null,
@@ -2399,6 +2412,7 @@ test('workspace file watcher refreshes prompt dashboard for a visible editor wit
 		getBuiltInGitApi: async () => null,
 	};
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		refreshProjectsWidget: async () => {
 			refreshCalls += 1;
 			return null;
@@ -2520,6 +2534,7 @@ test('getPromptDashboardSnapshot ignores boot-time placeholder prompt payload wh
 	};
 
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		getSnapshot: (prompt: unknown) => {
 			receivedPrompts.push(prompt);
 			return { projects: null };
@@ -2568,6 +2583,7 @@ test('hydratePromptDashboardProjectsDetails refreshes only the projects widget i
 	};
 
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		refreshProjectsWidget: async (
 			_prompt: unknown,
 			postMessage?: (message: unknown) => void,
@@ -2628,6 +2644,7 @@ test('promptDashboardSwitchBranch refreshes only the projects widget and starts 
 	};
 
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		switchProjectBranch: async () => ({ success: true, errors: [] }),
 		refreshPrompt: async () => {
 			refreshPromptCalls += 1;
@@ -2714,6 +2731,7 @@ test('promptDashboardPullProject refreshes only the projects widget and starts A
 	};
 
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		pullProject: async () => {
 			pullCalls += 1;
 			return { success: true, errors: [] };
@@ -2798,6 +2816,7 @@ test('promptDashboardPullProject still refreshes the projects widget when pull f
 	};
 
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		pullProject: async () => {
 			pullCalls += 1;
 			return { success: false, errors: ['api: origin недоступен'], projectErrors: { api: 'origin недоступен' } };
@@ -2881,6 +2900,7 @@ test('refreshPromptDashboard posts a refreshed snapshot before AI review finishe
 	};
 
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		refreshPrompt: async () => {
 			refreshPromptCalls += 1;
 			return null;
@@ -2895,6 +2915,7 @@ test('refreshPromptDashboard posts a refreshed snapshot before AI review finishe
 				activity: { kind: 'activity', cache: { status: 'fresh', source: 'refresh' }, data: { thresholdMs: 300000, today: [], yesterday: [] } },
 				status: { kind: 'status', cache: { status: 'fresh', source: 'refresh' }, data: { status: 'in-progress', progress: 55, totalTimeMs: 0, updatedAt: '2026-05-03T12:00:00.000Z' } },
 				projects: { kind: 'projects', cache: { status: 'fresh', source: 'refresh' }, data: { projects: [] } },
+				docker: { kind: 'docker', cache: { status: 'fresh', source: 'refresh' }, data: { enabled: true, available: true, generatedAt: '2026-05-03T12:00:00.000Z', defaultViewMode: 'tree', composeFilePatterns: [], projects: [], totalContainers: 0, runningContainers: 0, stoppedContainers: 0, warningContainers: 0, errorContainers: 0 } },
 				aiAnalysis: { kind: 'aiAnalysis', cache: { status: 'fresh', source: 'cache' }, data: { status: 'idle', model: 'gpt-5', content: '' } },
 			};
 		},
@@ -2951,6 +2972,7 @@ test('promptDashboardSwitchBranches refreshes only targeted project rows and sta
 	};
 
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		switchProjectBranches: async () => ({ success: true, errors: [] }),
 		refreshProjectsWidget: async (
 			_prompt: unknown,
@@ -3041,6 +3063,7 @@ test('refreshPromptDashboardWidget uses the just-saved expanded dashboard state 
 	};
 
 	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
 		refreshWidgetSnapshot: async (
 			_prompt: unknown,
 			_widget: unknown,
@@ -3099,6 +3122,42 @@ test('refreshPromptDashboardWidget uses the just-saved expanded dashboard state 
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 });
 
+test('savePromptDashboardCollapsedSections syncs Docker collapse state into PromptDashboardService immediately', async () => {
+	const syncedCollapsedStates: boolean[] = [];
+	const { manager } = await createManager();
+	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: (collapsed: boolean) => {
+			syncedCollapsedStates.push(collapsed);
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'savePromptDashboardCollapsedSections',
+			state: { dockerContainers: true },
+		} as any,
+		{ webview: {} } as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	await (manager as any).handleMessage(
+		{
+			type: 'savePromptDashboardCollapsedSections',
+			state: {},
+		} as any,
+		{ webview: {} } as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(syncedCollapsedStates, [true, false]);
+});
+
 test('savePromptDashboardSectionOrder persists the shared widget order in the host state service', async () => {
 	const savedOrders: string[][][] = [];
 	const { manager } = await createManager({
@@ -3129,7 +3188,7 @@ test('savePromptDashboardSectionOrder persists the shared widget order in the ho
 		['status', 'projectBranches', 'parallelBranches'],
 	]]);
 	assert.deepEqual((manager as any).getPromptDashboardSectionOrder(), [
-		['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits'],
+		['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits', 'dockerContainers'],
 		['status', 'projectBranches', 'parallelBranches'],
 	]);
 });

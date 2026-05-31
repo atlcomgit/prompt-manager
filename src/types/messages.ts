@@ -4,6 +4,7 @@
 
 import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
+import type { DockerComposeProjectActionKind, DockerContainerActionKind } from './docker.js';
 import type {
 	PromptDashboardAnalysisState,
 	PromptDashboardCollapsedSections,
@@ -105,6 +106,12 @@ export type WebviewToExtensionMessage =
 	| { type: 'promptDashboardPullProject'; prompt: Prompt; project: string; requestId?: string }
 	| { type: 'promptDashboardSwitchBranch'; prompt: Prompt; project: string; branch: string; requestId?: string }
 	| { type: 'promptDashboardSwitchBranches'; prompt: Prompt; branchesByProject: Record<string, string>; requestId?: string }
+	| { type: 'promptDashboardDockerAction'; prompt?: Prompt; containerId: string; action: DockerContainerActionKind; requestId?: string }
+	| { type: 'promptDashboardDockerComposeAction'; prompt?: Prompt; projectPath: string; composeFilePath: string; action: DockerComposeProjectActionKind; requestId?: string }
+	| { type: 'promptDashboardOpenDockerComposeFile'; projectPath: string; composeFilePath: string; requestId?: string }
+	| { type: 'promptDashboardOpenDockerLogs'; containerId: string; requestId?: string }
+	| { type: 'promptDashboardOpenDockerTerminal'; containerId: string; requestId?: string }
+	| { type: 'promptDashboardDockerLiveMetricsVisibility'; visible: boolean }
 	| { type: 'promptDashboardOpenFilePatch'; project: string; filePath: string; previousPath?: string; mode: 'commit' | 'branch'; ref: string; baseRef?: string }
 	| { type: 'analyzePromptDashboardReview'; prompt: Prompt; requestId?: string }
 	| { type: 'openGitOverlay'; promptBranch: string; projects: string[] }
@@ -258,8 +265,8 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptDashboardWidgetSnapshot'; promptId: string; promptUuid?: string; widget: PromptDashboardWidgetSnapshot<unknown>; requestId?: string }
 	| { type: 'promptDashboardAnalysis'; promptId: string; promptUuid?: string; analysis: PromptDashboardAnalysisState; requestId?: string }
 	| { type: 'branchStatus'; hasChanges: boolean; details: string }
-	| { type: 'error'; message: string; requestId?: string }
-	| { type: 'info'; message: string; requestId?: string }
+	| { type: 'error'; message: string; requestId?: string; retainPromptDashboardBusy?: boolean }
+	| { type: 'info'; message: string; requestId?: string; retainPromptDashboardBusy?: boolean }
 	| { type: 'clearNotice' }
 	| { type: 'pickedFiles'; files: string[] }
 	| { type: 'contextFileCards'; files: PromptContextFileCard[]; requestId?: string }

@@ -7,6 +7,7 @@ import {
 	buildPromptDashboardAnalysisFingerprint,
 	buildPromptDashboardStatusDataFromPrompt,
 	buildPromptDashboardBranchActions,
+	buildPromptDashboardDockerComposeBusyAction,
 	buildPromptDashboardScopeKey,
 	createPromptDashboardWidgetSnapshot,
 	fitPromptDashboardPathPartsToWidth,
@@ -18,6 +19,8 @@ import {
 	resolvePromptDashboardCacheState,
 	resolvePromptDashboardExpandRefreshTarget,
 	resolvePromptDashboardMode,
+	shouldReleasePromptDashboardRequestId,
+	shouldRetainPromptDashboardBusyActionOnNotice,
 	shouldAcceptPromptDashboardAnalysisMessage,
 	shouldAcceptPromptDashboardRequestMessage,
 	shouldClearPromptDashboardBusyActionFromWidget,
@@ -26,6 +29,22 @@ import {
 	splitPromptDashboardActivityByDay,
 } from '../src/utils/promptDashboard.js';
 import type { PromptDashboardProjectSummary, PromptDashboardProjectsData, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSnapshot } from '../src/types/promptDashboard.js';
+
+function createEmptyDockerWidget() {
+	return createPromptDashboardWidgetSnapshot('docker', {
+		enabled: true,
+		available: true,
+		generatedAt: '2026-05-30T10:00:00.000Z',
+		defaultViewMode: 'tree' as const,
+		composeFilePatterns: [],
+		projects: [],
+		totalContainers: 0,
+		runningContainers: 0,
+		stoppedContainers: 0,
+		warningContainers: 0,
+		errorContainers: 0,
+	});
+}
 
 test('resolvePromptDashboardMode switches to full only when the right side can fit widgets', () => {
 	assert.equal(resolvePromptDashboardMode(1119, 840), 'compact');
@@ -212,6 +231,7 @@ test('resolvePromptDashboardExpandRefreshTarget refreshes only stale or placehol
 			projects: [],
 			loadedSections: [],
 		}, { status: 'stale', source: 'cache' }),
+		docker: createEmptyDockerWidget(),
 		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null, { status: 'error', source: 'refresh' }),
 	};
 
@@ -231,10 +251,51 @@ test('resolvePromptDashboardExpandRefreshTarget refreshes only stale or placehol
 		section: 'aiAnalysis',
 		snapshot,
 	}), { type: 'widget', widget: 'aiAnalysis' });
+	assert.deepEqual(resolvePromptDashboardExpandRefreshTarget({
+		section: 'dockerContainers',
+		snapshot,
+	}), { type: 'widget', widget: 'docker' });
 	assert.equal(resolvePromptDashboardExpandRefreshTarget({
 		section: 'status',
 		snapshot: null,
 	}), null);
+});
+
+test('shouldRetainPromptDashboardBusyActionOnNotice keeps docker loaders until widget refresh', () => {
+	assert.equal(shouldRetainPromptDashboardBusyActionOnNotice({
+		busyAction: 'docker:start:abc123',
+		retainPromptDashboardBusy: true,
+	}), true);
+	assert.equal(shouldRetainPromptDashboardBusyActionOnNotice({
+		busyAction: 'refresh',
+		retainPromptDashboardBusy: true,
+	}), false);
+	assert.equal(shouldRetainPromptDashboardBusyActionOnNotice({
+		busyAction: 'docker:stop:abc123',
+		retainPromptDashboardBusy: false,
+	}), false);
+});
+
+test('shouldReleasePromptDashboardRequestId waits for the completed widget payload', () => {
+	assert.equal(shouldReleasePromptDashboardRequestId({
+		activeRequestId: 'req-1',
+		messageRequestId: 'req-1',
+		cacheStatus: 'loading',
+	}), false);
+	assert.equal(shouldReleasePromptDashboardRequestId({
+		activeRequestId: 'req-1',
+		messageRequestId: 'req-1',
+		cacheStatus: 'fresh',
+	}), true);
+	assert.equal(shouldReleasePromptDashboardRequestId({
+		activeRequestId: 'req-1',
+		messageRequestId: 'req-1',
+	}), true);
+	assert.equal(shouldReleasePromptDashboardRequestId({
+		activeRequestId: 'req-1',
+		messageRequestId: 'req-2',
+		cacheStatus: 'fresh',
+	}), false);
 });
 
 test('resolvePromptDashboardExpandRefreshTarget refreshes a shared Git section that is still missing from loadedSections', () => {
@@ -292,6 +353,7 @@ test('resolvePromptDashboardExpandRefreshTarget refreshes a shared Git section t
 			}],
 			loadedSections: ['parallelBranches'],
 		}, { status: 'fresh', source: 'refresh' }),
+		docker: createEmptyDockerWidget(),
 		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null, { status: 'idle', source: 'placeholder' }),
 	};
 
@@ -479,6 +541,27 @@ test('shouldClearPromptDashboardBusyActionFromWidget waits for a finished projec
 		widgetKind: 'activity',
 		cacheStatus: 'loading',
 	}), false);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'docker:restart:abc123',
+		widgetKind: 'docker',
+		cacheStatus: 'fresh',
+	}), true);
+	assert.equal(shouldClearPromptDashboardBusyActionFromWidget({
+		busyAction: 'docker:restart:abc123',
+		widgetKind: 'docker',
+		cacheStatus: 'loading',
+	}), false);
+});
+
+test('buildPromptDashboardDockerComposeBusyAction creates stable encoded Docker keys', () => {
+	assert.equal(
+		buildPromptDashboardDockerComposeBusyAction({
+			projectPath: '/workspace/api service',
+			composeFilePath: '/workspace/api service/docker-compose.yml',
+			action: 'up',
+		}),
+		'docker:compose:up:%2Fworkspace%2Fapi%20service:%2Fworkspace%2Fapi%20service%2Fdocker-compose.yml',
+	);
 });
 
 test('preservePromptDashboardProjectsLoadingSnapshot keeps previous rows during loading refresh', () => {
@@ -542,6 +625,7 @@ test('syncPromptDashboardStatusFromPrompt updates only the matching snapshot sta
 		activity: createPromptDashboardWidgetSnapshot('activity', { thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, today: [], yesterday: [] }),
 		status: createPromptDashboardWidgetSnapshot('status', { status: 'draft', progress: 10, totalTimeMs: 60_000, updatedAt: '2026-05-03T10:00:00.000Z' }),
 		projects: createPromptDashboardWidgetSnapshot('projects', { projects: [] }),
+		docker: createEmptyDockerWidget(),
 		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
 	};
 
@@ -586,6 +670,7 @@ test('syncPromptDashboardStatusFromPrompt keeps the loaded in-progress snapshot 
 		activity: createPromptDashboardWidgetSnapshot('activity', { thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, today: [], yesterday: [] }),
 		status: createPromptDashboardWidgetSnapshot('status', { status: 'in-progress', progress: 100, totalTimeMs: 1_000, updatedAt: '2026-05-03T16:05:00.000Z' }),
 		projects: createPromptDashboardWidgetSnapshot('projects', { projects: [] }),
+		docker: createEmptyDockerWidget(),
 		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
 	};
 
@@ -619,6 +704,7 @@ test('syncPromptDashboardStatusFromPrompt does not preserve draft progress when 
 		activity: createPromptDashboardWidgetSnapshot('activity', { thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, today: [], yesterday: [] }),
 		status: createPromptDashboardWidgetSnapshot('status', { status: 'draft', progress: 10, totalTimeMs: 1_000, updatedAt: '2026-05-03T16:09:00.000Z' }),
 		projects: createPromptDashboardWidgetSnapshot('projects', { projects: [] }),
+		docker: createEmptyDockerWidget(),
 		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
 	};
 
@@ -651,6 +737,7 @@ test('syncPromptDashboardStatusFromPrompt still uses an explicit prompt percent 
 		activity: createPromptDashboardWidgetSnapshot('activity', { thresholdMs: PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, today: [], yesterday: [] }),
 		status: createPromptDashboardWidgetSnapshot('status', { status: 'in-progress', progress: 0, totalTimeMs: 1_000, updatedAt: '2026-05-03T16:10:00.000Z' }),
 		projects: createPromptDashboardWidgetSnapshot('projects', { projects: [] }),
+		docker: createEmptyDockerWidget(),
 		aiAnalysis: createPromptDashboardWidgetSnapshot('aiAnalysis', null),
 	};
 

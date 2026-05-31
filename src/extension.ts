@@ -3,7 +3,7 @@
  */
 
 import * as vscode from 'vscode';
-import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService, PromptVoiceService, CustomGroupsService, PromptDashboardService } from './services/index.js';
+import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService, PromptVoiceService, CustomGroupsService, PromptDashboardService, DockerContainersService } from './services/index.js';
 import {
 	MemoryDatabaseService,
 	MemoryCleanupService,
@@ -60,7 +60,8 @@ export function activate(context: vscode.ExtensionContext) {
 	const gitService = new GitService();
 	const stateService = new StateService(context);
 	const promptVoiceService = new PromptVoiceService(context.globalStorageUri.fsPath);
-	const promptDashboardService = new PromptDashboardService(storageService, workspaceService, gitService, aiService);
+	const dockerContainersService = new DockerContainersService();
+	const promptDashboardService = new PromptDashboardService(storageService, workspaceService, gitService, aiService, dockerContainersService);
 	const extensionPackage = context.extension.packageJSON as { description?: string; version?: string };
 	const extensionVersion = String(extensionPackage.version || '0.0.0');
 
@@ -89,6 +90,7 @@ export function activate(context: vscode.ExtensionContext) {
 		stateService,
 		promptVoiceService,
 		promptDashboardService,
+		dockerContainersService,
 		() => chatMemoryInstructionService,
 		() => codeMapChatInstructionService,
 		customGroupsService,
@@ -96,6 +98,7 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(new vscode.Disposable(() => {
 		void promptVoiceService.dispose();
 	}));
+	context.subscriptions.push(dockerContainersService);
 	context.subscriptions.push(promptDashboardService);
 
 	const statisticsPanelManager = new StatisticsPanelManager(

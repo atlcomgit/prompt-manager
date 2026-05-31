@@ -54,6 +54,7 @@ import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
 import type { PromptVoiceService } from '../services/promptVoice/promptVoiceService.js';
 import type { PromptDashboardService } from '../services/promptDashboardService.js';
+import type { DockerContainersService } from '../services/dockerContainersService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { ChatMemoryInstructionService, ChatMemorySessionRecord } from '../services/chatMemoryInstructionService.js';
 import type { CustomGroupsService } from '../services/customGroupsService.js';
@@ -513,6 +514,11 @@ export class EditorPanelManager {
 	/** Check whether host-side work for one dashboard widget can be skipped. */
 	private isPromptDashboardWidgetCollapsed(widget: PromptDashboardWidgetKind): boolean {
 		return shouldSkipPromptDashboardWidgetRefresh(this.getPromptDashboardCollapsedSections(), widget);
+	}
+
+	/** Keep Docker auto-refresh policy aligned with the shared collapsed dashboard state. */
+	private syncDockerWidgetCollapsedState(): void {
+		this.promptDashboardService.setDockerWidgetCollapsed(this.isPromptDashboardWidgetCollapsed('docker'));
 	}
 
 	private getPromptEditorViewFallbackKey(panelKey: string): string {
@@ -3098,6 +3104,7 @@ export class EditorPanelManager {
 		private readonly stateService: StateService,
 		private readonly promptVoiceService: PromptVoiceService,
 		private readonly promptDashboardService: PromptDashboardService,
+		private readonly dockerContainersService: DockerContainersService,
 		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
 		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined,
 		private readonly customGroupsService?: CustomGroupsService,
@@ -8180,6 +8187,7 @@ export class EditorPanelManager {
 
 			case 'savePromptDashboardCollapsedSections': {
 				this.promptDashboardCollapsedSectionsState = normalizePromptDashboardCollapsedSections(msg.state);
+				this.syncDockerWidgetCollapsedState();
 				this.logReportDebug('promptDashboard.collapsedSections.saved', {
 					panelKey,
 					collapsedSections: this.promptDashboardCollapsedSectionsState,
@@ -8195,6 +8203,11 @@ export class EditorPanelManager {
 					sectionOrder: this.promptDashboardSectionOrderState,
 				});
 				await this.stateService.savePromptDashboardSectionOrder(msg.order);
+				break;
+			}
+
+			case 'promptDashboardDockerLiveMetricsVisibility': {
+				this.promptDashboardService.setDockerLiveMetricsVisibility(msg.visible === true);
 				break;
 			}
 
@@ -9647,6 +9660,7 @@ export class EditorPanelManager {
 			case 'getPromptDashboardSnapshot': {
 				const dashboardPrompt = this.resolveDashboardPromptRequest(currentPrompt, msg.prompt);
 				const collapsedWidgets = this.getCollapsedPromptDashboardWidgets();
+				this.syncDockerWidgetCollapsedState();
 				const snapshot = this.promptDashboardService.getSnapshot(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
@@ -9661,6 +9675,7 @@ export class EditorPanelManager {
 			case 'refreshPromptDashboard': {
 				const dashboardPrompt = msg.prompt || currentPrompt;
 				const collapsedWidgets = this.getCollapsedPromptDashboardWidgets();
+				this.syncDockerWidgetCollapsedState();
 				this.logReportDebug('promptDashboard.refresh.received', {
 					panelKey,
 					requestId: msg.requestId || '',
@@ -9693,6 +9708,7 @@ export class EditorPanelManager {
 
 			case 'refreshPromptDashboardWidget': {
 				const dashboardPrompt = msg.prompt || currentPrompt;
+				this.syncDockerWidgetCollapsedState();
 				this.logReportDebug('promptDashboard.refreshWidget.received', {
 					panelKey,
 					requestId: msg.requestId || '',
@@ -9840,6 +9856,153 @@ export class EditorPanelManager {
 						msg.requestId,
 						{ projectNames: Object.keys(msg.branchesByProject || {}) },
 					);
+				}
+				break;
+			}
+
+			case 'promptDashboardDockerAction': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				try {
+					const container = await this.dockerContainersService.getWorkspaceContainer(msg.containerId);
+					if (!container) {
+						postMessage({ type: 'error', message: 'Контейнер не относится к compose-файлам текущей рабочей области.', requestId: msg.requestId });
+						break;
+					}
+					if (msg.action === 'remove' && container.status !== 'stopped') {
+						postMessage({ type: 'error', message: 'Можно удалить только остановленный контейнер.', requestId: msg.requestId });
+						break;
+					}
+					if (msg.action === 'start' && container.status === 'running') {
+						postMessage({ type: 'error', message: 'Контейнер уже запущен.', requestId: msg.requestId });
+						break;
+					}
+					if (msg.action === 'remove' && this.dockerContainersService.shouldConfirmRemove()) {
+						const answer = await vscode.window.showWarningMessage(
+							`Удалить контейнер "${container.name}"?`,
+							{ modal: true, detail: 'Будет удалён только остановленный контейнер Docker. Данные в volumes не удаляются.' },
+							'Удалить',
+							'Отмена',
+						);
+						if (answer !== 'Удалить') {
+							break;
+						}
+					}
+					await this.dockerContainersService.runContainerAction(container.id, msg.action);
+					const actionText = msg.action === 'start' ? 'запущен' : msg.action === 'restart' ? 'перезапущен' : msg.action === 'stop' ? 'остановлен' : 'удалён';
+					postMessage({
+						type: 'info',
+						message: `Контейнер "${container.name}" ${actionText}.`,
+						requestId: msg.requestId,
+						retainPromptDashboardBusy: true,
+					});
+					if (!this.isPromptDashboardWidgetCollapsed('docker')) {
+						await this.promptDashboardService.refreshWidgetSnapshot(
+							dashboardPrompt,
+							'docker',
+							(message) => postMessage(message as ExtensionToWebviewMessage),
+							msg.requestId,
+							'dockerContainers',
+						);
+					}
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error), requestId: msg.requestId });
+				}
+				break;
+			}
+
+			case 'promptDashboardDockerComposeAction': {
+				const dashboardPrompt = msg.prompt || currentPrompt;
+				let shouldRefreshDockerWidget = false;
+				try {
+					const target = await this.dockerContainersService.getWorkspaceComposeFile(msg.projectPath, msg.composeFilePath);
+					if (!target) {
+						throw new Error('Compose-файл не найден среди compose-файлов текущей рабочей области.');
+					}
+					const composeFileName = path.basename(target.composeFile.filePath);
+					await this.dockerContainersService.runComposeFileAction(target.project, target.composeFile, msg.action);
+					shouldRefreshDockerWidget = true;
+					postMessage({
+						type: 'info',
+						message: `Команда docker compose ${msg.action} выполнена для "${composeFileName}".`,
+						requestId: msg.requestId,
+						retainPromptDashboardBusy: true,
+					});
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					this.dockerContainersService.setComposeActionError({
+						projectPath: msg.projectPath,
+						composeFilePath: msg.composeFilePath,
+						action: msg.action,
+						message,
+					});
+					shouldRefreshDockerWidget = true;
+					postMessage({ type: 'error', message, requestId: msg.requestId, retainPromptDashboardBusy: true });
+				}
+				if (shouldRefreshDockerWidget && !this.isPromptDashboardWidgetCollapsed('docker')) {
+					await this.promptDashboardService.refreshWidgetSnapshot(
+						dashboardPrompt,
+						'docker',
+						(message) => postMessage(message as ExtensionToWebviewMessage),
+						msg.requestId,
+						'dockerContainers',
+					);
+				}
+				break;
+			}
+
+			case 'promptDashboardOpenDockerComposeFile': {
+				try {
+					const target = await this.dockerContainersService.getWorkspaceComposeFile(msg.projectPath, msg.composeFilePath);
+					if (!target) {
+						postMessage({ type: 'error', message: 'Compose-файл не найден среди compose-файлов текущей рабочей области.', requestId: msg.requestId });
+						break;
+					}
+					const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target.composeFile.filePath));
+					await vscode.window.showTextDocument(document, { preview: false });
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error), requestId: msg.requestId });
+				}
+				break;
+			}
+
+			case 'promptDashboardOpenDockerLogs': {
+				try {
+					const container = await this.dockerContainersService.getWorkspaceContainer(msg.containerId);
+					if (!container) {
+						postMessage({ type: 'error', message: 'Контейнер не относится к compose-файлам текущей рабочей области.', requestId: msg.requestId });
+						break;
+					}
+					const terminal = vscode.window.createTerminal({
+						name: `Docker logs: ${container.service || container.name}`,
+						cwd: container.composeWorkingDir || undefined,
+					});
+					terminal.show();
+					terminal.sendText(this.dockerContainersService.buildContainerLogsTerminalCommand(container.id));
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error), requestId: msg.requestId });
+				}
+				break;
+			}
+
+			case 'promptDashboardOpenDockerTerminal': {
+				try {
+					const container = await this.dockerContainersService.getWorkspaceContainer(msg.containerId);
+					if (!container) {
+						postMessage({ type: 'error', message: 'Контейнер не относится к compose-файлам текущей рабочей области.', requestId: msg.requestId });
+						break;
+					}
+					if (container.status !== 'running') {
+						postMessage({ type: 'error', message: 'Терминал можно открыть только в запущенном контейнере.', requestId: msg.requestId });
+						break;
+					}
+					const terminal = vscode.window.createTerminal({
+						name: `Docker: ${container.service || container.name}`,
+						cwd: container.composeWorkingDir || undefined,
+					});
+					terminal.show();
+					terminal.sendText(this.dockerContainersService.buildContainerTerminalCommand(container.id));
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error), requestId: msg.requestId });
 				}
 				break;
 			}

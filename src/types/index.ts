@@ -5,3 +5,4 @@ export * from './memory.js';
 export * from './codemap.js';
 export * from './git.js';
 export * from './promptDashboard.js';
+export * from './docker.js';

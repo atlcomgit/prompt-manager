@@ -158,7 +158,7 @@ test('resolveInitialPromptDashboardSectionOrder prefers boot state over retained
 				['projectBranches', 'status', 'activity'],
 			),
 			[
-				['aiAnalysis', 'activity', 'projectBranches', 'parallelBranches'],
+				['aiAnalysis', 'activity', 'projectBranches', 'parallelBranches', 'dockerContainers'],
 				['status', 'reviewRequests', 'projectCommits'],
 			],
 		);
@@ -169,8 +169,8 @@ test('resolveInitialPromptDashboardSectionOrder prefers boot state over retained
 				['projectBranches', 'status', 'activity'],
 			),
 			[
-				['projectBranches', 'activity', 'parallelBranches', 'aiAnalysis'],
-				['status', 'reviewRequests', 'projectCommits'],
+				['projectBranches', 'activity', 'parallelBranches', 'dockerContainers'],
+				['status', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
 			],
 		);
 	});
@@ -308,6 +308,7 @@ test('mergePromptDashboardWidgetSnapshot bootstraps the first projects widget pa
 		assert.equal(snapshot?.projects.data.projects[0]?.project, 'api');
 		assert.equal(snapshot?.status.kind, 'status');
 		assert.equal(snapshot?.activity.kind, 'activity');
+		assert.equal(snapshot?.docker.kind, 'docker');
 		assert.equal(snapshot?.aiAnalysis.kind, 'aiAnalysis');
 	});
 });

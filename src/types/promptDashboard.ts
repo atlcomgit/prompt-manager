@@ -1,7 +1,8 @@
 import type { GitOverlayChangeFile, GitOverlayCommit, GitOverlayCommitChangedFile, GitOverlayPipelineStatus, GitOverlayProjectSnapshot, GitOverlayReviewState, GitOverlayParallelBranchSummary } from './git.js';
+import type { DockerContainersData } from './docker.js';
 import type { PromptStatus } from './prompt.js';
 
-export type PromptDashboardWidgetKind = 'activity' | 'status' | 'projects' | 'aiAnalysis';
+export type PromptDashboardWidgetKind = 'activity' | 'status' | 'projects' | 'aiAnalysis' | 'docker';
 
 /** Stores top-level prompt-page dashboard sections that users can collapse. */
 export type PromptDashboardSectionKey =
@@ -11,6 +12,7 @@ export type PromptDashboardSectionKey =
 	| 'reviewRequests'
 	| 'parallelBranches'
 	| 'projectCommits'
+	| 'dockerContainers'
 	| 'aiAnalysis';
 
 /** Persists only sections explicitly collapsed by the user. */
@@ -30,6 +32,7 @@ export const PROMPT_DASHBOARD_SECTION_KEYS: PromptDashboardSectionKey[] = [
 	'reviewRequests',
 	'parallelBranches',
 	'projectCommits',
+	'dockerContainers',
 	'aiAnalysis',
 ];
 
@@ -212,6 +215,10 @@ export function shouldSkipPromptDashboardWidgetRefresh(
 		return isPromptDashboardSectionCollapsed(state, widget);
 	}
 
+	if (widget === 'docker') {
+		return isPromptDashboardSectionCollapsed(state, 'dockerContainers');
+	}
+
 	return false;
 }
 
@@ -219,7 +226,7 @@ export function shouldSkipPromptDashboardWidgetRefresh(
 export function resolveCollapsedPromptDashboardWidgets(
 	state: PromptDashboardCollapsedSections,
 ): PromptDashboardWidgetKind[] {
-	const widgets = (['activity', 'status', 'projects', 'aiAnalysis'] as const)
+	const widgets = (['activity', 'status', 'projects', 'aiAnalysis', 'docker'] as const)
 		.filter(widget => shouldSkipPromptDashboardWidgetRefresh(state, widget));
 	return [...widgets];
 }
@@ -228,6 +235,10 @@ export function resolveCollapsedPromptDashboardWidgets(
 export function resolvePromptDashboardWidgetKindForSection(
 	section: PromptDashboardSectionKey,
 ): PromptDashboardWidgetKind {
+	if (section === 'dockerContainers') {
+		return 'docker';
+	}
+
 	return section === 'status' || section === 'activity' || section === 'aiAnalysis'
 		? section
 		: 'projects';
@@ -393,5 +404,6 @@ export interface PromptDashboardSnapshot {
 	activity: PromptDashboardWidgetSnapshot<PromptDashboardPromptActivityData>;
 	status: PromptDashboardWidgetSnapshot<PromptDashboardStatusData>;
 	projects: PromptDashboardWidgetSnapshot<PromptDashboardProjectsData>;
+	docker: PromptDashboardWidgetSnapshot<DockerContainersData>;
 	aiAnalysis: PromptDashboardWidgetSnapshot<PromptDashboardAnalysisState | null>;
 }

@@ -9,6 +9,8 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 ### 2026-05-31
 
 #### Fixed
+- The `Docker контейнеры` dashboard widget now requests Docker stats snapshots without `one-shot`, so Linux Docker daemons keep `precpu` counters and live CPU percentages no longer get rounded down to a constant `0%` under load.
+- The `Docker контейнеры` dashboard widget now normalizes CPU usage to a host-wide `0..100%` scale instead of Docker CLI's multi-core sum, so busy single containers no longer show values above `100%` in the dashboard UI.
 - The `Ветки проектов` dashboard widget now reuses already loaded prompt-project rows when it widens branch visibility to all workspace repositories, so the shared `projects` refresh fetches fresh Git snapshots only for missing repositories instead of repeating the selected-project snapshot.
 - Post-action AI review for `Получить` and `Переключить` now reuses the preceding reactive branch-row refresh and skips a second targeted project snapshot before the background review starts, so those actions settle faster while the review catches up.
 - The `Ветки проектов` dashboard widget now keeps manually chosen but unapplied branch targets across widget refreshes and `Показать все` scope changes until refreshed Git data confirms the branch became current, so background refreshes no longer reset pending switch choices.

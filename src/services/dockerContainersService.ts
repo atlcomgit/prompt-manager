@@ -1699,7 +1699,7 @@ function normalizeContainerMounts(mounts: DockerEngineContainerMount[]): DockerC
 	})).filter(mount => mount.destination || mount.source);
 }
 
-/** Calculates Docker-compatible CPU percentage from current and previous counters. */
+/** Calculates dashboard CPU percentage normalized to total host capacity. */
 function calculateCpuPercent(rawStats: DockerEngineContainerStats): number {
 	const cpuTotal = toFiniteNumber(rawStats.cpu_stats?.cpu_usage?.total_usage);
 	const previousCpuTotal = toFiniteNumber(rawStats.precpu_stats?.cpu_usage?.total_usage);
@@ -1707,13 +1707,10 @@ function calculateCpuPercent(rawStats: DockerEngineContainerStats): number {
 	const previousSystemTotal = toFiniteNumber(rawStats.precpu_stats?.system_cpu_usage);
 	const cpuDelta = cpuTotal - previousCpuTotal;
 	const systemDelta = systemTotal - previousSystemTotal;
-	const onlineCpus = toFiniteNumber(rawStats.cpu_stats?.online_cpus)
-		|| rawStats.cpu_stats?.cpu_usage?.percpu_usage?.length
-		|| 1;
 	if (cpuDelta <= 0 || systemDelta <= 0) {
 		return 0;
 	}
-	return clampPercent((cpuDelta / systemDelta) * onlineCpus * 100);
+	return clampPercent((cpuDelta / systemDelta) * 100);
 }
 
 /** Calculates memory usage similarly to Docker CLI by subtracting cache when available. */
@@ -2036,12 +2033,12 @@ function toFiniteNumber(value: unknown): number {
 	return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
-/** Clamps a percentage without hiding high CPU values on multi-core hosts. */
+/** Rounds percentage metrics into a stable dashboard-friendly 0..100 range. */
 function clampPercent(value: number): number {
 	if (!Number.isFinite(value)) {
 		return 0;
 	}
-	return Math.max(0, Math.round(value * 10) / 10);
+	return Math.max(0, Math.min(100, Math.round(value * 10) / 10));
 }
 
 /** Maps with a small concurrency limit to avoid overwhelming Docker Engine. */

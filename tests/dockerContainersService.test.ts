@@ -87,3 +87,39 @@ test('DockerContainersService restarts the Docker event stream after it closes',
 
 	service.dispose();
 });
+
+test('DockerContainersService normalizes container CPU to total host capacity', () => {
+	const composeDiscoveryService = {
+		onDidChange: () => ({ dispose: () => undefined }),
+		dispose: () => undefined,
+	} as any;
+	const service = new DockerContainersService({} as any, composeDiscoveryService);
+	const stats = (service as any).calculateResourceStats('container-1', {
+		read: '2026-05-31T16:00:00.000Z',
+		cpu_stats: {
+			online_cpus: 4,
+			system_cpu_usage: 1300,
+			cpu_usage: {
+				total_usage: 300,
+				percpu_usage: [1, 1, 1, 1],
+			},
+		},
+		precpu_stats: {
+			online_cpus: 4,
+			system_cpu_usage: 900,
+			cpu_usage: {
+				total_usage: 100,
+				percpu_usage: [1, 1, 1, 1],
+			},
+		},
+		memory_stats: {
+			usage: 0,
+			limit: 0,
+			stats: {},
+		},
+		networks: {},
+	} as any);
+
+	assert.equal(stats.cpuPercent, 50);
+	service.dispose();
+});

@@ -201,10 +201,10 @@ export class DockerEngineApiClient {
 		return this.requestJson<DockerEngineContainerInspect>('GET', `/containers/${encodeURIComponent(id)}/json`);
 	}
 
-	/** Reads one resource sample for a running container. */
+	/** Reads one resource sample while preserving Docker precpu deltas for CPU calculations. */
 	async getContainerStats(id: string): Promise<DockerEngineContainerStats> {
 		return this.requestJson<DockerEngineContainerStats>('GET', `/containers/${encodeURIComponent(id)}/stats`, {
-			query: { stream: false, 'one-shot': true },
+			query: { stream: false },
 		});
 	}
 

@@ -51,7 +51,7 @@ Copilot Prompt Manager собирает это в один понятный и �
 ## Built For Real Work / Для реальной работы
 
 - **Prompt Sidebar** for library, filters, groups, and fast capture.
-- **Prompt Editor** for context, files, chat launch, Git-aware execution, plan, and report. Collapsed prompt-dashboard cards pause their own refresh and AI review work until reopened. Свёрнутые карточки prompt-dashboard не обновляются и не запускают AI review, пока их снова не раскроют.
+- **Prompt Editor** for context, files, chat launch, Git-aware execution, plan, and report. Prompt-dashboard cards can be collapsed and reordered from their headers, and hidden cards pause their own refresh and AI review work until reopened. Карточки prompt-dashboard можно сворачивать и переставлять из шапки; скрытые карточки не обновляются и не запускают AI review, пока их снова не раскроют.
 - **Tracker and Statistics** for delivery visibility instead of forgotten prompt drafts.
 - **Project Memory** for commit history, AI analysis, semantic search, and codemap snapshots.
 - **Copilot Usage** for Premium request awareness without leaving VS Code.

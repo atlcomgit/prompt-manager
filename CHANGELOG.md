@@ -6,6 +6,11 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-06-01
+
+#### Fixed
+- Prompt-dashboard card dragging now uses pointer events instead of native HTML5 drag/drop, so widget reordering no longer depends on fragile webview `drop` delivery and commits reliably when the pointer is released.
+
 ### 2026-05-31
 
 #### Changed

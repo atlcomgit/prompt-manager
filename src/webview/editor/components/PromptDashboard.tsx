@@ -297,6 +297,8 @@ interface DashboardHydrationRequest {
 
 type DragPlacement = 'before' | 'after';
 
+const DASHBOARD_POINTER_DRAG_THRESHOLD_PX = 4;
+
 interface DashboardDropIndicator {
 	section: PromptDashboardSectionKey;
 	placement: DragPlacement;
@@ -306,6 +308,20 @@ interface PromptDashboardSectionBounds {
 	section: PromptDashboardSectionKey;
 	top: number;
 	bottom: number;
+}
+
+interface PromptDashboardColumnBounds {
+	left: number;
+	right: number;
+	sections: PromptDashboardSectionBounds[];
+}
+
+interface DashboardPointerDragState {
+	section: PromptDashboardSectionKey;
+	pointerId: number;
+	startX: number;
+	startY: number;
+	started: boolean;
 }
 
 /** Right-side prompt dashboard visible only when the editor has enough horizontal space. */
@@ -353,6 +369,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const [dropIndicator, setDropIndicator] = useState<DashboardDropIndicator | null>(null);
 	const [isDockerSectionInView, setIsDockerSectionInView] = useState(false);
 	const draggedSectionRef = useRef<PromptDashboardSectionKey | null>(null);
+	const dropIndicatorRef = useRef<DashboardDropIndicator | null>(null);
+	const pointerDragStateRef = useRef<DashboardPointerDragState | null>(null);
+	const pointerDragCleanupRef = useRef<(() => void) | null>(null);
 	const railRef = useRef<HTMLElement | null>(null);
 	const normalizedCollapsedSections = useMemo(
 		() => normalizePromptDashboardCollapsedSections(collapsedSections),
@@ -496,9 +515,20 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 
 	// Reset transient drag UI when the dashboard scope switches to another prompt.
 	useEffect(() => {
+		pointerDragCleanupRef.current?.();
+		pointerDragCleanupRef.current = null;
+		pointerDragStateRef.current = null;
+		draggedSectionRef.current = null;
+		dropIndicatorRef.current = null;
 		setDraggedSection(null);
 		setDropIndicator(null);
 	}, [snapshot?.scopeKey]);
+
+	// Remove global pointer listeners if the dashboard unmounts during a drag.
+	useEffect(() => () => {
+		pointerDragCleanupRef.current?.();
+		pointerDragCleanupRef.current = null;
+	}, []);
 
 	// Track whether the Docker section is currently inside the dashboard viewport.
 	useEffect(() => {
@@ -631,27 +661,28 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		setBranchDrafts(previous => buildBulkBranchDrafts(branchWidgetProjects, previous, branch));
 	};
 
+	// Store the current insertion slot synchronously so drop handlers do not race React state.
+	const updateDropIndicator = (nextIndicator: DashboardDropIndicator | null) => {
+		dropIndicatorRef.current = nextIndicator;
+		setDropIndicator(previous => previous?.section === nextIndicator?.section && previous?.placement === nextIndicator?.placement
+			? previous
+			: nextIndicator);
+	};
+
 	// Clear the temporary drag state once the current move operation finishes.
 	const clearDragState = () => {
+		pointerDragStateRef.current = null;
 		draggedSectionRef.current = null;
+		dropIndicatorRef.current = null;
 		setDraggedSection(null);
 		setDropIndicator(null);
 	};
 
-	const handleSectionDragStart = (
-		event: React.DragEvent<HTMLButtonElement>,
-		section: PromptDashboardSectionKey,
-	) => {
-		event.stopPropagation();
-		event.dataTransfer.effectAllowed = 'move';
-		event.dataTransfer.setData('text/plain', section);
-		draggedSectionRef.current = section;
-		setDraggedSection(section);
-		setDropIndicator(null);
-	};
-
-	const handleSectionDragEnd = () => {
-		clearDragState();
+	// Stop document-level pointer tracking after a pointer drag completes or cancels.
+	const clearPointerDragListeners = () => {
+		const cleanup = pointerDragCleanupRef.current;
+		pointerDragCleanupRef.current = null;
+		cleanup?.();
 	};
 
 	const resolveDropIndicator = (
@@ -667,6 +698,24 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		return { section: targetSection, placement };
 	};
 
+	// Read current DOM section bounds for one dashboard column.
+	const buildSectionBounds = (container: HTMLElement): PromptDashboardSectionBounds[] => Array.from(
+		container.querySelectorAll<HTMLElement>('[data-pm-dashboard-section]'),
+	)
+		.map((element) => {
+			const section = element.dataset.pmDashboardSection;
+			if (!isPromptDashboardSectionKeyValue(section)) {
+				return null;
+			}
+			const rect = element.getBoundingClientRect();
+			return {
+				section,
+				top: rect.top,
+				bottom: rect.bottom,
+			};
+		})
+		.filter((item): item is PromptDashboardSectionBounds => item !== null);
+
 	// Resolve the nearest insertion slot when the pointer is inside the column gap or below the last card.
 	const resolveColumnDropIndicator = (
 		event: React.DragEvent<HTMLDivElement>,
@@ -675,23 +724,35 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		if (!activeDraggedSection) {
 			return null;
 		}
-		const sectionBounds = Array.from(
-			event.currentTarget.querySelectorAll<HTMLElement>('[data-pm-dashboard-section]'),
-		)
+		const sectionBounds = buildSectionBounds(event.currentTarget);
+		return resolvePromptDashboardColumnDropIndicator(activeDraggedSection, event.clientY, sectionBounds);
+	};
+
+	// Read current DOM column bounds for pointer-based dashboard reordering.
+	const buildPointerColumnBounds = (): PromptDashboardColumnBounds[] => {
+		const railElement = railRef.current;
+		if (!railElement) {
+			return [];
+		}
+		return Array.from(railElement.querySelectorAll<HTMLElement>('[data-pm-dashboard-column]'))
 			.map((element) => {
-				const section = element.dataset.pmDashboardSection;
-				if (!isPromptDashboardSectionKeyValue(section)) {
-					return null;
-				}
 				const rect = element.getBoundingClientRect();
 				return {
-					section,
-					top: rect.top,
-					bottom: rect.bottom,
+					left: rect.left,
+					right: rect.right,
+					sections: buildSectionBounds(element),
 				};
-			})
-			.filter((item): item is PromptDashboardSectionBounds => item !== null);
-		return resolvePromptDashboardColumnDropIndicator(activeDraggedSection, event.clientY, sectionBounds);
+			});
+	};
+
+	// Resolve a pointer drag target without relying on native HTML5 drop events.
+	const resolvePointerDropIndicator = (clientX: number, clientY: number): DashboardDropIndicator | null => {
+		return resolvePromptDashboardPointerDropIndicator(
+			draggedSectionRef.current,
+			clientX,
+			clientY,
+			buildPointerColumnBounds(),
+		);
 	};
 
 	// Persist the shared section order once the current drag operation has a valid destination.
@@ -724,9 +785,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		}
 		event.preventDefault();
 		const nextIndicator = resolveDropIndicator(event, targetSection);
-		setDropIndicator(previous => previous?.section === nextIndicator?.section && previous?.placement === nextIndicator?.placement
-			? previous
-			: nextIndicator);
+		updateDropIndicator(nextIndicator);
 	};
 
 	// Keep reordering active when the pointer leaves one card and moves through the column gap.
@@ -736,9 +795,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		}
 		event.preventDefault();
 		const nextIndicator = resolveColumnDropIndicator(event);
-		setDropIndicator(previous => previous?.section === nextIndicator?.section && previous?.placement === nextIndicator?.placement
-			? previous
-			: nextIndicator);
+		updateDropIndicator(nextIndicator);
 	};
 
 	const handleSectionDragLeave = (
@@ -749,7 +806,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		if (relatedTarget && event.currentTarget.contains(relatedTarget)) {
 			return;
 		}
-		setDropIndicator(previous => previous?.section === targetSection ? null : previous);
+		if (dropIndicatorRef.current?.section === targetSection) {
+			updateDropIndicator(null);
+		}
 	};
 
 	// Drop the indicator only after the pointer leaves the whole column, not when it passes between cards.
@@ -761,7 +820,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		if (relatedTarget && event.currentTarget.contains(relatedTarget)) {
 			return;
 		}
-		setDropIndicator(previous => previous && columnSections.includes(previous.section) ? null : previous);
+		if (dropIndicatorRef.current && columnSections.includes(dropIndicatorRef.current.section)) {
+			updateDropIndicator(null);
+		}
 	};
 
 	const handleSectionDrop = (
@@ -770,32 +831,145 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	) => {
 		event.preventDefault();
 		const activeDraggedSection = draggedSectionRef.current;
-		if (!activeDraggedSection || activeDraggedSection === targetSection) {
+		if (!activeDraggedSection) {
 			clearDragState();
 			return;
 		}
-		applySectionDropIndicator(activeDraggedSection, resolveDropIndicator(event, targetSection));
+		const directIndicator = activeDraggedSection === targetSection
+			? null
+			: resolveDropIndicator(event, targetSection);
+		const commitIndicator = resolvePromptDashboardSectionDropCommitIndicator(
+			activeDraggedSection,
+			directIndicator,
+			dropIndicatorRef.current,
+		);
+		if (!commitIndicator && activeDraggedSection === targetSection) {
+			return;
+		}
+		event.stopPropagation();
+		applySectionDropIndicator(activeDraggedSection, commitIndicator);
 	};
 
 	// Accept drops on the full column so releasing in whitespace still commits the pending reorder.
 	const handleSectionColumnDrop = (event: React.DragEvent<HTMLDivElement>) => {
 		event.preventDefault();
-		applySectionDropIndicator(draggedSectionRef.current, resolveColumnDropIndicator(event));
+		const activeDraggedSection = draggedSectionRef.current;
+		const commitIndicator = resolvePromptDashboardSectionDropCommitIndicator(
+			activeDraggedSection,
+			resolveColumnDropIndicator(event),
+			dropIndicatorRef.current,
+		);
+		applySectionDropIndicator(activeDraggedSection, commitIndicator);
+	};
+
+	// Drive widget reordering through pointer events because webviews can lose native drag/drop.
+	const handleSectionPointerDown = (
+		event: React.PointerEvent<HTMLButtonElement>,
+		section: PromptDashboardSectionKey,
+	) => {
+		if (event.button !== 0 || !event.isPrimary || typeof window === 'undefined') {
+			return;
+		}
+
+		event.preventDefault();
+		event.stopPropagation();
+		clearPointerDragListeners();
+		const pointerId = event.pointerId;
+		const handleElement = event.currentTarget;
+		const dragState: DashboardPointerDragState = {
+			section,
+			pointerId,
+			startX: event.clientX,
+			startY: event.clientY,
+			started: false,
+		};
+		pointerDragStateRef.current = dragState;
+
+		try {
+			handleElement.setPointerCapture(pointerId);
+		} catch {
+			// Pointer capture is a best-effort improvement; window listeners still finish the drag.
+		}
+
+		const finishPointerDrag = (pointerEvent: PointerEvent) => {
+			const currentState = pointerDragStateRef.current;
+			if (!currentState || currentState.pointerId !== pointerEvent.pointerId) {
+				return;
+			}
+			pointerEvent.preventDefault();
+			const activeDraggedSection = currentState.started ? draggedSectionRef.current : null;
+			const directIndicator = currentState.started
+				? resolvePointerDropIndicator(pointerEvent.clientX, pointerEvent.clientY)
+				: null;
+			const pendingIndicator = dropIndicatorRef.current;
+			clearPointerDragListeners();
+			if (!currentState.started) {
+				clearDragState();
+				return;
+			}
+			const commitIndicator = resolvePromptDashboardSectionDropCommitIndicator(
+				activeDraggedSection,
+				directIndicator,
+				pendingIndicator,
+			);
+			applySectionDropIndicator(activeDraggedSection, commitIndicator);
+		};
+
+		const cancelPointerDrag = (pointerEvent: PointerEvent) => {
+			const currentState = pointerDragStateRef.current;
+			if (!currentState || currentState.pointerId !== pointerEvent.pointerId) {
+				return;
+			}
+			clearPointerDragListeners();
+			clearDragState();
+		};
+
+		const movePointerDrag = (pointerEvent: PointerEvent) => {
+			const currentState = pointerDragStateRef.current;
+			if (!currentState || currentState.pointerId !== pointerEvent.pointerId) {
+				return;
+			}
+			pointerEvent.preventDefault();
+			const distance = Math.hypot(pointerEvent.clientX - currentState.startX, pointerEvent.clientY - currentState.startY);
+			if (!currentState.started && distance < DASHBOARD_POINTER_DRAG_THRESHOLD_PX) {
+				return;
+			}
+			if (!currentState.started) {
+				currentState.started = true;
+				draggedSectionRef.current = currentState.section;
+				setDraggedSection(currentState.section);
+			}
+			updateDropIndicator(resolvePointerDropIndicator(pointerEvent.clientX, pointerEvent.clientY));
+		};
+
+		const cleanup = () => {
+			window.removeEventListener('pointermove', movePointerDrag);
+			window.removeEventListener('pointerup', finishPointerDrag);
+			window.removeEventListener('pointercancel', cancelPointerDrag);
+			try {
+				if (handleElement.hasPointerCapture(pointerId)) {
+					handleElement.releasePointerCapture(pointerId);
+				}
+			} catch {
+				// Ignore release failures after the browser already ended pointer capture.
+			}
+		};
+		pointerDragCleanupRef.current = cleanup;
+		window.addEventListener('pointermove', movePointerDrag, { passive: false });
+		window.addEventListener('pointerup', finishPointerDrag, { passive: false });
+		window.addEventListener('pointercancel', cancelPointerDrag, { passive: false });
 	};
 
 	// Render one dedicated header handle so dragging does not interfere with collapse or refresh actions.
 	const renderSectionDragHandle = (section: PromptDashboardSectionKey, title: string): React.ReactNode => (
 		<button
 			type="button"
-			draggable
 			style={{
 				...styles.sectionDragHandle,
 				...(draggedSection === section ? styles.sectionDragHandleDragging : null),
 			}}
 			onClick={(event) => event.stopPropagation()}
-			onMouseDown={(event) => event.stopPropagation()}
-			onDragStart={(event) => handleSectionDragStart(event, section)}
-			onDragEnd={handleSectionDragEnd}
+			onPointerDown={(event) => handleSectionPointerDown(event, section)}
 			title={`Перетащить виджет: ${title}`}
 			aria-label={`Перетащить виджет: ${title}`}
 		>
@@ -869,6 +1043,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 						onDragOver={handleSectionColumnDragOver}
 						onDragLeave={(event) => handleSectionColumnDragLeave(event, column.map(item => item.sectionKey))}
 						onDrop={handleSectionColumnDrop}
+						data-pm-dashboard-column={String(columnIndex)}
 					>
 						{column.map((section, sectionIndex) => (
 							<React.Fragment key={`widget-column:${columnIndex}:section:${sectionIndex}`}>
@@ -2873,6 +3048,68 @@ export function resolvePromptDashboardColumnDropIndicator(
 
 	const lastTarget = orderedBounds[orderedBounds.length - 1];
 	return { section: lastTarget.section, placement: 'after' };
+}
+
+/** Resolves the nearest dashboard drop slot for pointer-driven widget movement. */
+export function resolvePromptDashboardPointerDropIndicator(
+	activeDraggedSection: PromptDashboardSectionKey | null,
+	clientX: number,
+	clientY: number,
+	columnBounds: readonly PromptDashboardColumnBounds[],
+): { section: PromptDashboardSectionKey; placement: 'before' | 'after' } | null {
+	if (!activeDraggedSection) {
+		return null;
+	}
+
+	const orderedColumns = columnBounds
+		.map((column) => ({
+			left: Math.min(column.left, column.right),
+			right: Math.max(column.left, column.right),
+			sections: column.sections,
+		}))
+		.filter((column) => Number.isFinite(column.left) && Number.isFinite(column.right) && column.sections.length > 0)
+		.sort((left, right) => left.left - right.left);
+	if (orderedColumns.length === 0) {
+		return null;
+	}
+
+	const containingColumn = orderedColumns.find((column) => clientX >= column.left && clientX <= column.right);
+	const targetColumn = containingColumn || orderedColumns.reduce((bestColumn, column) => {
+		const bestDistance = resolvePromptDashboardHorizontalColumnDistance(clientX, bestColumn.left, bestColumn.right);
+		const columnDistance = resolvePromptDashboardHorizontalColumnDistance(clientX, column.left, column.right);
+		return columnDistance < bestDistance ? column : bestColumn;
+	}, orderedColumns[0]);
+
+	return resolvePromptDashboardColumnDropIndicator(activeDraggedSection, clientY, targetColumn.sections);
+}
+
+/** Measures how far a pointer is from a horizontal column range. */
+function resolvePromptDashboardHorizontalColumnDistance(clientX: number, left: number, right: number): number {
+	if (clientX < left) {
+		return left - clientX;
+	}
+	if (clientX > right) {
+		return clientX - right;
+	}
+	return 0;
+}
+
+/** Chooses the drop slot to commit when the direct target cannot describe the intended move. */
+export function resolvePromptDashboardSectionDropCommitIndicator(
+	activeDraggedSection: PromptDashboardSectionKey | null,
+	directIndicator: { section: PromptDashboardSectionKey; placement: 'before' | 'after' } | null,
+	pendingIndicator: { section: PromptDashboardSectionKey; placement: 'before' | 'after' } | null,
+): { section: PromptDashboardSectionKey; placement: 'before' | 'after' } | null {
+	if (!activeDraggedSection) {
+		return null;
+	}
+
+	const candidate = directIndicator || pendingIndicator;
+	if (!candidate || candidate.section === activeDraggedSection) {
+		return null;
+	}
+
+	return candidate;
 }
 
 function arePromptDashboardSectionOrdersEqual(
@@ -5319,6 +5556,8 @@ const styles: Record<string, React.CSSProperties> = {
 		background: 'transparent',
 		color: 'color-mix(in srgb, var(--vscode-foreground) 86%, var(--vscode-descriptionForeground))',
 		cursor: 'grab',
+		touchAction: 'none',
+		userSelect: 'none',
 		flexShrink: 0,
 	},
 	sectionDragHandleDragging: {

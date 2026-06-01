@@ -13,6 +13,8 @@ import {
 	reorderPromptDashboardSections,
 	resolveBranchDraftRefreshProjects,
 	resolvePromptDashboardColumnDropIndicator,
+	resolvePromptDashboardPointerDropIndicator,
+	resolvePromptDashboardSectionDropCommitIndicator,
 	reconcileBranchDrafts,
 	resolveFilteredDockerProjects,
 	resolvePromptDashboardDockerLiveMetricsVisible,
@@ -1878,6 +1880,71 @@ test('resolvePromptDashboardColumnDropIndicator keeps a valid drop target in col
 
 	assert.equal(
 		resolvePromptDashboardColumnDropIndicator('status', 40, [{ section: 'status', top: 0, bottom: 100 }]),
+		null,
+	);
+});
+
+test('resolvePromptDashboardSectionDropCommitIndicator reuses the pending slot when drop lands on the dragged card', () => {
+	assert.deepEqual(
+		resolvePromptDashboardSectionDropCommitIndicator(
+			'status',
+			null,
+			{ section: 'reviewRequests', placement: 'after' },
+		),
+		{ section: 'reviewRequests', placement: 'after' },
+	);
+
+	assert.deepEqual(
+		resolvePromptDashboardSectionDropCommitIndicator(
+			'status',
+			{ section: 'activity', placement: 'before' },
+			{ section: 'reviewRequests', placement: 'after' },
+		),
+		{ section: 'activity', placement: 'before' },
+	);
+
+	assert.equal(
+		resolvePromptDashboardSectionDropCommitIndicator(
+			'status',
+			null,
+			{ section: 'status', placement: 'after' },
+		),
+		null,
+	);
+});
+
+test('resolvePromptDashboardPointerDropIndicator selects the nearest column and slot without native drop events', () => {
+	const columns = [
+		{
+			left: 0,
+			right: 180,
+			sections: [
+				{ section: 'status' as const, top: 0, bottom: 100 },
+				{ section: 'projectBranches' as const, top: 112, bottom: 212 },
+			],
+		},
+		{
+			left: 200,
+			right: 380,
+			sections: [
+				{ section: 'activity' as const, top: 0, bottom: 100 },
+				{ section: 'reviewRequests' as const, top: 112, bottom: 212 },
+			],
+		},
+	];
+
+	assert.deepEqual(
+		resolvePromptDashboardPointerDropIndicator('status', 240, 150, columns),
+		{ section: 'reviewRequests', placement: 'before' },
+	);
+
+	assert.deepEqual(
+		resolvePromptDashboardPointerDropIndicator('status', 188, 260, columns),
+		{ section: 'projectBranches', placement: 'after' },
+	);
+
+	assert.equal(
+		resolvePromptDashboardPointerDropIndicator('status', 50, 40, [{ left: 0, right: 180, sections: [{ section: 'status', top: 0, bottom: 100 }] }]),
 		null,
 	);
 });

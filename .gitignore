@@ -11,3 +11,4 @@ out-tests
 
 # Prompt Manager memory database
 .vscode/prompt-manager
+.kilo

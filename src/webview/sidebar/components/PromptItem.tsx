@@ -106,7 +106,7 @@ export const PromptItem: React.FC<Props> = ({
 
   const t = useT();
   const statusOptions = useMemo(() => buildPromptStatusOptions(t), [t]);
-  const [showActions, setShowActions] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [menuBounds, setMenuBounds] = useState<{ width: number; height: number } | null>(null);
@@ -245,18 +245,18 @@ export const PromptItem: React.FC<Props> = ({
       style={{
         ...styles.item,
         ...(isSelected ? styles.itemSelected : {}),
+        ...(!isSelected && isHovered ? styles.itemHovered : {}),
         ...(!isSelected && contextTargeted ? styles.itemContextTargeted : {}),
       }}
       onClick={() => onOpen(prompt.id)}
       onContextMenu={event => {
         event.preventDefault();
         event.stopPropagation();
-        setShowActions(true);
         openMenuAtPointer(event);
       }}
-      onMouseEnter={() => setShowActions(true)}
+      onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => {
-        setShowActions(false);
+        setIsHovered(false);
         closeMenu();
       }}
       title={prompt.description || prompt.title || prompt.id}
@@ -266,7 +266,6 @@ export const PromptItem: React.FC<Props> = ({
           style={{
             ...styles.compactRow,
             gridTemplateColumns: resolveCompactPromptGridTemplateColumns(resolvedCompactTaskColumnTrack),
-            ...(showActions ? styles.compactRowWithActions : {}),
           }}
         >
           <div style={{ ...styles.compactTask, ...(selFg ? { color: selFg } : {}) }}>
@@ -469,46 +468,6 @@ export const PromptItem: React.FC<Props> = ({
           </div>
         </div>
       )}
-      <div
-        style={{
-          ...styles.actions,
-          visibility: showActions ? 'visible' : 'hidden',
-          pointerEvents: showActions ? 'auto' : 'none',
-          background: isSelected
-            ? 'linear-gradient(to right, transparent, var(--vscode-list-activeSelectionBackground) 28%)'
-            : contextTargeted
-              ? 'linear-gradient(to right, transparent, color-mix(in srgb, var(--vscode-list-hoverBackground) 85%, transparent) 28%)'
-              : 'linear-gradient(to right, transparent, var(--vscode-sideBar-background, var(--vscode-editor-background)) 28%)',
-        }}
-      >
-            <button
-              style={{
-                ...styles.actionBtn,
-                ...(selFg ? { color: selFg, opacity: 1 } : {}),
-              }}
-              onClick={e => { e.stopPropagation(); onToggleFavorite(prompt.id); }}
-              title={prompt.favorite ? t('item.removeFavorite') : t('item.addFavorite')}
-            >
-              {prompt.favorite ? '★' : '☆'}
-            </button>
-            <button
-              style={{
-                ...styles.actionBtn,
-                ...(selFg ? { color: selFg, opacity: 1 } : {}),
-              }}
-              onClick={event => {
-                event.stopPropagation();
-                if (showMenu) {
-                  closeMenu();
-                  return;
-                }
-                openMenuAtPointer(event);
-              }}
-              title={t('item.more')}
-            >
-              ⋯
-            </button>
-          </div>
       {showMenu && (
         <div
           style={{
@@ -614,6 +573,10 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--vscode-list-activeSelectionBackground)',
     color: 'var(--vscode-list-activeSelectionForeground)',
   },
+  itemHovered: {
+    background: 'var(--vscode-list-hoverBackground)',
+    color: 'var(--vscode-list-hoverForeground, var(--vscode-foreground))',
+  },
   itemContextTargeted: {
     background: 'color-mix(in srgb, var(--vscode-list-hoverBackground) 85%, transparent)',
   },
@@ -630,9 +593,6 @@ const styles: Record<string, React.CSSProperties> = {
     boxSizing: 'border-box',
     paddingLeft: '8px',
     paddingRight: '8px',
-  },
-  compactRowWithActions: {
-    paddingRight: '40px',
   },
   compactTask: {
     gridColumn: '1',
@@ -825,29 +785,6 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     maxWidth: '120px',
-  },
-  actions: {
-    position: 'absolute',
-    right: 0,
-    top: 0,
-    bottom: 0,
-    display: 'flex',
-    alignItems: 'center',
-    gap: '2px',
-    paddingLeft: '20px',
-    paddingRight: '4px',
-  },
-  actionBtn: {
-    background: 'var(--vscode-button-secondaryBackground, rgba(128,128,128,0.18))',
-    border: '1px solid var(--vscode-button-border, transparent)',
-    color: 'var(--vscode-button-secondaryForeground, var(--vscode-foreground))',
-    cursor: 'pointer',
-    padding: '3px 7px',
-    borderRadius: '4px',
-    fontSize: '15px',
-    lineHeight: '18px',
-    opacity: 1,
-    fontWeight: 600,
   },
   menu: {
     position: 'absolute',

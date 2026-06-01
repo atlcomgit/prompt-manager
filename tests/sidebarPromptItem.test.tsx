@@ -137,3 +137,15 @@ test('PromptItem uses a more saturated green fill for 100% progress', () => {
 	assert.match(markup, /color:var\(--vscode-button-foreground, #ffffff\)/);
 	assert.match(markup, /clip-path:inset\(0 0% 0 0\)/);
 });
+
+test('PromptItem does not render inline favorite and more action buttons', () => {
+	const markup = renderPromptItemMarkup();
+	const favoriteMarkup = renderPromptItemMarkup({
+		prompt: makePrompt({ favorite: true }),
+	});
+
+	assert.doesNotMatch(markup, /title="Add to favorites"/);
+	assert.doesNotMatch(favoriteMarkup, /title="Remove from favorites"/);
+	assert.doesNotMatch(markup, /title="More"/);
+	assert.doesNotMatch(favoriteMarkup, /title="More"/);
+});

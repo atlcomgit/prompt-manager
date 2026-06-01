@@ -516,9 +516,18 @@ export class EditorPanelManager {
 		return shouldSkipPromptDashboardWidgetRefresh(this.getPromptDashboardCollapsedSections(), widget);
 	}
 
-	/** Keep Docker auto-refresh policy aligned with the shared collapsed dashboard state. */
-	private syncDockerWidgetCollapsedState(): void {
-		this.promptDashboardService.setDockerWidgetCollapsed(this.isPromptDashboardWidgetCollapsed('docker'));
+	/** Keep prompt-dashboard refresh policy aligned with the shared collapsed dashboard state. */
+	private syncPromptDashboardCollapsedState(): void {
+		const promptDashboardService = this.promptDashboardService as unknown as {
+			setCollapsedSections?: (state: PromptDashboardCollapsedSections) => void;
+			setDockerWidgetCollapsed: (collapsed: boolean) => void;
+		};
+		if (typeof promptDashboardService.setCollapsedSections === 'function') {
+			promptDashboardService.setCollapsedSections(this.getPromptDashboardCollapsedSections());
+			return;
+		}
+
+		promptDashboardService.setDockerWidgetCollapsed(this.isPromptDashboardWidgetCollapsed('docker'));
 	}
 
 	private getPromptEditorViewFallbackKey(panelKey: string): string {
@@ -8187,7 +8196,7 @@ export class EditorPanelManager {
 
 			case 'savePromptDashboardCollapsedSections': {
 				this.promptDashboardCollapsedSectionsState = normalizePromptDashboardCollapsedSections(msg.state);
-				this.syncDockerWidgetCollapsedState();
+				this.syncPromptDashboardCollapsedState();
 				this.logReportDebug('promptDashboard.collapsedSections.saved', {
 					panelKey,
 					collapsedSections: this.promptDashboardCollapsedSectionsState,
@@ -9660,7 +9669,7 @@ export class EditorPanelManager {
 			case 'getPromptDashboardSnapshot': {
 				const dashboardPrompt = this.resolveDashboardPromptRequest(currentPrompt, msg.prompt);
 				const collapsedWidgets = this.getCollapsedPromptDashboardWidgets();
-				this.syncDockerWidgetCollapsedState();
+				this.syncPromptDashboardCollapsedState();
 				const snapshot = this.promptDashboardService.getSnapshot(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),
@@ -9675,7 +9684,7 @@ export class EditorPanelManager {
 			case 'refreshPromptDashboard': {
 				const dashboardPrompt = msg.prompt || currentPrompt;
 				const collapsedWidgets = this.getCollapsedPromptDashboardWidgets();
-				this.syncDockerWidgetCollapsedState();
+				this.syncPromptDashboardCollapsedState();
 				this.logReportDebug('promptDashboard.refresh.received', {
 					panelKey,
 					requestId: msg.requestId || '',
@@ -9708,7 +9717,7 @@ export class EditorPanelManager {
 
 			case 'refreshPromptDashboardWidget': {
 				const dashboardPrompt = msg.prompt || currentPrompt;
-				this.syncDockerWidgetCollapsedState();
+				this.syncPromptDashboardCollapsedState();
 				this.logReportDebug('promptDashboard.refreshWidget.received', {
 					panelKey,
 					requestId: msg.requestId || '',
@@ -10089,6 +10098,9 @@ export class EditorPanelManager {
 
 			case 'analyzePromptDashboardReview': {
 				const dashboardPrompt = msg.prompt || currentPrompt;
+				if (this.isPromptDashboardWidgetCollapsed('aiAnalysis')) {
+					break;
+				}
 				void this.promptDashboardService.analyzeParallelReview(
 					dashboardPrompt,
 					(message) => postMessage(message as ExtensionToWebviewMessage),

@@ -3309,12 +3309,12 @@ test('refreshPromptDashboardWidget uses the just-saved expanded dashboard state 
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 });
 
-test('savePromptDashboardCollapsedSections syncs Docker collapse state into PromptDashboardService immediately', async () => {
-	const syncedCollapsedStates: boolean[] = [];
+test('savePromptDashboardCollapsedSections syncs prompt dashboard collapsed sections into PromptDashboardService immediately', async () => {
+	const syncedCollapsedStates: Array<Record<string, boolean>> = [];
 	const { manager } = await createManager();
 	(manager as any).promptDashboardService = {
-		setDockerWidgetCollapsed: (collapsed: boolean) => {
-			syncedCollapsedStates.push(collapsed);
+		setCollapsedSections: (state: Record<string, boolean>) => {
+			syncedCollapsedStates.push({ ...state });
 		},
 	};
 
@@ -3342,7 +3342,35 @@ test('savePromptDashboardCollapsedSections syncs Docker collapse state into Prom
 		() => undefined,
 	);
 
-	assert.deepEqual(syncedCollapsedStates, [true, false]);
+	assert.deepEqual(syncedCollapsedStates, [{ dockerContainers: true }, {}]);
+});
+
+test('analyzePromptDashboardReview skips AI refresh while the AI widget is collapsed', async () => {
+	let analyzeCalls = 0;
+	const { manager } = await createManager();
+	(manager as any).promptDashboardCollapsedSectionsState = { aiAnalysis: true };
+	(manager as any).promptDashboardService = {
+		analyzeParallelReview: () => {
+			analyzeCalls += 1;
+			return Promise.resolve({ status: 'completed', model: 'copilot:gpt-5', content: 'ok' });
+		},
+		setDockerWidgetCollapsed: () => undefined,
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'analyzePromptDashboardReview',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			requestId: 'dashboard-ai-collapsed',
+		} as any,
+		{ webview: {} } as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(analyzeCalls, 0);
 });
 
 test('savePromptDashboardSectionOrder persists the shared widget order in the host state service', async () => {

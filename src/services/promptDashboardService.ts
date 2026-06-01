@@ -10,6 +10,7 @@ import type { Prompt, PromptConfig } from '../types/prompt.js';
 import type { GitOverlayChangeFile, GitOverlayCommitChangedFile, GitOverlayProjectSnapshot } from '../types/git.js';
 import type { DockerContainersData } from '../types/docker.js';
 import type {
+	PromptDashboardCollapsedSections,
 	PromptDashboardAnalysisState,
 	PromptDashboardPromptActivityData,
 	PromptDashboardPromptActivityItem,
@@ -23,8 +24,10 @@ import type {
 	PromptDashboardWidgetSnapshot,
 } from '../types/promptDashboard.js';
 import {
+	normalizePromptDashboardCollapsedSections,
 	normalizePromptDashboardLoadedProjectSections,
 	PROMPT_DASHBOARD_PROJECT_SECTION_KEYS,
+	resolveCollapsedPromptDashboardWidgets,
 } from '../types/promptDashboard.js';
 import {
 	buildPromptDashboardAnalysisFingerprint,
@@ -117,6 +120,10 @@ export class PromptDashboardService implements vscode.Disposable {
 	private dockerStatsTimer: NodeJS.Timeout | null = null;
 	/** Keeps external Docker changes queued while the Docker widget stays collapsed. */
 	private hasPendingCollapsedDockerRefresh = false;
+	/** Tracks the latest shared prompt-dashboard collapsed sections pushed from the host. */
+	private activeCollapsedSections: PromptDashboardCollapsedSections = {};
+	/** Signals that the host already synchronized the shared collapsed state for this session. */
+	private hasCollapsedSectionsState = false;
 	/** Tracks whether the Docker widget itself is collapsed in the current dashboard state. */
 	private activeDockerWidgetCollapsed = false;
 	/** Tracks whether Docker CPU/RAM/network blocks are currently visible in the webview. */
@@ -445,6 +452,13 @@ export class PromptDashboardService implements vscode.Disposable {
 	}
 
 	/** Sync the host-side Docker auto-refresh policy with the widget collapsed state. */
+	setCollapsedSections(collapsedSections: PromptDashboardCollapsedSections): void {
+		this.activeCollapsedSections = normalizePromptDashboardCollapsedSections(collapsedSections);
+		this.hasCollapsedSectionsState = true;
+		this.setDockerWidgetCollapsed(this.activeCollapsedSections.dockerContainers === true);
+	}
+
+	/** Sync the host-side Docker auto-refresh policy with the widget collapsed state. */
 	setDockerWidgetCollapsed(collapsed: boolean): void {
 		const wasCollapsed = this.activeDockerWidgetCollapsed;
 		this.activeDockerWidgetCollapsed = collapsed;
@@ -513,8 +527,16 @@ export class PromptDashboardService implements vscode.Disposable {
 	): Promise<PromptDashboardAnalysisState> {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
-		const targetProjects = this.resolveProjectsRefreshTargets(scope, options?.projectNames);
 		const currentProjectsData = this.getProjectsDataForScope(scope);
+		if (this.resolveCurrentCollapsedWidgets().has('aiAnalysis')) {
+			return this.buildAnalysisWidgetFromCache(scope, prompt, currentProjectsData).data || {
+				status: 'idle',
+				model: prompt.model || scope.model,
+				content: '',
+				updatedAt: new Date().toISOString(),
+			};
+		}
+		const targetProjects = this.resolveProjectsRefreshTargets(scope, options?.projectNames);
 		const canReuseCurrentProjects = options?.skipProjectsRefresh === true && currentProjectsData.projects.length > 0;
 		// Rehydrate only affected project rows after branch actions so AI follow-up avoids a full workspace replay.
 		if (!canReuseCurrentProjects && targetProjects.length > 0) {
@@ -876,6 +898,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		prompt: Prompt,
 		collapsedWidgets: PromptDashboardWidgetKind[] = [],
 	): PromptDashboardSnapshot {
+		const collapsedWidgetSet = this.resolveCurrentCollapsedWidgets(collapsedWidgets);
 		const projects = this.buildProjectsWidgetFromCache(scope);
 		const analysis = this.buildAnalysisWidgetFromCache(scope, prompt, projects.data);
 		const snapshot: PromptDashboardSnapshot = {
@@ -891,13 +914,13 @@ export class PromptDashboardService implements vscode.Disposable {
 		};
 
 		// Reused shared projects data should not look freshly refreshed when the widget was skipped while collapsed.
-		if (collapsedWidgets.includes('projects')) {
+		if (collapsedWidgetSet.has('projects')) {
 			snapshot.projects = createPromptDashboardWidgetSnapshot('projects', snapshot.projects.data, {
 				...snapshot.projects.cache,
 				status: 'idle',
 			});
 		}
-		if (collapsedWidgets.includes('docker')) {
+		if (collapsedWidgetSet.has('docker')) {
 			snapshot.docker = createPromptDashboardWidgetSnapshot('docker', snapshot.docker.data, {
 				...snapshot.docker.cache,
 				status: 'idle',
@@ -1079,6 +1102,28 @@ export class PromptDashboardService implements vscode.Disposable {
 
 	private getSharedAnalysis(inputFingerprint: string): PromptDashboardAnalysisState | null {
 		return this.sharedAnalysisCache.get(inputFingerprint)?.data ?? null;
+	}
+
+	/** Resolve host widget collapse state from the live host sync when it is available. */
+	private resolveCurrentCollapsedWidgets(
+		fallbackWidgets: PromptDashboardWidgetKind[] = [],
+	): Set<PromptDashboardWidgetKind> {
+		return new Set(
+			this.hasCollapsedSectionsState
+				? resolveCollapsedPromptDashboardWidgets(this.activeCollapsedSections)
+				: fallbackWidgets,
+		);
+	}
+
+	/** Resolve the still-visible shared Git sections during display refreshes. */
+	private resolveVisibleProjectSections(): PromptDashboardSectionKey[] {
+		if (!this.hasCollapsedSectionsState) {
+			return [...PROMPT_DASHBOARD_PROJECT_SECTION_KEYS];
+		}
+
+		return PROMPT_DASHBOARD_PROJECT_SECTION_KEYS.filter(
+			section => this.activeCollapsedSections[section] !== true,
+		);
 	}
 
 	private setCache<TData>(scope: PromptDashboardScope, widget: PromptDashboardWidgetKind, data: TData, error?: string): void {
@@ -1376,7 +1421,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		requestId?: string,
 		collapsedWidgets: PromptDashboardWidgetKind[] = [],
 	): void {
-		if (!this.dockerContainersService || collapsedWidgets.includes('docker')) {
+		if (!this.dockerContainersService || this.resolveCurrentCollapsedWidgets(collapsedWidgets).has('docker')) {
 			return;
 		}
 		const cached = this.getCachedEntry<DockerContainersData>(scope, 'docker');
@@ -1576,7 +1621,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		options?: PromptDashboardRefreshOptions,
 	): Promise<void> {
 		const scopeKey = buildPromptDashboardScopeKey(scope);
-		const collapsedWidgets = new Set(options?.collapsedWidgets || []);
+		const collapsedWidgets = this.resolveCurrentCollapsedWidgets(options?.collapsedWidgets);
 		const widgets = (['activity', 'status', 'projects', 'docker'] as PromptDashboardWidgetKind[])
 			.filter((widget): widget is PromptDashboardWidgetKind => !collapsedWidgets.has(widget));
 		await Promise.all(widgets.map(widget => this.refreshWidget(scope, widget, postMessage, options)));
@@ -1930,6 +1975,17 @@ export class PromptDashboardService implements vscode.Disposable {
 		projectNamesOverride?: string[],
 	): Promise<PromptDashboardProjectsData> {
 		const currentProjectsData = this.getProjectsDataForScope(scope);
+		const visibleProjectSections = mode === 'display'
+			? this.resolveVisibleProjectSections()
+			: [...PROMPT_DASHBOARD_PROJECT_SECTION_KEYS];
+		const refreshVisibleBranchSection = mode !== 'display'
+			|| visibleProjectSections.includes('projectBranches');
+		const refreshVisibleReviewSection = mode !== 'display'
+			|| visibleProjectSections.includes('reviewRequests');
+		const refreshVisibleParallelSection = mode !== 'display'
+			|| visibleProjectSections.includes('parallelBranches');
+		const refreshVisibleCommitSection = mode !== 'display'
+			|| visibleProjectSections.includes('projectCommits');
 		const paths = this.workspaceService.getWorkspaceFolderPaths();
 		const workspaceProjectNames = Array.from(paths.keys());
 		const requestedProjectNames = projectNamesOverride && projectNamesOverride.length > 0
@@ -1983,9 +2039,12 @@ export class PromptDashboardService implements vscode.Disposable {
 					detailLevel: 'full',
 					// Keep the normal projects refresh light; per-file dirty line stats hydrate only on explicit details refresh.
 					includeChangeDetails: mode === 'details' || mode === 'section-branches',
-					includeBranchDetails: !reviewOnlyRefresh && !commitsOnlyRefresh,
-					includeReviewState: !lightReactiveRefresh && mode !== 'details' && !parallelOnlyRefresh && !commitsOnlyRefresh,
-					includeRecentCommits: !lightReactiveRefresh && !reviewOnlyRefresh && !parallelOnlyRefresh,
+					includeBranchDetails: !reviewOnlyRefresh && !commitsOnlyRefresh
+						&& (mode !== 'display' || refreshVisibleBranchSection || refreshVisibleParallelSection),
+					includeReviewState: !lightReactiveRefresh && mode !== 'details' && !parallelOnlyRefresh && !commitsOnlyRefresh
+						&& (mode !== 'display' || refreshVisibleReviewSection),
+					includeRecentCommits: !lightReactiveRefresh && !reviewOnlyRefresh && !parallelOnlyRefresh
+						&& (mode !== 'display' || refreshVisibleCommitSection),
 					recentCommitsLimit: 2,
 					prefetchedReviewStatesByProject,
 				},
@@ -1996,7 +2055,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			this.ensureScopeActive(scope);
 			const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshot.trackedBranches);
 			const cachedProject = cachedProjectsByName.get(project.project);
-			const incomingSummary = dirtyOnlyDetailsRefresh || includeExpandedDetails || reviewOnlyRefresh || parallelOnlyRefresh || commitsOnlyRefresh
+			const incomingSummary = dirtyOnlyDetailsRefresh || includeExpandedDetails || reviewOnlyRefresh || parallelOnlyRefresh || commitsOnlyRefresh || !refreshVisibleBranchSection
 				? {
 					incomingFiles: cachedProject?.incomingFiles || [],
 					incomingAuthors: cachedProject?.incomingAuthors || [],
@@ -2010,7 +2069,9 @@ export class PromptDashboardService implements vscode.Disposable {
 					this.collectProjectUncommittedFiles(project, excludedPaths),
 					cachedProject,
 				)
-				: this.collectProjectUncommittedFiles(project, excludedPaths);
+				: refreshVisibleBranchSection
+					? this.collectProjectUncommittedFiles(project, excludedPaths)
+					: (cachedProject?.uncommittedFiles || []);
 			if (lightReactiveRefresh) {
 				return this.buildReactiveProjectSummary(
 					scope,
@@ -2040,7 +2101,9 @@ export class PromptDashboardService implements vscode.Disposable {
 			}
 			const canReuseCachedDetails = this.canReuseProjectDetails(project, trackedBranch, cachedProject);
 			const parallelBaseBranch = this.resolveParallelBranchBase(scope, project, trackedBranch);
-			const displayParallelBranches = await this.resolveDisplayParallelBranches(scope, project, trackedBranch, cachedProject);
+			const displayParallelBranches = refreshVisibleParallelSection
+				? await this.resolveDisplayParallelBranches(scope, project, trackedBranch, cachedProject)
+				: (cachedProject?.parallelBranches || []);
 			const branchForRemote = project.currentBranch || project.promptBranch || scope.promptBranch;
 			// Keep pipeline CLI work off the normal dashboard-open path because only AI review consumes it.
 			const pipeline = includePipeline && branchForRemote
@@ -2049,9 +2112,11 @@ export class PromptDashboardService implements vscode.Disposable {
 			this.ensureScopeActive(scope);
 			const recentCommits = includeExpandedDetails
 				? await this.loadDetailedRecentCommits(project)
-				: canReuseCachedDetails
-					? cachedProject?.recentCommits || []
-					: await this.buildDisplayRecentCommits(scope, project);
+				: refreshVisibleCommitSection
+					? (canReuseCachedDetails
+						? cachedProject?.recentCommits || []
+						: await this.buildDisplayRecentCommits(scope, project))
+					: (cachedProject?.recentCommits || []);
 			this.ensureScopeActive(scope);
 			const parallelBranches = includeExpandedDetails
 				? this.mergeParallelBranchDetails(
@@ -2065,9 +2130,13 @@ export class PromptDashboardService implements vscode.Disposable {
 						displayParallelBranches.map(branch => branch.ref || branch.name),
 					).catch(() => [])).map(branch => ({ ...branch, detailsHydrated: true })),
 				)
-				: displayParallelBranches;
+				: refreshVisibleParallelSection
+					? displayParallelBranches
+					: (cachedProject?.parallelBranches || []);
 			this.ensureScopeActive(scope);
-			const conflictFiles = flattenPromptDashboardChangeFiles([project.changeGroups.merge]);
+			const conflictFiles = refreshVisibleParallelSection
+				? flattenPromptDashboardChangeFiles([project.changeGroups.merge])
+				: (cachedProject?.conflictFiles || []);
 			const hasPromptBranchMismatch = this.hasPromptBranchMismatch(scope, project);
 			return {
 				project: project.project,
@@ -2091,7 +2160,9 @@ export class PromptDashboardService implements vscode.Disposable {
 					branches: project.branches,
 				}),
 				recentCommits,
-				review: project.review,
+				review: refreshVisibleReviewSection
+					? project.review
+					: (cachedProject?.review || this.emptyProjectReviewState()),
 				pipeline,
 				parallelBranches,
 				conflictFiles,
@@ -2106,16 +2177,18 @@ export class PromptDashboardService implements vscode.Disposable {
 			? undefined
 			: reviewOnlyRefresh || parallelOnlyRefresh || commitsOnlyRefresh
 				? undefined
-				: (this.hasSameProjectNameSet(projectNames, workspaceProjectNames)
-					? projects
-					: await this.loadBranchWidgetProjectsData(
-						scope,
-						paths,
-						workspaceProjectNames,
-						excludedPaths,
-						new Map(projects.map(project => [project.project, project] as const)),
-					));
-		const loadedSections = this.resolveLoadedProjectSectionsForMode(mode, currentProjectsData);
+				: refreshVisibleBranchSection
+					? (this.hasSameProjectNameSet(projectNames, workspaceProjectNames)
+						? projects
+						: await this.loadBranchWidgetProjectsData(
+							scope,
+							paths,
+							workspaceProjectNames,
+							excludedPaths,
+							new Map(projects.map(project => [project.project, project] as const)),
+						))
+					: currentProjectsData.branchProjects;
+		const loadedSections = this.resolveLoadedProjectSectionsForMode(mode, currentProjectsData, visibleProjectSections);
 
 		return branchProjects !== undefined
 			? { projects, branchProjects, loadedSections }
@@ -2126,6 +2199,7 @@ export class PromptDashboardService implements vscode.Disposable {
 	private resolveLoadedProjectSectionsForMode(
 		mode: PromptDashboardProjectsRefreshMode,
 		currentData: PromptDashboardProjectsData,
+		visibleProjectSections: PromptDashboardSectionKey[] = PROMPT_DASHBOARD_PROJECT_SECTION_KEYS,
 	): PromptDashboardSectionKey[] {
 		const currentSections = normalizePromptDashboardLoadedProjectSections(
 			currentData.loadedSections,
@@ -2133,7 +2207,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		);
 		switch (mode) {
 			case 'display':
-				return [...PROMPT_DASHBOARD_PROJECT_SECTION_KEYS];
+				return this.mergeLoadedProjectSections(currentSections, visibleProjectSections);
 			case 'reactive-branches':
 			case 'dirty-details':
 			case 'section-branches':

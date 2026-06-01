@@ -11,6 +11,7 @@
  */
 
 import * as vscode from 'vscode';
+import { areInternalAiFeaturesEnabled } from '../aiSettingsConfig.js';
 
 /** Системный промпт для LM, задающий роль корректора транскрипции */
 const SYSTEM_PROMPT = [
@@ -70,6 +71,11 @@ export class PromptVoicePostCorrectionService {
 		const trimmed = rawText.trim();
 		// Слишком короткий текст не нуждается в коррекции
 		if (trimmed.length < MIN_TEXT_LENGTH) {
+			return trimmed;
+		}
+
+		// Глобальный AI toggle отключает внутреннюю пост-коррекцию целиком.
+		if (!areInternalAiFeaturesEnabled()) {
 			return trimmed;
 		}
 

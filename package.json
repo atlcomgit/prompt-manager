@@ -55,7 +55,8 @@
     "theme": "dark"
   },
   "activationEvents": [
-    "onStartupFinished"
+  "onStartupFinished",
+  "onWebviewPanel:promptManager.editor"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -295,6 +296,11 @@
     "configuration": {
       "title": "Prompt Manager",
       "properties": {
+        "promptManager.ai.enabled": {
+          "type": "boolean",
+          "description": "Enable Prompt Manager internal AI features. When disabled, built-in AI generations and analyses are skipped, while direct Copilot chat commands remain available.",
+          "default": false
+        },
         "promptManager.improvePromptInstructions": {
           "type": "array",
           "description": "Additional instructions for AI prompt text improvement (button \"Improve\").",
@@ -466,7 +472,7 @@
         "promptManager.memory.enabled": {
           "type": "boolean",
           "description": "Enable the Project Memory system (collects and analyses git commits with AI).",
-          "default": true
+          "default": false
         },
         "promptManager.memory.aiModel": {
           "type": "string",
@@ -629,7 +635,7 @@
         "promptManager.codemap.enabled": {
           "type": "boolean",
           "description": "Enable the codemap instruction system for branch-aware code map files used during chat sessions.",
-          "default": true
+          "default": false
         },
         "promptManager.codemap.trackedBranches": {
           "type": "array",

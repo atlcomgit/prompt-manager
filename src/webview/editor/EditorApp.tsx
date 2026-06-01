@@ -113,6 +113,7 @@ type EditorBootWindow = Window & {
 
 const bootWindow = window as EditorBootWindow;
 const initialBootId = bootWindow.__WEBVIEW_BOOT_ID__ || '';
+const EDITOR_PROMPT_IDENTITY_STATE_KEY = 'pm.editor.promptIdentity';
 
 /** Prefer host boot data for the first paint and only fall back to retained webview state when boot data is absent. */
 export const resolveInitialPromptDashboardCollapsedSections = (
@@ -4213,6 +4214,17 @@ export const EditorApp: React.FC = () => {
       storage.setItem('pm.editor.viewState', JSON.stringify(nextEditorViewState));
     }
   }, [activeTab, branchesExpandedManual, editorContentHeights, expandedSections, manualSectionOverrides, isDescriptionExpanded, sectionHeights, showBranches, storage]);
+
+  useEffect(() => {
+    const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
+    vscode.setState?.({
+      ...currentState,
+      [EDITOR_PROMPT_IDENTITY_STATE_KEY]: {
+        id: prompt.id || '',
+        promptUuid: prompt.promptUuid || '',
+      },
+    });
+  }, [prompt.id, prompt.promptUuid]);
 
   useEffect(() => {
     const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;

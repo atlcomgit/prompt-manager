@@ -305,7 +305,7 @@ export interface MemorySettings {
 
 /** Default memory settings */
 export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
-	enabled: true,
+	enabled: false,
 	aiModel: DEFAULT_COPILOT_MODEL_FAMILY,
 	analysisDepth: 'standard',
 	diffLimit: 10000,

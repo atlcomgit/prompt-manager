@@ -52,12 +52,14 @@ import {
 } from '../types/promptDashboard.js';
 import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
+import { areInternalAiFeaturesEnabled } from '../services/aiSettingsConfig.js';
 import type { PromptVoiceService } from '../services/promptVoice/promptVoiceService.js';
 import type { PromptDashboardService } from '../services/promptDashboardService.js';
 import type { DockerContainersService } from '../services/dockerContainersService.js';
 import type { WorkspaceService } from '../services/workspaceService.js';
 import type { ChatMemoryInstructionService, ChatMemorySessionRecord } from '../services/chatMemoryInstructionService.js';
 import type { CustomGroupsService } from '../services/customGroupsService.js';
+import { getMemorySettings } from '../services/memorySettingsConfig.js';
 import type { CodeMapChatInstructionService } from '../codemap/codeMapChatInstructionService.js';
 import { GitService } from '../services/gitService.js';
 import type { GlobalAgentContextSource, StateService } from '../services/stateService.js';
@@ -141,6 +143,7 @@ const GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS = 250;
 const GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS = 250;
 const GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT = 4;
 const PROMPT_AGENT_JSON_SYNC_DEBOUNCE_MS = 300;
+const EDITOR_WEBVIEW_PROMPT_IDENTITY_STATE_KEY = 'pm.editor.promptIdentity';
 /** Give VS Code a short extra window to surface a late chat session before showing a timeout. */
 const CHAT_START_CONFIRMATION_GRACE_TIMEOUT_MS = 2500;
 const CHAT_START_CONFIRMATION_GRACE_POLL_INTERVAL_MS = 250;
@@ -2414,7 +2417,19 @@ export class EditorPanelManager {
 		return sections.join('\n\n---\n\n').slice(0, MAX_TOTAL_CHARS);
 	}
 
+	private async postInternalAiDisabledError(
+		postMessage: (message: ExtensionToWebviewMessage) => Promise<void>,
+	): Promise<void> {
+		const message = EditorPanelManager.INTERNAL_AI_DISABLED_MESSAGE;
+		void vscode.window.showWarningMessage(message);
+		await postMessage({ type: 'error', message });
+	}
+
 	private async generateReportHtmlFromPrompt(promptSnapshot: Prompt): Promise<string> {
+		if (!areInternalAiFeaturesEnabled()) {
+			throw new Error(EditorPanelManager.INTERNAL_AI_DISABLED_MESSAGE);
+		}
+
 		const projectPaths = this.workspaceService.getWorkspaceFolderPaths();
 		const selectedProjects = this.resolveVisibleWorkspaceProjects(
 			promptSnapshot.projects || [],
@@ -3272,6 +3287,16 @@ export class EditorPanelManager {
 
 	private codeMapChatInstructionService(): CodeMapChatInstructionService | undefined {
 		return this.getCodeMapChatInstructionService?.();
+	}
+
+	/** Check whether runtime memory history context is enabled for chat start. */
+	private isChatMemoryHistoryContextEnabled(): boolean {
+		return Boolean(this.chatMemoryInstructionService()) && getMemorySettings().enabled;
+	}
+
+	/** Check whether runtime codemap context is enabled for chat start. */
+	private isChatCodeMapContextEnabled(): boolean {
+		return Boolean(this.codeMapChatInstructionService()) && getCodeMapSettings().enabled;
 	}
 
 	private shouldCaptureAgentFinalResponse(): boolean {
@@ -5162,6 +5187,7 @@ export class EditorPanelManager {
 	}
 
 	private static readonly UNTITLED_PROMPT_TITLE = 'Промпт без названия';
+	private static readonly INTERNAL_AI_DISABLED_MESSAGE = 'Внутренние AI-функции Prompt Manager отключены настройкой promptManager.ai.enabled.';
 
 	private static stripInstructionFrontmatter(text: string): string {
 		return stripLegacyInstructionFrontmatter(text).trim();
@@ -6913,6 +6939,349 @@ export class EditorPanelManager {
 		this.pendingPanelMessages.delete(panelKey);
 	}
 
+	/** Resolve the prompt identity persisted by the webview so a restored panel can be adopted. */
+	private resolveRevivedPromptOpenTarget(state: unknown): PromptOpenTarget | null {
+		const stateRecord = state && typeof state === 'object'
+			? state as Record<string, unknown>
+			: {};
+		const identityValue = stateRecord[EDITOR_WEBVIEW_PROMPT_IDENTITY_STATE_KEY];
+		const identityRecord = identityValue && typeof identityValue === 'object'
+			? identityValue as Record<string, unknown>
+			: null;
+		const identityId = identityRecord ? String(identityRecord.id || '').trim() : '';
+		const identityPromptUuid = identityRecord ? String(identityRecord.promptUuid || '').trim() : '';
+		if (identityId || identityPromptUuid) {
+			return {
+				id: identityId || identityPromptUuid,
+				...(identityPromptUuid ? { promptUuid: identityPromptUuid } : {}),
+			};
+		}
+
+		const startupRestoreState = this.stateService.getStartupEditorRestoreState();
+		const sidebarState = this.stateService.getSidebarState();
+		const fallbackPromptUuid = (sidebarState.selectedPromptUuid || '').trim();
+		const fallbackPromptId = (
+			startupRestoreState.promptId
+			|| this.stateService.getLastPromptId()
+			|| sidebarState.selectedPromptId
+			|| ''
+		).trim();
+		if (!fallbackPromptId && !fallbackPromptUuid) {
+			return null;
+		}
+
+		return {
+			id: fallbackPromptId || fallbackPromptUuid,
+			...(fallbackPromptUuid ? { promptUuid: fallbackPromptUuid } : {}),
+		};
+	}
+
+	/** Attach the shared prompt editor lifecycle to a live or revived webview panel. */
+	private attachPromptEditorPanelRuntime(
+		panelKey: string,
+		panel: vscode.WebviewPanel,
+		setPanelDirty: (value: boolean) => void,
+	): void {
+		const isRu = vscode.env.language.startsWith('ru');
+
+		this.promptEditorPanels.add(panel);
+		panel.onDidDispose(() => {
+			this.promptEditorPanels.delete(panel);
+		});
+
+		panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'sidebar-icon.svg');
+
+		// Handle panel close — autosave unsaved changes silently.
+		panel.onDidDispose(async () => {
+			this.clearPromptDashboardReactiveRefreshTimer(panelKey);
+			this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
+			this.promptDashboardVisibleRefreshGraceUntilByPanel.delete(panelKey);
+			await this.promptVoiceService.cancel(panelKey);
+			const promptIdForWait = (this.panelPromptRefs.get(panelKey)?.id || '').trim();
+			await this.awaitPendingReportPersist(promptIdForWait);
+			const promptRefSnapshot = this.panelPromptRefs.get(panelKey)
+				? JSON.parse(JSON.stringify(this.panelPromptRefs.get(panelKey))) as Prompt
+				: null;
+			const latestPromptSnapshot = this.panelLatestPromptSnapshots.get(panelKey)
+				? JSON.parse(JSON.stringify(this.panelLatestPromptSnapshots.get(panelKey))) as Prompt
+				: null;
+			const basePromptSnapshot = this.panelBasePrompts.get(panelKey)
+				? JSON.parse(JSON.stringify(this.panelBasePrompts.get(panelKey))) as Prompt
+				: null;
+			const linkedKeys = [...openPanels.entries()]
+				.filter(([, p]) => p === panel)
+				.map(([key]) => key);
+			const disposedCurrentEditorPanel = linkedKeys.includes(SINGLE_EDITOR_PANEL_KEY);
+			const skipUnsavedPrompt = this.silentClosePanels.has(panel);
+			this.silentClosePanels.delete(panel);
+			this.clearPromptPlanTracking(panelKey);
+			for (const key of linkedKeys) {
+				this.clearPromptDashboardReactiveRefreshTimer(key);
+				this.promptDashboardPendingRefreshOnReveal.delete(key);
+				this.promptDashboardVisibleRefreshGraceUntilByPanel.delete(key);
+				this.disposeGitOverlaySession(key);
+				openPanels.delete(key);
+				this.panelPromptRefs.delete(key);
+				this.panelBootIds.delete(key);
+				this.pendingReadyPromptMessages.delete(key);
+				this.panelForceMainTabOnNextOpen.delete(key);
+				this.pendingPanelMessages.delete(key);
+				this.chatTrackingDisposables.get(key)?.dispose();
+				this.chatTrackingDisposables.delete(key);
+				this.panelDirtySetters.delete(key);
+				this.panelDirtyFlags.delete(key);
+				this.panelPromptConfigFieldChangedAt.delete(key);
+				this.panelLatestPromptSnapshots.delete(key);
+				this.panelBasePrompts.delete(key);
+				this.clearContentEditorBinding(key);
+				this.clearReportEditorBinding(key);
+				this.clearPromptPlanTracking(key);
+			}
+
+			if (disposedCurrentEditorPanel && !this.isShuttingDown) {
+				await this.stateService.saveStartupEditorRestoreState(false, null);
+			}
+
+			if (skipUnsavedPrompt) {
+				return;
+			}
+			const currentSnapshot: Prompt = latestPromptSnapshot
+				? JSON.parse(JSON.stringify(latestPromptSnapshot))
+				: promptRefSnapshot
+					? JSON.parse(JSON.stringify(promptRefSnapshot))
+					: basePromptSnapshot
+						? JSON.parse(JSON.stringify(basePromptSnapshot))
+						: createDefaultPrompt('');
+			let hasUnsavedChanges = this.panelDirtyFlags.get(panelKey) || false;
+			if (!hasUnsavedChanges) {
+				if (currentSnapshot.id) {
+					const persisted = await this.storageService.getPrompt(currentSnapshot.id);
+					this.mergeExternalReportIfUnchanged(currentSnapshot, persisted, basePromptSnapshot);
+					hasUnsavedChanges = this.hasMeaningfulPromptDiff(currentSnapshot, persisted);
+				} else {
+					hasUnsavedChanges = Boolean(
+						currentSnapshot.title
+						|| currentSnapshot.description
+						|| currentSnapshot.content
+						|| currentSnapshot.report
+						|| currentSnapshot.projects.length
+						|| currentSnapshot.languages.length
+						|| currentSnapshot.frameworks.length
+						|| currentSnapshot.skills.length
+						|| currentSnapshot.mcpTools.length
+						|| currentSnapshot.hooks.length
+						|| currentSnapshot.taskNumber
+						|| currentSnapshot.branch
+						|| currentSnapshot.model
+						|| currentSnapshot.contextFiles.length
+					);
+				}
+			}
+
+			if (hasUnsavedChanges) {
+				const dirtySnapshot: Prompt = latestPromptSnapshot
+					? JSON.parse(JSON.stringify(latestPromptSnapshot))
+					: promptRefSnapshot
+						? JSON.parse(JSON.stringify(promptRefSnapshot))
+						: basePromptSnapshot
+							? JSON.parse(JSON.stringify(basePromptSnapshot))
+							: createDefaultPrompt('');
+				const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(dirtySnapshot, promptRefSnapshot || basePromptSnapshot);
+				this.applyPromptFallbacksForPendingAiEnrichment(dirtySnapshot, aiEnrichmentPlan);
+				try {
+					const renameFromId = await this.ensurePromptIdMatchesTitle(dirtySnapshot, dirtySnapshot.id || undefined);
+					await this.guardReportOverwriteBeforeSave(panelKey, dirtySnapshot, basePromptSnapshot);
+					const persistedPrompt = dirtySnapshot.id ? await this.storageService.getPrompt(renameFromId || dirtySnapshot.id) : null;
+					this.mergeExternalReportIfUnchanged(dirtySnapshot, persistedPrompt, basePromptSnapshot);
+					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
+					dirtySnapshot.timeSpentOnTask = Math.max(0, dirtySnapshot.timeSpentOnTask || 0);
+					const savedPrompt = await this.storageService.savePrompt(dirtySnapshot, { previousId: renameFromId });
+					this.panelDirtyFlags.set(panelKey, false);
+					this.panelLatestPromptSnapshots.set(panelKey, null);
+					this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(savedPrompt)));
+					if (aiEnrichmentPlan.needsAiEnrichment) {
+						this.setPendingPromptAiEnrichmentState(savedPrompt.id, savedPrompt.promptUuid, {
+							title: aiEnrichmentPlan.needsTitle,
+							description: aiEnrichmentPlan.needsDescription,
+						});
+						void this.scheduleBackgroundAiEnrichment(
+							savedPrompt.id,
+							savedPrompt.promptUuid,
+							savedPrompt.content,
+							aiEnrichmentPlan.needsTitle,
+							aiEnrichmentPlan.needsDescription,
+							(message) => this.postMessageToCurrentPanel(panelKey, message),
+							panelKey,
+						);
+					}
+					await this.broadcastAvailableLanguagesAndFrameworks();
+					this._onDidSave.fire(savedPrompt.id);
+				} catch (err) {
+					const message = this.formatSaveConflictMessage(err);
+					vscode.window.showErrorMessage(
+						isRu ? `Ошибка сохранения: ${message}` : `Save error: ${message}`
+					);
+				}
+			}
+		});
+
+		panel.onDidChangeViewState((event) => {
+			if (!event.webviewPanel.visible) {
+				void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
+				this.clearPromptDashboardReactiveRefreshTimer(panelKey);
+				if (!this.hasActiveGitReactiveConsumers()) {
+					this.disposeGitOverlayReactiveSources();
+				}
+				return;
+			}
+
+			void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
+			void this.refreshPromptReportForPanel(panelKey, event.webviewPanel);
+			void this.ensureGitOverlayReactiveSources();
+			const promptRef = this.panelPromptRefs.get(panelKey);
+			const visibleRefreshGraceUntil = this.promptDashboardVisibleRefreshGraceUntilByPanel.get(panelKey) || 0;
+			const shouldSkipBootstrapDashboardRefresh = visibleRefreshGraceUntil > Date.now();
+			const shouldRefreshAfterHiddenChanges = this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
+			if (visibleRefreshGraceUntil > 0) {
+				this.promptDashboardVisibleRefreshGraceUntilByPanel.delete(panelKey);
+			}
+			if (promptRef) {
+				void this.syncPromptPlanSnapshot(panelKey, promptRef);
+				if (shouldRefreshAfterHiddenChanges) {
+					void this.refreshPromptDashboardProjectsForPanel(panelKey, event.webviewPanel, promptRef, 'reactive-branches');
+				} else if (!shouldSkipBootstrapDashboardRefresh) {
+					this.hooksOutput.appendLine(`[dashboard-refresh] panel=${panelKey} skipped visible refresh; no hidden git changes detected`);
+				}
+			}
+		});
+
+		// Handle messages.
+		panel.webview.onDidReceiveMessage(
+			async (msg: WebviewToExtensionMessage) => {
+				const currentPrompt = this.panelPromptRefs.get(panelKey);
+				if (!currentPrompt) {
+					return;
+				}
+				if (msg.type === 'ready') {
+					const activeBootId = this.panelBootIds.get(panelKey) || '';
+					if (activeBootId && (msg.bootId || '') !== activeBootId) {
+						return;
+					}
+				}
+				if (msg.type === 'debugLog') {
+					this.logReportDebug(`webview.${msg.scope}.${msg.message}`, msg.payload && typeof msg.payload === 'object'
+						? msg.payload as Record<string, unknown>
+						: { value: msg.payload ?? null });
+					return;
+				}
+				if (msg.type === 'markDirty') {
+					if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.promptId)) {
+						return;
+					}
+
+					const latestPromptState = this.panelLatestPromptSnapshots.get(panelKey) || null;
+					const previousLanguages = latestPromptState?.languages || currentPrompt.languages;
+					const previousFrameworks = latestPromptState?.frameworks || currentPrompt.frameworks;
+					const previousCurrentReport = currentPrompt.report || '';
+
+					this.panelDirtyFlags.set(panelKey, msg.dirty);
+					this.setPanelLatestLocalPromptRevision(panelKey, msg.localRevision);
+					this.setPanelPromptConfigFieldChangedAt(panelKey, msg.dirty ? msg.configFieldChangedAt || null : null);
+					if (msg.prompt) {
+						Object.assign(currentPrompt, msg.prompt);
+						this.setPanelPromptRef(panelKey, currentPrompt);
+						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(msg.prompt)));
+					} else if (msg.dirty && !latestPromptState) {
+						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(currentPrompt)));
+					} else if (!msg.dirty) {
+						this.panelLatestPromptSnapshots.set(panelKey, null);
+					}
+
+					const updatedLatestPromptState = this.panelLatestPromptSnapshots.get(panelKey) || null;
+
+					const debugReportSource = msg.prompt?.report
+						?? updatedLatestPromptState?.report
+						?? currentPrompt.report
+						?? '';
+					this.logReportDebug('markDirty', {
+						panelKey,
+						dirty: msg.dirty,
+						reportLength: debugReportSource.length,
+						reportPreview: this.reportDebugPreview(debugReportSource),
+					});
+
+					if (msg.prompt && currentPrompt.id) {
+						const nextReport = msg.prompt.report || '';
+						if (nextReport !== previousCurrentReport) {
+							const reportPanel = this.reportEditorPanels.get(currentPrompt.id);
+							if (reportPanel) {
+								this.logReportDebug('markDirty.forwardedToReportEditor', {
+									panelKey,
+									promptId: currentPrompt.id,
+									previousLength: previousCurrentReport.length,
+									nextLength: nextReport.length,
+								});
+								void reportPanel.webview.postMessage({
+									type: 'reportEditorExternalUpdate',
+									report: nextReport,
+								} satisfies ExtensionToWebviewMessage);
+							}
+						}
+					}
+
+					if (msg.prompt && msg.dirty) {
+						const normalize = (items: string[]): string[] => [...items].map(v => v.trim()).filter(Boolean).sort();
+						const languagesChanged = JSON.stringify(normalize(previousLanguages)) !== JSON.stringify(normalize(msg.prompt.languages || []));
+						const frameworksChanged = JSON.stringify(normalize(previousFrameworks)) !== JSON.stringify(normalize(msg.prompt.frameworks || []));
+						if (languagesChanged || frameworksChanged) {
+							await this.broadcastAvailableLanguagesAndFrameworks([msg.prompt]);
+						}
+					}
+
+					this.updatePromptPanelTitle(panel, updatedLatestPromptState || currentPrompt, {
+						dirty: this.panelDirtyFlags.get(panelKey) || false,
+						isRu,
+					});
+					return;
+				}
+				await this.handleMessage(msg, panel, currentPrompt, panelKey, () => this.panelDirtyFlags.get(panelKey) || false, setPanelDirty);
+			},
+		);
+	}
+
+	/** Adopt a restored prompt editor panel so startup restore can reuse it instead of creating a duplicate tab. */
+	public async revivePromptEditorPanel(panel: vscode.WebviewPanel, state: unknown): Promise<void> {
+		const panelKey = SINGLE_EDITOR_PANEL_KEY;
+		const liveSingletonPanel = openPanels.get(panelKey);
+		if (liveSingletonPanel && liveSingletonPanel !== panel && !this.silentClosePanels.has(liveSingletonPanel)) {
+			this.silentClosePanels.add(panel);
+			panel.dispose();
+			return;
+		}
+
+		if (!this.promptEditorPanels.has(panel)) {
+			const setPanelDirty = (value: boolean): void => {
+				this.panelDirtyFlags.set(panelKey, value);
+			};
+			this.attachPromptEditorPanelRuntime(panelKey, panel, setPanelDirty);
+			this.panelDirtySetters.set(panelKey, setPanelDirty);
+		}
+
+		openPanels.set(panelKey, panel);
+		void this.ensureGitOverlayReactiveSources();
+		this.syncStartupEditorRestoreState();
+		this.enforceSinglePromptEditorPage(panel);
+
+		const target = this.resolveRevivedPromptOpenTarget(state);
+		if (!target) {
+			this.silentClosePanels.add(panel);
+			panel.dispose();
+			return;
+		}
+
+		await this.openPrompt(target);
+	}
+
 	private async switchPromptInExistingPanel(
 		panelKey: string,
 		panel: vscode.WebviewPanel,
@@ -6950,7 +7319,9 @@ export class EditorPanelManager {
 			editorViewState: openEditorViewState,
 		});
 
-		if (options.rebootWebview) {
+		const shouldRebootWebview = options.rebootWebview || !((this.panelBootIds.get(panelKey) || '').trim());
+
+		if (shouldRebootWebview) {
 			this.rebootPromptPanelWebview(panelKey, panel, prompt, promptMessage);
 		} else {
 			try {
@@ -7378,12 +7749,7 @@ export class EditorPanelManager {
 				...this.getEditorWebviewOptions(prompt.contextFiles),
 			}
 		);
-		this.promptEditorPanels.add(panel);
-		panel.onDidDispose(() => {
-			this.promptEditorPanels.delete(panel);
-		});
-
-		panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'sidebar-icon.svg');
+		this.attachPromptEditorPanelRuntime(panelKey, panel, setPanelDirty);
 		const initialPromptMessage = this.buildPromptMessage(prompt, {
 			reason: 'open',
 			openRequestVersion: requestVersion,
@@ -7404,264 +7770,6 @@ export class EditorPanelManager {
 			this.silentClosePanels.add(existingPanel);
 			existingPanel.dispose();
 		}
-
-		// Handle panel close — autosave unsaved changes silently
-		panel.onDidDispose(async () => {
-			this.clearPromptDashboardReactiveRefreshTimer(panelKey);
-			this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
-			this.promptDashboardVisibleRefreshGraceUntilByPanel.delete(panelKey);
-			await this.promptVoiceService.cancel(panelKey);
-			const promptIdForWait = (this.panelPromptRefs.get(panelKey)?.id || '').trim();
-			await this.awaitPendingReportPersist(promptIdForWait);
-			const promptRefSnapshot = this.panelPromptRefs.get(panelKey)
-				? JSON.parse(JSON.stringify(this.panelPromptRefs.get(panelKey))) as Prompt
-				: null;
-			const latestPromptSnapshot = this.panelLatestPromptSnapshots.get(panelKey)
-				? JSON.parse(JSON.stringify(this.panelLatestPromptSnapshots.get(panelKey))) as Prompt
-				: null;
-			const basePromptSnapshot = this.panelBasePrompts.get(panelKey)
-				? JSON.parse(JSON.stringify(this.panelBasePrompts.get(panelKey))) as Prompt
-				: null;
-			const linkedKeys = [...openPanels.entries()]
-				.filter(([, p]) => p === panel)
-				.map(([key]) => key);
-			const disposedCurrentEditorPanel = linkedKeys.includes(SINGLE_EDITOR_PANEL_KEY);
-			const skipUnsavedPrompt = this.silentClosePanels.has(panel);
-			this.silentClosePanels.delete(panel);
-			this.clearPromptPlanTracking(panelKey);
-			for (const key of linkedKeys) {
-				this.clearPromptDashboardReactiveRefreshTimer(key);
-				this.promptDashboardPendingRefreshOnReveal.delete(key);
-				this.promptDashboardVisibleRefreshGraceUntilByPanel.delete(key);
-				this.disposeGitOverlaySession(key);
-				openPanels.delete(key);
-				this.panelPromptRefs.delete(key);
-				this.panelBootIds.delete(key);
-				this.pendingReadyPromptMessages.delete(key);
-				this.panelForceMainTabOnNextOpen.delete(key);
-				this.pendingPanelMessages.delete(key);
-				this.chatTrackingDisposables.get(key)?.dispose();
-				this.chatTrackingDisposables.delete(key);
-				this.panelDirtySetters.delete(key);
-				this.panelDirtyFlags.delete(key);
-				this.panelPromptConfigFieldChangedAt.delete(key);
-				this.panelLatestPromptSnapshots.delete(key);
-				this.panelBasePrompts.delete(key);
-				this.clearContentEditorBinding(key);
-				this.clearReportEditorBinding(key);
-				this.clearPromptPlanTracking(key);
-			}
-
-			if (disposedCurrentEditorPanel && !this.isShuttingDown) {
-				await this.stateService.saveStartupEditorRestoreState(false, null);
-			}
-
-			if (skipUnsavedPrompt) {
-				return;
-			}
-			const currentSnapshot: Prompt = latestPromptSnapshot
-				? JSON.parse(JSON.stringify(latestPromptSnapshot))
-				: promptRefSnapshot
-					? JSON.parse(JSON.stringify(promptRefSnapshot))
-					: basePromptSnapshot
-						? JSON.parse(JSON.stringify(basePromptSnapshot))
-						: createDefaultPrompt('');
-
-			let hasUnsavedChanges = this.panelDirtyFlags.get(panelKey) || false;
-			if (!hasUnsavedChanges) {
-				if (currentSnapshot.id) {
-					const persisted = await this.storageService.getPrompt(currentSnapshot.id);
-					this.mergeExternalReportIfUnchanged(currentSnapshot, persisted, basePromptSnapshot);
-					hasUnsavedChanges = this.hasMeaningfulPromptDiff(currentSnapshot, persisted);
-				} else {
-					hasUnsavedChanges = Boolean(
-						currentSnapshot.title
-						|| currentSnapshot.description
-						|| currentSnapshot.content
-						|| currentSnapshot.report
-						|| currentSnapshot.projects.length
-						|| currentSnapshot.languages.length
-						|| currentSnapshot.frameworks.length
-						|| currentSnapshot.skills.length
-						|| currentSnapshot.mcpTools.length
-						|| currentSnapshot.hooks.length
-						|| currentSnapshot.taskNumber
-						|| currentSnapshot.branch
-						|| currentSnapshot.model
-						|| currentSnapshot.contextFiles.length
-					);
-				}
-			}
-
-			if (hasUnsavedChanges) {
-				const dirtySnapshot: Prompt = latestPromptSnapshot
-					? JSON.parse(JSON.stringify(latestPromptSnapshot))
-					: promptRefSnapshot
-						? JSON.parse(JSON.stringify(promptRefSnapshot))
-						: basePromptSnapshot
-							? JSON.parse(JSON.stringify(basePromptSnapshot))
-							: createDefaultPrompt('');
-				const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(dirtySnapshot, promptRefSnapshot || basePromptSnapshot);
-				this.applyPromptFallbacksForPendingAiEnrichment(dirtySnapshot, aiEnrichmentPlan);
-				try {
-					const renameFromId = await this.ensurePromptIdMatchesTitle(dirtySnapshot, dirtySnapshot.id || undefined);
-					await this.guardReportOverwriteBeforeSave(panelKey, dirtySnapshot, basePromptSnapshot);
-					const persistedPrompt = dirtySnapshot.id ? await this.storageService.getPrompt(renameFromId || dirtySnapshot.id) : null;
-					this.mergeExternalReportIfUnchanged(dirtySnapshot, persistedPrompt, basePromptSnapshot);
-					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
-					dirtySnapshot.timeSpentOnTask = Math.max(0, dirtySnapshot.timeSpentOnTask || 0);
-					const savedPrompt = await this.storageService.savePrompt(dirtySnapshot, { previousId: renameFromId });
-					this.panelDirtyFlags.set(panelKey, false);
-					this.panelLatestPromptSnapshots.set(panelKey, null);
-					this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(savedPrompt)));
-					if (aiEnrichmentPlan.needsAiEnrichment) {
-						this.setPendingPromptAiEnrichmentState(savedPrompt.id, savedPrompt.promptUuid, {
-							title: aiEnrichmentPlan.needsTitle,
-							description: aiEnrichmentPlan.needsDescription,
-						});
-						void this.scheduleBackgroundAiEnrichment(
-							savedPrompt.id,
-							savedPrompt.promptUuid,
-							savedPrompt.content,
-							aiEnrichmentPlan.needsTitle,
-							aiEnrichmentPlan.needsDescription,
-							(message) => this.postMessageToCurrentPanel(panelKey, message),
-							panelKey,
-						);
-					}
-					await this.broadcastAvailableLanguagesAndFrameworks();
-					this._onDidSave.fire(savedPrompt.id);
-				} catch (err) {
-					const message = this.formatSaveConflictMessage(err);
-					vscode.window.showErrorMessage(
-						isRu ? `Ошибка сохранения: ${message}` : `Save error: ${message}`
-					);
-				}
-			}
-		});
-
-		panel.onDidChangeViewState((event) => {
-			if (!event.webviewPanel.visible) {
-				void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
-				this.clearPromptDashboardReactiveRefreshTimer(panelKey);
-				if (!this.hasActiveGitReactiveConsumers()) {
-					this.disposeGitOverlayReactiveSources();
-				}
-				return;
-			}
-
-			void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
-			void this.refreshPromptReportForPanel(panelKey, event.webviewPanel);
-			void this.ensureGitOverlayReactiveSources();
-			const promptRef = this.panelPromptRefs.get(panelKey);
-			const visibleRefreshGraceUntil = this.promptDashboardVisibleRefreshGraceUntilByPanel.get(panelKey) || 0;
-			const shouldSkipBootstrapDashboardRefresh = visibleRefreshGraceUntil > Date.now();
-			const shouldRefreshAfterHiddenChanges = this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
-			if (visibleRefreshGraceUntil > 0) {
-				this.promptDashboardVisibleRefreshGraceUntilByPanel.delete(panelKey);
-			}
-			if (promptRef) {
-				void this.syncPromptPlanSnapshot(panelKey, promptRef);
-				if (shouldRefreshAfterHiddenChanges) {
-					void this.refreshPromptDashboardProjectsForPanel(panelKey, event.webviewPanel, promptRef, 'reactive-branches');
-				} else if (!shouldSkipBootstrapDashboardRefresh) {
-					this.hooksOutput.appendLine(`[dashboard-refresh] panel=${panelKey} skipped visible refresh; no hidden git changes detected`);
-				}
-			}
-		});
-
-		// Handle messages
-		panel.webview.onDidReceiveMessage(
-			async (msg: WebviewToExtensionMessage) => {
-				const currentPrompt = this.panelPromptRefs.get(panelKey);
-				if (!currentPrompt) {
-					return;
-				}
-				if (msg.type === 'ready') {
-					const activeBootId = this.panelBootIds.get(panelKey) || '';
-					if (activeBootId && (msg.bootId || '') !== activeBootId) {
-						return;
-					}
-				}
-				if (msg.type === 'debugLog') {
-					this.logReportDebug(`webview.${msg.scope}.${msg.message}`, msg.payload && typeof msg.payload === 'object'
-						? msg.payload as Record<string, unknown>
-						: { value: msg.payload ?? null });
-					return;
-				}
-				if (msg.type === 'markDirty') {
-					if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.promptId)) {
-						return;
-					}
-
-					const latestPromptState = this.panelLatestPromptSnapshots.get(panelKey) || null;
-					const previousLanguages = latestPromptState?.languages || currentPrompt.languages;
-					const previousFrameworks = latestPromptState?.frameworks || currentPrompt.frameworks;
-					const previousCurrentReport = currentPrompt.report || '';
-
-					this.panelDirtyFlags.set(panelKey, msg.dirty);
-					this.setPanelLatestLocalPromptRevision(panelKey, msg.localRevision);
-					this.setPanelPromptConfigFieldChangedAt(panelKey, msg.dirty ? msg.configFieldChangedAt || null : null);
-					if (msg.prompt) {
-						Object.assign(currentPrompt, msg.prompt);
-						this.setPanelPromptRef(panelKey, currentPrompt);
-						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(msg.prompt)));
-					} else if (msg.dirty && !latestPromptState) {
-						this.panelLatestPromptSnapshots.set(panelKey, JSON.parse(JSON.stringify(currentPrompt)));
-					} else if (!msg.dirty) {
-						this.panelLatestPromptSnapshots.set(panelKey, null);
-					}
-
-					const updatedLatestPromptState = this.panelLatestPromptSnapshots.get(panelKey) || null;
-
-					const debugReportSource = msg.prompt?.report
-						?? updatedLatestPromptState?.report
-						?? currentPrompt.report
-						?? '';
-					this.logReportDebug('markDirty', {
-						panelKey,
-						dirty: msg.dirty,
-						reportLength: debugReportSource.length,
-						reportPreview: this.reportDebugPreview(debugReportSource),
-					});
-
-					if (msg.prompt && currentPrompt.id) {
-						const nextReport = msg.prompt.report || '';
-						if (nextReport !== previousCurrentReport) {
-							const reportPanel = this.reportEditorPanels.get(currentPrompt.id);
-							if (reportPanel) {
-								this.logReportDebug('markDirty.forwardedToReportEditor', {
-									panelKey,
-									promptId: currentPrompt.id,
-									previousLength: previousCurrentReport.length,
-									nextLength: nextReport.length,
-								});
-								void reportPanel.webview.postMessage({
-									type: 'reportEditorExternalUpdate',
-									report: nextReport,
-								} satisfies ExtensionToWebviewMessage);
-							}
-						}
-					}
-
-					if (msg.prompt && msg.dirty) {
-						const normalize = (items: string[]): string[] => [...items].map(v => v.trim()).filter(Boolean).sort();
-						const languagesChanged = JSON.stringify(normalize(previousLanguages)) !== JSON.stringify(normalize(msg.prompt.languages || []));
-						const frameworksChanged = JSON.stringify(normalize(previousFrameworks)) !== JSON.stringify(normalize(msg.prompt.frameworks || []));
-						if (languagesChanged || frameworksChanged) {
-							await this.broadcastAvailableLanguagesAndFrameworks([msg.prompt]);
-						}
-					}
-
-					this.updatePromptPanelTitle(panel, updatedLatestPromptState || currentPrompt, {
-						dirty: this.panelDirtyFlags.get(panelKey) || false,
-						isRu,
-					});
-					return;
-				}
-				await this.handleMessage(msg, panel, currentPrompt, panelKey, () => this.panelDirtyFlags.get(panelKey) || false, setPanelDirty);
-			}
-		);
 	}
 
 	/** Handle messages from editor webview */
@@ -8342,24 +8450,44 @@ export class EditorPanelManager {
 			}
 
 			case 'generateTitle': {
+				if (!areInternalAiFeaturesEnabled()) {
+					await this.postInternalAiDisabledError(postMessage);
+					break;
+				}
+
 				const title = await this.aiService.generateTitle(msg.content);
 				postMessage({ type: 'generatedTitle', title });
 				break;
 			}
 
 			case 'generateDescription': {
+				if (!areInternalAiFeaturesEnabled()) {
+					await this.postInternalAiDisabledError(postMessage);
+					break;
+				}
+
 				const description = await this.aiService.generateDescription(msg.content);
 				postMessage({ type: 'generatedDescription', description });
 				break;
 			}
 
 			case 'generateSlug': {
+				if (!areInternalAiFeaturesEnabled()) {
+					await this.postInternalAiDisabledError(postMessage);
+					break;
+				}
+
 				const slug = await this.aiService.generateSlug(msg.title, msg.description, this.stateService.getGlobalAgentContext());
 				postMessage({ type: 'generatedSlug', slug });
 				break;
 			}
 
 			case 'improvePromptText': {
+				if (!areInternalAiFeaturesEnabled()) {
+					await this.postInternalAiDisabledError(postMessage);
+					break;
+				}
+
 				const projectContext = await this.buildProjectsContextSnapshot(msg.projects || currentPrompt.projects || []);
 				const improvedContent = await this.aiService.improvePromptText(msg.content, projectContext);
 				postMessage({ type: 'improvedPromptText', content: improvedContent });
@@ -8785,17 +8913,23 @@ export class EditorPanelManager {
 					} catch (error) {
 						this.hooksOutput.appendLine(`[global-context] register .github/instructions failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 					}
+					const isChatCodeMapContextEnabled = this.isChatCodeMapContextEnabled();
 					let codeMapSummary: ChatMemoryCodemapSummary | null = null;
-					try {
-						codeMapSummary = await this.codeMapChatInstructionService()?.prepareInstruction(prompt) ?? null;
-					} catch (error) {
-						this.hooksOutput.appendLine(`[codemap] prepareInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+					if (isChatCodeMapContextEnabled) {
+						try {
+							codeMapSummary = await this.codeMapChatInstructionService()?.prepareInstruction(prompt) ?? null;
+						} catch (error) {
+							this.hooksOutput.appendLine(`[codemap] prepareInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+						}
 					}
+					const isChatMemoryHistoryContextEnabled = this.isChatMemoryHistoryContextEnabled();
 					let sessionInstructionRecord: Awaited<ReturnType<ChatMemoryInstructionService['prepareSessionInstruction']>> | null = null;
-					try {
-						sessionInstructionRecord = await this.chatMemoryInstructionService()?.prepareSessionInstruction(prompt) ?? null;
-					} catch (error) {
-						this.hooksOutput.appendLine(`[chat-memory] prepareSessionInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+					if (isChatMemoryHistoryContextEnabled) {
+						try {
+							sessionInstructionRecord = await this.chatMemoryInstructionService()?.prepareSessionInstruction(prompt) ?? null;
+						} catch (error) {
+							this.hooksOutput.appendLine(`[chat-memory] prepareSessionInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+						}
 					}
 
 					const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
@@ -8805,7 +8939,10 @@ export class EditorPanelManager {
 						workspaceRoot,
 						storageDir,
 						promptContextFiles: prompt.contextFiles,
-						sessionInstructionFilePath: sessionInstructionRecord?.instructionFilePath,
+						sessionInstructionFilePath: isChatMemoryHistoryContextEnabled
+							? sessionInstructionRecord?.instructionFilePath
+							: undefined,
+						includeCodeMapInstructionFile: isChatCodeMapContextEnabled,
 					});
 					const fileUris = chatContextFiles.allAbsolutePaths.map(filePath => vscode.Uri.file(filePath));
 
@@ -11104,6 +11241,11 @@ export class EditorPanelManager {
 
 			case 'requestSuggestion': {
 				try {
+					if (!areInternalAiFeaturesEnabled()) {
+						postMessage({ type: 'inlineSuggestion', suggestion: '' });
+						break;
+					}
+
 					const cancellation = new (await import('vscode')).CancellationTokenSource();
 					// Timeout after 10 seconds
 					const timeout = setTimeout(() => cancellation.cancel(), 10000);

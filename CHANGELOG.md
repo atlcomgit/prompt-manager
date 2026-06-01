@@ -8,7 +8,13 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ### 2026-06-01
 
+#### Changed
+- Added a new `promptManager.ai.enabled` setting that defaults to `false`, so Prompt Manager internal AI generations and analyses stay opt-in; when it remains disabled, built-in AI prompt actions, memory analysis, codemap refresh jobs, and voice post-correction skip AI requests.
+- Changed `promptManager.memory.enabled` and `promptManager.codemap.enabled` defaults to `false`, so Project Memory history analysis and CodeMap instructions are also opt-in for new workspaces unless explicitly enabled.
+
 #### Fixed
+- Start Chat now checks the current `promptManager.memory.enabled` and `promptManager.codemap.enabled` values at runtime, so disabled Project Memory history and CodeMap no longer generate or attach session/codemap instruction files, and stale `chat-memory/codemap.instructions.md` files are skipped when CodeMap is off.
+- Restored `promptManager.editor` webviews are now revived through a registered serializer, rebound to the live singleton editor panel, and reopened with the persisted prompt identity from webview state, so VS Code session restore no longer leaves a stale duplicate prompt tab where saves hang while a second tab works.
 - Prompt-dashboard card dragging now uses pointer events instead of native HTML5 drag/drop, so widget reordering no longer depends on fragile webview `drop` delivery and commits reliably when the pointer is released.
 
 ### 2026-05-31

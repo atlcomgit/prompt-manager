@@ -1,3 +1,59 @@
+## 150: Не формировать файлы при отключенной памяти
+
+- Дата: 2026-06-01.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: При старте чата добавлена runtime-проверка текущих настроек памяти истории и codemap-инструкций, поэтому при выключенных `promptManager.memory.enabled` и `promptManager.codemap.enabled` расширение больше не генерирует session/codemap instruction files и не подцепляет stale `codemap.instructions.md` в chat context.
+- Ключевые моменты: Баг возникал из-за того, что `EditorPanelManager.startChat` ориентировался только на наличие сервисов, а `buildChatContextFiles()` безусловно прикладывал существующий `chat-memory/codemap.instructions.md`; теперь оба пути учитывают актуальные runtime-настройки, что сохраняет корректное поведение даже после переключения настроек без перезагрузки окна. Регрессионный тест фиксирует отсутствие prepare/attach path при выключенных флагах.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/providers/editorPanelManager.ts
+  src/utils/chatContextFiles.ts
+  tests/editorPanelManager.test.ts
+
+## 149: Добавить переключатель ИИ и памяти
+
+- Дата: 2026-06-01.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Добавлен глобальный флаг `promptManager.ai.enabled` с выключенным по умолчанию состоянием для внутренних AI-функций Prompt Manager; при выключенном флаге расширение больше не выполняет встроенные AI-запросы для генерации полей промпта, отчетов, анализа истории памяти, codemap-очередей и voice post-correction. Также значения по умолчанию для `promptManager.memory.enabled` и `promptManager.codemap.enabled` переведены в `false`, чтобы память истории и инструкции были opt-in.
+- Ключевые моменты: Общий gate вынесен в `aiSettingsConfig`, центральный AI path `AiService` завершает внутренние AI-flow без LM-запроса, а обходные пути в `MemoryAnalyzerService`, `CodeMapOrchestratorService` и `PromptVoicePostCorrectionService` дополнительно обрезаны отдельно; ручные AI-действия редактора теперь показывают явную ошибку вместо ложного fallback-результата, а defaults памяти и codemap выровнены между manifest и runtime config constants.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  package.json
+  src/codemap/codeMapConfig.ts
+  src/codemap/codeMapOrchestratorService.ts
+  src/providers/editorPanelManager.ts
+  src/services/aiService.ts
+  src/services/aiSettingsConfig.ts
+  src/services/memoryAnalyzerService.ts
+  src/services/promptVoice/promptVoicePostCorrectionService.ts
+  src/types/memory.ts
+  tests/aiService.test.ts
+  tests/aiSettingsConfig.test.ts
+  tests/codeMapConfig.test.ts
+  tests/instructionsPanelSettings.test.ts
+  tests/memorySettingsConfig.test.ts
+  tests/memorySettingsPanel.test.ts
+
+## Без номера: Дублирование webview-вкладок и медленное сохранение
+
+- Дата: 2026-06-01.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлено восстановление singleton prompt editor после reload VS Code: расширение теперь регистрирует serializer для `promptManager.editor`, принимает восстановленную webview обратно в `EditorPanelManager`, переиспользует её вместо создания второй вкладки и восстанавливает нужный промпт по persisted identity из webview state.
+- Ключевые моменты: Корневой баг возникал из-за того, что VS Code мог восстановить старую webview-вкладку, а extension без `registerWebviewPanelSerializer` не брал её под управление и параллельно открывал новый singleton editor; в итоге одна вкладка была «живая», а старая оставалась stale и могла зависать на сохранении. Теперь `EditorApp` сохраняет `prompt id/promptUuid` в persisted webview state, `EditorPanelManager.revivePromptEditorPanel()` принимает restored panel, reuse-path принудительно делает новый boot cycle, если у панели ещё нет актуального host boot id, а регрессионный тест фиксирует сценарий без создания второй editor panel.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  package.json
+  src/extension.ts
+  src/providers/editorPanelManager.ts
+  src/webview/editor/EditorApp.tsx
+  tests/editorPanelManager.test.ts
+
 ## 143: Краткое эффектное описание расширения
 
 - Дата: 2026-05-31.

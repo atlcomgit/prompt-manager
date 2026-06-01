@@ -52,6 +52,8 @@ function t(key: string): string {
 }
 
 test('SettingsPanel renders helper descriptions for all memory settings', () => {
+	assert.equal(DEFAULT_MEMORY_SETTINGS.enabled, false);
+
 	const markup = renderToStaticMarkup(React.createElement(SettingsPanel, {
 		settings: { ...DEFAULT_MEMORY_SETTINGS, aiModel: 'gpt-5.4' },
 		availableModels: [{ id: 'gpt-5.4', name: 'GPT-5.4' }],

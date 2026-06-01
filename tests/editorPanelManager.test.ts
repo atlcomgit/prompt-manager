@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import Module from 'node:module';
 import { buildSaveQueueKey } from '../src/utils/promptSaveQueue.js';
 
@@ -82,6 +83,81 @@ function createVsCodeTab(viewType: string, label: string, active = true, panel?:
 
 function seedPromptEditorTab(label = 'Prompt: Prompt A', active = true) {
 	return createVsCodeTab('promptManager.editor', label, active);
+}
+
+function createDetachedPromptEditorPanel(label = 'Prompt: Prompt A restored') {
+	const disposeListeners: Array<() => void | Promise<void>> = [];
+	const viewStateListeners: Array<(event: { webviewPanel: any }) => void> = [];
+	const messageListeners: Array<(message: unknown) => void | Promise<void>> = [];
+	const options = { retainContextWhenHidden: true };
+	const panel: any = {
+		viewType: 'promptManager.editor',
+		title: label,
+		options,
+		visible: true,
+		iconPath: undefined,
+		disposed: false,
+		revealed: false,
+		postedMessages: [] as unknown[],
+		webview: {
+			html: '',
+			options,
+			cspSource: 'vscode-resource:',
+			asWebviewUri: (uri: unknown) => uri,
+			postMessage: async (message: unknown) => {
+				panel.postedMessages.push(message);
+				return true;
+			},
+			onDidReceiveMessage: (listener: (message: unknown) => void | Promise<void>) => {
+				messageListeners.push(listener);
+				return createDisposable();
+			},
+		},
+		onDidDispose: (listener: () => void | Promise<void>) => {
+			disposeListeners.push(listener);
+			return createDisposable();
+		},
+		onDidChangeViewState: (listener: (event: { webviewPanel: any }) => void) => {
+			viewStateListeners.push(listener);
+			return createDisposable();
+		},
+		reveal: () => {
+			panel.visible = true;
+			for (const tab of vscodeTabs) {
+				tab.isActive = false;
+			}
+			if (panel.tab) {
+				panel.tab.isActive = true;
+				emitVsCodeTabChange({ changed: [panel.tab] });
+			}
+			panel.revealed = true;
+		},
+		dispose: () => {
+			if (panel.disposed) {
+				return;
+			}
+			panel.disposed = true;
+			if (panel.tab) {
+				removeVsCodeTab(panel.tab);
+			}
+			for (const listener of disposeListeners) {
+				void listener();
+			}
+		},
+		emitMessage: async (message: unknown) => {
+			for (const listener of messageListeners) {
+				await listener(message);
+			}
+		},
+		emitVisible: () => {
+			panel.visible = true;
+			for (const listener of viewStateListeners) {
+				listener({ webviewPanel: panel });
+			}
+		},
+	};
+	panel.tab = createVsCodeTab('promptManager.editor', label, true, panel);
+	return panel;
 }
 
 function resetVsCodeConfigurationMock() {
@@ -460,16 +536,21 @@ async function createManager(options?: {
 	stateService?: Record<string, unknown>;
 	workspaceService?: Record<string, unknown>;
 	configurationValues?: Record<string, unknown>;
+	storageDirectoryPath?: string;
+	chatMemoryInstructionService?: Record<string, unknown>;
+	codeMapChatInstructionService?: Record<string, unknown>;
 }) {
 	setVsCodeConfigurationValues(options?.configurationValues);
 	const { EditorPanelManager } = await importEditorPanelManager();
 	let storedPrompt = options?.initialPrompt ? createPrompt(options.initialPrompt) : null;
+	const storageDirectoryPath = options?.storageDirectoryPath || '/tmp/workspace/.vscode/prompt-manager';
 	let sidebarState = {
 		selectedPromptId: (storedPrompt?.id || '').trim() || null,
 		selectedPromptUuid: (storedPrompt?.promptUuid || '').trim() || null,
 	};
 	const stateService = {
 		saveStartupEditorRestoreState: async () => undefined,
+		getStartupEditorRestoreState: () => ({ wasOpen: Boolean(storedPrompt?.id), promptId: storedPrompt?.id || null }),
 		getPromptEditorViewState: () => createEditorViewState(),
 		savePromptEditorViewState: async () => undefined,
 		migratePromptEditorViewState: async () => undefined,
@@ -481,6 +562,7 @@ async function createManager(options?: {
 		],
 		savePromptDashboardSectionOrder: async () => undefined,
 		saveLastPromptId: async () => undefined,
+		getLastPromptId: () => storedPrompt?.id || null,
 		getSidebarState: () => ({ ...sidebarState }),
 		saveSidebarState: async (state: { selectedPromptId?: string | null; selectedPromptUuid?: string | null }) => {
 			sidebarState = {
@@ -509,24 +591,24 @@ async function createManager(options?: {
 	};
 
 	const storageService = {
-		getStorageDirectoryPath: () => '/tmp/workspace/.vscode/prompt-manager',
-		getPromptDirectoryPath: (id: string) => `/tmp/workspace/.vscode/prompt-manager/prompts/${id}`,
+		getStorageDirectoryPath: () => storageDirectoryPath,
+		getPromptDirectoryPath: (id: string) => `${storageDirectoryPath}/prompts/${id}`,
 		getPromptMarkdownUri: (id: string) => {
-			const fsPath = `/tmp/workspace/.vscode/prompt-manager/prompts/${id}/prompt.md`;
+			const fsPath = `${storageDirectoryPath}/prompts/${id}/prompt.md`;
 			return {
 				fsPath,
 				toString: () => fsPath,
 			};
 		},
 		getPromptReportUri: (id: string) => {
-			const fsPath = `/tmp/workspace/.vscode/prompt-manager/prompts/${id}/report.txt`;
+			const fsPath = `${storageDirectoryPath}/prompts/${id}/report.txt`;
 			return {
 				fsPath,
 				toString: () => fsPath,
 			};
 		},
 		getPromptPlanUri: (id: string) => {
-			const fsPath = `/tmp/workspace/.vscode/prompt-manager/prompts/${id}/plan.md`;
+			const fsPath = `${storageDirectoryPath}/prompts/${id}/plan.md`;
 			return {
 				fsPath,
 				toString: () => fsPath,
@@ -607,8 +689,8 @@ async function createManager(options?: {
 		promptVoiceService as any,
 		promptDashboardService as any,
 		dockerContainersService as any,
-		undefined,
-		undefined,
+		options?.chatMemoryInstructionService as any,
+		options?.codeMapChatInstructionService as any,
 	);
 
 	return {
@@ -1010,6 +1092,40 @@ test('openPrompt closes orphan duplicate prompt editor tab after creating single
 	assert.equal(promptEditorTabs[0]?.panel, vscodeCreatedWebviewPanels[0]);
 	assert.equal(vscodeClosedTabs.length, 1);
 	vscodeCreatedWebviewPanels[0]?.dispose();
+});
+
+test('revivePromptEditorPanel adopts the restored singleton tab without creating a second editor panel', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+	});
+	const revivedPanel = createDetachedPromptEditorPanel('Prompt: Prompt A restored');
+
+	await (manager as any).revivePromptEditorPanel(revivedPanel, {
+		'pm.editor.promptIdentity': {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+		},
+	});
+	await flushTurns(2);
+
+	assert.equal(vscodeCreatedWebviewPanels.length, 0);
+	assert.equal((manager as any).resolveOpenEditorPanel('__prompt_editor_singleton__'), revivedPanel);
+	assert.ok(revivedPanel.webview.html.length > 0);
+
+	const bootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
+	assert.ok(bootId);
+	await revivedPanel.emitMessage({ type: 'ready', bootId });
+
+	const promptMessage = revivedPanel.postedMessages.find((message: any) => message?.type === 'prompt') as any;
+	assert.equal(promptMessage?.prompt?.id, 'prompt-a');
+	const promptEditorTabs = vscodeTabs.filter(tab => tab.input?.viewType === 'promptManager.editor');
+	assert.equal(promptEditorTabs.length, 1);
+	revivedPanel.dispose();
 });
 
 test('ready posts prompt before slow ready hydration messages', async () => {
@@ -4515,6 +4631,113 @@ test('startChat refreshes remote global context before syncing instructions when
 	assert.deepEqual(savedGlobalContexts, [{ context: 'Refreshed remote context', source: 'remote' }]);
 	assert.equal(syncedContexts[0], 'Refreshed remote context');
 	resetVsCodeCommandMock();
+});
+
+test('startChat skips session and codemap instruction context when memory features are disabled at runtime', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['workbench.action.chat.attachFile'];
+
+	const storageDirectoryPath = `/tmp/workspace/.vscode/prompt-manager-task150-${Date.now()}`;
+	const chatMemoryDirectory = `${storageDirectoryPath}/chat-memory`;
+	const staleCodemapPath = `${chatMemoryDirectory}/codemap.instructions.md`;
+	mkdirSync(chatMemoryDirectory, { recursive: true });
+	writeFileSync(staleCodemapPath, 'stale codemap content');
+
+	const chatMemoryCalls: string[] = [];
+	const codeMapCalls: string[] = [];
+
+	try {
+		const { manager } = await createManager({
+			storageDirectoryPath,
+			configurationValues: {
+				'promptManager.memory.enabled': false,
+				'promptManager.codemap.enabled': false,
+			},
+			initialPrompt: {
+				id: 'prompt-a',
+				promptUuid: 'uuid-a',
+				title: 'Prompt title',
+				status: 'draft',
+				content: 'Implement the requested workflow changes.',
+			},
+			stateService: {
+				saveLastPromptId: async () => undefined,
+				getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+				saveSidebarState: async () => undefined,
+				getGlobalAgentContext: () => '',
+				getActiveChatSessionId: async () => '',
+				waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+				waitForChatRequestCompletion: async () => ({
+					ok: false,
+					reason: 'timeout',
+					sessionId: '',
+					lastRequestStarted: 0,
+					lastRequestEnded: 0,
+					hasPendingEdits: false,
+				}),
+			},
+			chatMemoryInstructionService: {
+				prepareSessionInstruction: async () => {
+					chatMemoryCalls.push('prepareSessionInstruction');
+					return {
+						promptUuid: 'uuid-a',
+						promptId: 'prompt-a',
+						instructionFilePath: `${chatMemoryDirectory}/session-uuid-a.instructions.md`,
+						createdAt: '2026-06-01T00:00:00.000Z',
+						updatedAt: '2026-06-01T00:00:00.000Z',
+					};
+				},
+			},
+			codeMapChatInstructionService: {
+				prepareInstruction: async () => {
+					codeMapCalls.push('prepareInstruction');
+					return null;
+				},
+			},
+		});
+
+		(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+		(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+		(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+
+		const postedMessages: any[] = [];
+		const panel = {
+			visible: true,
+			webview: {
+				postMessage: async (message: unknown) => {
+					postedMessages.push(message);
+					return true;
+				},
+			},
+		} as any;
+		const currentPrompt = createPrompt({
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			content: 'Implement the requested workflow changes.',
+		});
+
+		await (manager as any).handleMessage(
+			{ type: 'startChat', id: 'prompt-a', requestId: 'req-disabled-memory-context' },
+			panel,
+			currentPrompt,
+			'__prompt_editor_singleton__',
+			() => false,
+			() => undefined,
+		);
+
+		assert.deepEqual(chatMemoryCalls, []);
+		assert.deepEqual(codeMapCalls, []);
+		assert.equal(
+			vscodeCommandCalls.filter(call => call.id === 'workbench.action.chat.attachFile').length,
+			0,
+		);
+		assert.ok(postedMessages.every(message => (message as any)?.type !== 'chatMemorySummary'));
+	} finally {
+		rmSync(storageDirectoryPath, { recursive: true, force: true });
+		resetVsCodeCommandMock();
+	}
 });
 
 test('startChat excludes only workspace projects that still exist from the readonly section', async () => {

@@ -6,6 +6,7 @@ interface BuildChatContextFilesOptions {
 	storageDir: string;
 	promptContextFiles: string[];
 	sessionInstructionFilePath?: string | null;
+	includeCodeMapInstructionFile?: boolean;
 }
 
 interface ChatContextFilesResult {
@@ -29,6 +30,7 @@ export function getProjectInstructionsFilePath(storageDir: string): string {
 
 export function buildChatContextFiles(options: BuildChatContextFilesOptions): ChatContextFilesResult {
 	const chatMemoryDirectory = getChatMemoryDirectoryPath(options.storageDir);
+	const includeCodeMapInstructionFile = options.includeCodeMapInstructionFile !== false;
 	const promptContextAbsolutePaths = dedupe(
 		(options.promptContextFiles || [])
 			.map(filePath => toAbsolutePath(filePath, options.workspaceRoot))
@@ -39,7 +41,9 @@ export function buildChatContextFiles(options: BuildChatContextFilesOptions): Ch
 		path.join(chatMemoryDirectory, GLOBAL_AGENT_INSTRUCTIONS_FILE_NAME),
 		(options.sessionInstructionFilePath || '').trim(),
 		getProjectInstructionsFilePath(options.storageDir),
-		path.join(chatMemoryDirectory, CODEMAP_INSTRUCTIONS_FILE_NAME),
+		...(includeCodeMapInstructionFile
+			? [path.join(chatMemoryDirectory, CODEMAP_INSTRUCTIONS_FILE_NAME)]
+			: []),
 	].filter(filePath => Boolean(filePath) && fs.existsSync(filePath)));
 
 	return {

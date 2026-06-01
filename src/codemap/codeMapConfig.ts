@@ -32,7 +32,7 @@ type VscodeApi = {
 };
 
 export const DEFAULT_CODEMAP_SETTINGS: CodeMapSettings = {
-	enabled: true,
+	enabled: false,
 	trackedBranches: [],
 	excludedPaths: [...DEFAULT_CODEMAP_EXCLUDED_PATHS],
 	autoUpdate: true,

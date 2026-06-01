@@ -28,6 +28,8 @@ function t(key: string): string {
 }
 
 test('InstructionSettingsPanel renders helper descriptions for extracted codemap settings', () => {
+	assert.equal(DEFAULT_CODEMAP_SETTINGS.enabled, false);
+
 	const markup = renderToStaticMarkup(React.createElement(InstructionSettingsPanel, {
 		settings: { ...DEFAULT_CODEMAP_SETTINGS, aiModel: 'gpt-5.4' },
 		availableModels: [{ id: 'gpt-5.4', name: 'GPT-5.4' }],

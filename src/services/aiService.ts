@@ -15,6 +15,7 @@ import { buildDescriptionGenerationUserPrompt, buildPromptFieldLanguageRule, bui
 import { normalizeCommitMessageGenerationInstructions } from '../utils/gitOverlay.js';
 import { readSqliteItemValue } from '../utils/sqliteItemTable.js';
 import type { PromptDashboardProjectSummary } from '../types/promptDashboard.js';
+import { areInternalAiFeaturesEnabled } from './aiSettingsConfig.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -823,6 +824,11 @@ export class AiService {
 	): Promise<string> {
 		const requestLabel = options?.requestLabel || 'generic-chat';
 		const callerMethod = options?.callerMethod || `AiService.${requestLabel}`;
+		/** Skip internal AI flows early when the extension-level AI toggle is disabled. */
+		if (!areInternalAiFeaturesEnabled()) {
+			this.logAiRequest(`label=${requestLabel} result=disabled-by-setting selector="${this.formatSelectorForLog(selector)}"`);
+			return fallback;
+		}
 		const selectorCacheKey = this.getSelectorCacheKey(selector);
 		try {
 			const allowFreeCopilotFallback = options?.allowFreeCopilotFallback ?? true;

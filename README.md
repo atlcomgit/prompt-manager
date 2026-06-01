@@ -51,7 +51,7 @@ Copilot Prompt Manager собирает это в один понятный и �
 ## Built For Real Work / Для реальной работы
 
 - **Prompt Sidebar** for library, filters, groups, and fast capture.
-- **Prompt Editor** for context, files, chat launch, Git-aware execution, plan, and report. Prompt-dashboard cards can be collapsed and reordered from their headers, and hidden cards pause their own refresh and AI review work until reopened. Карточки prompt-dashboard можно сворачивать и переставлять из шапки; скрытые карточки не обновляются и не запускают AI review, пока их снова не раскроют.
+- **Prompt Editor** for context, files, chat launch, Git-aware execution, plan, and report. Prompt-dashboard cards can be collapsed and reordered from their headers, hidden cards pause their own refresh and AI review work until reopened, and restored prompt tabs are rebound to the singleton editor after VS Code reload so a stale duplicate webview does not keep a broken save loop. Карточки prompt-dashboard можно сворачивать и переставлять из шапки; скрытые карточки не обновляются и не запускают AI review, пока их снова не раскроют, а восстановленная после перезапуска вкладка редактора снова привязывается к singleton-странице и не создаёт вторую нерабочую webview.
 - **Tracker and Statistics** for delivery visibility instead of forgotten prompt drafts.
 - **Project Memory** for commit history, AI analysis, semantic search, and codemap snapshots.
 - **Copilot Usage** for Premium request awareness without leaving VS Code.
@@ -59,16 +59,18 @@ Copilot Prompt Manager собирает это в один понятный и �
 ## Quick Start / Быстрый старт
 
 1. Install the extension and open Prompt Manager from the Activity Bar. Установите расширение и откройте Prompt Manager на боковой панели.
-2. Create a prompt, then add the brief, projects, branch, files, and AI model. Создайте промпт и заполните контекст задачи.
-3. Save the prompt and launch GitHub Copilot Chat from the editor. Сохраните промпт и запускайте чат прямо из редактора.
-4. Use tracker, report, Git flow, and Project Memory to carry the task to completion. Ведите задачу до результата в одном рабочем процессе.
+2. Turn on `Prompt Manager: AI Enabled` only when you want built-in AI generations, reports, or repository analysis. Включайте `Prompt Manager: AI Enabled` только когда нужны встроенные AI-генерации, отчёты и анализ репозитория.
+3. Create a prompt, then add the brief, projects, branch, files, and AI model. Создайте промпт и заполните контекст задачи.
+4. Save the prompt and launch GitHub Copilot Chat from the editor. Сохраните промпт и запускайте чат прямо из редактора.
+5. Enable Project Memory / CodeMap in settings when you want history analysis and chat instructions. Включайте Project Memory / CodeMap в настройках только когда нужны анализ истории и инструкции для чата.
+  When these settings stay off, Start Chat does not generate or attach session-memory / codemap instruction files. Если эти настройки выключены, Start Chat не создаёт и не прикладывает session-memory / codemap instruction файлы.
 
 ## Requirements / Требования
 
 - VS Code `1.95+`
 - GitHub Copilot Chat for the chat workflow
 - Git-enabled workspace folders for branch-aware features
-- Optional: Project Memory in settings when you want repository analysis and semantic recall
+- Optional: enable `Prompt Manager: AI Enabled`, Project Memory, and CodeMap in settings when you want built-in AI automation, repository analysis, and semantic recall
 
 VS Code Web is not supported right now because the extension ships as a desktop Node-based extension.
 Веб-версия VS Code пока не поддерживается.

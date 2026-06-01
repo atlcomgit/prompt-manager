@@ -60,6 +60,7 @@ test('getCodeMapSettingsFromConfiguration normalizes stored update priority valu
 test('getCodeMapSettingsFromConfiguration keeps file tree disabled by default', () => {
 	const settings = getCodeMapSettingsFromConfiguration(new FakeConfig({}));
 
+	assert.equal(settings.enabled, false);
 	assert.equal(settings.includeFileTree, false);
 	assert.equal(settings.updatePriority, 'lowest');
 });

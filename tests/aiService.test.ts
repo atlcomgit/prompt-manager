@@ -10,6 +10,7 @@ const originalModuleLoad = moduleLoader._load;
 
 let selectChatModelsCalls = 0;
 let sendRequestCalls = 0;
+const configurationValues = new Map<string, unknown>();
 
 const mockModel = {
 	vendor: 'copilot',
@@ -53,7 +54,9 @@ moduleLoader._load = (request, parent, isMain) => {
 			workspace: {
 				workspaceFolders: undefined,
 				getConfiguration: () => ({
-					get: (_key: string, defaultValue: unknown) => defaultValue,
+					get: (key: string, defaultValue: unknown) => configurationValues.has(key)
+						? configurationValues.get(key)
+						: defaultValue,
 				}),
 			},
 			env: {
@@ -76,7 +79,17 @@ moduleLoader._load = (request, parent, isMain) => {
 };
 
 const { AiService } = require('../src/services/aiService.js') as typeof import('../src/services/aiService.js');
-moduleLoader._load = originalModuleLoad;
+
+test.beforeEach(() => {
+	configurationValues.set('ai.enabled', true);
+});
+
+test.afterEach(() => {
+	configurationValues.clear();
+	selectChatModelsCalls = 0;
+	sendRequestCalls = 0;
+	selectChatModelsImpl = async () => [mockModel];
+});
 
 test('AiService reuses the selected Copilot model across consecutive requests', async () => {
 	selectChatModelsCalls = 0;
@@ -198,4 +211,15 @@ test('AiService clears cached Copilot model selectors and state snapshots on dem
 
 	assert.equal((service as any).selectedModelCache.size, 0);
 	assert.equal((service as any).stateDbItemCache.size, 0);
+});
+
+test('AiService skips internal AI requests when Prompt Manager AI setting is disabled', async () => {
+	configurationValues.set('ai.enabled', false);
+
+	const service = new AiService();
+	const title = await service.generateTitle('Сгенерируй заголовок');
+
+	assert.equal(title, 'Промпт без названия');
+	assert.equal(selectChatModelsCalls, 0);
+	assert.equal(sendRequestCalls, 0);
 });

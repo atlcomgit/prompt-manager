@@ -52,6 +52,12 @@ test('getMemorySettingsFromConfiguration normalizes invalid historyAnalysisLimit
 	assert.equal(settings.historyAnalysisLimit, 100);
 });
 
+test('getMemorySettingsFromConfiguration keeps memory disabled by default', () => {
+	const settings = getMemorySettingsFromConfiguration(new FakeConfig({}));
+
+	assert.equal(settings.enabled, false);
+});
+
 test('getMemorySettingsFromConfiguration normalizes background priority values and defaults to lowest', () => {
 	const normalized = getMemorySettingsFromConfiguration(new FakeConfig({
 		'memory.backgroundPriority': 'higher',

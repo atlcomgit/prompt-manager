@@ -95,6 +95,14 @@ export function activate(context: vscode.ExtensionContext) {
 		() => codeMapChatInstructionService,
 		customGroupsService,
 	);
+	context.subscriptions.push(
+		// Rebind restored prompt editor panels so startup restore reuses the live singleton webview.
+		vscode.window.registerWebviewPanelSerializer('promptManager.editor', {
+			async deserializeWebviewPanel(webviewPanel, state) {
+				await editorPanelManager.revivePromptEditorPanel(webviewPanel, state);
+			},
+		}),
+	);
 	context.subscriptions.push(new vscode.Disposable(() => {
 		void promptVoiceService.dispose();
 	}));

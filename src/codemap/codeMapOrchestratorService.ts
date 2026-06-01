@@ -3,6 +3,7 @@ import { getCodeMapSettings } from './codeMapConfig.js';
 import type { CodeMapBranchResolution, CodeMapInstructionKind, CodeMapRuntimeCycle, CodeMapRuntimeEvent, CodeMapRuntimePhase, CodeMapRuntimeState, CodeMapRuntimeTask, CodeMapUpdatePriority, CodeMapUpdateTrigger } from '../types/codemap.js';
 import { CodeMapDatabaseService } from './codeMapDatabaseService.js';
 import { CodeMapInstructionService } from './codeMapInstructionService.js';
+import { areInternalAiFeaturesEnabled } from '../services/aiSettingsConfig.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import {
 	getBackgroundTaskPriorityWeight,
@@ -55,6 +56,12 @@ export class CodeMapOrchestratorService {
 		trigger: CodeMapUpdateTrigger,
 		priority: CodeMapUpdatePriority,
 	): boolean {
+		/** Skip codemap queueing early when internal Prompt Manager AI is disabled. */
+		if (!areInternalAiFeaturesEnabled()) {
+			this.output.appendLine(`[codemap] skipped ${resolution.repository}:${instructionKind} (${trigger}) because internal AI is disabled`);
+			return false;
+		}
+
 		if (!String(getCodeMapSettings().aiModel || '').trim()) {
 			this.output.appendLine(`[codemap] skipped ${resolution.repository}:${instructionKind} (${trigger}) because no AI model is selected`);
 			return false;

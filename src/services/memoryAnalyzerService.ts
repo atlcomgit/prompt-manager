@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
+import { areInternalAiFeaturesEnabled } from './aiSettingsConfig.js';
 import type {
 	HookCommitPayload,
 	MemoryAnalysis,
@@ -206,6 +207,11 @@ export class MemoryAnalyzerService {
 		commitSha?: string,
 	): Promise<{ rawResult: any; usedModel: string }> {
 		const systemPrompt = this.buildSystemPrompt(depth);
+		/** Skip commit analysis requests when internal Prompt Manager AI is disabled. */
+		if (!areInternalAiFeaturesEnabled()) {
+			this.logAiRequest(`label=memory.commit-analysis commit=${this.shortenCommitSha(commitSha)} result=disabled-by-setting`);
+			return { rawResult: this.fallbackAnalysis(), usedModel: '' };
+		}
 		const configuredModel = String(this.modelSelector.family || '').trim();
 		if (!configuredModel) {
 			this.logAiRequest(`label=memory.commit-analysis commit=${this.shortenCommitSha(commitSha)} result=no-configured-model`);

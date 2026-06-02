@@ -478,6 +478,7 @@ test('PromptDashboardService defers external Docker refreshes while the widget i
 		['api', '/workspace/api'],
 	]);
 	let dockerRefreshCalls = 0;
+	let clearComposeActionErrorCalls = 0;
 	let handleDockerChange: ((reason: 'compose' | 'container' | 'snapshot') => void) | undefined;
 	const dockerData = {
 		enabled: true,
@@ -500,6 +501,9 @@ test('PromptDashboardService defers external Docker refreshes while the widget i
 		getDockerContainersData: async () => {
 			dockerRefreshCalls += 1;
 			return dockerData;
+		},
+		clearComposeActionError: () => {
+			clearComposeActionErrorCalls += 1;
 		},
 	};
 	const service = new PromptDashboardService(
@@ -531,6 +535,7 @@ test('PromptDashboardService defers external Docker refreshes while the widget i
 
 	await service.refreshWidgetSnapshot(createPrompt({ projects: ['api'] }), 'docker', () => undefined, 'docker-initial', 'dockerContainers');
 	assert.equal(dockerRefreshCalls, 1);
+	assert.equal(clearComposeActionErrorCalls, 1);
 
 	service.setDockerWidgetCollapsed(true);
 	handleDockerChange?.('container');
@@ -544,6 +549,7 @@ test('PromptDashboardService defers external Docker refreshes while the widget i
 	handleDockerChange?.('container');
 	await new Promise(resolve => setTimeout(resolve, 25));
 	assert.equal(dockerRefreshCalls, 3);
+	assert.equal(clearComposeActionErrorCalls, 1);
 	service.dispose();
 });
 
@@ -2837,6 +2843,15 @@ test('PromptDashboardService keeps branch-switch errors on the matching project 
 			['staged:src/staged.ts', 'working-tree:src/dirty.ts', 'untracked:src/new.ts'],
 		);
 
+		const manuallyRefreshedWidget = await service.refreshWidgetSnapshot(
+			createPrompt({ projects: ['api'], trackedBranch: '', trackedBranchesByProject: {} }),
+			'projects',
+			undefined,
+			'manual-project-branches-refresh',
+			'projectBranches',
+		) as any;
+		assert.equal(manuallyRefreshedWidget.data.projects[0]?.branchSwitchError, '');
+
 		switchShouldFail = false;
 		const successfulSwitch = await service.switchProjectBranch(
 			createPrompt({ projects: ['api'], trackedBranch: '', trackedBranchesByProject: {} }),
@@ -3550,6 +3565,16 @@ test('PromptDashboardService keeps pull errors on the matching project row and c
 		);
 		assert.equal(failedWidget.data.projects[0]?.pullError, 'origin недоступен');
 		assert.equal((failedWidget.data.branchProjects || [])[0]?.pullError, 'origin недоступен');
+
+		const manuallyRefreshedWidget = await service.refreshWidgetSnapshot(
+			createPrompt({ projects: ['api'], trackedBranch: '', trackedBranchesByProject: {} }),
+			'projects',
+			undefined,
+			'manual-project-branches-refresh',
+			'projectBranches',
+		) as any;
+		assert.equal(manuallyRefreshedWidget.data.projects[0]?.pullError, '');
+		assert.equal((manuallyRefreshedWidget.data.branchProjects || [])[0]?.pullError || '', '');
 
 		syncShouldFail = false;
 		const successfulPull = await service.pullProject(

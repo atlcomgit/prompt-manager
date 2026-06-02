@@ -309,8 +309,12 @@ export class PromptDashboardService implements vscode.Disposable {
 		this.activePrompt = prompt;
 		this.activePostMessage = postMessage || this.activePostMessage;
 		this.cancelScheduledAutoRefresh(`manual-widget-refresh:${widget}`, scope, requestId);
+		if (widget === 'projects' && section === 'projectBranches') {
+			this.clearProjectBranchActionErrors(scope);
+		}
 		if (widget === 'docker') {
 			this.cancelScheduledDockerStatsRefresh(`manual-widget-refresh:${widget}`);
+			this.dockerContainersService?.clearComposeActionError?.();
 		}
 		if (widget === 'projects') {
 			return this.refreshProjectsWidget(prompt, postMessage, requestId, this.resolveProjectsRefreshModeForSection(section));
@@ -974,6 +978,13 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 		const cache = this.resolveWidgetCacheState('projects', shared);
 		return createPromptDashboardWidgetSnapshot('projects', this.decorateProjectsData(scope, shared.data), cache);
+	}
+
+	/** Clears transient inline action errors shown only in the project branches widget. */
+	private clearProjectBranchActionErrors(scope: PromptDashboardScope): void {
+		const scopeKey = buildPromptDashboardScopeKey(scope);
+		this.branchSwitchErrorsByScope.delete(scopeKey);
+		this.pullErrorsByScope.delete(scopeKey);
 	}
 
 	/** Applies scope-local branch-switch errors without polluting the shared projects cache. */

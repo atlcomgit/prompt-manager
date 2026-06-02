@@ -1,6 +1,12 @@
 import type { PromptConfig } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
 
+function normalizeChatTarget(value: unknown): PromptConfig['chatTarget'] {
+	return value === 'kilo' || value === 'codex' || value === 'copilot'
+		? value
+		: 'copilot';
+}
+
 export interface NormalizedStoredPromptConfigResult {
 	config: PromptConfig;
 	shouldBackfillPromptUuid: boolean;
@@ -39,6 +45,7 @@ export function normalizeStoredPromptConfig(
 		...parsed,
 		id,
 		promptUuid,
+		chatTarget: normalizeChatTarget(parsed.chatTarget),
 		trackedBranchesByProject: normalizeTrackedBranchesByProject(parsed.trackedBranchesByProject),
 		timeSpentOnTask: typeof parsed.timeSpentOnTask === 'number' ? parsed.timeSpentOnTask : 0,
 		timeSpentUntracked: typeof parsed.timeSpentUntracked === 'number' ? parsed.timeSpentUntracked : 0,

@@ -1,7 +1,7 @@
 {
   "name": "copilot-prompt-manager",
-  "displayName": "Copilot Prompt Manager",
-  "description": "Manage AI prompt workflows, launch GitHub Copilot chats, and build project memory directly inside VS Code",
+  "displayName": "Prompt-Manager",
+  "description": "Manage AI prompt workflows, launch chats, and build project memory directly inside VS Code",
   "version": "0.2.42",
   "publisher": "alek-fiend",
   "repository": {
@@ -27,12 +27,11 @@
     "memory",
     "tracker",
     "statusbar",
-    "copilot status bar",
+    "kilo code",
     "premium request usage",
     "project memory",
     "prompt engineering",
     "промпт менеджер",
-    "копилот",
     "память ии",
     "трекер задач",
     "статус бар",
@@ -40,8 +39,6 @@
     "память проекта",
     "промпт инженерия",
     "премиум запрос",
-    "github copilot",
-    "copilot chat",
     "prompt library",
     "semantic search",
     "codemap",
@@ -298,7 +295,7 @@
       "properties": {
         "promptManager.ai.enabled": {
           "type": "boolean",
-          "description": "Enable Prompt Manager internal AI features. When disabled, built-in AI generations and analyses are skipped, while direct Copilot chat commands remain available.",
+          "description": "Enable Prompt Manager internal AI features. When disabled, built-in AI generations and analyses are skipped, while direct AI chat commands remain available.",
           "default": false
         },
         "promptManager.improvePromptInstructions": {
@@ -361,12 +358,12 @@
         },
         "promptManager.copilotStatusBar.enabled": {
           "type": "boolean",
-          "description": "Enable/disable Copilot Premium usage progress bar in the status bar.",
+          "description": "Enable/disable Copilot usage progress bar in the status bar.",
           "default": true
         },
         "promptManager.copilotPremiumRequestsLimit": {
           "type": "number",
-          "description": "Custom monthly limit for Copilot Premium requests. Set to 0 to auto-detect from subscription type.",
+          "description": "Custom monthly limit for Copilot requests. Set to 0 to auto-detect from subscription type.",
           "default": 0,
           "minimum": 0
         },
@@ -383,6 +380,16 @@
         "promptManager.captureAgentFinalResponse": {
           "type": "boolean",
           "description": "Save the final agent chat response to the prompt report and include it in afterChatCompleted hooks (for example, Telegram integrations).",
+          "default": false
+        },
+        "promptManager.kilo.autoSendWithXdotool": {
+          "type": "boolean",
+          "description": "Linux/X11 only: after using Kilo Code's Add to Context fallback, send Enter with xdotool to submit the prepared task automatically. Disabled by default because OS-level input automation can send Enter to the wrong focused window.",
+          "default": false
+        },
+        "promptManager.codex.autoSendWithXdotool": {
+          "type": "boolean",
+          "description": "Linux/X11 only: after opening Codex and preparing the prompt fallback, paste it into the Codex composer and send Enter with xdotool. If unset, Codex inherits promptManager.kilo.autoSendWithXdotool. Disabled by default because OS-level input automation can target the wrong focused window.",
           "default": false
         },
         "promptManager.docker.enabled": {

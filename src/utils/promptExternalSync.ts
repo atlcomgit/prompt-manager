@@ -17,6 +17,7 @@ export const PROMPT_CONFIG_SYNC_FIELDS = [
 	'trackedBranchesByProject',
 	'model',
 	'chatMode',
+	'chatTarget',
 	'contextFiles',
 	'httpExamples',
 	'timeSpentUntracked',

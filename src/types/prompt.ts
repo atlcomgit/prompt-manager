@@ -5,6 +5,9 @@
 /** Prompt status */
 export type PromptStatus = 'draft' | 'in-progress' | 'stopped' | 'cancelled' | 'completed' | 'report' | 'review' | 'closed';
 
+/** Target chat integration used by Start Chat. */
+export type PromptChatTarget = 'copilot' | 'kilo' | 'codex';
+
 /** Canonical order of prompt statuses used in UI controls and grouping */
 export const PROMPT_STATUS_ORDER: PromptStatus[] = [
 	'draft',
@@ -432,6 +435,8 @@ export interface PromptConfig {
 	// --- Chat mode ---
 	/** Chat mode: 'agent' | 'plan' */
 	chatMode: 'agent' | 'plan';
+	/** Chat target: Copilot Chat, Kilo Code, or OpenAI Codex */
+	chatTarget?: PromptChatTarget;
 
 	// --- Context files ---
 	/** Relative paths to context files attached to this prompt */
@@ -549,6 +554,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		trackedBranchesByProject: {},
 		model: '',
 		chatMode: 'agent',
+		chatTarget: 'copilot',
 		contextFiles: [],
 		httpExamples: '',
 		chatSessionIds: [],

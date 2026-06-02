@@ -11,9 +11,15 @@ const vscodeCreatedWatchers: any[] = [];
 const vscodeClosedTabs: any[] = [];
 const vscodeTabChangeListeners: Array<(event: { opened: any[]; closed: any[]; changed: any[] }) => void> = [];
 const vscodeTabs: any[] = [];
+const vscodeTextDocuments: any[] = [];
+const vscodeWorkspaceFiles = new Map<string, string>();
 let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<unknown>) | undefined;
 let vscodeAvailableCommands: string[] | undefined;
+let vscodeClipboardText = '';
+let vscodeActiveTextEditor: any;
 const vscodeConfigurationValues = new Map<string, unknown>();
+const childProcessSpawnCalls: Array<{ command: string; args: string[] }> = [];
+let childProcessSpawnHandler: ((command: string, args: string[], options?: unknown) => unknown) | undefined;
 
 const vscodePrimaryTabGroup: any = {
 	isActive: true,
@@ -37,8 +43,14 @@ function resetVsCodeCommandMock() {
 	vscodeClosedTabs.length = 0;
 	vscodeTabChangeListeners.length = 0;
 	vscodeTabs.length = 0;
+	vscodeTextDocuments.length = 0;
+	vscodeWorkspaceFiles.clear();
 	vscodeExecuteCommandHandler = undefined;
 	vscodeAvailableCommands = undefined;
+	vscodeClipboardText = '';
+	vscodeActiveTextEditor = undefined;
+	childProcessSpawnCalls.length = 0;
+	childProcessSpawnHandler = undefined;
 }
 
 function emitVsCodeTabChange(event: { opened?: any[]; closed?: any[]; changed?: any[] }) {
@@ -58,6 +70,25 @@ function removeVsCodeTab(tab: any) {
 		vscodeTabs.splice(index, 1);
 		emitVsCodeTabChange({ closed: [tab] });
 	}
+}
+
+function createMockTextDocument(content = '', language = 'plaintext', uri?: { fsPath?: string; toString?: () => string }) {
+	const lines = content.split(/\r?\n/);
+	const fallbackUri = {
+		fsPath: '',
+		toString: () => `untitled:mock-${vscodeTextDocuments.length + 1}`,
+	};
+	const document = {
+		uri: uri || fallbackUri,
+		languageId: language,
+		get lineCount() {
+			return Math.max(1, lines.length);
+		},
+		lineAt: (line: number) => ({ text: lines[line] || '' }),
+		getText: () => content,
+	};
+	vscodeTextDocuments.push(document);
+	return document;
 }
 
 function createVsCodeTab(viewType: string, label: string, active = true, panel?: any) {
@@ -210,6 +241,26 @@ function createVsCodeMock() {
 		) { }
 	}
 
+	class Position {
+		constructor(
+			public readonly line: number,
+			public readonly character: number,
+		) { }
+	}
+
+	class Selection {
+		public readonly anchor: Position;
+		public readonly active: Position;
+
+		constructor(
+			public readonly start: Position,
+			public readonly end: Position,
+		) {
+			this.anchor = start;
+			this.active = end;
+		}
+	}
+
 	const outputChannel = {
 		appendLine() { },
 		show() { },
@@ -334,6 +385,8 @@ function createVsCodeMock() {
 		EventEmitter,
 		Disposable,
 		RelativePattern,
+		Position,
+		Selection,
 		Uri: {
 			file: (value: string) => ({
 				fsPath: value,
@@ -353,13 +406,30 @@ function createVsCodeMock() {
 		},
 		workspace: {
 			workspaceFolders: [{ uri: { fsPath: '/tmp/workspace' } }],
-			textDocuments: [],
+			textDocuments: vscodeTextDocuments,
+			openTextDocument: async (input?: { content?: string; language?: string; fsPath?: string; toString?: () => string } | string) => {
+				if (typeof input === 'string') {
+					return createMockTextDocument('', 'plaintext');
+				}
+				if (typeof input?.fsPath === 'string') {
+					const uriKey = input.toString?.() || input.fsPath || '';
+					const content = vscodeWorkspaceFiles.get(uriKey) || '';
+					return createMockTextDocument(content, 'markdown', input);
+				}
+				return createMockTextDocument(input?.content || '', input?.language || 'plaintext');
+			},
 			getConfiguration: (section?: string) => ({
 				get: (key: string, defaultValue: unknown) => {
 					const fullKey = section ? `${section}.${key}` : key;
 					return vscodeConfigurationValues.has(fullKey)
 						? vscodeConfigurationValues.get(fullKey)
 						: defaultValue;
+				},
+				inspect: (key: string) => {
+					const fullKey = section ? `${section}.${key}` : key;
+					return vscodeConfigurationValues.has(fullKey)
+						? { globalValue: vscodeConfigurationValues.get(fullKey) }
+						: {};
 				},
 				update: async () => undefined,
 			}),
@@ -372,10 +442,40 @@ function createVsCodeMock() {
 				stat: async () => ({ mtime: Date.now() }),
 				createDirectory: async () => undefined,
 				readFile: async () => new Uint8Array(),
-				writeFile: async () => undefined,
+				writeFile: async (uri: { fsPath?: string; toString?: () => string }, content: Uint8Array) => {
+					vscodeWorkspaceFiles.set(uri.toString?.() || uri.fsPath || '', Buffer.from(content).toString('utf8'));
+				},
+				delete: async (uri: { fsPath?: string; toString?: () => string }) => {
+					vscodeWorkspaceFiles.delete(uri.toString?.() || uri.fsPath || '');
+				},
 			},
 		},
 		window: {
+			get activeTextEditor() {
+				return vscodeActiveTextEditor;
+			},
+			showTextDocument: async (document: any) => {
+				vscodeActiveTextEditor = {
+					document,
+					selection: undefined,
+					selections: [],
+				};
+				if (document?.uri) {
+					const uriText = document.uri.toString?.() || document.uri.fsPath || '';
+					const existingTab = vscodeTabs.find(tab => tab.input?.uri?.toString?.() === uriText);
+					if (existingTab) {
+						for (const tab of vscodeTabs) {
+							tab.isActive = false;
+						}
+						existingTab.isActive = true;
+					} else {
+						const label = uriText.split(/[\\/]/).pop() || 'Untitled';
+						const tab = createVsCodeTab('textEditor', label, true);
+						tab.input = { uri: document.uri };
+					}
+				}
+				return vscodeActiveTextEditor;
+			},
 			onDidChangeActiveTextEditor: () => createDisposable(),
 			tabGroups: {
 				get all() {
@@ -416,8 +516,17 @@ function createVsCodeMock() {
 			},
 			getCommands: async () => vscodeAvailableCommands || [],
 		},
+		extensions: {
+			getExtension: () => ({}),
+		},
 		env: {
 			language: 'en',
+			clipboard: {
+				writeText: async (value: string) => {
+					vscodeClipboardText = value;
+				},
+				readText: async () => vscodeClipboardText,
+			},
 		},
 		ViewColumn: {
 			One: 1,
@@ -434,6 +543,20 @@ async function importEditorPanelManager() {
 	(Module as any)._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
 		if (request === 'vscode') {
 			return createVsCodeMock();
+		}
+
+		if (request === 'child_process') {
+			const childProcess = originalLoad.call(this, request, parent, isMain);
+			return {
+				...childProcess,
+				spawn: (command: string, args: string[] = [], options?: unknown) => {
+					childProcessSpawnCalls.push({ command, args });
+					if (childProcessSpawnHandler) {
+						return childProcessSpawnHandler(command, args, options);
+					}
+					return childProcess.spawn(command, args, options);
+				},
+			};
 		}
 
 		return originalLoad.call(this, request, parent, isMain);
@@ -467,6 +590,7 @@ function createPrompt(overrides: Record<string, unknown> = {}) {
 		trackedBranchesByProject: {},
 		model: '',
 		chatMode: 'agent',
+		chatTarget: 'copilot',
 		contextFiles: [],
 		httpExamples: '',
 		chatSessionIds: [],
@@ -524,6 +648,54 @@ function createDeferred<T>() {
 		reject = rejectPromise;
 	});
 	return { promise, resolve, reject };
+}
+
+function createMockChildProcessExit(code: number = 0, stdout = '', stderr = '') {
+	const listeners = new Map<string, (...args: unknown[]) => void>();
+	const child = {
+		stdout: {
+			on: (event: string, listener: (chunk: string) => void) => {
+				if (event === 'data' && stdout) {
+					setTimeout(() => listener(stdout), 0);
+				}
+				return child.stdout;
+			},
+		},
+		stderr: {
+			on: (event: string, listener: (chunk: string) => void) => {
+				if (event === 'data' && stderr) {
+					setTimeout(() => listener(stderr), 0);
+				}
+				return child.stderr;
+			},
+		},
+		once: (event: string, listener: (...args: unknown[]) => void) => {
+			listeners.set(event, listener);
+			if (event === 'exit') {
+				setTimeout(() => listener(code, null), 0);
+			}
+			return child;
+		},
+		kill: () => undefined,
+		listeners,
+	};
+	return child;
+}
+
+function createMockChildProcessError(message: string) {
+	const listeners = new Map<string, (...args: unknown[]) => void>();
+	const child = {
+		once: (event: string, listener: (...args: unknown[]) => void) => {
+			listeners.set(event, listener);
+			if (event === 'error') {
+				setTimeout(() => listener(new Error(message)), 0);
+			}
+			return child;
+		},
+		kill: () => undefined,
+		listeners,
+	};
+	return child;
 }
 
 async function createManager(options?: {
@@ -4554,6 +4726,519 @@ test('startChat schedules an early rename after the chat session is bound', asyn
 	assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-new']);
 	assert.ok(postedMessages.some(message => (message as any)?.type === 'chatOpened'));
 	resetVsCodeCommandMock();
+});
+
+test('startChat dispatches Kilo Code target through bridge without Copilot session binding', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['kilo-code.new.startTask'];
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			chatTarget: 'kilo',
+			contextFiles: ['src/index.ts'],
+			content: 'Implement Kilo routing.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		chatTarget: 'kilo',
+		contextFiles: ['src/index.ts'],
+		content: 'Implement Kilo routing.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-kilo' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	const bridgeCall = vscodeCommandCalls.find(call => call.id === 'kilo-code.new.startTask');
+	assert.ok(bridgeCall);
+	assert.equal((bridgeCall.args[0] as any).source, 'prompt-manager');
+	assert.equal((bridgeCall.args[0] as any).promptId, 'prompt-a');
+	assert.match((bridgeCall.args[0] as any).text, /Implement Kilo routing/);
+	assert.deepEqual((bridgeCall.args[0] as any).files, ['/tmp/workspace/src/index.ts']);
+	assert.equal(vscodeCommandCalls.some(call => call.id.startsWith('workbench.action.chat.')), false);
+	assert.equal(getStoredPrompt()?.status, 'in-progress');
+	assert.deepEqual(getStoredPrompt()?.chatSessionIds, []);
+	assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
+	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
+	resetVsCodeCommandMock();
+});
+
+test('startChat prepares Kilo Code clipboard fallback when bridge is unavailable', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['kilo-code.new.addToContext', 'kilo-code.new.focusChatInput'];
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			chatTarget: 'kilo',
+			contextFiles: ['src/index.ts'],
+			content: 'Implement Kilo routing.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		chatTarget: 'kilo',
+		contextFiles: ['src/index.ts'],
+		content: 'Implement Kilo routing.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-kilo-missing' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(getStoredPrompt()?.status, 'in-progress');
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'kilo-code.new.startTask'), false);
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'kilo-code.new.addToContext'));
+	assert.ok(vscodeClosedTabs.some(tab => tab.input?.uri?.fsPath?.includes('prompt-manager-kilo-context')));
+	assert.equal(vscodeWorkspaceFiles.size, 0);
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.revertAndCloseActiveEditor'), false);
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.closeActiveEditor'), false);
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'kilo-code.SidebarProvider.focus'));
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'kilo-code.new.focusChatInput'));
+	assert.match(vscodeClipboardText, /Implement Kilo routing/);
+	assert.match(vscodeClipboardText, /@\/tmp\/workspace\/src\/index\.ts/);
+	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
+	assert.ok(postedMessages.some(message => message?.type === 'info' && /Add to Context/.test(message.message)));
+	assert.equal(postedMessages.some(message => message?.type === 'error'), false);
+	assert.equal(postedMessages.some(message => message?.type === 'chatStarted'), false);
+	resetVsCodeCommandMock();
+});
+
+test('startChat auto-sends Kilo Code fallback after closing the temporary context editor', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['kilo-code.new.addToContext', 'kilo-code.new.focusChatInput'];
+	childProcessSpawnHandler = () => createMockChildProcessExit(0);
+	const originalDisplay = process.env.DISPLAY;
+	process.env.DISPLAY = originalDisplay || ':99';
+
+	try {
+		const { manager, getStoredPrompt } = await createManager({
+			configurationValues: {
+				'promptManager.kilo.autoSendWithXdotool': true,
+			},
+			initialPrompt: {
+				id: 'prompt-a',
+				promptUuid: 'uuid-a',
+				title: 'Prompt title',
+				status: 'draft',
+				chatTarget: 'kilo',
+				contextFiles: ['src/index.ts'],
+				content: 'Implement Kilo routing.',
+			},
+			stateService: {
+				saveLastPromptId: async () => undefined,
+				getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+				saveSidebarState: async () => undefined,
+				getGlobalAgentContext: () => '',
+			},
+		});
+
+		(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+		(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+
+		const postedMessages: any[] = [];
+		const panel = {
+			visible: true,
+			webview: {
+				postMessage: async (message: unknown) => {
+					postedMessages.push(message);
+					return true;
+				},
+			},
+		} as any;
+		const currentPrompt = createPrompt({
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			chatTarget: 'kilo',
+			contextFiles: ['src/index.ts'],
+			content: 'Implement Kilo routing.',
+		});
+
+		await (manager as any).handleMessage(
+			{ type: 'startChat', id: 'prompt-a', requestId: 'req-kilo-xdotool' },
+			panel,
+			currentPrompt,
+			'__prompt_editor_singleton__',
+			() => false,
+			() => undefined,
+		);
+
+		assert.equal(getStoredPrompt()?.status, 'in-progress');
+		assert.equal(childProcessSpawnCalls.length, 1);
+		assert.match(childProcessSpawnCalls[0]?.command || '', /xdotool$/);
+		assert.deepEqual(childProcessSpawnCalls[0]?.args, ['key', '--clearmodifiers', 'Return']);
+		assert.ok(vscodeClosedTabs.some(tab => tab.input?.uri?.fsPath?.includes('prompt-manager-kilo-context')));
+		assert.equal(vscodeWorkspaceFiles.size, 0);
+		assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.revertAndCloseActiveEditor'), false);
+		assert.ok(vscodeCommandCalls.some(call => call.id === 'kilo-code.SidebarProvider.focus'));
+		assert.ok(vscodeCommandCalls.some(call => call.id === 'kilo-code.new.focusChatInput'));
+		assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
+		assert.ok(postedMessages.some(message => message?.type === 'chatRequestStarted'));
+		assert.ok(postedMessages.some(message => message?.type === 'info' && /xdotool/.test(message.message)));
+	} finally {
+		if (originalDisplay === undefined) {
+			delete process.env.DISPLAY;
+		} else {
+			process.env.DISPLAY = originalDisplay;
+		}
+		resetVsCodeCommandMock();
+	}
+});
+
+test('Kilo Code xdotool fallback reports startup errors', async () => {
+	resetVsCodeCommandMock();
+	childProcessSpawnHandler = () => createMockChildProcessError('spawn xdotool ENOENT');
+	const originalDisplay = process.env.DISPLAY;
+	process.env.DISPLAY = originalDisplay || ':99';
+
+	try {
+		const { manager } = await createManager();
+		const result = await (manager as any).runXdotoolEnter();
+
+		assert.equal(result.ok, false);
+		assert.match(result.reason, /ENOENT/);
+		assert.equal(childProcessSpawnCalls.length, 1);
+		assert.match(childProcessSpawnCalls[0]?.command || '', /xdotool$/);
+	} finally {
+		if (originalDisplay === undefined) {
+			delete process.env.DISPLAY;
+		} else {
+			process.env.DISPLAY = originalDisplay;
+		}
+		resetVsCodeCommandMock();
+	}
+});
+
+test('startChat starts Codex through implementTodo bridge when direct bridge is unavailable', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.implementTodo', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			chatTarget: 'codex',
+			contextFiles: ['src/index.ts'],
+			content: 'Implement Codex routing.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		chatTarget: 'codex',
+		contextFiles: ['src/index.ts'],
+		content: 'Implement Codex routing.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-codex-implement-todo' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	const bridgeCall = vscodeCommandCalls.find(call => call.id === 'chatgpt.implementTodo');
+	assert.ok(bridgeCall);
+	const bridgePayload = bridgeCall.args[0] as any;
+	assert.equal(bridgePayload.fileName, 'prompt-manager-task.md');
+	assert.equal(bridgePayload.line, 1);
+	assert.match(bridgePayload.comment, /Implement Codex routing/);
+	assert.match(bridgePayload.comment, /Ignore the surrounding Codex TODO wrapper/);
+	assert.match(bridgePayload.comment, /\/tmp\/workspace\/src\/index\.ts/);
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.addToThread'), false);
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.addFileToThread'), false);
+	assert.deepEqual(childProcessSpawnCalls, []);
+	assert.equal(getStoredPrompt()?.status, 'in-progress');
+	assert.match(vscodeClipboardText, /Implement Codex routing/);
+	assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
+	assert.ok(postedMessages.some(message => message?.type === 'chatRequestStarted'));
+	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
+	assert.ok(postedMessages.some(message => message?.type === 'info' && /Implement TODO bridge/.test(message.message)));
+	assert.equal(postedMessages.some(message => message?.type === 'error'), false);
+	resetVsCodeCommandMock();
+});
+
+test('startChat prepares Codex Add to Thread fallback when bridge is unavailable', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			chatTarget: 'codex',
+			contextFiles: ['src/index.ts'],
+			content: 'Implement Codex routing.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		chatTarget: 'codex',
+		contextFiles: ['src/index.ts'],
+		content: 'Implement Codex routing.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-codex-missing' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(getStoredPrompt()?.status, 'in-progress');
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.startThread'), false);
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.sendMessage'), false);
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.openSidebar'));
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.newChat'));
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.addToThread'));
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.addFileToThread'));
+	assert.ok(vscodeClosedTabs.some(tab => tab.input?.uri?.fsPath?.includes('prompt-manager-codex-context')));
+	assert.equal(vscodeWorkspaceFiles.size, 1);
+	assert.ok(Array.from(vscodeWorkspaceFiles.keys()).some(key => key.includes('prompt-manager-codex-context')));
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.revertAndCloseActiveEditor'), false);
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.closeActiveEditor'), false);
+	assert.match(vscodeClipboardText, /Implement Codex routing/);
+	assert.deepEqual(childProcessSpawnCalls, []);
+	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
+	assert.ok(postedMessages.some(message => message?.type === 'info' && /Add to Thread/.test(message.message)));
+	assert.equal(postedMessages.some(message => message?.type === 'info' && /Автоматическая отправка недоступна/.test(message.message)), false);
+	assert.equal(postedMessages.some(message => message?.type === 'error'), false);
+	assert.equal(postedMessages.some(message => message?.type === 'chatStarted'), false);
+	resetVsCodeCommandMock();
+});
+
+test('Codex xdotool fallback inherits Kilo auto-send setting unless explicitly configured', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager } = await createManager({
+		configurationValues: {
+			'promptManager.kilo.autoSendWithXdotool': true,
+		},
+	});
+	assert.equal((manager as any).isCodexXdotoolSendFallbackEnabled(), true);
+
+	const { manager: explicitCodexManager } = await createManager({
+		configurationValues: {
+			'promptManager.kilo.autoSendWithXdotool': true,
+			'promptManager.codex.autoSendWithXdotool': false,
+		},
+	});
+	assert.equal((explicitCodexManager as any).isCodexXdotoolSendFallbackEnabled(), false);
+
+	resetVsCodeCommandMock();
+});
+
+test('startChat auto-sends Codex fallback from the clipboard with xdotool', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
+	childProcessSpawnHandler = (_command, args) => args.includes('getwindowgeometry')
+		? createMockChildProcessExit(0, 'WINDOW=42\nX=0\nY=0\nWIDTH=1200\nHEIGHT=800\nSCREEN=0\n')
+		: createMockChildProcessExit(0);
+	const originalDisplay = process.env.DISPLAY;
+	process.env.DISPLAY = originalDisplay || ':99';
+
+	try {
+		const { manager, getStoredPrompt } = await createManager({
+			configurationValues: {
+				'promptManager.codex.autoSendWithXdotool': true,
+			},
+			initialPrompt: {
+				id: 'prompt-a',
+				promptUuid: 'uuid-a',
+				title: 'Prompt title',
+				status: 'draft',
+				chatTarget: 'codex',
+				contextFiles: ['src/index.ts'],
+				content: 'Implement Codex routing.',
+			},
+			stateService: {
+				saveLastPromptId: async () => undefined,
+				getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+				saveSidebarState: async () => undefined,
+				getGlobalAgentContext: () => '',
+			},
+		});
+
+		(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+		(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+
+		const postedMessages: any[] = [];
+		const panel = {
+			visible: true,
+			webview: {
+				postMessage: async (message: unknown) => {
+					postedMessages.push(message);
+					return true;
+				},
+			},
+		} as any;
+		const currentPrompt = createPrompt({
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			chatTarget: 'codex',
+			contextFiles: ['src/index.ts'],
+			content: 'Implement Codex routing.',
+		});
+
+		await (manager as any).handleMessage(
+			{ type: 'startChat', id: 'prompt-a', requestId: 'req-codex-xdotool' },
+			panel,
+			currentPrompt,
+			'__prompt_editor_singleton__',
+			() => false,
+			() => undefined,
+		);
+
+		assert.equal(getStoredPrompt()?.status, 'in-progress');
+		assert.equal(childProcessSpawnCalls.length, 4);
+		assert.match(childProcessSpawnCalls[0]?.command || '', /xdotool$/);
+		assert.deepEqual(childProcessSpawnCalls[0]?.args, ['getactivewindow', 'getwindowgeometry', '--shell']);
+		assert.match(childProcessSpawnCalls[1]?.command || '', /xdotool$/);
+		assert.deepEqual(childProcessSpawnCalls[1]?.args, ['mousemove', '980', '680', 'click', '1']);
+		assert.match(childProcessSpawnCalls[2]?.command || '', /xdotool$/);
+		assert.deepEqual(childProcessSpawnCalls[2]?.args, ['key', '--clearmodifiers', 'ctrl+v']);
+		assert.match(childProcessSpawnCalls[3]?.command || '', /xdotool$/);
+		assert.deepEqual(childProcessSpawnCalls[3]?.args, ['key', '--clearmodifiers', 'Return']);
+		assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.openSidebar'));
+		assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.newChat'));
+		assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.addToThread'));
+		assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.addFileToThread'));
+		assert.ok(vscodeClosedTabs.some(tab => tab.input?.uri?.fsPath?.includes('prompt-manager-codex-context')));
+		assert.equal(vscodeWorkspaceFiles.size, 1);
+		assert.ok(Array.from(vscodeWorkspaceFiles.keys()).some(key => key.includes('prompt-manager-codex-context')));
+		assert.match(vscodeClipboardText, /Implement Codex routing/);
+		assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
+		assert.ok(postedMessages.some(message => message?.type === 'chatRequestStarted'));
+		assert.ok(postedMessages.some(message => message?.type === 'info' && /xdotool/.test(message.message)));
+	} finally {
+		if (originalDisplay === undefined) {
+			delete process.env.DISPLAY;
+		} else {
+			process.env.DISPLAY = originalDisplay;
+		}
+		resetVsCodeCommandMock();
+	}
 });
 
 test('startChat refreshes remote global context before syncing instructions when auto-load is enabled', async () => {

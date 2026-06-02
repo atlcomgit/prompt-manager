@@ -20,6 +20,7 @@ test('normalizeStoredPromptConfig backfills missing promptUuid for legacy prompt
 	assert.equal(result.config.description, 'Created before promptUuid existed');
 	assert.equal(result.config.trackedBranch, '');
 	assert.deepEqual(result.config.trackedBranchesByProject, {});
+	assert.equal(result.config.chatTarget, 'copilot');
 	assert.equal(result.config.notes, '');
 });
 
@@ -47,4 +48,26 @@ test('normalizeStoredPromptConfig preserves existing promptUuid', () => {
 	});
 	assert.equal(result.config.title, 'Existing prompt');
 	assert.equal(result.config.id, 'existing-prompt');
+});
+
+test('normalizeStoredPromptConfig preserves supported chat targets', () => {
+	for (const chatTarget of ['copilot', 'kilo', 'codex'] as const) {
+		const result = normalizeStoredPromptConfig(
+			`prompt-${chatTarget}`,
+			{ chatTarget },
+			() => 'generated-uuid',
+		);
+
+		assert.equal(result.config.chatTarget, chatTarget);
+	}
+});
+
+test('normalizeStoredPromptConfig falls back to copilot for invalid chat target', () => {
+	const result = normalizeStoredPromptConfig(
+		'prompt-invalid-target',
+		{ chatTarget: 'unknown' as any },
+		() => 'generated-uuid',
+	);
+
+	assert.equal(result.config.chatTarget, 'copilot');
 });

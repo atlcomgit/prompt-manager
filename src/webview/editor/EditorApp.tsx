@@ -34,6 +34,7 @@ import type {
   EditorPromptTab,
   EditorPromptViewState,
   Prompt,
+  PromptChatTarget,
   PromptContextFileCard,
   PromptCustomGroup,
   PromptStatus,
@@ -114,6 +115,12 @@ type EditorBootWindow = Window & {
 const bootWindow = window as EditorBootWindow;
 const initialBootId = bootWindow.__WEBVIEW_BOOT_ID__ || '';
 const EDITOR_PROMPT_IDENTITY_STATE_KEY = 'pm.editor.promptIdentity';
+
+const CHAT_TARGET_OPTIONS: Array<{ id: PromptChatTarget; labelKey: string }> = [
+  { id: 'copilot', labelKey: 'editor.chatTargetCopilot' },
+  { id: 'kilo', labelKey: 'editor.chatTargetKilo' },
+  { id: 'codex', labelKey: 'editor.chatTargetCodex' },
+];
 
 /** Prefer host boot data for the first paint and only fall back to retained webview state when boot data is absent. */
 export const resolveInitialPromptDashboardCollapsedSections = (
@@ -2357,9 +2364,11 @@ export const EditorApp: React.FC = () => {
   const agentSummary = useMemo(() => {
     const chunks: string[] = [];
     if (selectedModelName) chunks.push(`Модель: ${toShortText(selectedModelName, 56)}`);
+    const chatTargetOption = CHAT_TARGET_OPTIONS.find(option => option.id === prompt.chatTarget);
+    chunks.push(`Чат: ${chatTargetOption ? t(chatTargetOption.labelKey) : t('editor.chatTargetCopilot')}`);
     chunks.push(`Режим: ${prompt.chatMode === 'agent' ? 'Agent' : 'Plan'}`);
     return chunks;
-  }, [selectedModelName, prompt.chatMode]);
+  }, [selectedModelName, prompt.chatTarget, prompt.chatMode, t]);
 
   const groupsSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -6810,6 +6819,19 @@ export const EditorApp: React.FC = () => {
           {renderSection('agent', 'Агент', agentSummary, (
             <>
               <div style={styles.agentInlineRow}>
+                <div style={{ ...styles.field, ...styles.agentFieldTarget }}>
+                  <label style={styles.label}>{t('editor.chatTarget')}</label>
+                  <select
+                    value={prompt.chatTarget || 'copilot'}
+                    onChange={e => updateFieldAndSaveNow('chatTarget', e.target.value as PromptChatTarget)}
+                    style={styles.select}
+                  >
+                    {CHAT_TARGET_OPTIONS.map(option => (
+                      <option key={option.id} value={option.id}>{t(option.labelKey)}</option>
+                    ))}
+                  </select>
+                </div>
+
                 <div style={{ ...styles.field, ...styles.agentFieldModel }}>
                   <label style={styles.label}>{t('editor.aiModel')}</label>
                   <select
@@ -8146,6 +8168,10 @@ const styles: Record<string, React.CSSProperties> = {
   agentFieldModel: {
     flex: '1 1 200px',
     minWidth: '200px',
+  },
+  agentFieldTarget: {
+    flex: '1 1 180px',
+    minWidth: '180px',
   },
   agentFieldMode: {
     flex: '1 1 260px',

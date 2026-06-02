@@ -19,6 +19,7 @@ import type {
 	EditorPromptViewState,
 	EditorPromptViewStateKeySource,
 	Prompt,
+	PromptChatTarget,
 	PromptContextFileCard,
 	PromptContextFileKind,
 } from '../types/prompt.js';
@@ -138,11 +139,29 @@ const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
 const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 600;
 const PROMPT_DASHBOARD_FILE_AUTO_REFRESH_DELAY_MS = 1000;
+
+interface ExternalChatDispatchResult {
+	dispatched: boolean;
+	message?: string;
+}
+
+interface XdotoolSubmitResult {
+	ok: boolean;
+	reason?: string;
+	stdout?: string;
+}
+interface XdotoolWindowGeometry {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
 const PROMPT_DASHBOARD_INITIAL_VISIBLE_REFRESH_GRACE_MS = 1500;
 const GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS = 250;
 const GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS = 250;
 const GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT = 4;
 const PROMPT_AGENT_JSON_SYNC_DEBOUNCE_MS = 300;
+const CODEX_TEMPORARY_CONTEXT_DELETE_DELAY_MS = 10 * 60 * 1000;
 const EDITOR_WEBVIEW_PROMPT_IDENTITY_STATE_KEY = 'pm.editor.promptIdentity';
 /** Give VS Code a short extra window to surface a late chat session before showing a timeout. */
 const CHAT_START_CONFIRMATION_GRACE_TIMEOUT_MS = 2500;
@@ -959,6 +978,43 @@ export class EditorPanelManager {
 		return vscode.workspace
 			.getConfiguration('promptManager')
 			.get<boolean>('editor.autoLoadContext', true) === true;
+	}
+
+	/** OS-level auto-submit is opt-in because xdotool can target the wrong focused window. */
+	private isKiloXdotoolSendFallbackEnabled(): boolean {
+		return vscode.workspace
+			.getConfiguration('promptManager')
+			.get<boolean>('kilo.autoSendWithXdotool', false) === true;
+	}
+
+	/** OS-level auto-submit is opt-in because xdotool can target the wrong focused window. */
+	private isCodexXdotoolSendFallbackEnabled(): boolean {
+		const config = vscode.workspace.getConfiguration('promptManager');
+		const codexValue = config.get<boolean>('codex.autoSendWithXdotool', false) === true;
+		const inspection = (config as {
+			inspect?<T>(key: string): {
+				globalValue?: T;
+				workspaceValue?: T;
+				workspaceFolderValue?: T;
+				globalLanguageValue?: T;
+				workspaceLanguageValue?: T;
+				workspaceFolderLanguageValue?: T;
+			} | undefined;
+		}).inspect?.<boolean>('codex.autoSendWithXdotool');
+		const explicitCodexValue = [
+			inspection?.workspaceFolderLanguageValue,
+			inspection?.workspaceLanguageValue,
+			inspection?.globalLanguageValue,
+			inspection?.workspaceFolderValue,
+			inspection?.workspaceValue,
+			inspection?.globalValue,
+		].find(value => typeof value === 'boolean');
+
+		if (typeof explicitCodexValue === 'boolean') {
+			return explicitCodexValue;
+		}
+
+		return codexValue || this.isKiloXdotoolSendFallbackEnabled();
 	}
 
 	/** Normalize source values arriving from the webview before they are persisted. */
@@ -1904,6 +1960,718 @@ export class EditorPanelManager {
 		} catch {
 			return false;
 		}
+	}
+
+	private normalizeChatTarget(value: unknown): PromptChatTarget {
+		return value === 'kilo' || value === 'codex' || value === 'copilot'
+			? value
+			: 'copilot';
+	}
+
+	private isExtensionAvailable(extensionId: string): boolean {
+		try {
+			return Boolean(vscode.extensions.getExtension(extensionId));
+		} catch {
+			return true;
+		}
+	}
+
+	private async focusKiloCode(): Promise<void> {
+		try {
+			await vscode.commands.executeCommand('kilo-code.SidebarProvider.focus');
+			return;
+		} catch {
+			// fall back to opening the tab command below
+		}
+
+		try {
+			await vscode.commands.executeCommand('kilo-code.new.openInTab');
+		} catch {
+			// best-effort only
+		}
+	}
+
+	private async focusCodex(): Promise<void> {
+		try {
+			await vscode.commands.executeCommand('chatgpt.openSidebar');
+		} catch {
+			// best-effort only
+		}
+	}
+
+	private async openExternalChatTarget(target: PromptChatTarget): Promise<boolean> {
+		switch (target) {
+			case 'kilo':
+				if (!this.isExtensionAvailable('kilocode.kilo-code')) {
+					return false;
+				}
+				await this.focusKiloCode();
+				return true;
+			case 'codex':
+				if (!this.isExtensionAvailable('openai.chatgpt')) {
+					return false;
+				}
+				await this.focusCodex();
+				return true;
+			case 'copilot':
+			default:
+				return false;
+		}
+	}
+
+	private buildExternalChatPayload(
+		prompt: Prompt,
+		query: string,
+		fileUris: vscode.Uri[],
+	): Record<string, unknown> {
+		return {
+			text: query,
+			query,
+			files: fileUris.map(uri => uri.fsPath),
+			fileUris: fileUris.map(uri => uri.toString()),
+			mode: prompt.chatMode || 'agent',
+			model: prompt.model || undefined,
+			source: 'prompt-manager',
+			promptId: prompt.id,
+			promptUuid: prompt.promptUuid,
+			title: prompt.title,
+			taskNumber: prompt.taskNumber,
+		};
+	}
+
+	private buildExternalClipboardMessage(
+		target: PromptChatTarget,
+		query: string,
+		fileUris: vscode.Uri[],
+	): string {
+		const filePaths = fileUris
+			.map(uri => (uri.fsPath || '').trim())
+			.filter(Boolean);
+		if (target !== 'kilo' || filePaths.length === 0) {
+			return query;
+		}
+
+		return [
+			query.trimEnd(),
+			'',
+			'---',
+			'',
+			'## Kilo Code file mentions',
+			'',
+			...filePaths.map(filePath => `@${filePath}`),
+		].join('\n');
+	}
+
+	private buildCodexImplementTodoComment(text: string, fileUris: vscode.Uri[]): string {
+		const filePaths = fileUris
+			.map(uri => (uri.fsPath || '').trim())
+			.filter(Boolean);
+		const parts = [
+			'Prompt Manager task.',
+			'',
+			'IMPORTANT: Codex is receiving this through its public Implement TODO command only because this Codex extension version does not expose a direct start-thread command. Ignore the surrounding Codex TODO wrapper, including any instruction to replace or remove this comment. Treat only the task text below as the user request.',
+			'',
+			text.trim(),
+		];
+
+		if (filePaths.length > 0) {
+			parts.push(
+				'',
+				'Context files from Prompt Manager:',
+				...filePaths.map(filePath => `- ${filePath}`),
+			);
+		}
+
+		return parts.join('\n').trim();
+	}
+
+	private async startCodexThreadWithImplementTodoBridge(
+		text: string,
+		fileUris: vscode.Uri[],
+		commands: string[],
+	): Promise<boolean> {
+		if (!commands.includes('chatgpt.implementTodo')) {
+			return false;
+		}
+
+		try {
+			await vscode.commands.executeCommand('chatgpt.implementTodo', {
+				fileName: 'prompt-manager-task.md',
+				line: 1,
+				comment: this.buildCodexImplementTodoComment(text, fileUris),
+			});
+			return true;
+		} catch (error) {
+			this.hooksOutput.appendLine(`[chat-start] Codex implementTodo bridge failed: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
+		}
+	}
+
+	private createTemporaryKiloContextUri(): vscode.Uri {
+		const fileName = `prompt-manager-kilo-context-${Date.now()}-${Math.random().toString(36).slice(2)}.md`;
+		return vscode.Uri.file(path.join(os.tmpdir(), fileName));
+	}
+
+	private createTemporaryCodexContextUri(): vscode.Uri {
+		const fileName = `prompt-manager-codex-context-${Date.now()}-${Math.random().toString(36).slice(2)}.md`;
+		return vscode.Uri.file(path.join(os.tmpdir(), fileName));
+	}
+
+	private async insertKiloPromptWithAddToContext(text: string, commands: string[]): Promise<boolean> {
+		if (!commands.includes('kilo-code.new.addToContext')) {
+			return false;
+		}
+
+		let document: vscode.TextDocument | undefined;
+		let temporaryUri: vscode.Uri | undefined;
+		try {
+			temporaryUri = this.createTemporaryKiloContextUri();
+			await vscode.workspace.fs.writeFile(temporaryUri, Buffer.from(text, 'utf8'));
+			document = await vscode.workspace.openTextDocument(temporaryUri);
+			const editor = await vscode.window.showTextDocument(document, {
+				preview: true,
+				preserveFocus: false,
+				viewColumn: vscode.ViewColumn.Beside,
+			});
+
+			const lastLine = Math.max(0, document.lineCount - 1);
+			const lastCharacter = document.lineAt(lastLine).text.length;
+			const selection = new vscode.Selection(
+				new vscode.Position(0, 0),
+				new vscode.Position(lastLine, lastCharacter),
+			);
+			editor.selection = selection;
+			editor.selections = [selection];
+
+			await vscode.commands.executeCommand('kilo-code.new.addToContext');
+			return true;
+		} catch (error) {
+			this.hooksOutput.appendLine(`[chat-start] Kilo addToContext fallback failed: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
+		} finally {
+			if (document) {
+				await this.closeTemporaryKiloContextDocument(document);
+			}
+			if (temporaryUri) {
+				await this.deleteTemporaryKiloContextFile(temporaryUri);
+			}
+		}
+	}
+
+	private async insertCodexPromptWithAddToThread(text: string, commands: string[]): Promise<boolean> {
+		if (!commands.includes('chatgpt.addToThread')) {
+			return false;
+		}
+
+		let document: vscode.TextDocument | undefined;
+		let temporaryUri: vscode.Uri | undefined;
+		let inserted = false;
+		try {
+			temporaryUri = this.createTemporaryCodexContextUri();
+			await vscode.workspace.fs.writeFile(temporaryUri, Buffer.from(text, 'utf8'));
+			document = await vscode.workspace.openTextDocument(temporaryUri);
+			const editor = await vscode.window.showTextDocument(document, {
+				preview: true,
+				preserveFocus: false,
+				viewColumn: vscode.ViewColumn.Beside,
+			});
+
+			const lastLine = Math.max(0, document.lineCount - 1);
+			const lastCharacter = document.lineAt(lastLine).text.length;
+			const selection = new vscode.Selection(
+				new vscode.Position(0, 0),
+				new vscode.Position(lastLine, lastCharacter),
+			);
+			editor.selection = selection;
+			editor.selections = [selection];
+
+			await vscode.commands.executeCommand('chatgpt.addToThread');
+			inserted = true;
+			return true;
+		} catch (error) {
+			this.hooksOutput.appendLine(`[chat-start] Codex addToThread fallback failed: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
+		} finally {
+			if (document) {
+				await this.closeTemporaryCodexContextDocument(document);
+			}
+			if (temporaryUri) {
+				if (inserted) {
+					this.scheduleTemporaryCodexContextFileDelete(temporaryUri);
+				} else {
+					await this.deleteTemporaryCodexContextFile(temporaryUri);
+				}
+			}
+		}
+	}
+
+	private async deleteTemporaryKiloContextFile(uri: vscode.Uri): Promise<void> {
+		try {
+			await vscode.workspace.fs.delete(uri, { useTrash: false });
+		} catch (error) {
+			this.hooksOutput.appendLine(`[chat-start] Kilo temporary context file delete failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async deleteTemporaryCodexContextFile(uri: vscode.Uri): Promise<void> {
+		try {
+			await vscode.workspace.fs.delete(uri, { useTrash: false });
+		} catch (error) {
+			this.hooksOutput.appendLine(`[chat-start] Codex temporary context file delete failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private scheduleTemporaryCodexContextFileDelete(uri: vscode.Uri): void {
+		const timer = setTimeout(() => {
+			void this.deleteTemporaryCodexContextFile(uri);
+		}, CODEX_TEMPORARY_CONTEXT_DELETE_DELAY_MS);
+		timer.unref?.();
+	}
+
+	private async closeTemporaryKiloContextDocument(document: vscode.TextDocument): Promise<void> {
+		const documentUri = document.uri.toString();
+		try {
+			const tabsToClose: vscode.Tab[] = [];
+			for (const group of vscode.window.tabGroups.all) {
+				for (const tab of group.tabs) {
+					const tabUri = (tab.input as { uri?: vscode.Uri } | undefined)?.uri;
+					if (tabUri?.toString() === documentUri) {
+						tabsToClose.push(tab);
+					}
+				}
+			}
+
+			if (tabsToClose.length > 0) {
+				await vscode.window.tabGroups.close(tabsToClose, true);
+				return;
+			}
+		} catch (error) {
+			this.hooksOutput.appendLine(`[chat-start] Kilo temporary context tab close failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+
+		if (vscode.window.activeTextEditor?.document?.uri.toString() !== documentUri) {
+			return;
+		}
+
+		try {
+			await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+			return;
+		} catch {
+			// Fall back to the generic close command below.
+		}
+
+		try {
+			await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+		} catch (error) {
+			this.hooksOutput.appendLine(`[chat-start] Kilo temporary context editor close failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async closeTemporaryCodexContextDocument(document: vscode.TextDocument): Promise<void> {
+		const documentUri = document.uri.toString();
+		try {
+			const tabsToClose: vscode.Tab[] = [];
+			for (const group of vscode.window.tabGroups.all) {
+				for (const tab of group.tabs) {
+					const tabUri = (tab.input as { uri?: vscode.Uri } | undefined)?.uri;
+					if (tabUri?.toString() === documentUri) {
+						tabsToClose.push(tab);
+					}
+				}
+			}
+
+			if (tabsToClose.length > 0) {
+				await vscode.window.tabGroups.close(tabsToClose, true);
+				return;
+			}
+		} catch (error) {
+			this.hooksOutput.appendLine(`[chat-start] Codex temporary context tab close failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+
+		if (vscode.window.activeTextEditor?.document?.uri.toString() !== documentUri) {
+			return;
+		}
+
+		try {
+			await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+			return;
+		} catch {
+			// Fall back to the generic close command below.
+		}
+
+		try {
+			await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+		} catch (error) {
+			this.hooksOutput.appendLine(`[chat-start] Codex temporary context editor close failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private resolveXdotoolCommand(): string {
+		const candidates = ['/usr/bin/xdotool', '/bin/xdotool', '/usr/local/bin/xdotool'];
+		for (const candidate of candidates) {
+			if (existsSync(candidate)) {
+				return candidate;
+			}
+		}
+
+		return 'xdotool';
+	}
+
+	private async runXdotoolCommand(args: string[], targetLabel: string): Promise<XdotoolSubmitResult> {
+		if (process.platform !== 'linux' || !process.env.DISPLAY) {
+			const reason = process.platform !== 'linux'
+				? 'requires Linux'
+				: 'requires DISPLAY; xdotool does not work in a pure Wayland session';
+			this.hooksOutput.appendLine(`[chat-start] ${targetLabel} xdotool skipped: ${reason}.`);
+			return { ok: false, reason };
+		}
+
+		return new Promise<XdotoolSubmitResult>((resolve) => {
+			let settled = false;
+			let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+			let stderr = '';
+			let stdout = '';
+			const command = this.resolveXdotoolCommand();
+			const child = spawn(command, args, {
+				env: process.env,
+				stdio: ['ignore', 'pipe', 'pipe'],
+			});
+
+			const finish = (result: XdotoolSubmitResult) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				if (timeoutHandle) {
+					clearTimeout(timeoutHandle);
+				}
+				resolve(result);
+			};
+
+			child.stdout?.on('data', chunk => {
+				stdout += String(chunk);
+			});
+			child.stderr?.on('data', chunk => {
+				stderr += String(chunk);
+			});
+
+			timeoutHandle = setTimeout(() => {
+				try {
+					child.kill('SIGTERM');
+				} catch {
+					// best effort
+				}
+				const reason = 'xdotool timed out';
+				this.hooksOutput.appendLine(`[chat-start] ${targetLabel} xdotool failed: ${reason}.`);
+				finish({ ok: false, reason });
+			}, 1500);
+
+			child.once('error', (error) => {
+				const reason = error.message || 'failed to start xdotool';
+				this.hooksOutput.appendLine(`[chat-start] ${targetLabel} xdotool failed: ${reason}`);
+				finish({ ok: false, reason });
+			});
+			child.once('exit', (code, signal) => {
+				const ok = code === 0;
+				if (!ok) {
+					const output = [stderr.trim(), stdout.trim()].filter(Boolean).join(' | ');
+					const reason = output || `xdotool exited with code=${code ?? '-'} signal=${signal ?? '-'}`;
+					this.hooksOutput.appendLine(`[chat-start] ${targetLabel} xdotool failed: ${reason}`);
+					finish({ ok: false, reason });
+					return;
+				}
+
+				finish({ ok: true, stdout });
+			});
+		});
+	}
+
+	private async runXdotoolKeys(keys: string[], targetLabel: string): Promise<XdotoolSubmitResult> {
+		return this.runXdotoolCommand(['key', '--clearmodifiers', ...keys], targetLabel);
+	}
+
+	private async runXdotoolEnter(): Promise<XdotoolSubmitResult> {
+		return this.runXdotoolKeys(['Return'], 'Kilo');
+	}
+
+	private async focusKiloChatInput(commands: string[]): Promise<void> {
+		await this.focusKiloCode();
+		if (commands.includes('kilo-code.new.focusChatInput')) {
+			try {
+				await vscode.commands.executeCommand('kilo-code.new.focusChatInput');
+			} catch {
+				// best-effort only
+			}
+		}
+	}
+
+	private async maybeSubmitKiloPromptWithXdotool(commands: string[]): Promise<XdotoolSubmitResult> {
+		if (!this.isKiloXdotoolSendFallbackEnabled()) {
+			return { ok: false, reason: 'xdotool auto-send is disabled' };
+		}
+
+		await this.focusKiloChatInput(commands);
+		await new Promise(resolve => setTimeout(resolve, 600));
+		return this.runXdotoolEnter();
+	}
+
+	private resolveCodexSubmitKey(text: string): string {
+		const enterBehavior = vscode.workspace
+			.getConfiguration('chatgpt')
+			.get<string>('composerEnterBehavior', 'enter');
+		return enterBehavior === 'cmdIfMultiline' && /\r?\n/.test(text)
+			? 'ctrl+Return'
+			: 'Return';
+	}
+
+	private parseXdotoolWindowGeometry(output: string): XdotoolWindowGeometry | null {
+		const values = new Map<string, number>();
+		for (const line of output.split(/\r?\n/)) {
+			const match = /^([A-Z]+)=(-?\d+)$/.exec(line.trim());
+			if (match) {
+				values.set(match[1], Number(match[2]));
+			}
+		}
+
+		const x = values.get('X');
+		const y = values.get('Y');
+		const width = values.get('WIDTH');
+		const height = values.get('HEIGHT');
+		if (
+			!Number.isFinite(x)
+			|| !Number.isFinite(y)
+			|| !Number.isFinite(width)
+			|| !Number.isFinite(height)
+			|| (width || 0) <= 0
+			|| (height || 0) <= 0
+		) {
+			return null;
+		}
+
+		return { x: x as number, y: y as number, width: width as number, height: height as number };
+	}
+
+	private isCodexSecondarySidebarLikely(): boolean {
+		const match = /^(\d+)\.(\d+)/.exec(vscode.version || '');
+		if (!match) {
+			return true;
+		}
+
+		const major = Number(match[1]);
+		const minor = Number(match[2]);
+		return major > 1 || (major === 1 && minor >= 106);
+	}
+
+	private getCodexComposerClickPoint(geometry: XdotoolWindowGeometry): { x: number; y: number } {
+		const xOffset = this.isCodexSecondarySidebarLikely()
+			? Math.max(120, geometry.width - 220)
+			: Math.min(Math.max(120, Math.round(geometry.width * 0.18)), Math.max(120, geometry.width - 120));
+		const yOffset = Math.max(120, geometry.height - 120);
+		return {
+			x: Math.round(geometry.x + xOffset),
+			y: Math.round(geometry.y + yOffset),
+		};
+	}
+
+	private async focusCodexComposerWithXdotool(): Promise<XdotoolSubmitResult> {
+		await this.focusCodex();
+		await new Promise(resolve => setTimeout(resolve, 600));
+
+		const geometryResult = await this.runXdotoolCommand(
+			['getactivewindow', 'getwindowgeometry', '--shell'],
+			'Codex composer geometry',
+		);
+		if (!geometryResult.ok) {
+			return geometryResult;
+		}
+
+		const geometry = this.parseXdotoolWindowGeometry(geometryResult.stdout || '');
+		if (!geometry) {
+			const reason = 'unable to read active VS Code window geometry';
+			this.hooksOutput.appendLine(`[chat-start] Codex composer xdotool focus failed: ${reason}.`);
+			return { ok: false, reason };
+		}
+
+		const point = this.getCodexComposerClickPoint(geometry);
+		return this.runXdotoolCommand(
+			['mousemove', String(point.x), String(point.y), 'click', '1'],
+			'Codex composer focus',
+		);
+	}
+
+	private async maybeSubmitCodexPromptWithXdotool(text: string): Promise<XdotoolSubmitResult> {
+		if (!this.isCodexXdotoolSendFallbackEnabled()) {
+			return { ok: false, reason: 'xdotool auto-send is disabled' };
+		}
+
+		const focused = await this.focusCodexComposerWithXdotool();
+		if (!focused.ok) {
+			return focused;
+		}
+
+		await new Promise(resolve => setTimeout(resolve, 250));
+		const pasted = await this.runXdotoolKeys(['ctrl+v'], 'Codex paste');
+		if (!pasted.ok) {
+			return pasted;
+		}
+
+		await new Promise(resolve => setTimeout(resolve, 500));
+		return this.runXdotoolKeys([this.resolveCodexSubmitKey(text)], 'Codex');
+	}
+
+	private async dispatchKiloChatTarget(
+		prompt: Prompt,
+		query: string,
+		fileUris: vscode.Uri[],
+		commands: string[],
+	): Promise<ExternalChatDispatchResult> {
+		if (!this.isExtensionAvailable('kilocode.kilo-code')) {
+			throw new Error('Kilo Code не установлен или недоступен в текущем окне VS Code.');
+		}
+
+		const bridgeCommand = 'kilo-code.new.startTask';
+		if (!commands.includes(bridgeCommand)) {
+			const fallbackText = this.buildExternalClipboardMessage('kilo', query, fileUris);
+			const insertedWithAddToContext = await this.insertKiloPromptWithAddToContext(fallbackText, commands);
+			if (!insertedWithAddToContext) {
+				await this.focusKiloCode();
+			}
+			if (insertedWithAddToContext) {
+				await this.focusKiloChatInput(commands);
+			}
+			await vscode.env.clipboard.writeText(fallbackText);
+			if (insertedWithAddToContext) {
+				const submittedWithXdotool = await this.maybeSubmitKiloPromptWithXdotool(commands);
+				if (submittedWithXdotool.ok) {
+					return {
+						dispatched: true,
+						message: 'Kilo Code открыт. Текст задачи вставлен через Add to Context и отправлен через xdotool.',
+					};
+				}
+
+				return {
+					dispatched: false,
+					message: this.isKiloXdotoolSendFallbackEnabled()
+						? `Kilo Code открыт. Текст задачи вставлен через Add to Context и продублирован в буфер обмена, но xdotool не смог отправить Enter (${submittedWithXdotool.reason || 'unknown error'}). Нажмите Enter в поле чата Kilo Code вручную.`
+						: 'Kilo Code открыт. Текст задачи вставлен через Add to Context и продублирован в буфер обмена. Нажмите Enter в поле чата Kilo Code для отправки.',
+				};
+			}
+
+			return {
+				dispatched: false,
+				message: 'Kilo Code открыт. Автоматическая отправка недоступна в текущей версии Kilo Code, поэтому текст задачи скопирован в буфер обмена. Вставьте его в поле чата Kilo Code и отправьте вручную.',
+			};
+		}
+
+		await vscode.commands.executeCommand(
+			bridgeCommand,
+			this.buildExternalChatPayload(prompt, query, fileUris),
+		);
+		return { dispatched: true };
+	}
+
+	private async dispatchCodexChatTarget(
+		prompt: Prompt,
+		query: string,
+		fileUris: vscode.Uri[],
+		commands: string[],
+	): Promise<ExternalChatDispatchResult> {
+		if (!this.isExtensionAvailable('openai.chatgpt')) {
+			throw new Error('OpenAI Codex extension не установлен или недоступен в текущем окне VS Code.');
+		}
+
+		const bridgeCommand = commands.includes('chatgpt.startThread')
+			? 'chatgpt.startThread'
+			: commands.includes('chatgpt.sendMessage')
+				? 'chatgpt.sendMessage'
+				: '';
+		if (!bridgeCommand) {
+			const fallbackText = this.buildExternalClipboardMessage('codex', query, fileUris);
+			const startedWithImplementTodo = await this.startCodexThreadWithImplementTodoBridge(fallbackText, fileUris, commands);
+			if (startedWithImplementTodo) {
+				await vscode.env.clipboard.writeText(fallbackText);
+				return {
+					dispatched: true,
+					message: 'OpenAI Codex запущен через публичный Implement TODO bridge. Текст задачи также скопирован в буфер обмена; файлы переданы в текст задачи как список context files.',
+				};
+			}
+
+			await this.focusCodex();
+			if (commands.includes('chatgpt.newChat')) {
+				try {
+					await vscode.commands.executeCommand('chatgpt.newChat');
+				} catch {
+					// best-effort only
+				}
+			}
+
+			const insertedWithAddToThread = await this.insertCodexPromptWithAddToThread(fallbackText, commands);
+			if (commands.includes('chatgpt.addFileToThread')) {
+				for (const fileUri of fileUris) {
+					try {
+						await vscode.commands.executeCommand('chatgpt.addFileToThread', fileUri);
+					} catch {
+						// best-effort only
+					}
+				}
+			}
+			await vscode.env.clipboard.writeText(fallbackText);
+			if (insertedWithAddToThread) {
+				const submittedWithXdotool = await this.maybeSubmitCodexPromptWithXdotool(fallbackText);
+				if (submittedWithXdotool.ok) {
+					return {
+						dispatched: true,
+						message: 'OpenAI Codex открыт. Текст задачи добавлен через Add to Thread, вставлен в поле ввода и отправлен через xdotool.',
+					};
+				}
+
+				return {
+					dispatched: false,
+					message: this.isCodexXdotoolSendFallbackEnabled()
+						? `OpenAI Codex открыт. Текст задачи добавлен через Add to Thread и продублирован в буфер обмена, но xdotool не смог вставить и отправить его (${submittedWithXdotool.reason || 'unknown error'}). Отправьте задачу в Codex вручную.`
+						: 'OpenAI Codex открыт. Текст задачи добавлен через Add to Thread и продублирован в буфер обмена. Отправьте задачу в Codex вручную.',
+				};
+			}
+
+			const submittedWithXdotool = await this.maybeSubmitCodexPromptWithXdotool(fallbackText);
+			if (submittedWithXdotool.ok) {
+				return {
+					dispatched: true,
+					message: 'OpenAI Codex открыт. Текст задачи вставлен из буфера обмена и отправлен через xdotool.',
+				};
+			}
+
+			return {
+				dispatched: false,
+				message: this.isCodexXdotoolSendFallbackEnabled()
+					? `OpenAI Codex открыт. Текст задачи скопирован в буфер обмена, но xdotool не смог вставить и отправить его (${submittedWithXdotool.reason || 'unknown error'}). Вставьте его в поле чата Codex и отправьте вручную.`
+					: 'OpenAI Codex открыт. Автоматическая отправка недоступна в текущей версии расширения, поэтому текст задачи скопирован в буфер обмена. Вставьте его в поле чата Codex и отправьте вручную.',
+			};
+		}
+
+		await vscode.commands.executeCommand(
+			bridgeCommand,
+			this.buildExternalChatPayload(prompt, query, fileUris),
+		);
+		return { dispatched: true };
+	}
+
+	private async dispatchExternalChatTarget(
+		chatTarget: PromptChatTarget,
+		prompt: Prompt,
+		query: string,
+		fileUris: vscode.Uri[],
+		commands: string[],
+	): Promise<ExternalChatDispatchResult> {
+		if (chatTarget === 'kilo') {
+			return this.dispatchKiloChatTarget(prompt, query, fileUris, commands);
+		}
+
+		if (chatTarget === 'codex') {
+			return this.dispatchCodexChatTarget(prompt, query, fileUris, commands);
+		}
+
+		return { dispatched: false };
 	}
 
 	/** Resolve the cancel commands currently exposed by the running VS Code build. */
@@ -8987,11 +9755,13 @@ export class EditorPanelManager {
 					}
 
 					const query = parts.join('\n');
+					const chatTarget = this.normalizeChatTarget(prompt.chatTarget);
 					hookPayloadBase = {
 						promptId: prompt.id,
 						title: prompt.title,
 						description: prompt.description,
 						status: prompt.status,
+						chatTarget,
 						query,
 						model: prompt.model,
 						taskNumber: prompt.taskNumber,
@@ -9005,6 +9775,50 @@ export class EditorPanelManager {
 						event: 'beforeChat',
 						...hookPayloadBase,
 					}, 'beforeChat');
+
+					if (chatTarget !== 'copilot') {
+						try {
+							const commands = await vscode.commands.getCommands(true);
+							const dispatchResult = await this.dispatchExternalChatTarget(chatTarget, prompt, query, fileUris, commands);
+							chatMessageDispatched = true;
+							await appendPromptAiLog({
+								kind: 'chat',
+								prompt: query,
+								callerMethod: `EditorPanelManager.startChat.${chatTarget}${dispatchResult.dispatched ? '' : '.clipboard'}`,
+								model: prompt.model || chatTarget,
+							});
+							await this.clearPromptPlanFileIfExists(panelKey, prompt.id);
+							try {
+								await this.storageService.createAgentFile(prompt.id);
+							} catch (error) {
+								this.hooksOutput.appendLine(`[agent-file] create agent.json failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+							}
+							if (dispatchResult.dispatched) {
+								postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
+								postMessage({ type: 'chatRequestStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
+							}
+							postMessage({ type: 'chatOpened', promptId: prompt.id, requestId: startChatRequestId || undefined });
+							if (dispatchResult.message) {
+								postMessage({ type: 'info', message: dispatchResult.message, requestId: startChatRequestId || undefined });
+							}
+							try {
+								const memorySummary = await this.buildChatMemorySummary(
+									sessionInstructionRecord,
+									chatContextFiles,
+									prompt,
+									panel.webview,
+									codeMapSummary,
+								);
+								postMessage({ type: 'chatMemorySummary', memorySummary, promptId: prompt.id });
+							} catch {
+								// Non-critical: summary display failure must not block chat
+							}
+						} catch (error) {
+							startStatePersisted = false;
+							await reportStartChatFailure(formatStartChatErrorMessage(error));
+						}
+						break;
+					}
 
 					let requestModelIdentifier = '';
 					let requestModelSelector: vscode.LanguageModelChatSelector | undefined;
@@ -9615,6 +10429,26 @@ export class EditorPanelManager {
 				if (msg.id) {
 					const promptFromStorage = await this.storageService.getPrompt(msg.id);
 					if (promptFromStorage) {
+						const chatTarget = this.normalizeChatTarget(promptFromStorage.chatTarget);
+						if (chatTarget !== 'copilot') {
+							if (promptFromStorage.status !== 'in-progress') {
+								promptFromStorage.status = 'in-progress';
+								markPromptChatAutoCompleteAfter(promptFromStorage);
+								await this.storageService.savePrompt(promptFromStorage, { historyReason: 'status-change' });
+								if (currentPrompt.id === promptFromStorage.id) {
+									Object.assign(currentPrompt, promptFromStorage);
+									postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
+								}
+								this._onDidSave.fire(promptFromStorage.id);
+							}
+							const openedExternal = await this.openExternalChatTarget(chatTarget);
+							if (openedExternal) {
+								postMessage({ type: 'chatOpened', promptId: promptIdToOpen || currentPrompt.id });
+							} else {
+								postMessage({ type: 'error', message: chatTarget === 'kilo' ? 'Kilo Code не установлен или недоступен.' : 'OpenAI Codex не установлен или недоступен.' });
+							}
+							break;
+						}
 						hadBoundSessionRequest = hadBoundSessionRequest || (promptFromStorage.chatSessionIds || []).length > 0;
 						// --- Branch mismatch check ---
 						if (promptFromStorage.projects.length > 0) {
@@ -9694,6 +10528,7 @@ export class EditorPanelManager {
 			}
 
 			case 'openChatPanel': {
+				const chatTarget = this.normalizeChatTarget(currentPrompt.chatTarget);
 				if (currentPrompt.id && currentPrompt.status !== 'in-progress') {
 					const promptFromStorage = await this.storageService.getPrompt(currentPrompt.id);
 					if (promptFromStorage && promptFromStorage.status !== 'in-progress') {
@@ -9704,6 +10539,15 @@ export class EditorPanelManager {
 						postMessage({ type: 'prompt', prompt: promptFromStorage, reason: 'sync' });
 						this._onDidSave.fire(promptFromStorage.id);
 					}
+				}
+				if (chatTarget !== 'copilot') {
+					const openedExternal = await this.openExternalChatTarget(chatTarget);
+					if (openedExternal) {
+						postMessage({ type: 'chatOpened', promptId: currentPrompt.id });
+					} else {
+						postMessage({ type: 'error', message: chatTarget === 'kilo' ? 'Kilo Code не установлен или недоступен.' : 'OpenAI Codex не установлен или недоступен.' });
+					}
+					break;
 				}
 				try {
 					await vscode.commands.executeCommand('workbench.action.chat.openAgent');

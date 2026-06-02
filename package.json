@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Prompt-Manager",
   "description": "Manage AI prompt workflows, launch chats, and build project memory directly inside VS Code",
-  "version": "0.2.43",
+  "version": "0.2.44",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -116,7 +116,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.2.43",
+        "title": "About 0.2.44",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },

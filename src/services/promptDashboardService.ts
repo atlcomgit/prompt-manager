@@ -2073,16 +2073,14 @@ export class PromptDashboardService implements vscode.Disposable {
 				}
 				: await this.loadIncomingSummaryForProject(project, cachedProject);
 			const { incomingFiles, incomingAuthors } = incomingSummary;
-			const uncommittedFiles = mode === 'analysis'
+			const uncommittedFiles = refreshVisibleBranchSection
 				? this.mergeCachedUncommittedFileDetails(
 					project,
 					trackedBranch,
 					this.collectProjectUncommittedFiles(project, excludedPaths),
 					cachedProject,
 				)
-				: refreshVisibleBranchSection
-					? this.collectProjectUncommittedFiles(project, excludedPaths)
-					: (cachedProject?.uncommittedFiles || []);
+				: (cachedProject?.uncommittedFiles || []);
 			if (lightReactiveRefresh) {
 				return this.buildReactiveProjectSummary(
 					scope,
@@ -2502,7 +2500,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		return this.hasHydratedProjectDetails(cachedProject);
 	}
 
-	/** Reuse dirty-file stats during the background AI refresh so expanded counters do not disappear again. */
+	/** Reuse dirty-file stats during lightweight refreshes so expanded counters do not disappear again. */
 	private mergeCachedUncommittedFileDetails(
 		project: GitOverlayProjectSnapshot,
 		trackedBranch: string,
@@ -2524,7 +2522,7 @@ export class PromptDashboardService implements vscode.Disposable {
 
 		return nextFiles.map(file => {
 			const cachedFile = cachedFilesByKey.get(this.buildUncommittedFileCacheKey(file));
-			if (!cachedFile) {
+			if (!cachedFile || this.hasDetailedUncommittedFileData(file)) {
 				return file;
 			}
 
@@ -2846,7 +2844,12 @@ export class PromptDashboardService implements vscode.Disposable {
 		incomingAuthors: string[] = [],
 	): PromptDashboardProjectSummary {
 		const trackedBranch = this.resolveTrackedBranchForProject(scope, project, snapshotTrackedBranches);
-		const uncommittedFiles = this.collectProjectUncommittedFiles(project, excludedPaths);
+		const uncommittedFiles = this.mergeCachedUncommittedFileDetails(
+			project,
+			trackedBranch,
+			this.collectProjectUncommittedFiles(project, excludedPaths),
+			cachedProject,
+		);
 		const hasPromptBranchMismatch = this.hasPromptBranchMismatch(scope, project);
 		const reusableCachedProject = cachedProject && project.available && !project.error
 			? cachedProject

@@ -2572,6 +2572,86 @@ test('PromptDashboardService analyzeParallelReview keeps hydrated dirty-file sta
 	service.dispose();
 });
 
+test('PromptDashboardService lightweight refresh keeps hydrated dirty-file stats visible', async () => {
+	const snapshotOptions: Array<Record<string, unknown> | undefined> = [];
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+	]);
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (
+				_paths: Map<string, string>,
+				projectNames: string[],
+				_promptBranch: string,
+				_trackedBranches: string[],
+				options?: Record<string, unknown>,
+			) => {
+				snapshotOptions.push(options);
+				const includeChangeDetails = options?.includeChangeDetails === true;
+				return {
+					trackedBranches: ['main'],
+					projects: projectNames.map(project => createSnapshotProject(project, {
+						changeGroups: {
+							merge: [],
+							staged: [],
+							workingTree: [{
+								project,
+								path: 'src/dirty.ts',
+								status: 'M',
+								group: 'working-tree',
+								conflicted: false,
+								staged: false,
+								fileSizeBytes: includeChangeDetails ? 128 : 0,
+								additions: includeChangeDetails ? 7 : null,
+								deletions: includeChangeDetails ? 2 : null,
+								isBinary: false,
+							}],
+							untracked: [],
+						},
+					})),
+				};
+			},
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	const prompt = createPrompt({ projects: ['api'] });
+	await service.refreshProjectsWidget(prompt, undefined, undefined, 'display');
+	const detailsWidget = await service.refreshProjectsWidget(prompt, undefined, undefined, 'details');
+	assert.equal(detailsWidget.data.projects[0]?.uncommittedFiles[0]?.additions, 7);
+	assert.equal(detailsWidget.data.projects[0]?.uncommittedFiles[0]?.deletions, 2);
+
+	const refreshedWidget = await service.refreshProjectsWidget(prompt, undefined, undefined, 'display');
+	const lastSnapshotOptions = snapshotOptions[snapshotOptions.length - 1] || {};
+
+	assert.equal(lastSnapshotOptions.includeChangeDetails, false);
+	assert.equal(refreshedWidget.data.projects[0]?.uncommittedFiles[0]?.additions, 7);
+	assert.equal(refreshedWidget.data.projects[0]?.uncommittedFiles[0]?.deletions, 2);
+
+	const reactiveWidget = await service.refreshProjectsWidget(prompt, undefined, undefined, 'reactive-branches', ['api']);
+	const reactiveSnapshotOptions = snapshotOptions[snapshotOptions.length - 1] || {};
+
+	assert.equal(reactiveSnapshotOptions.includeChangeDetails, false);
+	assert.equal(reactiveWidget.data.projects[0]?.uncommittedFiles[0]?.additions, 7);
+	assert.equal(reactiveWidget.data.projects[0]?.uncommittedFiles[0]?.deletions, 2);
+	service.dispose();
+});
+
 test('PromptDashboardService analyzeParallelReview reuses cached review states from the last projects refresh', async () => {
 	const snapshotOptions: Array<Record<string, unknown> | undefined> = [];
 	const workspaceFolders = new Map([

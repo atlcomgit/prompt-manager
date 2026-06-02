@@ -288,6 +288,7 @@ function renderDashboard(
 	snapshot: PromptDashboardSnapshot | null,
 	options?: {
 		busyAction?: string | null;
+		dockerBusyAction?: string | null;
 		collapsedSections?: Record<string, boolean>;
 		sectionOrder?: PromptDashboardSectionOrder;
 		localStorage?: Storage;
@@ -296,6 +297,7 @@ function renderDashboard(
 	return withDashboardEnvironment(() => renderToStaticMarkup(React.createElement(PromptDashboard, {
 		snapshot,
 		busyAction: options?.busyAction ?? null,
+		dockerBusyAction: options?.dockerBusyAction ?? null,
 		collapsedSections: options?.collapsedSections,
 		sectionOrder: options?.sectionOrder,
 		mode: 'full',
@@ -683,6 +685,18 @@ test('PromptDashboard restores Docker view and renders row action icons in the c
 		}),
 	});
 	assert.match(busyMarkup, /aria-label="Перезапустить контейнер" disabled=""[\s\S]*pm-spin/);
+
+	const multiBusyMarkup = renderDashboard(snapshot, {
+		dockerBusyAction: [
+			buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'restart' }),
+			buildPromptDashboardDockerWorkspaceBusyAction({ action: 'stopAll' }),
+		].join('\n'),
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'table', expandedContainerIds: [] }),
+		}),
+	});
+	assert.match(multiBusyMarkup, /aria-label="Перезапустить контейнер" disabled=""[\s\S]*pm-spin/);
+	assert.match(multiBusyMarkup, /aria-label="Остановить все контейнеры рабочей области" disabled=""[\s\S]*pm-spin/);
 });
 
 test('PromptDashboard renders Docker summary restart action for running containers and restore action otherwise', () => {

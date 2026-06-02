@@ -78,10 +78,18 @@ export const PROMPT_CHAT_LAUNCH_PHASE_ORDER: PromptChatLaunchPhase[] = [
 	'ready',
 ];
 
+const PROMPT_EXTERNAL_CHAT_LAUNCH_PHASE_ORDER: PromptChatLaunchPhase[] = [
+	'prepare',
+	'autoload',
+	'opening',
+	'ready',
+];
+
 interface IsPromptChatLaunchCompleteInput {
 	hasChatEntry: boolean;
 	chatRequestStarted: boolean;
 	chatRenameState: PromptChatLaunchRenameState;
+	requiresChatBinding?: boolean;
 }
 
 interface ResolvePromptChatLaunchPhaseInput extends IsPromptChatLaunchCompleteInput {
@@ -320,7 +328,10 @@ export function shouldShowPromptChatLaunchBlock(
 export function isPromptChatLaunchComplete(
 	input: IsPromptChatLaunchCompleteInput,
 ): boolean {
-	return input.hasChatEntry && input.chatRenameState !== 'active';
+	const chatOpened = input.requiresChatBinding === false
+		? input.hasChatEntry || input.chatRequestStarted
+		: input.hasChatEntry;
+	return chatOpened && input.chatRenameState !== 'active';
 }
 
 /** Resolve the top-level launch phase from the earliest incomplete milestone. */
@@ -335,6 +346,10 @@ export function resolvePromptChatLaunchPhase(
 		return 'opening';
 	}
 
+	if (input.requiresChatBinding === false) {
+		return 'ready';
+	}
+
 	if (!input.hasChatEntry) {
 		return 'binding';
 	}
@@ -346,9 +361,13 @@ export function resolvePromptChatLaunchPhase(
 export function resolveNextPromptChatLaunchPhase(
 	current: PromptChatLaunchPhase,
 	target: PromptChatLaunchPhase,
+	input?: { requiresChatBinding?: boolean },
 ): PromptChatLaunchPhase {
-	const currentIndex = PROMPT_CHAT_LAUNCH_PHASE_ORDER.indexOf(current);
-	const targetIndex = PROMPT_CHAT_LAUNCH_PHASE_ORDER.indexOf(target);
+	const phaseOrder = input?.requiresChatBinding === false
+		? PROMPT_EXTERNAL_CHAT_LAUNCH_PHASE_ORDER
+		: PROMPT_CHAT_LAUNCH_PHASE_ORDER;
+	const currentIndex = phaseOrder.indexOf(current);
+	const targetIndex = phaseOrder.indexOf(target);
 	if (currentIndex < 0 || targetIndex < 0) {
 		return target;
 	}
@@ -357,7 +376,7 @@ export function resolveNextPromptChatLaunchPhase(
 		return target;
 	}
 
-	return PROMPT_CHAT_LAUNCH_PHASE_ORDER[currentIndex + 1] || target;
+	return phaseOrder[currentIndex + 1] || target;
 }
 
 /** Keep inactive launch UI parked on the first row until the tracked launch is actually visible. */
@@ -433,6 +452,7 @@ export function resolvePromptChatLaunchStepStates(
 		chatRequestStarted: input.chatRequestStarted,
 		chatRenameState: input.chatRenameState,
 		chatLaunchCompletionHold: false,
+		requiresChatBinding: input.requiresChatBinding,
 	}));
 }
 

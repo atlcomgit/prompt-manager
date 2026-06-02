@@ -522,6 +522,13 @@ test('isPromptChatLaunchComplete treats an already bound chat as complete when r
 		chatRequestStarted: true,
 		chatRenameState: 'completed',
 	}), true);
+
+	assert.equal(isPromptChatLaunchComplete({
+		hasChatEntry: false,
+		chatRequestStarted: true,
+		chatRenameState: 'idle',
+		requiresChatBinding: false,
+	}), true);
 });
 
 test('resolvePromptChatLaunchPhase follows the earliest incomplete milestone', () => {
@@ -559,6 +566,22 @@ test('resolvePromptChatLaunchPhase follows the earliest incomplete milestone', (
 		chatRenameState: 'completed',
 		chatLaunchCompletionHold: true,
 	}), 'ready');
+
+	assert.equal(resolvePromptChatLaunchPhase({
+		hasChatEntry: false,
+		chatRequestStarted: true,
+		chatRenameState: 'idle',
+		chatLaunchCompletionHold: false,
+		requiresChatBinding: false,
+	}), 'ready');
+});
+
+test('resolveNextPromptChatLaunchPhase skips binding phases for external chat targets', () => {
+	assert.equal(resolveNextPromptChatLaunchPhase('opening', 'ready', {
+		requiresChatBinding: false,
+	}), 'ready');
+
+	assert.equal(resolveNextPromptChatLaunchPhase('opening', 'ready'), 'binding');
 });
 
 test('resolvePromptChatLaunchStepStates keeps later steps pending until earlier milestones finish', () => {
@@ -599,6 +622,18 @@ test('resolvePromptChatLaunchStepStates keeps later steps pending until earlier 
 		hasChatEntry: true,
 		chatRequestStarted: true,
 		chatRenameState: 'completed',
+	}), {
+		prepare: 'done',
+		open: 'done',
+		bind: 'done',
+		rename: 'done',
+	});
+
+	assert.deepEqual(resolvePromptChatLaunchStepStates({
+		hasChatEntry: false,
+		chatRequestStarted: true,
+		chatRenameState: 'idle',
+		requiresChatBinding: false,
 	}), {
 		prepare: 'done',
 		open: 'done',

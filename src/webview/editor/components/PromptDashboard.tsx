@@ -65,6 +65,7 @@ export interface PromptDashboardFilePatchRequest {
 interface PromptDashboardProps {
 	snapshot: PromptDashboardSnapshot | null;
 	busyAction?: string | null;
+	dockerBusyAction?: string | null;
 	collapsedSections?: PromptDashboardCollapsedSections;
 	sectionOrder?: PromptDashboardSectionOrder;
 	mode: 'full' | 'compact';
@@ -109,6 +110,8 @@ type ExpandedState = Record<string, boolean>;
 
 type DashboardBusyAction = string | null | undefined;
 
+type DashboardDockerBusyAction = string | null | undefined;
+
 type DashboardBranchApplySource = 'bulk' | 'prompt' | 'tracked';
 
 type DockerContainerSortBy = 'name' | 'status' | 'uptime' | 'cpu' | 'memory';
@@ -136,6 +139,15 @@ type DockerTableViewRow =
 	| { kind: 'service'; key: string; row: DockerDeclaredServiceViewRow; label: string };
 
 const DOCKER_WIDGET_STATE_STORAGE_KEY = 'pm.promptDashboard.dockerWidgetState.v1';
+
+/** Checks one Docker busy key inside a single or newline-packed action list. */
+function isDockerBusyActionActive(busyAction: DashboardDockerBusyAction, actionKey: string): boolean {
+	if (!busyAction) {
+		return false;
+	}
+
+	return busyAction === actionKey || busyAction.split('\n').includes(actionKey);
+}
 
 /** Checks whether an unknown value is one of the supported Docker status filters. */
 function isDockerStatusFilter(value: unknown): value is DockerContainersStatusFilter {
@@ -328,6 +340,7 @@ interface DashboardPointerDragState {
 export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	snapshot,
 	busyAction,
+	dockerBusyAction,
 	collapsedSections = createDefaultPromptDashboardCollapsedSections(),
 	sectionOrder = createDefaultPromptDashboardSectionOrder(),
 	mode,
@@ -407,6 +420,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const activityCacheStatus = snapshot?.activity.cache.status || 'idle';
 	const statusCacheStatus = snapshot?.status.cache.status || 'idle';
 	const dockerCacheStatus = snapshot?.docker.cache.status || 'idle';
+	const effectiveDockerBusyAction = dockerBusyAction || (busyAction?.startsWith('docker:') ? busyAction : null);
 	const logicalDockerLiveMetricsVisible = useMemo(
 		() => resolvePromptDashboardDockerLiveMetricsVisible({
 			data: snapshot?.docker.data,
@@ -985,7 +999,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		reviewRequests: renderReviewRequests(reviewProjects, reviewRequestsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('reviewRequests', 'MR/PR')),
 		parallelBranches: renderParallelBranchFiles(parallelProjects, expanded, toggleExpanded, fileHandlers, parallelBranchesCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('parallelBranches', 'Параллельные ветки')),
 		projectCommits: renderProjectCommits(commitProjects, expanded, toggleExpanded, fileHandlers, projectCommitsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('projectCommits', 'Коммиты проектов')),
-		dockerContainers: renderDockerContainers(snapshot?.docker.data, dockerViewMode, dockerStatusFilter, dockerSearch, dockerSortBy, expanded, dockerCacheStatus, busyAction, changeDockerViewMode, changeDockerStatusFilter, changeDockerSearch, clearDockerSearch, changeDockerSortBy, toggleExpanded, onDockerAction, onDockerWorkspaceAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('dockerContainers', 'Docker контейнеры')),
+		dockerContainers: renderDockerContainers(snapshot?.docker.data, dockerViewMode, dockerStatusFilter, dockerSearch, dockerSortBy, expanded, dockerCacheStatus, busyAction, effectiveDockerBusyAction, changeDockerViewMode, changeDockerStatusFilter, changeDockerSearch, clearDockerSearch, changeDockerSortBy, toggleExpanded, onDockerAction, onDockerWorkspaceAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('dockerContainers', 'Docker контейнеры')),
 		aiAnalysis: renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('aiAnalysis', 'AI review')),
 	};
 	const widgetColumns = normalizedSectionOrder
@@ -3272,6 +3286,7 @@ function renderDockerContainers(
 	expanded: ExpandedState,
 	cacheStatus: PromptDashboardLoadStatus,
 	busyAction: DashboardBusyAction,
+	dockerBusyAction: DashboardDockerBusyAction,
 	setViewMode: (mode: DockerContainersViewMode) => void,
 	setStatusFilter: (filter: DockerContainersStatusFilter) => void,
 	setSearch: (search: string) => void,
@@ -3315,9 +3330,9 @@ function renderDockerContainers(
 					onRefreshWidget,
 				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('dockerContainers'), dragHandle })}
 			{collapsed ? null : <div style={styles.sectionBody}>
-				{renderDockerSummary(data, sectionCacheStatus, busyAction, onDockerWorkspaceAction)}
+				{renderDockerSummary(data, sectionCacheStatus, dockerBusyAction, onDockerWorkspaceAction)}
 				{renderDockerControls(viewMode, statusFilter, search, sortBy, setViewMode, setStatusFilter, setSearch, clearSearch, setSortBy)}
-				{renderDockerContainerContent(data, projects, containers, viewMode, sectionCacheStatus, busyAction, expanded, toggleExpanded, onDockerAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal)}
+				{renderDockerContainerContent(data, projects, containers, viewMode, sectionCacheStatus, dockerBusyAction, expanded, toggleExpanded, onDockerAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal)}
 			</div>}
 		</section>
 	);
@@ -3327,7 +3342,7 @@ function renderDockerContainers(
 function renderDockerSummary(
 	data: DockerContainersData | undefined,
 	cacheStatus: PromptDashboardLoadStatus,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	onDockerWorkspaceAction: (action: DockerWorkspaceActionKind) => void,
 ): React.ReactNode {
 	if ((cacheStatus === 'loading' || !data) && !data?.totalContainers) {
@@ -3339,9 +3354,9 @@ function renderDockerSummary(
 	if (data.available === false) {
 		return <div style={styles.errorText}>{data.error || 'Docker Engine API недоступен.'}</div>;
 	}
-	const restartAllBusy = busyAction === buildPromptDashboardDockerWorkspaceBusyAction({ action: 'restartAll' });
-	const startPreviousBusy = busyAction === buildPromptDashboardDockerWorkspaceBusyAction({ action: 'startPrevious' });
-	const stopAllBusy = busyAction === buildPromptDashboardDockerWorkspaceBusyAction({ action: 'stopAll' });
+	const restartAllBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerWorkspaceBusyAction({ action: 'restartAll' }));
+	const startPreviousBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerWorkspaceBusyAction({ action: 'startPrevious' }));
+	const stopAllBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerWorkspaceBusyAction({ action: 'stopAll' }));
 	const restorableContainersCount = data.restorableContainersCount || 0;
 	const runningSummaryAction = data.runningContainers > 0
 		? renderDockerIconButton(
@@ -3476,7 +3491,7 @@ function renderDockerContainerContent(
 	containers: DockerContainerSummary[],
 	viewMode: DockerContainersViewMode,
 	cacheStatus: PromptDashboardLoadStatus,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
 	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void,
@@ -3531,7 +3546,7 @@ function renderDockerContainerContent(
 /** Renders Docker cards grouped by workspace project. */
 function renderDockerProjectGroupedCards(
 	projects: DockerContainerProjectGroup[],
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	actionError: DockerComposeActionError | undefined,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
@@ -3562,7 +3577,7 @@ function renderDockerProjectGroupedCards(
 /** Renders Docker list rows grouped by workspace project. */
 function renderDockerProjectGroupedList(
 	projects: DockerContainerProjectGroup[],
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	actionError: DockerComposeActionError | undefined,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
@@ -3598,7 +3613,7 @@ function resolveDockerStandaloneContainers(project: DockerContainerProjectGroup)
 /** Renders Docker rows in one flat table sorted by project, compose file and container/service. */
 function renderDockerFlatTable(
 	projects: DockerContainerProjectGroup[],
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	actionError: DockerComposeActionError | undefined,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
@@ -3641,7 +3656,7 @@ function renderDockerProjectEmpty(project: DockerContainerProjectGroup): React.R
 /** Renders one top-level Docker project tree group. */
 function renderDockerProjectGroup(
 	project: DockerContainerProjectGroup,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	actionError: DockerComposeActionError | undefined,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
@@ -3685,7 +3700,7 @@ function renderDockerProjectGroup(
 function renderDockerComposeFileGroup(
 	project: DockerContainerProjectGroup,
 	group: DockerComposeFileContainerGroup,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	actionError: DockerComposeActionError | undefined,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
@@ -3764,7 +3779,7 @@ function renderDockerComposeDeclaredServices(group: DockerComposeFileContainerGr
 function renderDockerComposeFileCard(
 	project: DockerContainerProjectGroup,
 	group: DockerComposeFileContainerGroup,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	actionError: DockerComposeActionError | undefined,
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
@@ -3825,7 +3840,7 @@ function summarizeDockerComposeRuntime(group: DockerComposeFileContainerGroup): 
 function renderDockerComposeFileListRow(
 	project: DockerContainerProjectGroup,
 	group: DockerComposeFileContainerGroup,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	actionError: DockerComposeActionError | undefined,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
@@ -3871,7 +3886,7 @@ function renderDockerComposeFileListRow(
 function renderDockerComposeActionButtons(
 	project: DockerContainerProjectGroup,
 	group: DockerComposeFileContainerGroup,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
 ): React.ReactNode {
@@ -3937,15 +3952,15 @@ function renderDockerComposeActionButton(
 	group: DockerComposeFileContainerGroup,
 	action: DockerComposeProjectActionKind,
 	label: string,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	disabled: boolean,
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 ): React.ReactNode {
-	const actionBusy = busyAction === buildPromptDashboardDockerComposeBusyAction({
+	const actionBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerComposeBusyAction({
 		projectPath: project.projectPath,
 		composeFilePath: group.composeFile.filePath,
 		action,
-	});
+	}));
 	const icon = action === 'up' ? 'composeUp' : action === 'down' ? 'composeDown' : 'restart';
 	return renderDockerIconButton(
 		icon,
@@ -3970,7 +3985,7 @@ function renderDockerComposeActionError(error: DockerComposeActionError): React.
 /** Renders one Docker container in card mode. */
 function renderDockerContainerCard(
 	container: DockerContainerSummary,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
 	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void,
@@ -3992,7 +4007,7 @@ function renderDockerContainerCard(
 /** Renders one declared compose service as a card when no Docker container exists yet. */
 function renderDockerDeclaredServiceCard(
 	row: DockerDeclaredServiceViewRow,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
 ): React.ReactNode {
@@ -4006,7 +4021,7 @@ function renderDockerDeclaredServiceCard(
 /** Renders one Docker container in list or project tree mode. */
 function renderDockerContainerListRow(
 	container: DockerContainerSummary,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
 	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void,
@@ -4042,7 +4057,7 @@ function renderDockerContainerListRow(
 /** Renders one declared compose service in list or tree mode. */
 function renderDockerDeclaredServiceListRow(
 	row: DockerDeclaredServiceViewRow,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
 	options: { tree?: boolean; treeContext?: DashboardFileTreeRowContext; listNested?: boolean } = {},
@@ -4062,7 +4077,7 @@ function renderDockerDeclaredServiceListRow(
 /** Renders one row in the flat Docker table. */
 function renderDockerTableRow(
 	row: DockerTableViewRow,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	actionError: DockerComposeActionError | undefined,
 	expanded: ExpandedState,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
@@ -4151,7 +4166,7 @@ function renderDockerContainerHeader(
 	variant: 'card' | 'list' | 'tree',
 	isExpanded: boolean,
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void,
 	onOpenDockerLogs: (containerId: string) => void,
 	onOpenDockerTerminal: (containerId: string) => void,
@@ -4190,7 +4205,7 @@ function renderDockerContainerHeader(
 /** Renders the title row for a declared compose service without a Docker container row. */
 function renderDockerDeclaredServiceHeader(
 	row: DockerDeclaredServiceViewRow,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
 	treeContext?: DashboardFileTreeRowContext,
@@ -4220,7 +4235,7 @@ function renderDockerDeclaredServiceHeader(
 /** Renders actions available for a declared service before Docker creates its container. */
 function renderDockerDeclaredServiceActionButtons(
 	row: DockerDeclaredServiceViewRow,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
 ): React.ReactNode {
@@ -4610,7 +4625,7 @@ function resolveDockerSparklineGapThreshold(samples: DockerSparklineSamplePoint[
 /** Renders compact icon-only container commands inside the container title row. */
 function renderDockerContainerActionButtons(
 	container: DockerContainerSummary,
-	busyAction: DashboardBusyAction,
+	busyAction: DashboardDockerBusyAction,
 	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void,
 	onOpenDockerLogs: (containerId: string) => void,
 	onOpenDockerTerminal: (containerId: string) => void,
@@ -4618,9 +4633,9 @@ function renderDockerContainerActionButtons(
 	const running = container.status === 'running';
 	const stopped = container.status === 'stopped';
 	const primaryAction: DockerContainerActionKind = running ? 'restart' : 'start';
-	const primaryBusy = busyAction === buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: primaryAction });
-	const stopBusy = busyAction === buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'stop' });
-	const removeBusy = busyAction === buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'remove' });
+	const primaryBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: primaryAction }));
+	const stopBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'stop' }));
+	const removeBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'remove' }));
 	return (
 		<div style={styles.dockerActionIcons}>
 			{renderDockerIconButton('logs', 'Открыть логи контейнера', () => onOpenDockerLogs(container.id))}

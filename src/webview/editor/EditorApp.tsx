@@ -791,6 +791,7 @@ export const EditorApp: React.FC = () => {
   const [pageWidth, setPageWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : EDITOR_FORM_SHELL_WIDTH_PX));
   const [promptDashboardSnapshot, setPromptDashboardSnapshot] = useState<PromptDashboardSnapshot | null>(null);
   const [promptDashboardBusyAction, setPromptDashboardBusyAction] = useState<string | null>(null);
+  const [promptDashboardDockerBusyActions, setPromptDashboardDockerBusyActions] = useState<string[]>([]);
   const [promptDashboardRefreshVersion, setPromptDashboardRefreshVersion] = useState(0);
   const [promptDashboardCollapsedSections, setPromptDashboardCollapsedSections] = useState<PromptDashboardCollapsedSections>(
     () => initialPromptDashboardCollapsedSections,
@@ -799,6 +800,7 @@ export const EditorApp: React.FC = () => {
     () => initialPromptDashboardSectionOrder,
   );
   const promptDashboardRequestIdRef = useRef('');
+  const promptDashboardDockerBusyByRequestIdRef = useRef<Record<string, string>>({});
   const promptDashboardSnapshotRef = useRef<PromptDashboardSnapshot | null>(null);
   const promptDashboardProgressOverrideRef = useRef<number | undefined>(undefined);
   const lastPromptDashboardRequestFingerprintRef = useRef('');
@@ -914,6 +916,8 @@ export const EditorApp: React.FC = () => {
     isPersistedPrompt,
     isStartingChat,
   });
+  const chatTarget = prompt.chatTarget || 'copilot';
+  const chatLaunchRequiresBinding = chatTarget === 'copilot';
   const [chatLaunchRequestStarted, setChatLaunchRequestStarted] = useState(false);
   const [chatLaunchRenameState, setChatLaunchRenameState] = useState<PromptChatLaunchRenameState>('idle');
   const [chatLaunchCompletionHold, setChatLaunchCompletionHold] = useState(false);
@@ -922,11 +926,15 @@ export const EditorApp: React.FC = () => {
   const chatLaunchCompletionTimerRef = useRef<number | null>(null);
   const chatLaunchPhaseTimerRef = useRef<number | null>(null);
   const chatLaunchPhaseVisibleSinceRef = useRef<number>(Date.now());
+  const chatLaunchHasChatEntry = chatLaunchRequiresBinding
+    ? chatEntryState.hasChatEntry
+    : chatEntryState.hasChatEntry || chatLaunchRequestStarted || (!isStartingChat && prompt.status === 'in-progress');
   const rawChatLaunchPhase = resolvePromptChatLaunchPhase({
-    hasChatEntry: chatEntryState.hasChatEntry,
+    hasChatEntry: chatLaunchHasChatEntry,
     chatRequestStarted: chatLaunchRequestStarted,
     chatRenameState: chatLaunchRenameState,
     chatLaunchCompletionHold: false,
+    requiresChatBinding: chatLaunchRequiresBinding,
   });
   const chatLaunchCompletionShownForKeyRef = useRef(rawChatLaunchPhase === 'ready');
   const previousChatLaunchTrackingPromptRef = useRef<Pick<Prompt, 'id' | 'promptUuid'>>({
@@ -941,7 +949,7 @@ export const EditorApp: React.FC = () => {
     && chatLaunchCompletionHold;
   const shouldShowChatLaunchBlock = shouldShowPromptChatLaunchBlock({
     status: prompt.status,
-    hasChatEntry: chatEntryState.hasChatEntry,
+    hasChatEntry: chatLaunchHasChatEntry,
     chatRequestStarted: chatLaunchRequestStarted,
     chatLaunchCompletionHold: showChatLaunchCompletionState,
     chatRenameState: chatLaunchRenameState,
@@ -953,6 +961,14 @@ export const EditorApp: React.FC = () => {
     : chatLaunchPhase === 'autoload'
       ? 'active'
       : 'done';
+  const chatLaunchTargetOption = CHAT_TARGET_OPTIONS.find(option => option.id === chatTarget);
+  const chatLaunchTargetLabel = t(chatLaunchTargetOption?.labelKey || 'editor.chatTargetCopilot');
+  const chatLaunchOpenStepLabel = chatLaunchRequiresBinding
+    ? t('editor.chatLaunchStepOpen')
+    : `${t('editor.chatLaunchStepOpenAction')} ${chatLaunchTargetLabel}`;
+  const chatLaunchStartingDescription = chatLaunchRequiresBinding
+    ? t('editor.chatLaunchDescriptionStarting')
+    : `${t('editor.chatLaunchDescriptionStartingExternalPrefix')}${chatLaunchTargetLabel}${t('editor.chatLaunchDescriptionStartingExternalSuffix')}`;
   const chatLaunchStateLabel = chatLaunchPhase === 'ready'
     ? t('editor.chatLaunchStatusReady')
     : chatLaunchPhase === 'renaming'
@@ -965,7 +981,7 @@ export const EditorApp: React.FC = () => {
     : chatLaunchPhase === 'renaming'
       ? t('editor.chatLaunchDescriptionRenaming')
     : chatLaunchPhase === 'prepare' || chatLaunchPhase === 'autoload' || chatLaunchPhase === 'opening'
-      ? t('editor.chatLaunchDescriptionStarting')
+      ? chatLaunchStartingDescription
       : t('editor.chatLaunchDescriptionWaiting');
   const chatLaunchHint = chatLaunchPhase === 'ready'
     ? t('editor.chatLaunchHintReady')
@@ -1110,6 +1126,44 @@ export const EditorApp: React.FC = () => {
     reportDraftActive: isReportEditorDraftActiveRef.current,
   }), []);
 
+  /** Track Docker dashboard actions independently so parallel buttons keep their own loaders. */
+  const addPromptDashboardDockerBusyAction = useCallback((requestId: string, busyAction: string) => {
+    const normalizedRequestId = requestId.trim();
+    const normalizedBusyAction = busyAction.trim();
+    if (!normalizedRequestId || !normalizedBusyAction) {
+      return;
+    }
+
+    promptDashboardDockerBusyByRequestIdRef.current = {
+      ...promptDashboardDockerBusyByRequestIdRef.current,
+      [normalizedRequestId]: normalizedBusyAction,
+    };
+    setPromptDashboardDockerBusyActions(previous => previous.includes(normalizedBusyAction)
+      ? previous
+      : [...previous, normalizedBusyAction]);
+  }, []);
+
+  /** Release exactly one Docker loader after its own notice or widget refresh finishes. */
+  const releasePromptDashboardDockerBusyAction = useCallback((requestId: string) => {
+    const normalizedRequestId = requestId.trim();
+    const busyAction = promptDashboardDockerBusyByRequestIdRef.current[normalizedRequestId];
+    if (!normalizedRequestId || !busyAction) {
+      return;
+    }
+
+    const nextBusyByRequestId = { ...promptDashboardDockerBusyByRequestIdRef.current };
+    delete nextBusyByRequestId[normalizedRequestId];
+    promptDashboardDockerBusyByRequestIdRef.current = nextBusyByRequestId;
+    const remainingBusyActions = new Set(Object.values(nextBusyByRequestId));
+    setPromptDashboardDockerBusyActions(previous => previous.filter(action => remainingBusyActions.has(action)));
+  }, []);
+
+  /** Clear stale Docker loaders when the current dashboard scope is no longer visible. */
+  const clearPromptDashboardDockerBusyActions = useCallback(() => {
+    promptDashboardDockerBusyByRequestIdRef.current = {};
+    setPromptDashboardDockerBusyActions([]);
+  }, []);
+
   /** Applies the shared workspace-level dashboard collapse state received from the host. */
   const applyPromptDashboardCollapsedSections = useCallback((state: unknown) => {
     const normalizedState = normalizePromptDashboardCollapsedSections(
@@ -1196,14 +1250,23 @@ export const EditorApp: React.FC = () => {
 
   const applyPromptDashboardWidgetMessage = useCallback((msg: any) => {
     const currentDashboardSnapshot = promptDashboardSnapshotRef.current;
+    const messageRequestId = String(msg.requestId || '');
+    const currentPromptId = String(currentDashboardSnapshot?.promptId || promptRef.current.id || '');
+    const currentPromptUuid = String(currentDashboardSnapshot?.promptUuid || promptRef.current.promptUuid || '');
+    const messagePromptId = String(msg.promptId || '');
+    const messagePromptUuid = String(msg.promptUuid || '');
+    const isSameDashboardPrompt = (!currentPromptId || !messagePromptId || currentPromptId === messagePromptId)
+      && (!currentPromptUuid || !messagePromptUuid || currentPromptUuid === messagePromptUuid);
+    const isTrackedDockerDashboardRequest = Boolean(promptDashboardDockerBusyByRequestIdRef.current[messageRequestId])
+      && isSameDashboardPrompt;
     const shouldAcceptWidgetMessage = shouldAcceptPromptDashboardRequestMessage({
       activeRequestId: String(promptDashboardRequestIdRef.current || ''),
-      messageRequestId: String(msg.requestId || ''),
-      currentPromptId: String(currentDashboardSnapshot?.promptId || promptRef.current.id || ''),
-      currentPromptUuid: String(currentDashboardSnapshot?.promptUuid || promptRef.current.promptUuid || ''),
-      messagePromptId: String(msg.promptId || ''),
-      messagePromptUuid: String(msg.promptUuid || ''),
-    });
+      messageRequestId,
+      currentPromptId,
+      currentPromptUuid,
+      messagePromptId,
+      messagePromptUuid,
+    }) || isTrackedDockerDashboardRequest;
     if (!shouldAcceptWidgetMessage) {
       postEditorDebugLog('editor-dashboard', 'widget.ignored-request-mismatch', {
         activeRequestId: String(promptDashboardRequestIdRef.current || ''),
@@ -1238,10 +1301,13 @@ export const EditorApp: React.FC = () => {
     if (widget?.kind) {
       if (shouldReleasePromptDashboardRequestId({
         activeRequestId: String(promptDashboardRequestIdRef.current || ''),
-        messageRequestId: String(msg.requestId || ''),
+        messageRequestId,
         cacheStatus: widget.cache.status,
       })) {
         promptDashboardRequestIdRef.current = '';
+      }
+      if (isTrackedDockerDashboardRequest && widget.kind === 'docker' && widget.cache.status !== 'loading') {
+        releasePromptDashboardDockerBusyAction(messageRequestId);
       }
       setPromptDashboardBusyAction(previous => shouldClearPromptDashboardBusyActionFromWidget({
         busyAction: previous,
@@ -1249,7 +1315,7 @@ export const EditorApp: React.FC = () => {
         cacheStatus: widget.cache.status,
       }) ? null : previous);
     }
-  }, []);
+  }, [releasePromptDashboardDockerBusyAction]);
 
   const applyPromptDashboardAnalysisMessage = useCallback((msg: any) => {
     const currentDashboardSnapshot = promptDashboardSnapshotRef.current;
@@ -2725,6 +2791,7 @@ export const EditorApp: React.FC = () => {
         setGitOverlayCommitMessages({});
         clearGitOverlayTrackedRequests();
         clearGitOverlayBusyState({ force: true });
+        clearPromptDashboardDockerBusyActions();
         setGitOverlayCompletedActions({ push: false, 'review-request': false, merge: false });
         setPromptPlanState({ exists: false, content: '' });
         break;
@@ -3865,6 +3932,7 @@ export const EditorApp: React.FC = () => {
           const matchesPreflightRequest = requestId === pendingChatStartPreflightRequestIdRef.current;
           const matchesGitOverlayTrackedRequest = hasGitOverlayTrackedRequest(requestId);
           const matchesPromptDashboardRequest = requestId === promptDashboardRequestIdRef.current;
+          const matchesPromptDashboardDockerRequest = Boolean(promptDashboardDockerBusyByRequestIdRef.current[requestId]);
           if (matchesSaveRequest) {
             setIsSaving(false);
             if (activeSaveClearedDirtyRef.current) {
@@ -3881,6 +3949,13 @@ export const EditorApp: React.FC = () => {
               busyAction: previous,
               retainPromptDashboardBusy: msg.retainPromptDashboardBusy,
             }) ? previous : null);
+            showInlineNotice('error', msg.message);
+            break;
+          }
+          if (matchesPromptDashboardDockerRequest) {
+            if (msg.retainPromptDashboardBusy !== true) {
+              releasePromptDashboardDockerBusyAction(requestId);
+            }
             showInlineNotice('error', msg.message);
             break;
           }
@@ -3922,6 +3997,14 @@ export const EditorApp: React.FC = () => {
           showInlineNotice('info', msg.message);
           break;
         }
+        if ((msg.requestId || '').trim() && promptDashboardDockerBusyByRequestIdRef.current[(msg.requestId || '').trim()]) {
+          const requestId = (msg.requestId || '').trim();
+          if (msg.retainPromptDashboardBusy !== true) {
+            releasePromptDashboardDockerBusyAction(requestId);
+          }
+          showInlineNotice('info', msg.message);
+          break;
+        }
         if (hasGitOverlayTrackedRequest(msg.requestId)) {
           showInlineNotice('info', msg.message);
           break;
@@ -3955,7 +4038,7 @@ export const EditorApp: React.FC = () => {
         setIsRecalculating(false);
         break;
     }
-  }, [applyPromptDashboardCollapsedSections, applyPromptDashboardSectionOrder, applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
+  }, [applyPromptDashboardCollapsedSections, applyPromptDashboardSectionOrder, applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPromptDashboardDockerBusyActions, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releasePromptDashboardDockerBusyAction, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
 
   handleMessageRef.current = handleMessage;
 
@@ -4051,6 +4134,11 @@ export const EditorApp: React.FC = () => {
     prompt.timeSpentUntracked,
   ]);
 
+  // Drop button-level Docker loaders when the editor switches to another prompt scope.
+  useEffect(() => {
+    clearPromptDashboardDockerBusyActions();
+  }, [clearPromptDashboardDockerBusyActions, prompt.id, prompt.promptUuid]);
+
   useEffect(() => {
     if (promptDashboardMode !== 'full') {
       postEditorDebugLog('editor-dashboard', 'snapshot.skipped', {
@@ -4062,6 +4150,7 @@ export const EditorApp: React.FC = () => {
       skipNextPromptDashboardAutoSnapshotRef.current = false;
       promptDashboardRequestIdRef.current = '';
       setPromptDashboardBusyAction(null);
+      clearPromptDashboardDockerBusyActions();
       return;
     }
     if (!promptDashboardHasVisibleSections) {
@@ -4075,6 +4164,7 @@ export const EditorApp: React.FC = () => {
       skipNextPromptDashboardAutoSnapshotRef.current = false;
       promptDashboardRequestIdRef.current = '';
       setPromptDashboardBusyAction(null);
+      clearPromptDashboardDockerBusyActions();
       return;
     }
     if (!isLoaded) {
@@ -4086,6 +4176,7 @@ export const EditorApp: React.FC = () => {
       });
       skipNextPromptDashboardAutoSnapshotRef.current = false;
       promptDashboardRequestIdRef.current = '';
+      clearPromptDashboardDockerBusyActions();
       return;
     }
     const hasPendingExplicitDashboardRequest = skipNextPromptDashboardAutoSnapshotRef.current;
@@ -4130,6 +4221,7 @@ export const EditorApp: React.FC = () => {
     });
     vscode.postMessage({ type: 'getPromptDashboardSnapshot', prompt, requestId });
   }, [
+    clearPromptDashboardDockerBusyActions,
     isLoaded,
     prompt,
     promptDashboardCollapsedWidgetsSignature,
@@ -4678,8 +4770,7 @@ export const EditorApp: React.FC = () => {
 
   const handlePromptDashboardDockerAction = useCallback((containerId: string, action: DockerContainerActionKind) => {
     const requestId = `prompt-dashboard-docker-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    promptDashboardRequestIdRef.current = requestId;
-    setPromptDashboardBusyAction(buildPromptDashboardDockerContainerBusyAction({ containerId, action }));
+    addPromptDashboardDockerBusyAction(requestId, buildPromptDashboardDockerContainerBusyAction({ containerId, action }));
     vscode.postMessage({
       type: 'promptDashboardDockerAction',
       prompt: promptRef.current,
@@ -4687,26 +4778,24 @@ export const EditorApp: React.FC = () => {
       action,
       requestId,
     });
-  }, []);
+  }, [addPromptDashboardDockerBusyAction]);
 
   /** Launches one workspace-level Docker summary action from the dashboard. */
   const handlePromptDashboardDockerWorkspaceAction = useCallback((action: DockerWorkspaceActionKind) => {
     const requestId = `prompt-dashboard-docker-workspace-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    promptDashboardRequestIdRef.current = requestId;
-    setPromptDashboardBusyAction(buildPromptDashboardDockerWorkspaceBusyAction({ action }));
+    addPromptDashboardDockerBusyAction(requestId, buildPromptDashboardDockerWorkspaceBusyAction({ action }));
     vscode.postMessage({
       type: 'promptDashboardDockerWorkspaceAction',
       prompt: promptRef.current,
       action,
       requestId,
     });
-  }, []);
+  }, [addPromptDashboardDockerBusyAction]);
 
   /** Launches one compose-level Docker orchestration command from the dashboard. */
   const handlePromptDashboardDockerComposeAction = useCallback((projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => {
     const requestId = `prompt-dashboard-docker-compose-${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    promptDashboardRequestIdRef.current = requestId;
-    setPromptDashboardBusyAction(buildPromptDashboardDockerComposeBusyAction({ projectPath, composeFilePath, action }));
+    addPromptDashboardDockerBusyAction(requestId, buildPromptDashboardDockerComposeBusyAction({ projectPath, composeFilePath, action }));
     vscode.postMessage({
       type: 'promptDashboardDockerComposeAction',
       prompt: promptRef.current,
@@ -4715,7 +4804,7 @@ export const EditorApp: React.FC = () => {
       action,
       requestId,
     });
-  }, []);
+  }, [addPromptDashboardDockerBusyAction]);
 
   const handlePromptDashboardOpenDockerComposeFile = useCallback((projectPath: string, composeFilePath: string) => {
     vscode.postMessage({ type: 'promptDashboardOpenDockerComposeFile', projectPath, composeFilePath });
@@ -5518,23 +5607,24 @@ export const EditorApp: React.FC = () => {
       key: 'open',
       label: (
         <ChatLaunchOpenStepLabel
-          label={t('editor.chatLaunchStepOpen')}
+          label={chatLaunchOpenStepLabel}
           modelName={selectedModelName}
         />
       ),
       state: chatLaunchStepStates.open,
     },
-    {
+  ];
+  if (chatLaunchRequiresBinding) {
+    chatLaunchSteps.push({
       key: 'bind',
       label: t('editor.chatLaunchStepBind'),
       state: chatLaunchStepStates.bind,
-    },
-    {
+    }, {
       key: 'rename',
       label: t('editor.chatLaunchStepRename'),
       state: chatLaunchStepStates.rename,
-    },
-  ];
+    });
+  }
   const completedChatLaunchStepCount = chatLaunchSteps.filter((step) => step.state === 'done').length;
 
   useLayoutEffect(() => {
@@ -5594,7 +5684,9 @@ export const EditorApp: React.FC = () => {
       return;
     }
 
-    const nextPhase = resolveNextPromptChatLaunchPhase(displayedChatLaunchPhase, rawChatLaunchPhase);
+    const nextPhase = resolveNextPromptChatLaunchPhase(displayedChatLaunchPhase, rawChatLaunchPhase, {
+      requiresChatBinding: chatLaunchRequiresBinding,
+    });
     const elapsedMs = Date.now() - chatLaunchPhaseVisibleSinceRef.current;
     const remainingMs = Math.max(0, CHAT_LAUNCH_MIN_PHASE_VISIBLE_MS - elapsedMs);
     const applyNextPhase = () => {
@@ -5609,7 +5701,7 @@ export const EditorApp: React.FC = () => {
     }
 
     chatLaunchPhaseTimerRef.current = window.setTimeout(applyNextPhase, remainingMs);
-  }, [displayedChatLaunchPhase, rawChatLaunchPhase, prompt.status]);
+  }, [chatLaunchRequiresBinding, displayedChatLaunchPhase, rawChatLaunchPhase, prompt.status]);
 
   useLayoutEffect(() => {
     const canTrackCompletion = prompt.status === 'in-progress';
@@ -7186,6 +7278,7 @@ export const EditorApp: React.FC = () => {
       <PromptDashboard
         snapshot={promptDashboardSnapshot}
         busyAction={promptDashboardBusyAction}
+        dockerBusyAction={promptDashboardDockerBusyActions.join('\n') || null}
         collapsedSections={promptDashboardCollapsedSections}
         sectionOrder={promptDashboardSectionOrder}
         mode={promptDashboardMode}

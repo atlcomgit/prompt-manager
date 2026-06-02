@@ -6,6 +6,11 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-06-02
+
+#### Fixed
+- The `Docker контейнеры` dashboard widget now tracks Docker action loaders independently from the shared dashboard busy state, so several quick start/stop/restart/compose clicks keep loaders on each clicked icon and their widget refresh payloads are no longer dropped by a newer Docker request id.
+
 ### 2026-06-01
 
 #### Changed

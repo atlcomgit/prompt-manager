@@ -5,7 +5,7 @@ interface ChatLaunchOpenStepLabelProps {
   modelName: string;
 }
 
-// Показывает название модели рядом с шагом открытия Copilot Chat.
+// Показывает название модели рядом с шагом открытия выбранного чата.
 export function ChatLaunchOpenStepLabel({ label, modelName }: ChatLaunchOpenStepLabelProps): React.JSX.Element {
   const normalizedModelName = modelName.trim();
 

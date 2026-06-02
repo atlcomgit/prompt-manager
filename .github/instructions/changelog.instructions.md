@@ -1,3 +1,16 @@
+## 151: В виджете "Docker контейнеры" при манипуляции с
+
+- Дата: 2026-06-02.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Исправлена обработка параллельных действий в виджете `Docker контейнеры`: button-level loaders теперь хранятся отдельно от общего dashboard busy-state и могут отображаться сразу на нескольких Docker-кнопках, а widget refresh-сообщения от Docker request id принимаются даже при наличии другого активного dashboard request.
+- Ключевые моменты: Docker action flow в `EditorApp` больше не перезаписывает единый `promptDashboardRequestIdRef`, поэтому несколько быстрых start/stop/restart/compose-команд не теряют ранние refresh payloads; `PromptDashboard` получил отдельный `dockerBusyAction` и проверяет newline-packed список Docker busy keys без влияния на Git/AI/status loaders.
+- Файлы:
+  CHANGELOG.md
+  src/webview/editor/EditorApp.tsx
+  src/webview/editor/components/PromptDashboard.tsx
+  tests/promptDashboardComponent.test.tsx
+
 ## 150: Не формировать файлы при отключенной памяти
 
 - Дата: 2026-06-01.

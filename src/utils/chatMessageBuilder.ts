@@ -104,6 +104,12 @@ export function buildChatMessage(
 		lines.push('');
 	}
 
+	// --- Обязательное условие для всех типов чатов ---
+	lines.push(`## ${t('chatMessage.mandatoryCondition')}`);
+	lines.push('');
+	lines.push(t('chatMessage.mandatoryInstructionsCondition'));
+	lines.push('');
+
 	return lines.join('\n').trimEnd();
 }
 

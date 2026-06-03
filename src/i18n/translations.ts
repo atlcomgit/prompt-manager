@@ -1123,6 +1123,8 @@ const en: Record<string, string> = {
 	'chatMessage.contextFiles': 'Context files',
 	'chatMessage.instructions': 'Instructions',
 	'chatMessage.instructionsNote': 'When implementing the task, consider the instructions from the attached files:',
+	'chatMessage.mandatoryCondition': 'Mandatory condition',
+	'chatMessage.mandatoryInstructionsCondition': 'Follow all instructions from this message and all attached instruction files regardless of chat mode or chat target.',
 };
 
 const ru: Record<string, string> = {
@@ -2243,6 +2245,8 @@ const ru: Record<string, string> = {
 	'chatMessage.contextFiles': 'Файлы контекста',
 	'chatMessage.instructions': 'Инструкции',
 	'chatMessage.instructionsNote': 'При реализации задачи учитывай инструкции из приложенных файлов:',
+	'chatMessage.mandatoryCondition': 'Обязательное условие',
+	'chatMessage.mandatoryInstructionsCondition': 'Выполняй все инструкции из этого сообщения и всех приложенных instruction-файлов независимо от режима и типа чата.',
 };
 
 export const translations: Record<string, Record<string, string>> = { en, ru };

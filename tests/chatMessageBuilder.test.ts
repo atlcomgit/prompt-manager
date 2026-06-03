@@ -138,6 +138,10 @@ test('buildChatMessage renders Agent and Plan mode sections correctly', () => {
 		agentResult.includes('Proceed with implementation immediately'),
 		'должна быть директива Agent',
 	);
+	assert.ok(
+		agentResult.endsWith('Follow all instructions from this message and all attached instruction files regardless of chat mode or chat target.'),
+		'обязательное условие должно завершать Agent-сообщение',
+	);
 
 	const planResult = buildChatMessage(
 		makePrompt({ chatMode: 'plan' }),
@@ -148,6 +152,10 @@ test('buildChatMessage renders Agent and Plan mode sections correctly', () => {
 	assert.ok(
 		planResult.includes('Create a detailed implementation plan first'),
 		'должна быть директива Plan',
+	);
+	assert.ok(
+		planResult.endsWith('Follow all instructions from this message and all attached instruction files regardless of chat mode or chat target.'),
+		'обязательное условие должно завершать Plan-сообщение',
 	);
 });
 

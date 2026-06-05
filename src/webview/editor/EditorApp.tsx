@@ -420,6 +420,7 @@ const PROMPT_OPEN_SECTION_MEASURE_SETTLE_MS = 640;
 const PROMPT_PROCESS_OPEN_SECTION_MEASURE_SETTLE_MS = 1400;
 // Plan content arrives through a separate host message, so keep its saved space reserved.
 const PROMPT_PROCESS_PLAN_HYDRATION_TIMEOUT_MS = 5000;
+const PROMPT_PROCESS_PLAN_HYDRATION_SETTLE_MS = 480;
 const EDITOR_FORM_CONTENT_WIDTH_PX = 800;
 const EDITOR_PROMPT_TABS: EditorPromptTab[] = ['main', 'process'];
 const PANEL_LEFT_ACCENT_SHADOW = 'inset 3px 0 0 var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))';
@@ -1458,6 +1459,14 @@ export const EditorApp: React.FC = () => {
     return delay > 0 ? delay : 0;
   }, []);
 
+  /** Avoid persisting transient Process layout heights while async Plan content settles. */
+  const suspendSectionMeasurementFor = useCallback((durationMs: number) => {
+    sectionMeasurementSuspendedUntilRef.current = Math.max(
+      sectionMeasurementSuspendedUntilRef.current,
+      Date.now() + durationMs,
+    );
+  }, []);
+
   /** Clear the post-open layout lock timer. */
   const clearPromptOpenLayoutSettleTimer = useCallback(() => {
     if (promptOpenLayoutSettleTimerRef.current !== null) {
@@ -1483,6 +1492,10 @@ export const EditorApp: React.FC = () => {
 
     if (!currentRequest) {
       return;
+    }
+
+    if (reason === 'updated' || reason === 'timeout') {
+      suspendSectionMeasurementFor(PROMPT_PROCESS_PLAN_HYDRATION_SETTLE_MS);
     }
 
     postEditorDebugLog('editor-layout', 'promptPlan.hydrationFinished', {
@@ -1539,6 +1552,7 @@ export const EditorApp: React.FC = () => {
       }
 
       promptPlanHydrationRequestRef.current = null;
+      suspendSectionMeasurementFor(PROMPT_PROCESS_PLAN_HYDRATION_SETTLE_MS);
       setIsPromptPlanHydrating(false);
       postEditorDebugLog('editor-layout', 'promptPlan.hydrationTimeout', {
         promptId,
@@ -1547,7 +1561,7 @@ export const EditorApp: React.FC = () => {
         durationMs: Date.now() - currentRequest.startedAt,
       });
     }, PROMPT_PROCESS_PLAN_HYDRATION_TIMEOUT_MS);
-  }, [clearPromptPlanHydrationTimer]);
+  }, [clearPromptPlanHydrationTimer, suspendSectionMeasurementFor]);
 
   /** Lock saved section heights briefly until child editors finish their first layout pass. */
   const startPromptOpenLayoutSettle = useCallback((tab: EditorPromptTab = 'main') => {
@@ -6413,7 +6427,10 @@ export const EditorApp: React.FC = () => {
         />
 
         {/* Main content */}
-        <div style={styles.body}>
+        <div style={{
+          ...styles.body,
+          ...(activeTab === 'process' ? styles.bodyProcessStableScroll : null),
+        }}>
           <div style={styles.formGrid}>
           {activeTab === 'main' ? (
             <>
@@ -7659,6 +7676,12 @@ const styles: Record<string, React.CSSProperties> = {
     flex: 1,
     overflowY: 'auto',
     padding: '16px 20px',
+  },
+  bodyProcessStableScroll: {
+    // Process updates section heights asynchronously; disable Chromium scroll anchoring
+    // so the scrollbar thumb does not jump while the visible content stays in place.
+    overflowAnchor: 'none',
+    scrollbarGutter: 'stable',
   },
   formGrid: {
     display: 'flex',

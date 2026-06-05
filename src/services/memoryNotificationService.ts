@@ -5,7 +5,7 @@
  */
 
 import * as vscode from 'vscode';
-import type { MemoryNotificationType } from '../types/memory.js';
+import { DEFAULT_MEMORY_SETTINGS, type MemoryNotificationType } from '../types/memory.js';
 
 export class MemoryNotificationService {
 	private statusBarItem: vscode.StatusBarItem;
@@ -123,7 +123,7 @@ export class MemoryNotificationService {
 	private isEnabled(): boolean {
 		return vscode.workspace
 			.getConfiguration('promptManager')
-			.get<boolean>('memory.enabled', true);
+			.get<boolean>('memory.enabled', DEFAULT_MEMORY_SETTINGS.enabled);
 	}
 
 	/** Get the configured notification type */

@@ -1,12 +1,12 @@
-# Copilot Prompt Manager
+# Prompt Manager
 
 <p align="center">
-  <img src="media/icon.png" alt="Copilot Prompt Manager icon" width="128" height="128">
+  <img src="media/icon.png" alt="Prompt Manager icon" width="128" height="128">
 </p>
 
 <p align="center">
   <strong>Prompt workflows that stay attached to your code.</strong><br>
-  Run GitHub Copilot from saved context, keep Git and delivery state nearby, and build project memory inside VS Code.<br>
+  Run AI chat from saved context, keep Git and delivery state nearby, and build project memory inside VS Code.<br>
   <strong>Промпты, Git-контекст, отчёты и память проекта в одном рабочем процессе прямо в VS Code.</strong>
 </p>
 
@@ -24,19 +24,22 @@
 </p>
 
 <p align="center">
-  <img src="media/readme/hero.png" alt="Copilot Prompt Manager overview" width="100%">
+  <img src="media/readme/hero.png" alt="Prompt Manager overview" width="100%">
 </p>
 
 Prompt work usually gets split across chat tabs, notes, branches, and half-finished checklists.
-Copilot Prompt Manager turns that mess into one repeatable workflow.
+Prompt Manager turns that mess into one repeatable workflow.
 
 Работа с промптами обычно распадается на вкладки чата, заметки, ветки и разрозненные отчёты.
-Copilot Prompt Manager собирает это в один понятный и управляемый процесс.
+Prompt Manager собирает это в один понятный и управляемый процесс.
+
+Support: Github Copilot Chat, Codex, and Kilo Code for the chat workflow.
+Поддержка Github Copilot Chat, Codex и Kilo Code для работы с чатом.
 
 ## Why Teams Install It / Зачем это ставят
 
 - **Repo-native prompts.** Prompts, plans, reports, and attached files live in the workspace instead of getting lost in separate tools. Промпты, планы, отчёты и файлы хранятся рядом с репозиторием.
-- **Copilot from saved context.** Start or reopen GitHub Copilot Chat from a prepared brief with model, files, instructions, and scope. Чат запускается из уже подготовленного контекста, а не из памяти пользователя.
+- **AI chat from saved context.** Start or reopen AI Chat from a prepared brief with model, files, instructions, and scope. AI чат запускается из уже подготовленного контекста, а не из памяти пользователя.
 - **Git-aware execution.** Keep branches, review flow, task tracking, and delivery status next to the prompt. Git-поток, ветки и статус выполнения остаются рядом с задачей.
 - **Project Memory.** Turn repository history into searchable AI context with analyses, semantic search, and codemap instructions. История репозитория становится рабочей памятью проекта.
 
@@ -51,24 +54,24 @@ Copilot Prompt Manager собирает это в один понятный и �
 ## Built For Real Work / Для реальной работы
 
 - **Prompt Sidebar** for library, filters, groups, and fast capture.
-- **Prompt Editor** for context, files, chat launch, Git-aware execution, plan, and report. Prompt-dashboard cards can be collapsed and reordered from their headers, hidden cards pause their own refresh and AI review work until reopened, and restored prompt tabs are rebound to the singleton editor after VS Code reload so a stale duplicate webview does not keep a broken save loop. When Kilo Code or OpenAI Codex is selected as the target chat, Copilot-only model and chat-mode controls are replaced with a per-prompt Xdotool autostart flag. Карточки prompt-dashboard можно сворачивать и переставлять из шапки; скрытые карточки не обновляются и не запускают AI review, пока их снова не раскроют, а восстановленная после перезапуска вкладка редактора снова привязывается к singleton-странице и не создаёт вторую нерабочую webview. Если целевым чатом выбран Kilo Code или OpenAI Codex, поля модели и режима Copilot заменяются флагом автостарта через Xdotool для конкретного промпта.
+- **Prompt Editor** for context, files, chat launch, Git-aware execution, plan, and report. Prompt-dashboard cards can be collapsed and reordered from their headers, hidden cards pause their own refresh and AI review work until reopened, and restored prompt tabs are rebound to the singleton editor after VS Code reload so a stale duplicate webview does not keep a broken save loop. When Kilo Code or OpenAI Codex is selected as the target chat, AI-only model and chat-mode controls are replaced with a per-prompt Xdotool autostart flag. Карточки prompt-dashboard можно сворачивать и переставлять из шапки; скрытые карточки не обновляются и не запускают AI review, пока их снова не раскроют, а восстановленная после перезапуска вкладка редактора снова привязывается к singleton-странице и не создаёт вторую нерабочую webview. Если целевым чатом выбран Kilo Code или OpenAI Codex, поля модели и режима AI заменяются флагом автостарта через Xdotool для конкретного промпта.
 - **Tracker and Statistics** for delivery visibility instead of forgotten prompt drafts.
 - **Project Memory** for commit history, AI analysis, semantic search, and codemap snapshots.
-- **Copilot Usage** for Premium request awareness without leaving VS Code.
+- **AI Usage** for Premium request awareness without leaving VS Code.
 
 ## Quick Start / Быстрый старт
 
 1. Install the extension and open Prompt Manager from the Activity Bar. Установите расширение и откройте Prompt Manager на боковой панели.
 2. Turn on `Prompt Manager: AI Enabled` only when you want built-in AI generations, reports, or repository analysis. Включайте `Prompt Manager: AI Enabled` только когда нужны встроенные AI-генерации, отчёты и анализ репозитория.
 3. Create a prompt, then add the brief, projects, branch, files, and AI model. Создайте промпт и заполните контекст задачи.
-4. Save the prompt and launch GitHub Copilot Chat from the editor. Сохраните промпт и запускайте чат прямо из редактора.
+4. Save the prompt and launch AI Chat from the editor. Сохраните промпт и запускайте чат прямо из редактора.
 5. Enable Project Memory / CodeMap in settings when you want history analysis and chat instructions. Включайте Project Memory / CodeMap в настройках только когда нужны анализ истории и инструкции для чата.
   When these settings stay off, Start Chat does not generate or attach session-memory / codemap instruction files. Если эти настройки выключены, Start Chat не создаёт и не прикладывает session-memory / codemap instruction файлы.
 
 ## Requirements / Требования
 
 - VS Code `1.95+`
-- GitHub Copilot Chat for the chat workflow
+- GitHub Copilot Chat, Codex, Kilo Code for the chat workflow
 - Git-enabled workspace folders for branch-aware features
 - Optional: enable `Prompt Manager: AI Enabled`, Project Memory, and CodeMap in settings when you want built-in AI automation, repository analysis, and semantic recall
 

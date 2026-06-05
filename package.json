@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Prompt-Manager",
   "description": "Manage AI prompt workflows, launch chats, and build project memory directly inside VS Code",
-  "version": "0.2.45",
+  "version": "0.2.46",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -116,7 +116,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.2.45",
+        "title": "About 0.2.46",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },
@@ -380,16 +380,6 @@
         "promptManager.captureAgentFinalResponse": {
           "type": "boolean",
           "description": "Save the final agent chat response to the prompt report and include it in afterChatCompleted hooks (for example, Telegram integrations).",
-          "default": false
-        },
-        "promptManager.kilo.autoSendWithXdotool": {
-          "type": "boolean",
-          "description": "Linux/X11 only: after using Kilo Code's Add to Context fallback, send Enter with xdotool to submit the prepared task automatically. Disabled by default because OS-level input automation can send Enter to the wrong focused window.",
-          "default": false
-        },
-        "promptManager.codex.autoSendWithXdotool": {
-          "type": "boolean",
-          "description": "Linux/X11 only: after opening Codex and preparing the prompt fallback, paste it into the Codex composer and send Enter with xdotool. If unset, Codex inherits promptManager.kilo.autoSendWithXdotool. Disabled by default because OS-level input automation can target the wrong focused window.",
           "default": false
         },
         "promptManager.docker.enabled": {

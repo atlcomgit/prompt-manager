@@ -437,6 +437,8 @@ export interface PromptConfig {
 	chatMode: 'agent' | 'plan';
 	/** Chat target: Copilot Chat, Kilo Code, or OpenAI Codex */
 	chatTarget?: PromptChatTarget;
+	/** Whether external chat fallback should auto-submit with xdotool */
+	autoStartChatWithXdotool?: boolean;
 
 	// --- Context files ---
 	/** Relative paths to context files attached to this prompt */
@@ -555,6 +557,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		model: '',
 		chatMode: 'agent',
 		chatTarget: 'copilot',
+		autoStartChatWithXdotool: false,
 		contextFiles: [],
 		httpExamples: '',
 		chatSessionIds: [],

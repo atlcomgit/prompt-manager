@@ -29,6 +29,8 @@ function makePrompt(overrides: Partial<Prompt> = {}): Prompt {
 		trackedBranchesByProject: { api: 'main' },
 		model: 'copilot/gpt-5.4',
 		chatMode: 'agent',
+		chatTarget: 'copilot',
+		autoStartChatWithXdotool: false,
 		contextFiles: ['README.md'],
 		httpExamples: '',
 		chatSessionIds: ['chat-1'],
@@ -66,6 +68,7 @@ test('mergePromptExternalConfig preserves only locally newer fields and applies 
 		title: 'External title',
 		status: 'completed',
 		taskNumber: '61-external',
+		autoStartChatWithXdotool: true,
 		notes: 'Updated by external agent',
 		updatedAt: '2026-04-09T10:00:00.000Z',
 	});
@@ -83,10 +86,11 @@ test('mergePromptExternalConfig preserves only locally newer fields and applies 
 	assert.equal(result.mergedPrompt.status, 'review');
 	assert.equal(result.mergedPrompt.title, 'External title');
 	assert.equal(result.mergedPrompt.taskNumber, '61-external');
+	assert.equal(result.mergedPrompt.autoStartChatWithXdotool, true);
 	assert.equal(result.mergedPrompt.notes, 'Updated by external agent');
 	assert.equal(result.mergedPrompt.updatedAt, '2026-04-09T10:00:00.000Z');
 	assert.deepEqual(result.preservedLocalFields, ['status']);
-	assert.deepEqual(result.appliedExternalFields.sort(), ['notes', 'taskNumber', 'title']);
+	assert.deepEqual(result.appliedExternalFields.sort(), ['autoStartChatWithXdotool', 'notes', 'taskNumber', 'title']);
 	assert.equal(result.hasChanges, true);
 });
 
@@ -99,6 +103,7 @@ test('applyPromptConfigSnapshotToPrompt updates config fields and keeps content/
 	});
 	const configSnapshot = makePrompt({
 		status: 'review',
+		autoStartChatWithXdotool: true,
 		notes: 'Synced notes',
 		title: 'Config title',
 		updatedAt: '2026-04-09T11:00:00.000Z',
@@ -107,6 +112,7 @@ test('applyPromptConfigSnapshotToPrompt updates config fields and keeps content/
 	const updatedPrompt = applyPromptConfigSnapshotToPrompt(currentPrompt, configSnapshot);
 
 	assert.equal(updatedPrompt.status, 'review');
+	assert.equal(updatedPrompt.autoStartChatWithXdotool, true);
 	assert.equal(updatedPrompt.notes, 'Synced notes');
 	assert.equal(updatedPrompt.title, 'Config title');
 	assert.equal(updatedPrompt.updatedAt, '2026-04-09T11:00:00.000Z');

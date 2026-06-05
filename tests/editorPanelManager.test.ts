@@ -4877,15 +4877,13 @@ test('startChat auto-sends Kilo Code fallback after closing the temporary contex
 
 	try {
 		const { manager, getStoredPrompt } = await createManager({
-			configurationValues: {
-				'promptManager.kilo.autoSendWithXdotool': true,
-			},
 			initialPrompt: {
 				id: 'prompt-a',
 				promptUuid: 'uuid-a',
 				title: 'Prompt title',
 				status: 'draft',
 				chatTarget: 'kilo',
+				autoStartChatWithXdotool: true,
 				contextFiles: ['src/index.ts'],
 				content: 'Implement Kilo routing.',
 			},
@@ -4916,6 +4914,7 @@ test('startChat auto-sends Kilo Code fallback after closing the temporary contex
 			title: 'Prompt title',
 			status: 'draft',
 			chatTarget: 'kilo',
+			autoStartChatWithXdotool: true,
 			contextFiles: ['src/index.ts'],
 			content: 'Implement Kilo routing.',
 		});
@@ -5126,27 +5125,6 @@ test('startChat prepares Codex Add to Thread fallback when bridge is unavailable
 	resetVsCodeCommandMock();
 });
 
-test('Codex xdotool fallback inherits Kilo auto-send setting unless explicitly configured', async () => {
-	resetVsCodeCommandMock();
-
-	const { manager } = await createManager({
-		configurationValues: {
-			'promptManager.kilo.autoSendWithXdotool': true,
-		},
-	});
-	assert.equal((manager as any).isCodexXdotoolSendFallbackEnabled(), true);
-
-	const { manager: explicitCodexManager } = await createManager({
-		configurationValues: {
-			'promptManager.kilo.autoSendWithXdotool': true,
-			'promptManager.codex.autoSendWithXdotool': false,
-		},
-	});
-	assert.equal((explicitCodexManager as any).isCodexXdotoolSendFallbackEnabled(), false);
-
-	resetVsCodeCommandMock();
-});
-
 test('startChat auto-sends Codex fallback from the clipboard with xdotool', async () => {
 	resetVsCodeCommandMock();
 	vscodeAvailableCommands = ['chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
@@ -5158,15 +5136,13 @@ test('startChat auto-sends Codex fallback from the clipboard with xdotool', asyn
 
 	try {
 		const { manager, getStoredPrompt } = await createManager({
-			configurationValues: {
-				'promptManager.codex.autoSendWithXdotool': true,
-			},
 			initialPrompt: {
 				id: 'prompt-a',
 				promptUuid: 'uuid-a',
 				title: 'Prompt title',
 				status: 'draft',
 				chatTarget: 'codex',
+				autoStartChatWithXdotool: true,
 				contextFiles: ['src/index.ts'],
 				content: 'Implement Codex routing.',
 			},
@@ -5197,6 +5173,7 @@ test('startChat auto-sends Codex fallback from the clipboard with xdotool', asyn
 			title: 'Prompt title',
 			status: 'draft',
 			chatTarget: 'codex',
+			autoStartChatWithXdotool: true,
 			contextFiles: ['src/index.ts'],
 			content: 'Implement Codex routing.',
 		});

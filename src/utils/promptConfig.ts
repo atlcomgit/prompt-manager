@@ -46,6 +46,7 @@ export function normalizeStoredPromptConfig(
 		id,
 		promptUuid,
 		chatTarget: normalizeChatTarget(parsed.chatTarget),
+		autoStartChatWithXdotool: parsed.autoStartChatWithXdotool === true,
 		trackedBranchesByProject: normalizeTrackedBranchesByProject(parsed.trackedBranchesByProject),
 		timeSpentOnTask: typeof parsed.timeSpentOnTask === 'number' ? parsed.timeSpentOnTask : 0,
 		timeSpentUntracked: typeof parsed.timeSpentUntracked === 'number' ? parsed.timeSpentUntracked : 0,

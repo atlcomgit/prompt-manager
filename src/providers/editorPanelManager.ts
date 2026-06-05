@@ -980,41 +980,9 @@ export class EditorPanelManager {
 			.get<boolean>('editor.autoLoadContext', true) === true;
 	}
 
-	/** OS-level auto-submit is opt-in because xdotool can target the wrong focused window. */
-	private isKiloXdotoolSendFallbackEnabled(): boolean {
-		return vscode.workspace
-			.getConfiguration('promptManager')
-			.get<boolean>('kilo.autoSendWithXdotool', false) === true;
-	}
-
-	/** OS-level auto-submit is opt-in because xdotool can target the wrong focused window. */
-	private isCodexXdotoolSendFallbackEnabled(): boolean {
-		const config = vscode.workspace.getConfiguration('promptManager');
-		const codexValue = config.get<boolean>('codex.autoSendWithXdotool', false) === true;
-		const inspection = (config as {
-			inspect?<T>(key: string): {
-				globalValue?: T;
-				workspaceValue?: T;
-				workspaceFolderValue?: T;
-				globalLanguageValue?: T;
-				workspaceLanguageValue?: T;
-				workspaceFolderLanguageValue?: T;
-			} | undefined;
-		}).inspect?.<boolean>('codex.autoSendWithXdotool');
-		const explicitCodexValue = [
-			inspection?.workspaceFolderLanguageValue,
-			inspection?.workspaceLanguageValue,
-			inspection?.globalLanguageValue,
-			inspection?.workspaceFolderValue,
-			inspection?.workspaceValue,
-			inspection?.globalValue,
-		].find(value => typeof value === 'boolean');
-
-		if (typeof explicitCodexValue === 'boolean') {
-			return explicitCodexValue;
-		}
-
-		return codexValue || this.isKiloXdotoolSendFallbackEnabled();
+	/** OS-level auto-submit is opt-in per prompt because xdotool can target the wrong window. */
+	private isPromptXdotoolAutoStartEnabled(prompt: Pick<Prompt, 'autoStartChatWithXdotool'>): boolean {
+		return prompt.autoStartChatWithXdotool === true;
 	}
 
 	/** Normalize source values arriving from the webview before they are persisted. */
@@ -2405,8 +2373,11 @@ export class EditorPanelManager {
 		}
 	}
 
-	private async maybeSubmitKiloPromptWithXdotool(commands: string[]): Promise<XdotoolSubmitResult> {
-		if (!this.isKiloXdotoolSendFallbackEnabled()) {
+	private async maybeSubmitKiloPromptWithXdotool(
+		prompt: Pick<Prompt, 'autoStartChatWithXdotool'>,
+		commands: string[],
+	): Promise<XdotoolSubmitResult> {
+		if (!this.isPromptXdotoolAutoStartEnabled(prompt)) {
 			return { ok: false, reason: 'xdotool auto-send is disabled' };
 		}
 
@@ -2499,8 +2470,11 @@ export class EditorPanelManager {
 		);
 	}
 
-	private async maybeSubmitCodexPromptWithXdotool(text: string): Promise<XdotoolSubmitResult> {
-		if (!this.isCodexXdotoolSendFallbackEnabled()) {
+	private async maybeSubmitCodexPromptWithXdotool(
+		prompt: Pick<Prompt, 'autoStartChatWithXdotool'>,
+		text: string,
+	): Promise<XdotoolSubmitResult> {
+		if (!this.isPromptXdotoolAutoStartEnabled(prompt)) {
 			return { ok: false, reason: 'xdotool auto-send is disabled' };
 		}
 
@@ -2541,7 +2515,7 @@ export class EditorPanelManager {
 			}
 			await vscode.env.clipboard.writeText(fallbackText);
 			if (insertedWithAddToContext) {
-				const submittedWithXdotool = await this.maybeSubmitKiloPromptWithXdotool(commands);
+				const submittedWithXdotool = await this.maybeSubmitKiloPromptWithXdotool(prompt, commands);
 				if (submittedWithXdotool.ok) {
 					return {
 						dispatched: true,
@@ -2551,7 +2525,7 @@ export class EditorPanelManager {
 
 				return {
 					dispatched: false,
-					message: this.isKiloXdotoolSendFallbackEnabled()
+					message: this.isPromptXdotoolAutoStartEnabled(prompt)
 						? `Kilo Code открыт. Текст задачи вставлен через Add to Context и продублирован в буфер обмена, но xdotool не смог отправить Enter (${submittedWithXdotool.reason || 'unknown error'}). Нажмите Enter в поле чата Kilo Code вручную.`
 						: 'Kilo Code открыт. Текст задачи вставлен через Add to Context и продублирован в буфер обмена. Нажмите Enter в поле чата Kilo Code для отправки.',
 				};
@@ -2617,7 +2591,7 @@ export class EditorPanelManager {
 			}
 			await vscode.env.clipboard.writeText(fallbackText);
 			if (insertedWithAddToThread) {
-				const submittedWithXdotool = await this.maybeSubmitCodexPromptWithXdotool(fallbackText);
+				const submittedWithXdotool = await this.maybeSubmitCodexPromptWithXdotool(prompt, fallbackText);
 				if (submittedWithXdotool.ok) {
 					return {
 						dispatched: true,
@@ -2627,13 +2601,13 @@ export class EditorPanelManager {
 
 				return {
 					dispatched: false,
-					message: this.isCodexXdotoolSendFallbackEnabled()
+					message: this.isPromptXdotoolAutoStartEnabled(prompt)
 						? `OpenAI Codex открыт. Текст задачи добавлен через Add to Thread и продублирован в буфер обмена, но xdotool не смог вставить и отправить его (${submittedWithXdotool.reason || 'unknown error'}). Отправьте задачу в Codex вручную.`
 						: 'OpenAI Codex открыт. Текст задачи добавлен через Add to Thread и продублирован в буфер обмена. Отправьте задачу в Codex вручную.',
 				};
 			}
 
-			const submittedWithXdotool = await this.maybeSubmitCodexPromptWithXdotool(fallbackText);
+			const submittedWithXdotool = await this.maybeSubmitCodexPromptWithXdotool(prompt, fallbackText);
 			if (submittedWithXdotool.ok) {
 				return {
 					dispatched: true,
@@ -2643,7 +2617,7 @@ export class EditorPanelManager {
 
 			return {
 				dispatched: false,
-				message: this.isCodexXdotoolSendFallbackEnabled()
+				message: this.isPromptXdotoolAutoStartEnabled(prompt)
 					? `OpenAI Codex открыт. Текст задачи скопирован в буфер обмена, но xdotool не смог вставить и отправить его (${submittedWithXdotool.reason || 'unknown error'}). Вставьте его в поле чата Codex и отправьте вручную.`
 					: 'OpenAI Codex открыт. Автоматическая отправка недоступна в текущей версии расширения, поэтому текст задачи скопирован в буфер обмена. Вставьте его в поле чата Codex и отправьте вручную.',
 			};

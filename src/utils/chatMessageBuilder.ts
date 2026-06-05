@@ -220,7 +220,7 @@ function buildContextSections(
 	if (prompt.hooks.length > 0) {
 		tools.push(`- **Hooks**: ${prompt.hooks.join(', ')}`);
 	}
-	if (prompt.model) {
+	if ((prompt.chatTarget || 'copilot') === 'copilot' && prompt.model) {
 		tools.push(`- **Preferred model**: ${prompt.model}`);
 	}
 	if (tools.length > 0) {

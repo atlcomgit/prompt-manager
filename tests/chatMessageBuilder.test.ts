@@ -239,6 +239,20 @@ test('buildChatMessage skips empty sections when data is missing', () => {
 	assert.ok(!result.includes('## Instructions'), 'пустые инструкции не отображаются');
 });
 
+test('buildChatMessage skips preferred model for external chat targets', () => {
+	const result = buildChatMessage(
+		makePrompt({
+			chatTarget: 'kilo',
+			model: 'copilot/gpt-5.4',
+		}),
+		makeContext(),
+		'en',
+	);
+
+	assert.ok(!result.includes('Preferred model'), 'внешние чаты не должны получать скрытую Copilot-модель');
+	assert.ok(!result.includes('copilot/gpt-5.4'), 'значение модели не должно попадать во внешний чат');
+});
+
 // ---- Тест: отсутствие лишних секций при пустых данных ----
 test('buildChatMessage with minimal prompt produces valid markdown', () => {
 	const result = buildChatMessage(

@@ -1,3 +1,26 @@
+## 152: Внешние чаты и автостарт Xdotool
+
+- Дата: 2026-06-05.
+- Автор: alek.
+- Ветка: master.
+- Что сделано: На странице промпта для целевого чата `Kilo Code` и `OpenAI Codex` скрываются поля модели ИИ и режима чата, а вместо них показывается флаг `Автостарт чата через Xdotool`. Автостарт сохраняется в `config.json` конкретного промпта и используется при запуске внешнего чата.
+- Ключевые моменты: Глобальные настройки `Auto Send With Xdotool` удалены из manifest; Kilo/Codex fallback больше не наследует workspace settings и проверяет только prompt-level флаг. Для внешних чатов скрытая Copilot-модель больше не добавляется в chat context как `Preferred model`.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  package.json
+  src/i18n/translations.ts
+  src/providers/editorPanelManager.ts
+  src/types/prompt.ts
+  src/utils/chatMessageBuilder.ts
+  src/utils/promptConfig.ts
+  src/utils/promptExternalSync.ts
+  src/webview/editor/EditorApp.tsx
+  tests/chatMessageBuilder.test.ts
+  tests/editorPanelManager.test.ts
+  tests/promptConfig.test.ts
+  tests/promptExternalSync.test.ts
+
 ## 151: В виджете "Docker контейнеры" при манипуляции с
 
 - Дата: 2026-06-02.

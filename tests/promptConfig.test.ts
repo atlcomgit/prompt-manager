@@ -21,6 +21,7 @@ test('normalizeStoredPromptConfig backfills missing promptUuid for legacy prompt
 	assert.equal(result.config.trackedBranch, '');
 	assert.deepEqual(result.config.trackedBranchesByProject, {});
 	assert.equal(result.config.chatTarget, 'copilot');
+	assert.equal(result.config.autoStartChatWithXdotool, false);
 	assert.equal(result.config.notes, '');
 });
 
@@ -70,4 +71,20 @@ test('normalizeStoredPromptConfig falls back to copilot for invalid chat target'
 	);
 
 	assert.equal(result.config.chatTarget, 'copilot');
+});
+
+test('normalizeStoredPromptConfig normalizes xdotool auto-start flag', () => {
+	const enabledResult = normalizeStoredPromptConfig(
+		'prompt-xdotool-enabled',
+		{ autoStartChatWithXdotool: true },
+		() => 'generated-uuid',
+	);
+	const disabledResult = normalizeStoredPromptConfig(
+		'prompt-xdotool-disabled',
+		{ autoStartChatWithXdotool: 'true' as any },
+		() => 'generated-uuid',
+	);
+
+	assert.equal(enabledResult.config.autoStartChatWithXdotool, true);
+	assert.equal(disabledResult.config.autoStartChatWithXdotool, false);
 });

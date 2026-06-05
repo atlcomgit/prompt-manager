@@ -2309,6 +2309,11 @@ export const EditorApp: React.FC = () => {
     return prompt.model.trim();
   }, [prompt.model, modelOptions]);
 
+  /** External chat targets do not use Copilot model and mode controls. */
+  const normalizedChatTarget = prompt.chatTarget || 'copilot';
+  const isExternalChatTarget = normalizedChatTarget === 'kilo' || normalizedChatTarget === 'codex';
+  const autoStartChatWithXdotool = prompt.autoStartChatWithXdotool === true;
+
   const basicSummary = useMemo(() => {
     const chunks: string[] = [];
     if (prompt.title.trim()) chunks.push(`Заголовок: ${toShortText(prompt.title, 48)}`);
@@ -2429,12 +2434,16 @@ export const EditorApp: React.FC = () => {
 
   const agentSummary = useMemo(() => {
     const chunks: string[] = [];
-    if (selectedModelName) chunks.push(`Модель: ${toShortText(selectedModelName, 56)}`);
-    const chatTargetOption = CHAT_TARGET_OPTIONS.find(option => option.id === prompt.chatTarget);
+    if (!isExternalChatTarget && selectedModelName) chunks.push(`Модель: ${toShortText(selectedModelName, 56)}`);
+    const chatTargetOption = CHAT_TARGET_OPTIONS.find(option => option.id === normalizedChatTarget);
     chunks.push(`Чат: ${chatTargetOption ? t(chatTargetOption.labelKey) : t('editor.chatTargetCopilot')}`);
-    chunks.push(`Режим: ${prompt.chatMode === 'agent' ? 'Agent' : 'Plan'}`);
+    if (isExternalChatTarget) {
+      chunks.push(`Xdotool: ${autoStartChatWithXdotool ? 'включен' : 'выключен'}`);
+    } else {
+      chunks.push(`Режим: ${prompt.chatMode === 'agent' ? 'Agent' : 'Plan'}`);
+    }
     return chunks;
-  }, [selectedModelName, prompt.chatTarget, prompt.chatMode, t]);
+  }, [autoStartChatWithXdotool, isExternalChatTarget, normalizedChatTarget, selectedModelName, prompt.chatMode, t]);
 
   const groupsSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -6914,7 +6923,7 @@ export const EditorApp: React.FC = () => {
                 <div style={{ ...styles.field, ...styles.agentFieldTarget }}>
                   <label style={styles.label}>{t('editor.chatTarget')}</label>
                   <select
-                    value={prompt.chatTarget || 'copilot'}
+                    value={normalizedChatTarget}
                     onChange={e => updateFieldAndSaveNow('chatTarget', e.target.value as PromptChatTarget)}
                     style={styles.select}
                   >
@@ -6924,38 +6933,57 @@ export const EditorApp: React.FC = () => {
                   </select>
                 </div>
 
-                <div style={{ ...styles.field, ...styles.agentFieldModel }}>
-                  <label style={styles.label}>{t('editor.aiModel')}</label>
-                  <select
-                    value={prompt.model}
-                    onChange={e => updateFieldAndSaveNow('model', e.target.value)}
-                    style={{ ...styles.select, ...styles.agentModelSelect }}
-                  >
-                    <option value="">{t('common.auto')}</option>
-                    {modelOptions.map(m => (
-                      <option key={m.id} value={m.id}>{m.name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div style={{ ...styles.field, ...styles.agentFieldMode }}>
-                  <label style={styles.label}>{t('editor.chatMode')}</label>
-                  <div style={styles.toggleGroup}>
-                    {(['agent', 'plan'] as const).map(mode => (
-                      <button
-                        key={mode}
-                        style={{
-                          ...styles.toggleBtn,
-                          ...(prompt.chatMode === mode ? styles.toggleBtnActive : {}),
-                        }}
-                        onClick={() => updateFieldAndSaveNow('chatMode', mode)}
-                        title={mode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
-                      >
-                        {mode === 'agent' ? `🤖 ${t('editor.chatModeAgent')}` : `📋 ${t('editor.chatModePlan')}`}
-                      </button>
-                    ))}
+                {!isExternalChatTarget && (
+                  <div style={{ ...styles.field, ...styles.agentFieldModel }}>
+                    <label style={styles.label}>{t('editor.aiModel')}</label>
+                    <select
+                      value={prompt.model}
+                      onChange={e => updateFieldAndSaveNow('model', e.target.value)}
+                      style={{ ...styles.select, ...styles.agentModelSelect }}
+                    >
+                      <option value="">{t('common.auto')}</option>
+                      {modelOptions.map(m => (
+                        <option key={m.id} value={m.id}>{m.name}</option>
+                      ))}
+                    </select>
                   </div>
-                </div>
+                )}
+
+                {!isExternalChatTarget && (
+                  <div style={{ ...styles.field, ...styles.agentFieldMode }}>
+                    <label style={styles.label}>{t('editor.chatMode')}</label>
+                    <div style={styles.toggleGroup}>
+                      {(['agent', 'plan'] as const).map(mode => (
+                        <button
+                          key={mode}
+                          style={{
+                            ...styles.toggleBtn,
+                            ...(prompt.chatMode === mode ? styles.toggleBtnActive : {}),
+                          }}
+                          onClick={() => updateFieldAndSaveNow('chatMode', mode)}
+                          title={mode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
+                        >
+                          {mode === 'agent' ? `🤖 ${t('editor.chatModeAgent')}` : `📋 ${t('editor.chatModePlan')}`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {isExternalChatTarget && (
+                  <div style={{ ...styles.field, ...styles.agentFieldXdotool }}>
+                    <label style={styles.agentCheckboxLabel}>
+                      <input
+                        type="checkbox"
+                        checked={autoStartChatWithXdotool}
+                        onChange={e => updateFieldAndSaveNow('autoStartChatWithXdotool', e.target.checked)}
+                        style={styles.agentCheckboxInput}
+                      />
+                      {t('editor.autoStartChatWithXdotool')}
+                    </label>
+                    <div style={styles.agentCheckboxHelp}>{t('editor.autoStartChatWithXdotoolHint')}</div>
+                  </div>
+                )}
               </div>
             </>
           ))}
@@ -8270,8 +8298,31 @@ const styles: Record<string, React.CSSProperties> = {
     flex: '1 1 260px',
     minWidth: '260px',
   },
+  agentFieldXdotool: {
+    flex: '1 1 280px',
+    minWidth: '260px',
+    paddingTop: '18px',
+  },
   agentModelSelect: {
     minWidth: '200px',
+  },
+  agentCheckboxLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    fontSize: '12px',
+    color: 'var(--vscode-foreground)',
+    cursor: 'pointer',
+  },
+  agentCheckboxInput: {
+    margin: 0,
+    flexShrink: 0,
+  },
+  agentCheckboxHelp: {
+    marginTop: '4px',
+    fontSize: '11px',
+    color: 'var(--vscode-descriptionForeground)',
+    lineHeight: 1.35,
   },
   linkBtn: {
     background: 'none',

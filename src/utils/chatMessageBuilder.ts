@@ -5,6 +5,7 @@
 
 import { translate } from '../i18n/translations';
 import type { Prompt } from '../types/prompt';
+import { isKeepCurrentChatModel } from '../constants/ai';
 
 /** Метаданные контекста для формирования сообщения чата */
 export interface ChatMessageContext {
@@ -220,7 +221,7 @@ function buildContextSections(
 	if (prompt.hooks.length > 0) {
 		tools.push(`- **Hooks**: ${prompt.hooks.join(', ')}`);
 	}
-	if ((prompt.chatTarget || 'copilot') === 'copilot' && prompt.model) {
+	if ((prompt.chatTarget || 'copilot') === 'copilot' && prompt.model && !isKeepCurrentChatModel(prompt.model)) {
 		tools.push(`- **Preferred model**: ${prompt.model}`);
 	}
 	if (tools.length > 0) {

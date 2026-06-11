@@ -104,6 +104,7 @@ import {
 import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
+import { KEEP_CURRENT_CHAT_MODEL, isKeepCurrentChatModel } from '../../constants/ai.js';
 
 const vscode = getVsCodeApi();
 type EditorBootWindow = Window & {
@@ -174,7 +175,12 @@ export const buildPromptModelOptions = (
   const normalizedCurrentModel = currentModel.trim();
   const items = [...availableModels];
 
-  if (normalizedCurrentModel && !items.some(item => item.id === normalizedCurrentModel)) {
+  if (
+    items.length === 0
+    && normalizedCurrentModel
+    && !isKeepCurrentChatModel(normalizedCurrentModel)
+    && !items.some(item => item.id === normalizedCurrentModel)
+  ) {
     items.push({ id: normalizedCurrentModel, name: normalizedCurrentModel });
   }
 
@@ -2316,12 +2322,15 @@ export const EditorApp: React.FC = () => {
     if (!prompt.model.trim()) {
       return '';
     }
+    if (isKeepCurrentChatModel(prompt.model)) {
+      return t('editor.aiModelKeep');
+    }
     const selected = modelOptions.find(m => m.id === prompt.model.trim());
     if (selected) {
       return selected.name;
     }
     return prompt.model.trim();
-  }, [prompt.model, modelOptions]);
+  }, [prompt.model, modelOptions, t]);
 
   /** External chat targets do not use Copilot model and mode controls. */
   const normalizedChatTarget = prompt.chatTarget || 'copilot';
@@ -6958,6 +6967,7 @@ export const EditorApp: React.FC = () => {
                       onChange={e => updateFieldAndSaveNow('model', e.target.value)}
                       style={{ ...styles.select, ...styles.agentModelSelect }}
                     >
+                      <option value={KEEP_CURRENT_CHAT_MODEL}>{t('editor.aiModelKeep')}</option>
                       <option value="">{t('common.auto')}</option>
                       {modelOptions.map(m => (
                         <option key={m.id} value={m.id}>{m.name}</option>

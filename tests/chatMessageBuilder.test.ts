@@ -253,6 +253,20 @@ test('buildChatMessage skips preferred model for external chat targets', () => {
 	assert.ok(!result.includes('copilot/gpt-5.4'), 'значение модели не должно попадать во внешний чат');
 });
 
+test('buildChatMessage skips preferred model when the prompt keeps the current chat model', () => {
+	const result = buildChatMessage(
+		makePrompt({
+			chatTarget: 'copilot',
+			model: 'keep-current-model',
+		}),
+		makeContext(),
+		'en',
+	);
+
+	assert.ok(!result.includes('Preferred model'), '«Не изменять» не должно добавлять Preferred model');
+	assert.ok(!result.includes('keep-current-model'), 'sentinel-значение не должно попадать в сообщение чата');
+});
+
 // ---- Тест: отсутствие лишних секций при пустых данных ----
 test('buildChatMessage with minimal prompt produces valid markdown', () => {
 	const result = buildChatMessage(

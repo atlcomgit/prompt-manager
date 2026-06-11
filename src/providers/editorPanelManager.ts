@@ -10,6 +10,7 @@ import * as path from 'path';
 import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { generateSmartTitle } from '../utils/smartTitle.js';
+import { isKeepCurrentChatModel } from '../constants/ai.js';
 import type {
 	ChatMemoryCodemapSummary,
 	ChatMemoryContextFilesSummary,
@@ -9831,7 +9832,7 @@ export class EditorPanelManager {
 						}
 					}
 
-					if (prompt.model) {
+					if (prompt.model && !isKeepCurrentChatModel(prompt.model)) {
 						try {
 							await new Promise(resolve => setTimeout(resolve, 200));
 							const storageModel = await this.aiService.resolveModelStorageIdentifier(prompt.model);

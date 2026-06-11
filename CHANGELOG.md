@@ -6,6 +6,21 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-06-11
+
+#### Added
+- The prompt-page `AI Models` picker now offers a `Do not change` option at the top of the list. When selected, starting a chat keeps whatever model is already active in the chat — Prompt Manager skips applying or persisting any model and does not inject a `Preferred model` line.
+
+#### Fixed
+- The prompt-page `AI Models` picker now excludes session-scoped models that VS Code binds to a specific chat session type (`targetChatSessionType`, such as the `copilotcli` and `claude-code` providers). The public `vscode.lm.selectChatModels()` API returns these models without exposing `targetChatSessionType`, so they previously leaked into the list as bare ids (for example `claude-sonnet-4.6`) even though VS Code keeps them out of the general model picker; they are now filtered using cached model metadata.
+- The prompt-page `AI Models` picker now resolves the correct VS Code `state.vscdb` before filtering hidden models: when several candidate databases exist (custom profiles, or an Extension Development Host running against a fresh user-data dir), it now picks the database that actually carries `chatModelVisibility` picker state instead of the first existing file, and also scans per-profile databases. The sqlite read is also `-readonly` with a timeout so opening the picker can no longer hang on a WAL-locked database.
+- The prompt-page `AI Models` picker now reliably hides models whose whole provider section is hidden in the VS Code model picker, even when version separators differ: hidden ids persisted with dashes (for example `claude-sonnet-4-6`) are now matched against live/cached models that report dotted ids (`claude-sonnet-4.6`), so BYOK providers hidden as an entire section (such as Anthropic or OpenRouter) no longer leak back through live model results that fail to resolve to a cached entry.
+
+### 2026-06-10
+
+#### Fixed
+- The prompt-page `AI Models` picker now mirrors the promoted Copilot Chat model picker list instead of flattening the whole model catalog: it keeps pinned/current/recent/featured models plus the same remaining visible entries, restores full Custom Endpoint identifiers such as Tokenator from VS Code's cached model catalog when the live LM API omits them, and keeps provider-scoped models hidden in the VS Code picker from leaking back through live model results, cached entries, or the saved-current-model fallback.
+
 ### 2026-06-05
 
 #### Changed

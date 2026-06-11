@@ -1,3 +1,49 @@
+## 156: Пункт «Не изменять» в поле Модель ИИ
+
+- Дата: 2026-06-11.
+- Автор: alek.
+- Ветка: master.
+- Что сделано: В поле `Модель ИИ` добавлен первым пункт «Не изменять». При его выборе запуск чата не меняет уже выбранную в чате модель.
+- Ключевые моменты: Добавлен sentinel `KEEP_CURRENT_CHAT_MODEL = 'keep-current-model'` и helper `isKeepCurrentChatModel` в `constants/ai.ts`. При `prompt.model === sentinel` `EditorPanelManager.startChat` пропускает блок применения модели (`resolveChatOpenModelSelector` / `forcePersistChatCurrentLanguageModel` / `tryApplyChatModelSafely` не вызываются), а `buildChatMessage` не добавляет `Preferred model`. В UI sentinel показывается локализованной меткой (`editor.aiModelKeep`) в select редактора, боковой панели и трекере; `buildPromptModelOptions` не добавляет sentinel как реальную модель. Пункт `Автоматически` (пустое значение) сохранён.
+- Файлы:
+  CHANGELOG.md
+  src/constants/ai.ts
+  src/i18n/translations.ts
+  src/providers/editorPanelManager.ts
+  src/utils/chatMessageBuilder.ts
+  src/webview/editor/EditorApp.tsx
+  src/webview/sidebar/components/PromptItem.tsx
+  src/webview/tracker/TrackerApp.tsx
+  tests/chatMessageBuilder.test.ts
+  tests/editorApp.test.tsx
+
+## 155: Скрытые разделы провайдеров и session-scoped модели в поле Модель ИИ
+
+- Дата: 2026-06-11.
+- Автор: alek.
+- Ветка: master.
+- Что сделано: В поле `Модель ИИ` теперь корректно скрываются модели, привязанные к отдельному типу чат-сессии (`copilotcli`, `claude-code`), модели с целиком скрытым разделом провайдера, и выбирается правильная `state.vscdb`.
+- Ключевые моменты: Диагностика через runtime-логи показала главную причину: `vscode.lm.selectChatModels()` возвращает session-bound модели провайдеров `copilotcli`/`claude-code` (у них в кэше `targetChatSessionType`), но в публичном API этого поля нет и у них пустой `identifier`, поэтому они протекали как bare-id (`claude-sonnet-4.6`) и не совпадали со скрытыми `copilot/...`. Добавлен `getSessionScopedModelKeys(dbPath)` — строит набор `vendor/id` для записей кэша с `targetChatSessionType`, и `isSessionScopedLanguageModel` отсеивает такие live-модели до фильтра hidden (по vendor+id, чтобы copilot `claude-opus-4.8` оставался, а claude-code `claude-opus-4.8` убирался). Кроме того: (1) `resolveStateDbPath` выбирает БД с реальным `chatModelVisibility` (вкл. per-profile, tie-break по mtime), чтение sqlite стало `-readonly` с timeout 4с (фикс зависания на WAL-locked БД); (2) нормализация разделителей версий (`.`/`_` → `-`) для сопоставления с дефисными скрытыми id.
+- Файлы:
+  CHANGELOG.md
+  src/services/aiService.ts
+  tests/aiService.test.ts
+
+## 154: Custom Endpoint модели в поле Модель ИИ
+
+- Дата: 2026-06-10.
+- Автор: alek.
+- Ветка: master.
+- Что сделано: Исправлен user-facing каталог моделей в поле `Модель ИИ`, чтобы Prompt Manager показывал не только Copilot-модели, но и Custom Endpoint модели из текущего каталога VS Code, включая Tokenator.
+- Ключевые моменты: Корневая причина была в том, что `AiService` собирал список и chat-start resolve path только через selector `{ vendor: 'copilot' }`, поэтому модели `customendpoint/...` не попадали в dropdown и могли терять свой полный identifier. После этого user-facing picker был дополнительно скорректирован по состоянию `chatModelVisibility.hiddenModels`: hidden ids индексируются как `vendor/provider/model` и `vendor/model`, фильтр применяется к live-моделям и cached entries, а Custom Endpoint identifiers восстанавливаются из `chat.cachedLanguageModels.v2`, если публичный LM API вернул только bare `id` или временно не вернул саму модель. Итоговый dropdown повторяет placement Copilot Chat picker (`pinned/current/recent/featured` плюс remaining visible entries с тем же dedupe), а не разворачивает полный каталог в плоский список. Webview больше не добавляет скрытую сохраненную модель обратно через fallback текущего значения после загрузки каталога. В итоге prompt-page picker показывает только тот же видимый curated список, сохраняет full identifier для cross-vendor моделей и использует тот же каталог при старте чата.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/services/aiService.ts
+  src/webview/editor/EditorApp.tsx
+  tests/aiService.test.ts
+  tests/editorApp.test.tsx
+
 ## 152: Внешние чаты и автостарт Xdotool
 
 - Дата: 2026-06-05.

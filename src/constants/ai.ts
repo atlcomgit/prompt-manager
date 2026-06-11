@@ -1,5 +1,17 @@
 export const DEFAULT_COPILOT_MODEL_FAMILY = 'gpt-5-mini';
 
+/**
+ * Sentinel value for the prompt `AI Models` field meaning "do not change the model already
+ * selected in the chat". When a prompt stores this value, starting a chat must skip applying
+ * any model so VS Code keeps whatever model is currently active in the chat.
+ */
+export const KEEP_CURRENT_CHAT_MODEL = 'keep-current-model';
+
+/** Return true when the value is the "do not change the chat model" sentinel. */
+export function isKeepCurrentChatModel(value: string | undefined | null): boolean {
+	return String(value || '').trim() === KEEP_CURRENT_CHAT_MODEL;
+}
+
 const EXPLICIT_COPILOT_MODEL_PATTERN = /(gpt-[\w.-]+|o[1-9][\w.-]*|claude-[\w.-]+|gemini-[\w.-]+|grok-[\w.-]+)/i;
 
 export function isZeroCostCopilotModelPickerCategory(category: {

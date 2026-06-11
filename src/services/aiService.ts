@@ -32,6 +32,10 @@ type ChatModelsControl = {
 	paid?: Record<string, ChatModelsControlEntry>;
 };
 
+type ChatModelVisibilityState = {
+	hiddenModels?: string[];
+};
+
 type CachedLanguageModelEntry = {
 	identifier?: string;
 	metadata?: {
@@ -167,6 +171,7 @@ export class AiService {
 
 	constructor(private readonly context?: vscode.ExtensionContext) { }
 	private sqliteBinaryPath: string | null | undefined;
+	private resolvedStateDbPath: string | null | undefined;
 	private readonly stateDbItemCache = new Map<string, { fingerprint: string; items: Map<string, string> }>();
 	private readonly selectedModelCache = new Map<string, CachedSelectedModelEntry>();
 	private readonly output = getPromptManagerOutputChannel();
@@ -936,6 +941,7 @@ export class AiService {
 	clearCopilotModelCaches(): void {
 		this.selectedModelCache.clear();
 		this.stateDbItemCache.clear();
+		this.resolvedStateDbPath = undefined;
 	}
 
 	private async selectFreeFallbackModel(
@@ -1017,24 +1023,611 @@ export class AiService {
 
 	/** Get available language models */
 	async getAvailableModels(): Promise<AvailableModelOption[]> {
-		let models: vscode.LanguageModelChat[] = [];
+		const models = await this.selectUserFacingChatModels();
+		const dbPath = await this.resolveStateDbPath();
+		const hiddenModelIds = dbPath
+			? await this.getHiddenUserFacingModelIds(dbPath)
+			: new Set<string>();
+		const modelLookup = dbPath
+			? await this.buildUserFacingModelLookup(dbPath)
+			: new Map<string, AvailableModelOption>();
+		const sessionScopedModelKeys = dbPath
+			? await this.getSessionScopedModelKeys(dbPath)
+			: new Set<string>();
+		const cachedUserFacingModels = dbPath
+			? await this.getCachedNonCopilotUserFacingModels(dbPath, hiddenModelIds)
+			: [];
+
+		const liveModels = this.normalizeAvailableModels(models
+			.filter(model => !this.isSessionScopedLanguageModel(sessionScopedModelKeys, model))
+			.map(model => ({
+				model,
+				option: this.resolveUserFacingLanguageModelOption(model, modelLookup),
+			}))
+			.filter(({ model, option }) => !this.isHiddenUserFacingLanguageModel(hiddenModelIds, model, option.id))
+			.map(({ option }) => option));
+
+		const userFacingModels = this.mergeAvailableModelOptions(liveModels, cachedUserFacingModels);
+		if (dbPath) {
+			return await this.getCuratedUserFacingModels(dbPath, userFacingModels);
+		}
+
+		return userFacingModels;
+	}
+
+	/**
+	 * Build the set of `vendor/id` keys for models that are bound to a specific chat session
+	 * type (`targetChatSessionType`). VS Code excludes these from the general model picker and
+	 * only surfaces them inside a matching session, but the public `vscode.lm.selectChatModels()`
+	 * API still returns them without exposing `targetChatSessionType`, so they must be filtered
+	 * out using the cached metadata. Examples: `copilotcli/*`, `claude-code/*`.
+	 */
+	private async getSessionScopedModelKeys(dbPath: string): Promise<Set<string>> {
+		const cachedModelsRaw = await this.readStateItemValue(dbPath, 'chat.cachedLanguageModels.v2');
+		const cachedModels = this.parseJson<CachedLanguageModelEntry[]>(cachedModelsRaw);
+		const keys = new Set<string>();
+
+		for (const entry of cachedModels || []) {
+			const metadata = entry.metadata;
+			if (!metadata || !metadata.targetChatSessionType) {
+				continue;
+			}
+
+			const vendor = String(metadata.vendor || '').trim().toLowerCase();
+			const id = String(metadata.id || '').trim().toLowerCase();
+			const identifier = String(entry.identifier || '').trim().toLowerCase();
+			if (vendor && id) {
+				keys.add(`${vendor}/${id}`);
+			}
+			if (identifier) {
+				keys.add(identifier);
+			}
+		}
+
+		return keys;
+	}
+
+	/** Skip live models that VS Code binds to a specific chat session type (not general picker). */
+	private isSessionScopedLanguageModel(
+		sessionScopedModelKeys: Set<string>,
+		model: vscode.LanguageModelChat,
+	): boolean {
+		if (sessionScopedModelKeys.size === 0) {
+			return false;
+		}
+
+		const vendor = String(model.vendor || '').trim().toLowerCase();
+		const id = String(model.id || '').trim().toLowerCase();
+		const family = String(model.family || '').trim().toLowerCase();
+		const identifier = String((model as any).identifier || '').trim().toLowerCase();
+
+		return (!!vendor && !!id && sessionScopedModelKeys.has(`${vendor}/${id}`))
+			|| (!!vendor && !!family && sessionScopedModelKeys.has(`${vendor}/${family}`))
+			|| (!!identifier && sessionScopedModelKeys.has(identifier));
+	}
+
+	/** Mirror the VS Code model picker placement in a flat prompt-page select list. */
+	private async getCuratedUserFacingModels(
+		dbPath: string,
+		models: AvailableModelOption[],
+	): Promise<AvailableModelOption[]> {
+		const [pinnedRaw, recentRaw, controlRaw, copilotSkuRaw, currentRaw, currentLocalRaw] = await Promise.all([
+			this.readStateItemValue(dbPath, 'chatModelPinned'),
+			this.readStateItemValue(dbPath, 'chatModelRecentlyUsed'),
+			this.readStateItemValue(dbPath, 'chat.modelsControl'),
+			this.readStateItemValue(dbPath, 'extensionsAssignmentFilterProvider.copilotSku'),
+			this.readStateItemValue(dbPath, 'chat.currentLanguageModel.chat'),
+			this.readStateItemValue(dbPath, 'chat.currentLanguageModel.chat.local'),
+		]);
+		const lookup = this.buildAvailableModelOptionLookup(models);
+		const result: AvailableModelOption[] = [];
+		const seen = new Set<string>();
+		const pinnedIds = this.parseStringArray(pinnedRaw);
+		const recentIds = this.parseStringArray(recentRaw);
+		const pinnedSet = new Set(pinnedIds.map(id => id.trim().toLowerCase()).filter(Boolean));
+		const pushOption = (option: AvailableModelOption | undefined): void => {
+			if (!option?.id || this.isAutoModelIdentifier(option.id)) {
+				return;
+			}
+
+			const seenKeys = this.getModelPickerPlacementSeenKeys(option.id);
+			if (seenKeys.length === 0 || seenKeys.some(key => seen.has(key))) {
+				return;
+			}
+
+			seenKeys.forEach(key => seen.add(key));
+			result.push(option);
+		};
+		const pushById = (id: string): void => pushOption(this.resolveAvailableModelOption(lookup, id));
+
+		for (const id of pinnedIds) {
+			pushById(id);
+		}
+
+		pushById(currentRaw);
+		pushById(currentLocalRaw);
+
+		for (const id of recentIds.filter(id => !pinnedSet.has(id.trim().toLowerCase())).slice(0, 3)) {
+			pushById(id);
+		}
+
+		const modelsControl = this.parseJson<ChatModelsControl>(controlRaw);
+		if (modelsControl) {
+			for (const entry of this.getVisibleControlEntries(modelsControl, this.resolveCopilotTier(copilotSkuRaw))) {
+				pushById(entry.id || '');
+			}
+		}
+
+		for (const model of this.sortModelPickerOtherModels(models)) {
+			pushOption(model);
+		}
+
+		return result.length > 0 ? result : this.normalizeAvailableModels(models);
+	}
+
+	/** Build placement keys matching VS Code picker duplicate suppression. */
+	private getModelPickerPlacementSeenKeys(modelId: string): string[] {
+		const raw = String(modelId || '').trim().toLowerCase();
+		if (!raw) {
+			return [];
+		}
+
+		const keys = [this.getModelOptionSeenKey(raw)];
+		if (raw.startsWith('copilot/') || raw.startsWith('customendpoint/')) {
+			keys.push(this.normalizeModelInput(raw));
+		}
+
+		return Array.from(new Set(keys.map(key => key.trim().toLowerCase()).filter(Boolean)));
+	}
+
+	/** Sort remaining Other Models in the same quiet alphabetical style as VS Code. */
+	private sortModelPickerOtherModels(models: AvailableModelOption[]): AvailableModelOption[] {
+		return [...models].sort((left, right) => {
+			const leftVendor = this.getModelOptionVendorRank(left.id);
+			const rightVendor = this.getModelOptionVendorRank(right.id);
+			if (leftVendor !== rightVendor) {
+				return leftVendor - rightVendor;
+			}
+
+			return left.name.localeCompare(right.name, 'ru', { sensitivity: 'base' });
+		});
+	}
+
+	/** Keep Copilot Other Models before external providers, matching VS Code bucket order. */
+	private getModelOptionVendorRank(modelId: string): number {
+		return String(modelId || '').trim().toLowerCase().startsWith('copilot/') ? 0 : 1;
+	}
+
+	/** Read hidden user-facing model identifiers from the VS Code picker state. */
+	private async getHiddenUserFacingModelIds(dbPath: string): Promise<Set<string>> {
+		const raw = await this.readStateItemValue(dbPath, 'chatModelVisibility');
+		const parsed = this.parseJson<ChatModelVisibilityState>(raw);
+		const hidden = new Set<string>();
+
+		for (const modelId of parsed?.hiddenModels || []) {
+			this.addHiddenUserFacingModelVariants(hidden, modelId);
+		}
+
+		return hidden;
+	}
+
+	/** Index VS Code hidden model ids with and without provider labels. */
+	private addHiddenUserFacingModelVariants(hiddenModelIds: Set<string>, modelId: string): void {
+		const normalized = String(modelId || '').trim().toLowerCase();
+		if (!normalized) {
+			return;
+		}
+
+		this.addModelIdMatchKey(hiddenModelIds, normalized);
+		const parts = this.splitModelIdentifierParts(normalized);
+		if (parts.length < 2) {
+			return;
+		}
+
+		const vendor = parts[0];
+		const modelTail = parts[parts.length - 1];
+		if (parts.length >= 3) {
+			this.addModelIdMatchKey(hiddenModelIds, [vendor, ...parts.slice(2)].join('/'));
+		}
+
+		if (modelTail) {
+			this.addModelIdMatchKey(hiddenModelIds, `${vendor}/${modelTail}`);
+		}
+	}
+
+	/** Unify version separators so `claude-sonnet-4.6` matches VS Code's persisted `claude-sonnet-4-6`. */
+	private normalizeModelIdSeparators(value: string): string {
+		return String(value || '').trim().toLowerCase().replace(/[._]/g, '-');
+	}
+
+	/** Register a model id together with a separator-normalized variant for robust hidden matching. */
+	private addModelIdMatchKey(target: Set<string>, value: string): void {
+		const normalized = String(value || '').trim().toLowerCase();
+		if (!normalized) {
+			return;
+		}
+
+		target.add(normalized);
+		const unified = this.normalizeModelIdSeparators(normalized);
+		if (unified && unified !== normalized) {
+			target.add(unified);
+		}
+	}
+
+	/** Skip live models that the VS Code model picker currently marks as hidden. */
+	private isHiddenUserFacingLanguageModel(
+		hiddenModelIds: Set<string>,
+		model: vscode.LanguageModelChat,
+		resolvedIdentifier?: string,
+	): boolean {
+		if (hiddenModelIds.size === 0) {
+			return false;
+		}
+
+		const candidates = new Set<string>();
+		const vendor = String(model.vendor || '').trim().toLowerCase();
+		this.addHiddenModelMatchCandidates(candidates, resolvedIdentifier || '', vendor);
+		this.addHiddenModelMatchCandidates(candidates, model.id, vendor);
+		this.addHiddenModelMatchCandidates(candidates, model.family, vendor);
+		this.addHiddenModelMatchCandidates(candidates, String((model as any).identifier || ''), vendor);
+
+		return this.hasHiddenModelMatch(hiddenModelIds, candidates);
+	}
+
+	/** Skip cached picker options that the VS Code model picker marks as hidden. */
+	private isHiddenUserFacingModelOption(
+		hiddenModelIds: Set<string>,
+		model: AvailableModelOption,
+		vendor?: string,
+	): boolean {
+		if (hiddenModelIds.size === 0) {
+			return false;
+		}
+
+		const candidates = new Set<string>();
+		this.addHiddenModelMatchCandidates(candidates, model.id, vendor);
+		return this.hasHiddenModelMatch(hiddenModelIds, candidates);
+	}
+
+	/** Add comparable model ids for hidden-state matching. */
+	private addHiddenModelMatchCandidates(candidates: Set<string>, rawValue: string, rawVendor?: string): void {
+		const normalized = String(rawValue || '').trim().toLowerCase();
+		if (!normalized) {
+			return;
+		}
+
+		this.addModelIdMatchKey(candidates, normalized);
+		const vendor = String(rawVendor || '').trim().toLowerCase();
+		const parts = this.splitModelIdentifierParts(normalized);
+		const normalizedInput = this.normalizeModelInput(normalized);
+
+		if (!vendor) {
+			return;
+		}
+
+		if (parts[0] === vendor) {
+			if (parts.length >= 3) {
+				this.addModelIdMatchKey(candidates, [vendor, ...parts.slice(2)].join('/'));
+			}
+
+			const modelTail = parts[parts.length - 1];
+			if (modelTail) {
+				this.addModelIdMatchKey(candidates, `${vendor}/${modelTail}`);
+			}
+			return;
+		}
+
+		this.addModelIdMatchKey(candidates, `${vendor}/${normalized}`);
+		if (normalizedInput) {
+			this.addModelIdMatchKey(candidates, `${vendor}/${normalizedInput}`);
+		}
+	}
+
+	/** Return true when any candidate is present in the hidden model index. */
+	private hasHiddenModelMatch(hiddenModelIds: Set<string>, candidates: Set<string>): boolean {
+		for (const candidate of candidates) {
+			if (hiddenModelIds.has(candidate)) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/** Split a model identifier into non-empty slash-delimited parts. */
+	private splitModelIdentifierParts(value: string): string[] {
+		return String(value || '')
+			.trim()
+			.toLowerCase()
+			.split('/')
+			.map(part => part.trim())
+			.filter(Boolean);
+	}
+
+	/** Resolve a live API model to the full VS Code model identifier when possible. */
+	private resolveUserFacingLanguageModelOption(
+		model: vscode.LanguageModelChat,
+		lookup: Map<string, AvailableModelOption>,
+	): AvailableModelOption {
+		const vendor = String(model.vendor || '').trim();
+		const rawIdentifier = String((model as any).identifier || '').trim();
+		const resolved = this.resolveUserFacingLookupOption(lookup, {
+			vendor,
+			id: model.id,
+			family: model.family,
+			name: model.name,
+			identifier: rawIdentifier,
+		});
+		const id = resolved?.id || this.getPreferredModelOptionId(model.id, rawIdentifier);
+
+		return {
+			id,
+			name: (model.name || '').trim() || resolved?.name || model.family || model.id || id,
+		};
+	}
+
+	/** Upgrade cached or control options to full identifiers from the user-facing cache. */
+	private resolveAvailableModelOptionIdentifier(
+		option: AvailableModelOption,
+		lookup: Map<string, AvailableModelOption>,
+		vendor?: string,
+	): AvailableModelOption {
+		const resolved = this.resolveUserFacingLookupOption(lookup, {
+			vendor,
+			id: option.id,
+			family: option.id,
+			name: option.name,
+			identifier: option.id,
+		});
+		if (!resolved || resolved.id === option.id) {
+			return option;
+		}
+
+		return {
+			id: resolved.id,
+			name: option.name || resolved.name,
+		};
+	}
+
+	/** Build a lookup from VS Code cached model ids to full user-facing identifiers. */
+	private async buildUserFacingModelLookup(dbPath: string): Promise<Map<string, AvailableModelOption>> {
+		const cachedModelsRaw = await this.readStateItemValue(dbPath, 'chat.cachedLanguageModels.v2');
+		const cachedModels = this.parseJson<CachedLanguageModelEntry[]>(cachedModelsRaw);
+		const lookup = new Map<string, AvailableModelOption>();
+
+		for (const entry of cachedModels || []) {
+			const metadata = entry.metadata;
+			const identifier = String(entry.identifier || '').trim();
+			if (!metadata || !identifier || metadata.isUserSelectable === false || metadata.targetChatSessionType) {
+				continue;
+			}
+
+			const option: AvailableModelOption = {
+				id: this.getPreferredModelOptionId(metadata.id || '', identifier),
+				name: String(metadata.name || '').trim() || metadata.family || identifier,
+			};
+			for (const key of this.getUserFacingModelLookupKeys({
+				vendor: metadata.vendor,
+				id: metadata.id,
+				family: metadata.family,
+				name: metadata.name,
+				identifier,
+			})) {
+				this.registerUserFacingLookupOption(lookup, key, option);
+			}
+		}
+
+		return lookup;
+	}
+
+	/** Use cache v2 as a fallback for visible non-Copilot providers missing from the public LM API. */
+	private async getCachedNonCopilotUserFacingModels(
+		dbPath: string,
+		hiddenModelIds: Set<string>,
+	): Promise<AvailableModelOption[]> {
+		const cachedModelsRaw = await this.readStateItemValue(dbPath, 'chat.cachedLanguageModels.v2');
+		const cachedModels = this.parseJson<CachedLanguageModelEntry[]>(cachedModelsRaw);
+		const result: AvailableModelOption[] = [];
+		const seenIds = new Set<string>();
+
+		for (const entry of cachedModels || []) {
+			if (!this.isUserFacingCacheEntry(entry) || this.isCopilotCacheEntry(entry)) {
+				continue;
+			}
+
+			const metadata = entry.metadata!;
+			const vendor = String(metadata.vendor || '').trim().toLowerCase();
+			const id = this.getPreferredModelOptionId(metadata.id || '', entry.identifier);
+			const option: AvailableModelOption = {
+				id,
+				name: String(metadata.name || '').trim() || metadata.family || id,
+			};
+			const seenKey = this.getModelOptionSeenKey(option.id);
+			if (!option.id || this.isAutoModelIdentifier(option.id) || seenIds.has(seenKey)) {
+				continue;
+			}
+
+			if (this.isHiddenUserFacingModelOption(hiddenModelIds, option, vendor)) {
+				continue;
+			}
+
+			seenIds.add(seenKey);
+			result.push(option);
+		}
+
+		return this.normalizeAvailableModels(result);
+	}
+
+	/** Build lookup keys for resolving pinned/recent/control ids to options. */
+	private buildAvailableModelOptionLookup(models: AvailableModelOption[]): Map<string, AvailableModelOption> {
+		const lookup = new Map<string, AvailableModelOption>();
+		const register = (key: string, option: AvailableModelOption): void => {
+			const normalized = String(key || '').trim().toLowerCase();
+			if (normalized && !lookup.has(normalized)) {
+				lookup.set(normalized, option);
+			}
+		};
+
+		for (const option of models) {
+			const id = String(option.id || '').trim();
+			if (!id) {
+				continue;
+			}
+
+			register(id, option);
+			if (id.toLowerCase().startsWith('copilot/')) {
+				const copilotId = id.slice('copilot/'.length);
+				register(copilotId, option);
+				register(this.normalizeModelInput(copilotId), option);
+			}
+		}
+
+		return lookup;
+	}
+
+	/** Resolve one stored picker id to an available option. */
+	private resolveAvailableModelOption(
+		lookup: Map<string, AvailableModelOption>,
+		id: string,
+	): AvailableModelOption | undefined {
+		const normalized = String(id || '').trim().toLowerCase();
+		if (!normalized) {
+			return undefined;
+		}
+
+		const keys = [
+			normalized,
+			this.normalizeModelInput(normalized),
+			`copilot/${normalized}`,
+			`copilot/${this.normalizeModelInput(normalized)}`,
+		]
+			.map(key => key.trim().toLowerCase())
+			.filter(Boolean);
+
+		for (const key of keys) {
+			const option = lookup.get(key);
+			if (option) {
+				return option;
+			}
+		}
+
+		return undefined;
+	}
+
+	/** Parse a persisted string array safely. */
+	private parseStringArray(raw: string): string[] {
+		const parsed = this.parseJson<unknown>(raw);
+		return Array.isArray(parsed)
+			? parsed.map(value => String(value || '').trim()).filter(Boolean)
+			: [];
+	}
+
+	/** Resolve a cached full-identifier option by stable model fields. */
+	private resolveUserFacingLookupOption(
+		lookup: Map<string, AvailableModelOption>,
+		input: { vendor?: string; id?: string; family?: string; name?: string; identifier?: string },
+	): AvailableModelOption | undefined {
+		for (const key of this.getUserFacingModelLookupKeys(input)) {
+			const option = lookup.get(key);
+			if (option) {
+				return option;
+			}
+		}
+
+		return undefined;
+	}
+
+	/** Create lookup keys that preserve provider identity before falling back to broad ids. */
+	private getUserFacingModelLookupKeys(input: {
+		vendor?: string;
+		id?: string;
+		family?: string;
+		name?: string;
+		identifier?: string;
+	}): string[] {
+		const vendor = String(input.vendor || '').trim().toLowerCase();
+		const id = String(input.id || '').trim().toLowerCase();
+		const family = String(input.family || '').trim().toLowerCase();
+		const name = String(input.name || '').trim().toLowerCase();
+		const identifier = String(input.identifier || '').trim().toLowerCase();
+		const keys: string[] = [];
+		const add = (value: string): void => {
+			const normalized = value.trim().toLowerCase();
+			if (normalized && !keys.includes(normalized)) {
+				keys.push(normalized);
+			}
+		};
+
+		add(identifier);
+		if (vendor && id && name) {
+			add(`${vendor}\u0000${id}\u0000${name}`);
+		}
+		if (vendor && family && name) {
+			add(`${vendor}\u0000${family}\u0000${name}`);
+		}
+		if (vendor && name) {
+			add(`${vendor}\u0000${name}`);
+		}
+		if (vendor && id) {
+			add(`${vendor}/${id}`);
+		}
+		if (vendor && family) {
+			add(`${vendor}/${family}`);
+		}
+		if (vendor === 'copilot') {
+			add(id);
+			add(family);
+		}
+
+		return keys;
+	}
+
+	/** Register a lookup option, preferring full identifiers over bare ids. */
+	private registerUserFacingLookupOption(
+		lookup: Map<string, AvailableModelOption>,
+		key: string,
+		option: AvailableModelOption,
+	): void {
+		const normalizedKey = key.trim().toLowerCase();
+		if (!normalizedKey) {
+			return;
+		}
+
+		const existing = lookup.get(normalizedKey);
+		if (!existing || (option.id.includes('/') && !existing.id.includes('/'))) {
+			lookup.set(normalizedKey, option);
+		}
+	}
+
+	/** Return true for cache entries that can appear in a user-facing model picker. */
+	private isUserFacingCacheEntry(entry: CachedLanguageModelEntry): boolean {
+		const metadata = entry.metadata;
+		if (!metadata || !String(entry.identifier || '').trim() || metadata.targetChatSessionType) {
+			return false;
+		}
+
+		return metadata.isUserSelectable !== false;
+	}
+
+	/** Return true when a cached entry belongs to the Copilot provider. */
+	private isCopilotCacheEntry(entry: CachedLanguageModelEntry): boolean {
+		const metadata = entry.metadata;
+		const vendor = String(metadata?.vendor || '').trim().toLowerCase();
+		const identifier = String(entry.identifier || '').trim().toLowerCase();
+		return vendor === 'copilot' || identifier.startsWith('copilot/');
+	}
+
+	/** Read the full chat-model catalog that the prompt-page picker should expose. */
+	private async selectUserFacingChatModels(): Promise<vscode.LanguageModelChat[]> {
 		try {
-			models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+			return await vscode.lm.selectChatModels();
 		} catch {
-			// Keep going: cached Copilot model state is still useful for the picker.
+			try {
+				return await vscode.lm.selectChatModels({ vendor: 'copilot' });
+			} catch {
+				return [];
+			}
 		}
-
-		const liveModels = this.normalizeAvailableModels(models.map(model => ({
-			id: this.getPreferredModelOptionId(model.id, String((model as any).identifier || '')),
-			name: (model.name || '').trim() || model.family || model.id,
-		})));
-
-		const visibleModels = await this.getVisibleCopilotModels(models);
-		if (visibleModels.length > 0) {
-			return this.mergeAvailableModelOptions(visibleModels, liveModels);
-		}
-
-		return liveModels;
 	}
 
 	async getAvailableFreeModels(): Promise<AvailableModelOption[]> {
@@ -1213,7 +1806,7 @@ export class AiService {
 				(model?.id || metadata.id || '').trim(),
 				String((model as any)?.identifier || entry.identifier || '').trim(),
 			);
-			const seenKey = (this.normalizeModelInput(id) || id).toLowerCase();
+			const seenKey = this.getModelOptionSeenKey(id);
 			if (!id || this.isAutoModelIdentifier(id) || seenIds.has(seenKey)) {
 				continue;
 			}
@@ -1261,7 +1854,7 @@ export class AiService {
 
 			const metadata = entry.metadata!;
 			const id = this.getPreferredModelOptionId(metadata.id || '', entry.identifier);
-			const seenKey = (this.normalizeModelInput(id) || id).toLowerCase();
+			const seenKey = this.getModelOptionSeenKey(id);
 			if (!id || this.isAutoModelIdentifier(id) || seenIds.has(seenKey)) {
 				continue;
 			}
@@ -1333,7 +1926,7 @@ export class AiService {
 
 		for (const model of models) {
 			const id = String(model.id || '').trim();
-			const seenKey = (this.normalizeModelInput(id) || id).toLowerCase();
+			const seenKey = this.getModelOptionSeenKey(id);
 			if (!id || this.isAutoModelIdentifier(id) || seen.has(seenKey)) {
 				continue;
 			}
@@ -1363,7 +1956,7 @@ export class AiService {
 				return;
 			}
 
-			const seenKey = (this.normalizeModelInput(option.id) || option.id).toLowerCase();
+			const seenKey = this.getModelOptionSeenKey(option.id);
 			if (!option.id || this.isAutoModelIdentifier(option.id) || seenIds.has(seenKey)) {
 				return;
 			}
@@ -1435,7 +2028,7 @@ export class AiService {
 
 		try {
 			const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
-			const { stdout } = await execFileAsync(sqlitePath, [dbPath, sql]);
+			const { stdout } = await execFileAsync(sqlitePath, ['-readonly', dbPath, sql], { timeout: 4000 });
 			return { ok: true, value: (stdout || '').trim() };
 		} catch {
 			return { ok: false, value: '' };
@@ -1497,15 +2090,68 @@ export class AiService {
 	}
 
 	private async resolveStateDbPath(): Promise<string | null> {
+		if (this.resolvedStateDbPath !== undefined) {
+			return this.resolvedStateDbPath;
+		}
+
+		const existing: string[] = [];
 		for (const candidate of this.getStateDbCandidates()) {
 			try {
 				await vscode.workspace.fs.stat(vscode.Uri.file(candidate));
-				return candidate;
+				existing.push(candidate);
 			} catch {
 				// continue
 			}
 		}
-		return null;
+
+		const chosen = await this.pickStateDbWithPickerState(existing);
+		this.resolvedStateDbPath = chosen;
+		return chosen;
+	}
+
+	/**
+	 * Choose the `state.vscdb` that actually holds the chat model picker state.
+	 *
+	 * The chat model visibility lives in VS Code's PROFILE storage, so when several
+	 * candidate databases exist (custom profiles, an Extension Development Host with a
+	 * fresh user-data dir, etc.) the first existing file can be an empty database with no
+	 * hidden-model state. Returning that empty database would silently disable hidden
+	 * filtering and leak every model into the picker, so prefer the candidate that
+	 * actually carries `chatModelVisibility` data.
+	 */
+	private async pickStateDbWithPickerState(existing: string[]): Promise<string | null> {
+		if (existing.length === 0) {
+			return null;
+		}
+
+		if (existing.length === 1) {
+			return existing[0];
+		}
+
+		let best: string | null = null;
+		let bestMtime = -1;
+		for (const candidate of existing) {
+			const raw = await this.readStateItemValue(candidate, 'chatModelVisibility');
+			const parsed = this.parseJson<ChatModelVisibilityState>(raw);
+			const hasPickerState = Array.isArray(parsed?.hiddenModels) && parsed!.hiddenModels!.length > 0;
+			if (!hasPickerState) {
+				continue;
+			}
+
+			let mtime = 0;
+			try {
+				mtime = fs.statSync(candidate).mtimeMs;
+			} catch {
+				mtime = 0;
+			}
+
+			if (mtime > bestMtime) {
+				bestMtime = mtime;
+				best = candidate;
+			}
+		}
+
+		return best ?? existing[0];
 	}
 
 	private getStateDbCandidates(): string[] {
@@ -1516,28 +2162,47 @@ export class AiService {
 		}
 
 		const home = os.homedir();
+		const userDirs: string[] = [];
 		if (process.platform === 'linux') {
-			candidates.push(
-				path.join(home, '.config', 'Code', 'User', 'globalStorage', 'state.vscdb'),
-				path.join(home, '.config', 'Code - Insiders', 'User', 'globalStorage', 'state.vscdb'),
-				path.join(home, '.config', 'VSCodium', 'User', 'globalStorage', 'state.vscdb'),
+			userDirs.push(
+				path.join(home, '.config', 'Code', 'User'),
+				path.join(home, '.config', 'Code - Insiders', 'User'),
+				path.join(home, '.config', 'VSCodium', 'User'),
 			);
 		} else if (process.platform === 'darwin') {
-			candidates.push(
-				path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'state.vscdb'),
-				path.join(home, 'Library', 'Application Support', 'Code - Insiders', 'User', 'globalStorage', 'state.vscdb'),
-				path.join(home, 'Library', 'Application Support', 'VSCodium', 'User', 'globalStorage', 'state.vscdb'),
+			userDirs.push(
+				path.join(home, 'Library', 'Application Support', 'Code', 'User'),
+				path.join(home, 'Library', 'Application Support', 'Code - Insiders', 'User'),
+				path.join(home, 'Library', 'Application Support', 'VSCodium', 'User'),
 			);
 		} else if (process.platform === 'win32') {
 			const appData = process.env.APPDATA || '';
-			candidates.push(
-				path.join(appData, 'Code', 'User', 'globalStorage', 'state.vscdb'),
-				path.join(appData, 'Code - Insiders', 'User', 'globalStorage', 'state.vscdb'),
-				path.join(appData, 'VSCodium', 'User', 'globalStorage', 'state.vscdb'),
+			userDirs.push(
+				path.join(appData, 'Code', 'User'),
+				path.join(appData, 'Code - Insiders', 'User'),
+				path.join(appData, 'VSCodium', 'User'),
 			);
 		}
 
+		for (const userDir of userDirs) {
+			candidates.push(path.join(userDir, 'globalStorage', 'state.vscdb'));
+			candidates.push(...this.getProfileStateDbCandidates(userDir));
+		}
+
 		return Array.from(new Set(candidates.filter(Boolean)));
+	}
+
+	/** Collect per-profile `state.vscdb` paths because chat picker state is PROFILE-scoped. */
+	private getProfileStateDbCandidates(userDir: string): string[] {
+		const profilesDir = path.join(userDir, 'profiles');
+		try {
+			return fs.readdirSync(profilesDir, { withFileTypes: true })
+				.filter(entry => entry.isDirectory())
+				.map(entry => path.join(profilesDir, entry.name, 'state.vscdb'))
+				.filter(candidate => fs.existsSync(candidate));
+		} catch {
+			return [];
+		}
 	}
 
 	private resolveSqliteBinaryPath(): string | null {
@@ -1859,7 +2524,7 @@ export class AiService {
 		];
 
 		try {
-			const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+			const models = await this.selectUserFacingChatModels();
 			const matched = this.findBestModelMatch(models, modelId);
 
 			if (matched) {
@@ -1899,7 +2564,7 @@ export class AiService {
 		const normalizedInput = this.normalizeModelInput(modelId);
 
 		try {
-			const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+			const models = await this.selectUserFacingChatModels();
 			const matched = this.findBestModelMatch(models, modelId);
 			if (matched) {
 				return matched.family || modelId;
@@ -1925,7 +2590,7 @@ export class AiService {
 		}
 
 		try {
-			const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+			const models = await this.selectUserFacingChatModels();
 			const matched = this.findBestModelMatch(models, modelId);
 			if (matched) {
 				candidates.unshift(matched.id);
@@ -1963,7 +2628,7 @@ export class AiService {
 		const normalizedInput = this.normalizeModelInput(modelId);
 
 		try {
-			const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+			const models = await this.selectUserFacingChatModels();
 			const matched = this.findBestModelMatch(models, modelId);
 			if (matched) {
 				const selector: vscode.LanguageModelChatSelector = {
@@ -1985,10 +2650,7 @@ export class AiService {
 			// ignore and fallback
 		}
 
-		return {
-			vendor: 'copilot',
-			id: normalizedInput,
-		};
+		return this.buildFallbackModelSelector(modelId, normalizedInput);
 	}
 
 	/** Resolve whether requested model exists in current Copilot environment */
@@ -1997,7 +2659,7 @@ export class AiService {
 			return { matched: false };
 		}
 		try {
-			const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+			const models = await this.selectUserFacingChatModels();
 			const matched = this.findBestModelMatch(models, modelId);
 			if (matched) {
 				return {
@@ -2030,7 +2692,7 @@ export class AiService {
 		}
 
 		try {
-			const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+			const models = await this.selectUserFacingChatModels();
 			const matched = this.findBestModelMatch(models, modelId);
 			if (matched) {
 				const identifier = String((matched as any).identifier || '').trim();
@@ -2046,6 +2708,11 @@ export class AiService {
 			// ignore and fallback
 		}
 
+		const raw = String(modelId || '').trim();
+		if (raw.includes('/')) {
+			return raw;
+		}
+
 		const normalized = this.normalizeModelInput(modelId);
 		if (!normalized) {
 			return modelId;
@@ -2054,6 +2721,33 @@ export class AiService {
 			return normalized;
 		}
 		return `copilot/${normalized}`;
+	}
+
+	/** Build a safe selector fallback from a stored model identifier. */
+	private buildFallbackModelSelector(
+		modelId: string,
+		normalizedInput: string,
+	): vscode.LanguageModelChatSelector | undefined {
+		const raw = String(modelId || '').trim();
+		if (!raw && !normalizedInput) {
+			return undefined;
+		}
+
+		if (raw.includes('/')) {
+			const parts = raw.split('/').map(part => part.trim()).filter(Boolean);
+			const vendor = parts[0] || undefined;
+			const terminalId = parts[parts.length - 1] || normalizedInput || raw;
+			return {
+				vendor,
+				id: terminalId,
+				family: terminalId,
+			};
+		}
+
+		return {
+			vendor: 'copilot',
+			id: normalizedInput,
+		};
 	}
 
 	/**
@@ -2151,10 +2845,28 @@ export class AiService {
 
 	private getPreferredModelOptionId(rawId: string, rawIdentifier?: string): string {
 		const identifier = String(rawIdentifier || '').trim();
-		if (identifier.toLowerCase().startsWith('copilot/')) {
+		if (identifier.includes('/') && !this.isAutoModelIdentifier(identifier)) {
 			return identifier;
 		}
 		return String(rawId || '').trim() || identifier;
+	}
+
+	/** Keep custom-endpoint identifiers unique while collapsing Copilot aliases. */
+	private getModelOptionSeenKey(value: string): string {
+		const raw = String(value || '').trim().toLowerCase();
+		if (!raw) {
+			return '';
+		}
+
+		if (raw.startsWith('copilot/')) {
+			return this.normalizeModelInput(raw) || raw;
+		}
+
+		if (raw.includes('/')) {
+			return raw;
+		}
+
+		return this.normalizeModelInput(raw) || raw;
 	}
 
 	private isAutoModelIdentifier(value: string): boolean {

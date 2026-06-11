@@ -10,6 +10,7 @@ import {
   type PromptStatus,
 } from '../../types/prompt';
 import { applyPromptConfigSnapshotToPrompt, diffPromptConfigSyncFields } from '../../utils/promptExternalSync.js';
+import { isKeepCurrentChatModel } from '../../constants/ai.js';
 import { PromptDetailOverlay } from './components/PromptDetailOverlay';
 import { trackerButtonStyles } from './trackerButtonStyles';
 
@@ -558,7 +559,7 @@ export const TrackerApp: React.FC = () => {
                           <div style={styles.metaRow}><strong>№</strong> {prompt.taskNumber || '—'}</div>
                           <div style={styles.metaRow}><strong>{t('tracker.projects')}</strong> {prompt.projects.length ? prompt.projects.join(', ') : '—'}</div>
                           <div style={styles.cardFooterRow}>
-                            <span style={styles.cardMetaChip}>{prompt.favorite ? '★' : '☆'} {prompt.model || t('tracker.detail.empty')}</span>
+                            <span style={styles.cardMetaChip}>{prompt.favorite ? '★' : '☆'} {isKeepCurrentChatModel(prompt.model) ? t('editor.aiModelKeep') : (prompt.model || t('tracker.detail.empty'))}</span>
                             <span style={styles.cardMetaChip}>{prompt.updatedAt ? new Date(prompt.updatedAt).toLocaleDateString('ru-RU') : '—'}</span>
                           </div>
                         </div>

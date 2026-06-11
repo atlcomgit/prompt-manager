@@ -185,13 +185,51 @@ test('buildPromptModelOptions sorts prompt AI models alphabetically', async () =
 				{ id: 'claude-sonnet-4', name: 'Claude Sonnet 4' },
 				{ id: 'gpt-4.1', name: 'GPT-4.1' },
 			],
-			'o3',
+			'gpt-4.1',
 		);
 
 		assert.deepEqual(
 			options.map(option => option.name),
-			['Claude Sonnet 4', 'GPT-4.1', 'GPT-5.5', 'o3'],
+			['Claude Sonnet 4', 'GPT-4.1', 'GPT-5.5'],
 		);
+	});
+});
+
+test('buildPromptModelOptions does not re-add hidden selected models after catalog load', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { buildPromptModelOptions } = await import('../src/webview/editor/EditorApp.js');
+		const options = buildPromptModelOptions(
+			[
+				{ id: 'copilot/gpt-5.5', name: 'GPT-5.5' },
+				{ id: 'customendpoint/tokenator/claude-fable-5', name: 'Tokenator - Claude Fable 5' },
+			],
+			'copilot/gemini-3.5-flash',
+		);
+
+		assert.deepEqual(
+			options.map(option => option.id),
+			['copilot/gpt-5.5', 'customendpoint/tokenator/claude-fable-5'],
+		);
+	});
+});
+
+test('buildPromptModelOptions keeps saved model while catalog is still empty', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { buildPromptModelOptions } = await import('../src/webview/editor/EditorApp.js');
+		const options = buildPromptModelOptions([], 'customendpoint/tokenator/claude-fable-5');
+
+		assert.deepEqual(options, [
+			{ id: 'customendpoint/tokenator/claude-fable-5', name: 'customendpoint/tokenator/claude-fable-5' },
+		]);
+	});
+});
+
+test('buildPromptModelOptions does not add the keep-current sentinel as a catalog entry', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { buildPromptModelOptions } = await import('../src/webview/editor/EditorApp.js');
+		const options = buildPromptModelOptions([], 'keep-current-model');
+
+		assert.deepEqual(options, []);
 	});
 });
 

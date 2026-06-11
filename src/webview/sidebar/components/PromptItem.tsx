@@ -5,6 +5,7 @@ import {
   resolveCompactPromptGridTemplateColumns,
   resolveCompactTaskColumnTrack,
 } from '../../../utils/sidebarCompactLayout.js';
+import { isKeepCurrentChatModel } from '../../../constants/ai.js';
 import { useT } from '../../shared/i18n';
 import {
   buildPromptStatusOptions,
@@ -454,7 +455,7 @@ export const PromptItem: React.FC<Props> = ({
                       ...(isSelected ? styles.metaBadgeSelected : styles.metaBadgeText),
                     }}
                   >
-                    {prompt.model}
+                    {isKeepCurrentChatModel(prompt.model) ? t('editor.aiModelKeep') : prompt.model}
                   </span>
                 </>
               )}

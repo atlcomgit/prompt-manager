@@ -89,12 +89,19 @@ import {
   resolvePromptChatLaunchPhase,
   resolvePromptChatLaunchStepStatesFromPhase,
   resolvePromptEditorExpandedSections,
+  resolvePromptProcessBodyScrollRestore,
   resolvePromptPlanPlaceholderState,
+  shouldDeferReportAutosave,
+  shouldPreserveLocalReportOnSave,
   shouldResetPromptChatLaunchTracking,
   shouldShowPromptChatLaunchBlock,
   togglePromptEditorSectionExpansion,
 } from '../../utils/promptEditorBehavior.js';
-import type { PromptChatLaunchPhase, PromptChatLaunchRenameState } from '../../utils/promptEditorBehavior.js';
+import type {
+  PromptChatLaunchPhase,
+  PromptChatLaunchRenameState,
+  PromptProcessBodyScrollSnapshot,
+} from '../../utils/promptEditorBehavior.js';
 import {
   mergeGitOverlaySnapshotPreservingOtherProjects,
   resolveGitOverlayBusyActionName,
@@ -105,6 +112,8 @@ import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, buildPromptDashboardDockerCompo
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
 import { KEEP_CURRENT_CHAT_MODEL, isKeepCurrentChatModel } from '../../constants/ai.js';
+
+export { shouldDeferReportAutosave, shouldPreserveLocalReportOnSave };
 
 const vscode = getVsCodeApi();
 type EditorBootWindow = Window & {
@@ -195,12 +204,6 @@ export const buildPromptModelOptions = (
     return left.id.localeCompare(right.id, 'ru', { sensitivity: 'base' });
   });
 };
-
-/** Defer prompt-wide save side effects while the inline report editor owns local typing state. */
-export const shouldDeferReportAutosave = (input: {
-  reportEditorFocused: boolean;
-  reportDraftActive: boolean;
-}): boolean => input.reportEditorFocused || input.reportDraftActive;
 
 /** Resolve which dashboard refresh request should run after one collapsed section is expanded. */
 export const resolvePromptDashboardExpandRequest = (input: {
@@ -358,25 +361,6 @@ export const mergePromptDashboardWidgetSnapshot = (input: {
   ) || nextSnapshot;
 };
 
-/** Keep the local report when a save response cannot yet be trusted as the active editor state. */
-export const shouldPreserveLocalReportOnSave = (input: {
-  reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config';
-  currentLocalReport: string;
-  incomingSavedReport: string;
-  reportEditorFocused: boolean;
-  reportDraftActive: boolean;
-}): boolean => {
-  if (input.reason !== 'save') {
-    return false;
-  }
-
-  return input.currentLocalReport !== input.incomingSavedReport
-    || shouldDeferReportAutosave({
-      reportEditorFocused: input.reportEditorFocused,
-      reportDraftActive: input.reportDraftActive,
-    });
-};
-
 /** Block derived implementing-time refresh once the prompt is explicitly closed. */
 export const canRequestImplementingTimeRecalc = (input: {
   promptId?: string;
@@ -419,6 +403,9 @@ const GIT_OVERLAY_STALE_TRACKED_REQUEST_MAX_AGE_MS = 15_000;
 const CHAT_LAUNCH_COMPLETION_HOLD_MS = 2000;
 const CHAT_LAUNCH_MIN_PHASE_VISIBLE_MS = 1000;
 const EDITOR_FORM_SHELL_WIDTH_PX = 840;
+const PROCESS_BODY_SCROLL_RESTORE_MAX_AGE_MS = 30_000;
+const PROCESS_BODY_SCROLL_RESTORE_MAX_ATTEMPTS = 8;
+const PROCESS_BODY_SCROLL_RESTORE_RETRY_MS = 80;
 // Keep blank switch placeholders visible long enough to make the target layout readable.
 const PROMPT_SWITCH_PLACEHOLDER_MIN_VISIBLE_MS = 450;
 const PROMPT_OPEN_SECTION_MEASURE_SETTLE_MS = 640;
@@ -775,6 +762,13 @@ export const EditorApp: React.FC = () => {
   const promptOpenLayoutSettleTimerRef = useRef<number | null>(null);
   const sectionMeasurementResumeTimerRef = useRef<number | null>(null);
   const sectionMeasurementSuspendedUntilRef = useRef(0);
+  const promptBodyScrollRef = useRef<HTMLDivElement | null>(null);
+  const processBodyScrollSnapshotRef = useRef<PromptProcessBodyScrollSnapshot | null>(null);
+  const processBodyScrollRestoreFrameRef = useRef<number | null>(null);
+  const processBodyScrollRestoreTimerRef = useRef<number | null>(null);
+  const processBodyScrollRestoreAttemptsRef = useRef(0);
+  const processBodyManualScrollVersionRef = useRef(0);
+  const processBodyProgrammaticScrollRef = useRef(false);
   const pendingPromptOpenMessageRef = useRef<any | null>(null);
   const handleMessageRef = useRef<(msg: any) => void>(() => undefined);
   const promptSwitchRestoreViewStateRef = useRef<EditorPromptViewState | null>(null);
@@ -814,6 +808,7 @@ export const EditorApp: React.FC = () => {
   const skipNextPromptDashboardAutoSnapshotRef = useRef(false);
   const isReportEditorFocusedRef = useRef(false);
   const isReportEditorDraftActiveRef = useRef(false);
+  const reportEditorCommitRef = useRef<(() => void) | null>(null);
   const bufferedPromptDashboardSnapshotMessageRef = useRef<any | null>(null);
   const bufferedPromptDashboardWidgetMessagesRef = useRef<Record<string, any>>({});
   const bufferedPromptDashboardAnalysisMessageRef = useRef<any | null>(null);
@@ -1115,6 +1110,144 @@ export const EditorApp: React.FC = () => {
     reportHeightLiveRef.current = reportHeight;
   }, [reportHeight]);
 
+  /** Cancel pending Process body scroll restore attempts without dropping the saved snapshot. */
+  const clearPendingProcessBodyScrollRestore = useCallback(() => {
+    if (processBodyScrollRestoreFrameRef.current !== null) {
+      window.cancelAnimationFrame(processBodyScrollRestoreFrameRef.current);
+      processBodyScrollRestoreFrameRef.current = null;
+    }
+    if (processBodyScrollRestoreTimerRef.current !== null) {
+      window.clearTimeout(processBodyScrollRestoreTimerRef.current);
+      processBodyScrollRestoreTimerRef.current = null;
+    }
+    processBodyScrollRestoreAttemptsRef.current = 0;
+  }, []);
+
+  /** Remember that the user intentionally changed Process body scroll during a restore window. */
+  const markProcessBodyScrollManualIntent = useCallback(() => {
+    if (activeTab !== 'process' || processBodyProgrammaticScrollRef.current) {
+      return;
+    }
+    processBodyManualScrollVersionRef.current += 1;
+  }, [activeTab]);
+
+  /** Capture the current Process body scroll before VS Code moves focus to another editor. */
+  const captureProcessBodyScroll = useCallback((reason: string) => {
+    const scrollContainer = promptBodyScrollRef.current;
+    if (!scrollContainer || activeTab !== 'process' || isPromptSwitchPlaceholderVisibleRef.current) {
+      return;
+    }
+
+    const currentPrompt = promptRef.current;
+    processBodyScrollSnapshotRef.current = {
+      promptId: currentPrompt.id || currentPromptIdRef.current || undefined,
+      promptUuid: currentPrompt.promptUuid || undefined,
+      activeTab,
+      top: scrollContainer.scrollTop,
+      left: scrollContainer.scrollLeft,
+      capturedAt: Date.now(),
+      manualScrollVersion: processBodyManualScrollVersionRef.current,
+    };
+    postEditorDebugLog('editor-layout', 'processBodyScroll.captured', {
+      reason,
+      promptId: currentPrompt.id || '__new__',
+      promptUuid: currentPrompt.promptUuid || '',
+      top: scrollContainer.scrollTop,
+      left: scrollContainer.scrollLeft,
+    });
+  }, [activeTab]);
+
+  /** Try applying the saved Process body scroll to the live container. */
+  const restoreProcessBodyScroll = useCallback((reason: string): boolean => {
+    const scrollContainer = promptBodyScrollRef.current;
+    if (!scrollContainer) {
+      return true;
+    }
+
+    const currentPrompt = promptRef.current;
+    const decision = resolvePromptProcessBodyScrollRestore({
+      snapshot: processBodyScrollSnapshotRef.current,
+      currentPromptId: currentPrompt.id || currentPromptIdRef.current,
+      currentPromptUuid: currentPrompt.promptUuid,
+      activeTab,
+      scrollHeight: scrollContainer.scrollHeight,
+      clientHeight: scrollContainer.clientHeight,
+      scrollWidth: scrollContainer.scrollWidth,
+      clientWidth: scrollContainer.clientWidth,
+      currentTop: scrollContainer.scrollTop,
+      currentLeft: scrollContainer.scrollLeft,
+      manualScrollVersion: processBodyManualScrollVersionRef.current,
+      placeholderVisible: isPromptSwitchPlaceholderVisibleRef.current,
+      now: Date.now(),
+      maxSnapshotAgeMs: PROCESS_BODY_SCROLL_RESTORE_MAX_AGE_MS,
+    });
+
+    if (!decision.shouldRestore) {
+      if (decision.reason !== 'placeholder-visible') {
+        postEditorDebugLog('editor-layout', 'processBodyScroll.restoreSkipped', {
+          reason,
+          decision: decision.reason,
+          targetTop: decision.top,
+          currentTop: scrollContainer.scrollTop,
+        });
+        if (decision.reason === 'already-current') {
+          return false;
+        }
+        if (decision.reason === 'identity-mismatch'
+          || decision.reason === 'manual-scroll'
+          || decision.reason === 'stale-snapshot') {
+          processBodyScrollSnapshotRef.current = null;
+        }
+        return true;
+      }
+      return false;
+    }
+
+    processBodyProgrammaticScrollRef.current = true;
+    scrollContainer.scrollTop = decision.top;
+    scrollContainer.scrollLeft = decision.left;
+    window.setTimeout(() => {
+      processBodyProgrammaticScrollRef.current = false;
+    }, 0);
+    postEditorDebugLog('editor-layout', 'processBodyScroll.restored', {
+      reason,
+      top: decision.top,
+      left: decision.left,
+      attempt: processBodyScrollRestoreAttemptsRef.current,
+    });
+    return false;
+  }, [activeTab]);
+
+  /** Restore Process body scroll after reveal/layout updates settle across a few animation frames. */
+  const scheduleProcessBodyScrollRestore = useCallback((reason: string) => {
+    if (!processBodyScrollSnapshotRef.current) {
+      return;
+    }
+
+    clearPendingProcessBodyScrollRestore();
+    const runRestoreAttempt = () => {
+      processBodyScrollRestoreFrameRef.current = null;
+      const finished = restoreProcessBodyScroll(reason);
+      if (finished) {
+        processBodyScrollRestoreAttemptsRef.current = 0;
+        return;
+      }
+
+      processBodyScrollRestoreAttemptsRef.current += 1;
+      if (processBodyScrollRestoreAttemptsRef.current >= PROCESS_BODY_SCROLL_RESTORE_MAX_ATTEMPTS) {
+        processBodyScrollRestoreAttemptsRef.current = 0;
+        return;
+      }
+
+      processBodyScrollRestoreTimerRef.current = window.setTimeout(() => {
+        processBodyScrollRestoreTimerRef.current = null;
+        processBodyScrollRestoreFrameRef.current = window.requestAnimationFrame(runRestoreAttempt);
+      }, PROCESS_BODY_SCROLL_RESTORE_RETRY_MS);
+    };
+
+    processBodyScrollRestoreFrameRef.current = window.requestAnimationFrame(runRestoreAttempt);
+  }, [clearPendingProcessBodyScrollRestore, restoreProcessBodyScroll]);
+
   useEffect(() => {
     postEditorDebugLog('editor-dashboard', 'bootstrap.collapsed-sections', {
       collapsedSections: initialPromptDashboardCollapsedSections,
@@ -1132,6 +1265,16 @@ export const EditorApp: React.FC = () => {
     reportEditorFocused: isReportEditorFocusedRef.current,
     reportDraftActive: isReportEditorDraftActiveRef.current,
   }), []);
+
+  /** Remember the inline report editor commit hook so Ctrl+S saves the latest blur-mode draft. */
+  const registerReportEditorCommit = useCallback((commit: (() => void) | null) => {
+    reportEditorCommitRef.current = commit;
+  }, []);
+
+  /** Flush pending report text before building the prompt save payload. */
+  const commitReportEditorDraftBeforeSave = useCallback(() => {
+    reportEditorCommitRef.current?.();
+  }, []);
 
   /** Track Docker dashboard actions independently so parallel buttons keep their own loaders. */
   const addPromptDashboardDockerBusyAction = useCallback((requestId: string, busyAction: string) => {
@@ -2587,19 +2730,22 @@ export const EditorApp: React.FC = () => {
     if (!(promptRef.current.promptUuid || '').trim()) {
       return;
     }
+    captureProcessBodyScroll('open-prompt-plan');
     vscode.postMessage({ type: 'openPromptPlanInEditor', promptId: prompt.id });
-  }, [prompt.id]);
+  }, [captureProcessBodyScroll, prompt.id]);
 
   const handleOpenPromptConfigInEditor = useCallback(() => {
     if (!(promptRef.current.promptUuid || '').trim()) {
       return;
     }
+    captureProcessBodyScroll('open-prompt-config');
     vscode.postMessage({ type: 'openPromptConfigInEditor', promptId: prompt.id });
-  }, [prompt.id]);
+  }, [captureProcessBodyScroll, prompt.id]);
 
   const handleOpenProjectInstructionsInEditor = useCallback(() => {
+    captureProcessBodyScroll('open-project-instructions');
     vscode.postMessage({ type: 'openProjectInstructionsInEditor' });
-  }, []);
+  }, [captureProcessBodyScroll]);
 
   useEffect(() => {
     const readyTimer = window.setTimeout(() => {
@@ -2707,9 +2853,10 @@ export const EditorApp: React.FC = () => {
         sectionMeasurementResumeTimerRef.current = null;
       }
       clearPromptPlanHydrationTimer();
+      clearPendingProcessBodyScrollRestore();
       clearPendingBackgroundRecalc();
     };
-  }, [clearPendingBackgroundRecalc, clearPromptOpenLayoutSettleTimer, clearPromptPlanHydrationTimer]);
+  }, [clearPendingBackgroundRecalc, clearPendingProcessBodyScrollRestore, clearPromptOpenLayoutSettleTimer, clearPromptPlanHydrationTimer]);
 
   const setPromptSwitchPlaceholderActive = useCallback((active: boolean) => {
     isPromptSwitchPlaceholderVisibleRef.current = active;
@@ -2762,6 +2909,8 @@ export const EditorApp: React.FC = () => {
         }
         enqueueEditorViewStateSave({ prompt: promptRef.current, flush: true, reason: 'before-switch' });
         finishPromptPlanHydration('switch');
+        clearPendingProcessBodyScrollRestore();
+        processBodyScrollSnapshotRef.current = null;
         clearPromptOpenLayoutSettleTimer();
         if (sectionMeasurementResumeTimerRef.current !== null) {
           window.clearTimeout(sectionMeasurementResumeTimerRef.current);
@@ -3036,6 +3185,7 @@ export const EditorApp: React.FC = () => {
             }
             setPromptDashboardRefreshVersion(version => version + 1);
             requestPromptPlanState(msg.prompt.id);
+            scheduleProcessBodyScrollRestore('prompt-sync');
             break;
           }
 
@@ -3054,6 +3204,7 @@ export const EditorApp: React.FC = () => {
             setIsLoaded(true);
             setPromptDashboardRefreshVersion(version => version + 1);
             requestPromptPlanState(msg.prompt.id);
+            scheduleProcessBodyScrollRestore('prompt-external-config');
             break;
           }
 
@@ -3082,6 +3233,7 @@ export const EditorApp: React.FC = () => {
             // Don't touch isDirty — user's pending edits stay intact
             setPromptDashboardRefreshVersion(version => version + 1);
             requestPromptPlanState(msg.prompt.id);
+            scheduleProcessBodyScrollRestore('prompt-ai-enrichment');
             break;
           }
 
@@ -3094,6 +3246,7 @@ export const EditorApp: React.FC = () => {
             incomingSavedReport,
             reportEditorFocused: isReportEditorFocusedRef.current,
             reportDraftActive: isReportEditorDraftActiveRef.current,
+            saveClearedDirty: activeSaveClearedDirtyRef.current,
           });
           const shouldMergeAfterSave = reason === 'save'
             && ((userChangedAfterSave && saveStartCounterRef.current > 0) || shouldPreserveLocalReportAfterSave);
@@ -3159,6 +3312,7 @@ export const EditorApp: React.FC = () => {
           }
           setPromptDashboardRefreshVersion(version => version + 1);
           requestPromptPlanState(msg.prompt.id);
+          scheduleProcessBodyScrollRestore('prompt-save');
         }
         break;
       case 'promptPlanUpdated':
@@ -3196,6 +3350,7 @@ export const EditorApp: React.FC = () => {
             exists: nextPlanState.exists,
             contentLength: nextPlanState.content.length,
           });
+          scheduleProcessBodyScrollRestore('prompt-plan-updated');
         }
         break;
       case 'promptSaved':
@@ -3354,6 +3509,7 @@ export const EditorApp: React.FC = () => {
           localReportDirtyRef.current = false;
         }
         hasBeenSavedRef.current = true;
+        scheduleProcessBodyScrollRestore('report-content-updated');
         break;
         }
       case 'contentEditorOpened':
@@ -3911,6 +4067,7 @@ export const EditorApp: React.FC = () => {
           break;
         }
         applyPromptDashboardSnapshotMessage(msg);
+        scheduleProcessBodyScrollRestore('dashboard-snapshot');
         break;
       case 'promptDashboardWidgetSnapshot':
         if (shouldBufferPromptDashboardMessages()) {
@@ -3925,6 +4082,7 @@ export const EditorApp: React.FC = () => {
           break;
         }
         applyPromptDashboardWidgetMessage(msg);
+        scheduleProcessBodyScrollRestore('dashboard-widget');
         break;
       case 'promptDashboardAnalysis':
         if (shouldBufferPromptDashboardMessages()) {
@@ -3938,6 +4096,7 @@ export const EditorApp: React.FC = () => {
           break;
         }
         applyPromptDashboardAnalysisMessage(msg);
+        scheduleProcessBodyScrollRestore('dashboard-analysis');
         break;
       case 'nextTaskNumber':
         setPrompt(prev => ({ ...prev, taskNumber: msg.taskNumber }));
@@ -4070,7 +4229,7 @@ export const EditorApp: React.FC = () => {
         setIsRecalculating(false);
         break;
     }
-  }, [applyPromptDashboardCollapsedSections, applyPromptDashboardSectionOrder, applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPromptDashboardDockerBusyActions, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releasePromptDashboardDockerBusyAction, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
+  }, [applyPromptDashboardCollapsedSections, applyPromptDashboardSectionOrder, applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPendingProcessBodyScrollRestore, clearPromptDashboardDockerBusyActions, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releasePromptDashboardDockerBusyAction, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, scheduleProcessBodyScrollRestore, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
 
   handleMessageRef.current = handleMessage;
 
@@ -4086,9 +4245,14 @@ export const EditorApp: React.FC = () => {
 
   useEffect(() => {
     const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        scheduleProcessBodyScrollRestore('page-visible');
+        return;
+      }
       if (document.visibilityState !== 'hidden') {
         return;
       }
+      captureProcessBodyScroll('page-hidden');
       enqueueEditorViewStateSaveRef.current({ flush: true, reason: 'page-hidden' });
       clearChatStartTimeout();
       startChatLockRef.current = false;
@@ -4102,19 +4266,32 @@ export const EditorApp: React.FC = () => {
     };
 
     const handlePageExit = () => {
+      captureProcessBodyScroll('page-exit');
       enqueueEditorViewStateSaveRef.current({ flush: true, reason: 'page-exit' });
+    };
+
+    const handleWindowBlur = () => {
+      captureProcessBodyScroll('window-blur');
+    };
+
+    const handleWindowFocus = () => {
+      scheduleProcessBodyScrollRestore('window-focus');
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('pagehide', handlePageExit);
     window.addEventListener('beforeunload', handlePageExit);
+    window.addEventListener('blur', handleWindowBlur);
+    window.addEventListener('focus', handleWindowFocus);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('pagehide', handlePageExit);
       window.removeEventListener('beforeunload', handlePageExit);
+      window.removeEventListener('blur', handleWindowBlur);
+      window.removeEventListener('focus', handleWindowFocus);
       enqueueEditorViewStateSaveRef.current({ flush: true, reason: 'effect-cleanup' });
     };
-  }, [clearChatStartTimeout, resetChatStartRequestTracking, resetStartChatPreflightTracking]);
+  }, [captureProcessBodyScroll, clearChatStartTimeout, resetChatStartRequestTracking, resetStartChatPreflightTracking, scheduleProcessBodyScrollRestore]);
 
   // Notify extension about dirty state changes
   useEffect(() => {
@@ -4839,8 +5016,9 @@ export const EditorApp: React.FC = () => {
   }, [addPromptDashboardDockerBusyAction]);
 
   const handlePromptDashboardOpenDockerComposeFile = useCallback((projectPath: string, composeFilePath: string) => {
+    captureProcessBodyScroll('dashboard-open-docker-compose-file');
     vscode.postMessage({ type: 'promptDashboardOpenDockerComposeFile', projectPath, composeFilePath });
-  }, []);
+  }, [captureProcessBodyScroll]);
 
   const handlePromptDashboardOpenDockerLogs = useCallback((containerId: string) => {
     vscode.postMessage({ type: 'promptDashboardOpenDockerLogs', containerId });
@@ -4851,8 +5029,9 @@ export const EditorApp: React.FC = () => {
   }, []);
 
   const handlePromptDashboardOpenFilePatch = useCallback((request: PromptDashboardFilePatchRequest) => {
+    captureProcessBodyScroll('dashboard-open-file-patch');
     vscode.postMessage({ type: 'promptDashboardOpenFilePatch', ...request });
-  }, []);
+  }, [captureProcessBodyScroll]);
 
   const handleGitOverlayEnsurePromptBranch = useCallback((trackedBranchesByProject: Record<string, string>) => {
     const normalizedTrackedBranchesByProject = normalizeTrackedBranchesByProject(trackedBranchesByProject);
@@ -4990,12 +5169,14 @@ export const EditorApp: React.FC = () => {
   }, [setGitOverlayBusyState, t]);
 
   const handleGitOverlayOpenFile = useCallback((project: string, filePath: string) => {
+    captureProcessBodyScroll('git-overlay-open-file');
     vscode.postMessage({ type: 'gitOverlayOpenFile', project, filePath });
-  }, []);
+  }, [captureProcessBodyScroll]);
 
   const handleGitOverlayOpenDiff = useCallback((project: string, filePath: string) => {
+    captureProcessBodyScroll('git-overlay-open-diff');
     vscode.postMessage({ type: 'gitOverlayOpenDiff', project, filePath });
-  }, []);
+  }, [captureProcessBodyScroll]);
 
   const handleGitOverlayDiscardFile = useCallback((project: string, filePath: string, group: GitOverlayChangeGroup, previousPath?: string) => {
     setGitOverlayBusyState(
@@ -5257,6 +5438,7 @@ export const EditorApp: React.FC = () => {
       source === 'status-change' || source === 'autosave' || source === 'manual'
         ? source
         : 'manual';
+    commitReportEditorDraftBeforeSave();
     const promptBase = promptOverride ?? promptRef.current;
     const updatedPrompt = buildPromptForSaveFrom(promptBase);
 
@@ -5275,7 +5457,7 @@ export const EditorApp: React.FC = () => {
       autoSaveTimerRef.current = null;
     }
 
-    dispatchPromptSave(updatedPrompt, normalizedSource);
+    dispatchPromptSave(updatedPrompt, normalizedSource, { clearDirty: true });
   };
 
   const handleResetReport = () => {
@@ -5329,8 +5511,9 @@ export const EditorApp: React.FC = () => {
     if (!file) {
       return;
     }
+    captureProcessBodyScroll('open-http-examples');
     vscode.postMessage({ type: 'openFile', file });
-  }, [prompt.httpExamples]);
+  }, [captureProcessBodyScroll, prompt.httpExamples]);
 
   const handlePickHttpExamples = useCallback(() => {
     vscode.postMessage({ type: 'pickHttpExamplesFile' });
@@ -6436,10 +6619,16 @@ export const EditorApp: React.FC = () => {
         />
 
         {/* Main content */}
-        <div style={{
-          ...styles.body,
-          ...(activeTab === 'process' ? styles.bodyProcessStableScroll : null),
-        }}>
+        <div
+          ref={promptBodyScrollRef}
+          onWheel={markProcessBodyScrollManualIntent}
+          onPointerDown={markProcessBodyScrollManualIntent}
+          onKeyDown={markProcessBodyScrollManualIntent}
+          style={{
+            ...styles.body,
+            ...(activeTab === 'process' ? styles.bodyProcessStableScroll : null),
+          }}
+        >
           <div style={styles.formGrid}>
           {activeTab === 'main' ? (
             <>
@@ -7079,6 +7268,7 @@ export const EditorApp: React.FC = () => {
                         key={fileCard.path}
                         file={fileCard}
                         onOpen={() => {
+                          captureProcessBodyScroll('open-context-file');
                           vscode.postMessage({ type: 'openFile', file: fileCard.path });
                         }}
                         onRemove={() => {
@@ -7200,6 +7390,7 @@ export const EditorApp: React.FC = () => {
                   value={prompt.report || ''}
                   changeMode="blur"
                   onChange={v => updateField('report', v)}
+                  onRegisterCommit={registerReportEditorCommit}
                   onFocus={() => {
                     isReportEditorFocusedRef.current = true;
                   }}

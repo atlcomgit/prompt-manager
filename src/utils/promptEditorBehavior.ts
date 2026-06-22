@@ -3,6 +3,7 @@ import type {
 	EditorPromptManualSectionOverrideMode,
 	EditorPromptManualSectionOverrides,
 	EditorPromptSectionKey,
+	EditorPromptTab,
 	EditorPromptViewState,
 	Prompt,
 	PromptStatus,
@@ -15,6 +16,53 @@ import {
 
 interface ResolvePromptOpenEditorViewStateOptions {
 	forceMainTab?: boolean;
+}
+
+/** Runtime snapshot of the prompt editor Process tab scroll container. */
+export interface PromptProcessBodyScrollSnapshot {
+	promptId?: string | null;
+	promptUuid?: string | null;
+	activeTab: EditorPromptTab;
+	top: number;
+	left: number;
+	capturedAt: number;
+	manualScrollVersion: number;
+}
+
+/** Input used to decide whether a Process tab scroll snapshot is still safe to apply. */
+export interface ResolvePromptProcessBodyScrollRestoreInput {
+	snapshot?: PromptProcessBodyScrollSnapshot | null;
+	currentPromptId?: string | null;
+	currentPromptUuid?: string | null;
+	activeTab: EditorPromptTab;
+	scrollHeight: number;
+	clientHeight: number;
+	scrollWidth?: number;
+	clientWidth?: number;
+	currentTop: number;
+	currentLeft: number;
+	manualScrollVersion: number;
+	placeholderVisible?: boolean;
+	now: number;
+	maxSnapshotAgeMs: number;
+}
+
+export type PromptProcessBodyScrollRestoreReason =
+	| 'restore'
+	| 'missing-snapshot'
+	| 'stale-snapshot'
+	| 'inactive-tab'
+	| 'placeholder-visible'
+	| 'identity-mismatch'
+	| 'manual-scroll'
+	| 'already-current';
+
+/** Decision returned before mutating the Process tab scroll container. */
+export interface PromptProcessBodyScrollRestoreDecision {
+	shouldRestore: boolean;
+	top: number;
+	left: number;
+	reason: PromptProcessBodyScrollRestoreReason;
 }
 
 interface ResolvePromptEditorExpandedSectionsInput {
@@ -50,6 +98,18 @@ interface ShouldAutoExpandPromptBranchListInput {
 	autoExpanded: boolean;
 }
 
+interface ShouldDeferReportAutosaveInput {
+	reportEditorFocused: boolean;
+	reportDraftActive: boolean;
+}
+
+interface ShouldPreserveLocalReportOnSaveInput extends ShouldDeferReportAutosaveInput {
+	reason?: 'open' | 'save' | 'sync' | 'ai-enrichment' | 'external-config';
+	currentLocalReport: string;
+	incomingSavedReport: string;
+	saveClearedDirty?: boolean;
+}
+
 interface ShouldPreservePromptIdAfterChatStartInput {
 	stableId?: string | null;
 	chatSessionIds?: readonly string[] | null;
@@ -77,6 +137,31 @@ export const PROMPT_CHAT_LAUNCH_PHASE_ORDER: PromptChatLaunchPhase[] = [
 	'renaming',
 	'ready',
 ];
+
+/** Defer prompt-wide save side effects while the inline report editor owns local typing state. */
+export function shouldDeferReportAutosave(input: ShouldDeferReportAutosaveInput): boolean {
+	return input.reportEditorFocused || input.reportDraftActive;
+}
+
+/** Keep the local report when a save response cannot yet be trusted as the active editor state. */
+export function shouldPreserveLocalReportOnSave(input: ShouldPreserveLocalReportOnSaveInput): boolean {
+	if (input.reason !== 'save') {
+		return false;
+	}
+
+	if (input.currentLocalReport !== input.incomingSavedReport) {
+		return true;
+	}
+
+	if (input.saveClearedDirty === true && !input.reportDraftActive) {
+		return false;
+	}
+
+	return shouldDeferReportAutosave({
+		reportEditorFocused: input.reportEditorFocused,
+		reportDraftActive: input.reportDraftActive,
+	});
+}
 
 const PROMPT_EXTERNAL_CHAT_LAUNCH_PHASE_ORDER: PromptChatLaunchPhase[] = [
 	'prepare',
@@ -207,6 +292,66 @@ export function resolvePromptOpenEditorViewState(
 		...normalized,
 		activeTab: 'main',
 	};
+}
+
+/** Normalize prompt identity fragments before comparing runtime scroll snapshots. */
+function normalizePromptScrollIdentityPart(value?: string | null): string {
+	return typeof value === 'string' ? value.trim() : '';
+}
+
+/** Clamp a scroll coordinate to the currently available scroll range. */
+function clampPromptProcessScrollOffset(value: number, maxValue: number): number {
+	const normalizedValue = Number.isFinite(value) ? Math.round(value) : 0;
+	const normalizedMaxValue = Number.isFinite(maxValue) ? Math.max(0, Math.round(maxValue)) : 0;
+	return Math.max(0, Math.min(normalizedValue, normalizedMaxValue));
+}
+
+/** Decide whether the saved Process tab scroll position can be safely restored now. */
+export function resolvePromptProcessBodyScrollRestore(
+	input: ResolvePromptProcessBodyScrollRestoreInput,
+): PromptProcessBodyScrollRestoreDecision {
+	const snapshot = input.snapshot;
+	if (!snapshot) {
+		return { shouldRestore: false, top: 0, left: 0, reason: 'missing-snapshot' };
+	}
+
+	if (input.now - snapshot.capturedAt > input.maxSnapshotAgeMs) {
+		return { shouldRestore: false, top: snapshot.top, left: snapshot.left, reason: 'stale-snapshot' };
+	}
+
+	if (input.activeTab !== 'process' || snapshot.activeTab !== 'process') {
+		return { shouldRestore: false, top: snapshot.top, left: snapshot.left, reason: 'inactive-tab' };
+	}
+
+	if (input.placeholderVisible === true) {
+		return { shouldRestore: false, top: snapshot.top, left: snapshot.left, reason: 'placeholder-visible' };
+	}
+
+	const snapshotPromptId = normalizePromptScrollIdentityPart(snapshot.promptId);
+	const snapshotPromptUuid = normalizePromptScrollIdentityPart(snapshot.promptUuid);
+	const currentPromptId = normalizePromptScrollIdentityPart(input.currentPromptId);
+	const currentPromptUuid = normalizePromptScrollIdentityPart(input.currentPromptUuid);
+	const promptIdMatches = Boolean(snapshotPromptId && currentPromptId && snapshotPromptId === currentPromptId);
+	const promptUuidMatches = Boolean(snapshotPromptUuid && currentPromptUuid && snapshotPromptUuid === currentPromptUuid);
+	if (!promptIdMatches && !promptUuidMatches) {
+		return { shouldRestore: false, top: snapshot.top, left: snapshot.left, reason: 'identity-mismatch' };
+	}
+
+	if (snapshot.manualScrollVersion !== input.manualScrollVersion) {
+		return { shouldRestore: false, top: snapshot.top, left: snapshot.left, reason: 'manual-scroll' };
+	}
+
+	const maxTop = Math.max(0, input.scrollHeight - input.clientHeight);
+	const maxLeft = Math.max(0, (input.scrollWidth || 0) - (input.clientWidth || 0));
+	const top = clampPromptProcessScrollOffset(snapshot.top, maxTop);
+	const left = clampPromptProcessScrollOffset(snapshot.left, maxLeft);
+	const topAlreadyCurrent = Math.abs(Math.round(input.currentTop) - top) <= 1;
+	const leftAlreadyCurrent = Math.abs(Math.round(input.currentLeft) - left) <= 1;
+	if (topAlreadyCurrent && leftAlreadyCurrent) {
+		return { shouldRestore: false, top, left, reason: 'already-current' };
+	}
+
+	return { shouldRestore: true, top, left, reason: 'restore' };
 }
 
 /** Resolve effective section expansion from defaults, content state, and manual overrides. */

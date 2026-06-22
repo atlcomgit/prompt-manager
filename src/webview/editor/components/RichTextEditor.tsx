@@ -3,12 +3,15 @@ import MarkdownIt from 'markdown-it';
 
 import { detectReportContentMode } from '../../../utils/reportContentMode.js';
 
+type RichTextEditorCommitHandle = () => void;
+
 interface Props {
   value: string;
   onChange: (value: string) => void;
   onFocus?: () => void;
   onBlur?: () => void;
   onDirtyChange?: (isDirty: boolean) => void;
+  onRegisterCommit?: (commit: RichTextEditorCommitHandle | null) => void;
   onDebug?: (message: string, payload?: Record<string, unknown>) => void;
   autoModeKey?: string;
   changeMode?: 'live' | 'blur';
@@ -511,6 +514,7 @@ export const RichTextEditor: React.FC<Props> = ({
   onFocus,
   onBlur,
   onDirtyChange,
+  onRegisterCommit,
   onDebug,
   autoModeKey,
   changeMode = 'live',
@@ -1544,6 +1548,12 @@ export const RichTextEditor: React.FC<Props> = ({
       commitPendingValue();
     }
   }, [changeMode, commitPendingValue]);
+
+  // Expose the blur-mode commit hook so parent save actions include the latest local draft.
+  useEffect(() => {
+    onRegisterCommit?.(flushPendingValue);
+    return () => onRegisterCommit?.(null);
+  }, [flushPendingValue, onRegisterCommit]);
 
   const startModeSwitch = useCallback((nextMode: Mode) => {
     if (nextMode === mode) {

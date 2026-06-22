@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PromptStatusText } from '../../shared/PromptStatusText';
 import { getPromptStatusColor } from '../../shared/promptStatus';
 import type { GitOverlayChangeFile } from '../../../types/git.js';
@@ -51,6 +51,9 @@ import {
 
 const DASHBOARD_LEFT_ACCENT_SHADOW = 'inset 3px 0 0 var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))';
 const BRANCH_PROJECT_LABEL_MAX_LENGTH = 20;
+const DASHBOARD_RAIL_SCROLL_RESTORE_MAX_AGE_MS = 30_000;
+const DASHBOARD_RAIL_SCROLL_RESTORE_MAX_ATTEMPTS = 8;
+const DASHBOARD_RAIL_SCROLL_RESTORE_RETRY_MS = 80;
 
 /** Describes an exact dashboard file comparison request. */
 export interface PromptDashboardFilePatchRequest {
@@ -336,6 +339,14 @@ interface DashboardPointerDragState {
 	started: boolean;
 }
 
+interface DashboardRailScrollSnapshot {
+	scopeKey: string;
+	top: number;
+	left: number;
+	capturedAt: number;
+	manualScrollVersion: number;
+}
+
 /** Right-side prompt dashboard visible only when the editor has enough horizontal space. */
 export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	snapshot,
@@ -386,6 +397,12 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const pointerDragStateRef = useRef<DashboardPointerDragState | null>(null);
 	const pointerDragCleanupRef = useRef<(() => void) | null>(null);
 	const railRef = useRef<HTMLElement | null>(null);
+	const railScrollSnapshotRef = useRef<DashboardRailScrollSnapshot | null>(null);
+	const railScrollRestoreFrameRef = useRef<number | null>(null);
+	const railScrollRestoreTimerRef = useRef<number | null>(null);
+	const railScrollRestoreAttemptsRef = useRef(0);
+	const railManualScrollVersionRef = useRef(0);
+	const railProgrammaticScrollRef = useRef(false);
 	const normalizedCollapsedSections = useMemo(
 		() => normalizePromptDashboardCollapsedSections(collapsedSections),
 		[collapsedSections],
@@ -421,6 +438,102 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const statusCacheStatus = snapshot?.status.cache.status || 'idle';
 	const dockerCacheStatus = snapshot?.docker.cache.status || 'idle';
 	const effectiveDockerBusyAction = dockerBusyAction || (busyAction?.startsWith('docker:') ? busyAction : null);
+	const dashboardScopeKey = snapshot?.scopeKey || '';
+	const clearPendingRailScrollRestore = useCallback(() => {
+		if (railScrollRestoreFrameRef.current !== null) {
+			window.cancelAnimationFrame(railScrollRestoreFrameRef.current);
+			railScrollRestoreFrameRef.current = null;
+		}
+		if (railScrollRestoreTimerRef.current !== null) {
+			window.clearTimeout(railScrollRestoreTimerRef.current);
+			railScrollRestoreTimerRef.current = null;
+		}
+		railScrollRestoreAttemptsRef.current = 0;
+	}, []);
+	const markRailScrollManualIntent = useCallback(() => {
+		if (railProgrammaticScrollRef.current) {
+			return;
+		}
+		railManualScrollVersionRef.current += 1;
+	}, []);
+	const captureRailScroll = useCallback(() => {
+		const railElement = railRef.current;
+		if (!railElement || !dashboardScopeKey) {
+			return;
+		}
+		railScrollSnapshotRef.current = {
+			scopeKey: dashboardScopeKey,
+			top: railElement.scrollTop,
+			left: railElement.scrollLeft,
+			capturedAt: Date.now(),
+			manualScrollVersion: railManualScrollVersionRef.current,
+		};
+	}, [dashboardScopeKey]);
+	const restoreRailScroll = useCallback((): boolean => {
+		const railElement = railRef.current;
+		const snapshot = railScrollSnapshotRef.current;
+		if (!railElement || !snapshot) {
+			return true;
+		}
+		if (!dashboardScopeKey || snapshot.scopeKey !== dashboardScopeKey) {
+			railScrollSnapshotRef.current = null;
+			return true;
+		}
+		if (Date.now() - snapshot.capturedAt > DASHBOARD_RAIL_SCROLL_RESTORE_MAX_AGE_MS) {
+			railScrollSnapshotRef.current = null;
+			return true;
+		}
+		if (snapshot.manualScrollVersion !== railManualScrollVersionRef.current) {
+			railScrollSnapshotRef.current = null;
+			return true;
+		}
+
+		const maxTop = Math.max(0, railElement.scrollHeight - railElement.clientHeight);
+		const maxLeft = Math.max(0, railElement.scrollWidth - railElement.clientWidth);
+		const top = Math.max(0, Math.min(Math.round(snapshot.top), Math.round(maxTop)));
+		const left = Math.max(0, Math.min(Math.round(snapshot.left), Math.round(maxLeft)));
+		const topAlreadyCurrent = Math.abs(Math.round(railElement.scrollTop) - top) <= 1;
+		const leftAlreadyCurrent = Math.abs(Math.round(railElement.scrollLeft) - left) <= 1;
+		if (topAlreadyCurrent && leftAlreadyCurrent) {
+			return false;
+		}
+
+		railProgrammaticScrollRef.current = true;
+		railElement.scrollTop = top;
+		railElement.scrollLeft = left;
+		window.setTimeout(() => {
+			railProgrammaticScrollRef.current = false;
+		}, 0);
+		return false;
+	}, [dashboardScopeKey]);
+	const scheduleRailScrollRestore = useCallback(() => {
+		if (!railScrollSnapshotRef.current) {
+			return;
+		}
+
+		clearPendingRailScrollRestore();
+		const runRestoreAttempt = () => {
+			railScrollRestoreFrameRef.current = null;
+			const finished = restoreRailScroll();
+			if (finished) {
+				railScrollRestoreAttemptsRef.current = 0;
+				return;
+			}
+
+			railScrollRestoreAttemptsRef.current += 1;
+			if (railScrollRestoreAttemptsRef.current >= DASHBOARD_RAIL_SCROLL_RESTORE_MAX_ATTEMPTS) {
+				railScrollRestoreAttemptsRef.current = 0;
+				return;
+			}
+
+			railScrollRestoreTimerRef.current = window.setTimeout(() => {
+				railScrollRestoreTimerRef.current = null;
+				railScrollRestoreFrameRef.current = window.requestAnimationFrame(runRestoreAttempt);
+			}, DASHBOARD_RAIL_SCROLL_RESTORE_RETRY_MS);
+		};
+
+		railScrollRestoreFrameRef.current = window.requestAnimationFrame(runRestoreAttempt);
+	}, [clearPendingRailScrollRestore, restoreRailScroll]);
 	const logicalDockerLiveMetricsVisible = useMemo(
 		() => resolvePromptDashboardDockerLiveMetricsVisible({
 			data: snapshot?.docker.data,
@@ -438,6 +551,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		const startedAt = Date.now();
 		const token = openingFileTokenRef.current + 1;
 		openingFileTokenRef.current = token;
+		captureRailScroll();
 		setActiveFileKey(fileKey);
 		setViewedFileKeys(current => current[fileKey] ? current : { ...current, [fileKey]: true });
 		setOpeningFileKey(fileKey);
@@ -529,6 +643,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 
 	// Reset transient drag UI when the dashboard scope switches to another prompt.
 	useEffect(() => {
+		clearPendingRailScrollRestore();
+		railScrollSnapshotRef.current = null;
 		pointerDragCleanupRef.current?.();
 		pointerDragCleanupRef.current = null;
 		pointerDragStateRef.current = null;
@@ -536,13 +652,43 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		dropIndicatorRef.current = null;
 		setDraggedSection(null);
 		setDropIndicator(null);
-	}, [snapshot?.scopeKey]);
+	}, [clearPendingRailScrollRestore, snapshot?.scopeKey]);
+
+	// Preserve the dashboard rail position when VS Code hides or refocuses editor pages.
+	useEffect(() => {
+		const handleVisibilityChange = () => {
+			if (document.visibilityState === 'visible') {
+				scheduleRailScrollRestore();
+				return;
+			}
+			if (document.visibilityState === 'hidden') {
+				captureRailScroll();
+			}
+		};
+		const handleWindowBlur = () => captureRailScroll();
+		const handleWindowFocus = () => scheduleRailScrollRestore();
+
+		document.addEventListener('visibilitychange', handleVisibilityChange);
+		window.addEventListener('blur', handleWindowBlur);
+		window.addEventListener('focus', handleWindowFocus);
+		return () => {
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
+			window.removeEventListener('blur', handleWindowBlur);
+			window.removeEventListener('focus', handleWindowFocus);
+		};
+	}, [captureRailScroll, scheduleRailScrollRestore]);
+
+	// Retry after dashboard data changes because widget hydration can shift row heights on reveal.
+	useEffect(() => {
+		scheduleRailScrollRestore();
+	}, [scheduleRailScrollRestore, snapshot?.generatedAt, projectsCacheStatus, normalizedSectionOrder]);
 
 	// Remove global pointer listeners if the dashboard unmounts during a drag.
 	useEffect(() => () => {
 		pointerDragCleanupRef.current?.();
 		pointerDragCleanupRef.current = null;
-	}, []);
+		clearPendingRailScrollRestore();
+	}, [clearPendingRailScrollRestore]);
 
 	// Track whether the Docker section is currently inside the dashboard viewport.
 	useEffect(() => {
@@ -1035,7 +1181,14 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		.filter(column => column.length > 0);
 
 	return (
-		<aside ref={railRef} style={styles.rail} data-pm-prompt-dashboard="true">
+		<aside
+			ref={railRef}
+			style={styles.rail}
+			data-pm-prompt-dashboard="true"
+			onWheel={markRailScrollManualIntent}
+			onPointerDown={markRailScrollManualIntent}
+			onKeyDown={markRailScrollManualIntent}
+		>
 			<div style={styles.toolbar}>
 				<div style={styles.titleRow}>
 					<PromptDashboardMark />
@@ -5405,6 +5558,8 @@ const styles: Record<string, React.CSSProperties> = {
 		minWidth: '280px',
 		height: '100vh',
 		overflowY: 'auto',
+		overflowAnchor: 'none',
+		scrollbarGutter: 'stable',
 		padding: '12px 20px 16px 0',
 		boxSizing: 'border-box',
 		background: 'transparent',

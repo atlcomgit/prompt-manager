@@ -12,9 +12,11 @@ import {
 	resolvePromptChatLaunchStepStatesFromPhase,
 	resolvePromptChatLaunchStepStates,
 	resolvePromptEditorExpandedSections,
+	resolvePromptProcessBodyScrollRestore,
 	resolvePromptPlanPlaceholderState,
 	resolvePromptChatLaunchTrackingKey,
 	resolvePromptOpenEditorViewState,
+	shouldPreserveLocalReportOnSave,
 	shouldPersistAutoExpandedReportSection,
 	shouldAutoExpandPromptBranchList,
 	shouldResetPromptChatLaunchTracking,
@@ -63,6 +65,118 @@ test('resolvePromptOpenEditorViewState can force the main tab without losing oth
 			prompt: 480,
 		},
 	});
+});
+
+test('resolvePromptProcessBodyScrollRestore restores same process prompt scroll with clamping', () => {
+	assert.deepEqual(resolvePromptProcessBodyScrollRestore({
+		snapshot: {
+			promptId: 'prompt-a',
+			promptUuid: 'uuid-a',
+			activeTab: 'process',
+			top: 1400,
+			left: 24,
+			capturedAt: 1000,
+			manualScrollVersion: 3,
+		},
+		currentPromptId: 'prompt-a',
+		currentPromptUuid: 'uuid-a',
+		activeTab: 'process',
+		scrollHeight: 1200,
+		clientHeight: 500,
+		scrollWidth: 300,
+		clientWidth: 250,
+		currentTop: 0,
+		currentLeft: 0,
+		manualScrollVersion: 3,
+		placeholderVisible: false,
+		now: 1200,
+		maxSnapshotAgeMs: 30000,
+	}), {
+		shouldRestore: true,
+		top: 700,
+		left: 24,
+		reason: 'restore',
+	});
+});
+
+test('resolvePromptProcessBodyScrollRestore rejects stale prompt and manual scroll changes', () => {
+	const snapshot = {
+		promptId: 'prompt-a',
+		promptUuid: 'uuid-a',
+		activeTab: 'process' as const,
+		top: 320,
+		left: 0,
+		capturedAt: 1000,
+		manualScrollVersion: 1,
+	};
+	const baseInput = {
+		snapshot,
+		currentPromptId: 'prompt-a',
+		currentPromptUuid: 'uuid-a',
+		activeTab: 'process' as const,
+		scrollHeight: 1200,
+		clientHeight: 500,
+		currentTop: 0,
+		currentLeft: 0,
+		manualScrollVersion: 1,
+		placeholderVisible: false,
+		now: 1200,
+		maxSnapshotAgeMs: 30000,
+	};
+
+	assert.equal(resolvePromptProcessBodyScrollRestore({
+		...baseInput,
+		currentPromptId: 'prompt-b',
+		currentPromptUuid: 'uuid-b',
+	}).reason, 'identity-mismatch');
+	assert.equal(resolvePromptProcessBodyScrollRestore({
+		...baseInput,
+		manualScrollVersion: 2,
+	}).reason, 'manual-scroll');
+	assert.equal(resolvePromptProcessBodyScrollRestore({
+		...baseInput,
+		activeTab: 'main',
+	}).reason, 'inactive-tab');
+});
+
+test('shouldPreserveLocalReportOnSave allows manual report save to clear dirty state', () => {
+	assert.equal(shouldPreserveLocalReportOnSave({
+		reason: 'save',
+		currentLocalReport: '<p>Готово</p>',
+		incomingSavedReport: '<p>Готово</p>',
+		reportEditorFocused: true,
+		reportDraftActive: false,
+		saveClearedDirty: true,
+	}), false);
+
+	assert.equal(shouldPreserveLocalReportOnSave({
+		reason: 'save',
+		currentLocalReport: '<p>Готово</p>',
+		incomingSavedReport: '<p>Готово</p>',
+		reportEditorFocused: true,
+		reportDraftActive: true,
+		saveClearedDirty: true,
+	}), true);
+
+	assert.equal(shouldPreserveLocalReportOnSave({
+		reason: 'save',
+		currentLocalReport: '<p>Локальный черновик</p>',
+		incomingSavedReport: '<p>Старый отчет</p>',
+		reportEditorFocused: true,
+		reportDraftActive: false,
+		saveClearedDirty: true,
+	}), true);
+});
+
+test('shouldPreserveLocalReportOnSave keeps focused report draft for background save responses', () => {
+	assert.equal(shouldPreserveLocalReportOnSave({
+		reason: 'save',
+		currentLocalReport: '<p>Готово</p>',
+		incomingSavedReport: '<p>Готово</p>',
+		reportEditorFocused: true,
+		reportDraftActive: false,
+		saveClearedDirty: false,
+	}), true);
 });
 
 test('resolvePromptEditorExpandedSections applies auto-open rules until notes, plan, and report are changed manually', () => {

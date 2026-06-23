@@ -77,10 +77,24 @@ interface PendingModeSwitchState {
 
 type ScrollRestoreResult = 'restored' | 'noop' | 'missing';
 
+export interface RichTextAutoResizeMeasurementStability {
+  key: string;
+  height: number;
+  count: number;
+}
+
+export interface RichTextAutoResizeHeightStabilityResult {
+  shouldApply: boolean;
+  nextPending: RichTextAutoResizeMeasurementStability | null;
+  reason: 'apply' | 'unchanged' | 'minor-change' | 'waiting-stable';
+}
+
 const DEFAULT_HEIGHT = 180;
 const MIN_HEIGHT = 80;
 const MAX_HEIGHT = 800;
 const AUTO_RESIZE_HEIGHT_PADDING = 2;
+const AUTO_RESIZE_HEIGHT_CHANGE_THRESHOLD = 8;
+const AUTO_RESIZE_STABLE_MEASUREMENT_COUNT = 2;
 const BLUR_COMMIT_DEFER_MS = 120;
 const MODE_SWITCH_MIN_UNSTABLE_HEIGHT = MIN_HEIGHT + 24;
 const MAX_MODE_SWITCH_DEFERRED_MEASUREMENTS = 2;
@@ -112,6 +126,44 @@ export function resolveRichTextEditorHeight(input: {
   }
 
   return Math.max(minHeight, Math.min(maxHeight, paddedHeight));
+}
+
+// Filters transient auto-resize measurements that otherwise make the surrounding section jump.
+export function resolveRichTextAutoResizeHeightStability(input: {
+  currentHeight: number;
+  nextHeight: number;
+  measurementKey: string;
+  pending?: RichTextAutoResizeMeasurementStability | null;
+  changeThreshold?: number;
+  stableMeasurements?: number;
+}): RichTextAutoResizeHeightStabilityResult {
+  const changeThreshold = input.changeThreshold ?? AUTO_RESIZE_HEIGHT_CHANGE_THRESHOLD;
+  const stableMeasurements = input.stableMeasurements ?? AUTO_RESIZE_STABLE_MEASUREMENT_COUNT;
+  const delta = Math.abs(input.currentHeight - input.nextHeight);
+
+  if (delta === 0) {
+    return { shouldApply: false, nextPending: null, reason: 'unchanged' };
+  }
+
+  if (delta <= changeThreshold) {
+    return { shouldApply: false, nextPending: null, reason: 'minor-change' };
+  }
+
+  const pending = input.pending || null;
+  const isSameMeasurement = Boolean(pending
+    && pending.key === input.measurementKey
+    && Math.abs(pending.height - input.nextHeight) <= 1);
+  const nextPending = {
+    key: input.measurementKey,
+    height: input.nextHeight,
+    count: isSameMeasurement ? (pending?.count || 0) + 1 : 1,
+  };
+
+  if (nextPending.count < stableMeasurements) {
+    return { shouldApply: false, nextPending, reason: 'waiting-stable' };
+  }
+
+  return { shouldApply: true, nextPending: null, reason: 'apply' };
 }
 
 // Ignores transient blur events that immediately return focus into the same editor surface.
@@ -552,6 +604,7 @@ export const RichTextEditor: React.FC<Props> = ({
   const pendingPageScrollRestoreRef = useRef<ScrollSnapshot | null>(null);
   const livePageScrollRef = useRef<ScrollSnapshot | null>(null);
   const pendingModeSwitchRef = useRef<PendingModeSwitchState | null>(null);
+  const pendingAutoResizeMeasurementRef = useRef<RichTextAutoResizeMeasurementStability | null>(null);
   const pendingLocalCommitRef = useRef(false);
   const [mode, setMode] = useState<Mode>(() => detectPreferredMode(value || ''));
   const [htmlSource, setHtmlSource] = useState(value || '');
@@ -922,6 +975,47 @@ export const RichTextEditor: React.FC<Props> = ({
         pendingAutoResizeFrameRef.current = window.requestAnimationFrame(() => {
           pendingAutoResizeFrameRef.current = null;
           syncAutoResizeHeight();
+        });
+      }
+      return;
+    }
+
+    const sourceFingerprint = `${htmlSourceRef.current.length}:${htmlSourceRef.current.slice(0, 32)}:${htmlSourceRef.current.slice(-32)}`;
+    const measurementKey = [
+      mode,
+      sourceFingerprint,
+      Math.round(containerRef.current?.getBoundingClientRect().width || 0),
+    ].join(':');
+    const heightStability = resolveRichTextAutoResizeHeightStability({
+      currentHeight,
+      nextHeight,
+      measurementKey,
+      pending: pendingAutoResizeMeasurementRef.current,
+    });
+    pendingAutoResizeMeasurementRef.current = heightStability.nextPending;
+    if (!heightStability.shouldApply) {
+      if (heightStability.reason === 'waiting-stable'
+        && typeof window !== 'undefined'
+        && typeof window.requestAnimationFrame === 'function') {
+        if (pendingAutoResizeFrameRef.current !== null) {
+          window.cancelAnimationFrame(pendingAutoResizeFrameRef.current);
+        }
+        pendingAutoResizeFrameRef.current = window.requestAnimationFrame(() => {
+          pendingAutoResizeFrameRef.current = null;
+          syncAutoResizeHeight();
+        });
+      }
+      if ((heightStability.reason === 'unchanged' || heightStability.reason === 'minor-change')
+        && pendingModeSwitch?.to === mode) {
+        pendingModeSwitchRef.current = null;
+      }
+      if (heightStability.reason !== 'unchanged') {
+        onDebug?.('autoResize.heightSkipped', {
+          reason: heightStability.reason,
+          previousHeight: currentHeight,
+          measuredHeight,
+          nextHeight,
+          mode,
         });
       }
       return;

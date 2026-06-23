@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	resolveRichTextAutoResizeHeightStability,
 	resolveRichTextEditorHeight,
 	resolveRichTextEditorCopyValue,
 	shouldCommitDeferredRichTextBlur,
@@ -31,6 +32,47 @@ test('resolveRichTextEditorHeight ignores invalid measurements', () => {
 		measuredHeight: 0,
 		autoResize: true,
 	}), null);
+});
+
+test('resolveRichTextAutoResizeHeightStability ignores minor layout jitter', () => {
+	assert.deepEqual(resolveRichTextAutoResizeHeightStability({
+		currentHeight: 420,
+		nextHeight: 426,
+		measurementKey: 'visual:report:800',
+	}), {
+		shouldApply: false,
+		nextPending: null,
+		reason: 'minor-change',
+	});
+});
+
+test('resolveRichTextAutoResizeHeightStability waits for a repeated stable measurement', () => {
+	const first = resolveRichTextAutoResizeHeightStability({
+		currentHeight: 420,
+		nextHeight: 470,
+		measurementKey: 'visual:report:800',
+	});
+
+	assert.deepEqual(first, {
+		shouldApply: false,
+		nextPending: {
+			key: 'visual:report:800',
+			height: 470,
+			count: 1,
+		},
+		reason: 'waiting-stable',
+	});
+
+	assert.deepEqual(resolveRichTextAutoResizeHeightStability({
+		currentHeight: 420,
+		nextHeight: 470,
+		measurementKey: 'visual:report:800',
+		pending: first.nextPending,
+	}), {
+		shouldApply: true,
+		nextPending: null,
+		reason: 'apply',
+	});
 });
 
 test('resolveRichTextEditorCopyValue returns the representation of the selected mode', () => {

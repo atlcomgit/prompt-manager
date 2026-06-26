@@ -314,7 +314,7 @@ export function activate(context: vscode.ExtensionContext) {
 						const depth = config.get<MemoryAnalysisDepth>('memory.analysisDepth', 'standard');
 						const diffLimit = config.get<number>('memory.diffLimit', 200000);
 						const aiModel = aiService
-							? await aiService.resolveFreeCopilotModel(config.get<string>('memory.aiModel', DEFAULT_COPILOT_MODEL_FAMILY))
+							? await aiService.resolveAiRequestModelIdentifier(config.get<string>('memory.aiModel', DEFAULT_COPILOT_MODEL_FAMILY))
 							: '';
 						if (!aiModel) {
 							appendPromptManagerLog(`[${new Date().toISOString()}] [memory] commit ${payload.sha.substring(0, 7)} SKIPPED — no AI model available`);

@@ -6,6 +6,11 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-06-26
+
+#### Fixed
+- Prompt Manager AI model pickers now use the full GitHub Copilot Chat picker catalog instead of free-only or Copilot-only model lists: prompt editor, Project Memory, and CodeMap settings include visible Custom Endpoint/OpenRouter/BYOK models such as Tokenator, Qwen, and GPT-OSS, include Copilot models hidden from the VS Code picker defaults, and preserve selected external model identifiers for internal Memory/CodeMap requests.
+
 ### 2026-06-11
 
 #### Added

@@ -14,6 +14,20 @@ export function isKeepCurrentChatModel(value: string | undefined | null): boolea
 
 const EXPLICIT_COPILOT_MODEL_PATTERN = /(gpt-[\w.-]+|o[1-9][\w.-]*|claude-[\w.-]+|gemini-[\w.-]+|grok-[\w.-]+)/i;
 
+/** Return true when a saved picker value belongs to the GitHub Copilot Chat provider. */
+export function isCopilotModelIdentifier(value: string | undefined | null): boolean {
+	const normalized = String(value || '').trim().toLowerCase();
+	if (!normalized) {
+		return false;
+	}
+
+	if (normalized.includes('/')) {
+		return normalized.split('/').filter(Boolean)[0] === 'copilot';
+	}
+
+	return EXPLICIT_COPILOT_MODEL_PATTERN.test(normalized);
+}
+
 export function isZeroCostCopilotModelPickerCategory(category: {
 	label?: string;
 	order?: number | null;
@@ -66,6 +80,10 @@ export function normalizeCopilotModelFamily(value: string | undefined | null): s
 export function normalizeOptionalCopilotModelFamily(value: string | undefined | null): string {
 	const normalized = String(value || '').trim();
 	if (!normalized) {
+		return '';
+	}
+
+	if (!isCopilotModelIdentifier(normalized)) {
 		return '';
 	}
 

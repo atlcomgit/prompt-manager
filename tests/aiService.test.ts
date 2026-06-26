@@ -139,7 +139,7 @@ test('AiService keeps live Copilot models that are missing from visible cache st
 	selectChatModelsImpl = async () => [mockModel];
 });
 
-test('AiService includes custom endpoint models in the prompt model picker', async () => {
+test('AiService includes custom endpoint models in the Chat model picker', async () => {
 	selectChatModelsCalls = 0;
 	selectChatModelsImpl = async () => [
 		mockModel,
@@ -168,7 +168,7 @@ test('AiService includes custom endpoint models in the prompt model picker', asy
 	selectChatModelsImpl = async () => [mockModel];
 });
 
-test('AiService restores custom endpoint identifiers from VS Code model cache', async () => {
+test('AiService restores visible custom endpoint identifiers from VS Code model cache', async () => {
 	selectChatModelsCalls = 0;
 	selectChatModelsImpl = async () => [
 		mockModel,
@@ -233,7 +233,7 @@ test('AiService restores custom endpoint identifiers from VS Code model cache', 
 	selectChatModelsImpl = async () => [mockModel];
 });
 
-test('AiService keeps visible custom endpoint models from cache when live results omit them', async () => {
+test('AiService keeps visible custom endpoint cache entries when live results omit them', async () => {
 	selectChatModelsCalls = 0;
 	selectChatModelsImpl = async () => [mockModel];
 
@@ -289,7 +289,7 @@ test('AiService keeps visible custom endpoint models from cache when live result
 	selectChatModelsImpl = async () => [mockModel];
 });
 
-test('AiService excludes provider-scoped models hidden by the VS Code model picker state', async () => {
+test('AiService keeps hidden Copilot models and visible external providers', async () => {
 	selectChatModelsCalls = 0;
 	selectChatModelsImpl = async () => [
 		mockModel,
@@ -344,6 +344,7 @@ test('AiService excludes provider-scoped models hidden by the VS Code model pick
 	assert.equal(selectChatModelsCalls, 1);
 	assert.deepEqual(models, [
 		{ id: 'copilot/gpt-5.5', name: 'GPT-5.5' },
+		{ id: 'gpt-5-mini', name: 'GPT-5 mini' },
 		{ id: 'customendpoint/tokenator/claude-fable-5', name: 'Tokenator - Claude Fable 5' },
 	]);
 	selectChatModelsImpl = async () => [mockModel];
@@ -540,10 +541,11 @@ test('AiService mirrors the promoted Copilot Chat model picker list', async () =
 		{ id: 'copilot/gpt-5.5', name: 'GPT-5.5' },
 		{ id: 'customendpoint/tokenator/claude-fable-5', name: 'Tokenator - Claude Fable 5' },
 		{ id: 'copilot/claude-opus-4.8', name: 'Claude Opus 4.8' },
+		{ id: 'copilot/gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro (Preview)' },
 		{ id: 'gpt-5-mini', name: 'GPT-5 mini' },
 	]);
-	assert.equal(models.some(model => model.name === 'Claude Fable 5'), false);
-	assert.equal(models.some(model => model.name === 'Gemini 3.1 Pro (Preview)'), false);
+	assert.equal(models.some(model => model.id.startsWith('customendpoint/')), true);
+	assert.equal(models.some(model => model.name === 'Gemini 3.1 Pro (Preview)'), true);
 	selectChatModelsImpl = async () => [mockModel];
 });
 
@@ -620,6 +622,38 @@ test('AiService prefers modelsControl over stale legacy cache for free models', 
 	assert.deepEqual(models, [
 		{ id: 'gpt-5.4', name: 'GPT-5.4' },
 		{ id: 'claude-haiku-4.5', name: 'Claude Haiku 4.5' },
+	]);
+	selectChatModelsImpl = async () => [mockModel];
+});
+
+test('AiService resolves only GitHub Copilot Chat model families for internal settings', async () => {
+	selectChatModelsCalls = 0;
+	selectChatModelsImpl = async () => [
+		mockModel,
+		{
+			vendor: 'copilot',
+			id: 'claude-sonnet-4.6',
+			family: 'claude-sonnet-4.6',
+			name: 'Claude Sonnet 4.6',
+			identifier: 'copilot/claude-sonnet-4.6',
+		},
+		{
+			vendor: 'customendpoint',
+			id: 'claude-fable-5',
+			family: 'claude-fable-5',
+			name: 'Tokenator - Claude Fable 5',
+			identifier: 'customendpoint/tokenator/claude-fable-5',
+		},
+	];
+
+	const service = new AiService();
+	(service as any).resolveStateDbPath = async () => null;
+
+	assert.equal(await service.resolveCopilotModelFamily('copilot/claude-sonnet-4.6'), 'claude-sonnet-4.6');
+	assert.equal(await service.resolveCopilotModelFamily('customendpoint/tokenator/claude-fable-5'), '');
+	assert.deepEqual(await service.getAvailableCopilotModelFamilies(), [
+		{ id: 'gpt-5-mini', name: 'GPT-5 mini' },
+		{ id: 'claude-sonnet-4.6', name: 'Claude Sonnet 4.6' },
 	]);
 	selectChatModelsImpl = async () => [mockModel];
 });

@@ -274,8 +274,12 @@ export class CodeMapInstructionService {
 	) { }
 
 	async resolveAiModel(aiModel: string): Promise<string> {
-		if (this.aiService && typeof (this.aiService as { resolveFreeCopilotModel?: unknown }).resolveFreeCopilotModel === 'function') {
-			return this.aiService.resolveFreeCopilotModel(aiModel);
+		if (this.aiService && typeof (this.aiService as { resolveAiRequestModelIdentifier?: unknown }).resolveAiRequestModelIdentifier === 'function') {
+			return this.aiService.resolveAiRequestModelIdentifier(aiModel);
+		}
+
+		if (this.aiService && typeof (this.aiService as { resolveCopilotModelFamily?: unknown }).resolveCopilotModelFamily === 'function') {
+			return this.aiService.resolveCopilotModelFamily(aiModel);
 		}
 
 		return normalizeOptionalCopilotModelFamily(aiModel);

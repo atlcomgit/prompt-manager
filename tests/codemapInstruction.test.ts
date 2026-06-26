@@ -506,13 +506,13 @@ test('generateInstruction emits detailed progress messages for area batching and
 	assert.ok(progress.some(item => item.stage === 'describing-files' && /Файл 1\//.test(item.detail || '')));
 });
 
-test('generateInstruction normalizes codemap aiModel through free-model resolver', async () => {
+test('generateInstruction normalizes codemap aiModel through AI request model resolver', async () => {
 	const requestedModels: string[] = [];
 	const generationModels: string[] = [];
 	const service = new CodeMapInstructionService({
-		resolveFreeCopilotModel: async (model: string) => {
+		resolveAiRequestModelIdentifier: async (model: string) => {
 			requestedModels.push(model);
-			return 'gpt-5-mini';
+			return 'customendpoint/tokenator/claude-fable-5';
 		},
 		generateCodeMapAreaDescriptionsBatch: async (_input: unknown, model?: string) => {
 			generationModels.push(model || '');
@@ -549,14 +549,14 @@ test('generateInstruction normalizes codemap aiModel through free-model resolver
 	}, 'base', 'ru', 'gpt-4o');
 
 	assert.deepEqual(requestedModels, ['gpt-4o']);
-	assert.deepEqual(generationModels, ['gpt-5-mini']);
-	assert.equal(record.aiModel, 'gpt-5-mini');
+	assert.deepEqual(generationModels, ['customendpoint/tokenator/claude-fable-5']);
+	assert.equal(record.aiModel, 'customendpoint/tokenator/claude-fable-5');
 });
 
 test('generateInstruction batches symbol descriptions across multiple files', async () => {
 	const symbolBatchSizes: number[] = [];
 	const service = new CodeMapInstructionService({
-		resolveFreeCopilotModel: async () => 'gpt-5-mini',
+		resolveCopilotModelFamily: async () => 'gpt-5-mini',
 		generateCodeMapAreaDescriptionsBatch: async () => JSON.stringify({
 			areas: [
 				{ id: 'area-1', description: 'Описание HTTP-слоя.' },
@@ -625,7 +625,7 @@ class TestService {
 test('generateInstruction batches frontend block descriptions for vue files', async () => {
 	const frontendBatchSizes: number[] = [];
 	const service = new CodeMapInstructionService({
-		resolveFreeCopilotModel: async () => 'gpt-5-mini',
+		resolveCopilotModelFamily: async () => 'gpt-5-mini',
 		generateCodeMapAreaDescriptionsBatch: async () => JSON.stringify({
 			areas: [
 				{ id: 'area-1', description: 'Описание фронтенд-слоя.' },
@@ -735,7 +735,7 @@ class TestController {
 		['routes/api.php', '3333333333333333333333333333333333333333'],
 	]);
 	const service = new CodeMapInstructionService({
-		resolveFreeCopilotModel: async () => 'gpt-5-mini',
+		resolveCopilotModelFamily: async () => 'gpt-5-mini',
 		generateCodeMapAreaDescriptionsBatch: async (input: { areas: Array<{ id: string; area: string }> }) => {
 			areaCalls.push(input.areas.map(area => area.area));
 			return JSON.stringify({
@@ -864,7 +864,7 @@ class TestController {
 		['routes/api.php', 'cccccccccccccccccccccccccccccccccccccccc'],
 	]);
 	const service = new CodeMapInstructionService({
-		resolveFreeCopilotModel: async () => 'gpt-5-mini',
+		resolveCopilotModelFamily: async () => 'gpt-5-mini',
 		generateCodeMapAreaDescriptionsBatch: async (input: { areas: Array<{ id: string; area: string }> }) => {
 			areaCalls.push(input.areas.map(area => area.area));
 			return JSON.stringify({
@@ -1029,7 +1029,7 @@ const applyFilters = () => query.value;
 		])],
 	]);
 	const service = new CodeMapInstructionService({
-		resolveFreeCopilotModel: async () => 'gpt-5-mini',
+		resolveCopilotModelFamily: async () => 'gpt-5-mini',
 		generateCodeMapAreaDescriptionsBatch: async (input: { areas: Array<{ id: string; area: string }> }) => JSON.stringify({
 			areas: input.areas.map(area => ({
 				id: area.id,

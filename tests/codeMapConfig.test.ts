@@ -171,3 +171,31 @@ test('saveCodeMapSettingsToConfiguration preserves empty aiModel when none is se
 	]);
 	assert.equal(settings.aiModel, '');
 });
+
+test('saveCodeMapSettingsToConfiguration preserves external aiModel identifiers', async () => {
+	const config = new FakeConfig(
+		{
+			aiModel: 'gpt-5-mini',
+		},
+		{
+			aiModel: 'workspace',
+		},
+	);
+	const updates: Array<{ key: string; value: unknown; scope: Scope }> = [];
+
+	const settings = await saveCodeMapSettingsToConfiguration(
+		config,
+		{
+			aiModel: 'customendpoint/tokenator/claude-fable-5',
+		},
+		async (key, value, scope) => {
+			updates.push({ key, value, scope });
+			await config.apply(key, value, scope);
+		},
+	);
+
+	assert.deepEqual(updates, [
+		{ key: 'aiModel', value: 'customendpoint/tokenator/claude-fable-5', scope: 'workspace' },
+	]);
+	assert.equal(settings.aiModel, 'customendpoint/tokenator/claude-fable-5');
+});

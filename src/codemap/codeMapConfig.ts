@@ -1,5 +1,5 @@
 import type { CodeMapSettings } from '../types/codemap.js';
-import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
+import { DEFAULT_COPILOT_MODEL_FAMILY } from '../constants/ai.js';
 import { resolveConfigurationScope } from '../utils/configurationScope.js';
 import {
 	normalizeBackgroundTaskPriority,
@@ -67,7 +67,7 @@ export function getCodeMapSettingsFromConfiguration(config: Pick<CodeMapConfigur
 		autoUpdate: config?.get<boolean>('autoUpdate', DEFAULT_CODEMAP_SETTINGS.autoUpdate) ?? DEFAULT_CODEMAP_SETTINGS.autoUpdate,
 		includeFileTree: config?.get<boolean>('includeFileTree', DEFAULT_CODEMAP_SETTINGS.includeFileTree) ?? DEFAULT_CODEMAP_SETTINGS.includeFileTree,
 		notificationsEnabled: config?.get<boolean>('notifications.enabled', DEFAULT_CODEMAP_SETTINGS.notificationsEnabled) ?? DEFAULT_CODEMAP_SETTINGS.notificationsEnabled,
-		aiModel: normalizeModelFamily(config?.get<string>('aiModel', DEFAULT_CODEMAP_SETTINGS.aiModel) ?? DEFAULT_CODEMAP_SETTINGS.aiModel),
+		aiModel: normalizeModelIdentifier(config?.get<string>('aiModel', DEFAULT_CODEMAP_SETTINGS.aiModel) ?? DEFAULT_CODEMAP_SETTINGS.aiModel),
 		instructionMaxChars: Math.max(5000, config?.get<number>('instructionMaxChars', DEFAULT_CODEMAP_SETTINGS.instructionMaxChars) ?? DEFAULT_CODEMAP_SETTINGS.instructionMaxChars),
 		blockDescriptionMode: config?.get<'short' | 'medium' | 'long'>('blockDescriptionMode', DEFAULT_CODEMAP_SETTINGS.blockDescriptionMode) ?? DEFAULT_CODEMAP_SETTINGS.blockDescriptionMode,
 		blockMaxChars: Math.max(200, config?.get<number>('blockMaxChars', DEFAULT_CODEMAP_SETTINGS.blockMaxChars) ?? DEFAULT_CODEMAP_SETTINGS.blockMaxChars),
@@ -137,7 +137,7 @@ export async function saveCodeMapSettingsToConfiguration(
 		await updateValue('notifications.enabled', settings.notificationsEnabled, resolveSettingScope(config, 'notifications.enabled'));
 	}
 	if (settings.aiModel !== undefined) {
-		await updateValue('aiModel', normalizeModelFamily(settings.aiModel), resolveSettingScope(config, 'aiModel'));
+		await updateValue('aiModel', normalizeModelIdentifier(settings.aiModel), resolveSettingScope(config, 'aiModel'));
 	}
 	if (settings.instructionMaxChars !== undefined) {
 		await updateValue('instructionMaxChars', Math.max(5000, Math.floor(settings.instructionMaxChars)), resolveSettingScope(config, 'instructionMaxChars'));
@@ -209,8 +209,8 @@ function normalizePriority(value: string): CodeMapSettings['updatePriority'] {
 	return normalizeBackgroundTaskPriority(value, DEFAULT_CODEMAP_SETTINGS.updatePriority);
 }
 
-function normalizeModelFamily(value: string): string {
-	return normalizeOptionalCopilotModelFamily(value);
+function normalizeModelIdentifier(value: string): string {
+	return String(value || '').trim();
 }
 
 function normalizeCodeMapInteger(value: number, fallback: number, min: number, max: number): number {

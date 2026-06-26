@@ -8,7 +8,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { DEFAULT_COPILOT_MODEL_FAMILY, isZeroCostCopilotModelPickerCategory, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
+import { DEFAULT_COPILOT_MODEL_FAMILY, isCopilotModelIdentifier, isZeroCostCopilotModelPickerCategory, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { buildDescriptionGenerationUserPrompt, buildPromptFieldLanguageRule, buildTitleGenerationUserPrompt } from '../utils/aiPromptBuilders.js';
@@ -548,12 +548,12 @@ export class AiService {
 			snippetBlock || 'No code excerpts available.',
 		].filter(Boolean).join('\n');
 
-		const resolvedFamily = await this.resolveFreeCopilotModel(modelFamily || this.modelSelector.family);
-		if (!resolvedFamily) {
+		const modelSelector = await this.resolveAiRequestModelSelector(modelFamily || this.modelSelector.family);
+		if (!modelSelector) {
 			return fallback;
 		}
 		return this.chatWithSelector(
-			{ vendor: 'copilot', family: resolvedFamily },
+			modelSelector,
 			systemPrompt,
 			userPrompt,
 			fallback,
@@ -614,12 +614,12 @@ export class AiService {
 			areaBlocks,
 		].filter(Boolean).join('\n');
 
-		const resolvedFamily = await this.resolveFreeCopilotModel(modelFamily || this.modelSelector.family);
-		if (!resolvedFamily) {
+		const modelSelector = await this.resolveAiRequestModelSelector(modelFamily || this.modelSelector.family);
+		if (!modelSelector) {
 			return fallback;
 		}
 		return this.chatWithSelector(
-			{ vendor: 'copilot', family: resolvedFamily },
+			modelSelector,
 			systemPrompt,
 			userPrompt,
 			fallback,
@@ -700,12 +700,12 @@ export class AiService {
 			fileBlocks,
 		].filter(Boolean).join('\n\n');
 
-		const resolvedFamily = await this.resolveFreeCopilotModel(modelFamily || this.modelSelector.family);
-		if (!resolvedFamily) {
+		const modelSelector = await this.resolveAiRequestModelSelector(modelFamily || this.modelSelector.family);
+		if (!modelSelector) {
 			return fallback;
 		}
 		return this.chatWithSelector(
-			{ vendor: 'copilot', family: resolvedFamily },
+			modelSelector,
 			systemPrompt,
 			userPrompt,
 			fallback,
@@ -792,12 +792,12 @@ export class AiService {
 			blockSections,
 		].filter(Boolean).join('\n\n');
 
-		const resolvedFamily = await this.resolveFreeCopilotModel(modelFamily || this.modelSelector.family);
-		if (!resolvedFamily) {
+		const modelSelector = await this.resolveAiRequestModelSelector(modelFamily || this.modelSelector.family);
+		if (!modelSelector) {
 			return fallback;
 		}
 		return this.chatWithSelector(
-			{ vendor: 'copilot', family: resolvedFamily },
+			modelSelector,
 			systemPrompt,
 			userPrompt,
 			fallback,
@@ -1034,8 +1034,14 @@ export class AiService {
 		const sessionScopedModelKeys = dbPath
 			? await this.getSessionScopedModelKeys(dbPath)
 			: new Set<string>();
-		const cachedUserFacingModels = dbPath
+		const cachedCopilotModels = dbPath
+			? await this.getCachedCopilotUserFacingModels(dbPath, models)
+			: [];
+		const cachedNonCopilotModels = dbPath
 			? await this.getCachedNonCopilotUserFacingModels(dbPath, hiddenModelIds)
+			: [];
+		const controlCopilotModels = dbPath
+			? await this.getAllVisibleCopilotModelsFromControl(dbPath, models)
 			: [];
 
 		const liveModels = this.normalizeAvailableModels(models
@@ -1044,15 +1050,74 @@ export class AiService {
 				model,
 				option: this.resolveUserFacingLanguageModelOption(model, modelLookup),
 			}))
-			.filter(({ model, option }) => !this.isHiddenUserFacingLanguageModel(hiddenModelIds, model, option.id))
+			.filter(({ model, option }) => this.isCopilotLanguageModel(model) || !this.isHiddenUserFacingLanguageModel(hiddenModelIds, model, option.id))
 			.map(({ option }) => option));
 
-		const userFacingModels = this.mergeAvailableModelOptions(liveModels, cachedUserFacingModels);
+		const userFacingModels = this.mergeAvailableModelOptions([
+			...controlCopilotModels,
+			...liveModels,
+			...cachedCopilotModels,
+			...cachedNonCopilotModels,
+		]);
 		if (dbPath) {
 			return await this.getCuratedUserFacingModels(dbPath, userFacingModels);
 		}
 
 		return userFacingModels;
+	}
+
+	/** Get available GitHub Copilot Chat model families for internal AI settings. */
+	async getAvailableCopilotModelFamilies(): Promise<AvailableModelOption[]> {
+		const models = await this.getAvailableModels();
+		return this.normalizeAvailableModels(models.map(model => ({
+			id: normalizeOptionalCopilotModelFamily(model.id),
+			name: model.name,
+		})));
+	}
+
+	/** Resolve a selected model against the full GitHub Copilot Chat catalog. */
+	async resolveCopilotModelFamily(modelId: string | undefined | null): Promise<string> {
+		const requested = String(modelId || '').trim();
+		const normalizedRequested = normalizeOptionalCopilotModelFamily(requested);
+		if (!normalizedRequested) {
+			return '';
+		}
+
+		const models = await this.getAvailableCopilotModelFamilies();
+		if (models.length === 0) {
+			return normalizedRequested;
+		}
+
+		const matched = this.findBestAvailableModelMatch(models, requested)
+			|| this.findBestAvailableModelMatch(models, normalizedRequested);
+		return matched
+			? normalizeOptionalCopilotModelFamily(matched.id)
+			: '';
+	}
+
+	/** Resolve any user-facing Chat picker model to the stable identifier stored in settings. */
+	async resolveAiRequestModelIdentifier(modelId: string | undefined | null): Promise<string> {
+		const requested = String(modelId || '').trim();
+		if (!requested) {
+			return '';
+		}
+
+		const models = await this.getAvailableModels();
+		if (models.length === 0) {
+			return requested.includes('/') ? requested : normalizeOptionalCopilotModelFamily(requested);
+		}
+
+		const matched = this.findBestAvailableModelMatch(models, requested);
+		return matched?.id || '';
+	}
+
+	private async resolveAiRequestModelSelector(modelId: string | undefined | null): Promise<vscode.LanguageModelChatSelector | undefined> {
+		const resolvedId = await this.resolveAiRequestModelIdentifier(modelId);
+		if (!resolvedId) {
+			return undefined;
+		}
+
+		return this.resolveChatOpenModelSelector(resolvedId);
 	}
 
 	/**
@@ -1617,6 +1682,13 @@ export class AiService {
 		return vendor === 'copilot' || identifier.startsWith('copilot/');
 	}
 
+	/** Return true when a live Language Model API entry belongs to GitHub Copilot Chat. */
+	private isCopilotLanguageModel(model: vscode.LanguageModelChat): boolean {
+		const vendor = String(model.vendor || '').trim().toLowerCase();
+		const identifier = String((model as any).identifier || '').trim().toLowerCase();
+		return vendor === 'copilot' || identifier.startsWith('copilot/');
+	}
+
 	/** Read the full chat-model catalog that the prompt-page picker should expose. */
 	private async selectUserFacingChatModels(): Promise<vscode.LanguageModelChat[]> {
 		try {
@@ -1757,6 +1829,56 @@ export class AiService {
 		}
 
 		return this.sortVisibleModels(result, featuredEntries);
+	}
+
+	/** Build Copilot model options from both paid and free VS Code control groups. */
+	private async getAllVisibleCopilotModelsFromControl(
+		dbPath: string,
+		models: vscode.LanguageModelChat[],
+	): Promise<AvailableModelOption[]> {
+		const [modelsControlRaw, modelPickerPreferencesRaw] = await Promise.all([
+			this.readStateItemValue(dbPath, 'chat.modelsControl'),
+			this.readStateItemValue(dbPath, 'chatModelPickerPreferences'),
+		]);
+
+		const modelsControl = this.parseJson<ChatModelsControl>(modelsControlRaw);
+		if (!modelsControl) {
+			return [];
+		}
+
+		const controlEntries = [
+			...Object.values(modelsControl.paid || {}),
+			...Object.values(modelsControl.free || {}),
+		].filter(entry => Boolean(entry?.id));
+		if (controlEntries.length === 0) {
+			return [];
+		}
+
+		const preferences = this.parseJson<Record<string, boolean>>(modelPickerPreferencesRaw) || {};
+		const extraVisibleIdentifiers = Object.entries(preferences)
+			.filter(([identifier, isVisible]) => isVisible && identifier.toLowerCase().startsWith('copilot/'))
+			.map(([identifier]) => identifier);
+		const result = await this.buildModelOptionsFromControlEntries(
+			dbPath,
+			models,
+			controlEntries,
+			extraVisibleIdentifiers,
+		);
+
+		return result.length > 0 ? this.sortVisibleModels(result, controlEntries) : [];
+	}
+
+	/** Read cached GitHub Copilot Chat models as a fallback when live LM results lag behind. */
+	private async getCachedCopilotUserFacingModels(
+		dbPath: string,
+		models: vscode.LanguageModelChat[],
+	): Promise<AvailableModelOption[]> {
+		const [cachedModels, legacyCachedModels] = await Promise.all([
+			this.getVisibleCopilotModelsFromCache(dbPath, models),
+			this.getVisibleCopilotModelsFromLegacyCache(dbPath),
+		]);
+
+		return this.normalizeAvailableModels([...cachedModels, ...legacyCachedModels]);
 	}
 
 	private async getVisibleCopilotModelsFromCache(
@@ -1904,20 +2026,9 @@ export class AiService {
 		});
 	}
 
-	/** Keep curated visible models first while appending live Copilot models that are not cached yet. */
-	private mergeAvailableModelOptions(
-		primary: AvailableModelOption[],
-		secondary: AvailableModelOption[],
-	): AvailableModelOption[] {
-		if (primary.length === 0) {
-			return this.normalizeAvailableModels(secondary);
-		}
-
-		if (secondary.length === 0) {
-			return this.normalizeAvailableModels(primary);
-		}
-
-		return this.normalizeAvailableModels([...primary, ...secondary]);
+	/** Merge model option groups while preserving first-seen order and removing aliases. */
+	private mergeAvailableModelOptions(...groups: AvailableModelOption[][]): AvailableModelOption[] {
+		return this.normalizeAvailableModels(groups.flat());
 	}
 
 	private normalizeAvailableModels(models: AvailableModelOption[]): AvailableModelOption[] {
@@ -2262,6 +2373,10 @@ export class AiService {
 		};
 
 		for (const model of models) {
+			if (!this.isCopilotLanguageModel(model)) {
+				continue;
+			}
+
 			const id = this.getPreferredModelOptionId(model.id, String((model as any).identifier || ''));
 			if (!id || this.isAutoModelIdentifier(id)) {
 				continue;
@@ -2650,6 +2765,11 @@ export class AiService {
 			// ignore and fallback
 		}
 
+		const cachedSelector = await this.resolveCachedModelSelector(modelId);
+		if (cachedSelector) {
+			return cachedSelector;
+		}
+
 		return this.buildFallbackModelSelector(modelId, normalizedInput);
 	}
 
@@ -2708,6 +2828,11 @@ export class AiService {
 			// ignore and fallback
 		}
 
+		const cachedMatch = await this.resolveCachedModelEntry(modelId);
+		if (cachedMatch) {
+			return this.getPreferredModelOptionId(cachedMatch.metadata?.id || '', cachedMatch.identifier);
+		}
+
 		const raw = String(modelId || '').trim();
 		if (raw.includes('/')) {
 			return raw;
@@ -2723,6 +2848,56 @@ export class AiService {
 		return `copilot/${normalized}`;
 	}
 
+	private async resolveCachedModelSelector(modelId: string): Promise<vscode.LanguageModelChatSelector | undefined> {
+		const entry = await this.resolveCachedModelEntry(modelId);
+		const metadata = entry?.metadata;
+		if (!metadata?.vendor || !metadata.id) {
+			return undefined;
+		}
+
+		const selector: vscode.LanguageModelChatSelector = {
+			vendor: metadata.vendor,
+			id: metadata.id,
+		};
+		if (metadata.family) {
+			selector.family = metadata.family;
+		}
+		if ((metadata as any).version) {
+			selector.version = (metadata as any).version;
+		}
+		return selector;
+	}
+
+	private async resolveCachedModelEntry(modelId: string): Promise<CachedLanguageModelEntry | undefined> {
+		const dbPath = await this.resolveStateDbPath();
+		if (!dbPath) {
+			return undefined;
+		}
+
+		const cachedModelsRaw = await this.readStateItemValue(dbPath, 'chat.cachedLanguageModels.v2');
+		const cachedModels = this.parseJson<CachedLanguageModelEntry[]>(cachedModelsRaw);
+		if (!cachedModels || cachedModels.length === 0) {
+			return undefined;
+		}
+
+		const requested = String(modelId || '').trim().toLowerCase();
+		const normalized = this.normalizeModelInput(modelId).toLowerCase();
+		const candidates = [requested, normalized].filter(Boolean);
+		return cachedModels.find(entry => {
+			if (!this.isUserFacingCacheEntry(entry)) {
+				return false;
+			}
+
+			const metadata = entry.metadata!;
+			const optionId = this.getPreferredModelOptionId(metadata.id || '', entry.identifier).toLowerCase();
+			const identifier = String(entry.identifier || '').trim().toLowerCase();
+			const id = String(metadata.id || '').trim().toLowerCase();
+			const family = String(metadata.family || '').trim().toLowerCase();
+			const vendorFamily = `${String(metadata.vendor || '').trim().toLowerCase()}/${family}`;
+			return candidates.some(candidate => candidate === optionId || candidate === identifier || candidate === id || candidate === family || candidate === vendorFamily);
+		});
+	}
+
 	/** Build a safe selector fallback from a stored model identifier. */
 	private buildFallbackModelSelector(
 		modelId: string,
@@ -2736,7 +2911,10 @@ export class AiService {
 		if (raw.includes('/')) {
 			const parts = raw.split('/').map(part => part.trim()).filter(Boolean);
 			const vendor = parts[0] || undefined;
-			const terminalId = parts[parts.length - 1] || normalizedInput || raw;
+			const idParts = parts.length >= 3
+				? parts.slice(2)
+				: parts.slice(1);
+			const terminalId = idParts.join('/') || parts[parts.length - 1] || normalizedInput || raw;
 			return {
 				vendor,
 				id: terminalId,

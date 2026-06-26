@@ -353,7 +353,7 @@ export class MemoryPanelManager {
 		currentPanel?.webview.postMessage(message);
 	}
 
-	/** Re-broadcast free-model options after Copilot account changes settle in VS Code state. */
+	/** Re-broadcast Copilot model options after Copilot account changes settle in VS Code state. */
 	refreshAvailableModelsAfterCopilotAccountSwitch(): void {
 		const panel = currentPanel;
 		if (!panel) {
@@ -538,7 +538,7 @@ export class MemoryPanelManager {
 
 				case 'saveMemorySettings': {
 					const settingsToSave = msg.settings.aiModel !== undefined
-						? { ...msg.settings, aiModel: await this.resolveFreeModelFamily(msg.settings.aiModel) }
+						? { ...msg.settings, aiModel: await this.resolveAiModelIdentifier(msg.settings.aiModel) }
 						: msg.settings;
 					const settings = await this.normalizeMemorySettings(await saveMemorySettings(settingsToSave));
 					this.analyzer.setModelFamily(settings.aiModel);
@@ -718,7 +718,7 @@ export class MemoryPanelManager {
 
 				case 'saveCodeMapSettings': {
 					const settingsToSave = msg.settings.aiModel !== undefined
-						? { ...msg.settings, aiModel: await this.resolveFreeModelFamily(msg.settings.aiModel) }
+						? { ...msg.settings, aiModel: await this.resolveAiModelIdentifier(msg.settings.aiModel) }
 						: msg.settings;
 					const settings = await this.normalizeCodeMapSettings(await saveCodeMapSettings(settingsToSave));
 					panel.webview.postMessage({
@@ -914,9 +914,9 @@ export class MemoryPanelManager {
 	}
 
 	private async getAvailableModels(): Promise<MemoryAvailableModel[]> {
-		const configured = await this.resolveFreeModelFamily(getMemorySettings().aiModel);
+		const configured = await this.resolveAiModelIdentifier(getMemorySettings().aiModel);
 		const discovered = this.aiService
-			? await this.aiService.getAvailableFreeModels()
+			? await this.aiService.getAvailableModels()
 			: [];
 		const items = [...discovered];
 		if (configured && !items.some(item => item.id === configured)) {
@@ -934,25 +934,25 @@ export class MemoryPanelManager {
 		});
 	}
 
-	private async resolveFreeModelFamily(requestedModel: string | undefined | null): Promise<string> {
+	private async resolveAiModelIdentifier(requestedModel: string | undefined | null): Promise<string> {
 		if (this.aiService) {
-			return this.aiService.resolveFreeCopilotModel(requestedModel);
+			return this.aiService.resolveAiRequestModelIdentifier(requestedModel);
 		}
 
-		return '';
+		return String(requestedModel || '').trim();
 	}
 
 	private async normalizeMemorySettings(settings: MemorySettings): Promise<MemorySettings> {
 		return {
 			...settings,
-			aiModel: await this.resolveFreeModelFamily(settings.aiModel),
+			aiModel: await this.resolveAiModelIdentifier(settings.aiModel),
 		};
 	}
 
 	private async normalizeCodeMapSettings(settings: CodeMapSettings): Promise<CodeMapSettings> {
 		return {
 			...settings,
-			aiModel: await this.resolveFreeModelFamily(settings.aiModel),
+			aiModel: await this.resolveAiModelIdentifier(settings.aiModel),
 		};
 	}
 
@@ -1008,7 +1008,7 @@ export class MemoryPanelManager {
 			return;
 		}
 
-		const selectedAiModel = await this.resolveFreeModelFamily(getMemorySettings().aiModel);
+		const selectedAiModel = await this.resolveAiModelIdentifier(getMemorySettings().aiModel);
 		if (!selectedAiModel) {
 			panel.webview.postMessage({
 				type: 'memoryError',
@@ -1289,7 +1289,7 @@ export class MemoryPanelManager {
 		const config = vscode.workspace.getConfiguration('promptManager');
 		const depth = config.get<any>('memory.analysisDepth', 'standard');
 		const diffLimit = config.get<number>('memory.diffLimit', 10000);
-		const aiModel = await this.resolveFreeModelFamily(config.get<string>('memory.aiModel', DEFAULT_MEMORY_SETTINGS.aiModel));
+		const aiModel = await this.resolveAiModelIdentifier(config.get<string>('memory.aiModel', DEFAULT_MEMORY_SETTINGS.aiModel));
 		const startedAt = new Date().toISOString();
 
 		row.status = 'running';

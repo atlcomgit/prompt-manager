@@ -213,7 +213,18 @@ test('buildPromptModelOptions does not re-add hidden selected models after catal
 	});
 });
 
-test('buildPromptModelOptions keeps saved model while catalog is still empty', async () => {
+test('buildPromptModelOptions keeps saved Copilot model while catalog is still empty', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { buildPromptModelOptions } = await import('../src/webview/editor/EditorApp.js');
+		const options = buildPromptModelOptions([], 'copilot/claude-sonnet-4.6');
+
+		assert.deepEqual(options, [
+			{ id: 'copilot/claude-sonnet-4.6', name: 'copilot/claude-sonnet-4.6' },
+		]);
+	});
+});
+
+test('buildPromptModelOptions keeps saved external provider model while catalog is still empty', async () => {
 	await withEditorAppEnvironment(async () => {
 		const { buildPromptModelOptions } = await import('../src/webview/editor/EditorApp.js');
 		const options = buildPromptModelOptions([], 'customendpoint/tokenator/claude-fable-5');

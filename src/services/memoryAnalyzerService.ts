@@ -5,7 +5,7 @@
  */
 
 import * as vscode from 'vscode';
-import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
+import { DEFAULT_COPILOT_MODEL_FAMILY, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { areInternalAiFeaturesEnabled } from './aiSettingsConfig.js';
@@ -39,9 +39,26 @@ export class MemoryAnalyzerService {
 	 * Set the AI model family used for analysis.
 	 */
 	setModelFamily(family: string): void {
-		this.modelSelector = {
+		this.modelSelector = this.buildModelSelector(family);
+	}
+
+	private buildModelSelector(modelIdentifier: string): vscode.LanguageModelChatSelector {
+		const raw = String(modelIdentifier || '').trim();
+		if (!raw) {
+			return { vendor: 'copilot', family: '' };
+		}
+
+		if (raw.includes('/')) {
+			const parts = raw.split('/').map(part => part.trim()).filter(Boolean);
+			const vendor = parts[0] || 'copilot';
+			const idParts = parts.length >= 3 ? parts.slice(2) : parts.slice(1);
+			const id = idParts.join('/') || parts[parts.length - 1] || raw;
+			return { vendor, id, family: id };
+		}
+
+		return {
 			vendor: 'copilot',
-			family: normalizeOptionalCopilotModelFamily(family),
+			family: normalizeOptionalCopilotModelFamily(raw),
 		};
 	}
 
@@ -212,7 +229,7 @@ export class MemoryAnalyzerService {
 			this.logAiRequest(`label=memory.commit-analysis commit=${this.shortenCommitSha(commitSha)} result=disabled-by-setting`);
 			return { rawResult: this.fallbackAnalysis(), usedModel: '' };
 		}
-		const configuredModel = String(this.modelSelector.family || '').trim();
+		const configuredModel = String(this.modelSelector.id || this.modelSelector.family || '').trim();
 		if (!configuredModel) {
 			this.logAiRequest(`label=memory.commit-analysis commit=${this.shortenCommitSha(commitSha)} result=no-configured-model`);
 			return { rawResult: this.fallbackAnalysis(), usedModel: '' };
@@ -223,7 +240,7 @@ export class MemoryAnalyzerService {
 			if (model) {
 				return {
 					rawResult: await this.chatJson(model, systemPrompt, input, commitSha),
-					usedModel: normalizeCopilotModelFamily(model.family || model.id || configuredModel),
+					usedModel: String((model as any).identifier || model.family || model.id || configuredModel),
 				};
 			}
 

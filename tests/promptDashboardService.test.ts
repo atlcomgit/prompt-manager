@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { Prompt } from '../src/types/prompt.js';
+import { buildPromptDashboardTodosData } from '../src/utils/promptDashboardTodos.js';
 
 type ModuleLoaderWithLoad = typeof import('node:module') & {
 	_load: (request: string, parent: unknown, isMain: boolean) => unknown;
@@ -165,6 +166,7 @@ test('PromptDashboardService refreshPromptSnapshot skips collapsed widgets', asy
 	let listPromptsCalls = 0;
 	let dailyTimeCalls = 0;
 	let gitSnapshotCalls = 0;
+	let todoScanCalls = 0;
 	const service = new PromptDashboardService(
 		{
 			listPrompts: async () => {
@@ -197,15 +199,93 @@ test('PromptDashboardService refreshPromptSnapshot skips collapsed widgets', asy
 		{
 			analyzePromptDashboardReview: async () => 'ok',
 		} as any,
+		undefined,
+		{
+			getMaxResults: () => 500,
+			scanTodos: async () => {
+				todoScanCalls += 1;
+				return buildPromptDashboardTodosData({
+					markers: [],
+					scannedFileCount: 0,
+					skippedFileCount: 0,
+					maxResults: 500,
+					truncated: false,
+				});
+			},
+		} as any,
 	);
 
 	await service.refreshPromptSnapshot(createPrompt(), undefined, 'collapsed-refresh', {
-		collapsedWidgets: ['activity', 'status', 'projects', 'aiAnalysis'],
+		collapsedWidgets: ['activity', 'status', 'projects', 'aiAnalysis', 'docker', 'todos'],
 	});
 
 	assert.equal(listPromptsCalls, 0);
 	assert.equal(dailyTimeCalls, 0);
 	assert.equal(gitSnapshotCalls, 0);
+	assert.equal(todoScanCalls, 0);
+	service.dispose();
+});
+
+test('PromptDashboardService refreshPromptSnapshot loads the visible todos widget', async () => {
+	let todoScanCalls = 0;
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => ['api'],
+			getWorkspaceFolderPaths: () => new Map([['api', '/workspace/api']]),
+		} as any,
+		{
+			getGitOverlaySnapshot: async () => ({ trackedBranches: ['main'], projects: [] }),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+		undefined,
+		{
+			getMaxResults: () => 500,
+			scanTodos: async (input: { projectNames: string[] }) => {
+				todoScanCalls += 1;
+				assert.deepEqual(input.projectNames, ['api']);
+				const marker = {
+					id: 'api:src%2Fapp.ts:3:4:todo',
+					project: 'api',
+					filePath: 'src/app.ts',
+					fileType: 'ts',
+					marker: 'todo' as const,
+					token: 'todo',
+					line: 3,
+					column: 4,
+					preview: '// todo: wire widget',
+				};
+				return buildPromptDashboardTodosData({
+					markers: [marker],
+					scannedFileCount: 10,
+					skippedFileCount: 2,
+					maxResults: 500,
+					truncated: false,
+				});
+			},
+		} as any,
+	);
+
+	const snapshot = await service.refreshPromptSnapshot(
+		createPrompt({ projects: ['api'] }),
+		undefined,
+		'todos-refresh',
+		{ collapsedWidgets: ['activity', 'status', 'projects', 'aiAnalysis', 'docker'] },
+	);
+
+	assert.equal(todoScanCalls, 1);
+	assert.equal(snapshot.todos?.data.markerCount, 1);
+	assert.equal(snapshot.todos?.data.projects[0].fileTypes[0].files[0].markers[0].line, 3);
 	service.dispose();
 });
 

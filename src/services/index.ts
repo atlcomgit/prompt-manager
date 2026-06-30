@@ -18,6 +18,7 @@ export { ChatMemoryInstructionComposer } from './chatMemoryInstructionComposer.j
 export { ChatMemoryInstructionService } from './chatMemoryInstructionService.js';
 export { PromptVoiceService } from './promptVoice/promptVoiceService.js';
 export { PromptDashboardService } from './promptDashboardService.js';
+export { TodoScannerService } from './todoScannerService.js';
 export { DockerEngineApiClient } from './dockerEngineApiClient.js';
 export { DockerComposeDiscoveryService } from './dockerComposeDiscoveryService.js';
 export { DockerContainersService } from './dockerContainersService.js';

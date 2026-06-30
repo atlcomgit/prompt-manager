@@ -15,12 +15,13 @@ export function getWebviewHtml(
   bootGlobals: Record<string, unknown> = {},
 ): string {
   const lang = locale || vscode.env.language || 'en';
-  const scriptUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, scriptPath)
-  );
-  const extraScriptUris = extraScriptPaths.map((extraScriptPath) => webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, extraScriptPath)
-  ));
+  const cacheBustToken = encodeURIComponent(bootId || `${Date.now()}`);
+  const toCacheBustedScriptUri = (targetScriptPath: string): string => {
+    const uri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, targetScriptPath)).toString();
+    return `${uri}${uri.includes('?') ? '&' : '?'}v=${cacheBustToken}`;
+  };
+  const scriptUri = toCacheBustedScriptUri(scriptPath);
+  const extraScriptUris = extraScriptPaths.map((extraScriptPath) => toCacheBustedScriptUri(extraScriptPath));
   const bootGlobalsScript = JSON.stringify(bootGlobals)
     .replace(/</g, '\\u003c')
     .replace(/>/g, '\\u003e')

@@ -28,6 +28,8 @@ import type {
 	PromptDashboardSectionKey,
 	PromptDashboardSectionOrder,
 	PromptDashboardSnapshot,
+	PromptDashboardTodoFile,
+	PromptDashboardTodosData,
 	PromptDashboardWidgetKind,
 } from '../../../types/promptDashboard.js';
 import {
@@ -48,6 +50,11 @@ import {
 	formatPromptDashboardDuration,
 	splitPromptDashboardPathParts,
 } from '../../../utils/promptDashboard.js';
+import {
+	buildPromptDashboardTodosData,
+	filterPromptDashboardTodosDataByFileTypes,
+	flattenPromptDashboardTodoMarkers,
+} from '../../../utils/promptDashboardTodos.js';
 
 const DASHBOARD_LEFT_ACCENT_SHADOW = 'inset 3px 0 0 var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))';
 const BRANCH_PROJECT_LABEL_MAX_LENGTH = 20;
@@ -63,6 +70,14 @@ export interface PromptDashboardFilePatchRequest {
 	mode: 'commit' | 'branch';
 	ref: string;
 	baseRef?: string;
+}
+
+/** Describes a clickable ToDo marker location in a workspace project. */
+export interface PromptDashboardTodoOpenRequest {
+	project: string;
+	filePath: string;
+	line: number;
+	column?: number;
 }
 
 interface PromptDashboardProps {
@@ -85,6 +100,7 @@ interface PromptDashboardProps {
 	onPullProject?: (project: string) => void;
 	onOpenDiff: (project: string, filePath: string) => void;
 	onOpenFilePatch: (request: PromptDashboardFilePatchRequest) => void;
+	onOpenTodoMarker: (request: PromptDashboardTodoOpenRequest) => void;
 	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void;
 	onDockerWorkspaceAction: (action: DockerWorkspaceActionKind) => void;
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void;
@@ -127,6 +143,11 @@ export interface DashboardDockerWidgetState {
 	expandedContainerIds: string[];
 }
 
+export interface DashboardTodosWidgetState {
+	selectedFileTypes: string[];
+	search: string;
+}
+
 type DockerContainerIconKind = 'logs' | 'terminal' | 'start' | 'restart' | 'stop' | 'remove' | 'composeUp' | 'composeDown' | 'composeFile' | 'openFile';
 
 interface DockerDeclaredServiceViewRow {
@@ -142,6 +163,7 @@ type DockerTableViewRow =
 	| { kind: 'service'; key: string; row: DockerDeclaredServiceViewRow; label: string };
 
 const DOCKER_WIDGET_STATE_STORAGE_KEY = 'pm.promptDashboard.dockerWidgetState.v1';
+const TODOS_WIDGET_STATE_STORAGE_KEY = 'pm.promptDashboard.todosWidgetState.v1';
 
 /** Checks one Docker busy key inside a single or newline-packed action list. */
 function isDockerBusyActionActive(busyAction: DashboardDockerBusyAction, actionKey: string): boolean {
@@ -179,6 +201,22 @@ export function normalizePromptDashboardDockerWidgetState(value: unknown): Dashb
 	return viewMode ? { viewMode, statusFilter, search, sortBy, expandedContainerIds } : { statusFilter, search, sortBy, expandedContainerIds };
 }
 
+/** Normalizes persisted ToDo widget filter state from webview storage. */
+export function normalizePromptDashboardTodosWidgetState(value: unknown): DashboardTodosWidgetState {
+	if (!value || typeof value !== 'object') {
+		return { selectedFileTypes: [], search: '' };
+	}
+
+	const input = value as Partial<DashboardTodosWidgetState>;
+	const selectedFileTypes = Array.isArray(input.selectedFileTypes)
+		? Array.from(new Set(input.selectedFileTypes
+			.map(item => String(item || '').trim().toLowerCase())
+			.filter(Boolean)))
+		: [];
+	const search = typeof input.search === 'string' ? input.search : '';
+	return { selectedFileTypes, search };
+}
+
 /** Reads Docker widget UI state from local webview storage. */
 function readPromptDashboardDockerWidgetState(): DashboardDockerWidgetState {
 	const storage = getPromptDashboardLocalStorage();
@@ -206,6 +244,38 @@ function writePromptDashboardDockerWidgetStatePatch(patch: Partial<DashboardDock
 	});
 	try {
 		storage.setItem(DOCKER_WIDGET_STATE_STORAGE_KEY, JSON.stringify(nextState));
+	} catch {
+		// Ignore webview storage quota errors; the widget remains usable without persistence.
+	}
+}
+
+/** Reads ToDo widget filter state from local webview storage. */
+function readPromptDashboardTodosWidgetState(): DashboardTodosWidgetState {
+	const storage = getPromptDashboardLocalStorage();
+	if (!storage) {
+		return normalizePromptDashboardTodosWidgetState(null);
+	}
+
+	try {
+		return normalizePromptDashboardTodosWidgetState(JSON.parse(storage.getItem(TODOS_WIDGET_STATE_STORAGE_KEY) || 'null'));
+	} catch {
+		return normalizePromptDashboardTodosWidgetState(null);
+	}
+}
+
+/** Writes a partial ToDo widget filter-state update without dropping saved fields. */
+function writePromptDashboardTodosWidgetStatePatch(patch: Partial<DashboardTodosWidgetState>): void {
+	const storage = getPromptDashboardLocalStorage();
+	if (!storage) {
+		return;
+	}
+
+	const nextState = normalizePromptDashboardTodosWidgetState({
+		...readPromptDashboardTodosWidgetState(),
+		...patch,
+	});
+	try {
+		storage.setItem(TODOS_WIDGET_STATE_STORAGE_KEY, JSON.stringify(nextState));
 	} catch {
 		// Ignore webview storage quota errors; the widget remains usable without persistence.
 	}
@@ -368,6 +438,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	onPullProject,
 	onOpenDiff,
 	onOpenFilePatch,
+	onOpenTodoMarker,
 	onDockerAction,
 	onDockerWorkspaceAction,
 	onDockerComposeAction,
@@ -377,6 +448,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	onDockerLiveMetricsVisibilityChange,
 }) => {
 	const [initialDockerWidgetState] = useState(() => readPromptDashboardDockerWidgetState());
+	const [initialTodosWidgetState] = useState(() => readPromptDashboardTodosWidgetState());
 	const [hasSavedDockerViewMode, setHasSavedDockerViewMode] = useState(() => Boolean(initialDockerWidgetState.viewMode));
 	const [expanded, setExpanded] = useState<ExpandedState>(() => buildDockerExpandedState(initialDockerWidgetState.expandedContainerIds));
 	const [branchDrafts, setBranchDrafts] = useState<Record<string, string>>({});
@@ -389,6 +461,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const [dockerStatusFilter, setDockerStatusFilter] = useState<DockerContainersStatusFilter>(initialDockerWidgetState.statusFilter);
 	const [dockerSearch, setDockerSearch] = useState(initialDockerWidgetState.search);
 	const [dockerSortBy, setDockerSortBy] = useState<DockerContainerSortBy>(initialDockerWidgetState.sortBy);
+	const [todoSelectedFileTypes, setTodoSelectedFileTypes] = useState<string[]>(initialTodosWidgetState.selectedFileTypes);
+	const [todoSearch, setTodoSearch] = useState(initialTodosWidgetState.search);
 	const [draggedSection, setDraggedSection] = useState<PromptDashboardSectionKey | null>(null);
 	const [dropIndicator, setDropIndicator] = useState<DashboardDropIndicator | null>(null);
 	const [isDockerSectionInView, setIsDockerSectionInView] = useState(false);
@@ -437,6 +511,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const activityCacheStatus = snapshot?.activity.cache.status || 'idle';
 	const statusCacheStatus = snapshot?.status.cache.status || 'idle';
 	const dockerCacheStatus = snapshot?.docker.cache.status || 'idle';
+	const todosCacheStatus = snapshot?.todos?.cache.status || 'idle';
 	const effectiveDockerBusyAction = dockerBusyAction || (busyAction?.startsWith('docker:') ? busyAction : null);
 	const dashboardScopeKey = snapshot?.scopeKey || '';
 	const clearPendingRailScrollRestore = useCallback(() => {
@@ -547,6 +622,36 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		}),
 		[dockerSearch, dockerSortBy, dockerStatusFilter, dockerViewMode, expanded, mode, normalizedCollapsedSections, snapshot?.docker.data],
 	);
+	const visibleTodosData = useMemo(() => {
+		const todosData = snapshot?.todos?.data;
+		if (!todosData) {
+			return null;
+		}
+
+		const availableFileTypes = new Set(todosData.fileTypes.map(item => item.fileType));
+		const selectedTypes = todoSelectedFileTypes.filter(fileType => availableFileTypes.has(fileType));
+		const typeFilteredData = filterPromptDashboardTodosDataByFileTypes(todosData, selectedTypes);
+		const normalizedSearch = todoSearch.trim().toLowerCase();
+		if (!normalizedSearch) {
+			return typeFilteredData;
+		}
+
+		const markers = flattenPromptDashboardTodoMarkers(typeFilteredData).filter(marker => [
+			marker.project,
+			marker.filePath,
+			marker.token,
+			marker.preview,
+			String(marker.line),
+		].some(value => value.toLowerCase().includes(normalizedSearch)));
+		return buildPromptDashboardTodosData({
+			markers,
+			scannedFileCount: todosData.scannedFileCount,
+			skippedFileCount: todosData.skippedFileCount,
+			maxResults: todosData.maxResults,
+			truncated: todosData.truncated,
+			generatedAt: todosData.generatedAt,
+		});
+	}, [snapshot?.todos?.data, todoSearch, todoSelectedFileTypes]);
 	const runFileOpenAction = (fileKey: string, action: () => void) => {
 		const startedAt = Date.now();
 		const token = openingFileTokenRef.current + 1;
@@ -786,6 +891,38 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const changeDockerSortBy = (sortBy: DockerContainerSortBy) => {
 		setDockerSortBy(sortBy);
 		writePromptDashboardDockerWidgetStatePatch({ sortBy });
+	};
+
+	/** Changes and persists the ToDo widget free-text search. */
+	const changeTodoSearch = (searchValue: string) => {
+		setTodoSearch(searchValue);
+		writePromptDashboardTodosWidgetStatePatch({ search: searchValue });
+	};
+
+	/** Toggles one ToDo file-type filter while keeping an empty list as the all-types state. */
+	const toggleTodoFileType = (fileType: string) => {
+		const normalizedType = fileType.trim().toLowerCase();
+		if (!normalizedType) {
+			return;
+		}
+		setTodoSelectedFileTypes(previous => {
+			const nextTypes = previous.includes(normalizedType)
+				? previous.filter(item => item !== normalizedType)
+				: [...previous, normalizedType].sort((left, right) => left.localeCompare(right, 'ru'));
+			writePromptDashboardTodosWidgetStatePatch({ selectedFileTypes: nextTypes });
+			return nextTypes;
+		});
+	};
+
+	/** Resets ToDo file-type filters back to the all-types state. */
+	const clearTodoFileTypes = () => {
+		setTodoSelectedFileTypes([]);
+		writePromptDashboardTodosWidgetStatePatch({ selectedFileTypes: [] });
+	};
+
+	/** Clears the persisted ToDo widget search value. */
+	const clearTodoSearch = () => {
+		changeTodoSearch('');
 	};
 
 	/** Toggles one shared top-level dashboard section from the section header. */
@@ -1146,6 +1283,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		parallelBranches: renderParallelBranchFiles(parallelProjects, expanded, toggleExpanded, fileHandlers, parallelBranchesCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('parallelBranches', 'Параллельные ветки')),
 		projectCommits: renderProjectCommits(commitProjects, expanded, toggleExpanded, fileHandlers, projectCommitsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('projectCommits', 'Коммиты проектов')),
 		dockerContainers: renderDockerContainers(snapshot?.docker.data, dockerViewMode, dockerStatusFilter, dockerSearch, dockerSortBy, expanded, dockerCacheStatus, busyAction, effectiveDockerBusyAction, changeDockerViewMode, changeDockerStatusFilter, changeDockerSearch, clearDockerSearch, changeDockerSortBy, toggleExpanded, onDockerAction, onDockerWorkspaceAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('dockerContainers', 'Docker контейнеры')),
+		todos: renderTodos(snapshot?.todos?.data || null, visibleTodosData, todoSelectedFileTypes, todoSearch, todosCacheStatus, busyAction, expanded, normalizedCollapsedSections, toggleTodoFileType, clearTodoFileTypes, changeTodoSearch, clearTodoSearch, toggleExpanded, onOpenTodoMarker, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('todos', 'ToDo')),
 		aiAnalysis: renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('aiAnalysis', 'AI review')),
 	};
 	const widgetColumns = normalizedSectionOrder
@@ -5399,6 +5537,291 @@ function renderLoadingEmptyState(label: string): React.ReactNode {
 	);
 }
 
+function renderTodos(
+	data: PromptDashboardTodosData | null,
+	visibleData: PromptDashboardTodosData | null,
+	selectedFileTypes: string[],
+	search: string,
+	cacheStatus: PromptDashboardLoadStatus,
+	busyAction: DashboardBusyAction,
+	expanded: ExpandedState,
+	collapsedSections: PromptDashboardCollapsedSections,
+	onToggleFileType: (fileType: string) => void,
+	onClearFileTypes: () => void,
+	onSearchChange: (search: string) => void,
+	onClearSearch: () => void,
+	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
+	onOpenTodoMarker: (request: PromptDashboardTodoOpenRequest) => void,
+	onToggleSectionCollapse: (section: PromptDashboardSectionKey) => void,
+	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void,
+	dragHandle?: React.ReactNode,
+): React.ReactNode {
+	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'todos');
+	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'todos', 'todos');
+	const markerCount = data?.markerCount || 0;
+	const visibleMarkerCount = visibleData?.markerCount || 0;
+	const hasActiveFilters = selectedFileTypes.length > 0 || search.trim().length > 0;
+	const metaLabel = hasActiveFilters && data
+		? `${visibleMarkerCount}/${markerCount}`
+		: markerCount;
+	return (
+		<section style={styles.section}>
+			{renderSectionHeader('ToDo', renderSectionMeta(metaLabel, sectionCacheStatus, 'сканируем', {
+					section: 'todos',
+					collapsed,
+					widget: 'todos',
+					title: 'ToDo',
+					busyAction,
+					onToggleCollapse: () => onToggleSectionCollapse('todos'),
+					onRefreshWidget,
+				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('todos'), dragHandle })}
+			{collapsed ? null : <div style={styles.sectionBody}>
+				{data ? renderTodoSummary(data, visibleData, hasActiveFilters) : null}
+				{data ? renderTodoControls(data, selectedFileTypes, search, onToggleFileType, onClearFileTypes, onSearchChange, onClearSearch) : null}
+				{sectionCacheStatus === 'loading' && markerCount === 0 ? renderLoadingEmptyState('Сканируем ToDo-маркеры...') : null}
+				{visibleMarkerCount > 0 && visibleData ? renderTodoTree(visibleData, expanded, toggleExpanded, onOpenTodoMarker) : (
+					<div style={styles.emptyText}>Метки `todo` и `//?!?` не найдены.</div>
+				)}
+				{data?.truncated ? <div style={styles.warningText}>{`Показаны первые ${data.maxResults} меток.`}</div> : null}
+			</div>}
+		</section>
+	);
+}
+
+/** Renders compact ToDo scan counters above filters. */
+function renderTodoSummary(
+	data: PromptDashboardTodosData,
+	visibleData: PromptDashboardTodosData | null,
+	hasActiveFilters: boolean,
+): React.ReactNode {
+	const visibleCount = visibleData?.markerCount ?? data.markerCount;
+	const markerLabel = hasActiveFilters ? `${visibleCount}/${data.markerCount}` : String(data.markerCount);
+	return (
+		<div style={styles.todoSummaryGrid}>
+			<div style={styles.todoSummaryItem}>
+				<span style={styles.todoSummaryValue}>{markerLabel}</span>
+				<span style={styles.todoSummaryLabel}>меток</span>
+			</div>
+			<div style={styles.todoSummaryItem}>
+				<span style={styles.todoSummaryValue}>{data.fileCount}</span>
+				<span style={styles.todoSummaryLabel}>файлов</span>
+			</div>
+			<div style={styles.todoSummaryItem}>
+				<span style={styles.todoSummaryValue}>{data.scannedFileCount}</span>
+				<span style={styles.todoSummaryLabel}>просмотрено</span>
+			</div>
+		</div>
+	);
+}
+
+/** Renders ToDo type filters and search controls. */
+function renderTodoControls(
+	data: PromptDashboardTodosData,
+	selectedFileTypes: string[],
+	search: string,
+	onToggleFileType: (fileType: string) => void,
+	onClearFileTypes: () => void,
+	onSearchChange: (search: string) => void,
+	onClearSearch: () => void,
+): React.ReactNode {
+	const selectedSet = new Set(selectedFileTypes);
+	return (
+		<div style={styles.todoControls}>
+			<div style={styles.todoTypeFilters} aria-label="Фильтр ToDo по типам файлов">
+				<button
+					type="button"
+					style={{ ...styles.todoTypeChip, ...(selectedFileTypes.length === 0 ? styles.todoTypeChipActive : null) }}
+					onClick={onClearFileTypes}
+					title="Показать все типы файлов"
+				>
+					Все
+				</button>
+				{data.fileTypes.map(fileType => {
+					const isActive = selectedFileTypes.length === 0 || selectedSet.has(fileType.fileType);
+					return (
+						<button
+							key={fileType.fileType}
+							type="button"
+							style={{ ...styles.todoTypeChip, ...(isActive ? styles.todoTypeChipActive : null) }}
+							onClick={() => onToggleFileType(fileType.fileType)}
+							title={`${fileType.label}: ${fileType.markerCount}`}
+						>
+							{`${fileType.label} ${fileType.markerCount}`}
+						</button>
+					);
+				})}
+			</div>
+			<div style={styles.dockerSearchField}>
+				<input
+					value={search}
+					style={{
+						...styles.dockerSearchInput,
+						...(search ? styles.dockerSearchInputWithClear : null),
+					}}
+					onChange={event => onSearchChange(event.target.value)}
+					placeholder="Файл, строка или метка"
+					aria-label="Поиск ToDo-маркеров"
+				/>
+				{search ? (
+					<button type="button" style={styles.dockerSearchClearButton} onClick={onClearSearch} aria-label="Очистить поиск ToDo">×</button>
+				) : null}
+			</div>
+		</div>
+	);
+}
+
+/** Renders ToDo markers as project -> folder -> file -> line tree rows. */
+function renderTodoTree(
+	data: PromptDashboardTodosData,
+	expanded: ExpandedState,
+	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
+	onOpenTodoMarker: (request: PromptDashboardTodoOpenRequest) => void,
+): React.ReactNode {
+	return (
+		<div style={styles.todoTree}>
+			{data.projects.map(project => renderTodoProject(project, expanded, toggleExpanded, onOpenTodoMarker))}
+		</div>
+	);
+}
+
+/** Renders one project branch in the ToDo tree. */
+function renderTodoProject(
+	project: PromptDashboardTodosData['projects'][number],
+	expanded: ExpandedState,
+	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
+	onOpenTodoMarker: (request: PromptDashboardTodoOpenRequest) => void,
+): React.ReactNode {
+	const key = `todo:project:${project.project}`;
+	const isExpanded = expanded[key] ?? true;
+	return (
+		<div key={key} style={styles.todoTreeGroup}>
+			{renderTodoTreeToggleRow(key, project.project, `${project.markerCount} меток`, isExpanded, toggleExpanded)}
+			{isExpanded ? <div style={styles.todoTreeChildren}>
+				{renderTodoDirectoryTree(project.project, collectTodoProjectFiles(project), expanded, toggleExpanded, onOpenTodoMarker)}
+			</div> : null}
+		</div>
+	);
+}
+
+/** Flattens files from all filtered file-type groups while keeping filter chips separate from the tree. */
+function collectTodoProjectFiles(project: PromptDashboardTodosData['projects'][number]): PromptDashboardTodoFile[] {
+	return project.fileTypes.flatMap(group => group.files);
+}
+
+/** Renders project-relative folders by their full folder path. */
+function renderTodoDirectoryTree(
+	project: string,
+	files: PromptDashboardTodoFile[],
+	expanded: ExpandedState,
+	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
+	onOpenTodoMarker: (request: PromptDashboardTodoOpenRequest) => void,
+): React.ReactNode {
+	const filesByDirectory = groupTodoFilesByDirectory(files);
+	const directoryEntries = Array.from(filesByDirectory.entries())
+		.filter(([directoryPath]) => Boolean(directoryPath))
+		.sort(([left], [right]) => left.localeCompare(right, 'ru'));
+	const rootFiles = [...(filesByDirectory.get('') || [])].sort((left, right) => left.filePath.localeCompare(right.filePath, 'ru'));
+	return [
+		...directoryEntries.map(([directoryPath, directoryFiles]) => renderTodoDirectoryPath(project, directoryPath, directoryFiles, expanded, toggleExpanded, onOpenTodoMarker)),
+		...rootFiles.map(file => renderTodoFile(file, expanded, toggleExpanded, onOpenTodoMarker)),
+	];
+}
+
+/** Groups ToDo files by their full project-relative folder path. */
+function groupTodoFilesByDirectory(files: PromptDashboardTodoFile[]): Map<string, PromptDashboardTodoFile[]> {
+	const filesByDirectory = new Map<string, PromptDashboardTodoFile[]>();
+	for (const file of files) {
+		const directoryPath = file.directoryPath || '';
+		filesByDirectory.set(directoryPath, [...(filesByDirectory.get(directoryPath) || []), file]);
+	}
+	return filesByDirectory;
+}
+
+/** Renders one folder node that keeps the full folder path visible. */
+function renderTodoDirectoryPath(
+	project: string,
+	directoryPath: string,
+	files: PromptDashboardTodoFile[],
+	expanded: ExpandedState,
+	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
+	onOpenTodoMarker: (request: PromptDashboardTodoOpenRequest) => void,
+): React.ReactNode {
+	const key = `todo:dir:${project}:${directoryPath}`;
+	const isExpanded = expanded[key] ?? true;
+	const sortedFiles = [...files].sort((left, right) => left.filePath.localeCompare(right.filePath, 'ru'));
+	const markerCount = sortedFiles.reduce((total, file) => total + file.markerCount, 0);
+	return (
+		<div key={key} style={styles.todoTreeGroup}>
+			{renderTodoTreeToggleRow(key, directoryPath, `${markerCount} меток`, isExpanded, toggleExpanded)}
+			{isExpanded ? <div style={styles.todoTreeChildren}>
+				{sortedFiles.map(file => renderTodoFile(file, expanded, toggleExpanded, onOpenTodoMarker))}
+			</div> : null}
+		</div>
+	);
+}
+
+/** Renders one file branch with clickable marker rows. */
+function renderTodoFile(
+	file: PromptDashboardTodosData['projects'][number]['fileTypes'][number]['files'][number],
+	expanded: ExpandedState,
+	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
+	onOpenTodoMarker: (request: PromptDashboardTodoOpenRequest) => void,
+): React.ReactNode {
+	const key = `todo:file:${file.project}:${file.filePath}`;
+	const isExpanded = expanded[key] ?? true;
+	const label = file.fileName;
+	return (
+		<div key={key} style={styles.todoTreeGroup}>
+			{renderTodoTreeToggleRow(key, label, `${file.markerCount}`, isExpanded, toggleExpanded)}
+			{isExpanded ? <div style={styles.todoTreeChildren}>
+				{file.markers.map(marker => renderTodoMarkerRow(marker, onOpenTodoMarker))}
+			</div> : null}
+		</div>
+	);
+}
+
+/** Renders one expandable non-leaf row in the ToDo tree. */
+function renderTodoTreeToggleRow(
+	key: string,
+	label: string,
+	meta: string,
+	isExpanded: boolean,
+	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
+): React.ReactNode {
+	return (
+		<button type="button" style={styles.todoTreeGroupButton} onClick={() => toggleExpanded(key, true)} title={label}>
+			<span style={{ ...styles.sectionCollapseIcon, ...(isExpanded ? null : styles.sectionCollapseIconCollapsed) }}>⌄</span>
+			<span style={styles.todoTreeGroupLabel}>{label}</span>
+			<span style={styles.todoTreeGroupMeta}>{meta}</span>
+		</button>
+	);
+}
+
+/** Renders one clickable ToDo marker line. */
+function renderTodoMarkerRow(
+	marker: ReturnType<typeof flattenPromptDashboardTodoMarkers>[number],
+	onOpenTodoMarker: (request: PromptDashboardTodoOpenRequest) => void,
+): React.ReactNode {
+	return (
+		<button
+			key={marker.id}
+			type="button"
+			style={styles.todoMarkerRow}
+			onClick={() => onOpenTodoMarker({
+				project: marker.project,
+				filePath: marker.filePath,
+				line: marker.line,
+				column: marker.column,
+			})}
+			title={`${marker.project}/${marker.filePath}:${marker.line}`}
+		>
+			<span style={styles.todoMarkerBadge}>{marker.marker === 'todo' ? 'todo' : '//?!?'}</span>
+			<span style={styles.todoMarkerLine}>{marker.line}</span>
+			<span style={styles.todoMarkerPreview}>{marker.preview}</span>
+		</button>
+	);
+}
+
 function formatRelativeTime(value: string): string {
 	return formatRelativeAge(parseIsoAgeMs(value));
 }
@@ -7080,6 +7503,153 @@ const styles: Record<string, React.CSSProperties> = {
 		fontWeight: 700,
 		lineHeight: 1,
 		cursor: 'pointer',
+	},
+	// Compact ToDo summary counters shown above the marker tree.
+	todoSummaryGrid: {
+		display: 'grid',
+		gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+		gap: '6px',
+		minWidth: 0,
+	},
+	todoSummaryItem: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '2px',
+		padding: '7px 8px',
+		border: '1px solid var(--vscode-panel-border)',
+		borderRadius: '5px',
+		background: 'color-mix(in srgb, var(--vscode-sideBar-background) 78%, transparent)',
+		minWidth: 0,
+	},
+	todoSummaryValue: {
+		fontSize: '13px',
+		fontWeight: 800,
+		color: 'var(--vscode-foreground)',
+		lineHeight: 1.1,
+	},
+	todoSummaryLabel: {
+		fontSize: '10px',
+		fontWeight: 600,
+		color: 'var(--vscode-descriptionForeground)',
+		whiteSpace: 'nowrap',
+	},
+	// ToDo filter controls use wrapped chips because file type counts vary per workspace.
+	todoControls: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '8px',
+		minWidth: 0,
+	},
+	todoTypeFilters: {
+		display: 'flex',
+		flexWrap: 'wrap',
+		gap: '5px',
+		minWidth: 0,
+	},
+	todoTypeChip: {
+		padding: '4px 7px',
+		border: '1px solid var(--vscode-panel-border)',
+		borderRadius: '4px',
+		background: 'var(--vscode-button-secondaryBackground)',
+		color: 'var(--vscode-button-secondaryForeground)',
+		fontFamily: 'var(--vscode-font-family)',
+		fontSize: '10px',
+		fontWeight: 700,
+		cursor: 'pointer',
+	},
+	todoTypeChipActive: {
+		background: 'var(--vscode-button-background)',
+		color: 'var(--vscode-button-foreground)',
+		borderColor: 'color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 60%, var(--vscode-panel-border))',
+	},
+	// ToDo tree rows keep project, file type, file and line levels compact.
+	todoTree: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '4px',
+		minWidth: 0,
+	},
+	todoTreeGroup: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '3px',
+		minWidth: 0,
+	},
+	todoTreeChildren: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '3px',
+		paddingLeft: '14px',
+		borderLeft: '1px solid color-mix(in srgb, var(--vscode-panel-border) 76%, transparent)',
+		marginLeft: '8px',
+		minWidth: 0,
+	},
+	todoTreeGroupButton: {
+		width: '100%',
+		display: 'grid',
+		gridTemplateColumns: '14px minmax(0, 1fr) auto',
+		alignItems: 'center',
+		gap: '6px',
+		padding: '4px 0',
+		border: 'none',
+		background: 'transparent',
+		color: 'var(--vscode-foreground)',
+		fontFamily: 'var(--vscode-font-family)',
+		textAlign: 'left',
+		cursor: 'pointer',
+		minWidth: 0,
+	},
+	todoTreeGroupLabel: {
+		fontSize: '11px',
+		fontWeight: 700,
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
+	},
+	todoTreeGroupMeta: {
+		fontSize: '10px',
+		fontWeight: 700,
+		color: 'var(--vscode-descriptionForeground)',
+		whiteSpace: 'nowrap',
+	},
+	todoMarkerRow: {
+		width: '100%',
+		display: 'grid',
+		gridTemplateColumns: 'auto auto minmax(0, 1fr)',
+		alignItems: 'center',
+		gap: '7px',
+		padding: '4px 0',
+		border: 'none',
+		borderBottom: '1px solid color-mix(in srgb, var(--vscode-panel-border) 58%, transparent)',
+		background: 'transparent',
+		color: 'var(--vscode-foreground)',
+		fontFamily: 'var(--vscode-font-family)',
+		textAlign: 'left',
+		cursor: 'pointer',
+		minWidth: 0,
+	},
+	todoMarkerBadge: {
+		padding: '2px 5px',
+		borderRadius: '3px',
+		background: 'color-mix(in srgb, var(--vscode-textLink-foreground) 14%, transparent)',
+		color: 'var(--vscode-textLink-foreground)',
+		fontSize: '10px',
+		fontWeight: 800,
+		whiteSpace: 'nowrap',
+	},
+	todoMarkerLine: {
+		fontSize: '10px',
+		fontWeight: 800,
+		color: 'var(--vscode-descriptionForeground)',
+		fontVariantNumeric: 'tabular-nums',
+	},
+	todoMarkerPreview: {
+		fontSize: '11px',
+		color: 'var(--vscode-foreground)',
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
+		minWidth: 0,
 	},
 	dockerTree: {
 		display: 'flex',

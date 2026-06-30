@@ -32,6 +32,7 @@ import type {
 } from '../src/types/promptDashboard.js';
 import type { DockerContainerSummary } from '../src/types/docker.js';
 import { buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction } from '../src/utils/promptDashboard.js';
+import { buildPromptDashboardTodosData } from '../src/utils/promptDashboardTodos.js';
 
 type TestWindow = Window & { __LOCALE__?: string };
 
@@ -312,6 +313,7 @@ function renderDashboard(
 		onSwitchBranches: () => { },
 		onOpenDiff: () => { },
 		onOpenFilePatch: () => { },
+		onOpenTodoMarker: () => { },
 		onDockerAction: () => { },
 		onDockerWorkspaceAction: () => { },
 		onDockerComposeAction: () => { },
@@ -729,6 +731,89 @@ test('PromptDashboard renders Docker summary restart action for running containe
 	const unavailableMarkup = renderDashboard(unavailableSnapshot);
 	assert.match(unavailableMarkup, /aria-label="Запустить предыдущие контейнеры"[^>]*disabled=""/);
 	assert.match(disabledMarkup, /aria-label="Остановить все контейнеры рабочей области"[^>]*disabled=""/);
+});
+
+test('PromptDashboard renders ToDo markers as a filterable tree with line links', () => {
+	const snapshot = createSnapshot([]);
+	snapshot.todos = {
+		kind: 'todos',
+		cache: { status: 'fresh', source: 'refresh', updatedAt: '2026-04-29T10:00:00.000Z' },
+		data: buildPromptDashboardTodosData({
+			markers: [{
+				id: 'api:src%2Fapp.ts:12:4:todo',
+				project: 'api',
+				filePath: 'src/app.ts',
+				fileType: 'ts',
+				marker: 'todo',
+				token: 'todo',
+				line: 12,
+				column: 4,
+				preview: '// todo: wire widget',
+			}],
+			scannedFileCount: 20,
+			skippedFileCount: 1,
+			maxResults: 500,
+			truncated: false,
+		}),
+	};
+
+	const markup = renderDashboard(snapshot);
+
+	assert.match(markup, /ToDo/);
+	assert.match(markup, /\.ts 1/);
+	assert.match(markup, /api/);
+	assert.match(markup, />src<\/span>/);
+	assert.match(markup, />app\.ts<\/span>/);
+	assert.match(markup, /todo/);
+	assert.match(markup, /12/);
+	assert.match(markup, /wire widget/);
+});
+
+test('PromptDashboard groups ToDo files by full folder path', () => {
+	const snapshot = createSnapshot([]);
+	snapshot.todos = {
+		kind: 'todos',
+		cache: { status: 'fresh', source: 'refresh', updatedAt: '2026-04-29T10:00:00.000Z' },
+		data: buildPromptDashboardTodosData({
+			markers: [
+				{
+					id: 'api:app%2Fdomains%2Fexample.php:10:4:todo',
+					project: 'api',
+					filePath: 'app/domains/example.php',
+					fileType: 'php',
+					marker: 'todo',
+					token: 'todo',
+					line: 10,
+					column: 4,
+					preview: '// todo: domain marker',
+				},
+				{
+					id: 'api:app%2Fservices%2Fservice.php:4:8:todo',
+					project: 'api',
+					filePath: 'app/services/service.php',
+					fileType: 'php',
+					marker: 'todo',
+					token: 'todo',
+					line: 4,
+					column: 8,
+					preview: '// todo: service marker',
+				},
+			],
+			scannedFileCount: 20,
+			skippedFileCount: 1,
+			maxResults: 500,
+			truncated: false,
+		}),
+	};
+
+	const markup = renderDashboard(snapshot);
+
+	assert.match(markup, />app\/domains<\/span>/);
+	assert.match(markup, />app\/services<\/span>/);
+	assert.match(markup, />example\.php<\/span>/);
+	assert.match(markup, />service\.php<\/span>/);
+	assert.doesNotMatch(markup, />app<\/span>/);
+	assert.doesNotMatch(markup, />domains<\/span>/);
 });
 
 test('PromptDashboard renders Docker Compose project orchestration icon buttons', () => {
@@ -1853,8 +1938,8 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 			'after',
 		),
 		[
-			['projectBranches', 'status', 'parallelBranches', 'dockerContainers'],
-			['activity', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
+			['projectBranches', 'status', 'parallelBranches', 'dockerContainers', 'aiAnalysis'],
+			['activity', 'reviewRequests', 'projectCommits', 'todos'],
 		],
 	);
 
@@ -1870,7 +1955,7 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 		),
 		[
 			['status', 'projectBranches', 'parallelBranches', 'aiAnalysis', 'dockerContainers'],
-			['projectCommits', 'activity', 'reviewRequests'],
+			['projectCommits', 'activity', 'reviewRequests', 'todos'],
 		],
 	);
 });

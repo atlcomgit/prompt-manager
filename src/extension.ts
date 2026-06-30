@@ -3,7 +3,7 @@
  */
 
 import * as vscode from 'vscode';
-import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService, PromptVoiceService, CustomGroupsService, PromptDashboardService, DockerContainersService } from './services/index.js';
+import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService, PromptVoiceService, CustomGroupsService, PromptDashboardService, DockerContainersService, TodoScannerService } from './services/index.js';
 import {
 	MemoryDatabaseService,
 	MemoryCleanupService,
@@ -61,7 +61,8 @@ export function activate(context: vscode.ExtensionContext) {
 	const stateService = new StateService(context);
 	const promptVoiceService = new PromptVoiceService(context.globalStorageUri.fsPath);
 	const dockerContainersService = new DockerContainersService();
-	const promptDashboardService = new PromptDashboardService(storageService, workspaceService, gitService, aiService, dockerContainersService);
+	const todoScannerService = new TodoScannerService();
+	const promptDashboardService = new PromptDashboardService(storageService, workspaceService, gitService, aiService, dockerContainersService, todoScannerService);
 	const extensionPackage = context.extension.packageJSON as { description?: string; version?: string };
 	const extensionVersion = String(extensionPackage.version || '0.0.0');
 

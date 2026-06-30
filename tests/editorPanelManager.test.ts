@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import Module from 'node:module';
+import { EDITOR_WEBVIEW_ASSET_VERSION } from '../src/constants/webview.js';
 import { buildSaveQueueKey } from '../src/utils/promptSaveQueue.js';
 
 const originalLoad = (Module as any)._load;
@@ -454,11 +455,11 @@ function createVsCodeMock() {
 			get activeTextEditor() {
 				return vscodeActiveTextEditor;
 			},
-			showTextDocument: async (document: any) => {
+			showTextDocument: async (document: any, options?: { selection?: unknown }) => {
 				vscodeActiveTextEditor = {
 					document,
-					selection: undefined,
-					selections: [],
+					selection: options?.selection,
+					selections: options?.selection ? [options.selection] : [],
 				};
 				if (document?.uri) {
 					const uriText = document.uri.toString?.() || document.uri.fsPath || '';
@@ -532,7 +533,12 @@ function createVsCodeMock() {
 			One: 1,
 			Beside: 2,
 		},
-		Range: class Range { },
+		Range: class Range {
+			constructor(
+				public readonly start: unknown,
+				public readonly end: unknown,
+			) { }
+		},
 		WorkspaceEdit: class WorkspaceEdit {
 			replace() { }
 		},
@@ -1291,7 +1297,7 @@ test('revivePromptEditorPanel adopts the restored singleton tab without creating
 
 	const bootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
 	assert.ok(bootId);
-	await revivedPanel.emitMessage({ type: 'ready', bootId });
+	await revivedPanel.emitMessage({ type: 'ready', bootId, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
 
 	const promptMessage = revivedPanel.postedMessages.find((message: any) => message?.type === 'prompt') as any;
 	assert.equal(promptMessage?.prompt?.id, 'prompt-a');
@@ -1322,7 +1328,7 @@ test('ready posts prompt before slow ready hydration messages', async () => {
 	panel.postedMessages.length = 0;
 
 	const bootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
-	await panel.emitMessage({ type: 'ready', bootId });
+	await panel.emitMessage({ type: 'ready', bootId, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
 
 	assert.equal(panel.postedMessages[0]?.type, 'prompt');
 	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'availableModels'), false);
@@ -1332,6 +1338,35 @@ test('ready posts prompt before slow ready hydration messages', async () => {
 
 	const modelsMessage = panel.postedMessages.find((message: any) => message?.type === 'availableModels') as any;
 	assert.deepEqual(modelsMessage?.models, [{ id: 'model-a', name: 'Model A' }]);
+	panel.dispose();
+});
+
+test('ready from stale editor webview asset reboots the panel before sending prompt data', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt A',
+		},
+	});
+
+	await (manager as any).openPrompt('prompt-a');
+	const panel = vscodeCreatedWebviewPanels[0];
+	assert.ok(panel);
+	panel.postedMessages.length = 0;
+
+	const staleBootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
+	const staleHtml = panel.webview.html;
+	await panel.emitMessage({ type: 'ready', bootId: staleBootId });
+
+	const nextBootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
+	assert.notEqual(nextBootId, staleBootId);
+	assert.notEqual(panel.webview.html, staleHtml);
+	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'prompt'), false);
+
+	await panel.emitMessage({ type: 'ready', bootId: nextBootId, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
+	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'prompt'), true);
 	panel.dispose();
 });
 
@@ -1370,7 +1405,7 @@ test('ready retries available models after a same-prompt ref refresh', async () 
 
 	const bootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
 	await withImmediateTimers(async () => {
-		await panel.emitMessage({ type: 'ready', bootId });
+		await panel.emitMessage({ type: 'ready', bootId, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
 		const currentPrompt = (manager as any).panelPromptRefs.get('__prompt_editor_singleton__');
 		(manager as any).setPanelPromptRef('__prompt_editor_singleton__', { ...currentPrompt });
 		await flushTurns(4);
@@ -1452,10 +1487,10 @@ test('reopening the same prompt rotates the singleton boot cycle before the next
 	assert.equal(vscodeCreatedWebviewPanels.length, 1);
 	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'prompt'), false);
 
-	await panel.emitMessage({ type: 'ready', bootId: initialBootId });
+	await panel.emitMessage({ type: 'ready', bootId: initialBootId, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
 	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'prompt'), false);
 
-	await panel.emitMessage({ type: 'ready', bootId: nextBootId });
+	await panel.emitMessage({ type: 'ready', bootId: nextBootId, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
 
 	const promptMessage = panel.postedMessages.find((message: any) => message?.type === 'prompt') as any;
 	assert.equal(promptMessage?.type, 'prompt');
@@ -2915,6 +2950,46 @@ test('hydratePromptDashboardProjectsDetails refreshes only the projects widget i
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 });
 
+test('promptDashboardOpenTodoMarker opens a workspace file at the requested line', async () => {
+	const { manager } = await createManager({
+		workspaceService: {
+			getWorkspaceFolders: () => ['api'],
+			getWorkspaceFolderPaths: () => new Map([['api', '/tmp/workspace/api']]),
+		},
+	});
+	const filePath = '/tmp/workspace/api/src/app.ts';
+	vscodeWorkspaceFiles.set(filePath, 'const a = 1;\n// todo: wire widget\nconst b = 2;');
+	const panelMessages: any[] = [];
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'promptDashboardOpenTodoMarker',
+			project: 'api',
+			filePath: 'src/app.ts',
+			line: 2,
+			column: 4,
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.equal(vscodeActiveTextEditor?.document?.uri?.fsPath, filePath);
+	assert.equal(vscodeActiveTextEditor?.selection?.start?.line, 1);
+	assert.equal(vscodeActiveTextEditor?.selection?.start?.character, 3);
+	assert.equal(panelMessages.some(message => message?.type === 'error'), false);
+});
+
 test('promptDashboardSwitchBranch refreshes only the projects widget and starts AI review without full snapshot blocking', async () => {
 	const { manager } = await createManager();
 	const refreshModes: string[] = [];
@@ -3692,7 +3767,7 @@ test('savePromptDashboardSectionOrder persists the shared widget order in the ho
 	]]);
 	assert.deepEqual((manager as any).getPromptDashboardSectionOrder(), [
 		['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits', 'dockerContainers'],
-		['status', 'projectBranches', 'parallelBranches'],
+		['status', 'projectBranches', 'parallelBranches', 'todos'],
 	]);
 });
 

@@ -38,7 +38,7 @@ export interface PromptOpenTarget {
 // ---- Messages FROM webview TO extension ----
 
 export type WebviewToExtensionMessage =
-	| { type: 'ready'; bootId?: string }
+	| { type: 'ready'; bootId?: string; assetVersion?: string }
 	| { type: 'getPrompts' }
 	| { type: 'getPrompt'; id: string }
 	| {
@@ -114,6 +114,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'promptDashboardOpenDockerTerminal'; containerId: string; requestId?: string }
 	| { type: 'promptDashboardDockerLiveMetricsVisibility'; visible: boolean }
 	| { type: 'promptDashboardOpenFilePatch'; project: string; filePath: string; previousPath?: string; mode: 'commit' | 'branch'; ref: string; baseRef?: string }
+	| { type: 'promptDashboardOpenTodoMarker'; project: string; filePath: string; line: number; column?: number; requestId?: string }
 	| { type: 'analyzePromptDashboardReview'; prompt: Prompt; requestId?: string }
 	| { type: 'openGitOverlay'; promptBranch: string; projects: string[] }
 	| { type: 'gitOverlayVisibility'; open: boolean; promptBranch: string; projects: string[] }

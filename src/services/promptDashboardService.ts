@@ -3,6 +3,7 @@ import type { AiService } from './aiService.js';
 import type { DockerContainersChangeReason, DockerContainersRefreshMode, DockerContainersService } from './dockerContainersService.js';
 import type { GitService } from './gitService.js';
 import type { StorageService } from './storageService.js';
+import type { TodoScannerService } from './todoScannerService.js';
 import type { WorkspaceService } from './workspaceService.js';
 import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
@@ -20,6 +21,7 @@ import type {
 	PromptDashboardScope,
 	PromptDashboardSnapshot,
 	PromptDashboardStatusData,
+	PromptDashboardTodosData,
 	PromptDashboardWidgetKind,
 	PromptDashboardWidgetSnapshot,
 } from '../types/promptDashboard.js';
@@ -43,6 +45,7 @@ import {
 	resolvePromptDashboardCacheState,
 	splitPromptDashboardActivityByDay,
 } from '../utils/promptDashboard.js';
+import { buildPromptDashboardTodosData } from '../utils/promptDashboardTodos.js';
 import { normalizeGitOverlayOtherProjectsExcludedPaths } from '../utils/gitOverlay.js';
 import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 import { resolveEffectiveProjectNames } from '../utils/projectScope.js';
@@ -140,6 +143,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		private readonly gitService: GitService,
 		private readonly aiService: AiService,
 		private readonly dockerContainersService?: DockerContainersService,
+		private readonly todoScannerService?: TodoScannerService,
 	) {
 		this.dockerChangeListener = this.dockerContainersService?.onDidChange(reason => this.scheduleDockerAutoRefresh(reason));
 		this.warmTimer = setInterval(() => {
@@ -914,6 +918,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			status: this.buildStatusWidgetFromPrompt(scope, prompt),
 			projects,
 			docker: this.buildDockerWidgetFromCache(scope),
+			todos: this.buildWidgetFromCache(scope, 'todos', this.emptyTodosData()),
 			aiAnalysis: analysis,
 		};
 
@@ -927,6 +932,12 @@ export class PromptDashboardService implements vscode.Disposable {
 		if (collapsedWidgetSet.has('docker')) {
 			snapshot.docker = createPromptDashboardWidgetSnapshot('docker', snapshot.docker.data, {
 				...snapshot.docker.cache,
+				status: 'idle',
+			});
+		}
+		if (collapsedWidgetSet.has('todos') && snapshot.todos) {
+			snapshot.todos = createPromptDashboardWidgetSnapshot('todos', snapshot.todos.data, {
+				...snapshot.todos.cache,
 				status: 'idle',
 			});
 		}
@@ -1633,7 +1644,7 @@ export class PromptDashboardService implements vscode.Disposable {
 	): Promise<void> {
 		const scopeKey = buildPromptDashboardScopeKey(scope);
 		const collapsedWidgets = this.resolveCurrentCollapsedWidgets(options?.collapsedWidgets);
-		const widgets = (['activity', 'status', 'projects', 'docker'] as PromptDashboardWidgetKind[])
+		const widgets = (['activity', 'status', 'projects', 'docker', 'todos'] as PromptDashboardWidgetKind[])
 			.filter((widget): widget is PromptDashboardWidgetKind => !collapsedWidgets.has(widget));
 		await Promise.all(widgets.map(widget => this.refreshWidget(scope, widget, postMessage, options)));
 		if (!this.isScopeActive(scope)) {
@@ -1822,6 +1833,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			case 'status': return this.loadStatusData(scope, prompt);
 			case 'projects': return this.loadProjectsData(scope, projectsMode);
 			case 'docker': return this.loadDockerContainersData(force, refreshMode);
+			case 'todos': return this.loadTodosData(scope);
 			case 'aiAnalysis': return this.getCachedData<PromptDashboardAnalysisState | null>(scope, 'aiAnalysis');
 			default: return null;
 		}
@@ -1833,6 +1845,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			case 'status': return prompt ? this.statusFromPrompt(prompt) : this.emptyStatus();
 			case 'projects': return { projects: [], loadedSections: [] };
 			case 'docker': return this.emptyDockerContainersData();
+			case 'todos': return this.emptyTodosData();
 			case 'aiAnalysis': return null;
 			default: return null;
 		}
@@ -1865,6 +1878,26 @@ export class PromptDashboardService implements vscode.Disposable {
 			warningContainers: 0,
 			errorContainers: 0,
 		};
+	}
+
+	private emptyTodosData(): PromptDashboardTodosData {
+		return buildPromptDashboardTodosData({
+			markers: [],
+			scannedFileCount: 0,
+			skippedFileCount: 0,
+			maxResults: this.todoScannerService?.getMaxResults() || 0,
+			truncated: false,
+		});
+	}
+
+	private async loadTodosData(scope: PromptDashboardScope): Promise<PromptDashboardTodosData> {
+		if (!this.todoScannerService) {
+			return this.emptyTodosData();
+		}
+		return this.todoScannerService.scanTodos({
+			projectPaths: this.workspaceService.getWorkspaceFolderPaths(),
+			projectNames: scope.projectNames,
+		});
 	}
 
 	private async loadDockerContainersData(force: boolean, refreshMode: DockerContainersRefreshMode = 'full'): Promise<DockerContainersData> {

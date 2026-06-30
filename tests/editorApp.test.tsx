@@ -159,7 +159,7 @@ test('resolveInitialPromptDashboardSectionOrder prefers boot state over retained
 			),
 			[
 				['aiAnalysis', 'activity', 'projectBranches', 'parallelBranches', 'dockerContainers'],
-				['status', 'reviewRequests', 'projectCommits'],
+				['status', 'reviewRequests', 'projectCommits', 'todos'],
 			],
 		);
 
@@ -169,8 +169,8 @@ test('resolveInitialPromptDashboardSectionOrder prefers boot state over retained
 				['projectBranches', 'status', 'activity'],
 			),
 			[
-				['projectBranches', 'activity', 'parallelBranches', 'dockerContainers'],
-				['status', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
+				['projectBranches', 'activity', 'parallelBranches', 'dockerContainers', 'aiAnalysis'],
+				['status', 'reviewRequests', 'projectCommits', 'todos'],
 			],
 		);
 	});

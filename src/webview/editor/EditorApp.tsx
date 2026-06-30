@@ -20,7 +20,8 @@ import { ChatMemoryBlock } from './components/ChatMemoryBlock';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { PromptVoiceQueueIndicator } from './components/PromptVoiceQueueIndicator';
 import { GitOverlay } from './components/GitOverlay';
-import { PromptDashboard, type PromptDashboardFilePatchRequest } from './components/PromptDashboard';
+import { PromptDashboard, type PromptDashboardFilePatchRequest, type PromptDashboardTodoOpenRequest } from './components/PromptDashboard';
+import { EDITOR_WEBVIEW_ASSET_VERSION } from '../../constants/webview';
 import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
 import type { ClipboardImagePayload, GlobalContextSourceMessage } from '../../types/messages';
@@ -2749,7 +2750,7 @@ export const EditorApp: React.FC = () => {
 
   useEffect(() => {
     const readyTimer = window.setTimeout(() => {
-      vscode.postMessage({ type: 'ready', bootId: bootIdRef.current });
+      vscode.postMessage({ type: 'ready', bootId: bootIdRef.current, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
       vscode.postMessage({ type: 'getCustomGroups' });
     }, 0);
 
@@ -5031,6 +5032,12 @@ export const EditorApp: React.FC = () => {
   const handlePromptDashboardOpenFilePatch = useCallback((request: PromptDashboardFilePatchRequest) => {
     captureProcessBodyScroll('dashboard-open-file-patch');
     vscode.postMessage({ type: 'promptDashboardOpenFilePatch', ...request });
+  }, [captureProcessBodyScroll]);
+
+  /** Opens one ToDo marker location from the dashboard without changing editor scroll state. */
+  const handlePromptDashboardOpenTodoMarker = useCallback((request: PromptDashboardTodoOpenRequest) => {
+    captureProcessBodyScroll('dashboard-open-todo-marker');
+    vscode.postMessage({ type: 'promptDashboardOpenTodoMarker', ...request });
   }, [captureProcessBodyScroll]);
 
   const handleGitOverlayEnsurePromptBranch = useCallback((trackedBranchesByProject: Record<string, string>) => {
@@ -7541,6 +7548,7 @@ export const EditorApp: React.FC = () => {
         onSwitchBranches={handlePromptDashboardSwitchBranches}
         onOpenDiff={handleGitOverlayOpenDiff}
         onOpenFilePatch={handlePromptDashboardOpenFilePatch}
+        onOpenTodoMarker={handlePromptDashboardOpenTodoMarker}
         onDockerAction={handlePromptDashboardDockerAction}
         onDockerWorkspaceAction={handlePromptDashboardDockerWorkspaceAction}
         onDockerComposeAction={handlePromptDashboardDockerComposeAction}

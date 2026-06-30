@@ -6,6 +6,11 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-06-29
+
+#### Added
+- Added a prompt-dashboard `ToDo` widget that scans selected workspace projects for `todo` and `//?!?` markers, groups matches by project, file type, file and line, provides persisted file-type/search filters, and opens the source file directly at the matched line.
+
 ### 2026-06-26
 
 #### Fixed

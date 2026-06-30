@@ -1,3 +1,29 @@
+## 158: Виджет ToDo: ссылки на строки
+
+- Дата: 2026-06-29.
+- Автор: alek.
+- Ветка: master.
+- Что сделано: На странице промпта добавлен виджет `ToDo`, который сканирует выбранные проекты рабочей области и показывает строки с `todo` или `//?!?`.
+- Ключевые моменты: Добавлен bounded scanner с учетом ignore/exclude правил, новый widget kind/section `todos` в Prompt Dashboard, payload с группировкой `project -> file type -> file -> line`, persisted фильтры типов файлов и поиска в webview, а также host message `promptDashboardOpenTodoMarker`, который открывает project-relative файл на нужной строке через VS Code editor API. Виджет обновляется через обычный dashboard refresh, ручной refresh карточки и file-event reactive path, если секция видима.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/extension.ts
+  src/providers/editorPanelManager.ts
+  src/services/index.ts
+  src/services/promptDashboardService.ts
+  src/services/todoScannerService.ts
+  src/types/messages.ts
+  src/types/promptDashboard.ts
+  src/utils/promptDashboard.ts
+  src/utils/promptDashboardTodos.ts
+  src/webview/editor/EditorApp.tsx
+  src/webview/editor/components/PromptDashboard.tsx
+  tests/editorPanelManager.test.ts
+  tests/promptDashboardComponent.test.tsx
+  tests/promptDashboardService.test.ts
+  tests/promptDashboardTodos.test.ts
+
 ## 156: Пункт «Не изменять» в поле Модель ИИ
 
 - Дата: 2026-06-11.

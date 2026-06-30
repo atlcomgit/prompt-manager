@@ -1,4 +1,4 @@
-import type { PromptDashboardAnalysisState, PromptDashboardBranchAction, PromptDashboardCacheState, PromptDashboardLoadStatus, PromptDashboardProjectsData, PromptDashboardProjectSummary, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSectionKey, PromptDashboardSnapshot, PromptDashboardStatusData, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../types/promptDashboard.js';
+import type { PromptDashboardAnalysisState, PromptDashboardBranchAction, PromptDashboardCacheState, PromptDashboardLoadStatus, PromptDashboardProjectsData, PromptDashboardProjectSummary, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSectionKey, PromptDashboardSnapshot, PromptDashboardStatusData, PromptDashboardTodosData, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../types/promptDashboard.js';
 import { resolvePromptDashboardWidgetKindForSection } from '../types/promptDashboard.js';
 import { isPromptDashboardProjectsSectionLoaded } from '../types/promptDashboard.js';
 import type { GitOverlayBranchInfo, GitOverlayChangeFile, GitOverlayCommitChangedFile } from '../types/git.js';
@@ -320,6 +320,10 @@ function isPromptDashboardWidgetEffectivelyEmpty(
 		case 'aiAnalysis': {
 			const data = widget.data as PromptDashboardAnalysisState | null | undefined;
 			return !data || data.status === 'idle' || !String(data.content || '').trim();
+		}
+		case 'todos': {
+			const data = widget.data as PromptDashboardTodosData | null | undefined;
+			return !data || (data.markerCount || 0) === 0;
 		}
 		case 'status':
 		case 'activity':

@@ -99,6 +99,7 @@ import {
 	type PromptConfigSyncField,
 } from '../utils/promptExternalSync.js';
 import { buildPromptDashboardFileDiffTitle } from '../utils/promptDashboard.js';
+import { EDITOR_WEBVIEW_ASSET_VERSION } from '../constants/webview.js';
 import {
 	buildReservedArchiveRenameNotice,
 	shouldApplySavedPromptToPanel,
@@ -5080,10 +5081,52 @@ export class EditorPanelManager {
 		}
 	}
 
+	/** Pushes a fresh dashboard ToDo widget into one visible prompt editor panel. */
+	private async refreshPromptDashboardTodosForPanel(
+		panelKey: string,
+		panel: vscode.WebviewPanel,
+		prompt: Prompt,
+	): Promise<void> {
+		if (!panel.visible || this.isPromptDashboardWidgetCollapsed('todos')) {
+			return;
+		}
+
+		try {
+			await this.promptDashboardService.refreshWidgetSnapshot(
+				prompt,
+				'todos',
+				(message) => {
+					void panel.webview.postMessage(message as ExtensionToWebviewMessage);
+				},
+				undefined,
+				'todos',
+			);
+		} catch (error) {
+			this.hooksOutput.appendLine(`[dashboard-refresh] panel=${panelKey} todos failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	/** Refreshes dashboard widgets affected by workspace file or Git changes. */
+	private async refreshPromptDashboardReactiveWidgetsForPanel(
+		panelKey: string,
+		panel: vscode.WebviewPanel,
+		prompt: Prompt,
+		reason: 'file' | 'git',
+	): Promise<void> {
+		await Promise.all([
+			this.refreshPromptDashboardProjectsForPanel(panelKey, panel, prompt, 'reactive-branches'),
+			reason === 'file'
+				? this.refreshPromptDashboardTodosForPanel(panelKey, panel, prompt)
+				: Promise.resolve(),
+		]);
+	}
+
 	/** Schedules project-widget refreshes for visible prompt editors after git events. */
 	private schedulePromptDashboardAutoRefreshForVisiblePanels(reason: 'file' | 'git', changedPath?: string): void {
 		for (const [panelKey, prompt] of this.panelPromptRefs.entries()) {
-			if (this.isPromptDashboardWidgetCollapsed('projects')) {
+			const projectsCollapsed = this.isPromptDashboardWidgetCollapsed('projects');
+			const todosCollapsed = reason !== 'file' || this.isPromptDashboardWidgetCollapsed('todos');
+			if (projectsCollapsed && todosCollapsed) {
 				this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
 				this.clearPromptDashboardReactiveRefreshTimer(panelKey);
 				continue;
@@ -5112,7 +5155,7 @@ export class EditorPanelManager {
 					return;
 				}
 
-				void this.refreshPromptDashboardProjectsForPanel(panelKey, latestPanel, latestPrompt, 'reactive-branches');
+				void this.refreshPromptDashboardReactiveWidgetsForPanel(panelKey, latestPanel, latestPrompt, reason);
 			}, refreshDelayMs);
 			this.promptDashboardReactiveRefreshTimers.set(panelKey, timer);
 			this.unrefBackgroundTimer(timer);
@@ -5650,6 +5693,29 @@ export class EditorPanelManager {
 		}
 
 		await this.openGitOverlayFile(project, filePath, false);
+	}
+
+	/** Opens a project-relative ToDo marker location from the prompt dashboard. */
+	private async openPromptDashboardTodoMarker(project: string, filePath: string, line: number, column?: number): Promise<void> {
+		const normalizedPath = String(filePath || '').trim().replace(/\\/g, '/');
+		if (!normalizedPath || path.isAbsolute(normalizedPath) || normalizedPath.split('/').includes('..')) {
+			throw new Error('Некорректный путь к ToDo-файлу.');
+		}
+
+		const uri = await this.resolveProjectFileUri(project, normalizedPath);
+		const document = await vscode.workspace.openTextDocument(uri);
+		const targetLine = Math.min(Math.max(0, Math.floor(line) - 1), Math.max(0, document.lineCount - 1));
+		const targetColumn = Math.min(
+			Math.max(0, Math.floor(column || 1) - 1),
+			document.lineAt(targetLine).text.length,
+		);
+		const position = new vscode.Position(targetLine, targetColumn);
+		await vscode.window.showTextDocument(document, {
+			viewColumn: vscode.ViewColumn.Beside,
+			preview: false,
+			preserveFocus: false,
+			selection: new vscode.Range(position, position),
+		});
 	}
 
 	/** Opens an exact dashboard file comparison using VS Code's standard diff editor. */
@@ -7891,7 +7957,7 @@ export class EditorPanelManager {
 			if (promptRef) {
 				void this.syncPromptPlanSnapshot(panelKey, promptRef);
 				if (shouldRefreshAfterHiddenChanges) {
-					void this.refreshPromptDashboardProjectsForPanel(panelKey, event.webviewPanel, promptRef, 'reactive-branches');
+					void this.refreshPromptDashboardReactiveWidgetsForPanel(panelKey, event.webviewPanel, promptRef, 'file');
 				} else if (!shouldSkipBootstrapDashboardRefresh) {
 					this.hooksOutput.appendLine(`[dashboard-refresh] panel=${panelKey} skipped visible refresh; no hidden git changes detected`);
 				}
@@ -8539,11 +8605,33 @@ export class EditorPanelManager {
 		switch (msg.type) {
 			case 'ready': {
 				const readyBootId = (msg.bootId || '').trim();
+				const readyAssetVersion = (msg.assetVersion || '').trim();
 				const isReadyCycleStale = (): boolean => {
 					return !this.isReadyCycleActive(panelKey, currentPrompt, readyBootId);
 				};
 
 				if (isReadyCycleStale()) {
+					break;
+				}
+
+				if (readyAssetVersion !== EDITOR_WEBVIEW_ASSET_VERSION) {
+					this.logReportDebug('ready.assetVersionMismatch.reboot', {
+						panelKey,
+						readyAssetVersion,
+						expectedAssetVersion: EDITOR_WEBVIEW_ASSET_VERSION,
+					});
+					this.rebootPromptPanelWebview(
+						panelKey,
+						panel,
+						currentPrompt,
+						this.buildPromptMessage(currentPrompt, {
+							reason: 'open',
+							editorViewState: resolvePromptOpenEditorViewState(
+								this.getPromptEditorViewState(panelKey, currentPrompt),
+								{ forceMainTab: false },
+							),
+						}),
+					);
 					break;
 				}
 
@@ -10869,6 +10957,15 @@ export class EditorPanelManager {
 							'dockerContainers',
 						);
 					}
+				} catch (error) {
+					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error), requestId: msg.requestId });
+				}
+				break;
+			}
+
+			case 'promptDashboardOpenTodoMarker': {
+				try {
+					await this.openPromptDashboardTodoMarker(msg.project, msg.filePath, msg.line, msg.column);
 				} catch (error) {
 					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error), requestId: msg.requestId });
 				}

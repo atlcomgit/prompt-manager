@@ -2237,7 +2237,7 @@ const ru: Record<string, string> = {
 	'chatMessage.task': 'Задача',
 	'chatMessage.workMode': 'Режим работы',
 	'chatMessage.workModeAgent': '**Agent** — Приступай к реализации задачи сразу, без предварительного планирования.',
-	'chatMessage.workModePlan': '**Plan** — Составь детальный план реализации, не приступай к выполнению, пока я не дам команду.',
+	'chatMessage.workModePlan': '**Plan** — Составь детальный план реализации, не приступай к выполнению, пока я не дам команду. Также спроси у меня уточнения по задаче, если они нужны для плана.',
 	'chatMessage.projects': 'Проекты',
 	'chatMessage.excludedProjects': 'Исключенные проекты',
 	'chatMessage.excludedProjectsNote': 'Используй эти проекты только как readonly-контекст и не предлагай прямые изменения в них без явного запроса.',

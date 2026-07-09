@@ -4814,6 +4814,7 @@ test('startChat dispatches Kilo Code target through bridge without Copilot sessi
 			title: 'Prompt title',
 			status: 'draft',
 			chatTarget: 'kilo',
+			chatMode: 'plan',
 			contextFiles: ['src/index.ts'],
 			content: 'Implement Kilo routing.',
 		},
@@ -4844,6 +4845,7 @@ test('startChat dispatches Kilo Code target through bridge without Copilot sessi
 		title: 'Prompt title',
 		status: 'draft',
 		chatTarget: 'kilo',
+		chatMode: 'plan',
 		contextFiles: ['src/index.ts'],
 		content: 'Implement Kilo routing.',
 	});
@@ -4859,10 +4861,14 @@ test('startChat dispatches Kilo Code target through bridge without Copilot sessi
 
 	const bridgeCall = vscodeCommandCalls.find(call => call.id === 'kilo-code.new.startTask');
 	assert.ok(bridgeCall);
-	assert.equal((bridgeCall.args[0] as any).source, 'prompt-manager');
-	assert.equal((bridgeCall.args[0] as any).promptId, 'prompt-a');
-	assert.match((bridgeCall.args[0] as any).text, /Implement Kilo routing/);
-	assert.deepEqual((bridgeCall.args[0] as any).files, ['/tmp/workspace/src/index.ts']);
+	const bridgePayload = bridgeCall.args[0] as any;
+	assert.equal(bridgePayload.source, 'prompt-manager');
+	assert.equal(bridgePayload.promptId, 'prompt-a');
+	assert.equal(bridgePayload.mode, 'plan');
+	assert.match(bridgePayload.text, /Implement Kilo routing/);
+	assert.match(bridgePayload.text, /## Work mode/);
+	assert.match(bridgePayload.text, /Create a detailed implementation plan first/);
+	assert.deepEqual(bridgePayload.files, ['/tmp/workspace/src/index.ts']);
 	assert.equal(vscodeCommandCalls.some(call => call.id.startsWith('workbench.action.chat.')), false);
 	assert.equal(getStoredPrompt()?.status, 'in-progress');
 	assert.deepEqual(getStoredPrompt()?.chatSessionIds, []);
@@ -4882,6 +4888,7 @@ test('startChat prepares Kilo Code clipboard fallback when bridge is unavailable
 			title: 'Prompt title',
 			status: 'draft',
 			chatTarget: 'kilo',
+			chatMode: 'plan',
 			contextFiles: ['src/index.ts'],
 			content: 'Implement Kilo routing.',
 		},
@@ -4912,6 +4919,7 @@ test('startChat prepares Kilo Code clipboard fallback when bridge is unavailable
 		title: 'Prompt title',
 		status: 'draft',
 		chatTarget: 'kilo',
+		chatMode: 'plan',
 		contextFiles: ['src/index.ts'],
 		content: 'Implement Kilo routing.',
 	});
@@ -4935,6 +4943,8 @@ test('startChat prepares Kilo Code clipboard fallback when bridge is unavailable
 	assert.ok(vscodeCommandCalls.some(call => call.id === 'kilo-code.SidebarProvider.focus'));
 	assert.ok(vscodeCommandCalls.some(call => call.id === 'kilo-code.new.focusChatInput'));
 	assert.match(vscodeClipboardText, /Implement Kilo routing/);
+	assert.match(vscodeClipboardText, /## Work mode/);
+	assert.match(vscodeClipboardText, /Create a detailed implementation plan first/);
 	assert.match(vscodeClipboardText, /@\/tmp\/workspace\/src\/index\.ts/);
 	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
 	assert.ok(postedMessages.some(message => message?.type === 'info' && /Add to Context/.test(message.message)));
@@ -5049,9 +5059,9 @@ test('Kilo Code xdotool fallback reports startup errors', async () => {
 	}
 });
 
-test('startChat starts Codex through implementTodo bridge when direct bridge is unavailable', async () => {
+test('startChat dispatches Codex direct bridge with selected chat mode', async () => {
 	resetVsCodeCommandMock();
-	vscodeAvailableCommands = ['chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.implementTodo', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
+	vscodeAvailableCommands = ['chatgpt.startThread'];
 
 	const { manager, getStoredPrompt } = await createManager({
 		initialPrompt: {
@@ -5060,6 +5070,7 @@ test('startChat starts Codex through implementTodo bridge when direct bridge is 
 			title: 'Prompt title',
 			status: 'draft',
 			chatTarget: 'codex',
+			chatMode: 'plan',
 			contextFiles: ['src/index.ts'],
 			content: 'Implement Codex routing.',
 		},
@@ -5090,6 +5101,79 @@ test('startChat starts Codex through implementTodo bridge when direct bridge is 
 		title: 'Prompt title',
 		status: 'draft',
 		chatTarget: 'codex',
+		chatMode: 'plan',
+		contextFiles: ['src/index.ts'],
+		content: 'Implement Codex routing.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-codex-direct' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	const bridgeCall = vscodeCommandCalls.find(call => call.id === 'chatgpt.startThread');
+	assert.ok(bridgeCall);
+	const bridgePayload = bridgeCall.args[0] as any;
+	assert.equal(bridgePayload.source, 'prompt-manager');
+	assert.equal(bridgePayload.promptId, 'prompt-a');
+	assert.equal(bridgePayload.mode, 'plan');
+	assert.match(bridgePayload.text, /Implement Codex routing/);
+	assert.match(bridgePayload.text, /## Work mode/);
+	assert.match(bridgePayload.text, /Create a detailed implementation plan first/);
+	assert.deepEqual(bridgePayload.files, ['/tmp/workspace/src/index.ts']);
+	assert.equal(getStoredPrompt()?.status, 'in-progress');
+	assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
+	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
+	resetVsCodeCommandMock();
+});
+
+test('startChat starts Codex through implementTodo bridge when direct bridge is unavailable', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.implementTodo', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			chatTarget: 'codex',
+			chatMode: 'plan',
+			contextFiles: ['src/index.ts'],
+			content: 'Implement Codex routing.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			saveSidebarState: async () => undefined,
+			getGlobalAgentContext: () => '',
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		chatTarget: 'codex',
+		chatMode: 'plan',
 		contextFiles: ['src/index.ts'],
 		content: 'Implement Codex routing.',
 	});
@@ -5109,6 +5193,8 @@ test('startChat starts Codex through implementTodo bridge when direct bridge is 
 	assert.equal(bridgePayload.fileName, 'prompt-manager-task.md');
 	assert.equal(bridgePayload.line, 1);
 	assert.match(bridgePayload.comment, /Implement Codex routing/);
+	assert.match(bridgePayload.comment, /## Work mode/);
+	assert.match(bridgePayload.comment, /Create a detailed implementation plan first/);
 	assert.match(bridgePayload.comment, /Ignore the surrounding Codex TODO wrapper/);
 	assert.match(bridgePayload.comment, /\/tmp\/workspace\/src\/index\.ts/);
 	assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.addToThread'), false);
@@ -5116,6 +5202,8 @@ test('startChat starts Codex through implementTodo bridge when direct bridge is 
 	assert.deepEqual(childProcessSpawnCalls, []);
 	assert.equal(getStoredPrompt()?.status, 'in-progress');
 	assert.match(vscodeClipboardText, /Implement Codex routing/);
+	assert.match(vscodeClipboardText, /## Work mode/);
+	assert.match(vscodeClipboardText, /Create a detailed implementation plan first/);
 	assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
 	assert.ok(postedMessages.some(message => message?.type === 'chatRequestStarted'));
 	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
@@ -5135,6 +5223,7 @@ test('startChat prepares Codex Add to Thread fallback when bridge is unavailable
 			title: 'Prompt title',
 			status: 'draft',
 			chatTarget: 'codex',
+			chatMode: 'plan',
 			contextFiles: ['src/index.ts'],
 			content: 'Implement Codex routing.',
 		},
@@ -5165,6 +5254,7 @@ test('startChat prepares Codex Add to Thread fallback when bridge is unavailable
 		title: 'Prompt title',
 		status: 'draft',
 		chatTarget: 'codex',
+		chatMode: 'plan',
 		contextFiles: ['src/index.ts'],
 		content: 'Implement Codex routing.',
 	});
@@ -5191,6 +5281,8 @@ test('startChat prepares Codex Add to Thread fallback when bridge is unavailable
 	assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.revertAndCloseActiveEditor'), false);
 	assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.closeActiveEditor'), false);
 	assert.match(vscodeClipboardText, /Implement Codex routing/);
+	assert.match(vscodeClipboardText, /## Work mode/);
+	assert.match(vscodeClipboardText, /Create a detailed implementation plan first/);
 	assert.deepEqual(childProcessSpawnCalls, []);
 	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
 	assert.ok(postedMessages.some(message => message?.type === 'info' && /Add to Thread/.test(message.message)));

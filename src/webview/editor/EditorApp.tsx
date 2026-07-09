@@ -2604,10 +2604,9 @@ export const EditorApp: React.FC = () => {
     if (!isExternalChatTarget && selectedModelName) chunks.push(`Модель: ${toShortText(selectedModelName, 56)}`);
     const chatTargetOption = CHAT_TARGET_OPTIONS.find(option => option.id === normalizedChatTarget);
     chunks.push(`Чат: ${chatTargetOption ? t(chatTargetOption.labelKey) : t('editor.chatTargetCopilot')}`);
+    chunks.push(`Режим: ${prompt.chatMode === 'agent' ? 'Agent' : 'Plan'}`);
     if (isExternalChatTarget) {
       chunks.push(`Xdotool: ${autoStartChatWithXdotool ? 'включен' : 'выключен'}`);
-    } else {
-      chunks.push(`Режим: ${prompt.chatMode === 'agent' ? 'Agent' : 'Plan'}`);
     }
     return chunks;
   }, [autoStartChatWithXdotool, isExternalChatTarget, normalizedChatTarget, selectedModelName, prompt.chatMode, t]);
@@ -7172,26 +7171,24 @@ export const EditorApp: React.FC = () => {
                   </div>
                 )}
 
-                {!isExternalChatTarget && (
-                  <div style={{ ...styles.field, ...styles.agentFieldMode }}>
-                    <label style={styles.label}>{t('editor.chatMode')}</label>
-                    <div style={styles.toggleGroup}>
-                      {(['agent', 'plan'] as const).map(mode => (
-                        <button
-                          key={mode}
-                          style={{
-                            ...styles.toggleBtn,
-                            ...(prompt.chatMode === mode ? styles.toggleBtnActive : {}),
-                          }}
-                          onClick={() => updateFieldAndSaveNow('chatMode', mode)}
-                          title={mode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
-                        >
-                          {mode === 'agent' ? `🤖 ${t('editor.chatModeAgent')}` : `📋 ${t('editor.chatModePlan')}`}
-                        </button>
-                      ))}
-                    </div>
+                <div style={{ ...styles.field, ...styles.agentFieldMode }}>
+                  <label style={styles.label}>{t('editor.chatMode')}</label>
+                  <div style={styles.toggleGroup}>
+                    {(['agent', 'plan'] as const).map(mode => (
+                      <button
+                        key={mode}
+                        style={{
+                          ...styles.toggleBtn,
+                          ...(prompt.chatMode === mode ? styles.toggleBtnActive : {}),
+                        }}
+                        onClick={() => updateFieldAndSaveNow('chatMode', mode)}
+                        title={mode === 'agent' ? t('editor.chatModeAgent') : t('editor.chatModePlan')}
+                      >
+                        {mode === 'agent' ? `🤖 ${t('editor.chatModeAgent')}` : `📋 ${t('editor.chatModePlan')}`}
+                      </button>
+                    ))}
                   </div>
-                )}
+                </div>
 
                 {isExternalChatTarget && (
                   <div style={{ ...styles.field, ...styles.agentFieldXdotool }}>

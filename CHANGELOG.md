@@ -34,7 +34,7 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 ### 2026-06-05
 
 #### Changed
-- The prompt editor now treats Kilo Code and OpenAI Codex as external chat targets: the prompt page hides Copilot-only `AI Models` and `Chat Mode` controls for those targets, shows a per-prompt `Autostart chat via Xdotool` checkbox instead, and Start Chat reads that prompt flag instead of removed global `Auto Send With Xdotool` settings.
+- The prompt editor now treats Kilo Code and OpenAI Codex as external chat targets: the prompt page hides the Copilot-only `AI Models` picker for those targets, keeps `Chat Mode` visible, shows a per-prompt `Autostart chat via Xdotool` checkbox, and Start Chat reflects the selected mode in external chat payloads and task messages.
 
 ### 2026-06-02
 

@@ -6,6 +6,14 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-07-21
+
+#### Changed
+- The `Docker контейнеры` dashboard widget now moves every table-row command into a vertical-ellipsis menu so long names receive more space, collapses container, Compose, and declared-service cards to one lifecycle row, and renders CPU, RAM, and network history as three compact charts inside expanded list details while hidden metrics no longer keep live polling active.
+
+#### Fixed
+- Docker table action menus now stay open while focus moves from the vertical-ellipsis trigger into the menu, close reliably after focus leaves, and no longer show a misleading non-interactive ellipsis in the table header. Menu commands now use VS Code-native hover, pressed, and keyboard-focus feedback while disabled commands remain visually inactive.
+
 ### 2026-06-29
 
 #### Added

@@ -150,6 +150,17 @@ export interface DashboardTodosWidgetState {
 
 type DockerContainerIconKind = 'logs' | 'terminal' | 'start' | 'restart' | 'stop' | 'remove' | 'composeUp' | 'composeDown' | 'composeFile' | 'openFile';
 
+/** Describes one Docker command rendered as an icon button or menu item. */
+interface DockerActionItem {
+	key: string;
+	icon: DockerContainerIconKind;
+	label: string;
+	onSelect: () => void;
+	disabled?: boolean;
+	danger?: boolean;
+	loading?: boolean;
+}
+
 interface DockerDeclaredServiceViewRow {
 	key: string;
 	project: DockerContainerProjectGroup;
@@ -161,6 +172,193 @@ type DockerTableViewRow =
 	| { kind: 'compose'; key: string; project: DockerContainerProjectGroup; group: DockerComposeFileContainerGroup; label: string }
 	| { kind: 'container'; key: string; project: DockerContainerProjectGroup; group?: DockerComposeFileContainerGroup; container: DockerContainerSummary; label: string }
 	| { kind: 'service'; key: string; row: DockerDeclaredServiceViewRow; label: string };
+
+/** Adds native VS Code hover, pressed and keyboard-focus feedback to Docker menu commands. */
+const DOCKER_ACTION_MENU_INTERACTION_STYLES = `
+	.pm-docker-action-menu-item {
+		background: transparent;
+		color: var(--vscode-menu-foreground, var(--vscode-foreground));
+		transition:
+			background-color 90ms ease,
+			color 90ms ease,
+			box-shadow 90ms ease,
+			transform 60ms ease;
+		-webkit-text-fill-color: currentColor;
+	}
+
+	.pm-docker-action-menu-item:hover:not(:disabled) {
+		background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+		color: var(--vscode-menu-selectionForeground, var(--vscode-foreground)) !important;
+	}
+
+	.pm-docker-action-menu-item:active:not(:disabled) {
+		background: var(--vscode-list-activeSelectionBackground, var(--vscode-menu-selectionBackground));
+		color: var(--vscode-list-activeSelectionForeground, var(--vscode-menu-selectionForeground, var(--vscode-foreground))) !important;
+		box-shadow: inset 0 1px 2px color-mix(in srgb, var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35)) 55%, transparent);
+		transform: translateY(1px);
+	}
+
+	.pm-docker-action-menu-item:focus-visible:not(:disabled) {
+		background: var(--vscode-menu-selectionBackground, var(--vscode-list-focusBackground));
+		color: var(--vscode-menu-selectionForeground, var(--vscode-list-focusForeground, var(--vscode-foreground))) !important;
+		outline: 1px solid var(--vscode-focusBorder);
+		outline-offset: -1px;
+	}
+`;
+
+/** Renders a keyboard-accessible Docker action menu without widening dense rows. */
+const DockerActionMenu: React.FC<{ items: DockerActionItem[]; label: string }> = ({ items, label }) => {
+	const [isOpen, setIsOpen] = useState(false);
+	const menuRef = useRef<HTMLDivElement | null>(null);
+	const triggerRef = useRef<HTMLButtonElement | null>(null);
+	const menuItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+	const focusLastOnOpenRef = useRef(false);
+	const menuId = React.useId();
+	const isBusy = items.some(item => item.loading === true);
+	const enabledItemIndexes = items
+		.map((item, index) => item.disabled || item.loading ? -1 : index)
+		.filter(index => index >= 0);
+
+	// Close an open menu only after pointer or focus actually moves outside its action surface.
+	useEffect(() => {
+		if (!isOpen) {
+			return;
+		}
+		const handlePointerDown = (event: PointerEvent) => {
+			if (!menuRef.current?.contains(event.target as Node)) {
+				setIsOpen(false);
+			}
+		};
+		const handleFocusIn = (event: FocusEvent) => {
+			if (!menuRef.current?.contains(event.target as Node)) {
+				setIsOpen(false);
+			}
+		};
+		document.addEventListener('pointerdown', handlePointerDown);
+		document.addEventListener('focusin', handleFocusIn);
+		return () => {
+			document.removeEventListener('pointerdown', handlePointerDown);
+			document.removeEventListener('focusin', handleFocusIn);
+		};
+	}, [isOpen]);
+
+	// Move focus into a newly opened ARIA menu after React mounts its command buttons.
+	useEffect(() => {
+		if (!isOpen || enabledItemIndexes.length === 0) {
+			return;
+		}
+		const targetIndex = focusLastOnOpenRef.current
+			? enabledItemIndexes[enabledItemIndexes.length - 1]
+			: enabledItemIndexes[0];
+		focusLastOnOpenRef.current = false;
+		const frameId = window.requestAnimationFrame(() => menuItemRefs.current[targetIndex]?.focus());
+		return () => window.cancelAnimationFrame(frameId);
+	}, [isOpen]);
+
+	/** Opens the menu and chooses the edge that should receive keyboard focus. */
+	const openMenu = (focusLast = false) => {
+		focusLastOnOpenRef.current = focusLast;
+		setIsOpen(true);
+	};
+
+	/** Moves focus among enabled menu commands without landing on unavailable actions. */
+	const moveMenuFocus = (direction: 'first' | 'last' | 'next' | 'previous') => {
+		if (enabledItemIndexes.length === 0) {
+			return;
+		}
+		const activeIndex = menuItemRefs.current.findIndex(item => item === document.activeElement);
+		const enabledPosition = enabledItemIndexes.indexOf(activeIndex);
+		const targetPosition = direction === 'first'
+			? 0
+			: direction === 'last'
+				? enabledItemIndexes.length - 1
+				: direction === 'next'
+					? (enabledPosition + 1 + enabledItemIndexes.length) % enabledItemIndexes.length
+					: (enabledPosition - 1 + enabledItemIndexes.length) % enabledItemIndexes.length;
+		menuItemRefs.current[enabledItemIndexes[targetPosition]]?.focus();
+	};
+
+	return (
+		<div
+			ref={menuRef}
+			style={styles.dockerActionMenu}
+			data-docker-action-menu="true"
+			data-docker-action-count={items.length}
+			onKeyDown={event => {
+				if (isOpen && event.key === 'Tab' && event.shiftKey) {
+					event.preventDefault();
+					setIsOpen(false);
+					triggerRef.current?.focus();
+					return;
+				}
+				if (event.key === 'Escape') {
+					event.preventDefault();
+					event.stopPropagation();
+					setIsOpen(false);
+					triggerRef.current?.focus();
+					return;
+				}
+				if (!isOpen && (event.key === 'ArrowDown' || event.key === 'Home')) {
+					event.preventDefault();
+					openMenu(false);
+					return;
+				}
+				if (!isOpen && (event.key === 'ArrowUp' || event.key === 'End')) {
+					event.preventDefault();
+					openMenu(true);
+					return;
+				}
+				if (!isOpen || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+					return;
+				}
+				event.preventDefault();
+				moveMenuFocus(event.key === 'ArrowDown' ? 'next' : event.key === 'ArrowUp' ? 'previous' : event.key === 'Home' ? 'first' : 'last');
+			}}
+		>
+			<button
+				ref={triggerRef}
+				type="button"
+				style={styles.dockerActionMenuTrigger}
+				onClick={() => isOpen ? setIsOpen(false) : openMenu(false)}
+				title={label}
+				aria-label={label}
+				aria-haspopup="menu"
+				aria-expanded={isOpen}
+				aria-controls={menuId}
+				aria-busy={isBusy || undefined}
+			>{isBusy ? <span style={styles.buttonSpinner} aria-hidden="true" /> : '⋮'}</button>
+			{isOpen ? <div id={menuId} role="menu" style={styles.dockerActionMenuPopover} aria-label={label}>
+				{items.map((item, index) => (
+					<button
+						key={item.key}
+						ref={element => { menuItemRefs.current[index] = element; }}
+						className="pm-docker-action-menu-item"
+						type="button"
+						role="menuitem"
+						tabIndex={-1}
+						style={{
+							...styles.dockerActionMenuItem,
+							...(item.danger ? styles.dockerActionMenuItemDanger : null),
+							...(item.disabled || item.loading ? styles.dockerActionMenuItemDisabled : null),
+						}}
+						disabled={item.disabled || item.loading}
+						aria-busy={item.loading || undefined}
+						title={item.label}
+						onClick={() => {
+							setIsOpen(false);
+							item.onSelect();
+						}}
+					>
+						<span style={styles.dockerActionMenuItemIcon} aria-hidden="true">
+							{item.loading ? <span style={styles.buttonSpinner} /> : <DockerContainerActionIcon icon={item.icon} />}
+						</span>
+						<span style={styles.dockerActionMenuItemLabel}>{item.label}</span>
+					</button>
+				))}
+			</div> : null}
+		</div>
+	);
+};
 
 const DOCKER_WIDGET_STATE_STORAGE_KEY = 'pm.promptDashboard.dockerWidgetState.v1';
 const TODOS_WIDGET_STATE_STORAGE_KEY = 'pm.promptDashboard.todosWidgetState.v1';
@@ -323,6 +521,11 @@ function buildDockerProjectExpandedKey(project: DockerContainerProjectGroup): st
 /** Builds the persisted disclosure key for a Docker Compose file group. */
 function buildDockerComposeFileExpandedKey(project: DockerContainerProjectGroup, composeFile: DockerComposeFileReference): string {
 	return `docker:compose:${project.projectPath || project.project}:${composeFile.filePath}`;
+}
+
+/** Builds the persisted disclosure key for a declared Compose service card. */
+function buildDockerDeclaredServiceExpandedKey(row: DockerDeclaredServiceViewRow): string {
+	return `docker:${row.key}`;
 }
 
 /** Stores a leaf row for the compact dashboard file tree. */
@@ -1327,6 +1530,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			onPointerDown={markRailScrollManualIntent}
 			onKeyDown={markRailScrollManualIntent}
 		>
+			<style>{DOCKER_ACTION_MENU_INTERACTION_STYLES}</style>
 			<div style={styles.toolbar}>
 				<div style={styles.titleRow}>
 					<PromptDashboardMark />
@@ -3855,9 +4059,9 @@ function renderDockerProjectGroupedCards(
 				{renderDockerProjectStaticHeader(project)}
 				{hasRows
 					? <div style={styles.dockerCardGrid}>
-						{project.composeFileGroups.map(group => renderDockerComposeFileCard(project, group, busyAction, actionError, onDockerComposeAction, onOpenDockerComposeFile))}
+						{project.composeFileGroups.map(group => renderDockerComposeFileCard(project, group, busyAction, actionError, expanded, toggleExpanded, onDockerComposeAction, onOpenDockerComposeFile))}
 						{project.containers.map(container => renderDockerContainerCard(container, busyAction, expanded, toggleExpanded, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal, { showComposeContext: true }))}
-						{declaredServices.map(row => renderDockerDeclaredServiceCard(row, busyAction, onDockerComposeAction, onOpenDockerComposeFile))}
+						{declaredServices.map(row => renderDockerDeclaredServiceCard(row, busyAction, expanded, toggleExpanded, onDockerComposeAction, onOpenDockerComposeFile))}
 					</div>
 					: renderDockerProjectEmpty(project)}
 			</div>
@@ -3922,7 +4126,7 @@ function renderDockerFlatTable(
 				<span style={styles.dockerTableHeaderCenteredCell}>Статус</span>
 				<span style={styles.dockerTableHeaderMetricCell}>CPU</span>
 				<span style={styles.dockerTableHeaderMetricCell}>RAM</span>
-				<span style={styles.dockerTableHeaderActionsCell}>Действия</span>
+				<span style={styles.dockerTableHeaderActionsCell} aria-hidden="true" />
 			</div>
 			{rows.map(row => renderDockerTableRow(row, busyAction, actionError, expanded, toggleExpanded, onDockerAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal))}
 		</div>
@@ -4028,7 +4232,7 @@ function renderDockerComposeFileGroup(
 					? childRows.map((row, index) => {
 						const childContext = { ancestorHasSibling: childAncestorHasSibling, isLast: index === childRows.length - 1 };
 						return row.kind === 'container'
-							? renderDockerContainerListRow(row.container, busyAction, expanded, toggleExpanded, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal, { showResourceSummary: false, includeResourcesInDetails: true, tree: true, treeContext: childContext, composeFile: group.composeFile })
+							? renderDockerContainerListRow(row.container, busyAction, expanded, toggleExpanded, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal, { tree: true, treeContext: childContext, composeFile: group.composeFile })
 							: renderDockerDeclaredServiceListRow(row.row, busyAction, onDockerComposeAction, onOpenDockerComposeFile, { tree: true, treeContext: childContext });
 					})
 					: renderDockerComposeDeclaredServices(group)}
@@ -4072,25 +4276,31 @@ function renderDockerComposeFileCard(
 	group: DockerComposeFileContainerGroup,
 	busyAction: DashboardDockerBusyAction,
 	actionError: DockerComposeActionError | undefined,
+	expanded: ExpandedState,
+	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
 ): React.ReactNode {
 	const label = formatDockerComposeFileLabel(group.composeFile);
 	const groupActionError = resolveDockerComposeActionError(actionError, project, group);
+	const expandKey = buildDockerComposeFileExpandedKey(project, group.composeFile);
+	const isExpanded = expanded[expandKey] === true;
+	const toggleLabel = `${isExpanded ? 'Свернуть' : 'Раскрыть'} карточку compose-файла ${label}`;
 	return (
-		<div key={`compose-card:${group.composeFile.filePath}`} style={styles.dockerCard}>
-			<div style={styles.dockerComposeSummaryHeader}>
-				<span style={styles.dockerNameButton} title={group.composeFile.filePath}>
+		<div key={`compose-card:${group.composeFile.filePath}`} style={{ ...styles.dockerCard, ...(!isExpanded ? styles.dockerCardCollapsed : null) }}>
+			<div style={styles.dockerCardHeader}>
+				<button type="button" style={styles.dockerExpandButton} onClick={() => toggleExpanded(expandKey)} title={toggleLabel} aria-label={toggleLabel} aria-expanded={isExpanded}>{isExpanded ? '▾' : '▸'}</button>
+				<button type="button" style={styles.dockerNameButton} onClick={() => toggleExpanded(expandKey)} title={toggleLabel} aria-label={toggleLabel} aria-expanded={isExpanded}>
 					<span style={styles.dockerServiceName}>{label}</span>
-					<span style={styles.dockerImageName}>{project.project} · {group.runningCount}/{group.containers.length}</span>
-				</span>
-				<div style={styles.dockerHeaderActions}>
-					{renderDockerComposeStatusBadge(group)}
-					{renderDockerComposeActionButtons(project, group, busyAction, onDockerComposeAction, onOpenDockerComposeFile)}
-				</div>
+					{isExpanded ? <span style={styles.dockerImageName}>{project.project} · {group.runningCount}/{group.containers.length}</span> : null}
+				</button>
+				{renderDockerComposeStatusBadge(group)}
 			</div>
-			{renderDockerComposeRuntimeSummary(group)}
-			{groupActionError ? renderDockerComposeActionError(groupActionError) : null}
+			{isExpanded ? <>
+				<div style={styles.dockerCardExpandedActions}>{renderDockerComposeActionButtons(project, group, busyAction, onDockerComposeAction, onOpenDockerComposeFile)}</div>
+				{renderDockerComposeRuntimeSummary(group)}
+				{groupActionError ? renderDockerComposeActionError(groupActionError) : null}
+			</> : null}
 		</div>
 	);
 }
@@ -4173,7 +4383,56 @@ function renderDockerComposeFileListRow(
 	);
 }
 
-/** Renders compose lifecycle controls with one start/restart slot and one stop slot. */
+/** Builds Compose actions once so icon rows and compact menus preserve identical behavior. */
+function buildDockerComposeActionItems(
+	project: DockerContainerProjectGroup,
+	group: DockerComposeFileContainerGroup,
+	busyAction: DashboardDockerBusyAction,
+	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
+	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
+): DockerActionItem[] {
+	const disabled = !project.projectPath || !group.composeFile.filePath;
+	const hasRunningContainers = group.runningCount > 0;
+	const primaryAction: DockerComposeProjectActionKind = hasRunningContainers ? 'restart' : 'up';
+	const label = formatDockerComposeFileLabel(group.composeFile);
+	const primaryBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerComposeBusyAction({
+		projectPath: project.projectPath,
+		composeFilePath: group.composeFile.filePath,
+		action: primaryAction,
+	}));
+	const downBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerComposeBusyAction({
+		projectPath: project.projectPath,
+		composeFilePath: group.composeFile.filePath,
+		action: 'down',
+	}));
+	return [
+		{
+			key: 'open-file',
+			icon: 'openFile',
+			label: `Открыть compose-файл ${label}`,
+			onSelect: () => onOpenDockerComposeFile(project.projectPath, group.composeFile.filePath),
+			disabled,
+		},
+		{
+			key: primaryAction,
+			icon: primaryAction === 'up' ? 'composeUp' : 'restart',
+			label: primaryAction === 'restart' ? `Перезапустить compose-файл ${label}` : `Запустить compose-файл ${label}`,
+			onSelect: () => onDockerComposeAction(project.projectPath, group.composeFile.filePath, primaryAction),
+			disabled,
+			loading: primaryBusy,
+		},
+		{
+			key: 'down',
+			icon: 'composeDown',
+			label: `Остановить compose-файл ${label}`,
+			onSelect: () => onDockerComposeAction(project.projectPath, group.composeFile.filePath, 'down'),
+			disabled: disabled || !hasRunningContainers,
+			loading: downBusy,
+		},
+	];
+}
+
+/** Renders Compose lifecycle controls with one start/restart slot and one stop slot. */
 function renderDockerComposeActionButtons(
 	project: DockerContainerProjectGroup,
 	group: DockerComposeFileContainerGroup,
@@ -4181,47 +4440,11 @@ function renderDockerComposeActionButtons(
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
 ): React.ReactNode {
-	const disabled = !project.projectPath || !group.composeFile.filePath;
-	const hasRunningContainers = group.runningCount > 0;
-	const primaryAction: DockerComposeProjectActionKind = hasRunningContainers ? 'restart' : 'up';
-	const label = formatDockerComposeFileLabel(group.composeFile);
+	const items = buildDockerComposeActionItems(project, group, busyAction, onDockerComposeAction, onOpenDockerComposeFile);
 	return (
 		<div style={styles.dockerActionIcons}>
-			{renderDockerOpenComposeFileButton(project, group, onOpenDockerComposeFile)}
-			{renderDockerComposeActionButton(
-				project,
-				group,
-				primaryAction,
-				primaryAction === 'restart' ? `Перезапустить compose-файл ${label}` : `Запустить compose-файл ${label}`,
-				busyAction,
-				disabled,
-				onDockerComposeAction,
-			)}
-			{renderDockerComposeActionButton(
-				project,
-				group,
-				'down',
-				`Остановить compose-файл ${label}`,
-				busyAction,
-				disabled || !hasRunningContainers,
-				onDockerComposeAction,
-			)}
+			{items.map(item => <React.Fragment key={item.key}>{renderDockerIconButton(item.icon, item.label, item.onSelect, item.disabled, item.danger, item.loading)}</React.Fragment>)}
 		</div>
-	);
-}
-
-/** Opens the compose file itself for quick editing. */
-function renderDockerOpenComposeFileButton(
-	project: DockerContainerProjectGroup,
-	group: DockerComposeFileContainerGroup,
-	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
-): React.ReactNode {
-	const label = formatDockerComposeFileLabel(group.composeFile);
-	return renderDockerIconButton(
-		'openFile',
-		`Открыть compose-файл ${label}`,
-		() => onOpenDockerComposeFile(project.projectPath, group.composeFile.filePath),
-		!project.projectPath || !group.composeFile.filePath,
 	);
 }
 
@@ -4235,32 +4458,6 @@ function resolveDockerComposeActionError(
 		&& normalizeDashboardPath(actionError.composeFilePath) === normalizeDashboardPath(group.composeFile.filePath)
 		? actionError
 		: undefined;
-}
-
-/** Renders one compose action button with exact button-level loading state. */
-function renderDockerComposeActionButton(
-	project: DockerContainerProjectGroup,
-	group: DockerComposeFileContainerGroup,
-	action: DockerComposeProjectActionKind,
-	label: string,
-	busyAction: DashboardDockerBusyAction,
-	disabled: boolean,
-	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
-): React.ReactNode {
-	const actionBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerComposeBusyAction({
-		projectPath: project.projectPath,
-		composeFilePath: group.composeFile.filePath,
-		action,
-	}));
-	const icon = action === 'up' ? 'composeUp' : action === 'down' ? 'composeDown' : 'restart';
-	return renderDockerIconButton(
-		icon,
-		label,
-		() => onDockerComposeAction(project.projectPath, group.composeFile.filePath, action),
-		disabled || actionBusy,
-		false,
-		actionBusy,
-	);
 }
 
 /** Renders the hidden compose command error directly under its compose file row. */
@@ -4287,10 +4484,13 @@ function renderDockerContainerCard(
 	const expandKey = `docker:${container.id}`;
 	const isExpanded = expanded[expandKey] === true;
 	return (
-		<div key={`${container.id}:${options.composeFile?.filePath || ''}`} style={styles.dockerCard}>
+		<div key={`${container.id}:${options.composeFile?.filePath || ''}`} style={{ ...styles.dockerCard, ...(!isExpanded ? styles.dockerCardCollapsed : null) }}>
 			{renderDockerContainerHeader(container, 'card', isExpanded, toggleExpanded, busyAction, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal, options)}
-			{renderDockerResourceSummary(container)}
-			{isExpanded ? renderDockerContainerDetails(container) : null}
+			{isExpanded ? <>
+				<div style={styles.dockerCardExpandedActions}>{renderDockerContainerActionButtons(container, busyAction, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal)}</div>
+				{renderDockerResourceSummary(container)}
+				{renderDockerContainerDetails(container)}
+			</> : null}
 		</div>
 	);
 }
@@ -4299,12 +4499,25 @@ function renderDockerContainerCard(
 function renderDockerDeclaredServiceCard(
 	row: DockerDeclaredServiceViewRow,
 	busyAction: DashboardDockerBusyAction,
+	expanded: ExpandedState,
+	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
 	onDockerComposeAction: (projectPath: string, composeFilePath: string, action: DockerComposeProjectActionKind) => void,
 	onOpenDockerComposeFile: (projectPath: string, composeFilePath: string) => void,
 ): React.ReactNode {
+	const expandKey = buildDockerDeclaredServiceExpandedKey(row);
+	const isExpanded = expanded[expandKey] === true;
+	const toggleLabel = `${isExpanded ? 'Свернуть' : 'Раскрыть'} карточку сервиса ${row.serviceName}`;
 	return (
-		<div key={row.key} style={styles.dockerCard}>
-			{renderDockerDeclaredServiceHeader(row, busyAction, onDockerComposeAction, onOpenDockerComposeFile)}
+		<div key={row.key} style={{ ...styles.dockerCard, ...(!isExpanded ? styles.dockerCardCollapsed : null) }}>
+			<div style={styles.dockerCardHeader}>
+				<button type="button" style={styles.dockerExpandButton} onClick={() => toggleExpanded(expandKey)} title={toggleLabel} aria-label={toggleLabel} aria-expanded={isExpanded}>{isExpanded ? '▾' : '▸'}</button>
+				<button type="button" style={styles.dockerNameButton} onClick={() => toggleExpanded(expandKey)} title={toggleLabel} aria-label={toggleLabel} aria-expanded={isExpanded}>
+					<span style={styles.dockerServiceName}>{row.serviceName}</span>
+					{isExpanded ? <span style={styles.dockerImageName}>{formatDockerProjectComposeLabel(row.project, row.group.composeFile)}</span> : null}
+				</button>
+				<span style={{ ...styles.badge, ...styles.badgeNeutral }} title="Контейнер не создан или остановлен">остановлен</span>
+			</div>
+			{isExpanded ? <div style={styles.dockerCardExpandedActions}>{renderDockerDeclaredServiceActionButtons(row, busyAction, onDockerComposeAction, onOpenDockerComposeFile)}</div> : null}
 		</div>
 	);
 }
@@ -4319,8 +4532,6 @@ function renderDockerContainerListRow(
 	onOpenDockerLogs: (containerId: string) => void,
 	onOpenDockerTerminal: (containerId: string) => void,
 	options: {
-		showResourceSummary?: boolean;
-		includeResourcesInDetails?: boolean;
 		tree?: boolean;
 		treeContext?: DashboardFileTreeRowContext;
 		listNested?: boolean;
@@ -4330,7 +4541,6 @@ function renderDockerContainerListRow(
 ): React.ReactNode {
 	const expandKey = `docker:${container.id}`;
 	const isExpanded = expanded[expandKey] === true;
-	const showResourceSummary = options.showResourceSummary !== false;
 	const rowStyle = options.tree
 		? { ...styles.dockerListRow, ...styles.dockerTreeContainerRow }
 		: options.listNested
@@ -4339,8 +4549,10 @@ function renderDockerContainerListRow(
 	return (
 		<div key={`${container.id}:${options.composeFile?.filePath || ''}`} style={rowStyle}>
 			{renderDockerContainerHeader(container, options.tree ? 'tree' : 'list', isExpanded, toggleExpanded, busyAction, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal, options)}
-			{showResourceSummary ? renderDockerResourceSummary(container) : null}
-			{isExpanded ? renderDockerContainerDetails(container, { includeResources: options.includeResourcesInDetails === true }) : null}
+			{isExpanded ? renderDockerContainerDetails(container, {
+				includeResources: true,
+				resourceVariant: options.tree ? 'default' : 'compact',
+			}) : null}
 		</div>
 	);
 }
@@ -4387,7 +4599,12 @@ function renderDockerTableRow(
 					{renderDockerStatusIcon(row.group.status || (row.group.runningCount > 0 ? 'running' : 'stopped'), row.group.statusTone || (row.group.runningCount > 0 ? 'ok' : 'neutral'), row.group.statusText)}
 					{renderDockerTableMetricCell('—')}
 					{renderDockerTableMetricCell('—')}
-					<div style={styles.dockerTableActions}>{renderDockerComposeActionButtons(row.project, row.group, busyAction, onDockerComposeAction, onOpenDockerComposeFile)}</div>
+					<div style={styles.dockerTableActions}>
+						<DockerActionMenu
+							items={buildDockerComposeActionItems(row.project, row.group, busyAction, onDockerComposeAction, onOpenDockerComposeFile)}
+							label={`Действия compose-файла ${formatDockerComposeFileLabel(row.group.composeFile)}`}
+						/>
+					</div>
 				</div>
 				{groupActionError ? renderDockerComposeActionError(groupActionError) : null}
 			</div>
@@ -4401,7 +4618,12 @@ function renderDockerTableRow(
 					{renderDockerStatusIcon('stopped', 'neutral', 'Контейнер не создан или остановлен')}
 					{renderDockerTableMetricCell('—')}
 					{renderDockerTableMetricCell('—')}
-					<div style={styles.dockerTableActions}>{renderDockerDeclaredServiceActionButtons(row.row, busyAction, onDockerComposeAction, onOpenDockerComposeFile)}</div>
+					<div style={styles.dockerTableActions}>
+						<DockerActionMenu
+							items={buildDockerComposeActionItems(row.row.project, row.row.group, busyAction, onDockerComposeAction, onOpenDockerComposeFile)}
+							label={`Действия сервиса ${row.row.serviceName}`}
+						/>
+					</div>
 				</div>
 			</div>
 		);
@@ -4435,7 +4657,10 @@ function renderDockerTableRow(
 				{renderDockerTableMetricCell(formatDockerTableMetric(container, container.stats?.cpuPercent))}
 				{renderDockerTableMetricCell(hasDockerRuntimeStats(container) ? formatDockerMemoryMegabytes(container.stats?.memoryUsageBytes) : '—')}
 				<div style={styles.dockerTableActions}>
-					{renderDockerContainerActionButtons(container, busyAction, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal)}
+					<DockerActionMenu
+						items={buildDockerContainerActionItems(container, busyAction, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal)}
+						label={`Действия контейнера ${displayName}`}
+					/>
 				</div>
 			</div>
 			{isExpanded ? <div style={styles.dockerTableDetails}>{renderDockerContainerDetails(container, {
@@ -4477,17 +4702,29 @@ function renderDockerContainerHeader(
 	const statusIndicator = variant === 'tree'
 		? renderDockerLifecycleIndicator(container.status, container.statusTone, container.statusText)
 		: renderDockerStatusBadge(container);
+	const showInlineActions = variant !== 'card';
+	// Card titles toggle disclosure because log opening remains available inside expanded actions.
+	const titleActionLabel = variant === 'card'
+		? `${isExpanded ? 'Свернуть' : 'Раскрыть'} карточку контейнера ${displayName}`
+		: `Открыть логи контейнера ${displayName}`;
 	return (
 		<div style={variant === 'card' ? styles.dockerCardHeader : variant === 'tree' ? styles.dockerTreeListHeader : styles.dockerListHeader}>
 			{options.treeContext ? <span style={styles.fileTreeBranchPrefix}>{buildTreeBranchPrefix(options.treeContext)}</span> : null}
 			<button type="button" style={expandButtonStyle} onClick={() => toggleExpanded(expandKey)} title={isExpanded ? 'Скрыть детали' : 'Показать детали'} aria-label={isExpanded ? 'Скрыть детали контейнера' : 'Показать детали контейнера'}>{isExpanded ? '▾' : '▸'}</button>
-			<button type="button" style={styles.dockerNameButton} onClick={() => onOpenDockerLogs(container.id)} title={`${displayName}\n${container.image}`}>
+			<button
+				type="button"
+				style={styles.dockerNameButton}
+				onClick={() => variant === 'card' ? toggleExpanded(expandKey) : onOpenDockerLogs(container.id)}
+				title={variant === 'card' ? titleActionLabel : `${displayName}\n${container.image}`}
+				aria-label={titleActionLabel}
+				aria-expanded={variant === 'card' ? isExpanded : undefined}
+			>
 				<span style={styles.dockerServiceName}>{displayName}</span>
-				{secondaryLabel ? <span style={styles.dockerImageName}>{secondaryLabel}</span> : null}
+				{secondaryLabel && (variant !== 'card' || isExpanded) ? <span style={styles.dockerImageName}>{secondaryLabel}</span> : null}
 			</button>
 			<div style={headerActionsStyle}>
 				{statusIndicator}
-				{renderDockerContainerActionButtons(container, busyAction, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal)}
+				{showInlineActions ? renderDockerContainerActionButtons(container, busyAction, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal) : null}
 			</div>
 		</div>
 	);
@@ -4645,7 +4882,10 @@ function resolveDockerLifecycleIndicatorIcon(status: DockerContainerLifecycleSta
 }
 
 /** Renders CPU, memory and network usage for one container. */
-function renderDockerResourceSummary(container: DockerContainerSummary): React.ReactNode {
+function renderDockerResourceSummary(
+	container: DockerContainerSummary,
+	variant: 'default' | 'compact' = 'default',
+): React.ReactNode {
 	if (!hasDockerRuntimeStats(container)) {
 		return null;
 	}
@@ -4654,6 +4894,14 @@ function renderDockerResourceSummary(container: DockerContainerSummary): React.R
 	const memoryUsageBytes = container.stats?.memoryUsageBytes || 0;
 	const rxRate = container.stats?.networkRxRateBytesPerSecond || 0;
 	const txRate = container.stats?.networkTxRateBytesPerSecond || 0;
+	if (variant === 'compact') {
+		return renderDockerCompactResourceSummary(container, {
+			cpu,
+			memoryUsageBytes,
+			rxRate,
+			txRate,
+		});
+	}
 	return (
 		<div style={styles.dockerResourceBlock}>
 			{renderDockerMetricBar('CPU', cpu, formatPercent(cpu), 'var(--vscode-charts-blue, var(--vscode-textLink-foreground))')}
@@ -4664,6 +4912,39 @@ function renderDockerResourceSummary(container: DockerContainerSummary): React.R
 				<span style={styles.statValue}>{formatByteRate(txRate)} ↑</span>
 			</div>
 			{renderDockerSparkline(container.samples)}
+		</div>
+	);
+}
+
+/** Renders three small resource charts in one row for expanded list items. */
+function renderDockerCompactResourceSummary(
+	container: DockerContainerSummary,
+	values: { cpu: number; memoryUsageBytes: number; rxRate: number; txRate: number },
+): React.ReactNode {
+	// Normalize and downsample one shared history window before rendering its three resource series.
+	const visibleSamples = buildDockerSparklineVisibleSamples(container.samples);
+	return (
+		<div style={styles.dockerCompactResourceGrid} data-docker-resource-layout="compact">
+			{renderDockerCompactMetricCard('CPU', formatPercent(values.cpu), renderDockerCompactSparkline(visibleSamples, 'cpu'))}
+			{renderDockerCompactMetricCard('RAM', formatDockerMemoryMegabytes(values.memoryUsageBytes), renderDockerCompactSparkline(visibleSamples, 'memory'))}
+			{renderDockerCompactMetricCard(
+				'СЕТЬ',
+				`${formatByteRate(values.rxRate)} ↓ · ${formatByteRate(values.txRate)} ↑`,
+				renderDockerCompactSparkline(visibleSamples, 'network'),
+			)}
+		</div>
+	);
+}
+
+/** Renders one current resource value above its compact history graph. */
+function renderDockerCompactMetricCard(label: string, value: string, chart: React.ReactNode): React.ReactNode {
+	return (
+		<div style={styles.dockerCompactMetricCard}>
+			<div style={styles.dockerCompactMetricHeader}>
+				<span style={styles.metricLabel}>{label}</span>
+				<span style={styles.dockerCompactMetricValue} title={value}>{value}</span>
+			</div>
+			{chart}
 		</div>
 	);
 }
@@ -4722,6 +5003,9 @@ interface DockerSparklineSamplePoint {
 	networkRateBytesPerSecond: number;
 }
 
+/** Resource series supported by one list-mode mini chart. */
+type DockerCompactSparklineMetric = 'cpu' | 'memory' | 'network';
+
 /** Renders one percentage metric bar. */
 function renderDockerMetricBar(label: string, value: number, displayValue: string, color: string): React.ReactNode {
 	const percent = Math.max(0, Math.min(100, value));
@@ -4731,6 +5015,58 @@ function renderDockerMetricBar(label: string, value: number, displayValue: strin
 			<span style={styles.dockerMetricTrack}><span style={{ ...styles.dockerMetricFill, width: `${percent}%`, background: color }} /></span>
 			<span style={styles.metricValue}>{displayValue}</span>
 		</div>
+	);
+}
+
+/** Renders one isolated CPU, RAM or network history line for compact list details. */
+function renderDockerCompactSparkline(
+	visibleSamples: DockerSparklineSamplePoint[],
+	metric: DockerCompactSparklineMetric,
+): React.ReactNode {
+	if (visibleSamples.length < 2) {
+		return <div style={styles.dockerCompactMetricEmpty}>нет истории</div>;
+	}
+	const width = 96;
+	const height = 28;
+	const getValue = metric === 'cpu'
+		? (sample: DockerSparklineSamplePoint) => sample.cpuPercent
+		: metric === 'memory'
+			? (sample: DockerSparklineSamplePoint) => sample.memoryUsageBytes
+			: (sample: DockerSparklineSamplePoint) => sample.networkRateBytesPerSecond;
+	const minimumValue = metric === 'cpu'
+		? MIN_DOCKER_SPARKLINE_CPU_PERCENT
+		: metric === 'memory'
+			? MIN_DOCKER_SPARKLINE_MEMORY_BYTES
+			: MIN_DOCKER_SPARKLINE_NETWORK_BYTES_PER_SECOND;
+	const color = metric === 'cpu'
+		? 'var(--vscode-charts-blue, var(--vscode-textLink-foreground))'
+		: metric === 'memory'
+			? 'var(--vscode-charts-green)'
+			: '#f97316';
+	const segments = buildDockerSparklinePolylines(
+		visibleSamples,
+		width,
+		height,
+		getValue,
+		resolveDockerSparklineMax(visibleSamples, getValue, minimumValue),
+	);
+	if (segments.length === 0) {
+		return <div style={styles.dockerCompactMetricEmpty}>нет истории</div>;
+	}
+	return (
+		<svg
+			viewBox={`0 0 ${width} ${height}`}
+			preserveAspectRatio="none"
+			style={styles.dockerCompactSparkline}
+			data-docker-metric-chart={metric}
+			aria-hidden="true"
+			focusable="false"
+		>
+			<line x1="0" y1="25" x2={width} y2="25" stroke="var(--vscode-panel-border)" opacity="0.28" vectorEffect="non-scaling-stroke" />
+			{segments.map((points, index) => (
+				<polyline key={`${metric}:${index}:${points}`} points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+			))}
+		</svg>
 	);
 }
 
@@ -4913,6 +5249,62 @@ function resolveDockerSparklineGapThreshold(samples: DockerSparklineSamplePoint[
 	return Math.max(15000, medianGapMs * 3);
 }
 
+/** Builds container actions once so table menus retain every existing command state. */
+function buildDockerContainerActionItems(
+	container: DockerContainerSummary,
+	busyAction: DashboardDockerBusyAction,
+	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void,
+	onOpenDockerLogs: (containerId: string) => void,
+	onOpenDockerTerminal: (containerId: string) => void,
+): DockerActionItem[] {
+	const running = container.status === 'running';
+	const stopped = container.status === 'stopped';
+	const primaryAction: DockerContainerActionKind = running ? 'restart' : 'start';
+	const primaryBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: primaryAction }));
+	const stopBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'stop' }));
+	const removeBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'remove' }));
+	return [
+		{
+			key: 'logs',
+			icon: 'logs',
+			label: 'Открыть логи контейнера',
+			onSelect: () => onOpenDockerLogs(container.id),
+		},
+		{
+			key: 'terminal',
+			icon: 'terminal',
+			label: 'Открыть терминал в контейнере',
+			onSelect: () => onOpenDockerTerminal(container.id),
+			disabled: !running,
+		},
+		{
+			key: primaryAction,
+			icon: primaryAction,
+			label: running ? 'Перезапустить контейнер' : 'Запустить контейнер',
+			onSelect: () => onDockerAction(container.id, primaryAction),
+			disabled: !running && !stopped,
+			loading: primaryBusy,
+		},
+		{
+			key: 'stop',
+			icon: 'stop',
+			label: 'Остановить контейнер',
+			onSelect: () => onDockerAction(container.id, 'stop'),
+			disabled: !running,
+			loading: stopBusy,
+		},
+		{
+			key: 'remove',
+			icon: 'remove',
+			label: 'Удалить остановленный контейнер',
+			onSelect: () => onDockerAction(container.id, 'remove'),
+			disabled: !stopped,
+			danger: true,
+			loading: removeBusy,
+		},
+	];
+}
+
 /** Renders compact icon-only container commands inside the container title row. */
 function renderDockerContainerActionButtons(
 	container: DockerContainerSummary,
@@ -4921,21 +5313,10 @@ function renderDockerContainerActionButtons(
 	onOpenDockerLogs: (containerId: string) => void,
 	onOpenDockerTerminal: (containerId: string) => void,
 ): React.ReactNode {
-	const running = container.status === 'running';
-	const stopped = container.status === 'stopped';
-	const primaryAction: DockerContainerActionKind = running ? 'restart' : 'start';
-	const primaryBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: primaryAction }));
-	const stopBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'stop' }));
-	const removeBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'remove' }));
+	const items = buildDockerContainerActionItems(container, busyAction, onDockerAction, onOpenDockerLogs, onOpenDockerTerminal);
 	return (
 		<div style={styles.dockerActionIcons}>
-			{renderDockerIconButton('logs', 'Открыть логи контейнера', () => onOpenDockerLogs(container.id))}
-			{renderDockerIconButton('terminal', 'Открыть терминал в контейнере', () => onOpenDockerTerminal(container.id), !running)}
-			{running
-				? renderDockerIconButton('restart', 'Перезапустить контейнер', () => onDockerAction(container.id, 'restart'), primaryBusy, false, primaryBusy)
-				: renderDockerIconButton('start', 'Запустить контейнер', () => onDockerAction(container.id, 'start'), !stopped || primaryBusy, false, primaryBusy)}
-			{renderDockerIconButton('stop', 'Остановить контейнер', () => onDockerAction(container.id, 'stop'), !running || stopBusy, false, stopBusy)}
-			{renderDockerIconButton('remove', 'Удалить остановленный контейнер', () => onDockerAction(container.id, 'remove'), !stopped || removeBusy, true, removeBusy)}
+			{items.map(item => <React.Fragment key={item.key}>{renderDockerIconButton(item.icon, item.label, item.onSelect, item.disabled, item.danger, item.loading)}</React.Fragment>)}
 		</div>
 	);
 }
@@ -4949,18 +5330,20 @@ function renderDockerIconButton(
 	danger = false,
 	loading = false,
 ): React.ReactNode {
+	// Loading commands use the same visual and native disabled state as unavailable commands.
+	const inactive = disabled || loading;
 	return (
 		<button
 			type="button"
 			style={{
 				...styles.dockerIconButton,
 				...(danger ? styles.dockerIconButtonDanger : null),
-				...(disabled ? styles.dockerIconButtonDisabled : null),
+				...(inactive ? styles.dockerIconButtonDisabled : null),
 			}}
 			onClick={onClick}
 			title={label}
 			aria-label={label}
-			disabled={disabled || loading}
+			disabled={inactive}
 		>
 			{loading ? <span style={styles.buttonSpinner} aria-hidden="true" /> : <DockerContainerActionIcon icon={icon} />}
 		</button>
@@ -5006,11 +5389,11 @@ function DockerContainerActionIcon({ icon }: { icon: DockerContainerIconKind }):
 /** Renders Docker inspect details that are useful without opening another view. */
 function renderDockerContainerDetails(
 	container: DockerContainerSummary,
-	options: { includeResources?: boolean; containerPathLabel?: string } = {},
+	options: { includeResources?: boolean; resourceVariant?: 'default' | 'compact'; containerPathLabel?: string } = {},
 ): React.ReactNode {
 	return (
 		<div style={styles.dockerDetails}>
-			{options.includeResources ? renderDockerResourceSummary(container) : null}
+			{options.includeResources ? renderDockerResourceSummary(container, options.resourceVariant) : null}
 			<div style={styles.metaGrid}>
 				{renderDockerMeta('ID', container.shortId)}
 				{renderDockerMeta('Время', container.uptimeMs > 0 ? formatPromptDashboardDuration(container.uptimeMs) : 'нет')}
@@ -5266,8 +5649,22 @@ export function resolvePromptDashboardDockerLiveMetricsVisible(input: {
 	if (visibleProjects.length === 0) {
 		return false;
 	}
-	if (input.viewMode === 'cards' || input.viewMode === 'list' || input.viewMode === 'table') {
+	if (input.viewMode === 'table') {
 		return visibleProjects.some(project => project.containers.some(hasDockerRuntimeStats));
+	}
+	if (input.viewMode === 'list') {
+		return visibleProjects.some(project => project.containers.some(container => (
+			input.expanded[`docker:${container.id}`] === true && hasDockerRuntimeStats(container)
+		)));
+	}
+	if (input.viewMode === 'cards') {
+		return visibleProjects.some(project => (
+			project.containers.some(container => input.expanded[`docker:${container.id}`] === true && hasDockerRuntimeStats(container))
+			|| project.composeFileGroups.some(group => (
+				input.expanded[buildDockerComposeFileExpandedKey(project, group.composeFile)] === true
+				&& group.containers.some(hasDockerRuntimeStats)
+			))
+		));
 	}
 	if (input.viewMode !== 'tree') {
 		return false;
@@ -7738,6 +8135,11 @@ const styles: Record<string, React.CSSProperties> = {
 		background: 'color-mix(in srgb, var(--vscode-sideBar-background) 52%, transparent)',
 		minWidth: 0,
 	},
+	// Keeps every collapsed Docker card to one dense lifecycle row.
+	dockerCardCollapsed: {
+		gap: 0,
+		padding: '6px 8px',
+	},
 	dockerList: {
 		display: 'flex',
 		flexDirection: 'column',
@@ -7807,7 +8209,7 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	dockerCardHeader: {
 		display: 'grid',
-		gridTemplateColumns: '18px minmax(0, 1fr)',
+		gridTemplateColumns: '18px minmax(0, 1fr) auto',
 		alignItems: 'center',
 		gap: '6px',
 		minWidth: 0,
@@ -7824,20 +8226,6 @@ const styles: Record<string, React.CSSProperties> = {
 		gridTemplateColumns: 'auto 18px minmax(0, 1fr) auto',
 		alignItems: 'start',
 		gap: '4px',
-		minWidth: 0,
-	},
-	dockerDeclaredServiceHeader: {
-		display: 'grid',
-		gridTemplateColumns: 'minmax(0, 1fr)',
-		alignItems: 'center',
-		gap: '6px',
-		minWidth: 0,
-	},
-	dockerComposeSummaryHeader: {
-		display: 'grid',
-		gridTemplateColumns: 'minmax(0, 1fr)',
-		alignItems: 'center',
-		gap: '6px',
 		minWidth: 0,
 	},
 	// Compact runtime tiles for running compose cards.
@@ -7953,8 +8341,14 @@ const styles: Record<string, React.CSSProperties> = {
 		minWidth: 0,
 	},
 	dockerCardHeaderActions: {
-		gridColumn: '1 / -1',
-		justifyContent: 'flex-start',
+		justifyContent: 'flex-end',
+		flexWrap: 'nowrap',
+	},
+	// Places card commands below the compact lifecycle row only while the card is expanded.
+	dockerCardExpandedActions: {
+		display: 'flex',
+		justifyContent: 'flex-end',
+		minWidth: 0,
 	},
 	dockerTreeHeaderActions: {
 		alignSelf: 'start',
@@ -7966,6 +8360,95 @@ const styles: Record<string, React.CSSProperties> = {
 		justifyContent: 'flex-end',
 		gap: '3px',
 		minWidth: 0,
+	},
+	// Anchors the table overflow menu without consuming the container-name column.
+	dockerActionMenu: {
+		position: 'relative',
+		display: 'inline-flex',
+		justifyContent: 'flex-end',
+		width: '28px',
+		minWidth: 0,
+	},
+	// Uses the familiar vertical-ellipsis affordance for dense Docker table rows.
+	dockerActionMenuTrigger: {
+		position: 'relative',
+		display: 'inline-flex',
+		alignItems: 'center',
+		justifyContent: 'center',
+		width: '28px',
+		height: '24px',
+		padding: 0,
+		border: 'none',
+		borderRadius: '4px',
+		background: 'transparent',
+		color: 'var(--vscode-icon-foreground, var(--vscode-foreground))',
+		fontFamily: 'var(--vscode-font-family)',
+		fontSize: '18px',
+		lineHeight: 1,
+		boxSizing: 'border-box',
+		appearance: 'none',
+		cursor: 'pointer',
+	},
+	// Floats table commands above following rows while retaining VS Code menu colors.
+	dockerActionMenuPopover: {
+		position: 'absolute',
+		top: 'calc(100% + 2px)',
+		right: 0,
+		zIndex: 30,
+		display: 'flex',
+		flexDirection: 'column',
+		width: '220px',
+		maxWidth: 'calc(100vw - 24px)',
+		maxHeight: 'calc(100vh - 24px)',
+		overflowY: 'auto',
+		padding: '4px',
+		border: '1px solid var(--vscode-menu-border, var(--vscode-panel-border))',
+		borderRadius: '5px',
+		boxShadow: '0 4px 14px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))',
+		background: 'var(--vscode-menu-background, var(--vscode-editorWidget-background))',
+		boxSizing: 'border-box',
+	},
+	// Renders one full-width command with icon and readable label inside the table menu.
+	dockerActionMenuItem: {
+		display: 'grid',
+		gridTemplateColumns: '18px minmax(0, 1fr)',
+		alignItems: 'center',
+		gap: '8px',
+		width: '100%',
+		minHeight: '28px',
+		padding: '4px 7px',
+		border: 'none',
+		borderRadius: '3px',
+		fontFamily: 'var(--vscode-font-family)',
+		fontSize: '12px',
+		textAlign: 'left',
+		cursor: 'pointer',
+	},
+	// Keeps destructive removal visually distinct from regular container commands.
+	dockerActionMenuItemDanger: {
+		color: 'var(--vscode-errorForeground, var(--vscode-charts-red))',
+	},
+	// Mirrors disabled icon-button semantics for unavailable or running commands.
+	dockerActionMenuItemDisabled: {
+		color: 'var(--vscode-disabledForeground, var(--vscode-descriptionForeground))',
+		opacity: 0.72,
+		cursor: 'default',
+	},
+	// Reserves a stable icon slot so menu labels remain aligned while a command loads.
+	dockerActionMenuItemIcon: {
+		display: 'inline-flex',
+		alignItems: 'center',
+		justifyContent: 'center',
+		width: '18px',
+		height: '18px',
+		position: 'relative',
+	},
+	// Truncates defensive long labels without widening the table menu.
+	dockerActionMenuItemLabel: {
+		minWidth: 0,
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
 	},
 	dockerIconButton: {
 		width: '24px',
@@ -8006,6 +8489,59 @@ const styles: Record<string, React.CSSProperties> = {
 		flexDirection: 'column',
 		gap: '5px',
 		minWidth: 0,
+	},
+	// Places CPU, RAM and network history in one compact list-details row.
+	dockerCompactResourceGrid: {
+		display: 'grid',
+		gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+		gap: '5px',
+		minWidth: 0,
+	},
+	// Keeps each resource value and mini chart readable in a narrow dashboard rail.
+	dockerCompactMetricCard: {
+		display: 'flex',
+		flexDirection: 'column',
+		gap: '3px',
+		padding: '5px',
+		border: '1px solid color-mix(in srgb, var(--vscode-panel-border) 70%, transparent)',
+		borderRadius: '4px',
+		background: 'color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-panel-border) 10%)',
+		minWidth: 0,
+	},
+	// Aligns a metric label and current value above its independent history line.
+	dockerCompactMetricHeader: {
+		display: 'flex',
+		alignItems: 'center',
+		justifyContent: 'space-between',
+		gap: '4px',
+		minWidth: 0,
+	},
+	// Prevents long byte-rate values from forcing horizontal scrolling.
+	dockerCompactMetricValue: {
+		minWidth: 0,
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
+		whiteSpace: 'nowrap',
+		fontSize: '9px',
+		fontVariantNumeric: 'tabular-nums',
+		color: 'var(--vscode-foreground)',
+	},
+	// Renders each list-mode history line at a compact fixed height.
+	dockerCompactSparkline: {
+		width: '100%',
+		height: '28px',
+		display: 'block',
+		borderRadius: '3px',
+		background: 'color-mix(in srgb, var(--vscode-editor-background) 86%, var(--vscode-panel-border) 14%)',
+	},
+	// Keeps cards aligned before enough samples exist to draw a history line.
+	dockerCompactMetricEmpty: {
+		display: 'flex',
+		alignItems: 'center',
+		justifyContent: 'center',
+		height: '28px',
+		fontSize: '9px',
+		color: 'var(--vscode-descriptionForeground)',
 	},
 	dockerMetricTrack: {
 		display: 'block',
@@ -8068,7 +8604,7 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	dockerTableRow: {
 		display: 'grid',
-		gridTemplateColumns: 'minmax(0, 1fr) 32px 46px 46px 132px',
+		gridTemplateColumns: 'minmax(0, 1fr) 32px 46px 46px 28px',
 		alignItems: 'center',
 		gap: '8px',
 		padding: '5px 0',
@@ -8088,16 +8624,15 @@ const styles: Record<string, React.CSSProperties> = {
 		justifySelf: 'end',
 	},
 	dockerTableHeaderActionsCell: {
-		justifySelf: 'start',
+		justifySelf: 'center',
 	},
 	dockerTableActions: {
 		display: 'inline-flex',
 		alignItems: 'center',
-		justifyContent: 'flex-start',
+		justifyContent: 'center',
 		flexWrap: 'nowrap',
-		gap: '3px',
-		width: '132px',
-		minWidth: '132px',
+		width: '28px',
+		minWidth: '28px',
 	},
 	dockerTableMetricCell: {
 		justifySelf: 'end',

@@ -632,7 +632,8 @@ test('buildDockerTableRows keeps the sorted row order supplied by visible Docker
 	assert.match(rows[1].label, /aaa-service-1/);
 });
 
-test('PromptDashboard restores Docker view and renders row action icons in the container title row', () => {
+/** Verifies that dense Docker table rows expose one compact menu trigger per row. */
+test('PromptDashboard restores Docker table view and renders row action menus', () => {
 	const container = createDockerContainer();
 	const snapshot = createSnapshot([]);
 	snapshot.docker.data.projects = [{
@@ -666,13 +667,20 @@ test('PromptDashboard restores Docker view and renders row action icons in the c
 	});
 
 	assert.match(markup, /Проект\/Compose\/Контейнер/);
-	assert.match(markup, /api-service[\s\S]*aria-label="Открыть логи контейнера"/);
+	assert.match(markup, /grid-template-columns:minmax\(0, 1fr\) 32px 46px 46px 28px/);
+	assert.match(markup, /data-docker-action-menu="true" data-docker-action-count="5"/);
+	assert.match(markup, /\.pm-docker-action-menu-item:hover:not\(:disabled\)/);
+	assert.match(markup, /\.pm-docker-action-menu-item:active:not\(:disabled\)/);
+	assert.match(markup, /\.pm-docker-action-menu-item:focus-visible:not\(:disabled\)/);
+	assert.match(markup, /api-service[\s\S]*aria-label="Действия контейнера api-service-1"[\s\S]*>⋮<\/button>/);
+	assert.equal((markup.match(/>⋮<\/button>/g) || []).length, 1);
+	assert.doesNotMatch(markup, /aria-label="Действия">⋮<\/span>/);
 	assert.match(markup, /api-service[\s\S]*aria-label="Up 5 minutes"/);
 	assert.match(markup, /<span[^>]*style="[^"]*width:18px;height:18px[^"]*border-radius:4px[^"]*"[^>]*aria-label="Up 5 minutes"/);
-	assert.match(markup, /aria-label="Удалить остановленный контейнер"/);
-	assert.match(markup, /<button[^>]*style="[^"]*color:var\(--vscode-icon-foreground, var\(--vscode-foreground\)\)[^"]*"[^>]*aria-label="Открыть логи контейнера"/);
-	assert.match(markup, /<button[^>]*style="[^"]*color:var\(--vscode-disabledForeground, var\(--vscode-descriptionForeground\)\)[^"]*"[^>]*aria-label="Удалить остановленный контейнер"/);
-	assert.match(markup, /width:132px/);
+	assert.doesNotMatch(markup, /role="menu"/);
+	assert.doesNotMatch(markup, /Открыть терминал в контейнере/);
+	assert.doesNotMatch(markup, /Удалить остановленный контейнер/);
+	assert.doesNotMatch(markup, /width:132px/);
 	assert.match(markup, /12\.5%/);
 	assert.match(markup, /Порты/);
 	assert.doesNotMatch(markup, /aria-label="Открыть compose-файл docker-compose\.yml"/);
@@ -686,7 +694,7 @@ test('PromptDashboard restores Docker view and renders row action icons in the c
 			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'table', expandedContainerIds: [] }),
 		}),
 	});
-	assert.match(busyMarkup, /aria-label="Перезапустить контейнер" disabled=""[\s\S]*pm-spin/);
+	assert.match(busyMarkup, /aria-label="Действия контейнера api-service-1"[\s\S]*aria-busy="true"[\s\S]*pm-spin/);
 
 	const multiBusyMarkup = renderDashboard(snapshot, {
 		dockerBusyAction: [
@@ -697,7 +705,7 @@ test('PromptDashboard restores Docker view and renders row action icons in the c
 			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'table', expandedContainerIds: [] }),
 		}),
 	});
-	assert.match(multiBusyMarkup, /aria-label="Перезапустить контейнер" disabled=""[\s\S]*pm-spin/);
+	assert.match(multiBusyMarkup, /aria-label="Действия контейнера api-service-1"[\s\S]*aria-busy="true"[\s\S]*pm-spin/);
 	assert.match(multiBusyMarkup, /aria-label="Остановить все контейнеры рабочей области" disabled=""[\s\S]*pm-spin/);
 });
 
@@ -1249,6 +1257,7 @@ test('buildDockerSparklineVisibleSamples keeps historical buckets stable when a 
 	assert.deepEqual(after.slice(0, before.length), before);
 });
 
+/** Verifies that live metrics run only for resource surfaces that are actually expanded. */
 test('resolvePromptDashboardDockerLiveMetricsVisible follows actual Docker resource-block visibility', () => {
 	const container = createDockerContainer();
 	const snapshot = createSnapshot([]);
@@ -1293,6 +1302,50 @@ test('resolvePromptDashboardDockerLiveMetricsVisible follows actual Docker resou
 		expanded: {},
 		collapsedSections: {},
 		mode: 'full',
+	}), false);
+
+	assert.equal(resolvePromptDashboardDockerLiveMetricsVisible({
+		data: snapshot.docker.data,
+		viewMode: 'list',
+		statusFilter: 'all',
+		search: '',
+		sortBy: 'status',
+		expanded: { [`docker:${container.id}`]: true },
+		collapsedSections: {},
+		mode: 'full',
+	}), true);
+
+	assert.equal(resolvePromptDashboardDockerLiveMetricsVisible({
+		data: snapshot.docker.data,
+		viewMode: 'cards',
+		statusFilter: 'all',
+		search: '',
+		sortBy: 'status',
+		expanded: {},
+		collapsedSections: {},
+		mode: 'full',
+	}), false);
+
+	assert.equal(resolvePromptDashboardDockerLiveMetricsVisible({
+		data: snapshot.docker.data,
+		viewMode: 'cards',
+		statusFilter: 'all',
+		search: '',
+		sortBy: 'status',
+		expanded: { [`docker:${container.id}`]: true },
+		collapsedSections: {},
+		mode: 'full',
+	}), true);
+
+	assert.equal(resolvePromptDashboardDockerLiveMetricsVisible({
+		data: snapshot.docker.data,
+		viewMode: 'cards',
+		statusFilter: 'all',
+		search: '',
+		sortBy: 'status',
+		expanded: { 'docker:compose:/workspace/api:/workspace/api/docker-compose.yml': true },
+		collapsedSections: {},
+		mode: 'full',
 	}), true);
 
 	assert.equal(resolvePromptDashboardDockerLiveMetricsVisible({
@@ -1333,6 +1386,7 @@ test('resolvePromptDashboardDockerLiveMetricsVisible follows actual Docker resou
 	}), false);
 });
 
+/** Verifies collapsed card and table-menu behavior for services without created containers. */
 test('PromptDashboard keeps empty Docker compose projects visible and disables inactive compose actions', () => {
 	const snapshot = createSnapshot([]);
 	snapshot.docker.data.projects = [{
@@ -1382,8 +1436,11 @@ test('PromptDashboard keeps empty Docker compose projects visible and disables i
 			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'cards' }),
 		}),
 	});
-	assert.match(cardsMarkup, /api-service[\s\S]*api\/docker-compose\.yml/);
-	assert.match(cardsMarkup, /aria-label="Запустить compose-файл docker-compose.yml"/);
+	assert.match(cardsMarkup, /aria-label="Раскрыть карточку compose-файла docker-compose.yml"[^>]*aria-expanded="false"/);
+	assert.match(cardsMarkup, /aria-label="Раскрыть карточку сервиса api-service"[^>]*aria-expanded="false"/);
+	assert.match(cardsMarkup, /api-service[\s\S]*остановлен/);
+	assert.doesNotMatch(cardsMarkup, /api\/docker-compose\.yml<\/span>/);
+	assert.doesNotMatch(cardsMarkup, /aria-label="Запустить compose-файл docker-compose.yml"/);
 	assert.doesNotMatch(cardsMarkup, /Контейнеров нет/);
 
 	const tableMarkup = renderDashboard(snapshot, {
@@ -1393,6 +1450,9 @@ test('PromptDashboard keeps empty Docker compose projects visible and disables i
 	});
 	assert.match(tableMarkup, /Проект\/Compose\/Контейнер/);
 	assert.match(tableMarkup, /api\/docker-compose\.yml\/api-service[\s\S]*aria-label="Контейнер не создан или остановлен"[\s\S]*>—<\/span>[\s\S]*>—<\/span>/);
+	assert.match(tableMarkup, /data-docker-action-menu="true" data-docker-action-count="3"/);
+	assert.match(tableMarkup, /aria-label="Действия сервиса api-service"/);
+	assert.doesNotMatch(tableMarkup, /role="menu"/);
 });
 
 test('PromptDashboard tree service rows keep the disclosure column width and outlined stopped status', () => {
@@ -1437,7 +1497,8 @@ test('PromptDashboard tree service rows keep the disclosure column width and out
 	assert.match(markup, /<span[^>]*style="[^"]*width:18px;height:18px[^"]*border-radius:4px[^"]*"[^>]*aria-label="Контейнер не создан или остановлен"/);
 });
 
-test('PromptDashboard card view shows container names and compose context', () => {
+/** Verifies that every Docker card restores its compact or expanded persisted state. */
+test('PromptDashboard card view reveals secondary Docker content only after persisted expansion', () => {
 	const apiContainer = createDockerContainer({
 		name: '',
 		service: 'api',
@@ -1458,7 +1519,25 @@ test('PromptDashboard card view shows container names and compose context', () =
 			{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
 			{ project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/compose.worker.yml', relativePath: 'compose.worker.yml' },
 		],
-		composeFileGroups: [],
+		composeFileGroups: [
+			{
+				composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/docker-compose.yml', relativePath: 'docker-compose.yml' },
+				containers: [apiContainer],
+				serviceNames: ['api', 'worker-declared'],
+				runningCount: 1,
+				stoppedCount: 0,
+				warningCount: 0,
+				errorCount: 0,
+			},
+			{
+				composeFile: { project: 'api', projectPath: '/workspace/api', filePath: '/workspace/api/compose.worker.yml', relativePath: 'compose.worker.yml' },
+				containers: [workerContainer],
+				runningCount: 1,
+				stoppedCount: 0,
+				warningCount: 0,
+				errorCount: 0,
+			},
+		],
 		containers: [apiContainer, workerContainer],
 		runningCount: 2,
 		stoppedCount: 0,
@@ -1474,9 +1553,39 @@ test('PromptDashboard card view shows container names and compose context', () =
 		}),
 	});
 
-	assert.match(markup, /api[\s\S]*docker-compose\.yml/);
-	assert.match(markup, /api-container-2[\s\S]*compose\.worker\.yml/);
+	assert.match(markup, /aria-label="Раскрыть карточку compose-файла docker-compose.yml"[^>]*aria-expanded="false"/);
+	assert.match(markup, /aria-label="Раскрыть карточку сервиса worker-declared"[^>]*aria-expanded="false"/);
+	assert.match(markup, /api[\s\S]*запущен/);
+	assert.match(markup, /api-container-2[\s\S]*запущен/);
+	assert.doesNotMatch(markup, /docker-compose\.yml · example\/api:latest<\/span>/);
+	assert.doesNotMatch(markup, /api\/docker-compose\.yml<\/span>/);
+	assert.doesNotMatch(markup, /aria-label="Открыть логи контейнера"/);
+	assert.doesNotMatch(markup, />CPU<\/span>/);
+	assert.doesNotMatch(markup, />RAM<\/span>/);
 	assert.doesNotMatch(markup, /Контейнеров нет/);
+
+	const expandedMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({
+				viewMode: 'cards',
+				expandedContainerIds: [
+					'compose:/workspace/api:/workspace/api/docker-compose.yml',
+					apiContainer.id,
+					'declared:/workspace/api/docker-compose.yml:worker-declared',
+				],
+			}),
+		}),
+	});
+	assert.match(expandedMarkup, /aria-label="Свернуть карточку compose-файла docker-compose.yml"[^>]*aria-expanded="true"/);
+	assert.match(expandedMarkup, /aria-label="Свернуть карточку сервиса worker-declared"[^>]*aria-expanded="true"/);
+	assert.match(expandedMarkup, /aria-label="Скрыть детали контейнера"/);
+	assert.match(expandedMarkup, /api · 1\/1/);
+	assert.match(expandedMarkup, /docker-compose\.yml · example\/api:latest/);
+	assert.match(expandedMarkup, /api\/docker-compose\.yml/);
+	assert.match(expandedMarkup, /aria-label="Открыть compose-файл docker-compose.yml"/);
+	assert.match(expandedMarkup, /aria-label="Открыть логи контейнера"/);
+	assert.match(expandedMarkup, />CPU<\/span>[\s\S]*>12\.5%<\/span>/);
+	assert.match(expandedMarkup, />RAM<\/span>[\s\S]*>100 МБ<\/span>/);
 });
 
 test('PromptDashboard shows loader and inline error for a hidden Docker compose action', () => {
@@ -1527,6 +1636,7 @@ test('PromptDashboard shows loader and inline error for a hidden Docker compose 
 	assert.match(markup, /Ошибка docker compose up[\s\S]*service api failed to start/);
 });
 
+/** Verifies that empty Compose rows retain their compact action-menu entry in the flat table. */
 test('PromptDashboard flattens Docker table rows while keeping empty compose files visible', () => {
 	const container = createDockerContainer({ project: 'web', composeWorkingDir: '/workspace/web', composeFilePaths: ['/workspace/web/docker-compose.yml'] });
 	const snapshot = createSnapshot([]);
@@ -1564,7 +1674,11 @@ test('PromptDashboard flattens Docker table rows while keeping empty compose fil
 	});
 
 	assert.match(markup, /Проект\/Compose\/Контейнер/);
+	assert.match(markup, /grid-template-columns:minmax\(0, 1fr\) 32px 46px 46px 28px/);
 	assert.match(markup, /api\/docker-compose\.yml[\s\S]*api-service/);
+	assert.match(markup, /data-docker-action-menu="true" data-docker-action-count="3"/);
+	assert.match(markup, /aria-label="Действия compose-файла docker-compose.yml"/);
+	assert.doesNotMatch(markup, /role="menu"/);
 	assert.doesNotMatch(markup, /Проект\/Compose<\/span>[\s\S]*<span>Сервис<\/span>/);
 });
 
@@ -1642,9 +1756,28 @@ test('PromptDashboard table view moves Docker disclosure into the first column a
 	assert.match(markup, /СЕТЬ[\s\S]*5 мин/);
 });
 
+/** Verifies grouped list rows reveal three independent compact resource charts on expansion. */
 test('PromptDashboard list view keeps containers grouped under their compose file', () => {
 	const apiContainer = createDockerContainer({
 		composeFilePaths: ['/workspace/api/docker-compose.yml'],
+		samples: [
+			{
+				readAt: '2026-04-29T09:56:00.000Z',
+				cpuPercent: 8,
+				memoryPercent: 8.4,
+				memoryUsageBytes: 88 * 1024 * 1024,
+				networkRxRateBytesPerSecond: 120,
+				networkTxRateBytesPerSecond: 80,
+			},
+			{
+				readAt: '2026-04-29T10:00:00.000Z',
+				cpuPercent: 12.5,
+				memoryPercent: 9.8,
+				memoryUsageBytes: 100 * 1024 * 1024,
+				networkRxRateBytesPerSecond: 100,
+				networkTxRateBytesPerSecond: 200,
+			},
+		],
 	});
 	const workerContainer = createDockerContainer({
 		id: 'container-worker123456789',
@@ -1696,7 +1829,23 @@ test('PromptDashboard list view keeps containers grouped under their compose fil
 
 	assert.match(markup, /docker-compose\.yml[\s\S]*api-service-1[\s\S]*compose\.worker\.yml[\s\S]*worker-service-1/);
 	assert.match(markup, /grid-template-columns:minmax\(0, 1fr\) auto/);
+	assert.doesNotMatch(markup, /data-docker-resource-layout="compact"/);
+	assert.doesNotMatch(markup, /data-docker-metric-chart=/);
+	assert.doesNotMatch(markup, />CPU<\/span>/);
+	assert.doesNotMatch(markup, />RAM<\/span>/);
+	assert.doesNotMatch(markup, />СЕТЬ<\/span>/);
 	assert.doesNotMatch(markup, /docker-compose\.yml[\s\S]*compose\.worker\.yml[\s\S]*api-service-1/);
+
+	const expandedMarkup = renderDashboard(snapshot, {
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'list', expandedContainerIds: [apiContainer.id] }),
+		}),
+	});
+	assert.match(expandedMarkup, /data-docker-resource-layout="compact"/);
+	assert.match(expandedMarkup, /data-docker-metric-chart="cpu"/);
+	assert.match(expandedMarkup, /data-docker-metric-chart="memory"/);
+	assert.match(expandedMarkup, /data-docker-metric-chart="network"/);
+	assert.equal((expandedMarkup.match(/data-docker-metric-chart="/g) || []).length, 3);
 });
 
 test('PromptDashboard keeps Docker startup placeholder out of unavailable state', () => {

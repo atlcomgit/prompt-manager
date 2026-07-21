@@ -7,8 +7,16 @@ import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
 import { DateRangeCalendar } from './DateRangeCalendar';
-import type { PromptStatistics, PromptStatus } from '../../types/prompt';
-import { calculateStatisticsExportTargetHours } from '../../utils/statisticsExport.js';
+import type { PromptStatistics } from '../../types/prompt';
+import {
+  buildStatisticsActualExportRows,
+  calculateStatisticsExportTargetHours,
+  formatStatisticsExportNumber,
+  type StatisticsActualExportSourceRow,
+  type StatisticsExportDisplayOptions,
+  type StatisticsExportHoursMode,
+  type StatisticsExportPeriodRange,
+} from '../../utils/statisticsExport.js';
 import {
   buildStatisticsExportHtmlPreview,
   buildStatisticsExportMarkdownDocument,
@@ -42,7 +50,14 @@ interface SortCriterion {
 }
 
 /** Column keys for report table */
-type ReportColumn = 'taskNumber' | 'title' | 'status' | 'timeWriting' | 'timeImplementing' | 'timeOnTask' | 'totalTime';
+type ReportColumn =
+  | 'taskNumber'
+  | 'title'
+  | 'status'
+  | 'timeWriting'
+  | 'timeImplementing'
+  | 'timeOnTask'
+  | 'totalTime';
 
 type ExportFormat = 'html' | 'md';
 
@@ -72,8 +87,9 @@ function parseOptionalExportHourlyRate(value: string): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+/** Build integer export rows by distributing the entered target hours proportionally. */
 function buildScaledExportRows(
-  rows: Array<{ taskNumber: string; title: string; totalTime: number; status: PromptStatus; reportSummary?: string }>,
+  rows: StatisticsActualExportSourceRow[],
   targetHours: number,
 ): StatisticsExportDocumentRow[] {
   if (rows.length === 0) {
@@ -231,7 +247,9 @@ export const StatisticsApp: React.FC = () => {
     }
 
     if (msg.type === 'statisticsUiState') {
-      setHourlyRateInput(typeof msg.hourlyRateInput === 'string' ? msg.hourlyRateInput : String(DEFAULT_EXPORT_HOURLY_RATE));
+      setHourlyRateInput(
+        typeof msg.hourlyRateInput === 'string' ? msg.hourlyRateInput : String(DEFAULT_EXPORT_HOURLY_RATE),
+      );
       setStatisticsUiHydrated(true);
     }
   }, []);
@@ -331,17 +349,37 @@ export const StatisticsApp: React.FC = () => {
     });
   }, [stats?.reportRows, sortCriteria]);
 
+  const selectedExportPeriod = useMemo<StatisticsExportPeriodRange | undefined>(() => {
+    if (!dateFrom || !dateTo) {
+      return undefined;
+    }
+
+    return { dateFrom, dateTo };
+  }, [dateFrom, dateTo]);
   const parsedExportHours = useMemo(() => parseOptionalExportHours(exportHoursInput), [exportHoursInput]);
-  const showHours = parsedExportHours !== null && parsedExportHours > 0;
-  const exportTargetHours = showHours && parsedExportHours !== null ? parsedExportHours : 0;
+  // Empty Hours with a complete period means actual tracked time, while positive values stay scaled.
+  const isActualHoursMode = exportHoursInput.trim().length === 0 && Boolean(selectedExportPeriod);
+  const showHours = isActualHoursMode || (parsedExportHours !== null && parsedExportHours > 0);
+  const exportHoursMode: StatisticsExportHoursMode = isActualHoursMode ? 'actual' : 'scaled';
+  const exportTargetHours = showHours && !isActualHoursMode && parsedExportHours !== null ? parsedExportHours : 0;
   const parsedExportHourlyRate = useMemo(() => parseOptionalExportHourlyRate(hourlyRateInput), [hourlyRateInput]);
   const showCost = showHours && parsedExportHourlyRate !== null && parsedExportHourlyRate > 0;
   const exportHourlyRate = showCost && parsedExportHourlyRate !== null ? parsedExportHourlyRate : 0;
-  const exportDisplayOptions = useMemo(() => ({ showHours, showCost }), [showCost, showHours]);
+  const exportDisplayOptions = useMemo<StatisticsExportDisplayOptions>(() => ({
+    showHours,
+    showCost,
+    hoursMode: showHours ? exportHoursMode : undefined,
+    period: selectedExportPeriod,
+  }), [exportHoursMode, selectedExportPeriod, showCost, showHours]);
+
+  const actualExportRows = useMemo(
+    () => buildStatisticsActualExportRows(sortedReportRows),
+    [sortedReportRows],
+  );
 
   const exportRows = useMemo(
-    () => buildScaledExportRows(sortedReportRows, exportTargetHours),
-    [exportTargetHours, sortedReportRows],
+    () => isActualHoursMode ? actualExportRows : buildScaledExportRows(sortedReportRows, exportTargetHours),
+    [actualExportRows, exportTargetHours, isActualHoursMode, sortedReportRows],
   );
   const exportRowsTotal = useMemo(
     () => exportRows.reduce((sum, row) => sum + row.hours, 0),
@@ -353,6 +391,12 @@ export const StatisticsApp: React.FC = () => {
     }
     return 'en';
   }, []);
+  const exportHoursLabel = useMemo(
+    () => showHours ? formatStatisticsExportNumber(exportRowsTotal, uiLocale) : '',
+    [exportRowsTotal, showHours, uiLocale],
+  );
+  const exportButtonHoursSuffix = showHours ? ` (${exportHoursLabel}${t('stats.exportHoursSuffix')})` : '';
+  const exportTooltipHours = showHours ? exportHoursLabel : '—';
   const exportHtmlPreview = useMemo(
     () => buildStatisticsExportHtmlPreview(
       exportRows,
@@ -386,8 +430,18 @@ export const StatisticsApp: React.FC = () => {
       includeReport: includeReportInExport,
       showHours,
       showCost,
+      hoursMode: showHours ? exportHoursMode : undefined,
+      period: selectedExportPeriod,
     });
-  }, [exportHourlyRate, exportRows, includeReportInExport, showCost, showHours]);
+  }, [
+    exportHourlyRate,
+    exportHoursMode,
+    exportRows,
+    includeReportInExport,
+    selectedExportPeriod,
+    showCost,
+    showHours,
+  ]);
 
   /** Status labels map */
   const statusLabels: Record<string, string> = {
@@ -603,16 +657,16 @@ export const StatisticsApp: React.FC = () => {
                 <button
                   style={styles.exportBtn}
                   onClick={() => handleExport('html')}
-                  title={t('stats.exportHtmlTooltip').replace('{hours}', String(exportTargetHours))}
+                  title={t('stats.exportHtmlTooltip').replace('{hours}', exportTooltipHours)}
                 >
-                  {`${t('stats.exportHtmlBtn')} (${exportTargetHours}${t('stats.exportHoursSuffix')})`}
+                  {`${t('stats.exportHtmlBtn')}${exportButtonHoursSuffix}`}
                 </button>
                 <button
                   style={styles.exportMdBtn}
                   onClick={() => handleExport('md')}
-                  title={t('stats.exportMdTooltip').replace('{hours}', String(exportTargetHours))}
+                  title={t('stats.exportMdTooltip').replace('{hours}', exportTooltipHours)}
                 >
-                  {`${t('stats.exportMdBtn')} (${exportTargetHours}${t('stats.exportHoursSuffix')})`}
+                  {`${t('stats.exportMdBtn')}${exportButtonHoursSuffix}`}
                 </button>
               </div>
             </div>
@@ -680,20 +734,36 @@ export const StatisticsApp: React.FC = () => {
                     <td style={styles.reportTaskCell}>{row.taskNumber || '—'}</td>
                     <td style={styles.reportTd}>{row.title}</td>
                     <td style={styles.reportTd}>{statusLabels[row.status] || row.status}</td>
-                    <td style={{ ...styles.reportTd, textAlign: 'right' }}>{formatDuration(row.timeWriting)}</td>
-                    <td style={{ ...styles.reportTd, textAlign: 'right' }}>{formatDuration(row.timeImplementing)}</td>
-                    <td style={{ ...styles.reportTd, textAlign: 'right' }}>{formatDuration(row.timeOnTask || 0)}</td>
-                    <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(row.totalTime)}</td>
+                    <td style={{ ...styles.reportTd, textAlign: 'right' }}>
+                      {formatDuration(row.timeWriting)}
+                    </td>
+                    <td style={{ ...styles.reportTd, textAlign: 'right' }}>
+                      {formatDuration(row.timeImplementing)}
+                    </td>
+                    <td style={{ ...styles.reportTd, textAlign: 'right' }}>
+                      {formatDuration(row.timeOnTask || 0)}
+                    </td>
+                    <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
+                      {formatDuration(row.totalTime)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
               <tfoot>
                 <tr style={styles.reportFooter}>
                   <td style={styles.reportTd} colSpan={3}>{t('stats.totalCol')}</td>
-                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeWriting)}</td>
-                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeImplementing)}</td>
-                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>{formatDuration(stats.totalTimeOnTask || 0)}</td>
-                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 700 }}>{formatDuration(stats.totalTime)}</td>
+                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
+                    {formatDuration(stats.totalTimeWriting)}
+                  </td>
+                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
+                    {formatDuration(stats.totalTimeImplementing)}
+                  </td>
+                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
+                    {formatDuration(stats.totalTimeOnTask || 0)}
+                  </td>
+                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 700 }}>
+                    {formatDuration(stats.totalTime)}
+                  </td>
                 </tr>
               </tfoot>
             </table>
@@ -909,7 +979,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   exportBtn: {
     padding: '6px 12px',
-    background: 'linear-gradient(135deg, var(--vscode-button-background), color-mix(in srgb, var(--vscode-button-background) 70%, white))',
+    background: 'linear-gradient(135deg, var(--vscode-button-background), '
+      + 'color-mix(in srgb, var(--vscode-button-background) 70%, white))',
     color: 'var(--vscode-button-foreground)',
     border: '1px solid color-mix(in srgb, var(--vscode-button-background) 70%, black)',
     borderRadius: '8px',

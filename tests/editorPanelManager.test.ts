@@ -717,6 +717,8 @@ async function createManager(options?: {
 	storageDirectoryPath?: string;
 	chatMemoryInstructionService?: Record<string, unknown>;
 	codeMapChatInstructionService?: Record<string, unknown>;
+	/** Overrides dashboard behavior required by a focused manager test. */
+	promptDashboardService?: Record<string, unknown>;
 }) {
 	setVsCodeConfigurationValues(options?.configurationValues);
 	const { EditorPanelManager } = await importEditorPanelManager();
@@ -767,6 +769,7 @@ async function createManager(options?: {
 		getHooks: async () => [],
 		...options?.workspaceService,
 	};
+	const dailyTimeChangeListeners = new Set<(event: Record<string, unknown>) => void>();
 
 	const storageService = {
 		getStorageDirectoryPath: () => storageDirectoryPath,
@@ -822,6 +825,12 @@ async function createManager(options?: {
 		},
 		readAgentProgress: options?.readAgentProgress || (async () => undefined),
 		createAgentFile: async () => undefined,
+		onDidPromptDailyTimeChange: (listener: (event: Record<string, unknown>) => void) => {
+			dailyTimeChangeListeners.add(listener);
+			return {
+				dispose: () => dailyTimeChangeListeners.delete(listener),
+			};
+		},
 	};
 
 	const aiService = {
@@ -847,6 +856,7 @@ async function createManager(options?: {
 		setDockerWidgetCollapsed: () => undefined,
 		pauseActiveScope: () => undefined,
 		analyzeParallelReview: async () => ({ status: 'idle', model: '', content: '' }),
+		...options?.promptDashboardService,
 	};
 	const dockerContainersService = {
 		getWorkspaceContainer: async () => null,
@@ -875,6 +885,12 @@ async function createManager(options?: {
 		manager,
 		storageService,
 		aiService,
+		promptDashboardService,
+		emitDailyTimeChange: (event: Record<string, unknown>) => {
+			for (const listener of dailyTimeChangeListeners) {
+				listener(event);
+			}
+		},
 		getStoredPrompt: () => clonePrompt(storedPrompt),
 	};
 }
@@ -3672,6 +3688,132 @@ test('refreshPromptDashboardWidget uses the just-saved expanded dashboard state 
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
 });
 
+/** Verify that any completed daily time write refreshes the visible global activity widget once. */
+test('daily time change refreshes the visible global activity widget without a loading snapshot', async () => {
+	resetVsCodeCommandMock();
+	const refreshCalls: Array<{ widget: string; showLoadingState: boolean | undefined }> = [];
+	const { manager, emitDailyTimeChange } = await createManager({
+		initialPrompt: { id: 'task-161', promptUuid: 'uuid-161', title: 'Task 161' },
+		promptDashboardService: {
+			refreshWidgetSnapshot: async (
+				prompt: any,
+				widget: string,
+				postMessage?: (message: unknown) => void,
+				_requestId?: string,
+				_section?: string,
+				options?: { showLoadingState?: boolean },
+			) => {
+				refreshCalls.push({ widget, showLoadingState: options?.showLoadingState });
+				postMessage?.({
+					type: 'promptDashboardWidgetSnapshot',
+					promptId: prompt.id,
+					promptUuid: prompt.promptUuid,
+					widget: { kind: 'activity', cache: { status: 'fresh' }, data: { today: [], yesterday: [] } },
+				});
+				return null;
+			},
+		},
+	});
+
+	await manager.openPrompt('task-161');
+	const panel = (manager as any).resolveOpenEditorPanel('__prompt_editor_singleton__');
+	assert.ok(panel);
+	panel.postedMessages.length = 0;
+
+	await withImmediateTimers(async () => {
+		emitDailyTimeChange({ id: 'task-other', promptUuid: 'uuid-other', archived: false });
+		emitDailyTimeChange({ id: 'task-other', promptUuid: 'uuid-other', archived: false });
+		await flushTurns(3);
+	});
+
+	assert.deepEqual(refreshCalls, [{ widget: 'activity', showLoadingState: false }]);
+	assert.equal(
+		panel.postedMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'),
+		true,
+	);
+	manager.disposeAll();
+});
+
+/** Verify that hidden and collapsed activity targets ignore completed daily time writes. */
+test('daily time change skips hidden and collapsed prompt panels', async () => {
+	resetVsCodeCommandMock();
+	let refreshCalls = 0;
+	const { manager, emitDailyTimeChange } = await createManager({
+		initialPrompt: { id: 'task-161', promptUuid: 'uuid-161', title: 'Task 161' },
+		promptDashboardService: {
+			refreshWidgetSnapshot: async () => {
+				refreshCalls += 1;
+				return null;
+			},
+		},
+	});
+
+	await manager.openPrompt('task-161');
+	const panel = (manager as any).resolveOpenEditorPanel('__prompt_editor_singleton__');
+	assert.ok(panel);
+
+	await withImmediateTimers(async () => {
+		panel.visible = false;
+		emitDailyTimeChange({ id: 'task-161', promptUuid: 'uuid-161', archived: false });
+		panel.visible = true;
+		(manager as any).promptDashboardCollapsedSectionsState = { activity: true };
+		emitDailyTimeChange({ id: 'task-161', promptUuid: 'uuid-161', archived: false });
+		await flushTurns(3);
+	});
+
+	assert.equal(refreshCalls, 0);
+	manager.disposeAll();
+});
+
+/** Verify that an activity result is dropped when the panel switches prompts during refresh. */
+test('daily time change drops activity messages after the prompt panel switches', async () => {
+	resetVsCodeCommandMock();
+	const refreshGate = createDeferred<void>();
+	let activityPostMessage: ((message: unknown) => void) | undefined;
+	const { manager, emitDailyTimeChange } = await createManager({
+		initialPrompt: { id: 'task-161', promptUuid: 'uuid-161', title: 'Task 161' },
+		promptDashboardService: {
+			refreshWidgetSnapshot: async (
+				_prompt: unknown,
+				_widget: string,
+				postMessage?: (message: unknown) => void,
+			) => {
+				activityPostMessage = postMessage;
+				await refreshGate.promise;
+				return null;
+			},
+		},
+	});
+
+	await manager.openPrompt('task-161');
+	const panelKey = '__prompt_editor_singleton__';
+	const panel = (manager as any).resolveOpenEditorPanel(panelKey);
+	assert.ok(panel);
+	panel.postedMessages.length = 0;
+
+	await withImmediateTimers(async () => {
+		emitDailyTimeChange({ id: 'task-other', promptUuid: 'uuid-other', archived: false });
+		await flushTurns(2);
+	});
+	assert.ok(activityPostMessage);
+
+	(manager as any).panelPromptRefs.set(panelKey, createPrompt({ id: 'task-162', promptUuid: 'uuid-162' }));
+	activityPostMessage?.({
+		type: 'promptDashboardWidgetSnapshot',
+		promptId: 'task-161',
+		promptUuid: 'uuid-161',
+		widget: { kind: 'activity', cache: { status: 'fresh' }, data: { today: [], yesterday: [] } },
+	});
+	refreshGate.resolve();
+	await flushTurns(2);
+
+	assert.equal(
+		panel.postedMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'),
+		false,
+	);
+	manager.disposeAll();
+});
+
 test('savePromptDashboardCollapsedSections syncs prompt dashboard collapsed sections into PromptDashboardService immediately', async () => {
 	const syncedCollapsedStates: Array<Record<string, boolean>> = [];
 	const { manager } = await createManager();
@@ -4203,20 +4345,31 @@ test('createQuickAddPrompt stores input as content and only enriches title in ba
 	assert.ok(aiStates.some(state => !state.title && !state.description));
 });
 
-test('createQuickAddPrompt reuses the latest saved AI model', async () => {
+/** Verify that Quick Add reuses every chat-launch field from the latest saved prompt. */
+test('createQuickAddPrompt reuses the latest saved chat defaults by updatedAt', async () => {
 	const { manager, getStoredPrompt } = await createManager({
 		listPrompts: [
+			{
+				// The newest config is first so array order cannot accidentally drive recent defaults.
+				id: 'prompt-new',
+				promptUuid: 'uuid-new',
+				model: ' copilot/claude-sonnet-4 ',
+				chatTarget: 'kilo',
+				chatMode: 'plan',
+				autoStartChatWithXdotool: true,
+				taskNumber: '161',
+				branch: 'feature/should-not-copy',
+				trackedBranch: 'main',
+				updatedAt: '2026-04-13T00:00:00.000Z',
+			},
 			{
 				id: 'prompt-old',
 				promptUuid: 'uuid-old',
 				model: 'copilot/gpt-4o',
+				chatTarget: 'copilot',
+				chatMode: 'agent',
+				autoStartChatWithXdotool: false,
 				updatedAt: '2026-04-11T00:00:00.000Z',
-			},
-			{
-				id: 'prompt-new',
-				promptUuid: 'uuid-new',
-				model: 'copilot/claude-sonnet-4',
-				updatedAt: '2026-04-13T00:00:00.000Z',
 			},
 		],
 	});
@@ -4224,7 +4377,58 @@ test('createQuickAddPrompt reuses the latest saved AI model', async () => {
 	const saved = await manager.createQuickAddPrompt('Быстро создать новый промпт из буфера обмена.');
 
 	assert.equal(saved?.model, 'copilot/claude-sonnet-4');
+	assert.equal(saved?.chatTarget, 'kilo');
+	assert.equal(saved?.chatMode, 'plan');
+	assert.equal(saved?.autoStartChatWithXdotool, true);
+	assert.equal(saved?.taskNumber, '');
+	assert.equal(saved?.branch, '');
+	assert.equal(saved?.trackedBranch, '');
 	assert.equal(getStoredPrompt()?.model, 'copilot/claude-sonnet-4');
+	assert.equal(getStoredPrompt()?.chatTarget, 'kilo');
+	assert.equal(getStoredPrompt()?.chatMode, 'plan');
+	assert.equal(getStoredPrompt()?.autoStartChatWithXdotool, true);
+});
+
+/** Verify that invalid legacy chat-launch fields cannot overwrite new-prompt defaults. */
+test('openPrompt new draft keeps default chat values for legacy optional prompt config', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		listPrompts: [
+			{
+				// Legacy optional chat fields must leave createDefaultPrompt defaults untouched.
+				id: 'prompt-legacy',
+				promptUuid: 'uuid-legacy',
+				model: undefined,
+				chatTarget: undefined,
+				chatMode: 'legacy-plan',
+				autoStartChatWithXdotool: 'true',
+				updatedAt: '2026-04-13T00:00:00.000Z',
+			},
+			{
+				id: 'prompt-valid-old',
+				promptUuid: 'uuid-valid-old',
+				model: 'copilot/gpt-4o',
+				chatTarget: 'codex',
+				chatMode: 'plan',
+				autoStartChatWithXdotool: true,
+				updatedAt: '2026-04-11T00:00:00.000Z',
+			},
+		],
+	});
+
+	await (manager as any).openPrompt('');
+	const panel = (manager as any).resolveOpenEditorPanel('__prompt_editor_singleton__');
+	assert.ok(panel);
+
+	const bootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
+	await panel.emitMessage({ type: 'ready', bootId, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
+
+	const promptMessage = panel.postedMessages.find((message: any) => message?.type === 'prompt') as any;
+	assert.equal(promptMessage?.prompt?.model, '');
+	assert.equal(promptMessage?.prompt?.chatTarget, 'copilot');
+	assert.equal(promptMessage?.prompt?.chatMode, 'agent');
+	assert.equal(promptMessage?.prompt?.autoStartChatWithXdotool, false);
+	panel.dispose();
 });
 
 test('resolvePromptIdBase ignores report-only fallback', async () => {

@@ -163,6 +163,8 @@ const GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS = 250;
 const GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS = 250;
 const GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT = 4;
 const PROMPT_AGENT_JSON_SYNC_DEBOUNCE_MS = 300;
+/** Coalesce frequent autosave time writes before rebuilding the global activity widget. */
+const PROMPT_DASHBOARD_ACTIVITY_REFRESH_DEBOUNCE_MS = 500;
 const CODEX_TEMPORARY_CONTEXT_DELETE_DELAY_MS = 10 * 60 * 1000;
 const EDITOR_WEBVIEW_PROMPT_IDENTITY_STATE_KEY = 'pm.editor.promptIdentity';
 /** Give VS Code a short extra window to surface a late chat session before showing a timeout. */
@@ -256,6 +258,8 @@ export class EditorPanelManager {
 	private gitOverlayBuiltInRepositoryDisposables = new Map<string, vscode.Disposable>();
 	private gitOverlayReactiveSourcesReady: Promise<void> | null = null;
 	private agentProgressSyncTimer: NodeJS.Timeout | null = null;
+	/** Debounces global activity reads triggered by consecutive daily time writes. */
+	private promptDashboardActivityRefreshTimer: NodeJS.Timeout | null = null;
 	private openPromptQueue: Promise<void> | null = null;
 	private pendingOpenPromptTarget: PromptOpenTarget | null = null;
 	private openPromptRequestVersion = 0;
@@ -3881,6 +3885,9 @@ export class EditorPanelManager {
 		this.promptDashboardSectionOrderState = this.stateService.getPromptDashboardSectionOrder();
 
 		this.contentSyncDisposables.push(
+			this.storageService.onDidPromptDailyTimeChange(() => {
+				this.schedulePromptDashboardActivityAfterDailyTimeChange();
+			}),
 			vscode.window.onDidChangeActiveTextEditor(() => {
 				if (this.pendingGlobalAgentContextSync !== null) {
 					this.scheduleGlobalAgentContextSync(this.pendingGlobalAgentContextSync);
@@ -5051,6 +5058,84 @@ export class EditorPanelManager {
 		}
 
 		return requestPrompt;
+	}
+
+	/** Compare prompt identities before publishing a delayed dashboard widget snapshot. */
+	private isSamePromptIdentity(expectedPrompt: Prompt, currentPrompt: Prompt | undefined): boolean {
+		if (!currentPrompt) {
+			return false;
+		}
+
+		const expectedPromptUuid = (expectedPrompt.promptUuid || '').trim();
+		if (expectedPromptUuid) {
+			return expectedPromptUuid === (currentPrompt.promptUuid || '').trim();
+		}
+
+		return (expectedPrompt.id || '').trim() === (currentPrompt.id || '').trim();
+	}
+
+	/** Coalesce consecutive daily time writes before the activity widget reads every prompt file. */
+	private schedulePromptDashboardActivityAfterDailyTimeChange(): void {
+		if (this.isShuttingDown || this.isPromptDashboardWidgetCollapsed('activity')) {
+			return;
+		}
+		const hasVisiblePanel = [...this.panelPromptRefs.keys()]
+			.some(panelKey => this.resolveOpenEditorPanel(panelKey)?.visible === true);
+		if (!hasVisiblePanel) {
+			return;
+		}
+
+		if (this.promptDashboardActivityRefreshTimer) {
+			clearTimeout(this.promptDashboardActivityRefreshTimer);
+		}
+
+		this.promptDashboardActivityRefreshTimer = setTimeout(() => {
+			this.promptDashboardActivityRefreshTimer = null;
+			void this.refreshPromptDashboardActivityAfterDailyTimeChange();
+		}, PROMPT_DASHBOARD_ACTIVITY_REFRESH_DEBOUNCE_MS);
+		this.promptDashboardActivityRefreshTimer.unref?.();
+	}
+
+	/** Refresh only visible activity widgets after their persisted daily time becomes available. */
+	private async refreshPromptDashboardActivityAfterDailyTimeChange(): Promise<void> {
+		if (this.isShuttingDown || this.isPromptDashboardWidgetCollapsed('activity')) {
+			return;
+		}
+
+		for (const [panelKey, prompt] of this.panelPromptRefs.entries()) {
+			const panel = this.resolveOpenEditorPanel(panelKey);
+			if (!panel?.visible) {
+				continue;
+			}
+
+			try {
+				await this.promptDashboardService.refreshWidgetSnapshot(
+					prompt,
+					'activity',
+					(message) => {
+						const currentPanel = this.resolveOpenEditorPanel(panelKey);
+						const currentPrompt = this.panelPromptRefs.get(panelKey);
+						if (
+							currentPanel !== panel
+							|| !panel.visible
+							|| this.isPromptDashboardWidgetCollapsed('activity')
+							|| !this.isSamePromptIdentity(prompt, currentPrompt)
+						) {
+							return;
+						}
+						void panel.webview.postMessage(message as ExtensionToWebviewMessage);
+					},
+					undefined,
+					undefined,
+					{ showLoadingState: false },
+				);
+			} catch (error) {
+				this.hooksOutput.appendLine(
+					`[dashboard-refresh] panel=${panelKey} activity failed: `
+					+ `${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
 	}
 
 	/** Pushes a fresh dashboard projects widget into one visible prompt editor panel. */
@@ -7327,7 +7412,7 @@ export class EditorPanelManager {
 		return saved;
 	}
 
-	/** Reuse the most recent prompt selections when creating a new draft prompt. */
+	/** Reuse non-task prompt selections from the latest saved prompt when creating a new draft. */
 	private async applyRecentPromptDefaults(prompt: Prompt): Promise<void> {
 		const promptConfigs = await this.storageService.listPrompts();
 		const lastPromptConfig = [...promptConfigs]
@@ -7341,7 +7426,22 @@ export class EditorPanelManager {
 		prompt.skills = [...(lastPromptConfig.skills || [])];
 		prompt.mcpTools = [...(lastPromptConfig.mcpTools || [])];
 		prompt.hooks = [...(lastPromptConfig.hooks || [])];
-		prompt.model = lastPromptConfig.model || '';
+
+		// Legacy configs can miss chat-launch fields, so invalid values leave new-prompt defaults untouched.
+		if (lastPromptConfig.chatTarget === 'kilo'
+			|| lastPromptConfig.chatTarget === 'codex'
+			|| lastPromptConfig.chatTarget === 'copilot') {
+			prompt.chatTarget = lastPromptConfig.chatTarget;
+		}
+		if (typeof lastPromptConfig.model === 'string') {
+			prompt.model = lastPromptConfig.model.trim();
+		}
+		if (lastPromptConfig.chatMode === 'agent' || lastPromptConfig.chatMode === 'plan') {
+			prompt.chatMode = lastPromptConfig.chatMode;
+		}
+		if (typeof lastPromptConfig.autoStartChatWithXdotool === 'boolean') {
+			prompt.autoStartChatWithXdotool = lastPromptConfig.autoStartChatWithXdotool;
+		}
 	}
 
 	private async processPendingOpenPromptRequests(): Promise<void> {
@@ -12196,6 +12296,10 @@ export class EditorPanelManager {
 		if (this.agentProgressSyncTimer) {
 			clearTimeout(this.agentProgressSyncTimer);
 			this.agentProgressSyncTimer = null;
+		}
+		if (this.promptDashboardActivityRefreshTimer) {
+			clearTimeout(this.promptDashboardActivityRefreshTimer);
+			this.promptDashboardActivityRefreshTimer = null;
 		}
 		this.pendingGlobalAgentContextSync = null;
 		this.isGlobalAgentContextSyncInProgress = false;

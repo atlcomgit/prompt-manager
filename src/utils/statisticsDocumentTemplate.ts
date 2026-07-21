@@ -1,5 +1,7 @@
 import {
+	buildStatisticsExportSubtitle,
 	buildStatisticsMarkdownWithReport,
+	formatStatisticsExportPeriod,
 	normalizeStatisticsExportDisplayOptions,
 	buildStatisticsWordSection,
 	formatStatisticsExportNumber,
@@ -17,6 +19,7 @@ export interface StatisticsExportDocumentRow {
 
 const DEFAULT_EXPORT_HOURLY_RATE = 1743;
 
+/** Escape text before inserting it into generated statistics HTML. */
 function escapeHtml(value: string): string {
 	return value
 		.replace(/&/g, '&amp;')
@@ -26,6 +29,7 @@ function escapeHtml(value: string): string {
 		.replace(/'/g, '&#39;');
 }
 
+/** Resolve the hourly rate used for amount calculations in export documents. */
 function resolveExportHourlyRate(hourlyRate: number | undefined): number {
 	if (typeof hourlyRate !== 'number' || !Number.isFinite(hourlyRate) || hourlyRate < 0) {
 		return DEFAULT_EXPORT_HOURLY_RATE;
@@ -34,43 +38,42 @@ function resolveExportHourlyRate(hourlyRate: number | undefined): number {
 	return hourlyRate;
 }
 
+/** Calculate one row amount from its hours and the resolved hourly rate. */
 function calculateExportRowAmount(hours: number, hourlyRate: number): number {
 	return (Number.isFinite(hours) ? hours : 0) * resolveExportHourlyRate(hourlyRate);
 }
 
+/** Resolve explicit or inferred visibility flags for document renderers. */
 function resolveStatisticsDocumentDisplayOptions(
 	totalHours: number,
 	hourlyRate: number | undefined,
 	options?: StatisticsExportDisplayOptions,
-): { showHours: boolean; showCost: boolean } {
+): StatisticsExportDisplayOptions & { showHours: boolean; showCost: boolean } {
 	const inferredShowHours = Number.isFinite(totalHours) && totalHours > 0;
-	const inferredShowCost = inferredShowHours && typeof hourlyRate === 'number' && Number.isFinite(hourlyRate) && hourlyRate > 0;
-
-	return normalizeStatisticsExportDisplayOptions({
+	const inferredShowCost = inferredShowHours
+		&& typeof hourlyRate === 'number'
+		&& Number.isFinite(hourlyRate)
+		&& hourlyRate > 0;
+	const normalizedOptions = normalizeStatisticsExportDisplayOptions({
 		showHours: options?.showHours ?? inferredShowHours,
 		showCost: options?.showCost ?? inferredShowCost,
 	});
+
+	return {
+		...options,
+		...normalizedOptions,
+	};
 }
 
+/** Build localized text labels used by HTML statistics documents. */
 function buildLabels(
 	locale: string,
-	formattedTotalHours: string,
-	formattedHourlyRate: string,
+	totalHours: number,
+	hourlyRate: number,
 	displayOptions: StatisticsExportDisplayOptions,
 ) {
 	const isRu = locale.toLowerCase().startsWith('ru');
-	const { showHours, showCost } = normalizeStatisticsExportDisplayOptions(displayOptions);
-	const subtitle = showHours && showCost
-		? (isRu
-			? `Сводный отчёт с пропорциональным распределением до ${formattedTotalHours} часов по ставке ${formattedHourlyRate}`
-			: `Summary report with proportional distribution to ${formattedTotalHours} hours at a ${formattedHourlyRate} hourly rate`)
-		: showHours
-			? (isRu
-				? `Сводный отчёт с пропорциональным распределением до ${formattedTotalHours} часов.`
-				: `Summary report with proportional distribution to ${formattedTotalHours} hours.`)
-			: (isRu
-				? 'Сводный отчёт по выбранным задачам.'
-				: 'Summary report for selected tasks.');
+	const subtitle = buildStatisticsExportSubtitle(totalHours, hourlyRate, locale, displayOptions);
 
 	return {
 		isRu,
@@ -78,6 +81,10 @@ function buildLabels(
 		title: isRu ? 'Отчёт по статистике' : 'Statistics Report',
 		subtitle,
 		generated: isRu ? 'Сформировано' : 'Generated',
+		period: isRu ? 'Период' : 'Period',
+		mode: isRu ? 'Режим часов' : 'Hours mode',
+		actualMode: isRu ? 'Фактические' : 'Actual',
+		scaledMode: isRu ? 'Масштабирование' : 'Scaled',
 		total: isRu ? 'Итого часов' : 'Total hours',
 		rate: isRu ? 'Ставка часа' : 'Hourly rate',
 		totalAmount: isRu ? 'Итоговая сумма' : 'Total amount',
@@ -91,6 +98,7 @@ function buildLabels(
 	};
 }
 
+/** Build a localized generation timestamp for export metadata. */
 function buildFormattedDate(locale: string, isRu: boolean): string {
 	return new Date().toLocaleString(isRu ? 'ru-RU' : 'en-US', {
 		year: 'numeric',
@@ -101,6 +109,7 @@ function buildFormattedDate(locale: string, isRu: boolean): string {
 	});
 }
 
+/** Build the embedded CSS used by HTML export documents and previews. */
 function buildStatisticsDocumentStyles(): string {
 	return `
 		:root {
@@ -173,12 +182,13 @@ function buildStatisticsDocumentStyles(): string {
 
 		.pm-stats-export-meta {
 			display: grid;
-			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+			grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
 			gap: 12px;
 			padding: 24px 36px 0;
 		}
 
 		.pm-stats-export-meta-card {
+			min-width: 0;
 			padding: 18px 20px;
 			border-radius: 10px;
 			background: var(--panel);
@@ -193,12 +203,17 @@ function buildStatisticsDocumentStyles(): string {
 			letter-spacing: 0.08em;
 			color: var(--muted);
 			margin-bottom: 8px;
+			overflow-wrap: anywhere;
 		}
 
 		.pm-stats-export-meta-value {
 			display: block;
-			font-size: 28px;
+			min-width: 0;
+			font-size: 19px;
 			font-weight: 700;
+			line-height: 1.25;
+			overflow-wrap: anywhere;
+			word-break: break-word;
 		}
 
 		.pm-stats-export-table-wrap {
@@ -344,6 +359,7 @@ function buildStatisticsDocumentStyles(): string {
 	`;
 }
 
+/** Build the shared body markup used by HTML documents and webview previews. */
 function buildStatisticsDocumentMarkup(
 	rows: StatisticsExportDocumentRow[],
 	totalHours: number,
@@ -359,8 +375,9 @@ function buildStatisticsDocumentMarkup(
 	const formattedHourlyRate = formatStatisticsExportNumber(exportHourlyRate, locale);
 	const formattedTotalHours = formatStatisticsExportNumber(totalHours, locale);
 	const formattedTotalAmount = formatStatisticsExportNumber(totalAmount, locale);
-	const labels = buildLabels(locale, formattedTotalHours, formattedHourlyRate, resolvedDisplayOptions);
+	const labels = buildLabels(locale, totalHours, exportHourlyRate, resolvedDisplayOptions);
 	const formattedDate = buildFormattedDate(locale, labels.isRu);
+	const formattedPeriod = formatStatisticsExportPeriod(resolvedDisplayOptions.period, locale);
 	const tableRows = rows.map((row, index) => {
 		const zebraClass = index % 2 === 0 ? 'pm-stats-export-row-even' : 'pm-stats-export-row-odd';
 		const amount = formatStatisticsExportNumber(calculateExportRowAmount(row.hours, exportHourlyRate), locale);
@@ -368,8 +385,12 @@ function buildStatisticsDocumentMarkup(
 			`<tr class="${zebraClass}">`,
 			`<td class="pm-stats-export-col-task">${escapeHtml(row.taskNumber || '—')}</td>`,
 			`<td class="pm-stats-export-col-title">${escapeHtml(row.title)}</td>`,
-			...(includeReport ? [`<td class="pm-stats-export-col-report">${escapeHtml(row.reportSummary || '—')}</td>`] : []),
-			...(showHours ? [`<td class="pm-stats-export-col-hours">${escapeHtml(formatStatisticsExportNumber(row.hours, locale))}</td>`] : []),
+			...(includeReport
+				? [`<td class="pm-stats-export-col-report">${escapeHtml(row.reportSummary || '—')}</td>`]
+				: []),
+			...(showHours
+				? [`<td class="pm-stats-export-col-hours">${escapeHtml(formatStatisticsExportNumber(row.hours, locale))}</td>`]
+				: []),
 			...(showCost ? [`<td class="pm-stats-export-col-amount">${escapeHtml(amount)}</td>`] : []),
 			'</tr>',
 		].join('');
@@ -384,12 +405,28 @@ function buildStatisticsDocumentMarkup(
 			<span class="pm-stats-export-meta-value">${rows.length}</span>
 		</div>`,
 	];
+	if (formattedPeriod) {
+		metaCards.push(`
+			<div class="pm-stats-export-meta-card">
+				<span class="pm-stats-export-meta-label">${escapeHtml(labels.period)}</span>
+				<span class="pm-stats-export-meta-value">${escapeHtml(formattedPeriod)}</span>
+			</div>
+		`.trim());
+	}
 
 	if (showHours) {
 		metaCards.push(`
 			<div class="pm-stats-export-meta-card">
 				<span class="pm-stats-export-meta-label">${escapeHtml(labels.total)}</span>
 				<span class="pm-stats-export-meta-value">${escapeHtml(formattedTotalHours)}</span>
+			</div>
+		`.trim());
+		metaCards.push(`
+			<div class="pm-stats-export-meta-card">
+				<span class="pm-stats-export-meta-label">${escapeHtml(labels.mode)}</span>
+				<span class="pm-stats-export-meta-value">
+					${escapeHtml(resolvedDisplayOptions.hoursMode === 'actual' ? labels.actualMode : labels.scaledMode)}
+				</span>
 			</div>
 		`.trim());
 	}
@@ -459,6 +496,7 @@ function buildStatisticsDocumentMarkup(
 	};
 }
 
+/** Escape Markdown table cells without changing already formatted numbers. */
 function escapeMarkdownCell(value: string): string {
 	return value
 		.replace(/\|/g, '\\|')
@@ -466,10 +504,12 @@ function escapeMarkdownCell(value: string): string {
 		.trim();
 }
 
+/** Pad a Markdown table cell according to the target alignment. */
 function padMarkdownCell(value: string, width: number, align: 'left' | 'right' = 'left'): string {
 	return align === 'right' ? value.padStart(width, ' ') : value.padEnd(width, ' ');
 }
 
+/** Build a complete HTML statistics export document. */
 export function buildStatisticsExportHtmlDocument(
 	rows: StatisticsExportDocumentRow[],
 	totalHours: number,
@@ -478,7 +518,14 @@ export function buildStatisticsExportHtmlDocument(
 	hourlyRate: number,
 	displayOptions?: StatisticsExportDisplayOptions,
 ): string {
-	const { lang, title, markup } = buildStatisticsDocumentMarkup(rows, totalHours, locale, includeReport, hourlyRate, displayOptions);
+	const { lang, title, markup } = buildStatisticsDocumentMarkup(
+		rows,
+		totalHours,
+		locale,
+		includeReport,
+		hourlyRate,
+		displayOptions,
+	);
 	const styles = buildStatisticsDocumentStyles();
 	return `<!DOCTYPE html>
 <html lang="${lang}">
@@ -494,6 +541,7 @@ export function buildStatisticsExportHtmlDocument(
 </html>`;
 }
 
+/** Build the HTML statistics export preview shown inside the webview. */
 export function buildStatisticsExportHtmlPreview(
 	rows: StatisticsExportDocumentRow[],
 	totalHours: number,
@@ -506,6 +554,7 @@ export function buildStatisticsExportHtmlPreview(
 	return `<style>${buildStatisticsDocumentStyles()}</style>${markup}`;
 }
 
+/** Build the Markdown statistics export document. */
 export function buildStatisticsExportMarkdownDocument(
 	rows: StatisticsExportDocumentRow[],
 	totalHours: number,
@@ -528,7 +577,12 @@ export function buildStatisticsExportMarkdownDocument(
 
 	const isRu = locale.toLowerCase().startsWith('ru');
 	const title = isRu ? '# Отчёт по статистике' : '# Statistics Report';
+	const subtitle = buildStatisticsExportSubtitle(totalHours, exportHourlyRate, locale, resolvedDisplayOptions);
 	const generatedLabel = isRu ? 'Сформировано' : 'Generated';
+	const periodLabel = isRu ? 'Период' : 'Period';
+	const modeLabel = isRu ? 'Режим часов' : 'Hours mode';
+	const actualModeLabel = isRu ? 'фактические часы' : 'actual hours';
+	const scaledModeLabel = isRu ? 'масштабирование' : 'scaled hours';
 	const totalLabel = isRu ? 'Итого часов' : 'Total hours';
 	const hourlyRateLabel = isRu ? 'Ставка часа' : 'Hourly rate';
 	const totalAmountLabel = isRu ? 'Итоговая сумма' : 'Total amount';
@@ -537,10 +591,17 @@ export function buildStatisticsExportMarkdownDocument(
 	const hoursLabel = isRu ? 'Часы' : 'Hours';
 	const amountLabel = isRu ? 'Сумма' : 'Amount';
 	const formattedDate = buildFormattedDate(locale, isRu);
+	const formattedPeriod = formatStatisticsExportPeriod(resolvedDisplayOptions.period, locale);
 	const summaryLines = [`- ${generatedLabel}: ${formattedDate}`];
+	if (formattedPeriod) {
+		summaryLines.push(`- ${periodLabel}: ${formattedPeriod}`);
+	}
 
 	if (showHours) {
 		summaryLines.push(`- ${totalLabel}: ${formattedTotalHours}`);
+		summaryLines.push(
+			`- ${modeLabel}: ${resolvedDisplayOptions.hoursMode === 'actual' ? actualModeLabel : scaledModeLabel}`,
+		);
 	}
 
 	if (showCost) {
@@ -565,8 +626,12 @@ export function buildStatisticsExportMarkdownDocument(
 	}> = [
 			{ key: 'taskNumber', label: taskNumberLabel, align: 'left', totalValue: totalTaskLabel },
 			{ key: 'title', label: titleLabel, align: 'left', totalValue: '' },
-			...(showHours ? [{ key: 'hours', label: hoursLabel, align: 'right', totalValue: totalHoursLabel } as const] : []),
-			...(showCost ? [{ key: 'amount', label: amountLabel, align: 'right', totalValue: totalAmountRowLabel } as const] : []),
+			...(showHours
+				? [{ key: 'hours', label: hoursLabel, align: 'right', totalValue: totalHoursLabel } as const]
+				: []),
+			...(showCost
+				? [{ key: 'amount', label: amountLabel, align: 'right', totalValue: totalAmountRowLabel } as const]
+				: []),
 		];
 	const widths = Object.fromEntries(columns.map((column) => [
 		column.key,
@@ -577,7 +642,9 @@ export function buildStatisticsExportMarkdownDocument(
 		),
 	])) as Record<'taskNumber' | 'title' | 'hours' | 'amount', number>;
 	const formatMarkdownRow = (row: Record<'taskNumber' | 'title' | 'hours' | 'amount', string>): string => (
-		`| ${columns.map((column) => padMarkdownCell(String(row[column.key] || ''), widths[column.key], column.align)).join(' | ')} |`
+		`| ${columns.map((column) => (
+			padMarkdownCell(String(row[column.key] || ''), widths[column.key], column.align)
+		)).join(' | ')} |`
 	);
 	const separator = `| ${columns.map((column) => (
 		column.align === 'right'
@@ -608,6 +675,7 @@ export function buildStatisticsExportMarkdownDocument(
 
 	return [
 		title,
+		`> ${subtitle}`,
 		'',
 		...summaryLines,
 		'',

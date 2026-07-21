@@ -1,3 +1,25 @@
+## 161: Отчёты, автосохранение и обновление времени
+
+- Дата: 2026-07-22.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Отчёты статистики показывают фактические часы и выбранный период, длинные значения остаются внутри адаптивных карточек HTML, новые промпты получают последние настройки запуска чата, а время в активных промптах обновляется после сохранения.
+- Ключевые моменты: Явный ноль часов сохраняет режим без часов и стоимости; пустое поле при выбранном периоде использует фактическое дневное время после текущего отбора по дате последнего изменения; строки без дневной истории периода исключаются; карточки метаданных используют более широкую адаптивную сетку, допускают сжатие и перенос непрерывных значений; фоновые записи времени выполняются последовательно и после завершения обновляют только видимый блок активности с объединением частых сохранений.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/providers/editorPanelManager.ts
+  src/providers/statisticsPanelManager.ts
+  src/services/promptDashboardService.ts
+  src/services/storageService.ts
+  src/types/messages.ts
+  src/utils/statisticsDocumentTemplate.ts
+  src/utils/statisticsExport.ts
+  src/webview/statistics/StatisticsApp.tsx
+  tests/editorPanelManager.test.ts
+  tests/statisticsExport.test.ts
+  tests/storageServiceStatistics.test.ts
+
 ## 160: Рефакторинг UI Docker контейнеров
 
 - Дата: 2026-07-21.

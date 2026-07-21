@@ -52,10 +52,36 @@ export interface ExternalPromptConfigChange {
 	externalChangedAt: number | null;
 }
 
+/** Identifies a prompt whose daily time file was updated successfully. */
+export interface PromptDailyTimeChangeEvent {
+	/** Current prompt folder identifier written by the save flow. */
+	id: string;
+	/** Stable prompt identity used when the folder identifier changes. */
+	promptUuid?: string;
+	/** Whether the updated daily time file belongs to archived storage. */
+	archived: boolean;
+}
+
 interface PromptStorageLocation {
 	id: string;
 	archived: boolean;
 	dirPath: string;
+}
+
+/** Daily time summary for a prompt inside the selected statistics period. */
+interface StatisticsPromptDailyTimeSummary {
+	/** Prompt metadata retained after the current updatedAt filter. */
+	prompt: PromptConfig;
+	/** Prompt-writing time tracked inside the selected period. */
+	writing: number;
+	/** Chat implementation time tracked inside the selected period. */
+	implementing: number;
+	/** Direct task work time tracked inside the selected period. */
+	onTask: number;
+	/** Additional time tracked inside the selected period. */
+	untracked: number;
+	/** Combined tracked time inside the selected period. */
+	total: number;
 }
 
 export class StorageService implements vscode.Disposable {
@@ -76,6 +102,10 @@ export class StorageService implements vscode.Disposable {
 	private _listCache: PromptConfig[] | null = null;
 	private _backgroundRefreshCancelled = false;
 	private readonly _onDidExternalPromptConfigChange = new vscode.EventEmitter<ExternalPromptConfigChange[]>();
+	/** Publishes completed daily time writes to dashboard consumers. */
+	private readonly _onDidPromptDailyTimeChange = new vscode.EventEmitter<PromptDailyTimeChangeEvent>();
+	/** Serializes read-modify-write operations for each prompt daily time file. */
+	private readonly dailyTimeWriteQueueByPromptKey = new Map<string, Promise<void>>();
 	private promptConfigWatcher: vscode.FileSystemWatcher | null = null;
 	private promptConfigWatcherDisposables: vscode.Disposable[] = [];
 	private externalConfigChangeTimer: NodeJS.Timeout | null = null;
@@ -89,6 +119,8 @@ export class StorageService implements vscode.Disposable {
 	}
 
 	public readonly onDidExternalPromptConfigChange = this._onDidExternalPromptConfigChange.event;
+	/** Notifies consumers only after the prompt daily time file has been written. */
+	public readonly onDidPromptDailyTimeChange = this._onDidPromptDailyTimeChange.event;
 
 	constructor(private readonly workspaceRoot: string) {
 		this.initializePromptConfigWatcher();
@@ -1300,10 +1332,10 @@ export class StorageService implements vscode.Disposable {
 			}
 		}
 
-		// Обновление daily time в фоне — не блокирует save
+		// Daily time stays off the visible save path and is serialized per prompt to avoid lost deltas.
 		if (existingPrompt) {
 			this.scheduleBackgroundStorageTask(
-				() => this.updateDailyTime(prompt.id, existingPrompt, prompt, targetArchived),
+				() => this.enqueueDailyTimeUpdate(prompt.id, existingPrompt, prompt, targetArchived),
 				canSkipStableStructureChecks ? 1000 : 0,
 			);
 		}
@@ -1462,7 +1494,30 @@ export class StorageService implements vscode.Disposable {
 		}
 	}
 
-	/** Update daily time tracking: compute deltas and add to today's entry */
+	/** Serialize daily time updates for one prompt before reading and writing its shared JSON file. */
+	private enqueueDailyTimeUpdate(
+		promptId: string,
+		oldPrompt: PromptConfig,
+		newPrompt: Prompt,
+		archived: boolean,
+	): Promise<void> {
+		const promptKey = (newPrompt.promptUuid || '').trim() || promptId;
+		const previousUpdate = this.dailyTimeWriteQueueByPromptKey.get(promptKey) || Promise.resolve();
+		const nextUpdate = previousUpdate
+			.catch(() => { })
+			.then(() => this.updateDailyTime(promptId, oldPrompt, newPrompt, archived));
+
+		this.dailyTimeWriteQueueByPromptKey.set(promptKey, nextUpdate);
+		void nextUpdate.finally(() => {
+			if (this.dailyTimeWriteQueueByPromptKey.get(promptKey) === nextUpdate) {
+				this.dailyTimeWriteQueueByPromptKey.delete(promptKey);
+			}
+		}).catch(() => { });
+
+		return nextUpdate;
+	}
+
+	/** Update daily time tracking, then notify observers after the file is durable. */
 	private async updateDailyTime(promptId: string, oldPrompt: PromptConfig, newPrompt: Prompt, archived: boolean = false): Promise<void> {
 		const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 
@@ -1492,23 +1547,64 @@ export class StorageService implements vscode.Disposable {
 			vscode.Uri.file(filePath),
 			Buffer.from(JSON.stringify(dailyData, null, 2), 'utf-8')
 		);
+
+		this._onDidPromptDailyTimeChange.fire({
+			id: promptId,
+			promptUuid: (newPrompt.promptUuid || '').trim() || undefined,
+			archived,
+		});
 	}
 
 	/** Get total time from daily data within a date range */
 	getDailyTimeTotalInRange(dailyData: DailyTimeData, dateFrom: string, dateTo: string): number {
-		let total = 0;
+		return this.getDailyTimeSummaryInRange(dailyData, dateFrom, dateTo).total;
+	}
+
+	/** Get categorized daily time totals from daily data within a date range. */
+	private getDailyTimeSummaryInRange(
+		dailyData: DailyTimeData,
+		dateFrom: string,
+		dateTo: string,
+	): Omit<StatisticsPromptDailyTimeSummary, 'prompt'> {
+		const summary = {
+			writing: 0,
+			implementing: 0,
+			onTask: 0,
+			untracked: 0,
+			total: 0,
+		};
+
 		for (const [date, entry] of Object.entries(dailyData)) {
 			if (date >= dateFrom && date <= dateTo) {
-				total += (entry.writing || 0) + (entry.implementing || 0) + (entry.onTask || 0) + (entry.untracked || 0);
+				summary.writing += entry.writing || 0;
+				summary.implementing += entry.implementing || 0;
+				summary.onTask += entry.onTask || 0;
+				summary.untracked += entry.untracked || 0;
 			}
 		}
-		return total;
+
+		summary.total = summary.writing + summary.implementing + summary.onTask + summary.untracked;
+		return summary;
+	}
+
+	/** Read daily-time.json once per prompt and attach period totals for statistics filters. */
+	private async getPromptDailyTimeSummariesInRange(
+		prompts: PromptConfig[],
+		dateFrom: string,
+		dateTo: string,
+	): Promise<StatisticsPromptDailyTimeSummary[]> {
+		return Promise.all(prompts.map(async (prompt) => {
+			const dailyData = await this.getDailyTime(prompt.id);
+			const summary = this.getDailyTimeSummaryInRange(dailyData, dateFrom, dateTo);
+			return { prompt, ...summary };
+		}));
 	}
 
 	/** Compute statistics across all prompts, optionally filtered by date range */
 	async getStatistics(filter?: { dateFrom?: string; dateTo?: string; minFiveMin?: boolean }): Promise<PromptStatistics> {
 		let prompts = await this.listPrompts({ includeArchived: true });
 		const hasDateRange = filter?.dateFrom && filter?.dateTo;
+		let periodDailySummaries: StatisticsPromptDailyTimeSummary[] | null = null;
 
 		// Filter by updatedAt within date range
 		if (hasDateRange) {
@@ -1516,21 +1612,23 @@ export class StorageService implements vscode.Disposable {
 				const dateStr = p.updatedAt.slice(0, 10); // YYYY-MM-DD
 				return dateStr >= filter.dateFrom! && dateStr <= filter.dateTo!;
 			});
+
+			// Period statistics are based only on prompts that have tracked daily time in range.
+			periodDailySummaries = (await this.getPromptDailyTimeSummariesInRange(
+				prompts,
+				filter.dateFrom!,
+				filter.dateTo!,
+			)).filter(summary => summary.total > 0);
+			prompts = periodDailySummaries.map(summary => summary.prompt);
 		}
 
-		// Filter by ≥5 min total daily time in date range (from daily-time.json)
-		if (filter?.minFiveMin && hasDateRange) {
+		// Filter by ≥5 min total daily time in date range without re-reading daily-time.json.
+		if (filter?.minFiveMin && periodDailySummaries) {
 			const MIN_TIME_MS = 5 * 60 * 1000; // 5 minutes
-			const filtered: PromptConfig[] = [];
-			for (const p of prompts) {
-				const dailyData = await this.getDailyTime(p.id);
-				const totalInRange = this.getDailyTimeTotalInRange(dailyData, filter.dateFrom!, filter.dateTo!);
-				if (totalInRange >= MIN_TIME_MS) {
-					filtered.push(p);
-				}
-			}
-			prompts = filtered;
+			periodDailySummaries = periodDailySummaries.filter(summary => summary.total >= MIN_TIME_MS);
+			prompts = periodDailySummaries.map(summary => summary.prompt);
 		}
+		const periodDailySummaryById = new Map((periodDailySummaries || []).map(summary => [summary.prompt.id, summary]));
 
 		const byStatus: Record<PromptStatus, number> = {
 			draft: 0,
@@ -1551,10 +1649,11 @@ export class StorageService implements vscode.Disposable {
 		for (const p of prompts) {
 			byStatus[p.status] = (byStatus[p.status] || 0) + 1;
 			if (p.favorite) favoriteCount++;
-			totalTimeWriting += p.timeSpentWriting || 0;
-			totalTimeImplementing += p.timeSpentImplementing || 0;
-			totalTimeOnTask += p.timeSpentOnTask || 0;
-			totalTimeUntracked += p.timeSpentUntracked || 0;
+			const periodSummary = periodDailySummaryById.get(p.id);
+			totalTimeWriting += periodSummary?.writing ?? (p.timeSpentWriting || 0);
+			totalTimeImplementing += periodSummary?.implementing ?? (p.timeSpentImplementing || 0);
+			totalTimeOnTask += periodSummary?.onTask ?? (p.timeSpentOnTask || 0);
+			totalTimeUntracked += periodSummary?.untracked ?? (p.timeSpentUntracked || 0);
 		}
 
 		const totalTime = totalTimeWriting + totalTimeImplementing + totalTimeOnTask + totalTimeUntracked;
@@ -1570,16 +1669,25 @@ export class StorageService implements vscode.Disposable {
 			return fullPrompt || ({ ...createDefaultPrompt(promptConfig.id), ...promptConfig } as Prompt);
 		}));
 
-		const reportRows = reportRowPrompts.map(p => ({
-			taskNumber: p.taskNumber || '',
-			title: p.title || p.id,
-			timeWriting: p.timeSpentWriting || 0,
-			timeImplementing: p.timeSpentImplementing || 0,
-			timeOnTask: p.timeSpentOnTask || 0,
-			totalTime: (p.timeSpentWriting || 0) + (p.timeSpentImplementing || 0) + (p.timeSpentOnTask || 0) + (p.timeSpentUntracked || 0),
-			status: p.status,
-			reportSummary: summarizePromptReport(p.report || ''),
-		}));
+		const reportRows = reportRowPrompts.map(p => {
+			// Period summary keeps report rows aligned with the aggregated statistics totals.
+			const periodSummary = periodDailySummaryById.get(p.id);
+			const fallbackTotalTime = (p.timeSpentWriting || 0)
+				+ (p.timeSpentImplementing || 0)
+				+ (p.timeSpentOnTask || 0)
+				+ (p.timeSpentUntracked || 0);
+
+			return {
+				taskNumber: p.taskNumber || '',
+				title: p.title || p.id,
+				timeWriting: periodSummary?.writing ?? (p.timeSpentWriting || 0),
+				timeImplementing: periodSummary?.implementing ?? (p.timeSpentImplementing || 0),
+				timeOnTask: periodSummary?.onTask ?? (p.timeSpentOnTask || 0),
+				totalTime: periodSummary?.total ?? fallbackTotalTime,
+				status: p.status,
+				reportSummary: summarizePromptReport(p.report || ''),
+			};
+		});
 
 		return {
 			totalPrompts: prompts.length,
@@ -1780,6 +1888,7 @@ export class StorageService implements vscode.Disposable {
 	dispose(): void {
 		this.cancelBackgroundCacheRefresh();
 		this.clearExternalConfigChangeTimer();
+		this.dailyTimeWriteQueueByPromptKey.clear();
 		this.pendingExternalConfigChanges.clear();
 		for (const disposable of this.promptConfigWatcherDisposables) {
 			disposable.dispose();
@@ -1787,5 +1896,6 @@ export class StorageService implements vscode.Disposable {
 		this.promptConfigWatcherDisposables = [];
 		this.promptConfigWatcher = null;
 		this._onDidExternalPromptConfigChange.dispose();
+		this._onDidPromptDailyTimeChange.dispose();
 	}
 }

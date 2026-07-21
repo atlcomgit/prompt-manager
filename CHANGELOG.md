@@ -6,13 +6,21 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-07-22
+
+#### Fixed
+- HTML statistics metadata cards now keep hour mode, period, generated date, large hour totals, rates, and amounts inside their boundaries on wide and narrow documents.
+
 ### 2026-07-21
 
 #### Changed
 - The `Docker контейнеры` dashboard widget now moves every table-row command into a vertical-ellipsis menu so long names receive more space, collapses container, Compose, and declared-service cards to one lifecycle row, and renders CPU, RAM, and network history as three compact charts inside expanded list details while hidden metrics no longer keep live polling active.
+- Statistics exports now use actual tracked time for the selected period when `Hours` is blank, display that period in HTML and Markdown previews/exports, and preserve explicit positive scaling plus the existing zero-hours hidden mode.
+- Regular and Quick Add prompts now reuse every saved chat-launch field from the most recently updated prompt instead of carrying over only one field.
 
 #### Fixed
 - Docker table action menus now stay open while focus moves from the vertical-ellipsis trigger into the menu, close reliably after focus leaves, and no longer show a misleading non-interactive ellipsis in the table header. Menu commands now use VS Code-native hover, pressed, and keyboard-focus feedback while disabled commands remain visually inactive.
+- The `Активные промпты` widget now refreshes after the durable daily-time write completes, coalesces consecutive saves, and no longer rereads stale time immediately after prompt save.
 
 ### 2026-06-29
 

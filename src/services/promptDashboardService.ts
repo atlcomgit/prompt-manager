@@ -307,6 +307,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		postMessage?: DashboardPostMessage,
 		requestId?: string,
 		section?: PromptDashboardSectionKey,
+		options?: Pick<PromptDashboardRefreshOptions, 'showLoadingState'>,
 	): Promise<PromptDashboardWidgetSnapshot<unknown>> {
 		const scope = this.createScope(prompt);
 		this.activeScope = scope;
@@ -335,6 +336,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			force: true,
 			requestId,
 			prompt,
+			showLoadingState: options?.showLoadingState,
 		});
 		return this.buildWidgetFromCache(scope, widget, this.getCachedData(scope, widget) || this.placeholderForWidget(widget, prompt));
 	}

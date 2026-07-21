@@ -170,6 +170,10 @@ export type WebviewToExtensionMessage =
 		includeReport?: boolean;
 		showHours?: boolean;
 		showCost?: boolean;
+		/** actual uses reportRows totalTime; scaled uses the positive Hours input. */
+		hoursMode?: 'actual' | 'scaled';
+		/** Full date range displayed in generated statistics documents. */
+		period?: { dateFrom: string; dateTo: string };
 	}
 	| {
 		type: 'markDirty';

@@ -4,7 +4,27 @@ export interface StatisticsExportPeriodInput {
 	fallbackHours?: number;
 }
 
-export type StatisticsExportStatus = 'draft' | 'in-progress' | 'stopped' | 'cancelled' | 'completed' | 'report' | 'review' | 'closed';
+/** Prompt statuses accepted by statistics export rows. */
+export type StatisticsExportStatus =
+	| 'draft'
+	| 'in-progress'
+	| 'stopped'
+	| 'cancelled'
+	| 'completed'
+	| 'report'
+	| 'review'
+	| 'closed';
+
+/** Time calculation mode used by statistics export documents. */
+export type StatisticsExportHoursMode = 'actual' | 'scaled';
+
+/** Date range shown in statistics export documents. */
+export interface StatisticsExportPeriodRange {
+	/** Inclusive first date in YYYY-MM-DD format. */
+	dateFrom: string;
+	/** Inclusive last date in YYYY-MM-DD format. */
+	dateTo: string;
+}
 
 export interface StatisticsMarkdownExportRow {
 	taskNumber: string;
@@ -14,17 +34,37 @@ export interface StatisticsMarkdownExportRow {
 	status?: StatisticsExportStatus;
 }
 
+/** Source row used to convert tracked milliseconds into actual export hours. */
+export interface StatisticsActualExportSourceRow {
+	/** Optional task reference displayed in the report. */
+	taskNumber: string;
+	/** Prompt title displayed in the report. */
+	title: string;
+	/** Tracked duration converted from milliseconds to fractional hours. */
+	totalTime: number;
+	/** Compact completed-work text included in detailed reports. */
+	reportSummary?: string;
+	/** Prompt status converted to a report progress percentage. */
+	status?: StatisticsExportStatus;
+}
+
 export interface StatisticsWordExportRow {
 	taskNumber: string;
 	title: string;
 	hours: number;
 }
 
+/** Display and context options shared by all statistics export renderers. */
 export interface StatisticsExportDisplayOptions {
 	showHours?: boolean;
 	showCost?: boolean;
+	/** actual keeps tracked daily time; scaled distributes rows to the entered target. */
+	hoursMode?: StatisticsExportHoursMode;
+	/** Full selected period shown in HTML and Markdown export documents. */
+	period?: StatisticsExportPeriodRange;
 }
 
+/** Normalize optional visibility flags for all statistics export renderers. */
 export function normalizeStatisticsExportDisplayOptions(
 	options?: StatisticsExportDisplayOptions,
 ): { showHours: boolean; showCost: boolean } {
@@ -34,6 +74,7 @@ export function normalizeStatisticsExportDisplayOptions(
 	return { showHours, showCost };
 }
 
+/** Parse a date-only value without applying the local timezone. */
 function parseDateOnly(value?: string | null): Date | null {
 	if (!value) {
 		return null;
@@ -59,21 +100,25 @@ function parseDateOnly(value?: string | null): Date | null {
 	return parsed;
 }
 
+/** Check whether the date points to the first day of its UTC month. */
 function isFirstDayOfMonth(date: Date): boolean {
 	return date.getUTCDate() === 1;
 }
 
+/** Check whether the date points to the last day of its UTC month. */
 function isLastDayOfMonth(date: Date): boolean {
 	const lastDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0));
 	return date.getUTCDate() === lastDay.getUTCDate();
 }
 
+/** Count full calendar months covered by an inclusive date range. */
 function countInclusiveMonths(start: Date, end: Date): number {
 	return ((end.getUTCFullYear() - start.getUTCFullYear()) * 12)
 		+ (end.getUTCMonth() - start.getUTCMonth())
 		+ 1;
 }
 
+/** Count weekdays in an inclusive UTC date range. */
 function countWorkingDays(start: Date, end: Date): number {
 	let count = 0;
 	const cursor = new Date(start.getTime());
@@ -89,6 +134,7 @@ function countWorkingDays(start: Date, end: Date): number {
 	return count;
 }
 
+/** Calculate the default scaled export target for the selected statistics period. */
 export function calculateStatisticsExportTargetHours({
 	dateFrom,
 	dateTo,
@@ -112,10 +158,12 @@ export function calculateStatisticsExportTargetHours({
 	return countWorkingDays(start, end) * 8;
 }
 
+/** Resolve a compact locale supported by the statistics export formatters. */
 function resolveStatisticsLocale(locale: string): string {
 	return locale.toLowerCase().startsWith('ru') ? 'ru-RU' : 'en-US';
 }
 
+/** Format a number with locale-aware grouping and up to two fractional digits. */
 export function formatStatisticsExportNumber(value: number, locale: string): string {
 	const normalized = Number.isFinite(value) ? value : 0;
 	const hasFraction = Math.abs(normalized % 1) > 0.000001;
@@ -125,6 +173,83 @@ export function formatStatisticsExportNumber(value: number, locale: string): str
 	}).format(normalized);
 }
 
+/** Convert tracked report durations to fractional hours without proportional scaling. */
+export function buildStatisticsActualExportRows(
+	rows: StatisticsActualExportSourceRow[],
+): StatisticsMarkdownExportRow[] {
+	const hourMs = 1000 * 60 * 60;
+	return rows.map(row => ({
+		taskNumber: row.taskNumber || '—',
+		title: row.title,
+		hours: Number.isFinite(row.totalTime) && row.totalTime > 0 ? row.totalTime / hourMs : 0,
+		status: row.status,
+		reportSummary: row.reportSummary || '',
+	}));
+}
+
+/** Format a date range for statistics export subtitles and summary metadata. */
+export function formatStatisticsExportPeriod(
+	period: StatisticsExportPeriodRange | undefined,
+	locale: string,
+): string {
+	const start = parseDateOnly(period?.dateFrom);
+	const end = parseDateOnly(period?.dateTo);
+	if (!start || !end) {
+		return '';
+	}
+
+	const formatter = new Intl.DateTimeFormat(resolveStatisticsLocale(locale), {
+		timeZone: 'UTC',
+		year: 'numeric',
+		month: '2-digit',
+		day: '2-digit',
+	});
+	const formattedStart = formatter.format(start);
+	const formattedEnd = formatter.format(end);
+
+	return formattedStart === formattedEnd ? formattedStart : `${formattedStart} - ${formattedEnd}`;
+}
+
+/** Build the localized document subtitle for actual and scaled statistics export modes. */
+export function buildStatisticsExportSubtitle(
+	totalHours: number,
+	hourlyRate: number,
+	locale: string,
+	options: StatisticsExportDisplayOptions = {},
+): string {
+	const isRu = locale.toLowerCase().startsWith('ru');
+	const { showHours, showCost } = normalizeStatisticsExportDisplayOptions(options);
+	const formattedTotalHours = formatStatisticsExportNumber(totalHours, locale);
+	const formattedHourlyRate = formatStatisticsExportNumber(hourlyRate, locale);
+	const period = formatStatisticsExportPeriod(options.period, locale);
+	const periodText = period ? (isRu ? ` за период ${period}` : ` for ${period}`) : '';
+
+	if (!showHours) {
+		return isRu
+			? `Сводный отчёт${periodText} по выбранным задачам.`
+			: `Summary report${periodText} for selected tasks.`;
+	}
+
+	if (options.hoursMode === 'actual') {
+		return isRu
+			? `Сводный отчёт${periodText} по фактически учтённому времени: ${formattedTotalHours} часов.`
+			: `Summary report${periodText} with actual tracked time: ${formattedTotalHours} hours.`;
+	}
+
+	if (showCost) {
+		return isRu
+			? `Сводный отчёт${periodText} с пропорциональным распределением до ${formattedTotalHours} часов `
+				+ `по ставке ${formattedHourlyRate}.`
+			: `Summary report${periodText} with proportional distribution to ${formattedTotalHours} hours `
+				+ `at a ${formattedHourlyRate} hourly rate.`;
+	}
+
+	return isRu
+		? `Сводный отчёт${periodText} с пропорциональным распределением до ${formattedTotalHours} часов.`
+		: `Summary report${periodText} with proportional distribution to ${formattedTotalHours} hours.`;
+}
+
+/** Format a number for tab-separated Word-compatible export rows. */
 function formatStatisticsWordNumber(value: number, locale: string): string {
 	const normalized = Number.isFinite(value) ? value : 0;
 	const hasFraction = Math.abs(normalized % 1) > 0.000001;
@@ -135,6 +260,7 @@ function formatStatisticsWordNumber(value: number, locale: string): string {
 	}).format(normalized);
 }
 
+/** Sanitize text before placing it into tab-separated Word-compatible cells. */
 function sanitizeStatisticsWordCell(value: string): string {
 	return (value || '')
 		.replace(/\t+/g, ' ')
@@ -143,6 +269,7 @@ function sanitizeStatisticsWordCell(value: string): string {
 		.trim();
 }
 
+/** Build a tab-separated section that can be pasted into Word as a table. */
 export function buildStatisticsWordSection(
 	rows: StatisticsWordExportRow[],
 	hourlyRate: number,
@@ -199,6 +326,7 @@ export function buildStatisticsWordSection(
 	].join('\n');
 }
 
+/** Decode the small subset of HTML entities used in report summaries. */
 function decodeBasicHtmlEntities(value: string): string {
 	return value
 		.replace(/&nbsp;/gi, ' ')
@@ -209,6 +337,7 @@ function decodeBasicHtmlEntities(value: string): string {
 		.replace(/&#39;/gi, "'");
 }
 
+/** Normalize one report line before it is inserted into statistics exports. */
 function normalizeSummaryLine(value: string): string {
 	return decodeBasicHtmlEntities(value)
 		.replace(/`([^`]+)`/g, '$1')
@@ -220,6 +349,7 @@ function normalizeSummaryLine(value: string): string {
 		.trim();
 }
 
+/** Extract the user-facing completed-work section from a prompt report. */
 function extractDoneSection(text: string): string {
 	const preparedText = text
 		.replace(/\r/g, '')
@@ -228,11 +358,30 @@ function extractDoneSection(text: string): string {
 		.replace(/\n{2,}/g, '\n')
 		.trim();
 
-	const doneSectionMatch = /(?:^|\n)\s*(?:[-*+]\s*)?(?:\*\*|__)?(?:что\s+сделано|сделано|what\s+was\s+done)(?:\*\*|__)?\s*[:.]?\s*([\s\S]*?)(?=\n\s*(?:[-*+]\s*)?(?:\*\*|__)?(?:как\s+протестировать|особенности\s+реализации|примеры|how\s+to\s+test|implementation\s+details|examples)(?:\*\*|__)?\s*[:.]?|$)/i.exec(preparedText);
+	// The section detector is split into readable fragments to keep the export parser maintainable.
+	const headingPrefix = String.raw`\s*(?:[-*+]\s*)?(?:\*\*|__)?`;
+	const headingSuffix = String.raw`(?:\*\*|__)?\s*[:.]?`;
+	const doneHeading = String.raw`(?:что\s+сделано|сделано|what\s+was\s+done)`;
+	const nextHeading = String.raw`(?:как\s+протестировать|особенности\s+реализации|примеры|`
+		+ String.raw`how\s+to\s+test|implementation\s+details|examples)`;
+	const doneSectionPattern = new RegExp(
+		String.raw`(?:^|\n)`
+			+ headingPrefix
+			+ doneHeading
+			+ headingSuffix
+			+ String.raw`\s*([\s\S]*?)(?=\n`
+			+ headingPrefix
+			+ nextHeading
+			+ headingSuffix
+			+ String.raw`|$)`,
+		'i',
+	);
+	const doneSectionMatch = doneSectionPattern.exec(preparedText);
 	const candidate = doneSectionMatch?.[1] || preparedText;
 	return normalizeSummaryLine(candidate.replace(/\r?\n/g, ' '));
 }
 
+/** Summarize a prompt report for compact statistics export rows. */
 export function summarizePromptReport(report: string, maxLength: number = 500): string {
 	const normalized = extractDoneSection(decodeBasicHtmlEntities(
 		(report || '')
@@ -254,6 +403,7 @@ export function summarizePromptReport(report: string, maxLength: number = 500): 
 	return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+/** Map prompt statuses to progress percentages shown in report-based exports. */
 export function getStatisticsStatusPercent(status?: StatisticsExportStatus): number {
 	switch (status) {
 		case 'draft':
@@ -277,6 +427,7 @@ export function getStatisticsStatusPercent(status?: StatisticsExportStatus): num
 	}
 }
 
+/** Build a Markdown export where each prompt includes its report summary. */
 export function buildStatisticsMarkdownWithReport(
 	rows: StatisticsMarkdownExportRow[],
 	totalHours: number,
@@ -297,9 +448,19 @@ export function buildStatisticsMarkdownWithReport(
 	const statusLabel = isRu ? 'Статус' : 'Status';
 	const hoursLabel = isRu ? 'Часы' : 'Hours';
 	const amountLabel = isRu ? 'Сумма' : 'Amount';
+	const periodLabel = isRu ? 'Период' : 'Period';
+	const modeLabel = isRu ? 'Режим часов' : 'Hours mode';
+	const actualModeLabel = isRu ? 'фактические часы' : 'actual hours';
+	const scaledModeLabel = isRu ? 'масштабирование' : 'scaled hours';
 	const emptyValue = isRu ? '—' : '-';
-	const totalAmount = rows.reduce((sum, row) => sum + ((Number.isFinite(row.hours) ? row.hours : 0) * (Number.isFinite(hourlyRate) ? hourlyRate : 0)), 0);
+	const totalAmount = rows.reduce((sum, row) => {
+		const rowHours = Number.isFinite(row.hours) ? row.hours : 0;
+		const safeHourlyRate = Number.isFinite(hourlyRate) ? hourlyRate : 0;
+		return sum + (rowHours * safeHourlyRate);
+	}, 0);
 	const wordSection = buildStatisticsWordSection(rows, hourlyRate, locale, { showHours, showCost });
+	const subtitle = buildStatisticsExportSubtitle(totalHours, hourlyRate, locale, options);
+	const formattedPeriod = formatStatisticsExportPeriod(options.period, locale);
 	const formattedDate = new Date().toLocaleString(isRu ? 'ru-RU' : 'en-US', {
 		year: 'numeric',
 		month: '2-digit',
@@ -308,9 +469,14 @@ export function buildStatisticsMarkdownWithReport(
 		minute: '2-digit',
 	});
 	const summaryLines = [`- ${generatedLabel}: ${formattedDate}`];
+	if (formattedPeriod) {
+		summaryLines.push(`- ${periodLabel}: ${formattedPeriod}`);
+	}
 
 	if (showHours) {
 		summaryLines.push(`- ${totalLabel}: ${formatStatisticsExportNumber(totalHours, locale)}`);
+		const hoursModeLabel = options.hoursMode === 'actual' ? actualModeLabel : scaledModeLabel;
+		summaryLines.push(`- ${modeLabel}: ${hoursModeLabel}`);
 	}
 
 	if (showCost) {
@@ -346,6 +512,7 @@ export function buildStatisticsMarkdownWithReport(
 
 	return [
 		title,
+		`> ${subtitle}`,
 		'',
 		...summaryLines,
 		'',

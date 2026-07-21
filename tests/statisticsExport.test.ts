@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	buildStatisticsActualExportRows,
 	buildStatisticsWordSection,
 	buildStatisticsMarkdownWithReport,
 	calculateStatisticsExportTargetHours,
@@ -28,6 +29,27 @@ test('calculateStatisticsExportTargetHours multiplies 165 by count of full month
 
 test('calculateStatisticsExportTargetHours uses working days times eight for arbitrary range', () => {
 	assert.equal(calculateStatisticsExportTargetHours({ dateFrom: '2026-03-02', dateTo: '2026-03-06' }), 40);
+});
+
+/** Verify that actual export rows preserve fractional tracked hours without scaling. */
+test('buildStatisticsActualExportRows converts tracked milliseconds to fractional hours', () => {
+	const rows = buildStatisticsActualExportRows([
+		{
+			taskNumber: '161',
+			title: 'Фактические часы',
+			totalTime: 90 * 60 * 1000,
+			status: 'completed',
+			reportSummary: 'Готово.',
+		},
+	]);
+
+	assert.deepEqual(rows, [{
+		taskNumber: '161',
+		title: 'Фактические часы',
+		hours: 1.5,
+		status: 'completed',
+		reportSummary: 'Готово.',
+	}]);
 });
 
 test('summarizePromptReport strips html and limits output length', () => {
@@ -238,4 +260,100 @@ test('buildStatisticsExportMarkdownDocument hides hours and cost sections when t
 	assert.ok(!markdown.includes('Стоимость часа'));
 	assert.ok(!markdown.includes('Подготовить шаблон таблиц |    0'));
 	assert.ok(markdown.endsWith('\n'));
+});
+
+/** Verify actual-hour metadata and period text in compact Markdown exports. */
+test('buildStatisticsExportMarkdownDocument shows selected period and actual hours subtitle', () => {
+	const markdown = buildStatisticsExportMarkdownDocument([
+		{
+			taskNumber: '161',
+			title: 'Проверить фактические часы',
+			hours: 0.25,
+		},
+	], 0.25, 'ru', false, 1743, {
+		showHours: true,
+		showCost: false,
+		hoursMode: 'actual',
+		period: { dateFrom: '2026-07-01', dateTo: '2026-07-31' },
+	});
+
+	assert.match(markdown, /> Сводный отчёт за период .* по фактически учтённому времени: 0,25 часов\./);
+	assert.match(markdown, /- Период: /);
+	assert.match(markdown, /- Режим часов: фактические часы/);
+	assert.match(markdown, /\| 161/);
+	assert.match(markdown, /0,25/);
+});
+
+/** Verify period metadata remains visible when detailed report summaries are enabled. */
+test('buildStatisticsMarkdownWithReport keeps period metadata when report summaries are included', () => {
+	const markdown = buildStatisticsExportMarkdownDocument([
+		{
+			taskNumber: '161',
+			title: 'Проверить Markdown с отчётом',
+			hours: 8,
+			reportSummary: 'Добавлена проверка периода.',
+			status: 'review',
+		},
+	], 8, 'ru', true, 0, {
+		showHours: true,
+		showCost: false,
+		hoursMode: 'scaled',
+		period: { dateFrom: '2026-07-01', dateTo: '2026-07-02' },
+	});
+
+	assert.match(markdown, /> Сводный отчёт за период .* с пропорциональным распределением до 8 часов\./);
+	assert.match(markdown, /- Период: /);
+	assert.match(markdown, /- Режим часов: масштабирование/);
+	assert.match(markdown, /Что сделано: Добавлена проверка периода\./);
+});
+
+/** Verify period metadata and HTML escaping in the shared browser preview. */
+test('buildStatisticsExportHtmlPreview shows selected period and escapes row text', () => {
+	const html = buildStatisticsExportHtmlPreview([
+		{
+			taskNumber: '161',
+			title: '<script>alert(1)</script>',
+			hours: 1.5,
+			reportSummary: '<b>Готово</b>',
+		},
+	], 1.5, 'ru', true, 0, {
+		showHours: true,
+		showCost: false,
+		hoursMode: 'actual',
+		period: { dateFrom: '2026-07-01', dateTo: '2026-07-31' },
+	});
+
+	assert.match(html, /Период/);
+	assert.match(html, /Фактические/);
+	assert.match(html, /фактически учтённому времени: 1,50 часов/);
+	assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+	assert.ok(html.includes('&lt;b&gt;Готово&lt;/b&gt;'));
+	assert.ok(!html.includes('<script>alert(1)</script>'));
+});
+
+/** Verify that every HTML metadata card can shrink and wrap long localized values. */
+test('buildStatisticsExportHtmlPreview keeps long metadata values inside cards', () => {
+	const html = buildStatisticsExportHtmlPreview([
+		{
+			taskNumber: '161',
+			title: 'Проверить карточки метаданных',
+			hours: 123456789.25,
+		},
+	], 123456789.25, 'ru', false, 987654321.75, {
+		showHours: true,
+		showCost: true,
+		hoursMode: 'scaled',
+		period: { dateFrom: '2026-01-01', dateTo: '2026-12-31' },
+	});
+
+	assert.match(html, /grid-template-columns: repeat\(auto-fit, minmax\(min\(220px, 100%\), 1fr\)\)/);
+	assert.match(html, /\.pm-stats-export-meta-card\s*\{[^}]*min-width: 0/s);
+	assert.match(html, /\.pm-stats-export-meta-label\s*\{[^}]*overflow-wrap: anywhere/s);
+	assert.match(html, /\.pm-stats-export-meta-value\s*\{[^}]*font-size: 19px/s);
+	assert.match(html, /\.pm-stats-export-meta-value\s*\{[^}]*overflow-wrap: anywhere/s);
+	assert.match(html, /\.pm-stats-export-meta-value\s*\{[^}]*word-break: break-word/s);
+	assert.match(html, /Масштабирование/);
+	assert.match(html, /Период/);
+	assert.match(html, /Ставка часа/);
+	assert.match(html, /Итоговая сумма/);
 });

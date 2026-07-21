@@ -10,9 +10,9 @@ import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from '../ty
 import {
 	buildStatisticsExportHtmlDocument,
 	buildStatisticsExportMarkdownDocument,
-	type StatisticsExportDisplayOptions,
 	type StatisticsExportDocumentRow,
 } from '../utils/statisticsDocumentTemplate.js';
+import type { StatisticsExportDisplayOptions, StatisticsExportPeriodRange } from '../utils/statisticsExport.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 const ALLOWED_EXPORT_STATUSES = new Set([
@@ -52,6 +52,19 @@ function normalizeExportRows(rows: unknown): StatisticsExportDocumentRow[] {
 	}).filter((row) => row.title.trim().length > 0 || row.taskNumber.trim().length > 0 || row.hours > 0);
 }
 
+/** Normalize an optional export period before forwarding it to document builders. */
+function normalizeExportPeriod(period: unknown): StatisticsExportPeriodRange | undefined {
+	if (!period || typeof period !== 'object') {
+		return undefined;
+	}
+
+	const candidate = period as Record<string, unknown>;
+	const dateFrom = typeof candidate.dateFrom === 'string' ? candidate.dateFrom : '';
+	const dateTo = typeof candidate.dateTo === 'string' ? candidate.dateTo : '';
+	return dateFrom && dateTo ? { dateFrom, dateTo } : undefined;
+}
+
+/** Open generated statistics export content in a regular VS Code document. */
 async function openExportDocument(content: string, language: 'html' | 'markdown'): Promise<void> {
 	const doc = await vscode.workspace.openTextDocument({ content, language });
 	await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
@@ -121,13 +134,33 @@ export class StatisticsPanelManager {
 			if (msg.type === 'exportReport') {
 				const rows = normalizeExportRows(msg.rows);
 				const total = rows.reduce((sum, row) => sum + row.hours, 0);
+				// Invalid or missing rates must keep amount columns disabled instead of reaching document builders.
+				const hourlyRate = typeof msg.hourlyRate === 'number' && Number.isFinite(msg.hourlyRate)
+					? msg.hourlyRate
+					: 0;
 				const displayOptions: StatisticsExportDisplayOptions = {
 					showHours: typeof msg.showHours === 'boolean' ? msg.showHours : undefined,
 					showCost: typeof msg.showCost === 'boolean' ? msg.showCost : undefined,
+					hoursMode: msg.hoursMode === 'actual' || msg.hoursMode === 'scaled' ? msg.hoursMode : undefined,
+					period: normalizeExportPeriod(msg.period),
 				};
 				const content = msg.format === 'md'
-					? buildStatisticsExportMarkdownDocument(rows, total, vscode.env.language, Boolean(msg.includeReport), msg.hourlyRate, displayOptions)
-					: buildStatisticsExportHtmlDocument(rows, total, vscode.env.language, Boolean(msg.includeReport), msg.hourlyRate, displayOptions);
+					? buildStatisticsExportMarkdownDocument(
+						rows,
+						total,
+						vscode.env.language,
+						Boolean(msg.includeReport),
+						hourlyRate,
+						displayOptions,
+					)
+					: buildStatisticsExportHtmlDocument(
+						rows,
+						total,
+						vscode.env.language,
+						Boolean(msg.includeReport),
+						hourlyRate,
+						displayOptions,
+					);
 				try {
 					await openExportDocument(content, msg.format === 'md' ? 'markdown' : 'html');
 				} catch (error) {

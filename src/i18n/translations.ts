@@ -594,6 +594,8 @@ const en: Record<string, string> = {
 	'stats.exportHtmlTooltip': 'Open a styled HTML report in the editor with total {hours} hours',
 	'stats.exportMdBtn': '📝 Export MD',
 	'stats.exportMdTooltip': 'Open a Markdown table report in the editor with total {hours} hours',
+	'stats.exportXlsxBtn': 'Export XLS',
+	'stats.exportXlsxTooltip': 'Save the currently visible table as an Excel workbook',
 	'stats.exportWithReport': 'With report',
 	'stats.exportWithReportTooltip': 'Add a short summary from the report field to export',
 	'stats.exportHoursField': 'Hours',
@@ -610,6 +612,7 @@ const en: Record<string, string> = {
 	'stats.writingCol': 'On prompt',
 	'stats.implementingCol': 'On chat',
 	'stats.taskWorkCol': 'On task',
+	'stats.untrackedCol': 'Other',
 	'stats.totalCol': 'Total',
 
 	// --- Tracker ---
@@ -1719,6 +1722,8 @@ const ru: Record<string, string> = {
 	'stats.exportHtmlTooltip': 'Открыть HTML-отчёт в редакторе с итогом {hours} часов',
 	'stats.exportMdBtn': '📝 Экспорт MD',
 	'stats.exportMdTooltip': 'Открыть Markdown-отчёт в редакторе с таблицей и итогом {hours} часов',
+	'stats.exportXlsxBtn': 'Экспорт в XLS',
+	'stats.exportXlsxTooltip': 'Сохранить текущую видимую таблицу в файл Excel',
 	'stats.exportWithReport': 'С отчётом',
 	'stats.exportWithReportTooltip': 'Добавить в экспорт краткую сводку из поля Отчёт',
 	'stats.exportHoursField': 'Часы',
@@ -1735,6 +1740,7 @@ const ru: Record<string, string> = {
 	'stats.writingCol': 'На промпт',
 	'stats.implementingCol': 'На чат',
 	'stats.taskWorkCol': 'На задачу',
+	'stats.untrackedCol': 'На разное',
 	'stats.totalCol': 'Итого',
 
 	// --- Tracker ---

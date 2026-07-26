@@ -711,6 +711,28 @@ export function normalizeSidebarState(state?: PartialSidebarState | null): Sideb
 	};
 }
 
+/** One prompt row displayed in the detailed statistics table. */
+export interface PromptStatisticsReportRow {
+	/** Optional task number shown in the first table column. */
+	taskNumber: string;
+	/** Prompt title shown in the table and exports. */
+	title: string;
+	/** Time spent writing the prompt, in milliseconds. */
+	timeWriting: number;
+	/** Time spent implementing through chat, in milliseconds. */
+	timeImplementing: number;
+	/** Time spent working directly on the task, in milliseconds. */
+	timeOnTask: number;
+	/** Time not assigned to a specific activity, in milliseconds. */
+	timeUntracked: number;
+	/** Combined time across all activity categories, in milliseconds. */
+	totalTime: number;
+	/** Current prompt lifecycle status. */
+	status: PromptStatus;
+	/** Compact report summary used by document exports. */
+	reportSummary: string;
+}
+
 /** Statistics for all prompts */
 export interface PromptStatistics {
 	totalPrompts: number;
@@ -718,12 +740,14 @@ export interface PromptStatistics {
 	totalTimeWriting: number;
 	totalTimeImplementing: number;
 	totalTimeOnTask: number;
+	/** Total time not assigned to a specific activity. */
+	totalTimeUntracked: number;
 	totalTime: number;
 	favoriteCount: number;
 	avgTimePerPrompt: number;
 	recentActivity: Array<{ id: string; title: string; updatedAt: string }>;
-	/** Brief report rows: taskNumber, title, total time */
-	reportRows: Array<{ taskNumber: string; title: string; timeWriting: number; timeImplementing: number; timeOnTask: number; totalTime: number; status: PromptStatus; reportSummary: string }>;
+	/** Detailed rows rendered by the final statistics table. */
+	reportRows: PromptStatisticsReportRow[];
 }
 
 /** User-defined custom group for prompts. Independent from PromptStatus. */

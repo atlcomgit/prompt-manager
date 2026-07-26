@@ -6,6 +6,17 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-07-26
+
+#### Added
+- The final prompt statistics table now shows miscellaneous tracked time in a sortable `Other` column and includes its total in the footer.
+- A new `Export XLS` action saves the currently filtered and sorted eight-column statistics table as a real `.xlsx` workbook through the VS Code save dialog.
+
+#### Changed
+- Statistics duration labels now follow the active webview locale, while XLSX text cells remain explicit text values to prevent spreadsheet formula interpretation.
+- The final statistics table now fits all eight columns into its available width, uses tighter horizontal cell padding, and truncates long prompt titles with an accessible full-text tooltip.
+- The `Ветки проектов` widget now labels an existing prompt branch as `промпт, есть` in each project selector without changing missing-branch creation or shared branch availability.
+
 ### 2026-07-22
 
 #### Fixed

@@ -254,6 +254,7 @@ test('StorageService period statistics use daily time without cumulative config 
 		assert.equal(stats.totalTimeWriting, 5 * ONE_MINUTE_MS);
 		assert.equal(stats.totalTimeImplementing, 2 * ONE_MINUTE_MS);
 		assert.equal(stats.totalTimeOnTask, 3 * ONE_MINUTE_MS);
+		assert.equal(stats.totalTimeUntracked, 4 * ONE_MINUTE_MS);
 		assert.equal(stats.totalTime, 14 * ONE_MINUTE_MS);
 		assert.equal(stats.avgTimePerPrompt, 7 * ONE_MINUTE_MS);
 
@@ -262,6 +263,7 @@ test('StorageService period statistics use daily time without cumulative config 
 		assert.equal(rowA.timeWriting, ONE_MINUTE_MS);
 		assert.equal(rowA.timeImplementing, 2 * ONE_MINUTE_MS);
 		assert.equal(rowA.timeOnTask, 3 * ONE_MINUTE_MS);
+		assert.equal(rowA.timeUntracked, 4 * ONE_MINUTE_MS);
 		assert.equal(rowA.totalTime, 10 * ONE_MINUTE_MS);
 		assert.equal(stats.reportRows.some((row: { taskNumber: string }) => row.taskNumber === '162'), false);
 		assert.equal(stats.reportRows.some((row: { taskNumber: string }) => row.taskNumber === '163'), false);

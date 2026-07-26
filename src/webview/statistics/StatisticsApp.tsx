@@ -5,9 +5,10 @@
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
-import { useT } from '../shared/i18n';
+import { getLocale, useT } from '../shared/i18n';
 import { DateRangeCalendar } from './DateRangeCalendar';
 import type { PromptStatistics } from '../../types/prompt';
+import { formatStatisticsDurationForDisplay } from '../../utils/statisticsTable.js';
 import {
   buildStatisticsActualExportRows,
   calculateStatisticsExportTargetHours,
@@ -28,18 +29,6 @@ const DEFAULT_EXPORT_HOURS = 165;
 const DEFAULT_EXPORT_HOURLY_RATE = 1743;
 const STATISTICS_HOURLY_RATE_WEBVIEW_STATE_KEY = 'pm.statistics.hourlyRateInput';
 
-/** Format milliseconds as human-readable duration */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return '0с';
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}ч ${minutes}м ${seconds}с`;
-  if (minutes > 0) return `${minutes}м ${seconds}с`;
-  return `${seconds}с`;
-}
-
 /** Sort direction type */
 type SortDir = 'asc' | 'desc';
 
@@ -47,6 +36,12 @@ type SortDir = 'asc' | 'desc';
 interface SortCriterion {
   field: string;
   dir: SortDir;
+}
+
+/** Modifier keys shared by mouse and keyboard sorting events. */
+interface SortModifierEvent {
+  ctrlKey: boolean;
+  metaKey: boolean;
 }
 
 /** Column keys for report table */
@@ -57,6 +52,7 @@ type ReportColumn =
   | 'timeWriting'
   | 'timeImplementing'
   | 'timeOnTask'
+  | 'timeUntracked'
   | 'totalTime';
 
 type ExportFormat = 'html' | 'md';
@@ -264,7 +260,7 @@ export const StatisticsApp: React.FC = () => {
   }, []);
 
   /** Handle column header click for sorting */
-  const handleSortClick = useCallback((field: ReportColumn, e: React.MouseEvent) => {
+  const handleSortClick = useCallback((field: ReportColumn, e: SortModifierEvent) => {
     setSortCriteria(prev => {
       // Ctrl+Click — add/toggle secondary sort
       if (e.ctrlKey || e.metaKey) {
@@ -385,12 +381,7 @@ export const StatisticsApp: React.FC = () => {
     () => exportRows.reduce((sum, row) => sum + row.hours, 0),
     [exportRows],
   );
-  const uiLocale = useMemo(() => {
-    if (typeof document !== 'undefined') {
-      return document.documentElement.lang || navigator.language || 'en';
-    }
-    return 'en';
-  }, []);
+  const uiLocale = getLocale();
   const exportHoursLabel = useMemo(
     () => showHours ? formatStatisticsExportNumber(exportRowsTotal, uiLocale) : '',
     [exportRowsTotal, showHours, uiLocale],
@@ -443,6 +434,12 @@ export const StatisticsApp: React.FC = () => {
     showHours,
   ]);
 
+  /** Export the currently sorted and filtered table rows to a real XLSX workbook. */
+  const handleXlsxExport = useCallback(() => {
+    if (sortedReportRows.length === 0) return;
+    vscode.postMessage({ type: 'exportStatisticsXlsx', rows: sortedReportRows });
+  }, [sortedReportRows]);
+
   /** Status labels map */
   const statusLabels: Record<string, string> = {
     'draft': t('status.draft'),
@@ -468,6 +465,7 @@ export const StatisticsApp: React.FC = () => {
   /** Column header builder with sort support */
   const sortableHeader = (field: ReportColumn, label: string, align: 'left' | 'right' = 'left') => {
     const indicator = getSortIndicator(field);
+    const sortCriterion = sortCriteria.find(criterion => criterion.field === field);
     return (
       <th
         style={{
@@ -476,7 +474,15 @@ export const StatisticsApp: React.FC = () => {
           cursor: 'pointer',
           userSelect: 'none',
         }}
+        tabIndex={0}
+        aria-sort={sortCriterion ? (sortCriterion.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
         onClick={(e) => handleSortClick(field, e)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleSortClick(field, e);
+          }
+        }}
         title={t('stats.sortTooltip')}
       >
         {label} {indicator && <span style={styles.sortIndicator}>{indicator}</span>}
@@ -491,7 +497,7 @@ export const StatisticsApp: React.FC = () => {
 
         {/* Period filter — date range + min 5 min checkbox + reset */}
         <div style={styles.periodFilter}>
-          <label style={styles.periodLabel}>{t('stats.period')}</label>
+          <span style={styles.periodLabel}>{t('stats.period')}</span>
           <DateRangeCalendar
             dateFrom={dateFrom}
             dateTo={dateTo}
@@ -529,11 +535,11 @@ export const StatisticsApp: React.FC = () => {
             <div style={styles.cardLabel}>{t('stats.favorites')}</div>
           </div>
           <div style={styles.card}>
-            <div style={styles.cardValue}>{formatDuration(stats.totalTime)}</div>
+            <div style={styles.cardValue}>{formatStatisticsDurationForDisplay(stats.totalTime, uiLocale)}</div>
             <div style={styles.cardLabel}>{t('stats.totalTime')}</div>
           </div>
           <div style={styles.card}>
-            <div style={styles.cardValue}>{formatDuration(stats.avgTimePerPrompt)}</div>
+            <div style={styles.cardValue}>{formatStatisticsDurationForDisplay(stats.avgTimePerPrompt, uiLocale)}</div>
             <div style={styles.cardLabel}>{t('stats.avgTime')}</div>
           </div>
         </div>
@@ -573,15 +579,21 @@ export const StatisticsApp: React.FC = () => {
           <div style={styles.timeGridRow}>
             <div style={styles.timeStat}>
               <span style={styles.timeLabel}>{t('stats.writingTime')}</span>
-              <span style={styles.timeValue}>{formatDuration(stats.totalTimeWriting)}</span>
+              <span style={styles.timeValue}>
+                {formatStatisticsDurationForDisplay(stats.totalTimeWriting, uiLocale)}
+              </span>
             </div>
             <div style={styles.timeStat}>
               <span style={styles.timeLabel}>{t('stats.implementingTime')}</span>
-              <span style={styles.timeValue}>{formatDuration(stats.totalTimeImplementing)}</span>
+              <span style={styles.timeValue}>
+                {formatStatisticsDurationForDisplay(stats.totalTimeImplementing, uiLocale)}
+              </span>
             </div>
             <div style={styles.timeStat}>
               <span style={styles.timeLabel}>{t('stats.taskWorkTime')}</span>
-              <span style={styles.timeValue}>{formatDuration(stats.totalTimeOnTask || 0)}</span>
+              <span style={styles.timeValue}>
+                {formatStatisticsDurationForDisplay(stats.totalTimeOnTask || 0, uiLocale)}
+              </span>
             </div>
           </div>
         </div>
@@ -624,6 +636,8 @@ export const StatisticsApp: React.FC = () => {
                 <label style={styles.exportField}>
                   <span style={styles.exportFieldLabel}>{t('stats.exportHoursField')}</span>
                   <input
+                    id="statistics-export-hours"
+                    name="statisticsExportHours"
                     type="number"
                     min={0}
                     step={1}
@@ -635,6 +649,8 @@ export const StatisticsApp: React.FC = () => {
                 <label style={styles.exportField}>
                   <span style={styles.exportFieldLabel}>{t('stats.exportRateField')}</span>
                   <input
+                    id="statistics-export-hourly-rate"
+                    name="statisticsExportHourlyRate"
                     type="number"
                     min={0}
                     step={0.01}
@@ -667,6 +683,13 @@ export const StatisticsApp: React.FC = () => {
                   title={t('stats.exportMdTooltip').replace('{hours}', exportTooltipHours)}
                 >
                   {`${t('stats.exportMdBtn')}${exportButtonHoursSuffix}`}
+                </button>
+                <button
+                  style={styles.exportMdBtn}
+                  onClick={handleXlsxExport}
+                  title={t('stats.exportXlsxTooltip')}
+                >
+                  {t('stats.exportXlsxBtn')}
                 </button>
               </div>
             </div>
@@ -716,57 +739,79 @@ export const StatisticsApp: React.FC = () => {
                 )}
               </div>
             </div>
-            <table style={styles.reportTable}>
-              <thead>
-                <tr>
-                  {sortableHeader('taskNumber', t('stats.taskCol'))}
-                  {sortableHeader('title', t('stats.nameCol'))}
-                  {sortableHeader('status', t('stats.statusCol'))}
-                  {sortableHeader('timeWriting', t('stats.writingCol'), 'right')}
-                  {sortableHeader('timeImplementing', t('stats.implementingCol'), 'right')}
-                  {sortableHeader('timeOnTask', t('stats.taskWorkCol'), 'right')}
-                  {sortableHeader('totalTime', t('stats.totalCol'), 'right')}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedReportRows.map((row, idx) => (
-                  <tr key={idx} style={idx % 2 === 0 ? styles.reportRowEven : undefined}>
-                    <td style={styles.reportTaskCell}>{row.taskNumber || '—'}</td>
-                    <td style={styles.reportTd}>{row.title}</td>
-                    <td style={styles.reportTd}>{statusLabels[row.status] || row.status}</td>
-                    <td style={{ ...styles.reportTd, textAlign: 'right' }}>
-                      {formatDuration(row.timeWriting)}
-                    </td>
-                    <td style={{ ...styles.reportTd, textAlign: 'right' }}>
-                      {formatDuration(row.timeImplementing)}
-                    </td>
-                    <td style={{ ...styles.reportTd, textAlign: 'right' }}>
-                      {formatDuration(row.timeOnTask || 0)}
+            <div style={styles.reportTableViewport}>
+              <table style={styles.reportTable}>
+                {/* Fixed column shares keep all eight columns inside the available table width. */}
+                <colgroup>
+                  <col style={styles.reportTaskColumn} />
+                  <col style={styles.reportTitleColumn} />
+                  <col style={styles.reportStatusColumn} />
+                  <col style={styles.reportTimeColumn} />
+                  <col style={styles.reportTimeColumn} />
+                  <col style={styles.reportTimeColumn} />
+                  <col style={styles.reportTimeColumn} />
+                  <col style={styles.reportTimeColumn} />
+                </colgroup>
+                <thead>
+                  <tr>
+                    {sortableHeader('taskNumber', t('stats.taskCol'))}
+                    {sortableHeader('title', t('stats.nameCol'))}
+                    {sortableHeader('status', t('stats.statusCol'))}
+                    {sortableHeader('timeWriting', t('stats.writingCol'), 'right')}
+                    {sortableHeader('timeImplementing', t('stats.implementingCol'), 'right')}
+                    {sortableHeader('timeOnTask', t('stats.taskWorkCol'), 'right')}
+                    {sortableHeader('timeUntracked', t('stats.untrackedCol'), 'right')}
+                    {sortableHeader('totalTime', t('stats.totalCol'), 'right')}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedReportRows.map((row, idx) => (
+                    <tr key={idx} style={idx % 2 === 0 ? styles.reportRowEven : undefined}>
+                      <td style={styles.reportTaskCell}>{row.taskNumber || '—'}</td>
+                      <td style={{ ...styles.reportTd, ...styles.reportTitleCell }} title={row.title}>
+                        {row.title}
+                      </td>
+                      <td style={styles.reportTd}>{statusLabels[row.status] || row.status}</td>
+                      <td style={{ ...styles.reportTd, textAlign: 'right' }}>
+                        {formatStatisticsDurationForDisplay(row.timeWriting, uiLocale)}
+                      </td>
+                      <td style={{ ...styles.reportTd, textAlign: 'right' }}>
+                        {formatStatisticsDurationForDisplay(row.timeImplementing, uiLocale)}
+                      </td>
+                      <td style={{ ...styles.reportTd, textAlign: 'right' }}>
+                        {formatStatisticsDurationForDisplay(row.timeOnTask || 0, uiLocale)}
+                      </td>
+                      <td style={{ ...styles.reportTd, textAlign: 'right' }}>
+                        {formatStatisticsDurationForDisplay(row.timeUntracked || 0, uiLocale)}
+                      </td>
+                      <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
+                        {formatStatisticsDurationForDisplay(row.totalTime, uiLocale)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr style={styles.reportFooter}>
+                    <td style={styles.reportTd} colSpan={3}>{t('stats.totalCol')}</td>
+                    <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
+                      {formatStatisticsDurationForDisplay(stats.totalTimeWriting, uiLocale)}
                     </td>
                     <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
-                      {formatDuration(row.totalTime)}
+                      {formatStatisticsDurationForDisplay(stats.totalTimeImplementing, uiLocale)}
+                    </td>
+                    <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
+                      {formatStatisticsDurationForDisplay(stats.totalTimeOnTask || 0, uiLocale)}
+                    </td>
+                    <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
+                      {formatStatisticsDurationForDisplay(stats.totalTimeUntracked || 0, uiLocale)}
+                    </td>
+                    <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 700 }}>
+                      {formatStatisticsDurationForDisplay(stats.totalTime, uiLocale)}
                     </td>
                   </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr style={styles.reportFooter}>
-                  <td style={styles.reportTd} colSpan={3}>{t('stats.totalCol')}</td>
-                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
-                    {formatDuration(stats.totalTimeWriting)}
-                  </td>
-                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
-                    {formatDuration(stats.totalTimeImplementing)}
-                  </td>
-                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 600 }}>
-                    {formatDuration(stats.totalTimeOnTask || 0)}
-                  </td>
-                  <td style={{ ...styles.reportTd, textAlign: 'right', fontWeight: 700 }}>
-                    {formatDuration(stats.totalTime)}
-                  </td>
-                </tr>
-              </tfoot>
-            </table>
+                </tfoot>
+              </table>
+            </div>
           </div>
         )}
       </div>
@@ -1122,18 +1167,40 @@ const styles: Record<string, React.CSSProperties> = {
   },
   reportTable: {
     width: '100%',
+    tableLayout: 'fixed',
     borderCollapse: 'collapse',
     fontSize: '12px',
   },
+  /** Preserve a fallback scrollbar only for exceptionally narrow editor groups. */
+  reportTableViewport: {
+    maxWidth: '100%',
+    overflowX: 'auto',
+  },
+  /** Column shares reserve most space for title while keeping five time columns equal. */
+  reportTaskColumn: {
+    width: '8%',
+  },
+  reportTitleColumn: {
+    width: '30%',
+  },
+  reportStatusColumn: {
+    width: '12%',
+  },
+  reportTimeColumn: {
+    width: '10%',
+  },
   reportTh: {
     textAlign: 'left',
-    padding: '8px 10px',
+    padding: '8px 4px',
     borderBottom: '2px solid var(--vscode-panel-border)',
     fontSize: '11px',
     fontWeight: 600,
     textTransform: 'uppercase',
     letterSpacing: '0.3px',
     color: 'var(--vscode-descriptionForeground)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
   },
   sortIndicator: {
     fontSize: '10px',
@@ -1141,12 +1208,19 @@ const styles: Record<string, React.CSSProperties> = {
     marginLeft: '2px',
   },
   reportTd: {
-    padding: '6px 10px',
+    padding: '6px 4px',
     borderBottom: '1px solid var(--vscode-panel-border)',
     fontSize: '12px',
   },
+  /** Truncate long prompt titles while preserving the full value in the title attribute. */
+  reportTitleCell: {
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
   reportTaskCell: {
-    padding: '6px 10px',
+    padding: '6px 4px',
     borderBottom: '1px solid var(--vscode-panel-border)',
     fontSize: '12px',
     fontWeight: 600,

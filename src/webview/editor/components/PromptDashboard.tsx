@@ -2506,8 +2506,17 @@ function buildBranchOptions(project: PromptDashboardProjectSummary): BranchOptio
 		});
 	};
 
+	// Роль существования берем только из списка веток и не меняем доступность действия.
+	const promptBranch = project.promptBranch.trim();
+	const promptBranchExists = Boolean(promptBranch)
+		&& project.branches.some(branch => branch.name.trim() === promptBranch && branch.exists === true);
+	const promptBranchAvailable = isBranchSwitchAvailable(project, promptBranch);
+
 	addOption(project.currentBranch, 'текущая', true);
-	addOption(project.promptBranch, 'промпт', isBranchSwitchAvailable(project, project.promptBranch));
+	addOption(promptBranch, 'промпт', promptBranchAvailable);
+	if (promptBranchExists) {
+		addOption(promptBranch, 'есть', false);
+	}
 	addOption(project.trackedBranch, 'tracked', isBranchSwitchAvailable(project, project.trackedBranch));
 	for (const branch of project.branches) {
 		const role = branch.current

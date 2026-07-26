@@ -1894,6 +1894,78 @@ test('PromptDashboard selects current branch first and renders the redesigned fi
 	assert.match(markup, /Что происходит/);
 });
 
+/** Проверяет, что существующая ветка промпта получает отметку в индивидуальном списке. */
+test('PromptDashboard добавляет роль есть для существующей ветки промпта', () => {
+	const markup = renderDashboard(createSnapshot([createProject()]));
+
+	assert.match(
+		markup,
+		/<option value="feature\/task-107">feature\/task-107 \(1\/1\)<\/option>/,
+	);
+	assert.match(
+		markup,
+		/<option value="feature\/task-107">feature\/task-107 \(промпт, есть\)<\/option>/,
+	);
+});
+
+/** Проверяет, что доступное действие не считается признаком существующей ветки. */
+test('PromptDashboard не добавляет роль есть для отсутствующей ветки промпта с доступным действием', () => {
+	const project = createProject();
+	project.branches = project.branches.map(branch => (
+		branch.name === project.promptBranch ? { ...branch, exists: false, canSwitch: false } : branch
+	));
+	const markup = renderDashboard(createSnapshot([project]));
+
+	assert.match(
+		markup,
+		/<option value="feature\/task-107">feature\/task-107 \(промпт\)<\/option>/,
+	);
+	assert.doesNotMatch(markup, /feature\/task-107 \(промпт, есть\)/);
+	assert.doesNotMatch(
+		markup,
+		/<option value="feature\/task-107" disabled="">feature\/task-107 \(промпт\)<\/option>/,
+	);
+});
+
+/** Проверяет, что роль существования не включает недоступное переключение ветки. */
+test('PromptDashboard сохраняет существующую недоступную ветку промпта отключенной', () => {
+	const project = createProject();
+	project.branches = project.branches.map(branch => (
+		branch.name === project.promptBranch ? { ...branch, canSwitch: false } : branch
+	));
+	project.branchActions = project.branchActions.filter(action => action.kind !== 'prompt');
+	const markup = renderDashboard(createSnapshot([project]));
+
+	assert.match(
+		markup,
+		/<option value="feature\/task-107" disabled="">feature\/task-107 \(промпт, есть\)<\/option>/,
+	);
+	assert.doesNotMatch(
+		markup,
+		/<option value="feature\/task-107">feature\/task-107 \(1\/1\)<\/option>/,
+	);
+});
+
+/** Проверяет, что совпадение текущей и ветки промпта не дублирует роли. */
+test('PromptDashboard объединяет роли текущей существующей ветки промпта без дублей', () => {
+	const project = createProject({ currentBranch: 'feature/task-107' });
+	project.branches = project.branches.map(branch => ({
+		...branch,
+		current: branch.name === project.promptBranch,
+	}));
+	const markup = renderDashboard(createSnapshot([project]));
+
+	assert.match(
+		markup,
+		/<option value="feature\/task-107" selected="">/,
+	);
+	assert.match(
+		markup,
+		/feature\/task-107 \(текущая, промпт, есть\)<\/option>/,
+	);
+	assert.equal((markup.match(/feature\/task-107 \(текущая, промпт, есть\)/g) || []).length, 1);
+});
+
 test('buildWidgetGridColumns keeps dashboard widgets in stable alternating columns', () => {
 	const columns = buildWidgetGridColumns(['status', 'activity', 'branches', 'commits', 'parallel', 'analysis', 'reviews']);
 

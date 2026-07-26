@@ -175,6 +175,8 @@ export type WebviewToExtensionMessage =
 		/** Full date range displayed in generated statistics documents. */
 		period?: { dateFrom: string; dateTo: string };
 	}
+	/** Export the currently visible statistics table rows to a real XLSX workbook. */
+	| { type: 'exportStatisticsXlsx'; rows: PromptStatistics['reportRows'] }
 	| {
 		type: 'markDirty';
 		dirty: boolean;

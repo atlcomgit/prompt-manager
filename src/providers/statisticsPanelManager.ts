@@ -13,6 +13,10 @@ import {
 	type StatisticsExportDocumentRow,
 } from '../utils/statisticsDocumentTemplate.js';
 import type { StatisticsExportDisplayOptions, StatisticsExportPeriodRange } from '../utils/statisticsExport.js';
+import {
+	createStatisticsXlsxBuffer,
+	type StatisticsXlsxExportRow,
+} from '../utils/statisticsXlsxExport.js';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 const ALLOWED_EXPORT_STATUSES = new Set([
@@ -25,6 +29,10 @@ const ALLOWED_EXPORT_STATUSES = new Set([
 	'review',
 	'closed',
 ] as const);
+/** Maximum row count accepted from a statistics webview export message. */
+const MAX_STATISTICS_XLSX_EXPORT_ROWS = 5_000;
+/** Conservative text limit used to bound workbook memory for untrusted webview payloads. */
+const MAX_STATISTICS_XLSX_CELL_TEXT_LENGTH = 4_096;
 
 function normalizeExportRows(rows: unknown): StatisticsExportDocumentRow[] {
 	if (!Array.isArray(rows)) {
@@ -50,6 +58,55 @@ function normalizeExportRows(rows: unknown): StatisticsExportDocumentRow[] {
 			reportSummary,
 		};
 	}).filter((row) => row.title.trim().length > 0 || row.taskNumber.trim().length > 0 || row.hours > 0);
+}
+
+/** Normalize a duration payload to finite non-negative milliseconds. */
+function normalizeXlsxDuration(value: unknown): number {
+	const parsed = typeof value === 'number' ? value : Number(value);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+/** Normalize text payloads to the maximum supported Excel cell length. */
+function normalizeXlsxText(value: unknown): string {
+	return typeof value === 'string' ? value.slice(0, MAX_STATISTICS_XLSX_CELL_TEXT_LENGTH) : '';
+}
+
+/** Normalize untrusted webview rows before creating a statistics XLSX workbook. */
+function normalizeXlsxRows(rows: unknown): StatisticsXlsxExportRow[] {
+	if (!Array.isArray(rows)) {
+		return [];
+	}
+
+	return rows.slice(0, MAX_STATISTICS_XLSX_EXPORT_ROWS).map((row) => {
+		const candidate = row && typeof row === 'object' ? row as Record<string, unknown> : {};
+		const timeWriting = normalizeXlsxDuration(candidate.timeWriting);
+		const timeImplementing = normalizeXlsxDuration(candidate.timeImplementing);
+		const timeOnTask = normalizeXlsxDuration(candidate.timeOnTask);
+		const timeUntracked = normalizeXlsxDuration(candidate.timeUntracked);
+		const status = typeof candidate.status === 'string' && ALLOWED_EXPORT_STATUSES.has(candidate.status as never)
+			? candidate.status as StatisticsXlsxExportRow['status']
+			: 'draft';
+
+		return {
+			taskNumber: normalizeXlsxText(candidate.taskNumber),
+			title: normalizeXlsxText(candidate.title),
+			status,
+			timeWriting,
+			timeImplementing,
+			timeOnTask,
+			timeUntracked,
+			totalTime: timeWriting + timeImplementing + timeOnTask + timeUntracked,
+		};
+	}).filter(row => row.title.trim().length > 0 || row.taskNumber.trim().length > 0 || row.totalTime > 0);
+}
+
+/** Build the default XLSX file name for the current local date. */
+function buildStatisticsXlsxFileName(): string {
+	const now = new Date();
+	const year = String(now.getFullYear());
+	const month = String(now.getMonth() + 1).padStart(2, '0');
+	const day = String(now.getDate()).padStart(2, '0');
+	return `prompt-statistics-${year}-${month}-${day}.xlsx`;
 }
 
 /** Normalize an optional export period before forwarding it to document builders. */
@@ -169,6 +226,42 @@ export class StatisticsPanelManager {
 						vscode.env.language.toLowerCase().startsWith('ru')
 							? `Не удалось открыть отчёт: ${message}`
 							: `Failed to open report: ${message}`
+					);
+				}
+			}
+			if (msg.type === 'exportStatisticsXlsx') {
+				const rows = normalizeXlsxRows(msg.rows);
+				if (rows.length === 0) {
+					return;
+				}
+
+				try {
+					const fileName = buildStatisticsXlsxFileName();
+					const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+					const defaultUri = workspaceFolder ? vscode.Uri.joinPath(workspaceFolder.uri, fileName) : undefined;
+					const targetUri = await vscode.window.showSaveDialog({
+						defaultUri,
+						filters: { 'Excel workbook': ['xlsx'] },
+						saveLabel: vscode.env.language.toLowerCase().startsWith('ru') ? 'Сохранить Excel' : 'Save Excel',
+					});
+
+					if (!targetUri) {
+						return;
+					}
+
+					const workbook = await createStatisticsXlsxBuffer(rows, vscode.env.language);
+					await vscode.workspace.fs.writeFile(targetUri, workbook);
+					vscode.window.showInformationMessage(
+						vscode.env.language.toLowerCase().startsWith('ru')
+							? `Excel-файл сохранён: ${targetUri.fsPath}`
+							: `Excel file saved: ${targetUri.fsPath}`,
+					);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					vscode.window.showErrorMessage(
+						vscode.env.language.toLowerCase().startsWith('ru')
+							? `Не удалось сохранить Excel-файл: ${message}`
+							: `Failed to save Excel file: ${message}`,
 					);
 				}
 			}

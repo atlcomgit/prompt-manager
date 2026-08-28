@@ -19,6 +19,8 @@ import {
 	resolvePromptDashboardCacheState,
 	resolvePromptDashboardExpandRefreshTarget,
 	resolvePromptDashboardMode,
+	resolvePromptDashboardRequestMessageContext,
+	shouldReleasePromptDashboardProjectRequestOnNotice,
 	shouldReleasePromptDashboardRequestId,
 	shouldRetainPromptDashboardBusyActionOnNotice,
 	shouldAcceptPromptDashboardAnalysisMessage,
@@ -393,6 +395,92 @@ test('shouldAcceptPromptDashboardRequestMessage keeps late payloads only for the
 		currentPromptUuid: 'uuid-1',
 		messagePromptId: 'task-2',
 		messagePromptUuid: 'uuid-2',
+	}), false);
+});
+
+/** Не позволяет reactive payload без версии обогнать активный запрос dirty-details hydration. */
+test('shouldAcceptPromptDashboardRequestMessage rejects late unversioned payloads during active hydration', () => {
+	assert.equal(shouldAcceptPromptDashboardRequestMessage({
+		activeRequestId: 'prompt-dashboard-projects-details-200',
+		messageRequestId: undefined,
+		currentPromptId: 'task-1',
+		currentPromptUuid: 'uuid-1',
+		messagePromptId: 'task-1',
+		messagePromptUuid: 'uuid-1',
+		rejectUnversionedWhileActive: true,
+	}), false);
+
+	assert.equal(shouldAcceptPromptDashboardRequestMessage({
+		activeRequestId: 'prompt-dashboard-projects-details-200',
+		messageRequestId: 'prompt-dashboard-projects-details-100',
+		currentPromptId: 'task-1',
+		currentPromptUuid: 'uuid-1',
+		messagePromptId: 'task-1',
+		messagePromptUuid: 'uuid-1',
+	}), false);
+
+	assert.equal(shouldAcceptPromptDashboardRequestMessage({
+		activeRequestId: 'prompt-dashboard-projects-details-200',
+		messageRequestId: 'prompt-dashboard-projects-details-200',
+		currentPromptId: 'task-1',
+		currentPromptUuid: 'uuid-1',
+		messagePromptId: 'task-1',
+		messagePromptUuid: 'uuid-1',
+	}), true);
+});
+
+/** Сохраняет прежний приём unversioned payload для несвязанных dashboard widgets. */
+test('shouldAcceptPromptDashboardRequestMessage accepts unversioned non-project widget payloads during hydration', () => {
+	assert.equal(shouldAcceptPromptDashboardRequestMessage({
+		activeRequestId: 'prompt-dashboard-projects-details-200',
+		messageRequestId: undefined,
+		currentPromptId: 'task-1',
+		currentPromptUuid: 'uuid-1',
+		messagePromptId: 'task-1',
+		messagePromptUuid: 'uuid-1',
+	}), true);
+});
+
+/** Проверяет независимость project-sensitive ordering от общего dashboard request. */
+test('resolvePromptDashboardRequestMessageContext isolates project hydration from unrelated widget requests', () => {
+	const hydrationContext = resolvePromptDashboardRequestMessageContext({
+		activeDashboardRequestId: 'todo-request',
+		activeProjectsRequestId: 'projects-hydration',
+		projectSensitive: true,
+	});
+	assert.equal(shouldAcceptPromptDashboardRequestMessage({
+		...hydrationContext,
+		messageRequestId: undefined,
+	}), false);
+
+	const unrelatedContext = resolvePromptDashboardRequestMessageContext({
+		activeDashboardRequestId: 'docker-request',
+		activeProjectsRequestId: '',
+		projectSensitive: true,
+	});
+	assert.equal(shouldAcceptPromptDashboardRequestMessage({
+		...unrelatedContext,
+		messageRequestId: undefined,
+	}), true);
+
+	assert.equal(shouldReleasePromptDashboardRequestId({
+		activeRequestId: 'projects-hydration',
+		messageRequestId: 'projects-hydration',
+		cacheStatus: 'loading',
+	}), false);
+	assert.equal(shouldReleasePromptDashboardRequestId({
+		activeRequestId: 'projects-hydration',
+		messageRequestId: 'projects-hydration',
+		cacheStatus: 'fresh',
+	}), true);
+	assert.equal(shouldReleasePromptDashboardProjectRequestOnNotice({
+		activeProjectsRequestId: 'projects-hydration',
+		messageRequestId: 'projects-hydration',
+	}), true);
+	assert.equal(shouldReleasePromptDashboardProjectRequestOnNotice({
+		activeProjectsRequestId: 'projects-hydration',
+		messageRequestId: 'projects-hydration',
+		retainPromptDashboardBusy: true,
 	}), false);
 });
 

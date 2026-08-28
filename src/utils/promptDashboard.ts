@@ -427,7 +427,7 @@ export function preservePromptDashboardProjectsLoadingSnapshot(
 	};
 }
 
-/** Accepts late dashboard payloads when no newer request is active and the same prompt is still visible. */
+/** Проверяет request ordering и при необходимости блокирует unversioned payload во время активного запроса. */
 export function shouldAcceptPromptDashboardRequestMessage(input: {
 	activeRequestId: string;
 	messageRequestId?: string;
@@ -435,8 +435,13 @@ export function shouldAcceptPromptDashboardRequestMessage(input: {
 	currentPromptUuid?: string;
 	messagePromptId?: string;
 	messagePromptUuid?: string;
+	/** Запрещает payload без request ID, пока активен более новый запрос. */
+	rejectUnversionedWhileActive?: boolean;
 }): boolean {
-	if (!input.messageRequestId || input.messageRequestId === input.activeRequestId) {
+	if (!input.messageRequestId) {
+		return !input.activeRequestId || input.rejectUnversionedWhileActive !== true;
+	}
+	if (input.messageRequestId === input.activeRequestId) {
 		return true;
 	}
 
@@ -455,6 +460,34 @@ export function shouldAcceptPromptDashboardRequestMessage(input: {
 	const samePromptId = !currentPromptId || !messagePromptId || currentPromptId === messagePromptId;
 	const samePromptUuid = !currentPromptUuid || !messagePromptUuid || currentPromptUuid === messagePromptUuid;
 	return samePromptId && samePromptUuid;
+}
+
+/** Выбирает независимый request-контекст для project-sensitive и остальных dashboard payload. */
+export function resolvePromptDashboardRequestMessageContext(input: {
+	activeDashboardRequestId: string;
+	activeProjectsRequestId: string;
+	projectSensitive: boolean;
+}): { activeRequestId: string; rejectUnversionedWhileActive: boolean } {
+	return input.projectSensitive
+		? {
+			activeRequestId: input.activeProjectsRequestId,
+			rejectUnversionedWhileActive: true,
+		}
+		: {
+			activeRequestId: input.activeDashboardRequestId,
+			rejectUnversionedWhileActive: false,
+		};
+}
+
+/** Определяет terminal notice, после которого project-sensitive request можно очистить. */
+export function shouldReleasePromptDashboardProjectRequestOnNotice(input: {
+	activeProjectsRequestId: string;
+	messageRequestId?: string;
+	retainPromptDashboardBusy?: boolean;
+}): boolean {
+	return Boolean(input.activeProjectsRequestId)
+		&& input.activeProjectsRequestId === String(input.messageRequestId || '')
+		&& input.retainPromptDashboardBusy !== true;
 }
 
 export function shouldAcceptPromptDashboardAnalysisMessage(input: {

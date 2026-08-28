@@ -4,6 +4,53 @@ import Module from 'node:module';
 
 const originalLoad = (Module as any)._load;
 
+/** Хранит вызовы команд VS Code для проверок интеграции Git SCM. */
+const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
+
+/** Задает доступные команды VS Code для текущего сценария. */
+let vscodeAvailableCommands: string[] = [];
+
+/** Перехватывает выполнение команд VS Code в текущем сценарии. */
+let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<unknown>) | undefined;
+
+/** Предоставляет встроенное Git API для текущего сценария. */
+let vscodeGitExtension: Record<string, unknown> | null = null;
+
+/** Предоставляет расширение Kilo Code и управляет его тестовой активацией. */
+let vscodeKiloExtension: Record<string, unknown> | null = null;
+
+/** Подменяет результат активации Kilo Code в проверяемом сценарии. */
+let vscodeKiloActivationHandler: (() => Promise<unknown>) | undefined;
+
+/** Хранит порядок получения расширений, активации и discovery команд. */
+const vscodeLifecycleCalls: string[] = [];
+
+/** Создает активное или холодное тестовое расширение Kilo Code. */
+function setKiloCodeExtension(isActive = true): void {
+	const extension: { isActive: boolean; activate: () => Promise<unknown> } = {
+		isActive,
+		activate: async () => {
+			vscodeLifecycleCalls.push('kilo:activate');
+			const result = await vscodeKiloActivationHandler?.();
+			extension.isActive = true;
+			return result;
+		},
+	};
+	vscodeKiloExtension = extension;
+}
+
+/** Сбрасывает изменяемое состояние VS Code mock между сценариями. */
+function resetVsCodeMock(): void {
+	vscodeCommandCalls.length = 0;
+	vscodeAvailableCommands = [];
+	vscodeExecuteCommandHandler = undefined;
+	vscodeGitExtension = null;
+	vscodeKiloActivationHandler = undefined;
+	vscodeLifecycleCalls.length = 0;
+	setKiloCodeExtension();
+}
+
+/** Создает минимальный VS Code mock для тестов GitService. */
 function createVsCodeMock() {
 	return {
 		Disposable: class Disposable {
@@ -15,6 +62,30 @@ function createVsCodeMock() {
 
 			dispose(): void {
 				this.callback?.();
+			}
+		},
+		CancellationTokenSource: class CancellationTokenSource {
+			/** Хранит подписчиков тестового сигнала отмены. */
+			private readonly cancellationListeners = new Set<() => void>();
+
+			/** Передает команде идентичный token на весь срок одного вызова. */
+			readonly token = {
+				onCancellationRequested: (listener: () => void) => {
+					this.cancellationListeners.add(listener);
+					return { dispose: () => this.cancellationListeners.delete(listener) };
+				},
+			};
+
+			/** Отправляет подписчикам тестовый сигнал отмены. */
+			cancel(): void {
+				for (const listener of this.cancellationListeners) {
+					listener();
+				}
+			}
+
+			/** Завершает жизненный цикл тестового cancellation source. */
+			dispose(): void {
+				this.cancellationListeners.clear();
 			}
 		},
 		workspace: {
@@ -30,13 +101,26 @@ function createVsCodeMock() {
 			}),
 		},
 		extensions: {
-			getExtension: () => null,
+			getExtension: (extensionId: string) => {
+				vscodeLifecycleCalls.push(`extension:get:${extensionId}`);
+				if (extensionId === 'vscode.git') {
+					return vscodeGitExtension;
+				}
+				return extensionId === 'kilocode.kilo-code' ? vscodeKiloExtension : null;
+			},
 		},
 		Uri: {
-			file: (fsPath: string) => ({ fsPath }),
+			file: (fsPath: string) => ({ fsPath, toString: () => fsPath }),
 		},
 		commands: {
-			executeCommand: async () => undefined,
+			getCommands: async () => {
+				vscodeLifecycleCalls.push('commands:get');
+				return [...vscodeAvailableCommands];
+			},
+			executeCommand: async (id: string, ...args: unknown[]) => {
+				vscodeCommandCalls.push({ id, args });
+				return vscodeExecuteCommandHandler?.(id, ...args);
+			},
 		},
 	};
 }
@@ -66,6 +150,501 @@ function createDeferred<T>() {
 	});
 	return { promise, resolve, reject };
 }
+
+/** Создает минимальный репозиторий встроенного Git API с изменяемым SCM input. */
+function createBuiltInGitRepository(rootPath: string, inputValue: string): any {
+	return {
+		rootUri: {
+			fsPath: rootPath,
+			toString: () => rootPath,
+		},
+		inputBox: { value: inputValue },
+		state: { onDidChange: () => ({ dispose() { } }) },
+	};
+}
+
+/** Подключает набор репозиториев к mock встроенного Git API. */
+function setBuiltInGitRepositories(repositories: any[]): void {
+	vscodeGitExtension = {
+		isActive: true,
+		exports: {
+			getAPI: () => ({
+				repositories,
+				getRepository: (uri: { fsPath?: string }) => repositories.find(
+					(repository) => repository.rootUri?.fsPath === uri.fsPath,
+				) || null,
+			}),
+		},
+	};
+}
+
+/** Проверяет выбор самого глубокого containing root без обратного совпадения с дочерним репозиторием. */
+test('GitService getBuiltInGitRepository fallback selects the deepest containing repository', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const outerRepository = createBuiltInGitRepository('/workspace/repository', 'outer');
+	const nestedRepository = createBuiltInGitRepository('/workspace/repository/packages/api', 'nested');
+	setBuiltInGitRepositories([outerRepository, nestedRepository]);
+
+	try {
+		assert.equal(
+			await service.getBuiltInGitRepository('/workspace/repository/packages/api/src/index.ts'),
+			nestedRepository,
+		);
+		assert.equal(await service.getBuiltInGitRepository('/workspace'), null);
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет ожидание nested repository, который built-in Git открывает после Reload Window. */
+test('GitService getBuiltInGitRepository waits for a deeper asynchronously opened repository', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const outerRepository = createBuiltInGitRepository('/workspace/repository', 'outer');
+	const nestedRepository = createBuiltInGitRepository('/workspace/repository/packages/api', 'nested');
+	const repositories = [outerRepository];
+	let openRepositoryListener: ((repository: any) => void) | undefined;
+	vscodeGitExtension = {
+		isActive: true,
+		exports: {
+			getAPI: () => ({
+				repositories,
+				getRepository: () => outerRepository,
+				onDidOpenRepository: (listener: (repository: any) => void) => {
+					openRepositoryListener = listener;
+					return { dispose: () => { openRepositoryListener = undefined; } };
+				},
+			}),
+		},
+	};
+
+	try {
+		const pendingRepository = service.getBuiltInGitRepository('/workspace/repository/packages/api');
+		await new Promise(resolve => setImmediate(resolve));
+		repositories.push(nestedRepository);
+		openRepositoryListener?.(nestedRepository);
+		assert.equal(await pendingRepository, nestedRepository);
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет точный rootUri, предварительную очистку и сохранение нового значения в Source Control. */
+test('GitService generateCommitMessageViaKilo uses the exact repository root and clears stale SCM input', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const apiRepository = createBuiltInGitRepository('/workspace/api', 'draft from user');
+	const webRepository = createBuiltInGitRepository('/workspace/web', 'web draft');
+	setBuiltInGitRepositories([apiRepository, webRepository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	vscodeExecuteCommandHandler = async (_id, sourceControl: any) => {
+		assert.equal(sourceControl.rootUri, apiRepository.rootUri);
+		assert.equal(apiRepository.inputBox.value, '');
+		apiRepository.inputBox.value = 'feat: generated by Kilo';
+	};
+
+	try {
+		const result = await service.generateCommitMessageViaKilo('/workspace/api/src');
+
+		assert.equal(result, 'feat: generated by Kilo');
+		assert.equal(apiRepository.inputBox.value, 'feat: generated by Kilo');
+		assert.equal(webRepository.inputBox.value, 'web draft');
+		assert.deepEqual(vscodeCommandCalls, [{
+			id: 'kilo-code.new.generateCommitMessage',
+			args: [{ rootUri: apiRepository.rootUri }],
+		}]);
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет активацию холодного Kilo Code строго до discovery и выполнения команды. */
+test('GitService generateCommitMessageViaKilo activates inactive extension before command discovery', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft');
+	setBuiltInGitRepositories([repository]);
+	setKiloCodeExtension(false);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	vscodeExecuteCommandHandler = async () => {
+		repository.inputBox.value = 'feat: activated generation';
+	};
+
+	try {
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), 'feat: activated generation');
+		assert.ok(vscodeLifecycleCalls.indexOf('kilo:activate') >= 0);
+		assert.ok(vscodeLifecycleCalls.indexOf('kilo:activate') < vscodeLifecycleCalls.indexOf('commands:get'));
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет общий hard deadline для зависшей активации Kilo Code до command discovery. */
+test('GitService generateCommitMessageViaKilo times out stalled extension activation', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	setKiloCodeExtension(false);
+	vscodeKiloActivationHandler = async () => new Promise(() => undefined);
+	const originalSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((handler: (...args: any[]) => void, _timeout?: number, ...args: any[]) => (
+		originalSetTimeout(handler, 0, ...args)
+	)) as typeof setTimeout;
+
+	try {
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		assert.equal(vscodeLifecycleCalls.includes('commands:get'), false);
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет логируемый fallback при отсутствии Kilo Code и ошибке его активации. */
+test('GitService generateCommitMessageViaKilo falls back when extension is missing or activation fails', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService() as any;
+	const logs: Array<{ event: string; reason: string }> = [];
+	service.logDebug = (event: string, payload?: { reason?: string }) => {
+		logs.push({ event, reason: payload?.reason || '' });
+	};
+
+	try {
+		vscodeKiloExtension = null;
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		assert.match(logs.at(-1)?.reason || '', /unavailable/);
+		assert.equal(vscodeLifecycleCalls.includes('commands:get'), false);
+
+		vscodeLifecycleCalls.length = 0;
+		setKiloCodeExtension(false);
+		vscodeKiloActivationHandler = async () => {
+			throw new Error('activation unavailable');
+		};
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		assert.match(logs.at(-1)?.reason || '', /activation failed: activation unavailable/);
+		assert.equal(vscodeLifecycleCalls.includes('commands:get'), false);
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет возврат повторно сгенерированного текста, совпавшего с прежним draft. */
+test('GitService generateCommitMessageViaKilo returns a same-result SCM value', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'feat: unchanged result');
+	setBuiltInGitRepositories([repository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	vscodeExecuteCommandHandler = async () => {
+		assert.equal(repository.inputBox.value, '');
+		repository.inputBox.value = 'feat: unchanged result';
+	};
+
+	try {
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), 'feat: unchanged result');
+		assert.equal(repository.inputBox.value, 'feat: unchanged result');
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет безопасный отказ без rootUri и без доступной команды Kilo. */
+test('GitService generateCommitMessageViaKilo skips unavailable command and repository without rootUri', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repositoryWithoutRoot = createBuiltInGitRepository('/workspace/api', 'draft from user');
+	repositoryWithoutRoot.rootUri = undefined;
+	setBuiltInGitRepositories([repositoryWithoutRoot]);
+	(service as any).getBuiltInGitRepository = async () => repositoryWithoutRoot;
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+
+	try {
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		assert.equal(repositoryWithoutRoot.inputBox.value, 'draft from user');
+		assert.deepEqual(vscodeCommandCalls, []);
+
+		const repository = createBuiltInGitRepository('/workspace/api', 'draft from user');
+		(service as any).getBuiltInGitRepository = async () => repository;
+		vscodeAvailableCommands = [];
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		assert.equal(repository.inputBox.value, 'draft from user');
+		assert.deepEqual(vscodeCommandCalls, []);
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет восстановление прежнего SCM draft после ошибки и пустого результата. */
+test('GitService generateCommitMessageViaKilo restores previous SCM input after failure or empty result', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft from user');
+	setBuiltInGitRepositories([repository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+
+	try {
+		vscodeExecuteCommandHandler = async () => {
+			assert.equal(repository.inputBox.value, '');
+			throw new Error('Kilo command failed');
+		};
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		assert.equal(repository.inputBox.value, 'draft from user');
+
+		repository.inputBox.value = 'another draft';
+		vscodeExecuteCommandHandler = async () => {
+			assert.equal(repository.inputBox.value, '');
+		};
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		assert.equal(repository.inputBox.value, 'another draft');
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет ожидание resolve после отложенной записи Kilo в SCM input. */
+test('GitService generateCommitMessageViaKilo waits for resolve after delayed SCM write', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft from user');
+	setBuiltInGitRepositories([repository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	const command = createDeferred<void>();
+	vscodeExecuteCommandHandler = async () => command.promise;
+
+	try {
+		const generation = service.generateCommitMessageViaKilo('/workspace/api');
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(repository.inputBox.value, '');
+		repository.inputBox.value = 'feat: generated before command resolve';
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(repository.inputBox.value, 'feat: generated before command resolve');
+		command.resolve();
+		assert.equal(await generation, 'feat: generated before command resolve');
+		assert.equal(repository.inputBox.value, 'feat: generated before command resolve');
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет сохранение аргументов Copilot и нового значения SCM input. */
+test('GitService generateCommitMessageViaCopilot keeps latest SCM input through shared lifecycle', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft from user');
+	setBuiltInGitRepositories([repository]);
+	vscodeExecuteCommandHandler = async (id, rootUri, placeholder, token) => {
+		assert.equal(id, 'github.copilot.git.generateCommitMessage');
+		assert.equal(rootUri, repository.rootUri);
+		assert.equal(placeholder, undefined);
+		assert.equal(typeof token, 'object');
+		assert.equal(repository.inputBox.value, 'draft from user');
+		repository.inputBox.value = 'fix: generated by Copilot';
+	};
+
+	try {
+		assert.equal(await service.generateCommitMessageViaCopilot('/workspace/api'), 'fix: generated by Copilot');
+		assert.equal(repository.inputBox.value, 'fix: generated by Copilot');
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет отмену зависшего Copilot fallback без записи устаревшего SCM input. */
+test('GitService generateCommitMessageViaCopilot cancels stalled generation without stale restore', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft from user');
+	setBuiltInGitRepositories([repository]);
+	vscodeExecuteCommandHandler = async (_id, _rootUri, _placeholder, token: any) => new Promise((_resolve, reject) => {
+		token.onCancellationRequested(() => reject(new Error('cancelled')));
+	});
+	const originalSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((handler: (...args: any[]) => void, _timeout?: number, ...args: any[]) => (
+		originalSetTimeout(handler, 0, ...args)
+	)) as typeof setTimeout;
+
+	try {
+		assert.equal(await service.generateCommitMessageViaCopilot('/workspace/api'), '');
+		assert.equal(repository.inputBox.value, 'draft from user');
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет сохранение пользовательского ввода, появившегося во время команды. */
+test('GitService generateCommitMessageViaKilo does not overwrite newer SCM input', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'stale draft');
+	const command = createDeferred<void>();
+	setBuiltInGitRepositories([repository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	vscodeExecuteCommandHandler = async () => command.promise;
+
+	try {
+		const generation = service.generateCommitMessageViaKilo('/workspace/api');
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(repository.inputBox.value, '');
+		repository.inputBox.value = 'new user text';
+		command.resolve();
+
+		assert.equal(await generation, 'new user text');
+		assert.equal(repository.inputBox.value, 'new user text');
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет последовательное выполнение двух генераций для одного repository. */
+test('GitService serializes concurrent commit message generations for one repository', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft');
+	const releases: Array<() => void> = [];
+	let running = 0;
+	let maxRunning = 0;
+	let commandCount = 0;
+	setBuiltInGitRepositories([repository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	vscodeExecuteCommandHandler = async () => {
+		const commandNumber = ++commandCount;
+		assert.equal(repository.inputBox.value, '');
+		running += 1;
+		maxRunning = Math.max(maxRunning, running);
+		await new Promise<void>(resolve => releases.push(resolve));
+		repository.inputBox.value = `generated ${commandNumber}`;
+		running -= 1;
+	};
+
+	try {
+		const first = service.generateCommitMessageViaKilo('/workspace/api');
+		const second = service.generateCommitMessageViaKilo('/workspace/api');
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(commandCount, 1);
+		releases.shift()?.();
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(commandCount, 2);
+		releases.shift()?.();
+
+		assert.deepEqual(await Promise.all([first, second]), ['generated 1', 'generated 2']);
+		assert.equal(maxRunning, 1);
+		assert.equal(repository.inputBox.value, 'generated 2');
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет 75-секундный hard timeout и восстановление draft при незавершающейся команде Kilo. */
+test('GitService generateCommitMessageViaKilo restores draft after its hard timeout', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft');
+	setBuiltInGitRepositories([repository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	vscodeExecuteCommandHandler = async () => {
+		assert.equal(repository.inputBox.value, '');
+		return await new Promise(() => undefined);
+	};
+	const originalSetTimeout = globalThis.setTimeout;
+	const requestedTimeouts: number[] = [];
+	globalThis.setTimeout = ((handler: (...args: any[]) => void, timeout?: number, ...args: any[]) => {
+		requestedTimeouts.push(timeout || 0);
+		return originalSetTimeout(handler, 0, ...args);
+	}) as typeof setTimeout;
+
+	try {
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		assert.equal(repository.inputBox.value, 'draft');
+		assert.ok(requestedTimeouts.length >= 3);
+		assert.equal(requestedTimeouts.every(timeout => timeout > 0 && timeout <= 75_000), true);
+		assert.equal(requestedTimeouts.some(timeout => timeout >= 74_000), true);
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет отсутствие новых Promise-цепочек за зависшей командой и восстановление после её завершения. */
+test('GitService quarantines a timed-out repository until the original command settles', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft');
+	setBuiltInGitRepositories([repository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	let commandCount = 0;
+	let releaseOriginalCommand: (() => void) | undefined;
+	vscodeExecuteCommandHandler = async () => {
+		commandCount += 1;
+		return await new Promise<void>((resolve) => {
+			releaseOriginalCommand = resolve;
+		});
+	};
+	const originalSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((handler: (...args: any[]) => void, _timeout?: number, ...args: any[]) => (
+		originalSetTimeout(handler, 0, ...args)
+	)) as typeof setTimeout;
+
+	try {
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		const replacementRepository = createBuiltInGitRepository('/workspace/api', 'replacement draft');
+		setBuiltInGitRepositories([replacementRepository]);
+		assert.equal(await service.generateCommitMessageViaCopilot('/workspace/api'), '');
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		assert.equal(commandCount, 1);
+
+		globalThis.setTimeout = originalSetTimeout;
+		releaseOriginalCommand?.();
+		await new Promise(resolve => setImmediate(resolve));
+		vscodeExecuteCommandHandler = async () => {
+			commandCount += 1;
+			replacementRepository.inputBox.value = 'feat: recovered generation';
+		};
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), 'feat: recovered generation');
+		assert.equal(commandCount, 2);
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет hard timeout Copilot, если команда игнорирует cancellation token. */
+test('GitService generateCommitMessageViaCopilot returns when cancellation is ignored', async () => {
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft');
+	setBuiltInGitRepositories([repository]);
+	vscodeExecuteCommandHandler = async () => new Promise(() => undefined);
+	const originalSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((handler: (...args: any[]) => void, _timeout?: number, ...args: any[]) => (
+		originalSetTimeout(handler, 0, ...args)
+	)) as typeof setTimeout;
+
+	try {
+		assert.equal(await service.generateCommitMessageViaCopilot('/workspace/api'), '');
+		assert.equal(repository.inputBox.value, 'draft');
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+		resetVsCodeMock();
+	}
+});
 
 test('GitService applyBranchTargetsByProject switches to existing prompt branch without source branch', async () => {
 	const { GitService } = await importGitService();

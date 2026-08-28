@@ -347,8 +347,8 @@ export class DockerContainersService implements vscode.Disposable {
 			daemon,
 			projects,
 			totalContainers: summaries.length,
-			runningContainers: summaries.filter(container => container.status === 'running').length,
-			stoppedContainers: summaries.filter(container => container.status === 'stopped').length,
+			runningContainers: summaries.filter(container => isDockerActiveLifecycleStatus(container.status)).length,
+			stoppedContainers: summaries.filter(container => !isDockerActiveLifecycleStatus(container.status)).length,
 			warningContainers: summaries.filter(container => container.statusTone === 'warning').length,
 			errorContainers: summaries.filter(container => container.statusTone === 'error').length,
 		};
@@ -367,7 +367,7 @@ export class DockerContainersService implements vscode.Disposable {
 		if (action === 'remove' && container.status !== 'stopped') {
 			throw new Error('Only stopped containers can be removed from the Docker widget.');
 		}
-		if (action === 'start' && container.status === 'running') {
+		if (action === 'start' && isDockerActiveLifecycleStatus(container.status)) {
 			throw new Error('Container is already running.');
 		}
 
@@ -1183,7 +1183,7 @@ export class DockerContainersService implements vscode.Disposable {
 		const standaloneContainers = restoreSnapshot.standaloneContainerIds
 			.map(containerId => containersById.get(containerId))
 			.filter((container): container is DockerContainerSummary => Boolean(container))
-			.filter(container => container.status !== 'running');
+			.filter(container => !isDockerActiveLifecycleStatus(container.status));
 		const standaloneResult = await this.runWorkspaceContainerBatch(standaloneContainers, 'start');
 		if (standaloneResult.completedContainers.length > 0) {
 			this.invalidate(false, 'container');
@@ -1516,8 +1516,8 @@ function buildDockerContainerProjectGroups(
 		group.composeFiles.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'ru'));
 		group.containers.sort(compareDockerContainers);
 		group.composeFileGroups = buildDockerComposeFileContainerGroups(group.composeFiles, group.containers, serviceNamesByComposeFile);
-		group.runningCount = group.containers.filter(container => container.status === 'running').length;
-		group.stoppedCount = group.containers.filter(container => container.status === 'stopped').length;
+		group.runningCount = group.containers.filter(container => isDockerActiveLifecycleStatus(container.status)).length;
+		group.stoppedCount = group.containers.filter(container => !isDockerActiveLifecycleStatus(container.status)).length;
 		group.warningCount = group.containers.filter(container => container.statusTone === 'warning').length;
 		group.errorCount = group.containers.filter(container => container.statusTone === 'error').length;
 	}
@@ -1546,8 +1546,8 @@ function buildDockerComposeFileContainerGroups(
 			status: status.status,
 			statusTone: status.statusTone,
 			statusText: status.statusText,
-			runningCount: composeContainers.filter(container => container.status === 'running').length,
-			stoppedCount: composeContainers.filter(container => container.status === 'stopped').length,
+			runningCount: composeContainers.filter(container => isDockerActiveLifecycleStatus(container.status)).length,
+			stoppedCount: composeContainers.filter(container => !isDockerActiveLifecycleStatus(container.status)).length,
 			warningCount: composeContainers.filter(container => container.statusTone === 'warning').length,
 			errorCount: composeContainers.filter(container => container.statusTone === 'error').length,
 		};
@@ -1559,7 +1559,7 @@ function resolveDockerComposeFileStatus(
 	containers: DockerContainerSummary[],
 	serviceNames: string[],
 ): { status: DockerContainerLifecycleStatus; statusTone: DockerContainerStatusTone; statusText: string } {
-	const runningCount = containers.filter(container => container.status === 'running').length;
+	const runningCount = containers.filter(container => isDockerActiveLifecycleStatus(container.status)).length;
 	const errorCount = containers.filter(container => container.statusTone === 'error').length;
 	if (errorCount > 0) {
 		return { status: 'error', statusTone: 'error', statusText: `Ошибки: ${errorCount}` };
@@ -1581,7 +1581,7 @@ function resolveDockerComposeFileStatus(
 
 /** Sorts running containers first, then by project service/name. */
 function compareDockerContainers(left: DockerContainerSummary, right: DockerContainerSummary): number {
-	const statusPriority = (status: DockerContainerLifecycleStatus): number => status === 'running' ? 0 : status === 'stopped' ? 2 : 1;
+	const statusPriority = (status: DockerContainerLifecycleStatus): number => isDockerActiveLifecycleStatus(status) ? 0 : 2;
 	const byStatus = statusPriority(left.status) - statusPriority(right.status);
 	if (byStatus !== 0) {
 		return byStatus;
@@ -1589,8 +1589,8 @@ function compareDockerContainers(left: DockerContainerSummary, right: DockerCont
 	return `${left.service}:${left.name}`.localeCompare(`${right.service}:${right.name}`, 'ru');
 }
 
-/** Maps Docker state into the widget lifecycle status union. */
-function resolveContainerLifecycleStatus(container: DockerEngineContainerListItem, inspect?: DockerEngineContainerInspect): DockerContainerLifecycleStatus {
+/** Преобразует Docker state в lifecycle-статус виджета без признания created активным. */
+export function resolveContainerLifecycleStatus(container: DockerEngineContainerListItem, inspect?: DockerEngineContainerInspect): DockerContainerLifecycleStatus {
 	const state = inspect?.State;
 	const rawState = String(state?.Status || container.State || '').toLowerCase();
 	if (state?.Dead || state?.Error || rawState === 'dead') {
@@ -1606,7 +1606,7 @@ function resolveContainerLifecycleStatus(container: DockerEngineContainerListIte
 		return 'running';
 	}
 	if (rawState === 'created') {
-		return 'starting';
+		return 'stopped';
 	}
 	if (rawState === 'exited' || rawState === 'removing') {
 		return 'stopped';
@@ -1804,7 +1804,7 @@ function getUniqueDockerContainers(data: DockerContainersData): DockerContainerS
 /** Collects exact running container ids from one Docker widget snapshot. */
 function getRunningDockerContainerIds(data: DockerContainersData): string[] {
 	return getUniqueDockerContainers(data)
-		.filter(container => container.status === 'running')
+		.filter(container => isDockerActiveLifecycleStatus(container.status))
 		.map(container => container.id);
 }
 
@@ -1818,7 +1818,7 @@ function buildDockerWorkspaceRestoreSnapshot(data: DockerContainersData): {
 	const composeTargets: DockerWorkspaceComposeRestoreTarget[] = [];
 	for (const project of data.projects) {
 		for (const group of project.composeFileGroups) {
-			const runningContainers = group.containers.filter(container => container.status === 'running');
+		const runningContainers = group.containers.filter(container => isDockerActiveLifecycleStatus(container.status));
 			if (runningContainers.length === 0) {
 				continue;
 			}
@@ -1836,7 +1836,7 @@ function buildDockerWorkspaceRestoreSnapshot(data: DockerContainersData): {
 	const standaloneContainerIds = resolveStandaloneDockerContainersForStop(
 		data,
 		getUniqueDockerContainers(data)
-			.filter(container => container.status === 'running' && !rememberedContainerIds.has(container.id))
+			.filter(container => isDockerActiveLifecycleStatus(container.status) && !rememberedContainerIds.has(container.id))
 			.map(container => container.id),
 	).map(container => container.id);
 	const containerCount = composeTargets.reduce((total, target) => total + target.containerCount, 0) + standaloneContainerIds.length;
@@ -1868,7 +1868,7 @@ function buildPendingDockerWorkspaceRestoreSnapshot(
 	});
 	const standaloneContainerIds = restoreSnapshot.standaloneContainerIds.filter(containerId => {
 		const container = findContainerSummary(data, containerId);
-		return container ? container.status !== 'running' : true;
+		return container ? !isDockerActiveLifecycleStatus(container.status) : true;
 	});
 	const containerCount = composeTargets.reduce((total, target) => total + target.containerCount, 0) + standaloneContainerIds.length;
 	return { composeTargets, standaloneContainerIds, containerCount };
@@ -1940,8 +1940,8 @@ function rebuildDockerContainersDataRuntime(
 				status: status.status,
 				statusTone: status.statusTone,
 				statusText: status.statusText,
-				runningCount: groupContainers.filter(container => container.status === 'running').length,
-				stoppedCount: groupContainers.filter(container => container.status === 'stopped').length,
+				runningCount: groupContainers.filter(container => isDockerActiveLifecycleStatus(container.status)).length,
+				stoppedCount: groupContainers.filter(container => !isDockerActiveLifecycleStatus(container.status)).length,
 				warningCount: groupContainers.filter(container => container.statusTone === 'warning').length,
 				errorCount: groupContainers.filter(container => container.statusTone === 'error').length,
 			};
@@ -1950,8 +1950,8 @@ function rebuildDockerContainersDataRuntime(
 			...project,
 			containers,
 			composeFileGroups,
-			runningCount: containers.filter(container => container.status === 'running').length,
-			stoppedCount: containers.filter(container => container.status === 'stopped').length,
+			runningCount: containers.filter(container => isDockerActiveLifecycleStatus(container.status)).length,
+			stoppedCount: containers.filter(container => !isDockerActiveLifecycleStatus(container.status)).length,
 			warningCount: containers.filter(container => container.statusTone === 'warning').length,
 			errorCount: containers.filter(container => container.statusTone === 'error').length,
 		};
@@ -1962,8 +1962,8 @@ function rebuildDockerContainersDataRuntime(
 		generatedAt: new Date(nowMs).toISOString(),
 		projects,
 		totalContainers: allContainers.length,
-		runningContainers: allContainers.filter(container => container.status === 'running').length,
-		stoppedContainers: allContainers.filter(container => container.status === 'stopped').length,
+		runningContainers: allContainers.filter(container => isDockerActiveLifecycleStatus(container.status)).length,
+		stoppedContainers: allContainers.filter(container => !isDockerActiveLifecycleStatus(container.status)).length,
 		warningContainers: allContainers.filter(container => container.statusTone === 'warning').length,
 		errorContainers: allContainers.filter(container => container.statusTone === 'error').length,
 	};
@@ -1979,8 +1979,8 @@ function resolveRuntimeDockerContainerUptimeMs(
 		: 0;
 }
 
-/** Treats running, starting, restarting and paused containers as still active. */
-function isDockerActiveLifecycleStatus(status: DockerContainerLifecycleStatus | null | undefined): boolean {
+/** Считает running, starting, restarting и paused активными lifecycle-состояниями. */
+export function isDockerActiveLifecycleStatus(status: DockerContainerLifecycleStatus | null | undefined): boolean {
 	return status === 'running' || status === 'starting' || status === 'restarting' || status === 'paused';
 }
 

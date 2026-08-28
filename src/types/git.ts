@@ -143,6 +143,8 @@ export interface GitOverlayChangeFile {
 	additions: number | null;
 	deletions: number | null;
 	isBinary: boolean;
+	/** Показывает, что сохранённые line stats требуют свежей hydration после reactive refresh. */
+	lineStatsHydrated?: boolean;
 }
 
 export interface GitOverlayBranchInfo {

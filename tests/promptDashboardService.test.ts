@@ -948,8 +948,10 @@ test('PromptDashboardService refreshProjectsWidget bypasses warm cache after rep
 	service.dispose();
 });
 
-test('PromptDashboardService exposes workspace-wide branchProjects without widening the other dashboard widgets', async () => {
+/** Проверяет workspace-wide branchProjects и точечную dirty-details hydration вне prompt scope. */
+test('PromptDashboardService exposes and hydrates workspace-wide branchProjects without widening other widgets', async () => {
 	const requestedProjectSets: string[][] = [];
+	const projectSnapshotTargets: string[] = [];
 	const snapshotOptions: Array<Record<string, unknown> | undefined> = [];
 	const workspaceFolders = new Map([
 		['api', '/workspace/api'],
@@ -988,6 +990,20 @@ test('PromptDashboardService exposes workspace-wide branchProjects without widen
 					})),
 				};
 			},
+			getGitOverlayProjectSnapshot: async (
+				_paths: Map<string, string>,
+				project: string,
+			) => {
+				projectSnapshotTargets.push(project);
+				return createSnapshotProject(project, {
+					changeGroups: {
+						merge: [],
+						staged: [{ project, path: `src/${project}.ts`, status: 'M', group: 'staged', conflicted: false, staged: true, fileSizeBytes: 128, additions: 9, deletions: 3, isBinary: false }],
+						workingTree: [],
+						untracked: [],
+					},
+				});
+			},
 			getGitOverlayProjectPipelineStatus: async () => null,
 			getGitOverlayParallelBranchSummaries: async () => [],
 			getCommitChangedFiles: async () => [],
@@ -997,7 +1013,8 @@ test('PromptDashboardService exposes workspace-wide branchProjects without widen
 		} as any,
 	);
 
-	const widget = await service.refreshProjectsWidget(createPrompt({ projects: ['api'] }));
+	const prompt = createPrompt({ projects: ['api'] });
+	const widget = await service.refreshProjectsWidget(prompt);
 	const branchProjectsSnapshotOptions = snapshotOptions[snapshotOptions.length - 1] || {};
 
 	assert.deepEqual(requestedProjectSets, [['api'], ['web']]);
@@ -1006,6 +1023,23 @@ test('PromptDashboardService exposes workspace-wide branchProjects without widen
 	assert.equal(branchProjectsSnapshotOptions.includeChangeDetails, true);
 	assert.equal(branchProjectsSnapshotOptions.includeReviewState, false);
 	assert.equal(branchProjectsSnapshotOptions.includeRecentCommits, false);
+
+	requestedProjectSets.length = 0;
+	const hydratedWidget = await service.refreshProjectsWidget(
+		prompt,
+		undefined,
+		'web-details',
+		'dirty-details',
+		['web'],
+	);
+	assert.deepEqual(projectSnapshotTargets, ['web']);
+	assert.deepEqual(requestedProjectSets, []);
+	assert.deepEqual(hydratedWidget.data.projects.map(project => project.project), ['api']);
+	assert.deepEqual(hydratedWidget.data.branchProjects?.map(project => project.project), ['api', 'web']);
+	assert.equal(
+		hydratedWidget.data.branchProjects?.find(project => project.project === 'web')?.uncommittedFiles[0]?.additions,
+		9,
+	);
 	service.dispose();
 });
 
@@ -2729,6 +2763,168 @@ test('PromptDashboardService lightweight refresh keeps hydrated dirty-file stats
 	assert.equal(reactiveSnapshotOptions.includeChangeDetails, false);
 	assert.equal(reactiveWidget.data.projects[0]?.uncommittedFiles[0]?.additions, 7);
 	assert.equal(reactiveWidget.data.projects[0]?.uncommittedFiles[0]?.deletions, 2);
+	service.dispose();
+});
+
+/** Проверяет раскрытый dirty-список на подтверждённых, reactive и повторно подтверждённых данных. */
+test('PromptDashboardService keeps confirmed dirty stats until reactive rows are rehydrated in both project collections', async () => {
+	type DirtyStatsPhase = 'confirmed' | 'reactive' | 'changed';
+	let phase: DirtyStatsPhase = 'confirmed';
+	const workspaceFolders = new Map([
+		['api', '/workspace/api'],
+		['web', '/workspace/web'],
+	]);
+
+	/** Строит snapshot с одинаковым путём, раздельно учтённым в staged и working-tree группах. */
+	const buildDirtyProject = (project: string, includeDetails: boolean) => {
+		const changed = phase === 'changed';
+		const includeRemovedFile = phase === 'confirmed';
+		return createSnapshotProject(project, {
+			dirty: true,
+			changeGroups: {
+				merge: [],
+				staged: [{
+					project,
+					path: 'src/shared.ts',
+					status: 'M',
+					group: 'staged',
+					conflicted: false,
+					staged: true,
+					fileSizeBytes: includeDetails ? 96 : 0,
+					additions: includeDetails ? (changed ? 4 : 2) : null,
+					deletions: includeDetails ? (changed ? 1 : 0) : null,
+					isBinary: false,
+				}],
+				workingTree: [{
+					project,
+					path: 'src/shared.ts',
+					status: 'M',
+					group: 'working-tree',
+					conflicted: false,
+					staged: false,
+					fileSizeBytes: includeDetails ? 192 : 0,
+					additions: includeDetails ? (changed ? 11 : 7) : null,
+					deletions: includeDetails ? (changed ? 4 : 2) : null,
+					isBinary: false,
+				}, ...(includeRemovedFile ? [{
+					project,
+					path: 'src/removed-before-reactive.ts',
+					status: 'M',
+					group: 'working-tree',
+					conflicted: false,
+					staged: false,
+					fileSizeBytes: includeDetails ? 64 : 0,
+					additions: includeDetails ? 3 : null,
+					deletions: includeDetails ? 1 : null,
+					isBinary: false,
+				}] : [])],
+				untracked: [],
+			},
+		});
+	};
+
+	const service = new PromptDashboardService(
+		{
+			listPrompts: async () => [],
+			getDailyTime: async () => ({}),
+			getDailyTimeTotalInRange: () => 0,
+			readAgentProgress: async () => undefined,
+		} as any,
+		{
+			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+			getWorkspaceFolderPaths: () => workspaceFolders,
+		} as any,
+		{
+			getGitOverlaySnapshot: async (
+				_paths: Map<string, string>,
+				projectNames: string[],
+				_promptBranch: string,
+				_trackedBranches: string[],
+				options?: Record<string, unknown>,
+			) => ({
+				trackedBranches: ['main'],
+				projects: projectNames.map(project => buildDirtyProject(project, options?.includeChangeDetails === true)),
+			}),
+			getGitOverlayProjectSnapshot: async (
+				_paths: Map<string, string>,
+				project: string,
+				_promptBranch: string,
+				_trackedBranches: string[],
+				options?: Record<string, unknown>,
+			) => buildDirtyProject(project, options?.includeChangeDetails === true),
+			getGitOverlayProjectPipelineStatus: async () => null,
+			getGitOverlayParallelBranchSummaries: async () => [],
+			getCommitChangedFiles: async () => [],
+		} as any,
+		{
+			analyzePromptDashboardReview: async () => 'ok',
+		} as any,
+	);
+
+	const prompt = createPrompt({ projects: ['api'], trackedBranchesByProject: { api: 'main' } });
+	await service.refreshProjectsWidget(prompt, undefined, 'display', 'display');
+	const confirmedWidget = await service.refreshProjectsWidget(
+		prompt,
+		undefined,
+		'confirmed',
+		'dirty-details',
+		['api'],
+	);
+
+	/** Находит проект в выбранной или workspace-wide коллекции строк веток. */
+	const readProject = (
+		widget: typeof confirmedWidget,
+		collection: 'projects' | 'branchProjects',
+	) => (collection === 'projects' ? widget.data.projects : widget.data.branchProjects || [])
+		.find(project => project.project === 'api');
+	for (const collection of ['projects', 'branchProjects'] as const) {
+		const files = readProject(confirmedWidget, collection)?.uncommittedFiles || [];
+		assert.equal(files.find(file => file.group === 'staged')?.additions, 2);
+		assert.equal(files.find(file => file.group === 'working-tree' && file.path === 'src/shared.ts')?.additions, 7);
+		assert.equal(files.some(file => file.path === 'src/removed-before-reactive.ts'), true);
+	}
+
+	phase = 'reactive';
+	const reactiveWidget = await service.refreshProjectsWidget(
+		prompt,
+		undefined,
+		'reactive',
+		'reactive-branches',
+		['api'],
+	);
+	for (const collection of ['projects', 'branchProjects'] as const) {
+		const files = readProject(reactiveWidget, collection)?.uncommittedFiles || [];
+		const stagedFile = files.find(file => file.group === 'staged');
+		const workingTreeFile = files.find(file => file.group === 'working-tree');
+		assert.equal(stagedFile?.additions, 2);
+		assert.equal(stagedFile?.deletions, 0);
+		assert.equal(workingTreeFile?.additions, 7);
+		assert.equal(workingTreeFile?.deletions, 2);
+		assert.equal(stagedFile?.lineStatsHydrated, false);
+		assert.equal(workingTreeFile?.lineStatsHydrated, false);
+		assert.equal(files.some(file => file.path === 'src/removed-before-reactive.ts'), false);
+	}
+	assert.deepEqual(reactiveWidget.data.branchProjects?.map(project => project.project), ['api', 'web']);
+
+	phase = 'changed';
+	const changedWidget = await service.refreshProjectsWidget(
+		prompt,
+		undefined,
+		'changed',
+		'dirty-details',
+		['api'],
+	);
+	for (const collection of ['projects', 'branchProjects'] as const) {
+		const files = readProject(changedWidget, collection)?.uncommittedFiles || [];
+		const stagedFile = files.find(file => file.group === 'staged');
+		const workingTreeFile = files.find(file => file.group === 'working-tree');
+		assert.equal(stagedFile?.additions, 4);
+		assert.equal(stagedFile?.deletions, 1);
+		assert.equal(workingTreeFile?.additions, 11);
+		assert.equal(workingTreeFile?.deletions, 4);
+		assert.notEqual(stagedFile?.lineStatsHydrated, false);
+		assert.notEqual(workingTreeFile?.lineStatsHydrated, false);
+	}
 	service.dispose();
 });
 

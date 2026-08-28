@@ -1724,6 +1724,275 @@ test('postGitOverlaySnapshot keeps freshly created review requests visible when 
 	assert.deepEqual(postedMessages[0]?.snapshot?.projects?.[0]?.review?.request, optimisticRequest);
 });
 
+/** Проверяет приоритет Kilo и последовательную резервную генерацию по проектам. */
+test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequential', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager();
+	const postedMessages: any[] = [];
+	const callOrder: string[] = [];
+	const firstProject = createDeferred<string>();
+	const currentPrompt = createPrompt({
+		projects: ['api', 'web'],
+		branch: 'feature/task-164',
+	});
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([
+			['api', '/tmp/api'],
+			['web', '/tmp/web'],
+		]),
+		getWorkspaceFolders: () => ['api', 'web'],
+	};
+	(manager as any).gitService = {
+		getStagedCommitProjectData: async () => [
+			{
+				project: 'api',
+				projectPath: '/tmp/api',
+				branch: 'feature/task-164',
+				changeSource: 'staged',
+				stagedFiles: [{ status: 'M', path: 'src/api.ts' }],
+				stat: '1 file changed',
+				diff: 'api diff',
+			},
+			{
+				project: 'web',
+				projectPath: '/tmp/web',
+				branch: 'feature/task-164',
+				changeSource: 'staged',
+				stagedFiles: [{ status: 'M', path: 'src/web.ts' }],
+				stat: '1 file changed',
+				diff: 'web diff',
+			},
+		],
+		generateCommitMessageViaKilo: async (projectPath: string) => {
+			callOrder.push(`kilo:${projectPath}`);
+			if (projectPath === '/tmp/api') {
+				return firstProject.promise;
+			}
+			throw new Error('Kilo command failed');
+		},
+		generateCommitMessageViaCopilot: async (projectPath: string) => {
+			callOrder.push(`copilot:${projectPath}`);
+			throw new Error('Copilot command failed');
+		},
+	};
+	(manager as any).aiService.generateCommitMessage = async ({ projectName }: { projectName: string }) => {
+		callOrder.push(`internal:${projectName}`);
+		return `chore: update ${projectName}`;
+	};
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+
+	const handling = (manager as any).handleMessage(
+		{
+			type: 'gitOverlayGenerateCommitMessage',
+			prompt: currentPrompt,
+			projects: ['api', 'web'],
+			requestId: 'req-generate-164',
+		},
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+	await flushTurns();
+	assert.deepEqual(callOrder, ['kilo:/tmp/api']);
+
+	firstProject.resolve('feat: update api');
+	await handling;
+
+	assert.deepEqual(callOrder, [
+		'kilo:/tmp/api',
+		'kilo:/tmp/web',
+		'copilot:/tmp/web',
+		'internal:web',
+	]);
+	assert.deepEqual(postedMessages.find(message => message.type === 'gitOverlayCommitMessagesGenerated'), {
+		type: 'gitOverlayCommitMessagesGenerated',
+		messages: [
+			{ project: 'api', message: 'feat: update api' },
+			{ project: 'web', message: 'chore: update web' },
+		],
+		requestId: 'req-generate-164',
+	});
+	resetVsCodeCommandMock();
+});
+
+/** Проверяет финальное сообщение tracked request при неожиданном исключении host-case. */
+test('gitOverlayGenerateCommitMessage finishes tracked request after host exception', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager();
+	const postedMessages: any[] = [];
+	const debugMessages: string[] = [];
+	const currentPrompt = createPrompt({
+		projects: ['api'],
+		branch: 'feature/task-164',
+	});
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([['api', '/tmp/api']]),
+		getWorkspaceFolders: () => ['api'],
+	};
+	(manager as any).gitService = {
+		getStagedCommitProjectData: async () => {
+			throw new Error('staged data failed');
+		},
+	};
+	(manager as any).logReportDebug = (_event: string, payload?: { message?: string }) => {
+		debugMessages.push(payload?.message || '');
+	};
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+
+	await (manager as any).handleMessage(
+		{
+			type: 'gitOverlayGenerateCommitMessage',
+			prompt: currentPrompt,
+			projects: ['api'],
+			requestId: 'req-generate-error-164',
+		},
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(postedMessages, [
+		{
+			type: 'error',
+			message: 'Failed to generate commit messages. Try again.',
+			requestId: 'req-generate-error-164',
+		},
+		{
+			type: 'gitOverlayCommitMessagesGenerated',
+			messages: [],
+			requestId: 'req-generate-error-164',
+		},
+	]);
+	assert.equal(debugMessages.some(message => message.includes('staged data failed')), true);
+	resetVsCodeCommandMock();
+});
+
+/** Проверяет terminal response при stale prompt после переименования. */
+test('gitOverlayGenerateCommitMessage finishes stale renamed prompt request', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager();
+	const postedMessages: any[] = [];
+	const currentPrompt = createPrompt({ id: 'renamed-prompt', promptUuid: 'uuid-164' });
+	const incomingPrompt = createPrompt({ id: 'old-prompt', promptUuid: 'uuid-164' });
+	(manager as any).gitService = {
+		getStagedCommitProjectData: async () => {
+			throw new Error('stale request must not reach Git');
+		},
+	};
+
+	await (manager as any).handleMessage(
+		{
+			type: 'gitOverlayGenerateCommitMessage',
+			prompt: incomingPrompt,
+			projects: ['api'],
+			requestId: 'req-stale-generate-164',
+		},
+		{ webview: { postMessage: async (message: unknown) => postedMessages.push(message) } } as any,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(postedMessages, [{
+		type: 'gitOverlayCommitMessagesGenerated',
+		messages: [],
+		requestId: 'req-stale-generate-164',
+	}]);
+	resetVsCodeCommandMock();
+});
+
+/** Проверяет production-like stageAll flow без изменения существующих аргументов. */
+test('gitOverlayGenerateCommitMessage preserves includeAllChanges stageAll semantics', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager();
+	const postedMessages: any[] = [];
+	const stageCalls: any[] = [];
+	const snapshotCalls: any[] = [];
+	const paths = new Map([['api', '/tmp/api']]);
+	const currentPrompt = createPrompt({
+		projects: ['api'],
+		branch: 'feature/task-164',
+	});
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => paths,
+		getWorkspaceFolders: () => ['api'],
+	};
+	(manager as any).gitService = {
+		stageAll: async (...args: unknown[]) => {
+			stageCalls.push(args);
+			return { success: true, errors: [], changedProjects: ['api'], skippedProjects: [] };
+		},
+		getStagedCommitProjectData: async () => [{
+			project: 'api',
+			projectPath: '/tmp/api',
+			branch: 'feature/task-164',
+			changeSource: 'staged',
+			stagedFiles: [{ status: 'M', path: 'src/api.ts' }],
+			stat: '1 file changed',
+			diff: 'api diff',
+		}],
+		generateCommitMessageViaKilo: async () => 'feat: generated',
+		generateCommitMessageViaCopilot: async () => {
+			throw new Error('Copilot must not run after Kilo success');
+		},
+	};
+	(manager as any).postGitOverlaySnapshot = async (...args: unknown[]) => {
+		snapshotCalls.push(args);
+	};
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+
+	await (manager as any).handleMessage(
+		{
+			type: 'gitOverlayGenerateCommitMessage',
+			prompt: currentPrompt,
+			projects: ['api'],
+			includeAllChanges: true,
+			requestId: 'req-stage-all-164',
+		},
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(stageCalls, [[paths, ['api'], false]]);
+	assert.equal(snapshotCalls.length, 1);
+	assert.equal(snapshotCalls[0]?.[4]?.requestId, 'req-stage-all-164');
+	assert.deepEqual(postedMessages, [{
+		type: 'gitOverlayCommitMessagesGenerated',
+		messages: [{ project: 'api', message: 'feat: generated' }],
+		requestId: 'req-stage-all-164',
+	}]);
+	resetVsCodeCommandMock();
+});
+
 test('gitOverlayCreateReviewRequest refreshes the current overlay scope with the tracked request id', async () => {
 	resetVsCodeCommandMock();
 	const { manager } = await createManager({
@@ -2538,7 +2807,8 @@ test('scheduleGitOverlayAutoRefreshForActiveSessions refreshes only other projec
 	assert.equal(fullRefreshCalls, 0);
 });
 
-test('scheduleGitReactiveAutoRefresh refreshes prompt dashboard for scoped file and git changes', async () => {
+/** Проверяет точечный reactive refresh для selected и workspace-only проектов. */
+test('scheduleGitReactiveAutoRefresh refreshes prompt dashboard for workspace file and git changes', async () => {
 	const { manager } = await createManager();
 	const currentPrompt = createPrompt({
 		id: 'task-42',
@@ -2568,6 +2838,8 @@ test('scheduleGitReactiveAutoRefresh refreshes prompt dashboard for scoped file 
 	(manager as any).panelPromptRefs.set('panel-a', currentPrompt);
 	(manager as any).resolveOpenEditorPanel = () => panel;
 	const refreshModes: string[] = [];
+	const refreshProjects: string[][] = [];
+	let todoRefreshCalls = 0;
 	(manager as any).promptDashboardService = {
 		setDockerWidgetCollapsed: () => undefined,
 		refreshProjectsWidget: async (
@@ -2575,9 +2847,11 @@ test('scheduleGitReactiveAutoRefresh refreshes prompt dashboard for scoped file 
 			postMessage?: (message: unknown) => void,
 			_requestId?: string,
 			mode?: string,
+			projects?: string[],
 		) => {
 			refreshCalls += 1;
 			refreshModes.push(mode || '');
+			refreshProjects.push([...(projects || [])]);
 			postMessage?.({
 				type: 'promptDashboardWidgetSnapshot',
 				promptId: 'task-42',
@@ -2590,34 +2864,92 @@ test('scheduleGitReactiveAutoRefresh refreshes prompt dashboard for scoped file 
 			});
 			return null;
 		},
+		refreshWidgetSnapshot: async (_prompt: unknown, widget: string) => {
+			if (widget === 'todos') {
+				todoRefreshCalls += 1;
+			}
+			return null;
+		},
 	};
 
 	await withImmediateTimers(async () => {
 		(manager as any).scheduleGitReactiveAutoRefresh('file', '/tmp/peer/src/changed.ts');
 		await flushTurns();
 	});
-	assert.equal(refreshCalls, 0);
+	assert.equal(refreshCalls, 1);
 
 	await withImmediateTimers(async () => {
 		(manager as any).scheduleGitReactiveAutoRefresh('file', '/tmp/selected/src/changed.ts');
 		await flushTurns();
 	});
-	assert.equal(refreshCalls, 1);
+	assert.equal(refreshCalls, 2);
 
 	await withImmediateTimers(async () => {
 		(manager as any).scheduleGitReactiveAutoRefresh('git', '/tmp/peer');
 		await flushTurns();
 	});
-	assert.equal(refreshCalls, 1);
+	assert.equal(refreshCalls, 3);
 
 	await withImmediateTimers(async () => {
 		(manager as any).scheduleGitReactiveAutoRefresh('git', '/tmp/selected');
 		await flushTurns();
 	});
 
-	assert.equal(refreshCalls, 2);
-	assert.deepEqual(refreshModes, ['reactive-branches', 'reactive-branches']);
+	assert.equal(refreshCalls, 4);
+	assert.deepEqual(refreshModes, [
+		'reactive-branches',
+		'reactive-branches',
+		'reactive-branches',
+		'reactive-branches',
+	]);
+	assert.deepEqual(refreshProjects, [['peer'], ['selected'], ['peer'], ['selected']]);
 	assert.equal(postedMessages.some(message => message?.type === 'promptDashboardWidgetSnapshot'), true);
+	assert.equal(todoRefreshCalls, 2);
+
+	// File-причина и оба проекта сохраняются, даже если последним debounce-сигналом был Git.
+	const originalSetTimeout = globalThis.setTimeout;
+	const originalClearTimeout = globalThis.clearTimeout;
+	const pendingTimers = new Map<number, () => void>();
+	let nextTimerId = 0;
+	globalThis.setTimeout = ((handler: () => void) => {
+		nextTimerId += 1;
+		pendingTimers.set(nextTimerId, handler);
+		return nextTimerId as unknown as NodeJS.Timeout;
+	}) as typeof setTimeout;
+	globalThis.clearTimeout = ((timer: NodeJS.Timeout) => {
+		pendingTimers.delete(Number(timer));
+	}) as typeof clearTimeout;
+	try {
+		(manager as any).scheduleGitReactiveAutoRefresh('file', '/tmp/peer/src/changed.ts');
+		(manager as any).scheduleGitReactiveAutoRefresh('git', '/tmp/selected');
+		assert.equal(pendingTimers.size, 1);
+		Array.from(pendingTimers.values())[0]?.();
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+		globalThis.clearTimeout = originalClearTimeout;
+	}
+	await flushTurns();
+	assert.equal(refreshCalls, 5);
+	assert.deepEqual(refreshProjects[4], ['peer', 'selected']);
+	assert.equal(todoRefreshCalls, 3);
+});
+
+/** Проверяет очистку debounce targets и причин при переключении промпта в singleton panel. */
+test('setPanelPromptRef clears pending dashboard reactive state when prompt identity changes', async () => {
+	const { manager } = await createManager();
+	const panelKey = 'panel-a';
+	(manager as any).panelPromptRefs.set(panelKey, createPrompt({ id: 'task-1', promptUuid: 'uuid-1' }));
+	(manager as any).promptDashboardReactiveProjectsByPanel.set(panelKey, new Set(['peer']));
+	(manager as any).promptDashboardReactiveFileRefreshByPanel.add(panelKey);
+	(manager as any).promptDashboardPendingRefreshOnReveal.add(panelKey);
+	(manager as any).promptDashboardReactiveRefreshTimers.set(panelKey, setTimeout(() => undefined, 60_000));
+
+	(manager as any).setPanelPromptRef(panelKey, createPrompt({ id: 'task-2', promptUuid: 'uuid-2' }));
+
+	assert.equal((manager as any).promptDashboardReactiveRefreshTimers.has(panelKey), false);
+	assert.equal((manager as any).promptDashboardReactiveProjectsByPanel.has(panelKey), false);
+	assert.equal((manager as any).promptDashboardReactiveFileRefreshByPanel.has(panelKey), false);
+	assert.equal((manager as any).promptDashboardPendingRefreshOnReveal.has(panelKey), false);
 });
 
 test('first visible prompt editor event skips bootstrap dashboard projects refresh', async () => {
@@ -2964,6 +3296,76 @@ test('hydratePromptDashboardProjectsDetails refreshes only the projects widget i
 	assert.deepEqual(receivedModes, ['details']);
 	assert.deepEqual(receivedProjects, [['api']]);
 	assert.equal(panelMessages.some((message: any) => message?.type === 'promptDashboardWidgetSnapshot'), true);
+});
+
+/** Проверяет terminal response при collapse race после отправки project-details request. */
+test('hydratePromptDashboardProjectsDetails completes request when projects widget collapsed before host handling', async () => {
+	const { manager } = await createManager();
+	const panelMessages: any[] = [];
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+	(manager as any).isPromptDashboardWidgetCollapsed = (widget: string) => widget === 'projects';
+
+	await (manager as any).handleMessage(
+		{
+			type: 'hydratePromptDashboardProjectsDetails',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			projects: ['api'],
+			requestId: 'dashboard-hydrate-collapsed',
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(panelMessages, [{
+		type: 'promptDashboardRequestCompleted',
+		requestId: 'dashboard-hydrate-collapsed',
+		target: 'projects',
+	}]);
+});
+
+/** Проверяет terminal response для обычного widget refresh при collapse race. */
+test('refreshPromptDashboardWidget completes request when target widget collapsed before host handling', async () => {
+	const { manager } = await createManager();
+	const panelMessages: any[] = [];
+	const panel = {
+		webview: {
+			postMessage: async (message: unknown) => {
+				panelMessages.push(message);
+				return true;
+			},
+		},
+	};
+	(manager as any).isPromptDashboardWidgetCollapsed = (widget: string) => widget === 'activity';
+
+	await (manager as any).handleMessage(
+		{
+			type: 'refreshPromptDashboardWidget',
+			prompt: createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+			widget: 'activity',
+			requestId: 'dashboard-activity-collapsed',
+		} as any,
+		panel as any,
+		createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] }),
+		'panel-a',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(panelMessages, [{
+		type: 'promptDashboardRequestCompleted',
+		requestId: 'dashboard-activity-collapsed',
+		target: 'activity',
+	}]);
 });
 
 test('promptDashboardOpenTodoMarker opens a workspace file at the requested line', async () => {

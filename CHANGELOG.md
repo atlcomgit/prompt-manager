@@ -6,6 +6,13 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-08-28
+
+#### Fixed
+- Project branch file counters now remain visible across lightweight and reactive refreshes, stop automatic detail retries after errors, hydrate changed workspace-only rows precisely, complete collapsed hydration requests, and isolate project ordering from unrelated widgets.
+- The Docker table `running` filter now excludes stopped or undeployed service rows, keeps raw created containers startable, and shares active lifecycle semantics with aggregate counters, row actions, and workspace actions.
+- Git Flow commit-message generation now explicitly activates Kilo Code, applies one 75-second lifecycle deadline, waits for asynchronously opened nested repositories, invokes the real SCM command for the deepest root, keys queue quarantine by normalized root, handles same-result and delayed writes through a cleared input sentinel, restores drafts after empty failures, and keeps the latest response valid across snapshot ordering.
+
 ### 2026-07-26
 
 #### Added

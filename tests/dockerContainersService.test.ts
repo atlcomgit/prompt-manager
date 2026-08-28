@@ -56,8 +56,29 @@ function loadWithVscodeStub(request: string, parent: unknown, isMain: boolean): 
 }
 
 moduleLoader._load = loadWithVscodeStub;
-const { DockerContainersService } = require('../src/services/dockerContainersService.js') as typeof import('../src/services/dockerContainersService.js');
+const {
+	DockerContainersService,
+	isDockerActiveLifecycleStatus,
+	resolveContainerLifecycleStatus,
+} = require('../src/services/dockerContainersService.js') as typeof import('../src/services/dockerContainersService.js');
 moduleLoader._load = originalModuleLoad;
+
+/** Проверяет единое определение активных lifecycle-состояний для счетчиков и workspace-действий. */
+test('isDockerActiveLifecycleStatus matches the running dashboard filter semantics', () => {
+	for (const status of ['running', 'starting', 'restarting', 'paused'] as const) {
+		assert.equal(isDockerActiveLifecycleStatus(status), true);
+	}
+	for (const status of ['stopped', 'error', 'unknown'] as const) {
+		assert.equal(isDockerActiveLifecycleStatus(status), false);
+	}
+});
+
+/** Проверяет, что созданный, но не запущенный Docker-контейнер остается доступным для запуска. */
+test('resolveContainerLifecycleStatus maps raw created state to stopped', () => {
+	assert.equal(resolveContainerLifecycleStatus({ State: 'created' } as any), 'stopped');
+	assert.equal(resolveContainerLifecycleStatus({ State: 'running' } as any), 'running');
+	assert.equal(resolveContainerLifecycleStatus({ State: 'restarting' } as any), 'restarting');
+});
 
 test('DockerContainersService restarts the Docker event stream after it closes', async () => {
 	const closeCallbacks: Array<(() => void) | undefined> = [];

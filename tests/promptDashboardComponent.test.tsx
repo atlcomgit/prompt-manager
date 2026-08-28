@@ -5,17 +5,20 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
 	PromptDashboard,
+	buildDockerContainerActionItems,
 	buildDockerSparklineVisibleSamples,
 	buildDockerTableRows,
 	buildWidgetGridColumns,
 	isPromptDashboardBranchActionBusy,
 	normalizePromptDashboardDockerWidgetState,
+	matchesDockerContainerStatusFilter,
 	reorderPromptDashboardSections,
 	resolveBranchDraftRefreshProjects,
 	resolvePromptDashboardColumnDropIndicator,
 	resolvePromptDashboardPointerDropIndicator,
 	resolvePromptDashboardSectionDropCommitIndicator,
 	reconcileBranchDrafts,
+	resolveAutomaticExpandedDetailsHydrationRequest,
 	resolveFilteredDockerProjects,
 	resolvePromptDashboardDockerLiveMetricsVisible,
 	resolveBranchWidgetProjects,
@@ -352,6 +355,7 @@ test('normalizePromptDashboardDockerWidgetState keeps valid view mode and unique
 	});
 });
 
+/** Проверяет, что stopped-фильтр исключает активные состояния и сохраняет реальный остановленный контейнер. */
 test('resolveFilteredDockerProjects excludes active lifecycle states from the stopped filter', () => {
 	const restartingContainer = createDockerContainer({
 		id: 'container-restarting',
@@ -407,8 +411,9 @@ test('resolveFilteredDockerProjects excludes active lifecycle states from the st
 
 	assert.equal(projects[0].containers.length, 1);
 	assert.equal(projects[0].containers[0].id, 'container-stopped');
-	assert.equal(projects[0].composeFileGroups.length, 0);
-	assert.equal(projects[0].composeFiles.length, 0);
+	assert.deepEqual(projects[0].composeFileGroups[0]?.containers.map(container => container.id), ['container-stopped']);
+	assert.deepEqual(projects[0].composeFileGroups[0]?.serviceNames, []);
+	assert.equal(projects[0].composeFiles.length, 1);
 });
 
 test('resolveFilteredDockerProjects search hides inactive declared-service leftovers from filtered compose groups', () => {
@@ -524,6 +529,131 @@ test('resolveFilteredDockerProjects search keeps stopped containers even when ho
 	assert.equal(filteredProjects[0].composeFileGroups.length, 1);
 	assert.equal(filteredProjects[0].composeFileGroups[0].containers[0].id, 'container-stopped-searchable');
 	assert.deepEqual(buildDockerTableRows(filteredProjects).map(row => row.kind === 'container' ? row.container.id : row.kind), ['container-stopped-searchable']);
+});
+
+/** Проверяет согласованный состав активных и остановленных lifecycle-состояний. */
+test('matchesDockerContainerStatusFilter groups active lifecycle states under running', () => {
+	for (const status of ['running', 'starting', 'restarting', 'paused'] as const) {
+		assert.equal(matchesDockerContainerStatusFilter(status, 'running'), true);
+		assert.equal(matchesDockerContainerStatusFilter(status, 'stopped'), false);
+	}
+	for (const status of ['stopped', 'error', 'unknown'] as const) {
+		assert.equal(matchesDockerContainerStatusFilter(status, 'running'), false);
+		assert.equal(matchesDockerContainerStatusFilter(status, 'stopped'), true);
+	}
+});
+
+/** Проверяет доступность restart/stop для каждого активного lifecycle-состояния. */
+test('buildDockerContainerActionItems aligns transitional actions with the running filter', () => {
+	for (const status of ['running', 'starting', 'restarting', 'paused'] as const) {
+		const items = buildDockerContainerActionItems(
+			createDockerContainer({ status }),
+			null,
+			() => undefined,
+			() => undefined,
+			() => undefined,
+		);
+		assert.equal(items.find(item => item.key === 'restart')?.disabled, false);
+		assert.equal(items.find(item => item.key === 'stop')?.disabled, false);
+		assert.equal(items.some(item => item.key === 'start'), false);
+	}
+
+	const stoppedItems = buildDockerContainerActionItems(
+		createDockerContainer({ status: 'stopped' }),
+		null,
+		() => undefined,
+		() => undefined,
+		() => undefined,
+	);
+	assert.equal(stoppedItems.find(item => item.key === 'start')?.disabled, false);
+	assert.equal(stoppedItems.find(item => item.key === 'stop')?.disabled, true);
+	assert.equal(stoppedItems.find(item => item.key === 'remove')?.disabled, false);
+});
+
+/** Проверяет отсутствие остановленных и declared-service строк в таблице с фильтром running. */
+test('resolveFilteredDockerProjects running filter keeps only active container rows from mixed compose groups', () => {
+	const runningContainer = createDockerContainer({
+		id: 'container-running-api',
+		name: 'api-service-1',
+		service: 'api-service',
+	});
+	const stoppedContainer = createDockerContainer({
+		id: 'container-stopped-marketcoin',
+		name: 'marketcoin-web-prod',
+		service: 'marketcoin-web',
+		status: 'stopped',
+		statusTone: 'neutral',
+		statusText: 'Exited 3 hours ago',
+		startedAt: undefined,
+		uptimeMs: 0,
+		stats: undefined,
+		samples: [],
+	});
+	const composeFile = {
+		project: 'api',
+		projectPath: '/workspace/api',
+		filePath: '/workspace/api/docker-compose.yml',
+		relativePath: 'docker-compose.yml',
+	};
+	const data = {
+		enabled: true,
+		available: true,
+		generatedAt: '2026-04-29T10:00:00.000Z',
+		defaultViewMode: 'table' as const,
+		composeFilePatterns: [],
+		projects: [{
+			project: 'api',
+			projectPath: '/workspace/api',
+			composeFiles: [composeFile],
+			composeFileGroups: [{
+				composeFile,
+				containers: [runningContainer],
+				serviceNames: ['api-service', 'marketcoin-web', 'queue-service'],
+				status: 'running' as const,
+				statusTone: 'ok' as const,
+				statusText: 'Запущено 1/3',
+				runningCount: 1,
+				stoppedCount: 1,
+				warningCount: 0,
+				errorCount: 0,
+			}],
+			containers: [runningContainer, stoppedContainer],
+			runningCount: 1,
+			stoppedCount: 1,
+			warningCount: 0,
+			errorCount: 0,
+		}],
+		totalContainers: 2,
+		runningContainers: 1,
+		stoppedContainers: 1,
+		warningContainers: 0,
+		errorContainers: 0,
+	};
+
+	const runningProjects = resolveFilteredDockerProjects(data, 'running', '', 'status');
+	assert.deepEqual(runningProjects[0]?.composeFileGroups[0]?.serviceNames, []);
+	assert.deepEqual(buildDockerTableRows(runningProjects).map(row => (
+		row.kind === 'container' ? row.container.id : row.kind
+	)), ['container-running-api']);
+
+	const stoppedProjects = resolveFilteredDockerProjects(data, 'stopped', '', 'status');
+	assert.deepEqual(stoppedProjects[0]?.composeFileGroups[0]?.containers.map(container => container.id), [
+		'container-stopped-marketcoin',
+	]);
+	assert.deepEqual(stoppedProjects[0]?.composeFileGroups[0]?.serviceNames, ['queue-service']);
+	assert.deepEqual(buildDockerTableRows(stoppedProjects).map(row => (
+		row.kind === 'container' ? row.container.id : row.kind === 'service' ? row.row.serviceName : row.kind
+	)), ['container-stopped-marketcoin', 'queue-service']);
+
+	const allProjects = resolveFilteredDockerProjects(data, 'all', '', 'status');
+	assert.deepEqual(allProjects[0]?.composeFileGroups[0]?.containers.map(container => container.id), [
+		'container-running-api',
+		'container-stopped-marketcoin',
+	]);
+	assert.deepEqual(allProjects[0]?.composeFileGroups[0]?.serviceNames, ['queue-service']);
+	assert.deepEqual(buildDockerTableRows(allProjects).map(row => (
+		row.kind === 'container' ? row.container.id : row.kind === 'service' ? row.row.serviceName : row.kind
+	)), ['container-running-api', 'container-stopped-marketcoin', 'queue-service']);
 });
 
 test('PromptDashboard restores persisted Docker search controls and shows a clear-search button', () => {
@@ -2590,6 +2720,66 @@ test('resolveExpandedDetailsHydrationRequest keeps dirty file hydration on the d
 	})]);
 
 	assert.deepEqual(request, {
+		projects: ['api'],
+		reason: 'dirty-files',
+	});
+});
+
+/** Проверяет видимые подтверждённые числа и свежую hydration в workspace-wide списке веток. */
+test('resolveExpandedDetailsHydrationRequest rehydrates stale visible counters from Show all branch projects', () => {
+	const selectedProject = createProject({ project: 'api' });
+	const workspaceProject = createProject({
+		project: 'web',
+		repositoryPath: '/workspace/web',
+		uncommittedFiles: [{
+			project: 'web',
+			path: 'src/app.ts',
+			status: 'M',
+			group: 'working-tree',
+			conflicted: false,
+			staged: false,
+			fileSizeBytes: 128,
+			additions: 7,
+			deletions: 2,
+			isBinary: false,
+			lineStatsHydrated: false,
+		}],
+	});
+	const visibleProjects = resolveBranchWidgetProjects(
+		[selectedProject],
+		[selectedProject, workspaceProject],
+		true,
+	);
+
+	assert.deepEqual(visibleProjects.map(project => project.project), ['api', 'web']);
+	assert.equal(visibleProjects[1]?.uncommittedFiles[0]?.additions, 7);
+	assert.equal(visibleProjects[1]?.uncommittedFiles[0]?.deletions, 2);
+	assert.deepEqual(resolveExpandedDetailsHydrationRequest('dirty:web', visibleProjects), {
+		projects: ['web'],
+		reason: 'dirty-files',
+	});
+});
+
+/** Не допускает автоматический retry раскрытого dirty-блока после error payload. */
+test('resolveAutomaticExpandedDetailsHydrationRequest waits for refresh after project details error', () => {
+	const projects = [createProject({
+		uncommittedFiles: [{
+			project: 'api',
+			path: 'src/app.ts',
+			status: 'M',
+			group: 'working-tree',
+			conflicted: false,
+			staged: false,
+			fileSizeBytes: 128,
+			additions: 7,
+			deletions: 2,
+			isBinary: false,
+			lineStatsHydrated: false,
+		}],
+	})];
+
+	assert.equal(resolveAutomaticExpandedDetailsHydrationRequest('dirty:api', projects, 'error'), null);
+	assert.deepEqual(resolveAutomaticExpandedDetailsHydrationRequest('dirty:api', projects, 'fresh'), {
 		projects: ['api'],
 		reason: 'dirty-files',
 	});

@@ -1,3 +1,39 @@
+## 164: В виджете "Ветки проектов" в раскрытом списке файлов
+
+- Дата: 2026-08-28.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: Счетчики измененных строк перестали исчезать во время фоновых обновлений, фильтр
+  «Запущены» больше не показывает остановленные контейнеры и незапущенные сервисы, а Git Flow сначала
+  получает сообщение коммита через Kilo Code.
+- Ключевые моменты: Последние подтвержденные счетчики сохраняются до свежего расчета; error payload
+  останавливает автоматический retry; измененные workspace-only строки обновляются точечно; collapse race
+  получает terminal response; raw created остается остановленным; Compose-группы, действия и общая сводка
+  используют одинаковые активные состояния; Kilo Code получает точный `rootUri`, генераторы одного
+  repository сериализованы по нормализованному root, расширение явно активируется до command discovery,
+  общий deadline 75 секунд охватывает activation, nested Git discovery и command, одинаковый результат
+  определяется через очищенный SCM sentinel, пустая ошибка восстанавливает draft, latest request переживает
+  snapshot cleanup, а stale webview response не меняет commit textarea. После сборки нужен reload окна VS Code.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  src/providers/editorPanelManager.ts
+  src/services/dockerContainersService.ts
+  src/services/gitService.ts
+  src/services/promptDashboardService.ts
+  src/types/git.ts
+  src/types/messages.ts
+  src/utils/promptDashboard.ts
+  src/webview/editor/EditorApp.tsx
+  src/webview/editor/components/PromptDashboard.tsx
+  tests/dockerContainersService.test.ts
+  tests/editorApp.test.tsx
+  tests/editorPanelManager.test.ts
+  tests/gitService.test.ts
+  tests/promptDashboard.test.ts
+  tests/promptDashboardComponent.test.tsx
+  tests/promptDashboardService.test.ts
+
 ## 163: В виджете "Ветки проектов" в списке выбора веток нужно у
 
 - Дата: 2026-07-26.

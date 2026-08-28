@@ -47,6 +47,24 @@ import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefre
 
 const execFileAsync = promisify(execFile);
 
+/** Публичная команда Kilo Code для генерации сообщения коммита в Git SCM input. */
+const KILO_GENERATE_COMMIT_MESSAGE_COMMAND = 'kilo-code.new.generateCommitMessage';
+
+/** Идентификатор расширения Kilo Code, которое регистрирует публичную команду. */
+const KILO_CODE_EXTENSION_ID = 'kilocode.kilo-code';
+
+/** Учитывает до 30 секунд cold start подключения, внутренние 35 секунд генерации и запас на IPC. */
+const KILO_GENERATE_COMMIT_MESSAGE_TIMEOUT_MS = 75_000;
+
+/** Коротко ожидает nested repository, который built-in Git открывает асинхронно после Reload Window. */
+const GIT_REPOSITORY_DISCOVERY_WAIT_MS = 1_500;
+
+/** Срок ожидания Copilot до отправки поддерживаемого командой сигнала отмены. */
+const COPILOT_GENERATE_COMMIT_MESSAGE_CANCEL_AFTER_MS = 30_000;
+
+/** Жесткий предел ожидания Copilot, если команда проигнорировала отмену. */
+const COPILOT_GENERATE_COMMIT_MESSAGE_TIMEOUT_MS = 35_000;
+
 export interface BranchInfo {
 	name: string;
 	current: boolean;
@@ -211,6 +229,10 @@ export class GitService {
 		unsupportedReason: GitOverlayReviewUnsupportedReason | null;
 	}>>();
 	private readonly reviewTitlePrefixCache = new Map<string, GitServiceTimedCacheEntry<string>>();
+	/** Сериализует внешние генерации по стабильному Git root, а не identity API wrapper. */
+	private readonly commitMessageGenerationQueues = new Map<string, Promise<void>>();
+	/** Не добавляет новые генераторы за root, команда которого не завершилась после hard timeout. */
+	private readonly timedOutCommitMessageRepositories = new Set<string>();
 
 	private logDebug(event: string, payload?: Record<string, unknown>): void {
 		const serializedPayload = payload ? ` ${JSON.stringify(payload)}` : '';
@@ -1303,20 +1325,79 @@ export class GitService {
 		if (!gitApi) {
 			return null;
 		}
-
-		const projectUri = vscode.Uri.file(projectPath);
-		const directRepository = gitApi.getRepository(projectUri);
-		if (directRepository) {
-			return directRepository;
+		const initialRepository = this.resolveBuiltInGitRepository(gitApi, projectPath);
+		const normalizedProjectPath = this.normalizeGitRepositoryPath(projectPath);
+		if (
+			initialRepository
+			&& this.normalizeGitRepositoryPath(initialRepository.rootUri.fsPath) === normalizedProjectPath
+		) {
+			return initialRepository;
+		}
+		const onDidOpenRepository = gitApi.onDidOpenRepository;
+		if (!onDidOpenRepository) {
+			return initialRepository;
 		}
 
-		const normalizedProjectPath = path.resolve(projectPath);
-		return gitApi.repositories.find((repository) => {
-			const repositoryRootPath = path.resolve(repository.rootUri.fsPath);
-			return normalizedProjectPath === repositoryRootPath
-				|| normalizedProjectPath.startsWith(`${repositoryRootPath}${path.sep}`)
-				|| repositoryRootPath.startsWith(`${normalizedProjectPath}${path.sep}`);
-		}) || null;
+		return await new Promise<BuiltInGitRepository | null>((resolve) => {
+			let settled = false;
+			let disposable: vscode.Disposable | undefined;
+			let timeoutHandle: NodeJS.Timeout | undefined;
+			const initialDepth = initialRepository
+				? this.normalizeGitRepositoryPath(initialRepository.rootUri.fsPath).length
+				: -1;
+			const finish = (repository: BuiltInGitRepository | null): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				disposable?.dispose();
+				if (timeoutHandle) {
+					clearTimeout(timeoutHandle);
+				}
+				resolve(repository);
+			};
+			disposable = onDidOpenRepository(() => {
+				const repository = this.resolveBuiltInGitRepository(gitApi, projectPath);
+				const repositoryDepth = repository
+					? this.normalizeGitRepositoryPath(repository.rootUri.fsPath).length
+					: -1;
+				if (repositoryDepth > initialDepth || repositoryDepth === normalizedProjectPath.length) {
+					finish(repository);
+				}
+			});
+			timeoutHandle = setTimeout(() => {
+				finish(this.resolveBuiltInGitRepository(gitApi, projectPath));
+			}, GIT_REPOSITORY_DISCOVERY_WAIT_MS);
+		});
+	}
+
+	/** Выбирает самый глубокий Git root, содержащий project path. */
+	private resolveBuiltInGitRepository(gitApi: BuiltInGitApi, projectPath: string): BuiltInGitRepository | null {
+		const projectUri = vscode.Uri.file(projectPath);
+		const directRepository = gitApi.getRepository(projectUri);
+		const repositories = new Map<string, BuiltInGitRepository>();
+		for (const repository of [...gitApi.repositories, ...(directRepository ? [directRepository] : [])]) {
+			repositories.set(this.normalizeGitRepositoryPath(repository.rootUri.fsPath), repository);
+		}
+
+		const normalizedProjectPath = this.normalizeGitRepositoryPath(projectPath);
+		// В fallback участвуют только содержащие путь корни; самый глубокий корень соответствует nested repository.
+		return Array.from(repositories.values())
+			.filter((repository) => {
+				const repositoryRootPath = this.normalizeGitRepositoryPath(repository.rootUri.fsPath);
+				return normalizedProjectPath === repositoryRootPath
+					|| normalizedProjectPath.startsWith(`${repositoryRootPath}${path.sep}`);
+			})
+			.sort((left, right) => (
+				this.normalizeGitRepositoryPath(right.rootUri.fsPath).length
+				- this.normalizeGitRepositoryPath(left.rootUri.fsPath).length
+			))[0] || null;
+	}
+
+	/** Нормализует Git path одинаково для repository discovery и generation queue. */
+	private normalizeGitRepositoryPath(repositoryPath: string): string {
+		const normalizedPath = path.resolve(repositoryPath);
+		return process.platform === 'win32' ? normalizedPath.toLowerCase() : normalizedPath;
 	}
 
 	private getEffectiveProjects(projectPaths: Map<string, string>, projectNames: string[]): Array<{ project: string; projectPath: string }> {
@@ -3230,28 +3311,266 @@ export class GitService {
 		}
 	}
 
+	/** Выполняет генератор последовательно и оставляет текущее значение Git SCM input источником истины. */
+	private async generateCommitMessageViaScmInput(
+		repository: BuiltInGitRepository,
+		commandId: string,
+		commandArgs: unknown[],
+		timeoutMs?: number,
+		options?: { clearInputBeforeCommand?: boolean },
+	): Promise<string> {
+		const repositoryKey = this.getCommitMessageRepositoryKey(repository);
+		if (this.timedOutCommitMessageRepositories.has(repositoryKey)) {
+			throw new Error('previous commit message command is still running after timeout');
+		}
+		const previousGeneration = this.commitMessageGenerationQueues.get(repositoryKey) || Promise.resolve();
+		let abandonedBeforeStart = false;
+		let restorePreviousInputIfEmpty: (() => void) | undefined;
+		const generation = previousGeneration
+			.catch(() => undefined)
+			.then(async () => {
+				if (abandonedBeforeStart) {
+					throw new Error('command was abandoned before start after timeout');
+				}
+				// Очистка позволяет отличить новый результат Kilo от прежнего draft, включая одинаковый текст.
+				const inputBeforeCommand = repository.inputBox.value;
+				if (options?.clearInputBeforeCommand) {
+					repository.inputBox.value = '';
+					restorePreviousInputIfEmpty = () => {
+						// Непустое значение мог ввести пользователь или записать генератор, поэтому его не заменяем.
+						if (!repository.inputBox.value.trim()) {
+							repository.inputBox.value = inputBeforeCommand;
+						}
+					};
+				}
+
+				try {
+					await vscode.commands.executeCommand<void>(commandId, ...commandArgs);
+				} catch (error) {
+					restorePreviousInputIfEmpty?.();
+					throw error;
+				}
+
+				const inputAfterCommand = repository.inputBox.value;
+				const generatedMessage = inputAfterCommand.trim();
+				if (options?.clearInputBeforeCommand) {
+					if (!generatedMessage) {
+						restorePreviousInputIfEmpty?.();
+					}
+					return generatedMessage;
+				}
+
+				return inputAfterCommand !== inputBeforeCommand ? generatedMessage : '';
+			});
+		const queueTail = generation.then(() => undefined, () => undefined);
+		this.commitMessageGenerationQueues.set(repositoryKey, queueTail);
+		void queueTail.then(() => {
+			if (this.commitMessageGenerationQueues.get(repositoryKey) === queueTail) {
+				this.commitMessageGenerationQueues.delete(repositoryKey);
+				this.timedOutCommitMessageRepositories.delete(repositoryKey);
+			}
+		});
+
+		if (!timeoutMs || timeoutMs <= 0) {
+			return await generation;
+		}
+
+		let timeoutHandle: NodeJS.Timeout | undefined;
+		try {
+			return await Promise.race<string>([
+				generation,
+				new Promise<string>((_resolve, reject) => {
+					timeoutHandle = setTimeout(() => {
+						abandonedBeforeStart = true;
+						this.timedOutCommitMessageRepositories.add(repositoryKey);
+						restorePreviousInputIfEmpty?.();
+						reject(new Error(`command timed out after ${timeoutMs} ms`));
+					}, timeoutMs);
+				}),
+			]);
+		} finally {
+			if (timeoutHandle) {
+				clearTimeout(timeoutHandle);
+			}
+		}
+	}
+
+	/** Возвращает стабильный platform-aware ключ очереди одного Git repository. */
+	private getCommitMessageRepositoryKey(repository: BuiltInGitRepository): string {
+		return this.normalizeGitRepositoryPath(repository.rootUri.fsPath);
+	}
+
+	/** Ограничивает activation, repository discovery и command единым deadline Kilo lifecycle. */
+	private async awaitKiloCommitMessageStep<T>(
+		operation: PromiseLike<T>,
+		deadlineAt: number,
+		step: string,
+	): Promise<T> {
+		const remainingMs = deadlineAt - Date.now();
+		if (remainingMs <= 0) {
+			throw new Error(`Kilo Code ${step} timed out`);
+		}
+		let timeoutHandle: NodeJS.Timeout | undefined;
+		try {
+			return await Promise.race<T>([
+				Promise.resolve(operation),
+				new Promise<T>((_resolve, reject) => {
+					timeoutHandle = setTimeout(() => {
+						reject(new Error(`Kilo Code ${step} timed out`));
+					}, remainingMs);
+				}),
+			]);
+		} finally {
+			if (timeoutHandle) {
+				clearTimeout(timeoutHandle);
+			}
+		}
+	}
+
+	/** Генерирует сообщение через Kilo Code, сохраняя последнее значение Source Control. */
+	async generateCommitMessageViaKilo(projectPath: string): Promise<string> {
+		const deadlineAt = Date.now() + KILO_GENERATE_COMMIT_MESSAGE_TIMEOUT_MS;
+		const kiloExtension = vscode.extensions.getExtension(KILO_CODE_EXTENSION_ID);
+		if (!kiloExtension) {
+			this.logDebug('generateCommitMessage.kilo.failed', {
+				projectPath,
+				reason: 'Kilo Code extension is unavailable',
+			});
+			return '';
+		}
+
+		try {
+			if (!kiloExtension.isActive) {
+				await this.awaitKiloCommitMessageStep(
+					kiloExtension.activate(),
+					deadlineAt,
+					'activation',
+				);
+			}
+		} catch (error) {
+			this.logDebug('generateCommitMessage.kilo.failed', {
+				projectPath,
+				reason: `Kilo Code activation failed: ${error instanceof Error ? error.message : String(error)}`,
+			});
+			return '';
+		}
+
+		let repository: BuiltInGitRepository | null;
+		try {
+			repository = await this.awaitKiloCommitMessageStep(
+				this.getBuiltInGitRepository(projectPath),
+				deadlineAt,
+				'Git repository discovery',
+			);
+		} catch (error) {
+			this.logDebug('generateCommitMessage.kilo.failed', {
+				projectPath,
+				reason: error instanceof Error ? error.message : String(error),
+			});
+			return '';
+		}
+
+		if (!repository) {
+			this.logDebug('generateCommitMessage.kilo.failed', {
+				projectPath,
+				reason: 'built-in Git repository is unavailable',
+			});
+			return '';
+		}
+
+		// Без rootUri Kilo Code использует первый репозиторий, поэтому точный корень обязателен.
+		const repositoryRootUri = repository.rootUri;
+		if (!repositoryRootUri) {
+			this.logDebug('generateCommitMessage.kilo.failed', {
+				projectPath,
+				reason: 'repository rootUri is unavailable',
+			});
+			return '';
+		}
+
+		let availableCommands: string[];
+		try {
+			availableCommands = await this.awaitKiloCommitMessageStep(
+				vscode.commands.getCommands(true),
+				deadlineAt,
+				'command discovery',
+			);
+		} catch (error) {
+			this.logDebug('generateCommitMessage.kilo.failed', {
+				projectPath,
+				reason: error instanceof Error ? error.message : String(error),
+			});
+			return '';
+		}
+
+		if (!availableCommands.includes(KILO_GENERATE_COMMIT_MESSAGE_COMMAND)) {
+			this.logDebug('generateCommitMessage.kilo.failed', {
+				projectPath,
+				reason: 'command is unavailable',
+			});
+			return '';
+		}
+
+		try {
+			const remainingMs = Math.max(1, deadlineAt - Date.now());
+			const generatedMessage = await this.generateCommitMessageViaScmInput(
+				repository,
+				KILO_GENERATE_COMMIT_MESSAGE_COMMAND,
+				[{ rootUri: repositoryRootUri }],
+				remainingMs,
+				{ clearInputBeforeCommand: true },
+			);
+			if (!generatedMessage) {
+				this.logDebug('generateCommitMessage.kilo.failed', {
+					projectPath,
+					reason: 'command completed without a message',
+				});
+			}
+			return generatedMessage;
+		} catch (error) {
+			this.logDebug('generateCommitMessage.kilo.failed', {
+				projectPath,
+				reason: error instanceof Error ? error.message : String(error),
+			});
+			return '';
+		}
+	}
+
+	/** Генерирует сообщение через Copilot с отменой и жестким пределом ожидания. */
 	async generateCommitMessageViaCopilot(projectPath: string): Promise<string> {
 		const repository = await this.getBuiltInGitRepository(projectPath);
 		if (!repository) {
 			return '';
 		}
 
-		const previousInputValue = repository.inputBox.value;
 		const cancellationSource = new vscode.CancellationTokenSource();
+		const cancellationTimer = setTimeout(
+			() => cancellationSource.cancel(),
+			COPILOT_GENERATE_COMMIT_MESSAGE_CANCEL_AFTER_MS,
+		);
+		cancellationTimer.unref?.();
+		let commandCompleted = false;
 
 		try {
-			repository.inputBox.value = '';
-			await vscode.commands.executeCommand(
+			const generatedMessage = await this.generateCommitMessageViaScmInput(
+				repository,
 				'github.copilot.git.generateCommitMessage',
-				repository.rootUri,
-				undefined,
-				cancellationSource.token,
+				[repository.rootUri, undefined, cancellationSource.token],
+				COPILOT_GENERATE_COMMIT_MESSAGE_TIMEOUT_MS,
 			);
-			return repository.inputBox.value.trim();
-		} catch {
+			commandCompleted = true;
+			return generatedMessage;
+		} catch (error) {
+			this.logDebug('generateCommitMessage.copilot.failed', {
+				projectPath,
+				reason: error instanceof Error ? error.message : String(error),
+			});
 			return '';
 		} finally {
-			repository.inputBox.value = previousInputValue;
+			clearTimeout(cancellationTimer);
+			if (!commandCompleted) {
+				cancellationSource.cancel();
+			}
 			cancellationSource.dispose();
 		}
 	}

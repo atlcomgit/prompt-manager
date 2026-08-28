@@ -271,6 +271,8 @@ export type ExtensionToWebviewMessage =
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
 	| { type: 'promptDashboardSnapshot'; snapshot: PromptDashboardSnapshot; requestId?: string }
 	| { type: 'promptDashboardWidgetSnapshot'; promptId: string; promptUuid?: string; widget: PromptDashboardWidgetSnapshot<unknown>; requestId?: string }
+	/** Завершает dashboard request, который host безопасно отбросил после collapse race. */
+	| { type: 'promptDashboardRequestCompleted'; requestId: string; target: PromptDashboardWidgetKind }
 	| { type: 'promptDashboardAnalysis'; promptId: string; promptUuid?: string; analysis: PromptDashboardAnalysisState; requestId?: string }
 	| { type: 'branchStatus'; hasChanges: boolean; details: string }
 	| { type: 'error'; message: string; requestId?: string; retainPromptDashboardBusy?: boolean }

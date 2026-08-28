@@ -268,7 +268,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		return this.buildSnapshotFromCache(scope, prompt, options?.collapsedWidgets);
 	}
 
-	/** Refreshes only Git-backed project widgets after external repo changes. */
+	/** Обновляет Git-backed projects widget полностью либо точечно для явно переданных проектов. */
 	async refreshProjectsWidget(
 		prompt: Prompt,
 		postMessage?: DashboardPostMessage,
@@ -282,8 +282,11 @@ export class PromptDashboardService implements vscode.Disposable {
 		this.activePostMessage = postMessage || this.activePostMessage;
 		const targetProjects = this.resolveProjectsRefreshTargets(scope, projectNames);
 		const sectionScopedRefresh = this.isSectionScopedProjectsRefreshMode(mode);
+		const targetedDetailsRefresh = (mode === 'details' || mode === 'dirty-details')
+			&& Array.isArray(projectNames)
+			&& projectNames.length > 0;
 		const shouldUsePartialProjectsRefresh = targetProjects.length > 0 && (
-			((mode === 'details' || mode === 'dirty-details') && targetProjects.length < scope.projectNames.length)
+			targetedDetailsRefresh
 			|| mode === 'reactive-branches'
 			|| mode === 'analysis'
 			|| sectionScopedRefresh
@@ -1170,12 +1173,16 @@ export class PromptDashboardService implements vscode.Disposable {
 		});
 	}
 
-	/** Restricts a details refresh to projects that are already visible in the current dashboard scope. */
+	/** Ограничивает details refresh проектами, видимыми в projects либо workspace-wide branchProjects. */
 	private resolveProjectsRefreshTargets(scope: PromptDashboardScope, projectNames?: string[]): string[] {
-		const scopeProjects = new Set(scope.projectNames.map(project => project.trim()).filter(Boolean));
+		const currentData = this.getProjectsDataForScope(scope);
+		const visibleProjects = new Set([
+			...scope.projectNames,
+			...(currentData.branchProjects || []).map(project => project.project),
+		].map(project => project.trim()).filter(Boolean));
 		return Array.from(new Set((projectNames || [])
 			.map(project => String(project || '').trim())
-			.filter(project => scopeProjects.has(project))));
+			.filter(project => visibleProjects.has(project))));
 	}
 
 	/** Merges refreshed project summaries by project name while keeping untouched rows stable. */
@@ -1193,7 +1200,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		return mergedProjects;
 	}
 
-	/** Merges a partial projects refresh back into the full widget snapshot without blanking other rows. */
+	/** Объединяет partial refresh, не добавляя workspace-only branchProjects в основную projects коллекцию. */
 	private mergeProjectsData(
 		currentData: PromptDashboardProjectsData,
 		nextData: PromptDashboardProjectsData,
@@ -1202,7 +1209,11 @@ export class PromptDashboardService implements vscode.Disposable {
 			return nextData;
 		}
 
-		const mergedProjects = this.mergeProjectSummaryList(currentData.projects, nextData.projects);
+		const currentProjectNames = new Set(currentData.projects.map(project => project.project));
+		const nextSelectedProjects = currentData.branchProjects !== undefined
+			? nextData.projects.filter(project => currentProjectNames.has(project.project))
+			: nextData.projects;
+		const mergedProjects = this.mergeProjectSummaryList(currentData.projects, nextSelectedProjects);
 		const mergedBranchProjects = nextData.branchProjects !== undefined
 			? nextData.branchProjects
 			: (currentData.branchProjects !== undefined
@@ -1246,7 +1257,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		);
 	}
 
-	/** Refreshes detailed file data only for selected projects instead of refetching every dashboard row. */
+	/** Обновляет details только целевых projects/branchProjects без повторного запроса остальных строк. */
 	private async refreshProjectsWidgetSubset(
 		scope: PromptDashboardScope,
 		prompt: Prompt,
@@ -2015,6 +2026,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		return `${previousDayKey.slice(8, 10)}.${previousDayKey.slice(5, 7)}`;
 	}
 
+	/** Загружает полные либо частичные project-данные с повторным использованием кеша обеих коллекций. */
 	private async loadProjectsData(
 		scope: PromptDashboardScope,
 		mode: PromptDashboardProjectsRefreshMode = 'display',
@@ -2050,9 +2062,11 @@ export class PromptDashboardService implements vscode.Disposable {
 		// Keep AI follow-up refreshes light and reuse cached trees until explicit details hydration runs.
 		const includeExpandedDetails = mode === 'details';
 		const includePipeline = mode === 'analysis';
-		const cachedProjectsByName = new Map(
-			currentProjectsData.projects.map(project => [project.project, project] as const),
-		);
+		// Workspace-wide branchProjects остаются полноценным кешем для точечной details hydration.
+		const cachedProjectsByName = new Map([
+			...(currentProjectsData.branchProjects || []).map(project => [project.project, project] as const),
+			...currentProjectsData.projects.map(project => [project.project, project] as const),
+		]);
 		const prefetchedReviewStatesByProject = mode === 'analysis'
 			? this.buildPrefetchedReviewStatesByProject(cachedProjectsByName)
 			: undefined;
@@ -2535,12 +2549,13 @@ export class PromptDashboardService implements vscode.Disposable {
 		return this.hasHydratedProjectDetails(cachedProject);
 	}
 
-	/** Reuse dirty-file stats during lightweight refreshes so expanded counters do not disappear again. */
+	/** Сохраняет подтверждённую статистику dirty-файлов и признак необходимости свежей hydration. */
 	private mergeCachedUncommittedFileDetails(
 		project: GitOverlayProjectSnapshot,
 		trackedBranch: string,
 		nextFiles: GitOverlayChangeFile[],
 		cachedProject?: PromptDashboardProjectSummary,
+		invalidateCachedLineStats = false,
 	): GitOverlayChangeFile[] {
 		if (!this.hasSameProjectBranchContext(project, trackedBranch, cachedProject) || !cachedProject) {
 			return nextFiles;
@@ -2567,6 +2582,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				additions: cachedFile.additions,
 				deletions: cachedFile.deletions,
 				isBinary: cachedFile.isBinary,
+				lineStatsHydrated: invalidateCachedLineStats ? false : cachedFile.lineStatsHydrated,
 			};
 		});
 	}
@@ -2884,6 +2900,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			trackedBranch,
 			this.collectProjectUncommittedFiles(project, excludedPaths),
 			cachedProject,
+			true,
 		);
 		const hasPromptBranchMismatch = this.hasPromptBranchMismatch(scope, project);
 		const reusableCachedProject = cachedProject && project.available && !project.error

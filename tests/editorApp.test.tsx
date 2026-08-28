@@ -578,6 +578,20 @@ test('shouldPruneGitOverlayTrackedRequest clears an old commit loader even if th
 	});
 });
 
+/** Проверяет latest generation после snapshot cleanup и защиту textarea от stale response. */
+test('shouldApplyGitOverlayCommitMessagesResponse keeps latest generation independent from tracked snapshot state', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { shouldApplyGitOverlayCommitMessagesResponse } = await import('../src/webview/editor/EditorApp.js');
+
+		assert.equal(shouldApplyGitOverlayCommitMessagesResponse('request-current', true), true);
+		assert.equal(shouldApplyGitOverlayCommitMessagesResponse('request-current', false, 'request-current'), true);
+		assert.equal(shouldApplyGitOverlayCommitMessagesResponse('request-stale', false), false);
+		assert.equal(shouldApplyGitOverlayCommitMessagesResponse('request-stale', false, 'request-current'), false);
+		assert.equal(shouldApplyGitOverlayCommitMessagesResponse(undefined, false), true);
+		assert.equal(shouldApplyGitOverlayCommitMessagesResponse('', false), true);
+	});
+});
+
 test('TimerDisplay hides implementing recalc action when recalculation is not allowed', async () => {
 	await withEditorAppEnvironment(async () => {
 		const { TimerDisplay } = await import('../src/webview/editor/components/TimerDisplay.js');

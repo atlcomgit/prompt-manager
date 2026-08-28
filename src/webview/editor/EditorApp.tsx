@@ -109,7 +109,7 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
-import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptDashboardMode, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
+import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptDashboardMode, resolvePromptDashboardRequestMessageContext, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardProjectRequestOnNotice, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
 import { KEEP_CURRENT_CHAT_MODEL, isKeepCurrentChatModel } from '../../constants/ai.js';
@@ -515,6 +515,18 @@ export const shouldPruneGitOverlayTrackedRequest = (input: {
   return staleAfterMs > 0 && now - input.request.createdAt >= staleAfterMs;
 };
 
+/** Разрешает менять commit textarea active/latest response либо legacy response без requestId. */
+export const shouldApplyGitOverlayCommitMessagesResponse = (
+  requestId: string | undefined,
+  isActiveTrackedRequest: boolean,
+  latestCommitMessageRequestId = '',
+): boolean => {
+  const normalizedRequestId = (requestId || '').trim();
+  return !normalizedRequestId
+    || isActiveTrackedRequest
+    || normalizedRequestId === latestCommitMessageRequestId.trim();
+};
+
 const areTrackedBranchesByProjectEqual = (
   left?: Record<string, string>,
   right?: Record<string, string>,
@@ -802,6 +814,8 @@ export const EditorApp: React.FC = () => {
     () => initialPromptDashboardSectionOrder,
   );
   const promptDashboardRequestIdRef = useRef('');
+  /** Отслеживает только запросы, способные заменить project details. */
+  const promptDashboardProjectsRequestIdRef = useRef('');
   const promptDashboardDockerBusyByRequestIdRef = useRef<Record<string, string>>({});
   const promptDashboardSnapshotRef = useRef<PromptDashboardSnapshot | null>(null);
   const promptDashboardProgressOverrideRef = useRef<number | undefined>(undefined);
@@ -1075,6 +1089,8 @@ export const EditorApp: React.FC = () => {
   const gitOverlayTrackedRequestsRef = useRef<Record<string, GitOverlayTrackedRequest>>({});
   const gitOverlayHoldBusyUntilSnapshotRef = useRef(false);
   const gitOverlayPendingCommitMessageGenerationRef = useRef(false);
+  /** Сохраняет latest generation request независимо от промежуточного snapshot cleanup. */
+  const gitOverlayLatestCommitMessageRequestIdRef = useRef('');
   const gitOverlayPendingCompletionActionRef = useRef<GitOverlayActionKind | null>(null);
   const handleStartChatRef = useRef<() => void>(() => undefined);
   const handleOpenChatRef = useRef<() => void>(() => undefined);
@@ -1351,10 +1367,15 @@ export const EditorApp: React.FC = () => {
     setReportHeight(previous => Math.abs((previous || 0) - normalizedHeight) > 1 ? normalizedHeight : previous);
   }, [shouldDeferReportLayoutStateUpdates]);
 
+  /** Применяет full dashboard snapshot с независимой защитой project details. */
   const applyPromptDashboardSnapshotMessage = useCallback((msg: any) => {
     const currentDashboardSnapshot = promptDashboardSnapshotRef.current;
     const shouldAcceptSnapshotMessage = shouldAcceptPromptDashboardRequestMessage({
-      activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+      ...resolvePromptDashboardRequestMessageContext({
+        activeDashboardRequestId: String(promptDashboardRequestIdRef.current || ''),
+        activeProjectsRequestId: String(promptDashboardProjectsRequestIdRef.current || ''),
+        projectSensitive: true,
+      }),
       messageRequestId: String(msg.requestId || ''),
       currentPromptId: String(currentDashboardSnapshot?.promptId || promptRef.current.id || ''),
       currentPromptUuid: String(currentDashboardSnapshot?.promptUuid || promptRef.current.promptUuid || ''),
@@ -1396,9 +1417,17 @@ export const EditorApp: React.FC = () => {
     })) {
       promptDashboardRequestIdRef.current = '';
     }
+    if (shouldReleasePromptDashboardRequestId({
+      activeRequestId: String(promptDashboardProjectsRequestIdRef.current || ''),
+      messageRequestId: String(msg.requestId || ''),
+      cacheStatus: msg.snapshot?.projects?.cache?.status,
+    })) {
+      promptDashboardProjectsRequestIdRef.current = '';
+    }
     setPromptDashboardBusyAction(null);
   }, []);
 
+  /** Применяет widget payload, изолируя project-sensitive ordering от остальных виджетов. */
   const applyPromptDashboardWidgetMessage = useCallback((msg: any) => {
     const currentDashboardSnapshot = promptDashboardSnapshotRef.current;
     const messageRequestId = String(msg.requestId || '');
@@ -1410,8 +1439,13 @@ export const EditorApp: React.FC = () => {
       && (!currentPromptUuid || !messagePromptUuid || currentPromptUuid === messagePromptUuid);
     const isTrackedDockerDashboardRequest = Boolean(promptDashboardDockerBusyByRequestIdRef.current[messageRequestId])
       && isSameDashboardPrompt;
+    const projectSensitive = msg.widget?.kind === 'projects';
     const shouldAcceptWidgetMessage = shouldAcceptPromptDashboardRequestMessage({
-      activeRequestId: String(promptDashboardRequestIdRef.current || ''),
+      ...resolvePromptDashboardRequestMessageContext({
+        activeDashboardRequestId: String(promptDashboardRequestIdRef.current || ''),
+        activeProjectsRequestId: String(promptDashboardProjectsRequestIdRef.current || ''),
+        projectSensitive,
+      }),
       messageRequestId,
       currentPromptId,
       currentPromptUuid,
@@ -1456,6 +1490,13 @@ export const EditorApp: React.FC = () => {
         cacheStatus: widget.cache.status,
       })) {
         promptDashboardRequestIdRef.current = '';
+      }
+      if (widget.kind === 'projects' && shouldReleasePromptDashboardRequestId({
+        activeRequestId: String(promptDashboardProjectsRequestIdRef.current || ''),
+        messageRequestId,
+        cacheStatus: widget.cache.status,
+      })) {
+        promptDashboardProjectsRequestIdRef.current = '';
       }
       if (isTrackedDockerDashboardRequest && widget.kind === 'docker' && widget.cache.status !== 'loading') {
         releasePromptDashboardDockerBusyAction(messageRequestId);
@@ -1968,6 +2009,7 @@ export const EditorApp: React.FC = () => {
 
   const clearGitOverlayTrackedRequests = useCallback(() => {
     gitOverlayTrackedRequestsRef.current = {};
+    gitOverlayLatestCommitMessageRequestIdRef.current = '';
     syncGitOverlayTrackedRequestState();
   }, [syncGitOverlayTrackedRequestState]);
 
@@ -3973,6 +4015,14 @@ export const EditorApp: React.FC = () => {
         clearGitOverlayBusyState();
         break;
       case 'gitOverlayCommitMessagesGenerated':
+        // Поздний versioned response не должен заменять текст, созданный более новым запросом или пользователем.
+        if (!shouldApplyGitOverlayCommitMessagesResponse(
+          msg.requestId,
+          hasGitOverlayTrackedRequest(msg.requestId),
+          gitOverlayLatestCommitMessageRequestIdRef.current,
+        )) {
+          break;
+        }
         setGitOverlayCommitMessages((prev) => {
           const next = { ...prev };
           for (const item of msg.messages || []) {
@@ -3984,6 +4034,9 @@ export const EditorApp: React.FC = () => {
           }
           return next;
         });
+        if (String(msg.requestId || '') === gitOverlayLatestCommitMessageRequestIdRef.current) {
+          gitOverlayLatestCommitMessageRequestIdRef.current = '';
+        }
         if (finishGitOverlayTrackedRequest(msg.requestId)) {
           clearGitOverlayBusyState();
           break;
@@ -4084,6 +4137,18 @@ export const EditorApp: React.FC = () => {
         applyPromptDashboardWidgetMessage(msg);
         scheduleProcessBodyScrollRestore('dashboard-widget');
         break;
+      case 'promptDashboardRequestCompleted':
+        // Terminal signal снимает project request, если host отбросил hydration после collapse race.
+        if (
+          msg.target === 'projects'
+          && String(promptDashboardProjectsRequestIdRef.current || '') === String(msg.requestId || '')
+        ) {
+          promptDashboardProjectsRequestIdRef.current = '';
+        }
+        if (String(promptDashboardRequestIdRef.current || '') === String(msg.requestId || '')) {
+          promptDashboardRequestIdRef.current = '';
+        }
+        break;
       case 'promptDashboardAnalysis':
         if (shouldBufferPromptDashboardMessages()) {
           bufferedPromptDashboardAnalysisMessageRef.current = msg;
@@ -4123,6 +4188,7 @@ export const EditorApp: React.FC = () => {
           const matchesPreflightRequest = requestId === pendingChatStartPreflightRequestIdRef.current;
           const matchesGitOverlayTrackedRequest = hasGitOverlayTrackedRequest(requestId);
           const matchesPromptDashboardRequest = requestId === promptDashboardRequestIdRef.current;
+          const matchesPromptDashboardProjectsRequest = requestId === promptDashboardProjectsRequestIdRef.current;
           const matchesPromptDashboardDockerRequest = Boolean(promptDashboardDockerBusyByRequestIdRef.current[requestId]);
           if (matchesSaveRequest) {
             setIsSaving(false);
@@ -4135,11 +4201,33 @@ export const EditorApp: React.FC = () => {
             showInlineNotice('error', msg.message);
             break;
           }
-          if (matchesPromptDashboardRequest) {
-            setPromptDashboardBusyAction(previous => shouldRetainPromptDashboardBusyActionOnNotice({
-              busyAction: previous,
+          if (matchesPromptDashboardRequest || matchesPromptDashboardProjectsRequest) {
+            const releaseProjectsRequest = shouldReleasePromptDashboardProjectRequestOnNotice({
+              activeProjectsRequestId: promptDashboardProjectsRequestIdRef.current,
+              messageRequestId: requestId,
               retainPromptDashboardBusy: msg.retainPromptDashboardBusy,
-            }) ? previous : null);
+            });
+            if (releaseProjectsRequest) {
+              promptDashboardProjectsRequestIdRef.current = '';
+              // Terminal project-details error запрещает автоматический retry до следующего refresh.
+              setPromptDashboardSnapshot(previous => previous ? {
+                ...previous,
+                projects: {
+                  ...previous.projects,
+                  cache: {
+                    ...previous.projects.cache,
+                    status: 'error',
+                    error: String(msg.message || ''),
+                  },
+                },
+              } : previous);
+            }
+            if (matchesPromptDashboardRequest) {
+              setPromptDashboardBusyAction(previous => shouldRetainPromptDashboardBusyActionOnNotice({
+                busyAction: previous,
+                retainPromptDashboardBusy: msg.retainPromptDashboardBusy,
+              }) ? previous : null);
+            }
             showInlineNotice('error', msg.message);
             break;
           }
@@ -4180,13 +4268,27 @@ export const EditorApp: React.FC = () => {
         showInlineNotice('error', msg.message);
         break;
       case 'info':
-        if ((msg.requestId || '').trim() && (msg.requestId || '').trim() === promptDashboardRequestIdRef.current) {
-          setPromptDashboardBusyAction(previous => shouldRetainPromptDashboardBusyActionOnNotice({
-            busyAction: previous,
-            retainPromptDashboardBusy: msg.retainPromptDashboardBusy,
-          }) ? previous : null);
-          showInlineNotice('info', msg.message);
-          break;
+        if ((msg.requestId || '').trim()) {
+          const requestId = (msg.requestId || '').trim();
+          const matchesPromptDashboardRequest = requestId === promptDashboardRequestIdRef.current;
+          const matchesPromptDashboardProjectsRequest = requestId === promptDashboardProjectsRequestIdRef.current;
+          if (matchesPromptDashboardRequest || matchesPromptDashboardProjectsRequest) {
+            if (shouldReleasePromptDashboardProjectRequestOnNotice({
+              activeProjectsRequestId: promptDashboardProjectsRequestIdRef.current,
+              messageRequestId: requestId,
+              retainPromptDashboardBusy: msg.retainPromptDashboardBusy,
+            })) {
+              promptDashboardProjectsRequestIdRef.current = '';
+            }
+            if (matchesPromptDashboardRequest) {
+              setPromptDashboardBusyAction(previous => shouldRetainPromptDashboardBusyActionOnNotice({
+                busyAction: previous,
+                retainPromptDashboardBusy: msg.retainPromptDashboardBusy,
+              }) ? previous : null);
+            }
+            showInlineNotice('info', msg.message);
+            break;
+          }
         }
         if ((msg.requestId || '').trim() && promptDashboardDockerBusyByRequestIdRef.current[(msg.requestId || '').trim()]) {
           const requestId = (msg.requestId || '').trim();
@@ -4343,8 +4445,9 @@ export const EditorApp: React.FC = () => {
     prompt.timeSpentUntracked,
   ]);
 
-  // Drop button-level Docker loaders when the editor switches to another prompt scope.
+  // Очищает request-состояние виджетов при переходе к другому промпту.
   useEffect(() => {
+    promptDashboardProjectsRequestIdRef.current = '';
     clearPromptDashboardDockerBusyActions();
   }, [clearPromptDashboardDockerBusyActions, prompt.id, prompt.promptUuid]);
 
@@ -4358,6 +4461,7 @@ export const EditorApp: React.FC = () => {
       });
       skipNextPromptDashboardAutoSnapshotRef.current = false;
       promptDashboardRequestIdRef.current = '';
+      promptDashboardProjectsRequestIdRef.current = '';
       setPromptDashboardBusyAction(null);
       clearPromptDashboardDockerBusyActions();
       return;
@@ -4372,6 +4476,7 @@ export const EditorApp: React.FC = () => {
       });
       skipNextPromptDashboardAutoSnapshotRef.current = false;
       promptDashboardRequestIdRef.current = '';
+      promptDashboardProjectsRequestIdRef.current = '';
       setPromptDashboardBusyAction(null);
       clearPromptDashboardDockerBusyActions();
       return;
@@ -4385,6 +4490,7 @@ export const EditorApp: React.FC = () => {
       });
       skipNextPromptDashboardAutoSnapshotRef.current = false;
       promptDashboardRequestIdRef.current = '';
+      promptDashboardProjectsRequestIdRef.current = '';
       clearPromptDashboardDockerBusyActions();
       return;
     }
@@ -4417,6 +4523,7 @@ export const EditorApp: React.FC = () => {
     }
     const requestId = `prompt-dashboard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     promptDashboardRequestIdRef.current = requestId;
+    promptDashboardProjectsRequestIdRef.current = requestId;
     lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
     setPromptDashboardBusyAction(null);
     postEditorDebugLog('editor-dashboard', 'snapshot.requested', {
@@ -4791,6 +4898,7 @@ export const EditorApp: React.FC = () => {
     });
   }, [gitOverlayBusyAction, gitOverlayMode, logGitOverlayDebug, prompt.branch, prompt.projects, setGitOverlayBusyState, t]);
 
+  /** Запускает full dashboard refresh и защищает project details до matching payload. */
   const handlePromptDashboardRefresh = useCallback(() => {
     if (!promptDashboardHasVisibleSections) {
       return;
@@ -4802,12 +4910,13 @@ export const EditorApp: React.FC = () => {
       ...buildPromptDashboardSnapshotDebugPayload(promptDashboardSnapshotRef.current),
     });
     promptDashboardRequestIdRef.current = requestId;
+    promptDashboardProjectsRequestIdRef.current = requestId;
     lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
     setPromptDashboardBusyAction('refresh');
     vscode.postMessage({ type: 'refreshPromptDashboard', prompt: promptRef.current, requestId });
   }, [promptDashboardCollapsedSections, promptDashboardHasVisibleSections, promptDashboardScopeFingerprint]);
 
-  /** Refreshes a single visible dashboard section without reloading the whole dashboard. */
+  /** Обновляет один виджет и включает project-sensitive ordering только для projects. */
   const handlePromptDashboardRefreshWidget = useCallback((section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => {
     if (shouldSkipPromptDashboardWidgetRefresh(promptDashboardCollapsedSections, widget)) {
       postEditorDebugLog('editor-dashboard', 'widget-refresh.skipped-collapsed', {
@@ -4826,16 +4935,23 @@ export const EditorApp: React.FC = () => {
       ...buildPromptDashboardSnapshotDebugPayload(promptDashboardSnapshotRef.current),
     });
     promptDashboardRequestIdRef.current = requestId;
+    if (widget === 'projects') {
+      promptDashboardProjectsRequestIdRef.current = requestId;
+    }
     lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
     setPromptDashboardBusyAction(buildPromptDashboardSectionRefreshBusyAction(section));
     vscode.postMessage({ type: 'refreshPromptDashboardWidget', prompt: promptRef.current, widget, section, requestId });
   }, [promptDashboardCollapsedSections, promptDashboardScopeFingerprint]);
 
+  /** Запрашивает свежие project details без повторной отправки уже активной hydration. */
   const handlePromptDashboardHydrateProjectsDetails = useCallback((projects: string[], reason: 'details' | 'dirty-files' = 'details') => {
     if (shouldSkipPromptDashboardWidgetRefresh(promptDashboardCollapsedSections, 'projects')) {
       return;
     }
     if (promptDashboardSnapshot?.projects.cache.status === 'loading') {
+      return;
+    }
+    if (promptDashboardProjectsRequestIdRef.current) {
       return;
     }
     const targetProjects = Array.from(new Set((projects || [])
@@ -4845,11 +4961,11 @@ export const EditorApp: React.FC = () => {
       return;
     }
     const requestId = `prompt-dashboard-projects-details-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    promptDashboardRequestIdRef.current = requestId;
+    promptDashboardProjectsRequestIdRef.current = requestId;
     vscode.postMessage({ type: 'hydratePromptDashboardProjectsDetails', prompt: promptRef.current, projects: targetProjects, requestId, reason });
   }, [promptDashboardCollapsedSections, promptDashboardSnapshot?.projects.cache.status]);
 
-  /** Persists one shared dashboard collapse toggle and refreshes newly expanded empty/stale widgets on demand. */
+  /** Сохраняет collapse state и обновляет раскрытый пустой либо stale виджет. */
   const handlePromptDashboardToggleSectionCollapse = useCallback((section: PromptDashboardSectionKey) => {
     const nextState = togglePromptDashboardSectionCollapsedState(promptDashboardCollapsedSections, section);
     const currentSnapshot = promptDashboardSnapshotRef.current;
@@ -4892,6 +5008,7 @@ export const EditorApp: React.FC = () => {
         collapsedSections: nextState,
       });
       promptDashboardRequestIdRef.current = requestId;
+      promptDashboardProjectsRequestIdRef.current = requestId;
       lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
       skipNextPromptDashboardAutoSnapshotRef.current = true;
       setPromptDashboardBusyAction(buildPromptDashboardSectionRefreshBusyAction(section));
@@ -4908,6 +5025,9 @@ export const EditorApp: React.FC = () => {
       collapsedSections: nextState,
     });
     promptDashboardRequestIdRef.current = requestId;
+    if (expandRequest.widget === 'projects') {
+      promptDashboardProjectsRequestIdRef.current = requestId;
+    }
     lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
     skipNextPromptDashboardAutoSnapshotRef.current = true;
     setPromptDashboardBusyAction(buildPromptDashboardSectionRefreshBusyAction(section));
@@ -4940,9 +5060,11 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'openPrompt', id, promptUuid });
   }, []);
 
+  /** Переключает ветку проекта и защищает details до итогового projects payload. */
   const handlePromptDashboardSwitchBranch = useCallback((project: string, branch: string) => {
     const requestId = `prompt-dashboard-switch-project-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     promptDashboardRequestIdRef.current = requestId;
+    promptDashboardProjectsRequestIdRef.current = requestId;
     setPromptDashboardBusyAction(`switch-project:${project}`);
     vscode.postMessage({
       type: 'promptDashboardSwitchBranch',
@@ -4953,9 +5075,11 @@ export const EditorApp: React.FC = () => {
     });
   }, []);
 
+  /** Получает изменения проекта и защищает details до итогового projects payload. */
   const handlePromptDashboardPullProject = useCallback((project: string) => {
     const requestId = `prompt-dashboard-pull-project-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     promptDashboardRequestIdRef.current = requestId;
+    promptDashboardProjectsRequestIdRef.current = requestId;
     setPromptDashboardBusyAction(`pull-project:${project}`);
     vscode.postMessage({
       type: 'promptDashboardPullProject',
@@ -4965,9 +5089,11 @@ export const EditorApp: React.FC = () => {
     });
   }, []);
 
+  /** Переключает ветки нескольких проектов с единым project-sensitive request. */
   const handlePromptDashboardSwitchBranches = useCallback((branchesByProject: Record<string, string>, source: 'bulk' | 'prompt' | 'tracked' = 'bulk') => {
     const requestId = `prompt-dashboard-switch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     promptDashboardRequestIdRef.current = requestId;
+    promptDashboardProjectsRequestIdRef.current = requestId;
     setPromptDashboardBusyAction(source === 'bulk' ? 'switch-all' : `preset:${source}`);
     vscode.postMessage({
       type: 'promptDashboardSwitchBranches',
@@ -5258,6 +5384,7 @@ export const EditorApp: React.FC = () => {
       bulk: busyAction === 'generateCommitMessage:all',
       createdAt: Date.now(),
     });
+    gitOverlayLatestCommitMessageRequestIdRef.current = requestId;
     gitOverlayPendingCommitMessageGenerationRef.current = true;
     setGitOverlayBusyState(busyAction, processLabel, false);
     vscode.postMessage({

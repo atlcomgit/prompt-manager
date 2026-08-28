@@ -1639,7 +1639,7 @@ function PromptDashboardMark() {
 	);
 }
 
-/** Requests lazy project detail hydration only when the user opens an unloaded detail block. */
+/** Запрашивает lazy hydration только для раскрытого блока без ошибки текущего projects payload. */
 function maybeHydrateExpandedDetails(
 	key: string,
 	projects: PromptDashboardProjectSummary[],
@@ -1647,20 +1647,30 @@ function maybeHydrateExpandedDetails(
 	onHydrateProjectsDetails: (projects: string[], reason?: 'details' | 'dirty-files') => void,
 	collapsedSections: PromptDashboardCollapsedSections,
 ): void {
-	if (cacheStatus === 'loading') {
-		return;
-	}
 	const sectionKey = resolvePromptDashboardSectionKeyForExpandedKey(key);
 	if (sectionKey && isPromptDashboardSectionCollapsed(collapsedSections, sectionKey)) {
 		return;
 	}
 
-	const request = resolveExpandedDetailsHydrationRequest(key, projects);
+	const request = resolveAutomaticExpandedDetailsHydrationRequest(key, projects, cacheStatus);
 	if (!request) {
 		return;
 	}
 
 	onHydrateProjectsDetails(request.projects, request.reason);
+}
+
+/** Не повторяет автоматическую hydration после error до manual refresh либо нового reactive payload. */
+export function resolveAutomaticExpandedDetailsHydrationRequest(
+	key: string,
+	projects: PromptDashboardProjectSummary[],
+	cacheStatus: PromptDashboardLoadStatus,
+): DashboardHydrationRequest | null {
+	if (cacheStatus === 'loading' || cacheStatus === 'error') {
+		return null;
+	}
+
+	return resolveExpandedDetailsHydrationRequest(key, projects);
 }
 
 
@@ -1772,7 +1782,7 @@ function renderSectionHeader(
 }
 
 
-/** Resolves which expanded block still needs lazy details and which host route should hydrate it. */
+/** Определяет раскрытый блок, которому ещё требуется lazy hydration через подходящий host route. */
 export function resolveExpandedDetailsHydrationRequest(
 	key: string,
 	projects: PromptDashboardProjectSummary[],
@@ -1788,7 +1798,9 @@ export function resolveExpandedDetailsHydrationRequest(
 	}
 
 	if (kind === 'dirty') {
-		return project.uncommittedFiles.some(file => file.group !== 'untracked' && file.isBinary !== true && (file.additions === null || file.deletions === null))
+		// Reactive snapshot сохраняет подтверждённые числа, но требует один свежий проход hydration.
+		return project.uncommittedFiles.some(file => file.lineStatsHydrated === false
+			|| (file.group !== 'untracked' && file.isBinary !== true && (file.additions === null || file.deletions === null)))
 			? { projects: [project.project], reason: 'dirty-files' }
 			: null;
 	}
@@ -5258,8 +5270,8 @@ function resolveDockerSparklineGapThreshold(samples: DockerSparklineSamplePoint[
 	return Math.max(15000, medianGapMs * 3);
 }
 
-/** Builds container actions once so table menus retain every existing command state. */
-function buildDockerContainerActionItems(
+/** Формирует действия контейнера с единым определением активных lifecycle-состояний. */
+export function buildDockerContainerActionItems(
 	container: DockerContainerSummary,
 	busyAction: DashboardDockerBusyAction,
 	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void,
@@ -5267,8 +5279,9 @@ function buildDockerContainerActionItems(
 	onOpenDockerTerminal: (containerId: string) => void,
 ): DockerActionItem[] {
 	const running = container.status === 'running';
+	const active = isDockerContainerActiveStatus(container.status);
 	const stopped = container.status === 'stopped';
-	const primaryAction: DockerContainerActionKind = running ? 'restart' : 'start';
+	const primaryAction: DockerContainerActionKind = active ? 'restart' : 'start';
 	const primaryBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: primaryAction }));
 	const stopBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'stop' }));
 	const removeBusy = isDockerBusyActionActive(busyAction, buildPromptDashboardDockerContainerBusyAction({ containerId: container.id, action: 'remove' }));
@@ -5289,9 +5302,9 @@ function buildDockerContainerActionItems(
 		{
 			key: primaryAction,
 			icon: primaryAction,
-			label: running ? 'Перезапустить контейнер' : 'Запустить контейнер',
+			label: active ? 'Перезапустить контейнер' : 'Запустить контейнер',
 			onSelect: () => onDockerAction(container.id, primaryAction),
-			disabled: !running && !stopped,
+			disabled: !active && !stopped,
 			loading: primaryBusy,
 		},
 		{
@@ -5299,7 +5312,7 @@ function buildDockerContainerActionItems(
 			icon: 'stop',
 			label: 'Остановить контейнер',
 			onSelect: () => onDockerAction(container.id, 'stop'),
-			disabled: !running,
+			disabled: !active,
 			loading: stopBusy,
 		},
 		{
@@ -5547,7 +5560,7 @@ function formatDockerContainerSecondaryLabel(
 	return parts.join(' · ');
 }
 
-/** Filters Docker project groups while preserving project boundaries for tree mode. */
+/** Фильтрует Docker-проекты и сохраняет границы Compose-групп для всех режимов отображения. */
 export function resolveFilteredDockerProjects(
 	data: DockerContainersData | undefined,
 	statusFilter: DockerContainersStatusFilter,
@@ -5570,20 +5583,25 @@ export function resolveFilteredDockerProjects(
 		const sourceGroups = (project.composeFileGroups || []).length > 0
 			? project.composeFileGroups
 			: buildDockerComposeFileGroupsForView(project.composeFiles, project.containers, sortBy);
+		const containersByComposePath = indexDockerContainersByComposePath(project.containers);
 		const composeFileGroups = sourceGroups.flatMap(sourceGroup => {
-			const sourceGroupContainers = normalizedSearch
-				? resolveDockerComposeGroupSourceContainers(project, sourceGroup, sortBy)
-				: sourceGroup.containers;
+			// Полный состав группы не позволяет остановленному контейнеру стать declared-service строкой.
+			const sourceGroupContainers = resolveDockerComposeGroupSourceContainers(
+				sourceGroup,
+				sortBy,
+				containersByComposePath,
+			);
 			const groupContainers = sourceGroupContainers.filter(container => visibleContainerIds.has(container.id));
 			const group = buildDockerComposeFileGroupForView({ ...sourceGroup, containers: sourceGroupContainers }, groupContainers, normalizedSearch);
+			if (statusFilter === 'running') {
+				// В активном режиме строки без реального активного контейнера не создаются.
+				return group.containers.length > 0 ? [{ ...group, serviceNames: [] }] : [];
+			}
+			if (statusFilter === 'stopped') {
+				return group.containers.length > 0 || (group.serviceNames || []).length > 0 ? [group] : [];
+			}
 			if (group.containers.length > 0) {
 				return [group];
-			}
-			if (statusFilter === 'running') {
-				return [];
-			}
-			if (statusFilter === 'stopped' && matchesDockerContainerStatusFilter(sourceGroup.status || 'unknown', 'running')) {
-				return [];
 			}
 			if (!normalizedSearch) {
 				return [group];
@@ -5598,29 +5616,43 @@ export function resolveFilteredDockerProjects(
 			containers,
 			composeFiles,
 			composeFileGroups,
-			runningCount: containers.filter(container => container.status === 'running').length,
-			stoppedCount: containers.filter(container => container.status === 'stopped').length,
+			runningCount: containers.filter(container => isDockerContainerActiveStatus(container.status)).length,
+			stoppedCount: containers.filter(container => !isDockerContainerActiveStatus(container.status)).length,
 			warningCount: containers.filter(container => container.statusTone === 'warning').length,
 			errorCount: containers.filter(container => container.statusTone === 'error').length,
 		};
 	});
 }
 
-/** Resolves the full source container set for one compose file group from project-level Docker rows. */
+/** Индексирует контейнеры проекта по нормализованному пути Compose-файла за один проход. */
+function indexDockerContainersByComposePath(
+	containers: DockerContainerSummary[],
+): Map<string, DockerContainerSummary[]> {
+	const containersByComposePath = new Map<string, DockerContainerSummary[]>();
+	for (const container of containers) {
+		for (const filePath of container.composeFilePaths) {
+			const composeFilePath = normalizeDashboardPath(filePath);
+			const indexedContainers = containersByComposePath.get(composeFilePath) || [];
+			indexedContainers.push(container);
+			containersByComposePath.set(composeFilePath, indexedContainers);
+		}
+	}
+	return containersByComposePath;
+}
+
+/** Собирает полный набор контейнеров Compose-группы из заранее построенного индекса проекта. */
 function resolveDockerComposeGroupSourceContainers(
-	project: DockerContainerProjectGroup,
 	group: DockerComposeFileContainerGroup,
 	sortBy: DockerContainerSortBy,
+	containersByComposePath: ReadonlyMap<string, DockerContainerSummary[]>,
 ): DockerContainerSummary[] {
 	const composeFilePath = normalizeDashboardPath(group.composeFile.filePath);
 	const containersById = new Map<string, DockerContainerSummary>();
 	for (const container of group.containers) {
 		containersById.set(container.id, container);
 	}
-	for (const container of project.containers) {
-		if (container.composeFilePaths.some(filePath => normalizeDashboardPath(filePath) === composeFilePath)) {
-			containersById.set(container.id, container);
-		}
+	for (const container of containersByComposePath.get(composeFilePath) || []) {
+		containersById.set(container.id, container);
 	}
 	return sortDockerContainers(Array.from(containersById.values()), sortBy);
 }
@@ -5730,7 +5762,7 @@ function buildDockerComposeFileGroupsForView(
 	});
 }
 
-/** Creates a UI compose file group and recalculates its visible counters. */
+/** Создает Compose-группу интерфейса и пересчитывает счетчики видимых контейнеров. */
 function buildDockerComposeFileGroupForView(
 	group: DockerComposeFileContainerGroup,
 	containers: DockerContainerSummary[],
@@ -5748,19 +5780,19 @@ function buildDockerComposeFileGroupForView(
 		status: status.status,
 		statusTone: status.statusTone,
 		statusText: status.statusText,
-		runningCount: containers.filter(container => container.status === 'running').length,
-		stoppedCount: containers.filter(container => container.status === 'stopped').length,
+		runningCount: containers.filter(container => isDockerContainerActiveStatus(container.status)).length,
+		stoppedCount: containers.filter(container => !isDockerContainerActiveStatus(container.status)).length,
 		warningCount: containers.filter(container => container.statusTone === 'warning').length,
 		errorCount: containers.filter(container => container.statusTone === 'error').length,
 	};
 }
 
-/** Resolves a compose file status from the visible containers and declared services. */
+/** Вычисляет статус Compose-файла по видимым контейнерам и объявленным сервисам. */
 function resolveDockerComposeGroupStatus(
 	containers: DockerContainerSummary[],
 	serviceNames: string[],
 ): { status: DockerContainerLifecycleStatus; statusTone: DockerContainerStatusTone; statusText: string } {
-	const runningCount = containers.filter(container => container.status === 'running').length;
+	const runningCount = containers.filter(container => isDockerContainerActiveStatus(container.status)).length;
 	const errorCount = containers.filter(container => container.statusTone === 'error').length;
 	if (errorCount > 0) {
 		return { status: 'error', statusTone: 'error', statusText: `Ошибки: ${errorCount}` };

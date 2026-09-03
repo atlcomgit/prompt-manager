@@ -6,6 +6,13 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-09-04
+
+#### Changed
+- Shared workflow instructions now keep the generated project schema inside one marker-delimited section of `project.instructions.md`, preserve all user-authored sections outside it, reject malformed or concurrent updates, and limit only the managed section to 300 lines and 30,000 Unicode code points.
+- `CHANGELOG.md` is no longer treated as mandatory full-project context and is consulted only through targeted history searches when needed.
+- Concurrent `CHANGELOG.md` entries from independent tasks are now treated as normal collaborative updates: each task preserves unrelated entries, rebases its minimal patch on the latest target section, and stops only for an incompatible edit or Git conflict markers affecting its own entry or insertion point.
+
 ### 2026-08-28
 
 #### Fixed

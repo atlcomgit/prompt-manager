@@ -17,6 +17,11 @@ test('shouldApplyPromptAiEnrichmentState matches current prompt or active save i
 	assert.equal(shouldApplyPromptAiEnrichmentState('old-prompt-id', 'uuid-1', 'other-prompt', 'uuid-1', null), true);
 });
 
+/** Проверяет приоритет несовпадающих UUID над одинаковыми идентификаторами папки. */
+test('shouldApplyPromptAiEnrichmentState rejects mismatched non-empty UUIDs', () => {
+	assert.equal(shouldApplyPromptAiEnrichmentState('prompt-1', 'uuid-1', 'prompt-1', 'uuid-2', 'prompt-1'), false);
+});
+
 test('shouldApplyPromptSaveResult matches only the active or currently opened prompt save completion', () => {
 	assert.equal(shouldApplyPromptSaveResult('prompt-1', '', '', 'prompt-1', '', null), true);
 	assert.equal(shouldApplyPromptSaveResult('prompt-2', 'uuid-2', '', 'other-prompt', 'uuid-2', null), true);

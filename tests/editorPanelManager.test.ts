@@ -4716,6 +4716,7 @@ test('savePrompt keeps a newer dirty snapshot when it arrives during an in-fligh
 	assert.equal((manager as any).panelBasePrompts.get(panelKey)?.content, 'Saved content');
 });
 
+/** Проверяет сохранение Quick Add и последующее фоновое обогащение названия. */
 test('createQuickAddPrompt stores input as content and only enriches title in background', async () => {
 	const content = [
 		'Нужно реализовать быстрый сценарий создания промпта из сырого текста.',
@@ -4725,6 +4726,9 @@ test('createQuickAddPrompt stores input as content and only enriches title in ba
 	const { manager, getStoredPrompt } = await createManager({
 		generateTitle: async () => 'AI generated title',
 		generateDescription: async () => 'AI generated description',
+		configurationValues: {
+			'promptManager.ai.enabled': true,
+		},
 	});
 
 	manager.onDidPromptAiEnrichmentStateChange((state) => {
@@ -4745,6 +4749,343 @@ test('createQuickAddPrompt stores input as content and only enriches title in ba
 	assert.equal(getStoredPrompt()?.title, 'AI generated title');
 	assert.equal((getStoredPrompt()?.description || '').trim(), '');
 	assert.ok(aiStates.some(state => !state.title && !state.description));
+});
+
+/** Проверяет локальное название без планирования фонового запроса при выключенной настройке. */
+test('createQuickAddPrompt keeps fallback title without background generation when disabled', async () => {
+	let generateTitleCalls = 0;
+	const enrichmentStates: Array<{ title: boolean; description: boolean }> = [];
+	const content = 'Нужно сохранить локальное название и не запускать фоновый запрос для выключенной настройки.';
+	const { manager, getStoredPrompt } = await createManager({
+		generateTitle: async () => {
+			generateTitleCalls += 1;
+			return 'Generated title';
+		},
+		configurationValues: {
+			'promptManager.ai.enabled': false,
+		},
+	});
+	manager.onDidPromptAiEnrichmentStateChange(state => enrichmentStates.push(state));
+
+	const saved = await manager.createQuickAddPrompt(content);
+	await flushTurns(2);
+
+	assert.ok((saved?.title || '').trim());
+	assert.equal(getStoredPrompt()?.title, saved?.title);
+	assert.equal(generateTitleCalls, 0);
+	assert.equal(enrichmentStates.some(state => state.title || state.description), false);
+	assert.equal((manager as any).pendingEnrichmentPromptKeys.size, 0);
+});
+
+/** Проверяет удаление устаревшего pending-признака перед ready-ответом. */
+test('consumePendingReadyPromptMessage removes stale enrichment state', async () => {
+	const { manager } = await createManager();
+	const panelKey = '__prompt_editor_singleton__';
+	(manager as any).panelPromptRefs.set(panelKey, createPrompt({
+		id: 'prompt-final',
+		promptUuid: 'uuid-a',
+		title: 'Итоговое название',
+	}));
+	(manager as any).pendingReadyPromptMessages.set(panelKey, {
+		type: 'prompt',
+		prompt: createPrompt({ id: 'prompt-stale', promptUuid: 'uuid-a', title: 'Старое название' }),
+		reason: 'open',
+		aiEnrichment: { title: true, description: false },
+	});
+
+	const message = (manager as any).consumePendingReadyPromptMessage(panelKey);
+
+	assert.equal(message?.type, 'prompt');
+	assert.equal('aiEnrichment' in message, false);
+	assert.equal(message?.prompt?.id, 'prompt-final');
+	assert.equal(message?.prompt?.title, 'Итоговое название');
+});
+
+/** Проверяет добавление активного pending-состояния в ready-ответ. */
+test('consumePendingReadyPromptMessage adds active enrichment state', async () => {
+	const { manager } = await createManager();
+	const panelKey = '__prompt_editor_singleton__';
+	const prompt = createPrompt({ id: 'prompt-a', promptUuid: 'uuid-a' });
+	(manager as any).setPendingPromptAiEnrichmentState(prompt.id, prompt.promptUuid, {
+		title: true,
+		description: false,
+	});
+	(manager as any).pendingReadyPromptMessages.set(panelKey, {
+		type: 'prompt',
+		prompt,
+		reason: 'open',
+	});
+
+	const message = (manager as any).consumePendingReadyPromptMessage(panelKey);
+
+	assert.deepEqual(message?.aiEnrichment, { title: true, description: false });
+});
+
+/** Проверяет доставку через ключ актуальной панели и обязательный завершающий false. */
+test('scheduleBackgroundAiEnrichment posts full prompt and terminal state to current panel', async () => {
+	const content = 'Нужно проверить доставку результата после закрытия и повторного открытия панели редактора промпта.';
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: '',
+			content,
+		},
+		generateTitle: async () => 'Generated title',
+	});
+	const panelKey = '__prompt_editor_singleton__';
+	const events: Array<{ panelKey: string; message?: any; type: 'message' | 'sync' }> = [];
+	const enrichmentStates: Array<{ promptId: string; title: boolean; description: boolean }> = [];
+	(manager as any).storageService.uniqueId = async (requestedIdBase: string) => requestedIdBase;
+	manager.onDidPromptAiEnrichmentStateChange(state => enrichmentStates.push(state));
+	(manager as any).panelPromptRefs.set(panelKey, createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: '',
+		content,
+	}));
+	(manager as any).postMessageToCurrentPanel = async (targetPanelKey: string, message: any) => {
+		events.push({ panelKey: targetPanelKey, message, type: 'message' });
+		return true;
+	};
+	(manager as any).syncTrackedPromptFilesForPanel = async () => {
+		events.push({ panelKey, type: 'sync' });
+	};
+
+	await (manager as any).scheduleBackgroundAiEnrichment(
+		'prompt-a',
+		'uuid-a',
+		content,
+		true,
+		false,
+		panelKey,
+	);
+
+	const fullPromptIndex = events.findIndex(event => (
+		event.message?.type === 'prompt' && event.message?.reason === 'ai-enrichment'
+	));
+	const syncIndex = events.findIndex(event => event.type === 'sync');
+	const terminalStateIndexes = events.flatMap((event, index) => (
+		index > fullPromptIndex
+		&& event.message?.type === 'promptAiEnrichmentState'
+		&& !event.message.title
+		&& !event.message.description
+			? [index]
+			: []
+	));
+	assert.ok(events.every(event => event.panelKey === panelKey));
+	assert.ok(events.some(event => event.message?.type === 'promptAiEnrichmentState' && event.message.title));
+	assert.ok(fullPromptIndex >= 0);
+	assert.ok(syncIndex > fullPromptIndex);
+	assert.equal(terminalStateIndexes.length, 1);
+	assert.ok((terminalStateIndexes[0] ?? -1) > fullPromptIndex);
+	assert.ok((terminalStateIndexes[0] ?? Number.MAX_SAFE_INTEGER) < syncIndex);
+	assert.equal(enrichmentStates[0]?.promptId, 'prompt-a');
+	assert.equal(enrichmentStates[enrichmentStates.length - 1]?.promptId, 'prompt-a');
+	assert.equal((manager as any).pendingPromptAiEnrichmentStates.size, 0);
+	assert.equal((manager as any).pendingEnrichmentPromptKeys.size, 0);
+});
+
+/** Проверяет, что завершённый старый запуск не очищает состояние нового во время синхронизации. */
+test('background title lifecycle finishes before optional tracked file sync', async () => {
+	const content = 'Нужно проверить независимое завершение двух последовательных фоновых операций названия промпта.';
+	const secondGeneratedTitle = createDeferred<string>();
+	const firstSyncStarted = createDeferred<void>();
+	const releaseFirstSync = createDeferred<void>();
+	let generateTitleCalls = 0;
+	let syncCalls = 0;
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: '',
+			content,
+		},
+		generateTitle: async () => {
+			generateTitleCalls += 1;
+			return generateTitleCalls === 1 ? 'Первое итоговое название' : secondGeneratedTitle.promise;
+		},
+	});
+	const panelKey = '__prompt_editor_singleton__';
+	(manager as any).panelPromptRefs.set(panelKey, createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: '',
+		content,
+	}));
+	(manager as any).postMessageToCurrentPanel = async () => true;
+	(manager as any).syncTrackedPromptFilesForPanel = async () => {
+		syncCalls += 1;
+		if (syncCalls === 1) {
+			firstSyncStarted.resolve();
+			await releaseFirstSync.promise;
+		}
+	};
+
+	const firstOperation = (manager as any).scheduleBackgroundAiEnrichment(
+		'prompt-a',
+		'uuid-a',
+		content,
+		true,
+		false,
+		panelKey,
+	);
+	await firstSyncStarted.promise;
+	const secondOperation = (manager as any).scheduleBackgroundAiEnrichment(
+		'prompt-a',
+		'uuid-a',
+		content,
+		true,
+		false,
+		panelKey,
+	);
+	assert.equal((manager as any).pendingPromptAiEnrichmentStates.get('uuid:uuid-a')?.title, true);
+
+	releaseFirstSync.resolve();
+	await firstOperation;
+	assert.equal((manager as any).pendingPromptAiEnrichmentStates.get('uuid:uuid-a')?.title, true);
+	assert.equal((manager as any).pendingEnrichmentPromptKeys.has('uuid:uuid-a'), true);
+
+	secondGeneratedTitle.resolve('Второе итоговое название');
+	await secondOperation;
+	assert.equal((manager as any).pendingPromptAiEnrichmentStates.size, 0);
+	assert.equal((manager as any).pendingEnrichmentPromptKeys.size, 0);
+});
+
+/** Проверяет запрет отложенной записи и событий завершения после остановки manager. */
+test('background title lifecycle stops before persistence during shutdown', async () => {
+	const generatedTitle = createDeferred<string>();
+	const states: Array<{ title: boolean; description: boolean }> = [];
+	let savePromptCalls = 0;
+	const content = 'Нужно проверить остановку фонового названия без записи после завершения работы расширения.';
+	const { manager } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: '',
+			content,
+		},
+		generateTitle: async () => generatedTitle.promise,
+		savePrompt: async prompt => {
+			savePromptCalls += 1;
+			return prompt;
+		},
+	});
+	manager.onDidPromptAiEnrichmentStateChange(state => states.push(state));
+
+	const operation = (manager as any).scheduleBackgroundAiEnrichment(
+		'prompt-a',
+		'uuid-a',
+		content,
+		true,
+		false,
+		'__prompt_editor_singleton__',
+	);
+	await flushTurns(1);
+	manager.prepareForShutdown();
+	generatedTitle.resolve('Итоговое название');
+	await operation;
+
+	assert.equal(savePromptCalls, 0);
+	assert.equal(states.length, 1);
+	assert.equal(states[0]?.title, true);
+	assert.equal((manager as any).pendingPromptAiEnrichmentStates.size, 0);
+	assert.equal((manager as any).pendingEnrichmentPromptKeys.size, 0);
+});
+
+/** Проверяет доставку результата в новую singleton-панель после закрытия исходного окна. */
+test('background title completion reaches the reopened singleton panel', async () => {
+	resetVsCodeCommandMock();
+	const generatedTitle = createDeferred<string>();
+	const activeState = createDeferred<void>();
+	const terminalState = createDeferred<void>();
+	const content = 'Нужно проверить завершение фонового названия после закрытия и повторного открытия окна промпта.';
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-reopened-title',
+			title: '',
+			content,
+		},
+		generateTitle: async () => generatedTitle.promise,
+		configurationValues: {
+			'promptManager.ai.enabled': true,
+		},
+	});
+	(manager as any).storageService.uniqueId = async (requestedIdBase: string) => requestedIdBase;
+	let enrichmentStarted = false;
+	manager.onDidPromptAiEnrichmentStateChange((state) => {
+		if (state.title) {
+			enrichmentStarted = true;
+			activeState.resolve();
+		}
+		if (enrichmentStarted && !state.title && !state.description) {
+			terminalState.resolve();
+		}
+	});
+
+	await manager.openPrompt('prompt-a');
+	const disposedPanel = vscodeCreatedWebviewPanels[0];
+	assert.ok(disposedPanel);
+	await disposedPanel.emitMessage({
+		type: 'savePrompt',
+		source: 'manual',
+		requestId: 'save-before-reopen',
+		prompt: createPrompt({
+			id: 'prompt-a',
+			promptUuid: 'uuid-reopened-title',
+			title: '',
+			content,
+		}),
+	});
+	await activeState.promise;
+
+	const fallbackPromptId = getStoredPrompt()?.id;
+	assert.ok(fallbackPromptId);
+	disposedPanel.dispose();
+	await flushTurns(2);
+	await manager.openPrompt(fallbackPromptId);
+	const reopenedPanel = vscodeCreatedWebviewPanels[1];
+	assert.ok(reopenedPanel);
+	reopenedPanel.postedMessages.length = 0;
+	let acceptsMessages = false;
+	reopenedPanel.webview.postMessage = async (message: any) => {
+		if (!acceptsMessages) {
+			return false;
+		}
+		reopenedPanel.postedMessages.push(message);
+		return true;
+	};
+	let disposedCompletionMessages = 0;
+	disposedPanel.webview.postMessage = async (message: any) => {
+		if (message?.type === 'promptAiEnrichmentState' || message?.reason === 'ai-enrichment') {
+			disposedCompletionMessages += 1;
+		}
+		return false;
+	};
+
+	generatedTitle.resolve('Итоговое название промпта');
+	await terminalState.promise;
+	await flushTurns(3);
+	acceptsMessages = true;
+	const reopenedBootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
+	assert.ok(reopenedBootId);
+	await reopenedPanel.emitMessage({
+		type: 'ready',
+		bootId: reopenedBootId,
+		assetVersion: EDITOR_WEBVIEW_ASSET_VERSION,
+	});
+
+	const fullPromptMessage = reopenedPanel.postedMessages.find((message: any) => (
+		message?.type === 'prompt' && message?.reason === 'open'
+	)) as any;
+	assert.ok(fullPromptMessage);
+	assert.equal(fullPromptMessage?.prompt?.promptUuid, 'uuid-reopened-title');
+	assert.equal(fullPromptMessage?.prompt?.title, 'Итоговое название промпта');
+	assert.notEqual(fullPromptMessage?.prompt?.id, fallbackPromptId);
+	assert.equal('aiEnrichment' in fullPromptMessage, false);
+	assert.equal(disposedCompletionMessages, 0);
+	reopenedPanel.dispose();
 });
 
 /** Verify that Quick Add reuses every chat-launch field from the latest saved prompt. */

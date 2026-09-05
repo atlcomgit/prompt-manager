@@ -54,7 +54,7 @@ import {
 } from '../types/promptDashboard.js';
 import type { StorageService } from '../services/storageService.js';
 import type { AiService } from '../services/aiService.js';
-import { areInternalAiFeaturesEnabled } from '../services/aiSettingsConfig.js';
+import { areInternalAiFeaturesEnabled, getAiSettingsFromConfiguration } from '../services/aiSettingsConfig.js';
 import type { PromptVoiceService } from '../services/promptVoice/promptVoiceService.js';
 import type { PromptDashboardService } from '../services/promptDashboardService.js';
 import { isDockerActiveLifecycleStatus, type DockerContainersService } from '../services/dockerContainersService.js';
@@ -3838,17 +3838,12 @@ export class EditorPanelManager {
 				switchSaveQueueResolve!(savedPrompt);
 
 				if (aiEnrichmentPlan.needsAiEnrichment) {
-					this.setPendingPromptAiEnrichmentState(savedPrompt.id, savedPrompt.promptUuid, {
-						title: aiEnrichmentPlan.needsTitle,
-						description: aiEnrichmentPlan.needsDescription,
-					});
 					void this.scheduleBackgroundAiEnrichment(
 						savedPrompt.id,
 						savedPrompt.promptUuid,
 						savedPrompt.content,
 						aiEnrichmentPlan.needsTitle,
 						aiEnrichmentPlan.needsDescription,
-						(message) => this.postMessageToCurrentPanel(panelKey || SINGLE_EDITOR_PANEL_KEY, message),
 						panelKey || SINGLE_EDITOR_PANEL_KEY,
 					);
 				}
@@ -6185,6 +6180,7 @@ export class EditorPanelManager {
 		return vscode.env.language.startsWith('ru') ? 'ru' : 'en';
 	}
 
+	/** Определяет необходимость fallback и запуска фонового обогащения после сохранения. */
 	private resolvePromptAiEnrichmentPlan(
 		promptToSave: Pick<Prompt, 'id' | 'promptUuid' | 'title' | 'description' | 'content'>,
 		currentPrompt?: Pick<Prompt, 'id' | 'promptUuid'> | null,
@@ -6207,11 +6203,17 @@ export class EditorPanelManager {
 		const enrichmentAlreadyRunning = Boolean(
 			enrichmentKey && this.pendingEnrichmentPromptKeys.has(enrichmentKey),
 		);
+		/** Отключённая фоновая генерация сохраняет локальный fallback, но не планирует запрос. */
+		const enrichmentEnabled = getAiSettingsFromConfiguration(
+			vscode.workspace.getConfiguration('promptManager'),
+		).enabled;
 
 		return {
 			needsTitle,
 			needsDescription,
-			needsAiEnrichment: (needsTitle || needsDescription) && !enrichmentAlreadyRunning,
+			needsAiEnrichment: enrichmentEnabled
+				&& (needsTitle || needsDescription)
+				&& !enrichmentAlreadyRunning,
 			enrichmentAlreadyRunning,
 		};
 	}
@@ -6279,7 +6281,7 @@ export class EditorPanelManager {
 	}
 
 	/**
-	 * Фоновое AI-обогащение title и description после сохранения.
+	 * Фоновое обогащение title и description после сохранения.
 	 * Если пользователь не менял title/description вручную (значение совпадает с fallback),
 	 * обновляет config.json на диске и отправляет обновлённый промпт в webview.
 	 */
@@ -6289,24 +6291,39 @@ export class EditorPanelManager {
 		content: string,
 		needsTitle: boolean,
 		needsDescription: boolean,
-		postMessage: (m: ExtensionToWebviewMessage) => Promise<void>,
 		panelKey: string,
 	): Promise<void> {
+		if (this.isShuttingDown) {
+			return;
+		}
 		const enrichmentKey = this.resolvePromptAiEnrichmentKey(promptId, promptUuid);
 		if (!enrichmentKey) {
 			return;
 		}
 
-		// Дедупликация: если AI-обогащение для этого промпта уже запущено — пропускаем
+		// Дедупликация: если фоновое обогащение для этого промпта уже запущено, пропускаем повтор.
 		if (this.pendingEnrichmentPromptKeys.has(enrichmentKey)) {
 			this.hooksOutput.appendLine(`[ai-enrichment] skip: already running for promptId=${promptId}`);
 			return;
 		}
 		this.pendingEnrichmentPromptKeys.add(enrichmentKey);
-		this.hooksOutput.appendLine(`[ai-enrichment] start: promptId=${promptId} needsTitle=${needsTitle} needsDesc=${needsDescription}`);
-		let postedPromptUpdateToUi = false;
+		/** Побочные эффекты выполняются только после полного завершения runtime-состояния. */
+		let pendingTrackedFileSync: { prompt: Prompt; previousId?: string } | null = null;
+		let savedPromptId: string | null = null;
 		try {
-			// Параллельные AI-запросы с увеличенным таймаутом (60с)
+			this.setPendingPromptAiEnrichmentState(promptId, promptUuid, {
+				title: needsTitle,
+				description: needsDescription,
+			});
+			void this.postMessageToCurrentPanel(panelKey, {
+				type: 'promptAiEnrichmentState',
+				promptId,
+				promptUuid: promptUuid || undefined,
+				title: needsTitle,
+				description: needsDescription,
+			});
+			this.hooksOutput.appendLine(`[ai-enrichment] start: promptId=${promptId} needsTitle=${needsTitle} needsDesc=${needsDescription}`);
+			// Параллельные запросы генерации ограничены увеличенным таймаутом в 60 секунд.
 			const TIMEOUT_MS = 60_000;
 			const TIMEOUT_SENTINEL = '\x00__TIMEOUT__';
 
@@ -6341,8 +6358,11 @@ export class EditorPanelManager {
 					generatedTitle = '';
 				}
 			}
+			if (this.isShuttingDown) {
+				return;
+			}
 
-			// Фильтруем: если AI вернул стандартный fallback — считаем пустым
+			// Стандартный fallback не считается сгенерированным результатом.
 			if (generatedTitle === EditorPanelManager.UNTITLED_PROMPT_TITLE) {
 				generatedTitle = '';
 			}
@@ -6364,6 +6384,9 @@ export class EditorPanelManager {
 				: null) || await this.storageService.getPrompt(promptId);
 			if (!currentPrompt) {
 				this.hooksOutput.appendLine(`[ai-enrichment] skip: prompt not found on disk promptId=${promptId}`);
+				return;
+			}
+			if (this.isShuttingDown) {
 				return;
 			}
 
@@ -6401,13 +6424,18 @@ export class EditorPanelManager {
 			}
 
 			const renameFromId = await this.ensurePromptIdMatchesTitle(currentPrompt, currentPrompt.id || undefined);
+			if (this.isShuttingDown) {
+				return;
+			}
 
 			// Сохраняем обновлённый промпт на диск (без истории — это просто обогащение)
 			const enriched = await this.storageService.savePrompt(currentPrompt, {
 				skipHistory: true,
 				previousId: renameFromId,
 			});
-			this.setPendingPromptAiEnrichmentState(enriched.id, enriched.promptUuid, null);
+			if (this.isShuttingDown) {
+				return;
+			}
 
 			// Обновляем UI в webview
 			const activePrompt = this.panelPromptRefs.get(panelKey);
@@ -6427,35 +6455,73 @@ export class EditorPanelManager {
 			if (activePrompt && activePromptMatches) {
 				Object.assign(activePrompt, enriched);
 				this.setPanelPromptRef(panelKey, activePrompt);
-				await this.syncTrackedPromptFilesForPanel(panelKey, activePrompt, renameFromId);
-				const panel = openPanels.get(panelKey);
+				const panel = this.resolveOpenEditorPanel(panelKey);
 				if (panel) {
 					this.updatePromptPanelTitle(panel, enriched);
 				}
-				await postMessage({ type: 'prompt', prompt: enriched, reason: 'ai-enrichment', previousId: renameFromId });
-				await postMessage({ type: 'promptSaved', prompt: enriched, previousId: renameFromId });
-				postedPromptUpdateToUi = true;
-				// Обновляем базовый снимок, чтобы dirty-флаг не зажёгся от AI-обновления
+				/** Результат и завершающее состояние отправляются до синхронизации связанных файлов. */
+				void this.postMessageToCurrentPanel(panelKey, {
+					type: 'prompt',
+					prompt: enriched,
+					reason: 'ai-enrichment',
+					previousId: renameFromId,
+				});
+				void this.postMessageToCurrentPanel(panelKey, {
+					type: 'promptSaved',
+					prompt: enriched,
+					previousId: renameFromId,
+				});
+				// Обновляем базовый снимок, чтобы dirty-флаг не зажёгся от фонового обновления.
 				this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(enriched)));
+				pendingTrackedFileSync = { prompt: activePrompt, previousId: renameFromId };
 			}
 			this.hooksOutput.appendLine(`[ai-enrichment] done: promptId=${promptId} title=${JSON.stringify((enriched.title || '').slice(0, 40))}`);
-
-			// Обновляем список промптов в sidebar (onDidSave → sidebarProvider.refreshList)
-			this._onDidSave.fire(enriched.id);
+			savedPromptId = enriched.id;
 		} catch (err) {
 			this.hooksOutput.appendLine(`[ai-enrichment] error: promptId=${promptId} ${err instanceof Error ? err.message : String(err)}`);
 		} finally {
-			this.setPendingPromptAiEnrichmentState(promptId, promptUuid, null);
-			if (!postedPromptUpdateToUi) {
-				await postMessage({
+			/** Runtime-состояние очищается без ожиданий, чтобы новый ready-cycle увидел завершение. */
+			if (this.isShuttingDown) {
+				this.pendingPromptAiEnrichmentStates.delete(enrichmentKey);
+			} else {
+				this.setPendingPromptAiEnrichmentState(promptId, promptUuid, null);
+			}
+			if (!this.isShuttingDown) {
+				/** Повтор выполняется до освобождения ключа, чтобы старое завершение не затронуло новый запуск. */
+				const terminalMessage: ExtensionToWebviewMessage = {
 					type: 'promptAiEnrichmentState',
 					promptId,
 					promptUuid: promptUuid || undefined,
 					title: false,
 					description: false,
-				});
+				};
+				const terminalStateDelivered = await this.postMessageToCurrentPanel(panelKey, terminalMessage);
+				if (!terminalStateDelivered && !this.isShuttingDown) {
+					await this.postMessageToCurrentPanel(panelKey, terminalMessage);
+				}
 			}
 			this.pendingEnrichmentPromptKeys.delete(enrichmentKey);
+		}
+
+		if (this.isShuttingDown) {
+			return;
+		}
+		// Обновляем список промптов до необязательной синхронизации связанных файлов.
+		if (savedPromptId) {
+			this._onDidSave.fire(savedPromptId);
+		}
+		if (pendingTrackedFileSync) {
+			try {
+				await this.syncTrackedPromptFilesForPanel(
+					panelKey,
+					pendingTrackedFileSync.prompt,
+					pendingTrackedFileSync.previousId,
+				);
+			} catch (err) {
+				this.hooksOutput.appendLine(
+					`[ai-enrichment] sync-error: promptId=${promptId} ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
 		}
 	}
 
@@ -7420,17 +7486,12 @@ export class EditorPanelManager {
 		});
 
 		if (aiEnrichmentPlan.needsAiEnrichment) {
-			this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, {
-				title: aiEnrichmentPlan.needsTitle,
-				description: aiEnrichmentPlan.needsDescription,
-			});
 			void this.scheduleBackgroundAiEnrichment(
 				saved.id,
 				saved.promptUuid,
 				saved.content,
 				aiEnrichmentPlan.needsTitle,
 				aiEnrichmentPlan.needsDescription,
-				async () => undefined,
 				SINGLE_EDITOR_PANEL_KEY,
 			);
 		} else if (!aiEnrichmentPlan.enrichmentAlreadyRunning) {
@@ -7522,11 +7583,23 @@ export class EditorPanelManager {
 		);
 	}
 
-	/** Consumes the next ready-cycle prompt payload if the panel was rebooted before ready arrived. */
+	/** Возвращает ожидающий ready-payload с актуальным состоянием фонового обогащения. */
 	private consumePendingReadyPromptMessage(panelKey: string): ExtensionToWebviewMessage | undefined {
 		const promptMessage = this.pendingReadyPromptMessages.get(panelKey);
 		if (promptMessage) {
 			this.pendingReadyPromptMessages.delete(panelKey);
+		}
+		if (promptMessage?.type === 'prompt') {
+			/** Сохранённый prompt мог устареть целиком во время перезапуска webview. */
+			const currentPrompt = this.panelPromptRefs.get(panelKey);
+			if (promptMessage.prompt && currentPrompt && this.isSamePromptIdentity(promptMessage.prompt, currentPrompt)) {
+				promptMessage.prompt = JSON.parse(JSON.stringify(currentPrompt)) as Prompt;
+			}
+			const pendingAiEnrichment = this.getPendingPromptAiEnrichmentState(promptMessage.prompt);
+			delete promptMessage.aiEnrichment;
+			if (pendingAiEnrichment) {
+				promptMessage.aiEnrichment = pendingAiEnrichment;
+			}
 		}
 		return promptMessage;
 	}
@@ -7830,17 +7903,21 @@ export class EditorPanelManager {
 		}
 	}
 
-	/** Post a message to the current panel if it still exists and is not silently closing. */
-	private async postMessageToCurrentPanel(panelKey: string, message: ExtensionToWebviewMessage): Promise<void> {
-		const panel = this.resolveOpenEditorPanel(panelKey) || openPanels.get(panelKey);
+	/** Отправляет сообщение в актуальную панель и возвращает подтверждение доставки. */
+	private async postMessageToCurrentPanel(
+		panelKey: string,
+		message: ExtensionToWebviewMessage,
+	): Promise<boolean> {
+		const panel = this.resolveOpenEditorPanel(panelKey);
 		if (!panel || this.silentClosePanels.has(panel)) {
-			return;
+			return false;
 		}
 
 		try {
-			await panel.webview.postMessage(message);
+			return await panel.webview.postMessage(message);
 		} catch {
-			// Ignore transient postMessage failures while the webview reloads.
+			// Игнорируем временную ошибку доставки во время перезапуска webview.
+			return false;
 		}
 	}
 
@@ -8038,17 +8115,12 @@ export class EditorPanelManager {
 					this.panelLatestPromptSnapshots.set(panelKey, null);
 					this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(savedPrompt)));
 					if (aiEnrichmentPlan.needsAiEnrichment) {
-						this.setPendingPromptAiEnrichmentState(savedPrompt.id, savedPrompt.promptUuid, {
-							title: aiEnrichmentPlan.needsTitle,
-							description: aiEnrichmentPlan.needsDescription,
-						});
 						void this.scheduleBackgroundAiEnrichment(
 							savedPrompt.id,
 							savedPrompt.promptUuid,
 							savedPrompt.content,
 							aiEnrichmentPlan.needsTitle,
 							aiEnrichmentPlan.needsDescription,
-							(message) => this.postMessageToCurrentPanel(panelKey, message),
 							panelKey,
 						);
 					}
@@ -9077,12 +9149,7 @@ export class EditorPanelManager {
 									`[chat-rename] (save) error: ${error instanceof Error ? error.message : String(error)}`,
 								);
 							});
-						if (needsAiEnrichment) {
-							this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, {
-								title: aiEnrichmentPlan.needsTitle,
-								description: aiEnrichmentPlan.needsDescription,
-							});
-						} else if (!aiEnrichmentPlan.enrichmentAlreadyRunning) {
+						if (!needsAiEnrichment && !aiEnrichmentPlan.enrichmentAlreadyRunning) {
 							this.setPendingPromptAiEnrichmentState(saved.id, saved.promptUuid, null);
 						}
 						const livePanelPrompt = this.panelPromptRefs.get(panelKey);
@@ -9191,7 +9258,6 @@ export class EditorPanelManager {
 								saved.content,
 								aiEnrichmentPlan.needsTitle,
 								aiEnrichmentPlan.needsDescription,
-								postMessage,
 								panelKey,
 							);
 						}

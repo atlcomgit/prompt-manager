@@ -1,3 +1,4 @@
+/** Проверяет принадлежность состояния фонового обогащения текущему промпту. */
 export function shouldApplyPromptAiEnrichmentState(
 	promptId: string | null | undefined,
 	promptUuid: string | null | undefined,
@@ -7,8 +8,8 @@ export function shouldApplyPromptAiEnrichmentState(
 ): boolean {
 	const normalizedPromptUuid = (promptUuid || '').trim();
 	const normalizedCurrentPromptUuid = (currentPromptUuid || '').trim();
-	if (normalizedPromptUuid && normalizedCurrentPromptUuid && normalizedPromptUuid === normalizedCurrentPromptUuid) {
-		return true;
+	if (normalizedPromptUuid && normalizedCurrentPromptUuid) {
+		return normalizedPromptUuid === normalizedCurrentPromptUuid;
 	}
 
 	const normalizedPromptId = (promptId || '').trim();

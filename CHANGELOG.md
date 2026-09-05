@@ -6,6 +6,11 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-09-05
+
+#### Fixed
+- Automatic prompt-title completion now clears its loading state in the current editor after a webview reload, prompt reopen, or folder rename, and ignores stale pending state from an earlier ready cycle.
+
 ### 2026-09-04
 
 #### Changed

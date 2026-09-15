@@ -59,6 +59,9 @@ const KILO_GENERATE_COMMIT_MESSAGE_TIMEOUT_MS = 75_000;
 /** Коротко ожидает nested repository, который built-in Git открывает асинхронно после Reload Window. */
 const GIT_REPOSITORY_DISCOVERY_WAIT_MS = 1_500;
 
+/** Ограничивает срок жизни cleanup token, если webview не подтвердил применение сообщения. */
+const GENERATED_COMMIT_MESSAGE_CLEANUP_TTL_MS = 60_000;
+
 /** Срок ожидания Copilot до отправки поддерживаемого командой сигнала отмены. */
 const COPILOT_GENERATE_COMMIT_MESSAGE_CANCEL_AFTER_MS = 30_000;
 
@@ -231,6 +234,19 @@ export class GitService {
 	private readonly reviewTitlePrefixCache = new Map<string, GitServiceTimedCacheEntry<string>>();
 	/** Сериализует внешние генерации по стабильному Git root, а не identity API wrapper. */
 	private readonly commitMessageGenerationQueues = new Map<string, Promise<void>>();
+	/** Сохраняет точный SCM input и repository wrapper последней генерации каждого root. */
+	private readonly generatedCommitMessageInputs = new Map<string, {
+		repository: BuiltInGitRepository;
+		input: string;
+	}>();
+	/** Хранит одноразовые cleanup tokens до подтверждения применения сообщения webview. */
+	private readonly generatedCommitMessageCleanupTokens = new Map<string, {
+		repository: BuiltInGitRepository;
+		input: string;
+		timeout: NodeJS.Timeout;
+	}>();
+	/** Формирует уникальные cleanup tokens без раскрытия repository path в webview. */
+	private generatedCommitMessageCleanupSequence = 0;
 	/** Не добавляет новые генераторы за root, команда которого не завершилась после hard timeout. */
 	private readonly timedOutCommitMessageRepositories = new Set<string>();
 
@@ -3334,6 +3350,7 @@ export class GitService {
 				}
 				// Очистка позволяет отличить новый результат Kilo от прежнего draft, включая одинаковый текст.
 				const inputBeforeCommand = repository.inputBox.value;
+				this.generatedCommitMessageInputs.delete(repositoryKey);
 				if (options?.clearInputBeforeCommand) {
 					repository.inputBox.value = '';
 					restorePreviousInputIfEmpty = () => {
@@ -3353,6 +3370,13 @@ export class GitService {
 
 				const inputAfterCommand = repository.inputBox.value;
 				const generatedMessage = inputAfterCommand.trim();
+				// Для последующей очистки сохраняем точный SCM-текст, не меняя нормализацию результата для Git Flow.
+				if (generatedMessage && (options?.clearInputBeforeCommand || inputAfterCommand !== inputBeforeCommand)) {
+					this.generatedCommitMessageInputs.set(repositoryKey, {
+						repository,
+						input: inputAfterCommand,
+					});
+				}
 				if (options?.clearInputBeforeCommand) {
 					if (!generatedMessage) {
 						restorePreviousInputIfEmpty?.();
@@ -3573,6 +3597,52 @@ export class GitService {
 			}
 			cancellationSource.dispose();
 		}
+	}
+
+	/** Создает одноразовый token для подтвержденного внешнего сообщения Git Flow. */
+	createGeneratedCommitMessageCleanupToken(projectPath: string, expectedMessage: string): string | undefined {
+		const normalizedExpectedMessage = expectedMessage.trim();
+		if (!normalizedExpectedMessage) {
+			return undefined;
+		}
+		const normalizedProjectPath = this.normalizeGitRepositoryPath(projectPath);
+		const generatedEntry = Array.from(this.generatedCommitMessageInputs.entries())
+			.filter(([repositoryKey, entry]) => (
+				entry.input.trim() === normalizedExpectedMessage
+				&& (
+					normalizedProjectPath === repositoryKey
+					|| normalizedProjectPath.startsWith(`${repositoryKey}${path.sep}`)
+				)
+			))
+			.sort(([leftKey], [rightKey]) => rightKey.length - leftKey.length)[0];
+		if (!generatedEntry) {
+			return undefined;
+		}
+		const [repositoryKey, entry] = generatedEntry;
+		this.generatedCommitMessageInputs.delete(repositoryKey);
+		this.generatedCommitMessageCleanupSequence += 1;
+		const cleanupToken = `scm-commit-${Date.now()}-${this.generatedCommitMessageCleanupSequence}`;
+		const timeout = setTimeout(() => {
+			this.generatedCommitMessageCleanupTokens.delete(cleanupToken);
+		}, GENERATED_COMMIT_MESSAGE_CLEANUP_TTL_MS);
+		timeout.unref?.();
+		this.generatedCommitMessageCleanupTokens.set(cleanupToken, { ...entry, timeout });
+		return cleanupToken;
+	}
+
+	/** Очищает точный SCM input только после webview acknowledgment соответствующего token. */
+	clearGeneratedCommitMessageInput(cleanupToken: string): boolean {
+		const entry = this.generatedCommitMessageCleanupTokens.get(cleanupToken);
+		if (!entry) {
+			return false;
+		}
+		this.generatedCommitMessageCleanupTokens.delete(cleanupToken);
+		clearTimeout(entry.timeout);
+		if (entry.repository.inputBox.value !== entry.input) {
+			return false;
+		}
+		entry.repository.inputBox.value = '';
+		return true;
 	}
 
 	/** Create a new branch in specified projects */

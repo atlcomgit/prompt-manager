@@ -1,3 +1,38 @@
+## Без номера: Сохранение положительного времени реализации
+
+- Дата: 2026-09-15.
+- Автор: alek@atlcom.ru.
+- Ветка: master.
+- Что сделано: сохранение промпта больше не обнуляет ранее записанное положительное время реализации.
+- Ключевые моменты: защита читает актуальную конфигурацию даже при устаревшем снимке редактора,
+  работает после переименования и архивирования и не начисляет сохранённое время повторно.
+- Файлы:
+    CHANGELOG.md
+    README.md
+    src/services/storageService.ts
+    tests/storageServiceContextFiles.test.ts
+
+## 164: Очистка Source Control после переноса commit message
+
+- Дата: 2026-09-14.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: после переноса внешнего сообщения в поля Git Flow совпадающее поле Source Control
+  очищается, а новый пользовательский текст сохраняется.
+- Ключевые моменты: источник Kilo/Copilot отслеживается отдельно от внутреннего резервного способа;
+  webview накапливает concurrent tokens и подтверждает их после React commit; очистка использует одноразовый
+  token, exact repository wrapper и точный raw SCM input; недоставленные tokens удаляются по TTL.
+- Файлы:
+    CHANGELOG.md
+    README.md
+    src/providers/editorPanelManager.ts
+    src/services/gitService.ts
+    src/types/messages.ts
+    src/webview/editor/EditorApp.tsx
+    tests/editorApp.test.tsx
+    tests/editorPanelManager.test.ts
+    tests/gitService.test.ts
+
 ## Без номера: Исправить бесконечную генерацию названия
 
 - Дата: 2026-09-05.

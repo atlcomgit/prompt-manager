@@ -355,6 +355,90 @@ test('GitService generateCommitMessageViaKilo returns a same-result SCM value', 
 	}
 });
 
+/** Проверяет очистку доставленного сообщения без удаления более нового пользовательского текста. */
+test('GitService clearGeneratedCommitMessageInput clears only the matching SCM value', async () => {
+	// Одинаковые сообщения в соседних репозиториях не должны расширять область очистки.
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft');
+	const otherRepository = createBuiltInGitRepository('/workspace/web', 'feat: delivered');
+	setBuiltInGitRepositories([repository, otherRepository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	vscodeExecuteCommandHandler = async () => {
+		repository.inputBox.value = 'feat: delivered';
+	};
+
+	try {
+		const message = await service.generateCommitMessageViaKilo('/workspace/api');
+		const cleanupToken = service.createGeneratedCommitMessageCleanupToken('/workspace/api', message);
+		assert.ok(cleanupToken);
+		assert.equal(service.clearGeneratedCommitMessageInput(cleanupToken), true);
+		assert.equal(repository.inputBox.value, '');
+		assert.equal(otherRepository.inputBox.value, 'feat: delivered');
+
+		// Новый пользовательский ввод после генерации остается нетронутым.
+		repository.inputBox.value = 'draft';
+		const nextMessage = await service.generateCommitMessageViaKilo('/workspace/api');
+		const nextCleanupToken = service.createGeneratedCommitMessageCleanupToken('/workspace/api', nextMessage);
+		assert.ok(nextCleanupToken);
+		repository.inputBox.value = 'feat: newer user input';
+		assert.equal(service.clearGeneratedCommitMessageInput(nextCleanupToken), false);
+		assert.equal(repository.inputBox.value, 'feat: newer user input');
+		assert.equal(service.createGeneratedCommitMessageCleanupToken('/workspace/api', '   '), undefined);
+		assert.equal(service.createGeneratedCommitMessageCleanupToken('/workspace/missing', 'feat: delivered'), undefined);
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
+/** Проверяет очистку исходных пробелов генератора и сохранение последующих пробельных правок для обоих источников. */
+test('GitService clearGeneratedCommitMessageInput distinguishes generated padding from newer whitespace edits', async () => {
+	// Команды работают только с тестовым SCM, без запуска Git и обращения к хранилищу.
+	resetVsCodeMock();
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft');
+	const originalInput = '  feat: delivered\n\nbody  \n';
+	setBuiltInGitRepositories([repository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	// Оба генератора записывают одинаковый текст с внешними пробелами и переносами.
+	vscodeExecuteCommandHandler = async () => {
+		repository.inputBox.value = originalInput;
+	};
+
+	try {
+		for (const source of ['kilo', 'copilot']) {
+			repository.inputBox.value = 'draft';
+			const message = source === 'kilo'
+				? await service.generateCommitMessageViaKilo('/workspace/api')
+				: await service.generateCommitMessageViaCopilot('/workspace/api');
+			assert.equal(message, originalInput.trim());
+			assert.equal(service.createGeneratedCommitMessageCleanupToken('/workspace/api', 'another message'), undefined);
+			assert.equal(repository.inputBox.value, originalInput);
+
+			// Добавленный после генерации перенос считается новым пользовательским вводом.
+			const cleanupToken = service.createGeneratedCommitMessageCleanupToken('/workspace/api', message);
+			assert.ok(cleanupToken);
+			repository.inputBox.value += '\n';
+			assert.equal(service.clearGeneratedCommitMessageInput(cleanupToken), false);
+			assert.equal(repository.inputBox.value, `${originalInput}\n`);
+
+			// Неизмененный исходный текст очищается, хотя доставленное сообщение уже нормализовано.
+			repository.inputBox.value = 'draft';
+			const repeatedMessage = source === 'kilo'
+				? await service.generateCommitMessageViaKilo('/workspace/api')
+				: await service.generateCommitMessageViaCopilot('/workspace/api');
+			const repeatedCleanupToken = service.createGeneratedCommitMessageCleanupToken('/workspace/api', repeatedMessage);
+			assert.ok(repeatedCleanupToken);
+			assert.equal(service.clearGeneratedCommitMessageInput(repeatedCleanupToken), true);
+			assert.equal(repository.inputBox.value, '');
+		}
+	} finally {
+		resetVsCodeMock();
+	}
+});
+
 /** Проверяет безопасный отказ без rootUri и без доступной команды Kilo. */
 test('GitService generateCommitMessageViaKilo skips unavailable command and repository without rootUri', async () => {
 	resetVsCodeMock();

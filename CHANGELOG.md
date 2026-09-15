@@ -6,6 +6,16 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-09-15
+
+#### Fixed
+- Saving a prompt no longer replaces a positive `timeSpentImplementing` already stored in `config.json` with a stale zero, including status-only saves, renames, and archiving, without counting the preserved time again in daily statistics.
+
+### 2026-09-14
+
+#### Fixed
+- Git Flow now clears a matching Kilo/Copilot-generated Source Control input only after React acknowledges the applied field value, accumulates concurrent multi-project acknowledgments, and preserves newer user input and internal fallback text.
+
 ### 2026-09-05
 
 #### Fixed

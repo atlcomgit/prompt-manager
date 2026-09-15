@@ -1724,23 +1724,26 @@ test('postGitOverlaySnapshot keeps freshly created review requests visible when 
 	assert.deepEqual(postedMessages[0]?.snapshot?.projects?.[0]?.review?.request, optimisticRequest);
 });
 
-/** Проверяет приоритет Kilo и последовательную резервную генерацию по проектам. */
+/** Проверяет последовательную генерацию через Kilo, внутренний fallback и Copilot с очисткой только SCM-результатов. */
 test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequential', async () => {
 	resetVsCodeCommandMock();
 	const { manager } = await createManager();
 	const postedMessages: any[] = [];
 	const callOrder: string[] = [];
+	// Запоминаем точные пути и ожидаемые сообщения только внешних генераторов.
+	const clearCalls: unknown[][] = [];
 	const firstProject = createDeferred<string>();
 	const currentPrompt = createPrompt({
-		projects: ['api', 'web'],
+		projects: ['api', 'web', 'docs'],
 		branch: 'feature/task-164',
 	});
 	(manager as any).workspaceService = {
 		getWorkspaceFolderPaths: () => new Map([
 			['api', '/tmp/api'],
 			['web', '/tmp/web'],
+			['docs', '/tmp/docs'],
 		]),
-		getWorkspaceFolders: () => ['api', 'web'],
+		getWorkspaceFolders: () => ['api', 'web', 'docs'],
 	};
 	(manager as any).gitService = {
 		getStagedCommitProjectData: async () => [
@@ -1762,6 +1765,15 @@ test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequent
 				stat: '1 file changed',
 				diff: 'web diff',
 			},
+			{
+				project: 'docs',
+				projectPath: '/tmp/docs',
+				branch: 'feature/task-164',
+				changeSource: 'staged',
+				stagedFiles: [{ status: 'M', path: 'guide.txt' }],
+				stat: '1 file changed',
+				diff: 'docs diff',
+			},
 		],
 		generateCommitMessageViaKilo: async (projectPath: string) => {
 			callOrder.push(`kilo:${projectPath}`);
@@ -1772,7 +1784,19 @@ test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequent
 		},
 		generateCommitMessageViaCopilot: async (projectPath: string) => {
 			callOrder.push(`copilot:${projectPath}`);
+			// Третий проект получает результат Copilot, второй остается на внутреннем fallback.
+			if (projectPath === '/tmp/docs') {
+				return 'docs: update guide';
+			}
 			throw new Error('Copilot command failed');
+		},
+		createGeneratedCommitMessageCleanupToken: (projectPath: string) => {
+			callOrder.push(`token:${projectPath}`);
+			return `cleanup:${projectPath}`;
+		},
+		clearGeneratedCommitMessageInput: (cleanupToken: string) => {
+			clearCalls.push([cleanupToken]);
+			return true;
 		},
 	};
 	(manager as any).aiService.generateCommitMessage = async ({ projectName }: { projectName: string }) => {
@@ -1792,7 +1816,7 @@ test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequent
 		{
 			type: 'gitOverlayGenerateCommitMessage',
 			prompt: currentPrompt,
-			projects: ['api', 'web'],
+			projects: ['api', 'web', 'docs'],
 			requestId: 'req-generate-164',
 		},
 		panel,
@@ -1812,16 +1836,93 @@ test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequent
 		'kilo:/tmp/web',
 		'copilot:/tmp/web',
 		'internal:web',
+		'kilo:/tmp/docs',
+		'copilot:/tmp/docs',
+		'token:/tmp/api',
+		'token:/tmp/docs',
 	]);
 	assert.deepEqual(postedMessages.find(message => message.type === 'gitOverlayCommitMessagesGenerated'), {
 		type: 'gitOverlayCommitMessagesGenerated',
 		messages: [
-			{ project: 'api', message: 'feat: update api' },
+			{ project: 'api', message: 'feat: update api', scmCleanupToken: 'cleanup:/tmp/api' },
 			{ project: 'web', message: 'chore: update web' },
+			{ project: 'docs', message: 'docs: update guide', scmCleanupToken: 'cleanup:/tmp/docs' },
 		],
 		requestId: 'req-generate-164',
 	});
+	assert.deepEqual(clearCalls, []);
+	await (manager as any).handleMessage(
+		{
+			type: 'gitOverlayCommitMessagesApplied',
+			cleanupTokens: ['cleanup:/tmp/api', 'cleanup:/tmp/docs'],
+			requestId: 'req-generate-164',
+		},
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+	assert.deepEqual(clearCalls, [['cleanup:/tmp/api'], ['cleanup:/tmp/docs']]);
 	resetVsCodeCommandMock();
+});
+
+/** Проверяет сохранение SCM при отказе доставки, отклонении отправки и уже закрытом webview. */
+test('gitOverlayGenerateCommitMessage keeps SCM input when delivery fails or webview is disposed', async (t) => {
+	// Все варианты недоставки проверяются последовательно с изолированными подменами зависимостей.
+	for (const failure of ['false', 'rejected', 'disposed']) {
+		await t.test(failure, async () => {
+			resetVsCodeCommandMock();
+			const { manager } = await createManager();
+			const currentPrompt = createPrompt({ projects: ['api'] });
+			const clearCalls: unknown[][] = [];
+			let snapshotCalls = 0;
+			(manager as any).workspaceService = {
+				getWorkspaceFolderPaths: () => new Map([['api', '/tmp/api']]),
+				getWorkspaceFolders: () => ['api'],
+			};
+			// Git полностью подменен: staged-данные и готовый SCM-результат существуют только в памяти.
+			(manager as any).gitService = {
+				stageAll: async () => ({ errors: [] }),
+				getStagedCommitProjectData: async () => [{ project: 'api', projectPath: '/tmp/api' }],
+				generateCommitMessageViaKilo: async () => 'feat: generated',
+				createGeneratedCommitMessageCleanupToken: () => 'cleanup:/tmp/api',
+				clearGeneratedCommitMessageInput: (...args: unknown[]) => {
+					clearCalls.push(args);
+					return true;
+				},
+			};
+			// Отдельно фиксируем обновление снимка после недоставленного ответа.
+			(manager as any).postGitOverlaySnapshot = async () => { snapshotCalls += 1; };
+			const panel = {
+				// Закрытая панель может синхронно бросить исключение уже при получении webview.
+				get webview() {
+					if (failure === 'disposed') {
+						throw new Error('Webview is disposed');
+					}
+					return {
+						postMessage: async () => {
+							if (failure === 'rejected') {
+								throw new Error('Delivery failed');
+							}
+							return false;
+						},
+					};
+				},
+			};
+
+			try {
+				await (manager as any).handleMessage(
+					{ type: 'gitOverlayGenerateCommitMessage', prompt: currentPrompt, includeAllChanges: true },
+					panel, currentPrompt, '__prompt_editor_singleton__', () => false, () => undefined,
+				);
+				assert.deepEqual(clearCalls, []);
+				assert.equal(snapshotCalls, 1);
+			} finally {
+				resetVsCodeCommandMock();
+			}
+		});
+	}
 });
 
 /** Проверяет финальное сообщение tracked request при неожиданном исключении host-case. */
@@ -1920,13 +2021,17 @@ test('gitOverlayGenerateCommitMessage finishes stale renamed prompt request', as
 	resetVsCodeCommandMock();
 });
 
-/** Проверяет production-like stageAll flow без изменения существующих аргументов. */
+/** Проверяет stageAll, generated response и очистку SCM только после webview acknowledgment. */
 test('gitOverlayGenerateCommitMessage preserves includeAllChanges stageAll semantics', async () => {
 	resetVsCodeCommandMock();
 	const { manager } = await createManager();
 	const postedMessages: any[] = [];
 	const stageCalls: any[] = [];
 	const snapshotCalls: any[] = [];
+	// Порядок вызовов выявляет преждевременную очистку до применения webview state.
+	const lifecycleCalls: string[] = [];
+	const clearCalls: any[] = [];
+	const delivery = createDeferred<boolean>();
 	const paths = new Map([['api', '/tmp/api']]);
 	const currentPrompt = createPrompt({
 		projects: ['api'],
@@ -1954,20 +2059,30 @@ test('gitOverlayGenerateCommitMessage preserves includeAllChanges stageAll seman
 		generateCommitMessageViaCopilot: async () => {
 			throw new Error('Copilot must not run after Kilo success');
 		},
+		createGeneratedCommitMessageCleanupToken: () => 'cleanup:/tmp/api',
+		clearGeneratedCommitMessageInput: (...args: unknown[]) => {
+			lifecycleCalls.push('clear');
+			clearCalls.push(args);
+			return true;
+		},
 	};
+	// Снимок отправляется после generated response, но очистка ожидает отдельный acknowledgment.
 	(manager as any).postGitOverlaySnapshot = async (...args: unknown[]) => {
+		lifecycleCalls.push('snapshot');
 		snapshotCalls.push(args);
 	};
 	const panel = {
 		webview: {
+			// Доставка остается неподтвержденной до явного разрешения тестом.
 			postMessage: async (message: unknown) => {
+				lifecycleCalls.push('post');
 				postedMessages.push(message);
-				return true;
+				return delivery.promise;
 			},
 		},
 	} as any;
 
-	await (manager as any).handleMessage(
+	const handling = (manager as any).handleMessage(
 		{
 			type: 'gitOverlayGenerateCommitMessage',
 			prompt: currentPrompt,
@@ -1982,14 +2097,40 @@ test('gitOverlayGenerateCommitMessage preserves includeAllChanges stageAll seman
 		() => undefined,
 	);
 
+	// Сам вызов postMessage не разрешает очистку SCM input.
+	await flushTurns();
+	assert.deepEqual(lifecycleCalls, ['post']);
+	delivery.resolve(true);
+	await handling;
+
 	assert.deepEqual(stageCalls, [[paths, ['api'], false]]);
 	assert.equal(snapshotCalls.length, 1);
 	assert.equal(snapshotCalls[0]?.[4]?.requestId, 'req-stage-all-164');
+	assert.deepEqual(clearCalls, []);
+	assert.deepEqual(lifecycleCalls, ['post', 'snapshot']);
 	assert.deepEqual(postedMessages, [{
 		type: 'gitOverlayCommitMessagesGenerated',
-		messages: [{ project: 'api', message: 'feat: generated' }],
+		messages: [{
+			project: 'api',
+			message: 'feat: generated',
+			scmCleanupToken: 'cleanup:/tmp/api',
+		}],
 		requestId: 'req-stage-all-164',
 	}]);
+	await (manager as any).handleMessage(
+		{
+			type: 'gitOverlayCommitMessagesApplied',
+			cleanupTokens: ['cleanup:/tmp/api'],
+			requestId: 'req-stage-all-164',
+		},
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+	assert.deepEqual(clearCalls, [['cleanup:/tmp/api']]);
+	assert.deepEqual(lifecycleCalls, ['post', 'snapshot', 'clear']);
 	resetVsCodeCommandMock();
 });
 

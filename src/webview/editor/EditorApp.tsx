@@ -400,6 +400,16 @@ type GitOverlayTrackedRequest = {
   createdAt: number;
 };
 
+/** Расширяет generated message одноразовым token подтвержденной SCM cleanup. */
+type GitOverlayGeneratedCommitMessage = GitOverlayProjectCommitMessage & { scmCleanupToken?: string };
+
+/** Описывает одно внешнее сообщение, ожидающее подтверждения React commit. */
+type GitOverlayPendingScmCleanupItem = {
+  project: string;
+  message: string;
+  cleanupToken: string;
+};
+
 const GIT_OVERLAY_STALE_TRACKED_REQUEST_MAX_AGE_MS = 15_000;
 const CHAT_LAUNCH_COMPLETION_HOLD_MS = 2000;
 const CHAT_LAUNCH_MIN_PHASE_VISIBLE_MS = 1000;
@@ -525,6 +535,29 @@ export const shouldApplyGitOverlayCommitMessagesResponse = (
   return !normalizedRequestId
     || isActiveTrackedRequest
     || normalizedRequestId === latestCommitMessageRequestId.trim();
+};
+
+/** Возвращает cleanup tokens только для сообщений, примененных в текущем Git Flow state. */
+export const resolveGitOverlayCommitMessageCleanupTokens = (
+  items: Array<{ project: string; message: string; cleanupToken: string }>,
+  commitMessages: Record<string, string>,
+): string[] => items
+  .filter(item => commitMessages[item.project] === item.message)
+  .map(item => item.cleanupToken);
+
+/** Накапливает независимые cleanup tokens и не сбрасывает очередь внутренним fallback. */
+export const mergeGitOverlayPendingScmCleanupItems = (
+  currentItems: GitOverlayPendingScmCleanupItem[],
+  incomingItems: GitOverlayPendingScmCleanupItem[],
+): GitOverlayPendingScmCleanupItem[] => {
+  if (incomingItems.length === 0) {
+    return currentItems;
+  }
+  const incomingTokens = new Set(incomingItems.map(item => item.cleanupToken));
+  return [
+    ...currentItems.filter(item => !incomingTokens.has(item.cleanupToken)),
+    ...incomingItems,
+  ];
 };
 
 const areTrackedBranchesByProjectEqual = (
@@ -841,6 +874,10 @@ export const EditorApp: React.FC = () => {
   const [gitOverlaySnapshot, setGitOverlaySnapshot] = useState<GitOverlaySnapshot | null>(null);
   const [gitOverlayFileHistory, setGitOverlayFileHistory] = useState<GitOverlayFileHistoryPayload | null>(null);
   const [gitOverlayCommitMessages, setGitOverlayCommitMessages] = useState<Record<string, string>>({});
+  /** Ожидает React commit перед подтверждением очистки соответствующего SCM input. */
+  const [gitOverlayPendingScmCleanupItems, setGitOverlayPendingScmCleanupItems] = useState<
+    GitOverlayPendingScmCleanupItem[]
+  >([]);
   const [gitOverlayBusyAction, setGitOverlayBusyAction] = useState<string | null>(null);
   const [gitOverlayWaitingForSnapshotAction, setGitOverlayWaitingForSnapshotAction] = useState<string | null>(null);
   const [gitOverlayProcessLabel, setGitOverlayProcessLabel] = useState<string | null>(null);
@@ -1122,6 +1159,27 @@ export const EditorApp: React.FC = () => {
   useEffect(() => {
     promptDashboardSnapshotRef.current = promptDashboardSnapshot;
   }, [promptDashboardSnapshot]);
+
+  useEffect(() => {
+    if (gitOverlayPendingScmCleanupItems.length === 0) {
+      return;
+    }
+    // Эффект выполняется после React commit и подтверждает только реально примененные значения полей.
+    const cleanupTokens = resolveGitOverlayCommitMessageCleanupTokens(
+      gitOverlayPendingScmCleanupItems,
+      gitOverlayCommitMessages,
+    );
+    const processedTokens = new Set(gitOverlayPendingScmCleanupItems.map(item => item.cleanupToken));
+    setGitOverlayPendingScmCleanupItems(currentItems => (
+      currentItems.filter(item => !processedTokens.has(item.cleanupToken))
+    ));
+    if (cleanupTokens.length > 0) {
+      vscode.postMessage({
+        type: 'gitOverlayCommitMessagesApplied',
+        cleanupTokens,
+      });
+    }
+  }, [gitOverlayCommitMessages, gitOverlayPendingScmCleanupItems]);
 
   useEffect(() => {
     reportHeightLiveRef.current = reportHeight;
@@ -2010,6 +2068,7 @@ export const EditorApp: React.FC = () => {
   const clearGitOverlayTrackedRequests = useCallback(() => {
     gitOverlayTrackedRequestsRef.current = {};
     gitOverlayLatestCommitMessageRequestIdRef.current = '';
+    setGitOverlayPendingScmCleanupItems([]);
     syncGitOverlayTrackedRequestState();
   }, [syncGitOverlayTrackedRequestState]);
 
@@ -4034,6 +4093,18 @@ export const EditorApp: React.FC = () => {
           }
           return next;
         });
+        const cleanupItems = (msg.messages || [])
+          .filter((item: GitOverlayGeneratedCommitMessage): item is GitOverlayGeneratedCommitMessage & {
+            scmCleanupToken: string;
+          } => Boolean(item.scmCleanupToken))
+          .map((item: GitOverlayGeneratedCommitMessage & { scmCleanupToken: string }) => ({
+            project: item.project,
+            message: item.message || '',
+            cleanupToken: item.scmCleanupToken,
+          }));
+        setGitOverlayPendingScmCleanupItems(currentItems => (
+          mergeGitOverlayPendingScmCleanupItems(currentItems, cleanupItems)
+        ));
         if (String(msg.requestId || '') === gitOverlayLatestCommitMessageRequestIdRef.current) {
           gitOverlayLatestCommitMessageRequestIdRef.current = '';
         }

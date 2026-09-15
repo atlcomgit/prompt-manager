@@ -141,6 +141,8 @@ export type WebviewToExtensionMessage =
 	| { type: 'gitOverlaySetupReviewCli'; request: GitOverlayReviewCliSetupRequest }
 	| { type: 'gitOverlayAssignReviewProvider'; host: string; provider: 'github' | 'gitlab'; promptBranch: string; projects: string[] }
 	| { type: 'gitOverlayGenerateCommitMessage'; prompt: Prompt; project?: string; projects?: string[]; includeAllChanges?: boolean; requestId?: string }
+	/** Подтверждает применение внешних commit messages в состоянии Git Flow webview. */
+	| { type: 'gitOverlayCommitMessagesApplied'; cleanupTokens: string[]; requestId?: string }
 	| { type: 'gitOverlayCommitStaged'; prompt: Prompt; messages: GitOverlayProjectCommitMessage[]; includeAllChanges?: boolean; requestId?: string }
 	| {
 		type: 'gitOverlayCreateReviewRequest';
@@ -266,7 +268,11 @@ export type ExtensionToWebviewMessage =
 	| { type: 'gitOverlayProjectSnapshot'; projectSnapshot: GitOverlayProjectSnapshot; snapshotGeneratedAt: string }
 	| { type: 'gitOverlayBusy'; action: string | null; reason?: GitOverlayBusyReason | null }
 	| { type: 'gitOverlayFileHistory'; history: GitOverlayFileHistoryPayload }
-	| { type: 'gitOverlayCommitMessagesGenerated'; messages: GitOverlayProjectCommitMessage[]; requestId?: string }
+	| {
+		type: 'gitOverlayCommitMessagesGenerated';
+		messages: Array<GitOverlayProjectCommitMessage & { scmCleanupToken?: string }>;
+		requestId?: string;
+	}
 	| { type: 'gitOverlayActionCompleted'; action: GitOverlayActionKind }
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
 	| { type: 'promptDashboardSnapshot'; snapshot: PromptDashboardSnapshot; requestId?: string }

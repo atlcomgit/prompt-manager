@@ -592,6 +592,28 @@ test('shouldApplyGitOverlayCommitMessagesResponse keeps latest generation indepe
 	});
 });
 
+/** Проверяет acknowledgment только для сообщений, реально оставшихся в Git Flow state. */
+test('resolveGitOverlayCommitMessageCleanupTokens excludes fields changed before React acknowledgment', async () => {
+	await withEditorAppEnvironment(async () => {
+		const {
+			mergeGitOverlayPendingScmCleanupItems,
+			resolveGitOverlayCommitMessageCleanupTokens,
+		} = await import('../src/webview/editor/EditorApp.js');
+		const apiItems = [{ project: 'api', message: 'feat: generated', cleanupToken: 'cleanup-api' }];
+		const pendingItems = mergeGitOverlayPendingScmCleanupItems(
+			mergeGitOverlayPendingScmCleanupItems([], apiItems),
+			[{ project: 'web', message: 'fix: generated', cleanupToken: 'cleanup-web' }],
+		);
+		assert.deepEqual(mergeGitOverlayPendingScmCleanupItems(pendingItems, []), pendingItems);
+		const cleanupTokens = resolveGitOverlayCommitMessageCleanupTokens(pendingItems, {
+			api: 'feat: generated',
+			web: 'fix: edited by user',
+		});
+
+		assert.deepEqual(cleanupTokens, ['cleanup-api']);
+	});
+});
+
 test('TimerDisplay hides implementing recalc action when recalculation is not allowed', async () => {
 	await withEditorAppEnvironment(async () => {
 		const { TimerDisplay } = await import('../src/webview/editor/components/TimerDisplay.js');

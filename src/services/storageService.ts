@@ -1170,7 +1170,7 @@ export class StorageService implements vscode.Disposable {
 		return { ...config, content, report };
 	}
 
-	/** Save prompt (config + markdown). Возвращает полный Prompt (config + content + report) */
+	/** Сохраняет промпт, защищая записанное время от обнуления; проверки: storageServiceContextFiles.test.ts. */
 	async savePrompt(
 		prompt: Prompt,
 		options?: {
@@ -1254,12 +1254,30 @@ export class StorageService implements vscode.Disposable {
 		const repairedContextFiles = this.repairPromptContextFileReferences(prompt.contextFiles, dir);
 		prompt.contextFiles = repairedContextFiles.contextFiles;
 
+		// Проверяем актуальный файл после переноса каталога: снимок редактора может содержать устаревший ноль.
+		const configPath = path.join(dir, this.CONFIG_FILE_NAME);
+		let preservedImplementingTime = 0;
+		if (prompt.timeSpentImplementing === 0) {
+			try {
+				const storedConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Partial<PromptConfig> | null;
+				const storedTime = storedConfig?.timeSpentImplementing;
+				if (typeof storedTime === 'number' && Number.isFinite(storedTime) && storedTime > 0) {
+					preservedImplementingTime = storedTime;
+					prompt.timeSpentImplementing = storedTime;
+				}
+			} catch (error) {
+				// Новый промпт ещё не имеет конфигурации; ошибки чтения не разрешают затирать существующую.
+				if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+					throw error;
+				}
+			}
+		}
+
 		// Save config.json (without content field)
 		const { content, report, progress: _progress, sidebarSearchText: _sidebarSearchText, ...config } = prompt;
 		config.updatedAt = new Date().toISOString();
 		config.archived = targetArchived;
 
-		const configPath = path.join(dir, this.CONFIG_FILE_NAME);
 		const configJson = this.serializeStoredPromptConfig(config);
 		const nextContent = content || '';
 		const nextReport = report || '';
@@ -1334,8 +1352,12 @@ export class StorageService implements vscode.Disposable {
 
 		// Daily time stays off the visible save path and is serialized per prompt to avoid lost deltas.
 		if (existingPrompt) {
+			// Сохранённое извне время уже учтено: его восстановление не является новым приростом за сегодня.
+			const dailyTimeBasePrompt = preservedImplementingTime > 0
+				? { ...existingPrompt, timeSpentImplementing: preservedImplementingTime }
+				: existingPrompt;
 			this.scheduleBackgroundStorageTask(
-				() => this.enqueueDailyTimeUpdate(prompt.id, existingPrompt, prompt, targetArchived),
+				() => this.enqueueDailyTimeUpdate(prompt.id, dailyTimeBasePrompt, prompt, targetArchived),
 				canSkipStableStructureChecks ? 1000 : 0,
 			);
 		}

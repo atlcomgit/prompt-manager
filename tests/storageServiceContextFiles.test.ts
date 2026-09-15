@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
 import * as fs from 'node:fs';
@@ -340,4 +340,159 @@ test('savePrompt skips unchanged content and report files for status-only saves'
 	} finally {
 		fs.rmSync(workspaceRoot, { recursive: true, force: true });
 	}
+});
+
+/** Создаёт изолированное хранилище с явно ожидаемыми фоновыми записями. */
+async function createTimeSaveFixture(t: TestContext) {
+	const { StorageService } = await importStorageService();
+	const workspaceRoot = createTempWorkspace();
+	const service = new (StorageService as any)(workspaceRoot);
+	const tasks: Array<() => Promise<void>> = [];
+	// Не запускаем таймеры: дневной учёт и очистка выполняются по команде теста.
+	service.scheduleBackgroundStorageTask = (task: () => Promise<void>) => { tasks.push(task); };
+	// Запись файлового кэша также должна завершиться до удаления временного каталога.
+	const writeListCacheFile = service.writeListCacheFile.bind(service);
+	service.writeListCacheFile = async (configs: unknown[]) => {
+		tasks.push(() => writeListCacheFile(configs));
+	};
+	/** Выполняет все отложенные записи, включая добавленные во время ожидания. */
+	const flush = async () => {
+		while (tasks.length > 0) {
+			await tasks.shift()!();
+		}
+	};
+	// Очистка гарантирована и при падении проверки; незавершённых записей не оставляем.
+	t.after(async () => {
+		try {
+			await flush();
+		} finally {
+			service.dispose();
+			fs.rmSync(workspaceRoot, { recursive: true, force: true });
+		}
+	});
+	return { service, workspaceRoot, flush };
+}
+
+// Проверяем оба пути записи, смену каталога и сочетание переименования с архивированием.
+for (const scenario of [
+	{ name: 'async content save', content: true, rename: false, archived: false },
+	{ name: 'sync status-only save', content: false, rename: false, archived: false },
+	{ name: 'rename', content: false, rename: true, archived: false },
+	{ name: 'archive', content: false, rename: false, archived: true },
+	{ name: 'rename and archive', content: true, rename: true, archived: true },
+]) {
+	/** Устаревший ноль не затирает время с диска и не начисляет его повторно за день. */
+	test(`savePrompt preserves persisted implementing time with stale existingPrompt: ${scenario.name}`, async t => {
+		const { service, workspaceRoot, flush } = await createTimeSaveFixture(t);
+		const oldId = 'time-save-existing';
+		const oldDir = await seedPrompt(workspaceRoot, oldId, []);
+		const existingPrompt = await service.getPrompt(oldId);
+		assert.ok(existingPrompt);
+		service._listCache = [{ ...existingPrompt }];
+
+		// Файл обновлён после загрузки снимка; дневное время уже учтено в прошлом дне.
+		const persistedTime = 120_000;
+		const dailyTime = { '2026-01-01': { writing: 0, implementing: persistedTime, onTask: 0, untracked: 0 } };
+		await writeTextFile(path.join(oldDir, 'config.json'), JSON.stringify({
+			...await readJson(path.join(oldDir, 'config.json')),
+			timeSpentImplementing: persistedTime,
+		}));
+		await writeTextFile(path.join(oldDir, 'daily-time.json'), JSON.stringify(dailyTime));
+		const prompt = {
+			...existingPrompt,
+			id: scenario.rename ? 'time-save-renamed' : oldId,
+			archived: scenario.archived,
+			status: 'completed',
+			content: scenario.content ? '# Changed\n' : existingPrompt.content,
+		};
+		vscodeFsReadPaths.length = 0;
+		vscodeFsWritePaths.length = 0;
+		const saved = await service.savePrompt(prompt, { existingPrompt, previousId: oldId, skipHistory: true });
+		const finalDir = path.join(workspaceRoot, '.vscode/prompt-manager',
+			...(scenario.archived ? ['archive'] : []), prompt.id);
+
+		// Проверяем входной объект, результат, конфигурацию и быстрый путь без чтения через VS Code.
+		assert.equal(prompt.timeSpentImplementing, persistedTime);
+		assert.equal(saved.timeSpentImplementing, persistedTime);
+		assert.equal(saved.status, 'completed');
+		assert.equal(saved.archived, scenario.archived);
+		assert.equal((await readJson(path.join(finalDir, 'config.json'))).timeSpentImplementing, persistedTime);
+		assert.equal(await fsp.readFile(path.join(finalDir, 'prompt.md'), 'utf-8'), prompt.content);
+		assert.equal(vscodeFsReadPaths.some(filePath => filePath.endsWith('/config.json')), false);
+		assert.equal(vscodeFsWritePaths.includes(path.join(finalDir, 'config.json')),
+			scenario.content || scenario.rename || scenario.archived);
+		if (scenario.rename || scenario.archived) {
+			assert.equal(fs.existsSync(oldDir), false);
+		}
+
+		// Архив исключается из списка; в остальных случаях обновляется запись нового идентификатора.
+		assert.deepEqual(service._listCache.map((entry: { id: string; timeSpentImplementing: number }) =>
+			[entry.id, entry.timeSpentImplementing]), scenario.archived ? [] : [[prompt.id, persistedTime]]);
+		await flush();
+		assert.deepEqual(await readJson(path.join(finalDir, 'daily-time.json')), dailyTime);
+		assert.deepEqual(JSON.parse(await fsp.readFile(
+			path.join(workspaceRoot, '.vscode/prompt-manager/prompt-list.json'), 'utf-8')), service._listCache);
+	});
+}
+
+// Положительное значение является явным обновлением, а не попыткой сброса времени.
+for (const incomingTime of [30_000, 180_000]) {
+	/** Разрешает как уменьшение, так и увеличение ранее сохранённого времени. */
+	test(`savePrompt accepts positive implementing time ${incomingTime}`, async t => {
+		const { service, workspaceRoot, flush } = await createTimeSaveFixture(t);
+		const promptDir = await seedPrompt(workspaceRoot, 'positive-time', []);
+		const existingPrompt = await service.getPrompt('positive-time');
+		assert.ok(existingPrompt);
+		service._listCache = [{ ...existingPrompt }];
+		// На диске значение отличается и от снимка, и от нового явного значения.
+		await writeTextFile(path.join(promptDir, 'config.json'), JSON.stringify({
+			...await readJson(path.join(promptDir, 'config.json')), timeSpentImplementing: 120_000,
+		}));
+		const saved = await service.savePrompt({ ...existingPrompt, timeSpentImplementing: incomingTime },
+			{ existingPrompt, skipHistory: true });
+		await flush();
+		assert.equal(saved.timeSpentImplementing, incomingTime);
+		assert.equal((await readJson(path.join(promptDir, 'config.json'))).timeSpentImplementing, incomingTime);
+		assert.equal(service._listCache[0].timeSpentImplementing, incomingTime);
+	});
+}
+
+// Новый каталог не должен наследовать накопленное время исходного промпта.
+for (const duplicate of [false, true]) {
+	/** Сохраняет ноль при создании нового промпта и при штатном копировании. */
+	test(`savePrompt keeps zero implementing time for ${duplicate ? 'duplicate' : 'new prompt'}`, async t => {
+		const { service, workspaceRoot, flush } = await createTimeSaveFixture(t);
+		const sourceDir = await seedPrompt(workspaceRoot, 'time-source', []);
+		await writeTextFile(path.join(sourceDir, 'config.json'), JSON.stringify({
+			...await readJson(path.join(sourceDir, 'config.json')), timeSpentImplementing: 120_000,
+		}));
+		const source = await service.getPrompt('time-source');
+		assert.ok(source);
+		service._listCache = [{ ...source }];
+		const saved = duplicate
+			? await service.duplicatePrompt(source.id, 'time-new')
+			: await service.savePrompt({ ...source, id: 'time-new', promptUuid: '', timeSpentImplementing: 0 },
+				{ existingPrompt: null, skipHistory: true });
+		await flush();
+		assert.ok(saved);
+		assert.equal(saved.id, 'time-new');
+		assert.notEqual(saved.promptUuid, source.promptUuid);
+		assert.equal(saved.timeSpentImplementing, 0);
+		assert.equal((await readJson(path.join(workspaceRoot,
+			'.vscode/prompt-manager/time-new/config.json'))).timeSpentImplementing, 0);
+		assert.equal(service._listCache.find((entry: { id: string }) => entry.id === saved.id).timeSpentImplementing, 0);
+		assert.equal((await readJson(path.join(sourceDir, 'config.json'))).timeSpentImplementing, 120_000);
+	});
+}
+
+/** Повреждённая конфигурация не должна молча заменяться устаревшим нулём. */
+test('savePrompt rejects malformed persisted config when incoming implementing time is zero', async t => {
+	const { service, workspaceRoot } = await createTimeSaveFixture(t);
+	const promptDir = await seedPrompt(workspaceRoot, 'malformed-time', []);
+	const existingPrompt = await service.getPrompt('malformed-time');
+	assert.ok(existingPrompt);
+	await writeTextFile(path.join(promptDir, 'config.json'), '{broken');
+	await assert.rejects(service.savePrompt({ ...existingPrompt, status: 'completed' },
+		{ existingPrompt, skipHistory: true }), SyntaxError);
+	assert.equal(await fsp.readFile(path.join(promptDir, 'config.json'), 'utf-8'), '{broken');
 });

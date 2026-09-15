@@ -11961,12 +11961,25 @@ export class EditorPanelManager {
 						break;
 					}
 
-					const generatedMessages: Array<{ project: string; message: string }> = [];
+					// Cleanup token добавляется только внешнему сообщению, а внутренний fallback остается без него.
+					const generatedMessages: Array<{
+						project: string;
+						message: string;
+						scmCleanupToken?: string;
+					}> = [];
+					const generatedScmInputs: Array<{
+						messageIndex: number;
+						projectPath: string;
+						message: string;
+					}> = [];
 					// Проекты обрабатываются последовательно, чтобы каждый генератор работал со своим SCM input.
 					for (const projectData of stagedProjects) {
+						// Источник результата определяет, требуется ли очищать SCM после доставки.
 						let generatedMessage = '';
+						let generatedViaScm = false;
 						try {
 							generatedMessage = await this.gitService.generateCommitMessageViaKilo(projectData.projectPath);
+							generatedViaScm = Boolean(generatedMessage.trim());
 						} catch (error) {
 							this.logReportDebug('gitOverlay.commitMessage.kilo.failed', {
 								project: projectData.project,
@@ -11977,6 +11990,7 @@ export class EditorPanelManager {
 						if (!generatedMessage.trim()) {
 							try {
 								generatedMessage = await this.gitService.generateCommitMessageViaCopilot(projectData.projectPath);
+								generatedViaScm = Boolean(generatedMessage.trim());
 							} catch (error) {
 								this.logReportDebug('gitOverlay.commitMessage.copilot.failed', {
 									project: projectData.project,
@@ -11990,10 +12004,36 @@ export class EditorPanelManager {
 								stagedChangesSummary: this.buildPreparedCommitContext([projectData]),
 							});
 						}
-						generatedMessages.push({ project: projectData.project, message: generatedMessage });
+						const generatedResult: {
+							project: string;
+							message: string;
+							scmCleanupToken?: string;
+						} = { project: projectData.project, message: generatedMessage };
+						if (generatedViaScm) {
+							generatedScmInputs.push({
+								messageIndex: generatedMessages.length,
+								projectPath: projectData.projectPath,
+								message: generatedMessage,
+							});
+						}
+						generatedMessages.push(generatedResult);
 					}
 
-					postMessage({ type: 'gitOverlayCommitMessagesGenerated', messages: generatedMessages, requestId: requestId || undefined });
+					// TTL начинается после завершения multi-project генерации, непосредственно перед доставкой.
+					for (const generatedInput of generatedScmInputs) {
+						generatedMessages[generatedInput.messageIndex].scmCleanupToken = (
+							this.gitService.createGeneratedCommitMessageCleanupToken(
+								generatedInput.projectPath,
+								generatedInput.message,
+							)
+						);
+					}
+					// Webview подтвердит применение token отдельным сообщением перед очисткой SCM input.
+					await postMessage({
+						type: 'gitOverlayCommitMessagesGenerated',
+						messages: generatedMessages,
+						requestId: requestId || undefined,
+					});
 					if (msg.includeAllChanges === true) {
 						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, { requestId });
 					}
@@ -12014,6 +12054,14 @@ export class EditorPanelManager {
 						messages: [],
 						requestId: requestId || undefined,
 					});
+				}
+				break;
+			}
+
+			case 'gitOverlayCommitMessagesApplied': {
+				// Одноразовые tokens очищают только exact SCM inputs, подтвержденные React state.
+				for (const cleanupToken of new Set(msg.cleanupTokens.filter(Boolean))) {
+					this.gitService.clearGeneratedCommitMessageInput(cleanupToken);
 				}
 				break;
 			}

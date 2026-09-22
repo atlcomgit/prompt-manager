@@ -3,7 +3,7 @@
  */
 
 import * as vscode from 'vscode';
-import { existsSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
@@ -147,10 +147,13 @@ interface ExternalChatDispatchResult {
 	message?: string;
 }
 
+/** Результат отдельного шага автоматизации внешнего поля ввода через Xdotool. */
 interface XdotoolSubmitResult {
 	ok: boolean;
 	reason?: string;
 	stdout?: string;
+	/** Этап подготовки Codex, на котором завершилась операция. */
+	stage?: 'focus' | 'paste' | 'submit';
 }
 interface XdotoolWindowGeometry {
 	x: number;
@@ -165,7 +168,6 @@ const GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT = 4;
 const PROMPT_AGENT_JSON_SYNC_DEBOUNCE_MS = 300;
 /** Coalesce frequent autosave time writes before rebuilding the global activity widget. */
 const PROMPT_DASHBOARD_ACTIVITY_REFRESH_DEBOUNCE_MS = 500;
-const CODEX_TEMPORARY_CONTEXT_DELETE_DELAY_MS = 10 * 60 * 1000;
 const EDITOR_WEBVIEW_PROMPT_IDENTITY_STATE_KEY = 'pm.editor.promptIdentity';
 /** Give VS Code a short extra window to surface a late chat session before showing a timeout. */
 const CHAT_START_CONFIRMATION_GRACE_TIMEOUT_MS = 2500;
@@ -198,6 +200,7 @@ interface GitOverlaySession {
 	queuedBusyReason: GitOverlayBusyReason | null;
 }
 
+/** Координирует редактор промпта, запуск чатов и связанные операции VS Code. */
 export class EditorPanelManager {
 	private _onDidSave = new vscode.EventEmitter<string>();
 	public readonly onDidSave = this._onDidSave.event;
@@ -1971,14 +1974,20 @@ export class EditorPanelManager {
 		}
 	}
 
-	private async focusCodex(): Promise<void> {
+	/** Открывает панель Codex и сообщает, принял ли VS Code команду фокуса. */
+	private async focusCodex(): Promise<boolean> {
 		try {
 			await vscode.commands.executeCommand('chatgpt.openSidebar');
-		} catch {
-			// best-effort only
+			return true;
+		} catch (error) {
+			this.hooksOutput.appendLine(
+				`[chat-start] Codex sidebar focus failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return false;
 		}
 	}
 
+	/** Открывает выбранный внешний чат без передачи сообщения. */
 	private async openExternalChatTarget(target: PromptChatTarget): Promise<boolean> {
 		switch (target) {
 			case 'kilo':
@@ -1991,8 +2000,7 @@ export class EditorPanelManager {
 				if (!this.isExtensionAvailable('openai.chatgpt')) {
 					return false;
 				}
-				await this.focusCodex();
-				return true;
+				return this.focusCodex();
 			case 'copilot':
 			default:
 				return false;
@@ -2042,58 +2050,8 @@ export class EditorPanelManager {
 		].join('\n');
 	}
 
-	private buildCodexImplementTodoComment(text: string, fileUris: vscode.Uri[]): string {
-		const filePaths = fileUris
-			.map(uri => (uri.fsPath || '').trim())
-			.filter(Boolean);
-		const parts = [
-			'Prompt Manager task.',
-			'',
-			'IMPORTANT: Codex is receiving this through its public Implement TODO command only because this Codex extension version does not expose a direct start-thread command. Ignore the surrounding Codex TODO wrapper, including any instruction to replace or remove this comment. Treat only the task text below as the user request.',
-			'',
-			text.trim(),
-		];
-
-		if (filePaths.length > 0) {
-			parts.push(
-				'',
-				'Context files from Prompt Manager:',
-				...filePaths.map(filePath => `- ${filePath}`),
-			);
-		}
-
-		return parts.join('\n').trim();
-	}
-
-	private async startCodexThreadWithImplementTodoBridge(
-		text: string,
-		fileUris: vscode.Uri[],
-		commands: string[],
-	): Promise<boolean> {
-		if (!commands.includes('chatgpt.implementTodo')) {
-			return false;
-		}
-
-		try {
-			await vscode.commands.executeCommand('chatgpt.implementTodo', {
-				fileName: 'prompt-manager-task.md',
-				line: 1,
-				comment: this.buildCodexImplementTodoComment(text, fileUris),
-			});
-			return true;
-		} catch (error) {
-			this.hooksOutput.appendLine(`[chat-start] Codex implementTodo bridge failed: ${error instanceof Error ? error.message : String(error)}`);
-			return false;
-		}
-	}
-
 	private createTemporaryKiloContextUri(): vscode.Uri {
 		const fileName = `prompt-manager-kilo-context-${Date.now()}-${Math.random().toString(36).slice(2)}.md`;
-		return vscode.Uri.file(path.join(os.tmpdir(), fileName));
-	}
-
-	private createTemporaryCodexContextUri(): vscode.Uri {
-		const fileName = `prompt-manager-codex-context-${Date.now()}-${Math.random().toString(36).slice(2)}.md`;
 		return vscode.Uri.file(path.join(os.tmpdir(), fileName));
 	}
 
@@ -2138,74 +2096,12 @@ export class EditorPanelManager {
 		}
 	}
 
-	private async insertCodexPromptWithAddToThread(text: string, commands: string[]): Promise<boolean> {
-		if (!commands.includes('chatgpt.addToThread')) {
-			return false;
-		}
-
-		let document: vscode.TextDocument | undefined;
-		let temporaryUri: vscode.Uri | undefined;
-		let inserted = false;
-		try {
-			temporaryUri = this.createTemporaryCodexContextUri();
-			await vscode.workspace.fs.writeFile(temporaryUri, Buffer.from(text, 'utf8'));
-			document = await vscode.workspace.openTextDocument(temporaryUri);
-			const editor = await vscode.window.showTextDocument(document, {
-				preview: true,
-				preserveFocus: false,
-				viewColumn: vscode.ViewColumn.Beside,
-			});
-
-			const lastLine = Math.max(0, document.lineCount - 1);
-			const lastCharacter = document.lineAt(lastLine).text.length;
-			const selection = new vscode.Selection(
-				new vscode.Position(0, 0),
-				new vscode.Position(lastLine, lastCharacter),
-			);
-			editor.selection = selection;
-			editor.selections = [selection];
-
-			await vscode.commands.executeCommand('chatgpt.addToThread');
-			inserted = true;
-			return true;
-		} catch (error) {
-			this.hooksOutput.appendLine(`[chat-start] Codex addToThread fallback failed: ${error instanceof Error ? error.message : String(error)}`);
-			return false;
-		} finally {
-			if (document) {
-				await this.closeTemporaryCodexContextDocument(document);
-			}
-			if (temporaryUri) {
-				if (inserted) {
-					this.scheduleTemporaryCodexContextFileDelete(temporaryUri);
-				} else {
-					await this.deleteTemporaryCodexContextFile(temporaryUri);
-				}
-			}
-		}
-	}
-
 	private async deleteTemporaryKiloContextFile(uri: vscode.Uri): Promise<void> {
 		try {
 			await vscode.workspace.fs.delete(uri, { useTrash: false });
 		} catch (error) {
 			this.hooksOutput.appendLine(`[chat-start] Kilo temporary context file delete failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
-	}
-
-	private async deleteTemporaryCodexContextFile(uri: vscode.Uri): Promise<void> {
-		try {
-			await vscode.workspace.fs.delete(uri, { useTrash: false });
-		} catch (error) {
-			this.hooksOutput.appendLine(`[chat-start] Codex temporary context file delete failed: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	}
-
-	private scheduleTemporaryCodexContextFileDelete(uri: vscode.Uri): void {
-		const timer = setTimeout(() => {
-			void this.deleteTemporaryCodexContextFile(uri);
-		}, CODEX_TEMPORARY_CONTEXT_DELETE_DELAY_MS);
-		timer.unref?.();
 	}
 
 	private async closeTemporaryKiloContextDocument(document: vscode.TextDocument): Promise<void> {
@@ -2247,45 +2143,6 @@ export class EditorPanelManager {
 		}
 	}
 
-	private async closeTemporaryCodexContextDocument(document: vscode.TextDocument): Promise<void> {
-		const documentUri = document.uri.toString();
-		try {
-			const tabsToClose: vscode.Tab[] = [];
-			for (const group of vscode.window.tabGroups.all) {
-				for (const tab of group.tabs) {
-					const tabUri = (tab.input as { uri?: vscode.Uri } | undefined)?.uri;
-					if (tabUri?.toString() === documentUri) {
-						tabsToClose.push(tab);
-					}
-				}
-			}
-
-			if (tabsToClose.length > 0) {
-				await vscode.window.tabGroups.close(tabsToClose, true);
-				return;
-			}
-		} catch (error) {
-			this.hooksOutput.appendLine(`[chat-start] Codex temporary context tab close failed: ${error instanceof Error ? error.message : String(error)}`);
-		}
-
-		if (vscode.window.activeTextEditor?.document?.uri.toString() !== documentUri) {
-			return;
-		}
-
-		try {
-			await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
-			return;
-		} catch {
-			// Fall back to the generic close command below.
-		}
-
-		try {
-			await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
-		} catch (error) {
-			this.hooksOutput.appendLine(`[chat-start] Codex temporary context editor close failed: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	}
-
 	private resolveXdotoolCommand(): string {
 		const candidates = ['/usr/bin/xdotool', '/bin/xdotool', '/usr/local/bin/xdotool'];
 		for (const candidate of candidates) {
@@ -2297,9 +2154,29 @@ export class EditorPanelManager {
 		return 'xdotool';
 	}
 
+	/** Сообщает, поддерживает ли текущая платформа Xdotool-автоматизацию. */
+	private isXdotoolPlatformSupported(): boolean {
+		return process.platform === 'linux';
+	}
+
+	/** Проверяет, принадлежит ли PID окна процессу VS Code или совместимой сборке. */
+	private isVisualStudioCodeWindowProcess(pid: string): boolean {
+		if (!/^\d+$/.test(pid)) {
+			return false;
+		}
+
+		try {
+			const processName = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
+			return /^(?:code|code-insiders|code-oss|codium|vscodium)$/i.test(processName);
+		} catch {
+			return false;
+		}
+	}
+
 	private async runXdotoolCommand(args: string[], targetLabel: string): Promise<XdotoolSubmitResult> {
-		if (process.platform !== 'linux' || !process.env.DISPLAY) {
-			const reason = process.platform !== 'linux'
+		const isPlatformSupported = this.isXdotoolPlatformSupported();
+		if (!isPlatformSupported || !process.env.DISPLAY) {
+			const reason = !isPlatformSupported
 				? 'requires Linux'
 				: 'requires DISPLAY; xdotool does not work in a pure Wayland session';
 			this.hooksOutput.appendLine(`[chat-start] ${targetLabel} xdotool skipped: ${reason}.`);
@@ -2398,11 +2275,13 @@ export class EditorPanelManager {
 		return this.runXdotoolEnter();
 	}
 
+	/** Выбирает клавишу отправки с учетом настройки composer Codex. */
 	private resolveCodexSubmitKey(text: string): string {
 		const enterBehavior = vscode.workspace
 			.getConfiguration('chatgpt')
 			.get<string>('composerEnterBehavior', 'enter');
-		return enterBehavior === 'cmdIfMultiline' && /\r?\n/.test(text)
+		return enterBehavior === 'cmdAlways'
+			|| (enterBehavior === 'cmdIfMultiline' && /\r?\n/.test(text))
 			? 'ctrl+Return'
 			: 'Return';
 	}
@@ -2456,12 +2335,36 @@ export class EditorPanelManager {
 		};
 	}
 
+	/** Фокусирует composer Codex только после подтвержденного открытия его панели. */
 	private async focusCodexComposerWithXdotool(): Promise<XdotoolSubmitResult> {
-		await this.focusCodex();
+		if (!await this.focusCodex()) {
+			return { ok: false, reason: 'Codex sidebar focus command failed' };
+		}
 		await new Promise(resolve => setTimeout(resolve, 600));
 
+		const activeWindowResult = await this.runXdotoolCommand(['getactivewindow'], 'Codex active window');
+		const activeWindowId = (activeWindowResult.stdout || '').trim();
+		if (!activeWindowResult.ok || !/^\d+$/.test(activeWindowId)) {
+			return {
+				ok: false,
+				reason: activeWindowResult.reason || 'unable to identify the active VS Code window',
+			};
+		}
+
+		const windowPidResult = await this.runXdotoolCommand(
+			['getwindowpid', activeWindowId],
+			'Codex window process',
+		);
+		const windowPid = (windowPidResult.stdout || '').trim();
+		if (!windowPidResult.ok || !this.isVisualStudioCodeWindowProcess(windowPid)) {
+			return {
+				ok: false,
+				reason: windowPidResult.reason || 'the active window is not VS Code',
+			};
+		}
+
 		const geometryResult = await this.runXdotoolCommand(
-			['getactivewindow', 'getwindowgeometry', '--shell'],
+			['getwindowgeometry', '--shell', activeWindowId],
 			'Codex composer geometry',
 		);
 		if (!geometryResult.ok) {
@@ -2476,33 +2379,46 @@ export class EditorPanelManager {
 		}
 
 		const point = this.getCodexComposerClickPoint(geometry);
-		return this.runXdotoolCommand(
+		const clicked = await this.runXdotoolCommand(
 			['mousemove', String(point.x), String(point.y), 'click', '1'],
 			'Codex composer focus',
 		);
+		return clicked.ok
+			? { ok: true, stdout: activeWindowId }
+			: clicked;
 	}
 
-	private async maybeSubmitCodexPromptWithXdotool(
+	/** Вставляет текст в composer Codex и отправляет его только при включенном автостарте. */
+	private async prepareCodexPromptWithXdotool(
 		prompt: Pick<Prompt, 'autoStartChatWithXdotool'>,
 		text: string,
 	): Promise<XdotoolSubmitResult> {
-		if (!this.isPromptXdotoolAutoStartEnabled(prompt)) {
-			return { ok: false, reason: 'xdotool auto-send is disabled' };
-		}
-
 		const focused = await this.focusCodexComposerWithXdotool();
 		if (!focused.ok) {
-			return focused;
+			return { ...focused, stage: 'focus' };
 		}
 
 		await new Promise(resolve => setTimeout(resolve, 250));
+		const activeWindowResult = await this.runXdotoolCommand(['getactivewindow'], 'Codex paste target');
+		if (!activeWindowResult.ok || (activeWindowResult.stdout || '').trim() !== focused.stdout) {
+			return {
+				ok: false,
+				reason: activeWindowResult.reason || 'the active window changed before paste',
+				stage: 'focus',
+			};
+		}
+
 		const pasted = await this.runXdotoolKeys(['ctrl+v'], 'Codex paste');
 		if (!pasted.ok) {
-			return pasted;
+			return { ...pasted, stage: 'paste' };
+		}
+		if (!this.isPromptXdotoolAutoStartEnabled(prompt)) {
+			return { ...pasted, stage: 'paste' };
 		}
 
 		await new Promise(resolve => setTimeout(resolve, 500));
-		return this.runXdotoolKeys([this.resolveCodexSubmitKey(text)], 'Codex');
+		const submitted = await this.runXdotoolKeys([this.resolveCodexSubmitKey(text)], 'Codex');
+		return { ...submitted, stage: 'submit' };
 	}
 
 	private async dispatchKiloChatTarget(
@@ -2556,6 +2472,7 @@ export class EditorPanelManager {
 		return { dispatched: true };
 	}
 
+	/** Передает запрос в Codex через публичный bridge либо подготавливает composer через Xdotool. */
 	private async dispatchCodexChatTarget(
 		prompt: Prompt,
 		query: string,
@@ -2573,25 +2490,34 @@ export class EditorPanelManager {
 				: '';
 		if (!bridgeCommand) {
 			const fallbackText = this.buildExternalClipboardMessage('codex', query, fileUris);
-			const startedWithImplementTodo = await this.startCodexThreadWithImplementTodoBridge(fallbackText, fileUris, commands);
-			if (startedWithImplementTodo) {
-				await vscode.env.clipboard.writeText(fallbackText);
+			await vscode.env.clipboard.writeText(fallbackText);
+			if (!await this.focusCodex()) {
 				return {
-					dispatched: true,
-					message: 'OpenAI Codex запущен через публичный Implement TODO bridge. Текст задачи также скопирован в буфер обмена; файлы переданы в текст задачи как список context files.',
+					dispatched: false,
+					message: 'Не удалось открыть OpenAI Codex. Текст задачи скопирован в буфер обмена для ручной вставки.',
+				};
+			}
+			if (!commands.includes('chatgpt.newChat')) {
+				return {
+					dispatched: false,
+					message: 'Текущая версия OpenAI Codex не поддерживает открытие нового чата. Текст задачи скопирован в буфер обмена.',
+				};
+			}
+			try {
+				await vscode.commands.executeCommand('chatgpt.newChat');
+			} catch (error) {
+				this.hooksOutput.appendLine(
+					`[chat-start] Codex new chat failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return {
+					dispatched: false,
+					message: 'Не удалось создать новый чат OpenAI Codex. Текст задачи скопирован в буфер обмена.',
 				};
 			}
 
-			await this.focusCodex();
-			if (commands.includes('chatgpt.newChat')) {
-				try {
-					await vscode.commands.executeCommand('chatgpt.newChat');
-				} catch {
-					// best-effort only
-				}
-			}
+			// Codex обрабатывает команду нового чата через очередь webview, поэтому даем composer время на подготовку.
+			await new Promise(resolve => setTimeout(resolve, 600));
 
-			const insertedWithAddToThread = await this.insertCodexPromptWithAddToThread(fallbackText, commands);
 			if (commands.includes('chatgpt.addFileToThread')) {
 				for (const fileUri of fileUris) {
 					try {
@@ -2601,37 +2527,25 @@ export class EditorPanelManager {
 					}
 				}
 			}
-			await vscode.env.clipboard.writeText(fallbackText);
-			if (insertedWithAddToThread) {
-				const submittedWithXdotool = await this.maybeSubmitCodexPromptWithXdotool(prompt, fallbackText);
-				if (submittedWithXdotool.ok) {
-					return {
-						dispatched: true,
-						message: 'OpenAI Codex открыт. Текст задачи добавлен через Add to Thread, вставлен в поле ввода и отправлен через xdotool.',
-					};
-				}
-
+			const preparedWithXdotool = await this.prepareCodexPromptWithXdotool(prompt, fallbackText);
+			if (preparedWithXdotool.ok && this.isPromptXdotoolAutoStartEnabled(prompt)) {
 				return {
 					dispatched: false,
-					message: this.isPromptXdotoolAutoStartEnabled(prompt)
-						? `OpenAI Codex открыт. Текст задачи добавлен через Add to Thread и продублирован в буфер обмена, но xdotool не смог вставить и отправить его (${submittedWithXdotool.reason || 'unknown error'}). Отправьте задачу в Codex вручную.`
-						: 'OpenAI Codex открыт. Текст задачи добавлен через Add to Thread и продублирован в буфер обмена. Отправьте задачу в Codex вручную.',
+					message: 'OpenAI Codex открыт. Xdotool выполнил вставку и команду отправки, но расширение Codex не подтверждает прием запроса. План сохранен.',
 				};
 			}
-
-			const submittedWithXdotool = await this.maybeSubmitCodexPromptWithXdotool(prompt, fallbackText);
-			if (submittedWithXdotool.ok) {
+			if (preparedWithXdotool.ok) {
 				return {
-					dispatched: true,
-					message: 'OpenAI Codex открыт. Текст задачи вставлен из буфера обмена и отправлен через xdotool.',
+					dispatched: false,
+					message: 'OpenAI Codex открыт. Текст задачи вставлен в поле сообщения. Отправьте его вручную.',
 				};
 			}
 
 			return {
 				dispatched: false,
-				message: this.isPromptXdotoolAutoStartEnabled(prompt)
-					? `OpenAI Codex открыт. Текст задачи скопирован в буфер обмена, но xdotool не смог вставить и отправить его (${submittedWithXdotool.reason || 'unknown error'}). Вставьте его в поле чата Codex и отправьте вручную.`
-					: 'OpenAI Codex открыт. Автоматическая отправка недоступна в текущей версии расширения, поэтому текст задачи скопирован в буфер обмена. Вставьте его в поле чата Codex и отправьте вручную.',
+				message: preparedWithXdotool.stage === 'submit'
+					? `OpenAI Codex открыт. Текст задачи вставлен, но xdotool не смог отправить его (${preparedWithXdotool.reason || 'unknown error'}). Отправьте задачу вручную.`
+					: `OpenAI Codex открыт. Текст задачи скопирован в буфер обмена, но xdotool не смог вставить его (${preparedWithXdotool.reason || 'unknown error'}). Вставьте его вручную.`,
 			};
 		}
 
@@ -7502,7 +7416,7 @@ export class EditorPanelManager {
 		return saved;
 	}
 
-	/** Reuse non-task prompt selections from the latest saved prompt when creating a new draft. */
+	/** Переносит настройки чата из последнего промпта в новый черновик. */
 	private async applyRecentPromptDefaults(prompt: Prompt): Promise<void> {
 		const promptConfigs = await this.storageService.listPrompts();
 		const lastPromptConfig = [...promptConfigs]
@@ -7517,7 +7431,7 @@ export class EditorPanelManager {
 		prompt.mcpTools = [...(lastPromptConfig.mcpTools || [])];
 		prompt.hooks = [...(lastPromptConfig.hooks || [])];
 
-		// Legacy configs can miss chat-launch fields, so invalid values leave new-prompt defaults untouched.
+		// Для старых конфигураций некорректные значения не заменяют безопасные настройки нового промпта.
 		if (lastPromptConfig.chatTarget === 'kilo'
 			|| lastPromptConfig.chatTarget === 'codex'
 			|| lastPromptConfig.chatTarget === 'copilot') {
@@ -7531,6 +7445,9 @@ export class EditorPanelManager {
 		}
 		if (typeof lastPromptConfig.autoStartChatWithXdotool === 'boolean') {
 			prompt.autoStartChatWithXdotool = lastPromptConfig.autoStartChatWithXdotool;
+		}
+		if (typeof lastPromptConfig.autoStartChat === 'boolean') {
+			prompt.autoStartChat = lastPromptConfig.autoStartChat;
 		}
 	}
 
@@ -10050,18 +9967,21 @@ export class EditorPanelManager {
 						try {
 							const commands = await vscode.commands.getCommands(true);
 							const dispatchResult = await this.dispatchExternalChatTarget(chatTarget, prompt, query, fileUris, commands);
-							chatMessageDispatched = true;
+							chatMessageDispatched = dispatchResult.dispatched;
 							await appendPromptAiLog({
 								kind: 'chat',
 								prompt: query,
 								callerMethod: `EditorPanelManager.startChat.${chatTarget}${dispatchResult.dispatched ? '' : '.clipboard'}`,
 								model: prompt.model || chatTarget,
 							});
-							await this.clearPromptPlanFileIfExists(panelKey, prompt.id);
-							try {
-								await this.storageService.createAgentFile(prompt.id);
-							} catch (error) {
-								this.hooksOutput.appendLine(`[agent-file] create agent.json failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+							// План и служебный файл меняются только после фактической отправки внешнего запроса.
+							if (dispatchResult.dispatched) {
+								await this.clearPromptPlanFileIfExists(panelKey, prompt.id);
+								try {
+									await this.storageService.createAgentFile(prompt.id);
+								} catch (error) {
+									this.hooksOutput.appendLine(`[agent-file] create agent.json failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
+								}
 							}
 							if (dispatchResult.dispatched) {
 								postMessage({ type: 'chatStarted', promptId: prompt.id, requestId: startChatRequestId || undefined });
@@ -10208,6 +10128,41 @@ export class EditorPanelManager {
 						throw new Error('VS Code не принял команду отправки сообщения в чат.');
 					};
 
+					/** Заполняет поле Copilot подготовленным текстом без отправки сообщения. */
+					const prepareChatInput = async (message: string): Promise<void> => {
+						const partialArgs: Array<Record<string, unknown>> = [
+							...(requestModelSelector
+								? [{
+									query: message,
+									modelSelector: requestModelSelector,
+									mode: chatModeName,
+									isPartialQuery: true,
+								}]
+								: []),
+							{ query: message, mode: chatModeName, isPartialQuery: true },
+							{ query: message, isPartialQuery: true },
+						];
+
+						if (requestModelIdentifier) {
+							partialArgs.unshift(
+								{ query: message, userSelectedModelId: requestModelIdentifier, mode: chatModeName, isPartialQuery: true },
+								{ query: message, userSelectedModelId: requestModelIdentifier, isPartialQuery: true },
+								{ query: message, modelId: requestModelIdentifier, mode: chatModeName, isPartialQuery: true },
+							);
+						}
+
+						for (const partialArg of partialArgs) {
+							try {
+								await vscode.commands.executeCommand('workbench.action.chat.open', partialArg);
+								return;
+							} catch {
+								// try the next compatibility variant
+							}
+						}
+
+						throw new Error('VS Code не принял текст для поля чата.');
+					};
+
 					const forceNewChatSession = async (): Promise<void> => {
 						const commands = await vscode.commands.getCommands(true);
 						const newSessionCmds = [
@@ -10239,7 +10194,8 @@ export class EditorPanelManager {
 						await new Promise(resolve => setTimeout(resolve, 120));
 					}
 
-					if (prompt.model) {
+					// Keep the active chat selection untouched when the prompt uses the keep-current sentinel.
+					if (prompt.model && !isKeepCurrentChatModel(prompt.model)) {
 						const storageModel = await this.aiService.resolveModelStorageIdentifier(prompt.model);
 						requestModelIdentifier = storageModel || requestModelIdentifier;
 						requestModelSelector = await this.aiService.resolveChatOpenModelSelector(prompt.model);
@@ -10272,6 +10228,14 @@ export class EditorPanelManager {
 
 					if (fileUris.length > 0) {
 						await attachFiles();
+					}
+
+					// При отключенном автостарте пользователь отправляет заполненное сообщение вручную.
+					if (prompt.autoStartChat === false) {
+						await prepareChatInput(query);
+						this.hooksOutput.appendLine(`[chat-start] Copilot Chat prompt prepared without auto-submit for prompt=${prompt.id}`);
+						postMessage({ type: 'chatOpened', promptId: prompt.id, requestId: startChatRequestId || undefined });
+						break;
 					}
 
 					await sendMessage(query);

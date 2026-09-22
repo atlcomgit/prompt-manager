@@ -5229,7 +5229,7 @@ test('background title completion reaches the reopened singleton panel', async (
 	reopenedPanel.dispose();
 });
 
-/** Verify that Quick Add reuses every chat-launch field from the latest saved prompt. */
+/** Проверяет перенос последних сохраненных настроек чата в быстрый новый промпт. */
 test('createQuickAddPrompt reuses the latest saved chat defaults by updatedAt', async () => {
 	const { manager, getStoredPrompt } = await createManager({
 		listPrompts: [
@@ -5240,6 +5240,7 @@ test('createQuickAddPrompt reuses the latest saved chat defaults by updatedAt', 
 				model: ' copilot/claude-sonnet-4 ',
 				chatTarget: 'kilo',
 				chatMode: 'plan',
+				autoStartChat: false,
 				autoStartChatWithXdotool: true,
 				taskNumber: '161',
 				branch: 'feature/should-not-copy',
@@ -5263,6 +5264,7 @@ test('createQuickAddPrompt reuses the latest saved chat defaults by updatedAt', 
 	assert.equal(saved?.model, 'copilot/claude-sonnet-4');
 	assert.equal(saved?.chatTarget, 'kilo');
 	assert.equal(saved?.chatMode, 'plan');
+	assert.equal(saved?.autoStartChat, false);
 	assert.equal(saved?.autoStartChatWithXdotool, true);
 	assert.equal(saved?.taskNumber, '');
 	assert.equal(saved?.branch, '');
@@ -5270,6 +5272,7 @@ test('createQuickAddPrompt reuses the latest saved chat defaults by updatedAt', 
 	assert.equal(getStoredPrompt()?.model, 'copilot/claude-sonnet-4');
 	assert.equal(getStoredPrompt()?.chatTarget, 'kilo');
 	assert.equal(getStoredPrompt()?.chatMode, 'plan');
+	assert.equal(getStoredPrompt()?.autoStartChat, false);
 	assert.equal(getStoredPrompt()?.autoStartChatWithXdotool, true);
 });
 
@@ -5891,6 +5894,170 @@ test('startChat schedules an early rename after the chat session is bound', asyn
 	resetVsCodeCommandMock();
 });
 
+/** Проверяет заполнение поля Copilot Chat без отправки при отключенном автостарте. */
+test('startChat opens Copilot Chat without submitting when Copilot auto-start is disabled', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			autoStartChat: false,
+			content: 'Implement the requested workflow changes.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			getGlobalAgentContext: () => '',
+			getActiveChatSessionId: async () => '',
+		},
+	});
+
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		autoStartChat: false,
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-copilot-manual' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'workbench.action.chat.openAgent'));
+	const partialChatCall = vscodeCommandCalls.find(call => (
+		call.id === 'workbench.action.chat.open'
+		&& call.args.some(arg => (
+			arg
+			&& typeof arg === 'object'
+			&& 'query' in arg
+			&& 'isPartialQuery' in arg
+		))
+	));
+	assert.ok(partialChatCall);
+	const partialChatArg = partialChatCall?.args.find(arg => (
+		arg
+		&& typeof arg === 'object'
+		&& 'query' in arg
+		&& 'isPartialQuery' in arg
+	)) as { query?: unknown; isPartialQuery?: unknown } | undefined;
+	assert.match(String(partialChatArg?.query || ''), /Implement the requested workflow changes/);
+	assert.equal(partialChatArg?.isPartialQuery, true);
+	assert.equal(postedMessages.some(message => message?.type === 'chatStarted'), false);
+	assert.equal(postedMessages.some(message => message?.type === 'chatRequestStarted'), false);
+	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
+	assert.equal(getStoredPrompt()?.status, 'in-progress');
+	assert.deepEqual(getStoredPrompt()?.chatSessionIds, []);
+	resetVsCodeCommandMock();
+});
+
+/** Verify that the keep-current selection reaches chat dispatch without resolving another selection. */
+test('startChat keeps the active chat model unchanged for the keep-current selection', async () => {
+	resetVsCodeCommandMock();
+
+	// Track any attempt to replace the active chat selection during launch.
+	const modelResolutionCalls: string[] = [];
+	let persistedModelSelectionCalls = 0;
+	const { manager, aiService } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			model: 'keep-current-model',
+			content: 'Implement the requested workflow changes.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			getGlobalAgentContext: () => '',
+			getActiveChatSessionId: async () => '',
+			forcePersistChatCurrentLanguageModel: async () => {
+				persistedModelSelectionCalls += 1;
+				return { ok: true };
+			},
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: '',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	(aiService as any).resolveModelStorageIdentifier = async (value: string) => {
+		modelResolutionCalls.push(`storage:${value}`);
+		return value;
+	};
+	(aiService as any).resolveChatOpenModelSelector = async (value: string) => {
+		modelResolutionCalls.push(`selector:${value}`);
+		return undefined;
+	};
+	(aiService as any).tryApplyChatModelSafely = async (value: string) => {
+		modelResolutionCalls.push(`apply:${value}`);
+		return { ok: true };
+	};
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		model: 'keep-current-model',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-keep-current' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.deepEqual(modelResolutionCalls, []);
+	assert.equal(persistedModelSelectionCalls, 0);
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'workbench.action.chat.openAgent'));
+	assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
+	resetVsCodeCommandMock();
+});
+
 test('startChat dispatches Kilo Code target through bridge without Copilot session binding', async () => {
 	resetVsCodeCommandMock();
 	vscodeAvailableCommands = ['kilo-code.new.startTask'];
@@ -6068,6 +6235,7 @@ test('startChat auto-sends Kilo Code fallback after closing the temporary contex
 			},
 		});
 
+		(manager as any).isXdotoolPlatformSupported = () => true;
 		(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
 		(manager as any).clearPromptPlanFileIfExists = async () => undefined;
 
@@ -6131,6 +6299,7 @@ test('Kilo Code xdotool fallback reports startup errors', async () => {
 
 	try {
 		const { manager } = await createManager();
+		(manager as any).isXdotoolPlatformSupported = () => true;
 		const result = await (manager as any).runXdotoolEnter();
 
 		assert.equal(result.ok, false);
@@ -6219,12 +6388,63 @@ test('startChat dispatches Codex direct bridge with selected chat mode', async (
 	resetVsCodeCommandMock();
 });
 
-test('startChat starts Codex through implementTodo bridge when direct bridge is unavailable', async () => {
+/** Проверяет подготовку composer без запуска внутренней TODO-команды и без автоматической отправки. */
+test('startChat prepares Codex composer without auto-submit when implementTodo is available', async () => {
 	resetVsCodeCommandMock();
 	vscodeAvailableCommands = ['chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.implementTodo', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
+	childProcessSpawnHandler = (_command, args) => {
+		if (args[0] === 'getactivewindow') {
+			return createMockChildProcessExit(0, '42\n');
+		}
+		if (args[0] === 'getwindowpid') {
+			return createMockChildProcessExit(0, '4242\n');
+		}
+		return args[0] === 'getwindowgeometry'
+			? createMockChildProcessExit(0, 'X=0\nY=0\nWIDTH=1200\nHEIGHT=800\nSCREEN=0\n')
+			: createMockChildProcessExit(0);
+	};
+	const originalDisplay = process.env.DISPLAY;
+	process.env.DISPLAY = originalDisplay || ':99';
 
-	const { manager, getStoredPrompt } = await createManager({
-		initialPrompt: {
+	try {
+		const { manager, getStoredPrompt } = await createManager({
+			initialPrompt: {
+				id: 'prompt-a',
+				promptUuid: 'uuid-a',
+				title: 'Prompt title',
+				status: 'draft',
+				chatTarget: 'codex',
+				chatMode: 'plan',
+				contextFiles: ['src/index.ts'],
+				content: 'Implement Codex routing.',
+			},
+			stateService: {
+				saveLastPromptId: async () => undefined,
+				getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+				saveSidebarState: async () => undefined,
+				getGlobalAgentContext: () => '',
+			},
+		});
+
+		let clearedPlanCount = 0;
+		(manager as any).isXdotoolPlatformSupported = () => true;
+		(manager as any).isVisualStudioCodeWindowProcess = () => true;
+		(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+		(manager as any).clearPromptPlanFileIfExists = async () => {
+			clearedPlanCount += 1;
+		};
+
+		const postedMessages: any[] = [];
+		const panel = {
+			visible: true,
+			webview: {
+				postMessage: async (message: unknown) => {
+					postedMessages.push(message);
+					return true;
+				},
+			},
+		} as any;
+		const currentPrompt = createPrompt({
 			id: 'prompt-a',
 			promptUuid: 'uuid-a',
 			title: 'Prompt title',
@@ -6233,74 +6453,58 @@ test('startChat starts Codex through implementTodo bridge when direct bridge is 
 			chatMode: 'plan',
 			contextFiles: ['src/index.ts'],
 			content: 'Implement Codex routing.',
-		},
-		stateService: {
-			saveLastPromptId: async () => undefined,
-			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
-			saveSidebarState: async () => undefined,
-			getGlobalAgentContext: () => '',
-		},
-	});
+		});
 
-	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
-	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+		await (manager as any).handleMessage(
+			{ type: 'startChat', id: 'prompt-a', requestId: 'req-codex-prepare' },
+			panel,
+			currentPrompt,
+			'__prompt_editor_singleton__',
+			() => false,
+			() => undefined,
+		);
 
-	const postedMessages: any[] = [];
-	const panel = {
-		visible: true,
-		webview: {
-			postMessage: async (message: unknown) => {
-				postedMessages.push(message);
-				return true;
-			},
-		},
-	} as any;
-	const currentPrompt = createPrompt({
-		id: 'prompt-a',
-		promptUuid: 'uuid-a',
-		title: 'Prompt title',
-		status: 'draft',
-		chatTarget: 'codex',
-		chatMode: 'plan',
-		contextFiles: ['src/index.ts'],
-		content: 'Implement Codex routing.',
-	});
-
-	await (manager as any).handleMessage(
-		{ type: 'startChat', id: 'prompt-a', requestId: 'req-codex-implement-todo' },
-		panel,
-		currentPrompt,
-		'__prompt_editor_singleton__',
-		() => false,
-		() => undefined,
-	);
-
-	const bridgeCall = vscodeCommandCalls.find(call => call.id === 'chatgpt.implementTodo');
-	assert.ok(bridgeCall);
-	const bridgePayload = bridgeCall.args[0] as any;
-	assert.equal(bridgePayload.fileName, 'prompt-manager-task.md');
-	assert.equal(bridgePayload.line, 1);
-	assert.match(bridgePayload.comment, /Implement Codex routing/);
-	assert.match(bridgePayload.comment, /## Work mode/);
-	assert.match(bridgePayload.comment, /Create a detailed implementation plan first/);
-	assert.match(bridgePayload.comment, /Ignore the surrounding Codex TODO wrapper/);
-	assert.match(bridgePayload.comment, /\/tmp\/workspace\/src\/index\.ts/);
-	assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.addToThread'), false);
-	assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.addFileToThread'), false);
-	assert.deepEqual(childProcessSpawnCalls, []);
-	assert.equal(getStoredPrompt()?.status, 'in-progress');
-	assert.match(vscodeClipboardText, /Implement Codex routing/);
-	assert.match(vscodeClipboardText, /## Work mode/);
-	assert.match(vscodeClipboardText, /Create a detailed implementation plan first/);
-	assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
-	assert.ok(postedMessages.some(message => message?.type === 'chatRequestStarted'));
-	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
-	assert.ok(postedMessages.some(message => message?.type === 'info' && /Implement TODO bridge/.test(message.message)));
-	assert.equal(postedMessages.some(message => message?.type === 'error'), false);
-	resetVsCodeCommandMock();
+		assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.implementTodo'), false);
+		assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.openSidebar'));
+		const newChatCallIndex = vscodeCommandCalls.findIndex(call => call.id === 'chatgpt.newChat');
+		const fileCallIndexes = vscodeCommandCalls
+			.map((call, index) => call.id === 'chatgpt.addFileToThread' ? index : -1)
+			.filter(index => index >= 0);
+		assert.ok(newChatCallIndex >= 0);
+		assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.addToThread'), false);
+		assert.equal(fileCallIndexes.length, 1);
+		assert.ok(fileCallIndexes[0] > newChatCallIndex);
+		const fileCall = vscodeCommandCalls[fileCallIndexes[0]];
+		assert.equal((fileCall.args[0] as any)?.fsPath, '/tmp/workspace/src/index.ts');
+		assert.deepEqual(childProcessSpawnCalls.map(call => call.args), [
+			['getactivewindow'],
+			['getwindowpid', '42'],
+			['getwindowgeometry', '--shell', '42'],
+			['mousemove', '980', '680', 'click', '1'],
+			['getactivewindow'],
+			['key', '--clearmodifiers', 'ctrl+v'],
+		]);
+		assert.equal(getStoredPrompt()?.status, 'in-progress');
+		assert.equal(clearedPlanCount, 0);
+		assert.match(vscodeClipboardText, /Implement Codex routing/);
+		assert.match(vscodeClipboardText, /## Work mode/);
+		assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
+		assert.ok(postedMessages.some(message => message?.type === 'info' && /вставлен в поле сообщения/.test(message.message)));
+		assert.equal(postedMessages.some(message => message?.type === 'chatStarted'), false);
+		assert.equal(postedMessages.some(message => message?.type === 'chatRequestStarted'), false);
+		assert.equal(postedMessages.some(message => message?.type === 'error'), false);
+	} finally {
+		if (originalDisplay === undefined) {
+			delete process.env.DISPLAY;
+		} else {
+			process.env.DISPLAY = originalDisplay;
+		}
+		resetVsCodeCommandMock();
+	}
 });
 
-test('startChat prepares Codex Add to Thread fallback when bridge is unavailable', async () => {
+/** Проверяет безопасный clipboard fallback, когда Xdotool не смог сфокусировать composer Codex. */
+test('startChat keeps Codex prompt in clipboard when xdotool preparation fails', async () => {
 	resetVsCodeCommandMock();
 	vscodeAvailableCommands = ['chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
 
@@ -6324,7 +6528,15 @@ test('startChat prepares Codex Add to Thread fallback when bridge is unavailable
 	});
 
 	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
-	(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+	let clearedPlanCount = 0;
+	(manager as any).clearPromptPlanFileIfExists = async () => {
+		clearedPlanCount += 1;
+	};
+	(manager as any).prepareCodexPromptWithXdotool = async () => ({
+		ok: false,
+		reason: 'composer focus failed',
+		stage: 'focus',
+	});
 
 	const postedMessages: any[] = [];
 	const panel = {
@@ -6361,31 +6573,285 @@ test('startChat prepares Codex Add to Thread fallback when bridge is unavailable
 	assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.sendMessage'), false);
 	assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.openSidebar'));
 	assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.newChat'));
-	assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.addToThread'));
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.addToThread'), false);
 	assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.addFileToThread'));
-	assert.ok(vscodeClosedTabs.some(tab => tab.input?.uri?.fsPath?.includes('prompt-manager-codex-context')));
-	assert.equal(vscodeWorkspaceFiles.size, 1);
-	assert.ok(Array.from(vscodeWorkspaceFiles.keys()).some(key => key.includes('prompt-manager-codex-context')));
+	assert.equal(vscodeClosedTabs.length, 0);
+	assert.equal(vscodeWorkspaceFiles.size, 0);
 	assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.revertAndCloseActiveEditor'), false);
 	assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.closeActiveEditor'), false);
 	assert.match(vscodeClipboardText, /Implement Codex routing/);
 	assert.match(vscodeClipboardText, /## Work mode/);
 	assert.match(vscodeClipboardText, /Create a detailed implementation plan first/);
 	assert.deepEqual(childProcessSpawnCalls, []);
+	assert.equal(clearedPlanCount, 0);
 	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
-	assert.ok(postedMessages.some(message => message?.type === 'info' && /Add to Thread/.test(message.message)));
-	assert.equal(postedMessages.some(message => message?.type === 'info' && /Автоматическая отправка недоступна/.test(message.message)), false);
+	assert.ok(postedMessages.some(message => message?.type === 'info' && /не смог вставить/.test(message.message)));
 	assert.equal(postedMessages.some(message => message?.type === 'error'), false);
 	assert.equal(postedMessages.some(message => message?.type === 'chatStarted'), false);
 	resetVsCodeCommandMock();
 });
 
+/** Проверяет клавишу отправки для всех поддерживаемых настроек composer Codex. */
+test('resolveCodexSubmitKey respects Codex composer enter behavior', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager();
+
+	try {
+		vscodeConfigurationValues.set('chatgpt.composerEnterBehavior', 'enter');
+		assert.equal((manager as any).resolveCodexSubmitKey('single line'), 'Return');
+		assert.equal((manager as any).resolveCodexSubmitKey('multiple\nlines'), 'Return');
+
+		vscodeConfigurationValues.set('chatgpt.composerEnterBehavior', 'cmdIfMultiline');
+		assert.equal((manager as any).resolveCodexSubmitKey('single line'), 'Return');
+		assert.equal((manager as any).resolveCodexSubmitKey('multiple\nlines'), 'ctrl+Return');
+
+		vscodeConfigurationValues.set('chatgpt.composerEnterBehavior', 'cmdAlways');
+		assert.equal((manager as any).resolveCodexSubmitKey('single line'), 'ctrl+Return');
+		assert.equal((manager as any).resolveCodexSubmitKey('multiple\nlines'), 'ctrl+Return');
+	} finally {
+		vscodeConfigurationValues.delete('chatgpt.composerEnterBehavior');
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Проверяет отказ от вставки, если активное окно изменилось после фокусировки Codex. */
+test('prepareCodexPromptWithXdotool aborts paste after active window changes', async () => {
+	resetVsCodeCommandMock();
+	let activeWindowReadCount = 0;
+	childProcessSpawnHandler = (_command, args) => {
+		if (args[0] === 'getactivewindow') {
+			activeWindowReadCount += 1;
+			return createMockChildProcessExit(0, activeWindowReadCount === 1 ? '42\n' : '43\n');
+		}
+		if (args[0] === 'getwindowpid') {
+			return createMockChildProcessExit(0, '4242\n');
+		}
+		return args[0] === 'getwindowgeometry'
+			? createMockChildProcessExit(0, 'X=0\nY=0\nWIDTH=1200\nHEIGHT=800\nSCREEN=0\n')
+			: createMockChildProcessExit(0);
+	};
+	const originalDisplay = process.env.DISPLAY;
+	process.env.DISPLAY = originalDisplay || ':99';
+
+	try {
+		const { manager } = await createManager();
+		(manager as any).isXdotoolPlatformSupported = () => true;
+		(manager as any).isVisualStudioCodeWindowProcess = () => true;
+		const result = await (manager as any).prepareCodexPromptWithXdotool(
+			{ autoStartChatWithXdotool: false },
+			'Prepared prompt',
+		);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.stage, 'focus');
+		assert.match(result.reason, /active window changed/);
+		assert.equal(childProcessSpawnCalls.some(call => call.args.includes('ctrl+v')), false);
+	} finally {
+		if (originalDisplay === undefined) {
+			delete process.env.DISPLAY;
+		} else {
+			process.env.DISPLAY = originalDisplay;
+		}
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Проверяет, что ошибка открытия Codex не приводит к вставке в текущее активное окно. */
+test('prepareCodexPromptWithXdotool skips automation when Codex focus command fails', async () => {
+	resetVsCodeCommandMock();
+	vscodeExecuteCommandHandler = async (id) => {
+		if (id === 'chatgpt.openSidebar') {
+			throw new Error('Codex is unavailable');
+		}
+		return undefined;
+	};
+
+	try {
+		const { manager } = await createManager();
+		const result = await (manager as any).prepareCodexPromptWithXdotool(
+			{ autoStartChatWithXdotool: false },
+			'Prepared prompt',
+		);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.stage, 'focus');
+		assert.match(result.reason, /sidebar focus command failed/);
+		assert.deepEqual(childProcessSpawnCalls, []);
+	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Проверяет безопасный отказ Codex fallback при отсутствии X11 DISPLAY. */
+test('prepareCodexPromptWithXdotool skips automation without DISPLAY', async () => {
+	resetVsCodeCommandMock();
+	const originalDisplay = process.env.DISPLAY;
+	delete process.env.DISPLAY;
+
+	try {
+		const { manager } = await createManager();
+		(manager as any).isXdotoolPlatformSupported = () => true;
+		const result = await (manager as any).prepareCodexPromptWithXdotool(
+			{ autoStartChatWithXdotool: true },
+			'Prepared prompt',
+		);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.stage, 'focus');
+		assert.match(result.reason, /requires DISPLAY/);
+		assert.deepEqual(childProcessSpawnCalls, []);
+	} finally {
+		if (originalDisplay === undefined) {
+			delete process.env.DISPLAY;
+		} else {
+			process.env.DISPLAY = originalDisplay;
+		}
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Проверяет отказ от вставки при некорректной геометрии окна VS Code. */
+test('prepareCodexPromptWithXdotool rejects invalid window geometry', async () => {
+	resetVsCodeCommandMock();
+	childProcessSpawnHandler = (_command, args) => {
+		if (args[0] === 'getactivewindow') {
+			return createMockChildProcessExit(0, '42\n');
+		}
+		if (args[0] === 'getwindowpid') {
+			return createMockChildProcessExit(0, '4242\n');
+		}
+		return args[0] === 'getwindowgeometry'
+			? createMockChildProcessExit(0, 'invalid geometry')
+			: createMockChildProcessExit(0);
+	};
+	const originalDisplay = process.env.DISPLAY;
+	process.env.DISPLAY = originalDisplay || ':99';
+
+	try {
+		const { manager } = await createManager();
+		(manager as any).isXdotoolPlatformSupported = () => true;
+		(manager as any).isVisualStudioCodeWindowProcess = () => true;
+		const result = await (manager as any).prepareCodexPromptWithXdotool(
+			{ autoStartChatWithXdotool: true },
+			'Prepared prompt',
+		);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.stage, 'focus');
+		assert.match(result.reason, /geometry/);
+		assert.equal(childProcessSpawnCalls.some(call => call.args.includes('ctrl+v')), false);
+	} finally {
+		if (originalDisplay === undefined) {
+			delete process.env.DISPLAY;
+		} else {
+			process.env.DISPLAY = originalDisplay;
+		}
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Проверяет, что ошибка вставки не приводит к последующему нажатию клавиши отправки. */
+test('prepareCodexPromptWithXdotool stops after paste failure', async () => {
+	resetVsCodeCommandMock();
+	childProcessSpawnHandler = (_command, args) => {
+		if (args[0] === 'getactivewindow') {
+			return createMockChildProcessExit(0, '42\n');
+		}
+		if (args[0] === 'getwindowpid') {
+			return createMockChildProcessExit(0, '4242\n');
+		}
+		if (args[0] === 'getwindowgeometry') {
+			return createMockChildProcessExit(0, 'X=0\nY=0\nWIDTH=1200\nHEIGHT=800\nSCREEN=0\n');
+		}
+		return args.includes('ctrl+v')
+			? createMockChildProcessExit(1, '', 'paste failed')
+			: createMockChildProcessExit(0);
+	};
+	const originalDisplay = process.env.DISPLAY;
+	process.env.DISPLAY = originalDisplay || ':99';
+
+	try {
+		const { manager } = await createManager();
+		(manager as any).isXdotoolPlatformSupported = () => true;
+		(manager as any).isVisualStudioCodeWindowProcess = () => true;
+		const result = await (manager as any).prepareCodexPromptWithXdotool(
+			{ autoStartChatWithXdotool: true },
+			'Prepared prompt',
+		);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.stage, 'paste');
+		assert.match(result.reason, /paste failed/);
+		assert.equal(childProcessSpawnCalls.some(call => call.args.includes('Return')), false);
+		assert.equal(childProcessSpawnCalls.some(call => call.args.includes('ctrl+Return')), false);
+	} finally {
+		if (originalDisplay === undefined) {
+			delete process.env.DISPLAY;
+		} else {
+			process.env.DISPLAY = originalDisplay;
+		}
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Проверяет явный результат ошибки отправки после успешной вставки текста. */
+test('prepareCodexPromptWithXdotool reports submit failure after paste', async () => {
+	resetVsCodeCommandMock();
+	childProcessSpawnHandler = (_command, args) => {
+		if (args[0] === 'getactivewindow') {
+			return createMockChildProcessExit(0, '42\n');
+		}
+		if (args[0] === 'getwindowpid') {
+			return createMockChildProcessExit(0, '4242\n');
+		}
+		if (args[0] === 'getwindowgeometry') {
+			return createMockChildProcessExit(0, 'X=0\nY=0\nWIDTH=1200\nHEIGHT=800\nSCREEN=0\n');
+		}
+		return args.includes('Return')
+			? createMockChildProcessExit(1, '', 'submit failed')
+			: createMockChildProcessExit(0);
+	};
+	const originalDisplay = process.env.DISPLAY;
+	process.env.DISPLAY = originalDisplay || ':99';
+
+	try {
+		const { manager } = await createManager();
+		(manager as any).isXdotoolPlatformSupported = () => true;
+		(manager as any).isVisualStudioCodeWindowProcess = () => true;
+		const result = await (manager as any).prepareCodexPromptWithXdotool(
+			{ autoStartChatWithXdotool: true },
+			'Prepared prompt',
+		);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.stage, 'submit');
+		assert.match(result.reason, /submit failed/);
+		assert.ok(childProcessSpawnCalls.some(call => call.args.includes('ctrl+v')));
+	} finally {
+		if (originalDisplay === undefined) {
+			delete process.env.DISPLAY;
+		} else {
+			process.env.DISPLAY = originalDisplay;
+		}
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Проверяет вставку и отправку текста Codex через Xdotool при включенном автостарте. */
 test('startChat auto-sends Codex fallback from the clipboard with xdotool', async () => {
 	resetVsCodeCommandMock();
 	vscodeAvailableCommands = ['chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
-	childProcessSpawnHandler = (_command, args) => args.includes('getwindowgeometry')
-		? createMockChildProcessExit(0, 'WINDOW=42\nX=0\nY=0\nWIDTH=1200\nHEIGHT=800\nSCREEN=0\n')
-		: createMockChildProcessExit(0);
+	childProcessSpawnHandler = (_command, args) => {
+		if (args[0] === 'getactivewindow') {
+			return createMockChildProcessExit(0, '42\n');
+		}
+		if (args[0] === 'getwindowpid') {
+			return createMockChildProcessExit(0, '4242\n');
+		}
+		return args[0] === 'getwindowgeometry'
+			? createMockChildProcessExit(0, 'X=0\nY=0\nWIDTH=1200\nHEIGHT=800\nSCREEN=0\n')
+			: createMockChildProcessExit(0);
+	};
 	const originalDisplay = process.env.DISPLAY;
 	process.env.DISPLAY = originalDisplay || ':99';
 
@@ -6409,8 +6875,14 @@ test('startChat auto-sends Codex fallback from the clipboard with xdotool', asyn
 			},
 		});
 
+		vscodeConfigurationValues.set('chatgpt.composerEnterBehavior', 'cmdAlways');
 		(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
-		(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+		let clearedPlanCount = 0;
+		(manager as any).isXdotoolPlatformSupported = () => true;
+		(manager as any).isVisualStudioCodeWindowProcess = () => true;
+		(manager as any).clearPromptPlanFileIfExists = async () => {
+			clearedPlanCount += 1;
+		};
 
 		const postedMessages: any[] = [];
 		const panel = {
@@ -6443,27 +6915,34 @@ test('startChat auto-sends Codex fallback from the clipboard with xdotool', asyn
 		);
 
 		assert.equal(getStoredPrompt()?.status, 'in-progress');
-		assert.equal(childProcessSpawnCalls.length, 4);
+		assert.equal(childProcessSpawnCalls.length, 7);
 		assert.match(childProcessSpawnCalls[0]?.command || '', /xdotool$/);
-		assert.deepEqual(childProcessSpawnCalls[0]?.args, ['getactivewindow', 'getwindowgeometry', '--shell']);
+		assert.deepEqual(childProcessSpawnCalls[0]?.args, ['getactivewindow']);
 		assert.match(childProcessSpawnCalls[1]?.command || '', /xdotool$/);
-		assert.deepEqual(childProcessSpawnCalls[1]?.args, ['mousemove', '980', '680', 'click', '1']);
+		assert.deepEqual(childProcessSpawnCalls[1]?.args, ['getwindowpid', '42']);
 		assert.match(childProcessSpawnCalls[2]?.command || '', /xdotool$/);
-		assert.deepEqual(childProcessSpawnCalls[2]?.args, ['key', '--clearmodifiers', 'ctrl+v']);
+		assert.deepEqual(childProcessSpawnCalls[2]?.args, ['getwindowgeometry', '--shell', '42']);
 		assert.match(childProcessSpawnCalls[3]?.command || '', /xdotool$/);
-		assert.deepEqual(childProcessSpawnCalls[3]?.args, ['key', '--clearmodifiers', 'Return']);
+		assert.deepEqual(childProcessSpawnCalls[3]?.args, ['mousemove', '980', '680', 'click', '1']);
+		assert.match(childProcessSpawnCalls[4]?.command || '', /xdotool$/);
+		assert.deepEqual(childProcessSpawnCalls[4]?.args, ['getactivewindow']);
+		assert.match(childProcessSpawnCalls[5]?.command || '', /xdotool$/);
+		assert.deepEqual(childProcessSpawnCalls[5]?.args, ['key', '--clearmodifiers', 'ctrl+v']);
+		assert.match(childProcessSpawnCalls[6]?.command || '', /xdotool$/);
+		assert.deepEqual(childProcessSpawnCalls[6]?.args, ['key', '--clearmodifiers', 'ctrl+Return']);
 		assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.openSidebar'));
 		assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.newChat'));
-		assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.addToThread'));
+		assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.addToThread'), false);
 		assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.addFileToThread'));
-		assert.ok(vscodeClosedTabs.some(tab => tab.input?.uri?.fsPath?.includes('prompt-manager-codex-context')));
-		assert.equal(vscodeWorkspaceFiles.size, 1);
-		assert.ok(Array.from(vscodeWorkspaceFiles.keys()).some(key => key.includes('prompt-manager-codex-context')));
+		assert.equal(vscodeClosedTabs.length, 0);
+		assert.equal(vscodeWorkspaceFiles.size, 0);
 		assert.match(vscodeClipboardText, /Implement Codex routing/);
-		assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
-		assert.ok(postedMessages.some(message => message?.type === 'chatRequestStarted'));
-		assert.ok(postedMessages.some(message => message?.type === 'info' && /xdotool/.test(message.message)));
+		assert.equal(clearedPlanCount, 0);
+		assert.equal(postedMessages.some(message => message?.type === 'chatStarted'), false);
+		assert.equal(postedMessages.some(message => message?.type === 'chatRequestStarted'), false);
+		assert.ok(postedMessages.some(message => message?.type === 'info' && /не подтверждает прием/.test(message.message)));
 	} finally {
+		vscodeConfigurationValues.delete('chatgpt.composerEnterBehavior');
 		if (originalDisplay === undefined) {
 			delete process.env.DISPLAY;
 		} else {

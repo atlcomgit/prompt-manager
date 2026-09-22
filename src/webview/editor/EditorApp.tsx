@@ -707,6 +707,7 @@ const ProjectInstructionsIcon: React.FC = () => (
   </svg>
 );
 
+/** Отображает редактор промпта и управляет его пользовательскими действиями. */
 export const EditorApp: React.FC = () => {
   const t = useT();
   const bootIdRef = useRef<string>(initialBootId);
@@ -2577,9 +2578,10 @@ export const EditorApp: React.FC = () => {
     return prompt.model.trim();
   }, [prompt.model, modelOptions, t]);
 
-  /** External chat targets do not use Copilot model and mode controls. */
+  /** Разделяет настройки Copilot Chat и внешних целевых чатов. */
   const normalizedChatTarget = prompt.chatTarget || 'copilot';
   const isExternalChatTarget = normalizedChatTarget === 'kilo' || normalizedChatTarget === 'codex';
+  const autoStartChat = prompt.autoStartChat !== false;
   const autoStartChatWithXdotool = prompt.autoStartChatWithXdotool === true;
 
   const basicSummary = useMemo(() => {
@@ -2708,9 +2710,11 @@ export const EditorApp: React.FC = () => {
     chunks.push(`Режим: ${prompt.chatMode === 'agent' ? 'Agent' : 'Plan'}`);
     if (isExternalChatTarget) {
       chunks.push(`Xdotool: ${autoStartChatWithXdotool ? 'включен' : 'выключен'}`);
+    } else {
+      chunks.push(`Автостарт: ${autoStartChat ? 'включен' : 'выключен'}`);
     }
     return chunks;
-  }, [autoStartChatWithXdotool, isExternalChatTarget, normalizedChatTarget, selectedModelName, prompt.chatMode, t]);
+  }, [autoStartChat, autoStartChatWithXdotool, isExternalChatTarget, normalizedChatTarget, selectedModelName, prompt.chatMode, t]);
 
   const groupsSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -7388,20 +7392,23 @@ export const EditorApp: React.FC = () => {
                   </div>
                 </div>
 
-                {isExternalChatTarget && (
-                  <div style={{ ...styles.field, ...styles.agentFieldXdotool }}>
-                    <label style={styles.agentCheckboxLabel}>
-                      <input
-                        type="checkbox"
-                        checked={autoStartChatWithXdotool}
-                        onChange={e => updateFieldAndSaveNow('autoStartChatWithXdotool', e.target.checked)}
-                        style={styles.agentCheckboxInput}
-                      />
-                      {t('editor.autoStartChatWithXdotool')}
-                    </label>
-                    <div style={styles.agentCheckboxHelp}>{t('editor.autoStartChatWithXdotoolHint')}</div>
+                <div style={{ ...styles.field, ...styles.agentFieldAutostart }}>
+                  <label style={styles.agentCheckboxLabel}>
+                    <input
+                      type="checkbox"
+                      checked={isExternalChatTarget ? autoStartChatWithXdotool : autoStartChat}
+                      onChange={e => updateFieldAndSaveNow(
+                        isExternalChatTarget ? 'autoStartChatWithXdotool' : 'autoStartChat',
+                        e.target.checked,
+                      )}
+                      style={styles.agentCheckboxInput}
+                    />
+                    {t(isExternalChatTarget ? 'editor.autoStartChatWithXdotool' : 'editor.autoStartChat')}
+                  </label>
+                  <div style={styles.agentCheckboxHelp}>
+                    {t(isExternalChatTarget ? 'editor.autoStartChatWithXdotoolHint' : 'editor.autoStartChatHint')}
                   </div>
-                )}
+                </div>
               </div>
             </>
           ))}
@@ -8725,7 +8732,8 @@ const styles: Record<string, React.CSSProperties> = {
     flex: '1 1 260px',
     minWidth: '260px',
   },
-  agentFieldXdotool: {
+  // Общая компоновка флага автостарта для Copilot Chat и внешних чатов.
+  agentFieldAutostart: {
     flex: '1 1 280px',
     minWidth: '260px',
     paddingTop: '18px',

@@ -6,6 +6,25 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-09-22
+
+#### Fixed
+- Copilot Chat startup now skips selection-resolution calls for the `Не изменять` option, so launching a prompt
+  reaches the chat composer instead of waiting indefinitely during the opening step.
+
+### 2026-09-21
+
+#### Added
+- Added a per-prompt Copilot Chat autostart flag in the Agent section. Disabling it places the prepared
+  prompt in the selected Copilot input without submitting it, while the existing Xdotool flag remains
+  limited to external chat targets.
+
+#### Fixed
+- Starting OpenAI Codex now opens a new chat, attaches real context files, and pastes the prepared prompt
+  into the composer through Xdotool instead of routing it through the internal Implement TODO action. The
+  external-chat autostart flag controls submission. Xdotool input is no longer treated as confirmed delivery,
+  so the saved plan and request-start state remain intact until Codex exposes a verifiable command result.
+
 ### 2026-09-15
 
 #### Fixed

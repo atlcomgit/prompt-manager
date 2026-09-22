@@ -30,6 +30,7 @@ function normalizeTrackedBranchesByProject(value: unknown): Record<string, strin
 	return result;
 }
 
+/** Нормализует сохраненную конфигурацию промпта и восстанавливает обязательные значения. */
 export function normalizeStoredPromptConfig(
 	id: string,
 	parsed: Partial<PromptConfig>,
@@ -46,6 +47,7 @@ export function normalizeStoredPromptConfig(
 		id,
 		promptUuid,
 		chatTarget: normalizeChatTarget(parsed.chatTarget),
+		autoStartChat: parsed.autoStartChat !== false,
 		autoStartChatWithXdotool: parsed.autoStartChatWithXdotool === true,
 		trackedBranchesByProject: normalizeTrackedBranchesByProject(parsed.trackedBranchesByProject),
 		timeSpentOnTask: typeof parsed.timeSpentOnTask === 'number' ? parsed.timeSpentOnTask : 0,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { normalizeStoredPromptConfig } from '../src/utils/promptConfig.js';
 
+/** Проверяет восстановление обязательных полей старой конфигурации промпта. */
 test('normalizeStoredPromptConfig backfills missing promptUuid for legacy prompt configs', () => {
 	const result = normalizeStoredPromptConfig(
 		'legacy-prompt',
@@ -21,6 +22,7 @@ test('normalizeStoredPromptConfig backfills missing promptUuid for legacy prompt
 	assert.equal(result.config.trackedBranch, '');
 	assert.deepEqual(result.config.trackedBranchesByProject, {});
 	assert.equal(result.config.chatTarget, 'copilot');
+	assert.equal(result.config.autoStartChat, true);
 	assert.equal(result.config.autoStartChatWithXdotool, false);
 	assert.equal(result.config.notes, '');
 });
@@ -87,4 +89,21 @@ test('normalizeStoredPromptConfig normalizes xdotool auto-start flag', () => {
 
 	assert.equal(enabledResult.config.autoStartChatWithXdotool, true);
 	assert.equal(disabledResult.config.autoStartChatWithXdotool, false);
+});
+
+/** Проверяет значение автостарта по умолчанию и сохранение явного отключения. */
+test('normalizeStoredPromptConfig keeps Copilot auto-start enabled by default and accepts explicit disable', () => {
+	const defaultResult = normalizeStoredPromptConfig(
+		'prompt-copilot-default',
+		{},
+		() => 'generated-uuid',
+	);
+	const disabledResult = normalizeStoredPromptConfig(
+		'prompt-copilot-disabled',
+		{ autoStartChat: false },
+		() => 'generated-uuid',
+	);
+
+	assert.equal(defaultResult.config.autoStartChat, true);
+	assert.equal(disabledResult.config.autoStartChat, false);
 });

@@ -1,5 +1,6 @@
 import type { Prompt, PromptConfig } from '../types/prompt.js';
 
+/** Поля конфигурации, разрешенные для внешней синхронизации промпта. */
 export const PROMPT_CONFIG_SYNC_FIELDS = [
 	'title',
 	'description',
@@ -18,6 +19,7 @@ export const PROMPT_CONFIG_SYNC_FIELDS = [
 	'model',
 	'chatMode',
 	'chatTarget',
+	'autoStartChat',
 	'autoStartChatWithXdotool',
 	'contextFiles',
 	'httpExamples',

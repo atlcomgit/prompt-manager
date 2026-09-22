@@ -437,6 +437,8 @@ export interface PromptConfig {
 	chatMode: 'agent' | 'plan';
 	/** Chat target: Copilot Chat, Kilo Code, or OpenAI Codex */
 	chatTarget?: PromptChatTarget;
+	/** Определяет, нужно ли сразу отправлять подготовленный запрос в Copilot Chat. */
+	autoStartChat?: boolean;
 	/** Whether external chat fallback should auto-submit with xdotool */
 	autoStartChatWithXdotool?: boolean;
 
@@ -532,7 +534,7 @@ export interface PromptHistoryEntry {
 	prompt: Prompt;
 }
 
-/** Default prompt config */
+/** Создает промпт с безопасными значениями по умолчанию. */
 export function createDefaultPrompt(id: string = ''): Prompt {
 	const now = new Date().toISOString();
 	return {
@@ -557,6 +559,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		model: '',
 		chatMode: 'agent',
 		chatTarget: 'copilot',
+		autoStartChat: true,
 		autoStartChatWithXdotool: false,
 		contextFiles: [],
 		httpExamples: '',

@@ -8,6 +8,7 @@ import {
 	normalizePromptExternalChangedAt,
 } from '../src/utils/promptExternalSync.js';
 
+/** Создает полный промпт для сценариев внешней синхронизации. */
 function makePrompt(overrides: Partial<Prompt> = {}): Prompt {
 	return {
 		id: 'prompt-1',
@@ -30,6 +31,7 @@ function makePrompt(overrides: Partial<Prompt> = {}): Prompt {
 		model: 'copilot/gpt-5.4',
 		chatMode: 'agent',
 		chatTarget: 'copilot',
+		autoStartChat: true,
 		autoStartChatWithXdotool: false,
 		contextFiles: ['README.md'],
 		httpExamples: '',
@@ -57,6 +59,7 @@ test('normalizePromptExternalChangedAt prefers config updatedAt and falls back t
 	assert.equal(normalizePromptExternalChangedAt('', null), null);
 });
 
+/** Проверяет синхронизацию автостарта вместе с остальными внешними изменениями. */
 test('mergePromptExternalConfig preserves only locally newer fields and applies the rest from external config', () => {
 	const currentPrompt = makePrompt({
 		title: 'Local title',
@@ -68,6 +71,7 @@ test('mergePromptExternalConfig preserves only locally newer fields and applies 
 		title: 'External title',
 		status: 'completed',
 		taskNumber: '61-external',
+		autoStartChat: false,
 		autoStartChatWithXdotool: true,
 		notes: 'Updated by external agent',
 		updatedAt: '2026-04-09T10:00:00.000Z',
@@ -90,10 +94,11 @@ test('mergePromptExternalConfig preserves only locally newer fields and applies 
 	assert.equal(result.mergedPrompt.notes, 'Updated by external agent');
 	assert.equal(result.mergedPrompt.updatedAt, '2026-04-09T10:00:00.000Z');
 	assert.deepEqual(result.preservedLocalFields, ['status']);
-	assert.deepEqual(result.appliedExternalFields.sort(), ['autoStartChatWithXdotool', 'notes', 'taskNumber', 'title']);
+	assert.deepEqual(result.appliedExternalFields.sort(), ['autoStartChat', 'autoStartChatWithXdotool', 'notes', 'taskNumber', 'title']);
 	assert.equal(result.hasChanges, true);
 });
 
+/** Проверяет применение снимка конфигурации без изменения текста и отчета. */
 test('applyPromptConfigSnapshotToPrompt updates config fields and keeps content/report intact', () => {
 	const currentPrompt = makePrompt({
 		content: 'Local content',
@@ -103,6 +108,7 @@ test('applyPromptConfigSnapshotToPrompt updates config fields and keeps content/
 	});
 	const configSnapshot = makePrompt({
 		status: 'review',
+		autoStartChat: false,
 		autoStartChatWithXdotool: true,
 		notes: 'Synced notes',
 		title: 'Config title',
@@ -112,6 +118,7 @@ test('applyPromptConfigSnapshotToPrompt updates config fields and keeps content/
 	const updatedPrompt = applyPromptConfigSnapshotToPrompt(currentPrompt, configSnapshot);
 
 	assert.equal(updatedPrompt.status, 'review');
+	assert.equal(updatedPrompt.autoStartChat, false);
 	assert.equal(updatedPrompt.autoStartChatWithXdotool, true);
 	assert.equal(updatedPrompt.notes, 'Synced notes');
 	assert.equal(updatedPrompt.title, 'Config title');

@@ -3075,6 +3075,139 @@ test('scheduleGitReactiveAutoRefresh refreshes prompt dashboard for workspace fi
 	assert.equal(todoRefreshCalls, 3);
 });
 
+/** Управляет таймерами обновления без ожидания реальных задержек. */
+async function withControlledDashboardTimers(
+	run: (
+		timers: Map<number, { delay: number; fire: () => void }>,
+		settle: () => Promise<void>,
+	) => Promise<void>,
+): Promise<void> {
+	const originalSetTimeout = globalThis.setTimeout;
+	const originalClearTimeout = globalThis.clearTimeout;
+	const timers = new Map<number, { delay: number; fire: () => void }>();
+	let nextTimerId = 0;
+	globalThis.setTimeout = ((handler: () => void, delay = 0) => {
+		const timerId = ++nextTimerId;
+		timers.set(timerId, { delay, fire: () => { timers.delete(timerId); handler(); } });
+		return timerId as unknown as NodeJS.Timeout;
+	}) as typeof setTimeout;
+	globalThis.clearTimeout = ((timer: NodeJS.Timeout) => { timers.delete(Number(timer)); }) as typeof clearTimeout;
+	try {
+		await run(timers, () => new Promise(resolve => originalSetTimeout(resolve, 0)));
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+		globalThis.clearTimeout = originalClearTimeout;
+	}
+}
+
+/** Создаёт панель с подменёнными сервисами, без файлового хранилища и базы данных. */
+async function createReactiveDashboardManager() {
+	const { manager } = await createManager({
+		workspaceService: {
+			getWorkspaceFolderPaths: () => new Map([['selected', '/tmp/selected']]),
+			getWorkspaceFolders: () => ['selected'],
+		},
+	});
+	const panel = { visible: true, webview: { postMessage: async () => true } };
+	(manager as any).panelPromptRefs.set('panel-a', createPrompt({ projects: ['selected'] }));
+	(manager as any).resolveOpenEditorPanel = () => panel;
+	return manager;
+}
+
+/** Шумные пути не запускают работу и не отменяют накопленное обновление проектов. */
+test('dashboard ignored file events preserve a queued Git refresh with collapsed todos', async () => {
+	const manager = await createReactiveDashboardManager();
+	(manager as any).isPromptDashboardWidgetCollapsed = (widget: string) => widget === 'todos';
+	(manager as any).getGitOverlayExcludedPathsSetting = () => ['node_modules', 'generated'];
+	let projectsRefreshes = 0;
+	(manager as any).promptDashboardService.refreshProjectsWidget = async () => { projectsRefreshes += 1; };
+	await withControlledDashboardTimers(async (timers, settle) => {
+		const ignoredPaths = [
+			'/tmp/selected/node_modules/package/index.js',
+			'/tmp/selected/.vscode/prompt-manager/prompts/task/report.txt',
+			'/tmp/selected/generated/result.ts',
+		];
+		for (const filePath of ignoredPaths) {
+			(manager as any).scheduleGitReactiveAutoRefresh('file', filePath);
+		}
+		assert.equal(timers.size, 0);
+		(manager as any).scheduleGitReactiveAutoRefresh('git', '/tmp/selected');
+		const queuedTimer = Array.from(timers.values())[0];
+		assert.ok(queuedTimer);
+		for (const filePath of ignoredPaths) {
+			(manager as any).scheduleGitReactiveAutoRefresh('file', filePath);
+		}
+		assert.equal(timers.size, 1);
+		assert.equal(Array.from(timers.values())[0], queuedTimer);
+		queuedTimer.fire();
+		await settle();
+		assert.equal(projectsRefreshes, 1);
+	});
+});
+
+/** Событие Git не отменяет очередь ToDo, когда проекты свёрнуты. */
+test('dashboard Git events preserve queued todos when projects are collapsed', async () => {
+	const manager = await createReactiveDashboardManager();
+	(manager as any).isPromptDashboardWidgetCollapsed = (widget: string) => widget === 'projects';
+	let todoRefreshes = 0;
+	(manager as any).promptDashboardService.refreshWidgetSnapshot = async (_prompt: unknown, widget: string) => {
+		assert.equal(widget, 'todos');
+		todoRefreshes += 1;
+	};
+	await withControlledDashboardTimers(async (timers, settle) => {
+		(manager as any).scheduleGitReactiveAutoRefresh('file', '/tmp/selected/src/task.ts');
+		const queuedTimer = Array.from(timers.values())[0];
+		assert.ok(queuedTimer);
+		(manager as any).scheduleGitReactiveAutoRefresh('git', '/tmp/selected');
+		assert.equal(timers.size, 1);
+		assert.equal(Array.from(timers.values())[0], queuedTimer);
+		queuedTimer.fire();
+		await settle();
+		assert.equal(todoRefreshes, 1);
+	});
+});
+
+/** Поток событий не переносит срок обновления и не создаёт параллельные запросы. */
+test('dashboard file bursts keep a fixed deadline and queue one refresh during an in-flight refresh', async () => {
+	const manager = await createReactiveDashboardManager();
+	const firstRefresh = createDeferred<void>();
+	let projectsRefreshes = 0;
+	(manager as any).promptDashboardService.refreshProjectsWidget = async () => {
+		projectsRefreshes += 1;
+		if (projectsRefreshes === 1) {
+			await firstRefresh.promise;
+		}
+	};
+	await withControlledDashboardTimers(async (timers, settle) => {
+		(manager as any).scheduleGitReactiveAutoRefresh('file', '/tmp/selected/src/new.ts');
+		const firstTimer = Array.from(timers.values())[0];
+		assert.ok(firstTimer);
+		assert.equal(firstTimer.delay, 5000);
+		for (let index = 0; index < 20; index += 1) {
+			(manager as any).scheduleGitReactiveAutoRefresh('file', '/tmp/selected/src/new.ts');
+		}
+		assert.equal(timers.size, 1);
+		assert.equal(Array.from(timers.values())[0], firstTimer);
+		firstTimer.fire();
+		await settle();
+		assert.equal(projectsRefreshes, 1);
+		for (let index = 0; index < 20; index += 1) {
+			(manager as any).scheduleGitReactiveAutoRefresh('file', '/tmp/selected/src/deleted.ts');
+		}
+		assert.ok(timers.size <= 1);
+		// Даже истечение задержки во время запроса не должно запускать второй запрос параллельно.
+		Array.from(timers.values())[0]?.fire();
+		await settle();
+		assert.equal(projectsRefreshes, 1);
+		firstRefresh.resolve();
+		await settle();
+		Array.from(timers.values())[0]?.fire();
+		await settle();
+		assert.equal(projectsRefreshes, 2);
+		assert.equal(timers.size, 0);
+	});
+});
+
 /** Проверяет очистку debounce targets и причин при переключении промпта в singleton panel. */
 test('setPanelPromptRef clears pending dashboard reactive state when prompt identity changes', async () => {
 	const { manager } = await createManager();
@@ -3082,6 +3215,10 @@ test('setPanelPromptRef clears pending dashboard reactive state when prompt iden
 	(manager as any).panelPromptRefs.set(panelKey, createPrompt({ id: 'task-1', promptUuid: 'uuid-1' }));
 	(manager as any).promptDashboardReactiveProjectsByPanel.set(panelKey, new Set(['peer']));
 	(manager as any).promptDashboardReactiveFileRefreshByPanel.add(panelKey);
+	// Очередь и незавершённый запрос принадлежат предыдущему промпту.
+	(manager as any).promptDashboardReactiveGitRefreshByPanel.add(panelKey);
+	(manager as any).promptDashboardReactiveRefreshInFlight.set(panelKey, {});
+	(manager as any).promptDashboardReactiveRefreshStartedAt.set(panelKey, Date.now());
 	(manager as any).promptDashboardPendingRefreshOnReveal.add(panelKey);
 	(manager as any).promptDashboardReactiveRefreshTimers.set(panelKey, setTimeout(() => undefined, 60_000));
 
@@ -3090,6 +3227,9 @@ test('setPanelPromptRef clears pending dashboard reactive state when prompt iden
 	assert.equal((manager as any).promptDashboardReactiveRefreshTimers.has(panelKey), false);
 	assert.equal((manager as any).promptDashboardReactiveProjectsByPanel.has(panelKey), false);
 	assert.equal((manager as any).promptDashboardReactiveFileRefreshByPanel.has(panelKey), false);
+	assert.equal((manager as any).promptDashboardReactiveGitRefreshByPanel.has(panelKey), false);
+	assert.equal((manager as any).promptDashboardReactiveRefreshInFlight.has(panelKey), false);
+	assert.equal((manager as any).promptDashboardReactiveRefreshStartedAt.has(panelKey), false);
 	assert.equal((manager as any).promptDashboardPendingRefreshOnReveal.has(panelKey), false);
 });
 
@@ -3132,6 +3272,7 @@ test('first visible prompt editor event skips bootstrap dashboard projects refre
 	assert.equal(refreshCalls, 0);
 });
 
+/** Реальное скрытое событие сохраняет причины обновления до показа панели. */
 test('revealed prompt editor refreshes the dashboard when hidden changes were queued', async () => {
 	resetVsCodeCommandMock();
 	const { manager } = await createManager({
@@ -3171,7 +3312,7 @@ test('revealed prompt editor refreshes the dashboard when hidden changes were qu
 	assert.ok(panel);
 
 	panel.visible = false;
-	(manager as any).promptDashboardPendingRefreshOnReveal.add('__prompt_editor_singleton__');
+	(manager as any).scheduleGitReactiveAutoRefresh('git', '/tmp/api');
 	assert.equal(refreshCalls, 0);
 
 	panel.emitVisible();
@@ -3199,6 +3340,7 @@ test('ensureGitOverlayReactiveSources starts watchers for a visible prompt edito
 	assert.ok(vscodeCreatedWatchers.length > 0);
 });
 
+/** Создание и удаление неотслеживаемого файла обновляет проекты без Git-события. */
 test('workspace file watcher refreshes prompt dashboard for a visible editor without Git Overlay session', async () => {
 	const { manager } = await createManager();
 	vscodeCreatedWatchers.length = 0;
@@ -3246,6 +3388,14 @@ test('workspace file watcher refreshes prompt dashboard for a visible editor wit
 	});
 
 	assert.equal(refreshCalls, 1);
+	// Оба изменения состава файлов должны обновлять список незакоммиченных изменений.
+	await withImmediateTimers(async () => {
+		workspaceWatcher.emitCreate({ fsPath: '/tmp/selected/src/untracked.ts' });
+		await flushTurns();
+		workspaceWatcher.emitDelete({ fsPath: '/tmp/selected/src/untracked.ts' });
+		await flushTurns();
+	});
+	assert.equal(refreshCalls, 3);
 });
 
 test('agent.json watcher posts promptAgentProgress to the open editor panel', async () => {
@@ -3287,6 +3437,66 @@ test('agent.json watcher posts promptAgentProgress to the open editor panel', as
 		&& message.progress === 67
 	)), true);
 	assert.equal((manager as any).panelPromptRefs.get('__prompt_editor_singleton__')?.progress, 67);
+});
+
+/** Скрытая панель пропускает чтение прогресса и догоняет его при показе без нового события. */
+test('hidden prompt progress catches up on reveal without another file event', async () => {
+	resetVsCodeCommandMock();
+	let progress = 14;
+	let progressReads = 0;
+	const { manager } = await createManager({
+		initialPrompt: { id: 'prompt-a', promptUuid: 'uuid-a', title: 'Prompt A', progress: 14 },
+		readAgentProgress: async () => { progressReads += 1; return progress; },
+	});
+	// Удаляем общую панель прошлого теста вместе с её обработчиками показа.
+	(manager as any).resolveOpenEditorPanel('__prompt_editor_singleton__')?.dispose();
+	await flushTurns();
+	await (manager as any).openPrompt('prompt-a');
+	const panel = (manager as any).resolveOpenEditorPanel('__prompt_editor_singleton__');
+	assert.ok(panel);
+	await flushTurns();
+	panel.visible = false;
+	panel.postedMessages.length = 0;
+	progress = 100;
+	const readsBeforeHiddenSync = progressReads;
+	await (manager as any).syncAgentProgressForOpenPanels();
+	assert.equal(progressReads, readsBeforeHiddenSync);
+	assert.equal((manager as any).panelPromptRefs.get('__prompt_editor_singleton__')?.progress, 14);
+	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'promptAgentProgress'), false);
+	panel.emitVisible();
+	await flushTurns();
+	assert.equal((manager as any).panelPromptRefs.get('__prompt_editor_singleton__')?.progress, 100);
+	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'promptAgentProgress' && message.progress === 100), true);
+	manager.disposeAll();
+});
+
+/** Завершение старого чтения прогресса не перезаписывает новый промпт той же панели. */
+test('progress sync ignores an old read after switching the panel prompt', async () => {
+	const pendingProgress = createDeferred<number | undefined>();
+	const { manager } = await createManager({ readAgentProgress: async () => pendingProgress.promise });
+	const panelKey = 'progress-race-panel';
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: { postMessage: async (message: unknown) => { postedMessages.push(message); return true; } },
+	};
+	const previousPrompt = createPrompt({ id: 'prompt-a', promptUuid: 'uuid-a', progress: 14 });
+	const currentPrompt = createPrompt({ id: 'prompt-b', promptUuid: 'uuid-b', progress: 35 });
+	const currentSnapshot = clonePrompt(currentPrompt);
+	(manager as any).resolveOpenEditorPanel = () => panel;
+	(manager as any).setPanelPromptRef(panelKey, previousPrompt);
+	const pendingSync = (manager as any).syncAgentProgressForPanel(panelKey);
+	// Пользователь переключается на другой промпт до завершения чтения предыдущего.
+	(manager as any).setPanelPromptRef(panelKey, currentPrompt);
+	(manager as any).panelLatestPromptSnapshots.set(panelKey, currentSnapshot);
+	pendingProgress.resolve(100);
+	await pendingSync;
+	assert.equal((manager as any).panelPromptRefs.get(panelKey), currentPrompt);
+	assert.equal(currentPrompt.progress, 35);
+	assert.equal((manager as any).panelLatestPromptSnapshots.get(panelKey), currentSnapshot);
+	assert.equal(currentSnapshot.progress, 35);
+	assert.equal(previousPrompt.progress, 14);
+	assert.equal(postedMessages.some(message => message?.type === 'promptAgentProgress'), false);
 });
 
 test('built-in git openRepository bootstrap does not schedule reactive refresh', async () => {

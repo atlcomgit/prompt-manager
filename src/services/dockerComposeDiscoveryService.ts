@@ -1,11 +1,11 @@
-import { readdirSync } from 'fs';
+import { readdirSync, statSync, type Dirent } from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 import type { DockerComposeFileReference } from '../types/docker.js';
 import {
-	matchesDockerComposeRootPattern,
+	createDockerComposeRootMatcher,
 	normalizeDockerComposeRelativePath,
 	normalizeDockerComposeRootPattern,
 	shouldIncludeDockerComposeFile,
@@ -61,75 +61,55 @@ export class DockerComposeDiscoveryService implements vscode.Disposable {
 		return normalized.length > 0 ? Array.from(new Set(normalized)) : [...DEFAULT_DOCKER_COMPOSE_FILE_PATTERNS];
 	}
 
-	/** Reads compose files from cache or scans workspace folders. */
+	/** Reads root-level compose files without recursively scanning the whole workspace. */
 	async getComposeFiles(force = false): Promise<DockerComposeFileReference[]> {
-		if (!force && this.cachedFiles) {
-			return this.cachedFiles;
+		if (force) {
+			this.cachedFiles = null;
 		}
-
-		const folders = vscode.workspace.workspaceFolders || [];
-		const patterns = this.getComposeFilePatterns();
-		const excludedPaths = this.getExcludedPaths();
-		const byPath = new Map<string, DockerComposeFileReference>();
-		for (const folder of folders) {
-			if (shouldSkipDockerComposeWorkspaceFolder(folder, excludedPaths)) {
-				continue;
-			}
-			for (const pattern of patterns) {
-				const files = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, pattern), undefined, 500);
-				for (const uri of files) {
-					const filePath = uri.fsPath;
-					const relativePath = path.relative(folder.uri.fsPath, filePath).split(path.sep).join('/');
-					if (byPath.has(filePath) || !shouldIncludeDockerComposeFile(relativePath, excludedPaths)) {
-						continue;
-					}
-					byPath.set(filePath, {
-						project: folder.name,
-						projectPath: folder.uri.fsPath,
-						filePath,
-						relativePath,
-					});
-				}
-			}
-		}
-
-		this.cachedFiles = Array.from(byPath.values())
-			.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'ru'));
-		return this.cachedFiles;
+		return this.getComposeFilesSync();
 	}
 
-	/** Reads compose files synchronously for fast startup cache validation. */
+	/** Синхронно проверяет только корень проекта и ссылки на файлы для стартового кэша. */
 	getComposeFilesSync(): DockerComposeFileReference[] {
 		if (this.cachedFiles) {
 			return this.cachedFiles;
 		}
 
 		const folders = vscode.workspace.workspaceFolders || [];
-		const patterns = this.getComposeFilePatterns();
+		// Компиляция glob выполняется один раз за сканирование, а не для каждого файла.
+		const matchesPattern = createDockerComposeRootMatcher(this.getComposeFilePatterns());
 		const excludedPaths = this.getExcludedPaths();
 		const byPath = new Map<string, DockerComposeFileReference>();
 		for (const folder of folders) {
 			if (shouldSkipDockerComposeWorkspaceFolder(folder, excludedPaths)) {
 				continue;
 			}
-			let entries: Array<{ isFile: () => boolean; name: string }>;
+			let entries: Dirent[];
 			try {
-				entries = readdirSync(folder.uri.fsPath, { withFileTypes: true, encoding: 'utf8' }) as Array<{ isFile: () => boolean; name: string }>;
+				entries = readdirSync(folder.uri.fsPath, { withFileTypes: true, encoding: 'utf8' });
 			} catch {
 				continue;
 			}
 			for (const entry of entries) {
-				if (!entry.isFile()) {
+				if (!entry.isFile() && !entry.isSymbolicLink()) {
 					continue;
 				}
 				const relativePath = normalizeDockerComposeRelativePath(entry.name);
-				if (!relativePath || !patterns.some(pattern => matchesDockerComposeRootPattern(relativePath, pattern))) {
+				if (!relativePath || !matchesPattern(relativePath)) {
 					continue;
 				}
 				if (!shouldIncludeDockerComposeFile(relativePath, excludedPaths)) {
 					continue;
 				}
 				const filePath = path.join(folder.uri.fsPath, entry.name);
+				// Только подходящие ссылки требуют stat; каталоги и оборванные ссылки пропускаются.
+				if (entry.isSymbolicLink()) {
+					try {
+						if (!statSync(filePath).isFile()) continue;
+					} catch {
+						continue;
+					}
+				}
 				if (byPath.has(filePath)) {
 					continue;
 				}

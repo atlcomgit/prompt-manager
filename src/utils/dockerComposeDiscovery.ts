@@ -1,8 +1,61 @@
 import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 
-/** Escapes plain file-name text before it is used inside a root-level glob regex. */
+/** Экранирует текст имени файла для регулярного выражения. */
 function escapeDockerComposeRootPatternRegex(value: string): string {
-	return value.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+	return value.replace(/[|\\{}()[\]^$+?.*]/g, '\\$&');
+}
+
+/** Компилирует корневой glob: звёздочки, одиночные символы, группы и диапазоны VS Code. */
+function compileDockerComposeRootPattern(pattern: string): RegExp | null {
+	// Группы остаются в выражении, поэтому число альтернатив не раздувает список шаблонов.
+	let source = '';
+	let braceDepth = 0;
+	for (let index = 0; index < pattern.length; index += 1) {
+		const character = pattern[index];
+		if (character === '*') {
+			source += '[^/]*';
+			while (pattern[index + 1] === '*') index += 1;
+		} else if (character === '?') {
+			source += '[^/]';
+		} else if (character === '{') {
+			source += '(?:';
+			braceDepth += 1;
+		} else if (character === '}' && braceDepth > 0) {
+			source += ')';
+			braceDepth -= 1;
+		} else if (character === ',' && braceDepth > 0) {
+			source += '|';
+		} else if (character === '[') {
+			// Скобка в начале диапазона задаёт литерал: [[] и []] экранируют имена файлов.
+			const bodyStart = index + 1 + (pattern[index + 1] === '!' ? 1 : 0);
+			const end = pattern.indexOf(']', bodyStart + (pattern[bodyStart] === ']' ? 1 : 0));
+			if (end < 0) {
+				source += '\\[';
+				continue;
+			}
+			const body = pattern.slice(bodyStart, end).replace(/[\\\[\]^]/g, '\\$&');
+			source += `[${pattern[index + 1] === '!' ? '^' : ''}${body}]`;
+			index = end;
+		} else {
+			source += escapeDockerComposeRootPatternRegex(character);
+		}
+	}
+	try {
+		return new RegExp(`^${source}$`);
+	} catch {
+		// Ошибочный пользовательский диапазон не должен прерывать обнаружение остальных файлов.
+		return null;
+	}
+}
+
+/** Подготавливает шаблоны один раз перед проверкой всех записей корневой папки. */
+export function createDockerComposeRootMatcher(patterns: string[]): (fileName: string) => boolean {
+	const expressions = patterns.map(normalizeDockerComposeRootPattern)
+		.filter(Boolean).map(compileDockerComposeRootPattern).filter((value): value is RegExp => value !== null);
+	return (fileName) => {
+		const normalized = normalizeDockerComposeRelativePath(fileName);
+		return Boolean(normalized && !normalized.includes('/') && expressions.some(expression => expression.test(normalized)));
+	};
 }
 
 /** Converts recursive compose patterns into root-only workspace project patterns. */
@@ -21,18 +74,9 @@ export function normalizeDockerComposeRootPattern(value: string): string {
 	return rootPattern && rootPattern !== '**' ? rootPattern : '';
 }
 
-/** Matches one root-level file name against a normalized compose glob pattern. */
+/** Проверяет имя корневого файла по glob-шаблону VS Code. */
 export function matchesDockerComposeRootPattern(fileName: string, pattern: string): boolean {
-	const normalizedFileName = normalizeDockerComposeRelativePath(fileName);
-	const normalizedPattern = normalizeDockerComposeRootPattern(pattern);
-	if (!normalizedFileName || !normalizedPattern) {
-		return false;
-	}
-	const patternRegex = new RegExp(`^${normalizedPattern
-		.split('*')
-		.map(escapeDockerComposeRootPatternRegex)
-		.join('.*')}$`);
-	return patternRegex.test(normalizedFileName);
+	return createDockerComposeRootMatcher([pattern])(fileName);
 }
 
 /** Returns true only for compose files placed directly in a scanned project root. */

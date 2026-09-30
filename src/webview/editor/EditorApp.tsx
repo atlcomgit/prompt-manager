@@ -6212,7 +6212,7 @@ export const EditorApp: React.FC = () => {
     };
 
     const collectSectionHeights = () => {
-      if (isPromptSwitchPlaceholderVisibleRef.current) {
+      if (document.visibilityState !== 'visible' || isPromptSwitchPlaceholderVisibleRef.current) {
         return;
       }
       if (scheduleMeasurementAfterSettle()) {
@@ -6276,10 +6276,24 @@ export const EditorApp: React.FC = () => {
       return;
     }
 
-    const observer = new ResizeObserver(collectSectionHeights);
+    let resizeMeasureTimer: number | null = null;
+    const scheduleResizeMeasurement = () => {
+      if (document.visibilityState !== 'visible' || resizeMeasureTimer !== null) {
+        return;
+      }
+      resizeMeasureTimer = window.setTimeout(() => {
+        resizeMeasureTimer = null;
+        collectSectionHeights();
+      }, 100);
+    };
+    const observer = new ResizeObserver(scheduleResizeMeasurement);
     document.querySelectorAll<HTMLElement>('[data-pm-editor-section]').forEach(section => observer.observe(section));
     return () => {
       observer.disconnect();
+      if (resizeMeasureTimer !== null) {
+        window.clearTimeout(resizeMeasureTimer);
+        resizeMeasureTimer = null;
+      }
       if (sectionMeasurementResumeTimerRef.current !== null) {
         window.clearTimeout(sectionMeasurementResumeTimerRef.current);
         sectionMeasurementResumeTimerRef.current = null;

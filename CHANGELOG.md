@@ -6,6 +6,15 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-09-29
+
+#### Fixed
+- Dashboard file changes now refresh affected projects, including new and deleted untracked files,
+  while filtering excluded paths, limiting background refresh frequency, and coalescing events during active work.
+- Unrelated events no longer discard queued widget updates, and revealing a prompt editor refreshes its task progress.
+- Root-only Compose discovery now supports grouped glob patterns, character ranges, and symbolic links to files
+  without recursively searching the workspace.
+
 ### 2026-09-22
 
 #### Fixed

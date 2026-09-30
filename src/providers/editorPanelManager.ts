@@ -140,7 +140,10 @@ const EDITOR_PANEL_VIEW_TYPE = 'promptManager.editor';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
 const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 600;
-const PROMPT_DASHBOARD_FILE_AUTO_REFRESH_DELAY_MS = 1000;
+/** Объединяет поток файловых изменений в одно обновление за пять секунд. */
+const PROMPT_DASHBOARD_FILE_AUTO_REFRESH_DELAY_MS = 5000;
+/** Ограничивает частоту фоновых Git-расчётов даже при смешанных событиях. */
+const PROMPT_DASHBOARD_REACTIVE_REFRESH_MIN_INTERVAL_MS = 5000;
 
 interface ExternalChatDispatchResult {
 	dispatched: boolean;
@@ -165,7 +168,7 @@ const PROMPT_DASHBOARD_INITIAL_VISIBLE_REFRESH_GRACE_MS = 1500;
 const GIT_OVERLAY_OTHER_PROJECTS_DELAY_MS = 250;
 const GIT_OVERLAY_OPEN_HYDRATION_DELAY_MS = 250;
 const GIT_OVERLAY_POST_MESSAGE_HISTORY_LIMIT = 4;
-const PROMPT_AGENT_JSON_SYNC_DEBOUNCE_MS = 300;
+const PROMPT_AGENT_JSON_SYNC_DEBOUNCE_MS = 1000;
 /** Coalesce frequent autosave time writes before rebuilding the global activity widget. */
 const PROMPT_DASHBOARD_ACTIVITY_REFRESH_DEBOUNCE_MS = 500;
 const EDITOR_WEBVIEW_PROMPT_IDENTITY_STATE_KEY = 'pm.editor.promptIdentity';
@@ -236,10 +239,16 @@ export class EditorPanelManager {
 	private promptEditorPanels = new Set<vscode.WebviewPanel>();
 	/** Debounces reactive dashboard project-widget refreshes per visible editor panel. */
 	private promptDashboardReactiveRefreshTimers = new Map<string, NodeJS.Timeout>();
+	/** Не допускает очереди параллельных расчётов для одной панели. */
+	private promptDashboardReactiveRefreshInFlight = new Map<string, object>();
+	/** Хранит время начала последнего фонового расчёта для ограничения частоты. */
+	private promptDashboardReactiveRefreshStartedAt = new Map<string, number>();
 	/** Накапливает workspace-проекты из debounce-окна для точечного reactive refresh. */
 	private promptDashboardReactiveProjectsByPanel = new Map<string, Set<string>>();
-	/** Сохраняет необходимость ToDo refresh, если после file event пришел Git event. */
+	/** Сохраняет необходимость ToDo refresh после workspace file events. */
 	private promptDashboardReactiveFileRefreshByPanel = new Set<string>();
+	/** Сохраняет необходимость обновить проекты после изменений Git или рабочих файлов. */
+	private promptDashboardReactiveGitRefreshByPanel = new Set<string>();
 	/** Marks hidden prompt editors that must catch up on the next reveal. */
 	private promptDashboardPendingRefreshOnReveal = new Set<string>();
 	/** Skips the first visible dashboard refresh right after a prompt is opened or switched. */
@@ -3910,6 +3919,10 @@ export class EditorPanelManager {
 	/** Refresh runtime agent progress for every open prompt editor panel. */
 	private async syncAgentProgressForOpenPanels(): Promise<void> {
 		for (const panelKey of this.panelPromptRefs.keys()) {
+			const panel = this.resolveOpenEditorPanel(panelKey);
+			if (!panel?.visible) {
+				continue;
+			}
 			await this.syncAgentProgressForPanel(panelKey);
 		}
 	}
@@ -3924,6 +3937,10 @@ export class EditorPanelManager {
 		}
 
 		const nextProgress = await this.storageService.readAgentProgress(promptId);
+		// Чтение со скрытой вкладки не должно восстанавливать старый промпт после быстрого переключения.
+		if (this.resolveOpenEditorPanel(panelKey) !== panel || this.panelPromptRefs.get(panelKey) !== currentPrompt) {
+			return;
+		}
 		const currentProgress = typeof currentPrompt.progress === 'number' && Number.isFinite(currentPrompt.progress)
 			? Math.max(0, Math.min(100, Math.round(currentPrompt.progress)))
 			: undefined;
@@ -4891,6 +4908,9 @@ export class EditorPanelManager {
 		if (clearProjects) {
 			this.promptDashboardReactiveProjectsByPanel.delete(panelKey);
 			this.promptDashboardReactiveFileRefreshByPanel.delete(panelKey);
+			this.promptDashboardReactiveGitRefreshByPanel.delete(panelKey);
+			this.promptDashboardReactiveRefreshInFlight.delete(panelKey);
+			this.promptDashboardReactiveRefreshStartedAt.delete(panelKey);
 		}
 	}
 
@@ -4940,10 +4960,12 @@ export class EditorPanelManager {
 	}
 
 	/** Возвращает workspace-проекты, которым принадлежит измененный путь. */
-	private resolvePromptDashboardProjectsForChangedPath(changedPath: string): string[] {
+	private resolvePromptDashboardProjectsForChangedPath(changedPath: string, excludeFileNoise = false): string[] {
 		const workspacePaths = this.workspaceService.getWorkspaceFolderPaths();
 		const normalizedChangedPath = path.resolve(changedPath);
 		const projects: string[] = [];
+		// Переиспользуем исключения Git Flow, не создавая отдельного сканирования workspace.
+		const excludedPaths = excludeFileNoise ? this.getGitOverlayExcludedPathsSetting() : [];
 
 		for (const [project, projectRootPath] of workspacePaths.entries()) {
 			const normalizedProjectRootPath = path.resolve(projectRootPath);
@@ -4951,6 +4973,12 @@ export class EditorPanelManager {
 				normalizedChangedPath === normalizedProjectRootPath
 				|| normalizedChangedPath.startsWith(`${normalizedProjectRootPath}${path.sep}`)
 			) {
+				if (excludeFileNoise && shouldIgnoreRealtimeRefreshPath(
+					path.relative(normalizedProjectRootPath, normalizedChangedPath),
+					excludedPaths,
+				)) {
+					continue;
+				}
 				projects.push(project);
 			}
 		}
@@ -5106,82 +5134,144 @@ export class EditorPanelManager {
 		}
 	}
 
-	/** Обновляет dashboard-виджеты, затронутые изменениями workspace или Git. */
+	/** Обновляет только те dashboard-виджеты, которые действительно затронуты событием. */
 	private async refreshPromptDashboardReactiveWidgetsForPanel(
 		panelKey: string,
 		panel: vscode.WebviewPanel,
 		prompt: Prompt,
-		reason: 'file' | 'git',
+		options: { refreshProjects: boolean; refreshTodos: boolean },
 		projectNames?: string[],
 	): Promise<void> {
-		await Promise.all([
-			this.refreshPromptDashboardProjectsForPanel(panelKey, panel, prompt, 'reactive-branches', projectNames),
-			reason === 'file'
-				? this.refreshPromptDashboardTodosForPanel(panelKey, panel, prompt)
-				: Promise.resolve(),
-		]);
+		const tasks: Promise<void>[] = [];
+		if (options.refreshProjects) {
+			tasks.push(this.refreshPromptDashboardProjectsForPanel(
+				panelKey,
+				panel,
+				prompt,
+				'reactive-branches',
+				projectNames,
+			));
+		}
+		if (options.refreshTodos) {
+			tasks.push(this.refreshPromptDashboardTodosForPanel(panelKey, panel, prompt));
+		}
+		await Promise.all(tasks);
 	}
 
-	/** Планирует точечные project-widget refresh для видимых редакторов после Git-событий. */
+	/** Накапливает нужные виджеты и проекты, отбрасывая служебные файловые события. */
 	private schedulePromptDashboardAutoRefreshForVisiblePanels(reason: 'file' | 'git', changedPath?: string): void {
 		const changedProjects = changedPath
-			? this.resolvePromptDashboardProjectsForChangedPath(changedPath)
+			? this.resolvePromptDashboardProjectsForChangedPath(changedPath, reason === 'file')
 			: [];
 		if (changedPath && changedProjects.length === 0) {
 			return;
 		}
 		for (const [panelKey] of this.panelPromptRefs.entries()) {
 			const projectsCollapsed = this.isPromptDashboardWidgetCollapsed('projects');
-			const todosCollapsed = reason !== 'file' || this.isPromptDashboardWidgetCollapsed('todos');
-			if (projectsCollapsed && todosCollapsed) {
-				this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
-				this.clearPromptDashboardReactiveRefreshTimer(panelKey, true);
+			const todosCollapsed = this.isPromptDashboardWidgetCollapsed('todos');
+			const shouldRefreshProjects = !projectsCollapsed;
+			const shouldRefreshTodos = reason === 'file' && !todosCollapsed;
+			if (!shouldRefreshProjects && !shouldRefreshTodos) {
+				// Неподходящее событие не отменяет ранее накопленное обновление другого виджета.
 				continue;
 			}
+
 			const panel = this.resolveOpenEditorPanel(panelKey);
 			if (!panel) {
 				continue;
 			}
-			if (reason === 'file') {
+
+			if (shouldRefreshTodos) {
 				this.promptDashboardReactiveFileRefreshByPanel.add(panelKey);
 			}
-			if (!projectsCollapsed && changedProjects.length > 0) {
-				const pendingProjects = this.promptDashboardReactiveProjectsByPanel.get(panelKey) || new Set<string>();
-				for (const project of changedProjects) {
-					pendingProjects.add(project);
+			if (shouldRefreshProjects) {
+				this.promptDashboardReactiveGitRefreshByPanel.add(panelKey);
+				if (changedProjects.length > 0) {
+					const pendingProjects = this.promptDashboardReactiveProjectsByPanel.get(panelKey) || new Set<string>();
+					for (const project of changedProjects) {
+						pendingProjects.add(project);
+					}
+					this.promptDashboardReactiveProjectsByPanel.set(panelKey, pendingProjects);
 				}
-				this.promptDashboardReactiveProjectsByPanel.set(panelKey, pendingProjects);
 			}
+
 			if (!panel.visible) {
 				this.promptDashboardPendingRefreshOnReveal.add(panelKey);
 				continue;
 			}
 
-			this.clearPromptDashboardReactiveRefreshTimer(panelKey);
-			const refreshDelayMs = reason === 'file'
-				? PROMPT_DASHBOARD_FILE_AUTO_REFRESH_DELAY_MS
-				: GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS + 50;
-			const timer = setTimeout(() => {
-				this.promptDashboardReactiveRefreshTimers.delete(panelKey);
-				const projectNames = Array.from(this.promptDashboardReactiveProjectsByPanel.get(panelKey) || []);
-				this.promptDashboardReactiveProjectsByPanel.delete(panelKey);
-				const refreshReason = this.promptDashboardReactiveFileRefreshByPanel.delete(panelKey) ? 'file' : 'git';
-				const latestPrompt = this.panelPromptRefs.get(panelKey);
-				const latestPanel = this.resolveOpenEditorPanel(panelKey);
-				if (!latestPrompt || !latestPanel || !latestPanel.visible) {
-					return;
-				}
+			this.schedulePromptDashboardReactiveRefreshForPanel(panelKey, reason);
+		}
+	}
 
-				void this.refreshPromptDashboardReactiveWidgetsForPanel(
-					panelKey,
-					latestPanel,
-					latestPrompt,
-					refreshReason,
-					projectNames.length > 0 ? projectNames : undefined,
-				);
-			}, refreshDelayMs);
-			this.promptDashboardReactiveRefreshTimers.set(panelKey, timer);
-			this.unrefBackgroundTimer(timer);
+	/** Сохраняет фиксированный срок обновления, чтобы непрерывные события не откладывали его бесконечно. */
+	private schedulePromptDashboardReactiveRefreshForPanel(panelKey: string, reason: 'file' | 'git'): void {
+		if (this.promptDashboardReactiveRefreshTimers.has(panelKey)
+			|| this.promptDashboardReactiveRefreshInFlight.has(panelKey)) {
+			return;
+		}
+
+		// Ограничение частоты действует и при чередовании файловых событий и Git metadata.
+		const lastStartedAt = this.promptDashboardReactiveRefreshStartedAt.get(panelKey);
+		const refreshDelayMs = Math.max(
+			reason === 'file' ? PROMPT_DASHBOARD_FILE_AUTO_REFRESH_DELAY_MS : GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS + 50,
+			lastStartedAt === undefined ? 0 : lastStartedAt + PROMPT_DASHBOARD_REACTIVE_REFRESH_MIN_INTERVAL_MS - Date.now(),
+		);
+		const timer = setTimeout(() => {
+			this.promptDashboardReactiveRefreshTimers.delete(panelKey);
+			void this.runPromptDashboardReactiveRefreshForPanel(panelKey);
+		}, refreshDelayMs);
+		this.promptDashboardReactiveRefreshTimers.set(panelKey, timer);
+		this.unrefBackgroundTimer(timer);
+	}
+
+	/** Выполняет один накопленный расчёт; события во время него объединяются в следующий. */
+	private async runPromptDashboardReactiveRefreshForPanel(panelKey: string): Promise<void> {
+		if (this.promptDashboardReactiveRefreshInFlight.has(panelKey)) {
+			return;
+		}
+		const prompt = this.panelPromptRefs.get(panelKey);
+		const panel = this.resolveOpenEditorPanel(panelKey);
+		if (!prompt || !panel) {
+			return;
+		}
+		if (!panel.visible) {
+			this.promptDashboardPendingRefreshOnReveal.add(panelKey);
+			return;
+		}
+
+		// Забираем только текущую порцию: новые события останутся в накопителях до завершения.
+		this.clearPromptDashboardReactiveRefreshTimer(panelKey);
+		this.promptDashboardPendingRefreshOnReveal.delete(panelKey);
+		const projectNames = Array.from(this.promptDashboardReactiveProjectsByPanel.get(panelKey) || []);
+		this.promptDashboardReactiveProjectsByPanel.delete(panelKey);
+		const refreshTodos = this.promptDashboardReactiveFileRefreshByPanel.delete(panelKey);
+		const refreshProjects = this.promptDashboardReactiveGitRefreshByPanel.delete(panelKey);
+		if (!refreshProjects && !refreshTodos) {
+			return;
+		}
+
+		// Отдельный маркер не даёт завершившемуся расчёту возобновить работу закрытого или сменённого промпта.
+		const refreshToken = {};
+		this.promptDashboardReactiveRefreshInFlight.set(panelKey, refreshToken);
+		this.promptDashboardReactiveRefreshStartedAt.set(panelKey, Date.now());
+		try {
+			await this.refreshPromptDashboardReactiveWidgetsForPanel(
+				panelKey, panel, prompt, { refreshProjects, refreshTodos },
+				projectNames.length > 0 ? projectNames : undefined,
+			);
+		} finally {
+			if (this.promptDashboardReactiveRefreshInFlight.get(panelKey) === refreshToken) {
+				this.promptDashboardReactiveRefreshInFlight.delete(panelKey);
+				if (this.promptDashboardReactiveFileRefreshByPanel.has(panelKey)
+					|| this.promptDashboardReactiveGitRefreshByPanel.has(panelKey)) {
+					if (this.resolveOpenEditorPanel(panelKey)?.visible) {
+						this.schedulePromptDashboardReactiveRefreshForPanel(panelKey, 'file');
+					} else {
+						this.promptDashboardPendingRefreshOnReveal.add(panelKey);
+					}
+				}
+			}
 		}
 	}
 
@@ -5300,7 +5390,9 @@ export class EditorPanelManager {
 		const gitStatePatterns = [
 			'.git/HEAD',
 			'.git/index',
-			'.git/refs/**',
+			// Ignore refs/remotes/**: git.autofetch updates them in the background and
+			// must not trigger a full projects-widget refresh in every visible panel.
+			'.git/refs/heads/**',
 			'.git/MERGE_HEAD',
 			'.git/CHERRY_PICK_HEAD',
 			'.git/REVERT_HEAD',
@@ -8055,7 +8147,11 @@ export class EditorPanelManager {
 		panel.onDidChangeViewState((event) => {
 			if (!event.webviewPanel.visible) {
 				void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
-				if ((this.promptDashboardReactiveProjectsByPanel.get(panelKey)?.size || 0) > 0) {
+				if (
+					(this.promptDashboardReactiveProjectsByPanel.get(panelKey)?.size || 0) > 0
+					|| this.promptDashboardReactiveFileRefreshByPanel.has(panelKey)
+					|| this.promptDashboardReactiveGitRefreshByPanel.has(panelKey)
+				) {
 					this.promptDashboardPendingRefreshOnReveal.add(panelKey);
 				}
 				this.clearPromptDashboardReactiveRefreshTimer(panelKey);
@@ -8066,6 +8162,8 @@ export class EditorPanelManager {
 			}
 
 			void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
+			// При показе догоняем изменения прогресса, пропущенные во время скрытия вкладки.
+			void this.syncAgentProgressForPanel(panelKey);
 			void this.refreshPromptReportForPanel(panelKey, event.webviewPanel);
 			void this.ensureGitOverlayReactiveSources();
 			const promptRef = this.panelPromptRefs.get(panelKey);
@@ -8078,16 +8176,7 @@ export class EditorPanelManager {
 			if (promptRef) {
 				void this.syncPromptPlanSnapshot(panelKey, promptRef);
 				if (shouldRefreshAfterHiddenChanges) {
-					const projectNames = Array.from(this.promptDashboardReactiveProjectsByPanel.get(panelKey) || []);
-					this.promptDashboardReactiveProjectsByPanel.delete(panelKey);
-					const refreshReason = this.promptDashboardReactiveFileRefreshByPanel.delete(panelKey) ? 'file' : 'git';
-					void this.refreshPromptDashboardReactiveWidgetsForPanel(
-						panelKey,
-						event.webviewPanel,
-						promptRef,
-						refreshReason,
-						projectNames.length > 0 ? projectNames : undefined,
-					);
+					void this.runPromptDashboardReactiveRefreshForPanel(panelKey);
 				} else if (!shouldSkipBootstrapDashboardRefresh) {
 					this.hooksOutput.appendLine(`[dashboard-refresh] panel=${panelKey} skipped visible refresh; no hidden git changes detected`);
 				}
@@ -12496,8 +12585,11 @@ export class EditorPanelManager {
 			clearTimeout(timer);
 		}
 		this.promptDashboardReactiveRefreshTimers.clear();
+		this.promptDashboardReactiveRefreshInFlight.clear();
+		this.promptDashboardReactiveRefreshStartedAt.clear();
 		this.promptDashboardReactiveProjectsByPanel.clear();
 		this.promptDashboardReactiveFileRefreshByPanel.clear();
+		this.promptDashboardReactiveGitRefreshByPanel.clear();
 		this.promptDashboardPendingRefreshOnReveal.clear();
 		this.promptDashboardVisibleRefreshGraceUntilByPanel.clear();
 		this.disposeGitOverlayReactiveSources();

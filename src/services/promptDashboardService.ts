@@ -1512,9 +1512,9 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 
 		const scopeKey = buildPromptDashboardScopeKey(scope);
-		const delayMs = reason === 'snapshot' || reason === 'container' || reason === 'compose'
-			? Math.min(100, this.getDockerRefreshIntervalMs())
-			: this.getDockerRefreshIntervalMs();
+		// Docker emits bursts of snapshot/container events. Respect the configured
+		// debounce instead of forcing a full compose/container refresh ~100 ms later.
+		const delayMs = this.getDockerRefreshIntervalMs();
 		this.dockerRefreshTimer = setTimeout(() => {
 			this.dockerRefreshTimer = null;
 			if (!this.activeScope || buildPromptDashboardScopeKey(this.activeScope) !== scopeKey) {
@@ -1523,7 +1523,9 @@ export class PromptDashboardService implements vscode.Disposable {
 			void this.refreshWidget(scope, 'docker', this.activePostMessage, {
 				force: true,
 				prompt,
-				requestId: 'docker-auto-refresh',
+				// Background updates are unsolicited; synthetic request IDs are rejected
+				// after the webview completes or switches its active dashboard request.
+				requestId: undefined,
 				refreshMode: 'full',
 				showLoadingState: false,
 			});

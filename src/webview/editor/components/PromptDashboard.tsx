@@ -49,6 +49,7 @@ import {
 	fitPromptDashboardPathPartsToWidth,
 	formatPromptDashboardDuration,
 	splitPromptDashboardPathParts,
+	comparePromptDashboardExplorerPaths,
 } from '../../../utils/promptDashboard.js';
 import {
 	buildPromptDashboardTodosData,
@@ -2298,7 +2299,7 @@ function renderBranchProjectUncommittedFileList(
 	fileHandlers: FileRowActionHandlers,
 ): React.ReactNode {
 	const entries = [...files]
-		.sort((left, right) => left.path.localeCompare(right.path, 'ru'))
+		.sort((left, right) => comparePromptDashboardExplorerPaths(left.path, right.path))
 		.map((file, index) => {
 			const pathParts = splitPromptDashboardPathParts(file.path);
 			const fileKey = `${project.project}:dirty:${file.group}:${file.previousPath || ''}:${file.path}`;

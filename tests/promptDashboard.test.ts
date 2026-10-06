@@ -29,6 +29,7 @@ import {
 	shouldRequestPromptDashboardSnapshot,
 	splitPromptDashboardPathParts,
 	splitPromptDashboardActivityByDay,
+	comparePromptDashboardExplorerPaths,
 } from '../src/utils/promptDashboard.js';
 import type { PromptDashboardProjectSummary, PromptDashboardProjectsData, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSnapshot } from '../src/types/promptDashboard.js';
 
@@ -92,6 +93,32 @@ test('splitPromptDashboardPathParts keeps the full path intact without UI compac
 			displayPath: 'app/Domain/Controllers/User.ts',
 		},
 	);
+});
+
+test('comparePromptDashboardExplorerPaths sorts directories before files with natural name order', () => {
+	const paths = [
+		'README.md',
+		'file10.ts',
+		'src/b.ts',
+		'file2.ts',
+		'src/utils/z.ts',
+		'docs/v10/a.md',
+		'src/A.ts',
+		'docs/v2/a.md',
+		'.gitignore',
+	];
+
+	assert.deepEqual([...paths].sort(comparePromptDashboardExplorerPaths), [
+		'docs/v2/a.md',
+		'docs/v10/a.md',
+		'src/utils/z.ts',
+		'src/A.ts',
+		'src/b.ts',
+		'.gitignore',
+		'file2.ts',
+		'file10.ts',
+		'README.md',
+	]);
 });
 
 test('fitPromptDashboardPathPartsToWidth keeps the full path when the measured width fits', () => {

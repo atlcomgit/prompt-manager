@@ -50,6 +50,37 @@ export function splitPromptDashboardPathParts(path: string): PromptDashboardComp
 	return normalizePromptDashboardPath(path).parts;
 }
 
+/** Натурально сравнивает имена файлов и папок без учёта регистра: 1, 2, 10, 20 вместо 1, 10, 2, 20. */
+const PROMPT_DASHBOARD_NATURAL_NAME_COLLATOR = new Intl.Collator('ru', { numeric: true, sensitivity: 'base' });
+
+/**
+ * Сравнивает пути как проводник: на каждом уровне сначала папки, затем файлы,
+ * имена внутри группы сортируются натурально по алфавиту.
+ */
+export function comparePromptDashboardExplorerPaths(leftPath: string, rightPath: string): number {
+	const leftParts = normalizePromptDashboardPath(leftPath).parts;
+	const rightParts = normalizePromptDashboardPath(rightPath).parts;
+	const leftSegments = leftParts.displayPath ? leftParts.displayPath.split('/') : [];
+	const rightSegments = rightParts.displayPath ? rightParts.displayPath.split('/') : [];
+	const sharedLength = Math.min(leftSegments.length, rightSegments.length);
+	for (let index = 0; index < sharedLength; index += 1) {
+		// Сегмент является папкой, если после него в пути есть ещё сегменты.
+		const leftIsDirectory = index < leftSegments.length - 1;
+		const rightIsDirectory = index < rightSegments.length - 1;
+		if (leftIsDirectory !== rightIsDirectory) {
+			return leftIsDirectory ? -1 : 1;
+		}
+
+		const nameOrder = PROMPT_DASHBOARD_NATURAL_NAME_COLLATOR.compare(leftSegments[index], rightSegments[index]);
+		if (nameOrder !== 0) {
+			return nameOrder;
+		}
+	}
+
+	// Стабильный порядок для путей, различающихся только регистром или длиной.
+	return leftSegments.length - rightSegments.length || leftParts.displayPath.localeCompare(rightParts.displayPath, 'ru');
+}
+
 /** Fits only the directory prefix into the measured width budget while keeping the file name intact. */
 export function fitPromptDashboardPathPartsToWidth(
 	path: string,

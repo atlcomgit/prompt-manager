@@ -10142,7 +10142,6 @@ export class EditorPanelManager {
 							const storageModel = await this.aiService.resolveModelStorageIdentifier(prompt.model);
 							requestModelIdentifier = storageModel || requestModelIdentifier;
 							requestModelSelector = await this.aiService.resolveChatOpenModelSelector(prompt.model);
-							await this.stateService.forcePersistChatCurrentLanguageModel(storageModel);
 							await this.aiService.tryApplyChatModelSafely(prompt.model);
 						} catch {
 							// keep default model if model switch fails
@@ -10288,7 +10287,6 @@ export class EditorPanelManager {
 						const storageModel = await this.aiService.resolveModelStorageIdentifier(prompt.model);
 						requestModelIdentifier = storageModel || requestModelIdentifier;
 						requestModelSelector = await this.aiService.resolveChatOpenModelSelector(prompt.model);
-						await this.stateService.forcePersistChatCurrentLanguageModel(storageModel);
 						await this.aiService.tryApplyChatModelSafely(prompt.model);
 					}
 

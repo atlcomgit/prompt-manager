@@ -6,8 +6,6 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { DEFAULT_COPILOT_MODEL_FAMILY, isCopilotModelIdentifier, isZeroCostCopilotModelPickerCategory, normalizeCopilotModelFamily, normalizeOptionalCopilotModelFamily } from '../constants/ai.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
@@ -16,8 +14,6 @@ import { normalizeCommitMessageGenerationInstructions } from '../utils/gitOverla
 import { readSqliteItemValue } from '../utils/sqliteItemTable.js';
 import type { PromptDashboardProjectSummary } from '../types/promptDashboard.js';
 import { areInternalAiFeaturesEnabled } from './aiSettingsConfig.js';
-
-const execFileAsync = promisify(execFile);
 
 type AvailableModelOption = { id: string; name: string };
 
@@ -170,7 +166,6 @@ export class AiService {
 	];
 
 	constructor(private readonly context?: vscode.ExtensionContext) { }
-	private sqliteBinaryPath: string | null | undefined;
 	private resolvedStateDbPath: string | null | undefined;
 	private readonly stateDbItemCache = new Map<string, { fingerprint: string; items: Map<string, string> }>();
 	private readonly selectedModelCache = new Map<string, CachedSelectedModelEntry>();
@@ -2121,29 +2116,14 @@ export class AiService {
 		}
 	}
 
+	/**
+	 * Читает значение `ItemTable` из `state.vscdb` только через read-only снимок sql.js.
+	 * Внешний `sqlite3` не используется: даже читающее подключение к рабочей БД берёт
+	 * SQLite-блокировку и может мешать записи VS Code.
+	 */
 	private async readStateItemValue(dbPath: string, key: string): Promise<string> {
-		const sqliteValue = await this.readStateItemValueWithSqlite(dbPath, key);
-		if (sqliteValue.ok) {
-			return sqliteValue.value;
-		}
-
 		const sqlJsValue = await this.readStateItemValueWithSqlJs(dbPath, key);
 		return sqlJsValue ?? '';
-	}
-
-	private async readStateItemValueWithSqlite(dbPath: string, key: string): Promise<{ ok: boolean; value: string }> {
-		const sqlitePath = this.resolveSqliteBinaryPath();
-		if (!sqlitePath) {
-			return { ok: false, value: '' };
-		}
-
-		try {
-			const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
-			const { stdout } = await execFileAsync(sqlitePath, ['-readonly', dbPath, sql], { timeout: 4000 });
-			return { ok: true, value: (stdout || '').trim() };
-		} catch {
-			return { ok: false, value: '' };
-		}
 	}
 
 	private async readStateItemValueWithSqlJs(dbPath: string, key: string): Promise<string | null> {
@@ -2314,49 +2294,6 @@ export class AiService {
 		} catch {
 			return [];
 		}
-	}
-
-	private resolveSqliteBinaryPath(): string | null {
-		if (this.sqliteBinaryPath !== undefined) {
-			return this.sqliteBinaryPath;
-		}
-
-		const candidates = process.platform === 'win32'
-			? [
-				process.env.PROMPT_MANAGER_SQLITE3_PATH || '',
-				path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'sqlite3.exe'),
-				'C:\\sqlite3\\sqlite3.exe',
-				'C:\\Program Files\\SQLite\\sqlite3.exe',
-				'C:\\Program Files (x86)\\SQLite\\sqlite3.exe',
-				'sqlite3.exe',
-			]
-			: [
-				process.env.PROMPT_MANAGER_SQLITE3_PATH || '',
-				'/usr/bin/sqlite3',
-				'/bin/sqlite3',
-				'/usr/local/bin/sqlite3',
-				'/opt/homebrew/bin/sqlite3',
-				'sqlite3',
-			];
-
-		for (const candidate of candidates) {
-			if (!candidate) {
-				continue;
-			}
-			if (candidate.includes(path.sep) && !fs.existsSync(candidate)) {
-				continue;
-			}
-
-			this.sqliteBinaryPath = candidate;
-			return candidate;
-		}
-
-		this.sqliteBinaryPath = null;
-		return null;
-	}
-
-	private escapeSql(value: string): string {
-		return value.replace(/'/g, "''");
 	}
 
 	private async buildCopilotModelLookup(

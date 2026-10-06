@@ -10,12 +10,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fsSync from 'fs';
 import * as fs from 'fs/promises';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 import { readSqliteItemTable, readSqliteItemValue } from '../utils/sqliteItemTable.js';
-
-const execFileAsync = promisify(execFile);
 
 /** Данные об использовании Copilot Premium запросов */
 export interface CopilotUsageData {
@@ -119,8 +115,10 @@ const CHAT_REQUESTS_BASE_USED_KEY = 'promptManager.copilotUsage.chatRequestsBase
 const GITHUB_AUTH_PROVIDER_ID = 'github';
 const COPILOT_CHAT_AUTH_PROVIDER_ID = '__GitHub.copilot-chat';
 const COPILOT_GITHUB_PREFERENCE_KEYS = ['github.copilot-github', 'github.copilot-chat-github'];
-const PROMPT_MANAGER_GITHUB_PREFERENCE_KEY = 'alek-fiend.copilot-prompt-manager-github';
-const PROMPT_MANAGER_GITHUB_PREFERENCE_FALLBACK_STATE_KEY = 'promptManager.copilotUsage.githubPreference';
+/** Устаревший ключ preference в `state.vscdb`: только читается для переноса значения из старых версий. */
+const LEGACY_PROMPT_MANAGER_GITHUB_PREFERENCE_DB_KEY = 'alek-fiend.copilot-prompt-manager-github';
+/** Ключ `globalState`, в котором хранится выбранный в Prompt Manager GitHub-аккаунт Copilot. */
+const PROMPT_MANAGER_GITHUB_PREFERENCE_STATE_KEY = 'promptManager.copilotUsage.githubPreference';
 const COPILOT_CHAT_GITHUB_USAGE_EXTENSION_IDS = ['github.copilot-chat', 'github.copilot'];
 const ACCOUNT_SWITCH_DETECTION_INTERVAL_MS = 500;
 const ACCOUNT_SWITCH_DETECTION_MAX_ATTEMPTS = 60;
@@ -152,7 +150,7 @@ export class CopilotUsageService implements vscode.Disposable {
 	private lastDebugLog = '';
 	private lastFullRefreshTimestamp = 0;
 	private lastKnownCopilotGitHubPreference: string | null | undefined;
-	/** In-memory кэш PM preference — fallback при недоступной DB (state.vscdb заблокирован) */
+	/** In-memory кэш PM preference — последнее сохранённое или прочитанное значение */
 	private lastSyncedPmPreference: string | null = null;
 	private lastGitHubSessionIssue: string | null = null;
 	private copilotPreferencePollingTimer: ReturnType<typeof setInterval> | undefined;
@@ -455,32 +453,16 @@ export class CopilotUsageService implements vscode.Disposable {
 		const lastSeen = this.context.globalState.get<number>(LAST_CHAT_ACTIVITY_KEY, 0);
 
 		for (const dbPath of dbPaths) {
+			// Индекс сессий читается только из read-only снимка state.vscdb.
 			const cachedRaw = await this.readStateValueWithSqlJs(dbPath, 'chat.ChatSessionStore.index');
-			if (cachedRaw.ok) {
-				const parsed = this.parseChatSessionStoreIndex(cachedRaw.value);
-				if (!parsed) {
-					continue;
-				}
-
-				const nextSignal = this.extractChatActivitySignal(parsed, lastSeen);
-				maxLastMessageDate = Math.max(maxLastMessageDate, nextSignal.maxLastMessageDate);
-				changedSessions += nextSignal.changedSessions;
+			const parsed = cachedRaw.ok ? this.parseChatSessionStoreIndex(cachedRaw.value) : null;
+			if (!parsed) {
 				continue;
 			}
 
-			try {
-				const sql = "SELECT value FROM ItemTable WHERE key='chat.ChatSessionStore.index' LIMIT 1;";
-				const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
-				const parsed = this.parseChatSessionStoreIndex((stdout || '').trim());
-				if (!parsed) {
-					continue;
-				}
-				const nextSignal = this.extractChatActivitySignal(parsed, lastSeen);
-				maxLastMessageDate = Math.max(maxLastMessageDate, nextSignal.maxLastMessageDate);
-				changedSessions += nextSignal.changedSessions;
-			} catch {
-				// continue
-			}
+			const nextSignal = this.extractChatActivitySignal(parsed, lastSeen);
+			maxLastMessageDate = Math.max(maxLastMessageDate, nextSignal.maxLastMessageDate);
+			changedSessions += nextSignal.changedSessions;
 		}
 
 		if (maxLastMessageDate > lastSeen) {
@@ -522,10 +504,6 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 
 		return { maxLastMessageDate, changedSessions };
-	}
-
-	private escapeSql(value: string): string {
-		return value.replace(/'/g, "''");
 	}
 
 	private deepFindNumberByNames(node: unknown, names: string[]): number | null {
@@ -642,6 +620,7 @@ export class CopilotUsageService implements vscode.Disposable {
 			'fail-safe.copilot-premium-usage-monitor',
 		];
 
+		// Данные читаются только из read-only снимка state.vscdb; без снимка источник пропускается.
 		const cachedItems = await this.getStateDbItems(dbPath);
 		if (cachedItems) {
 			for (const key of priorityKeys) {
@@ -671,45 +650,6 @@ export class CopilotUsageService implements vscode.Disposable {
 					return { ...parsed, status: `local-db:${key}` };
 				}
 			}
-
-			return null;
-		}
-
-		for (const key of priorityKeys) {
-			try {
-				const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
-				const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
-				const raw = (stdout || '').trim();
-				if (!raw) {
-					continue;
-				}
-				const parsed = this.parseUsageFromJsonText(raw);
-				if (parsed && parsed.limit > 0) {
-					return { ...parsed, status: `local-db:${key}` };
-				}
-			} catch {
-				// continue
-			}
-		}
-
-		try {
-			const sql = "SELECT key, value FROM ItemTable WHERE lower(key) LIKE '%copilot%' AND (lower(value) LIKE '%quota%' OR lower(value) LIKE '%premium%' OR lower(value) LIKE '%used%') LIMIT 80;";
-			const { stdout } = await execFileAsync('sqlite3', [dbPath, sql, '-separator', '\t']);
-			const lines = (stdout || '').split('\n').map(line => line.trim()).filter(Boolean);
-			for (const line of lines) {
-				const tabIndex = line.indexOf('\t');
-				if (tabIndex <= 0) {
-					continue;
-				}
-				const key = line.slice(0, tabIndex);
-				const value = line.slice(tabIndex + 1);
-				const parsed = this.parseUsageFromJsonText(value);
-				if (parsed && parsed.limit > 0) {
-					return { ...parsed, status: `local-db:${key}` };
-				}
-			}
-		} catch {
-			// continue
 		}
 
 		return null;
@@ -844,7 +784,7 @@ export class CopilotUsageService implements vscode.Disposable {
 				appendPromptManagerLog(
 					`[${new Date().toISOString()}] [sync] ${reason}: CHANGED from ${this.lastKnownCopilotGitHubPreference || 'none'} → ${actualLabel}`,
 				);
-				await this.persistPreferredAccountLabel(PROMPT_MANAGER_GITHUB_PREFERENCE_KEY, actualLabel);
+				await this.persistPreferredAccountLabel(actualLabel);
 				this.lastKnownCopilotGitHubPreference = actualLabel;
 				return true;
 			}
@@ -985,84 +925,29 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 	}
 
+	/**
+	 * Читает значение `ItemTable` из read-only снимка `state.vscdb` (sql.js).
+	 * Внешний `sqlite3` не используется, запись в рабочие БД VS Code запрещена.
+	 */
 	private async readStateValue(dbPath: string, key: string): Promise<string | null> {
 		const cachedValue = await this.readStateValueWithSqlJs(dbPath, key);
-		if (cachedValue.ok) {
-			return cachedValue.value;
-		}
-
-		if (process.platform === 'win32') {
-			return null;
-		}
-
-		try {
-			const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
-			const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
-			const raw = (stdout || '').trim();
-			return raw || null;
-		} catch (err) {
+		if (!cachedValue.ok) {
 			appendPromptManagerLog(
-				`[${new Date().toISOString()}] [state-db] readStateValue FAILED key=${key} db=${dbPath} error=${String(err)}`,
+				`[${new Date().toISOString()}] [state-db] readStateValue SKIPPED key=${key} db=${dbPath} reason=snapshot-unavailable`,
 			);
 			return null;
 		}
+
+		return String(cachedValue.value || '').trim() || null;
 	}
 
-	private async writeStateValue(dbPath: string, key: string, value: string): Promise<void> {
-		if (process.platform === 'win32') {
-			appendPromptManagerLog(
-				`[${new Date().toISOString()}] [state-db] writeStateValue SKIPPED key=${key} db=${dbPath} reason=external-sqlite-unavailable-on-win32`,
-			);
-			return;
-		}
-
-		const sql = [
-			'BEGIN TRANSACTION;',
-			`INSERT INTO ItemTable(key, value) VALUES ('${this.escapeSql(key)}', '${this.escapeSql(value)}')`,
-			'ON CONFLICT(key) DO UPDATE SET value=excluded.value;',
-			'COMMIT;',
-		].join(' ');
-		try {
-			await execFileAsync('sqlite3', [dbPath, sql]);
-			appendPromptManagerLog(
-				`[${new Date().toISOString()}] [state-db] writeStateValue OK key=${key} value=${value} db=${dbPath}`,
-			);
-		} catch (err) {
-			appendPromptManagerLog(
-				`[${new Date().toISOString()}] [state-db] writeStateValue FAILED key=${key} value=${value} db=${dbPath} error=${String(err)}`,
-			);
-			throw err;
-		}
-	}
-
-	private async persistPreferredAccountLabel(key: string, accountLabel: string): Promise<void> {
-		await this.context.globalState.update(PROMPT_MANAGER_GITHUB_PREFERENCE_FALLBACK_STATE_KEY, accountLabel);
+	/** Сохраняет выбранный GitHub-аккаунт только в `globalState` расширения. */
+	private async persistPreferredAccountLabel(accountLabel: string): Promise<void> {
+		await this.context.globalState.update(PROMPT_MANAGER_GITHUB_PREFERENCE_STATE_KEY, accountLabel);
 		this.lastSyncedPmPreference = accountLabel;
-
-		const dbPaths = [
-			await this.getCurrentWorkspaceStateDbPath(),
-			await this.resolveGlobalStateDbPath(),
-		].filter((value): value is string => !!value);
-
 		appendPromptManagerLog(
-			`[${new Date().toISOString()}] [persist] persistPreferredAccountLabel key=${key} value=${accountLabel} dbPaths=[${dbPaths.join(', ')}]`,
+			`[${new Date().toISOString()}] [persist] persistPreferredAccountLabel globalState=${PROMPT_MANAGER_GITHUB_PREFERENCE_STATE_KEY} value=${accountLabel}`,
 		);
-
-		let anySuccess = false;
-		for (const dbPath of dbPaths) {
-			try {
-				await this.writeStateValue(dbPath, key, accountLabel);
-				anySuccess = true;
-			} catch {
-				// writeStateValue уже залогировала ошибку
-			}
-		}
-
-		if (!anySuccess) {
-			appendPromptManagerLog(
-				`[${new Date().toISOString()}] [persist] ALL DB writes FAILED for ${key}=${accountLabel} — using globalState fallback`,
-			);
-		}
 	}
 
 	private async resolveCopilotPreferredGitHubAccountLabel(): Promise<string | null> {
@@ -1083,35 +968,37 @@ export class CopilotUsageService implements vscode.Disposable {
 		return await this.resolveCopilotChatGitHubUsageAccountLabel();
 	}
 
+	/**
+	 * Возвращает GitHub-аккаунт, выбранный в Prompt Manager.
+	 * Источник истины — `globalState`. Значение, записанное старыми версиями в `state.vscdb`,
+	 * однократно переносится в `globalState` (БД при этом только читается).
+	 */
 	private async resolvePromptManagerPreferredGitHubAccountLabel(): Promise<string | null> {
+		const persisted = this.context.globalState.get<string>(PROMPT_MANAGER_GITHUB_PREFERENCE_STATE_KEY) || null;
+		if (persisted) {
+			this.lastSyncedPmPreference = persisted;
+			return persisted;
+		}
+
 		const dbPaths = [
 			await this.getCurrentWorkspaceStateDbPath(),
 			await this.resolveGlobalStateDbPath(),
 		].filter((value): value is string => !!value);
 
 		for (const dbPath of dbPaths) {
-			const value = await this.readStateValue(dbPath, PROMPT_MANAGER_GITHUB_PREFERENCE_KEY);
-			if (value) {
-				this.lastSyncedPmPreference = value;
+			const legacyValue = await this.readStateValue(dbPath, LEGACY_PROMPT_MANAGER_GITHUB_PREFERENCE_DB_KEY);
+			if (legacyValue) {
 				appendPromptManagerLog(
-					`[${new Date().toISOString()}] [resolve-pm] found in DB: ${value} db=${dbPath}`,
+					`[${new Date().toISOString()}] [resolve-pm] migrated legacy DB value to globalState: ${legacyValue} db=${dbPath}`,
 				);
-				return value;
+				await this.persistPreferredAccountLabel(legacyValue);
+				return legacyValue;
 			}
 		}
 
-		const persistedFallback = this.context.globalState.get<string>(PROMPT_MANAGER_GITHUB_PREFERENCE_FALLBACK_STATE_KEY) || null;
-		if (persistedFallback) {
-			this.lastSyncedPmPreference = persistedFallback;
-			appendPromptManagerLog(
-				`[${new Date().toISOString()}] [resolve-pm] using globalState fallback: ${persistedFallback}`,
-			);
-			return persistedFallback;
-		}
-
-		// Если DB недоступна — используем in-memory кэш, чтобы не зацикливать sync
+		// Сохранённого значения нет — используем in-memory кэш, чтобы не зацикливать sync
 		appendPromptManagerLog(
-			`[${new Date().toISOString()}] [resolve-pm] DB returned nothing, using in-memory cache: ${this.lastSyncedPmPreference || 'null'}`,
+			`[${new Date().toISOString()}] [resolve-pm] no persisted preference, using in-memory cache: ${this.lastSyncedPmPreference || 'null'}`,
 		);
 		return this.lastSyncedPmPreference;
 	}
@@ -1132,9 +1019,9 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 
 		const keyPrefix = `${providerId}-`;
-		const sql = `SELECT key, value FROM ItemTable WHERE key LIKE '${this.escapeSql(providerId)}-%-usages';`;
 		let latest: { accountLabel: string; lastUsed: number } | null = null;
 
+		// Использование аккаунтов читается только из read-only снимков state.vscdb.
 		for (const dbPath of dbPaths) {
 			const cachedItems = await this.getStateDbItems(dbPath);
 			if (cachedItems) {
@@ -1182,65 +1069,6 @@ export class CopilotUsageService implements vscode.Disposable {
 						}
 					}
 				}
-				continue;
-			}
-
-			try {
-				const { stdout } = await execFileAsync('sqlite3', [dbPath, sql, '-separator', '\t']);
-				const lines = (stdout || '').split('\n').map((line) => line.trim()).filter(Boolean);
-				for (const line of lines) {
-					const tabIndex = line.indexOf('\t');
-					if (tabIndex <= 0) {
-						continue;
-					}
-
-					const key = line.slice(0, tabIndex);
-					const rawValue = line.slice(tabIndex + 1);
-					if (!key.startsWith(keyPrefix) || !key.endsWith('-usages')) {
-						continue;
-					}
-
-					const accountLabel = key.slice(keyPrefix.length, -'-usages'.length).trim();
-					if (!accountLabel) {
-						continue;
-					}
-
-					let usages: unknown;
-					try {
-						usages = JSON.parse(rawValue);
-					} catch {
-						continue;
-					}
-
-					if (!Array.isArray(usages)) {
-						continue;
-					}
-
-					for (const usage of usages) {
-						if (!usage || typeof usage !== 'object') {
-							continue;
-						}
-
-						const usageRecord = usage as Record<string, unknown>;
-						const extensionId = typeof usageRecord.extensionId === 'string'
-							? usageRecord.extensionId.trim().toLowerCase()
-							: '';
-						if (!normalizedExtensionIds.has(extensionId)) {
-							continue;
-						}
-
-						const lastUsed = Number(usageRecord.lastUsed || 0);
-						if (!Number.isFinite(lastUsed) || lastUsed <= 0) {
-							continue;
-						}
-
-						if (!latest || lastUsed > latest.lastUsed) {
-							latest = { accountLabel, lastUsed };
-						}
-					}
-				}
-			} catch {
-				// ignore unavailable db or malformed row
 			}
 		}
 
@@ -1376,7 +1204,7 @@ export class CopilotUsageService implements vscode.Disposable {
 		);
 		// Сохраняем в in-memory кэш ДО записи в DB — при неудаче DB sync не зацикливается
 		this.lastSyncedPmPreference = preferredAccount.label;
-		await this.persistPreferredAccountLabel(PROMPT_MANAGER_GITHUB_PREFERENCE_KEY, preferredAccount.label);
+		await this.persistPreferredAccountLabel(preferredAccount.label);
 
 		try {
 			await vscode.authentication.getSession(
@@ -1456,7 +1284,7 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 
 		const snapshot: Record<string, string | null> = {};
-		for (const key of [...COPILOT_GITHUB_PREFERENCE_KEYS, PROMPT_MANAGER_GITHUB_PREFERENCE_KEY]) {
+		for (const key of [...COPILOT_GITHUB_PREFERENCE_KEYS, LEGACY_PROMPT_MANAGER_GITHUB_PREFERENCE_DB_KEY]) {
 			snapshot[key] = await this.readStateValue(dbPath, key);
 		}
 		return snapshot;
@@ -1718,7 +1546,7 @@ export class CopilotUsageService implements vscode.Disposable {
 				`Переключаем Prompt Manager на аккаунт ${expectedAccountLabel}.`,
 				expectedAccountLabel,
 			);
-			await this.persistPreferredAccountLabel(PROMPT_MANAGER_GITHUB_PREFERENCE_KEY, expectedAccountLabel);
+			await this.persistPreferredAccountLabel(expectedAccountLabel);
 			appendPromptManagerLog(
 				`[${new Date().toISOString()}] [switch-complete] prompt-manager preference persisted: ${expectedAccountLabel}`,
 			);

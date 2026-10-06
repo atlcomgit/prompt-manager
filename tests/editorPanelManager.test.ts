@@ -6189,7 +6189,6 @@ test('startChat keeps the active chat model unchanged for the keep-current selec
 
 	// Track any attempt to replace the active chat selection during launch.
 	const modelResolutionCalls: string[] = [];
-	let persistedModelSelectionCalls = 0;
 	const { manager, aiService } = await createManager({
 		initialPrompt: {
 			id: 'prompt-a',
@@ -6204,10 +6203,6 @@ test('startChat keeps the active chat model unchanged for the keep-current selec
 			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
 			getGlobalAgentContext: () => '',
 			getActiveChatSessionId: async () => '',
-			forcePersistChatCurrentLanguageModel: async () => {
-				persistedModelSelectionCalls += 1;
-				return { ok: true };
-			},
 			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
 			waitForChatRequestCompletion: async () => ({
 				ok: false,
@@ -6262,7 +6257,6 @@ test('startChat keeps the active chat model unchanged for the keep-current selec
 	);
 
 	assert.deepEqual(modelResolutionCalls, []);
-	assert.equal(persistedModelSelectionCalls, 0);
 	assert.ok(vscodeCommandCalls.some(call => call.id === 'workbench.action.chat.openAgent'));
 	assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
 	resetVsCodeCommandMock();

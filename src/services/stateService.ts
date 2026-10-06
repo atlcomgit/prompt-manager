@@ -7,8 +7,6 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import type { EditorPromptViewState, EditorPromptViewStateKeySource, SidebarState } from '../types/prompt.js';
 import type { PromptDashboardCollapsedSections, PromptDashboardSectionOrder } from '../types/promptDashboard.js';
 import {
@@ -25,6 +23,7 @@ import {
 	normalizePromptDashboardCollapsedSections,
 	normalizePromptDashboardSectionOrder,
 } from '../types/promptDashboard.js';
+import { readSqliteItemValueCached, resolveBundledSqlJsWasmPath } from '../utils/sqliteItemTable.js';
 import { observeStableChatCompletion, isCompletedChatResponse, type StableChatCompletionCandidate } from '../utils/chatCompletionState.js';
 
 interface ChatSessionLatestRequestState {
@@ -35,8 +34,6 @@ interface ChatSessionLatestRequestState {
 
 /** Tracks whether the shared agent context came from remote load or manual input. */
 export type GlobalAgentContextSource = 'empty' | 'manual' | 'remote';
-
-const execFileAsync = promisify(execFile);
 
 const SIDEBAR_STATE_KEY = 'promptManager.sidebarState';
 const LAST_PROMPT_KEY = 'promptManager.lastPromptId';
@@ -210,11 +207,10 @@ export class StateService {
 		return paths[0] || null;
 	}
 
+	/** Читает индекс чат-сессий из read-only снимка `state.vscdb` workspace. */
 	private async readChatSessionStoreIndex(dbPath: string): Promise<any | null> {
 		try {
-			const sql = "SELECT value FROM ItemTable WHERE key='chat.ChatSessionStore.index' LIMIT 1;";
-			const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
-			const raw = (stdout || '').trim();
+			const raw = (await this.readWorkspaceItemValue(dbPath, 'chat.ChatSessionStore.index')).trim();
 			if (!raw) {
 				return null;
 			}
@@ -352,11 +348,18 @@ export class StateService {
 		return '';
 	}
 
+	/**
+	 * Читает значение `ItemTable` из снимка `state.vscdb` через sql.js.
+	 * Рабочий файл VS Code не открывается как SQLite-БД, поэтому блокировки и запись исключены.
+	 */
 	private async readWorkspaceItemValue(dbPath: string, key: string): Promise<string> {
+		const wasmPath = resolveBundledSqlJsWasmPath(this.context.extensionUri?.fsPath);
+		if (!wasmPath) {
+			return '';
+		}
+
 		try {
-			const sql = `SELECT value FROM ItemTable WHERE key='${this.escapeSql(key)}' LIMIT 1;`;
-			const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
-			return (stdout || '').trim();
+			return ((await readSqliteItemValueCached(dbPath, wasmPath, key)) ?? '').trim();
 		} catch {
 			return '';
 		}
@@ -718,45 +721,6 @@ export class StateService {
 		};
 	}
 
-	private escapeSql(value: string): string {
-		return value.replace(/'/g, "''");
-	}
-
-	private escapeSqlJsonPathSegment(value: string): string {
-		return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-	}
-
-	async forcePersistChatCurrentLanguageModel(modelIdentifier: string): Promise<{ ok: boolean; reason?: string; dbPath?: string }> {
-		if (!modelIdentifier) {
-			return { ok: false, reason: 'empty-model' };
-		}
-
-		const dbPath = await this.resolveStateDbPath();
-		if (!dbPath) {
-			return { ok: false, reason: 'db-not-found' };
-		}
-
-		const model = this.escapeSql(modelIdentifier);
-		const locations = ['panel', 'chat', 'editor', 'editorInline'];
-		const sqlParts: string[] = ['PRAGMA busy_timeout=2000;'];
-		for (const location of locations) {
-			sqlParts.push(
-				`INSERT INTO ItemTable(key, value) VALUES('chat.currentLanguageModel.${location}', '${model}') ON CONFLICT(key) DO UPDATE SET value=excluded.value;`,
-				`INSERT INTO ItemTable(key, value) VALUES('chat.currentLanguageModel.${location}.isDefault', 'false') ON CONFLICT(key) DO UPDATE SET value=excluded.value;`,
-				`INSERT INTO ItemTable(key, value) VALUES('chat.currentLanguageModel.${location}.local', '${model}') ON CONFLICT(key) DO UPDATE SET value=excluded.value;`,
-				`INSERT INTO ItemTable(key, value) VALUES('chat.currentLanguageModel.${location}.local.isDefault', 'false') ON CONFLICT(key) DO UPDATE SET value=excluded.value;`
-			);
-		}
-		const sql = sqlParts.join(' ');
-
-		try {
-			await execFileAsync('sqlite3', [dbPath, sql]);
-			return { ok: true, dbPath };
-		} catch (error: any) {
-			return { ok: false, reason: error?.message || 'sqlite-write-failed', dbPath };
-		}
-	}
-
 	/**
 	 * Extract total implementing time from a chat session JSONL file.
 	 * Parses the JSONL, finds all requests and their result.timings.totalElapsed,
@@ -851,8 +815,9 @@ export class StateService {
 	}
 
 	/**
-	 * Rename a chat session by writing customTitle to its JSONL session file
-	 * and updating the in-memory session index in state.vscdb when possible.
+	 * Rename a chat session by writing customTitle to its JSONL session file.
+	 * Индекс сессий в `state.vscdb` не изменяется: прямая запись в рабочую БД VS Code
+	 * конфликтует с её собственными транзакциями, а заголовок в UI обновляет вызывающий код.
 	 */
 	async renameChatSession(
 		sessionId: string,
@@ -892,41 +857,11 @@ export class StateService {
 			}
 		}
 
-		const dbPaths = this.scopeWorkspaceStateDbPathsToCurrentWorkspace(await this.resolveWorkspaceStateDbPaths());
-		let indexOk = false;
-		let indexReason = 'index-entry-not-found';
-		const sessionPathSegment = this.escapeSqlJsonPathSegment(normalizedId);
-		const titlePath = `$.entries."${sessionPathSegment}".title`;
-		const sessionPath = `$.entries."${sessionPathSegment}".sessionId`;
-		const escapedTitle = this.escapeSql(normalizedTitle);
-		for (const dbPath of dbPaths) {
-			try {
-				const sql = [
-					'PRAGMA busy_timeout=2000;',
-					`UPDATE ItemTable SET value = json_set(value, '${titlePath}', '${escapedTitle}')`,
-					`WHERE key='chat.ChatSessionStore.index' AND json_extract(value, '${sessionPath}') IS NOT NULL;`,
-					'SELECT changes();',
-				].join(' ');
-				const { stdout } = await execFileAsync('sqlite3', [dbPath, sql]);
-				const changes = Number((stdout || '').trim().split(/\s+/).pop() || 0);
-				if (changes > 0) {
-					indexOk = true;
-					indexReason = dbPath;
-					break;
-				}
-			} catch (error: any) {
-				indexReason = error?.message || 'index-write-failed';
-			}
+		if (jsonlOk) {
+			return { ok: true, reason: `jsonl:${jsonlReason}` };
 		}
 
-		if (jsonlOk || indexOk) {
-			return {
-				ok: true,
-				reason: `jsonl:${jsonlReason} | index:${indexReason}`,
-			};
-		}
-
-		return { ok: false, reason: `${jsonlReason} | ${indexReason}` };
+		return { ok: false, reason: jsonlReason };
 	}
 
 	/** Get saved sidebar state */

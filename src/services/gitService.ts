@@ -3301,7 +3301,7 @@ export class GitService {
 						hasLocalBranch: promptBranchExistsLocally,
 						remoteBranchRef: promptBranchRemoteRef,
 					});
-					return;
+					return true;
 				}
 
 				const sourceBranch = (sourceSelections[project] || '').trim();
@@ -3311,10 +3311,11 @@ export class GitService {
 
 				await this.ensureBranchCheckedOutAndPulled(projectPath, sourceBranch);
 				await this.runGitFileMutation(projectPath, ['checkout', '-b', normalizedPromptBranch, sourceBranch]);
-				return;
+				return true;
 			}
 
 			await this.switchProjectBranch(project, projectPath, targetBranch, allowedBaseBranches);
+			return true;
 		});
 	}
 
@@ -4512,6 +4513,7 @@ export class GitService {
 			for (const change of uniqueChanges) {
 				await this.discardProjectChange(projectPath, change.path, change.group, change.previousPath);
 			}
+			return true;
 		});
 	}
 
@@ -4635,6 +4637,7 @@ export class GitService {
 				return false;
 			}
 			await this.runGitFileMutation(projectPath, ['branch', '-D', normalizedBranchName]);
+			return true;
 		});
 	}
 
@@ -4840,6 +4843,7 @@ export class GitService {
 				return false;
 			}
 			await this.runGitFileMutation(projectPath, ['pull', '--ff-only']);
+			return true;
 		});
 	}
 

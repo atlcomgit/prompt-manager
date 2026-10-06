@@ -1570,6 +1570,14 @@ export const GitOverlay: React.FC<Props> = ({
 		|| waitingForSnapshotAction?.startsWith('commitStaged:')
 		|| waitingForSnapshotAction?.startsWith('generateCommitMessage:'),
 	);
+	// Шаг 2 ждёт шаг 1: ветки не переключены, и во всех проектах с изменениями действия коммита недоступны.
+	const step2BlockedByStep1Branches = !step2Busy
+		&& projectsWithChanges.length > 0
+		&& projectsWithChanges.some(project => Boolean(projectValidations.get(project.project)?.branchMismatch))
+		&& projectsWithChanges.every(project => (
+			isProjectGenerateActionDisabled(project.project)
+			&& isProjectCommitActionDisabled(project.project)
+		));
 	const step3HasWarnings = showPushNeedsPromptBranchHint
 		|| projectsWithChangesOutsideTrackedOrPrompt.length > 0
 		|| projectsWithChanges.length > 0
@@ -1631,12 +1639,13 @@ export const GitOverlay: React.FC<Props> = ({
 			step5: false,
 		}) : ({
 			step1: false,
-			step2: firstPendingStep !== null && 2 > firstPendingStep,
+			// Шаг 2 также ждёт шаг 1, если все его кнопки заблокированы непереключёнными ветками.
+			step2: (firstPendingStep !== null && 2 > firstPendingStep) || step2BlockedByStep1Branches,
 			step3: firstPendingStep !== null && 3 > firstPendingStep,
 			step4: firstPendingStep !== null && 4 > firstPendingStep,
 			step5: firstPendingStep !== null && 5 > firstPendingStep,
 		}),
-		[firstPendingStep, shouldShowSnapshotLoaders],
+		[firstPendingStep, shouldShowSnapshotLoaders, step2BlockedByStep1Branches],
 	);
 	const completedCollapsedSections = useMemo<Record<SectionKey, boolean>>(
 		() => shouldShowSnapshotLoaders ? ({

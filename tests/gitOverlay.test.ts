@@ -3511,6 +3511,16 @@ test('GitOverlay disables commit textarea with the same gating as commit message
 						edges: [],
 					},
 				},
+				// Второй проект уже на ветке промпта: шаг 2 остаётся раскрытым, и видно блокировку первого проекта.
+				createTestProject({
+					project: 'prompt-dirty',
+					currentBranch: 'feature/task-42',
+					promptBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'prompt-dirty', group: 'staged' })],
+					},
+				}),
 			],
 		},
 		commitMessages: {
@@ -3547,6 +3557,30 @@ test('GitOverlay disables commit textarea with the same gating as commit message
 	}));
 
 	assert.match(markup, /<textarea[^>]*disabled[^>]*placeholder="Сообщение коммита\.\.\."/);
+});
+
+// Шаг 2 сворачивается как ожидающий шаг 1, если все кнопки коммита заблокированы непереключёнными ветками.
+test('GitOverlay auto-collapses commit step when all project actions are blocked by unswitched branches', () => {
+	const markup = renderGitOverlayMarkup({
+		snapshot: createTestSnapshot({
+			promptBranch: 'feature/task-42',
+			trackedBranches: ['main'],
+			projects: [
+				createTestProject({
+					project: 'tracked-dirty',
+					currentBranch: 'main',
+					promptBranch: 'feature/task-42',
+					dirty: true,
+					changeGroups: {
+						staged: [createTestChange({ project: 'tracked-dirty', group: 'staged' })],
+					},
+				}),
+			],
+		}),
+	});
+
+	assert.doesNotMatch(markup, /<textarea/);
+	assert.match(markup, /editor\.gitOverlayWaitingPreviousStep/);
 });
 
 test('GitOverlay shows project commit error in the commit step card', () => {

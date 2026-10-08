@@ -46,6 +46,8 @@ import { getCodeMapSettings } from '../codemap/codeMapConfig.js';
 import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefresh.js';
 
 const execFileAsync = promisify(execFile);
+/** Без этого git экранирует не-ASCII имена файлов в виде "\320\236...". */
+const GIT_UNQUOTED_PATHS_ARGS = ['-c', 'core.quotepath=false'];
 
 /** Максимальное время выполнения gh/glab команды, чтобы зависший сетевой запрос не блокировал Git flow overlay. */
 const REVIEW_CLI_COMMAND_TIMEOUT_MS = 20_000;
@@ -357,7 +359,7 @@ export class GitService {
 	}
 
 	private async runGitFileCommand(projectPath: string, args: string[]): Promise<string> {
-		const { stdout } = await execFileAsync('git', args, {
+		const { stdout } = await execFileAsync('git', [...GIT_UNQUOTED_PATHS_ARGS, ...args], {
 			cwd: projectPath,
 			maxBuffer: GitService.DIFF_MAX_BUFFER,
 		});
@@ -365,7 +367,7 @@ export class GitService {
 	}
 
 	private async runGitFileCommandRaw(projectPath: string, args: string[]): Promise<string> {
-		const { stdout } = await execFileAsync('git', args, {
+		const { stdout } = await execFileAsync('git', [...GIT_UNQUOTED_PATHS_ARGS, ...args], {
 			cwd: projectPath,
 			maxBuffer: GitService.DIFF_MAX_BUFFER,
 		});
@@ -381,7 +383,7 @@ export class GitService {
 	}
 
 	private async runGitFileMutation(projectPath: string, args: string[]): Promise<void> {
-		await execFileAsync('git', args, {
+		await execFileAsync('git', [...GIT_UNQUOTED_PATHS_ARGS, ...args], {
 			cwd: projectPath,
 			maxBuffer: GitService.DIFF_MAX_BUFFER,
 		});

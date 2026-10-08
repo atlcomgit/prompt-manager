@@ -9,6 +9,13 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 ### 2026-10-08
 
 #### Fixed
+- Starting a prompt with the `Не изменять` model into a Codex (Agent Host) chat now explicitly reselects the
+  model remembered for that chat type, the same way as picking it manually. This reduces the chance that a new
+  Codex chat starts through the Copilot provider and fails with "The requested model is not supported".
+- A new Codex (Agent Host) chat started from a prompt now always opens in Agent mode, including prompts saved
+  with Plan mode, so it no longer ends up in Ask mode. If `chat.newSession.defaultMode` is not configured, the
+  launch sets it to `agent` in user settings: in a new Codex chat Agent mode appears only after Ask is selected,
+  and VS Code reapplies this setting when the mode list changes.
 - The Process tab "Chat launch" block no longer stays on "Open Copilot Chat" forever when the chat session
   cannot be detected for binding (for example, agent-host sessions), after the editor is hidden, or after
   the prompt is reopened. The block now finishes once no launch is being tracked.

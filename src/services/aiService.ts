@@ -12,6 +12,12 @@ import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { buildDescriptionGenerationUserPrompt, buildPromptFieldLanguageRule, buildTitleGenerationUserPrompt } from '../utils/aiPromptBuilders.js';
 import { normalizeCommitMessageGenerationInstructions } from '../utils/gitOverlay.js';
 import { readSqliteItemValue } from '../utils/sqliteItemTable.js';
+import {
+	getSessionTypePanelModelStateKey,
+	resolveSessionTypeRememberedModel,
+	USER_SELECTED_CHAT_SESSION_TYPE_STATE_KEY,
+	type SessionTypeModelSelection,
+} from '../utils/sessionTypeChatModel.js';
 import type { PromptDashboardProjectSummary } from '../types/promptDashboard.js';
 import { areInternalAiFeaturesEnabled } from './aiSettingsConfig.js';
 
@@ -2708,6 +2714,51 @@ export class AiService {
 		}
 
 		return this.buildFallbackModelSelector(modelId, normalizedInput);
+	}
+
+	/**
+	 * Возвращает тип сессии, который получит новый чат Copilot Chat (например, `agent-host-codex`).
+	 * Только читает снимок `state.vscdb`; при ошибке или отсутствии значения возвращает пустую строку.
+	 */
+	async resolveSelectedChatSessionType(): Promise<string> {
+		try {
+			const dbPath = await this.resolveStateDbPath();
+			if (!dbPath) {
+				return '';
+			}
+			return (await this.readStateItemValue(dbPath, USER_SELECTED_CHAT_SESSION_TYPE_STATE_KEY)).trim();
+		} catch {
+			return '';
+		}
+	}
+
+	/**
+	 * Возвращает запомненную модель для типа сессии, который получит новый чат (например, Codex).
+	 * Только читает снимок `state.vscdb`; при любой ошибке возвращает `undefined`, и запуск чата
+	 * продолжается без явного выбора модели.
+	 * Тесты правила выбора: tests/sessionTypeChatModel.test.ts.
+	 */
+	async resolveSelectedSessionTypeModel(): Promise<SessionTypeModelSelection | undefined> {
+		try {
+			const dbPath = await this.resolveStateDbPath();
+			if (!dbPath) {
+				return undefined;
+			}
+
+			const sessionType = await this.resolveSelectedChatSessionType();
+			if (!sessionType) {
+				return undefined;
+			}
+
+			const [rememberedIdentifier, cachedModelsRaw] = await Promise.all([
+				this.readStateItemValue(dbPath, getSessionTypePanelModelStateKey(sessionType)),
+				this.readStateItemValue(dbPath, 'chat.cachedLanguageModels.v2'),
+			]);
+			const cachedModels = this.parseJson<CachedLanguageModelEntry[]>(cachedModelsRaw) || [];
+			return resolveSessionTypeRememberedModel(sessionType, rememberedIdentifier, cachedModels);
+		} catch {
+			return undefined;
+		}
 	}
 
 	/** Resolve whether requested model exists in current Copilot environment */

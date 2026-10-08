@@ -19,6 +19,8 @@ let vscodeAvailableCommands: string[] | undefined;
 let vscodeClipboardText = '';
 let vscodeActiveTextEditor: any;
 const vscodeConfigurationValues = new Map<string, unknown>();
+/** Вызовы `WorkspaceConfiguration.update`, записанные заглушкой VS Code. */
+const vscodeConfigurationUpdates: Array<{ key: string; value: unknown; target: unknown }> = [];
 const childProcessSpawnCalls: Array<{ command: string; args: string[] }> = [];
 let childProcessSpawnHandler: ((command: string, args: string[], options?: unknown) => unknown) | undefined;
 
@@ -39,6 +41,7 @@ function createDisposable() {
 
 function resetVsCodeCommandMock() {
 	vscodeCommandCalls.length = 0;
+	vscodeConfigurationUpdates.length = 0;
 	vscodeCreatedWebviewPanels.length = 0;
 	vscodeCreatedWatchers.length = 0;
 	vscodeClosedTabs.length = 0;
@@ -432,7 +435,9 @@ function createVsCodeMock() {
 						? { globalValue: vscodeConfigurationValues.get(fullKey) }
 						: {};
 				},
-				update: async () => undefined,
+				update: async (key: string, value: unknown, target: unknown) => {
+					vscodeConfigurationUpdates.push({ key: section ? `${section}.${key}` : key, value, target });
+				},
 			}),
 			onDidChangeConfiguration: () => createDisposable(),
 			onDidChangeTextDocument: () => createDisposable(),
@@ -837,6 +842,10 @@ async function createManager(options?: {
 		generateTitle: options?.generateTitle || (async () => 'AI title'),
 		generateDescription: options?.generateDescription || (async () => 'AI description'),
 		getAvailableModels: async () => [],
+		// По умолчанию выбранный тип сессии не имеет отдельной запомненной модели.
+		resolveSelectedSessionTypeModel: async () => undefined,
+		// По умолчанию новый чат — обычная сессия Copilot.
+		resolveSelectedChatSessionType: async () => '',
 	};
 	const promptVoiceService = {
 		start: async () => undefined,
@@ -6258,6 +6267,148 @@ test('startChat keeps the active chat model unchanged for the keep-current selec
 
 	assert.deepEqual(modelResolutionCalls, []);
 	assert.ok(vscodeCommandCalls.some(call => call.id === 'workbench.action.chat.openAgent'));
+	assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
+	resetVsCodeCommandMock();
+});
+
+/** Verify that a Plan prompt opens a new Codex chat in Agent mode. */
+test('startChat opens a Codex agent host chat in Agent mode even for a Plan prompt', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager, aiService } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			chatMode: 'plan',
+			model: 'keep-current-model',
+			content: 'Implement the requested workflow changes.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			getGlobalAgentContext: () => '',
+			getActiveChatSessionId: async () => '',
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: '',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+	(aiService as any).resolveSelectedChatSessionType = async () => 'agent-host-codex';
+
+	const panel = {
+		visible: true,
+		webview: { postMessage: async () => true },
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		chatMode: 'plan',
+		model: 'keep-current-model',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-codex-agent-mode' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'workbench.action.chat.openAgent'));
+	assert.ok(!vscodeCommandCalls.some(call => call.id === 'workbench.action.chat.openPlan'));
+	const toggleCall = vscodeCommandCalls.find(call => call.id === 'workbench.action.chat.toggleAgentMode');
+	assert.deepEqual(toggleCall?.args[0], { modeId: 'agent' });
+	const queryModes = vscodeCommandCalls
+		.filter(call => (call.id === 'workbench.action.chat.open' || call.id === 'workbench.action.chat.openAgent')
+			&& typeof (call.args[0] as any)?.query === 'string')
+		.map(call => (call.args[0] as any)?.mode);
+	assert.ok(queryModes.includes('Agent'));
+	assert.ok(!queryModes.includes('Plan'));
+	assert.deepEqual(vscodeConfigurationUpdates, [{ key: 'chat.newSession.defaultMode', value: 'agent', target: true }]);
+	resetVsCodeCommandMock();
+});
+
+/** Verify that keep-current explicitly reapplies the remembered Codex model through modelSelector. */
+test('startChat reapplies the remembered session type model for the keep-current selection', async () => {
+	resetVsCodeCommandMock();
+
+	const { manager, aiService } = await createManager({
+		initialPrompt: {
+			id: 'prompt-a',
+			promptUuid: 'uuid-a',
+			title: 'Prompt title',
+			status: 'draft',
+			model: 'keep-current-model',
+			content: 'Implement the requested workflow changes.',
+		},
+		stateService: {
+			saveLastPromptId: async () => undefined,
+			getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+			getGlobalAgentContext: () => '',
+			getActiveChatSessionId: async () => '',
+			waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+			waitForChatRequestCompletion: async () => ({
+				ok: false,
+				reason: 'timeout',
+				sessionId: '',
+				lastRequestStarted: 0,
+				lastRequestEnded: 0,
+				hasPendingEdits: false,
+			}),
+		},
+	});
+
+	// Запомненная модель Codex с провайдером OpenAI, которую нужно выбрать явно.
+	const selector = { vendor: 'agent-host-codex', id: '@provider=openai:gpt-6-astra' };
+	(aiService as any).resolveSelectedSessionTypeModel = async () => ({
+		sessionType: 'agent-host-codex',
+		identifier: 'agent-host-codex:@provider=openai:gpt-6-astra',
+		selector,
+	});
+
+	const postedMessages: any[] = [];
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				postedMessages.push(message);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({
+		id: 'prompt-a',
+		promptUuid: 'uuid-a',
+		title: 'Prompt title',
+		status: 'draft',
+		model: 'keep-current-model',
+		content: 'Implement the requested workflow changes.',
+	});
+
+	await (manager as any).handleMessage(
+		{ type: 'startChat', id: 'prompt-a', requestId: 'req-keep-current-session-model' },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	const queryCall = vscodeCommandCalls.find(call => call.id === 'workbench.action.chat.open'
+		&& typeof (call.args[0] as any)?.query === 'string');
+	assert.deepEqual((queryCall?.args[0] as any)?.modelSelector, selector);
 	assert.ok(postedMessages.some(message => message?.type === 'chatStarted'));
 	resetVsCodeCommandMock();
 });

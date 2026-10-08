@@ -107,6 +107,14 @@ import {
 } from '../utils/promptSaveFeedback.js';
 import { resolveEffectiveProjectNames } from '../utils/projectScope.js';
 import {
+	isCodexAgentHostSessionType,
+	NEW_CHAT_SESSION_AGENT_MODE,
+	NEW_CHAT_SESSION_DEFAULT_MODE_KEY,
+	NEW_CHAT_SESSION_DEFAULT_MODE_SECTION,
+	resolveChatModeForSessionType,
+	shouldSetNewSessionDefaultAgentMode,
+} from '../utils/sessionTypeChatModel.js';
+import {
 	buildSaveQueueKey,
 	findPendingSaveEntry,
 	type PendingSaveEntry,
@@ -1982,6 +1990,32 @@ export class EditorPanelManager {
 			await vscode.commands.executeCommand('kilo-code.new.openInTab');
 		} catch {
 			// best-effort only
+		}
+	}
+
+	/**
+	 * Включает режим Agent для новых сессий чата через `chat.newSession.defaultMode`, если пользователь
+	 * не задал эту настройку сам. В новом чате Codex режим Agent появляется позже Ask, поэтому выбрать его
+	 * командой при открытии нельзя, а эту настройку VS Code применяет повторно при изменении списка режимов.
+	 * Ошибка записи не прерывает запуск чата.
+	 */
+	private async ensureNewChatSessionDefaultAgentMode(): Promise<void> {
+		try {
+			const config = vscode.workspace.getConfiguration(NEW_CHAT_SESSION_DEFAULT_MODE_SECTION);
+			if (!shouldSetNewSessionDefaultAgentMode(config.inspect<string>(NEW_CHAT_SESSION_DEFAULT_MODE_KEY))) {
+				return;
+			}
+			// true — запись в пользовательские настройки, чтобы не менять файлы рабочей области.
+			await config.update(NEW_CHAT_SESSION_DEFAULT_MODE_KEY, NEW_CHAT_SESSION_AGENT_MODE, true);
+			this.hooksOutput.appendLine(
+				`[chat-start] set ${NEW_CHAT_SESSION_DEFAULT_MODE_SECTION}.${NEW_CHAT_SESSION_DEFAULT_MODE_KEY}=`
+				+ `${NEW_CHAT_SESSION_AGENT_MODE} so new Codex chats open in Agent mode`,
+			);
+		} catch (error) {
+			this.hooksOutput.appendLine(
+				`[chat-start] failed to set default Agent mode for new chats: `
+				+ `${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
 	}
 
@@ -10120,7 +10154,12 @@ export class EditorPanelManager {
 					let requestModelIdentifier = '';
 					let requestModelSelector: vscode.LanguageModelChatSelector | undefined;
 
-					const chatMode = prompt.chatMode || 'agent';
+					// Для нового чата Codex (Agent Host) режим всегда Agent, иначе VS Code оставляет его в Ask.
+					const selectedChatSessionType = await this.aiService.resolveSelectedChatSessionType();
+					if (isCodexAgentHostSessionType(selectedChatSessionType)) {
+						await this.ensureNewChatSessionDefaultAgentMode();
+					}
+					const chatMode = resolveChatModeForSessionType(prompt.chatMode, selectedChatSessionType);
 					const chatModeName = chatMode === 'agent' ? 'Agent' : 'Plan';
 
 					// Open chat in the requested mode using mode-specific commands first
@@ -10306,6 +10345,19 @@ export class EditorPanelManager {
 						requestModelIdentifier = storageModel || requestModelIdentifier;
 						requestModelSelector = await this.aiService.resolveChatOpenModelSelector(prompt.model);
 						await this.aiService.tryApplyChatModelSafely(prompt.model);
+					} else {
+						// Codex через Agent Host запускает ветку с моделью из запроса; если модель была только
+						// «запомнена», VS Code иногда стартует ветку с провайдером Copilot и она навсегда
+						// получает ошибку model_not_supported. Явный выбор той же модели, как вручную в списке,
+						// передаётся вместе с текстом через modelSelector и закрепляет модель до отправки.
+						const sessionTypeModel = await this.aiService.resolveSelectedSessionTypeModel();
+						if (sessionTypeModel) {
+							requestModelSelector = sessionTypeModel.selector;
+							this.hooksOutput.appendLine(
+								`[chat-start] reapplying remembered ${sessionTypeModel.sessionType} model `
+								+ `${sessionTypeModel.identifier} for prompt=${prompt.id}`,
+							);
+						}
 					}
 
 					const attachFiles = async () => {

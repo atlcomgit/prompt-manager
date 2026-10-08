@@ -479,6 +479,39 @@ export function isPromptChatLaunchComplete(
 	return chatOpened && input.chatRenameState !== 'active';
 }
 
+/** Входные данные для определения, считается ли чат уже открытым для блока «Запуск чата». */
+interface ResolvePromptChatLaunchHasChatEntryInput {
+	status: PromptStatus;
+	requiresChatBinding: boolean;
+	hasChatEntry: boolean;
+	chatRequestStarted: boolean;
+	isStartingChat: boolean;
+	/** Хост отправил сообщение в Copilot Chat и ещё ищет сессию для привязки. */
+	isAwaitingChatBinding: boolean;
+}
+
+/**
+ * Определяет, есть ли уже вход в чат для прогресса запуска.
+ *
+ * In-progress промпт без отслеживаемого запуска считается открытым: иначе после таймаута привязки,
+ * скрытия или переоткрытия редактора шаг «Открываем Copilot Chat» висел бы бесконечно.
+ */
+export function resolvePromptChatLaunchHasChatEntry(
+	input: ResolvePromptChatLaunchHasChatEntryInput,
+): boolean {
+	if (input.hasChatEntry) {
+		return true;
+	}
+
+	if (!input.requiresChatBinding && input.chatRequestStarted) {
+		return true;
+	}
+
+	const isLaunchTracked = input.isStartingChat
+		|| (input.requiresChatBinding && input.isAwaitingChatBinding);
+	return !isLaunchTracked && input.status === 'in-progress';
+}
+
 /** Resolve the top-level launch phase from the earliest incomplete milestone. */
 export function resolvePromptChatLaunchPhase(
 	input: ResolvePromptChatLaunchPhaseInput,

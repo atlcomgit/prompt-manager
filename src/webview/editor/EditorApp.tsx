@@ -87,6 +87,7 @@ import {
   shouldAutoExpandPromptBranchList,
   shouldPersistAutoExpandedReportSection,
   type PromptChatContextAutoLoadRuntimeState,
+  resolvePromptChatLaunchHasChatEntry,
   resolvePromptChatLaunchPhase,
   resolvePromptChatLaunchStepStatesFromPhase,
   resolvePromptEditorExpandedSections,
@@ -974,6 +975,8 @@ export const EditorApp: React.FC = () => {
   const chatTarget = prompt.chatTarget || 'copilot';
   const chatLaunchRequiresBinding = chatTarget === 'copilot';
   const [chatLaunchRequestStarted, setChatLaunchRequestStarted] = useState(false);
+  // Хост уже отправил сообщение в Copilot Chat и ищет сессию для привязки к промпту.
+  const [chatLaunchAwaitingBinding, setChatLaunchAwaitingBinding] = useState(false);
   const [chatLaunchRenameState, setChatLaunchRenameState] = useState<PromptChatLaunchRenameState>('idle');
   const [chatLaunchCompletionHold, setChatLaunchCompletionHold] = useState(false);
   const [chatContextAutoLoadState, setChatContextAutoLoadState] = useState<PromptChatContextAutoLoadRuntimeState>('idle');
@@ -981,9 +984,14 @@ export const EditorApp: React.FC = () => {
   const chatLaunchCompletionTimerRef = useRef<number | null>(null);
   const chatLaunchPhaseTimerRef = useRef<number | null>(null);
   const chatLaunchPhaseVisibleSinceRef = useRef<number>(Date.now());
-  const chatLaunchHasChatEntry = chatLaunchRequiresBinding
-    ? chatEntryState.hasChatEntry
-    : chatEntryState.hasChatEntry || chatLaunchRequestStarted || (!isStartingChat && prompt.status === 'in-progress');
+  const chatLaunchHasChatEntry = resolvePromptChatLaunchHasChatEntry({
+    status: prompt.status,
+    requiresChatBinding: chatLaunchRequiresBinding,
+    hasChatEntry: chatEntryState.hasChatEntry,
+    chatRequestStarted: chatLaunchRequestStarted,
+    isStartingChat,
+    isAwaitingChatBinding: chatLaunchAwaitingBinding,
+  });
   const rawChatLaunchPhase = resolvePromptChatLaunchPhase({
     hasChatEntry: chatLaunchHasChatEntry,
     chatRequestStarted: chatLaunchRequestStarted,
@@ -2415,6 +2423,7 @@ export const EditorApp: React.FC = () => {
     pendingGitOverlayStartChatRequestIdRef.current = '';
     chatLaunchCompletionShownForKeyRef.current = false;
     setChatLaunchRequestStarted(false);
+    setChatLaunchAwaitingBinding(false);
     setChatLaunchRenameState('idle');
     setChatContextAutoLoadState('idle');
     setNotice(null);
@@ -3060,6 +3069,7 @@ export const EditorApp: React.FC = () => {
         startChatLockRef.current = false;
         setIsStartingChat(false);
         setChatLaunchRequestStarted(false);
+        setChatLaunchAwaitingBinding(false);
         setChatLaunchRenameState('idle');
         resetChatStartRequestTracking();
         resetStartChatPreflightTracking();
@@ -3220,6 +3230,7 @@ export const EditorApp: React.FC = () => {
             setIsGeneratingTitle(Boolean(msg.aiEnrichment?.title));
             setIsGeneratingDescription(Boolean(msg.aiEnrichment?.description));
             setChatLaunchRequestStarted(false);
+            setChatLaunchAwaitingBinding(false);
             setChatLaunchRenameState('idle');
             setNotice(null);
             if (shouldResetGitOverlayState) {
@@ -3774,6 +3785,7 @@ export const EditorApp: React.FC = () => {
           setPrompt(nextPrompt);
         }
         setChatLaunchRenameState('idle');
+        setChatLaunchAwaitingBinding(true);
         releaseStartChatPendingState();
         break;
       case 'chatContextAutoLoadState':
@@ -4323,6 +4335,7 @@ export const EditorApp: React.FC = () => {
         }
         releaseStartChatPendingState({ resetSaving: true });
         setChatLaunchRequestStarted(false);
+        setChatLaunchAwaitingBinding(false);
         setChatLaunchRenameState('idle');
         setChatLaunchCompletionHold(false);
         setIsOpeningChat(false);
@@ -4395,6 +4408,7 @@ export const EditorApp: React.FC = () => {
         startChatLockRef.current = false;
         setIsStartingChat(false);
         setChatLaunchRequestStarted(false);
+        setChatLaunchAwaitingBinding(false);
         setChatLaunchRenameState('idle');
         setChatLaunchCompletionHold(false);
         setIsOpeningChat(false);
@@ -4435,6 +4449,7 @@ export const EditorApp: React.FC = () => {
       startChatLockRef.current = false;
       setIsStartingChat(false);
       setChatLaunchRequestStarted(false);
+      setChatLaunchAwaitingBinding(false);
       setChatLaunchRenameState('idle');
       setChatLaunchCompletionHold(false);
       resetChatStartRequestTracking();
@@ -6075,6 +6090,7 @@ export const EditorApp: React.FC = () => {
     setDisplayedChatLaunchPhase(resolvePromptChatLaunchInactivePhase(rawChatLaunchPhase));
     setChatLaunchCompletionHold(false);
     setChatLaunchRequestStarted(false);
+    setChatLaunchAwaitingBinding(false);
     setChatLaunchRenameState('idle');
     setChatContextAutoLoadState('idle');
   }, [prompt.id, prompt.promptUuid, rawChatLaunchPhase]);

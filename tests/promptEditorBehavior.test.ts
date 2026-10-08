@@ -8,6 +8,7 @@ import {
 	resolveNextPromptChatLaunchPhase,
 	resolvePromptChatContextAutoLoadDisplay,
 	resolvePromptChatLaunchInactivePhase,
+	resolvePromptChatLaunchHasChatEntry,
 	resolvePromptChatLaunchPhase,
 	resolvePromptChatLaunchStepStatesFromPhase,
 	resolvePromptChatLaunchStepStates,
@@ -688,6 +689,56 @@ test('resolvePromptChatLaunchPhase follows the earliest incomplete milestone', (
 		chatLaunchCompletionHold: false,
 		requiresChatBinding: false,
 	}), 'ready');
+});
+
+/** Проверяет resolvePromptChatLaunchHasChatEntry: блок запуска не висит без отслеживаемого запуска. */
+test('resolvePromptChatLaunchHasChatEntry keeps Copilot launch active only while it is tracked', () => {
+	const base = {
+		status: 'in-progress' as const,
+		requiresChatBinding: true,
+		hasChatEntry: false,
+		chatRequestStarted: false,
+		isStartingChat: false,
+		isAwaitingChatBinding: false,
+	};
+
+	// Запуск ещё идёт: шаг открытия остаётся активным.
+	assert.equal(resolvePromptChatLaunchHasChatEntry({ ...base, isStartingChat: true }), false);
+	// Сообщение отправлено, хост ищет сессию: шаги открытия/привязки остаются активными.
+	assert.equal(resolvePromptChatLaunchHasChatEntry({ ...base, isAwaitingChatBinding: true }), false);
+	assert.equal(resolvePromptChatLaunchHasChatEntry({
+		...base,
+		isAwaitingChatBinding: true,
+		chatRequestStarted: true,
+	}), false);
+	// Таймаут привязки, скрытие или переоткрытие редактора: запуск больше не отслеживается.
+	assert.equal(resolvePromptChatLaunchHasChatEntry(base), true);
+	assert.equal(resolvePromptChatLaunchPhase({
+		hasChatEntry: resolvePromptChatLaunchHasChatEntry(base),
+		chatRequestStarted: false,
+		chatRenameState: 'idle',
+		chatLaunchCompletionHold: false,
+	}), 'ready');
+	// Привязанная сессия всегда означает открытый чат.
+	assert.equal(resolvePromptChatLaunchHasChatEntry({ ...base, hasChatEntry: true, isStartingChat: true }), true);
+	// Черновик без привязки не считается открытым чатом.
+	assert.equal(resolvePromptChatLaunchHasChatEntry({ ...base, status: 'draft' }), false);
+});
+
+test('resolvePromptChatLaunchHasChatEntry keeps external target behavior', () => {
+	const base = {
+		status: 'in-progress' as const,
+		requiresChatBinding: false,
+		hasChatEntry: false,
+		chatRequestStarted: false,
+		isStartingChat: true,
+		isAwaitingChatBinding: true,
+	};
+
+	assert.equal(resolvePromptChatLaunchHasChatEntry(base), false);
+	assert.equal(resolvePromptChatLaunchHasChatEntry({ ...base, chatRequestStarted: true }), true);
+	// Для внешних целей ожидание привязки не применяется.
+	assert.equal(resolvePromptChatLaunchHasChatEntry({ ...base, isStartingChat: false }), true);
 });
 
 test('resolveNextPromptChatLaunchPhase skips binding phases for external chat targets', () => {

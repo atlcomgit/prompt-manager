@@ -6,6 +6,13 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-10-08
+
+#### Fixed
+- The Process tab "Chat launch" block no longer stays on "Open Copilot Chat" forever when the chat session
+  cannot be detected for binding (for example, agent-host sessions), after the editor is hidden, or after
+  the prompt is reopened. The block now finishes once no launch is being tracked.
+
 ### 2026-09-29
 
 #### Fixed

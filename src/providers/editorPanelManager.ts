@@ -270,6 +270,8 @@ export class EditorPanelManager {
 	private pendingReportPersistByPromptId = new Map<string, Promise<Prompt | null>>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
 	private gitOverlaySessions = new Map<string, GitOverlaySession>();
+	/** Стабильный postMessage callback панели: async Git overlay шаги сопоставляются с сессией по ссылке на него. */
+	private panelPostMessageCallbacks = new WeakMap<vscode.WebviewPanel, (message: ExtensionToWebviewMessage) => Promise<void>>();
 	private gitOverlayReactiveDisposables: vscode.Disposable[] = [];
 	private gitOverlayBuiltInRepositoryDisposables = new Map<string, vscode.Disposable>();
 	private gitOverlayReactiveSourcesReady: Promise<void> | null = null;
@@ -8800,6 +8802,28 @@ export class EditorPanelManager {
 		}
 	}
 
+	/**
+	 * Возвращает один и тот же postMessage callback для панели.
+	 * Новый callback на каждое сообщение вытеснял из истории сессии callback открытия overlay,
+	 * и его snapshot отбрасывался как устаревший — окно зависало на загрузке.
+	 */
+	private resolvePanelPostMessageCallback(panel: vscode.WebviewPanel): (message: ExtensionToWebviewMessage) => Promise<void> {
+		const cached = this.panelPostMessageCallbacks.get(panel);
+		if (cached) {
+			return cached;
+		}
+
+		const postMessage = async (message: ExtensionToWebviewMessage): Promise<void> => {
+			try {
+				await panel.webview.postMessage(message);
+			} catch {
+				// panel/webview might be disposed; ignore to keep background flows alive
+			}
+		};
+		this.panelPostMessageCallbacks.set(panel, postMessage);
+		return postMessage;
+	}
+
 	/** Handle messages from editor webview */
 	private async handleMessage(
 		msg: WebviewToExtensionMessage,
@@ -8809,13 +8833,7 @@ export class EditorPanelManager {
 		getIsDirty: () => boolean,
 		setIsDirty: (v: boolean) => void,
 	): Promise<void> {
-		const postMessage = async (m: ExtensionToWebviewMessage): Promise<void> => {
-			try {
-				await panel.webview.postMessage(m);
-			} catch {
-				// panel/webview might be disposed; ignore to keep background flows alive
-			}
-		};
+		const postMessage = this.resolvePanelPostMessageCallback(panel);
 		const gitOverlaySession = this.gitOverlaySessions.get(panelKey);
 		if (gitOverlaySession) {
 			this.rememberGitOverlaySessionPostMessage(gitOverlaySession, postMessage);

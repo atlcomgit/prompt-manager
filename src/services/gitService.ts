@@ -47,6 +47,9 @@ import { shouldIgnoreRealtimeRefreshPath } from '../codemap/codeMapRealtimeRefre
 
 const execFileAsync = promisify(execFile);
 
+/** Максимальное время выполнения gh/glab команды, чтобы зависший сетевой запрос не блокировал Git flow overlay. */
+const REVIEW_CLI_COMMAND_TIMEOUT_MS = 20_000;
+
 /** Публичная команда Kilo Code для генерации сообщения коммита в Git SCM input. */
 const KILO_GENERATE_COMMIT_MESSAGE_COMMAND = 'kilo-code.new.generateCommitMessage';
 
@@ -385,11 +388,45 @@ export class GitService {
 	}
 
 	private async runCliCommand(command: 'gh' | 'glab', projectPath: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-		const { stdout, stderr } = await execFileAsync(command, args, {
+		return this.execReviewCliCommand(command, args, {
 			cwd: projectPath,
 			maxBuffer: GitService.DIFF_MAX_BUFFER,
 		});
-		return { stdout, stderr };
+	}
+
+	/** Запускает gh/glab с ограничением по времени (кроме изменяющих запросов) и понятной ошибкой при таймауте. */
+	private async execReviewCliCommand(
+		command: 'gh' | 'glab',
+		args: string[],
+		options: { cwd?: string; maxBuffer: number },
+	): Promise<{ stdout: string; stderr: string }> {
+		// Изменяющий запрос не обрываем: сервер может успеть создать PR/MR, а пользователь получит ложную ошибку.
+		const timeout = this.isMutatingReviewCliCommand(args) ? 0 : REVIEW_CLI_COMMAND_TIMEOUT_MS;
+		try {
+			const { stdout, stderr } = await execFileAsync(command, args, { ...options, timeout });
+			return { stdout, stderr };
+		} catch (error) {
+			const errorRecord = error as { killed?: boolean; signal?: string | null; code?: unknown };
+			// killed выставляется и при превышении maxBuffer, поэтому таймаут определяем по SIGTERM без кода maxBuffer.
+			const isTimeout = timeout > 0
+				&& errorRecord.killed === true
+				&& errorRecord.signal === 'SIGTERM'
+				&& errorRecord.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+			if (isTimeout) {
+				throw Object.assign(
+					new Error(`${command} ${args.slice(0, 2).join(' ')} timed out after ${REVIEW_CLI_COMMAND_TIMEOUT_MS} ms`),
+					{ code: 'ETIMEDOUT' },
+				);
+			}
+			throw error;
+		}
+	}
+
+	/** Определяет изменяющий API-запрос gh/glab по HTTP методу (`-X`/`--method`), отличному от GET. */
+	private isMutatingReviewCliCommand(args: string[]): boolean {
+		const methodIndex = args.findIndex(arg => arg === '-X' || arg === '--method');
+		const method = methodIndex >= 0 ? (args[methodIndex + 1] || '').trim().toUpperCase() : 'GET';
+		return method !== 'GET';
 	}
 
 	private async runJsonCliCommand(command: 'gh' | 'glab', projectPath: string, args: string[]): Promise<unknown> {
@@ -522,7 +559,7 @@ export class GitService {
 
 		let available = false;
 		try {
-			await execFileAsync(command, ['--version'], {
+			await this.execReviewCliCommand(command, ['--version'], {
 				maxBuffer: 256 * 1024,
 			});
 			available = true;
@@ -545,7 +582,7 @@ export class GitService {
 		const projectLabel = path.basename(projectPath) || projectPath;
 
 		try {
-			const { stdout, stderr } = await execFileAsync(command, args, {
+			const { stdout, stderr } = await this.execReviewCliCommand(command, args, {
 				cwd: projectPath,
 				maxBuffer: 256 * 1024,
 			});
@@ -574,6 +611,10 @@ export class GitService {
 				stdoutPreview: this.previewDebugValue(errorRecord.stdout, 180) || null,
 				stderrPreview: this.previewDebugValue(errorRecord.stderr, 180) || null,
 			});
+			// Таймаут — это недоступность сети, а не отсутствие авторизации: пробрасываем как ошибку review state.
+			if (errorRecord.code === 'ETIMEDOUT') {
+				throw error;
+			}
 			return false;
 		}
 	}
@@ -1183,29 +1224,29 @@ export class GitService {
 			return { remote, request: null, error: '', setupAction: null, titlePrefix, unsupportedReason };
 		}
 
-		const authenticated = await this.isCliAuthenticated(cliCommand, projectPath, remote.host);
-		if (!authenticated) {
-			this.logDebug('reviewState.resolved', {
-				project: projectLabel,
-				branchName,
-				host: remote.host,
-				provider: remote.provider,
-				cliAvailable: remote.cliAvailable,
-				authenticated: false,
-				setupAction: 'auth',
-				unsupportedReason: null,
-			});
-			return {
-				remote,
-				request: null,
-				error: '',
-				setupAction: 'auth',
-				titlePrefix,
-				unsupportedReason: null,
-			};
-		}
-
 		try {
+			const authenticated = await this.isCliAuthenticated(cliCommand, projectPath, remote.host);
+			if (!authenticated) {
+				this.logDebug('reviewState.resolved', {
+					project: projectLabel,
+					branchName,
+					host: remote.host,
+					provider: remote.provider,
+					cliAvailable: remote.cliAvailable,
+					authenticated: false,
+					setupAction: 'auth',
+					unsupportedReason: null,
+				});
+				return {
+					remote,
+					request: null,
+					error: '',
+					setupAction: 'auth',
+					titlePrefix,
+					unsupportedReason: null,
+				};
+			}
+
 			const request = await this.getExistingReviewRequest(projectPath, remote, branchName);
 			this.logDebug('reviewState.resolved', {
 				project: projectLabel,

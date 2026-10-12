@@ -33,8 +33,8 @@ Prompt Manager turns that mess into one repeatable workflow.
 Работа с промптами обычно распадается на вкладки чата, заметки, ветки и разрозненные отчёты.
 Prompt Manager собирает это в один понятный и управляемый процесс.
 
-Support: Github Copilot Chat, Codex, and Kilo Code for the chat workflow.
-Поддержка Github Copilot Chat, Codex и Kilo Code для работы с чатом.
+Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integration) for the chat workflow.
+Поддержка Github Copilot Chat, Codex, Kilo Code и Claude Code (частичная интеграция) для работы с чатом.
 
 ## Why Teams Install It / Зачем это ставят
 
@@ -65,6 +65,19 @@ Support: Github Copilot Chat, Codex, and Kilo Code for the chat workflow.
   поле через Xdotool; флаг автостарта внешнего чата управляет только отправкой. Поскольку Codex не подтверждает
   доставку, такая отправка считается предварительной и не очищает сохраненный план. Опция «Не изменять»
   сохраняет уже выбранный вариант в чате.
+- **Claude Code (partial integration).** Opens prepared text in the installed Claude extension's sidebar for manual sending;
+  Agent/Plan are text instructions, not changes to Claude's model or permissions. Session binding uses an exact UUID
+  marker after manual sending. Xdotool auto-send is safety-blocked even when enabled because composer focus cannot
+  be verified; the notice asks you to send manually. Stop requests inside Claude. End-to-end validation is pending.
+  Opening selects `claudeCode.preferredLocation: sidebar` at its existing workspace/global scope;
+  existing session tabs are not closed automatically and may be reused by Claude itself.
+  **Claude Code (частичная интеграция).** Открывает подготовленный текст в боковой панели Claude для ручной
+  отправки; Agent/Plan передаются текстом, модель и разрешения Claude не меняются. Сессия привязывается по точному
+  UUID-маркеру после ручной отправки. Автоотправка Xdotool заблокирована даже при включённом флаге: фокус поля ввода
+  нельзя подтвердить, поэтому уведомление предлагает отправить текст вручную. Останавливайте запрос внутри Claude.
+  Настройка `claudeCode.preferredLocation` переключается на `sidebar` с сохранением её уровня workspace/global;
+  уже открытые вкладки не закрываются автоматически и могут переиспользоваться самим Claude.
+  Сквозная проверка ещё не проведена.
 - **Prompt Editor** for context, files, chat launch, Git-aware execution, plan, and report. Prompt-dashboard cards can be collapsed and reordered from their headers, hidden cards pause their own refresh and AI review work until reopened, restored prompt tabs are rebound to the singleton editor after VS Code reload so a stale duplicate webview does not keep a broken save loop, and the prompt-page `AI model` picker mirrors the promoted Copilot Chat picker list instead of flattening the whole catalog, restores visible Custom Endpoint entries from VS Code's cached model catalog when needed, and respects provider-scoped models or whole groups hidden in the VS Code picker, including a model that was already saved on the prompt. When Kilo Code or OpenAI Codex is selected as the target chat, the AI model picker is hidden, Chat Mode stays available, and a per-prompt Xdotool autostart flag is shown. Карточки prompt-dashboard можно сворачивать и переставлять из шапки; скрытые карточки не обновляются и не запускают AI review, пока их снова не раскроют, восстановленная после перезапуска вкладка редактора снова привязывается к singleton-странице и не создаёт вторую нерабочую webview, а поле `Модель ИИ` повторяет promoted-список Copilot Chat picker вместо полного каталога, восстанавливает видимые Custom Endpoint модели из cached catalog при необходимости и не подтягивает provider-scoped модели из скрытых в самом VS Code групп, даже если такая модель уже была сохранена в промпте. Если целевым чатом выбран Kilo Code или OpenAI Codex, поле модели ИИ скрывается, `Режим чата` остаётся доступным, а флаг автостарта через Xdotool показывается для конкретного промпта.
 - **Reliable automatic title completion** always clears the loading indicator in the current prompt editor after a reload, reopen, or folder rename. Автоматическое создание названия всегда завершает индикатор в актуальном окне промпта после перезагрузки, повторного открытия или переименования папки.
 - **Project branches dashboard widget** keeps the last confirmed file line counters visible during lightweight refreshes, refreshes selected and workspace-only rows precisely, and replaces counters after fresh details arrive. Виджет веток проектов не скрывает счетчики строк во время фонового обновления, точечно обновляет выбранные и workspace-only строки и заменяет счетчики после получения свежей детализации.

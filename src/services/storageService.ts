@@ -1431,7 +1431,7 @@ export class StorageService implements vscode.Disposable {
 		await this.removeListCacheEntry(id);
 	}
 
-	/** Duplicate a prompt with a new id */
+	/** Создаёт независимую копию без привязок чата; проверка: tests/storageServiceContextFiles.test.ts. */
 	async duplicatePrompt(sourceId: string, newId: string): Promise<Prompt | null> {
 		const source = await this.getPrompt(sourceId);
 		if (!source) { return null; }
@@ -1452,6 +1452,8 @@ export class StorageService implements vscode.Disposable {
 			updatedAt: now,
 		};
 
+		// Копия не получает права переименовывать и учитывать время исходного разговора.
+		delete duplicate.claudeChat;
 		await this.savePrompt(duplicate);
 		return duplicate;
 	}
@@ -1490,6 +1492,8 @@ export class StorageService implements vscode.Disposable {
 			return null;
 		}
 		imported.promptUuid = '';
+		// Импорт создаёт другую задачу: исходный разговор Claude остаётся у оригинала.
+		delete imported.claudeChat;
 		await this.savePrompt(imported, { skipHistory: true });
 		return this.getPrompt(imported.id);
 	}

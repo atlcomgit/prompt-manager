@@ -52,6 +52,7 @@ function createVsCodeMock() {
 
 	return {
 		EventEmitter,
+		FileType: { Unknown: 0, File: 1, Directory: 2, SymbolicLink: 64 },
 		RelativePattern,
 		Uri: {
 			file: (value: string) => ({
@@ -484,6 +485,26 @@ for (const duplicate of [false, true]) {
 		assert.equal((await readJson(path.join(sourceDir, 'config.json'))).timeSpentImplementing, 120_000);
 	});
 }
+
+/** Копия и импорт не должны управлять Claude-разговором исходной задачи. */
+test('duplicate and import preserve Claude target without inheriting its session binding', async t => {
+	const { service, workspaceRoot, flush } = await createTimeSaveFixture(t);
+	const sourceDir = await seedPrompt(workspaceRoot, 'claude-source', []);
+	const state = { sessions: [{ sessionId: '11111111-1111-4111-8111-111111111111',
+		projectPath: workspaceRoot, accountedMs: 200 }] };
+	await writeTextFile(path.join(sourceDir, 'config.json'), JSON.stringify({
+		...await readJson(path.join(sourceDir, 'config.json')), chatTarget: 'claude', claudeChat: state,
+	}));
+	const copy = await service.duplicatePrompt('claude-source', 'claude-copy');
+	const imported = await service.importPrompt(sourceDir);
+	await flush();
+	for (const prompt of [copy, imported]) {
+		assert.ok(prompt);
+		assert.equal(prompt.chatTarget, 'claude');
+		assert.equal(prompt.claudeChat, undefined);
+	}
+	assert.deepEqual((await readJson(path.join(sourceDir, 'config.json'))).claudeChat, state);
+});
 
 /** Повреждённая конфигурация не должна молча заменяться устаревшим нулём. */
 test('savePrompt rejects malformed persisted config when incoming implementing time is zero', async t => {

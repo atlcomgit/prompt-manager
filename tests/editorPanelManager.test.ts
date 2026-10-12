@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Module from 'node:module';
 import { EDITOR_WEBVIEW_ASSET_VERSION } from '../src/constants/webview.js';
 import { buildSaveQueueKey } from '../src/utils/promptSaveQueue.js';
@@ -16,9 +18,14 @@ const vscodeTextDocuments: any[] = [];
 const vscodeWorkspaceFiles = new Map<string, string>();
 let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<unknown>) | undefined;
 let vscodeAvailableCommands: string[] | undefined;
+/** Подмена Claude не активирует установленное расширение при unit-проверках. */
+let vscodeClaudeExtension: any = { isActive: true };
 let vscodeClipboardText = '';
 let vscodeActiveTextEditor: any;
 const vscodeConfigurationValues = new Map<string, unknown>();
+/** Workspace override и задержка записи моделируются без изменения настоящих настроек VS Code. */
+const vscodeWorkspaceConfigurationValues = new Map<string, unknown>();
+let vscodeConfigurationUpdateHandler: ((key: string, value: unknown, target: unknown) => Promise<void>) | undefined;
 /** Вызовы `WorkspaceConfiguration.update`, записанные заглушкой VS Code. */
 const vscodeConfigurationUpdates: Array<{ key: string; value: unknown; target: unknown }> = [];
 const childProcessSpawnCalls: Array<{ command: string; args: string[] }> = [];
@@ -42,6 +49,8 @@ function createDisposable() {
 function resetVsCodeCommandMock() {
 	vscodeCommandCalls.length = 0;
 	vscodeConfigurationUpdates.length = 0;
+	vscodeWorkspaceConfigurationValues.clear();
+	vscodeConfigurationUpdateHandler = undefined;
 	vscodeCreatedWebviewPanels.length = 0;
 	vscodeCreatedWatchers.length = 0;
 	vscodeClosedTabs.length = 0;
@@ -51,6 +60,7 @@ function resetVsCodeCommandMock() {
 	vscodeWorkspaceFiles.clear();
 	vscodeExecuteCommandHandler = undefined;
 	vscodeAvailableCommands = undefined;
+	vscodeClaudeExtension = { isActive: true };
 	vscodeClipboardText = '';
 	vscodeActiveTextEditor = undefined;
 	childProcessSpawnCalls.length = 0;
@@ -431,12 +441,15 @@ function createVsCodeMock() {
 				},
 				inspect: (key: string) => {
 					const fullKey = section ? `${section}.${key}` : key;
-					return vscodeConfigurationValues.has(fullKey)
-						? { globalValue: vscodeConfigurationValues.get(fullKey) }
-						: {};
+					return {
+						...(vscodeConfigurationValues.has(fullKey) ? { globalValue: vscodeConfigurationValues.get(fullKey) } : {}),
+						...(vscodeWorkspaceConfigurationValues.has(fullKey)
+							? { workspaceValue: vscodeWorkspaceConfigurationValues.get(fullKey) } : {}),
+					};
 				},
 				update: async (key: string, value: unknown, target: unknown) => {
 					vscodeConfigurationUpdates.push({ key: section ? `${section}.${key}` : key, value, target });
+					await vscodeConfigurationUpdateHandler?.(section ? `${section}.${key}` : key, value, target);
 				},
 			}),
 			onDidChangeConfiguration: () => createDisposable(),
@@ -457,6 +470,7 @@ function createVsCodeMock() {
 			},
 		},
 		window: {
+			state: { focused: true },
 			get activeTextEditor() {
 				return vscodeActiveTextEditor;
 			},
@@ -523,7 +537,7 @@ function createVsCodeMock() {
 			getCommands: async () => vscodeAvailableCommands || [],
 		},
 		extensions: {
-			getExtension: () => ({}),
+			getExtension: (id: string) => id === 'anthropic.claude-code' ? vscodeClaudeExtension : ({}),
 		},
 		env: {
 			language: 'en',
@@ -6413,6 +6427,305 @@ test('startChat reapplies the remembered session type model for the keep-current
 	resetVsCodeCommandMock();
 });
 
+/** Создаёт Claude harness без файлов, SDK worker, сети, рабочих hooks и реальных нажатий клавиш. */
+async function createClaudeManager(overrides: Record<string, unknown> = {}) {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['claude-vscode.editor.open'];
+	vscodeConfigurationUpdateHandler = async (key, value) => { vscodeConfigurationValues.set(key, value); };
+	const initialPrompt = createPrompt({ title: 'Claude task', chatTarget: 'claude', content: 'Test Claude.', ...overrides });
+	const harness = await createManager({ initialPrompt, stateService: { getChatSessionsTotalElapsed: async () => 300 },
+		workspaceService: { getWorkspaceFolderPaths: () => new Map([['workspace', '/tmp/workspace']]) } });
+	const service: any = {
+		findSession: async () => undefined,
+		readSession: async () => undefined,
+		hasSession: async () => false,
+		renameSession: async () => undefined,
+		watch: () => createDisposable(),
+		dispose: () => undefined,
+	};
+	(harness.manager as any).claudeChatService = service;
+	(harness.manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	const messages: any[] = [];
+	const panel: any = { visible: true, webview: { postMessage: async (message: unknown) => messages.push(message) } };
+	/** Отправляет сообщение только изолированному обработчику manager. */
+	const send = (message: any) => (harness.manager as any).handleMessage(
+		message, panel, initialPrompt, '__prompt_editor_singleton__', () => false, () => undefined,
+	);
+	return { ...harness, service, initialPrompt, messages, send };
+}
+
+/** Не считает prefill отправкой и не удаляет план, включая случай прежней сессии Copilot. */
+test('Claude start prefills the native sidebar and preserves plan and Copilot history', async () => {
+	const fixture = await createClaudeManager({ chatMode: 'plan', model: 'copilot-model', chatSessionIds: ['old-copilot'] });
+	let clearedPlan = false;
+	(fixture.manager as any).clearPromptPlanFileIfExists = async () => { clearedPlan = true; };
+	await fixture.send({ type: 'startChat', id: 'prompt-a', forceRebindChat: true, requestId: 'claude-test' });
+	await flushTurns();
+	const open = vscodeCommandCalls.find(call => call.id === 'claude-vscode.editor.open');
+	assert.ok(open);
+	assert.equal(open.args[0], undefined);
+	assert.match(String(open.args[1]), /^\[\[prompt-manager-claude:[\da-f-]+\]\]\n/);
+	assert.match(String(open.args[1]), /Test Claude\.|Create a detailed implementation plan/);
+	assert.doesNotMatch(String(open.args[1]), /Preferred model:.*copilot-model|^\/plan/);
+	assert.deepEqual(open.args.slice(2), [undefined, undefined, undefined, { programmatic: 'honor-preferred-location' }]);
+	assert.deepEqual(vscodeConfigurationUpdates, [{ key: 'claudeCode.preferredLocation', value: 'sidebar', target: true }]);
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'claude-vscode.primaryEditor.open'), false);
+	assert.deepEqual(fixture.getStoredPrompt()?.chatSessionIds, ['old-copilot']);
+	assert.ok(fixture.getStoredPrompt()?.claudeChat.pendingLaunch);
+	assert.equal(fixture.getStoredPrompt()?.claudeChat.copilotAccountedMs, 300);
+	assert.equal(clearedPlan, false);
+	assert.equal(childProcessSpawnCalls.length, 0);
+	assert.equal(fixture.messages.some(message => message.type === 'chatStarted'), false);
+	assert.ok(fixture.messages.some(message => message.type === 'chatOpened'));
+	assert.equal(vscodeCommandCalls.some(call => call.id.startsWith('workbench.action.chat.')), false);
+	fixture.manager.disposeAll();
+});
+
+/** Предпочтение sidebar не перезаписывается; настройка проекта не подменяется глобальной. */
+test('Claude sidebar routing preserves an existing preference and the workspace setting scope', async () => {
+	for (const scope of ['sidebar', 'workspace']) {
+		const fixture = await createClaudeManager();
+		vscodeConfigurationValues.set('claudeCode.preferredLocation', scope === 'sidebar' ? 'sidebar' : 'panel');
+		if (scope === 'workspace') { vscodeWorkspaceConfigurationValues.set('claudeCode.preferredLocation', 'panel'); }
+		await fixture.send({ type: 'startChat', id: 'prompt-a' });
+		assert.deepEqual(vscodeConfigurationUpdates, scope === 'sidebar' ? []
+			: [{ key: 'claudeCode.preferredLocation', value: 'sidebar', target: false }]);
+		assert.ok(vscodeCommandCalls.some(call => call.id === 'claude-vscode.editor.open'
+			&& (call.args[5] as any)?.programmatic === 'honor-preferred-location'));
+		fixture.manager.disposeAll();
+	}
+});
+
+/** editor.open не должен увидеть старое panel до завершения асинхронной записи настройки. */
+test('Claude waits for the sidebar preference before dispatching the initial prompt', async () => {
+	const fixture = await createClaudeManager();
+	const started = createDeferred<void>();
+	const release = createDeferred<void>();
+	vscodeConfigurationUpdateHandler = async () => { started.resolve(); await release.promise; };
+	const launching = fixture.send({ type: 'startChat', id: 'prompt-a' });
+	try {
+		await started.promise;
+		assert.equal(vscodeCommandCalls.some(call => call.id === 'claude-vscode.editor.open'), false);
+	} finally {
+		release.resolve();
+		await launching;
+		fixture.manager.disposeAll();
+	}
+	assert.ok(vscodeCommandCalls.some(call => call.id === 'claude-vscode.editor.open'));
+});
+
+/** При отказе настройки не появляется ни editor tab, ни ложное подтверждение открытия. */
+test('Claude reports a sidebar configuration error without falling back to an editor tab', async () => {
+	const fixture = await createClaudeManager();
+	vscodeConfigurationUpdateHandler = async () => { throw new Error('settings are read-only'); };
+	await fixture.send({ type: 'startChat', id: 'prompt-a' });
+	assert.equal(vscodeCommandCalls.some(call => call.id.startsWith('claude-vscode.')), false);
+	assert.equal(fixture.messages.some(message => message.type === 'chatOpened'), false);
+	assert.ok(fixture.messages.some(message => message.type === 'error' && /settings are read-only/.test(message.message)));
+	fixture.manager.disposeAll();
+});
+
+/** Активация происходит до повторного чтения списка команд, без fallback в другой чат. */
+test('Claude activates extension and reports missing command or extension without a false launch', async () => {
+	for (const missing of ['extension', 'command', 'none']) {
+		const fixture = await createClaudeManager();
+		let activated = false;
+		vscodeAvailableCommands = missing === 'command' ? ['claude-vscode.primaryEditor.open'] : [];
+		vscodeClaudeExtension = missing === 'extension' ? undefined : {
+			isActive: false,
+			activate: async () => {
+				activated = true;
+				if (missing === 'none') { vscodeAvailableCommands = ['claude-vscode.editor.open']; }
+			},
+		};
+		await fixture.send({ type: 'startChat', id: 'prompt-a' });
+		assert.equal(activated, missing !== 'extension');
+		assert.equal(vscodeCommandCalls.some(call => call.id === 'claude-vscode.editor.open'), missing === 'none');
+		assert.equal(vscodeCommandCalls.some(call => call.id === 'claude-vscode.primaryEditor.open'), false);
+		assert.equal(fixture.messages.some(message => message.type === 'chatOpened'), missing === 'none');
+		assert.equal(vscodeCommandCalls.some(call => call.id.startsWith('workbench.action.chat.')), false);
+		fixture.manager.disposeAll();
+	}
+});
+
+/** Первое подтверждённое сообщение привязывается и переименовывается, время начисляется один раз. */
+test('Claude binding survives manual send and refresh accounts duration once while preserving manual time', async () => {
+	const fixture = await createClaudeManager({ status: 'in-progress', timeSpentImplementing: 7000 });
+	await fixture.send({ type: 'startChat', id: 'prompt-a' });
+	await flushTurns();
+	const binding = { sessionId: '11111111-1111-4111-8111-111111111111', projectPath: '/tmp/workspace', accountedMs: 0 };
+	fixture.service.findSession = async () => binding;
+	let title = '';
+	fixture.service.readSession = async () => ({ totalElapsedMs: 2000, customTitle: title, completed: false });
+	let renames = 0;
+	fixture.service.renameSession = async (_binding: unknown, nextTitle: string) => { title = nextTitle; renames++; };
+	await (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+	await (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+	assert.equal(fixture.getStoredPrompt()?.timeSpentImplementing, 9000);
+	assert.equal(fixture.getStoredPrompt()?.claudeChat.pendingLaunch, undefined);
+	assert.equal(fixture.getStoredPrompt()?.claudeChat.sessions[0].sessionId, binding.sessionId);
+	assert.equal(fixture.getStoredPrompt()?.claudeChat.sessions[0].accountedMs, 2000);
+	assert.deepEqual(fixture.getStoredPrompt()?.chatSessionIds, []);
+	assert.equal(renames, 1);
+	assert.equal(title, 'Claude task');
+	fixture.manager.disposeAll();
+});
+
+/** Данные Claude никогда не используются как команда остановки Copilot. */
+test('Claude stop with stale Copilot IDs only explains manual stop', async () => {
+	const fixture = await createClaudeManager({ chatSessionIds: ['old-copilot'] });
+	await fixture.send({ type: 'stopChat', id: 'prompt-a' });
+	assert.equal(vscodeCommandCalls.length, 0);
+	assert.ok(fixture.messages.some(message => message.type === 'info' && /inside Claude Code/.test(message.message)));
+	fixture.manager.disposeAll();
+});
+
+/** Не подменяет отсутствующий разговор новой сессией при переходе. */
+test('Claude reopen uses exact persisted session or fails without opening a replacement', async () => {
+	for (const exists of [true, false]) {
+		const sessionId = '11111111-1111-4111-8111-111111111111';
+		const fixture = await createClaudeManager({ status: 'completed', chatSessionIds: ['old-copilot'],
+			claudeChat: { sessions: [{ sessionId, projectPath: '/tmp/workspace', accountedMs: 0 }] } });
+		fixture.service.hasSession = async () => exists;
+		await fixture.send({ type: 'openChat', id: 'prompt-a', sessionId: 'old-copilot' });
+		const call = vscodeCommandCalls.find(item => item.id === 'claude-vscode.editor.open');
+		assert.equal(Boolean(call), exists);
+		if (exists) {
+			assert.deepEqual(call?.args, [sessionId, undefined, undefined, undefined, undefined,
+				{ programmatic: 'honor-preferred-location' }]);
+		}
+		assert.equal(vscodeCommandCalls.some(item => item.id === 'claude-vscode.primaryEditor.open'), false);
+		assert.equal(fixture.getStoredPrompt()?.status, exists ? 'in-progress' : 'completed');
+		assert.equal(vscodeCommandCalls.some(item => item.id.startsWith('workbench.action.chat.')), false);
+		fixture.manager.disposeAll();
+	}
+});
+
+/** Фиксирует завершение только один раз; закрытый промпт не получает новое время или статус. */
+test('Claude completion hooks are idempotent and closed timing is frozen', async () => {
+	for (const status of ['in-progress', 'closed']) {
+		const fixture = await createClaudeManager({ status, timeSpentImplementing: 500, chatRequestAutoCompleteAfter: 1000,
+			claudeChat: { sessions: [{ sessionId: '11111111-1111-4111-8111-111111111111',
+				projectPath: '/tmp/workspace', accountedMs: 100 }] } });
+		fixture.service.readSession = async () => ({ totalElapsedMs: 600, customTitle: 'Claude task',
+			completed: true, lastRequestStarted: 2000, lastRequestEnded: 3000 });
+		let hooks = 0;
+		(fixture.manager as any).runConfiguredHooks = async () => { hooks++; };
+		await (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+		await (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+		assert.equal(fixture.getStoredPrompt()?.timeSpentImplementing, status === 'closed' ? 500 : 1000);
+		assert.equal(fixture.getStoredPrompt()?.status, status === 'closed' ? 'closed' : 'completed');
+		assert.equal(hooks, status === 'closed' ? 0 : 1);
+		fixture.manager.disposeAll();
+	}
+});
+
+/** Смена статуса не откатывает binding и время, полученные после открытия панели. */
+test('Claude binding survives status-only save with a real panel baseline', async () => {
+	const fixture = await createClaudeManager({ status: 'in-progress', timeSpentImplementing: 100,
+		claudeChat: { sessions: [{ sessionId: '11111111-1111-4111-8111-111111111111',
+			projectPath: '/tmp/workspace', accountedMs: 0 }] } });
+	const key = '__prompt_editor_singleton__';
+	(fixture.manager as any).panelPromptRefs.set(key, fixture.initialPrompt);
+	(fixture.manager as any).panelBasePrompts.set(key, clonePrompt(fixture.initialPrompt));
+	fixture.service.readSession = async () => ({ totalElapsedMs: 200, customTitle: 'Claude task', completed: false });
+	await (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+	assert.equal((fixture.manager as any).panelBasePrompts.get(key).claudeChat.sessions[0].accountedMs, 200);
+	await fixture.send({ type: 'savePrompt', source: 'status-change',
+		prompt: { ...fixture.getStoredPrompt(), status: 'stopped' } });
+	await (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+	assert.equal(fixture.getStoredPrompt()?.claudeChat.sessions[0].accountedMs, 200);
+	assert.equal(fixture.getStoredPrompt()?.timeSpentImplementing, 300);
+	assert.equal(fixture.getStoredPrompt()?.status, 'stopped');
+	fixture.manager.disposeAll();
+});
+
+/** Не теряет событие во время чтения и не завершает более новый активный запрос старым финалом. */
+test('Claude coalesces refresh events without blocking saves or completing an active session', async () => {
+	const fixture = await createClaudeManager({ status: 'in-progress', chatRequestAutoCompleteAfter: 1000,
+		claudeChat: { sessions: [
+			{ sessionId: '11111111-1111-4111-8111-111111111111', projectPath: '/tmp/workspace', accountedMs: 0 },
+			{ sessionId: '22222222-2222-4222-8222-222222222222', projectPath: '/tmp/workspace', accountedMs: 0 },
+		] } });
+	const gate = createDeferred<void>();
+	let reads = 0;
+	fixture.service.readSession = async (binding: { sessionId: string }) => {
+		if (++reads === 1) { await gate.promise; }
+		return binding.sessionId.startsWith('111')
+			? { totalElapsedMs: 0, customTitle: 'Claude task', completed: false, lastRequestStarted: 5000 }
+			: { totalElapsedMs: 300, customTitle: 'Claude task', completed: true, lastRequestStarted: 2000, lastRequestEnded: 4000 };
+	};
+	const first = (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+	await flushTurns();
+	const repeated = (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+	let saved = false;
+	await (fixture.manager as any).enqueuePromptSaveOperation(fixture.initialPrompt, async () => { saved = true; });
+	assert.equal(saved, true);
+	gate.resolve();
+	await Promise.all([first, repeated]);
+	await flushTurns(12);
+	assert.ok(reads >= 4);
+	assert.equal(fixture.getStoredPrompt()?.status, 'in-progress');
+	assert.equal(fixture.getStoredPrompt()?.timeSpentImplementing, 300);
+	fixture.manager.disposeAll();
+});
+
+/** Переименование не зависит от поддержки истории длительностей. */
+test('Claude renames confirmed sessions independently of unsupported timing', async () => {
+	const fixture = await createClaudeManager({ timeSpentImplementing: 500,
+		claudeChat: { sessions: [{ sessionId: '11111111-1111-4111-8111-111111111111',
+			projectPath: '/tmp/workspace', accountedMs: 100 }] } });
+	fixture.service.readSession = async () => { throw new Error('unsupported transcript'); };
+	let renames = 0;
+	fixture.service.renameSession = async () => { renames++; };
+	await (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+	await (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+	assert.equal(renames, 1);
+	assert.equal(fixture.getStoredPrompt()?.timeSpentImplementing, 500);
+	fixture.manager.disposeAll();
+});
+
+/** Прирост Copilot добавляется один раз поверх сохранённого Claude-времени. */
+test('mixed-provider refresh preserves Claude time with one Copilot baseline', async () => {
+	const fixture = await createClaudeManager({ chatTarget: 'copilot', timeSpentImplementing: 2300,
+		chatSessionIds: ['old-copilot'], claudeChat: { sessions: [], copilotAccountedMs: 300 } });
+	(fixture.manager as any).stateService.getChatSessionsTotalElapsed = async () => 400;
+	await (fixture.manager as any).refreshPromptFromTrackedChatSessions('prompt-a', null, undefined, 'test');
+	await (fixture.manager as any).refreshPromptFromTrackedChatSessions('prompt-a', null, undefined, 'test');
+	assert.equal(fixture.getStoredPrompt()?.timeSpentImplementing, 2400);
+	assert.equal(fixture.getStoredPrompt()?.claudeChat.copilotAccountedMs, 400);
+	fixture.manager.disposeAll();
+});
+
+/** Изменённый извне config не позволяет переименовать разговор другого проекта. */
+test('Claude ignores persisted bindings and launch scopes outside the workspace', async () => {
+	const fixture = await createClaudeManager({ claudeChat: {
+		sessions: [{ sessionId: '11111111-1111-4111-8111-111111111111', projectPath: '/other-project', accountedMs: 0 }],
+		pendingLaunch: { marker: '[[prompt-manager-claude:22222222-2222-4222-8222-222222222222]]',
+			projectPaths: ['/other-project'], startedAt: 1000 },
+	} });
+	let accesses = 0;
+	fixture.service.findSession = fixture.service.readSession = fixture.service.renameSession
+		= fixture.service.hasSession = async () => { accesses++; };
+	await (fixture.manager as any).refreshClaudePrompt(fixture.initialPrompt);
+	await fixture.send({ type: 'openChat', id: 'prompt-a' });
+	assert.equal(accesses, 0);
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'claude-vscode.primaryEditor.open'), false);
+	assert.equal(vscodeCommandCalls.some(call => call.id === 'claude-vscode.editor.open'), false);
+	fixture.manager.disposeAll();
+});
+
+/** Активная вкладка не доказывает фокус composer: неизвестная поверхность не получает Enter. */
+test('Claude does not send Xdotool keys without verified composer focus even when enabled', async () => {
+	const fixture = await createClaudeManager({ autoStartChatWithXdotool: true });
+	createVsCodeTab('claudeVSCodePanel', 'Claude Code');
+	await fixture.send({ type: 'startChat', id: 'prompt-a' });
+	assert.equal(childProcessSpawnCalls.length, 0);
+	assert.ok(fixture.messages.some(message => message.type === 'info' && /input focus cannot be verified/.test(message.message)));
+	assert.ok(fixture.getStoredPrompt()?.claudeChat.pendingLaunch);
+	fixture.manager.disposeAll();
+});
+
 test('startChat dispatches Kilo Code target through bridge without Copilot session binding', async () => {
 	resetVsCodeCommandMock();
 	vscodeAvailableCommands = ['kilo-code.new.startTask'];
@@ -7388,7 +7701,8 @@ test('startChat skips session and codemap instruction context when memory featur
 	resetVsCodeCommandMock();
 	vscodeAvailableCommands = ['workbench.action.chat.attachFile'];
 
-	const storageDirectoryPath = `/tmp/workspace/.vscode/prompt-manager-task150-${Date.now()}`;
+	// Проверка контекста внешних чатов не использует общий каталог другой задачи.
+	const storageDirectoryPath = mkdtempSync(join(tmpdir(), 'prompt-manager-instructions-'));
 	const chatMemoryDirectory = `${storageDirectoryPath}/chat-memory`;
 	const staleCodemapPath = `${chatMemoryDirectory}/codemap.instructions.md`;
 	mkdirSync(chatMemoryDirectory, { recursive: true });

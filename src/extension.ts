@@ -96,6 +96,10 @@ export function activate(context: vscode.ExtensionContext) {
 		() => codeMapChatInstructionService,
 		customGroupsService,
 	);
+	// Наблюдение Claude восстанавливается в фоне и не блокирует активацию интерфейса.
+	void editorPanelManager.restoreClaudeChatTracking().catch(error => {
+		appendPromptManagerLog(`[claude-chat] restore failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+	});
 	context.subscriptions.push(
 		// Rebind restored prompt editor panels so startup restore reuses the live singleton webview.
 		vscode.window.registerWebviewPanelSerializer('promptManager.editor', {

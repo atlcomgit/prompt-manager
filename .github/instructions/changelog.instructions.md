@@ -1,3 +1,53 @@
+## 167: Частичная интеграция Claude Code
+
+- Дата: 2026-10-12.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: описан текущий неполный результат задачи 167. Новый целевой чат Claude открывает подготовленный
+  текст в боковой панели через `editor.open` с `honor-preferred-location`; Agent/Plan передаются текстом, без изменения
+  выбранной модели и разрешений Claude.
+- Ключевые моменты: привязка выполняется только после ручной отправки по полному UUID-маркеру нового запуска.
+  Исправлен принудительный запуск editor tab: перед открытием ожидается запись preferredLocation=sidebar
+  на прежнем workspace/global уровне. Пользовательские вкладки автоматически не закрываются.
+  Идентификаторы сессий хранятся отдельно от Copilot в `claudeChat`; повторно открывается именно проверенная
+  привязанная сессия, переименование выполняется публичным Claude Agent SDK `0.3.234`.
+  Время начисляется только по доказанным финальным `turn_duration`. Неподдержанные компактация, очередь запросов
+  и несколько финальных записей сохраняют прежнее время, без приблизительного расчёта.
+  Автоотправка Xdotool остаётся заблокированной по безопасности даже при `autoStartChatWithXdotool: true`:
+  активная вкладка и PID не подтверждают фокус поля ввода, поэтому Enter может попасть в терминал.
+  Уведомление предлагает ручную отправку; разрешение на отправку без подтверждённого фокуса не получено.
+  Остановка запроса выполняется вручную внутри Claude, без вызова остановки Copilot.
+  Файловые API SDK поставляются отдельным ESM bundle без необязательных нативных CLI-пакетов;
+  исполняемые файлы Claude остаются в установленном расширении Claude Code. Новые пользовательские настройки
+  и hooks не добавляются. Поддерживается локальная рабочая область с существующими настройками
+  `claudeCode.environmentVariables` и окружением процесса, включая `CLAUDE_CONFIG_DIR` и
+  `CLAUDE_CODE_PROJECT_DIR_NAME`; `claudeProcessWrapper` не поддерживается и вызывает явную ошибку.
+  Сквозная проверка ещё не проведена; результаты предварительных тестов не означают завершение всей задачи.
+- Файлы:
+    CHANGELOG.md
+    README.md
+    package-lock.json
+    package.json
+    scripts/claude-session-sdk.mjs
+    src/extension.ts
+    src/i18n/translations.ts
+    src/providers/editorPanelManager.ts
+    src/services/claudeChatSessionService.ts
+    src/services/storageService.ts
+    src/types/claudeChat.ts
+    src/types/prompt.ts
+    src/utils/claudeChat.ts
+    src/utils/promptConfig.ts
+    src/webview/editor/EditorApp.tsx
+    tests/chatLaunchOpenStepLabel.test.ts
+    tests/claudeChat.test.ts
+    tests/claudeChatSessionService.test.ts
+    tests/editorApp.test.tsx
+    tests/editorPanelManager.test.ts
+    tests/promptConfig.test.ts
+    tests/promptExternalSync.test.ts
+    tests/storageServiceContextFiles.test.ts
+
 ## Без номера: Исправления обновления виджетов после оптимизации CPU
 
 - Дата: 2026-09-29.

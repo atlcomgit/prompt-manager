@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import type { Prompt } from '../src/types/prompt.js';
+import { translate } from '../src/i18n/translations.js';
 
 type TestStorage = Pick<Storage, 'clear' | 'getItem' | 'key' | 'removeItem' | 'setItem'> & { length: number };
 type TestWindow = Window & {
@@ -116,6 +118,7 @@ async function withEditorAppEnvironment<T>(callback: (EditorApp: React.FC) => T 
 	}
 }
 
+/** Проверяет первоначальную форму, новый вариант Claude и сохранение Copilot по умолчанию. */
 test('EditorApp renders the initial prompt page without throwing', async () => {
 	await withEditorAppEnvironment((EditorApp) => {
 		const markup = renderToStaticMarkup(React.createElement(EditorApp));
@@ -123,6 +126,163 @@ test('EditorApp renders the initial prompt page without throwing', async () => {
 		assert.ok(markup.length > 0);
 		assert.match(markup, /data-pm-editor-loading-overlay="true"/);
 		assert.match(markup, /Prompt details|Prompt content|Description/i);
+		assert.match(markup, /<option value="copilot" selected="">Copilot Chat<\/option>/);
+		assert.match(markup, /<option value="kilo">Kilo Code<\/option>/);
+		assert.match(markup, /<option value="codex">OpenAI Codex<\/option>/);
+		assert.match(markup, /<option value="claude">Claude Code<\/option>/);
+	});
+});
+
+/** Проверяет разметку Claude на изолированном промпте без запуска эффектов React или настоящего чата. */
+test('EditorApp renders Claude with mode selection and independent Xdotool controls but no Copilot model', async context => {
+	await withEditorAppEnvironment(EditorApp => {
+		// Подменяем только фабрику начального состояния; node:test восстанавливает ее после проверки.
+		const promptModule = require('../src/types/prompt.js') as typeof import('../src/types/prompt.js');
+		const prompt = {
+			...promptModule.createDefaultPrompt(),
+			chatTarget: 'claude' as const,
+			chatMode: 'plan' as const,
+			model: 'copilot/model-must-stay-hidden',
+		};
+		context.mock.method(promptModule, 'createDefaultPrompt', () => prompt);
+
+		for (const autoStartChatWithXdotool of [false, true]) {
+			prompt.autoStartChatWithXdotool = autoStartChatWithXdotool;
+			prompt.autoStartChat = !autoStartChatWithXdotool;
+			const markup = renderToStaticMarkup(React.createElement(EditorApp));
+
+			assert.match(markup, /<option value="claude" selected="">Claude Code<\/option>/);
+			assert.match(markup, /title="Agent"/);
+			assert.match(markup, /title="Plan"/);
+			assert.match(markup, /title="Чат: Claude Code"/);
+			assert.match(markup, /title="Режим: Plan"/);
+			assert.ok(markup.includes(`title="Xdotool: ${autoStartChatWithXdotool ? 'включен' : 'выключен'}"`));
+			assert.doesNotMatch(markup, /copilot\/model-must-stay-hidden|Autostart Copilot Chat/);
+			const checkbox = markup.match(/<input[^>]*type="checkbox"[^>]*\/>Autostart chat via Xdotool/);
+			assert.ok(checkbox, 'Claude must use the external Xdotool checkbox');
+			assert.equal(checkbox[0].includes('checked=""'), autoStartChatWithXdotool);
+		}
+	});
+});
+
+/** Проверяет локализованные состояния Claude и таймер без доступа к реальным сессиям или отправки запросов. */
+test('EditorApp shows pending and bound Claude sessions without counting Copilot history', async context => {
+	await withEditorAppEnvironment(EditorApp => {
+		// Каждый SSR-проход получает текущую тестовую привязку; фабрика восстанавливается после теста.
+		const promptModule = require('../src/types/prompt.js') as typeof import('../src/types/prompt.js');
+		const prompt: Prompt = {
+			...promptModule.createDefaultPrompt('prompt-claude'),
+			chatTarget: 'claude',
+			chatSessionIds: ['old-copilot-session'],
+			status: 'in-progress',
+		};
+		context.mock.method(promptModule, 'createDefaultPrompt', () => prompt);
+
+		for (const locale of ['en', 'ru'] as const) {
+			window.__LOCALE__ = locale;
+			prompt.claudeChat = undefined;
+			const unboundMarkup = renderToStaticMarkup(React.createElement(EditorApp));
+			assert.ok(unboundMarkup.includes(translate(locale, 'editor.claudeChatNotBound')));
+			assert.ok(!unboundMarkup.includes(translate(locale, 'timer.recalcTitle')));
+
+			prompt.claudeChat = {
+				sessions: [],
+				pendingLaunch: { marker: 'launch-marker', projectPaths: ['/testing-project'], startedAt: 100 },
+			};
+			const pendingMarkup = renderToStaticMarkup(React.createElement(EditorApp));
+			assert.ok(pendingMarkup.includes(translate(locale, 'editor.claudeChatPending')));
+			assert.ok(!pendingMarkup.includes(translate(locale, 'editor.chatLaunchDescriptionReady')));
+			assert.ok(!pendingMarkup.includes(translate(locale, 'timer.recalcTitle')));
+
+			prompt.claudeChat = {
+				sessions: [
+					{ sessionId: 'claude-a', projectPath: '/testing-project', accountedMs: 1000 },
+					{ sessionId: 'claude-b', projectPath: '/testing-project', accountedMs: 2000 },
+				],
+			};
+			const boundMarkup = renderToStaticMarkup(React.createElement(EditorApp));
+			assert.ok(boundMarkup.includes(`${translate(locale, 'editor.claudeChatBoundCount')}: 2`));
+			assert.ok(!boundMarkup.includes(translate(locale, 'editor.claudeChatPending')));
+			assert.ok(boundMarkup.includes(translate(locale, 'timer.recalcTitle')));
+		}
+	});
+});
+
+/** Проверяет общий источник идентификаторов для открытия, запуска и учета времени. */
+test('resolvePromptChatSessionIds isolates Claude IDs from retained Copilot history', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { resolvePromptChatSessionIds } = await import('../src/webview/editor/EditorApp.js');
+		const chatSessionIds = ['copilot-history'];
+		const claudeChat = {
+			sessions: [{ sessionId: 'claude-session', projectPath: '/testing-project', accountedMs: 0 }],
+		};
+
+		assert.deepEqual(resolvePromptChatSessionIds({ chatTarget: 'claude', chatSessionIds }), []);
+		assert.deepEqual(resolvePromptChatSessionIds({ chatTarget: 'claude', chatSessionIds, claudeChat }), ['claude-session']);
+		assert.deepEqual(resolvePromptChatSessionIds({ chatTarget: 'copilot', chatSessionIds, claudeChat }), chatSessionIds);
+		assert.deepEqual(resolvePromptChatSessionIds({ chatSessionIds, claudeChat }), chatSessionIds);
+		assert.deepEqual(resolvePromptChatSessionIds({ chatTarget: 'copilot', claudeChat }), []);
+	});
+});
+
+/** Проверяет, что старая история Copilot не блокирует запуск Claude, а новая цель не меняет guards остальных чатов. */
+test('canStartPromptChat checks only sessions of the selected target and permits draft rebinding', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { canStartPromptChat } = await import('../src/webview/editor/EditorApp.js');
+		const { createDefaultPrompt } = await import('../src/types/prompt.js');
+		const prompt: Prompt = {
+			...createDefaultPrompt('prompt-claude'),
+			chatTarget: 'claude',
+			chatSessionIds: ['copilot-history'],
+			content: 'Prompt text',
+			status: 'in-progress',
+		};
+
+		assert.equal(canStartPromptChat(prompt), true);
+		assert.equal(canStartPromptChat({ ...prompt, chatTarget: 'copilot' }), false);
+		assert.equal(canStartPromptChat({ ...prompt, content: '' }), false);
+		assert.equal(canStartPromptChat({ ...prompt, promptUuid: '' }), false);
+		prompt.claudeChat = {
+			sessions: [{ sessionId: 'claude-session', projectPath: '/testing-project', accountedMs: 0 }],
+		};
+		assert.equal(canStartPromptChat(prompt), false);
+		assert.equal(canStartPromptChat({ ...prompt, status: 'draft' }), true);
+	});
+});
+
+/** Проверяет частичные ответы хоста: обновляется Claude, но ни текст, ни история Copilot не заменяются его IDs. */
+test('mergePromptChatBindings applies or preserves Claude state without overwriting unsaved text', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { mergePromptChatBindings } = await import('../src/webview/editor/EditorApp.js');
+		const { createDefaultPrompt } = await import('../src/types/prompt.js');
+		const current: Prompt = {
+			...createDefaultPrompt('prompt-claude'),
+			chatTarget: 'claude',
+			chatSessionIds: ['copilot-history'],
+			content: 'Unsaved prompt text',
+			report: 'Unsaved report text',
+			claudeChat: {
+				sessions: [],
+				pendingLaunch: { marker: 'launch-marker', projectPaths: ['/testing-project'], startedAt: 100 },
+			},
+		};
+		const boundChat = {
+			sessions: [{ sessionId: 'claude-session', projectPath: '/testing-project', accountedMs: 0 }],
+		};
+		const merged = mergePromptChatBindings(current, {
+			claudeChat: boundChat,
+			content: 'Stale saved text',
+			report: 'Stale saved report',
+		});
+
+		assert.deepEqual(merged.claudeChat, boundChat);
+		assert.equal(merged.claudeChat?.pendingLaunch, undefined);
+		assert.deepEqual(merged.chatSessionIds, ['copilot-history']);
+		assert.equal(merged.content, current.content);
+		assert.equal(merged.report, current.report);
+		assert.deepEqual(mergePromptChatBindings(merged, {}).claudeChat, boundChat);
+		assert.equal(mergePromptChatBindings(merged, { claudeChat: undefined }).claudeChat, undefined);
+		assert.ok(current.claudeChat?.pendingLaunch, 'Merging must not mutate the current prompt');
 	});
 });
 
@@ -488,6 +648,33 @@ test('canRequestImplementingTimeRecalc blocks closed prompts and active recalcul
 			chatSessionIds: ['session-a'],
 			isRecalculating: true,
 		}), false);
+	});
+});
+
+/** Проверяет, что для Claude нужны его собственные сессии, а закрытая задача остается замороженной. */
+test('canRequestImplementingTimeRecalc uses Claude sessions instead of Copilot history', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { canRequestImplementingTimeRecalc } = await import('../src/webview/editor/EditorApp.js');
+		const input = {
+			promptId: 'prompt-claude',
+			status: 'in-progress' as const,
+			chatTarget: 'claude' as const,
+			chatSessionIds: ['old-copilot-session'],
+		};
+		const boundInput = {
+			...input,
+			chatSessionIds: [],
+			claudeChat: {
+				sessions: [{ sessionId: 'claude-session', projectPath: '/testing-project', accountedMs: 0 }],
+			},
+		};
+
+		assert.equal(canRequestImplementingTimeRecalc(input), false);
+		assert.equal(canRequestImplementingTimeRecalc(boundInput), true);
+		assert.equal(canRequestImplementingTimeRecalc({ ...boundInput, status: 'closed' }), false);
+		assert.equal(canRequestImplementingTimeRecalc({ ...boundInput, isRecalculating: true }), false);
+		assert.equal(canRequestImplementingTimeRecalc({ ...boundInput, promptId: '' }), false);
+		assert.equal(canRequestImplementingTimeRecalc({ ...boundInput, chatTarget: 'copilot' }), false);
 	});
 });
 

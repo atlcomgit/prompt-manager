@@ -1,7 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { normalizeStoredPromptConfig } from '../src/utils/promptConfig.js';
+import { normalizeChatTarget, normalizeStoredPromptConfig } from '../src/utils/promptConfig.js';
+
+/** Проверяет общий нормализатор целей и прежний fallback для отсутствующих или поврежденных значений. */
+test('normalizeChatTarget accepts supported targets and rejects invalid values', () => {
+	for (const target of ['copilot', 'kilo', 'codex', 'claude'] as const) {
+		assert.equal(normalizeChatTarget(target), target);
+	}
+	for (const target of [undefined, null, '', 'unknown', 'Claude', 'claude ', 1, {}, ['claude']]) {
+		assert.equal(normalizeChatTarget(target), 'copilot');
+	}
+});
 
 /** Проверяет восстановление обязательных полей старой конфигурации промпта. */
 test('normalizeStoredPromptConfig backfills missing promptUuid for legacy prompt configs', () => {
@@ -53,8 +63,9 @@ test('normalizeStoredPromptConfig preserves existing promptUuid', () => {
 	assert.equal(result.config.id, 'existing-prompt');
 });
 
+/** Проверяет сохранение всех поддерживаемых целей, включая Claude Code. */
 test('normalizeStoredPromptConfig preserves supported chat targets', () => {
-	for (const chatTarget of ['copilot', 'kilo', 'codex'] as const) {
+	for (const chatTarget of ['copilot', 'kilo', 'codex', 'claude'] as const) {
 		const result = normalizeStoredPromptConfig(
 			`prompt-${chatTarget}`,
 			{ chatTarget },
@@ -62,6 +73,23 @@ test('normalizeStoredPromptConfig preserves supported chat targets', () => {
 		);
 
 		assert.equal(result.config.chatTarget, chatTarget);
+	}
+});
+
+/** Проверяет, что выбор Claude не меняет режим, сохраненную модель и независимые флаги отправки. */
+test('normalizeStoredPromptConfig preserves Claude settings and keeps Xdotool opt-in', () => {
+	for (const chatMode of ['agent', 'plan'] as const) {
+		const result = normalizeStoredPromptConfig(
+			'prompt-claude',
+			{ chatTarget: 'claude', chatMode, model: 'copilot/gpt-5.4', autoStartChat: false },
+			() => 'generated-uuid',
+		);
+
+		assert.equal(result.config.chatTarget, 'claude');
+		assert.equal(result.config.chatMode, chatMode);
+		assert.equal(result.config.model, 'copilot/gpt-5.4');
+		assert.equal(result.config.autoStartChat, false);
+		assert.equal(result.config.autoStartChatWithXdotool, false);
 	}
 });
 

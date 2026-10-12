@@ -128,10 +128,12 @@ const bootWindow = window as EditorBootWindow;
 const initialBootId = bootWindow.__WEBVIEW_BOOT_ID__ || '';
 const EDITOR_PROMPT_IDENTITY_STATE_KEY = 'pm.editor.promptIdentity';
 
+/** Целевые чаты редактора; состав списка проверяет tests/editorApp.test.tsx. */
 const CHAT_TARGET_OPTIONS: Array<{ id: PromptChatTarget; labelKey: string }> = [
   { id: 'copilot', labelKey: 'editor.chatTargetCopilot' },
   { id: 'kilo', labelKey: 'editor.chatTargetKilo' },
   { id: 'codex', labelKey: 'editor.chatTargetCodex' },
+  { id: 'claude', labelKey: 'editor.chatTargetClaude' },
 ];
 
 /** Prefer host boot data for the first paint and only fall back to retained webview state when boot data is absent. */
@@ -363,11 +365,42 @@ export const mergePromptDashboardWidgetSnapshot = (input: {
   ) || nextSnapshot;
 };
 
-/** Block derived implementing-time refresh once the prompt is explicitly closed. */
+/** Возвращает сессии выбранного чата без смешивания истории Claude и Copilot; tests/editorApp.test.tsx. */
+export function resolvePromptChatSessionIds(
+  prompt: Partial<Pick<Prompt, 'chatTarget' | 'chatSessionIds' | 'claudeChat'>>,
+): string[] {
+  return prompt.chatTarget === 'claude'
+    ? (prompt.claudeChat?.sessions || []).map(session => session.sessionId)
+    : prompt.chatSessionIds || [];
+}
+
+/** Разрешает повторный запуск draft и учитывает сессии только выбранной цели; tests/editorApp.test.tsx. */
+export function canStartPromptChat(
+  prompt: Pick<Prompt, 'promptUuid' | 'content' | 'status' | 'chatTarget' | 'chatSessionIds' | 'claudeChat'>,
+): boolean {
+  return Boolean((prompt.promptUuid || '').trim())
+    && Boolean(prompt.content)
+    && (prompt.status === 'draft' || resolvePromptChatSessionIds(prompt).length === 0);
+}
+
+/** Применяет только сведения о привязке, сохраняя текст и отсутствующие в сообщении поля; tests/editorApp.test.tsx. */
+export function mergePromptChatBindings(current: Prompt, incoming: Partial<Prompt>): Prompt {
+  return {
+    ...current,
+    chatSessionIds: incoming.chatSessionIds ?? current.chatSessionIds,
+    claudeChat: Object.prototype.hasOwnProperty.call(incoming, 'claudeChat')
+      ? incoming.claudeChat
+      : current.claudeChat,
+  };
+}
+
+/** Запрещает пересчет без сессий выбранного чата, после закрытия и при активном запросе; tests/editorApp.test.tsx. */
 export const canRequestImplementingTimeRecalc = (input: {
   promptId?: string;
   status: PromptStatus;
   chatSessionIds?: string[];
+  chatTarget?: PromptChatTarget;
+  claudeChat?: Prompt['claudeChat'];
   isRecalculating?: boolean;
 }): boolean => {
   const promptId = String(input.promptId || '').trim();
@@ -379,7 +412,7 @@ export const canRequestImplementingTimeRecalc = (input: {
     return false;
   }
 
-  if ((input.chatSessionIds || []).length === 0) {
+  if (resolvePromptChatSessionIds(input).length === 0) {
     return false;
   }
 
@@ -964,7 +997,9 @@ export const EditorApp: React.FC = () => {
     || prompt.status === 'report'
     || prompt.status === 'review';
   const isPersistedPrompt = Boolean((prompt.promptUuid || '').trim());
-  const hasChatSession = prompt.chatSessionIds.length > 0;
+  // История Copilot не означает, что у выбранного Claude уже есть привязанная сессия.
+  const activeChatSessionIds = resolvePromptChatSessionIds(prompt);
+  const hasChatSession = activeChatSessionIds.length > 0;
   const chatEntryState = resolveChatEntryState({
     status: prompt.status,
     hasChatSession,
@@ -973,7 +1008,13 @@ export const EditorApp: React.FC = () => {
     isStartingChat,
   });
   const chatTarget = prompt.chatTarget || 'copilot';
+  // У Claude подготовка завершается chatOpened, а привязка подтверждается позднее через prompt sync.
   const chatLaunchRequiresBinding = chatTarget === 'copilot';
+  const claudeChatStatus = prompt.claudeChat?.pendingLaunch
+    ? t('editor.claudeChatPending')
+    : hasChatSession
+      ? `${t('editor.claudeChatBoundCount')}: ${activeChatSessionIds.length}`
+      : t('editor.claudeChatNotBound');
   const [chatLaunchRequestStarted, setChatLaunchRequestStarted] = useState(false);
   // Хост уже отправил сообщение в Copilot Chat и ищет сессию для привязки к промпту.
   const [chatLaunchAwaitingBinding, setChatLaunchAwaitingBinding] = useState(false);
@@ -987,7 +1028,8 @@ export const EditorApp: React.FC = () => {
   const chatLaunchHasChatEntry = resolvePromptChatLaunchHasChatEntry({
     status: prompt.status,
     requiresChatBinding: chatLaunchRequiresBinding,
-    hasChatEntry: chatEntryState.hasChatEntry,
+    // Прежние сессии Claude не подтверждают открытие новой попытки запуска.
+    hasChatEntry: chatTarget === 'claude' && isStartingChat ? false : chatEntryState.hasChatEntry,
     chatRequestStarted: chatLaunchRequestStarted,
     isStartingChat,
     isAwaitingChatBinding: chatLaunchAwaitingBinding,
@@ -1026,12 +1068,15 @@ export const EditorApp: React.FC = () => {
       : 'done';
   const chatLaunchTargetOption = CHAT_TARGET_OPTIONS.find(option => option.id === chatTarget);
   const chatLaunchTargetLabel = t(chatLaunchTargetOption?.labelKey || 'editor.chatTargetCopilot');
-  const chatLaunchOpenStepLabel = chatLaunchRequiresBinding
+  // Название чата не зависит от того, поддерживает ли интеграция привязку сессии.
+  const chatLaunchOpenStepLabel = chatTarget === 'copilot'
     ? t('editor.chatLaunchStepOpen')
     : `${t('editor.chatLaunchStepOpenAction')} ${chatLaunchTargetLabel}`;
-  const chatLaunchStartingDescription = chatLaunchRequiresBinding
+  const chatLaunchStartingDescription = chatTarget === 'copilot'
     ? t('editor.chatLaunchDescriptionStarting')
-    : `${t('editor.chatLaunchDescriptionStartingExternalPrefix')}${chatLaunchTargetLabel}${t('editor.chatLaunchDescriptionStartingExternalSuffix')}`;
+    : chatTarget === 'claude'
+      ? t('editor.claudeChatLaunchStarting')
+      : `${t('editor.chatLaunchDescriptionStartingExternalPrefix')}${chatLaunchTargetLabel}${t('editor.chatLaunchDescriptionStartingExternalSuffix')}`;
   const chatLaunchStateLabel = chatLaunchPhase === 'ready'
     ? t('editor.chatLaunchStatusReady')
     : chatLaunchPhase === 'renaming'
@@ -1040,7 +1085,7 @@ export const EditorApp: React.FC = () => {
       ? t('editor.chatLaunchStatusStarting')
       : t('editor.chatLaunchStatusWaiting');
   const chatLaunchDescription = chatLaunchPhase === 'ready'
-    ? t('editor.chatLaunchDescriptionReady')
+    ? (chatTarget === 'claude' ? claudeChatStatus : t('editor.chatLaunchDescriptionReady'))
     : chatLaunchPhase === 'renaming'
       ? t('editor.chatLaunchDescriptionRenaming')
     : chatLaunchPhase === 'prepare' || chatLaunchPhase === 'autoload' || chatLaunchPhase === 'opening'
@@ -1048,6 +1093,8 @@ export const EditorApp: React.FC = () => {
       : t('editor.chatLaunchDescriptionWaiting');
   const chatLaunchHint = chatLaunchPhase === 'ready'
     ? t('editor.chatLaunchHintReady')
+    : chatTarget === 'claude'
+      ? t('editor.claudeChatLaunchHint')
     : chatLaunchPhase === 'renaming'
       ? t('editor.chatLaunchHintRenaming')
     : t('editor.chatLaunchHint');
@@ -2291,25 +2338,34 @@ export const EditorApp: React.FC = () => {
     }
   }, []);
 
-  // Refresh bound chat timing after open without turning on the global editor progress line.
+  // Пересчитываем время отдельно для цели и ее сессий, не включая общий индикатор редактора.
   const requestBackgroundImplementingTimeRefresh = useCallback((nextPrompt: Prompt) => {
     const promptId = String(nextPrompt.id || '').trim();
+    const recalcKey = JSON.stringify([promptId, nextPrompt.chatTarget || 'copilot', resolvePromptChatSessionIds(nextPrompt)]);
     if (!canRequestImplementingTimeRecalc({
       promptId,
       status: nextPrompt.status,
       chatSessionIds: nextPrompt.chatSessionIds,
-    }) || recalcTriggeredForRef.current.has(promptId)) {
+      chatTarget: nextPrompt.chatTarget,
+      claudeChat: nextPrompt.claudeChat,
+    }) || recalcTriggeredForRef.current.has(recalcKey)) {
       return;
     }
 
     clearPendingBackgroundRecalc();
     pendingBackgroundRecalcTimerRef.current = window.setTimeout(() => {
       pendingBackgroundRecalcTimerRef.current = null;
-      const currentPromptId = String(promptRef.current.id || '').trim();
-      if (currentPromptId !== promptId || recalcTriggeredForRef.current.has(promptId)) {
+      // За задержку пользователь мог сменить цель, сессию или закрыть промпт.
+      const currentPrompt = promptRef.current;
+      const currentPromptId = String(currentPrompt.id || '').trim();
+      const currentRecalcKey = JSON.stringify([
+        currentPromptId, currentPrompt.chatTarget || 'copilot', resolvePromptChatSessionIds(currentPrompt),
+      ]);
+      if (currentRecalcKey !== recalcKey || recalcTriggeredForRef.current.has(recalcKey)
+        || !canRequestImplementingTimeRecalc({ ...currentPrompt, promptId: currentPromptId })) {
         return;
       }
-      recalcTriggeredForRef.current.add(promptId);
+      recalcTriggeredForRef.current.add(recalcKey);
       vscode.postMessage({ type: 'recalcImplementingTime', id: promptId, silent: true });
     }, 900);
   }, [clearPendingBackgroundRecalc]);
@@ -2408,10 +2464,9 @@ export const EditorApp: React.FC = () => {
 
   const dispatchStartChat = useCallback((requestId: string, options?: { skipBranchMismatchCheck?: boolean }) => {
     const latestPrompt = promptRef.current;
-    const isPersisted = Boolean((latestPrompt.promptUuid || '').trim());
     const originalStatus = latestPrompt.status;
     const shouldForceRebindChat = latestPrompt.status === 'draft';
-    if (!isPersisted || !latestPrompt.content || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)) {
+    if (!canStartPromptChat(latestPrompt)) {
       return;
     }
 
@@ -2433,7 +2488,10 @@ export const EditorApp: React.FC = () => {
     const updatedPrompt = {
       ...buildPromptForSave(),
       status: 'in-progress' as const,
-      chatSessionIds: shouldForceRebindChat ? [] : latestPrompt.chatSessionIds,
+      // Новый запуск Claude не удаляет прежнюю историю Copilot и не записывает туда Claude IDs.
+      chatSessionIds: shouldForceRebindChat && latestPrompt.chatTarget !== 'claude'
+        ? []
+        : latestPrompt.chatSessionIds,
     };
 
     startChatLockRef.current = true;
@@ -2457,7 +2515,7 @@ export const EditorApp: React.FC = () => {
     }
 
     const latestPrompt = promptRef.current;
-    const requestedSessionId = String(latestPrompt.chatSessionIds[0] || '').trim();
+    const requestedSessionId = String(resolvePromptChatSessionIds(latestPrompt)[0] || '').trim();
 
     setNotice(null);
     setIsOpeningChat(true);
@@ -2587,9 +2645,11 @@ export const EditorApp: React.FC = () => {
     return prompt.model.trim();
   }, [prompt.model, modelOptions, t]);
 
-  /** Разделяет настройки Copilot Chat и внешних целевых чатов. */
+  /** Разделяет модель Copilot и флаг Xdotool внешних чатов; проверка: tests/editorApp.test.tsx. */
   const normalizedChatTarget = prompt.chatTarget || 'copilot';
-  const isExternalChatTarget = normalizedChatTarget === 'kilo' || normalizedChatTarget === 'codex';
+  const isExternalChatTarget = normalizedChatTarget === 'kilo'
+    || normalizedChatTarget === 'codex'
+    || normalizedChatTarget === 'claude';
   const autoStartChat = prompt.autoStartChat !== false;
   const autoStartChatWithXdotool = prompt.autoStartChatWithXdotool === true;
 
@@ -3267,8 +3327,10 @@ export const EditorApp: React.FC = () => {
             activeSaveIdRef.current = null;
             activeSaveRequestIdRef.current = null;
             activeSaveClearedDirtyRef.current = false;
-            if ((msg.prompt.chatSessionIds || []).length > 0) {
-              releaseStartChatPendingState();
+            if (resolvePromptChatSessionIds(msg.prompt).length > 0) {
+              if (msg.prompt.chatTarget !== 'claude') {
+                releaseStartChatPendingState();
+              }
               requestBackgroundImplementingTimeRefresh(msg.prompt);
             }
             requestPromptPlanState(msg.prompt.id);
@@ -3279,25 +3341,31 @@ export const EditorApp: React.FC = () => {
           hasBeenSavedRef.current = Boolean(msg.prompt.id);
 
           if (reason === 'sync') {
-            // Background sync (chat completion, recalc, status change) — merge only server-side fields, keep user edits
+            // Синхронизация привязки и времени не заменяет несохраненный текст или настройки выбранного чата.
             skipNextPromptConfigTrackingRef.current = true;
             setPrompt(prev => {
               const mergedPrompt = {
-                ...prev,
-                chatSessionIds: msg.prompt.chatSessionIds ?? prev.chatSessionIds,
+                ...mergePromptChatBindings(prev, msg.prompt),
                 timeSpentImplementing: Math.max(msg.prompt.timeSpentImplementing || 0, prev.timeSpentImplementing || 0),
                 timeSpentOnTask: Math.max(msg.prompt.timeSpentOnTask || 0, prev.timeSpentOnTask || 0),
                 timeSpentUntracked: Math.max(msg.prompt.timeSpentUntracked || 0, prev.timeSpentUntracked || 0),
                 updatedAt: msg.prompt.updatedAt || prev.updatedAt,
                 status: msg.prompt.status || prev.status,
-                report: (prev.report || '').trim() ? prev.report : (msg.prompt.report || prev.report),
+                // Даже намеренно очищенный отчет остается локальным черновиком до сохранения.
+                report: localReportDirtyRef.current || isReportEditorDraftActiveRef.current || (prev.report || '').trim()
+                  ? prev.report
+                  : (msg.prompt.report || prev.report),
               };
               promptRef.current = mergedPrompt;
               return mergedPrompt;
             });
-            // Don't touch isDirty — user's pending edits stay intact
-            if ((msg.prompt.chatSessionIds || []).length > 0) {
-              releaseStartChatPendingState();
+            // Фоновая привязка не сбрасывает признак несохраненных изменений пользователя.
+            const syncedPrompt = mergePromptChatBindings(promptRef.current, msg.prompt);
+            if (resolvePromptChatSessionIds(syncedPrompt).length > 0) {
+              if (syncedPrompt.chatTarget !== 'claude') {
+                releaseStartChatPendingState();
+              }
+              requestBackgroundImplementingTimeRefresh(syncedPrompt);
             }
             setPromptDashboardRefreshVersion(version => version + 1);
             requestPromptPlanState(msg.prompt.id);
@@ -3306,14 +3374,25 @@ export const EditorApp: React.FC = () => {
           }
 
           if (reason === 'external-config') {
-            const changedFields = diffPromptConfigSyncFields(promptRef.current, msg.prompt);
+            // Config-снимок может принести новую привязку, но не должен затереть локальный черновик текста.
+            const hasLocalTextChanges = isDirtyRef.current
+              || userChangeCounterRef.current !== saveStartCounterRef.current;
+            const externalPrompt = {
+              ...promptRef.current,
+              ...msg.prompt,
+              ...(hasLocalTextChanges ? { content: promptRef.current.content } : {}),
+              ...(hasLocalTextChanges || localReportDirtyRef.current || isReportEditorDraftActiveRef.current
+                ? { report: promptRef.current.report }
+                : {}),
+            };
+            const changedFields = diffPromptConfigSyncFields(promptRef.current, externalPrompt);
             promptConfigFieldChangedAtRef.current = clearPromptConfigFieldChangedAt(
               promptConfigFieldChangedAtRef.current,
               changedFields,
             );
             skipNextPromptConfigTrackingRef.current = true;
-            promptRef.current = msg.prompt;
-            setPrompt(msg.prompt);
+            promptRef.current = externalPrompt;
+            setPrompt(externalPrompt);
             if (incomingPromptId !== currentPromptId && incomingPromptId !== '__new__') {
               currentPromptIdRef.current = incomingPromptId;
             }
@@ -3327,7 +3406,7 @@ export const EditorApp: React.FC = () => {
           if (reason === 'ai-enrichment') {
             // Background AI enrichment may also rename the prompt slug after the title changes.
             const enrichedPrompt = {
-              ...promptRef.current,
+              ...mergePromptChatBindings(promptRef.current, msg.prompt),
               id: msg.prompt.id || promptRef.current.id,
               promptUuid: msg.prompt.promptUuid || promptRef.current.promptUuid,
               title: msg.prompt.title || promptRef.current.title,
@@ -3365,7 +3444,7 @@ export const EditorApp: React.FC = () => {
             saveClearedDirty: activeSaveClearedDirtyRef.current,
           });
           const shouldMergeAfterSave = reason === 'save'
-            && ((userChangedAfterSave && saveStartCounterRef.current > 0) || shouldPreserveLocalReportAfterSave);
+            && (userChangedAfterSave || shouldPreserveLocalReportAfterSave);
           skipNextPromptConfigTrackingRef.current = true;
           if (shouldMergeAfterSave) {
             // User changed something after save started — merge only server-generated fields, keep user edits
@@ -3381,12 +3460,11 @@ export const EditorApp: React.FC = () => {
               });
             }
             const mergedPrompt = {
-              ...promptRef.current,
+              ...mergePromptChatBindings(promptRef.current, msg.prompt),
               id: msg.prompt.id || promptRef.current.id,
               title: promptRef.current.title || msg.prompt.title,
               description: promptRef.current.description || msg.prompt.description,
               updatedAt: msg.prompt.updatedAt,
-              chatSessionIds: msg.prompt.chatSessionIds || promptRef.current.chatSessionIds,
               timeSpentWriting: Math.max(msg.prompt.timeSpentWriting || 0, promptRef.current.timeSpentWriting || 0),
               timeSpentImplementing: Math.max(msg.prompt.timeSpentImplementing || 0, promptRef.current.timeSpentImplementing || 0),
               timeSpentOnTask: Math.max(msg.prompt.timeSpentOnTask || 0, promptRef.current.timeSpentOnTask || 0),
@@ -3397,8 +3475,10 @@ export const EditorApp: React.FC = () => {
             setIsDirty(true);
             // Keep isDirty = true so next auto-save picks up user's changes
           } else {
-            promptRef.current = msg.prompt;
-            setPrompt(msg.prompt);
+            // Необязательные поля могут отсутствовать в частичном подтверждении сохранения.
+            const savedPrompt = { ...promptRef.current, ...msg.prompt };
+            promptRef.current = savedPrompt;
+            setPrompt(savedPrompt);
             localReportDirtyRef.current = false;
             setIsDirty(false);
           }
@@ -3422,9 +3502,11 @@ export const EditorApp: React.FC = () => {
             setIsGeneratingTitle(Boolean(msg.aiEnrichment.title));
             setIsGeneratingDescription(Boolean(msg.aiEnrichment.description));
           }
-          if ((msg.prompt.chatSessionIds || []).length > 0) {
-            releaseStartChatPendingState();
-            requestBackgroundImplementingTimeRefresh(msg.prompt);
+          if (resolvePromptChatSessionIds(promptRef.current).length > 0) {
+            if (promptRef.current.chatTarget !== 'claude') {
+              releaseStartChatPendingState();
+            }
+            requestBackgroundImplementingTimeRefresh(promptRef.current);
           }
           setPromptDashboardRefreshVersion(version => version + 1);
           requestPromptPlanState(msg.prompt.id);
@@ -3785,8 +3867,11 @@ export const EditorApp: React.FC = () => {
           setPrompt(nextPrompt);
         }
         setChatLaunchRenameState('idle');
-        setChatLaunchAwaitingBinding(true);
-        releaseStartChatPendingState();
+        setChatLaunchAwaitingBinding(promptRef.current.chatTarget !== 'claude');
+        // Для Claude подготовка заканчивается отдельным chatOpened, а не подтверждением принятого запуска.
+        if (promptRef.current.chatTarget !== 'claude') {
+          releaseStartChatPendingState();
+        }
         break;
       case 'chatContextAutoLoadState':
         if (!shouldHandleChatStartMessage(msg.requestId)) {
@@ -3825,6 +3910,10 @@ export const EditorApp: React.FC = () => {
         }
         releaseStartChatPendingState();
         setIsOpeningChat(false);
+        // Ручной prefill Claude не подтверждает отправку; ожидание привязки видно в статусе у выбора цели.
+        if (promptRef.current.chatTarget === 'claude') {
+          setChatLaunchAwaitingBinding(false);
+        }
         setIsChatPanelOpen(true);
         break;
       case 'chatLaunchRenameState':
@@ -4860,10 +4949,17 @@ export const EditorApp: React.FC = () => {
     }
   };
 
-  /** Update a select/toggle field with near-immediate auto-save. */
+  /** Сохраняет выбор поля и сбрасывает состояние панели и пересчета при смене цели чата. */
   const updateFieldAndSaveNow = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
     promptRef.current = { ...promptRef.current, [field]: value };
     setPrompt(prev => ({ ...prev, [field]: value }));
+    // Открытая панель и ручной пересчет прежней цели не относятся к вновь выбранному чату.
+    if (field === 'chatTarget') {
+      clearPendingBackgroundRecalc();
+      setIsChatPanelOpen(false);
+      setIsOpeningChat(false);
+      setIsRecalculating(false);
+    }
     if (field === 'report') {
       localReportDirtyRef.current = true;
     }
@@ -5744,16 +5840,12 @@ export const EditorApp: React.FC = () => {
 
   const handleStartChat = () => {
     const latestPrompt = promptRef.current;
-    const isPersisted = Boolean((latestPrompt.promptUuid || '').trim());
-    const shouldForceRebindChat = latestPrompt.status === 'draft';
     if (
       startChatLockRef.current
       || isStartingChat
       || isGeneratingTitle
       || isGeneratingDescription
-      || !isPersisted
-      || !latestPrompt.content
-      || (!shouldForceRebindChat && latestPrompt.chatSessionIds.length > 0)
+      || !canStartPromptChat(latestPrompt)
     ) {
       return;
     }
@@ -5810,6 +5902,8 @@ export const EditorApp: React.FC = () => {
       promptId: prompt.id,
       status: prompt.status,
       chatSessionIds: prompt.chatSessionIds,
+      chatTarget: prompt.chatTarget,
+      claudeChat: prompt.claudeChat,
       isRecalculating,
     })) {
       return;
@@ -6043,10 +6137,11 @@ export const EditorApp: React.FC = () => {
     },
     {
       key: 'open',
+      // Модель Claude Code выбирается в самом расширении, а не из сохраненного списка Copilot.
       label: (
         <ChatLaunchOpenStepLabel
           label={chatLaunchOpenStepLabel}
-          modelName={selectedModelName}
+          modelName={chatTarget === 'claude' ? '' : selectedModelName}
         />
       ),
       state: chatLaunchStepStates.open,
@@ -6954,11 +7049,13 @@ export const EditorApp: React.FC = () => {
               timeOnTask={prompt.timeSpentOnTask || 0}
               timeUntracked={prompt.timeSpentUntracked || 0}
               onUntrackedChange={(ms) => updateField('timeSpentUntracked', ms)}
-              hasChatSessions={prompt.chatSessionIds.length > 0}
+              hasChatSessions={hasChatSession}
               canRecalcImplementingTime={canRequestImplementingTimeRecalc({
                 promptId: prompt.id,
                 status: prompt.status,
                 chatSessionIds: prompt.chatSessionIds,
+                chatTarget: prompt.chatTarget,
+                claudeChat: prompt.claudeChat,
               })}
               isRecalculating={isRecalculating}
               onRecalcImplementingTime={handleRecalcImplementingTime}
@@ -7384,6 +7481,11 @@ export const EditorApp: React.FC = () => {
                       <option key={option.id} value={option.id}>{t(option.labelKey)}</option>
                     ))}
                   </select>
+                  {normalizedChatTarget === 'claude' && (
+                    <div role="status" style={styles.agentCheckboxHelp}>
+                      {claudeChatStatus}
+                    </div>
+                  )}
                 </div>
 
                 {!isExternalChatTarget && (
@@ -7436,7 +7538,8 @@ export const EditorApp: React.FC = () => {
                     {t(isExternalChatTarget ? 'editor.autoStartChatWithXdotool' : 'editor.autoStartChat')}
                   </label>
                   <div style={styles.agentCheckboxHelp}>
-                    {t(isExternalChatTarget ? 'editor.autoStartChatWithXdotoolHint' : 'editor.autoStartChatHint')}
+                    {t(chatTarget === 'claude' ? 'editor.claudeAutoSendUnavailable'
+                      : isExternalChatTarget ? 'editor.autoStartChatWithXdotoolHint' : 'editor.autoStartChatHint')}
                   </div>
                 </div>
               </div>

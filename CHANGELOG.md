@@ -6,6 +6,23 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-10-12
+
+#### Added
+- **Task167 (partial):** Added a Claude Code target that opens prepared text through
+  the native sidebar. Agent/Plan are text instructions; Claude's model and permissions stay unchanged.
+- After manual sending, an exact UUID marker binds the session under separate `claudeChat` state. Reopening verifies
+  the exact bound session, and renaming uses the public Claude Agent SDK `0.3.234`. End-to-end validation is pending.
+
+#### Fixed
+- Claude launches and bound-session reopening now use `editor.open` with `honor-preferred-location` instead of
+  forcing a primary editor tab. The sidebar preference is saved before opening, preserving its workspace/global scope.
+- Claude Xdotool auto-send remains safety-blocked even when enabled: an active tab or matching PID cannot prove
+  composer focus, and Enter could reach a terminal. The notice requests manual sending; stopping a request is manual
+  inside Claude and does not invoke Copilot stop commands.
+- Claude timing accepts only proven final `turn_duration` records. Unsupported compaction, queued commands, or
+  multiple final records preserve previously saved time instead of estimating it.
+
 ### 2026-10-08
 
 #### Fixed

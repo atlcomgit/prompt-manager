@@ -1,8 +1,10 @@
-import type { PromptConfig } from '../types/prompt.js';
+import type { PromptChatTarget, PromptConfig } from '../types/prompt.js';
 import { createDefaultPrompt } from '../types/prompt.js';
+import { normalizeClaudeChatState } from './claudeChat.js';
 
-function normalizeChatTarget(value: unknown): PromptConfig['chatTarget'] {
-	return value === 'kilo' || value === 'codex' || value === 'copilot'
+/** Возвращает поддерживаемый чат либо Copilot; варианты и fallback проверяет tests/promptConfig.test.ts. */
+export function normalizeChatTarget(value: unknown): PromptChatTarget {
+	return value === 'kilo' || value === 'codex' || value === 'claude' || value === 'copilot'
 		? value
 		: 'copilot';
 }
@@ -61,6 +63,11 @@ export function normalizeStoredPromptConfig(
 			))
 			: [],
 	};
+
+	// Старые конфигурации не получают undefined-поле: память и сериализованный кэш должны совпадать.
+	const claudeChat = normalizeClaudeChatState(parsed.claudeChat);
+	if (claudeChat) { config.claudeChat = claudeChat; }
+	else { delete config.claudeChat; }
 
 	const normalizedChatRequestAutoCompleteAfter = Number(parsed.chatRequestAutoCompleteAfter);
 	if (Number.isFinite(normalizedChatRequestAutoCompleteAfter) && normalizedChatRequestAutoCompleteAfter > 0) {

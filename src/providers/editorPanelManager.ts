@@ -4,9 +4,15 @@
 
 import * as vscode from 'vscode';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { realpath } from 'node:fs/promises';
 import { spawn } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
+import { ClaudeChatSessionService } from '../services/claudeChatSessionService.js';
+import type { ClaudeChatSessionSnapshot } from '../types/claudeChat.js';
+import { createClaudeChatLaunchMarker, normalizeClaudeChatState } from '../utils/claudeChat.js';
+import { normalizeChatTarget } from '../utils/promptConfig.js';
 import MarkdownIt from 'markdown-it';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
 import { generateSmartTitle } from '../utils/smartTitle.js';
@@ -213,6 +219,17 @@ interface GitOverlaySession {
 
 /** Координирует редактор промпта, запуск чатов и связанные операции VS Code. */
 export class EditorPanelManager {
+	/** Лениво читает только историю выбранных Claude-сессий; tests/editorPanelManager.test.ts. */
+	private claudeChatService?: ClaudeChatSessionService;
+	/** Подписки живут независимо от вкладки редактора и освобождаются вместе с manager. */
+	private readonly claudeChatTracking = new Map<string, vscode.Disposable>();
+	/** Объединяет файловые события и исключает двойной запуск одного промпта. */
+	private readonly claudeChatRefreshes = new Map<string, Promise<{ totalMs: number; sessionsCount: number; completionOk: boolean }>>();
+	private readonly claudeChatLaunches = new Set<string>();
+	/** Повторное событие не теряется между чтением transcript и фиксацией результата. */
+	private readonly claudeChatRefreshAgain = new Set<string>();
+	/** Не требует повторного разбора времени только ради уже применённого заголовка. */
+	private readonly claudeChatRenamedTitles = new Map<string, string>();
 	private _onDidSave = new vscode.EventEmitter<string>();
 	public readonly onDidSave = this._onDidSave.event;
 	private _onDidSaveStateChange = new vscode.EventEmitter<{ id: string; promptUuid?: string; saving: boolean }>();
@@ -411,6 +428,13 @@ export class EditorPanelManager {
 		}
 
 		this.panelPromptRefs.set(panelKey, prompt);
+		if (prompt.chatTarget === 'claude' && prompt.claudeChat) {
+			// Наблюдение и SDK не задерживают первую отрисовку редактора.
+			void Promise.resolve().then(async () => {
+				await this.trackClaudePrompt(prompt);
+				return this.refreshClaudePrompt(prompt);
+			}).catch(error => this.reportClaudeTrackingError(error));
+		}
 		if (panelKey === SINGLE_EDITOR_PANEL_KEY) {
 			this.syncStartupEditorRestoreState();
 		}
@@ -1964,10 +1988,9 @@ export class EditorPanelManager {
 		}
 	}
 
+	/** Использует общий контракт цели при чтении, наследовании и запуске. */
 	private normalizeChatTarget(value: unknown): PromptChatTarget {
-		return value === 'kilo' || value === 'codex' || value === 'copilot'
-			? value
-			: 'copilot';
+		return normalizeChatTarget(value);
 	}
 
 	private isExtensionAvailable(extensionId: string): boolean {
@@ -2050,6 +2073,343 @@ export class EditorPanelManager {
 			default:
 				return false;
 		}
+	}
+
+	/** Проверяет расширение до сохранения попытки; тесты: editorPanelManager.test.ts. */
+	private async ensureClaudeChatAvailable(): Promise<void> {
+		const extension = vscode.extensions.getExtension('anthropic.claude-code');
+		if (!extension) {
+			throw new Error('Claude Code: установите расширение Anthropic.claude-code.');
+		}
+		if (!extension.isActive) {
+			await extension.activate();
+		}
+		if (!(await vscode.commands.getCommands(true)).includes('claude-vscode.editor.open')) {
+			throw new Error('Claude Code: эта версия расширения не поддерживает открытие чата в боковой панели.');
+		}
+	}
+
+	/** Передаёт текст или сессию в native sidebar; проверки: tests/editorPanelManager.test.ts. */
+	private async openClaudeChatInSidebar(sessionId?: string, initialPrompt?: string): Promise<void> {
+		const configuration = vscode.workspace.getConfiguration('claudeCode');
+		if (configuration.get<string>('preferredLocation', 'panel') !== 'sidebar') {
+			// Сохраняем уровень уже заданной настройки; workspace override не должен снова открыть вкладку.
+			const updateGlobally = configuration.inspect<string>('preferredLocation')?.workspaceValue === undefined;
+			await configuration.update('preferredLocation', 'sidebar', updateGlobally);
+		}
+		// Без шестого аргумента editor.open принудительно выбирает panel, даже при предпочтении sidebar.
+		await vscode.commands.executeCommand(
+			'claude-vscode.editor.open', sessionId, initialPrompt, undefined, undefined, undefined,
+			{ programmatic: 'honor-preferred-location' },
+		);
+	}
+
+	/** Не подменяет общее окружение при работе с отдельным профилем Claude. */
+	private getClaudeChatService(): ClaudeChatSessionService {
+		if (vscode.workspace.isTrusted === false) {
+			throw new Error('Claude Code: привязка доступна только в доверенной рабочей области.');
+		}
+		if (!this.claudeChatService) {
+			const settings = vscode.workspace.getConfiguration('claudeCode');
+			if (settings.get<string>('claudeProcessWrapper', '').trim()) {
+				throw new Error('Claude Code: привязка сессий через claudeProcessWrapper пока не поддерживается.');
+			}
+			const variables = settings.get<Array<{ name: string; value: string }>>('environmentVariables', []);
+			/** Учитывает окружение CLI, не меняя настройки или process.env. */
+			const environmentValue = (name: string): string | undefined => {
+				return variables.find(variable => variable.name === name)?.value ?? process.env[name];
+			};
+			const configDir = environmentValue('CLAUDE_CONFIG_DIR') || path.join(os.homedir(), '.claude');
+			if (!path.isAbsolute(configDir)) {
+				throw new Error('Claude Code: для привязки требуется абсолютный CLAUDE_CONFIG_DIR.');
+			}
+			this.claudeChatService = new ClaudeChatSessionService({
+				configDir,
+				projectDirName: environmentValue('CLAUDE_CODE_PROJECT_DIR_NAME'),
+			});
+		}
+		return this.claudeChatService;
+	}
+
+	/** Сохранённый config не разрешает доступ к Claude-сессиям проектов вне текущей рабочей области. */
+	private async getClaudeWorkspacePaths(): Promise<Set<string>> {
+		const roots = Array.from(this.workspaceService.getWorkspaceFolderPaths().values());
+		return new Set(await Promise.all(roots.map(async root => {
+			try { return await realpath(root); }
+			catch { return path.resolve(root); }
+		})));
+	}
+
+	/** Открывает новый диалог с точной корреляцией, не выдавая заполнение поля за приём запроса. */
+	private async dispatchClaudeChatTarget(
+		prompt: Prompt,
+		query: string,
+		fileUris: vscode.Uri[],
+	): Promise<ExternalChatDispatchResult> {
+		const key = prompt.promptUuid || prompt.id;
+		if (this.claudeChatLaunches.has(key)) {
+			throw new Error('Claude Code: этот промпт уже открывается.');
+		}
+		this.claudeChatLaunches.add(key);
+		try {
+			await this.ensureClaudeChatAvailable();
+			this.getClaudeChatService();
+			const pendingLaunch = {
+				marker: createClaudeChatLaunchMarker(randomUUID()),
+				projectPaths: [...await this.getClaudeWorkspacePaths()],
+				startedAt: Date.now(),
+			};
+			if (pendingLaunch.projectPaths.length === 0) {
+				throw new Error('Claude Code: откройте локальную рабочую область для привязки сессии.');
+			}
+			await this.enqueuePromptSaveOperation(prompt, async () => {
+				const latest = await this.storageService.getPrompt(prompt.id);
+				if (!latest || latest.promptUuid !== prompt.promptUuid || latest.chatTarget !== 'claude') {
+					throw new Error('Claude Code: промпт изменился до открытия чата.');
+				}
+				const copilotAccountedMs = latest.claudeChat?.copilotAccountedMs
+					?? (latest.chatSessionIds.length > 0
+						? await this.stateService.getChatSessionsTotalElapsed(latest.chatSessionIds) : 0);
+				latest.claudeChat = { ...latest.claudeChat, sessions: latest.claudeChat?.sessions || [],
+					copilotAccountedMs, pendingLaunch };
+				Object.assign(prompt, await this.storageService.savePrompt(latest));
+				this.syncClaudePromptToPanels(prompt);
+			});
+			await this.trackClaudePrompt(prompt);
+			// JSON-строки передают пути с пробелами без предположения о поддержке Copilot #file:.
+			const context = fileUris.length > 0
+				? '\n\nContext files (read these exact paths):\n' + fileUris.map(uri => JSON.stringify(uri.fsPath)).join('\n')
+				: '';
+			const text = `${pendingLaunch.marker}\n\n${query}${context}`;
+			await this.openClaudeChatInSidebar(undefined, text);
+			// Внешний webview не подтверждает фокус composer: Enter может выполнить команду в терминале.
+			// До согласования безопасного механизма флаг сохраняется, но клавиатурная отправка запрещена.
+			void this.refreshClaudePrompt(prompt).catch(error => this.reportClaudeTrackingError(error));
+			const isRu = vscode.env.language.startsWith('ru');
+			return {
+				dispatched: false,
+				message: prompt.autoStartChatWithXdotool === true
+					? (isRu ? 'Claude Code: автоотправка не выполнена, фокус поля нельзя подтвердить. Отправьте текст вручную.'
+						: 'Claude Code: auto-send was not attempted because input focus cannot be verified. Send the prompt manually.')
+					: (isRu ? 'Claude Code: текст подготовлен. Отправьте его в чате; затем сессия привяжется автоматически.'
+						: 'Claude Code: the prompt is ready. Send it in the opened chat to bind the session automatically.'),
+			};
+		} finally {
+			this.claudeChatLaunches.delete(key);
+		}
+	}
+
+	/** Диагностика не включает текст разговора и не вызывает повторную отправку. */
+	private reportClaudeTrackingError(error: unknown): void {
+		this.hooksOutput.appendLine(`[claude-chat] ${error instanceof Error ? error.message : 'Session tracking failed'}`);
+	}
+
+	/** Обновляет также persisted baseline, чтобы последующий status-only save не откатил привязку и время. */
+	private syncClaudePromptToPanels(prompt: Prompt): void {
+		for (const [panelKey, displayed] of this.panelPromptRefs) {
+			if (displayed.promptUuid === prompt.promptUuid) {
+				Object.assign(displayed, prompt);
+				this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(prompt)));
+				void this.resolveOpenEditorPanel(panelKey)?.webview.postMessage({ type: 'prompt', prompt, reason: 'sync' });
+			}
+		}
+	}
+
+	/** Восстанавливает событийное наблюдение после открытия или перезапуска редактора. */
+	private async trackClaudePrompt(prompt: Prompt): Promise<void> {
+		const key = prompt.promptUuid || prompt.id;
+		if (this.isShuttingDown || prompt.chatTarget !== 'claude' || !prompt.claudeChat || prompt.archived) {
+			this.claudeChatTracking.get(key)?.dispose();
+			this.claudeChatTracking.delete(key);
+			return;
+		}
+		if (this.claudeChatTracking.has(key)) {
+			return;
+		}
+		const service = this.getClaudeChatService();
+		const allowed = await this.getClaudeWorkspacePaths();
+		const projectPaths = [...new Set([
+			...(prompt.claudeChat.pendingLaunch?.projectPaths || []),
+			...prompt.claudeChat.sessions.map(session => session.projectPath),
+		])].filter(projectPath => allowed.has(path.resolve(projectPath)));
+		if (projectPaths.length === 0 || this.claudeChatService !== service || this.isShuttingDown
+			|| this.claudeChatTracking.has(key)) {
+			return;
+		}
+		this.claudeChatTracking.set(key, service.watch(projectPaths, error => {
+			if (error) {
+				this.reportClaudeTrackingError(error);
+				return;
+			}
+			void this.refreshClaudePrompt(prompt).catch(reason => this.reportClaudeTrackingError(reason));
+		}));
+	}
+
+	/** Восстанавливает незавершённые привязки и событийное обновление времени после reload VS Code. */
+	public async restoreClaudeChatTracking(): Promise<void> {
+		for (const config of await this.storageService.listPrompts()) {
+			if (this.isShuttingDown) {
+				break;
+			}
+			if (config.chatTarget !== 'claude' || !config.claudeChat || config.archived || config.status === 'closed') {
+				continue;
+			}
+			try {
+				const prompt = await this.storageService.getPrompt(config.id);
+				if (prompt) {
+					await this.trackClaudePrompt(prompt);
+					await this.refreshClaudePrompt(prompt);
+				}
+			} catch (error) {
+				this.reportClaudeTrackingError(error);
+			}
+		}
+	}
+
+	/** Начисляет только новые длительности Claude, не теряя ручное время и параллельные сохранения. */
+	private refreshClaudePrompt(
+		identity: Pick<Prompt, 'id' | 'promptUuid'>,
+	): Promise<{ totalMs: number; sessionsCount: number; completionOk: boolean }> {
+		const key = identity.promptUuid || identity.id;
+		const running = this.claudeChatRefreshes.get(key);
+		if (running) {
+			this.claudeChatRefreshAgain.add(key);
+			return running;
+		}
+		const operation = (async () => {
+			const initial = await this.storageService.getPromptByUuid(identity.promptUuid)
+				|| await this.storageService.getPrompt(identity.id);
+			const unchanged = { totalMs: initial?.timeSpentImplementing || 0, sessionsCount: 0, completionOk: false };
+			if (!initial || initial.chatTarget !== 'claude' || this.isShuttingDown || initial.archived) {
+				this.claudeChatTracking.get(key)?.dispose();
+				this.claudeChatTracking.delete(key);
+				return unchanged;
+			}
+			const observedState = normalizeClaudeChatState(initial.claudeChat);
+			if (!observedState) {
+				return unchanged;
+			}
+			const service = this.getClaudeChatService();
+			const allowed = await this.getClaudeWorkspacePaths();
+			const pending = observedState.pendingLaunch;
+			const pendingIsAllowed = pending?.projectPaths.every(projectPath => allowed.has(path.resolve(projectPath)));
+			const found = pending && pendingIsAllowed ? await service.findSession(pending) : undefined;
+			if (found) {
+				observedState.sessions = [found, ...observedState.sessions.filter(session => session.sessionId !== found.sessionId)];
+			}
+			// Диск и SDK работают вне save queue: набор текста и обычное сохранение не ждут worker.
+			const snapshots = new Map<string, ClaudeChatSessionSnapshot>();
+			for (const session of observedState.sessions) {
+				if (!allowed.has(path.resolve(session.projectPath))) { continue; }
+				const snapshot = await service.readSession(session).catch(error => {
+					this.reportClaudeTrackingError(error);
+					return undefined;
+				});
+				const title = this.buildChatSessionRenameTitle(initial);
+				if (title && snapshot?.customTitle !== title && this.claudeChatRenamedTitles.get(session.sessionId) !== title) {
+					try {
+						await service.renameSession(session, title);
+						this.claudeChatRenamedTitles.set(session.sessionId, title);
+					} catch (error) { this.reportClaudeTrackingError(error); }
+				}
+				if (snapshot) { snapshots.set(session.sessionId, snapshot); }
+			}
+			let completedPrompt: Prompt | undefined;
+			let completedSessionId = '';
+			const result = await this.enqueuePromptSaveOperation(identity, async () => {
+				const prompt = await this.storageService.getPromptByUuid(identity.promptUuid)
+					|| await this.storageService.getPrompt(identity.id);
+				if (!prompt || prompt.chatTarget !== 'claude' || prompt.archived || this.isShuttingDown
+					|| this.claudeChatService !== service) { return unchanged; }
+				const state = normalizeClaudeChatState(prompt.claudeChat);
+				if (!state) { return unchanged; }
+				const before = JSON.stringify(state);
+				if (found && state.pendingLaunch?.marker === observedState.pendingLaunch?.marker) {
+					state.sessions = [found, ...state.sessions.filter(session => session.sessionId !== found.sessionId)];
+					delete state.pendingLaunch;
+				}
+				let changed = false;
+				const newest = state.sessions.filter(session => snapshots.has(session.sessionId)).sort((left, right) =>
+					(snapshots.get(right.sessionId)?.lastRequestStarted || 0) - (snapshots.get(left.sessionId)?.lastRequestStarted || 0))[0];
+				const allFinished = !state.pendingLaunch && state.sessions.length > 0
+					&& state.sessions.every(session => snapshots.get(session.sessionId)?.completed);
+				for (const session of state.sessions) {
+					const snapshot = snapshots.get(session.sessionId);
+					if (!snapshot) { continue; }
+					if (prompt.status !== 'closed') {
+						const delta = Math.max(0, snapshot.totalElapsedMs - session.accountedMs);
+						prompt.timeSpentImplementing += delta;
+						session.accountedMs = Math.max(session.accountedMs, snapshot.totalElapsedMs);
+						changed ||= delta > 0;
+					}
+					if (allFinished && newest === session && snapshot.lastRequestEnded
+						&& snapshot.lastRequestEnded > (session.completionHandledAt || 0)
+						&& prompt.status === 'in-progress'
+						&& shouldAutoCompletePromptFromChatRequest(prompt, snapshot.lastRequestStarted)) {
+						session.completionHandledAt = snapshot.lastRequestEnded;
+						prompt.status = this.resolveTerminalStatusFromHooks(prompt.hooks || [], 'afterChatCompleted') || 'completed';
+						completedPrompt = prompt;
+						completedSessionId = session.sessionId;
+						changed = true;
+					}
+				}
+				prompt.claudeChat = state;
+				if (changed || before !== JSON.stringify(state)) {
+					await this.storageService.savePrompt(prompt);
+					this.syncClaudePromptToPanels(prompt);
+					this._onDidSave.fire(prompt.id);
+				}
+				return { totalMs: prompt.timeSpentImplementing || 0, sessionsCount: state.sessions.length,
+					completionOk: Boolean(completedPrompt) };
+			});
+			if (completedPrompt) {
+				await this.runConfiguredHooks(completedPrompt.hooks || [], {
+					event: 'afterChatCompleted', promptId: completedPrompt.id, promptUuid: completedPrompt.promptUuid,
+					chatSessionId: completedSessionId, status: completedPrompt.status, chatTarget: 'claude',
+					timeSpentImplementing: completedPrompt.timeSpentImplementing,
+				}, 'afterChatCompleted');
+			}
+			return result;
+		})();
+		this.claudeChatRefreshes.set(key, operation);
+		void operation.finally(() => {
+			this.claudeChatRefreshes.delete(key);
+			if (this.claudeChatRefreshAgain.delete(key) && !this.isShuttingDown && this.claudeChatService) {
+				void this.refreshClaudePrompt(identity).catch(error => this.reportClaudeTrackingError(error));
+			}
+		}).catch(() => undefined);
+		return operation;
+	}
+
+	/** Не позволяет неизвестному session ID незаметно открыть новый разговор вместо привязанного. */
+	private async openBoundClaudeChat(
+		prompt: Prompt,
+		postMessage: (message: ExtensionToWebviewMessage) => void,
+		currentPrompt: Prompt,
+	): Promise<void> {
+		await this.ensureClaudeChatAvailable();
+		await this.refreshClaudePrompt(prompt);
+		const latest = await this.storageService.getPrompt(prompt.id);
+		const session = latest?.claudeChat?.sessions[0];
+		const allowed = await this.getClaudeWorkspacePaths();
+		if (latest?.chatTarget !== 'claude' || !session || !allowed.has(path.resolve(session.projectPath))
+			|| !(await this.getClaudeChatService().hasSession(session))) {
+			throw new Error('Claude Code: привязанная сессия ещё не создана или недоступна. Отправьте текст в Claude.');
+		}
+		await this.openClaudeChatInSidebar(session.sessionId);
+		if (latest.status !== 'in-progress') {
+			latest.status = 'in-progress';
+			markPromptChatAutoCompleteAfter(latest);
+			await this.storageService.savePrompt(latest, { historyReason: 'status-change' });
+			this.syncClaudePromptToPanels(latest);
+			if (currentPrompt.promptUuid === latest.promptUuid) {
+				Object.assign(currentPrompt, latest);
+				postMessage({ type: 'prompt', prompt: latest, reason: 'sync' });
+			}
+			this._onDidSave.fire(latest.id);
+		}
+		await this.trackClaudePrompt(latest);
+		postMessage({ type: 'chatOpened', promptId: latest.id });
 	}
 
 	private buildExternalChatPayload(
@@ -2615,6 +2975,9 @@ export class EditorPanelManager {
 		if (chatTarget === 'codex') {
 			return this.dispatchCodexChatTarget(prompt, query, fileUris, commands);
 		}
+		if (chatTarget === 'claude') {
+			return this.dispatchClaudeChatTarget(prompt, query, fileUris);
+		}
 
 		return { dispatched: false };
 	}
@@ -2766,10 +3129,10 @@ export class EditorPanelManager {
 		return taskNumber ? `${taskNumber} | ${title}` : title;
 	}
 
-	/** Resolve the latest prompt snapshot for chat rename, even if the prompt id has changed. */
+	/** Восстанавливает актуальную цель и заголовок, даже если промпт был переименован. */
 	private async resolvePromptForChatSessionRename(
 		prompt: Pick<Prompt, 'id' | 'promptUuid' | 'title' | 'taskNumber'> | null,
-	): Promise<Pick<Prompt, 'id' | 'title' | 'taskNumber'> | null> {
+	): Promise<Pick<Prompt, 'id' | 'title' | 'taskNumber' | 'chatTarget'> | null> {
 		const normalizedPromptId = String(prompt?.id || '').trim();
 		if (normalizedPromptId) {
 			const storedById = await this.storageService.getPrompt(normalizedPromptId);
@@ -2797,10 +3160,14 @@ export class EditorPanelManager {
 
 	/** Sync all still-valid bound chat sessions when a saved prompt changes its chat-visible title. */
 	private async scheduleBoundChatSessionRenames(
-		prompt: Pick<Prompt, 'id' | 'promptUuid' | 'title' | 'taskNumber' | 'chatSessionIds'> | null,
+		prompt: Pick<Prompt, 'id' | 'promptUuid' | 'title' | 'taskNumber' | 'chatSessionIds' | 'chatTarget'> | null,
 		previousPrompt: Pick<Prompt, 'id' | 'title' | 'taskNumber'> | null,
 		logSuffix: string = ' (save)',
 	): Promise<void> {
+		if (prompt?.chatTarget === 'claude') {
+			await this.refreshClaudePrompt(prompt);
+			return;
+		}
 		const normalizedPromptId = String(prompt?.id || '').trim();
 		const nextTitle = this.buildChatSessionRenameTitle(prompt);
 		const previousTitle = this.buildChatSessionRenameTitle(previousPrompt);
@@ -2903,6 +3270,9 @@ export class EditorPanelManager {
 		}
 
 		const latestPrompt = await this.resolvePromptForChatSessionRename(promptSnapshot);
+		if (latestPrompt?.chatTarget === 'claude') {
+			return;
+		}
 		const renameTitle = this.buildChatSessionRenameTitle(latestPrompt);
 		if (!renameTitle) {
 			this.hooksOutput.appendLine(
@@ -3310,6 +3680,9 @@ export class EditorPanelManager {
 		if (!freshPrompt) {
 			return { totalMs: 0, sessionsCount: 0, completionOk: false };
 		}
+		if (freshPrompt.chatTarget === 'claude') {
+			return this.refreshClaudePrompt(freshPrompt);
+		}
 
 		const sessionIds = Array.from(new Set(
 			(freshPrompt.chatSessionIds || [])
@@ -3339,6 +3712,16 @@ export class EditorPanelManager {
 
 		let changed = false;
 		const shouldFreezeDerivedTime = EditorPanelManager.shouldFreezeDerivedTime(freshPrompt.status);
+		if (freshPrompt.claudeChat?.copilotAccountedMs !== undefined) {
+			// После смены провайдера не заменяем общее время одной только историей Copilot.
+			const rawCopilotMs = totalMs;
+			const delta = Math.max(0, rawCopilotMs - freshPrompt.claudeChat.copilotAccountedMs);
+			totalMs = (freshPrompt.timeSpentImplementing || 0) + delta;
+			if (!shouldFreezeDerivedTime && delta > 0) {
+				freshPrompt.claudeChat.copilotAccountedMs = rawCopilotMs;
+				changed = true;
+			}
+		}
 		if (!shouldFreezeDerivedTime && totalMs > 0 && freshPrompt.timeSpentImplementing !== totalMs) {
 			freshPrompt.timeSpentImplementing = totalMs;
 			changed = true;
@@ -3427,6 +3810,9 @@ export class EditorPanelManager {
 		options: { allowStatusOverwrite?: boolean } = {},
 	): void {
 		if (existingPrompt) {
+			// Сведения сессии принадлежат host: старый webview-снимок не отменяет новые привязки и начисления.
+			if (existingPrompt.claudeChat) { promptToSave.claudeChat = existingPrompt.claudeChat; }
+			else { delete promptToSave.claudeChat; }
 			const hasConcurrentUpdate = Boolean(
 				promptToSave.updatedAt
 				&& existingPrompt.updatedAt
@@ -7560,11 +7946,7 @@ export class EditorPanelManager {
 		prompt.hooks = [...(lastPromptConfig.hooks || [])];
 
 		// Для старых конфигураций некорректные значения не заменяют безопасные настройки нового промпта.
-		if (lastPromptConfig.chatTarget === 'kilo'
-			|| lastPromptConfig.chatTarget === 'codex'
-			|| lastPromptConfig.chatTarget === 'copilot') {
-			prompt.chatTarget = lastPromptConfig.chatTarget;
-		}
+		prompt.chatTarget = normalizeChatTarget(lastPromptConfig.chatTarget);
 		if (typeof lastPromptConfig.model === 'string') {
 			prompt.model = lastPromptConfig.model.trim();
 		}
@@ -9751,7 +10133,7 @@ export class EditorPanelManager {
 			case 'startChat': {
 				let prompt: Prompt | null = msg.prompt ? { ...msg.prompt } : await this.storageService.getPrompt(msg.id);
 				const skipBranchMismatchCheck = msg.skipBranchMismatchCheck === true;
-				const shouldForceRebindChat = msg.forceRebindChat === true;
+				const shouldForceRebindChat = msg.forceRebindChat === true && prompt?.chatTarget !== 'claude';
 				const startChatRequestId = (msg.requestId || '').trim();
 				const initialStatus = msg.originalStatus || prompt?.status || 'draft';
 				const initialChatSessionIds = [...(prompt?.chatSessionIds || [])];
@@ -9897,6 +10279,9 @@ export class EditorPanelManager {
 							this.hooksOutput.appendLine(`[chat-start] bind skipped for prompt=${promptForSessionBinding.id}: prompt missing in storage`);
 							return false;
 						}
+						if (promptFromStorage.chatTarget === 'claude') {
+							return false;
+						}
 
 						const updatedChatSessionIds = shouldForceRebindChat
 							? [normalizedSessionId]
@@ -9950,6 +10335,7 @@ export class EditorPanelManager {
 					const renameFromId = await this.ensurePromptIdMatchesTitle(prompt, promptPreviousId);
 					const existingBeforeChat = await this.storageService.getPrompt(renameFromId || prompt.id);
 					if (existingBeforeChat) {
+						prompt.claudeChat = existingBeforeChat.claudeChat;
 						prompt.timeSpentWriting = Math.max(prompt.timeSpentWriting || 0, existingBeforeChat.timeSpentWriting || 0);
 						prompt.timeSpentImplementing = Math.max(prompt.timeSpentImplementing || 0, existingBeforeChat.timeSpentImplementing || 0);
 						prompt.timeSpentOnTask = Math.max(prompt.timeSpentOnTask || 0, existingBeforeChat.timeSpentOnTask || 0);
@@ -10108,6 +10494,13 @@ export class EditorPanelManager {
 						try {
 							const commands = await vscode.commands.getCommands(true);
 							const dispatchResult = await this.dispatchExternalChatTarget(chatTarget, prompt, query, fileUris, commands);
+							if (chatTarget === 'claude') {
+								const latest = await this.storageService.getPrompt(prompt.id) || prompt;
+								if (currentPrompt.promptUuid === latest.promptUuid) {
+									Object.assign(currentPrompt, latest);
+									postMessage({ type: 'prompt', prompt: latest, reason: 'sync' });
+								}
+							}
 							chatMessageDispatched = dispatchResult.dispatched;
 							await appendPromptAiLog({
 								kind: 'chat',
@@ -10613,12 +11006,16 @@ export class EditorPanelManager {
 						);
 						if (shouldFinalizeTrackedCompletion) {
 							const promptToComplete = await this.storageService.getPrompt(prompt.id);
+							if (promptToComplete?.chatTarget === 'claude') {
+								return;
+							}
 							if (promptToComplete) {
 								const shouldFreezeDerivedTime = EditorPanelManager.shouldFreezeDerivedTime(promptToComplete.status);
 								const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
 								const endedAt = Number(completion.lastRequestEnded || Date.now());
 								const implementingDelta = Math.max(0, endedAt - startedAt);
-								if (!shouldFreezeDerivedTime && implementingDelta > 0) {
+								if (!shouldFreezeDerivedTime && implementingDelta > 0
+									&& promptToComplete.claudeChat?.copilotAccountedMs === undefined) {
 									promptToComplete.timeSpentImplementing = (promptToComplete.timeSpentImplementing || 0) + implementingDelta;
 								} else if (shouldFreezeDerivedTime && implementingDelta > 0) {
 									this.hooksOutput.appendLine(
@@ -10692,12 +11089,16 @@ export class EditorPanelManager {
 
 						if (chatReportHtml) {
 							const promptForTiming = await this.storageService.getPrompt(prompt.id);
+							if (promptForTiming?.chatTarget === 'claude') {
+								return;
+							}
 							if (promptForTiming) {
 								const shouldFreezeDerivedTime = EditorPanelManager.shouldFreezeDerivedTime(promptForTiming.status);
 								const startedAt = Number(completion.lastRequestStarted || requestStartTimestamp);
 								const endedAt = Number(completion.lastRequestEnded || Date.now());
 								const implementingDelta = Math.max(0, endedAt - startedAt);
-								if (!shouldFreezeDerivedTime && implementingDelta > 0) {
+								if (!shouldFreezeDerivedTime && implementingDelta > 0
+									&& promptForTiming.claudeChat?.copilotAccountedMs === undefined) {
 									promptForTiming.timeSpentImplementing = (promptForTiming.timeSpentImplementing || 0) + implementingDelta;
 								} else if (shouldFreezeDerivedTime && implementingDelta > 0) {
 									this.hooksOutput.appendLine(
@@ -10751,6 +11152,10 @@ export class EditorPanelManager {
 							return;
 						}
 
+						// Старый Copilot tracker не меняет новую Claude-задачу и не запускает её error hooks.
+						if ((await this.storageService.getPrompt(prompt.id))?.chatTarget === 'claude') {
+							return;
+						}
 						let chatErrorStatus = prompt?.status || 'in-progress';
 						const terminalErrorStatus = this.resolveTerminalStatusFromHooks(
 							prompt?.hooks || [],
@@ -10758,6 +11163,9 @@ export class EditorPanelManager {
 						);
 						if (terminalErrorStatus && prompt?.id) {
 							const promptToStop = await this.storageService.getPrompt(prompt.id);
+							if (promptToStop?.chatTarget === 'claude') {
+								return;
+							}
 							if (promptToStop) {
 								chatErrorStatus = promptToStop.status;
 								if (promptToStop.status !== terminalErrorStatus) {
@@ -10814,6 +11222,15 @@ export class EditorPanelManager {
 			}
 
 			case 'openChat': {
+				const targetPrompt = await this.storageService.getPrompt(msg.id || currentPrompt.id) || currentPrompt;
+				if (targetPrompt.chatTarget === 'claude') {
+					try {
+						await this.openBoundClaudeChat(targetPrompt, postMessage, currentPrompt);
+					} catch (error) {
+						postMessage({ type: 'error', message: error instanceof Error ? error.message : 'Claude Code недоступен.' });
+					}
+					break;
+				}
 				let sessionIdToOpen = String(msg.sessionId || '').trim();
 				let hadBoundSessionRequest = Boolean(sessionIdToOpen);
 				const promptIdToOpen = String(msg.id || currentPrompt.id || '').trim();
@@ -10919,6 +11336,14 @@ export class EditorPanelManager {
 			}
 
 			case 'openChatPanel': {
+				if (currentPrompt.chatTarget === 'claude') {
+					try {
+						await this.openBoundClaudeChat(currentPrompt, postMessage, currentPrompt);
+					} catch (error) {
+						postMessage({ type: 'error', message: error instanceof Error ? error.message : 'Claude Code недоступен.' });
+					}
+					break;
+				}
 				const chatTarget = this.normalizeChatTarget(currentPrompt.chatTarget);
 				if (currentPrompt.id && currentPrompt.status !== 'in-progress') {
 					const promptFromStorage = await this.storageService.getPrompt(currentPrompt.id);
@@ -10955,6 +11380,13 @@ export class EditorPanelManager {
 			}
 
 			case 'stopChat': {
+				const targetPrompt = await this.storageService.getPrompt(msg.id || currentPrompt.id) || currentPrompt;
+				if (targetPrompt.chatTarget === 'claude') {
+					postMessage({ type: 'info', message: vscode.env.language.startsWith('ru')
+						? 'Остановите запрос кнопкой Stop в Claude Code. Изменение статуса промпта не останавливает запрос.'
+						: 'Stop the request inside Claude Code. Changing the prompt status does not stop the request.' });
+					break;
+				}
 				const stopChatCommands = await this.getAvailableStopChatCommands();
 				let sessionIdToStop = '';
 				let hadBoundSessionRequest = false;
@@ -12536,7 +12968,9 @@ export class EditorPanelManager {
 					}
 					break;
 				}
-				const sessionIds = prompt.chatSessionIds || [];
+				const sessionIds = prompt.chatTarget === 'claude'
+					? prompt.claudeChat?.sessions.map(session => session.sessionId) || []
+					: prompt.chatSessionIds || [];
 				if (sessionIds.length === 0) {
 					if (isSilentRecalc) {
 						postMessage({
@@ -12626,6 +13060,14 @@ export class EditorPanelManager {
 
 	/** Close all open panels */
 	disposeAll(): void {
+		for (const tracking of this.claudeChatTracking.values()) {
+			tracking.dispose();
+		}
+		this.claudeChatTracking.clear();
+		this.claudeChatRefreshAgain.clear();
+		this.claudeChatRenamedTitles.clear();
+		this.claudeChatService?.dispose();
+		this.claudeChatService = undefined;
 		this.clearGlobalAgentContextSyncTimer();
 		if (this.promptEditorTabCleanupTimer) {
 			clearTimeout(this.promptEditorTabCleanupTimer);

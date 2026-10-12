@@ -499,6 +499,15 @@ const en: Record<string, string> = {
 	'editor.chatTargetCopilot': 'Copilot Chat',
 	'editor.chatTargetKilo': 'Kilo Code',
 	'editor.chatTargetCodex': 'OpenAI Codex',
+	// Название интеграции Claude Code в выборе чата и прогрессе запуска.
+	'editor.chatTargetClaude': 'Claude Code',
+	'editor.claudeAutoSendUnavailable': 'Claude input focus cannot be verified. The prompt is prepared, but submission remains manual even when this flag is enabled.',
+	// Подготовка Claude и подтвержденная привязка показываются отдельно, без фиктивного успеха отправки.
+	'editor.claudeChatPending': 'Waiting for the first message in Claude Code and session binding.',
+	'editor.claudeChatBoundCount': 'Bound Claude Code sessions',
+	'editor.claudeChatNotBound': 'No Claude Code session is bound yet.',
+	'editor.claudeChatLaunchStarting': 'Opening Claude Code and preparing the prompt.',
+	'editor.claudeChatLaunchHint': 'Session binding appears after the first message is sent in Claude Code.',
 	'editor.autoStartChat': 'Autostart Copilot Chat',
 	'editor.autoStartChatHint': 'When enabled, sends the prepared prompt through the current Copilot Chat command.',
 	'editor.autoStartChatWithXdotool': 'Autostart chat via Xdotool',
@@ -1629,6 +1638,15 @@ const ru: Record<string, string> = {
 	'editor.chatTargetCopilot': 'Copilot Chat',
 	'editor.chatTargetKilo': 'Kilo Code',
 	'editor.chatTargetCodex': 'OpenAI Codex',
+	// Название интеграции Claude Code в выборе чата и прогрессе запуска.
+	'editor.chatTargetClaude': 'Claude Code',
+	'editor.claudeAutoSendUnavailable': 'Фокус поля Claude нельзя подтвердить. Текст подготавливается, но отправка остаётся ручной даже при включённом флаге.',
+	// Подготовка Claude и подтвержденная привязка показываются отдельно, без фиктивного успеха отправки.
+	'editor.claudeChatPending': 'Ожидается первое сообщение в Claude Code и подтверждение привязки.',
+	'editor.claudeChatBoundCount': 'Привязано сессий Claude Code',
+	'editor.claudeChatNotBound': 'Сессия Claude Code пока не привязана.',
+	'editor.claudeChatLaunchStarting': 'Открываем Claude Code и подготавливаем промпт.',
+	'editor.claudeChatLaunchHint': 'Привязка появится после отправки первого сообщения в Claude Code.',
 	'editor.autoStartChat': 'Автостарт Copilot Chat',
 	'editor.autoStartChatHint': 'При включении подготовленный промпт отправляется через текущую команду Copilot Chat.',
 	'editor.autoStartChatWithXdotool': 'Автостарт чата через Xdotool',

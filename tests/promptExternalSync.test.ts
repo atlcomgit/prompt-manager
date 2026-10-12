@@ -59,7 +59,7 @@ test('normalizePromptExternalChangedAt prefers config updatedAt and falls back t
 	assert.equal(normalizePromptExternalChangedAt('', null), null);
 });
 
-/** Проверяет синхронизацию автостарта вместе с остальными внешними изменениями. */
+/** Проверяет синхронизацию Claude и автостарта без перезаписи более свежих локальных полей. */
 test('mergePromptExternalConfig preserves only locally newer fields and applies the rest from external config', () => {
 	const currentPrompt = makePrompt({
 		title: 'Local title',
@@ -71,6 +71,7 @@ test('mergePromptExternalConfig preserves only locally newer fields and applies 
 		title: 'External title',
 		status: 'completed',
 		taskNumber: '61-external',
+		chatTarget: 'claude',
 		autoStartChat: false,
 		autoStartChatWithXdotool: true,
 		notes: 'Updated by external agent',
@@ -90,15 +91,18 @@ test('mergePromptExternalConfig preserves only locally newer fields and applies 
 	assert.equal(result.mergedPrompt.status, 'review');
 	assert.equal(result.mergedPrompt.title, 'External title');
 	assert.equal(result.mergedPrompt.taskNumber, '61-external');
+	assert.equal(result.mergedPrompt.chatTarget, 'claude');
 	assert.equal(result.mergedPrompt.autoStartChatWithXdotool, true);
 	assert.equal(result.mergedPrompt.notes, 'Updated by external agent');
 	assert.equal(result.mergedPrompt.updatedAt, '2026-04-09T10:00:00.000Z');
 	assert.deepEqual(result.preservedLocalFields, ['status']);
-	assert.deepEqual(result.appliedExternalFields.sort(), ['autoStartChat', 'autoStartChatWithXdotool', 'notes', 'taskNumber', 'title']);
+	assert.deepEqual(result.appliedExternalFields.sort(), [
+		'autoStartChat', 'autoStartChatWithXdotool', 'chatTarget', 'notes', 'taskNumber', 'title',
+	]);
 	assert.equal(result.hasChanges, true);
 });
 
-/** Проверяет применение снимка конфигурации без изменения текста и отчета. */
+/** Проверяет применение выбора Claude из снимка конфигурации без изменения текста и отчета. */
 test('applyPromptConfigSnapshotToPrompt updates config fields and keeps content/report intact', () => {
 	const currentPrompt = makePrompt({
 		content: 'Local content',
@@ -108,6 +112,7 @@ test('applyPromptConfigSnapshotToPrompt updates config fields and keeps content/
 	});
 	const configSnapshot = makePrompt({
 		status: 'review',
+		chatTarget: 'claude',
 		autoStartChat: false,
 		autoStartChatWithXdotool: true,
 		notes: 'Synced notes',
@@ -118,6 +123,7 @@ test('applyPromptConfigSnapshotToPrompt updates config fields and keeps content/
 	const updatedPrompt = applyPromptConfigSnapshotToPrompt(currentPrompt, configSnapshot);
 
 	assert.equal(updatedPrompt.status, 'review');
+	assert.equal(updatedPrompt.chatTarget, 'claude');
 	assert.equal(updatedPrompt.autoStartChat, false);
 	assert.equal(updatedPrompt.autoStartChatWithXdotool, true);
 	assert.equal(updatedPrompt.notes, 'Synced notes');
@@ -125,4 +131,21 @@ test('applyPromptConfigSnapshotToPrompt updates config fields and keeps content/
 	assert.equal(updatedPrompt.updatedAt, '2026-04-09T11:00:00.000Z');
 	assert.equal(updatedPrompt.content, 'Local content');
 	assert.equal(updatedPrompt.report, 'Local report');
+});
+
+/** Не позволяет старому внешнему снимку отменить локальный выбор Claude или его флаг Xdotool. */
+test('mergePromptExternalConfig preserves newer local Claude target and Xdotool selection', () => {
+	const currentPrompt = makePrompt({ chatTarget: 'claude', autoStartChatWithXdotool: true });
+	const externalPrompt = makePrompt({ chatTarget: 'copilot', autoStartChatWithXdotool: false });
+	const result = mergePromptExternalConfig(
+		currentPrompt,
+		externalPrompt,
+		{ chatTarget: 200, autoStartChatWithXdotool: 200 },
+		100,
+	);
+
+	assert.equal(result.mergedPrompt.chatTarget, 'claude');
+	assert.equal(result.mergedPrompt.autoStartChatWithXdotool, true);
+	assert.deepEqual(result.preservedLocalFields, ['chatTarget', 'autoStartChatWithXdotool']);
+	assert.deepEqual(result.appliedExternalFields, []);
 });

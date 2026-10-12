@@ -2,11 +2,13 @@
  * Core type definitions for Prompt Manager extension
  */
 
+import type { ClaudeChatState } from './claudeChat.js';
+
 /** Prompt status */
 export type PromptStatus = 'draft' | 'in-progress' | 'stopped' | 'cancelled' | 'completed' | 'report' | 'review' | 'closed';
 
-/** Target chat integration used by Start Chat. */
-export type PromptChatTarget = 'copilot' | 'kilo' | 'codex';
+/** Целевая интеграция для запуска чата; значения проверяет tests/promptConfig.test.ts. */
+export type PromptChatTarget = 'copilot' | 'kilo' | 'codex' | 'claude';
 
 /** Canonical order of prompt statuses used in UI controls and grouping */
 export const PROMPT_STATUS_ORDER: PromptStatus[] = [
@@ -435,7 +437,7 @@ export interface PromptConfig {
 	// --- Chat mode ---
 	/** Chat mode: 'agent' | 'plan' */
 	chatMode: 'agent' | 'plan';
-	/** Chat target: Copilot Chat, Kilo Code, or OpenAI Codex */
+	/** Целевой чат: Copilot Chat, Kilo Code, OpenAI Codex или Claude Code. */
 	chatTarget?: PromptChatTarget;
 	/** Определяет, нужно ли сразу отправлять подготовленный запрос в Copilot Chat. */
 	autoStartChat?: boolean;
@@ -451,6 +453,8 @@ export interface PromptConfig {
 	// --- Chat integration ---
 	/** Associated Copilot chat session IDs */
 	chatSessionIds: string[];
+	/** Привязки Claude изолированы от Copilot; проверка: tests/claudeChat.test.ts. */
+	claudeChat?: ClaudeChatState;
 	/** Auto-complete only after a chat request started at/after this timestamp (ms). */
 	chatRequestAutoCompleteAfter?: number;
 

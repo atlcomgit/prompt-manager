@@ -12296,10 +12296,12 @@ export class EditorPanelManager {
 					type: result.errors.length > 0 ? 'error' : 'info',
 					message: this.describeGitMultiProjectResult(result, `Push ветки ${msg.branch || 'текущей'} выполнен`),
 				});
-				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
+				// Webview держит индикатор push до snapshot, пришедшего после gitOverlayActionCompleted.
+				// Push меняет только refs/remotes, которые watcher игнорирует, поэтому другого snapshot не будет.
 				if (result.errors.length === 0) {
 					postMessage({ type: 'gitOverlayActionCompleted', action: 'push' });
 				}
+				await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects);
 				break;
 			}
 

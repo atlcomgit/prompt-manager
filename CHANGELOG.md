@@ -6,6 +6,12 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-10-14
+
+#### Fixed
+- Git Flow: the "Push branches for all projects" button no longer spins forever after a successful push. The push
+  completion is now reported before the final overlay snapshot, so the spinner is released by that snapshot.
+
 ### 2026-10-12
 
 #### Added

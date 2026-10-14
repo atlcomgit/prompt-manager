@@ -2267,6 +2267,52 @@ test('gitOverlayCreateReviewRequest refreshes the current overlay scope with the
 	resetVsCodeCommandMock();
 });
 
+/** Проверяет, что push сообщает о завершении до snapshot, иначе webview бесконечно ждёт следующий snapshot. */
+test('gitOverlayPush posts action completion before the final overlay snapshot', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		workspaceService: {
+			getWorkspaceFolderPaths: () => new Map([['api', '/tmp/api']]),
+			getWorkspaceFolders: () => ['api'],
+		},
+	});
+
+	// Общий журнал сообщений webview и вызовов snapshot фиксирует порядок отправки.
+	const events: string[] = [];
+	(manager as any).gitService = {
+		pushBranch: async () => ({ success: true, errors: [], changedProjects: ['api'], skippedProjects: [] }),
+	};
+	(manager as any).postGitOverlaySnapshot = async () => {
+		events.push('snapshot');
+		return null;
+	};
+
+	const panel = {
+		visible: true,
+		webview: {
+			postMessage: async (message: unknown) => {
+				events.push(`message:${(message as any)?.type}`);
+				return true;
+			},
+		},
+	} as any;
+	const currentPrompt = createPrompt({ id: 'prompt-a', promptUuid: 'uuid-a', title: 'Prompt A', projects: ['api'] });
+
+	await (manager as any).handleMessage(
+		{ type: 'gitOverlayPush', promptBranch: '', projects: ['api'] },
+		panel,
+		currentPrompt,
+		'__prompt_editor_singleton__',
+		() => false,
+		() => undefined,
+	);
+
+	const completedIndex = events.indexOf('message:gitOverlayActionCompleted');
+	assert.notEqual(completedIndex, -1);
+	assert.ok(completedIndex < events.indexOf('snapshot'));
+	resetVsCodeCommandMock();
+});
+
 test('gitOverlayCreateReviewRequest replays the cached overlay snapshot when reread fails after bulk MR/PR creation', async () => {
 	resetVsCodeCommandMock();
 	const { manager } = await createManager({

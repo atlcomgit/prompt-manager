@@ -15,7 +15,8 @@ import { applyPriorityToExecFilePromise } from '../utils/backgroundTaskPriority.
 const execFileAsync = promisify(execFile);
 
 /** Version marker inside hook files for upgrade detection */
-const HOOK_VERSION = '1';
+// Версия 2: исправлено экранирование кавычек в awk (лишний обратный слеш обрывал строку).
+const HOOK_VERSION = '2';
 
 /** Marker comment identifying hooks managed by this extension */
 const HOOK_MARKER = '# prompt-manager-memory-hook';
@@ -311,8 +312,8 @@ export class MemoryGitHookService {
     {
       status=$1; path=$NF; oldPath=""
       if (status ~ /^[RC]/) { oldPath=$2; path=$3 }
-      gsub(/"/, "\\\\\\\\\\\\\"", path)
-      gsub(/"/, "\\\\\\\\\\\\\"", oldPath)
+      gsub(/"/, "\\\\\\\"", path)
+      gsub(/"/, "\\\\\\\"", oldPath)
       if (oldPath != "") {
         printf "{\\"status\\":\\"%s\\",\\"path\\":\\"%s\\",\\"oldPath\\":\\"%s\\"}", substr(status,1,1), path, oldPath
       } else {

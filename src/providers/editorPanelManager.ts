@@ -84,6 +84,7 @@ import {
 	applyGitOverlayOtherProjectsExcludedPaths,
 	buildGitOverlayReviewCliSetupCommand,
 	normalizeGitOverlayOtherProjectsExcludedPaths,
+	replaceGeneratedCommitMessageTrackedBranch,
 	resolveGitOverlaySnapshotProjectScope,
 } from '../utils/gitOverlay.js';
 import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
@@ -12493,6 +12494,9 @@ export class EditorPanelManager {
 
 				try {
 					const promptSnapshot = msg.prompt;
+					// Фиксируем правило до await: поздний результат не должен использовать другую задачу или настройку.
+					const taskNumber = promptSnapshot.taskNumber;
+					const trackedBranches = this.getTrackedBranchesSetting();
 					const paths = this.workspaceService.getWorkspaceFolderPaths();
 					const projects = this.resolveGitOverlayProjects(promptSnapshot.projects || [], currentPrompt);
 					const generationProjects = Array.isArray(msg.projects) && msg.projects.length > 0
@@ -12565,8 +12569,14 @@ export class EditorPanelManager {
 							project: string;
 							message: string;
 							scmCleanupToken?: string;
-						} = { project: projectData.project, message: generatedMessage };
+						} = {
+							project: projectData.project,
+							message: replaceGeneratedCommitMessageTrackedBranch(
+								generatedMessage, taskNumber, promptBranch, trackedBranches,
+							),
+						};
 						if (generatedViaScm) {
+							// Cleanup token сопоставляется с исходным SCM-текстом, а не с исправленным префиксом.
 							generatedScmInputs.push({
 								messageIndex: generatedMessages.length,
 								projectPath: projectData.projectPath,

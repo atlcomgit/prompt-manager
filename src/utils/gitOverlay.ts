@@ -991,6 +991,31 @@ export function resolveGitOverlayDonePersistence(
 	};
 }
 
+/** Заменяет только tracked-ветку в заданном префиксе; проверки: gitOverlay.test.ts и editorPanelManager.test.ts. */
+export function replaceGeneratedCommitMessageTrackedBranch(
+	message: string,
+	taskNumber: string,
+	promptBranch: string,
+	trackedBranches: string[],
+): string {
+	// Номер остаётся строкой; разделитель и переводы строк не должны менять структуру сообщения.
+	const normalizedTaskNumber = taskNumber.trim();
+	if (!normalizedTaskNumber || /[\r\n|]/u.test(normalizedTaskNumber)) {
+		return message;
+	}
+
+	// Меняем только ветку первой строки, сохраняя подпись, пробелы, разделитель и всё тело коммита.
+	return message.replace(
+		/^([ \t]*🅰️🅻🅴🅺[ \t]+)([^\s|]+)([ \t]*\|)/u,
+		(match, prefix: string, branch: string, separator: string) => {
+			if (branch === promptBranch.trim() || !trackedBranches.some(tracked => tracked.trim() === branch)) {
+				return match;
+			}
+			return `${prefix}${normalizedTaskNumber}${separator}`;
+		},
+	);
+}
+
 export function normalizeCommitMessageGenerationInstructions(value: unknown): string {
 	if (typeof value === 'string') {
 		return value.trim();

@@ -25,6 +25,10 @@
 - Что сделано: описан текущий неполный результат задачи 167. Новый целевой чат Claude открывает подготовленный
   текст в боковой панели через `editor.open` с `honor-preferred-location`; Agent/Plan передаются текстом, без изменения
   выбранной модели и разрешений Claude.
+- Дополнение от 2026-10-20: Git Flow заменяет tracked-ветку между точной подписью 🅰️🅻🅴🅺 и | на номер задачи,
+  если это не ветка промпта. Номер и настройки фиксируются до генерации; текст после разделителя и ручной commit
+  сохраняются. Порядок Kilo → Copilot → внутренний генератор не меняется; SCM очищается по исходному ответу.
+  Проверены положительные и отрицательные случаи, все генераторы, single/all, смена промпта и raw SCM cleanup.
 - Ключевые моменты: привязка выполняется только после ручной отправки по полному UUID-маркеру нового запуска.
   Исправлен принудительный запуск editor tab: перед открытием ожидается запись preferredLocation=sidebar
   на прежнем workspace/global уровне. Пользовательские вкладки автоматически не закрываются.
@@ -56,6 +60,7 @@
     src/types/claudeChat.ts
     src/types/prompt.ts
     src/utils/claudeChat.ts
+    src/utils/gitOverlay.ts
     src/utils/promptConfig.ts
     src/webview/editor/EditorApp.tsx
     tests/chatLaunchOpenStepLabel.test.ts
@@ -63,6 +68,7 @@
     tests/claudeChatSessionService.test.ts
     tests/editorApp.test.tsx
     tests/editorPanelManager.test.ts
+    tests/gitOverlay.test.ts
     tests/promptConfig.test.ts
     tests/promptExternalSync.test.ts
     tests/storageServiceContextFiles.test.ts

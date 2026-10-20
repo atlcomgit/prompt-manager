@@ -18,6 +18,7 @@ import {
 	isGitOverlayStartChatBranchAllowed,
 	normalizeGitOverlayReviewRequestState,
 	normalizeCommitMessageGenerationInstructions,
+	replaceGeneratedCommitMessageTrackedBranch,
 	parseGitOverlayRemoteUrl,
 	resolveGitOverlayBusyActionName,
 	resolveGitOverlayBulkCommitMessages,
@@ -3856,6 +3857,50 @@ test('resolveChangeDiffStats hides zero additions and deletions and preserves sp
 		resolveChangeDiffStats({ conflicted: false, isBinary: true, additions: 3, deletions: 1 }),
 		{ kind: 'special', additions: 0, deletions: 0, specialLabel: 'binary' },
 	);
+});
+
+/** Проверяет замену только разрешённого идентификатора без переформатирования сообщения. */
+test('replaceGeneratedCommitMessageTrackedBranch preserves the message outside the tracked branch', () => {
+	// Примеры включают другую tracked-ветку, тело с повторным префиксом и буквальные символы замены.
+	const cases = [
+		['🅰️🅻🅴🅺 master | текст коммита', '167', '🅰️🅻🅴🅺 167 | текст коммита'],
+		['🅰️🅻🅴🅺 develop| текст', '00167', '🅰️🅻🅴🅺 00167| текст'],
+		[' \t🅰️🅻🅴🅺\tmaster  | master\r\n\r\n🅰️🅻🅴🅺 master | тело', ' 167 ',
+			' \t🅰️🅻🅴🅺\t167  | master\r\n\r\n🅰️🅻🅴🅺 master | тело'],
+		['🅰️🅻🅴🅺 master | текст', 'TASK-$&', '🅰️🅻🅴🅺 TASK-$& | текст'],
+	];
+	for (const [message, taskNumber, expected] of cases) {
+		assert.equal(
+			replaceGeneratedCommitMessageTrackedBranch(message, taskNumber, 'feature/167', ['master', ' develop ']),
+			expected,
+		);
+	}
+});
+
+/** Проверяет отсутствие замены ветки промпта, другого префикса и некорректного номера задачи. */
+test('replaceGeneratedCommitMessageTrackedBranch leaves unrelated and incomplete messages unchanged', () => {
+	// Каждая строка проверяет отдельное ограничение; готовый номер и текст тела не переписываются.
+	const cases: Array<[string, string, string, string[]]> = [
+		['🅰️🅻🅴🅺 master | текст', '167', ' master ', ['master']],
+		['🅰️🅻🅴🅺 feature/167 | текст', '167', 'feature/167', ['feature/167']],
+		['🅰️🅻🅴🅺 feature/other | текст', '167', '', ['master']],
+		['🅰️🅻🅴🅺 master-extra | текст', '167', '', ['master']],
+		['🅰️🅻🅴🅺 167 | текст', '167', '', ['master']],
+		['Другой автор master | текст', '167', '', ['master']],
+		['🅰️🅻🅴🅺 master: текст', '167', '', ['master']],
+		['Текст\n🅰️🅻🅴🅺 master | тело', '167', '', ['master']],
+		['🅰️🅻🅴🅺\nmaster | текст', '167', '', ['master']],
+		['🅰️🅻🅴🅺 master | текст', '  ', '', ['master']],
+		['🅰️🅻🅴🅺 master | текст', '167\n168', '', ['master']],
+		['🅰️🅻🅴🅺 master | текст', '167|168', '', ['master']],
+		['🅰️🅻🅴🅺 master | текст', '167', '', []],
+	];
+	for (const [message, taskNumber, promptBranch, trackedBranches] of cases) {
+		assert.equal(
+			replaceGeneratedCommitMessageTrackedBranch(message, taskNumber, promptBranch, trackedBranches),
+			message,
+		);
+	}
 });
 
 test('normalizeCommitMessageGenerationInstructions supports strings, arrays and invalid values', () => {

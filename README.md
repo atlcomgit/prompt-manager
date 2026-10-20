@@ -122,6 +122,7 @@ Prompt Manager stores prompt assets inside the workspace, so they travel with th
 
 ```text
 .vscode/prompt-manager/
+├── task-active.json
 ├── my-prompt/
 │   ├── config.json
 │   ├── prompt.md
@@ -129,6 +130,27 @@ Prompt Manager stores prompt assets inside the workspace, so they travel with th
 │   └── report.txt
 └── chat-memory/
 ```
+
+При открытии промпта, изменении или начальном восстановлении его выделения в списке расширение обновляет
+`task-active.json` в корне хранилища Prompt Manager. Файл содержит `id` (имя папки промпта),
+`promptUuid`, `taskNumber` (строка), `title`, `archived` и `promptDirectory` (абсолютный путь к папке).
+Путь учитывает архив и переименование. Например:
+
+```json
+{
+  "id": "123-example",
+  "promptUuid": "example-uuid",
+  "taskNumber": "123",
+  "title": "Пример задачи",
+  "archived": false,
+  "promptDirectory": "/workspace/project/.vscode/prompt-manager/123-example"
+}
+```
+
+Для промпта без номера `taskNumber` равен `""`; при снятии выделения или открытии нового,
+ещё не сохранённого промпта файл содержит `null`. Быстрое переключение сохраняет последний выбор;
+запись выполняется в фоне и заменяет файл целиком, без промежуточного неполного JSON.
+Название и номер берутся из сохранённой конфигурации при выборе или открытии, а не при каждом вводе текста.
 
 ## License
 

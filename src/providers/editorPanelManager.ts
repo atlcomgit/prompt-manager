@@ -7871,10 +7871,12 @@ export class EditorPanelManager {
 		};
 	}
 
-	/** Open or focus an editor panel for a prompt. */
+	/** Открывает промпт и сохраняет выбор без задержки интерфейса; проверки: editorPanelManager.test.ts. */
 	async openPrompt(target: string | PromptOpenTarget): Promise<void> {
 		this.pendingOpenPromptTarget = this.normalizePromptOpenTarget(target);
 		this.openPromptRequestVersion += 1;
+		// Регистрируем выбор сразу: поздняя загрузка не должна затереть более новое выделение в списке.
+		void this.storageService.saveActiveTask(this.pendingOpenPromptTarget.id, this.pendingOpenPromptTarget.promptUuid);
 
 		if (!this.openPromptQueue) {
 			this.openPromptQueue = this.processPendingOpenPromptRequests().finally(() => {

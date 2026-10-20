@@ -161,11 +161,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		this.postMessage({ type: 'sidebarSelectionChanged', id: normalizedId });
 	}
 
-	/** Handle messages from sidebar webview */
+	/** Обрабатывает действия списка, включая сохранение выбора; проверки: sidebarProvider.test.ts. */
 	private async handleMessage(msg: WebviewToExtensionMessage): Promise<void> {
 		switch (msg.type) {
 			case 'ready':
 			case 'getPrompts': {
+				// Восстановление списка не должно перезаписать более новый выбор редактора или пользователя.
+				const restoredState = this.stateService.getSidebarState();
+				void this.storageService.saveActiveTask(
+					restoredState.selectedPromptId, restoredState.selectedPromptUuid, { onlyIfUnset: true },
+				);
 				await this.refreshList();
 				const state = this.stateService.getSidebarState();
 				this.postMessage({ type: 'sidebarState', state });
@@ -259,6 +264,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			}
 
 			case 'saveSidebarState': {
+				// Фильтры и сортировка не должны повторно объявлять старое выделение активной задачей.
+				const previousState = this.stateService.getSidebarState();
+				if (previousState.selectedPromptId !== msg.state.selectedPromptId
+					|| previousState.selectedPromptUuid !== msg.state.selectedPromptUuid) {
+					void this.storageService.saveActiveTask(msg.state.selectedPromptId, msg.state.selectedPromptUuid);
+				}
 				await this.stateService.saveSidebarState(msg.state);
 				break;
 			}

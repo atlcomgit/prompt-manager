@@ -1,3 +1,22 @@
+## Без номера: Сохранение выбранной задачи в task-active.json
+
+- Дата: 2026-10-20.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: открытие промпта и изменение выделения списка сохраняют номер и название текущей задачи
+  вместе с идентификаторами, признаком архива и абсолютным путём к папке (`promptDirectory`) в task-active.json.
+- Ключевые моменты: последовательная атомарная запись не блокирует открытие и не публикует устаревшие
+  снимки; новый несохранённый промпт и пустое выделение записывают null; сохранённый номер остаётся строкой.
+- Файлы:
+    CHANGELOG.md
+    README.md
+    src/providers/editorPanelManager.ts
+    src/providers/sidebarProvider.ts
+    src/services/storageService.ts
+    tests/editorPanelManager.test.ts
+    tests/sidebarProvider.test.ts
+    tests/storageServiceContextFiles.test.ts
+
 ## 167: Частичная интеграция Claude Code
 
 - Дата: 2026-10-12.

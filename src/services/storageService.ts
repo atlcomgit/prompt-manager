@@ -111,6 +111,10 @@ export class StorageService implements vscode.Disposable {
 	private externalConfigChangeTimer: NodeJS.Timeout | null = null;
 	private pendingExternalConfigChanges = new Map<string, ExternalPromptConfigChange>();
 	private internalWatchedFileWriteSuppressionByPath = new Map<string, number>();
+	/** Последовательная запись выбранной задачи не допускает одновременной замены одного файла. */
+	private activeTaskWriteQueue: Promise<void> = Promise.resolve();
+	/** Новое выделение отменяет ещё не опубликованный снимок предыдущего промпта. */
+	private activeTaskRequestVersion = 0;
 
 	/** Writes prompt-load diagnostics into the shared Prompt Manager output channel. */
 	private logStoragePerf(event: string, payload?: Record<string, unknown>): void {
@@ -551,6 +555,86 @@ export class StorageService implements vscode.Disposable {
 	/** Get absolute path to storage directory */
 	getStorageDirectoryPath(): string {
 		return this.storageDir;
+	}
+
+	/**
+	 * Сохраняет выбранную задачу без чтения текста и отчёта; проверки: storageServiceContextFiles.test.ts.
+	 * onlyIfUnset восстанавливает начальное выделение, только если ещё не зарегистрирован другой выбор.
+	 */
+	saveActiveTask(
+		promptId: string | null,
+		promptUuid?: string | null,
+		options: { onlyIfUnset?: boolean } = {},
+	): Promise<void> {
+		if (options.onlyIfUnset && this.activeTaskRequestVersion > 0) {
+			return this.activeTaskWriteQueue;
+		}
+		// Версию фиксируем до первого await, чтобы медленное чтение не меняло порядок пользовательских действий.
+		const requestVersion = ++this.activeTaskRequestVersion;
+		const id = (promptId || '').trim();
+		const uuid = (promptUuid || '').trim();
+		const writeTask = this.activeTaskWriteQueue.then(async () => {
+			if (requestVersion !== this.activeTaskRequestVersion) {
+				return;
+			}
+
+			// Пустой выбор и новый несохранённый промпт явно снимают прежнюю активную задачу.
+			let activeTask: (Pick<PromptConfig, 'id' | 'promptUuid' | 'taskNumber' | 'title' | 'archived'> & {
+				/** Абсолютный путь к фактической папке, включая архив и переименование. */
+				promptDirectory: string;
+			}) | null = null;
+			if (id && id !== '__new__') {
+				// Идентификатор каталога не должен позволять читать конфигурацию за пределами хранилища.
+				if (id === '.' || id === '..' || /[/\\\0]/.test(id) || this.isReservedPromptDirName(id)) {
+					return;
+				}
+				let location = this.resolvePromptStorageLocationSync(id);
+				// После переименования редактор также восстанавливает промпт по стабильному UUID.
+				if (!location && uuid) {
+					const canonicalId = await this.findPromptIdByUuid(uuid);
+					location = canonicalId ? this.resolvePromptStorageLocationSync(canonicalId) : null;
+				}
+				if (!location) {
+					return;
+				}
+				const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(
+					path.join(location.dirPath, this.CONFIG_FILE_NAME),
+				));
+				const config = JSON.parse(Buffer.from(raw).toString('utf-8')) as Partial<PromptConfig> | null;
+				if (!config || typeof config !== 'object' || Array.isArray(config)) {
+					throw new Error('Invalid prompt config');
+				}
+				activeTask = {
+					id: location.id,
+					promptUuid: typeof config.promptUuid === 'string' ? config.promptUuid : '',
+					taskNumber: typeof config.taskNumber === 'string' ? config.taskNumber : '',
+					title: typeof config.title === 'string' ? config.title : '',
+					archived: location.archived,
+					promptDirectory: path.resolve(location.dirPath),
+				};
+			}
+			if (requestVersion !== this.activeTaskRequestVersion) {
+				return;
+			}
+
+			// Публикуем готовый JSON атомарной заменой, чтобы внешний читатель не увидел частичную запись.
+			await this.ensureStorageDir();
+			const targetPath = path.join(this.storageDir, 'task-active.json');
+			const temporaryPath = `${targetPath}.${crypto.randomUUID()}.tmp`;
+			try {
+				await fs.promises.writeFile(temporaryPath, `${JSON.stringify(activeTask, null, 2)}\n`, 'utf-8');
+				if (requestVersion === this.activeTaskRequestVersion) {
+					await fs.promises.rename(temporaryPath, targetPath);
+				}
+			} finally {
+				await fs.promises.rm(temporaryPath, { force: true });
+			}
+		});
+		// Ошибка не ломает открытие редактора и не блокирует сохранение следующего выбора.
+		this.activeTaskWriteQueue = writeTask.catch(() => {
+			appendPromptManagerLog('[storage] Не удалось сохранить task-active.json.');
+		});
+		return this.activeTaskWriteQueue;
 	}
 
 	/** Get absolute path to a prompt folder */

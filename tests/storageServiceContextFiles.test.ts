@@ -517,3 +517,115 @@ test('savePrompt rejects malformed persisted config when incoming implementing t
 		{ existingPrompt, skipHistory: true }), SyntaxError);
 	assert.equal(await fsp.readFile(path.join(promptDir, 'config.json'), 'utf-8'), '{broken');
 });
+
+/** Выбор экспортирует метаданные и абсолютный путь, сохраняя строковый номер без чтения содержимого. */
+test('saveActiveTask writes selected metadata without reading prompt content', async t => {
+	const { service, workspaceRoot } = await createTimeSaveFixture(t);
+	const promptDir = await seedPrompt(workspaceRoot, 'selected', []);
+	await writeTextFile(path.join(promptDir, 'config.json'), JSON.stringify({
+		id: 'stale-folder', promptUuid: 'uuid-selected', taskNumber: 'TASK-007', title: 'Название задачи',
+		content: 'private content', notes: 'private notes',
+	}));
+	vscodeFsReadPaths.length = 0;
+	await service.saveActiveTask('selected');
+	assert.deepEqual(await readJson(path.join(service.getStorageDirectoryPath(), 'task-active.json')), {
+		id: 'selected', promptUuid: 'uuid-selected', taskNumber: 'TASK-007', title: 'Название задачи', archived: false,
+		promptDirectory: promptDir,
+	});
+	assert.deepEqual(vscodeFsReadPaths, [path.join(promptDir, 'config.json')]);
+	assert.equal((await fsp.readdir(service.getStorageDirectoryPath())).some(name => name.endsWith('.tmp')), false);
+});
+
+/** Архив, переименование и полный путь определяются по фактическому каталогу и стабильному UUID. */
+test('saveActiveTask resolves renamed archived prompts and empty task numbers', async t => {
+	const { service, workspaceRoot } = await createTimeSaveFixture(t);
+	const promptDir = await seedPrompt(workspaceRoot, 'renamed', []);
+	const archiveDir = path.join(service.getStorageDirectoryPath(), 'archive');
+	await fsp.mkdir(archiveDir);
+	await fsp.rename(promptDir, path.join(archiveDir, 'renamed'));
+	await service.saveActiveTask('old-name', 'uuid-renamed');
+	assert.deepEqual(await readJson(path.join(service.getStorageDirectoryPath(), 'task-active.json')), {
+		id: 'renamed', promptUuid: 'uuid-renamed', taskNumber: '', title: 'renamed', archived: true,
+		promptDirectory: path.join(archiveDir, 'renamed'),
+	});
+});
+
+/** Ошибочный путь, отсутствующая задача и повреждённая конфигурация не заменяют корректный снимок. */
+test('saveActiveTask preserves previous selection for invalid or missing prompts', async t => {
+	const { service, workspaceRoot } = await createTimeSaveFixture(t);
+	const promptDir = await seedPrompt(workspaceRoot, 'selected', []);
+	const targetPath = path.join(service.getStorageDirectoryPath(), 'task-active.json');
+	await service.saveActiveTask('selected');
+	const expected = await readJson(targetPath);
+	for (const id of ['missing', '../selected', '..\\selected', '.', 'archive']) {
+		await service.saveActiveTask(id);
+		assert.deepEqual(await readJson(targetPath), expected);
+	}
+	await writeTextFile(path.join(promptDir, 'config.json'), '{broken');
+	await service.saveActiveTask('selected');
+	assert.deepEqual(await readJson(targetPath), expected);
+	// Новый несохранённый промпт и снятое выделение не оставляют номер предыдущей задачи.
+	for (const id of ['__new__', null]) {
+		await service.saveActiveTask(id);
+		assert.equal(await readJson(targetPath), null);
+	}
+});
+
+/** Позднее завершение записи не публикует устаревший выбор поверх более нового. */
+test('saveActiveTask keeps the latest selection during delayed writes', async t => {
+	const { service, workspaceRoot } = await createTimeSaveFixture(t);
+	await seedPrompt(workspaceRoot, 'first', []);
+	await seedPrompt(workspaceRoot, 'last', []);
+	// Управляем только первой временной записью, без таймеров и фоновой работы после теста.
+	const writeFile = fs.promises.writeFile;
+	let release!: () => void;
+	let started!: () => void;
+	const blocked = new Promise<void>(resolve => { release = resolve; });
+	const writing = new Promise<void>(resolve => { started = resolve; });
+	let firstWrite = true;
+	t.mock.method(fs.promises, 'writeFile', async (...args: Parameters<typeof writeFile>) => {
+		if (firstWrite) {
+			firstWrite = false;
+			started();
+			await blocked;
+		}
+		return writeFile(...args);
+	});
+	const first = service.saveActiveTask('first');
+	await writing;
+	const last = service.saveActiveTask('last');
+	release();
+	await Promise.all([first, last]);
+	assert.equal((await readJson(path.join(service.getStorageDirectoryPath(), 'task-active.json'))).id, 'last');
+	assert.equal((await fsp.readdir(service.getStorageDirectoryPath())).some(name => name.endsWith('.tmp')), false);
+});
+
+/** Неудачная атомарная замена сохраняет прежний JSON, удаляет временный файл и не ломает очередь. */
+test('saveActiveTask recovers after a failed atomic replacement', async t => {
+	const { service, workspaceRoot } = await createTimeSaveFixture(t);
+	await seedPrompt(workspaceRoot, 'first', []);
+	await seedPrompt(workspaceRoot, 'last', []);
+	const targetPath = path.join(service.getStorageDirectoryPath(), 'task-active.json');
+	await service.saveActiveTask('first');
+	const rename = t.mock.method(fs.promises, 'rename', async () => { throw new Error('write denied'); });
+	await service.saveActiveTask('last');
+	assert.equal((await readJson(targetPath)).id, 'first');
+	assert.equal((await fsp.readdir(service.getStorageDirectoryPath())).some(name => name.endsWith('.tmp')), false);
+	rename.mock.restore();
+	await service.saveActiveTask('last');
+	assert.equal((await readJson(targetPath)).id, 'last');
+});
+
+/** Восстановление выделения создаёт снимок, но не отменяет даже ещё не завершённый явный выбор. */
+test('saveActiveTask restores initial selection only before explicit requests', async t => {
+	const { service, workspaceRoot } = await createTimeSaveFixture(t);
+	await seedPrompt(workspaceRoot, 'restored', []);
+	await seedPrompt(workspaceRoot, 'selected', []);
+	const targetPath = path.join(service.getStorageDirectoryPath(), 'task-active.json');
+	await service.saveActiveTask('restored', undefined, { onlyIfUnset: true });
+	assert.equal((await readJson(targetPath)).id, 'restored');
+	const selected = service.saveActiveTask('selected');
+	const lateRestore = service.saveActiveTask('restored', undefined, { onlyIfUnset: true });
+	await Promise.all([selected, lateRestore]);
+	assert.equal((await readJson(targetPath)).id, 'selected');
+});

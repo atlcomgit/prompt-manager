@@ -193,3 +193,56 @@ test('SidebarProvider marks in-progress status changes to wait for the next chat
 	assert.equal(savedPrompts[0]?.status, 'in-progress');
 	assert.ok(Number(savedPrompts[0]?.chatRequestAutoCompleteAfter || 0) > 0);
 });
+
+/** Выделение сохраняется до ожидания Memento; смена фильтра не меняет активную задачу. */
+test('SidebarProvider saves active task only when selection changes', async () => {
+	const { SidebarProvider } = await importSidebarProvider();
+	let state = { selectedPromptId: 'first' as string | null, selectedPromptUuid: 'uuid-first' as string | null };
+	const calls: Array<{ id: string | null; uuid?: string | null }> = [];
+	const provider = new SidebarProvider(
+		{ fsPath: '/unused-extension' } as any,
+		{
+			getStorageDirectoryPath: () => '/unused-storage',
+			saveActiveTask: async (id: string | null, uuid?: string | null) => { calls.push({ id, uuid }); },
+		} as any,
+		{} as any, {} as any, {} as any,
+		{
+			getSidebarState: () => state,
+			saveSidebarState: async (next: typeof state) => { state = next; },
+		} as any,
+	);
+	await (provider as any).handleMessage({ type: 'saveSidebarState', state: { ...state, sortOrder: 'asc' } });
+	assert.deepEqual(calls, []);
+	const save = (provider as any).handleMessage({
+		type: 'saveSidebarState', state: { selectedPromptId: 'last', selectedPromptUuid: 'uuid-last' },
+	});
+	assert.deepEqual(calls, [{ id: 'last', uuid: 'uuid-last' }]);
+	await save;
+	await (provider as any).handleMessage({
+		type: 'saveSidebarState', state: { selectedPromptId: null, selectedPromptUuid: null },
+	});
+	assert.deepEqual(calls[1], { id: null, uuid: null });
+});
+
+/** Начальное выделение экспортируется при готовности списка даже без открытия редактора. */
+test('SidebarProvider restores active task before loading the prompt list', async () => {
+	const { SidebarProvider } = await importSidebarProvider();
+	const calls: unknown[][] = [];
+	const state = { selectedPromptId: 'restored', selectedPromptUuid: 'uuid-restored' };
+	const provider = new SidebarProvider(
+		{ fsPath: '/unused-extension' } as any,
+		{
+			getStorageDirectoryPath: () => '/unused-storage',
+			listPrompts: async () => [],
+			listArchivedPrompts: async () => [],
+			saveActiveTask: async (...args: unknown[]) => { calls.push(args); },
+		} as any,
+		{} as any, {} as any, {} as any,
+		{ getSidebarState: () => state, saveSidebarState: async () => undefined } as any,
+	);
+	const ready = (provider as any).handleMessage({ type: 'ready' });
+	assert.deepEqual(calls, [['restored', 'uuid-restored', { onlyIfUnset: true }]]);
+	await ready;
+	await (provider as any).handleMessage({ type: 'saveSidebarState', state: { ...state, sortOrder: 'asc' } });
+	assert.equal(calls.length, 1);
+});

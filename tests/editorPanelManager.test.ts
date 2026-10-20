@@ -791,6 +791,8 @@ async function createManager(options?: {
 	const dailyTimeChangeListeners = new Set<(event: Record<string, unknown>) => void>();
 
 	const storageService = {
+		/** Не пишет файлы при проверке событий открытия редактора. */
+		saveActiveTask: async (_id: string | null, _promptUuid?: string | null): Promise<void> => undefined,
 		getStorageDirectoryPath: () => storageDirectoryPath,
 		getPromptDirectoryPath: (id: string) => `${storageDirectoryPath}/prompts/${id}`,
 		getPromptMarkdownUri: (id: string) => {
@@ -969,6 +971,32 @@ function createGitOverlayProjectSnapshot(project: string, overrides: Record<stri
 		...overrides,
 	} as any;
 }
+
+/** Регистрация выбора не ждёт файловой записи и охватывает повторное открытие. */
+test('openPrompt persists active task without waiting for storage', async () => {
+	resetVsCodeCommandMock();
+	const { manager, storageService } = await createManager({
+		initialPrompt: { id: 'prompt-a', promptUuid: 'uuid-a', title: 'Prompt A' },
+	});
+	const writes: Array<{ id: string | null; uuid?: string | null }> = [];
+	const pendingWrite = createDeferred<void>();
+	storageService.saveActiveTask = (id, uuid) => {
+		writes.push({ id, uuid });
+		return pendingWrite.promise;
+	};
+	try {
+		await manager.openPrompt({ id: 'prompt-a', promptUuid: 'uuid-a' });
+		await manager.openPrompt('prompt-a');
+		assert.deepEqual(writes, [
+			{ id: 'prompt-a', uuid: 'uuid-a' }, { id: 'prompt-a', uuid: undefined },
+		]);
+	} finally {
+		pendingWrite.resolve();
+		for (const panel of vscodeCreatedWebviewPanels) {
+			panel.dispose();
+		}
+	}
+});
 
 test('openPrompt posts targeted loading before delayed target prompt resolves', async () => {
 	resetVsCodeCommandMock();

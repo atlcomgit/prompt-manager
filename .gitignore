@@ -13,3 +13,5 @@ out-tests
 .vscode/prompt-manager
 .kilo
 CLAUDE.md
+share/diagnostics.domains.md
+share/diagnostics.instructions.md

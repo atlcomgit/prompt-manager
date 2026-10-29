@@ -25,3 +25,4 @@ tsconfig.tests.json
 .qodo/**
 .tmp/**
 media/icon-variants/**
+share/**

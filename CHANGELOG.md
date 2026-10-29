@@ -6,6 +6,12 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-10-29
+
+#### Changed
+- Пакет расширения `.vsix` больше не включает папку `share/` с шаблонами инструкций: расширение не читает
+  эти файлы, а общая инструкция по умолчанию по-прежнему загружается по ссылке с GitHub.
+
 ### 2026-10-20
 
 #### Added

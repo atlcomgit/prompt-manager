@@ -6,6 +6,13 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-11-01
+
+#### Changed
+- Shared instructions require interactive questions in every agent mode, including post-review decisions.
+  Agents select an allowed synchronous, asynchronous, or equivalent form instead of falling back to text
+  when a single tool is unavailable; unavailable forms leave required decisions pending.
+
 ### 2026-10-29
 
 #### Changed

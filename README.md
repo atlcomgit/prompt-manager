@@ -108,6 +108,11 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
 5. Enable Project Memory / CodeMap in settings when you want history analysis and chat instructions. Включайте Project Memory / CodeMap в настройках только когда нужны анализ истории и инструкции для чата.
   When these settings stay off, Start Chat does not generate or attach session-memory / codemap instruction files. Если эти настройки выключены, Start Chat не создаёт и не прикладывает session-memory / codemap instruction файлы.
 
+Общая инструкция `share/general.instructions.md` требует задавать необходимые вопросы через интерактивную форму
+в любом режиме агента, включая выбор исправлений после ревью. Если синхронная форма ограничена режимом Plan,
+агент использует разрешённую асинхронную форму или доступный аналог. При отсутствии всех разрешённых форм
+он сообщает техническое ограничение и сохраняет необходимое решение открытым, не подменяя форму текстовым опросом.
+
 ## Requirements / Требования
 
 - VS Code `1.95+`

@@ -79,6 +79,7 @@ import {
 	getProjectInstructionsFilePath,
 } from '../utils/chatContextFiles.js';
 import { buildChatMessage } from '../utils/chatMessageBuilder.js';
+import { splitCodexPasteText } from '../utils/codexClipboard.js';
 import type { ChatMessageContext } from '../utils/chatMessageBuilder.js';
 import {
 	applyGitOverlayOtherProjectsExcludedPaths,
@@ -165,13 +166,15 @@ interface ExternalChatDispatchResult {
 	message?: string;
 }
 
-/** Результат отдельного шага автоматизации внешнего поля ввода через Xdotool. */
+/** Результат отдельного шага автоматизации внешнего поля ввода. */
 interface XdotoolSubmitResult {
 	ok: boolean;
 	reason?: string;
 	stdout?: string;
 	/** Этап подготовки Codex, на котором завершилась операция. */
 	stage?: 'focus' | 'paste' | 'submit';
+	/** Команда вставки уже могла передать часть текста; повторять весь запрос автоматически нельзя. */
+	partialPaste?: boolean;
 }
 interface XdotoolWindowGeometry {
 	x: number;
@@ -2741,13 +2744,8 @@ export class EditorPanelManager {
 		};
 	}
 
-	/** Фокусирует composer Codex только после подтвержденного открытия его панели. */
-	private async focusCodexComposerWithXdotool(): Promise<XdotoolSubmitResult> {
-		if (!await this.focusCodex()) {
-			return { ok: false, reason: 'Codex sidebar focus command failed' };
-		}
-		await new Promise(resolve => setTimeout(resolve, 600));
-
+	/** Проверяет окно перед отправкой клавиш через X11, включая случай служебного окна XWayland без PID. */
+	private async getCodexXdotoolWindow(): Promise<XdotoolSubmitResult> {
 		const activeWindowResult = await this.runXdotoolCommand(['getactivewindow'], 'Codex active window');
 		const activeWindowId = (activeWindowResult.stdout || '').trim();
 		if (!activeWindowResult.ok || !/^\d+$/.test(activeWindowId)) {
@@ -2768,6 +2766,21 @@ export class EditorPanelManager {
 				reason: windowPidResult.reason || 'the active window is not VS Code',
 			};
 		}
+		return { ok: true, stdout: activeWindowId };
+	}
+
+	/** Фокусирует composer Codex только после подтвержденного открытия его панели. */
+	private async focusCodexComposerWithXdotool(): Promise<XdotoolSubmitResult> {
+		if (!await this.focusCodex()) {
+			return { ok: false, reason: 'Codex sidebar focus command failed' };
+		}
+		await new Promise(resolve => setTimeout(resolve, 600));
+
+		const activeWindow = await this.getCodexXdotoolWindow();
+		if (!activeWindow.ok) {
+			return activeWindow;
+		}
+		const activeWindowId = activeWindow.stdout!;
 
 		const geometryResult = await this.runXdotoolCommand(
 			['getwindowgeometry', '--shell', activeWindowId],
@@ -2805,24 +2818,127 @@ export class EditorPanelManager {
 		}
 
 		await new Promise(resolve => setTimeout(resolve, 250));
-		const activeWindowResult = await this.runXdotoolCommand(['getactivewindow'], 'Codex paste target');
-		if (!activeWindowResult.ok || (activeWindowResult.stdout || '').trim() !== focused.stdout) {
-			return {
-				ok: false,
-				reason: activeWindowResult.reason || 'the active window changed before paste',
-				stage: 'focus',
-			};
-		}
-
-		const pasted = await this.runXdotoolKeys(['ctrl+v'], 'Codex paste');
+		const pasted = await this.pasteCodexClipboardText(text,
+			() => this.runXdotoolKeys(['ctrl+v'], 'Codex paste'),
+			async () => {
+				const activeWindow = await this.runXdotoolCommand(['getactivewindow'], 'Codex paste target');
+				return activeWindow.ok && activeWindow.stdout?.trim() === focused.stdout
+					? { ok: true }
+					: { ok: false, reason: activeWindow.reason || 'the active window changed before paste' };
+			},
+		);
 		if (!pasted.ok) {
-			return { ...pasted, stage: 'paste' };
+			return pasted;
 		}
 		if (!this.isPromptXdotoolAutoStartEnabled(prompt)) {
 			return { ...pasted, stage: 'paste' };
 		}
 
 		await new Promise(resolve => setTimeout(resolve, 500));
+		const submitted = await this.runXdotoolKeys([this.resolveCodexSubmitKey(text)], 'Codex');
+		return { ...submitted, stage: 'submit' };
+	}
+
+	/** Пауза после каждой команды нужна: webview читает clipboard асинхронно, уже после возврата команды. */
+	private async pasteCodexClipboardText(
+		text: string,
+		paste: () => Promise<XdotoolSubmitResult>,
+		checkTarget: () => Promise<XdotoolSubmitResult>,
+	): Promise<XdotoolSubmitResult> {
+		const chunks = splitCodexPasteText(text);
+		let lastClipboardText: string | undefined;
+		let pasteAttempted = false;
+		try {
+			for (const chunk of chunks) {
+				if (lastClipboardText !== undefined && await vscode.env.clipboard.readText() !== lastClipboardText) {
+					throw new Error('clipboard changed during Codex paste');
+				}
+				await vscode.env.clipboard.writeText(chunk);
+				lastClipboardText = chunk;
+				const target = await checkTarget();
+				if (!target.ok) {
+					return { ...target, stage: pasteAttempted ? 'paste' : 'focus', ...(pasteAttempted ? { partialPaste: true } : {}) };
+				}
+				pasteAttempted = true;
+				let result: XdotoolSubmitResult;
+				try {
+					result = await paste();
+				} finally {
+					// Не заменяем буфер следующим фрагментом или полным текстом до обработки paste.
+					await new Promise(resolve => setTimeout(resolve, 250));
+				}
+				if (!result.ok) {
+					return { ...result, stage: 'paste', partialPaste: true };
+				}
+			}
+			this.hooksOutput.appendLine(`[chat-start] Codex clipboard paste dispatched: ${text.length} characters in ${chunks.length} part(s).`);
+			return { ok: true, stage: 'paste' };
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.hooksOutput.appendLine(`[chat-start] Codex clipboard paste failed: ${reason}`);
+			return { ok: false, stage: 'paste', reason, ...(pasteAttempted ? { partialPaste: true } : {}) };
+		} finally {
+			// Возвращаем полный запрос для ручной вставки, но сохраняем новое содержимое буфера пользователя.
+			try {
+				if (lastClipboardText !== undefined && lastClipboardText !== text && await vscode.env.clipboard.readText() === lastClipboardText) {
+					await vscode.env.clipboard.writeText(text);
+				}
+			} catch (error) {
+				this.hooksOutput.appendLine(`[chat-start] Codex clipboard restore failed: ${String(error)}`);
+			}
+		}
+	}
+
+	/** Вставляет текст штатной командой webview VS Code, в том числе в native Wayland. */
+	private async prepareCodexPrompt(
+		prompt: Pick<Prompt, 'autoStartChatWithXdotool'>,
+		text: string,
+		commands: string[],
+	): Promise<XdotoolSubmitResult> {
+		const viewFocusCommand = this.isCodexSecondarySidebarLikely()
+			? 'chatgpt.sidebarSecondaryView.focus'
+			: 'chatgpt.sidebarView.focus';
+		if (!commands.includes('editor.action.clipboardPasteAction') || !commands.includes(viewFocusCommand)) {
+			return this.prepareCodexPromptWithXdotool(prompt, text);
+		}
+
+		try {
+			// Фокусируем конкретную webview: openSidebar в Codex перехватывает собственные ошибки фокуса.
+			await vscode.commands.executeCommand(viewFocusCommand);
+			await new Promise(resolve => setTimeout(resolve, 250));
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.hooksOutput.appendLine(`[chat-start] Codex native focus failed: ${reason}`);
+			return { ok: false, stage: 'focus', reason };
+		}
+		const pasted = await this.pasteCodexClipboardText(text,
+			async () => {
+				await vscode.commands.executeCommand('editor.action.clipboardPasteAction');
+				return { ok: true };
+			},
+			async () => vscode.window.state.focused
+				? { ok: true }
+				: { ok: false, reason: 'the VS Code window lost focus before paste' },
+		);
+		// Не повторяем неудачную вставку через Xdotool: webview могла уже получить часть текста.
+		if (!pasted.ok) {
+			return pasted;
+		}
+
+		if (!this.isPromptXdotoolAutoStartEnabled(prompt)) {
+			return { ok: true, stage: 'paste' };
+		}
+
+		// Xdotool нужен только для отправки. Его недоступность не мешает подготовить текст.
+		const targetWindow = await this.getCodexXdotoolWindow();
+		if (!targetWindow.ok) {
+			return { ...targetWindow, stage: 'submit' };
+		}
+		await new Promise(resolve => setTimeout(resolve, 500));
+		const activeWindow = await this.runXdotoolCommand(['getactivewindow'], 'Codex submit target');
+		if (!vscode.window.state.focused || !activeWindow.ok || activeWindow.stdout?.trim() !== targetWindow.stdout) {
+			return { ok: false, stage: 'submit', reason: activeWindow.reason || 'the active window changed before submit' };
+		}
 		const submitted = await this.runXdotoolKeys([this.resolveCodexSubmitKey(text)], 'Codex');
 		return { ...submitted, stage: 'submit' };
 	}
@@ -2878,7 +2994,7 @@ export class EditorPanelManager {
 		return { dispatched: true };
 	}
 
-	/** Передает запрос в Codex через публичный bridge либо подготавливает composer через Xdotool. */
+	/** Передает запрос в Codex через публичный bridge либо подготавливает composer для отправки. */
 	private async dispatchCodexChatTarget(
 		prompt: Prompt,
 		query: string,
@@ -2933,14 +3049,14 @@ export class EditorPanelManager {
 					}
 				}
 			}
-			const preparedWithXdotool = await this.prepareCodexPromptWithXdotool(prompt, fallbackText);
-			if (preparedWithXdotool.ok && this.isPromptXdotoolAutoStartEnabled(prompt)) {
+			const prepared = await this.prepareCodexPrompt(prompt, fallbackText, commands);
+			if (prepared.ok && this.isPromptXdotoolAutoStartEnabled(prompt)) {
 				return {
 					dispatched: false,
-					message: 'OpenAI Codex открыт. Xdotool выполнил вставку и команду отправки, но расширение Codex не подтверждает прием запроса. План сохранен.',
+					message: 'OpenAI Codex открыт. Команды вставки и отправки выполнены, но расширение Codex не подтверждает прием запроса. План сохранен.',
 				};
 			}
-			if (preparedWithXdotool.ok) {
+			if (prepared.ok) {
 				return {
 					dispatched: false,
 					message: 'OpenAI Codex открыт. Текст задачи вставлен в поле сообщения. Отправьте его вручную.',
@@ -2949,9 +3065,11 @@ export class EditorPanelManager {
 
 			return {
 				dispatched: false,
-				message: preparedWithXdotool.stage === 'submit'
-					? `OpenAI Codex открыт. Текст задачи вставлен, но xdotool не смог отправить его (${preparedWithXdotool.reason || 'unknown error'}). Отправьте задачу вручную.`
-					: `OpenAI Codex открыт. Текст задачи скопирован в буфер обмена, но xdotool не смог вставить его (${preparedWithXdotool.reason || 'unknown error'}). Вставьте его вручную.`,
+				message: prepared.partialPaste
+					? `OpenAI Codex открыт. Вставка прервана (${prepared.reason || 'unknown error'}); в поле могла остаться часть текста. Полный запрос можно заново скопировать из Prompt Manager и заменить им содержимое поля.`
+					: prepared.stage === 'submit'
+					? `OpenAI Codex открыт. Текст задачи вставлен, но xdotool не смог отправить его (${prepared.reason || 'unknown error'}). Отправьте задачу вручную.`
+					: `OpenAI Codex открыт. Текст задачи скопирован в буфер обмена, но не удалось вставить его автоматически (${prepared.reason || 'unknown error'}). Вставьте его вручную.`,
 			};
 		}
 

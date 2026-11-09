@@ -56,15 +56,19 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
 - **Prompt Sidebar** for library, filters, groups, and fast capture.
 - **Copilot Chat autostart** is controlled per prompt in the Agent section. When disabled, the selected
   Copilot mode opens with the prepared prompt in the input without submitting it. Kilo Code keeps its existing
-  external-chat autostart behavior. OpenAI Codex pastes the prepared prompt into its composer through Xdotool,
-  while its external-chat autostart flag controls only submission. Because Codex exposes no delivery acknowledgement,
+  external-chat autostart behavior. OpenAI Codex pastes the prepared prompt into its composer through the native VS Code paste command (including Wayland),
+  splitting long prompts into parts below its 5,000-character paste-to-file threshold so the text stays editable.
+  If focus or clipboard content changes during insertion, preparation stops without submitting a partial prompt.
+  Its external-chat autostart flag controls only Xdotool submission on X11. Because Codex exposes no delivery acknowledgement,
   Xdotool submission remains best-effort and does not clear the saved plan. The `Не изменять` option keeps
   the selection already active in the chat. В секции «Агент» автостарт Copilot Chat
   настраивается отдельно для каждого промпта: при выключении выбранный режим открывается с подготовленным
   текстом в поле без отправки. Для Kilo Code сохраняется прежнее поведение, а OpenAI Codex вставляет текст в
-  поле через Xdotool; флаг автостарта внешнего чата управляет только отправкой. Поскольку Codex не подтверждает
+  поле штатной командой VS Code, в том числе в Wayland; флаг автостарта управляет только отправкой через Xdotool в X11. Поскольку Codex не подтверждает
   доставку, такая отправка считается предварительной и не очищает сохраненный план. Опция «Не изменять»
-  сохраняет уже выбранный вариант в чате.
+  сохраняет уже выбранный вариант в чате. Длинные запросы вставляются частями меньше порога в 5000 символов,
+  чтобы Codex оставлял текст в поле, а не превращал его в файл. При потере фокуса или изменении буфера вставка
+  останавливается без отправки неполного запроса.
 - **Claude Code (partial integration).** Opens prepared text in the installed Claude extension's sidebar for manual sending;
   Agent/Plan are text instructions, not changes to Claude's model or permissions. Session binding uses an exact UUID
   marker after manual sending. Xdotool auto-send is safety-blocked even when enabled because composer focus cannot

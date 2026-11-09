@@ -22,6 +22,7 @@ let vscodeAvailableCommands: string[] | undefined;
 let vscodeClaudeExtension: any = { isActive: true };
 let vscodeClipboardText = '';
 let vscodeActiveTextEditor: any;
+let vscodeWindowFocused = true;
 const vscodeConfigurationValues = new Map<string, unknown>();
 /** Workspace override и задержка записи моделируются без изменения настоящих настроек VS Code. */
 const vscodeWorkspaceConfigurationValues = new Map<string, unknown>();
@@ -63,6 +64,7 @@ function resetVsCodeCommandMock() {
 	vscodeClaudeExtension = { isActive: true };
 	vscodeClipboardText = '';
 	vscodeActiveTextEditor = undefined;
+	vscodeWindowFocused = true;
 	childProcessSpawnCalls.length = 0;
 	childProcessSpawnHandler = undefined;
 }
@@ -470,7 +472,7 @@ function createVsCodeMock() {
 			},
 		},
 		window: {
-			state: { focused: true },
+			state: { get focused() { return vscodeWindowFocused; } },
 			get activeTextEditor() {
 				return vscodeActiveTextEditor;
 			},
@@ -7193,7 +7195,7 @@ test('startChat dispatches Codex direct bridge with selected chat mode', async (
 /** Проверяет подготовку composer без запуска внутренней TODO-команды и без автоматической отправки. */
 test('startChat prepares Codex composer without auto-submit when implementTodo is available', async () => {
 	resetVsCodeCommandMock();
-	vscodeAvailableCommands = ['chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.implementTodo', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
+	vscodeAvailableCommands = ['editor.action.clipboardPasteAction', 'chatgpt.sidebarSecondaryView.focus', 'chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.implementTodo', 'chatgpt.addToThread', 'chatgpt.addFileToThread'];
 	childProcessSpawnHandler = (_command, args) => {
 		if (args[0] === 'getactivewindow') {
 			return createMockChildProcessExit(0, '42\n');
@@ -7278,14 +7280,10 @@ test('startChat prepares Codex composer without auto-submit when implementTodo i
 		assert.ok(fileCallIndexes[0] > newChatCallIndex);
 		const fileCall = vscodeCommandCalls[fileCallIndexes[0]];
 		assert.equal((fileCall.args[0] as any)?.fsPath, '/tmp/workspace/src/index.ts');
-		assert.deepEqual(childProcessSpawnCalls.map(call => call.args), [
-			['getactivewindow'],
-			['getwindowpid', '42'],
-			['getwindowgeometry', '--shell', '42'],
-			['mousemove', '980', '680', 'click', '1'],
-			['getactivewindow'],
-			['key', '--clearmodifiers', 'ctrl+v'],
-		]);
+		assert.deepEqual(childProcessSpawnCalls, []);
+		const pasteIndex = vscodeCommandCalls.findIndex(call => call.id === 'editor.action.clipboardPasteAction');
+		assert.ok(pasteIndex > fileCallIndexes[0]);
+		assert.ok(vscodeCommandCalls.some(call => call.id === 'chatgpt.sidebarSecondaryView.focus'));
 		assert.equal(getStoredPrompt()?.status, 'in-progress');
 		assert.equal(clearedPlanCount, 0);
 		assert.match(vscodeClipboardText, /Implement Codex routing/);
@@ -7387,11 +7385,191 @@ test('startChat keeps Codex prompt in clipboard when xdotool preparation fails',
 	assert.deepEqual(childProcessSpawnCalls, []);
 	assert.equal(clearedPlanCount, 0);
 	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
-	assert.ok(postedMessages.some(message => message?.type === 'info' && /не смог вставить/.test(message.message)));
+	assert.ok(postedMessages.some(message => message?.type === 'info' && /не удалось вставить/.test(message.message)));
 	assert.equal(postedMessages.some(message => message?.type === 'error'), false);
 	assert.equal(postedMessages.some(message => message?.type === 'chatStarted'), false);
 	resetVsCodeCommandMock();
 });
+
+const codexNativePasteCommands = ['chatgpt.sidebarSecondaryView.focus', 'editor.action.clipboardPasteAction'];
+
+/** Вставка не зависит от X11, DISPLAY и платформы, когда доступна штатная команда VS Code. */
+test('prepareCodexPrompt pastes multiline text natively without X11 or xdotool', async () => {
+	resetVsCodeCommandMock();
+	const originalDisplay = process.env.DISPLAY;
+	delete process.env.DISPLAY;
+	try {
+		const { manager } = await createManager();
+		(manager as any).isXdotoolPlatformSupported = () => false;
+		const text = 'Задача\nВторая строка';
+		const result = await (manager as any).prepareCodexPrompt({ autoStartChatWithXdotool: false }, text, codexNativePasteCommands);
+		assert.deepEqual(result, { ok: true, stage: 'paste' });
+		assert.equal(vscodeClipboardText, text);
+		assert.deepEqual(vscodeCommandCalls.map(call => call.id), codexNativePasteCommands);
+		assert.deepEqual(childProcessSpawnCalls, []);
+	} finally {
+		if (originalDisplay === undefined) { delete process.env.DISPLAY; } else { process.env.DISPLAY = originalDisplay; }
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Ошибки фокуса/вставки не запускают повторную вставку и не отправляют сообщение. */
+for (const failure of ['focus', 'paste'] as const) {
+	test(`prepareCodexPrompt stops after native ${failure} fails`, async () => {
+		resetVsCodeCommandMock();
+		try {
+			const { manager } = await createManager();
+			const failedCommand = codexNativePasteCommands[failure === 'focus' ? 0 : 1];
+			vscodeExecuteCommandHandler = async id => {
+				if (id === failedCommand) { throw new Error('native command failed'); }
+			};
+			const result = await (manager as any).prepareCodexPrompt({ autoStartChatWithXdotool: true }, 'Prepared prompt', codexNativePasteCommands);
+			assert.deepEqual(result, { ok: false, stage: failure, reason: 'native command failed', ...(failure === 'paste' ? { partialPaste: true } : {}) });
+			assert.equal(vscodeCommandCalls.filter(call => call.id === 'editor.action.clipboardPasteAction').length, failure === 'focus' ? 0 : 1);
+			assert.deepEqual(childProcessSpawnCalls, []);
+		} finally { resetVsCodeCommandMock(); }
+	});
+}
+
+/** Webview reads clipboard after executeCommand resolves; subsequent chunks must not overtake it. */
+test('prepareCodexPrompt keeps a long prompt inline and restores the full clipboard after asynchronous paste', async () => {
+	resetVsCodeCommandMock();
+	try {
+		const { manager } = await createManager();
+		const text = 'Начало\n' + 'я'.repeat(3991) + '😀\r\n' + 'Длинный текст\n'.repeat(650) + '\nКонец  ';
+		const received: string[] = [];
+		vscodeExecuteCommandHandler = async id => {
+			if (id === 'editor.action.clipboardPasteAction') {
+				setTimeout(() => received.push(vscodeClipboardText), 30);
+			}
+		};
+		const result = await (manager as any).prepareCodexPrompt({ autoStartChatWithXdotool: false }, text, codexNativePasteCommands);
+		assert.deepEqual(result, { ok: true, stage: 'paste' });
+		assert.ok(received.length > 1);
+		assert.ok(received.every(part => part.length < 5000));
+		assert.equal(received.join(''), text);
+		assert.equal(vscodeClipboardText, text);
+		assert.deepEqual(childProcessSpawnCalls, []);
+	} finally { resetVsCodeCommandMock(); }
+});
+
+for (const interruption of ['command-error', 'focus-lost', 'clipboard-changed']) {
+	test(`prepareCodexPrompt cancels a partial long paste on ${interruption} without submitting or retrying`, async () => {
+		resetVsCodeCommandMock();
+		try {
+			const { manager } = await createManager();
+			const text = 'я'.repeat(12000);
+			let pasteCalls = 0;
+			vscodeExecuteCommandHandler = async id => {
+				if (id !== 'editor.action.clipboardPasteAction') { return; }
+				pasteCalls++;
+				if (interruption === 'command-error' && pasteCalls === 2) { throw new Error('paste interrupted'); }
+				if (interruption === 'focus-lost') { vscodeWindowFocused = false; }
+				if (interruption === 'clipboard-changed') { vscodeClipboardText = 'User copied something else'; }
+			};
+			const result = await (manager as any).prepareCodexPrompt({ autoStartChatWithXdotool: true }, text, codexNativePasteCommands);
+			assert.equal(result.ok, false);
+			assert.equal(result.stage, 'paste');
+			assert.equal(result.partialPaste, true);
+			assert.equal(pasteCalls, interruption === 'command-error' ? 2 : 1);
+			assert.equal(vscodeClipboardText, interruption === 'clipboard-changed' ? 'User copied something else' : text);
+			assert.deepEqual(childProcessSpawnCalls, []);
+		} finally { resetVsCodeCommandMock(); }
+	});
+}
+
+test('prepareCodexPromptWithXdotool also splits long text below the attachment threshold', async () => {
+	resetVsCodeCommandMock();
+	try {
+		const { manager } = await createManager();
+		const text = 'я'.repeat(9000);
+		const received: string[] = [];
+		(manager as any).focusCodexComposerWithXdotool = async () => ({ ok: true, stdout: '42' });
+		(manager as any).runXdotoolCommand = async () => ({ ok: true, stdout: '42\n' });
+		(manager as any).runXdotoolKeys = async (keys: string[]) => {
+			assert.deepEqual(keys, ['ctrl+v']);
+			received.push(vscodeClipboardText);
+			return { ok: true };
+		};
+		const result = await (manager as any).prepareCodexPromptWithXdotool({ autoStartChatWithXdotool: false }, text);
+		assert.equal(result.ok, true);
+		assert.ok(received.length > 1);
+		assert.ok(received.every(part => part.length < 5000));
+		assert.equal(received.join(''), text);
+		assert.equal(vscodeClipboardText, text);
+	} finally { resetVsCodeCommandMock(); }
+});
+
+test('prepareCodexPrompt skips native paste when the VS Code window loses focus', async () => {
+	resetVsCodeCommandMock();
+	try {
+		const { manager } = await createManager();
+		vscodeExecuteCommandHandler = async id => {
+			if (id === codexNativePasteCommands[0]) { vscodeWindowFocused = false; }
+		};
+		const result = await (manager as any).prepareCodexPrompt({ autoStartChatWithXdotool: true }, 'Prepared prompt', codexNativePasteCommands);
+		assert.equal(result.ok, false);
+		assert.equal(result.stage, 'focus');
+		assert.match(result.reason, /lost focus/);
+		assert.equal(vscodeCommandCalls.some(call => call.id === 'editor.action.clipboardPasteAction'), false);
+		assert.deepEqual(childProcessSpawnCalls, []);
+	} finally { resetVsCodeCommandMock(); }
+});
+
+/** Воспроизводит native Wayland: XWayland возвращает служебное окно без PID, но текст уже вставлен. */
+test('prepareCodexPrompt preserves native paste when XWayland has no window PID', async () => {
+	resetVsCodeCommandMock();
+	const originalDisplay = process.env.DISPLAY;
+	process.env.DISPLAY = originalDisplay || ':99';
+	try {
+		const { manager } = await createManager();
+		(manager as any).isXdotoolPlatformSupported = () => true;
+		childProcessSpawnHandler = (_command, args) => args[0] === 'getactivewindow'
+			? createMockChildProcessExit(0, '6291459\n')
+			: createMockChildProcessExit(1, '', 'window 6291459 has no pid associated with it.');
+		const result = await (manager as any).prepareCodexPrompt({ autoStartChatWithXdotool: true }, 'Prepared prompt', codexNativePasteCommands);
+		assert.equal(result.ok, false);
+		assert.equal(result.stage, 'submit');
+		assert.match(result.reason, /has no pid/);
+		assert.equal(vscodeCommandCalls.filter(call => call.id === 'editor.action.clipboardPasteAction').length, 1);
+		assert.deepEqual(childProcessSpawnCalls.map(call => call.args), [['getactivewindow'], ['getwindowpid', '6291459']]);
+	} finally {
+		if (originalDisplay === undefined) { delete process.env.DISPLAY; } else { process.env.DISPLAY = originalDisplay; }
+		resetVsCodeCommandMock();
+	}
+});
+
+for (const windowChanges of [false, true]) {
+	test(`prepareCodexPrompt ${windowChanges ? 'cancels' : 'performs'} X11 submission after native paste`, async () => {
+		resetVsCodeCommandMock();
+		const originalDisplay = process.env.DISPLAY;
+		process.env.DISPLAY = originalDisplay || ':99';
+		try {
+			const { manager } = await createManager();
+			(manager as any).isXdotoolPlatformSupported = () => true;
+			(manager as any).isVisualStudioCodeWindowProcess = () => true;
+			vscodeConfigurationValues.set('chatgpt.composerEnterBehavior', 'cmdIfMultiline');
+			let windowReads = 0;
+			childProcessSpawnHandler = (_command, args) => {
+				if (args[0] === 'getactivewindow') {
+					return createMockChildProcessExit(0, ++windowReads === 2 && windowChanges ? '43\n' : '42\n');
+				}
+				return createMockChildProcessExit(0, args[0] === 'getwindowpid' ? '4242\n' : '');
+			};
+			const result = await (manager as any).prepareCodexPrompt({ autoStartChatWithXdotool: true }, 'First\nSecond', codexNativePasteCommands);
+			assert.equal(result.ok, !windowChanges);
+			assert.equal(result.stage, 'submit');
+			assert.equal(vscodeCommandCalls.filter(call => call.id === 'editor.action.clipboardPasteAction').length, 1);
+			const keyCalls = childProcessSpawnCalls.filter(call => call.args[0] === 'key').map(call => call.args);
+			assert.deepEqual(keyCalls, windowChanges ? [] : [['key', '--clearmodifiers', 'ctrl+Return']]);
+			assert.equal(childProcessSpawnCalls.some(call => call.args[0] === 'mousemove'), false);
+		} finally {
+			vscodeConfigurationValues.delete('chatgpt.composerEnterBehavior');
+			if (originalDisplay === undefined) { delete process.env.DISPLAY; } else { process.env.DISPLAY = originalDisplay; }
+			resetVsCodeCommandMock();
+		}
+	});
+}
 
 /** Проверяет клавишу отправки для всех поддерживаемых настроек composer Codex. */
 test('resolveCodexSubmitKey respects Codex composer enter behavior', async () => {

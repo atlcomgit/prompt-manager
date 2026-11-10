@@ -605,9 +605,12 @@ interface PromptDashboardColumnBounds {
 	sections: PromptDashboardSectionBounds[];
 }
 
+/** Хранит источник и начальные координаты активного жеста перетаскивания. */
 interface DashboardPointerDragState {
 	section: PromptDashboardSectionKey;
 	pointerId: number;
+	/** Отличает мышь со сменившимся идентификатором от независимых касаний и пера. */
+	pointerType: string;
 	startX: number;
 	startY: number;
 	started: boolean;
@@ -1363,7 +1366,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		applySectionDropIndicator(activeDraggedSection, commitIndicator);
 	};
 
-	// Drive widget reordering through pointer events because webviews can lose native drag/drop.
+	// Начинаем жест по pointerdown; дальнейшие события выбираются по исходному типу устройства.
 	const handleSectionPointerDown = (
 		event: React.PointerEvent<HTMLButtonElement>,
 		section: PromptDashboardSectionKey,
@@ -1380,6 +1383,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		const dragState: DashboardPointerDragState = {
 			section,
 			pointerId,
+			pointerType: event.pointerType,
 			startX: event.clientX,
 			startY: event.clientY,
 			started: false,
@@ -1392,9 +1396,10 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			// Pointer capture is a best-effort improvement; window listeners still finish the drag.
 		}
 
+		/** Сохраняет место вставки при отпускании исходного устройства и освобождает обработчики. */
 		const finishPointerDrag = (pointerEvent: PointerEvent) => {
 			const currentState = pointerDragStateRef.current;
-			if (!currentState || currentState.pointerId !== pointerEvent.pointerId) {
+			if (!currentState) {
 				return;
 			}
 			pointerEvent.preventDefault();
@@ -1416,18 +1421,21 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			applySectionDropIndicator(activeDraggedSection, commitIndicator);
 		};
 
-		const cancelPointerDrag = (pointerEvent: PointerEvent) => {
-			const currentState = pointerDragStateRef.current;
-			if (!currentState || currentState.pointerId !== pointerEvent.pointerId) {
-				return;
-			}
+		/** Отменяет жест без сохранения и освобождает оба возможных вида подписок. */
+		const cancelPointerDrag = () => {
 			clearPointerDragListeners();
 			clearDragState();
 		};
 
-		const movePointerDrag = (pointerEvent: PointerEvent) => {
+		/** Применяет координаты выбранного потока событий к индикатору вставки. */
+		const movePointerDrag = (pointerEvent: MouseEvent) => {
 			const currentState = pointerDragStateRef.current;
-			if (!currentState || currentState.pointerId !== pointerEvent.pointerId) {
+			if (!currentState) {
+				return;
+			}
+			// Если отпускание произошло вне webview, последующее наведение не должно продолжать перенос.
+			if (currentState.pointerType === 'mouse' && (pointerEvent.buttons & 1) === 0) {
+				cancelPointerDrag();
 				return;
 			}
 			pointerEvent.preventDefault();
@@ -1443,10 +1451,15 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			updateDropIndicator(resolvePointerDropIndicator(pointerEvent.clientX, pointerEvent.clientY));
 		};
 
+		// Дополняем pointer-поток совместимым mousemove, когда среда маркирует движение мыши как pen.
+		const stopTracking = subscribePromptDashboardDragEvents(window, dragState, {
+			move: movePointerDrag,
+			finish: finishPointerDrag,
+			cancel: cancelPointerDrag,
+		});
+		/** Снимает отслеживание и освобождает захват исходного указателя. */
 		const cleanup = () => {
-			window.removeEventListener('pointermove', movePointerDrag);
-			window.removeEventListener('pointerup', finishPointerDrag);
-			window.removeEventListener('pointercancel', cancelPointerDrag);
+			stopTracking();
 			try {
 				if (handleElement.hasPointerCapture(pointerId)) {
 					handleElement.releasePointerCapture(pointerId);
@@ -1456,9 +1469,6 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			}
 		};
 		pointerDragCleanupRef.current = cleanup;
-		window.addEventListener('pointermove', movePointerDrag, { passive: false });
-		window.addEventListener('pointerup', finishPointerDrag, { passive: false });
-		window.addEventListener('pointercancel', cancelPointerDrag, { passive: false });
 	};
 
 	// Render one dedicated header handle so dragging does not interfere with collapse or refresh actions.
@@ -3554,6 +3564,75 @@ function isPromptDashboardSectionKeyValue(value: string | undefined): value is P
 		&& PROMPT_DASHBOARD_SECTION_KEYS.includes(value as PromptDashboardSectionKey);
 }
 
+/** Сопоставляет события жеста; смену mouse pointerId проверяет promptDashboardComponent.test.tsx. */
+export function isPromptDashboardDragPointer(
+	drag: Pick<DashboardPointerDragState, 'pointerId' | 'pointerType'>,
+	event: Pick<PointerEvent, 'pointerId' | 'pointerType' | 'isPrimary'>,
+): boolean {
+	if (drag.pointerType !== event.pointerType) {
+		return false;
+	}
+	// У мыши отслеживаем основной указатель независимо от его числового идентификатора.
+	// Для касаний и пера допускаем только тот указатель, который начал жест.
+	return drag.pointerType === 'mouse'
+		? event.isPrimary
+		: drag.pointerId === event.pointerId;
+}
+
+/** Подключает поток движения и завершение жеста; регрессии — promptDashboardComponent.test.tsx. */
+export function subscribePromptDashboardDragEvents(
+	target: EventTarget,
+	drag: Pick<DashboardPointerDragState, 'pointerId' | 'pointerType'>,
+	handlers: {
+		move: (event: MouseEvent) => void;
+		finish: (event: PointerEvent) => void;
+		cancel: () => void;
+	},
+): () => void {
+	// В некоторых средах mouse-нажатие сопровождается pen-движениями с отдельным pointerId.
+	// Совместимый mousemove нужен только для несовпавшего pointer-события; обычная мышь может его не присылать.
+	let useCompatibilityMouseMove = true;
+	/** Передаёт исходный указатель и отмечает необходимость совместимого движения без двойной обработки. */
+	const handleMove = (event: Event) => {
+		const matchesPointer = isPromptDashboardDragPointer(drag, event as PointerEvent);
+		useCompatibilityMouseMove = !matchesPointer;
+		if (matchesPointer) {
+			handlers.move(event as MouseEvent);
+		}
+	};
+	/** Дополняет жест мыши совместимым движением, когда pointer-событие пришло от другого устройства. */
+	const handleCompatibilityMove = (event: Event) => {
+		if (useCompatibilityMouseMove) {
+			handlers.move(event as MouseEvent);
+		}
+	};
+	/** Завершает жест по отпусканию его исходного устройства. */
+	const handleFinish = (event: Event) => {
+		if (isPromptDashboardDragPointer(drag, event as PointerEvent)) {
+			handlers.finish(event as PointerEvent);
+		}
+	};
+	/** Отменяет жест только по отмене его исходного устройства. */
+	const handleCancel = (event: Event) => {
+		if (isPromptDashboardDragPointer(drag, event as PointerEvent)) {
+			handlers.cancel();
+		}
+	};
+	target.addEventListener('pointermove', handleMove, { passive: false });
+	if (drag.pointerType === 'mouse') {
+		target.addEventListener('mousemove', handleCompatibilityMove, { passive: false });
+	}
+	target.addEventListener('pointerup', handleFinish, { passive: false });
+	target.addEventListener('pointercancel', handleCancel, { passive: false });
+	// Одна функция очистки используется при завершении, отмене, новом жесте и размонтировании.
+	return () => {
+		target.removeEventListener('pointermove', handleMove);
+		target.removeEventListener('mousemove', handleCompatibilityMove);
+		target.removeEventListener('pointerup', handleFinish);
+		target.removeEventListener('pointercancel', handleCancel);
+	};
+}
+
 /** Resolves the nearest visible drop slot inside one dashboard column. */
 export function resolvePromptDashboardColumnDropIndicator(
 	activeDraggedSection: PromptDashboardSectionKey | null,
@@ -3581,7 +3660,7 @@ export function resolvePromptDashboardColumnDropIndicator(
 	return { section: lastTarget.section, placement: 'after' };
 }
 
-/** Resolves the nearest dashboard drop slot for pointer-driven widget movement. */
+/** Выбирает цель переноса в широкой и узкой раскладке; проверки — promptDashboardComponent.test.tsx. */
 export function resolvePromptDashboardPointerDropIndicator(
 	activeDraggedSection: PromptDashboardSectionKey | null,
 	clientX: number,
@@ -3604,23 +3683,31 @@ export function resolvePromptDashboardPointerDropIndicator(
 		return null;
 	}
 
-	const containingColumn = orderedColumns.find((column) => clientX >= column.left && clientX <= column.right);
-	const targetColumn = containingColumn || orderedColumns.reduce((bestColumn, column) => {
-		const bestDistance = resolvePromptDashboardHorizontalColumnDistance(clientX, bestColumn.left, bestColumn.right);
-		const columnDistance = resolvePromptDashboardHorizontalColumnDistance(clientX, column.left, column.right);
-		return columnDistance < bestDistance ? column : bestColumn;
-	}, orderedColumns[0]);
+	// В узкой панели CSS ставит колонки друг под другом: совпадение X не определяет нужную колонку.
+	const targetColumn = orderedColumns
+		.map(column => ({
+			column,
+			horizontalDistance: resolvePromptDashboardAxisDistance(clientX, column.left, column.right),
+			verticalDistance: resolvePromptDashboardAxisDistance(
+				clientY,
+				Math.min(...column.sections.map(section => section.top)),
+				Math.max(...column.sections.map(section => section.bottom)),
+			),
+		}))
+		// Сохраняем выбор по X для соседних колонок разной высоты, а по Y различаем вертикальные группы.
+		.sort((left, right) => left.horizontalDistance - right.horizontalDistance
+			|| left.verticalDistance - right.verticalDistance)[0].column;
 
 	return resolvePromptDashboardColumnDropIndicator(activeDraggedSection, clientY, targetColumn.sections);
 }
 
-/** Measures how far a pointer is from a horizontal column range. */
-function resolvePromptDashboardHorizontalColumnDistance(clientX: number, left: number, right: number): number {
-	if (clientX < left) {
-		return left - clientX;
+/** Измеряет расстояние от координаты указателя до диапазона по одной оси. */
+function resolvePromptDashboardAxisDistance(position: number, start: number, end: number): number {
+	if (position < start) {
+		return start - position;
 	}
-	if (clientX > right) {
-		return clientX - right;
+	if (position > end) {
+		return position - end;
 	}
 	return 0;
 }

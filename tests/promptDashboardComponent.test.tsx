@@ -10,6 +10,8 @@ import {
 	buildDockerTableRows,
 	buildWidgetGridColumns,
 	isPromptDashboardBranchActionBusy,
+	isPromptDashboardDragPointer,
+	subscribePromptDashboardDragEvents,
 	normalizePromptDashboardDockerWidgetState,
 	matchesDockerContainerStatusFilter,
 	reorderPromptDashboardSections,
@@ -2311,6 +2313,110 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 	);
 });
 
+/** Отправляет события с полями из живого webview, не требуя браузерного конструктора PointerEvent. */
+function dispatchDashboardDragEvent(target: EventTarget, type: string, properties: PointerEventInit): void {
+	target.dispatchEvent(Object.assign(new Event(type, { cancelable: true }), properties));
+}
+
+/** Воспроизводит mouse-down → pen-move + mousemove → mouse-up из пользовательского VS Code. */
+test('subscribePromptDashboardDragEvents tracks mixed mouse and pen input through compatibility mouse movement', () => {
+	const target = new EventTarget();
+	const calls: string[] = [];
+	const stop = subscribePromptDashboardDragEvents(target, { pointerId: 1, pointerType: 'mouse' }, {
+		move: event => calls.push(`move:${event.clientX}:${event.buttons}`),
+		finish: () => { calls.push('finish'); stop(); },
+		cancel: () => { calls.push('cancel'); stop(); },
+	});
+
+	// Чужой pointermove не обрабатывается второй раз вместе с совместимым mousemove.
+	dispatchDashboardDragEvent(target, 'pointermove', {
+		pointerId: 2, pointerType: 'pen', isPrimary: true, buttons: 1, clientX: 120,
+	});
+	dispatchDashboardDragEvent(target, 'mousemove', { buttons: 1, clientX: 120 });
+	dispatchDashboardDragEvent(target, 'pointerup', { pointerId: 2, pointerType: 'pen', isPrimary: true });
+	assert.deepEqual(calls, ['move:120:1']);
+	dispatchDashboardDragEvent(target, 'pointerup', { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+	assert.deepEqual(calls, ['move:120:1', 'finish']);
+
+	// После завершения больше не должно быть ни движения, ни повторного завершения или отмены.
+	dispatchDashboardDragEvent(target, 'mousemove', { buttons: 1, clientX: 240 });
+	dispatchDashboardDragEvent(target, 'pointerup', { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+	dispatchDashboardDragEvent(target, 'pointercancel', { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+	assert.deepEqual(calls, ['move:120:1', 'finish']);
+});
+
+/** Обычная мышь работает без совместимых событий, а их наличие не удваивает обработку движения. */
+test('subscribePromptDashboardDragEvents preserves native mouse moves and avoids processing their compatibility duplicate', () => {
+	const target = new EventTarget();
+	const positions: number[] = [];
+	const stop = subscribePromptDashboardDragEvents(target, { pointerId: 1, pointerType: 'mouse' }, {
+		move: event => positions.push(event.clientX),
+		finish: () => stop(),
+		cancel: () => stop(),
+	});
+	dispatchDashboardDragEvent(target, 'pointermove', {
+		pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 1, clientX: 100,
+	});
+	assert.deepEqual(positions, [100]);
+	dispatchDashboardDragEvent(target, 'mousemove', { buttons: 1, clientX: 100 });
+	assert.deepEqual(positions, [100]);
+	// После обычной мыши движение может снова прийти от pen, не теряя совместимый поток.
+	dispatchDashboardDragEvent(target, 'pointermove', {
+		pointerId: 2, pointerType: 'pen', isPrimary: true, buttons: 1, clientX: 200,
+	});
+	dispatchDashboardDragEvent(target, 'mousemove', { buttons: 1, clientX: 200 });
+	assert.deepEqual(positions, [100, 200]);
+	dispatchDashboardDragEvent(target, 'pointerup', { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+	dispatchDashboardDragEvent(target, 'pointermove', {
+		pointerId: 1, pointerType: 'mouse', isPrimary: true, buttons: 1, clientX: 300,
+	});
+	dispatchDashboardDragEvent(target, 'mousemove', { buttons: 1, clientX: 300 });
+	assert.deepEqual(positions, [100, 200]);
+});
+
+/** Не позволяет совместимым mouse-событиям и другим указателям вмешиваться в жест пера или касания. */
+test('subscribePromptDashboardDragEvents isolates pen and touch movement and removes listeners on cancellation', () => {
+	for (const pointerType of ['pen', 'touch']) {
+		const target = new EventTarget();
+		const calls: string[] = [];
+		const stop = subscribePromptDashboardDragEvents(target, { pointerId: 7, pointerType }, {
+			move: () => calls.push('move'),
+			finish: () => calls.push('finish'),
+			cancel: () => { calls.push('cancel'); stop(); },
+		});
+		dispatchDashboardDragEvent(target, 'mousemove', { buttons: 1 });
+		dispatchDashboardDragEvent(target, 'pointermove', { pointerId: 8, pointerType, isPrimary: true });
+		dispatchDashboardDragEvent(target, 'pointerup', { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+		dispatchDashboardDragEvent(target, 'pointercancel', { pointerId: 8, pointerType, isPrimary: true });
+		assert.deepEqual(calls, []);
+		dispatchDashboardDragEvent(target, 'pointermove', { pointerId: 7, pointerType, isPrimary: true });
+		dispatchDashboardDragEvent(target, 'pointercancel', { pointerId: 7, pointerType, isPrimary: true });
+		dispatchDashboardDragEvent(target, 'pointermove', { pointerId: 7, pointerType, isPrimary: true });
+		dispatchDashboardDragEvent(target, 'pointerup', { pointerId: 7, pointerType, isPrimary: true });
+		assert.deepEqual(calls, ['move', 'cancel']);
+	}
+});
+
+/** Проверяет устойчивость жеста мыши к смене pointerId и изоляцию других устройств ввода. */
+test('isPromptDashboardDragPointer accepts primary mouse movement and release after pointerId changes', () => {
+	const drag = { pointerId: 1, pointerType: 'mouse' };
+	assert.equal(isPromptDashboardDragPointer(drag, { pointerId: 2, pointerType: 'mouse', isPrimary: true }), true);
+	assert.equal(isPromptDashboardDragPointer(drag, { pointerId: 1, pointerType: 'mouse', isPrimary: true }), true);
+	assert.equal(isPromptDashboardDragPointer(drag, { pointerId: 2, pointerType: 'mouse', isPrimary: false }), false);
+	assert.equal(isPromptDashboardDragPointer(drag, { pointerId: 1, pointerType: 'touch', isPrimary: true }), false);
+	assert.equal(isPromptDashboardDragPointer(drag, { pointerId: 1, pointerType: 'pen', isPrimary: true }), false);
+});
+
+/** Проверяет, что мышь, второе касание и другое перо не могут завершить чужой жест. */
+test('isPromptDashboardDragPointer keeps touch and pen gestures bound to their original pointer', () => {
+	for (const pointerType of ['touch', 'pen']) {
+		const drag = { pointerId: 7, pointerType };
+		assert.equal(isPromptDashboardDragPointer(drag, { pointerId: 7, pointerType, isPrimary: true }), true);
+		assert.equal(isPromptDashboardDragPointer(drag, { pointerId: 8, pointerType, isPrimary: true }), false);
+		assert.equal(isPromptDashboardDragPointer(drag, { pointerId: 7, pointerType: 'mouse', isPrimary: true }), false);
+	}
+});
+
 test('resolvePromptDashboardColumnDropIndicator keeps a valid drop target in column gaps and below the last card', () => {
 	const sectionBounds = [
 		{ section: 'status' as const, top: 0, bottom: 100 },
@@ -2396,6 +2502,51 @@ test('resolvePromptDashboardPointerDropIndicator selects the nearest column and 
 	assert.equal(
 		resolvePromptDashboardPointerDropIndicator('status', 50, 40, [{ left: 0, right: 180, sections: [{ section: 'status', top: 0, bottom: 100 }] }]),
 		null,
+	);
+});
+
+/** Проверяет перенос внутри нижней колонки и между колонками, расположенными друг под другом. */
+test('resolvePromptDashboardPointerDropIndicator respects vertically stacked dashboard columns', () => {
+	// При узкой панели горизонтальные границы обеих колонок совпадают.
+	const columns = [
+		{
+			left: 0,
+			right: 600,
+			sections: [
+				{ section: 'status' as const, top: 50, bottom: 150 },
+				{ section: 'projectBranches' as const, top: 162, bottom: 300 },
+			],
+		},
+		{
+			left: 0,
+			right: 600,
+			sections: [
+				{ section: 'activity' as const, top: 312, bottom: 450 },
+				{ section: 'projectCommits' as const, top: 462, bottom: 600 },
+			],
+		},
+	];
+
+	assert.deepEqual(
+		resolvePromptDashboardPointerDropIndicator('projectCommits', 30, 330, columns),
+		{ section: 'activity', placement: 'before' },
+	);
+	assert.deepEqual(
+		resolvePromptDashboardPointerDropIndicator('status', 30, 520, columns),
+		{ section: 'projectCommits', placement: 'before' },
+	);
+	assert.deepEqual(
+		resolvePromptDashboardPointerDropIndicator('projectCommits', 30, 180, columns),
+		{ section: 'projectBranches', placement: 'before' },
+	);
+	// В промежутке и за внешними границами выбирается ближайшая колонка по обеим координатам.
+	assert.deepEqual(
+		resolvePromptDashboardPointerDropIndicator('status', 610, 310, columns),
+		{ section: 'activity', placement: 'before' },
+	);
+	assert.deepEqual(
+		resolvePromptDashboardPointerDropIndicator('status', 30, 650, columns),
+		{ section: 'projectCommits', placement: 'after' },
 	);
 });
 

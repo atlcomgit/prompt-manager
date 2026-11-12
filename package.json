@@ -774,13 +774,13 @@
     "prebuild": "npm run sync:about-title",
     "version": "npm run sync:about-title",
     "vscode:prepublish": "npm run build",
-    "compile": "npm run build",
+    "compile": "npm run build && node scripts/sync-tunnel-extension.mjs",
     "build": "npm run build:extension && npm run build:claude-sdk && npm run build:webview && npm run copy:wasm",
     "build:claude-sdk": "esbuild ./scripts/claude-session-sdk.mjs --bundle --outfile=dist/claude-chat-sdk.mjs --platform=node --format=esm --minify --legal-comments=eof && cp node_modules/@anthropic-ai/claude-agent-sdk/LICENSE.md dist/claude-agent-sdk-LICENSE.md",
     "test": "npm run test:compile && npm run test:run --",
     "test:compile": "node -e \"require('fs').rmSync('out-tests', { recursive: true, force: true })\" && tsc -p tsconfig.tests.json",
     "test:run": "node scripts/run-tests.mjs",
-    "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@huggingface/transformers --external:@anthropic-ai/claude-agent-sdk --format=cjs --platform=node --minify",
+    "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@huggingface/transformers --external:@anthropic-ai/claude-agent-sdk --format=cjs --platform=node --minify && cp node_modules/ws/LICENSE dist/ws-LICENSE",
     "build:webview": "node esbuild.webview.mjs",
     "copy:wasm": "cp node_modules/sql.js/dist/sql-wasm.wasm dist/sql-wasm.wasm",
     "watch:esbuild": "npm run watch:extension & npm run watch:webview",
@@ -801,6 +801,7 @@
     "@types/sql.js": "^1.4.9",
     "@types/three": "^0.183.1",
     "@types/vscode": "^1.95.0",
+    "@types/ws": "8.18.1",
     "@vscode/vsce": "^3.8.0",
     "esbuild": "^0.28.0",
     "typescript": "^5.3.3"
@@ -815,6 +816,7 @@
     "react-dom": "^18.2.0",
     "sql.js": "^1.14.1",
     "three": "^0.183.2",
-    "write-excel-file": "^4.1.1"
+    "write-excel-file": "^4.1.1",
+    "ws": "8.21.0"
   }
 }

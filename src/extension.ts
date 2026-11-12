@@ -3,6 +3,7 @@
  */
 
 import * as vscode from 'vscode';
+import { CopilotCodexSessionService } from './services/copilotCodexSessionService.js';
 import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService, PromptVoiceService, CustomGroupsService, PromptDashboardService, DockerContainersService, TodoScannerService } from './services/index.js';
 import {
 	MemoryDatabaseService,
@@ -95,6 +96,8 @@ export function activate(context: vscode.ExtensionContext) {
 		() => chatMemoryInstructionService,
 		() => codeMapChatInstructionService,
 		customGroupsService,
+		// Discovery учитывает реальный пользовательский каталог текущего extension host.
+		new CopilotCodexSessionService(context.globalStorageUri.fsPath),
 	);
 	// Наблюдение Claude восстанавливается в фоне и не блокирует активацию интерфейса.
 	void editorPanelManager.restoreClaudeChatTracking().catch(error => {
@@ -640,7 +643,8 @@ export function activate(context: vscode.ExtensionContext) {
 		}),
 
 		vscode.commands.registerCommand('promptManager.refreshList', async () => {
-			await sidebarProvider.refreshList();
+			// Кнопка в шапке сверяет список с папками, включая изменения из другого окна.
+			await sidebarProvider.refreshList({ forceRefresh: true });
 		}),
 
 		vscode.commands.registerCommand('promptManager.startChat', async (promptId?: string) => {

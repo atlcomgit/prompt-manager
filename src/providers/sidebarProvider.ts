@@ -20,6 +20,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 	private static readonly AGENT_JSON_DEBOUNCE_MS = 300;
 
 	private _view?: vscode.WebviewView;
+	/** Последний запрос списка отменяет доставку более старого снимка; тесты: sidebarProvider.test.ts. */
+	private listRefreshVersion = 0;
 	private _onDidOpenPrompt = new vscode.EventEmitter<PromptOpenTarget>();
 	public readonly onDidOpenPrompt = this._onDidOpenPrompt.event;
 	private _onDidDeletePrompt = new vscode.EventEmitter<string>();
@@ -119,10 +121,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		return true;
 	}
 
-	/** Refresh the prompt list */
-	async refreshList(): Promise<void> {
+	/** Публикует только актуальное обновление списка; тесты: sidebarProvider.test.ts. */
+	async refreshList(options?: { forceRefresh?: boolean }): Promise<void> {
+		const requestVersion = ++this.listRefreshVersion;
 		const [prompts, archivedPrompts] = await Promise.all([
-			this.storageService.listPrompts(),
+			this.storageService.listPrompts(options),
 			this.storageService.listArchivedPrompts(),
 		]);
 
@@ -137,7 +140,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			}
 		}
 
-		this.postMessage({ type: 'prompts', prompts, archivedPrompts });
+		if (requestVersion === this.listRefreshVersion) {
+			this.postMessage({ type: 'prompts', prompts, archivedPrompts });
+		}
 	}
 
 	/** Sync selected prompt in persisted sidebar state and active webview */

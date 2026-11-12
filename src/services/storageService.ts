@@ -100,6 +100,20 @@ export class StorageService implements vscode.Disposable {
 	private readonly EXTERNAL_CONFIG_CHANGE_DEBOUNCE_MS = 120;
 
 	private _listCache: PromptConfig[] | null = null;
+	/** Версия изменений защищает публикацию сканирования; тесты: storageServiceContextFiles.test.ts. */
+	private listCacheRevision = 0;
+	/** Одна начальная загрузка не перезаписывает изменения параллельного обработчика. */
+	private listCacheLoadTask: Promise<void> | null = null;
+	/** Ручное обновление общее для ожидающих читателей; тесты: storageServiceContextFiles.test.ts. */
+	private listCacheRefreshTask: Promise<void> | null = null;
+	/** Последовательная атомарная запись кеша не оставляет частичный JSON при работе двух окон. */
+	private listCacheWriteQueue: Promise<void> = Promise.resolve();
+	private listCacheWriteVersion = 0;
+	/** Уникальные номера чтений не переиспользуются после завершения события. */
+	private promptFileReadSequence = 0;
+	private pendingPromptReadsByDirectory = new Map<string, number>();
+	/** Содержимое собственной записи позволяет отличить её эхо от записи другого окна. */
+	private internalConfigWrites = new Map<string, { content: string; expiresAt: number }>();
 	private _backgroundRefreshCancelled = false;
 	private readonly _onDidExternalPromptConfigChange = new vscode.EventEmitter<ExternalPromptConfigChange[]>();
 	/** Publishes completed daily time writes to dashboard consumers. */
@@ -172,29 +186,25 @@ export class StorageService implements vscode.Disposable {
 		}
 	}
 
+	/** Публикует новый снимок в памяти и атомарно сохраняет его; тесты: storageServiceContextFiles.test.ts. */
 	private async writeListCache(prompts: PromptConfig[]): Promise<void> {
+		this.listCacheRevision++;
 		this._listCache = prompts;
-		try {
-			await vscode.workspace.fs.writeFile(
-				vscode.Uri.file(this.cacheFilePath),
-				Buffer.from(JSON.stringify(prompts, null, 2), 'utf-8'),
-			);
-		} catch {
-			// Cache write failure is non-fatal
-		}
+		await this.writeListCacheFile(prompts);
 	}
 
 	private removeListCacheEntryFast(id: string): void {
 		const current = this._listCache;
 		if (current === null) { return; }
 		const updated = current.filter(prompt => prompt.id !== id);
+		this.listCacheRevision++;
 		this._listCache = updated;
 		void this.writeListCacheFile(updated).catch(() => { });
 	}
 
 	/** Update or add one entry in the cache. No-op if no cache exists yet. */
 	private async updateListCacheEntry(config: PromptConfig, removedId?: string): Promise<void> {
-		const current = this._listCache ?? await this.readListCache();
+		const current = this._listCache ?? await this.listPrompts();
 		if (current === null) { return; }
 		const removeIds = new Set<string>([config.id]);
 		if (removedId) {
@@ -219,18 +229,31 @@ export class StorageService implements vscode.Disposable {
 		if (!config.archived) {
 			updated.push(config);
 		}
+		this.listCacheRevision++;
 		this._listCache = updated;
 		// Файловая запись кэша — в фоне, не блокирует save
 		void this.writeListCacheFile(updated).catch(() => { });
 	}
 
-	/** Запись файла кэша списка без обновления in-memory кэша */
-	private async writeListCacheFile(prompts: PromptConfig[]): Promise<void> {
-		try {
-			await fs.promises.writeFile(this.cacheFilePath, JSON.stringify(prompts, null, 2), 'utf-8');
-		} catch {
-			// Cache write failure is non-fatal
-		}
+	/** Заменяет кеш целым JSON, пропуская вытесненные записи; тесты: storageServiceContextFiles.test.ts. */
+	private writeListCacheFile(prompts: PromptConfig[]): Promise<void> {
+		const version = ++this.listCacheWriteVersion;
+		const contents = JSON.stringify(prompts, null, 2);
+		const task = this.listCacheWriteQueue.then(async () => {
+			if (version !== this.listCacheWriteVersion) { return; }
+			const temporaryPath = `${this.cacheFilePath}.${crypto.randomUUID()}.tmp`;
+			try {
+				await fs.promises.writeFile(temporaryPath, contents, 'utf-8');
+				if (version === this.listCacheWriteVersion) {
+					await fs.promises.rename(temporaryPath, this.cacheFilePath);
+				}
+			} finally {
+				await fs.promises.rm(temporaryPath, { force: true });
+			}
+		});
+		// Кеш восстанавливается из папок; отказ его записи не отменяет сохранённый промпт.
+		this.listCacheWriteQueue = task.catch(() => { });
+		return this.listCacheWriteQueue;
 	}
 
 	/** Run best-effort storage work outside the visible save path. */
@@ -243,7 +266,7 @@ export class StorageService implements vscode.Disposable {
 
 	/** Remove one entry from the cache by id. No-op if no cache exists yet. */
 	private async removeListCacheEntry(id: string): Promise<void> {
-		const current = this._listCache ?? await this.readListCache();
+		const current = this._listCache ?? await this.listPrompts();
 		if (current === null) { return; }
 		await this.writeListCache(current.filter(p => p.id !== id));
 	}
@@ -459,23 +482,42 @@ export class StorageService implements vscode.Disposable {
 		return prompt;
 	}
 
-	private async findPromptIdByUuid(promptUuid: string): Promise<string | undefined> {
-		const normalizedPromptUuid = (promptUuid || '').trim();
-		if (!normalizedPromptUuid) {
-			return undefined;
+	/** Восстанавливает identity по файлам при устаревшем кеше; тесты: storageServiceContextFiles.test.ts. */
+	private async findPromptIdByUuid(promptUuid: string, forceScan = false): Promise<string | undefined> {
+		const uuid = (promptUuid || '').trim();
+		if (!uuid) { return undefined; }
+		const cached = (await this.listPrompts({ includeArchived: true }))
+			.filter(prompt => (prompt.promptUuid || '').trim() === uuid);
+		if (!forceScan) {
+			const existing = cached.find(prompt => this.resolvePromptStorageLocationSync(prompt.id));
+			if (existing) { return existing.id; }
 		}
-
-		const prompts = await this.listPrompts({ includeArchived: true });
-		return prompts.find(prompt => (prompt.promptUuid || '').trim() === normalizedPromptUuid)?.id;
+		// При переименовании из другого окна кеш не является источником истины.
+		const scanRevision = this.listCacheRevision;
+		const [active, archived] = await Promise.all([
+			this.readPromptConfigsFromDirectory(this.storageDir, false),
+			this.listArchivedPrompts(),
+		]);
+		const found = [...active, ...archived].find(prompt => prompt.promptUuid === uuid);
+		if (scanRevision === this.listCacheRevision) {
+			for (const stale of cached) {
+				if (!this.resolvePromptStorageLocationSync(stale.id)) { this.removeListCacheEntryFast(stale.id); }
+			}
+			if (found) { this.updateListCacheEntryFast(found); }
+		}
+		return found?.id;
 	}
 
+	/** Открывает стабильный UUID даже после переименования в другом окне; тесты: storageServiceContextFiles.test.ts. */
 	async getPromptByUuid(promptUuid: string): Promise<Prompt | null> {
-		const promptId = await this.findPromptIdByUuid(promptUuid);
-		if (!promptId) {
-			return null;
-		}
-
-		return this.getPrompt(promptId);
+		const id = await this.findPromptIdByUuid(promptUuid);
+		const prompt = id ? await this.getPrompt(id) : null;
+		if (prompt?.promptUuid === promptUuid.trim()) { return prompt; }
+		if (!id) { return null; }
+		// Каталог мог переместиться между проверкой его наличия и чтением конфигурации.
+		const freshId = await this.findPromptIdByUuid(promptUuid, true);
+		const freshPrompt = freshId ? await this.getPrompt(freshId) : null;
+		return freshPrompt?.promptUuid === promptUuid.trim() ? freshPrompt : null;
 	}
 
 	private async resolveExistingPromptIdentity(prompt: Prompt, requestedPreviousId: string): Promise<string | undefined> {
@@ -724,12 +766,40 @@ export class StorageService implements vscode.Disposable {
 		return typeof expiresAt === 'number' && expiresAt > now;
 	}
 
-	private markInternalConfigWrite(configPath: string): void {
-		this.markInternalWatchedFileWrite(configPath);
+	/** Запоминает точные байты записи, не скрывая изменения другого окна в течение suppression-интервала. */
+	private markInternalConfigWrite(configPath: string, content: string): void {
+		const now = Date.now();
+		for (const [key, entry] of this.internalConfigWrites) {
+			if (entry.expiresAt <= now) { this.internalConfigWrites.delete(key); }
+		}
+		this.internalConfigWrites.set(path.normalize(configPath), {
+			content, expiresAt: now + this.INTERNAL_CONFIG_WRITE_SUPPRESS_MS,
+		});
 	}
 
-	private shouldIgnoreWatchedPromptConfigChange(uri: vscode.Uri): boolean {
-		return this.shouldIgnoreInternalWatchedFileChange(uri);
+	/** Подавляет только совпадающее эхо записи; тесты: storageServiceContextFiles.test.ts. */
+	private async shouldIgnoreWatchedPromptConfigChange(uri: vscode.Uri): Promise<boolean> {
+		const key = path.normalize(uri.fsPath);
+		const ownWrite = this.internalConfigWrites.get(key);
+		if (!ownWrite) { return false; }
+		if (ownWrite.expiresAt <= Date.now()) {
+			this.internalConfigWrites.delete(key);
+			return false;
+		}
+		try {
+			const raw = await vscode.workspace.fs.readFile(uri);
+			return Buffer.from(raw).toString('utf-8') === ownWrite.content;
+		} catch {
+			return false;
+		}
+	}
+
+	/** Регистрирует чтение папки до await; более новое событие отменяет прежний результат. */
+	private beginPromptFileRead(directory: string): number {
+		this.listCacheRevision++;
+		const version = ++this.promptFileReadSequence;
+		this.pendingPromptReadsByDirectory.set(directory, version);
+		return version;
 	}
 
 	private shouldIgnoreWatchedPromptSearchSupportFileChange(uri: vscode.Uri): boolean {
@@ -793,73 +863,69 @@ export class StorageService implements vscode.Disposable {
 		}
 	}
 
+	/** Применяет только последнее файловое событие папки; тесты: storageServiceContextFiles.test.ts. */
 	private async handleWatchedPromptConfigChange(
 		uri: vscode.Uri,
 		kind: ExternalPromptConfigChange['kind'],
 	): Promise<void> {
-		if (this.shouldIgnoreWatchedPromptConfigChange(uri)) {
-			return;
-		}
+		const directory = path.normalize(path.dirname(uri.fsPath));
+		const version = this.beginPromptFileRead(directory);
+		const isCurrent = (): boolean => this.pendingPromptReadsByDirectory.get(directory) === version;
+		try {
+			const pathDetails = this.resolvePromptConfigPathDetails(uri);
+			if (!pathDetails) {
+				return;
+			}
 
-		const pathDetails = this.resolvePromptConfigPathDetails(uri);
-		if (!pathDetails) {
-			return;
-		}
+			await this.listPrompts();
+			if (await this.shouldIgnoreWatchedPromptConfigChange(uri) || !isCurrent()) { return; }
 
-		if (kind === 'deleted') {
-			if (!pathDetails.archived) {
-				if (this._listCache === null) {
-					await this.removeListCacheEntry(pathDetails.id);
-				} else {
+			if (kind === 'deleted') {
+				if (!pathDetails.archived) {
 					this.removeListCacheEntryFast(pathDetails.id);
 				}
+				this.queueExternalPromptConfigChange({
+					id: pathDetails.id,
+					archived: pathDetails.archived,
+					kind,
+					config: null,
+					uri,
+					externalChangedAt: Date.now(),
+				});
+				return;
 			}
+
+			const [config, fileMtimeMs] = await Promise.all([
+				this.readConfig(pathDetails.id, { archived: pathDetails.archived, dirPath: path.dirname(uri.fsPath) }),
+				this.resolvePromptConfigFileMtime(uri),
+			]);
+
+			if (!isCurrent()) { return; }
+			if (!config) {
+				if (!pathDetails.archived) {
+					this.removeListCacheEntryFast(pathDetails.id);
+				}
+				return;
+			}
+
+			if (!pathDetails.archived) {
+				this.updateListCacheEntryFast(config);
+			}
+
 			this.queueExternalPromptConfigChange({
 				id: pathDetails.id,
 				archived: pathDetails.archived,
 				kind,
-				config: null,
+				config,
 				uri,
-				externalChangedAt: Date.now(),
+				externalChangedAt: normalizePromptExternalChangedAt(config.updatedAt, fileMtimeMs),
 			});
-			return;
+		} finally {
+			if (isCurrent()) { this.pendingPromptReadsByDirectory.delete(directory); }
 		}
-
-		const [config, fileMtimeMs] = await Promise.all([
-			this.readConfig(pathDetails.id, { archived: pathDetails.archived, dirPath: path.dirname(uri.fsPath) }),
-			this.resolvePromptConfigFileMtime(uri),
-		]);
-
-		if (!config) {
-			if (!pathDetails.archived) {
-				if (this._listCache === null) {
-					await this.removeListCacheEntry(pathDetails.id);
-				} else {
-					this.removeListCacheEntryFast(pathDetails.id);
-				}
-			}
-			return;
-		}
-
-		if (!pathDetails.archived) {
-			if (this._listCache === null) {
-				await this.updateListCacheEntry(config);
-			} else {
-				this.updateListCacheEntryFast(config);
-			}
-		}
-
-		this.queueExternalPromptConfigChange({
-			id: pathDetails.id,
-			archived: pathDetails.archived,
-			kind,
-			config,
-			uri,
-			externalChangedAt: normalizePromptExternalChangedAt(config.updatedAt, fileMtimeMs),
-		});
 	}
 
-	/** Refresh cached sidebar search data when plan/report files change outside config.json. */
+	/** Обновляет поиск после внешней правки плана/отчёта, отбрасывая устаревшее чтение папки. */
 	private async handleWatchedPromptSearchSupportFileChange(
 		uri: vscode.Uri,
 		expectedFileName: string,
@@ -873,30 +939,34 @@ export class StorageService implements vscode.Disposable {
 			return;
 		}
 
-		const config = await this.readConfig(pathDetails.id, {
-			archived: pathDetails.archived,
-			dirPath: path.dirname(uri.fsPath),
-		});
-		if (!config) {
-			return;
-		}
+		const directory = path.normalize(path.dirname(uri.fsPath));
+		const version = this.beginPromptFileRead(directory);
+		const isCurrent = (): boolean => this.pendingPromptReadsByDirectory.get(directory) === version;
+		try {
+			await this.listPrompts();
+			const config = await this.readConfig(pathDetails.id, {
+				archived: pathDetails.archived,
+				dirPath: path.dirname(uri.fsPath),
+			});
+			if (!config || !isCurrent()) {
+				return;
+			}
 
-		if (!pathDetails.archived) {
-			if (this._listCache === null) {
-				await this.updateListCacheEntry(config);
-			} else {
+			if (!pathDetails.archived) {
 				this.updateListCacheEntryFast(config);
 			}
-		}
 
-		this.queueExternalPromptConfigChange({
-			id: pathDetails.id,
-			archived: pathDetails.archived,
-			kind: 'changed',
-			config,
-			uri,
-			externalChangedAt: Date.now(),
-		});
+			this.queueExternalPromptConfigChange({
+				id: pathDetails.id,
+				archived: pathDetails.archived,
+				kind: 'changed',
+				config,
+				uri,
+				externalChangedAt: Date.now(),
+			});
+		} finally {
+			if (isCurrent()) { this.pendingPromptReadsByDirectory.delete(directory); }
+		}
 	}
 
 	private promptHistoryDir(id: string): string {
@@ -1078,20 +1148,29 @@ export class StorageService implements vscode.Disposable {
 		}
 	}
 
-	/** List all prompt configs (lightweight — no content) */
-	async listPrompts(options?: { includeArchived?: boolean }): Promise<PromptConfig[]> {
+	/** Читает кеш или явно пересобирает его из папок; тесты: storageServiceContextFiles.test.ts. */
+	async listPrompts(options?: { includeArchived?: boolean; forceRefresh?: boolean }): Promise<PromptConfig[]> {
+		if (options?.forceRefresh) {
+			await this.refreshListCacheFromDisk();
+		}
 		await this.ensureStorageDir();
-
-		// Level 1: in-memory cache
-		if (this._listCache === null) {
-			const cached = await this.readListCache();
-			if (cached !== null) {
-				this._listCache = cached;
-			} else {
-				this._listCache = await this._scanAndCachePrompts();
-			}
+		if (this.listCacheRefreshTask) {
+			// Автоматическое обновление sidebar не должно обогнать ручное со старым кешем.
+			// Ошибку получает ручная команда; обычные читатели продолжают работать с сохранённым кешем.
+			await this.listCacheRefreshTask.catch(() => undefined);
 		}
 
+		if (this._listCache === null) {
+			if (!this.listCacheLoadTask) {
+				this.listCacheLoadTask = (async () => {
+					const cached = await this.readListCache();
+					if (this._listCache === null) {
+						this._listCache = cached ?? await this._scanAndCachePrompts();
+					}
+				})().finally(() => { this.listCacheLoadTask = null; });
+			}
+			await this.listCacheLoadTask;
+		}
 		const prompts = this._listCache || [];
 		if (!options?.includeArchived) {
 			return prompts;
@@ -1101,16 +1180,42 @@ export class StorageService implements vscode.Disposable {
 		return [...prompts, ...archivedPrompts];
 	}
 
+	/** Восстанавливает список даже после пропущенного watcher-события; тесты: storageServiceContextFiles.test.ts. */
+	private refreshListCacheFromDisk(): Promise<void> {
+		if (this.listCacheRefreshTask) { return this.listCacheRefreshTask; }
+		this.listCacheRefreshTask = (async () => {
+			await this.ensureStorageDir();
+			await this.listCacheLoadTask;
+			// Запоздавшее чтение старой папки и фоновый обход не отменяют явное обновление.
+			this.pendingPromptReadsByDirectory.clear();
+			this.listCacheRevision++;
+			for (let attempt = 0; attempt < 3; attempt++) {
+				const revision = this.listCacheRevision;
+				const prompts = await this.readPromptConfigsFromDirectory(this.storageDir, false, true);
+				if (revision !== this.listCacheRevision) { continue; }
+				await this.writeListCache(prompts);
+				return;
+			}
+			// При непрерывных изменениях сохраняем действующий кеш и позволяем повторить обновление.
+			throw new Error('Список промптов изменяется во время чтения. Повторите обновление.');
+		})().finally(() => { this.listCacheRefreshTask = null; });
+		return this.listCacheRefreshTask;
+	}
+
 	async listArchivedPrompts(): Promise<PromptConfig[]> {
 		await this.ensureStorageDir();
 		return this.readPromptConfigsFromDirectory(this.archiveStorageDir, true);
 	}
 
-	private async readPromptConfigsFromDirectory(dirPath: string, archived: boolean): Promise<PromptConfig[]> {
+	/** При явном обновлении ошибка доступа не превращается в успешный пустой список. */
+	private async readPromptConfigsFromDirectory(
+		dirPath: string, archived: boolean, throwOnDirectoryReadError = false,
+	): Promise<PromptConfig[]> {
 		let entries: [string, vscode.FileType][];
 		try {
 			entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dirPath));
-		} catch {
+		} catch (error) {
+			if (throwOnDirectoryReadError) { throw error; }
 			return [];
 		}
 
@@ -1153,7 +1258,7 @@ export class StorageService implements vscode.Disposable {
 
 			if (shouldBackfillPromptUuid || shouldBackfillArchived || repairedContextFiles.changed) {
 				try {
-					this.markInternalConfigWrite(configPath);
+					this.markInternalConfigWrite(configPath, this.serializeStoredPromptConfig(config));
 					await vscode.workspace.fs.writeFile(
 						vscode.Uri.file(configPath),
 						Buffer.from(this.serializeStoredPromptConfig(config), 'utf-8'),
@@ -1374,7 +1479,9 @@ export class StorageService implements vscode.Disposable {
 			&& !repairedContextFiles.changed,
 		);
 		// Ставим suppression до локальной записи, чтобы watcher не подхватил наш же config.json.
-		this.markInternalConfigWrite(configPath);
+		this.listCacheRevision++;
+		this.pendingPromptReadsByDirectory.delete(path.normalize(dir));
+		this.markInternalConfigWrite(configPath, configJson);
 		if (canSkipStableStructureChecks) {
 			fs.writeFileSync(configPath, configJson, 'utf-8');
 		}
@@ -1850,6 +1957,9 @@ export class StorageService implements vscode.Disposable {
 
 		const oldUri = vscode.Uri.file(this.promptDir(oldId, fromArchived));
 		const newUri = vscode.Uri.file(this.promptDir(newId, toArchived));
+		this.listCacheRevision++;
+		this.pendingPromptReadsByDirectory.delete(path.normalize(oldUri.fsPath));
+		this.pendingPromptReadsByDirectory.delete(path.normalize(newUri.fsPath));
 
 		try {
 			await vscode.workspace.fs.stat(oldUri);
@@ -1903,6 +2013,7 @@ export class StorageService implements vscode.Disposable {
 		await new Promise<void>(resolve => setTimeout(resolve, 2000));
 		if (this._backgroundRefreshCancelled) { return; }
 
+		const scanRevision = this.listCacheRevision;
 		let entries: [string, vscode.FileType][];
 		try {
 			await this.ensureStorageDir();
@@ -1950,7 +2061,8 @@ export class StorageService implements vscode.Disposable {
 			}
 		}
 
-		if (hasChanges && !this._backgroundRefreshCancelled) {
+		// Файловые события и сохранения уже обновляют кеш; старый проход не отменяет их результат.
+		if (hasChanges && !this._backgroundRefreshCancelled && scanRevision === this.listCacheRevision) {
 			await this.writeListCache(freshConfigs);
 			onComplete?.();
 		}
@@ -2002,6 +2114,8 @@ export class StorageService implements vscode.Disposable {
 		this.clearExternalConfigChangeTimer();
 		this.dailyTimeWriteQueueByPromptKey.clear();
 		this.pendingExternalConfigChanges.clear();
+		this.pendingPromptReadsByDirectory.clear();
+		this.internalConfigWrites.clear();
 		for (const disposable of this.promptConfigWatcherDisposables) {
 			disposable.dispose();
 		}

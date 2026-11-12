@@ -54,6 +54,12 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
 ## Built For Real Work / Для реальной работы
 
 - **Prompt Sidebar** for library, filters, groups, and fast capture.
+- **Codex inside Copilot** starts with Full Access when launched from Prompt Manager on Linux with a local
+  Agent Host supporting AHP 1.1. The new session is named before the task is sent; other chats keep their permissions.
+  **Codex внутри Copilot** при запуске из Prompt Manager получает Full Access — доступ к файлам и сети
+  без запросов подтверждения. Поддерживается Linux с локальным Agent Host (AHP 1.1).
+  Локальное подключение через Unix-сокет совместимо с HTTP-обёрткой VS Code; настройки прокси менять не требуется.
+  При неподтверждённых разрешениях отправка отменяется, текст сохраняется в буфере обмена.
 - **Copilot Chat autostart** is controlled per prompt in the Agent section. When disabled, the selected
   Copilot mode opens with the prepared prompt in the input without submitting it. Kilo Code keeps its existing
   external-chat autostart behavior. OpenAI Codex pastes the prepared prompt into its composer through the native VS Code paste command (including Wayland),
@@ -152,6 +158,18 @@ Prompt Manager stores prompt assets inside the workspace, so they travel with th
 └── chat-memory/
 ```
 
+При переключении промпта расширение дожидается сохранения и записывает правки, пришедшие во время записи.
+Если сохранение завершилось ошибкой, текущий черновик остаётся открытым. Фоновая генерация названия
+использует ту же очередь сохранения и не отменяет сохранённые пользователем текст и номер задачи.
+
+При работе с одной папкой из нескольких окон, в том числе через туннель, список учитывает внешние
+переименования и изменения `config.json`. Устаревшие результаты чтения и обновления списка отбрасываются;
+если имя папки изменилось до получения файлового события, промпт открывается по стабильному `promptUuid`.
+Кнопка обновления в шапке списка заново читает папки промптов и пересоздаёт кеш: исчезают строки
+удалённых или переименованных папок, появляются новые промпты и актуальные номера задач.
+Если папку хранения прочитать не удалось, ошибка не заменяет прежний список пустым.
+Это не блокировка одновременного редактирования одного промпта с двух компьютеров.
+
 При открытии промпта, изменении или начальном восстановлении его выделения в списке расширение обновляет
 `task-active.json` в корне хранилища Prompt Manager. Файл содержит `id` (имя папки промпта),
 `promptUuid`, `taskNumber` (строка), `title`, `archived` и `promptDirectory` (абсолютный путь к папке).
@@ -172,6 +190,32 @@ Prompt Manager stores prompt assets inside the workspace, so they travel with th
 ещё не сохранённого промпта файл содержит `null`. Быстрое переключение сохраняет последний выбор;
 запись выполняется в фоне и заменяет файл целиком, без промежуточного неполного JSON.
 Название и номер берутся из сохранённой конфигурации при выборе или открытии, а не при каждом вводе текста.
+
+## Разработка через VS Code Tunnel
+
+Локальный VS Code может использовать ссылку на проект. В туннеле каталог расширения остаётся обычной
+папкой: это сохраняет зарегистрированный путь для получения API `vscode` из Extension Host.
+`npm run compile` после сборки запускает `scripts/sync-tunnel-extension.mjs`. Синхронизация включается
+только локальным файлом `.vscode/tunnel-dev.json`, исключённым из Git и VSIX:
+
+```json
+{
+  "enabled": true,
+  "extensionDirectory": "/absolute/path/to/.vscode-server/extensions/prompt-manager-installation",
+  "backupDirectory": "/absolute/path/outside/extensions/prompt-manager-backup"
+}
+```
+
+Скрипт проверяет принадлежность установки, копирует `dist/`, `media/` и манифест, сохраняет зависимости
+и метаданные платформы. Исходные файлы резервируются один раз; при ошибке замены выполняется откат.
+В реестре обновляются только версия и `metadata.pinned` Prompt Manager, чтобы Marketplace
+не заменял локальную сборку автоматически. Отдельная установка через VSIX требуется при изменении
+внешних runtime-зависимостей: `node_modules` этот скрипт не обновляет.
+
+Достаточно выполнить `.vscode/bash/compile.sh`, затем **Developer: Reload Window** в окне VS Code
+или перезагрузить страницу туннеля. Для отключения синхронизации установите `enabled: false`.
+Для отката восстановите `dist/`, `media/`, `package.json` из резервной копии и только запись
+Prompt Manager в текущем реестре по `entry.before.json`; остальные расширения сохраняются.
 
 ## License
 

@@ -246,3 +246,49 @@ test('SidebarProvider restores active task before loading the prompt list', asyn
 	await (provider as any).handleMessage({ type: 'saveSidebarState', state: { ...state, sortOrder: 'asc' } });
 	assert.equal(calls.length, 1);
 });
+
+/** Поздний ответ старого запроса не возвращает строку без номера после свежего обновления. */
+test('SidebarProvider publishes only the latest overlapping list refresh', async () => {
+	const { SidebarProvider } = await importSidebarProvider();
+	let release!: (value: never[]) => void;
+	const delayedArchive = new Promise<never[]>(resolve => { release = resolve; });
+	let listCalls = 0;
+	let archiveCalls = 0;
+	const old = { ...makePrompt('old-title', 'review'), promptUuid: 'same-uuid' };
+	const current = { ...old, id: '169-title', taskNumber: '169' };
+	const provider = new SidebarProvider({ fsPath: '/tmp/extension' } as any, {
+		getStorageDirectoryPath: () => '/tmp/storage',
+		listPrompts: async () => [++listCalls === 1 ? old : current],
+		listArchivedPrompts: async () => ++archiveCalls === 1 ? delayedArchive : [],
+		readAgentProgress: async () => undefined,
+	} as any, {} as any, {} as any, {} as any, {} as any);
+	const messages: any[] = [];
+	(provider as any).postMessage = (message: any) => messages.push(message);
+	const first = provider.refreshList();
+	await provider.refreshList();
+	release([]);
+	await first;
+	assert.deepEqual(messages.map(message => message.prompts.map((prompt: any) => prompt.id)), [['169-title']]);
+});
+
+/** Ручная команда передаёт запрос перечитывания файлов; автоматическая публикация использует быстрый путь. */
+test('SidebarProvider requests disk refresh only for an explicit list reload', async () => {
+	const { SidebarProvider } = await importSidebarProvider();
+	const old = makePrompt('old-title', 'review');
+	const actual = { ...old, id: '169-title', taskNumber: '169' };
+	const modes: boolean[] = [];
+	const provider = new SidebarProvider({ fsPath: '/tmp/extension' } as any, {
+		getStorageDirectoryPath: () => '/tmp/storage',
+		listPrompts: async (options?: { forceRefresh?: boolean }) => {
+			modes.push(Boolean(options?.forceRefresh));
+			return [options?.forceRefresh ? actual : old];
+		},
+		listArchivedPrompts: async () => [],
+	} as any, {} as any, {} as any, {} as any, {} as any);
+	const messages: any[] = [];
+	provider.postMessage = message => { messages.push(message); };
+	await provider.refreshList();
+	await provider.refreshList({ forceRefresh: true });
+	assert.deepEqual(modes, [false, true]);
+	assert.deepEqual(messages.map(message => message.prompts[0].id), ['old-title', '169-title']);
+});

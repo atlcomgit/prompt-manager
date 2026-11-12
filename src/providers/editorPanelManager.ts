@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { realpath } from 'node:fs/promises';
 import { spawn } from 'child_process';
+import { CopilotCodexSessionService } from '../services/copilotCodexSessionService.js';
 import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
@@ -251,6 +252,8 @@ export class EditorPanelManager {
 	private panelPromptConfigFieldChangedAt = new Map<string, PromptConfigFieldChangedAt>();
 	private panelLatestLocalPromptRevisions = new Map<string, number>();
 	private chatTrackingDisposables = new Map<string, vscode.Disposable>();
+	/** Не даёт двум запускам переключить общий Copilot composer между настройкой разрешений и отправкой. */
+	private preparingCopilotCodexChat = false;
 	private panelDirtySetters = new Map<string, (v: boolean) => void>();
 	private panelDirtyFlags = new Map<string, boolean>();
 	private panelLatestPromptSnapshots = new Map<string, Prompt | null>();
@@ -2048,6 +2051,21 @@ export class EditorPanelManager {
 				+ `${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+	}
+
+	/** Готовит адресный Codex с Full Access до текста задачи; тесты: editorPanelManager.test.ts. */
+	private async prepareCopilotCodexChat(prompt: Prompt): Promise<void> {
+		if (vscode.workspace.isTrusted === false) {
+			throw new Error('Для запуска Codex с Full Access требуется доверенная рабочая область VS Code.');
+		}
+		const session = await this.copilotCodexSessionService.prepare(
+			prompt.title,
+			// Readonly-проекты остаются контекстом рабочей области, как при обычном новом чате VS Code.
+			[...this.workspaceService.getWorkspaceFolderPaths(true).values()],
+		);
+		// Штатный opener разрешает backend identity и открывает ровно созданную сессию в интерфейсе Copilot.
+		await vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(session.openLink));
+		this.hooksOutput.appendLine('[chat-start] Codex session prepared with confirmed Full Access.');
 	}
 
 	/** Открывает панель Codex и сообщает, принял ли VS Code команду фокуса. */
@@ -4349,6 +4367,7 @@ export class EditorPanelManager {
 		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
 		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined,
 		private readonly customGroupsService?: CustomGroupsService,
+		private readonly copilotCodexSessionService: Pick<CopilotCodexSessionService, 'prepare'> = new CopilotCodexSessionService(),
 	) {
 		this.promptDashboardLayoutsState = this.stateService.getPromptDashboardLayouts();
 
@@ -6928,64 +6947,71 @@ export class EditorPanelManager {
 				return;
 			}
 
-			// Перечитываем текущий промпт с диска для проверки актуальности
-			const currentPrompt = (promptUuid
-				? await this.storageService.getPromptByUuid(promptUuid)
-				: null) || await this.storageService.getPrompt(promptId);
-			if (!currentPrompt) {
-				this.hooksOutput.appendLine(`[ai-enrichment] skip: prompt not found on disk promptId=${promptId}`);
-				return;
-			}
-			if (this.isShuttingDown) {
-				return;
-			}
-
-			let updated = false;
-
-			// Обновляем title только если он ещё fallback (пользователь не менял вручную)
-			if (needsTitle && generatedTitle) {
-				const titleIsFallback = !currentPrompt.title
-					|| currentPrompt.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
-					|| EditorPanelManager.isTitleFallback(currentPrompt.title, content);
-				this.hooksOutput.appendLine(
-					`[ai-enrichment] title-check: promptId=${promptId}`
-					+ ` diskTitle=${JSON.stringify((currentPrompt.title || '').slice(0, 40))}`
-					+ ` isFallback=${titleIsFallback}`,
-				);
-				if (titleIsFallback) {
-					currentPrompt.title = generatedTitle;
-					updated = true;
+			// Общая очередь не позволяет фоновому названию затереть сохранение формы.
+			const enrichmentResult = await this.enqueuePromptSaveOperation({ id: promptId, promptUuid: promptUuid || '' }, async () => {
+				// Перечитываем текущий промпт с диска для проверки актуальности
+				const currentPrompt = (promptUuid
+					? await this.storageService.getPromptByUuid(promptUuid)
+					: null) || await this.storageService.getPrompt(promptId);
+				if (!currentPrompt) {
+					this.hooksOutput.appendLine(`[ai-enrichment] skip: prompt not found on disk promptId=${promptId}`);
+					return null;
 				}
-			}
-
-			// Обновляем description только если оно ещё fallback
-			if (needsDescription && generatedDescription) {
-				const descIsFallback = !currentPrompt.description
-					|| EditorPanelManager.isDescriptionFallback(currentPrompt.description, content);
-				if (descIsFallback) {
-					currentPrompt.description = generatedDescription;
-					updated = true;
+				if (this.isShuttingDown) {
+					return null;
 				}
-			}
 
-			if (!updated) {
-				this.hooksOutput.appendLine(`[ai-enrichment] skip: nothing to update for promptId=${promptId}`);
-				return;
-			}
+				let updated = false;
 
-			const renameFromId = await this.ensurePromptIdMatchesTitle(currentPrompt, currentPrompt.id || undefined);
-			if (this.isShuttingDown) {
-				return;
-			}
+				// Обновляем title только если он ещё fallback (пользователь не менял вручную)
+				if (needsTitle && generatedTitle) {
+					const titleIsFallback = !currentPrompt.title
+						|| currentPrompt.title === EditorPanelManager.UNTITLED_PROMPT_TITLE
+						|| EditorPanelManager.isTitleFallback(currentPrompt.title, content);
+					this.hooksOutput.appendLine(
+						`[ai-enrichment] title-check: promptId=${promptId}`
+						+ ` diskTitle=${JSON.stringify((currentPrompt.title || '').slice(0, 40))}`
+						+ ` isFallback=${titleIsFallback}`,
+					);
+					if (titleIsFallback) {
+						currentPrompt.title = generatedTitle;
+						updated = true;
+					}
+				}
 
-			// Сохраняем обновлённый промпт на диск (без истории — это просто обогащение)
-			const enriched = await this.storageService.savePrompt(currentPrompt, {
-				skipHistory: true,
-				previousId: renameFromId,
+				// Обновляем description только если оно ещё fallback
+				if (needsDescription && generatedDescription) {
+					const descIsFallback = !currentPrompt.description
+						|| EditorPanelManager.isDescriptionFallback(currentPrompt.description, content);
+					if (descIsFallback) {
+						currentPrompt.description = generatedDescription;
+						updated = true;
+					}
+				}
+
+				if (!updated) {
+					this.hooksOutput.appendLine(`[ai-enrichment] skip: nothing to update for promptId=${promptId}`);
+					return null;
+				}
+
+				const renameFromId = await this.ensurePromptIdMatchesTitle(currentPrompt, currentPrompt.id || undefined);
+				if (this.isShuttingDown) {
+					return null;
+				}
+
+				// Сохраняем обновлённый промпт на диск (без истории — это просто обогащение)
+				const enriched = await this.storageService.savePrompt(currentPrompt, {
+					skipHistory: true,
+					previousId: renameFromId,
+				});
+				if (this.isShuttingDown) {
+					return null;
+				}
+
+				return { enriched, renameFromId };
 			});
-			if (this.isShuttingDown) {
-				return;
-			}
+			if (!enrichmentResult) { return; }
+			const { enriched, renameFromId } = enrichmentResult;
 
 			// Обновляем UI в webview
 			const activePrompt = this.panelPromptRefs.get(panelKey);
@@ -8996,6 +9022,49 @@ export class EditorPanelManager {
 		await this.openPrompt(normalizedPromptId);
 	}
 
+	/** Сохраняет все принятые ревизии перед переходом; тесты: editorPanelManager.test.ts. */
+	private async persistPanelBeforeSwitch(panelKey: string, requestVersion: number): Promise<void> {
+		let awaitedSave: Promise<void> | undefined;
+		while (!this.isOpenPromptRequestStale(requestVersion)) {
+			// После ожидания берём свежий снимок: за время записи могли прийти дополнительные правки.
+			const pendingSave = this.pendingPromptSaveByPanelKey.get(panelKey);
+			if (pendingSave && pendingSave !== awaitedSave) {
+				awaitedSave = pendingSave;
+				await pendingSave;
+				continue;
+			}
+			const base = this.panelBasePrompts.get(panelKey) || null;
+			const latest = this.panelLatestPromptSnapshots.get(panelKey)
+				|| this.panelPromptRefs.get(panelKey) || base;
+			if (!latest) { return; }
+			const snapshot = JSON.parse(JSON.stringify(latest)) as Prompt;
+			const revision = this.getPanelLatestLocalPromptRevision(panelKey);
+			const dirty = this.panelDirtyFlags.get(panelKey) || false;
+			const unsaved = !snapshot.id && this.hasPromptDataWithoutId(snapshot);
+			if (!dirty && !unsaved && base && !this.hasMeaningfulPromptDiff(snapshot, base)) { return; }
+			if (!dirty && !unsaved && snapshot.id) {
+				const persisted = await this.storageService.getPrompt(snapshot.id);
+				if (this.getPanelLatestLocalPromptRevision(panelKey) > revision) { continue; }
+				if (!this.hasMeaningfulPromptDiff(snapshot, persisted)) { return; }
+			}
+			const saved = await this.persistPromptSnapshotForSwitch(snapshot, base, panelKey);
+			if (!saved) { return; }
+			this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(saved)));
+			const newer = this.panelLatestPromptSnapshots.get(panelKey);
+			if (newer && this.getPanelLatestLocalPromptRevision(panelKey) > revision) {
+				// Переносим только identity сохранённой папки, не затирая текст следующей ревизии.
+				this.panelLatestPromptSnapshots.set(panelKey, {
+					...newer, id: saved.id, promptUuid: saved.promptUuid, updatedAt: saved.updatedAt,
+				});
+			} else {
+				this.setPanelPromptRef(panelKey, saved);
+				this.panelLatestPromptSnapshots.set(panelKey, null);
+				this.panelDirtyFlags.set(panelKey, false);
+			}
+			this._onDidSave.fire(saved.id);
+		}
+	}
+
 	private async openPromptInternal(target: PromptOpenTarget, requestVersion: number): Promise<void> {
 		const openStartedAt = Date.now();
 		const promptId = target.id;
@@ -9100,80 +9169,19 @@ export class EditorPanelManager {
 		const panelsToDispose: vscode.WebviewPanel[] = [];
 
 		for (const [existingKey, existingPanel] of existingEntries) {
-			const livePromptSnapshot = this.panelPromptRefs.get(existingKey);
-			const latestPanelSnapshot = this.panelLatestPromptSnapshots.get(existingKey) || null;
-			const basePanelSnapshot = this.panelBasePrompts.get(existingKey) || null;
-			const latestSnapshot = this.panelLatestPromptSnapshots.get(existingKey)
-				|| (livePromptSnapshot ? JSON.parse(JSON.stringify(livePromptSnapshot)) : null)
-				|| basePanelSnapshot
-				|| null;
-			if (latestSnapshot) {
-				const isDirty = this.panelDirtyFlags.get(existingKey) || false;
-				const hasUnsavedDraftData = !latestSnapshot.id && this.hasPromptDataWithoutId(latestSnapshot);
-				const hasPendingPromptSave = this.pendingPromptSaveByPanelKey.has(existingKey);
-				/** Дождаться завершения текущего сохранения, чтобы не было race condition */
-				if (hasPendingPromptSave) {
-					const pendingSave = this.pendingPromptSaveByPanelKey.get(existingKey);
-					if (pendingSave) {
-						const waitStartedAt = Date.now();
-						try { await pendingSave; } catch { /* ошибка обработана в saveTask */ }
-						this.logReportDebug('openPrompt.stage', {
-							stage: 'pendingSaveWaited',
-							promptId,
-							requestVersion,
-							existingKey,
-							waitMs: Date.now() - waitStartedAt,
-							elapsedMs: Date.now() - openStartedAt,
-						});
-					}
+			try {
+				await this.persistPanelBeforeSwitch(existingKey, requestVersion);
+			} catch (error) {
+				// Не заменяем редактор и его черновик после отказа записи.
+				if (promptLoadingSentToReusablePanel && reusableSingletonPanel
+					&& !this.isOpenPromptRequestStale(requestVersion)) {
+					await this.cancelPromptLoading(reusableSingletonPanel, promptId, requestVersion);
 				}
-				let shouldPersistBeforeSwitch = !hasPendingPromptSave && (isDirty || hasUnsavedDraftData);
-				if (!shouldPersistBeforeSwitch && latestSnapshot.id && !hasPendingPromptSave) {
-					const canTrustBaseSnapshot = !isDirty
-						&& !hasUnsavedDraftData
-						&& Boolean(basePanelSnapshot)
-						&& !this.hasMeaningfulPromptDiff(latestPanelSnapshot || latestSnapshot, basePanelSnapshot);
-					if (!canTrustBaseSnapshot) {
-						const persistedReadStartedAt = Date.now();
-						const persistedSnapshot = await this.storageService.getPrompt(latestSnapshot.id);
-						this.logReportDebug('openPrompt.stage', {
-							stage: 'currentPromptReread',
-							promptId,
-							requestVersion,
-							latestSnapshotId: latestSnapshot.id,
-							durationMs: Date.now() - persistedReadStartedAt,
-							elapsedMs: Date.now() - openStartedAt,
-						});
-						shouldPersistBeforeSwitch = this.hasMeaningfulPromptDiff(latestSnapshot, persistedSnapshot);
-					}
-				}
-				if (shouldPersistBeforeSwitch) {
-					try {
-						const persistStartedAt = Date.now();
-						const saved = await this.persistPromptSnapshotForSwitch(
-							latestSnapshot,
-							this.panelBasePrompts.get(existingKey) || null,
-							existingKey,
-						);
-						this.logReportDebug('openPrompt.stage', {
-							stage: 'persistBeforeSwitch',
-							promptId,
-							requestVersion,
-							existingKey,
-							durationMs: Date.now() - persistStartedAt,
-							elapsedMs: Date.now() - openStartedAt,
-						});
-						if (saved?.id) {
-							this._onDidSave.fire(saved.id);
-						}
-					} catch (err) {
-						const message = this.formatSaveConflictMessage(err);
-						const isRu = vscode.env.language.startsWith('ru');
-						vscode.window.showErrorMessage(
-							isRu ? `Ошибка сохранения перед переключением: ${message}` : `Save before switch error: ${message}`
-						);
-					}
-				}
+				const message = this.formatSaveConflictMessage(error);
+				vscode.window.showErrorMessage(
+					isRu ? `Ошибка сохранения перед переключением: ${message}` : `Save before switch error: ${message}`,
+				);
+				return;
 			}
 			if (existingKey === panelKey) {
 				continue;
@@ -9838,6 +9846,7 @@ export class EditorPanelManager {
 							message: `Save failed: ${message}`,
 							...(saveRequestId ? { requestId: saveRequestId } : {}),
 						});
+						throw error;
 					} finally {
 						finishVisibleSave();
 						this.clearPendingSaveEntry(saveQueueKey, operationId);
@@ -9850,6 +9859,8 @@ export class EditorPanelManager {
 				this.pendingPromptSaveByPanelKey.set(panelKey, saveTask);
 				try {
 					await saveTask;
+				} catch {
+					// Сообщение об ошибке уже доставлено; очередь сохраняет отказ для ожидающего переключения.
 				} finally {
 					if (this.pendingPromptSaveByPanelKey.get(panelKey) === saveTask) {
 						this.pendingPromptSaveByPanelKey.delete(panelKey);
@@ -10286,6 +10297,11 @@ export class EditorPanelManager {
 
 			case 'startChat': {
 				let prompt: Prompt | null = msg.prompt ? { ...msg.prompt } : await this.storageService.getPrompt(msg.id);
+				// Повторный запуск не меняет сохранённый статус первой задачи и её общий composer.
+				if (this.preparingCopilotCodexChat && this.normalizeChatTarget(prompt?.chatTarget) === 'copilot') {
+					postMessage({ type: 'error', message: 'Подготовка другого чата Codex ещё не завершена.', requestId: msg.requestId });
+					break;
+				}
 				const skipBranchMismatchCheck = msg.skipBranchMismatchCheck === true;
 				const shouldForceRebindChat = msg.forceRebindChat === true && prompt?.chatTarget !== 'claude';
 				const startChatRequestId = (msg.requestId || '').trim();
@@ -10294,6 +10310,7 @@ export class EditorPanelManager {
 				let startStatePersisted = false;
 				let chatMessageDispatched = false;
 				let sessionBindingSucceeded = false;
+				let ownsCodexLaunch = false;
 				let hookPayloadBase: Record<string, unknown> | null = null;
 				let trackedSessionId = '';
 				const defaultStartChatError = 'Не удалось запустить чат. Проверьте, что Copilot Chat доступен, и повторите попытку.';
@@ -10703,6 +10720,15 @@ export class EditorPanelManager {
 
 					// Для нового чата Codex (Agent Host) режим всегда Agent, иначе VS Code оставляет его в Ask.
 					const selectedChatSessionType = await this.aiService.resolveSelectedChatSessionType();
+					if (this.preparingCopilotCodexChat) throw new Error('Подготовка другого чата Codex ещё не завершена.');
+					if (isCodexAgentHostSessionType(selectedChatSessionType)) {
+						this.preparingCopilotCodexChat = true;
+						ownsCodexLaunch = true;
+					}
+					// Фиксируем запомненную модель до открытия созданной сессии и обновления model picker.
+					const initialCodexModel = isCodexAgentHostSessionType(selectedChatSessionType)
+						&& (!prompt.model || isKeepCurrentChatModel(prompt.model))
+						? await this.aiService.resolveSelectedSessionTypeModel() : undefined;
 					if (isCodexAgentHostSessionType(selectedChatSessionType)) {
 						await this.ensureNewChatSessionDefaultAgentMode();
 					}
@@ -10881,7 +10907,17 @@ export class EditorPanelManager {
 					if (activeSessionBeforeStart) {
 						sessionIdsToExclude.add(activeSessionBeforeStart);
 					}
-					if (shouldForceRebindChat) {
+					// Codex получает отдельную адресную сессию; newChat после этого сбросил бы её разрешения.
+					if (isCodexAgentHostSessionType(selectedChatSessionType)) {
+						try {
+							await this.prepareCopilotCodexChat(prompt);
+						} catch (error) {
+							// Сохраняем полный текст для восстановления, не отправляя его в неподтверждённый чат.
+							await vscode.env.clipboard.writeText(query);
+							throw new Error(`${error instanceof Error ? error.message : 'Не удалось подготовить Full Access.'} `
+								+ 'Текст задачи скопирован в буфер обмена; автоматическая отправка отменена.');
+						}
+					} else if (shouldForceRebindChat) {
 						await forceNewChatSession();
 						await new Promise(resolve => setTimeout(resolve, 120));
 					}
@@ -10897,7 +10933,7 @@ export class EditorPanelManager {
 						// «запомнена», VS Code иногда стартует ветку с провайдером Copilot и она навсегда
 						// получает ошибку model_not_supported. Явный выбор той же модели, как вручную в списке,
 						// передаётся вместе с текстом через modelSelector и закрепляет модель до отправки.
-						const sessionTypeModel = await this.aiService.resolveSelectedSessionTypeModel();
+						const sessionTypeModel = initialCodexModel ?? await this.aiService.resolveSelectedSessionTypeModel();
 						if (sessionTypeModel) {
 							requestModelSelector = sessionTypeModel.selector;
 							this.hooksOutput.appendLine(
@@ -11371,6 +11407,8 @@ export class EditorPanelManager {
 					})();
 				} catch (error) {
 					await reportStartChatFailure(formatStartChatErrorMessage(error));
+				} finally {
+					if (ownsCodexLaunch) this.preparingCopilotCodexChat = false;
 				}
 				break;
 			}

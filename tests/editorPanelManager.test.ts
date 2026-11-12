@@ -726,7 +726,10 @@ function createMockChildProcessError(message: string) {
 	return child;
 }
 
+/** Собирает manager с изолированными сервисами, включая транспорт новых Codex-сессий. */
 async function createManager(options?: {
+	/** Изолирует новые Codex-сессии от установленного Agent Host во всех unit-сценариях. */
+	prepareCopilotCodexSession?: (title: string, folders: string[]) => Promise<{ openLink: string }>;
 	generateTitle?: (content: string) => Promise<string>;
 	generateDescription?: (content: string) => Promise<string>;
 	initialPrompt?: Record<string, unknown> | null;
@@ -912,6 +915,10 @@ async function createManager(options?: {
 		dockerContainersService as any,
 		options?.chatMemoryInstructionService as any,
 		options?.codeMapChatInstructionService as any,
+		undefined,
+		{ prepare: options?.prepareCopilotCodexSession ?? (async () => ({
+			openLink: 'agent-host-session://ahp-session/testing-codex-session',
+		})) },
 	);
 
 	return {
@@ -6496,6 +6503,135 @@ test('startChat opens a Codex agent host chat in Agent mode even for a Plan prom
 	resetVsCodeCommandMock();
 });
 
+/** Проверяет настройку разрешений до подготовки или отправки и сохранение исходной модели при открытии. */
+const codexLaunchState = {
+	getActiveChatSessionId: async () => '',
+	waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+	waitForChatRequestCompletion: async () => ({ ok: false, reason: 'timeout', sessionId: '',
+		lastRequestStarted: 0, lastRequestEnded: 0, hasPendingEdits: false }),
+};
+
+/** Readonly-исключения Prompt Manager не должны удалять корни из контекста нового чата VS Code. */
+test('prepareCopilotCodexChat retains readonly workspace roots as context', async () => {
+	resetVsCodeCommandMock();
+	let folders: string[] = [];
+	const { manager } = await createManager({
+		workspaceService: { getWorkspaceFolderPaths: (includeExcluded: boolean) => new Map(
+			includeExcluded ? [['readonly-project', '/testing/readonly-project']] : [],
+		) },
+		prepareCopilotCodexSession: async (_title, paths) => {
+			folders = paths;
+			return { openLink: 'agent-host-session://ahp-session/testing-readonly-context' };
+		},
+	});
+	await (manager as any).prepareCopilotCodexChat(createPrompt());
+	assert.deepEqual(folders, ['/testing/readonly-project']);
+	manager.disposeAll();
+	resetVsCodeCommandMock();
+});
+
+/** Ручной и автоматический запуск используют одинаково подтверждённые разрешения. */
+for (const autoStartChat of [false, true]) {
+	test(`startChat prepares Codex Full Access before ${autoStartChat ? 'sending' : 'prefilling'} the prompt`, async () => {
+		resetVsCodeCommandMock();
+		const preparation = createDeferred<{ openLink: string }>();
+		const enteredPreparation = createDeferred<void>();
+		const initialPrompt = createPrompt({ model: 'keep-current-model', autoStartChat, content: 'Test Full Access.' });
+		const { manager, aiService } = await createManager({ initialPrompt, stateService: codexLaunchState,
+			prepareCopilotCodexSession: async () => { enteredPreparation.resolve(); return preparation.promise; } });
+		aiService.resolveSelectedChatSessionType = async () => 'agent-host-codex';
+		const selector = { vendor: 'agent-host-codex', id: '@provider=openai:remembered-model' };
+		Object.assign(aiService, { resolveSelectedSessionTypeModel: async () => ({
+			sessionType: 'agent-host-codex', identifier: 'remembered', selector,
+		}) });
+		// Новый picker может выбрать иной default, но запуск должен сохранить ранее запомненную модель.
+		vscodeExecuteCommandHandler = async id => {
+			if (id === 'vscode.open') Object.assign(aiService, { resolveSelectedSessionTypeModel: async () => ({
+				sessionType: 'agent-host-codex', identifier: 'new-default',
+				selector: { vendor: 'agent-host-codex', id: 'new-default' },
+			}) });
+		};
+		const events: Array<Record<string, unknown>> = [];
+		const panel = { visible: true, webview: { postMessage: async (event: Record<string, unknown>) => events.push(event) } };
+		await withImmediateTimers(async () => {
+			const start = (manager as any).handleMessage(
+				{ type: 'startChat', id: initialPrompt.id, forceRebindChat: true }, panel, initialPrompt,
+				'__prompt_editor_singleton__', () => false, () => undefined,
+			);
+			await enteredPreparation.promise;
+			assert.equal(vscodeCommandCalls.some(call => typeof (call.args[0] as { query?: unknown })?.query === 'string'), false);
+			preparation.resolve({ openLink: 'agent-host-session://ahp-session/testing-exact-session' });
+			await start;
+		});
+		const openIndex = vscodeCommandCalls.findIndex(call => call.id === 'vscode.open');
+		const queryIndex = vscodeCommandCalls.findIndex(call => typeof (call.args[0] as { query?: unknown })?.query === 'string');
+		assert.ok(openIndex >= 0 && queryIndex > openIndex);
+		assert.equal(String(vscodeCommandCalls[openIndex].args[0]), 'agent-host-session://ahp-session/testing-exact-session');
+		const query = vscodeCommandCalls[queryIndex].args[0] as Record<string, unknown>;
+		assert.deepEqual(query.modelSelector, selector);
+		assert.equal(query.isPartialQuery === true, !autoStartChat);
+		assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.chat.newChat'), false);
+		assert.equal(events.some(event => event.type === 'chatStarted'), autoStartChat);
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	});
+}
+
+/** Параллельный запуск не перехватывает composer и не откатывает статус первой задачи. */
+test('startChat rejects a concurrent Codex launch without changing the first launch state', async () => {
+	resetVsCodeCommandMock();
+	const entered = createDeferred<void>();
+	const prepared = createDeferred<{ openLink: string }>();
+	let calls = 0;
+	const prompt = createPrompt({ content: 'Concurrent launch', autoStartChat: false });
+	const { manager, aiService, getStoredPrompt } = await createManager({ initialPrompt: prompt,
+		stateService: codexLaunchState, prepareCopilotCodexSession: async () => {
+			calls++; entered.resolve(); return prepared.promise;
+		} });
+	aiService.resolveSelectedChatSessionType = async () => 'agent-host-codex';
+	const events: Array<Record<string, unknown>> = [];
+	const panel = { visible: true, webview: { postMessage: async (event: Record<string, unknown>) => events.push(event) } };
+	await withImmediateTimers(async () => {
+		const start = (manager as any).handleMessage({ type: 'startChat', id: prompt.id }, panel, prompt,
+			'__prompt_editor_singleton__', () => false, () => undefined);
+		await entered.promise;
+		const before = getStoredPrompt();
+		await (manager as any).handleMessage({ type: 'startChat', id: prompt.id, requestId: 'second' }, panel, prompt,
+			'__prompt_editor_singleton__', () => false, () => undefined);
+		assert.equal(calls, 1);
+		assert.deepEqual(getStoredPrompt(), before);
+		assert.ok(events.some(event => event.type === 'error' && event.requestId === 'second'));
+		prepared.resolve({ openLink: 'agent-host-session://ahp-session/testing-first' });
+		await start;
+	});
+	manager.disposeAll();
+	resetVsCodeCommandMock();
+});
+
+/** Отказ подготовки не отправляет запрос, сохраняет текст и не очищает план задачи. */
+test('startChat stops Codex launch and preserves prompt text when Full Access cannot be confirmed', async () => {
+	resetVsCodeCommandMock();
+	const initialPrompt = createPrompt({ content: 'Keep this prompt.', autoStartChat: true });
+	const { manager, aiService } = await createManager({ initialPrompt, stateService: codexLaunchState,
+		prepareCopilotCodexSession: async () => { throw new Error('Full Access unavailable'); } });
+	aiService.resolveSelectedChatSessionType = async () => 'agent-host-codex';
+	let cleared = false;
+	(manager as any).clearPromptPlanFileIfExists = async () => { cleared = true; };
+	const events: Array<Record<string, unknown>> = [];
+	await withImmediateTimers(() => (manager as any).handleMessage(
+		{ type: 'startChat', id: initialPrompt.id },
+		{ visible: true, webview: { postMessage: async (event: Record<string, unknown>) => events.push(event) } },
+		initialPrompt, '__prompt_editor_singleton__', () => false, () => undefined,
+	));
+	assert.equal(vscodeCommandCalls.some(call => typeof (call.args[0] as { query?: unknown })?.query === 'string'), false);
+	assert.match(vscodeClipboardText, /Keep this prompt/);
+	assert.equal(cleared, false);
+	assert.equal(events.some(event => event.type === 'chatStarted'), false);
+	assert.ok(events.some(event => event.type === 'error' && String(event.message).includes('Full Access unavailable')));
+	manager.disposeAll();
+	resetVsCodeCommandMock();
+});
+
 /** Verify that keep-current explicitly reapplies the remembered Codex model through modelSelector. */
 test('startChat reapplies the remembered session type model for the keep-current selection', async () => {
 	resetVsCodeCommandMock();
@@ -10058,4 +10194,140 @@ test('dashboard layout switching isolates pending saves and active refresh polic
 	const message = (manager as any).buildPromptMessage(prompt);
 	assert.deepEqual(message.promptDashboardLayouts['single-column'].collapsedSections, { activity: true });
 	assert.deepEqual(message.promptDashboardLayouts['two-columns'].collapsedSections, {});
+});
+
+/** Правки, пришедшие во время ручного сохранения, должны попасть на диск до перехода. */
+test('openPrompt preserves a newer revision received during a pending save', async () => {
+	resetVsCodeCommandMock();
+	const started = createDeferred<void>();
+	const release = createDeferred<void>();
+	const writes: string[] = [];
+	const { manager, storageService, getStoredPrompt } = await createManager({
+		initialPrompt: { title: 'prompt-a', description: 'Description', content: 'Base' },
+		savePrompt: async prompt => {
+			writes.push(prompt.content);
+			if (writes.length === 1) { started.resolve(); await release.promise; }
+			return clonePrompt(prompt);
+		},
+	});
+	const key = '__prompt_editor_singleton__';
+	const originalGet = storageService.getPrompt;
+	storageService.getPrompt = async id => id === 'prompt-b'
+		? createPrompt({ id, promptUuid: 'uuid-b', title: 'prompt-b' }) : originalGet(id);
+	try {
+		await manager.openPrompt('prompt-a');
+		const panel = vscodeCreatedWebviewPanels.at(-1)!;
+		const current = clonePrompt((manager as any).panelPromptRefs.get(key));
+		const saving = panel.emitMessage({ type: 'savePrompt', localRevision: 1,
+			prompt: { ...current, content: 'First edit' } });
+		await started.promise;
+		await panel.emitMessage({ type: 'markDirty', dirty: true, localRevision: 2,
+			prompt: { ...current, content: 'Latest edit' } });
+		const switching = manager.openPrompt('prompt-b');
+		await flushTurns();
+		release.resolve();
+		await Promise.all([saving, switching]);
+		assert.deepEqual(writes, ['First edit', 'Latest edit']);
+		assert.equal(getStoredPrompt().content, 'Latest edit');
+		assert.equal((manager as any).panelPromptRefs.get(key).id, 'prompt-b');
+	} finally {
+		release.resolve();
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Ошибка записи не разрешает заменить новый черновик другим промптом. */
+test('openPrompt keeps unsaved draft and cancels loading after a save failure', async () => {
+	resetVsCodeCommandMock();
+	const { manager, storageService } = await createManager({
+		savePrompt: async () => { throw new Error('EACCES simulated'); },
+	});
+	const key = '__prompt_editor_singleton__';
+	storageService.getPrompt = async id => id === 'prompt-b'
+		? createPrompt({ id, promptUuid: 'uuid-b', title: 'prompt-b' }) : null;
+	try {
+		await manager.openPrompt('__new__');
+		const panel = vscodeCreatedWebviewPanels.at(-1)!;
+		const draft = { ...(manager as any).panelPromptRefs.get(key), title: 'Draft', content: 'Unsaved text' };
+		await panel.emitMessage({ type: 'markDirty', dirty: true, localRevision: 1, prompt: draft });
+		await manager.openPrompt('prompt-b');
+		assert.equal((manager as any).panelPromptRefs.get(key).id, '');
+		assert.equal((manager as any).panelLatestPromptSnapshots.get(key).content, 'Unsaved text');
+		assert.equal((manager as any).panelDirtyFlags.get(key), true);
+		assert.ok(panel.postedMessages.some((message: any) => message.type === 'promptLoadingCancelled'));
+	} finally {
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Фоновое название и ручное сохранение используют одну очередь по UUID. */
+test('background title enrichment cannot overwrite a concurrent manual task number and text', async () => {
+	resetVsCodeCommandMock();
+	const entered = createDeferred<void>();
+	const release = createDeferred<void>();
+	const original = createPrompt({ content: 'Original text', description: 'Description' });
+	const { manager, storageService, getStoredPrompt } = await createManager({ initialPrompt: original });
+	const key = '__prompt_editor_singleton__';
+	let first = true;
+	storageService.uniqueId = async base => {
+		if (first) { first = false; entered.resolve(); await release.promise; }
+		return base;
+	};
+	(manager as any).panelPromptRefs.set(key, original);
+	(manager as any).panelBasePrompts.set(key, clonePrompt(original));
+	(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+	try {
+		const enrichment = (manager as any).scheduleBackgroundAiEnrichment(
+			original.id, original.promptUuid, original.content, true, false, key);
+		await entered.promise;
+		const manual = (manager as any).handleMessage({ type: 'savePrompt', localRevision: 1,
+			prompt: { ...original, title: 'Edited title', taskNumber: '169', content: 'Edited text' } },
+			{ webview: { postMessage: async () => true } }, original, key, () => true, () => undefined);
+		await flushTurns();
+		release.resolve();
+		await Promise.all([enrichment, manual]);
+		assert.equal(getStoredPrompt().taskNumber, '169');
+		assert.equal(getStoredPrompt().content, 'Edited text');
+		assert.equal(getStoredPrompt().title, 'Edited title');
+	} finally {
+		release.resolve();
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Отказ уже запущенного ручного сохранения также отменяет переключение панели. */
+test('openPrompt cancels switching when an awaited manual save rejects', async () => {
+	resetVsCodeCommandMock();
+	const started = createDeferred<void>();
+	const release = createDeferred<void>();
+	const { manager, storageService } = await createManager({
+		initialPrompt: { title: 'prompt-a', description: 'Description', content: 'Base' },
+		savePrompt: async () => { started.resolve(); await release.promise; throw new Error('EACCES simulated'); },
+	});
+	const key = '__prompt_editor_singleton__';
+	const originalGet = storageService.getPrompt;
+	storageService.getPrompt = async id => id === 'prompt-b'
+		? createPrompt({ id, promptUuid: 'uuid-b', title: 'prompt-b' }) : originalGet(id);
+	try {
+		await manager.openPrompt('prompt-a');
+		const panel = vscodeCreatedWebviewPanels.at(-1)!;
+		const draft = { ...(manager as any).panelPromptRefs.get(key), content: 'Unsaved text' };
+		await panel.emitMessage({ type: 'markDirty', dirty: true, localRevision: 1, prompt: draft });
+		const saving = panel.emitMessage({ type: 'savePrompt', prompt: draft, localRevision: 1 });
+		await started.promise;
+		const switching = manager.openPrompt('prompt-b');
+		await flushTurns();
+		release.resolve();
+		await Promise.all([saving, switching]);
+		assert.equal((manager as any).panelPromptRefs.get(key).id, 'prompt-a');
+		assert.equal((manager as any).panelLatestPromptSnapshots.get(key).content, 'Unsaved text');
+		assert.equal((manager as any).panelDirtyFlags.get(key), true);
+	} finally {
+		release.resolve();
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
 });

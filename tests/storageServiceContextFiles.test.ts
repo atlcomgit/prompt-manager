@@ -629,3 +629,234 @@ test('saveActiveTask restores initial selection only before explicit requests', 
 	await Promise.all([selected, lateRestore]);
 	assert.equal((await readJson(targetPath)).id, 'selected');
 });
+
+/** Управляемая пауза воспроизводит порядок файловых событий без зависимости от скорости диска. */
+function createStorageGate() {
+	let resolve!: () => void;
+	const promise = new Promise<void>(done => { resolve = done; });
+	return { promise, resolve };
+}
+
+/** Два экземпляра используют общую временную папку, имитируя локальное окно и туннель. */
+async function createSharedStorageFixture(t: TestContext, ids = ['old-title']) {
+	const { StorageService } = await importStorageService();
+	const root = createTempWorkspace();
+	for (const id of ids) { await seedPrompt(root, id, []); }
+	const local = new StorageService(root);
+	const remote = new StorageService(root);
+	t.after(async () => {
+		local.dispose();
+		remote.dispose();
+		await Promise.all([(local as any).listCacheWriteQueue, (remote as any).listCacheWriteQueue]);
+		await fsp.rm(root, { recursive: true, force: true });
+	});
+	await Promise.all([local.listPrompts(), remote.listPrompts()]);
+	const configUri = (id: string) => ({ fsPath: path.join(root, '.vscode', 'prompt-manager', id, 'config.json') });
+	return { root, local, remote, configUri };
+}
+
+/** Старое чтение не воскрешает папку после удаления и создания папки с номером. */
+test('config watcher discards an old read after another instance renames the prompt', async t => {
+	const { local, remote, configUri } = await createSharedStorageFixture(t);
+	const entered = createStorageGate();
+	const release = createStorageGate();
+	t.after(() => release.resolve());
+	const readConfig = (local as any).readConfig.bind(local);
+	let delayed = false;
+	(local as any).readConfig = async (...args: any[]) => {
+		const config = await readConfig(...args);
+		if (args[0] === 'old-title' && !delayed) {
+			delayed = true; entered.resolve(); await release.promise;
+		}
+		return config;
+	};
+	const pendingRead = (local as any).handleWatchedPromptConfigChange(configUri('old-title'), 'changed');
+	await entered.promise;
+	const prompt = (await remote.getPrompt('old-title'))!;
+	await remote.savePrompt({ ...prompt, id: '169-title', taskNumber: '169' }, { previousId: prompt.id, skipHistory: true });
+	await (local as any).handleWatchedPromptConfigChange(configUri('old-title'), 'deleted');
+	await (local as any).handleWatchedPromptConfigChange(configUri('169-title'), 'created');
+	release.resolve();
+	await pendingRead;
+	assert.deepEqual((await local.listPrompts()).map(p => [p.id, p.taskNumber]), [['169-title', '169']]);
+	assert.equal((await local.getPromptByUuid(prompt.promptUuid))?.id, '169-title');
+});
+
+/** Фоновый обход не заменяет результат сохранения снимком, собранным до переименования. */
+test('background list scan cannot overwrite a newer prompt rename', async t => {
+	const { local } = await createSharedStorageFixture(t, ['a-old', 'z-blocker']);
+	const entered = createStorageGate();
+	const release = createStorageGate();
+	t.after(() => release.resolve());
+	const readConfig = (local as any).readConfig.bind(local);
+	(local as any).readConfig = async (...args: any[]) => {
+		const config = await readConfig(...args);
+		if (args[0] === 'z-blocker') { entered.resolve(); await release.promise; }
+		return config;
+	};
+	const scan = (local as any)._runBackgroundRefresh();
+	await entered.promise;
+	const prompt = (await local.getPrompt('a-old'))!;
+	await local.savePrompt({ ...prompt, id: '169-title', taskNumber: '169' }, { previousId: prompt.id, skipHistory: true });
+	release.resolve();
+	await scan;
+	assert.deepEqual((await local.listPrompts()).map(p => p.id).sort(), ['169-title', 'z-blocker']);
+	assert.equal((await local.getPromptByUuid(prompt.promptUuid))?.id, '169-title');
+});
+
+/** Старый кеш другого окна не должен мешать открытию существующего промпта по UUID. */
+test('getPromptByUuid recovers a renamed directory before watcher delivery', async t => {
+	const { local, remote } = await createSharedStorageFixture(t);
+	const prompt = (await remote.getPrompt('old-title'))!;
+	await remote.savePrompt({ ...prompt, id: '169-title', taskNumber: '169' }, { previousId: prompt.id, skipHistory: true });
+	const found = await local.getPromptByUuid(prompt.promptUuid);
+	assert.equal(found?.id, '169-title');
+	assert.equal(found?.taskNumber, '169');
+	assert.deepEqual((await local.listPrompts()).map(p => p.id), ['169-title']);
+});
+
+/** Окно подавления скрывает только собственные байты, а не запись другого экземпляра. */
+test('config watcher accepts another instance write immediately after a local save', async t => {
+	const { local, remote, configUri } = await createSharedStorageFixture(t);
+	const prompt = (await local.getPrompt('old-title'))!;
+	await local.savePrompt({ ...prompt, title: 'Local title' }, { skipHistory: true });
+	assert.equal(await (local as any).shouldIgnoreWatchedPromptConfigChange(configUri(prompt.id)), true);
+	const remotePrompt = (await remote.getPrompt(prompt.id))!;
+	await remote.savePrompt({ ...remotePrompt, taskNumber: '169' }, { skipHistory: true });
+	assert.equal(await (local as any).shouldIgnoreWatchedPromptConfigChange(configUri(prompt.id)), false);
+	await (local as any).handleWatchedPromptConfigChange(configUri(prompt.id), 'changed');
+	assert.equal((await local.listPrompts())[0].taskNumber, '169');
+});
+
+/** Несколько обновлений оставляют целый JSON с последним состоянием списка. */
+test('overlapping list cache writes persist the newest complete snapshot', async t => {
+	const { local, root } = await createSharedStorageFixture(t);
+	const original = (await local.listPrompts())[0];
+	await Promise.all([
+		(local as any).writeListCache([{ ...original, taskNumber: 'old' }]),
+		(local as any).writeListCache([{ ...original, taskNumber: '169' }]),
+	]);
+	const stored = JSON.parse(await fsp.readFile(path.join(root, '.vscode', 'prompt-manager', 'prompt-list.json'), 'utf-8'));
+	assert.equal(stored[0].taskNumber, '169');
+});
+
+/** Кнопка обновления убирает старое имя и удалённые папки даже без файловых событий. */
+test('forced list refresh replaces stale memory and disk cache with actual prompt directories', async t => {
+	const { root, local, remote } = await createSharedStorageFixture(t, ['old-title', 'deleted-prompt']);
+	const stale = await local.listPrompts();
+	const prompt = (await remote.getPrompt('old-title'))!;
+	await remote.savePrompt({ ...prompt, id: '169-title', taskNumber: '169' }, { previousId: prompt.id, skipHistory: true });
+	await fsp.rm(path.join(root, '.vscode', 'prompt-manager', 'deleted-prompt'), { recursive: true });
+	await seedPrompt(root, 'new-prompt', []);
+	// Намеренно оставляем устаревшим и файл кеша, а не только снимок первого экземпляра.
+	await (remote as any).listCacheWriteQueue;
+	await (local as any).writeListCacheFile(stale);
+	assert.deepEqual((await local.listPrompts()).map(p => p.id).sort(), ['deleted-prompt', 'old-title']);
+
+	const actual = await local.listPrompts({ forceRefresh: true });
+	assert.deepEqual(actual.map(p => p.id).sort(), ['169-title', 'new-prompt']);
+	assert.equal(actual.find(p => p.promptUuid === prompt.promptUuid)?.taskNumber, '169');
+	const savedCache = JSON.parse(await fsp.readFile(path.join(root, '.vscode', 'prompt-manager', 'prompt-list.json'), 'utf-8'));
+	assert.deepEqual(savedCache.map((p: { id: string }) => p.id).sort(), ['169-title', 'new-prompt']);
+	assert.equal((await local.getPromptByUuid(prompt.promptUuid))?.id, '169-title');
+});
+
+/** Обычный запрос, пришедший после ручного обновления, также получает восстановленный список. */
+test('forced list refresh shares its scan with overlapping cached and manual requests', async t => {
+	const { local, remote } = await createSharedStorageFixture(t);
+	const prompt = (await remote.getPrompt('old-title'))!;
+	await remote.savePrompt({ ...prompt, id: '169-title', taskNumber: '169' }, { previousId: prompt.id, skipHistory: true });
+	const entered = createStorageGate();
+	const release = createStorageGate();
+	const readConfigs = (local as any).readPromptConfigsFromDirectory.bind(local);
+	let scans = 0;
+	(local as any).readPromptConfigsFromDirectory = async (...args: any[]) => {
+		scans++; entered.resolve(); await release.promise;
+		return readConfigs(...args);
+	};
+	const first = local.listPrompts({ forceRefresh: true });
+	await entered.promise;
+	const cached = local.listPrompts();
+	const second = local.listPrompts({ forceRefresh: true });
+	release.resolve();
+	const results = await Promise.all([first, cached, second]);
+	assert.equal(scans, 1);
+	for (const result of results) { assert.deepEqual(result.map(p => p.id), ['169-title']); }
+});
+
+/** Принудительный проход отменяет ещё не завершившееся чтение удалённой папки. */
+test('forced list refresh prevents a delayed watcher from restoring a phantom row', async t => {
+	const { local, remote, configUri } = await createSharedStorageFixture(t);
+	const entered = createStorageGate();
+	const release = createStorageGate();
+	const readConfig = (local as any).readConfig.bind(local);
+	let delay = true;
+	(local as any).readConfig = async (...args: any[]) => {
+		const result = await readConfig(...args);
+		if (delay) { delay = false; entered.resolve(); await release.promise; }
+		return result;
+	};
+	const watcher = (local as any).handleWatchedPromptConfigChange(configUri('old-title'), 'changed');
+	await entered.promise;
+	const prompt = (await remote.getPrompt('old-title'))!;
+	await remote.savePrompt({ ...prompt, id: '169-title', taskNumber: '169' }, { previousId: prompt.id, skipHistory: true });
+	await local.listPrompts({ forceRefresh: true });
+	release.resolve();
+	await watcher;
+	assert.deepEqual((await local.listPrompts()).map(p => p.id), ['169-title']);
+});
+
+/** Событие второго окна во время прохода требует перечитать изменившийся снимок. */
+test('forced list refresh retries when a prompt changes during the disk scan', async t => {
+	const { local, remote, configUri } = await createSharedStorageFixture(t);
+	const entered = createStorageGate();
+	const release = createStorageGate();
+	const readConfigs = (local as any).readPromptConfigsFromDirectory.bind(local);
+	let scans = 0;
+	(local as any).readPromptConfigsFromDirectory = async (...args: any[]) => {
+		const result = await readConfigs(...args);
+		if (++scans === 1) { entered.resolve(); await release.promise; }
+		return result;
+	};
+	const refresh = local.listPrompts({ forceRefresh: true });
+	await entered.promise;
+	const prompt = (await remote.getPrompt('old-title'))!;
+	await remote.savePrompt({ ...prompt, taskNumber: '169' }, { skipHistory: true });
+	const event = (local as any).handleWatchedPromptConfigChange(configUri(prompt.id), 'changed');
+	release.resolve();
+	const [actual] = await Promise.all([refresh, event]);
+	assert.equal(scans, 2);
+	assert.equal(actual[0].taskNumber, '169');
+	assert.equal((await local.listPrompts())[0].taskNumber, '169');
+});
+
+/** Ошибка доступа не стирает кеш и не мешает следующему ручному обновлению. */
+test('forced list refresh preserves cache after a directory read error and can retry', async t => {
+	const { local, root } = await createSharedStorageFixture(t);
+	const readConfigs = (local as any).readPromptConfigsFromDirectory.bind(local);
+	const entered = createStorageGate();
+	const release = createStorageGate();
+	(local as any).readPromptConfigsFromDirectory = async (...args: any[]) => {
+		entered.resolve(); await release.promise;
+		// Читаем заведомо недопустимый путь реальным методом, чтобы проверить его обработку ошибки.
+		return readConfigs(path.join(root, '.vscode', 'prompt-manager', 'old-title', 'config.json'), args[1], args[2]);
+	};
+	const failure = assert.rejects(local.listPrompts({ forceRefresh: true }), { code: 'ENOTDIR' });
+	await entered.promise;
+	const ordinaryRead = local.listPrompts();
+	release.resolve();
+	await failure;
+	assert.deepEqual((await ordinaryRead).map(p => p.id), ['old-title']);
+	assert.deepEqual((await local.listPrompts()).map(p => p.id), ['old-title']);
+	(local as any).readPromptConfigsFromDirectory = readConfigs;
+	assert.deepEqual((await local.listPrompts({ forceRefresh: true })).map(p => p.id), ['old-title']);
+});
+
+/** Перемещение в архив без watcher-события убирает строку из активных и сохраняет её в архиве. */
+test('forced list refresh reconciles active prompts with archive moves from another instance', async t => {
+	const { local, remote } = await createSharedStorageFixture(t);
+	await remote.archivePrompt('old-title');
+	const all = await local.listPrompts({ forceRefresh: true, includeArchived: true });
+	assert.deepEqual(all.map(p => [p.id, p.archived]), [['old-title', true]]);
+	assert.deepEqual(await local.listPrompts(), []);
+});

@@ -26,6 +26,7 @@ import type {
 	PromptDashboardWidgetSnapshot,
 } from '../types/promptDashboard.js';
 import {
+	isPromptDashboardProjectsSectionLoaded,
 	normalizePromptDashboardCollapsedSections,
 	normalizePromptDashboardLoadedProjectSections,
 	PROMPT_DASHBOARD_PROJECT_SECTION_KEYS,
@@ -1688,6 +1689,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 	}
 
+	/** Переиспользует полный кеш или догружает видимые секции; регрессии — promptDashboardService.test.ts. */
 	private async refreshWidget(
 		scope: PromptDashboardScope,
 		widget: PromptDashboardWidgetKind,
@@ -1698,12 +1700,19 @@ export class PromptDashboardService implements vscode.Disposable {
 		const cacheKey = buildPromptDashboardWidgetCacheKey(scope, widget);
 		const scopeKey = buildPromptDashboardScopeKey(scope);
 		const cached = this.cache.get(cacheKey);
+		// Свежий кеш может не содержать секции, раскрытые другим профилем ширины.
+		// Проверяем также общий кеш и результат незавершённой загрузки: promptDashboardService.test.ts.
+		const hasVisibleSections = (entry: DashboardCacheEntry<unknown> | undefined): boolean => widget !== 'projects'
+			|| this.resolveVisibleProjectSections().every(section => isPromptDashboardProjectsSectionLoaded(
+				entry?.data as PromptDashboardProjectsData | undefined,
+				section,
+			));
 		const nextActivityFingerprint = widget === 'activity' && options?.prompt
 			? buildPromptDashboardActivityFingerprint(options.prompt)
 			: '';
 		if (!options?.force && widget === 'projects' && !cached) {
 			const shared = this.getSharedProjects(scope);
-			if (shared && Date.now() - shared.updatedAtMs < PromptDashboardService.CACHE_TTL_MS) {
+			if (shared && hasVisibleSections(shared) && Date.now() - shared.updatedAtMs < PromptDashboardService.CACHE_TTL_MS) {
 				this.cache.set(cacheKey, shared);
 				this.logDashboardPerf('widget.reused-shared-projects', {
 					widget,
@@ -1713,7 +1722,8 @@ export class PromptDashboardService implements vscode.Disposable {
 				return;
 			}
 		}
-		if (!options?.force && widget !== 'status' && cached && Date.now() - cached.updatedAtMs < this.getCacheTtlMsForWidget(widget)) {
+		if (!options?.force && widget !== 'status' && cached && hasVisibleSections(cached)
+			&& Date.now() - cached.updatedAtMs < this.getCacheTtlMsForWidget(widget)) {
 			if (
 				widget === 'activity'
 				&& nextActivityFingerprint
@@ -1745,7 +1755,7 @@ export class PromptDashboardService implements vscode.Disposable {
 				requestId: options?.requestId || '',
 			});
 			await existing;
-			if (!options?.force) {
+			if (!options?.force && hasVisibleSections(this.cache.get(cacheKey))) {
 				return;
 			}
 		}

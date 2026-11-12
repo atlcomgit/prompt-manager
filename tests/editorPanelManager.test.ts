@@ -1,3 +1,4 @@
+import { normalizePromptDashboardLayouts } from '../src/types/promptDashboard.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -755,6 +756,11 @@ async function createManager(options?: {
 		getPromptEditorViewState: () => createEditorViewState(),
 		savePromptEditorViewState: async () => undefined,
 		migratePromptEditorViewState: async () => undefined,
+		getPromptDashboardLayouts: () => normalizePromptDashboardLayouts(
+			undefined,
+			stateService.getPromptDashboardSectionOrder(),
+			stateService.getPromptDashboardCollapsedSections(),
+		),
 		getPromptDashboardCollapsedSections: () => ({}),
 		savePromptDashboardCollapsedSections: async () => undefined,
 		getPromptDashboardSectionOrder: () => [
@@ -4668,7 +4674,7 @@ test('daily time change skips hidden and collapsed prompt panels', async () => {
 		panel.visible = false;
 		emitDailyTimeChange({ id: 'task-161', promptUuid: 'uuid-161', archived: false });
 		panel.visible = true;
-		(manager as any).promptDashboardCollapsedSectionsState = { activity: true };
+		(manager as any).promptDashboardLayoutsState['two-columns'].collapsedSections = { activity: true };
 		emitDailyTimeChange({ id: 'task-161', promptUuid: 'uuid-161', archived: false });
 		await flushTurns(3);
 	});
@@ -4765,7 +4771,7 @@ test('savePromptDashboardCollapsedSections syncs prompt dashboard collapsed sect
 test('analyzePromptDashboardReview skips AI refresh while the AI widget is collapsed', async () => {
 	let analyzeCalls = 0;
 	const { manager } = await createManager();
-	(manager as any).promptDashboardCollapsedSectionsState = { aiAnalysis: true };
+	(manager as any).promptDashboardLayoutsState['two-columns'].collapsedSections = { aiAnalysis: true };
 	(manager as any).promptDashboardService = {
 		analyzeParallelReview: () => {
 			analyzeCalls += 1;
@@ -10017,4 +10023,39 @@ test('buildChatMemorySummary aggregates attached files, missing context and code
 	assert.equal(summary.totals.describedMethodLikeCount, 13);
 	assert.equal(summary.codemap, codemap);
 	assert.ok(!Number.isNaN(Date.parse(summary.generatedAt)));
+});
+
+/** Host переключает правила загрузки сразу, даже пока сохранение другого режима ожидает запись. */
+test('dashboard layout switching isolates pending saves and active refresh policy', async () => {
+	const gate = createDeferred<void>();
+	const savedModes: string[] = [];
+	const { manager } = await createManager({
+		stateService: {
+			savePromptDashboardCollapsedSections: async (_state: unknown, mode: string) => {
+				savedModes.push(mode);
+				await gate.promise;
+			},
+		},
+	});
+	const prompt = createPrompt({ id: 'task-42', promptUuid: 'uuid-42' });
+	/** Вызывает реальный обработчик сообщений без файловой системы и рабочих сервисов. */
+	const dispatch = (message: unknown) => (manager as any).handleMessage(
+		message, { webview: {} }, prompt, 'panel-a', () => false, () => undefined,
+	);
+	await dispatch({ type: 'promptDashboardLayoutModeChanged', layoutMode: 'single-column' });
+	const saving = dispatch({
+		type: 'savePromptDashboardCollapsedSections', layoutMode: 'single-column', state: { activity: true },
+	});
+	assert.equal((manager as any).isPromptDashboardWidgetCollapsed('activity'), true);
+	await dispatch({ type: 'promptDashboardLayoutModeChanged', layoutMode: 'two-columns' });
+	assert.equal((manager as any).isPromptDashboardWidgetCollapsed('activity'), false);
+	gate.resolve();
+	await saving;
+	assert.equal((manager as any).isPromptDashboardWidgetCollapsed('activity'), false);
+	await dispatch({ type: 'promptDashboardLayoutModeChanged', layoutMode: 'single-column' });
+	assert.equal((manager as any).isPromptDashboardWidgetCollapsed('activity'), true);
+	assert.deepEqual(savedModes, ['single-column']);
+	const message = (manager as any).buildPromptMessage(prompt);
+	assert.deepEqual(message.promptDashboardLayouts['single-column'].collapsedSections, { activity: true });
+	assert.deepEqual(message.promptDashboardLayouts['two-columns'].collapsedSections, {});
 });

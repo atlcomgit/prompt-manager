@@ -19,6 +19,7 @@ import {
 	resolvePromptDashboardCacheState,
 	resolvePromptDashboardExpandRefreshTarget,
 	resolvePromptDashboardMode,
+	resolvePromptDashboardLayoutMode,
 	resolvePromptDashboardRequestMessageContext,
 	shouldReleasePromptDashboardProjectRequestOnNotice,
 	shouldReleasePromptDashboardRequestId,
@@ -31,6 +32,7 @@ import {
 	splitPromptDashboardActivityByDay,
 	comparePromptDashboardExplorerPaths,
 } from '../src/utils/promptDashboard.js';
+import { normalizePromptDashboardLayouts, PROMPT_DASHBOARD_SECTION_KEYS } from '../src/types/promptDashboard.js';
 import type { PromptDashboardProjectSummary, PromptDashboardProjectsData, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSnapshot } from '../src/types/promptDashboard.js';
 
 function createEmptyDockerWidget() {
@@ -938,4 +940,36 @@ test('buildPromptDashboardAnalysisFingerprint changes when prompt inputs change'
 
 	assert.equal(base, same);
 	assert.notEqual(base, changed);
+});
+
+/** Граница режимов совпадает с двумя карточками по 360 px и промежутком 12 px. */
+test('dashboard layout mode follows the usable grid width', () => {
+	assert.equal(resolvePromptDashboardLayoutMode(280), 'single-column');
+	assert.equal(resolvePromptDashboardLayoutMode(731.9), 'single-column');
+	assert.equal(resolvePromptDashboardLayoutMode(732), 'two-columns');
+	assert.equal(resolvePromptDashboardLayoutMode(1400), 'two-columns');
+});
+
+/** Перенос сохраняет видимый порядок узкой панели и создаёт независимые настройки. */
+test('dashboard layouts migrate the legacy stacked order without sharing arrays or collapse maps', () => {
+	const layouts = normalizePromptDashboardLayouts(undefined, [['todos', 'status'], ['activity']], { activity: true });
+	assert.deepEqual(layouts['single-column'].sectionOrder, [layouts['two-columns'].sectionOrder.flat()]);
+	layouts['single-column'].collapsedSections.status = true;
+	layouts['single-column'].sectionOrder[0].reverse();
+	assert.deepEqual(layouts['two-columns'].collapsedSections, { activity: true });
+	assert.equal(layouts['two-columns'].sectionOrder[0][0], 'todos');
+});
+
+/** Повреждённые и неполные профили не теряют карточки, пустая карта сворачивания остаётся пустой. */
+test('dashboard layouts normalize each profile independently', () => {
+	const layouts = normalizePromptDashboardLayouts({
+		'single-column': { sectionOrder: [['todos', 'todos', 'invalid']], collapsedSections: {} },
+		'two-columns': { sectionOrder: null, collapsedSections: { status: true, invalid: true, activity: false } },
+	}, undefined, { activity: true });
+	assert.deepEqual(layouts['single-column'].collapsedSections, {});
+	assert.deepEqual(layouts['two-columns'].collapsedSections, { status: true });
+	assert.equal(layouts['single-column'].sectionOrder.length, 1);
+	for (const profile of Object.values(layouts)) {
+		assert.deepEqual([...profile.sectionOrder.flat()].sort(), [...PROMPT_DASHBOARD_SECTION_KEYS].sort());
+	}
 });

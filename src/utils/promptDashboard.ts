@@ -1,4 +1,4 @@
-import type { PromptDashboardAnalysisState, PromptDashboardBranchAction, PromptDashboardCacheState, PromptDashboardLoadStatus, PromptDashboardProjectsData, PromptDashboardProjectSummary, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSectionKey, PromptDashboardSnapshot, PromptDashboardStatusData, PromptDashboardTodosData, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../types/promptDashboard.js';
+import type { PromptDashboardLayoutMode, PromptDashboardAnalysisState, PromptDashboardBranchAction, PromptDashboardCacheState, PromptDashboardLoadStatus, PromptDashboardProjectsData, PromptDashboardProjectSummary, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSectionKey, PromptDashboardSnapshot, PromptDashboardStatusData, PromptDashboardTodosData, PromptDashboardWidgetKind, PromptDashboardWidgetSnapshot } from '../types/promptDashboard.js';
 import { resolvePromptDashboardWidgetKindForSection } from '../types/promptDashboard.js';
 import { isPromptDashboardProjectsSectionLoaded } from '../types/promptDashboard.js';
 import type { GitOverlayBranchInfo, GitOverlayChangeFile, GitOverlayCommitChangedFile } from '../types/git.js';
@@ -7,6 +7,17 @@ import type { Prompt, PromptStatus } from '../types/prompt.js';
 export const PROMPT_DASHBOARD_WARM_INTERVAL_MS = 5 * 60 * 1000;
 export const PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS = 5 * 60 * 1000;
 export const PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX = 280;
+/** Размеры существующей сетки; используются и измерением, и стилями. */
+export const PROMPT_DASHBOARD_COLUMN_MIN_WIDTH_PX = 360;
+export const PROMPT_DASHBOARD_COLUMN_GAP_PX = 12;
+
+/** Выбирает профиль по полезной ширине сетки; граница проверяется в promptDashboard.test.ts. */
+export function resolvePromptDashboardLayoutMode(gridWidth: number): PromptDashboardLayoutMode {
+	return gridWidth >= PROMPT_DASHBOARD_COLUMN_MIN_WIDTH_PX * 2 + PROMPT_DASHBOARD_COLUMN_GAP_PX
+		? 'two-columns'
+		: 'single-column';
+}
+
 const PROMPT_DASHBOARD_TEXT_ELLIPSIS = '...';
 const PROMPT_DASHBOARD_PATH_SHORT_SEGMENT_PREFIX = 4;
 const PROMPT_DASHBOARD_PATH_LONG_SEGMENT_PREFIX = 8;

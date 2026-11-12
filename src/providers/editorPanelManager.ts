@@ -49,11 +49,14 @@ import type {
 import type { GitOverlayProjectSnapshot, GitOverlaySnapshot } from '../types/git.js';
 import type {
 	PromptDashboardCollapsedSections,
+	PromptDashboardLayoutMode,
+	PromptDashboardLayouts,
 	PromptDashboardSectionOrder,
 	PromptDashboardWidgetKind,
 } from '../types/promptDashboard.js';
 import {
 	normalizePromptDashboardCollapsedSections,
+	normalizePromptDashboardLayouts,
 	normalizePromptDashboardSectionOrder,
 	resolveCollapsedPromptDashboardWidgets,
 	shouldSkipPromptDashboardWidgetRefresh,
@@ -319,8 +322,9 @@ export class EditorPanelManager {
 	private latestPromptEditorViewStateByQueueKey = new Map<string, EditorPromptViewState>();
 	private promptEditorViewStateSaveFlushScheduled = false;
 	private promptEditorViewStateSaveQueue: Promise<void> = Promise.resolve();
-	private promptDashboardCollapsedSectionsState: PromptDashboardCollapsedSections = {};
-	private promptDashboardSectionOrderState: PromptDashboardSectionOrder = [];
+	/** Два независимых профиля и текущий режим для фонового обновления видимых карточек. */
+	private promptDashboardLayoutsState: PromptDashboardLayouts = normalizePromptDashboardLayouts();
+	private promptDashboardLayoutMode: PromptDashboardLayoutMode = 'two-columns';
 	/** Очередь ожидающих сохранений по составному ключу (uuid::id). Хранит снимок и промис завершения. */
 	private pendingSaveQueue = new Map<string, PendingSaveEntry>();
 	private isShuttingDown = false;
@@ -580,14 +584,14 @@ export class EditorPanelManager {
 		return promptId ? openPanels.get(promptId) : undefined;
 	}
 
-	/** Read the shared workspace-wide dashboard collapse state. */
+	/** Возвращает общую для промптов карту сворачивания текущего режима ширины. */
 	private getPromptDashboardCollapsedSections(): PromptDashboardCollapsedSections {
-		return this.promptDashboardCollapsedSectionsState;
+		return this.promptDashboardLayoutsState[this.promptDashboardLayoutMode].collapsedSections;
 	}
 
-	/** Read the shared workspace-wide dashboard card order. */
+	/** Возвращает общий для промптов порядок карточек текущего режима ширины. */
 	private getPromptDashboardSectionOrder(): PromptDashboardSectionOrder {
-		return this.promptDashboardSectionOrderState;
+		return this.promptDashboardLayoutsState[this.promptDashboardLayoutMode].sectionOrder;
 	}
 
 	/** Resolve host widget payloads hidden by the shared collapse state. */
@@ -4346,8 +4350,7 @@ export class EditorPanelManager {
 		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined,
 		private readonly customGroupsService?: CustomGroupsService,
 	) {
-		this.promptDashboardCollapsedSectionsState = this.stateService.getPromptDashboardCollapsedSections();
-		this.promptDashboardSectionOrderState = this.stateService.getPromptDashboardSectionOrder();
+		this.promptDashboardLayoutsState = this.stateService.getPromptDashboardLayouts();
 
 		this.contentSyncDisposables.push(
 			this.storageService.onDidPromptDailyTimeChange(() => {
@@ -8127,6 +8130,7 @@ export class EditorPanelManager {
 			{
 				__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__: promptDashboardCollapsedSections,
 				__PROMPT_DASHBOARD_SECTION_ORDER__: promptDashboardSectionOrder,
+				__PROMPT_DASHBOARD_LAYOUTS__: this.promptDashboardLayoutsState,
 			},
 		);
 	}
@@ -8281,6 +8285,7 @@ export class EditorPanelManager {
 			...options,
 			promptDashboardCollapsedSections,
 			promptDashboardSectionOrder,
+			promptDashboardLayouts: this.promptDashboardLayoutsState,
 			...(pendingAiEnrichment ? { aiEnrichment: pendingAiEnrichment } : {}),
 		};
 	}
@@ -8305,6 +8310,7 @@ export class EditorPanelManager {
 			...(editorViewState ? { editorViewState } : {}),
 			promptDashboardCollapsedSections,
 			promptDashboardSectionOrder,
+			promptDashboardLayouts: this.promptDashboardLayoutsState,
 		};
 	}
 
@@ -9901,24 +9907,51 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'promptDashboardLayoutModeChanged': {
+				// Переключаем правила фоновой загрузки без записи настроек соседнего режима.
+				if (msg.layoutMode === 'single-column' || msg.layoutMode === 'two-columns') {
+					this.promptDashboardLayoutMode = msg.layoutMode;
+					this.syncPromptDashboardCollapsedState();
+				}
+				break;
+			}
+
 			case 'savePromptDashboardCollapsedSections': {
-				this.promptDashboardCollapsedSectionsState = normalizePromptDashboardCollapsedSections(msg.state);
+				// Обновляем снимок до await: открытие промпта и загрузка виджетов уже видят новое состояние.
+				const layoutMode = msg.layoutMode === 'single-column' ? 'single-column' : 'two-columns';
+				this.promptDashboardLayoutsState = {
+					...this.promptDashboardLayoutsState,
+					[layoutMode]: {
+						...this.promptDashboardLayoutsState[layoutMode],
+						collapsedSections: normalizePromptDashboardCollapsedSections(msg.state),
+					},
+				};
 				this.syncPromptDashboardCollapsedState();
 				this.logReportDebug('promptDashboard.collapsedSections.saved', {
 					panelKey,
-					collapsedSections: this.promptDashboardCollapsedSectionsState,
+					layoutMode,
+					collapsedSections: this.promptDashboardLayoutsState[layoutMode].collapsedSections,
 				});
-				await this.stateService.savePromptDashboardCollapsedSections(msg.state);
+				await this.stateService.savePromptDashboardCollapsedSections(msg.state, layoutMode);
 				break;
 			}
 
 			case 'savePromptDashboardSectionOrder': {
-				this.promptDashboardSectionOrderState = normalizePromptDashboardSectionOrder(msg.order);
+				// Режим сообщения сохраняется независимо от последующего изменения ширины webview.
+				const layoutMode = msg.layoutMode === 'single-column' ? 'single-column' : 'two-columns';
+				this.promptDashboardLayoutsState = {
+					...this.promptDashboardLayoutsState,
+					[layoutMode]: {
+						...this.promptDashboardLayoutsState[layoutMode],
+						sectionOrder: normalizePromptDashboardSectionOrder(msg.order, layoutMode),
+					},
+				};
 				this.logReportDebug('promptDashboard.sectionOrder.saved', {
 					panelKey,
-					sectionOrder: this.promptDashboardSectionOrderState,
+					layoutMode,
+					sectionOrder: this.promptDashboardLayoutsState[layoutMode].sectionOrder,
 				});
-				await this.stateService.savePromptDashboardSectionOrder(msg.order);
+				await this.stateService.savePromptDashboardSectionOrder(msg.order, layoutMode);
 				break;
 			}
 

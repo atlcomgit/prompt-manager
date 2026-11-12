@@ -52,6 +52,8 @@ import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerW
 import type {
   PromptDashboardAnalysisState,
   PromptDashboardCollapsedSections,
+  PromptDashboardLayoutMode,
+  PromptDashboardLayouts,
   PromptDashboardProjectsData,
   PromptDashboardSectionKey,
   PromptDashboardSectionOrder,
@@ -64,6 +66,7 @@ import {
   createDefaultPromptDashboardSectionOrder,
   hasVisiblePromptDashboardSections,
   normalizePromptDashboardCollapsedSections,
+  normalizePromptDashboardLayouts,
   normalizePromptDashboardSectionOrder,
   resolveCollapsedPromptDashboardWidgets,
   resolvePromptDashboardWidgetKindForSection,
@@ -122,6 +125,7 @@ type EditorBootWindow = Window & {
   __WEBVIEW_BOOT_ID__?: string;
   __PROMPT_DASHBOARD_COLLAPSED_SECTIONS__?: PromptDashboardCollapsedSections;
   __PROMPT_DASHBOARD_SECTION_ORDER__?: PromptDashboardSectionOrder;
+  __PROMPT_DASHBOARD_LAYOUTS__?: PromptDashboardLayouts;
 };
 
 const bootWindow = window as EditorBootWindow;
@@ -164,14 +168,31 @@ export const resolveInitialPromptDashboardSectionOrder = (
   return createDefaultPromptDashboardSectionOrder();
 };
 
-const initialPromptDashboardCollapsedSections = resolveInitialPromptDashboardCollapsedSections(
-  bootWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__,
-  ((vscode.getState?.() || {}) as Record<string, unknown>)['pm.editor.promptDashboardCollapsedSections'],
+/** Восстанавливает профили host/webview, сохраняя совместимость со старым общим состоянием. */
+export const resolveInitialPromptDashboardLayouts = (
+  bootLayouts: unknown,
+  persistedLayouts: unknown,
+  legacyOrder?: unknown,
+  legacyCollapsedSections?: PromptDashboardCollapsedSections,
+): PromptDashboardLayouts => normalizePromptDashboardLayouts(
+  bootLayouts ?? persistedLayouts,
+  legacyOrder,
+  legacyCollapsedSections,
 );
 
-const initialPromptDashboardSectionOrder = resolveInitialPromptDashboardSectionOrder(
-  bootWindow.__PROMPT_DASHBOARD_SECTION_ORDER__,
-  ((vscode.getState?.() || {}) as Record<string, unknown>)['pm.editor.promptDashboardSectionOrder'],
+/** Host имеет приоритет; старые настройки нужны только при отсутствии сохранённых профилей. */
+const persistedDashboardState = (vscode.getState?.() || {}) as Record<string, unknown>;
+const initialPromptDashboardLayouts = resolveInitialPromptDashboardLayouts(
+  bootWindow.__PROMPT_DASHBOARD_LAYOUTS__,
+  persistedDashboardState['pm.editor.promptDashboardLayouts'],
+  resolveInitialPromptDashboardSectionOrder(
+    bootWindow.__PROMPT_DASHBOARD_SECTION_ORDER__,
+    persistedDashboardState['pm.editor.promptDashboardSectionOrder'],
+  ),
+  resolveInitialPromptDashboardCollapsedSections(
+    bootWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__,
+    persistedDashboardState['pm.editor.promptDashboardCollapsedSections'],
+  ),
 );
 
 interface SelectOption {
@@ -875,12 +896,12 @@ export const EditorApp: React.FC = () => {
   const [promptDashboardBusyAction, setPromptDashboardBusyAction] = useState<string | null>(null);
   const [promptDashboardDockerBusyActions, setPromptDashboardDockerBusyActions] = useState<string[]>([]);
   const [promptDashboardRefreshVersion, setPromptDashboardRefreshVersion] = useState(0);
-  const [promptDashboardCollapsedSections, setPromptDashboardCollapsedSections] = useState<PromptDashboardCollapsedSections>(
-    () => initialPromptDashboardCollapsedSections,
-  );
-  const [promptDashboardSectionOrder, setPromptDashboardSectionOrder] = useState<PromptDashboardSectionOrder>(
-    () => initialPromptDashboardSectionOrder,
-  );
+  /** Профили общие для промптов; активный режим определяется по ширине сетки. */
+  const [promptDashboardLayouts, setPromptDashboardLayouts] = useState(() => initialPromptDashboardLayouts);
+  const [promptDashboardLayoutMode, setPromptDashboardLayoutMode] = useState<PromptDashboardLayoutMode | null>(null);
+  const activeDashboardLayoutMode = promptDashboardLayoutMode || 'single-column';
+  const { collapsedSections: promptDashboardCollapsedSections, sectionOrder: promptDashboardSectionOrder } =
+    promptDashboardLayouts[activeDashboardLayoutMode];
   const promptDashboardRequestIdRef = useRef('');
   /** Отслеживает только запросы, способные заменить project details. */
   const promptDashboardProjectsRequestIdRef = useRef('');
@@ -1114,6 +1135,7 @@ export const EditorApp: React.FC = () => {
     [promptDashboardCollapsedWidgets],
   );
   const promptDashboardScopeFingerprint = useMemo(() => JSON.stringify({
+    layoutMode: promptDashboardLayoutMode,
     id: prompt.id,
     promptUuid: prompt.promptUuid,
     projects: prompt.projects,
@@ -1131,6 +1153,7 @@ export const EditorApp: React.FC = () => {
     updatedAt: prompt.updatedAt,
     refreshVersion: promptDashboardRefreshVersion,
   }), [
+    promptDashboardLayoutMode,
     prompt.id,
     prompt.promptUuid,
     prompt.projects,
@@ -1380,9 +1403,9 @@ export const EditorApp: React.FC = () => {
   }, [clearPendingProcessBodyScrollRestore, restoreProcessBodyScroll]);
 
   useEffect(() => {
-    postEditorDebugLog('editor-dashboard', 'bootstrap.collapsed-sections', {
-      collapsedSections: initialPromptDashboardCollapsedSections,
-      hasBootState: bootWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__ !== undefined,
+    postEditorDebugLog('editor-dashboard', 'bootstrap.layouts', {
+      layouts: initialPromptDashboardLayouts,
+      hasBootState: bootWindow.__PROMPT_DASHBOARD_LAYOUTS__ !== undefined,
       bootId: initialBootId,
     });
   }, []);
@@ -1445,26 +1468,19 @@ export const EditorApp: React.FC = () => {
     setPromptDashboardDockerBusyActions([]);
   }, []);
 
-  /** Applies the shared workspace-level dashboard collapse state received from the host. */
-  const applyPromptDashboardCollapsedSections = useCallback((state: unknown) => {
-    const normalizedState = normalizePromptDashboardCollapsedSections(
-      state as PromptDashboardCollapsedSections | null | undefined,
-    );
-    postEditorDebugLog('editor-dashboard', 'collapsed-sections.applied', {
-      collapsedSections: normalizedState,
-    });
-    setPromptDashboardCollapsedSections(normalizedState);
+  /** Применяет оба профиля из host без переноса текущей раскладки в соседний режим. */
+  const applyPromptDashboardLayouts = useCallback((layouts: unknown, order: unknown, collapsed: unknown) => {
+    setPromptDashboardLayouts(normalizePromptDashboardLayouts(
+      layouts,
+      order,
+      collapsed as PromptDashboardCollapsedSections,
+    ));
   }, []);
 
-  /** Applies the shared workspace-level dashboard card order received from the host. */
-  const applyPromptDashboardSectionOrder = useCallback((state: unknown) => {
-    const normalizedState = normalizePromptDashboardSectionOrder(
-      Array.isArray(state) ? state : null,
-    );
-    postEditorDebugLog('editor-dashboard', 'section-order.applied', {
-      sectionOrder: normalizedState,
-    });
-    setPromptDashboardSectionOrder(normalizedState);
+  /** Сообщает host текущую ширину до запросов данных, чтобы свёрнутые виджеты не загружались. */
+  const handlePromptDashboardLayoutModeChange = useCallback((layoutMode: PromptDashboardLayoutMode) => {
+    vscode.postMessage({ type: 'promptDashboardLayoutModeChanged', layoutMode });
+    setPromptDashboardLayoutMode(layoutMode);
   }, []);
 
   const handleReportHeightChange = useCallback((nextHeight: number) => {
@@ -3096,8 +3112,9 @@ export const EditorApp: React.FC = () => {
         clearPromptSwitchPlaceholderDelay();
         promptSwitchRestoreViewStateRef.current = editorViewStateRef.current;
         const loadingEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
-        applyPromptDashboardCollapsedSections(msg.promptDashboardCollapsedSections);
-        applyPromptDashboardSectionOrder(msg.promptDashboardSectionOrder);
+        applyPromptDashboardLayouts(
+          msg.promptDashboardLayouts, msg.promptDashboardSectionOrder, msg.promptDashboardCollapsedSections,
+        );
         postEditorDebugLog('editor-layout', 'promptLoading.apply', {
           promptId: String(msg.promptId || '').trim() || '__new__',
           promptUuid: String(msg.promptUuid || '').trim(),
@@ -3252,8 +3269,9 @@ export const EditorApp: React.FC = () => {
               activePromptOpenRequestVersionRef.current = incomingOpenRequestVersion;
             }
             const nextEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
-            applyPromptDashboardCollapsedSections(msg.promptDashboardCollapsedSections);
-            applyPromptDashboardSectionOrder(msg.promptDashboardSectionOrder);
+            applyPromptDashboardLayouts(
+              msg.promptDashboardLayouts, msg.promptDashboardSectionOrder, msg.promptDashboardCollapsedSections,
+            );
             const promptSwitchTiming = promptSwitchTimingRef.current;
             postEditorDebugLog('editor-layout', 'promptOpen.apply', {
               promptId: incomingPromptId,
@@ -4509,7 +4527,7 @@ export const EditorApp: React.FC = () => {
         setIsRecalculating(false);
         break;
     }
-  }, [applyPromptDashboardCollapsedSections, applyPromptDashboardSectionOrder, applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPendingProcessBodyScrollRestore, clearPromptDashboardDockerBusyActions, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releasePromptDashboardDockerBusyAction, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, scheduleProcessBodyScrollRestore, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
+  }, [applyPromptDashboardLayouts, applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPendingProcessBodyScrollRestore, clearPromptDashboardDockerBusyActions, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releasePromptDashboardDockerBusyAction, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, scheduleProcessBodyScrollRestore, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
 
   handleMessageRef.current = handleMessage;
 
@@ -4631,7 +4649,7 @@ export const EditorApp: React.FC = () => {
   }, [clearPromptDashboardDockerBusyActions, prompt.id, prompt.promptUuid]);
 
   useEffect(() => {
-    if (promptDashboardMode !== 'full') {
+    if (promptDashboardMode !== 'full' || !promptDashboardLayoutMode) {
       postEditorDebugLog('editor-dashboard', 'snapshot.skipped', {
         reason: 'dashboard-hidden',
         mode: promptDashboardMode,
@@ -4826,10 +4844,9 @@ export const EditorApp: React.FC = () => {
     const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
     vscode.setState?.({
       ...currentState,
-      'pm.editor.promptDashboardCollapsedSections': promptDashboardCollapsedSections,
-      'pm.editor.promptDashboardSectionOrder': promptDashboardSectionOrder,
+      'pm.editor.promptDashboardLayouts': promptDashboardLayouts,
     });
-  }, [promptDashboardCollapsedSections, promptDashboardSectionOrder]);
+  }, [promptDashboardLayouts]);
 
   useEffect(() => {
     if (!globalContextTextareaRef.current || typeof ResizeObserver === 'undefined') {
@@ -5173,8 +5190,13 @@ export const EditorApp: React.FC = () => {
       ...buildPromptDashboardSnapshotDebugPayload(currentSnapshot),
     });
 
-    setPromptDashboardCollapsedSections(nextState);
-    vscode.postMessage({ type: 'savePromptDashboardCollapsedSections', state: nextState });
+    setPromptDashboardLayouts(previous => ({
+      ...previous,
+      [activeDashboardLayoutMode]: { ...previous[activeDashboardLayoutMode], collapsedSections: nextState },
+    }));
+    vscode.postMessage({
+      type: 'savePromptDashboardCollapsedSections', state: nextState, layoutMode: activeDashboardLayoutMode,
+    });
 
     if (!expandRequest) {
       postEditorDebugLog('editor-dashboard', 'expand.skipped', {
@@ -5224,18 +5246,23 @@ export const EditorApp: React.FC = () => {
       section,
       requestId,
     });
-  }, [promptDashboardCollapsedSections, promptDashboardMode, promptDashboardScopeFingerprint]);
+  }, [activeDashboardLayoutMode, promptDashboardCollapsedSections, promptDashboardMode, promptDashboardScopeFingerprint]);
 
-  /** Persists the shared prompt-dashboard card order after one header drag-and-drop move. */
+  /** Сохраняет перестановку только в режиме, в котором завершено перетаскивание. */
   const handlePromptDashboardReorderSections = useCallback((nextOrder: PromptDashboardSectionOrder) => {
-    const normalizedOrder = normalizePromptDashboardSectionOrder(nextOrder);
+    const normalizedOrder = normalizePromptDashboardSectionOrder(nextOrder, activeDashboardLayoutMode);
     postEditorDebugLog('editor-dashboard', 'section-order.requested', {
       previousOrder: promptDashboardSectionOrder,
       nextOrder: normalizedOrder,
     });
-    setPromptDashboardSectionOrder(normalizedOrder);
-    vscode.postMessage({ type: 'savePromptDashboardSectionOrder', order: normalizedOrder });
-  }, [promptDashboardSectionOrder]);
+    setPromptDashboardLayouts(previous => ({
+      ...previous,
+      [activeDashboardLayoutMode]: { ...previous[activeDashboardLayoutMode], sectionOrder: normalizedOrder },
+    }));
+    vscode.postMessage({
+      type: 'savePromptDashboardSectionOrder', order: normalizedOrder, layoutMode: activeDashboardLayoutMode,
+    });
+  }, [activeDashboardLayoutMode, promptDashboardSectionOrder]);
 
   /** Sync Docker live polling with the actual visibility of resource blocks inside the dashboard. */
   const handlePromptDashboardDockerLiveMetricsVisibilityChange = useCallback((visible: boolean) => {
@@ -7870,6 +7897,8 @@ export const EditorApp: React.FC = () => {
         collapsedSections={promptDashboardCollapsedSections}
         sectionOrder={promptDashboardSectionOrder}
         mode={promptDashboardMode}
+        layoutMode={activeDashboardLayoutMode}
+        onLayoutModeChange={handlePromptDashboardLayoutModeChange}
         showGitFlowAction={shouldShowFooterGitFlow}
         onRefresh={handlePromptDashboardRefresh}
         onRefreshWidget={handlePromptDashboardRefreshWidget}

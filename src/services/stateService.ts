@@ -8,7 +8,13 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import type { EditorPromptViewState, EditorPromptViewStateKeySource, SidebarState } from '../types/prompt.js';
-import type { PromptDashboardCollapsedSections, PromptDashboardSectionOrder } from '../types/promptDashboard.js';
+import type {
+	PromptDashboardCollapsedSections,
+	PromptDashboardSectionOrder,
+	PromptDashboardLayoutMode,
+	PromptDashboardLayouts,
+	PromptDashboardLayoutState,
+} from '../types/promptDashboard.js';
 import {
 	createDefaultEditorPromptViewState,
 	moveEditorPromptViewStateEntries,
@@ -18,8 +24,7 @@ import {
 	resolveEditorPromptViewStateStorageKey,
 } from '../types/prompt.js';
 import {
-	createDefaultPromptDashboardCollapsedSections,
-	createDefaultPromptDashboardSectionOrder,
+	normalizePromptDashboardLayouts,
 	normalizePromptDashboardCollapsedSections,
 	normalizePromptDashboardSectionOrder,
 } from '../types/promptDashboard.js';
@@ -44,14 +49,16 @@ const STARTUP_EDITOR_PROMPT_ID_KEY = 'promptManager.startup.editorPromptId';
 const PROMPT_EDITOR_VIEW_STATE_KEY = 'promptManager.editorPromptViewState';
 const PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY = 'promptManager.dashboardCollapsedSections';
 const PROMPT_DASHBOARD_SECTION_ORDER_KEY = 'promptManager.dashboardSectionOrder';
+/** Раздельные настройки режимов; старые ключи читаются только при первоначальном переносе. */
+const PROMPT_DASHBOARD_LAYOUTS_KEY = 'promptManager.dashboardLayouts';
 const STATISTICS_UI_STATE_KEY = 'promptManager.statisticsUiState';
 
 export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
 	private static readonly GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchesByProjectPreference';
 	private promptEditorViewStateMutationQueue: Promise<void> = Promise.resolve();
-	private promptDashboardCollapsedSectionsMutationQueue: Promise<void> = Promise.resolve();
-	private promptDashboardSectionOrderMutationQueue: Promise<void> = Promise.resolve();
+	/** Единая очередь исключает потерю порядка при одновременном сохранении сворачивания. */
+	private promptDashboardLayoutsMutationQueue: Promise<void> = Promise.resolve();
 
 	/** Normalize persisted global-context source and keep legacy workspaces predictable. */
 	private static normalizeGlobalAgentContextSource(
@@ -944,62 +951,54 @@ export class StateService {
 		await pendingMutation;
 	}
 
-	/** Serialize mutations of the shared dashboard collapse map to keep the latest toggle order stable. */
-	private async persistPromptDashboardCollapsedSections(
+	/** Читает независимые режимы с переносом прежних настроек; tests/stateService.test.ts. */
+	getPromptDashboardLayouts(): PromptDashboardLayouts {
+		return normalizePromptDashboardLayouts(
+			this.context.workspaceState.get(PROMPT_DASHBOARD_LAYOUTS_KEY),
+			this.context.workspaceState.get(PROMPT_DASHBOARD_SECTION_ORDER_KEY),
+			this.context.workspaceState.get<PromptDashboardCollapsedSections>(PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY),
+		);
+	}
+
+	/** Последовательно сохраняет только изменённую часть режима, удерживая второй режим и остальные поля. */
+	private async persistPromptDashboardLayout(
+		mode: PromptDashboardLayoutMode,
+		patch: Partial<PromptDashboardLayoutState>,
+	): Promise<void> {
+		const applyMutation = async (): Promise<void> => {
+			const layouts = this.getPromptDashboardLayouts();
+			layouts[mode] = { ...layouts[mode], ...patch };
+			await this.context.workspaceState.update(PROMPT_DASHBOARD_LAYOUTS_KEY, layouts);
+		};
+		const pendingMutation = this.promptDashboardLayoutsMutationQueue.then(applyMutation, applyMutation);
+		this.promptDashboardLayoutsMutationQueue = pendingMutation.catch(() => undefined);
+		await pendingMutation;
+	}
+
+	/** Возвращает сворачивание только выбранного режима. */
+	getPromptDashboardCollapsedSections(mode: PromptDashboardLayoutMode = 'two-columns'): PromptDashboardCollapsedSections {
+		return this.getPromptDashboardLayouts()[mode].collapsedSections;
+	}
+
+	/** Сохраняет даже пустую карту: раскрытие всех карточек не должно возвращать старые настройки. */
+	async savePromptDashboardCollapsedSections(
 		state: PromptDashboardCollapsedSections,
+		mode: PromptDashboardLayoutMode = 'two-columns',
 	): Promise<void> {
-		const normalizedState = normalizePromptDashboardCollapsedSections(state);
-		const applyMutation = async (): Promise<void> => {
-			await this.context.workspaceState.update(
-				PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY,
-				Object.keys(normalizedState).length > 0 ? normalizedState : undefined,
-			);
-		};
-
-		const pendingMutation = this.promptDashboardCollapsedSectionsMutationQueue.then(applyMutation, applyMutation);
-		this.promptDashboardCollapsedSectionsMutationQueue = pendingMutation.catch(() => undefined);
-		await pendingMutation;
+		await this.persistPromptDashboardLayout(mode, { collapsedSections: normalizePromptDashboardCollapsedSections(state) });
 	}
 
-	getPromptDashboardCollapsedSections(): PromptDashboardCollapsedSections {
-		const saved = this.context.workspaceState.get<PromptDashboardCollapsedSections>(
-			PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY,
-			createDefaultPromptDashboardCollapsedSections(),
-		);
-		return normalizePromptDashboardCollapsedSections(saved);
+	/** Возвращает порядок карточек только выбранного режима. */
+	getPromptDashboardSectionOrder(mode: PromptDashboardLayoutMode = 'two-columns'): PromptDashboardSectionOrder {
+		return this.getPromptDashboardLayouts()[mode].sectionOrder;
 	}
 
-	async savePromptDashboardCollapsedSections(state: PromptDashboardCollapsedSections): Promise<void> {
-		await this.persistPromptDashboardCollapsedSections(state);
-	}
-
-	/** Serialize mutations of the shared dashboard order so repeated drags keep the latest card order stable. */
-	private async persistPromptDashboardSectionOrder(
+	/** Сохраняет перестановку, не изменяя сворачивание и настройки другой ширины. */
+	async savePromptDashboardSectionOrder(
 		order: PromptDashboardSectionOrder,
+		mode: PromptDashboardLayoutMode = 'two-columns',
 	): Promise<void> {
-		const normalizedOrder = normalizePromptDashboardSectionOrder(order);
-		const applyMutation = async (): Promise<void> => {
-			await this.context.workspaceState.update(
-				PROMPT_DASHBOARD_SECTION_ORDER_KEY,
-				normalizedOrder,
-			);
-		};
-
-		const pendingMutation = this.promptDashboardSectionOrderMutationQueue.then(applyMutation, applyMutation);
-		this.promptDashboardSectionOrderMutationQueue = pendingMutation.catch(() => undefined);
-		await pendingMutation;
-	}
-
-	getPromptDashboardSectionOrder(): PromptDashboardSectionOrder {
-		const saved = this.context.workspaceState.get<PromptDashboardSectionOrder>(
-			PROMPT_DASHBOARD_SECTION_ORDER_KEY,
-			createDefaultPromptDashboardSectionOrder(),
-		);
-		return normalizePromptDashboardSectionOrder(saved);
-	}
-
-	async savePromptDashboardSectionOrder(order: PromptDashboardSectionOrder): Promise<void> {
-		await this.persistPromptDashboardSectionOrder(order);
+		await this.persistPromptDashboardLayout(mode, { sectionOrder: normalizePromptDashboardSectionOrder(order, mode) });
 	}
 
 	getPromptEditorViewState(source?: EditorPromptViewStateKeySource | null): EditorPromptViewState {

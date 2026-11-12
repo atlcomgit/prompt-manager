@@ -8,6 +8,8 @@ import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerW
 import type {
 	PromptDashboardAnalysisState,
 	PromptDashboardCollapsedSections,
+	PromptDashboardLayoutMode,
+	PromptDashboardLayouts,
 	PromptDashboardSectionOrder,
 	PromptDashboardSectionKey,
 	PromptDashboardSnapshot,
@@ -75,8 +77,9 @@ export type WebviewToExtensionMessage =
 	| { type: 'generateReportFromStagedChanges'; prompt: Prompt }
 	| { type: 'saveSidebarState'; state: SidebarState }
 	| { type: 'savePromptEditorViewState'; promptId?: string; promptUuid?: string; state: EditorPromptViewState }
-	| { type: 'savePromptDashboardCollapsedSections'; state: PromptDashboardCollapsedSections }
-	| { type: 'savePromptDashboardSectionOrder'; order: PromptDashboardSectionOrder }
+	| { type: 'savePromptDashboardCollapsedSections'; state: PromptDashboardCollapsedSections; layoutMode?: PromptDashboardLayoutMode }
+	| { type: 'savePromptDashboardSectionOrder'; order: PromptDashboardSectionOrder; layoutMode?: PromptDashboardLayoutMode }
+	| { type: 'promptDashboardLayoutModeChanged'; layoutMode: PromptDashboardLayoutMode }
 	| { type: 'getSidebarState' }
 	| { type: 'getWorkspaceFolders' }
 	| { type: 'getAvailableModels' }
@@ -241,6 +244,8 @@ export type ExtensionToWebviewMessage =
 		requestId?: string;
 		openRequestVersion?: number;
 		editorViewState?: EditorPromptViewState;
+		/** Независимые настройки обеих ширин панели. */
+		promptDashboardLayouts?: PromptDashboardLayouts;
 		promptDashboardCollapsedSections?: PromptDashboardCollapsedSections;
 		promptDashboardSectionOrder?: PromptDashboardSectionOrder;
 		aiEnrichment?: { title: boolean; description: boolean };
@@ -335,6 +340,8 @@ export type ExtensionToWebviewMessage =
 		promptUuid?: string;
 		openRequestVersion?: number;
 		editorViewState?: EditorPromptViewState;
+		/** Независимые настройки обеих ширин панели. */
+		promptDashboardLayouts?: PromptDashboardLayouts;
 		promptDashboardCollapsedSections?: PromptDashboardCollapsedSections;
 		promptDashboardSectionOrder?: PromptDashboardSectionOrder;
 	}

@@ -19,8 +19,20 @@ export type PromptDashboardSectionKey =
 /** Persists only sections explicitly collapsed by the user. */
 export type PromptDashboardCollapsedSections = Partial<Record<PromptDashboardSectionKey, boolean>>;
 
-/** Persists the shared visible two-column layout of prompt-dashboard cards. */
+/** Хранит порядок карточек в колонках выбранного режима. */
 export type PromptDashboardSectionOrder = PromptDashboardSectionKey[][];
+
+/** Различает независимые настройки узкой и широкой панели виджетов. */
+export type PromptDashboardLayoutMode = 'single-column' | 'two-columns';
+
+/** Сохраняет порядок и сворачивание виджетов одного режима. */
+export interface PromptDashboardLayoutState {
+	sectionOrder: PromptDashboardSectionOrder;
+	collapsedSections: PromptDashboardCollapsedSections;
+}
+
+/** Общие для промптов настройки каждого режима отображения. */
+export type PromptDashboardLayouts = Record<PromptDashboardLayoutMode, PromptDashboardLayoutState>;
 
 /** Prompt dashboard keeps two stable columns in full mode. */
 export const PROMPT_DASHBOARD_SECTION_COLUMN_COUNT = 2;
@@ -74,10 +86,15 @@ export function normalizePromptDashboardCollapsedSections(
 	return normalized;
 }
 
-/** Normalizes a persisted widget order and appends any missing dashboard cards in their default order. */
+/** Нормализует порядок выбранного режима и добавляет новые карточки; tests/promptDashboard.test.ts. */
 export function normalizePromptDashboardSectionOrder(
 	state?: unknown,
+	layoutMode: PromptDashboardLayoutMode = 'two-columns',
 ): PromptDashboardSectionOrder {
+	// Узкая панель сохраняет прежний видимый порядок: сначала левая колонка, затем правая.
+	if (layoutMode === 'single-column') {
+		return [normalizePromptDashboardSectionOrder(state).flat()];
+	}
 	if (!Array.isArray(state)) {
 		return createDefaultPromptDashboardSectionOrder();
 	}
@@ -119,6 +136,26 @@ export function normalizePromptDashboardSectionOrder(
 	}
 
 	return normalized;
+}
+
+/** Восстанавливает оба режима из старых общих настроек; проверяется в promptDashboard.test.ts. */
+export function normalizePromptDashboardLayouts(
+	state?: unknown,
+	legacyOrder?: unknown,
+	legacyCollapsedSections?: PromptDashboardCollapsedSections | null,
+): PromptDashboardLayouts {
+	const saved = state && typeof state === 'object' ? state as Partial<PromptDashboardLayouts> : {};
+	/** Создаёт независимые массивы и карты, включая явно сохранённое раскрытие всех виджетов. */
+	const resolveLayout = (mode: PromptDashboardLayoutMode): PromptDashboardLayoutState => ({
+		sectionOrder: normalizePromptDashboardSectionOrder(saved[mode]?.sectionOrder ?? legacyOrder, mode),
+		collapsedSections: normalizePromptDashboardCollapsedSections(
+			saved[mode]?.collapsedSections ?? legacyCollapsedSections,
+		),
+	});
+	return {
+		'single-column': resolveLayout('single-column'),
+		'two-columns': resolveLayout('two-columns'),
+	};
 }
 
 /** Flattens the persisted two-column layout into the visible row-first order. */

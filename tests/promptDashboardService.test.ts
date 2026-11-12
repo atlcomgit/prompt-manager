@@ -2381,107 +2381,159 @@ test('PromptDashboardService first parallel widget refresh marks only the parall
 	service.dispose();
 });
 
-test('PromptDashboardService display refresh skips collapsed parallel branches until that section is reopened', async () => {
-	let affectedFileCountCalls = 0;
-	let revisionCountCalls = 0;
-	const workspaceFolders = new Map([
-		['api', '/workspace/api'],
-	]);
-	const service = new PromptDashboardService(
-		{
-			listPrompts: async () => [],
-			getDailyTime: async () => ({}),
-			getDailyTimeTotalInRange: () => 0,
-			readAgentProgress: async () => undefined,
-		} as any,
-		{
-			getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
-			getWorkspaceFolderPaths: () => workspaceFolders,
-		} as any,
-		{
-			getGitOverlaySnapshot: async (
-				_paths: Map<string, string>,
-				projectNames: string[],
-			) => ({
-				trackedBranches: ['main'],
-				projects: projectNames.map(project => createSnapshotProject(project, {
-					currentBranch: 'feature/task-107',
-					review: {
-						remote: {
-							provider: 'github',
-							host: 'github.com',
-							owner: 'octo',
-							repo: project,
-							remoteName: 'origin',
-							cliAvailable: true,
-							cliCommand: 'gh',
-						},
-						request: {
-							id: 23,
-							number: 23,
-							state: 'open',
-							title: 'Visible review widget',
-							url: 'https://example.test/pull/23',
-							createdAt: '2026-04-29T09:00:00.000Z',
-							updatedAt: '2026-04-29T10:00:00.000Z',
-							sourceBranch: 'feature/task-107',
-							targetBranch: 'main',
-						},
-						error: '',
-						setupAction: null,
-						titlePrefix: 'Task',
-						unsupportedReason: null,
-					},
-					recentCommits: [{
-						sha: 'api-sha',
-						shortSha: 'api-sha',
-						subject: 'Commit api',
-						author: 'Dev',
-						committedAt: '2026-04-29T10:00:00.000Z',
-						refNames: [],
-					}],
-					cleanupBranches: [{
-						name: 'feature/parallel-api',
-						kind: 'remote',
-						ahead: 2,
-						behind: 0,
-						lastCommit: null,
-					}],
-				})),
-			}),
-			getGitOverlayProjectPipelineStatus: async () => null,
-			getGitOverlayParallelBranchAffectedFileCount: async () => {
-				affectedFileCountCalls += 1;
-				return 3;
-			},
-			getGitOverlayParallelBranchRevisionCounts: async () => {
-				revisionCountCalls += 1;
-				return { ahead: 2, behind: 0 };
-			},
-			getGitOverlayParallelBranchSummaries: async () => [],
-			getCommitChangedFiles: async () => [],
-		} as any,
-		{
-			analyzePromptDashboardReview: async () => 'cached analysis',
-		} as any,
-	);
+/** Проверяет раскрытие секции с локальным, общим кешем и уже начавшейся загрузкой старого профиля. */
+for (const cacheSource of ['scope', 'shared', 'in-flight'] as const) {
+	test(`PromptDashboardService loads newly visible sections from ${cacheSource} cache`, async () => {
+		let affectedFileCountCalls = 0;
+		let revisionCountCalls = 0;
+		// Управляем завершением Git-запроса без таймеров, чтобы воспроизвести смену профиля во время загрузки.
+		let pendingGit: Promise<void> | undefined;
+		let onGitStarted: (() => void) | undefined;
+		const workspaceFolders = new Map([
+			['api', '/workspace/api'],
+		]);
+		const service = new PromptDashboardService(
+			{
+				listPrompts: async () => [],
+				getDailyTime: async () => ({}),
+				getDailyTimeTotalInRange: () => 0,
+				readAgentProgress: async () => undefined,
+			} as any,
+			{
+				getWorkspaceFolders: () => Array.from(workspaceFolders.keys()),
+				getWorkspaceFolderPaths: () => workspaceFolders,
+			} as any,
+			{
+				getGitOverlaySnapshot: async (
+					_paths: Map<string, string>,
+					projectNames: string[],
+				) => {
+					onGitStarted?.();
+					await pendingGit;
+					return {
+						trackedBranches: ['main'],
+						projects: projectNames.map(project => createSnapshotProject(project, {
+							currentBranch: 'feature/task-107',
+							review: {
+								remote: {
+									provider: 'github',
+									host: 'github.com',
+									owner: 'octo',
+									repo: project,
+									remoteName: 'origin',
+									cliAvailable: true,
+									cliCommand: 'gh',
+								},
+								request: {
+									id: 23,
+									number: 23,
+									state: 'open',
+									title: 'Visible review widget',
+									url: 'https://example.test/pull/23',
+									createdAt: '2026-04-29T09:00:00.000Z',
+									updatedAt: '2026-04-29T10:00:00.000Z',
+									sourceBranch: 'feature/task-107',
+									targetBranch: 'main',
+								},
+								error: '',
+								setupAction: null,
+								titlePrefix: 'Task',
+								unsupportedReason: null,
+							},
+							recentCommits: [{
+								sha: 'api-sha',
+								shortSha: 'api-sha',
+								subject: 'Commit api',
+								author: 'Dev',
+								committedAt: '2026-04-29T10:00:00.000Z',
+								refNames: [],
+							}],
+							cleanupBranches: [{
+								name: 'feature/parallel-api',
+								kind: 'remote',
+								ahead: 2,
+								behind: 0,
+								lastCommit: null,
+							}],
+						})),
+					};
+				},
+				getGitOverlayProjectPipelineStatus: async () => null,
+				getGitOverlayParallelBranchAffectedFileCount: async () => {
+					affectedFileCountCalls += 1;
+					return 3;
+				},
+				getGitOverlayParallelBranchRevisionCounts: async () => {
+					revisionCountCalls += 1;
+					return { ahead: 2, behind: 0 };
+				},
+				getGitOverlayParallelBranchSummaries: async () => [],
+				getCommitChangedFiles: async () => [],
+			} as any,
+			{
+				analyzePromptDashboardReview: async () => 'cached analysis',
+			} as any,
+		);
 
-	service.setCollapsedSections({ parallelBranches: true });
-	const widget = await service.refreshProjectsWidget(
-		createPrompt({ projects: ['api'], branch: 'feature/task-107', trackedBranch: 'main', trackedBranchesByProject: { api: 'main' } }),
-		undefined,
-		undefined,
-		'display',
-	) as any;
-	const project = widget.data.projects[0];
+		// Оба профиля используют один Git scope, но раскрывают разные секции.
+		const prompt = createPrompt({ projects: ['api'], trackedBranchesByProject: { api: 'main' } });
+		service.setCollapsedSections({ parallelBranches: true });
+		const widget = await service.refreshProjectsWidget(
+			prompt,
+			undefined,
+			undefined,
+			'display',
+		) as any;
+		const project = widget.data.projects[0];
 
-	assert.equal(affectedFileCountCalls, 0);
-	assert.equal(revisionCountCalls, 0);
-	assert.equal(project.parallelBranches.length, 0);
-	assert.equal(widget.data.loadedSections.includes('parallelBranches'), false);
-	assert.deepEqual(widget.data.loadedSections, ['projectBranches', 'reviewRequests', 'projectCommits']);
-	service.dispose();
-});
+		assert.equal(affectedFileCountCalls, 0);
+		assert.equal(revisionCountCalls, 0);
+		assert.equal(project.parallelBranches.length, 0);
+		assert.equal(widget.data.loadedSections.includes('parallelBranches'), false);
+		assert.deepEqual(widget.data.loadedSections, ['projectBranches', 'reviewRequests', 'projectCommits']);
+		// Повторяем обычный путь автообновления без force, при необходимости через общий кеш другого промпта.
+		const nextPrompt = cacheSource === 'shared'
+			? { ...prompt, id: 'other-task', promptUuid: 'other-uuid' } : prompt;
+		const refreshAccess = service as unknown as {
+			createScope: (value: Prompt) => import('../src/types/promptDashboard.js').PromptDashboardScope;
+			cancelScheduledAutoRefresh: (reason: string) => void;
+			refreshWidget: (scope: import('../src/types/promptDashboard.js').PromptDashboardScope,
+				widget: 'projects', postMessage: undefined, options: { prompt: Prompt; projectsMode: 'display' }) => Promise<void>;
+		};
+		let releaseGit = () => {};
+		try {
+			let hiddenRefresh: ReturnType<typeof service.refreshProjectsWidget> | undefined;
+			if (cacheSource === 'in-flight') {
+				const started = new Promise<void>(resolve => { onGitStarted = resolve; });
+				pendingGit = new Promise<void>(resolve => { releaseGit = resolve; });
+				hiddenRefresh = service.refreshProjectsWidget(prompt);
+				await started;
+			}
+			service.setCollapsedSections({});
+			service.getSnapshot(nextPrompt);
+			refreshAccess.cancelScheduledAutoRefresh('test-controls-refresh');
+			const scope = refreshAccess.createScope(nextPrompt);
+			const visibleRefresh = refreshAccess.refreshWidget(
+				scope, 'projects', undefined, { prompt: nextPrompt, projectsMode: 'display' },
+			);
+			pendingGit = undefined;
+			releaseGit();
+			await hiddenRefresh;
+			await visibleRefresh;
+			const loaded = service.getSnapshot(nextPrompt).projects.data;
+			assert.ok(loaded?.loadedSections?.includes('parallelBranches'));
+			assert.equal(loaded?.projects[0].parallelBranches.length, 1);
+			assert.equal(affectedFileCountCalls, 1);
+			assert.equal(revisionCountCalls, 1);
+			// Заполненный свежий кеш продолжает переиспользоваться без повторных Git-запросов.
+			await refreshAccess.refreshWidget(scope, 'projects', undefined, { prompt: nextPrompt, projectsMode: 'display' });
+			assert.equal(affectedFileCountCalls, 1);
+		} finally {
+			releaseGit();
+			service.dispose();
+		}
+	});
+}
 
 test('PromptDashboardService analyzeParallelReview loads pipeline enrichment on demand', async () => {
 	let pipelineCalls = 0;

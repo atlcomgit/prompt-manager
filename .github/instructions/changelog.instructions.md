@@ -1,3 +1,31 @@
+## Без номера: Независимые настройки режимов панели виджетов
+
+- Дата: 2026-11-12.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: порядок и сворачивание виджетов сохраняются отдельно для одной и двух колонок.
+  Переключение ширины и повторное открытие редактора восстанавливают соответствующий профиль.
+- Ключевые моменты: прежние настройки используются как исходные для обоих режимов;
+  единая очередь сохранения не теряет изменения разных профилей, фоновые обновления учитывают активный режим.
+  Неполный кеш раскрытых секций дополняется; пустые колонки сохраняют положение и принимают перенос.
+- Файлы:
+    CHANGELOG.md
+    README.md
+    src/providers/editorPanelManager.ts
+    src/services/promptDashboardService.ts
+    src/services/stateService.ts
+    src/types/messages.ts
+    src/types/promptDashboard.ts
+    src/utils/promptDashboard.ts
+    src/webview/editor/EditorApp.tsx
+    src/webview/editor/components/PromptDashboard.tsx
+    tests/editorApp.test.tsx
+    tests/editorPanelManager.test.ts
+    tests/promptDashboard.test.ts
+    tests/promptDashboardComponent.test.tsx
+    tests/promptDashboardService.test.ts
+    tests/stateService.test.ts
+
 ## Без номера: Восстановление перемещения виджетов на странице промпта
 
 - Дата: 2026-11-10.

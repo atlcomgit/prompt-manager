@@ -873,3 +873,21 @@ test('shouldPreserveLocalReportOnSave keeps equal saved report only while the in
 		}), true);
 	});
 });
+
+/** Перезагрузка редактора предпочитает сохранённые host-профили устаревшему состоянию webview. */
+test('resolveInitialPromptDashboardLayouts restores both profiles from host and falls back to webview', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { resolveInitialPromptDashboardLayouts } = await import('../src/webview/editor/EditorApp.js');
+		const host = {
+			'single-column': { sectionOrder: [['todos', 'status']], collapsedSections: { status: true } },
+			'two-columns': { sectionOrder: [['activity'], ['status']], collapsedSections: {} },
+		};
+		const retained = { 'single-column': { collapsedSections: { activity: true } } };
+		const layouts = resolveInitialPromptDashboardLayouts(host, retained);
+		assert.equal(layouts['single-column'].sectionOrder[0][0], 'todos');
+		assert.deepEqual(layouts['single-column'].collapsedSections, { status: true });
+		assert.deepEqual(layouts['two-columns'].collapsedSections, {});
+		assert.deepEqual(resolveInitialPromptDashboardLayouts(undefined, retained)['single-column'].collapsedSections,
+			{ activity: true });
+	});
+});

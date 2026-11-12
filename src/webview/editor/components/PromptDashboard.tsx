@@ -22,6 +22,7 @@ import type {
 import type {
 	PromptDashboardAnalysisState,
 	PromptDashboardCollapsedSections,
+	PromptDashboardLayoutMode,
 	PromptDashboardLoadStatus,
 	PromptDashboardProjectSummary,
 	PromptDashboardRecentCommit,
@@ -42,6 +43,8 @@ import {
 	normalizePromptDashboardSectionOrder,
 } from '../../../types/promptDashboard.js';
 import {
+	PROMPT_DASHBOARD_COLUMN_GAP_PX,
+	resolvePromptDashboardLayoutMode,
 	buildPromptDashboardDockerComposeBusyAction,
 	buildPromptDashboardDockerContainerBusyAction,
 	buildPromptDashboardDockerWorkspaceBusyAction,
@@ -88,6 +91,9 @@ interface PromptDashboardProps {
 	collapsedSections?: PromptDashboardCollapsedSections;
 	sectionOrder?: PromptDashboardSectionOrder;
 	mode: 'full' | 'compact';
+	/** Профиль измеренной ширины сетки и уведомление о его смене. */
+	layoutMode?: PromptDashboardLayoutMode;
+	onLayoutModeChange?: (mode: PromptDashboardLayoutMode) => void;
 	showGitFlowAction?: boolean;
 	onRefresh: () => void;
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void;
@@ -588,10 +594,16 @@ type DragPlacement = 'before' | 'after';
 
 const DASHBOARD_POINTER_DRAG_THRESHOLD_PX = 4;
 
-interface DashboardDropIndicator {
+/** Место вставки рядом с карточкой либо в пустую колонку с сохранённым индексом. */
+type DashboardDropIndicator = {
 	section: PromptDashboardSectionKey;
 	placement: DragPlacement;
-}
+	columnIndex?: never;
+} | {
+	section?: never;
+	placement: 'before';
+	columnIndex: number;
+};
 
 interface PromptDashboardSectionBounds {
 	section: PromptDashboardSectionKey;
@@ -599,9 +611,14 @@ interface PromptDashboardSectionBounds {
 	bottom: number;
 }
 
+/** Геометрия колонки для поиска цели переноса, включая колонку без карточек. */
 interface PromptDashboardColumnBounds {
 	left: number;
 	right: number;
+	/** Границы и индекс нужны для колонки, в которой ещё нет карточек. */
+	top?: number;
+	bottom?: number;
+	columnIndex?: number;
 	sections: PromptDashboardSectionBounds[];
 }
 
@@ -632,6 +649,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	collapsedSections = createDefaultPromptDashboardCollapsedSections(),
 	sectionOrder = createDefaultPromptDashboardSectionOrder(),
 	mode,
+	layoutMode = 'two-columns',
+	onLayoutModeChange,
 	showGitFlowAction = false,
 	onRefresh,
 	onRefreshWidget,
@@ -678,6 +697,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const pointerDragStateRef = useRef<DashboardPointerDragState | null>(null);
 	const pointerDragCleanupRef = useRef<(() => void) | null>(null);
 	const railRef = useRef<HTMLElement | null>(null);
+	/** Измеряем сетку без padding и полосы прокрутки панели. */
+	const widgetGridRef = useRef<HTMLDivElement | null>(null);
 	const railScrollSnapshotRef = useRef<DashboardRailScrollSnapshot | null>(null);
 	const railScrollRestoreFrameRef = useRef<number | null>(null);
 	const railScrollRestoreTimerRef = useRef<number | null>(null);
@@ -689,8 +710,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		[collapsedSections],
 	);
 	const normalizedSectionOrder = useMemo(
-		() => normalizePromptDashboardSectionOrder(sectionOrder),
-		[sectionOrder],
+		() => normalizePromptDashboardSectionOrder(sectionOrder, layoutMode),
+		[sectionOrder, layoutMode],
 	);
 	const openingFileTokenRef = useRef(0);
 	const projectsData = snapshot?.projects.data;
@@ -1002,6 +1023,46 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		clearPendingRailScrollRestore();
 	}, [clearPendingRailScrollRestore]);
 
+	// Переключаем профиль при изменении полезной ширины, в том числе после скрытия и повторного открытия.
+	useEffect(() => {
+		const grid = widgetGridRef.current;
+		if (mode !== 'full' || !grid || !onLayoutModeChange) {
+			return;
+		}
+		let lastMode: PromptDashboardLayoutMode | undefined;
+		/** Сообщает только изменения режима, игнорируя скрытую сетку нулевой ширины. */
+		const measure = () => {
+			const width = grid.getBoundingClientRect().width;
+			if (width <= 0) {
+				return;
+			}
+			const nextMode = resolvePromptDashboardLayoutMode(width);
+			if (nextMode !== lastMode) {
+				lastMode = nextMode;
+				onLayoutModeChange(nextMode);
+			}
+		};
+		measure();
+		if (typeof ResizeObserver !== 'undefined') {
+			const observer = new ResizeObserver(measure);
+			observer.observe(grid);
+			return () => observer.disconnect();
+		}
+		window.addEventListener('resize', measure);
+		return () => window.removeEventListener('resize', measure);
+	}, [mode, onLayoutModeChange]);
+
+	// Смена ширины отменяет незавершённый перенос, чтобы он не записал порядок соседнего режима.
+	useEffect(() => {
+		pointerDragCleanupRef.current?.();
+		pointerDragCleanupRef.current = null;
+		pointerDragStateRef.current = null;
+		draggedSectionRef.current = null;
+		dropIndicatorRef.current = null;
+		setDraggedSection(null);
+		setDropIndicator(null);
+	}, [layoutMode]);
+
 	// Track whether the Docker section is currently inside the dashboard viewport.
 	useEffect(() => {
 		if (mode !== 'full') {
@@ -1168,7 +1229,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	// Store the current insertion slot synchronously so drop handlers do not race React state.
 	const updateDropIndicator = (nextIndicator: DashboardDropIndicator | null) => {
 		dropIndicatorRef.current = nextIndicator;
-		setDropIndicator(previous => previous?.section === nextIndicator?.section && previous?.placement === nextIndicator?.placement
+		setDropIndicator(previous => previous?.section === nextIndicator?.section
+			&& previous?.columnIndex === nextIndicator?.columnIndex && previous?.placement === nextIndicator?.placement
 			? previous
 			: nextIndicator);
 	};
@@ -1229,7 +1291,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			return null;
 		}
 		const sectionBounds = buildSectionBounds(event.currentTarget);
-		return resolvePromptDashboardColumnDropIndicator(activeDraggedSection, event.clientY, sectionBounds);
+		return resolvePromptDashboardColumnDropIndicator(
+			activeDraggedSection, event.clientY, sectionBounds, Number(event.currentTarget.dataset.pmDashboardColumn),
+		);
 	};
 
 	// Read current DOM column bounds for pointer-based dashboard reordering.
@@ -1244,6 +1308,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				return {
 					left: rect.left,
 					right: rect.right,
+					top: rect.top,
+					bottom: rect.bottom,
+					columnIndex: Number(element.dataset.pmDashboardColumn),
 					sections: buildSectionBounds(element),
 				};
 			});
@@ -1259,7 +1326,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		);
 	};
 
-	// Persist the shared section order once the current drag operation has a valid destination.
+	// Сохраняем порядок текущего профиля после переноса к карточке или в пустую колонку.
 	const applySectionDropIndicator = (
 		activeDraggedSection: PromptDashboardSectionKey | null,
 		indicator: DashboardDropIndicator | null,
@@ -1271,7 +1338,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		const nextOrder = reorderPromptDashboardSections(
 			normalizedSectionOrder,
 			activeDraggedSection,
-			indicator.section,
+			indicator.section ?? indicator.columnIndex,
 			indicator.placement,
 		);
 		if (!arePromptDashboardSectionOrdersEqual(normalizedSectionOrder, nextOrder)) {
@@ -1324,7 +1391,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		if (relatedTarget && event.currentTarget.contains(relatedTarget)) {
 			return;
 		}
-		if (dropIndicatorRef.current && columnSections.includes(dropIndicatorRef.current.section)) {
+		const indicator = dropIndicatorRef.current;
+		if (indicator && (indicator.section ? columnSections.includes(indicator.section)
+			: indicator.columnIndex === Number(event.currentTarget.dataset.pmDashboardColumn))) {
 			updateDropIndicator(null);
 		}
 	};
@@ -1529,14 +1598,14 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				),
 			});
 			return entries;
-		}, []))
-		.filter(column => column.length > 0);
+			}, []));
 
 	return (
 		<aside
 			ref={railRef}
 			style={styles.rail}
 			data-pm-prompt-dashboard="true"
+			data-pm-dashboard-layout={layoutMode}
 			onWheel={markRailScrollManualIntent}
 			onPointerDown={markRailScrollManualIntent}
 			onKeyDown={markRailScrollManualIntent}
@@ -1555,16 +1624,21 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				</button>
 			</div>
 
-			<div style={styles.widgetGrid}>
+			<div ref={widgetGridRef} style={{
+				...styles.widgetGrid,
+				gridTemplateColumns: layoutMode === 'single-column' ? 'minmax(0,1fr)' : 'repeat(2,minmax(0,1fr))',
+			}}>
 				{widgetColumns.map((column, columnIndex) => (
 					<div
 						key={`widget-column:${columnIndex}`}
-						style={styles.widgetColumn}
+						style={{ ...styles.widgetColumn, ...(column.length === 0 ? styles.emptyWidgetColumn : null) }}
 						onDragOver={handleSectionColumnDragOver}
 						onDragLeave={(event) => handleSectionColumnDragLeave(event, column.map(item => item.sectionKey))}
 						onDrop={handleSectionColumnDrop}
 						data-pm-dashboard-column={String(columnIndex)}
 					>
+						{dropIndicator?.columnIndex === columnIndex
+							? <div style={styles.sectionDropIndicator} aria-hidden="true" /> : null}
 						{column.map((section, sectionIndex) => (
 							<React.Fragment key={`widget-column:${columnIndex}:section:${sectionIndex}`}>
 								{section.node}
@@ -3633,14 +3707,19 @@ export function subscribePromptDashboardDragEvents(
 	};
 }
 
-/** Resolves the nearest visible drop slot inside one dashboard column. */
+/** Находит место вставки, включая пустую колонку; регрессии — promptDashboardComponent.test.tsx. */
 export function resolvePromptDashboardColumnDropIndicator(
 	activeDraggedSection: PromptDashboardSectionKey | null,
 	clientY: number,
 	sectionBounds: readonly PromptDashboardSectionBounds[],
-): { section: PromptDashboardSectionKey; placement: 'before' | 'after' } | null {
+	columnIndex?: number,
+): DashboardDropIndicator | null {
 	if (!activeDraggedSection) {
 		return null;
+	}
+	// Единственная перетаскиваемая карточка не делает исходную колонку новой целью.
+	if (sectionBounds.length === 0 && columnIndex !== undefined && Number.isInteger(columnIndex) && columnIndex >= 0) {
+		return { columnIndex, placement: 'before' };
 	}
 
 	const orderedBounds = sectionBounds
@@ -3666,18 +3745,22 @@ export function resolvePromptDashboardPointerDropIndicator(
 	clientX: number,
 	clientY: number,
 	columnBounds: readonly PromptDashboardColumnBounds[],
-): { section: PromptDashboardSectionKey; placement: 'before' | 'after' } | null {
+): DashboardDropIndicator | null {
 	if (!activeDraggedSection) {
 		return null;
 	}
 
 	const orderedColumns = columnBounds
-		.map((column) => ({
+		.map((column, index) => ({
 			left: Math.min(column.left, column.right),
 			right: Math.max(column.left, column.right),
+			top: column.top ?? Math.min(...column.sections.map(section => section.top)),
+			bottom: column.bottom ?? Math.max(...column.sections.map(section => section.bottom)),
+			columnIndex: column.columnIndex ?? index,
 			sections: column.sections,
 		}))
-		.filter((column) => Number.isFinite(column.left) && Number.isFinite(column.right) && column.sections.length > 0)
+		.filter((column) => Number.isFinite(column.left) && Number.isFinite(column.right)
+			&& Number.isFinite(column.top) && Number.isFinite(column.bottom))
 		.sort((left, right) => left.left - right.left);
 	if (orderedColumns.length === 0) {
 		return null;
@@ -3690,15 +3773,17 @@ export function resolvePromptDashboardPointerDropIndicator(
 			horizontalDistance: resolvePromptDashboardAxisDistance(clientX, column.left, column.right),
 			verticalDistance: resolvePromptDashboardAxisDistance(
 				clientY,
-				Math.min(...column.sections.map(section => section.top)),
-				Math.max(...column.sections.map(section => section.bottom)),
+				column.top,
+				column.bottom,
 			),
 		}))
 		// Сохраняем выбор по X для соседних колонок разной высоты, а по Y различаем вертикальные группы.
 		.sort((left, right) => left.horizontalDistance - right.horizontalDistance
 			|| left.verticalDistance - right.verticalDistance)[0].column;
 
-	return resolvePromptDashboardColumnDropIndicator(activeDraggedSection, clientY, targetColumn.sections);
+	return resolvePromptDashboardColumnDropIndicator(
+		activeDraggedSection, clientY, targetColumn.sections, targetColumn.columnIndex,
+	);
 }
 
 /** Измеряет расстояние от координаты указателя до диапазона по одной оси. */
@@ -3715,9 +3800,9 @@ function resolvePromptDashboardAxisDistance(position: number, start: number, end
 /** Chooses the drop slot to commit when the direct target cannot describe the intended move. */
 export function resolvePromptDashboardSectionDropCommitIndicator(
 	activeDraggedSection: PromptDashboardSectionKey | null,
-	directIndicator: { section: PromptDashboardSectionKey; placement: 'before' | 'after' } | null,
-	pendingIndicator: { section: PromptDashboardSectionKey; placement: 'before' | 'after' } | null,
-): { section: PromptDashboardSectionKey; placement: 'before' | 'after' } | null {
+	directIndicator: DashboardDropIndicator | null,
+	pendingIndicator: DashboardDropIndicator | null,
+): DashboardDropIndicator | null {
 	if (!activeDraggedSection) {
 		return null;
 	}
@@ -3747,22 +3832,27 @@ function arePromptDashboardSectionOrdersEqual(
 	});
 }
 
-/** Moves one section around the shared ordered dashboard list and keeps missing keys normalized. */
+/** Перемещает карточку к другой карточке или в пустую колонку; проверки — promptDashboardComponent.test.tsx. */
 export function reorderPromptDashboardSections(
 	order: PromptDashboardSectionOrder,
 	draggedSection: PromptDashboardSectionKey,
-	targetSection: PromptDashboardSectionKey,
+	targetSection: PromptDashboardSectionKey | number,
 	placement: DragPlacement,
 ): PromptDashboardSectionOrder {
 	const normalizedOrder = normalizePromptDashboardSectionOrder(order);
 	if (draggedSection === targetSection) {
 		return normalizedOrder;
 	}
+	// Число обозначает только существующую пустую колонку, а не позицию в заполненной.
+	const targetsEmptyColumn = typeof targetSection === 'number';
+	if (targetsEmptyColumn && (!Number.isInteger(targetSection) || normalizedOrder[targetSection]?.length !== 0)) {
+		return normalizedOrder;
+	}
 
 	let sourceColumnIndex = -1;
 	let sourceRowIndex = -1;
-	let targetColumnIndex = -1;
-	let targetRowIndex = -1;
+	let targetColumnIndex = targetsEmptyColumn ? targetSection : -1;
+	let targetRowIndex = targetsEmptyColumn ? 0 : -1;
 	for (let columnIndex = 0; columnIndex < normalizedOrder.length; columnIndex += 1) {
 		for (let rowIndex = 0; rowIndex < normalizedOrder[columnIndex].length; rowIndex += 1) {
 			const section = normalizedOrder[columnIndex][rowIndex];
@@ -6592,11 +6682,10 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '6px',
 		justifyContent: 'center',
 	},
-	// Two stable dashboard columns that avoid row-height gaps while keeping widgets in fixed columns.
+	// Независимые вертикальные колонки; их число задаётся измеренным режимом без общих высот строк.
 	widgetGrid: {
 		display: 'grid',
-		gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,360px),1fr))',
-		gap: '12px',
+		gap: `${PROMPT_DASHBOARD_COLUMN_GAP_PX}px`,
 		alignItems: 'start',
 	},
 	// Vertical stack inside each stable dashboard column.
@@ -6606,6 +6695,11 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '12px',
 		minWidth: 0,
 		alignSelf: 'start',
+	},
+	// Пустая колонка сохраняет место и принимает перенос на всей высоте соседней колонки.
+	emptyWidgetColumn: {
+		minHeight: '80px',
+		alignSelf: 'stretch',
 	},
 	// Wrapper that owns drag-over highlighting around one dashboard card.
 	sectionDragWrapper: {

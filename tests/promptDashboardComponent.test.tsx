@@ -33,6 +33,7 @@ import type {
 	PromptDashboardPromptActivityItem,
 	PromptDashboardSectionKey,
 	PromptDashboardSectionOrder,
+	PromptDashboardLayoutMode,
 	PromptDashboardSnapshot,
 } from '../src/types/promptDashboard.js';
 import type { DockerContainerSummary } from '../src/types/docker.js';
@@ -297,6 +298,7 @@ function renderDashboard(
 		dockerBusyAction?: string | null;
 		collapsedSections?: Record<string, boolean>;
 		sectionOrder?: PromptDashboardSectionOrder;
+		layoutMode?: PromptDashboardLayoutMode;
 		localStorage?: Storage;
 	},
 ): string {
@@ -306,6 +308,7 @@ function renderDashboard(
 		dockerBusyAction: options?.dockerBusyAction ?? null,
 		collapsedSections: options?.collapsedSections,
 		sectionOrder: options?.sectionOrder,
+		layoutMode: options?.layoutMode,
 		mode: 'full',
 		onRefresh: () => { },
 		onRefreshWidget: () => { },
@@ -2003,7 +2006,7 @@ test('isPromptDashboardBranchActionBusy ignores unrelated widget refreshes', () 
 test('PromptDashboard selects current branch first and renders the redesigned file tree', () => {
 	const markup = renderDashboard(createSnapshot([createProject()]));
 
-	assert.match(markup, /display:grid;grid-template-columns:repeat\(auto-fit,minmax\(min\(100%,360px\),1fr\)\);gap:12px;align-items:start/);
+	assert.match(markup, /display:grid;gap:12px;align-items:start;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
 	assert.match(markup, /display:flex;flex-direction:column;gap:12px;min-width:0;align-self:start/);
 	assert.doesNotMatch(markup, /Branch Divergence/);
 	assert.doesNotMatch(markup, /Pipelines/);
@@ -2277,6 +2280,39 @@ test('PromptDashboard renders sections in the shared custom order', () => {
 	assert.match(markup, /aria-label="Перетащить виджет: AI review"/);
 	assert.match(markup, /data-pm-dashboard-section="aiAnalysis"/);
 	assert.match(markup, /data-pm-dashboard-section="projectBranches"/);
+});
+
+/** Проверяет сохранение стороны пустой колонки и перенос обратно без потери карточек. */
+test('PromptDashboard preserves empty columns and accepts pointer and native drops into them', () => {
+	const sections: PromptDashboardSectionKey[] = [
+		'status', 'projectBranches', 'parallelBranches', 'dockerContainers', 'aiAnalysis',
+		'activity', 'reviewRequests', 'projectCommits', 'todos',
+	];
+	for (const emptyIndex of [0, 1]) {
+		const order: PromptDashboardSectionOrder = emptyIndex === 0 ? [[], sections] : [sections, []];
+		const markup = renderDashboard(createSnapshot([createProject()]), { sectionOrder: order });
+		assert.match(markup, /data-pm-dashboard-column="0"/);
+		assert.match(markup, /data-pm-dashboard-column="1"/);
+		// Пустая колонка остаётся именно на своей стороне, а не исчезает из DOM.
+		assert.equal(markup.indexOf('data-pm-dashboard-column="1"') < markup.indexOf('data-pm-dashboard-section="status"'),
+			emptyIndex === 0);
+		const indicator = { columnIndex: emptyIndex, placement: 'before' as const };
+		assert.deepEqual(resolvePromptDashboardColumnDropIndicator('status', 100, [], emptyIndex), indicator);
+		assert.deepEqual(resolvePromptDashboardPointerDropIndicator('status', emptyIndex * 400 + 20, 100,
+			order.map((column, columnIndex) => ({
+				columnIndex, left: columnIndex * 400, right: columnIndex * 400 + 380, top: 0, bottom: 400,
+				sections: column.map((section, row) => ({ section, top: row * 40, bottom: row * 40 + 30 })),
+			}))), indicator);
+		assert.deepEqual(resolvePromptDashboardSectionDropCommitIndicator('status', indicator, null), indicator);
+		const reordered = reorderPromptDashboardSections(order, 'status', emptyIndex, 'before');
+		assert.deepEqual(reordered[emptyIndex], ['status']);
+		assert.deepEqual(reordered[1 - emptyIndex], sections.filter(section => section !== 'status'));
+		assert.equal(new Set(reordered.flat()).size, sections.length);
+		// Некорректный индекс и заполненная колонка не удаляют исходную карточку.
+		for (const invalidTarget of [-1, 2, 0.5, 1 - emptyIndex]) {
+			assert.deepEqual(reorderPromptDashboardSections(order, 'status', invalidTarget, 'before'), order);
+		}
+	}
 });
 
 test('reorderPromptDashboardSections moves a dragged section around the target and normalizes missing sections', () => {
@@ -3163,4 +3199,19 @@ test('PromptDashboard shows a quick preliminary summary while AI review is still
 	assert.match(markup, /Показываем быстрый локальный вывод/);
 	assert.match(markup, /Быстрый локальный вывод уже готов/);
 	assert.doesNotMatch(markup, /AI проверяет ветки и изменения/);
+});
+
+/** Одноколоночный режим выводит единую последовательность и использует свою карту сворачивания. */
+test('PromptDashboard renders one ordered column with layout-specific collapsed sections', () => {
+	const markup = renderDashboard(createSnapshot([createProject()]), {
+		layoutMode: 'single-column',
+		sectionOrder: [['activity', 'status', 'todos']],
+		collapsedSections: { status: true },
+	});
+	assert.equal((markup.match(/data-pm-dashboard-column=/g) || []).length, 1);
+	assert.match(markup, /data-pm-dashboard-layout="single-column"/);
+	assert.match(markup, /grid-template-columns:minmax\(0,1fr\)/);
+	assert.ok(markup.indexOf('data-pm-dashboard-section="activity"') < markup.indexOf('data-pm-dashboard-section="status"'));
+	assert.doesNotMatch(markup, /aria-label="Обновить виджет: Статус промпта"/);
+	assert.match(markup, /aria-label="Обновить виджет: Активные промпты"/);
 });

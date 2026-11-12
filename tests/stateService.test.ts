@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
+import { normalizePromptDashboardLayouts } from '../src/types/promptDashboard.js';
 import { createDefaultEditorPromptViewState } from '../src/types/prompt.js';
 
 const originalLoad = (Module as any)._load;
@@ -228,7 +229,7 @@ test('StateService saves shared dashboard collapsed sections through a serialize
 		status: true,
 		parallelBranches: true,
 	});
-	assert.deepEqual(workspaceState.store.get('promptManager.dashboardCollapsedSections'), {
+	assert.deepEqual(service.getPromptDashboardLayouts()['two-columns'].collapsedSections, {
 		status: true,
 		parallelBranches: true,
 	});
@@ -272,7 +273,7 @@ test('StateService saves shared dashboard section order through a serialized wor
 		['projectBranches', 'activity', 'parallelBranches', 'dockerContainers'],
 		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis', 'todos'],
 	]);
-	assert.deepEqual(workspaceState.store.get('promptManager.dashboardSectionOrder'), [
+	assert.deepEqual(service.getPromptDashboardLayouts()['two-columns'].sectionOrder, [
 		['projectBranches', 'activity', 'parallelBranches', 'dockerContainers'],
 		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis', 'todos'],
 	]);
@@ -506,4 +507,54 @@ test('StateService completion snapshot selects the newest tracked session with a
 		hasPendingEdits: false,
 		dbPath: '/tmp/workspaceStorage/current/state.vscdb',
 	});
+});
+
+/** Смена режима и перезапуск сохраняют отдельные порядок и сворачивание, включая пустую карту. */
+test('StateService keeps dashboard layouts isolated across queued saves and restart', async () => {
+	const { StateService } = await importStateService();
+	const legacyOrder = [['todos', 'status'], ['activity']];
+	const workspaceState = createWorkspaceStateMock({
+		'promptManager.dashboardSectionOrder': legacyOrder,
+		'promptManager.dashboardCollapsedSections': { activity: true },
+	});
+	const service = new StateService({ workspaceState } as any);
+	const initial = normalizePromptDashboardLayouts(undefined, legacyOrder, { activity: true });
+	assert.deepEqual(service.getPromptDashboardLayouts(), initial);
+
+	// Несколько быстрых действий в разных режимах не должны перезаписывать соседние настройки.
+	await Promise.all([
+		service.savePromptDashboardSectionOrder([['aiAnalysis', 'todos', 'status']], 'single-column'),
+		service.savePromptDashboardCollapsedSections({}, 'single-column'),
+		service.savePromptDashboardSectionOrder([['activity'], ['todos', 'aiAnalysis']], 'two-columns'),
+		service.savePromptDashboardCollapsedSections({ dockerContainers: true }, 'two-columns'),
+	]);
+	const reopened = new StateService({ workspaceState } as any);
+	assert.deepEqual(reopened.getPromptDashboardLayouts(), service.getPromptDashboardLayouts());
+	assert.deepEqual(reopened.getPromptDashboardCollapsedSections('single-column'), {});
+	assert.deepEqual(reopened.getPromptDashboardCollapsedSections('two-columns'), { dockerContainers: true });
+	assert.deepEqual(reopened.getPromptDashboardSectionOrder('single-column')[0].slice(0, 3),
+		['aiAnalysis', 'todos', 'status']);
+	assert.equal(reopened.getPromptDashboardSectionOrder('single-column').length, 1);
+	assert.equal(reopened.getPromptDashboardSectionOrder('two-columns').length, 2);
+	assert.equal(reopened.getPromptDashboardSectionOrder('two-columns')[0][0], 'activity');
+	assert.deepEqual(workspaceState.store.get('promptManager.dashboardSectionOrder'), legacyOrder);
+});
+
+/** Ошибка одной записи не блокирует следующие сохранения обоих режимов. */
+test('StateService recovers dashboard layout saves after a failed write', async () => {
+	const { StateService } = await importStateService();
+	let first = true;
+	const workspaceState = createWorkspaceStateMock({}, {
+		update: async (store, key, value) => {
+			if (first) {
+				first = false;
+				throw new Error('write failed');
+			}
+			store.set(key, value);
+		},
+	});
+	const service = new StateService({ workspaceState } as any);
+	await assert.rejects(service.savePromptDashboardCollapsedSections({ status: true }, 'single-column'));
+	await service.savePromptDashboardCollapsedSections({ activity: true }, 'two-columns');
+	assert.deepEqual(service.getPromptDashboardCollapsedSections('two-columns'), { activity: true });
 });

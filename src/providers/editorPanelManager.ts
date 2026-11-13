@@ -84,6 +84,7 @@ import {
 } from '../utils/chatContextFiles.js';
 import { buildChatMessage } from '../utils/chatMessageBuilder.js';
 import { splitCodexPasteText } from '../utils/codexClipboard.js';
+import { buildCodexRequestFileContent, CODEX_REQUEST_FILE_NAME } from '../utils/codexRequestFile.js';
 import type { ChatMessageContext } from '../utils/chatMessageBuilder.js';
 import {
 	applyGitOverlayOtherProjectsExcludedPaths,
@@ -160,6 +161,12 @@ const EDITOR_PANEL_VIEW_TYPE = 'promptManager.editor';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
 const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 600;
+/** Предел ожидания записи в буфер обмена браузера при запуске OpenAI Codex, мс. */
+const CODEX_WEB_CLIPBOARD_TIMEOUT_MS = 2000;
+/** Срок загрузки панели Codex в браузере, в течение которого запоздавший «Новый чат» сбрасывает файлы, мс. */
+const CODEX_WEB_PANEL_LOAD_WINDOW_MS = 15000;
+/** Интервал повторного прикрепления файлов, пока панель Codex может ещё загружаться, мс. */
+const CODEX_WEB_ATTACH_RETRY_INTERVAL_MS = 3000;
 /** Объединяет поток файловых изменений в одно обновление за пять секунд. */
 const PROMPT_DASHBOARD_FILE_AUTO_REFRESH_DELAY_MS = 5000;
 /** Ограничивает частоту фоновых Git-расчётов даже при смешанных событиях. */
@@ -263,6 +270,11 @@ export class EditorPanelManager {
 	private pendingRestorePrompt: Prompt | null = null;
 	private pendingRestoreIsDirty = false;
 	private readonly hooksOutput = getPromptManagerOutputChannel();
+	/** После первого запуска в браузере панель Codex считается загруженной до конца сеанса расширения. */
+	private codexWebPanelLoaded = false;
+	/** Срок и интервал повторного прикрепления файлов Codex; отдельные поля позволяют сокращать ожидание в тестах. */
+	private codexWebPanelLoadWindowMs = CODEX_WEB_PANEL_LOAD_WINDOW_MS;
+	private codexWebAttachRetryIntervalMs = CODEX_WEB_ATTACH_RETRY_INTERVAL_MS;
 	private readonly reportDebugOutput = getPromptManagerOutputChannel();
 	private contentEditorByPanelKey = new Map<string, { uri: vscode.Uri; lastSyncedContent: string }>();
 	private panelKeyByContentEditorUri = new Map<string, string>();
@@ -2585,9 +2597,9 @@ export class EditorPanelManager {
 		return 'xdotool';
 	}
 
-	/** Сообщает, поддерживает ли текущая платформа Xdotool-автоматизацию. */
+	/** Клавиши X11 доступны только локальному desktop; тесты: editorPanelManager.test.ts. */
 	private isXdotoolPlatformSupported(): boolean {
-		return process.platform === 'linux';
+		return process.platform === 'linux' && vscode.env.uiKind !== vscode.UIKind.Web && !vscode.env.remoteName;
 	}
 
 	/** Проверяет, принадлежит ли PID окна процессу VS Code или совместимой сборке. */
@@ -2608,7 +2620,7 @@ export class EditorPanelManager {
 		const isPlatformSupported = this.isXdotoolPlatformSupported();
 		if (!isPlatformSupported || !process.env.DISPLAY) {
 			const reason = !isPlatformSupported
-				? 'requires Linux'
+				? 'requires a local Linux desktop window; browser and remote windows are not supported'
 				: 'requires DISPLAY; xdotool does not work in a pure Wayland session';
 			this.hooksOutput.appendLine(`[chat-start] ${targetLabel} xdotool skipped: ${reason}.`);
 			return { ok: false, reason };
@@ -2699,6 +2711,10 @@ export class EditorPanelManager {
 	): Promise<XdotoolSubmitResult> {
 		if (!this.isPromptXdotoolAutoStartEnabled(prompt)) {
 			return { ok: false, reason: 'xdotool auto-send is disabled' };
+		}
+		// На удалённом хосте ожидание локального фокуса и Enter заведомо не относятся к клиенту.
+		if (!this.isXdotoolPlatformSupported()) {
+			return { ok: false, reason: 'xdotool requires a local Linux desktop window' };
 		}
 
 		await this.focusKiloChatInput(commands);
@@ -2834,6 +2850,10 @@ export class EditorPanelManager {
 		prompt: Pick<Prompt, 'autoStartChatWithXdotool'>,
 		text: string,
 	): Promise<XdotoolSubmitResult> {
+		// Не трогаем локальную панель сервера при запуске из браузера или другого удалённого клиента.
+		if (!this.isXdotoolPlatformSupported()) {
+			return { ok: false, stage: 'focus', reason: 'xdotool requires a local Linux desktop window' };
+		}
 		const focused = await this.focusCodexComposerWithXdotool();
 		if (!focused.ok) {
 			return { ...focused, stage: 'focus' };
@@ -2911,12 +2931,103 @@ export class EditorPanelManager {
 		}
 	}
 
-	/** Вставляет текст штатной командой webview VS Code, в том числе в native Wayland. */
+	/**
+	 * Записывает текст в буфер обмена и ждёт подтверждения не дольше заданного срока.
+	 * Возвращает false при отказе или истечении срока; запоздавшая запись не отменяется.
+	 * Тесты: editorPanelManager.test.ts.
+	 */
+	private writeClipboardTextWithTimeout(text: string, timeoutMs: number): Promise<boolean> {
+		return new Promise<boolean>(resolve => {
+			const timer = setTimeout(() => resolve(false), timeoutMs);
+			timer.unref?.();
+			Promise.resolve(vscode.env.clipboard.writeText(text)).then(
+				() => {
+					clearTimeout(timer);
+					resolve(true);
+				},
+				error => {
+					clearTimeout(timer);
+					this.hooksOutput.appendLine(
+						`[chat-start] Codex clipboard write failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+					resolve(false);
+				},
+			);
+		});
+	}
+
+	/**
+	 * Записывает полный текст запроса в файл папки промпта для прикрепления к чату Codex.
+	 * Возвращает undefined, когда прикрепить файл нельзя или запись не удалась. Тесты: editorPanelManager.test.ts.
+	 */
+	private async writeCodexRequestFile(
+		prompt: Pick<Prompt, 'id'>,
+		text: string,
+		commands: string[],
+	): Promise<vscode.Uri | undefined> {
+		const promptId = (prompt.id || '').trim();
+		// У несохранённого промпта нет собственной папки, а без команды Codex файл прикрепить нельзя.
+		if (!promptId || promptId === '__new__' || !commands.includes('chatgpt.addFileToThread')) {
+			return undefined;
+		}
+
+		try {
+			const fileUri = vscode.Uri.file(
+				path.join(this.storageService.getPromptDirectoryPath(promptId), CODEX_REQUEST_FILE_NAME),
+			);
+			await vscode.workspace.fs.writeFile(
+				fileUri,
+				Buffer.from(buildCodexRequestFileContent(text, vscode.env.language), 'utf8'),
+			);
+			return fileUri;
+		} catch (error) {
+			this.hooksOutput.appendLine(
+				`[chat-start] Codex request file failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return undefined;
+		}
+	}
+
+	/**
+	 * Прикрепляет файлы к чату Codex публичной командой в заданном порядке; повторный файл Codex не дублирует.
+	 * Отказ файла запроса прекращает проход и возвращает false, файлы контекста прикрепляются по возможности.
+	 * Выполнение команды не подтверждает показ файла в панели. Тесты: editorPanelManager.test.ts.
+	 */
+	private async attachCodexChatFiles(requestFileUri: vscode.Uri | undefined, contextFileUris: vscode.Uri[]): Promise<boolean> {
+		if (requestFileUri) {
+			try {
+				await vscode.commands.executeCommand('chatgpt.addFileToThread', requestFileUri);
+			} catch (error) {
+				this.hooksOutput.appendLine(
+					`[chat-start] Codex request file failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				return false;
+			}
+		}
+		for (const fileUri of contextFileUris) {
+			try {
+				await vscode.commands.executeCommand('chatgpt.addFileToThread', fileUri);
+			} catch {
+				// Файлы контекста необязательны: отказ одного не отменяет запуск.
+			}
+		}
+		return Boolean(requestFileUri);
+	}
+
+	/** Вставляет текст в desktop webview; Web не поддерживает execCommand('paste'). Тесты: editorPanelManager.test.ts. */
 	private async prepareCodexPrompt(
 		prompt: Pick<Prompt, 'autoStartChatWithXdotool'>,
 		text: string,
 		commands: string[],
 	): Promise<XdotoolSubmitResult> {
+		// Команда VS Code возвращает успех до исполнения paste в iframe; в браузере это ложное подтверждение.
+		if (vscode.env.uiKind === vscode.UIKind.Web) {
+			return {
+				ok: false,
+				stage: 'paste',
+				reason: 'браузер не поддерживает программную вставку в поле OpenAI Codex',
+			};
+		}
 		const viewFocusCommand = this.isCodexSecondarySidebarLikely()
 			? 'chatgpt.sidebarSecondaryView.focus'
 			: 'chatgpt.sidebarView.focus';
@@ -2985,8 +3096,8 @@ export class EditorPanelManager {
 			if (insertedWithAddToContext) {
 				await this.focusKiloChatInput(commands);
 			}
-			await vscode.env.clipboard.writeText(fallbackText);
 			if (insertedWithAddToContext) {
+				// Текст уже передан командой Kilo: clipboard RPC через туннель не нужен для запуска.
 				const submittedWithXdotool = await this.maybeSubmitKiloPromptWithXdotool(prompt, commands);
 				if (submittedWithXdotool.ok) {
 					return {
@@ -2998,11 +3109,12 @@ export class EditorPanelManager {
 				return {
 					dispatched: false,
 					message: this.isPromptXdotoolAutoStartEnabled(prompt)
-						? `Kilo Code открыт. Текст задачи вставлен через Add to Context и продублирован в буфер обмена, но xdotool не смог отправить Enter (${submittedWithXdotool.reason || 'unknown error'}). Нажмите Enter в поле чата Kilo Code вручную.`
-						: 'Kilo Code открыт. Текст задачи вставлен через Add to Context и продублирован в буфер обмена. Нажмите Enter в поле чата Kilo Code для отправки.',
+						? `Kilo Code открыт. Текст задачи вставлен через Add to Context, но xdotool не смог отправить Enter (${submittedWithXdotool.reason || 'unknown error'}). Нажмите Enter в поле чата Kilo Code вручную.`
+						: 'Kilo Code открыт. Текст задачи вставлен через Add to Context. Нажмите Enter в поле чата Kilo Code для отправки.',
 				};
 			}
 
+			await vscode.env.clipboard.writeText(fallbackText);
 			return {
 				dispatched: false,
 				message: 'Kilo Code открыт. Автоматическая отправка недоступна в текущей версии Kilo Code, поэтому текст задачи скопирован в буфер обмена. Вставьте его в поле чата Kilo Code и отправьте вручную.',
@@ -3034,17 +3146,29 @@ export class EditorPanelManager {
 				: '';
 		if (!bridgeCommand) {
 			const fallbackText = this.buildExternalClipboardMessage('codex', query, fileUris);
-			await vscode.env.clipboard.writeText(fallbackText);
+			const isWebClient = vscode.env.uiKind === vscode.UIKind.Web;
+			// Браузер без фокуса окна не завершает запись в буфер: Web начинает её до смены фокуса и ждёт ограниченное время,
+			// а результат учитывает только в итоговом сообщении. Desktop ждёт запись, потому что вставляет текст из буфера.
+			const clipboardWrite: Thenable<boolean> = isWebClient
+				? this.writeClipboardTextWithTimeout(fallbackText, CODEX_WEB_CLIPBOARD_TIMEOUT_MS)
+				: vscode.env.clipboard.writeText(fallbackText).then(() => true);
+			if (!isWebClient) {
+				await clipboardWrite;
+			}
+			/** Сообщает о копировании только после подтверждённой записи в буфер обмена. */
+			const describeClipboard = async (copiedText: string): Promise<string> => await clipboardWrite
+				? copiedText
+				: 'Браузер не подтвердил запись текста задачи в буфер обмена: скопируйте его из Prompt Manager вручную.';
 			if (!await this.focusCodex()) {
 				return {
 					dispatched: false,
-					message: 'Не удалось открыть OpenAI Codex. Текст задачи скопирован в буфер обмена для ручной вставки.',
+					message: `Не удалось открыть OpenAI Codex. ${await describeClipboard('Текст задачи скопирован в буфер обмена для ручной вставки.')}`,
 				};
 			}
 			if (!commands.includes('chatgpt.newChat')) {
 				return {
 					dispatched: false,
-					message: 'Текущая версия OpenAI Codex не поддерживает открытие нового чата. Текст задачи скопирован в буфер обмена.',
+					message: `Текущая версия OpenAI Codex не поддерживает открытие нового чата. ${await describeClipboard('Текст задачи скопирован в буфер обмена.')}`,
 				};
 			}
 			try {
@@ -3055,21 +3179,43 @@ export class EditorPanelManager {
 				);
 				return {
 					dispatched: false,
-					message: 'Не удалось создать новый чат OpenAI Codex. Текст задачи скопирован в буфер обмена.',
+					message: `Не удалось создать новый чат OpenAI Codex. ${await describeClipboard('Текст задачи скопирован в буфер обмена.')}`,
 				};
 			}
 
-			// Codex обрабатывает команду нового чата через очередь webview, поэтому даем composer время на подготовку.
-			await new Promise(resolve => setTimeout(resolve, 600));
+			// Codex применяет «Новый чат» асинхронно и сбрасывает поле вместе с файлами, добавленными раньше.
+			// Web ждёт только перед прикреплением файлов: вставка в webview там не выполняется.
+			if (!isWebClient || commands.includes('chatgpt.addFileToThread')) {
+				await new Promise(resolve => setTimeout(resolve, 600));
+			}
 
+			// В браузерном клиенте вставка в поле Codex недоступна: полный текст передаётся файлом запроса.
+			// Файл запроса прикрепляется первым, чтобы стоять перед файлами контекста.
+			const requestFileUri = isWebClient
+				? await this.writeCodexRequestFile(prompt, fallbackText, commands)
+				: undefined;
+			let requestFileAttached = false;
 			if (commands.includes('chatgpt.addFileToThread')) {
-				for (const fileUri of fileUris) {
-					try {
-						await vscode.commands.executeCommand('chatgpt.addFileToThread', fileUri);
-					} catch {
-						// best-effort only
+				requestFileAttached = await this.attachCodexChatFiles(requestFileUri, fileUris);
+				// Пока панель Codex загружается, Codex применяет отложенный «Новый чат» после файлов и сбрасывает их.
+				// Признака готовности панели нет, поэтому первый запуск в сеансе повторяет прикрепление в течение срока загрузки.
+				if (requestFileAttached && !this.codexWebPanelLoaded) {
+					const loadDeadline = Date.now() + this.codexWebPanelLoadWindowMs;
+					while (Date.now() < loadDeadline) {
+						await new Promise(resolve => setTimeout(resolve, this.codexWebAttachRetryIntervalMs));
+						await this.attachCodexChatFiles(requestFileUri, fileUris);
 					}
+					this.codexWebPanelLoaded = true;
 				}
+			}
+			if (requestFileAttached) {
+				// Команда Codex не подтверждает показ файла и не отправляет сообщение: план сохраняется.
+				return {
+					dispatched: false,
+					message: `OpenAI Codex открыт. К новому чату прикреплён файл ${CODEX_REQUEST_FILE_NAME} с полным текстом задачи. `
+						+ 'Проверьте, что файл показан над полем сообщения, и нажмите «Отправить».'
+						+ (await clipboardWrite ? ' Текст задачи также скопирован в буфер обмена.' : ''),
+				};
 			}
 			const prepared = await this.prepareCodexPrompt(prompt, fallbackText, commands);
 			if (prepared.ok && this.isPromptXdotoolAutoStartEnabled(prompt)) {
@@ -3091,7 +3237,9 @@ export class EditorPanelManager {
 					? `OpenAI Codex открыт. Вставка прервана (${prepared.reason || 'unknown error'}); в поле могла остаться часть текста. Полный запрос можно заново скопировать из Prompt Manager и заменить им содержимое поля.`
 					: prepared.stage === 'submit'
 					? `OpenAI Codex открыт. Текст задачи вставлен, но xdotool не смог отправить его (${prepared.reason || 'unknown error'}). Отправьте задачу вручную.`
-					: `OpenAI Codex открыт. Текст задачи скопирован в буфер обмена, но не удалось вставить его автоматически (${prepared.reason || 'unknown error'}). Вставьте его вручную.`,
+					: await clipboardWrite
+					? `OpenAI Codex открыт. Текст задачи скопирован в буфер обмена, но не удалось вставить его автоматически (${prepared.reason || 'unknown error'}). Вставьте его вручную.`
+					: `OpenAI Codex открыт, но не удалось вставить текст задачи автоматически (${prepared.reason || 'unknown error'}). ${await describeClipboard('')}`,
 			};
 		}
 

@@ -11,7 +11,7 @@ import { FilterBar } from './components/FilterBar';
 import { PromptList } from './components/PromptList';
 import { Toolbar } from './components/Toolbar';
 import { PromptHoverPreview } from './PromptHoverPreview';
-import { createDefaultPrompt, PROMPT_STATUS_ORDER, PROMPT_CUSTOM_GROUP_NONE_KEY } from '../../types/prompt';
+import { createDefaultPrompt, createDefaultSidebarState, PROMPT_STATUS_ORDER, PROMPT_CUSTOM_GROUP_NONE_KEY } from '../../types/prompt';
 import { matchesCreatedAtFilter } from '../../utils/sidebarDateFilter.js';
 import {
   makeSidebarGroupCollapseKey,
@@ -39,6 +39,8 @@ import type {
 } from '../../types/prompt';
 
 const vscode = getVsCodeApi();
+/** Начальный рендер и восстановление неполных настроек используют те же значения, что и хост. */
+const defaultSidebarState = createDefaultSidebarState();
 
 export function getSidebarPromptSearchPool(
   prompts: PromptConfig[],
@@ -80,10 +82,10 @@ export const SidebarApp: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<PromptStatus[]>([]);
   const [createdAtFilter, setCreatedAtFilter] = useState<CreatedAtFilter>('all');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
-  const [sortField, setSortField] = useState<SortField>('createdAt');
-  const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
-  const [viewMode, setViewMode] = useState<SidebarViewMode>('detailed');
-  const [groupBy, setGroupBy] = useState<GroupBy>('none');
+  const [sortField, setSortField] = useState<SortField>(defaultSidebarState.sortField);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(defaultSidebarState.sortOrder);
+  const [viewMode, setViewMode] = useState<SidebarViewMode>(defaultSidebarState.viewMode);
+  const [groupBy, setGroupBy] = useState<GroupBy>(defaultSidebarState.groupBy);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [filteredCollapsedGroups, setFilteredCollapsedGroups] = useState<Record<string, boolean>>({});
   const [showFilters, setShowFilters] = useState(false);
@@ -200,10 +202,10 @@ export const SidebarApp: React.FC = () => {
           setFavoritesOnly(state.filters.favorites || false);
           setCreatedAtFilter(state.filters.createdAt || 'all');
         }
-        setSortField(state.sortField || 'createdAt');
-        setSortOrder(state.sortOrder || 'desc');
-        setViewMode(state.viewMode || 'detailed');
-        setGroupBy(state.groupBy || 'none');
+        setSortField(state.sortField || defaultSidebarState.sortField);
+        setSortOrder(state.sortOrder || defaultSidebarState.sortOrder);
+        setViewMode(state.viewMode || defaultSidebarState.viewMode);
+        setGroupBy(state.groupBy || defaultSidebarState.groupBy);
         setCollapsedGroups(state.collapsedGroups || {});
         setFilteredCollapsedGroups({});
         setHasHydratedState(true);

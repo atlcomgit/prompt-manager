@@ -59,16 +59,26 @@ test('normalizeSidebarState backfills selectedPromptUuid for legacy sidebar stat
 
 	assert.equal(result.selectedPromptId, 'prompt-1');
 	assert.equal(result.selectedPromptUuid, null);
-	assert.equal(result.viewMode, 'detailed');
+	assert.equal(result.viewMode, 'compact');
+	assert.equal(result.sortField, 'title');
+	assert.equal(result.sortOrder, 'asc');
+	assert.equal(result.groupBy, 'status');
 	assert.equal(result.filters.createdAt, 'all');
 });
 
-test('normalizeSidebarState preserves explicit compact view mode', () => {
+/** Новые defaults не перезаписывают уже сохранённые настройки пользователя. */
+test('normalizeSidebarState preserves explicit view preferences', () => {
 	const result = normalizeSidebarState({
-		viewMode: 'compact',
+		viewMode: 'detailed',
+		sortField: 'createdAt',
+		sortOrder: 'desc',
+		groupBy: 'none',
 	});
 
-	assert.equal(result.viewMode, 'compact');
+	assert.equal(result.viewMode, 'detailed');
+	assert.equal(result.sortField, 'createdAt');
+	assert.equal(result.sortOrder, 'desc');
+	assert.equal(result.groupBy, 'none');
 });
 
 test('reconcileSidebarSelection remaps selection to renamed prompt by promptUuid', () => {

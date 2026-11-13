@@ -646,6 +646,18 @@ test('isPromptChatLaunchComplete treats an already bound chat as complete when r
 	}), true);
 });
 
+/** Принятая команда переводит запуск к привязке, не выдавая её за завершённую. */
+test('resolvePromptChatLaunchPhase separates command acceptance from session confirmation', () => {
+	assert.equal(resolvePromptChatLaunchPhase({
+		hasChatEntry: false,
+		chatRequestStarted: false,
+		chatCommandAccepted: true,
+		chatRenameState: 'idle',
+		chatLaunchCompletionHold: false,
+		requiresChatBinding: true,
+	}), 'binding');
+});
+
 test('resolvePromptChatLaunchPhase follows the earliest incomplete milestone', () => {
 	assert.equal(resolvePromptChatLaunchPhase({
 		hasChatEntry: false,

@@ -177,8 +177,11 @@ interface IsPromptChatLaunchCompleteInput {
 	requiresChatBinding?: boolean;
 }
 
+/** Отделяет принятую команду открытия от подтверждения запроса и привязки сессии. */
 interface ResolvePromptChatLaunchPhaseInput extends IsPromptChatLaunchCompleteInput {
 	chatLaunchCompletionHold: boolean;
+	/** Команда отправки вернулась, но индекс сессий ещё может обновляться. */
+	chatCommandAccepted?: boolean;
 }
 
 interface ResolvePromptChatLaunchStepStatesInput extends IsPromptChatLaunchCompleteInput { }
@@ -512,7 +515,7 @@ export function resolvePromptChatLaunchHasChatEntry(
 	return !isLaunchTracked && input.status === 'in-progress';
 }
 
-/** Resolve the top-level launch phase from the earliest incomplete milestone. */
+/** Не задерживает шаг открытия до обновления индекса; проверки: promptEditorBehavior.test.ts. */
 export function resolvePromptChatLaunchPhase(
 	input: ResolvePromptChatLaunchPhaseInput,
 ): PromptChatLaunchPhase {
@@ -520,7 +523,7 @@ export function resolvePromptChatLaunchPhase(
 		return 'ready';
 	}
 
-	if (!input.chatRequestStarted && !input.hasChatEntry) {
+	if (!input.chatRequestStarted && !input.hasChatEntry && !input.chatCommandAccepted) {
 		return 'opening';
 	}
 

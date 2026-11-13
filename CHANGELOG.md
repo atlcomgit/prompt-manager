@@ -16,14 +16,27 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 - Запуск Codex внутри Copilot из Prompt Manager подготавливает отдельную сессию с Full Access
   до отправки задачи. Разрешения проверяются через локальный Agent Host; общие настройки и другие чаты не меняются.
   Поддерживается Linux с AHP 1.1. При ошибке отправка отменяется, а полный текст сохраняется в буфере обмена.
+- OpenAI Codex в VS Code Web, в том числе через туннель: полный текст задачи сохраняется в файл `task.md`
+  в папке промпта и прикрепляется к новому чату штатной командой Codex; для запуска остаётся нажать «Отправить».
+  Файл стоит первым в списке файлов чата. Первый запуск после загрузки окна повторяет прикрепление в течение 15 секунд,
+  потому что ещё не загруженная панель Codex сбрасывает файлы. Текст также копируется в буфер обмена, при отказе команды
+  остаётся ручная вставка. Вставка текста в поле на desktop не изменена; установленный Codex не модифицируется.
 
 #### Changed
+- Начальный вид списка: название по возрастанию, группировка по статусу, краткий режим.
+  Ранее сохранённые настройки остаются в силе.
 - Локально включаемая синхронизация после compile копирует сборку в обычную серверную папку Prompt Manager.
   Сохраняются путь Extension Host, зависимости и метаданные платформы; предусмотрены резервная копия и откат.
 - Task 168: the prompt form shrinks to 300 px while keeping dashboard widgets visible; below 632 px,
   widgets move under the form in one vertical scroll area. Narrow controls wrap without changing the selected view.
 
 #### Fixed
+- Запуск OpenAI Codex в VS Code Web больше не останавливается на шаге открытия чата, когда браузер не завершает
+  запись в буфер обмена: запись ожидается не дольше 2 секунд, а сообщение упоминает копирование только после её подтверждения.
+- Шаг открытия Copilot отделён от ожидания привязки сессии. Kilo после Add to Context больше
+  не ожидает лишнюю запись в буфер браузера. Xdotool не запускается в Web и удалённых окнах.
+  OpenAI Codex в Web больше не выдаёт неподдерживаемую программную вставку за успешную;
+  автоматическое заполнение поля в установленной версии Codex остаётся недоступным.
 - Task 168: persist Docker/ToDo preferences and scoped Git disclosures in workspace state, preserve independent
   layout profiles, and prevent delayed prompt-open messages from replacing newer widget settings.
   Failed writes report an error without disabling refresh of visibly expanded widgets; bootstrap uses confirmed state.

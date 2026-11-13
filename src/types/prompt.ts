@@ -677,7 +677,7 @@ type PartialSidebarState = Partial<Omit<SidebarState, 'filters'>> & {
 	filters?: Partial<FilterState>;
 };
 
-/** Create default sidebar state */
+/** Начальный краткий список группируется по статусу и сортируется по названию; тесты: sidebarSelection.test.ts. */
 export function createDefaultSidebarState(): SidebarState {
 	return {
 		selectedPromptId: null,
@@ -691,10 +691,10 @@ export function createDefaultSidebarState(): SidebarState {
 			favorites: false,
 			createdAt: 'all',
 		},
-		sortField: 'createdAt',
-		sortOrder: 'desc',
-		viewMode: 'detailed',
-		groupBy: 'none',
+		sortField: 'title',
+		sortOrder: 'asc',
+		viewMode: 'compact',
+		groupBy: 'status',
 		collapsedGroups: {},
 		panelWidth: 300,
 	};

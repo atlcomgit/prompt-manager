@@ -54,6 +54,8 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
 ## Built For Real Work / Для реальной работы
 
 - **Prompt Sidebar** for library, filters, groups, and fast capture.
+  По умолчанию список краткий, сгруппирован по статусу и отсортирован по названию по возрастанию.
+  Сохранённые настройки вида сохраняются при обновлении расширения.
   Hover over a prompt to preview its task number, title, status, and full scrollable Markdown text.
   При наведении на промпт появляется карточка с номером задачи, названием, статусом и полным текстом Markdown.
   Длинный текст прокручивается внутри карточки; Escape закрывает её. С клавиатуры выберите строку через Tab
@@ -66,19 +68,33 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
   При неподтверждённых разрешениях отправка отменяется, текст сохраняется в буфере обмена.
 - **Copilot Chat autostart** is controlled per prompt in the Agent section. When disabled, the selected
   Copilot mode opens with the prepared prompt in the input without submitting it. Kilo Code keeps its existing
-  external-chat autostart behavior. OpenAI Codex pastes the prepared prompt into its composer through the native VS Code paste command (including Wayland),
+  external-chat autostart behavior. On desktop, OpenAI Codex pastes the prepared prompt through the native VS Code paste command (including Wayland),
   splitting long prompts into parts below its 5,000-character paste-to-file threshold so the text stays editable.
   If focus or clipboard content changes during insertion, preparation stops without submitting a partial prompt.
+  In VS Code for the Web (including tunnels), where programmatic paste into the Codex webview is unavailable, the full prompt
+  is saved to `task.md` in the prompt folder and attached to a new Codex chat with Codex's own command, so only Send remains.
   Its external-chat autostart flag controls only Xdotool submission on X11. Because Codex exposes no delivery acknowledgement,
   Xdotool submission remains best-effort and does not clear the saved plan. The `Не изменять` option keeps
   the selection already active in the chat. В секции «Агент» автостарт Copilot Chat
   настраивается отдельно для каждого промпта: при выключении выбранный режим открывается с подготовленным
-  текстом в поле без отправки. Для Kilo Code сохраняется прежнее поведение, а OpenAI Codex вставляет текст в
+  текстом в поле без отправки. Для Kilo Code сохраняется прежнее поведение, а на desktop OpenAI Codex вставляет текст в
   поле штатной командой VS Code, в том числе в Wayland; флаг автостарта управляет только отправкой через Xdotool в X11. Поскольку Codex не подтверждает
   доставку, такая отправка считается предварительной и не очищает сохраненный план. Опция «Не изменять»
   сохраняет уже выбранный вариант в чате. Длинные запросы вставляются частями меньше порога в 5000 символов,
   чтобы Codex оставлял текст в поле, а не превращал его в файл. При потере фокуса или изменении буфера вставка
   останавливается без отправки неполного запроса.
+  Xdotool доступен только в локальном настольном VS Code на Linux; через туннель клавиши на сервер не отправляются.
+  В браузере (VS Code Web, в том числе через туннель) штатная команда вставки в webview недоступна, поэтому полный текст
+  задачи сохраняется в файл `task.md` в папке промпта и прикрепляется к новому чату Codex его штатной командой:
+  для запуска остаётся нажать «Отправить». Файл `task.md` стоит первым в списке файлов чата. Первый запуск после загрузки окна
+  длится примерно на 15 секунд дольше: пока панель Codex загружается, прикрепление повторяется, иначе Codex сбрасывает файлы.
+  Текст также копируется в буфер обмена, но запуск не ждёт эту запись дольше 2 секунд:
+  браузер без фокуса окна может её не завершить. Если прикрепить файл не удалось,
+  расширение сообщает о ручной вставке вместо ложного успеха. Само поле сообщения в браузере не заполняется,
+  установленный Codex не модифицируется. Ограничения Web-пути и ссылки на документацию описаны
+  в [правилах подготовки Codex](docs/rules/Чаты/Подготовка_Codex_без_номера.md).
+  Kilo после Add to Context не ожидает дополнительной записи в буфер обмена браузера.
+  В Copilot шаг открытия заканчивается после принятия команды; поиск сессии показывается шагом привязки.
 - **Claude Code (partial integration).** Opens prepared text in the installed Claude extension's sidebar for manual sending;
   Agent/Plan are text instructions, not changes to Claude's model or permissions. Session binding uses an exact UUID
   marker after manual sending. Xdotool auto-send is safety-blocked even when enabled because composer focus cannot

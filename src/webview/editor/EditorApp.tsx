@@ -1083,6 +1083,8 @@ export const EditorApp: React.FC = () => {
   const rawChatLaunchPhase = resolvePromptChatLaunchPhase({
     hasChatEntry: chatLaunchHasChatEntry,
     chatRequestStarted: chatLaunchRequestStarted,
+    // chatStarted завершает открытие, а подтверждение сессии относится к отдельному шагу привязки.
+    chatCommandAccepted: chatLaunchRequiresBinding && chatLaunchAwaitingBinding,
     chatRenameState: chatLaunchRenameState,
     chatLaunchCompletionHold: false,
     requiresChatBinding: chatLaunchRequiresBinding,

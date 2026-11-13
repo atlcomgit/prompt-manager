@@ -19,12 +19,17 @@ const vscodeTabs: any[] = [];
 const vscodeTextDocuments: any[] = [];
 const vscodeWorkspaceFiles = new Map<string, string>();
 let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<unknown>) | undefined;
+/** Подменяет запись в буфер обмена, например незавершающейся записью браузера без фокуса окна. */
+let vscodeClipboardWriteHandler: ((value: string) => Promise<void>) | undefined;
 let vscodeAvailableCommands: string[] | undefined;
 /** Подмена Claude не активирует установленное расширение при unit-проверках. */
 let vscodeClaudeExtension: any = { isActive: true };
 let vscodeClipboardText = '';
 let vscodeActiveTextEditor: any;
 let vscodeWindowFocused = true;
+/** Тип клиента отделён от Linux-хоста, чтобы проверить запрет серверных клавиш в туннеле. */
+let vscodeUiKind = 1;
+let vscodeRemoteName: string | undefined;
 const vscodeConfigurationValues = new Map<string, unknown>();
 /** Workspace override и задержка записи моделируются без изменения настоящих настроек VS Code. */
 const vscodeWorkspaceConfigurationValues = new Map<string, unknown>();
@@ -62,11 +67,14 @@ function resetVsCodeCommandMock() {
 	vscodeTextDocuments.length = 0;
 	vscodeWorkspaceFiles.clear();
 	vscodeExecuteCommandHandler = undefined;
+	vscodeClipboardWriteHandler = undefined;
 	vscodeAvailableCommands = undefined;
 	vscodeClaudeExtension = { isActive: true };
 	vscodeClipboardText = '';
 	vscodeActiveTextEditor = undefined;
 	vscodeWindowFocused = true;
+	vscodeUiKind = 1;
+	vscodeRemoteName = undefined;
 	childProcessSpawnCalls.length = 0;
 	childProcessSpawnHandler = undefined;
 }
@@ -552,13 +560,19 @@ function createVsCodeMock() {
 		},
 		env: {
 			language: 'en',
+			get uiKind() { return vscodeUiKind; },
+			get remoteName() { return vscodeRemoteName; },
 			clipboard: {
 				writeText: async (value: string) => {
+					if (vscodeClipboardWriteHandler) {
+						return vscodeClipboardWriteHandler(value);
+					}
 					vscodeClipboardText = value;
 				},
 				readText: async () => vscodeClipboardText,
 			},
 		},
+		UIKind: { Desktop: 1, Web: 2 },
 		ViewColumn: {
 			One: 1,
 			Beside: 2,
@@ -7143,8 +7157,15 @@ test('startChat dispatches Kilo Code target through bridge without Copilot sessi
 	resetVsCodeCommandMock();
 });
 
-test('startChat prepares Kilo Code clipboard fallback when bridge is unavailable', async () => {
+/** Команда Kilo получает полный запрос без лишнего обращения к clipboard клиента. */
+test('startChat prepares Kilo Code context without a redundant clipboard write', async () => {
 	resetVsCodeCommandMock();
+	let insertedText = '';
+	vscodeExecuteCommandHandler = async id => {
+		if (id === 'kilo-code.new.addToContext') {
+			insertedText = vscodeActiveTextEditor.document.getText();
+		}
+	};
 	vscodeAvailableCommands = ['kilo-code.new.addToContext', 'kilo-code.new.focusChatInput'];
 
 	const { manager, getStoredPrompt } = await createManager({
@@ -7208,10 +7229,11 @@ test('startChat prepares Kilo Code clipboard fallback when bridge is unavailable
 	assert.equal(vscodeCommandCalls.some(call => call.id === 'workbench.action.closeActiveEditor'), false);
 	assert.ok(vscodeCommandCalls.some(call => call.id === 'kilo-code.SidebarProvider.focus'));
 	assert.ok(vscodeCommandCalls.some(call => call.id === 'kilo-code.new.focusChatInput'));
-	assert.match(vscodeClipboardText, /Implement Kilo routing/);
-	assert.match(vscodeClipboardText, /## Work mode/);
-	assert.match(vscodeClipboardText, /Create a detailed implementation plan first/);
-	assert.match(vscodeClipboardText, /@\/tmp\/workspace\/src\/index\.ts/);
+	assert.equal(vscodeClipboardText, '');
+	assert.match(insertedText, /Implement Kilo routing/);
+	assert.match(insertedText, /## Work mode/);
+	assert.match(insertedText, /Create a detailed implementation plan first/);
+	assert.match(insertedText, /@\/tmp\/workspace\/src\/index\.ts/);
 	assert.ok(postedMessages.some(message => message?.type === 'chatOpened'));
 	assert.ok(postedMessages.some(message => message?.type === 'info' && /Add to Context/.test(message.message)));
 	assert.equal(postedMessages.some(message => message?.type === 'error'), false);
@@ -7301,6 +7323,26 @@ test('startChat auto-sends Kilo Code fallback after closing the temporary contex
 		resetVsCodeCommandMock();
 	}
 });
+
+/** DISPLAY на сервере не даёт права отправлять клавиши вместо браузерного/удалённого клиента. */
+for (const client of [{ uiKind: 2, remoteName: 'tunnel' }, { uiKind: 1, remoteName: 'ssh-remote' }]) {
+	test(`external chat rejects server keyboard automation for ${client.remoteName}`, async () => {
+		resetVsCodeCommandMock();
+		vscodeUiKind = client.uiKind;
+		vscodeRemoteName = client.remoteName;
+		try {
+			const { manager } = await createManager();
+			const input = { autoStartChatWithXdotool: true };
+			assert.equal((await (manager as any).runXdotoolEnter()).ok, false);
+			assert.equal((await (manager as any).maybeSubmitKiloPromptWithXdotool(input, [])).ok, false);
+			assert.equal((await (manager as any).prepareCodexPromptWithXdotool(input, 'text')).ok, false);
+			assert.deepEqual(childProcessSpawnCalls, []);
+			assert.deepEqual(vscodeCommandCalls, []);
+		} finally {
+			resetVsCodeCommandMock();
+		}
+	});
+}
 
 test('Kilo Code xdotool fallback reports startup errors', async () => {
 	resetVsCodeCommandMock();
@@ -7599,6 +7641,217 @@ test('startChat keeps Codex prompt in clipboard when xdotool preparation fails',
 });
 
 const codexNativePasteCommands = ['chatgpt.sidebarSecondaryView.focus', 'editor.action.clipboardPasteAction'];
+
+/** Доступность команды VS Code не означает поддержку paste внутри браузерного iframe. */
+test('prepareCodexPrompt reports unsupported browser paste without clipboard or keyboard commands', async () => {
+	resetVsCodeCommandMock();
+	vscodeUiKind = 2;
+	vscodeRemoteName = 'tunnel';
+	try {
+		const { manager } = await createManager();
+		const result = await (manager as any).prepareCodexPrompt(
+			{ autoStartChatWithXdotool: true }, 'Полный тестовый текст', codexNativePasteCommands,
+		);
+		assert.equal(result.ok, false);
+		assert.equal(result.stage, 'paste');
+		assert.match(result.reason, /браузер/);
+		assert.equal(result.partialPaste, undefined);
+		assert.equal(vscodeClipboardText, '');
+		assert.deepEqual(vscodeCommandCalls, []);
+		assert.deepEqual(childProcessSpawnCalls, []);
+	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Полный Web fallback открывает чат, но не сообщает о вставке или отправке неподготовленного сообщения. */
+test('dispatchCodexChatTarget keeps browser fallback text without reporting a successful insertion', async () => {
+	resetVsCodeCommandMock();
+	vscodeUiKind = 2;
+	vscodeRemoteName = 'tunnel';
+	try {
+		const { manager } = await createManager();
+		const result = await (manager as any).dispatchCodexChatTarget(
+			createPrompt(), 'Browser prompt', [], [...codexNativePasteCommands, 'chatgpt.newChat'],
+		);
+		assert.equal(result.dispatched, false);
+		assert.match(result.message, /не удалось вставить.*браузер/);
+		assert.match(vscodeClipboardText, /Browser prompt/);
+		assert.deepEqual(vscodeCommandCalls.map(call => call.id), ['chatgpt.openSidebar', 'chatgpt.newChat']);
+		assert.deepEqual(childProcessSpawnCalls, []);
+	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
+/** В браузере полный текст передаётся файлом запроса: он прикрепляется первым, сообщение не отправляется. */
+test('dispatchCodexChatTarget attaches the request file in the browser without pasting or sending', async () => {
+	resetVsCodeCommandMock();
+	vscodeUiKind = 2;
+	vscodeRemoteName = 'tunnel';
+	try {
+		const { manager } = await createManager();
+		// Повторное прикрепление во время загрузки панели проверяется отдельным тестом.
+		(manager as any).codexWebPanelLoadWindowMs = 0;
+		const text = `# Задача\r\n\r\n${'я'.repeat(12000)} **MD** <tag> & 😀`;
+		const contextFile = { fsPath: '/tmp/workspace/context.md', toString: () => '/tmp/workspace/context.md' };
+		const result = await (manager as any).dispatchCodexChatTarget(
+			createPrompt(), text, [contextFile],
+			[...codexNativePasteCommands, 'chatgpt.newChat', 'chatgpt.addFileToThread'],
+		);
+		const requestFilePath = '/tmp/workspace/.vscode/prompt-manager/prompts/prompt-a/task.md';
+		assert.equal(result.dispatched, false);
+		assert.match(result.message, /прикреплён файл task\.md.*«Отправить»\. Текст задачи также скопирован в буфер обмена\.$/);
+		assert.ok(vscodeWorkspaceFiles.get(requestFilePath)?.endsWith(`\n\n---\n\n${text}`));
+		assert.equal(vscodeWorkspaceFiles.size, 1);
+		assert.equal(vscodeClipboardText, text);
+		assert.deepEqual(vscodeCommandCalls.map(call => call.id), [
+			'chatgpt.openSidebar', 'chatgpt.newChat', 'chatgpt.addFileToThread', 'chatgpt.addFileToThread',
+		]);
+		assert.equal((vscodeCommandCalls[2].args[0] as { fsPath: string }).fsPath, requestFilePath);
+		assert.equal(vscodeCommandCalls[3].args[0], contextFile);
+		assert.deepEqual(childProcessSpawnCalls, []);
+	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Отказ команды Codex или отсутствие папки промпта возвращают прежнее сообщение о ручной вставке. */
+for (const failure of ['command', 'unsaved prompt'] as const) {
+	test(`dispatchCodexChatTarget falls back to manual paste when the request file fails: ${failure}`, async () => {
+		resetVsCodeCommandMock();
+		vscodeUiKind = 2;
+		vscodeRemoteName = 'tunnel';
+		vscodeExecuteCommandHandler = async id => {
+			if (id === 'chatgpt.addFileToThread') {
+				throw new Error('Codex rejected the file');
+			}
+			return undefined;
+		};
+		try {
+			const { manager } = await createManager();
+			const result = await (manager as any).dispatchCodexChatTarget(
+				createPrompt(failure === 'unsaved prompt' ? { id: '__new__' } : {}), 'Browser prompt', [],
+				[...codexNativePasteCommands, 'chatgpt.newChat', 'chatgpt.addFileToThread'],
+			);
+			assert.equal(result.dispatched, false);
+			assert.match(result.message, /не удалось вставить.*браузер/);
+			assert.doesNotMatch(result.message, /прикреплён файл/);
+			assert.equal(vscodeClipboardText, 'Browser prompt');
+			assert.equal(vscodeWorkspaceFiles.size, failure === 'command' ? 1 : 0);
+			assert.equal(vscodeCommandCalls.some(call => call.id === 'editor.action.clipboardPasteAction'), false);
+		} finally {
+			resetVsCodeCommandMock();
+		}
+	});
+}
+
+/** Браузер без фокуса окна не завершает запись в буфер: запуск не зависает и не сообщает о копировании. */
+for (const withRequestFile of [true, false]) {
+	test(`dispatchCodexChatTarget does not wait for a pending browser clipboard write: request file ${withRequestFile}`, async () => {
+		resetVsCodeCommandMock();
+		vscodeUiKind = 2;
+		vscodeRemoteName = 'tunnel';
+		vscodeClipboardWriteHandler = () => new Promise<void>(() => { });
+		// Ограничивающий таймер не удерживает цикл событий, поэтому ожидание в тесте поддерживает отдельный таймер.
+		const keepAlive = setTimeout(() => { }, 10_000);
+		try {
+			const { manager } = await createManager();
+			(manager as any).codexWebPanelLoadWindowMs = 0;
+			const result = await (manager as any).dispatchCodexChatTarget(
+				createPrompt(), 'Browser prompt', [],
+				[...codexNativePasteCommands, 'chatgpt.newChat', ...(withRequestFile ? ['chatgpt.addFileToThread'] : [])],
+			);
+			assert.equal(result.dispatched, false);
+			assert.doesNotMatch(result.message, /скопирован в буфер обмена/);
+			assert.match(result.message, withRequestFile
+				? /прикреплён файл task\.md.*«Отправить»\.$/
+				: /не удалось вставить текст задачи автоматически.*Браузер не подтвердил запись/);
+			assert.equal(vscodeWorkspaceFiles.size, withRequestFile ? 1 : 0);
+			assert.equal(vscodeClipboardText, '');
+		} finally {
+			clearTimeout(keepAlive);
+			resetVsCodeCommandMock();
+		}
+	});
+}
+
+/** Отказ записи в буфер браузера не прерывает запуск: текст задачи остаётся в прикреплённом файле. */
+test('dispatchCodexChatTarget keeps the request file when the browser clipboard write is rejected', async () => {
+	resetVsCodeCommandMock();
+	vscodeUiKind = 2;
+	vscodeRemoteName = 'tunnel';
+	vscodeClipboardWriteHandler = async () => {
+		throw new Error('Document is not focused');
+	};
+	try {
+		const { manager } = await createManager();
+		(manager as any).codexWebPanelLoadWindowMs = 0;
+		const result = await (manager as any).dispatchCodexChatTarget(
+			createPrompt(), 'Browser prompt', [],
+			[...codexNativePasteCommands, 'chatgpt.newChat', 'chatgpt.addFileToThread'],
+		);
+		assert.equal(result.dispatched, false);
+		assert.match(result.message, /прикреплён файл task\.md/);
+		assert.doesNotMatch(result.message, /скопирован в буфер обмена/);
+		assert.equal(vscodeWorkspaceFiles.size, 1);
+	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
+/**
+ * Пока панель Codex загружается, отложенный «Новый чат» сбрасывает файлы: первый запуск в сеансе
+ * повторяет прикрепление в прежнем порядке, следующие запуски прикрепляют файлы один раз.
+ */
+test('dispatchCodexChatTarget repeats the attachment while the Codex panel may still be loading', async () => {
+	resetVsCodeCommandMock();
+	vscodeUiKind = 2;
+	vscodeRemoteName = 'tunnel';
+	try {
+		const { manager } = await createManager();
+		(manager as any).codexWebPanelLoadWindowMs = 90;
+		(manager as any).codexWebAttachRetryIntervalMs = 30;
+		const contextFile = { fsPath: '/tmp/workspace/context.md', toString: () => '/tmp/workspace/context.md' };
+		const commands = [...codexNativePasteCommands, 'chatgpt.newChat', 'chatgpt.addFileToThread'];
+		const attachedPaths = () => vscodeCommandCalls
+			.filter(call => call.id === 'chatgpt.addFileToThread')
+			.map(call => (call.args[0] as { fsPath: string }).fsPath.split('/').pop());
+
+		const first = await (manager as any).dispatchCodexChatTarget(createPrompt(), 'Browser prompt', [contextFile], commands);
+		const firstPaths = attachedPaths();
+		assert.match(first.message, /прикреплён файл task\.md/);
+		assert.ok(firstPaths.length >= 4 && firstPaths.length % 2 === 0);
+		assert.ok(firstPaths.every((name, index) => name === (index % 2 === 0 ? 'task.md' : 'context.md')));
+		assert.equal(vscodeWorkspaceFiles.size, 1);
+
+		vscodeCommandCalls.length = 0;
+		const second = await (manager as any).dispatchCodexChatTarget(createPrompt(), 'Browser prompt', [contextFile], commands);
+		assert.match(second.message, /прикреплён файл task\.md/);
+		assert.deepEqual(attachedPaths(), ['task.md', 'context.md']);
+	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Desktop сохраняет вставку текста в поле: файл запроса не создаётся и не прикрепляется. */
+test('dispatchCodexChatTarget keeps the desktop paste path without a request file', async () => {
+	resetVsCodeCommandMock();
+	try {
+		const { manager } = await createManager();
+		const result = await (manager as any).dispatchCodexChatTarget(
+			createPrompt(), 'Desktop prompt', [],
+			[...codexNativePasteCommands, 'chatgpt.newChat', 'chatgpt.addFileToThread'],
+		);
+		assert.equal(result.dispatched, false);
+		assert.match(result.message, /Текст задачи вставлен в поле сообщения/);
+		assert.equal(vscodeWorkspaceFiles.size, 0);
+		assert.equal(vscodeCommandCalls.some(call => call.id === 'chatgpt.addFileToThread'), false);
+		assert.ok(vscodeCommandCalls.some(call => call.id === 'editor.action.clipboardPasteAction'));
+	} finally {
+		resetVsCodeCommandMock();
+	}
+});
 
 /** Вставка не зависит от X11, DISPLAY и платформы, когда доступна штатная команда VS Code. */
 test('prepareCodexPrompt pastes multiline text natively without X11 or xdotool', async () => {

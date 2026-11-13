@@ -553,6 +553,165 @@ test('PromptDashboardService polls Docker live stats only while metrics remain v
 	service.dispose();
 });
 
+/** Создаёт изолированный Docker dashboard с управляемым завершением stats, без файлов и Docker API. */
+async function createDeferredDockerDashboard() {
+	// Реальный сервис получает только подмены; полный снимок прогревает кеш перед проверкой гонок.
+	const calls: string[] = [];
+	const messages: unknown[] = [];
+	const data = {
+		enabled: true, available: true, generatedAt: '2026-11-13T00:00:00.000Z', defaultViewMode: 'tree' as const,
+		composeFilePatterns: [], projects: [], totalContainers: 1, runningContainers: 1,
+		stoppedContainers: 0, warningContainers: 0, errorContainers: 0,
+	};
+	let releaseStats!: () => void;
+	const statsGate = new Promise<void>(resolve => { releaseStats = resolve; });
+	const service = new PromptDashboardService(
+		{} as ConstructorParameters<typeof PromptDashboardService>[0],
+		{
+			getWorkspaceFolders: () => ['api'],
+			getWorkspaceFolderPaths: () => new Map([['api', '/workspace/api']]),
+		} as ConstructorParameters<typeof PromptDashboardService>[1],
+		{} as ConstructorParameters<typeof PromptDashboardService>[2],
+		{} as ConstructorParameters<typeof PromptDashboardService>[3],
+		{
+			onDidChange: () => ({ dispose: () => undefined }),
+			/** Задерживает только статистику; начальная и ручная загрузки остаются независимыми. */
+			getDockerContainersData: async (_force = false, mode = 'full') => {
+				calls.push(mode);
+				if (mode === 'stats') {
+					await statsGate;
+				}
+				return data;
+			},
+		} as unknown as ConstructorParameters<typeof PromptDashboardService>[4],
+	);
+	// Таймер не запускается по часам теста: проверяем его постановку и очистку непосредственно.
+	const state = service as unknown as {
+		inFlight: Map<string, Promise<unknown>>;
+		dockerStatsTimer: NodeJS.Timeout | null;
+		getDockerStatsIntervalMs: () => number;
+		getCacheTtlMsForWidget: () => number;
+	};
+	state.getDockerStatsIntervalMs = () => 60000;
+	const prompt = createPrompt({ projects: ['api'] });
+	const postMessage = (message: unknown) => { messages.push(message); };
+	await service.refreshWidgetSnapshot(prompt, 'docker', postMessage);
+	/** Освобождает запрос и дожидается также продолжений, уже ожидавших тот же Promise. */
+	const finishStats = async () => {
+		const pending = [...state.inFlight.values()];
+		releaseStats();
+		await Promise.all(pending);
+		await new Promise<void>(resolve => setImmediate(resolve));
+	};
+	return { service, state, calls, messages, prompt, postMessage, finishStats };
+}
+
+/** Скрытие отменяет накопленные автоматические повторы, но не прерывает уже отправленный HTTP-запрос. */
+test('PromptDashboardService drops queued Docker stats after false true false during an in-flight sample', async () => {
+	const fixture = await createDeferredDockerDashboard();
+	const { service, state, calls } = fixture;
+	try {
+		service.setDockerLiveMetricsVisibility(true);
+		for (let index = 0; index < 3; index += 1) {
+			service.setDockerLiveMetricsVisibility(false);
+			service.setDockerLiveMetricsVisibility(true);
+		}
+		service.setDockerLiveMetricsVisibility(false);
+		await fixture.finishStats();
+		assert.deepEqual(calls, ['full', 'stats']);
+		assert.equal(state.inFlight.size, 0);
+		assert.equal(state.dockerStatsTimer, null);
+	} finally {
+		service.setDockerLiveMetricsVisibility(false);
+		await fixture.finishStats();
+		service.dispose();
+	}
+});
+
+/** Повторный показ переиспользует текущий замер и оставляет один следующий таймер вместо пачки запросов. */
+test('PromptDashboardService coalesces Docker reveal bursts while stats are in flight', async () => {
+	const fixture = await createDeferredDockerDashboard();
+	const { service, state, calls } = fixture;
+	try {
+		service.setDockerLiveMetricsVisibility(true);
+		service.setDockerLiveMetricsVisibility(true);
+		for (let index = 0; index < 3; index += 1) {
+			service.setDockerLiveMetricsVisibility(false);
+			service.setDockerLiveMetricsVisibility(true);
+		}
+		await fixture.finishStats();
+		assert.deepEqual(calls, ['full', 'stats']);
+		assert.notEqual(state.dockerStatsTimer, null);
+		service.setDockerLiveMetricsVisibility(false);
+		assert.equal(state.dockerStatsTimer, null);
+		service.setDockerLiveMetricsVisibility(true);
+		await fixture.finishStats();
+		assert.deepEqual(calls, ['full', 'stats', 'stats']);
+	} finally {
+		service.setDockerLiveMetricsVisibility(false);
+		await fixture.finishStats();
+		service.dispose();
+	}
+});
+
+/** Позднее завершение запроса после dispose не отправляет snapshot и не восстанавливает polling. */
+test('PromptDashboardService does not rearm Docker polling after disposing an in-flight sample', async () => {
+	const fixture = await createDeferredDockerDashboard();
+	const { service, state, messages } = fixture;
+	try {
+		service.setDockerLiveMetricsVisibility(true);
+		const messagesBeforeDispose = messages.length;
+		service.dispose();
+		await fixture.finishStats();
+		assert.equal(state.dockerStatsTimer, null);
+		assert.equal(state.inFlight.size, 0);
+		assert.equal(messages.length, messagesBeforeDispose);
+	} finally {
+		service.setDockerLiveMetricsVisibility(false);
+		await fixture.finishStats();
+		service.dispose();
+	}
+});
+
+/** Видимость ограничивает только автоматическую статистику, не явный refresh и начальный снимок. */
+test('PromptDashboardService preserves initial and manual Docker loads while metrics are hidden', async () => {
+	const fixture = await createDeferredDockerDashboard();
+	try {
+		assert.deepEqual(fixture.calls, ['full']);
+		await fixture.service.refreshWidgetSnapshot(fixture.prompt, 'docker', fixture.postMessage);
+		assert.deepEqual(fixture.calls, ['full', 'full']);
+		assert.equal(fixture.state.dockerStatsTimer, null);
+	} finally {
+		fixture.service.dispose();
+	}
+});
+
+/** Прогрев сохраняет проверку compose-топологии; full с тем же fingerprint переиспользует кеш Docker. */
+test('PromptDashboardService preserves Docker topology discovery during the warm interval', async (context) => {
+	let runWarm!: () => void;
+	context.mock.method(globalThis, 'setInterval', (callback: () => void) => {
+		runWarm = callback;
+		return { unref: () => undefined };
+	});
+	const fixture = await createDeferredDockerDashboard();
+	try {
+		// Оставляем открытым только Docker и делаем кеш устаревшим без ожидания реального времени.
+		fixture.service.setCollapsedSections({
+			activity: true, status: true, projectBranches: true, reviewRequests: true,
+			parallelBranches: true, projectCommits: true, aiAnalysis: true, todos: true,
+		});
+		fixture.state.getCacheTtlMsForWidget = () => 0;
+		runWarm();
+		await fixture.finishStats();
+		assert.deepEqual(fixture.calls, ['full', 'full']);
+		assert.equal(fixture.state.dockerStatsTimer, null);
+		await fixture.service.refreshWidgetSnapshot(fixture.prompt, 'docker', fixture.postMessage);
+		assert.deepEqual(fixture.calls, ['full', 'full', 'full']);
+	} finally {
+		fixture.service.dispose();
+	}
+});
+
 test('PromptDashboardService defers external Docker refreshes while the widget is collapsed and replays them on expand', async () => {
 	const workspaceFolders = new Map([
 		['api', '/workspace/api'],

@@ -54,6 +54,10 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
 ## Built For Real Work / Для реальной работы
 
 - **Prompt Sidebar** for library, filters, groups, and fast capture.
+  Hover over a prompt to preview its task number, title, status, and full scrollable Markdown text.
+  При наведении на промпт появляется карточка с номером задачи, названием, статусом и полным текстом Markdown.
+  Длинный текст прокручивается внутри карточки; Escape закрывает её. С клавиатуры выберите строку через Tab
+  и нажмите F2 для перехода к тексту. Просмотр читает сохранённый промпт без открытия редактора и записи файлов.
 - **Codex inside Copilot** starts with Full Access when launched from Prompt Manager on Linux with a local
   Agent Host supporting AHP 1.1. The new session is named before the task is sent; other chats keep their permissions.
   **Codex внутри Copilot** при запуске из Prompt Manager получает Full Access — доступ к файлам и сети
@@ -98,6 +102,11 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
   Если при смене режима раскрывается виджет без загруженных данных, они догружаются автоматически.
   В двухколоночном режиме пустая колонка сохраняет свою сторону и принимает перетаскиваемые карточки.
   Во время движения виджет подсвечивается, а линия показывает место вставки; отпустите кнопку мыши для сохранения.
+- Форма сжимается до 300 px, оставляя виджеты справа; при ширине редактора меньше 632 px виджеты
+  переходят под форму с общей прокруткой. Например, узкая панель больше не скрывает «ToDo» и Docker.
+  Режим, поиск, фильтры и раскрытия виджетов сохраняются для рабочей области вместе с настройками
+  обоих вариантов сетки. Переключение промпта не сбрасывает их. При ошибке записи появляется уведомление:
+  текущий вид остаётся рабочим, но для сохранения после перезапуска требуется повторить изменение.
 - **Reliable automatic title completion** always clears the loading indicator in the current prompt editor after a reload, reopen, or folder rename. Автоматическое создание названия всегда завершает индикатор в актуальном окне промпта после перезагрузки, повторного открытия или переименования папки.
 - **Project branches dashboard widget** keeps the last confirmed file line counters visible during lightweight refreshes, refreshes selected and workspace-only rows precisely, and replaces counters after fresh details arrive. Виджет веток проектов не скрывает счетчики строк во время фонового обновления, точечно обновляет выбранные и workspace-only строки и заменяет счетчики после получения свежей детализации.
 - Файловые изменения, включая создание и удаление новых файлов, обновляют проекты пакетами с интервалом

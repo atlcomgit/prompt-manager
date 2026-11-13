@@ -28,6 +28,10 @@ import {
 	normalizePromptDashboardCollapsedSections,
 	normalizePromptDashboardSectionOrder,
 } from '../types/promptDashboard.js';
+import {
+	normalizePromptDashboardPreferences,
+	type PromptDashboardPreferences,
+} from '../types/promptDashboardPreferences.js';
 import { readSqliteItemValueCached, resolveBundledSqlJsWasmPath } from '../utils/sqliteItemTable.js';
 import { observeStableChatCompletion, isCompletedChatResponse, type StableChatCompletionCandidate } from '../utils/chatCompletionState.js';
 
@@ -51,14 +55,19 @@ const PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY = 'promptManager.dashboardCollapse
 const PROMPT_DASHBOARD_SECTION_ORDER_KEY = 'promptManager.dashboardSectionOrder';
 /** Раздельные настройки режимов; старые ключи читаются только при первоначальном переносе. */
 const PROMPT_DASHBOARD_LAYOUTS_KEY = 'promptManager.dashboardLayouts';
+/** Настройки содержимого виджетов общие для обоих профилей ширины. */
+const PROMPT_DASHBOARD_PREFERENCES_KEY = 'promptManager.dashboardPreferences';
 const STATISTICS_UI_STATE_KEY = 'promptManager.statisticsUiState';
 
 export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
 	private static readonly GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchesByProjectPreference';
 	private promptEditorViewStateMutationQueue: Promise<void> = Promise.resolve();
-	/** Единая очередь исключает потерю порядка при одновременном сохранении сворачивания. */
-	private promptDashboardLayoutsMutationQueue: Promise<void> = Promise.resolve();
+	/** Единая очередь сохраняет порядок layout-патчей и полных снимков preferences. */
+	private promptDashboardMutationQueue: Promise<void> = Promise.resolve();
+	/** Подтверждённые значения скрывают eager Memento.update до успеха или восстановления после ошибки. */
+	private promptDashboardLayoutsReadOverride?: PromptDashboardLayouts;
+	private promptDashboardPreferencesReadOverride?: { state: PromptDashboardPreferences | undefined };
 
 	/** Normalize persisted global-context source and keep legacy workspaces predictable. */
 	private static normalizeGlobalAgentContextSource(
@@ -951,27 +960,42 @@ export class StateService {
 		await pendingMutation;
 	}
 
+	/** Ждёт принятые dashboard-записи до bootstrap; отказ обрабатывает вызывающий save. Тесты: stateService.test.ts. */
+	async waitForPromptDashboardSaves(): Promise<void> {
+		// Во время записи могли поступить новые действия; снимок должен включать и их результат.
+		let pending: Promise<void>;
+		do {
+			pending = this.promptDashboardMutationQueue;
+			await pending;
+		} while (pending !== this.promptDashboardMutationQueue);
+	}
+
 	/** Читает независимые режимы с переносом прежних настроек; tests/stateService.test.ts. */
 	getPromptDashboardLayouts(): PromptDashboardLayouts {
 		return normalizePromptDashboardLayouts(
-			this.context.workspaceState.get(PROMPT_DASHBOARD_LAYOUTS_KEY),
+			this.promptDashboardLayoutsReadOverride ?? this.context.workspaceState.get(PROMPT_DASHBOARD_LAYOUTS_KEY),
 			this.context.workspaceState.get(PROMPT_DASHBOARD_SECTION_ORDER_KEY),
 			this.context.workspaceState.get<PromptDashboardCollapsedSections>(PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY),
 		);
 	}
 
-	/** Последовательно сохраняет только изменённую часть режима, удерживая второй режим и остальные поля. */
+	/** Сохраняет патч режима без публикации незавершённой записи; tests/stateService.test.ts. */
 	private async persistPromptDashboardLayout(
 		mode: PromptDashboardLayoutMode,
 		patch: Partial<PromptDashboardLayoutState>,
 	): Promise<void> {
 		const applyMutation = async (): Promise<void> => {
 			const layouts = this.getPromptDashboardLayouts();
-			layouts[mode] = { ...layouts[mode], ...patch };
-			await this.context.workspaceState.update(PROMPT_DASHBOARD_LAYOUTS_KEY, layouts);
+			this.promptDashboardLayoutsReadOverride = layouts;
+			await this.context.workspaceState.update(PROMPT_DASHBOARD_LAYOUTS_KEY, {
+				...layouts,
+				[mode]: { ...layouts[mode], ...patch },
+			});
+			// При отказе override остаётся: следующий патч строится из последней подтверждённой записи.
+			this.promptDashboardLayoutsReadOverride = undefined;
 		};
-		const pendingMutation = this.promptDashboardLayoutsMutationQueue.then(applyMutation, applyMutation);
-		this.promptDashboardLayoutsMutationQueue = pendingMutation.catch(() => undefined);
+		const pendingMutation = this.promptDashboardMutationQueue.then(applyMutation, applyMutation);
+		this.promptDashboardMutationQueue = pendingMutation.catch(() => undefined);
 		await pendingMutation;
 	}
 
@@ -999,6 +1023,28 @@ export class StateService {
 		mode: PromptDashboardLayoutMode = 'two-columns',
 	): Promise<void> {
 		await this.persistPromptDashboardLayout(mode, { sectionOrder: normalizePromptDashboardSectionOrder(order, mode) });
+	}
+
+	/** Отсутствие записи разрешает legacy-миграцию в webview; tests/stateService.test.ts. */
+	getPromptDashboardPreferences(): PromptDashboardPreferences | undefined {
+		const saved = this.promptDashboardPreferencesReadOverride
+			? this.promptDashboardPreferencesReadOverride.state
+			: this.context.workspaceState.get(PROMPT_DASHBOARD_PREFERENCES_KEY);
+		return saved === undefined ? undefined : normalizePromptDashboardPreferences(saved);
+	}
+
+	/** Полный снимок сохраняется в общей очереди; отказ не выдаётся за успех и не блокирует повтор. */
+	async savePromptDashboardPreferences(state: PromptDashboardPreferences): Promise<void> {
+		// Копируем вход до ожидания очереди, чтобы дальнейшие правки вызывающего кода не меняли эту запись.
+		const normalized = normalizePromptDashboardPreferences(state);
+		const applyMutation = async (): Promise<void> => {
+			this.promptDashboardPreferencesReadOverride = { state: this.getPromptDashboardPreferences() };
+			await this.context.workspaceState.update(PROMPT_DASHBOARD_PREFERENCES_KEY, normalized);
+			this.promptDashboardPreferencesReadOverride = undefined;
+		};
+		const pendingMutation = this.promptDashboardMutationQueue.then(applyMutation, applyMutation);
+		this.promptDashboardMutationQueue = pendingMutation.catch(() => undefined);
+		await pendingMutation;
 	}
 
 	getPromptEditorViewState(source?: EditorPromptViewStateKeySource | null): EditorPromptViewState {

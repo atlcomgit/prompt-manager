@@ -18,7 +18,7 @@ import {
 	PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS,
 	resolvePromptDashboardCacheState,
 	resolvePromptDashboardExpandRefreshTarget,
-	resolvePromptDashboardMode,
+	resolvePromptEditorLayout,
 	resolvePromptDashboardLayoutMode,
 	resolvePromptDashboardRequestMessageContext,
 	shouldReleasePromptDashboardProjectRequestOnNotice,
@@ -51,9 +51,19 @@ function createEmptyDockerWidget() {
 	});
 }
 
-test('resolvePromptDashboardMode switches to full only when the right side can fit widgets', () => {
-	assert.equal(resolvePromptDashboardMode(1119, 840), 'compact');
-	assert.equal(resolvePromptDashboardMode(1120, 840), 'full');
+/** Форма сжимается раньше виджетов, а слишком узкий экран переходит к общей вертикальной прокрутке. */
+test('resolvePromptEditorLayout preserves both panels at every breakpoint', () => {
+	for (const width of [0, 300, 631]) {
+		assert.deepEqual(resolvePromptEditorLayout(width), { stacked: true, formWidth: width });
+	}
+	for (const [width, formWidth] of [[632, 300], [633, 300], [671, 300], [672, 300], [673, 301],
+		[800, 428], [1119, 747], [1120, 748], [1211, 839], [1212, 840], [1213, 840], [1920, 840]]) {
+		assert.deepEqual(resolvePromptEditorLayout(width), { stacked: false, formWidth });
+		assert.ok(width - formWidth - 12 >= 320);
+	}
+	for (const invalid of [NaN, Infinity, -1]) {
+		assert.deepEqual(resolvePromptEditorLayout(invalid), { stacked: true, formWidth: 0 });
+	}
 });
 
 test('compactPromptDashboardMiddleLabel keeps the start and ending of a long project name', () => {

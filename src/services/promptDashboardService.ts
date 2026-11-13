@@ -158,7 +158,10 @@ export class PromptDashboardService implements vscode.Disposable {
 		this.warmTimer.unref?.();
 	}
 
+	/** Закрывает scope до очистки: поздний inflight не публикует данные и не ставит таймер; тесты Docker dispose. */
 	dispose(): void {
+		this.pauseActiveScope('dispose');
+		this.activePostMessage = undefined;
 		if (this.warmTimer) {
 			clearInterval(this.warmTimer);
 			this.warmTimer = null;
@@ -1689,7 +1692,7 @@ export class PromptDashboardService implements vscode.Disposable {
 		}
 	}
 
-	/** Переиспользует полный кеш или догружает видимые секции; регрессии — promptDashboardService.test.ts. */
+	/** Переиспользует кеш и текущие stats без очереди polling; регрессии — promptDashboardService.test.ts. */
 	private async refreshWidget(
 		scope: PromptDashboardScope,
 		widget: PromptDashboardWidgetKind,
@@ -1700,6 +1703,8 @@ export class PromptDashboardService implements vscode.Disposable {
 		const cacheKey = buildPromptDashboardWidgetCacheKey(scope, widget);
 		const scopeKey = buildPromptDashboardScopeKey(scope);
 		const cached = this.cache.get(cacheKey);
+		// Только автоматические stats объединяются; ручной full refresh сохраняет принудительный повтор.
+		const isDockerStatsRefresh = widget === 'docker' && options?.refreshMode === 'stats';
 		// Свежий кеш может не содержать секции, раскрытые другим профилем ширины.
 		// Проверяем также общий кеш и результат незавершённой загрузки: promptDashboardService.test.ts.
 		const hasVisibleSections = (entry: DashboardCacheEntry<unknown> | undefined): boolean => widget !== 'projects'
@@ -1749,6 +1754,10 @@ export class PromptDashboardService implements vscode.Disposable {
 			if (!existing) {
 				break;
 			}
+			// Текущая загрузка сама поставит следующий таймер; не сохраняем даже ожидающие stats-продолжения.
+			if (isDockerStatsRefresh) {
+				return;
+			}
 			this.logDashboardPerf('widget.waiting-in-flight', {
 				widget,
 				promptId: scope.promptId,
@@ -1758,6 +1767,10 @@ export class PromptDashboardService implements vscode.Disposable {
 			if (!options?.force && hasVisibleSections(this.cache.get(cacheKey))) {
 				return;
 			}
+		}
+		// Последняя видимость важнее причины запуска; скрытие не запрещает initial/manual full загрузку.
+		if (isDockerStatsRefresh && !this.isDockerLiveMetricsVisibleForScope(scope)) {
+			return;
 		}
 		this.ensureScopeActive(scope);
 		this.logDashboardPerf('widget.started', {

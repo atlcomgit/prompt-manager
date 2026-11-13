@@ -9,10 +9,13 @@ import {
 	buildDockerSparklineVisibleSamples,
 	buildDockerTableRows,
 	buildWidgetGridColumns,
+	buildPromptDashboardGitExpandedKey,
 	isPromptDashboardBranchActionBusy,
 	isPromptDashboardDragPointer,
 	subscribePromptDashboardDragEvents,
 	normalizePromptDashboardDockerWidgetState,
+	readPromptDashboardInitialPreferences,
+	observePromptDashboardDockerMetrics,
 	matchesDockerContainerStatusFilter,
 	reorderPromptDashboardSections,
 	resolveBranchDraftRefreshProjects,
@@ -37,6 +40,10 @@ import type {
 	PromptDashboardSnapshot,
 } from '../src/types/promptDashboard.js';
 import type { DockerContainerSummary } from '../src/types/docker.js';
+import {
+	normalizePromptDashboardPreferences,
+	type PromptDashboardPreferences,
+} from '../src/types/promptDashboardPreferences.js';
 import { buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction } from '../src/utils/promptDashboard.js';
 import { buildPromptDashboardTodosData } from '../src/utils/promptDashboardTodos.js';
 
@@ -290,7 +297,7 @@ function createActivityItem(
 	};
 }
 
-/** Renders the dashboard component into static markup for regression checks. */
+/** Проверяет разметку и первичное восстановление; эффекты и CSS требуют отдельной браузерной проверки. */
 function renderDashboard(
 	snapshot: PromptDashboardSnapshot | null,
 	options?: {
@@ -300,6 +307,11 @@ function renderDashboard(
 		sectionOrder?: PromptDashboardSectionOrder;
 		layoutMode?: PromptDashboardLayoutMode;
 		localStorage?: Storage;
+		/** Общая прокрутка, явное скрытие и сохранённые workspace-предпочтения. */
+		stacked?: boolean;
+		mode?: 'full' | 'compact';
+		initialPreferences?: PromptDashboardPreferences;
+		onPreferencesChange?: (state: PromptDashboardPreferences) => void;
 	},
 ): string {
 	return withDashboardEnvironment(() => renderToStaticMarkup(React.createElement(PromptDashboard, {
@@ -309,7 +321,10 @@ function renderDashboard(
 		collapsedSections: options?.collapsedSections,
 		sectionOrder: options?.sectionOrder,
 		layoutMode: options?.layoutMode,
-		mode: 'full',
+		mode: options?.mode ?? 'full',
+		stacked: options?.stacked,
+		initialPreferences: options?.initialPreferences,
+		onPreferencesChange: options?.onPreferencesChange,
 		onRefresh: () => { },
 		onRefreshWidget: () => { },
 		onToggleSectionCollapse: () => { },
@@ -358,6 +373,210 @@ test('normalizePromptDashboardDockerWidgetState keeps valid view mode and unique
 		sortBy: 'status',
 		expandedContainerIds: [],
 	});
+});
+
+/** Отсутствующее хранилище не создаёт перенос defaults, даже при явно пустых картах. */
+test('readPromptDashboardInitialPreferences does not migrate defaults or overwrite empty host settings', () => {
+	const defaults = normalizePromptDashboardPreferences(undefined);
+	const storage = createStorageMock({
+		'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ viewMode: 'cards', expandedContainerIds: ['legacy'] }),
+	});
+	withDashboardEnvironment(() => {
+		assert.deepEqual(readPromptDashboardInitialPreferences(defaults), { preferences: defaults, migratedLegacy: false });
+		// Даже непустой старый список Docker не имеет приоритета над явно пустой host-картой.
+		const host = { ...defaults, docker: { ...defaults.docker, expandedContainerIds: ['stale'] }, expanded: {} };
+		assert.deepEqual(readPromptDashboardInitialPreferences(host).preferences.expanded, {});
+	}, { localStorage: storage });
+	withDashboardEnvironment(() => {
+		assert.deepEqual(readPromptDashboardInitialPreferences(), { preferences: defaults, migratedLegacy: false });
+	}, { localStorage: createStorageMock() });
+});
+
+/** Перенос читает существующие Docker/TODO настройки, сохраняя исходное localStorage неизменным. */
+test('readPromptDashboardInitialPreferences migrates real legacy values without writing localStorage', () => {
+	const docker = {
+		viewMode: 'table', statusFilter: 'running', search: 'worker', sortBy: 'cpu', expandedContainerIds: ['container-a'],
+	};
+	const todos = { selectedFileTypes: [' TS ', 'php'], search: 'fix me' };
+	const storage = createStorageMock({
+		'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify(docker),
+		'pm.promptDashboard.todosWidgetState.v1': JSON.stringify(todos),
+	});
+	withDashboardEnvironment(() => {
+		assert.deepEqual(readPromptDashboardInitialPreferences(), {
+			migratedLegacy: true,
+			preferences: normalizePromptDashboardPreferences({
+				docker, todos, expanded: { 'docker:container-a': true },
+			}),
+		});
+	}, { localStorage: storage });
+	assert.equal(storage.length, 2);
+	assert.equal(storage.getItem('pm.promptDashboard.dockerWidgetState.v1'), JSON.stringify(docker));
+	assert.equal(storage.getItem('pm.promptDashboard.todosWidgetState.v1'), JSON.stringify(todos));
+});
+
+/** Повреждённые значения и запрет storage не дают ложный повод сохранять defaults на host. */
+test('readPromptDashboardInitialPreferences ignores corrupt and inaccessible legacy storage', () => {
+	for (const raw of ['invalid json', 'null', '[]', '42']) {
+		withDashboardEnvironment(() => {
+			assert.equal(readPromptDashboardInitialPreferences().migratedLegacy, false);
+		}, { localStorage: createStorageMock({ 'pm.promptDashboard.dockerWidgetState.v1': raw }) });
+	}
+	const storage = createStorageMock();
+	storage.getItem = () => { throw new Error('storage disabled'); };
+	withDashboardEnvironment(() => {
+		assert.equal(readPromptDashboardInitialPreferences().migratedLegacy, false);
+	}, { localStorage: storage });
+});
+
+/** Вертикальная компоновка сохраняет видимые карточки, но не получает второй viewport прокрутки. */
+test('PromptDashboard stacked markup retains widgets and delegates scrolling to the editor page', () => {
+	const writes: PromptDashboardPreferences[] = [];
+	const markup = renderDashboard(createSnapshot([createProject()]), {
+		stacked: true, layoutMode: 'single-column', onPreferencesChange: state => writes.push(state),
+	});
+	const rail = markup.match(/<aside[^>]*>/)?.[0] || '';
+	assert.match(rail, /height:auto/);
+	assert.match(rail, /overflow-y:visible/);
+	assert.doesNotMatch(rail, /(?:;|style=")overflow:/);
+	assert.match(rail, /data-pm-dashboard-stacked="true"/);
+	assert.doesNotMatch(rail, /height:100vh/);
+	assert.equal((markup.match(/data-pm-dashboard-column=/g) || []).length, 1);
+	assert.match(markup, /data-pm-dashboard-section="dockerContainers"/);
+	assert.match(markup, /@container pm-dashboard-widget \(max-width: 359px\)/);
+	assert.match(markup, /class="pm-dashboard-branch-project"/);
+	assert.match(markup, /class="pm-dashboard-docker-controls"/);
+	assert.deepEqual(writes, []);
+	assert.equal(renderDashboard(createSnapshot([]), { mode: 'compact', stacked: true }), '');
+	assert.match(renderDashboard(createSnapshot([])).match(/<aside[^>]*>/)?.[0] || '', /height:100vh/);
+});
+
+/** Настройки host имеют приоритет над localStorage и восстанавливают workspace-wide выбор без побочных записей. */
+test('PromptDashboard restores Docker controls and Show all from host preferences', () => {
+	const writes: PromptDashboardPreferences[] = [];
+	const preferences = normalizePromptDashboardPreferences({
+		docker: { viewMode: 'table', statusFilter: 'stopped', search: 'saved search', sortBy: 'memory' },
+		showAllBranchProjects: true,
+	});
+	const selected = createProject();
+	const other = createProject({ project: 'extra-workspace-project', repositoryPath: '/workspace/extra' });
+	const markup = renderDashboard(createSnapshot([selected], 'fresh', [selected, other]), {
+		initialPreferences: preferences, onPreferencesChange: state => writes.push(state),
+		localStorage: createStorageMock({
+			'pm.promptDashboard.dockerWidgetState.v1': JSON.stringify({ search: 'obsolete search', viewMode: 'cards' }),
+		}),
+	});
+	assert.match(markup, /value="saved search"/);
+	assert.doesNotMatch(markup, /obsolete search/);
+	assert.match(markup, /<option value="stopped" selected="">/);
+	assert.match(markup, /<option value="memory" selected="">/);
+	assert.match(markup, /Только выбранные/);
+	assert.match(markup, /title="extra-workspace-project/);
+	assert.match(renderDashboard(null, { initialPreferences: preferences }), /Только выбранные/);
+	assert.deepEqual(writes, []);
+});
+
+/** Явное false закрывает ToDo-узел, раскрытый по умолчанию, не уничтожая поиск и фильтр. */
+test('PromptDashboard restores ToDo filters and explicit false disclosure flags', () => {
+	const snapshot = createSnapshot([]);
+	snapshot.todos = {
+		kind: 'todos', cache: { status: 'fresh', source: 'cache', updatedAt: snapshot.generatedAt },
+		data: buildPromptDashboardTodosData({
+			markers: [{ id: 'todo-one', project: 'api', filePath: 'src/app.ts', fileType: 'ts',
+				marker: 'todo', token: 'todo', line: 7, column: 1, preview: 'restore setting' }],
+			scannedFileCount: 1, skippedFileCount: 0, maxResults: 500, truncated: false,
+		}),
+	};
+	const preferences = normalizePromptDashboardPreferences({
+		todos: { selectedFileTypes: ['ts'], search: 'restore' }, expanded: { 'todo:project:api': false },
+	});
+	const closed = renderDashboard(snapshot, { initialPreferences: preferences });
+	assert.match(closed, /value="restore"/);
+	// Длинная подпись счётчика не выходит за границы карточки шириной 300 px.
+	const summaryLabel = closed.match(/<span style="[^"]*">просмотрено<\/span>/)?.[0] || '';
+	assert.match(summaryLabel, /overflow-wrap:anywhere/);
+	assert.doesNotMatch(summaryLabel, /white-space:nowrap/);
+	assert.match(closed, /title="api" aria-expanded="false"/);
+	assert.doesNotMatch(closed, /restore setting/);
+	const opened = renderDashboard(snapshot, { initialPreferences: { ...preferences, expanded: {} } });
+	assert.match(opened, /restore setting/);
+	assert.match(opened, /class="pm-dashboard-todo-marker"/);
+});
+
+/** Наблюдатель различает viewport и rail и не включает polling лишь из-за видимого заголовка карточки. */
+test('observePromptDashboardDockerMetrics observes resource blocks with the active scroll root and disconnects', () => {
+	const previous = Object.getOwnPropertyDescriptor(globalThis, 'IntersectionObserver');
+	const targets = [{}, {}] as HTMLElement[];
+	// Независимое событие страницы позволяет скрыть вкладку, не меняя геометрию метрик.
+	const ownerDocument = Object.assign(new EventTarget(), { hidden: false });
+	const rail = { querySelectorAll: () => targets, ownerDocument } as unknown as HTMLElement;
+	const observed: Element[] = [];
+	const roots: Array<Element | Document | null | undefined> = [];
+	const callbacks: IntersectionObserverCallback[] = [];
+	let disconnected = 0;
+	/** Изолированная подмена доставляет пересечения вручную, без настоящего DOM и фоновых процессов. */
+	class ObserverMock {
+		/** Сохраняет callback и root для управляемой доставки событий. */
+		constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+			callbacks.push(callback);
+			roots.push(options?.root);
+		}
+		/** Фиксирует реальные targets, выбранные production-наблюдателем. */
+		observe(target: Element) { observed.push(target); }
+		/** Подтверждает снятие подписки при очистке. */
+		disconnect() { disconnected += 1; }
+	}
+	Object.defineProperty(globalThis, 'IntersectionObserver', { configurable: true, value: ObserverMock });
+	try {
+		const visible: boolean[] = [];
+		const stopRail = observePromptDashboardDockerMetrics(rail, false, value => visible.push(value));
+		assert.equal(roots[0], rail);
+		assert.deepEqual(observed, targets);
+		/** Доставляет частичное обновление пересечений, как настоящий IntersectionObserver. */
+		const deliver = (index: number, target: Element, inView: boolean) => callbacks[index]([
+			{ target, isIntersecting: inView, intersectionRatio: inView ? 0.5 : 0 } as IntersectionObserverEntry,
+		], {} as IntersectionObserver);
+		deliver(0, targets[0], false);
+		deliver(0, targets[0], true);
+		deliver(0, targets[1], true);
+		deliver(0, targets[0], false);
+		deliver(0, targets[1], false);
+		assert.deepEqual(visible, [false, true, true, true, false]);
+		deliver(0, targets[0], true);
+		ownerDocument.hidden = true;
+		ownerDocument.dispatchEvent(new Event('visibilitychange'));
+		deliver(0, targets[0], true);
+		ownerDocument.hidden = false;
+		ownerDocument.dispatchEvent(new Event('visibilitychange'));
+		assert.deepEqual(visible.slice(-4), [true, false, false, true]);
+		deliver(0, targets[0], false);
+		stopRail();
+		const notificationCount = visible.length;
+		ownerDocument.dispatchEvent(new Event('visibilitychange'));
+		deliver(0, targets[0], true);
+		assert.equal(visible.length, notificationCount);
+		assert.equal(visible.at(-1), false);
+		const stopStacked = observePromptDashboardDockerMetrics(rail, true, () => undefined);
+		assert.equal(roots[1], null);
+		stopStacked();
+		assert.equal(disconnected, 2);
+		// Карточка без видимых ресурсных блоков не создаёт наблюдатель и не включает опрос.
+		const noMetrics: boolean[] = [];
+		const emptyRail = { querySelectorAll: () => [] } as unknown as HTMLElement;
+		observePromptDashboardDockerMetrics(emptyRail, true, value => noMetrics.push(value))();
+		assert.deepEqual(noMetrics, [false]);
+		assert.equal(callbacks.length, 2);
+		// Недоступный API также не превращается в фиктивное разрешение фонового опроса.
+		Object.defineProperty(globalThis, 'IntersectionObserver', { configurable: true, value: undefined });
+		observePromptDashboardDockerMetrics(rail, false, value => noMetrics.push(value))();
+		assert.deepEqual(noMetrics, [false, false]);
+	} finally {
+		if (previous) {
+			Object.defineProperty(globalThis, 'IntersectionObserver', previous);
+		} else {
+			Reflect.deleteProperty(globalThis, 'IntersectionObserver');
+		}
+	}
 });
 
 /** Проверяет, что stopped-фильтр исключает активные состояния и сохраняет реальный остановленный контейнер. */
@@ -2597,7 +2816,7 @@ test('PromptDashboard scopes a shared projects refresh spinner only to the click
 	);
 	assert.match(
 		markup,
-		/MR\/PR[\s\S]*?<span style="font-size:11px;font-weight:600;color:var\(--vscode-descriptionForeground\);white-space:nowrap">1<\/span>[\s\S]*?aria-label="Обновить виджет: MR\/PR"/,
+		/MR\/PR[\s\S]*?<span style="[^"]*font-size:11px;font-weight:600;color:var\(--vscode-descriptionForeground\);white-space:nowrap">1<\/span>[\s\S]*?aria-label="Обновить виджет: MR\/PR"/,
 	);
 	assert.doesNotMatch(
 		markup,
@@ -2890,8 +3109,9 @@ test('resolveVisibleParallelBranches hides zero-file rows once lightweight or hy
 	assert.deepEqual(visible.map(branch => branch.name), ['feature/loading-unknown', 'feature/kept-visible', 'feature/real']);
 });
 
+/** Гидратация сохранённого раскрытия dirty-файлов использует отдельный маршрут и точный repository scope. */
 test('resolveExpandedDetailsHydrationRequest keeps dirty file hydration on the dedicated route', () => {
-	const request = resolveExpandedDetailsHydrationRequest('dirty:api', [createProject({
+	const project = createProject({
 		uncommittedFiles: [{
 			project: 'api',
 			path: 'src/app.ts',
@@ -2904,7 +3124,8 @@ test('resolveExpandedDetailsHydrationRequest keeps dirty file hydration on the d
 			deletions: null,
 			isBinary: false,
 		}],
-	})]);
+	});
+	const request = resolveExpandedDetailsHydrationRequest(buildPromptDashboardGitExpandedKey('dirty', project), [project]);
 
 	assert.deepEqual(request, {
 		projects: ['api'],
@@ -2941,7 +3162,7 @@ test('resolveExpandedDetailsHydrationRequest rehydrates stale visible counters f
 	assert.deepEqual(visibleProjects.map(project => project.project), ['api', 'web']);
 	assert.equal(visibleProjects[1]?.uncommittedFiles[0]?.additions, 7);
 	assert.equal(visibleProjects[1]?.uncommittedFiles[0]?.deletions, 2);
-	assert.deepEqual(resolveExpandedDetailsHydrationRequest('dirty:web', visibleProjects), {
+	assert.deepEqual(resolveExpandedDetailsHydrationRequest(buildPromptDashboardGitExpandedKey('dirty', workspaceProject), visibleProjects), {
 		projects: ['web'],
 		reason: 'dirty-files',
 	});
@@ -2965,11 +3186,71 @@ test('resolveAutomaticExpandedDetailsHydrationRequest waits for refresh after pr
 		}],
 	})];
 
-	assert.equal(resolveAutomaticExpandedDetailsHydrationRequest('dirty:api', projects, 'error'), null);
-	assert.deepEqual(resolveAutomaticExpandedDetailsHydrationRequest('dirty:api', projects, 'fresh'), {
+	const key = buildPromptDashboardGitExpandedKey('dirty', projects[0]);
+	assert.equal(resolveAutomaticExpandedDetailsHydrationRequest(key, projects, 'error'), null);
+	assert.deepEqual(resolveAutomaticExpandedDetailsHydrationRequest(key, projects, 'fresh'), {
 		projects: ['api'],
 		reason: 'dirty-files',
 	});
+});
+
+/** Сохранённые раскрытия Git не переходят к другому рабочему дереву, ветке или базе сравнения. */
+test('PromptDashboard restores Git disclosures only for the matching repository and branch', () => {
+	const project = createProject({
+		recentCommits: [{
+			sha: 'saved-sha', shortSha: 'saved', subject: 'Saved disclosure', author: 'Example',
+			committedAt: '2026-04-29T10:00:00.000Z', refNames: [], changedFilesHydrated: false, changedFiles: [],
+		}],
+	});
+	const key = buildPromptDashboardGitExpandedKey('commit', project, 'saved-sha');
+	const preferences = normalizePromptDashboardPreferences({ expanded: { [key]: true } });
+	assert.match(renderDashboard(createSnapshot([project]), { initialPreferences: preferences }), /Файлы коммита загружаются/);
+	assert.deepEqual(resolveExpandedDetailsHydrationRequest(key, [project]), { projects: ['api'], reason: 'details' });
+	for (const other of [
+		{ ...project, repositoryPath: '/workspace/api-other' },
+		{ ...project, currentBranch: 'feature/other:branch' },
+	]) {
+		assert.equal(resolveExpandedDetailsHydrationRequest(key, [other]), null);
+		assert.doesNotMatch(renderDashboard(createSnapshot([other]), { initialPreferences: preferences }), /Файлы коммита загружаются/);
+	}
+	const closed = { ...preferences, expanded: { [key]: false } };
+	assert.doesNotMatch(renderDashboard(createSnapshot([project]), { initialPreferences: closed }), /Файлы коммита загружаются/);
+	assert.notEqual(buildPromptDashboardGitExpandedKey('parallel', project, 'feature/a', 'main'),
+		buildPromptDashboardGitExpandedKey('parallel', project, 'feature/a', 'develop'));
+	assert.notEqual(buildPromptDashboardGitExpandedKey('parallel', project, 'feature/a', 'main'),
+		buildPromptDashboardGitExpandedKey('parallel', project, 'origin/feature/a', 'main'));
+});
+
+/** Узкая таблица сохраняет тот же viewMode и данные; пустая host-карта не наследует legacy раскрытия. */
+test('PromptDashboard keeps restored table fields and explicit Docker disclosure in stacked markup', () => {
+	const snapshot = createSnapshot([]);
+	const container = createDockerContainer();
+	snapshot.docker.data.projects = [{
+		project: 'api', projectPath: '/workspace/api', composeFiles: [], composeFileGroups: [],
+		containers: [container], runningCount: 1, stoppedCount: 0, warningCount: 0, errorCount: 0,
+	}];
+	snapshot.docker.data.totalContainers = 1;
+	snapshot.docker.data.runningContainers = 1;
+	snapshot.docker.data.defaultViewMode = 'table';
+	const preferences = normalizePromptDashboardPreferences({
+		docker: { viewMode: 'table', expandedContainerIds: [container.id] }, expanded: {},
+	});
+	const closed = renderDashboard(snapshot, { initialPreferences: preferences, stacked: true, layoutMode: 'single-column' });
+	assert.match(closed, /class="pm-dashboard-docker-table-row"/);
+	assert.match(closed, /Проект\/Compose\/Контейнер/);
+	assert.match(closed, /12\.5%/);
+	assert.match(closed, /100 МБ/);
+	assert.match(closed, /aria-label="Действия контейнера api-service-1"/);
+	assert.match(closed, /data-pm-docker-live-metrics="true"/);
+	assert.doesNotMatch(closed, /Скрыть детали контейнера api-service-1/);
+	const opened = renderDashboard(snapshot, {
+		initialPreferences: { ...preferences, expanded: { [`docker:${container.id}`]: true } },
+		stacked: true, layoutMode: 'single-column',
+	});
+	assert.match(opened, /Скрыть детали контейнера api-service-1/);
+	assert.match(opened, /Порты/);
+	// Настройка расширения применяется сразу при отсутствии явного пользовательского выбора.
+	assert.match(renderDashboard(snapshot), /class="pm-dashboard-docker-table-row"/);
 });
 
 test('PromptDashboard hides header loading labels for project-based widgets while data refreshes', () => {

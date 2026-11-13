@@ -18,6 +18,9 @@ function createVsCodeMock() {
 				listener(value);
 			}
 		}
+
+		/** Освобождает подписки при проверке штатного dispose провайдера. */
+		dispose(): void { this.listeners.length = 0; }
 	}
 
 	return {
@@ -95,6 +98,35 @@ function makePrompt(id: string, status: 'in-progress' | 'review' | 'completed') 
 		report: '',
 	};
 }
+
+/** Просмотр адресует ответы и ошибки без открытия промпта, сохранения и обновления списка. */
+test('SidebarProvider routes hover previews without prompt mutations and sanitizes failures', async () => {
+	const { SidebarProvider } = await importSidebarProvider();
+	type Args = ConstructorParameters<typeof SidebarProvider>;
+	const target = { id: 'preview', promptUuid: 'uuid', archived: true };
+	const messages: import('../src/types/messages.js').ExtensionToWebviewMessage[] = [];
+	let fail = false;
+	const storage = {
+		getStorageDirectoryPath: () => '/unused',
+		getPromptHoverPreview: async (received: typeof target) => {
+			assert.deepEqual(received, target);
+			if (fail) { throw new Error('Private filesystem detail'); }
+			return { state: 'ready' as const, content: 'Full content' };
+		},
+	};
+	const provider = new SidebarProvider({} as Args[0], storage as unknown as Args[1],
+		{} as Args[2], {} as Args[3], {} as Args[4], {} as Args[5]);
+	provider.postMessage = message => { messages.push(message); };
+	const handler = provider as unknown as { handleMessage: (message: import('../src/types/messages.js').WebviewToExtensionMessage) => Promise<void> };
+	await handler.handleMessage({ type: 'getPromptHoverPreview', target, requestId: 'hover-1' });
+	fail = true;
+	await handler.handleMessage({ type: 'getPromptHoverPreview', target, requestId: 'hover-2' });
+	assert.deepEqual(messages, [
+		{ type: 'promptHoverPreview', target, requestId: 'hover-1', result: { state: 'ready', content: 'Full content' } },
+		{ type: 'promptHoverPreview', target, requestId: 'hover-2', result: { state: 'error' } },
+	]);
+	provider.dispose();
+});
 
 test('SidebarProvider updates prompt status with status-change history and cleanup side effects', async () => {
 	const { SidebarProvider } = await importSidebarProvider();

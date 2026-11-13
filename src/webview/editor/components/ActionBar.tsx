@@ -109,6 +109,7 @@ function splitLeadingIconLabel(label: string): { icon: string; text: string } {
   return { icon: leadingToken, text };
 }
 
+/** Сохраняет доступность основных действий при переносе групп в узкой форме промпта. */
 export const ActionBar: React.FC<Props> = ({
   onSave, onShowHistory, onStartChat, onOpenChat, onOpenGitFlow, onMarkCompleted, onMarkStopped, showStatusActions, showGitFlowAction = false, hasChatSession, isChatPanelOpen, isSaving, isStartingChat, isOpeningChat = false, isGeneratingTitle = false, isGeneratingDescription = false, hasContent, isPersistedPrompt, status, activeTab,
 }) => {
@@ -144,7 +145,7 @@ export const ActionBar: React.FC<Props> = ({
         </div>
       ) : null}
 
-      <div style={styles.bar}>
+      <div className="pm-editor-actions" style={styles.bar}>
         <div style={styles.left}>
           <button
             style={{ ...styles.btn, ...styles.btnPrimary }}
@@ -236,6 +237,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   bar: {
     display: 'flex',
+    // Каждая группа может занять новую строку вместо обрезания кнопок соседней группой.
+    flexWrap: 'wrap',
+    gap: '8px',
     alignItems: 'center',
     justifyContent: 'space-between',
     padding: '10px 20px',
@@ -267,11 +271,13 @@ const styles: Record<string, React.CSSProperties> = {
   },
   left: {
     display: 'flex',
+    minWidth: 0,
     gap: '8px',
     flexWrap: 'wrap',
   },
   right: {
     display: 'flex',
+    minWidth: 0,
     alignItems: 'center',
     gap: '8px',
     flexWrap: 'wrap',

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
-import { normalizePromptDashboardLayouts } from '../src/types/promptDashboard.js';
+import { normalizePromptDashboardLayouts, PROMPT_DASHBOARD_SECTION_KEYS } from '../src/types/promptDashboard.js';
+import { normalizePromptDashboardPreferences } from '../src/types/promptDashboardPreferences.js';
 import { createDefaultEditorPromptViewState } from '../src/types/prompt.js';
 
 const originalLoad = (Module as any)._load;
@@ -509,8 +510,48 @@ test('StateService completion snapshot selects the newest tracked session with a
 	});
 });
 
-/** Смена режима и перезапуск сохраняют отдельные порядок и сворачивание, включая пустую карту. */
-test('StateService keeps dashboard layouts isolated across queued saves and restart', async () => {
+/** Ожидание bootstrap включает новые записи очереди и не зависает после отказа предыдущей. */
+test('StateService waits for dashboard saves added during a pending failed write', async () => {
+	const { StateService } = await importStateService();
+	const firstEntered = createDeferred<void>();
+	const firstRelease = createDeferred<void>();
+	const secondEntered = createDeferred<void>();
+	const secondRelease = createDeferred<void>();
+	let writes = 0;
+	let completed = false;
+	const workspaceState = createWorkspaceStateMock({}, { update: async (store, key, value) => {
+		if (++writes === 1) {
+			firstEntered.resolve();
+			await firstRelease.promise;
+			throw new Error('testing write failure');
+		}
+		secondEntered.resolve();
+		await secondRelease.promise;
+		store.set(key, value);
+	} });
+	const service = new StateService({ workspaceState } as unknown as ConstructorParameters<typeof StateService>[0]);
+	const failure = assert.rejects(service.savePromptDashboardCollapsedSections({ todos: true }, 'two-columns'));
+	await firstEntered.promise;
+	const waiting = service.waitForPromptDashboardSaves().then(() => { completed = true; });
+	const preferences = normalizePromptDashboardPreferences({ docker: { search: 'latest' } });
+	const saving = service.savePromptDashboardPreferences(preferences);
+	try {
+		firstRelease.resolve();
+		await secondEntered.promise;
+		assert.equal(completed, false);
+		secondRelease.resolve();
+		await Promise.all([failure, saving, waiting]);
+		assert.deepEqual(service.getPromptDashboardCollapsedSections('two-columns'), {});
+		assert.deepEqual(service.getPromptDashboardPreferences(), preferences);
+	} finally {
+		firstRelease.resolve();
+		secondRelease.resolve();
+		await Promise.all([failure, saving, waiting]);
+	}
+});
+
+/** Новый экземпляр восстанавливает профили из отдельного JSON-снимка, а не общей ссылки Memento. */
+test('StateService keeps dashboard layouts isolated across queued saves and serialized restore', async () => {
 	const { StateService } = await importStateService();
 	const legacyOrder = [['todos', 'status'], ['activity']];
 	const workspaceState = createWorkspaceStateMock({
@@ -525,10 +566,14 @@ test('StateService keeps dashboard layouts isolated across queued saves and rest
 	await Promise.all([
 		service.savePromptDashboardSectionOrder([['aiAnalysis', 'todos', 'status']], 'single-column'),
 		service.savePromptDashboardCollapsedSections({}, 'single-column'),
-		service.savePromptDashboardSectionOrder([['activity'], ['todos', 'aiAnalysis']], 'two-columns'),
+		service.savePromptDashboardSectionOrder([[], ['activity',
+			...PROMPT_DASHBOARD_SECTION_KEYS.filter(key => key !== 'activity')]], 'two-columns'),
 		service.savePromptDashboardCollapsedSections({ dockerContainers: true }, 'two-columns'),
 	]);
-	const reopened = new StateService({ workspaceState } as any);
+	const restoredWorkspaceState = createWorkspaceStateMock(JSON.parse(JSON.stringify(
+		Object.fromEntries(workspaceState.store),
+	)));
+	const reopened = new StateService({ workspaceState: restoredWorkspaceState } as any);
 	assert.deepEqual(reopened.getPromptDashboardLayouts(), service.getPromptDashboardLayouts());
 	assert.deepEqual(reopened.getPromptDashboardCollapsedSections('single-column'), {});
 	assert.deepEqual(reopened.getPromptDashboardCollapsedSections('two-columns'), { dockerContainers: true });
@@ -536,8 +581,44 @@ test('StateService keeps dashboard layouts isolated across queued saves and rest
 		['aiAnalysis', 'todos', 'status']);
 	assert.equal(reopened.getPromptDashboardSectionOrder('single-column').length, 1);
 	assert.equal(reopened.getPromptDashboardSectionOrder('two-columns').length, 2);
-	assert.equal(reopened.getPromptDashboardSectionOrder('two-columns')[0][0], 'activity');
+	assert.deepEqual(reopened.getPromptDashboardSectionOrder('two-columns')[0], []);
+	assert.equal(reopened.getPromptDashboardSectionOrder('two-columns')[1][0], 'activity');
 	assert.deepEqual(workspaceState.store.get('promptManager.dashboardSectionOrder'), legacyOrder);
+});
+
+/** Memento может обновить память до отказа записи: следующий патч не должен сохранить неудачный снимок. */
+test('StateService does not expose or inherit an eagerly updated failed dashboard layout', async () => {
+	const { StateService } = await importStateService();
+	const entered = createDeferred<void>();
+	const release = createDeferred<void>();
+	let writes = 0;
+	const workspaceState = createWorkspaceStateMock({}, {
+		update: async (store, key, value) => {
+			store.set(key, value);
+			if (++writes === 1) {
+				entered.resolve();
+				await release.promise;
+				throw new Error('simulated persistence failure');
+			}
+		},
+	});
+	const service = new StateService({ workspaceState } as any);
+	const expected = service.getPromptDashboardLayouts();
+	const saving = service.savePromptDashboardCollapsedSections({ status: true }, 'single-column');
+	const rejected = assert.rejects(saving, /simulated persistence failure/);
+	await entered.promise;
+	try {
+		assert.deepEqual(service.getPromptDashboardLayouts(), expected);
+	} finally {
+		release.resolve();
+		await rejected;
+	}
+	assert.deepEqual(service.getPromptDashboardLayouts(), expected);
+	await service.savePromptDashboardCollapsedSections({ todos: true }, 'two-columns');
+	assert.deepEqual(service.getPromptDashboardCollapsedSections('single-column'), {});
+	assert.deepEqual(service.getPromptDashboardCollapsedSections('two-columns'), { todos: true });
+	await service.savePromptDashboardCollapsedSections({ activity: true }, 'single-column');
+	assert.deepEqual(service.getPromptDashboardCollapsedSections('single-column'), { activity: true });
 });
 
 /** Ошибка одной записи не блокирует следующие сохранения обоих режимов. */
@@ -557,4 +638,98 @@ test('StateService recovers dashboard layout saves after a failed write', async 
 	await assert.rejects(service.savePromptDashboardCollapsedSections({ status: true }, 'single-column'));
 	await service.savePromptDashboardCollapsedSections({ activity: true }, 'two-columns');
 	assert.deepEqual(service.getPromptDashboardCollapsedSections('two-columns'), { activity: true });
+});
+
+/** Отсутствие записи отличается от сохранённых defaults и не мешает миграции localStorage. */
+test('StateService dashboard preferences stay absent until explicitly saved', async () => {
+	const { StateService } = await importStateService();
+	const workspaceState = createWorkspaceStateMock();
+	const service = new StateService({ workspaceState } as any);
+	assert.equal(service.getPromptDashboardPreferences(), undefined);
+	assert.equal(workspaceState.store.size, 0);
+	await service.savePromptDashboardPreferences(normalizePromptDashboardPreferences(undefined));
+	assert.deepEqual(service.getPromptDashboardPreferences(), normalizePromptDashboardPreferences(undefined));
+	assert.equal(workspaceState.store.has('promptManager.dashboardPreferences'), true);
+});
+
+/** Отдельный сериализованный Memento восстанавливает поиск, фильтры, false и пустые значения. */
+test('StateService dashboard preferences survive serialized restore without sharing mutable values', async () => {
+	const { StateService } = await importStateService();
+	const workspaceState = createWorkspaceStateMock();
+	const service = new StateService({ workspaceState } as any);
+	const state = normalizePromptDashboardPreferences({
+		docker: { viewMode: 'table', statusFilter: 'stopped', search: 'api', sortBy: 'cpu',
+			expandedContainerIds: ['compose:api'] },
+		todos: { selectedFileTypes: [' TS '], search: 'FIXME' },
+		expanded: { 'project:api': false }, showAllBranchProjects: true,
+	});
+	const expected = normalizePromptDashboardPreferences(state);
+	await service.savePromptDashboardPreferences(state);
+	state.expanded['project:api'] = true;
+	state.docker.search = 'modified input';
+	const returned = service.getPromptDashboardPreferences()!;
+	returned.todos.selectedFileTypes.push('php');
+	returned.expanded['branch:other'] = true;
+	const restored = new StateService({ workspaceState: createWorkspaceStateMock(JSON.parse(JSON.stringify(
+		Object.fromEntries(workspaceState.store),
+	))) } as any);
+	assert.deepEqual(restored.getPromptDashboardPreferences(), expected);
+	await restored.savePromptDashboardPreferences(normalizePromptDashboardPreferences({ expanded: {} }));
+	assert.deepEqual(restored.getPromptDashboardPreferences()?.expanded, {});
+	assert.equal(restored.getPromptDashboardPreferences()?.showAllBranchProjects, false);
+});
+
+/** Быстрые полные снимки сохраняются в порядке поступления, а отказ не публикует optimistic Memento. */
+test('StateService dashboard preferences recover after eager failure and serialize newer snapshots', async () => {
+	const { StateService } = await importStateService();
+	const entered = createDeferred<void>();
+	const release = createDeferred<void>();
+	const retryEntered = createDeferred<void>();
+	const retryRelease = createDeferred<void>();
+	const writes: unknown[] = [];
+	const workspaceState = createWorkspaceStateMock({}, { update: async (store, key, value) => {
+		writes.push(value);
+		store.set(key, value);
+		if (writes.length === 1) {
+			entered.resolve();
+			await release.promise;
+			throw new Error('preferences write failed');
+		}
+		if (writes.length === 2) {
+			retryEntered.resolve();
+			await retryRelease.promise;
+		}
+	} });
+	const service = new StateService({ workspaceState } as any);
+	const failed = service.savePromptDashboardPreferences(normalizePromptDashboardPreferences({
+		docker: { search: 'failed' },
+	}));
+	const rejected = assert.rejects(failed, /preferences write failed/);
+	await entered.promise;
+	try {
+		assert.equal(service.getPromptDashboardPreferences(), undefined);
+	} finally {
+		release.resolve();
+		await rejected;
+	}
+	assert.equal(service.getPromptDashboardPreferences(), undefined);
+	const first = normalizePromptDashboardPreferences({ docker: { search: 'first' } });
+	const latest = normalizePromptDashboardPreferences({ expanded: { 'project:api': false }, todos: { search: 'latest' } });
+	const saving = Promise.all([
+		service.savePromptDashboardPreferences(first),
+		service.savePromptDashboardCollapsedSections({ activity: true }, 'single-column'),
+		service.savePromptDashboardPreferences(latest),
+	]);
+	await retryEntered.promise;
+	try {
+		assert.equal(writes.length, 2);
+		assert.equal(service.getPromptDashboardPreferences(), undefined);
+	} finally {
+		retryRelease.resolve();
+		await saving;
+	}
+	assert.deepEqual(writes[1], first);
+	assert.deepEqual(writes[3], latest);
+	assert.deepEqual(service.getPromptDashboardPreferences(), latest);
+	assert.deepEqual(service.getPromptDashboardCollapsedSections('single-column'), { activity: true });
 });

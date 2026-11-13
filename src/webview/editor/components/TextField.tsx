@@ -8,6 +8,7 @@ interface Props {
   required?: boolean;
 }
 
+/** Поле сжимается до доступного места, не задавая браузерную min-content ширину форме. */
 export const TextField: React.FC<Props> = ({ label, value, onChange, placeholder, required }) => {
   return (
     <div style={styles.field}>
@@ -28,6 +29,7 @@ export const TextField: React.FC<Props> = ({ label, value, onChange, placeholder
 
 const styles: Record<string, React.CSSProperties> = {
   field: {
+    minWidth: 0,
     display: 'flex',
     flexDirection: 'column',
     gap: '4px',
@@ -42,6 +44,8 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--vscode-errorForeground)',
   },
   input: {
+    minWidth: 0,
+    width: '100%',
     padding: '6px 8px',
     background: 'var(--vscode-input-background)',
     color: 'var(--vscode-input-foreground)',

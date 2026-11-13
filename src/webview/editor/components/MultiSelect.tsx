@@ -108,8 +108,8 @@ export const MultiSelect: React.FC<Props> = ({
         {selected.map(id => {
           const opt = options.find(o => o.id === id);
           return (
-            <span key={id} style={styles.chip}>
-              {opt?.name || id}
+            <span key={id} style={styles.chip} title={opt?.name || id}>
+              <span style={styles.chipLabel}>{opt?.name || id}</span>
               <button style={styles.chipRemove} onClick={() => onChange(selected.filter(s => s !== id))}>✕</button>
             </span>
           );
@@ -245,6 +245,7 @@ export const MultiSelect: React.FC<Props> = ({
 
 const styles: Record<string, React.CSSProperties> = {
   field: {
+    minWidth: 0,
     display: 'flex',
     flexDirection: 'column',
     gap: '4px',
@@ -267,6 +268,9 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
   },
   chip: {
+    // Длинное имя не выталкивает кнопку удаления за пределы выбранного проекта.
+    maxWidth: '100%',
+    minWidth: 0,
     display: 'inline-flex',
     alignItems: 'center',
     gap: '4px',
@@ -278,6 +282,7 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: 'nowrap' as const,
   },
   chipRemove: {
+    flexShrink: 0,
     background: 'none',
     border: 'none',
     color: 'inherit',
@@ -285,6 +290,12 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '0 2px',
     fontSize: '10px',
     opacity: 0.8,
+  },
+  // Полное имя остаётся в title; визуальная метка занимает остаток ширины чипа.
+  chipLabel: {
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   },
   input: {
     flex: 1,

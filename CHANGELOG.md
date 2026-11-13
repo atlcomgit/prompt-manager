@@ -9,6 +9,10 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 ### 2026-11-13
 
 #### Added
+- Задача 169: карточка при наведении на промпт показывает номер задачи, название, статус и полный Markdown-текст
+  с прокруткой. Работает в обоих режимах списка и архивном поиске, поддерживает клавиатуру и Escape.
+  Чтение не создаёт отчёты и не меняет конфигурацию; запоздавшие ответы не подменяют другую карточку.
+  Номер задачи выделен жирным шрифтом и основным цветом текста карточки для читаемости в разных темах.
 - Запуск Codex внутри Copilot из Prompt Manager подготавливает отдельную сессию с Full Access
   до отправки задачи. Разрешения проверяются через локальный Agent Host; общие настройки и другие чаты не меняются.
   Поддерживается Linux с AHP 1.1. При ошибке отправка отменяется, а полный текст сохраняется в буфере обмена.
@@ -16,8 +20,16 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 #### Changed
 - Локально включаемая синхронизация после compile копирует сборку в обычную серверную папку Prompt Manager.
   Сохраняются путь Extension Host, зависимости и метаданные платформы; предусмотрены резервная копия и откат.
+- Task 168: the prompt form shrinks to 300 px while keeping dashboard widgets visible; below 632 px,
+  widgets move under the form in one vertical scroll area. Narrow controls wrap without changing the selected view.
 
 #### Fixed
+- Task 168: persist Docker/ToDo preferences and scoped Git disclosures in workspace state, preserve independent
+  layout profiles, and prevent delayed prompt-open messages from replacing newer widget settings.
+  Failed writes report an error without disabling refresh of visibly expanded widgets; bootstrap uses confirmed state.
+  Preserve Process scroll across layout transitions, wrap narrow ToDo labels, and prevent queued Docker statistics
+  from restarting after hide/dispose. Existing topology refresh remains unchanged.
+  Await accepted dashboard writes before replacing the editor so reopening cannot erase a completed collapse change.
 - Кнопка обновления списка перечитывает папки промптов и пересоздаёт кеш вместо повторного показа
   старого снимка из памяти. Устаревшие строки исчезают даже при пропущенных файловых событиях;
   параллельное обновление и запоздавшее чтение не возвращают их обратно.

@@ -10,6 +10,7 @@ import { SearchBar } from './components/SearchBar';
 import { FilterBar } from './components/FilterBar';
 import { PromptList } from './components/PromptList';
 import { Toolbar } from './components/Toolbar';
+import { PromptHoverPreview } from './PromptHoverPreview';
 import { createDefaultPrompt, PROMPT_STATUS_ORDER, PROMPT_CUSTOM_GROUP_NONE_KEY } from '../../types/prompt';
 import { matchesCreatedAtFilter } from '../../utils/sidebarDateFilter.js';
 import {
@@ -518,24 +519,26 @@ export const SidebarApp: React.FC = () => {
         </div>
       )}
       <div style={styles.listContainer}>
-        <PromptList
-          groups={groupedPrompts}
-          groupBy={groupBy}
-          viewMode={viewMode}
-          collapsedGroups={effectiveCollapsedGroups}
-          selectedId={selectedId}
-          savingPromptKeys={savingPromptKeys}
-          aiEnrichmentPromptKeys={aiEnrichmentPromptKeys}
-          isLoading={isLoading}
-          customGroups={customGroups}
-          onToggleGroup={handleToggleGroup}
-          onOpen={handleOpenPrompt}
-          onDelete={handleDelete}
-          onDuplicate={handleDuplicate}
-          onToggleFavorite={handleToggleFavorite}
-          onExport={handleExport}
-          onUpdateStatus={handleUpdateStatus}
-        />
+        <PromptHoverPreview prompts={filteredPrompts}>
+          <PromptList
+            groups={groupedPrompts}
+            groupBy={groupBy}
+            viewMode={viewMode}
+            collapsedGroups={effectiveCollapsedGroups}
+            selectedId={selectedId}
+            savingPromptKeys={savingPromptKeys}
+            aiEnrichmentPromptKeys={aiEnrichmentPromptKeys}
+            isLoading={isLoading}
+            customGroups={customGroups}
+            onToggleGroup={handleToggleGroup}
+            onOpen={handleOpenPrompt}
+            onDelete={handleDelete}
+            onDuplicate={handleDuplicate}
+            onToggleFavorite={handleToggleFavorite}
+            onExport={handleExport}
+            onUpdateStatus={handleUpdateStatus}
+          />
+        </PromptHoverPreview>
       </div>
       <div style={styles.footer}>
         <span style={styles.count}>{filteredPrompts.length} / {totalPromptCount} {t('sidebar.promptCount')}</span>

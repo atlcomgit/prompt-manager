@@ -8128,7 +8128,7 @@ export class EditorPanelManager {
 		return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 	}
 
-	/** Rebuilds the prompt webview so reused panels cannot keep a stale JS bundle alive. */
+	/** Перезапускает webview с подтверждёнными workspace-настройками; tests/editorPanelManager.test.ts. */
 	private rebootPromptPanelWebview(
 		panelKey: string,
 		panel: vscode.WebviewPanel,
@@ -8137,12 +8137,15 @@ export class EditorPanelManager {
 	): void {
 		const promptTitle = prompt.id ? (prompt.title || prompt.id) : 'New prompt';
 		const bootId = this.createPanelBootId();
-		const promptDashboardCollapsedSections = 'promptDashboardCollapsedSections' in promptMessage
-			? promptMessage.promptDashboardCollapsedSections || this.getPromptDashboardCollapsedSections()
-			: this.getPromptDashboardCollapsedSections();
-		const promptDashboardSectionOrder = 'promptDashboardSectionOrder' in promptMessage
-			? promptMessage.promptDashboardSectionOrder || this.getPromptDashboardSectionOrder()
-			: this.getPromptDashboardSectionOrder();
+		// Незавершённый optimistic layout нужен загрузчикам, но не является сохранённым bootstrap.
+		const promptDashboardLayouts = this.stateService.getPromptDashboardLayouts();
+		const { collapsedSections, sectionOrder } = promptDashboardLayouts[this.promptDashboardLayoutMode];
+		// Новое дерево webview начинает с подтверждённого вида; прежний несохранённый вид больше не отображается.
+		this.promptDashboardLayoutsState = promptDashboardLayouts;
+		this.syncPromptDashboardCollapsedState();
+		if (promptMessage.type === 'prompt') {
+			promptMessage.promptDashboardLayouts = promptDashboardLayouts;
+		}
 		this.panelBootIds.set(panelKey, bootId);
 		this.pendingReadyPromptMessages.set(panelKey, promptMessage);
 		panel.webview.html = getWebviewHtml(
@@ -8154,20 +8157,32 @@ export class EditorPanelManager {
 			bootId,
 			[],
 			{
-				__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__: promptDashboardCollapsedSections,
-				__PROMPT_DASHBOARD_SECTION_ORDER__: promptDashboardSectionOrder,
-				__PROMPT_DASHBOARD_LAYOUTS__: this.promptDashboardLayoutsState,
+				__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__: collapsedSections,
+				__PROMPT_DASHBOARD_SECTION_ORDER__: sectionOrder,
+				__PROMPT_DASHBOARD_LAYOUTS__: promptDashboardLayouts,
+				__PROMPT_DASHBOARD_PREFERENCES__: this.stateService.getPromptDashboardPreferences(),
 			},
 		);
 	}
 
-	/** Возвращает ожидающий ready-payload с актуальным состоянием фонового обогащения. */
+	/** Актуализирует ready-payload, включая подтверждённые настройки; tests/editorPanelManager.test.ts. */
 	private consumePendingReadyPromptMessage(panelKey: string): ExtensionToWebviewMessage | undefined {
 		const promptMessage = this.pendingReadyPromptMessages.get(panelKey);
 		if (promptMessage) {
 			this.pendingReadyPromptMessages.delete(panelKey);
 		}
 		if (promptMessage?.type === 'prompt') {
+			// Между подготовкой HTML и ready могли завершиться сохранения общих настроек виджетов.
+			const layouts = this.stateService.getPromptDashboardLayouts();
+			// Раннее локальное действие заменяет объект профилей и защищает видимую политику от позднего ready.
+			if (this.promptDashboardLayoutsState === promptMessage.promptDashboardLayouts) {
+				this.promptDashboardLayoutsState = layouts;
+				this.syncPromptDashboardCollapsedState();
+			}
+			promptMessage.promptDashboardLayouts = layouts;
+			promptMessage.promptDashboardCollapsedSections = layouts[this.promptDashboardLayoutMode].collapsedSections;
+			promptMessage.promptDashboardSectionOrder = layouts[this.promptDashboardLayoutMode].sectionOrder;
+			promptMessage.promptDashboardPreferences = this.stateService.getPromptDashboardPreferences();
 			/** Сохранённый prompt мог устареть целиком во время перезапуска webview. */
 			const currentPrompt = this.panelPromptRefs.get(panelKey);
 			if (promptMessage.prompt && currentPrompt && this.isSamePromptIdentity(promptMessage.prompt, currentPrompt)) {
@@ -8291,6 +8306,7 @@ export class EditorPanelManager {
 		});
 	}
 
+	/** Собирает снимок промпта с текущей политикой загрузки и подтверждёнными preferences. */
 	private buildPromptMessage(
 		prompt: Prompt,
 		options: {
@@ -8312,6 +8328,7 @@ export class EditorPanelManager {
 			promptDashboardCollapsedSections,
 			promptDashboardSectionOrder,
 			promptDashboardLayouts: this.promptDashboardLayoutsState,
+			promptDashboardPreferences: this.stateService.getPromptDashboardPreferences(),
 			...(pendingAiEnrichment ? { aiEnrichment: pendingAiEnrichment } : {}),
 		};
 	}
@@ -8717,6 +8734,8 @@ export class EditorPanelManager {
 
 		panel.onDidChangeViewState((event) => {
 			if (!event.webviewPanel.visible) {
+				// Host останавливает polling, даже если скрытое webview не успело отправить false.
+				this.promptDashboardService.setDockerLiveMetricsVisibility(false);
 				void event.webviewPanel.webview.postMessage({ type: 'clearNotice' } satisfies ExtensionToWebviewMessage);
 				if (
 					(this.promptDashboardReactiveProjectsByPanel.get(panelKey)?.size || 0) > 0
@@ -8881,6 +8900,7 @@ export class EditorPanelManager {
 		await this.openPrompt(target);
 	}
 
+	/** Перед заменой дерева ждёт настройки и повторно проверяет актуальность открытия; dashboard reopen test. */
 	private async switchPromptInExistingPanel(
 		panelKey: string,
 		panel: vscode.WebviewPanel,
@@ -8895,6 +8915,11 @@ export class EditorPanelManager {
 			targetPromptId?: string;
 		},
 	): Promise<void> {
+		await this.stateService.waitForPromptDashboardSaves();
+		if (openPanels.get(panelKey) !== panel
+			|| (options.openRequestVersion !== undefined && this.isOpenPromptRequestStale(options.openRequestVersion))) {
+			return;
+		}
 		const openEditorViewState = resolvePromptOpenEditorViewState(
 			this.getPromptEditorViewState(panelKey, prompt),
 			{ forceMainTab: options.forceMainTab === true },
@@ -9294,6 +9319,12 @@ export class EditorPanelManager {
 			return;
 		}
 
+		// Закрытая панель тоже могла оставить запись: новый bootstrap берёт её результат до создания HTML.
+		await this.stateService.waitForPromptDashboardSaves();
+		if (this.isOpenPromptRequestStale(requestVersion)) {
+			return;
+		}
+
 		/**
 		 * Защита от дубликата окна редактора: пока выше выполнялись awaits
 		 * (загрузка промпта с диска, ожидание pending save), параллельный вызов
@@ -9403,6 +9434,12 @@ export class EditorPanelManager {
 				}
 
 				if (readyAssetVersion !== EDITOR_WEBVIEW_ASSET_VERSION) {
+					// Перезагрузка устаревшего bundle подчиняется той же очереди, что и обычное повторное открытие.
+					const openRequestVersion = this.openPromptRequestVersion;
+					await this.stateService.waitForPromptDashboardSaves();
+					if (isReadyCycleStale() || this.isOpenPromptRequestStale(openRequestVersion)) {
+						break;
+					}
 					this.logReportDebug('ready.assetVersionMismatch.reboot', {
 						panelKey,
 						readyAssetVersion,
@@ -9928,46 +9965,88 @@ export class EditorPanelManager {
 			}
 
 			case 'savePromptDashboardCollapsedSections': {
-				// Обновляем снимок до await: открытие промпта и загрузка виджетов уже видят новое состояние.
+				// Загрузчики сразу учитывают раскрытие; подтверждение долговременной записи ждёт await.
 				const layoutMode = msg.layoutMode === 'single-column' ? 'single-column' : 'two-columns';
+				const collapsedSections = normalizePromptDashboardCollapsedSections(msg.state);
 				this.promptDashboardLayoutsState = {
 					...this.promptDashboardLayoutsState,
 					[layoutMode]: {
 						...this.promptDashboardLayoutsState[layoutMode],
-						collapsedSections: normalizePromptDashboardCollapsedSections(msg.state),
+						collapsedSections,
 					},
 				};
 				this.syncPromptDashboardCollapsedState();
-				this.logReportDebug('promptDashboard.collapsedSections.saved', {
-					panelKey,
-					layoutMode,
-					collapsedSections: this.promptDashboardLayoutsState[layoutMode].collapsedSections,
-				});
-				await this.stateService.savePromptDashboardCollapsedSections(msg.state, layoutMode);
+				try {
+					await this.stateService.savePromptDashboardCollapsedSections(msg.state, layoutMode);
+					this.logReportDebug('promptDashboard.collapsedSections.saved', { panelKey, layoutMode, collapsedSections });
+					if (msg.requestId) {
+						await postMessage({ type: 'promptDashboardStateSaved', requestId: msg.requestId });
+					}
+				} catch {
+					// Видимый layout остаётся источником политики загрузки; StateService хранит подтверждённый снимок.
+					// Регрессия: dashboard manual refresh remains available в editorPanelManager.test.ts.
+					await postMessage({
+						type: 'error', requestId: msg.requestId,
+						message: vscode.env.language.startsWith('ru')
+							? 'Не удалось сохранить сворачивание виджетов. Повторите изменение.'
+							: 'Could not save widget collapse state. Retry the change.',
+					});
+				}
 				break;
 			}
 
 			case 'savePromptDashboardSectionOrder': {
 				// Режим сообщения сохраняется независимо от последующего изменения ширины webview.
 				const layoutMode = msg.layoutMode === 'single-column' ? 'single-column' : 'two-columns';
+				const sectionOrder = normalizePromptDashboardSectionOrder(msg.order, layoutMode);
 				this.promptDashboardLayoutsState = {
 					...this.promptDashboardLayoutsState,
 					[layoutMode]: {
 						...this.promptDashboardLayoutsState[layoutMode],
-						sectionOrder: normalizePromptDashboardSectionOrder(msg.order, layoutMode),
+						sectionOrder,
 					},
 				};
-				this.logReportDebug('promptDashboard.sectionOrder.saved', {
-					panelKey,
-					layoutMode,
-					sectionOrder: this.promptDashboardLayoutsState[layoutMode].sectionOrder,
-				});
-				await this.stateService.savePromptDashboardSectionOrder(msg.order, layoutMode);
+				try {
+					await this.stateService.savePromptDashboardSectionOrder(msg.order, layoutMode);
+					this.logReportDebug('promptDashboard.sectionOrder.saved', { panelKey, layoutMode, sectionOrder });
+					if (msg.requestId) {
+						await postMessage({ type: 'promptDashboardStateSaved', requestId: msg.requestId });
+					}
+				} catch {
+					// Ошибка хранения не меняет текущий порядок на экране и не отменяет более поздние действия.
+					await postMessage({
+						type: 'error', requestId: msg.requestId,
+						message: vscode.env.language.startsWith('ru')
+							? 'Не удалось сохранить порядок виджетов. Повторите изменение.'
+							: 'Could not save widget order. Retry the change.',
+					});
+				}
+				break;
+			}
+
+			case 'savePromptDashboardPreferences': {
+				// Полный снимок нормализуется и сериализуется StateService без второго optimistic-кеша.
+				try {
+					await this.stateService.savePromptDashboardPreferences(msg.state);
+					if (msg.requestId) {
+						await postMessage({ type: 'promptDashboardStateSaved', requestId: msg.requestId });
+					}
+				} catch {
+					await postMessage({
+						type: 'error', requestId: msg.requestId,
+						message: vscode.env.language.startsWith('ru')
+							? 'Не удалось сохранить настройки виджетов. Повторите изменение.'
+							: 'Could not save widget preferences. Retry the change.',
+					});
+				}
 				break;
 			}
 
 			case 'promptDashboardDockerLiveMetricsVisibility': {
-				this.promptDashboardService.setDockerLiveMetricsVisibility(msg.visible === true);
+				// Запоздавшее true скрытой панели не запускает polling; после reveal webview измеряет видимость заново.
+				if (msg.visible !== true || panel.visible) {
+					this.promptDashboardService.setDockerLiveMetricsVisibility(msg.visible === true);
+				}
 				break;
 			}
 

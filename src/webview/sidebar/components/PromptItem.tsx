@@ -1,4 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
+import { usePromptHoverPreview } from '../PromptHoverPreview';
+import { PROMPT_HOVER_CARD_ID } from './PromptHoverCard';
 import { PROMPT_STATUS_ORDER, type PromptConfig, type PromptStatus, type SidebarViewMode } from '../../../types/prompt';
 import {
   normalizeCompactTaskNumber,
@@ -106,6 +108,9 @@ export const PromptItem: React.FC<Props> = ({
   const MENU_GAP = 4;
 
   const t = useT();
+  // Общая карточка использует реальную строку как якорь, в том числе при повторении в группах.
+  const hoverPreview = usePromptHoverPreview();
+  const itemRef = useRef<HTMLDivElement>(null);
   const statusOptions = useMemo(() => buildPromptStatusOptions(t), [t]);
   const [isHovered, setIsHovered] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -204,6 +209,7 @@ export const PromptItem: React.FC<Props> = ({
   };
 
   const openMenuAtPointer = (event: React.MouseEvent<HTMLElement>) => {
+    hoverPreview?.dismiss();
     const itemRect = event.currentTarget.closest('[data-prompt-item]')?.getBoundingClientRect();
 
     if (itemRect) {
@@ -243,24 +249,49 @@ export const PromptItem: React.FC<Props> = ({
   return (
     <div
       data-prompt-item
+      ref={itemRef}
+      className="pm-prompt-item"
+      tabIndex={0}
+      aria-keyshortcuts="F2"
+      aria-controls={itemRef.current && hoverPreview?.activeAnchor === itemRef.current ? PROMPT_HOVER_CARD_ID : undefined}
       style={{
         ...styles.item,
         ...(isSelected ? styles.itemSelected : {}),
         ...(!isSelected && isHovered ? styles.itemHovered : {}),
         ...(!isSelected && contextTargeted ? styles.itemContextTargeted : {}),
       }}
-      onClick={() => onOpen(prompt.id)}
+      onClick={() => { hoverPreview?.dismiss(); onOpen(prompt.id); }}
+      onFocus={event => {
+        if (event.target === event.currentTarget && !showMenu) {
+          hoverPreview?.enter(prompt, event.currentTarget, true);
+        }
+      }}
+      onBlur={event => {
+        if (!event.currentTarget.contains(event.relatedTarget)) { hoverPreview?.leave(event.relatedTarget); }
+      }}
+      onKeyDown={event => {
+        if (event.target !== event.currentTarget) { return; }
+        if (event.key === 'F2') {
+          event.preventDefault();
+          document.getElementById(PROMPT_HOVER_CARD_ID)?.focus({ preventScroll: true });
+        } else if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault(); hoverPreview?.dismiss(); onOpen(prompt.id);
+        }
+      }}
       onContextMenu={event => {
         event.preventDefault();
         event.stopPropagation();
         openMenuAtPointer(event);
       }}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => {
+      onMouseEnter={event => {
+        setIsHovered(true);
+        if (!showMenu) { hoverPreview?.enter(prompt, event.currentTarget); }
+      }}
+      onMouseLeave={event => {
         setIsHovered(false);
         closeMenu();
+        hoverPreview?.leave(event.relatedTarget);
       }}
-      title={prompt.description || prompt.title || prompt.id}
     >
       {viewMode === 'compact' ? (
         <div

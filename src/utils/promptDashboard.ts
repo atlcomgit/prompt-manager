@@ -6,7 +6,12 @@ import type { Prompt, PromptStatus } from '../types/prompt.js';
 
 export const PROMPT_DASHBOARD_WARM_INTERVAL_MS = 5 * 60 * 1000;
 export const PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS = 5 * 60 * 1000;
-export const PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX = 280;
+/** Размеры внешних областей, включая отступы; граничные значения проверяет promptDashboard.test.ts. */
+export const PROMPT_EDITOR_FORM_MAX_WIDTH_PX = 840;
+export const PROMPT_EDITOR_FORM_MIN_WIDTH_PX = 300;
+export const PROMPT_EDITOR_PANELS_GAP_PX = 12;
+export const PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX = 320;
+const PROMPT_DASHBOARD_PREFERRED_WIDTH_PX = 360;
 /** Размеры существующей сетки; используются и измерением, и стилями. */
 export const PROMPT_DASHBOARD_COLUMN_MIN_WIDTH_PX = 360;
 export const PROMPT_DASHBOARD_COLUMN_GAP_PX = 12;
@@ -39,8 +44,17 @@ interface PromptDashboardNormalizedPath {
 	parts: PromptDashboardCompactPathParts;
 }
 
-export function resolvePromptDashboardMode(pageWidth: number, formShellWidth: number): 'full' | 'compact' {
-	return pageWidth - formShellWidth >= PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX ? 'full' : 'compact';
+/** Распределяет ширину без скрытия виджетов; слишком узкое окно получает вертикальную компоновку. */
+export function resolvePromptEditorLayout(pageWidth: number): { stacked: boolean; formWidth: number } {
+	const width = Number.isFinite(pageWidth) ? Math.max(0, pageWidth) : 0;
+	const stacked = width < PROMPT_EDITOR_FORM_MIN_WIDTH_PX + PROMPT_EDITOR_PANELS_GAP_PX
+		+ PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX;
+	return {
+		stacked,
+		formWidth: stacked ? width : Math.min(PROMPT_EDITOR_FORM_MAX_WIDTH_PX,
+			Math.max(PROMPT_EDITOR_FORM_MIN_WIDTH_PX, width - PROMPT_EDITOR_PANELS_GAP_PX
+				- PROMPT_DASHBOARD_PREFERRED_WIDTH_PX)),
+	};
 }
 
 /** Keeps both the start and the ending of a long label visible inside narrow dashboard rows. */

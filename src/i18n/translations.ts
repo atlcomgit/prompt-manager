@@ -36,6 +36,12 @@ const en: Record<string, string> = {
 	'sidebar.createFirst': 'Create your first prompt',
 	'sidebar.archivedBadge': 'Archived',
 	'sidebar.promptBusy': 'Saving or generating fields...',
+	'sidebar.previewLabel': 'Prompt preview',
+	'sidebar.previewNoTask': 'No task number',
+	'sidebar.previewLoading': 'Loading prompt…',
+	'sidebar.previewMissing': 'This prompt is no longer available.',
+	'sidebar.previewError': 'Could not read the prompt. Hover again to retry.',
+	'sidebar.previewEmpty': 'Prompt text is empty.',
 	'sidebar.promptCount': 'prompts',
 
 	// --- FilterBar ---
@@ -1175,6 +1181,12 @@ const ru: Record<string, string> = {
 	'sidebar.createFirst': 'Создайте первый промпт',
 	'sidebar.archivedBadge': 'Архив',
 	'sidebar.promptBusy': 'Сохранение или генерация полей...',
+	'sidebar.previewLabel': 'Просмотр промпта',
+	'sidebar.previewNoTask': 'Без номера задачи',
+	'sidebar.previewLoading': 'Загрузка промпта…',
+	'sidebar.previewMissing': 'Этот промпт больше недоступен.',
+	'sidebar.previewError': 'Не удалось прочитать промпт. Наведите курсор ещё раз.',
+	'sidebar.previewEmpty': 'Текст промпта пуст.',
 	'sidebar.promptCount': 'промптов',
 
 	// --- FilterBar ---

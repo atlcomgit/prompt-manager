@@ -113,7 +113,8 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
-import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptDashboardMode, resolvePromptDashboardRequestMessageContext, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardProjectRequestOnNotice, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
+import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, PROMPT_EDITOR_FORM_MAX_WIDTH_PX, PROMPT_EDITOR_PANELS_GAP_PX, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptEditorLayout, resolvePromptDashboardRequestMessageContext, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardProjectRequestOnNotice, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
+import { normalizePromptDashboardPreferences, type PromptDashboardPreferences } from '../../types/promptDashboardPreferences.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
 import { KEEP_CURRENT_CHAT_MODEL, isKeepCurrentChatModel } from '../../constants/ai.js';
@@ -126,6 +127,8 @@ type EditorBootWindow = Window & {
   __PROMPT_DASHBOARD_COLLAPSED_SECTIONS__?: PromptDashboardCollapsedSections;
   __PROMPT_DASHBOARD_SECTION_ORDER__?: PromptDashboardSectionOrder;
   __PROMPT_DASHBOARD_LAYOUTS__?: PromptDashboardLayouts;
+  /** Общие настройки карточек переживают смену origin webview после перезапуска. */
+  __PROMPT_DASHBOARD_PREFERENCES__?: PromptDashboardPreferences;
 };
 
 const bootWindow = window as EditorBootWindow;
@@ -193,6 +196,20 @@ const initialPromptDashboardLayouts = resolveInitialPromptDashboardLayouts(
     bootWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__,
     persistedDashboardState['pm.editor.promptDashboardCollapsedSections'],
   ),
+);
+
+/** Отсутствие host-настроек позволяет однократно перенести прежний localStorage в компоненте. */
+export function resolveInitialPromptDashboardPreferences(
+  bootPreferences: unknown,
+  retainedPreferences: unknown,
+): PromptDashboardPreferences | undefined {
+  const source = bootPreferences ?? retainedPreferences;
+  return source === undefined ? undefined : normalizePromptDashboardPreferences(source);
+}
+
+/** Bootstrap применяется только при запуске webview, не при смене промпта или ширины. */
+const initialPromptDashboardPreferences = resolveInitialPromptDashboardPreferences(
+  bootWindow.__PROMPT_DASHBOARD_PREFERENCES__, persistedDashboardState['pm.editor.promptDashboardPreferences'],
 );
 
 interface SelectOption {
@@ -468,7 +485,6 @@ type GitOverlayPendingScmCleanupItem = {
 const GIT_OVERLAY_STALE_TRACKED_REQUEST_MAX_AGE_MS = 15_000;
 const CHAT_LAUNCH_COMPLETION_HOLD_MS = 2000;
 const CHAT_LAUNCH_MIN_PHASE_VISIBLE_MS = 1000;
-const EDITOR_FORM_SHELL_WIDTH_PX = 840;
 const PROCESS_BODY_SCROLL_RESTORE_MAX_AGE_MS = 30_000;
 const PROCESS_BODY_SCROLL_RESTORE_MAX_ATTEMPTS = 8;
 const PROCESS_BODY_SCROLL_RESTORE_RETRY_MS = 80;
@@ -865,6 +881,8 @@ export const EditorApp: React.FC = () => {
   const sectionMeasurementResumeTimerRef = useRef<number | null>(null);
   const sectionMeasurementSuspendedUntilRef = useRef(0);
   const promptBodyScrollRef = useRef<HTMLDivElement | null>(null);
+  /** В вертикальном режиме прокруткой формы и виджетов владеет общий контейнер. */
+  const editorScrollRef = useRef<HTMLDivElement | null>(null);
   const processBodyScrollSnapshotRef = useRef<PromptProcessBodyScrollSnapshot | null>(null);
   const processBodyScrollRestoreFrameRef = useRef<number | null>(null);
   const processBodyScrollRestoreTimerRef = useRef<number | null>(null);
@@ -891,7 +909,14 @@ export const EditorApp: React.FC = () => {
   const [allowedBranchesSetting, setAllowedBranchesSetting] = useState<string[]>(['master', 'main', 'prod', 'develop', 'dev']);
   const [workspaceTrackedBranchPreference, setWorkspaceTrackedBranchPreference] = useState('');
   const [workspaceTrackedBranchesByProjectPreference, setWorkspaceTrackedBranchesByProjectPreference] = useState<Record<string, string>>({});
-  const [pageWidth, setPageWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : EDITOR_FORM_SHELL_WIDTH_PX));
+  const [pageWidth, setPageWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : PROMPT_EDITOR_FORM_MAX_WIDTH_PX));
+  /** Идентификаторы записи настроек не смешиваются с загрузкой данных виджетов. */
+  const dashboardSettingsSaveSequenceRef = useRef(0);
+  /** Первый ready может уточнить bootstrap, но ни один ответ не отменяет локальные действия. */
+  const dashboardInitialHydrationRef = useRef(false);
+  const dashboardLayoutEditedRef = useRef(false);
+  const dashboardPreferencesEditedRef = useRef(false);
+  const [promptDashboardPreferences, setPromptDashboardPreferences] = useState(initialPromptDashboardPreferences);
   const [promptDashboardSnapshot, setPromptDashboardSnapshot] = useState<PromptDashboardSnapshot | null>(null);
   const [promptDashboardBusyAction, setPromptDashboardBusyAction] = useState<string | null>(null);
   const [promptDashboardDockerBusyActions, setPromptDashboardDockerBusyActions] = useState<string[]>([]);
@@ -1120,8 +1145,10 @@ export const EditorApp: React.FC = () => {
       ? t('editor.chatLaunchHintRenaming')
     : t('editor.chatLaunchHint');
   const [chatLaunchActivityFrame, setChatLaunchActivityFrame] = useState(0);
-  const shouldDockGitOverlaySecondHalf = pageWidth >= EDITOR_FORM_SHELL_WIDTH_PX * 2;
-  const promptDashboardMode = resolvePromptDashboardMode(pageWidth, EDITOR_FORM_SHELL_WIDTH_PX);
+  const shouldDockGitOverlaySecondHalf = pageWidth >= PROMPT_EDITOR_FORM_MAX_WIDTH_PX * 2;
+  /** Узкий редактор меняет расположение, но не отключает загрузку видимых карточек. */
+  const editorLayout = resolvePromptEditorLayout(pageWidth);
+  const promptDashboardMode = 'full' as const;
   const promptDashboardCollapsedWidgets = useMemo(
     () => resolveCollapsedPromptDashboardWidgets(promptDashboardCollapsedSections),
     [promptDashboardCollapsedSections],
@@ -1285,9 +1312,9 @@ export const EditorApp: React.FC = () => {
     processBodyManualScrollVersionRef.current += 1;
   }, [activeTab]);
 
-  /** Capture the current Process body scroll before VS Code moves focus to another editor. */
+  /** Сохраняет Process-scroll перед уходом фокуса или сменой владельца прокрутки на границе компоновки. */
   const captureProcessBodyScroll = useCallback((reason: string) => {
-    const scrollContainer = promptBodyScrollRef.current;
+    const scrollContainer = editorLayout.stacked ? editorScrollRef.current : promptBodyScrollRef.current;
     if (!scrollContainer || activeTab !== 'process' || isPromptSwitchPlaceholderVisibleRef.current) {
       return;
     }
@@ -1309,11 +1336,11 @@ export const EditorApp: React.FC = () => {
       top: scrollContainer.scrollTop,
       left: scrollContainer.scrollLeft,
     });
-  }, [activeTab]);
+  }, [activeTab, editorLayout.stacked]);
 
-  /** Try applying the saved Process body scroll to the live container. */
+  /** Восстанавливает Process scroll в текущем владельце прокрутки, включая вертикальный layout. */
   const restoreProcessBodyScroll = useCallback((reason: string): boolean => {
-    const scrollContainer = promptBodyScrollRef.current;
+    const scrollContainer = editorLayout.stacked ? editorScrollRef.current : promptBodyScrollRef.current;
     if (!scrollContainer) {
       return true;
     }
@@ -1370,7 +1397,7 @@ export const EditorApp: React.FC = () => {
       attempt: processBodyScrollRestoreAttemptsRef.current,
     });
     return false;
-  }, [activeTab]);
+  }, [activeTab, editorLayout.stacked]);
 
   /** Restore Process body scroll after reveal/layout updates settle across a few animation frames. */
   const scheduleProcessBodyScrollRestore = useCallback((reason: string) => {
@@ -1401,6 +1428,11 @@ export const EditorApp: React.FC = () => {
 
     processBodyScrollRestoreFrameRef.current = window.requestAnimationFrame(runRestoreAttempt);
   }, [clearPendingProcessBodyScrollRestore, restoreProcessBodyScroll]);
+
+  // После смены владельца scroll переносим снимок в новый контейнер до следующего кадра.
+  useLayoutEffect(() => {
+    scheduleProcessBodyScrollRestore('layout-mode-changed');
+  }, [editorLayout.stacked, scheduleProcessBodyScrollRestore]);
 
   useEffect(() => {
     postEditorDebugLog('editor-dashboard', 'bootstrap.layouts', {
@@ -1468,13 +1500,15 @@ export const EditorApp: React.FC = () => {
     setPromptDashboardDockerBusyActions([]);
   }, []);
 
-  /** Применяет оба профиля из host без переноса текущей раскладки в соседний режим. */
-  const applyPromptDashboardLayouts = useCallback((layouts: unknown, order: unknown, collapsed: unknown) => {
-    setPromptDashboardLayouts(normalizePromptDashboardLayouts(
-      layouts,
-      order,
-      collapsed as PromptDashboardCollapsedSections,
-    ));
+  /** Сохраняет только явные изменения карточек; resize и prompt(open) не пишут defaults. */
+  const handlePromptDashboardPreferencesChange = useCallback((state: PromptDashboardPreferences) => {
+    dashboardPreferencesEditedRef.current = true;
+    const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
+    vscode.setState?.({ ...currentState, 'pm.editor.promptDashboardPreferences': state });
+    vscode.postMessage({
+      type: 'savePromptDashboardPreferences', state,
+      requestId: `dashboard-settings-${initialBootId}-${++dashboardSettingsSaveSequenceRef.current}`,
+    });
   }, []);
 
   /** Сообщает host текущую ширину до запросов данных, чтобы свёрнутые виджеты не загружались. */
@@ -2407,12 +2441,20 @@ export const EditorApp: React.FC = () => {
   }, [promptPlanState]);
 
   useEffect(() => {
-    const handleResize = () => setPageWidth(window.innerWidth);
+    /** Снимает позицию Process до того, как новые стили сбросят scroll прежнего контейнера. */
+    const handleResize = () => {
+      const nextWidth = window.innerWidth;
+      if (resolvePromptEditorLayout(nextWidth).stacked !== editorLayout.stacked) {
+        clearPendingProcessBodyScrollRestore();
+        captureProcessBodyScroll('before-layout-mode-change');
+      }
+      setPageWidth(nextWidth);
+    };
 
     handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, []);
+  }, [captureProcessBodyScroll, clearPendingProcessBodyScrollRestore, editorLayout.stacked]);
 
   const showInlineNotice = useCallback((kind: InlineNotice['kind'], message: string) => {
     const normalizedMessage = (message || '').trim();
@@ -3112,9 +3154,7 @@ export const EditorApp: React.FC = () => {
         clearPromptSwitchPlaceholderDelay();
         promptSwitchRestoreViewStateRef.current = editorViewStateRef.current;
         const loadingEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
-        applyPromptDashboardLayouts(
-          msg.promptDashboardLayouts, msg.promptDashboardSectionOrder, msg.promptDashboardCollapsedSections,
-        );
+        // Workspace-настройки уже восстановлены в bootstrap; снимок другого промпта может быть устаревшим.
         postEditorDebugLog('editor-layout', 'promptLoading.apply', {
           promptId: String(msg.promptId || '').trim() || '__new__',
           promptUuid: String(msg.promptUuid || '').trim(),
@@ -3269,9 +3309,16 @@ export const EditorApp: React.FC = () => {
               activePromptOpenRequestVersionRef.current = incomingOpenRequestVersion;
             }
             const nextEditorViewState = normalizeEditorPromptViewState(msg.editorViewState);
-            applyPromptDashboardLayouts(
-              msg.promptDashboardLayouts, msg.promptDashboardSectionOrder, msg.promptDashboardCollapsedSections,
-            );
+            // Ready уточняет bootstrap один раз; последующие open и ранние локальные действия имеют приоритет.
+            if (!dashboardInitialHydrationRef.current) {
+              dashboardInitialHydrationRef.current = true;
+              if (!dashboardLayoutEditedRef.current && msg.promptDashboardLayouts !== undefined) {
+                setPromptDashboardLayouts(normalizePromptDashboardLayouts(msg.promptDashboardLayouts));
+              }
+              if (!dashboardPreferencesEditedRef.current && msg.promptDashboardPreferences !== undefined) {
+                setPromptDashboardPreferences(normalizePromptDashboardPreferences(msg.promptDashboardPreferences));
+              }
+            }
             const promptSwitchTiming = promptSwitchTimingRef.current;
             postEditorDebugLog('editor-layout', 'promptOpen.apply', {
               promptId: incomingPromptId,
@@ -4375,6 +4422,10 @@ export const EditorApp: React.FC = () => {
         }
         break;
       case 'error':
+        if (String(msg.requestId || '').startsWith(`dashboard-settings-${initialBootId}-`)) {
+          showInlineNotice('error', msg.message);
+          break;
+        }
         if ((msg.requestId || '').trim()) {
           const requestId = (msg.requestId || '').trim();
           const matchesSaveRequest = requestId === (activeSaveRequestIdRef.current || '').trim();
@@ -4527,7 +4578,7 @@ export const EditorApp: React.FC = () => {
         setIsRecalculating(false);
         break;
     }
-  }, [applyPromptDashboardLayouts, applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPendingProcessBodyScrollRestore, clearPromptDashboardDockerBusyActions, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releasePromptDashboardDockerBusyAction, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, scheduleProcessBodyScrollRestore, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
+  }, [applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPendingProcessBodyScrollRestore, clearPromptDashboardDockerBusyActions, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releasePromptDashboardDockerBusyAction, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, scheduleProcessBodyScrollRestore, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
 
   handleMessageRef.current = handleMessage;
 
@@ -5170,6 +5221,7 @@ export const EditorApp: React.FC = () => {
 
   /** Сохраняет collapse state и обновляет раскрытый пустой либо stale виджет. */
   const handlePromptDashboardToggleSectionCollapse = useCallback((section: PromptDashboardSectionKey) => {
+    dashboardLayoutEditedRef.current = true;
     const nextState = togglePromptDashboardSectionCollapsedState(promptDashboardCollapsedSections, section);
     const currentSnapshot = promptDashboardSnapshotRef.current;
     const expandRequest = resolvePromptDashboardExpandRequest({
@@ -5196,6 +5248,7 @@ export const EditorApp: React.FC = () => {
     }));
     vscode.postMessage({
       type: 'savePromptDashboardCollapsedSections', state: nextState, layoutMode: activeDashboardLayoutMode,
+      requestId: `dashboard-settings-${initialBootId}-${++dashboardSettingsSaveSequenceRef.current}`,
     });
 
     if (!expandRequest) {
@@ -5250,6 +5303,7 @@ export const EditorApp: React.FC = () => {
 
   /** Сохраняет перестановку только в режиме, в котором завершено перетаскивание. */
   const handlePromptDashboardReorderSections = useCallback((nextOrder: PromptDashboardSectionOrder) => {
+    dashboardLayoutEditedRef.current = true;
     const normalizedOrder = normalizePromptDashboardSectionOrder(nextOrder, activeDashboardLayoutMode);
     postEditorDebugLog('editor-dashboard', 'section-order.requested', {
       previousOrder: promptDashboardSectionOrder,
@@ -5261,6 +5315,7 @@ export const EditorApp: React.FC = () => {
     }));
     vscode.postMessage({
       type: 'savePromptDashboardSectionOrder', order: normalizedOrder, layoutMode: activeDashboardLayoutMode,
+      requestId: `dashboard-settings-${initialBootId}-${++dashboardSettingsSaveSequenceRef.current}`,
     });
   }, [activeDashboardLayoutMode, promptDashboardSectionOrder]);
 
@@ -6682,6 +6737,7 @@ export const EditorApp: React.FC = () => {
       >
       <button
         type="button"
+        className="pm-editor-section-toggle"
         style={styles.sectionHeaderBtn}
         onClick={() => toggleSection(key)}
         aria-expanded={isExpanded}
@@ -6691,6 +6747,7 @@ export const EditorApp: React.FC = () => {
           <span style={styles.sectionTitle}>{title}</span>
         </span>
         <span
+          className="pm-editor-section-summary"
           style={{
             ...styles.sectionSummaryWrap,
             ...(isContentVisible ? styles.blockContentVisible : styles.blockContentHidden),
@@ -6889,13 +6946,19 @@ export const EditorApp: React.FC = () => {
   ) : null;
 
   return (
-    <div style={{
+    <div ref={editorScrollRef} data-pm-editor-layout={editorLayout.stacked ? 'stacked' : 'side-by-side'}
+      onWheel={editorLayout.stacked ? markProcessBodyScrollManualIntent : undefined}
+      onPointerDown={editorLayout.stacked ? markProcessBodyScrollManualIntent : undefined}
+      onKeyDown={editorLayout.stacked ? markProcessBodyScrollManualIntent : undefined}
+      style={{
       ...styles.container,
-      ...(promptDashboardMode === 'full' ? styles.containerWithDashboard : null),
+      ...(editorLayout.stacked ? styles.containerStacked : styles.containerWithDashboard),
     }}>
-      <div style={{
+      <style>{EDITOR_RESPONSIVE_STYLES}</style>
+      <div className="pm-editor-form" style={{
         ...styles.contentShell,
-        ...(promptDashboardMode === 'full' ? styles.contentShellWithDashboard : null),
+        flex: editorLayout.stacked ? '0 0 auto' : `0 0 ${editorLayout.formWidth}px`,
+        width: editorLayout.stacked ? '100%' : `${editorLayout.formWidth}px`,
       }}>
         {/* Loading overlay — stays centered within the prompt form shell */}
         {showLoader && !isLoaded && (
@@ -6905,9 +6968,9 @@ export const EditorApp: React.FC = () => {
         )}
 
         {/* Header */}
-        <div style={styles.header}>
+        <div className="pm-editor-header" style={styles.header}>
           <h2
-            style={{
+            className="pm-editor-title" style={{
               ...styles.headerTitle,
               ...((isLoaded || shouldShowPromptSwitchPlaceholder) ? styles.blockContentVisible : styles.blockContentHidden),
             }}
@@ -6917,7 +6980,7 @@ export const EditorApp: React.FC = () => {
               : promptHeaderTitle}
           </h2>
           <div
-            style={{
+            className="pm-editor-header-right" style={{
               ...styles.headerRight,
               ...(isLoaded ? styles.blockContentVisible : styles.blockContentHidden),
             }}
@@ -6981,11 +7044,13 @@ export const EditorApp: React.FC = () => {
         {/* Main content */}
         <div
           ref={promptBodyScrollRef}
+          className="pm-editor-body"
           onWheel={markProcessBodyScrollManualIntent}
           onPointerDown={markProcessBodyScrollManualIntent}
           onKeyDown={markProcessBodyScrollManualIntent}
           style={{
             ...styles.body,
+            ...(editorLayout.stacked ? styles.bodyStacked : null),
             ...(activeTab === 'process' ? styles.bodyProcessStableScroll : null),
           }}
         >
@@ -7891,6 +7956,9 @@ export const EditorApp: React.FC = () => {
       </div>
 
       <PromptDashboard
+        stacked={editorLayout.stacked}
+        initialPreferences={promptDashboardPreferences}
+        onPreferencesChange={handlePromptDashboardPreferencesChange}
         snapshot={promptDashboardSnapshot}
         busyAction={promptDashboardBusyAction}
         dockerBusyAction={promptDashboardDockerBusyActions.join('\n') || null}
@@ -8002,30 +8070,55 @@ export const EditorApp: React.FC = () => {
   );
 };
 
+/** Правила зависят от ширины формы, а не монитора; controls не исчезают на компактном layout. */
+const EDITOR_RESPONSIVE_STYLES = `
+  .pm-editor-form :is(input, select, textarea) { min-width: 0; max-width: 100%; }
+  .pm-editor-form button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+  @container prompt-form (max-width: 559px) {
+    .pm-editor-header { flex-wrap: wrap; padding: 12px !important; }
+    .pm-editor-title { flex-basis: 100% !important; }
+    .pm-editor-header-right { width: 100%; min-width: 0; flex-wrap: wrap; }
+    .pm-editor-body { padding: 12px !important; }
+    .pm-editor-section-toggle { flex-direction: column; }
+    .pm-editor-section-summary { max-width: 100% !important; justify-content: flex-start !important; }
+    .pm-editor-actions { padding: 10px 12px !important; }
+    .pm-editor-actions button { padding: 6px 10px !important; }
+  }
+  @container prompt-form (max-width: 399px) {
+    .pm-editor-header-right { gap: 8px !important; }
+    .pm-editor-header-right [role="tab"] { padding: 6px 8px !important; }
+    .pm-editor-header-right button[aria-label]:not([role="tab"]) { width: 28px !important; height: 28px !important; }
+  }
+`;
+
 const styles: Record<string, React.CSSProperties> = {
   container: {
     display: 'flex',
     flexDirection: 'column',
     height: '100vh',
-    overflow: 'hidden',
+    // Единые свойства осей не сбрасываются React при смене компоновки; проверка в editorApp.test.tsx.
+    overflowX: 'hidden',
+    overflowY: 'hidden',
     position: 'relative',
   },
   containerWithDashboard: {
     flexDirection: 'row',
     alignItems: 'stretch',
-    gap: '24px',
+    gap: `${PROMPT_EDITOR_PANELS_GAP_PX}px`,
   },
-  contentShellWithDashboard: {
-    flex: `0 0 ${EDITOR_FORM_SHELL_WIDTH_PX}px`,
-    maxWidth: `${EDITOR_FORM_SHELL_WIDTH_PX}px`,
+  // На узкой ширине один scroll-container содержит обе области без обрезания карточек.
+  containerStacked: {
+    overflowY: 'auto',
+    overflowAnchor: 'none',
   },
   contentShell: {
     display: 'flex',
     flexDirection: 'column',
-    flex: 1,
+    minWidth: 0,
     minHeight: 0,
     position: 'relative',
-    width: `${EDITOR_FORM_SHELL_WIDTH_PX}px`,
+    containerType: 'inline-size',
+    containerName: 'prompt-form',
     maxWidth: '100%',
   },
   blockContentVisible: {
@@ -8068,13 +8161,13 @@ const styles: Record<string, React.CSSProperties> = {
   },
   blankPlaceholderTwoCol: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))',
     gap: '12px',
     width: '100%',
   },
   blankPlaceholderFourCol: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 120px), 1fr))',
     gap: '8px',
     width: '100%',
   },
@@ -8250,6 +8343,11 @@ const styles: Record<string, React.CSSProperties> = {
     overflowY: 'auto',
     padding: '16px 20px',
   },
+  // В stacked-режиме тело не создаёт вложенную полноэкранную прокрутку.
+  bodyStacked: {
+    flex: '0 0 auto',
+    overflowY: 'visible',
+  },
   bodyProcessStableScroll: {
     // Process updates section heights asynchronously; disable Chromium scroll anchoring
     // so the scrollbar thumb does not jump while the visible content stays in place.
@@ -8279,6 +8377,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   chatLaunchTopRow: {
     display: 'flex',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: '12px',
@@ -8873,7 +8972,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   twoCol: {
     display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))',
     gap: '12px',
   },
   agentInlineRow: {
@@ -8884,24 +8983,24 @@ const styles: Record<string, React.CSSProperties> = {
   },
   agentFieldModel: {
     flex: '1 1 200px',
-    minWidth: '200px',
+    minWidth: 'min(100%, 200px)',
   },
   agentFieldTarget: {
     flex: '1 1 180px',
-    minWidth: '180px',
+    minWidth: 'min(100%, 180px)',
   },
   agentFieldMode: {
     flex: '1 1 260px',
-    minWidth: '260px',
+    minWidth: 'min(100%, 260px)',
   },
   // Общая компоновка флага автостарта для Copilot Chat и внешних чатов.
   agentFieldAutostart: {
     flex: '1 1 280px',
-    minWidth: '260px',
+    minWidth: 'min(100%, 260px)',
     paddingTop: '18px',
   },
   agentModelSelect: {
-    minWidth: '200px',
+    minWidth: 0,
   },
   agentCheckboxLabel: {
     display: 'flex',
@@ -8973,7 +9072,7 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: '8px',
-    flexWrap: 'nowrap',
+    flexWrap: 'wrap',
   },
   promptFieldLabelRow: {
     display: 'flex',
@@ -8991,9 +9090,9 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
-    flexWrap: 'nowrap',
+    flexWrap: 'wrap',
     whiteSpace: 'nowrap',
-    flexShrink: 0,
+    minWidth: 0,
   },
   promptTextAreaWrap: {
     position: 'relative',

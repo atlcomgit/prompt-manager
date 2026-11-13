@@ -5,6 +5,8 @@
 import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerWorkspaceActionKind } from './docker.js';
+import type { PromptDashboardPreferences } from './promptDashboardPreferences.js';
+import type { PromptHoverTarget, PromptHoverPreviewResult } from './promptHoverPreview.js';
 import type {
 	PromptDashboardAnalysisState,
 	PromptDashboardCollapsedSections,
@@ -42,6 +44,8 @@ export interface PromptOpenTarget {
 export type WebviewToExtensionMessage =
 	| { type: 'ready'; bootId?: string; assetVersion?: string }
 	| { type: 'getPrompts' }
+	/** Чтение текста для одной карточки без открытия редактора и побочных записей. */
+	| { type: 'getPromptHoverPreview'; target: PromptHoverTarget; requestId: string }
 	| { type: 'getPrompt'; id: string }
 	| {
 		type: 'savePrompt';
@@ -77,8 +81,11 @@ export type WebviewToExtensionMessage =
 	| { type: 'generateReportFromStagedChanges'; prompt: Prompt }
 	| { type: 'saveSidebarState'; state: SidebarState }
 	| { type: 'savePromptEditorViewState'; promptId?: string; promptUuid?: string; state: EditorPromptViewState }
-	| { type: 'savePromptDashboardCollapsedSections'; state: PromptDashboardCollapsedSections; layoutMode?: PromptDashboardLayoutMode }
-	| { type: 'savePromptDashboardSectionOrder'; order: PromptDashboardSectionOrder; layoutMode?: PromptDashboardLayoutMode }
+	/** requestId связывает подтверждение записи с действием; старые webview могут его не передавать. */
+	| { type: 'savePromptDashboardCollapsedSections'; state: PromptDashboardCollapsedSections; layoutMode?: PromptDashboardLayoutMode; requestId?: string }
+	| { type: 'savePromptDashboardSectionOrder'; order: PromptDashboardSectionOrder; layoutMode?: PromptDashboardLayoutMode; requestId?: string }
+	/** Полный снимок внутренних настроек; пустые поля являются явным сохранённым выбором. */
+	| { type: 'savePromptDashboardPreferences'; state: PromptDashboardPreferences; requestId?: string }
 	| { type: 'promptDashboardLayoutModeChanged'; layoutMode: PromptDashboardLayoutMode }
 	| { type: 'getSidebarState' }
 	| { type: 'getWorkspaceFolders' }
@@ -236,6 +243,8 @@ export type WebviewToExtensionMessage =
 
 export type ExtensionToWebviewMessage =
 	| { type: 'prompts'; prompts: PromptConfig[]; archivedPrompts?: PromptConfig[] }
+	/** Ответ применяется только к текущему наведению и точной identity строки. */
+	| { type: 'promptHoverPreview'; target: PromptHoverTarget; requestId: string; result: PromptHoverPreviewResult }
 	| {
 		type: 'prompt';
 		prompt: Prompt | null;
@@ -246,6 +255,8 @@ export type ExtensionToWebviewMessage =
 		editorViewState?: EditorPromptViewState;
 		/** Независимые настройки обеих ширин панели. */
 		promptDashboardLayouts?: PromptDashboardLayouts;
+		/** Отсутствие записи сохраняет возможность переноса legacy-настроек webview. */
+		promptDashboardPreferences?: PromptDashboardPreferences;
 		promptDashboardCollapsedSections?: PromptDashboardCollapsedSections;
 		promptDashboardSectionOrder?: PromptDashboardSectionOrder;
 		aiEnrichment?: { title: boolean; description: boolean };
@@ -281,6 +292,8 @@ export type ExtensionToWebviewMessage =
 	| { type: 'gitOverlayActionCompleted'; action: GitOverlayActionKind }
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
 	| { type: 'promptDashboardSnapshot'; snapshot: PromptDashboardSnapshot; requestId?: string }
+	/** Подтверждает layout или preferences только после завершения workspaceState.update. */
+	| { type: 'promptDashboardStateSaved'; requestId: string }
 	| { type: 'promptDashboardWidgetSnapshot'; promptId: string; promptUuid?: string; widget: PromptDashboardWidgetSnapshot<unknown>; requestId?: string }
 	/** Завершает dashboard request, который host безопасно отбросил после collapse race. */
 	| { type: 'promptDashboardRequestCompleted'; requestId: string; target: PromptDashboardWidgetKind }

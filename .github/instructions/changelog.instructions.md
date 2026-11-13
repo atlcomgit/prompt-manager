@@ -1,3 +1,69 @@
+## 169: Всплывающий просмотр промпта в списке
+
+- Дата: 2026-11-13.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: общая карточка показывает номер задачи, название, статус и полный текст Markdown с прокруткой.
+- Ключевые моменты: отдельное чтение без миграций и записей; защита UUID/архива и поздних ответов;
+  оба режима списка, клавиатура, Escape, безопасное форматирование без загрузки изображений.
+  Номер задачи использует основной цвет текста карточки и жирность 700 вместо приглушённого оформления.
+- Файлы:
+    CHANGELOG.md
+    README.md
+    docs/rules/map.md
+    docs/rules/Промпты/Сохранение_и_список_без_номера.md
+    src/i18n/translations.ts
+    src/providers/sidebarProvider.ts
+    src/services/storageService.ts
+    src/types/messages.ts
+    src/types/promptHoverPreview.ts
+    src/utils/promptHoverPreview.ts
+    src/webview/sidebar/PromptHoverPreview.tsx
+    src/webview/sidebar/SidebarApp.tsx
+    src/webview/sidebar/components/PromptHoverCard.tsx
+    src/webview/sidebar/components/PromptItem.tsx
+    src/webview/sidebar/promptHoverMarkdown.ts
+    tests/promptHoverPreview.test.ts
+    tests/sidebarProvider.test.ts
+    tests/storageServiceHoverPreview.test.ts
+
+## 168: Исправить ширину панели и сохранение
+
+- Дата: 2026-11-13.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: форма сжимается до 300 px, а при ширине редактора меньше 632 px виджеты переходят под неё.
+  Внутренние настройки сохраняются для рабочей области; позднее открытие не заменяет новые изменения.
+- Ключевые моменты: профили одной и двух колонок независимы, legacy-настройки переносятся без потери пустых карт.
+  Подтверждение записи приходит после её завершения; отказ не отключает обновление видимой карточки.
+  Новый bootstrap использует подтверждённое состояние; Process-scroll переносится между компоновками.
+  Замена HTML ожидает очередь принятых настроек и повторно проверяет актуальность запроса открытия.
+  Автоматические stats не накапливаются при скрытии и не возобновляются после dispose; topology refresh сохранён.
+  Перезапуск StateService/Memento в настоящем VS Code проверен; полный перезапуск интерфейса ещё не проверен.
+- Файлы:
+    CHANGELOG.md
+    README.md
+    docs/rules/map.md
+    docs/rules/Промпты/Сохранение_и_список_без_номера.md
+    src/providers/editorPanelManager.ts
+    src/services/promptDashboardService.ts
+    src/services/stateService.ts
+    src/types/messages.ts
+    src/types/promptDashboardPreferences.ts
+    src/utils/promptDashboard.ts
+    src/webview/editor/EditorApp.tsx
+    src/webview/editor/components/ActionBar.tsx
+    src/webview/editor/components/MultiSelect.tsx
+    src/webview/editor/components/PromptDashboard.tsx
+    src/webview/editor/components/TextField.tsx
+    tests/editorApp.test.tsx
+    tests/editorPanelManager.test.ts
+    tests/promptDashboard.test.ts
+    tests/promptDashboardComponent.test.tsx
+    tests/promptDashboardPreferences.test.ts
+    tests/promptDashboardService.test.ts
+    tests/stateService.test.ts
+
 ## Без номера: Общая сборка Prompt Manager для локального VS Code и туннеля
 
 - Дата: 2026-11-13.

@@ -33,8 +33,11 @@ function createStorage(): TestStorage {
 	};
 }
 
-/** Provide the minimal webview globals needed to import and render EditorApp. */
-async function withEditorAppEnvironment<T>(callback: (EditorApp: React.FC) => T | Promise<T>): Promise<T> {
+/** Задаёт изолированные webview API и ширину для проверки первоначального рендера редактора. */
+async function withEditorAppEnvironment<T>(
+	callback: (EditorApp: React.FC) => T | Promise<T>,
+	width = 1280,
+): Promise<T> {
 	const globalScope = globalThis as typeof globalThis & { window?: TestWindow };
 	const previousWindow = globalScope.window;
 	const activeWindow = previousWindow || {} as TestWindow;
@@ -58,7 +61,7 @@ async function withEditorAppEnvironment<T>(callback: (EditorApp: React.FC) => T 
 	activeWindow.__WEBVIEW_BOOT_ID__ = 'test-boot-id';
 	activeWindow.__PROMPT_DASHBOARD_COLLAPSED_SECTIONS__ = undefined;
 	activeWindow.__PROMPT_DASHBOARD_SECTION_ORDER__ = undefined;
-	activeWindow.innerWidth = 1280;
+	activeWindow.innerWidth = width;
 	activeWindow.localStorage = createStorage();
 	(globalThis as Record<string, unknown>).acquireVsCodeApi = () => ({
 		postMessage: (_msg: unknown) => undefined,
@@ -889,5 +892,32 @@ test('resolveInitialPromptDashboardLayouts restores both profiles from host and 
 		assert.deepEqual(layouts['two-columns'].collapsedSections, {});
 		assert.deepEqual(resolveInitialPromptDashboardLayouts(undefined, retained)['single-column'].collapsedSections,
 			{ activity: true });
+	});
+});
+
+/** Виджеты остаются в DOM даже там, где прежний порог скрывал всю панель. */
+test('EditorApp retains widgets below the former fixed form breakpoint', async () => {
+	for (const width of [300, 631, 632, 800, 1119, 1120]) {
+		await withEditorAppEnvironment(EditorApp => {
+			const markup = renderToStaticMarkup(React.createElement(EditorApp));
+			assert.ok(markup.includes('data-pm-prompt-dashboard="true"'), `widgets at ${width}px`);
+			assert.ok(markup.includes(`data-pm-editor-layout="${width < 632 ? 'stacked' : 'side-by-side'}"`));
+			// Один набор longhand-свойств не теряет scroll при удалении stacked-стилей в React.
+			const container = markup.match(/<div[^>]*data-pm-editor-layout=[^>]*>/)?.[0] || '';
+			assert.match(container, new RegExp(`overflow-y:${width < 632 ? 'auto' : 'hidden'}`));
+			assert.doesNotMatch(container, /(?:;|style=")overflow:/);
+		}, width);
+	}
+});
+
+/** Подтверждённый bootstrap побеждает устаревшую webview-копию, отсутствие разрешает legacy migration. */
+test('resolveInitialPromptDashboardPreferences preserves empty host maps and retained fallback', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { resolveInitialPromptDashboardPreferences: resolve } = await import('../src/webview/editor/EditorApp.js');
+		const retained = { expanded: { 'project:api': true }, showAllBranchProjects: true, docker: { search: 'worker' } };
+		assert.equal(resolve(undefined, undefined), undefined);
+		assert.equal(resolve(undefined, retained)?.docker.search, 'worker');
+		assert.deepEqual(resolve({ expanded: {} }, retained)?.expanded, {});
+		assert.equal(resolve({ showAllBranchProjects: false }, retained)?.showAllBranchProjects, false);
 	});
 });

@@ -169,6 +169,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 	/** Обрабатывает действия списка, включая сохранение выбора; проверки: sidebarProvider.test.ts. */
 	private async handleMessage(msg: WebviewToExtensionMessage): Promise<void> {
 		switch (msg.type) {
+			case 'getPromptHoverPreview': {
+				// Отдельный ответ не запускает refreshList/openPrompt и не раскрывает текст ошибки файловой системы.
+				if (typeof msg.requestId !== 'string' || !msg.requestId) { break; }
+				try {
+					const result = await this.storageService.getPromptHoverPreview(msg.target);
+					this.postMessage({ type: 'promptHoverPreview', target: msg.target, requestId: msg.requestId, result });
+				} catch {
+					this.postMessage({
+						type: 'promptHoverPreview', target: msg.target, requestId: msg.requestId, result: { state: 'error' },
+					});
+				}
+				break;
+			}
 			case 'ready':
 			case 'getPrompts': {
 				// Восстановление списка не должно перезаписать более новый выбор редактора или пользователя.

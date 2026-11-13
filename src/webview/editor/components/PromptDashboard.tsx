@@ -59,6 +59,25 @@ import {
 	filterPromptDashboardTodosDataByFileTypes,
 	flattenPromptDashboardTodoMarkers,
 } from '../../../utils/promptDashboardTodos.js';
+import {
+	normalizePromptDashboardDockerWidgetState,
+	normalizePromptDashboardTodosWidgetState,
+	normalizePromptDashboardPreferences,
+} from '../../../types/promptDashboardPreferences.js';
+import type {
+	DockerContainerSortBy,
+	PromptDashboardPreferences,
+} from '../../../types/promptDashboardPreferences.js';
+
+// Прежние импорты normalizer и типов остаются доступны существующим потребителям компонента.
+export {
+	normalizePromptDashboardDockerWidgetState,
+	normalizePromptDashboardTodosWidgetState,
+} from '../../../types/promptDashboardPreferences.js';
+export type {
+	DashboardDockerWidgetState,
+	DashboardTodosWidgetState,
+} from '../../../types/promptDashboardPreferences.js';
 
 const DASHBOARD_LEFT_ACCENT_SHADOW = 'inset 3px 0 0 var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35))';
 const BRANCH_PROJECT_LABEL_MAX_LENGTH = 20;
@@ -91,6 +110,12 @@ interface PromptDashboardProps {
 	collapsedSections?: PromptDashboardCollapsedSections;
 	sectionOrder?: PromptDashboardSectionOrder;
 	mode: 'full' | 'compact';
+	/** Вертикальная компоновка передаёт прокрутку внешней странице редактора. */
+	stacked?: boolean;
+	/** Bootstrap допускает одно уточнение от host до локальных действий; смена промпта не сбрасывает выбор. */
+	initialPreferences?: PromptDashboardPreferences;
+	/** Передаёт полный снимок только после действия пользователя либо переноса старых настроек. */
+	onPreferencesChange?: (state: PromptDashboardPreferences) => void;
 	/** Профиль измеренной ширины сетки и уведомление о его смене. */
 	layoutMode?: PromptDashboardLayoutMode;
 	onLayoutModeChange?: (mode: PromptDashboardLayoutMode) => void;
@@ -139,21 +164,6 @@ type DashboardBusyAction = string | null | undefined;
 type DashboardDockerBusyAction = string | null | undefined;
 
 type DashboardBranchApplySource = 'bulk' | 'prompt' | 'tracked';
-
-type DockerContainerSortBy = 'name' | 'status' | 'uptime' | 'cpu' | 'memory';
-
-export interface DashboardDockerWidgetState {
-	viewMode?: DockerContainersViewMode;
-	statusFilter: DockerContainersStatusFilter;
-	search: string;
-	sortBy: DockerContainerSortBy;
-	expandedContainerIds: string[];
-}
-
-export interface DashboardTodosWidgetState {
-	selectedFileTypes: string[];
-	search: string;
-}
 
 type DockerContainerIconKind = 'logs' | 'terminal' | 'start' | 'restart' | 'stop' | 'remove' | 'composeUp' | 'composeDown' | 'composeFile' | 'openFile';
 
@@ -210,6 +220,52 @@ const DOCKER_ACTION_MENU_INTERACTION_STYLES = `
 		color: var(--vscode-menu-selectionForeground, var(--vscode-list-focusForeground, var(--vscode-foreground))) !important;
 		outline: 1px solid var(--vscode-focusBorder);
 		outline-offset: -1px;
+	}
+`;
+
+/** Адаптирует содержимое к ширине карточки, не меняя выбранный вид и не вызывая React на каждом пикселе. */
+const DASHBOARD_RESPONSIVE_STYLES = `
+	.pm-dashboard-widget { container: pm-dashboard-widget / inline-size; }
+	.pm-dashboard-widget > section { box-sizing: border-box; overflow-wrap: anywhere; }
+	@container pm-dashboard-widget (max-width: 480px) {
+		.pm-dashboard-docker-controls { grid-template-columns: minmax(0, 1fr) !important; }
+		.pm-dashboard-docker-views { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
+		.pm-dashboard-docker-views > button { min-width: 0 !important; padding-inline: 4px !important; }
+	}
+	@container pm-dashboard-widget (max-width: 359px) {
+		.pm-dashboard-section-header { gap: 6px !important; padding: 8px !important; flex-wrap: wrap; }
+		.pm-dashboard-section-title { white-space: normal !important; overflow-wrap: anywhere; }
+		.pm-dashboard-section-header > :last-child { margin-left: auto; }
+		.pm-dashboard-widget > section > .pm-dashboard-section-header + div { padding: 8px !important; }
+		.pm-dashboard-project-header { flex-wrap: wrap; }
+		.pm-dashboard-bulk-branch { grid-template-columns: minmax(0, 1fr) !important; }
+		.pm-dashboard-branch-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+		.pm-dashboard-branch-toolbar > :last-child { grid-column: 1 / -1; }
+		.pm-dashboard-branch-project { grid-template-columns: minmax(0, 1fr) auto auto !important; gap: 6px !important; }
+		.pm-dashboard-branch-project > :first-child { grid-column: 1 / -1; }
+		.pm-dashboard-parallel-branch { grid-template-columns: 12px minmax(0, 1fr) auto auto !important; gap: 5px !important; }
+		.pm-dashboard-parallel-branch > :nth-child(2) { grid-column: 2 / -1; grid-row: 2; }
+		.pm-dashboard-parallel-branch > :nth-child(3) { grid-column: 2; grid-row: 1; }
+		.pm-dashboard-parallel-branch > :nth-child(4) { grid-column: 3; grid-row: 1; }
+		.pm-dashboard-parallel-branch > :nth-child(5) { grid-column: 4; grid-row: 1; }
+		.pm-dashboard-docker-summary { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+		.pm-dashboard-docker-table-row { grid-template-columns: 24px minmax(0, 1fr) minmax(0, 1fr) 28px !important; gap: 6px !important; }
+		.pm-dashboard-docker-table-row > :first-child { grid-column: 1 / -1; }
+		.pm-dashboard-docker-table-row > :nth-child(3)::before { content: 'CPU '; color: var(--vscode-descriptionForeground); }
+		.pm-dashboard-docker-table-row > :nth-child(4)::before { content: 'RAM '; color: var(--vscode-descriptionForeground); }
+		.pm-dashboard-docker-table-header { display: none !important; }
+		.pm-dashboard-docker-compose-header { grid-template-columns: auto 18px minmax(0, 1fr) auto !important; }
+		.pm-dashboard-docker-compose-header > :nth-child(5) { grid-column: 3 / -1; grid-row: 2; }
+		.pm-dashboard-docker-compose-header > :nth-child(6) { grid-column: 2; grid-row: 2; }
+		.pm-dashboard-docker-tree-header { grid-template-columns: auto 18px minmax(0, 1fr) !important; }
+		.pm-dashboard-docker-tree-header > :last-child { grid-column: 3; justify-content: flex-start !important; }
+		.pm-dashboard-docker-list-header { grid-template-columns: 18px minmax(0, 1fr) !important; }
+		.pm-dashboard-docker-list-header > :last-child { grid-column: 2; justify-content: flex-start !important; }
+		.pm-dashboard-docker-resource-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+		.pm-dashboard-docker-resource-grid > :last-child { grid-column: 1 / -1; }
+		.pm-dashboard-todo-children { padding-left: 7px !important; margin-left: 3px !important; }
+		.pm-dashboard-todo-marker { grid-template-columns: auto minmax(0, 1fr) !important; }
+		.pm-dashboard-todo-marker > :last-child { grid-column: 1 / -1; white-space: normal !important; overflow-wrap: anywhere; }
 	}
 `;
 
@@ -379,111 +435,36 @@ function isDockerBusyActionActive(busyAction: DashboardDockerBusyAction, actionK
 	return busyAction === actionKey || busyAction.split('\n').includes(actionKey);
 }
 
-/** Checks whether an unknown value is one of the supported Docker status filters. */
-function isDockerStatusFilter(value: unknown): value is DockerContainersStatusFilter {
-	return value === 'all' || value === 'running' || value === 'stopped';
-}
-
-/** Checks whether an unknown value is one of the supported Docker sort keys. */
-function isDockerContainerSortBy(value: unknown): value is DockerContainerSortBy {
-	return value === 'name' || value === 'status' || value === 'uptime' || value === 'cpu' || value === 'memory';
-}
-
-/** Normalizes persisted Docker widget UI state from webview storage. */
-export function normalizePromptDashboardDockerWidgetState(value: unknown): DashboardDockerWidgetState {
-	if (!value || typeof value !== 'object') {
-		return { statusFilter: 'all', search: '', sortBy: 'status', expandedContainerIds: [] };
+/** Восстанавливает host-снимок либо старые настройки без записи defaults; проверяется component-тестами. */
+export function readPromptDashboardInitialPreferences(initialPreferences?: PromptDashboardPreferences): {
+	preferences: PromptDashboardPreferences;
+	migratedLegacy: boolean;
+} {
+	if (initialPreferences !== undefined) {
+		return { preferences: normalizePromptDashboardPreferences(initialPreferences), migratedLegacy: false };
 	}
-
-	const input = value as Partial<DashboardDockerWidgetState>;
-	const viewMode = isDockerViewMode(input.viewMode) ? input.viewMode : undefined;
-	const statusFilter = isDockerStatusFilter(input.statusFilter) ? input.statusFilter : 'all';
-	const search = typeof input.search === 'string' ? input.search : '';
-	const sortBy = isDockerContainerSortBy(input.sortBy) ? input.sortBy : 'status';
-	const expandedContainerIds = Array.isArray(input.expandedContainerIds)
-		? Array.from(new Set(input.expandedContainerIds.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)))
-		: [];
-	return viewMode ? { viewMode, statusFilter, search, sortBy, expandedContainerIds } : { statusFilter, search, sortBy, expandedContainerIds };
-}
-
-/** Normalizes persisted ToDo widget filter state from webview storage. */
-export function normalizePromptDashboardTodosWidgetState(value: unknown): DashboardTodosWidgetState {
-	if (!value || typeof value !== 'object') {
-		return { selectedFileTypes: [], search: '' };
-	}
-
-	const input = value as Partial<DashboardTodosWidgetState>;
-	const selectedFileTypes = Array.isArray(input.selectedFileTypes)
-		? Array.from(new Set(input.selectedFileTypes
-			.map(item => String(item || '').trim().toLowerCase())
-			.filter(Boolean)))
-		: [];
-	const search = typeof input.search === 'string' ? input.search : '';
-	return { selectedFileTypes, search };
-}
-
-/** Reads Docker widget UI state from local webview storage. */
-function readPromptDashboardDockerWidgetState(): DashboardDockerWidgetState {
 	const storage = getPromptDashboardLocalStorage();
-	if (!storage) {
-		return normalizePromptDashboardDockerWidgetState(null);
-	}
-
-	try {
-		return normalizePromptDashboardDockerWidgetState(JSON.parse(storage.getItem(DOCKER_WIDGET_STATE_STORAGE_KEY) || 'null'));
-	} catch {
-		return normalizePromptDashboardDockerWidgetState(null);
-	}
-}
-
-/** Writes a partial Docker widget UI state update without dropping saved fields. */
-function writePromptDashboardDockerWidgetStatePatch(patch: Partial<DashboardDockerWidgetState>): void {
-	const storage = getPromptDashboardLocalStorage();
-	if (!storage) {
-		return;
-	}
-
-	const nextState = normalizePromptDashboardDockerWidgetState({
-		...readPromptDashboardDockerWidgetState(),
-		...patch,
-	});
-	try {
-		storage.setItem(DOCKER_WIDGET_STATE_STORAGE_KEY, JSON.stringify(nextState));
-	} catch {
-		// Ignore webview storage quota errors; the widget remains usable without persistence.
-	}
-}
-
-/** Reads ToDo widget filter state from local webview storage. */
-function readPromptDashboardTodosWidgetState(): DashboardTodosWidgetState {
-	const storage = getPromptDashboardLocalStorage();
-	if (!storage) {
-		return normalizePromptDashboardTodosWidgetState(null);
-	}
-
-	try {
-		return normalizePromptDashboardTodosWidgetState(JSON.parse(storage.getItem(TODOS_WIDGET_STATE_STORAGE_KEY) || 'null'));
-	} catch {
-		return normalizePromptDashboardTodosWidgetState(null);
-	}
-}
-
-/** Writes a partial ToDo widget filter-state update without dropping saved fields. */
-function writePromptDashboardTodosWidgetStatePatch(patch: Partial<DashboardTodosWidgetState>): void {
-	const storage = getPromptDashboardLocalStorage();
-	if (!storage) {
-		return;
-	}
-
-	const nextState = normalizePromptDashboardTodosWidgetState({
-		...readPromptDashboardTodosWidgetState(),
-		...patch,
-	});
-	try {
-		storage.setItem(TODOS_WIDGET_STATE_STORAGE_KEY, JSON.stringify(nextState));
-	} catch {
-		// Ignore webview storage quota errors; the widget remains usable without persistence.
-	}
+	/** Повреждённый или отсутствующий ключ не считается переносимыми настройками. */
+	const readLegacy = (key: string): Record<string, unknown> | undefined => {
+		try {
+			const value: unknown = JSON.parse(storage?.getItem(key) || 'null');
+			return value && typeof value === 'object' && !Array.isArray(value)
+				? value as Record<string, unknown> : undefined;
+		} catch {
+			return undefined;
+		}
+	};
+	const docker = readLegacy(DOCKER_WIDGET_STATE_STORAGE_KEY);
+	const todos = readLegacy(TODOS_WIDGET_STATE_STORAGE_KEY);
+	const dockerState = normalizePromptDashboardDockerWidgetState(docker);
+	return {
+		preferences: normalizePromptDashboardPreferences({
+			docker: dockerState,
+			todos: normalizePromptDashboardTodosWidgetState(todos),
+			expanded: buildDockerExpandedState(dockerState.expandedContainerIds),
+		}),
+		migratedLegacy: docker !== undefined || todos !== undefined,
+	};
 }
 
 /** Resolves browser localStorage only when the dashboard runs inside a webview. */
@@ -493,11 +474,6 @@ function getPromptDashboardLocalStorage(): Storage | null {
 	} catch {
 		return null;
 	}
-}
-
-/** Checks whether an unknown value is one of the supported Docker view modes. */
-function isDockerViewMode(value: unknown): value is DockerContainersViewMode {
-	return value === 'tree' || value === 'cards' || value === 'table' || value === 'list';
 }
 
 /** Builds the shared expanded map entries for persisted Docker container IDs. */
@@ -533,6 +509,53 @@ function buildDockerComposeFileExpandedKey(project: DockerContainerProjectGroup,
 /** Builds the persisted disclosure key for a declared Compose service card. */
 function buildDockerDeclaredServiceExpandedKey(row: DockerDeclaredServiceViewRow): string {
 	return `docker:${row.key}`;
+}
+
+/** Наблюдает именно метрики, а не высокую карточку Docker; root и cleanup проверяются component-тестами. */
+export function observePromptDashboardDockerMetrics(
+	rail: HTMLElement,
+	stacked: boolean,
+	onVisibilityChange: (visible: boolean) => void,
+): () => void {
+	// При отсутствии наблюдателя не включаем фоновый опрос невидимого содержимого.
+	const targets = rail.querySelectorAll<HTMLElement>('[data-pm-docker-live-metrics="true"]');
+	if (typeof IntersectionObserver === 'undefined' || targets.length === 0) {
+		onVisibilityChange(false);
+		return () => undefined;
+	}
+	// Перекрытие геометрии не означает видимость скрытой вкладки; component-тест проверяет оба события.
+	const ownerDocument = rail.ownerDocument;
+	const visibleTargets = new Set<Element>();
+	let disposed = false;
+	/** Повторно сообщает видимость при возврате страницы, даже если IntersectionObserver не изменился. */
+	const publishVisibility = () => {
+		if (!disposed) {
+			onVisibilityChange(!ownerDocument.hidden && visibleTargets.size > 0);
+		}
+	};
+	const observer = new IntersectionObserver(entries => {
+		if (disposed) {
+			return;
+		}
+		for (const entry of entries) {
+			if (entry.isIntersecting && entry.intersectionRatio > 0) {
+				visibleTargets.add(entry.target);
+			} else {
+				visibleTargets.delete(entry.target);
+			}
+		}
+		publishVisibility();
+	}, { root: stacked ? null : rail, threshold: [0, 0.01] });
+	ownerDocument.addEventListener('visibilitychange', publishVisibility);
+	for (const target of Array.from(targets)) {
+		observer.observe(target);
+	}
+	return () => {
+		disposed = true;
+		ownerDocument.removeEventListener('visibilitychange', publishVisibility);
+		observer.disconnect();
+		visibleTargets.clear();
+	};
 }
 
 /** Stores a leaf row for the compact dashboard file tree. */
@@ -641,7 +664,7 @@ interface DashboardRailScrollSnapshot {
 	manualScrollVersion: number;
 }
 
-/** Right-side prompt dashboard visible only when the editor has enough horizontal space. */
+/** Панель виджетов с workspace-настройками и общей прокруткой в вертикальной компоновке. */
 export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	snapshot,
 	busyAction,
@@ -649,6 +672,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	collapsedSections = createDefaultPromptDashboardCollapsedSections(),
 	sectionOrder = createDefaultPromptDashboardSectionOrder(),
 	mode,
+	stacked = false,
+	initialPreferences,
+	onPreferencesChange,
 	layoutMode = 'two-columns',
 	onLayoutModeChange,
 	showGitFlowAction = false,
@@ -673,22 +699,51 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	onOpenDockerTerminal,
 	onDockerLiveMetricsVisibilityChange,
 }) => {
-	const [initialDockerWidgetState] = useState(() => readPromptDashboardDockerWidgetState());
-	const [initialTodosWidgetState] = useState(() => readPromptDashboardTodosWidgetState());
-	const [hasSavedDockerViewMode, setHasSavedDockerViewMode] = useState(() => Boolean(initialDockerWidgetState.viewMode));
-	const [expanded, setExpanded] = useState<ExpandedState>(() => buildDockerExpandedState(initialDockerWidgetState.expandedContainerIds));
+	// Начальное состояние не зависит от snapshot/resize; первый ready может уточнить ещё не изменённый bootstrap.
+	const [initialState] = useState(() => readPromptDashboardInitialPreferences(initialPreferences));
+	const [preferences, setPreferences] = useState(initialState.preferences);
+	const preferencesRef = useRef(preferences);
+	const legacyMigrationPendingRef = useRef(initialState.migratedLegacy);
+	const initialPreferencesRef = useRef(initialPreferences);
+	const preferencesHydrationClosedRef = useRef(initialState.migratedLegacy);
+	const { expanded, showAllBranchProjects } = preferences;
+	const dockerViewMode = preferences.docker.viewMode ?? snapshot?.docker.data.defaultViewMode ?? 'tree';
+	const { statusFilter: dockerStatusFilter, search: dockerSearch, sortBy: dockerSortBy } = preferences.docker;
+	const { selectedFileTypes: todoSelectedFileTypes, search: todoSearch } = preferences.todos;
+	/** Применяет актуальный полный снимок вне React updater; автопоказ ошибки не пишет настройки. */
+	const updatePreferences = useCallback((patch: Partial<PromptDashboardPreferences>, persist = true) => {
+		const next = { ...preferencesRef.current, ...patch };
+		preferencesRef.current = next;
+		setPreferences(next);
+		if (persist) {
+			preferencesHydrationClosedRef.current = true;
+			legacyMigrationPendingRef.current = false;
+			onPreferencesChange?.(next);
+		}
+	}, [onPreferencesChange]);
+	// Уточнение host не сохраняется повторно и не может обогнать уже принятое локальное действие.
+	useEffect(() => {
+		if (preferencesHydrationClosedRef.current || initialPreferences === undefined
+			|| initialPreferences === initialPreferencesRef.current) {
+			return;
+		}
+		preferencesHydrationClosedRef.current = true;
+		const next = normalizePromptDashboardPreferences(initialPreferences);
+		preferencesRef.current = next;
+		setPreferences(next);
+	}, [initialPreferences]);
+	// Перенос выполняется один раз и только при найденном старом состоянии; host остаётся источником истины.
+	useEffect(() => {
+		if (legacyMigrationPendingRef.current && onPreferencesChange) {
+			legacyMigrationPendingRef.current = false;
+			onPreferencesChange(preferencesRef.current);
+		}
+	}, [onPreferencesChange]);
 	const [branchDrafts, setBranchDrafts] = useState<Record<string, string>>({});
 	const [bulkBranchDraft, setBulkBranchDraft] = useState('');
-	const [showAllBranchProjects, setShowAllBranchProjects] = useState(false);
 	const [openingFileKey, setOpeningFileKey] = useState<string | null>(null);
 	const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
 	const [viewedFileKeys, setViewedFileKeys] = useState<Record<string, boolean>>({});
-	const [dockerViewMode, setDockerViewMode] = useState<DockerContainersViewMode>(initialDockerWidgetState.viewMode || 'tree');
-	const [dockerStatusFilter, setDockerStatusFilter] = useState<DockerContainersStatusFilter>(initialDockerWidgetState.statusFilter);
-	const [dockerSearch, setDockerSearch] = useState(initialDockerWidgetState.search);
-	const [dockerSortBy, setDockerSortBy] = useState<DockerContainerSortBy>(initialDockerWidgetState.sortBy);
-	const [todoSelectedFileTypes, setTodoSelectedFileTypes] = useState<string[]>(initialTodosWidgetState.selectedFileTypes);
-	const [todoSearch, setTodoSearch] = useState(initialTodosWidgetState.search);
 	const [draggedSection, setDraggedSection] = useState<PromptDashboardSectionKey | null>(null);
 	const [dropIndicator, setDropIndicator] = useState<DashboardDropIndicator | null>(null);
 	const [isDockerSectionInView, setIsDockerSectionInView] = useState(false);
@@ -759,9 +814,10 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		}
 		railManualScrollVersionRef.current += 1;
 	}, []);
+	/** Запоминает только собственную прокрутку rail; внешней страницей управляет EditorApp. */
 	const captureRailScroll = useCallback(() => {
 		const railElement = railRef.current;
-		if (!railElement || !dashboardScopeKey) {
+		if (stacked || !railElement || !dashboardScopeKey) {
 			return;
 		}
 		railScrollSnapshotRef.current = {
@@ -771,11 +827,12 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			capturedAt: Date.now(),
 			manualScrollVersion: railManualScrollVersionRef.current,
 		};
-	}, [dashboardScopeKey]);
+	}, [dashboardScopeKey, stacked]);
+	/** Не переносит сохранённую позицию rail во внешнюю прокрутку вертикального редактора. */
 	const restoreRailScroll = useCallback((): boolean => {
 		const railElement = railRef.current;
 		const snapshot = railScrollSnapshotRef.current;
-		if (!railElement || !snapshot) {
+		if (stacked || !railElement || !snapshot) {
 			return true;
 		}
 		if (!dashboardScopeKey || snapshot.scopeKey !== dashboardScopeKey) {
@@ -808,7 +865,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			railProgrammaticScrollRef.current = false;
 		}, 0);
 		return false;
-	}, [dashboardScopeKey]);
+	}, [dashboardScopeKey, stacked]);
 	const scheduleRailScrollRestore = useCallback(() => {
 		if (!railScrollSnapshotRef.current) {
 			return;
@@ -850,6 +907,13 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		}),
 		[dockerSearch, dockerSortBy, dockerStatusFilter, dockerViewMode, expanded, mode, normalizedCollapsedSections, snapshot?.docker.data],
 	);
+	// Состав и появление первых stats меняют targets; очередной замер сам по себе не перезапускает polling.
+	const dockerMetricsLayoutKey = JSON.stringify((snapshot?.docker.data.projects || []).map(project => [
+		project.projectPath,
+		project.containers.map(container => [container.id, container.status, Boolean(container.stats)]),
+		project.composeFileGroups?.map(group => [group.composeFile.filePath, group.runningCount,
+			group.containers.map(container => [container.id, hasDockerRuntimeStats(container)])]),
+	]));
 	const visibleTodosData = useMemo(() => {
 		const todosData = snapshot?.todos?.data;
 		if (!todosData) {
@@ -918,24 +982,15 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	};
 	const isRefreshBusy = busyAction === 'refresh';
 
-	// Reset local branch selectors only when the dashboard scope changes to another prompt context.
+	// Смена промпта сбрасывает только черновики операций, но сохраняет workspace-предпочтения.
 	useEffect(() => {
 		setBranchDrafts({});
 		setBulkBranchDraft('');
-		setShowAllBranchProjects(false);
 		setActiveFileKey(null);
 		setViewedFileKeys({});
 	}, [snapshot?.scopeKey]);
 
-	// Apply the configured default mode only until the user saves their own Docker view preference.
-	useEffect(() => {
-		const defaultViewMode = snapshot?.docker.data.defaultViewMode;
-		if (!hasSavedDockerViewMode && defaultViewMode && defaultViewMode !== dockerViewMode) {
-			setDockerViewMode(defaultViewMode);
-		}
-	}, [dockerViewMode, hasSavedDockerViewMode, snapshot?.docker.data.defaultViewMode]);
-
-	// Reveal the exact compose file branch when a hidden compose command fails.
+	// Ошибка раскрывает нужный compose-файл без автоматической записи настроек на host.
 	useEffect(() => {
 		const actionError = snapshot?.docker.data.composeActionError;
 		if (!actionError) {
@@ -950,29 +1005,16 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		}
 		const projectKey = buildDockerProjectExpandedKey(project);
 		const composeFileKey = buildDockerComposeFileExpandedKey(project, composeFile);
-		setExpanded(previous => {
-			if (previous[projectKey] && previous[composeFileKey]) {
-				return previous;
-			}
-			const next = { ...previous, [projectKey]: true, [composeFileKey]: true };
-			writePromptDashboardDockerWidgetStatePatch({
-				expandedContainerIds: resolveExpandedDockerContainerIds(next),
-			});
-			return next;
-		});
-	}, [snapshot?.docker.data.composeActionError?.createdAt, snapshot?.docker.data.projects]);
+		const previous = preferencesRef.current.expanded;
+		if (!previous[projectKey] || !previous[composeFileKey]) {
+			updatePreferences({ expanded: { ...previous, [projectKey]: true, [composeFileKey]: true } }, false);
+		}
+	}, [snapshot?.docker.data.composeActionError?.createdAt, snapshot?.docker.data.projects, updatePreferences]);
 
 	// Drop stale branch drafts once refreshed project data confirms the branch is current again.
 	useEffect(() => {
 		setBranchDrafts(previous => reconcileBranchDrafts(resolveBranchDraftRefreshProjects(branchProjects, branchScopeProjects), previous));
 	}, [branchProjects, branchScopeProjects]);
-
-	// Collapse the workspace-wide view automatically when the current snapshot no longer exposes extra projects.
-	useEffect(() => {
-		if (!canShowAllBranchProjects) {
-			setShowAllBranchProjects(false);
-		}
-	}, [canShowAllBranchProjects]);
 
 	// Reset transient drag UI when the dashboard scope switches to another prompt.
 	useEffect(() => {
@@ -985,7 +1027,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		dropIndicatorRef.current = null;
 		setDraggedSection(null);
 		setDropIndicator(null);
-	}, [clearPendingRailScrollRestore, snapshot?.scopeKey]);
+	}, [clearPendingRailScrollRestore, snapshot?.scopeKey, stacked]);
 
 	// Preserve the dashboard rail position when VS Code hides or refocuses editor pages.
 	useEffect(() => {
@@ -1050,7 +1092,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		}
 		window.addEventListener('resize', measure);
 		return () => window.removeEventListener('resize', measure);
-	}, [mode, onLayoutModeChange]);
+	}, [mode, onLayoutModeChange, stacked]);
 
 	// Смена ширины отменяет незавершённый перенос, чтобы он не записал порядок соседнего режима.
 	useEffect(() => {
@@ -1061,9 +1103,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		dropIndicatorRef.current = null;
 		setDraggedSection(null);
 		setDropIndicator(null);
-	}, [layoutMode]);
+	}, [layoutMode, mode, stacked]);
 
-	// Track whether the Docker section is currently inside the dashboard viewport.
+	// В stacked корнем наблюдения служит viewport с clipping внешнего scroll, а не весь высокий rail.
 	useEffect(() => {
 		if (mode !== 'full') {
 			setIsDockerSectionInView(false);
@@ -1074,33 +1116,23 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			setIsDockerSectionInView(false);
 			return;
 		}
-		const dockerSectionElement = railElement.querySelector<HTMLElement>('[data-pm-dashboard-section="dockerContainers"]');
-		if (!dockerSectionElement) {
-			setIsDockerSectionInView(false);
-			return;
-		}
-		if (typeof IntersectionObserver === 'undefined') {
-			setIsDockerSectionInView(true);
-			return;
-		}
-		const observer = new IntersectionObserver(entries => {
-			const entry = entries[0];
-			setIsDockerSectionInView(Boolean(entry?.isIntersecting) && (entry?.intersectionRatio || 0) > 0.05);
-		}, {
-			root: railElement,
-			threshold: [0, 0.05, 0.25],
-		});
-		observer.observe(dockerSectionElement);
-		return () => observer.disconnect();
-	}, [mode, normalizedCollapsedSections.dockerContainers, normalizedSectionOrder, snapshot?.scopeKey]);
+		setIsDockerSectionInView(false);
+		return observePromptDashboardDockerMetrics(railElement, stacked, setIsDockerSectionInView);
+	}, [mode, stacked, dockerViewMode, dockerSearch, dockerStatusFilter, dockerSortBy, expanded,
+		normalizedCollapsedSections.dockerContainers, normalizedSectionOrder, dockerMetricsLayoutKey]);
 
 	// Sync host-side Docker polling with the actual visibility of live resource blocks.
 	useEffect(() => {
 		onDockerLiveMetricsVisibilityChange?.(logicalDockerLiveMetricsVisible && isDockerSectionInView);
 	}, [isDockerSectionInView, logicalDockerLiveMetricsVisible, onDockerLiveMetricsVisibilityChange]);
+	// Размонтирование панели не оставляет host с последним положительным признаком видимости.
+	useEffect(() => () => onDockerLiveMetricsVisibilityChange?.(false), [onDockerLiveMetricsVisibilityChange]);
 
 	// Retry lazy details hydration for already-open blocks once the projects widget finishes refreshing.
 	useEffect(() => {
+		if (mode !== 'full') {
+			return;
+		}
 		for (const [key, isExpanded] of Object.entries(expanded)) {
 			if (!isExpanded) {
 				continue;
@@ -1113,41 +1145,37 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				normalizedCollapsedSections,
 			);
 		}
-	}, [expanded, hydrationProjects, normalizedCollapsedSections, onHydrateProjectsDetails, projectsCacheStatus]);
+	}, [expanded, hydrationProjects, mode, normalizedCollapsedSections, onHydrateProjectsDetails, projectsCacheStatus]);
 
 	if (mode !== 'full') {
 		return null;
 	}
 
+	/** Сохраняет также явное false у узлов, раскрытых по умолчанию; тесты проверяют восстановление. */
 	const toggleExpanded = (key: string, defaultExpanded = false) => {
-		setExpanded(previous => {
-			const next = { ...previous, [key]: !(previous[key] ?? defaultExpanded) };
-			if (isDockerExpandedKey(key)) {
-				writePromptDashboardDockerWidgetStatePatch({
-					expandedContainerIds: resolveExpandedDockerContainerIds(next),
-				});
-			}
-			return next;
+		const current = preferencesRef.current;
+		const next = { ...current.expanded, [key]: !(current.expanded[key] ?? defaultExpanded) };
+		updatePreferences({
+			expanded: next,
+			...(isDockerExpandedKey(key)
+				? { docker: { ...current.docker, expandedContainerIds: resolveExpandedDockerContainerIds(next) } }
+				: {}),
 		});
 	};
 
-	/** Changes and persists the Docker widget display mode. */
+	/** Сохраняет явно выбранный вид Docker без изменений при resize. */
 	const changeDockerViewMode = (mode: DockerContainersViewMode) => {
-		setHasSavedDockerViewMode(true);
-		setDockerViewMode(mode);
-		writePromptDashboardDockerWidgetStatePatch({ viewMode: mode });
+		updatePreferences({ docker: { ...preferencesRef.current.docker, viewMode: mode } });
 	};
 
-	/** Changes and persists the Docker widget status filter. */
+	/** Сохраняет фильтр Docker, не теряя остальные актуальные настройки. */
 	const changeDockerStatusFilter = (filter: DockerContainersStatusFilter) => {
-		setDockerStatusFilter(filter);
-		writePromptDashboardDockerWidgetStatePatch({ statusFilter: filter });
+		updatePreferences({ docker: { ...preferencesRef.current.docker, statusFilter: filter } });
 	};
 
-	/** Changes and persists the Docker widget free-text search. */
+	/** Сохраняет строку поиска Docker вместе с остальными настройками. */
 	const changeDockerSearch = (searchValue: string) => {
-		setDockerSearch(searchValue);
-		writePromptDashboardDockerWidgetStatePatch({ search: searchValue });
+		updatePreferences({ docker: { ...preferencesRef.current.docker, search: searchValue } });
 	};
 
 	/** Clears the persisted Docker widget search value. */
@@ -1155,37 +1183,37 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		changeDockerSearch('');
 	};
 
-	/** Changes and persists the Docker widget sort key. */
+	/** Сохраняет выбранный порядок контейнеров. */
 	const changeDockerSortBy = (sortBy: DockerContainerSortBy) => {
-		setDockerSortBy(sortBy);
-		writePromptDashboardDockerWidgetStatePatch({ sortBy });
+		updatePreferences({ docker: { ...preferencesRef.current.docker, sortBy } });
 	};
 
-	/** Changes and persists the ToDo widget free-text search. */
+	/** Сохраняет строку поиска ToDo. */
 	const changeTodoSearch = (searchValue: string) => {
-		setTodoSearch(searchValue);
-		writePromptDashboardTodosWidgetStatePatch({ search: searchValue });
+		updatePreferences({ todos: { ...preferencesRef.current.todos, search: searchValue } });
 	};
 
-	/** Toggles one ToDo file-type filter while keeping an empty list as the all-types state. */
+	/** Переключает тип файлов ToDo; пустой список означает все типы, а не сброс сохранения. */
 	const toggleTodoFileType = (fileType: string) => {
 		const normalizedType = fileType.trim().toLowerCase();
 		if (!normalizedType) {
 			return;
 		}
-		setTodoSelectedFileTypes(previous => {
-			const nextTypes = previous.includes(normalizedType)
-				? previous.filter(item => item !== normalizedType)
-				: [...previous, normalizedType].sort((left, right) => left.localeCompare(right, 'ru'));
-			writePromptDashboardTodosWidgetStatePatch({ selectedFileTypes: nextTypes });
-			return nextTypes;
-		});
+		const previous = preferencesRef.current.todos.selectedFileTypes;
+		const nextTypes = previous.includes(normalizedType)
+			? previous.filter(item => item !== normalizedType)
+			: [...previous, normalizedType].sort((left, right) => left.localeCompare(right, 'ru'));
+		updatePreferences({ todos: { ...preferencesRef.current.todos, selectedFileTypes: nextTypes } });
 	};
 
-	/** Resets ToDo file-type filters back to the all-types state. */
+	/** Сохраняет явный выбор всех типов ToDo. */
 	const clearTodoFileTypes = () => {
-		setTodoSelectedFileTypes([]);
-		writePromptDashboardTodosWidgetStatePatch({ selectedFileTypes: [] });
+		updatePreferences({ todos: { ...preferencesRef.current.todos, selectedFileTypes: [] } });
+	};
+
+	/** Область списка проектов остаётся UI-предпочтением при пустом snapshot и смене промпта. */
+	const toggleShowAllBranchProjects = () => {
+		updatePreferences({ showAllBranchProjects: !preferencesRef.current.showAllBranchProjects });
 	};
 
 	/** Clears the persisted ToDo widget search value. */
@@ -1561,7 +1589,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const sectionNodesByKey: Record<PromptDashboardSectionKey, React.ReactNode> = {
 		status: renderStatus(snapshot, statusCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('status', 'Статус промпта')),
 		activity: renderActivity(snapshot, onOpenPrompt, activityCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('activity', 'Активные промпты')),
-		projectBranches: renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectBranchesCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), () => setShowAllBranchProjects(previous => !previous), showGitFlowAction, onOpenGitFlow, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('projectBranches', 'Ветки проектов')),
+		projectBranches: renderProjectBranches(branchWidgetProjects, showAllBranchProjects, canShowAllBranchProjects, expanded, branchDrafts, bulkBranchDraft, busyAction, projectBranchesCacheStatus, fileHandlers, setBranchDrafts, toggleExpanded, applyBulkBranchDraft, applyBranchDrafts, applyBranchPreset, applyProjectBranch, (project) => onPullProject?.(project.project), toggleShowAllBranchProjects, showGitFlowAction, onOpenGitFlow, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('projectBranches', 'Ветки проектов')),
 		reviewRequests: renderReviewRequests(reviewProjects, reviewRequestsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('reviewRequests', 'MR/PR')),
 		parallelBranches: renderParallelBranchFiles(parallelProjects, expanded, toggleExpanded, fileHandlers, parallelBranchesCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('parallelBranches', 'Параллельные ветки')),
 		projectCommits: renderProjectCommits(commitProjects, expanded, toggleExpanded, fileHandlers, projectCommitsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('projectCommits', 'Коммиты проектов')),
@@ -1582,6 +1610,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				node: (
 					<div
 						key={`dashboard-section:${sectionKey}`}
+						className="pm-dashboard-widget"
 						style={{
 							...styles.sectionDragWrapper,
 							...(draggedSection === sectionKey ? styles.sectionDragWrapperDragging : null),
@@ -1603,14 +1632,16 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	return (
 		<aside
 			ref={railRef}
-			style={styles.rail}
+			style={{ ...styles.rail, ...(stacked ? styles.railStacked : null) }}
 			data-pm-prompt-dashboard="true"
 			data-pm-dashboard-layout={layoutMode}
+			data-pm-dashboard-stacked={stacked ? 'true' : 'false'}
 			onWheel={markRailScrollManualIntent}
 			onPointerDown={markRailScrollManualIntent}
 			onKeyDown={markRailScrollManualIntent}
 		>
 			<style>{DOCKER_ACTION_MENU_INTERACTION_STYLES}</style>
+			<style>{DASHBOARD_RESPONSIVE_STYLES}</style>
 			<div style={styles.toolbar}>
 				<div style={styles.titleRow}>
 					<PromptDashboardMark />
@@ -1842,6 +1873,7 @@ function renderSectionHeader(
 	const toggleCollapse = () => options?.onToggleCollapse?.();
 	return (
 		<div
+			className="pm-dashboard-section-header"
 			style={{
 				...styles.sectionHeader,
 				...(interactive ? styles.sectionHeaderInteractive : null),
@@ -1859,7 +1891,7 @@ function renderSectionHeader(
 		>
 			<span style={styles.sectionTitleRow}>
 				{options?.dragHandle}
-				<span style={styles.sectionTitle}>{title}</span>
+				<span className="pm-dashboard-section-title" style={styles.sectionTitle}>{title}</span>
 			</span>
 			{metaNode}
 		</div>
@@ -1867,17 +1899,28 @@ function renderSectionHeader(
 }
 
 
-/** Определяет раскрытый блок, которому ещё требуется lazy hydration через подходящий host route. */
+/** Разделяет раскрытия репозиториев, текущих веток и сравниваемых refs; покрыто component-тестами. */
+export function buildPromptDashboardGitExpandedKey(
+	kind: 'incoming' | 'dirty' | 'commit' | 'parallel',
+	project: PromptDashboardProjectSummary,
+	...refs: string[]
+): string {
+	return [kind, project.repositoryPath || project.project, project.currentBranch, ...refs]
+		.map(encodeURIComponent).join(':');
+}
+
+/** Определяет раскрытый блок только в его репозитории и ветке, не гидратируя чужой scope. */
 export function resolveExpandedDetailsHydrationRequest(
 	key: string,
 	projects: PromptDashboardProjectSummary[],
 ): DashboardHydrationRequest | null {
-	const [kind, projectName, ...rest] = key.split(':');
-	if (!kind || !projectName) {
+	const [kind, repositoryPath, currentBranch, ...rest] = key.split(':');
+	if (!kind || !repositoryPath || currentBranch === undefined) {
 		return null;
 	}
 
-	const project = projects.find(item => item.project === projectName);
+	const project = projects.find(item => encodeURIComponent(item.repositoryPath || item.project) === repositoryPath
+		&& encodeURIComponent(item.currentBranch) === currentBranch);
 	if (!project) {
 		return null;
 	}
@@ -1895,16 +1938,18 @@ export function resolveExpandedDetailsHydrationRequest(
 	}
 
 	if (kind === 'commit') {
-		const commitSha = rest.join(':');
-		if (project.recentCommits.some(commit => commit.sha === commitSha && commit.changedFilesHydrated === false)) {
+		if (project.recentCommits.some(commit => buildPromptDashboardGitExpandedKey('commit', project, commit.sha) === key
+			&& commit.changedFilesHydrated === false)) {
 			return { projects: [project.project], reason: 'details' };
 		}
 		return null;
 	}
 
 	if (kind === 'parallel') {
-		const branchName = rest.join(':');
-		if (project.parallelBranches.some(branch => branch.name === branchName && branch.detailsHydrated === false)) {
+		if (project.parallelBranches.some(branch => (
+			buildPromptDashboardGitExpandedKey('parallel', project, branch.ref || branch.name, branch.baseBranch) === key
+			&& branch.detailsHydrated === false
+		))) {
 			return { projects: [project.project], reason: 'details' };
 		}
 		return null;
@@ -2110,7 +2155,7 @@ function renderProjectBranches(
 					onRefreshWidget,
 				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('projectBranches'), dragHandle })}
 			{collapsed ? null : <div style={styles.sectionBody}>
-				<label style={styles.bulkBranchRow}>
+				<label className="pm-dashboard-bulk-branch" style={styles.bulkBranchRow}>
 					<span style={styles.bulkBranchLabel}>Для всех</span>
 					<span style={styles.bulkBranchControls}>
 						<select
@@ -2138,7 +2183,7 @@ function renderProjectBranches(
 						</button>
 					</span>
 				</label>
-				<div style={styles.branchToolbar}>
+				<div className="pm-dashboard-branch-toolbar" style={styles.branchToolbar}>
 					<button type="button" style={{ ...styles.secondaryButton, ...(isPromptPresetBusy ? styles.busyButton : null), ...(isPromptPresetDisabled && !isPromptPresetBusy ? styles.disabledButton : null) }} onClick={() => applyBranchPreset('prompt')} title={hasPromptPresetBranch ? 'Сразу переключить каждый проект на его ветку из поля prompt branch' : 'У промпта не задана ветка Git'} disabled={isPromptPresetDisabled}>
 						{isPromptPresetBusy ? <span style={styles.inlineSpinnerLabel}><span style={styles.buttonSpinner} aria-hidden="true" /> Применяем</span> : 'Ветка промпта'}
 					</button>
@@ -2167,6 +2212,7 @@ function renderProjectBranches(
 	);
 }
 
+/** Показывает выбор ветки и раскрытия файлов только для соответствующего рабочего дерева. */
 function renderBranchProject(
 	project: PromptDashboardProjectSummary,
 	index: number,
@@ -2198,8 +2244,9 @@ function renderBranchProject(
 			? `Переключить ${project.project} на ${selectedBranch}`
 			: 'Ветка уже активна';
 	const selectedLabel = isChanged ? 'выбрана' : 'текущая';
-	const incomingFilesToggleKey = `incoming:${project.project}`;
-	const dirtyFilesToggleKey = `dirty:${project.project}`;
+	// Сохранённое раскрытие относится к точному рабочему дереву и его текущей ветке.
+	const incomingFilesToggleKey = buildPromptDashboardGitExpandedKey('incoming', project);
+	const dirtyFilesToggleKey = buildPromptDashboardGitExpandedKey('dirty', project);
 	const hasIncomingFiles = canPullSelectedCurrentBranch && project.incomingFiles.length > 0;
 	const incomingFilesExpanded = expanded[incomingFilesToggleKey] === true;
 	const hasUncommittedFiles = project.uncommittedFiles.length > 0;
@@ -2209,7 +2256,7 @@ function renderBranchProject(
 		...(project.hasPromptBranchMismatch ? styles.branchSelectMismatch : null),
 	};
 	return (
-		<div key={project.project} style={{ ...styles.branchProjectRow, ...(index === 0 ? styles.branchProjectRowFirst : null) }}>
+		<div key={project.project} className="pm-dashboard-branch-project" style={{ ...styles.branchProjectRow, ...(index === 0 ? styles.branchProjectRowFirst : null) }}>
 			<div style={styles.projectName} title={`${project.project}\nТекущая ветка: ${project.currentBranch || 'n/a'}`}>{projectLabel}</div>
 			<label style={styles.branchSelectInlineLabel}>
 				<select
@@ -2446,7 +2493,7 @@ function renderReviewRequests(
 					const state = request?.state || (project.review.error ? 'недоступно' : project.review.unsupportedReason ? 'нет setup' : 'нет MR/PR');
 					return (
 						<div key={project.project} style={styles.compactProjectRow}>
-							<div style={styles.projectHeader}>
+							<div className="pm-dashboard-project-header" style={styles.projectHeader}>
 								<div style={styles.projectName}>{project.project}</div>
 								<span style={{ ...styles.badge, ...(request ? styles.badgeOk : styles.badgeNeutral) }}>{state}</span>
 							</div>
@@ -2506,7 +2553,7 @@ function renderParallelBranchFiles(
 			{collapsed ? null : <div style={styles.sectionBody}>
 				{projectGroups.length === 0 ? sectionCacheStatus === 'loading' ? renderLoadingEmptyState('Данные по веткам загружаются') : <div style={styles.emptyText}>Нет данных по параллельным веткам</div> : projectGroups.map(({ project, branches }) => (
 					<div key={project.project} style={styles.projectBlock}>
-						<div style={styles.projectHeader}>
+						<div className="pm-dashboard-project-header" style={styles.projectHeader}>
 							<div style={styles.projectName}>{project.project}</div>
 							<span style={styles.sectionMeta}>{branches.length}</span>
 						</div>
@@ -2565,7 +2612,7 @@ function renderProjectCommits(
 					sectionCacheStatus === 'loading' ? renderLoadingEmptyState('Коммиты загружаются') : <div style={styles.emptyText}>Коммиты пока недоступны</div>
 				) : projects.map((project, index) => (
 					<div key={project.project} style={{ ...styles.projectBlock, ...(index === 0 ? styles.projectBlockFirst : null) }}>
-						<div style={styles.projectHeader}>
+						<div className="pm-dashboard-project-header" style={styles.projectHeader}>
 							<div style={styles.projectName}>{project.project}</div>
 							<span style={styles.sectionMeta}>{project.currentBranch || 'n/a'}</span>
 						</div>
@@ -2784,6 +2831,7 @@ function renderCommitList(
 	);
 }
 
+/** Восстанавливает раскрытие SHA в текущем репозитории и ветке; tests/promptDashboardComponent.test.tsx. */
 function renderCommit(
 	project: PromptDashboardProjectSummary,
 	commit: PromptDashboardRecentCommit,
@@ -2791,7 +2839,8 @@ function renderCommit(
 	toggleExpanded: (key: string) => void,
 	fileHandlers: FileRowActionHandlers,
 ): React.ReactNode {
-	const expandKey = `commit:${project.project}:${commit.sha}`;
+	// SHA раскрывается только внутри исходного репозитория и ветки.
+	const expandKey = buildPromptDashboardGitExpandedKey('commit', project, commit.sha);
 	const isExpanded = expanded[expandKey] === true;
 	const changedFilesLabel = resolveCommitChangedFilesLabel(commit);
 	return (
@@ -3034,6 +3083,7 @@ function resolveParallelBranchChangedFilesLabel(branch: GitOverlayParallelBranch
 	return branch.detailsHydrated === false ? '...' : String(branch.affectedFiles.length);
 }
 
+/** Показывает ветку с адаптивным графом и раскрытием для точной пары сравниваемых refs. */
 function renderParallelBranch(
 	project: PromptDashboardProjectSummary,
 	branch: GitOverlayParallelBranchSummary,
@@ -3044,7 +3094,8 @@ function renderParallelBranch(
 	toggleExpanded: (key: string) => void,
 	fileHandlers: FileRowActionHandlers,
 ): React.ReactNode {
-	const expandKey = `parallel:${project.project}:${branch.name}`;
+	// Смена базы сравнения не переиспользует раскрытие другой пары веток.
+	const expandKey = buildPromptDashboardGitExpandedKey('parallel', project, branch.ref || branch.name, branch.baseBranch);
 	const isExpanded = expanded[expandKey] === true;
 	const changedFilesLabel = resolveParallelBranchChangedFilesLabel(branch);
 	const hasConflictWarning = branch.detailsHydrated !== false && branch.potentialConflicts.length > 0;
@@ -3052,6 +3103,7 @@ function renderParallelBranch(
 		<div key={branch.name} style={styles.detailBlock}>
 			<button
 				type="button"
+				className="pm-dashboard-parallel-branch"
 				style={{ ...styles.detailButton, ...styles.parallelDetailButton }}
 				onClick={() => toggleExpanded(expandKey)}
 				title={`${branch.ref || branch.name}\n${resolveParallelGraphMeta(branch)}`}
@@ -4073,7 +4125,7 @@ function renderDockerSummary(
 		);
 
 	return (
-		<div style={styles.dockerSummaryGrid}>
+		<div className="pm-dashboard-docker-summary" style={styles.dockerSummaryGrid}>
 			{renderDockerSummaryMetric('Всего', data.totalContainers)}
 			{renderDockerSummaryMetric(
 				'Запущено',
@@ -4125,8 +4177,8 @@ function renderDockerControls(
 	setSortBy: (sortBy: DockerContainerSortBy) => void,
 ): React.ReactNode {
 	return (
-		<div style={styles.dockerControls}>
-			<div style={styles.dockerSegmentedControl}>
+		<div className="pm-dashboard-docker-controls" style={styles.dockerControls}>
+			<div className="pm-dashboard-docker-views" style={styles.dockerSegmentedControl}>
 				{(['tree', 'cards', 'table', 'list'] as const).map(mode => (
 					<button
 						key={mode}
@@ -4320,7 +4372,7 @@ function renderDockerFlatTable(
 	const rows = buildDockerTableRows(projects);
 	return (
 		<div style={styles.dockerTable}>
-			<div style={{ ...styles.dockerTableRow, ...styles.dockerTableHeader }}>
+			<div className="pm-dashboard-docker-table-header" style={{ ...styles.dockerTableRow, ...styles.dockerTableHeader }}>
 				<span>Проект/Compose/Контейнер</span>
 				<span style={styles.dockerTableHeaderCenteredCell}>Статус</span>
 				<span style={styles.dockerTableHeaderMetricCell}>CPU</span>
@@ -4417,7 +4469,7 @@ function renderDockerComposeFileGroup(
 	const groupActionError = resolveDockerComposeActionError(actionError, project, group);
 	return (
 		<div key={group.composeFile.filePath} style={styles.dockerComposeFileBlock}>
-			<div style={styles.dockerComposeFileHeader}>
+			<div className="pm-dashboard-docker-compose-header" style={styles.dockerComposeFileHeader}>
 				<span style={styles.fileTreeBranchPrefix}>{buildTreeBranchPrefix(context)}</span>
 				<button type="button" style={styles.dockerExpandButton} onClick={() => toggleExpanded(composeFileKey)} title={isExpanded ? 'Свернуть compose-файл' : 'Раскрыть compose-файл'} aria-label={isExpanded ? 'Свернуть compose-файл' : 'Раскрыть compose-файл'}>{isExpanded ? '▾' : '▸'}</button>
 				<span style={styles.dockerComposeFileName} title={group.composeFile.filePath}>{label}</span>
@@ -4511,7 +4563,7 @@ function renderDockerComposeRuntimeSummary(group: DockerComposeFileContainerGrou
 		return null;
 	}
 	return (
-		<div style={styles.dockerComposeRuntimeMetrics}>
+		<div style={styles.dockerComposeRuntimeMetrics} data-pm-docker-live-metrics="true">
 			<div style={styles.dockerComposeRuntimeMetricCard}>
 				<span style={styles.metricLabel}>CPU</span>
 				<span style={styles.dockerComposeRuntimeMetricValue}>{formatPercent(runtimeTotals.cpuPercent)}</span>
@@ -4793,7 +4845,7 @@ function renderDockerTableRow(
 		const groupActionError = resolveDockerComposeActionError(actionError, row.project, row.group);
 		return (
 			<div key={row.key} style={styles.dockerTableBlock}>
-				<div style={styles.dockerTableRow}>
+				<div className="pm-dashboard-docker-table-row" style={styles.dockerTableRow}>
 					{renderDockerProjectComposeCell(row.label, formatDockerComposeFileLabel(row.group.composeFile))}
 					{renderDockerStatusIcon(row.group.status || (row.group.runningCount > 0 ? 'running' : 'stopped'), row.group.statusTone || (row.group.runningCount > 0 ? 'ok' : 'neutral'), row.group.statusText)}
 					{renderDockerTableMetricCell('—')}
@@ -4812,7 +4864,7 @@ function renderDockerTableRow(
 	if (row.kind === 'service') {
 		return (
 			<div key={row.key} style={styles.dockerTableBlock}>
-				<div style={styles.dockerTableRow}>
+				<div className="pm-dashboard-docker-table-row" style={styles.dockerTableRow}>
 					{renderDockerProjectComposeCell(row.label, row.row.serviceName)}
 					{renderDockerStatusIcon('stopped', 'neutral', 'Контейнер не создан или остановлен')}
 					{renderDockerTableMetricCell('—')}
@@ -4835,7 +4887,8 @@ function renderDockerTableRow(
 	const toggleLabel = `${isExpanded ? 'Скрыть детали контейнера' : 'Показать детали контейнера'} ${displayName}`;
 	return (
 		<div key={row.key} style={styles.dockerTableBlock}>
-			<div style={styles.dockerTableRow}>
+			<div className="pm-dashboard-docker-table-row" style={styles.dockerTableRow}
+				data-pm-docker-live-metrics={hasDockerRuntimeStats(container) ? 'true' : undefined}>
 				{renderDockerProjectComposeCell(row.label, displayName, {
 					leadingControl: <button
 						type="button"
@@ -4907,7 +4960,10 @@ function renderDockerContainerHeader(
 		? `${isExpanded ? 'Свернуть' : 'Раскрыть'} карточку контейнера ${displayName}`
 		: `Открыть логи контейнера ${displayName}`;
 	return (
-		<div style={variant === 'card' ? styles.dockerCardHeader : variant === 'tree' ? styles.dockerTreeListHeader : styles.dockerListHeader}>
+		<div
+			className={variant === 'tree' ? 'pm-dashboard-docker-tree-header' : variant === 'list' ? 'pm-dashboard-docker-list-header' : undefined}
+			style={variant === 'card' ? styles.dockerCardHeader : variant === 'tree' ? styles.dockerTreeListHeader : styles.dockerListHeader}
+		>
 			{options.treeContext ? <span style={styles.fileTreeBranchPrefix}>{buildTreeBranchPrefix(options.treeContext)}</span> : null}
 			<button type="button" style={expandButtonStyle} onClick={() => toggleExpanded(expandKey)} title={isExpanded ? 'Скрыть детали' : 'Показать детали'} aria-label={isExpanded ? 'Скрыть детали контейнера' : 'Показать детали контейнера'}>{isExpanded ? '▾' : '▸'}</button>
 			<button
@@ -4944,7 +5000,7 @@ function renderDockerDeclaredServiceHeader(
 		? { ...styles.dockerHeaderActions, ...styles.dockerTreeHeaderActions }
 		: styles.dockerHeaderActions;
 	return (
-		<div style={treeContext ? styles.dockerTreeDeclaredServiceHeader : styles.dockerListDeclaredServiceHeader}>
+		<div className={treeContext ? 'pm-dashboard-docker-tree-header' : undefined} style={treeContext ? styles.dockerTreeDeclaredServiceHeader : styles.dockerListDeclaredServiceHeader}>
 			{treeContext ? <span style={styles.fileTreeBranchPrefix}>{buildTreeBranchPrefix(treeContext)}</span> : null}
 			{treeContext ? <span style={{ ...styles.dockerExpandPlaceholder, ...styles.dockerTreeExpandPlaceholder }} aria-hidden="true" /> : null}
 			<span style={styles.dockerNameButton} title={`${row.serviceName}\n${row.group.composeFile.filePath}`}>
@@ -5102,7 +5158,7 @@ function renderDockerResourceSummary(
 		});
 	}
 	return (
-		<div style={styles.dockerResourceBlock}>
+		<div style={styles.dockerResourceBlock} data-pm-docker-live-metrics="true">
 			{renderDockerMetricBar('CPU', cpu, formatPercent(cpu), 'var(--vscode-charts-blue, var(--vscode-textLink-foreground))')}
 			{renderDockerMetricBar('RAM', memoryPercent, formatDockerMemoryMegabytes(memoryUsageBytes), 'var(--vscode-charts-green)')}
 			<div style={styles.dockerNetworkRow}>
@@ -5115,7 +5171,7 @@ function renderDockerResourceSummary(
 	);
 }
 
-/** Renders three small resource charts in one row for expanded list items. */
+/** Показывает три ресурсных графика раскрытого контейнера с переносом на узкой карточке. */
 function renderDockerCompactResourceSummary(
 	container: DockerContainerSummary,
 	values: { cpu: number; memoryUsageBytes: number; rxRate: number; txRate: number },
@@ -5123,7 +5179,8 @@ function renderDockerCompactResourceSummary(
 	// Normalize and downsample one shared history window before rendering its three resource series.
 	const visibleSamples = buildDockerSparklineVisibleSamples(container.samples);
 	return (
-		<div style={styles.dockerCompactResourceGrid} data-docker-resource-layout="compact">
+		<div className="pm-dashboard-docker-resource-grid" style={styles.dockerCompactResourceGrid}
+			data-docker-resource-layout="compact" data-pm-docker-live-metrics="true">
 			{renderDockerCompactMetricCard('CPU', formatPercent(values.cpu), renderDockerCompactSparkline(visibleSamples, 'cpu'))}
 			{renderDockerCompactMetricCard('RAM', formatDockerMemoryMegabytes(values.memoryUsageBytes), renderDockerCompactSparkline(visibleSamples, 'memory'))}
 			{renderDockerCompactMetricCard(
@@ -6312,7 +6369,7 @@ function renderTodoProject(
 	return (
 		<div key={key} style={styles.todoTreeGroup}>
 			{renderTodoTreeToggleRow(key, project.project, `${project.markerCount} меток`, isExpanded, toggleExpanded)}
-			{isExpanded ? <div style={styles.todoTreeChildren}>
+			{isExpanded ? <div className="pm-dashboard-todo-children" style={styles.todoTreeChildren}>
 				{renderTodoDirectoryTree(project.project, collectTodoProjectFiles(project), expanded, toggleExpanded, onOpenTodoMarker)}
 			</div> : null}
 		</div>
@@ -6369,7 +6426,7 @@ function renderTodoDirectoryPath(
 	return (
 		<div key={key} style={styles.todoTreeGroup}>
 			{renderTodoTreeToggleRow(key, directoryPath, `${markerCount} меток`, isExpanded, toggleExpanded)}
-			{isExpanded ? <div style={styles.todoTreeChildren}>
+			{isExpanded ? <div className="pm-dashboard-todo-children" style={styles.todoTreeChildren}>
 				{sortedFiles.map(file => renderTodoFile(file, expanded, toggleExpanded, onOpenTodoMarker))}
 			</div> : null}
 		</div>
@@ -6389,7 +6446,7 @@ function renderTodoFile(
 	return (
 		<div key={key} style={styles.todoTreeGroup}>
 			{renderTodoTreeToggleRow(key, label, `${file.markerCount}`, isExpanded, toggleExpanded)}
-			{isExpanded ? <div style={styles.todoTreeChildren}>
+			{isExpanded ? <div className="pm-dashboard-todo-children" style={styles.todoTreeChildren}>
 				{file.markers.map(marker => renderTodoMarkerRow(marker, onOpenTodoMarker))}
 			</div> : null}
 		</div>
@@ -6405,7 +6462,8 @@ function renderTodoTreeToggleRow(
 	toggleExpanded: (key: string, defaultExpanded?: boolean) => void,
 ): React.ReactNode {
 	return (
-		<button type="button" style={styles.todoTreeGroupButton} onClick={() => toggleExpanded(key, true)} title={label}>
+		<button type="button" style={styles.todoTreeGroupButton} onClick={() => toggleExpanded(key, true)}
+			title={label} aria-expanded={isExpanded}>
 			<span style={{ ...styles.sectionCollapseIcon, ...(isExpanded ? null : styles.sectionCollapseIconCollapsed) }}>⌄</span>
 			<span style={styles.todoTreeGroupLabel}>{label}</span>
 			<span style={styles.todoTreeGroupMeta}>{meta}</span>
@@ -6422,6 +6480,7 @@ function renderTodoMarkerRow(
 		<button
 			key={marker.id}
 			type="button"
+			className="pm-dashboard-todo-marker"
 			style={styles.todoMarkerRow}
 			onClick={() => onOpenTodoMarker({
 				project: marker.project,
@@ -6594,7 +6653,7 @@ const styles: Record<string, React.CSSProperties> = {
 	// Корневая правая колонка дашборда с вертикальной прокруткой.
 	rail: {
 		flex: '1 1 360px',
-		minWidth: '280px',
+		minWidth: 0,
 		height: '100vh',
 		overflowY: 'auto',
 		overflowAnchor: 'none',
@@ -6602,6 +6661,15 @@ const styles: Record<string, React.CSSProperties> = {
 		padding: '12px 20px 16px 0',
 		boxSizing: 'border-box',
 		background: 'transparent',
+	},
+	// В узком редакторе rail не создаёт второй экран высоты и собственный вертикальный scroll.
+	railStacked: {
+		flex: '0 0 auto',
+		width: '100%',
+		height: 'auto',
+		overflowY: 'visible',
+		scrollbarGutter: 'auto',
+		padding: '12px',
 	},
 	// Верхняя строка с заголовком и кнопкой ручного обновления.
 	toolbar: {
@@ -6792,6 +6860,10 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	// Правая компактная метка со счетчиком или статусом секции.
 	sectionMeta: {
+		minWidth: 0,
+		maxWidth: '100%',
+		overflow: 'hidden',
+		textOverflow: 'ellipsis',
 		fontSize: '11px',
 		fontWeight: 600,
 		color: 'var(--vscode-descriptionForeground)',
@@ -8089,7 +8161,11 @@ const styles: Record<string, React.CSSProperties> = {
 	dockerSearchInput: {
 		width: '100%',
 		minWidth: 0,
-		padding: '6px 8px',
+		// Кнопка очистки меняет только правый отступ без конфликта shorthand при восстановлении поиска.
+		paddingTop: '6px',
+		paddingBottom: '6px',
+		paddingLeft: '8px',
+		paddingRight: '8px',
 		border: '1px solid var(--vscode-input-border, var(--vscode-panel-border))',
 		borderRadius: '4px',
 		background: 'var(--vscode-input-background)',
@@ -8151,7 +8227,8 @@ const styles: Record<string, React.CSSProperties> = {
 		fontSize: '10px',
 		fontWeight: 600,
 		color: 'var(--vscode-descriptionForeground)',
-		whiteSpace: 'nowrap',
+		// Длинная подпись остаётся читаемой на 300 px; проверка в promptDashboardComponent.test.tsx.
+		overflowWrap: 'anywhere',
 	},
 	// ToDo filter controls use wrapped chips because file type counts vary per workspace.
 	todoControls: {
@@ -8168,7 +8245,10 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	todoTypeChip: {
 		padding: '4px 7px',
-		border: '1px solid var(--vscode-panel-border)',
+		// Восстановление фильтра меняет цвет рамки, не удаляя её остальные составляющие.
+		borderWidth: '1px',
+		borderStyle: 'solid',
+		borderColor: 'var(--vscode-panel-border)',
 		borderRadius: '4px',
 		background: 'var(--vscode-button-secondaryBackground)',
 		color: 'var(--vscode-button-secondaryForeground)',
@@ -8344,7 +8424,8 @@ const styles: Record<string, React.CSSProperties> = {
 	},
 	dockerCardGrid: {
 		display: 'grid',
-		gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+		// Карточка сохраняет минимум только пока он помещается в полезную ширину виджета.
+		gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))',
 		gap: '8px',
 		minWidth: 0,
 	},

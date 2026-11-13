@@ -31,6 +31,7 @@ import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 import { normalizeStoredPromptConfig } from '../utils/promptConfig.js';
 import { normalizePromptExternalChangedAt } from '../utils/promptExternalSync.js';
 import { summarizePromptReport } from '../utils/statisticsExport.js';
+import type { PromptHoverTarget, PromptHoverPreviewResult } from '../types/promptHoverPreview.js';
 
 /** Daily time entry for a prompt (ms per category) */
 export interface DailyTimeEntry {
@@ -1271,6 +1272,43 @@ export class StorageService implements vscode.Disposable {
 			return this.attachSidebarSearchText(config, dirPath);
 		} catch {
 			return null;
+		}
+	}
+
+	/** Читает только текст без миграций и отчётов; проверки: storageServiceHoverPreview.test.ts. */
+	async getPromptHoverPreview(target: PromptHoverTarget): Promise<PromptHoverPreviewResult> {
+		// Вход webview не может задавать путь вне непосредственной папки промпта.
+		if (!target || typeof target.id !== 'string' || !target.id.trim()
+			|| /[/\\\x00]/.test(target.id) || target.id === '.' || target.id === '..'
+			|| this.isReservedPromptDirName(target.id) || target.id === '__new__'
+			|| typeof target.promptUuid !== 'string' || !target.promptUuid.trim()
+			|| typeof target.archived !== 'boolean') {
+			return { state: 'missing' };
+		}
+		try {
+			// Проверяем реальные пути: симлинк не должен раскрывать файлы вне этой папки.
+			const root = await fs.promises.realpath(target.archived ? this.archiveStorageDir : this.storageDir);
+			const directory = await fs.promises.realpath(path.join(root, target.id));
+			if (path.dirname(directory) !== root) { return { state: 'missing' }; }
+			const [configPath, contentPath] = await Promise.all([
+				fs.promises.realpath(path.join(directory, this.CONFIG_FILE_NAME)),
+				fs.promises.realpath(path.join(directory, 'prompt.md')),
+			]);
+			if (path.dirname(configPath) !== directory || path.dirname(contentPath) !== directory) {
+				return { state: 'missing' };
+			}
+			const config: unknown = JSON.parse(await fs.promises.readFile(configPath, 'utf8'));
+			if (!config || typeof config !== 'object' || !('promptUuid' in config)
+				|| config.promptUuid !== target.promptUuid) { return { state: 'missing' }; }
+			const content = await fs.promises.readFile(contentPath, 'utf8');
+			// Повторная проверка не даёт выдать текст другой задачи при замене папки во время чтения.
+			const current: unknown = JSON.parse(await fs.promises.readFile(configPath, 'utf8'));
+			if (!current || typeof current !== 'object' || !('promptUuid' in current)
+				|| current.promptUuid !== target.promptUuid) { return { state: 'missing' }; }
+			return { state: 'ready', content };
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			return { state: code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'error' };
 		}
 	}
 

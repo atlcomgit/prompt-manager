@@ -4,6 +4,74 @@ import Module from 'node:module';
 import { normalizePromptDashboardLayouts, PROMPT_DASHBOARD_SECTION_KEYS } from '../src/types/promptDashboard.js';
 import { normalizePromptDashboardPreferences } from '../src/types/promptDashboardPreferences.js';
 import { createDefaultEditorPromptViewState } from '../src/types/prompt.js';
+import { normalizePromptEditorLayout, PROMPT_EDITOR_TAB_SECTIONS } from '../src/types/promptEditorLayout.js';
+import type { ExtensionContext } from 'vscode';
+
+/** Настройки пользователя отделены от Memento и общие для всех подмен рабочих областей. */
+function createConfigurationMock(
+	initial: Record<string, unknown> = {},
+	overrides?: {
+		update?: (store: Map<string, unknown>, key: string, value: unknown) => Promise<void>;
+		workspaceValues?: Record<string, unknown>;
+	},
+) {
+	const store = new Map<string, unknown>(Object.entries(structuredClone(initial)));
+	const writes: { key: string; value: unknown; target: number }[] = [];
+	const inspected: string[] = [];
+	return {
+		store,
+		writes,
+		inspected,
+		inspect<T>(key: string) {
+			inspected.push(key);
+			return {
+				globalValue: structuredClone(store.get(key)) as T | undefined,
+				workspaceValue: overrides?.workspaceValues?.[key] as T | undefined,
+			};
+		},
+		async update(key: string, value: unknown, target: number): Promise<void> {
+			assert.equal(target, 1, 'Настройки должны записываться в ConfigurationTarget.Global');
+			writes.push({ key, value: structuredClone(value), target });
+			if (overrides?.update) {
+				await overrides.update(store, key, structuredClone(value));
+				return;
+			}
+			store.set(key, structuredClone(value));
+		},
+	};
+}
+
+/** Барьер удерживает две записи разных окон до построения обоих патчей из одного подтверждённого снимка. */
+function createConcurrentConfigurationMock() {
+	const entered = createDeferred<void>();
+	const released = createDeferred<void>();
+	let armed = false;
+	let blockedWrites = 0;
+	const configuration = createConfigurationMock({}, { update: async (store, key, value) => {
+		if (armed && blockedWrites < 2) {
+			blockedWrites += 1;
+			if (blockedWrites === 2) {
+				entered.resolve();
+			}
+			await released.promise;
+		}
+		store.set(key, value);
+	} });
+	return {
+		configuration,
+		entered: entered.promise,
+		arm: () => { armed = true; },
+		release: () => { released.resolve(); },
+	};
+}
+
+/** Текущий тест заменяет настройки, сохраняя закешированный модуль vscode между импортами. */
+let activeConfiguration = createConfigurationMock();
+
+/** Создаёт минимальный контекст без рабочих файлов, подключений и настоящего хранилища VS Code. */
+function createStateContext(workspaceState = createWorkspaceStateMock()): ExtensionContext {
+	return { workspaceState } as unknown as ExtensionContext;
+}
 
 const originalLoad = (Module as any)._load;
 
@@ -23,6 +91,7 @@ function createDeferred<T>() {
 
 function createVsCodeMock() {
 	return {
+		ConfigurationTarget: { Global: 1 },
 		FileType: {
 			Directory: 2,
 		},
@@ -33,6 +102,10 @@ function createVsCodeMock() {
 			}),
 		},
 		workspace: {
+			getConfiguration: (section: string) => {
+				assert.equal(section, 'promptManager');
+				return activeConfiguration;
+			},
 			fs: {
 				stat: async () => ({ mtime: Date.now() }),
 				readDirectory: async () => [],
@@ -42,7 +115,8 @@ function createVsCodeMock() {
 	};
 }
 
-async function importStateService() {
+async function importStateService(configuration = createConfigurationMock()) {
+	activeConfiguration = configuration;
 	(Module as any)._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
 		if (request === 'vscode') {
 			return createVsCodeMock();
@@ -191,93 +265,57 @@ test('StateService serializes prompt editor view-state save and migrate mutation
 	}).expandedSections.files, false);
 });
 
-test('StateService saves shared dashboard collapsed sections through a serialized workspace mutation queue', async () => {
-	const { StateService } = await importStateService();
-	const firstUpdateGate = createDeferred<void>();
-	let updateCount = 0;
-	const workspaceState = createWorkspaceStateMock({}, {
-		update: async (store, key, value) => {
-			updateCount += 1;
-			if (updateCount === 1) {
-				await firstUpdateGate.promise;
-			}
-
-			if (typeof value === 'undefined') {
-				store.delete(key);
-				return;
-			}
-
-			store.set(key, value);
-		},
-	});
-	const service = new StateService({ workspaceState } as any);
-
-	const firstSave = service.savePromptDashboardCollapsedSections({
-		activity: true,
-		status: false,
-	});
-	const secondSave = service.savePromptDashboardCollapsedSections({
-		activity: false,
-		status: true,
-		parallelBranches: true,
-	});
-
-	firstUpdateGate.resolve();
-	await Promise.all([firstSave, secondSave]);
-
-	assert.equal(updateCount, 2);
-	assert.deepEqual(service.getPromptDashboardCollapsedSections(), {
-		status: true,
-		parallelBranches: true,
-	});
-	assert.deepEqual(service.getPromptDashboardLayouts()['two-columns'].collapsedSections, {
-		status: true,
-		parallelBranches: true,
-	});
+/** Очередь сохраняет последние сворачивания через пользовательскую конфигурацию. */
+test('StateService serializes global dashboard collapse writes', async () => {
+	const entered = createDeferred<void>();
+	const release = createDeferred<void>();
+	let blocked = false;
+	const configuration = createConfigurationMock({}, { update: async (store, key, value) => {
+		if (!blocked) {
+			blocked = true;
+			entered.resolve();
+			await release.promise;
+		}
+		store.set(key, value);
+	} });
+	const { StateService } = await importStateService(configuration);
+	const workspaceState = createWorkspaceStateMock();
+	const service = new StateService(createStateContext(workspaceState));
+	const firstSave = service.savePromptDashboardCollapsedSections({ activity: true, status: false });
+	const secondSave = service.savePromptDashboardCollapsedSections({ status: true, parallelBranches: true });
+	await entered.promise;
+	try {
+		assert.equal(configuration.writes.length, 1);
+		assert.deepEqual(service.getPromptDashboardCollapsedSections(), {});
+	} finally {
+		release.resolve();
+		await Promise.all([firstSave, secondSave]);
+	}
+	assert.deepEqual(service.getPromptDashboardCollapsedSections(), { status: true, parallelBranches: true });
+	assert.equal(configuration.store.get('dashboardLayouts.twoColumns.collapsed.status'), true);
+	assert.equal(configuration.store.get('dashboardLayouts.twoColumns.collapsed.activity'), false);
+	assert.equal(workspaceState.store.size, 0);
 });
 
-test('StateService saves shared dashboard section order through a serialized workspace mutation queue', async () => {
-	const { StateService } = await importStateService();
-	const firstUpdateGate = createDeferred<void>();
-	let updateCount = 0;
-	const workspaceState = createWorkspaceStateMock({}, {
-		update: async (store, key, value) => {
-			updateCount += 1;
-			if (updateCount === 1) {
-				await firstUpdateGate.promise;
-			}
-
-			if (typeof value === 'undefined') {
-				store.delete(key);
-				return;
-			}
-
-			store.set(key, value);
-		},
-	});
-	const service = new StateService({ workspaceState } as any);
-
-	const firstSave = service.savePromptDashboardSectionOrder([
-		['aiAnalysis', 'activity'],
-		['status'],
+/** Перестановки одного профиля сериализуются и не меняют порядок другой ширины. */
+test('StateService serializes global dashboard order writes independently of the other profile', async () => {
+	const configuration = createConfigurationMock();
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext());
+	const narrowBefore = service.getPromptDashboardSectionOrder('single-column');
+	await Promise.all([
+		service.savePromptDashboardSectionOrder([['aiAnalysis', 'activity'], ['status']]),
+		service.savePromptDashboardSectionOrder([
+			['projectBranches', 'activity', 'parallelBranches'],
+			['status', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
+		]),
 	]);
-	const secondSave = service.savePromptDashboardSectionOrder([
-		['projectBranches', 'activity', 'parallelBranches'],
-		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis'],
-	]);
-
-	firstUpdateGate.resolve();
-	await Promise.all([firstSave, secondSave]);
-
-	assert.equal(updateCount, 2);
 	assert.deepEqual(service.getPromptDashboardSectionOrder(), [
 		['projectBranches', 'activity', 'parallelBranches', 'dockerContainers'],
 		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis', 'todos'],
 	]);
-	assert.deepEqual(service.getPromptDashboardLayouts()['two-columns'].sectionOrder, [
-		['projectBranches', 'activity', 'parallelBranches', 'dockerContainers'],
-		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis', 'todos'],
-	]);
+	assert.deepEqual(service.getPromptDashboardSectionOrder('single-column'), narrowBefore);
+	assert.equal(configuration.writes.filter(write => write.key === 'dashboardLayouts.twoColumns.order').length, 2);
 });
 
 test('StateService chat session relevance ignores sessions completed before the tracked start', async () => {
@@ -510,102 +548,438 @@ test('StateService completion snapshot selects the newest tracked session with a
 	});
 });
 
-/** Ожидание bootstrap включает новые записи очереди и не зависает после отказа предыдущей. */
-test('StateService waits for dashboard saves added during a pending failed write', async () => {
-	const { StateService } = await importStateService();
-	const firstEntered = createDeferred<void>();
-	const firstRelease = createDeferred<void>();
-	const secondEntered = createDeferred<void>();
-	const secondRelease = createDeferred<void>();
-	let writes = 0;
-	let completed = false;
-	const workspaceState = createWorkspaceStateMock({}, { update: async (store, key, value) => {
-		if (++writes === 1) {
-			firstEntered.resolve();
-			await firstRelease.promise;
-			throw new Error('testing write failure');
-		}
-		secondEntered.resolve();
-		await secondRelease.promise;
-		store.set(key, value);
-	} });
-	const service = new StateService({ workspaceState } as unknown as ConstructorParameters<typeof StateService>[0]);
-	const failure = assert.rejects(service.savePromptDashboardCollapsedSections({ todos: true }, 'two-columns'));
-	await firstEntered.promise;
-	const waiting = service.waitForPromptDashboardSaves().then(() => { completed = true; });
-	const preferences = normalizePromptDashboardPreferences({ docker: { search: 'latest' } });
-	const saving = service.savePromptDashboardPreferences(preferences);
-	try {
-		firstRelease.resolve();
-		await secondEntered.promise;
-		assert.equal(completed, false);
-		secondRelease.resolve();
-		await Promise.all([failure, saving, waiting]);
-		assert.deepEqual(service.getPromptDashboardCollapsedSections('two-columns'), {});
-		assert.deepEqual(service.getPromptDashboardPreferences(), preferences);
-	} finally {
-		firstRelease.resolve();
-		secondRelease.resolve();
-		await Promise.all([failure, saving, waiting]);
-	}
-});
-
-/** Новый экземпляр восстанавливает профили из отдельного JSON-снимка, а не общей ссылки Memento. */
-test('StateService keeps dashboard layouts isolated across queued saves and serialized restore', async () => {
-	const { StateService } = await importStateService();
+/** Чтение legacy ничего не записывает; первый жест переносит отсутствующие поля и только раскрытия main. */
+test('StateService migrates legacy UI state only after an explicit save', async () => {
+	const configuration = createConfigurationMock();
+	const { StateService } = await importStateService(configuration);
 	const legacyOrder = [['todos', 'status'], ['activity']];
+	const preferences = normalizePromptDashboardPreferences({ docker: { search: 'legacy' } });
 	const workspaceState = createWorkspaceStateMock({
 		'promptManager.dashboardSectionOrder': legacyOrder,
 		'promptManager.dashboardCollapsedSections': { activity: true },
+		'promptManager.dashboardPreferences': preferences,
 	});
-	const service = new StateService({ workspaceState } as any);
-	const initial = normalizePromptDashboardLayouts(undefined, legacyOrder, { activity: true });
-	assert.deepEqual(service.getPromptDashboardLayouts(), initial);
+	const service = new StateService(createStateContext(workspaceState));
+	const source = { promptUuid: 'prompt-one', promptId: 'one' };
+	const view = createDefaultEditorPromptViewState();
+	view.expandedSections.workspace = false;
+	view.expandedSections.files = true;
+	view.expandedSections.report = true;
+	view.expandedSections.notes = false;
+	await service.savePromptEditorViewState(source, view);
+	const workspaceBefore = structuredClone(Object.fromEntries(workspaceState.store));
+	assert.deepEqual(service.getPromptDashboardLayouts(),
+		normalizePromptDashboardLayouts(undefined, legacyOrder, { activity: true }));
+	assert.deepEqual(service.getPromptDashboardPreferences(), preferences);
+	assert.equal(service.getPromptEditorLayout().mainExpandedSections, undefined);
+	assert.equal(configuration.writes.length, 0);
 
-	// Несколько быстрых действий в разных режимах не должны перезаписывать соседние настройки.
-	await Promise.all([
-		service.savePromptDashboardSectionOrder([['aiAnalysis', 'todos', 'status']], 'single-column'),
-		service.savePromptDashboardCollapsedSections({}, 'single-column'),
-		service.savePromptDashboardSectionOrder([[], ['activity',
-			...PROMPT_DASHBOARD_SECTION_KEYS.filter(key => key !== 'activity')]], 'two-columns'),
-		service.savePromptDashboardCollapsedSections({ dockerContainers: true }, 'two-columns'),
-	]);
-	const restoredWorkspaceState = createWorkspaceStateMock(JSON.parse(JSON.stringify(
-		Object.fromEntries(workspaceState.store),
-	)));
-	const reopened = new StateService({ workspaceState: restoredWorkspaceState } as any);
-	assert.deepEqual(reopened.getPromptDashboardLayouts(), service.getPromptDashboardLayouts());
-	assert.deepEqual(reopened.getPromptDashboardCollapsedSections('single-column'), {});
-	assert.deepEqual(reopened.getPromptDashboardCollapsedSections('two-columns'), { dockerContainers: true });
-	assert.deepEqual(reopened.getPromptDashboardSectionOrder('single-column')[0].slice(0, 3),
-		['aiAnalysis', 'todos', 'status']);
-	assert.equal(reopened.getPromptDashboardSectionOrder('single-column').length, 1);
-	assert.equal(reopened.getPromptDashboardSectionOrder('two-columns').length, 2);
-	assert.deepEqual(reopened.getPromptDashboardSectionOrder('two-columns')[0], []);
-	assert.equal(reopened.getPromptDashboardSectionOrder('two-columns')[1][0], 'activity');
-	assert.deepEqual(workspaceState.store.get('promptManager.dashboardSectionOrder'), legacyOrder);
+	await service.savePromptDashboardCollapsedSections({}, 'single-column', undefined, source);
+	assert.deepEqual(service.getPromptDashboardCollapsedSections('single-column'), {});
+	assert.deepEqual(service.getPromptDashboardCollapsedSections('two-columns'), { activity: true });
+	assert.equal(service.getPromptEditorLayout().mainExpandedSections?.workspace, false);
+	assert.equal(service.getPromptEditorLayout().mainExpandedSections?.files, true);
+	assert.deepEqual([...configuration.store.keys()].filter(key => key.startsWith('editor.mainExpandedSections.'))
+		.map(key => key.slice('editor.mainExpandedSections.'.length)).sort(), [...PROMPT_EDITOR_TAB_SECTIONS.main].sort());
+	assert.equal(service.getPromptEditorViewState(source).expandedSections.report, true);
+	assert.deepEqual(Object.fromEntries(workspaceState.store), workspaceBefore);
+	assert.equal(configuration.store.get('dashboardPreferences.docker.search'), preferences.docker.search);
+	assert.equal(configuration.store.get('dashboardPreferences.docker.viewMode'), null);
+	assert.equal(configuration.store.has('dashboardPreferences.docker'), false);
+	assert.equal(configuration.store.has('editor.mainExpandedSections'), false);
+	assert.equal(configuration.store.has('dashboardLayouts.singleColumn.collapsed'), false);
+	assert.ok(configuration.writes.every(write => write.target === 1));
 });
 
-/** Memento может обновить память до отказа записи: следующий патч не должен сохранить неудачный снимок. */
-test('StateService does not expose or inherit an eagerly updated failed dashboard layout', async () => {
+/** Global имеет приоритет над legacy и workspaceValue; пустые объекты и false не считаются отсутствующими. */
+test('StateService prefers explicit global settings over workspace profiles and workspace overrides', async () => {
+	const globalOrder = [[], [...PROMPT_DASHBOARD_SECTION_KEYS]];
+	const configuration = createConfigurationMock({
+		'dashboardLayouts.twoColumns.order': globalOrder,
+		'dashboardLayouts.twoColumns.collapsed.activity': false,
+		'dashboardPreferences.expanded': {},
+		'dashboardPreferences.showAllBranchProjects': false,
+	}, { workspaceValues: { 'dashboardLayouts.twoColumns.collapsed.activity': true } });
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext(createWorkspaceStateMock({
+		'promptManager.dashboardCollapsedSections': { activity: true },
+		'promptManager.dashboardPreferences': normalizePromptDashboardPreferences({
+			expanded: { legacy: true }, showAllBranchProjects: true,
+		}),
+	})));
+	assert.deepEqual(service.getPromptDashboardSectionOrder(), globalOrder);
+	assert.deepEqual(service.getPromptDashboardCollapsedSections(), {});
+	assert.deepEqual(service.getPromptDashboardPreferences()?.expanded, {});
+	assert.equal(service.getPromptDashboardPreferences()?.showAllBranchProjects, false);
+	assert.equal(configuration.writes.length, 0);
+	assert.ok(configuration.inspected.includes('dashboardLayouts.twoColumns.collapsed.activity'));
+});
+
+/** Две рабочие области получают один пользовательский снимок и не мигрируют его повторно из чужого legacy. */
+test('StateService shares saved UI settings between independent workspaces and serialized restore', async () => {
+	const configuration = createConfigurationMock();
+	const { StateService } = await importStateService(configuration);
+	const firstWorkspace = createWorkspaceStateMock({
+		'promptManager.dashboardCollapsedSections': { activity: true },
+	});
+	const secondWorkspace = createWorkspaceStateMock({
+		'promptManager.dashboardCollapsedSections': { status: true },
+	});
+	const first = new StateService(createStateContext(firstWorkspace));
+	const second = new StateService(createStateContext(secondWorkspace));
+	await first.savePromptDashboardSectionOrder([[], [...PROMPT_DASHBOARD_SECTION_KEYS]], 'two-columns');
+	await first.savePromptDashboardCollapsedSections({}, 'single-column');
+	assert.deepEqual(second.getPromptDashboardLayouts(), first.getPromptDashboardLayouts());
+	await second.savePromptDashboardCollapsedSections({ todos: true }, 'two-columns');
+	assert.deepEqual(first.getPromptDashboardCollapsedSections(), { todos: true });
+
+	const restoredConfiguration = createConfigurationMock(JSON.parse(JSON.stringify(
+		Object.fromEntries(configuration.store),
+	)));
+	await importStateService(restoredConfiguration);
+	const reopened = new StateService(createStateContext());
+	assert.deepEqual(reopened.getPromptDashboardSectionOrder()[0], []);
+	assert.deepEqual(reopened.getPromptDashboardCollapsedSections('single-column'), {});
+	assert.deepEqual(reopened.getPromptDashboardCollapsedSections(), { todos: true });
+	assert.deepEqual(firstWorkspace.store.get('promptManager.dashboardCollapsedSections'), { activity: true });
+	assert.deepEqual(secondWorkspace.store.get('promptManager.dashboardCollapsedSections'), { status: true });
+});
+
+/** Запись фильтров копирует значения, сохраняет false и не возвращает удалённые внутренние раскрытия. */
+test('StateService restores preferences without sharing mutable values and preserves empty settings', async () => {
+	const configuration = createConfigurationMock();
+	const { StateService } = await importStateService(configuration);
+	const workspaceState = createWorkspaceStateMock();
+	const service = new StateService(createStateContext(workspaceState));
+	assert.equal(service.getPromptDashboardPreferences(), undefined);
+	assert.equal(configuration.writes.length, 0);
+	const state = normalizePromptDashboardPreferences({
+		docker: { viewMode: 'table', statusFilter: 'stopped', search: 'api', sortBy: 'cpu',
+			expandedContainerIds: ['compose:api'] },
+		todos: { selectedFileTypes: [' TS '], search: 'FIXME' },
+		expanded: { 'project:api': false }, showAllBranchProjects: true,
+	});
+	const expected = structuredClone(state);
+	await service.savePromptDashboardPreferences(state);
+	state.docker.search = 'changed input';
+	service.getPromptDashboardPreferences()!.todos.selectedFileTypes.push('php');
+	assert.deepEqual(service.getPromptDashboardPreferences(), expected);
+	assert.equal(workspaceState.store.size, 0);
+	await service.savePromptDashboardPreferences(normalizePromptDashboardPreferences({ expanded: {} }));
+	assert.deepEqual(service.getPromptDashboardPreferences()?.expanded, {});
+	assert.equal(service.getPromptDashboardPreferences()?.showAllBranchProjects, false);
+	assert.deepEqual(service.getPromptDashboardPreferences()?.todos.selectedFileTypes, []);
+});
+
+/** Явный null после переноса не подхватывает старый режим другой рабочей области при независимом сохранении. */
+test('StateService preserves migrated null Docker viewMode across workspaces with legacy preferences', async () => {
+	const configuration = createConfigurationMock();
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext());
+	await service.savePromptDashboardPreferences(normalizePromptDashboardPreferences(undefined));
+	assert.deepEqual(configuration.writes.filter(write => write.key === 'dashboardPreferences.docker.viewMode')
+		.map(write => write.value), [null]);
+	const secondWorkspace = createWorkspaceStateMock({
+		'promptManager.dashboardPreferences': normalizePromptDashboardPreferences({ docker: { viewMode: 'cards' } }),
+	});
+	const secondService = new StateService(createStateContext(secondWorkspace));
+	assert.equal(secondService.getPromptDashboardPreferences()?.docker.viewMode, undefined);
+	await secondService.savePromptDashboardCollapsedSections({ activity: true }, 'two-columns', {});
+	assert.deepEqual(configuration.writes.filter(write => write.key === 'dashboardPreferences.docker.viewMode')
+		.map(write => write.value), [null]);
+	assert.equal(service.getPromptDashboardPreferences()?.docker.viewMode, undefined);
+	assert.equal(secondService.getPromptDashboardPreferences()?.docker.viewMode, undefined);
+	assert.deepEqual(service.getPromptDashboardCollapsedSections(), { activity: true });
+	assert.equal(configuration.store.get('dashboardPreferences.docker.viewMode'), null);
+	assert.equal((secondWorkspace.store.get('promptManager.dashboardPreferences') as
+		ReturnType<typeof normalizePromptDashboardPreferences>).docker.viewMode, 'cards');
+});
+
+/** Сброс null перекрывает legacy так же, как false и пустые значения; удалённый ключ снова разрешает fallback. */
+test('StateService distinguishes explicit null resets from missing settings before normalization', async () => {
+	const resets = {
+		'dashboardLayouts.twoColumns.order': null,
+		'dashboardLayouts.twoColumns.collapsed.activity': null,
+		'editor.mainExpandedSections.files': null,
+		'dashboardPreferences.docker.viewMode': null,
+		'dashboardPreferences.docker.search': null,
+		'dashboardPreferences.docker.expandedContainerIds': null,
+		'dashboardPreferences.todos.search': null,
+		'dashboardPreferences.todos.selectedFileTypes': null,
+		'dashboardPreferences.expanded': null,
+		'dashboardPreferences.showAllBranchProjects': null,
+	};
+	const configuration = createConfigurationMock(resets);
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext(createWorkspaceStateMock({
+		'promptManager.dashboardSectionOrder': [[], [...PROMPT_DASHBOARD_SECTION_KEYS]],
+		'promptManager.dashboardCollapsedSections': { activity: true },
+		'promptManager.dashboardPreferences': normalizePromptDashboardPreferences({
+			docker: { viewMode: 'cards', search: 'legacy', expandedContainerIds: ['api'] },
+			todos: { search: 'TODO', selectedFileTypes: ['ts'] },
+			expanded: { legacy: true }, showAllBranchProjects: true,
+		}),
+	})));
+	assert.deepEqual(service.getPromptDashboardPreferences(), normalizePromptDashboardPreferences(undefined));
+	assert.deepEqual(service.getPromptDashboardSectionOrder(), normalizePromptDashboardLayouts()['two-columns'].sectionOrder);
+	assert.deepEqual(service.getPromptDashboardCollapsedSections(), {});
+	assert.equal(service.getPromptEditorLayout().mainExpandedSections?.files,
+		createDefaultEditorPromptViewState().expandedSections.files);
+	await service.savePromptDashboardCollapsedSections({ todos: true }, 'single-column', {});
+	for (const key of Object.keys(resets)) {
+		assert.equal(configuration.store.get(key), null, `${key} must not be migrated again`);
+		assert.equal(configuration.writes.some(write => write.key === key), false);
+	}
+	configuration.store.delete('dashboardPreferences.docker.viewMode');
+	service.invalidatePromptUiSettings();
+	assert.equal(service.getPromptDashboardPreferences()?.docker.viewMode, 'cards');
+	configuration.store.set('dashboardPreferences.docker.viewMode', null);
+	service.invalidatePromptUiSettings();
+	assert.equal(service.getPromptDashboardPreferences()?.docker.viewMode, undefined);
+});
+
+/** При отказе записи подтверждённый null и прежний режим защищены одинаково; повтор может успешно сбросить режим. */
+for (const initialViewMode of [null, 'cards'] as const) {
+	test(`StateService preserves confirmed Docker viewMode ${initialViewMode} through a failed write and retry`, async () => {
+		const entered = createDeferred<void>();
+		const release = createDeferred<void>();
+		let fail = true;
+		const configuration = createConfigurationMock({ 'dashboardPreferences.docker.viewMode': initialViewMode }, {
+			update: async (store, key, value) => {
+				store.set(key, value);
+				if (fail && key === 'dashboardPreferences.docker.viewMode') {
+					fail = false;
+					entered.resolve();
+					await release.promise;
+					throw new Error('view mode write failed');
+				}
+			},
+		});
+		const { StateService } = await importStateService(configuration);
+		const workspaceState = createWorkspaceStateMock({
+			'promptManager.dashboardPreferences': normalizePromptDashboardPreferences({ docker: { viewMode: 'list' } }),
+		});
+		const service = new StateService(createStateContext(workspaceState));
+		const base = service.getPromptDashboardPreferences()!;
+		const next = structuredClone(base);
+		next.docker.viewMode = initialViewMode === null ? 'cards' : undefined;
+		const failed = assert.rejects(service.savePromptDashboardPreferences(next, base), /view mode write failed/);
+		await entered.promise;
+		try {
+			assert.equal(service.getPromptDashboardPreferences()?.docker.viewMode, initialViewMode ?? undefined);
+		} finally {
+			release.resolve();
+			await failed;
+		}
+		await service.savePromptDashboardCollapsedSections({ activity: true }, 'two-columns', {});
+		assert.equal(service.getPromptDashboardPreferences()?.docker.viewMode, initialViewMode ?? undefined);
+		assert.equal(configuration.writes.filter(write => write.key === 'dashboardPreferences.docker.viewMode').length, 1);
+		await service.savePromptDashboardPreferences(next, base);
+		assert.equal(service.getPromptDashboardPreferences()?.docker.viewMode, next.docker.viewMode);
+		const restored = new StateService(createStateContext(workspaceState));
+		assert.equal(restored.getPromptDashboardPreferences()?.docker.viewMode, next.docker.viewMode);
+		assert.equal(configuration.store.get('dashboardPreferences.docker.viewMode'), next.docker.viewMode ?? null);
+	});
+}
+
+/** Устаревший снимок меняет только свой фильтр, сохраняя свежие поля другого окна. */
+test('StateService applies stale preference patches to the latest global settings', async () => {
+	const configuration = createConfigurationMock();
+	const { StateService } = await importStateService(configuration);
+	const first = new StateService(createStateContext());
+	const second = new StateService(createStateContext());
+	const base = normalizePromptDashboardPreferences(undefined);
+	await first.savePromptDashboardPreferences(base);
+	const dockerChange = structuredClone(base);
+	dockerChange.docker.search = 'api';
+	dockerChange.expanded.first = false;
+	await first.savePromptDashboardPreferences(dockerChange, base);
+	const staleChange = structuredClone(base);
+	staleChange.docker.sortBy = 'cpu';
+	staleChange.todos.search = 'TODO';
+	staleChange.expanded.second = true;
+	await second.savePromptDashboardPreferences(staleChange, base);
+	assert.equal(first.getPromptDashboardPreferences()?.docker.search, 'api');
+	assert.equal(first.getPromptDashboardPreferences()?.docker.sortBy, 'cpu');
+	assert.equal(first.getPromptDashboardPreferences()?.todos.search, 'TODO');
+	assert.deepEqual(first.getPromptDashboardPreferences()?.expanded, { first: false, second: true });
+});
+
+/** Обе записи начинают update до завершения соседней; отдельные листья не затирают другой параметр Docker. */
+test('StateService preserves simultaneous Docker search and sort changes from two windows', async () => {
+	const barrier = createConcurrentConfigurationMock();
+	const { StateService } = await importStateService(barrier.configuration);
+	const first = new StateService(createStateContext());
+	const second = new StateService(createStateContext());
+	const base = normalizePromptDashboardPreferences(undefined);
+	await first.savePromptDashboardPreferences(base);
+	const searchChange = structuredClone(base);
+	searchChange.docker.search = 'api';
+	const sortChange = structuredClone(base);
+	sortChange.docker.sortBy = 'cpu';
+	barrier.arm();
+	const saves = [
+		first.savePromptDashboardPreferences(searchChange, base),
+		second.savePromptDashboardPreferences(sortChange, base),
+	];
+	await barrier.entered;
+	try {
+		assert.equal(first.getPromptDashboardPreferences()?.docker.search, '');
+		assert.equal(second.getPromptDashboardPreferences()?.docker.sortBy, base.docker.sortBy);
+	} finally {
+		barrier.release();
+		await Promise.all(saves);
+	}
+	for (const service of [first, second]) {
+		assert.equal(service.getPromptDashboardPreferences()?.docker.search, 'api');
+		assert.equal(service.getPromptDashboardPreferences()?.docker.sortBy, 'cpu');
+	}
+	assert.equal(barrier.configuration.store.get('dashboardPreferences.docker.search'), 'api');
+	assert.equal(barrier.configuration.store.get('dashboardPreferences.docker.sortBy'), 'cpu');
+	assert.equal(barrier.configuration.store.has('dashboardPreferences.docker'), false);
+});
+
+/** Параллельные раскрытия main разных окон записываются независимо, даже когда исходный снимок общий. */
+test('StateService preserves simultaneous independent main expansion flags from two windows', async () => {
+	const barrier = createConcurrentConfigurationMock();
+	const { StateService } = await importStateService(barrier.configuration);
+	const first = new StateService(createStateContext());
+	const second = new StateService(createStateContext());
+	await first.savePromptEditorLayout(normalizePromptEditorLayout({ mainExpandedSections: {} }));
+	const base = first.getPromptEditorLayout();
+	const basicChange = structuredClone(base);
+	basicChange.mainExpandedSections!.basic = !base.mainExpandedSections!.basic;
+	const timeChange = structuredClone(base);
+	timeChange.mainExpandedSections!.time = !base.mainExpandedSections!.time;
+	barrier.arm();
+	const saves = [first.savePromptEditorLayout(basicChange, base), second.savePromptEditorLayout(timeChange, base)];
+	try {
+		await barrier.entered;
+	} finally {
+		barrier.release();
+		await Promise.all(saves);
+	}
+	for (const service of [first, second]) {
+		assert.equal(service.getPromptEditorLayout().mainExpandedSections?.basic, !base.mainExpandedSections!.basic);
+		assert.equal(service.getPromptEditorLayout().mainExpandedSections?.time, !base.mainExpandedSections!.time);
+	}
+	assert.equal(barrier.configuration.store.has('editor.mainExpandedSections'), false);
+});
+
+/** Сворачивание двух разных карточек не теряет соседний флаг при перекрывающихся записях двух окон. */
+test('StateService preserves simultaneous independent dashboard collapse flags from two windows', async () => {
+	const barrier = createConcurrentConfigurationMock();
+	const { StateService } = await importStateService(barrier.configuration);
+	const first = new StateService(createStateContext());
+	const second = new StateService(createStateContext());
+	await first.savePromptDashboardCollapsedSections({});
+	const base = first.getPromptDashboardCollapsedSections();
+	barrier.arm();
+	const saves = [
+		first.savePromptDashboardCollapsedSections({ status: true }, 'two-columns', base),
+		second.savePromptDashboardCollapsedSections({ activity: true }, 'two-columns', base),
+	];
+	try {
+		await barrier.entered;
+	} finally {
+		barrier.release();
+		await Promise.all(saves);
+	}
+	assert.deepEqual(first.getPromptDashboardCollapsedSections(), { status: true, activity: true });
+	assert.deepEqual(second.getPromptDashboardCollapsedSections(), { status: true, activity: true });
+	assert.equal(barrier.configuration.store.has('dashboardLayouts.twoColumns.collapsed'), false);
+});
+
+/** Первый патч одного leaf сохраняет соседние legacy-фильтры и приоритет явно пустого global-значения. */
+test('StateService migrates complete legacy preferences when the first explicit change affects one leaf', async () => {
+	const configuration = createConfigurationMock({ 'dashboardPreferences.docker.search': '' });
+	const { StateService } = await importStateService(configuration);
+	const legacy = normalizePromptDashboardPreferences({
+		docker: { search: 'workspace', sortBy: 'memory', statusFilter: 'stopped', expandedContainerIds: ['api'] },
+		todos: { search: 'FIXME', selectedFileTypes: ['ts'] },
+	});
+	const service = new StateService(createStateContext(createWorkspaceStateMock({
+		'promptManager.dashboardPreferences': legacy,
+	})));
+	const base = service.getPromptDashboardPreferences()!;
+	assert.equal(base.docker.search, '');
+	assert.equal(base.docker.sortBy, 'memory');
+	const next = structuredClone(base);
+	next.docker.sortBy = 'cpu';
+	await service.savePromptDashboardPreferences(next, base);
+	assert.deepEqual(service.getPromptDashboardPreferences(), next);
+	assert.equal(configuration.store.get('dashboardPreferences.docker.search'), '');
+	assert.equal(configuration.store.get('dashboardPreferences.docker.statusFilter'), 'stopped');
+	assert.deepEqual(configuration.store.get('dashboardPreferences.docker.expandedContainerIds'), ['api']);
+	assert.equal(configuration.store.get('dashboardPreferences.todos.search'), 'FIXME');
+	assert.deepEqual(configuration.store.get('dashboardPreferences.todos.selectedFileTypes'), ['ts']);
+});
+
+/** Очередь раскрытий применяет оба изменения относительно одного старого снимка. */
+test('StateService preserves independent queued collapse patches and explicit removals', async () => {
 	const { StateService } = await importStateService();
+	const service = new StateService(createStateContext());
+	await service.savePromptDashboardCollapsedSections({ status: true });
+	const base = service.getPromptDashboardCollapsedSections();
+	await Promise.all([
+		service.savePromptDashboardCollapsedSections({ status: true, todos: true }, 'two-columns', base),
+		service.savePromptDashboardCollapsedSections({}, 'two-columns', base),
+	]);
+	assert.deepEqual(service.getPromptDashboardCollapsedSections(), { todos: true });
+});
+
+/** Порядок вкладок и раскрытия main разделены; автоматические flags Process никогда не уходят в global. */
+test('StateService saves editor layout patches without globalizing Process expansion', async () => {
+	const configuration = createConfigurationMock();
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext());
+	const source = { promptUuid: 'uuid-layout', promptId: 'layout' };
+	const view = createDefaultEditorPromptViewState();
+	view.expandedSections.plan = true;
+	view.expandedSections.report = true;
+	await service.savePromptEditorViewState(source, view);
+	await service.savePromptEditorLayout(normalizePromptEditorLayout({
+		main: ['time', 'basic'], process: ['report', 'plan'],
+		mainExpandedSections: { basic: false, report: true, notes: false },
+	}), undefined, source);
+	const base = service.getPromptEditorLayout();
+	const reordered = structuredClone(base);
+	reordered.main = ['files', ...base.main.filter(key => key !== 'files')];
+	await service.savePromptEditorLayout(reordered, base, source);
+	const stale = structuredClone(base);
+	stale.mainExpandedSections!.time = false;
+	await service.savePromptEditorLayout(stale, base, source);
+	assert.equal(service.getPromptEditorLayout().main[0], 'files');
+	assert.equal(service.getPromptEditorLayout().mainExpandedSections?.basic, false);
+	assert.equal(service.getPromptEditorLayout().mainExpandedSections?.time, false);
+	assert.deepEqual(service.getPromptEditorLayout().process.slice(0, 2), ['report', 'plan']);
+	assert.deepEqual([...configuration.store.keys()].filter(key => key.startsWith('editor.mainExpandedSections.'))
+		.map(key => key.slice('editor.mainExpandedSections.'.length)).sort(), [...PROMPT_EDITOR_TAB_SECTIONS.main].sort());
+	assert.equal(service.getPromptEditorViewState(source).expandedSections.plan, true);
+	assert.equal(service.getPromptEditorViewState(source).expandedSections.report, true);
+});
+
+/** Eager update скрыт до подтверждения и после отказа; следующая запись другого профиля не наследует его. */
+test('StateService hides eager failed global writes and recovers on later saves', async () => {
 	const entered = createDeferred<void>();
 	const release = createDeferred<void>();
-	let writes = 0;
-	const workspaceState = createWorkspaceStateMock({}, {
-		update: async (store, key, value) => {
-			store.set(key, value);
-			if (++writes === 1) {
-				entered.resolve();
-				await release.promise;
-				throw new Error('simulated persistence failure');
-			}
-		},
-	});
-	const service = new StateService({ workspaceState } as any);
+	let first = true;
+	const configuration = createConfigurationMock({}, { update: async (store, key, value) => {
+		store.set(key, value);
+		if (first) {
+			first = false;
+			entered.resolve();
+			await release.promise;
+			throw new Error('simulated persistence failure');
+		}
+	} });
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext());
 	const expected = service.getPromptDashboardLayouts();
-	const saving = service.savePromptDashboardCollapsedSections({ status: true }, 'single-column');
-	const rejected = assert.rejects(saving, /simulated persistence failure/);
+	const rejected = assert.rejects(
+		service.savePromptDashboardCollapsedSections({ status: true }, 'single-column'),
+		/simulated persistence failure/,
+	);
 	await entered.promise;
 	try {
 		assert.deepEqual(service.getPromptDashboardLayouts(), expected);
@@ -617,119 +991,83 @@ test('StateService does not expose or inherit an eagerly updated failed dashboar
 	await service.savePromptDashboardCollapsedSections({ todos: true }, 'two-columns');
 	assert.deepEqual(service.getPromptDashboardCollapsedSections('single-column'), {});
 	assert.deepEqual(service.getPromptDashboardCollapsedSections('two-columns'), { todos: true });
-	await service.savePromptDashboardCollapsedSections({ activity: true }, 'single-column');
+	configuration.store.set('dashboardLayouts.singleColumn.collapsed.activity', true);
+	service.invalidatePromptUiSettings();
 	assert.deepEqual(service.getPromptDashboardCollapsedSections('single-column'), { activity: true });
 });
 
-/** Ошибка одной записи не блокирует следующие сохранения обоих режимов. */
-test('StateService recovers dashboard layout saves after a failed write', async () => {
-	const { StateService } = await importStateService();
-	let first = true;
-	const workspaceState = createWorkspaceStateMock({}, {
-		update: async (store, key, value) => {
-			if (first) {
-				first = false;
-				throw new Error('write failed');
-			}
-			store.set(key, value);
-		},
-	});
-	const service = new StateService({ workspaceState } as any);
-	await assert.rejects(service.savePromptDashboardCollapsedSections({ status: true }, 'single-column'));
-	await service.savePromptDashboardCollapsedSections({ activity: true }, 'two-columns');
-	assert.deepEqual(service.getPromptDashboardCollapsedSections('two-columns'), { activity: true });
-});
-
-/** Отсутствие записи отличается от сохранённых defaults и не мешает миграции localStorage. */
-test('StateService dashboard preferences stay absent until explicitly saved', async () => {
-	const { StateService } = await importStateService();
-	const workspaceState = createWorkspaceStateMock();
-	const service = new StateService({ workspaceState } as any);
-	assert.equal(service.getPromptDashboardPreferences(), undefined);
-	assert.equal(workspaceState.store.size, 0);
-	await service.savePromptDashboardPreferences(normalizePromptDashboardPreferences(undefined));
-	assert.deepEqual(service.getPromptDashboardPreferences(), normalizePromptDashboardPreferences(undefined));
-	assert.equal(workspaceState.store.has('promptManager.dashboardPreferences'), true);
-});
-
-/** Отдельный сериализованный Memento восстанавливает поиск, фильтры, false и пустые значения. */
-test('StateService dashboard preferences survive serialized restore without sharing mutable values', async () => {
-	const { StateService } = await importStateService();
-	const workspaceState = createWorkspaceStateMock();
-	const service = new StateService({ workspaceState } as any);
-	const state = normalizePromptDashboardPreferences({
-		docker: { viewMode: 'table', statusFilter: 'stopped', search: 'api', sortBy: 'cpu',
-			expandedContainerIds: ['compose:api'] },
-		todos: { selectedFileTypes: [' TS '], search: 'FIXME' },
-		expanded: { 'project:api': false }, showAllBranchProjects: true,
-	});
-	const expected = normalizePromptDashboardPreferences(state);
-	await service.savePromptDashboardPreferences(state);
-	state.expanded['project:api'] = true;
-	state.docker.search = 'modified input';
-	const returned = service.getPromptDashboardPreferences()!;
-	returned.todos.selectedFileTypes.push('php');
-	returned.expanded['branch:other'] = true;
-	const restored = new StateService({ workspaceState: createWorkspaceStateMock(JSON.parse(JSON.stringify(
-		Object.fromEntries(workspaceState.store),
-	))) } as any);
-	assert.deepEqual(restored.getPromptDashboardPreferences(), expected);
-	await restored.savePromptDashboardPreferences(normalizePromptDashboardPreferences({ expanded: {} }));
-	assert.deepEqual(restored.getPromptDashboardPreferences()?.expanded, {});
-	assert.equal(restored.getPromptDashboardPreferences()?.showAllBranchProjects, false);
-});
-
-/** Быстрые полные снимки сохраняются в порядке поступления, а отказ не публикует optimistic Memento. */
-test('StateService dashboard preferences recover after eager failure and serialize newer snapshots', async () => {
-	const { StateService } = await importStateService();
-	const entered = createDeferred<void>();
-	const release = createDeferred<void>();
-	const retryEntered = createDeferred<void>();
-	const retryRelease = createDeferred<void>();
-	const writes: unknown[] = [];
-	const workspaceState = createWorkspaceStateMock({}, { update: async (store, key, value) => {
-		writes.push(value);
+/** Отказ первого поля preferences не публикует фильтр и не мешает новым полным снимкам очереди. */
+test('StateService recovers preferences after an eager failure and serializes newer snapshots', async () => {
+	let fail = false;
+	const configuration = createConfigurationMock({}, { update: async (store, key, value) => {
 		store.set(key, value);
-		if (writes.length === 1) {
-			entered.resolve();
-			await release.promise;
+		if (fail && key === 'dashboardPreferences.docker.search') {
+			fail = false;
 			throw new Error('preferences write failed');
 		}
-		if (writes.length === 2) {
-			retryEntered.resolve();
-			await retryRelease.promise;
-		}
 	} });
-	const service = new StateService({ workspaceState } as any);
-	const failed = service.savePromptDashboardPreferences(normalizePromptDashboardPreferences({
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext());
+	const initial = normalizePromptDashboardPreferences(undefined);
+	await service.savePromptDashboardPreferences(initial);
+	configuration.writes.length = 0;
+	fail = true;
+	await assert.rejects(service.savePromptDashboardPreferences(normalizePromptDashboardPreferences({
 		docker: { search: 'failed' },
-	}));
-	const rejected = assert.rejects(failed, /preferences write failed/);
-	await entered.promise;
-	try {
-		assert.equal(service.getPromptDashboardPreferences(), undefined);
-	} finally {
-		release.resolve();
-		await rejected;
-	}
-	assert.equal(service.getPromptDashboardPreferences(), undefined);
+	})), /preferences write failed/);
+	assert.deepEqual(service.getPromptDashboardPreferences(), initial);
 	const first = normalizePromptDashboardPreferences({ docker: { search: 'first' } });
-	const latest = normalizePromptDashboardPreferences({ expanded: { 'project:api': false }, todos: { search: 'latest' } });
-	const saving = Promise.all([
+	const latest = normalizePromptDashboardPreferences({ todos: { search: 'latest' }, expanded: { api: false } });
+	await Promise.all([
 		service.savePromptDashboardPreferences(first),
 		service.savePromptDashboardCollapsedSections({ activity: true }, 'single-column'),
 		service.savePromptDashboardPreferences(latest),
 	]);
-	await retryEntered.promise;
-	try {
-		assert.equal(writes.length, 2);
-		assert.equal(service.getPromptDashboardPreferences(), undefined);
-	} finally {
-		retryRelease.resolve();
-		await saving;
-	}
-	assert.deepEqual(writes[1], first);
-	assert.deepEqual(writes[3], latest);
+	assert.deepEqual(configuration.writes.filter(write => write.key === 'dashboardPreferences.docker.search')
+		.map(write => write.value), ['failed', 'first', '']);
 	assert.deepEqual(service.getPromptDashboardPreferences(), latest);
 	assert.deepEqual(service.getPromptDashboardCollapsedSections('single-column'), { activity: true });
+});
+
+/** Bootstrap ожидает добавленные сохранения даже после отказа первого configuration.update. */
+test('StateService waits for saves queued during a pending failed global update', async () => {
+	const firstEntered = createDeferred<void>();
+	const firstRelease = createDeferred<void>();
+	const secondEntered = createDeferred<void>();
+	const secondRelease = createDeferred<void>();
+	let writes = 0;
+	let completed = false;
+	const configuration = createConfigurationMock({}, { update: async (store, key, value) => {
+		writes += 1;
+		if (writes === 1) {
+			firstEntered.resolve();
+			await firstRelease.promise;
+			throw new Error('write failure');
+		}
+		if (writes === 2) {
+			secondEntered.resolve();
+			await secondRelease.promise;
+		}
+		store.set(key, value);
+	} });
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext());
+	const failure = assert.rejects(service.savePromptDashboardCollapsedSections({ todos: true }));
+	await firstEntered.promise;
+	const waiting = service.waitForPromptDashboardSaves().then(() => { completed = true; });
+	const preferences = normalizePromptDashboardPreferences({ docker: { search: 'latest' } });
+	const saving = service.savePromptDashboardPreferences(preferences);
+	try {
+		firstRelease.resolve();
+		await secondEntered.promise;
+		assert.equal(completed, false);
+		secondRelease.resolve();
+		await Promise.all([failure, saving, waiting]);
+		assert.deepEqual(service.getPromptDashboardCollapsedSections(), {});
+		assert.deepEqual(service.getPromptDashboardPreferences(), preferences);
+	} finally {
+		firstRelease.resolve();
+		secondRelease.resolve();
+		await Promise.all([failure, saving, waiting]);
+	}
 });

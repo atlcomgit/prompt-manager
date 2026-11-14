@@ -13,6 +13,7 @@ import { Toolbar } from './components/Toolbar';
 import { PromptHoverPreview } from './PromptHoverPreview';
 import { createDefaultPrompt, createDefaultSidebarState, PROMPT_STATUS_ORDER, PROMPT_CUSTOM_GROUP_NONE_KEY } from '../../types/prompt';
 import { matchesCreatedAtFilter } from '../../utils/sidebarDateFilter.js';
+import { compareSidebarPrompts } from '../../utils/sidebarSorting.js';
 import {
   makeSidebarGroupCollapseKey,
   resolveEffectiveSidebarCollapsedGroups,
@@ -307,25 +308,8 @@ export const SidebarApp: React.FC = () => {
       result = result.filter(p => p.favorite);
     }
 
-    // Sort
-    result.sort((a, b) => {
-      let cmp = 0;
-      switch (sortField) {
-        case 'title':
-          cmp = (a.title || a.id).localeCompare(b.title || b.id);
-          break;
-        case 'createdAt':
-          cmp = a.createdAt.localeCompare(b.createdAt);
-          break;
-        case 'updatedAt':
-          cmp = a.updatedAt.localeCompare(b.updatedAt);
-          break;
-        case 'status':
-          cmp = a.status.localeCompare(b.status);
-          break;
-      }
-      return sortOrder === 'asc' ? cmp : -cmp;
-    });
+    // Сортировка применяется к результатам поиска до группировки и закрепления нового промпта.
+    result.sort((a, b) => compareSidebarPrompts(a, b, sortField, sortOrder));
 
     if (showOptimisticNewPrompt && !result.some(p => p.id === '__new__')) {
       result = [optimisticPrompt, ...result];

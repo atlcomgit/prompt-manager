@@ -1,4 +1,13 @@
+import { DragHandleIcon } from '../../shared/DragHandleIcon.js';
+import { sectionDragStyles } from '../../shared/sectionDragStyles.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { subscribeDragPointerEvents as subscribePromptDashboardDragEvents } from '../../shared/dragPointer';
+
+// Сохраняет прежние импорты тестов и потребителей после выделения общего потока указателя.
+export {
+	isDragPointer as isPromptDashboardDragPointer,
+	subscribeDragPointerEvents as subscribePromptDashboardDragEvents,
+} from '../../shared/dragPointer';
 import { PromptStatusText } from '../../shared/PromptStatusText';
 import { getPromptStatusColor } from '../../shared/promptStatus';
 import type { GitOverlayChangeFile } from '../../../types/git.js';
@@ -114,6 +123,9 @@ interface PromptDashboardProps {
 	stacked?: boolean;
 	/** Bootstrap допускает одно уточнение от host до локальных действий; смена промпта не сбрасывает выбор. */
 	initialPreferences?: PromptDashboardPreferences;
+	/** Номер внешнего обновления позволяет принять Sync после первоначального bootstrap. */
+	preferencesRevision?: number;
+	onDragStateChange?: (dragging: boolean) => void;
 	/** Передаёт полный снимок только после действия пользователя либо переноса старых настроек. */
 	onPreferencesChange?: (state: PromptDashboardPreferences) => void;
 	/** Профиль измеренной ширины сетки и уведомление о его смене. */
@@ -664,7 +676,7 @@ interface DashboardRailScrollSnapshot {
 	manualScrollVersion: number;
 }
 
-/** Панель виджетов с workspace-настройками и общей прокруткой в вертикальной компоновке. */
+/** Панель виджетов с глобальными настройками и общей прокруткой в вертикальной компоновке. */
 export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	snapshot,
 	busyAction,
@@ -674,6 +686,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	mode,
 	stacked = false,
 	initialPreferences,
+	preferencesRevision = 0,
+	onDragStateChange,
 	onPreferencesChange,
 	layoutMode = 'two-columns',
 	onLayoutModeChange,
@@ -703,7 +717,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	const [initialState] = useState(() => readPromptDashboardInitialPreferences(initialPreferences));
 	const [preferences, setPreferences] = useState(initialState.preferences);
 	const preferencesRef = useRef(preferences);
-	const legacyMigrationPendingRef = useRef(initialState.migratedLegacy);
+	const preferencesRevisionRef = useRef(preferencesRevision);
 	const initialPreferencesRef = useRef(initialPreferences);
 	const preferencesHydrationClosedRef = useRef(initialState.migratedLegacy);
 	const { expanded, showAllBranchProjects } = preferences;
@@ -717,34 +731,35 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		setPreferences(next);
 		if (persist) {
 			preferencesHydrationClosedRef.current = true;
-			legacyMigrationPendingRef.current = false;
 			onPreferencesChange?.(next);
 		}
 	}, [onPreferencesChange]);
-	// Уточнение host не сохраняется повторно и не может обогнать уже принятое локальное действие.
+	// Первый ready не отменяет локальный выбор; отдельная ревизия Settings Sync применяется без обратной записи.
 	useEffect(() => {
-		if (preferencesHydrationClosedRef.current || initialPreferences === undefined
-			|| initialPreferences === initialPreferencesRef.current) {
+		const externalUpdate = preferencesRevisionRef.current !== preferencesRevision;
+		preferencesRevisionRef.current = preferencesRevision;
+		if (!externalUpdate && (preferencesHydrationClosedRef.current || initialPreferences === undefined
+			|| initialPreferences === initialPreferencesRef.current)) {
 			return;
 		}
 		preferencesHydrationClosedRef.current = true;
+		initialPreferencesRef.current = initialPreferences;
 		const next = normalizePromptDashboardPreferences(initialPreferences);
 		preferencesRef.current = next;
 		setPreferences(next);
-	}, [initialPreferences]);
-	// Перенос выполняется один раз и только при найденном старом состоянии; host остаётся источником истины.
-	useEffect(() => {
-		if (legacyMigrationPendingRef.current && onPreferencesChange) {
-			legacyMigrationPendingRef.current = false;
-			onPreferencesChange(preferencesRef.current);
-		}
-	}, [onPreferencesChange]);
+	}, [initialPreferences, preferencesRevision]);
+	// Legacy localStorage переносится первым явным изменением через updatePreferences, не при открытии.
+
 	const [branchDrafts, setBranchDrafts] = useState<Record<string, string>>({});
 	const [bulkBranchDraft, setBulkBranchDraft] = useState('');
 	const [openingFileKey, setOpeningFileKey] = useState<string | null>(null);
 	const [activeFileKey, setActiveFileKey] = useState<string | null>(null);
 	const [viewedFileKeys, setViewedFileKeys] = useState<Record<string, boolean>>({});
 	const [draggedSection, setDraggedSection] = useState<PromptDashboardSectionKey | null>(null);
+	/** Уведомление защищает активный жест от внешней перестановки карточек. */
+	useEffect(() => { onDragStateChange?.(draggedSection !== null); }, [draggedSection, onDragStateChange]);
+	useEffect(() => () => { onDragStateChange?.(false); }, [onDragStateChange]);
+
 	const [dropIndicator, setDropIndicator] = useState<DashboardDropIndicator | null>(null);
 	const [isDockerSectionInView, setIsDockerSectionInView] = useState(false);
 	const draggedSectionRef = useRef<PromptDashboardSectionKey | null>(null);
@@ -982,7 +997,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	};
 	const isRefreshBusy = busyAction === 'refresh';
 
-	// Смена промпта сбрасывает только черновики операций, но сохраняет workspace-предпочтения.
+	// Смена промпта сбрасывает только черновики операций, но сохраняет глобальные предпочтения.
 	useEffect(() => {
 		setBranchDrafts({});
 		setBulkBranchDraft('');
@@ -1573,8 +1588,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		<button
 			type="button"
 			style={{
-				...styles.sectionDragHandle,
-				...(draggedSection === section ? styles.sectionDragHandleDragging : null),
+				...sectionDragStyles.handle,
+				...(draggedSection === section ? sectionDragStyles.handleDragging : null),
 			}}
 			onClick={(event) => event.stopPropagation()}
 			onPointerDown={(event) => handleSectionPointerDown(event, section)}
@@ -1612,17 +1627,17 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 						key={`dashboard-section:${sectionKey}`}
 						className="pm-dashboard-widget"
 						style={{
-							...styles.sectionDragWrapper,
-							...(draggedSection === sectionKey ? styles.sectionDragWrapperDragging : null),
+							...sectionDragStyles.wrapper,
+							...(draggedSection === sectionKey ? sectionDragStyles.dragging : null),
 						}}
 						onDragOver={(event) => handleSectionDragOver(event, sectionKey)}
 						onDragLeave={(event) => handleSectionDragLeave(event, sectionKey)}
 						onDrop={(event) => handleSectionDrop(event, sectionKey)}
 						data-pm-dashboard-section={sectionKey}
 					>
-						{showDropBefore ? <div style={styles.sectionDropIndicator} aria-hidden="true" /> : null}
+						{showDropBefore ? <div style={sectionDragStyles.indicator} aria-hidden="true" /> : null}
 						{sectionNode}
-						{showDropAfter ? <div style={styles.sectionDropIndicator} aria-hidden="true" /> : null}
+						{showDropAfter ? <div style={sectionDragStyles.indicator} aria-hidden="true" /> : null}
 					</div>
 				),
 			});
@@ -1669,7 +1684,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 						data-pm-dashboard-column={String(columnIndex)}
 					>
 						{dropIndicator?.columnIndex === columnIndex
-							? <div style={styles.sectionDropIndicator} aria-hidden="true" /> : null}
+							? <div style={sectionDragStyles.indicator} aria-hidden="true" /> : null}
 						{column.map((section, sectionIndex) => (
 							<React.Fragment key={`widget-column:${columnIndex}:section:${sectionIndex}`}>
 								{section.node}
@@ -1835,20 +1850,6 @@ function RefreshIcon(): React.ReactNode {
 		>
 			<path d="M12.5 7.25A4.75 4.75 0 1 0 8 12.75c1.67 0 3.17-.88 4.01-2.27" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
 			<path d="M9.75 2.75h3v3" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />
-		</svg>
-	);
-}
-
-/** Renders the compact grab-handle glyph shown in every draggable section header. */
-function DragHandleIcon(): React.ReactNode {
-	return (
-		<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" style={styles.sectionDragHandleIcon}>
-			<circle cx="5" cy="4" r="1" fill="currentColor" />
-			<circle cx="5" cy="8" r="1" fill="currentColor" />
-			<circle cx="5" cy="12" r="1" fill="currentColor" />
-			<circle cx="11" cy="4" r="1" fill="currentColor" />
-			<circle cx="11" cy="8" r="1" fill="currentColor" />
-			<circle cx="11" cy="12" r="1" fill="currentColor" />
 		</svg>
 	);
 }
@@ -3688,75 +3689,6 @@ function buildSectionRefreshBusyAction(section: PromptDashboardSectionKey): stri
 function isPromptDashboardSectionKeyValue(value: string | undefined): value is PromptDashboardSectionKey {
 	return typeof value === 'string'
 		&& PROMPT_DASHBOARD_SECTION_KEYS.includes(value as PromptDashboardSectionKey);
-}
-
-/** Сопоставляет события жеста; смену mouse pointerId проверяет promptDashboardComponent.test.tsx. */
-export function isPromptDashboardDragPointer(
-	drag: Pick<DashboardPointerDragState, 'pointerId' | 'pointerType'>,
-	event: Pick<PointerEvent, 'pointerId' | 'pointerType' | 'isPrimary'>,
-): boolean {
-	if (drag.pointerType !== event.pointerType) {
-		return false;
-	}
-	// У мыши отслеживаем основной указатель независимо от его числового идентификатора.
-	// Для касаний и пера допускаем только тот указатель, который начал жест.
-	return drag.pointerType === 'mouse'
-		? event.isPrimary
-		: drag.pointerId === event.pointerId;
-}
-
-/** Подключает поток движения и завершение жеста; регрессии — promptDashboardComponent.test.tsx. */
-export function subscribePromptDashboardDragEvents(
-	target: EventTarget,
-	drag: Pick<DashboardPointerDragState, 'pointerId' | 'pointerType'>,
-	handlers: {
-		move: (event: MouseEvent) => void;
-		finish: (event: PointerEvent) => void;
-		cancel: () => void;
-	},
-): () => void {
-	// В некоторых средах mouse-нажатие сопровождается pen-движениями с отдельным pointerId.
-	// Совместимый mousemove нужен только для несовпавшего pointer-события; обычная мышь может его не присылать.
-	let useCompatibilityMouseMove = true;
-	/** Передаёт исходный указатель и отмечает необходимость совместимого движения без двойной обработки. */
-	const handleMove = (event: Event) => {
-		const matchesPointer = isPromptDashboardDragPointer(drag, event as PointerEvent);
-		useCompatibilityMouseMove = !matchesPointer;
-		if (matchesPointer) {
-			handlers.move(event as MouseEvent);
-		}
-	};
-	/** Дополняет жест мыши совместимым движением, когда pointer-событие пришло от другого устройства. */
-	const handleCompatibilityMove = (event: Event) => {
-		if (useCompatibilityMouseMove) {
-			handlers.move(event as MouseEvent);
-		}
-	};
-	/** Завершает жест по отпусканию его исходного устройства. */
-	const handleFinish = (event: Event) => {
-		if (isPromptDashboardDragPointer(drag, event as PointerEvent)) {
-			handlers.finish(event as PointerEvent);
-		}
-	};
-	/** Отменяет жест только по отмене его исходного устройства. */
-	const handleCancel = (event: Event) => {
-		if (isPromptDashboardDragPointer(drag, event as PointerEvent)) {
-			handlers.cancel();
-		}
-	};
-	target.addEventListener('pointermove', handleMove, { passive: false });
-	if (drag.pointerType === 'mouse') {
-		target.addEventListener('mousemove', handleCompatibilityMove, { passive: false });
-	}
-	target.addEventListener('pointerup', handleFinish, { passive: false });
-	target.addEventListener('pointercancel', handleCancel, { passive: false });
-	// Одна функция очистки используется при завершении, отмене, новом жесте и размонтировании.
-	return () => {
-		target.removeEventListener('pointermove', handleMove);
-		target.removeEventListener('mousemove', handleCompatibilityMove);
-		target.removeEventListener('pointerup', handleFinish);
-		target.removeEventListener('pointercancel', handleCancel);
-	};
 }
 
 /** Находит место вставки, включая пустую колонку; регрессии — promptDashboardComponent.test.tsx. */
@@ -6769,25 +6701,6 @@ const styles: Record<string, React.CSSProperties> = {
 		minHeight: '80px',
 		alignSelf: 'stretch',
 	},
-	// Wrapper that owns drag-over highlighting around one dashboard card.
-	sectionDragWrapper: {
-		display: 'flex',
-		flexDirection: 'column',
-		gap: '8px',
-		minWidth: 0,
-		transition: 'opacity 0.18s ease, transform 0.18s ease',
-	},
-	sectionDragWrapperDragging: {
-		opacity: 0.5,
-		transform: 'scale(0.985)',
-	},
-	// Visible insertion rail shown above or below the current drop target.
-	sectionDropIndicator: {
-		height: '4px',
-		borderRadius: '999px',
-		background: 'linear-gradient(90deg, var(--vscode-focusBorder, #3794ff), color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 40%, transparent))',
-		boxShadow: '0 0 0 1px color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 24%, transparent)',
-	},
 	// Общая карточка любого виджета дашборда.
 	section: {
 		width: '100%',
@@ -6823,33 +6736,6 @@ const styles: Record<string, React.CSSProperties> = {
 		alignItems: 'center',
 		gap: '8px',
 		minWidth: 0,
-	},
-	// Compact drag handle used to start section reordering from the header only.
-	sectionDragHandle: {
-		display: 'inline-flex',
-		alignItems: 'center',
-		justifyContent: 'center',
-		width: '20px',
-		height: '20px',
-		padding: 0,
-		border: 'none',
-		borderRadius: '4px',
-		background: 'transparent',
-		color: 'color-mix(in srgb, var(--vscode-foreground) 86%, var(--vscode-descriptionForeground))',
-		cursor: 'grab',
-		touchAction: 'none',
-		userSelect: 'none',
-		flexShrink: 0,
-	},
-	sectionDragHandleDragging: {
-		cursor: 'grabbing',
-		color: 'var(--vscode-focusBorder, #3794ff)',
-		background: 'transparent',
-	},
-	// Dot-grid glyph inside the section drag handle button.
-	sectionDragHandleIcon: {
-		width: '14px',
-		height: '14px',
 	},
 	// Текст названия виджета в шапке карточки.
 	sectionTitle: {

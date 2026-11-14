@@ -1,3 +1,7 @@
+import { SortableEditorSections, EditorSectionDragHandle } from './components/SortableEditorSections.js';
+import { normalizePromptEditorLayout, normalizePromptEditorMainExpanded, PROMPT_EDITOR_TAB_SECTIONS, type PromptEditorLayout, type PromptUiSettingsSnapshot } from '../../types/promptEditorLayout.js';
+import { appendPendingPromptUiEdit, rejectPendingPromptUiEdit, rebasePromptUiSettings, type PendingPromptUiEdit } from '../../utils/promptUiSettings.js';
+import { getPromptStatusLabel } from '../shared/promptStatus.js';
 /**
  * Editor App — Main component for prompt configuration form
  */
@@ -20,7 +24,7 @@ import { ChatMemoryBlock } from './components/ChatMemoryBlock';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { PromptVoiceQueueIndicator } from './components/PromptVoiceQueueIndicator';
 import { GitOverlay } from './components/GitOverlay';
-import { PromptDashboard, type PromptDashboardFilePatchRequest, type PromptDashboardTodoOpenRequest } from './components/PromptDashboard';
+import { PromptDashboard, readPromptDashboardInitialPreferences, type PromptDashboardFilePatchRequest, type PromptDashboardTodoOpenRequest } from './components/PromptDashboard';
 import { EDITOR_WEBVIEW_ASSET_VERSION } from '../../constants/webview';
 import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
@@ -124,6 +128,7 @@ export { shouldDeferReportAutosave, shouldPreserveLocalReportOnSave };
 const vscode = getVsCodeApi();
 type EditorBootWindow = Window & {
   __WEBVIEW_BOOT_ID__?: string;
+  __PROMPT_EDITOR_LAYOUT__?: PromptEditorLayout;
   __PROMPT_DASHBOARD_COLLAPSED_SECTIONS__?: PromptDashboardCollapsedSections;
   __PROMPT_DASHBOARD_SECTION_ORDER__?: PromptDashboardSectionOrder;
   __PROMPT_DASHBOARD_LAYOUTS__?: PromptDashboardLayouts;
@@ -916,13 +921,102 @@ export const EditorApp: React.FC = () => {
   const dashboardInitialHydrationRef = useRef(false);
   const dashboardLayoutEditedRef = useRef(false);
   const dashboardPreferencesEditedRef = useRef(false);
-  const [promptDashboardPreferences, setPromptDashboardPreferences] = useState(initialPromptDashboardPreferences);
+  const [initialDashboardPreferenceState] = useState(() => readPromptDashboardInitialPreferences(initialPromptDashboardPreferences));
+  const legacyDashboardPreferencesPendingRef = useRef(initialDashboardPreferenceState.migratedLegacy);
+  const [promptDashboardPreferences, setPromptDashboardPreferences] = useState(
+    initialDashboardPreferenceState.migratedLegacy ? initialDashboardPreferenceState.preferences : initialPromptDashboardPreferences,
+  );
+  /** Глобальное раскрытие формы содержит только main; Process остаётся в expandedSections. */
+  const [formSectionLayout, setFormSectionLayout] = useState(() => normalizePromptEditorLayout(bootWindow.__PROMPT_EDITOR_LAYOUT__));
+  const [dashboardPreferencesRevision, setDashboardPreferencesRevision] = useState(0);
+  const uiSettingsEditsRef = useRef<PendingPromptUiEdit[]>([]);
+  const uiSettingsDraggingRef = useRef(false);
+  const uiSettingsBufferedRef = useRef<PromptUiSettingsSnapshot | null>(null);
+  const editorLayoutEditedRef = useRef(false);
+
   const [promptDashboardSnapshot, setPromptDashboardSnapshot] = useState<PromptDashboardSnapshot | null>(null);
   const [promptDashboardBusyAction, setPromptDashboardBusyAction] = useState<string | null>(null);
   const [promptDashboardDockerBusyActions, setPromptDashboardDockerBusyActions] = useState<string[]>([]);
   const [promptDashboardRefreshVersion, setPromptDashboardRefreshVersion] = useState(0);
   /** Профили общие для промптов; активный режим определяется по ширине сетки. */
   const [promptDashboardLayouts, setPromptDashboardLayouts] = useState(() => initialPromptDashboardLayouts);
+  /** Снимок обновляется до postMessage, чтобы быстрые последовательные действия не терялись. */
+  const uiSettingsRef = useRef<PromptUiSettingsSnapshot>({
+    editorLayout: formSectionLayout, dashboardLayouts: promptDashboardLayouts, dashboardPreferences: promptDashboardPreferences,
+  });
+
+  /** Внешний update не является новым пользовательским действием и не записывается обратно. */
+  const applyPromptUiSettings = useCallback((settings: PromptUiSettingsSnapshot) => {
+    // Подтверждённая доставка новее bootstrap: поздний ready не должен возвращать старый снимок.
+    dashboardInitialHydrationRef.current = true;
+    if (uiSettingsDraggingRef.current) {
+      uiSettingsBufferedRef.current = settings;
+      return;
+    }
+    const next = rebasePromptUiSettings(settings, uiSettingsEditsRef.current);
+    if (legacyDashboardPreferencesPendingRef.current && next.dashboardPreferences === undefined) {
+      next.dashboardPreferences = uiSettingsRef.current.dashboardPreferences;
+    } else if (next.dashboardPreferences !== undefined) {
+      legacyDashboardPreferencesPendingRef.current = false;
+    }
+    const previousLayouts = uiSettingsRef.current.dashboardLayouts;
+    if (Object.keys(previousLayouts).some(mode => {
+      const key = mode as PromptDashboardLayoutMode;
+      return JSON.stringify(previousLayouts[key].collapsedSections) !== JSON.stringify(next.dashboardLayouts[key].collapsedSections);
+    })) {
+      setPromptDashboardRefreshVersion(previous => previous + 1);
+    }
+    uiSettingsRef.current = next;
+    setFormSectionLayout(normalizePromptEditorLayout(next.editorLayout));
+    setPromptDashboardLayouts(normalizePromptDashboardLayouts(next.dashboardLayouts));
+    setPromptDashboardPreferences(next.dashboardPreferences);
+    setDashboardPreferencesRevision(previous => previous + 1);
+  }, []);
+
+  /** Новое действие вытесняет только пересекающиеся поля прежних правок, включая ещё ожидающие ответа. */
+  const registerPromptUiEdit = useCallback((area: string, next: PromptUiSettingsSnapshot): PendingPromptUiEdit => {
+    // Первый явный жест переносит найденный localStorage до записи остальных настроек.
+    if (legacyDashboardPreferencesPendingRef.current) {
+      legacyDashboardPreferencesPendingRef.current = false;
+      if (area !== 'preferences' && uiSettingsRef.current.dashboardPreferences) {
+        const migration: PendingPromptUiEdit = {
+          requestId: `dashboard-settings-${initialBootId}-${++dashboardSettingsSaveSequenceRef.current}`,
+          area: 'preferences', base: { ...uiSettingsRef.current, dashboardPreferences: undefined }, next: uiSettingsRef.current,
+        };
+        uiSettingsEditsRef.current = appendPendingPromptUiEdit(uiSettingsEditsRef.current, migration);
+        vscode.postMessage({ type: 'savePromptDashboardPreferences', state: migration.next.dashboardPreferences,
+          requestId: migration.requestId });
+      }
+    }
+    const base = structuredClone(uiSettingsRef.current);
+    const edit: PendingPromptUiEdit = {
+      requestId: `dashboard-settings-${initialBootId}-${++dashboardSettingsSaveSequenceRef.current}`,
+      area, base, next,
+    };
+    uiSettingsEditsRef.current = appendPendingPromptUiEdit(uiSettingsEditsRef.current, edit);
+    uiSettingsRef.current = next;
+    return edit;
+  }, []);
+
+  /** Глобальная доставка не переставляет карточки под указателем до завершения жеста. */
+  const handleUiSettingsDragChange = useCallback((dragging: boolean) => {
+    uiSettingsDraggingRef.current = dragging;
+    if (!dragging && uiSettingsBufferedRef.current) {
+      const pending = uiSettingsBufferedRef.current;
+      uiSettingsBufferedRef.current = null;
+      applyPromptUiSettings(pending);
+    }
+  }, [applyPromptUiSettings]);
+
+  /** Сохраняет порядок вкладки или раскрытие main без изменения локальной логики Process. */
+  const saveEditorLayout = useCallback((next: PromptEditorLayout) => {
+    editorLayoutEditedRef.current = true;
+    const edit = registerPromptUiEdit('editor', { ...uiSettingsRef.current, editorLayout: next });
+    setFormSectionLayout(next);
+    vscode.postMessage({ type: 'savePromptEditorLayout', state: next,
+      baseState: edit.base.editorLayout, requestId: edit.requestId });
+  }, [registerPromptUiEdit]);
+
   const [promptDashboardLayoutMode, setPromptDashboardLayoutMode] = useState<PromptDashboardLayoutMode | null>(null);
   const activeDashboardLayoutMode = promptDashboardLayoutMode || 'single-column';
   const { collapsedSections: promptDashboardCollapsedSections, sectionOrder: promptDashboardSectionOrder } =
@@ -997,9 +1091,15 @@ export const EditorApp: React.FC = () => {
   const [manualSectionOverrides, setManualSectionOverrides] = useState<EditorPromptManualSectionOverrides>(
     () => initialEditorViewStateRef.current?.manualSectionOverrides || createDefaultEditorPromptViewState().manualSectionOverrides,
   );
-  const [activeTab, setActiveTab] = useState<EditorPromptTab>(
+  const [activeTab, setActiveTabState] = useState<EditorPromptTab>(
     () => initialEditorViewStateRef.current?.activeTab || createDefaultEditorPromptViewState().activeTab,
   );
+  /** Последний выбор доступен закрытию страницы до React commit; Process-раскрытие не изменяется. */
+  const activeTabRef = useRef(activeTab);
+  const setActiveTab = useCallback((tab: EditorPromptTab) => {
+    activeTabRef.current = tab;
+    setActiveTabState(tab);
+  }, []);
   const [promptPlanState, setPromptPlanState] = useState<{ exists: boolean; content: string }>({ exists: false, content: '' });
   const [isPromptPlanHydrating, setIsPromptPlanHydrating] = useState(false);
   const [planHighlightedLineIndexes, setPlanHighlightedLineIndexes] = useState<number[]>([]);
@@ -1505,13 +1605,13 @@ export const EditorApp: React.FC = () => {
   /** Сохраняет только явные изменения карточек; resize и prompt(open) не пишут defaults. */
   const handlePromptDashboardPreferencesChange = useCallback((state: PromptDashboardPreferences) => {
     dashboardPreferencesEditedRef.current = true;
+    const edit = registerPromptUiEdit('preferences', { ...uiSettingsRef.current, dashboardPreferences: state });
+    setPromptDashboardPreferences(state);
     const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
     vscode.setState?.({ ...currentState, 'pm.editor.promptDashboardPreferences': state });
-    vscode.postMessage({
-      type: 'savePromptDashboardPreferences', state,
-      requestId: `dashboard-settings-${initialBootId}-${++dashboardSettingsSaveSequenceRef.current}`,
-    });
-  }, []);
+    vscode.postMessage({ type: 'savePromptDashboardPreferences', state,
+      baseState: edit.base.dashboardPreferences, requestId: edit.requestId });
+  }, [registerPromptUiEdit]);
 
   /** Сообщает host текущую ширину до запросов данных, чтобы свёрнутые виджеты не загружались. */
   const handlePromptDashboardLayoutModeChange = useCallback((layoutMode: PromptDashboardLayoutMode) => {
@@ -1990,7 +2090,7 @@ export const EditorApp: React.FC = () => {
 
   /** Build a latest editor view state snapshot with live field and section heights. */
   const captureEditorViewStateSnapshot = useCallback((): EditorPromptViewState => normalizeEditorPromptViewState({
-    activeTab,
+    activeTab: activeTabRef.current,
     branchesExpanded: showBranches,
     branchesExpandedManual,
     expandedSections,
@@ -2005,7 +2105,6 @@ export const EditorApp: React.FC = () => {
     },
     sectionHeights: captureRenderedSectionHeights(),
   }), [
-    activeTab,
     branchesExpandedManual,
     captureRenderedSectionHeights,
     expandedSections,
@@ -2515,12 +2614,14 @@ export const EditorApp: React.FC = () => {
   }, [gitOverlayOpen, prompt.branch, prompt.projects]);
 
   const handleEditorTabChange = useCallback((tab: EditorPromptTab) => {
-    if (activeTab === tab) {
+    if (activeTabRef.current === tab) {
       return;
     }
 
     setActiveTab(tab);
-  }, [activeTab]);
+    // Не полагаемся на pagehide/unload: webview может быть уничтожен раньше доставки этих событий.
+    enqueueEditorViewStateSave({ flush: true, reason: 'tab-change' });
+  }, [enqueueEditorViewStateSave, setActiveTab]);
 
   const dispatchStartChat = useCallback((requestId: string, options?: { skipBranchMismatchCheck?: boolean }) => {
     const latestPrompt = promptRef.current;
@@ -3314,11 +3415,19 @@ export const EditorApp: React.FC = () => {
             // Ready уточняет bootstrap один раз; последующие open и ранние локальные действия имеют приоритет.
             if (!dashboardInitialHydrationRef.current) {
               dashboardInitialHydrationRef.current = true;
+              if (!editorLayoutEditedRef.current && msg.editorLayout !== undefined) {
+                const nextLayout = normalizePromptEditorLayout(msg.editorLayout);
+                setFormSectionLayout(nextLayout);
+                uiSettingsRef.current = { ...uiSettingsRef.current, editorLayout: nextLayout };
+              }
+
               if (!dashboardLayoutEditedRef.current && msg.promptDashboardLayouts !== undefined) {
                 setPromptDashboardLayouts(normalizePromptDashboardLayouts(msg.promptDashboardLayouts));
+                uiSettingsRef.current = { ...uiSettingsRef.current, dashboardLayouts: normalizePromptDashboardLayouts(msg.promptDashboardLayouts) };
               }
               if (!dashboardPreferencesEditedRef.current && msg.promptDashboardPreferences !== undefined) {
                 setPromptDashboardPreferences(normalizePromptDashboardPreferences(msg.promptDashboardPreferences));
+                uiSettingsRef.current = { ...uiSettingsRef.current, dashboardPreferences: normalizePromptDashboardPreferences(msg.promptDashboardPreferences) };
               }
             }
             const promptSwitchTiming = promptSwitchTimingRef.current;
@@ -4423,8 +4532,18 @@ export const EditorApp: React.FC = () => {
           // Show warning about uncommitted changes
         }
         break;
+      case 'promptUiSettingsChanged':
+        applyPromptUiSettings(msg.settings);
+        break;
+      case 'promptDashboardStateSaved':
+        uiSettingsEditsRef.current = uiSettingsEditsRef.current.filter(edit => edit.requestId !== msg.requestId);
+        if (msg.settings) {
+          applyPromptUiSettings(msg.settings);
+        }
+        break;
       case 'error':
         if (String(msg.requestId || '').startsWith(`dashboard-settings-${initialBootId}-`)) {
+          uiSettingsEditsRef.current = rejectPendingPromptUiEdit(uiSettingsEditsRef.current, msg.requestId || '');
           showInlineNotice('error', msg.message);
           break;
         }
@@ -5248,9 +5367,13 @@ export const EditorApp: React.FC = () => {
       ...previous,
       [activeDashboardLayoutMode]: { ...previous[activeDashboardLayoutMode], collapsedSections: nextState },
     }));
+    const edit = registerPromptUiEdit(`collapse:${activeDashboardLayoutMode}`, {
+      ...uiSettingsRef.current, dashboardLayouts: { ...uiSettingsRef.current.dashboardLayouts,
+        [activeDashboardLayoutMode]: { ...uiSettingsRef.current.dashboardLayouts[activeDashboardLayoutMode], collapsedSections: nextState } },
+    });
     vscode.postMessage({
       type: 'savePromptDashboardCollapsedSections', state: nextState, layoutMode: activeDashboardLayoutMode,
-      requestId: `dashboard-settings-${initialBootId}-${++dashboardSettingsSaveSequenceRef.current}`,
+      baseState: edit.base.dashboardLayouts[activeDashboardLayoutMode].collapsedSections, requestId: edit.requestId,
     });
 
     if (!expandRequest) {
@@ -5301,7 +5424,7 @@ export const EditorApp: React.FC = () => {
       section,
       requestId,
     });
-  }, [activeDashboardLayoutMode, promptDashboardCollapsedSections, promptDashboardMode, promptDashboardScopeFingerprint]);
+  }, [activeDashboardLayoutMode, promptDashboardCollapsedSections, promptDashboardMode, promptDashboardScopeFingerprint, registerPromptUiEdit]);
 
   /** Сохраняет перестановку только в режиме, в котором завершено перетаскивание. */
   const handlePromptDashboardReorderSections = useCallback((nextOrder: PromptDashboardSectionOrder) => {
@@ -5315,11 +5438,15 @@ export const EditorApp: React.FC = () => {
       ...previous,
       [activeDashboardLayoutMode]: { ...previous[activeDashboardLayoutMode], sectionOrder: normalizedOrder },
     }));
+    const edit = registerPromptUiEdit(`order:${activeDashboardLayoutMode}`, {
+      ...uiSettingsRef.current, dashboardLayouts: { ...uiSettingsRef.current.dashboardLayouts,
+        [activeDashboardLayoutMode]: { ...uiSettingsRef.current.dashboardLayouts[activeDashboardLayoutMode], sectionOrder: normalizedOrder } },
+    });
     vscode.postMessage({
       type: 'savePromptDashboardSectionOrder', order: normalizedOrder, layoutMode: activeDashboardLayoutMode,
-      requestId: `dashboard-settings-${initialBootId}-${++dashboardSettingsSaveSequenceRef.current}`,
+      requestId: edit.requestId,
     });
-  }, [activeDashboardLayoutMode, promptDashboardSectionOrder]);
+  }, [activeDashboardLayoutMode, promptDashboardSectionOrder, registerPromptUiEdit]);
 
   /** Sync Docker live polling with the actual visibility of resource blocks inside the dashboard. */
   const handlePromptDashboardDockerLiveMetricsVisibilityChange = useCallback((visible: boolean) => {
@@ -6137,14 +6264,14 @@ export const EditorApp: React.FC = () => {
   const shouldAutoExpandPlanSection = planPlaceholderState === 'plan-mode';
   const effectiveExpandedSections = useMemo(
     () => resolvePromptEditorExpandedSections({
-      expandedSections,
+      expandedSections: { ...expandedSections, ...formSectionLayout.mainExpandedSections },
       manualSectionOverrides,
       hasNotesContent,
       hasPlanContent,
       shouldExpandPlanSection: shouldAutoExpandPlanSection,
       hasReportContent,
     }),
-    [expandedSections, manualSectionOverrides, hasNotesContent, hasPlanContent, hasReportContent, shouldAutoExpandPlanSection],
+    [expandedSections, formSectionLayout.mainExpandedSections, manualSectionOverrides, hasNotesContent, hasPlanContent, hasReportContent, shouldAutoExpandPlanSection],
   );
 
   useEffect(() => {
@@ -6178,6 +6305,13 @@ export const EditorApp: React.FC = () => {
 	  hasReportContent,
     });
 
+    if (PROMPT_EDITOR_TAB_SECTIONS.main.includes(key)) {
+      saveEditorLayout({ ...formSectionLayout,
+        mainExpandedSections: normalizePromptEditorMainExpanded({
+          ...effectiveExpandedSections, [key]: nextSectionState.expandedSections[key],
+        }),
+      });
+    }
     setExpandedSections(nextSectionState.expandedSections);
     setManualSectionOverrides(nextSectionState.manualSectionOverrides);
   };
@@ -6551,9 +6685,10 @@ export const EditorApp: React.FC = () => {
               {renderBlankPlaceholderField('basic-description')}
               {renderBlankPlaceholderBlock('basic-description-ai', '36px', '32px')}
             </div>
-            {renderBlankPlaceholderBlock('basic-status', '100%', '34px')}
           </div>
         );
+      case 'status':
+        return renderBlankPlaceholderBlock('status-buttons', '100%', '34px');
       case 'time':
         return (
           <div data-pm-editor-section-placeholder-body="time" style={styles.blankPlaceholderStack}>
@@ -6677,7 +6812,9 @@ export const EditorApp: React.FC = () => {
       case 'files':
         return collapsedHeaderHeight + 232;
       case 'basic':
-        return collapsedHeaderHeight + 150;
+        return collapsedHeaderHeight + 112;
+      case 'status':
+        return collapsedHeaderHeight + 68;
       case 'workspace':
         return collapsedHeaderHeight + 122;
       case 'time':
@@ -6717,6 +6854,7 @@ export const EditorApp: React.FC = () => {
 
     return (
       <section
+        key={key}
         style={{
           ...styles.sectionCard,
           ...(fallbackPlaceholderMinHeight ? { minHeight: `${fallbackPlaceholderMinHeight}px` } : {}),
@@ -6737,6 +6875,7 @@ export const EditorApp: React.FC = () => {
           ...(isExpanded ? styles.sectionHeaderRowExpanded : styles.sectionHeaderRowCollapsed),
         }}
       >
+      <EditorSectionDragHandle sectionKey={key} title={title} />
       <button
         type="button"
         className="pm-editor-section-toggle"
@@ -7058,7 +7197,10 @@ export const EditorApp: React.FC = () => {
         >
           <div style={styles.formGrid}>
           {activeTab === 'main' ? (
-            <>
+            <SortableEditorSections order={formSectionLayout.main} scopeKey={`${prompt.id}:main`}
+              disabled={!isLoaded || shouldShowPromptSwitchPlaceholder}
+              onReorder={order => saveEditorLayout(normalizePromptEditorLayout({ ...formSectionLayout, main: order as EditorPromptSectionKey[] }))}
+              onDragStateChange={handleUiSettingsDragChange}>
           {renderSection('basic', 'Основное', basicSummary, (
             <>
               <div style={styles.fieldRow}>
@@ -7129,11 +7271,11 @@ export const EditorApp: React.FC = () => {
                 </div>
               </div>
 
-              <StatusSelect
-                value={prompt.status}
-                onChange={v => handleSetStatus(v as PromptStatus)}
-              />
             </>
+          ))}
+
+          {renderSection('status', 'Статусы', [getPromptStatusLabel(prompt.status, t)], (
+            <StatusSelect value={prompt.status} onChange={v => handleSetStatus(v as PromptStatus)} />
           ))}
 
           {renderSection('time', 'Учёт времени', timeSummary, (
@@ -7748,11 +7890,13 @@ export const EditorApp: React.FC = () => {
             </>
           ))}
 
-            </>
+            </SortableEditorSections>
           ) : (
-            <>
-
-            {renderSection('notes', t('editor.notes'), notesSummary, (
+            <SortableEditorSections order={formSectionLayout.process} scopeKey={`${prompt.id}:process`}
+              disabled={!isLoaded || shouldShowPromptSwitchPlaceholder}
+              onReorder={order => saveEditorLayout(normalizePromptEditorLayout({ ...formSectionLayout, process: order as EditorPromptSectionKey[] }))}
+              onDragStateChange={handleUiSettingsDragChange}>
+          {renderSection('notes', t('editor.notes'), notesSummary, (
             <>
               {/* Show the prompt status first inside notes, matching the prompt list color contract. */}
               <div style={styles.notesStatusRow}>
@@ -7905,7 +8049,7 @@ export const EditorApp: React.FC = () => {
             </>
           ))}
 
-            </>
+            </SortableEditorSections>
           )}
           </div>
         </div>
@@ -7960,6 +8104,8 @@ export const EditorApp: React.FC = () => {
       <PromptDashboard
         stacked={editorLayout.stacked}
         initialPreferences={promptDashboardPreferences}
+        preferencesRevision={dashboardPreferencesRevision}
+        onDragStateChange={handleUiSettingsDragChange}
         onPreferencesChange={handlePromptDashboardPreferencesChange}
         snapshot={promptDashboardSnapshot}
         busyAction={promptDashboardBusyAction}
@@ -8660,7 +8806,8 @@ const styles: Record<string, React.CSSProperties> = {
   sectionHeaderRow: {
     display: 'flex',
     alignItems: 'center',
-    gap: '8px',
+    gap: '4px',
+    paddingLeft: '12px',
     paddingRight: '12px',
     background: 'var(--vscode-sideBar-background)',
     boxShadow: PANEL_LEFT_ACCENT_SHADOW,
@@ -8687,14 +8834,14 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'transparent',
     color: 'var(--vscode-foreground)',
     cursor: 'pointer',
-    padding: '10px 12px',
+    padding: '10px 0',
     fontFamily: 'var(--vscode-font-family)',
     fontSize: '12px',
   },
   sectionHeaderLeft: {
     display: 'flex',
     alignItems: 'center',
-    gap: '8px',
+    gap: '4px',
     minWidth: 0,
   },
   sectionHeaderActions: {

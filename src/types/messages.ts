@@ -6,6 +6,7 @@ import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, Pr
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerWorkspaceActionKind } from './docker.js';
 import type { PromptDashboardPreferences } from './promptDashboardPreferences.js';
+import type { PromptEditorLayout, PromptUiSettingsSnapshot } from './promptEditorLayout.js';
 import type { PromptHoverTarget, PromptHoverPreviewResult } from './promptHoverPreview.js';
 import type {
 	PromptDashboardAnalysisState,
@@ -81,11 +82,13 @@ export type WebviewToExtensionMessage =
 	| { type: 'generateReportFromStagedChanges'; prompt: Prompt }
 	| { type: 'saveSidebarState'; state: SidebarState }
 	| { type: 'savePromptEditorViewState'; promptId?: string; promptUuid?: string; state: EditorPromptViewState }
+	/** Глобальное представление формы сохраняется отдельно от локальной вкладки Process. */
+	| { type: 'savePromptEditorLayout'; state: PromptEditorLayout; baseState?: PromptEditorLayout; requestId: string }
 	/** requestId связывает подтверждение записи с действием; старые webview могут его не передавать. */
-	| { type: 'savePromptDashboardCollapsedSections'; state: PromptDashboardCollapsedSections; layoutMode?: PromptDashboardLayoutMode; requestId?: string }
+	| { type: 'savePromptDashboardCollapsedSections'; state: PromptDashboardCollapsedSections; baseState?: PromptDashboardCollapsedSections; layoutMode?: PromptDashboardLayoutMode; requestId?: string }
 	| { type: 'savePromptDashboardSectionOrder'; order: PromptDashboardSectionOrder; layoutMode?: PromptDashboardLayoutMode; requestId?: string }
 	/** Полный снимок внутренних настроек; пустые поля являются явным сохранённым выбором. */
-	| { type: 'savePromptDashboardPreferences'; state: PromptDashboardPreferences; requestId?: string }
+	| { type: 'savePromptDashboardPreferences'; state: PromptDashboardPreferences; baseState?: PromptDashboardPreferences; requestId?: string }
 	| { type: 'promptDashboardLayoutModeChanged'; layoutMode: PromptDashboardLayoutMode }
 	| { type: 'getSidebarState' }
 	| { type: 'getWorkspaceFolders' }
@@ -253,6 +256,7 @@ export type ExtensionToWebviewMessage =
 		requestId?: string;
 		openRequestVersion?: number;
 		editorViewState?: EditorPromptViewState;
+		editorLayout?: PromptEditorLayout;
 		/** Независимые настройки обеих ширин панели. */
 		promptDashboardLayouts?: PromptDashboardLayouts;
 		/** Отсутствие записи сохраняет возможность переноса legacy-настроек webview. */
@@ -292,8 +296,10 @@ export type ExtensionToWebviewMessage =
 	| { type: 'gitOverlayActionCompleted'; action: GitOverlayActionKind }
 	| { type: 'branches'; branches: Array<{ name: string; current: boolean; project: string }> }
 	| { type: 'promptDashboardSnapshot'; snapshot: PromptDashboardSnapshot; requestId?: string }
-	/** Подтверждает layout или preferences только после завершения workspaceState.update. */
-	| { type: 'promptDashboardStateSaved'; requestId: string }
+	/** Подтверждает локальную запись настройки; облачная доставка выполняется Settings Sync отдельно. */
+	| { type: 'promptDashboardStateSaved'; requestId: string; settings?: PromptUiSettingsSnapshot }
+	/** Изменения из другого окна применяются отдельно от одноразовой начальной гидратации. */
+	| { type: 'promptUiSettingsChanged'; settings: PromptUiSettingsSnapshot }
 	| { type: 'promptDashboardWidgetSnapshot'; promptId: string; promptUuid?: string; widget: PromptDashboardWidgetSnapshot<unknown>; requestId?: string }
 	/** Завершает dashboard request, который host безопасно отбросил после collapse race. */
 	| { type: 'promptDashboardRequestCompleted'; requestId: string; target: PromptDashboardWidgetKind }

@@ -54,8 +54,12 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
 ## Built For Real Work / Для реальной работы
 
 - **Prompt Sidebar** for library, filters, groups, and fast capture.
-  По умолчанию список краткий, сгруппирован по статусу и отсортирован по названию по возрастанию.
+  По умолчанию список краткий, сгруппирован по статусу; сортировка «Номер задачи + Дата создания» — по возрастанию.
   Сохранённые настройки вида сохраняются при обновлении расширения.
+  В сортировке доступен «Номер задачи»: 2, 10, 170 и ABC-2, ABC-12 сравниваются естественно;
+  пустые номера остаются в конце при любом направлении. Комбинированный режим при одинаковых или пустых номерах
+  сравнивает дату создания, затем название и идентификатор. Сохранённый ранее выбор сортировки не сбрасывается.
+  Task-number sorting supports numeric and prefixed IDs, optionally followed by creation date.
   Hover over a prompt to preview its task number, title, status, and full scrollable Markdown text.
   При наведении на промпт появляется карточка с номером задачи, названием, статусом и полным текстом Markdown.
   Длинный текст прокручивается внутри карточки; Escape закрывает её. С клавиатуры выберите строку через Tab
@@ -109,18 +113,29 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
   уже открытые вкладки не закрываются автоматически и могут переиспользоваться самим Claude.
   Сквозная проверка ещё не проведена.
 - **Prompt Editor** for context, files, chat launch, Git-aware execution, plan, and report. Prompt-dashboard cards can be collapsed and reordered from their headers, hidden cards pause their own refresh and AI review work until reopened, restored prompt tabs are rebound to the singleton editor after VS Code reload so a stale duplicate webview does not keep a broken save loop, and the prompt-page `AI model` picker mirrors the promoted Copilot Chat picker list instead of flattening the whole catalog, restores visible Custom Endpoint entries from VS Code's cached model catalog when needed, and respects provider-scoped models or whole groups hidden in the VS Code picker, including a model that was already saved on the prompt. When Kilo Code or OpenAI Codex is selected as the target chat, the AI model picker is hidden, Chat Mode stays available, and a per-prompt Xdotool autostart flag is shown. Карточки prompt-dashboard можно сворачивать и переставлять из шапки; скрытые карточки не обновляются и не запускают AI review, пока их снова не раскроют, восстановленная после перезапуска вкладка редактора снова привязывается к singleton-странице и не создаёт вторую нерабочую webview, а поле `Модель ИИ` повторяет promoted-список Copilot Chat picker вместо полного каталога, восстанавливает видимые Custom Endpoint модели из cached catalog при необходимости и не подтягивает provider-scoped модели из скрытых в самом VS Code групп, даже если такая модель уже была сохранена в промпте. Если целевым чатом выбран Kilo Code или OpenAI Codex, поле модели ИИ скрывается, `Режим чата` остаётся доступным, а флаг автостарта через Xdotool показывается для конкретного промпта.
+- **Editor layout and Settings Sync.** Reorder sections on Main and Process with the header handle or arrow keys.
+  Both orders and all widget preferences are shared; only Main section expansion is global.
+  На обеих вкладках разделы можно переставлять за ручку в шапке, стрелками или Home/End; Escape отменяет перенос.
+  Последняя активная вкладка сохраняется отдельно для каждого промпта сразу при переключении.
+  Кнопки смены статуса находятся в отдельном блоке «Статусы». На вкладке «Процесс» прежняя логика раскрытия
+  плана, отчёта и заметок сохраняется; глобально меняется только порядок разделов.
+  Настройки интерфейса хранятся в пользовательских настройках VS Code. Для передачи между Desktop,
+  Web/Tunnel и устройствами включите Settings Sync с одной учётной записью и синхронизируемым профилем,
+  включая категорию Settings. Подтверждение записи означает локальное сохранение; доставка зависит от Sync.
+  Старые workspace/localStorage-настройки переносятся первым изменением интерфейса, а существующие
+  пользовательские значения имеют приоритет. Привязки раскрытия к конкретным Git/Docker-объектам сохраняются.
 - Для перемещения виджета тяните значок точек слева в его шапке к нужному месту.
   В одноколоночном и двухколоночном режимах отдельно запоминаются порядок и сворачивание виджетов.
   Например, сверните «Статус промпта» и переместите «ToDo» вверх в узкой панели, затем расширьте её
   и настройте две колонки по-другому: при возврате к каждой ширине восстановится её собственная расстановка.
-  Настройки общие для промптов рабочей области и сохраняются после повторного открытия редактора.
+  Настройки общие для рабочих областей и сохраняются после повторного открытия редактора.
   При первом переходе на раздельные настройки оба режима используют прежний порядок и сворачивание.
   Если при смене режима раскрывается виджет без загруженных данных, они догружаются автоматически.
   В двухколоночном режиме пустая колонка сохраняет свою сторону и принимает перетаскиваемые карточки.
   Во время движения виджет подсвечивается, а линия показывает место вставки; отпустите кнопку мыши для сохранения.
 - Форма сжимается до 300 px, оставляя виджеты справа; при ширине редактора меньше 632 px виджеты
   переходят под форму с общей прокруткой. Например, узкая панель больше не скрывает «ToDo» и Docker.
-  Режим, поиск, фильтры и раскрытия виджетов сохраняются для рабочей области вместе с настройками
+  Режим, поиск, фильтры и раскрытия виджетов сохраняются глобально вместе с настройками
   обоих вариантов сетки. Переключение промпта не сбрасывает их. При ошибке записи появляется уведомление:
   текущий вид остаётся рабочим, но для сохранения после перезапуска требуется повторить изменение.
 - **Reliable automatic title completion** always clears the loading indicator in the current prompt editor after a reload, reopen, or folder rename. Автоматическое создание названия всегда завершает индикатор в актуальном окне промпта после перезагрузки, повторного открытия или переименования папки.

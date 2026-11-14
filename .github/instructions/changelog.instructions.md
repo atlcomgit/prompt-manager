@@ -1,3 +1,55 @@
+## 170: Перестановка блоков и глобальное сохранение настроек
+
+- Дата: 2026-11-15.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: разделы обеих вкладок перемещаются; «Статусы» вынесены отдельно; список сортируется по номеру задачи.
+- Ключевые моменты: порядок и виджеты сохраняются через application-настройки и Settings Sync;
+  раскрытие глобально только для «Основного». Сохранены профили ширины, старые значения и обработка отказов.
+  Последняя вкладка сохраняется немедленно для каждого промпта; заголовки компактны, drag-эффекты общие с виджетами.
+  Совместимая cache-метка не меняется при UI-правках; повторный asset mismatch открывает данные после одной попытки обновления.
+  По итогам ревью исправлены повторный перенос явного null, откат новой правки поздней ошибкой
+  и рассогласование раскрытого виджета с политикой загрузки после отказа записи и внешнего update.
+  Проверены 574 целевых теста, TypeScript и два сценария задержанных ответов в настоящем EditorApp через DevTools MCP.
+  Начальная сортировка — «Номер задачи + Дата создания» по возрастанию; сохранённый выбор не заменяется.
+  Для дополнения проверены 73 теста и настоящий SidebarApp: оба направления и восстановление выбора.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  docs/rules/map.md
+  docs/rules/Промпты/Сохранение_и_список_без_номера.md
+  package.json
+  src/constants/webview.ts
+  src/i18n/translations.ts
+  src/providers/editorPanelManager.ts
+  src/services/stateService.ts
+  src/types/messages.ts
+  src/types/prompt.ts
+  src/types/promptDashboardPreferences.ts
+  src/types/promptEditorLayout.ts
+  src/utils/promptUiSettings.ts
+  src/utils/sidebarSorting.ts
+  src/utils/uiSettingsPatch.ts
+  src/webview/editor/EditorApp.tsx
+  src/webview/editor/components/PromptDashboard.tsx
+  src/webview/editor/components/SortableEditorSections.tsx
+  src/webview/editor/components/StatusSelect.tsx
+  src/webview/shared/DragHandleIcon.tsx
+  src/webview/shared/dragPointer.ts
+  src/webview/shared/sectionDragStyles.ts
+  src/webview/sidebar/SidebarApp.tsx
+  src/webview/sidebar/components/FilterBar.tsx
+  tests/editorApp.test.tsx
+  tests/editorPanelManager.test.ts
+  tests/editorPromptViewState.test.ts
+  tests/promptEditorLayout.test.ts
+  tests/promptUiSettings.test.ts
+  tests/sidebarSelection.test.ts
+  tests/sidebarSorting.test.ts
+  tests/sortableEditorSections.test.tsx
+  tests/stateService.test.ts
+
+
 ## Без номера: Файл запроса для OpenAI Codex в браузере
 
 - Дата: 2026-11-13.

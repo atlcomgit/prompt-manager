@@ -60,7 +60,7 @@ test('normalizeSidebarState backfills selectedPromptUuid for legacy sidebar stat
 	assert.equal(result.selectedPromptId, 'prompt-1');
 	assert.equal(result.selectedPromptUuid, null);
 	assert.equal(result.viewMode, 'compact');
-	assert.equal(result.sortField, 'title');
+	assert.equal(result.sortField, 'taskNumberCreatedAt');
 	assert.equal(result.sortOrder, 'asc');
 	assert.equal(result.groupBy, 'status');
 	assert.equal(result.filters.createdAt, 'all');

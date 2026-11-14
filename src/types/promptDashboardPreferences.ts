@@ -15,7 +15,7 @@ export interface DashboardDockerWidgetState {
 	expandedContainerIds: string[];
 }
 
-/** Фильтры TODO, одинаковые для всех промптов рабочей области. */
+/** Фильтры TODO, общие для рабочих областей через пользовательские настройки. */
 export interface DashboardTodosWidgetState {
 	/** Нормализованные расширения файлов; пустой список означает отсутствие фильтра. */
 	selectedFileTypes: string[];

@@ -1,3 +1,4 @@
+import { normalizePromptEditorLayout } from '../src/types/promptEditorLayout.js';
 import { normalizePromptDashboardLayouts } from '../src/types/promptDashboard.js';
 import { normalizePromptDashboardPreferences } from '../src/types/promptDashboardPreferences.js';
 import test from 'node:test';
@@ -415,6 +416,7 @@ function createVsCodeMock() {
 	};
 
 	return {
+		ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
 		EventEmitter,
 		Disposable,
 		RelativePattern,
@@ -781,6 +783,9 @@ async function createManager(options?: {
 	};
 	const stateService = {
 		waitForPromptDashboardSaves: async () => undefined,
+		getPromptEditorLayout: () => normalizePromptEditorLayout(),
+		savePromptEditorLayout: async () => undefined,
+		invalidatePromptUiSettings: () => undefined,
 		saveStartupEditorRestoreState: async () => undefined,
 		getStartupEditorRestoreState: () => ({ wasOpen: Boolean(storedPrompt?.id), promptId: storedPrompt?.id || null }),
 		getPromptEditorViewState: () => createEditorViewState(),
@@ -1498,6 +1503,53 @@ test('ready from stale editor webview asset reboots the panel before sending pro
 	await panel.emitMessage({ type: 'ready', bootId: nextBootId, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
 	assert.equal(panel.postedMessages.some((message: any) => message?.type === 'prompt'), true);
 	panel.dispose();
+});
+
+/** Повторное несовпадение после cache-bust открывает данные и не запускает бесконечную замену HTML. */
+test('ready asset mismatch retries once then opens the prompt without another reboot', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({ initialPrompt: { id: 'prompt-a', promptUuid: 'uuid-a' } });
+	try {
+		await manager.openPrompt('prompt-a');
+		const panel = vscodeCreatedWebviewPanels.at(-1);
+		const key = '__prompt_editor_singleton__';
+		const firstBoot = (manager as any).panelBootIds.get(key);
+		await panel.emitMessage({ type: 'ready', bootId: firstBoot, assetVersion: 'other-build' });
+		const retriedBoot = (manager as any).panelBootIds.get(key);
+		assert.notEqual(retriedBoot, firstBoot);
+		const htmlAfterRetry = panel.webview.html;
+		for (let index = 0; index < 3; index++) {
+			await panel.emitMessage({ type: 'ready', bootId: retriedBoot, assetVersion: 'other-build' });
+		}
+		assert.equal(panel.webview.html, htmlAfterRetry);
+		assert.equal((manager as any).panelBootIds.get(key), retriedBoot);
+		assert.ok(panel.postedMessages.some((m: { type: string; prompt?: { id: string } }) =>
+			m.type === 'prompt' && m.prompt?.id === 'prompt-a'));
+		assert.ok(panel.postedMessages.some((m: { type: string }) => m.type === 'info'));
+	} finally { manager.disposeAll(); }
+});
+
+/** Два ready одного boot не обходят лимит, пока первая попытка ждёт сохранения. */
+test('concurrent mismatched ready events share one asset reload attempt', async () => {
+	resetVsCodeCommandMock();
+	let gate: ReturnType<typeof createDeferred<void>> | undefined;
+	const { manager } = await createManager({ initialPrompt: { id: 'prompt-a', promptUuid: 'uuid-a' },
+		stateService: { waitForPromptDashboardSaves: () => gate?.promise ?? Promise.resolve() } });
+	try {
+		await manager.openPrompt('prompt-a');
+		const panel = vscodeCreatedWebviewPanels.at(-1);
+		const key = '__prompt_editor_singleton__';
+		const bootId = (manager as any).panelBootIds.get(key);
+		const html = panel.webview.html;
+		gate = createDeferred<void>();
+		const first = panel.emitMessage({ type: 'ready', bootId, assetVersion: 'other-build' });
+		await panel.emitMessage({ type: 'ready', bootId, assetVersion: 'other-build' });
+		assert.equal(panel.webview.html, html);
+		gate.resolve();
+		await first;
+		assert.notEqual((manager as any).panelBootIds.get(key), bootId);
+		assert.equal((manager as any).panelAssetReloadState.get(panel), 'retried');
+	} finally { gate?.resolve(); manager.disposeAll(); }
 });
 
 test('ready retries available models after a same-prompt ref refresh', async () => {
@@ -4820,7 +4872,13 @@ test('daily time change drops activity messages after the prompt panel switches'
 
 test('savePromptDashboardCollapsedSections syncs prompt dashboard collapsed sections into PromptDashboardService immediately', async () => {
 	const syncedCollapsedStates: Array<Record<string, boolean>> = [];
-	const { manager } = await createManager();
+	const layouts = normalizePromptDashboardLayouts();
+	const { manager } = await createManager({ stateService: {
+		getPromptDashboardLayouts: () => clonePrompt(layouts),
+		savePromptDashboardCollapsedSections: async (state: Record<string, boolean>) => {
+			layouts['two-columns'].collapsedSections = { ...state };
+		},
+	} });
 	(manager as any).promptDashboardService = {
 		setCollapsedSections: (state: Record<string, boolean>) => {
 			syncedCollapsedStates.push({ ...state });
@@ -10483,11 +10541,14 @@ test('buildChatMemorySummary aggregates attached files, missing context and code
 test('dashboard layout switching isolates pending saves and active refresh policy', async () => {
 	const gate = createDeferred<void>();
 	const savedModes: string[] = [];
+	const layouts = normalizePromptDashboardLayouts();
 	const { manager } = await createManager({
 		stateService: {
-			savePromptDashboardCollapsedSections: async (_state: unknown, mode: string) => {
+			getPromptDashboardLayouts: () => clonePrompt(layouts),
+			savePromptDashboardCollapsedSections: async (state: Record<string, boolean>, mode: 'single-column' | 'two-columns') => {
 				savedModes.push(mode);
 				await gate.promise;
+				layouts[mode].collapsedSections = { ...state };
 			},
 		},
 	});
@@ -10531,7 +10592,9 @@ test('dashboard persistence acknowledges layout requests only after successful w
 			await saving;
 			manager.disposeAll();
 		}
-		assert.deepEqual(messages, [{ type: 'promptDashboardStateSaved', requestId: type }]);
+		assert.deepEqual(messages.map(({ type, requestId }) => ({ type, requestId })),
+			[{ type: 'promptDashboardStateSaved', requestId: type }]);
+		assert.ok((messages[0] as any).settings.editorLayout);
 	}
 });
 
@@ -10592,6 +10655,10 @@ test('dashboard manual refresh remains available after an expanded widget fails 
 		assert.equal((manager as any).isPromptDashboardWidgetCollapsed('todos'), true);
 		await dispatch({ type: 'savePromptDashboardCollapsedSections', layoutMode: 'single-column',
 			state: { todos: false }, requestId: 'failed-expansion' });
+		// Событие другой настройки не должно возвращать сохранённое сворачивание в политику видимой страницы.
+		await (manager as any).broadcastPromptUiSettings();
+		assert.equal((manager as any).isPromptDashboardWidgetCollapsed('todos'), false);
+
 		await dispatch({ type: 'refreshPromptDashboardWidget', widget: 'todos', requestId: 'manual-refresh' });
 		assert.deepEqual(refreshedWidgets, ['todos']);
 		assert.equal(messages.some(message => message.type === 'error' && message.requestId === 'failed-expansion'), true);
@@ -10610,9 +10677,12 @@ test('dashboard manual refresh remains available after an expanded widget fails 
 test('dashboard persistence does not roll back a newer layout while an older request fails', async () => {
 	const release = createDeferred<void>();
 	let writes = 0;
+	const layouts = normalizePromptDashboardLayouts();
 	const { manager } = await createManager({ stateService: {
-		savePromptDashboardCollapsedSections: async () => {
+		getPromptDashboardLayouts: () => clonePrompt(layouts),
+		savePromptDashboardCollapsedSections: async (state: Record<string, boolean>) => {
 			if (++writes === 1) { await release.promise; throw new Error('older write failed'); }
+			layouts['two-columns'].collapsedSections = { ...state };
 		},
 	} });
 	const messages: Array<{ type: string; requestId?: string }> = [];
@@ -10641,26 +10711,25 @@ test('dashboard reopen waits for a pending collapse save before replacing the we
 		resetVsCodeCommandMock();
 		const { StateService } = await importEditorPanelManager();
 		// Отдельный Memento и управляемая задержка не обращаются к рабочему хранилищу.
-		const values = new Map<string, unknown>();
 		const entered = createDeferred<void>();
 		const release = createDeferred<void>();
 		let writes = 0;
 		const stateService = new StateService({ workspaceState: {
-			get: (key: string, fallback: unknown) => values.has(key) ? values.get(key) : fallback,
-			update: async (key: string, value: unknown) => {
-				if (++writes === 1) {
-					entered.resolve();
-					await release.promise;
-					if (rejectFirstWrite) { throw new Error('testing dashboard write failure'); }
-				}
-				values.set(key, structuredClone(value));
-			},
+			get: (_key: string, fallback: unknown) => fallback,
 		} } as unknown as ConstructorParameters<typeof StateService>[0]);
 		const { manager } = await createManager({ initialPrompt: createPrompt(), stateService: {
 			getPromptDashboardLayouts: () => stateService.getPromptDashboardLayouts(),
 			savePromptDashboardCollapsedSections: stateService.savePromptDashboardCollapsedSections.bind(stateService),
 			waitForPromptDashboardSaves: () => stateService.waitForPromptDashboardSaves(),
 		} });
+		vscodeConfigurationUpdateHandler = async (key, value) => {
+			if (++writes === 1) {
+				entered.resolve();
+				await release.promise;
+				if (rejectFirstWrite) { throw new Error('testing dashboard write failure'); }
+			}
+			vscodeConfigurationValues.set(key, structuredClone(value));
+		};
 		await manager.openPrompt('prompt-a');
 		const panel = vscodeCreatedWebviewPanels.at(-1);
 		const key = '__prompt_editor_singleton__';
@@ -10737,8 +10806,14 @@ test('dashboard ready synchronizes loading policy unless a local layout action a
 	for (const editedBeforeReady of [false, true]) {
 		// Запись может завершиться между HTML bootstrap и получением ready.
 		let savedLayouts = normalizePromptDashboardLayouts();
+		const gate = createDeferred<void>();
+		let localSave: Promise<void> | undefined;
 		const { manager } = await createManager({ stateService: {
 			getPromptDashboardLayouts: () => clonePrompt(savedLayouts),
+			savePromptDashboardCollapsedSections: async (state: Record<string, boolean>) => {
+				await gate.promise;
+				savedLayouts['two-columns'].collapsedSections = { ...state };
+			},
 		} });
 		const panel = createDetachedPromptEditorPanel();
 		const prompt = createPrompt();
@@ -10747,7 +10822,7 @@ test('dashboard ready synchronizes loading policy unless a local layout action a
 				(manager as any).buildPromptMessage(prompt));
 			savedLayouts['two-columns'].collapsedSections = { todos: true };
 			if (editedBeforeReady) {
-				await (manager as any).handleMessage({ type: 'savePromptDashboardCollapsedSections',
+				localSave = (manager as any).handleMessage({ type: 'savePromptDashboardCollapsedSections',
 					layoutMode: 'two-columns', state: { activity: true } },
 				panel, prompt, 'panel-a', () => false, () => undefined);
 			}
@@ -10756,6 +10831,8 @@ test('dashboard ready synchronizes loading policy unless a local layout action a
 			assert.deepEqual((manager as any).getPromptDashboardCollapsedSections(),
 				editedBeforeReady ? { activity: true } : { todos: true });
 		} finally {
+			gate.resolve();
+			await localSave;
 			manager.disposeAll();
 		}
 	}
@@ -10791,7 +10868,8 @@ test('dashboard persistence handles preferences acknowledgement failure and full
 		assert.equal(messages[0]?.type, 'error');
 		assert.equal(messages[0]?.requestId, 'failed');
 		await dispatch('retry');
-		assert.deepEqual(messages[1], { type: 'promptDashboardStateSaved', requestId: 'retry' });
+		assert.equal(messages[1].type, 'promptDashboardStateSaved');
+		assert.equal(messages[1].requestId, 'retry');
 		assert.deepEqual((manager as any).buildPromptMessage(createPrompt()).promptDashboardPreferences, next);
 		assert.deepEqual(writes, [next, next]);
 	} finally {
@@ -10958,4 +11036,124 @@ test('openPrompt cancels switching when an awaited manual save rejects', async (
 		manager.disposeAll();
 		resetVsCodeCommandMock();
 	}
+});
+
+/** Сохранение глобального порядка подтверждается снимком после записи, включая настройки другого окна. */
+test('editor layout persistence waits for the write and returns authoritative settings', async () => {
+	const gate = createDeferred<void>();
+	let layout = normalizePromptEditorLayout();
+	const { manager } = await createManager({ stateService: {
+		getPromptEditorLayout: () => structuredClone(layout),
+		savePromptEditorLayout: async (next: typeof layout) => { await gate.promise; layout = next; },
+	} });
+	const messages: Array<{ type: string; requestId?: string; settings?: { editorLayout: typeof layout } }> = [];
+	const panel = { webview: { postMessage: async (message: { type: string }) => { messages.push(message); } } };
+	const next = { ...layout, process: [...layout.process].reverse(), mainExpandedSections: { time: false } };
+	const saving = (manager as any).handleMessage({ type: 'savePromptEditorLayout', state: next,
+		baseState: layout, requestId: 'form-order' }, panel, createPrompt(), 'panel-a', () => false, () => undefined);
+	try {
+		assert.equal(messages.length, 0);
+		gate.resolve();
+		await saving;
+		assert.equal(messages[0].type, 'promptDashboardStateSaved');
+		assert.equal(messages[0].requestId, 'form-order');
+		assert.deepEqual(messages[0].settings?.editorLayout, next);
+	} finally { gate.resolve(); await saving; manager.disposeAll(); }
+});
+
+/** Серия событий конфигурации доставляется живому редактору один раз после принятой очереди. */
+test('external UI settings updates coalesce and preserve local Process view state', async () => {
+	resetVsCodeCommandMock();
+	let gate: ReturnType<typeof createDeferred<void>> | undefined;
+	const layout = normalizePromptEditorLayout({ mainExpandedSections: { time: false } });
+	const { manager } = await createManager({ initialPrompt: createPrompt(), stateService: {
+		getPromptEditorLayout: () => structuredClone(layout),
+		waitForPromptDashboardSaves: () => gate?.promise ?? Promise.resolve(),
+	} });
+	try {
+		await manager.openPrompt('prompt-a');
+		const panel = vscodeCreatedWebviewPanels.at(-1);
+		panel.postedMessages.length = 0;
+		gate = createDeferred<void>();
+		const first = (manager as any).broadcastPromptUiSettings();
+		const second = (manager as any).broadcastPromptUiSettings();
+		assert.equal(panel.postedMessages.filter((m: { type: string }) => m.type === 'promptUiSettingsChanged').length, 0);
+		gate.resolve();
+		await Promise.all([first, second]);
+		const messages = panel.postedMessages.filter((m: { type: string }) => m.type === 'promptUiSettingsChanged');
+		assert.equal(messages.length, 1);
+		assert.deepEqual(messages[0].settings.editorLayout, layout);
+		assert.equal('editorViewState' in messages[0], false);
+		assert.equal('notes' in messages[0].settings.editorLayout.mainExpandedSections, false);
+	} finally { gate?.resolve(); manager.disposeAll(); }
+});
+
+/** Последняя вкладка немедленно доступна reopen, даже пока долговременная запись ещё не завершена. */
+test('prompt reopen retains the latest tab while its view-state save is pending', async () => {
+	resetVsCodeCommandMock();
+	const gate = createDeferred<void>();
+	const stored = new Map<string, ReturnType<typeof createEditorViewState>>([
+		['prompt-a', createEditorViewState({ activeTab: 'process' })],
+		['prompt-b', createEditorViewState({ activeTab: 'process' })],
+	]);
+	const { manager } = await createManager({ initialPrompt: { id: 'prompt-a', promptUuid: 'uuid-a' }, stateService: {
+		getPromptEditorViewState: (source: { promptId: string }) => stored.get(source.promptId) || createEditorViewState(),
+		savePromptEditorViewState: async (source: { promptId: string }, state: ReturnType<typeof createEditorViewState>) => {
+			await gate.promise;
+			stored.set(source.promptId, state);
+		},
+	} });
+	try {
+		await manager.openPrompt('prompt-a');
+		const firstPanel = vscodeCreatedWebviewPanels.at(-1);
+		await firstPanel.emitMessage({ type: 'savePromptEditorViewState', promptId: 'prompt-a', promptUuid: 'uuid-a',
+			state: createEditorViewState({ activeTab: 'main' }) });
+		firstPanel.dispose();
+		await flushTurns(2);
+		await manager.openPrompt('prompt-a');
+		const reopened = vscodeCreatedWebviewPanels.at(-1);
+		await reopened.emitMessage({ type: 'ready',
+			bootId: (manager as any).panelBootIds.get('__prompt_editor_singleton__'),
+			assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
+		const opened = reopened.postedMessages.filter((message: { type: string; reason?: string }) =>
+			message.type === 'prompt' && message.reason === 'open').at(-1);
+		assert.equal(opened.editorViewState.activeTab, 'main');
+		assert.equal(stored.get('prompt-a')?.activeTab, 'process');
+		assert.equal((manager as any).getPromptLoadingEditorViewState('__prompt_editor_singleton__',
+			{ id: 'prompt-b', promptUuid: 'uuid-b' }).activeTab, 'process');
+		gate.resolve();
+		await (manager as any).promptEditorViewStateSaveQueue;
+		assert.equal(stored.get('prompt-a')?.activeTab, 'main');
+	} finally { gate.resolve(); manager.disposeAll(); }
+});
+
+/** Успех независимого флага не отменяет ошибочное раскрытие другой карточки; bootstrap сбрасывает overlay. */
+test('dashboard keeps failed collapse fields through an unrelated successful save and external update', async () => {
+	resetVsCodeCommandMock();
+	const confirmed = normalizePromptDashboardLayouts();
+	confirmed['two-columns'].collapsedSections = { activity: true, todos: true };
+	let writes = 0;
+	const { manager } = await createManager({ stateService: {
+		getPromptDashboardLayouts: () => clonePrompt(confirmed),
+		savePromptDashboardCollapsedSections: async () => {
+			if (++writes === 1) { throw new Error('activity write failed'); }
+			confirmed['two-columns'].collapsedSections = { activity: true };
+		},
+	} });
+	const panel = createDetachedPromptEditorPanel();
+	const dispatch = (requestId: string, state: Record<string, boolean>, baseState: Record<string, boolean>) =>
+		(manager as any).handleMessage({ type: 'savePromptDashboardCollapsedSections', layoutMode: 'two-columns',
+			requestId, state, baseState }, panel, createPrompt(), 'panel-a', () => false, () => undefined);
+	try {
+		await dispatch('failed-activity', { todos: true }, { activity: true, todos: true });
+		await dispatch('saved-todos', {}, { todos: true });
+		await (manager as any).broadcastPromptUiSettings();
+		assert.equal((manager as any).isPromptDashboardWidgetCollapsed('activity'), false);
+		assert.equal((manager as any).isPromptDashboardWidgetCollapsed('todos'), false);
+		assert.deepEqual(confirmed['two-columns'].collapsedSections, { activity: true });
+		(manager as any).rebootPromptPanelWebview('panel-a', panel, createPrompt(),
+			(manager as any).buildPromptMessage(createPrompt()));
+		assert.equal((manager as any).isPromptDashboardWidgetCollapsed('activity'), true);
+		assert.equal((manager as any).isPromptDashboardWidgetCollapsed('todos'), false);
+	} finally { manager.disposeAll(); }
 });

@@ -21,7 +21,7 @@ export const StatusSelect: React.FC<Props> = ({ value, onChange }) => {
             key={opt.value}
             style={{
               ...styles.statusBtn,
-              ...(value === opt.value ? { ...styles.statusBtnActive, borderColor: opt.color } : {}),
+              ...(value === opt.value ? styles.statusBtnActive : {}),
             }}
             onClick={() => onChange(opt.value)}
             title={opt.label}

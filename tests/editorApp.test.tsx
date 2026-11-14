@@ -921,3 +921,20 @@ test('resolveInitialPromptDashboardPreferences preserves empty host maps and ret
 		assert.equal(resolve({ showAllBranchProjects: false }, retained)?.showAllBranchProjects, false);
 	});
 });
+
+/** Статусы вынесены из basic и используют общую локализацию для составного идентификатора in-progress. */
+test('EditorApp renders a standalone movable status section with translated summary', async context => {
+	await withEditorAppEnvironment(EditorApp => {
+		const promptModule = require('../src/types/prompt.js') as typeof import('../src/types/prompt.js');
+		const prompt = { ...promptModule.createDefaultPrompt('status-layout'), status: 'in-progress' as const };
+		context.mock.method(promptModule, 'createDefaultPrompt', () => prompt);
+		const markup = renderToStaticMarkup(React.createElement(EditorApp));
+		const status = markup.match(/<section[^>]*data-pm-editor-section="status"[\s\S]*?<\/section>/)?.[0] || '';
+		const basic = markup.match(/<section[^>]*data-pm-editor-section="basic"[\s\S]*?<\/section>/)?.[0] || '';
+		assert.ok(status.includes('Статусы'));
+		assert.ok(status.includes(translate('en', 'status.inProgress')));
+		assert.doesNotMatch(status, /status\.in-progress/);
+		assert.match(status, /aria-keyshortcuts=/);
+		assert.doesNotMatch(basic, /aria-pressed=/);
+	});
+});

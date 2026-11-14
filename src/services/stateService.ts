@@ -1,6 +1,6 @@
 /**
  * State service — persists UI state (sidebar filters, sort, last opened prompt, etc.)
- * Uses VS Code extension globalState and workspaceState.
+ * Хранит общие UI-настройки в конфигурации пользователя, локальные состояния — в workspaceState.
  */
 
 import * as vscode from 'vscode';
@@ -13,7 +13,6 @@ import type {
 	PromptDashboardSectionOrder,
 	PromptDashboardLayoutMode,
 	PromptDashboardLayouts,
-	PromptDashboardLayoutState,
 } from '../types/promptDashboard.js';
 import {
 	createDefaultEditorPromptViewState,
@@ -27,6 +26,7 @@ import {
 	normalizePromptDashboardLayouts,
 	normalizePromptDashboardCollapsedSections,
 	normalizePromptDashboardSectionOrder,
+	PROMPT_DASHBOARD_SECTION_KEYS,
 } from '../types/promptDashboard.js';
 import {
 	normalizePromptDashboardPreferences,
@@ -34,6 +34,30 @@ import {
 } from '../types/promptDashboardPreferences.js';
 import { readSqliteItemValueCached, resolveBundledSqlJsWasmPath } from '../utils/sqliteItemTable.js';
 import { observeStableChatCompletion, isCompletedChatResponse, type StableChatCompletionCandidate } from '../utils/chatCompletionState.js';
+import {
+	normalizePromptEditorLayout, normalizePromptEditorMainExpanded, PROMPT_EDITOR_TAB_SECTIONS,
+	type PromptEditorLayout,
+} from '../types/promptEditorLayout.js';
+import { applyUiSettingsChanges } from '../utils/uiSettingsPatch.js';
+
+/** Независимые поля Docker не перезаписывают соседнюю настройку из другого окна. */
+const PROMPT_DOCKER_SETTING_FIELDS = ['viewMode', 'statusFilter', 'search', 'sortBy', 'expandedContainerIds'] as const;
+/** Независимые поля TODO сохраняют параллельный поиск и выбор типов файлов. */
+const PROMPT_TODOS_SETTING_FIELDS = ['search', 'selectedFileTypes'] as const;
+
+/** Пользовательские настройки application наследуются Tunnel и участвуют в штатной Settings Sync. */
+export const PROMPT_UI_SETTING_KEYS = [
+	'editor.sectionOrder.main', 'editor.sectionOrder.process',
+	...PROMPT_EDITOR_TAB_SECTIONS.main.map(section => `editor.mainExpandedSections.${section}`),
+	'dashboardLayouts.singleColumn.order', 'dashboardLayouts.twoColumns.order',
+	...['singleColumn', 'twoColumns'].flatMap(mode => PROMPT_DASHBOARD_SECTION_KEYS.map(
+		section => `dashboardLayouts.${mode}.collapsed.${section}`,
+	)),
+	...PROMPT_DOCKER_SETTING_FIELDS.map(field => `dashboardPreferences.docker.${field}`),
+	...PROMPT_TODOS_SETTING_FIELDS.map(field => `dashboardPreferences.todos.${field}`),
+	'dashboardPreferences.expanded',
+	'dashboardPreferences.showAllBranchProjects',
+] as const;
 
 interface ChatSessionLatestRequestState {
 	requestIndex: number;
@@ -63,11 +87,10 @@ export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
 	private static readonly GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchesByProjectPreference';
 	private promptEditorViewStateMutationQueue: Promise<void> = Promise.resolve();
-	/** Единая очередь сохраняет порядок layout-патчей и полных снимков preferences. */
+	/** Очередь экземпляра упорядочивает записи и перенос; независимые окна сохраняют отдельные статические поля. */
 	private promptDashboardMutationQueue: Promise<void> = Promise.resolve();
-	/** Подтверждённые значения скрывают eager Memento.update до успеха или восстановления после ошибки. */
-	private promptDashboardLayoutsReadOverride?: PromptDashboardLayouts;
-	private promptDashboardPreferencesReadOverride?: { state: PromptDashboardPreferences | undefined };
+	/** Подтверждённые значения скрывают незавершённый Configuration.update и сохраняются при ошибке записи. */
+	private readonly promptUiConfirmedValues = new Map<string, unknown>();
 
 	/** Normalize persisted global-context source and keep legacy workspaces predictable. */
 	private static normalizeGlobalAgentContextSource(
@@ -970,33 +993,182 @@ export class StateService {
 		} while (pending !== this.promptDashboardMutationQueue);
 	}
 
-	/** Читает независимые режимы с переносом прежних настроек; tests/stateService.test.ts. */
+	/** Отличает отсутствие ключа от явного сброса null; tests/stateService.test.ts проверяет перенос между workspace. */
+	private readPromptUiSetting<T>(key: string): T | null | undefined {
+		if (this.promptUiConfirmedValues.has(key)) {
+			return this.promptUiConfirmedValues.get(key) as T | null | undefined;
+		}
+		return vscode.workspace.getConfiguration('promptManager').inspect<T | null>(key)?.globalValue;
+	}
+
+	/** Успех публикуется после update; прежнее значение остаётся доступным при отказе записи. */
+	private async writePromptUiSetting(key: string, value: unknown): Promise<void> {
+		this.promptUiConfirmedValues.set(key, this.readPromptUiSetting(key));
+		await vscode.workspace.getConfiguration('promptManager').update(key, value, vscode.ConfigurationTarget.Global);
+		this.promptUiConfirmedValues.delete(key);
+	}
+
+	/** Восстанавливает логический объект, перекрывая legacy только присутствующими глобальными листьями. */
+	private readPromptUiFields<T extends object>(
+		prefix: string, fields: readonly (keyof T & string)[], fallback?: T,
+	): Partial<T> | undefined {
+		const result: Partial<T> = { ...fallback };
+		let found = fallback !== undefined;
+		for (const field of fields) {
+			const value = this.readPromptUiSetting<T[typeof field]>(`${prefix}.${field}`);
+			if (value !== undefined) {
+				// Сброс убирает legacy-поле; доменный нормализатор затем выбирает default или отсутствие optional-поля.
+				result[field] = value ?? undefined;
+				found = true;
+			}
+		}
+		return found ? result : undefined;
+	}
+
+	/** Записывает только изменённые листья; независимые поля не входят в одно конфигурационное update. */
+	private async writePromptUiFields<T extends object>(
+		prefix: string, fields: readonly (keyof T & string)[], next: T, base?: T,
+	): Promise<void> {
+		for (const field of fields) {
+			if (base && JSON.stringify(base[field]) === JSON.stringify(next[field])) {
+				continue;
+			}
+			await this.writePromptUiSetting(`${prefix}.${field}`, next[field] ?? null);
+		}
+	}
+
+	/** Внешнее изменение после завершения очереди снимает защиту от предыдущего отказа. */
+	invalidatePromptUiSettings(): void {
+		this.promptUiConfirmedValues.clear();
+	}
+
+	/** Единственная очередь сохраняет патч и недостающие legacy-поля; чтение/resize ничего не записывают. */
+	private async mutatePromptUiSettings(
+		mutation: () => Promise<void>,
+		source?: EditorPromptViewStateKeySource,
+		initialPreferences?: PromptDashboardPreferences,
+	): Promise<void> {
+		const apply = async (): Promise<void> => {
+			// Частичный patch не должен подменять старые значения остальных полей значениями по умолчанию.
+			const seeds = this.capturePromptUiMigrationSeeds(source, initialPreferences);
+			await mutation();
+			await this.migrateMissingPromptUiSettings(seeds);
+		};
+		const pending = this.promptDashboardMutationQueue.then(apply, apply);
+		this.promptDashboardMutationQueue = pending.catch(() => undefined);
+		await pending;
+	}
+
+	/** Снимает полный legacy-снимок до первой записи, включая ещё не изменённые флаги сворачивания. */
+	private capturePromptUiMigrationSeeds(
+		source?: EditorPromptViewStateKeySource,
+		initialPreferences?: PromptDashboardPreferences,
+	): Record<string, unknown> {
+		const layout = this.getPromptEditorLayout();
+		const dashboard = this.getPromptDashboardLayouts();
+		const preferences = this.getPromptDashboardPreferences() ?? initialPreferences;
+		const expanded = {
+			...normalizePromptEditorMainExpanded(this.getPromptEditorViewState(source).expandedSections),
+			...this.readPromptUiFields<NonNullable<PromptEditorLayout['mainExpandedSections']>>(
+				'editor.mainExpandedSections', PROMPT_EDITOR_TAB_SECTIONS.main,
+			),
+		};
+		const seeds: Record<string, unknown> = {
+			'editor.sectionOrder.main': layout.main,
+			'editor.sectionOrder.process': layout.process,
+		};
+		for (const section of PROMPT_EDITOR_TAB_SECTIONS.main) {
+			seeds[`editor.mainExpandedSections.${section}`] = expanded[section];
+		}
+		for (const mode of ['single-column', 'two-columns'] as const) {
+			const prefix = this.dashboardLayoutSettingPrefix(mode);
+			seeds[`${prefix}.order`] = dashboard[mode].sectionOrder;
+			for (const section of PROMPT_DASHBOARD_SECTION_KEYS) {
+				seeds[`${prefix}.collapsed.${section}`] = dashboard[mode].collapsedSections[section] === true;
+			}
+		}
+		// Отсутствующие preferences оставляют возможность переноса ещё не доставленного localStorage.
+		if (preferences) {
+			for (const field of PROMPT_DOCKER_SETTING_FIELDS) {
+				// Отсутствующий optional viewMode тоже завершает перенос и не подхватывает режим другой рабочей области.
+				seeds[`dashboardPreferences.docker.${field}`] = preferences.docker[field] ?? null;
+			}
+			for (const field of PROMPT_TODOS_SETTING_FIELDS) {
+				seeds[`dashboardPreferences.todos.${field}`] = preferences.todos[field];
+			}
+			for (const field of ['expanded', 'showAllBranchProjects'] as const) {
+				seeds[`dashboardPreferences.${field}`] = preferences[field];
+			}
+		}
+		return seeds;
+	}
+
+	/** Переносит отсутствующие листья, повторно проверяя Settings Sync перед каждой отдельной записью. */
+	private async migrateMissingPromptUiSettings(seeds: Record<string, unknown>): Promise<void> {
+		for (const [key, value] of Object.entries(seeds)) {
+			if (value !== undefined && this.readPromptUiSetting(key) === undefined) {
+				await this.writePromptUiSetting(key, value);
+			}
+		}
+	}
+
+	/** Порядок глобален на обеих вкладках, раскрытие — только для main. */
+	getPromptEditorLayout(): PromptEditorLayout {
+		return normalizePromptEditorLayout({
+			main: this.readPromptUiSetting<PromptEditorLayout['main']>('editor.sectionOrder.main') ?? undefined,
+			process: this.readPromptUiSetting<PromptEditorLayout['process']>('editor.sectionOrder.process') ?? undefined,
+			mainExpandedSections: this.readPromptUiFields<NonNullable<PromptEditorLayout['mainExpandedSections']>>(
+				'editor.mainExpandedSections', PROMPT_EDITOR_TAB_SECTIONS.main,
+			),
+		});
+	}
+
+	/** Применяет изменение формы относительно снимка webview без записи состояния Process. */
+	async savePromptEditorLayout(
+		state: PromptEditorLayout,
+		baseState?: PromptEditorLayout,
+		source?: EditorPromptViewStateKeySource,
+	): Promise<void> {
+		const next = normalizePromptEditorLayout(state);
+		const base = baseState ? normalizePromptEditorLayout(baseState) : undefined;
+		await this.mutatePromptUiSettings(async () => {
+			for (const field of ['main', 'process'] as const) {
+				if (base && JSON.stringify(next[field]) === JSON.stringify(base[field])) {
+					continue;
+				}
+				await this.writePromptUiSetting(`editor.sectionOrder.${field}`, next[field]);
+			}
+			if (next.mainExpandedSections) {
+				await this.writePromptUiFields('editor.mainExpandedSections', PROMPT_EDITOR_TAB_SECTIONS.main,
+					next.mainExpandedSections, base?.mainExpandedSections);
+			}
+		}, source);
+	}
+
+	/** Префикс настроек режима не зависит от текущей рабочей области. */
+	private dashboardLayoutSettingPrefix(mode: PromptDashboardLayoutMode): string {
+		return `dashboardLayouts.${mode === 'single-column' ? 'singleColumn' : 'twoColumns'}`;
+	}
+
+	/** Читает пользовательские режимы с fallback на прежние workspace-профили. */
 	getPromptDashboardLayouts(): PromptDashboardLayouts {
-		return normalizePromptDashboardLayouts(
-			this.promptDashboardLayoutsReadOverride ?? this.context.workspaceState.get(PROMPT_DASHBOARD_LAYOUTS_KEY),
+		const legacy = normalizePromptDashboardLayouts(
+			this.context.workspaceState.get(PROMPT_DASHBOARD_LAYOUTS_KEY),
 			this.context.workspaceState.get(PROMPT_DASHBOARD_SECTION_ORDER_KEY),
 			this.context.workspaceState.get<PromptDashboardCollapsedSections>(PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY),
 		);
-	}
-
-	/** Сохраняет патч режима без публикации незавершённой записи; tests/stateService.test.ts. */
-	private async persistPromptDashboardLayout(
-		mode: PromptDashboardLayoutMode,
-		patch: Partial<PromptDashboardLayoutState>,
-	): Promise<void> {
-		const applyMutation = async (): Promise<void> => {
-			const layouts = this.getPromptDashboardLayouts();
-			this.promptDashboardLayoutsReadOverride = layouts;
-			await this.context.workspaceState.update(PROMPT_DASHBOARD_LAYOUTS_KEY, {
-				...layouts,
-				[mode]: { ...layouts[mode], ...patch },
-			});
-			// При отказе override остаётся: следующий патч строится из последней подтверждённой записи.
-			this.promptDashboardLayoutsReadOverride = undefined;
-		};
-		const pendingMutation = this.promptDashboardMutationQueue.then(applyMutation, applyMutation);
-		this.promptDashboardMutationQueue = pendingMutation.catch(() => undefined);
-		await pendingMutation;
+		for (const mode of ['single-column', 'two-columns'] as const) {
+			const prefix = this.dashboardLayoutSettingPrefix(mode);
+			// Явный null сбрасывает порядок к default; только отсутствующий ключ разрешает workspace-fallback.
+			const order = this.readPromptUiSetting(`${prefix}.order`);
+			legacy[mode] = {
+				sectionOrder: normalizePromptDashboardSectionOrder(order === undefined ? legacy[mode].sectionOrder : order, mode),
+				collapsedSections: normalizePromptDashboardCollapsedSections(this.readPromptUiFields(
+					`${prefix}.collapsed`, PROMPT_DASHBOARD_SECTION_KEYS, legacy[mode].collapsedSections,
+				)),
+			};
+		}
+		return legacy;
 	}
 
 	/** Возвращает сворачивание только выбранного режима. */
@@ -1004,12 +1176,25 @@ export class StateService {
 		return this.getPromptDashboardLayouts()[mode].collapsedSections;
 	}
 
-	/** Сохраняет даже пустую карту: раскрытие всех карточек не должно возвращать старые настройки. */
+	/** Пустая карта означает раскрытие всех карточек и не возвращает прежние workspace-флаги. */
 	async savePromptDashboardCollapsedSections(
 		state: PromptDashboardCollapsedSections,
 		mode: PromptDashboardLayoutMode = 'two-columns',
+		baseState?: PromptDashboardCollapsedSections,
+		source?: EditorPromptViewStateKeySource,
 	): Promise<void> {
-		await this.persistPromptDashboardLayout(mode, { collapsedSections: normalizePromptDashboardCollapsedSections(state) });
+		const next = normalizePromptDashboardCollapsedSections(state);
+		const base = baseState === undefined ? undefined : normalizePromptDashboardCollapsedSections(baseState);
+		await this.mutatePromptUiSettings(async () => {
+			for (const section of PROMPT_DASHBOARD_SECTION_KEYS) {
+				const collapsed = next[section] === true;
+				if (base && (base[section] === true) === collapsed) {
+					continue;
+				}
+				// Явный false перекрывает legacy true, хотя внешний контракт хранит только свёрнутые разделы.
+				await this.writePromptUiSetting(`${this.dashboardLayoutSettingPrefix(mode)}.collapsed.${section}`, collapsed);
+			}
+		}, source);
 	}
 
 	/** Возвращает порядок карточек только выбранного режима. */
@@ -1017,34 +1202,59 @@ export class StateService {
 		return this.getPromptDashboardLayouts()[mode].sectionOrder;
 	}
 
-	/** Сохраняет перестановку, не изменяя сворачивание и настройки другой ширины. */
+	/** Сохраняет перестановку отдельно от сворачивания и настроек другой ширины. */
 	async savePromptDashboardSectionOrder(
 		order: PromptDashboardSectionOrder,
 		mode: PromptDashboardLayoutMode = 'two-columns',
+		source?: EditorPromptViewStateKeySource,
 	): Promise<void> {
-		await this.persistPromptDashboardLayout(mode, { sectionOrder: normalizePromptDashboardSectionOrder(order, mode) });
+		const next = normalizePromptDashboardSectionOrder(order, mode);
+		await this.mutatePromptUiSettings(
+			() => this.writePromptUiSetting(`${this.dashboardLayoutSettingPrefix(mode)}.order`, next), source,
+		);
 	}
 
-	/** Отсутствие записи разрешает legacy-миграцию в webview; tests/stateService.test.ts. */
+	/** Отсутствие любого нового и workspace-значения разрешает legacy-перенос из webview. */
 	getPromptDashboardPreferences(): PromptDashboardPreferences | undefined {
-		const saved = this.promptDashboardPreferencesReadOverride
-			? this.promptDashboardPreferencesReadOverride.state
-			: this.context.workspaceState.get(PROMPT_DASHBOARD_PREFERENCES_KEY);
-		return saved === undefined ? undefined : normalizePromptDashboardPreferences(saved);
+		const saved = this.context.workspaceState.get<PromptDashboardPreferences>(PROMPT_DASHBOARD_PREFERENCES_KEY);
+		const legacy = saved === undefined ? undefined : normalizePromptDashboardPreferences(saved);
+		const next: Partial<PromptDashboardPreferences> = {};
+		const docker = this.readPromptUiFields<PromptDashboardPreferences['docker']>(
+			'dashboardPreferences.docker', PROMPT_DOCKER_SETTING_FIELDS, legacy?.docker,
+		);
+		const todos = this.readPromptUiFields<PromptDashboardPreferences['todos']>(
+			'dashboardPreferences.todos', PROMPT_TODOS_SETTING_FIELDS, legacy?.todos,
+		);
+		for (const field of ['expanded', 'showAllBranchProjects'] as const) {
+			const value = this.readPromptUiSetting(`dashboardPreferences.${field}`);
+			if (value !== undefined) {
+				Object.assign(next, { [field]: value });
+			}
+		}
+		return !legacy && !docker && !todos && Object.keys(next).length === 0 ? undefined
+			: normalizePromptDashboardPreferences({ ...legacy, ...next, docker, todos });
 	}
 
-	/** Полный снимок сохраняется в общей очереди; отказ не выдаётся за успех и не блокирует повтор. */
-	async savePromptDashboardPreferences(state: PromptDashboardPreferences): Promise<void> {
-		// Копируем вход до ожидания очереди, чтобы дальнейшие правки вызывающего кода не меняли эту запись.
-		const normalized = normalizePromptDashboardPreferences(state);
-		const applyMutation = async (): Promise<void> => {
-			this.promptDashboardPreferencesReadOverride = { state: this.getPromptDashboardPreferences() };
-			await this.context.workspaceState.update(PROMPT_DASHBOARD_PREFERENCES_KEY, normalized);
-			this.promptDashboardPreferencesReadOverride = undefined;
-		};
-		const pendingMutation = this.promptDashboardMutationQueue.then(applyMutation, applyMutation);
-		this.promptDashboardMutationQueue = pendingMutation.catch(() => undefined);
-		await pendingMutation;
+	/** Адресный патч preferences сохраняет параллельные изменения других полей и явный false. */
+	async savePromptDashboardPreferences(
+		state: PromptDashboardPreferences,
+		baseState?: PromptDashboardPreferences,
+		source?: EditorPromptViewStateKeySource,
+	): Promise<void> {
+		const next = normalizePromptDashboardPreferences(state);
+		const base = baseState ? normalizePromptDashboardPreferences(baseState) : undefined;
+		await this.mutatePromptUiSettings(async () => {
+			await this.writePromptUiFields('dashboardPreferences.docker', PROMPT_DOCKER_SETTING_FIELDS, next.docker, base?.docker);
+			await this.writePromptUiFields('dashboardPreferences.todos', PROMPT_TODOS_SETTING_FIELDS, next.todos, base?.todos);
+			for (const field of ['expanded', 'showAllBranchProjects'] as const) {
+				if (base && JSON.stringify(base[field]) === JSON.stringify(next[field])) {
+					continue;
+				}
+				const current = this.getPromptDashboardPreferences() ?? normalizePromptDashboardPreferences(undefined);
+				const merged = applyUiSettingsChanges(current[field], next[field], base?.[field]);
+				await this.writePromptUiSetting(`dashboardPreferences.${field}`, merged);
+			}
+		}, source, next);
 	}
 
 	getPromptEditorViewState(source?: EditorPromptViewStateKeySource | null): EditorPromptViewState {

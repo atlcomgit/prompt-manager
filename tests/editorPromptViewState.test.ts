@@ -13,6 +13,7 @@ import {
 test('createDefaultEditorPromptExpandedSections opens the main authoring blocks by default', () => {
 	assert.deepEqual(createDefaultEditorPromptExpandedSections(), {
 		basic: true,
+		status: true,
 		workspace: true,
 		prompt: true,
 		globalPrompt: false,
@@ -45,7 +46,7 @@ test('createDefaultEditorPromptViewState returns main tab by default', () => {
 test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 	assert.deepEqual(normalizeEditorPromptViewState({
 		activeTab: 'process',
-		expandedSections: { basic: false, plan: true },
+		expandedSections: { basic: false, status: true, plan: true },
 		manualSectionOverrides: { report: 'manual', notes: false as never },
 		descriptionExpanded: true,
 		branchesExpanded: true,
@@ -230,4 +231,13 @@ test('moveEditorPromptViewStateEntries prefers legacy promptUuid state over prom
 			sectionHeights: {},
 		},
 	});
+});
+/** Старое измерение basic включало StatusSelect; новый блок не должен удерживать прежнюю высоту. */
+test('legacy view state invalidates only the basic section height after separating status', () => {
+	const result = normalizeEditorPromptViewState({
+		expandedSections: { basic: true }, sectionHeights: { basic: 200, report: 300 },
+	});
+	assert.equal(result.sectionHeights.basic, undefined);
+	assert.equal(result.sectionHeights.report, 300);
+	assert.equal(result.expandedSections.status, true);
 });

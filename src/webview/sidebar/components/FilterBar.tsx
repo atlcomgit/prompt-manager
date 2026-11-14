@@ -48,8 +48,11 @@ export const FilterBar: React.FC<Props> = (props) => {
     { value: 'closed', label: `🔒 ${t('status.closed')}` },
   ];
 
+  // Комбинированный режим уточняет естественный номер датой создания; отдельные способы также доступны.
   const SORT_OPTIONS: { value: SortField; label: string }[] = [
     { value: 'title', label: t('filter.sortTitle') },
+    { value: 'taskNumber', label: t('filter.sortTaskNumber') },
+    { value: 'taskNumberCreatedAt', label: t('filter.sortTaskNumberCreated') },
     { value: 'createdAt', label: t('filter.sortCreated') },
     { value: 'updatedAt', label: t('filter.sortUpdated') },
     { value: 'status', label: t('filter.sortStatus') },

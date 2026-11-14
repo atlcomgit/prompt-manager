@@ -293,6 +293,433 @@
     "configuration": {
       "title": "Prompt Manager",
       "properties": {
+        "promptManager.editor.sectionOrder.main": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Порядок разделов вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.sectionOrder.process": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Порядок разделов вкладки «Процесс». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.basic": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Основное» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.status": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Статусы» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.time": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Учёт времени» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.workspace": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Рабочее окружение» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.prompt": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Промпт» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.globalPrompt": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Общая инструкция» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.tech": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Технологии» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.integrations": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Интеграции» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.agent": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Агент» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.groups": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Группы» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.editor.mainExpandedSections.files": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытие раздела «Файлы контекста» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.singleColumn.order": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Порядок и колонки виджетов (singleColumn). Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.status": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета status для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.activity": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета activity для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.projectBranches": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета projectBranches для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.reviewRequests": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета reviewRequests для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.parallelBranches": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета parallelBranches для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.projectCommits": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета projectCommits для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.dockerContainers": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета dockerContainers для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.todos": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета todos для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.aiAnalysis": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета aiAnalysis для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.order": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Порядок и колонки виджетов (twoColumns). Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.status": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета status для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.activity": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета activity для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.projectBranches": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета projectBranches для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.reviewRequests": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета reviewRequests для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.parallelBranches": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета parallelBranches для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.projectCommits": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета projectCommits для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.dockerContainers": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета dockerContainers для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.todos": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета todos для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.aiAnalysis": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета aiAnalysis для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.docker.viewMode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "tree",
+            "cards",
+            "table",
+            "list",
+            null
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Вид списка контейнеров. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.docker.statusFilter": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "all",
+            "running",
+            "stopped",
+            null
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Фильтр контейнеров по состоянию. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.docker.search": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Строка поиска контейнеров. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.docker.sortBy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "name",
+            "status",
+            "uptime",
+            "cpu",
+            "memory",
+            null
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сортировка контейнеров. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.docker.expandedContainerIds": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Раскрытые контейнеры, проекты и compose-файлы. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.todos.search": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Строка поиска TODO. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.todos.selectedFileTypes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Выбранные типы файлов TODO. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.expanded": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Настройки представления expanded. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.showAllBranchProjects": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Показывать все проекты в виджете веток. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
         "promptManager.ai.enabled": {
           "type": "boolean",
           "description": "Enable Prompt Manager internal AI features. When disabled, built-in AI generations and analyses are skipped, while direct AI chat commands remain available.",

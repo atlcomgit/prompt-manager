@@ -47,6 +47,7 @@ export type EditorPromptTab = 'main' | 'process';
 /** Expandable section keys in prompt settings page. */
 export const PROMPT_EDITOR_SECTION_KEYS = [
 	'basic',
+	'status',
 	'workspace',
 	'prompt',
 	'globalPrompt',
@@ -106,6 +107,7 @@ const PROMPT_EDITOR_LAYOUT_HEIGHT_MAX = 10000;
 export function createDefaultEditorPromptExpandedSections(): EditorPromptExpandedSections {
 	return {
 		basic: true,
+		status: true,
 		workspace: true,
 		prompt: true,
 		globalPrompt: false,
@@ -227,6 +229,7 @@ function normalizeEditorPromptExpandedSections(
 
 	return {
 		basic: typeof state.basic === 'boolean' ? state.basic : defaults.basic,
+		status: typeof state.status === 'boolean' ? state.status : defaults.status,
 		workspace: typeof state.workspace === 'boolean' ? state.workspace : defaults.workspace,
 		prompt: typeof state.prompt === 'boolean' ? state.prompt : defaults.prompt,
 		globalPrompt: typeof state.globalPrompt === 'boolean' ? state.globalPrompt : defaults.globalPrompt,
@@ -286,7 +289,8 @@ export function normalizeEditorPromptViewState(
 			? state.branchesExpandedManual
 			: defaults.branchesExpandedManual,
 		contentHeights: normalizeEditorPromptContentHeights(state.contentHeights),
-		sectionHeights: normalizeEditorPromptSectionHeights(state.sectionHeights),
+		sectionHeights: normalizeEditorPromptSectionHeights(state.expandedSections?.status === undefined
+			? { ...state.sectionHeights, basic: undefined } : state.sectionHeights),
 	};
 }
 
@@ -624,8 +628,8 @@ export function shouldAutoCompletePromptFromChatRequest(
 	return normalizedRequestStartedAt >= gateTimestamp;
 }
 
-/** Sidebar sort options */
-export type SortField = 'title' | 'createdAt' | 'updatedAt' | 'status';
+/** Сортировка списка, включая номер с датой создания как вторым ключом. */
+export type SortField = 'title' | 'createdAt' | 'updatedAt' | 'status' | 'taskNumber' | 'taskNumberCreatedAt';
 export type SortOrder = 'asc' | 'desc';
 
 /** Sidebar list view options */
@@ -677,7 +681,7 @@ type PartialSidebarState = Partial<Omit<SidebarState, 'filters'>> & {
 	filters?: Partial<FilterState>;
 };
 
-/** Начальный краткий список группируется по статусу и сортируется по названию; тесты: sidebarSelection.test.ts. */
+/** Начальный список: номер и дата по возрастанию, группы статусов; тесты: sidebarSelection/sidebarSorting.test.ts. */
 export function createDefaultSidebarState(): SidebarState {
 	return {
 		selectedPromptId: null,
@@ -691,7 +695,7 @@ export function createDefaultSidebarState(): SidebarState {
 			favorites: false,
 			createdAt: 'all',
 		},
-		sortField: 'title',
+		sortField: 'taskNumberCreatedAt',
 		sortOrder: 'asc',
 		viewMode: 'compact',
 		groupBy: 'status',

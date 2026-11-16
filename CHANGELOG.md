@@ -6,6 +6,24 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-11-16
+
+#### Added
+- Задача 171: целевой чат «Opencode CLI» открывает новый интерактивный терминал на Linux-хосте,
+  передаёт файлы через штатный IDE-протокол и сохраняет редактируемый черновик.
+  Независимый автостарт выключен по умолчанию; однократная отправка подтверждается экспортом точной сессии.
+  Переход и остановка изолированы от Copilot; инструкция Plan/Agent не меняет модель или разрешения OpenCode.
+  Исправлен конфликт IDE-порта с Claude Code в Tunnel: окружение задаётся непосредственно процессу CLI.
+  Готовность не зависит от необязательных режимов терминала; таймаут сохраняет терминал открытым.
+  Частичная перерисовка имён файлов и перенос метки длинной вставки больше не блокируют подготовку текста.
+  Каждый файл и текст промпта вставляются с новой строки, включая свёрнутый длинный текст.
+  Старые ручные подтверждения не очищают план нового запуска; полная длинная вставка корректно определяется после прокрутки.
+
+#### Fixed
+- Recognize VS Code's internal `mainThreadWebview-` tab type when removing duplicate prompt editors,
+  including restored tabs in vscode.dev remote tunnels. Regression tests now model the actual tabs API
+  and cover startup, late restoration, and unrelated webviews with identical titles.
+
 ### 2026-11-15
 
 #### Added

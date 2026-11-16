@@ -4,7 +4,7 @@ import { normalizeClaudeChatState } from './claudeChat.js';
 
 /** Возвращает поддерживаемый чат либо Copilot; варианты и fallback проверяет tests/promptConfig.test.ts. */
 export function normalizeChatTarget(value: unknown): PromptChatTarget {
-	return value === 'kilo' || value === 'codex' || value === 'claude' || value === 'copilot'
+	return value === 'kilo' || value === 'codex' || value === 'claude' || value === 'copilot' || value === 'opencode-cli'
 		? value
 		: 'copilot';
 }
@@ -51,6 +51,7 @@ export function normalizeStoredPromptConfig(
 		chatTarget: normalizeChatTarget(parsed.chatTarget),
 		autoStartChat: parsed.autoStartChat !== false,
 		autoStartChatWithXdotool: parsed.autoStartChatWithXdotool === true,
+		autoStartOpenCodeChat: parsed.autoStartOpenCodeChat === true,
 		trackedBranchesByProject: normalizeTrackedBranchesByProject(parsed.trackedBranchesByProject),
 		timeSpentOnTask: typeof parsed.timeSpentOnTask === 'number' ? parsed.timeSpentOnTask : 0,
 		timeSpentUntracked: typeof parsed.timeSpentUntracked === 'number' ? parsed.timeSpentUntracked : 0,

@@ -5,11 +5,24 @@ import { normalizeChatTarget, normalizeStoredPromptConfig } from '../src/utils/p
 
 /** Проверяет общий нормализатор целей и прежний fallback для отсутствующих или поврежденных значений. */
 test('normalizeChatTarget accepts supported targets and rejects invalid values', () => {
-	for (const target of ['copilot', 'kilo', 'codex', 'claude'] as const) {
+	for (const target of ['copilot', 'kilo', 'codex', 'claude', 'opencode-cli'] as const) {
 		assert.equal(normalizeChatTarget(target), target);
 	}
 	for (const target of [undefined, null, '', 'unknown', 'Claude', 'claude ', 1, {}, ['claude']]) {
 		assert.equal(normalizeChatTarget(target), 'copilot');
+	}
+});
+
+/** OpenCode не наследует выполнение из флага Copilot или Xdotool; разрешён только явный true. */
+test('OpenCode auto-start is independent, opt-in and preserved only for a boolean true', () => {
+	for (const autoStartOpenCodeChat of [undefined, false, true, 'true', 1]) {
+		const result = normalizeStoredPromptConfig('opencode', {
+			chatTarget: 'opencode-cli', autoStartChat: true, autoStartChatWithXdotool: true,
+			...{ autoStartOpenCodeChat } as Partial<import('../src/types/prompt.js').PromptConfig>,
+		}, () => 'uuid');
+		assert.equal(result.config.autoStartOpenCodeChat, autoStartOpenCodeChat === true);
+		assert.equal(result.config.autoStartChat, true);
+		assert.equal(result.config.autoStartChatWithXdotool, true);
 	}
 });
 
@@ -65,7 +78,7 @@ test('normalizeStoredPromptConfig preserves existing promptUuid', () => {
 
 /** Проверяет сохранение всех поддерживаемых целей, включая Claude Code. */
 test('normalizeStoredPromptConfig preserves supported chat targets', () => {
-	for (const chatTarget of ['copilot', 'kilo', 'codex', 'claude'] as const) {
+	for (const chatTarget of ['copilot', 'kilo', 'codex', 'claude', 'opencode-cli'] as const) {
 		const result = normalizeStoredPromptConfig(
 			`prompt-${chatTarget}`,
 			{ chatTarget },

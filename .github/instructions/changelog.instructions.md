@@ -1,3 +1,40 @@
+## 171: Отправка промптов в OpenCode CLI
+
+- Дата: 2026-11-16.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: добавлен новый интерактивный терминальный чат OpenCode с текстом задачи и файлами контекста.
+- Ключевые моменты: Linux-хост, OpenCode 2.1.4+ в ветке 2, Bash shell integration, отдельный IDE-порт и session ID.
+  Автостарт выключен по умолчанию; подтверждение экспорта отделено от открытия и подготовки черновика.
+  Переход, Stop и расчёт времени не используют старую историю Copilot.
+  IDE-порт назначается у процесса после применения коллекций окружения Claude Code; таймаут не закрывает терминал.
+  Вставка подтверждается новым текстом или native-плейсхолдером без зависимости от режимов frontend терминала.
+  @xterm/headless восстанавливает частичную ANSI-перерисовку и переносы; экран освобождается после подготовки.
+  После каждого файла отдельно вставляется перевод строки с ожиданием отрисовки, чтобы длинный paste не удалял его.
+  Поколения координатора и CLI защищают новый план от старых подтверждений; полная вставка учитывает видимое окончание.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  docs/rules/map.md
+  docs/rules/Чаты/OpenCode_CLI_171.md
+  licenses/xterm-headless-LICENSE
+  package.json
+  package-lock.json
+  src/i18n/translations.ts
+  src/providers/editorPanelManager.ts
+  src/services/openCodeCliService.ts
+  src/types/prompt.ts
+  src/utils/openCodeCli.ts
+  src/utils/promptConfig.ts
+  src/utils/promptExternalSync.ts
+  src/webview/editor/EditorApp.tsx
+  tests/editorApp.test.tsx
+  tests/editorPanelManager.test.ts
+  tests/openCodeCli.test.ts
+  tests/openCodeCliService.test.ts
+  tests/promptConfig.test.ts
+  tests/promptExternalSync.test.ts
+
 ## 170: Перестановка блоков и глобальное сохранение настроек
 
 - Дата: 2026-11-15.

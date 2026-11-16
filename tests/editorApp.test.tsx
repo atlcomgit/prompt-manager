@@ -136,6 +136,29 @@ test('EditorApp renders the initial prompt page without throwing', async () => {
 	});
 });
 
+/** OpenCode показывает собственный автостарт и не интерпретирует прежнюю историю Copilot. */
+test('EditorApp renders OpenCode with independent native auto-start and no Copilot model or Xdotool', async context => {
+	await withEditorAppEnvironment(EditorApp => {
+		const promptModule = require('../src/types/prompt.js') as typeof import('../src/types/prompt.js');
+		const prompt = { ...promptModule.createDefaultPrompt('opencode'), chatTarget: 'opencode-cli' as const,
+			model: 'copilot/hidden-model', autoStartChat: true, autoStartChatWithXdotool: true, autoStartOpenCodeChat: false };
+		context.mock.method(promptModule, 'createDefaultPrompt', () => prompt);
+		for (const enabled of [false, true]) {
+			prompt.autoStartOpenCodeChat = enabled;
+			const markup = renderToStaticMarkup(React.createElement(EditorApp));
+			assert.match(markup, /<option value="opencode-cli" selected="">Opencode CLI<\/option>/);
+			assert.doesNotMatch(markup, /copilot\/hidden-model|Autostart chat via Xdotool|title="Xdotool:/);
+			const checkbox = markup.match(/<input[^>]*type="checkbox"[^>]*\/>Automatically send to OpenCode CLI/);
+			assert.ok(checkbox);
+			assert.equal(checkbox[0].includes('checked=""'), enabled);
+		}
+	});
+	const behavior = await import('../src/webview/editor/EditorApp.js');
+	assert.deepEqual(behavior.resolvePromptChatSessionIds({ chatTarget: 'opencode-cli', chatSessionIds: ['old-copilot'] }), []);
+	assert.equal(behavior.canRequestImplementingTimeRecalc({ promptId: 'opencode', status: 'in-progress',
+		chatTarget: 'opencode-cli', chatSessionIds: ['old-copilot'] }), false);
+});
+
 /** Проверяет разметку Claude на изолированном промпте без запуска эффектов React или настоящего чата. */
 test('EditorApp renders Claude with mode selection and independent Xdotool controls but no Copilot model', async context => {
 	await withEditorAppEnvironment(EditorApp => {

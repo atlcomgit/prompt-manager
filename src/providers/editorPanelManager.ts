@@ -13,6 +13,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { ClaudeChatSessionService } from '../services/claudeChatSessionService.js';
+import { OpenCodeCliService } from '../services/openCodeCliService.js';
 import type { ClaudeChatSessionSnapshot } from '../types/claudeChat.js';
 import { createClaudeChatLaunchMarker, normalizeClaudeChatState } from '../utils/claudeChat.js';
 import { normalizeChatTarget } from '../utils/promptConfig.js';
@@ -238,6 +239,12 @@ interface GitOverlaySession {
 
 /** Координирует редактор промпта, запуск чатов и связанные операции VS Code. */
 export class EditorPanelManager {
+	/** Терминалы OpenCode не используют привязки и историю Copilot; tests/editorPanelManager.test.ts. */
+	private openCodeCliService?: OpenCodeCliService;
+	/** Защищает весь стартовый сценарий, включая сохранение и hooks, от повторного клика. */
+	private readonly openCodeCliLaunches = new Set<string>();
+	/** Инвалидирует старое ручное подтверждение уже при принятии запуска, до контекста и hooks. */
+	private readonly openCodeCliLaunchGenerations = new Map<string, symbol>();
 	/** Лениво читает только историю выбранных Claude-сессий; tests/editorPanelManager.test.ts. */
 	private claudeChatService?: ClaudeChatSessionService;
 	/** Подписки живут независимо от вкладки редактора и освобождаются вместе с manager. */
@@ -378,10 +385,15 @@ export class EditorPanelManager {
 		void this.stateService.saveStartupEditorRestoreState(Boolean(openPanels.get(SINGLE_EDITOR_PANEL_KEY)), promptId);
 	}
 
-	/** Проверяет, что вкладка VS Code принадлежит editor webview промптов. */
+	/** Match both the public panel type and the internal type exposed by VS Code's tabs API. */
 	private isPromptEditorTab(tab: vscode.Tab): boolean {
 		const input = tab.input as { viewType?: unknown } | null | undefined;
-		return Boolean(input && typeof input === 'object' && input.viewType === EDITOR_PANEL_VIEW_TYPE);
+		if (!input || typeof input !== 'object') {
+			return false;
+		}
+		// Restored/inactive tabs may have no WebviewPanel handle yet, especially over a remote tunnel.
+		return input.viewType === EDITOR_PANEL_VIEW_TYPE
+			|| input.viewType === `mainThreadWebview-${EDITOR_PANEL_VIEW_TYPE}`;
 	}
 
 	/** Возвращает все видимые вкладки prompt editor независимо от внутреннего Map-трекинга. */
@@ -902,9 +914,12 @@ export class EditorPanelManager {
 		await this.readPromptPlanSnapshot(panelKey, promptId, fileUri);
 	}
 
-	private async clearPromptPlanFileIfExists(panelKey: string, promptId: string): Promise<void> {
+	/** Guard не допускает отложенную очистку после stat, если подтверждённый запуск уже сменился. */
+	private async clearPromptPlanFileIfExists(
+		panelKey: string, promptId: string, isCurrent: () => boolean = () => true,
+	): Promise<void> {
 		const normalizedPromptId = (promptId || '').trim();
-		if (!normalizedPromptId) {
+		if (!normalizedPromptId || !isCurrent()) {
 			return;
 		}
 
@@ -914,6 +929,7 @@ export class EditorPanelManager {
 		} catch {
 			return;
 		}
+		if (!isCurrent()) return;
 
 		try {
 			const openDocument = vscode.workspace.textDocuments.find(document => document.uri.toString() === planUri.toString());
@@ -925,7 +941,7 @@ export class EditorPanelManager {
 				const edit = new vscode.WorkspaceEdit();
 				edit.replace(planUri, documentRange, '');
 				await vscode.workspace.applyEdit(edit);
-				if (openDocument.isDirty) {
+				if (openDocument.isDirty && isCurrent()) {
 					this.storageService.markInternalWatchedPromptFileWrite(planUri);
 					await openDocument.save();
 				}
@@ -935,7 +951,7 @@ export class EditorPanelManager {
 			}
 
 			const trackedEntry = this.promptPlanByPanelKey.get(panelKey);
-			if (trackedEntry && trackedEntry.uri.toString() === planUri.toString()) {
+			if (isCurrent() && trackedEntry && trackedEntry.uri.toString() === planUri.toString()) {
 				await this.readPromptPlanSnapshot(panelKey, normalizedPromptId, planUri);
 			}
 		} catch (error) {
@@ -3346,6 +3362,9 @@ export class EditorPanelManager {
 		fileUris: vscode.Uri[],
 		commands: string[],
 	): Promise<ExternalChatDispatchResult> {
+		if (chatTarget === 'opencode-cli') {
+			return this.dispatchOpenCodeCliChatTarget(prompt, query, fileUris);
+		}
 		if (chatTarget === 'kilo') {
 			return this.dispatchKiloChatTarget(prompt, query, fileUris, commands);
 		}
@@ -3358,6 +3377,51 @@ export class EditorPanelManager {
 		}
 
 		return { dispatched: false };
+	}
+
+	/** Создаёт сервис только при выборе CLI, не открывая сокеты во время активации редактора. */
+	private getOpenCodeCliService(): OpenCodeCliService {
+		return this.openCodeCliService ??= new OpenCodeCliService(vscode.window, undefined, undefined, undefined,
+			message => this.hooksOutput.appendLine(`[opencode-cli] ${message}`));
+	}
+
+	/** Передаёт готовый общий контекст в адресный терминал; tests/editorPanelManager.test.ts. */
+	private async dispatchOpenCodeCliChatTarget(
+		prompt: Prompt, query: string, fileUris: vscode.Uri[],
+	): Promise<ExternalChatDispatchResult> {
+		if (vscode.workspace.isTrusted === false) throw new Error('OpenCode CLI требует доверенной рабочей области VS Code.');
+		const paths = this.workspaceService.getWorkspaceFolderPaths();
+		const selected = [...new Set(prompt.projects.map(name => paths.get(name)).filter((value): value is string => Boolean(value)))];
+		const cwd = selected.length === 1 ? selected[0] : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (!cwd) throw new Error('OpenCode CLI: откройте рабочую область VS Code.');
+		const generation = this.openCodeCliLaunchGenerations.get(prompt.promptUuid);
+		return this.getOpenCodeCliService().start({ promptUuid: prompt.promptUuid,
+			title: [prompt.taskNumber, prompt.title].filter(Boolean).join(' · '), cwd, query,
+			files: fileUris.map(uri => uri.fsPath), autoStart: prompt.autoStartOpenCodeChat === true,
+			onManualSubmission: async isCurrentLaunch => {
+				// Поздний ответ не очищает план другого промпта или закрытой/архивной задачи.
+				const isCurrent = () => isCurrentLaunch()
+					&& this.openCodeCliLaunchGenerations.get(prompt.promptUuid) === generation;
+				if (!isCurrent()) return;
+				const latest = await this.storageService.getPromptByUuid(prompt.promptUuid);
+				if (!isCurrent() || !latest || latest.chatTarget !== 'opencode-cli'
+					|| latest.archived || latest.status === 'closed' || this.isShuttingDown) return;
+				await this.clearPromptPlanFileIfExists(SINGLE_EDITOR_PANEL_KEY, latest.id, isCurrent);
+				if (!isCurrent()) return;
+				await this.storageService.createAgentFile(latest.id);
+				if (!isCurrent()) return;
+				const panel = openPanels.get(SINGLE_EDITOR_PANEL_KEY);
+				if (panel && this.panelPromptRefs.get(SINGLE_EDITOR_PANEL_KEY)?.promptUuid === latest.promptUuid) {
+					void panel.webview.postMessage({ type: 'chatRequestStarted', promptId: latest.id });
+				}
+			},
+		});
+	}
+
+	/** Переход не создаёт новый запрос и не меняет историю/статус чужого провайдера. */
+	private openOpenCodeCliChat(prompt: Prompt, postMessage: (message: ExtensionToWebviewMessage) => void): void {
+		if (this.getOpenCodeCliService().open(prompt.promptUuid)) postMessage({ type: 'chatOpened', promptId: prompt.id });
+		else postMessage({ type: 'error', message: 'Терминал этого промпта OpenCode CLI закрыт или недоступен. Начните новый чат.' });
 	}
 
 	/** Resolve the cancel commands currently exposed by the running VS Code build. */
@@ -3542,6 +3606,7 @@ export class EditorPanelManager {
 		previousPrompt: Pick<Prompt, 'id' | 'title' | 'taskNumber'> | null,
 		logSuffix: string = ' (save)',
 	): Promise<void> {
+		if (prompt?.chatTarget === 'opencode-cli') return;
 		if (prompt?.chatTarget === 'claude') {
 			await this.refreshClaudePrompt(prompt);
 			return;
@@ -3648,7 +3713,7 @@ export class EditorPanelManager {
 		}
 
 		const latestPrompt = await this.resolvePromptForChatSessionRename(promptSnapshot);
-		if (latestPrompt?.chatTarget === 'claude') {
+		if (latestPrompt?.chatTarget === 'claude' || latestPrompt?.chatTarget === 'opencode-cli') {
 			return;
 		}
 		const renameTitle = this.buildChatSessionRenameTitle(latestPrompt);
@@ -4060,6 +4125,9 @@ export class EditorPanelManager {
 		}
 		if (freshPrompt.chatTarget === 'claude') {
 			return this.refreshClaudePrompt(freshPrompt);
+		}
+		if (freshPrompt.chatTarget === 'opencode-cli') {
+			return { totalMs: freshPrompt.timeSpentImplementing || 0, sessionsCount: 0, completionOk: false };
 		}
 
 		const sessionIds = Array.from(new Set(
@@ -8346,6 +8414,7 @@ export class EditorPanelManager {
 		if (typeof lastPromptConfig.autoStartChatWithXdotool === 'boolean') {
 			prompt.autoStartChatWithXdotool = lastPromptConfig.autoStartChatWithXdotool;
 		}
+		prompt.autoStartOpenCodeChat = lastPromptConfig.autoStartOpenCodeChat === true;
 		if (typeof lastPromptConfig.autoStartChat === 'boolean') {
 			prompt.autoStartChat = lastPromptConfig.autoStartChat;
 		}
@@ -10653,7 +10722,8 @@ export class EditorPanelManager {
 					break;
 				}
 				const skipBranchMismatchCheck = msg.skipBranchMismatchCheck === true;
-				const shouldForceRebindChat = msg.forceRebindChat === true && prompt?.chatTarget !== 'claude';
+				const shouldForceRebindChat = msg.forceRebindChat === true
+					&& prompt?.chatTarget !== 'claude' && prompt?.chatTarget !== 'opencode-cli';
 				const startChatRequestId = (msg.requestId || '').trim();
 				const initialStatus = msg.originalStatus || prompt?.status || 'draft';
 				const initialChatSessionIds = [...(prompt?.chatSessionIds || [])];
@@ -10661,6 +10731,7 @@ export class EditorPanelManager {
 				let chatMessageDispatched = false;
 				let sessionBindingSucceeded = false;
 				let ownsCodexLaunch = false;
+				let ownsOpenCodeLaunch = false;
 				let hookPayloadBase: Record<string, unknown> | null = null;
 				let trackedSessionId = '';
 				const defaultStartChatError = 'Не удалось запустить чат. Проверьте, что Copilot Chat доступен, и повторите попытку.';
@@ -10676,7 +10747,9 @@ export class EditorPanelManager {
 					return `Не удалось запустить чат: ${normalized}`;
 				};
 				const restorePromptAfterStartFailure = async (): Promise<void> => {
-					if (EditorPanelManager.resolveStartChatFailureRecovery({
+					// CLI возвращает статус после отказа до отправки, даже если подготовка уже была сохранена.
+					const isOpenCode = prompt?.chatTarget === 'opencode-cli';
+					if (isOpenCode ? chatMessageDispatched : EditorPanelManager.resolveStartChatFailureRecovery({
 						startStatePersisted,
 						chatMessageDispatched,
 					}) !== 'restore') {
@@ -10690,7 +10763,11 @@ export class EditorPanelManager {
 					if (!promptFromStorage) {
 						return;
 					}
-					const restoredChatSessionIds = shouldForceRebindChat ? [] : initialChatSessionIds;
+					// Поздняя ошибка не отменяет смену цели, закрытие и другие явные переходы состояния.
+					if (isOpenCode && (promptFromStorage.promptUuid !== prompt.promptUuid
+						|| promptFromStorage.chatTarget !== 'opencode-cli' || promptFromStorage.status !== 'in-progress')) return;
+					const restoredChatSessionIds = isOpenCode ? promptFromStorage.chatSessionIds
+						: shouldForceRebindChat ? [] : initialChatSessionIds;
 					const changed = promptFromStorage.status !== initialStatus
 						|| JSON.stringify(promptFromStorage.chatSessionIds || []) !== JSON.stringify(restoredChatSessionIds);
 					if (!changed) {
@@ -10750,13 +10827,22 @@ export class EditorPanelManager {
 					break;
 				}
 
-				await this.syncIncomingGlobalAgentContextState(
-					msg.globalContext,
-					msg.globalContextSource,
-					panel,
-				);
-
+				if (prompt.chatTarget === 'opencode-cli') {
+					if (this.openCodeCliLaunches.has(prompt.promptUuid)) {
+						postMessage({ type: 'error', message: 'Подготовка OpenCode CLI для этого промпта ещё не завершена.', requestId: msg.requestId });
+						break;
+					}
+					this.openCodeCliLaunches.add(prompt.promptUuid);
+					this.openCodeCliLaunchGenerations.set(prompt.promptUuid, Symbol(prompt.promptUuid));
+					ownsOpenCodeLaunch = true;
+				}
 				try {
+					await this.syncIncomingGlobalAgentContextState(
+						msg.globalContext,
+						msg.globalContextSource,
+						panel,
+					);
+
 					// --- Branch mismatch check ---
 					if (!skipBranchMismatchCheck && prompt.projects.length > 0) {
 						const paths = this.workspaceService.getWorkspaceFolderPaths();
@@ -10800,7 +10886,7 @@ export class EditorPanelManager {
 							this.hooksOutput.appendLine(`[chat-start] bind skipped for prompt=${promptForSessionBinding.id}: prompt missing in storage`);
 							return false;
 						}
-						if (promptFromStorage.chatTarget === 'claude') {
+						if (promptFromStorage.chatTarget === 'claude' || promptFromStorage.chatTarget === 'opencode-cli') {
 							return false;
 						}
 
@@ -11059,7 +11145,7 @@ export class EditorPanelManager {
 								// Non-critical: summary display failure must not block chat
 							}
 						} catch (error) {
-							startStatePersisted = false;
+							if (chatTarget !== 'opencode-cli') startStatePersisted = false;
 							await reportStartChatFailure(formatStartChatErrorMessage(error));
 						}
 						break;
@@ -11546,7 +11632,7 @@ export class EditorPanelManager {
 						);
 						if (shouldFinalizeTrackedCompletion) {
 							const promptToComplete = await this.storageService.getPrompt(prompt.id);
-							if (promptToComplete?.chatTarget === 'claude') {
+							if (promptToComplete?.chatTarget === 'claude' || promptToComplete?.chatTarget === 'opencode-cli') {
 								return;
 							}
 							if (promptToComplete) {
@@ -11629,7 +11715,7 @@ export class EditorPanelManager {
 
 						if (chatReportHtml) {
 							const promptForTiming = await this.storageService.getPrompt(prompt.id);
-							if (promptForTiming?.chatTarget === 'claude') {
+							if (promptForTiming?.chatTarget === 'claude' || promptForTiming?.chatTarget === 'opencode-cli') {
 								return;
 							}
 							if (promptForTiming) {
@@ -11692,8 +11778,8 @@ export class EditorPanelManager {
 							return;
 						}
 
-						// Старый Copilot tracker не меняет новую Claude-задачу и не запускает её error hooks.
-						if ((await this.storageService.getPrompt(prompt.id))?.chatTarget === 'claude') {
+						// Старый Copilot tracker не меняет задачу внешнего чата и не запускает её error hooks.
+						if (['claude', 'opencode-cli'].includes((await this.storageService.getPrompt(prompt.id))?.chatTarget || '')) {
 							return;
 						}
 						let chatErrorStatus = prompt?.status || 'in-progress';
@@ -11703,7 +11789,7 @@ export class EditorPanelManager {
 						);
 						if (terminalErrorStatus && prompt?.id) {
 							const promptToStop = await this.storageService.getPrompt(prompt.id);
-							if (promptToStop?.chatTarget === 'claude') {
+							if (promptToStop?.chatTarget === 'claude' || promptToStop?.chatTarget === 'opencode-cli') {
 								return;
 							}
 							if (promptToStop) {
@@ -11759,12 +11845,17 @@ export class EditorPanelManager {
 					await reportStartChatFailure(formatStartChatErrorMessage(error));
 				} finally {
 					if (ownsCodexLaunch) this.preparingCopilotCodexChat = false;
+					if (ownsOpenCodeLaunch && prompt) this.openCodeCliLaunches.delete(prompt.promptUuid);
 				}
 				break;
 			}
 
 			case 'openChat': {
 				const targetPrompt = await this.storageService.getPrompt(msg.id || currentPrompt.id) || currentPrompt;
+				if (targetPrompt.chatTarget === 'opencode-cli') {
+					this.openOpenCodeCliChat(targetPrompt, postMessage);
+					break;
+				}
 				if (targetPrompt.chatTarget === 'claude') {
 					try {
 						await this.openBoundClaudeChat(targetPrompt, postMessage, currentPrompt);
@@ -11878,6 +11969,10 @@ export class EditorPanelManager {
 			}
 
 			case 'openChatPanel': {
+				if (currentPrompt.chatTarget === 'opencode-cli') {
+					this.openOpenCodeCliChat(currentPrompt, postMessage);
+					break;
+				}
 				if (currentPrompt.chatTarget === 'claude') {
 					try {
 						await this.openBoundClaudeChat(currentPrompt, postMessage, currentPrompt);
@@ -11923,6 +12018,10 @@ export class EditorPanelManager {
 
 			case 'stopChat': {
 				const targetPrompt = await this.storageService.getPrompt(msg.id || currentPrompt.id) || currentPrompt;
+				if (targetPrompt.chatTarget === 'opencode-cli') {
+					postMessage({ type: 'info', message: 'Остановите запрос в терминале OpenCode CLI. Статус промпта не останавливает выполнение.' });
+					break;
+				}
 				if (targetPrompt.chatTarget === 'claude') {
 					postMessage({ type: 'info', message: vscode.env.language.startsWith('ru')
 						? 'Остановите запрос кнопкой Stop в Claude Code. Изменение статуса промпта не останавливает запрос.'
@@ -13521,7 +13620,7 @@ export class EditorPanelManager {
 					}
 					break;
 				}
-				const sessionIds = prompt.chatTarget === 'claude'
+				const sessionIds = prompt.chatTarget === 'opencode-cli' ? [] : prompt.chatTarget === 'claude'
 					? prompt.claudeChat?.sessions.map(session => session.sessionId) || []
 					: prompt.chatSessionIds || [];
 				if (sessionIds.length === 0) {
@@ -13620,6 +13719,8 @@ export class EditorPanelManager {
 		this.claudeChatRefreshAgain.clear();
 		this.claudeChatRenamedTitles.clear();
 		this.claudeChatService?.dispose();
+		this.openCodeCliService?.dispose();
+		this.openCodeCliLaunchGenerations.clear();
 		this.claudeChatService = undefined;
 		this.clearGlobalAgentContextSyncTimer();
 		if (this.promptEditorTabCleanupTimer) {

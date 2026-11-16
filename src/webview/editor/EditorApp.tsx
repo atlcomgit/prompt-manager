@@ -146,6 +146,7 @@ const CHAT_TARGET_OPTIONS: Array<{ id: PromptChatTarget; labelKey: string }> = [
   { id: 'kilo', labelKey: 'editor.chatTargetKilo' },
   { id: 'codex', labelKey: 'editor.chatTargetCodex' },
   { id: 'claude', labelKey: 'editor.chatTargetClaude' },
+  { id: 'opencode-cli', labelKey: 'editor.chatTargetOpenCodeCli' },
 ];
 
 /** Prefer host boot data for the first paint and only fall back to retained webview state when boot data is absent. */
@@ -408,10 +409,11 @@ export const mergePromptDashboardWidgetSnapshot = (input: {
   ) || nextSnapshot;
 };
 
-/** Возвращает сессии выбранного чата без смешивания истории Claude и Copilot; tests/editorApp.test.tsx. */
+/** Возвращает историю выбранного чата; OpenCode не использует Copilot IDs; tests/editorApp.test.tsx. */
 export function resolvePromptChatSessionIds(
   prompt: Partial<Pick<Prompt, 'chatTarget' | 'chatSessionIds' | 'claudeChat'>>,
 ): string[] {
+  if (prompt.chatTarget === 'opencode-cli') return [];
   return prompt.chatTarget === 'claude'
     ? (prompt.claudeChat?.sessions || []).map(session => session.sessionId)
     : prompt.chatSessionIds || [];
@@ -2810,7 +2812,11 @@ export const EditorApp: React.FC = () => {
   const normalizedChatTarget = prompt.chatTarget || 'copilot';
   const isExternalChatTarget = normalizedChatTarget === 'kilo'
     || normalizedChatTarget === 'codex'
-    || normalizedChatTarget === 'claude';
+    || normalizedChatTarget === 'claude'
+    || normalizedChatTarget === 'opencode-cli';
+  /** OpenCode использует терминальный ввод, сохраняя независимые прежние флаги; tests/editorApp.test.tsx. */
+  const isOpenCodeCli = normalizedChatTarget === 'opencode-cli';
+  const autoStartOpenCodeChat = prompt.autoStartOpenCodeChat === true;
   const autoStartChat = prompt.autoStartChat !== false;
   const autoStartChatWithXdotool = prompt.autoStartChatWithXdotool === true;
 
@@ -2938,13 +2944,15 @@ export const EditorApp: React.FC = () => {
     const chatTargetOption = CHAT_TARGET_OPTIONS.find(option => option.id === normalizedChatTarget);
     chunks.push(`Чат: ${chatTargetOption ? t(chatTargetOption.labelKey) : t('editor.chatTargetCopilot')}`);
     chunks.push(`Режим: ${prompt.chatMode === 'agent' ? 'Agent' : 'Plan'}`);
-    if (isExternalChatTarget) {
+    if (isOpenCodeCli) {
+      chunks.push(`Автостарт: ${autoStartOpenCodeChat ? 'включен' : 'выключен'}`);
+    } else if (isExternalChatTarget) {
       chunks.push(`Xdotool: ${autoStartChatWithXdotool ? 'включен' : 'выключен'}`);
     } else {
       chunks.push(`Автостарт: ${autoStartChat ? 'включен' : 'выключен'}`);
     }
     return chunks;
-  }, [autoStartChat, autoStartChatWithXdotool, isExternalChatTarget, normalizedChatTarget, selectedModelName, prompt.chatMode, t]);
+  }, [autoStartChat, autoStartChatWithXdotool, autoStartOpenCodeChat, isOpenCodeCli, isExternalChatTarget, normalizedChatTarget, selectedModelName, prompt.chatMode, t]);
 
   const groupsSummary = useMemo(() => {
     const chunks: string[] = [];
@@ -7764,17 +7772,17 @@ export const EditorApp: React.FC = () => {
                   <label style={styles.agentCheckboxLabel}>
                     <input
                       type="checkbox"
-                      checked={isExternalChatTarget ? autoStartChatWithXdotool : autoStartChat}
+                      checked={isOpenCodeCli ? autoStartOpenCodeChat : isExternalChatTarget ? autoStartChatWithXdotool : autoStartChat}
                       onChange={e => updateFieldAndSaveNow(
-                        isExternalChatTarget ? 'autoStartChatWithXdotool' : 'autoStartChat',
+                        isOpenCodeCli ? 'autoStartOpenCodeChat' : isExternalChatTarget ? 'autoStartChatWithXdotool' : 'autoStartChat',
                         e.target.checked,
                       )}
                       style={styles.agentCheckboxInput}
                     />
-                    {t(isExternalChatTarget ? 'editor.autoStartChatWithXdotool' : 'editor.autoStartChat')}
+                    {t(isOpenCodeCli ? 'editor.openCodeAutoStart' : isExternalChatTarget ? 'editor.autoStartChatWithXdotool' : 'editor.autoStartChat')}
                   </label>
                   <div style={styles.agentCheckboxHelp}>
-                    {t(chatTarget === 'claude' ? 'editor.claudeAutoSendUnavailable'
+                    {t(isOpenCodeCli ? 'editor.openCodeAutoStartHint' : chatTarget === 'claude' ? 'editor.claudeAutoSendUnavailable'
                       : isExternalChatTarget ? 'editor.autoStartChatWithXdotoolHint' : 'editor.autoStartChatHint')}
                   </div>
                 </div>

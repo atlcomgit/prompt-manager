@@ -21,6 +21,7 @@ export const PROMPT_CONFIG_SYNC_FIELDS = [
 	'chatTarget',
 	'autoStartChat',
 	'autoStartChatWithXdotool',
+	'autoStartOpenCodeChat',
 	'contextFiles',
 	'httpExamples',
 	'timeSpentUntracked',

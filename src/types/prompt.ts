@@ -8,7 +8,7 @@ import type { ClaudeChatState } from './claudeChat.js';
 export type PromptStatus = 'draft' | 'in-progress' | 'stopped' | 'cancelled' | 'completed' | 'report' | 'review' | 'closed';
 
 /** Целевая интеграция для запуска чата; значения проверяет tests/promptConfig.test.ts. */
-export type PromptChatTarget = 'copilot' | 'kilo' | 'codex' | 'claude';
+export type PromptChatTarget = 'copilot' | 'kilo' | 'codex' | 'claude' | 'opencode-cli';
 
 /** Canonical order of prompt statuses used in UI controls and grouping */
 export const PROMPT_STATUS_ORDER: PromptStatus[] = [
@@ -441,12 +441,14 @@ export interface PromptConfig {
 	// --- Chat mode ---
 	/** Chat mode: 'agent' | 'plan' */
 	chatMode: 'agent' | 'plan';
-	/** Целевой чат: Copilot Chat, Kilo Code, OpenAI Codex или Claude Code. */
+	/** Целевой чат, включая интерактивный OpenCode CLI; tests/promptConfig.test.ts. */
 	chatTarget?: PromptChatTarget;
 	/** Определяет, нужно ли сразу отправлять подготовленный запрос в Copilot Chat. */
 	autoStartChat?: boolean;
 	/** Whether external chat fallback should auto-submit with xdotool */
 	autoStartChatWithXdotool?: boolean;
+	/** Отправка в OpenCode включается отдельно; прежний автостарт Copilot её не активирует. */
+	autoStartOpenCodeChat?: boolean;
 
 	// --- Context files ---
 	/** Relative paths to context files attached to this prompt */
@@ -569,6 +571,7 @@ export function createDefaultPrompt(id: string = ''): Prompt {
 		chatTarget: 'copilot',
 		autoStartChat: true,
 		autoStartChatWithXdotool: false,
+		autoStartOpenCodeChat: false,
 		contextFiles: [],
 		httpExamples: '',
 		chatSessionIds: [],

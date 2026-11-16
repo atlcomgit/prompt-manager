@@ -509,6 +509,9 @@ const en: Record<string, string> = {
 	'editor.chatTargetCodex': 'OpenAI Codex',
 	// Название интеграции Claude Code в выборе чата и прогрессе запуска.
 	'editor.chatTargetClaude': 'Claude Code',
+	'editor.chatTargetOpenCodeCli': 'Opencode CLI',
+	'editor.openCodeAutoStart': 'Automatically send to OpenCode CLI',
+	'editor.openCodeAutoStartHint': 'Off: leave an editable draft. On: send once after the text and files are prepared. Requires OpenCode 2.1.4+ and terminal shell integration on the Linux host.',
 	'editor.claudeAutoSendUnavailable': 'Claude input focus cannot be verified. The prompt is prepared, but submission remains manual even when this flag is enabled.',
 	// Подготовка Claude и подтвержденная привязка показываются отдельно, без фиктивного успеха отправки.
 	'editor.claudeChatPending': 'Waiting for the first message in Claude Code and session binding.',
@@ -1657,6 +1660,9 @@ const ru: Record<string, string> = {
 	'editor.chatTargetCodex': 'OpenAI Codex',
 	// Название интеграции Claude Code в выборе чата и прогрессе запуска.
 	'editor.chatTargetClaude': 'Claude Code',
+	'editor.chatTargetOpenCodeCli': 'Opencode CLI',
+	'editor.openCodeAutoStart': 'Автоматически отправлять в OpenCode CLI',
+	'editor.openCodeAutoStartHint': 'Выключено: оставить редактируемый черновик. Включено: отправить один раз после подготовки текста и файлов. Требуется OpenCode 2.1.4+ и интеграция оболочки терминала на Linux-хосте.',
 	'editor.claudeAutoSendUnavailable': 'Фокус поля Claude нельзя подтвердить. Текст подготавливается, но отправка остаётся ручной даже при включённом флаге.',
 	// Подготовка Claude и подтвержденная привязка показываются отдельно, без фиктивного успеха отправки.
 	'editor.claudeChatPending': 'Ожидается первое сообщение в Claude Code и подтверждение привязки.',

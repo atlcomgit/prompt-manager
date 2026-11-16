@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import Module from 'node:module';
 import { EDITOR_WEBVIEW_ASSET_VERSION } from '../src/constants/webview.js';
 import { buildSaveQueueKey } from '../src/utils/promptSaveQueue.js';
+import type { OpenCodeCliRequest, OpenCodeCliService } from '../src/services/openCodeCliService.js';
 
 const originalLoad = (Module as any)._load;
 const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
@@ -140,7 +141,8 @@ function createVsCodeTab(viewType: string, label: string, active = true, panel?:
 }
 
 function seedPromptEditorTab(label = 'Prompt: Prompt A', active = true) {
-	return createVsCodeTab('promptManager.editor', label, active);
+	// TabInputWebview exposes VS Code's internal view type, unlike WebviewPanel.viewType.
+	return createVsCodeTab('mainThreadWebview-promptManager.editor', label, active);
 }
 
 function createDetachedPromptEditorPanel(label = 'Prompt: Prompt A restored') {
@@ -214,7 +216,7 @@ function createDetachedPromptEditorPanel(label = 'Prompt: Prompt A restored') {
 			}
 		},
 	};
-	panel.tab = createVsCodeTab('promptManager.editor', label, true, panel);
+	panel.tab = createVsCodeTab('mainThreadWebview-promptManager.editor', label, true, panel);
 	return panel;
 }
 
@@ -410,7 +412,7 @@ function createVsCodeMock() {
 				}
 			},
 		};
-		panel.tab = createVsCodeTab(viewType, title, true, panel);
+		panel.tab = createVsCodeTab(`mainThreadWebview-${viewType}`, title, true, panel);
 		vscodeCreatedWebviewPanels.push(panel);
 		return panel;
 	};
@@ -1361,7 +1363,7 @@ test('manager startup collapses duplicate prompt editor webview tabs', async () 
 	await createManager();
 	await flushTurns(2);
 
-	const promptEditorTabs = vscodeTabs.filter(tab => tab.input?.viewType === 'promptManager.editor');
+	const promptEditorTabs = vscodeTabs.filter(tab => tab.input?.viewType === 'mainThreadWebview-promptManager.editor');
 	assert.equal(promptEditorTabs.length, 1);
 	assert.equal(promptEditorTabs[0]?.label, 'Prompt: Prompt A');
 	assert.equal(vscodeClosedTabs.length, 1);
@@ -1381,12 +1383,48 @@ test('openPrompt closes orphan duplicate prompt editor tab after creating single
 	await (manager as any).openPrompt('prompt-a');
 	await flushTurns(2);
 
-	const promptEditorTabs = vscodeTabs.filter(tab => tab.input?.viewType === 'promptManager.editor');
+	const promptEditorTabs = vscodeTabs.filter(tab => tab.input?.viewType === 'mainThreadWebview-promptManager.editor');
 	assert.equal(vscodeCreatedWebviewPanels.length, 1);
 	assert.equal(promptEditorTabs.length, 1);
 	assert.equal(promptEditorTabs[0]?.panel, vscodeCreatedWebviewPanels[0]);
 	assert.equal(vscodeClosedTabs.length, 1);
 	vscodeCreatedWebviewPanels[0]?.dispose();
+});
+
+/** Late restoration must trigger cleanup through the real tabs API view type. */
+test('late prompt editor tabs are deduplicated without closing other webviews with the same title', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({
+		initialPrompt: { id: 'prompt-a', promptUuid: 'uuid-a', title: 'Prompt A' },
+	});
+	await manager.openPrompt('prompt-a');
+	await flushTurns(2);
+	const livePanel = vscodeCreatedWebviewPanels[0];
+	try {
+		const reportTab = createVsCodeTab('mainThreadWebview-promptManager.reportEditor', livePanel.title, false);
+		const otherTab = createVsCodeTab('mainThreadWebview-other.promptManager.editor', livePanel.title, false);
+		const restoredTab = seedPromptEditorTab(livePanel.title, false);
+		await flushTurns(2);
+
+		assert.deepEqual(vscodeClosedTabs, [restoredTab]);
+		assert.deepEqual(vscodeTabs, [livePanel.tab, reportTab, otherTab]);
+		assert.equal(livePanel.disposed, false);
+		assert.equal((manager as any).resolveOpenEditorPanel('__prompt_editor_singleton__'), livePanel);
+	} finally {
+		livePanel.dispose();
+	}
+});
+
+/** Keep compatibility with hosts exposing the public type alongside internally prefixed restored tabs. */
+test('duplicate cleanup handles mixed public and internal prompt editor tab types', async () => {
+	resetVsCodeCommandMock();
+	const activeTab = createVsCodeTab('promptManager.editor', 'Prompt A', true);
+	const restoredTab = seedPromptEditorTab('Prompt A', false);
+	await createManager();
+	await flushTurns(2);
+
+	assert.deepEqual(vscodeTabs, [activeTab]);
+	assert.deepEqual(vscodeClosedTabs, [restoredTab]);
 });
 
 /** Сериализатор восстанавливает singleton и настройки; подмена Memento не является перезапуском VS Code. */
@@ -1436,7 +1474,7 @@ test('revivePromptEditorPanel adopts the restored singleton tab without creating
 	assert.equal(promptMessage?.prompt?.id, 'prompt-a');
 	assert.deepEqual(promptMessage?.promptDashboardLayouts, layouts);
 	assert.deepEqual(promptMessage?.promptDashboardPreferences, preferences);
-	const promptEditorTabs = vscodeTabs.filter(tab => tab.input?.viewType === 'promptManager.editor');
+	const promptEditorTabs = vscodeTabs.filter(tab => tab.input?.viewType === 'mainThreadWebview-promptManager.editor');
 	assert.equal(promptEditorTabs.length, 1);
 	revivedPanel.dispose();
 });
@@ -6868,6 +6906,171 @@ async function createClaudeManager(overrides: Record<string, unknown> = {}) {
 	);
 	return { ...harness, service, initialPrompt, messages, send };
 }
+
+/** Изолирует OpenCode от настоящих терминалов, сокетов, рабочих файлов и моделей. */
+async function createOpenCodeManager(autoStart = false) {
+	resetVsCodeCommandMock();
+	const prompt = createPrompt({ title: 'OpenCode task', content: 'Test OpenCode.', chatMode: 'plan',
+		chatTarget: 'opencode-cli', autoStartOpenCodeChat: autoStart, chatSessionIds: ['old-copilot'] });
+	const harness = await createManager({ initialPrompt: prompt,
+		workspaceService: { getWorkspaceFolderPaths: () => new Map([['workspace', '/tmp/workspace']]) } });
+	const requests: OpenCodeCliRequest[] = [];
+	const messages: Array<{ type?: string; message?: string }> = [];
+	let cleared = 0, created = 0, opened = 0;
+	const internals = harness.manager as unknown as {
+		openCodeCliService: Pick<OpenCodeCliService, 'start' | 'open' | 'dispose'>;
+		syncTrackedPromptFilesForPanel: () => Promise<void>;
+		clearPromptPlanFileIfExists: () => Promise<void>;
+		handleMessage: (...args: unknown[]) => Promise<void>;
+	};
+	internals.openCodeCliService = {
+		start: async request => { requests.push(request); return { dispatched: request.autoStart, message: 'Prepared' }; },
+		open: () => { opened++; return true; }, dispose() {},
+	};
+	internals.syncTrackedPromptFilesForPanel = async () => undefined;
+	internals.clearPromptPlanFileIfExists = async () => { cleared++; };
+	harness.storageService.createAgentFile = async () => { created++; };
+	const panel = { visible: true, webview: { postMessage: async (message: { type?: string; message?: string }) => messages.push(message) } };
+	return { ...harness, requests, messages, internals,
+		counts: () => ({ cleared, created, opened }),
+		send: (message: Record<string, unknown>) => internals.handleMessage(message, panel, prompt,
+			'__prompt_editor_singleton__', () => false, () => undefined),
+	};
+}
+
+/** Черновик сохраняет план, старые Copilot IDs и независимую настройку отправки. */
+test('OpenCode manager prepares common context without clearing a draft plan or rebinding Copilot', async () => {
+	const fixture = await createOpenCodeManager();
+	try {
+		await fixture.send({ type: 'startChat', id: 'prompt-a', forceRebindChat: true });
+		assert.equal(fixture.requests.length, 1);
+		assert.equal(fixture.requests[0].autoStart, false);
+		assert.equal(fixture.requests[0].cwd, '/tmp/workspace');
+		assert.match(fixture.requests[0].query, /Test OpenCode\./);
+		assert.match(fixture.requests[0].query, /Create a detailed implementation plan/);
+		assert.deepEqual(fixture.getStoredPrompt()?.chatSessionIds, ['old-copilot']);
+		assert.deepEqual(fixture.counts(), { cleared: 0, created: 0, opened: 0 });
+		assert.ok(fixture.messages.some(message => message.type === 'chatOpened'));
+		assert.equal(fixture.messages.some(message => message.type === 'chatRequestStarted'), false);
+		assert.equal(vscodeCommandCalls.some(call => call.id.startsWith('workbench.action.chat.')), false);
+	} finally { fixture.manager.disposeAll(); }
+});
+
+/** Поколение проверяется повторно после чтения, чтобы ответ старой сессии не очистил новый план. */
+test('OpenCode manager ignores a manual confirmation invalidated during prompt lookup', async () => {
+	const fixture = await createOpenCodeManager();
+	try {
+		await fixture.send({ type: 'startChat', id: 'prompt-a' });
+		const latest = fixture.getStoredPrompt();
+		let resolveLatest!: (value: typeof latest) => void;
+		const lookup = new Promise<typeof latest>(resolve => { resolveLatest = resolve; });
+		fixture.storageService.getPromptByUuid = async () => lookup;
+		let current = true;
+		const confirmation = fixture.requests[0].onManualSubmission!(() => current);
+		current = false;
+		resolveLatest(latest);
+		await confirmation;
+		assert.deepEqual(fixture.counts(), { cleared: 0, created: 0, opened: 0 });
+		assert.equal(fixture.messages.some(message => message.type === 'chatRequestStarted'), false);
+	} finally { fixture.manager.disposeAll(); }
+});
+
+/** Подтверждение актуального запуска сохраняет штатную очистку даже без зарегистрированной панели. */
+test('OpenCode manager accepts a current manual confirmation', async () => {
+	const fixture = await createOpenCodeManager();
+	try {
+		await fixture.send({ type: 'startChat', id: 'prompt-a' });
+		await fixture.requests[0].onManualSubmission!(() => true);
+		assert.deepEqual(fixture.counts(), { cleared: 1, created: 1, opened: 0 });
+	} finally { fixture.manager.disposeAll(); }
+});
+
+/** Поколение координатора защищает новый план ещё до передачи нового запуска в CLI-сервис. */
+test('OpenCode manager invalidates the old callback while the next launch waits for beforeChat', async () => {
+	const fixture = await createOpenCodeManager();
+	let resume!: () => void, entered!: () => void;
+	const waiting = new Promise<void>(resolve => { entered = resolve; });
+	const gate = new Promise<void>(resolve => { resume = resolve; });
+	let second: Promise<void> | undefined;
+	try {
+		await fixture.send({ type: 'startChat', id: 'prompt-a' });
+		const previous = fixture.requests[0];
+		await fixture.storageService.savePrompt({ ...fixture.getStoredPrompt(), content: 'New prompt B', status: 'draft' });
+		(fixture.manager as unknown as { runConfiguredHooks: (
+			hooks: unknown, payload: { event: string },
+		) => Promise<void> }).runConfiguredHooks = async (_hooks, payload) => {
+			if (payload.event === 'beforeChat') { entered(); await gate; }
+		};
+		second = fixture.send({ type: 'startChat', id: 'prompt-a' });
+		await waiting;
+		assert.equal(fixture.requests.length, 1);
+		await previous.onManualSubmission!(() => true);
+		assert.deepEqual(fixture.counts(), { cleared: 0, created: 0, opened: 0 });
+	} finally {
+		resume();
+		await second;
+		fixture.manager.disposeAll();
+	}
+});
+
+/** Отложенный stat не даёт старому подтверждению стереть план после смены поколения запуска. */
+test('OpenCode plan cleanup checks launch ownership again after file stat', async () => {
+	resetVsCodeCommandMock();
+	const { manager, storageService } = await createManager({ initialPrompt: { id: 'prompt-a', promptUuid: 'uuid-a' } });
+	const planUri = storageService.getPromptPlanUri('prompt-a');
+	vscodeWorkspaceFiles.set(planUri.toString(), 'New plan B');
+	let current = true;
+	storageService.getPromptPlanUri = () => {
+		queueMicrotask(() => { current = false; });
+		return planUri;
+	};
+	try {
+		await (manager as unknown as { clearPromptPlanFileIfExists: (
+			panelKey: string, promptId: string, isCurrent: () => boolean,
+		) => Promise<void> }).clearPromptPlanFileIfExists('__prompt_editor_singleton__', 'prompt-a', () => current);
+		assert.equal(vscodeWorkspaceFiles.get(planUri.toString()), 'New plan B');
+	} finally { manager.disposeAll(); }
+});
+
+/** План и служебный файл меняются только после подтверждённого приёма запроса OpenCode. */
+test('OpenCode manager clears the plan and emits request events only for confirmed auto-send', async () => {
+	const fixture = await createOpenCodeManager(true);
+	try {
+		await fixture.send({ type: 'startChat', id: 'prompt-a' });
+		assert.equal(fixture.requests[0].autoStart, true);
+		assert.deepEqual(fixture.counts(), { cleared: 1, created: 1, opened: 0 });
+		assert.ok(fixture.messages.some(message => message.type === 'chatStarted'));
+		assert.ok(fixture.messages.some(message => message.type === 'chatRequestStarted'));
+	} finally { fixture.manager.disposeAll(); }
+});
+
+/** Ошибка нового dispatch возвращает исходный статус и сохраняет существующую историю/план. */
+test('OpenCode manager restores draft status after a failed terminal launch', async () => {
+	const fixture = await createOpenCodeManager();
+	fixture.internals.openCodeCliService.start = async () => { throw new Error('OpenCode unavailable'); };
+	try {
+		await fixture.send({ type: 'startChat', id: 'prompt-a' });
+		assert.equal(fixture.getStoredPrompt()?.status, 'draft');
+		assert.deepEqual(fixture.getStoredPrompt()?.chatSessionIds, ['old-copilot']);
+		assert.equal(fixture.counts().cleared, 0);
+		assert.ok(fixture.messages.some(message => message.type === 'error' && message.message?.includes('OpenCode unavailable')));
+	} finally { fixture.manager.disposeAll(); }
+});
+
+/** Открытие и Stop не выполняют команды встроенного Copilot, даже при наличии его старой привязки. */
+test('OpenCode manager routes open, stop and timing actions without touching old Copilot sessions', async () => {
+	const fixture = await createOpenCodeManager();
+	try {
+		for (const type of ['openChat', 'openChatPanel', 'stopChat', 'recalcImplementingTime']) {
+			await fixture.send({ type, id: 'prompt-a', silent: true });
+		}
+		assert.equal(fixture.counts().opened, 2);
+		assert.equal(fixture.requests.length, 0);
+		assert.deepEqual(fixture.getStoredPrompt()?.chatSessionIds, ['old-copilot']);
+		assert.equal(vscodeCommandCalls.some(call => call.id.startsWith('workbench.action.chat.')), false);
+		assert.ok(fixture.messages.some(message => message.message?.includes('терминале OpenCode CLI')));
+	} finally { fixture.manager.disposeAll(); }
+});
 
 /** Не считает prefill отправкой и не удаляет план, включая случай прежней сессии Copilot. */
 test('Claude start prefills the native sidebar and preserves plan and Copilot history', async () => {

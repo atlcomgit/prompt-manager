@@ -33,8 +33,8 @@ Prompt Manager turns that mess into one repeatable workflow.
 Работа с промптами обычно распадается на вкладки чата, заметки, ветки и разрозненные отчёты.
 Prompt Manager собирает это в один понятный и управляемый процесс.
 
-Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integration) for the chat workflow.
-Поддержка Github Copilot Chat, Codex, Kilo Code и Claude Code (частичная интеграция) для работы с чатом.
+Support: Github Copilot Chat, Codex, Kilo Code, OpenCode CLI, and Claude Code (partial integration).
+Поддержка Github Copilot Chat, Codex, Kilo Code, OpenCode CLI и Claude Code (частичная интеграция).
 
 ## Why Teams Install It / Зачем это ставят
 
@@ -99,6 +99,23 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
   в [правилах подготовки Codex](docs/rules/Чаты/Подготовка_Codex_без_номера.md).
   Kilo после Add to Context не ожидает дополнительной записи в буфер обмена браузера.
   В Copilot шаг открытия заканчивается после принятия команды; поиск сессии показывается шагом привязки.
+- **OpenCode CLI.** Select `Opencode CLI` in the Agent section to open a new interactive terminal and chat.
+  Requires OpenCode 2.1.4+ on the Linux extension host, Bash, and terminal shell integration.
+  Native file mentions carry the context; automatic sending has its own setting, disabled by default.
+  **OpenCode CLI.** Выберите `Opencode CLI` в секции «Агент»: запуск откроет новый терминал и новый чат
+  с текстом задачи и файлами. На Linux-хосте расширения нужны `opencode` версии 2.1.4 или новее в ветке 2,
+  Bash и включённая настройка `terminal.integrated.shellIntegration.enabled`.
+  По умолчанию остаётся редактируемый черновик; отдельный флаг включает однократную автоматическую отправку.
+  Модель и разрешения OpenCode не меняются, Plan/Agent передаются в тексте. Xdotool и буфер обмена не нужны,
+  в Tunnel терминал запускается на удалённом хосте. «Перейти в чат» возвращает в терминал этого промпта;
+  после закрытия терминала запустите новый чат. Останавливайте запрос в самом OpenCode.
+  План сохраняется до подтверждения приёма полного запроса с файлами; неподтверждённая отправка не повторяется.
+  Установленный Claude Code не перехватывает канал передачи; при ошибке подготовки терминал остаётся открытым
+  и сообщение показывает этап, на котором остановился запуск.
+  Длинный текст OpenCode может показать меткой `[Pasted ~N lines]`: нажмите на неё, чтобы раскрыть текст в поле.
+  Каждый файл и текст промпта начинаются с новой строки. Суффикс `#1` у файла — штатная метка начала с первой строки.
+  Поддерживается полная вставка без свёртки; после нового запуска отправка из старого терминала не очищает новый план.
+  Подробнее: [правила OpenCode CLI](docs/rules/Чаты/OpenCode_CLI_171.md).
 - **Claude Code (partial integration).** Opens prepared text in the installed Claude extension's sidebar for manual sending;
   Agent/Plan are text instructions, not changes to Claude's model or permissions. Session binding uses an exact UUID
   marker after manual sending. Xdotool auto-send is safety-blocked even when enabled because composer focus cannot
@@ -117,6 +134,8 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
   Both orders and all widget preferences are shared; only Main section expansion is global.
   На обеих вкладках разделы можно переставлять за ручку в шапке, стрелками или Home/End; Escape отменяет перенос.
   Последняя активная вкладка сохраняется отдельно для каждого промпта сразу при переключении.
+  В vscode.dev через туннель дубли страниц промпта удаляются также после восстановления вкладок VS Code.
+  После локальной сборки с синхронизацией расширения выполните `Developer: Reload Window`, чтобы загрузить исправление.
   Кнопки смены статуса находятся в отдельном блоке «Статусы». На вкладке «Процесс» прежняя логика раскрытия
   плана, отчёта и заметок сохраняется; глобально меняется только порядок разделов.
   Настройки интерфейса хранятся в пользовательских настройках VS Code. Для передачи между Desktop,
@@ -179,8 +198,8 @@ Support: Github Copilot Chat, Codex, Kilo Code, and Claude Code (partial integra
 - Git-enabled workspace folders for branch-aware features
 - Optional: enable `Prompt Manager: AI Enabled`, Project Memory, and CodeMap in settings when you want built-in AI automation, repository analysis, and semantic recall
 
-VS Code Web is not supported right now because the extension ships as a desktop Node-based extension.
-Веб-версия VS Code пока не поддерживается.
+The extension requires a Node.js extension host. Browser-only VS Code without a remote host is not supported.
+Для VS Code Web нужен подключённый Node.js Extension Host; в Tunnel OpenCode CLI запускается на Linux-хосте.
 
 ## Prompts Stay With The Repo / Где живут промпты
 

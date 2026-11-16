@@ -8,6 +8,17 @@ import {
 	normalizePromptExternalChangedAt,
 } from '../src/utils/promptExternalSync.js';
 
+/** Синхронизация OpenCode сохраняет более новое локальное выключение автозапуска. */
+test('OpenCode target syncs while a newer explicit auto-start disable is preserved', () => {
+	const current = makePrompt({ autoStartOpenCodeChat: false });
+	const external = makePrompt({ chatTarget: 'opencode-cli', autoStartOpenCodeChat: true });
+	const merged = mergePromptExternalConfig(current, external, { autoStartOpenCodeChat: 200 }, 100);
+	assert.equal(merged.mergedPrompt.chatTarget, 'opencode-cli');
+	assert.equal(merged.mergedPrompt.autoStartOpenCodeChat, false);
+	assert.ok(merged.preservedLocalFields.includes('autoStartOpenCodeChat'));
+	assert.equal(applyPromptConfigSnapshotToPrompt(current, external).autoStartOpenCodeChat, true);
+});
+
 /** Создает полный промпт для сценариев внешней синхронизации. */
 function makePrompt(overrides: Partial<Prompt> = {}): Prompt {
 	return {

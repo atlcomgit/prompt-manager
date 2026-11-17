@@ -353,46 +353,19 @@ export class MemoryPanelManager {
 		currentPanel?.webview.postMessage(message);
 	}
 
-	/** Re-broadcast Copilot model options after Copilot account changes settle in VS Code state. */
-	refreshAvailableModelsAfterCopilotAccountSwitch(): void {
+	/** Обновляет открытую панель после прогрева или смены общего каталога без повторных таймеров. */
+	refreshAvailableModels(): void {
 		const panel = currentPanel;
 		if (!panel) {
 			return;
 		}
 
-		const delaysMs = [0, 1500, 5000];
-		let lastModels: MemoryAvailableModel[] | null = null;
-
-		for (const delayMs of delaysMs) {
-			const refreshTimer = setTimeout(() => {
-				void (async () => {
-					if (currentPanel !== panel) {
-						return;
-					}
-
-					const refreshedModels = await this.getAvailableModels();
-					if (currentPanel !== panel) {
-						return;
-					}
-
-					if (lastModels && this.areAvailableModelsEqual(lastModels, refreshedModels)) {
-						return;
-					}
-
-					lastModels = [...refreshedModels];
-					try {
-						await panel.webview.postMessage({
-							type: 'memoryAvailableModels',
-							models: refreshedModels,
-						} as MemoryExtensionToWebviewMessage);
-					} catch {
-						// panel/webview might be disposed; ignore
-					}
-				})();
-			}, delayMs);
-			const maybeNodeTimer = refreshTimer as ReturnType<typeof setTimeout> & { unref?: () => void };
-			maybeNodeTimer.unref?.();
-		}
+		void (async () => {
+			const models = await this.getAvailableModels();
+			if (currentPanel === panel) {
+				await panel.webview.postMessage({ type: 'memoryAvailableModels', models } satisfies MemoryExtensionToWebviewMessage);
+			}
+		})().catch(error => console.error('[PromptManager] memory model catalog broadcast failed:', error));
 	}
 
 	/** Handle incoming messages from the webview */
@@ -831,18 +804,6 @@ export class MemoryPanelManager {
 		return workspaceFolders.find(folder => folder.name === repository)
 			|| workspaceFolders.find(folder => path.basename(folder.uri.fsPath) === repository)
 			|| workspaceFolders[0];
-	}
-
-	/** Compare model lists without re-posting identical account-switch retries. */
-	private areAvailableModelsEqual(left: MemoryAvailableModel[], right: MemoryAvailableModel[]): boolean {
-		if (left.length !== right.length) {
-			return false;
-		}
-
-		return left.every((model, index) => {
-			const other = right[index];
-			return model.id === other?.id && model.name === other?.name;
-		});
 	}
 
 	/** Send initial data when webview becomes ready */

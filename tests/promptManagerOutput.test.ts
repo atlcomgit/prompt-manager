@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
 
-/** Проверяет фактический output-фильтр: замеры доступны с debugLogging, а обычные строки подавляются. */
-test('commit generation timings reach output only with debug logging enabled', async () => {
+/** Проверяет фактический фильтр стадий генерации и кеша: debugLogging обязателен для обоих путей записи. */
+test('commit generation and model catalog timings reach output only with debug logging enabled', async () => {
 	const originalLoad = (Module as any)._load;
 	const lines: string[] = [];
 	let enabled = false;
@@ -25,14 +25,19 @@ test('commit generation timings reach output only with debug logging enabled', a
 			'[git-service] generateCommitMessage.kilo.skipped {"reason":"inactive"}',
 			'[git-service] generateCommitMessage.copilot.timing {"phase":"cancel-deadline","durationMs":30000}',
 			'[ai-request] label=generate-commit-message stage=selectModel phase=finish durationMs=1200',
+			'[ai-request] label=model-catalog result=loaded count=21 complete=true durationMs=1200',
+			'[ai-request] label=model-catalog result=cache-hit selector="vendor=copilot, id=gpt-6-luna" count=1',
+			'[ai-request] label=model-catalog result=unavailable',
 		];
 		try {
 			for (const event of events) { output.appendPromptManagerLog(event); }
+			for (const event of events) { output.getPromptManagerOutputChannel().appendLine(event); }
 			assert.deepEqual(lines, []);
 			enabled = true;
 			for (const event of events) { output.appendPromptManagerLog(event); }
+			for (const event of events) { output.getPromptManagerOutputChannel().appendLine(event); }
 			output.appendPromptManagerLog('unrelated verbose output');
-			assert.deepEqual(lines, events);
+			assert.deepEqual(lines, [...events, ...events]);
 		} finally {
 			output.disposePromptManagerOutputChannel();
 		}

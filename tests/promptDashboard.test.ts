@@ -19,6 +19,9 @@ import {
 	resolvePromptDashboardCacheState,
 	resolvePromptDashboardExpandRefreshTarget,
 	resolvePromptEditorLayout,
+	resolvePromptEditorFormWidthBounds,
+	resolvePromptEditorPanelSplitRatio,
+	clampPromptEditorFormWidth,
 	resolvePromptDashboardLayoutMode,
 	resolvePromptDashboardRequestMessageContext,
 	shouldReleasePromptDashboardProjectRequestOnNotice,
@@ -53,16 +56,63 @@ function createEmptyDockerWidget() {
 
 /** Форма сжимается раньше виджетов, а слишком узкий экран переходит к общей вертикальной прокрутке. */
 test('resolvePromptEditorLayout preserves both panels at every breakpoint', () => {
-	for (const width of [0, 300, 631]) {
+	for (const width of [0, 300, 637]) {
 		assert.deepEqual(resolvePromptEditorLayout(width), { stacked: true, formWidth: width });
 	}
-	for (const [width, formWidth] of [[632, 300], [633, 300], [671, 300], [672, 300], [673, 301],
-		[800, 428], [1119, 747], [1120, 748], [1211, 839], [1212, 840], [1213, 840], [1920, 840]]) {
+	for (const [width, formWidth] of [[638, 300], [639, 300], [677, 300], [678, 300], [679, 301],
+		[800, 422], [1119, 741], [1120, 742], [1217, 839], [1218, 840], [1219, 840], [1920, 840]]) {
 		assert.deepEqual(resolvePromptEditorLayout(width), { stacked: false, formWidth });
-		assert.ok(width - formWidth - 12 >= 320);
+		assert.ok(width - formWidth - 18 >= 320);
 	}
 	for (const invalid of [NaN, Infinity, -1]) {
 		assert.deepEqual(resolvePromptEditorLayout(invalid), { stacked: true, formWidth: 0 });
+	}
+});
+
+/** Ручная доля распределяет сумму ширин панелей, соблюдая минимумы и не ограничивая форму 840 px. */
+test('resolvePromptEditorLayout applies a manual split ratio within panel minimums', () => {
+	// При ширине страницы 1218 px сумма ширин панелей без промежутка 18 px равна 1200 px.
+	assert.deepEqual(resolvePromptEditorLayout(1218, 0.5), { stacked: false, formWidth: 600 });
+	assert.deepEqual(resolvePromptEditorLayout(1920, 0.75), { stacked: false, formWidth: 1427 });
+	assert.ok(resolvePromptEditorLayout(1920, 0.75).formWidth > 840);
+	// Крайние доли упираются в минимум формы и минимум правой панели.
+	assert.deepEqual(resolvePromptEditorLayout(1218, 0), { stacked: false, formWidth: 300 });
+	assert.deepEqual(resolvePromptEditorLayout(1218, 1), { stacked: false, formWidth: 880 });
+	for (const [width, formWidth] of [[638, 300], [639, 301], [640, 302]]) {
+		assert.deepEqual(resolvePromptEditorLayout(width, 1), { stacked: false, formWidth });
+		assert.ok(width - formWidth - 18 >= 320);
+	}
+	// Узкое окно остаётся вертикальным, а после расширения та же доля даёт прежнее соотношение.
+	assert.deepEqual(resolvePromptEditorLayout(637, 0.7), { stacked: true, formWidth: 637 });
+	assert.deepEqual(resolvePromptEditorLayout(1518, 0.7), { stacked: false, formWidth: 1050 });
+	// Отсутствие, сброс и некорректные значения сохраняют автоматический расчёт.
+	for (const ratio of [undefined, null, NaN, Infinity, -0.1, 1.5, '0.5' as unknown as number]) {
+		assert.deepEqual(resolvePromptEditorLayout(1218, ratio), resolvePromptEditorLayout(1218));
+	}
+});
+
+/** Границы ширины формы вырождаются на пороге 638 px и отсутствуют в вертикальной компоновке. */
+test('resolvePromptEditorFormWidthBounds returns null when stacked and a degenerate range at the threshold', () => {
+	assert.equal(resolvePromptEditorFormWidthBounds(637), null);
+	assert.equal(resolvePromptEditorFormWidthBounds(NaN), null);
+	assert.deepEqual(resolvePromptEditorFormWidthBounds(638), { available: 620, min: 300, max: 300 });
+	assert.deepEqual(resolvePromptEditorFormWidthBounds(1218), { available: 1200, min: 300, max: 880 });
+});
+
+/** Перевод ширины в долю ограничен минимумами и даёт ту же ширину при обратном расчёте. */
+test('resolvePromptEditorPanelSplitRatio round-trips form widths through the stored ratio', () => {
+	const bounds = resolvePromptEditorFormWidthBounds(1218)!;
+	assert.equal(resolvePromptEditorPanelSplitRatio(bounds, 600), 0.5);
+	assert.equal(resolvePromptEditorPanelSplitRatio(bounds, 10), 0.25);
+	assert.equal(resolvePromptEditorPanelSplitRatio(bounds, 5000), 0.7333);
+	assert.equal(clampPromptEditorFormWidth(bounds, NaN), 300);
+	assert.equal(clampPromptEditorFormWidth(bounds, 450.6), 451);
+	for (const pageWidth of [639, 900, 1218, 1920, 3840]) {
+		const pageBounds = resolvePromptEditorFormWidthBounds(pageWidth)!;
+		for (let formWidth = pageBounds.min; formWidth <= pageBounds.max; formWidth += 7) {
+			const ratio = resolvePromptEditorPanelSplitRatio(pageBounds, formWidth);
+			assert.equal(resolvePromptEditorLayout(pageWidth, ratio).formWidth, formWidth);
+		}
 	}
 });
 

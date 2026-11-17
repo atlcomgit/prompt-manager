@@ -4,7 +4,8 @@ import { normalizePromptEditorLayout, type PromptUiSettingsSnapshot } from '../s
 import { normalizePromptDashboardLayouts } from '../src/types/promptDashboard.js';
 import { normalizePromptDashboardPreferences } from '../src/types/promptDashboardPreferences.js';
 import {
-	appendPendingPromptUiEdit, rejectPendingPromptUiEdit, rebasePromptUiSettings, type PendingPromptUiEdit,
+	appendPendingPromptUiEdit, planPromptEditorSplitRatioSave, rejectPendingPromptUiEdit, rebasePromptUiSettings,
+	resolvePromptEditorSplitRatioSave, type PendingPromptUiEdit,
 } from '../src/utils/promptUiSettings.js';
 import { applyUiSettingsChanges } from '../src/utils/uiSettingsPatch.js';
 
@@ -177,4 +178,77 @@ test('UI settings rapid retries preserve latest field ownership through late res
 	assert.equal(visible.dashboardPreferences!.docker.search, 'unsaved');
 	assert.deepEqual(edits[0].supersededPaths, [['dashboardPreferences', 'todos', 'search']]);
 	assert.deepEqual(edits.map(edit => edit.requestId), ['A']);
+});
+
+/** Доля ширины и порядок разделов — независимые поля: внешние и локальные правки не стирают друг друга. */
+test('UI settings keep a pending panel split ratio independent from section order and external updates', () => {
+	const base = snapshot();
+	const resized = structuredClone(base);
+	resized.editorLayout.panelSplitRatio = 0.6;
+	let edits = appendPendingPromptUiEdit([], { requestId: 'ratio', area: 'editor', base, next: resized });
+	const reordered = structuredClone(resized);
+	reordered.editorLayout.main.reverse();
+	edits = appendPendingPromptUiEdit(edits, { requestId: 'order', area: 'editor', base: resized, next: reordered });
+	assert.equal(edits.length, 2);
+	const external = structuredClone(base);
+	external.dashboardPreferences!.todos.search = 'other window';
+	const rebased = rebasePromptUiSettings(external, edits);
+	assert.equal(rebased.editorLayout.panelSplitRatio, 0.6);
+	assert.deepEqual(rebased.editorLayout.main, reordered.editorLayout.main);
+	assert.equal(rebased.dashboardPreferences!.todos.search, 'other window');
+	// После подтверждения обеих записей ширина из другого окна применяется без локального отката.
+	const fromOtherWindow = structuredClone(reordered);
+	fromOtherWindow.editorLayout.panelSplitRatio = null;
+	assert.equal(rebasePromptUiSettings(fromOtherWindow, []).editorLayout.panelSplitRatio, null);
+});
+
+/** Совпадающее значение не пишется; повтор отклонённого значения получает базу ошибочной правки. */
+test('UI settings retry a rejected panel split ratio with the base of the failed edit', () => {
+	const confirmed = snapshot();
+	confirmed.editorLayout.panelSplitRatio = 0.6;
+	assert.deepEqual(resolvePromptEditorSplitRatioSave([], confirmed, 0.6), { save: false });
+	assert.deepEqual(resolvePromptEditorSplitRatioSave([], confirmed, 0.45), { save: true });
+
+	const reset = structuredClone(confirmed);
+	reset.editorLayout.panelSplitRatio = null;
+	let edits = appendPendingPromptUiEdit([], { requestId: 'reset', area: 'editor', base: confirmed, next: reset });
+	assert.deepEqual(resolvePromptEditorSplitRatioSave(edits, reset, null), { save: false });
+	edits = rejectPendingPromptUiEdit(edits, 'reset');
+	const visible = rebasePromptUiSettings(confirmed, edits);
+	assert.equal(visible.editorLayout.panelSplitRatio, null);
+
+	const decision = resolvePromptEditorSplitRatioSave(edits, visible, null);
+	assert.equal(decision.save, true);
+	const retryBase = decision.save ? decision.base : undefined;
+	assert.equal(retryBase?.editorLayout.panelSplitRatio, 0.6);
+	assert.deepEqual(retryBase?.editorLayout.main, visible.editorLayout.main);
+	// Повтор вытесняет ошибочную правку, а его подтверждение очищает очередь.
+	edits = appendPendingPromptUiEdit(edits, { requestId: 'retry', area: 'editor', base: retryBase!, next: visible });
+	assert.deepEqual(edits.map(edit => edit.requestId), ['retry']);
+	edits = edits.filter(edit => edit.requestId !== 'retry');
+	assert.equal(rebasePromptUiSettings(reset, edits).editorLayout.panelSplitRatio, null);
+	// Ошибка другого значения не разрешает повтор текущего видимого значения.
+	const failedOther = rejectPendingPromptUiEdit(appendPendingPromptUiEdit([],
+		{ requestId: 'other', area: 'editor', base: confirmed, next: reset }), 'other');
+	assert.deepEqual(resolvePromptEditorSplitRatioSave(failedOther, confirmed, 0.6), { save: false });
+});
+
+/** План записи переносит порядок и раскрытие формы, а повтор отклонённого значения получает базу ошибки. */
+test('planPromptEditorSplitRatioSave keeps other layout fields and plans retries of rejected values', () => {
+	const current = snapshot();
+	current.editorLayout = normalizePromptEditorLayout({ main: ['files'], mainExpandedSections: { basic: false },
+		panelSplitRatio: 0.5 });
+	const plan = planPromptEditorSplitRatioSave([], current, 0.65);
+	assert.deepEqual(plan, { layout: { ...current.editorLayout, panelSplitRatio: 0.65 } });
+	assert.equal(planPromptEditorSplitRatioSave([], current, 0.5), null);
+	assert.deepEqual(planPromptEditorSplitRatioSave([], current, null)?.layout.panelSplitRatio, null);
+
+	const rejected = structuredClone(current);
+	rejected.editorLayout.panelSplitRatio = 0.65;
+	const edits = rejectPendingPromptUiEdit(appendPendingPromptUiEdit([],
+		{ requestId: 'ratio', area: 'editor', base: current, next: rejected }), 'ratio');
+	const retry = planPromptEditorSplitRatioSave(edits, rejected, 0.65);
+	assert.equal(retry?.layout.panelSplitRatio, 0.65);
+	assert.equal(retry?.base?.editorLayout.panelSplitRatio, 0.5);
+	assert.deepEqual(retry?.layout.main, current.editorLayout.main);
 });

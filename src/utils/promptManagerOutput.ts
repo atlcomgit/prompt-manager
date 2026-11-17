@@ -15,6 +15,8 @@ const CONSOLE_METHODS: ConsoleMethod[] = ['debug', 'info', 'log', 'warn', 'error
 const PROMPT_MANAGER_ERROR_MESSAGE_RE = /\b(error|failed|exception)\b/i;
 /** Точечные замеры генерации разрешены только при включённом debugLogging. */
 const COMMIT_GENERATION_DEBUG_MESSAGE_RE = /(?:\[report-debug\]\s+gitOverlay\.commitMessage\.timing\b|generateCommitMessage\.(?:context|delivery|kilo\.skipped|copilot\.timing)\b|\[ai-request\]\s+label=generate-commit-message\b)/;
+/** Прогрев и попадания в общий кеш моделей проходят тот же debug-фильтр; тест — promptManagerOutput.test.ts. */
+const MODEL_CATALOG_DEBUG_MESSAGE_RE = /\[ai-request\]\s+label=model-catalog\b/;
 const PROMPT_MANAGER_TASK_DEBUG_MESSAGE_RE = /\[report-debug\]\s+(?:webview\.editor-layout\.sectionHeights\.measured|webview\.editor-report\.mainRichText\.(?:autoResize\.heightChanged|pageScroll\.(?:snapshot|restore)|blur\.(?:defer|cancelDeferred|commitDeferred)|text\.syncFromSourceSurface)|webview\.editor-dashboard\.[^\s]+|promptDashboard\.[^\s]+)\b/;
 
 export const PROMPT_MANAGER_OUTPUT_CHANNEL_NAME = 'Prompt Manager';
@@ -41,7 +43,9 @@ function shouldWritePromptManagerLogMessage(message: string): boolean {
 		return false;
 	}
 
-	return PROMPT_MANAGER_TASK_DEBUG_MESSAGE_RE.test(message) || COMMIT_GENERATION_DEBUG_MESSAGE_RE.test(message);
+	return PROMPT_MANAGER_TASK_DEBUG_MESSAGE_RE.test(message)
+		|| COMMIT_GENERATION_DEBUG_MESSAGE_RE.test(message)
+		|| MODEL_CATALOG_DEBUG_MESSAGE_RE.test(message);
 }
 
 export function getPromptManagerOutputChannel(): vscode.OutputChannel {

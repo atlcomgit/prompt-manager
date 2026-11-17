@@ -15,7 +15,9 @@ import {
 	subscribePromptDashboardDragEvents,
 	normalizePromptDashboardDockerWidgetState,
 	readPromptDashboardInitialPreferences,
+	createPromptDashboardLayoutModeReporter,
 	observePromptDashboardDockerMetrics,
+	observePromptDashboardLayoutMode,
 	matchesDockerContainerStatusFilter,
 	reorderPromptDashboardSections,
 	resolveBranchDraftRefreshProjects,
@@ -3495,4 +3497,80 @@ test('PromptDashboard renders one ordered column with layout-specific collapsed 
 	assert.ok(markup.indexOf('data-pm-dashboard-section="activity"') < markup.indexOf('data-pm-dashboard-section="status"'));
 	assert.doesNotMatch(markup, /aria-label="Обновить виджет: Статус промпта"/);
 	assert.match(markup, /aria-label="Обновить виджет: Активные промпты"/);
+});
+
+/** Подменный ResizeObserver: тест сам вызывает callback и проверяет отключение наблюдения. */
+function createLayoutModeObserverEnvironment(initialWidth: number) {
+	const grid = { width: initialWidth, getBoundingClientRect() { return { width: grid.width } as DOMRect; } };
+	const observers: { callback: () => void; disconnected: boolean }[] = [];
+	class FakeResizeObserver {
+		private readonly entry: { callback: () => void; disconnected: boolean };
+		constructor(callback: ResizeObserverCallback) {
+			this.entry = { callback: () => callback([], this as unknown as ResizeObserver), disconnected: false };
+			observers.push(this.entry);
+		}
+		observe(): void { /* Наблюдение моделируется ручным вызовом callback. */ }
+		disconnect(): void { this.entry.disconnected = true; }
+	}
+	const view = new EventTarget() as unknown as Pick<Window, 'addEventListener' | 'removeEventListener'>;
+	return { grid, observers, FakeResizeObserver, view };
+}
+
+/** Во время жеста разделителя сетка не измеряется; после него профиль сообщается один раз, затем только смены. */
+test('observePromptDashboardLayoutMode skips frozen grids and reports one mode after unfreezing', () => {
+	const env = createLayoutModeObserverEnvironment(500);
+	const modes: PromptDashboardLayoutMode[] = [];
+	const options = (frozen: boolean) => ({ frozen, onChange: (mode: PromptDashboardLayoutMode) => modes.push(mode),
+		view: env.view, ResizeObserverCtor: env.FakeResizeObserver });
+
+	const before = observePromptDashboardLayoutMode(env.grid, options(false));
+	assert.deepEqual(modes, ['single-column']);
+	env.observers[0].callback();
+	assert.deepEqual(modes, ['single-column']);
+	before();
+	assert.equal(env.observers[0].disconnected, true);
+
+	// Заморозка: ширина многократно пересекает порог 732 px без измерений и уведомлений.
+	const frozen = observePromptDashboardLayoutMode(env.grid, options(true));
+	for (const width of [800, 600, 900, 650]) {
+		env.grid.width = width;
+	}
+	frozen();
+	assert.equal(env.observers.length, 1);
+	assert.deepEqual(modes, ['single-column']);
+
+	env.grid.width = 900;
+	const after = observePromptDashboardLayoutMode(env.grid, options(false));
+	assert.deepEqual(modes, ['single-column', 'two-columns']);
+	env.observers[1].callback();
+	env.grid.width = 0;
+	env.observers[1].callback();
+	env.grid.width = 640;
+	env.observers[1].callback();
+	assert.deepEqual(modes, ['single-column', 'two-columns', 'single-column']);
+	after();
+	assert.equal(env.observers[1].disconnected, true);
+});
+
+/** Без ResizeObserver используется resize окна, и подписка снимается при завершении. */
+test('observePromptDashboardLayoutMode falls back to window resize events', () => {
+	const env = createLayoutModeObserverEnvironment(900);
+	const modes: PromptDashboardLayoutMode[] = [];
+	const stop = observePromptDashboardLayoutMode(env.grid, { frozen: false, onChange: mode => modes.push(mode), view: env.view });
+	env.grid.width = 500;
+	(env.view as unknown as EventTarget).dispatchEvent(new Event('resize'));
+	stop();
+	env.grid.width = 900;
+	(env.view as unknown as EventTarget).dispatchEvent(new Event('resize'));
+	assert.deepEqual(modes, ['two-columns', 'single-column']);
+});
+
+/** Повторный замер того же профиля после жеста разделителя не отправляет host второе сообщение. */
+test('createPromptDashboardLayoutModeReporter reports only profile changes', () => {
+	const reported: PromptDashboardLayoutMode[] = [];
+	const report = createPromptDashboardLayoutModeReporter(mode => reported.push(mode));
+	for (const mode of ['single-column', 'single-column', 'two-columns', 'two-columns', 'single-column'] as const) {
+		report(mode);
+	}
+	assert.deepEqual(reported, ['single-column', 'two-columns', 'single-column']);
 });

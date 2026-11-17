@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
 	normalizePromptEditorLayout,
 	normalizePromptEditorMainExpanded,
+	normalizePromptEditorPanelSplitRatio,
 	normalizePromptEditorSectionOrder,
 	PROMPT_EDITOR_TAB_SECTIONS,
 } from '../src/types/promptEditorLayout.js';
@@ -58,4 +59,17 @@ test('normalizePromptEditorLayout copies supplied section order and main expansi
 	assert.equal(input.main[0], 'files');
 	assert.deepEqual(input.process, PROMPT_EDITOR_TAB_SECTIONS.process);
 	assert.equal(input.mainExpandedSections?.basic, false);
+});
+
+/** Доля ширины сохраняет отличие отсутствия от сброса, округляется и отклоняет некорректные значения. */
+test('normalizePromptEditorLayout keeps panel split ratio absence, reset and valid rounded values', () => {
+	assert.equal(Object.hasOwn(normalizePromptEditorLayout({ main: ['files'] }), 'panelSplitRatio'), false);
+	assert.equal(normalizePromptEditorLayout({ panelSplitRatio: null }).panelSplitRatio, null);
+	assert.equal(normalizePromptEditorLayout({ panelSplitRatio: 0.123_456 }).panelSplitRatio, 0.1235);
+	for (const valid of [0, 0.5, 1]) {
+		assert.equal(normalizePromptEditorPanelSplitRatio(valid), valid);
+	}
+	for (const invalid of [NaN, Infinity, -Infinity, -0.01, 1.01, '0.5', true, {}, []]) {
+		assert.equal(normalizePromptEditorPanelSplitRatio(invalid), null);
+	}
 });

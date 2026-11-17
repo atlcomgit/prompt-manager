@@ -1,4 +1,4 @@
-import type { PromptUiSettingsSnapshot } from '../types/promptEditorLayout.js';
+import { normalizePromptEditorLayout, type PromptEditorLayout, type PromptUiSettingsSnapshot } from '../types/promptEditorLayout.js';
 import { applyUiSettingsChanges } from './uiSettingsPatch.js';
 
 /** Локальная правка остаётся видимой до подтверждения; ошибка допускает повтор того же действия. */
@@ -96,6 +96,53 @@ function restorePath(target: unknown, source: unknown, path: readonly string[]):
 		target[key] = {};
 	}
 	restorePath(target[key], hasSource ? source[key] : undefined, path.slice(1));
+}
+
+/** Решение о записи доли ширины: base задаётся только для повтора значения, отклонённого host. */
+export type PromptEditorSplitRatioSaveDecision =
+	| { save: false }
+	| { save: true; base?: PromptUiSettingsSnapshot };
+
+/**
+ * Определяет, нужна ли запись доли ширины. Совпадение с видимым значением ничего не пишет, кроме повтора
+ * отклонённой записи: тогда база берётся из ошибочной правки, чтобы host и очередь увидели изменение.
+ * Тесты: promptUiSettings.test.ts.
+ */
+export function resolvePromptEditorSplitRatioSave(
+	edits: readonly PendingPromptUiEdit[],
+	current: PromptUiSettingsSnapshot,
+	ratio: number | null,
+): PromptEditorSplitRatioSaveDecision {
+	if ((current.editorLayout.panelSplitRatio ?? null) !== ratio) {
+		return { save: true };
+	}
+	const failed = [...edits].reverse().find(edit => edit.failed
+		&& (edit.base.editorLayout.panelSplitRatio ?? null) !== (edit.next.editorLayout.panelSplitRatio ?? null)
+		&& (edit.next.editorLayout.panelSplitRatio ?? null) === ratio);
+	if (!failed) {
+		return { save: false };
+	}
+	const base = structuredClone(current);
+	base.editorLayout = { ...base.editorLayout, panelSplitRatio: failed.base.editorLayout.panelSplitRatio ?? null };
+	return { save: true, base };
+}
+
+/**
+ * План записи доли ширины для EditorApp: макет формы с новой долей и база повтора; null — запись не нужна.
+ * Остальные поля макета (порядок и раскрытие разделов) переносятся из видимого снимка без изменений.
+ * Тесты: promptUiSettings.test.ts.
+ */
+export function planPromptEditorSplitRatioSave(
+	edits: readonly PendingPromptUiEdit[],
+	current: PromptUiSettingsSnapshot,
+	ratio: number | null,
+): { layout: PromptEditorLayout; base?: PromptUiSettingsSnapshot } | null {
+	const decision = resolvePromptEditorSplitRatioSave(edits, current, ratio);
+	if (!decision.save) {
+		return null;
+	}
+	const layout = normalizePromptEditorLayout({ ...current.editorLayout, panelSplitRatio: ratio });
+	return decision.base ? { layout, base: decision.base } : { layout };
 }
 
 /** Внешний снимок обновляет незатронутые поля, сохраняя локальные правки и не повторяя запись. */

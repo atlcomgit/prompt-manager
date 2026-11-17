@@ -62,6 +62,13 @@ type CachedSelectedModelEntry = {
 	expiresAtMs: number;
 };
 
+/** Общий снимок API: неполный/пустой результат допускает повтор, полный живёт до события изменения. */
+type ChatModelCatalog = {
+	models: vscode.LanguageModelChat[];
+	complete: boolean;
+	retryAtMs: number;
+};
+
 export type ChatModelApplyStatus =
 	| 'applied'
 	| 'model-not-found'
@@ -175,12 +182,57 @@ export class AiService {
 	private resolvedStateDbPath: string | null | undefined;
 	private readonly stateDbItemCache = new Map<string, { fingerprint: string; items: Map<string, string> }>();
 	private readonly selectedModelCache = new Map<string, CachedSelectedModelEntry>();
+	/** Один каталог на Extension Host; поколение запрещает публикацию после смены аккаунта или dispose. */
+	private modelCatalog?: ChatModelCatalog;
+	private modelCatalogLoad?: Promise<void>;
+	private modelCatalogGeneration = 0;
+	private modelCatalogDisposed = false;
+	private onModelCatalogLoaded?: () => void;
+	private readonly modelCatalogSubscriptions: vscode.Disposable[] = [];
+	/** Ограниченные повторы нужны, когда провайдер ещё регистрируется во время старта VS Code. */
+	private static readonly MODEL_CATALOG_RETRY_DELAYS_MS = [1500, 5000];
+	private modelCatalogRetry?: ReturnType<typeof setTimeout>;
+	private modelCatalogRetryCount = 0;
 	private readonly output = getPromptManagerOutputChannel();
 
 	private modelSelector: vscode.LanguageModelChatSelector = {
 		vendor: 'copilot',
 		family: DEFAULT_COPILOT_MODEL_FAMILY,
 	};
+
+	/** Запускает общий прогрев без ожидания в activate; жизненный цикл проверяет tests/aiService.test.ts. */
+	initializeModelCatalog(onLoaded: () => void): void {
+		if (this.onModelCatalogLoaded || this.modelCatalogDisposed) {
+			return;
+		}
+		this.onModelCatalogLoaded = onLoaded;
+		this.modelCatalogSubscriptions.push(
+			vscode.lm.onDidChangeChatModels(() => this.clearCopilotModelCaches()),
+			vscode.authentication.onDidChangeSessions(event => {
+				if (event.provider.id === 'github' || event.provider.id === 'github-enterprise') {
+					this.clearCopilotModelCaches();
+				}
+			}),
+		);
+		this.warmModelCatalog();
+	}
+
+	/** Фоновая загрузка не должна превращать отказ провайдера в необработанный Promise. */
+	private warmModelCatalog(): void {
+		void this.selectUserFacingChatModels().catch(() => {
+			this.logAiRequest('label=model-catalog result=warmup-error');
+		});
+	}
+
+	/** Освобождает подписки и таймер; уже начатый RPC нельзя отменить, но его результат будет отброшен. */
+	dispose(): void {
+		this.modelCatalogDisposed = true;
+		this.onModelCatalogLoaded = undefined;
+		for (const subscription of this.modelCatalogSubscriptions.splice(0)) {
+			subscription.dispose();
+		}
+		this.clearCopilotModelCaches();
+	}
 
 	private getImprovePromptInstructions(): string[] {
 		const configured = vscode.workspace
@@ -363,7 +415,10 @@ export class AiService {
 		return this.chat(systemPrompt, userPrompt, fallback, 'generate-implementation-report', 'AiService.generateImplementationReport');
 	}
 
-	/** Генерирует commit с правилами выбранного проекта и снимком задачи; проверки — aiService.test.ts. */
+	/**
+	 * Генерирует commit с правилами проекта и снимком задачи; проверки — aiService.test.ts.
+	 * Без ответа LM возвращает пустую строку для следующего генератора; ошибка файла инструкций пробрасывается.
+	 */
 	async generateCommitMessage(input: {
 		projectName?: string;
 		projectPath?: string;
@@ -373,9 +428,8 @@ export class AiService {
 	}): Promise<string> {
 		// Выключенный AI не читает файлы инструкций и не запускает выбор модели.
 		const locale = vscode.env.language;
-		const fallback = locale.toLowerCase().startsWith('ru') ? 'Обновить изменения' : 'Update changes';
 		if (!areInternalAiFeaturesEnabled()) {
-			return fallback;
+			return '';
 		}
 		const commitInstructions = await this.measureAiStage('generate-commit-message', 'instructions', () =>
 			this.getCommitMessageInstructions(input.projectPath)
@@ -412,7 +466,7 @@ export class AiService {
 		return this.chat(
 			systemPromptParts.join(' '),
 			userPrompt,
-			fallback,
+			'',
 			'generate-commit-message',
 			'AiService.generateCommitMessage',
 		);
@@ -878,12 +932,18 @@ export class AiService {
 	): Promise<string> {
 		const requestLabel = options?.requestLabel || 'generic-chat';
 		const callerMethod = options?.callerMethod || `AiService.${requestLabel}`;
-		/** Skip internal AI flows early when the extension-level AI toggle is disabled. */
+		// После dispose не обращаемся ни к моделям, ни к уже закрываемому output channel.
+		if (this.modelCatalogDisposed) {
+			return fallback;
+		}
+		/** Выключенный внутренний AI не отправляет запросы, даже если каталог прогрет для выбора чата. */
 		if (!areInternalAiFeaturesEnabled()) {
 			this.logAiRequest(`label=${requestLabel} result=disabled-by-setting selector="${this.formatSelectorForLog(selector)}"`);
 			return fallback;
 		}
 		const selectorCacheKey = this.getSelectorCacheKey(selector);
+		// Смена аккаунта во время выбора не должна отправить запрос через старый API-объект.
+		const modelGeneration = this.modelCatalogGeneration;
 		try {
 			const allowFreeCopilotFallback = options?.allowFreeCopilotFallback ?? true;
 			const cachedModel = this.getCachedSelectedModel(selector);
@@ -891,7 +951,10 @@ export class AiService {
 				this.logAiRequest(`label=${requestLabel} result=model-cache-hit selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(cachedModel)}"`);
 				return this.chatWithModel(cachedModel, systemPrompt, userPrompt, fallback, requestLabel, selector, callerMethod);
 			}
-			const [model] = await this.measureAiStage(requestLabel, 'selectModel', () => vscode.lm.selectChatModels(selector));
+			const [model] = await this.measureAiStage(requestLabel, 'selectModel', () => this.selectChatModels(selector));
+			if (modelGeneration !== this.modelCatalogGeneration) {
+				return this.chatWithSelector(selector, systemPrompt, userPrompt, fallback, options);
+			}
 			if (!model) {
 				this.selectedModelCache.delete(selectorCacheKey);
 				if (!allowFreeCopilotFallback) {
@@ -902,6 +965,9 @@ export class AiService {
 				const fallbackModel = await this.measureAiStage(requestLabel, 'freeFallback', () => (
 					this.selectFreeFallbackModel(selector, requestLabel)
 				));
+				if (modelGeneration !== this.modelCatalogGeneration) {
+					return this.chatWithSelector(selector, systemPrompt, userPrompt, fallback, options);
+				}
 				if (!fallbackModel) {
 					this.logAiRequest(`label=${requestLabel} result=no-free-model selector="${this.formatSelectorForLog(selector)}" fallback=free-only`);
 					return fallback;
@@ -955,6 +1021,11 @@ export class AiService {
 			return result.trim() || fallback;
 		} catch (err) {
 			this.selectedModelCache.delete(this.getSelectorCacheKey(selector));
+			// Удалённая модель больше не пригодна для следующих запросов даже без события от провайдера.
+			if (err instanceof Error && 'code' in err && err.code === 'NotFound'
+				&& this.modelCatalog?.models.includes(model)) {
+				this.clearCopilotModelCaches();
+			}
 			const message = err instanceof Error ? err.message : String(err);
 			this.logAiRequest(`label=${requestLabel} result=send-error selector="${this.formatSelectorForLog(selector)}" model="${this.formatModelForLog(model)}" error="${message}"`);
 			return fallback;
@@ -996,21 +1067,57 @@ export class AiService {
 		});
 	}
 
-	/** Reset Copilot model caches after an account or catalog change. */
+	/** Сбрасывает снимки и запускает один общий прогрев после изменения аккаунта или каталога. */
 	clearCopilotModelCaches(): void {
+		this.modelCatalogGeneration += 1;
+		this.modelCatalog = undefined;
+		clearTimeout(this.modelCatalogRetry);
+		this.modelCatalogRetry = undefined;
+		this.modelCatalogRetryCount = 0;
 		this.selectedModelCache.clear();
 		this.stateDbItemCache.clear();
 		this.resolvedStateDbPath = undefined;
+		if (this.onModelCatalogLoaded && !this.modelCatalogDisposed) {
+			this.warmModelCatalog();
+		}
 	}
 
-	/** Повторно использует один снимок LM API для проверки стоимости и выбора резервной модели. */
+	/**
+	 * Выбирает точный бесплатный id из общего снимка или адресно при холодном/неполном каталоге.
+	 * Полный резервный поиск также переиспользует снимок; проверки — aiService.test.ts.
+	 */
 	private async selectFreeFallbackModel(
 		selector: vscode.LanguageModelChatSelector,
 		requestLabel: string,
 	): Promise<vscode.LanguageModelChat | null> {
 		const requestedModel = String(selector.id || selector.family || '').trim();
+		/** Сохраняет приоритет запрошенной модели среди уже проверенных бесплатных кандидатов. */
+		const prioritize = (models: AvailableModelOption[]): AvailableModelOption[] => {
+			const preferred = requestedModel ? this.findBestAvailableModelMatch(models, requestedModel) : undefined;
+			return preferred ? [preferred, ...models.filter(model => model.id !== preferred.id)] : models;
+		};
+		// Пустой готовый список запрещает getAvailableFreeModels запрашивать весь LM-каталог.
+		const cachedFreeModels = await this.getAvailableFreeModels([], requestLabel);
+		for (const candidate of prioritize(cachedFreeModels)) {
+			this.logAiRequest(`label=${requestLabel} result=fallback-candidate id="${candidate.id}"`);
+			try {
+				const models = await this.measureAiStage(requestLabel, 'fallbackCandidate', () => (
+					this.selectChatModels({ vendor: 'copilot', id: candidate.id })
+				));
+				// Не подменяем бесплатный id похожей платной моделью или моделью другого провайдера.
+				const matched = models.find(model => model.vendor === 'copilot' && model.id === candidate.id);
+				if (matched) {
+					return matched;
+				}
+			} catch {
+				// Устаревший кандидат не должен лишать запрос остальных бесплатных моделей.
+				this.logAiRequest(`label=${requestLabel} result=fallback-candidate-unavailable id="${candidate.id}"`);
+			}
+		}
+
+		// При пустом/устаревшем локальном списке прежний путь может обнаружить новые доступные модели.
 		const allModels = await this.measureAiStage(requestLabel, 'fallbackModels', () => (
-			vscode.lm.selectChatModels({ vendor: 'copilot' })
+			this.selectChatModels({ vendor: 'copilot' })
 		));
 		if (allModels.length === 0) {
 			return null;
@@ -1021,15 +1128,8 @@ export class AiService {
 			return null;
 		}
 
-		const preferred = requestedModel
-			? this.findBestAvailableModelMatch(freeModels, requestedModel)
-			: undefined;
-		const candidates = preferred
-			? [preferred, ...freeModels.filter(model => model.id !== preferred.id)]
-			: freeModels;
-
-		for (const candidate of candidates) {
-			const matched = this.findBestModelMatch(allModels, candidate.id);
+		for (const candidate of prioritize(freeModels)) {
+			const matched = allModels.find(model => model.vendor === 'copilot' && model.id === candidate.id);
 			if (matched) {
 				return matched;
 			}
@@ -1095,9 +1195,24 @@ export class AiService {
 			.substring(0, 40) || `prompt-${Date.now()}`;
 	}
 
-	/** Get available language models */
+	/** Переиспользует LM-каталог, но применяет актуальные локальные visibility/pinned/recent к каждому списку. */
 	async getAvailableModels(): Promise<AvailableModelOption[]> {
-		const models = await this.selectUserFacingChatModels();
+		while (!this.modelCatalogDisposed) {
+			const generation = this.modelCatalogGeneration;
+			const models = await this.selectUserFacingChatModels();
+			if (generation !== this.modelCatalogGeneration) {
+				continue;
+			}
+			const options = await this.buildAvailableModels(models);
+			if (generation === this.modelCatalogGeneration) {
+				return options;
+			}
+		}
+		return [];
+	}
+
+	/** Строит пользовательскую проекцию снимка без повторного обращения к LM API. */
+	private async buildAvailableModels(models: vscode.LanguageModelChat[]): Promise<AvailableModelOption[]> {
 		const dbPath = await this.resolveStateDbPath();
 		const hiddenModelIds = dbPath
 			? await this.getHiddenUserFacingModelIds(dbPath)
@@ -1763,30 +1878,106 @@ export class AiService {
 		return vendor === 'copilot' || identifier.startsWith('copilot/');
 	}
 
-	/** Read the full chat-model catalog that the prompt-page picker should expose. */
+	/** Объединяет загрузки; после инвалидирования ждёт новый снимок, не публикуя запоздалый ответ. */
 	private async selectUserFacingChatModels(): Promise<vscode.LanguageModelChat[]> {
+		while (!this.modelCatalogDisposed) {
+			if (this.modelCatalog && Date.now() < this.modelCatalog.retryAtMs) {
+				return this.modelCatalog.models;
+			}
+			if (!this.modelCatalogLoad) {
+				const generation = this.modelCatalogGeneration;
+				this.modelCatalogLoad = this.loadModelCatalog(generation).finally(() => {
+					this.modelCatalogLoad = undefined;
+				});
+			}
+			await this.modelCatalogLoad;
+		}
+		return [];
+	}
+
+	/** Хранит только текущие API-объекты; пустой/ошибочный результат повторяется ограниченно в фоне. */
+	private async loadModelCatalog(generation: number): Promise<void> {
+		const startedAt = Date.now();
+		let models: vscode.LanguageModelChat[] = [];
+		let complete = true;
 		try {
-			return await vscode.lm.selectChatModels();
+			models = await vscode.lm.selectChatModels();
 		} catch {
+			if (generation !== this.modelCatalogGeneration || this.modelCatalogDisposed) {
+				return;
+			}
+			complete = false;
 			try {
-				return await vscode.lm.selectChatModels({ vendor: 'copilot' });
+				models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
 			} catch {
-				return [];
+				this.logAiRequest('label=model-catalog result=unavailable');
 			}
 		}
+		if (generation !== this.modelCatalogGeneration || this.modelCatalogDisposed) {
+			return;
+		}
+		const retryable = !complete || models.length === 0;
+		this.modelCatalog = {
+			models,
+			complete,
+			retryAtMs: retryable ? Date.now() + AiService.MODEL_CATALOG_RETRY_DELAYS_MS[0] : Infinity,
+		};
+		this.logAiRequest(`label=model-catalog result=loaded count=${models.length} complete=${complete} durationMs=${Date.now() - startedAt}`);
+		clearTimeout(this.modelCatalogRetry);
+		this.modelCatalogRetry = undefined;
+		if (retryable && this.onModelCatalogLoaded
+			&& this.modelCatalogRetryCount < AiService.MODEL_CATALOG_RETRY_DELAYS_MS.length) {
+			const delayMs = AiService.MODEL_CATALOG_RETRY_DELAYS_MS[this.modelCatalogRetryCount++];
+			this.modelCatalogRetry = setTimeout(() => this.warmModelCatalog(), delayMs);
+			this.modelCatalogRetry.unref?.();
+		} else if (!retryable) {
+			this.modelCatalogRetryCount = 0;
+		}
+		this.onModelCatalogLoaded?.();
+	}
+
+	/** Выбирает из прогретых объектов с точной семантикой селектора; холодный адресный путь сохранён. */
+	private async selectChatModels(selector: vscode.LanguageModelChatSelector): Promise<vscode.LanguageModelChat[]> {
+		if (this.modelCatalogDisposed) {
+			return [];
+		}
+		if (this.modelCatalog || this.modelCatalogLoad || this.onModelCatalogLoaded || (!selector.id && !selector.family)) {
+			const models = await this.selectUserFacingChatModels();
+			const matching = models.filter(model =>
+				(!selector.vendor || model.vendor === selector.vendor)
+				&& (!selector.id || model.id === selector.id)
+				&& (!selector.family || model.family === selector.family)
+				&& (!selector.version || model.version === selector.version));
+			if (matching.length > 0 || (this.modelCatalog?.complete && models.length > 0)
+				|| (!selector.id && !selector.family) || this.modelCatalogDisposed) {
+				this.logAiRequest(`label=model-catalog result=cache-hit selector="${this.formatSelectorForLog(selector)}" count=${matching.length}`);
+				return matching;
+			}
+		}
+		return vscode.lm.selectChatModels(selector);
 	}
 
 	/** При выборе fallback принимает готовый каталог, чтобы не повторять дорогой selectChatModels. */
 	async getAvailableFreeModels(knownModels?: vscode.LanguageModelChat[], requestLabel = 'free-models'): Promise<AvailableModelOption[]> {
-		let models = knownModels ?? [];
-		if (!knownModels) {
-			try {
-				models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-			} catch {
-				// При недоступном API список интерфейса может быть восстановлен из каталога VS Code.
+		while (!this.modelCatalogDisposed) {
+			const generation = this.modelCatalogGeneration;
+			const models = knownModels ?? await this.selectChatModels({ vendor: 'copilot' });
+			if (generation !== this.modelCatalogGeneration) {
+				continue;
+			}
+			const options = await this.buildAvailableFreeModels(models, requestLabel);
+			if (generation === this.modelCatalogGeneration) {
+				return options;
+			}
+			if (knownModels) {
+				return [];
 			}
 		}
+		return [];
+	}
 
+	/** Проверяет бесплатность по локальным метаданным; список API сам по себе не доказывает стоимость. */
+	private async buildAvailableFreeModels(models: vscode.LanguageModelChat[], requestLabel: string): Promise<AvailableModelOption[]> {
 		const dbPath = await this.measureAiStage(requestLabel, 'catalogPath', () => this.resolveStateDbPath());
 		if (dbPath) {
 			const controlFreeModels = await this.measureAiStage(requestLabel, 'catalogControl', () => (
@@ -2269,6 +2460,7 @@ export class AiService {
 			return this.resolvedStateDbPath;
 		}
 
+		const generation = this.modelCatalogGeneration;
 		const existing: string[] = [];
 		for (const candidate of this.getStateDbCandidates()) {
 			try {
@@ -2280,7 +2472,9 @@ export class AiService {
 		}
 
 		const chosen = await this.pickStateDbWithPickerState(existing);
-		this.resolvedStateDbPath = chosen;
+		if (generation === this.modelCatalogGeneration) {
+			this.resolvedStateDbPath = chosen;
+		}
 		return chosen;
 	}
 

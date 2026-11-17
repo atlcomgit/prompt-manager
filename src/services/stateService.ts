@@ -49,6 +49,7 @@ const PROMPT_TODOS_SETTING_FIELDS = ['search', 'selectedFileTypes'] as const;
 export const PROMPT_UI_SETTING_KEYS = [
 	'editor.sectionOrder.main', 'editor.sectionOrder.process',
 	...PROMPT_EDITOR_TAB_SECTIONS.main.map(section => `editor.mainExpandedSections.${section}`),
+	'editor.panelSplitRatio',
 	'dashboardLayouts.singleColumn.order', 'dashboardLayouts.twoColumns.order',
 	...['singleColumn', 'twoColumns'].flatMap(mode => PROMPT_DASHBOARD_SECTION_KEYS.map(
 		section => `dashboardLayouts.${mode}.collapsed.${section}`,
@@ -1112,7 +1113,7 @@ export class StateService {
 		}
 	}
 
-	/** Порядок глобален на обеих вкладках, раскрытие — только для main. */
+	/** Порядок глобален на обеих вкладках, раскрытие — только для main; доля ширины общая для всех промптов. */
 	getPromptEditorLayout(): PromptEditorLayout {
 		return normalizePromptEditorLayout({
 			main: this.readPromptUiSetting<PromptEditorLayout['main']>('editor.sectionOrder.main') ?? undefined,
@@ -1120,6 +1121,8 @@ export class StateService {
 			mainExpandedSections: this.readPromptUiFields<NonNullable<PromptEditorLayout['mainExpandedSections']>>(
 				'editor.mainExpandedSections', PROMPT_EDITOR_TAB_SECTIONS.main,
 			),
+			// Отсутствие ключа остаётся отсутствием, явный null — автоматической шириной после сброса.
+			panelSplitRatio: this.readPromptUiSetting<number>('editor.panelSplitRatio'),
 		});
 	}
 
@@ -1141,6 +1144,11 @@ export class StateService {
 			if (next.mainExpandedSections) {
 				await this.writePromptUiFields('editor.mainExpandedSections', PROMPT_EDITOR_TAB_SECTIONS.main,
 					next.mainExpandedSections, base?.mainExpandedSections);
+			}
+			// Старые сообщения без доли и чужие правки формы не сбрасывают выбранную ширину.
+			if (next.panelSplitRatio !== undefined
+				&& (!base || (base.panelSplitRatio ?? null) !== next.panelSplitRatio)) {
+				await this.writePromptUiSetting('editor.panelSplitRatio', next.panelSplitRatio);
 			}
 		}, source);
 	}

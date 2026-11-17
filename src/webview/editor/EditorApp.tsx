@@ -1,12 +1,12 @@
 import { SortableEditorSections, EditorSectionDragHandle } from './components/SortableEditorSections.js';
 import { normalizePromptEditorLayout, normalizePromptEditorMainExpanded, PROMPT_EDITOR_TAB_SECTIONS, type PromptEditorLayout, type PromptUiSettingsSnapshot } from '../../types/promptEditorLayout.js';
-import { appendPendingPromptUiEdit, rejectPendingPromptUiEdit, rebasePromptUiSettings, type PendingPromptUiEdit } from '../../utils/promptUiSettings.js';
+import { appendPendingPromptUiEdit, planPromptEditorSplitRatioSave, rejectPendingPromptUiEdit, rebasePromptUiSettings, type PendingPromptUiEdit } from '../../utils/promptUiSettings.js';
 import { getPromptStatusLabel } from '../shared/promptStatus.js';
 /**
  * Editor App — Main component for prompt configuration form
  */
 import React, { useState, useCallback, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
-import { unstable_batchedUpdates } from 'react-dom';
+import { flushSync, unstable_batchedUpdates } from 'react-dom';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { useT } from '../shared/i18n';
@@ -24,7 +24,8 @@ import { ChatMemoryBlock } from './components/ChatMemoryBlock';
 import { PromptVoiceOverlay } from './components/PromptVoiceOverlay';
 import { PromptVoiceQueueIndicator } from './components/PromptVoiceQueueIndicator';
 import { GitOverlay } from './components/GitOverlay';
-import { PromptDashboard, readPromptDashboardInitialPreferences, type PromptDashboardFilePatchRequest, type PromptDashboardTodoOpenRequest } from './components/PromptDashboard';
+import { PromptDashboard, createPromptDashboardLayoutModeReporter, readPromptDashboardInitialPreferences, type PromptDashboardFilePatchRequest, type PromptDashboardTodoOpenRequest } from './components/PromptDashboard';
+import { PromptPanelSplitter, applyPromptPanelResizeState } from './components/PromptPanelSplitter';
 import { EDITOR_WEBVIEW_ASSET_VERSION } from '../../constants/webview';
 import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
@@ -117,7 +118,7 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
-import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, PROMPT_EDITOR_FORM_MAX_WIDTH_PX, PROMPT_EDITOR_PANELS_GAP_PX, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptEditorLayout, resolvePromptDashboardRequestMessageContext, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardProjectRequestOnNotice, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
+import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, PROMPT_EDITOR_FORM_MAX_WIDTH_PX, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptEditorLayout, resolvePromptEditorPanelSplitRatio, type PromptEditorFormWidthBounds, resolvePromptDashboardRequestMessageContext, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardProjectRequestOnNotice, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
 import { normalizePromptDashboardPreferences, type PromptDashboardPreferences } from '../../types/promptDashboardPreferences.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
@@ -975,8 +976,13 @@ export const EditorApp: React.FC = () => {
     setDashboardPreferencesRevision(previous => previous + 1);
   }, []);
 
-  /** Новое действие вытесняет только пересекающиеся поля прежних правок, включая ещё ожидающие ответа. */
-  const registerPromptUiEdit = useCallback((area: string, next: PromptUiSettingsSnapshot): PendingPromptUiEdit => {
+  /**
+   * Новое действие вытесняет только пересекающиеся поля прежних правок, включая ещё ожидающие ответа.
+   * baseOverride используется для повтора отклонённого значения, чтобы поле снова считалось изменённым.
+   */
+  const registerPromptUiEdit = useCallback((
+    area: string, next: PromptUiSettingsSnapshot, baseOverride?: PromptUiSettingsSnapshot,
+  ): PendingPromptUiEdit => {
     // Первый явный жест переносит найденный localStorage до записи остальных настроек.
     if (legacyDashboardPreferencesPendingRef.current) {
       legacyDashboardPreferencesPendingRef.current = false;
@@ -990,7 +996,7 @@ export const EditorApp: React.FC = () => {
           requestId: migration.requestId });
       }
     }
-    const base = structuredClone(uiSettingsRef.current);
+    const base = structuredClone(baseOverride ?? uiSettingsRef.current);
     const edit: PendingPromptUiEdit = {
       requestId: `dashboard-settings-${initialBootId}-${++dashboardSettingsSaveSequenceRef.current}`,
       area, base, next,
@@ -1010,14 +1016,49 @@ export const EditorApp: React.FC = () => {
     }
   }, [applyPromptUiSettings]);
 
-  /** Сохраняет порядок вкладки или раскрытие main без изменения локальной логики Process. */
-  const saveEditorLayout = useCallback((next: PromptEditorLayout) => {
+  /** Сохраняет порядок вкладки, раскрытие main или долю ширины без изменения локальной логики Process. */
+  const saveEditorLayout = useCallback((next: PromptEditorLayout, baseOverride?: PromptUiSettingsSnapshot) => {
     editorLayoutEditedRef.current = true;
-    const edit = registerPromptUiEdit('editor', { ...uiSettingsRef.current, editorLayout: next });
+    const edit = registerPromptUiEdit('editor', { ...uiSettingsRef.current, editorLayout: next }, baseOverride);
     setFormSectionLayout(next);
     vscode.postMessage({ type: 'savePromptEditorLayout', state: next,
       baseState: edit.base.editorLayout, requestId: edit.requestId });
   }, [registerPromptUiEdit]);
+
+  /** Элемент формы получает предпросмотр ширины во время жеста без перерисовки EditorApp. */
+  const formShellRef = useRef<HTMLDivElement>(null);
+  /** Пока ширина меняется, профиль колонок виджетов и внешние настройки не применяются. */
+  const [isPanelResizing, setIsPanelResizing] = useState(false);
+
+  /** Начало и конец жеста разделителя; окончание применяет отложенный внешний снимок после записи жеста. */
+  const handlePanelResizeStateChange = useCallback((active: boolean) => {
+    applyPromptPanelResizeState(active, {
+      flushSync, setResizing: setIsPanelResizing, setSettingsBuffered: handleUiSettingsDragChange,
+    });
+  }, [handleUiSettingsDragChange]);
+
+  /** Сохраняет долю ширины глобально; совпадающее значение пишется повторно только после отказа записи. */
+  const savePanelSplitRatio = useCallback((ratio: number | null) => {
+    const plan = planPromptEditorSplitRatioSave(uiSettingsEditsRef.current, uiSettingsRef.current, ratio);
+    if (plan) {
+      saveEditorLayout(plan.layout, plan.base);
+    }
+  }, [saveEditorLayout]);
+
+  /** Переводит итоговую ширину формы в долю от суммы ширин панелей. */
+  const handlePanelSplitCommit = useCallback((formWidth: number, bounds: PromptEditorFormWidthBounds) => {
+    savePanelSplitRatio(resolvePromptEditorPanelSplitRatio(bounds, formWidth));
+  }, [savePanelSplitRatio]);
+
+  /** Возвращает автоматическую ширину формы. */
+  const handlePanelSplitReset = useCallback(() => {
+    savePanelSplitRatio(null);
+  }, [savePanelSplitRatio]);
+
+  /** Ширина не изменилась (щелчок, край, возврат): повторяется только отклонённая запись видимой доли. */
+  const handlePanelSplitRetry = useCallback(() => {
+    savePanelSplitRatio(uiSettingsRef.current.editorLayout.panelSplitRatio ?? null);
+  }, [savePanelSplitRatio]);
 
   const [promptDashboardLayoutMode, setPromptDashboardLayoutMode] = useState<PromptDashboardLayoutMode | null>(null);
   const activeDashboardLayoutMode = promptDashboardLayoutMode || 'single-column';
@@ -1250,8 +1291,8 @@ export const EditorApp: React.FC = () => {
     : t('editor.chatLaunchHint');
   const [chatLaunchActivityFrame, setChatLaunchActivityFrame] = useState(0);
   const shouldDockGitOverlaySecondHalf = pageWidth >= PROMPT_EDITOR_FORM_MAX_WIDTH_PX * 2;
-  /** Узкий редактор меняет расположение, но не отключает загрузку видимых карточек. */
-  const editorLayout = resolvePromptEditorLayout(pageWidth);
+  /** Узкий редактор меняет расположение, но не отключает загрузку видимых карточек; доля ширины глобальна. */
+  const editorLayout = resolvePromptEditorLayout(pageWidth, formSectionLayout.panelSplitRatio);
   const promptDashboardMode = 'full' as const;
   const promptDashboardCollapsedWidgets = useMemo(
     () => resolveCollapsedPromptDashboardWidgets(promptDashboardCollapsedSections),
@@ -1615,11 +1656,16 @@ export const EditorApp: React.FC = () => {
       baseState: edit.base.dashboardPreferences, requestId: edit.requestId });
   }, [registerPromptUiEdit]);
 
-  /** Сообщает host текущую ширину до запросов данных, чтобы свёрнутые виджеты не загружались. */
-  const handlePromptDashboardLayoutModeChange = useCallback((layoutMode: PromptDashboardLayoutMode) => {
-    vscode.postMessage({ type: 'promptDashboardLayoutModeChanged', layoutMode });
-    setPromptDashboardLayoutMode(layoutMode);
-  }, []);
+  /**
+   * Сообщает host текущую ширину до запросов данных, чтобы свёрнутые виджеты не загружались.
+   * Функция создаётся один раз: повтор того же профиля после жеста или перезамера не отправляется.
+   */
+  const [handlePromptDashboardLayoutModeChange] = useState(() => createPromptDashboardLayoutModeReporter(
+    (layoutMode: PromptDashboardLayoutMode) => {
+      vscode.postMessage({ type: 'promptDashboardLayoutModeChanged', layoutMode });
+      setPromptDashboardLayoutMode(layoutMode);
+    },
+  ));
 
   const handleReportHeightChange = useCallback((nextHeight: number) => {
     const normalizedHeight = normalizeEditorLayoutHeight(nextHeight);
@@ -7104,7 +7150,7 @@ export const EditorApp: React.FC = () => {
       ...(editorLayout.stacked ? styles.containerStacked : styles.containerWithDashboard),
     }}>
       <style>{EDITOR_RESPONSIVE_STYLES}</style>
-      <div className="pm-editor-form" style={{
+      <div ref={formShellRef} className="pm-editor-form" style={{
         ...styles.contentShell,
         flex: editorLayout.stacked ? '0 0 auto' : `0 0 ${editorLayout.formWidth}px`,
         width: editorLayout.stacked ? '100%' : `${editorLayout.formWidth}px`,
@@ -8109,8 +8155,23 @@ export const EditorApp: React.FC = () => {
         </div>
       </div>
 
+      {/* Разделитель занимает прежний промежуток между панелями; в вертикальной компоновке не нужен. */}
+      {!editorLayout.stacked ? (
+        <PromptPanelSplitter
+          pageWidth={pageWidth}
+          formWidth={editorLayout.formWidth}
+          automatic={(formSectionLayout.panelSplitRatio ?? null) === null}
+          formRef={formShellRef}
+          onResizeStateChange={handlePanelResizeStateChange}
+          onCommit={handlePanelSplitCommit}
+          onRetry={handlePanelSplitRetry}
+          onReset={handlePanelSplitReset}
+        />
+      ) : null}
+
       <PromptDashboard
         stacked={editorLayout.stacked}
+        layoutModeFrozen={isPanelResizing}
         initialPreferences={promptDashboardPreferences}
         preferencesRevision={dashboardPreferencesRevision}
         onDragStateChange={handleUiSettingsDragChange}
@@ -8257,10 +8318,10 @@ const styles: Record<string, React.CSSProperties> = {
     overflowY: 'hidden',
     position: 'relative',
   },
+  // Промежуток между панелями занимает PromptPanelSplitter той же ширины PROMPT_EDITOR_PANELS_GAP_PX.
   containerWithDashboard: {
     flexDirection: 'row',
     alignItems: 'stretch',
-    gap: `${PROMPT_EDITOR_PANELS_GAP_PX}px`,
   },
   // На узкой ширине один scroll-container содержит обе области без обрезания карточек.
   containerStacked: {

@@ -9,6 +9,8 @@ const moduleLoader = require('node:module') as ModuleLoaderWithLoad;
 const originalModuleLoad = moduleLoader._load;
 
 let selectChatModelsCalls = 0;
+/** Селекторы показывают, создаётся ли весь каталог вместо адресного API одной модели. */
+const modelSelections: Array<import('vscode').LanguageModelChatSelector | undefined> = [];
 let sendRequestCalls = 0;
 const configurationValues = new Map<string, unknown>();
 /** Снимки запросов и ресурсов позволяют проверить инструкции без LM, диска и рабочего VS Code. */
@@ -18,6 +20,9 @@ const instructionFiles = new Map<string, string>();
 const readInstructionFiles: string[] = [];
 const aiLogLines: string[] = [];
 let disposedTokenSources = 0;
+/** Управляемые события VS Code проверяют инвалидирование без реальных аккаунтов и Extension Host. */
+const modelCatalogListeners = new Set<() => void>();
+const authenticationListeners = new Set<(event: { provider: { id: string } }) => void>();
 
 const mockModel = {
 	vendor: 'copilot',
@@ -35,7 +40,7 @@ const mockModel = {
 	},
 };
 
-let selectChatModelsImpl: () => Promise<any[]> = async () => [mockModel];
+let selectChatModelsImpl: (selector?: import('vscode').LanguageModelChatSelector) => Promise<any[]> = async () => [mockModel];
 
 moduleLoader._load = (request, parent, isMain) => {
 	if (request === 'vscode') {
@@ -90,9 +95,20 @@ moduleLoader._load = (request, parent, isMain) => {
 				language: 'ru',
 			},
 			lm: {
-				selectChatModels: async () => {
+				onDidChangeChatModels: (listener: () => void) => {
+					modelCatalogListeners.add(listener);
+					return { dispose: () => modelCatalogListeners.delete(listener) };
+				},
+				selectChatModels: async (selector?: import('vscode').LanguageModelChatSelector) => {
 					selectChatModelsCalls += 1;
-					return selectChatModelsImpl();
+					modelSelections.push(selector);
+					return selectChatModelsImpl(selector);
+				},
+			},
+			authentication: {
+				onDidChangeSessions: (listener: (event: { provider: { id: string } }) => void) => {
+					authenticationListeners.add(listener);
+					return { dispose: () => authenticationListeners.delete(listener) };
 				},
 			},
 			LanguageModelChatMessage: {
@@ -120,6 +136,7 @@ test.afterEach(() => {
 	aiLogLines.length = 0;
 	disposedTokenSources = 0;
 	selectChatModelsCalls = 0;
+	modelSelections.length = 0;
 	sendRequestCalls = 0;
 	selectChatModelsImpl = async () => [mockModel];
 });
@@ -778,6 +795,7 @@ test('AiService commit instructions preserve text, file order, project scope and
 		{ file: '.github/commit.md' },
 		'Без точки в конце',
 		{ text: 'Используй taskNumber текущего промпта.' },
+		{ text: 'Упоминай тесты только тогда, когда коммит касается исключительно тестов.' },
 		null, 123, { unknown: true },
 	]);
 	instructionFiles.set('/workspace/web/.github/commit.md', 'Формат: 🅰️🅻🅴🅺 <taskNumber> | <описание>');
@@ -788,6 +806,7 @@ test('AiService commit instructions preserve text, file order, project scope and
 	}), 'ok');
 	const [system, user] = modelRequests[0];
 	assert.match(system.text, /Одной строкой[^]*Формат: 🅰️🅻🅴🅺[^]*Без точки[^]*Используй taskNumber/);
+	assert.match(system.text, /Упоминай тесты только тогда, когда коммит касается исключительно тестов\./);
 	assert.doesNotMatch(system.text, /\[object Object\]|72 characters|imperative/);
 	assert.match(user.text, /Current prompt taskNumber: 00172/);
 	assert.match(user.text, /Current Git branch: master/);
@@ -812,32 +831,347 @@ test('AiService does not silently drop unavailable commit instruction files', as
 test('AiService disabled commit generation skips instructions and model discovery', async () => {
 	configurationValues.set('ai.enabled', false);
 	configurationValues.set('github.copilot.chat.commitMessageGeneration.instructions', [{ file: 'missing.md' }]);
-	assert.equal(await new AiService().generateCommitMessage({ stagedChangesSummary: '' }), 'Обновить изменения');
+	assert.equal(await new AiService().generateCommitMessage({ stagedChangesSummary: '' }), '');
 	assert.deepEqual(readInstructionFiles, []);
 	assert.equal(selectChatModelsCalls, 0);
 });
 
-/** Резервный выбор сохраняет free-only политику и не запрашивает каталог LM API второй раз. */
-test('AiService commit fallback reuses discovered models and rejects paid-only candidates', async () => {
-	const freeModel = { ...mockModel, id: 'gpt-6-luna', family: 'gpt-6-luna' };
-	const paidModel = { ...mockModel, id: 'paid-model', family: 'paid-model' };
-	selectChatModelsImpl = async () => selectChatModelsCalls === 1 ? [] : [paidModel, freeModel];
-	const service = new AiService();
-	// Метаданные заменены, сопоставление и выбор выполняются кодом сервиса.
+/** Локальные метаданные заменяют БД; реальные функции сервиса определяют допустимые бесплатные модели. */
+function stubFreeModelCatalog(service: InstanceType<typeof AiService>, freeIds: string[], cachedIds = freeIds): void {
 	(service as unknown as { resolveStateDbPath: () => Promise<string> }).resolveStateDbPath = async () => '/testing-state';
-	(service as unknown as { getVisibleCopilotModelsFromControl: () => Promise<Array<{ id: string; name: string }>> })
-		.getVisibleCopilotModelsFromControl = async () => [{ id: 'gpt-6-luna', name: 'Free model' }];
-	await service.generateCommitMessage({ stagedChangesSummary: 'diff' });
-	assert.equal(selectChatModelsCalls, 2);
-	assert.equal(sendRequestCalls, 1);
-	const cache = (service as unknown as { selectedModelCache: Map<string, { model: typeof mockModel }> }).selectedModelCache;
-	assert.equal([...cache.values()][0].model.id, 'gpt-6-luna');
-	await service.generateCommitMessage({ stagedChangesSummary: 'another diff' });
-	assert.equal(selectChatModelsCalls, 2);
-	assert.equal(sendRequestCalls, 2);
-	service.clearCopilotModelCaches();
-	selectChatModelsCalls = 0;
-	selectChatModelsImpl = async () => selectChatModelsCalls === 1 ? [] : [paidModel];
-	assert.equal(await service.generateCommitMessage({ stagedChangesSummary: 'diff' }), 'Обновить изменения');
-	assert.equal(sendRequestCalls, 2);
+	(service as unknown as { readStateItemValue: (path: string, key: string) => Promise<string> }).readStateItemValue = async (_path, key) => {
+		if (key === 'chat.modelsControl') {
+			return JSON.stringify({ free: Object.fromEntries(freeIds.map(id => [id, { id, label: id, featured: true }])) });
+		}
+		if (key === 'chat.cachedLanguageModels.v2') {
+			return JSON.stringify(cachedIds.map(id => ({ identifier: `copilot/${id}`,
+				metadata: { id, vendor: 'copilot', family: id, name: id, isUserSelectable: true } })));
+		}
+		return '';
+	};
+}
+
+/** Холодный fallback выбирает один бесплатный id; последующие внутренние сценарии переиспользуют выбранную модель. */
+test('AiService selects a cached free candidate without enumerating all models', async () => {
+	configurationValues.set('debugLogging.enabled', true);
+	const freeModel = { ...mockModel, id: 'gpt-6-luna', family: 'gpt-6-luna' };
+	selectChatModelsImpl = async selector => selector?.id === freeModel.id ? [freeModel] : [];
+	const service = new AiService();
+	stubFreeModelCatalog(service, [freeModel.id]);
+	assert.equal(await service.generateCommitMessage({ stagedChangesSummary: 'diff' }), 'ok');
+	assert.equal(await service.generateTitle('title'), 'ok');
+	assert.equal(await service.generateDescription('description'), 'ok');
+	assert.deepEqual(modelSelections, [
+		{ vendor: 'copilot', family: 'gpt-5-mini' }, { vendor: 'copilot', id: freeModel.id },
+	]);
+	assert.equal(sendRequestCalls, 3);
+	assert.ok(aiLogLines.some(line => line.includes('stage=fallbackCandidate phase=finish')));
+	assert.ok(!aiLogLines.some(line => line.includes('stage=fallbackModels')));
 });
+
+/** Устаревший id или ошибка адресного API сохраняют поиск остальных кандидатов и полный резервный путь. */
+for (const staleResult of ['empty', 'error', 'missing-cache'] as const) {
+	test(`AiService refreshes free candidates after ${staleResult}`, async () => {
+		const freeModel = { ...mockModel, id: 'gpt-6-luna', family: 'gpt-6-luna' };
+		const service = new AiService();
+		stubFreeModelCatalog(service, ['retired-free', freeModel.id], staleResult === 'missing-cache' ? [] : ['retired-free']);
+		selectChatModelsImpl = async selector => {
+			if (selector?.id === 'retired-free' && staleResult === 'error') { throw new Error('stale id'); }
+			return selector?.family || selector?.id ? [] : [freeModel];
+		};
+		assert.equal(await service.generateCommitMessage({ stagedChangesSummary: '+code' }), 'ok');
+		assert.deepEqual(modelSelections, [
+			{ vendor: 'copilot', family: 'gpt-5-mini' },
+			...(staleResult === 'missing-cache' ? [] : [{ vendor: 'copilot', id: 'retired-free' }]),
+			undefined,
+		]);
+		assert.equal(sendRequestCalls, 1);
+	});
+}
+
+/** Отказ первого бесплатного кандидата не включает полный каталог, пока доступен следующий адресный кандидат. */
+test('AiService tries the next cached free candidate after a targeted failure', async () => {
+	const freeModel = { ...mockModel, id: 'gpt-6-luna', family: 'gpt-6-luna' };
+	const service = new AiService();
+	stubFreeModelCatalog(service, ['retired-free', freeModel.id]);
+	selectChatModelsImpl = async selector => {
+		if (selector?.id === 'retired-free') { throw new Error('stale id'); }
+		return selector?.id === freeModel.id ? [freeModel] : [];
+	};
+	assert.equal(await service.generateCommitMessage({ stagedChangesSummary: '+code' }), 'ok');
+	assert.deepEqual(modelSelections, [
+		{ vendor: 'copilot', family: 'gpt-5-mini' }, { vendor: 'copilot', id: 'retired-free' },
+		{ vendor: 'copilot', id: freeModel.id },
+	]);
+});
+
+/** Управляемое завершение исключает ожидания таймеров из проверок совместной загрузки и гонок. */
+function deferredModels() {
+	let resolve!: (models: typeof mockModel[]) => void;
+	let reject!: (error: Error) => void;
+	const promise = new Promise<typeof mockModel[]>((done, fail) => { resolve = done; reject = fail; });
+	return { promise, resolve, reject };
+}
+
+/** Прогрев общий для picker, бесплатного списка и нескольких Git Flow проектов, даже после TTL выбранной модели. */
+test('AiService warmup shares one catalog with concurrent pickers and commit requests', async t => {
+	configurationValues.set('debugLogging.enabled', true);
+	const service = new AiService();
+	t.after(() => service.dispose());
+	const freeModel = { ...mockModel, id: 'gpt-6-luna', family: 'gpt-6-luna' };
+	stubFreeModelCatalog(service, [freeModel.id]);
+	const pending = deferredModels();
+	selectChatModelsImpl = () => pending.promise;
+	let notifications = 0;
+	service.initializeModelCatalog(() => { notifications++; });
+	service.initializeModelCatalog(() => { assert.fail('duplicate initialization'); });
+	const results = Promise.all([
+		service.getAvailableModels(), service.getAvailableModels(), service.getAvailableFreeModels(),
+		service.generateCommitMessage({ stagedChangesSummary: '+code one' }),
+		service.generateCommitMessage({ stagedChangesSummary: '+code two' }),
+	]);
+	assert.equal(selectChatModelsCalls, 1);
+	assert.equal(sendRequestCalls, 0);
+	pending.resolve([freeModel]);
+	const [first, second, free, commitOne, commitTwo] = await results;
+	assert.deepEqual(first, second);
+	assert.ok(first.some(model => model.id.includes(freeModel.id)));
+	assert.deepEqual(free, [{ id: freeModel.id, name: freeModel.id }]);
+	assert.equal(commitOne, 'ok');
+	assert.equal(commitTwo, 'ok');
+	assert.equal(notifications, 1);
+	const later = Date.now() + 120_000;
+	t.mock.method(Date, 'now', () => later);
+	await service.generateTitle('title');
+	await service.generateDescription('description');
+	assert.deepEqual(modelSelections, [undefined]);
+	assert.equal(sendRequestCalls, 4);
+	assert.equal(aiLogLines.filter(line => line.includes('label=model-catalog result=loaded')).length, 1);
+	assert.ok(aiLogLines.some(line => line.includes('label=model-catalog result=cache-hit') && line.includes('gpt-6-luna')));
+});
+
+/** События моделей и GitHub очищают общий и выбранный кеш; сторонняя auth-сессия не вызывает новый запрос. */
+test('AiService refreshes the catalog after model and account changes', async t => {
+	const service = new AiService();
+	t.after(() => service.dispose());
+	stubFreeModelCatalog(service, [mockModel.id]);
+	let activeModel = mockModel;
+	selectChatModelsImpl = async () => [activeModel];
+	let notifications = 0;
+	service.initializeModelCatalog(() => { notifications++; });
+	await service.getAvailableModels();
+	await service.generateTitle('first');
+	for (const listener of authenticationListeners) { listener({ provider: { id: 'other' } }); }
+	await service.getAvailableModels();
+	assert.equal(selectChatModelsCalls, 1);
+	for (const kind of ['catalog', 'github', 'github-enterprise']) {
+		activeModel = { ...mockModel, sendRequest: async messages => {
+			const response = await mockModel.sendRequest(messages);
+			return { ...response, text: (async function* () { yield kind; })() };
+		} };
+		if (kind === 'catalog') {
+			for (const listener of modelCatalogListeners) { listener(); }
+		} else {
+			for (const listener of authenticationListeners) { listener({ provider: { id: kind } }); }
+		}
+		await service.getAvailableModels();
+		assert.equal(await service.generateTitle('new account'), kind);
+	}
+	assert.equal(selectChatModelsCalls, 4);
+	assert.equal(notifications, 4);
+});
+
+/** Несколько событий во время RPC объединяются; старый аккаунт не попадает в списки и запросы. */
+test('AiService discards stale catalog completion and coalesces invalidations', async t => {
+	const service = new AiService();
+	t.after(() => service.dispose());
+	stubFreeModelCatalog(service, [mockModel.id]);
+	const old = deferredModels();
+	const fresh = { ...mockModel, name: 'New account', sendRequest: async (messages: Array<{ text: string }>) => {
+		await mockModel.sendRequest(messages);
+		return { text: (async function* () { yield 'fresh'; })() };
+	} };
+	selectChatModelsImpl = () => selectChatModelsCalls === 1 ? old.promise : Promise.resolve([fresh]);
+	let notifications = 0;
+	service.initializeModelCatalog(() => { notifications++; });
+	const picker = service.getAvailableModels();
+	const commit = service.generateCommitMessage({ stagedChangesSummary: '+code' });
+	for (let index = 0; index < 3; index++) { service.clearCopilotModelCaches(); }
+	assert.equal(selectChatModelsCalls, 1);
+	old.resolve([{ ...mockModel, sendRequest: async () => { assert.fail('stale model'); } }]);
+	await picker;
+	assert.equal(await commit, 'fresh');
+	assert.equal(selectChatModelsCalls, 2);
+	assert.equal(notifications, 1);
+});
+
+/** Ошибка и пустой каталог не закрепляются на весь сеанс; ближайший запрос после backoff повторяет загрузку. */
+for (const failure of ['empty', 'error', 'partial'] as const) {
+	test(`AiService retries a ${failure} catalog and preserves the Copilot fallback`, async t => {
+		const service = new AiService();
+		t.after(() => service.dispose());
+		stubFreeModelCatalog(service, []);
+		let recovering = false;
+		selectChatModelsImpl = async selector => {
+			if (recovering) { return [mockModel]; }
+			if (failure === 'empty') { return []; }
+			if (failure === 'partial' && selector?.vendor === 'copilot') { return [mockModel]; }
+			throw new Error('provider unavailable');
+		};
+		service.initializeModelCatalog(() => undefined);
+		await service.getAvailableModels();
+		const callsBeforeRetry = selectChatModelsCalls;
+		await service.getAvailableModels();
+		assert.equal(selectChatModelsCalls, callsBeforeRetry);
+		if (failure === 'partial') { assert.equal(await service.generateTitle('fallback'), 'ok'); }
+		recovering = true;
+		const later = Date.now() + 2000;
+		t.mock.method(Date, 'now', () => later);
+		const models = await service.getAvailableModels();
+		assert.ok(models.some(model => model.id.includes(mockModel.id)));
+		assert.equal(selectChatModelsCalls, callsBeforeRetry + 1);
+	});
+}
+
+/** Изменение visibility не требует нового дорогого LM-каталога, но должно менять выдачу picker. */
+test('AiService keeps picker metadata current while reusing the live catalog', async t => {
+	const service = new AiService();
+	t.after(() => service.dispose());
+	const external = { ...mockModel, vendor: 'customendpoint', id: 'external', family: 'external' };
+	selectChatModelsImpl = async () => [external];
+	let hidden = false;
+	(service as unknown as { resolveStateDbPath: () => Promise<string> }).resolveStateDbPath = async () => '/testing-state';
+	(service as unknown as { readStateItemValue: (path: string, key: string) => Promise<string> }).readStateItemValue =
+		async (_path, key) => key === 'chatModelVisibility' && hidden
+			? JSON.stringify({ hiddenModels: ['customendpoint/external'] }) : '';
+	assert.equal((await service.getAvailableModels()).length, 1);
+	hidden = true;
+	assert.deepEqual(await service.getAvailableModels(), []);
+	assert.equal(selectChatModelsCalls, 1);
+});
+
+/** Прогретый список не даёт разрешения использовать платную или похожую модель в free-only fallback. */
+test('AiService warm catalog keeps free-only fallback and exact vendor/id matching', async t => {
+	const service = new AiService();
+	t.after(() => service.dispose());
+	stubFreeModelCatalog(service, ['gpt-free']);
+	selectChatModelsImpl = async () => [
+		{ ...mockModel, id: 'gpt-free-premium', family: 'gpt-free', name: 'gpt-free' },
+		{ ...mockModel, vendor: 'other', id: 'gpt-free', family: 'gpt-free' },
+	];
+	service.initializeModelCatalog(() => undefined);
+	await service.getAvailableModels();
+	assert.equal(await service.generateCommitMessage({ stagedChangesSummary: '+code' }), '');
+	assert.equal(sendRequestCalls, 0);
+	assert.equal(selectChatModelsCalls, 1);
+});
+
+/** Dispose запрещает позднее уведомление и запрос модели; снимает обе подписки и таймер восстановления. */
+for (const outcome of ['success', 'error'] as const) {
+	test(`AiService disposal ignores pending catalog ${outcome} and removes listeners`, async () => {
+		const service = new AiService();
+		stubFreeModelCatalog(service, [mockModel.id]);
+		const pending = deferredModels();
+		selectChatModelsImpl = () => pending.promise;
+		service.initializeModelCatalog(() => { assert.fail('notification after dispose'); });
+		const picker = service.getAvailableModels();
+		const commit = service.generateCommitMessage({ stagedChangesSummary: '+code' });
+		service.dispose();
+		if (outcome === 'success') { pending.resolve([mockModel]); }
+		else { pending.reject(new Error('late provider error')); }
+		assert.deepEqual(await picker, []);
+		assert.equal(await commit, '');
+		assert.equal(modelCatalogListeners.size, 0);
+		assert.equal(authenticationListeners.size, 0);
+		assert.equal(sendRequestCalls, 0);
+		assert.equal(selectChatModelsCalls, 1);
+	});
+}
+
+/** Автоповторы ограничены двумя попытками, а dispose отменяет ещё не наступившую попытку. */
+test('AiService bounds background retries and cancels their timer on disposal', async t => {
+	t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 });
+	const service = new AiService();
+	t.after(() => service.dispose());
+	stubFreeModelCatalog(service, []);
+	selectChatModelsImpl = async () => [];
+	service.initializeModelCatalog(() => undefined);
+	await service.getAvailableModels();
+	for (const delay of [1500, 5000]) {
+		t.mock.timers.tick(delay);
+		await service.getAvailableModels();
+	}
+	assert.equal(selectChatModelsCalls, 3);
+	t.mock.timers.tick(60_000);
+	assert.equal(selectChatModelsCalls, 3);
+	service.clearCopilotModelCaches();
+	await service.getAvailableModels();
+	service.dispose();
+	t.mock.timers.tick(60_000);
+	assert.equal(selectChatModelsCalls, 4);
+});
+
+/** NotFound удаляет устаревший API из общего кеша, но не повторяет уже неуспешный пользовательский запрос. */
+test('AiService refreshes a removed model without retrying the failed request', async t => {
+	const service = new AiService();
+	t.after(() => service.dispose());
+	stubFreeModelCatalog(service, [mockModel.id]);
+	const removed = { ...mockModel, sendRequest: async () => {
+		throw Object.assign(new Error('removed model'), { code: 'NotFound' });
+	} };
+	selectChatModelsImpl = async () => selectChatModelsCalls === 1 ? [removed] : [mockModel];
+	service.initializeModelCatalog(() => undefined);
+	await service.getAvailableModels();
+	assert.equal(await service.generateCommitMessage({ stagedChangesSummary: '+code' }), '');
+	assert.equal(sendRequestCalls, 0);
+	await service.getAvailableModels();
+	assert.equal(await service.generateCommitMessage({ stagedChangesSummary: '+code' }), 'ok');
+	assert.equal(sendRequestCalls, 1);
+	assert.equal(selectChatModelsCalls, 2);
+});
+
+/** Совпадение по похожему имени или другому провайдеру не разрешает отправку запроса в адресном free-only пути. */
+for (const mismatch of ['id', 'vendor', 'paid-only'] as const) {
+	test(`AiService free fallback rejects ${mismatch} model`, async () => {
+		const service = new AiService();
+		stubFreeModelCatalog(service, mismatch === 'paid-only' ? [] : ['gpt-free']);
+		const wrongModel = { ...mockModel, vendor: mismatch === 'vendor' ? 'other' : 'copilot',
+			id: mismatch === 'vendor' ? 'gpt-free' : 'gpt-free-premium', family: 'gpt-free' };
+		selectChatModelsImpl = async selector => selector?.id || (mismatch === 'paid-only' && !selector?.family)
+			? [wrongModel] : [];
+		assert.equal(await service.generateCommitMessage({ stagedChangesSummary: '+code' }), '');
+		assert.equal(sendRequestCalls, 0);
+	});
+}
+
+/** Запрошенная бесплатная модель имеет приоритет даже при другом порядке локального списка. */
+test('AiService prefers the requested free candidate before other cached models', async () => {
+	const service = new AiService();
+	stubFreeModelCatalog(service, ['gpt-other', 'gpt-5-mini']);
+	selectChatModelsImpl = async selector => selector?.id === mockModel.id ? [mockModel] : [];
+	assert.equal(await service.generateCommitMessage({ stagedChangesSummary: '+code' }), 'ok');
+	assert.deepEqual(modelSelections, [
+		{ vendor: 'copilot', family: 'gpt-5-mini' }, { vendor: 'copilot', id: 'gpt-5-mini' },
+	]);
+});
+
+/** Отсутствие модели, пустой ответ и отказы LM дают сигнал резервному генератору, а не фиктивный текст коммита. */
+for (const failure of ['no-model', 'empty', 'request', 'stream'] as const) {
+	test(`AiService commit generation returns no message after ${failure} failure`, async t => {
+		if (failure === 'no-model') {
+			selectChatModelsImpl = async () => [];
+		} else {
+			t.mock.method(mockModel, 'sendRequest', async () => {
+				if (failure === 'request') { throw new Error('request failed'); }
+				return { text: (async function* () {
+					yield failure === 'stream' ? 'incomplete result' : '   ';
+					if (failure === 'stream') { throw new Error('stream failed'); }
+				})() };
+			});
+		}
+		const service = new AiService();
+		(service as unknown as { resolveStateDbPath: () => Promise<null> }).resolveStateDbPath = async () => null;
+		assert.equal(await service.generateCommitMessage({ stagedChangesSummary: '+code' }), '');
+		assert.equal(disposedTokenSources, failure === 'no-model' ? 0 : 1);
+	});
+}

@@ -7498,40 +7498,21 @@ export class EditorPanelManager {
 		}
 	}
 
-	/** Re-broadcast model options after Copilot account changes settle in VS Code state. */
-	public refreshAvailableModelsAfterCopilotAccountSwitch(): void {
-		const delaysMs = [0, 1500, 5000];
-
-		for (const [panelKey, panel] of openPanels.entries()) {
-			let lastModels: Array<{ id: string; name: string }> | null = null;
-
-			for (const delayMs of delaysMs) {
-				const refreshTimer = setTimeout(() => {
-					void (async () => {
-						if (openPanels.get(panelKey) !== panel) {
-							return;
-						}
-
-						const refreshedModels = await this.aiService.getAvailableModels();
-						if (openPanels.get(panelKey) !== panel) {
-							return;
-						}
-
-						if (lastModels && this.areAvailableModelsEqual(lastModels, refreshedModels)) {
-							return;
-						}
-
-						lastModels = [...refreshedModels];
-						try {
-							await panel.webview.postMessage({ type: 'availableModels', models: refreshedModels } satisfies ExtensionToWebviewMessage);
-						} catch {
-							// panel/webview might be disposed; ignore
-						}
-					})();
-				}, delayMs);
-				this.unrefBackgroundTimer(refreshTimer);
-			}
+	/** Доставляет завершившийся прогрев/обновление всем живым панелям; тесты — editorPanelManager.test.ts. */
+	public refreshAvailableModels(): void {
+		const panels = [...openPanels.entries()];
+		if (panels.length === 0) {
+			return;
 		}
+		void (async () => {
+			const models = await this.aiService.getAvailableModels();
+			for (const [panelKey, panel] of panels) {
+				// openPanels очищается после autosave; набор живых панелей меняется синхронно при dispose.
+				if (openPanels.get(panelKey) === panel && this.promptEditorPanels.has(panel)) {
+					await panel.webview.postMessage({ type: 'availableModels', models } satisfies ExtensionToWebviewMessage);
+				}
+			}
+		})().catch(error => console.error('[PromptManager] model catalog broadcast failed:', error));
 	}
 
 	private formatSaveConflictMessage(error: unknown): string {
@@ -13203,7 +13184,27 @@ export class EditorPanelManager {
 							});
 						}
 
+						if (!generatedMessage.trim() && areInternalAiFeaturesEnabled()) {
+							// Наш контекст и инструкции применяются до штатной команды; выключенный AI пропускается целиком.
+							const context = await measure('internalContext', () => this.gitService.getStagedCommitProjectData(
+								paths, [projectData.project],
+							), projectData.project);
+							// После исключения всех файлов запрос без контекста не должен придумывать описание изменений.
+							if (context.length === 0) {
+								throw new Error('No staged files eligible for commit message generation');
+							}
+							// Ошибки обязательных инструкций завершают проект; отказы LM сервис возвращает пустой строкой.
+							generatedMessage = await measure('internal', async () => this.aiService.generateCommitMessage({
+								projectName: projectData.project,
+								projectPath: projectData.projectPath,
+								taskNumber,
+								currentBranch: !taskNumber?.trim()
+									? await this.gitService.getCurrentBranch(projectData.projectPath) : undefined,
+								stagedChangesSummary: this.buildPreparedCommitContext(context),
+							}), projectData.project);
+						}
 						if (!generatedMessage.trim()) {
+							// Штатный Copilot — резерв при выключенном внутреннем AI или отсутствии ответа модели.
 							try {
 								generatedMessage = await measure('copilot', () => (
 									this.gitService.generateCommitMessageViaCopilot(projectData.projectPath)
@@ -13217,25 +13218,7 @@ export class EditorPanelManager {
 							}
 						}
 						if (!generatedMessage.trim()) {
-							// Контекст нужен только внутреннему AI; выключенный AI возвращает прежний резервный текст.
-							const internalAiEnabled = areInternalAiFeaturesEnabled();
-							const context = internalAiEnabled
-								? await measure('fallbackContext', () => this.gitService.getStagedCommitProjectData(
-									paths, [projectData.project],
-								), projectData.project)
-								: [];
-							// После исключения всех файлов запрос без контекста не должен придумывать описание изменений.
-							if (internalAiEnabled && context.length === 0) {
-								throw new Error('No staged files eligible for commit message generation');
-							}
-							generatedMessage = await measure('internal', async () => this.aiService.generateCommitMessage({
-								projectName: projectData.project,
-								projectPath: projectData.projectPath,
-								taskNumber,
-								currentBranch: !taskNumber?.trim() && internalAiEnabled
-									? await this.gitService.getCurrentBranch(projectData.projectPath) : undefined,
-								stagedChangesSummary: this.buildPreparedCommitContext(context),
-							}), projectData.project);
+							throw new Error('No commit message generator returned a result');
 						}
 						return { projectData, generatedMessage, generatedViaScm };
 					}));

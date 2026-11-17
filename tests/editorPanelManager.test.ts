@@ -1445,6 +1445,7 @@ test('revivePromptEditorPanel adopts the restored singleton tab without creating
 		stateService: {
 			getPromptDashboardLayouts: () => clonePrompt(layouts),
 			getPromptDashboardPreferences: () => clonePrompt(preferences),
+			getPromptEditorLayout: () => normalizePromptEditorLayout({ panelSplitRatio: 0.65 }),
 		},
 	});
 	const revivedPanel = createDetachedPromptEditorPanel('Prompt: Prompt A restored');
@@ -1465,6 +1466,8 @@ test('revivePromptEditorPanel adopts the restored singleton tab without creating
 	const bootGlobals = JSON.parse(bootGlobalsMatch[1]);
 	assert.deepEqual(bootGlobals.__PROMPT_DASHBOARD_LAYOUTS__, layouts);
 	assert.deepEqual(bootGlobals.__PROMPT_DASHBOARD_PREFERENCES__, preferences);
+	// Первый кадр получает глобальную долю ширины без ожидания сообщения prompt.
+	assert.equal(bootGlobals.__PROMPT_EDITOR_LAYOUT__.panelSplitRatio, 0.65);
 
 	const bootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
 	assert.ok(bootId);
@@ -1474,6 +1477,7 @@ test('revivePromptEditorPanel adopts the restored singleton tab without creating
 	assert.equal(promptMessage?.prompt?.id, 'prompt-a');
 	assert.deepEqual(promptMessage?.promptDashboardLayouts, layouts);
 	assert.deepEqual(promptMessage?.promptDashboardPreferences, preferences);
+	assert.equal(promptMessage?.editorLayout?.panelSplitRatio, 0.65);
 	const promptEditorTabs = vscodeTabs.filter(tab => tab.input?.viewType === 'mainThreadWebview-promptManager.editor');
 	assert.equal(promptEditorTabs.length, 1);
 	revivedPanel.dispose();
@@ -1638,7 +1642,8 @@ test('ready retries available models after a same-prompt ref refresh', async () 
 	panel.dispose();
 });
 
-test('account switch refresh re-broadcasts updated models for the open prompt editor', async () => {
+/** Каждый завершённый прогрев доставляет список открытой панели одним обращением к общему кешу. */
+test('catalog refresh re-broadcasts updated models for the open prompt editor without polling', async () => {
 	resetVsCodeCommandMock();
 	const { manager } = await createManager({
 		initialPrompt: {
@@ -1670,16 +1675,41 @@ test('account switch refresh re-broadcasts updated models for the open prompt ed
 	assert.ok(panel);
 	panel.postedMessages.length = 0;
 
-	await withImmediateTimers(async () => {
-		(manager as any).refreshAvailableModelsAfterCopilotAccountSwitch();
-		await flushTurns(4);
-	});
+	manager.refreshAvailableModels();
+	await flushTurns(4);
+	assert.equal(getAvailableModelsCalls, 1);
+	manager.refreshAvailableModels();
+	await flushTurns(4);
 
 	const modelMessages = panel.postedMessages.filter((message: any) => message?.type === 'availableModels') as Array<{ models: Array<{ id: string; name: string }> }>;
 	assert.deepEqual(modelMessages.map((message) => message.models), [initialModels, refreshedModels]);
-	assert.ok(getAvailableModelsCalls >= 2);
+	assert.equal(getAvailableModelsCalls, 2);
 	panel.dispose();
 });
+
+/** Загрузка каталога может завершиться после ready-таймаута; открытая панель получает результат, закрытая — нет. */
+for (const disposeBeforeLoad of [false, true]) {
+	test(`catalog refresh handles delayed completion with disposed=${disposeBeforeLoad}`, async () => {
+		resetVsCodeCommandMock();
+		const { manager } = await createManager({ initialPrompt: { id: 'prompt-a', promptUuid: 'uuid-a' } });
+		try {
+			await manager.openPrompt('prompt-a');
+			const panel = vscodeCreatedWebviewPanels[0];
+			const pending = createDeferred<Array<{ id: string; name: string }>>();
+			(manager as any).aiService.getAvailableModels = () => pending.promise;
+			panel.postedMessages.length = 0;
+			manager.refreshAvailableModels();
+			await flushTurns(2);
+			assert.equal(panel.postedMessages.length, 0);
+			if (disposeBeforeLoad) { panel.dispose(); }
+			const models = [{ id: 'copilot/gpt-6-luna', name: 'GPT-6 Luna' }];
+			pending.resolve(models);
+			await flushTurns(4);
+			const messages = panel.postedMessages.filter((message: { type: string }) => message.type === 'availableModels');
+			assert.deepEqual(messages, disposeBeforeLoad ? [] : [{ type: 'availableModels', models }]);
+		} finally { manager.disposeAll(); }
+	});
+}
 
 test('reopening the same prompt rotates the singleton boot cycle before the next ready event', async () => {
 	resetVsCodeCommandMock();
@@ -1947,7 +1977,7 @@ test('gitOverlayGenerateCommitMessage runs selected projects in parallel with or
 	// Запоминаем точные пути и ожидаемые сообщения только внешних генераторов.
 	const clearCalls: unknown[][] = [];
 	const firstProject = createDeferred<string>();
-	const fallbackContext = createDeferred<void>();
+	const internalContext = createDeferred<void>();
 	const currentPrompt = createPrompt({
 		projects: ['api', 'web', 'docs', 'busy'],
 		branch: 'feature/task-164',
@@ -1977,12 +2007,14 @@ test('gitOverlayGenerateCommitMessage runs selected projects in parallel with or
 			return projects.map(project => ({ project, projectPath: `/tmp/${project}` }));
 		},
 		getStagedCommitProjectData: async (_paths: unknown, projects: string[]) => {
-			assert.deepEqual(projects, ['web']);
-			callOrder.push('context:web');
-			await fallbackContext.promise;
+			assert.equal(projects.length, 1);
+			const project = projects[0];
+			assert.ok(project === 'web' || project === 'docs');
+			callOrder.push(`context:${project}`);
+			if (project === 'web') { await internalContext.promise; }
 			return [{
-				project: 'web', projectPath: '/tmp/web', branch: 'feature/task-164', changeSource: 'staged',
-				stagedFiles: [{ status: 'M', path: 'src/web.ts' }], stat: '', diff: 'compact web diff',
+				project, projectPath: `/tmp/${project}`, branch: 'feature/task-164', changeSource: 'staged',
+				stagedFiles: [{ status: 'M', path: `src/${project}.ts` }], stat: '', diff: `compact ${project} diff`,
 			}];
 		},
 		generateCommitMessageViaKilo: async (projectPath: string) => {
@@ -1998,7 +2030,7 @@ test('gitOverlayGenerateCommitMessage runs selected projects in parallel with or
 		},
 		generateCommitMessageViaCopilot: async (projectPath: string) => {
 			callOrder.push(`copilot:${projectPath}`);
-			// Третий проект получает результат Copilot, второй остается на внутреннем fallback.
+			// Только третий проект доходит до Copilot после пустого внутреннего ответа.
 			if (projectPath === '/tmp/docs') {
 				return '🅰️🅻🅴🅺 develop | update guide';
 			}
@@ -2022,10 +2054,10 @@ test('gitOverlayGenerateCommitMessage runs selected projects in parallel with or
 	}) => {
 		const { projectName, stagedChangesSummary } = input;
 		assert.equal(input.taskNumber, '167');
-		assert.equal(input.projectPath, '/tmp/web');
-		assert.match(stagedChangesSummary, /compact web diff/);
+		assert.equal(input.projectPath, `/tmp/${projectName}`);
+		assert.ok(stagedChangesSummary.includes(`compact ${projectName} diff`));
 		callOrder.push(`internal:${projectName}`);
-		return `🅰️🅻🅴🅺 master | update ${projectName}`;
+		return projectName === 'docs' ? '' : `🅰️🅻🅴🅺 master | update ${projectName}`;
 	};
 	const panel = {
 		webview: {
@@ -2053,7 +2085,7 @@ test('gitOverlayGenerateCommitMessage runs selected projects in parallel with or
 	await new Promise(resolve => setImmediate(resolve));
 	assert.deepEqual(callOrder, [
 		'stageAll', 'stagedCheck', 'kilo:/tmp/api', 'kilo:/tmp/web', 'kilo:/tmp/docs',
-		'copilot:/tmp/web', 'copilot:/tmp/docs', 'context:web',
+		'context:web', 'context:docs', 'internal:docs', 'copilot:/tmp/docs',
 	]);
 	assert.equal(postedMessages.length, 0);
 
@@ -2063,10 +2095,10 @@ test('gitOverlayGenerateCommitMessage runs selected projects in parallel with or
 	(manager as any).getTrackedBranchesSetting = () => [];
 	firstProject.resolve('🅰️🅻🅴🅺 master | update api');
 	await new Promise(resolve => setImmediate(resolve));
-	// Ни быстрый Copilot, ни завершившееся Kilo не выпускают token до окончания оставшегося fallback.
+	// Ни резервный Copilot, ни завершившееся Kilo не выпускают token до окончания внутренней генерации.
 	assert.ok(!callOrder.some(call => call.startsWith('token:')));
 	assert.equal(postedMessages.length, 0);
-	fallbackContext.resolve();
+	internalContext.resolve();
 	await handling;
 
 	assert.deepEqual(callOrder, [
@@ -2075,9 +2107,10 @@ test('gitOverlayGenerateCommitMessage runs selected projects in parallel with or
 		'kilo:/tmp/api',
 		'kilo:/tmp/web',
 		'kilo:/tmp/docs',
-		'copilot:/tmp/web',
-		'copilot:/tmp/docs',
 		'context:web',
+		'context:docs',
+		'internal:docs',
+		'copilot:/tmp/docs',
 		'internal:web',
 		'token:/tmp/api',
 		'token:/tmp/docs',
@@ -2108,13 +2141,13 @@ test('gitOverlayGenerateCommitMessage runs selected projects in parallel with or
 	assert.deepEqual(clearCalls, [['cleanup:/tmp/api'], ['cleanup:/tmp/docs']]);
 	// Проверяется реальный coordinator-фильтр, без подмены logReportDebug.
 	assert.ok(timingLogs.some(line => line.includes('gitOverlay.commitMessage.timing') && line.includes('"stage":"copilot"')));
-	assert.ok(timingLogs.some(line => line.includes('"stage":"fallbackContext"') && line.includes('"durationMs":')));
+	assert.ok(timingLogs.some(line => line.includes('"stage":"internalContext"') && line.includes('"durationMs":')));
 	assert.ok(timingLogs.every(line => !line.includes('compact web diff') && !line.includes('🅰️🅻🅴🅺')));
 	resetVsCodeCommandMock();
 });
 
 /** Ошибка отдельного проекта не завершает bulk раньше остальных и не теряет их сообщения или cleanup tokens. */
-for (const failure of ['context', 'internal', 'excluded'] as const) {
+for (const failure of ['context', 'instructions', 'excluded', 'empty', 'copilot'] as const) {
 	test(`gitOverlayGenerateCommitMessage preserves parallel successes after ${failure} failure`, async t => {
 		resetVsCodeCommandMock();
 		t.after(resetVsCodeCommandMock);
@@ -2131,6 +2164,7 @@ for (const failure of ['context', 'internal', 'excluded'] as const) {
 		const started: string[] = [];
 		const posted: any[] = [];
 		let internalCalls = 0;
+		let copilotCalls = 0;
 		(manager as any).workspaceService = {
 			getWorkspaceFolderPaths: () => paths, getWorkspaceFolders: () => prompt.projects,
 		};
@@ -2140,7 +2174,11 @@ for (const failure of ['context', 'internal', 'excluded'] as const) {
 				started.push(projectPath);
 				return projectPath.endsWith('/slow') ? slow.promise : projectPath.endsWith('/fast') ? 'fast result' : '';
 			},
-			generateCommitMessageViaCopilot: async () => '',
+			generateCommitMessageViaCopilot: async () => {
+				copilotCalls++;
+				if (failure === 'copilot') { throw new Error('private Copilot failure'); }
+				return '';
+			},
 			getStagedCommitProjectData: async () => {
 				if (failure === 'context') { throw new Error('private context failure'); }
 				return failure === 'excluded' ? [] : [{ project: 'broken', stagedFiles: [], stat: '', diff: '+code' }];
@@ -2152,7 +2190,8 @@ for (const failure of ['context', 'internal', 'excluded'] as const) {
 		};
 		(manager as any).aiService.generateCommitMessage = async () => {
 			internalCalls++;
-			throw new Error('private internal failure');
+			if (failure === 'instructions') { throw new Error('private instruction failure'); }
+			return '';
 		};
 		const handling = (manager as any).handleMessage(
 			{ type: 'gitOverlayGenerateCommitMessage', prompt, projects: prompt.projects, requestId: 'parallel-error' },
@@ -2164,7 +2203,8 @@ for (const failure of ['context', 'internal', 'excluded'] as const) {
 		assert.deepEqual(posted, []);
 		slow.resolve('slow result');
 		await handling;
-		assert.equal(internalCalls, failure === 'internal' ? 1 : 0);
+		assert.equal(internalCalls, failure === 'context' || failure === 'excluded' ? 0 : 1);
+		assert.equal(copilotCalls, failure === 'empty' || failure === 'copilot' ? 1 : 0);
 		assert.deepEqual(posted, [
 			{ type: 'error', message: 'Failed to generate commit messages for projects: broken. Try again.',
 				requestId: 'parallel-error' },
@@ -2176,14 +2216,20 @@ for (const failure of ['context', 'internal', 'excluded'] as const) {
 	});
 }
 
-/** Проверяет переход на Copilot после пропуска Kilo, номер в одиночном результате и сохранность ручного текста. */
-test('gitOverlayGenerateCommitMessage skips Kilo for a single project without rewriting manual commit text', async () => {
+/** Внутренний успех обходит штатный Copilot и SCM; номер корректируется только у сгенерированного сообщения. */
+test('gitOverlayGenerateCommitMessage prefers internal AI without rewriting manual commit text', async t => {
 	resetVsCodeCommandMock();
 	// Все внешние действия заменены: ни генератор, ни commit не обращаются к настоящему репозиторию.
-	const { manager } = await createManager();
+	const { manager } = await createManager({ configurationValues: { 'promptManager.ai.enabled': true } });
+	const previousLoad = (Module as any)._load;
+	(Module as any)._load = function (request: string, ...args: unknown[]) {
+		return request === 'vscode' ? createVsCodeMock() : previousLoad.call(this, request, ...args);
+	};
+	t.after(() => { (Module as any)._load = previousLoad; resetVsCodeCommandMock(); });
 	const currentPrompt = createPrompt({ projects: ['api'], taskNumber: '167', branch: '' });
 	const postedMessages: any[] = [];
 	const committedMessages: unknown[] = [];
+	const callOrder: string[] = [];
 	const generatedMessage = '🅰️🅻🅴🅺 master | текст коммита';
 	(manager as any).getTrackedBranchesSetting = () => ['master'];
 	(manager as any).postGitOverlaySnapshot = async () => undefined;
@@ -2193,17 +2239,23 @@ test('gitOverlayGenerateCommitMessage skips Kilo for a single project without re
 	};
 	(manager as any).gitService = {
 		getStagedCommitProjects: async () => [{ project: 'api', projectPath: '/tmp/api' }],
-		// Copilot получает управление после штатного пропуска Kilo.
-		generateCommitMessageViaKilo: async () => '',
-		generateCommitMessageViaCopilot: async () => generatedMessage,
-		createGeneratedCommitMessageCleanupToken: (_path: string, rawMessage: string) => {
-			assert.equal(rawMessage, generatedMessage);
-			return 'cleanup:single';
+		generateCommitMessageViaKilo: async () => { callOrder.push('kilo'); return ''; },
+		getStagedCommitProjectData: async () => {
+			callOrder.push('context');
+			return [{ project: 'api', stagedFiles: [{ status: 'M', path: 'src/api.ts' }], stat: '', diff: '+code' }];
+		},
+		generateCommitMessageViaCopilot: async () => { callOrder.push('copilot'); return 'wrong generator'; },
+		createGeneratedCommitMessageCleanupToken: () => {
+			throw new Error('Internal result must not create SCM cleanup tokens');
 		},
 		commitStagedChanges: async (_paths: unknown, messages: unknown) => {
 			committedMessages.push(messages);
 			return { success: true, errors: [], changedProjects: ['api'], skippedProjects: [] };
 		},
+	};
+	(manager as any).aiService.generateCommitMessage = async () => {
+		callOrder.push('internal');
+		return generatedMessage;
 	};
 	const panel = { webview: { postMessage: async (message: unknown) => {
 		postedMessages.push(message);
@@ -2216,9 +2268,10 @@ test('gitOverlayGenerateCommitMessage skips Kilo for a single project without re
 	);
 	assert.deepEqual(postedMessages.find(message => message.type === 'gitOverlayCommitMessagesGenerated'), {
 		type: 'gitOverlayCommitMessagesGenerated',
-		messages: [{ project: 'api', message: '🅰️🅻🅴🅺 167 | текст коммита', scmCleanupToken: 'cleanup:single' }],
+		messages: [{ project: 'api', message: '🅰️🅻🅴🅺 167 | текст коммита' }],
 		requestId: 'single-167',
 	});
+	assert.deepEqual(callOrder, ['kilo', 'context', 'internal']);
 
 	// Пользователь намеренно вернул master: при commit этот текст должен пройти без повторной замены.
 	const manualMessages = [{ project: 'api', message: '🅰️🅻🅴🅺 master | мой текст' }];
@@ -2231,9 +2284,14 @@ test('gitOverlayGenerateCommitMessage skips Kilo for a single project without re
 });
 
 /** Выключенный внутренний AI не требует даже компактного Git-контекста. */
-test('gitOverlayGenerateCommitMessage skips context collection when internal AI is disabled', async () => {
+test('gitOverlayGenerateCommitMessage skips internal AI and its context when disabled', async t => {
 	resetVsCodeCommandMock();
 	const { manager } = await createManager({ configurationValues: { 'promptManager.ai.enabled': false } });
+	const previousLoad = (Module as any)._load;
+	(Module as any)._load = function (request: string, ...args: unknown[]) {
+		return request === 'vscode' ? createVsCodeMock() : previousLoad.call(this, request, ...args);
+	};
+	t.after(() => { (Module as any)._load = previousLoad; resetVsCodeCommandMock(); });
 	const prompt = createPrompt({ projects: ['api'] });
 	const messages: any[] = [];
 	(manager as any).workspaceService = {
@@ -2243,18 +2301,18 @@ test('gitOverlayGenerateCommitMessage skips context collection when internal AI 
 		getStagedCommitProjects: async () => [{ project: 'api', projectPath: '/unused' }],
 		getStagedCommitProjectData: async () => { throw new Error('Disabled AI must not collect context'); },
 		generateCommitMessageViaKilo: async () => '',
-		generateCommitMessageViaCopilot: async () => '',
+		generateCommitMessageViaCopilot: async () => 'native result',
+		createGeneratedCommitMessageCleanupToken: () => 'cleanup:disabled',
 	};
-	(manager as any).aiService.generateCommitMessage = async (input: { stagedChangesSummary: string }) => {
-		assert.equal(input.stagedChangesSummary, '');
-		return 'chore: update api';
+	(manager as any).aiService.generateCommitMessage = async () => {
+		throw new Error('Disabled internal AI must not be invoked');
 	};
 	await (manager as any).handleMessage(
 		{ type: 'gitOverlayGenerateCommitMessage', prompt, project: 'api' },
 		{ webview: { postMessage: async (message: unknown) => { messages.push(message); return true; } } },
 		prompt, '__prompt_editor_singleton__', () => false, () => undefined,
 	);
-	assert.deepEqual(messages[0].messages, [{ project: 'api', message: 'chore: update api' }]);
+	assert.deepEqual(messages[0].messages, [{ project: 'api', message: 'native result', scmCleanupToken: 'cleanup:disabled' }]);
 	resetVsCodeCommandMock();
 });
 

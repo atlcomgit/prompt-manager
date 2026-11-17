@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { normalizePromptDashboardLayouts, PROMPT_DASHBOARD_SECTION_KEYS } from '../src/types/promptDashboard.js';
 import { normalizePromptDashboardPreferences } from '../src/types/promptDashboardPreferences.js';
 import { createDefaultEditorPromptViewState } from '../src/types/prompt.js';
@@ -957,6 +959,91 @@ test('StateService saves editor layout patches without globalizing Process expan
 		.map(key => key.slice('editor.mainExpandedSections.'.length)).sort(), [...PROMPT_EDITOR_TAB_SECTIONS.main].sort());
 	assert.equal(service.getPromptEditorViewState(source).expandedSections.plan, true);
 	assert.equal(service.getPromptEditorViewState(source).expandedSections.report, true);
+});
+
+/** Доля ширины панелей общая для рабочих областей; чтение, перенос legacy и чужие правки её не записывают. */
+test('StateService stores the panel split ratio globally and writes it only on explicit change', async () => {
+	const configuration = createConfigurationMock();
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext());
+	const ratioWrites = () => configuration.writes.filter(write => write.key === 'editor.panelSplitRatio');
+	const initial = service.getPromptEditorLayout();
+	assert.equal(Object.hasOwn(initial, 'panelSplitRatio'), false);
+	assert.equal(configuration.writes.length, 0);
+
+	// Первый жест другой настройки переносит legacy-поля, но не создаёт ключ ширины.
+	const reordered = structuredClone(initial);
+	reordered.main = ['files', ...initial.main.filter(key => key !== 'files')];
+	await service.savePromptEditorLayout(reordered, initial);
+	assert.equal(configuration.store.has('editor.panelSplitRatio'), false);
+	assert.equal(ratioWrites().length, 0);
+
+	const base = service.getPromptEditorLayout();
+	await service.savePromptEditorLayout({ ...base, panelSplitRatio: 0.612_345 }, base);
+	assert.deepEqual(ratioWrites(), [{ key: 'editor.panelSplitRatio', value: 0.6123, target: 1 }]);
+	const otherWorkspace = new StateService(createStateContext(createWorkspaceStateMock()));
+	assert.equal(otherWorkspace.getPromptEditorLayout().panelSplitRatio, 0.6123);
+	assert.equal(otherWorkspace.getPromptEditorLayout().main[0], 'files');
+
+	// Старое сообщение без поля и правка раскрытия из того же снимка не сбрасывают ширину.
+	const withRatio = service.getPromptEditorLayout();
+	const legacyMessage = structuredClone(withRatio);
+	delete legacyMessage.panelSplitRatio;
+	legacyMessage.process = ['report', ...withRatio.process.filter(key => key !== 'report')];
+	await service.savePromptEditorLayout(legacyMessage, withRatio);
+	const expansion = service.getPromptEditorLayout();
+	await service.savePromptEditorLayout({ ...expansion,
+		mainExpandedSections: { ...expansion.mainExpandedSections, files: !expansion.mainExpandedSections?.files } },
+	expansion);
+	assert.equal(ratioWrites().length, 1);
+	assert.equal(service.getPromptEditorLayout().panelSplitRatio, 0.6123);
+	assert.equal(service.getPromptEditorLayout().process[0], 'report');
+
+	// Сброс сохраняет явный null, а повтор того же значения ничего не пишет.
+	const beforeReset = service.getPromptEditorLayout();
+	await service.savePromptEditorLayout({ ...beforeReset, panelSplitRatio: null }, beforeReset);
+	const afterReset = service.getPromptEditorLayout();
+	await service.savePromptEditorLayout({ ...afterReset, panelSplitRatio: null }, afterReset);
+	assert.equal(configuration.store.get('editor.panelSplitRatio'), null);
+	assert.equal(afterReset.panelSplitRatio, null);
+	assert.equal(ratioWrites().length, 2);
+
+	// Некорректное ручное значение в settings.json читается как автоматическая ширина.
+	configuration.store.set('editor.panelSplitRatio', 'wide');
+	service.invalidatePromptUiSettings();
+	assert.equal(service.getPromptEditorLayout().panelSplitRatio, null);
+});
+
+/** Каждая глобальная настройка интерфейса объявлена application-ключом, иначе Settings Sync её не передаст. */
+test('PROMPT_UI_SETTING_KEYS are declared as application settings in package.json', async () => {
+	const { PROMPT_UI_SETTING_KEYS } = await importStateService();
+	const manifest = JSON.parse(readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8'));
+	const properties = manifest.contributes.configuration.properties as Record<string, Record<string, unknown>>;
+	for (const key of PROMPT_UI_SETTING_KEYS) {
+		assert.equal(properties[`promptManager.${key}`]?.scope, 'application', key);
+	}
+	const ratio = properties['promptManager.editor.panelSplitRatio'];
+	assert.deepEqual([ratio.type, ratio.default, ratio.minimum, ratio.maximum], [['number', 'null'], null, 0, 1]);
+});
+
+/** Отказ записи ширины оставляет подтверждённое значение и не мешает повтору того же выбора. */
+test('StateService keeps the confirmed panel split ratio after a failed write and accepts a retry', async () => {
+	let fail = true;
+	const configuration = createConfigurationMock({ 'editor.panelSplitRatio': 0.4 }, { update: async (store, key, value) => {
+		if (fail && key === 'editor.panelSplitRatio') {
+			fail = false;
+			throw new Error('ratio write failed');
+		}
+		store.set(key, value);
+	} });
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext());
+	const base = service.getPromptEditorLayout();
+	await assert.rejects(service.savePromptEditorLayout({ ...base, panelSplitRatio: 0.7 }, base), /ratio write failed/);
+	assert.equal(service.getPromptEditorLayout().panelSplitRatio, 0.4);
+	await service.savePromptEditorLayout({ ...base, panelSplitRatio: 0.7 }, base);
+	assert.equal(service.getPromptEditorLayout().panelSplitRatio, 0.7);
+	assert.equal(configuration.store.get('editor.panelSplitRatio'), 0.7);
 });
 
 /** Eager update скрыт до подтверждения и после отказа; следующая запись другого профиля не наследует его. */

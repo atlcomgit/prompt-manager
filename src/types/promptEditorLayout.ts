@@ -20,6 +20,22 @@ export interface PromptEditorLayout {
 	main: EditorPromptSectionKey[];
 	process: EditorPromptSectionKey[];
 	mainExpandedSections?: Partial<EditorPromptExpandedSections>;
+	/**
+	 * Доля ширины формы от суммы ширин формы и виджетов без промежутка; общая для промптов и вкладок.
+	 * `null` — автоматическая ширина, отсутствие поля — значение не передано и не меняется при patch.
+	 */
+	panelSplitRatio?: number | null;
+}
+
+/** Точность хранения доли: четыре знака не создают лишних изменений в Settings Sync. */
+const PROMPT_EDITOR_PANEL_SPLIT_RATIO_SCALE = 10_000;
+
+/** Возвращает долю в диапазоне 0…1 или null для автоматического режима; тесты: promptEditorLayout.test.ts. */
+export function normalizePromptEditorPanelSplitRatio(value: unknown): number | null {
+	if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+		return null;
+	}
+	return Math.round(value * PROMPT_EDITOR_PANEL_SPLIT_RATIO_SCALE) / PROMPT_EDITOR_PANEL_SPLIT_RATIO_SCALE;
 }
 
 /** Удаляет неизвестные ключи и добавляет новые разделы без дублей; скрытие не меняет список вкладки. */
@@ -50,12 +66,14 @@ export function normalizePromptEditorMainExpanded(value: unknown): Partial<Edito
 	return state;
 }
 
-/** Отсутствие main-снимка позволяет использовать старое состояние до первого сохранения. */
+/** Отсутствие main-снимка и доли ширины позволяет использовать прежнее состояние до первого сохранения. */
 export function normalizePromptEditorLayout(value?: Partial<PromptEditorLayout> | null): PromptEditorLayout {
 	return {
 		main: normalizePromptEditorSectionOrder(value?.main, 'main'),
 		process: normalizePromptEditorSectionOrder(value?.process, 'process'),
 		...(value?.mainExpandedSections !== undefined
 			? { mainExpandedSections: normalizePromptEditorMainExpanded(value.mainExpandedSections) } : {}),
+		...(value?.panelSplitRatio !== undefined
+			? { panelSplitRatio: normalizePromptEditorPanelSplitRatio(value.panelSplitRatio) } : {}),
 	};
 }

@@ -131,6 +131,8 @@ interface PromptDashboardProps {
 	/** Профиль измеренной ширины сетки и уведомление о его смене. */
 	layoutMode?: PromptDashboardLayoutMode;
 	onLayoutModeChange?: (mode: PromptDashboardLayoutMode) => void;
+	/** Пока меняется ширина панелей, профиль не переключается; после жеста сетка измеряется один раз. */
+	layoutModeFrozen?: boolean;
 	showGitFlowAction?: boolean;
 	onRefresh: () => void;
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void;
@@ -676,6 +678,67 @@ interface DashboardRailScrollSnapshot {
 	manualScrollVersion: number;
 }
 
+/** Источник событий изменения размера окна для сред без ResizeObserver. */
+type PromptDashboardResizeView = Pick<Window, 'addEventListener' | 'removeEventListener'>;
+
+/**
+ * Наблюдает полезную ширину сетки и сообщает только смену профиля, игнорируя скрытую сетку нулевой ширины.
+ * Замороженная сетка не измеряется: после снятия заморозки новый вызов сообщает текущий профиль один раз.
+ * Тесты: promptDashboardComponent.test.tsx.
+ */
+export function observePromptDashboardLayoutMode(
+	grid: Pick<Element, 'getBoundingClientRect'>,
+	options: {
+		frozen: boolean;
+		onChange: (mode: PromptDashboardLayoutMode) => void;
+		view: PromptDashboardResizeView;
+		ResizeObserverCtor?: new (callback: ResizeObserverCallback) => Pick<ResizeObserver, 'observe' | 'disconnect'>;
+	},
+): () => void {
+	if (options.frozen) {
+		return () => undefined;
+	}
+	let lastMode: PromptDashboardLayoutMode | undefined;
+	/** Сообщает только изменения режима. */
+	const measure = () => {
+		const width = grid.getBoundingClientRect().width;
+		if (width <= 0) {
+			return;
+		}
+		const nextMode = resolvePromptDashboardLayoutMode(width);
+		if (nextMode !== lastMode) {
+			lastMode = nextMode;
+			options.onChange(nextMode);
+		}
+	};
+	measure();
+	if (options.ResizeObserverCtor) {
+		const observer = new options.ResizeObserverCtor(measure);
+		observer.observe(grid as Element);
+		return () => observer.disconnect();
+	}
+	options.view.addEventListener('resize', measure);
+	return () => options.view.removeEventListener('resize', measure);
+}
+
+/**
+ * Возвращает функцию уведомления о профиле колонок, пропускающую повтор того же профиля:
+ * повторный замер после жеста разделителя или смены компоновки не дублирует сообщение host.
+ * Тесты: promptDashboardComponent.test.tsx.
+ */
+export function createPromptDashboardLayoutModeReporter(
+	report: (mode: PromptDashboardLayoutMode) => void,
+): (mode: PromptDashboardLayoutMode) => void {
+	let lastMode: PromptDashboardLayoutMode | null = null;
+	return mode => {
+		if (mode === lastMode) {
+			return;
+		}
+		lastMode = mode;
+		report(mode);
+	};
+}
+
 /** Панель виджетов с глобальными настройками и общей прокруткой в вертикальной компоновке. */
 export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	snapshot,
@@ -691,6 +754,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	onPreferencesChange,
 	layoutMode = 'two-columns',
 	onLayoutModeChange,
+	layoutModeFrozen = false,
 	showGitFlowAction = false,
 	onRefresh,
 	onRefreshWidget,
@@ -1081,33 +1145,19 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	}, [clearPendingRailScrollRestore]);
 
 	// Переключаем профиль при изменении полезной ширины, в том числе после скрытия и повторного открытия.
+	// Во время жеста разделителя наблюдение снято: каждая смена профиля перезапрашивает данные виджетов.
 	useEffect(() => {
 		const grid = widgetGridRef.current;
 		if (mode !== 'full' || !grid || !onLayoutModeChange) {
 			return;
 		}
-		let lastMode: PromptDashboardLayoutMode | undefined;
-		/** Сообщает только изменения режима, игнорируя скрытую сетку нулевой ширины. */
-		const measure = () => {
-			const width = grid.getBoundingClientRect().width;
-			if (width <= 0) {
-				return;
-			}
-			const nextMode = resolvePromptDashboardLayoutMode(width);
-			if (nextMode !== lastMode) {
-				lastMode = nextMode;
-				onLayoutModeChange(nextMode);
-			}
-		};
-		measure();
-		if (typeof ResizeObserver !== 'undefined') {
-			const observer = new ResizeObserver(measure);
-			observer.observe(grid);
-			return () => observer.disconnect();
-		}
-		window.addEventListener('resize', measure);
-		return () => window.removeEventListener('resize', measure);
-	}, [mode, onLayoutModeChange, stacked]);
+		return observePromptDashboardLayoutMode(grid, {
+			frozen: layoutModeFrozen,
+			onChange: onLayoutModeChange,
+			view: window,
+			ResizeObserverCtor: typeof ResizeObserver !== 'undefined' ? ResizeObserver : undefined,
+		});
+	}, [layoutModeFrozen, mode, onLayoutModeChange, stacked]);
 
 	// Смена ширины отменяет незавершённый перенос, чтобы он не записал порядок соседнего режима.
 	useEffect(() => {

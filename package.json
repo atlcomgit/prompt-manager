@@ -418,6 +418,17 @@
           "scope": "application",
           "markdownDescription": "Раскрытие раздела «Файлы контекста» вкладки «Основное». Общая настройка интерфейса; передаётся через Settings Sync."
         },
+        "promptManager.editor.panelSplitRatio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Доля ширины формы промпта относительно виджетов (от 0 до 1). Меняется перетаскиванием разделителя на странице промпта; `null` — автоматическая ширина. Минимальные ширины панелей соблюдаются всегда. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
         "promptManager.dashboardLayouts.singleColumn.order": {
           "type": [
             "array",

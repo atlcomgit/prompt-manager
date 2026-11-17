@@ -3,13 +3,15 @@ import { resolvePromptDashboardWidgetKindForSection } from '../types/promptDashb
 import { isPromptDashboardProjectsSectionLoaded } from '../types/promptDashboard.js';
 import type { GitOverlayBranchInfo, GitOverlayChangeFile, GitOverlayCommitChangedFile } from '../types/git.js';
 import type { Prompt, PromptStatus } from '../types/prompt.js';
+import { normalizePromptEditorPanelSplitRatio } from '../types/promptEditorLayout.js';
 
 export const PROMPT_DASHBOARD_WARM_INTERVAL_MS = 5 * 60 * 1000;
 export const PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS = 5 * 60 * 1000;
 /** Размеры внешних областей, включая отступы; граничные значения проверяет promptDashboard.test.ts. */
 export const PROMPT_EDITOR_FORM_MAX_WIDTH_PX = 840;
 export const PROMPT_EDITOR_FORM_MIN_WIDTH_PX = 300;
-export const PROMPT_EDITOR_PANELS_GAP_PX = 12;
+/** Промежуток между панелями занимает разделитель: линия 2 px по центру и отступы по 8 px с каждой стороны. */
+export const PROMPT_EDITOR_PANELS_GAP_PX = 18;
 export const PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX = 320;
 const PROMPT_DASHBOARD_PREFERRED_WIDTH_PX = 360;
 /** Размеры существующей сетки; используются и измерением, и стилями. */
@@ -44,16 +46,54 @@ interface PromptDashboardNormalizedPath {
 	parts: PromptDashboardCompactPathParts;
 }
 
-/** Распределяет ширину без скрытия виджетов; слишком узкое окно получает вертикальную компоновку. */
-export function resolvePromptEditorLayout(pageWidth: number): { stacked: boolean; formWidth: number } {
+/** Допустимые ширины формы при горизонтальной компоновке; available — сумма ширин обеих панелей без промежутка. */
+export interface PromptEditorFormWidthBounds {
+	available: number;
+	min: number;
+	max: number;
+}
+
+/** Возвращает null для вертикальной компоновки; при 632 px диапазон вырожден (min = max). */
+export function resolvePromptEditorFormWidthBounds(pageWidth: number): PromptEditorFormWidthBounds | null {
 	const width = Number.isFinite(pageWidth) ? Math.max(0, pageWidth) : 0;
-	const stacked = width < PROMPT_EDITOR_FORM_MIN_WIDTH_PX + PROMPT_EDITOR_PANELS_GAP_PX
-		+ PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX;
+	if (width < PROMPT_EDITOR_FORM_MIN_WIDTH_PX + PROMPT_EDITOR_PANELS_GAP_PX + PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX) {
+		return null;
+	}
+	const available = width - PROMPT_EDITOR_PANELS_GAP_PX;
+	return { available, min: PROMPT_EDITOR_FORM_MIN_WIDTH_PX, max: available - PROMPT_DASHBOARD_MIN_RIGHT_SPACE_PX };
+}
+
+/** Ограничивает ширину формы минимумами обеих панелей и округляет её до целого пикселя. */
+export function clampPromptEditorFormWidth(bounds: PromptEditorFormWidthBounds, formWidth: number): number {
+	const width = Number.isFinite(formWidth) ? Math.round(formWidth) : bounds.min;
+	return Math.min(bounds.max, Math.max(bounds.min, width));
+}
+
+/** Переводит выбранную ширину формы в сохраняемую долю; обратный расчёт даёт ту же ширину. */
+export function resolvePromptEditorPanelSplitRatio(bounds: PromptEditorFormWidthBounds, formWidth: number): number {
+	return normalizePromptEditorPanelSplitRatio(clampPromptEditorFormWidth(bounds, formWidth) / bounds.available) ?? 0;
+}
+
+/**
+ * Распределяет ширину без скрытия виджетов; слишком узкое окно получает вертикальную компоновку.
+ * Без доли форма автоматическая (до 840 px), ручная доля ограничена только минимумами панелей.
+ */
+export function resolvePromptEditorLayout(
+	pageWidth: number,
+	panelSplitRatio?: number | null,
+): { stacked: boolean; formWidth: number } {
+	const width = Number.isFinite(pageWidth) ? Math.max(0, pageWidth) : 0;
+	const bounds = resolvePromptEditorFormWidthBounds(width);
+	if (!bounds) {
+		return { stacked: true, formWidth: width };
+	}
+	const ratio = normalizePromptEditorPanelSplitRatio(panelSplitRatio);
 	return {
-		stacked,
-		formWidth: stacked ? width : Math.min(PROMPT_EDITOR_FORM_MAX_WIDTH_PX,
-			Math.max(PROMPT_EDITOR_FORM_MIN_WIDTH_PX, width - PROMPT_EDITOR_PANELS_GAP_PX
-				- PROMPT_DASHBOARD_PREFERRED_WIDTH_PX)),
+		stacked: false,
+		formWidth: ratio === null
+			? Math.min(PROMPT_EDITOR_FORM_MAX_WIDTH_PX, Math.max(PROMPT_EDITOR_FORM_MIN_WIDTH_PX,
+				width - PROMPT_EDITOR_PANELS_GAP_PX - PROMPT_DASHBOARD_PREFERRED_WIDTH_PX))
+			: clampPromptEditorFormWidth(bounds, bounds.available * ratio),
 	};
 }
 

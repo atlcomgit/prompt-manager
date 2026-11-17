@@ -920,15 +920,45 @@ test('resolveInitialPromptDashboardLayouts restores both profiles from host and 
 
 /** Виджеты остаются в DOM даже там, где прежний порог скрывал всю панель. */
 test('EditorApp retains widgets below the former fixed form breakpoint', async () => {
-	for (const width of [300, 631, 632, 800, 1119, 1120]) {
+	for (const width of [300, 637, 638, 800, 1119, 1120]) {
 		await withEditorAppEnvironment(EditorApp => {
 			const markup = renderToStaticMarkup(React.createElement(EditorApp));
 			assert.ok(markup.includes('data-pm-prompt-dashboard="true"'), `widgets at ${width}px`);
-			assert.ok(markup.includes(`data-pm-editor-layout="${width < 632 ? 'stacked' : 'side-by-side'}"`));
+			assert.ok(markup.includes(`data-pm-editor-layout="${width < 638 ? 'stacked' : 'side-by-side'}"`));
 			// Один набор longhand-свойств не теряет scroll при удалении stacked-стилей в React.
 			const container = markup.match(/<div[^>]*data-pm-editor-layout=[^>]*>/)?.[0] || '';
-			assert.match(container, new RegExp(`overflow-y:${width < 632 ? 'auto' : 'hidden'}`));
+			assert.match(container, new RegExp(`overflow-y:${width < 638 ? 'auto' : 'hidden'}`));
 			assert.doesNotMatch(container, /(?:;|style=")overflow:/);
+		}, width);
+	}
+});
+
+/** Разделитель занимает прежний промежуток между формой и виджетами и не показывается в вертикальной компоновке. */
+test('EditorApp places the panel splitter between the form and widgets only side by side', async () => {
+	for (const width of [637, 638, 1280]) {
+		await withEditorAppEnvironment(EditorApp => {
+			const markup = renderToStaticMarkup(React.createElement(EditorApp));
+			const container = markup.match(/<div[^>]*data-pm-editor-layout=[^>]*>/)?.[0] || '';
+			assert.doesNotMatch(container, /gap:/, `container gap at ${width}px`);
+			if (width < 638) {
+				assert.doesNotMatch(markup, /data-pm-panel-splitter=/);
+				return;
+			}
+			const form = markup.indexOf('class="pm-editor-form"');
+			const splitter = markup.indexOf('data-pm-panel-splitter="true"');
+			const dashboard = markup.indexOf('data-pm-prompt-dashboard="true"');
+			assert.ok(form >= 0 && form < splitter && splitter < dashboard, `order at ${width}px`);
+			const splitterTag = markup.match(/<div[^>]*data-pm-panel-splitter="true"[^>]*>/)?.[0] || '';
+			assert.match(splitterTag, /role="separator"[^>]*aria-orientation="vertical"/);
+			assert.match(splitterTag, /data-pm-panel-splitter-mode="auto"/);
+			if (width === 638) {
+				assert.match(splitterTag, /aria-disabled="true"/);
+			} else {
+				// Автоматическая форма 840 px из 1262 px суммарной ширины панелей.
+				assert.match(markup, /class="pm-editor-form" style="[^"]*flex:0 0 840px/);
+				assert.match(splitterTag, /aria-valuenow="67"/);
+				assert.doesNotMatch(splitterTag, /aria-disabled/);
+			}
 		}, width);
 	}
 });

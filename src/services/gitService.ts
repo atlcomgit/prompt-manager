@@ -255,7 +255,7 @@ function createDeferredGitOverlayBranchDetails(): GitOverlayProjectBranchDetails
 
 export class GitService {
 	private static readonly DIFF_MAX_BUFFER = 8 * 1024 * 1024;
-	/** Ограничения резервного контекста: исходные объекты, количество патчей и итоговый текст. */
+	/** Ограничения внутреннего контекста: исходные объекты, количество патчей и итоговый текст. */
 	private static readonly COMMIT_FILE_MAX_BYTES = 64 * 1024;
 	private static readonly COMMIT_CONTEXT_MAX_CHARS = 12000;
 	private static readonly COMMIT_CODE_MAX_FILES = 6;
@@ -3646,7 +3646,7 @@ export class GitService {
 
 	/**
 	 * Загружает staged-тексты параллельно, чтобы Copilot не читал их последовательно через VS Code RPC.
-	 * Включает имена с test: фильтр резервного контекста не ограничивает собственный отбор Copilot.
+	 * Включает имена с test: фильтр внутреннего контекста не ограничивает собственный отбор Copilot.
 	 * Не показывает вкладки и не собирает свой prompt; лимиты, отмена и бинарные файлы — tests/gitService.test.ts.
 	 */
 	private async prefetchCopilotCommitDocuments(

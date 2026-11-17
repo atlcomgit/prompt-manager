@@ -151,6 +151,13 @@ export function activate(context: vscode.ExtensionContext) {
 	let codeMapAdminService: CodeMapAdminService | undefined;
 	let codeMapRealtimeWatcherRegistered = false;
 
+	// Общий каталог загружается в фоне; позднее завершение обновляет уже открытые списки моделей.
+	context.subscriptions.push(aiService);
+	aiService.initializeModelCatalog(() => {
+		editorPanelManager.refreshAvailableModels();
+		memoryPanelManager?.refreshAvailableModels();
+	});
+
 	// Initialize Copilot Premium usage status bar
 	const copilotUsageService = new CopilotUsageService(context);
 	void copilotUsageService.checkAuthenticationBindingOnActivation();
@@ -160,8 +167,6 @@ export function activate(context: vscode.ExtensionContext) {
 			`[${new Date().toISOString()}] [copilot-models] rebroadcasting AI models after account switch: ${accountLabel}`,
 		);
 		aiService.clearCopilotModelCaches();
-		editorPanelManager.refreshAvailableModelsAfterCopilotAccountSwitch();
-		memoryPanelManager?.refreshAvailableModelsAfterCopilotAccountSwitch();
 	};
 	const copilotUsagePanelManager = new CopilotUsagePanelManager(
 		context.extensionUri,

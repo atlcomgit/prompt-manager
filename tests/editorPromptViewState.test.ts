@@ -30,9 +30,10 @@ test('createDefaultEditorPromptExpandedSections opens the main authoring blocks 
 	});
 });
 
-test('createDefaultEditorPromptViewState returns main tab by default', () => {
+test('createDefaultEditorPromptViewState uses compact plan mode for new prompts', () => {
 	assert.deepEqual(createDefaultEditorPromptViewState(), {
 		activeTab: 'main',
+		planViewMode: 'compact',
 		expandedSections: createDefaultEditorPromptExpandedSections(),
 		manualSectionOverrides: {},
 		descriptionExpanded: false,
@@ -46,6 +47,7 @@ test('createDefaultEditorPromptViewState returns main tab by default', () => {
 test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 	assert.deepEqual(normalizeEditorPromptViewState({
 		activeTab: 'process',
+		planViewMode: 'compact',
 		expandedSections: { basic: false, status: true, plan: true },
 		manualSectionOverrides: { report: 'manual', notes: false as never },
 		descriptionExpanded: true,
@@ -63,6 +65,7 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 		},
 	}), {
 		activeTab: 'process',
+		planViewMode: 'compact',
 		expandedSections: {
 			...createDefaultEditorPromptExpandedSections(),
 			basic: false,
@@ -85,6 +88,7 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 		normalizeEditorPromptViewState({ activeTab: 'unknown' as 'main' }),
 		{
 			activeTab: 'main',
+			planViewMode: 'full',
 			expandedSections: createDefaultEditorPromptExpandedSections(),
 			manualSectionOverrides: {},
 			descriptionExpanded: false,
@@ -96,6 +100,7 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 	);
 	assert.deepEqual(normalizeEditorPromptViewState(null), {
 		activeTab: 'main',
+		planViewMode: 'compact',
 		expandedSections: createDefaultEditorPromptExpandedSections(),
 		manualSectionOverrides: {},
 		descriptionExpanded: false,
@@ -104,6 +109,15 @@ test('normalizeEditorPromptViewState accepts only supported tabs', () => {
 		contentHeights: {},
 		sectionHeights: {},
 	});
+});
+
+test('normalizeEditorPromptViewState uses compact defaults, preserves explicit modes, and upgrades legacy views', () => {
+	assert.equal(normalizeEditorPromptViewState(null).planViewMode, 'compact');
+	assert.equal(normalizeEditorPromptViewState(undefined).planViewMode, 'compact');
+	assert.equal(normalizeEditorPromptViewState({ activeTab: 'process' }).planViewMode, 'full');
+	assert.equal(normalizeEditorPromptViewState({ planViewMode: 'full' }).planViewMode, 'full');
+	assert.equal(normalizeEditorPromptViewState({ planViewMode: 'compact' }).planViewMode, 'compact');
+	assert.equal(normalizeEditorPromptViewState({ planViewMode: 'invalid' as any }).planViewMode, 'full');
 });
 
 test('normalizeEditorPromptViewState keeps legacy manual overrides and accepts until-content only for plan and report', () => {
@@ -115,6 +129,7 @@ test('normalizeEditorPromptViewState keeps legacy manual overrides and accepts u
 		} as any,
 	}), {
 		activeTab: 'main',
+		planViewMode: 'full',
 		expandedSections: createDefaultEditorPromptExpandedSections(),
 		manualSectionOverrides: {
 			report: 'manual',
@@ -163,6 +178,7 @@ test('moveEditorPromptViewStateEntries migrates transient panel state to composi
 	assert.deepEqual(next, {
 		'promptUuid:uuid-1|promptId:prompt-a': {
 			activeTab: 'process',
+			planViewMode: 'full',
 			expandedSections: createDefaultEditorPromptExpandedSections(),
 			manualSectionOverrides: {},
 			descriptionExpanded: false,
@@ -193,6 +209,7 @@ test('moveEditorPromptViewStateEntries keeps stable target state and removes dup
 	assert.deepEqual(next, {
 		'promptUuid:uuid-1|promptId:prompt-a': {
 			activeTab: 'process',
+			planViewMode: 'full',
 			expandedSections: createDefaultEditorPromptExpandedSections(),
 			manualSectionOverrides: {},
 			descriptionExpanded: false,
@@ -222,6 +239,7 @@ test('moveEditorPromptViewStateEntries prefers legacy promptUuid state over prom
 	assert.deepEqual(next, {
 		'promptUuid:uuid-1|promptId:prompt-a': {
 			activeTab: 'process',
+			planViewMode: 'full',
 			expandedSections: createDefaultEditorPromptExpandedSections(),
 			manualSectionOverrides: {},
 			descriptionExpanded: false,

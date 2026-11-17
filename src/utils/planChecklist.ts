@@ -12,6 +12,44 @@ export interface PlanChecklistStats {
 
 const PLAN_CHECKLIST_ITEM_PATTERN = /^\s*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(.+?)\s*$/;
 
+/** Keeps headings and checkbox items at their source indices for compact plan rendering. */
+export function selectCompactPlanLines(lines: readonly string[]): Array<{ index: number; text: string }> {
+	const result: Array<{ index: number; text: string }> = [];
+	let fenceMarker = '';
+	let fenceLength = 0;
+
+	for (let index = 0; index < lines.length; index += 1) {
+		const text = lines[index];
+		const fence = text.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+		if (fence) {
+			const marker = fence[1];
+			if (!fenceMarker) {
+				fenceMarker = marker[0];
+				fenceLength = marker.length;
+			} else if (marker[0] === fenceMarker && marker.length >= fenceLength && !fence[2].trim()) {
+				fenceMarker = '';
+				fenceLength = 0;
+			}
+			continue;
+		}
+		if (fenceMarker) {
+			continue;
+		}
+		const isHeading = /^ {0,3}#{1,6}(?:[ \t]+|$)/.test(text);
+		const isChecklistItem = /^\s*(?:(?:[-*+]|\d+[.)])\s+)?\[[ xX]\](?:\s|$)/.test(text);
+		if (isHeading || isChecklistItem) {
+			// Keep one existing blank line before a heading, without adding extra empty rows.
+			if (isHeading && result.length > 0 && index > 0
+				&& lines[index - 1].trim() === '' && result[result.length - 1].text !== '') {
+				result.push({ index: index - 1, text: '' });
+			}
+			result.push({ index, text });
+		}
+	}
+
+	return result;
+}
+
 export function parsePlanChecklist(markdown: string): PlanChecklistItem[] {
 	if (!markdown.trim()) {
 		return [];

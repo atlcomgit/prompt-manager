@@ -267,6 +267,30 @@ test('StateService serializes prompt editor view-state save and migrate mutation
 	}).expandedSections.files, false);
 });
 
+/** The saved plan view mode is separate for each prompt, even across reopens. */
+test('StateService persists the plan mode independently per prompt', async () => {
+	const { StateService } = await importStateService();
+	const service = new StateService(createStateContext());
+	const sourceA = { promptUuid: 'uuid-plan-a', promptId: 'plan-a' };
+	const sourceB = { promptUuid: 'uuid-plan-b', promptId: 'plan-b' };
+	assert.equal(service.getPromptEditorViewState(sourceA).planViewMode, 'compact');
+
+	await service.savePromptEditorViewState(sourceA, {
+		...createDefaultEditorPromptViewState(),
+		planViewMode: 'full',
+	});
+	await service.savePromptEditorViewState(sourceB, createDefaultEditorPromptViewState());
+	assert.equal(service.getPromptEditorViewState(sourceA).planViewMode, 'full');
+	assert.equal(service.getPromptEditorViewState(sourceB).planViewMode, 'compact');
+
+	await service.savePromptEditorViewState(sourceB, {
+		...createDefaultEditorPromptViewState(),
+		planViewMode: 'full',
+	});
+	assert.equal(service.getPromptEditorViewState(sourceA).planViewMode, 'full');
+	assert.equal(service.getPromptEditorViewState(sourceB).planViewMode, 'full');
+});
+
 /** Очередь сохраняет последние сворачивания через пользовательскую конфигурацию. */
 test('StateService serializes global dashboard collapse writes', async () => {
 	const entered = createDeferred<void>();

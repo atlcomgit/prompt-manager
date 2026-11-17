@@ -39,6 +39,7 @@ import type {
   EditorPromptSectionHeights,
   EditorPromptTab,
   EditorPromptViewState,
+  EditorPromptPlanViewMode,
   Prompt,
   PromptChatTarget,
   PromptContextFileCard,
@@ -85,6 +86,7 @@ import {
 } from '../../utils/contextFiles.js';
 import { TimeTrackingService } from '../../services/timeTrackingService.js';
 import { getChangedLineIndexes } from '../../utils/planLineDiff.js';
+import { selectCompactPlanLines } from '../../utils/planChecklist.js';
 import { diffPromptConfigSyncFields, PROMPT_CONFIG_SYNC_FIELDS } from '../../utils/promptExternalSync.js';
 import { shouldApplyPromptAiEnrichmentState, shouldApplyPromptSaveResult } from '../../utils/promptSaveFeedback.js';
 import {
@@ -1144,6 +1146,11 @@ export const EditorApp: React.FC = () => {
     setActiveTabState(tab);
   }, []);
   const [promptPlanState, setPromptPlanState] = useState<{ exists: boolean; content: string }>({ exists: false, content: '' });
+  const [planViewMode, setPlanViewMode] = useState<EditorPromptPlanViewMode>(
+    () => initialEditorViewStateRef.current?.planViewMode ?? createDefaultEditorPromptViewState().planViewMode,
+  );
+  /** Keeps the latest selection available during prompt switches before React commits. */
+  const planViewModeRef = useRef<EditorPromptPlanViewMode>(planViewMode);
   const [isPromptPlanHydrating, setIsPromptPlanHydrating] = useState(false);
   const [planHighlightedLineIndexes, setPlanHighlightedLineIndexes] = useState<number[]>([]);
   const [notice, setNotice] = useState<InlineNotice | null>(null);
@@ -1171,6 +1178,7 @@ export const EditorApp: React.FC = () => {
   );
   const editorViewStateRef = useRef<EditorPromptViewState>(normalizeEditorPromptViewState({
     activeTab,
+    planViewMode,
     expandedSections,
     manualSectionOverrides,
     descriptionExpanded: isDescriptionExpanded,
@@ -2139,6 +2147,7 @@ export const EditorApp: React.FC = () => {
   /** Build a latest editor view state snapshot with live field and section heights. */
   const captureEditorViewStateSnapshot = useCallback((): EditorPromptViewState => normalizeEditorPromptViewState({
     activeTab: activeTabRef.current,
+    planViewMode: planViewModeRef.current,
     branchesExpanded: showBranches,
     branchesExpandedManual,
     expandedSections,
@@ -2933,14 +2942,20 @@ export const EditorApp: React.FC = () => {
 
   const planLines = useMemo(() => promptPlanState.content.split(/\r?\n/), [promptPlanState.content]);
 
+  const visiblePlanLines = useMemo(
+    () => planViewMode === 'compact'
+      ? selectCompactPlanLines(planLines)
+      : planLines.map((text, index) => ({ index, text })),
+    [planLines, planViewMode],
+  );
+
   const planLineSegments = useMemo(() => {
     const highlightedLineIndexSet = new Set(planHighlightedLineIndexes);
     const segments: Array<{ highlighted: boolean; lines: Array<{ index: number; text: string }> }> = [];
 
-    for (let index = 0; index < planLines.length; index += 1) {
-      const highlighted = highlightedLineIndexSet.has(index);
+    for (const lineEntry of visiblePlanLines) {
+      const highlighted = highlightedLineIndexSet.has(lineEntry.index);
       const lastSegment = segments[segments.length - 1];
-      const lineEntry = { index, text: planLines[index] };
 
       if (!lastSegment || lastSegment.highlighted !== highlighted) {
         segments.push({ highlighted, lines: [lineEntry] });
@@ -2951,7 +2966,7 @@ export const EditorApp: React.FC = () => {
     }
 
     return segments;
-  }, [planLines, planHighlightedLineIndexes]);
+  }, [visiblePlanLines, planHighlightedLineIndexes]);
 
   const shouldShowPlanSection = isPersistedPrompt && shouldShowPromptPlanForStatus(prompt.status);
 
@@ -3330,6 +3345,8 @@ export const EditorApp: React.FC = () => {
           sectionCount: Object.keys(loadingEditorViewState.sectionHeights || {}).length,
         });
         setActiveTab(loadingEditorViewState.activeTab);
+        planViewModeRef.current = loadingEditorViewState.planViewMode;
+        setPlanViewMode(loadingEditorViewState.planViewMode);
         setExpandedSections(loadingEditorViewState.expandedSections);
         setManualSectionOverrides(loadingEditorViewState.manualSectionOverrides);
         setIsDescriptionExpanded(loadingEditorViewState.descriptionExpanded);
@@ -3377,6 +3394,8 @@ export const EditorApp: React.FC = () => {
           const restoreViewState = promptSwitchRestoreViewStateRef.current;
           if (restoreViewState) {
             setActiveTab(restoreViewState.activeTab);
+            planViewModeRef.current = restoreViewState.planViewMode;
+            setPlanViewMode(restoreViewState.planViewMode);
             setExpandedSections(restoreViewState.expandedSections);
             setManualSectionOverrides(restoreViewState.manualSectionOverrides);
             setIsDescriptionExpanded(restoreViewState.descriptionExpanded);
@@ -3538,6 +3557,8 @@ export const EditorApp: React.FC = () => {
             promptRef.current = msg.prompt;
             setPrompt(msg.prompt);
             setActiveTab(nextEditorViewState.activeTab);
+            planViewModeRef.current = nextEditorViewState.planViewMode;
+            setPlanViewMode(nextEditorViewState.planViewMode);
             setExpandedSections(nextEditorViewState.expandedSections);
             setManualSectionOverrides(nextEditorViewState.manualSectionOverrides);
             setIsDescriptionExpanded(nextEditorViewState.descriptionExpanded);
@@ -5039,6 +5060,7 @@ export const EditorApp: React.FC = () => {
   useEffect(() => {
     const nextEditorViewState = normalizeEditorPromptViewState({
       activeTab,
+      planViewMode,
       expandedSections,
       manualSectionOverrides,
       descriptionExpanded: isDescriptionExpanded,
@@ -5053,7 +5075,7 @@ export const EditorApp: React.FC = () => {
     if (storage) {
       storage.setItem('pm.editor.viewState', JSON.stringify(nextEditorViewState));
     }
-  }, [activeTab, branchesExpandedManual, editorContentHeights, expandedSections, manualSectionOverrides, isDescriptionExpanded, sectionHeights, showBranches, storage]);
+  }, [activeTab, branchesExpandedManual, editorContentHeights, expandedSections, manualSectionOverrides, isDescriptionExpanded, planViewMode, sectionHeights, showBranches, storage]);
 
   useEffect(() => {
     const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
@@ -7979,6 +8001,9 @@ export const EditorApp: React.FC = () => {
           {(shouldShowPromptSwitchPlaceholder || shouldShowPlanSection) ? renderSection('plan', 'План', planSummary, (
             <>
               {hasPlanContent ? (
+                planViewMode === 'compact' && visiblePlanLines.length === 0 ? (
+                  <div style={styles.planRawContentEmpty}>В плане нет заголовков или пунктов чек-листа</div>
+                ) : (
                 <div style={styles.planRawContent} role="log" aria-live="polite" aria-atomic="false">
                   {planLineSegments.map((segment, segmentIndex) => (
                     <div
@@ -7993,6 +8018,7 @@ export const EditorApp: React.FC = () => {
                     </div>
                   ))}
                 </div>
+                )
           ) : planPlaceholderState === 'plan-mode' ? (
             <div style={styles.planModeNotice} role="status" aria-live="polite">
               <span style={styles.planModeNoticeBadge}>PLAN</span>
@@ -8005,14 +8031,38 @@ export const EditorApp: React.FC = () => {
               )}
             </>
           ), hasPlanContent ? (
-            <button
-              type="button"
-              style={styles.linkBtn}
-              onClick={handleOpenPromptPlanInEditor}
-              title={t('editor.open')}
-            >
-              {openActionLabel}
-            </button>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              <div role="group" aria-label="Режим отображения плана" style={styles.planViewToggleGroup}>
+                {(['compact', 'full'] as const).map(mode => (
+                  <button
+                    key={mode}
+                    type="button"
+                    aria-pressed={planViewMode === mode}
+                    onClick={() => {
+                      planViewModeRef.current = mode;
+                      setPlanViewMode(mode);
+                      enqueueEditorViewStateSave({ flush: true, reason: 'plan-view-mode' });
+                    }}
+                    title={mode === 'compact' ? 'Только заголовки и пункты чек-листа' : 'Весь план'}
+                    style={{
+                      ...styles.planViewToggleButton,
+                      ...(planViewMode === mode ? styles.planViewToggleButtonActive : {}),
+                      ...(mode === 'full' ? { borderRight: 'none' } : {}),
+                    }}
+                  >
+                    {mode === 'compact' ? 'Краткий' : 'Полный'}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                style={styles.linkBtn}
+                onClick={handleOpenPromptPlanInEditor}
+                title={t('editor.open')}
+              >
+                {openActionLabel}
+              </button>
+            </div>
           ) : null) : null}
 
           {renderSection('report', 'Отчет', reportSummary, (
@@ -8973,6 +9023,27 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '12px',
+  },
+  planViewToggleGroup: {
+    display: 'inline-flex',
+    border: '1px solid var(--vscode-panel-border)',
+    borderRadius: '5px',
+    overflow: 'hidden',
+    flexShrink: 0,
+  },
+  planViewToggleButton: {
+    padding: '3px 7px',
+    border: 'none',
+    borderRight: '1px solid var(--vscode-panel-border)',
+    background: 'var(--vscode-button-secondaryBackground)',
+    color: 'var(--vscode-button-secondaryForeground)',
+    fontFamily: 'var(--vscode-font-family)',
+    fontSize: '11px',
+    cursor: 'pointer',
+  },
+  planViewToggleButtonActive: {
+    background: 'var(--vscode-button-background)',
+    color: 'var(--vscode-button-foreground)',
   },
   planRawContent: {
     display: 'flex',

@@ -129,9 +129,13 @@ export function createDefaultEditorPromptManualSectionOverrides(): EditorPromptM
 	return {};
 }
 
+/** Plan display mode stored separately for each prompt. */
+export type EditorPromptPlanViewMode = 'compact' | 'full';
+
 /** Persisted per-prompt editor view state */
 export interface EditorPromptViewState {
 	activeTab: EditorPromptTab;
+	planViewMode: EditorPromptPlanViewMode;
 	expandedSections: EditorPromptExpandedSections;
 	manualSectionOverrides: EditorPromptManualSectionOverrides;
 	descriptionExpanded: boolean;
@@ -159,6 +163,7 @@ export interface EditorPromptViewStateKeySource {
 export function createDefaultEditorPromptViewState(): EditorPromptViewState {
 	return {
 		activeTab: 'main',
+		planViewMode: 'compact',
 		expandedSections: createDefaultEditorPromptExpandedSections(),
 		manualSectionOverrides: createDefaultEditorPromptManualSectionOverrides(),
 		descriptionExpanded: false,
@@ -277,6 +282,9 @@ export function normalizeEditorPromptViewState(
 
 	return {
 		activeTab: state.activeTab === 'process' ? 'process' : defaults.activeTab,
+		// Retain the full plan for legacy saved states with no view selection.
+		planViewMode: state.planViewMode === 'compact' || state.planViewMode === 'full'
+			? state.planViewMode : 'full',
 		expandedSections: normalizeEditorPromptExpandedSections(state.expandedSections),
 		manualSectionOverrides: normalizeEditorPromptManualSectionOverrides(state.manualSectionOverrides),
 		descriptionExpanded: typeof state.descriptionExpanded === 'boolean'

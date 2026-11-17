@@ -9,6 +9,13 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 ### 2026-11-17
 
 #### Added
+- Added a Compact / Full toggle to the Process tab's Plan header. Compact mode keeps Markdown headings and
+  checkbox items with their original completion markers and nesting, hiding explanatory text and code blocks.
+  New prompts now default to Compact, with each prompt's choice saved and restored independently.
+  Existing stored states without a view choice continue to use Full; switching never edits the plan file.
+  Compact mode now retains at most one existing blank line before a section heading.
+  The general instructions now define self-contained checklist titles, indented multi-line details and
+  acceptance criteria, with examples of how the same plan looks in Full and Compact views.
 - Задача 173: на странице промпта ширину формы и виджетов можно менять разделителем — мышью, пером, касанием
   или клавиатурой (стрелки, Shift, Home/End); Enter и двойной щелчок возвращают автоматическую ширину.
   Доля ширины сохраняется глобально в application-настройке `promptManager.editor.panelSplitRatio`, общая для всех

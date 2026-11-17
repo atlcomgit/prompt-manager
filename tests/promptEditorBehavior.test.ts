@@ -29,6 +29,7 @@ import {
 test('resolvePromptOpenEditorViewState can force the main tab without losing other editor state', () => {
 	assert.deepEqual(resolvePromptOpenEditorViewState({
 		activeTab: 'process',
+		planViewMode: 'compact',
 		expandedSections: {
 			...createDefaultEditorPromptExpandedSections(),
 			plan: true,
@@ -49,6 +50,7 @@ test('resolvePromptOpenEditorViewState can force the main tab without losing oth
 		forceMainTab: true,
 	}), {
 		activeTab: 'main',
+		planViewMode: 'compact',
 		expandedSections: {
 			...createDefaultEditorPromptExpandedSections(),
 			plan: true,

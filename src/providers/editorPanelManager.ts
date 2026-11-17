@@ -1849,7 +1849,9 @@ export class EditorPanelManager {
 			return true;
 		}
 
-		return event === 'webview.editor-layout.sectionHeights.measured'
+		// Замеры генерации проходят оба фильтра: coordinator и общий канал Prompt Manager.
+		return event === 'gitOverlay.commitMessage.timing'
+			|| event === 'webview.editor-layout.sectionHeights.measured'
 			|| event === 'webview.editor-report.mainRichText.autoResize.heightChanged'
 			|| event === 'webview.editor-report.mainRichText.autoResize.deferUnstableModeSwitchMeasurement'
 			|| event === 'webview.editor-report.mainRichText.mode.switch.start'
@@ -3396,8 +3398,13 @@ export class EditorPanelManager {
 		if (!cwd) throw new Error('OpenCode CLI: откройте рабочую область VS Code.');
 		const generation = this.openCodeCliLaunchGenerations.get(prompt.promptUuid);
 		return this.getOpenCodeCliService().start({ promptUuid: prompt.promptUuid,
-			title: [prompt.taskNumber, prompt.title].filter(Boolean).join(' · '), cwd, query,
+			title: this.buildChatSessionRenameTitle(prompt), cwd, query,
 			files: fileUris.map(uri => uri.fsPath), autoStart: prompt.autoStartOpenCodeChat === true,
+			onWarning: message => {
+				if (!this.isShuttingDown && this.openCodeCliLaunchGenerations.get(prompt.promptUuid) === generation) {
+					void vscode.window.showWarningMessage(message);
+				}
+			},
 			onManualSubmission: async isCurrentLaunch => {
 				// Поздний ответ не очищает план другого промпта или закрытой/архивной задачи.
 				const isCurrent = () => isCurrentLaunch()
@@ -13116,6 +13123,22 @@ export class EditorPanelManager {
 
 			case 'gitOverlayGenerateCommitMessage': {
 				const requestId = (msg.requestId || '').trim();
+				// Замеры включают всю команду Copilot, а не только запрос модели; содержимое не журналируется.
+				const generationStartedAt = Date.now();
+				const measure = async <T>(stage: string, action: () => Promise<T>, project?: string): Promise<T> => {
+					const startedAt = Date.now();
+					let outcome = 'failed';
+					try {
+						const result = await action();
+						outcome = typeof result === 'string' && !result.trim() ? 'empty' : 'completed';
+						return result;
+					} finally {
+						this.logReportDebug('gitOverlay.commitMessage.timing', {
+							requestId, project, stage, outcome, durationMs: Date.now() - startedAt,
+							elapsedMs: Date.now() - generationStartedAt,
+						});
+					}
+				};
 				if (this.isStalePromptMessage(currentPrompt, msg.prompt, msg.prompt?.id)) {
 					this.logReportDebug('gitOverlay.commitMessage.stale', {
 						requestId,
@@ -13142,7 +13165,7 @@ export class EditorPanelManager {
 						: msg.project ? [msg.project] : projects;
 					const promptBranch = this.resolveGitOverlayPromptBranch(promptSnapshot.branch, currentPrompt);
 					if (msg.includeAllChanges === true) {
-						const stagedAll = await this.gitService.stageAll(paths, generationProjects, false);
+						const stagedAll = await measure('stageAll', () => this.gitService.stageAll(paths, generationProjects, false));
 						if (stagedAll.errors.length > 0) {
 							postMessage({
 								type: 'error',
@@ -13153,31 +13176,25 @@ export class EditorPanelManager {
 							break;
 						}
 					}
-					const stagedProjects = await this.gitService.getStagedCommitProjectData(paths, generationProjects);
+					const stagedProjects = await measure('stagedCheck', () => (
+						this.gitService.getStagedCommitProjects(paths, generationProjects)
+					));
 					if (stagedProjects.length === 0) {
 						postMessage({ type: 'error', message: 'Нет staged-изменений для генерации commit message.', requestId: requestId || undefined });
 						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, { requestId });
 						break;
 					}
 
-					// Cleanup token добавляется только внешнему сообщению, а внутренний fallback остается без него.
-					const generatedMessages: Array<{
-						project: string;
-						message: string;
-						scmCleanupToken?: string;
-					}> = [];
-					const generatedScmInputs: Array<{
-						messageIndex: number;
-						projectPath: string;
-						message: string;
-					}> = [];
-					// Проекты обрабатываются последовательно, чтобы каждый генератор работал со своим SCM input.
-					for (const projectData of stagedProjects) {
+					// Все проекты стартуют вместе; GitService сериализует SCM только внутри одного репозитория.
+					// allSettled сохраняет порядок и успех соседей при ошибке; проверки — editorPanelManager.test.ts.
+					const generationResults = await Promise.allSettled(stagedProjects.map(async projectData => {
 						// Источник результата определяет, требуется ли очищать SCM после доставки.
 						let generatedMessage = '';
 						let generatedViaScm = false;
 						try {
-							generatedMessage = await this.gitService.generateCommitMessageViaKilo(projectData.projectPath);
+							generatedMessage = await measure('kilo', () => (
+								this.gitService.generateCommitMessageViaKilo(projectData.projectPath)
+							), projectData.project);
 							generatedViaScm = Boolean(generatedMessage.trim());
 						} catch (error) {
 							this.logReportDebug('gitOverlay.commitMessage.kilo.failed', {
@@ -13188,7 +13205,9 @@ export class EditorPanelManager {
 
 						if (!generatedMessage.trim()) {
 							try {
-								generatedMessage = await this.gitService.generateCommitMessageViaCopilot(projectData.projectPath);
+								generatedMessage = await measure('copilot', () => (
+									this.gitService.generateCommitMessageViaCopilot(projectData.projectPath)
+								), projectData.project);
 								generatedViaScm = Boolean(generatedMessage.trim());
 							} catch (error) {
 								this.logReportDebug('gitOverlay.commitMessage.copilot.failed', {
@@ -13198,47 +13217,65 @@ export class EditorPanelManager {
 							}
 						}
 						if (!generatedMessage.trim()) {
-							generatedMessage = await this.aiService.generateCommitMessage({
+							// Контекст нужен только внутреннему AI; выключенный AI возвращает прежний резервный текст.
+							const internalAiEnabled = areInternalAiFeaturesEnabled();
+							const context = internalAiEnabled
+								? await measure('fallbackContext', () => this.gitService.getStagedCommitProjectData(
+									paths, [projectData.project],
+								), projectData.project)
+								: [];
+							// После исключения всех файлов запрос без контекста не должен придумывать описание изменений.
+							if (internalAiEnabled && context.length === 0) {
+								throw new Error('No staged files eligible for commit message generation');
+							}
+							generatedMessage = await measure('internal', async () => this.aiService.generateCommitMessage({
 								projectName: projectData.project,
-								stagedChangesSummary: this.buildPreparedCommitContext([projectData]),
-							});
+								projectPath: projectData.projectPath,
+								taskNumber,
+								currentBranch: !taskNumber?.trim() && internalAiEnabled
+									? await this.gitService.getCurrentBranch(projectData.projectPath) : undefined,
+								stagedChangesSummary: this.buildPreparedCommitContext(context),
+							}), projectData.project);
 						}
-						const generatedResult: {
-							project: string;
-							message: string;
-							scmCleanupToken?: string;
-						} = {
+						return { projectData, generatedMessage, generatedViaScm };
+					}));
+
+					// TTL начинается перед доставкой; raw SCM-ответ остаётся связан со своим проектом.
+					const generatedMessages: Array<{ project: string; message: string; scmCleanupToken?: string }> = [];
+					const failedProjects: string[] = [];
+					for (const [index, result] of generationResults.entries()) {
+						if (result.status === 'rejected') {
+							failedProjects.push(stagedProjects[index].project);
+							this.logReportDebug('gitOverlay.commitMessage.project.failed', {
+								requestId, project: stagedProjects[index].project,
+								message: result.reason instanceof Error ? result.reason.message : String(result.reason),
+							});
+							continue;
+						}
+						const { projectData, generatedMessage, generatedViaScm } = result.value;
+						generatedMessages.push({
 							project: projectData.project,
 							message: replaceGeneratedCommitMessageTrackedBranch(
 								generatedMessage, taskNumber, promptBranch, trackedBranches,
 							),
-						};
-						if (generatedViaScm) {
-							// Cleanup token сопоставляется с исходным SCM-текстом, а не с исправленным префиксом.
-							generatedScmInputs.push({
-								messageIndex: generatedMessages.length,
-								projectPath: projectData.projectPath,
-								message: generatedMessage,
-							});
-						}
-						generatedMessages.push(generatedResult);
+							...(generatedViaScm ? { scmCleanupToken: this.gitService.createGeneratedCommitMessageCleanupToken(
+								projectData.projectPath, generatedMessage,
+							) } : {}),
+						});
 					}
-
-					// TTL начинается после завершения multi-project генерации, непосредственно перед доставкой.
-					for (const generatedInput of generatedScmInputs) {
-						generatedMessages[generatedInput.messageIndex].scmCleanupToken = (
-							this.gitService.createGeneratedCommitMessageCleanupToken(
-								generatedInput.projectPath,
-								generatedInput.message,
-							)
-						);
+					if (failedProjects.length) {
+						// Ошибка приходит до terminal response, пока webview ещё отслеживает этот requestId.
+						const safeMessage = vscode.env.language.toLowerCase().startsWith('ru')
+							? `Не удалось сгенерировать сообщения для проектов: ${failedProjects.join(', ')}. Повторите попытку.`
+							: `Failed to generate commit messages for projects: ${failedProjects.join(', ')}. Try again.`;
+						await postMessage({ type: 'error', message: safeMessage, requestId: requestId || undefined });
 					}
 					// Webview подтвердит применение token отдельным сообщением перед очисткой SCM input.
-					await postMessage({
+					await measure('postMessage', () => postMessage({
 						type: 'gitOverlayCommitMessagesGenerated',
 						messages: generatedMessages,
 						requestId: requestId || undefined,
-					});
+					}));
 					if (msg.includeAllChanges === true) {
 						await this.postGitOverlaySnapshot(postMessage, currentPrompt, promptBranch, projects, { requestId });
 					}

@@ -100,6 +100,14 @@ export function hasOpenCodeSubmission(
 	} catch { return false; }
 }
 
+/** Ответ session.get подтверждает название именно назначенной сессии и каталога; tests/openCodeCli.test.ts. */
+export function hasOpenCodeSessionTitle(json: string, sessionId: string, cwd: string, title: string): boolean {
+	try {
+		const info = object(object(JSON.parse(json)).data);
+		return info.id === sessionId && object(info.location).directory === cwd && info.title === title;
+	} catch { return false; }
+}
+
 /** Наблюдает ограниченный фрагмент TUI, а не сохраняет журнал пользовательского терминала. */
 export class OpenCodeTerminalOutput {
 	/** Экран восстанавливает ANSI-перерисовку; scrollback не накапливает пользовательскую историю. */

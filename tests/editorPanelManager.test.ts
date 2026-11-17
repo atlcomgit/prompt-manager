@@ -1928,17 +1928,28 @@ test('postGitOverlaySnapshot keeps freshly created review requests visible when 
 	assert.deepEqual(postedMessages[0]?.snapshot?.projects?.[0]?.review?.request, optimisticRequest);
 });
 
-/** Проверяет номер снимка для всех генераторов и очистку по исходному, а не исправленному SCM-тексту. */
-test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequential', async () => {
+/** Проверяет параллельный bulk-запуск, независимый fallback, номер снимка и очистку по исходному SCM-тексту. */
+test('gitOverlayGenerateCommitMessage runs selected projects in parallel with ordered fallback per project', async (t) => {
 	resetVsCodeCommandMock();
-	const { manager } = await createManager();
+	const { manager } = await createManager({ configurationValues: {
+		'promptManager.ai.enabled': true, 'promptManager.debugLogging.enabled': true,
+	} });
+	// AI gate загружает vscode лениво, уже после импорта coordinator.
+	const previousLoad = (Module as any)._load;
+	(Module as any)._load = function (request: string, ...args: unknown[]) {
+		return request === 'vscode' ? createVsCodeMock() : previousLoad.call(this, request, ...args);
+	};
+	t.after(() => { (Module as any)._load = previousLoad; });
+	const timingLogs: string[] = [];
+	(manager as any).reportDebugOutput = { appendLine: (line: string) => timingLogs.push(line) };
 	const postedMessages: any[] = [];
 	const callOrder: string[] = [];
 	// Запоминаем точные пути и ожидаемые сообщения только внешних генераторов.
 	const clearCalls: unknown[][] = [];
 	const firstProject = createDeferred<string>();
+	const fallbackContext = createDeferred<void>();
 	const currentPrompt = createPrompt({
-		projects: ['api', 'web', 'docs'],
+		projects: ['api', 'web', 'docs', 'busy'],
 		branch: 'feature/task-164',
 		taskNumber: '167',
 	});
@@ -1948,43 +1959,40 @@ test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequent
 			['api', '/tmp/api'],
 			['web', '/tmp/web'],
 			['docs', '/tmp/docs'],
+			['busy', '/tmp/busy'],
 		]),
-		getWorkspaceFolders: () => ['api', 'web', 'docs'],
+		getWorkspaceFolders: () => ['api', 'web', 'docs', 'busy'],
 	};
+	(manager as any).postGitOverlaySnapshot = async () => { callOrder.push('snapshot'); };
 	(manager as any).gitService = {
-		getStagedCommitProjectData: async () => [
-			{
-				project: 'api',
-				projectPath: '/tmp/api',
-				branch: 'feature/task-164',
-				changeSource: 'staged',
-				stagedFiles: [{ status: 'M', path: 'src/api.ts' }],
-				stat: '1 file changed',
-				diff: 'api diff',
-			},
-			{
-				project: 'web',
-				projectPath: '/tmp/web',
-				branch: 'feature/task-164',
-				changeSource: 'staged',
-				stagedFiles: [{ status: 'M', path: 'src/web.ts' }],
-				stat: '1 file changed',
-				diff: 'web diff',
-			},
-			{
-				project: 'docs',
-				projectPath: '/tmp/docs',
-				branch: 'feature/task-164',
-				changeSource: 'staged',
-				stagedFiles: [{ status: 'M', path: 'guide.txt' }],
-				stat: '1 file changed',
-				diff: 'docs diff',
-			},
-		],
+		stageAll: async (_paths: unknown, projects: string[], includeOther: boolean) => {
+			assert.deepEqual(projects, ['api', 'web', 'docs']);
+			assert.equal(includeOther, false);
+			callOrder.push('stageAll');
+			return { errors: [] };
+		},
+		getStagedCommitProjects: async (_paths: unknown, projects: string[]) => {
+			assert.deepEqual(projects, ['api', 'web', 'docs']);
+			callOrder.push('stagedCheck');
+			return projects.map(project => ({ project, projectPath: `/tmp/${project}` }));
+		},
+		getStagedCommitProjectData: async (_paths: unknown, projects: string[]) => {
+			assert.deepEqual(projects, ['web']);
+			callOrder.push('context:web');
+			await fallbackContext.promise;
+			return [{
+				project: 'web', projectPath: '/tmp/web', branch: 'feature/task-164', changeSource: 'staged',
+				stagedFiles: [{ status: 'M', path: 'src/web.ts' }], stat: '', diff: 'compact web diff',
+			}];
+		},
 		generateCommitMessageViaKilo: async (projectPath: string) => {
 			callOrder.push(`kilo:${projectPath}`);
 			if (projectPath === '/tmp/api') {
 				return firstProject.promise;
+			}
+			// Пустой результат означает пропуск недоступного Kilo без ошибки для пользователя.
+			if (projectPath === '/tmp/docs') {
+				return '';
 			}
 			throw new Error('Kilo command failed');
 		},
@@ -2009,7 +2017,13 @@ test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequent
 			return true;
 		},
 	};
-	(manager as any).aiService.generateCommitMessage = async ({ projectName }: { projectName: string }) => {
+	(manager as any).aiService.generateCommitMessage = async (input: {
+		projectName: string; projectPath: string; taskNumber: string; stagedChangesSummary: string;
+	}) => {
+		const { projectName, stagedChangesSummary } = input;
+		assert.equal(input.taskNumber, '167');
+		assert.equal(input.projectPath, '/tmp/web');
+		assert.match(stagedChangesSummary, /compact web diff/);
 		callOrder.push(`internal:${projectName}`);
 		return `🅰️🅻🅴🅺 master | update ${projectName}`;
 	};
@@ -2027,6 +2041,7 @@ test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequent
 			type: 'gitOverlayGenerateCommitMessage',
 			prompt: currentPrompt,
 			projects: ['api', 'web', 'docs'],
+			includeAllChanges: true,
 			requestId: 'req-generate-164',
 		},
 		panel,
@@ -2035,25 +2050,38 @@ test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequent
 		() => false,
 		() => undefined,
 	);
-	await flushTurns();
-	assert.deepEqual(callOrder, ['kilo:/tmp/api']);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(callOrder, [
+		'stageAll', 'stagedCheck', 'kilo:/tmp/api', 'kilo:/tmp/web', 'kilo:/tmp/docs',
+		'copilot:/tmp/web', 'copilot:/tmp/docs', 'context:web',
+	]);
+	assert.equal(postedMessages.length, 0);
 
 	// Поздний ответ должен сохранить правило исходного запроса при изменении промпта и настроек.
 	currentPrompt.taskNumber = '999';
 	currentPrompt.branch = 'master';
 	(manager as any).getTrackedBranchesSetting = () => [];
 	firstProject.resolve('🅰️🅻🅴🅺 master | update api');
+	await new Promise(resolve => setImmediate(resolve));
+	// Ни быстрый Copilot, ни завершившееся Kilo не выпускают token до окончания оставшегося fallback.
+	assert.ok(!callOrder.some(call => call.startsWith('token:')));
+	assert.equal(postedMessages.length, 0);
+	fallbackContext.resolve();
 	await handling;
 
 	assert.deepEqual(callOrder, [
+		'stageAll',
+		'stagedCheck',
 		'kilo:/tmp/api',
 		'kilo:/tmp/web',
-		'copilot:/tmp/web',
-		'internal:web',
 		'kilo:/tmp/docs',
+		'copilot:/tmp/web',
 		'copilot:/tmp/docs',
+		'context:web',
+		'internal:web',
 		'token:/tmp/api',
 		'token:/tmp/docs',
+		'snapshot',
 	]);
 	assert.deepEqual(postedMessages.find(message => message.type === 'gitOverlayCommitMessagesGenerated'), {
 		type: 'gitOverlayCommitMessagesGenerated',
@@ -2078,11 +2106,78 @@ test('gitOverlayGenerateCommitMessage uses Kilo first and keeps projects sequent
 		() => undefined,
 	);
 	assert.deepEqual(clearCalls, [['cleanup:/tmp/api'], ['cleanup:/tmp/docs']]);
+	// Проверяется реальный coordinator-фильтр, без подмены logReportDebug.
+	assert.ok(timingLogs.some(line => line.includes('gitOverlay.commitMessage.timing') && line.includes('"stage":"copilot"')));
+	assert.ok(timingLogs.some(line => line.includes('"stage":"fallbackContext"') && line.includes('"durationMs":')));
+	assert.ok(timingLogs.every(line => !line.includes('compact web diff') && !line.includes('🅰️🅻🅴🅺')));
 	resetVsCodeCommandMock();
 });
 
-/** Проверяет одиночную генерацию с пустой веткой промпта и отсутствие постобработки ручного commit message. */
-test('gitOverlayGenerateCommitMessage replaces a single prefix without rewriting manual commit text', async () => {
+/** Ошибка отдельного проекта не завершает bulk раньше остальных и не теряет их сообщения или cleanup tokens. */
+for (const failure of ['context', 'internal', 'excluded'] as const) {
+	test(`gitOverlayGenerateCommitMessage preserves parallel successes after ${failure} failure`, async t => {
+		resetVsCodeCommandMock();
+		t.after(resetVsCodeCommandMock);
+		const { manager } = await createManager({ configurationValues: { 'promptManager.ai.enabled': true } });
+		const previousLoad = (Module as any)._load;
+		(Module as any)._load = function (request: string, ...args: unknown[]) {
+			return request === 'vscode' ? createVsCodeMock() : previousLoad.call(this, request, ...args);
+		};
+		t.after(() => { (Module as any)._load = previousLoad; });
+		// Все API подменены; медленный успех завершается после ошибки другого проекта.
+		const prompt = createPrompt({ projects: ['slow', 'broken', 'fast'], taskNumber: '172' });
+		const paths = new Map<string, string>(prompt.projects.map((project: string) => [project, `/workspace/${project}`]));
+		const slow = createDeferred<string>();
+		const started: string[] = [];
+		const posted: any[] = [];
+		let internalCalls = 0;
+		(manager as any).workspaceService = {
+			getWorkspaceFolderPaths: () => paths, getWorkspaceFolders: () => prompt.projects,
+		};
+		(manager as any).gitService = {
+			getStagedCommitProjects: async () => [...paths].map(([project, projectPath]) => ({ project, projectPath })),
+			generateCommitMessageViaKilo: async (projectPath: string) => {
+				started.push(projectPath);
+				return projectPath.endsWith('/slow') ? slow.promise : projectPath.endsWith('/fast') ? 'fast result' : '';
+			},
+			generateCommitMessageViaCopilot: async () => '',
+			getStagedCommitProjectData: async () => {
+				if (failure === 'context') { throw new Error('private context failure'); }
+				return failure === 'excluded' ? [] : [{ project: 'broken', stagedFiles: [], stat: '', diff: '+code' }];
+			},
+			createGeneratedCommitMessageCleanupToken: (projectPath: string, message: string) => {
+				assert.equal(message, projectPath.endsWith('/slow') ? 'slow result' : 'fast result');
+				return `token:${projectPath}`;
+			},
+		};
+		(manager as any).aiService.generateCommitMessage = async () => {
+			internalCalls++;
+			throw new Error('private internal failure');
+		};
+		const handling = (manager as any).handleMessage(
+			{ type: 'gitOverlayGenerateCommitMessage', prompt, projects: prompt.projects, requestId: 'parallel-error' },
+			{ webview: { postMessage: async (message: unknown) => { posted.push(message); return true; } } },
+			prompt, '__prompt_editor_singleton__', () => false, () => undefined,
+		);
+		await new Promise(resolve => setImmediate(resolve));
+		assert.deepEqual(started, [...paths.values()]);
+		assert.deepEqual(posted, []);
+		slow.resolve('slow result');
+		await handling;
+		assert.equal(internalCalls, failure === 'internal' ? 1 : 0);
+		assert.deepEqual(posted, [
+			{ type: 'error', message: 'Failed to generate commit messages for projects: broken. Try again.',
+				requestId: 'parallel-error' },
+			{ type: 'gitOverlayCommitMessagesGenerated', requestId: 'parallel-error', messages: [
+				{ project: 'slow', message: 'slow result', scmCleanupToken: 'token:/workspace/slow' },
+				{ project: 'fast', message: 'fast result', scmCleanupToken: 'token:/workspace/fast' },
+			] },
+		]);
+	});
+}
+
+/** Проверяет переход на Copilot после пропуска Kilo, номер в одиночном результате и сохранность ручного текста. */
+test('gitOverlayGenerateCommitMessage skips Kilo for a single project without rewriting manual commit text', async () => {
 	resetVsCodeCommandMock();
 	// Все внешние действия заменены: ни генератор, ни commit не обращаются к настоящему репозиторию.
 	const { manager } = await createManager();
@@ -2097,8 +2192,10 @@ test('gitOverlayGenerateCommitMessage replaces a single prefix without rewriting
 		getWorkspaceFolders: () => ['api'],
 	};
 	(manager as any).gitService = {
-		getStagedCommitProjectData: async () => [{ project: 'api', projectPath: '/tmp/api' }],
-		generateCommitMessageViaKilo: async () => generatedMessage,
+		getStagedCommitProjects: async () => [{ project: 'api', projectPath: '/tmp/api' }],
+		// Copilot получает управление после штатного пропуска Kilo.
+		generateCommitMessageViaKilo: async () => '',
+		generateCommitMessageViaCopilot: async () => generatedMessage,
 		createGeneratedCommitMessageCleanupToken: (_path: string, rawMessage: string) => {
 			assert.equal(rawMessage, generatedMessage);
 			return 'cleanup:single';
@@ -2117,9 +2214,11 @@ test('gitOverlayGenerateCommitMessage replaces a single prefix without rewriting
 		{ type: 'gitOverlayGenerateCommitMessage', prompt: currentPrompt, project: 'api', requestId: 'single-167' },
 		panel, currentPrompt, '__prompt_editor_singleton__', () => false, () => undefined,
 	);
-	assert.deepEqual(postedMessages.find(message => message.type === 'gitOverlayCommitMessagesGenerated')?.messages, [
-		{ project: 'api', message: '🅰️🅻🅴🅺 167 | текст коммита', scmCleanupToken: 'cleanup:single' },
-	]);
+	assert.deepEqual(postedMessages.find(message => message.type === 'gitOverlayCommitMessagesGenerated'), {
+		type: 'gitOverlayCommitMessagesGenerated',
+		messages: [{ project: 'api', message: '🅰️🅻🅴🅺 167 | текст коммита', scmCleanupToken: 'cleanup:single' }],
+		requestId: 'single-167',
+	});
 
 	// Пользователь намеренно вернул master: при commit этот текст должен пройти без повторной замены.
 	const manualMessages = [{ project: 'api', message: '🅰️🅻🅴🅺 master | мой текст' }];
@@ -2129,6 +2228,75 @@ test('gitOverlayGenerateCommitMessage replaces a single prefix without rewriting
 	);
 	assert.deepEqual(committedMessages, [manualMessages]);
 	resetVsCodeCommandMock();
+});
+
+/** Выключенный внутренний AI не требует даже компактного Git-контекста. */
+test('gitOverlayGenerateCommitMessage skips context collection when internal AI is disabled', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({ configurationValues: { 'promptManager.ai.enabled': false } });
+	const prompt = createPrompt({ projects: ['api'] });
+	const messages: any[] = [];
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([['api', '/unused']]), getWorkspaceFolders: () => ['api'],
+	};
+	(manager as any).gitService = {
+		getStagedCommitProjects: async () => [{ project: 'api', projectPath: '/unused' }],
+		getStagedCommitProjectData: async () => { throw new Error('Disabled AI must not collect context'); },
+		generateCommitMessageViaKilo: async () => '',
+		generateCommitMessageViaCopilot: async () => '',
+	};
+	(manager as any).aiService.generateCommitMessage = async (input: { stagedChangesSummary: string }) => {
+		assert.equal(input.stagedChangesSummary, '');
+		return 'chore: update api';
+	};
+	await (manager as any).handleMessage(
+		{ type: 'gitOverlayGenerateCommitMessage', prompt, project: 'api' },
+		{ webview: { postMessage: async (message: unknown) => { messages.push(message); return true; } } },
+		prompt, '__prompt_editor_singleton__', () => false, () => undefined,
+	);
+	assert.deepEqual(messages[0].messages, [{ project: 'api', message: 'chore: update api' }]);
+	resetVsCodeCommandMock();
+});
+
+/** При пустом номере внутренний генератор получает действительную ветку, а не ветку из формы промпта. */
+test('gitOverlayGenerateCommitMessage supplies current branch when task number is absent', async (t) => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({ configurationValues: { 'promptManager.ai.enabled': true } });
+	const previousLoad = (Module as any)._load;
+	(Module as any)._load = function (request: string, ...args: unknown[]) {
+		return request === 'vscode' ? createVsCodeMock() : previousLoad.call(this, request, ...args);
+	};
+	t.after(() => { (Module as any)._load = previousLoad; resetVsCodeCommandMock(); });
+	const prompt = createPrompt({ projects: ['api'], taskNumber: '', branch: 'planned-branch' });
+	let generated = false;
+	(manager as any).workspaceService = {
+		getWorkspaceFolderPaths: () => new Map([['api', '/workspace/api']]), getWorkspaceFolders: () => ['api'],
+	};
+	(manager as any).gitService = {
+		getStagedCommitProjects: async () => [{ project: 'api', projectPath: '/workspace/api' }],
+		getStagedCommitProjectData: async () => [{
+			project: 'api', projectPath: '/workspace/api', stagedFiles: [{ status: 'M', path: 'src/api.ts' }],
+			stat: '1 file changed', diff: '+code',
+		}],
+		generateCommitMessageViaKilo: async () => '',
+		generateCommitMessageViaCopilot: async () => '',
+		getCurrentBranch: async (projectPath: string) => {
+			assert.equal(projectPath, '/workspace/api');
+			return 'feature/ABC-172';
+		},
+	};
+	(manager as any).aiService.generateCommitMessage = async (input: { currentBranch: string; taskNumber: string }) => {
+		assert.equal(input.currentBranch, 'feature/ABC-172');
+		assert.equal(input.taskNumber, '');
+		generated = true;
+		return 'Исправил обработку инструкций';
+	};
+	await (manager as any).handleMessage(
+		{ type: 'gitOverlayGenerateCommitMessage', prompt, project: 'api' },
+		{ webview: { postMessage: async () => true } },
+		prompt, '__prompt_editor_singleton__', () => false, () => undefined,
+	);
+	assert.equal(generated, true);
 });
 
 /** Проверяет сохранение SCM при отказе доставки, отклонении отправки и уже закрытом webview. */
@@ -2148,7 +2316,7 @@ test('gitOverlayGenerateCommitMessage keeps SCM input when delivery fails or web
 			// Git полностью подменен: staged-данные и готовый SCM-результат существуют только в памяти.
 			(manager as any).gitService = {
 				stageAll: async () => ({ errors: [] }),
-				getStagedCommitProjectData: async () => [{ project: 'api', projectPath: '/tmp/api' }],
+				getStagedCommitProjects: async () => [{ project: 'api', projectPath: '/tmp/api' }],
 				generateCommitMessageViaKilo: async () => 'feat: generated',
 				createGeneratedCommitMessageCleanupToken: () => 'cleanup:/tmp/api',
 				clearGeneratedCommitMessageInput: (...args: unknown[]) => {
@@ -2204,7 +2372,7 @@ test('gitOverlayGenerateCommitMessage finishes tracked request after host except
 		getWorkspaceFolders: () => ['api'],
 	};
 	(manager as any).gitService = {
-		getStagedCommitProjectData: async () => {
+		getStagedCommitProjects: async () => {
 			throw new Error('staged data failed');
 		},
 	};
@@ -2258,7 +2426,7 @@ test('gitOverlayGenerateCommitMessage finishes stale renamed prompt request', as
 	const currentPrompt = createPrompt({ id: 'renamed-prompt', promptUuid: 'uuid-164' });
 	const incomingPrompt = createPrompt({ id: 'old-prompt', promptUuid: 'uuid-164' });
 	(manager as any).gitService = {
-		getStagedCommitProjectData: async () => {
+		getStagedCommitProjects: async () => {
 			throw new Error('stale request must not reach Git');
 		},
 	};
@@ -2310,7 +2478,7 @@ test('gitOverlayGenerateCommitMessage preserves includeAllChanges stageAll seman
 			stageCalls.push(args);
 			return { success: true, errors: [], changedProjects: ['api'], skippedProjects: [] };
 		},
-		getStagedCommitProjectData: async () => [{
+		getStagedCommitProjects: async () => [{
 			project: 'api',
 			projectPath: '/tmp/api',
 			branch: 'feature/task-164',
@@ -6908,10 +7076,10 @@ async function createClaudeManager(overrides: Record<string, unknown> = {}) {
 }
 
 /** Изолирует OpenCode от настоящих терминалов, сокетов, рабочих файлов и моделей. */
-async function createOpenCodeManager(autoStart = false) {
+async function createOpenCodeManager(autoStart = false, overrides: Record<string, unknown> = {}) {
 	resetVsCodeCommandMock();
 	const prompt = createPrompt({ title: 'OpenCode task', content: 'Test OpenCode.', chatMode: 'plan',
-		chatTarget: 'opencode-cli', autoStartOpenCodeChat: autoStart, chatSessionIds: ['old-copilot'] });
+		chatTarget: 'opencode-cli', autoStartOpenCodeChat: autoStart, chatSessionIds: ['old-copilot'], ...overrides });
 	const harness = await createManager({ initialPrompt: prompt,
 		workspaceService: { getWorkspaceFolderPaths: () => new Map([['workspace', '/tmp/workspace']]) } });
 	const requests: OpenCodeCliRequest[] = [];
@@ -6954,6 +7122,17 @@ test('OpenCode manager prepares common context without clearing a draft plan or 
 		assert.equal(fixture.messages.some(message => message.type === 'chatRequestStarted'), false);
 		assert.equal(vscodeCommandCalls.some(call => call.id.startsWith('workbench.action.chat.')), false);
 	} finally { fixture.manager.disposeAll(); }
+});
+
+/** OpenCode использует тот же формат названия, что Copilot, сохраняя строковый номер без преобразования. */
+test('OpenCode manager shares the Number | Title format with Copilot', async () => {
+	for (const taskNumber of ['172', '00172', '']) {
+		const fixture = await createOpenCodeManager(false, { taskNumber, title: ' Проверка Kilo ' });
+		try {
+			await fixture.send({ type: 'startChat', id: 'prompt-a' });
+			assert.equal(fixture.requests[0].title, taskNumber ? `${taskNumber} | Проверка Kilo` : 'Проверка Kilo');
+		} finally { fixture.manager.disposeAll(); }
+	}
 });
 
 /** Поколение проверяется повторно после чтения, чтобы ответ старой сессии не очистил новый план. */

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
-	findOpenCodeExecutable, hasOpenCodeSubmission, isSupportedOpenCodeVersion, OpenCodeTerminalOutput,
+	findOpenCodeExecutable, hasOpenCodeSubmission, hasOpenCodeSessionTitle, isSupportedOpenCodeVersion, OpenCodeTerminalOutput,
 	buildOpenCodeLaunchCommand, runOpenCodeCli, validateOpenCodeContext, type OpenCodeCliRunner,
 } from '../utils/openCodeCli.js';
 
@@ -15,7 +15,7 @@ export type OpenCodeTerminalHost = Pick<typeof vscode.window,
 export interface OpenCodeCliRequest {
 	/** Стабильная принадлежность терминала переживает переименование папки промпта. */
 	promptUuid: string;
-	/** Читаемое название терминала, не ключ выбора сессии. */
+	/** Общее название терминала и сессии: «Номер | Название», без номера — только название. */
 	title: string;
 	/** Абсолютный каталог на хосте Extension Host. */
 	cwd: string;
@@ -27,6 +27,8 @@ export interface OpenCodeCliRequest {
 	autoStart: boolean;
 	/** Guard повторно проверяет поколение запуска после await перед изменением файлов промпта. */
 	onManualSubmission?: (isCurrentLaunch: () => boolean) => Promise<void>;
+	/** Ошибка оформления не отменяет подтверждённую отправку запроса. */
+	onWarning?: (message: string) => void;
 }
 
 /** Подтверждённая отправка отличается от подготовленного или неподтверждённого запроса. */
@@ -153,7 +155,7 @@ export class OpenCodeCliService {
 			server.on('connection', socket => this.connectEditor(active, socket));
 			const address = server.address();
 			if (!address || typeof address === 'string') throw new Error('OpenCode CLI: IDE-соединение недоступно.');
-			const terminal = this.host.createTerminal({ name: `OpenCode · ${request.title}`, cwd: request.cwd,
+			const terminal = this.host.createTerminal({ name: request.title, cwd: request.cwd,
 				shellPath: '/bin/bash', env: { [TERMINAL_UUID_KEY]: request.promptUuid,
 					OPENCODE_EDITOR_SSE_PORT: String(address.port), CLAUDE_CODE_SSE_PORT: null } });
 			active.terminal = terminal;
@@ -198,6 +200,8 @@ export class OpenCodeCliService {
 			terminal.sendText('\r', false);
 			const dispatched = await this.confirmSubmission(active, true);
 			active.submissionChecked = true;
+			// Подтверждение доставки возвращается сразу; оформление сессии не блокирует события начала запроса.
+			if (dispatched) void this.renameSession(active);
 			return { dispatched, message: dispatched ? 'Запрос принят новой сессией OpenCode CLI.'
 				: 'OpenCode CLI не подтвердил приём полного запроса с файлами. Проверьте терминал; план сохранён.' };
 		} catch (error) {
@@ -276,7 +280,11 @@ export class OpenCodeCliService {
 					launch.submissionChecked = true;
 					void this.confirmSubmission(launch, false).then(async confirmed => {
 						if (confirmed && this.isCurrentLaunch(launch)) {
-							await launch.request.onManualSubmission?.(() => this.isCurrentLaunch(launch));
+							// Оба действия стартуют независимо: закрытие во время rename не задерживает уведомление о доставке.
+							await Promise.all([
+								this.renameSession(launch),
+								launch.request.onManualSubmission?.(() => this.isCurrentLaunch(launch)),
+							]);
 						}
 					}).catch(() => { /* Неподтверждённая отправка сохраняет план. */ });
 				}
@@ -299,13 +307,41 @@ export class OpenCodeCliService {
 			try {
 				const json = await this.runner(launch.executable, ['session', 'export', launch.sessionId], launch.request.cwd);
 				if (!launch.closed && !this.disposed
-					&& hasOpenCodeSubmission(json, launch.sessionId, launch.request.cwd, launch.request.query, launch.files, strict)) return true;
+					&& hasOpenCodeSubmission(json, launch.sessionId, launch.request.cwd, launch.request.query, launch.files, strict)) {
+					return true;
+				}
 			} catch { /* Сессия может появиться после оптимистичной отрисовки TUI. */ }
 			if (attempt < 4) await new Promise<void>(resolve => {
 				const timer = setTimeout(resolve, 500); timer.unref?.();
 			});
 		}
 		return false;
+	}
+
+	/** Штатный API меняет только title; результат проверяется чтением, не выводом команды обновления. */
+	private async renameSession(launch: OpenCodeLaunch): Promise<void> {
+		if (!this.isCurrentLaunch(launch)) return;
+		try {
+			// Пустое title в API означает генерацию моделью, поэтому такой запрос запрещён.
+			if (!launch.request.title.trim()) throw new Error('Пустое название сессии.');
+			const sessionParam = `sessionID=${launch.sessionId}`;
+			await this.runner(launch.executable, ['api', 'session.update', '--param', sessionParam,
+				'--data', JSON.stringify({ title: launch.request.title })], launch.request.cwd);
+			if (!this.isCurrentLaunch(launch)) return;
+			const json = await this.runner(launch.executable, ['api', 'session.get', '--param', sessionParam], launch.request.cwd);
+			if (!this.isCurrentLaunch(launch)) return;
+			if (!hasOpenCodeSessionTitle(json, launch.sessionId, launch.request.cwd, launch.request.title)) {
+				throw new Error('Название сессии не подтверждено.');
+			}
+			this.log(`renamed session=${launch.sessionId}`);
+		} catch {
+			if (!this.isCurrentLaunch(launch)) return;
+			this.log(`rename-failed session=${launch.sessionId}`);
+			// Ошибка уведомления также не должна запускать повторную проверку или отправку принятого запроса.
+			try {
+				launch.request.onWarning?.('OpenCode CLI: запрос отправлен, но название сессии не удалось подтвердить.');
+			} catch { /* Подтверждённая доставка не зависит от отображения предупреждения. */ }
+		}
 	}
 
 	/** Каждое ожидание удаляет таймер и подписку при успехе, закрытии и таймауте. */

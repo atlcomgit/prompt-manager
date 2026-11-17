@@ -11,14 +11,22 @@ const originalModuleLoad = moduleLoader._load;
 let selectChatModelsCalls = 0;
 let sendRequestCalls = 0;
 const configurationValues = new Map<string, unknown>();
+/** Снимки запросов и ресурсов позволяют проверить инструкции без LM, диска и рабочего VS Code. */
+const modelRequests: Array<Array<{ text: string }>> = [];
+const configurationScopes: Array<string | undefined> = [];
+const instructionFiles = new Map<string, string>();
+const readInstructionFiles: string[] = [];
+const aiLogLines: string[] = [];
+let disposedTokenSources = 0;
 
 const mockModel = {
 	vendor: 'copilot',
 	id: 'gpt-5-mini',
 	family: 'gpt-5-mini',
 	name: 'GPT-5 mini',
-	sendRequest: async () => {
+	sendRequest: async (messages: Array<{ text: string }>) => {
 		sendRequestCalls += 1;
+		modelRequests.push(messages);
 		return {
 			text: (async function* () {
 				yield 'ok';
@@ -39,6 +47,7 @@ moduleLoader._load = (request, parent, isMain) => {
 			}
 
 			dispose(): void {
+				disposedTokenSources += 1;
 				this.cancel();
 			}
 		}
@@ -46,24 +55,36 @@ moduleLoader._load = (request, parent, isMain) => {
 		return {
 			window: {
 				createOutputChannel: () => ({
-					appendLine: () => undefined,
+					appendLine: (line: string) => aiLogLines.push(line),
 					show: () => undefined,
 					dispose: () => undefined,
 				}),
 			},
 			workspace: {
 				workspaceFolders: undefined,
-				getConfiguration: () => ({
+				getConfiguration: (_section: unknown, scope?: { fsPath: string }) => {
+					configurationScopes.push(scope?.fsPath);
+					return {
 					get: (key: string, defaultValue: unknown) => configurationValues.has(key)
 						? configurationValues.get(key)
 						: defaultValue,
-				}),
+					};
+				},
 				fs: {
 					stat: async (uri: { fsPath: string }) => require('node:fs').promises.stat(uri.fsPath),
+					readFile: async (uri: { fsPath: string }) => {
+						readInstructionFiles.push(uri.fsPath);
+						const text = instructionFiles.get(uri.fsPath);
+						if (text === undefined) { throw new Error('missing fixture'); }
+						return Buffer.from(text);
+					},
 				},
 			},
 			Uri: {
 				file: (fsPath: string) => ({ fsPath }),
+				joinPath: (uri: { fsPath: string }, ...parts: string[]) => ({
+					fsPath: require('node:path').join(uri.fsPath, ...parts),
+				}),
 			},
 			env: {
 				language: 'ru',
@@ -92,6 +113,12 @@ test.beforeEach(() => {
 
 test.afterEach(() => {
 	configurationValues.clear();
+	modelRequests.length = 0;
+	configurationScopes.length = 0;
+	instructionFiles.clear();
+	readInstructionFiles.length = 0;
+	aiLogLines.length = 0;
+	disposedTokenSources = 0;
 	selectChatModelsCalls = 0;
 	sendRequestCalls = 0;
 	selectChatModelsImpl = async () => [mockModel];
@@ -713,14 +740,15 @@ test('AiService skips internal AI requests when Prompt Manager AI setting is dis
 });
 
 test('AiService picks the state database that actually holds the chat picker state', async () => {
-	const os = require('node:os') as typeof import('node:os');
 	const fs = require('node:fs') as typeof import('node:fs');
 	const path = require('node:path') as typeof import('node:path');
 
 	// An empty Extension Development Host database (no picker state) plus the real
 	// profile database that carries the user's hidden models.
-	const emptyDb = path.join(os.tmpdir(), `pm-empty-${Date.now()}.vscdb`);
-	const activeDb = path.join(os.tmpdir(), `pm-active-${Date.now()}.vscdb`);
+	// Это текстовые фикстуры: SQL-reader подменён, рабочие БД не открываются.
+	const directory = fs.mkdtempSync('/tmp/opencode/commit-models-172-');
+	const emptyDb = path.join(directory, 'testing-empty.vscdb');
+	const activeDb = path.join(directory, 'testing-active.vscdb');
 	fs.writeFileSync(emptyDb, 'empty');
 	fs.writeFileSync(activeDb, 'active');
 
@@ -738,7 +766,78 @@ test('AiService picks the state database that actually holds the chat picker sta
 		const resolved = await (service as any).resolveStateDbPath();
 		assert.equal(resolved, activeDb);
 	} finally {
-		fs.rmSync(emptyDb, { force: true });
-		fs.rmSync(activeDb, { force: true });
+		fs.rmSync(directory, { recursive: true, force: true });
 	}
+});
+
+/** Объектные инструкции, ссылки на файлы и номер задачи доходят до реального построителя LM-запроса. */
+test('AiService commit instructions preserve text, file order, project scope and task context', async () => {
+	configurationValues.set('debugLogging.enabled', true);
+	configurationValues.set('github.copilot.chat.commitMessageGeneration.instructions', [
+		{ text: 'Одной строкой, от первого лица в прошедшем времени, до 100 символов.' },
+		{ file: '.github/commit.md' },
+		'Без точки в конце',
+		{ text: 'Используй taskNumber текущего промпта.' },
+		null, 123, { unknown: true },
+	]);
+	instructionFiles.set('/workspace/web/.github/commit.md', 'Формат: 🅰️🅻🅴🅺 <taskNumber> | <описание>');
+	const service = new AiService();
+	assert.equal(await service.generateCommitMessage({
+		projectName: 'web', projectPath: '/workspace/web', taskNumber: '00172',
+		currentBranch: 'master', stagedChangesSummary: 'Исправление обработки инструкций',
+	}), 'ok');
+	const [system, user] = modelRequests[0];
+	assert.match(system.text, /Одной строкой[^]*Формат: 🅰️🅻🅴🅺[^]*Без точки[^]*Используй taskNumber/);
+	assert.doesNotMatch(system.text, /\[object Object\]|72 characters|imperative/);
+	assert.match(user.text, /Current prompt taskNumber: 00172/);
+	assert.match(user.text, /Current Git branch: master/);
+	assert.ok(configurationScopes.includes('/workspace/web'));
+	assert.deepEqual(readInstructionFiles, ['/workspace/web/.github/commit.md']);
+	assert.equal(disposedTokenSources, 1);
+	assert.ok(aiLogLines.some(line => /stage=selectModel phase=finish durationMs=\d+/.test(line)));
+	assert.ok(aiLogLines.some(line => /stage=response durationMs=\d+/.test(line)));
+});
+
+/** Ошибка файла не подменяет результат сообщением, сгенерированным без обязательных правил. */
+test('AiService does not silently drop unavailable commit instruction files', async () => {
+	configurationValues.set('github.copilot.chat.commitMessageGeneration.instructions', [{ file: 'missing.md' }]);
+	await assert.rejects(new AiService().generateCommitMessage({
+		projectPath: '/workspace/web', stagedChangesSummary: 'diff',
+	}), /файл инструкций/);
+	assert.equal(selectChatModelsCalls, 0);
+	assert.equal(sendRequestCalls, 0);
+});
+
+/** Выключение AI запрещает даже чтение ссылочных правил commit. */
+test('AiService disabled commit generation skips instructions and model discovery', async () => {
+	configurationValues.set('ai.enabled', false);
+	configurationValues.set('github.copilot.chat.commitMessageGeneration.instructions', [{ file: 'missing.md' }]);
+	assert.equal(await new AiService().generateCommitMessage({ stagedChangesSummary: '' }), 'Обновить изменения');
+	assert.deepEqual(readInstructionFiles, []);
+	assert.equal(selectChatModelsCalls, 0);
+});
+
+/** Резервный выбор сохраняет free-only политику и не запрашивает каталог LM API второй раз. */
+test('AiService commit fallback reuses discovered models and rejects paid-only candidates', async () => {
+	const freeModel = { ...mockModel, id: 'gpt-6-luna', family: 'gpt-6-luna' };
+	const paidModel = { ...mockModel, id: 'paid-model', family: 'paid-model' };
+	selectChatModelsImpl = async () => selectChatModelsCalls === 1 ? [] : [paidModel, freeModel];
+	const service = new AiService();
+	// Метаданные заменены, сопоставление и выбор выполняются кодом сервиса.
+	(service as unknown as { resolveStateDbPath: () => Promise<string> }).resolveStateDbPath = async () => '/testing-state';
+	(service as unknown as { getVisibleCopilotModelsFromControl: () => Promise<Array<{ id: string; name: string }>> })
+		.getVisibleCopilotModelsFromControl = async () => [{ id: 'gpt-6-luna', name: 'Free model' }];
+	await service.generateCommitMessage({ stagedChangesSummary: 'diff' });
+	assert.equal(selectChatModelsCalls, 2);
+	assert.equal(sendRequestCalls, 1);
+	const cache = (service as unknown as { selectedModelCache: Map<string, { model: typeof mockModel }> }).selectedModelCache;
+	assert.equal([...cache.values()][0].model.id, 'gpt-6-luna');
+	await service.generateCommitMessage({ stagedChangesSummary: 'another diff' });
+	assert.equal(selectChatModelsCalls, 2);
+	assert.equal(sendRequestCalls, 2);
+	service.clearCopilotModelCaches();
+	selectChatModelsCalls = 0;
+	selectChatModelsImpl = async () => selectChatModelsCalls === 1 ? [] : [paidModel];
+	assert.equal(await service.generateCommitMessage({ stagedChangesSummary: 'diff' }), 'Обновить изменения');
+	assert.equal(sendRequestCalls, 2);
 });

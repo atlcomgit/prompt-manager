@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { getContextFileKind } from '../utils/contextFiles.js';
 import type { CodeMapRefDiffEntry } from '../types/codemap.js';
 import type {
 	GitOverlayChangeGroup,
@@ -73,6 +74,17 @@ const COPILOT_GENERATE_COMMIT_MESSAGE_CANCEL_AFTER_MS = 30_000;
 /** Жесткий предел ожидания Copilot, если команда проигнорировала отмену. */
 const COPILOT_GENERATE_COMMIT_MESSAGE_TIMEOUT_MS = 35_000;
 
+/** Ограничивает предварительную загрузку документов; контекст и модель по-прежнему выбирает Copilot. */
+const COPILOT_DOCUMENT_PREFETCH = {
+	concurrency: 4,
+	maxFiles: 32,
+	maxFileBytes: 1024 * 1024,
+	maxTotalBytes: 4 * 1024 * 1024,
+	timeoutMs: 5_000,
+	// Copilot проверяет NUL только в первых 8192 байтах перед открытием текстового документа.
+	probeBytes: 8192,
+} as const;
+
 export interface BranchInfo {
 	name: string;
 	current: boolean;
@@ -105,6 +117,16 @@ export interface PreparedCommitProjectData {
 	stagedFiles: StagedFileChange[];
 	stat: string;
 	diff: string;
+}
+
+/** Лёгкая цель внешнего генератора без загрузки содержимого файлов. */
+export type StagedCommitProject = Pick<PreparedCommitProjectData, 'project' | 'projectPath'>;
+
+/** Метаданные обеих версий файла позволяют отсеять тяжёлые объекты до построения патча. */
+interface StagedCommitFile extends StagedFileChange {
+	oldObject: string;
+	newObject: string;
+	regularFile: boolean;
 }
 
 export interface UncommittedProjectData {
@@ -160,14 +182,20 @@ interface BuiltInGitInputBox {
 	value: string;
 }
 
+/** Состояние встроенного Git с подготовленными файлами для генерации сообщения. */
 interface BuiltInGitRepositoryState {
 	onDidChange: vscode.Event<void>;
+	/** Staged URI встроенного Git; status=2 обозначает INDEX_DELETED в API v1. */
+	indexChanges?: ReadonlyArray<{ uri: vscode.Uri; status: number }>;
 }
 
+/** Предоставляет SCM input, обновление индекса и события выбранного репозитория. */
 interface BuiltInGitRepository {
 	rootUri: vscode.Uri;
 	inputBox: BuiltInGitInputBox;
 	state: BuiltInGitRepositoryState;
+	/** Обновляет state после stageAll, выполненного через Git CLI. */
+	status?(): Promise<void>;
 	onDidCommit?: vscode.Event<void>;
 	onDidCheckout?: vscode.Event<void>;
 }
@@ -227,6 +255,10 @@ function createDeferredGitOverlayBranchDetails(): GitOverlayProjectBranchDetails
 
 export class GitService {
 	private static readonly DIFF_MAX_BUFFER = 8 * 1024 * 1024;
+	/** Ограничения резервного контекста: исходные объекты, количество патчей и итоговый текст. */
+	private static readonly COMMIT_FILE_MAX_BYTES = 64 * 1024;
+	private static readonly COMMIT_CONTEXT_MAX_CHARS = 12000;
+	private static readonly COMMIT_CODE_MAX_FILES = 6;
 	// Limit parallel project mutations so bulk actions accelerate without flooding the workspace.
 	private static readonly PROJECT_MUTATION_CONCURRENCY = 4;
 	private static readonly REVIEW_CACHE_TTL_MS = 30_000;
@@ -249,6 +281,7 @@ export class GitService {
 		repository: BuiltInGitRepository;
 		input: string;
 		timeout: NodeJS.Timeout;
+		issuedAt: number;
 	}>();
 	/** Формирует уникальные cleanup tokens без раскрытия repository path в webview. */
 	private generatedCommitMessageCleanupSequence = 0;
@@ -366,11 +399,22 @@ export class GitService {
 		return stdout.trim();
 	}
 
-	private async runGitFileCommandRaw(projectPath: string, args: string[]): Promise<string> {
-		const { stdout } = await execFileAsync('git', [...GIT_UNQUOTED_PATHS_ARGS, ...args], {
+	/** Сохраняет NUL-разделители; пакетные Git-запросы могут передать stdin и ограничить вывод. */
+	private async runGitFileCommandRaw(
+		projectPath: string,
+		args: string[],
+		options?: { input?: string; maxBuffer?: number },
+	): Promise<string> {
+		const execution = execFileAsync('git', [...GIT_UNQUOTED_PATHS_ARGS, ...args], {
 			cwd: projectPath,
-			maxBuffer: GitService.DIFF_MAX_BUFFER,
+			maxBuffer: options?.maxBuffer ?? GitService.DIFF_MAX_BUFFER,
 		});
+		if (options?.input !== undefined) {
+			// Ошибка раннего закрытия stdin сопровождается отказом самого процесса Git.
+			execution.child.stdin?.on('error', () => undefined);
+			execution.child.stdin?.end(options.input);
+		}
+		const { stdout } = await execution;
 		return stdout;
 	}
 
@@ -3377,7 +3421,7 @@ export class GitService {
 		commandId: string,
 		commandArgs: unknown[],
 		timeoutMs?: number,
-		options?: { clearInputBeforeCommand?: boolean },
+		options?: { clearInputBeforeCommand?: boolean; prepareCommand?: () => Promise<void> },
 	): Promise<string> {
 		const repositoryKey = this.getCommitMessageRepositoryKey(repository);
 		if (this.timedOutCommitMessageRepositories.has(repositoryKey)) {
@@ -3391,6 +3435,13 @@ export class GitService {
 			.then(async () => {
 				if (abandonedBeforeStart) {
 					throw new Error('command was abandoned before start after timeout');
+				}
+				// Подготовка входит в очередь и общий hard timeout; позднее завершение не запускает SCM.
+				if (options?.prepareCommand) {
+					await options.prepareCommand();
+					if (abandonedBeforeStart) {
+						throw new Error('command was abandoned during preparation after timeout');
+					}
 				}
 				// Очистка позволяет отличить новый результат Kilo от прежнего draft, включая одинаковый текст.
 				const inputBeforeCommand = repository.inputBox.value;
@@ -3468,7 +3519,7 @@ export class GitService {
 		return this.normalizeGitRepositoryPath(repository.rootUri.fsPath);
 	}
 
-	/** Ограничивает activation, repository discovery и command единым deadline Kilo lifecycle. */
+	/** Ограничивает поиск репозитория и команды общим сроком ожидания активного Kilo. */
 	private async awaitKiloCommitMessageStep<T>(
 		operation: PromiseLike<T>,
 		deadlineAt: number,
@@ -3495,34 +3546,23 @@ export class GitService {
 		}
 	}
 
-	/** Генерирует сообщение через Kilo Code, сохраняя последнее значение Source Control. */
+	/**
+	 * Генерирует сообщение только через активное Kilo, иначе возвращает пустую строку для перехода на Copilot.
+	 * Сохраняет последнее значение Source Control; проверки активности и SCM — в tests/gitService.test.ts.
+	 */
 	async generateCommitMessageViaKilo(projectPath: string): Promise<string> {
-		const deadlineAt = Date.now() + KILO_GENERATE_COMMIT_MESSAGE_TIMEOUT_MS;
+		// Генерация не запускает Kilo: пропускаем его до Git discovery, таймеров и любых изменений SCM input.
 		const kiloExtension = vscode.extensions.getExtension(KILO_CODE_EXTENSION_ID);
-		if (!kiloExtension) {
-			this.logDebug('generateCommitMessage.kilo.failed', {
+		if (!kiloExtension || kiloExtension.isActive !== true) {
+			this.logDebug('generateCommitMessage.kilo.skipped', {
 				projectPath,
-				reason: 'Kilo Code extension is unavailable',
+				reason: kiloExtension ? 'Kilo Code extension is inactive' : 'Kilo Code extension is unavailable',
 			});
 			return '';
 		}
 
-		try {
-			if (!kiloExtension.isActive) {
-				await this.awaitKiloCommitMessageStep(
-					kiloExtension.activate(),
-					deadlineAt,
-					'activation',
-				);
-			}
-		} catch (error) {
-			this.logDebug('generateCommitMessage.kilo.failed', {
-				projectPath,
-				reason: `Kilo Code activation failed: ${error instanceof Error ? error.message : String(error)}`,
-			});
-			return '';
-		}
-
+		// Общий лимит распространяется только на подготовку и выполнение уже активного генератора.
+		const deadlineAt = Date.now() + KILO_GENERATE_COMMIT_MESSAGE_TIMEOUT_MS;
 		let repository: BuiltInGitRepository | null;
 		try {
 			repository = await this.awaitKiloCommitMessageStep(
@@ -3604,7 +3644,97 @@ export class GitService {
 		}
 	}
 
-	/** Генерирует сообщение через Copilot с отменой и жестким пределом ожидания. */
+	/**
+	 * Загружает staged-тексты параллельно, чтобы Copilot не читал их последовательно через VS Code RPC.
+	 * Включает имена с test: фильтр резервного контекста не ограничивает собственный отбор Copilot.
+	 * Не показывает вкладки и не собирает свой prompt; лимиты, отмена и бинарные файлы — tests/gitService.test.ts.
+	 */
+	private async prefetchCopilotCommitDocuments(
+		repository: BuiltInGitRepository,
+		token: vscode.CancellationToken,
+	): Promise<void> {
+		if (repository.rootUri.scheme !== 'file' || !repository.status || token.isCancellationRequested) {
+			return;
+		}
+		// Локальный probe не делает дополнительный медленный RPC; остальные URI оставляем штатному Copilot.
+		const startedAt = Date.now();
+		let stopped = false;
+		let outcome = 'completed';
+		let opened = 0;
+		let failed = 0;
+		let reservedBytes = 0;
+		let timeout: NodeJS.Timeout | undefined;
+		let cancellation: vscode.Disposable | undefined;
+		const stop = new Promise<void>(resolve => {
+			timeout = setTimeout(() => { stopped = true; outcome = 'timeout'; resolve(); }, COPILOT_DOCUMENT_PREFETCH.timeoutMs);
+			timeout.unref?.();
+			cancellation = token.onCancellationRequested(() => {
+				stopped = true; outcome = 'cancelled'; resolve();
+			});
+		});
+		/** Один проход обновляет staged scope и ограничивает одновременно ожидающие открытия документов. */
+		const prepare = async (): Promise<void> => {
+			await repository.status!();
+			if (stopped) { return; }
+			const seen = new Set(vscode.workspace.textDocuments.filter(document => !document.isClosed)
+				.map(document => document.uri.toString()));
+			const candidates: vscode.Uri[] = [];
+			for (const change of repository.state.indexChanges ?? []) {
+				const uri = change.uri;
+				const relativePath = path.relative(repository.rootUri.fsPath, uri.fsPath);
+				const kind = getContextFileKind(uri.fsPath);
+				if (change.status === 2 || uri.scheme !== 'file' || seen.has(uri.toString())
+					|| !relativePath || relativePath === '..' || relativePath.startsWith(`..${path.sep}`)
+					|| path.isAbsolute(relativePath)
+					|| !(kind === 'code' || kind === 'text' || this.isCommitCodeFile(uri.fsPath))) {
+					continue;
+				}
+				seen.add(uri.toString());
+				candidates.push(uri);
+				if (candidates.length >= COPILOT_DOCUMENT_PREFETCH.maxFiles) { break; }
+			}
+			let next = 0;
+			/** Проверяет обычный файл и бинарность до openTextDocument; ошибки не мешают штатной генерации. */
+			const worker = async (): Promise<void> => {
+				while (!stopped && next < candidates.length) {
+					const uri = candidates[next++];
+					try {
+						const stat = await fs.lstat(uri.fsPath);
+						if (stopped || !stat.isFile() || stat.size > COPILOT_DOCUMENT_PREFETCH.maxFileBytes
+							|| reservedBytes + stat.size > COPILOT_DOCUMENT_PREFETCH.maxTotalBytes) { continue; }
+						reservedBytes += stat.size;
+						const handle = await fs.open(uri.fsPath, 'r');
+						let binary: boolean;
+						try {
+							const probe = Buffer.alloc(COPILOT_DOCUMENT_PREFETCH.probeBytes);
+							const { bytesRead } = await handle.read(probe, 0, probe.length, 0);
+							binary = probe.subarray(0, bytesRead).includes(0);
+						} finally { await handle.close(); }
+						if (stopped || binary) { continue; }
+						await vscode.workspace.openTextDocument(uri);
+						if (!stopped) { opened++; }
+					} catch { if (!stopped) { failed++; } }
+				}
+			};
+			await Promise.all(Array.from({ length: Math.min(COPILOT_DOCUMENT_PREFETCH.concurrency, candidates.length) }, worker));
+		};
+		try {
+			await Promise.race([prepare(), stop]);
+		} catch {
+			outcome = 'failed';
+		} finally {
+			// openTextDocument не принимает token; после дедлайна прекращаем только новые обращения.
+			stopped = true;
+			clearTimeout(timeout);
+			cancellation?.dispose();
+			this.logDebug('generateCommitMessage.copilot.timing', {
+				projectPath: repository.rootUri.fsPath, phase: 'document-prefetch', outcome,
+				opened, failed, reservedBytes, durationMs: Date.now() - startedAt,
+			});
+		}
+	}
+
+	/** Генерирует сообщение штатной командой Copilot; подготовка документов входит в общий срок отмены. */
 	async generateCommitMessageViaCopilot(projectPath: string): Promise<string> {
 		const repository = await this.getBuiltInGitRepository(projectPath);
 		if (!repository) {
@@ -3612,8 +3742,16 @@ export class GitService {
 		}
 
 		const cancellationSource = new vscode.CancellationTokenSource();
+		// Записываем причину отмены отдельно: пустой результат не означает, что Copilot ответил.
+		const startedAt = Date.now();
+		this.logDebug('generateCommitMessage.copilot.timing', { projectPath, phase: 'start' });
 		const cancellationTimer = setTimeout(
-			() => cancellationSource.cancel(),
+			() => {
+				this.logDebug('generateCommitMessage.copilot.timing', {
+					projectPath, phase: 'cancel-deadline', durationMs: Date.now() - startedAt,
+				});
+				cancellationSource.cancel();
+			},
 			COPILOT_GENERATE_COMMIT_MESSAGE_CANCEL_AFTER_MS,
 		);
 		cancellationTimer.unref?.();
@@ -3625,6 +3763,14 @@ export class GitService {
 				'github.copilot.git.generateCommitMessage',
 				[repository.rootUri, undefined, cancellationSource.token],
 				COPILOT_GENERATE_COMMIT_MESSAGE_TIMEOUT_MS,
+				{
+					prepareCommand: async () => {
+						await this.prefetchCopilotCommitDocuments(repository, cancellationSource.token);
+						if (cancellationSource.token.isCancellationRequested) {
+							throw new Error('Copilot command cancelled before start');
+						}
+					},
+				},
 			);
 			commandCompleted = true;
 			return generatedMessage;
@@ -3636,6 +3782,10 @@ export class GitService {
 			return '';
 		} finally {
 			clearTimeout(cancellationTimer);
+			this.logDebug('generateCommitMessage.copilot.timing', {
+				projectPath, phase: 'finish', commandCompleted,
+				cancelled: cancellationSource.token.isCancellationRequested, durationMs: Date.now() - startedAt,
+			});
 			if (!commandCompleted) {
 				cancellationSource.cancel();
 			}
@@ -3670,7 +3820,8 @@ export class GitService {
 			this.generatedCommitMessageCleanupTokens.delete(cleanupToken);
 		}, GENERATED_COMMIT_MESSAGE_CLEANUP_TTL_MS);
 		timeout.unref?.();
-		this.generatedCommitMessageCleanupTokens.set(cleanupToken, { ...entry, timeout });
+		this.generatedCommitMessageCleanupTokens.set(cleanupToken, { ...entry, timeout, issuedAt: Date.now() });
+		this.logDebug('generateCommitMessage.delivery', { stage: 'tokenIssued', cleanupToken, projectPath });
 		return cleanupToken;
 	}
 
@@ -3682,6 +3833,10 @@ export class GitService {
 		}
 		this.generatedCommitMessageCleanupTokens.delete(cleanupToken);
 		clearTimeout(entry.timeout);
+		this.logDebug('generateCommitMessage.delivery', {
+			stage: 'acknowledged', cleanupToken, durationMs: this.resolveDebugDurationMs(entry.issuedAt),
+			inputUnchanged: entry.repository.inputBox.value === entry.input,
+		});
 		if (entry.repository.inputBox.value !== entry.input) {
 			return false;
 		}
@@ -3849,6 +4004,90 @@ export class GitService {
 		return mismatches;
 	}
 
+	/** Проверяет только наличие staged, без diff/истории/рабочих файлов; тесты: gitService.test.ts. */
+	async getStagedCommitProjects(
+		projectPaths: Map<string, string>,
+		projectNames: string[],
+	): Promise<StagedCommitProject[]> {
+		const projects: StagedCommitProject[] = [];
+		for (const project of new Set(projectNames.length ? projectNames : projectPaths.keys())) {
+			const projectPath = projectPaths.get(project);
+			if (!projectPath) {
+				continue;
+			}
+			try {
+				await this.runGitFileCommandRaw(projectPath, [
+					'diff', '--cached', '--quiet', '--no-renames', '--no-ext-diff', '--no-textconv',
+				]);
+			} catch (error) {
+				// Только exit 1 означает различия; не-Git каталоги и ошибки не становятся целями генерации.
+				if ((error as { code?: unknown }).code === 1) {
+					projects.push({ project, projectPath });
+				}
+			}
+		}
+		return projects;
+	}
+
+	/** Читает только staged-метаданные, без поиска сходства rename и без содержимого тяжёлых файлов. */
+	private async getStagedCommitFiles(projectPath: string): Promise<StagedCommitFile[]> {
+		const raw = await this.runGitFileCommandRaw(projectPath, [
+			'diff', '--cached', '--raw', '-z', '--no-abbrev', '--no-renames', '--no-ext-diff', '--no-textconv',
+		]);
+		const records = raw.split('\0');
+		const files: StagedCommitFile[] = [];
+		for (let index = 0; index + 1 < records.length; index += 2) {
+			const [oldMode, newMode, oldObject, newObject, status] = records[index].slice(1).split(' ');
+			if (!status || !records[index + 1]) {
+				continue;
+			}
+			files.push({
+				status, path: records[index + 1], oldObject, newObject,
+				regularFile: [oldMode, newMode].every(mode => mode === '000000' || /^100\d{3}$/.test(mode)),
+			});
+		}
+		return files;
+	}
+
+	/** Исключает test в имени без каталогов и регистра только из собственного отбора; tests/gitService.test.ts. */
+	private isExcludedCommitMessageFile(filePath: string): boolean {
+		return path.basename(filePath).toLowerCase().includes('test');
+	}
+
+	/** Предпочитает исходники; документация, lock-файлы и сгенерированные bundles — только минимальный fallback. */
+	private isCommitCodeFile(filePath: string): boolean {
+		if (/(^|\/)(docs?|documentation)(\/|$)|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$|\.min\.[^/]+$|\.map$/i.test(filePath)) {
+			return false;
+		}
+		return getContextFileKind(filePath) === 'code'
+			|| /\.(c|h|cc|cpp|cxx|hpp|cs|fs|fsx|ex|exs|erl|hrl|lua|dart|r|scala|pl|pm|clj|zig)$/i.test(filePath)
+			|| /(^|\/)(Dockerfile|Makefile|CMakeLists\.txt)$/i.test(filePath);
+	}
+
+	/** Возвращает ограниченный текстовый патч; Git textconv и внешние diff-драйверы не запускаются. */
+	private async getStagedCommitPatch(projectPath: string, filePath: string, maxChars: number): Promise<string> {
+		let diff: string;
+		try {
+			diff = await this.runGitFileCommandRaw(projectPath, [
+				'diff', '--cached', '--no-color', '--no-ext-diff', '--no-textconv',
+				'--no-renames', '--unified=2', '--', `:(top,literal)${filePath}`,
+			], { maxBuffer: 16 * 1024 });
+		} catch (error) {
+			const failure = error as { code?: unknown; stdout?: string };
+			if (failure.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || typeof failure.stdout !== 'string') {
+				return '';
+			}
+			diff = `${failure.stdout}\n...[diff truncated]`;
+		}
+		if (!diff.trim() || diff.includes('\0') || /^Binary files |^GIT binary patch/m.test(diff)) {
+			return '';
+		}
+		// Имя сохраняется отдельно: общий builder удаляет технические заголовки diff.
+		const text = `File: ${JSON.stringify(filePath)}\n${diff}`;
+		return text.length > maxChars ? `${text.slice(0, maxChars - 21)}\n...[diff truncated]` : text;
+	}
+
+	/** Ленивый компактный контекст внутреннего генератора; отчёты используют отдельный полный сбор. */
 	async getStagedCommitProjectData(
 		projectPaths: Map<string, string>,
 		projectNames: string[],
@@ -3865,19 +4104,72 @@ export class GitService {
 			}
 
 			try {
-				const snapshot = await this.getUncommittedProjectSnapshot(project, projectPath);
-				if (!snapshot || snapshot.stagedFiles.length === 0) {
+				// Исключённые имена не попадают ни в патчи, ни в summary/metadata и не расходуют бюджет чтения.
+				const files = (await this.getStagedCommitFiles(projectPath))
+					.filter(file => !this.isExcludedCommitMessageFile(file.path));
+				if (files.length === 0) {
 					continue;
 				}
-
+				// Размеры обеих версий учитывают удаления и замену большого файла маленьким.
+				const candidates = files.filter(file => file.regularFile);
+				const objectIds = [...new Set(candidates.flatMap(file => [file.oldObject, file.newObject]))]
+					.filter(id => !/^0+$/.test(id));
+				const sizes = new Map<string, number>();
+				if (objectIds.length) {
+					const metadata = await this.runGitFileCommandRaw(projectPath, [
+						'cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)',
+					], { input: `${objectIds.join('\n')}\n` });
+					for (const line of metadata.split('\n')) {
+						const [id, type, size] = line.split(' ');
+						if (type === 'blob') {
+							sizes.set(id, Number(size));
+						}
+					}
+				}
+				const fileSize = (file: StagedCommitFile): number => Math.max(...[file.oldObject, file.newObject]
+					.map(id => /^0+$/.test(id) ? 0 : sizes.get(id) ?? Infinity));
+				const smallFiles = candidates.filter(file => fileSize(file) <= GitService.COMMIT_FILE_MAX_BYTES)
+					.sort((left, right) => fileSize(left) - fileSize(right) || left.path.localeCompare(right.path));
+				const codeFiles = smallFiles.filter(file => this.isCommitCodeFile(file.path));
+				const textFiles = smallFiles.filter(file => !this.isCommitCodeFile(file.path)
+					&& ['text', 'code', 'other'].includes(getContextFileKind(file.path)))
+					.sort((left, right) => Number(getContextFileKind(left.path) === 'other')
+						- Number(getContextFileKind(right.path) === 'other') || fileSize(left) - fileSize(right));
+				const patches: string[] = [];
+				const included = new Set<string>();
+				// Ограничено и число попыток: бинарный файл с расширением кода не запускает неограниченный обход.
+				for (const group of [codeFiles.slice(0, GitService.COMMIT_CODE_MAX_FILES), textFiles.slice(0, 2)]) {
+					if (patches.length) {
+						break;
+					}
+					// Не более шести небольших патчей параллельно; порядок результата остаётся детерминированным.
+					const results = await Promise.all(group.map(async (file) => {
+						const maxChars = this.isCommitCodeFile(file.path) ? 1800 : 1000;
+						const patch = await this.getStagedCommitPatch(projectPath, file.path, maxChars);
+						return { file, patch };
+					}));
+					for (const { file, patch } of results) {
+						if (patch) {
+							patches.push(patch);
+							included.add(file.path);
+						}
+					}
+				}
+				const omitted = files.filter(file => !included.has(file.path));
+				const summary = `Staged files: ${files.length}; patches: ${included.size}; omitted content: ${omitted.length}.\n`
+					+ omitted.slice(0, 20).map(file => `${file.status} ${JSON.stringify(file.path)}`).join('\n');
+				this.logDebug('generateCommitMessage.context', {
+					project, stagedFiles: files.length, patchFiles: included.size, omittedFiles: omitted.length,
+					diffChars: patches.reduce((total, patch) => total + patch.length, 0),
+				});
 				prepared.push({
 					project,
 					projectPath,
-					branch: snapshot.branch,
+					branch: await this.runGitFileCommandOptional(projectPath, ['symbolic-ref', '--short', 'HEAD']),
 					changeSource: 'staged',
-					stagedFiles: snapshot.stagedFiles,
-					stat: snapshot.stagedStat,
-					diff: snapshot.stagedDiff,
+					stagedFiles: files.map(({ status, path: filePath }) => ({ status, path: filePath })),
+					stat: summary.slice(0, 1000),
+					diff: [summary.slice(0, 1000), ...patches].join('\n\n').slice(0, GitService.COMMIT_CONTEXT_MAX_CHARS),
 				});
 			} catch {
 				// Ignore non-git folders and command failures for a specific project.

@@ -3910,6 +3910,10 @@ test('normalizeCommitMessageGenerationInstructions supports strings, arrays and 
 		'keep subject short\nmention ticket when useful',
 	);
 	assert.equal(normalizeCommitMessageGenerationInstructions({ custom: true }), '');
+	assert.equal(normalizeCommitMessageGenerationInstructions([
+		{ text: ' По-русски ' }, { text: 'Прошедшее время' }, { file: 'rules.md' },
+		null, false, 5, {}, { text: 7 },
+	]), 'По-русски\nПрошедшее время');
 });
 
 test('buildGitOverlayGraph creates prompt, tracked and upstream relationships without duplicate nodes', () => {

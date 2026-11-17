@@ -1,8 +1,212 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 const originalLoad = (Module as any)._load;
+
+/** Git-проверки используют только собственные временные репозитории, без коммитов и рабочих ресурсов. */
+const execFileAsync = promisify(execFile);
+
+/** Создаёт изолированный unborn-репозиторий и гарантирует адресную очистку после теста. */
+async function createCommitContextRepository(t: { after: (cleanup: () => Promise<void>) => void }): Promise<string> {
+	const temporaryRoot = path.join(os.tmpdir(), 'opencode');
+	await fs.mkdir(temporaryRoot, { recursive: true });
+	const directory = await fs.mkdtemp(path.join(temporaryRoot, 'commit-context-172-'));
+	t.after(() => fs.rm(directory, { recursive: true, force: true }));
+	await execFileAsync('git', ['init', '--quiet', directory]);
+	return directory;
+}
+
+/** Проверяет реальный индекс, отбор по размеру/типу, literal paths и отсутствие чтения рабочих изменений. */
+test('GitService staged commit context prefers small code and never reads unstaged or untracked content', async (t) => {
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const directory = await createCommitContextRepository(t);
+	const projects = new Map([['sample', directory]]);
+	assert.deepEqual(await service.getStagedCommitProjects(projects, []), []);
+	await fs.mkdir(path.join(directory, 'src'));
+	await fs.mkdir(path.join(directory, 'docs'));
+	// Windows запрещает tab/newline в имени, поэтому там проверяется путь с пробелами.
+	const unusualPath = process.platform === 'win32' ? 'src/spaced name.cpp' : 'src/tab\tline\n.cpp';
+	const stagedFiles = new Map<string, string | Buffer>([
+		['src/[literal].ts', 'export const stagedOnly = 172;\n'],
+		[unusualPath, 'int staged_cpp = 172;\n'],
+		['src/large.ts', 'large_code_content\n'.repeat(5000)],
+		['src/binary.ts', Buffer.from([0, 1, 2, 3])],
+		['docs/guide.md', 'documentation_content\n'],
+	]);
+	for (const [name, content] of stagedFiles) {
+		await fs.writeFile(path.join(directory, name), content);
+	}
+	await execFileAsync('git', ['add', '--all'], { cwd: directory });
+	await fs.writeFile(path.join(directory, 'src/[literal].ts'), 'unstaged_only_content\n');
+	await fs.writeFile(path.join(directory, 'untracked.ts'), 'untracked_only_content\n'.repeat(100000));
+	const indexBefore = await fs.readFile(path.join(directory, '.git/index'));
+	const commands: string[][] = [];
+	const run = (service as any).runGitFileCommandRaw.bind(service);
+	(service as any).runGitFileCommandRaw = async (root: string, args: string[], options: unknown) => {
+		commands.push(args);
+		return run(root, args, options);
+	};
+	assert.deepEqual(await service.getStagedCommitProjects(projects, ['sample', 'missing', 'sample']), [
+		{ project: 'sample', projectPath: directory },
+	]);
+	assert.equal(commands.length, 1);
+	assert.ok(commands[0].includes('--quiet'));
+	const [context] = await service.getStagedCommitProjectData(projects, ['sample']);
+	assert.equal(context.stagedFiles.length, 5);
+	assert.match(context.diff, /stagedOnly = 172/);
+	assert.match(context.diff, /staged_cpp = 172/);
+	assert.doesNotMatch(context.diff, /documentation_content|large_code_content|unstaged_only_content|untracked_only_content/);
+	assert.ok(!context.diff.includes('\0'));
+	assert.match(context.diff, /omitted content: 3/);
+	assert.ok(context.stagedFiles.some(file => file.path === unusualPath));
+	const patches = commands.filter(args => args.includes('--unified=2'));
+	assert.equal(patches.length, 3);
+	assert.ok(patches.every(args => args.includes('--no-textconv') && args.at(-1)?.startsWith(':(top,literal)')));
+	assert.ok(!commands.some(args => args.includes('status') || args.includes('ls-files')));
+	// Workspace folder может быть вложен в Git root; пути raw-diff остаются корневыми.
+	const [nestedContext] = await service.getStagedCommitProjectData(new Map([
+		['nested', path.join(directory, 'src')],
+	]), []);
+	assert.match(nestedContext.diff, /stagedOnly = 172/);
+	assert.deepEqual(await fs.readFile(path.join(directory, '.git/index')), indexBefore);
+});
+
+/** Фильтр test действует до чтения содержимого, на metadata и текстовый fallback, но не на имена каталогов. */
+test('GitService staged commit context excludes test filenames regardless of case and handles test-only changes', async t => {
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const directory = await createCommitContextRepository(t);
+	const projects = new Map([['sample', directory]]);
+	const excluded = ['code.test.ts', 'TestHelper.ts', 'latest.ts', 'TEST.md', 'test'];
+	for (const name of excluded) {
+		await fs.writeFile(path.join(directory, name), 'excluded_content_172\n');
+	}
+	await execFileAsync('git', ['add', '--all'], { cwd: directory });
+	const indexBefore = await fs.readFile(path.join(directory, '.git/index'));
+	const commands: string[][] = [];
+	const run = (service as any).runGitFileCommandRaw.bind(service);
+	(service as any).runGitFileCommandRaw = async (root: string, args: string[], options: unknown) => {
+		commands.push(args);
+		return run(root, args, options);
+	};
+	assert.deepEqual(await service.getStagedCommitProjectData(projects, []), []);
+	assert.equal(commands.length, 1);
+	assert.ok(commands[0].includes('--raw'));
+	assert.deepEqual(await fs.readFile(path.join(directory, '.git/index')), indexBefore);
+	// Наличие staged для штатных внешних генераторов не фильтруется.
+	assert.deepEqual(await service.getStagedCommitProjects(projects, []), [{ project: 'sample', projectPath: directory }]);
+	await fs.writeFile(path.join(directory, 'README.md'), 'allowed_documentation_172\n');
+	await execFileAsync('git', ['add', '--all'], { cwd: directory });
+	const [textContext] = await service.getStagedCommitProjectData(projects, []);
+	assert.deepEqual(textContext.stagedFiles, [{ path: 'README.md', status: 'A' }]);
+	assert.match(textContext.diff, /allowed_documentation_172/);
+	assert.doesNotMatch(JSON.stringify(textContext), /excluded_content_172|code\.test\.ts|TestHelper|latest\.ts|TEST\.md/);
+	await fs.mkdir(path.join(directory, 'tests'));
+	await fs.writeFile(path.join(directory, 'tests/helper.ts'), 'export const allowed_code_172 = true;\n');
+	await execFileAsync('git', ['add', '--all'], { cwd: directory });
+	const [codeContext] = await service.getStagedCommitProjectData(projects, []);
+	assert.deepEqual(codeContext.stagedFiles.map(file => file.path), ['README.md', 'tests/helper.ts']);
+	assert.match(codeContext.diff, /allowed_code_172/);
+	assert.doesNotMatch(codeContext.diff, /allowed_documentation_172|excluded_content_172/);
+	assert.match(codeContext.stat, /Staged files: 2; patches: 1; omitted content: 1/);
+	assert.ok(commands.filter(args => args.includes('--unified=2'))
+		.every(args => [':(top,literal)README.md', ':(top,literal)tests/helper.ts'].includes(args.at(-1)!)));
+});
+
+/** Проверяет минимальный текстовый fallback и пределы реально получаемого diff. */
+test('GitService staged commit context uses minimal docs without code and bounds large patches', async (t) => {
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const directory = await createCommitContextRepository(t);
+	await fs.writeFile(path.join(directory, 'README.md'), 'small_documentation\n');
+	await fs.writeFile(path.join(directory, 'guide.txt'), 'guide_documentation\n'.repeat(2500));
+	await fs.writeFile(path.join(directory, 'manual.md'), 'large_documentation\n'.repeat(4000));
+	await execFileAsync('git', ['add', '--all'], { cwd: directory });
+	const [context] = await service.getStagedCommitProjectData(new Map([['docs', directory]]), []);
+	assert.match(context.diff, /small_documentation/);
+	assert.match(context.diff, /guide_documentation/);
+	assert.match(context.diff, /diff truncated/);
+	assert.doesNotMatch(context.diff, /large_documentation/);
+	assert.ok(context.diff.length < 3100);
+	assert.equal(context.stagedFiles.length, 3);
+});
+
+/** Проверяет удаление большого blob, обе стороны изменения, submodule и rename без дорогого поиска сходства. */
+test('GitService staged commit context filters both object sizes and preserves deleted metadata', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const patches: string[] = [];
+	const zero = '0'.repeat(40);
+	const small = '1'.repeat(40);
+	const large = '2'.repeat(40);
+	const raw = [
+		`:100644 000000 ${large} ${zero} D\0old.ts\0`,
+		`:100644 100644 ${large} ${small} M\0shrunk.ts\0`,
+		`:000000 100644 ${zero} ${small} A\0new.cpp\0`,
+		`:160000 160000 ${small} ${large} M\0module\0`,
+	].join('');
+	(service as any).runGitFileCommandRaw = async (_root: string, args: string[]) => {
+		if (args.includes('--raw')) { return raw; }
+		if (args[0] === 'cat-file') { return `${small} blob 20\n${large} blob 10000000\n`; }
+		patches.push(args[args.length - 1]);
+		return '+small change';
+	};
+	(service as any).runGitFileCommandOptional = async () => 'main';
+	const [context] = await service.getStagedCommitProjectData(new Map([['sample', '/unused']]), []);
+	assert.deepEqual(patches, [':(top,literal)new.cpp']);
+	assert.deepEqual(context.stagedFiles.map(file => file.status), ['D', 'M', 'A', 'M']);
+	assert.match(context.diff, /omitted content: 3/);
+});
+
+/** Проверяет лимит патчей, полностью бинарный набор и исчезновение diff во время сбора. */
+test('GitService staged commit context bounds file count and handles binary-only or empty patches', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const projects = new Map([['sample', '/unused']]);
+	const zero = '0'.repeat(40);
+	const small = '1'.repeat(40);
+	let patchContent = '+bounded code\n'.repeat(1000);
+	let patchCalls = 0;
+	(service as any).runGitFileCommandRaw = async (_root: string, args: string[]) => {
+		if (args.includes('--raw')) {
+			return Array.from({ length: 10 }, (_, i) => `:000000 100644 ${zero} ${small} A\0file${i}.ts\0`).join('');
+		}
+		if (args[0] === 'cat-file') { return `${small} blob 14000\n`; }
+		patchCalls += 1;
+		return patchContent;
+	};
+	(service as any).runGitFileCommandOptional = async () => '';
+	const [bounded] = await service.getStagedCommitProjectData(projects, []);
+	assert.equal(patchCalls, 6);
+	assert.ok(bounded.diff.length <= 12000);
+	assert.match(bounded.diff, /patches: 6; omitted content: 4/);
+	for (const content of ['Binary files a/file.ts and b/file.ts differ', '']) {
+		patchContent = content;
+		const [metadataOnly] = await service.getStagedCommitProjectData(projects, []);
+		assert.match(metadataOnly.diff, /patches: 0; omitted content: 10/);
+		assert.doesNotMatch(metadataOnly.diff, /Binary files|File:/);
+	}
+});
+
+/** Отличает чистый индекс от отказа Git; код ошибки 128 не должен запускать генерацию. */
+test('GitService staged project discovery skips git failures and clean projects', async () => {
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	(service as any).runGitFileCommandRaw = async (root: string) => {
+		if (root === '/clean') { return ''; }
+		throw Object.assign(new Error('git failure'), { code: root === '/staged' ? 1 : 128 });
+	};
+	assert.deepEqual(await service.getStagedCommitProjects(new Map([
+		['clean', '/clean'], ['broken', '/broken'], ['staged', '/staged'],
+	]), []), [{ project: 'staged', projectPath: '/staged' }]);
+});
 
 /** Хранит вызовы команд VS Code для проверок интеграции Git SCM. */
 const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
@@ -16,27 +220,33 @@ let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<un
 /** Предоставляет встроенное Git API для текущего сценария. */
 let vscodeGitExtension: Record<string, unknown> | null = null;
 
-/** Предоставляет расширение Kilo Code и управляет его тестовой активацией. */
+/** Предоставляет текущее состояние расширения Kilo Code без обращения к установленному расширению. */
 let vscodeKiloExtension: Record<string, unknown> | null = null;
-
-/** Подменяет результат активации Kilo Code в проверяемом сценарии. */
-let vscodeKiloActivationHandler: (() => Promise<unknown>) | undefined;
 
 /** Хранит порядок получения расширений, активации и discovery команд. */
 const vscodeLifecycleCalls: string[] = [];
 
-/** Создает активное или холодное тестовое расширение Kilo Code. */
+/** Минимальный URI сохраняет схему и identity документа при предварительной загрузке. */
+function createFileUri(fsPath: string) {
+	return { scheme: 'file', fsPath, toString: () => fsPath };
+}
+
+/** Хранит документы и обращения только тестового VS Code, без открытия редактора. */
+const vscodeTextDocuments: Array<{ uri: ReturnType<typeof createFileUri>; isClosed: boolean }> = [];
+const vscodeOpenedDocuments: string[] = [];
+let vscodeOpenTextDocumentHandler: ((uri: ReturnType<typeof createFileUri>) => Promise<void>) | undefined;
+let vscodeShownDocuments = 0;
+
+/** Создаёт активное или холодное Kilo и фиксирует запрещённую автоматическую активацию. */
 function setKiloCodeExtension(isActive = true): void {
-	const extension: { isActive: boolean; activate: () => Promise<unknown> } = {
+	vscodeKiloExtension = {
 		isActive,
+		/** Отказ не позволяет ошибочной активации запустить генератор в тесте. */
 		activate: async () => {
 			vscodeLifecycleCalls.push('kilo:activate');
-			const result = await vscodeKiloActivationHandler?.();
-			extension.isActive = true;
-			return result;
+			throw new Error('Commit message generation must not activate Kilo');
 		},
 	};
-	vscodeKiloExtension = extension;
 }
 
 /** Сбрасывает изменяемое состояние VS Code mock между сценариями. */
@@ -45,8 +255,11 @@ function resetVsCodeMock(): void {
 	vscodeAvailableCommands = [];
 	vscodeExecuteCommandHandler = undefined;
 	vscodeGitExtension = null;
-	vscodeKiloActivationHandler = undefined;
 	vscodeLifecycleCalls.length = 0;
+	vscodeTextDocuments.length = 0;
+	vscodeOpenedDocuments.length = 0;
+	vscodeOpenTextDocumentHandler = undefined;
+	vscodeShownDocuments = 0;
 	setKiloCodeExtension();
 }
 
@@ -70,6 +283,7 @@ function createVsCodeMock() {
 
 			/** Передает команде идентичный token на весь срок одного вызова. */
 			readonly token = {
+				isCancellationRequested: false,
 				onCancellationRequested: (listener: () => void) => {
 					this.cancellationListeners.add(listener);
 					return { dispose: () => this.cancellationListeners.delete(listener) };
@@ -78,6 +292,7 @@ function createVsCodeMock() {
 
 			/** Отправляет подписчикам тестовый сигнал отмены. */
 			cancel(): void {
+				this.token.isCancellationRequested = true;
 				for (const listener of this.cancellationListeners) {
 					listener();
 				}
@@ -89,11 +304,21 @@ function createVsCodeMock() {
 			}
 		},
 		workspace: {
+			textDocuments: vscodeTextDocuments,
+			/** Открывает документ в общем кеше, не создавая видимую вкладку. */
+			openTextDocument: async (uri: ReturnType<typeof createFileUri>) => {
+				vscodeOpenedDocuments.push(uri.fsPath);
+				await vscodeOpenTextDocumentHandler?.(uri);
+				const document = { uri, isClosed: false };
+				vscodeTextDocuments.push(document);
+				return document;
+			},
 			getConfiguration: () => ({
 				get: <T>(_key: string, defaultValue?: T) => defaultValue,
 			}),
 		},
 		window: {
+			showTextDocument: async () => { vscodeShownDocuments++; },
 			createOutputChannel: () => ({
 				appendLine: (_message: string) => { },
 				show: (_preserveFocus?: boolean) => { },
@@ -110,7 +335,7 @@ function createVsCodeMock() {
 			},
 		},
 		Uri: {
-			file: (fsPath: string) => ({ fsPath, toString: () => fsPath }),
+			file: createFileUri,
 		},
 		commands: {
 			getCommands: async () => {
@@ -154,12 +379,10 @@ function createDeferred<T>() {
 /** Создает минимальный репозиторий встроенного Git API с изменяемым SCM input. */
 function createBuiltInGitRepository(rootPath: string, inputValue: string): any {
 	return {
-		rootUri: {
-			fsPath: rootPath,
-			toString: () => rootPath,
-		},
+		rootUri: createFileUri(rootPath),
 		inputBox: { value: inputValue },
-		state: { onDidChange: () => ({ dispose() { } }) },
+		state: { onDidChange: () => ({ dispose() { } }), indexChanges: [] },
+		status: async () => {},
 	};
 }
 
@@ -262,73 +485,87 @@ test('GitService generateCommitMessageViaKilo uses the exact repository root and
 	}
 });
 
-/** Проверяет активацию холодного Kilo Code строго до discovery и выполнения команды. */
-test('GitService generateCommitMessageViaKilo activates inactive extension before command discovery', async () => {
+/** Проверяет пропуск отсутствующего/холодного Kilo без активации, ожидания и изменения SCM. */
+test('GitService generateCommitMessageViaKilo skips missing and inactive extensions before SCM work', async (t) => {
+	// Настоящие расширения, Git и SCM заменены объектами в памяти; команда известна даже при холодном Kilo.
 	resetVsCodeMock();
 	const { GitService } = await importGitService();
 	const service = new GitService();
 	const repository = createBuiltInGitRepository('/workspace/api', 'draft');
 	setBuiltInGitRepositories([repository]);
-	setKiloCodeExtension(false);
 	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
-	vscodeExecuteCommandHandler = async () => {
-		repository.inputBox.value = 'feat: activated generation';
-	};
+	// Отсутствие вызовов доказывает немедленный выход без измерения нестабильного времени выполнения.
+	const timeout = t.mock.method(globalThis, 'setTimeout');
+	const repositoryLookup = t.mock.method(service, 'getBuiltInGitApi');
 
 	try {
-		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), 'feat: activated generation');
-		assert.ok(vscodeLifecycleCalls.indexOf('kilo:activate') >= 0);
-		assert.ok(vscodeLifecycleCalls.indexOf('kilo:activate') < vscodeLifecycleCalls.indexOf('commands:get'));
+		for (const state of ['missing', 'inactive']) {
+			setKiloCodeExtension(false);
+			if (state === 'missing') vscodeKiloExtension = null;
+			vscodeLifecycleCalls.length = 0;
+			assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '', state);
+			assert.deepEqual(vscodeLifecycleCalls, ['extension:get:kilocode.kilo-code'], state);
+			assert.deepEqual(vscodeCommandCalls, [], state);
+			assert.equal(repositoryLookup.mock.callCount(), 0, state);
+			assert.equal(timeout.mock.callCount(), 0, state);
+			assert.equal(repository.inputBox.value, 'draft', state);
+		}
 	} finally {
 		resetVsCodeMock();
 	}
 });
 
-/** Проверяет общий hard deadline для зависшей активации Kilo Code до command discovery. */
-test('GitService generateCommitMessageViaKilo times out stalled extension activation', async () => {
+/** Проверяет общий срок ожидания поиска Git, когда Kilo уже активно. */
+test('GitService generateCommitMessageViaKilo times out stalled repository discovery', async (t) => {
+	// Управляем временем и Git API в памяти: реального ожидания 75 секунд и запуска Git нет.
 	resetVsCodeMock();
 	const { GitService } = await importGitService();
 	const service = new GitService();
-	setKiloCodeExtension(false);
-	vscodeKiloActivationHandler = async () => new Promise(() => undefined);
-	const originalSetTimeout = globalThis.setTimeout;
-	globalThis.setTimeout = ((handler: (...args: any[]) => void, _timeout?: number, ...args: any[]) => (
-		originalSetTimeout(handler, 0, ...args)
-	)) as typeof setTimeout;
+	t.mock.method(service, 'getBuiltInGitApi', () => new Promise<null>(() => undefined));
+	t.mock.timers.enable({ apis: ['setTimeout'] });
 
 	try {
-		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		const generation = service.generateCommitMessageViaKilo('/workspace/api');
+		t.mock.timers.tick(75_000);
+		assert.equal(await generation, '');
 		assert.equal(vscodeLifecycleCalls.includes('commands:get'), false);
+		assert.equal(vscodeLifecycleCalls.includes('kilo:activate'), false);
+		assert.deepEqual(vscodeCommandCalls, []);
 	} finally {
-		globalThis.setTimeout = originalSetTimeout;
+		t.mock.timers.reset();
 		resetVsCodeMock();
 	}
 });
 
-/** Проверяет логируемый fallback при отсутствии Kilo Code и ошибке его активации. */
-test('GitService generateCommitMessageViaKilo falls back when extension is missing or activation fails', async () => {
+/** Проверяет повторное чтение активности: пропуск не кешируется, а последующее отключение учитывается. */
+test('GitService generateCommitMessageViaKilo rechecks extension availability for every generation', async () => {
+	// Один экземпляр сервиса переживает изменение состояния расширения между нажатиями кнопки.
 	resetVsCodeMock();
 	const { GitService } = await importGitService();
-	const service = new GitService() as any;
-	const logs: Array<{ event: string; reason: string }> = [];
-	service.logDebug = (event: string, payload?: { reason?: string }) => {
-		logs.push({ event, reason: payload?.reason || '' });
+	const service = new GitService();
+	const repository = createBuiltInGitRepository('/workspace/api', 'draft');
+	setBuiltInGitRepositories([repository]);
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	vscodeExecuteCommandHandler = async () => {
+		repository.inputBox.value = 'feat: active generation';
 	};
 
 	try {
+		setKiloCodeExtension(false);
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
+		assert.equal(vscodeCommandCalls.length, 0);
+		setKiloCodeExtension();
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), 'feat: active generation');
+		assert.equal(vscodeCommandCalls.length, 1);
+
+		// Пропуск после успешной генерации сохраняет текущее поле Source Control.
+		setKiloCodeExtension(false);
+		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
 		vscodeKiloExtension = null;
 		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
-		assert.match(logs.at(-1)?.reason || '', /unavailable/);
-		assert.equal(vscodeLifecycleCalls.includes('commands:get'), false);
-
-		vscodeLifecycleCalls.length = 0;
-		setKiloCodeExtension(false);
-		vscodeKiloActivationHandler = async () => {
-			throw new Error('activation unavailable');
-		};
-		assert.equal(await service.generateCommitMessageViaKilo('/workspace/api'), '');
-		assert.match(logs.at(-1)?.reason || '', /activation failed: activation unavailable/);
-		assert.equal(vscodeLifecycleCalls.includes('commands:get'), false);
+		assert.equal(vscodeCommandCalls.length, 1);
+		assert.equal(repository.inputBox.value, 'feat: active generation');
+		assert.equal(vscodeLifecycleCalls.includes('kilo:activate'), false);
 	} finally {
 		resetVsCodeMock();
 	}
@@ -544,6 +781,232 @@ test('GitService generateCommitMessageViaCopilot keeps latest SCM input through 
 	}
 });
 
+/** Подготавливает изолированные staged-файлы и штатный SCM mock для проверок предварительной загрузки. */
+async function createCopilotPrefetchFixture(
+	t: { after: (cleanup: () => void | Promise<void>) => void },
+	files: Record<string, string | Buffer>,
+) {
+	resetVsCodeMock();
+	t.after(resetVsCodeMock);
+	const root = await createCommitContextRepository(t);
+	await Promise.all(Object.entries(files).map(async ([name, content]) => {
+		await fs.mkdir(path.dirname(path.join(root, name)), { recursive: true });
+		await fs.writeFile(path.join(root, name), content);
+	}));
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repository = createBuiltInGitRepository(root, 'draft from user');
+	repository.state.indexChanges = Object.keys(files).map(name => ({ uri: createFileUri(path.join(root, name)), status: 0 }));
+	setBuiltInGitRepositories([repository]);
+	vscodeExecuteCommandHandler = async (id, rootUri) => {
+		assert.equal(id, 'github.copilot.git.generateCommitMessage');
+		assert.equal(rootUri, repository.rootUri);
+		repository.inputBox.value = 'generated message';
+	};
+	return { root, repository, service };
+}
+
+/** Проверяет staged scope, включая test-имена, binary probe, повторное использование документов и отсутствие вкладок. */
+test('GitService Copilot prefetch opens only eligible staged text documents', async t => {
+	const { root, repository, service } = await createCopilotPrefetchFixture(t, {
+		'code.ts': 'export const value = 1;', 'README.md': '# Example', 'empty.txt': '',
+		'closed.ts': '// closed', 'open.ts': '// already open', 'deleted.ts': '// deleted',
+		'binary.ts': Buffer.from([65, 0, 66]), 'picture.png': 'not an image',
+		'large.ts': Buffer.alloc(1024 * 1024 + 1, 65), 'failed.ts': '// opening fails',
+		'code.test.ts': '// prefetch includes tests', 'TestHelper.ts': '// included', 'TEST.md': '# included',
+		'latest.ts': '// included substring', 'tests/helper.ts': '// included directory',
+	});
+	await fs.symlink(path.join(root, 'code.ts'), path.join(root, 'link.ts'));
+	await fs.mkdir(path.join(root, 'directory.ts'));
+	await fs.writeFile(path.join(root, 'unstaged.ts'), '// not in index');
+	vscodeTextDocuments.push(
+		{ uri: createFileUri(path.join(root, 'open.ts')), isClosed: false },
+		{ uri: createFileUri(path.join(root, 'closed.ts')), isClosed: true },
+	);
+	const staged = repository.state.indexChanges;
+	staged.find((change: { uri: ReturnType<typeof createFileUri> }) => change.uri.fsPath.endsWith('/deleted.ts')).status = 2;
+	staged.push(
+		{ uri: createFileUri(path.join(root, 'code.ts')), status: 0 },
+		{ uri: createFileUri(path.join(root, 'missing.ts')), status: 0 },
+		{ uri: createFileUri(path.join(root, 'link.ts')), status: 0 },
+		{ uri: createFileUri(path.join(root, 'directory.ts')), status: 0 },
+		{ uri: createFileUri(path.join(root, '..', 'outside.ts')), status: 0 },
+		{ uri: { ...createFileUri(path.join(root, 'virtual.ts')), scheme: 'git' }, status: 0 },
+	);
+	// До status API содержит старый снимок, поэтому подготовка обязана дождаться обновления.
+	repository.state.indexChanges = [];
+	let refreshed = false;
+	repository.status = async () => { refreshed = true; repository.state.indexChanges = staged; };
+	const preparationStates: Array<{ refreshed: boolean; draft: string }> = [];
+	vscodeOpenTextDocumentHandler = async uri => {
+		preparationStates.push({ refreshed, draft: repository.inputBox.value });
+		if (uri.fsPath.endsWith('/failed.ts')) { throw new Error('document unavailable'); }
+	};
+	assert.equal(await service.generateCommitMessageViaCopilot(root), 'generated message');
+	assert.deepEqual(vscodeOpenedDocuments.map(file => path.basename(file)).sort(),
+		['README.md', 'TEST.md', 'TestHelper.ts', 'closed.ts', 'code.test.ts', 'code.ts',
+			'empty.txt', 'failed.ts', 'helper.ts', 'latest.ts'].sort());
+	assert.deepEqual(preparationStates, Array.from({ length: 10 }, () => ({ refreshed: true, draft: 'draft from user' })));
+	assert.equal(vscodeShownDocuments, 0);
+	assert.equal(vscodeCommandCalls.length, 1);
+});
+
+/** Управляемые Promise доказывают четыре одновременных открытия вместо последовательного ожидания файлов. */
+test('GitService Copilot prefetch opens documents in bounded parallel groups before the command', async t => {
+	const { root, repository, service } = await createCopilotPrefetchFixture(t,
+		Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`file-${index}.ts`, '// text'])));
+	const batches = [createDeferred<void>(), createDeferred<void>(), createDeferred<void>()];
+	const started = [createDeferred<void>(), createDeferred<void>(), createDeferred<void>()];
+	let running = 0;
+	let maxRunning = 0;
+	let count = 0;
+	vscodeOpenTextDocumentHandler = async () => {
+		const index = count++;
+		running++;
+		maxRunning = Math.max(maxRunning, running);
+		if (count === 4 || count === 8 || count === 9) { started[Math.floor(index / 4)].resolve(); }
+		await batches[Math.floor(index / 4)].promise;
+		running--;
+	};
+	const generation = service.generateCommitMessageViaCopilot(root);
+	for (let index = 0; index < batches.length; index++) {
+		await started[index].promise;
+		assert.equal(vscodeCommandCalls.length, 0);
+		assert.equal(repository.inputBox.value, 'draft from user');
+		assert.equal(count, Math.min((index + 1) * 4, 9));
+		batches[index].resolve();
+	}
+	assert.equal(await generation, 'generated message');
+	assert.equal(maxRunning, 4);
+	assert.equal(vscodeOpenedDocuments.length, 9);
+	assert.equal(vscodeShownDocuments, 0);
+});
+
+/** Проверяет независимые ограничения количества и общего объёма без фильтрации команды Copilot. */
+for (const budget of ['files', 'bytes'] as const) {
+	test(`GitService Copilot prefetch respects the ${budget} budget`, async t => {
+		const count = budget === 'files' ? 36 : 6;
+		const content = budget === 'files' ? '// text' : Buffer.alloc(1024 * 1024, 65);
+		const { root, service } = await createCopilotPrefetchFixture(t,
+			Object.fromEntries(Array.from({ length: count }, (_, index) => [`file-${index}.ts`, content])));
+		assert.equal(await service.generateCommitMessageViaCopilot(root), 'generated message');
+		assert.equal(vscodeOpenedDocuments.length, budget === 'files' ? 32 : 4);
+		assert.equal(vscodeCommandCalls.length, 1);
+		assert.equal(vscodeCommandCalls[0].args.length, 3);
+	});
+}
+
+/** Пятисекундный предел освобождает команду; завершения старых открытий не запускают оставшиеся файлы. */
+test('GitService Copilot prefetch stops scheduling documents after its timeout', async t => {
+	const { root, service } = await createCopilotPrefetchFixture(t,
+		Object.fromEntries(Array.from({ length: 6 }, (_, index) => [`file-${index}.ts`, '// text'])));
+	const release = createDeferred<void>();
+	const started = createDeferred<void>();
+	const settled = createDeferred<void>();
+	let active = 0;
+	vscodeOpenTextDocumentHandler = async () => {
+		if (++active === 4) { started.resolve(); }
+		await release.promise;
+		if (--active === 0) { settled.resolve(); }
+	};
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	const generation = service.generateCommitMessageViaCopilot(root);
+	await started.promise;
+	t.mock.timers.tick(5000);
+	assert.equal(await generation, 'generated message');
+	assert.equal(vscodeOpenedDocuments.length, 4);
+	release.resolve();
+	await settled.promise;
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(vscodeOpenedDocuments.length, 4);
+	assert.equal(vscodeCommandCalls.length, 1);
+});
+
+/** Сбой status не запрещает генерацию; поздний status после дедлайна не начинает загрузку документов. */
+for (const failure of ['rejected', 'timeout'] as const) {
+	test(`GitService Copilot prefetch tolerates ${failure} repository status`, async t => {
+		const { root, repository, service } = await createCopilotPrefetchFixture(t, { 'code.ts': '// text' });
+		const started = createDeferred<void>();
+		const release = createDeferred<void>();
+		repository.status = async () => {
+			started.resolve();
+			if (failure === 'rejected') { throw new Error('status unavailable'); }
+			await release.promise;
+		};
+		t.mock.timers.enable({ apis: ['setTimeout'] });
+		const generation = service.generateCommitMessageViaCopilot(root);
+		await started.promise;
+		if (failure === 'timeout') { t.mock.timers.tick(5000); }
+		assert.equal(await generation, 'generated message');
+		release.resolve();
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(vscodeOpenedDocuments.length, 0);
+		assert.equal(vscodeCommandCalls.length, 1);
+	});
+}
+
+/** Очередь включает подготовку, а общий deadline останавливает её до собственного пятисекундного предела. */
+test('GitService Copilot prefetch shares the SCM queue and never starts a cancelled command', async t => {
+	const { root, repository, service } = await createCopilotPrefetchFixture(t,
+		Object.fromEntries(Array.from({ length: 6 }, (_, index) => [`file-${index}.ts`, '// text'])));
+	const firstCommand = createDeferred<void>();
+	const firstStarted = createDeferred<void>();
+	const documentsStarted = createDeferred<void>();
+	const releaseDocuments = createDeferred<void>();
+	let statusCalls = 0;
+	repository.status = async () => { statusCalls++; };
+	vscodeAvailableCommands = ['kilo-code.new.generateCommitMessage'];
+	vscodeExecuteCommandHandler = async id => {
+		assert.equal(id, 'kilo-code.new.generateCommitMessage');
+		firstStarted.resolve();
+		await firstCommand.promise;
+		repository.inputBox.value = 'earlier message';
+	};
+	vscodeOpenTextDocumentHandler = async () => {
+		if (vscodeOpenedDocuments.length === 4) { documentsStarted.resolve(); }
+		await releaseDocuments.promise;
+	};
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	const kilo = service.generateCommitMessageViaKilo(root);
+	await firstStarted.promise;
+	const copilot = service.generateCommitMessageViaCopilot(root);
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(statusCalls, 0);
+	t.mock.timers.tick(28_000);
+	firstCommand.resolve();
+	assert.equal(await kilo, 'earlier message');
+	await documentsStarted.promise;
+	repository.inputBox.value = 'newer manual draft';
+	t.mock.timers.tick(2000);
+	assert.equal(await copilot, '');
+	releaseDocuments.resolve();
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(vscodeOpenedDocuments.length, 4);
+	assert.equal(vscodeCommandCalls.length, 1);
+	assert.equal(repository.inputBox.value, 'newer manual draft');
+});
+
+/** Общий hard timeout запрещает поздний SCM-запуск даже при подготовке, которая игнорирует отмену. */
+test('GitService SCM hard timeout abandons a late preparation without touching the draft', async t => {
+	const { root, repository, service } = await createCopilotPrefetchFixture(t, {});
+	const started = createDeferred<void>();
+	const prepare = createDeferred<void>();
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	const generation = (service as any).generateCommitMessageViaScmInput(repository, 'test-command', [], 1000, {
+		prepareCommand: async () => { started.resolve(); await prepare.promise; },
+	});
+	const rejected = assert.rejects(generation, /timed out/);
+	await started.promise;
+	t.mock.timers.tick(1000);
+	await rejected;
+	prepare.resolve();
+	await new Promise(resolve => setImmediate(resolve));
+	assert.equal(vscodeCommandCalls.length, 0);
+	assert.equal(repository.inputBox.value, 'draft from user');
+	// После окончания подготовки карантин снимается и следующая штатная генерация работает.
+	assert.equal(await service.generateCommitMessageViaCopilot(root), 'generated message');
+});
+
 /** Проверяет отмену зависшего Copilot fallback без записи устаревшего SCM input. */
 test('GitService generateCommitMessageViaCopilot cancels stalled generation without stale restore', async () => {
 	resetVsCodeMock();
@@ -630,6 +1093,44 @@ test('GitService serializes concurrent commit message generations for one reposi
 		assert.equal(repository.inputBox.value, 'generated 2');
 	} finally {
 		resetVsCodeMock();
+	}
+});
+
+/** Разные репозитории одновременно достигают SCM-команды; обратный порядок ответов не смешивает cleanup tokens. */
+test('GitService runs Copilot commands concurrently for different repositories with isolated cleanup', async t => {
+	resetVsCodeMock();
+	t.after(resetVsCodeMock);
+	const { GitService } = await importGitService();
+	const service = new GitService();
+	const repositories = [
+		createBuiltInGitRepository('/workspace/api', 'api draft'),
+		createBuiltInGitRepository('/workspace/web', 'web draft'),
+	];
+	const releases = [createDeferred<void>(), createDeferred<void>()];
+	const started: number[] = [];
+	setBuiltInGitRepositories(repositories);
+	vscodeExecuteCommandHandler = async (id, rootUri) => {
+		assert.equal(id, 'github.copilot.git.generateCommitMessage');
+		const index = repositories.findIndex(repository => repository.rootUri === rootUri);
+		assert.notEqual(index, -1);
+		started.push(index);
+		await releases[index].promise;
+		repositories[index].inputBox.value = `generated ${index}`;
+	};
+	const generations = repositories.map(repository => service.generateCommitMessageViaCopilot(repository.rootUri.fsPath));
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(started, [0, 1]);
+	releases[1].resolve();
+	assert.equal(await generations[1], 'generated 1');
+	assert.equal(repositories[0].inputBox.value, 'api draft');
+	releases[0].resolve();
+	assert.equal(await generations[0], 'generated 0');
+	for (const [index, repository] of repositories.entries()) {
+		const token = service.createGeneratedCommitMessageCleanupToken(repository.rootUri.fsPath, `generated ${index}`);
+		assert.ok(token);
+		assert.equal(service.clearGeneratedCommitMessageInput(token), true);
+		assert.equal(repository.inputBox.value, '');
+		if (index === 0) { assert.equal(repositories[1].inputBox.value, 'generated 1'); }
 	}
 });
 

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import {
-	buildOpenCodeLaunchCommand, hasOpenCodeSubmission, isSupportedOpenCodeVersion, OpenCodeTerminalOutput,
+	buildOpenCodeLaunchCommand, hasOpenCodeSubmission, hasOpenCodeSessionTitle, isSupportedOpenCodeVersion, OpenCodeTerminalOutput,
 	quoteOpenCodeShellArgument, validateOpenCodeContext,
 } from '../src/utils/openCodeCli.js';
 
@@ -75,6 +75,18 @@ test('OpenCode confirmation rejects another session, wrong directory, truncated 
 	for (const value of ['not json', 'null', '[]', '{}']) {
 		assert.equal(hasOpenCodeSubmission(value, 'ses_pm_test', '/testing', 'Точный\nзапрос', [file], true), false);
 	}
+});
+
+/** Успешный exit команды не подтверждает название: проверяются title, identity и каталог ответа. */
+test('OpenCode title confirmation rejects wrong sessions, directories and names', () => {
+	const data = { id: 'ses_pm_title', title: '172 | Проверка', location: { directory: '/testing' } };
+	const check = (value: unknown) => hasOpenCodeSessionTitle(JSON.stringify(value), data.id, '/testing', data.title);
+	assert.equal(check({ data }), true);
+	assert.equal(check({ data: { ...data, id: 'other' } }), false);
+	assert.equal(check({ data: { ...data, title: 'Проверка' } }), false);
+	assert.equal(check({ data: { ...data, location: { directory: '/other' } } }), false);
+	assert.equal(check({ info: data }), false);
+	assert.equal(hasOpenCodeSessionTitle('not json', data.id, '/testing', data.title), false);
 });
 
 /** Готовность требует TUI; OSC другой сессии и частичные пакеты не подменяют подтверждение экспорта. */

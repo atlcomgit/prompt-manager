@@ -1016,6 +1016,7 @@ export function replaceGeneratedCommitMessageTrackedBranch(
 	);
 }
 
+/** Извлекает текст настроек Copilot; ссылки на файлы разрешаются сервисом, неизвестные значения пропускаются. */
 export function normalizeCommitMessageGenerationInstructions(value: unknown): string {
 	if (typeof value === 'string') {
 		return value.trim();
@@ -1023,11 +1024,14 @@ export function normalizeCommitMessageGenerationInstructions(value: unknown): st
 
 	if (Array.isArray(value)) {
 		return value
-			.map(item => String(item || '').trim())
+			.map(item => normalizeCommitMessageGenerationInstructions(item))
 			.filter(Boolean)
 			.join('\n');
 	}
 
+	if (value && typeof value === 'object' && 'text' in value && typeof value.text === 'string') {
+		return value.text.trim();
+	}
 	return '';
 }
 

@@ -27,10 +27,12 @@ function streamQueue() {
 
 /** Объекты VS Code подменены, subprocess/БД/модель не запускаются; проверяется полный порядок передачи. */
 function fixture(options: { version?: string; mismatch?: boolean; shell?: boolean; noModes?: boolean;
-	paint?: boolean; incremental?: boolean; onPaste?: (query: string) => void } = {}) {
+	paint?: boolean; incremental?: boolean; onPaste?: (query: string) => void;
+	renameError?: boolean; ignoreRename?: boolean; onRename?: () => Promise<void> } = {}) {
 	const terminals: vscode.Terminal[] = [];
 	const sessions: Array<{ id: string; text: string; files: string[]; enters: number; shows: number; disposals: number;
-		draft: string; newlines: number; options: vscode.TerminalOptions; close(): void }> = [];
+		draft: string; newlines: number; title: string; renames: number; options: vscode.TerminalOptions; close(): void }> = [];
+	const apiCalls: string[][] = [];
 	const logs: string[] = [];
 	const closedListeners = new Set<(terminal: vscode.Terminal) => unknown>();
 	const host = {
@@ -44,7 +46,7 @@ function fixture(options: { version?: string; mismatch?: boolean; shell?: boolea
 			let socket: WebSocket | undefined;
 			let painted = false;
 			const frameEnd = options.noModes ? '' : '\x1b[?2026l';
-			const state = { id: '', text: '', draft: '', newlines: 0, files: [] as string[],
+			const state = { id: '', text: '', draft: '', newlines: 0, title: 'Automatic title', renames: 0, files: [] as string[],
 				enters: 0, shows: 0, disposals: 0, options: creationOptions,
 				close() {
 					stream.close(); socket?.terminate();
@@ -134,13 +136,30 @@ function fixture(options: { version?: string; mismatch?: boolean; shell?: boolea
 	} as unknown as OpenCodeTerminalHost;
 	const runner: OpenCodeCliRunner = async (_executable, args, cwd) => {
 		if (args[0] === '--version') return options.version || 'opencode v2.1.4';
+		if (args[0] === 'api') {
+			apiCalls.push(args);
+			const id = args[args.indexOf('--param') + 1].slice('sessionID='.length);
+			const session = sessions.find(candidate => candidate.id === id);
+			assert.ok(session && session.enters > 0, 'Rename must use the submitted exact session');
+			if (args[1] === 'session.update') {
+				await options.onRename?.();
+				if (options.renameError) throw new Error('Rename unavailable');
+				const body = JSON.parse(args[args.indexOf('--data') + 1]) as { title: string };
+				assert.deepEqual(Object.keys(body), ['title']);
+				session.renames++;
+				if (!options.ignoreRename) session.title = body.title;
+				return '';
+			}
+			assert.equal(args[1], 'session.get');
+			return JSON.stringify({ data: { id, title: session.title, location: { directory: cwd } } });
+		}
 		const session = sessions.find(candidate => candidate.id === args[2]);
 		return JSON.stringify({ info: { id: options.mismatch ? 'ses_other' : session?.id, location: { directory: cwd } },
 			messages: session?.enters ? [{ type: 'user', text: session.text,
 				files: session.files.map(file => ({ source: { type: 'uri', uri: pathToFileURL(file).href } })) }] : [] });
 	};
 	const service = new OpenCodeCliService(host, runner, async () => '/testing/opencode', 500, message => logs.push(message));
-	return { service, sessions, host, logs };
+	return { service, sessions, host, logs, apiCalls };
 }
 
 /** Изолированный контекст живёт только в собственном временном каталоге. */
@@ -155,7 +174,7 @@ async function withContext(callback: (request: OpenCodeCliRequest) => Promise<vo
 
 /** Черновик не выполняет запрос: файлы добавлены через IDE, Enter и экспорт не нужны. */
 test('OpenCode service prepares native files and editable draft without sending', async () => withContext(async request => {
-	const { service, sessions } = fixture();
+	const { service, sessions, apiCalls } = fixture();
 	try {
 		const result = await service.start({ ...request, files: [...request.files, ...request.files] });
 		assert.equal(result.dispatched, false);
@@ -166,7 +185,95 @@ test('OpenCode service prepares native files and editable draft without sending'
 		assert.equal(sessions[0].options.env?.CLAUDE_CODE_SSE_PORT, null);
 		assert.equal(service.open(request.promptUuid), true);
 		assert.equal(service.open('unrelated-prompt'), false);
+		assert.equal(sessions[0].options.name, request.title);
+		assert.deepEqual(apiCalls, []);
 	} finally { service.dispose(); }
+}));
+
+/** Название не попадает в shell; обновление метаданных относится только к подтверждённому session ID. */
+test('OpenCode applies the same exact title to terminal and submitted session', async () => withContext(async request => {
+	const { service, sessions, apiCalls } = fixture();
+	const title = '172 | Проверка "Kilo" $(literal) `code`';
+	try {
+		assert.equal((await service.start({ ...request, title, autoStart: true })).dispatched, true);
+		// Подмена API завершается в микрозадачах, уже после независимого результата доставки.
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.equal(sessions[0].options.name, title);
+		assert.equal(sessions[0].title, title);
+		assert.equal(sessions[0].renames, 1);
+		assert.equal(sessions[0].enters, 1);
+		assert.deepEqual(apiCalls.map(args => args[1]), ['session.update', 'session.get']);
+		assert.ok(apiCalls.every(args => args.includes(`sessionID=${sessions[0].id}`)));
+	} finally { service.dispose(); }
+}));
+
+/** Ошибка API или несовпадение прочитанного названия не отменяет приём запроса и не повторяет Enter. */
+test('OpenCode warns on an unconfirmed title without retrying the accepted request', async () => withContext(async request => {
+	for (const options of [{ renameError: true }, { ignoreRename: true }]) {
+		const { service, sessions } = fixture(options);
+		const warnings: string[] = [];
+		try {
+			const result = await service.start({ ...request, title: '172 | Проверка', autoStart: true,
+				onWarning: message => warnings.push(message) });
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.equal(result.dispatched, true);
+			assert.equal(sessions[0].enters, 1);
+			assert.equal(warnings.length, 1);
+			assert.match(warnings[0], /запрос отправлен.*название/);
+		} finally { service.dispose(); }
+	}
+}));
+
+/** Пустая строка title означала бы генерацию названия моделью; служебный rename её не вызывает. */
+test('OpenCode never requests model-generated titles for an empty label', async () => withContext(async request => {
+	const { service, apiCalls } = fixture();
+	const warnings: string[] = [];
+	try {
+		assert.equal((await service.start({ ...request, title: '', autoStart: true,
+			onWarning: message => warnings.push(message) })).dispatched, true);
+		assert.deepEqual(apiCalls, []);
+		assert.equal(warnings.length, 1);
+	} finally { service.dispose(); }
+}));
+
+/** Закрытие терминала во время медленного rename не теряет уже проверенную ручную отправку. */
+test('OpenCode confirms manual delivery before a pending rename and terminal close', async () => withContext(async request => {
+	let entered!: () => void, resume!: () => void;
+	const renaming = new Promise<void>(resolve => { entered = resolve; });
+	const gate = new Promise<void>(resolve => { resume = resolve; });
+	const { service, sessions, host } = fixture({ onRename: async () => { entered(); await gate; } });
+	let confirmations = 0;
+	try {
+		await service.start({ ...request, onManualSubmission: async () => { confirmations++; } });
+		host.terminals[0].sendText('\r', false);
+		await renaming;
+		assert.equal(confirmations, 1);
+		sessions[0].close();
+		resume();
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.equal(confirmations, 1);
+		assert.equal(sessions[0].enters, 1);
+	} finally { resume(); service.dispose(); }
+}));
+
+/** Автостарт также возвращает приём запроса до завершения независимого оформления сессии. */
+test('OpenCode returns automatic delivery while the rename is still pending', async () => withContext(async request => {
+	let entered!: () => void, resume!: () => void;
+	const renaming = new Promise<void>(resolve => { entered = resolve; });
+	const gate = new Promise<void>(resolve => { resume = resolve; });
+	const { service, sessions } = fixture({ onRename: async () => { entered(); await gate; } });
+	let dispatched = false;
+	let starting: Promise<void> | undefined;
+	try {
+		starting = service.start({ ...request, autoStart: true }).then(result => { dispatched = result.dispatched; });
+		await renaming;
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.equal(dispatched, true);
+		sessions[0].close();
+		resume();
+		await starting;
+		assert.equal(sessions[0].enters, 1);
+	} finally { resume(); await starting; service.dispose(); }
 }));
 
 /** Frontend может не отдавать paste/cursor/synchronized-маркеры; асинхронная вставка всё равно завершается. */
@@ -281,6 +388,8 @@ test('OpenCode service confirms a manual send once and releases the editor bridg
 		await confirmation;
 		assert.equal(submissions, 1);
 		assert.equal(sessions[0].enters, 1);
+		assert.equal(sessions[0].title, request.title);
+		assert.equal(sessions[0].renames, 1);
 		service.dispose();
 		assert.equal(service.open(request.promptUuid), false);
 		assert.equal(sessions[0].enters, 1);

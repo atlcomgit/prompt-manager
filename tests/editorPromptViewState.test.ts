@@ -5,6 +5,8 @@ import {
 	createDefaultEditorPromptExpandedSections,
 	createDefaultEditorPromptViewState,
 	getEditorPromptViewStateStorageKeys,
+	getEditorPromptPlanViewModeKeys,
+	moveEditorPromptPlanViewModeEntries,
 	moveEditorPromptViewStateEntries,
 	normalizeEditorPromptViewState,
 	resolveEditorPromptViewStateStorageKey,
@@ -141,6 +143,34 @@ test('normalizeEditorPromptViewState keeps legacy manual overrides and accepts u
 		contentHeights: {},
 		sectionHeights: {},
 	});
+});
+
+/** Режим плана использует UUID+ID промпта и никогда не хранится по общему ключу панели. */
+test('getEditorPromptPlanViewModeKeys uses prompt UUID with ID and ignores the panel fallback', () => {
+	assert.deepEqual(getEditorPromptPlanViewModeKeys({
+		promptUuid: ' uuid-a ', promptId: 'prompt-a', fallbackKey: 'panel:singleton',
+	}), ['promptUuid:uuid-a|promptId:prompt-a', 'promptId:prompt-a']);
+	assert.deepEqual(getEditorPromptPlanViewModeKeys({ promptId: 'prompt-b' }), ['promptId:prompt-b']);
+	assert.deepEqual(getEditorPromptPlanViewModeKeys({ promptUuid: 'uuid-new' }), ['promptUuid:uuid-new']);
+	assert.deepEqual(getEditorPromptPlanViewModeKeys({ fallbackKey: 'panel:singleton' }), []);
+});
+
+/** Переименование переносит выбор, папка с тем же UUID сохраняет свой, некорректные значения отбрасываются. */
+test('moveEditorPromptPlanViewModeEntries carries the choice on rename and keeps same-UUID folders separate', () => {
+	const next = moveEditorPromptPlanViewModeEntries({
+		'promptUuid:uuid-a|promptId:prompt-a': 'compact',
+		'promptUuid:uuid-a|promptId:prompt-a-1': 'full',
+		'promptId:legacy': 'broken',
+	}, [
+		{ promptUuid: 'uuid-a', promptId: 'prompt-a', fallbackKey: 'panel:singleton' },
+	], { promptUuid: 'uuid-a', promptId: 'renamed-a', fallbackKey: 'panel:singleton' });
+
+	assert.deepEqual(next, {
+		'promptUuid:uuid-a|promptId:renamed-a': 'compact',
+		'promptUuid:uuid-a|promptId:prompt-a-1': 'full',
+	});
+	// Без сохранённого выбора перенос ничего не создаёт.
+	assert.deepEqual(moveEditorPromptPlanViewModeEntries({}, [{ promptId: 'a' }], { promptId: 'b' }), {});
 });
 
 test('editor prompt view state keys use promptUuid and promptId composite primary key', () => {

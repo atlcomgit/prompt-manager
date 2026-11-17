@@ -291,6 +291,78 @@ test('StateService persists the plan mode independently per prompt', async () =>
 	assert.equal(service.getPromptEditorViewState(sourceB).planViewMode, 'full');
 });
 
+/** Explicit per-prompt plan mode survives stale layout snapshots and a new StateService instance. */
+test('StateService keeps each plan view choice across close/reopen and stale full-state saves', async () => {
+	const { StateService } = await importStateService();
+	const workspaceState = createWorkspaceStateMock();
+	const service = new StateService(createStateContext(workspaceState));
+	const sourceA = { promptUuid: 'uuid-plan-a', promptId: 'plan-a' };
+	const sourceB = { promptUuid: 'uuid-plan-b', promptId: 'plan-b' };
+
+	await service.savePromptEditorViewState(sourceA, {
+		...createDefaultEditorPromptViewState(), planViewMode: 'full',
+	});
+	await service.savePromptPlanViewMode(sourceA, 'compact');
+	await service.savePromptPlanViewMode(sourceB, 'full');
+	await service.savePromptEditorViewState(sourceA, {
+		...createDefaultEditorPromptViewState(), planViewMode: 'full',
+	});
+
+	const reopened = new StateService(createStateContext(workspaceState));
+	assert.equal(reopened.getPromptEditorViewState(sourceA).planViewMode, 'compact');
+	assert.equal(reopened.getPromptEditorViewState(sourceB).planViewMode, 'full');
+	assert.equal(reopened.getPromptEditorViewState({ promptUuid: 'new-uuid', promptId: 'new-prompt' }).planViewMode, 'compact');
+	assert.equal(reopened.getPromptPlanViewMode(sourceA), 'compact');
+});
+
+/** Копия папки с тем же UUID не наследует выбор, а переименование переносит его вместе с состоянием редактора. */
+test('StateService isolates plan mode of same-UUID folders and migrates it on rename', async () => {
+	const { StateService } = await importStateService();
+	const workspaceState = createWorkspaceStateMock();
+	const service = new StateService(createStateContext(workspaceState));
+	const original = { promptUuid: 'uuid-twin', promptId: 'task-171' };
+	const copy = { promptUuid: 'uuid-twin', promptId: 'task-171-1' };
+	const renamed = { promptUuid: 'uuid-twin', promptId: 'task-171-renamed' };
+
+	await service.savePromptEditorViewState(copy, { ...createDefaultEditorPromptViewState(), planViewMode: 'full' });
+	await service.savePromptPlanViewMode(original, 'compact');
+	assert.equal(service.getPromptPlanViewMode(copy), null);
+	assert.equal(service.getPromptEditorViewState(copy).planViewMode, 'full');
+
+	await service.migratePromptEditorViewState([{ ...original, fallbackKey: 'panel:singleton' }], renamed);
+	const reopened = new StateService(createStateContext(workspaceState));
+	assert.equal(reopened.getPromptPlanViewMode(renamed), 'compact');
+	assert.equal(reopened.getPromptPlanViewMode(original), null);
+	assert.equal(reopened.getPromptEditorViewState(renamed).planViewMode, 'compact');
+	assert.equal(reopened.getPromptEditorViewState(copy).planViewMode, 'full');
+});
+
+/** Обычное сохранение без переименования не перезаписывает карту режимов плана. */
+test('StateService skips the plan mode write when a save migration changes nothing', async () => {
+	const { StateService } = await importStateService();
+	const planWrites: unknown[] = [];
+	const workspaceState = createWorkspaceStateMock({}, {
+		update: async (store, key, value) => {
+			if (key === 'promptManager.editorPlanViewModes') {
+				planWrites.push(value);
+			}
+			if (value === undefined) {
+				store.delete(key);
+			} else {
+				store.set(key, value);
+			}
+		},
+	});
+	const service = new StateService(createStateContext(workspaceState));
+	const source = { promptUuid: 'uuid-same', promptId: 'same' };
+
+	await service.migratePromptEditorViewState([source], source);
+	await service.savePromptPlanViewMode(source, 'full');
+	await service.migratePromptEditorViewState([{ ...source, fallbackKey: 'panel:singleton' }], source);
+	assert.deepEqual(planWrites, [{ 'promptUuid:uuid-same|promptId:same': 'full' }]);
+	assert.equal(service.getPromptPlanViewMode(source), 'full');
+});
+
 /** Очередь сохраняет последние сворачивания через пользовательскую конфигурацию. */
 test('StateService serializes global dashboard collapse writes', async () => {
 	const entered = createDeferred<void>();

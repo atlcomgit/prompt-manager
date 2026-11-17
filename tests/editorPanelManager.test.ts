@@ -11567,6 +11567,61 @@ test('prompt reopen retains the latest tab while its view-state save is pending'
 	} finally { gate.resolve(); manager.disposeAll(); }
 });
 
+/** Plan mode survives closing and reopening before the dedicated preference has finished persisting. */
+test('prompt reopen restores compact plan mode despite an older full-state snapshot', async () => {
+	resetVsCodeCommandMock();
+	const gate = createDeferred<void>();
+	const modes = new Map<string, 'compact' | 'full'>();
+	const { manager } = await createManager({
+		initialPrompt: { id: 'prompt-a', promptUuid: 'uuid-a' },
+		stateService: {
+			getPromptEditorViewState: () => createEditorViewState({ planViewMode: 'full' }),
+			getPromptPlanViewMode: (source: { promptUuid: string }) => modes.get(source.promptUuid) || null,
+			savePromptPlanViewMode: async (source: { promptUuid: string }, mode: 'compact' | 'full') => {
+				await gate.promise;
+				modes.set(source.promptUuid, mode);
+			},
+		},
+	});
+	try {
+		await manager.openPrompt('prompt-a');
+		const firstPanel = vscodeCreatedWebviewPanels.at(-1)!;
+		const selection = firstPanel.emitMessage({
+			type: 'savePromptPlanViewMode', promptId: 'prompt-a', promptUuid: 'uuid-a', mode: 'compact',
+		});
+		await flushTurns(2);
+		// The general layout channel can still deliver an older Full snapshot during close.
+		await firstPanel.emitMessage({
+			type: 'savePromptEditorViewState', promptId: 'prompt-a', promptUuid: 'uuid-a',
+			state: createEditorViewState({ planViewMode: 'full' }),
+		});
+		firstPanel.dispose();
+		await flushTurns(2);
+		await manager.openPrompt('prompt-a');
+		const reopened = vscodeCreatedWebviewPanels.at(-1)!;
+		await reopened.emitMessage({ type: 'ready',
+			bootId: (manager as any).panelBootIds.get('__prompt_editor_singleton__'),
+			assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
+		const opened = reopened.postedMessages.filter((message: { type: string; reason?: string }) =>
+			message.type === 'prompt' && message.reason === 'open').at(-1);
+		assert.equal(opened.editorViewState.planViewMode, 'compact');
+		assert.equal((manager as any).getPromptLoadingEditorViewState('__prompt_editor_singleton__',
+			{ id: 'prompt-b', promptUuid: 'uuid-b' }).planViewMode, 'full');
+		gate.resolve();
+		await selection;
+		assert.equal(modes.get('uuid-a'), 'compact');
+
+		// Durable storage must beat an unrelated stale Full snapshot even after the cache clears.
+		await reopened.emitMessage({
+			type: 'savePromptEditorViewState', promptId: 'prompt-a', promptUuid: 'uuid-a',
+			state: createEditorViewState({ planViewMode: 'full' }),
+		});
+		const durable = (manager as any).getPromptEditorViewState('__prompt_editor_singleton__',
+			{ id: 'prompt-a', promptUuid: 'uuid-a' });
+		assert.equal(durable.planViewMode, 'compact');
+	} finally { gate.resolve(); manager.disposeAll(); resetVsCodeCommandMock(); }
+});
+
 /** Успех независимого флага не отменяет ошибочное раскрытие другой карточки; bootstrap сбрасывает overlay. */
 test('dashboard keeps failed collapse fields through an unrelated successful save and external update', async () => {
 	resetVsCodeCommandMock();

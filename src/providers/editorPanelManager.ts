@@ -29,6 +29,7 @@ import type {
 	ChatMemorySummary,
 	EditorPromptViewState,
 	EditorPromptViewStateKeySource,
+	EditorPromptPlanViewMode,
 	Prompt,
 	PromptChatTarget,
 	PromptContextFileCard,
@@ -38,6 +39,7 @@ import {
 	createDefaultEditorPromptViewState,
 	createDefaultPrompt,
 	getEditorPromptViewStateStorageKeys,
+	getEditorPromptPlanViewModeKeys,
 	markPromptChatAutoCompleteAfter,
 	normalizeEditorPromptViewState,
 	shouldAutoCompletePromptFromChatRequest,
@@ -346,6 +348,8 @@ export class EditorPanelManager {
 		state: EditorPromptViewState;
 	}>();
 	private latestPromptEditorViewStateByQueueKey = new Map<string, EditorPromptViewState>();
+	/** Immediate per-prompt override while the standalone preference write is pending. */
+	private latestPromptPlanModeByKey = new Map<string, EditorPromptPlanViewMode>();
 	private promptEditorViewStateSaveFlushScheduled = false;
 	private promptEditorViewStateSaveQueue: Promise<void> = Promise.resolve();
 	/** Ограничивает обновление assets одной попыткой на панель; параллельный ready не запускает вторую. */
@@ -756,14 +760,19 @@ export class EditorPanelManager {
 		overrides?: { promptId?: string | null; promptUuid?: string | null },
 	): EditorPromptViewState {
 		const source = this.getPromptEditorViewStateSource(panelKey, prompt, overrides);
+		let state: EditorPromptViewState | undefined;
 		for (const queueKey of this.getPromptEditorViewStateSaveQueueKeys(source)) {
 			const latestQueuedState = this.latestPromptEditorViewStateByQueueKey.get(queueKey);
 			if (latestQueuedState) {
-				return normalizeEditorPromptViewState(latestQueuedState);
+				state = normalizeEditorPromptViewState(latestQueuedState);
+				break;
 			}
 		}
-
-		return this.stateService.getPromptEditorViewState(source);
+		state ??= this.stateService.getPromptEditorViewState(source);
+		const keys = getEditorPromptPlanViewModeKeys(source);
+		const pendingMode = keys.map(key => this.latestPromptPlanModeByKey.get(key)).find(mode => mode !== undefined);
+		const chosenMode = pendingMode ?? this.stateService.getPromptPlanViewMode?.(source);
+		return chosenMode ? { ...state, planViewMode: chosenMode } : state;
 	}
 
 	/** Resolve all in-memory queue keys for a prompt editor view-state source. */
@@ -10257,6 +10266,35 @@ export class EditorPanelManager {
 
 			case 'openPrompt': {
 				await this.openPrompt({ id: msg.id, promptUuid: msg.promptUuid });
+				break;
+			}
+
+			case 'savePromptPlanViewMode': {
+				if (msg.mode !== 'compact' && msg.mode !== 'full') {
+					break;
+				}
+				const source = this.getPromptEditorViewStateSource(panelKey, currentPrompt, {
+					promptId: msg.promptId ?? currentPrompt.id,
+					promptUuid: msg.promptUuid ?? currentPrompt.promptUuid,
+				});
+				const key = getEditorPromptPlanViewModeKeys(source)[0];
+				if (!key) {
+					break;
+				}
+				// Reopening may happen while workspaceState.update is still pending.
+				this.latestPromptPlanModeByKey.set(key, msg.mode);
+				try {
+					await this.stateService.savePromptPlanViewMode(source, msg.mode);
+					// Once persisted, the workspace state becomes authoritative again.
+					if (this.latestPromptPlanModeByKey.get(key) === msg.mode) {
+						this.latestPromptPlanModeByKey.delete(key);
+					}
+				} catch (error) {
+					if (this.latestPromptPlanModeByKey.get(key) === msg.mode) {
+						this.latestPromptPlanModeByKey.delete(key);
+					}
+					vscode.window.showWarningMessage(`Не удалось сохранить режим плана: ${String(error)}`);
+				}
 				break;
 			}
 

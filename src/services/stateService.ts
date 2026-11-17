@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import type { EditorPromptViewState, EditorPromptViewStateKeySource, SidebarState } from '../types/prompt.js';
+import type { EditorPromptViewState, EditorPromptViewStateKeySource, EditorPromptPlanViewMode, SidebarState } from '../types/prompt.js';
 import type {
 	PromptDashboardCollapsedSections,
 	PromptDashboardSectionOrder,
@@ -20,6 +20,8 @@ import {
 	normalizeEditorPromptViewState,
 	normalizeSidebarState,
 	getEditorPromptViewStateStorageKeys,
+	getEditorPromptPlanViewModeKeys,
+	moveEditorPromptPlanViewModeEntries,
 	resolveEditorPromptViewStateStorageKey,
 } from '../types/prompt.js';
 import {
@@ -76,6 +78,8 @@ const GLOBAL_AGENT_CONTEXT_SOURCE_KEY = 'promptManager.globalAgentContextSource'
 const STARTUP_EDITOR_OPEN_KEY = 'promptManager.startup.editorOpen';
 const STARTUP_EDITOR_PROMPT_ID_KEY = 'promptManager.startup.editorPromptId';
 const PROMPT_EDITOR_VIEW_STATE_KEY = 'promptManager.editorPromptViewState';
+/** An explicit per-prompt plan view choice cannot be overwritten by an older layout snapshot. */
+const PROMPT_EDITOR_PLAN_MODE_KEY = 'promptManager.editorPlanViewModes';
 const PROMPT_DASHBOARD_COLLAPSED_SECTIONS_KEY = 'promptManager.dashboardCollapsedSections';
 const PROMPT_DASHBOARD_SECTION_ORDER_KEY = 'promptManager.dashboardSectionOrder';
 /** Раздельные настройки режимов; старые ключи читаются только при первоначальном переносе. */
@@ -88,6 +92,7 @@ export class StateService {
 	private static readonly GIT_OVERLAY_TRACKED_BRANCH_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchPreference';
 	private static readonly GIT_OVERLAY_TRACKED_BRANCHES_BY_PROJECT_PREFERENCE_KEY = 'editor.gitOverlayTrackedBranchesByProjectPreference';
 	private promptEditorViewStateMutationQueue: Promise<void> = Promise.resolve();
+	private promptPlanViewModeMutationQueue: Promise<void> = Promise.resolve();
 	/** Очередь экземпляра упорядочивает записи и перенос; независимые окна сохраняют отдельные статические поля. */
 	private promptDashboardMutationQueue: Promise<void> = Promise.resolve();
 	/** Подтверждённые значения скрывают незавершённый Configuration.update и сохраняются при ошибке записи. */
@@ -1265,16 +1270,63 @@ export class StateService {
 		}, source, next);
 	}
 
+	/** Restores only an explicitly selected plan mode; legacy states retain their original default. */
+	getPromptPlanViewMode(source?: EditorPromptViewStateKeySource | null): EditorPromptPlanViewMode | null {
+		const saved = this.context.workspaceState.get<Record<string, unknown>>(PROMPT_EDITOR_PLAN_MODE_KEY, {});
+		for (const key of getEditorPromptPlanViewModeKeys(source)) {
+			const mode = saved[key];
+			if (mode === 'compact' || mode === 'full') {
+				return mode;
+			}
+		}
+		return null;
+	}
+
+	/** Writes only the plan mode, without rewriting other editor view-state fields. */
+	async savePromptPlanViewMode(
+		source: EditorPromptViewStateKeySource | null | undefined,
+		mode: EditorPromptPlanViewMode,
+	): Promise<void> {
+		const key = getEditorPromptPlanViewModeKeys(source)[0];
+		if (!key || (mode !== 'compact' && mode !== 'full')) {
+			return;
+		}
+		await this.mutatePromptPlanViewModeStore(current => ({ ...current, [key]: mode }));
+	}
+
+	/** Последовательно изменяет карту режимов плана, чтобы выбор и перенос при переименовании не теряли записи. */
+	private async mutatePromptPlanViewModeStore(
+		mutator: (current: Record<string, unknown>) => Record<string, unknown>,
+	): Promise<void> {
+		const write = async (): Promise<void> => {
+			const current = this.context.workspaceState.get<Record<string, unknown>>(PROMPT_EDITOR_PLAN_MODE_KEY, {});
+			const next = mutator(current);
+			// Перенос вызывается при каждом сохранении промпта; без изменений запись в workspaceState не нужна.
+			if (JSON.stringify(next) === JSON.stringify(current)) {
+				return;
+			}
+			await this.context.workspaceState.update(
+				PROMPT_EDITOR_PLAN_MODE_KEY,
+				Object.keys(next).length > 0 ? next : undefined,
+			);
+		};
+		const pending = this.promptPlanViewModeMutationQueue.then(write, write);
+		this.promptPlanViewModeMutationQueue = pending.catch(() => undefined);
+		await pending;
+	}
+
 	getPromptEditorViewState(source?: EditorPromptViewStateKeySource | null): EditorPromptViewState {
 		const saved = this.context.workspaceState.get<Record<string, EditorPromptViewState>>(PROMPT_EDITOR_VIEW_STATE_KEY, {});
+		const chosenMode = this.getPromptPlanViewMode(source);
 		for (const key of getEditorPromptViewStateStorageKeys(source)) {
 			const state = saved[key];
 			if (state) {
-				return normalizeEditorPromptViewState(state);
+				const normalized = normalizeEditorPromptViewState(state);
+				return chosenMode ? { ...normalized, planViewMode: chosenMode } : normalized;
 			}
 		}
-
-		return createDefaultEditorPromptViewState();
+		const defaults = createDefaultEditorPromptViewState();
+		return chosenMode ? { ...defaults, planViewMode: chosenMode } : defaults;
 	}
 
 	async savePromptEditorViewState(
@@ -1292,11 +1344,15 @@ export class StateService {
 		}));
 	}
 
+	/** Переносит состояние редактора и выбранный режим плана на новый ключ после первого сохранения или переименования. */
 	async migratePromptEditorViewState(
 		fromSources: Array<EditorPromptViewStateKeySource | null | undefined>,
 		toSource: EditorPromptViewStateKeySource | null | undefined,
 	): Promise<void> {
-		await this.mutatePromptEditorViewStateStore(current => moveEditorPromptViewStateEntries(current, fromSources, toSource));
+		await Promise.all([
+			this.mutatePromptEditorViewStateStore(current => moveEditorPromptViewStateEntries(current, fromSources, toSource)),
+			this.mutatePromptPlanViewModeStore(current => moveEditorPromptPlanViewModeEntries(current, fromSources, toSource)),
+		]);
 	}
 
 	getGitOverlayTrackedBranchPreference(): string {

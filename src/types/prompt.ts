@@ -327,6 +327,15 @@ export function getEditorPromptViewStateStorageKeys(source?: EditorPromptViewSta
 	return Array.from(new Set(keys));
 }
 
+/**
+ * Ключи выбранного режима плана: те же UUID+ID, что у состояния редактора, но без ключа панели.
+ * Папки с одинаковым UUID не делят выбор; переименование переносит его вместе с состоянием редактора.
+ * Тесты: editorPromptViewState.test.ts, stateService.test.ts.
+ */
+export function getEditorPromptPlanViewModeKeys(source?: EditorPromptViewStateKeySource | null): string[] {
+	return getEditorPromptViewStateStorageKeys({ promptUuid: source?.promptUuid, promptId: source?.promptId });
+}
+
 /** Resolve the primary storage key for per-prompt editor view state */
 export function resolveEditorPromptViewStateStorageKey(source?: EditorPromptViewStateKeySource | null): string | null {
 	return getEditorPromptViewStateStorageKeys(source)[0] || null;
@@ -338,13 +347,53 @@ export function moveEditorPromptViewStateEntries(
 	fromSources: Array<EditorPromptViewStateKeySource | null | undefined>,
 	toSource?: EditorPromptViewStateKeySource | null,
 ): Record<string, EditorPromptViewState> {
-	const next: Record<string, EditorPromptViewState> = {};
-	for (const [key, value] of Object.entries(states || {})) {
+	return movePromptKeyedEntries(
+		states,
+		fromSources,
+		toSource,
+		value => normalizeEditorPromptViewState(value as PartialEditorPromptViewState | null | undefined),
+	);
+}
+
+/**
+ * Переносит выбранный режим плана на новый ключ промпта при первом сохранении или переименовании.
+ * Некорректные значения отбрасываются. Тесты: editorPromptViewState.test.ts, stateService.test.ts.
+ */
+export function moveEditorPromptPlanViewModeEntries(
+	modes: Record<string, unknown> | null | undefined,
+	fromSources: Array<EditorPromptViewStateKeySource | null | undefined>,
+	toSource?: EditorPromptViewStateKeySource | null,
+): Record<string, EditorPromptPlanViewMode> {
+	// Ключ панели общий для разных промптов, поэтому режим плана по нему не хранится и не переносится.
+	const withoutPanelKey = (source?: EditorPromptViewStateKeySource | null): EditorPromptViewStateKeySource => ({
+		promptUuid: source?.promptUuid,
+		promptId: source?.promptId,
+	});
+	return movePromptKeyedEntries(
+		modes,
+		fromSources.map(withoutPanelKey),
+		withoutPanelKey(toSource),
+		value => value === 'compact' || value === 'full' ? value : undefined,
+	);
+}
+
+/**
+ * Общий перенос записи промпта: сохраняет значение целевого ключа, иначе берёт его из прежних ключей,
+ * затем удаляет прежние и вспомогательные ключи. `normalize` возвращает undefined для отбрасываемых значений.
+ */
+function movePromptKeyedEntries<T>(
+	entries: Record<string, unknown> | null | undefined,
+	fromSources: Array<EditorPromptViewStateKeySource | null | undefined>,
+	toSource: EditorPromptViewStateKeySource | null | undefined,
+	normalize: (value: unknown) => T | undefined,
+): Record<string, T> {
+	const next: Record<string, T> = {};
+	for (const [key, value] of Object.entries(entries || {})) {
 		const normalizedKey = key.trim();
-		if (!normalizedKey) {
-			continue;
+		const normalizedValue = normalizedKey ? normalize(value) : undefined;
+		if (normalizedValue !== undefined) {
+			next[normalizedKey] = normalizedValue;
 		}
-		next[normalizedKey] = normalizeEditorPromptViewState(value);
 	}
 
 	const targetKeys = getEditorPromptViewStateStorageKeys(toSource);
@@ -364,23 +413,19 @@ export function moveEditorPromptViewStateEntries(
 		fromSources.flatMap(source => getEditorPromptViewStateStorageKeys(source)),
 	));
 
-	let stateToCarry: EditorPromptViewState | undefined;
-	for (const targetCarryKey of targetCarryKeys) {
-		if (!stateToCarry && next[targetCarryKey]) {
-			stateToCarry = next[targetCarryKey];
-		}
-	}
-	for (const sourceKey of sourceKeys) {
-		if (!stateToCarry && next[sourceKey]) {
-			stateToCarry = next[sourceKey];
+	let stateToCarry: T | undefined;
+	for (const candidateKey of [...targetCarryKeys, ...sourceKeys]) {
+		if (stateToCarry === undefined && next[candidateKey] !== undefined) {
+			stateToCarry = next[candidateKey];
 		}
 	}
 
-	if (!stateToCarry) {
+	if (stateToCarry === undefined) {
 		return next;
 	}
 
-	next[primaryTargetKey] = normalizeEditorPromptViewState(stateToCarry);
+	// Значение уже нормализовано при чтении записей.
+	next[primaryTargetKey] = stateToCarry;
 	for (const sourceKey of sourceKeys) {
 		if (sourceKey !== primaryTargetKey) {
 			delete next[sourceKey];

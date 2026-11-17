@@ -2,7 +2,7 @@
  * Message types for communication between extension and webviews
  */
 
-import type { ChatMemorySummary, EditorPromptViewState, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
+import type { ChatMemorySummary, EditorPromptViewState, EditorPromptPlanViewMode, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerWorkspaceActionKind } from './docker.js';
 import type { PromptDashboardPreferences } from './promptDashboardPreferences.js';
@@ -82,6 +82,8 @@ export type WebviewToExtensionMessage =
 	| { type: 'generateReportFromStagedChanges'; prompt: Prompt }
 	| { type: 'saveSidebarState'; state: SidebarState }
 	| { type: 'savePromptEditorViewState'; promptId?: string; promptUuid?: string; state: EditorPromptViewState }
+	/** Persist a user-selected plan view separately from layout snapshots to prevent stale overwrites. */
+	| { type: 'savePromptPlanViewMode'; promptId?: string; promptUuid?: string; mode: EditorPromptPlanViewMode }
 	/** Глобальное представление формы сохраняется отдельно от локальной вкладки Process. */
 	| { type: 'savePromptEditorLayout'; state: PromptEditorLayout; baseState?: PromptEditorLayout; requestId: string }
 	/** requestId связывает подтверждение записи с действием; старые webview могут его не передавать. */

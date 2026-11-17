@@ -8041,6 +8041,13 @@ export const EditorApp: React.FC = () => {
                     onClick={() => {
                       planViewModeRef.current = mode;
                       setPlanViewMode(mode);
+                      const targetPrompt = promptRef.current;
+                      vscode.postMessage({
+                        type: 'savePromptPlanViewMode',
+                        promptId: targetPrompt.id || undefined,
+                        promptUuid: targetPrompt.promptUuid || undefined,
+                        mode,
+                      });
                       enqueueEditorViewStateSave({ flush: true, reason: 'plan-view-mode' });
                     }}
                     title={mode === 'compact' ? 'Только заголовки и пункты чек-листа' : 'Весь план'}

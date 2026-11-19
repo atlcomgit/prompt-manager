@@ -70,6 +70,30 @@ interface PromptStorageLocation {
 	dirPath: string;
 }
 
+/** Optional on-read migrations must also work in read-only workspaces. */
+function isWriteAccessDenied(error: unknown): boolean {
+	return ['EACCES', 'EPERM', 'EROFS'].includes((error as NodeJS.ErrnoException).code ?? '');
+}
+
+/** Two readers of a legacy folder need the same UUID even when neither can persist it. */
+function legacyPromptUuid(dirPath: string): string {
+	const stat = fs.statSync(dirPath, { bigint: true });
+	const identity = stat.ino ? `${stat.dev}/${stat.ino}/${stat.birthtimeNs}` : fs.realpathSync(dirPath);
+	const bytes = crypto.createHash('sha256').update(`prompt-manager/legacy/${identity}`).digest();
+	bytes[6] = (bytes[6] & 0x0f) | 0x80;
+	bytes[8] = (bytes[8] & 0x3f) | 0x80;
+	const hex = bytes.toString('hex', 0, 16);
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Resolve the same identity as readConfig without writing a migration during lookup or preview. */
+function promptUuidFromJson(raw: string, dirPath: string): string | undefined {
+	const config = JSON.parse(raw);
+	if (!config || typeof config !== 'object' || Array.isArray(config)) { return undefined; }
+	const storedUuid = typeof config.promptUuid === 'string' ? config.promptUuid.trim() : '';
+	return storedUuid || legacyPromptUuid(dirPath);
+}
+
 interface PromptSaveOptions {
 	historyReason?: PromptHistoryReason | string;
 	forceHistory?: boolean;
@@ -486,18 +510,17 @@ export class StorageService implements vscode.Disposable {
 	}
 
 	private isReservedPromptDirName(id: string): boolean {
-		return this.RESERVED_PROMPT_DIR_NAMES.has((id || '').trim());
+		const name = (id || '').trim();
+		return this.RESERVED_PROMPT_DIR_NAMES.has(name) || /^\.prompt-manager-stage-[a-z0-9]+$/i.test(name);
 	}
 
 	private ensurePromptUuid<T extends Prompt | PromptConfig>(prompt: T): T {
-		if (!(prompt.promptUuid || '').trim()) {
-			prompt.promptUuid = crypto.randomUUID();
-		}
+		prompt.promptUuid = (prompt.promptUuid || '').trim() || crypto.randomUUID();
 		return prompt;
 	}
 
 	/** Восстанавливает identity по файлам при устаревшем кеше; тесты: storageServiceContextFiles.test.ts. */
-	private async findPromptIdByUuid(promptUuid: string, rejectAmbiguous = false): Promise<string | undefined> {
+	private async findPromptLocationByUuid(promptUuid: string, rejectAmbiguous = false): Promise<PromptStorageLocation | undefined> {
 		const uuid = (promptUuid || '').trim();
 		if (!uuid) { return undefined; }
 		const cached = this._listCache?.filter(prompt => prompt.promptUuid === uuid) ?? [];
@@ -520,7 +543,7 @@ export class StorageService implements vscode.Disposable {
 					});
 				if (!config) { return undefined; }
 				try {
-					if (JSON.parse(config)?.promptUuid === uuid) { return { id: entry.name, archived, dirPath }; }
+					if (promptUuidFromJson(config, dirPath) === uuid) { return { id: entry.name, archived, dirPath }; }
 				} catch { /* Файлы с некорректным JSON также исключены из списка промптов. */ }
 				return undefined;
 			}));
@@ -537,30 +560,40 @@ export class StorageService implements vscode.Disposable {
 			}
 			if (found && !found.archived && !cached.some(entry => entry.id === found.id)) {
 				const revision = this.listCacheRevision;
-				const config = await this.readConfig(found.id, found);
+				const config = await this.readConfig(found.id, found, false);
 				if (config?.promptUuid === uuid && revision === this.listCacheRevision) { this.updateListCacheEntryFast(config); }
 			}
 		}
-		return found?.id;
+		return found;
 	}
 
 	/** Открывает стабильный UUID даже после переименования в другом окне; тесты: storageServiceContextFiles.test.ts. */
 	async getPromptByUuid(promptUuid: string): Promise<Prompt | null> {
-		const id = await this.findPromptIdByUuid(promptUuid);
-		const prompt = id ? await this.getPrompt(id) : null;
-		if (prompt?.promptUuid === promptUuid.trim()) { return prompt; }
-		if (!id) { return null; }
-		// Каталог мог переместиться между проверкой его наличия и чтением конфигурации.
-		const freshId = await this.findPromptIdByUuid(promptUuid);
-		const freshPrompt = freshId ? await this.getPrompt(freshId) : null;
-		return freshPrompt?.promptUuid === promptUuid.trim() ? freshPrompt : null;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const location = await this.findPromptLocationByUuid(promptUuid);
+			if (!location) { return null; }
+			const prompt = await this.readPromptAtLocation(location.id, location);
+			if (prompt?.promptUuid === promptUuid.trim()) { return prompt; }
+			// Папка могла переехать между поиском метаданных и чтением содержимого.
+		}
+		return null;
+	}
+
+	/** Восстанавливает каталог по UUID при смене slug, переиспользовании имени или переносе в архив. */
+	private async locateStoredPrompt(id: string, uuid: string): Promise<PromptStorageLocation | null> {
+		const direct = this.resolvePromptStorageLocationSync(id);
+		if (direct && this.readStoredConfig(direct)?.promptUuid === uuid) { return direct; }
+		return await this.findPromptLocationByUuid(uuid) ?? null;
 	}
 
 	/** Читает идентификатор с диска и допускает отсутствие файла только при первом сохранении. */
 	private readStoredConfig(location: PromptStorageLocation | null): Partial<PromptConfig> | null {
 		if (!location) { return null; }
 		try {
-			return JSON.parse(fs.readFileSync(path.join(location.dirPath, this.CONFIG_FILE_NAME), 'utf-8'));
+			const config = JSON.parse(fs.readFileSync(path.join(location.dirPath, this.CONFIG_FILE_NAME), 'utf-8'));
+			if (!config || typeof config !== 'object' || Array.isArray(config)) { return null; }
+			if (typeof config.promptUuid === 'string') { config.promptUuid = config.promptUuid.trim(); }
+			return config;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return null; }
 			throw error;
@@ -640,14 +673,11 @@ export class StorageService implements vscode.Disposable {
 				if (id === '.' || id === '..' || /[/\\\0]/.test(id) || this.isReservedPromptDirName(id)) {
 					return;
 				}
-				let location = this.resolvePromptStorageLocationSync(id);
-				let config = this.readStoredConfig(location);
-				if (uuid && config?.promptUuid !== uuid) {
-					const canonicalId = await this.findPromptIdByUuid(uuid);
-					location = canonicalId ? this.resolvePromptStorageLocationSync(canonicalId) : null;
-					config = this.readStoredConfig(location);
-				}
-				if (!location || !config || (uuid && config.promptUuid !== uuid)) { return; }
+				const location = uuid ? await this.locateStoredPrompt(id, uuid) : this.resolvePromptStorageLocationSync(id);
+				if (!location) { return; }
+				const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(path.join(location.dirPath, this.CONFIG_FILE_NAME)));
+				const config = JSON.parse(Buffer.from(raw).toString('utf8')) as Partial<PromptConfig> | null;
+				if (!config || typeof config !== 'object' || Array.isArray(config) || (uuid && config.promptUuid !== uuid)) { return; }
 				activeTask = {
 					id: location.id,
 					promptUuid: typeof config.promptUuid === 'string' ? config.promptUuid : '',
@@ -971,8 +1001,8 @@ export class StorageService implements vscode.Disposable {
 		}
 	}
 
-	private promptHistoryDir(id: string): string {
-		return path.join(this.getPromptDirectoryPath(id), this.HISTORY_DIR_NAME);
+	private promptHistoryDir(promptDir: string): vscode.Uri {
+		return vscode.Uri.file(path.join(promptDir, this.HISTORY_DIR_NAME));
 	}
 
 	private normalizeHistoryReason(reason?: string): PromptHistoryReason {
@@ -1006,8 +1036,8 @@ export class StorageService implements vscode.Disposable {
 		return `${ts}-${suffix}`;
 	}
 
-	private async readHistoryEntry(promptId: string, entryId: string): Promise<PromptHistoryEntry | null> {
-		const fileUri = vscode.Uri.file(path.join(this.promptHistoryDir(promptId), `${entryId}.json`));
+	private async readHistoryEntry(historyDir: vscode.Uri, entryId: string): Promise<PromptHistoryEntry | null> {
+		const fileUri = vscode.Uri.joinPath(historyDir, `${entryId}.json`);
 		try {
 			const raw = await vscode.workspace.fs.readFile(fileUri);
 			const parsed = JSON.parse(Buffer.from(raw).toString('utf-8')) as PromptHistoryEntry;
@@ -1020,8 +1050,7 @@ export class StorageService implements vscode.Disposable {
 		}
 	}
 
-	private async trimPromptHistory(promptId: string): Promise<void> {
-		const dirUri = vscode.Uri.file(this.promptHistoryDir(promptId));
+	private async trimPromptHistory(dirUri: vscode.Uri, assertOwner: () => void): Promise<void> {
 		let entries: [string, vscode.FileType][] = [];
 		try {
 			entries = await vscode.workspace.fs.readDirectory(dirUri);
@@ -1039,6 +1068,7 @@ export class StorageService implements vscode.Disposable {
 		}
 
 		for (const file of files.slice(this.HISTORY_LIMIT)) {
+			assertOwner();
 			try {
 				await vscode.workspace.fs.delete(vscode.Uri.joinPath(dirUri, file));
 			} catch {
@@ -1047,90 +1077,63 @@ export class StorageService implements vscode.Disposable {
 		}
 	}
 
-	private async getLatestHistoryEntry(promptId: string): Promise<PromptHistoryEntry | null> {
-		const list = await this.listPromptHistory(promptId);
+	private async getLatestHistoryEntry(historyDir: vscode.Uri): Promise<PromptHistoryEntry | null> {
+		const list = await this.listHistoryAt(historyDir);
 		if (list.length === 0) {
 			return null;
 		}
-		return this.readHistoryEntry(promptId, list[0].id);
+		return this.readHistoryEntry(historyDir, list[0].id);
 	}
 
-	private async createHistorySnapshot(prompt: Prompt, reason: PromptHistoryReason): Promise<void> {
-		if (!prompt.id) {
-			return;
-		}
-
-		const latestEntry = await this.getLatestHistoryEntry(prompt.id);
+	/** Сохраняет предыдущее содержимое в истории текущего каталога, включая перенос в архив. */
+	private async writeHistorySnapshot(
+		prompt: Prompt, reason: PromptHistoryReason, location: PromptStorageLocation, assertOwner: () => void, nextPrompt?: Prompt,
+	): Promise<void> {
+		const historyDirUri = this.promptHistoryDir(location.dirPath);
+		const latestEntry = await this.getLatestHistoryEntry(historyDirUri);
 		if (latestEntry?.prompt && this.historyTrackedFingerprint(latestEntry.prompt) === this.historyTrackedFingerprint(prompt)) {
 			return;
 		}
 
-		const historyDirUri = vscode.Uri.file(this.promptHistoryDir(prompt.id));
+		if (nextPrompt && latestEntry && this.shouldThrottleHistorySnapshot(prompt, nextPrompt, reason, latestEntry)) {
+			return;
+		}
+		assertOwner();
 		try {
 			await vscode.workspace.fs.stat(historyDirUri);
 		} catch {
+			assertOwner();
 			await vscode.workspace.fs.createDirectory(historyDirUri);
 		}
 
 		const entry: PromptHistoryEntry = {
 			id: this.makeHistoryEntryId(),
-			promptId: prompt.id,
+			promptId: location.id,
 			createdAt: new Date().toISOString(),
 			reason,
 			prompt: JSON.parse(JSON.stringify(prompt)) as Prompt,
 		};
 
-		const entryUri = vscode.Uri.file(path.join(this.promptHistoryDir(prompt.id), `${entry.id}.json`));
+		const entryUri = vscode.Uri.joinPath(historyDirUri, `${entry.id}.json`);
+		assertOwner();
 		await vscode.workspace.fs.writeFile(entryUri, Buffer.from(JSON.stringify(entry, null, 2), 'utf-8'));
-		await this.trimPromptHistory(prompt.id);
+		await this.trimPromptHistory(historyDirUri, assertOwner);
 	}
 
-	private async shouldCaptureHistorySnapshot(
-		previousPrompt: Prompt | null,
+	/** Throttle only automatic content edits against the last snapshot in this prompt's physical directory. */
+	private shouldThrottleHistorySnapshot(
+		previousPrompt: Prompt,
 		nextPrompt: Prompt,
 		reason: PromptHistoryReason,
-		_forceHistory: boolean,
-	): Promise<boolean> {
-		if (!previousPrompt || !previousPrompt.id) {
+		latestEntry: PromptHistoryEntry,
+	): boolean {
+		if (reason === 'manual' || previousPrompt.report !== nextPrompt.report || previousPrompt.notes !== nextPrompt.notes) {
 			return false;
 		}
-
-		const previousTrackedFingerprint = this.historyTrackedFingerprint(previousPrompt);
-		const nextTrackedFingerprint = this.historyTrackedFingerprint(nextPrompt);
-		if (previousTrackedFingerprint === nextTrackedFingerprint) {
-			return false;
-		}
-
-		const contentChanged = previousPrompt.content !== nextPrompt.content;
-		const reportChanged = previousPrompt.report !== nextPrompt.report;
-		const notesChanged = previousPrompt.notes !== nextPrompt.notes;
 		const previousFiles = [...(previousPrompt.contextFiles || [])].map(file => file.trim()).sort();
 		const nextFiles = [...(nextPrompt.contextFiles || [])].map(file => file.trim()).sort();
-		const filesChanged = JSON.stringify(previousFiles) !== JSON.stringify(nextFiles);
-
-		if (!contentChanged && !reportChanged && !notesChanged && !filesChanged) {
-			return false;
-		}
-
-		if (reason === 'manual') {
-			return true;
-		}
-
-		if (reportChanged || notesChanged || filesChanged) {
-			return true;
-		}
-
-		const latestEntry = await this.getLatestHistoryEntry(previousPrompt.id);
-		if (!latestEntry?.createdAt) {
-			return true;
-		}
-
-		const latestTs = new Date(latestEntry.createdAt).getTime();
-		if (!Number.isFinite(latestTs)) {
-			return true;
-		}
-
-		return (Date.now() - latestTs) >= this.HISTORY_WINDOW_MS;
+		return JSON.stringify(previousFiles) === JSON.stringify(nextFiles)
+			&& Date.now() - Date.parse(latestEntry.createdAt) < this.HISTORY_WINDOW_MS;
 	}
 
 	/** Фоновая запись истории — не блокирует основной поток сохранения */
@@ -1138,13 +1141,15 @@ export class StorageService implements vscode.Disposable {
 		existingPrompt: Prompt | null,
 		nextPrompt: Prompt,
 		reason: PromptHistoryReason,
-		forceHistory: boolean,
 	): Promise<void> {
+		if (!existingPrompt?.id || this.historyTrackedFingerprint(existingPrompt) === this.historyTrackedFingerprint(nextPrompt)) {
+			return;
+		}
 		try {
-			const shouldCapture = await this.shouldCaptureHistorySnapshot(existingPrompt, nextPrompt, reason, forceHistory);
-			if (shouldCapture && existingPrompt) {
-				await this.createHistorySnapshot(existingPrompt, reason);
-			}
+			await this.withPromptWriteLock(existingPrompt.promptUuid, async assertOwner => {
+				const location = await this.locateStoredPrompt(existingPrompt.id, existingPrompt.promptUuid);
+				if (location) { await this.writeHistorySnapshot(existingPrompt, reason, location, assertOwner, nextPrompt); }
+			});
 		} catch {
 			// Ошибка записи истории не должна влиять на работу расширения
 		}
@@ -1237,8 +1242,47 @@ export class StorageService implements vscode.Disposable {
 		return prompts;
 	}
 
-	/** Read config.json for a prompt */
-	private async readConfig(id: string, options?: { archived?: boolean; dirPath?: string }): Promise<PromptConfig | null> {
+	/** Publish normalized JSON while the UUID lock excludes saves and folder moves. */
+	private async backfillPromptConfig(configPath: string, raw: Uint8Array, config: PromptConfig, lockKey: string): Promise<boolean> {
+		return this.withPromptWriteLock(lockKey, async assertOwner => {
+			// Opening the original for writing respects a read-only file even in a writable directory.
+			const original = await fs.promises.open(configPath, 'r+');
+			try {
+				if (!(await original.readFile()).equals(raw)) { return false; }
+				const stat = await original.stat();
+				const temporaryPath = `${configPath}.${crypto.randomUUID()}.tmp`;
+				const temporary = await fs.promises.open(temporaryPath, 'wx', stat.mode & 0o777);
+				try {
+					const content = this.serializeStoredPromptConfig(config);
+					try {
+						await temporary.writeFile(content);
+						if (process.platform !== 'win32') {
+							const target = await temporary.stat();
+							if (target.uid !== stat.uid || target.gid !== stat.gid) { await temporary.chown(stat.uid, stat.gid); }
+							await temporary.chmod(stat.mode & 0o777);
+						}
+					} finally {
+						await temporary.close();
+					}
+					// External edits can bypass the extension's lock. Check the source before replacing it.
+					if (!(await fs.promises.readFile(configPath)).equals(raw)) { return false; }
+					assertOwner();
+					this.markInternalConfigWrite(configPath, content);
+					await fs.promises.rename(temporaryPath, configPath);
+					return true;
+				} finally {
+					await fs.promises.rm(temporaryPath, { force: true });
+				}
+			} finally {
+				await original.close();
+			}
+		});
+	}
+
+	/** Read config.json and optionally persist legacy fields outside an existing save lock. */
+	private async readConfig(
+		id: string, options?: { archived?: boolean; dirPath?: string }, persistRepairs = true,
+	): Promise<PromptConfig | null> {
 		const archived = options?.archived === true;
 		const dirPath = options?.dirPath || this.promptDir(id, archived);
 		const configPath = path.join(dirPath, this.CONFIG_FILE_NAME);
@@ -1248,7 +1292,7 @@ export class StorageService implements vscode.Disposable {
 			const { config, shouldBackfillPromptUuid } = normalizeStoredPromptConfig(
 				id,
 				parsed,
-				() => crypto.randomUUID(),
+				() => legacyPromptUuid(dirPath),
 			);
 			const repairedContextFiles = this.repairPromptContextFileReferences(config.contextFiles, dirPath);
 			if (repairedContextFiles.changed) {
@@ -1258,15 +1302,20 @@ export class StorageService implements vscode.Disposable {
 			config.archived = archived;
 			const shouldBackfillArchived = archived ? parsed.archived !== true : parsed.archived === true;
 
-			if (shouldBackfillPromptUuid || shouldBackfillArchived || repairedContextFiles.changed) {
+			if (persistRepairs && (shouldBackfillPromptUuid || shouldBackfillArchived || repairedContextFiles.changed)) {
+				const hasUuid = typeof parsed.promptUuid === 'string' && Boolean(parsed.promptUuid.trim());
+				// A folder without a persisted UUID has the same relative name on every mounted workspace.
+				const lockKey = hasUuid ? config.promptUuid : `legacy-folder/${archived ? 'archive/' : ''}${id}`;
+				let published = false;
 				try {
-					this.markInternalConfigWrite(configPath, this.serializeStoredPromptConfig(config));
-					await vscode.workspace.fs.writeFile(
-						vscode.Uri.file(configPath),
-						Buffer.from(this.serializeStoredPromptConfig(config), 'utf-8'),
-					);
-				} catch {
-					// Ignore backfill failures and continue with in-memory config.
+					published = await this.backfillPromptConfig(configPath, raw, config, lockKey);
+				} catch (error) {
+					if (!isWriteAccessDenied(error)) { throw error; }
+				}
+				if (!published) {
+					const current = await this.readConfig(id, options, false);
+					const sameFolder = !hasUuid && legacyPromptUuid(dirPath) === config.promptUuid;
+					return sameFolder || current?.promptUuid === config.promptUuid ? current : null;
 				}
 			}
 
@@ -1298,14 +1347,11 @@ export class StorageService implements vscode.Disposable {
 			if (path.dirname(configPath) !== directory || path.dirname(contentPath) !== directory) {
 				return { state: 'missing' };
 			}
-			const config: unknown = JSON.parse(await fs.promises.readFile(configPath, 'utf8'));
-			if (!config || typeof config !== 'object' || !('promptUuid' in config)
-				|| config.promptUuid !== target.promptUuid) { return { state: 'missing' }; }
+			const readOwner = async () => promptUuidFromJson(await fs.promises.readFile(configPath, 'utf8'), directory);
+			if (await readOwner() !== target.promptUuid) { return { state: 'missing' }; }
 			const content = await fs.promises.readFile(contentPath, 'utf8');
 			// Повторная проверка не даёт выдать текст другой задачи при замене папки во время чтения.
-			const current: unknown = JSON.parse(await fs.promises.readFile(configPath, 'utf8'));
-			if (!current || typeof current !== 'object' || !('promptUuid' in current)
-				|| current.promptUuid !== target.promptUuid) { return { state: 'missing' }; }
+			if (await readOwner() !== target.promptUuid) { return { state: 'missing' }; }
 			return { state: 'ready', content };
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
@@ -1314,10 +1360,14 @@ export class StorageService implements vscode.Disposable {
 	}
 
 	/** Read full prompt (config + markdown) */
-	async getPrompt(id: string): Promise<Prompt | null> {
+	getPrompt(id: string): Promise<Prompt | null> {
+		return this.readPromptAtLocation(id, this.resolvePromptStorageLocationSync(id));
+	}
+
+	/** Читает данные из выбранного каталога, включая архив с повторно занятым именем. */
+	private async readPromptAtLocation(id: string, location: PromptStorageLocation | null, underWriteLock = false): Promise<Prompt | null> {
 		const promptStartedAt = Date.now();
 		const normalizedPromptId = (id || '').trim();
-		const location = this.resolvePromptStorageLocationSync(id);
 		if (!location) {
 			this.logStoragePerf('getPrompt.missingLocation', {
 				promptId: normalizedPromptId,
@@ -1327,7 +1377,7 @@ export class StorageService implements vscode.Disposable {
 		}
 
 		const configStartedAt = Date.now();
-		const config = await this.readConfig(id, location);
+		const config = await this.readConfig(id, location, !underWriteLock);
 		const configDurationMs = Date.now() - configStartedAt;
 		if (!config) {
 			this.logStoragePerf('getPrompt.missingConfig', {
@@ -1376,7 +1426,17 @@ export class StorageService implements vscode.Disposable {
 		let ensureReportDurationMs = 0;
 		if (!hasReportTxt) {
 			const ensureReportStartedAt = Date.now();
-			await this.ensurePromptReportFile(id, report, location.archived);
+			const migrateReport = async () => {
+				if (this.readStoredConfig(location)?.promptUuid === config.promptUuid) {
+					await this.ensurePromptReportFile(id, report, location.archived);
+				}
+			};
+			try {
+				if (underWriteLock) { await migrateReport(); }
+				else { await this.withPromptWriteLock(config.promptUuid, migrateReport); }
+			} catch (error) {
+				if (!isWriteAccessDenied(error)) { throw error; }
+			}
 			ensureReportDurationMs = Date.now() - ensureReportStartedAt;
 		}
 
@@ -1402,28 +1462,47 @@ export class StorageService implements vscode.Disposable {
 	async savePrompt(prompt: Prompt, options?: PromptSaveOptions): Promise<Prompt> {
 		this.ensurePromptUuid(prompt);
 		await this.ensureStorageDir();
-		const hash = crypto.createHash('sha256').update(prompt.promptUuid).digest('hex');
+		// A cold list scan may migrate other UUIDs. Finish it before locking a new prompt.
+		if (!this._listCache && !options?.previousId && !options?.existingPrompt) {
+			const target = this.resolvePromptStorageLocationSync(prompt.id);
+			if (this.readStoredConfig(target)?.promptUuid !== prompt.promptUuid) { await this.listPrompts(); }
+		}
+		return this.withPromptWriteLock(prompt.promptUuid, assertOwner => this.saveLockedPrompt(prompt, assertOwner, options));
+	}
+
+	/** Фоновые записи истории и времени проверяют каталог под той же блокировкой, что и переименование. */
+	private async withPromptWriteLock<T>(uuid: string, write: (assertOwner: () => void) => Promise<T>): Promise<T> {
+		const hash = crypto.createHash('sha256').update(uuid).digest('hex');
 		const key = path.join(path.dirname(this.storageDir), `.prompt-manager-save-${hash}`);
+		let compromised: Error | undefined;
+		const assertOwner = () => { if (compromised) { throw compromised; } };
 		const release = await lock(key, {
 			realpath: false,
+			// Потеря блокировки отклоняет операцию через её Promise. Ошибка из таймера не завершает Extension Host.
+			onCompromised: error => { compromised = error; },
 			retries: { retries: 60, factor: 1.3, minTimeout: 15, maxTimeout: 250 },
 		});
 		try {
-			return await this.saveLockedPrompt(prompt, options);
+			const result = await write(assertOwner);
+			assertOwner();
+			return result;
 		} finally {
-			await release();
+			if (!compromised) { await release(); }
 		}
 	}
 
 	/** Проверка исходного каталога и перенос выполняются под одной блокировкой до окончания записи файлов. */
-	private async saveLockedPrompt(prompt: Prompt, options?: PromptSaveOptions): Promise<Prompt> {
+	private async saveLockedPrompt(
+		prompt: Prompt, assertOwner: () => void, options?: PromptSaveOptions, sourceLocation?: PromptStorageLocation,
+	): Promise<Prompt> {
 		const provided = options?.existingPrompt;
 		const expectedId = options?.previousId?.trim() || provided?.id;
 		const sourceId = expectedId || prompt.id;
-		const location = this.resolvePromptStorageLocationSync(sourceId);
+		const location = sourceLocation ?? this.resolvePromptStorageLocationSync(sourceId);
 		const stored = this.readStoredConfig(location);
 		const samePrompt = location && stored?.promptUuid === prompt.promptUuid;
-		if (!samePrompt && (expectedId || await this.findPromptIdByUuid(prompt.promptUuid, true))) {
+		const staleArchive = samePrompt && location.archived && !prompt.archived;
+		if (staleArchive || (!samePrompt && (expectedId || await this.findPromptLocationByUuid(prompt.promptUuid, true)))) {
 			// Это запоздавший снимок перемещённой, удалённой или заменённой задачи.
 			// Его статус и тексты нельзя переносить на актуальный промпт без повторного открытия.
 			throw new Error('Каталог промпта изменился. Откройте актуальную версию перед сохранением.');
@@ -1431,13 +1510,12 @@ export class StorageService implements vscode.Disposable {
 		const previousId = samePrompt ? sourceId : undefined;
 		const existingPrompt = previousId
 			? (provided?.id === previousId && provided.promptUuid === prompt.promptUuid
-				? provided : await this.getPrompt(previousId))
+				? provided : await this.readPromptAtLocation(previousId, location, true))
 			: null;
 		if (previousId && !existingPrompt) {
 			throw new Error('Не удалось прочитать исходный промпт для сохранения.');
 		}
 		const reason = this.normalizeHistoryReason(options?.historyReason);
-		const forceHistory = Boolean(options?.forceHistory);
 		const shouldCaptureHistory = !options?.skipHistory && Boolean(existingPrompt);
 		const sourceArchived = Boolean(samePrompt && location.archived);
 		const targetArchived = Boolean(prompt.archived || sourceArchived);
@@ -1448,37 +1526,26 @@ export class StorageService implements vscode.Disposable {
 
 		const hasStableExistingPromptDirectory = previousId === prompt.id && sourceArchived === targetArchived;
 		const dir = this.promptDir(prompt.id, targetArchived);
+		assertOwner();
 		if (previousId && !hasStableExistingPromptDirectory) {
 			await this.renamePromptDirectory(previousId, prompt.id, {
 				fromArchived: sourceArchived,
 				toArchived: targetArchived,
 			});
-		} else if (!previousId) {
-			if (targetArchived) { await this.ensureArchiveStorageDir(); }
-			// Другой UUID мог занять выбранный slug после проверки uniqueId.
-			await fs.promises.mkdir(dir);
+		} else if (!previousId && targetArchived) {
+			await this.ensureArchiveStorageDir();
 		}
 		const repairedContextFiles = this.repairPromptContextFileReferences(prompt.contextFiles, dir);
 		prompt.contextFiles = repairedContextFiles.contextFiles;
 
 		// Проверяем актуальный файл после переноса каталога: снимок редактора может содержать устаревший ноль.
 		const configPath = path.join(dir, this.CONFIG_FILE_NAME);
-		let preservedImplementingTime = 0;
-		if (prompt.timeSpentImplementing === 0) {
-			try {
-				const storedConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Partial<PromptConfig> | null;
-				const storedTime = storedConfig?.timeSpentImplementing;
-				if (typeof storedTime === 'number' && Number.isFinite(storedTime) && storedTime > 0) {
-					preservedImplementingTime = storedTime;
-					prompt.timeSpentImplementing = storedTime;
-				}
-			} catch (error) {
-				// Новый промпт ещё не имеет конфигурации; ошибки чтения не разрешают затирать существующую.
-				if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-					throw error;
-				}
-			}
-		}
+		const storedTime = previousId && prompt.timeSpentImplementing === 0
+			? this.readStoredConfig({ id: prompt.id, archived: targetArchived, dirPath: dir })?.timeSpentImplementing
+			: undefined;
+		const preservedImplementingTime = prompt.timeSpentImplementing === 0
+			&& typeof storedTime === 'number' && Number.isFinite(storedTime) && storedTime > 0 ? storedTime : 0;
+		if (preservedImplementingTime) { prompt.timeSpentImplementing = preservedImplementingTime; }
 
 		// Save config.json (without content field)
 		const { content, report, progress: _progress, sidebarSearchText: _sidebarSearchText, ...config } = prompt;
@@ -1500,63 +1567,60 @@ export class StorageService implements vscode.Disposable {
 		this.listCacheRevision++;
 		this.pendingPromptReadsByDirectory.delete(path.normalize(dir));
 		this.markInternalConfigWrite(configPath, configJson);
-		if (canSkipStableStructureChecks) {
-			fs.writeFileSync(configPath, configJson, 'utf-8');
+		// Первый save становится виден только с полным набором файлов. Сбой оставляет slug свободным для повтора.
+		// The private wrapper inherits the destination's group and default ACL, as does its ordinary child.
+		const stage = previousId ? null : await fs.promises.mkdtemp(path.join(path.dirname(dir), '.prompt-manager-stage-'));
+		const writeDir = stage ? path.join(stage, 'prompt') : dir;
+		try {
+			assertOwner();
+			if (stage) { await fs.promises.mkdir(writeDir); }
+			if (canSkipStableStructureChecks) {
+				fs.writeFileSync(configPath, configJson, 'utf-8');
+			} else {
+				const writes: Array<PromiseLike<unknown>> = [
+					vscode.workspace.fs.writeFile(vscode.Uri.file(path.join(writeDir, this.CONFIG_FILE_NAME)), Buffer.from(configJson)),
+					fs.promises.mkdir(path.join(writeDir, 'context')).catch(error => {
+						if (error.code !== 'EEXIST') { throw error; }
+					}),
+				];
+				if (shouldWritePromptContent) {
+					writes.push(vscode.workspace.fs.writeFile(vscode.Uri.file(path.join(writeDir, 'prompt.md')), Buffer.from(nextContent)));
+				}
+				if (shouldWriteReportContent) {
+					this.markInternalWatchedPromptFileWrite(vscode.Uri.file(path.join(dir, 'report.txt')));
+					writes.push(vscode.workspace.fs.writeFile(vscode.Uri.file(path.join(writeDir, 'report.txt')), Buffer.from(nextReport)));
+				} else {
+					writes.push(this.ensurePromptReportFile(prompt.id, '', targetArchived));
+				}
+				// Завершаем все записи до освобождения блокировки или удаления временной папки.
+				const results = await Promise.allSettled(writes);
+				for (const result of results) {
+					if (result.status === 'rejected') { throw result.reason; }
+				}
+			}
+			if (stage) {
+				assertOwner();
+				await vscode.workspace.fs.rename(vscode.Uri.file(writeDir), vscode.Uri.file(dir), { overwrite: false });
+			}
+		} finally {
+			if (stage) { await fs.promises.rm(stage, { recursive: true, force: true }); }
 		}
-		const writeOperations: Array<PromiseLike<unknown>> = [];
-		if (!canSkipStableStructureChecks) {
-			writeOperations.push(vscode.workspace.fs.writeFile(
-				vscode.Uri.file(configPath),
-				Buffer.from(configJson, 'utf-8')
-			));
-		}
-
-		if (shouldWritePromptContent) {
-			writeOperations.push(
-				vscode.workspace.fs.writeFile(
-					vscode.Uri.file(path.join(dir, 'prompt.md')),
-					Buffer.from(nextContent, 'utf-8')
-				)
-			);
-		}
-
-		if (shouldWriteReportContent) {
-			this.markInternalWatchedPromptFileWrite(vscode.Uri.file(path.join(dir, 'report.txt')));
-			writeOperations.push(
-				vscode.workspace.fs.writeFile(
-					vscode.Uri.file(path.join(dir, 'report.txt')),
-					Buffer.from(nextReport, 'utf-8')
-				)
-			);
-		}
-		if (!shouldWriteReportContent && !canSkipStableStructureChecks) {
-			await this.ensurePromptReportFile(prompt.id, '', targetArchived);
-		}
-
-		// Параллельная запись изменившихся файлов для ускорения status-only сохранений.
-		await Promise.all(writeOperations);
 
 		// История стартует после durable write, чтобы не конкурировать с первым status-save.
 		if (shouldCaptureHistory) {
 			this.scheduleBackgroundStorageTask(
-				() => this.captureHistorySnapshotInBackground(existingPrompt, prompt, reason, forceHistory),
+				() => this.captureHistorySnapshotInBackground(existingPrompt, prompt, reason),
 				canSkipStableStructureChecks ? 1000 : 0,
 			);
 		}
 
-		// Удаление legacy report.md не должно задерживать обычный save/status-change.
-		this.scheduleBackgroundStorageTask(async () => {
-			await vscode.workspace.fs.delete(vscode.Uri.file(path.join(dir, 'report.md')));
-		}, canSkipStableStructureChecks ? 1000 : 0);
-
-		// Проверка context нужна только когда структура промпта могла измениться.
-		if (!canSkipStableStructureChecks) {
-			const contextDir = path.join(dir, 'context');
-			try {
-				await vscode.workspace.fs.stat(vscode.Uri.file(contextDir));
-			} catch {
-				await vscode.workspace.fs.createDirectory(vscode.Uri.file(contextDir));
-			}
+		// Старый формат можно удалить только из той же папки, пока она принадлежит текущему UUID.
+		const legacyReportPath = path.join(dir, 'report.md');
+		if (fs.existsSync(legacyReportPath)) {
+			assertOwner();
+			await fs.promises.unlink(legacyReportPath).catch(error => {
+				if (error.code !== 'ENOENT') { this.logStoragePerf('legacyReportCleanup.failed', { promptId: prompt.id }); }
+			});
 		}
 
 		// Daily time stays off the visible save path and is serialized per prompt to avoid lost deltas.
@@ -1566,7 +1630,7 @@ export class StorageService implements vscode.Disposable {
 				? { ...existingPrompt, timeSpentImplementing: preservedImplementingTime }
 				: existingPrompt;
 			this.scheduleBackgroundStorageTask(
-				() => this.enqueueDailyTimeUpdate(prompt.id, dailyTimeBasePrompt, prompt, targetArchived),
+				() => this.enqueueDailyTimeUpdate(prompt.id, dailyTimeBasePrompt, prompt),
 				canSkipStableStructureChecks ? 1000 : 0,
 			);
 		}
@@ -1574,14 +1638,34 @@ export class StorageService implements vscode.Disposable {
 		const cachedConfig = await this.attachSidebarSearchText(config, dir);
 
 		// Обновление in-memory кэша — мгновенно; файловая запись в фоне
-		this.updateListCacheEntryFast(cachedConfig, previousId && previousId !== prompt.id ? previousId : undefined);
+		// Restoring an archived revision never removes an active prompt with the same folder name.
+		if (!sourceLocation?.archived) {
+			this.updateListCacheEntryFast(cachedConfig, previousId && previousId !== prompt.id ? previousId : undefined);
+		}
 
 		// Возвращаем полный Prompt (config + content + report) чтобы не требовался повторный getPrompt()
 		return { ...cachedConfig, content, report };
 	}
 
-	async listPromptHistory(promptId: string): Promise<Array<{ id: string; createdAt: string; reason: PromptHistoryReason }>> {
-		const dirUri = vscode.Uri.file(this.promptHistoryDir(promptId));
+	/** Bind a history operation to the selected folder and reject a later occupant with the same name. */
+	private async resolveHistoryOwner(promptId: string, expected?: Pick<Prompt, 'promptUuid' | 'archived'>) {
+		const archived = Boolean(expected?.archived);
+		const location = expected
+			? { id: promptId, archived, dirPath: this.promptDir(promptId, archived) }
+			: this.resolvePromptStorageLocationSync(promptId);
+		if (!location) { return null; }
+		const config = await this.readConfig(promptId, location, !expected);
+		if (!config || (expected && config.promptUuid !== expected.promptUuid)) { return null; }
+		return { location, promptUuid: config.promptUuid };
+	}
+
+	async listPromptHistory(promptId: string, expected?: Pick<Prompt, 'promptUuid' | 'archived'>) {
+		const owner = await this.resolveHistoryOwner(promptId, expected);
+		return owner ? this.listHistoryAt(this.promptHistoryDir(owner.location.dirPath)) : [];
+	}
+
+	/** Read every summary from the same directory even when active and archived prompts share a name. */
+	private async listHistoryAt(dirUri: vscode.Uri): Promise<Array<Pick<PromptHistoryEntry, 'id' | 'createdAt' | 'reason'>>> {
 		let entries: [string, vscode.FileType][] = [];
 		try {
 			entries = await vscode.workspace.fs.readDirectory(dirUri);
@@ -1595,7 +1679,7 @@ export class StorageService implements vscode.Disposable {
 				continue;
 			}
 			const id = name.slice(0, -5);
-			const entry = await this.readHistoryEntry(promptId, id);
+			const entry = await this.readHistoryEntry(dirUri, id);
 			if (!entry) {
 				continue;
 			}
@@ -1605,28 +1689,31 @@ export class StorageService implements vscode.Disposable {
 		return result.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 	}
 
-	async restorePromptHistory(promptId: string, entryId: string): Promise<Prompt | null> {
-		const targetEntry = await this.readHistoryEntry(promptId, entryId);
-		if (!targetEntry) {
-			return null;
-		}
+	async restorePromptHistory(
+		promptId: string, entryId: string, expected?: Pick<Prompt, 'promptUuid' | 'archived'>,
+	): Promise<Prompt | null> {
+		const selected = await this.resolveHistoryOwner(promptId, expected);
+		if (!selected) { return null; }
+		const { location } = selected;
 
-		const currentPrompt = await this.getPrompt(promptId);
-		const targetPromptForCompare: Prompt = {
-			...targetEntry.prompt,
-			id: promptId,
-		};
+		// A restore must see the current binding and record the previous content before releasing the owner's lock.
+		return this.withPromptWriteLock(selected.promptUuid, async assertOwner => {
+			if (this.readStoredConfig(location)?.promptUuid !== selected.promptUuid) { return null; }
+			const targetEntry = await this.readHistoryEntry(this.promptHistoryDir(location.dirPath), entryId);
+			if (!targetEntry) { return null; }
+			const current = await this.readPromptAtLocation(promptId, location, true);
+			if (current?.promptUuid !== selected.promptUuid) { return null; }
+			const restored: Prompt = { ...targetEntry.prompt, id: promptId, promptUuid: current.promptUuid, archived: current.archived };
+			if (targetEntry.prompt.promptUuid !== current.promptUuid) {
+				// Imported history may contain the original prompt's session or pending launch.
+				restored.claudeChat = current.claudeChat;
+			}
 
-		if (currentPrompt && this.historyTrackedFingerprint(currentPrompt) !== this.historyTrackedFingerprint(targetPromptForCompare)) {
-			await this.createHistorySnapshot(currentPrompt, 'restore');
-		}
-
-		const restoredPrompt: Prompt = {
-			...targetPromptForCompare,
-		};
-
-		await this.savePrompt(restoredPrompt, { historyReason: 'restore', skipHistory: true });
-		return this.getPrompt(promptId);
+			if (this.historyTrackedFingerprint(current) !== this.historyTrackedFingerprint(restored)) {
+				await this.writeHistorySnapshot(current, 'restore', location, assertOwner);
+			}
+			return this.saveLockedPrompt(restored, assertOwner, { skipHistory: true, existingPrompt: current }, location);
+		});
 	}
 
 	/** Delete a prompt folder and notify linked-note consumers only after deletion is confirmed. */
@@ -1692,27 +1779,43 @@ export class StorageService implements vscode.Disposable {
 		return id;
 	}
 
-	/** Import a prompt from an external folder */
+	/** Импорт публикует самостоятельную копию с новым UUID вместе со всеми вложениями. */
 	async importPrompt(sourceFolder: string): Promise<Prompt | null> {
-		const sourceName = path.basename(sourceFolder);
-		const newId = await this.uniqueId(sourceName);
-		const targetDir = this.promptDir(newId);
-
-		// Copy entire folder
-		await this.copyDirectory(
-			vscode.Uri.file(sourceFolder),
-			vscode.Uri.file(targetDir)
-		);
-
-		const imported = await this.getPrompt(newId);
-		if (!imported) {
-			return null;
+		await this.listPrompts();
+		// A source tree containing the destination would recursively copy the import into itself.
+		const [sourceRoot, storageRoot] = await Promise.all([sourceFolder, this.storageDir].map(dir => fs.promises.realpath(dir)));
+		const relativeStorage = path.relative(sourceRoot, storageRoot);
+		if (!path.isAbsolute(relativeStorage) && relativeStorage.split(path.sep)[0] !== '..') { return null; }
+		const newId = await this.uniqueId(path.basename(sourceFolder));
+		const stage = await fs.promises.mkdtemp(path.join(this.storageDir, '.prompt-manager-stage-'));
+		const importDir = path.join(stage, 'prompt');
+		try {
+			await this.copyDirectory(vscode.Uri.file(sourceFolder), vscode.Uri.file(importDir));
+			const configPath = path.join(importDir, this.CONFIG_FILE_NAME);
+			let config: Partial<PromptConfig> | null;
+			try {
+				config = this.readStoredConfig({ id: newId, archived: false, dirPath: importDir });
+			} catch (error) {
+				if (error instanceof SyntaxError) { return null; }
+				throw error;
+			}
+			if (!config) { return null; }
+			config.id = newId;
+			config.promptUuid = crypto.randomUUID();
+			config.archived = false;
+			config.updatedAt = new Date().toISOString();
+			delete config.claudeChat;
+			await fs.promises.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
+			await vscode.workspace.fs.rename(vscode.Uri.file(importDir), vscode.Uri.file(this.promptDir(newId)), { overwrite: false });
+		} finally {
+			await fs.promises.rm(stage, { recursive: true, force: true });
 		}
-		imported.promptUuid = '';
-		// Импорт создаёт другую задачу: исходный разговор Claude остаётся у оригинала.
-		delete imported.claudeChat;
-		await this.savePrompt(imported, { skipHistory: true });
-		return this.getPrompt(imported.id);
+		const imported = await this.getPrompt(newId);
+		if (imported) {
+			const { content, report, ...config } = imported;
+			this.updateListCacheEntryFast(config);
+		}
+		return imported;
 	}
 
 	/** Export a prompt to an external folder */
@@ -1727,8 +1830,8 @@ export class StorageService implements vscode.Disposable {
 	}
 
 	/** Read daily time data for a prompt */
-	async getDailyTime(promptId: string): Promise<DailyTimeData> {
-		const filePath = path.join(this.getPromptDirectoryPath(promptId), this.DAILY_TIME_FILE);
+	async getDailyTime(promptId: string, dirPath = this.getPromptDirectoryPath(promptId)): Promise<DailyTimeData> {
+		const filePath = path.join(dirPath, this.DAILY_TIME_FILE);
 		try {
 			const raw = await vscode.workspace.fs.readFile(vscode.Uri.file(filePath));
 			return JSON.parse(Buffer.from(raw).toString('utf-8')) as DailyTimeData;
@@ -1742,13 +1845,12 @@ export class StorageService implements vscode.Disposable {
 		promptId: string,
 		oldPrompt: PromptConfig,
 		newPrompt: Prompt,
-		archived: boolean,
 	): Promise<void> {
 		const promptKey = (newPrompt.promptUuid || '').trim() || promptId;
 		const previousUpdate = this.dailyTimeWriteQueueByPromptKey.get(promptKey) || Promise.resolve();
 		const nextUpdate = previousUpdate
 			.catch(() => { })
-			.then(() => this.updateDailyTime(promptId, oldPrompt, newPrompt, archived));
+			.then(() => this.updateDailyTime(promptId, oldPrompt, newPrompt));
 
 		this.dailyTimeWriteQueueByPromptKey.set(promptKey, nextUpdate);
 		void nextUpdate.finally(() => {
@@ -1761,7 +1863,7 @@ export class StorageService implements vscode.Disposable {
 	}
 
 	/** Update daily time tracking, then notify observers after the file is durable. */
-	private async updateDailyTime(promptId: string, oldPrompt: PromptConfig, newPrompt: Prompt, archived: boolean = false): Promise<void> {
+	private async updateDailyTime(promptId: string, oldPrompt: PromptConfig, newPrompt: Prompt): Promise<void> {
 		const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 
 		// Compute time deltas
@@ -1775,26 +1877,31 @@ export class StorageService implements vscode.Disposable {
 			return;
 		}
 
-		// Read existing daily time data
-		const dailyData = await this.getDailyTime(promptId);
-		const entry = dailyData[today] || { writing: 0, implementing: 0, onTask: 0, untracked: 0 };
-		entry.writing += dWriting;
-		entry.implementing += dImplementing;
-		entry.onTask += dOnTask;
-		entry.untracked += dUntracked;
-		dailyData[today] = entry;
+		await this.withPromptWriteLock(newPrompt.promptUuid, async assertOwner => {
+			const location = await this.locateStoredPrompt(promptId, newPrompt.promptUuid);
+			if (!location) { return; }
+			// Read existing daily time data
+			const dailyData = await this.getDailyTime(location.id, location.dirPath);
+			const entry = dailyData[today] || { writing: 0, implementing: 0, onTask: 0, untracked: 0 };
+			entry.writing += dWriting;
+			entry.implementing += dImplementing;
+			entry.onTask += dOnTask;
+			entry.untracked += dUntracked;
+			dailyData[today] = entry;
 
-		// Write back
-		const filePath = path.join(this.promptDir(promptId, archived), this.DAILY_TIME_FILE);
-		await vscode.workspace.fs.writeFile(
-			vscode.Uri.file(filePath),
-			Buffer.from(JSON.stringify(dailyData, null, 2), 'utf-8')
-		);
+			// Write back
+			const filePath = path.join(location.dirPath, this.DAILY_TIME_FILE);
+			assertOwner();
+			await vscode.workspace.fs.writeFile(
+				vscode.Uri.file(filePath),
+				Buffer.from(JSON.stringify(dailyData, null, 2), 'utf-8')
+			);
 
-		this._onDidPromptDailyTimeChange.fire({
-			id: promptId,
-			promptUuid: (newPrompt.promptUuid || '').trim() || undefined,
-			archived,
+			this._onDidPromptDailyTimeChange.fire({
+				id: location.id,
+				promptUuid: (newPrompt.promptUuid || '').trim() || undefined,
+				archived: location.archived,
+			});
 		});
 	}
 

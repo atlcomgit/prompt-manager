@@ -52,6 +52,11 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
   показываются на странице «Аккаунты».
 
 #### Fixed
+- Fixed duplicate prompt folders after concurrent saves and renames. Refreshing the list keeps the selected
+  folder when older copies share its UUID.
+- Preserved the latest edit during a rename, made legacy configuration updates atomic, and kept read-only
+  prompts visible. New and imported prompts inherit the destination's access policy. Archived prompts retain
+  their own history when folder names are reused, and imported history preserves the copy's Claude session binding.
 - Обновление лимитов Claude теперь получает данные от официального CLI `/usage` раз в 5 минут,
   без отправки промпта модели и без собственных HTTP-запросов Prompt Manager к Anthropic.
   Общий на весь Ubuntu/VS Code Tunnel кэш и атомарная межпроцессная блокировка гарантируют,

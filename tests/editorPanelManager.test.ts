@@ -29,6 +29,7 @@ let vscodeClaudeExtension: any = { isActive: true };
 let vscodeClipboardText = '';
 let vscodeActiveTextEditor: any;
 let vscodeWindowFocused = true;
+let chooseHistoryRevision: ((items: Array<{ entryId: string }>) => { entryId: string }) | undefined;
 /** Тип клиента отделён от Linux-хоста, чтобы проверить запрет серверных клавиш в туннеле. */
 let vscodeUiKind = 1;
 let vscodeRemoteName: string | undefined;
@@ -546,6 +547,7 @@ function createVsCodeMock() {
 			},
 			createWebviewPanel,
 			createOutputChannel: () => outputChannel,
+			showQuickPick: async (items: Array<{ entryId: string }>) => chooseHistoryRevision?.(items),
 			showErrorMessage: () => undefined,
 			showInformationMessage: () => undefined,
 		},
@@ -1024,6 +1026,48 @@ function createGitOverlayProjectSnapshot(project: string, overrides: Record<stri
 		...overrides,
 	} as any;
 }
+
+/** Switching to a same-name active copy during history selection or restore keeps that form intact. */
+test('showPromptHistory follows the selected archive and leaves a newly opened form intact', async () => {
+	for (const switchAt of ['pick', 'restore']) {
+		const archived = createPrompt({ id: 'task', promptUuid: 'shared', archived: true, content: 'archive' });
+		const active = createPrompt({ ...archived, archived: false, content: 'live' });
+		const { manager, storageService } = await createManager({ initialPrompt: archived });
+		const key = '__prompt_editor_singleton__';
+		const refs = (manager as any).panelPromptRefs;
+		refs.set(key, archived);
+		const calls: string[] = [];
+		const expected = { promptUuid: archived.promptUuid, archived: true };
+		(storageService as any).listPromptHistory = async (id: string, owner: unknown) => {
+			assert.equal(id, archived.id);
+			assert.deepEqual(owner, expected);
+			calls.push('list');
+			return [{ id: 'earlier', createdAt: archived.createdAt, reason: 'manual' }];
+		};
+		chooseHistoryRevision = items => {
+			if (switchAt === 'pick') { refs.set(key, active); }
+			return items[0];
+		};
+		(storageService as any).restorePromptHistory = async (id: string, revision: string, owner: unknown) => {
+			assert.equal(id, archived.id);
+			assert.equal(revision, 'earlier');
+			assert.deepEqual(owner, expected);
+			calls.push('restore');
+			refs.set(key, active);
+			return { ...archived, content: 'restored' };
+		};
+		const messages: unknown[] = [];
+		const panel = { webview: { postMessage: async (message: unknown) => { messages.push(message); return true; } } };
+		try {
+			await (manager as any).handleMessage({ type: 'showPromptHistory', id: archived.id }, panel, archived,
+				key, () => false, () => assert.fail('Must preserve the new form'));
+			assert.deepEqual(calls, switchAt === 'pick' ? ['list'] : ['list', 'restore']);
+			assert.deepEqual(messages, []);
+			assert.equal(refs.get(key), active);
+			assert.equal(active.content, 'live');
+		} finally { chooseHistoryRevision = undefined; manager.disposeAll(); }
+	}
+});
 
 /** Регистрация выбора не ждёт файловой записи и охватывает повторное открытие. */
 test('openPrompt persists active task without waiting for storage', async () => {
@@ -5489,6 +5533,111 @@ test('savePrompt persists a detached stale save after the panel switches to anot
 
 	assert.equal(getStoredPrompt()?.content, 'Updated detached content');
 	assert.ok(!postedMessages.some(message => (message as any)?.type === 'prompt' && (message as any)?.reason === 'save'));
+});
+
+/** Старая форма не может переименовать обратно завершённую папку или сделать её черновиком. */
+test('late manual and status saves after rename leave the completed prompt and a reused folder intact', async () => {
+	for (const source of ['manual', 'status-change']) {
+		for (const reused of [false, true]) {
+			const old = createPrompt({ id: 'draft', promptUuid: 'shared', title: 'Draft', status: 'draft' });
+			const completed = createPrompt({ ...old, id: 'done', title: 'Done', status: 'completed', report: 'Full report' });
+			const replacement = createPrompt({ id: 'draft', promptUuid: 'another', content: 'Unrelated' });
+			const rows = new Map([[completed.id, completed]]);
+			if (reused) { rows.set(replacement.id, replacement); }
+			let writes = 0;
+			const { manager, storageService } = await createManager({ initialPrompt: completed,
+				savePrompt: async prompt => { writes++; return prompt; } });
+			storageService.getPrompt = async id => rows.has(id) ? clonePrompt(rows.get(id)!) : null;
+			const messages: any[] = [];
+			const panel = { webview: { postMessage: async (message: unknown) => { messages.push(message); return true; } } };
+			const key = '__prompt_editor_singleton__';
+			(manager as any).panelPromptRefs.set(key, completed);
+			try {
+				await (manager as any).handleMessage({ type: 'savePrompt', source, prompt: old, requestId: 'old-save', localRevision: 66 },
+					panel, completed, key, () => false, () => undefined);
+				assert.equal(writes, 0);
+				assert.equal(completed.id, 'done');
+				assert.equal(completed.status, 'completed');
+				assert.equal(completed.report, 'Full report');
+				assert.equal(replacement.content, 'Unrelated');
+				assert.ok(messages.some(message => message.type === 'error' && message.requestId === 'old-save'));
+				assert.equal(messages.some(message => message.type === 'promptSaved'), false);
+				assert.equal((manager as any).pendingSaveQueue.size, 0);
+				assert.equal((manager as any).getPanelLatestLocalPromptRevision(key), 0);
+			} finally { manager.disposeAll(); }
+		}
+	}
+});
+
+/** Изменение существующей копии сохраняется по её собственному пути; новый промпт может получить первый id. */
+test('savePrompt keeps the original folder for separate copies and a fresh rename, and supports first save', async () => {
+	for (const mode of ['copy', 'rename', 'new']) {
+		const current = createPrompt({ id: mode === 'new' ? '' : 'main', title: 'Main', promptUuid: 'shared' });
+		const id = mode === 'copy' ? 'copy' : current.id;
+		const form = createPrompt({ id, promptUuid: current.promptUuid, title: mode === 'copy' ? 'Copy' : 'Next' });
+		const writes: Array<{ id: string; previous?: string }> = [];
+		const { manager, storageService } = await createManager({ initialPrompt: current,
+			savePrompt: async (saved, options) => { writes.push({ id: saved.id, previous: options.previousId }); return saved; } });
+		storageService.getPrompt = async requested => requested === id && id ? clonePrompt(form) : null;
+		const messages: any[] = [];
+		const panel = { webview: { postMessage: async (message: unknown) => { messages.push(message); return true; } } };
+		const key = '__prompt_editor_singleton__';
+		(manager as any).panelPromptRefs.set(key, current);
+		try {
+			await (manager as any).handleMessage({ type: 'savePrompt', source: 'manual', prompt: form, requestId: mode },
+				panel, current, key, () => false, () => undefined);
+			assert.deepEqual(writes, [{ id: mode === 'copy' ? 'copy' : 'next', previous: id || undefined }]);
+			assert.equal(messages.some(message => message.type === 'promptSaved'), mode !== 'copy');
+			assert.equal(current.id, mode === 'copy' ? 'main' : 'next');
+		} finally { manager.disposeAll(); }
+	}
+});
+
+/** Ручная отмена правки сохраняется после переименования, смены статуса и сбоя промежуточной записи. */
+test('queued saves preserve both a stale status change and an explicit undo after rename or first save', async () => {
+	for (const oldId of ['old', '']) {
+		const entered = createDeferred<void>();
+		const release = createDeferred<void>();
+		const original = createPrompt({ id: oldId, promptUuid: 'same', title: 'Old', content: 'Original', status: 'draft' });
+		const writes: Array<{ id: string; previous?: string; title: string; content: string; status: string; notes: string }> = [];
+		let rejected = 0;
+		const { manager } = await createManager({ initialPrompt: oldId ? original : undefined,
+			savePrompt: async (saved, options) => {
+				if (saved.notes === 'fail once') { rejected++; throw new Error('write failed'); }
+				writes.push({ id: saved.id, previous: options.previousId, title: saved.title, content: saved.content,
+					status: saved.status, notes: saved.notes });
+				if (writes.length === 1) { entered.resolve(); await release.promise; }
+				return clonePrompt(saved);
+			} });
+		const key = '__prompt_editor_singleton__';
+		(manager as any).panelPromptRefs.set(key, original);
+		(manager as any).panelBasePrompts.set(key, clonePrompt(original));
+		(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+		const panel = { webview: { postMessage: async () => true } };
+		let revision = 0;
+		const send = (source: string, prompt: any) => (manager as any).handleMessage(
+			{ type: 'savePrompt', source, prompt, requestId: String(++revision), localRevision: revision },
+			panel, original, key, () => false, () => undefined,
+		);
+		try {
+			const rename = send('manual', { ...original, title: 'Next', content: 'New contents' });
+			await entered.promise;
+			const status = send('status-change', { ...original, status: 'review' });
+			const undone = { ...original, title: 'Next', status: 'review' };
+			const failed = send('manual', { ...undone, notes: 'fail once' });
+			const undo = send('manual', undone);
+			const next = send('autosave', { ...undone, notes: 'new note' });
+			release.resolve();
+			await Promise.all([rename, status, failed, undo, next]);
+			assert.equal(rejected, 1);
+			assert.deepEqual(writes, [
+				{ id: 'next', previous: oldId || undefined, title: 'Next', content: 'New contents', status: 'draft', notes: '' },
+				{ id: 'next', previous: 'next', title: 'Next', content: 'New contents', status: 'review', notes: '' },
+				{ id: 'next', previous: 'next', title: 'Next', content: 'Original', status: 'review', notes: '' },
+				{ id: 'next', previous: 'next', title: 'Next', content: 'Original', status: 'review', notes: 'new note' },
+			]);
+		} finally { release.resolve(); manager.disposeAll(); }
+	}
 });
 
 test('savePrompt serializes overlapping saves for the same prompt', async () => {

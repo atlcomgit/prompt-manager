@@ -8,6 +8,7 @@ import { normalizePromptDashboardHiddenSections } from '../types/promptDashboard
 import * as vscode from 'vscode';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { copyFile, mkdir, readdir, realpath } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
 import { spawn } from 'child_process';
 import { CopilotCodexSessionService } from '../services/copilotCodexSessionService.js';
 import * as os from 'os';
@@ -243,6 +244,20 @@ interface GitOverlaySession {
 	queuedBusyReason: GitOverlayBusyReason | null;
 }
 
+/** Снимок формы до подстановки серверных полей, переименования и сохранения. */
+interface EditorFormSave {
+	readonly panelKey: string;
+	readonly snapshot: Prompt;
+	/** Смена статуса переносит только выбранный статус и внесённые в форме правки. */
+	readonly statusEdits?: Partial<Prompt>;
+}
+
+/** Ожидающие сохранения формы следуют за уже записанными изменениями при переименовании. */
+interface QueuedEditorSave extends EditorFormSave {
+	base: Prompt;
+	movedTo?: Prompt;
+}
+
 /** Координирует редактор промпта, запуск чатов и связанные операции VS Code. */
 export class EditorPanelManager {
 	/** Терминалы OpenCode не используют привязки и историю Copilot; tests/editorPanelManager.test.ts. */
@@ -373,6 +388,7 @@ export class EditorPanelManager {
 	private promptDashboardCollapseRevision = 0;
 	/** Очередь ожидающих сохранений по составному ключу (uuid::id). Хранит снимок и промис завершения. */
 	private pendingSaveQueue = new Map<string, PendingSaveEntry>();
+	private readonly queuedEditorSaves = new Set<QueuedEditorSave>();
 	private isShuttingDown = false;
 	/** Stable keys промптов, для которых уже запущено фоновое AI-обогащение (дедупликация) */
 	private pendingEnrichmentPromptKeys = new Set<string>();
@@ -4460,17 +4476,53 @@ export class EditorPanelManager {
 		return false;
 	}
 
-	private async resolvePromptSaveContext(
-		currentPrompt: Prompt,
-		incomingPrompt: Prompt,
-	): Promise<{ prompt: Prompt; detached: boolean }> {
-		const detached = this.isStalePromptMessage(currentPrompt, incomingPrompt, incomingPrompt.id);
-		if (!detached) {
-			return { prompt: currentPrompt, detached: false };
+	/** Только уже принятые снимки той же формы могут следовать за успешным локальным переносом. */
+	private async saveEditorPrompt(
+		prompt: Prompt, sourceId: string | undefined, options: Parameters<StorageService['savePrompt']>[1] = {},
+		form?: EditorFormSave,
+	): Promise<Prompt> {
+		const saved = await this.storageService.savePrompt(prompt, { ...options, previousId: sourceId });
+		for (const queued of this.queuedEditorSaves) {
+			const from = queued.movedTo || queued.snapshot;
+			if (from.id !== (sourceId || '') || from.promptUuid !== saved.promptUuid) { continue; }
+			if (form?.panelKey === queued.panelKey && !queued.statusEdits) {
+				// Возврат к исходному тексту виден при сравнении с предыдущим успешно принятым снимком.
+				queued.base = form.statusEdits ? { ...queued.base, ...form.statusEdits } : form.snapshot;
+			}
+			if (queued.movedTo || saved.id !== from.id) {
+				queued.movedTo = structuredClone(saved);
+			}
 		}
+		return saved;
+	}
 
-		const stored = await this.getStoredPromptByIdentity(incomingPrompt.id, incomingPrompt.promptUuid);
-		return { prompt: stored ?? JSON.parse(JSON.stringify(incomingPrompt)), detached: true };
+	/** Находит правки формы, включая очистку необязательных полей. Проверка в editorPanelManager.test.ts. */
+	private getEditorFormEdits(base: Prompt, next: Prompt): Partial<Prompt> {
+		const keys = Object.keys({ ...base, ...next }) as Array<keyof Prompt>;
+		const changed = keys.filter(key => !isDeepStrictEqual(base[key], next[key]));
+		return Object.fromEntries(changed.map(key => [key, next[key]]));
+	}
+
+	/** Объединяет правки формы с последней успешной записью после переноса папки. */
+	private rebaseQueuedEditorSave(queued: QueuedEditorSave, saved: Prompt): Prompt {
+		const edits = queued.statusEdits ?? this.getEditorFormEdits(queued.base, queued.snapshot);
+		return { ...saved, ...edits, id: saved.id, promptUuid: saved.promptUuid, updatedAt: saved.updatedAt };
+	}
+
+	/** Для записи исходным остаётся id приславшей снимок формы, даже после смены открытого промпта. */
+	private async resolvePromptSaveBase(currentPrompt: Prompt, incoming: Prompt, detached: boolean): Promise<Prompt> {
+		if (!incoming.id) {
+			if (currentPrompt.id && currentPrompt.promptUuid === incoming.promptUuid) {
+				throw new Error('Промпт уже сохранён. Откройте актуальную версию перед сохранением.');
+			}
+			return detached ? incoming : currentPrompt;
+		}
+		if (!detached) { return currentPrompt; }
+		const source = await this.storageService.getPrompt(incoming.id);
+		if (!source || (incoming.promptUuid && source.promptUuid !== incoming.promptUuid)) {
+			throw new Error('Каталог промпта изменился. Откройте актуальную версию перед сохранением.');
+		}
+		return source;
 	}
 
 	private mergeExternalReportIfUnchanged(snapshot: Prompt, persistedPrompt: Prompt | null, basePrompt: Prompt | null): void {
@@ -4657,10 +4709,8 @@ export class EditorPanelManager {
 				const existingPrompt = await this.storageService.getPrompt(renameFromId || promptToSave.id);
 				this.mergePersistedPromptStateBeforeSave(promptToSave, existingPrompt, baseSnapshot || null);
 
-				const savedPrompt = await this.storageService.savePrompt(promptToSave, {
-					historyReason: 'switch',
-					forceHistory: true,
-					previousId: renameFromId,
+				const savedPrompt = await this.saveEditorPrompt(promptToSave, previousPromptId, {
+					historyReason: 'switch', forceHistory: true,
 				});
 
 				/** Обновляем ключ очереди если id изменился (переименование) и резолвим промис */
@@ -7359,16 +7409,14 @@ export class EditorPanelManager {
 					return null;
 				}
 
-				const renameFromId = await this.ensurePromptIdMatchesTitle(currentPrompt, currentPrompt.id || undefined);
+				const sourceId = currentPrompt.id;
+				const renameFromId = await this.ensurePromptIdMatchesTitle(currentPrompt, sourceId);
 				if (this.isShuttingDown) {
 					return null;
 				}
 
 				// Сохраняем обновлённый промпт на диск (без истории — это просто обогащение)
-				const enriched = await this.storageService.savePrompt(currentPrompt, {
-					skipHistory: true,
-					previousId: renameFromId,
-				});
+				const enriched = await this.saveEditorPrompt(currentPrompt, sourceId, { skipHistory: true });
 				if (this.isShuttingDown) {
 					return null;
 				}
@@ -9078,13 +9126,14 @@ export class EditorPanelManager {
 				const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(dirtySnapshot, promptRefSnapshot || basePromptSnapshot);
 				this.applyPromptFallbacksForPendingAiEnrichment(dirtySnapshot, aiEnrichmentPlan);
 				try {
-					const renameFromId = await this.ensurePromptIdMatchesTitle(dirtySnapshot, dirtySnapshot.id || undefined);
+					const sourceId = dirtySnapshot.id || undefined;
+					const renameFromId = await this.ensurePromptIdMatchesTitle(dirtySnapshot, sourceId);
 					await this.guardReportOverwriteBeforeSave(panelKey, dirtySnapshot, basePromptSnapshot);
 					const persistedPrompt = dirtySnapshot.id ? await this.storageService.getPrompt(renameFromId || dirtySnapshot.id) : null;
 					this.mergeExternalReportIfUnchanged(dirtySnapshot, persistedPrompt, basePromptSnapshot);
 					dirtySnapshot.timeSpentUntracked = Math.max(0, dirtySnapshot.timeSpentUntracked || 0);
 					dirtySnapshot.timeSpentOnTask = Math.max(0, dirtySnapshot.timeSpentOnTask || 0);
-					const savedPrompt = await this.storageService.savePrompt(dirtySnapshot, { previousId: renameFromId });
+					const savedPrompt = await this.saveEditorPrompt(dirtySnapshot, sourceId);
 					this.panelDirtyFlags.set(panelKey, false);
 					this.panelLatestPromptSnapshots.set(panelKey, null);
 					this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(savedPrompt)));
@@ -9986,10 +10035,13 @@ export class EditorPanelManager {
 				const operationId = crypto.randomUUID();
 				const saveRequestId = (msg.requestId || '').trim() || undefined;
 				const saveLocalRevision = this.normalizePromptLocalRevision(msg.localRevision);
-				this.setPanelLatestLocalPromptRevision(
-					panelKey,
-					Math.max(this.getPanelLatestLocalPromptRevision(panelKey), saveLocalRevision),
-				);
+				const sameForm = msg.prompt.id === currentPrompt.id && msg.prompt.promptUuid === currentPrompt.promptUuid;
+				if (sameForm) {
+					this.setPanelLatestLocalPromptRevision(
+						panelKey,
+						Math.max(this.getPanelLatestLocalPromptRevision(panelKey), saveLocalRevision),
+					);
+				}
 				let saveQueueResolve: (value: Prompt | null) => void;
 				const saveQueuePromise = new Promise<Prompt | null>(resolve => { saveQueueResolve = resolve; });
 				const saveQueueKey = buildSaveQueueKey(
@@ -9997,18 +10049,32 @@ export class EditorPanelManager {
 					msg.prompt.id || currentPrompt.id,
 				);
 				let finalSaveQueueKey = saveQueueKey;
+				const base = this.panelBasePrompts.get(panelKey) || currentPrompt;
+				const snapshot = structuredClone(msg.prompt);
+				const form: EditorFormSave = {
+					panelKey, snapshot,
+					statusEdits: msg.source === 'status-change'
+						? { ...this.getEditorFormEdits(base, snapshot), status: snapshot.status }
+						: undefined,
+				};
 				this.setPendingSaveEntry(saveQueueKey, {
-					snapshot: JSON.parse(JSON.stringify(msg.prompt)),
+					snapshot,
 					promise: saveQueuePromise,
 					operationId,
 				});
 
+				// Окно может принять ручное редактирование, пока фоновое название ещё переносит папку.
+				const waitingForSave = this.pendingPromptSaveChainByPromptKey.has(this.resolvePromptSaveSerializationKey(msg.prompt));
+				const queued: QueuedEditorSave | undefined = waitingForSave && sameForm ? {
+					...form, base: structuredClone(base),
+				} : undefined;
+				if (queued) { this.queuedEditorSaves.add(queued); }
 				const saveTask = this.enqueuePromptSaveOperation(msg.prompt, async (): Promise<void> => {
-					const saveContext = await this.resolvePromptSaveContext(currentPrompt, msg.prompt);
-					const currentPromptForSave = saveContext.prompt;
-					const detachedSave = saveContext.detached;
-					const saveStateId = (msg.prompt.id || currentPromptForSave.id || '__new__').trim() || '__new__';
-					const savePromptUuid = msg.prompt.promptUuid || currentPromptForSave.promptUuid;
+					if (queued) { this.queuedEditorSaves.delete(queued); }
+					const promptToSave = queued?.movedTo ? this.rebaseQueuedEditorSave(queued, queued.movedTo) : msg.prompt;
+					const detachedSave = this.isStalePromptMessage(currentPrompt, promptToSave);
+					const saveStateId = (msg.prompt.id || '__new__').trim() || '__new__';
+					const savePromptUuid = msg.prompt.promptUuid || currentPrompt.promptUuid;
 					this.logReportDebug('savePrompt.received', {
 						panelKey,
 						source: msg.source || 'manual',
@@ -10063,7 +10129,7 @@ export class EditorPanelManager {
 						});
 					};
 					try {
-						let promptToSave = msg.prompt;
+						const currentPromptForSave = await this.resolvePromptSaveBase(currentPrompt, promptToSave, detachedSave);
 						const saveSource = msg.source || 'manual';
 						const canUseCachedReportBinding = saveSource === 'status-change';
 						if (!canUseCachedReportBinding) {
@@ -10072,7 +10138,7 @@ export class EditorPanelManager {
 						if (saveSource === 'status-change' && promptToSave.status === 'in-progress') {
 							markPromptChatAutoCompleteAfter(promptToSave);
 						}
-						const previousPromptId = (currentPromptForSave.id || msg.prompt.id || '').trim() || undefined;
+						const previousPromptId = promptToSave.id?.trim() || undefined;
 						const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(promptToSave, currentPromptForSave);
 
 						this.hooksOutput.appendLine(
@@ -10115,9 +10181,10 @@ export class EditorPanelManager {
 							await this.guardReportOverwriteBeforeSave(panelKey, promptToSave, basePrompt || null, reportBindingState);
 						}
 
-						const existingPrompt = canUseCachedReportBinding
-							? (basePrompt || currentPromptForSave || null)
-							: (promptToSave.id ? await this.storageService.getPrompt(renameFromId || promptToSave.id) : null);
+						// У нового промпта ещё нет сохранённой базы: вычисленный slug не является исходным каталогом.
+						const existingPrompt = !previousPromptId ? null : canUseCachedReportBinding
+							? (basePrompt || currentPromptForSave)
+							: await this.storageService.getPrompt(previousPromptId);
 						const allowStatusOverwrite = canUseCachedReportBinding;
 						this.mergePersistedPromptStateBeforeSave(
 							promptToSave,
@@ -10127,11 +10194,9 @@ export class EditorPanelManager {
 						);
 
 						const storageSaveStartedAt = Date.now();
-						const saved = await this.storageService.savePrompt(promptToSave, {
-							historyReason: saveSource,
-							previousId: renameFromId || previousPromptId,
-							existingPrompt,
-						});
+						const saved = await this.saveEditorPrompt(promptToSave, previousPromptId, {
+							historyReason: saveSource, existingPrompt,
+						}, form);
 						const storageDurationMs = Date.now() - storageSaveStartedAt;
 
 						/** Обновляем ключ очереди, если id изменился после сохранения (переименование, генерация id) */
@@ -10571,7 +10636,14 @@ export class EditorPanelManager {
 					break;
 				}
 
-				const history = await this.storageService.listPromptHistory(promptId);
+				const owner = { promptUuid: currentPrompt.promptUuid, archived: Boolean(currentPrompt.archived) };
+				const isStillSelected = () => {
+					const live = this.panelPromptRefs.get(panelKey);
+					return live?.id === promptId && live.promptUuid === owner.promptUuid && Boolean(live.archived) === owner.archived;
+				};
+				if (!isStillSelected()) { break; }
+				const history = await this.storageService.listPromptHistory(promptId, owner);
+				if (!isStillSelected()) { break; }
 				if (history.length === 0) {
 					vscode.window.showInformationMessage('История для этого промпта пуста.');
 					break;
@@ -10592,11 +10664,15 @@ export class EditorPanelManager {
 					matchOnDescription: true,
 				});
 
-				if (!selected) {
+				if (!selected || !isStillSelected()) {
 					break;
 				}
 
-				const restored = await this.storageService.restorePromptHistory(promptId, selected.entryId);
+				const restored = await this.storageService.restorePromptHistory(promptId, selected.entryId, owner);
+				if (!isStillSelected()) {
+					if (restored) { this._onDidSave.fire(restored.id); }
+					break;
+				}
 				if (!restored) {
 					postMessage({ type: 'error', message: 'Не удалось восстановить выбранную ревизию.' });
 					break;
@@ -11062,10 +11138,7 @@ export class EditorPanelManager {
 							prompt.chatSessionIds = prompt.chatSessionIds?.length ? prompt.chatSessionIds : (existingBeforeChat.chatSessionIds || []);
 						}
 					}
-					prompt = await this.storageService.savePrompt(prompt, {
-						historyReason: 'start-chat',
-						previousId: renameFromId,
-					});
+					prompt = await this.saveEditorPrompt(prompt, promptPreviousId, { historyReason: 'start-chat' });
 					startStatePersisted = true;
 					this.lockPromptIdAfterChatStart(prompt);
 					const normalizedCurrentPromptId = (currentPrompt.id || '').trim();

@@ -1353,7 +1353,7 @@
     "test": "npm run test:compile && npm run test:run --",
     "test:compile": "node -e \"require('fs').rmSync('out-tests', { recursive: true, force: true })\" && tsc -p tsconfig.tests.json",
     "test:run": "node scripts/run-tests.mjs",
-    "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@huggingface/transformers --external:@anthropic-ai/claude-agent-sdk --format=cjs --platform=node --minify && cp node_modules/ws/LICENSE dist/ws-LICENSE && cp licenses/xterm-headless-LICENSE dist/xterm-headless-LICENSE",
+    "build:extension": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:@huggingface/transformers --external:@anthropic-ai/claude-agent-sdk --format=cjs --platform=node --minify && cp node_modules/ws/LICENSE dist/ws-LICENSE && cp licenses/xterm-headless-LICENSE dist/xterm-headless-LICENSE && cp licenses/proper-lockfile-NOTICES.txt dist/proper-lockfile-NOTICES.txt",
     "build:webview": "node esbuild.webview.mjs",
     "copy:wasm": "cp node_modules/sql.js/dist/sql-wasm.wasm dist/sql-wasm.wasm",
     "watch:esbuild": "npm run watch:extension & npm run watch:webview",

@@ -34,14 +34,15 @@ export function shouldApplyPromptSaveResult(
 ): boolean {
 	const normalizedPromptUuid = (promptUuid || '').trim();
 	const normalizedCurrentPromptUuid = (currentPromptUuid || '').trim();
-	if (normalizedPromptUuid && normalizedCurrentPromptUuid && normalizedPromptUuid === normalizedCurrentPromptUuid) {
-		return true;
-	}
-
 	const normalizedPromptId = (promptId || '').trim();
 	const normalizedPreviousPromptId = (previousPromptId || '').trim();
 	const normalizedCurrentPromptId = (currentPromptId || '').trim();
 	const normalizedActiveSaveId = (activeSaveId || '').trim();
+	if (normalizedPromptUuid && normalizedCurrentPromptUuid) {
+		return shouldApplySavedPromptToPanel(normalizedPromptId, normalizedPromptUuid,
+			normalizedCurrentPromptId === '__new__' ? '' : normalizedCurrentPromptId,
+			normalizedCurrentPromptUuid, normalizedPreviousPromptId);
+	}
 
 	return Boolean(
 		(normalizedPromptId && normalizedPromptId === normalizedCurrentPromptId)

@@ -297,6 +297,8 @@ test('StorageService serializes daily time updates and emits durable change even
 	const promptDir = path.join(workspaceRoot, '.vscode', 'prompt-manager', promptId);
 
 	try {
+		// У отложенной записи есть сохранённый владелец каталога, как при штатном вызове savePrompt.
+		await writeTextFile(path.join(promptDir, 'config.json'), JSON.stringify({ id: promptId, promptUuid: 'uuid-activity' }));
 		await writeTextFile(path.join(promptDir, 'daily-time.json'), '{}');
 		const service = new (StorageService as any)(workspaceRoot);
 		const events: Array<Record<string, unknown>> = [];

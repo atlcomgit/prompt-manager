@@ -24,7 +24,11 @@ test('shouldApplyPromptAiEnrichmentState rejects mismatched non-empty UUIDs', ()
 
 test('shouldApplyPromptSaveResult matches only the active or currently opened prompt save completion', () => {
 	assert.equal(shouldApplyPromptSaveResult('prompt-1', '', '', 'prompt-1', '', null), true);
-	assert.equal(shouldApplyPromptSaveResult('prompt-2', 'uuid-2', '', 'other-prompt', 'uuid-2', null), true);
+	assert.equal(shouldApplyPromptSaveResult('prompt-2', 'uuid-2', '', 'other-prompt', 'uuid-2', null), false);
+	assert.equal(shouldApplyPromptSaveResult('renamed', 'shared', 'old', 'old', 'shared', 'old'), true);
+	assert.equal(shouldApplyPromptSaveResult('renamed', 'shared', 'old', 'another', 'shared', 'old'), false);
+	assert.equal(shouldApplyPromptSaveResult('same-id', 'old-uuid', '', 'same-id', 'new-uuid', null), false);
+	assert.equal(shouldApplyPromptSaveResult('created', 'same', '', '__new__', 'same', '__new__'), true);
 	assert.equal(shouldApplyPromptSaveResult('prompt-2', '', 'prompt-1', 'prompt-1', '', null), true);
 	assert.equal(shouldApplyPromptSaveResult('prompt-2', '', '', 'other-prompt', '', 'prompt-2'), true);
 	assert.equal(shouldApplyPromptSaveResult('prompt-2', '', '', 'other-prompt', '', 'another-save'), false);

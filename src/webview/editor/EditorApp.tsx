@@ -3454,11 +3454,9 @@ export const EditorApp: React.FC = () => {
           /** Принимаем save-ответ для нового промпта только если UUID совпадает или отсутствует */
           const isNewPromptSaveResponse = currentPromptId === '__new__' && reason === 'save'
             && (incomingPromptUuid === '' || currentPromptUuid === '' || incomingPromptUuid === currentPromptUuid);
-          const isRelatedToCurrentPrompt = incomingPromptId === currentPromptId
-            || (incomingPromptUuid !== '' && currentPromptUuid !== '' && incomingPromptUuid === currentPromptUuid)
-            || previousPromptId === currentPromptId
-            || (activeSaveId !== '' && (incomingPromptId === activeSaveId || previousPromptId === activeSaveId))
-            || isNewPromptSaveResponse;
+          const isRelatedToCurrentPrompt = isNewPromptSaveResponse || shouldApplyPromptSaveResult(
+            incomingPromptId, incomingPromptUuid, previousPromptId, currentPromptId, currentPromptUuid, activeSaveId,
+          );
 
           if (!isOpenPayload && !isRelatedToCurrentPrompt) {
             break;

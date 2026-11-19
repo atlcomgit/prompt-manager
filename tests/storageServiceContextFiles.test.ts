@@ -292,7 +292,7 @@ test('savePrompt keeps same-id saves on direct identity path before uuid list sc
 		const prompt = await service.getPrompt(promptId);
 		assert.ok(prompt, 'prompt should be loaded before save');
 
-		service.findPromptIdByUuid = async () => {
+		service.findPromptLocationByUuid = async () => {
 			throw new Error('same-id save should not scan all prompt configs by uuid');
 		};
 
@@ -667,6 +667,8 @@ test('stale saves after rename preserve the single completed prompt and a reused
 	const other = await remote.savePrompt({ ...old, promptUuid: 'other-uuid', content: 'other content' });
 	assert.equal(other.id, old.id);
 	await assert.rejects(local.savePrompt({ ...old, id: 'stale-rename' }, { previousId: old.id, existingPrompt: old }));
+	await local.saveActiveTask(old.id, old.promptUuid);
+	assert.equal((await readJson(path.join(local.getStorageDirectoryPath(), 'task-active.json'))).id, finalId);
 	assert.equal((await remote.getPrompt(old.id))?.content, 'other content');
 	assert.equal((await readJson(configUri(finalId).fsPath)).status, 'completed');
 	assert.equal((await remote.getPrompt(finalId))?.report, 'final report');
@@ -684,6 +686,386 @@ test('simultaneous first saves with different titles cannot duplicate a UUID', a
 	assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
 	const rows = await local.listPrompts({ forceRefresh: true });
 	assert.equal(rows.filter(row => row.promptUuid === 'new-prompt-uuid').length, 1);
+});
+
+/** Publishing through a temporary directory must preserve normal access to prompts and their files. */
+for (const mode of [0o2770, 0o700]) {
+	test(`new and imported prompts inherit storage permissions for mode ${mode.toString(8)}`,
+		{ skip: process.platform === 'win32' }, async t => {
+			const { local, configUri } = await createSharedStorageFixture(t);
+			const root = local.getStorageDirectoryPath();
+			await fsp.chmod(root, mode);
+			const reference = path.join(root, 'reference');
+			await fsp.mkdir(reference);
+			await fsp.writeFile(path.join(reference, 'sample'), '');
+			const source = (await local.getPrompt('old-title'))!;
+			const saved = await local.savePrompt({ ...source, id: 'new-title', promptUuid: 'uuid-new' });
+			const imported = await local.importPrompt(path.dirname(configUri(source.id).fsPath));
+			assert.ok(imported);
+			const publishedIds: string[] = [saved.id, imported.id];
+			for (const relative of ['', 'config.json']) {
+				const expected = await fsp.stat(relative ? path.join(reference, 'sample') : reference);
+				for (const id of publishedIds) {
+					const actual = await fsp.stat(path.join(root, id, relative));
+					assert.equal(actual.mode & 0o7777, expected.mode & 0o7777);
+					assert.equal(actual.gid, expected.gid);
+				}
+			}
+		});
+}
+
+/** Readers must discover new prompts through the final rename even when a second window refreshes mid-save. */
+test('staged saves and imports stay out of prompt lookup and watchers until published', async t => {
+	const { local, remote, configUri } = await createSharedStorageFixture(t);
+	const root = local.getStorageDirectoryPath();
+	const source = (await local.getPrompt('old-title'))!;
+	const rename = fs.promises.rename;
+	const publications: string[] = [];
+	t.mock.method(fs.promises, 'rename', async (...args: Parameters<typeof rename>) => {
+		const [from, to] = args.map(String);
+		if (path.dirname(to) === root && ['new-title', 'old-title-1'].includes(path.basename(to))) {
+			const stagedConfig = path.join(from, 'config.json');
+			const { promptUuid } = await readJson(stagedConfig);
+			assert.equal(typeof promptUuid, 'string');
+			assert.equal((await remote.listPrompts({ forceRefresh: true })).some(row => row.promptUuid === promptUuid), false);
+			assert.equal(await remote.getPromptByUuid(promptUuid as string), null);
+			assert.equal((remote as any).resolvePromptStorageFilePathDetails({ fsPath: stagedConfig }, 'config.json'), null);
+			publications.push(path.basename(to));
+		}
+		return rename(...args);
+	});
+	await local.savePrompt({ ...source, id: 'new-title', promptUuid: 'uuid-new' });
+	await local.importPrompt(path.dirname(configUri(source.id).fsPath));
+	assert.deepEqual(publications, ['new-title', 'old-title-1']);
+	assert.equal(await local.importPrompt(root), null);
+});
+
+/** После сбоя записи первого черновика тот же slug можно сохранить повторно без следов частичного каталога. */
+test('failed first save can retry under its original slug', async t => {
+	const { local } = await createSharedStorageFixture(t);
+	const source = (await local.getPrompt('old-title'))!;
+	const draft = { ...source, id: 'first-save', promptUuid: 'first-save-uuid' };
+	const mkdir = fs.promises.mkdir;
+	const failing = t.mock.method(fs.promises, 'mkdir', async (...args: Parameters<typeof mkdir>) => {
+		if (String(args[0]).endsWith(path.sep + 'context')) { throw new Error('context write failed'); }
+		return mkdir(...args);
+	});
+	await assert.rejects(local.savePrompt(draft), /context write failed/);
+	failing.mock.restore();
+	assert.equal(await local.exists(draft.id), false);
+	assert.equal((await local.savePrompt(draft)).id, draft.id);
+});
+
+/** При перемещении в архив отложенные операции и устаревшее окно не воссоздают активный черновик. */
+test('archiving and renaming retains delayed history and daily time in the archived folder', async t => {
+	const { local, remote } = await createSharedStorageFixture(t);
+	const old = (await local.getPrompt('old-title'))!;
+	const background: Array<() => Promise<void>> = [];
+	(local as any).scheduleBackgroundStorageTask = (run: () => Promise<void>) => background.push(run);
+	const saved = await local.savePrompt({ ...old, content: 'updated text', timeSpentWriting: 100 });
+	await remote.savePrompt({ ...saved, id: 'archived-title', archived: true, status: 'completed' },
+		{ previousId: saved.id, skipHistory: true });
+	await assert.rejects(local.savePrompt({ ...saved, content: 'stale' }, { existingPrompt: saved }));
+	for (const run of background) { await run(); }
+	assert.equal(await local.exists(old.id), false);
+	assert.equal((await local.listPromptHistory('archived-title')).length, 1);
+	assert.equal(Object.values(await local.getDailyTime('archived-title'))[0].writing, 100);
+	const archived = (await remote.getPrompt('archived-title'))!;
+	assert.equal(archived.content, 'updated text');
+	assert.equal(archived.status, 'completed');
+});
+
+/** Импорт публикует ровно одну самостоятельную копию с вложениями и отдельным UUID. */
+test('import leaves only the original UUID and one independent imported copy', async t => {
+	const { local, configUri } = await createSharedStorageFixture(t);
+	const sourceDir = path.dirname(configUri('old-title').fsPath);
+	await writeTextFile(path.join(sourceDir, 'context', 'example.md'), 'attached');
+	const snapshot = (await local.getPrompt('old-title'))!;
+	await writeTextFile(path.join(sourceDir, 'history', 'historical.json'), JSON.stringify({
+		id: 'historical', promptId: snapshot.id, createdAt: snapshot.createdAt, reason: 'manual',
+		prompt: { ...snapshot, content: 'restored content' },
+	}));
+	const imported = await local.importPrompt(sourceDir);
+	assert.ok(imported);
+	assert.equal(imported.id, 'old-title-1');
+	assert.notEqual(imported.promptUuid, 'uuid-old-title');
+	assert.equal(await fsp.readFile(path.join(local.getPromptDirectoryPath(imported.id), 'context', 'example.md'), 'utf8'), 'attached');
+	const restored = await local.restorePromptHistory(imported.id, 'historical');
+	assert.equal(restored?.promptUuid, imported.promptUuid);
+	assert.equal(restored?.content, 'restored content');
+	assert.equal((await local.getPrompt('old-title'))?.content, snapshot.content);
+	const rows = await local.listPrompts({ forceRefresh: true });
+	assert.equal(rows.length, 2);
+	assert.equal(new Set(rows.map(row => row.promptUuid)).size, 2);
+});
+
+/** Imported history may restore content but only the copy owns its current Claude session binding. */
+test('restoring imported history preserves the current Claude binding or its absence', async t => {
+	const { local, root, configUri } = await createSharedStorageFixture(t);
+	const source = (await local.getPrompt('old-title'))!;
+	const sourceDir = path.dirname(configUri(source.id).fsPath);
+	const sourceSession = { sessionId: '11111111-1111-4111-8111-111111111111', projectPath: root, accountedMs: 200 };
+	await writeTextFile(path.join(sourceDir, 'history', 'source-revision.json'), JSON.stringify({
+		id: 'source-revision', promptId: source.id, createdAt: source.createdAt, reason: 'manual',
+		prompt: { ...source, chatTarget: 'claude', content: 'previous text', claudeChat: { sessions: [sourceSession] } },
+	}));
+	const imported = (await local.importPrompt(sourceDir))!;
+	const restored = await local.restorePromptHistory(imported.id, 'source-revision');
+	assert.ok(restored);
+	assert.equal(restored.content, 'previous text');
+	assert.equal(restored.claudeChat, undefined);
+
+	const ownBinding = { sessions: [{ ...sourceSession, sessionId: '22222222-2222-4222-8222-222222222222' }] };
+	await local.savePrompt({ ...restored, content: 'another edit', claudeChat: ownBinding }, { skipHistory: true });
+	const restoredAgain = await local.restorePromptHistory(imported.id, 'source-revision');
+	assert.deepEqual(restoredAgain?.claudeChat, ownBinding);
+	assert.equal(restoredAgain?.content, 'previous text');
+});
+
+/** Use the archived owner's history for throttling, deduplication and trimming after its name is reused. */
+test('queued snapshots consult and trim only the archived prompt history under a reused id', async t => {
+	const { local, remote, root, configUri } = await createSharedStorageFixture(t);
+	const old = (await local.getPrompt('old-title'))!;
+	const pending: Array<() => Promise<void>> = [];
+	(local as any).scheduleBackgroundStorageTask = (run: () => Promise<void>) => pending.push(run);
+	const first = await local.savePrompt({ ...old, content: 'first edit' }, { historyReason: 'autosave' });
+	await local.savePrompt({ ...first, content: 'second edit' }, { historyReason: 'autosave' });
+	await remote.archivePrompt(old.id);
+	const archiveHistory = path.join(local.getStorageDirectoryPath(), 'archive', old.id, 'history');
+	const activeDir = await seedPrompt(root, old.id, []);
+	await writeTextFile(configUri(old.id).fsPath, JSON.stringify({ ...old, promptUuid: 'uuid-new-owner' }));
+	const activeHistory = path.join(activeDir, 'history');
+	const now = new Date().toISOString();
+	for (let index = 0; index < 20; index++) {
+		const id = '2000-' + String(index).padStart(2, '0');
+		const entry = { id, promptId: old.id, createdAt: '2000-01-01T00:00:00.000Z', reason: 'manual' };
+		await writeTextFile(path.join(archiveHistory, id + '.json'), JSON.stringify({
+			...entry, prompt: { ...old, content: 'earlier archived content' },
+		}));
+		await writeTextFile(path.join(activeHistory, id + '.json'), JSON.stringify({
+			...entry, createdAt: now, prompt: { ...old, promptUuid: 'uuid-new-owner' },
+		}));
+	}
+	await writeTextFile(path.join(activeHistory, 'extra.json'), JSON.stringify({
+		id: 'extra', promptId: old.id, createdAt: now, reason: 'manual', prompt: { ...old, promptUuid: 'uuid-new-owner' },
+	}));
+	const activeFiles = (await fsp.readdir(activeHistory)).sort();
+	for (const run of pending) { await run(); }
+	assert.deepEqual((await fsp.readdir(activeHistory)).sort(), activeFiles);
+	const archiveFiles = await fsp.readdir(archiveHistory);
+	assert.equal(archiveFiles.length, 20);
+	assert.ok(!archiveFiles.includes('2000-00.json'));
+	const captured = archiveFiles.filter(name => !name.startsWith('2000-'));
+	assert.equal(captured.length, 1);
+	const snapshot = JSON.parse(await fsp.readFile(path.join(archiveHistory, captured[0]), 'utf8'));
+	assert.equal(snapshot.prompt.content, old.content);
+	assert.equal(snapshot.prompt.promptUuid, old.promptUuid);
+});
+
+/** Select the history of the open archive even if a live prompt reuses its id and revision filenames. */
+test('history selection restores the archived folder and rejects a later occupant', async t => {
+	const { local, configUri } = await createSharedStorageFixture(t);
+	const active = (await local.getPrompt('old-title'))!;
+	const activeDir = path.dirname(configUri(active.id).fsPath);
+	const archiveDir = path.join(local.getStorageDirectoryPath(), 'archive', active.id);
+	await fsp.cp(activeDir, archiveDir, { recursive: true });
+	const archived = { ...active, promptUuid: 'archive-owner', archived: true };
+	await writeTextFile(path.join(archiveDir, 'config.json'), JSON.stringify(archived));
+	for (const [dir, prompt] of [[activeDir, active], [archiveDir, archived]] as const) {
+		const revision = {
+			id: 'same-revision', promptId: prompt.id, createdAt: prompt.createdAt, reason: 'manual',
+			prompt: { ...prompt, content: 'snapshot for ' + prompt.promptUuid },
+		};
+		await writeTextFile(path.join(dir, 'history', 'same-revision.json'), JSON.stringify(revision));
+		await writeTextFile(path.join(dir, 'history', prompt.promptUuid + '.json'), JSON.stringify({
+			...revision, id: prompt.promptUuid,
+		}));
+	}
+	assert.deepEqual((await local.listPromptHistory(active.id, archived)).map(entry => entry.id).sort(),
+		['archive-owner', 'same-revision']);
+	const restored = await local.restorePromptHistory(active.id, 'same-revision', archived);
+	assert.equal(restored?.content, 'snapshot for archive-owner');
+	assert.equal(await fsp.readFile(path.join(archiveDir, 'prompt.md'), 'utf8'), restored?.content);
+	assert.equal((await local.getPrompt(active.id))?.content, active.content);
+	assert.equal((await local.listPrompts()).find(prompt => prompt.id === active.id)?.promptUuid, active.promptUuid);
+
+	await writeTextFile(path.join(archiveDir, 'config.json'), JSON.stringify({ ...archived, promptUuid: 'next-owner' }));
+	assert.deepEqual(await local.listPromptHistory(active.id, archived), []);
+	assert.equal(await local.restorePromptHistory(active.id, 'same-revision', archived), null);
+});
+
+/** Поиск только по UUID возвращает результат лишь при единственной физической папке, включая архив. */
+test('UUID lookup rejects ambiguous folders and resolves an archived prompt under a reused id', async t => {
+	const { local, configUri } = await createSharedStorageFixture(t);
+	const sourceDir = path.dirname(configUri('old-title').fsPath);
+	const archiveDir = path.join(local.getStorageDirectoryPath(), 'archive', 'old-title');
+	await fsp.cp(sourceDir, archiveDir, { recursive: true });
+	assert.equal(await local.getPromptByUuid('uuid-old-title'), null);
+	await writeTextFile(configUri('old-title').fsPath, JSON.stringify({ promptUuid: 'new-owner' }));
+	assert.equal((await local.getPromptByUuid('uuid-old-title'))?.archived, true);
+	await local.saveActiveTask('old-title', 'uuid-old-title');
+	assert.equal((await readJson(path.join(local.getStorageDirectoryPath(), 'task-active.json'))).promptDirectory, archiveDir);
+});
+
+/** Отсутствующий после переименования родитель не создаётся при устаревшем чтении legacy report. */
+test('delayed report backfill does not resurrect the previous prompt folder', async t => {
+	const { local, configUri } = await createSharedStorageFixture(t);
+	const oldDir = path.dirname(configUri('old-title').fsPath);
+	await fsp.unlink(path.join(oldDir, 'report.txt'));
+	const entered = createStorageGate(), resume = createStorageGate();
+	const ensureReport = (local as any).ensurePromptReportFile.bind(local);
+	(local as any).ensurePromptReportFile = async (...args: unknown[]) => {
+		entered.resolve();
+		await resume.promise;
+		return ensureReport(...args);
+	};
+	const pending = local.getPrompt('old-title');
+	await entered.promise;
+	await fsp.rename(oldDir, path.dirname(configUri('renamed').fsPath));
+	resume.resolve();
+	await pending;
+	assert.equal(fs.existsSync(oldDir), false);
+});
+
+/** A reader publishes a complete migration before the next window can commit its edit. */
+test('config backfill and a concurrent save keep the complete newer JSON', async t => {
+	const { local, remote, configUri } = await createSharedStorageFixture(t);
+	const before = (await local.getPrompt('old-title'))!;
+	const configPath = configUri(before.id).fsPath;
+	const legacy = { ...await readJson(configPath), promptUuid: ` ${before.promptUuid} ` };
+	await writeTextFile(configPath, JSON.stringify(legacy));
+	const entered = createStorageGate(), resume = createStorageGate(), saving = createStorageGate();
+	const rename = fs.promises.rename;
+	t.mock.method(fs.promises, 'rename', async (...args: Parameters<typeof rename>) => {
+		if (args[1] === configPath) { entered.resolve(); await resume.promise; }
+		return rename(...args);
+	});
+	const lock = (remote as any).withPromptWriteLock.bind(remote);
+	t.mock.method(remote as any, 'withPromptWriteLock', (...args: unknown[]) => {
+		saving.resolve();
+		return lock(...args);
+	});
+	const reading = local.getPrompt(before.id);
+	await entered.promise;
+	const title = 'longer title '.repeat(300);
+	const writing = remote.savePrompt({ ...before, title }, { existingPrompt: before, skipHistory: true });
+	try {
+		await saving.promise;
+		assert.deepEqual(await readJson(configPath), legacy);
+	} finally { resume.resolve(); }
+	await Promise.all([reading, writing]);
+	assert.equal((await readJson(configPath)).title, title);
+	assert.equal((await local.getPrompt(before.id))?.title, title);
+});
+
+/** A different writer may change the file after a reader decides it needs migration. */
+test('config backfill returns a newer edit and rejects a replacement owner', async t => {
+	const { local, configUri } = await createSharedStorageFixture(t);
+	const configPath = configUri('old-title').fsPath;
+	const before = await readJson(configPath);
+	for (const owner of [before.promptUuid, 'new-owner']) {
+		await writeTextFile(configPath, JSON.stringify({ ...before, promptUuid: ` ${before.promptUuid} ` }));
+		const open = fs.promises.open;
+		const mock = t.mock.method(fs.promises, 'open', async (...args: Parameters<typeof open>) => {
+			if (args[0] === configPath && args[1] === 'r+') {
+				await writeTextFile(configPath, JSON.stringify({ ...before, promptUuid: owner, title: 'Latest' }));
+			}
+			return open(...args);
+		});
+		const prompt = await local.getPrompt('old-title');
+		mock.mock.restore();
+		if (owner === before.promptUuid) { assert.equal(prompt?.title, 'Latest'); }
+		else { assert.equal(prompt, null); }
+		assert.equal((await readJson(configPath)).promptUuid, owner);
+	}
+});
+
+/** A valid read-only legacy folder stays selectable across scans and editor opens. */
+test('read-only legacy config retains its UUID, content and report without writing a migration', async t => {
+	const { local, remote, configUri } = await createSharedStorageFixture(t);
+	const configPath = configUri('old-title').fsPath;
+	const legacy = await readJson(configPath);
+	delete legacy.promptUuid;
+	await writeTextFile(configPath, JSON.stringify(legacy));
+	const directory = path.dirname(configPath);
+	await fsp.rename(path.join(directory, 'report.txt'), path.join(directory, 'report.md'));
+	await writeTextFile(path.join(directory, 'report.md'), 'Legacy report');
+	const denied = Object.assign(new Error('read-only filesystem'), { code: 'EROFS' });
+	const open = fs.promises.open;
+	t.mock.method(fs.promises, 'open', async (...args: Parameters<typeof open>) => {
+		if (args[0] === configPath && args[1] === 'r+') { throw denied; }
+		return open(...args);
+	});
+	const rows = await local.listPrompts({ forceRefresh: true });
+	const viewed = await remote.getPrompt('old-title');
+	assert.ok(viewed);
+	assert.equal(rows.length, 1);
+	assert.equal(viewed.promptUuid, rows[0].promptUuid);
+	assert.equal(viewed.content, '# Prompt\n');
+	assert.equal(viewed.report, 'Legacy report');
+	assert.equal((await remote.getPromptByUuid(rows[0].promptUuid))?.content, viewed.content);
+	const hoverTarget = { id: viewed.id, promptUuid: rows[0].promptUuid, archived: false };
+	assert.deepEqual(await local.getPromptHoverPreview(hoverTarget), { state: 'ready', content: viewed.content });
+	assert.deepEqual(await readJson(configPath), legacy);
+});
+
+/** Переименование сохраняет физическую папку; её прежнее имя может занять другой старый промпт. */
+test('lookup and preview keep the read-only legacy owner after a folder name is reused',
+	{ skip: process.platform === 'win32' || process.getuid?.() === 0 }, async t => {
+		const { local, remote, configUri } = await createSharedStorageFixture(t);
+		const configPath = configUri('old-title').fsPath;
+		const legacy = await readJson(configPath);
+		delete legacy.promptUuid;
+		await writeTextFile(configPath, JSON.stringify(legacy));
+		await fsp.chmod(configPath, 0o444);
+		const [listed] = await local.listPrompts({ forceRefresh: true });
+		const oldDir = path.dirname(configPath);
+		const movedDir = path.dirname(configUri('moved').fsPath);
+		await fsp.rename(oldDir, movedDir);
+		await writeTextFile(configPath, JSON.stringify(legacy));
+		await writeTextFile(path.join(oldDir, 'prompt.md'), 'Replacement');
+		await fsp.chmod(configPath, 0o444);
+
+		assert.equal((await remote.getPromptByUuid(listed.promptUuid))?.id, 'moved');
+		const target = { id: 'old-title', promptUuid: listed.promptUuid, archived: false };
+		assert.deepEqual(await local.getPromptHoverPreview(target), { state: 'missing' });
+		assert.deepEqual(await local.getPromptHoverPreview({ ...target, id: 'moved' }), { state: 'ready', content: '# Prompt\n' });
+		assert.deepEqual(await readJson(configPath), legacy);
+		assert.deepEqual(await readJson(path.join(movedDir, 'config.json')), legacy);
+	});
+
+/** Запоздалый backfill старой конфигурации не создаёт каталог по прежнему slug. */
+test('delayed config backfill never recreates a moved config', async t => {
+	const { local, configUri } = await createSharedStorageFixture(t);
+	const oldConfig = configUri('old-title').fsPath;
+	const oldDir = path.dirname(oldConfig);
+	await writeTextFile(oldConfig, JSON.stringify({ id: 'legacy', title: 'legacy' }));
+	const entered = createStorageGate(), resume = createStorageGate();
+	const open = fs.promises.open;
+	t.mock.method(fs.promises, 'open', async (...args: Parameters<typeof open>) => {
+		if (args[0] === oldConfig && args[1] === 'r+') { entered.resolve(); await resume.promise; }
+		return open(...args);
+	});
+	const pending = local.getPrompt('old-title');
+	await entered.promise;
+	await fsp.rename(oldDir, path.dirname(configUri('renamed').fsPath));
+	resume.resolve();
+	assert.equal(await pending, null);
+	assert.equal(fs.existsSync(oldDir), false);
+});
+
+/** Истечение владения перехватывается внутри Promise сохранения до его первой записи. */
+test('a compromised filesystem lock rejects save without an uncaught exception', async t => {
+	const { local } = await createSharedStorageFixture(t);
+	const source = (await local.getPrompt('old-title'))!;
+	const lost = new Error('lock owner changed');
+	const locks = require('proper-lockfile');
+	t.mock.method(locks, 'lock', async (_key: string, options: { onCompromised: (error: Error) => void }) => {
+		queueMicrotask(() => options.onCompromised(lost));
+		return () => assert.fail('must not release the new owner lock');
+	});
+	await assert.rejects(local.savePrompt({ ...source, status: 'completed' }), lost);
+	assert.equal((await local.getPrompt(source.id))?.status, 'draft');
 });
 
 /** Старое чтение не воскрешает папку после удаления и создания папки с номером. */

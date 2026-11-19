@@ -1,6 +1,7 @@
 import React from 'react';
 import type { CopilotCreditsSnapshot } from '../../utils/copilotCredits.js';
 import { formatTimeUntilReset } from '../../utils/resetCountdown.js';
+import { copilotCreditsForMode, type LimitDisplayMode } from '../../utils/limitDisplay.js';
 
 /** Приглушённый текст подписей полосы. */
 const muted: React.CSSProperties = {
@@ -17,18 +18,20 @@ function formatResetDate(value: string | null): string | null {
 }
 
 /**
- * Полоса премиум-кредитов GitHub Copilot: заполнение — использованные кредиты (как в штатной строке «Credits»),
- * а не остаток. Во время переключения аккаунта прежние проценты скрываются. Проверка — tests/copilotCredits.test.tsx.
+ * Полоса премиум-кредитов Copilot: проценты и заполнение зависят от глобальной настройки;
+ * по умолчанию — использовано. Во время переключения аккаунта старые проценты скрываются.
  */
-export function CopilotCreditsProgress({ credits, switching, now = Date.now() }: {
+export function CopilotCreditsProgress({ credits, switching, now = Date.now(), mode = 'used' }: {
     credits: CopilotCreditsSnapshot | null;
     switching: boolean;
     now?: number;
+    mode?: LimitDisplayMode;
 }): React.ReactElement {
     const resetDate = credits ? formatResetDate(credits.resetAt) : null;
     const expired = credits?.resetAt ? Date.parse(credits.resetAt) <= now : !!credits?.expired;
     const countdown = credits?.resetAt ? formatTimeUntilReset(credits.resetAt, now) : null;
     const available = !switching && !!credits && !expired;
+    const displayed = credits ? copilotCreditsForMode(credits, mode) : null;
     return (
         <div style={{ borderTop: '1px solid var(--vscode-panel-border)', marginTop: 16, paddingTop: 14 }}>
             <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' }}>
@@ -45,17 +48,17 @@ export function CopilotCreditsProgress({ credits, switching, now = Date.now() }:
                 <>
                     <div style={{ display: 'flex', gap: 5, alignItems: 'baseline', marginTop: 11 }}>
                         <strong style={{ fontSize: 22, fontVariantNumeric: 'tabular-nums', lineHeight: 1.1 }}>
-                            {credits.usedPercent}%
+                            {displayed?.percent}%
                         </strong>
-                        <span style={muted}>использовано</span>
+                        <span style={muted}>{displayed?.label}</span>
                     </div>
                     <div
                         role="progressbar"
-                        aria-label="Использование кредитов GitHub Copilot"
+                        aria-label={mode === 'used' ? 'Использование кредитов GitHub Copilot' : 'Остаток кредитов GitHub Copilot'}
                         aria-valuemin={0}
                         aria-valuemax={100}
-                        aria-valuenow={Math.min(100, credits.usedPercent)}
-                        aria-valuetext={credits.usedPercent + '% использовано'}
+                        aria-valuenow={Math.min(100, displayed?.percent ?? 0)}
+                        aria-valuetext={(displayed?.percent ?? 0) + '% ' + (displayed?.label ?? '')}
                         style={{
                             background: 'var(--vscode-panel-border)',
                             height: 7, borderRadius: 6, marginTop: 10, overflow: 'hidden',
@@ -63,13 +66,13 @@ export function CopilotCreditsProgress({ credits, switching, now = Date.now() }:
                     >
                         <div style={{
                             height: '100%',
-                            width: Math.min(100, credits.usedPercent) + '%',
+                            width: Math.min(100, displayed?.percent ?? 0) + '%',
                             background: 'var(--vscode-progressBar-background)',
-                            minWidth: credits.usedPercent === 0 ? 2 : undefined,
+                            minWidth: displayed?.percent === 0 ? 2 : undefined,
                         }} />
                     </div>
                     <div style={{ ...muted, marginTop: 8 }}>
-                        {credits.used} из {credits.limit} кредитов
+                        {displayed?.count} из {credits.limit} кредитов {displayed?.label}
                         {credits.estimated ? ' · расчётные данные' : ' · данные GitHub'}
                         {credits.stale ? ' · последнее обновление устарело' : ''}
                     </div>

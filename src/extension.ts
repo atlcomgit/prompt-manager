@@ -33,6 +33,7 @@ import { CodexRateLimitService, cleanupStaleCodexTempHomes } from './services/co
 import { CodexAccountsStatusBarProvider } from './providers/codexAccountsStatusBarProvider.js';
 import { ClaudeAccountService, findClaudeExecutable } from './services/claudeAccountService.js';
 import { ClaudeUsageService } from './services/claudeUsageService.js';
+import { AccountsLimitDisplayService } from './services/accountsLimitDisplayService.js';
 import { ClaudeStatusLineService } from './services/claudeStatusLineService.js';
 import { ClaudeAccountsStatusBarProvider } from './providers/claudeAccountsStatusBarProvider.js';
 import type { MemoryCommit, HookCommitPayload, MemoryAnalysisDepth } from './types/index.js';
@@ -216,6 +217,7 @@ export function activate(context: vscode.ExtensionContext) {
 		sharedCacheDir: context.globalStorageUri.fsPath,
 		storeRefreshedAuth: (original, refreshed) => codexAccountsService.storeRefreshedAuth(original, refreshed),
 	});
+	const accountsLimitDisplayService = new AccountsLimitDisplayService();
 	const claudeAccountsService = new ClaudeAccountService(context);
 	// Путь к Claude CLI вычисляется при каждой проверке: Claude Code могут установить или обновить после активации.
 	const claudeUsageService = new ClaudeUsageService(context.globalStorageUri.fsPath, findClaudeExecutable);
@@ -253,15 +255,18 @@ export function activate(context: vscode.ExtensionContext) {
 		claudeAccountsService,
 		claudeUsageService,
 		refreshAiModelsAfterCopilotAccountSwitch,
+		accountsLimitDisplayService,
 	);
 	const codexStatusBarProvider = new CodexAccountsStatusBarProvider(
 		codexAccountsService,
 		codexRateLimitService,
 		() => copilotUsagePanelManager.show(),
+		accountsLimitDisplayService,
 	);
 	const claudeStatusBarProvider = new ClaudeAccountsStatusBarProvider(
 		claudeAccountsService,
 		claudeUsageService,
+		accountsLimitDisplayService,
 	);
 
 	// ---- Project Memory System ----
@@ -864,6 +869,7 @@ export function activate(context: vscode.ExtensionContext) {
 			copilotUsagePanelManager.dispose();
 			codexStatusBarProvider.dispose();
 			claudeStatusBarProvider.dispose();
+			accountsLimitDisplayService.dispose();
 			claudeStatusLineService.dispose();
 			claudeAccountsService.dispose();
 			codexAccountsService.dispose();

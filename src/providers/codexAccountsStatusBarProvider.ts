@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import type { CodexAccountService } from '../services/codexAccountService.js';
+import type { AccountsLimitDisplayService } from '../services/accountsLimitDisplayService.js';
+import { limitDisplayVerb, limitDisplayShortLabel, limitPercent } from '../utils/limitDisplay.js';
 import {
     CODEX_LIMITS_REFRESH_MS, type CodexRateLimitService, type CodexLimitStatus,
 } from '../services/codexRateLimitService.js';
@@ -22,6 +24,7 @@ export class CodexAccountsStatusBarProvider implements vscode.Disposable {
         private readonly accounts: CodexAccountService,
         private readonly rateLimits: CodexRateLimitService,
         private readonly openAccounts: () => Promise<void>,
+        private readonly display?: AccountsLimitDisplayService,
     ) {
         this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
         this.item.name = 'Prompt Manager: Codex Accounts';
@@ -38,6 +41,10 @@ export class CodexAccountsStatusBarProvider implements vscode.Disposable {
             void this.refresh();
         }));
         this.subscriptions.push(vscode.extensions.onDidChange(() => void this.refresh()));
+        if (this.display) {
+            // Rendering a different percentage never triggers another rate-limit request.
+            this.subscriptions.push(this.display.onDidChange(() => this.render()));
+        }
         // При получении фокуса окно опрашивает Codex, только если данные старше интервала обновления.
         const focusSubscription = vscode.window.onDidChangeWindowState?.(state => {
             if (state.focused) void this.refresh();
@@ -67,16 +74,18 @@ export class CodexAccountsStatusBarProvider implements vscode.Disposable {
             return;
         }
         const stale = Boolean(this.last?.stale && this.last.windows.length);
+        const mode = this.display?.getMode() || 'used';
         // Знак «≈» отмечает последние известные, а не свежие проценты.
         const fragments = (this.last?.windows || [])
-            .map(w => w.label + ': ' + (stale ? '≈' : '') + Math.round(w.remainingPercent) + '%');
+            .map(w => w.label + ': ' + (stale ? '≈' : '') + Math.round(limitPercent(w, mode) ?? 0) + '%');
         const warning = state.pendingRestart || stale ? ' $(warning)' : '';
-        this.item.text = '$(account) Codex ' + (fragments.join(' · ') || 'лимиты —') + warning;
+        this.item.text = '$(account) Codex ' + limitDisplayShortLabel(mode) + ' ' + (fragments.join(' · ') || 'лимиты —') + warning;
         const receivedAt = this.last?.windows.length ? new Date(this.last.updatedAt).toLocaleString('ru-RU') : '';
         const lines = [
             'Codex: ' + current.label,
             ...(this.last?.windows || []).map(w =>
-                w.label + ': ' + (stale ? 'последние известные ' : 'осталось ') + w.remainingPercent + '%'
+                w.label + ': ' + (stale ? 'последние известные ' : '') + Math.round(limitPercent(w, mode) ?? 0)
+                + '% ' + limitDisplayVerb(mode)
                 + (w.resetsAt ? ' · сброс ' + new Date(w.resetsAt * 1000).toLocaleString('ru-RU') : '')),
             receivedAt ? 'Данные получены: ' + receivedAt : '',
             stale ? 'Значения могли устареть: они обновятся, когда окно VS Code получит фокус.' : '',

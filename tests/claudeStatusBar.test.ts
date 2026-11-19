@@ -49,9 +49,23 @@ test('Claude status-bar marks old quota as approximate and never shows a reset f
                 source: 'native-cache',
             }),
         };
-        provider = new ClaudeAccountsStatusBarProvider(accounts as any, usage as any);
+        let mode: 'used' | 'remaining' = 'used';
+        const change: Array<() => void> = [];
+        const preference = {
+            getMode: () => mode,
+            onDidChange: (cb: () => void) => {
+                change.push(cb);
+                return { dispose() {} };
+            },
+        };
+        provider = new ClaudeAccountsStatusBarProvider(accounts as any, usage as any, preference as any);
         await provider.refresh();
-        assert.match(item.text, /Claude 5ч: — · 7д: ≈97%/);
+        assert.match(item.text, /Claude исп\. 5ч: — · 7д: ≈3%/);
+        assert.match(item.tooltip, /3% использовано/);
+        mode = 'remaining';
+        change.forEach(cb => cb());
+        assert.match(item.text, /Claude ост\. 5ч: — · 7д: ≈97%/);
+        assert.match(item.tooltip, /97% осталось/);
         assert.doesNotMatch(item.text, /82%/);
         assert.match(String(item.tooltip), /Значения устарели/);
         installed = false;

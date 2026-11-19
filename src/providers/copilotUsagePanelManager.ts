@@ -12,6 +12,7 @@ import type { ClaudeAccountService } from '../services/claudeAccountService.js';
 import { ClaudeUsageService } from '../services/claudeUsageService.js';
 import { resolveAccountProviderAvailability } from '../utils/accountProviders.js';
 import { buildCopilotCreditsSnapshot } from '../utils/copilotCredits.js';
+import type { AccountsLimitDisplayService } from '../services/accountsLimitDisplayService.js';
 import type { CopilotUsageData } from '../services/copilotUsageService.js';
 
 /** Одна вкладка «Аккаунты» на окно: обработка действий webview и периодическая отправка данных; tests/accountsPanelManager.test.ts. */
@@ -30,6 +31,7 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
         private readonly claudeAccounts: ClaudeAccountService,
         private readonly claudeUsage: ClaudeUsageService,
         private readonly onCopilotAccountChanged?: (accountLabel: string) => Promise<void> | void,
+        private readonly limitDisplay?: AccountsLimitDisplayService,
     ) {
         this.disposables.push(this.codexAccounts.onDidChange(() => {
             this.codexLimits.invalidate();
@@ -42,6 +44,12 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
             void this.pushData(false);
         }));
         this.disposables.push(vscode.extensions.onDidChange(() => void this.pushData(false)));
+        if (this.limitDisplay) {
+            this.disposables.push(this.limitDisplay.onDidChange(mode => {
+                // Each window updates its own page without new API/CLI calls.
+                void this.panel?.webview.postMessage({ type: 'accounts.displayMode', mode });
+            }));
+        }
     }
 
     /** Открывает вкладку или показывает уже открытую и обновляет её данные. */
@@ -72,6 +80,17 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
                     case 'accounts.ready':
                         await this.pushData(false);
                         break;
+                    case 'accounts.setDisplayMode': {
+                        if (message.mode !== 'used' && message.mode !== 'remaining') {
+                            throw new Error('Неизвестный режим отображения лимитов.');
+                        }
+                        if (!this.limitDisplay) throw new Error('Настройка отображения недоступна.');
+                        await this.limitDisplay.setMode(message.mode);
+                        await panel.webview.postMessage({
+                            type: 'accounts.displayMode', mode: this.limitDisplay.getMode(),
+                        });
+                        break;
+                    }
                     case 'accounts.refresh':
                         this.codexLimits.invalidate();
                         this.claudeUsage.invalidate();
@@ -294,6 +313,7 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
                 type: 'accounts.data',
                 data: {
                     installed,
+                    limitDisplayMode: this.limitDisplay?.getMode() || 'used',
                     codex: codex ? { ...codex,
                         otherSwitcherInstalled: Boolean(vscode.extensions.getExtension('goosenest.codex-profiles')),
                         limits,

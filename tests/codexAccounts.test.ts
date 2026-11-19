@@ -331,21 +331,41 @@ test('Codex status bar appears after the extension is installed and polls only f
     };
     codexInstalled = false;
     vscodeMock.window.state.focused = true;
-    const provider = new CodexAccountsStatusBarProvider(accounts as any, limits as any, async () => undefined);
+    let mode: 'used' | 'remaining' = 'used';
+    const modeChangeHandlers: Array<() => void> = [];
+    const preference = {
+        getMode: () => mode,
+        onDidChange: (cb: () => void) => {
+            modeChangeHandlers.push(cb);
+            return { dispose() {} };
+        },
+    };
+    const provider = new CodexAccountsStatusBarProvider(
+        accounts as any, limits as any, async () => undefined, preference as any);
     const item = statusItems[statusItems.length - 1];
     try {
         assert.equal(item.visible, false);
         codexInstalled = true;
         await provider.refresh();
         assert.equal(item.visible, true);
-        assert.match(item.text, /5ч: 80%/);
+        assert.match(item.text, /Codex исп\. 5ч: 20%/);
+        assert.match(item.tooltip, /20% использовано/);
+        const countBeforeToggle = calls.length;
+        mode = 'remaining';
+        modeChangeHandlers.forEach(cb => cb());
+        assert.match(item.text, /Codex ост\. 5ч: 80%/);
+        assert.match(item.tooltip, /80% осталось/);
+        assert.equal(calls.length, countBeforeToggle, 'Changing display must not poll Codex');
+        mode = 'used';
+        modeChangeHandlers.forEach(cb => cb());
+        assert.match(item.text, /5ч: 20%/);
         assert.deepEqual(calls[calls.length - 1].slice(2), [false, true]);
 
         vscodeMock.window.state.focused = false;
         stale = true;
         await provider.refresh();
         assert.deepEqual(calls[calls.length - 1].slice(2), [false, false]);
-        assert.match(item.text, /5ч: ≈80%/);
+        assert.match(item.text, /5ч: ≈20%/);
         assert.match(item.tooltip, /могли устареть/);
         await provider.refresh(true);
         assert.deepEqual(calls[calls.length - 1].slice(2), [true, true]);

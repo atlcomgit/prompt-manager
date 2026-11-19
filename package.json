@@ -811,6 +811,17 @@
           "scope": "application",
           "markdownDescription": "Показывать выполненные заметки на доске быстрых заметок. Общая настройка интерфейса; передаётся через Settings Sync."
         },
+        "promptManager.accounts.limitDisplayMode": {
+          "type": "string",
+          "enum": ["used", "remaining"],
+          "enumDescriptions": [
+            "Показывать использованную квоту и заполнение прогресс-баров (по умолчанию).",
+            "Показывать оставшуюся квоту и заполнение прогресс-баров."
+          ],
+          "default": "used",
+          "scope": "application",
+          "markdownDescription": "Глобальный режим отображения лимитов Codex, Claude Code и GitHub Copilot в строке состояния и на странице «Аккаунты». Общий для проектов и окон VS Code."
+        },
         "promptManager.dashboardPreferences.quickNotes.descriptionHeight": {
           "type": [
             "number",

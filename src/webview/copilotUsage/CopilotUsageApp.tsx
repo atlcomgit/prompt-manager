@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
 import { CopilotCreditsProgress } from './CopilotCreditsProgress';
+import { LimitDisplayToggle } from './LimitDisplayToggle';
+import { limitPercent, limitDisplayVerb, resolveAccountsBackendMode, type LimitDisplayMode } from '../../utils/limitDisplay.js';
 import { AccountsLoading } from './AccountsLoading';
 import { AccountsPageFrame } from './AccountsPageFrame';
 import { formatTimeUntilReset } from '../../utils/resetCountdown.js';
@@ -19,6 +21,8 @@ type ClaudeLimitStatus = { windows: LimitWindow[]; updatedAt: string | null; sta
 /** Данные страницы от расширения (сообщение accounts.data). */
 type State = {
     installed: InstalledProviders;
+    /** Absent while an older Extension Host is still running after a Tunnel Webview update. */
+    limitDisplayMode?: LimitDisplayMode;
     codex: {
         profiles: Account[];
         activeId: string | null;
@@ -88,8 +92,9 @@ const CLAUDE_STALE_HINT = 'Обновление придёт со следующ
  * Окна лимитов с полосой остатка и обратным отсчётом до сброса. Устаревшие данные помечаются «≈»,
  * окно после времени сброса показывается без процентов до следующего обновления; staleHint — когда придут новые.
  */
-function Limits({ windows, stale, staleHint, error, updatedAt, now }: {
-    windows: LimitWindow[]; stale?: boolean; staleHint: string; error?: string; updatedAt?: string | null; now: number;
+function Limits({ windows, stale, staleHint, error, updatedAt, now, mode }: {
+    windows: LimitWindow[]; stale?: boolean; staleHint: string; error?: string;
+    updatedAt?: string | null; now: number; mode: LimitDisplayMode;
 }): React.ReactElement {
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -101,13 +106,15 @@ function Limits({ windows, stale, staleHint, error, updatedAt, now }: {
             ) : windows.map((w, index) => {
                 const expired = w.resetsAt !== null && w.resetsAt * 1000 <= now;
                 const countdown = formatTimeUntilReset(w.resetsAt, now);
+                const percent = Math.round(limitPercent(w, mode) ?? 0);
                 return <div key={w.key || index} style={{ opacity: stale ? 0.65 : 1 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginBottom: 5 }}>
                         <span>{w.label}{expired ? ' · окно уже сброшено' : stale ? ' · последние известные' : ''}</span>
-                        <b>{expired ? '— · ожидаем обновления' : (stale ? '≈' : '') + Math.round(w.remainingPercent) + '% осталось'}</b>
+                        <b>{expired ? '— · ожидаем обновления'
+                            : (stale ? '≈' : '') + percent + '% ' + limitDisplayVerb(mode)}</b>
                     </div>
                     {!expired && <div style={{ height: 6, borderRadius: 5, background: 'var(--vscode-panel-border)', overflow: 'hidden' }}>
-                        <div style={{ width: Math.min(100, Math.max(0, w.remainingPercent)) + '%', height: '100%', background: 'var(--vscode-progressBar-background)' }}/>
+                        <div style={{ width: percent + '%', height: '100%', background: 'var(--vscode-progressBar-background)' }}/>
                     </div>}
                     {!!w.resetsAt && <div style={{ ...muted, marginTop: 4 }}>
                         Сброс: {timestamp(w.resetsAt)}
@@ -146,6 +153,10 @@ export const CopilotUsageApp: React.FC = () => {
             // После ошибки ответа на действие не будет: кнопки снова доступны.
             setBusyId(null);
         }
+        if (message?.type === 'accounts.displayMode'
+            && (message.mode === 'used' || message.mode === 'remaining')) {
+            setData(previous => previous ? { ...previous, limitDisplayMode: message.mode } : previous);
+        }
         if (message?.type === 'accounts.result') {
             setNotice({ message: String(message.message || ''), warning: Boolean(message.warning) });
             setBusyId(null);
@@ -158,6 +169,7 @@ export const CopilotUsageApp: React.FC = () => {
     }} />;
 
     const { codex, claude, copilot, installed } = data;
+    const { mode, supported: supportsLimitDisplay } = resolveAccountsBackendMode(data.limitDisplayMode);
     const pick = (provider: string, id: string): void => {
         if (busyId) return;
         setNotice(null);
@@ -166,13 +178,27 @@ export const CopilotUsageApp: React.FC = () => {
     };
     return (
         <AccountsPageFrame>
-            <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+            <header style={{ display: 'flex', justifyContent: 'space-between',
+                alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                 <div>
                     <h1 style={{ fontSize: 21, margin: 0 }}>Аккаунты</h1>
                     <div style={{ ...muted, marginTop: 4 }}>Показываются только установленные расширения</div>
                 </div>
-                <button style={button} onClick={() => { setNotice(null); send('accounts.refresh'); }}>↻ Обновить</button>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <LimitDisplayToggle mode={mode} disabled={!supportsLimitDisplay}
+                        onChange={next => send('accounts.setDisplayMode', { mode: next })}/>
+                    <button style={button} onClick={() => { setNotice(null); send('accounts.refresh'); }}>↻ Обновить</button>
+                </div>
             </header>
+            {!supportsLimitDisplay && (
+                <div role="alert" style={{ ...card, color: 'var(--vscode-editorWarning-foreground)' }}>
+                    <b>Работает предыдущая версия Extension Host.</b>{' '}
+                    Статус-бар пока показывает остаток, поэтому переключатель заблокирован.
+                    После завершения задач агентов выполните в этом окне VS Code команду
+                    «Developer: Reload Window» — обычное обновление страницы браузера
+                    не перезапускает расширения на сервере.
+                </div>
+            )}
             {!!notice?.message && (
                 <div role="status" style={{ ...card, color: notice.warning ? 'var(--vscode-editorWarning-foreground)' : 'var(--vscode-foreground)' }}>
                     {notice.message}
@@ -211,7 +237,7 @@ export const CopilotUsageApp: React.FC = () => {
                     {codexActive && <div style={{ borderTop: '1px solid var(--vscode-panel-border)', marginTop: 12, paddingTop: 12 }}>
                         <h3 style={{ margin: '0 0 10px', fontSize: 13 }}>Лимиты выбранного аккаунта</h3>
                         <Limits windows={codex.limits?.windows || []} stale={codex.limits?.stale} staleHint={CODEX_STALE_HINT}
-                            error={codex.limits?.error} updatedAt={codex.limits?.updatedAt} now={now}/>
+                            error={codex.limits?.error} updatedAt={codex.limits?.updatedAt} now={now} mode={mode}/>
                     </div>}
                     {codex.pendingRestart && <div style={{ marginTop: 12, padding: 12, border: '1px solid var(--vscode-editorWarning-foreground)', borderRadius: 6 }}>
                         <b>Открытые сеансы Codex ещё могут использовать прежнюю авторизацию.</b>
@@ -260,7 +286,7 @@ export const CopilotUsageApp: React.FC = () => {
                                 </div>
                                 {profile.loggedIn && <div style={{ margin: '11px 0 0 22px' }}>
                                     <Limits windows={limits?.windows || []} stale={limits?.stale} staleHint={CLAUDE_STALE_HINT}
-                                        updatedAt={limits?.updatedAt} error={limits?.error} now={now}/>
+                                        updatedAt={limits?.updatedAt} error={limits?.error} now={now} mode={mode}/>
                                 </div>}
                             </div>
                         );
@@ -285,7 +311,7 @@ export const CopilotUsageApp: React.FC = () => {
                     <div>Текущий аккаунт: <b>{copilot.active || 'не определён'}</b></div>
                     <div style={{ ...muted, marginTop: 5 }}>Сессия Prompt Manager: {copilot.session || 'не определена'}</div>
                     {!!copilot.issue && <p style={{ color: 'var(--vscode-editorWarning-foreground)', fontSize: 12 }}>{copilot.issue}</p>}
-                    <CopilotCreditsProgress credits={copilot.credits} switching={copilot.switching} now={now} />
+                    <CopilotCreditsProgress credits={copilot.credits} switching={copilot.switching} now={now} mode={mode} />
                     <div style={{ ...actions, marginTop: 13 }}>
                         <button style={primaryButton} disabled={copilot.switching} onClick={() => send('copilot.switch')}>
                             {copilot.switching ? 'Переключение…' : 'Сменить аккаунт Copilot'}

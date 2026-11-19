@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import type { ClaudeAccountService } from '../services/claudeAccountService.js';
+import type { AccountsLimitDisplayService } from '../services/accountsLimitDisplayService.js';
+import { limitDisplayVerb, limitDisplayShortLabel, limitPercent } from '../utils/limitDisplay.js';
 import { ClaudeUsageService, isClaudeWindowExpired, type ClaudeLimitStatus } from '../services/claudeUsageService.js';
 
 /**
@@ -19,6 +21,7 @@ export class ClaudeAccountsStatusBarProvider implements vscode.Disposable {
     constructor(
         private readonly accounts: ClaudeAccountService,
         private readonly usage: ClaudeUsageService,
+        private readonly display?: AccountsLimitDisplayService,
     ) {
         this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 49);
         this.item.name = 'Prompt Manager: Claude Code';
@@ -28,6 +31,7 @@ export class ClaudeAccountsStatusBarProvider implements vscode.Disposable {
             void this.refresh();
         }));
         this.disposables.push(vscode.extensions.onDidChange(() => void this.refresh()));
+        if (this.display) this.disposables.push(this.display.onDidChange(() => this.render()));
         // Фоновые окна, включая VS Code Tunnel, только читают общий кэш; проверку CLI может начать окно в фокусе.
         const focusSubscription = vscode.window.onDidChangeWindowState?.(state => {
             if (state.focused) void this.refresh();
@@ -55,21 +59,22 @@ export class ClaudeAccountsStatusBarProvider implements vscode.Disposable {
                 : 'Откройте «Аккаунты» для подключения Claude Code.';
         } else {
             const windows = (this.last?.windows || []).filter(w => !isClaudeWindowExpired(w));
+            const mode = this.display?.getMode() || 'used';
             const summary = ['five_hour', 'seven_day'].map((key, index) => {
                 const item = windows.find(w => w.key === key);
                 const label = index === 0 ? '5ч' : '7д';
                 return label + ': ' + (item
-                    ? (this.last?.stale ? '≈' : '') + Math.round(item.remainingPercent) + '%'
+                    ? (this.last?.stale ? '≈' : '') + Math.round(limitPercent(item, mode) ?? 0) + '%'
                     : '—');
             });
-            this.item.text = '$(account) Claude ' + (windows.length ? summary.join(' · ') : 'лимиты —')
+            this.item.text = '$(account) Claude ' + limitDisplayShortLabel(mode) + ' ' + (windows.length ? summary.join(' · ') : 'лимиты —')
                 + ((view.pendingRestart || this.last?.stale) ? ' $(warning)' : '');
             this.item.tooltip = [
                 'Claude Code: ' + profile.label,
                 profile.plan ? 'Подписка: ' + profile.plan : '',
                 ...windows.map(w => w.label + ': '
-                    + (this.last?.stale ? 'последние известные ' : 'осталось ')
-                    + Math.round(w.remainingPercent) + '%'
+                    + (this.last?.stale ? 'последние известные ' : '')
+                    + Math.round(limitPercent(w, mode) ?? 0) + '% ' + limitDisplayVerb(mode)
                     + (w.resetsAt ? ', сброс ' + new Date(w.resetsAt * 1000).toLocaleString('ru-RU') : '')),
                 this.last?.updatedAt ? 'Данные: ' + new Date(this.last.updatedAt).toLocaleString('ru-RU') : '',
                 this.last?.source === 'claude-cli' ? 'Источник: Claude CLI /usage (общий кэш)'

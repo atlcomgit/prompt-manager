@@ -29,6 +29,10 @@ const webviewEntries = [
     entry: "src/webview/memory/index.tsx",
     outfile: "dist/webview/memory.js",
   },
+  {
+    entry: "src/webview/quickNotes/index.tsx",
+    outfile: "dist/webview/quickNotes.js",
+  },
 ];
 
 const buildOptions = webviewEntries.map(({ entry, outfile }) => ({

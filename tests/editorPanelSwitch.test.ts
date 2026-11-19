@@ -19,6 +19,14 @@ test('resolvePromptEditorPanelSwitchStrategy keeps the current panel when prompt
 	}), 'noop');
 });
 
+/** Повторно занятый id требует загрузки другой версии страницы. */
+test('resolvePromptEditorPanelSwitchStrategy reloads a reused id with another UUID', () => {
+	assert.equal(resolvePromptEditorPanelSwitchStrategy({
+		hasReusableSingletonPanel: true, currentPromptId: 'same', nextPromptId: 'same',
+		currentPromptUuid: 'old-uuid', nextPromptUuid: 'new-uuid',
+	}), 'reuse');
+});
+
 test('resolvePromptEditorPanelSwitchStrategy creates a panel when no reusable singleton exists', () => {
 	assert.equal(resolvePromptEditorPanelSwitchStrategy({
 		hasReusableSingletonPanel: false,

@@ -410,7 +410,7 @@ test('StateService serializes global dashboard order writes independently of the
 	]);
 	assert.deepEqual(service.getPromptDashboardSectionOrder(), [
 		['projectBranches', 'activity', 'parallelBranches', 'dockerContainers'],
-		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis', 'todos'],
+		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis', 'todos', 'quickNotes'],
 	]);
 	assert.deepEqual(service.getPromptDashboardSectionOrder('single-column'), narrowBefore);
 	assert.equal(configuration.writes.filter(write => write.key === 'dashboardLayouts.twoColumns.order').length, 2);

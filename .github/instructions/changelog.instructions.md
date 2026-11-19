@@ -1,3 +1,101 @@
+## Без номера: Проверка изложения от лица разработчика при ревью
+
+- Дата: 2026-11-19.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: ревью по `/alek-review` и `/alek-review-MR` проверяет комментарии, документацию,
+  отчёты, сообщения коммитов, название и описание МР на упоминания ИИ, моделей, агентов
+  и истории подготовки материала; подтверждённые места выводятся замечанием `[Info]`
+  с цитатой и нейтральной формулировкой от лица разработчика.
+- Ключевые моменты: в изменённых документах и инструкциях проверяется весь документ,
+  в коде — добавленные и изменённые фрагменты. Названия продуктов и технологий, описание самого
+  продукта, примеры в инструкциях, реальные авторы и лицензии нарушением не считаются.
+  Общая инструкция явно запрещает подписи `Co-Authored-By` и «Generated with …» от агентов
+  и включает эту проверку в ревью своей работы, правила отчёта и финальную проверку.
+- Файлы:
+    CHANGELOG.md
+
+## 174: Виджет «Быстрые заметки»
+
+- Дата: 2026-11-18.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: в панели «Обзор» страницы промпта появился виджет «Быстрые заметки»: заметка добавляется вводом
+  и Enter, Ctrl+Enter открывает её окно. Заметки рабочей области хранятся в `.vscode/prompt-manager/quick-notes.json`,
+  глобальные — в `~/.vscode/prompt-manager/quick-notes.json`, файлы — копиями в `quick-notes-files/`.
+  Окно заметки работает с черновиком («Сохранить / Отмена»), чек-листом с AI-предложением пункта, файлами
+  с превью и плиткой «+» и кнопкой «В промпт»; доска на отдельной вкладке редактора показывает стикеры
+  с группировкой по цвету и области и переносом.
+- Ключевые моменты: заметки получают данные отдельным каналом сообщений и не входят в снимок dashboard; секция
+  `quickNotes` раскрывается без обновления Git, Docker и ToDo. Запись атомарная с проверкой изменения файла
+  другим окном, повреждённый JSON не перезаписывается, неизвестные поля сохраняются. Сохранение черновика
+  отклоняется при изменении заметки в другом окне. Новые файлы черновика лежат в `.pending` до сохранения.
+  Промпт из заметки создаётся без открытия редактора: сначала сохраняется, затем получает файлы в `context/`.
+  Сообщения виджета и доски обрабатывает общий контроллер расширения; отказ записи показывается сообщением,
+  а текст новой заметки возвращается в поле.
+  По итогам ревью: оба файла переноса между областями заменяются одним синхронным шагом; символические ссылки
+  ниже папки хранилища не используются; операции панелей проверяются расширением; окно заметки и его черновик
+  хранятся на уровне панели «Обзор» и переживают перестройку колонок; сочетания клавиш работают в любой раскладке.
+  Доработки 2026-11-19: поле новой заметки на доске закрывается при уходе фокуса и сохраняет неотправленный текст;
+  меню «⋯» панели «Обзор» скрывает виджеты общей настройкой `promptManager.dashboardPreferences.hiddenSections`,
+  скрытые виджеты не загружают данные (как свёрнутые), снова показанный загружается как раскрытый.
+  Повторное сохранение из окна не удаляет вложение с суффиксом имени: имена сохранённых копий задаёт расширение
+  по id; у глобальной заметки ссылка на промпт другой рабочей области не снимается, промпт с другим UUID
+  не открывается; AI-название новой заметки принимается в окне без ложного конфликта; операция `create`
+  из webview не задаёт ссылку на промпт и вложения.
+  Настройки вида — application-настройки `promptManager.dashboardPreferences.quickNotes.*`; метка совместимости
+  webview обновлена.
+- Файлы:
+  CHANGELOG.md
+  README.md
+  docs/rules/map.md
+  docs/rules/Промпты/Быстрые_заметки_174.md
+  docs/rules/Промпты/Сохранение_и_список_без_номера.md
+  esbuild.webview.mjs
+  package.json
+  src/constants/webview.ts
+  src/extension.ts
+  src/providers/editorPanelManager.ts
+  src/providers/quickNotesBoardPanelManager.ts
+  src/providers/quickNotesHostController.ts
+  src/services/aiService.ts
+  src/services/quickNotesService.ts
+  src/services/stateService.ts
+  src/services/storageService.ts
+  src/types/messages.ts
+  src/types/promptDashboard.ts
+  src/types/promptDashboardPreferences.ts
+  src/types/quickNotes.ts
+  src/utils/aiPromptBuilders.ts
+  src/utils/promptDashboard.ts
+  src/utils/quickNotes.ts
+  src/webview/editor/EditorApp.tsx
+  src/webview/editor/components/PromptDashboard.tsx
+  src/webview/editor/components/SortableEditorSections.tsx
+  src/webview/editor/components/quickNotes/QuickNoteIcon.tsx
+  src/webview/editor/components/quickNotes/QuickNoteModal.tsx
+  src/webview/editor/components/quickNotes/QuickNotesBoard.tsx
+  src/webview/editor/components/quickNotes/QuickNotesSection.tsx
+  src/webview/editor/components/quickNotes/QuickNotesWidget.tsx
+  src/webview/editor/components/quickNotes/quickNotesFocus.ts
+  src/webview/editor/components/quickNotes/quickNotesStyles.ts
+  src/webview/editor/components/quickNotes/useQuickNotesActions.tsx
+  src/webview/editor/components/quickNotes/useQuickNotesClient.ts
+  src/webview/quickNotes/QuickNotesBoardApp.tsx
+  src/webview/quickNotes/index.tsx
+  src/webview/shared/clipboardImages.ts
+  tests/aiPromptBuilders.test.ts
+  tests/editorApp.test.tsx
+  tests/editorPanelManager.test.ts
+  tests/promptDashboard.test.ts
+  tests/promptDashboardComponent.test.tsx
+  tests/promptDashboardPreferences.test.ts
+  tests/quickNotes.test.ts
+  tests/quickNotesComponents.test.tsx
+  tests/quickNotesHostController.test.ts
+  tests/quickNotesService.test.ts
+  tests/stateService.test.ts
+
 ## 173: Настройка ширины панелей промпта с сохранением
 
 - Дата: 2026-11-17.

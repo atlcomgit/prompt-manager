@@ -157,16 +157,21 @@
         "icon": "$(repo)"
       },
       {
+        "command": "promptManager.accounts",
+        "title": "Аккаунты",
+        "category": "Prompt Manager",
+        "icon": "$(account)"
+      },
+      {
         "command": "promptManager.copilotUsageDetails",
-        "title": "Show Copilot Premium Usage",
+        "title": "Аккаунты (совместимость)",
         "category": "Prompt Manager",
         "icon": "$(copilot)"
       },
       {
-        "command": "promptManager.copilotUsageAuth",
-        "title": "Authenticate for Copilot Usage",
-        "category": "Prompt Manager",
-        "icon": "$(sign-in)"
+        "command": "promptManager.claude.removeStatusLineCollector",
+        "title": "Удалить сборщик statusLine Claude Code",
+        "category": "Prompt Manager"
       },
       {
         "command": "promptManager.openMemory",
@@ -525,6 +530,15 @@
           "scope": "application",
           "markdownDescription": "Сворачивание виджета aiAnalysis для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
         },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.quickNotes": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета «Быстрые заметки» для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
         "promptManager.dashboardLayouts.twoColumns.order": {
           "type": [
             "array",
@@ -621,6 +635,15 @@
           "scope": "application",
           "markdownDescription": "Сворачивание виджета aiAnalysis для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
         },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.quickNotes": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета «Быстрые заметки» для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
         "promptManager.dashboardPreferences.docker.viewMode": {
           "type": [
             "string",
@@ -713,6 +736,92 @@
           "scope": "application",
           "markdownDescription": "Выбранные типы файлов TODO. Общая настройка интерфейса; передаётся через Settings Sync."
         },
+        "promptManager.dashboardPreferences.quickNotes.newNoteScope": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "workspace",
+            "global",
+            null
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Куда сохраняется новая быстрая заметка: `workspace` — в `.vscode/prompt-manager/quick-notes.json` рабочей области, `global` — в `~/.vscode/prompt-manager/quick-notes.json`. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.quickNotes.search": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Строка поиска виджета «Быстрые заметки». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.quickNotes.colors": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Выбранные цвета фильтра виджета «Быстрые заметки». Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.quickNotes.boardGroupBy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "none",
+            "color",
+            "scope",
+            null
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Группировка доски быстрых заметок: `none` — сетка, `color` — колонки по цвету, `scope` — колонки по области. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.quickNotes.boardScope": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "all",
+            "workspace",
+            "global",
+            null
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Фильтр области на доске быстрых заметок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.quickNotes.boardShowDone": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Показывать выполненные заметки на доске быстрых заметок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.quickNotes.descriptionHeight": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "minimum": 84,
+          "maximum": 1000,
+          "scope": "application",
+          "markdownDescription": "Глобальная высота поля описания быстрых заметок; синхронизируется между окнами и проектами через Settings Sync."
+        },
         "promptManager.dashboardPreferences.expanded": {
           "type": [
             "object",
@@ -730,6 +839,37 @@
           "default": null,
           "scope": "application",
           "markdownDescription": "Показывать все проекты в виджете веток. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardPreferences.hiddenSections": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "enum": [
+              "status",
+              "activity",
+              "projectBranches",
+              "reviewRequests",
+              "parallelBranches",
+              "projectCommits",
+              "dockerContainers",
+              "todos",
+              "aiAnalysis",
+              "quickNotes"
+            ]
+          },
+          "uniqueItems": true,
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Виджеты панели «Обзор», скрытые меню «⋯»: не отображаются и не загружают данные. Общая настройка для всех рабочих областей и обеих ширин панели; передаётся через Settings Sync."
+        },
+        "promptManager.claude.statusLineCollector": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "markdownDescription": "Добавлять в `settings.json` профилей Claude Code сборщик `statusLine`, который после ответов сохраняет локальную копию лимитов 5ч / 7д (запасной источник для статус-бара и страницы «Аккаунты»). Существующий собственный `statusLine` не заменяется. При выключении снимается только запись сборщика Prompt Manager; то же делает команда «Удалить сборщик statusLine Claude Code»."
         },
         "promptManager.ai.enabled": {
           "type": "boolean",
@@ -793,11 +933,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "promptManager.copilotStatusBar.enabled": {
-          "type": "boolean",
-          "description": "Enable/disable Copilot usage progress bar in the status bar.",
-          "default": true
         },
         "promptManager.copilotPremiumRequestsLimit": {
           "type": "number",
@@ -1234,6 +1369,7 @@
     "@anthropic-ai/claude-agent-sdk": "0.3.234",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.11.0",
+    "@types/proper-lockfile": "4.1.4",
     "@types/react": "^18.2.48",
     "@types/react-dom": "^18.2.18",
     "@types/sql.js": "^1.4.9",
@@ -1251,6 +1387,7 @@
     "3d-force-graph": "^1.79.1",
     "ignore": "^7.0.5",
     "markdown-it": "^14.1.1",
+    "proper-lockfile": "4.1.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "sql.js": "^1.14.1",

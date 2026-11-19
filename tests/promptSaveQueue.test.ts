@@ -53,6 +53,16 @@ test('findPendingSaveEntry matches by UUID with highest priority', () => {
 	assert.equal(findPendingSaveEntry(queue, 'id-2', 'uuid-aaa'), entry1);
 });
 
+/** При общей UUID сохраняем точную папку, а переиспользованный id не подменяет выбранный промпт. */
+test('findPendingSaveEntry disambiguates duplicate UUIDs and ignores a reused id', () => {
+	const draft = makeEntry('draft', 'shared');
+	const completed = makeEntry('completed', 'shared');
+	const queue = new Map([['1', draft], ['2', completed]]);
+	assert.equal(findPendingSaveEntry(queue, 'completed', 'shared'), completed);
+	assert.equal(findPendingSaveEntry(queue, 'gone', 'shared'), undefined);
+	assert.equal(findPendingSaveEntry(queue, 'draft', 'other'), undefined);
+});
+
 test('findPendingSaveEntry falls back to id match when UUID is not available', () => {
 	const queue = new Map<string, PendingSaveEntry>();
 	const entry = makeEntry('my-task', 'uuid-111');

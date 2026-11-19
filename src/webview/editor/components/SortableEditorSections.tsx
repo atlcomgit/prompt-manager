@@ -66,8 +66,15 @@ const EditorSectionDragContext = createContext<EditorSectionDragContextValue | n
 /** В SSR нет DOM для восстановления фокуса; браузер восстанавливает его до отрисовки кадра. */
 const useClientLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
-/** Отдельная ручка переноса не вызывает сворачивание раздела по нажатию на заголовок. */
-export function EditorSectionDragHandle({ sectionKey, title }: { sectionKey: string; title: string }): React.ReactElement | null {
+/**
+ * Отдельная ручка переноса не вызывает сворачивание раздела по нажатию на заголовок.
+ * itemLabel меняет слово в подписи, например «заметку» для списка быстрых заметок.
+ */
+export function EditorSectionDragHandle({ sectionKey, title, itemLabel = 'раздел' }: {
+	sectionKey: string;
+	title: string;
+	itemLabel?: string;
+}): React.ReactElement | null {
 	const context = useContext(EditorSectionDragContext);
 	const [focused, setFocused] = useState(false);
 	if (!context) {
@@ -75,8 +82,8 @@ export function EditorSectionDragHandle({ sectionKey, title }: { sectionKey: str
 	}
 	return (
 		<button type="button" disabled={context.disabled}
-			title={`Перетащить раздел: ${title}. Стрелки — переместить; Home/End — в начало/конец.`}
-			aria-label={`Перетащить раздел: ${title}`} aria-keyshortcuts="ArrowUp ArrowDown Home End Escape"
+			title={`Перетащить ${itemLabel}: ${title}. Стрелки — переместить; Home/End — в начало/конец.`}
+			aria-label={`Перетащить ${itemLabel}: ${title}`} aria-keyshortcuts="ArrowUp ArrowDown Home End Escape"
 			data-pm-editor-section-handle={sectionKey}
 			onPointerDown={event => context.start(event, sectionKey)}
 			onKeyDown={event => context.keyboard(event, sectionKey)}
@@ -102,6 +109,8 @@ interface SortableEditorSectionsProps {
 	scopeKey: string;
 	onReorder(order: string[]): void;
 	onDragStateChange?(dragging: boolean): void;
+	/** Промежуток между элементами в пикселях; по умолчанию 12, как между разделами формы. */
+	gap?: number;
 }
 
 /** Переставляет реальные узлы без CSS order; проверки — sortableEditorSections.test.tsx. */
@@ -153,9 +162,12 @@ export function SortableEditorSections(props: SortableEditorSectionsProps): Reac
 	/** Обеспечивает тот же перенос с клавиатуры с учётом только доступных на вкладке разделов. */
 	const keyboard = (event: React.KeyboardEvent<HTMLButtonElement>, key: string) => {
 		if (event.key === 'Escape') {
-			event.preventDefault();
-			event.stopPropagation();
-			cleanupRef.current?.();
+			// Escape перехватывается только для отмены идущего переноса; иначе он закрывает окно или слой вокруг списка.
+			if (cleanupRef.current) {
+				event.preventDefault();
+				event.stopPropagation();
+				cleanupRef.current();
+			}
 			return;
 		}
 		if (props.disabled || !['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
@@ -300,7 +312,7 @@ export function SortableEditorSections(props: SortableEditorSectionsProps): Reac
 
 	return (
 		<EditorSectionDragContext.Provider value={{ disabled: Boolean(props.disabled), dragged, start, keyboard }}>
-			<div ref={rootRef} data-pm-sortable-editor-sections="true" style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+			<div ref={rootRef} data-pm-sortable-editor-sections="true" style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: props.gap ?? 12 }}>
 				{visibleKeys.map(key => (
 					<div key={key} data-pm-sortable-section={key} style={{
 						...sectionDragStyles.wrapper,

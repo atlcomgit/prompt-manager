@@ -35,7 +35,16 @@ import {
 	splitPromptDashboardActivityByDay,
 	comparePromptDashboardExplorerPaths,
 } from '../src/utils/promptDashboard.js';
-import { normalizePromptDashboardLayouts, PROMPT_DASHBOARD_SECTION_KEYS } from '../src/types/promptDashboard.js';
+import {
+	hasVisiblePromptDashboardSections,
+	mergePromptDashboardHiddenSections,
+	normalizePromptDashboardLayouts,
+	normalizePromptDashboardSectionOrder,
+	PROMPT_DASHBOARD_SECTION_KEYS,
+	PROMPT_DASHBOARD_SECTION_LABELS,
+	resolveCollapsedPromptDashboardWidgets,
+	resolvePromptDashboardWidgetKindForSection,
+} from '../src/types/promptDashboard.js';
 import type { PromptDashboardProjectSummary, PromptDashboardProjectsData, PromptDashboardPromptActivityItem, PromptDashboardScope, PromptDashboardSnapshot } from '../src/types/promptDashboard.js';
 
 function createEmptyDockerWidget() {
@@ -346,6 +355,11 @@ test('resolvePromptDashboardExpandRefreshTarget refreshes only stale or placehol
 		section: 'dockerContainers',
 		snapshot,
 	}), { type: 'widget', widget: 'docker' });
+	// Без отдельной обработки секция заметок попала бы в устаревший проектный виджет и запросила его обновление.
+	assert.equal(resolvePromptDashboardExpandRefreshTarget({
+		section: 'quickNotes',
+		snapshot,
+	}), null);
 	assert.equal(resolvePromptDashboardExpandRefreshTarget({
 		section: 'status',
 		snapshot: null,
@@ -1032,4 +1046,33 @@ test('dashboard layouts normalize each profile independently', () => {
 	for (const profile of Object.values(layouts)) {
 		assert.deepEqual([...profile.sectionOrder.flat()].sort(), [...PROMPT_DASHBOARD_SECTION_KEYS].sort());
 	}
+});
+
+/** Быстрые заметки не связаны со снимком панели: раскрытие и видимость не запрашивают данные виджетов. */
+test('quick notes section is standalone and does not trigger dashboard widget refreshes', () => {
+	assert.equal(resolvePromptDashboardWidgetKindForSection('quickNotes'), null);
+	assert.equal(resolvePromptDashboardWidgetKindForSection('projectBranches'), 'projects');
+	const allHostSectionsCollapsed = Object.fromEntries(PROMPT_DASHBOARD_SECTION_KEYS
+		.filter(section => section !== 'quickNotes')
+		.map(section => [section, true]));
+	assert.equal(hasVisiblePromptDashboardSections(allHostSectionsCollapsed), false);
+	assert.equal(hasVisiblePromptDashboardSections({ ...allHostSectionsCollapsed, todos: false }), true);
+	// Старые сохранённые раскладки получают новую карточку в конце второй колонки.
+	const legacy = normalizePromptDashboardSectionOrder([
+		['status', 'projectBranches', 'parallelBranches', 'dockerContainers', 'aiAnalysis'],
+		['activity', 'reviewRequests', 'projectCommits', 'todos'],
+	]);
+	assert.deepEqual(legacy[1].slice(-1), ['quickNotes']);
+	assert.equal(legacy.flat().filter(section => section === 'quickNotes').length, 1);
+});
+
+/** Скрытые меню «⋯» виджеты не загружаются, как свёрнутые, а сохраняемое сворачивание не меняется. */
+test('hidden dashboard widgets join the collapsed map only for loading decisions', () => {
+	const collapsed = { status: true };
+	const merged = mergePromptDashboardHiddenSections(collapsed, ['aiAnalysis', 'dockerContainers']);
+	assert.deepEqual(merged, { status: true, aiAnalysis: true, dockerContainers: true });
+	assert.deepEqual(collapsed, { status: true });
+	assert.deepEqual(resolveCollapsedPromptDashboardWidgets(merged), ['status', 'aiAnalysis', 'docker']);
+	assert.equal(hasVisiblePromptDashboardSections(mergePromptDashboardHiddenSections({}, PROMPT_DASHBOARD_SECTION_KEYS)), false);
+	assert.deepEqual(Object.keys(PROMPT_DASHBOARD_SECTION_LABELS).sort(), [...PROMPT_DASHBOARD_SECTION_KEYS].sort());
 });

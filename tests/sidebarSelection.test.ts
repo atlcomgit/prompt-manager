@@ -97,6 +97,19 @@ test('reconcileSidebarSelection remaps selection to renamed prompt by promptUuid
 	});
 });
 
+/** Два каталога одного UUID не должны менять выбранную строку после обновления. */
+test('reconcileSidebarSelection preserves the exact folder and rejects an ambiguous rename', () => {
+	const shared = { promptUuid: 'stable-uuid' };
+	const prompts = [makePrompt({ ...shared, id: 'draft' }), makePrompt({ ...shared, id: 'completed' })];
+	const selection = { selectedId: 'completed', selectedPromptUuid: shared.promptUuid };
+	assert.deepEqual(reconcileSidebarSelection(prompts, selection), selection);
+	assert.deepEqual(reconcileSidebarSelection(prompts, { ...selection, selectedId: 'gone' }), {
+		selectedId: null, selectedPromptUuid: null,
+	});
+	const newSelection = { ...selection, selectedId: '__new__' };
+	assert.deepEqual(reconcileSidebarSelection(prompts, newSelection), newSelection);
+});
+
 test('reconcileSidebarSelection backfills promptUuid from legacy selected id', () => {
 	const prompts = [
 		makePrompt({ id: 'prompt-1', promptUuid: 'stable-uuid' }),

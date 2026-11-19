@@ -865,6 +865,7 @@ async function createManager(options?: {
 		},
 		markInternalWatchedPromptFileWrite: () => undefined,
 		uniqueId: async (base: string) => base,
+		exists: async (id: string) => storedPrompt?.id === id,
 		getPrompt: async (id: string) => {
 			if (!storedPrompt || storedPrompt.id !== id) {
 				return null;
@@ -1259,6 +1260,38 @@ test('loadPromptForOpen returns a renamed pending save snapshot by promptUuid wi
 	assert.equal(loaded?.title, 'Prompt B pending rename');
 	assert.equal(loaded?.content, 'pending renamed content');
 	assert.equal(diskReadCount, 0);
+});
+
+/** Копия с активным сохранением не подменяет открытую папку с тем же UUID. */
+test('opening a completed prompt with a pending draft copy preserves the exact folder', async () => {
+	resetVsCodeCommandMock();
+	const completed = createPrompt({ id: 'completed', promptUuid: 'shared', status: 'completed' });
+	const draft = createPrompt({ id: 'draft', promptUuid: 'shared', status: 'draft' });
+	const { manager, storageService } = await createManager({ initialPrompt: completed });
+	storageService.exists = async (id: string) => [completed.id, draft.id].includes(id);
+	(manager as any).pendingSaveQueue.set(buildSaveQueueKey(draft.promptUuid, draft.id), {
+		snapshot: draft, promise: Promise.resolve(draft), operationId: 'save-draft',
+	});
+	try {
+		await manager.openPrompt({ id: completed.id, promptUuid: completed.promptUuid });
+		const opened = (manager as any).panelPromptRefs.get('__prompt_editor_singleton__');
+		assert.equal(opened?.id, completed.id);
+		assert.equal(opened?.status, 'completed');
+	} finally {
+		manager.disposeAll();
+	}
+});
+
+/** Переименованный промпт открывается по UUID, даже если прежний id уже занял другой промпт. */
+test('loadPromptForOpen recovers a renamed prompt when its former id is reused', async () => {
+	const renamed = createPrompt({ id: 'renamed', promptUuid: 'original-uuid' });
+	const { manager, storageService } = await createManager({ initialPrompt: renamed });
+	storageService.getPrompt = async id => createPrompt({ id, promptUuid: 'unrelated-uuid' });
+	try {
+		assert.equal((await (manager as any).loadPromptForOpen('old-id', renamed.promptUuid))?.id, renamed.id);
+	} finally {
+		manager.disposeAll();
+	}
 });
 
 test('savePromptEditorViewState message queues persistence without blocking handler', async () => {
@@ -5235,7 +5268,7 @@ test('savePromptDashboardSectionOrder persists the shared widget order in the ho
 	]]);
 	assert.deepEqual((manager as any).getPromptDashboardSectionOrder(), [
 		['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits', 'dockerContainers'],
-		['status', 'projectBranches', 'parallelBranches', 'todos'],
+		['status', 'projectBranches', 'parallelBranches', 'todos', 'quickNotes'],
 	]);
 });
 
@@ -7424,6 +7457,24 @@ test('Claude binding survives manual send and refresh accounts duration once whi
 	assert.equal(renames, 1);
 	assert.equal(title, 'Claude task');
 	fixture.manager.disposeAll();
+});
+
+/** Фоновая сверка времени обращается к своей папке и не заменяет открытую копию другим статусом. */
+test('Claude refresh and panel synchronization preserve the exact folder with duplicate UUIDs', async () => {
+	const fixture = await createClaudeManager({ id: 'completed', status: 'completed', timeSpentImplementing: 5600 });
+	const copy = createPrompt({ id: 'draft', status: 'draft', promptUuid: fixture.initialPrompt.promptUuid });
+	fixture.storageService.getPromptByUuid = async () => copy;
+	const manager = fixture.manager as any;
+	manager.panelPromptRefs.set('__prompt_editor_singleton__', copy);
+	try {
+		const refreshed = await manager.refreshClaudePrompt(fixture.initialPrompt);
+		assert.equal(refreshed.totalMs, 5600);
+		manager.syncClaudePromptToPanels(fixture.initialPrompt);
+		assert.equal(copy.id, 'draft');
+		assert.equal(copy.status, 'draft');
+	} finally {
+		fixture.manager.disposeAll();
+	}
 });
 
 /** Данные Claude никогда не используются как команда остановки Copilot. */
@@ -11651,4 +11702,44 @@ test('dashboard keeps failed collapse fields through an unrelated successful sav
 		assert.equal((manager as any).isPromptDashboardWidgetCollapsed('activity'), true);
 		assert.equal((manager as any).isPromptDashboardWidgetCollapsed('todos'), false);
 	} finally { manager.disposeAll(); }
+});
+
+test('refreshPromptDashboardWidget skips widgets hidden by the widgets menu and loads them right after they are shown', async () => {
+	const saveGate = createDeferred<void>();
+	const refreshed: string[] = [];
+	const collapsedSent: unknown[] = [];
+	const { manager } = await createManager({
+		stateService: {
+			getPromptDashboardCollapsedSections: () => ({}),
+			getPromptDashboardPreferences: () => ({ hiddenSections: ['todos'] }),
+			savePromptDashboardPreferences: async () => {
+				await saveGate.promise;
+			},
+		},
+	});
+	const panelMessages: any[] = [];
+	const panel = { webview: { postMessage: async (message: unknown) => { panelMessages.push(message); return true; } } };
+	(manager as any).promptDashboardHiddenSections = ['todos'];
+	(manager as any).promptDashboardService = {
+		setDockerWidgetCollapsed: () => undefined,
+		setCollapsedSections: (state: unknown) => { collapsedSent.push(state); },
+		refreshWidgetSnapshot: async (_prompt: unknown, widget: string) => {
+			refreshed.push(widget);
+			return null;
+		},
+	};
+	const prompt = createPrompt({ id: 'task-42', promptUuid: 'uuid-42', projects: ['api'] });
+	const dispatch = (message: unknown) => (manager as any).handleMessage(message, panel, prompt, 'panel-a', () => false, () => undefined);
+
+	await dispatch({ type: 'refreshPromptDashboardWidget', prompt, widget: 'todos', section: 'todos', requestId: 'hidden-refresh' });
+	assert.deepEqual(refreshed, []);
+	assert.equal(panelMessages.some(message => message?.type === 'promptDashboardRequestCompleted' && message.requestId === 'hidden-refresh'), true);
+
+	// Сохранение показа и запрос данных приходят подряд: запись ещё не завершена, а запрос уже не пропускается.
+	const savePromise = dispatch({ type: 'savePromptDashboardPreferences', state: { hiddenSections: [] } });
+	await dispatch({ type: 'refreshPromptDashboardWidget', prompt, widget: 'todos', section: 'todos', requestId: 'shown-refresh' });
+	saveGate.resolve();
+	await savePromise;
+	assert.deepEqual(refreshed, ['todos']);
+	assert.deepEqual(collapsedSent.at(-1), {});
 });

@@ -1,4 +1,6 @@
 import type { DockerContainersStatusFilter, DockerContainersViewMode } from './docker.js';
+import { PROMPT_DASHBOARD_SECTION_KEYS, type PromptDashboardSectionKey } from './promptDashboard.js';
+import { QUICK_NOTE_PALETTE_COLORS, type QuickNoteScope, type QuickNotesBoardGroupBy, type QuickNotesBoardScopeFilter } from './quickNotes.js';
 
 /** Поле сортировки контейнеров, общее для host и webview. */
 export type DockerContainerSortBy = 'name' | 'status' | 'uptime' | 'cpu' | 'memory';
@@ -23,15 +25,42 @@ export interface DashboardTodosWidgetState {
 	search: string;
 }
 
+/** Вид быстрых заметок: область новой заметки, фильтры виджета и параметры доски. */
+export interface DashboardQuickNotesWidgetState {
+	/** Куда сохраняется новая заметка из поля виджета и доски при фильтре «Все». */
+	newNoteScope: QuickNoteScope;
+	/** Поиск и выбранные ключи цветов списка виджета; пустой список — без фильтра. */
+	search: string;
+	colors: string[];
+	/** Группировка, фильтр области и показ выполненных на доске. */
+	boardGroupBy: QuickNotesBoardGroupBy;
+	boardScope: QuickNotesBoardScopeFilter;
+	boardShowDone: boolean;
+	/** Общая высота поля описания в окне заметки (пользовательская настройка). */
+	descriptionHeight?: number;
+}
+
 /** Общие настройки представления виджетов, не зависящие от ширины и выбранного промпта. */
 export interface PromptDashboardPreferences {
 	/** Независимые фильтры и раскрытия Docker и TODO. */
 	docker: DashboardDockerWidgetState;
 	todos: DashboardTodosWidgetState;
+	quickNotes: DashboardQuickNotesWidgetState;
 	/** Явный false сохраняет закрытие узлов Git, раскрытых по умолчанию. */
 	expanded: Record<string, boolean>;
 	/** Показывать в карточке веток все проекты, а не только проекты промпта. */
 	showAllBranchProjects: boolean;
+	/**
+	 * Виджеты, скрытые меню «⋯» панели «Обзор»: не отображаются и не загружают данные. Общая настройка для всех
+	 * рабочих областей и обеих ширин панели, в отличие от сворачивания.
+	 */
+	hiddenSections: PromptDashboardSectionKey[];
+}
+
+/** Известные ключи скрытых виджетов без повторов в порядке секций панели. */
+export function normalizePromptDashboardHiddenSections(value: unknown): PromptDashboardSectionKey[] {
+	const requested = new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []);
+	return PROMPT_DASHBOARD_SECTION_KEYS.filter(section => requested.has(section));
 }
 
 /** Нормализует Docker state без усечения валидных данных; tests/promptDashboardPreferences.test.ts. */
@@ -73,6 +102,31 @@ export function normalizePromptDashboardTodosWidgetState(value: unknown): Dashbo
 	return { selectedFileTypes, search };
 }
 
+/** Нормализует вид быстрых заметок; ключи цветов — палитра, `#rrggbb` или `none`; tests/promptDashboardPreferences.test.ts. */
+export function normalizePromptDashboardQuickNotesWidgetState(value: unknown): DashboardQuickNotesWidgetState {
+	const input: Partial<Record<keyof DashboardQuickNotesWidgetState, unknown>> = value && typeof value === 'object'
+		&& !Array.isArray(value) ? { ...value } : {};
+	const isColorKey = (key: string) => key === 'none' || /^#[0-9a-f]{6}$/.test(key)
+		|| (QUICK_NOTE_PALETTE_COLORS as readonly string[]).includes(key);
+	const colors = Array.isArray(input.colors)
+		? Array.from(new Set(input.colors
+			.filter((item): item is string => typeof item === 'string')
+			.map(item => item.trim().toLowerCase())
+			.filter(isColorKey)))
+		: [];
+	return {
+		newNoteScope: input.newNoteScope === 'global' ? 'global' : 'workspace',
+		search: typeof input.search === 'string' ? input.search : '',
+		colors,
+		boardGroupBy: input.boardGroupBy === 'color' || input.boardGroupBy === 'scope' ? input.boardGroupBy : 'none',
+		boardScope: input.boardScope === 'workspace' || input.boardScope === 'global' ? input.boardScope : 'all',
+		boardShowDone: input.boardShowDone === true,
+		...(typeof input.descriptionHeight === 'number' && Number.isFinite(input.descriptionHeight)
+			? { descriptionHeight: Math.max(84, Math.min(1000, Math.round(input.descriptionHeight))) }
+			: {}),
+	};
+}
+
 /** Проверяет сохранённый JSON и сохраняет закрытые узлы; tests/promptDashboardPreferences.test.ts. */
 export function normalizePromptDashboardPreferences(value: unknown): PromptDashboardPreferences {
 	// Состояние состоит только из известных полей; прототипные ключи не становятся ключами раскрытий.
@@ -91,7 +145,9 @@ export function normalizePromptDashboardPreferences(value: unknown): PromptDashb
 	return {
 		docker: normalizePromptDashboardDockerWidgetState(input.docker),
 		todos: normalizePromptDashboardTodosWidgetState(input.todos),
+		quickNotes: normalizePromptDashboardQuickNotesWidgetState(input.quickNotes),
 		expanded,
 		showAllBranchProjects: input.showAllBranchProjects === true,
+		hiddenSections: normalizePromptDashboardHiddenSections(input.hiddenSections),
 	};
 }

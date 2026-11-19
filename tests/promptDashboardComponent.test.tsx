@@ -41,6 +41,7 @@ import type {
 	PromptDashboardLayoutMode,
 	PromptDashboardSnapshot,
 } from '../src/types/promptDashboard.js';
+import { PROMPT_DASHBOARD_SECTION_KEYS } from '../src/types/promptDashboard.js';
 import type { DockerContainerSummary } from '../src/types/docker.js';
 import {
 	normalizePromptDashboardPreferences,
@@ -2507,7 +2508,7 @@ test('PromptDashboard renders sections in the shared custom order', () => {
 test('PromptDashboard preserves empty columns and accepts pointer and native drops into them', () => {
 	const sections: PromptDashboardSectionKey[] = [
 		'status', 'projectBranches', 'parallelBranches', 'dockerContainers', 'aiAnalysis',
-		'activity', 'reviewRequests', 'projectCommits', 'todos',
+		'activity', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes',
 	];
 	for (const emptyIndex of [0, 1]) {
 		const order: PromptDashboardSectionOrder = emptyIndex === 0 ? [[], sections] : [sections, []];
@@ -2549,7 +2550,7 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 		),
 		[
 			['projectBranches', 'status', 'parallelBranches', 'dockerContainers', 'aiAnalysis'],
-			['activity', 'reviewRequests', 'projectCommits', 'todos'],
+			['activity', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes'],
 		],
 	);
 
@@ -2565,7 +2566,7 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 		),
 		[
 			['status', 'projectBranches', 'parallelBranches', 'aiAnalysis', 'dockerContainers'],
-			['projectCommits', 'activity', 'reviewRequests', 'todos'],
+			['projectCommits', 'activity', 'reviewRequests', 'todos', 'quickNotes'],
 		],
 	);
 });
@@ -3573,4 +3574,19 @@ test('createPromptDashboardLayoutModeReporter reports only profile changes', () 
 		report(mode);
 	}
 	assert.deepEqual(reported, ['single-column', 'two-columns', 'single-column']);
+});
+
+/** Меню «⋯» стоит рядом с обновлением; скрытый виджет не отображается, а все скрытые дают подсказку. */
+test('PromptDashboard hides widgets chosen in the widgets menu', () => {
+	const preferences = { ...normalizePromptDashboardPreferences(undefined), hiddenSections: ['status' as const] };
+	const markup = renderDashboard(createSnapshot([createProject()]), { initialPreferences: preferences });
+	assert.match(markup, /aria-label="Обновить"[^]*aria-label="Виджеты панели" aria-haspopup="menu" aria-expanded="false"/);
+	assert.doesNotMatch(markup, /data-pm-dashboard-section="status"/);
+	assert.match(markup, /data-pm-dashboard-section="activity"/);
+	assert.doesNotMatch(markup, /Все виджеты скрыты/);
+	const allHidden = renderDashboard(createSnapshot([createProject()]), {
+		initialPreferences: { ...preferences, hiddenSections: [...PROMPT_DASHBOARD_SECTION_KEYS] },
+	});
+	assert.doesNotMatch(allHidden, /data-pm-dashboard-section=/);
+	assert.match(allHidden, /Все виджеты скрыты/);
 });

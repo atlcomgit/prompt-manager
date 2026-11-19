@@ -64,6 +64,56 @@ Support: Github Copilot Chat, Codex, Kilo Code, OpenCode CLI, and Claude Code (p
   При наведении на промпт появляется карточка с номером задачи, названием, статусом и полным текстом Markdown.
   Длинный текст прокручивается внутри карточки; Escape закрывает её. С клавиатуры выберите строку через Tab
   и нажмите F2 для перехода к тексту. Просмотр читает сохранённый промпт без открытия редактора и записи файлов.
+- **Аккаунты Codex, Claude Code и Copilot.** Страница «Аккаунты» показывает только установленные
+  расширения и позволяет вручную выбирать аккаунты. Статус-бар отображает известные ограничения
+  Codex и Claude (5ч / 7д); лимиты Claude обновляются раз в 5 минут через официальный CLI `/usage`,
+  а все открытые окна VS Code Tunnel используют одну межпроцессную блокировку и общий кэш.
+  Лимиты Codex запрашивает только окно в фокусе, остальные окна показывают общий результат.
+  Данные `statusLine` и `cachedUsageUtilization` используются как запасные источники; устаревшие значения помечаются.
+  Сборщик `statusLine` в настройках Claude Code отключается настройкой `promptManager.claude.statusLineCollector`
+  или командой «Удалить сборщик statusLine Claude Code» (собственный statusLine пользователя не меняется).
+  Профили Claude изолированы через CLAUDE_CONFIG_DIR; переключение открытых сеансов может потребовать
+  повторного подключения или Reload Window. В блоке GitHub Copilot добавлена полоса кредитов
+  с использованным процентом, количеством использованных запросов и расчётной датой обновления квоты.
+  Статистика берётся из существующего CopilotUsageService; если прямые данные GitHub недоступны,
+  показывается отметка о расчётных значениях. Дата сброса дополнена обратным отсчётом (дни и часы),
+  который обновляется раз в минуту без сетевых запросов. Страница прокручивается по вертикали,
+  если блоки не помещаются в высоту вкладки. Подробнее: [Аккаунты](docs/rules/Аккаунты/Аккаунты_без_номера.md).
+- **Быстрые заметки.** Виджет в панели «Обзор» на странице промпта: короткие заметки, которые потом
+  в один клик превращаются в промпт. Щёлкните в поле «Новая заметка…», введите текст и нажмите Enter — заметка
+  встанет первой, а курсор останется в поле для следующей; Shift+Enter добавляет строку,
+  Ctrl+Enter добавит заметку и сразу откроет её окно.
+  Если первая строка новой заметки содержит 100 или больше символов, весь текст автоматически сохраняется
+  в описании, а короткое название генерируется через внутренний AI после сохранения.
+  Пока название генерируется, в конце поля названия открытого окна заметки показывается лоадер. При отсутствии модели
+  остаётся короткое название из начала текста; уже отредактированные вручную названия AI не перезаписывает.
+  Переключатель у поля выбирает область: «Проект» (`.vscode/prompt-manager/quick-notes.json`) или «Глобальная»
+  (`~/.vscode/prompt-manager/quick-notes.json`); обе области показываются одним списком со значком области.
+  В строке заметки — цвет, отметка выполнения, прогресс чек-листа «2/5» (раскрывает пункты для отметки),
+  значки описания, файлов и связанного промпта. Порядок меняется перетаскиванием или стрелками на ручке,
+  выполненные собираются в блок «Выполнено (N)», есть поиск и фильтр по цвету.
+  Кнопка «Открыть» (или двойной щелчок) открывает окно заметки: название, цвет, область, описание, чек-лист
+  с кнопкой «Добавить предложение AI» (AI предлагает новый пункт по заметке, текст можно перегенерировать
+  или поправить), файлы плитками с последней плиткой «+» (выбор файлов, вставка изображения или путей из буфера,
+  перетаскивание из файлового менеджера локального компьютера прямо в блок «Файлы») и «В промпт».
+  Через VS Code Remote Tunnel в меню «Добавить» есть отдельные варианты «С этого компьютера…»
+  (браузерный выбор файлов на ПК) и «С сервера / проекта…» (файлы Ubuntu).
+  Браузерные файлы пересылаются частями по 512 КиБ (до 64 МиБ на файл, до 20 файлов и 256 МиБ за выбор),
+  с проверкой полноты и сохранением во временный черновик, без передачи локальных путей в Ubuntu.
+  При «Убрать файл» несохранённая копия немедленно удаляется из временной папки сервера;
+  сохранённые вложения физически удаляются после «Сохранить», чтобы «Отмена» могла восстановить их.
+  Закрытие без сохранения удаляет временные вложения, удаление заметки — её папку файлов.
+  Высота поля «Описание» сохраняется глобально для всех заметок и проектов через Settings Sync.
+  Правки копятся в черновике и записываются по «Сохранить»
+  (Ctrl+S); Escape и «Отмена» спрашивают о несохранённом, Alt+← / Alt+→ переходят к соседней заметке.
+  «В промпт» создаёт черновик промпта без открытия редактора: название — из заметки, текст — из описания
+  и чек-листа, файлы копируются в `context/` промпта; заметка хранит ссылку на промпт. При удалении
+  связанного промпта ссылка сразу снимается с заметки во всех открытых панелях.
+  Кнопка доски в заголовке виджета открывает доску стикеров отдельной вкладкой редактора: поиск, фильтр по цвету и области,
+  группировка «Сетка / По цвету / По области», добавление прямо на доске (клавиша N; первая строка — название,
+  остальные — описание; поле закрывается, когда фокус уходит в другое место, неотправленный текст сохраняется), перенос стикеров мышью и Alt+стрелками. В сетке порядок по строкам,
+  при перетаскивании видна карточка у указателя, выделение текста отключено;
+  между группами сохраняются смена цвета и области.
 - **План на вкладке «Процесс».** В заголовке блока «План» есть переключатель «Краткий / Полный».
   «Полный» показывает весь исходный план. «Краткий» включён по умолчанию у новых промптов
   и оставляет только Markdown-заголовки и пункты чек-листа `[ ]` / `[x]` с их текстом и вложенностью; пояснения и блоки кода скрыты.
@@ -144,7 +194,7 @@ Support: Github Copilot Chat, Codex, Kilo Code, OpenCode CLI, and Claude Code (p
   Настройка `claudeCode.preferredLocation` переключается на `sidebar` с сохранением её уровня workspace/global;
   уже открытые вкладки не закрываются автоматически и могут переиспользоваться самим Claude.
   Сквозная проверка ещё не проведена.
-- **Prompt Editor** for context, files, chat launch, Git-aware execution, plan, and report. Prompt-dashboard cards can be collapsed and reordered from their headers, hidden cards pause their own refresh and AI review work until reopened, restored prompt tabs are rebound to the singleton editor after VS Code reload so a stale duplicate webview does not keep a broken save loop, and the prompt-page `AI model` picker mirrors the promoted Copilot Chat picker list instead of flattening the whole catalog, restores visible Custom Endpoint entries from VS Code's cached model catalog when needed, and respects provider-scoped models or whole groups hidden in the VS Code picker, including a model that was already saved on the prompt. When Kilo Code or OpenAI Codex is selected as the target chat, the AI model picker is hidden, Chat Mode stays available, and a per-prompt Xdotool autostart flag is shown. Карточки prompt-dashboard можно сворачивать и переставлять из шапки; скрытые карточки не обновляются и не запускают AI review, пока их снова не раскроют, восстановленная после перезапуска вкладка редактора снова привязывается к singleton-странице и не создаёт вторую нерабочую webview, а поле `Модель ИИ` повторяет promoted-список Copilot Chat picker вместо полного каталога, восстанавливает видимые Custom Endpoint модели из cached catalog при необходимости и не подтягивает provider-scoped модели из скрытых в самом VS Code групп, даже если такая модель уже была сохранена в промпте. Если целевым чатом выбран Kilo Code или OpenAI Codex, поле модели ИИ скрывается, `Режим чата` остаётся доступным, а флаг автостарта через Xdotool показывается для конкретного промпта.
+- **Prompt Editor** for context, files, chat launch, Git-aware execution, plan, and report. Prompt-dashboard cards can be collapsed and reordered from their headers, hidden cards pause their own refresh and AI review work until reopened, the `⋯` menu next to the refresh button lists every widget and hides unchecked ones for all workspaces (hidden widgets load no data until shown again), restored prompt tabs are rebound to the singleton editor after VS Code reload so a stale duplicate webview does not keep a broken save loop, and the prompt-page `AI model` picker mirrors the promoted Copilot Chat picker list instead of flattening the whole catalog, restores visible Custom Endpoint entries from VS Code's cached model catalog when needed, and respects provider-scoped models or whole groups hidden in the VS Code picker, including a model that was already saved on the prompt. When Kilo Code or OpenAI Codex is selected as the target chat, the AI model picker is hidden, Chat Mode stays available, and a per-prompt Xdotool autostart flag is shown. Карточки prompt-dashboard можно сворачивать и переставлять из шапки; скрытые карточки не обновляются и не запускают AI review, пока их снова не раскроют, меню `⋯` рядом с кнопкой обновления показывает все виджеты и скрывает виджеты со снятой отметкой во всех рабочих областях (скрытый виджет не загружает данные, пока его снова не покажут), восстановленная после перезапуска вкладка редактора снова привязывается к singleton-странице и не создаёт вторую нерабочую webview, а поле `Модель ИИ` повторяет promoted-список Copilot Chat picker вместо полного каталога, восстанавливает видимые Custom Endpoint модели из cached catalog при необходимости и не подтягивает provider-scoped модели из скрытых в самом VS Code групп, даже если такая модель уже была сохранена в промпте. Если целевым чатом выбран Kilo Code или OpenAI Codex, поле модели ИИ скрывается, `Режим чата` остаётся доступным, а флаг автостарта через Xdotool показывается для конкретного промпта.
 - **Editor layout and Settings Sync.** Reorder sections on Main and Process with the header handle or arrow keys.
   Both orders and all widget preferences are shared; only Main section expansion is global.
   На обеих вкладках разделы можно переставлять за ручку в шапке, стрелками или Home/End; Escape отменяет перенос.
@@ -268,6 +318,9 @@ Prompt Manager stores prompt assets inside the workspace, so they travel with th
 ```text
 .vscode/prompt-manager/
 ├── task-active.json
+├── quick-notes.json
+├── quick-notes-files/
+│   └── <id заметки>/
 ├── my-prompt/
 │   ├── config.json
 │   ├── prompt.md
@@ -308,6 +361,13 @@ Prompt Manager stores prompt assets inside the workspace, so they travel with th
 ещё не сохранённого промпта файл содержит `null`. Быстрое переключение сохраняет последний выбор;
 запись выполняется в фоне и заменяет файл целиком, без промежуточного неполного JSON.
 Название и номер берутся из сохранённой конфигурации при выборе или открытии, а не при каждом вводе текста.
+
+Быстрые заметки проекта хранятся в `quick-notes.json`, их файлы — копиями в `quick-notes-files/<id заметки>/`.
+Глобальные заметки лежат так же в `~/.vscode/prompt-manager/` (при работе через Tunnel — в домашней папке
+удалённой машины). Файлы читаемые (JSON с отступами), неизвестные поля сохраняются, запись атомарная;
+повреждённый файл не перезаписывается — виджет предлагает открыть его. Изменения из другого окна VS Code
+появляются без перезагрузки, а сохранение заметки, изменённой в другом окне, предлагает загрузить актуальную
+версию или перезаписать её. Если `.vscode/prompt-manager` хранится в git, копии файлов заметок попадут в репозиторий.
 
 ## Разработка через VS Code Tunnel
 

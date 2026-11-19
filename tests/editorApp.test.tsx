@@ -345,7 +345,7 @@ test('resolveInitialPromptDashboardSectionOrder prefers boot state over retained
 			),
 			[
 				['aiAnalysis', 'activity', 'projectBranches', 'parallelBranches', 'dockerContainers'],
-				['status', 'reviewRequests', 'projectCommits', 'todos'],
+				['status', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes'],
 			],
 		);
 
@@ -356,7 +356,7 @@ test('resolveInitialPromptDashboardSectionOrder prefers boot state over retained
 			),
 			[
 				['projectBranches', 'activity', 'parallelBranches', 'dockerContainers', 'aiAnalysis'],
-				['status', 'reviewRequests', 'projectCommits', 'todos'],
+				['status', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes'],
 			],
 		);
 	});
@@ -989,5 +989,21 @@ test('EditorApp renders a standalone movable status section with translated summ
 		assert.doesNotMatch(status, /status\.in-progress/);
 		assert.match(status, /aria-keyshortcuts=/);
 		assert.doesNotMatch(basic, /aria-pressed=/);
+	});
+});
+
+/** Снова показанный меню «⋯» виджет загружается как раскрытый, но свёрнутый остаётся без загрузки. */
+test('resolvePromptDashboardShownSectionRequest loads a shown widget unless it stays collapsed or hidden', async () => {
+	await withEditorAppEnvironment(async () => {
+		const { resolvePromptDashboardShownSectionRequest } = await import('../src/webview/editor/EditorApp.js');
+		const base = { mode: 'full' as const, snapshot: null };
+		assert.deepEqual(resolvePromptDashboardShownSectionRequest({ ...base, collapsedSections: {}, hiddenSections: [], section: 'status' }), { type: 'refresh' });
+		assert.deepEqual(
+			resolvePromptDashboardShownSectionRequest({ ...base, collapsedSections: {}, hiddenSections: [], section: 'projectBranches' }),
+			{ type: 'widget', widget: 'projects' },
+		);
+		assert.equal(resolvePromptDashboardShownSectionRequest({ ...base, collapsedSections: { status: true }, hiddenSections: [], section: 'status' }), null);
+		assert.equal(resolvePromptDashboardShownSectionRequest({ ...base, collapsedSections: {}, hiddenSections: ['status'], section: 'status' }), null);
+		assert.equal(resolvePromptDashboardShownSectionRequest({ ...base, collapsedSections: {}, hiddenSections: [], section: 'quickNotes' }), null);
 	});
 });

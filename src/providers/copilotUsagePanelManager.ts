@@ -1,241 +1,343 @@
 /**
- * Copilot Usage Panel Manager — отдельная webview-страница
- * с детальной статистикой использования Copilot Premium.
+ * Страница «Аккаунты»: профили Codex и Claude Code, их лимиты и прежний выбор аккаунта GitHub Copilot.
+ * Webview получает только метаданные и проценты лимитов, никогда — токены OAuth.
  */
-
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../utils/webviewHtml.js';
-import type { CopilotUsageAccountSummary, CopilotUsageService, CopilotUsageSnapshot } from '../services/copilotUsageService.js';
 import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
+import type { CopilotUsageService } from '../services/copilotUsageService.js';
+import type { CodexAccountService } from '../services/codexAccountService.js';
+import { CodexRateLimitService } from '../services/codexRateLimitService.js';
+import type { ClaudeAccountService } from '../services/claudeAccountService.js';
+import { ClaudeUsageService } from '../services/claudeUsageService.js';
+import { resolveAccountProviderAvailability } from '../utils/accountProviders.js';
+import { buildCopilotCreditsSnapshot } from '../utils/copilotCredits.js';
+import type { CopilotUsageData } from '../services/copilotUsageService.js';
 
-let currentPanel: vscode.WebviewPanel | undefined;
-let panelRefreshTimer: ReturnType<typeof setInterval> | undefined;
-const PANEL_REFRESH_INTERVAL_MS = 30 * 1000;
+/** Одна вкладка «Аккаунты» на окно: обработка действий webview и периодическая отправка данных; tests/accountsPanelManager.test.ts. */
+export class CopilotUsagePanelManager implements vscode.Disposable {
+    private panel: vscode.WebviewPanel | null = null;
+    private readonly disposables: vscode.Disposable[] = [];
+    private refreshTimer: ReturnType<typeof setInterval> | null = null;
+    private refreshing = false;
+    private refreshQueued = false;
 
-export class CopilotUsagePanelManager {
-	private readonly disposables: vscode.Disposable[] = [];
+    constructor(
+        private readonly extensionUri: vscode.Uri,
+        private readonly usageService: CopilotUsageService,
+        private readonly codexAccounts: CodexAccountService,
+        private readonly codexLimits: CodexRateLimitService,
+        private readonly claudeAccounts: ClaudeAccountService,
+        private readonly claudeUsage: ClaudeUsageService,
+        private readonly onCopilotAccountChanged?: (accountLabel: string) => Promise<void> | void,
+    ) {
+        this.disposables.push(this.codexAccounts.onDidChange(() => {
+            this.codexLimits.invalidate();
+            void this.pushData(false);
+        }));
+        this.disposables.push(this.usageService.onDidChangeAccountSwitchState(() => void this.pushData(false)));
+        this.disposables.push(this.usageService.onDidChangeUsage(() => void this.pushData(false)));
+        this.disposables.push(this.claudeAccounts.onDidChange(() => {
+            this.claudeUsage.invalidate();
+            void this.pushData(false);
+        }));
+        this.disposables.push(vscode.extensions.onDidChange(() => void this.pushData(false)));
+    }
 
-	constructor(
-		private readonly extensionUri: vscode.Uri,
-		private readonly usageService: CopilotUsageService,
-		private readonly onAccountSwitchCompleted?: (accountLabel: string) => Promise<void> | void,
-	) {
-		this.disposables.push(
-			this.usageService.onDidChangeAccountSwitchState((state) => {
-				if (!currentPanel) {
-					return;
-				}
-				void currentPanel.webview.postMessage({ type: 'copilotUsage.accountSwitching', state });
-			}),
-		);
-	}
+    /** Открывает вкладку или показывает уже открытую и обновляет её данные. */
+    async show(): Promise<void> {
+        if (this.panel) {
+            this.panel.reveal(vscode.ViewColumn.One);
+            void this.pushData(false);
+            return;
+        }
+        const panel = vscode.window.createWebviewPanel('promptManager.copilotUsage', 'Аккаунты', vscode.ViewColumn.One, {
+            enableScripts: true,
+            retainContextWhenHidden: true,
+            localResourceRoots: [this.extensionUri],
+        });
+        panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'sidebar-icon.svg');
+        panel.webview.html = getWebviewHtml(
+            panel.webview, this.extensionUri, 'dist/webview/copilotUsage.js', 'Аккаунты', vscode.env.language,
+        );
+        this.panel = panel;
+        this.disposables.push(panel.onDidDispose(() => {
+            this.stopRefresh();
+            if (this.panel === panel) this.panel = null;
+        }));
+        this.disposables.push(panel.webview.onDidReceiveMessage(async (message: any) => {
+            if (this.panel !== panel || !message || typeof message.type !== 'string') return;
+            try {
+                switch (message.type) {
+                    case 'accounts.ready':
+                        await this.pushData(false);
+                        break;
+                    case 'accounts.refresh':
+                        this.codexLimits.invalidate();
+                        this.claudeUsage.invalidate();
+                        if (vscode.extensions.getExtension('anthropic.claude-code')) {
+                            await this.claudeAccounts.refreshAccounts();
+                            const state = this.claudeAccounts.getView();
+                            const active = this.claudeAccounts.getProfileDirectories().find(p => p.id === state.activeId);
+                            if (active) {
+                                // Ручное обновление тоже соблюдает общую блокировку окон и минимальный интервал в одну минуту.
+                                await this.claudeUsage.refreshActive(active.id, active.directory, true)
+                                    .catch(() => undefined);
+                            }
+                        }
+                        await this.pushData(true);
+                        break;
+                    case 'codex.add':
+                        await this.codexAccounts.addAccount();
+                        await this.pushData(false);
+                        break;
+                    case 'codex.switch': {
+                        const requested = this.codexAccounts.getView().profiles.find(p => p.id === message.id);
+                        if (!requested) throw new Error('Аккаунт Codex не найден.');
+                        const confirmation = await vscode.window.showWarningMessage(
+                            'Выбрать Codex-аккаунт «' + requested.label + '»? Открытые сессии Codex продолжат работать с прежней авторизацией до перезапуска.',
+                            { modal: true }, 'Выбрать аккаунт',
+                        );
+                        // Отмена тоже отвечает webview: иначе кнопки «Выбрать» остаются заблокированными.
+                        if (confirmation !== 'Выбрать аккаунт') {
+                            await this.pushData(false);
+                            break;
+                        }
+                        const result = await this.codexAccounts.switchAccount(requested.id);
+                        this.codexLimits.invalidate();
+                        await panel.webview.postMessage({ type: 'accounts.result', message: result.message, warning: !result.applied });
+                        await this.pushData(true);
+                        break;
+                    }
+                    case 'codex.rename': {
+                        const item = this.codexAccounts.getView().profiles.find(p => p.id === message.id);
+                        if (!item) break;
+                        const label = await vscode.window.showInputBox({ title: 'Название аккаунта Codex', value: item.label });
+                        if (label !== undefined) await this.codexAccounts.renameAccount(item.id, label);
+                        break;
+                    }
+                    case 'codex.remove': {
+                        const item = this.codexAccounts.getView().profiles.find(p => p.id === message.id);
+                        if (!item) break;
+                        const accepted = await vscode.window.showWarningMessage(
+                            'Удалить сохранённый профиль «' + item.label + '»? Аккаунт ChatGPT не удаляется.',
+                            { modal: true }, 'Удалить профиль',
+                        );
+                        if (accepted === 'Удалить профиль') await this.codexAccounts.removeAccount(item.id);
+                        break;
+                    }
+                    case 'codex.restartExtensions': {
+                        const accepted = await vscode.window.showWarningMessage(
+                            'Перезапустить Extension Host? Это прервёт работу всех расширений в этом VS Code, включая других агентов.',
+                            { modal: true }, 'Перезапустить расширения',
+                        );
+                        if (accepted === 'Перезапустить расширения') {
+                            const commands = await vscode.commands.getCommands(true);
+                            const restart = commands.includes('workbench.action.restartExtensionHost')
+                                ? 'workbench.action.restartExtensionHost'
+                                : commands.includes('workbench.extensions.action.restartExtensionHost')
+                                    ? 'workbench.extensions.action.restartExtensionHost' : null;
+                            if (!restart) throw new Error('Команда перезапуска Extension Host не найдена. Используйте «Reload Window».');
+                            await vscode.commands.executeCommand(restart);
+                        }
+                        break;
+                    }
+                    case 'codex.reloadWindow': {
+                        const accepted = await vscode.window.showWarningMessage(
+                            'Перезагрузить окно VS Code для применения аккаунта Codex? Несохранённая работа и активные агенты могут быть прерваны.',
+                            { modal: true }, 'Reload Window',
+                        );
+                        if (accepted === 'Reload Window') await vscode.commands.executeCommand('workbench.action.reloadWindow');
+                        break;
+                    }
+                    case 'claude.add':
+                        if (!vscode.extensions.getExtension('anthropic.claude-code')) break;
+                        await this.claudeAccounts.addAccount();
+                        await this.pushData(false);
+                        break;
+                    case 'claude.switch': {
+                        if (!vscode.extensions.getExtension('anthropic.claude-code')) break;
+                        const selected = this.claudeAccounts.getView().profiles.find(p => p.id === message.id);
+                        if (!selected) throw new Error('Профиль Claude не найден.');
+                        const confirmation = await vscode.window.showWarningMessage(
+                            'Выбрать аккаунт Claude «' + selected.label
+                                + '»? Новые сеансы получат выбранную конфигурацию, но открытые сеансы не переключатся. '
+                                + 'Изменение пользовательской настройки влияет на другие окна VS Code.',
+                            { modal: true }, 'Выбрать аккаунт',
+                        );
+                        // Отмена тоже отвечает webview: иначе кнопки «Выбрать» остаются заблокированными.
+                        if (confirmation !== 'Выбрать аккаунт') {
+                            await this.pushData(false);
+                            break;
+                        }
+                        const result = await this.claudeAccounts.switchAccount(selected.id);
+                        this.claudeUsage.invalidate();
+                        await panel.webview.postMessage({ type: 'accounts.result', message: result.message, warning: !result.applied });
+                        await this.pushData(true);
+                        break;
+                    }
+                    case 'claude.rename': {
+                        const profile = this.claudeAccounts.getView().profiles.find(p => p.id === message.id);
+                        if (!profile) break;
+                        const label = await vscode.window.showInputBox({ title: 'Название аккаунта Claude Code', value: profile.label });
+                        if (label !== undefined) await this.claudeAccounts.renameAccount(profile.id, label);
+                        break;
+                    }
+                    case 'claude.remove': {
+                        const profile = this.claudeAccounts.getView().profiles.find(p => p.id === message.id);
+                        if (!profile) break;
+                        const answer = await vscode.window.showWarningMessage(
+                            'Удалить профиль Claude «' + profile.label
+                                + '» вместе с его отдельными данными авторизации и настройками? Это необратимо.',
+                            { modal: true }, 'Удалить профиль',
+                        );
+                        if (answer === 'Удалить профиль') await this.claudeAccounts.removeAccount(profile.id);
+                        break;
+                    }
+                    case 'claude.open':
+                        await vscode.commands.executeCommand('claude-vscode.sidebar.open');
+                        break;
+                    case 'claude.reloadWindow': {
+                        const answer = await vscode.window.showWarningMessage(
+                            'Перезагрузить окно VS Code для применения профиля Claude? Это прервёт активные задания и расширения.',
+                            { modal: true }, 'Reload Window',
+                        );
+                        if (answer === 'Reload Window') await vscode.commands.executeCommand('workbench.action.reloadWindow');
+                        break;
+                    }
+                    case 'copilot.switch': {
+                        const result = await this.usageService.switchCopilotChatAccountInteractively();
+                        if (!result.changed) {
+                            if (!result.cancelled) await panel.webview.postMessage({ type: 'accounts.result', message: result.message });
+                            break;
+                        }
+                        const completion = await this.usageService.completeAccountSwitch(result.accountLabel || '');
+                        if (this.onCopilotAccountChanged) await this.onCopilotAccountChanged(completion.accountLabel);
+                        await panel.webview.postMessage({ type: 'accounts.result', message: completion.message });
+                        await this.pushData(false);
+                        break;
+                    }
+                    case 'copilot.auth':
+                        await this.usageService.authenticate();
+                        await this.pushData(false);
+                        break;
+                }
+            } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                appendPromptManagerLog('[Accounts] action failed: ' + detail);
+                await panel.webview.postMessage({ type: 'accounts.result', message: detail, warning: true });
+                await this.pushData(false);
+            }
+        }));
+        this.refreshTimer = setInterval(() => { if (this.panel === panel) void this.pushData(false); }, 60_000);
+        void this.pushData(false);
+    }
 
-	async show(): Promise<void> {
-		appendPromptManagerLog(`[${new Date().toISOString()}] [panel] show() called, currentPanel=${!!currentPanel}`);
-		if (currentPanel) {
-			currentPanel.reveal(vscode.ViewColumn.One);
-			await this.pushUsageToWebview(currentPanel.webview, false);
-			this.startPanelRefresh(currentPanel.webview);
-			return;
-		}
+    /** Кредиты Copilot из кэша CopilotUsageService (не старше 5 минут) без отдельного запроса квоты; ошибка — прежний кэш. */
+    private async readCopilotCredits(force: boolean): Promise<CopilotUsageData | null> {
+        const cached = this.usageService.getCachedData();
+        const ageMs = cached ? Date.now() - Date.parse(cached.lastUpdated) : Infinity;
+        if (!force && cached && Number.isFinite(ageMs) && ageMs >= 0 && ageMs < 5 * 60_000) {
+            return cached;
+        }
+        try {
+            return await this.usageService.fetchUsage(force);
+        } catch (error) {
+            appendPromptManagerLog('[Accounts] Copilot credits refresh failed: '
+                + (error instanceof Error ? error.message : String(error)));
+            return cached;
+        }
+    }
 
-		const panel = vscode.window.createWebviewPanel(
-			'promptManager.copilotUsage',
-			'Copilot Premium Usage',
-			vscode.ViewColumn.One,
-			{
-				enableScripts: true,
-				retainContextWhenHidden: true,
-				localResourceRoots: [this.extensionUri],
-			}
-		);
+    /**
+     * Собирает и отправляет данные страницы (accounts.data); повторный вызов во время сборки ставится в очередь.
+     * force — принудительное обновление лимитов; при ошибке webview получает accounts.error.
+     */
+    private async pushData(force: boolean): Promise<void> {
+        const panel = this.panel;
+        if (!panel) return;
+        if (this.refreshing) { this.refreshQueued = true; return; }
+        this.refreshing = true;
+        try {
+            const installed = resolveAccountProviderAvailability(id => vscode.extensions.getExtension(id));
+            // Авторизация читается до представления: активный профиль Codex определяется по файлу на диске.
+            const auth = installed.codex ? await this.codexAccounts.getActiveAuth() : null;
+            const codex = installed.codex ? this.codexAccounts.getView() : null;
+            const claude = installed.claude ? this.claudeAccounts.getView() : null;
+            const [copilot, copilotUsage] = await Promise.all([
+                installed.copilot ? this.usageService.getAccountBindingSummary().catch(() => null) : Promise.resolve(null),
+                installed.copilot && !this.usageService.getAccountSwitchState().isSwitching
+                    ? this.readCopilotCredits(force) : Promise.resolve(null),
+            ]);
+            if (claude && !force && vscode.window.state?.focused !== false) {
+                const active = this.claudeAccounts.getProfileDirectories().find(p => p.id === claude.activeId);
+                if (active) {
+                    // Открытие страницы не ждёт процесс CLI: статус-бар и страница читают общий кэш.
+                    void this.claudeUsage.refreshActive(active.id, active.directory)
+                        .then(result => {
+                            if (result?.reason === 'updated' && this.panel === panel) void this.pushData(false);
+                        })
+                        .catch(() => undefined);
+                }
+            }
+            const [limits, claudeLimits] = await Promise.all([
+                // Фоновое окно не запускает Codex: берёт общий кэш, опрашивает окно в фокусе или «Обновить».
+                codex ? this.codexLimits.get(codex.activeId, auth, force, force || vscode.window.state?.focused !== false)
+                    : Promise.resolve(null),
+                claude ? Promise.all(this.claudeAccounts.getProfileDirectories().map(async profile => ({
+                    id: profile.id,
+                    limits: await this.claudeUsage.read(profile.id, profile.directory, force),
+                }))) : Promise.resolve([]),
+            ]);
+            if (this.panel !== panel) return;
+            await panel.webview.postMessage({
+                type: 'accounts.data',
+                data: {
+                    installed,
+                    codex: codex ? { ...codex,
+                        otherSwitcherInstalled: Boolean(vscode.extensions.getExtension('goosenest.codex-profiles')),
+                        limits,
+                    } : null,
+                    claude: claude ? { ...claude, limitsByProfile: Object.fromEntries(claudeLimits.map(x => [x.id, x.limits])) } : null,
+                    copilot: installed.copilot ? {
+                        active: copilot?.copilotPreferredGitHubLabel || null,
+                        session: copilot?.activeGithubSessionAccountLabel || null,
+                        accounts: copilot?.availableGitHubAccounts || [],
+                        issue: copilot?.githubSessionIssue || null,
+                        switching: this.usageService.getAccountSwitchState().isSwitching,
+                        credits: buildCopilotCreditsSnapshot(copilotUsage),
+                    } : null,
+                },
+            });
+        } catch (error) {
+            appendPromptManagerLog('[Accounts] refresh failed: ' + (error instanceof Error ? error.message : String(error)));
+            if (this.panel === panel) {
+                await panel.webview.postMessage({
+                    type: 'accounts.error',
+                    message: 'Не удалось получить сведения об аккаунтах. Повторите загрузку.',
+                });
+            }
+        } finally {
+            this.refreshing = false;
+            if (this.refreshQueued) {
+                this.refreshQueued = false;
+                void this.pushData(false);
+            }
+        }
+    }
 
-		panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'sidebar-icon.svg');
-		panel.webview.html = getWebviewHtml(
-			panel.webview,
-			this.extensionUri,
-			'dist/webview/copilotUsage.js',
-			'Copilot Premium Usage',
-			vscode.env.language,
-		);
+    /** Останавливает периодическое обновление открытой вкладки. */
+    private stopRefresh(): void {
+        if (this.refreshTimer) clearInterval(this.refreshTimer);
+        this.refreshTimer = null;
+    }
 
-		currentPanel = panel;
-
-		panel.onDidDispose(() => {
-			this.stopPanelRefresh();
-			currentPanel = undefined;
-		});
-
-		panel.webview.onDidReceiveMessage(async (msg: any) => {
-			if (!msg || typeof msg !== 'object') {
-				return;
-			}
-
-			if (msg.type === 'copilotUsage.ready') {
-				await this.pushUsageToWebview(panel.webview, false);
-				return;
-			}
-
-			if (msg.type === 'copilotUsage.refresh') {
-				await this.pushUsageToWebview(panel.webview, true);
-				await panel.webview.postMessage({ type: 'copilotUsage.refreshed', at: new Date().toISOString() });
-				return;
-			}
-
-			if (msg.type === 'copilotUsage.auth') {
-				await this.usageService.authenticate();
-				await this.pushUsageToWebview(panel.webview, true);
-				return;
-			}
-
-			if (msg.type === 'copilotUsage.switchAccount') {
-				appendPromptManagerLog(`[${new Date().toISOString()}] [panel] switch account requested from Copilot Premium Usage page`);
-				const result = await this.usageService.switchCopilotChatAccountInteractively();
-
-				if (!result.changed) {
-					appendPromptManagerLog(
-						`[${new Date().toISOString()}] [panel] switch account finished without change cancelled=${result.cancelled ? 'true' : 'false'} message=${result.message}`,
-					);
-					if (!result.cancelled) {
-						await panel.webview.postMessage({ type: 'copilotUsage.accountSwitchResult', result });
-					}
-					return;
-				}
-
-				this.stopPanelRefresh();
-				try {
-					const completion = await this.usageService.completeAccountSwitch(result.accountLabel || '');
-					if (this.onAccountSwitchCompleted) {
-						try {
-							await this.onAccountSwitchCompleted(completion.accountLabel);
-						} catch (error) {
-							const refreshMessage = error instanceof Error ? error.message : String(error);
-							appendPromptManagerLog(
-								`[${new Date().toISOString()}] [panel] post-switch model refresh failed: ${refreshMessage}`,
-							);
-						}
-					}
-					await this.pushUsageToWebview(panel.webview, false, completion);
-					await panel.webview.postMessage({
-						type: 'copilotUsage.accountSwitchResult',
-						result: {
-							changed: true,
-							message: completion.message,
-							accountLabel: completion.accountLabel,
-						},
-					});
-					appendPromptManagerLog(
-						`[${new Date().toISOString()}] [panel] switch account completed for ${completion.accountLabel}`,
-					);
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					appendPromptManagerLog(`[${new Date().toISOString()}] [panel] switch account failed: ${message}`);
-					await panel.webview.postMessage({
-						type: 'copilotUsage.accountSwitchResult',
-						result: { changed: false, message },
-					});
-				} finally {
-					if (currentPanel === panel) {
-						this.startPanelRefresh(panel.webview);
-					}
-				}
-				return;
-			}
-
-			if (msg.type === 'copilotUsage.openSettings') {
-				await vscode.commands.executeCommand('workbench.action.openSettings', 'promptManager.copilot');
-				return;
-			}
-
-			if (msg.type === 'copilotUsage.openGitHub') {
-				await vscode.env.openExternal(vscode.Uri.parse('https://github.com/settings/copilot'));
-			}
-		});
-
-		try {
-			await this.pushUsageToWebview(panel.webview, false);
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			appendPromptManagerLog(`[${new Date().toISOString()}] [panel] initial pushUsageToWebview ERROR: ${msg}`);
-		}
-		this.startPanelRefresh(panel.webview);
-		appendPromptManagerLog(`[${new Date().toISOString()}] [panel] show() completed, panel created`);
-	}
-
-	private startPanelRefresh(webview: vscode.Webview): void {
-		this.stopPanelRefresh();
-		panelRefreshTimer = setInterval(() => {
-			void this.pushUsageToWebview(webview, false);
-		}, PANEL_REFRESH_INTERVAL_MS);
-	}
-
-	private stopPanelRefresh(): void {
-		if (panelRefreshTimer) {
-			clearInterval(panelRefreshTimer);
-			panelRefreshTimer = undefined;
-		}
-	}
-
-	private async pushUsageToWebview(webview: vscode.Webview, forceRefresh: boolean, snapshot?: CopilotUsageSnapshot): Promise<void> {
-		let resolvedSnapshot: CopilotUsageSnapshot;
-		try {
-			resolvedSnapshot = snapshot ?? await this.usageService.getUsageSnapshot(forceRefresh);
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			appendPromptManagerLog(`[${new Date().toISOString()}] [panel] getUsageSnapshot ERROR: ${msg}`);
-			return;
-		}
-		const { usage, accountSummary, debugLog } = resolvedSnapshot;
-		const switchState = this.usageService.getAccountSwitchState();
-		const now = new Date();
-		const start = new Date(usage.periodStart);
-		const end = new Date(usage.periodEnd);
-		const daysPassed = Math.max(1, Math.ceil((now.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
-		const daysRemaining = Math.max(0, Math.ceil((end.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
-		const percent = usage.limit > 0 ? (usage.used / usage.limit) * 100 : 0;
-		const remaining = Math.max(0, usage.limit - usage.used);
-		const recommendedPerDay = daysRemaining > 0 ? Math.round((remaining / daysRemaining) * 10) / 10 : 0;
-
-		const timeline = usage.snapshots.length > 0
-			? usage.snapshots
-			: [{ date: new Date().toISOString().slice(0, 10), used: usage.used, limit: usage.limit }];
-		appendPromptManagerLog(
-			`[${new Date().toISOString()}] [panel] push usage to webview forceRefresh=${forceRefresh} active=${accountSummary.activeGithubSessionAccountLabel || 'none'} used=${usage.used}/${usage.limit} switching=${switchState.isSwitching}`,
-		);
-
-		await webview.postMessage({
-			type: 'copilotUsage.data',
-			data: {
-				...usage,
-				...this.buildAccountSummaryPayload(accountSummary),
-				accountSwitchState: switchState,
-				debugLog,
-				percent,
-				remaining,
-				daysPassed,
-				daysRemaining,
-				recommendedPerDay,
-				timeline,
-			},
-		});
-	}
-
-	private buildAccountSummaryPayload(accountSummary: CopilotUsageAccountSummary): Record<string, unknown> {
-		return {
-			copilotPreferredGitHubLabel: accountSummary.copilotPreferredGitHubLabel,
-			promptManagerPreferredGitHubLabel: accountSummary.promptManagerPreferredGitHubLabel,
-			activeGithubSessionAccountLabel: accountSummary.activeGithubSessionAccountLabel,
-			githubSessionIssue: accountSummary.githubSessionIssue,
-			availableGitHubAccounts: accountSummary.availableGitHubAccounts,
-		};
-	}
-
-	dispose(): void {
-		this.stopPanelRefresh();
-		for (const disposable of this.disposables) {
-			disposable.dispose();
-		}
-		currentPanel?.dispose();
-		currentPanel = undefined;
-	}
+    /** Закрывает вкладку и освобождает подписки. */
+    dispose(): void {
+        this.stopRefresh();
+        this.panel?.dispose();
+        this.panel = null;
+        for (const x of this.disposables) x.dispose();
+        this.disposables.length = 0;
+    }
 }

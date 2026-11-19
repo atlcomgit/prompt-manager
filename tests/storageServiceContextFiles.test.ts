@@ -655,6 +655,37 @@ async function createSharedStorageFixture(t: TestContext, ids = ['old-title']) {
 	return { root, local, remote, configUri };
 }
 
+/** Запоздавшие операции второго окна не восстанавливают прежнее имя и не перезаписывают другой промпт. */
+test('stale saves after rename preserve the single completed prompt and a reused slug', async t => {
+	const { local, remote, configUri } = await createSharedStorageFixture(t);
+	const old = (await local.getPrompt('old-title'))!;
+	const finalId = 'tre-137-with-schedule';
+	await remote.savePrompt({ ...old, id: finalId, status: 'completed', content: 'final content', report: 'final report' },
+		{ previousId: old.id, skipHistory: true });
+	await assert.rejects(local.savePrompt({ ...old, id: 'tre-137-and-schedule' }, { previousId: old.id, existingPrompt: null }));
+	await assert.rejects(local.savePrompt({ ...old, content: 'stale edit' }, { existingPrompt: old }));
+	const other = await remote.savePrompt({ ...old, promptUuid: 'other-uuid', content: 'other content' });
+	assert.equal(other.id, old.id);
+	await assert.rejects(local.savePrompt({ ...old, id: 'stale-rename' }, { previousId: old.id, existingPrompt: old }));
+	assert.equal((await remote.getPrompt(old.id))?.content, 'other content');
+	assert.equal((await readJson(configUri(finalId).fsPath)).status, 'completed');
+	assert.equal((await remote.getPrompt(finalId))?.report, 'final report');
+	const rows = await local.listPrompts({ forceRefresh: true });
+	assert.deepEqual(rows.filter(row => row.promptUuid === old.promptUuid).map(row => row.id), [finalId]);
+});
+
+/** Два одновременных первых сохранения одного UUID с разными заголовками создают только одну задачу. */
+test('simultaneous first saves with different titles cannot duplicate a UUID', async t => {
+	const { local, remote } = await createSharedStorageFixture(t);
+	const template = (await local.getPrompt('old-title'))!;
+	const results = await Promise.allSettled([local, remote].map((service, i) => service.savePrompt({
+		...template, id: 'new-title-' + i, promptUuid: 'new-prompt-uuid',
+	}, { existingPrompt: null, skipHistory: true })));
+	assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+	const rows = await local.listPrompts({ forceRefresh: true });
+	assert.equal(rows.filter(row => row.promptUuid === 'new-prompt-uuid').length, 1);
+});
+
 /** Старое чтение не воскрешает папку после удаления и создания папки с номером. */
 test('config watcher discards an old read after another instance renames the prompt', async t => {
 	const { local, remote, configUri } = await createSharedStorageFixture(t);
@@ -859,4 +890,26 @@ test('forced list refresh reconciles active prompts with archive moves from anot
 	const all = await local.listPrompts({ forceRefresh: true, includeArchived: true });
 	assert.deepEqual(all.map(p => [p.id, p.archived]), [['old-title', true]]);
 	assert.deepEqual(await local.listPrompts(), []);
+});
+
+
+/** Deleting a prompt signals linked notes once, only after the folder is truly removed. */
+test('deletePrompt fires a confirmed deletion event containing prompt UUID', async () => {
+	const { StorageService } = await importStorageService();
+	const root = createTempWorkspace();
+	try {
+		const promptId = 'delete-note-link';
+		const folder = await seedPrompt(root, promptId, []);
+		const service = new (StorageService as any)(root);
+		const deleted: Array<{ id: string; promptUuid?: string }> = [];
+		service.onDidDeletePrompt((info: { id: string; promptUuid?: string }) => deleted.push(info));
+		await service.deletePrompt(promptId);
+		assert.equal(fs.existsSync(folder), false);
+		assert.deepEqual(deleted, [{ id: promptId, promptUuid: 'uuid-' + promptId }]);
+		await service.deletePrompt(promptId);
+		assert.equal(deleted.length, 1);
+		service.dispose();
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
 });

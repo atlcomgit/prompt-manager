@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
 	normalizePromptDashboardDockerWidgetState,
+	normalizePromptDashboardHiddenSections,
 	normalizePromptDashboardPreferences,
+	normalizePromptDashboardQuickNotesWidgetState,
 	normalizePromptDashboardTodosWidgetState,
 } from '../src/types/promptDashboardPreferences.js';
 
@@ -27,8 +29,11 @@ test('dashboard preferences keep false disclosures and explicit empty values', (
 		docker: { viewMode: 'table', statusFilter: 'stopped', search: '', sortBy: 'memory',
 			expandedContainerIds: ['docker:legacy'] },
 		todos: { selectedFileTypes: [], search: '' },
+		quickNotes: { newNoteScope: 'global', search: 'идея', colors: ['red', '#12abef'], boardGroupBy: 'color',
+			boardScope: 'workspace', boardShowDone: true },
 		expanded: { 'project:api': false, 'branch:main': true },
 		showAllBranchProjects: true,
+		hiddenSections: ['status', 'aiAnalysis'],
 	};
 	assert.deepEqual(normalizePromptDashboardPreferences(value), value);
 	assert.deepEqual(normalizePromptDashboardPreferences({ ...value, expanded: {} }).expanded, {});
@@ -61,4 +66,36 @@ test('dashboard preferences preserve all valid search text and disclosure keys',
 	assert.equal(normalized.todos.search, search);
 	assert.deepEqual(normalized.expanded, expanded);
 	assert.deepEqual(normalized.docker.expandedContainerIds, Object.keys(expanded));
+});
+
+/** Вид быстрых заметок: недопустимые значения заменяются значениями по умолчанию, цвета проверяются. */
+test('normalizePromptDashboardQuickNotesWidgetState keeps valid values and drops invalid ones', () => {
+	assert.deepEqual(normalizePromptDashboardQuickNotesWidgetState(undefined), {
+		newNoteScope: 'workspace', search: '', colors: [], boardGroupBy: 'none', boardScope: 'all', boardShowDone: false,
+	});
+	assert.deepEqual(normalizePromptDashboardQuickNotesWidgetState({
+		newNoteScope: 'other', search: 5, colors: [' RED ', 'red', 'none', '#ABCDEF', 'url(x)', 3, '#abc'],
+		boardGroupBy: 'size', boardScope: 'global', boardShowDone: 'yes',
+	}), {
+		newNoteScope: 'workspace', search: '', colors: ['red', 'none', '#abcdef'], boardGroupBy: 'none', boardScope: 'global',
+		boardShowDone: false,
+	});
+});
+
+
+/** The note description field height is global, capped, and omitted when not configured. */
+test('quick notes preferences normalize and persist one description height for all notes', () => {
+	const defaults = normalizePromptDashboardQuickNotesWidgetState(undefined);
+	assert.equal(defaults.descriptionHeight, undefined);
+	assert.equal(normalizePromptDashboardQuickNotesWidgetState({ descriptionHeight: 314.6 }).descriptionHeight, 315);
+	assert.equal(normalizePromptDashboardQuickNotesWidgetState({ descriptionHeight: 24 }).descriptionHeight, 84);
+	assert.equal(normalizePromptDashboardQuickNotesWidgetState({ descriptionHeight: 2400 }).descriptionHeight, 1000);
+	assert.equal(normalizePromptDashboardQuickNotesWidgetState({ descriptionHeight: '640' }).descriptionHeight, undefined);
+});
+
+/** Скрытые меню «⋯» виджеты: только известные ключи без повторов в порядке секций панели. */
+test('dashboard preferences normalize hidden widgets from the widgets menu', () => {
+	assert.deepEqual(normalizePromptDashboardHiddenSections(['todos', 'unknown', 'status', 'todos', 42, null]), ['status', 'todos']);
+	assert.deepEqual(normalizePromptDashboardHiddenSections('status'), []);
+	assert.deepEqual(normalizePromptDashboardPreferences({}).hiddenSections, []);
 });

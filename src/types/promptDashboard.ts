@@ -14,7 +14,9 @@ export type PromptDashboardSectionKey =
 	| 'projectCommits'
 	| 'dockerContainers'
 	| 'todos'
-	| 'aiAnalysis';
+	| 'aiAnalysis'
+	/** Быстрые заметки получают данные отдельным каналом, а не снимком dashboard. */
+	| 'quickNotes';
 
 /** Persists only sections explicitly collapsed by the user. */
 export type PromptDashboardCollapsedSections = Partial<Record<PromptDashboardSectionKey, boolean>>;
@@ -48,7 +50,42 @@ export const PROMPT_DASHBOARD_SECTION_KEYS: PromptDashboardSectionKey[] = [
 	'dockerContainers',
 	'todos',
 	'aiAnalysis',
+	'quickNotes',
 ];
+
+/** Подписи виджетов панели «Обзор» в заголовках карточек и в меню видимости. */
+export const PROMPT_DASHBOARD_SECTION_LABELS: Record<PromptDashboardSectionKey, string> = {
+	status: 'Статус промпта',
+	activity: 'Активные промпты',
+	projectBranches: 'Ветки проектов',
+	reviewRequests: 'MR/PR',
+	parallelBranches: 'Параллельные ветки',
+	projectCommits: 'Коммиты проектов',
+	dockerContainers: 'Docker контейнеры',
+	todos: 'ToDo',
+	aiAnalysis: 'AI review',
+	quickNotes: 'Быстрые заметки',
+};
+
+/**
+ * Карта для решений о загрузке данных: скрытый меню «⋯» виджет не загружается так же, как свёрнутый.
+ * Сохраняемое сворачивание при этом не меняется: после показа виджет остаётся в своём прежнем состоянии.
+ */
+export function mergePromptDashboardHiddenSections(
+	collapsedSections: PromptDashboardCollapsedSections,
+	hiddenSections: readonly PromptDashboardSectionKey[],
+): PromptDashboardCollapsedSections {
+	const merged = normalizePromptDashboardCollapsedSections(collapsedSections);
+	for (const section of hiddenSections) {
+		if (PROMPT_DASHBOARD_SECTION_KEYS.includes(section)) {
+			merged[section] = true;
+		}
+	}
+	return merged;
+}
+
+/** Секции без данных снимка dashboard: раскрытие и обновление не запрашивают виджеты расширения. */
+export const PROMPT_DASHBOARD_STANDALONE_SECTION_KEYS: PromptDashboardSectionKey[] = ['quickNotes'];
 
 /** Project-derived sections share one host payload and only collapse as a group for refresh gating. */
 export const PROMPT_DASHBOARD_PROJECT_SECTION_KEYS: PromptDashboardSectionKey[] = [
@@ -270,10 +307,16 @@ export function resolveCollapsedPromptDashboardWidgets(
 	return [...widgets];
 }
 
-/** Maps one visible dashboard section to the host widget payload it belongs to. */
+/**
+ * Maps one visible dashboard section to the host widget payload it belongs to.
+ * Секции с отдельным каналом данных возвращают null; проверка — tests/promptDashboard.test.ts.
+ */
 export function resolvePromptDashboardWidgetKindForSection(
 	section: PromptDashboardSectionKey,
-): PromptDashboardWidgetKind {
+): PromptDashboardWidgetKind | null {
+	if (PROMPT_DASHBOARD_STANDALONE_SECTION_KEYS.includes(section)) {
+		return null;
+	}
 	if (section === 'dockerContainers') {
 		return 'docker';
 	}
@@ -286,12 +329,13 @@ export function resolvePromptDashboardWidgetKindForSection(
 		: 'projects';
 }
 
-/** Checks whether at least one top-level dashboard section is still visible. */
+/** Проверяет, что видна хотя бы одна секция с данными снимка dashboard; заметки снимок не запрашивают. */
 export function hasVisiblePromptDashboardSections(
 	state: PromptDashboardCollapsedSections,
 ): boolean {
 	const normalized = normalizePromptDashboardCollapsedSections(state);
-	return PROMPT_DASHBOARD_SECTION_KEYS.some(section => normalized[section] !== true);
+	return PROMPT_DASHBOARD_SECTION_KEYS.some(section => normalized[section] !== true
+		&& !PROMPT_DASHBOARD_STANDALONE_SECTION_KEYS.includes(section));
 }
 
 export type PromptDashboardLoadStatus = 'idle' | 'loading' | 'fresh' | 'stale' | 'error';

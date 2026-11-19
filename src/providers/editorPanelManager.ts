@@ -1,12 +1,13 @@
 import type { PromptUiSettingsSnapshot } from '../types/promptEditorLayout.js';
 import { PROMPT_UI_SETTING_KEYS } from '../services/stateService.js';
+import { normalizePromptDashboardHiddenSections } from '../types/promptDashboardPreferences.js';
 /**
  * Webview-редактор промпта — одна переиспользуемая страница настройки промпта в VS Code.
  */
 
 import * as vscode from 'vscode';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
-import { realpath } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, realpath } from 'node:fs/promises';
 import { spawn } from 'child_process';
 import { CopilotCodexSessionService } from '../services/copilotCodexSessionService.js';
 import * as os from 'os';
@@ -63,6 +64,7 @@ import type {
 } from '../types/promptDashboard.js';
 import {
 	PROMPT_DASHBOARD_SECTION_KEYS,
+	mergePromptDashboardHiddenSections,
 	normalizePromptDashboardCollapsedSections,
 	normalizePromptDashboardLayouts,
 	normalizePromptDashboardSectionOrder,
@@ -100,7 +102,7 @@ import {
 	replaceGeneratedCommitMessageTrackedBranch,
 	resolveGitOverlaySnapshotProjectScope,
 } from '../utils/gitOverlay.js';
-import { getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
+import { appendPromptManagerLog, getPromptManagerOutputChannel } from '../utils/promptManagerOutput.js';
 import { appendPromptAiLog } from '../utils/promptAiLogger.js';
 import { filterPromptHookIdsForPhase } from '../utils/promptHookPhase.js';
 import { resolvePromptEditorPanelSwitchStrategy } from '../utils/editorPanelSwitch.js';
@@ -159,6 +161,8 @@ import {
 	isContextFilePreviewSupported,
 	normalizeContextFileReference,
 } from '../utils/contextFiles.js';
+import type { QuickNotesChannel, QuickNotesHostController } from './quickNotesHostController.js';
+import { buildQuickNoteStoredName } from '../utils/quickNotes.js';
 
 /** Tracks open editor panels */
 const openPanels = new Map<string, vscode.WebviewPanel>();
@@ -329,6 +333,8 @@ export class EditorPanelManager {
 	private promptIdLocksAfterChatStart = new Set<string>();
 	private pendingReportPersistByPromptId = new Map<string, Promise<Prompt | null>>();
 	private contentSyncDisposables: vscode.Disposable[] = [];
+	/** Контроллер быстрых заметок; null, пока расширение его не подключило. */
+	private quickNotesController: QuickNotesHostController | null = null;
 	private gitOverlaySessions = new Map<string, GitOverlaySession>();
 	/** Стабильный postMessage callback панели: async Git overlay шаги сопоставляются с сессией по ссылке на него. */
 	private panelPostMessageCallbacks = new WeakMap<vscode.WebviewPanel, (message: ExtensionToWebviewMessage) => Promise<void>>();
@@ -357,6 +363,8 @@ export class EditorPanelManager {
 	/** Два независимых профиля и текущий режим для фонового обновления видимых карточек. */
 	private promptDashboardLayoutsState: PromptDashboardLayouts = normalizePromptDashboardLayouts();
 	private promptDashboardLayoutMode: PromptDashboardLayoutMode = 'two-columns';
+	/** Виджеты, скрытые меню «⋯» панели: их данные не загружаются, как у свёрнутых. Общие для обеих ширин. */
+	private promptDashboardHiddenSections: PromptDashboardSectionKey[] = [];
 	/** Неподтверждённое раскрытие сохраняет политику видимой страницы при внешних изменениях настроек. */
 	private readonly promptDashboardCollapseOverrides: Record<PromptDashboardLayoutMode,
 		Map<PromptDashboardSectionKey, { revision: number; collapsed: boolean }>> = {
@@ -650,6 +658,8 @@ export class EditorPanelManager {
 			this.stateService.invalidatePromptUiSettings();
 			const settings = this.getPromptUiSettings();
 			this.promptDashboardLayoutsState = this.applyPromptDashboardCollapseOverrides(settings.dashboardLayouts);
+			// Скрытие виджетов меню «⋯» могло измениться в другом окне: загрузка следует за подтверждённой настройкой.
+			this.promptDashboardHiddenSections = settings.dashboardPreferences?.hiddenSections ?? [];
 			this.syncPromptDashboardCollapsedState();
 			for (const panel of new Set(openPanels.values())) {
 				void Promise.resolve(panel.webview.postMessage({ type: 'promptUiSettingsChanged', settings }))
@@ -714,14 +724,22 @@ export class EditorPanelManager {
 		return this.promptDashboardLayoutsState[this.promptDashboardLayoutMode].sectionOrder;
 	}
 
-	/** Resolve host widget payloads hidden by the shared collapse state. */
+	/**
+	 * Карта для решений о загрузке: свёрнутые секции текущей ширины и виджеты, скрытые меню «⋯».
+	 * Webview получает только сохранённое сворачивание, поэтому после показа виджет остаётся в прежнем состоянии.
+	 */
+	private getPromptDashboardWorkCollapsedSections(): PromptDashboardCollapsedSections {
+		return mergePromptDashboardHiddenSections(this.getPromptDashboardCollapsedSections(), this.promptDashboardHiddenSections);
+	}
+
+	/** Resolve host widget payloads hidden by the shared collapse state or the widgets menu. */
 	private getCollapsedPromptDashboardWidgets(): PromptDashboardWidgetKind[] {
-		return resolveCollapsedPromptDashboardWidgets(this.getPromptDashboardCollapsedSections());
+		return resolveCollapsedPromptDashboardWidgets(this.getPromptDashboardWorkCollapsedSections());
 	}
 
 	/** Check whether host-side work for one dashboard widget can be skipped. */
 	private isPromptDashboardWidgetCollapsed(widget: PromptDashboardWidgetKind): boolean {
-		return shouldSkipPromptDashboardWidgetRefresh(this.getPromptDashboardCollapsedSections(), widget);
+		return shouldSkipPromptDashboardWidgetRefresh(this.getPromptDashboardWorkCollapsedSections(), widget);
 	}
 
 	/** Keep prompt-dashboard refresh policy aligned with the shared collapsed dashboard state. */
@@ -731,7 +749,7 @@ export class EditorPanelManager {
 			setDockerWidgetCollapsed: (collapsed: boolean) => void;
 		};
 		if (typeof promptDashboardService.setCollapsedSections === 'function') {
-			promptDashboardService.setCollapsedSections(this.getPromptDashboardCollapsedSections());
+			promptDashboardService.setCollapsedSections(this.getPromptDashboardWorkCollapsedSections());
 			return;
 		}
 
@@ -1278,6 +1296,11 @@ export class EditorPanelManager {
 		return normalizeContextFileReference(normalizedFsPath);
 	}
 
+	/** Разрешает путь файла из буфера или перетаскивания по правилам файлов контекста (для быстрых заметок). */
+	resolveContextFileReference(filePath: string): vscode.Uri | null {
+		return this.resolveContextFileUri(filePath);
+	}
+
 	private resolveContextFileUri(filePath: string): vscode.Uri | null {
 		const normalizedReference = normalizeContextFileReference(filePath);
 		if (!normalizedReference) {
@@ -1343,6 +1366,11 @@ export class EditorPanelManager {
 
 		addRoot(this.extensionUri);
 		addRoot(vscode.Uri.file(this.storageService.getStorageDirectoryPath()));
+		// Глобальные вложения заметок лежат вне рабочей области; постоянный корень не меняет опции при открытии окна.
+		const globalQuickNotesFilesRoot = this.quickNotesController?.getGlobalFilesRoot();
+		if (globalQuickNotesFilesRoot) {
+			addRoot(vscode.Uri.file(globalQuickNotesFilesRoot));
+		}
 		for (const workspaceFolder of vscode.workspace.workspaceFolders || []) {
 			addRoot(workspaceFolder.uri);
 		}
@@ -1543,6 +1571,27 @@ export class EditorPanelManager {
 		}
 
 		return dedupeContextFileReferences(savedFiles);
+	}
+
+	/** Копирует файлы в папку context/ промпта с уникальными безопасными именами и возвращает ссылки контекста. */
+	private async copyFilesIntoPromptContext(promptId: string, files: Array<{ path: string; name: string }>): Promise<string[]> {
+		const contextDirectory = path.join(this.storageService.getPromptDirectoryPath(promptId), 'context');
+		await mkdir(contextDirectory, { recursive: true });
+		const taken = new Set((await readdir(contextDirectory)).map(name => name.toLowerCase()));
+		const references: string[] = [];
+		for (const file of files) {
+			const storedName = buildQuickNoteStoredName(file.name, taken);
+			taken.add(storedName.toLowerCase());
+			const target = path.join(contextDirectory, storedName);
+			try {
+				await copyFile(file.path, target);
+				references.push(this.toStoredContextFileReference(target));
+			} catch (error) {
+				appendPromptManagerLog(`[quick-notes] Не удалось скопировать «${file.name}» в контекст промпта: ${
+					error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		return dedupeContextFileReferences(references);
 	}
 
 	private buildGlobalContextMessage(): ExtensionToWebviewMessage {
@@ -2361,7 +2410,7 @@ export class EditorPanelManager {
 	/** Обновляет также persisted baseline, чтобы последующий status-only save не откатил привязку и время. */
 	private syncClaudePromptToPanels(prompt: Prompt): void {
 		for (const [panelKey, displayed] of this.panelPromptRefs) {
-			if (displayed.promptUuid === prompt.promptUuid) {
+			if (displayed.id === prompt.id && displayed.promptUuid === prompt.promptUuid) {
 				Object.assign(displayed, prompt);
 				this.panelBasePrompts.set(panelKey, JSON.parse(JSON.stringify(prompt)));
 				void this.resolveOpenEditorPanel(panelKey)?.webview.postMessage({ type: 'prompt', prompt, reason: 'sync' });
@@ -2431,8 +2480,7 @@ export class EditorPanelManager {
 			return running;
 		}
 		const operation = (async () => {
-			const initial = await this.storageService.getPromptByUuid(identity.promptUuid)
-				|| await this.storageService.getPrompt(identity.id);
+			const initial = await this.getStoredPromptByIdentity(identity.id, identity.promptUuid);
 			const unchanged = { totalMs: initial?.timeSpentImplementing || 0, sessionsCount: 0, completionOk: false };
 			if (!initial || initial.chatTarget !== 'claude' || this.isShuttingDown || initial.archived) {
 				this.claudeChatTracking.get(key)?.dispose();
@@ -2471,8 +2519,7 @@ export class EditorPanelManager {
 			let completedPrompt: Prompt | undefined;
 			let completedSessionId = '';
 			const result = await this.enqueuePromptSaveOperation(identity, async () => {
-				const prompt = await this.storageService.getPromptByUuid(identity.promptUuid)
-					|| await this.storageService.getPrompt(identity.id);
+				const prompt = await this.getStoredPromptByIdentity(identity.id, identity.promptUuid);
 				if (!prompt || prompt.chatTarget !== 'claude' || prompt.archived || this.isShuttingDown
 					|| this.claudeChatService !== service) { return unchanged; }
 				const state = normalizeClaudeChatState(prompt.claudeChat);
@@ -2556,7 +2603,7 @@ export class EditorPanelManager {
 			markPromptChatAutoCompleteAfter(latest);
 			await this.storageService.savePrompt(latest, { historyReason: 'status-change' });
 			this.syncClaudePromptToPanels(latest);
-			if (currentPrompt.promptUuid === latest.promptUuid) {
+			if (currentPrompt.id === latest.id && currentPrompt.promptUuid === latest.promptUuid) {
 				Object.assign(currentPrompt, latest);
 				postMessage({ type: 'prompt', prompt: latest, reason: 'sync' });
 			}
@@ -4422,26 +4469,8 @@ export class EditorPanelManager {
 			return { prompt: currentPrompt, detached: false };
 		}
 
-		const normalizedPromptUuid = (incomingPrompt.promptUuid || '').trim();
-		if (normalizedPromptUuid) {
-			const promptByUuid = await this.storageService.getPromptByUuid(normalizedPromptUuid);
-			if (promptByUuid) {
-				return { prompt: promptByUuid, detached: true };
-			}
-		}
-
-		const normalizedPromptId = (incomingPrompt.id || '').trim();
-		if (normalizedPromptId) {
-			const promptById = await this.storageService.getPrompt(normalizedPromptId);
-			if (promptById) {
-				return { prompt: promptById, detached: true };
-			}
-		}
-
-		return {
-			prompt: JSON.parse(JSON.stringify(incomingPrompt)),
-			detached: true,
-		};
+		const stored = await this.getStoredPromptByIdentity(incomingPrompt.id, incomingPrompt.promptUuid);
+		return { prompt: stored ?? JSON.parse(JSON.stringify(incomingPrompt)), detached: true };
 	}
 
 	private mergeExternalReportIfUnchanged(snapshot: Prompt, persistedPrompt: Prompt | null, basePrompt: Prompt | null): void {
@@ -4691,6 +4720,7 @@ export class EditorPanelManager {
 		private readonly copilotCodexSessionService: Pick<CopilotCodexSessionService, 'prepare'> = new CopilotCodexSessionService(),
 	) {
 		this.promptDashboardLayoutsState = this.stateService.getPromptDashboardLayouts();
+		this.promptDashboardHiddenSections = this.stateService.getPromptDashboardPreferences()?.hiddenSections ?? [];
 
 		this.contentSyncDisposables.push(
 			this.storageService.onDidPromptDailyTimeChange(() => {
@@ -4788,6 +4818,19 @@ export class EditorPanelManager {
 			agentJsonWatcher.onDidChange(scheduleAgentProgressSync),
 			agentJsonWatcher.onDidDelete(scheduleAgentProgressSync),
 		);
+	}
+
+	/** Подключает контроллер быстрых заметок; он создаётся после менеджера, так как использует его методы. */
+	setQuickNotesController(controller: QuickNotesHostController): void {
+		this.quickNotesController = controller;
+	}
+
+	/** Каналы открытых панелей редактора для рассылки состояния и настроек быстрых заметок. */
+	getQuickNotesChannels(): QuickNotesChannel[] {
+		return [...new Set(openPanels.values())].map(panel => ({
+			webview: panel.webview,
+			post: this.resolvePanelPostMessageCallback(panel),
+		}));
 	}
 
 	/** Debounce agent.json progress refreshes so rapid agent writes do not spam the webview. */
@@ -7274,9 +7317,7 @@ export class EditorPanelManager {
 			// Общая очередь не позволяет фоновому названию затереть сохранение формы.
 			const enrichmentResult = await this.enqueuePromptSaveOperation({ id: promptId, promptUuid: promptUuid || '' }, async () => {
 				// Перечитываем текущий промпт с диска для проверки актуальности
-				const currentPrompt = (promptUuid
-					? await this.storageService.getPromptByUuid(promptUuid)
-					: null) || await this.storageService.getPrompt(promptId);
+				const currentPrompt = await this.getStoredPromptByIdentity(promptId, promptUuid || undefined);
 				if (!currentPrompt) {
 					this.hooksOutput.appendLine(`[ai-enrichment] skip: prompt not found on disk promptId=${promptId}`);
 					return null;
@@ -7341,9 +7382,8 @@ export class EditorPanelManager {
 			const activePrompt = this.panelPromptRefs.get(panelKey);
 			const activePromptMatches = Boolean(
 				activePrompt
-				&& ((activePrompt.promptUuid || '').trim() && (enriched.promptUuid || '').trim()
-					? (activePrompt.promptUuid || '').trim() === (enriched.promptUuid || '').trim()
-					: activePrompt.id === promptId),
+				&& (activePrompt.id === enriched.id || activePrompt.id === renameFromId)
+				&& (!activePrompt.promptUuid || activePrompt.promptUuid === enriched.promptUuid),
 			);
 			this.hooksOutput.appendLine(
 				`[ai-enrichment] ui-update: promptId=${promptId}`
@@ -8345,7 +8385,15 @@ export class EditorPanelManager {
 	 * Текст попадает в content, а title/description проходят тот же fallback + AI enrichment,
 	 * что и при сохранении нового промпта из страницы редактора.
 	 */
-	public async createQuickAddPrompt(content: string): Promise<Prompt | null> {
+	public async createQuickAddPrompt(
+		content: string,
+		options: {
+			/** Готовое название из быстрой заметки: фоновый AI его не заменяет. */
+			title?: string;
+			/** Файлы, копируемые в папку context/ созданного промпта. */
+			attachments?: Array<{ path: string; name: string }>;
+		} = {},
+	): Promise<Prompt | null> {
 		const normalizedContent = content.trim();
 		if (!normalizedContent) {
 			return null;
@@ -8359,14 +8407,31 @@ export class EditorPanelManager {
 		}
 		promptToSave.content = normalizedContent;
 		promptToSave.status = 'draft';
+		if (options.title?.trim()) {
+			promptToSave.title = options.title.trim();
+		}
 
-		const aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(promptToSave, null);
+		let aiEnrichmentPlan = this.resolvePromptAiEnrichmentPlan(promptToSave, null);
+		// Готовое название не заменяется фоновым AI, даже если описание начинается с него.
+		if (options.title?.trim()) {
+			aiEnrichmentPlan = {
+				...aiEnrichmentPlan,
+				needsTitle: false,
+				needsAiEnrichment: aiEnrichmentPlan.needsAiEnrichment && aiEnrichmentPlan.needsDescription,
+			};
+		}
 		this.applyPromptFallbacksForPendingAiEnrichment(promptToSave, aiEnrichmentPlan);
 
 		await this.ensurePromptIdMatchesTitle(promptToSave);
-		const saved = await this.storageService.savePrompt(promptToSave, {
+		let saved = await this.storageService.savePrompt(promptToSave, {
 			historyReason: 'create',
 		});
+		// Файлы копируются в папку уже сохранённого промпта: заранее созданный каталог занял бы выбранный id,
+		// и промпт сохранился бы в соседнюю папку. Фоновое заполнение планируется только после второй записи.
+		if (options.attachments && options.attachments.length > 0) {
+			saved.contextFiles = await this.copyFilesIntoPromptContext(saved.id, options.attachments);
+			saved = await this.storageService.savePrompt(saved, { skipHistory: true });
+		}
 
 		if (aiEnrichmentPlan.needsAiEnrichment) {
 			void this.scheduleBackgroundAiEnrichment(
@@ -9274,6 +9339,13 @@ export class EditorPanelManager {
 		this.syncStartupEditorRestoreState();
 	}
 
+	/** Читает выбранную папку; после перемещения промпта восстанавливает его по стабильному UUID. */
+	private async getStoredPromptByIdentity(promptId: string, promptUuid?: string): Promise<Prompt | null> {
+		const stored = promptId ? await this.storageService.getPrompt(promptId) : null;
+		if (!promptUuid || stored?.promptUuid === promptUuid) { return stored; }
+		return this.storageService.getPromptByUuid(promptUuid);
+	}
+
 	/** Load a saved prompt for opening, preferring an in-flight save result over stale disk data. */
 	private async loadPromptForOpen(promptId: string, promptUuid?: string): Promise<Prompt | null> {
 		const loadStartedAt = Date.now();
@@ -9287,6 +9359,11 @@ export class EditorPanelManager {
 		if (pendingSaveEntry) {
 			const pendingSnapshotId = (pendingSaveEntry.snapshot.id || '').trim();
 			const pendingSnapshotUuid = (pendingSaveEntry.snapshot.promptUuid || '').trim();
+			// При сохранении соседней копии читаем выбранную папку до перехода по общему UUID.
+			if (pendingSnapshotId && pendingSnapshotId !== promptId && await this.storageService.exists(pendingSnapshotId)) {
+				const requested = await this.storageService.getPrompt(promptId);
+				if (requested && requested.promptUuid === normalizedPromptUuid) { return requested; }
+			}
 			if (pendingSnapshotId === promptId || (normalizedPromptUuid && pendingSnapshotUuid === normalizedPromptUuid)) {
 				const pendingSnapshot = JSON.parse(JSON.stringify(pendingSaveEntry.snapshot)) as Prompt;
 				this.logReportDebug('openPrompt.loadTarget.pendingSaveSnapshot', {
@@ -9319,10 +9396,7 @@ export class EditorPanelManager {
 		}
 
 		const storageReadStartedAt = Date.now();
-		let prompt = await this.storageService.getPrompt(promptId);
-		if (!prompt && normalizedPromptUuid) {
-			prompt = await this.storageService.getPromptByUuid(normalizedPromptUuid);
-		}
+		const prompt = await this.getStoredPromptByIdentity(promptId, normalizedPromptUuid);
 		this.logReportDebug('openPrompt.loadTarget.storageRead', {
 			promptId,
 			promptUuid: promptUuid || '',
@@ -9417,7 +9491,9 @@ export class EditorPanelManager {
 		const panelSwitchStrategy = resolvePromptEditorPanelSwitchStrategy({
 			hasReusableSingletonPanel: Boolean(reusableSingletonPanel),
 			currentPromptId: singletonPrompt?.id,
+			currentPromptUuid: singletonPrompt?.promptUuid,
 			nextPromptId: promptId,
+			nextPromptUuid: target.promptUuid,
 		});
 		this.logReportDebug('openPrompt.stage', {
 			stage: 'start',
@@ -9560,7 +9636,8 @@ export class EditorPanelManager {
 		let restoredUnsaved = false;
 		if (this.pendingRestorePrompt) {
 			const canRestore = (isNew && !this.pendingRestorePrompt.id)
-				|| (!isNew && this.pendingRestorePrompt.id === promptId);
+				|| (!isNew && this.pendingRestorePrompt.id === prompt.id
+					&& (!target.promptUuid || this.pendingRestorePrompt.promptUuid === target.promptUuid));
 			if (canRestore) {
 				prompt = this.pendingRestorePrompt;
 				restoredUnsaved = this.pendingRestoreIsDirty;
@@ -10390,6 +10467,10 @@ export class EditorPanelManager {
 			}
 
 			case 'savePromptDashboardPreferences': {
+				// Скрытие виджетов учитывается до ожидания записи: следующий за сохранением запрос обновления
+				// показанного виджета не должен быть пропущен как запрос к скрытому.
+				this.promptDashboardHiddenSections = normalizePromptDashboardHiddenSections(msg.state?.hiddenSections);
+				this.syncPromptDashboardCollapsedState();
 				// Полный снимок нормализуется и сериализуется StateService без второго optimistic-кеша.
 				try {
 					await this.stateService.savePromptDashboardPreferences(msg.state, msg.baseState,
@@ -11129,7 +11210,7 @@ export class EditorPanelManager {
 							const dispatchResult = await this.dispatchExternalChatTarget(chatTarget, prompt, query, fileUris, commands);
 							if (chatTarget === 'claude') {
 								const latest = await this.storageService.getPrompt(prompt.id) || prompt;
-								if (currentPrompt.promptUuid === latest.promptUuid) {
+								if (currentPrompt.id === latest.id && currentPrompt.promptUuid === latest.promptUuid) {
 									Object.assign(currentPrompt, latest);
 									postMessage({ type: 'prompt', prompt: latest, reason: 'sync' });
 								}
@@ -12402,6 +12483,25 @@ export class EditorPanelManager {
 				}
 				break;
 			}
+
+			case 'quickNotesRequestState':
+			case 'quickNotesApply':
+			case 'quickNotesAttach':
+			case 'quickNotesUploadChunk':
+			case 'quickNotesCancelUpload':
+			case 'quickNotesDiscardDraft':
+			case 'quickNotesRemoveDraftFile':
+			case 'quickNotesOpenFile':
+			case 'quickNotesOpenStorageFile':
+			case 'quickNotesCreatePrompt':
+			case 'quickNotesOpenPrompt':
+			case 'quickNotesSuggestItem':
+			case 'quickNotesOpenBoard':
+			case 'quickNotesRequestPreferences':
+			case 'quickNotesSavePreferences':
+			case 'quickNotesSetDescriptionHeight':
+				await this.quickNotesController?.handleMessage(msg, { webview: panel.webview, post: postMessage });
+				break;
 
 			case 'promptDashboardOpenTodoMarker': {
 				try {

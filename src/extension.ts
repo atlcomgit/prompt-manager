@@ -3,6 +3,8 @@
  */
 
 import * as vscode from 'vscode';
+import * as os from 'os';
+import * as path from 'path';
 import { CopilotCodexSessionService } from './services/copilotCodexSessionService.js';
 import { StorageService, AiService, WorkspaceService, GitService, StateService, CopilotUsageService, PromptVoiceService, CustomGroupsService, PromptDashboardService, DockerContainersService, TodoScannerService } from './services/index.js';
 import {
@@ -25,7 +27,14 @@ import {
 	CodeMapAdminService,
 	getCodeMapSettings,
 } from './services/index.js';
-import { SidebarProvider, AboutPanelManager, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager, CopilotStatusBarProvider, CopilotUsagePanelManager, MemoryPanelManager } from './providers/index.js';
+import { SidebarProvider, AboutPanelManager, EditorPanelManager, StatisticsPanelManager, TrackerPanelManager, CopilotUsagePanelManager, MemoryPanelManager } from './providers/index.js';
+import { CodexAccountService } from './services/codexAccountService.js';
+import { CodexRateLimitService, cleanupStaleCodexTempHomes } from './services/codexRateLimitService.js';
+import { CodexAccountsStatusBarProvider } from './providers/codexAccountsStatusBarProvider.js';
+import { ClaudeAccountService, findClaudeExecutable } from './services/claudeAccountService.js';
+import { ClaudeUsageService } from './services/claudeUsageService.js';
+import { ClaudeStatusLineService } from './services/claudeStatusLineService.js';
+import { ClaudeAccountsStatusBarProvider } from './providers/claudeAccountsStatusBarProvider.js';
 import type { MemoryCommit, HookCommitPayload, MemoryAnalysisDepth } from './types/index.js';
 import type { PromptOpenTarget } from './types/messages.js';
 import { DEFAULT_COPILOT_MODEL_FAMILY } from './constants/ai.js';
@@ -38,6 +47,10 @@ import {
 } from './utils/promptManagerOutput.js';
 import { clearPromptAiLogIfDateChanged } from './utils/promptAiLogger.js';
 import type { ExternalPromptConfigChange } from './services/storageService.js';
+import { QuickNotesService } from './services/quickNotesService.js';
+import { QuickNotesHostController } from './providers/quickNotesHostController.js';
+import { QuickNotesBoardPanelManager } from './providers/quickNotesBoardPanelManager.js';
+import * as fs from 'fs';
 
 export function activate(context: vscode.ExtensionContext) {
 	getPromptManagerOutputChannel();
@@ -83,6 +96,29 @@ export function activate(context: vscode.ExtensionContext) {
 		customGroupsService,
 	);
 
+	// Быстрые заметки: рабочая область — рядом с промптами, глобальные — в ~/.vscode/prompt-manager.
+	const quickNotesGlobalDir = path.join(os.homedir(), '.vscode', 'prompt-manager');
+	// Папка создаётся заранее: наблюдатель вне рабочей области надёжно работает только для существующего каталога.
+	try {
+		fs.mkdirSync(quickNotesGlobalDir, { recursive: true });
+	} catch (error) {
+		appendPromptManagerLog(`[quick-notes] global folder unavailable: ${error instanceof Error ? error.message : 'unknown error'}`);
+	}
+	const quickNotesService = new QuickNotesService({
+		workspaceStorageDir: storageService.getStorageDirectoryPath(),
+		globalStorageDir: quickNotesGlobalDir,
+		createWatcher: (directory, fileName, onChange) => {
+			const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(directory), fileName));
+			const subscriptions = [watcher, watcher.onDidCreate(onChange), watcher.onDidChange(onChange), watcher.onDidDelete(onChange)];
+			return { dispose: () => subscriptions.forEach(subscription => subscription.dispose()) };
+		},
+		log: appendPromptManagerLog,
+	});
+	context.subscriptions.push({ dispose: () => quickNotesService.dispose() });
+	// Брошенные копии черновиков окна заметки удаляются в фоне и не задерживают активацию.
+	void quickNotesService.cleanupStalePending().catch(error => {
+		appendPromptManagerLog(`[quick-notes] cleanup failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+	});
 	const editorPanelManager = new EditorPanelManager(
 		context.extensionUri,
 		storageService,
@@ -160,7 +196,9 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Initialize Copilot Premium usage status bar
 	const copilotUsageService = new CopilotUsageService(context);
-	void copilotUsageService.checkAuthenticationBindingOnActivation();
+	if (vscode.extensions.getExtension('github.copilot-chat') || vscode.extensions.getExtension('github.copilot')) {
+		void copilotUsageService.checkAuthenticationBindingOnActivation();
+	}
 	// Refresh AI-model pickers after VS Code finishes rebinding the Copilot account catalog.
 	const refreshAiModelsAfterCopilotAccountSwitch = async (accountLabel: string): Promise<void> => {
 		appendPromptManagerLog(
@@ -168,12 +206,63 @@ export function activate(context: vscode.ExtensionContext) {
 		);
 		aiService.clearCopilotModelCaches();
 	};
+	const codexAccountsService = new CodexAccountService(context);
+	// Брошенные после аварийного завершения временные CODEX_HOME с копиями auth.json удаляются в фоне.
+	void cleanupStaleCodexTempHomes().then(removed => {
+		if (removed > 0) appendPromptManagerLog('[Accounts] Removed stale Codex temporary homes: ' + removed);
+	}).catch(() => undefined);
+	// Общий кэш лимитов окон и возврат токенов, обновлённых временным процессом Codex при запросе лимитов.
+	const codexRateLimitService = new CodexRateLimitService({
+		sharedCacheDir: context.globalStorageUri.fsPath,
+		storeRefreshedAuth: (original, refreshed) => codexAccountsService.storeRefreshedAuth(original, refreshed),
+	});
+	const claudeAccountsService = new ClaudeAccountService(context);
+	// Путь к Claude CLI вычисляется при каждой проверке: Claude Code могут установить или обновить после активации.
+	const claudeUsageService = new ClaudeUsageService(context.globalStorageUri.fsPath, findClaudeExecutable);
+	const claudeStatusLineService = new ClaudeStatusLineService(
+		context, claudeAccountsService, message => appendPromptManagerLog(message),
+	);
+	let claudeProfilesInitialized = false;
+	const initializeClaudeIfInstalled = () => {
+		if (claudeProfilesInitialized || !vscode.extensions.getExtension('anthropic.claude-code')) return;
+		claudeProfilesInitialized = true;
+		void claudeAccountsService.initialize().then(() => claudeStatusLineService.ensureConfigured()).catch(error => {
+			claudeProfilesInitialized = false;
+			appendPromptManagerLog('[Accounts] Claude initialization failed: ' + (error instanceof Error ? error.message : String(error)));
+		});
+	};
+	initializeClaudeIfInstalled();
+	context.subscriptions.push(vscode.extensions.onDidChange(initializeClaudeIfInstalled));
+	// Профили Codex и копия auth.json в SecretStorage появляются только при установленном расширении Codex.
+	let codexProfilesInitialized = false;
+	const initializeCodexIfInstalled = () => {
+		if (codexProfilesInitialized || !vscode.extensions.getExtension('openai.chatgpt')) return;
+		codexProfilesInitialized = true;
+		void codexAccountsService.initialize().catch(error => {
+			codexProfilesInitialized = false;
+			appendPromptManagerLog('[Accounts] Codex initialization failed: ' + (error instanceof Error ? error.message : String(error)));
+		});
+	};
+	initializeCodexIfInstalled();
+	context.subscriptions.push(vscode.extensions.onDidChange(initializeCodexIfInstalled));
 	const copilotUsagePanelManager = new CopilotUsagePanelManager(
 		context.extensionUri,
 		copilotUsageService,
+		codexAccountsService,
+		codexRateLimitService,
+		claudeAccountsService,
+		claudeUsageService,
 		refreshAiModelsAfterCopilotAccountSwitch,
 	);
-	const copilotStatusBarProvider = new CopilotStatusBarProvider(copilotUsageService, copilotUsagePanelManager);
+	const codexStatusBarProvider = new CodexAccountsStatusBarProvider(
+		codexAccountsService,
+		codexRateLimitService,
+		() => copilotUsagePanelManager.show(),
+	);
+	const claudeStatusBarProvider = new ClaudeAccountsStatusBarProvider(
+		claudeAccountsService,
+		claudeUsageService,
+	);
 
 	// ---- Project Memory System ----
 	const memoryEnabled = vscode.workspace.getConfiguration('promptManager').get<boolean>('memory.enabled', false);
@@ -427,6 +516,29 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 		await sidebarProvider.syncSelectedPrompt(id);
 	};
+
+	// Страница доски и виджет редактора работают через общий контроллер заметок.
+	const quickNotesBoardPanelManager = new QuickNotesBoardPanelManager(context.extensionUri, storageService.getStorageDirectoryPath());
+	const quickNotesController = new QuickNotesHostController({
+		service: quickNotesService,
+		aiService,
+		storageService,
+		stateService,
+		getChannels: () => [...editorPanelManager.getQuickNotesChannels(), ...quickNotesBoardPanelManager.getChannels()],
+		createPrompt: (content, options) => editorPanelManager.createQuickAddPrompt(content, options),
+		openPrompt: target => openPromptOutsideSidebar(target),
+		openBoard: () => quickNotesBoardPanelManager.show(),
+		resolveFileReference: reference => editorPanelManager.resolveContextFileReference(reference),
+	});
+	context.subscriptions.push(storageService.onDidDeletePrompt(info => {
+		void quickNotesController.handleDeletedPrompt(info).catch(error => {
+			appendPromptManagerLog('[quick-notes] Failed to unlink deleted prompt: '
+				+ (error instanceof Error ? error.message : String(error)));
+		});
+	}));
+	editorPanelManager.setQuickNotesController(quickNotesController);
+	quickNotesBoardPanelManager.setController(quickNotesController);
+	context.subscriptions.push(quickNotesController, quickNotesBoardPanelManager);
 
 	const openPromptAndStartChatOutsideSidebar = async (id: string): Promise<void> => {
 		await editorPanelManager.openPromptAndStartChat(id);
@@ -750,7 +862,11 @@ export function activate(context: vscode.ExtensionContext) {
 			statisticsPanelManager.dispose();
 			trackerPanelManager.dispose();
 			copilotUsagePanelManager.dispose();
-			copilotStatusBarProvider.dispose();
+			codexStatusBarProvider.dispose();
+			claudeStatusBarProvider.dispose();
+			claudeStatusLineService.dispose();
+			claudeAccountsService.dispose();
+			codexAccountsService.dispose();
 			copilotUsageService.dispose();
 
 			// Memory system cleanup

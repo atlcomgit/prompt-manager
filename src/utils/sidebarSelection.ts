@@ -58,56 +58,18 @@ export function reconcileSidebarSelection(
 	const selectedId = (selection.selectedId || '').trim() || null;
 	const selectedPromptUuid = (selection.selectedPromptUuid || '').trim() || null;
 
-	if (selectedId === '__new__') {
-		// Remap the optimistic row only when the exact persisted prompt UUID is known.
-		if (selectedPromptUuid) {
-			const matchingPrompt = prompts.find(prompt => (prompt.promptUuid || '').trim() === selectedPromptUuid);
-			if (matchingPrompt) {
-				return {
-					selectedId: matchingPrompt.id,
-					selectedPromptUuid: (matchingPrompt.promptUuid || '').trim() || null,
-				};
-			}
-		}
-
+	// Сохраняем точную папку; после переименования выбираем только однозначный UUID.
+	const candidates = selectedPromptUuid
+		? prompts.filter(prompt => (prompt.promptUuid || '').trim() === selectedPromptUuid)
+		: prompts;
+	const matchingPrompt = candidates.find(prompt => prompt.id === selectedId)
+		?? (selectedPromptUuid && candidates.length === 1 ? candidates[0] : undefined);
+	if (matchingPrompt) {
 		return {
-			selectedId,
-			selectedPromptUuid,
+			selectedId: matchingPrompt.id,
+			selectedPromptUuid: (matchingPrompt.promptUuid || '').trim() || null,
 		};
 	}
 
-	if (selectedPromptUuid) {
-		const matchingPrompt = prompts.find(prompt => (prompt.promptUuid || '').trim() === selectedPromptUuid);
-		if (matchingPrompt) {
-			return {
-				selectedId: matchingPrompt.id,
-				selectedPromptUuid: (matchingPrompt.promptUuid || '').trim() || null,
-			};
-		}
-
-		return {
-			selectedId: null,
-			selectedPromptUuid: null,
-		};
-	}
-
-	if (selectedId) {
-		const matchingPrompt = prompts.find(prompt => prompt.id === selectedId);
-		if (matchingPrompt) {
-			return {
-				selectedId: matchingPrompt.id,
-				selectedPromptUuid: (matchingPrompt.promptUuid || '').trim() || null,
-			};
-		}
-
-		return {
-			selectedId: null,
-			selectedPromptUuid: null,
-		};
-	}
-
-	return {
-		selectedId: null,
-		selectedPromptUuid: null,
-	};
+	return selectedId === '__new__' ? { selectedId, selectedPromptUuid } : { selectedId: null, selectedPromptUuid: null };
 }

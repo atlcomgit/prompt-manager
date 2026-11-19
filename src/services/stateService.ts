@@ -46,6 +46,10 @@ import { applyUiSettingsChanges } from '../utils/uiSettingsPatch.js';
 const PROMPT_DOCKER_SETTING_FIELDS = ['viewMode', 'statusFilter', 'search', 'sortBy', 'expandedContainerIds'] as const;
 /** Независимые поля TODO сохраняют параллельный поиск и выбор типов файлов. */
 const PROMPT_TODOS_SETTING_FIELDS = ['search', 'selectedFileTypes'] as const;
+/** Поля вида быстрых заметок пишутся отдельно, чтобы параллельные правки окон не затирали друг друга. */
+const PROMPT_QUICK_NOTES_SETTING_FIELDS = [
+	'newNoteScope', 'search', 'colors', 'boardGroupBy', 'boardScope', 'boardShowDone', 'descriptionHeight',
+] as const;
 
 /** Пользовательские настройки application наследуются Tunnel и участвуют в штатной Settings Sync. */
 export const PROMPT_UI_SETTING_KEYS = [
@@ -58,8 +62,10 @@ export const PROMPT_UI_SETTING_KEYS = [
 	)),
 	...PROMPT_DOCKER_SETTING_FIELDS.map(field => `dashboardPreferences.docker.${field}`),
 	...PROMPT_TODOS_SETTING_FIELDS.map(field => `dashboardPreferences.todos.${field}`),
+	...PROMPT_QUICK_NOTES_SETTING_FIELDS.map(field => `dashboardPreferences.quickNotes.${field}`),
 	'dashboardPreferences.expanded',
 	'dashboardPreferences.showAllBranchProjects',
+	'dashboardPreferences.hiddenSections',
 ] as const;
 
 interface ChatSessionLatestRequestState {
@@ -1102,7 +1108,10 @@ export class StateService {
 			for (const field of PROMPT_TODOS_SETTING_FIELDS) {
 				seeds[`dashboardPreferences.todos.${field}`] = preferences.todos[field];
 			}
-			for (const field of ['expanded', 'showAllBranchProjects'] as const) {
+			for (const field of PROMPT_QUICK_NOTES_SETTING_FIELDS) {
+				seeds[`dashboardPreferences.quickNotes.${field}`] = preferences.quickNotes[field];
+			}
+			for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
 				seeds[`dashboardPreferences.${field}`] = preferences[field];
 			}
 		}
@@ -1238,14 +1247,17 @@ export class StateService {
 		const todos = this.readPromptUiFields<PromptDashboardPreferences['todos']>(
 			'dashboardPreferences.todos', PROMPT_TODOS_SETTING_FIELDS, legacy?.todos,
 		);
-		for (const field of ['expanded', 'showAllBranchProjects'] as const) {
+		const quickNotes = this.readPromptUiFields<PromptDashboardPreferences['quickNotes']>(
+			'dashboardPreferences.quickNotes', PROMPT_QUICK_NOTES_SETTING_FIELDS, legacy?.quickNotes,
+		);
+		for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
 			const value = this.readPromptUiSetting(`dashboardPreferences.${field}`);
 			if (value !== undefined) {
 				Object.assign(next, { [field]: value });
 			}
 		}
-		return !legacy && !docker && !todos && Object.keys(next).length === 0 ? undefined
-			: normalizePromptDashboardPreferences({ ...legacy, ...next, docker, todos });
+		return !legacy && !docker && !todos && !quickNotes && Object.keys(next).length === 0 ? undefined
+			: normalizePromptDashboardPreferences({ ...legacy, ...next, docker, todos, quickNotes });
 	}
 
 	/** Адресный патч preferences сохраняет параллельные изменения других полей и явный false. */
@@ -1259,7 +1271,10 @@ export class StateService {
 		await this.mutatePromptUiSettings(async () => {
 			await this.writePromptUiFields('dashboardPreferences.docker', PROMPT_DOCKER_SETTING_FIELDS, next.docker, base?.docker);
 			await this.writePromptUiFields('dashboardPreferences.todos', PROMPT_TODOS_SETTING_FIELDS, next.todos, base?.todos);
-			for (const field of ['expanded', 'showAllBranchProjects'] as const) {
+			await this.writePromptUiFields(
+				'dashboardPreferences.quickNotes', PROMPT_QUICK_NOTES_SETTING_FIELDS, next.quickNotes, base?.quickNotes,
+			);
+			for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
 				if (base && JSON.stringify(base[field]) === JSON.stringify(next[field])) {
 					continue;
 				}

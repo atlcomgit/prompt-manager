@@ -362,7 +362,8 @@ export function resolvePromptDashboardExpandRefreshTarget(input: {
 	section: PromptDashboardSectionKey;
 	snapshot: PromptDashboardSnapshot | null;
 }): { type: 'widget'; widget: PromptDashboardWidgetKind } | null {
-	if (!input.snapshot) {
+	// Секции с отдельным каналом данных не обновляют виджеты снимка при раскрытии.
+	if (!input.snapshot || resolvePromptDashboardWidgetKindForSection(input.section) === null) {
 		return null;
 	}
 	if (

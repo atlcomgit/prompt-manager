@@ -29,7 +29,8 @@ import { PromptPanelSplitter, applyPromptPanelResizeState } from './components/P
 import { EDITOR_WEBVIEW_ASSET_VERSION } from '../../constants/webview';
 import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
-import type { ClipboardImagePayload, GlobalContextSourceMessage } from '../../types/messages';
+import type { GlobalContextSourceMessage } from '../../types/messages';
+import { readClipboardImagePayloads } from '../shared/clipboardImages';
 import type {
   ChatMemorySummary,
   EditorPromptContentHeights,
@@ -71,6 +72,7 @@ import type { DockerContainersData } from '../../types/docker';
 import {
   createDefaultPromptDashboardSectionOrder,
   hasVisiblePromptDashboardSections,
+  mergePromptDashboardHiddenSections,
   normalizePromptDashboardCollapsedSections,
   normalizePromptDashboardLayouts,
   normalizePromptDashboardSectionOrder,
@@ -265,7 +267,8 @@ export const resolvePromptDashboardExpandRequest = (input: {
   snapshot: PromptDashboardSnapshot | null;
 }): { type: 'refresh' } | { type: 'widget'; widget: PromptDashboardWidgetKind } | null => {
   const wasCollapsed = input.previousCollapsedSections[input.section] === true;
-  if (!wasCollapsed || input.mode !== 'full') {
+  // Быстрые заметки получают данные отдельным каналом и не запускают обновление снимка dashboard.
+  if (!wasCollapsed || input.mode !== 'full' || resolvePromptDashboardWidgetKindForSection(input.section) === null) {
     return null;
   }
 
@@ -290,6 +293,30 @@ export const resolvePromptDashboardExpandRequest = (input: {
   }
 
   return refreshTarget;
+};
+
+/**
+ * Запрос данных для виджета, снова показанного меню «⋯»: как раскрытие свёрнутого, но только если сам виджет
+ * не свёрнут. Скрытые после изменения виджеты считаются свёрнутыми при решении о загрузке.
+ */
+export const resolvePromptDashboardShownSectionRequest = (input: {
+  collapsedSections: PromptDashboardCollapsedSections;
+  hiddenSections: readonly PromptDashboardSectionKey[];
+  section: PromptDashboardSectionKey;
+  mode: 'full' | 'compact';
+  snapshot: PromptDashboardSnapshot | null;
+}): ReturnType<typeof resolvePromptDashboardExpandRequest> => {
+  if (input.collapsedSections[input.section] === true || input.hiddenSections.includes(input.section)) {
+    return null;
+  }
+  const nextCollapsedSections = mergePromptDashboardHiddenSections(input.collapsedSections, input.hiddenSections);
+  return resolvePromptDashboardExpandRequest({
+    previousCollapsedSections: { ...nextCollapsedSections, [input.section]: true },
+    nextCollapsedSections,
+    section: input.section,
+    mode: input.mode,
+    snapshot: input.snapshot,
+  });
 };
 
 /** Build one section-scoped busy action so shared project payloads do not light up every card. */
@@ -709,53 +736,6 @@ const clearPromptConfigFieldChangedAt = (
 
   return next;
 };
-
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error || new Error('Failed to read clipboard blob.'));
-    reader.onload = () => {
-      const result = typeof reader.result === 'string' ? reader.result : '';
-      const commaIndex = result.indexOf(',');
-      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
-    };
-    reader.readAsDataURL(blob);
-  });
-}
-
-async function readClipboardImagePayloads(): Promise<ClipboardImagePayload[]> {
-  if (typeof navigator === 'undefined' || !navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
-    return [];
-  }
-
-  try {
-    const items = await navigator.clipboard.read();
-    const images: ClipboardImagePayload[] = [];
-
-    for (const item of items) {
-      for (const type of item.types) {
-        if (!type.startsWith('image/')) {
-          continue;
-        }
-
-        const blob = await item.getType(type);
-        const dataBase64 = await blobToBase64(blob);
-        if (!dataBase64) {
-          continue;
-        }
-
-        images.push({
-          mimeType: type,
-          dataBase64,
-        });
-      }
-    }
-
-    return images;
-  } catch {
-    return [];
-  }
-}
 
 const VoiceMicIcon: React.FC = () => (
   <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" style={styles.inlineIcon}>
@@ -1302,13 +1282,22 @@ export const EditorApp: React.FC = () => {
   /** Узкий редактор меняет расположение, но не отключает загрузку видимых карточек; доля ширины глобальна. */
   const editorLayout = resolvePromptEditorLayout(pageWidth, formSectionLayout.panelSplitRatio);
   const promptDashboardMode = 'full' as const;
+  const promptDashboardHiddenSections = promptDashboardPreferences?.hiddenSections;
+  /**
+   * Карта для решений о загрузке: скрытые меню «⋯» виджеты не загружаются, как свёрнутые.
+   * Сохраняемое сворачивание остаётся отдельным: после показа виджет возвращается в прежнее состояние.
+   */
+  const promptDashboardWorkCollapsedSections = useMemo(
+    () => mergePromptDashboardHiddenSections(promptDashboardCollapsedSections, promptDashboardHiddenSections ?? []),
+    [promptDashboardCollapsedSections, promptDashboardHiddenSections],
+  );
   const promptDashboardCollapsedWidgets = useMemo(
-    () => resolveCollapsedPromptDashboardWidgets(promptDashboardCollapsedSections),
-    [promptDashboardCollapsedSections],
+    () => resolveCollapsedPromptDashboardWidgets(promptDashboardWorkCollapsedSections),
+    [promptDashboardWorkCollapsedSections],
   );
   const promptDashboardHasVisibleSections = useMemo(
-    () => hasVisiblePromptDashboardSections(promptDashboardCollapsedSections),
-    [promptDashboardCollapsedSections],
+    () => hasVisiblePromptDashboardSections(promptDashboardWorkCollapsedSections),
+    [promptDashboardWorkCollapsedSections],
   );
   const promptDashboardCollapsedWidgetsSignature = useMemo(
     () => [...promptDashboardCollapsedWidgets].sort().join('|'),
@@ -5369,11 +5358,11 @@ export const EditorApp: React.FC = () => {
 
   /** Обновляет один виджет и включает project-sensitive ordering только для projects. */
   const handlePromptDashboardRefreshWidget = useCallback((section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => {
-    if (shouldSkipPromptDashboardWidgetRefresh(promptDashboardCollapsedSections, widget)) {
+    if (shouldSkipPromptDashboardWidgetRefresh(promptDashboardWorkCollapsedSections, widget)) {
       postEditorDebugLog('editor-dashboard', 'widget-refresh.skipped-collapsed', {
         section,
         widget,
-        collapsedSections: promptDashboardCollapsedSections,
+        collapsedSections: promptDashboardWorkCollapsedSections,
       });
       return;
     }
@@ -5392,11 +5381,11 @@ export const EditorApp: React.FC = () => {
     lastPromptDashboardRequestFingerprintRef.current = promptDashboardScopeFingerprint;
     setPromptDashboardBusyAction(buildPromptDashboardSectionRefreshBusyAction(section));
     vscode.postMessage({ type: 'refreshPromptDashboardWidget', prompt: promptRef.current, widget, section, requestId });
-  }, [promptDashboardCollapsedSections, promptDashboardScopeFingerprint]);
+  }, [promptDashboardWorkCollapsedSections, promptDashboardScopeFingerprint]);
 
   /** Запрашивает свежие project details без повторной отправки уже активной hydration. */
   const handlePromptDashboardHydrateProjectsDetails = useCallback((projects: string[], reason: 'details' | 'dirty-files' = 'details') => {
-    if (shouldSkipPromptDashboardWidgetRefresh(promptDashboardCollapsedSections, 'projects')) {
+    if (shouldSkipPromptDashboardWidgetRefresh(promptDashboardWorkCollapsedSections, 'projects')) {
       return;
     }
     if (promptDashboardSnapshot?.projects.cache.status === 'loading') {
@@ -5414,53 +5403,14 @@ export const EditorApp: React.FC = () => {
     const requestId = `prompt-dashboard-projects-details-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     promptDashboardProjectsRequestIdRef.current = requestId;
     vscode.postMessage({ type: 'hydratePromptDashboardProjectsDetails', prompt: promptRef.current, projects: targetProjects, requestId, reason });
-  }, [promptDashboardCollapsedSections, promptDashboardSnapshot?.projects.cache.status]);
+  }, [promptDashboardWorkCollapsedSections, promptDashboardSnapshot?.projects.cache.status]);
 
-  /** Сохраняет collapse state и обновляет раскрытый пустой либо stale виджет. */
-  const handlePromptDashboardToggleSectionCollapse = useCallback((section: PromptDashboardSectionKey) => {
-    dashboardLayoutEditedRef.current = true;
-    const nextState = togglePromptDashboardSectionCollapsedState(promptDashboardCollapsedSections, section);
-    const currentSnapshot = promptDashboardSnapshotRef.current;
-    const expandRequest = resolvePromptDashboardExpandRequest({
-      previousCollapsedSections: promptDashboardCollapsedSections,
-      nextCollapsedSections: nextState,
-      section,
-      mode: promptDashboardMode,
-      snapshot: currentSnapshot,
-    });
-
-    postEditorDebugLog('editor-dashboard', 'expand.evaluated', {
-      section,
-      mode: promptDashboardMode,
-      previousCollapsedSections: promptDashboardCollapsedSections,
-      nextCollapsedSections: nextState,
-      expandRequestType: expandRequest?.type || null,
-      expandRequestWidget: expandRequest?.type === 'widget' ? expandRequest.widget : null,
-      ...buildPromptDashboardSnapshotDebugPayload(currentSnapshot),
-    });
-
-    setPromptDashboardLayouts(previous => ({
-      ...previous,
-      [activeDashboardLayoutMode]: { ...previous[activeDashboardLayoutMode], collapsedSections: nextState },
-    }));
-    const edit = registerPromptUiEdit(`collapse:${activeDashboardLayoutMode}`, {
-      ...uiSettingsRef.current, dashboardLayouts: { ...uiSettingsRef.current.dashboardLayouts,
-        [activeDashboardLayoutMode]: { ...uiSettingsRef.current.dashboardLayouts[activeDashboardLayoutMode], collapsedSections: nextState } },
-    });
-    vscode.postMessage({
-      type: 'savePromptDashboardCollapsedSections', state: nextState, layoutMode: activeDashboardLayoutMode,
-      baseState: edit.base.dashboardLayouts[activeDashboardLayoutMode].collapsedSections, requestId: edit.requestId,
-    });
-
-    if (!expandRequest) {
-      postEditorDebugLog('editor-dashboard', 'expand.skipped', {
-        section,
-        mode: promptDashboardMode,
-        nextCollapsedSections: nextState,
-      });
-      return;
-    }
-
+  /** Отправляет запрос данных для раскрытого или снова показанного виджета и защищает его от автоснимка. */
+  const postPromptDashboardExpandRequest = useCallback((
+    section: PromptDashboardSectionKey,
+    expandRequest: NonNullable<ReturnType<typeof resolvePromptDashboardExpandRequest>>,
+    nextState: PromptDashboardCollapsedSections,
+  ) => {
     if (expandRequest.type === 'refresh') {
       const requestId = `prompt-dashboard-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       postEditorDebugLog('editor-dashboard', 'expand.posted', {
@@ -5500,7 +5450,77 @@ export const EditorApp: React.FC = () => {
       section,
       requestId,
     });
-  }, [activeDashboardLayoutMode, promptDashboardCollapsedSections, promptDashboardMode, promptDashboardScopeFingerprint, registerPromptUiEdit]);
+  }, [promptDashboardScopeFingerprint]);
+
+  /** Сохраняет collapse state и обновляет раскрытый пустой либо stale виджет. */
+  const handlePromptDashboardToggleSectionCollapse = useCallback((section: PromptDashboardSectionKey) => {
+    dashboardLayoutEditedRef.current = true;
+    const nextState = togglePromptDashboardSectionCollapsedState(promptDashboardCollapsedSections, section);
+    const currentSnapshot = promptDashboardSnapshotRef.current;
+    const expandRequest = resolvePromptDashboardExpandRequest({
+      previousCollapsedSections: promptDashboardCollapsedSections,
+      nextCollapsedSections: mergePromptDashboardHiddenSections(nextState, promptDashboardHiddenSections ?? []),
+      section,
+      mode: promptDashboardMode,
+      snapshot: currentSnapshot,
+    });
+
+    postEditorDebugLog('editor-dashboard', 'expand.evaluated', {
+      section,
+      mode: promptDashboardMode,
+      previousCollapsedSections: promptDashboardCollapsedSections,
+      nextCollapsedSections: nextState,
+      expandRequestType: expandRequest?.type || null,
+      expandRequestWidget: expandRequest?.type === 'widget' ? expandRequest.widget : null,
+      ...buildPromptDashboardSnapshotDebugPayload(currentSnapshot),
+    });
+
+    setPromptDashboardLayouts(previous => ({
+      ...previous,
+      [activeDashboardLayoutMode]: { ...previous[activeDashboardLayoutMode], collapsedSections: nextState },
+    }));
+    const edit = registerPromptUiEdit(`collapse:${activeDashboardLayoutMode}`, {
+      ...uiSettingsRef.current, dashboardLayouts: { ...uiSettingsRef.current.dashboardLayouts,
+        [activeDashboardLayoutMode]: { ...uiSettingsRef.current.dashboardLayouts[activeDashboardLayoutMode], collapsedSections: nextState } },
+    });
+    vscode.postMessage({
+      type: 'savePromptDashboardCollapsedSections', state: nextState, layoutMode: activeDashboardLayoutMode,
+      baseState: edit.base.dashboardLayouts[activeDashboardLayoutMode].collapsedSections, requestId: edit.requestId,
+    });
+
+    if (!expandRequest) {
+      postEditorDebugLog('editor-dashboard', 'expand.skipped', {
+        section,
+        mode: promptDashboardMode,
+        nextCollapsedSections: nextState,
+      });
+      return;
+    }
+
+    postPromptDashboardExpandRequest(section, expandRequest, nextState);
+  }, [activeDashboardLayoutMode, promptDashboardCollapsedSections, promptDashboardHiddenSections, promptDashboardMode, postPromptDashboardExpandRequest, registerPromptUiEdit]);
+
+  /**
+   * Виджет снова показан меню «⋯»: данные загружаются как при раскрытии — только если их нет или они устарели.
+   * Свёрнутый виджет остаётся свёрнутым и загрузится при раскрытии.
+   */
+  const handlePromptDashboardSectionShown = useCallback((section: PromptDashboardSectionKey, hiddenSections: PromptDashboardSectionKey[]) => {
+    const expandRequest = resolvePromptDashboardShownSectionRequest({
+      collapsedSections: promptDashboardCollapsedSections,
+      hiddenSections,
+      section,
+      mode: promptDashboardMode,
+      snapshot: promptDashboardSnapshotRef.current,
+    });
+    postEditorDebugLog('editor-dashboard', 'section-shown.evaluated', {
+      section,
+      hiddenSections,
+      expandRequestType: expandRequest?.type || null,
+    });
+    if (expandRequest) {
+      postPromptDashboardExpandRequest(section, expandRequest, mergePromptDashboardHiddenSections(promptDashboardCollapsedSections, hiddenSections));
+    }
+  }, [promptDashboardCollapsedSections, promptDashboardMode, postPromptDashboardExpandRequest]);
 
   /** Сохраняет перестановку только в режиме, в котором завершено перетаскивание. */
   const handlePromptDashboardReorderSections = useCallback((nextOrder: PromptDashboardSectionOrder) => {
@@ -8244,6 +8264,7 @@ export const EditorApp: React.FC = () => {
         showGitFlowAction={shouldShowFooterGitFlow}
         onRefresh={handlePromptDashboardRefresh}
         onRefreshWidget={handlePromptDashboardRefreshWidget}
+        onSectionShown={handlePromptDashboardSectionShown}
         onToggleSectionCollapse={handlePromptDashboardToggleSectionCollapse}
         onReorderSections={handlePromptDashboardReorderSections}
         onHydrateProjectsDetails={handlePromptDashboardHydrateProjectsDetails}

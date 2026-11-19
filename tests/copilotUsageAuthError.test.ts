@@ -4,26 +4,13 @@ import Module from 'node:module';
 
 const originalLoad = (Module as any)._load;
 
-type StatusBarItemMock = {
-	text: string;
-	tooltip: unknown;
-	command: string | undefined;
-	color: { id: string } | undefined;
-	backgroundColor: { id: string } | undefined;
-	visible: boolean;
-	show: () => void;
-	hide: () => void;
-	dispose: () => void;
-};
-
+/** Состояние подменённого VS Code: globalState сервиса. */
 type VsCodeMockState = {
-	lastStatusBarItem: StatusBarItemMock | null;
-	statusBarItems: StatusBarItemMock[];
 	globalState: Map<string, unknown>;
 };
 
-/** Создаёт общий mock VS Code для service/provider тестов. */
-function createVsCodeMock(state: VsCodeMockState) {
+/** Создаёт общий mock VS Code для тестов CopilotUsageService. */
+function createVsCodeMock() {
 	class EventEmitter<T> {
 		private readonly listeners: Array<(value: T) => void> = [];
 
@@ -99,28 +86,6 @@ function createVsCodeMock(state: VsCodeMockState) {
 			},
 		},
 		window: {
-			createStatusBarItem: () => {
-				const item: StatusBarItemMock = {
-					text: '',
-					tooltip: undefined,
-					command: undefined,
-					color: undefined,
-					backgroundColor: undefined,
-					visible: false,
-					show() {
-						this.visible = true;
-					},
-					hide() {
-						this.visible = false;
-					},
-					dispose() {
-						this.visible = false;
-					},
-				};
-				state.lastStatusBarItem = item;
-				state.statusBarItems.push(item);
-				return item;
-			},
 			createOutputChannel: () => ({
 				appendLine() { },
 				show() { },
@@ -169,7 +134,6 @@ function createExtensionContext(state: VsCodeMockState) {
 let modulesPromise: Promise<{
 	state: VsCodeMockState;
 	serviceModule: typeof import('../src/services/copilotUsageService.js');
-	providerModule: typeof import('../src/providers/copilotStatusBarProvider.js');
 }> | null = null;
 
 /** Один раз импортирует тестируемые модули с подменённым vscode. */
@@ -180,11 +144,9 @@ function loadModules() {
 
 	modulesPromise = (async () => {
 		const state: VsCodeMockState = {
-			lastStatusBarItem: null,
-			statusBarItems: [],
 			globalState: new Map<string, unknown>(),
 		};
-		const vscodeMock = createVsCodeMock(state);
+		const vscodeMock = createVsCodeMock();
 
 		(Module as any)._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
 			if (request === 'vscode') {
@@ -195,11 +157,8 @@ function loadModules() {
 		};
 
 		try {
-			const [serviceModule, providerModule] = await Promise.all([
-				import('../src/services/copilotUsageService.js'),
-				import('../src/providers/copilotStatusBarProvider.js'),
-			]);
-			return { state, serviceModule, providerModule };
+			const serviceModule = await import('../src/services/copilotUsageService.js');
+			return { state, serviceModule };
 		} finally {
 			(Module as any)._load = originalLoad;
 		}
@@ -342,134 +301,4 @@ test('CopilotUsageService activation binding reuses cache without startup force 
 		(CopilotUsageService.prototype as any).startCopilotPreferencePolling = originalStartPolling;
 		(CopilotUsageService.prototype as any).stopCopilotPreferencePolling = originalStopPolling;
 	}
-});
-
-test('CopilotStatusBarProvider uses cached startup usage without immediate auth summary refresh', async () => {
-	const { state, providerModule } = await loadModules();
-	const { CopilotStatusBarProvider } = providerModule;
-	state.lastStatusBarItem = null;
-	state.statusBarItems.length = 0;
-
-	const cachedData = {
-		used: 21,
-		limit: 300,
-		periodStart: '2026-04-01T00:00:00.000Z',
-		periodEnd: '2026-04-30T23:59:59.999Z',
-		lastUpdated: '2026-04-21T12:00:00.000Z',
-		avgPerDay: 2,
-		authenticated: true,
-		planType: 'Pro',
-		source: 'api' as const,
-		lastSyncStatus: 'restored-from-cache',
-		snapshots: [{ date: '2026-04-21', used: 21, limit: 300 }],
-	};
-	let fetchUsageCount = 0;
-	let accountSummaryCount = 0;
-	let autoRefreshCount = 0;
-
-	const usageService = {
-		onDidChangeUsage: () => ({ dispose() { } }),
-		onDidChangeAccountSwitchState: () => ({ dispose() { } }),
-		getAccountSwitchState: () => ({
-			isSwitching: false,
-			phase: 'idle',
-			message: '',
-			accountLabel: null,
-			startedAt: null,
-			updatedAt: '2026-04-21T12:00:00.000Z',
-		}),
-		getCachedData: () => cachedData,
-		fetchUsage: async () => {
-			fetchUsageCount += 1;
-			return cachedData;
-		},
-		getAccountBindingSummary: async () => {
-			accountSummaryCount += 1;
-			return {
-				copilotPreferredGitHubLabel: 'atlcomgit',
-				promptManagerPreferredGitHubLabel: 'atlcomgit',
-				activeGithubSessionAccountLabel: 'atlcomgit',
-				githubSessionIssue: null,
-				availableGitHubAccounts: [{ id: '1', label: 'atlcomgit' }],
-			};
-		},
-		startAutoRefresh: () => { autoRefreshCount += 1; },
-		stopAutoRefresh: () => undefined,
-		authenticate: async () => true,
-	};
-
-	const provider = new CopilotStatusBarProvider(
-		usageService as any,
-		{ show: async () => undefined } as any,
-	);
-
-	assert.equal(fetchUsageCount, 0);
-	assert.equal(accountSummaryCount, 0);
-	assert.equal(autoRefreshCount, 1);
-	const statusBarItem = state.lastStatusBarItem as StatusBarItemMock | null;
-	assert.ok(statusBarItem);
-	assert.equal(statusBarItem.visible, true);
-
-	provider.dispose();
-});
-
-test('CopilotStatusBarProvider shows explicit sign-in error label for auth-error usage data', async () => {
-	const { state, providerModule } = await loadModules();
-	const { CopilotStatusBarProvider } = providerModule;
-	state.lastStatusBarItem = null;
-	state.statusBarItems.length = 0;
-
-	const authErrorData = {
-		used: 0,
-		limit: 0,
-		periodStart: '2026-04-01T00:00:00.000Z',
-		periodEnd: '2026-04-30T23:59:59.999Z',
-		lastUpdated: '2026-04-21T12:00:00.000Z',
-		avgPerDay: 0,
-		authenticated: false,
-		planType: 'Pro+',
-		source: 'local' as const,
-		lastSyncStatus: 'github-auth-error:api:user -> 401 (Bad credentials)',
-		snapshots: [],
-	};
-
-	const usageService = {
-		onDidChangeUsage: () => ({ dispose() { } }),
-		onDidChangeAccountSwitchState: () => ({ dispose() { } }),
-		getAccountSwitchState: () => ({
-			isSwitching: false,
-			phase: 'idle',
-			message: '',
-			accountLabel: null,
-			startedAt: null,
-			updatedAt: '2026-04-21T12:00:00.000Z',
-		}),
-		getCachedData: () => authErrorData,
-		fetchUsage: async () => authErrorData,
-		getAccountBindingSummary: async () => ({
-			copilotPreferredGitHubLabel: null,
-			promptManagerPreferredGitHubLabel: null,
-			activeGithubSessionAccountLabel: null,
-			githubSessionIssue: null,
-			availableGitHubAccounts: [],
-		}),
-		startAutoRefresh: () => undefined,
-		stopAutoRefresh: () => undefined,
-		authenticate: async () => true,
-	};
-
-	const provider = new CopilotStatusBarProvider(
-		usageService as any,
-		{ show: async () => undefined } as any,
-	);
-
-	assert.ok(state.lastStatusBarItem);
-	const statusBarItem = state.lastStatusBarItem as StatusBarItemMock;
-	assert.equal(statusBarItem.text, '$(error) Ошибка входа');
-	assert.equal(statusBarItem.command, 'promptManager.copilotUsageAuth');
-	assert.equal(statusBarItem.color?.id, 'errorForeground');
-	assert.equal(statusBarItem.backgroundColor?.id, 'statusBarItem.errorBackground');
-	assert.equal(statusBarItem.visible, true);
-
-	provider.dispose();
 });

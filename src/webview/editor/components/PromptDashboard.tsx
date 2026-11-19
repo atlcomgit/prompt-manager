@@ -1,5 +1,8 @@
 import { DragHandleIcon } from '../../shared/DragHandleIcon.js';
 import { sectionDragStyles } from '../../shared/sectionDragStyles.js';
+import { QuickNotesSection } from './quickNotes/QuickNotesSection';
+import { QuickNoteModalHost, useQuickNotesActions } from './quickNotes/useQuickNotesActions';
+import { useQuickNotesClient } from './quickNotes/useQuickNotesClient';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { subscribeDragPointerEvents as subscribePromptDashboardDragEvents } from '../../shared/dragPointer';
 
@@ -44,6 +47,7 @@ import type {
 } from '../../../types/promptDashboard.js';
 import {
 	PROMPT_DASHBOARD_SECTION_KEYS,
+	PROMPT_DASHBOARD_SECTION_LABELS,
 	createDefaultPromptDashboardCollapsedSections,
 	createDefaultPromptDashboardSectionOrder,
 	isPromptDashboardProjectsSectionLoaded,
@@ -136,6 +140,11 @@ interface PromptDashboardProps {
 	showGitFlowAction?: boolean;
 	onRefresh: () => void;
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void;
+	/**
+	 * Виджет снова показан меню «⋯»: контейнер загружает его данные, если их нет или они устарели.
+	 * hiddenSections — скрытые виджеты после изменения.
+	 */
+	onSectionShown?: (section: PromptDashboardSectionKey, hiddenSections: PromptDashboardSectionKey[]) => void;
 	onToggleSectionCollapse?: (section: PromptDashboardSectionKey) => void;
 	onReorderSections?: (order: PromptDashboardSectionOrder) => void;
 	onHydrateProjectsDetails: (projects: string[], reason?: 'details' | 'dirty-files') => void;
@@ -758,6 +767,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	showGitFlowAction = false,
 	onRefresh,
 	onRefreshWidget,
+	onSectionShown,
 	onToggleSectionCollapse,
 	onReorderSections,
 	onHydrateProjectsDetails,
@@ -777,6 +787,11 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	onOpenDockerTerminal,
 	onDockerLiveMetricsVisibilityChange,
 }) => {
+	// Состояние быстрых заметок живёт на уровне панели, а не карточки: карточка пересоздаётся при смене числа
+	// колонок и порядка виджетов, а открытое окно, его черновик и текст нового поля не должны пропадать.
+	const quickNotesClient = useQuickNotesClient();
+	const quickNotesActions = useQuickNotesActions(quickNotesClient);
+	const [quickNotesAddText, setQuickNotesAddText] = useState('');
 	// Начальное состояние не зависит от snapshot/resize; первый ready может уточнить ещё не изменённый bootstrap.
 	const [initialState] = useState(() => readPromptDashboardInitialPreferences(initialPreferences));
 	const [preferences, setPreferences] = useState(initialState.preferences);
@@ -798,6 +813,17 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			onPreferencesChange?.(next);
 		}
 	}, [onPreferencesChange]);
+	const hiddenSections = preferences.hiddenSections;
+	/**
+	 * Сохраняет скрытие виджетов меню «⋯», затем сообщает о снова показанных: настройка уходит расширению раньше
+	 * запроса их данных, поэтому запрос не пропускается как обращение к скрытому виджету.
+	 */
+	const changeHiddenSections = useCallback((next: PromptDashboardSectionKey[], shown: PromptDashboardSectionKey[]) => {
+		updatePreferences({ hiddenSections: next });
+		for (const section of shown) {
+			onSectionShown?.(section, next);
+		}
+	}, [onSectionShown, updatePreferences]);
 	// Первый ready не отменяет локальный выбор; отдельная ревизия Settings Sync применяется без обратной записи.
 	useEffect(() => {
 		const externalUpdate = preferencesRevisionRef.current !== preferencesRevision;
@@ -1661,11 +1687,44 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		dockerContainers: renderDockerContainers(snapshot?.docker.data, dockerViewMode, dockerStatusFilter, dockerSearch, dockerSortBy, expanded, dockerCacheStatus, busyAction, effectiveDockerBusyAction, changeDockerViewMode, changeDockerStatusFilter, changeDockerSearch, clearDockerSearch, changeDockerSortBy, toggleExpanded, onDockerAction, onDockerWorkspaceAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('dockerContainers', 'Docker контейнеры')),
 		todos: renderTodos(snapshot?.todos?.data || null, visibleTodosData, todoSelectedFileTypes, todoSearch, todosCacheStatus, busyAction, expanded, normalizedCollapsedSections, toggleTodoFileType, clearTodoFileTypes, changeTodoSearch, clearTodoSearch, toggleExpanded, onOpenTodoMarker, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('todos', 'ToDo')),
 		aiAnalysis: renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('aiAnalysis', 'AI review')),
+		quickNotes: (
+			<QuickNotesSection
+				client={quickNotesClient}
+				actions={quickNotesActions}
+				addText={quickNotesAddText}
+				onAddTextChange={setQuickNotesAddText}
+				collapsed={isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'quickNotes')}
+				onToggleCollapse={() => toggleSectionCollapse('quickNotes')}
+				renderShell={(actions, body) => {
+					const quickNotesCollapsed = isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'quickNotes');
+					return (
+						<section style={styles.section}>
+							{renderSectionHeader('Быстрые заметки', (
+								<span style={styles.sectionHeaderActions}>
+									{actions}
+									{renderSectionCollapseButton('Быстрые заметки', quickNotesCollapsed, () => toggleSectionCollapse('quickNotes'))}
+								</span>
+							), {
+								collapsed: quickNotesCollapsed,
+								onToggleCollapse: () => toggleSectionCollapse('quickNotes'),
+								dragHandle: renderSectionDragHandle('quickNotes', 'Быстрые заметки'),
+							})}
+							{body ? <div style={styles.sectionBody}>{body}</div> : null}
+						</section>
+					);
+				}}
+				preferences={preferences.quickNotes}
+				onPreferencesChange={quickNotes => updatePreferences({ quickNotes })}
+				expanded={expanded}
+				onExpandedChange={nextExpanded => updatePreferences({ expanded: nextExpanded })}
+			/>
+		),
 	};
 	const widgetColumns = normalizedSectionOrder
 		.map(column => column.reduce<Array<{ sectionKey: PromptDashboardSectionKey; node: React.ReactElement }>>((entries, sectionKey) => {
 			const sectionNode = sectionNodesByKey[sectionKey];
-			if (sectionNode === null || sectionNode === undefined || sectionNode === false) {
+			// Скрытый меню «⋯» виджет не отображается, но сохраняет место в порядке колонок.
+			if (sectionNode === null || sectionNode === undefined || sectionNode === false || hiddenSections.includes(sectionKey)) {
 				return entries;
 			}
 			const showDropBefore = dropIndicator?.section === sectionKey && dropIndicator.placement === 'before';
@@ -1715,9 +1774,12 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 						<div style={styles.subtitle}>{resolveCacheLabel(snapshot)}</div>
 					</div>
 				</div>
-				<button type="button" style={{ ...styles.iconButton, ...(isRefreshBusy ? styles.busyButton : null) }} onClick={onRefresh} title="Обновить" aria-label="Обновить" disabled={isRefreshBusy}>
-					{isRefreshBusy ? <span style={styles.buttonSpinner} aria-hidden="true" /> : <RefreshIcon />}
-				</button>
+				<div style={styles.toolbarActions}>
+					<button type="button" style={{ ...styles.iconButton, ...(isRefreshBusy ? styles.busyButton : null) }} onClick={onRefresh} title="Обновить" aria-label="Обновить" disabled={isRefreshBusy}>
+						{isRefreshBusy ? <span style={styles.buttonSpinner} aria-hidden="true" /> : <RefreshIcon />}
+					</button>
+					<PromptDashboardWidgetsMenu hiddenSections={hiddenSections} onChange={changeHiddenSections} />
+				</div>
 			</div>
 
 			<div ref={widgetGridRef} style={{
@@ -1735,14 +1797,22 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 					>
 						{dropIndicator?.columnIndex === columnIndex
 							? <div style={sectionDragStyles.indicator} aria-hidden="true" /> : null}
-						{column.map((section, sectionIndex) => (
-							<React.Fragment key={`widget-column:${columnIndex}:section:${sectionIndex}`}>
+						{column.map(section => (
+							// Ключ по секции сохраняет состояние карточки, когда соседние виджеты появляются или переставляются.
+							<React.Fragment key={`widget-section:${section.sectionKey}`}>
 								{section.node}
 							</React.Fragment>
 						))}
 					</div>
 				))}
 			</div>
+			{hiddenSections.length === PROMPT_DASHBOARD_SECTION_KEYS.length ? (
+				<div style={styles.allWidgetsHidden} role="status">
+					Все виджеты скрыты. Включите нужные в меню «⋯» рядом с кнопкой обновления.
+				</div>
+			) : null}
+			{/* Окно заметки живёт вне колонок: перенос карточки в другую колонку не закрывает его и не теряет черновик. */}
+			<QuickNoteModalHost client={quickNotesClient} actions={quickNotesActions} />
 		</aside>
 	);
 };
@@ -1886,6 +1956,166 @@ function SectionChevronIcon({ collapsed }: { collapsed: boolean }): React.ReactN
 		>
 			<path d="M3.5 6l4.5 4.5L12.5 6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
 		</svg>
+	);
+}
+
+/** Три точки кнопки меню виджетов панели. */
+function MoreIcon(): React.ReactNode {
+	return (
+		<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" style={styles.refreshIcon}>
+			<circle cx="3.5" cy="8" r="1.25" fill="currentColor" />
+			<circle cx="8" cy="8" r="1.25" fill="currentColor" />
+			<circle cx="12.5" cy="8" r="1.25" fill="currentColor" />
+		</svg>
+	);
+}
+
+/** Отметка видимого виджета в меню. */
+function MenuCheckIcon(): React.ReactNode {
+	return (
+		<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+			<path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+		</svg>
+	);
+}
+
+/**
+ * Меню «⋯» панели «Обзор»: все виджеты с отметкой видимых. Снятая отметка скрывает виджет общей настройкой,
+ * повторная — показывает. Меню остаётся открытым после переключения, чтобы изменить несколько виджетов подряд.
+ * Тесты разметки — tests/promptDashboardComponent.test.tsx.
+ */
+function PromptDashboardWidgetsMenu({ hiddenSections, onChange }: {
+	hiddenSections: readonly PromptDashboardSectionKey[];
+	onChange: (hiddenSections: PromptDashboardSectionKey[], shown: PromptDashboardSectionKey[]) => void;
+}): React.ReactElement {
+	const [isOpen, setIsOpen] = useState(false);
+	const menuRef = useRef<HTMLDivElement>(null);
+	const triggerRef = useRef<HTMLButtonElement>(null);
+	const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+	const menuId = React.useId();
+	const label = 'Виджеты панели';
+
+	// Меню закрывается, когда указатель или фокус переходит за его пределы.
+	useEffect(() => {
+		if (!isOpen) {
+			return;
+		}
+		const closeOutside = (event: Event) => {
+			if (event.target instanceof Node && !menuRef.current?.contains(event.target)) {
+				setIsOpen(false);
+			}
+		};
+		document.addEventListener('pointerdown', closeOutside);
+		document.addEventListener('focusin', closeOutside);
+		return () => {
+			document.removeEventListener('pointerdown', closeOutside);
+			document.removeEventListener('focusin', closeOutside);
+		};
+	}, [isOpen]);
+
+	// Открытое меню получает фокус на первом пункте после монтирования.
+	useEffect(() => {
+		if (!isOpen) {
+			return;
+		}
+		const frameId = window.requestAnimationFrame(() => itemRefs.current[0]?.focus());
+		return () => window.cancelAnimationFrame(frameId);
+	}, [isOpen]);
+
+	/** Переключает видимость одного виджета. */
+	const toggle = (section: PromptDashboardSectionKey) => {
+		const hidden = hiddenSections.includes(section);
+		const next = hidden
+			? hiddenSections.filter(entry => entry !== section)
+			: PROMPT_DASHBOARD_SECTION_KEYS.filter(entry => entry === section || hiddenSections.includes(entry));
+		onChange(next, hidden ? [section] : []);
+	};
+
+	/** Перемещает фокус по пунктам меню стрелками, Home и End. */
+	const moveFocus = (key: string) => {
+		const items = itemRefs.current.filter((item): item is HTMLButtonElement => Boolean(item));
+		if (items.length === 0) {
+			return;
+		}
+		const current = items.findIndex(item => item === document.activeElement);
+		const target = key === 'Home' ? 0
+			: key === 'End' ? items.length - 1
+				: key === 'ArrowDown' ? (current + 1) % items.length
+					: (current - 1 + items.length) % items.length;
+		items[target]?.focus();
+	};
+
+	return (
+		<div
+			ref={menuRef}
+			style={styles.widgetsMenu}
+			onKeyDown={event => {
+				if (event.key === 'Escape' && isOpen) {
+					event.preventDefault();
+					event.stopPropagation();
+					setIsOpen(false);
+					triggerRef.current?.focus();
+				} else if (isOpen && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+					event.preventDefault();
+					moveFocus(event.key);
+				}
+			}}
+		>
+			<button
+				ref={triggerRef}
+				type="button"
+				style={styles.iconButton}
+				title={label}
+				aria-label={label}
+				aria-haspopup="menu"
+				aria-expanded={isOpen}
+				aria-controls={isOpen ? menuId : undefined}
+				onClick={() => setIsOpen(!isOpen)}
+			>
+				<MoreIcon />
+			</button>
+			{isOpen ? (
+				<div id={menuId} role="menu" aria-label={label} style={styles.dockerActionMenuPopover}>
+					<div style={styles.widgetsMenuHeading} aria-hidden="true">Показывать виджеты</div>
+					{PROMPT_DASHBOARD_SECTION_KEYS.map((section, index) => {
+						const visible = !hiddenSections.includes(section);
+						return (
+							<button
+								key={section}
+								ref={element => { itemRefs.current[index] = element; }}
+								className="pm-docker-action-menu-item"
+								type="button"
+								role="menuitemcheckbox"
+								aria-checked={visible}
+								tabIndex={-1}
+								style={styles.dockerActionMenuItem}
+								onClick={() => toggle(section)}
+							>
+								<span style={styles.dockerActionMenuItemIcon} aria-hidden="true">{visible ? <MenuCheckIcon /> : null}</span>
+								<span style={styles.dockerActionMenuItemLabel}>{PROMPT_DASHBOARD_SECTION_LABELS[section]}</span>
+							</button>
+						);
+					})}
+					{hiddenSections.length > 0 ? (
+						<>
+							<div style={styles.widgetsMenuSeparator} role="separator" />
+							<button
+								ref={element => { itemRefs.current[PROMPT_DASHBOARD_SECTION_KEYS.length] = element; }}
+								className="pm-docker-action-menu-item"
+								type="button"
+								role="menuitem"
+								tabIndex={-1}
+								style={styles.dockerActionMenuItem}
+								onClick={() => onChange([], [...hiddenSections])}
+							>
+								<span style={styles.dockerActionMenuItemIcon} aria-hidden="true" />
+								<span style={styles.dockerActionMenuItemLabel}>Показать все</span>
+							</button>
+						</>
+					) : null}
+				</div>
+			) : null}
+		</div>
 	);
 }
 
@@ -3940,6 +4170,21 @@ function resolveSectionCacheStatus(
 }
 
 
+/** Кнопка сворачивания виджета в заголовке; общая для карточек с данными снимка и быстрых заметок. */
+function renderSectionCollapseButton(title: string, collapsed: boolean, onToggleCollapse: () => void): React.ReactNode {
+	return (
+		<button
+			type="button"
+			style={{ ...styles.iconButton, ...styles.sectionCollapseButton }}
+			onClick={(event) => handleSectionHeaderActionClick(event, onToggleCollapse)}
+			title={`${collapsed ? 'Развернуть' : 'Свернуть'} виджет: ${title}`}
+			aria-label={`${collapsed ? 'Развернуть' : 'Свернуть'} виджет: ${title}`}
+		>
+			<SectionChevronIcon collapsed={collapsed} />
+		</button>
+	);
+}
+
 function renderSectionMeta(
 	value: string | number,
 	cacheStatus: PromptDashboardLoadStatus,
@@ -3955,17 +4200,9 @@ function renderSectionMeta(
 	},
 ): React.ReactNode {
 	const isBusy = options ? isSectionRefreshBusy(options.busyAction, options.section) : false;
-	const collapseButton = options?.onToggleCollapse ? (
-		<button
-			type="button"
-			style={{ ...styles.iconButton, ...styles.sectionCollapseButton }}
-			onClick={(event) => handleSectionHeaderActionClick(event, () => options.onToggleCollapse?.())}
-			title={`${options?.collapsed ? 'Развернуть' : 'Свернуть'} виджет: ${options.title}`}
-			aria-label={`${options?.collapsed ? 'Развернуть' : 'Свернуть'} виджет: ${options.title}`}
-		>
-			<SectionChevronIcon collapsed={Boolean(options?.collapsed)} />
-		</button>
-	) : null;
+	const collapseButton = options?.onToggleCollapse
+		? renderSectionCollapseButton(options.title, Boolean(options.collapsed), options.onToggleCollapse)
+		: null;
 	const metaNode = cacheStatus === 'loading' && options?.onRefreshWidget
 		? null
 		: cacheStatus === 'loading'
@@ -6691,6 +6928,40 @@ const styles: Record<string, React.CSSProperties> = {
 	subtitle: {
 		fontSize: '11px',
 		color: 'var(--vscode-descriptionForeground)',
+	},
+	// Кнопки обновления и меню виджетов справа от заголовка панели.
+	toolbarActions: {
+		display: 'inline-flex',
+		alignItems: 'center',
+		gap: '2px',
+		flexShrink: 0,
+	},
+	// Якорь всплывающего меню виджетов.
+	widgetsMenu: {
+		position: 'relative',
+		display: 'inline-flex',
+	},
+	// Подзаголовок меню виджетов.
+	widgetsMenuHeading: {
+		padding: '4px 7px 6px',
+		fontSize: '11px',
+		fontWeight: 600,
+		color: 'var(--vscode-descriptionForeground)',
+	},
+	// Разделитель перед командой «Показать все».
+	widgetsMenuSeparator: {
+		height: '1px',
+		margin: '4px 2px',
+		background: 'var(--vscode-menu-separatorBackground, var(--vscode-panel-border))',
+	},
+	// Подсказка, когда все виджеты скрыты меню.
+	allWidgetsHidden: {
+		padding: '24px 12px',
+		textAlign: 'center',
+		fontSize: '12px',
+		color: 'var(--vscode-descriptionForeground)',
+		border: '1px dashed var(--vscode-panel-border)',
+		borderRadius: '6px',
 	},
 	// Базовый вид круглой кнопки в тулбаре.
 	iconButton: {

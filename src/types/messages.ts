@@ -5,7 +5,16 @@
 import type { ChatMemorySummary, EditorPromptViewState, EditorPromptPlanViewMode, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerWorkspaceActionKind } from './docker.js';
-import type { PromptDashboardPreferences } from './promptDashboardPreferences.js';
+import type { DashboardQuickNotesWidgetState, PromptDashboardPreferences } from './promptDashboardPreferences.js';
+import type {
+	QuickNoteAttachSource,
+	QuickNoteChecklistSuggestionInput,
+	QuickNoteFile,
+	QuickNoteOperation,
+	QuickNoteOperationResult,
+	QuickNoteScope,
+	QuickNotesState,
+} from './quickNotes.js';
 import type { PromptEditorLayout, PromptUiSettingsSnapshot } from './promptEditorLayout.js';
 import type { PromptHoverTarget, PromptHoverPreviewResult } from './promptHoverPreview.js';
 import type {
@@ -131,6 +140,31 @@ export type WebviewToExtensionMessage =
 	| { type: 'promptDashboardOpenFilePatch'; project: string; filePath: string; previousPath?: string; mode: 'commit' | 'branch'; ref: string; baseRef?: string }
 	| { type: 'promptDashboardOpenTodoMarker'; project: string; filePath: string; line: number; column?: number; requestId?: string }
 	| { type: 'analyzePromptDashboardReview'; prompt: Prompt; requestId?: string }
+	/** Быстрые заметки: состояние обеих областей и операции; ответы приходят адресно по requestId. */
+	| { type: 'quickNotesRequestState'; requestId?: string }
+	| { type: 'quickNotesSetDescriptionHeight'; height: number }
+	| { type: 'quickNotesApply'; operation: QuickNoteOperation; requestId: string }
+	/** Копирует файлы во временную папку черновика окна заметки. */
+	| { type: 'quickNotesAttach'; scope: QuickNoteScope; draftId: string; source: QuickNoteAttachSource; requestId: string }
+	/** Blocks of local files uploaded by a browser while connected to VS Code Remote Tunnel. */
+	| { type: 'quickNotesUploadChunk'; scope: QuickNoteScope; draftId: string; requestId: string;
+		uploadId: string; name: string; fileSize: number; chunkIndex: number; chunkCount: number; dataBase64: string }
+	| { type: 'quickNotesCancelUpload'; scope: QuickNoteScope; draftId: string; uploadId: string }
+	/** Удаляет временные копии отменённого черновика. */
+	| { type: 'quickNotesDiscardDraft'; scope: QuickNoteScope; draftId: string }
+	/** Удалить только несохранённую копию файла, сохранив исходное вложение до Save. */
+	| { type: 'quickNotesRemoveDraftFile'; scope: QuickNoteScope; draftId: string; storedName: string; requestId: string }
+	| { type: 'quickNotesOpenFile'; scope: QuickNoteScope; noteId: string; storedName: string; draftId?: string }
+	/** Открывает quick-notes.json области, например при ошибке чтения. */
+	| { type: 'quickNotesOpenStorageFile'; scope: QuickNoteScope }
+	| { type: 'quickNotesCreatePrompt'; scope: QuickNoteScope; noteId: string; requestId: string }
+	| { type: 'quickNotesOpenPrompt'; promptId: string; promptUuid?: string }
+	| { type: 'quickNotesSuggestItem'; input: QuickNoteChecklistSuggestionInput; requestId: string }
+	/** Открывает страницу доски заметок отдельной вкладкой редактора. */
+	| { type: 'quickNotesOpenBoard' }
+	/** Страница доски запрашивает и сохраняет вид заметок; base защищает параллельные правки других полей. */
+	| { type: 'quickNotesRequestPreferences' }
+	| { type: 'quickNotesSavePreferences'; state: DashboardQuickNotesWidgetState; baseState?: DashboardQuickNotesWidgetState }
 	| { type: 'openGitOverlay'; promptBranch: string; projects: string[] }
 	| { type: 'gitOverlayVisibility'; open: boolean; promptBranch: string; projects: string[] }
 	| { type: 'refreshGitOverlay'; promptBranch: string; projects: string[]; mode?: 'local' | 'fetch' | 'sync' }
@@ -306,6 +340,26 @@ export type ExtensionToWebviewMessage =
 	/** Завершает dashboard request, который host безопасно отбросил после collapse race. */
 	| { type: 'promptDashboardRequestCompleted'; requestId: string; target: PromptDashboardWidgetKind }
 	| { type: 'promptDashboardAnalysis'; promptId: string; promptUuid?: string; analysis: PromptDashboardAnalysisState; requestId?: string }
+	/** Полное состояние заметок; requestId и result подтверждают операцию отправившей панели. */
+	| { type: 'quickNotesState'; state: QuickNotesState; requestId?: string; result?: QuickNoteOperationResult; generatingTitleKeys?: string[]; descriptionHeight?: number }
+	| { type: 'quickNotesTitleGeneration'; generatingTitleKeys: string[] }
+	/** Добавленные в черновик копии с адресами превью изображений для текущей панели. */
+	| {
+		type: 'quickNotesAttached';
+		requestId: string;
+		draftId: string;
+		files: QuickNoteFile[];
+		previewUris: Record<string, string>;
+		skipped: string[];
+		error?: string;
+	}
+	| { type: 'quickNotesUploadResult'; requestId: string; draftId: string; file?: QuickNoteFile; previewUri?: string; error?: string }
+	| { type: 'quickNotesDraftFileRemoved'; requestId: string; ok: boolean; error?: string }
+	| { type: 'quickNotesPromptCreated'; requestId: string; ok: boolean; promptTitle?: string; message?: string }
+	/** Пустой text вместе с error означает, что пункт предложить не удалось. */
+	| { type: 'quickNotesSuggestion'; requestId: string; text: string; error?: string }
+	/** Актуальный вид заметок для страницы доски. */
+	| { type: 'quickNotesPreferences'; state: DashboardQuickNotesWidgetState }
 	| { type: 'branchStatus'; hasChanges: boolean; details: string }
 	| { type: 'error'; message: string; requestId?: string; retainPromptDashboardBusy?: boolean }
 	| { type: 'info'; message: string; requestId?: string; retainPromptDashboardBusy?: boolean }

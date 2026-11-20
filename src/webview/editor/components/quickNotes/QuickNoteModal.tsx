@@ -468,20 +468,22 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 
 	/** Запрашивает предложение пункта; поздний ответ после перегенерации или закрытия отбрасывается. */
 	const requestSuggestion = async (rejectCurrent = false) => {
+		if (suggestion?.status === 'loading') return;
 		const sequence = ++suggestionSeqRef.current;
 		const rejected = rejectCurrent && suggestion?.text.trim() ? suggestion.text.trim() : '';
 		const previous = [...new Set([
 			...(note.rejectedSuggestions || []), ...(suggestion?.previous || []), rejected,
 		].map(text => text.trim()).filter(Boolean))].slice(-80);
-		// Rejected suggestions are saved immediately even if the editor is later closed without saving.
+		// Показываем загрузку до записи отклонённого варианта. Закрытие блока отменяет следующий запрос.
+		setSuggestion({ status: 'loading', text: '', previous });
 		if (rejected) {
 			const stored = await client.apply({ kind: 'rejectSuggestion', scope: note.scope, id: note.id, text: rejected });
+			if (!mountedRef.current || sequence !== suggestionSeqRef.current) return;
 			if (!stored.ok) {
 				setSuggestion({ status: 'error', text: '', previous, error: stored.message || 'Не удалось запомнить отклонённый пункт.' });
 				return;
 			}
 		}
-		setSuggestion({ status: 'loading', text: '', previous });
 		const result = await client.suggest({
 			title: draft.title,
 			description: draft.description,

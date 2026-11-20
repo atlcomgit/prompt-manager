@@ -118,7 +118,7 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 	const addEditorRef = useRef<HTMLDivElement>(null);
 	// Позднее подтверждение не закрывает поле после отправки следующего черновика.
 	const saveVersionRef = useRef(0);
-	const contextMenuRef = useRef<HTMLDivElement>(null);
+	const contextMenuRef = useRef<HTMLDivElement | null>(null);
 	useEffect(() => {
 		if (props.searchOpen) searchRef.current?.focus();
 	}, [props.searchOpen]);
@@ -175,11 +175,20 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 		if (focused instanceof HTMLElement && editor?.contains(focused)) focused.blur();
 		setAddOpen(false);
 	};
-	/** Сбрасывает черновик и сворачивает поле после очистки. */
-	const clearNewNote = () => {
+	/** Сбрасывает черновик и отменяет действие прежнего подтверждения сохранения. */
+	const resetNewNote = () => {
 		saveVersionRef.current++;
 		setTitle('');
 		setAddHeight(90);
+	};
+	/** Очищает текст, возвращая фокус при нажатии мышью или клавиатурой. */
+	const clearNewNote = () => {
+		resetNewNote();
+		addEditorRef.current?.querySelector('textarea')?.focus({ preventScroll: true });
+	};
+	/** Отмена закрывает ввод, если поле не удерживает активная диктовка. */
+	const cancelNewNote = () => {
+		resetNewNote();
 		collapseNewNoteEditor();
 	};
 	const [confirmClear, setConfirmClear] = useState(false);
@@ -319,8 +328,7 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 						if (!selected) setSelectedKeys(new Set());
 						setContextMenu({
 							keys: selected ? selectedKeys : new Set([expandedKey]), primaryKey: expandedKey,
-							x: Math.max(8, Math.min(event.clientX, window.innerWidth - 240)),
-							y: Math.max(8, Math.min(event.clientY, window.innerHeight - 360)),
+							x: event.clientX, y: event.clientY,
 						});
 					}}
 					onDoubleClick={event => {
@@ -459,6 +467,8 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 					{addExpanded ? <div className="pm-qn-add-tools">
 						<button type="button" className="pm-qn-btn is-secondary is-small pm-qn-add-clear"
 							disabled={!title} onClick={clearNewNote}>Очистить</button>
+						<button type="button" className="pm-qn-btn is-secondary is-small"
+							onClick={cancelNewNote}>Отмена</button>
 						{title.trim() ? <button type="button" className="pm-qn-btn is-primary is-small"
 							aria-label="Сохранить новую заметку" onClick={() => saveNewNote()}>
 							<QuickNoteIcon name="check" size={13}/>Сохранить
@@ -587,8 +597,14 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 				</>
 			)}
 			{contextMenu && primaryNote && typeof document !== 'undefined' ? createPortal(
-				<div ref={contextMenuRef} className="pm-qn-context-menu" role="menu"
-					style={{ left: contextMenu.x, top: contextMenu.y }}>
+				<div className="pm-qn-context-menu" role="menu" ref={element => {
+					contextMenuRef.current = element;
+					if (!element) return;
+					// Меню подстраивается под подписи и остаётся в окне у правого или нижнего края.
+					const { width, height } = element.getBoundingClientRect();
+					element.style.left = `${Math.max(8, Math.min(contextMenu.x, window.innerWidth - width - 8))}px`;
+					element.style.top = `${Math.max(8, Math.min(contextMenu.y, window.innerHeight - height - 8))}px`;
+				}}>
 					{contextMenu.error ? <div role="alert" className="pm-qn-menu-error">{contextMenu.error}</div> : null}
 					{contextMenu.confirmDelete ? <>
 						<span className="pm-qn-menu-note">{bulkMenu ? `Удалить выбранные заметки (${menuNotes.length}) и их файлы?` : 'Удалить заметку и её файлы?'}</span>

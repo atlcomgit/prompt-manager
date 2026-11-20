@@ -1,5 +1,4 @@
 import type { DockerContainersStatusFilter, DockerContainersViewMode } from './docker.js';
-import type { PromptChatTarget } from './prompt.js';
 import { PROMPT_DASHBOARD_SECTION_KEYS, type PromptDashboardSectionKey } from './promptDashboard.js';
 import { QUICK_NOTE_PALETTE_COLORS, type QuickNoteScope, type QuickNotesBoardGroupBy, type QuickNotesBoardScopeFilter } from './quickNotes.js';
 
@@ -41,28 +40,74 @@ export interface DashboardQuickNotesWidgetState {
 	descriptionHeight?: number;
 }
 
-/** Agents with a draft entry point in the quick commands widget. */
-export type DashboardQuickCommandTarget = Exclude<PromptChatTarget, 'kilo'>;
+/** Цели виджета, включая открытый чат текущего окна. */
+export const DASHBOARD_QUICK_COMMAND_TARGETS = ['current', 'copilot', 'codex', 'claude', 'opencode-cli'] as const;
 
-/** User phrases and the explicitly selected draft destination. */
+/** Выбранный способ адресации черновика. */
+export type DashboardQuickCommandTarget = typeof DASHBOARD_QUICK_COMMAND_TARGETS[number];
+
+/** Ограничения общих настроек, формы команды и сообщения вставки. */
+export const DASHBOARD_QUICK_COMMAND_LIMIT = 120;
+export const DASHBOARD_QUICK_COMMAND_TEXT_LIMIT = 3000;
+export const DASHBOARD_QUICK_COMMAND_CATEGORY_LIMIT = 80;
+
+/** Фраза уникальна в списке, пустая категория означает общий список. */
+export interface DashboardQuickCommand {
+	text: string;
+	category?: string;
+}
+
+/** Порядок фраз и выбранный агент общие для всех промптов. */
 export interface DashboardQuickCommandsWidgetState {
-	items: string[];
+	items: DashboardQuickCommand[];
 	target?: DashboardQuickCommandTarget;
 }
 
-/** Нормализует ограниченный список быстрых команд из глобальных настроек. */
-export function normalizeDashboardQuickCommandsWidgetState(value: unknown): DashboardQuickCommandsWidgetState {
-	const input: { items?: unknown; target?: unknown } = value && typeof value === 'object' && !Array.isArray(value)
-		? { ...value } : {};
-	const { target } = input;
-	const defaults = ['/alek-review', 'есть еще уточнения или вопросы?'];
+/** Формат глобальных настроек. Строковый список доступен в прежних версиях расширения. */
+export interface DashboardQuickCommandsConfiguration {
+	items: string[];
+	categories: Record<string, string>;
+	target?: DashboardQuickCommandTarget;
+}
+
+/** Записывает порядок отдельно от категорий, отсортированных по ключу для сравнения сохранений. */
+export function serializeDashboardQuickCommands(state: DashboardQuickCommandsWidgetState): DashboardQuickCommandsConfiguration {
+	const categories = new Map<string, string>();
+	for (const { text, category } of state.items) {
+		if (category) categories.set(text, category);
+	}
 	return {
-		items: Array.isArray(input.items)
-			? [...new Set(input.items.filter((entry): entry is string => typeof entry === 'string')
-				.map(entry => entry.trim()).filter(entry => entry.length > 0 && entry.length <= 3000))].slice(0, 120)
-			: defaults,
-		...(target === 'copilot' || target === 'codex' || target === 'claude' || target === 'opencode-cli' ? { target } : {}),
+		items: state.items.map(command => command.text),
+		categories: Object.fromEntries([...categories].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)),
+		target: state.target,
 	};
+}
+
+/** Принимает только поддерживаемые цели сообщений и глобальных настроек. */
+export function isDashboardQuickCommandTarget(value: unknown): value is DashboardQuickCommandTarget {
+	return DASHBOARD_QUICK_COMMAND_TARGETS.some(target => target === value);
+}
+
+/** Читает сохранённые строки и записи с категориями в исходном порядке. Проверки в quickCommandsWidget.test.tsx. */
+export function normalizeDashboardQuickCommandsWidgetState(value: unknown): DashboardQuickCommandsWidgetState {
+	const input: { items?: unknown; categories?: unknown; target?: unknown } = value && typeof value === 'object' && !Array.isArray(value)
+		? { ...value } : {};
+	const entries: readonly unknown[] = Array.isArray(input.items)
+		? input.items : ['/alek-review', 'есть еще уточнения или вопросы?'];
+	const categories = input.categories && typeof input.categories === 'object' && !Array.isArray(input.categories)
+		? new Map<string, unknown>(Object.entries(input.categories)) : new Map<string, unknown>();
+	const commands = new Map<string, DashboardQuickCommand>();
+	for (const entry of entries) {
+		const command: { text?: unknown; category?: unknown } = typeof entry === 'string'
+			? { text: entry } : entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : {};
+		const text = typeof command.text === 'string' ? command.text.trim() : '';
+		if (!text || text.length > DASHBOARD_QUICK_COMMAND_TEXT_LIMIT || commands.has(text)) continue;
+		const value = categories.has(text) ? categories.get(text) : command.category;
+		const category = typeof value === 'string' ? value.trim().slice(0, DASHBOARD_QUICK_COMMAND_CATEGORY_LIMIT) : '';
+		commands.set(text, category ? { text, category } : { text });
+		if (commands.size === DASHBOARD_QUICK_COMMAND_LIMIT) break;
+	}
+	return { items: [...commands.values()], ...(isDashboardQuickCommandTarget(input.target) ? { target: input.target } : {}) };
 }
 
 /** Общие настройки представления виджетов, не зависящие от ширины и выбранного промпта. */

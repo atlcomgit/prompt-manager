@@ -5,7 +5,7 @@
 import type { ChatMemorySummary, EditorPromptViewState, EditorPromptPlanViewMode, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerWorkspaceActionKind } from './docker.js';
-import type { DashboardQuickNotesWidgetState, PromptDashboardPreferences } from './promptDashboardPreferences.js';
+import type { DashboardQuickCommandTarget, DashboardQuickNotesWidgetState, PromptDashboardPreferences } from './promptDashboardPreferences.js';
 import type {
 	QuickNoteAttachSource,
 	QuickNoteChecklistSuggestionInput,
@@ -140,9 +140,11 @@ export type WebviewToExtensionMessage =
 	| { type: 'promptDashboardOpenFilePatch'; project: string; filePath: string; previousPath?: string; mode: 'commit' | 'branch'; ref: string; baseRef?: string }
 	| { type: 'promptDashboardOpenTodoMarker'; project: string; filePath: string; line: number; column?: number; requestId?: string }
 	| { type: 'analyzePromptDashboardReview'; prompt: Prompt; requestId?: string }
+	/** До передачи текста клиент удостоверяется, что хост доступен и пользователь ещё ожидает вставку. */
+	| { type: 'promptDashboardQuickCommandPrepare'; requestId: string }
+	| { type: 'promptDashboardQuickCommandInsert'; requestId: string; text: string; target: DashboardQuickCommandTarget; hostDeadline: number }
+	| { type: 'promptDashboardQuickCommandCopy'; text: string }
 	/** Быстрые заметки: состояние обеих областей и операции; ответы приходят адресно по requestId. */
-	/** Inserts a quick-command draft into the selected provider without sending the message. */
-	| { type: 'promptDashboardQuickCommandInsert'; text: string; target: 'copilot' | 'codex' | 'claude' | 'opencode-cli' }
 	| { type: 'quickNotesRequestState'; requestId?: string }
 	| { type: 'quickNotesSetDescriptionHeight'; height: number }
 	| { type: 'quickNotesApply'; operation: QuickNoteOperation; requestId: string }
@@ -337,6 +339,8 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptDashboardSnapshot'; snapshot: PromptDashboardSnapshot; requestId?: string }
 	/** Подтверждает локальную запись настройки; облачная доставка выполняется Settings Sync отдельно. */
 	| { type: 'promptDashboardStateSaved'; requestId: string; settings?: PromptUiSettingsSnapshot }
+	| { type: 'promptDashboardQuickCommandReady'; requestId: string; hostTime: number }
+	| { type: 'promptDashboardQuickCommandFinished'; requestId: string; expired?: boolean }
 	/** Изменения из другого окна применяются отдельно от одноразовой начальной гидратации. */
 	| { type: 'promptUiSettingsChanged'; settings: PromptUiSettingsSnapshot }
 	| { type: 'promptDashboardWidgetSnapshot'; promptId: string; promptUuid?: string; widget: PromptDashboardWidgetSnapshot<unknown>; requestId?: string }

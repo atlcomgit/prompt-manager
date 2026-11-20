@@ -903,20 +903,125 @@ test('StateService applies stale preference patches to the latest global setting
 	assert.deepEqual(first.getPromptDashboardPreferences()?.expanded, { first: false, second: true });
 });
 
-/** Editing commands with an older snapshot preserves the agent chosen elsewhere. */
-test('StateService persists the quick command agent separately from the command list', async () => {
-	const base = normalizePromptDashboardPreferences(undefined);
-	const configuration = createConfigurationMock({ 'dashboardPreferences.quickCommands.items': base.quickCommands.items });
+/** Старый клиент по-прежнему читает строки, а его правка списка сохраняет категории и агента. */
+test('StateService shares quick command strings and preserves categories after an older client edits the list', async () => {
+	const legacyItems = ['/review', '/status'];
+	const base = normalizePromptDashboardPreferences({ quickCommands: { items: legacyItems } });
+	const itemsKey = 'dashboardPreferences.quickCommands.items';
+	const categoriesKey = 'dashboardPreferences.quickCommands.categories';
+	const configuration = createConfigurationMock({ [itemsKey]: legacyItems });
 	const { StateService } = await importStateService(configuration);
 	const first = new StateService(createStateContext());
 	const second = new StateService(createStateContext());
-	await first.savePromptDashboardPreferences({ ...base, quickCommands: { ...base.quickCommands, target: 'codex' } }, base);
-	await second.savePromptDashboardPreferences({ ...base, quickCommands: { items: ['/review'] } }, base);
-	assert.deepEqual(second.getPromptDashboardPreferences()?.quickCommands, { items: ['/review'], target: 'codex' });
+	const items = [{ text: '/status', category: 'Git' }, { text: '/review' }];
+	await first.savePromptDashboardPreferences({ ...base, quickCommands: { ...base.quickCommands, target: 'current' } }, base);
+	await second.savePromptDashboardPreferences({ ...base, quickCommands: { items } }, base);
+	const reopened = new StateService(createStateContext());
+	assert.deepEqual(reopened.getPromptDashboardPreferences()?.quickCommands, { items, target: 'current' });
 	assert.deepEqual(configuration.writes.filter(write => write.key.includes('.quickCommands.')), [
-		{ key: 'dashboardPreferences.quickCommands.target', value: 'codex', target: 1 },
-		{ key: 'dashboardPreferences.quickCommands.items', value: ['/review'], target: 1 },
+		{ key: 'dashboardPreferences.quickCommands.target', value: 'current', target: 1 },
+		{ key: categoriesKey, value: { '/status': 'Git' }, target: 1 },
+		{ key: itemsKey, value: ['/status', '/review'], target: 1 },
 	]);
+	const oldView = (configuration.store.get(itemsKey) as unknown[]).filter(item => typeof item === 'string');
+	assert.deepEqual(oldView, ['/status', '/review']);
+	await configuration.update(itemsKey, ['/review', '/status', '/extra'], 1);
+	// Окно со старым снимком меняет только категорию и сохраняет перестановку из старого клиента.
+	await first.savePromptDashboardPreferences({
+		...base, quickCommands: { items: [{ text: '/review', category: 'Ревью' }, { text: '/status' }] },
+	}, base);
+	assert.deepEqual(reopened.getPromptDashboardPreferences()?.quickCommands, {
+		items: [{ text: '/review', category: 'Ревью' }, { text: '/status', category: 'Git' }, { text: '/extra' }],
+		target: 'current',
+	});
+});
+
+/** Отказ списка оставляет старую категорию читаемой из другого окна. Повтор завершает перенос метаданных. */
+for (const action of ['rename', 'delete'] as const) {
+	test(`Quick command ${action} preserves the visible category after a failed list write and retry`, async () => {
+		const itemsKey = 'dashboardPreferences.quickCommands.items';
+		const categoriesKey = 'dashboardPreferences.quickCommands.categories';
+		let fail = true;
+		const configuration = createConfigurationMock({
+			[itemsKey]: ['/old', '/keep'], [categoriesKey]: { '/old': 'Git', '/keep': 'Other' },
+		}, { update: async (store, key, value) => {
+			if (fail && key === itemsKey) throw new Error('list write failed');
+			store.set(key, value);
+		} });
+		const { StateService } = await importStateService(configuration);
+		const service = new StateService(createStateContext());
+		const reopened = new StateService(createStateContext());
+		const base = service.getPromptDashboardPreferences()!;
+		const items = base.quickCommands.items.filter(item => item.text !== '/old');
+		if (action === 'rename') items.unshift({ text: '/new', category: 'Git' });
+		const next = { ...base, quickCommands: { items } };
+		await assert.rejects(service.savePromptDashboardPreferences(next, base), /list write failed/);
+		assert.deepEqual(reopened.getPromptDashboardPreferences()?.quickCommands, base.quickCommands);
+		fail = false;
+		await service.savePromptDashboardPreferences(next, base);
+		assert.deepEqual(reopened.getPromptDashboardPreferences()?.quickCommands, next.quickCommands);
+		assert.equal(Object.hasOwn(configuration.store.get(categoriesKey) as object, '/old'), false);
+	});
+}
+
+/** Повторная очистка после успешной записи списка сохраняет категорию переименованной команды. */
+test('Quick command rename retries a failed category cleanup without losing the renamed command', async () => {
+	const itemsKey = 'dashboardPreferences.quickCommands.items';
+	const categoriesKey = 'dashboardPreferences.quickCommands.categories';
+	let fail = true;
+	const configuration = createConfigurationMock({ [itemsKey]: ['A'], [categoriesKey]: { A: 'Git' } }, {
+		update: async (store, key, value) => {
+			if (fail && key === categoriesKey && !Object.hasOwn(value as object, 'A')) throw new Error('cleanup failed');
+			store.set(key, value);
+		},
+	});
+	const { StateService } = await importStateService(configuration);
+	const writer = new StateService(createStateContext());
+	const base = writer.getPromptDashboardPreferences()!;
+	const next = { ...base, quickCommands: { items: [{ text: 'B', category: 'Git' }] } };
+	await assert.rejects(writer.savePromptDashboardPreferences(next, base), /cleanup failed/);
+	assert.deepEqual(new StateService(createStateContext()).getPromptDashboardPreferences()?.quickCommands, next.quickCommands);
+	fail = false;
+	await writer.savePromptDashboardPreferences(next, base);
+	assert.deepEqual(configuration.store.get(categoriesKey), { B: 'Git' });
+});
+
+/** Пустая категория новой строки очищает данные, оставшиеся после удаления команды старым клиентом. */
+test('Quick commands re-added without a category after legacy deletion remain ungrouped', async () => {
+	const itemsKey = 'dashboardPreferences.quickCommands.items';
+	const categoriesKey = 'dashboardPreferences.quickCommands.categories';
+	const configuration = createConfigurationMock({
+		[itemsKey]: ['/review', '/status'], [categoriesKey]: { '/review': 'Review', '/status': 'Git' },
+	});
+	const { StateService } = await importStateService(configuration);
+	await configuration.update(itemsKey, ['/review'], 1);
+	const writer = new StateService(createStateContext());
+	const base = writer.getPromptDashboardPreferences()!;
+	const items = [...base.quickCommands.items, { text: '/status' }];
+	const next = { ...base, quickCommands: { items } };
+	await writer.savePromptDashboardPreferences(next, base);
+	assert.deepEqual(new StateService(createStateContext()).getPromptDashboardPreferences()?.quickCommands, next.quickCommands);
+	assert.deepEqual(configuration.store.get(categoriesKey), { '/review': 'Review' });
+});
+
+/** Уже сохранённые записи переходного формата конвертируются после записи метаданных. */
+test('StateService migrates quick command records to strings after persisting their categories', async () => {
+	const itemsKey = 'dashboardPreferences.quickCommands.items';
+	const categoriesKey = 'dashboardPreferences.quickCommands.categories';
+	const items = [{ text: '/status', category: 'Git' }, { text: '/review' }];
+	const configuration = createConfigurationMock({ [itemsKey]: items, [categoriesKey]: { '/review': 'Ревью' } });
+	const { StateService } = await importStateService(configuration);
+	const service = new StateService(createStateContext());
+	const base = service.getPromptDashboardPreferences()!;
+	assert.deepEqual(base.quickCommands.items, [items[0], { text: '/review', category: 'Ревью' }]);
+	const next = { ...base, quickCommands: { ...base.quickCommands, target: 'current' as const } };
+	await service.savePromptDashboardPreferences(next, base);
+	assert.deepEqual(configuration.writes.filter(write => write.key.includes('.quickCommands.')), [
+		{ key: categoriesKey, value: { '/status': 'Git', '/review': 'Ревью' }, target: 1 },
+		{ key: itemsKey, value: ['/status', '/review'], target: 1 },
+		{ key: 'dashboardPreferences.quickCommands.target', value: 'current', target: 1 },
+	]);
+	assert.deepEqual(service.getPromptDashboardPreferences()?.quickCommands, next.quickCommands);
 });
 
 /** Обе записи начинают update до завершения соседней; отдельные листья не затирают другой параметр Docker. */

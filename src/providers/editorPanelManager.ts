@@ -1,6 +1,11 @@
 import type { PromptUiSettingsSnapshot } from '../types/promptEditorLayout.js';
 import { PROMPT_UI_SETTING_KEYS } from '../services/stateService.js';
-import { normalizePromptDashboardHiddenSections } from '../types/promptDashboardPreferences.js';
+import {
+	DASHBOARD_QUICK_COMMAND_TEXT_LIMIT,
+	isDashboardQuickCommandTarget,
+	normalizePromptDashboardHiddenSections,
+	type DashboardQuickCommandTarget,
+} from '../types/promptDashboardPreferences.js';
 /**
  * Webview-редактор промпта — одна переиспользуемая страница настройки промпта в VS Code.
  */
@@ -15,7 +20,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { ClaudeChatSessionService } from '../services/claudeChatSessionService.js';
-import { OpenCodeCliService } from '../services/openCodeCliService.js';
+import { getOpenCodeTerminalPromptUuid, OpenCodeCliService } from '../services/openCodeCliService.js';
 import type { ClaudeChatSessionSnapshot } from '../types/claudeChat.js';
 import { createClaudeChatLaunchMarker, normalizeClaudeChatState } from '../utils/claudeChat.js';
 import { normalizeChatTarget } from '../utils/promptConfig.js';
@@ -122,7 +127,7 @@ import {
 	type PromptConfigSyncField,
 } from '../utils/promptExternalSync.js';
 import { buildPromptDashboardFileDiffTitle } from '../utils/promptDashboard.js';
-import { EDITOR_WEBVIEW_ASSET_VERSION } from '../constants/webview.js';
+import { DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS, DASHBOARD_QUICK_COMMAND_TIMEOUT_MS, EDITOR_WEBVIEW_ASSET_VERSION } from '../constants/webview.js';
 import {
 	buildReservedArchiveRenameNotice,
 	shouldApplySavedPromptToPanel,
@@ -173,8 +178,70 @@ const EDITOR_PANEL_VIEW_TYPE = 'promptManager.editor';
 const GLOBAL_AGENT_CONTEXT_SYNC_DELAY_MS = 500;
 const PROMPT_PANEL_TITLE_MAX_LENGTH = 30;
 const GIT_OVERLAY_AUTO_REFRESH_DEBOUNCE_MS = 600;
-/** Предел ожидания записи в буфер обмена браузера при запуске OpenAI Codex, мс. */
-const CODEX_WEB_CLIPBOARD_TIMEOUT_MS = 2000;
+/** Предел ожидания буфера обмена при передаче текста в чат, мс. */
+const CHAT_CLIPBOARD_TIMEOUT_MS = 2000;
+/** Срок доставки изменения модели из workbench в extension host после возврата команды. */
+const CHAT_INPUT_CONFIRMATION_TIMEOUT_MS = 1000;
+/** VS Code синхронизирует модели встроенного поля чата с Extension Host по этим схемам URI. */
+function isDashboardNativeChatInput(document: vscode.TextDocument | undefined): document is vscode.TextDocument {
+	const scheme = document?.uri.scheme?.toLowerCase();
+	return document !== undefined && !document.isClosed && (scheme === 'chatsessioninput' || scheme === 'sessions-chat');
+}
+
+type DashboardChatAgent = 'copilot' | 'codex' | 'claude';
+
+/** Парные условия commandPalette в package.json оставляют каждую из этих команд доступной ровно один раз. */
+const dashboardChatViews: ReadonlyArray<{ agent: DashboardChatAgent; command: string; views: string[] }> = [
+	{ agent: 'codex', command: 'promptManager.openChat', views: ['chatgpt.sidebarSecondaryView', 'chatgpt.sidebarView'] },
+	{ agent: 'claude', command: 'promptManager.startChat', views: ['claudeVSCodeSidebar', 'claudeVSCodeSidebarSecondary'] },
+	{ agent: 'copilot', command: 'promptManager.copilotUsageDiagnostics', views: ['workbench.panel.chat.view.copilot'] },
+];
+
+interface DashboardChatWindow {
+	part: 'main' | 'auxiliary-first-group' | 'auxiliary-later-group';
+	views: Set<DashboardChatAgent>;
+}
+
+/** VS Code 1.96+ возвращает строки палитры с выполненным when в окне клиента, включая подключение через Tunnel. */
+async function readVisibleDashboardChatViews(): Promise<DashboardChatWindow | undefined> {
+	const entries = await Promise.resolve(vscode.commands.executeCommand('_getAllCommands', true)).catch(() => undefined);
+	if (!Array.isArray(entries)) return undefined;
+	const visible = new Set<DashboardChatAgent>();
+	for (const { agent, command, views } of dashboardChatViews) {
+		const rows = entries.filter(entry => entry?.command === command);
+		// В версии 1.95 приходят обе строки. При неизвестном формате используем только признаки из API вкладок.
+		if (rows.length !== 1 || typeof rows[0].precondition !== 'string') return undefined;
+		const condition: string = rows[0].precondition;
+		const keys = views.map(view => `view.${view}.visible`).sort();
+		if (condition.split(' || ').sort().join(' || ') === keys.join(' || ')) {
+			visible.add(agent);
+		} else if (condition.split(' && ').sort().join(' && ') !== keys.map(key => '!' + key).join(' && ')) {
+			return undefined;
+		}
+	}
+	const windows = entries.filter(entry => entry?.command === 'promptManager.openPrompt');
+	if (windows.length !== 1 || typeof windows[0].precondition !== 'string') return undefined;
+	const conditions: string[] = windows[0].precondition.split(' && ');
+	if (conditions.length === 1 && conditions[0] === '!isAuxiliaryWindowFocusedContext') return { part: 'main', views: visible };
+	// Боковые панели принадлежат основному окну. Их ключи могут оставаться true при фокусе в вынесенном окне.
+	if (conditions.length !== 2 || !conditions.includes('isAuxiliaryWindowFocusedContext')) return undefined;
+	if (conditions.includes('activeEditorGroupIndex <= 1')) return { part: 'auxiliary-first-group', views: new Set() };
+	if (conditions.includes('activeEditorGroupIndex > 1')) return { part: 'auxiliary-later-group', views: new Set() };
+	return undefined;
+}
+
+/** Layout активного окна содержит дерево групп; tabGroups.all содержит группы всех окон этой рабочей области. */
+function getDashboardLayoutGroupCount(layout: unknown): number {
+	if (!layout || typeof layout !== 'object' || !('groups' in layout) || !Array.isArray(layout.groups)) return 0;
+	let count = 0;
+	for (const node of layout.groups) {
+		if (!node || typeof node !== 'object') return 0;
+		const leaves = 'groups' in node ? getDashboardLayoutGroupCount(node) : 1;
+		if (!leaves) return 0;
+		count += leaves;
+	}
+	return count;
+}
 /** Срок загрузки панели Codex в браузере, в течение которого запоздавший «Новый чат» сбрасывает файлы, мс. */
 const CODEX_WEB_PANEL_LOAD_WINDOW_MS = 15000;
 /** Интервал повторного прикрепления файлов, пока панель Codex может ещё загружаться, мс. */
@@ -262,6 +329,8 @@ interface QueuedEditorSave extends EditorFormSave {
 export class EditorPanelManager {
 	/** Терминалы OpenCode не используют привязки и историю Copilot; tests/editorPanelManager.test.ts. */
 	private openCodeCliService?: OpenCodeCliService;
+	/** Действия с командами используют общий буфер и выполняются в окне последовательно. */
+	private dashboardQuickCommandInProgress = false;
 	/** Защищает весь стартовый сценарий, включая сохранение и hooks, от повторного клика. */
 	private readonly openCodeCliLaunches = new Set<string>();
 	/** Инвалидирует старое ручное подтверждение уже при принятии запуска, до контекста и hooks. */
@@ -2990,11 +3059,13 @@ export class EditorPanelManager {
 	}
 
 	/** Фокусирует composer Codex только после подтвержденного открытия его панели. */
-	private async focusCodexComposerWithXdotool(): Promise<XdotoolSubmitResult> {
+	private async focusCodexComposerWithXdotool(signal?: AbortSignal): Promise<XdotoolSubmitResult> {
+		signal?.throwIfAborted();
 		if (!await this.focusCodex()) {
 			return { ok: false, reason: 'Codex sidebar focus command failed' };
 		}
 		await new Promise(resolve => setTimeout(resolve, 600));
+		signal?.throwIfAborted();
 
 		const activeWindow = await this.getCodexXdotoolWindow();
 		if (!activeWindow.ok) {
@@ -3018,6 +3089,7 @@ export class EditorPanelManager {
 		}
 
 		const point = this.getCodexComposerClickPoint(geometry);
+		signal?.throwIfAborted();
 		const clicked = await this.runXdotoolCommand(
 			['mousemove', String(point.x), String(point.y), 'click', '1'],
 			'Codex composer focus',
@@ -3031,12 +3103,13 @@ export class EditorPanelManager {
 	private async prepareCodexPromptWithXdotool(
 		prompt: Pick<Prompt, 'autoStartChatWithXdotool'>,
 		text: string,
+		signal?: AbortSignal,
 	): Promise<XdotoolSubmitResult> {
 		// Не трогаем локальную панель сервера при запуске из браузера или другого удалённого клиента.
 		if (!this.isXdotoolPlatformSupported()) {
 			return { ok: false, stage: 'focus', reason: 'xdotool requires a local Linux desktop window' };
 		}
-		const focused = await this.focusCodexComposerWithXdotool();
+		const focused = await this.focusCodexComposerWithXdotool(signal);
 		if (!focused.ok) {
 			return { ...focused, stage: 'focus' };
 		}
@@ -3050,6 +3123,7 @@ export class EditorPanelManager {
 					? { ok: true }
 					: { ok: false, reason: activeWindow.reason || 'the active window changed before paste' };
 			},
+			signal,
 		);
 		if (!pasted.ok) {
 			return pasted;
@@ -3059,6 +3133,7 @@ export class EditorPanelManager {
 		}
 
 		await new Promise(resolve => setTimeout(resolve, 500));
+		signal?.throwIfAborted();
 		const submitted = await this.runXdotoolKeys([this.resolveCodexSubmitKey(text)], 'Codex');
 		return { ...submitted, stage: 'submit' };
 	}
@@ -3068,18 +3143,23 @@ export class EditorPanelManager {
 		text: string,
 		paste: () => Promise<XdotoolSubmitResult>,
 		checkTarget: () => Promise<XdotoolSubmitResult>,
+		signal?: AbortSignal,
 	): Promise<XdotoolSubmitResult> {
 		const chunks = splitCodexPasteText(text);
 		let lastClipboardText: string | undefined;
 		let pasteAttempted = false;
 		try {
 			for (const chunk of chunks) {
+				signal?.throwIfAborted();
 				if (lastClipboardText !== undefined && await vscode.env.clipboard.readText() !== lastClipboardText) {
 					throw new Error('clipboard changed during Codex paste');
 				}
+				signal?.throwIfAborted();
 				await vscode.env.clipboard.writeText(chunk);
 				lastClipboardText = chunk;
+				signal?.throwIfAborted();
 				const target = await checkTarget();
+				signal?.throwIfAborted();
 				if (!target.ok) {
 					return { ...target, stage: pasteAttempted ? 'paste' : 'focus', ...(pasteAttempted ? { partialPaste: true } : {}) };
 				}
@@ -3104,7 +3184,8 @@ export class EditorPanelManager {
 		} finally {
 			// Возвращаем полный запрос для ручной вставки, но сохраняем новое содержимое буфера пользователя.
 			try {
-				if (lastClipboardText !== undefined && lastClipboardText !== text && await vscode.env.clipboard.readText() === lastClipboardText) {
+				if (!signal?.aborted && lastClipboardText !== undefined && lastClipboardText !== text
+					&& await vscode.env.clipboard.readText() === lastClipboardText && !signal?.aborted) {
 					await vscode.env.clipboard.writeText(text);
 				}
 			} catch (error) {
@@ -3130,7 +3211,7 @@ export class EditorPanelManager {
 				error => {
 					clearTimeout(timer);
 					this.hooksOutput.appendLine(
-						`[chat-start] Codex clipboard write failed: ${error instanceof Error ? error.message : String(error)}`,
+						`[clipboard] Write failed: ${error instanceof Error ? error.message : String(error)}`,
 					);
 					resolve(false);
 				},
@@ -3202,6 +3283,7 @@ export class EditorPanelManager {
 		text: string,
 		commands: string[],
 		allowXdotoolFallback = true,
+		signal?: AbortSignal,
 	): Promise<XdotoolSubmitResult> {
 		// Команда VS Code возвращает успех до исполнения paste в iframe; в браузере это ложное подтверждение.
 		if (vscode.env.uiKind === vscode.UIKind.Web) {
@@ -3216,12 +3298,13 @@ export class EditorPanelManager {
 			: 'chatgpt.sidebarView.focus';
 		if (!commands.includes('editor.action.clipboardPasteAction') || !commands.includes(viewFocusCommand)) {
 			return allowXdotoolFallback
-				? this.prepareCodexPromptWithXdotool(prompt, text)
+				? this.prepareCodexPromptWithXdotool(prompt, text, signal)
 				: { ok: false, stage: 'focus', reason: 'команда фокуса поля Codex недоступна' };
 		}
 
 		try {
 			// Фокусируем конкретную webview: openSidebar в Codex перехватывает собственные ошибки фокуса.
+			signal?.throwIfAborted();
 			await vscode.commands.executeCommand(viewFocusCommand);
 			await new Promise(resolve => setTimeout(resolve, 250));
 		} catch (error) {
@@ -3237,6 +3320,7 @@ export class EditorPanelManager {
 			async () => vscode.window.state.focused
 				? { ok: true }
 				: { ok: false, reason: 'the VS Code window lost focus before paste' },
+			signal,
 		);
 		// Не повторяем неудачную вставку через Xdotool: webview могла уже получить часть текста.
 		if (!pasted.ok) {
@@ -3261,36 +3345,215 @@ export class EditorPanelManager {
 		return { ...submitted, stage: 'submit' };
 	}
 
-	/** Передаёт черновик выбранному чату и сообщает, удалось ли вызвать его штатную вставку. */
+	/** Подтверждает вставку по изменению доступной модели. Скрытое от Extension Host поле допускает только подтверждение передачи. */
+	private async insertDashboardNativeChatDraft(
+		text: string, signal: AbortSignal,
+	): Promise<'inserted' | 'dispatched' | 'unconfirmed'> {
+		const versions = new Map(vscode.workspace.textDocuments.filter(isDashboardNativeChatInput)
+			.map(document => [document.uri.toString(), document.version]));
+		const query = text.replace(/\r\n?/g, '\n');
+		let observedInput = versions.size > 0;
+		/** Модель может впервые появиться уже после вызова команды, в том числе через Tunnel. */
+		const matches = (document: vscode.TextDocument) => {
+			if (!isDashboardNativeChatInput(document)) return false;
+			observedInput = true;
+			return document.version !== versions.get(document.uri.toString()) && document.getText().replace(/\r\n?/g, '\n') === query;
+		};
+		let settle!: (observed: boolean) => void;
+		const changed = new Promise<boolean>(resolve => { settle = resolve; });
+		const subscription = vscode.workspace.onDidChangeTextDocument(({ document }) => {
+			if (matches(document)) settle(true);
+		});
+		/** Снимает наблюдение даже тогда, когда promise команды VS Code завис. */
+		const cancel = () => {
+			subscription.dispose();
+			settle(false);
+		};
+		signal.addEventListener('abort', cancel, { once: true });
+		try {
+			signal.throwIfAborted();
+			await vscode.commands.executeCommand('workbench.action.chat.open', { query: text, isPartialQuery: true });
+			signal.throwIfAborted();
+			if (vscode.workspace.textDocuments.some(matches)
+				|| await this.withTimeout(changed, CHAT_INPUT_CONFIRMATION_TIMEOUT_MS, false)
+				|| vscode.workspace.textDocuments.some(matches)) return 'inserted';
+			signal.throwIfAborted();
+			return observedInput ? 'unconfirmed' : 'dispatched';
+		} finally {
+			signal.removeEventListener('abort', cancel);
+			if (!signal.aborted) cancel();
+		}
+	}
+
+	/** Вставляет черновик без отправки и проверяет актуальность после асинхронной подготовки провайдера. */
 	private async insertDashboardQuickCommand(
-		target: Extract<WebviewToExtensionMessage, { type: 'promptDashboardQuickCommandInsert' }>['target'],
+		target: Exclude<DashboardQuickCommandTarget, 'current'>,
 		promptUuid: string,
 		text: string,
-	): Promise<boolean> {
+		signal: AbortSignal,
+	): Promise<'inserted' | 'dispatched' | 'unconfirmed' | undefined> {
+		signal.throwIfAborted();
 		switch (target) {
 			case 'copilot':
-				await vscode.commands.executeCommand('workbench.action.chat.open', { query: text, isPartialQuery: true });
-				return true;
+				return this.insertDashboardNativeChatDraft(text, signal);
 			case 'claude':
 				await this.ensureClaudeChatAvailable();
+				signal.throwIfAborted();
 				// initialPrompt заполняет поле черновика и сохраняет выбранное место открытия Claude Code.
 				await vscode.commands.executeCommand(
 					'claude-vscode.editor.open', undefined, text, undefined, undefined, undefined,
 					{ programmatic: 'honor-preferred-location' },
 				);
-				return true;
+				return 'dispatched';
 			case 'codex': {
 				const draftOnly = { autoStartChatWithXdotool: false };
-				// Sidebar focus can land on its toolbar. On local X11, focus the composer before pasting.
+				// На локальном X11 сначала фокусируем поле, так как команда панели может выбрать её заголовок.
 				if (this.isXdotoolPlatformSupported() && process.env.DISPLAY && vscode.window.state.focused) {
-					const result = await this.prepareCodexPromptWithXdotool(draftOnly, text);
-					if (result.ok || result.partialPaste) return result.ok;
+					const result = await this.prepareCodexPromptWithXdotool(draftOnly, text, signal);
+					if (result.ok || result.partialPaste) return result.ok ? 'dispatched' : undefined;
 				}
+				signal.throwIfAborted();
 				const commands = await vscode.commands.getCommands(true);
-				return (await this.prepareCodexPrompt(draftOnly, text, commands, false)).ok;
+				signal.throwIfAborted();
+				return (await this.prepareCodexPrompt(draftOnly, text, commands, false, signal)).ok ? 'dispatched' : undefined;
 			}
 			case 'opencode-cli':
-				return this.openCodeCliService?.insertIntoOpenChat(promptUuid, text) === true;
+				return this.openCodeCliService?.insertIntoOpenChat(promptUuid, text) ? 'dispatched' : undefined;
+		}
+	}
+
+	/** Объединяет видимые области чата. Переход фокуса в виджет сохраняет видимость соседней панели. */
+	private async resolveCurrentDashboardQuickCommandTarget(): Promise<DashboardChatAgent | undefined> {
+		const tabs = vscode.window.tabGroups;
+		const groups = tabs.all;
+		const activeGroup = tabs.activeTabGroup;
+		const activeColumn = activeGroup.viewColumn;
+		const activeTab = activeGroup.activeTab;
+		const [snapshot, windowGroupCount] = await Promise.all([
+			readVisibleDashboardChatViews(),
+			groups.length <= 1 ? 1 : Promise.resolve(vscode.commands.executeCommand('vscode.getEditorLayout'))
+				.then(getDashboardLayoutGroupCount, () => 0),
+		]);
+		const currentGroups = tabs.all;
+		if (!vscode.window.state.focused || activeGroup !== tabs.activeTabGroup || activeTab !== activeGroup.activeTab
+			|| activeGroup.viewColumn !== activeColumn || groups.length !== currentGroups.length
+			|| groups.some((group, index) => group !== currentGroups[index])
+			|| !windowGroupCount || windowGroupCount > groups.length) return undefined;
+		const singleWindow = windowGroupCount === groups.length;
+		let firstColumn = 1;
+		if (!singleWindow) {
+			// viewColumn нумеруется по порядку сетки: сначала группы основного окна, затем каждого вынесенного.
+			if (!snapshot) return undefined;
+			const columns = groups.map(group => group.viewColumn);
+			if (new Set(columns).size !== groups.length
+				|| columns.some(column => !Number.isInteger(column) || column < 1 || column > groups.length)) return undefined;
+			if (snapshot.part === 'auxiliary-first-group') firstColumn = activeColumn;
+			if (snapshot.part === 'auxiliary-later-group') {
+				const earliest = Math.max(2, activeColumn - windowGroupCount + 1);
+				const latest = Math.min(activeColumn - 1, groups.length - windowGroupCount + 1);
+				// При нескольких вынесенных окнах принимаем только доказанные границы своего окна.
+				if (earliest !== latest) return undefined;
+				firstColumn = earliest;
+			}
+			if (firstColumn + windowGroupCount - 1 > groups.length || activeColumn < firstColumn
+				|| activeColumn >= firstColumn + windowGroupCount || (snapshot.part !== 'main' && firstColumn < 2)) return undefined;
+		}
+		const targets = snapshot?.views ?? new Set<DashboardChatAgent>();
+		if (singleWindow && isDashboardNativeChatInput(vscode.window.activeTextEditor?.document)) targets.add('copilot');
+		// VS Code публикует конструктор вкладки встроенного чата не во всех версиях API.
+		const chatTab = (vscode as typeof vscode & { TabInputChat?: new () => object }).TabInputChat;
+		for (const group of groups) {
+			if (!singleWindow && (group.viewColumn < firstColumn || group.viewColumn >= firstColumn + windowGroupCount)) continue;
+			// activeTab выбран в своей группе, даже если фокус ушёл в виджет в соседней группе.
+			const input = group.activeTab?.input as { viewType?: unknown } | undefined;
+			if (chatTab && input instanceof chatTab) targets.add('copilot');
+			if (vscode.env.uiKind !== vscode.UIKind.Desktop || typeof input?.viewType !== 'string') continue;
+			switch (input.viewType.replace(/^mainThreadWebview-/, '')) {
+				case 'chatgpt.panelView':
+				case 'chatgpt.conversationEditor':
+					targets.add('codex');
+					break;
+				case 'claudeVSCodePanel':
+					targets.add('claude');
+					break;
+			}
+		}
+		if (snapshot || targets.size > 0) return targets.size === 1 ? [...targets][0] : undefined;
+
+		// Последний терминал может быть скрыт. При таком конфликте предлагаем ручную вставку.
+		return !getOpenCodeTerminalPromptUuid(vscode.window.activeTerminal)
+			&& vscode.workspace.textDocuments.some(isDashboardNativeChatInput) ? 'copilot' : undefined;
+	}
+
+	/** Определяет доступный адресат. При сомнении сохраняет текст и возвращает причину отказа. */
+	private async prepareDashboardQuickCommand(
+		target: DashboardQuickCommandTarget,
+		promptUuid: string,
+		text: string,
+		signal: AbortSignal,
+		sourcePanel?: vscode.WebviewPanel,
+	): Promise<{ ok: boolean; message: string }> {
+		let destination: Exclude<DashboardQuickCommandTarget, 'current'> | undefined;
+		if (target === 'current') {
+			const sourceIsActive = () => vscode.window.state.focused && sourcePanel?.active !== false;
+			if (sourceIsActive()) destination = await this.resolveCurrentDashboardQuickCommandTarget();
+			if (!sourceIsActive()) {
+				return { ok: false, message: 'Редактор с быстрой командой потерял фокус. Повторите вставку из нужного окна.' };
+			}
+		} else {
+			destination = target;
+		}
+		signal.throwIfAborted();
+		const result = destination
+			? await this.insertDashboardQuickCommand(destination, promptUuid, text, signal).catch(() => undefined)
+			: undefined;
+		signal.throwIfAborted();
+		if (result === 'inserted' || result === 'dispatched') {
+			return { ok: true, message: result === 'inserted'
+				? 'Команда вставлена в поле чата.' : 'Команда передана для вставки в поле чата.' };
+		}
+
+		// Запрос буфера отправляем до смены фокуса, чтобы сохранить возможность ручной вставки в Web.
+		const copying = this.writeClipboardTextWithTimeout(text, CHAT_CLIPBOARD_TIMEOUT_MS);
+		if (destination === 'codex') {
+			await this.focusCodex();
+			signal.throwIfAborted();
+		}
+		let reason = 'Не удалось вставить команду.';
+		let instruction = 'Вставьте её в поле чата через Ctrl+V.';
+		if (!destination) {
+			reason = 'Не удалось определить текущий чат.';
+			instruction = 'Выберите агента или вставьте команду вручную.';
+		} else if (result === 'unconfirmed') {
+			reason = 'VS Code не подтвердил вставку.';
+			instruction = 'Проверьте поле чата и при необходимости вставьте команду через Ctrl+V.';
+		} else if (destination === 'opencode-cli') {
+			instruction = this.openCodeCliService?.open(promptUuid)
+				? 'Вставьте её в терминал через Ctrl+Shift+V.'
+				: 'Откройте терминал OpenCode CLI и вставьте её через Ctrl+Shift+V.';
+		}
+		return { ok: false, message: await copying ? `${reason} Команда скопирована. ${instruction}`
+			: `${reason} Не удалось скопировать команду в буфер обмена.` };
+	}
+
+	/** Ограничивает вставку и сообщает один исход. Поздняя подготовка после таймаута больше не вставляет черновик. */
+	private async runDashboardQuickCommand(
+		target: DashboardQuickCommandTarget, promptUuid: string, text: string, timeoutMs = DASHBOARD_QUICK_COMMAND_TIMEOUT_MS,
+		sourcePanel?: vscode.WebviewPanel,
+	): Promise<void> {
+		const controller = new AbortController();
+		try {
+			const timeout = {
+				ok: false, message: 'Истекло время ожидания вставки. Проверьте поле чата. Команду можно скопировать в виджете.',
+			};
+			const result = await this.withTimeout(
+				this.prepareDashboardQuickCommand(target, promptUuid, text, controller.signal, sourcePanel),
+				timeoutMs, timeout,
+			);
+			if (result.ok) void vscode.window.showInformationMessage(result.message);
+			else void vscode.window.showErrorMessage(result.message);
+		} finally {
+			controller.abort();
 		}
 	}
 
@@ -3368,7 +3631,7 @@ export class EditorPanelManager {
 			// Браузер без фокуса окна не завершает запись в буфер: Web начинает её до смены фокуса и ждёт ограниченное время,
 			// а результат учитывает только в итоговом сообщении. Desktop ждёт запись, потому что вставляет текст из буфера.
 			const clipboardWrite: Thenable<boolean> = isWebClient
-				? this.writeClipboardTextWithTimeout(fallbackText, CODEX_WEB_CLIPBOARD_TIMEOUT_MS)
+				? this.writeClipboardTextWithTimeout(fallbackText, CHAT_CLIPBOARD_TIMEOUT_MS)
 				: vscode.env.clipboard.writeText(fallbackText).then(() => true);
 			if (!isWebClient) {
 				await clipboardWrite;
@@ -12615,34 +12878,57 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'promptDashboardQuickCommandPrepare': {
+				if (typeof msg.requestId !== 'string' || !msg.requestId) break;
+				await postMessage({ type: 'promptDashboardQuickCommandReady', requestId: msg.requestId, hostTime: performance.now() });
+				break;
+			}
+
 			case 'promptDashboardQuickCommandInsert': {
+				// Срок привязан к часам этого хоста, даже если рабочая область открыта через Tunnel.
+				const remainingMs = msg.hostDeadline - performance.now();
+				if (!Number.isFinite(msg.hostDeadline) || remainingMs < 1 || remainingMs > DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS) {
+					await postMessage({ type: 'promptDashboardQuickCommandFinished', requestId: msg.requestId, expired: true });
+					break;
+				}
 				const text = typeof msg.text === 'string' ? msg.text.trim() : '';
-				const target = msg.target;
-				if (!text || text.length > 3000
-					|| !['copilot', 'codex', 'claude', 'opencode-cli'].includes(target)) {
-					postMessage({ type: 'error', message: 'Некорректная быстрая команда или целевой агент.' });
+				const canStart = !this.dashboardQuickCommandInProgress;
+				try {
+					if (!text || text.length > DASHBOARD_QUICK_COMMAND_TEXT_LIMIT || !isDashboardQuickCommandTarget(msg.target)) {
+						void vscode.window.showErrorMessage('Некорректная быстрая команда или целевой агент.');
+					} else if (canStart) {
+						this.dashboardQuickCommandInProgress = true;
+						await this.runDashboardQuickCommand(msg.target, currentPrompt.promptUuid, text,
+								Math.min(remainingMs, DASHBOARD_QUICK_COMMAND_TIMEOUT_MS), panel);
+					} else {
+						void vscode.window.showErrorMessage('Дождитесь завершения предыдущего действия с командой.');
+					}
+				} catch {
+					void vscode.window.showErrorMessage('Не удалось вставить команду в поле чата.');
+				} finally {
+					if (canStart) this.dashboardQuickCommandInProgress = false;
+					await postMessage({ type: 'promptDashboardQuickCommandFinished', requestId: msg.requestId });
+				}
+				break;
+			}
+
+			case 'promptDashboardQuickCommandCopy': {
+				const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+				if (this.dashboardQuickCommandInProgress) {
+					void vscode.window.showErrorMessage('Дождитесь завершения предыдущего действия с командой.');
 					break;
 				}
-				const inserted = await this.insertDashboardQuickCommand(target, currentPrompt.promptUuid, text)
-					.catch(() => false);
-				if (inserted) {
-					break;
+				this.dashboardQuickCommandInProgress = true;
+				try {
+					if (text && text.length <= DASHBOARD_QUICK_COMMAND_TEXT_LIMIT
+						&& await this.writeClipboardTextWithTimeout(text, CHAT_CLIPBOARD_TIMEOUT_MS)) {
+						void vscode.window.showInformationMessage('Команда скопирована.');
+					} else {
+						void vscode.window.showErrorMessage('Не удалось скопировать команду.');
+					}
+				} finally {
+					this.dashboardQuickCommandInProgress = false;
 				}
-				// Start clipboard access before moving the browser focus and bound the wait in Web.
-				const copied = vscode.env.uiKind === vscode.UIKind.Web
-					? this.writeClipboardTextWithTimeout(text, CODEX_WEB_CLIPBOARD_TIMEOUT_MS)
-					: vscode.env.clipboard.writeText(text).then(() => true, () => false);
-				if (target === 'codex') await this.focusCodex();
-				const openCodeVisible = target === 'opencode-cli' && this.openCodeCliService?.open(currentPrompt.promptUuid);
-				if (!await copied) {
-					postMessage({ type: 'error', message: 'Не удалось вставить команду или записать её в буфер обмена.' });
-					break;
-				}
-				postMessage({ type: 'info', message: target === 'opencode-cli'
-					? openCodeVisible
-						? 'Команда скопирована. Вставьте её в поле OpenCode CLI через меню терминала или Ctrl+Shift+V.'
-						: 'Команда скопирована. Откройте OpenCode CLI для этого промпта и вставьте её в поле чата.'
-					: 'Команда скопирована. Вставьте её в поле чата агента нажатием Ctrl+V.' });
 				break;
 			}
 

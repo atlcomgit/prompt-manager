@@ -47,6 +47,12 @@ test('clipboard text includes title, distinct description and checklist', () => 
 	assert.equal(formatQuickNoteClipboardText({ title: 'Название.', description: 'Описание:', items }),
 		'Название.\n\nОписание:\n\n- [x] Проверить');
 	assert.equal(formatQuickNoteClipboardText({ title: 'Название', description: '', items: [] }), 'Название.');
+	for (const title of ['Название', 'Название.', 'Название:']) {
+		assert.equal(formatQuickNoteClipboardText({ title, description: '  ', items }), 'Название:\n\n- [x] Проверить');
+	}
+	assert.equal(formatQuickNoteClipboardText({
+		title: 'Название', description: '', items: [{ id: 'empty', text: '\t', done: false }],
+	}), 'Название.');
 	assert.equal(formatQuickNoteClipboardText({
 		title: 'Название.', description: 'Описание', items: [{ id: 'empty', text: ' \n', done: true }],
 	}), 'Название.\n\nОписание');

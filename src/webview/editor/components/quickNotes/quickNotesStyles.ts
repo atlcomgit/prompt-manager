@@ -143,13 +143,19 @@ body.vscode-light, body.vscode-high-contrast-light { --pm-qn-pink: #c2185b; --pm
 .pm-qn-row.is-copied { outline: 1px solid var(--vscode-focusBorder); background: var(--vscode-list-activeSelectionBackground); }
 .pm-qn-row.is-pinned::before { background: var(--vscode-charts-yellow, #d7ba7d); }
 .pm-qn-context-menu {
-	position: fixed; z-index: 3000; width: 230px; max-width: calc(100vw - 16px);
+	position: fixed; z-index: 3000; box-sizing: border-box; width: max-content;
+	min-width: min(230px, calc(100vw - 16px)); max-width: calc(100vw - 16px);
+	max-height: calc(100vh - 16px); overflow: auto;
 	background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
 	color: var(--vscode-menu-foreground, var(--vscode-foreground));
 	border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border));
 	border-radius: 5px; padding: 5px; box-shadow: 0 8px 25px var(--vscode-widget-shadow, rgba(0,0,0,.35));
 }
-.pm-qn-context-menu > button { display: block; width: 100%; text-align: left; padding: 7px 9px; color: inherit; border: 0; background: none; border-radius: 3px; cursor: pointer; font: inherit; font-size: 12px; }
+.pm-qn-context-menu > button {
+	display: block; width: 100%; text-align: left; padding: 7px 9px; color: inherit; border: 0; background: none;
+	border-radius: 3px; cursor: pointer; font: inherit; font-size: 12px;
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .pm-qn-context-menu > button:hover, .pm-qn-context-menu > button:focus-visible { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, var(--vscode-foreground)); }
 .pm-qn-context-colors { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; border-top: 1px solid var(--vscode-panel-border); margin: 5px 0; padding: 6px 4px; font-size: 11px; }
 .pm-qn-context-color { width: 16px; height: 16px; padding: 0; border-radius: 50%; border: 1px solid var(--vscode-panel-border); cursor: pointer; }

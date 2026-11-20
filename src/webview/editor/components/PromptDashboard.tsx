@@ -81,6 +81,7 @@ import {
 	normalizePromptDashboardPreferences,
 } from '../../../types/promptDashboardPreferences.js';
 import type {
+	DashboardQuickCommandTarget,
 	DockerContainerSortBy,
 	PromptDashboardPreferences,
 } from '../../../types/promptDashboardPreferences.js';
@@ -144,7 +145,10 @@ interface PromptDashboardProps {
 	/** Supplies the initial draft destination until the user selects an agent in the widget. */
 	chatTarget?: PromptChatTarget;
 	/** Prepares a draft in an agent chat or copies it when direct input is unavailable. */
-	onQuickCommandInsert?: (text: string, target: PromptChatTarget) => void;
+	/** Состояние запроса хранится в редакторе и переживает закрытие карточки. */
+	pendingQuickCommandText?: string | null;
+	onQuickCommandInsert?: (text: string, target: DashboardQuickCommandTarget) => void;
+	onQuickCommandCopy?: (text: string) => void;
 	/** Voice dictation uses the prompt editor's existing recorder, with a distinct insertion destination. */
 	quickNotesVoiceInsertion?: { sequence: number; text: string } | null;
 	onStartQuickNotesVoice?: () => void;
@@ -781,7 +785,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	layoutModeFrozen = false,
 	showGitFlowAction = false,
 	chatTarget = 'copilot',
+	pendingQuickCommandText,
 	onQuickCommandInsert,
+	onQuickCommandCopy,
 	quickNotesVoiceInsertion,
 	onStartQuickNotesVoice,
 	quickNotesVoiceBusy,
@@ -1737,9 +1743,11 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				{collapsed ? null : <div style={styles.sectionBody}>
 					<QuickCommandsWidget items={preferences.quickCommands.items}
 						target={preferences.quickCommands.target ?? (chatTarget === 'kilo' ? 'copilot' : chatTarget)}
+						pendingText={pendingQuickCommandText}
 						onTargetChange={target => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, target } })}
 						onItemsChange={items => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, items } })}
-						onInsert={(text, target) => onQuickCommandInsert?.(text, target)}/>
+						onInsert={(text, target) => onQuickCommandInsert?.(text, target)}
+						onCopy={text => onQuickCommandCopy?.(text)}/>
 				</div>}
 			</section>;
 		})(),

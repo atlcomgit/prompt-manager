@@ -190,6 +190,35 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        { "command": "promptManager.openPrompt", "when": "!isAuxiliaryWindowFocusedContext" },
+        { "command": "promptManager.openPrompt", "when": "isAuxiliaryWindowFocusedContext && activeEditorGroupIndex <= 1" },
+        { "command": "promptManager.openPrompt", "when": "isAuxiliaryWindowFocusedContext && activeEditorGroupIndex > 1" },
+        {
+          "command": "promptManager.openChat",
+          "when": "view.chatgpt.sidebarSecondaryView.visible || view.chatgpt.sidebarView.visible"
+        },
+        {
+          "command": "promptManager.openChat",
+          "when": "!view.chatgpt.sidebarSecondaryView.visible && !view.chatgpt.sidebarView.visible"
+        },
+        {
+          "command": "promptManager.startChat",
+          "when": "view.claudeVSCodeSidebar.visible || view.claudeVSCodeSidebarSecondary.visible"
+        },
+        {
+          "command": "promptManager.startChat",
+          "when": "!view.claudeVSCodeSidebar.visible && !view.claudeVSCodeSidebarSecondary.visible"
+        },
+        {
+          "command": "promptManager.copilotUsageDiagnostics",
+          "when": "view.workbench.panel.chat.view.copilot.visible"
+        },
+        {
+          "command": "promptManager.copilotUsageDiagnostics",
+          "when": "!view.workbench.panel.chat.view.copilot.visible"
+        }
+      ],
       "editor/title": [
         {
           "command": "promptManager.quickAddPrompt",
@@ -837,14 +866,21 @@
           "default": ["/alek-review", "есть еще уточнения или вопросы?"],
           "maxItems": 120,
           "scope": "application",
-          "markdownDescription": "Быстрые фразы для вставки в чаты агентов из виджета «Быстрые команды». Глобальны для всех рабочих областей."
+          "markdownDescription": "Быстрые фразы и их порядок. Общий список для всех рабочих областей."
+        },
+        "promptManager.dashboardPreferences.quickCommands.categories": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "maxLength": 80},
+          "default": {},
+          "scope": "application",
+          "markdownDescription": "Глобальные категории быстрых команд по тексту фразы."
         },
         "promptManager.dashboardPreferences.quickCommands.target": {
           "type": ["string", "null"],
-          "enum": [null, "copilot", "codex", "claude", "opencode-cli"],
+          "enum": [null, "current", "copilot", "codex", "claude", "opencode-cli"],
           "default": null,
           "scope": "application",
-          "markdownDescription": "Агент для вставки быстрых команд во всех промптах. Если не выбран, используется чат текущего промпта."
+          "markdownDescription": "Агент для вставки быстрых команд. В VS Code 1.96 и новее «Текущий» распознаёт встроенный чат, Codex и Claude Code в основной или дополнительной боковой панели. В настольном VS Code учитываются и видимые вкладки чатов. Если выбор не задан, применяется агент промпта."
         },
         "promptManager.dashboardPreferences.quickNotes.descriptionHeight": {
           "type": [

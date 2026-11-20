@@ -1037,7 +1037,7 @@ export function formatQuickNoteShortDate(iso: string): string {
 }
 
 
-/** Formats the title and distinct description, then adds nonempty checklist items. */
+/** Ставит двоеточие перед чек-листом у названия без описания. Проверки в quickNotes.test.ts. */
 export function formatQuickNoteClipboardText(
     note: Pick<QuickNote, 'title' | 'description' | 'items'>,
 ): string {
@@ -1047,7 +1047,9 @@ export function formatQuickNoteClipboardText(
         const text = item.text.trim();
         return text ? [`- [${item.done ? 'x' : ' '}] ${text}`] : [];
     });
-    const titleText = title && !title.endsWith('.') ? title + '.' : title;
+    const titleText = title && !description && checklist.length
+        ? (title.endsWith(':') ? title : title.replace(/\.$/, '') + ':')
+        : (title && !title.endsWith('.') ? title + '.' : title);
     const descriptionText = !description || description === title ? ''
         : checklist.length && !description.endsWith(':') ? description + ':' : description;
     return [titleText, descriptionText, checklist.join('\n')].filter(Boolean).join('\n\n');

@@ -1,24 +1,31 @@
 import { normalizePromptEditorLayout } from '../src/types/promptEditorLayout.js';
 import { normalizePromptDashboardLayouts } from '../src/types/promptDashboard.js';
-import { normalizePromptDashboardPreferences } from '../src/types/promptDashboardPreferences.js';
+import { normalizePromptDashboardPreferences, type DashboardQuickCommandTarget } from '../src/types/promptDashboardPreferences.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import Module from 'node:module';
-import { EDITOR_WEBVIEW_ASSET_VERSION } from '../src/constants/webview.js';
+import { DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS, DASHBOARD_QUICK_COMMAND_TIMEOUT_MS, EDITOR_WEBVIEW_ASSET_VERSION } from '../src/constants/webview.js';
 import { buildSaveQueueKey } from '../src/utils/promptSaveQueue.js';
+import { confirmDashboardQuickCommand, type PendingDashboardQuickCommand } from '../src/utils/promptDashboard.js';
 import type { OpenCodeCliRequest, OpenCodeCliService } from '../src/services/openCodeCliService.js';
 
 const originalLoad = (Module as any)._load;
 const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
+const vscodeNotices: Array<{ kind: 'info' | 'error'; message: string }> = [];
 const vscodeCreatedWebviewPanels: any[] = [];
 const vscodeCreatedWatchers: any[] = [];
 const vscodeClosedTabs: any[] = [];
 const vscodeTabChangeListeners: Array<(event: { opened: any[]; closed: any[]; changed: any[] }) => void> = [];
 const vscodeTabs: any[] = [];
+class MockChatTabInput {}
+const vscodeAdditionalTabGroups: Array<{ viewColumn?: number; activeTab: { input: { viewType: string } | MockChatTabInput }; tabs: unknown[] }> = [];
+let vscodeDashboardActiveColumn = 1;
+let vscodeDashboardEditorLayout: unknown;
 const vscodeTextDocuments: any[] = [];
+const vscodeTextDocumentChangeListeners = new Set<(event: { document: any }) => void>();
 const vscodeWorkspaceFiles = new Map<string, string>();
 let vscodeExecuteCommandHandler: ((id: string, ...args: unknown[]) => Promise<unknown>) | undefined;
 /** Подменяет запись в буфер обмена, например незавершающейся записью браузера без фокуса окна. */
@@ -28,6 +35,7 @@ let vscodeAvailableCommands: string[] | undefined;
 let vscodeClaudeExtension: any = { isActive: true };
 let vscodeClipboardText = '';
 let vscodeActiveTextEditor: any;
+let vscodeActiveTerminal: { creationOptions: { env: Record<string, string> } } | undefined;
 let vscodeWindowFocused = true;
 let chooseHistoryRevision: ((items: Array<{ entryId: string }>) => { entryId: string }) | undefined;
 /** Тип клиента отделён от Linux-хоста, чтобы проверить запрет серверных клавиш в туннеле. */
@@ -59,6 +67,7 @@ function createDisposable() {
 
 function resetVsCodeCommandMock() {
 	vscodeCommandCalls.length = 0;
+	vscodeNotices.length = 0;
 	vscodeConfigurationUpdates.length = 0;
 	vscodeWorkspaceConfigurationValues.clear();
 	vscodeConfigurationUpdateHandler = undefined;
@@ -67,7 +76,11 @@ function resetVsCodeCommandMock() {
 	vscodeClosedTabs.length = 0;
 	vscodeTabChangeListeners.length = 0;
 	vscodeTabs.length = 0;
+	vscodeAdditionalTabGroups.length = 0;
+	vscodeDashboardActiveColumn = 1;
+	vscodeDashboardEditorLayout = undefined;
 	vscodeTextDocuments.length = 0;
+	vscodeTextDocumentChangeListeners.clear();
 	vscodeWorkspaceFiles.clear();
 	vscodeExecuteCommandHandler = undefined;
 	vscodeClipboardWriteHandler = undefined;
@@ -75,6 +88,7 @@ function resetVsCodeCommandMock() {
 	vscodeClaudeExtension = { isActive: true };
 	vscodeClipboardText = '';
 	vscodeActiveTextEditor = undefined;
+	vscodeActiveTerminal = undefined;
 	vscodeWindowFocused = true;
 	vscodeUiKind = 1;
 	vscodeRemoteName = undefined;
@@ -118,6 +132,23 @@ function createMockTextDocument(content = '', language = 'plaintext', uri?: { fs
 	};
 	vscodeTextDocuments.push(document);
 	return document;
+}
+
+/** Модель поля штатного чата, доступная через тот же API документов, что и в VS Code. */
+function createMockNativeChatInput(content = '') {
+	const document = {
+		uri: { scheme: 'chatSessionInput', toString: () => 'chatSessionInput:/chat-input' },
+		version: 1,
+		getText: () => content,
+	};
+	vscodeTextDocuments.push(document);
+	return {
+		setText(text: string) {
+			content = text;
+			document.version += 1;
+			for (const listener of vscodeTextDocumentChangeListeners) listener({ document });
+		},
+	};
 }
 
 function createVsCodeTab(viewType: string, label: string, active = true, panel?: any) {
@@ -477,7 +508,10 @@ function createVsCodeMock() {
 				},
 			}),
 			onDidChangeConfiguration: () => createDisposable(),
-			onDidChangeTextDocument: () => createDisposable(),
+			onDidChangeTextDocument: (listener: (event: { document: any }) => void) => {
+				vscodeTextDocumentChangeListeners.add(listener);
+				return { dispose: () => vscodeTextDocumentChangeListeners.delete(listener) };
+			},
 			onDidSaveTextDocument: () => createDisposable(),
 			onDidCloseTextDocument: () => createDisposable(),
 			createFileSystemWatcher: (pattern?: unknown) => createWatcher(pattern),
@@ -495,6 +529,7 @@ function createVsCodeMock() {
 		},
 		window: {
 			state: { get focused() { return vscodeWindowFocused; } },
+			get activeTerminal() { return vscodeActiveTerminal; },
 			get activeTextEditor() {
 				return vscodeActiveTextEditor;
 			},
@@ -523,10 +558,10 @@ function createVsCodeMock() {
 			onDidChangeActiveTextEditor: () => createDisposable(),
 			tabGroups: {
 				get all() {
-					return [vscodePrimaryTabGroup];
+					return [vscodePrimaryTabGroup, ...vscodeAdditionalTabGroups];
 				},
 				get activeTabGroup() {
-					return vscodePrimaryTabGroup;
+					return vscodeAdditionalTabGroups.find(group => group.viewColumn === vscodeDashboardActiveColumn) ?? vscodePrimaryTabGroup;
 				},
 				onDidChangeTabs: (listener: (event: { opened: any[]; closed: any[]; changed: any[] }) => void) => {
 					vscodeTabChangeListeners.push(listener);
@@ -548,12 +583,14 @@ function createVsCodeMock() {
 			createWebviewPanel,
 			createOutputChannel: () => outputChannel,
 			showQuickPick: async (items: Array<{ entryId: string }>) => chooseHistoryRevision?.(items),
-			showErrorMessage: () => undefined,
-			showInformationMessage: () => undefined,
+			showErrorMessage: (message: string) => { vscodeNotices.push({ kind: 'error', message }); },
+			showInformationMessage: (message: string) => { vscodeNotices.push({ kind: 'info', message }); },
 		},
 		commands: {
 			executeCommand: async (id: string, ...args: unknown[]) => {
 				vscodeCommandCalls.push({ id, args });
+				if (id === 'vscode.getEditorLayout') return vscodeDashboardEditorLayout
+					?? { groups: [vscodePrimaryTabGroup, ...vscodeAdditionalTabGroups].map(() => ({})) };
 				if (vscodeExecuteCommandHandler) {
 					return vscodeExecuteCommandHandler(id, ...args);
 				}
@@ -579,6 +616,7 @@ function createVsCodeMock() {
 			},
 		},
 		UIKind: { Desktop: 1, Web: 2 },
+		TabInputChat: MockChatTabInput,
 		ViewColumn: {
 			One: 1,
 			Beside: 2,
@@ -8485,16 +8523,69 @@ test('dashboard branch diff starts right-side reads before merge base and opens 
 	}
 });
 
+/** Сообщение после подтверждения виджетом, пока ещё хватает времени на штатную вставку. */
+function quickCommandInsert(requestId: string, target: DashboardQuickCommandTarget, text = '/review') {
+	return { type: 'promptDashboardQuickCommandInsert', requestId, text, target,
+		hostDeadline: performance.now() + DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS };
+}
+
+/** Просроченная доставка в любую сторону Tunnel не запускает вставку. У клиента и хоста разные часы. */
+test('dashboard quick commands require a current confirmation from the originating widget', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager();
+	const replies: any[] = [];
+	const panel = { webview: { postMessage: async (reply: unknown) => { replies.push(reply); return true; } } };
+	const deliver = (message: object) => (manager as any).handleMessage(
+		message, panel, createPrompt(), 'panel', () => false, () => undefined,
+	);
+	const dispatched: string[] = [];
+	(manager as any).insertDashboardQuickCommand = async (_target: string, _uuid: string, text: string) => {
+		dispatched.push(text);
+		return 'dispatched';
+	};
+	const clientTime = 900_000;
+	const pending: PendingDashboardQuickCommand = { requestId: 'first', text: '/review', target: 'codex',
+		clientDeadline: clientTime + DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS, sent: false };
+	try {
+		await deliver({ type: 'promptDashboardQuickCommandPrepare', requestId: pending.requestId });
+		const ready = replies.shift();
+		assert.equal(ready.type, 'promptDashboardQuickCommandReady');
+		assert.equal(ready.requestId, 'first');
+		// Виджет уже закончил ожидание, начал новую попытку или пока не успел обработать свой таймер.
+		assert.equal(confirmDashboardQuickCommand(null, ready.requestId, ready.hostTime, clientTime), undefined);
+		assert.equal(confirmDashboardQuickCommand({ ...pending, requestId: 'second' }, ready.requestId, ready.hostTime, clientTime), undefined);
+		assert.equal(confirmDashboardQuickCommand(pending, ready.requestId, ready.hostTime, pending.clientDeadline), undefined);
+		const late = confirmDashboardQuickCommand({ ...pending }, ready.requestId, ready.hostTime - 1_000, pending.clientDeadline - 100);
+		assert.ok(late);
+		await deliver(late);
+		assert.deepEqual(dispatched, []);
+		assert.deepEqual(replies.shift(), { type: 'promptDashboardQuickCommandFinished', requestId: 'first', expired: true });
+		const valid = confirmDashboardQuickCommand(pending, ready.requestId, ready.hostTime, clientTime + 100);
+		assert.ok(valid);
+		assert.equal(confirmDashboardQuickCommand(pending, ready.requestId, ready.hostTime, clientTime + 101), undefined);
+		await deliver(valid);
+		assert.deepEqual(dispatched, ['/review']);
+		assert.deepEqual(replies, [{ type: 'promptDashboardQuickCommandFinished', requestId: 'first' }]);
+	} finally {
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
 /** Проверяет маршрутизацию быстрых команд до штатных редакторов черновика. */
 test('dashboard quick commands populate Copilot and Claude drafts without sending', async () => {
 	resetVsCodeCommandMock();
 	vscodeAvailableCommands = ['claude-vscode.editor.open'];
+	const draft = createMockNativeChatInput();
+	vscodeExecuteCommandHandler = async id => {
+		if (id === 'workbench.action.chat.open') draft.setText('/review');
+	};
 	try {
 		const { manager } = await createManager();
 		const panel = { webview: { postMessage: async () => true } };
-		for (const target of ['copilot', 'claude']) {
+		for (const target of ['copilot', 'claude'] as const) {
 			await (manager as any).handleMessage(
-				{ type: 'promptDashboardQuickCommandInsert', target, text: '/review' },
+				quickCommandInsert(target, target),
 				panel, createPrompt(), 'panel', () => false, () => undefined,
 			);
 		}
@@ -8506,7 +8597,389 @@ test('dashboard quick commands populate Copilot and Claude drafts without sendin
 		]);
 		assert.equal(vscodeClipboardText, '');
 		assert.deepEqual(childProcessSpawnCalls, []);
+		assert.deepEqual(vscodeNotices, [
+			{ kind: 'info', message: 'Команда вставлена в поле чата.' },
+			{ kind: 'info', message: 'Команда передана для вставки в поле чата.' },
+		]);
 	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Текущий встроенный чат подтверждает фактическое изменение поля после завершения команды. */
+test('Current quick command awaits the native draft and acknowledges the original request', async () => {
+	resetVsCodeCommandMock();
+	const ready = createDeferred<void>();
+	const draft = createMockNativeChatInput();
+	vscodeExecuteCommandHandler = async id => id === 'workbench.action.chat.open' ? ready.promise : undefined;
+	const { manager } = await createManager();
+	const replies: unknown[] = [];
+	const panel = { webview: { postMessage: async (reply: unknown) => replies.push(reply) } };
+	try {
+		const pending = (manager as any).handleMessage(
+			quickCommandInsert('current', 'current'),
+			panel, { ...createPrompt(), chatTarget: 'codex' }, 'panel', () => false, () => undefined,
+		);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.deepEqual(vscodeCommandCalls, [
+			{ id: '_getAllCommands', args: [true] },
+			{ id: 'workbench.action.chat.open', args: [{ query: '/review', isPartialQuery: true }] },
+		]);
+		assert.deepEqual(replies, []);
+		assert.deepEqual(vscodeNotices, []);
+		ready.resolve();
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.deepEqual(replies, []);
+		draft.setText('/review');
+		await pending;
+		assert.deepEqual(replies, [{ type: 'promptDashboardQuickCommandFinished', requestId: 'current' }]);
+		assert.deepEqual(vscodeNotices, [{ kind: 'info', message: 'Команда вставлена в поле чата.' }]);
+	} finally {
+		ready.resolve();
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Текущий агент определяется по выбранной вкладке рядом с виджетом, после чего работает штатная вставка. */
+test('Current quick command selects a visible agent editor only when the Desktop target is clear', async t => {
+	const codex = 'mainThreadWebview-chatgpt.panelView';
+	const claude = 'mainThreadWebview-claudeVSCodePanel';
+	const scenarios = [
+		{ name: 'Codex editor in a split', visible: [codex], uiKind: 1, expected: 'codex' },
+		{ name: 'Claude editor in a split', visible: [claude], uiKind: 1, expected: 'claude' },
+		{ name: 'two different agent editors', visible: [codex, claude], uiKind: 1, expected: undefined },
+		{ name: 'Codex editor in Web', visible: [codex], uiKind: 2, expected: undefined },
+		{ name: 'only inactive Codex editor', visible: [], uiKind: 1, expected: undefined },
+	];
+	for (const scenario of scenarios) {
+		await t.test(scenario.name, async () => {
+			resetVsCodeCommandMock();
+			vscodeUiKind = scenario.uiKind;
+			createVsCodeTab(codex, 'Скрытый Codex', false);
+			seedPromptEditorTab();
+			for (const viewType of scenario.visible) {
+				const tab = { input: { viewType } };
+				vscodeAdditionalTabGroups.push({ activeTab: tab, tabs: [tab] });
+			}
+			const { manager } = await createManager();
+			const dispatches: Array<{ target: string; text: string }> = [];
+			(manager as any).insertDashboardQuickCommand = async (target: string, _promptUuid: string, text: string) => {
+				dispatches.push({ target, text });
+				return 'dispatched';
+			};
+			try {
+				await (manager as any).handleMessage(
+					quickCommandInsert('current', 'current'),
+					{ webview: { postMessage: async () => true } }, createPrompt(), 'panel', () => false, () => undefined,
+				);
+				assert.deepEqual(dispatches, scenario.expected ? [{ target: scenario.expected, text: '/review' }] : []);
+				assert.equal(vscodeClipboardText, scenario.expected ? '' : '/review');
+			} finally {
+				manager.disposeAll();
+				resetVsCodeCommandMock();
+			}
+		});
+	}
+});
+
+/** Вычисляет поддерживаемые условия манифеста для конкретного расположения окон и панелей. */
+function quickCommandPalette(visible: string[], auxiliaryIndex?: number, unfiltered = false) {
+	const menu: Array<{ command: string; when: string }> =
+		JSON.parse(readFileSync('package.json', 'utf8')).contributes.menus.commandPalette;
+	function matches(term: string) {
+		if (term === 'isAuxiliaryWindowFocusedContext') return auxiliaryIndex !== undefined;
+		if (term === '!isAuxiliaryWindowFocusedContext') return auxiliaryIndex === undefined;
+		if (term === 'activeEditorGroupIndex <= 1') return auxiliaryIndex === 1;
+		if (term === 'activeEditorGroupIndex > 1') return (auxiliaryIndex ?? 0) > 1;
+		return term.startsWith('!') ? !visible.includes(term.slice(1)) : visible.includes(term);
+	}
+	return menu.filter(row => unfiltered || row.when.split(' || ').some(clause => clause.split(' && ').every(matches)))
+		.map(row => ({ command: row.command, precondition: row.when }));
+}
+
+/** Проверяет маршрутизацию по реальным условиям обеих боковых панелей, когда фокус уже у виджета. */
+test('Current quick command routes the double click to the chat visible in this window', async t => {
+	const primary = 'view.chatgpt.sidebarView.visible';
+	const secondary = 'view.chatgpt.sidebarSecondaryView.visible';
+	const claude = 'view.claudeVSCodeSidebar.visible';
+	const claudeSecondary = 'view.claudeVSCodeSidebarSecondary.visible';
+	const copilot = 'view.workbench.panel.chat.view.copilot.visible';
+	const cases: Array<{ name: string; visible: string[]; expected?: string; editor?: string; unfiltered?: boolean }> = [
+		{ name: 'Codex primary with a stale native draft', visible: [primary], expected: 'codex' },
+		{ name: 'Codex secondary through a Desktop Tunnel', visible: [secondary], expected: 'codex' },
+		{ name: 'Claude primary', visible: [claude], expected: 'claude' },
+		{ name: 'Claude secondary', visible: [claudeSecondary], expected: 'claude' },
+		{ name: 'native chat body', visible: [copilot], expected: 'copilot' },
+		{ name: 'all sidebars closed with a stale native draft', visible: [], expected: undefined },
+		{ name: 'two sidebars', visible: [primary, claudeSecondary], expected: undefined },
+		{ name: 'native and Codex simultaneously', visible: [copilot, secondary], expected: undefined },
+		{ name: 'sidebar and different editor', visible: [primary], editor: 'claudeVSCodePanel', expected: undefined },
+		{ name: 'same agent in sidebar and editor', visible: [primary], editor: 'chatgpt.panelView', expected: 'codex' },
+		{ name: 'native chat in another editor group', visible: [], editor: 'native', expected: 'copilot' },
+		{ name: 'native editor alongside Codex sidebar', visible: [secondary], editor: 'native', expected: undefined },
+		{ name: 'VS Code 1.95 returns both alternatives', visible: [], unfiltered: true, expected: undefined },
+	];
+	for (const scenario of cases) {
+		await t.test(scenario.name, async () => {
+			resetVsCodeCommandMock();
+			vscodeRemoteName = 'tunnel';
+			seedPromptEditorTab();
+			if (scenario.editor === 'native') {
+				const tab = { input: new MockChatTabInput() };
+				vscodeAdditionalTabGroups.push({ activeTab: tab, tabs: [tab] });
+			} else if (scenario.editor) {
+				createVsCodeTab(scenario.editor, 'Agent', true);
+			}
+			if (!scenario.unfiltered) createMockNativeChatInput();
+			vscodeExecuteCommandHandler = async (id, ...args) => {
+				assert.equal(id, '_getAllCommands');
+				assert.deepEqual(args, [true]);
+				return quickCommandPalette(scenario.visible, undefined, scenario.unfiltered);
+			};
+			const { manager } = await createManager();
+			const targets: string[] = [];
+			(manager as any).insertDashboardQuickCommand = async (target: string, _uuid: string, draft: string) => {
+				assert.equal(draft, '/review');
+				targets.push(target);
+				return 'dispatched';
+			};
+			try {
+				await (manager as any).handleMessage(
+					quickCommandInsert('sidebar', 'current'),
+					{ webview: { postMessage: async () => true } }, createPrompt(), 'panel', () => false, () => undefined,
+				);
+				assert.deepEqual(targets, scenario.expected ? [scenario.expected] : []);
+				assert.equal(vscodeClipboardText, scenario.expected ? '' : '/review');
+			} finally {
+				manager.disposeAll();
+				resetVsCodeCommandMock();
+			}
+		});
+	}
+});
+
+/** В одном workbench вкладки вынесенных окон имеют сквозные колонки, а боковые панели принадлежат главному. */
+test('Current quick command scopes chat detection to the physical window with the dashboard', async t => {
+	const codex = 'chatgpt.panelView';
+	const claude = 'claudeVSCodePanel';
+	const dashboard = 'promptManager.editor';
+	const visibleSidebar = ['view.chatgpt.sidebarSecondaryView.visible'];
+	const cases = [
+		{ name: 'main sidebar with detached Claude', views: [dashboard, claude], active: 1, local: 1, sidebar: true, target: 'codex' },
+		{ name: 'no chat in main window', views: [dashboard, claude], active: 1, local: 1 },
+		{ name: 'main split with another floating window', views: [dashboard, codex, claude], active: 1, local: 2, target: 'codex' },
+		{ name: 'dashboard alone in auxiliary', views: [claude, dashboard], active: 2, local: 1, index: 1, sidebar: true },
+		{ name: 'first group in second auxiliary', views: [codex, codex, dashboard, claude], active: 3, local: 2, index: 1, sidebar: true, target: 'claude' },
+		{ name: 'second group in first auxiliary', views: [codex, claude, dashboard, codex], active: 3, local: 2, index: 2, sidebar: true, target: 'claude' },
+		{ name: 'indeterminate auxiliary boundaries', views: [codex, claude, codex, dashboard, claude, codex], active: 4, local: 3, index: 2 },
+	];
+	for (const scenario of cases) {
+		await t.test(scenario.name, async () => {
+			resetVsCodeCommandMock();
+			createVsCodeTab(scenario.views[0], 'First editor', true);
+			for (const [i, viewType] of scenario.views.slice(1).entries()) {
+				const tab = { input: { viewType } };
+				vscodeAdditionalTabGroups.push({ viewColumn: i + 2, activeTab: tab, tabs: [tab] });
+			}
+			vscodeDashboardActiveColumn = scenario.active;
+			vscodeDashboardEditorLayout = { groups: [{ groups: Array.from({ length: scenario.local }, () => ({})) }] };
+			vscodeExecuteCommandHandler = async () => quickCommandPalette(scenario.sidebar ? visibleSidebar : [], scenario.index);
+			const { manager } = await createManager();
+			try {
+				assert.equal(await (manager as any).resolveCurrentDashboardQuickCommandTarget(), scenario.target);
+			} finally {
+				manager.disposeAll();
+				resetVsCodeCommandMock();
+			}
+		});
+	}
+});
+
+/** Запрос из потерявшей фокус панели не выбирает адресата в новом окне и сохраняет буфер обмена. */
+test('Current quick command checks the source panel before and after looking up the destination', async () => {
+	resetVsCodeCommandMock();
+	const lookup = createDeferred<void>();
+	const { manager } = await createManager();
+	const panel = { active: false, webview: { postMessage: async () => true } };
+	vscodeExecuteCommandHandler = async () => {
+		await lookup.promise;
+		return quickCommandPalette(['view.chatgpt.sidebarSecondaryView.visible']);
+	};
+	const insert = () => (manager as any).handleMessage(
+		quickCommandInsert('source-panel', 'current'), panel, createPrompt(), 'panel', () => false, () => undefined,
+	);
+	try {
+		await insert();
+		assert.deepEqual(vscodeCommandCalls, []);
+		panel.active = true;
+		const pending = insert();
+		panel.active = false;
+		lookup.resolve();
+		await pending;
+		assert.deepEqual(vscodeCommandCalls, [{ id: '_getAllCommands', args: [true] }]);
+		assert.equal(vscodeClipboardText, '');
+		assert.equal(vscodeNotices.length, 2);
+		assert.ok(vscodeNotices.every(n => n.kind === 'error' && n.message.includes('потерял фокус')));
+	} finally {
+		lookup.resolve();
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Запоздалый снимок видимости после таймаута не должен инициировать вставку в чат. */
+test('Current quick command discards a late lookup after the widget receives its timeout', async t => {
+	resetVsCodeCommandMock();
+	const palette = createDeferred<unknown>();
+	const { manager } = await createManager();
+	const tab = { input: { viewType: 'chatgpt.panelView' } };
+	vscodeAdditionalTabGroups.push({ activeTab: tab, tabs: [tab] });
+	vscodeExecuteCommandHandler = async () => palette.promise;
+	const insert = t.mock.method(manager as any, 'insertDashboardQuickCommand', async () => 'dispatched');
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	try {
+		const pending = (manager as any).runDashboardQuickCommand('current', 'prompt', '/review');
+		t.mock.timers.tick(DASHBOARD_QUICK_COMMAND_TIMEOUT_MS);
+		await pending;
+		palette.resolve(undefined);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.equal(insert.mock.callCount(), 0);
+		assert.equal(vscodeNotices.length, 1);
+		assert.match(vscodeNotices[0].message, /Истекло время/);
+	} finally {
+		palette.resolve(undefined);
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
+/** activeTerminal может указывать на скрытый терминал, открывавшийся ранее. */
+test('Current quick command copies the draft when the native chat and last focused OpenCode are ambiguous', async () => {
+	resetVsCodeCommandMock();
+	vscodeActiveTerminal = { creationOptions: { env: { PROMPT_MANAGER_OPENCODE_UUID: 'other-prompt' } } };
+	createMockNativeChatInput();
+	const { manager } = await createManager();
+	const insertions: unknown[][] = [];
+	(manager as any).openCodeCliService = {
+		insertIntoOpenChat: (...args: unknown[]) => { insertions.push(args); return true; },
+		dispose: () => undefined,
+	};
+	try {
+		await (manager as any).handleMessage(
+			quickCommandInsert('cli', 'current'),
+			{ webview: { postMessage: async () => true } }, createPrompt(), 'panel', () => false, () => undefined,
+		);
+		assert.deepEqual(insertions, []);
+		assert.deepEqual(vscodeCommandCalls, [{ id: '_getAllCommands', args: [true] }]);
+		assert.equal(vscodeClipboardText, '/review');
+		assert.deepEqual(vscodeNotices, [{ kind: 'error', message: 'Не удалось определить текущий чат. Команда скопирована. Выберите агента или вставьте команду вручную.' }]);
+	} finally {
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Доставка команды и подтверждение содержимого поля различаются у клиентов, скрывающих модель чата. */
+test('dashboard native draft distinguishes an unpublished model from an unchanged draft or rejected command', async t => {
+	for (const scenario of ['hidden', 'late match', 'late mismatch', 'command rejected'] as const) {
+		await t.test(scenario, async t => {
+			resetVsCodeCommandMock();
+			vscodeClipboardText = 'мой буфер';
+			const { manager } = await createManager();
+			t.mock.timers.enable({ apis: ['setTimeout'] });
+			vscodeExecuteCommandHandler = async id => {
+				assert.equal(id, 'workbench.action.chat.open');
+				if (scenario === 'command rejected') throw new Error('Chat unavailable');
+			};
+			try {
+				const pending = (manager as any).runDashboardQuickCommand('copilot', 'prompt', '/review');
+				await new Promise<void>(resolve => setImmediate(resolve));
+				if (scenario === 'late match' || scenario === 'late mismatch') {
+					const model = createMockNativeChatInput();
+					model.setText(scenario === 'late match' ? '/review' : 'другой текст');
+				}
+				t.mock.timers.tick(1500);
+				await pending;
+				const failed = scenario === 'late mismatch' || scenario === 'command rejected';
+				assert.equal(vscodeClipboardText, failed ? '/review' : 'мой буфер');
+				assert.equal(vscodeNotices.length, 1);
+				assert.equal(vscodeNotices[0].kind, failed ? 'error' : 'info');
+				const messages = {
+					hidden: 'Команда передана для вставки в поле чата.',
+					'late match': 'Команда вставлена в поле чата.',
+					'late mismatch': 'VS Code не подтвердил вставку.',
+					'command rejected': 'Не удалось вставить команду.',
+				};
+				assert.ok(vscodeNotices[0].message.startsWith(messages[scenario]));
+			} finally {
+				manager.disposeAll();
+				resetVsCodeCommandMock();
+			}
+		});
+	}
+});
+
+/** Команда VS Code может успешно завершиться, не изменив даже уже совпадающий текст. */
+test('dashboard quick command reports an unconfirmed native draft when chat.open changes no input', async t => {
+	resetVsCodeCommandMock();
+	createMockNativeChatInput('@participant /review');
+	const { manager } = await createManager();
+	const initialListeners = vscodeTextDocumentChangeListeners.size;
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	const replies: unknown[] = [];
+	try {
+		const pending = (manager as any).handleMessage(
+			quickCommandInsert('no-op', 'copilot', '@participant /review'),
+			{ webview: { postMessage: async (reply: unknown) => replies.push(reply) } },
+			createPrompt(), 'panel', () => false, () => undefined,
+		);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.equal(vscodeNotices.length, 0);
+		assert.equal(vscodeTextDocumentChangeListeners.size, initialListeners + 1);
+		t.mock.timers.tick(2000);
+		await pending;
+		assert.equal(vscodeClipboardText, '@participant /review');
+		assert.deepEqual(replies, [{ type: 'promptDashboardQuickCommandFinished', requestId: 'no-op' }]);
+		assert.equal(vscodeNotices.length, 1);
+		assert.equal(vscodeNotices[0].kind, 'error');
+		assert.match(vscodeNotices[0].message, /VS Code не подтвердил вставку.*Команда скопирована/);
+		assert.equal(vscodeTextDocumentChangeListeners.size, initialListeners);
+	} finally {
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Запоздавшая активация провайдера не вставляет команду после таймаута и освобождения виджета. */
+test('dashboard quick command times out a hung activation and releases copy without inserting late', async t => {
+	resetVsCodeCommandMock();
+	const activation = createDeferred<void>();
+	vscodeClaudeExtension = { isActive: false, activate: () => activation.promise };
+	vscodeAvailableCommands = ['claude-vscode.editor.open'];
+	const { manager } = await createManager();
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	const replies: unknown[] = [];
+	const handle = (message: object) => (manager as any).handleMessage(
+		message, { webview: { postMessage: async (reply: unknown) => replies.push(reply) } },
+		createPrompt(), 'panel', () => false, () => undefined,
+	);
+	try {
+		const pending = handle(quickCommandInsert('hung', 'claude'));
+		assert.deepEqual(replies, []);
+		t.mock.timers.tick(DASHBOARD_QUICK_COMMAND_TIMEOUT_MS);
+		await pending;
+		await handle({ type: 'promptDashboardQuickCommandCopy', text: '/next' });
+		activation.resolve();
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.deepEqual(vscodeCommandCalls, []);
+		assert.equal(vscodeClipboardText, '/next');
+		assert.deepEqual(replies, [{ type: 'promptDashboardQuickCommandFinished', requestId: 'hung' }]);
+		assert.deepEqual(vscodeNotices.map(notice => notice.kind), ['error', 'info']);
+		assert.match(vscodeNotices[0].message, /Истекло время ожидания вставки/);
+	} finally {
+		activation.resolve();
+		manager.disposeAll();
 		resetVsCodeCommandMock();
 	}
 });
@@ -8527,7 +9000,7 @@ test('dashboard quick command prepares a Codex composer draft on local X11', asy
 			return { ok: true, stage: 'paste' };
 		};
 		await (manager as any).handleMessage(
-			{ type: 'promptDashboardQuickCommandInsert', target: 'codex', text: '/review' },
+			quickCommandInsert('desktop', 'codex'),
 			{ webview: { postMessage: async () => true } },
 			{ ...createPrompt(), autoStartChatWithXdotool: true }, 'panel', () => false, () => undefined,
 		);
@@ -8552,16 +9025,43 @@ test('dashboard quick command copies Codex draft in the browser without dispatch
 	};
 	try {
 		const { manager } = await createManager();
-		const replies: Array<{ type: string; message: string }> = [];
+		const replies: unknown[] = [];
 		await (manager as any).handleMessage(
-			{ type: 'promptDashboardQuickCommandInsert', target: 'codex', text: '/review' },
-			{ webview: { postMessage: async (reply: { type: string; message: string }) => { replies.push(reply); return true; } } },
+			quickCommandInsert('browser', 'codex'),
+			{ webview: { postMessage: async (reply: unknown) => replies.push(reply) } },
 			createPrompt(), 'panel', () => false, () => undefined,
 		);
 		assert.deepEqual(vscodeCommandCalls.map(call => call.id), ['chatgpt.openSidebar']);
 		assert.equal(vscodeClipboardText, '/review');
-		assert.ok(replies.some(reply => reply.type === 'info' && reply.message.includes('Ctrl+V')));
+		assert.deepEqual(replies, [{ type: 'promptDashboardQuickCommandFinished', requestId: 'browser' }]);
+		assert.equal(vscodeNotices.length, 1);
+		assert.equal(vscodeNotices[0].kind, 'error');
+		assert.match(vscodeNotices[0].message, /Не удалось вставить.*Ctrl\+V/);
 	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Копирование сообщает об успехе после записи и об отказе при недоступном буфере. */
+test('Quick Command copy uses the clipboard without focusing any chat', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager();
+	const copy = () => (manager as any).handleMessage(
+		{ type: 'promptDashboardQuickCommandCopy', text: '/review' },
+		{ webview: { postMessage: async () => true } }, createPrompt(), 'panel', () => false, () => undefined,
+	);
+	try {
+		await copy();
+		assert.equal(vscodeClipboardText, '/review');
+		vscodeClipboardWriteHandler = async () => { throw new Error('Clipboard unavailable'); };
+		await copy();
+		assert.deepEqual(vscodeCommandCalls, []);
+		assert.deepEqual(vscodeNotices, [
+			{ kind: 'info', message: 'Команда скопирована.' },
+			{ kind: 'error', message: 'Не удалось скопировать команду.' },
+		]);
+	} finally {
+		manager.disposeAll();
 		resetVsCodeCommandMock();
 	}
 });

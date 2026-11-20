@@ -4,6 +4,29 @@ import { isPromptDashboardProjectsSectionLoaded } from '../types/promptDashboard
 import type { GitOverlayBranchInfo, GitOverlayChangeFile, GitOverlayCommitChangedFile } from '../types/git.js';
 import type { Prompt, PromptStatus } from '../types/prompt.js';
 import { normalizePromptEditorPanelSplitRatio } from '../types/promptEditorLayout.js';
+import type { WebviewToExtensionMessage } from '../types/messages.js';
+import type { DashboardQuickCommandTarget } from '../types/promptDashboardPreferences.js';
+
+/** Текст остаётся в виджете, пока расширение не ответит на запрос с тем же идентификатором. */
+export interface PendingDashboardQuickCommand {
+	requestId: string;
+	text: string;
+	target: DashboardQuickCommandTarget;
+	clientDeadline: number;
+	sent: boolean;
+}
+
+/** Переносит оставшееся время на часы хоста. Задержка обратного пути только сокращает срок вставки. */
+export function confirmDashboardQuickCommand(
+	pending: PendingDashboardQuickCommand | null, requestId: string, hostTime: number, clientTime: number,
+): Extract<WebviewToExtensionMessage, { type: 'promptDashboardQuickCommandInsert' }> | undefined {
+	if (!pending || pending.sent || pending.requestId !== requestId || !Number.isFinite(hostTime)) return;
+	const remaining = pending.clientDeadline - clientTime;
+	if (remaining <= 0) return;
+	pending.sent = true;
+	return { type: 'promptDashboardQuickCommandInsert', requestId, text: pending.text, target: pending.target,
+		hostDeadline: hostTime + remaining };
+}
 
 export const PROMPT_DASHBOARD_WARM_INTERVAL_MS = 5 * 60 * 1000;
 export const PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS = 5 * 60 * 1000;

@@ -6,16 +6,37 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-11-21
+
+#### Fixed
+- Quick Commands now resolves Current from an expanded Codex, Claude Code, or built-in chat sidebar
+  in VS Code 1.96 and later, including desktop connections through a Tunnel.
+- Limit Current to the widget's window when editor tabs are detached. Preserve the clipboard when
+  Copilot accepts a draft in a private input model. Discard expired insert requests on delayed connections.
+- Preserve categories if renaming or deleting a command fails. A command re-added without a category
+  after deletion by an older client now stays uncategorized.
+
 ### 2026-11-20
+
+#### Added
+- Quick Commands supports categories, drag and keyboard reordering within each category, a copy action,
+  and a deletion confirmation. Command order and categories are shared across workspaces.
+- The Current agent option uses an identifiable built-in VS Code chat. If the target is ambiguous, the command
+  is copied for manual paste when the clipboard is available. Select OpenCode CLI explicitly.
 
 #### Fixed
 - Keep the new-note field expanded during recording and background transcription. Append the result to the draft
   and return the caret to the end of the text.
 - Keep the Quick Commands agent selected across prompts and editor tabs. Focus the Codex composer
   for local X11 paste and allow drafts in the existing OpenCode CLI terminal after automatic submission.
+- Keep the global quick command list readable by older clients by storing category metadata separately.
+  Confirm built-in chat insertion from the composer and release the command row if insertion or its reply times out.
+- Resolve the Current agent from a visible Codex or Claude Code editor tab in VS Code Desktop.
 - Show the status label alongside progress in the expanded Prompt Status widget.
-- Clear discards the draft and removes focus. The new-note field collapses when dictation is inactive.
-  Clipboard text adds a period to the title and a colon to a distinct description followed by a nonempty checklist.
+- `/alek-review` показывает замечания до формы выбора и оставляет ход активным, пока ожидается асинхронный ответ.
+- Clear keeps the new-note field open and focused. Cancel discards the draft and collapses it outside dictation.
+  Note menu items fit on one line. A nonempty checklist with no description follows a colon after the title.
+  Regenerating a checklist suggestion shows progress immediately.
 - Startup waits up to ten seconds for the providers needed by each operation. A pending Copilot startup
   leaves the other account sections available.
 - Ignore extra saved dashboard columns, keep command drafts attached to their original row, and preserve

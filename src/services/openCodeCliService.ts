@@ -75,6 +75,13 @@ interface OpenCodeLaunch {
 
 /** Метка сохраняет принадлежность живого терминала при повторной активации расширения. */
 const TERMINAL_UUID_KEY = 'PROMPT_MANAGER_OPENCODE_UUID';
+
+/** Определяет промпт по метке терминала Prompt Manager, в том числе после восстановления окна. */
+export function getOpenCodeTerminalPromptUuid(terminal: vscode.Terminal | undefined): string | undefined {
+	const options = terminal?.creationOptions;
+	return options && 'env' in options ? options.env?.[TERMINAL_UUID_KEY] ?? undefined : undefined;
+}
+
 /** Предел холодного запуска не подменяет проверку готовности произвольной паузой. */
 const STARTUP_TIMEOUT_MS = 120_000;
 
@@ -115,10 +122,8 @@ export class OpenCodeCliService {
 		const current = this.terminalsByPrompt.get(promptUuid);
 		// Закрытый последний запуск не заменяется более старым чатом того же промпта.
 		if (current && !this.host.terminals.includes(current)) return false;
-		const terminal = current || [...this.host.terminals].reverse().find(candidate => {
-			const options = candidate.creationOptions;
-			return 'env' in options && options.env?.[TERMINAL_UUID_KEY] === promptUuid;
-		});
+		const terminal = current || [...this.host.terminals].reverse()
+			.find(candidate => getOpenCodeTerminalPromptUuid(candidate) === promptUuid);
 		if (!terminal || this.disposed) return false;
 		this.terminalsByPrompt.set(promptUuid, terminal);
 		terminal.show();

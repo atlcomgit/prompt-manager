@@ -26,7 +26,7 @@ import { PromptVoiceQueueIndicator } from './components/PromptVoiceQueueIndicato
 import { GitOverlay } from './components/GitOverlay';
 import { PromptDashboard, createPromptDashboardLayoutModeReporter, readPromptDashboardInitialPreferences, type PromptDashboardFilePatchRequest, type PromptDashboardTodoOpenRequest } from './components/PromptDashboard';
 import { PromptPanelSplitter, applyPromptPanelResizeState } from './components/PromptPanelSplitter';
-import { EDITOR_WEBVIEW_ASSET_VERSION } from '../../constants/webview';
+import { DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS, EDITOR_WEBVIEW_ASSET_VERSION } from '../../constants/webview';
 import { CustomGroupsManagerModal } from './components/CustomGroupsManagerModal';
 import { ProgressLine, resolveEditorProgressMode } from './components/ProgressLine';
 import type { GlobalContextSourceMessage } from '../../types/messages';
@@ -122,8 +122,8 @@ import {
   resolveGitOverlayDonePersistence,
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
-import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, PROMPT_EDITOR_FORM_MAX_WIDTH_PX, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptEditorLayout, resolvePromptEditorPanelSplitRatio, type PromptEditorFormWidthBounds, resolvePromptDashboardRequestMessageContext, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardProjectRequestOnNotice, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
-import { normalizePromptDashboardPreferences, type PromptDashboardPreferences } from '../../types/promptDashboardPreferences.js';
+import { confirmDashboardQuickCommand, type PendingDashboardQuickCommand, PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, PROMPT_EDITOR_FORM_MAX_WIDTH_PX, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptEditorLayout, resolvePromptEditorPanelSplitRatio, type PromptEditorFormWidthBounds, resolvePromptDashboardRequestMessageContext, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardProjectRequestOnNotice, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
+import { normalizePromptDashboardPreferences, type DashboardQuickCommandTarget, type PromptDashboardPreferences } from '../../types/promptDashboardPreferences.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController, type PromptVoiceTarget } from './voice/usePromptVoiceController.js';
 import { KEEP_CURRENT_CHAT_MODEL, isKeepCurrentChatModel } from '../../constants/ai.js';
@@ -911,6 +911,9 @@ export const EditorApp: React.FC = () => {
   const [promptDashboardPreferences, setPromptDashboardPreferences] = useState(
     initialDashboardPreferenceState.migratedLegacy ? initialDashboardPreferenceState.preferences : initialPromptDashboardPreferences,
   );
+  /** Индикатор переживает закрытие карточки, а идентификатор отличает ответ от прежних запросов. */
+  const [pendingQuickCommandText, setPendingQuickCommandText] = useState<string | null>(null);
+  const pendingQuickCommandRef = useRef<(PendingDashboardQuickCommand & { timer: number }) | null>(null);
   /** Глобальное раскрытие формы содержит только main; Process остаётся в expandedSections. */
   const [formSectionLayout, setFormSectionLayout] = useState(() => normalizePromptEditorLayout(bootWindow.__PROMPT_EDITOR_LAYOUT__));
   const [dashboardPreferencesRevision, setDashboardPreferencesRevision] = useState(0);
@@ -1641,6 +1644,37 @@ export const EditorApp: React.FC = () => {
     promptDashboardDockerBusyByRequestIdRef.current = {};
     setPromptDashboardDockerBusyActions([]);
   }, []);
+
+  /** Снимает индикатор только по ответу или таймауту соответствующей вставки. */
+  const finishQuickCommand = useCallback((requestId: string) => {
+    const pending = pendingQuickCommandRef.current;
+    if (!pending || pending.requestId !== requestId) return false;
+    window.clearTimeout(pending.timer);
+    pendingQuickCommandRef.current = null;
+    setPendingQuickCommandText(null);
+    return true;
+  }, []);
+
+  useEffect(() => () => {
+    const pending = pendingQuickCommandRef.current;
+    if (pending) window.clearTimeout(pending.timer);
+    pendingQuickCommandRef.current = null;
+  }, []);
+
+  /** Отправляет одну вставку за раз и восстанавливает действия виджета при потере ответа. */
+  const handleQuickCommandInsert = (text: string, target: DashboardQuickCommandTarget) => {
+    if (pendingQuickCommandRef.current) return;
+    const requestId = crypto.randomUUID();
+    const clientDeadline = performance.now() + DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS;
+    const timer = window.setTimeout(() => {
+      if (finishQuickCommand(requestId)) {
+        setNotice({ kind: 'error', message: 'Расширение не подтвердило вставку. Проверьте поле чата. Команду можно скопировать в виджете.' });
+      }
+    }, DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS);
+    pendingQuickCommandRef.current = { requestId, timer, text, target, clientDeadline, sent: false };
+    setPendingQuickCommandText(text);
+    vscode.postMessage({ type: 'promptDashboardQuickCommandPrepare', requestId });
+  };
 
   /** Сохраняет только явные изменения карточек; resize и prompt(open) не пишут defaults. */
   const handlePromptDashboardPreferencesChange = useCallback((state: PromptDashboardPreferences) => {
@@ -4597,6 +4631,16 @@ export const EditorApp: React.FC = () => {
       case 'promptUiSettingsChanged':
         applyPromptUiSettings(msg.settings);
         break;
+      case 'promptDashboardQuickCommandReady': {
+        const insert = confirmDashboardQuickCommand(pendingQuickCommandRef.current, msg.requestId, msg.hostTime, performance.now());
+        if (insert) vscode.postMessage(insert);
+        break;
+      }
+      case 'promptDashboardQuickCommandFinished':
+        if (finishQuickCommand(msg.requestId) && msg.expired) {
+          setNotice({ kind: 'error', message: 'Время ожидания истекло до вставки. Повторите команду.' });
+        }
+        break;
       case 'promptDashboardStateSaved':
         uiSettingsEditsRef.current = uiSettingsEditsRef.current.filter(edit => edit.requestId !== msg.requestId);
         if (msg.settings) {
@@ -4761,7 +4805,7 @@ export const EditorApp: React.FC = () => {
         setIsRecalculating(false);
         break;
     }
-  }, [applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPendingProcessBodyScrollRestore, clearPromptDashboardDockerBusyActions, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, releasePromptDashboardDockerBusyAction, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, scheduleProcessBodyScrollRestore, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
+  }, [applyPromptLayoutHeights, clearChatStartTimeout, clearPendingBackgroundRecalc, clearPendingProcessBodyScrollRestore, clearPromptDashboardDockerBusyActions, clearPromptOpenLayoutSettleTimer, clearPromptSwitchPlaceholderDelay, createStartChatRequestId, dispatchStartChat, enqueueEditorViewStateSave, finishPromptPlanHydration, finishQuickCommand, releasePromptDashboardDockerBusyAction, releaseStartChatPendingState, requestBackgroundImplementingTimeRefresh, resetChatStartRequestTracking, resetStartChatPreflightTracking, scheduleProcessBodyScrollRestore, setPromptSwitchPlaceholderActive, shouldHandleChatStartMessage, showInlineNotice, startPromptOpenLayoutSettle, startPromptPlanHydration]);
 
   handleMessageRef.current = handleMessage;
 
@@ -8291,9 +8335,9 @@ export const EditorApp: React.FC = () => {
         quickNotesVoiceQueue={noteVoiceQueueItems.length > 0 ? (
           <PromptVoiceQueueIndicator items={noteVoiceQueueItems} onDismiss={voiceController.dismissQueueItem} t={t} />
         ) : null}
-        onQuickCommandInsert={(text, target) => vscode.postMessage({
-          type: 'promptDashboardQuickCommandInsert', text, target,
-        })}
+        pendingQuickCommandText={pendingQuickCommandText}
+        onQuickCommandInsert={handleQuickCommandInsert}
+        onQuickCommandCopy={text => vscode.postMessage({ type: 'promptDashboardQuickCommandCopy', text })}
         onOpenGitFlow={handleOpenGitOverlay}
         onOpenPrompt={handlePromptDashboardOpenPrompt}
         onPullProject={handlePromptDashboardPullProject}

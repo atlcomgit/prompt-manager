@@ -3,4 +3,4 @@
  * Меняется вместе с полями состояния и сообщениями: иначе host без перезагрузки окна молча отбросит новые данные,
  * например выбранный режим плана, а с новой меткой предложит перезагрузить окно.
  */
-export const EDITOR_WEBVIEW_ASSET_VERSION = 'editor-webview-2026-11-18-quick-notes-v1';
+export const EDITOR_WEBVIEW_ASSET_VERSION = 'editor-webview-2026-11-20-dashboard-commands-v2';

@@ -676,3 +676,73 @@ test('repeated replace with a stale stored name keeps the renamed attachment', a
 	assert.deepEqual([...fs.readFileSync(filesDir(workspaceDir, 'n1', 'a.png'))], [1]);
 	assert.deepEqual([...fs.readFileSync(filesDir(workspaceDir, 'n1', 'a (2).png'))], [2]);
 });
+
+
+/** Дублирование заметки копирует вложения независимо: удаление оригинала не ломает копию. */
+test('duplicating a note copies file contents into its own safe directory', async t => {
+	const { service, workspaceDir } = createFixture(t);
+	const original = await createNoteWithFiles(service, 'workspace', 'source-note', [
+		{ name: 'readme.txt', data: Buffer.from('private note content') },
+	]);
+	await applyOk(service, {
+		kind: 'duplicate', scope: 'workspace', id: original.id, newId: 'copy-note',
+		at: '2026-11-18T11:00:00.000Z',
+	});
+	const state = await service.getState();
+	const copy = state.notes.find(note => note.id === 'copy-note');
+	assert.ok(copy);
+	assert.match(copy.title, /копия/);
+	assert.equal(copy.files.length, 1);
+	assert.notEqual(copy.files[0].id, original.files[0].id);
+	assert.equal(fs.readFileSync(filesDir(workspaceDir, 'copy-note', copy.files[0].storedName), 'utf8'), 'private note content');
+	await applyOk(service, { kind: 'delete', scope: 'workspace', id: original.id });
+	assert.equal(fs.existsSync(filesDir(workspaceDir, original.id)), false);
+	assert.equal(fs.readFileSync(filesDir(workspaceDir, 'copy-note', copy.files[0].storedName), 'utf8'), 'private note content');
+});
+
+/** Failed duplicates must discard their own files during copying and after a rejected JSON write. */
+test('failed duplication removes staged and published attachments', async t => {
+	const { service, workspaceDir } = createFixture(t);
+	const original = await createNoteWithFiles(service, 'workspace', 'source-note', [
+		{ name: 'first.txt', data: Buffer.from('first') },
+		{ name: 'second.txt', data: Buffer.from('second') },
+	]);
+	const secondFile = filesDir(workspaceDir, original.id, original.files[1].storedName);
+	const duplicate = async (newId: string) => service.applyOperation({
+		kind: 'duplicate', scope: 'workspace', id: original.id, newId, at: NOW.toISOString(),
+	});
+	fs.unlinkSync(secondFile);
+	assert.equal((await duplicate('missing-file-copy')).result.ok, false);
+	assert.equal(fs.existsSync(filesDir(workspaceDir, 'missing-file-copy')), false);
+	assert.deepEqual(fs.readdirSync(filesDir(workspaceDir, '.pending')), []);
+
+	fs.writeFileSync(secondFile, 'second');
+	const fileSystem = require('node:fs') as typeof fs;
+	const rename = fileSystem.renameSync;
+	const guard = t.mock.method(fileSystem, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
+		if (to === notesFile(workspaceDir)) throw new Error('fixture: JSON write denied');
+		return rename(from, to);
+	});
+	try {
+		assert.equal((await duplicate('denied-write-copy')).result.ok, false);
+	} finally {
+		guard.mock.restore();
+	}
+	assert.equal(fs.existsSync(filesDir(workspaceDir, 'denied-write-copy')), false);
+	assert.deepEqual(fs.readdirSync(filesDir(workspaceDir, '.pending')), []);
+	assert.deepEqual((await service.getState()).notes.map(note => note.id), [original.id]);
+	assert.equal(fs.readFileSync(secondFile, 'utf8'), 'second');
+});
+
+/** Отклонённые при перегенерации пункты сохраняются отдельно от ручных правок черновика. */
+test('rejected AI checklist suggestions survive reload without marking the note edited', async t => {
+	const { service, workspaceDir } = createFixture(t);
+	const note = makeNote('reject-test');
+	await applyOk(service, { kind: 'create', scope: 'workspace', note });
+	await applyOk(service, { kind: 'rejectSuggestion', scope: 'workspace', id: note.id, text: 'Проверить кэш' });
+	await applyOk(service, { kind: 'rejectSuggestion', scope: 'workspace', id: note.id, text: 'проверить кэш' });
+	const next = (await service.getState()).notes.find(item => item.id === note.id);
+	assert.deepEqual(next?.rejectedSuggestions, ['Проверить кэш']);
+	assert.equal(next?.updatedAt, note.updatedAt);
+	assert.deepEqual(readNotesFile(workspaceDir).json.notes[0].rejectedSuggestions, ['Проверить кэш']);
+});

@@ -12,6 +12,7 @@ import * as fsSync from 'fs';
 import * as fs from 'fs/promises';
 import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
 import { readSqliteItemTable, readSqliteItemValue } from '../utils/sqliteItemTable.js';
+import { CopilotQuotaCoordinator, copilotQuotaAccountKey, type CopilotRemoteQuota } from './copilotUsageShared.js';
 
 /** Данные об использовании Copilot Premium запросов */
 export interface CopilotUsageData {
@@ -85,20 +86,7 @@ export interface CopilotAccountSwitchCompletionResult extends CopilotUsageSnapsh
 }
 
 /** Результат чтения usage-метрик или явной ошибки авторизации GitHub API. */
-type CopilotUsageMetricsFetchResult =
-	| {
-		kind: 'metrics';
-		used: number;
-		limit: number;
-		source: 'api' | 'inferred';
-		planType?: string;
-		snapshots?: Array<{ date: string; used: number; limit: number }>;
-		statusText: string;
-	}
-	| {
-		kind: 'auth-error';
-		statusText: string;
-	};
+type CopilotUsageMetricsFetchResult = NonNullable<CopilotRemoteQuota['metrics']>;
 
 /** Ключи для хранения состояния в globalState */
 const STATE_KEY_USAGE = 'promptManager.copilotUsage';
@@ -109,6 +97,8 @@ const AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 /** Минимальный интервал между запросами к API (30 секунд) */
 const MIN_API_CALL_INTERVAL_MS = 30 * 1000;
 const MIN_FULL_REFRESH_INTERVAL_MS = 30 * 1000;
+/** Bound the time a single HTTP call can hold the shared refresh. */
+const GITHUB_REQUEST_TIMEOUT_MS = 8_000;
 const LAST_CHAT_ACTIVITY_KEY = 'promptManager.copilotUsage.lastChatActivity';
 const CHAT_REQUESTS_BASE_TOTAL_KEY = 'promptManager.copilotUsage.chatRequestsBaseTotal';
 const CHAT_REQUESTS_BASE_USED_KEY = 'promptManager.copilotUsage.chatRequestsBaseUsed';
@@ -133,13 +123,18 @@ export class CopilotUsageService implements vscode.Disposable {
 	readonly onDidChangeUsage = this._onDidChangeUsage.event;
 	private readonly _onDidChangeAccountSwitchState = new vscode.EventEmitter<CopilotAccountSwitchState>();
 	readonly onDidChangeAccountSwitchState = this._onDidChangeAccountSwitchState.event;
-	private readonly disposables: vscode.Disposable[] = [];
+	private authenticationSubscription?: vscode.Disposable;
 
 	/** Таймер автоматического обновления */
 	private autoRefreshTimer: ReturnType<typeof setInterval> | undefined;
 
 	/** Кэш последних данных об использовании */
 	private cachedData: CopilotUsageData | null = null;
+	/** Share remote quota snapshots across sessions and compute local estimates per session. */
+	private readonly quotaCoordinator?: CopilotQuotaCoordinator;
+	private quotaAccountKey?: string;
+	/** The GitHub snapshot applied to this account and period, even after local usage increments. */
+	private appliedQuotaCheckedAt?: number;
 
 	/** Временная метка последнего API-вызова */
 	private lastApiCallTimestamp = 0;
@@ -655,27 +650,10 @@ export class CopilotUsageService implements vscode.Disposable {
 		return null;
 	}
 
-	constructor(private readonly context: vscode.ExtensionContext) {
+	constructor(private readonly context: vscode.ExtensionContext, sharedQuotaRoot?: string) {
+		if (sharedQuotaRoot) this.quotaCoordinator = new CopilotQuotaCoordinator(sharedQuotaRoot);
 		// Восстанавливаем сохранённое состояние при инициализации
 		this.restoreState();
-		this.disposables.push(
-			vscode.authentication.onDidChangeSessions((event) => {
-				if (!this.isRelevantAuthenticationProvider(event.provider.id)) {
-					return;
-				}
-
-				void this.handleAuthenticationSessionsChanged(event.provider.id);
-			}),
-		);
-		this.startCopilotPreferencePolling();
-		this.accountSwitchState = {
-			isSwitching: false,
-			phase: 'idle',
-			message: '',
-			accountLabel: null,
-			startedAt: null,
-			updatedAt: new Date().toISOString(),
-		};
 	}
 
 	private isRelevantAuthenticationProvider(providerId: string): boolean {
@@ -727,7 +705,15 @@ export class CopilotUsageService implements vscode.Disposable {
 		await this.refreshAuthenticationBinding(`auth-session-changed:${providerId}`);
 	}
 
+	/** После готовности Copilot один раз запускает наблюдение аккаунта и сверяет актуальную привязку. */
 	async checkAuthenticationBindingOnActivation(): Promise<void> {
+		if (this.authenticationSubscription) return;
+		this.authenticationSubscription = vscode.authentication.onDidChangeSessions(event => {
+			if (this.isRelevantAuthenticationProvider(event.provider.id)) {
+				void this.handleAuthenticationSessionsChanged(event.provider.id);
+			}
+		});
+		this.startCopilotPreferencePolling();
 		const ts = new Date().toISOString();
 		appendPromptManagerLog(`[${ts}] [activation] === START checkAuthenticationBindingOnActivation ===`);
 
@@ -863,7 +849,6 @@ export class CopilotUsageService implements vscode.Disposable {
 
 		const cachedData: CopilotUsageData = {
 			...this.cachedData,
-			lastUpdated: new Date().toISOString(),
 			lastSyncStatus: `${this.cachedData.lastSyncStatus || 'api-cache'}; fetch-in-flight`,
 		};
 		this.lastDebugLog = this.formatDebugLog(debugLines.concat(
@@ -896,8 +881,14 @@ export class CopilotUsageService implements vscode.Disposable {
 	 * Если данные были сохранены ранее, они используются как начальные значения.
 	 */
 	private restoreState(): void {
-		const saved = this.context.globalState.get<CopilotUsageData>(STATE_KEY_USAGE);
+		const saved = this.context.globalState.get<CopilotUsageData & {
+			quotaAccountKey?: string;
+			appliedQuotaCheckedAt?: number;
+		}>(STATE_KEY_USAGE);
 		if (saved) {
+			const { quotaAccountKey, appliedQuotaCheckedAt, ...usage } = saved;
+			this.quotaAccountKey = quotaAccountKey;
+			this.appliedQuotaCheckedAt = Number.isFinite(appliedQuotaCheckedAt) ? appliedQuotaCheckedAt : undefined;
 			const sanitizedSnapshots = this.fillSnapshotGaps(
 				this.sanitizeSnapshots(
 					Array.isArray(saved.snapshots) ? saved.snapshots : [],
@@ -906,7 +897,7 @@ export class CopilotUsageService implements vscode.Disposable {
 				),
 			);
 			this.cachedData = {
-				...saved,
+				...usage,
 				source: saved.source || 'local',
 				snapshots: sanitizedSnapshots,
 				lastSyncStatus: saved.lastSyncStatus || 'restored-from-cache',
@@ -921,7 +912,11 @@ export class CopilotUsageService implements vscode.Disposable {
 	 */
 	private async persistState(): Promise<void> {
 		if (this.cachedData) {
-			await this.context.globalState.update(STATE_KEY_USAGE, this.cachedData);
+			await this.context.globalState.update(STATE_KEY_USAGE, {
+				...this.cachedData,
+				...(this.quotaAccountKey ? { quotaAccountKey: this.quotaAccountKey } : {}),
+				...(this.appliedQuotaCheckedAt !== undefined ? { appliedQuotaCheckedAt: this.appliedQuotaCheckedAt } : {}),
+			});
 		}
 	}
 
@@ -1894,6 +1889,7 @@ export class CopilotUsageService implements vscode.Disposable {
 		try {
 			const response = await fetch(url, {
 				method: 'GET',
+				signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
 				headers: {
 					'Authorization': `Bearer ${token}`,
 					'Accept': 'application/vnd.github+json',
@@ -1974,6 +1970,7 @@ export class CopilotUsageService implements vscode.Disposable {
 		try {
 			const response = await fetch('https://api.github.com/copilot_internal/user', {
 				method: 'GET',
+				signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),
 				headers: {
 					'Authorization': `Bearer ${token}`,
 					'Accept': 'application/json',
@@ -2554,7 +2551,7 @@ export class CopilotUsageService implements vscode.Disposable {
 			return earlyCachedData;
 		}
 
-		const recentCachedData = this.resolveRecentCachedUsage(forceRefresh, earlyNow);
+		const recentCachedData = this.quotaCoordinator ? null : this.resolveRecentCachedUsage(forceRefresh, earlyNow);
 		if (recentCachedData) {
 			return recentCachedData;
 		}
@@ -2567,7 +2564,7 @@ export class CopilotUsageService implements vscode.Disposable {
 		}
 
 		const now = Date.now();
-		const fullRefreshThrottled = !forceRefresh
+		const fullRefreshThrottled = !this.quotaCoordinator && !forceRefresh
 			&& !!this.cachedData
 			&& (now - this.lastFullRefreshTimestamp) < MIN_FULL_REFRESH_INTERVAL_MS;
 		if (fullRefreshThrottled && this.cachedData) {
@@ -2601,7 +2598,7 @@ export class CopilotUsageService implements vscode.Disposable {
 			}
 		}
 
-		if (!forceRefresh && !shouldCallApi && this.cachedData?.authenticated && this.cachedData.source === 'api') {
+		if (!this.quotaCoordinator && !forceRefresh && !shouldCallApi && this.cachedData?.authenticated && this.cachedData.source === 'api') {
 			const cachedApiData: CopilotUsageData = {
 				...this.cachedData,
 				lastUpdated: new Date().toISOString(),
@@ -2636,27 +2633,48 @@ export class CopilotUsageService implements vscode.Disposable {
 			}
 			this.lastKnownAuthenticated = true;
 
-			// Получаем данные о подписке
-			const subscription = shouldCallApi
-				? await this.fetchCopilotSubscription(session.accessToken)
-				: null;
-			let planType = subscription?.planType || 'unknown';
+			// Clear the previous local snapshot when the GitHub account changes.
+			const period = this.getCurrentPeriod();
+			const accountKey = this.quotaCoordinator ? copilotQuotaAccountKey(session.account.id) : undefined;
+			if (this.quotaAccountKey !== accountKey) {
+				this.quotaAccountKey = accountKey;
+				this.appliedQuotaCheckedAt = undefined;
+				this.cachedData = null;
+			}
+			/** Fetch the subscription and quota metrics while holding one provider lock. */
+			const pollQuota = async (): Promise<CopilotRemoteQuota> => ({
+				planType: (await this.fetchCopilotSubscription(session.accessToken))?.planType,
+				metrics: await this.fetchCopilotUsageMetrics(session.accessToken),
+			});
+			const remote = this.quotaCoordinator
+				? await this.quotaCoordinator.get(session.account.id, period.start, forceRefresh, pollQuota).catch(() => ({
+					data: null, busy: true, checkedAt: undefined, polled: false,
+				}))
+				: { data: shouldCallApi ? await pollQuota() : null, busy: false, checkedAt: undefined, polled: shouldCallApi };
+			if (remote.busy && !remote.data) {
+				// Preserve the confirmed snapshot while another session refreshes it.
+				return this.cachedData ?? this.buildUnauthenticatedUsageData('copilot-quota-refresh-in-progress');
+			}
+			let planType = remote.data?.planType || 'unknown';
 			debugLines.push(`[subscription] planType=${planType}`);
 
-			// Получаем данные об использовании из API
-			const usageMetricsResult = shouldCallApi
-				? await this.fetchCopilotUsageMetrics(session.accessToken)
-				: null;
+			const usageMetricsResult = remote.data?.metrics ?? null;
 			const usageMetrics = usageMetricsResult?.kind === 'metrics'
 				? usageMetricsResult
 				: null;
+			const sharedTimestamp = remote.checkedAt === undefined ? undefined : new Date(remote.checkedAt).toISOString();
+			if (usageMetrics && remote.checkedAt !== undefined && remote.checkedAt === this.appliedQuotaCheckedAt
+				&& this.cachedData?.authenticated && this.cachedData.periodStart === period.start) {
+				// The same GitHub snapshot must not undo locally recorded usage.
+				return this.cachedData;
+			}
 			const usageAuthError = usageMetricsResult?.kind === 'auth-error'
 				? usageMetricsResult.statusText
 				: null;
 			debugLines.push(`[api] usageMetrics=${usageMetrics
 				? `used=${usageMetrics.used},limit=${usageMetrics.limit},source=${usageMetrics.source}`
 				: usageAuthError || 'none'}`);
-			if (shouldCallApi) {
+			if (remote.polled) {
 				this.lastApiCallTimestamp = now;
 			}
 			if (usageAuthError) {
@@ -2676,7 +2694,6 @@ export class CopilotUsageService implements vscode.Disposable {
 			debugLines.push(`[local-db] usage=${localUsageMetrics ? `used=${localUsageMetrics.used},limit=${localUsageMetrics.limit},status=${localUsageMetrics.status}` : 'none'}`);
 			const chatSignal = await this.readWorkspaceChatActivitySignal();
 			debugLines.push(`[chat-signal] changedSessions=${chatSignal.changedSessions} maxLastMessageDate=${chatSignal.maxLastMessageDate}`);
-			const period = this.getCurrentPeriod();
 			const chatRequestsTotal = await this.countChatRequestsCurrentPeriod(period.start);
 			debugLines.push(`[chat-requests] total=${chatRequestsTotal} periodStart=${period.start}`);
 
@@ -2765,7 +2782,7 @@ export class CopilotUsageService implements vscode.Disposable {
 				limit,
 				periodStart: period.start,
 				periodEnd: period.end,
-				lastUpdated: new Date().toISOString(),
+				lastUpdated: sharedTimestamp ?? new Date().toISOString(),
 				avgPerDay: this.calculateAvgPerDay(used, period.start),
 				authenticated: true,
 				planType,
@@ -2794,6 +2811,7 @@ export class CopilotUsageService implements vscode.Disposable {
 			this.lastDebugLog = this.formatDebugLog(debugLines);
 			this.lastFullRefreshTimestamp = now;
 
+			this.appliedQuotaCheckedAt = usageMetrics ? remote.checkedAt : undefined;
 			this.cachedData = data;
 			await this.persistState();
 			this._onDidChangeUsage.fire(data);
@@ -2918,9 +2936,7 @@ export class CopilotUsageService implements vscode.Disposable {
 	dispose(): void {
 		this.stopAutoRefresh();
 		this.stopCopilotPreferencePolling();
-		for (const disposable of this.disposables) {
-			disposable.dispose();
-		}
+		this.authenticationSubscription?.dispose();
 		this._onDidChangeUsage.dispose();
 		this._onDidChangeAccountSwitchState.dispose();
 	}

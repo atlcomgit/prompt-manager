@@ -91,6 +91,8 @@ interface QuickNotesOperationPlan {
 	operation: QuickNoteOperation;
 	/** Подготовка копий до записи JSON; ошибка отменяет запись. */
 	before?: () => Promise<void>;
+	/** Remove files created by this attempt if the JSON write did not complete. */
+	rollback?: () => Promise<void>;
 	/** Очистка после записи по итоговым заметкам; ошибка только записывается в лог. */
 	after?: (notes: readonly QuickNoteView[]) => Promise<void>;
 }
@@ -540,12 +542,20 @@ export class QuickNotesService {
 		const writes = orderSnapshotsForWrite(operation, snapshots)
 			.map(snapshot => ({ snapshot, text: serializeQuickNotesFile(buildScopeContent(snapshot, applied.notes)) }))
 			.filter(({ snapshot, text }) => text !== serializeQuickNotesFile(snapshot.content));
-		await plan.before?.();
-		if (!(await this.writeAllIfUnchanged(writes.map(({ snapshot, text }) => ({
-			filePath: snapshot.filePath, text, expectedRaw: snapshot.raw,
-		}))))) {
-			return 'retry';
+		let written = false;
+		try {
+			await plan.before?.();
+			written = await this.writeAllIfUnchanged(writes.map(({ snapshot, text }) => ({
+				filePath: snapshot.filePath, text, expectedRaw: snapshot.raw,
+			})));
+		} finally {
+			if (!written) {
+				await plan.rollback?.().catch(error => {
+					this.log(`[quick-notes] Attachment rollback failed for ${operation.kind}: ${describeError(error)}`);
+				});
+			}
 		}
+		if (!written) return 'retry';
 		try {
 			await plan.after?.(applied.notes);
 		} catch (error) {
@@ -572,6 +582,48 @@ export class QuickNotesService {
 						}
 					},
 				};
+			case 'duplicate': {
+				const source = views.find(note => note.id === operation.id && note.scope === operation.scope);
+				if (!source?.files.length || views.some(note => note.id === operation.newId)) return { operation };
+				const sourceDir = this.getNoteDir(operation.scope, operation.id);
+				const targetDir = this.getNoteDir(operation.scope, operation.newId);
+				const notesFile = this.getNotesFilePath(operation.scope);
+				let staging: string | null = null;
+				let published = false;
+				return {
+					operation,
+					before: async () => {
+						if (!sourceDir || !targetDir) throw new Error('Недоступна папка вложений заметки.');
+						await this.assertSafeStoragePath(sourceDir);
+						await this.assertSafeStoragePath(targetDir);
+						// An interrupted copy is eligible for the existing draft-directory cleanup.
+						const pending = path.join(path.dirname(targetDir), QUICK_NOTES_PENDING_DIR_NAME);
+						await this.assertSafeStoragePath(pending);
+						await fs.promises.mkdir(pending, { recursive: true });
+						staging = await fs.promises.mkdtemp(path.join(pending, 'duplicate-'));
+						for (const file of source.files) {
+							if (!isSafeQuickNoteStoredName(file.storedName)) throw new Error('Небезопасное имя вложения.');
+							await this.copyFirstExisting({
+								sources: [path.join(sourceDir, file.storedName)],
+								target: path.join(staging, file.storedName),
+								required: true, name: file.name,
+							});
+						}
+						await fs.promises.rename(staging, targetDir);
+						staging = null;
+						published = true;
+					},
+					rollback: async () => {
+						await this.removeDir(staging);
+						if (!published || !targetDir || !notesFile) return;
+						// Keep the files if the note reached disk before an error was reported.
+						const current = await this.readSnapshot(operation.scope, notesFile);
+						if (!current.error && !current.content.notes.some(note => note.id === operation.newId)) {
+							await this.removeDir(targetDir);
+						}
+					},
+				};
+			}
 			case 'changeScope':
 				return this.planChangeScope(operation, views);
 			case 'replace':

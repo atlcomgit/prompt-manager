@@ -7,12 +7,18 @@ import { PromptVoiceTranscriptionService, type PromptVoiceTranscriptionState } f
 
 type PostMessage = (message: ExtensionToWebviewMessage) => void;
 
+/** Capture state requested by the webview before the recorder settles. */
+type CaptureState = 'recording' | 'paused';
+
 type PromptVoiceRecordingEntry = {
 	sessionId: string;
 	postMessage: PostMessage;
 	recorder: PromptVoiceRecorderRuntime;
 	isStopping: boolean;
 	manualConfirmRequested: boolean;
+	captureState: CaptureState;
+	captureRevision: number;
+	captureAction: Promise<void>;
 };
 
 type PromptVoiceQueueJob = {
@@ -212,7 +218,7 @@ export class PromptVoiceService {
 			output: this.output,
 			onLevel: (level, elapsedMs, levels) => {
 				const recording = this.activeRecordings.get(panelKey);
-				if (!recording || recording.sessionId !== sessionId || recording.isStopping) {
+				if (!recording || recording.sessionId !== sessionId || recording.isStopping || recording.captureState !== 'recording') {
 					return;
 				}
 
@@ -232,21 +238,24 @@ export class PromptVoiceService {
 			onError: (error) => {
 				this.trace('host.recorder.error', panelKey, sessionId, { error: normalizeErrorText(error) });
 				const recording = this.getRecording(panelKey, sessionId);
-				if (!recording) {
+				if (!recording || recording.isStopping || recording.captureState !== 'recording') {
 					return;
 				}
-				recording.isStopping = false;
 				this.postError(recording.postMessage, sessionId, error);
 			},
 		});
 
-		this.activeRecordings.set(panelKey, {
+		const recording: PromptVoiceRecordingEntry = {
 			sessionId,
 			postMessage,
 			recorder,
 			isStopping: false,
 			manualConfirmRequested: false,
-		});
+			captureState: 'recording',
+			captureRevision: 0,
+			captureAction: Promise.resolve(),
+		};
+		this.activeRecordings.set(panelKey, recording);
 		this.trace('host.start.active-set', panelKey, sessionId);
 
 		try {
@@ -254,8 +263,7 @@ export class PromptVoiceService {
 				this.logError(error);
 			});
 			await recorder.start();
-			const recording = this.activeRecordings.get(panelKey);
-			if (!recording || recording.sessionId !== sessionId) {
+			if (this.getRecording(panelKey, sessionId) !== recording || recording.isStopping || recording.captureRevision !== 0) {
 				this.trace('host.start.ready-ignored', panelKey, sessionId);
 				return;
 			}
@@ -265,64 +273,55 @@ export class PromptVoiceService {
 				type: 'promptVoiceState',
 				sessionId,
 				status: 'recording',
-				elapsedMs: 0,
+				elapsedMs: recorder.getElapsedMs(),
 				level: 0.08,
 				levels: createIdleWaveLevels(),
 			});
 		} catch (error) {
 			this.trace('host.start.error', panelKey, sessionId, { error: normalizeErrorText(error) });
+			if (this.getRecording(panelKey, sessionId) !== recording || recording.isStopping || recording.captureRevision !== 0) return;
+			this.activeRecordings.delete(panelKey);
 			await recorder.dispose().catch(() => null);
-			const recording = this.activeRecordings.get(panelKey);
-			if (recording?.sessionId === sessionId) {
-				this.activeRecordings.delete(panelKey);
-			}
 			this.postError(postMessage, sessionId, error);
 		}
 	}
 
 	async pause(panelKey: string, sessionId: string): Promise<void> {
-		const recording = this.getRecording(panelKey, sessionId);
-		if (!recording || recording.isStopping) {
-			this.trace('host.pause.skip', panelKey, sessionId, { reason: recording ? 'stopping' : 'missing' });
-			return;
-		}
-
-		try {
-			this.trace('host.pause.request', panelKey, sessionId);
-			await recording.recorder.pause();
-			recording.postMessage({
-				type: 'promptVoiceState',
-				sessionId,
-				status: 'paused',
-				elapsedMs: recording.recorder.getElapsedMs(),
-				levels: createSilentWaveLevels(),
-			});
-		} catch (error) {
-			this.postError(recording.postMessage, sessionId, error);
-		}
+		await this.setCaptureState(panelKey, sessionId, 'paused');
 	}
 
 	async resume(panelKey: string, sessionId: string): Promise<void> {
-		const recording = this.getRecording(panelKey, sessionId);
-		if (!recording || recording.isStopping) {
-			this.trace('host.resume.skip', panelKey, sessionId, { reason: recording ? 'stopping' : 'missing' });
-			return;
-		}
+		await this.setCaptureState(panelKey, sessionId, 'recording');
+	}
 
-		try {
-			this.trace('host.resume.request', panelKey, sessionId);
-			await recording.recorder.resume();
-			recording.postMessage({
-				type: 'promptVoiceState',
-				sessionId,
-				status: 'recording',
-				elapsedMs: recording.recorder.getElapsedMs(),
-				level: 0.08,
-				levels: createIdleWaveLevels(),
-			});
-		} catch (error) {
-			this.postError(recording.postMessage, sessionId, error);
-		}
+	/** Serialize pause and resume, and publish only the latest state of the active recording. */
+	private async setCaptureState(panelKey: string, sessionId: string, state: CaptureState): Promise<void> {
+		const recording = this.getRecording(panelKey, sessionId);
+		if (!recording || recording.isStopping || recording.captureState === state) return;
+		recording.captureState = state;
+		const revision = ++recording.captureRevision;
+		const isCurrent = () => this.getRecording(panelKey, sessionId) === recording
+			&& !recording.isStopping && recording.captureRevision === revision;
+		const paused = state === 'paused';
+		const action = paused ? 'pause' : 'resume';
+		const transition = recording.captureAction.then(async () => {
+			if (!isCurrent()) return;
+			try {
+				this.trace(`host.${action}.request`, panelKey, sessionId);
+				await recording.recorder[action]();
+				if (!isCurrent()) return;
+				recording.postMessage({
+					type: 'promptVoiceState', sessionId, status: state,
+					elapsedMs: recording.recorder.getElapsedMs(),
+					level: paused ? undefined : 0.08,
+					levels: paused ? createSilentWaveLevels() : createIdleWaveLevels(),
+				});
+			} catch (error) {
+				if (isCurrent()) this.postError(recording.postMessage, sessionId, error);
+			}
+		});
+		recording.captureAction = transition;
+		await transition;
 	}
 
 	/** Early OK intent suppresses limit auto-restart before recorder.stop finishes. */
@@ -369,6 +368,8 @@ export class PromptVoiceService {
 				manualConfirmRequested: recording.manualConfirmRequested,
 			});
 			const result = await recording.recorder.stop();
+			// Смена или отмена записи во время остановки не должна удалять новую сессию.
+			if (this.getRecording(panelKey, sessionId) !== recording) return;
 			const shouldAutoRestart = Boolean(options.autoRestart) && !recording.manualConfirmRequested;
 			this.trace('host.confirm.stop.done', panelKey, sessionId, {
 				optionAutoRestart: Boolean(options.autoRestart),

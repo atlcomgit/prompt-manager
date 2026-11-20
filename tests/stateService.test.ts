@@ -409,7 +409,7 @@ test('StateService serializes global dashboard order writes independently of the
 		]),
 	]);
 	assert.deepEqual(service.getPromptDashboardSectionOrder(), [
-		['projectBranches', 'activity', 'parallelBranches', 'dockerContainers'],
+		['projectBranches', 'activity', 'parallelBranches', 'dockerContainers', 'quickCommands'],
 		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis', 'todos', 'quickNotes'],
 	]);
 	assert.deepEqual(service.getPromptDashboardSectionOrder('single-column'), narrowBefore);
@@ -901,6 +901,22 @@ test('StateService applies stale preference patches to the latest global setting
 	assert.equal(first.getPromptDashboardPreferences()?.docker.sortBy, 'cpu');
 	assert.equal(first.getPromptDashboardPreferences()?.todos.search, 'TODO');
 	assert.deepEqual(first.getPromptDashboardPreferences()?.expanded, { first: false, second: true });
+});
+
+/** Editing commands with an older snapshot preserves the agent chosen elsewhere. */
+test('StateService persists the quick command agent separately from the command list', async () => {
+	const base = normalizePromptDashboardPreferences(undefined);
+	const configuration = createConfigurationMock({ 'dashboardPreferences.quickCommands.items': base.quickCommands.items });
+	const { StateService } = await importStateService(configuration);
+	const first = new StateService(createStateContext());
+	const second = new StateService(createStateContext());
+	await first.savePromptDashboardPreferences({ ...base, quickCommands: { ...base.quickCommands, target: 'codex' } }, base);
+	await second.savePromptDashboardPreferences({ ...base, quickCommands: { items: ['/review'] } }, base);
+	assert.deepEqual(second.getPromptDashboardPreferences()?.quickCommands, { items: ['/review'], target: 'codex' });
+	assert.deepEqual(configuration.writes.filter(write => write.key.includes('.quickCommands.')), [
+		{ key: 'dashboardPreferences.quickCommands.target', value: 'codex', target: 1 },
+		{ key: 'dashboardPreferences.quickCommands.items', value: ['/review'], target: 1 },
+	]);
 });
 
 /** Обе записи начинают update до завершения соседней; отдельные листья не затирают другой параметр Docker. */

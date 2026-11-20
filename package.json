@@ -51,10 +51,7 @@
     "color": "#09111f",
     "theme": "dark"
   },
-  "activationEvents": [
-    "onStartupFinished",
-    "onWebviewPanel:promptManager.editor"
-  ],
+  "activationEvents": ["onStartupFinished", "onWebviewPanel:promptManager.editor"],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -530,6 +527,12 @@
           "scope": "application",
           "markdownDescription": "Сворачивание виджета aiAnalysis для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
         },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.quickCommands": {
+          "type": ["boolean", "null"],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Глобальное сворачивание виджета «Быстрые команды» (одна колонка)."
+        },
         "promptManager.dashboardLayouts.singleColumn.collapsed.quickNotes": {
           "type": [
             "boolean",
@@ -634,6 +637,12 @@
           "default": null,
           "scope": "application",
           "markdownDescription": "Сворачивание виджета aiAnalysis для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.quickCommands": {
+          "type": ["boolean", "null"],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Глобальное сворачивание виджета «Быстрые команды» (две колонки)."
         },
         "promptManager.dashboardLayouts.twoColumns.collapsed.quickNotes": {
           "type": [
@@ -821,6 +830,21 @@
           "default": "used",
           "scope": "application",
           "markdownDescription": "Глобальный режим отображения лимитов Codex, Claude Code и GitHub Copilot в строке состояния и на странице «Аккаунты». Общий для проектов и окон VS Code."
+        },
+        "promptManager.dashboardPreferences.quickCommands.items": {
+          "type": "array",
+          "items": {"type": "string", "maxLength": 3000},
+          "default": ["/alek-review", "есть еще уточнения или вопросы?"],
+          "maxItems": 120,
+          "scope": "application",
+          "markdownDescription": "Быстрые фразы для вставки в чаты агентов из виджета «Быстрые команды». Глобальны для всех рабочих областей."
+        },
+        "promptManager.dashboardPreferences.quickCommands.target": {
+          "type": ["string", "null"],
+          "enum": [null, "copilot", "codex", "claude", "opencode-cli"],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Агент для вставки быстрых команд во всех промптах. Если не выбран, используется чат текущего промпта."
         },
         "promptManager.dashboardPreferences.quickNotes.descriptionHeight": {
           "type": [

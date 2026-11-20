@@ -21,7 +21,8 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
     private readonly disposables: vscode.Disposable[] = [];
     private refreshTimer: ReturnType<typeof setInterval> | null = null;
     private refreshing = false;
-    private refreshQueued = false;
+    private queuedRefresh: boolean | undefined;
+    private waitingForProviders?: Promise<boolean>;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
@@ -32,13 +33,29 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
         private readonly claudeUsage: ClaudeUsageService,
         private readonly onCopilotAccountChanged?: (accountLabel: string) => Promise<void> | void,
         private readonly limitDisplay?: AccountsLimitDisplayService,
+        whenProvidersReady?: () => Promise<boolean>,
+        private readonly isCopilotStarting?: () => boolean,
     ) {
+        // Обе команды сразу открывают интерфейс, в том числе до появления статус-бара.
+        this.disposables.push(
+            vscode.commands.registerCommand('promptManager.accounts', () => this.show()),
+            vscode.commands.registerCommand('promptManager.copilotUsageDetails', () => this.show()),
+        );
+        this.waitingForProviders = whenProvidersReady?.();
+        void this.waitingForProviders?.then(ready => {
+            if (!ready) return;
+            this.waitingForProviders = undefined;
+            void this.pushData(false);
+        });
         this.disposables.push(this.codexAccounts.onDidChange(() => {
             this.codexLimits.invalidate();
             void this.pushData(false);
         }));
         this.disposables.push(this.usageService.onDidChangeAccountSwitchState(() => void this.pushData(false)));
-        this.disposables.push(this.usageService.onDidChangeUsage(() => void this.pushData(false)));
+        this.disposables.push(this.usageService.onDidChangeUsage(() => {
+            // A panel refresh already delivers the usage result that it just read.
+            if (!this.refreshing) void this.pushData(false);
+        }));
         this.disposables.push(this.claudeAccounts.onDidChange(() => {
             this.claudeUsage.invalidate();
             void this.pushData(false);
@@ -76,6 +93,14 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
         this.disposables.push(panel.webview.onDidReceiveMessage(async (message: any) => {
             if (this.panel !== panel || !message || typeof message.type !== 'string') return;
             try {
+                // Единственный стартовый снимок придёт после активации. Ручное действие дожидается провайдеров.
+                if (this.waitingForProviders) {
+                    if (message.type === 'accounts.ready') return;
+                    if (!await this.waitingForProviders || this.panel !== panel) return;
+                }
+                if ((message.type === 'copilot.switch' || message.type === 'copilot.auth') && this.isCopilotStarting?.()) {
+                    throw new Error('GitHub Copilot ещё запускается. Повторите действие после активации.');
+                }
                 switch (message.type) {
                     case 'accounts.ready':
                         await this.pushData(false);
@@ -252,13 +277,9 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
         void this.pushData(false);
     }
 
-    /** Кредиты Copilot из кэша CopilotUsageService (не старше 5 минут) без отдельного запроса квоты; ошибка — прежний кэш. */
+    /** Read the shared Copilot snapshot before delivering the panel data. */
     private async readCopilotCredits(force: boolean): Promise<CopilotUsageData | null> {
         const cached = this.usageService.getCachedData();
-        const ageMs = cached ? Date.now() - Date.parse(cached.lastUpdated) : Infinity;
-        if (!force && cached && Number.isFinite(ageMs) && ageMs >= 0 && ageMs < 5 * 60_000) {
-            return cached;
-        }
         try {
             return await this.usageService.fetchUsage(force);
         } catch (error) {
@@ -274,8 +295,11 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
      */
     private async pushData(force: boolean): Promise<void> {
         const panel = this.panel;
-        if (!panel) return;
-        if (this.refreshing) { this.refreshQueued = true; return; }
+        if (!panel || this.waitingForProviders) return;
+        if (this.refreshing) {
+            this.queuedRefresh = force || this.queuedRefresh === true;
+            return;
+        }
         this.refreshing = true;
         try {
             const installed = resolveAccountProviderAvailability(id => vscode.extensions.getExtension(id));
@@ -283,12 +307,15 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
             const auth = installed.codex ? await this.codexAccounts.getActiveAuth() : null;
             const codex = installed.codex ? this.codexAccounts.getView() : null;
             const claude = installed.claude ? this.claudeAccounts.getView() : null;
+            // Waiting for a still-starting Copilot must not hold the other account sections.
+            const copilotStarting = installed.copilot && this.isCopilotStarting?.() === true;
+            const readCopilot = installed.copilot && !copilotStarting;
             const [copilot, copilotUsage] = await Promise.all([
-                installed.copilot ? this.usageService.getAccountBindingSummary().catch(() => null) : Promise.resolve(null),
-                installed.copilot && !this.usageService.getAccountSwitchState().isSwitching
+                readCopilot ? this.usageService.getAccountBindingSummary().catch(() => null) : Promise.resolve(null),
+                readCopilot && !this.usageService.getAccountSwitchState().isSwitching
                     ? this.readCopilotCredits(force) : Promise.resolve(null),
             ]);
-            if (claude && !force && vscode.window.state?.focused !== false) {
+            if (claude && !force) {
                 const active = this.claudeAccounts.getProfileDirectories().find(p => p.id === claude.activeId);
                 if (active) {
                     // Открытие страницы не ждёт процесс CLI: статус-бар и страница читают общий кэш.
@@ -300,8 +327,8 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
                 }
             }
             const [limits, claudeLimits] = await Promise.all([
-                // Фоновое окно не запускает Codex: берёт общий кэш, опрашивает окно в фокусе или «Обновить».
-                codex ? this.codexLimits.get(codex.activeId, auth, force, force || vscode.window.state?.focused !== false)
+                // Any session can refresh usage under the shared provider lock.
+                codex ? this.codexLimits.get(codex.activeId, auth, force)
                     : Promise.resolve(null),
                 claude ? Promise.all(this.claudeAccounts.getProfileDirectories().map(async profile => ({
                     id: profile.id,
@@ -323,7 +350,7 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
                         active: copilot?.copilotPreferredGitHubLabel || null,
                         session: copilot?.activeGithubSessionAccountLabel || null,
                         accounts: copilot?.availableGitHubAccounts || [],
-                        issue: copilot?.githubSessionIssue || null,
+                        issue: copilotStarting ? 'GitHub Copilot ещё запускается.' : copilot?.githubSessionIssue || null,
                         switching: this.usageService.getAccountSwitchState().isSwitching,
                         credits: buildCopilotCreditsSnapshot(copilotUsage),
                     } : null,
@@ -339,9 +366,10 @@ export class CopilotUsagePanelManager implements vscode.Disposable {
             }
         } finally {
             this.refreshing = false;
-            if (this.refreshQueued) {
-                this.refreshQueued = false;
-                void this.pushData(false);
+            if (this.queuedRefresh !== undefined) {
+                const queuedForce = this.queuedRefresh;
+                this.queuedRefresh = undefined;
+                void this.pushData(queuedForce);
             }
         }
     }

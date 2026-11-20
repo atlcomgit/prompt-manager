@@ -67,6 +67,10 @@ export interface QuickNote {
 	/** Имя цвета палитры, `#rrggbb` или пустая строка без цвета. */
 	color: string;
 	done: boolean;
+	/** Закреплённые заметки отображаются выше остальных открытых. */
+	pinned?: boolean;
+	/** Отклонённые предложения чек-листа, которые не должны повторяться при новой генерации. */
+	rejectedSuggestions?: string[];
 	/** Общая позиция в списке обеих областей; меньшее значение выше. */
 	order: number;
 	items: QuickNoteItem[];
@@ -108,7 +112,7 @@ export interface QuickNotesState {
 }
 
 /** Изменяемые поля заметки для быстрых действий виджета и доски. */
-export type QuickNotePatch = Partial<Pick<QuickNote, 'title' | 'description' | 'color' | 'done'>>;
+export type QuickNotePatch = Partial<Pick<QuickNote, 'title' | 'description' | 'color' | 'done' | 'pinned'>>;
 
 /** Операции изменения заметок; одна чистая функция применяет их в webview и в расширении. */
 export type QuickNoteOperation =
@@ -119,6 +123,10 @@ export type QuickNoteOperation =
 	| { kind: 'update'; scope: QuickNoteScope; id: string; patch: QuickNotePatch; at: string }
 	/** Явное значение отметки пункта: повтор операции не меняет результат. */
 	| { kind: 'setItemDone'; scope: QuickNoteScope; id: string; itemId: string; done: boolean; at: string }
+	/** Rejected checklist proposals are stored without invalidating an open note draft. */
+	| { kind: 'rejectSuggestion'; scope: QuickNoteScope; id: string; text: string }
+	/** Duplicate a note and its stored attachment copies under a new unique id. */
+	| { kind: 'duplicate'; scope: QuickNoteScope; id: string; newId: string; at: string }
 	| { kind: 'delete'; scope: QuickNoteScope; id: string }
 	/** Удаляет выполненные заметки обеих областей. */
 	| { kind: 'clearDone' }

@@ -6,7 +6,7 @@ import Module from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-    limitPercent, normalizeLimitDisplayMode, resolveAccountsBackendMode, limitDisplayShortLabel,
+    limitPercent, normalizeLimitDisplayMode, resolveAccountsBackendMode,
     limitDisplayVerb, copilotCreditsForMode,
 } from '../src/utils/limitDisplay.js';
 import { LimitDisplayToggle } from '../src/webview/copilotUsage/LimitDisplayToggle.js';
@@ -32,8 +32,6 @@ test('new Webview does not claim Used mode while old Extension Host still report
     assert.deepEqual(resolveAccountsBackendMode(null), { mode: 'remaining', supported: false });
     assert.deepEqual(resolveAccountsBackendMode('used'), { mode: 'used', supported: true });
     assert.deepEqual(resolveAccountsBackendMode('remaining'), { mode: 'remaining', supported: true });
-    assert.equal(limitDisplayShortLabel('used'), 'исп.');
-    assert.equal(limitDisplayShortLabel('remaining'), 'ост.');
     const fallback = resolveAccountsBackendMode(undefined);
     const html = renderToStaticMarkup(
         <LimitDisplayToggle mode={fallback.mode} disabled={!fallback.supported} onChange={() => undefined}/>);

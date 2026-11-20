@@ -64,13 +64,14 @@ export class ClaudeSharedUsageCoordinator {
         private readonly cacheDir: string,
         private readonly runner: Runner,
         private readonly now: () => number = Date.now,
+        private readonly legacyCacheDir?: string,
     ) {
         this.lockDir = path.join(cacheDir, 'usage.lock');
     }
 
     /** Возвращает путь к файлу кэша для ключа каталога учётных данных. */
-    private cacheFile(key: string): string {
-        return path.join(this.cacheDir, 'quota-' + key + '.json');
+    private cacheFile(key: string, directory = this.cacheDir): string {
+        return path.join(directory, 'quota-' + key + '.json');
     }
 
     /** Создаёт каталог кэша с правами 0700 и отказывает, если по этому пути находится символическая ссылка. */
@@ -82,8 +83,14 @@ export class ClaudeSharedUsageCoordinator {
 
     /** Читает запись кэша; отсутствующий, повреждённый файл или файл другой версии даёт `null`. */
     private async load(key: string): Promise<SharedRecord | null> {
+        return (await this.loadFile(key, this.cacheDir))
+            ?? (this.legacyCacheDir ? await this.loadFile(key, this.legacyCacheDir) : null);
+    }
+
+    /** Validate snapshot files from the shared and previous cache directories. */
+    private async loadFile(key: string, directory: string): Promise<SharedRecord | null> {
         try {
-            const json = JSON.parse(await fs.readFile(this.cacheFile(key), 'utf8'));
+            const json = JSON.parse(await fs.readFile(this.cacheFile(key, directory), 'utf8'));
             if (json.version !== VERSION || json.key !== key ||
                 !Number.isFinite(json.checkedAt) || !Number.isFinite(json.lastAttemptAt) ||
                 !Number.isFinite(json.nextAllowedAt)) return null;
@@ -205,6 +212,7 @@ export class ClaudeSharedUsageCoordinator {
             return { attempted: false, reason: 'cooldown', data: this.normalized(record?.data ?? null) };
         }
         if (!(await this.acquire())) {
+            record = await this.load(key);
             return { attempted: false, reason: 'locked', data: this.normalized(record?.data ?? null) };
         }
         try {

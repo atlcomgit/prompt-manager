@@ -33,6 +33,7 @@ import { CodexRateLimitService, cleanupStaleCodexTempHomes } from './services/co
 import { CodexAccountsStatusBarProvider } from './providers/codexAccountsStatusBarProvider.js';
 import { ClaudeAccountService, findClaudeExecutable } from './services/claudeAccountService.js';
 import { ClaudeUsageService } from './services/claudeUsageService.js';
+import { accountQuotaCacheRoot } from './services/accountQuotaCache.js';
 import { AccountsLimitDisplayService } from './services/accountsLimitDisplayService.js';
 import { ClaudeStatusLineService } from './services/claudeStatusLineService.js';
 import { ClaudeAccountsStatusBarProvider } from './providers/claudeAccountsStatusBarProvider.js';
@@ -51,6 +52,7 @@ import type { ExternalPromptConfigChange } from './services/storageService.js';
 import { QuickNotesService } from './services/quickNotesService.js';
 import { QuickNotesHostController } from './providers/quickNotesHostController.js';
 import { QuickNotesBoardPanelManager } from './providers/quickNotesBoardPanelManager.js';
+import { StartupExtensions } from './services/startupExtensions.js';
 import * as fs from 'fs';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -63,25 +65,49 @@ export function activate(context: vscode.ExtensionContext) {
 		disposePromptManagerOutputChannel();
 		return;
 	}
-	void clearPromptAiLogIfDateChanged({ workspaceRoot });
+	const startup = new StartupExtensions(vscode.extensions, appendPromptManagerLog, context.extension.id);
+	context.subscriptions.push(startup);
+	// Local storage and chat context can initialize independently of the account providers.
+	const copilotProviderIds = ['github.copilot-chat', 'github.copilot', 'vscode.github-authentication'];
+	const whenCopilotReady = startup.forProviders(...copilotProviderIds);
+	const isCopilotStarting = () => startup.startingProviders(copilotProviderIds).length > 0;
+	const whenClaudeReady = startup.forProviders('anthropic.claude-code');
+	const whenCodexReady = startup.forProviders('openai.chatgpt');
+	const whenGitReady = startup.forProviders('vscode.git');
+	const whenAccountsReady = async () => (await Promise.all([
+		whenCopilotReady(), whenClaudeReady(), whenCodexReady(),
+	])).every(Boolean);
+	let chatMemoryReady: Promise<ChatMemoryInstructionService | undefined> | undefined;
+	let codeMapReady: Promise<CodeMapChatInstructionService | undefined> | undefined;
+	// Ранний старт чата ожидает восстановление инструкций только для включённых подсистем.
+	const getChatMemory = async () => {
+		const service = await chatMemoryReady;
+		return startup.isDisposed ? undefined : service;
+	};
+	const getCodeMap = async () => {
+		const service = await codeMapReady;
+		return startup.isDisposed ? undefined : service;
+	};
+	void startup.run(() => clearPromptAiLogIfDateChanged({ workspaceRoot }));
 
 	const extensionSettingsQuery = '@ext:alek-fiend.copilot-prompt-manager';
 
 	// Initialize services
 	const storageService = new StorageService(workspaceRoot);
 	const customGroupsService = new CustomGroupsService(workspaceRoot);
-	const aiService = new AiService(context);
+	const aiService = new AiService(context, whenCopilotReady);
 	const workspaceService = new WorkspaceService();
 	const gitService = new GitService();
 	const stateService = new StateService(context);
 	const promptVoiceService = new PromptVoiceService(context.globalStorageUri.fsPath);
 	const dockerContainersService = new DockerContainersService();
 	const todoScannerService = new TodoScannerService();
-	const promptDashboardService = new PromptDashboardService(storageService, workspaceService, gitService, aiService, dockerContainersService, todoScannerService);
+	const promptDashboardService = new PromptDashboardService(storageService, workspaceService, gitService, aiService,
+		dockerContainersService, todoScannerService, startup.whenReady);
 	const extensionPackage = context.extension.packageJSON as { description?: string; version?: string };
 	const extensionVersion = String(extensionPackage.version || '0.0.0');
 
-	void workspaceService.syncGlobalAgentInstructionsFile(stateService.getGlobalAgentContext()).catch(() => {
+	void startup.run(() => workspaceService.syncGlobalAgentInstructionsFile(stateService.getGlobalAgentContext())).catch(() => {
 		// keep activation resilient if project instruction file sync fails
 	});
 
@@ -93,7 +119,7 @@ export function activate(context: vscode.ExtensionContext) {
 		workspaceService,
 		gitService,
 		stateService,
-		() => chatMemoryInstructionService,
+		getChatMemory,
 		customGroupsService,
 	);
 
@@ -117,7 +143,7 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 	context.subscriptions.push({ dispose: () => quickNotesService.dispose() });
 	// Брошенные копии черновиков окна заметки удаляются в фоне и не задерживают активацию.
-	void quickNotesService.cleanupStalePending().catch(error => {
+	void startup.run(() => quickNotesService.cleanupStalePending()).catch(error => {
 		appendPromptManagerLog(`[quick-notes] cleanup failed: ${error instanceof Error ? error.message : 'unknown error'}`);
 	});
 	const editorPanelManager = new EditorPanelManager(
@@ -130,14 +156,18 @@ export function activate(context: vscode.ExtensionContext) {
 		promptVoiceService,
 		promptDashboardService,
 		dockerContainersService,
-		() => chatMemoryInstructionService,
-		() => codeMapChatInstructionService,
+		getChatMemory,
+		getCodeMap,
 		customGroupsService,
 		// Discovery учитывает реальный пользовательский каталог текущего extension host.
 		new CopilotCodexSessionService(context.globalStorageUri.fsPath),
+		startup.whenReady,
+		whenGitReady,
 	);
 	// Наблюдение Claude восстанавливается в фоне и не блокирует активацию интерфейса.
-	void editorPanelManager.restoreClaudeChatTracking().catch(error => {
+	void whenClaudeReady().then(async ready => {
+		if (ready && !startup.isDisposed) await editorPanelManager.restoreClaudeChatTracking();
+	}).catch(error => {
 		appendPromptManagerLog(`[claude-chat] restore failed: ${error instanceof Error ? error.message : 'unknown error'}`);
 	});
 	context.subscriptions.push(
@@ -170,7 +200,7 @@ export function activate(context: vscode.ExtensionContext) {
 		context.extensionUri,
 		storageService,
 		stateService,
-		() => chatMemoryInstructionService,
+		getChatMemory,
 	);
 	let memoryDb: MemoryDatabaseService | undefined;
 	let memoryCleanup: MemoryCleanupService | undefined;
@@ -195,11 +225,9 @@ export function activate(context: vscode.ExtensionContext) {
 		memoryPanelManager?.refreshAvailableModels();
 	});
 
-	// Initialize Copilot Premium usage status bar
-	const copilotUsageService = new CopilotUsageService(context);
-	if (vscode.extensions.getExtension('github.copilot-chat') || vscode.extensions.getExtension('github.copilot')) {
-		void copilotUsageService.checkAuthenticationBindingOnActivation();
-	}
+	// All extension hosts for the current OS user share the quota directory.
+	const quotaCacheRoot = accountQuotaCacheRoot();
+	const copilotUsageService = new CopilotUsageService(context, quotaCacheRoot);
 	// Refresh AI-model pickers after VS Code finishes rebinding the Copilot account catalog.
 	const refreshAiModelsAfterCopilotAccountSwitch = async (accountLabel: string): Promise<void> => {
 		appendPromptManagerLog(
@@ -209,20 +237,21 @@ export function activate(context: vscode.ExtensionContext) {
 	};
 	const codexAccountsService = new CodexAccountService(context);
 	// Брошенные после аварийного завершения временные CODEX_HOME с копиями auth.json удаляются в фоне.
-	void cleanupStaleCodexTempHomes().then(removed => {
+	void startup.run(() => cleanupStaleCodexTempHomes().then(removed => {
 		if (removed > 0) appendPromptManagerLog('[Accounts] Removed stale Codex temporary homes: ' + removed);
-	}).catch(() => undefined);
+	})).catch(() => undefined);
 	// Общий кэш лимитов окон и возврат токенов, обновлённых временным процессом Codex при запросе лимитов.
 	const codexRateLimitService = new CodexRateLimitService({
-		sharedCacheDir: context.globalStorageUri.fsPath,
+		sharedCacheDir: quotaCacheRoot,
+		legacyCacheDir: context.globalStorageUri.fsPath,
 		storeRefreshedAuth: (original, refreshed) => codexAccountsService.storeRefreshedAuth(original, refreshed),
 	});
 	const accountsLimitDisplayService = new AccountsLimitDisplayService();
 	const claudeAccountsService = new ClaudeAccountService(context);
 	// Путь к Claude CLI вычисляется при каждой проверке: Claude Code могут установить или обновить после активации.
-	const claudeUsageService = new ClaudeUsageService(context.globalStorageUri.fsPath, findClaudeExecutable);
+	const claudeUsageService = new ClaudeUsageService(context.globalStorageUri.fsPath, findClaudeExecutable, quotaCacheRoot);
 	const claudeStatusLineService = new ClaudeStatusLineService(
-		context, claudeAccountsService, message => appendPromptManagerLog(message),
+		context, claudeAccountsService, message => appendPromptManagerLog(message), whenClaudeReady,
 	);
 	let claudeProfilesInitialized = false;
 	const initializeClaudeIfInstalled = () => {
@@ -233,8 +262,6 @@ export function activate(context: vscode.ExtensionContext) {
 			appendPromptManagerLog('[Accounts] Claude initialization failed: ' + (error instanceof Error ? error.message : String(error)));
 		});
 	};
-	initializeClaudeIfInstalled();
-	context.subscriptions.push(vscode.extensions.onDidChange(initializeClaudeIfInstalled));
 	// Профили Codex и копия auth.json в SecretStorage появляются только при установленном расширении Codex.
 	let codexProfilesInitialized = false;
 	const initializeCodexIfInstalled = () => {
@@ -245,8 +272,6 @@ export function activate(context: vscode.ExtensionContext) {
 			appendPromptManagerLog('[Accounts] Codex initialization failed: ' + (error instanceof Error ? error.message : String(error)));
 		});
 	};
-	initializeCodexIfInstalled();
-	context.subscriptions.push(vscode.extensions.onDidChange(initializeCodexIfInstalled));
 	const copilotUsagePanelManager = new CopilotUsagePanelManager(
 		context.extensionUri,
 		copilotUsageService,
@@ -256,18 +281,25 @@ export function activate(context: vscode.ExtensionContext) {
 		claudeUsageService,
 		refreshAiModelsAfterCopilotAccountSwitch,
 		accountsLimitDisplayService,
+		whenAccountsReady,
+		isCopilotStarting,
 	);
-	const codexStatusBarProvider = new CodexAccountsStatusBarProvider(
-		codexAccountsService,
-		codexRateLimitService,
-		() => copilotUsagePanelManager.show(),
-		accountsLimitDisplayService,
-	);
-	const claudeStatusBarProvider = new ClaudeAccountsStatusBarProvider(
-		claudeAccountsService,
-		claudeUsageService,
-		accountsLimitDisplayService,
-	);
+	void whenAccountsReady().then(ready => {
+		if (!ready || startup.isDisposed) return;
+		const initializeInstalledAccounts = () => {
+			if (vscode.extensions.getExtension('github.copilot-chat') || vscode.extensions.getExtension('github.copilot')) {
+				void copilotUsageService.checkAuthenticationBindingOnActivation();
+			}
+			initializeClaudeIfInstalled();
+			initializeCodexIfInstalled();
+		};
+		initializeInstalledAccounts();
+		context.subscriptions.push(
+			vscode.extensions.onDidChange(initializeInstalledAccounts),
+			new CodexAccountsStatusBarProvider(codexAccountsService, codexRateLimitService, accountsLimitDisplayService),
+			new ClaudeAccountsStatusBarProvider(claudeAccountsService, claudeUsageService, accountsLimitDisplayService),
+		);
+	}).catch(error => console.error('[PromptManager] Account services failed to start:', error));
 
 	// ---- Project Memory System ----
 	const memoryEnabled = vscode.workspace.getConfiguration('promptManager').get<boolean>('memory.enabled', false);
@@ -314,26 +346,33 @@ export function activate(context: vscode.ExtensionContext) {
 			context.subscriptions.push(watcher);
 		};
 
-		void (async () => {
+		codeMapReady = startup.run(async () => {
 			try {
 				appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] initializing DB...`);
 				await codeMapDb!.initialize(workspaceRoot);
+				if (startup.isDisposed) {
+					codeMapDb!.close();
+					return;
+				}
 				appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] DB initialized, registering watcher`);
 				registerCodeMapRealtimeWatcher();
 				if (codeMapSettings.autoUpdate) {
 					appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] autoUpdate=true, scheduling workspace refresh in ${codeMapSettings.startupDelayMs}ms`);
-					setTimeout(() => {
+					const refreshTimer = setTimeout(() => {
 						codeMapChatInstructionService?.queueWorkspaceRefresh();
 					}, codeMapSettings.startupDelayMs);
+					context.subscriptions.push({ dispose: () => clearTimeout(refreshTimer) });
 				} else {
 					appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] autoUpdate=false, skipping workspace refresh`);
 				}
+				return codeMapChatInstructionService;
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				appendPromptManagerLog(`[${new Date().toISOString()}] [codemap] init FAILED: ${msg}`);
 				console.error('[PromptManager] Code map init failed:', msg);
+				return undefined;
 			}
-		})();
+		});
 	}
 
 	memoryDb = new MemoryDatabaseService(context.extensionUri);
@@ -353,17 +392,23 @@ export function activate(context: vscode.ExtensionContext) {
 		codeMapAdminService,
 	);
 
-	const memoryDbReady = (async () => {
+	const memoryDbReady = startup.run(async () => {
 		try {
 			appendPromptManagerLog(`[${new Date().toISOString()}] [memory] initializing DB...`);
 			await memoryDb!.initialize(workspaceRoot);
+			if (startup.isDisposed) {
+				memoryDb!.close();
+				return;
+			}
 			appendPromptManagerLog(`[${new Date().toISOString()}] [memory] DB initialized OK`);
+			return true;
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			appendPromptManagerLog(`[${new Date().toISOString()}] [memory] DB init FAILED: ${msg}`);
 			console.error('[PromptManager] Memory database init failed:', msg);
+			return false;
 		}
-	})();
+	});
 
 	appendPromptManagerLog(`[${new Date().toISOString()}] [memory] enabled=${memoryEnabled}`);
 
@@ -374,20 +419,22 @@ export function activate(context: vscode.ExtensionContext) {
 		const chatMemoryInstructionComposer = new ChatMemoryInstructionComposer();
 
 		// Start memory subsystems only when Memory is enabled
-		void (async () => {
+		chatMemoryReady = startup.run(async () => {
 			try {
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] waiting for DB ready...`);
-				await memoryDbReady;
+				if (!await memoryDbReady || startup.isDisposed) { return; }
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] starting cleanup service`);
 				memoryCleanup!.start();
 
 				// Start HTTP server and install git hooks
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] starting HTTP server...`);
 				const { port, token } = await memoryHttpServer!.start();
+				if (startup.isDisposed) { return; }
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] HTTP server started on port=${port}`);
 				const folders = Array.from(workspaceService.getWorkspaceFolderPaths().values());
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] installing git hooks for ${folders.length} folders`);
 				await memoryGitHook!.installHooksForWorkspace(folders, port, token);
+				if (startup.isDisposed) { return; }
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] git hooks installed`);
 
 				// Initialize embedding model in background
@@ -406,6 +453,7 @@ export function activate(context: vscode.ExtensionContext) {
 					workspaceService,
 				);
 				await chatMemoryInstructionService.recoverSessionsOnStartup();
+				if (startup.isDisposed) { return; }
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] ChatMemoryInstructionService ready`);
 
 				// Wire up pipeline: HTTP server → analyze → store → embed
@@ -481,12 +529,14 @@ export function activate(context: vscode.ExtensionContext) {
 
 				memoryNotification!.updateStatusBar(memoryDb!.getCommitCount(), false);
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] system fully initialized, commits=${memoryDb!.getCommitCount()}`);
+				return chatMemoryInstructionService;
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				appendPromptManagerLog(`[${new Date().toISOString()}] [memory] system init FAILED: ${msg}`);
 				console.error('[PromptManager] Memory system init failed:', msg);
+				return undefined;
 			}
-		})();
+		});
 	} else {
 		appendPromptManagerLog(`[${new Date().toISOString()}] [memory] DISABLED (promptManager.memory.enabled=false)`);
 	}
@@ -642,9 +692,11 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 
 	// Background cache refresh — detects manual file-system changes with low disk/CPU pressure
-	storageService.startBackgroundCacheRefresh(() => {
-		void sidebarProvider.refreshList();
-		void trackerPanelManager.refresh();
+	void startup.run(() => {
+		storageService.startBackgroundCacheRefresh(() => {
+			void sidebarProvider.refreshList();
+			void trackerPanelManager.refresh();
+		});
 	});
 
 	// Register commands
@@ -787,7 +839,9 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 
-			void copilotUsageService.incrementUsage();
+			void whenCopilotReady().then(async ready => {
+				if (ready && !startup.isDisposed) await copilotUsageService.incrementUsage();
+			});
 			await openPromptAndStartChatOutsideSidebar(targetId);
 		}),
 
@@ -808,7 +862,8 @@ export function activate(context: vscode.ExtensionContext) {
 		}),
 
 		vscode.commands.registerCommand('promptManager.openMemory', async () => {
-			await memoryDbReady;
+			await Promise.all([memoryDbReady, codeMapReady]);
+			if (startup.isDisposed) { return; }
 			await memoryPanelManager?.show();
 		}),
 
@@ -817,6 +872,11 @@ export function activate(context: vscode.ExtensionContext) {
 		}),
 
 		vscode.commands.registerCommand('promptManager.copilotUsageDiagnostics', async () => {
+			if (!await whenCopilotReady()) { return; }
+			if (isCopilotStarting()) {
+				vscode.window.showWarningMessage('GitHub Copilot ещё запускается. Повторите диагностику после активации.');
+				return;
+			}
 			const report = await copilotUsageService.buildDiagnosticsReport();
 			const output = getPromptManagerOutputChannel();
 			output.appendLine('===== Copilot Usage Diagnostics =====');
@@ -867,8 +927,6 @@ export function activate(context: vscode.ExtensionContext) {
 			statisticsPanelManager.dispose();
 			trackerPanelManager.dispose();
 			copilotUsagePanelManager.dispose();
-			codexStatusBarProvider.dispose();
-			claudeStatusBarProvider.dispose();
 			accountsLimitDisplayService.dispose();
 			claudeStatusLineService.dispose();
 			claudeAccountsService.dispose();

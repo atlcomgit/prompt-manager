@@ -1,4 +1,5 @@
 import type { DockerContainersStatusFilter, DockerContainersViewMode } from './docker.js';
+import type { PromptChatTarget } from './prompt.js';
 import { PROMPT_DASHBOARD_SECTION_KEYS, type PromptDashboardSectionKey } from './promptDashboard.js';
 import { QUICK_NOTE_PALETTE_COLORS, type QuickNoteScope, type QuickNotesBoardGroupBy, type QuickNotesBoardScopeFilter } from './quickNotes.js';
 
@@ -40,12 +41,37 @@ export interface DashboardQuickNotesWidgetState {
 	descriptionHeight?: number;
 }
 
+/** Agents with a draft entry point in the quick commands widget. */
+export type DashboardQuickCommandTarget = Exclude<PromptChatTarget, 'kilo'>;
+
+/** User phrases and the explicitly selected draft destination. */
+export interface DashboardQuickCommandsWidgetState {
+	items: string[];
+	target?: DashboardQuickCommandTarget;
+}
+
+/** Нормализует ограниченный список быстрых команд из глобальных настроек. */
+export function normalizeDashboardQuickCommandsWidgetState(value: unknown): DashboardQuickCommandsWidgetState {
+	const input: { items?: unknown; target?: unknown } = value && typeof value === 'object' && !Array.isArray(value)
+		? { ...value } : {};
+	const { target } = input;
+	const defaults = ['/alek-review', 'есть еще уточнения или вопросы?'];
+	return {
+		items: Array.isArray(input.items)
+			? [...new Set(input.items.filter((entry): entry is string => typeof entry === 'string')
+				.map(entry => entry.trim()).filter(entry => entry.length > 0 && entry.length <= 3000))].slice(0, 120)
+			: defaults,
+		...(target === 'copilot' || target === 'codex' || target === 'claude' || target === 'opencode-cli' ? { target } : {}),
+	};
+}
+
 /** Общие настройки представления виджетов, не зависящие от ширины и выбранного промпта. */
 export interface PromptDashboardPreferences {
 	/** Независимые фильтры и раскрытия Docker и TODO. */
 	docker: DashboardDockerWidgetState;
 	todos: DashboardTodosWidgetState;
 	quickNotes: DashboardQuickNotesWidgetState;
+	quickCommands: DashboardQuickCommandsWidgetState;
 	/** Явный false сохраняет закрытие узлов Git, раскрытых по умолчанию. */
 	expanded: Record<string, boolean>;
 	/** Показывать в карточке веток все проекты, а не только проекты промпта. */
@@ -146,6 +172,7 @@ export function normalizePromptDashboardPreferences(value: unknown): PromptDashb
 		docker: normalizePromptDashboardDockerWidgetState(input.docker),
 		todos: normalizePromptDashboardTodosWidgetState(input.todos),
 		quickNotes: normalizePromptDashboardQuickNotesWidgetState(input.quickNotes),
+		quickCommands: normalizeDashboardQuickCommandsWidgetState(input.quickCommands),
 		expanded,
 		showAllBranchProjects: input.showAllBranchProjects === true,
 		hiddenSections: normalizePromptDashboardHiddenSections(input.hiddenSections),

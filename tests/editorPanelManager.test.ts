@@ -3,9 +3,9 @@ import { normalizePromptDashboardLayouts } from '../src/types/promptDashboard.js
 import { normalizePromptDashboardPreferences } from '../src/types/promptDashboardPreferences.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import Module from 'node:module';
 import { EDITOR_WEBVIEW_ASSET_VERSION } from '../src/constants/webview.js';
 import { buildSaveQueueKey } from '../src/utils/promptSaveQueue.js';
@@ -772,8 +772,8 @@ async function createManager(options?: {
 	workspaceService?: Record<string, unknown>;
 	configurationValues?: Record<string, unknown>;
 	storageDirectoryPath?: string;
-	chatMemoryInstructionService?: Record<string, unknown>;
-	codeMapChatInstructionService?: Record<string, unknown>;
+	chatMemoryInstructionService?: () => Record<string, unknown> | Promise<Record<string, unknown>>;
+	codeMapChatInstructionService?: () => Record<string, unknown> | Promise<Record<string, unknown>>;
 	/** Overrides dashboard behavior required by a focused manager test. */
 	promptDashboardService?: Record<string, unknown>;
 }) {
@@ -1593,6 +1593,54 @@ test('ready posts prompt before slow ready hydration messages', async () => {
 	const modelsMessage = panel.postedMessages.find((message: any) => message?.type === 'availableModels') as any;
 	assert.deepEqual(modelsMessage?.models, [{ id: 'model-a', name: 'Model A' }]);
 	panel.dispose();
+});
+
+/** Пока провайдеры активируются, восстановленная вкладка показывает промпт и не ставит повторы загрузки моделей. */
+test('restored editor defers model hydration and its retries until providers are ready', async () => {
+	resetVsCodeCommandMock();
+	const checkedSessions: string[] = [];
+	const discovered: string[] = [];
+	const { manager, getStoredPrompt } = await createManager({
+		initialPrompt: { id: 'prompt-a', promptUuid: 'uuid-a', chatSessionIds: ['session-a'] },
+		stateService: { hasChatSession: async (id: string) => { checkedSessions.push(id); return true; } },
+		workspaceService: {
+			getSkills: async () => { discovered.push('skills'); return []; },
+			getMcpTools: async () => { discovered.push('mcp'); return []; },
+			getHooks: async () => { discovered.push('hooks'); return []; },
+		},
+	});
+	const readiness = createDeferred<boolean>();
+	(manager as any).whenProvidersReady = () => readiness.promise;
+	const models = [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }];
+	let loads = 0;
+	(manager as any).aiService.getAvailableModels = async () => { loads++; return models; };
+	try {
+		const panel = createDetachedPromptEditorPanel('Prompt A');
+		await manager.revivePromptEditorPanel(panel as any, {
+			'pm.editor.promptIdentity': { id: 'prompt-a', promptUuid: 'uuid-a' },
+		});
+		const bootId = (manager as any).panelBootIds.get('__prompt_editor_singleton__');
+		panel.postedMessages.length = 0;
+		await withImmediateTimers(async () => {
+			const hydration = panel.emitMessage({ type: 'ready', bootId, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
+			await flushTurns(4);
+			assert.equal(panel.postedMessages[0]?.type, 'prompt');
+			assert.deepEqual(checkedSessions, []);
+			assert.deepEqual(discovered, []);
+			assert.equal(loads, 0);
+			readiness.resolve(true);
+			await hydration;
+			await flushTurns(4);
+		});
+		assert.deepEqual(checkedSessions, ['session-a']);
+		assert.deepEqual(getStoredPrompt()?.chatSessionIds, ['session-a']);
+		assert.deepEqual(discovered.sort(), ['hooks', 'mcp', 'skills']);
+		assert.equal(loads, 1);
+		assert.deepEqual(panel.postedMessages.find((msg: any) => msg.type === 'availableModels')?.models, models);
+	} finally {
+		readiness.resolve(false);
+		manager.disposeAll();
+	}
 });
 
 test('ready from stale editor webview asset reboots the panel before sending prompt data', async () => {
@@ -3964,6 +4012,30 @@ test('revealed prompt editor refreshes the dashboard when hidden changes were qu
 	assert.equal(refreshCalls, 1);
 });
 
+test('restore waits for providers before creating Git watchers and ignores closed panels', async () => {
+	const { manager } = await createManager();
+	const ready = createDeferred<boolean>();
+	let apiCalls = 0;
+	(manager as any).whenProvidersReady = () => ready.promise;
+	(manager as any).gitService = { getBuiltInGitApi: async () => { apiCalls++; return null; } };
+	(manager as any).workspaceService = { getWorkspaceFolderPaths: () => new Map([['api', '/tmp/api']]) };
+	const panel = { visible: true };
+	(manager as any).promptEditorPanels.add(panel);
+	vscodeCreatedWatchers.length = 0;
+	const closed = (manager as any).ensureGitOverlayReactiveSources();
+	(manager as any).disposeGitOverlayReactiveSources();
+	panel.visible = false;
+	ready.resolve(true);
+	await closed;
+	assert.equal(apiCalls, 0);
+	assert.equal(vscodeCreatedWatchers.length, 0);
+	panel.visible = true;
+	await (manager as any).ensureGitOverlayReactiveSources();
+	assert.equal(apiCalls, 1);
+	assert.ok(vscodeCreatedWatchers.length > 0);
+	(manager as any).disposeGitOverlayReactiveSources();
+});
+
 test('ensureGitOverlayReactiveSources starts watchers for a visible prompt editor without Git Overlay', async () => {
 	const { manager } = await createManager();
 	vscodeCreatedWatchers.length = 0;
@@ -5311,7 +5383,7 @@ test('savePromptDashboardSectionOrder persists the shared widget order in the ho
 		['status', 'projectBranches', 'parallelBranches'],
 	]]);
 	assert.deepEqual((manager as any).getPromptDashboardSectionOrder(), [
-		['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits', 'dockerContainers'],
+		['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits', 'dockerContainers', 'quickCommands'],
 		['status', 'projectBranches', 'parallelBranches', 'todos', 'quickNotes'],
 	]);
 });
@@ -8340,6 +8412,160 @@ test('startChat keeps Codex prompt in clipboard when xdotool preparation fails',
 
 const codexNativePasteCommands = ['chatgpt.sidebarSecondaryView.focus', 'editor.action.clipboardPasteAction'];
 
+/** Один файл в индексе и рабочем дереве должен открываться относительно разных версий без чтения SCM. */
+test('dashboard opens the selected dirty-file comparison directly by Git URIs', async () => {
+	resetVsCodeCommandMock();
+	try {
+		const { manager } = await createManager({
+			workspaceService: { getWorkspaceFolderPaths: () => new Map([['repo', '/tmp/repo']]) },
+		});
+		(manager as any).gitService.getBuiltInGitApi = async () => ({
+			getRepository: () => ({}),
+			toGitUri: (uri: { fsPath: string }, ref: string) => ({ ...uri, ref }),
+		});
+		const panel = { webview: { postMessage: async () => true } };
+		for (const group of ['staged', 'working-tree']) {
+			await (manager as any).handleMessage(
+				{ type: 'gitOverlayOpenDiff', project: 'repo', filePath: 'src/file.ts', change: { status: 'M', group } },
+				panel, createPrompt(), 'panel', () => false, () => undefined,
+			);
+		}
+		assert.deepEqual(vscodeCommandCalls.map(call => call.id), ['vscode.diff', 'vscode.diff']);
+		assert.deepEqual(vscodeCommandCalls.map(call => call.args.slice(0, 2).map(uri => (uri as { ref?: string }).ref)), [
+			['HEAD', ''],
+			['', undefined],
+		]);
+		assert.equal((vscodeCommandCalls[1].args[1] as { fsPath: string }).fsPath, '/tmp/repo/src/file.ts');
+	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Проверяет путь открытия переименованного файла и независимость чтения правой стороны от merge-base. */
+test('dashboard branch diff starts right-side reads before merge base and opens the exact rename', async () => {
+	resetVsCodeCommandMock();
+	const base = createDeferred<string>();
+	const calls: string[] = [];
+	let diffDirectory: string | undefined;
+	try {
+		const { manager } = await createManager({
+			workspaceService: { getWorkspaceFolderPaths: () => new Map([['repo', '/tmp/repo']]) },
+		});
+		Object.assign((manager as any).gitService, {
+			getMergeBase: async () => base.promise,
+			getFileContentAtRef: async (_project: string, ref: string, file: string) => {
+				calls.push(ref + ':' + file);
+				return ref + '\n';
+			},
+			getFileAuthorAtRef: async () => {
+				calls.push('author');
+				return 'Автор';
+			},
+		});
+		vscodeExecuteCommandHandler = async (id, ...args) => {
+			if (id !== 'vscode.diff') return;
+			const [left, right, title] = args as [{ fsPath: string }, { fsPath: string }, string];
+			diffDirectory = dirname(left.fsPath);
+			assert.match(left.fsPath, /left-before\.ts$/);
+			assert.equal(readFileSync(left.fsPath, 'utf8'), 'merge-base\n');
+			assert.equal(readFileSync(right.fsPath, 'utf8'), 'origin/main\n');
+			assert.match(title, /Опережающие файлы \(Автор\) \| after\.ts \| repo/);
+		};
+		const open = (manager as any).openPromptDashboardFilePatch({
+			project: 'repo', filePath: 'after.ts', previousPath: 'before.ts', mode: 'branch', ref: 'origin/main',
+		});
+		assert.deepEqual(calls, ['origin/main:after.ts', 'author']);
+		base.resolve('merge-base');
+		await open;
+		assert.equal(calls.at(-1), 'merge-base:before.ts');
+		assert.deepEqual(vscodeCommandCalls.map(call => call.id), ['vscode.diff']);
+	} finally {
+		if (diffDirectory) rmSync(diffDirectory, { recursive: true, force: true });
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Проверяет маршрутизацию быстрых команд до штатных редакторов черновика. */
+test('dashboard quick commands populate Copilot and Claude drafts without sending', async () => {
+	resetVsCodeCommandMock();
+	vscodeAvailableCommands = ['claude-vscode.editor.open'];
+	try {
+		const { manager } = await createManager();
+		const panel = { webview: { postMessage: async () => true } };
+		for (const target of ['copilot', 'claude']) {
+			await (manager as any).handleMessage(
+				{ type: 'promptDashboardQuickCommandInsert', target, text: '/review' },
+				panel, createPrompt(), 'panel', () => false, () => undefined,
+			);
+		}
+		assert.deepEqual(vscodeCommandCalls, [
+			{ id: 'workbench.action.chat.open', args: [{ query: '/review', isPartialQuery: true }] },
+			{ id: 'claude-vscode.editor.open', args: [
+				undefined, '/review', undefined, undefined, undefined, { programmatic: 'honor-preferred-location' },
+			] },
+		]);
+		assert.equal(vscodeClipboardText, '');
+		assert.deepEqual(childProcessSpawnCalls, []);
+	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Local X11 insertion targets the composer and ignores the prompt's automatic submit setting. */
+test('dashboard quick command prepares a Codex composer draft on local X11', async () => {
+	resetVsCodeCommandMock();
+	const originalDisplay = process.env.DISPLAY;
+	process.env.DISPLAY = ':99';
+	try {
+		const { manager } = await createManager();
+		const drafts: Array<{ text: string; autoStart: boolean }> = [];
+		(manager as any).isXdotoolPlatformSupported = () => true;
+		(manager as any).prepareCodexPromptWithXdotool = async (
+			prompt: { autoStartChatWithXdotool: boolean }, text: string,
+		) => {
+			drafts.push({ text, autoStart: prompt.autoStartChatWithXdotool });
+			return { ok: true, stage: 'paste' };
+		};
+		await (manager as any).handleMessage(
+			{ type: 'promptDashboardQuickCommandInsert', target: 'codex', text: '/review' },
+			{ webview: { postMessage: async () => true } },
+			{ ...createPrompt(), autoStartChatWithXdotool: true }, 'panel', () => false, () => undefined,
+		);
+		assert.deepEqual(drafts, [{ text: '/review', autoStart: false }]);
+		assert.deepEqual(vscodeCommandCalls, []);
+		assert.equal(vscodeClipboardText, '');
+	} finally {
+		if (originalDisplay === undefined) delete process.env.DISPLAY;
+		else process.env.DISPLAY = originalDisplay;
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Проверяет отказ браузерной вставки на фактической точке входа быстрых команд. */
+test('dashboard quick command copies Codex draft in the browser without dispatching paste', async () => {
+	resetVsCodeCommandMock();
+	vscodeUiKind = 2;
+	vscodeRemoteName = 'tunnel';
+	vscodeAvailableCommands = codexNativePasteCommands;
+	vscodeExecuteCommandHandler = async id => {
+		if (id === 'chatgpt.openSidebar') assert.equal(vscodeClipboardText, '/review');
+	};
+	try {
+		const { manager } = await createManager();
+		const replies: Array<{ type: string; message: string }> = [];
+		await (manager as any).handleMessage(
+			{ type: 'promptDashboardQuickCommandInsert', target: 'codex', text: '/review' },
+			{ webview: { postMessage: async (reply: { type: string; message: string }) => { replies.push(reply); return true; } } },
+			createPrompt(), 'panel', () => false, () => undefined,
+		);
+		assert.deepEqual(vscodeCommandCalls.map(call => call.id), ['chatgpt.openSidebar']);
+		assert.equal(vscodeClipboardText, '/review');
+		assert.ok(replies.some(reply => reply.type === 'info' && reply.message.includes('Ctrl+V')));
+	} finally {
+		resetVsCodeCommandMock();
+	}
+});
+
 /** Доступность команды VS Code не означает поддержку paste внутри браузерного iframe. */
 test('prepareCodexPrompt reports unsupported browser paste without clipboard or keyboard commands', async () => {
 	resetVsCodeCommandMock();
@@ -9167,113 +9393,139 @@ test('startChat refreshes remote global context before syncing instructions when
 	resetVsCodeCommandMock();
 });
 
-test('startChat skips session and codemap instruction context when memory features are disabled at runtime', async () => {
-	resetVsCodeCommandMock();
-	vscodeAvailableCommands = ['workbench.action.chat.attachFile'];
+for (const enabled of [false, true]) {
+	test(`startChat resolves startup instruction services only when enabled=${enabled}`, async t => {
+		resetVsCodeCommandMock();
+		vscodeAvailableCommands = ['workbench.action.chat.attachFile'];
 
-	// Проверка контекста внешних чатов не использует общий каталог другой задачи.
-	const storageDirectoryPath = mkdtempSync(join(tmpdir(), 'prompt-manager-instructions-'));
-	const chatMemoryDirectory = `${storageDirectoryPath}/chat-memory`;
-	const staleCodemapPath = `${chatMemoryDirectory}/codemap.instructions.md`;
-	mkdirSync(chatMemoryDirectory, { recursive: true });
-	writeFileSync(staleCodemapPath, 'stale codemap content');
+		// Проверка контекста внешних чатов не использует общий каталог другой задачи.
+		const storageDirectoryPath = mkdtempSync(join(tmpdir(), 'prompt-manager-instructions-'));
+		const chatMemoryDirectory = `${storageDirectoryPath}/chat-memory`;
+		const staleCodemapPath = `${chatMemoryDirectory}/codemap.instructions.md`;
+		mkdirSync(chatMemoryDirectory, { recursive: true });
+		writeFileSync(staleCodemapPath, 'stale codemap content');
 
-	const chatMemoryCalls: string[] = [];
-	const codeMapCalls: string[] = [];
+		const chatMemoryCalls: string[] = [];
+		const codeMapCalls: string[] = [];
+		const initialized = createDeferred<void>();
+		const contextRequested = createDeferred<void>();
+		const waitForContext = () => {
+			assert.equal(enabled, true, 'выключенный источник не должен запрашиваться');
+			contextRequested.resolve();
+			return initialized.promise;
+		};
 
-	try {
-		const { manager } = await createManager({
-			storageDirectoryPath,
-			configurationValues: {
-				'promptManager.memory.enabled': false,
-				'promptManager.codemap.enabled': false,
-			},
-			initialPrompt: {
+		try {
+			const { manager } = await createManager({
+				storageDirectoryPath,
+				configurationValues: {
+					'promptManager.memory.enabled': enabled,
+					'promptManager.codemap.enabled': enabled,
+				},
+				initialPrompt: {
+					id: 'prompt-a',
+					promptUuid: 'uuid-a',
+					title: 'Prompt title',
+					status: 'draft',
+					content: 'Implement the requested workflow changes.',
+				},
+				stateService: {
+					saveLastPromptId: async () => undefined,
+					getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
+					saveSidebarState: async () => undefined,
+					getGlobalAgentContext: () => '',
+					getActiveChatSessionId: async () => '',
+					waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
+					waitForChatRequestCompletion: async () => ({
+						ok: false,
+						reason: 'timeout',
+						sessionId: '',
+						lastRequestStarted: 0,
+						lastRequestEnded: 0,
+						hasPendingEdits: false,
+					}),
+				},
+				chatMemoryInstructionService: () => waitForContext().then(() => ({
+					prepareSessionInstruction: async () => {
+						chatMemoryCalls.push('prepareSessionInstruction');
+						return {
+							promptUuid: 'uuid-a',
+							promptId: 'prompt-a',
+							instructionFilePath: `${chatMemoryDirectory}/session-uuid-a.instructions.md`,
+							createdAt: '2026-06-01T00:00:00.000Z',
+							updatedAt: '2026-06-01T00:00:00.000Z',
+						};
+					},
+				})),
+				codeMapChatInstructionService: () => waitForContext().then(() => ({
+					prepareInstruction: async () => {
+						codeMapCalls.push('prepareInstruction');
+						return null;
+					},
+				})),
+			});
+
+			// Конфигурация этих сервисов запрашивает vscode динамически при самом старте чата.
+			const previousLoad = (Module as any)._load;
+			(Module as any)._load = function (request: string, ...args: unknown[]) {
+				return request === 'vscode' ? createVsCodeMock() : previousLoad.call(this, request, ...args);
+			};
+			t.after(() => { (Module as any)._load = previousLoad; });
+			(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
+			(manager as any).clearPromptPlanFileIfExists = async () => undefined;
+			(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+
+			const postedMessages: any[] = [];
+			const panel = {
+				visible: true,
+				webview: {
+					postMessage: async (message: unknown) => {
+						postedMessages.push(message);
+						return true;
+					},
+				},
+			} as any;
+			const currentPrompt = createPrompt({
 				id: 'prompt-a',
 				promptUuid: 'uuid-a',
 				title: 'Prompt title',
 				status: 'draft',
 				content: 'Implement the requested workflow changes.',
-			},
-			stateService: {
-				saveLastPromptId: async () => undefined,
-				getSidebarState: () => ({ selectedPromptId: 'prompt-a', selectedPromptUuid: 'uuid-a' }),
-				saveSidebarState: async () => undefined,
-				getGlobalAgentContext: () => '',
-				getActiveChatSessionId: async () => '',
-				waitForChatSessionStarted: async () => ({ ok: false, reason: 'timeout' }),
-				waitForChatRequestCompletion: async () => ({
-					ok: false,
-					reason: 'timeout',
-					sessionId: '',
-					lastRequestStarted: 0,
-					lastRequestEnded: 0,
-					hasPendingEdits: false,
-				}),
-			},
-			chatMemoryInstructionService: {
-				prepareSessionInstruction: async () => {
-					chatMemoryCalls.push('prepareSessionInstruction');
-					return {
-						promptUuid: 'uuid-a',
-						promptId: 'prompt-a',
-						instructionFilePath: `${chatMemoryDirectory}/session-uuid-a.instructions.md`,
-						createdAt: '2026-06-01T00:00:00.000Z',
-						updatedAt: '2026-06-01T00:00:00.000Z',
-					};
-				},
-			},
-			codeMapChatInstructionService: {
-				prepareInstruction: async () => {
-					codeMapCalls.push('prepareInstruction');
-					return null;
-				},
-			},
-		});
+			});
 
-		(manager as any).syncTrackedPromptFilesForPanel = async () => undefined;
-		(manager as any).clearPromptPlanFileIfExists = async () => undefined;
-		(manager as any).tryReadChatMarkdownFromClipboard = async () => ({ markdown: '', html: '' });
+			const start = (manager as any).handleMessage(
+				{ type: 'startChat', id: 'prompt-a', requestId: 'req-disabled-memory-context' },
+				panel,
+				currentPrompt,
+				'__prompt_editor_singleton__',
+				() => false,
+				() => undefined,
+			);
 
-		const postedMessages: any[] = [];
-		const panel = {
-			visible: true,
-			webview: {
-				postMessage: async (message: unknown) => {
-					postedMessages.push(message);
-					return true;
-				},
-			},
-		} as any;
-		const currentPrompt = createPrompt({
-			id: 'prompt-a',
-			promptUuid: 'uuid-a',
-			title: 'Prompt title',
-			status: 'draft',
-			content: 'Implement the requested workflow changes.',
-		});
-
-		await (manager as any).handleMessage(
-			{ type: 'startChat', id: 'prompt-a', requestId: 'req-disabled-memory-context' },
-			panel,
-			currentPrompt,
-			'__prompt_editor_singleton__',
-			() => false,
-			() => undefined,
-		);
-
-		assert.deepEqual(chatMemoryCalls, []);
-		assert.deepEqual(codeMapCalls, []);
-		assert.equal(
-			vscodeCommandCalls.filter(call => call.id === 'workbench.action.chat.attachFile').length,
-			0,
-		);
-		assert.ok(postedMessages.every(message => (message as any)?.type !== 'chatMemorySummary'));
-	} finally {
-		rmSync(storageDirectoryPath, { recursive: true, force: true });
-		resetVsCodeCommandMock();
-	}
-});
+			if (enabled) await contextRequested.promise;
+			assert.deepEqual(chatMemoryCalls, []);
+			assert.deepEqual(codeMapCalls, []);
+			// Ручная команда при выключенных настройках завершается до открытия барьера.
+			if (!enabled) await start;
+			initialized.resolve();
+			await start;
+			assert.deepEqual(chatMemoryCalls, enabled ? ['prepareSessionInstruction'] : []);
+			assert.deepEqual(codeMapCalls, enabled ? ['prepareInstruction'] : []);
+			assert.ok(postedMessages.some(message => message.type === 'chatStarted'));
+			if (!enabled) {
+				assert.equal(vscodeCommandCalls.filter(call => call.id === 'workbench.action.chat.attachFile').length, 0);
+				const summary = postedMessages.find(message => message.type === 'chatMemorySummary')?.memorySummary;
+				assert.ok(summary);
+				assert.equal(summary.codemap, null);
+				assert.ok(summary.instructionFiles.every((file: { sourceKind: string }) =>
+					file.sourceKind !== 'codemap' && file.sourceKind !== 'session'));
+			}
+		} finally {
+			rmSync(storageDirectoryPath, { recursive: true, force: true });
+			resetVsCodeCommandMock();
+		}
+	});
+}
 
 test('startChat excludes only workspace projects that still exist from the readonly section', async () => {
 	resetVsCodeCommandMock();

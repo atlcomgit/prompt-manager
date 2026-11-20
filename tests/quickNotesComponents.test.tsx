@@ -60,6 +60,10 @@ function renderWidget(props: Partial<QuickNotesWidgetProps>): string {
 			onClearDone={noop}
 			onOpenStorageFile={noop}
 			onReload={noop}
+			onPin={noop}
+			onDelete={noop}
+			onDuplicate={noop}
+			onSetColor={noop}
 			{...props}
 		/>,
 	);
@@ -89,6 +93,18 @@ test('QuickNotesWidget renders loading and first-note hint states', () => {
 	assert.doesNotMatch(empty, /Поиск заметок/);
 });
 
+/** A note keeps its editor after remounting during background work, even without textarea focus. */
+test('QuickNotesWidget stays expanded for note dictation and distinguishes a busy prompt recorder', () => {
+	const state = createState([]);
+	const onStartVoice = () => undefined;
+	const processing = renderWidget({ state, onStartVoice, voiceInProgress: true });
+	assert.match(processing, /class="pm-qn-add is-expanded"/);
+	assert.match(processing, /class="pm-qn-add-tools"/);
+	const promptRecording = renderWidget({ state, onStartVoice, voiceBusy: true });
+	assert.doesNotMatch(promptRecording, /class="pm-qn-add is-expanded"/);
+	assert.match(promptRecording, /title="Записать и преобразовать речь в текст" disabled=""/);
+});
+
 /** Строки показывают область, прогресс, описание, файлы, промпт и блок выполненных. */
 test('QuickNotesWidget renders compact rows with metadata and done block', () => {
 	const markup = renderWidget({
@@ -104,6 +120,7 @@ test('QuickNotesWidget renders compact rows with metadata and done block', () =>
 		]),
 		expanded: { [buildQuickNoteExpandedKey({ scope: 'workspace', id: 'a' })]: true },
 		newNoteIds: new Set(['b']),
+		searchOpen: true,
 	});
 	assert.match(markup, /Проверить кеш/);
 	assert.match(markup, /aria-label="Чек-лист: 1 из 2"/);
@@ -117,6 +134,8 @@ test('QuickNotesWidget renders compact rows with metadata and done block', () =>
 	assert.match(markup, /pm-qn-row is-new/);
 	assert.match(markup, /--pm-qn-note:var\(--vscode-charts-red\)/);
 	assert.match(markup, /aria-label="Перетащить заметку: Проверить кеш"/);
+	const filtersHidden = renderWidget({ state: createState([note('a', { color: 'red' })]), searchOpen: false });
+	assert.doesNotMatch(filtersHidden, /aria-label="Фильтр по цвету"|aria-label="Поиск заметок"/);
 });
 
 /** Без папки новая заметка сохраняется глобально; ошибка файла показывает действия восстановления. */
@@ -131,8 +150,9 @@ test('QuickNotesWidget handles unavailable workspace, damaged file and empty fil
 		onDismissError: () => undefined,
 	});
 	assert.match(markup, /Расширение не ответило\. Изменение не сохранено\.<\/span><button[^>]*aria-label="Скрыть сообщение"/);
-	assert.match(markup, /aria-label="Область новой заметки: Глобальная"/);
-	assert.match(markup, /disabled=""[^>]*title="Откройте папку/);
+	// Выбор проекта появляется только при фокусе на поле, а не занимает место в свёрнутом состоянии.
+	assert.doesNotMatch(markup, /aria-label="Область новой заметки/);
+	assert.match(markup, /class="pm-qn-add-slot"/);
 	assert.match(markup, /Файл quick-notes\.json повреждён/);
 	assert.match(markup, /Открыть файл/);
 	assert.match(markup, /Ничего не найдено/);

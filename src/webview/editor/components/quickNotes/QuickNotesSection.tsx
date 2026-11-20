@@ -3,7 +3,7 @@
  * хранит PromptDashboard: карточка пересоздаётся при смене числа колонок или порядка виджетов, а черновик не должен
  * пропадать. Доска открывается отдельной страницей (вкладкой редактора) кнопкой в заголовке.
  */
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { DashboardQuickNotesWidgetState } from '../../../../types/promptDashboardPreferences.js';
 import type { QuickNoteView } from '../../../../types/quickNotes.js';
 import { QuickNoteIcon } from './QuickNoteIcon';
@@ -18,6 +18,12 @@ export interface QuickNotesSectionProps {
 	actions: QuickNotesActions;
 	/** Текст поля «Новая заметка…», хранимый панелью. */
 	addText: string;
+	/** Порядковый номер вставки, после которой нужно вернуть фокус в поле заметки. */
+	voiceFocusSignal?: number;
+	onStartVoice?(): void;
+	voiceBusy?: boolean;
+	/** Recording or pending transcription for the note draft. */
+	voiceInProgress?: boolean;
 	onAddTextChange(text: string): void;
 	collapsed: boolean;
 	onToggleCollapse(): void;
@@ -34,6 +40,13 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 	const { client, actions } = props;
 	const { state } = client;
 	const addInputRef = useRef<HTMLTextAreaElement>(null);
+	// При открытии карточки показываем уже действующие фильтры.
+	const hasFilter = Boolean(props.preferences.search.trim() || props.preferences.colors.length);
+	const [searchOpen, setSearchOpen] = useState(() => hasFilter);
+	useEffect(() => {
+		if (hasFilter) setSearchOpen(true);
+	}, [hasFilter]);
+	const lastVoiceFocusSignal = useRef(props.voiceFocusSignal);
 	const focusAddRef = useRef(false);
 	const previousNotesRef = useRef<QuickNoteView[] | null>(null);
 	const expandedRef = useRef(props.expanded);
@@ -49,6 +62,14 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 			addInputRef.current?.focus();
 		}
 	}, [props.collapsed]);
+
+	// Окно записи уже закрыто, а вставленный текст находится в DOM.
+	useEffect(() => {
+		if (props.voiceBusy || props.voiceFocusSignal === lastVoiceFocusSignal.current || !addInputRef.current) return;
+		lastVoiceFocusSignal.current = props.voiceFocusSignal;
+		addInputRef.current.focus();
+		addInputRef.current.setSelectionRange(props.addText.length, props.addText.length);
+	}, [props.addText, props.collapsed, props.voiceBusy, props.voiceFocusSignal]);
 
 	// Ключи раскрытия исчезнувших заметок снимаются, а при смене области переходят на новый ключ: ключ содержит
 	// область. Заметки других рабочих областей не затрагиваются — сравниваются только заметки этого окна.
@@ -82,6 +103,16 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 		<span className="pm-qn-header-actions pm-qn-scope" onKeyDown={event => event.stopPropagation()}>
 			<style>{QUICK_NOTES_CSS}</style>
 			{openCount > 0 ? <span className="pm-qn-count" title="Открытых заметок">{openCount}</span> : null}
+			<button type="button" className="pm-qn-icon-btn" aria-pressed={searchOpen}
+				title={hasFilter && !searchOpen ? 'Поиск заметок (фильтры действуют)' : 'Поиск и фильтр заметок'}
+				aria-label="Поиск заметок" aria-expanded={searchOpen && !props.collapsed}
+				onClick={event => {
+					event.stopPropagation();
+					if (props.collapsed) props.onToggleCollapse();
+					setSearchOpen(open => props.collapsed || !open);
+				}}>
+				<QuickNoteIcon name="search" size={15}/>
+			</button>
 			<button
 				type="button"
 				className="pm-qn-icon-btn"
@@ -122,6 +153,10 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 			newNoteIds={actions.newNoteIds}
 			error={actions.error}
 			addInputRef={addInputRef}
+			searchOpen={searchOpen}
+			onStartVoice={props.onStartVoice}
+			voiceBusy={props.voiceBusy}
+			voiceInProgress={props.voiceInProgress}
 			addText={props.addText}
 			onAddTextChange={props.onAddTextChange}
 			onAdd={(title, scope, openAfter) => {
@@ -149,6 +184,10 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 			onClearDone={actions.clearDone}
 			onOpenStorageFile={client.openStorageFile}
 			onReload={client.reload}
+			onPin={actions.togglePin}
+			onDuplicate={actions.duplicate}
+			onDelete={actions.deleteNote}
+			onSetColor={actions.setColor}
 		/>
 	);
 

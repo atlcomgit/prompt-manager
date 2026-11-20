@@ -16,7 +16,9 @@ export type PromptDashboardSectionKey =
 	| 'todos'
 	| 'aiAnalysis'
 	/** Быстрые заметки получают данные отдельным каналом, а не снимком dashboard. */
-	| 'quickNotes';
+	| 'quickNotes'
+	/** Быстрые команды не требуют обновляемого снимка dashboard. */
+	| 'quickCommands';
 
 /** Persists only sections explicitly collapsed by the user. */
 export type PromptDashboardCollapsedSections = Partial<Record<PromptDashboardSectionKey, boolean>>;
@@ -51,6 +53,7 @@ export const PROMPT_DASHBOARD_SECTION_KEYS: PromptDashboardSectionKey[] = [
 	'todos',
 	'aiAnalysis',
 	'quickNotes',
+	'quickCommands',
 ];
 
 /** Подписи виджетов панели «Обзор» в заголовках карточек и в меню видимости. */
@@ -65,6 +68,7 @@ export const PROMPT_DASHBOARD_SECTION_LABELS: Record<PromptDashboardSectionKey, 
 	todos: 'ToDo',
 	aiAnalysis: 'AI review',
 	quickNotes: 'Быстрые заметки',
+	quickCommands: 'Быстрые команды',
 };
 
 /**
@@ -85,7 +89,7 @@ export function mergePromptDashboardHiddenSections(
 }
 
 /** Секции без данных снимка dashboard: раскрытие и обновление не запрашивают виджеты расширения. */
-export const PROMPT_DASHBOARD_STANDALONE_SECTION_KEYS: PromptDashboardSectionKey[] = ['quickNotes'];
+export const PROMPT_DASHBOARD_STANDALONE_SECTION_KEYS: PromptDashboardSectionKey[] = ['quickNotes', 'quickCommands'];
 
 /** Project-derived sections share one host payload and only collapse as a group for refresh gating. */
 export const PROMPT_DASHBOARD_PROJECT_SECTION_KEYS: PromptDashboardSectionKey[] = [
@@ -163,11 +167,20 @@ export function normalizePromptDashboardSectionOrder(
 		}
 	}
 
+	// A previously saved empty column must remain available as a drop target when a new
+	// widget is introduced. Otherwise normalization fills it and makes drag-to-empty impossible.
+	const explicitEmptyColumns = normalized.map((_, index) => {
+		const column = state[index];
+		return Array.isArray(column) && column.length === 0;
+	});
 	for (let columnIndex = 0; columnIndex < defaultLayout.length; columnIndex += 1) {
 		for (const section of defaultLayout[columnIndex]) {
 			if (!seen.has(section)) {
 				seen.add(section);
-				normalized[columnIndex].push(section);
+				const destination = explicitEmptyColumns[columnIndex]
+					? normalized.findIndex((_, index) => !explicitEmptyColumns[index])
+					: columnIndex;
+				normalized[destination < 0 ? columnIndex : destination].push(section);
 			}
 		}
 	}

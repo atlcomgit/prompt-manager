@@ -6,8 +6,63 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-11-20
+
+#### Fixed
+- Keep the new-note field expanded during recording and background transcription. Append the result to the draft
+  and return the caret to the end of the text.
+- Keep the Quick Commands agent selected across prompts and editor tabs. Focus the Codex composer
+  for local X11 paste and allow drafts in the existing OpenCode CLI terminal after automatic submission.
+- Show the status label alongside progress in the expanded Prompt Status widget.
+- Clear discards the draft and removes focus. The new-note field collapses when dictation is inactive.
+  Clipboard text adds a period to the title and a colon to a distinct description followed by a nonempty checklist.
+- Startup waits up to ten seconds for the providers needed by each operation. A pending Copilot startup
+  leaves the other account sections available.
+- Ignore extra saved dashboard columns, keep command drafts attached to their original row, and preserve
+  locally counted Copilot usage when a shared snapshot is read again.
+- Keep an early microphone pause in effect and remove attachment copies when note duplication fails.
+- В строке состояния Codex и Claude Code убраны сокращения режима. Цвета темы VS Code отображают
+  расход квоты одинаково в режимах «Использовано» и «Осталось».
+- Лупа в быстрых заметках управляет поиском и фильтром по цвету. «Сохранить» идёт первой кнопкой,
+  а после голосового ввода курсор возвращается в поле новой заметки. Сокращено ожидание захвата
+  микрофона и коррекции расшифровки.
+- Двойной щелчок по быстрой команде готовит черновик в выбранном чате. «В работе» показывается одной
+  шкалой. Изменённые файлы открывают сравнение нужной группы без ожидания списка SCM. Шаг 2 Git Flow
+  выделяет постороннюю ветку красным по правилу шага 1.
+- Поле новой заметки сворачивается после сохранения. Копирование включает название, отличающееся
+  описание и чек-лист. Ctrl+ЛКМ выделяет несколько заметок для групповых действий из меню ПКМ.
+- Сборка обновляет все настроенные установки VS Code Tunnel, по одной на реестр расширений.
+  Список целей можно проверить перед сборкой без записи.
+- Quick Notes bulk actions show the number of selected notes, including color changes and deletion.
+- Codex, Claude Code, and GitHub Copilot share quota snapshots across sessions of the same user on one host.
+  While one extension host refreshes a provider, the other hosts skip that provider's refresh.
+
 ### 2026-11-19
 
+#### Added
+- Для статус-баров Codex и Claude Code добавлена подсветка при достижении любой квоты:
+  предупреждение от 60% использовано / 60% осталось и ниже, критический уровень
+  от 90% использовано / 10% осталось и ниже. Используются стандартные цвета
+  предупреждения и ошибки темы VS Code и контрастный цвет текста.
+- Виджет «Быстрые команды»: глобальные редактируемые фразы с быстрым поиском и выбором чата;
+  Copilot и адресный OpenCode CLI поддерживают вставку без отправки, Codex и Claude Code —
+  безопасное копирование с открытием чата для ручной вставки.
+- Поле новой заметки разворачивается поверх списка, с выбором области и кнопкой сохранения
+  внутри, голосовым вводом и неизменной высотой виджета.
+- Контекстное меню заметки по правой кнопке: редактирование, закрепление, копирование текста
+  с подсветкой активного содержимого буфера, дублирование вместе с файлами, цвет и удаление.
+- Окно заметки копирует описание или название вместе с чек-листом; перегенерация AI
+  запоминает отклонённые ранее предложения.
+- Свёрнутый виджет «Статус промпта» показывает текущий статус и компактную шкалу прогресса;
+  «Git flow» у кнопки коммита указывает текущую ветку проекта.
+
+#### Fixed
+- Скрытые виджеты исключаются из загрузки данных; скрытые «Быстрые заметки» прекращают
+  получать сообщения состояния до повторного показа.
+- Поиск быстрых заметок и Docker перенесён под лупу в шапке; действующие сохранённые
+  фильтры автоматически открывают поле, чтобы избежать невидимой фильтрации.
+- Исправлены дублированные элементы голосового ввода и добавлены проверки корректного
+  дублирования файлов заметки и хранения отклонённых AI-предложений.
 #### Fixed
 - Страница «Аккаунты» больше не показывает режим «Использовано», если Webview уже обновлена,
   но серверный процесс Extension Host был запущен до обновления расширения. Вместо этого

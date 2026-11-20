@@ -7,7 +7,7 @@ import { normalizePromptDashboardHiddenSections } from '../types/promptDashboard
 
 import * as vscode from 'vscode';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
-import { copyFile, mkdir, readdir, realpath } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readdir, realpath, writeFile } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { spawn } from 'child_process';
 import { CopilotCodexSessionService } from '../services/copilotCodexSessionService.js';
@@ -506,6 +506,9 @@ export class EditorPanelManager {
 		if (prompt.chatTarget === 'claude' && prompt.claudeChat) {
 			// Наблюдение и SDK не задерживают первую отрисовку редактора.
 			void Promise.resolve().then(async () => {
+				if (this.whenProvidersReady && (!await this.whenProvidersReady() || this.panelPromptRefs.get(panelKey) !== prompt)) {
+					return;
+				}
 				await this.trackClaudePrompt(prompt);
 				return this.refreshClaudePrompt(prompt);
 			}).catch(error => this.reportClaudeTrackingError(error));
@@ -3198,6 +3201,7 @@ export class EditorPanelManager {
 		prompt: Pick<Prompt, 'autoStartChatWithXdotool'>,
 		text: string,
 		commands: string[],
+		allowXdotoolFallback = true,
 	): Promise<XdotoolSubmitResult> {
 		// Команда VS Code возвращает успех до исполнения paste в iframe; в браузере это ложное подтверждение.
 		if (vscode.env.uiKind === vscode.UIKind.Web) {
@@ -3211,7 +3215,9 @@ export class EditorPanelManager {
 			? 'chatgpt.sidebarSecondaryView.focus'
 			: 'chatgpt.sidebarView.focus';
 		if (!commands.includes('editor.action.clipboardPasteAction') || !commands.includes(viewFocusCommand)) {
-			return this.prepareCodexPromptWithXdotool(prompt, text);
+			return allowXdotoolFallback
+				? this.prepareCodexPromptWithXdotool(prompt, text)
+				: { ok: false, stage: 'focus', reason: 'команда фокуса поля Codex недоступна' };
 		}
 
 		try {
@@ -3253,6 +3259,39 @@ export class EditorPanelManager {
 		}
 		const submitted = await this.runXdotoolKeys([this.resolveCodexSubmitKey(text)], 'Codex');
 		return { ...submitted, stage: 'submit' };
+	}
+
+	/** Передаёт черновик выбранному чату и сообщает, удалось ли вызвать его штатную вставку. */
+	private async insertDashboardQuickCommand(
+		target: Extract<WebviewToExtensionMessage, { type: 'promptDashboardQuickCommandInsert' }>['target'],
+		promptUuid: string,
+		text: string,
+	): Promise<boolean> {
+		switch (target) {
+			case 'copilot':
+				await vscode.commands.executeCommand('workbench.action.chat.open', { query: text, isPartialQuery: true });
+				return true;
+			case 'claude':
+				await this.ensureClaudeChatAvailable();
+				// initialPrompt заполняет поле черновика и сохраняет выбранное место открытия Claude Code.
+				await vscode.commands.executeCommand(
+					'claude-vscode.editor.open', undefined, text, undefined, undefined, undefined,
+					{ programmatic: 'honor-preferred-location' },
+				);
+				return true;
+			case 'codex': {
+				const draftOnly = { autoStartChatWithXdotool: false };
+				// Sidebar focus can land on its toolbar. On local X11, focus the composer before pasting.
+				if (this.isXdotoolPlatformSupported() && process.env.DISPLAY && vscode.window.state.focused) {
+					const result = await this.prepareCodexPromptWithXdotool(draftOnly, text);
+					if (result.ok || result.partialPaste) return result.ok;
+				}
+				const commands = await vscode.commands.getCommands(true);
+				return (await this.prepareCodexPrompt(draftOnly, text, commands, false)).ok;
+			}
+			case 'opencode-cli':
+				return this.openCodeCliService?.insertIntoOpenChat(promptUuid, text) === true;
+		}
 	}
 
 	private async dispatchKiloChatTarget(
@@ -4764,10 +4803,12 @@ export class EditorPanelManager {
 		private readonly promptVoiceService: PromptVoiceService,
 		private readonly promptDashboardService: PromptDashboardService,
 		private readonly dockerContainersService: DockerContainersService,
-		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
-		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined,
+		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined | Promise<ChatMemoryInstructionService | undefined>,
+		private readonly getCodeMapChatInstructionService?: () => CodeMapChatInstructionService | undefined | Promise<CodeMapChatInstructionService | undefined>,
 		private readonly customGroupsService?: CustomGroupsService,
 		private readonly copilotCodexSessionService: Pick<CopilotCodexSessionService, 'prepare'> = new CopilotCodexSessionService(),
+		private readonly whenProvidersReady?: () => Promise<boolean>,
+		private readonly whenGitReady?: () => Promise<boolean>,
 	) {
 		this.promptDashboardLayoutsState = this.stateService.getPromptDashboardLayouts();
 		this.promptDashboardHiddenSections = this.stateService.getPromptDashboardPreferences()?.hiddenSections ?? [];
@@ -4942,24 +4983,6 @@ export class EditorPanelManager {
 			promptUuid: (currentPrompt.promptUuid || '').trim() || undefined,
 			progress: nextProgress,
 		} satisfies ExtensionToWebviewMessage);
-	}
-
-	private chatMemoryInstructionService(): ChatMemoryInstructionService | undefined {
-		return this.getChatMemoryInstructionService?.();
-	}
-
-	private codeMapChatInstructionService(): CodeMapChatInstructionService | undefined {
-		return this.getCodeMapChatInstructionService?.();
-	}
-
-	/** Check whether runtime memory history context is enabled for chat start. */
-	private isChatMemoryHistoryContextEnabled(): boolean {
-		return Boolean(this.chatMemoryInstructionService()) && getMemorySettings().enabled;
-	}
-
-	/** Check whether runtime codemap context is enabled for chat start. */
-	private isChatCodeMapContextEnabled(): boolean {
-		return Boolean(this.codeMapChatInstructionService()) && getCodeMapSettings().enabled;
 	}
 
 	private shouldCaptureAgentFinalResponse(): boolean {
@@ -6360,7 +6383,15 @@ export class EditorPanelManager {
 	}
 
 	private async initializeGitOverlayReactiveSources(): Promise<void> {
-		if (!this.hasActiveGitReactiveConsumers()) {
+		// Закрытие или повторное открытие панели заменяет набор подписок даже во время ожидания Git.
+		const disposables = this.gitOverlayReactiveDisposables;
+		const isCurrent = () => !this.isShuttingDown
+			&& disposables === this.gitOverlayReactiveDisposables && this.hasActiveGitReactiveConsumers();
+		if (!isCurrent()) {
+			return;
+		}
+		const whenGitReady = this.whenGitReady ?? this.whenProvidersReady;
+		if (whenGitReady && (!await whenGitReady() || !isCurrent())) {
 			return;
 		}
 
@@ -6424,7 +6455,7 @@ export class EditorPanelManager {
 		const gitApi = typeof this.gitService.getBuiltInGitApi === 'function'
 			? await this.gitService.getBuiltInGitApi()
 			: null;
-		if (!gitApi) {
+		if (!gitApi || !isCurrent()) {
 			return;
 		}
 
@@ -6456,11 +6487,16 @@ export class EditorPanelManager {
 			return;
 		}
 
-		this.gitOverlayReactiveSourcesReady = this.initializeGitOverlayReactiveSources();
+		const initialization = this.initializeGitOverlayReactiveSources().catch(error => {
+			appendPromptManagerLog(`[git] Не удалось подключить наблюдение за репозиториями: ${String(error)}`);
+		});
+		this.gitOverlayReactiveSourcesReady = initialization;
 		try {
-			await this.gitOverlayReactiveSourcesReady;
+			await initialization;
 		} finally {
-			this.gitOverlayReactiveSourcesReady = null;
+			if (this.gitOverlayReactiveSourcesReady === initialization) {
+				this.gitOverlayReactiveSourcesReady = null;
+			}
 		}
 	}
 
@@ -6511,7 +6547,8 @@ export class EditorPanelManager {
 			return;
 		}
 
-		await this.ensureGitOverlayReactiveSources();
+		// Снимок по кнопке доступен независимо от готовности фоновых подписок.
+		void this.ensureGitOverlayReactiveSources();
 	}
 
 	private resolveGitOverlayQueuedMode(
@@ -6749,12 +6786,8 @@ export class EditorPanelManager {
 		return false;
 	}
 
+	/** Открывает рабочий diff штатной командой Git. Встроенное расширение активируется при её вызове. */
 	private async tryOpenGitDiff(uri: vscode.Uri): Promise<boolean> {
-		const commands = await vscode.commands.getCommands(true);
-		if (!commands.includes('git.openChange')) {
-			return false;
-		}
-
 		try {
 			await vscode.commands.executeCommand('git.openChange', uri);
 			return true;
@@ -6780,8 +6813,29 @@ export class EditorPanelManager {
 		});
 	}
 
-	private async openGitOverlayDiff(project: string, filePath: string): Promise<void> {
+	/** Для изменённого файла открывает выбранное сравнение по URI, независимо от обновления списка SCM. */
+	private async openGitOverlayDiff(
+		project: string,
+		filePath: string,
+		change?: Extract<WebviewToExtensionMessage, { type: 'gitOverlayOpenDiff' }>['change'],
+	): Promise<void> {
 		const uri = await this.resolveProjectFileUri(project, filePath);
+		if (change?.status === 'M' && !change.previousPath && !change.conflicted
+			&& (change.group === 'working-tree' || change.group === 'staged')) {
+			try {
+				const api = await this.gitService.getBuiltInGitApi();
+				if (api?.toGitUri && api.getRepository(uri)) {
+					const staged = change.group === 'staged';
+					const left = api.toGitUri(uri, staged ? 'HEAD' : '');
+					const right = staged ? api.toGitUri(uri, '') : uri;
+					const context = staged ? 'Индекс' : 'Рабочее дерево';
+					await vscode.commands.executeCommand('vscode.diff', left, right, `${path.basename(uri.fsPath)} (${context})`);
+					return;
+				}
+			} catch {
+				// В старых или отключённых версиях Git сохраняем обычное открытие через SCM.
+			}
+		}
 		const opened = await this.tryOpenGitDiff(uri);
 		if (opened) {
 			return;
@@ -6813,7 +6867,7 @@ export class EditorPanelManager {
 		});
 	}
 
-	/** Opens an exact dashboard file comparison using VS Code's standard diff editor. */
+	/** Готовит обе стороны сравнения параллельно, включая чтение автора и общей базы веток. */
 	private async openPromptDashboardFilePatch(input: {
 		project: string;
 		filePath: string;
@@ -6826,14 +6880,13 @@ export class EditorPanelManager {
 		if (!projectPath) {
 			throw new Error(`Проект "${input.project}" не найден.`);
 		}
-		const leftRef = input.mode === 'commit'
-			? `${input.ref}^`
-			: await this.resolvePromptDashboardBranchDiffBase(projectPath, input.baseRef || 'HEAD', input.ref);
 		const rightRef = input.ref;
 		const leftPath = input.previousPath || input.filePath;
-		// Resolve both file sides and the visible author metadata in one round-trip.
+		const leftRef = input.mode === 'commit'
+			? Promise.resolve(`${rightRef}^`)
+			: this.resolvePromptDashboardBranchDiffBase(projectPath, input.baseRef || 'HEAD', rightRef);
 		const [leftContent, rightContent, author] = await Promise.all([
-			this.gitService.getFileContentAtRef(projectPath, leftRef, leftPath),
+			leftRef.then(ref => this.gitService.getFileContentAtRef(projectPath, ref, leftPath)),
 			this.gitService.getFileContentAtRef(projectPath, rightRef, input.filePath),
 			this.gitService.getFileAuthorAtRef(projectPath, rightRef, input.filePath),
 		]);
@@ -6845,14 +6898,12 @@ export class EditorPanelManager {
 			baseRef: input.baseRef || 'HEAD',
 			author,
 		});
-		const diffDirectory = vscode.Uri.file(path.join(
-			os.tmpdir(),
-			'prompt-manager-dashboard-diff',
-			`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-		));
-		await vscode.workspace.fs.createDirectory(diffDirectory);
-		const leftUri = await this.writePromptDashboardDiffSide(diffDirectory, 'left', leftPath, leftContent);
-		const rightUri = await this.writePromptDashboardDiffSide(diffDirectory, 'right', input.filePath, rightContent);
+		// Временные файлы находятся на том же хосте, что и Git. Обе записи независимы.
+		const diffDirectory = await mkdtemp(path.join(os.tmpdir(), 'prompt-manager-dashboard-diff-'));
+		const [leftUri, rightUri] = await Promise.all([
+			this.writePromptDashboardDiffSide(diffDirectory, 'left', leftPath, leftContent),
+			this.writePromptDashboardDiffSide(diffDirectory, 'right', input.filePath, rightContent),
+		]);
 		await vscode.commands.executeCommand(
 			'vscode.diff',
 			leftUri,
@@ -6868,18 +6919,18 @@ export class EditorPanelManager {
 		return mergeBase || baseRef;
 	}
 
-	/** Writes one side of a dashboard diff to a temporary file URI. */
+	/** Записывает одну сторону сравнения с исходным расширением файла для подсветки синтаксиса. */
 	private async writePromptDashboardDiffSide(
-		directory: vscode.Uri,
+		directory: string,
 		side: 'left' | 'right',
 		filePath: string,
 		content: string,
 	): Promise<vscode.Uri> {
 		const basename = path.basename(filePath.trim() || 'file.txt');
 		const safeName = basename.replace(/[^a-zA-Z0-9._-]/g, '_') || 'file.txt';
-		const uri = vscode.Uri.joinPath(directory, `${side}-${safeName}`);
-		await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf-8'));
-		return uri;
+		const filename = path.join(directory, `${side}-${safeName}`);
+		await writeFile(filename, content, 'utf-8');
+		return vscode.Uri.file(filename);
 	}
 
 	private async openGitOverlayReviewRequest(url: string): Promise<void> {
@@ -9049,6 +9100,9 @@ export class EditorPanelManager {
 				.filter(([, p]) => p === panel)
 				.map(([key]) => key);
 			const disposedCurrentEditorPanel = linkedKeys.includes(SINGLE_EDITOR_PANEL_KEY);
+			if (disposedCurrentEditorPanel) {
+				this.promptDashboardService.pauseActiveScope('panel-closed');
+			}
 			const skipUnsavedPrompt = this.silentClosePanels.has(panel);
 			this.silentClosePanels.delete(panel);
 			this.clearPromptPlanTracking(panelKey);
@@ -9933,8 +9987,12 @@ export class EditorPanelManager {
 					branchesByProject: this.getGitOverlayTrackedBranchesByProjectPreference(),
 				});
 
+				// Промпт и его настройки уже доступны. Фоновое чтение и проверка сохранённых сессий ждут провайдеров.
+				if (this.whenProvidersReady && (!await this.whenProvidersReady() || isReadyCycleStale())) {
+					break;
+				}
 				void (async () => {
-					if (!currentPrompt.chatSessionIds?.length) {
+					if (!currentPrompt.chatSessionIds?.length || this.panelPromptRefs.get(panelKey) !== currentPrompt) {
 						return;
 					}
 
@@ -9945,7 +10003,8 @@ export class EditorPanelManager {
 						}
 					}
 
-					if (isReadyCycleStale() || existingSessionIds.length === currentPrompt.chatSessionIds.length) {
+					if (isReadyCycleStale() || this.panelPromptRefs.get(panelKey) !== currentPrompt
+						|| existingSessionIds.length === currentPrompt.chatSessionIds.length) {
 						return;
 					}
 
@@ -10323,7 +10382,7 @@ export class EditorPanelManager {
 						if (promptForPanel.status !== 'in-progress') {
 							void (async () => {
 								try {
-									await this.chatMemoryInstructionService()?.handlePromptStatusChange(promptForPanel);
+									await (await this.getChatMemoryInstructionService?.())?.handlePromptStatusChange(promptForPanel);
 								} catch (error) {
 									this.hooksOutput.appendLine(`[chat-memory] status cleanup after save failed: ${error instanceof Error ? error.message : String(error)}`);
 								}
@@ -10985,7 +11044,7 @@ export class EditorPanelManager {
 					}
 					if (prompt?.promptUuid) {
 						try {
-							await this.chatMemoryInstructionService()?.noteChatError(
+							await (await this.getChatMemoryInstructionService?.())?.noteChatError(
 								prompt.promptUuid,
 								finalMessage,
 								trackedSessionId || undefined,
@@ -11088,7 +11147,7 @@ export class EditorPanelManager {
 						await this.storageService.savePrompt(promptFromStorage, { historyReason: 'start-chat' });
 						this.lockPromptIdAfterChatStart(promptFromStorage);
 						try {
-							await this.chatMemoryInstructionService()?.bindChatSession(promptFromStorage.promptUuid, normalizedSessionId);
+							await (await this.getChatMemoryInstructionService?.())?.bindChatSession(promptFromStorage.promptUuid, normalizedSessionId);
 						} catch (error) {
 							this.hooksOutput.appendLine(`[chat-memory] bindChatSession failed for prompt=${promptFromStorage.id}: ${error instanceof Error ? error.message : String(error)}`);
 						}
@@ -11182,20 +11241,21 @@ export class EditorPanelManager {
 					} catch (error) {
 						this.hooksOutput.appendLine(`[global-context] register .github/instructions failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 					}
-					const isChatCodeMapContextEnabled = this.isChatCodeMapContextEnabled();
+					// Настроенные инструкции должны быть подготовлены и при запуске чата из восстановленного окна.
+					const codeMapService = getCodeMapSettings().enabled ? await this.getCodeMapChatInstructionService?.() : undefined;
 					let codeMapSummary: ChatMemoryCodemapSummary | null = null;
-					if (isChatCodeMapContextEnabled) {
+					if (codeMapService) {
 						try {
-							codeMapSummary = await this.codeMapChatInstructionService()?.prepareInstruction(prompt) ?? null;
+							codeMapSummary = await codeMapService.prepareInstruction(prompt) ?? null;
 						} catch (error) {
 							this.hooksOutput.appendLine(`[codemap] prepareInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 						}
 					}
-					const isChatMemoryHistoryContextEnabled = this.isChatMemoryHistoryContextEnabled();
+					const memoryService = getMemorySettings().enabled ? await this.getChatMemoryInstructionService?.() : undefined;
 					let sessionInstructionRecord: Awaited<ReturnType<ChatMemoryInstructionService['prepareSessionInstruction']>> | null = null;
-					if (isChatMemoryHistoryContextEnabled) {
+					if (memoryService) {
 						try {
-							sessionInstructionRecord = await this.chatMemoryInstructionService()?.prepareSessionInstruction(prompt) ?? null;
+							sessionInstructionRecord = await memoryService.prepareSessionInstruction(prompt) ?? null;
 						} catch (error) {
 							this.hooksOutput.appendLine(`[chat-memory] prepareSessionInstruction failed for prompt=${prompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 						}
@@ -11208,10 +11268,8 @@ export class EditorPanelManager {
 						workspaceRoot,
 						storageDir,
 						promptContextFiles: prompt.contextFiles,
-						sessionInstructionFilePath: isChatMemoryHistoryContextEnabled
-							? sessionInstructionRecord?.instructionFilePath
-							: undefined,
-						includeCodeMapInstructionFile: isChatCodeMapContextEnabled,
+						sessionInstructionFilePath: sessionInstructionRecord?.instructionFilePath,
+						includeCodeMapInstructionFile: Boolean(codeMapService),
 					});
 					const fileUris = chatContextFiles.allAbsolutePaths.map(filePath => vscode.Uri.file(filePath));
 
@@ -11878,7 +11936,7 @@ export class EditorPanelManager {
 								timeSpentImplementing: promptToComplete?.timeSpentImplementing || 0,
 							}, 'afterChatCompleted');
 							try {
-								await this.chatMemoryInstructionService()?.completeChatSession(
+								await (await this.getChatMemoryInstructionService?.())?.completeChatSession(
 									prompt.promptUuid,
 									'afterChatCompleted',
 									trackedSessionId || undefined,
@@ -11947,7 +12005,7 @@ export class EditorPanelManager {
 								timeSpentImplementing: promptForTiming?.timeSpentImplementing || 0,
 							}, 'afterChatCompleted');
 							try {
-								await this.chatMemoryInstructionService()?.completeChatSession(
+								await (await this.getChatMemoryInstructionService?.())?.completeChatSession(
 									prompt.promptUuid,
 									'afterChatCompleted',
 									trackedSessionId || undefined,
@@ -11981,7 +12039,7 @@ export class EditorPanelManager {
 									});
 									chatErrorStatus = savedStoppedPrompt.status;
 									try {
-										await this.chatMemoryInstructionService()?.handlePromptStatusChange(savedStoppedPrompt);
+										await (await this.getChatMemoryInstructionService?.())?.handlePromptStatusChange(savedStoppedPrompt);
 									} catch (error) {
 										this.hooksOutput.appendLine(`[chat-memory] chatError status cleanup failed for prompt=${savedStoppedPrompt.id}: ${error instanceof Error ? error.message : String(error)}`);
 									}
@@ -12003,7 +12061,7 @@ export class EditorPanelManager {
 							status: chatErrorStatus,
 						}, 'chatError');
 						try {
-							await this.chatMemoryInstructionService()?.noteChatError(
+							await (await this.getChatMemoryInstructionService?.())?.noteChatError(
 								prompt.promptUuid,
 								`Chat completion not detected (${completion.reason || 'unknown'})`,
 								trackedSessionId || undefined,
@@ -12554,6 +12612,37 @@ export class EditorPanelManager {
 				} catch (error) {
 					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error), requestId: msg.requestId });
 				}
+				break;
+			}
+
+			case 'promptDashboardQuickCommandInsert': {
+				const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+				const target = msg.target;
+				if (!text || text.length > 3000
+					|| !['copilot', 'codex', 'claude', 'opencode-cli'].includes(target)) {
+					postMessage({ type: 'error', message: 'Некорректная быстрая команда или целевой агент.' });
+					break;
+				}
+				const inserted = await this.insertDashboardQuickCommand(target, currentPrompt.promptUuid, text)
+					.catch(() => false);
+				if (inserted) {
+					break;
+				}
+				// Start clipboard access before moving the browser focus and bound the wait in Web.
+				const copied = vscode.env.uiKind === vscode.UIKind.Web
+					? this.writeClipboardTextWithTimeout(text, CODEX_WEB_CLIPBOARD_TIMEOUT_MS)
+					: vscode.env.clipboard.writeText(text).then(() => true, () => false);
+				if (target === 'codex') await this.focusCodex();
+				const openCodeVisible = target === 'opencode-cli' && this.openCodeCliService?.open(currentPrompt.promptUuid);
+				if (!await copied) {
+					postMessage({ type: 'error', message: 'Не удалось вставить команду или записать её в буфер обмена.' });
+					break;
+				}
+				postMessage({ type: 'info', message: target === 'opencode-cli'
+					? openCodeVisible
+						? 'Команда скопирована. Вставьте её в поле OpenCode CLI через меню терминала или Ctrl+Shift+V.'
+						: 'Команда скопирована. Откройте OpenCode CLI для этого промпта и вставьте её в поле чата.'
+					: 'Команда скопирована. Вставьте её в поле чата агента нажатием Ctrl+V.' });
 				break;
 			}
 
@@ -13242,7 +13331,7 @@ export class EditorPanelManager {
 
 			case 'gitOverlayOpenDiff': {
 				try {
-					await this.openGitOverlayDiff(msg.project, msg.filePath);
+					await this.openGitOverlayDiff(msg.project, msg.filePath, msg.change);
 				} catch (error) {
 					postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
 				}

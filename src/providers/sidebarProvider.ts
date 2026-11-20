@@ -41,7 +41,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		private readonly workspaceService: WorkspaceService,
 		private readonly gitService: GitService,
 		private readonly stateService: StateService,
-		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
+		private readonly getChatMemoryInstructionService?: () =>
+			ChatMemoryInstructionService | undefined | Promise<ChatMemoryInstructionService | undefined>,
 		private readonly customGroupsService?: CustomGroupsService,
 	) {
 		this.initializeAgentJsonWatcher();
@@ -65,7 +66,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		const savedPrompt = await this.storageService.savePrompt(prompt, { historyReason: 'status-change' });
 		if (savedPrompt.status !== 'in-progress') {
 			try {
-				await this.getChatMemoryInstructionService?.()?.handlePromptStatusChange(savedPrompt);
+				const memory = await this.getChatMemoryInstructionService?.();
+				await memory?.handlePromptStatusChange(savedPrompt);
 			} catch {
 				// keep sidebar responsive if session cleanup fails
 			}

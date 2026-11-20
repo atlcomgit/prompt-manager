@@ -18,6 +18,7 @@ import {
 	createQuickNoteDraft,
 	createQuickNoteId,
 	getQuickNoteChecklistProgress,
+	formatQuickNoteClipboardText,
 	isQuickNoteDraftDirty,
 	normalizeQuickNoteColor,
 	resolveAdjacentQuickNoteId,
@@ -99,6 +100,7 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 	const [saving, setSaving] = useState(false);
 	const [promptStatus, setPromptStatus] = useState<null | { kind: 'busy' | 'ok' | 'error'; text: string }>(null);
 	const [newItemText, setNewItemText] = useState('');
+	const [copyStatus, setCopyStatus] = useState<'idle' | 'ok' | 'error'>('idle');
 	const [focusItemId, setFocusItemId] = useState<string | null>(null);
 	/** Своё удаление ждёт подтверждения: исчезновение заметки в это время не означает удаление в другом окне. */
 	const [deleting, setDeleting] = useState(false);
@@ -452,10 +454,33 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 		if (files.length > 0) await attachLocalFiles(files);
 	};
 
+	/** Копирует название, отличающееся описание и чек-лист текущего черновика. */
+	const copyNoteText = async () => {
+		const text = formatQuickNoteClipboardText(draft);
+		try {
+			await navigator.clipboard.writeText(text);
+			setCopyStatus('ok');
+		} catch {
+			setCopyStatus('error');
+			setBanner({ kind: 'error', message: 'Браузер не разрешил запись в буфер обмена. Проверьте разрешения VS Code Tunnel.' });
+		}
+	};
+
 	/** Запрашивает предложение пункта; поздний ответ после перегенерации или закрытия отбрасывается. */
-	const requestSuggestion = async () => {
+	const requestSuggestion = async (rejectCurrent = false) => {
 		const sequence = ++suggestionSeqRef.current;
-		const previous = suggestion?.previous ?? [];
+		const rejected = rejectCurrent && suggestion?.text.trim() ? suggestion.text.trim() : '';
+		const previous = [...new Set([
+			...(note.rejectedSuggestions || []), ...(suggestion?.previous || []), rejected,
+		].map(text => text.trim()).filter(Boolean))].slice(-80);
+		// Rejected suggestions are saved immediately even if the editor is later closed without saving.
+		if (rejected) {
+			const stored = await client.apply({ kind: 'rejectSuggestion', scope: note.scope, id: note.id, text: rejected });
+			if (!stored.ok) {
+				setSuggestion({ status: 'error', text: '', previous, error: stored.message || 'Не удалось запомнить отклонённый пункт.' });
+				return;
+			}
+		}
 		setSuggestion({ status: 'loading', text: '', previous });
 		const result = await client.suggest({
 			title: draft.title,
@@ -464,12 +489,13 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 			fileNames: draft.files.map(file => file.name),
 			previousSuggestions: previous,
 		});
-		if (!mountedRef.current || sequence !== suggestionSeqRef.current) {
-			return;
-		}
-		setSuggestion(result.text
+		if (!mountedRef.current || sequence !== suggestionSeqRef.current) return;
+		const repeated = Boolean(result.text && previous.some(value => value.toLocaleLowerCase() === result.text.trim().toLocaleLowerCase()));
+		setSuggestion(result.text && !repeated
 			? { status: 'ready', text: result.text, previous: [...previous, result.text] }
-			: { status: 'error', text: '', error: result.error || 'AI не предложил новый пункт. Попробуйте ещё раз.', previous });
+			: { status: 'error', text: '', error: repeated
+				? 'AI повторил уже отклонённый пункт. Попробуйте перегенерировать.'
+				: result.error || 'AI не предложил новый пункт. Попробуйте ещё раз.', previous });
 	};
 
 	/** Скрывает блок предложения и делает ожидаемый ответ устаревшим. */
@@ -877,7 +903,7 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 								)}
 								<div className="pm-qn-actions">
 									<span className="pm-qn-muted pm-qn-grow">Учитываются название, описание, пункты и файлы заметки. Текст можно поправить.</span>
-									<button type="button" className="pm-qn-btn is-ghost" disabled={suggestion.status === 'loading'} onClick={() => void requestSuggestion()}>
+									<button type="button" className="pm-qn-btn is-ghost" disabled={suggestion.status === 'loading'} onClick={() => void requestSuggestion(true)}>
 										<QuickNoteIcon name="refresh" size={13} />Перегенерировать
 									</button>
 									<button type="button" className="pm-qn-btn is-primary" disabled={suggestion.status !== 'ready' || !suggestion.text.trim()} onClick={applySuggestion}>
@@ -980,6 +1006,9 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 						</button>
 					)}
 					<span className="pm-qn-grow" />
+					<button type="button" className="pm-qn-btn is-secondary" onClick={() => void copyNoteText()}>
+						<QuickNoteIcon name="clippy" size={13}/>{copyStatus === 'ok' ? 'Скопировано' : 'Копировать'}
+					</button>
 					{dirty ? <span className="pm-qn-dirty">Есть несохранённые изменения</span> : null}
 					<button type="button" className="pm-qn-btn is-secondary" onClick={requestClose}>Отмена</button>
 					<button type="button" className="pm-qn-btn is-primary" disabled={!dirty || saving || props.missing || uploadingLocalFiles} onClick={() => void saveAndClose()}>

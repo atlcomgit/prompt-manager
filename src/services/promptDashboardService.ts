@@ -136,7 +136,10 @@ export class PromptDashboardService implements vscode.Disposable {
 	private autoRefreshGeneration = 0;
 	private activePrompt: Prompt | null = null;
 	private activePostMessage: DashboardPostMessage | undefined;
-	private readonly dockerChangeListener: vscode.Disposable | undefined;
+	private dockerChangeListener?: vscode.Disposable;
+	private backgroundReady = false;
+	private disposed = false;
+	private pendingSnapshotRefresh?: () => void;
 
 	constructor(
 		private readonly storageService: StorageService,
@@ -145,7 +148,20 @@ export class PromptDashboardService implements vscode.Disposable {
 		private readonly aiService: AiService,
 		private readonly dockerContainersService?: DockerContainersService,
 		private readonly todoScannerService?: TodoScannerService,
+		whenProvidersReady?: () => Promise<boolean>,
 	) {
+		if (whenProvidersReady) {
+			void whenProvidersReady().then(ready => {
+				if (ready && !this.disposed) this.startBackgroundRefresh();
+			});
+		} else {
+			this.startBackgroundRefresh();
+		}
+	}
+
+	/** Таймеры и наблюдение Docker начинаются вместе с фоновым обновлением последней видимой панели. */
+	private startBackgroundRefresh(): void {
+		this.backgroundReady = true;
 		this.dockerChangeListener = this.dockerContainersService?.onDidChange(reason => this.scheduleDockerAutoRefresh(reason));
 		this.warmTimer = setInterval(() => {
 			const scope = this.activeScope;
@@ -156,10 +172,14 @@ export class PromptDashboardService implements vscode.Disposable {
 			void this.refreshScope(scope, undefined, { force: false, prompt, includeAiAnalysis: true });
 		}, PROMPT_DASHBOARD_WARM_INTERVAL_MS);
 		this.warmTimer.unref?.();
+		this.pendingSnapshotRefresh?.();
+		this.pendingSnapshotRefresh = undefined;
 	}
 
 	/** Закрывает scope до очистки: поздний inflight не публикует данные и не ставит таймер; тесты Docker dispose. */
 	dispose(): void {
+		this.disposed = true;
+		this.pendingSnapshotRefresh = undefined;
 		this.pauseActiveScope('dispose');
 		this.activePostMessage = undefined;
 		if (this.warmTimer) {
@@ -218,18 +238,25 @@ export class PromptDashboardService implements vscode.Disposable {
 		this.activePrompt = prompt;
 		this.activePostMessage = postMessage || this.activePostMessage;
 		const snapshot = this.buildSnapshotFromCache(scope, prompt, options?.collapsedWidgets);
-		this.primeDockerWidget(scope, prompt, postMessage, requestId, options?.collapsedWidgets);
-		// Initial open should avoid auto-running AI review on the prompt-open critical path.
-		this.scheduleAutoRefresh(scope, postMessage, {
-			force: forceRefresh,
-			requestId,
-			prompt,
-			includeAiAnalysis: false,
-			ensureBackgroundAiAnalysis: true,
-			analysisReason: 'initial-auto-refresh',
-			projectsMode: 'display',
-			collapsedWidgets: options?.collapsedWidgets,
-		});
+		const refresh = () => {
+			if (!this.isScopeActive(scope)) return;
+			this.primeDockerWidget(scope, prompt, postMessage, requestId, options?.collapsedWidgets);
+			this.scheduleAutoRefresh(scope, postMessage, {
+				force: forceRefresh,
+				requestId,
+				prompt,
+				includeAiAnalysis: false,
+				ensureBackgroundAiAnalysis: true,
+				analysisReason: 'initial-auto-refresh',
+				projectsMode: 'display',
+				collapsedWidgets: options?.collapsedWidgets,
+			});
+		};
+		if (this.backgroundReady) {
+			refresh();
+		} else if (!this.disposed) {
+			this.pendingSnapshotRefresh = refresh;
+		}
 		return snapshot;
 	}
 
@@ -516,7 +543,7 @@ export class PromptDashboardService implements vscode.Disposable {
 			this.cancelScheduledDockerStatsRefresh('hidden-docker-metrics');
 			return;
 		}
-		if (!becameVisible || !scope || !this.activePrompt || !this.activePostMessage) {
+		if (!this.backgroundReady || !becameVisible || !scope || !this.activePrompt || !this.activePostMessage) {
 			return;
 		}
 		const widget = this.buildWidgetFromCache(
@@ -961,7 +988,8 @@ export class PromptDashboardService implements vscode.Disposable {
 			const cache = this.resolveWidgetCacheState('docker', cached);
 			return createPromptDashboardWidgetSnapshot('docker', cached.data, cache);
 		}
-		const bootstrapData = this.dockerContainersService?.getBootstrapDockerContainersData();
+		// Проверка дискового снимка синхронно обходит compose-файлы и тоже ждёт готовности хоста.
+		const bootstrapData = this.backgroundReady ? this.dockerContainersService?.getBootstrapDockerContainersData() : null;
 		if (!bootstrapData) {
 			return createPromptDashboardWidgetSnapshot('docker', this.emptyDockerContainersData());
 		}
@@ -1477,6 +1505,7 @@ export class PromptDashboardService implements vscode.Disposable {
 
 	/** Cancel any queued automatic refresh that no longer matches the active prompt scope. */
 	private cancelScheduledAutoRefresh(reason: string, scope?: PromptDashboardScope, requestId?: string): void {
+		this.pendingSnapshotRefresh = undefined;
 		this.autoRefreshGeneration += 1;
 		if (!this.autoRefreshTimer) {
 			return;

@@ -141,6 +141,8 @@ export type WebviewToExtensionMessage =
 	| { type: 'promptDashboardOpenTodoMarker'; project: string; filePath: string; line: number; column?: number; requestId?: string }
 	| { type: 'analyzePromptDashboardReview'; prompt: Prompt; requestId?: string }
 	/** Быстрые заметки: состояние обеих областей и операции; ответы приходят адресно по requestId. */
+	/** Inserts a quick-command draft into the selected provider without sending the message. */
+	| { type: 'promptDashboardQuickCommandInsert'; text: string; target: 'copilot' | 'codex' | 'claude' | 'opencode-cli' }
 	| { type: 'quickNotesRequestState'; requestId?: string }
 	| { type: 'quickNotesSetDescriptionHeight'; height: number }
 	| { type: 'quickNotesApply'; operation: QuickNoteOperation; requestId: string }
@@ -184,7 +186,8 @@ export type WebviewToExtensionMessage =
 	| { type: 'gitOverlayDiscardProjectChanges'; promptBranch: string; projects: string[]; project: string; changes: GitOverlayChangeFile[] }
 	| { type: 'gitOverlayLoadFileHistory'; project: string; filePath: string }
 	| { type: 'gitOverlayOpenFile'; project: string; filePath: string }
-	| { type: 'gitOverlayOpenDiff'; project: string; filePath: string }
+	/** Виджет передаёт выбранную группу изменений, даже если SCM ещё не обновил список. */
+	| { type: 'gitOverlayOpenDiff'; project: string; filePath: string; change?: GitOverlayChangeFile }
 	| { type: 'gitOverlayOpenMergeEditor'; project: string; filePath: string }
 	| { type: 'gitOverlayOpenReviewRequest'; url: string }
 	| { type: 'gitOverlaySetupReviewCli'; request: GitOverlayReviewCliSetupRequest }

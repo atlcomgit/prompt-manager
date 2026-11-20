@@ -116,6 +116,46 @@ body.vscode-light, body.vscode-high-contrast-light { --pm-qn-pink: #c2185b; --pm
 	box-shadow: 0 0 0 2px var(--vscode-editor-background), 0 0 0 3px var(--vscode-foreground);
 }
 
+
+/* Focused editor overlays the note list instead of changing widget layout height. */
+.pm-qn-add-slot { position: relative; height: 30px; min-width: 0; }
+.pm-qn-add-slot > .pm-qn-add { min-height: 28px; width: 100%; box-sizing: border-box; }
+.pm-qn-add.is-expanded {
+	position: absolute; left: 0; right: 0; top: 0; z-index: 90;
+	display: flex; flex-direction: column; align-items: stretch;
+	background: color-mix(in srgb, var(--vscode-input-background) 94%, transparent);
+	backdrop-filter: blur(5px);
+	border-color: var(--vscode-focusBorder);
+	box-shadow: 0 9px 25px var(--vscode-widget-shadow, rgba(0,0,0,.35));
+}
+.pm-qn-add.is-expanded textarea {
+	width: 100%; min-height: 90px; max-height: 280px;
+	padding: 8px; resize: none; transition: height .16s ease;
+	background: transparent;
+}
+.pm-qn-add:not(.is-expanded) textarea { height: 28px !important; resize: none; }
+.pm-qn-add-tools {
+	display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px;
+	padding: 5px 7px; border-top: 1px solid var(--vscode-panel-border);
+}
+/* Keep the draft reset at the left edge of the action row. */
+.pm-qn-add-clear { margin-right: auto; }
+.pm-qn-row.is-copied { outline: 1px solid var(--vscode-focusBorder); background: var(--vscode-list-activeSelectionBackground); }
+.pm-qn-row.is-pinned::before { background: var(--vscode-charts-yellow, #d7ba7d); }
+.pm-qn-context-menu {
+	position: fixed; z-index: 3000; width: 230px; max-width: calc(100vw - 16px);
+	background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
+	color: var(--vscode-menu-foreground, var(--vscode-foreground));
+	border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border));
+	border-radius: 5px; padding: 5px; box-shadow: 0 8px 25px var(--vscode-widget-shadow, rgba(0,0,0,.35));
+}
+.pm-qn-context-menu > button { display: block; width: 100%; text-align: left; padding: 7px 9px; color: inherit; border: 0; background: none; border-radius: 3px; cursor: pointer; font: inherit; font-size: 12px; }
+.pm-qn-context-menu > button:hover, .pm-qn-context-menu > button:focus-visible { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, var(--vscode-foreground)); }
+.pm-qn-context-colors { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; border-top: 1px solid var(--vscode-panel-border); margin: 5px 0; padding: 6px 4px; font-size: 11px; }
+.pm-qn-context-color { width: 16px; height: 16px; padding: 0; border-radius: 50%; border: 1px solid var(--vscode-panel-border); cursor: pointer; }
+.pm-qn-menu-error { font-size: 11px; padding: 7px; color: var(--vscode-errorForeground); }
+@media (prefers-reduced-motion: reduce) { .pm-qn-add.is-expanded textarea { transition: none; } }
+
 /* Строки заметок фиксированной высоты с цветной полосой слева. */
 .pm-qn-list { display: flex; flex-direction: column; margin: 0 -4px; }
 .pm-qn-row {
@@ -127,6 +167,11 @@ body.vscode-light, body.vscode-high-contrast-light { --pm-qn-pink: #c2185b; --pm
 	background: var(--pm-qn-note, transparent);
 }
 .pm-qn-row:hover, .pm-qn-row:focus-within { background: var(--vscode-list-hoverBackground); }
+.pm-qn-row.is-selected {
+	background: var(--vscode-list-activeSelectionBackground);
+	color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+	box-shadow: inset 0 0 0 1px var(--vscode-focusBorder);
+}
 .pm-qn-row .pm-qn-grip { opacity: 0; }
 .pm-qn-row:hover .pm-qn-grip, .pm-qn-row:focus-within .pm-qn-grip { opacity: 1; }
 .pm-qn-grip > button { width: 14px !important; height: 18px !important; }

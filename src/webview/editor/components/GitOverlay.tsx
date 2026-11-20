@@ -2456,7 +2456,12 @@ export const GitOverlay: React.FC<Props> = ({
 													...(rowStyle || null),
 											}}>
 												<span style={styles.projectName}>{project.project}</span>
-												<span style={styles.projectTableCellCentered}>
+												<span style={{
+													...styles.projectTableCellCentered,
+													...(project.available && currentBranch
+														&& !isGitOverlayStartChatBranchAllowed(currentBranch, promptBranch, trackedBranchOptions)
+														? styles.branchValueError : null),
+												}}>
 														{currentBranch || '—'}
 													</span>
 													<span style={styles.branchValue}>
@@ -2597,6 +2602,10 @@ export const GitOverlay: React.FC<Props> = ({
 								<div style={styles.projectCards}>
 									{projectsWithChanges.map((project) => {
 										const validation = projectValidations.get(project.project);
+										// Как в шаге 1, разрешённая ветка может быть tracked или веткой промпта.
+										const currentBranch = project.currentBranch.trim();
+										const currentBranchWarning = project.available && currentBranch
+											&& !isGitOverlayStartChatBranchAllowed(currentBranch, promptBranch, trackedBranchOptions);
 										const projectCommitMessage = commitMessages[project.project] || '';
 										const projectChanges = collectProjectChanges(project);
 										const isGeneratingProject = pendingGenerateProjectNameSet.has(project.project);
@@ -2724,6 +2733,12 @@ export const GitOverlay: React.FC<Props> = ({
 														loading={isCommittingProject}
 														variant="primary"
 													/>
+													<strong title="Текущая ветка, в которую будет создан коммит"
+														style={{ ...(currentBranchWarning ? styles.branchValueError : null),
+															marginLeft: 8, fontSize: 13, fontWeight: 750, whiteSpace: 'nowrap',
+															overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 320 }}>
+														{currentBranch || 'Ветка неизвестна'}
+													</strong>
 												</div>
 											</div>
 										);

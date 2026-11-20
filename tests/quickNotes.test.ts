@@ -11,6 +11,7 @@ import {
 	collectQuickNoteColorKeys,
 	createQuickNoteDraft,
 	distributeQuickNotesIntoColumns,
+	formatQuickNoteClipboardText,
 	getQuickNoteOperationScopes,
 	groupQuickNotesForBoard,
 	isQuickNoteDraftDirty,
@@ -35,6 +36,21 @@ import {
 	syncQuickNoteFilesWithSaved,
 	toStoredQuickNote,
 } from '../src/utils/quickNotes.js';
+
+/** Название и описание копируются в порядке полей, одинаковый текст добавляется один раз. */
+test('clipboard text includes title, distinct description and checklist', () => {
+	const items = [{ id: 'check', text: 'Проверить', done: true }];
+	assert.equal(formatQuickNoteClipboardText({ title: 'Название ', description: 'Описание', items }),
+		'Название.\n\nОписание:\n\n- [x] Проверить');
+	assert.equal(formatQuickNoteClipboardText({ title: 'Описание', description: ' Описание\n', items }),
+		'Описание.\n\n- [x] Проверить');
+	assert.equal(formatQuickNoteClipboardText({ title: 'Название.', description: 'Описание:', items }),
+		'Название.\n\nОписание:\n\n- [x] Проверить');
+	assert.equal(formatQuickNoteClipboardText({ title: 'Название', description: '', items: [] }), 'Название.');
+	assert.equal(formatQuickNoteClipboardText({
+		title: 'Название.', description: 'Описание', items: [{ id: 'empty', text: ' \n', done: true }],
+	}), 'Название.\n\nОписание');
+});
 
 /** Создаёт заметку представления с заполненными обязательными полями. */
 function note(id: string, patch: Partial<QuickNoteView> = {}, scope: QuickNoteScope = 'workspace'): QuickNoteView {

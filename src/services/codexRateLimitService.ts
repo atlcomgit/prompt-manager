@@ -7,6 +7,7 @@ import {
     findCodexExecutable, identityOf, resolveCodexHome, returnRefreshedCodexAuth, type CodexAuthReturnResult,
 } from './codexAccountService.js';
 import { appendPromptManagerLog } from '../utils/promptManagerOutput.js';
+import { tryLockQuotaRefresh, writeQuotaCacheFile } from './accountQuotaCache.js';
 
 /** Одно окно лимита Codex (например, 5 часов или 7 дней) в процентах. */
 export interface CodexLimitWindow {
@@ -29,8 +30,10 @@ export interface CodexLimitStatus {
 }
 /** Параметры сервиса лимитов; все необязательны и нужны для общего кэша, возврата авторизации и тестов. */
 export interface CodexRateLimitOptions {
-    /** Каталог общего между окнами VS Code кэша (globalStorage). Без него используется только кэш окна. */
+    /** The shared quota directory for the current OS user, when configured. */
     sharedCacheDir?: string;
+    /** Keep the previous globalStorage directory as a read-only fallback. */
+    legacyCacheDir?: string;
     /**
      * Возврат авторизации, обновлённой временным app-server. По умолчанию — проверенная запись
      * в auth.json текущего CODEX_HOME без обновления SecretStorage.
@@ -190,6 +193,7 @@ async function stopAppServer(child: ChildProcessWithoutNullStreams): Promise<voi
     child.kill('SIGTERM');
     if (await settlesWithin(exited, APP_SERVER_KILL_WAIT_MS)) return;
     child.kill('SIGKILL');
+    await settlesWithin(exited, APP_SERVER_KILL_WAIT_MS);
 }
 
 /**
@@ -282,8 +286,7 @@ async function rpcRateLimits(
  */
 export class CodexRateLimitService {
     private last: CachedLimits | null = null;
-    private request: Promise<CodexLimitStatus> | null = null;
-    private requestKey: string | null = null;
+    private readonly requests = new Map<string, Promise<CodexLimitStatus>>();
     /** Увеличивается при `invalidate`, чтобы результат начатого раньше запроса не попал в кэш окна. */
     private generation = 0;
     private readonly now: () => number;
@@ -321,51 +324,73 @@ export class CodexRateLimitService {
                 error: 'Нет активной авторизации Codex.',
             };
         }
-        const key = codexLimitsCacheKey(auth) ?? 'profile-' + accountId;
-        if (this.request && this.requestKey === key) return this.request;
-        const now = this.now();
-        if (!force) {
-            const own = this.last?.key === key ? this.last : null;
-            if (own && now - own.checkedAt < CODEX_LIMITS_REFRESH_MS) return withCodexLimitStaleness(own.status, now);
-            const shared = await this.readShared(key);
-            const sharedAt = shared ? Date.parse(shared.updatedAt) : NaN;
-            // Общий кэш берётся, если он новее собственного результата и свежий либо опрос запрещён.
-            if (shared && (!own || sharedAt >= own.checkedAt)
-                && (now - sharedAt < CODEX_LIMITS_REFRESH_MS || !allowPoll)) {
-                this.last = { key, status: shared, checkedAt: sharedAt };
-                return withCodexLimitStaleness(shared, now);
+        const key = codexLimitsCacheKey(auth) ?? crypto.createHash('sha256').update('profile-' + accountId).digest('hex').slice(0, 40);
+        const active = this.requests.get(key);
+        if (active) return active;
+        const generation = this.generation;
+        const request = this.resolveLimits(key, auth, force, allowPoll).then(status => {
+            if (generation === this.generation) {
+                this.last = { key, status, checkedAt: Date.parse(status.updatedAt) };
             }
-            if (!allowPoll) {
-                if (own) return withCodexLimitStaleness(own.status, now);
-                return {
-                    windows: [], planType: null, updatedAt: new Date(now).toISOString(), stale: true,
-                    error: 'Лимиты обновятся, когда окно VS Code получит фокус.',
-                };
-            }
+            return status;
+        });
+        this.requests.set(key, request);
+        try {
+            return await request;
+        } finally {
+            if (this.requests.get(key) === request) this.requests.delete(key);
         }
-        return this.poll(key, auth);
     }
 
-    /** Опрашивает Codex, сохраняет результат в кэш окна, а успешный — и в общий кэш. */
-    private async poll(key: string, auth: string): Promise<CodexLimitStatus> {
-        const generation = this.generation;
-        const executable = (this.options.executable ?? findCodexExecutable)();
-        const promise = rpcRateLimits(auth, executable, refreshed => this.returnAuth(auth, refreshed))
-            .then(status => ({ ...status, updatedAt: new Date(this.now()).toISOString(), stale: false }))
-            .catch((error: unknown): CodexLimitStatus => ({
-                windows: [], planType: null, updatedAt: new Date(this.now()).toISOString(),
-                error: error instanceof Error ? error.message : String(error),
-            }));
-        this.request = promise;
-        this.requestKey = key;
+    /** Check freshness around lock acquisition and return the latest snapshot if the refresh is busy. */
+    private async resolveLimits(key: string, auth: string, force: boolean, allowPoll: boolean): Promise<CodexLimitStatus> {
+        const own = this.last?.key === key ? this.last : null;
+        let shared = await this.readShared(key);
+        const best = () => {
+            if (!own || (shared && (!own.status.windows.length || Date.parse(shared.updatedAt) >= own.checkedAt))) return shared;
+            return own.status;
+        };
+        const fallback = (error: string) => {
+            const status = best();
+            return status ? withCodexLimitStaleness(status, this.now()) : {
+                windows: [], planType: null, updatedAt: new Date(0).toISOString(), stale: true, error,
+            };
+        };
+        const cached = best();
+        /** Apply the snapshot TTL to automatic refresh. */
+        const fresh = (status: CodexLimitStatus) => {
+            const age = this.now() - Date.parse(status.updatedAt);
+            return age >= 0 && age < CODEX_LIMITS_REFRESH_MS;
+        };
+        if (!force && cached && fresh(cached)) {
+            return withCodexLimitStaleness(cached, this.now());
+        }
+        if (!force && !allowPoll) {
+            return fallback('Лимиты обновятся, когда окно VS Code получит фокус.');
+        }
+        const directory = this.options.sharedCacheDir;
+        let release: (() => Promise<void>) | null = null;
         try {
-            const result = await promise;
-            if (generation === this.generation) this.last = { key, status: result, checkedAt: this.now() };
-            // Ошибки в общий кэш не попадают: другие окна продолжают показывать последние известные проценты.
-            if (!result.error) await this.writeShared(key, result);
+            if (directory) {
+                release = await tryLockQuotaRefresh(directory, 'codex');
+                const previousDate = shared?.updatedAt;
+                shared = await this.readShared(key);
+                if (!release) return fallback('Лимиты Codex обновляются в другой сессии.');
+                if (shared && (shared.updatedAt !== previousDate
+                    || (!force && fresh(shared)))) {
+                    return withCodexLimitStaleness(shared, this.now());
+                }
+            }
+            const executable = (this.options.executable ?? findCodexExecutable)();
+            const data = await rpcRateLimits(auth, executable, refreshed => this.returnAuth(auth, refreshed));
+            const result = { ...data, updatedAt: new Date(this.now()).toISOString(), stale: false };
+            await this.writeShared(key, result);
             return result;
+        } catch (error) {
+            this.log('[Accounts] Codex quota refresh failed: ' + errorCode(error));
+            return fallback(error instanceof Error ? error.message : 'Не удалось обновить лимиты Codex.');
         } finally {
-            if (this.request === promise) { this.request = null; this.requestKey = null; }
+            await release?.().catch(() => this.log('[Accounts] Codex quota lock release failed.'));
         }
     }
 
@@ -394,7 +419,15 @@ export class CodexRateLimitService {
     /** Читает запись общего кэша; повреждённая или чужая запись считается отсутствующей. */
     private async readShared(key: string): Promise<CodexLimitStatus | null> {
         const file = this.sharedFile(key);
-        if (!file) return null;
+        const migrated = file ? await this.readSharedFile(file, key) : null;
+        const legacy = this.options.legacyCacheDir;
+        return migrated ?? (legacy
+            ? await this.readSharedFile(path.join(legacy, 'codex-limits-' + key + '.json'), key)
+            : null);
+    }
+
+    /** Validate the saved snapshot and its account key. */
+    private async readSharedFile(file: string, key: string): Promise<CodexLimitStatus | null> {
         try {
             const record = JSON.parse(await fs.readFile(file, 'utf8')) as SharedLimitRecord;
             const data = record?.data;
@@ -421,15 +454,10 @@ export class CodexRateLimitService {
             key,
             data: { windows: status.windows, planType: status.planType, updatedAt: status.updatedAt },
         };
-        const temp = file + '.' + crypto.randomUUID() + '.tmp';
         try {
-            await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-            await fs.writeFile(temp, JSON.stringify(record), { mode: 0o600, flag: 'wx' });
-            await fs.rename(temp, file);
+            await writeQuotaCacheFile(file, record);
         } catch (error) {
             this.log('[Accounts] Codex shared limits cache write failed: ' + errorCode(error));
-        } finally {
-            await fs.rm(temp, { force: true }).catch(() => undefined);
         }
     }
 }

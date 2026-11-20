@@ -169,8 +169,9 @@ test('multiple Prompt Manager services read the same global per-account cache', 
     await chmod(cli, 0o700);
     try {
         const { ClaudeUsageService } = await import('../src/services/claudeUsageService.js');
-        const first = new ClaudeUsageService(root, cli);
-        const second = new ClaudeUsageService(root, cli);
+        const sharedRoot = path.join(root, 'shared-quota');
+        const first = new ClaudeUsageService(path.join(root, 'host-a'), cli, sharedRoot);
+        const second = new ClaudeUsageService(path.join(root, 'host-b'), cli, sharedRoot);
         assert.equal((await first.refreshActive('work', config))?.reason, 'updated');
         const status = await second.read('work', config, true);
         assert.equal(status.source, 'claude-cli');

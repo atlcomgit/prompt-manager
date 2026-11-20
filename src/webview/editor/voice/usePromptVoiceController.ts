@@ -21,8 +21,12 @@ export type PromptVoiceStatus =
 
 type PromptVoiceQueueMessage = Extract<ExtensionToWebviewMessage, { type: 'promptVoiceQueueState' }>;
 
+/** Поле, для которого пользователь начал конкретную запись. */
+export type PromptVoiceTarget = 'prompt' | 'quickNotes';
+
 export type PromptVoiceQueueItem = {
 	sessionId: string;
+	target: PromptVoiceTarget;
 	status: PromptVoiceQueueMessage['status'];
 	elapsedMs: number;
 	elapsedLabel: string;
@@ -34,12 +38,13 @@ export type PromptVoiceQueueItem = {
 };
 
 type PromptVoiceControllerOptions = {
-	onTranscriptionReady: (text: string) => void;
-	onOpen?: () => void;
+	onTranscriptionReady: (text: string, target: PromptVoiceTarget) => void;
+	onOpen?: (target: PromptVoiceTarget) => void;
 };
 
 type PromptVoiceControllerState = {
 	status: PromptVoiceStatus;
+	target: PromptVoiceTarget;
 	elapsedLabel: string;
 	maxDurationLabel: string;
 	elapsedMs: number;
@@ -82,12 +87,14 @@ const normalizeProgress = (value: unknown): number | null => {
 	return Math.max(0, Math.min(100, value));
 };
 
-const createQueueItemFromMessage = (msg: PromptVoiceQueueMessage): PromptVoiceQueueItem => {
+/** Сохраняет назначение записи вместе с состоянием фоновой обработки. */
+const createQueueItemFromMessage = (msg: PromptVoiceQueueMessage, target: PromptVoiceTarget): PromptVoiceQueueItem => {
 	const elapsedMs = typeof msg.elapsedMs === 'number' && Number.isFinite(msg.elapsedMs)
 		? Math.max(0, Math.floor(msg.elapsedMs))
 		: 0;
 	return {
 		sessionId: msg.sessionId,
+		target,
 		status: msg.status,
 		elapsedMs,
 		elapsedLabel: formatPromptVoiceDuration(elapsedMs),
@@ -103,7 +110,7 @@ export const usePromptVoiceController = ({
 	onTranscriptionReady,
 	onOpen,
 }: PromptVoiceControllerOptions): PromptVoiceControllerState & {
-	startRecording: (source?: PromptVoiceStartSource) => Promise<void>;
+	startRecording: (target?: PromptVoiceTarget, source?: PromptVoiceStartSource) => Promise<void>;
 	pauseRecording: () => void;
 	resumeRecording: () => void;
 	markConfirmIntent: () => void;
@@ -112,11 +119,18 @@ export const usePromptVoiceController = ({
 	dismissQueueItem: (sessionId: string) => void;
 } => {
 	const activeSessionIdRef = useRef<string | null>(null);
+	// Результат может прийти после запуска новой записи из другого поля.
+	const sessionTargetsRef = useRef(new Map<string, PromptVoiceTarget>());
+	const onTranscriptionReadyRef = useRef(onTranscriptionReady);
+	onTranscriptionReadyRef.current = onTranscriptionReady;
+	const onOpenRef = useRef(onOpen);
+	onOpenRef.current = onOpen;
 	const statusRef = useRef<PromptVoiceStatus>('hidden');
 	const completionTimersRef = useRef<Map<string, number>>(new Map());
 	const manualConfirmSessionIdsRef = useRef<Set<string>>(new Set());
 
 	const [status, setStatus] = useState<PromptVoiceStatus>('hidden');
+	const [target, setTarget] = useState<PromptVoiceTarget>('prompt');
 	const [elapsedMs, setElapsedMs] = useState(0);
 	const [levels, setLevels] = useState<number[]>(DEFAULT_WAVE);
 	const [progressMessage, setProgressMessage] = useState('');
@@ -191,8 +205,9 @@ export const usePromptVoiceController = ({
 		completionTimersRef.current.set(sessionId, timer);
 	}, [dismissQueueItem]);
 
-	const upsertQueueItem = useCallback((msg: PromptVoiceQueueMessage) => {
-		const nextItem = createQueueItemFromMessage(msg);
+	/** Добавляет запись в очередь соответствующего поля или обновляет её состояние. */
+	const upsertQueueItem = useCallback((msg: PromptVoiceQueueMessage, target: PromptVoiceTarget) => {
+		const nextItem = createQueueItemFromMessage(msg, target);
 		setQueueItems(prev => {
 			const existingIndex = prev.findIndex(item => item.sessionId === msg.sessionId);
 			if (existingIndex < 0) {
@@ -209,19 +224,26 @@ export const usePromptVoiceController = ({
 		});
 	}, []);
 
-	const startRecording = useCallback(async (source: PromptVoiceStartSource = 'manual') => {
+	/** Фиксирует поле назначения до отправки команды запуска. */
+	const startRecording = useCallback(async (
+		target: PromptVoiceTarget = 'prompt',
+		source: PromptVoiceStartSource = 'manual',
+	) => {
 		trace('startRecording.request', {
 			source,
 			previousSessionId: activeSessionIdRef.current ?? null,
 			previousStatus: statusRef.current,
 		});
+		if (activeSessionIdRef.current) sessionTargetsRef.current.delete(activeSessionIdRef.current);
 		const sessionId = activateNewSession();
+		sessionTargetsRef.current.set(sessionId, target);
+		setTarget(target);
 		resetTracking();
-		onOpen?.();
+		onOpenRef.current?.(target);
 		setVoiceStatus('recording');
 		trace('startRecording.postMessage', { source, newSessionId: sessionId });
 		vscode.postMessage({ type: 'startPromptVoiceRecording', sessionId });
-	}, [activateNewSession, onOpen, resetTracking, setVoiceStatus, trace]);
+	}, [activateNewSession, resetTracking, setVoiceStatus, trace]);
 
 	const pauseRecording = useCallback(() => {
 		const sessionId = activeSessionIdRef.current;
@@ -239,7 +261,7 @@ export const usePromptVoiceController = ({
 	const resumeRecording = useCallback(() => {
 		if (statusRef.current === 'error') {
 			trace('resumeRecording.restartAfterError');
-			void startRecording('resume-error');
+			void startRecording(target, 'resume-error');
 			return;
 		}
 
@@ -251,7 +273,7 @@ export const usePromptVoiceController = ({
 
 		trace('resumeRecording.postMessage', { sessionId });
 		vscode.postMessage({ type: 'resumePromptVoiceRecording', sessionId });
-	}, [startRecording, trace]);
+	}, [startRecording, target, trace]);
 
 	/** Marks OK intent before click can race with limit auto-restart. */
 	const markConfirmIntent = useCallback(() => {
@@ -294,6 +316,7 @@ export const usePromptVoiceController = ({
 		if (!sessionId) {
 			return;
 		}
+		sessionTargetsRef.current.delete(sessionId);
 
 		trace('cancelRecording.postMessage', { sessionId });
 		vscode.postMessage({ type: 'cancelPromptVoiceRecording', sessionId });
@@ -301,6 +324,8 @@ export const usePromptVoiceController = ({
 
 	useEffect(() => {
 		const handleQueueMessage = (msg: PromptVoiceQueueMessage) => {
+			const jobTarget = sessionTargetsRef.current.get(msg.sessionId);
+			if (!jobTarget) return;
 			const activeSessionId = activeSessionIdRef.current;
 			const isManualConfirm = manualConfirmSessionIdsRef.current.has(msg.sessionId);
 			const isActiveQueuedSession = activeSessionId === msg.sessionId && msg.status === 'queued';
@@ -313,13 +338,13 @@ export const usePromptVoiceController = ({
 				isManualConfirm,
 				willAutoRestart,
 			});
-			upsertQueueItem(msg);
+			upsertQueueItem(msg, jobTarget);
 
 			if (activeSessionIdRef.current === msg.sessionId && msg.status === 'queued') {
 				hideOverlay('queue.queued');
 				if (willAutoRestart) {
 					trace('queue.autoRestart.startRecording', { msgSessionId: msg.sessionId });
-					void startRecording('autoRestart');
+					void startRecording(jobTarget, 'autoRestart');
 				}
 				manualConfirmSessionIdsRef.current.delete(msg.sessionId);
 			}
@@ -328,13 +353,15 @@ export const usePromptVoiceController = ({
 				const text = (msg.text || '').trim();
 				if (text) {
 					trace('queue.completed.transcriptionReady', { msgSessionId: msg.sessionId, textLength: text.length });
-					onTranscriptionReady(text);
+					onTranscriptionReadyRef.current(text, jobTarget);
 				}
+				sessionTargetsRef.current.delete(msg.sessionId);
 				manualConfirmSessionIdsRef.current.delete(msg.sessionId);
 				scheduleQueueItemRemoval(msg.sessionId);
 			}
 
 			if (msg.status === 'error') {
+				sessionTargetsRef.current.delete(msg.sessionId);
 				trace('queue.error', { msgSessionId: msg.sessionId, message: msg.message ?? null });
 				manualConfirmSessionIdsRef.current.delete(msg.sessionId);
 			}
@@ -429,16 +456,20 @@ export const usePromptVoiceController = ({
 					break;
 
 				case 'cancelled':
+					sessionTargetsRef.current.delete(msg.sessionId);
+					manualConfirmSessionIdsRef.current.delete(msg.sessionId);
 					trace('state.apply', { msgStatus: 'cancelled' });
 					hideOverlay('state.cancelled');
 					break;
 
 				case 'transcribed': {
 					const text = (msg.text || '').trim();
+					const jobTarget = sessionTargetsRef.current.get(msg.sessionId);
+					sessionTargetsRef.current.delete(msg.sessionId);
 					trace('state.apply', { msgStatus: 'transcribed', textLength: text.length });
 					hideOverlay('state.transcribed');
-					if (text) {
-						onTranscriptionReady(text);
+					if (text && jobTarget) {
+						onTranscriptionReadyRef.current(text, jobTarget);
 					}
 					break;
 				}
@@ -447,7 +478,7 @@ export const usePromptVoiceController = ({
 
 		window.addEventListener('message', handleMessage as EventListener);
 		return () => window.removeEventListener('message', handleMessage as EventListener);
-	}, [hideOverlay, onTranscriptionReady, scheduleQueueItemRemoval, setVoiceStatus, startRecording, trace, upsertQueueItem]);
+	}, [hideOverlay, scheduleQueueItemRemoval, setVoiceStatus, startRecording, trace, upsertQueueItem]);
 
 	useEffect(() => {
 		if (status === 'hidden') {
@@ -495,6 +526,7 @@ export const usePromptVoiceController = ({
 
 	return useMemo(() => ({
 		status,
+		target,
 		elapsedMs,
 		elapsedLabel: formatPromptVoiceDuration(elapsedMs),
 		maxDurationLabel: formatPromptVoiceDuration(MAX_PROMPT_VOICE_RECORDING_MS),
@@ -535,5 +567,6 @@ export const usePromptVoiceController = ({
 		resumeRecording,
 		startRecording,
 		status,
+		target,
 	]);
 };

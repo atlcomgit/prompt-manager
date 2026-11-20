@@ -19,11 +19,6 @@ export function resolveAccountsBackendMode(value: unknown): {
     return { mode: 'remaining', supported: false };
 }
 
-export function limitDisplayShortLabel(mode: LimitDisplayMode): string {
-    return mode === 'used' ? 'исп.' : 'ост.';
-}
-
-
 /** Показанный процент всегда относится к выбранному режиму; квота ограничена диапазоном 0–100%. */
 export function limitPercent(
     values: { remainingPercent?: number | null; usedPercent?: number | null },

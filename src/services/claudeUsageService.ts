@@ -127,7 +127,7 @@ export type ClaudeExecutableSource = string | (() => string);
  * обновляет общий для всех окон VS Code кэш через Claude CLI `/usage`.
  */
 export class ClaudeUsageService {
-    private readonly cached = new Map<string, { at: number; data: ClaudeLimitStatus }>();
+    private readonly cached = new Map<string, { directory: string; at: number; data: ClaudeLimitStatus }>();
     private readonly shared: ClaudeSharedUsageCoordinator | null;
 
     /**
@@ -135,14 +135,14 @@ export class ClaudeUsageService {
      * Проверки `/usage` выполняются в постоянном каталоге `<globalStorageRoot>/claude-usage-cwd`, поэтому Claude
      * не создаёт новый каталог в `projects` при каждом запуске.
      */
-    constructor(globalStorageRoot?: string, claudeExecutable?: ClaudeExecutableSource) {
-        this.shared = globalStorageRoot && claudeExecutable
-            ? new ClaudeSharedUsageCoordinator(path.join(globalStorageRoot, 'claude-usage-cache-v1'),
+    constructor(globalStorageRoot?: string, claudeExecutable?: ClaudeExecutableSource, sharedQuotaRoot = globalStorageRoot) {
+        this.shared = globalStorageRoot && sharedQuotaRoot && claudeExecutable
+            ? new ClaudeSharedUsageCoordinator(path.join(sharedQuotaRoot, 'claude-usage-cache-v1'),
                 async directory => runClaudeCliUsage(
                     typeof claudeExecutable === 'function' ? claudeExecutable() : claudeExecutable,
                     directory,
-                    path.join(globalStorageRoot, 'claude-usage-cwd'),
-                ))
+                    path.join(sharedQuotaRoot, 'claude-usage-cwd'),
+                ), Date.now, sharedQuotaRoot === globalStorageRoot ? undefined : path.join(globalStorageRoot, 'claude-usage-cache-v1'))
             : null;
     }
 
@@ -172,14 +172,15 @@ export class ClaudeUsageService {
      */
     async read(profileId: string, directory: string, force = false): Promise<ClaudeLimitStatus> {
         const fromCache = this.cached.get(profileId);
-        if (!force && fromCache && Date.now() - fromCache.at < 20_000) return fromCache.data;
+        const shared = await this.shared?.read(profileId, directory);
+        if (!force && fromCache?.directory === directory && Date.now() - fromCache.at < 20_000
+            && (!shared?.updatedAt || Date.parse(shared.updatedAt) <= Date.parse(fromCache.data.updatedAt || ''))) return fromCache.data;
         const sourcePath = directory === path.join(os.homedir(), '.claude')
             ? path.join(os.homedir(), '.claude.json')
             : path.join(directory, '.claude.json');
-        const [nativeResult, collectorResult, sharedResult] = await Promise.allSettled([
+        const [nativeResult, collectorResult] = await Promise.allSettled([
             fs.readFile(sourcePath, 'utf8'),
             fs.readFile(path.join(directory, 'prompt-manager-rate-limits.json'), 'utf8'),
-            this.shared ? this.shared.read(profileId, directory) : Promise.resolve(null),
         ]);
         /** Разбирает JSON, возвращая `null` для повреждённого файла. */
         const safeParse = (text: string): unknown => {
@@ -189,7 +190,6 @@ export class ClaudeUsageService {
             ? parseClaudeUsageCache(safeParse(nativeResult.value)) : null;
         const collector = collectorResult.status === 'fulfilled'
             ? parseClaudeStatusLineSample(safeParse(collectorResult.value)) : null;
-        const shared = sharedResult.status === 'fulfilled' ? sharedResult.value : null;
         // Выбираются сведения с самой поздней датой: старый statusLine не перекрывает свежую проверку CLI /usage.
         const candidates = [shared, native, collector]
             .filter((item): item is ClaudeLimitStatus => !!item?.windows.length)
@@ -198,7 +198,7 @@ export class ClaudeUsageService {
             windows: [], updatedAt: null, stale: true, source: 'unavailable',
             error: 'Нет статистики Claude. Обновление через CLI /usage будет выполнено автоматически.',
         };
-        this.cached.set(profileId, { at: Date.now(), data });
+        this.cached.set(profileId, { directory, at: Date.now(), data });
         return data;
     }
 }

@@ -44,6 +44,7 @@ function shouldWritePromptManagerLogMessage(message: string): boolean {
 	}
 
 	return PROMPT_MANAGER_TASK_DEBUG_MESSAGE_RE.test(message)
+		|| message.startsWith('[startup]')
 		|| COMMIT_GENERATION_DEBUG_MESSAGE_RE.test(message)
 		|| MODEL_CATALOG_DEBUG_MESSAGE_RE.test(message);
 }

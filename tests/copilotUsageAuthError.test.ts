@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const originalLoad = (Module as any)._load;
 
@@ -167,6 +170,51 @@ function loadModules() {
 	return modulesPromise;
 }
 
+/** Страница и статус читают квоту через публичный fetchUsage с проверенной привязкой аккаунта. */
+test('CopilotUsageService reads shared quota from an independent host without calling GitHub twice', async t => {
+	const { serviceModule: { CopilotUsageService } } = await loadModules();
+	const root = await mkdtemp(join(tmpdir(), 'pm-copilot-usage-shared-'));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-10T12:00:00Z') });
+	let polls = 0;
+	const create = (account: string, used: number, state: VsCodeMockState = { globalState: new Map() }) => {
+		const service = new CopilotUsageService(createExtensionContext(state) as any, root);
+		Object.assign(service, {
+			refreshCopilotGitHubPreference: async () => false,
+			getGitHubSession: async () => ({ accessToken: 'fixture-only', account: { id: account } }),
+			fetchCopilotSubscription: async () => ({ planType: 'Pro' }),
+			fetchCopilotUsageMetrics: async () => {
+				polls++;
+				return { kind: 'metrics', used, limit: 300, source: 'api', statusText: 'fixture-api' };
+			},
+			readWorkspaceChatActivitySignal: async () => ({ changedSessions: 0, maxLastMessageDate: 0 }),
+			countChatRequestsCurrentPeriod: async () => 0,
+		});
+		t.after(() => service.dispose());
+		return service;
+	};
+	const localState = { globalState: new Map() };
+	const firstService = create('shared-account', 40, localState);
+	const first = await firstService.fetchUsage();
+	const second = await create('shared-account', 99).fetchUsage();
+	assert.equal(first.used, 40);
+	assert.equal(second.used, 40);
+	assert.equal(second.lastUpdated, first.lastUpdated);
+	assert.equal(polls, 1);
+	// A repeated shared snapshot preserves the local increment, including after recreating the service.
+	t.mock.timers.tick(1000);
+	await firstService.incrementUsage();
+	assert.equal((await firstService.fetchUsage()).used, 41);
+	const reopened = create('shared-account', 99, localState);
+	assert.equal((await reopened.fetchUsage()).used, 41);
+	assert.equal((await create('shared-account', 99).fetchUsage()).used, 40);
+	assert.equal(polls, 1);
+	assert.equal((await create('shared-account', 47).fetchUsage(true)).used, 47);
+	assert.equal((await reopened.fetchUsage()).used, 47);
+	assert.equal((await create('different-account', 12).fetchUsage()).used, 12);
+	assert.equal(polls, 3);
+});
+
 test('CopilotUsageService treats GitHub auth errors as unauthenticated state', async () => {
 	const { state, serviceModule } = await loadModules();
 	const { CopilotUsageService } = serviceModule;
@@ -269,11 +317,13 @@ test('CopilotUsageService activation binding reuses cache without startup force 
 
 	const originalStartPolling = (CopilotUsageService.prototype as any).startCopilotPreferencePolling;
 	const originalStopPolling = (CopilotUsageService.prototype as any).stopCopilotPreferencePolling;
-	(CopilotUsageService.prototype as any).startCopilotPreferencePolling = function noop() { };
+	let polls = 0;
+	(CopilotUsageService.prototype as any).startCopilotPreferencePolling = () => { polls++; };
 	(CopilotUsageService.prototype as any).stopCopilotPreferencePolling = function noop() { };
 
 	try {
 		const service = new CopilotUsageService(createExtensionContext(state) as any);
+		assert.equal(polls, 0);
 		(service as any).cachedData = {
 			used: 17,
 			limit: 100,
@@ -287,13 +337,16 @@ test('CopilotUsageService activation binding reuses cache without startup force 
 			lastSyncStatus: 'restored-from-cache',
 			snapshots: [{ date: '2026-04-21', used: 17, limit: 100 }],
 		};
-		(service as any).syncPreferenceFromCopilotChat = async () => false;
+		let bindings = 0;
+		(service as any).syncPreferenceFromCopilotChat = async () => { bindings++; return false; };
 		(service as any).fetchUsage = async () => {
 			throw new Error('activation should not run a startup usage fetch');
 		};
 
-		await service.checkAuthenticationBindingOnActivation();
+		await Promise.all([service.checkAuthenticationBindingOnActivation(), service.checkAuthenticationBindingOnActivation()]);
 
+		assert.equal(polls, 1);
+		assert.equal(bindings, 1);
 		assert.equal(service.getCachedData()?.used, 17);
 		assert.equal(service.getCachedData()?.lastSyncStatus, 'activation-cache');
 		service.dispose();

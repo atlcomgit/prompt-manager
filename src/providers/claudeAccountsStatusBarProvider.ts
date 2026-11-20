@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import type { ClaudeAccountService } from '../services/claudeAccountService.js';
 import type { AccountsLimitDisplayService } from '../services/accountsLimitDisplayService.js';
-import { limitDisplayVerb, limitDisplayShortLabel, limitPercent } from '../utils/limitDisplay.js';
+import { limitDisplayVerb, limitPercent } from '../utils/limitDisplay.js';
+import { resolveQuotaHighlight, type QuotaHighlightLevel } from '../utils/quotaHighlight.js';
 import { ClaudeUsageService, isClaudeWindowExpired, type ClaudeLimitStatus } from '../services/claudeUsageService.js';
 
 /**
@@ -32,7 +33,7 @@ export class ClaudeAccountsStatusBarProvider implements vscode.Disposable {
         }));
         this.disposables.push(vscode.extensions.onDidChange(() => void this.refresh()));
         if (this.display) this.disposables.push(this.display.onDidChange(() => this.render()));
-        // Фоновые окна, включая VS Code Tunnel, только читают общий кэш; проверку CLI может начать окно в фокусе.
+        // Read the shared snapshot and check refresh eligibility when the window regains focus.
         const focusSubscription = vscode.window.onDidChangeWindowState?.(state => {
             if (state.focused) void this.refresh();
         });
@@ -47,12 +48,16 @@ export class ClaudeAccountsStatusBarProvider implements vscode.Disposable {
      */
     private render(): void {
         if (!vscode.extensions.getExtension('anthropic.claude-code')) {
+            this.item.backgroundColor = undefined;
+            this.item.color = undefined;
             this.item.hide();
             return;
         }
         const view = this.accounts.getView();
         const profile = view.profiles.find(p => p.id === view.activeId);
         if (!profile || !profile.loggedIn) {
+            this.item.backgroundColor = undefined;
+            this.item.color = undefined;
             this.item.text = '$(account) Claude: вход не выполнен';
             this.item.tooltip = view.externalConfigDir
                 ? 'Claude использует внешнюю конфигурацию. Проверьте CLAUDE_CONFIG_DIR.'
@@ -60,6 +65,7 @@ export class ClaudeAccountsStatusBarProvider implements vscode.Disposable {
         } else {
             const windows = (this.last?.windows || []).filter(w => !isClaudeWindowExpired(w));
             const mode = this.display?.getMode() || 'used';
+            this.setQuotaHighlight(resolveQuotaHighlight(windows));
             const summary = ['five_hour', 'seven_day'].map((key, index) => {
                 const item = windows.find(w => w.key === key);
                 const label = index === 0 ? '5ч' : '7д';
@@ -67,7 +73,7 @@ export class ClaudeAccountsStatusBarProvider implements vscode.Disposable {
                     ? (this.last?.stale ? '≈' : '') + Math.round(limitPercent(item, mode) ?? 0) + '%'
                     : '—');
             });
-            this.item.text = '$(account) Claude ' + limitDisplayShortLabel(mode) + ' ' + (windows.length ? summary.join(' · ') : 'лимиты —')
+            this.item.text = '$(account) Claude ' + (windows.length ? summary.join(' · ') : 'лимиты —')
                 + ((view.pendingRestart || this.last?.stale) ? ' $(warning)' : '');
             this.item.tooltip = [
                 'Claude Code: ' + profile.label,
@@ -92,6 +98,16 @@ export class ClaudeAccountsStatusBarProvider implements vscode.Disposable {
         this.item.show();
     }
 
+    /** Применяет пару фон и текст из текущей темы VS Code. */
+    private setQuotaHighlight(level: QuotaHighlightLevel): void {
+        this.item.backgroundColor = level === 'critical'
+            ? new vscode.ThemeColor('statusBarItem.errorBackground')
+            : level === 'warning' ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
+        this.item.color = level === 'critical'
+            ? new vscode.ThemeColor('statusBarItem.errorForeground')
+            : level === 'warning' ? new vscode.ThemeColor('statusBarItem.warningForeground') : undefined;
+    }
+
     /**
      * Обновляет лимиты активного профиля и перерисовывает элемент. Вызов во время обновления ставит ещё одно
      * в очередь; ошибки чтения приводят к отображению без лимитов.
@@ -103,9 +119,8 @@ export class ClaudeAccountsStatusBarProvider implements vscode.Disposable {
             if (vscode.extensions.getExtension('anthropic.claude-code')) {
                 const state = this.accounts.getView();
                 const profile = this.accounts.getProfileDirectories().find(x => x.id === state.activeId);
-                const focused = vscode.window.state?.focused !== false;
-                if (profile && focused && typeof this.usage.refreshActive === 'function') {
-                    // Межпроцессная блокировка гарантирует один запуск CLI на все открытые проекты VS Code.
+                if (profile && typeof this.usage.refreshActive === 'function') {
+                    // One cross-process lock covers Claude CLI refreshes from all VS Code sessions.
                     await this.usage.refreshActive(profile.id, profile.directory).catch(() => undefined);
                 }
                 this.last = profile ? await this.usage.read(profile.id, profile.directory, true) : null;

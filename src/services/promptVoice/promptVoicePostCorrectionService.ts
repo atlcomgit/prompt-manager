@@ -23,8 +23,8 @@ const SYSTEM_PROMPT = [
 	'Верни только исправленный текст без кавычек, маркеров и комментариев.',
 ].join(' ');
 
-/** Таймаут ожидания ответа от LM (мс) */
-const LM_TIMEOUT_MS = 15_000;
+/** Максимальная задержка вставки распознанного текста из-за коррекции. */
+const LM_TIMEOUT_MS = 4_000;
 
 /** Минимальная длина текста для отправки на коррекцию (символов) */
 const MIN_TEXT_LENGTH = 3;
@@ -96,10 +96,29 @@ export class PromptVoicePostCorrectionService {
 		}
 	}
 
-	/** Отправляет текст на коррекцию в LM и возвращает результат */
+	/** Ограничивает весь вызов, включая поиск модели и чтение потока. */
 	private async requestCorrection(text: string): Promise<string> {
+		const cts = new vscode.CancellationTokenSource();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<string>(resolve => {
+			timer = setTimeout(() => {
+				resolve(text);
+				cts.cancel();
+			}, LM_TIMEOUT_MS);
+		});
+
+		try {
+			return await Promise.race([this.readCorrection(text, cts.token), deadline]);
+		} finally {
+			clearTimeout(timer);
+			cts.dispose();
+		}
+	}
+
+	/** Пропускает запрос, если выбор модели завершился после истечения срока. */
+	private async readCorrection(text: string, token: vscode.CancellationToken): Promise<string> {
 		const [model] = await vscode.lm.selectChatModels(MODEL_SELECTOR);
-		if (!model) {
+		if (!model || token.isCancellationRequested) {
 			return text;
 		}
 
@@ -116,20 +135,12 @@ export class PromptVoicePostCorrectionService {
 			].join('\n')),
 		];
 
-		// CancellationToken с таймаутом для защиты от зависания
-		const cts = new vscode.CancellationTokenSource();
-		const timer = setTimeout(() => cts.cancel(), LM_TIMEOUT_MS);
-
-		try {
-			const response = await model.sendRequest(messages, {}, cts.token);
-			let result = '';
-			for await (const chunk of response.text) {
-				result += chunk;
-			}
-			return result.trim();
-		} finally {
-			clearTimeout(timer);
-			cts.dispose();
+		const response = await model.sendRequest(messages, {}, token);
+		let result = '';
+		for await (const chunk of response.text) {
+			if (token.isCancellationRequested) return text;
+			result += chunk;
 		}
+		return result.trim();
 	}
 }

@@ -432,6 +432,17 @@ test('readPromptDashboardInitialPreferences ignores corrupt and inaccessible leg
 	}, { localStorage: storage });
 });
 
+/** Both states show one progress bar, with the status label visible in the expanded card. */
+test('PromptDashboard shows in-progress status text when expanded', () => {
+	const snapshot = createSnapshot([]);
+	for (const collapsed of [false, true]) {
+		const markup = renderDashboard(snapshot, { collapsedSections: { status: collapsed } });
+		assert.equal((markup.match(/role="progressbar" aria-label="Прогресс промпта"/g) || []).length, 1);
+		assert.match(markup, /aria-valuenow="68"/);
+		assert.equal(markup.includes('В работе'), !collapsed);
+	}
+});
+
 /** Вертикальная компоновка сохраняет видимые карточки, но не получает второй viewport прокрутки. */
 test('PromptDashboard stacked markup retains widgets and delegates scrolling to the editor page', () => {
 	const writes: PromptDashboardPreferences[] = [];
@@ -2508,7 +2519,7 @@ test('PromptDashboard renders sections in the shared custom order', () => {
 test('PromptDashboard preserves empty columns and accepts pointer and native drops into them', () => {
 	const sections: PromptDashboardSectionKey[] = [
 		'status', 'projectBranches', 'parallelBranches', 'dockerContainers', 'aiAnalysis',
-		'activity', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes',
+		'activity', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes', 'quickCommands',
 	];
 	for (const emptyIndex of [0, 1]) {
 		const order: PromptDashboardSectionOrder = emptyIndex === 0 ? [[], sections] : [sections, []];
@@ -2549,7 +2560,7 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 			'after',
 		),
 		[
-			['projectBranches', 'status', 'parallelBranches', 'dockerContainers', 'aiAnalysis'],
+			['projectBranches', 'status', 'parallelBranches', 'dockerContainers', 'aiAnalysis', 'quickCommands'],
 			['activity', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes'],
 		],
 	);
@@ -2565,7 +2576,7 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 			'before',
 		),
 		[
-			['status', 'projectBranches', 'parallelBranches', 'aiAnalysis', 'dockerContainers'],
+			['status', 'projectBranches', 'parallelBranches', 'aiAnalysis', 'dockerContainers', 'quickCommands'],
 			['projectCommits', 'activity', 'reviewRequests', 'todos', 'quickNotes'],
 		],
 	);
@@ -2819,7 +2830,7 @@ test('PromptDashboard scopes a shared projects refresh spinner only to the click
 	);
 	assert.match(
 		markup,
-		/MR\/PR[\s\S]*?<span style="[^"]*font-size:11px;font-weight:600;color:var\(--vscode-descriptionForeground\);white-space:nowrap">1<\/span>[\s\S]*?aria-label="Обновить виджет: MR\/PR"/,
+		/MR\/PR[\s\S]*?<span style="[^"]*background:var\(--vscode-badge-background\)[^"]*">1<\/span>[\s\S]*?aria-label="Обновить виджет: MR\/PR"/,
 	);
 	assert.doesNotMatch(
 		markup,

@@ -125,6 +125,23 @@ export class OpenCodeCliService {
 		return true;
 	}
 
+	/** Pastes into the exact live TUI after initial preparation or submission has finished. */
+	insertIntoOpenChat(promptUuid: string, text: string): boolean {
+		const launch = this.launches.get(promptUuid);
+		if (!launch || !this.isCurrentLaunch(launch) || this.starting.has(promptUuid)
+			|| !launch.terminal || !this.host.terminals.includes(launch.terminal)) return false;
+		// The screen buffer is released after preparation; the live shell execution still owns the PTY.
+		if (launch.stage !== 'prepared' && launch.stage !== 'submit') return false;
+		const normalized = text.replace(/\r\n?/g, '\n').trim();
+		// Управляющие байты могли бы преждевременно закрыть bracketed paste.
+		if (!normalized || normalized.length > 3000 || /[\x00-\x08\x0b-\x1f\x7f]/.test(normalized)) return false;
+		// Separate the first draft from the command and keep standalone slash commands after submission.
+		const payload = launch.stage === 'prepared' && !launch.output.submitted ? '\n' + normalized : normalized;
+		launch.terminal.show();
+		launch.terminal.sendText('\x1b[200~' + payload + '\x1b[201~', false);
+		return true;
+	}
+
 	/** До первой терминальной записи проверяет контекст; отправку признаёт только по экспорту сессии. */
 	async start(request: OpenCodeCliRequest): Promise<OpenCodeCliResult> {
 		if (this.disposed || this.starting.has(request.promptUuid)) {

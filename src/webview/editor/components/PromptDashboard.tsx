@@ -1,6 +1,9 @@
 import { DragHandleIcon } from '../../shared/DragHandleIcon.js';
 import { sectionDragStyles } from '../../shared/sectionDragStyles.js';
 import { QuickNotesSection } from './quickNotes/QuickNotesSection';
+import { QuickCommandsWidget } from './QuickCommandsWidget';
+import type { PromptChatTarget } from '../../../types/prompt.js';
+import { QuickNoteIcon } from './quickNotes/QuickNoteIcon';
 import { QuickNoteModalHost, useQuickNotesActions } from './quickNotes/useQuickNotesActions';
 import { useQuickNotesClient } from './quickNotes/useQuickNotesClient';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -138,6 +141,18 @@ interface PromptDashboardProps {
 	/** Пока меняется ширина панелей, профиль не переключается; после жеста сетка измеряется один раз. */
 	layoutModeFrozen?: boolean;
 	showGitFlowAction?: boolean;
+	/** Supplies the initial draft destination until the user selects an agent in the widget. */
+	chatTarget?: PromptChatTarget;
+	/** Prepares a draft in an agent chat or copies it when direct input is unavailable. */
+	onQuickCommandInsert?: (text: string, target: PromptChatTarget) => void;
+	/** Voice dictation uses the prompt editor's existing recorder, with a distinct insertion destination. */
+	quickNotesVoiceInsertion?: { sequence: number; text: string } | null;
+	onStartQuickNotesVoice?: () => void;
+	quickNotesVoiceBusy?: boolean;
+	/** Keeps the note input open through recording and background transcription. */
+	quickNotesVoiceInProgress?: boolean;
+	/** Состояние распознавания записей из карточки заметок. */
+	quickNotesVoiceQueue?: React.ReactNode;
 	onRefresh: () => void;
 	onRefreshWidget?: (section: PromptDashboardSectionKey, widget: PromptDashboardWidgetKind) => void;
 	/**
@@ -153,7 +168,7 @@ interface PromptDashboardProps {
 	onSwitchBranch: (project: string, branch: string) => void;
 	onSwitchBranches: (branchesByProject: Record<string, string>, source?: 'bulk' | 'prompt' | 'tracked') => void;
 	onPullProject?: (project: string) => void;
-	onOpenDiff: (project: string, filePath: string) => void;
+	onOpenDiff: (project: string, filePath: string, change?: GitOverlayChangeFile) => void;
 	onOpenFilePatch: (request: PromptDashboardFilePatchRequest) => void;
 	onOpenTodoMarker: (request: PromptDashboardTodoOpenRequest) => void;
 	onDockerAction: (containerId: string, action: DockerContainerActionKind) => void;
@@ -176,7 +191,7 @@ interface FileRowActionHandlers {
 	openingFileKey: string | null;
 	activeFileKey: string | null;
 	viewedFileKeys: Record<string, boolean>;
-	onOpenDiff: (project: string, filePath: string, fileKey: string) => void;
+	onOpenDiff: (project: string, filePath: string, fileKey: string, change?: GitOverlayChangeFile) => void;
 	onOpenFilePatch: (request: PromptDashboardFilePatchRequest, fileKey: string) => void;
 }
 
@@ -765,6 +780,13 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	onLayoutModeChange,
 	layoutModeFrozen = false,
 	showGitFlowAction = false,
+	chatTarget = 'copilot',
+	onQuickCommandInsert,
+	quickNotesVoiceInsertion,
+	onStartQuickNotesVoice,
+	quickNotesVoiceBusy,
+	quickNotesVoiceInProgress,
+	quickNotesVoiceQueue,
 	onRefresh,
 	onRefreshWidget,
 	onSectionShown,
@@ -789,12 +811,21 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 }) => {
 	// Состояние быстрых заметок живёт на уровне панели, а не карточки: карточка пересоздаётся при смене числа
 	// колонок и порядка виджетов, а открытое окно, его черновик и текст нового поля не должны пропадать.
-	const quickNotesClient = useQuickNotesClient();
-	const quickNotesActions = useQuickNotesActions(quickNotesClient);
 	const [quickNotesAddText, setQuickNotesAddText] = useState('');
+	const [quickNotesVoiceFocusSignal, setQuickNotesVoiceFocusSignal] = useState<number>();
+	useEffect(() => {
+		if (!quickNotesVoiceInsertion?.sequence || !quickNotesVoiceInsertion.text.trim()) return;
+		setQuickNotesAddText(previous =>
+			previous.trim() ? previous.trimEnd() + '\n' + quickNotesVoiceInsertion.text.trim()
+				: quickNotesVoiceInsertion.text.trim());
+		setQuickNotesVoiceFocusSignal(quickNotesVoiceInsertion.sequence);
+	}, [quickNotesVoiceInsertion?.sequence]);
 	// Начальное состояние не зависит от snapshot/resize; первый ready может уточнить ещё не изменённый bootstrap.
 	const [initialState] = useState(() => readPromptDashboardInitialPreferences(initialPreferences));
 	const [preferences, setPreferences] = useState(initialState.preferences);
+	// A menu-hidden note widget unsubscribes from host changes until it is visible again.
+	const quickNotesClient = useQuickNotesClient(!preferences.hiddenSections.includes('quickNotes'));
+	const quickNotesActions = useQuickNotesActions(quickNotesClient);
 	const preferencesRef = useRef(preferences);
 	const preferencesRevisionRef = useRef(preferencesRevision);
 	const initialPreferencesRef = useRef(initialPreferences);
@@ -840,6 +871,11 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	}, [initialPreferences, preferencesRevision]);
 	// Legacy localStorage переносится первым явным изменением через updatePreferences, не при открытии.
 
+	const [dockerSearchOpen, setDockerSearchOpen] = useState(() => Boolean(preferences.docker.search.trim()));
+	useEffect(() => {
+		// Synced or restored filters must stay visible so hidden search terms do not silently filter containers.
+		if (preferences.docker.search.trim()) setDockerSearchOpen(true);
+	}, [preferences.docker.search]);
 	const [branchDrafts, setBranchDrafts] = useState<Record<string, string>>({});
 	const [bulkBranchDraft, setBulkBranchDraft] = useState('');
 	const [openingFileKey, setOpeningFileKey] = useState<string | null>(null);
@@ -1078,8 +1114,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		openingFileKey,
 		activeFileKey,
 		viewedFileKeys,
-		onOpenDiff: (project: string, filePath: string, fileKey: string) => {
-			runFileOpenAction(fileKey, () => onOpenDiff(project, filePath));
+		onOpenDiff: (project: string, filePath: string, fileKey: string, change?: GitOverlayChangeFile) => {
+			runFileOpenAction(fileKey, () => onOpenDiff(project, filePath, change));
 		},
 		onOpenFilePatch: (request: PromptDashboardFilePatchRequest, fileKey: string) => {
 			runFileOpenAction(fileKey, () => onOpenFilePatch(request));
@@ -1684,14 +1720,38 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		reviewRequests: renderReviewRequests(reviewProjects, reviewRequestsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('reviewRequests', 'MR/PR')),
 		parallelBranches: renderParallelBranchFiles(parallelProjects, expanded, toggleExpanded, fileHandlers, parallelBranchesCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('parallelBranches', 'Параллельные ветки')),
 		projectCommits: renderProjectCommits(commitProjects, expanded, toggleExpanded, fileHandlers, projectCommitsCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('projectCommits', 'Коммиты проектов')),
-		dockerContainers: renderDockerContainers(snapshot?.docker.data, dockerViewMode, dockerStatusFilter, dockerSearch, dockerSortBy, expanded, dockerCacheStatus, busyAction, effectiveDockerBusyAction, changeDockerViewMode, changeDockerStatusFilter, changeDockerSearch, clearDockerSearch, changeDockerSortBy, toggleExpanded, onDockerAction, onDockerWorkspaceAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('dockerContainers', 'Docker контейнеры')),
+		dockerContainers: renderDockerContainers(snapshot?.docker.data, dockerViewMode, dockerStatusFilter, dockerSearch, dockerSearchOpen, () => setDockerSearchOpen(open => !open), dockerSortBy, expanded, dockerCacheStatus, busyAction, effectiveDockerBusyAction, changeDockerViewMode, changeDockerStatusFilter, changeDockerSearch, clearDockerSearch, changeDockerSortBy, toggleExpanded, onDockerAction, onDockerWorkspaceAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('dockerContainers', 'Docker контейнеры')),
 		todos: renderTodos(snapshot?.todos?.data || null, visibleTodosData, todoSelectedFileTypes, todoSearch, todosCacheStatus, busyAction, expanded, normalizedCollapsedSections, toggleTodoFileType, clearTodoFileTypes, changeTodoSearch, clearTodoSearch, toggleExpanded, onOpenTodoMarker, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('todos', 'ToDo')),
 		aiAnalysis: renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('aiAnalysis', 'AI review')),
+		quickCommands: (() => {
+			const collapsed = isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'quickCommands');
+			const count = preferences.quickCommands.items.length;
+			return <section style={styles.section}>
+				{renderSectionHeader('Быстрые команды', (
+					<span style={styles.sectionHeaderActions}>
+						<span className="pm-qn-count" title="Сохранённых команд">{count}</span>
+						{renderSectionCollapseButton('Быстрые команды', collapsed, () => toggleSectionCollapse('quickCommands'))}
+					</span>
+				), { collapsed, onToggleCollapse: () => toggleSectionCollapse('quickCommands'),
+					dragHandle: renderSectionDragHandle('quickCommands', 'Быстрые команды') })}
+				{collapsed ? null : <div style={styles.sectionBody}>
+					<QuickCommandsWidget items={preferences.quickCommands.items}
+						target={preferences.quickCommands.target ?? (chatTarget === 'kilo' ? 'copilot' : chatTarget)}
+						onTargetChange={target => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, target } })}
+						onItemsChange={items => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, items } })}
+						onInsert={(text, target) => onQuickCommandInsert?.(text, target)}/>
+				</div>}
+			</section>;
+		})(),
 		quickNotes: (
 			<QuickNotesSection
 				client={quickNotesClient}
 				actions={quickNotesActions}
 				addText={quickNotesAddText}
+				voiceFocusSignal={quickNotesVoiceFocusSignal}
+				onStartVoice={onStartQuickNotesVoice}
+				voiceBusy={quickNotesVoiceBusy}
+				voiceInProgress={quickNotesVoiceInProgress}
 				onAddTextChange={setQuickNotesAddText}
 				collapsed={isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'quickNotes')}
 				onToggleCollapse={() => toggleSectionCollapse('quickNotes')}
@@ -1709,7 +1769,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 								onToggleCollapse: () => toggleSectionCollapse('quickNotes'),
 								dragHandle: renderSectionDragHandle('quickNotes', 'Быстрые заметки'),
 							})}
-							{body ? <div style={styles.sectionBody}>{body}</div> : null}
+							{body ? <div style={styles.sectionBody}>{body}{quickNotesVoiceQueue}</div> : null}
 						</section>
 					);
 				}}
@@ -2254,6 +2314,7 @@ function resolveCacheLabel(snapshot: PromptDashboardSnapshot | null): string {
 	return `Обновлено ${new Date(updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 }
 
+/** Shows the status text in the expanded widget and a compact indicator when collapsed. */
 function renderStatus(
 	snapshot: PromptDashboardSnapshot | null,
 	cacheStatus: PromptDashboardLoadStatus,
@@ -2266,45 +2327,52 @@ function renderStatus(
 	const data = snapshot?.status.data;
 	const collapsed = isPromptDashboardSectionCollapsed(collapsedSections, 'status');
 	const sectionCacheStatus = resolveSectionCacheStatus(cacheStatus, busyAction, 'status', 'status');
-	const progress = Math.max(0, Math.min(100, data?.progress ?? 0));
+	const progress = typeof data?.progress === 'number' ? Math.round(Math.max(0, Math.min(100, data.progress))) : undefined;
 	const statusAccent = data ? getPromptStatusColor(data.status) : 'var(--vscode-descriptionForeground)';
-	const progressFillTone = progress >= 100
+	const progressComplete = progress === 100;
+	const progressFillTone = progressComplete
 		? 'var(--vscode-charts-green, var(--vscode-terminal-ansiGreen, var(--vscode-testing-iconPassed, #2e7d32)))'
 		: statusAccent;
+	// В свёрнутом состоянии та же шкала помещается рядом с кнопкой раскрытия.
+	const progressIndicator = data?.status === 'in-progress' ? (
+		<div
+			role="progressbar"
+			aria-label="Прогресс промпта"
+			aria-valuenow={progress}
+			title={progress === undefined ? 'Прогресс пока неизвестен' : `${progress}%`}
+			style={{ ...styles.progressBarContainer, ...styles.statusProgress, ...(collapsed ? styles.statusProgressCollapsed : null) }}
+		>
+			{progress === undefined ? <span style={styles.progressBarText}>—</span> : (
+				<>
+					<div style={{ ...styles.progressBarFill, width: `${progress}%`, background: progressFillTone, opacity: progressComplete ? 0.96 : 0.72 }} />
+					<ProgressValueLabel value={progress} fillTone="var(--vscode-button-foreground, #ffffff)" />
+				</>
+			)}
+		</div>
+	) : null;
+	const statusLabel = data ? (
+		<PromptStatusText status={data.status} variant="badge" style={{ ...styles.statusChip, color: statusAccent }} />
+	) : null;
 
 	return (
 		<section style={styles.section}>
-			{renderSectionHeader('Статус промпта', renderSectionMeta(formatPromptDashboardDuration(data?.totalTimeMs || 0), sectionCacheStatus, 'обновляем', {
-					section: 'status',
-					collapsed,
-					widget: 'status',
-					title: 'Статус промпта',
-					busyAction,
-					onToggleCollapse: () => onToggleSectionCollapse('status'),
-					onRefreshWidget,
-				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('status'), dragHandle })}
+			{renderSectionHeader('Статус промпта', (
+				<span style={{ ...styles.sectionHeaderActions, gap: 7 }}>
+					{collapsed ? progressIndicator ?? statusLabel : null}
+					{renderSectionMeta(formatPromptDashboardDuration(data?.totalTimeMs || 0), sectionCacheStatus, 'обновляем', {
+						section: 'status',
+						collapsed,
+						widget: 'status',
+						title: 'Статус промпта',
+						busyAction,
+						onToggleCollapse: () => onToggleSectionCollapse('status'),
+						onRefreshWidget,
+					})}
+				</span>
+			), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('status'), dragHandle })}
 			{collapsed ? null : <div style={{ ...styles.sectionBody, ...styles.statusBody }}>
-				<div style={styles.statusChipRow}>
-					{data ? (
-						<PromptStatusText
-							status={data.status}
-							variant="badge"
-							style={{ ...styles.statusChip, color: statusAccent }}
-						/>
-					) : <span style={styles.muted}>Нет данных</span>}
-				</div>
-				{data?.status === 'in-progress' && typeof data.progress === 'number' ? (
-					<div style={styles.statusProgressRow}>
-						<div
-							style={{ ...styles.progressBarContainer, borderColor: 'color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 48%, var(--vscode-panel-border))' }}
-							title={`${progress}%`}
-							aria-label={`Прогресс ${progress}%`}
-						>
-							<div style={{ ...styles.progressBarFill, width: `${progress}%`, background: progressFillTone, opacity: progress >= 100 ? 0.96 : 0.72 }} />
-							<ProgressValueLabel value={progress} fillTone="var(--vscode-button-foreground, #ffffff)" />
-						</div>
-					</div>
-				) : null}
+				{statusLabel ?? <span style={styles.muted}>Нет данных</span>}
+				{progressIndicator}
 			</div>}
 		</section>
 	);
@@ -2730,7 +2798,7 @@ function renderBranchProjectUncommittedFileList(
 				opening: fileHandlers.openingFileKey === fileKey,
 				active: fileHandlers.activeFileKey === fileKey,
 				viewed: fileHandlers.viewedFileKeys[fileKey] === true,
-				onOpenPatch: () => fileHandlers.onOpenDiff(project.project, file.path, fileKey),
+				onOpenPatch: () => fileHandlers.onOpenDiff(project.project, file.path, fileKey, file),
 			} satisfies DashboardFileTreeEntry;
 		});
 	return (
@@ -4212,7 +4280,13 @@ function renderSectionMeta(
 				<span>{loadingLabel}</span>
 			</span>
 		)
-		: <span style={styles.sectionMeta}>{value}</span>;
+		: <span style={{
+			...styles.sectionMeta,
+			...(typeof value === 'number' || /^\d+(?:\/\d+)?$/.test(String(value))
+				? { minWidth: 18, padding: '1px 6px', borderRadius: 9, textAlign: 'center' as const,
+					fontSize: 10, fontWeight: 700, background: 'var(--vscode-badge-background)',
+					color: 'var(--vscode-badge-foreground)' } : {}),
+		}}>{value}</span>;
 
 	if (!options?.onRefreshWidget) {
 		return (
@@ -4247,6 +4321,8 @@ function renderDockerContainers(
 	viewMode: DockerContainersViewMode,
 	statusFilter: DockerContainersStatusFilter,
 	search: string,
+	searchOpen: boolean,
+	onToggleSearch: () => void,
 	sortBy: DockerContainerSortBy,
 	expanded: ExpandedState,
 	cacheStatus: PromptDashboardLoadStatus,
@@ -4285,7 +4361,13 @@ function renderDockerContainers(
 
 	return (
 		<section style={styles.section}>
-			{renderSectionHeader('Docker контейнеры', renderSectionMeta(metaValue, sectionCacheStatus, 'обновляем', {
+			{renderSectionHeader('Docker контейнеры', <span style={styles.sectionHeaderActions}>
+				<button type="button" className="pm-qn-icon-btn" aria-label="Поиск Docker контейнеров"
+					aria-pressed={searchOpen} title="Поиск Docker контейнеров"
+					onClick={event => { event.stopPropagation(); onToggleSearch(); }}>
+					<QuickNoteIcon name="search" size={14}/>
+				</button>
+				{renderSectionMeta(metaValue, sectionCacheStatus, 'обновляем', {
 					section: 'dockerContainers',
 					collapsed,
 					widget: 'docker',
@@ -4293,10 +4375,10 @@ function renderDockerContainers(
 					busyAction,
 					onToggleCollapse: () => onToggleSectionCollapse('dockerContainers'),
 					onRefreshWidget,
-				}), { collapsed, onToggleCollapse: () => onToggleSectionCollapse('dockerContainers'), dragHandle })}
+				})}</span>, { collapsed, onToggleCollapse: () => onToggleSectionCollapse('dockerContainers'), dragHandle })}
 			{collapsed ? null : <div style={styles.sectionBody}>
 				{renderDockerSummary(data, sectionCacheStatus, dockerBusyAction, onDockerWorkspaceAction)}
-				{renderDockerControls(viewMode, statusFilter, search, sortBy, setViewMode, setStatusFilter, setSearch, clearSearch, setSortBy)}
+				{renderDockerControls(viewMode, statusFilter, search, searchOpen, sortBy, setViewMode, setStatusFilter, setSearch, clearSearch, setSortBy)}
 				{renderDockerContainerContent(data, projects, containers, viewMode, sectionCacheStatus, dockerBusyAction, expanded, toggleExpanded, onDockerAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal)}
 			</div>}
 		</section>
@@ -4388,6 +4470,7 @@ function renderDockerControls(
 	viewMode: DockerContainersViewMode,
 	statusFilter: DockerContainersStatusFilter,
 	search: string,
+	searchOpen: boolean,
 	sortBy: DockerContainerSortBy,
 	setViewMode: (mode: DockerContainersViewMode) => void,
 	setStatusFilter: (filter: DockerContainersStatusFilter) => void,
@@ -4424,7 +4507,7 @@ function renderDockerControls(
 					<option value="memory">RAM</option>
 				</select>
 			</div>
-			<div style={styles.dockerSearchField}>
+			{searchOpen ? <div style={styles.dockerSearchField}>
 				<input
 					value={search}
 					style={{
@@ -4444,7 +4527,7 @@ function renderDockerControls(
 						aria-label="Сбросить поиск"
 					>x</button>
 					: null}
-			</div>
+			</div> : null}
 		</div>
 	);
 }
@@ -7119,30 +7202,34 @@ const styles: Record<string, React.CSSProperties> = {
 		gap: '10px',
 		padding: '12px',
 	},
-	// Вертикальное центрирование контента карточки статуса.
+	// Keep the status badge and the progress bar on one row.
 	statusBody: {
-		minHeight: '72px',
-		justifyContent: 'center',
-	},
-	// Ряд с badge статуса и вторичными значениями.
-	statusChipRow: {
-		display: 'flex',
+		flexDirection: 'row',
 		alignItems: 'center',
-		justifyContent: 'space-between',
-		gap: '12px',
+		gap: '6px',
+		padding: '6px 12px',
 	},
 	// Визуальный badge статуса промпта.
 	statusChip: {
-		fontSize: '13px',
+		fontSize: '11px',
 		fontWeight: 700,
-		padding: '5px 10px',
+		padding: '2px 6px',
 		lineHeight: 1.25,
+		whiteSpace: 'nowrap',
 	},
-	// Ряд, в котором лежит прогресс-бар статуса.
-	statusProgressRow: {
-		display: 'flex',
-		alignItems: 'center',
-		gap: '8px',
+	// Процент рисуется внутри шкалы и остаётся на одной строке.
+	statusProgress: {
+		flex: '1 1 auto',
+		minWidth: 0,
+		height: '15px',
+		whiteSpace: 'nowrap',
+		borderColor: 'color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 48%, var(--vscode-panel-border))',
+	},
+	// Шкала в строке заголовка может сжиматься в узком виджете.
+	statusProgressCollapsed: {
+		width: '52px',
+		minWidth: '30px',
+		flexShrink: 1,
 	},
 	// Контейнер полосы прогресса с рамкой и фоном.
 	progressBarContainer: {

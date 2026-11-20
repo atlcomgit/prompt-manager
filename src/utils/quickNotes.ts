@@ -187,6 +187,11 @@ export function normalizeQuickNote(raw: unknown, index = 0): QuickNote | null {
 		description: readString(source.description),
 		color: normalizeQuickNoteColor(source.color),
 		done,
+		pinned: source.pinned === true,
+		rejectedSuggestions: Array.isArray(source.rejectedSuggestions)
+			? [...new Set(source.rejectedSuggestions.filter((entry): entry is string => typeof entry === 'string')
+				.map(entry => entry.trim()).filter(Boolean))].slice(-80)
+			: [],
 		order: typeof source.order === 'number' && Number.isFinite(source.order) ? source.order : index * QUICK_NOTE_ORDER_STEP,
 		items: dedupeIds(items),
 		files: dedupeIds(files),
@@ -237,7 +242,7 @@ export function createQuickNoteId(): string {
 
 /** Сравнивает открытые заметки по позиции, затем по дате создания и id для устойчивого порядка. */
 function compareQuickNotesByOrder(left: QuickNote, right: QuickNote): number {
-	return left.order - right.order
+	return Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)) || left.order - right.order
 		|| left.createdAt.localeCompare(right.createdAt)
 		|| left.id.localeCompare(right.id);
 }
@@ -376,6 +381,19 @@ export function applyQuickNoteOperation(
 			next[index] = patchQuickNote(notes[index], operation.patch, operation.at);
 			return { notes: next, result: ok };
 		}
+		case 'rejectSuggestion': {
+			const index = findIndex(operation.scope, operation.id);
+			if (index < 0) return { notes: [...notes], result: { ok: false, code: 'not-found', message: 'Заметка не найдена.' } };
+			const previous = notes[index].rejectedSuggestions || [];
+			const text = operation.text.trim();
+			if (!text || previous.some(value => value.toLocaleLowerCase() === text.toLocaleLowerCase())) {
+				return { notes: [...notes], result: ok };
+			}
+			const next = [...notes];
+			// Do not update updatedAt: suggestion history is independent of the open editor draft.
+			next[index] = { ...next[index], rejectedSuggestions: [...previous, text].slice(-80) };
+			return { notes: next, result: ok };
+		}
 		case 'setItemDone': {
 			const index = findIndex(operation.scope, operation.id);
 			if (index < 0 || !notes[index].items.some(item => item.id === operation.itemId)) {
@@ -388,6 +406,22 @@ export function applyQuickNoteOperation(
 				updatedAt: operation.at,
 			};
 			return { notes: next, result: ok };
+		}
+		case 'duplicate': {
+			const source = notes.find(note => note.scope === operation.scope && note.id === operation.id);
+			if (!source) return { notes: [...notes], result: { ok: false, code: 'not-found', message: 'Заметка не найдена.' } };
+			if (notes.some(note => note.id === operation.newId)) return { notes: [...notes], result: ok };
+			const duplicated = normalizeQuickNote({
+				...toStoredQuickNote(source),
+				id: operation.newId, title: source.title + ' (копия)',
+				order: resolveQuickNoteTopOrder(notes),
+				pinned: false, done: false, prompt: undefined, completedAt: undefined,
+				rejectedSuggestions: [], createdAt: operation.at, updatedAt: operation.at,
+				items: source.items.map(item => ({ ...item, id: createQuickNoteId() })),
+				files: source.files.map(file => ({ ...file, id: createQuickNoteId() })),
+			});
+			if (!duplicated) return { notes: [...notes], result: { ok: false, code: 'failed', message: 'Не удалось скопировать заметку.' } };
+			return { notes: [{ ...duplicated, scope: operation.scope }, ...notes], result: ok };
 		}
 		case 'delete':
 			return { notes: notes.filter(note => !(note.scope === operation.scope && note.id === operation.id)), result: ok };
@@ -545,6 +579,10 @@ export function parseQuickNoteWebviewOperation(value: unknown): QuickNoteOperati
 					patch[key] = source[key] as string;
 				}
 			}
+			if (source.pinned !== undefined) {
+				if (typeof source.pinned !== 'boolean') return null;
+				patch.pinned = source.pinned;
+			}
 			if (source.done !== undefined) {
 				if (typeof source.done !== 'boolean') {
 					return null;
@@ -553,11 +591,19 @@ export function parseQuickNoteWebviewOperation(value: unknown): QuickNoteOperati
 			}
 			return { kind: 'update', scope: value.scope, id: value.id, patch, at };
 		}
+		case 'rejectSuggestion':
+			return isQuickNoteScope(value.scope) && isOperationId(value.id) && typeof value.text === 'string'
+				&& value.text.trim().length >= 1 && value.text.length <= 300
+				? { kind: 'rejectSuggestion', scope: value.scope, id: value.id, text: value.text.trim() } : null;
 		case 'setItemDone':
 			return isQuickNoteScope(value.scope) && isOperationId(value.id) && isOperationId(value.itemId)
 				&& typeof value.done === 'boolean' && at !== null
 				? { kind: 'setItemDone', scope: value.scope, id: value.id, itemId: value.itemId, done: value.done, at }
 				: null;
+		case 'duplicate':
+			return isQuickNoteScope(value.scope) && isOperationId(value.id)
+				&& isOperationId(value.newId) && isSafeQuickNoteDirectoryId(value.newId) && at !== null
+				? { kind: 'duplicate', scope: value.scope, id: value.id, newId: value.newId, at } : null;
 		case 'delete':
 			return isQuickNoteScope(value.scope) && isOperationId(value.id) ? { kind: 'delete', scope: value.scope, id: value.id } : null;
 		case 'clearDone':
@@ -988,4 +1034,21 @@ export function formatQuickNoteShortDate(iso: string): string {
 	}
 	const pad = (value: number) => String(value).padStart(2, '0');
 	return `${pad(date.getDate())}.${pad(date.getMonth() + 1)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+
+/** Formats the title and distinct description, then adds nonempty checklist items. */
+export function formatQuickNoteClipboardText(
+    note: Pick<QuickNote, 'title' | 'description' | 'items'>,
+): string {
+    const title = note.title.trim();
+    const description = note.description.trim();
+    const checklist = note.items.flatMap(item => {
+        const text = item.text.trim();
+        return text ? [`- [${item.done ? 'x' : ' '}] ${text}`] : [];
+    });
+    const titleText = title && !title.endsWith('.') ? title + '.' : title;
+    const descriptionText = !description || description === title ? ''
+        : checklist.length && !description.endsWith(':') ? description + ':' : description;
+    return [titleText, descriptionText, checklist.join('\n')].filter(Boolean).join('\n\n');
 }

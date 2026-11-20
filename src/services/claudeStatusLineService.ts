@@ -156,6 +156,7 @@ export class ClaudeStatusLineService implements vscode.Disposable {
         private readonly context: vscode.ExtensionContext,
         private readonly accounts: ClaudeAccountService,
         private readonly log: (message: string) => void,
+        private readonly whenProvidersReady?: () => Promise<boolean>,
     ) {
         this.collectorPath = path.join(context.globalStorageUri.fsPath, COLLECTOR_NAME);
         this.disposables.push(accounts.onDidChange(() => { void this.ensureConfigured(); }));
@@ -213,6 +214,8 @@ export class ClaudeStatusLineService implements vscode.Disposable {
      * при включённой обновляет скрипт в globalStorage и добавляет statusLine в профили с выполненным входом.
      */
     private async configure(): Promise<void> {
+        // Настройка может измениться уже при восстановлении окна, до активации Claude Code.
+        if (this.whenProvidersReady && !await this.whenProvidersReady()) return;
         if (this.disposed) return;
         if (!this.isEnabled()) {
             this.configured.clear();

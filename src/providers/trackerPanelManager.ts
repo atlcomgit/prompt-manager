@@ -28,7 +28,8 @@ export class TrackerPanelManager {
 		private readonly extensionUri: vscode.Uri,
 		private readonly storageService: StorageService,
 		private readonly stateService: StateService,
-		private readonly getChatMemoryInstructionService?: () => ChatMemoryInstructionService | undefined,
+		private readonly getChatMemoryInstructionService?: () =>
+			ChatMemoryInstructionService | undefined | Promise<ChatMemoryInstructionService | undefined>,
 	) { }
 
 	/** Open or focus the tracker panel */
@@ -104,7 +105,8 @@ export class TrackerPanelManager {
 		this._onDidSave.fire(prompt.id);
 		if (prompt.status !== 'in-progress') {
 			try {
-				await this.getChatMemoryInstructionService?.()?.handlePromptStatusChange(prompt);
+				const memory = await this.getChatMemoryInstructionService?.();
+				await memory?.handlePromptStatusChange(prompt);
 			} catch {
 				// keep tracker responsive if session cleanup fails
 			}

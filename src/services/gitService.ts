@@ -203,6 +203,8 @@ interface BuiltInGitRepository {
 interface BuiltInGitApi {
 	repositories: BuiltInGitRepository[];
 	getRepository(uri: vscode.Uri): BuiltInGitRepository | null;
+	/** Создаёт URI версии файла через штатный провайдер VS Code Git. */
+	toGitUri?(uri: vscode.Uri, ref: string): vscode.Uri;
 	onDidOpenRepository?: vscode.Event<BuiltInGitRepository>;
 	onDidCloseRepository?: vscode.Event<BuiltInGitRepository>;
 }

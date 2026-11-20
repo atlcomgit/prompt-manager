@@ -125,7 +125,7 @@ import {
 import { PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, PROMPT_EDITOR_FORM_MAX_WIDTH_PX, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptEditorLayout, resolvePromptEditorPanelSplitRatio, type PromptEditorFormWidthBounds, resolvePromptDashboardRequestMessageContext, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardProjectRequestOnNotice, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
 import { normalizePromptDashboardPreferences, type PromptDashboardPreferences } from '../../types/promptDashboardPreferences.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
-import { usePromptVoiceController } from './voice/usePromptVoiceController.js';
+import { usePromptVoiceController, type PromptVoiceTarget } from './voice/usePromptVoiceController.js';
 import { KEEP_CURRENT_CHAT_MODEL, isKeepCurrentChatModel } from '../../constants/ai.js';
 
 export { shouldDeferReportAutosave, shouldPreserveLocalReportOnSave };
@@ -5153,9 +5153,16 @@ export const EditorApp: React.FC = () => {
     }, delayMs);
   };
 
-  const handleVoiceTranscriptionReady = (text: string) => {
+  const [quickNotesVoiceInsertion, setQuickNotesVoiceInsertion] = useState<{ sequence: number; text: string } | null>(null);
+
+  /** Добавляет расшифровку в поле, из которого началась запись. */
+  const handleVoiceTranscriptionReady = (text: string, target: PromptVoiceTarget) => {
     const normalized = text.trim();
     if (!normalized) {
+      return;
+    }
+    if (target === 'quickNotes') {
+      setQuickNotesVoiceInsertion(previous => ({ sequence: (previous?.sequence || 0) + 1, text: normalized }));
       return;
     }
 
@@ -5176,13 +5183,22 @@ export const EditorApp: React.FC = () => {
   };
 
   const voiceController = usePromptVoiceController({
-    onOpen: () => {
+    onOpen: (target) => {
+      if (target !== 'prompt') return;
       setShowPreview(false);
       setInlineSuggestion('');
       setInlineSuggestions([]);
     },
     onTranscriptionReady: handleVoiceTranscriptionReady,
   });
+  // Состояние распознавания доступно рядом с полем соответствующей записи.
+  const promptVoiceQueueItems = voiceController.queueItems.filter(item => item.target === 'prompt');
+  const noteVoiceQueueItems = voiceController.queueItems.filter(item => item.target === 'quickNotes');
+  const showPromptVoiceOverlay = voiceController.isVisible && voiceController.target === 'prompt';
+  // The recorder closes when the note enters the background transcription queue.
+  const showQuickNotesVoiceOverlay = voiceController.isVisible && voiceController.target === 'quickNotes';
+  const quickNotesVoiceInProgress = showQuickNotesVoiceOverlay
+    || noteVoiceQueueItems.some(item => item.status !== 'completed' && item.status !== 'error');
 
   /** Update a text field with debounced auto-save (1.5 s). */
   const updateField = <K extends keyof Prompt>(field: K, value: Prompt[K]) => {
@@ -5796,9 +5812,10 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'gitOverlayOpenFile', project, filePath });
   }, [captureProcessBodyScroll]);
 
-  const handleGitOverlayOpenDiff = useCallback((project: string, filePath: string) => {
+  /** Передаёт группу выбранного файла из виджета, где staged и рабочие изменения показаны отдельно. */
+  const handleGitOverlayOpenDiff = useCallback((project: string, filePath: string, change?: GitOverlayChangeFile) => {
     captureProcessBodyScroll('git-overlay-open-diff');
-    vscode.postMessage({ type: 'gitOverlayOpenDiff', project, filePath });
+    vscode.postMessage({ type: 'gitOverlayOpenDiff', project, filePath, change });
   }, [captureProcessBodyScroll]);
 
   const handleGitOverlayDiscardFile = useCallback((project: string, filePath: string, group: GitOverlayChangeGroup, previousPath?: string) => {
@@ -7547,7 +7564,7 @@ export const EditorApp: React.FC = () => {
                         ...styles.iconLinkBtn,
                         ...(voiceController.isVisible ? styles.linkBtnDisabled : {}),
                       }}
-                      onClick={() => { void voiceController.startRecording(); }}
+                      onClick={() => { void voiceController.startRecording('prompt'); }}
                       title={t('editor.voiceRecordFromMic')}
                       aria-label={t('editor.voiceRecordFromMic')}
                       disabled={voiceController.isVisible}
@@ -7565,10 +7582,10 @@ export const EditorApp: React.FC = () => {
                   <div
                     style={{
                       ...styles.promptTextAreaWrap,
-                      ...(voiceController.isVisible ? styles.promptTextAreaWrapWithOverlay : null),
+                      ...(showPromptVoiceOverlay ? styles.promptTextAreaWrapWithOverlay : null),
                     }}
                   >
-                    {voiceController.isVisible && (
+                    {showPromptVoiceOverlay && (
                       <PromptVoiceOverlay
                         status={voiceController.status}
                         elapsedLabel={voiceController.elapsedLabel}
@@ -7601,9 +7618,9 @@ export const EditorApp: React.FC = () => {
                       onHeightChange={setPromptContentHeight}
                       requestSuggestionSignal={requestSuggestionSignal}
                       onSuggestionLoadingChange={setIsSuggestionLoading}
-                      bottomOverlay={voiceController.queueItems.length > 0 ? (
+                      bottomOverlay={promptVoiceQueueItems.length > 0 ? (
                         <PromptVoiceQueueIndicator
-                          items={voiceController.queueItems}
+                          items={promptVoiceQueueItems}
                           onDismiss={voiceController.dismissQueueItem}
                           t={t}
                         />
@@ -8266,6 +8283,17 @@ export const EditorApp: React.FC = () => {
         onToggleSectionCollapse={handlePromptDashboardToggleSectionCollapse}
         onReorderSections={handlePromptDashboardReorderSections}
         onHydrateProjectsDetails={handlePromptDashboardHydrateProjectsDetails}
+        chatTarget={prompt.chatTarget || 'copilot'}
+        quickNotesVoiceInsertion={quickNotesVoiceInsertion}
+        onStartQuickNotesVoice={() => { void voiceController.startRecording('quickNotes'); }}
+        quickNotesVoiceBusy={voiceController.isVisible}
+        quickNotesVoiceInProgress={quickNotesVoiceInProgress}
+        quickNotesVoiceQueue={noteVoiceQueueItems.length > 0 ? (
+          <PromptVoiceQueueIndicator items={noteVoiceQueueItems} onDismiss={voiceController.dismissQueueItem} t={t} />
+        ) : null}
+        onQuickCommandInsert={(text, target) => vscode.postMessage({
+          type: 'promptDashboardQuickCommandInsert', text, target,
+        })}
         onOpenGitFlow={handleOpenGitOverlay}
         onOpenPrompt={handlePromptDashboardOpenPrompt}
         onPullProject={handlePromptDashboardPullProject}
@@ -8282,6 +8310,31 @@ export const EditorApp: React.FC = () => {
         onOpenDockerTerminal={handlePromptDashboardOpenDockerTerminal}
         onDockerLiveMetricsVisibilityChange={handlePromptDashboardDockerLiveMetricsVisibilityChange}
       />
+
+      {showQuickNotesVoiceOverlay ? (
+        <div aria-label="Запись голосовой заметки" style={{
+          position: 'fixed', zIndex: 1200, top: '20%', left: 'max(5%, 20px)',
+          right: 'max(5%, 20px)', height: 340, maxWidth: 800, margin: '0 auto',
+        }}>
+          <PromptVoiceOverlay
+            status={voiceController.status}
+            elapsedLabel={voiceController.elapsedLabel}
+            maxDurationLabel={voiceController.maxDurationLabel}
+            levels={voiceController.levels}
+            progressMessage={voiceController.progressMessage}
+            progressPercent={voiceController.progressPercent}
+            errorMessage={voiceController.errorMessage}
+            errorBadge={voiceController.errorBadge}
+            errorHint={voiceController.errorHint}
+            onConfirmIntent={voiceController.markConfirmIntent}
+            onConfirm={voiceController.confirmRecording}
+            onPause={voiceController.pauseRecording}
+            onResume={voiceController.resumeRecording}
+            onCancel={voiceController.cancelRecording}
+            t={t}
+          />
+        </div>
+      ) : null}
 
       {gitOverlayOpen ? (
         <GitOverlay

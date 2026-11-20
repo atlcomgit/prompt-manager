@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
+import { EventEmitter } from 'node:events';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ExtensionToWebviewMessage } from '../src/types/messages.js';
@@ -136,6 +137,50 @@ const withPromptVoiceService = async <T,>(
     (Module as any)._load = originalLoad;
   }
 };
+
+/** A paused capture must stay paused when the initial recorder startup settles. */
+test('PromptVoiceService can pause before the first audio block and resume on a new capture', {
+  skip: process.platform !== 'linux',
+}, async t => {
+  const devices: Array<{ child: EventEmitter; stdout: EventEmitter }> = [];
+  const childProcess = require('node:child_process') as typeof import('node:child_process');
+  t.mock.method(childProcess, 'spawn', () => {
+    const stdout = new EventEmitter();
+    const child = Object.assign(new EventEmitter(), {
+      stdout,
+      stderr: new EventEmitter(),
+      kill: () => {
+        queueMicrotask(() => child.emit('close', 0, 'SIGINT'));
+        return true;
+      },
+    });
+    devices.push({ child, stdout });
+    return child;
+  });
+  await withPromptVoiceService(async ({ PromptVoiceService }) => {
+    const messages: ExtensionToWebviewMessage[] = [];
+    const service = new PromptVoiceService('/tmp/prompt-voice-test-cache', {
+      transcriptionService: { preload: async () => undefined, transcribe: async () => '' },
+      postCorrectionService: { correct: async text => text },
+    });
+    try {
+      const started = service.start('panel', 'early-pause', message => messages.push(message));
+      await flushAsync();
+      assert.equal(devices.length, 1);
+      await service.pause('panel', 'early-pause');
+      await started;
+      assert.deepEqual(messages.map(message => message.type === 'promptVoiceState' ? message.status : null), ['paused']);
+      const resumed = service.resume('panel', 'early-pause');
+      await flushAsync();
+      assert.equal(devices.length, 2);
+      devices[1].stdout.emit('data', Buffer.alloc(512));
+      await resumed;
+      assert.match(JSON.stringify(messages.at(-1)), /"status":"recording"/);
+    } finally {
+      await service.dispose();
+    }
+  });
+});
 
 test('PromptVoiceService queues confirmed audio and allows the next recording while transcription runs', async () => {
   await withPromptVoiceService(async ({ PromptVoiceService }) => {
@@ -425,6 +470,7 @@ test('PromptVoiceQueueIndicator renders compact progress for queued recognition'
   const markup = renderToStaticMarkup(React.createElement(PromptVoiceQueueIndicator, {
     items: [{
       sessionId: 'voice-1',
+      target: 'prompt',
       status: 'processing',
       elapsedMs: 42000,
       elapsedLabel: '00:42',

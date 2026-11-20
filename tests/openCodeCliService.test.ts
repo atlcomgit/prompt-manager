@@ -101,6 +101,7 @@ function fixture(options: { version?: string; mismatch?: boolean; shell?: boolea
 					if (text === '\r') {
 						assert.equal(painted, true, 'Enter must wait for paste processing, not any output frame');
 						state.enters++;
+						state.draft = '';
 						stream.push(`\x1b]7501;state=working:id=${state.id}:app=opencode\x1b\\`);
 					} else {
 						assert.ok(text.startsWith('\x1b[200~') && text.endsWith('\x1b[201~'));
@@ -114,7 +115,11 @@ function fixture(options: { version?: string; mismatch?: boolean; shell?: boolea
 							});
 							return;
 						}
-						if (state.files.length) assert.ok(state.draft.endsWith('\n'), 'Prompt must begin on a new line');
+						if (state.files.length && !state.text) {
+							assert.ok(state.draft.endsWith('\n'), 'Prompt must begin on a new line');
+						} else if (state.text && state.draft && !state.draft.endsWith('\n')) {
+							assert.ok(content.startsWith('\n'), 'Quick command must not join the previous draft line');
+						}
 						state.text = content;
 						state.draft += content;
 						options.onPaste?.(content);
@@ -185,8 +190,28 @@ test('OpenCode service prepares native files and editable draft without sending'
 		assert.equal(sessions[0].options.env?.CLAUDE_CODE_SSE_PORT, null);
 		assert.equal(service.open(request.promptUuid), true);
 		assert.equal(service.open('unrelated-prompt'), false);
+		// Quick command inserts text into this exact TUI, without Enter or a new terminal.
+		assert.equal(service.insertIntoOpenChat(request.promptUuid, '/alek-review'), true);
+		assert.match(sessions[0].draft, /\/alek-review/);
+		assert.equal(sessions[0].enters, 0);
+		assert.equal(service.insertIntoOpenChat('unrelated-prompt', '/alek-review'), false);
+		assert.equal(service.insertIntoOpenChat(request.promptUuid, 'Текст\x1b[201~\n'), false);
 		assert.equal(sessions[0].options.name, request.title);
 		assert.deepEqual(apiCalls, []);
+	} finally { service.dispose(); }
+}));
+
+/** Later drafts use the same terminal even after the startup screen buffer is released. */
+test('OpenCode inserts a standalone quick command after automatic submission', async () => withContext(async request => {
+	const { service, sessions } = fixture();
+	try {
+		assert.equal((await service.start({ ...request, autoStart: true })).dispatched, true);
+		assert.equal(service.insertIntoOpenChat(request.promptUuid, '/alek-review'), true);
+		assert.equal(sessions.length, 1);
+		assert.equal(sessions[0].draft, '/alek-review');
+		assert.equal(sessions[0].enters, 1);
+		sessions[0].close();
+		assert.equal(service.insertIntoOpenChat(request.promptUuid, '/alek-review'), false);
 	} finally { service.dispose(); }
 }));
 

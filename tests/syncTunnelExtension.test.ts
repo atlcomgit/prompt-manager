@@ -74,6 +74,67 @@ test('tunnel sync publishes physical runtime files and preserves unrelated exten
 	assert.deepEqual(await fs.readdir(path.dirname(f.backup)), ['original']);
 });
 
+/** Релиз однажды собирается в проекте и доставляется в каждый зарегистрированный каталог. */
+test('tunnel sync checks and updates all configured installations', async t => {
+	const first = await fixture(t);
+	const second = await fixture(t);
+	await fs.writeFile(first.configFile, JSON.stringify({
+		enabled: true,
+		installations: [first, second, first].map(f => ({ extensionDirectory: f.destination, backupDirectory: f.backup })),
+	}));
+	const { syncTunnelExtension } = await loadSync();
+	const checked: string[] = [];
+	assert.equal(await syncTunnelExtension(first.project, { check: true, report: (destination: string) => checked.push(destination) }), true);
+	assert.deepEqual(checked, [first.destination, second.destination]);
+	for (const f of [first, second]) {
+		assert.equal(await fs.readFile(path.join(f.destination, 'dist', 'extension.js'), 'utf8'), 'old build');
+		await assert.rejects(fs.access(f.backup), { code: 'ENOENT' });
+	}
+	assert.equal(await syncTunnelExtension(first.project), true);
+	for (const f of [first, second]) {
+		assert.equal(await fs.readFile(path.join(f.destination, 'dist', 'extension.js'), 'utf8'), 'new build');
+		assert.equal(await fs.readFile(path.join(f.backup, 'dist', 'extension.js'), 'utf8'), 'old build');
+		assert.equal(JSON.parse(await fs.readFile(f.registry, 'utf8'))[0].version, '0.2.55');
+	}
+});
+
+/** Ошибка конфигурации второго реестра обнаруживается до замены первого. */
+test('tunnel sync rejects an invalid target before updating any installation', async t => {
+	const first = await fixture(t);
+	const second = await fixture(t);
+	await fs.writeFile(second.registry, '[]');
+	await fs.writeFile(first.configFile, JSON.stringify({
+		enabled: true,
+		installations: [first, second].map(f => ({ extensionDirectory: f.destination, backupDirectory: f.backup })),
+	}));
+	const { syncTunnelExtension } = await loadSync();
+	await assert.rejects(syncTunnelExtension(first.project), /однозначно определить/);
+	assert.equal(await fs.readFile(path.join(first.destination, 'dist', 'extension.js'), 'utf8'), 'old build');
+	await assert.rejects(fs.access(first.backup), { code: 'ENOENT' });
+});
+
+/** Ошибка публикации в одном реестре откатывает его и не пропускает независимую цель. */
+test('tunnel sync reports a failed installation and still updates the other registry', async t => {
+	const first = await fixture(t);
+	const second = await fixture(t);
+	await fs.writeFile(first.configFile, JSON.stringify({
+		enabled: true,
+		installations: [first, second].map(f => ({ extensionDirectory: f.destination, backupDirectory: f.backup })),
+	}));
+	const { syncTunnelExtension } = await loadSync();
+	const before = await fs.readFile(first.registry, 'utf8');
+	const rename = fs.rename;
+	fs.rename = async (from, to) => {
+		if (String(to) === first.registry) throw new Error('Simulated first registry write failure');
+		return rename(from, to);
+	};
+	try { await assert.rejects(syncTunnelExtension(first.project), /Simulated first registry write failure/); }
+	finally { fs.rename = rename; }
+	assert.equal(await fs.readFile(first.registry, 'utf8'), before);
+	assert.equal(await fs.readFile(path.join(first.destination, 'dist', 'extension.js'), 'utf8'), 'old build');
+	assert.equal(await fs.readFile(path.join(second.destination, 'dist', 'extension.js'), 'utf8'), 'new build');
+});
+
 /** Ссылка на проект не допускается: Node должен сохранить путь установленного extension host. */
 test('tunnel sync rejects a symbolic link instead of an installed extension directory', async t => {
 	const f = await fixture(t);

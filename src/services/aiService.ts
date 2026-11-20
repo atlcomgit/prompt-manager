@@ -186,7 +186,10 @@ export class AiService {
 		'Пиши ответ с обращением к одному лицу.',
 	];
 
-	constructor(private readonly context?: vscode.ExtensionContext) { }
+	constructor(
+		private readonly context?: vscode.ExtensionContext,
+		private readonly whenProvidersReady?: () => Promise<boolean>,
+	) { }
 	private resolvedStateDbPath: string | null | undefined;
 	private readonly stateDbItemCache = new Map<string, { fingerprint: string; items: Map<string, string> }>();
 	private readonly selectedModelCache = new Map<string, CachedSelectedModelEntry>();
@@ -214,6 +217,16 @@ export class AiService {
 			return;
 		}
 		this.onModelCatalogLoaded = onLoaded;
+		void this.watchModelCatalog().catch(() => {
+			this.logAiRequest('label=model-catalog result=warmup-error');
+		});
+	}
+
+	/** Первое чтение после старта уже увидит провайдеров, которые зарегистрировались во время ожидания. */
+	private async watchModelCatalog(): Promise<void> {
+		if ((this.whenProvidersReady && !await this.whenProvidersReady()) || this.modelCatalogDisposed) {
+			return;
+		}
 		this.modelCatalogSubscriptions.push(
 			vscode.lm.onDidChangeChatModels(() => this.clearCopilotModelCaches()),
 			vscode.authentication.onDidChangeSessions(event => {
@@ -222,7 +235,7 @@ export class AiService {
 				}
 			}),
 		);
-		this.warmModelCatalog();
+		await this.selectUserFacingChatModels();
 	}
 
 	/** Фоновая загрузка не должна превращать отказ провайдера в необработанный Promise. */
@@ -1927,6 +1940,10 @@ export class AiService {
 
 	/** Объединяет загрузки; после инвалидирования ждёт новый снимок, не публикуя запоздалый ответ. */
 	private async selectUserFacingChatModels(): Promise<vscode.LanguageModelChat[]> {
+		// Прогрев и восстановленная панель получают одно актуальное поколение уже после готовности провайдеров.
+		if (this.whenProvidersReady && !await this.whenProvidersReady()) {
+			return [];
+		}
 		while (!this.modelCatalogDisposed) {
 			if (this.modelCatalog && Date.now() < this.modelCatalog.retryAtMs) {
 				return this.modelCatalog.models;
@@ -1985,7 +2002,7 @@ export class AiService {
 
 	/** Выбирает из прогретых объектов с точной семантикой селектора; холодный адресный путь сохранён. */
 	private async selectChatModels(selector: vscode.LanguageModelChatSelector): Promise<vscode.LanguageModelChat[]> {
-		if (this.modelCatalogDisposed) {
+		if ((this.whenProvidersReady && !await this.whenProvidersReady()) || this.modelCatalogDisposed) {
 			return [];
 		}
 		if (this.modelCatalog || this.modelCatalogLoad || this.onModelCatalogLoaded || (!selector.id && !selector.family)) {

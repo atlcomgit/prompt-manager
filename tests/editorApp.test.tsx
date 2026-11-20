@@ -344,7 +344,7 @@ test('resolveInitialPromptDashboardSectionOrder prefers boot state over retained
 				['projectBranches', 'status', 'activity'],
 			),
 			[
-				['aiAnalysis', 'activity', 'projectBranches', 'parallelBranches', 'dockerContainers'],
+				['aiAnalysis', 'activity', 'projectBranches', 'parallelBranches', 'dockerContainers', 'quickCommands'],
 				['status', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes'],
 			],
 		);
@@ -355,7 +355,7 @@ test('resolveInitialPromptDashboardSectionOrder prefers boot state over retained
 				['projectBranches', 'status', 'activity'],
 			),
 			[
-				['projectBranches', 'activity', 'parallelBranches', 'dockerContainers', 'aiAnalysis'],
+				['projectBranches', 'activity', 'parallelBranches', 'dockerContainers', 'aiAnalysis', 'quickCommands'],
 				['status', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes'],
 			],
 		);

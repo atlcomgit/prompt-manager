@@ -24,20 +24,23 @@ type PromptVoiceRecorderBackend = {
   args: string[];
 };
 
-type RecorderState = 'idle' | 'recording' | 'paused';
+/** Запуск можно прервать до получения первого блока PCM. */
+type RecorderState = 'idle' | 'starting' | 'recording' | 'paused';
 
 const START_TIMEOUT_MS = 250;
 const STOP_TIMEOUT_MS = 1200;
 const LEVEL_THROTTLE_MS = 80;
 
+/** Небольшие периоды ALSA уменьшают задержку первой порции PCM и индикации микрофона. */
 const LINUX_BACKENDS: PromptVoiceRecorderBackend[] = [
   {
     command: 'arecord',
-    args: ['-q', '-t', 'raw', '-f', 'S16_LE', '-c', '1', '-r', String(PROMPT_VOICE_TARGET_SAMPLE_RATE)],
+    args: ['-q', '-t', 'raw', '-f', 'S16_LE', '-c', '1', '-r', String(PROMPT_VOICE_TARGET_SAMPLE_RATE),
+      '--period-time=20000', '--buffer-time=80000'],
   },
   {
     command: 'pw-record',
-    args: ['--format=s16', '--rate', String(PROMPT_VOICE_TARGET_SAMPLE_RATE), '--channels', '1', '-'],
+    args: ['--raw', '--format=s16', '--rate', String(PROMPT_VOICE_TARGET_SAMPLE_RATE), '--channels', '1', '-'],
   },
 ];
 
@@ -91,40 +94,40 @@ export class PromptVoiceRecorder {
     return bytesToMs(this.totalBytes);
   }
 
+  /** Сбрасывает буферы новой записи и открывает устройство захвата. */
   async start(): Promise<void> {
     this.chunks = [];
     this.totalBytes = 0;
     this.limitReached = false;
     this.lastLevelEmitAt = 0;
     this.lastWaveLevels = createIdleWaveLevels();
-    await this.spawnRecorder();
-    this.state = 'recording';
+    await this.startCapture();
   }
 
+  /** Приостанавливает захват, включая запуск, и сохраняет собранный PCM. */
   async pause(): Promise<void> {
-    if (this.state !== 'recording') {
+    if (this.state !== 'recording' && this.state !== 'starting') {
       return;
     }
 
-    await this.stopActiveProcess('pause');
     this.state = 'paused';
+    await this.stopActiveProcess('pause');
   }
 
+  /** Снова открывает устройство и продолжает заполнять буфер записи. */
   async resume(): Promise<void> {
     if (this.state !== 'paused') {
       return;
     }
 
-    await this.spawnRecorder();
-    this.state = 'recording';
+    await this.stopPromise;
+    if (this.state === 'paused') await this.startCapture();
   }
 
+  /** Освобождает устройство даже при остановке до первого блока PCM. */
   async stop(): Promise<PromptVoiceRecordingResult> {
-    if (this.state === 'recording') {
-      await this.stopActiveProcess('stop');
-    }
-
     this.state = 'idle';
+    await this.stopActiveProcess('stop');
     const combined = Buffer.concat(this.chunks);
     const samples = pcmToFloat32(combined);
     this.chunks = [];
@@ -135,12 +138,13 @@ export class PromptVoiceRecorder {
     };
   }
 
+  /** Прерывает инициализацию или захват и освобождает данные записи. */
   async cancel(): Promise<void> {
+    this.state = 'idle';
     if (this.process) {
       await this.stopActiveProcess('cancel');
     }
 
-    this.state = 'idle';
     this.chunks = [];
     this.totalBytes = 0;
     this.limitReached = false;
@@ -152,6 +156,14 @@ export class PromptVoiceRecorder {
     await this.cancel();
   }
 
+  /** При отмене запуска резервное устройство открывать уже не нужно. */
+  private async startCapture(): Promise<void> {
+    this.state = 'starting';
+    await this.spawnRecorder();
+    if (this.state === 'starting') this.state = 'recording';
+  }
+
+  /** Пробует следующие системные команды только пока пользователь ожидает захват. */
   private async spawnRecorder(): Promise<void> {
     const backends = process.platform === 'linux' ? LINUX_BACKENDS : [];
     if (backends.length === 0) {
@@ -160,6 +172,7 @@ export class PromptVoiceRecorder {
 
     let lastError: Error | null = null;
     for (const backend of backends) {
+      if (this.state !== 'starting') return;
       try {
         await this.startBackend(backend);
         return;
@@ -169,9 +182,10 @@ export class PromptVoiceRecorder {
       }
     }
 
-    throw lastError || new Error('PROMPT_VOICE_RECORDER_UNAVAILABLE');
+    if (this.state === 'starting') throw lastError || new Error('PROMPT_VOICE_RECORDER_UNAVAILABLE');
   }
 
+  /** Завершает ожидание сразу после прихода аудио, сохраняя время для ранних ошибок драйвера. */
   private async startBackend(backend: PromptVoiceRecorderBackend): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -197,6 +211,11 @@ export class PromptVoiceRecorder {
           resolve();
         });
       }, START_TIMEOUT_MS);
+
+      child.stdout.once('data', () => {
+        clearTimeout(startTimer);
+        settle(resolve);
+      });
 
       child.stderr.on('data', (chunk: Buffer) => {
         stderr += chunk.toString('utf-8');

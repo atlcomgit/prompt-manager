@@ -105,7 +105,7 @@ export function resolveEffectiveQuickNotesState(
 }
 
 /** Подключает webview к сервису заметок расширения. */
-export function useQuickNotesClient(): QuickNotesClient {
+export function useQuickNotesClient(enabled = true): QuickNotesClient {
 	const [hostState, setHostState] = useState<QuickNotesState | null>(null);
 	const [generatingTitleKeys, setGeneratingTitleKeys] = useState<ReadonlySet<string>>(new Set());
 	const [descriptionHeight, setDescriptionHeightState] = useState<number | undefined>();
@@ -132,6 +132,8 @@ export function useQuickNotesClient(): QuickNotesClient {
 
 	// Ответы расширения адресуются по requestId; полное состояние приходит и без него при внешних изменениях.
 	useEffect(() => {
+		// A widget hidden through the dashboard menu must not subscribe or request new state.
+		if (!enabled) return;
 		const pendingRequests = pendingRequestsRef.current;
 		const listener = (event: MessageEvent) => {
 			const message = event.data as Record<string, unknown> | null;
@@ -175,7 +177,7 @@ export function useQuickNotesClient(): QuickNotesClient {
 			}
 			pendingRequests.clear();
 		};
-	}, [post]);
+	}, [enabled, post]);
 
 	/** Применяет операцию сразу и снимает её, если расширение отказало или не ответило. */
 	const apply = useCallback(async (operation: QuickNoteOperation): Promise<QuickNoteOperationResult> => {

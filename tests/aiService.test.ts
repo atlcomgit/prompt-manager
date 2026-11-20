@@ -913,6 +913,49 @@ function deferredModels() {
 	return { promise, resolve, reject };
 }
 
+/** Восстановление вкладки и ручной запрос дожидаются тех же провайдеров, что и автоматический прогрев. */
+test('AiService waits for provider activation before loading the shared catalog', async t => {
+	let finishStartup!: (ready: boolean) => void;
+	const readiness = new Promise<boolean>(resolve => { finishStartup = resolve; });
+	const service = new AiService(undefined, () => readiness);
+	t.after(() => service.dispose());
+	stubFreeModelCatalog(service, [mockModel.id]);
+	const panel = service.getAvailableModels();
+	const command = service.generateTitle('title');
+	let notifications = 0;
+	service.initializeModelCatalog(() => { notifications++; });
+	service.clearCopilotModelCaches();
+	await new Promise<void>(resolve => setImmediate(resolve));
+	assert.deepEqual(modelSelections, []);
+	assert.equal(modelCatalogListeners.size, 0);
+	assert.equal(authenticationListeners.size, 0);
+	finishStartup(true);
+	assert.ok((await panel).some(model => model.id.includes(mockModel.id)));
+	assert.equal(await command, 'ok');
+	assert.deepEqual(modelSelections, [undefined]);
+	assert.equal(notifications, 1);
+	assert.equal(modelCatalogListeners.size, 1);
+	assert.equal(authenticationListeners.size, 1);
+});
+
+/** Холодный адресный запрос к одной модели также подчиняется готовности и отмене при завершении. */
+for (const outcome of ['ready', 'canceled', 'disposed'] as const) {
+	test(`AiService gates a cold model query when startup is ${outcome}`, async t => {
+		let finishStartup!: (ready: boolean) => void;
+		const readiness = new Promise<boolean>(resolve => { finishStartup = resolve; });
+		const service = new AiService(undefined, () => readiness);
+		t.after(() => service.dispose());
+		stubFreeModelCatalog(service, []);
+		const request = service.generateCommitMessage({ stagedChangesSummary: '+code' });
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.deepEqual(modelSelections, []);
+		if (outcome === 'disposed') { service.dispose(); }
+		finishStartup(outcome !== 'canceled');
+		assert.equal(await request, outcome === 'ready' ? 'ok' : '');
+		assert.deepEqual(modelSelections, outcome === 'ready' ? [{ vendor: 'copilot', family: mockModel.family }] : []);
+	});
+}
+
 /** Прогрев общий для picker, бесплатного списка и нескольких Git Flow проектов, даже после TTL выбранной модели. */
 test('AiService warmup shares one catalog with concurrent pickers and commit requests', async t => {
 	configurationValues.set('debugLogging.enabled', true);

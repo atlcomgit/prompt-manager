@@ -1066,6 +1066,18 @@ test('quick notes section is standalone and does not trigger dashboard widget re
 	assert.equal(legacy.flat().filter(section => section === 'quickNotes').length, 1);
 });
 
+/** Saved and synced layouts can contain extra columns from manual edits. */
+test('dashboard layouts recover from an extra empty column in persisted settings', () => {
+	const stored = [['quickNotes'], ['status'], []];
+	const twoColumns = normalizePromptDashboardSectionOrder(stored);
+	assert.equal(twoColumns.length, 2);
+	assert.equal(twoColumns[0][0], 'quickNotes');
+	assert.equal(twoColumns[1][0], 'status');
+	assert.deepEqual([...twoColumns.flat()].sort(), [...PROMPT_DASHBOARD_SECTION_KEYS].sort());
+	assert.deepEqual(normalizePromptDashboardSectionOrder(stored, 'single-column'), [twoColumns.flat()]);
+	assert.equal(normalizePromptDashboardSectionOrder([['status'], [], []])[1].length, 0);
+});
+
 /** Скрытые меню «⋯» виджеты не загружаются, как свёрнутые, а сохраняемое сворачивание не меняется. */
 test('hidden dashboard widgets join the collapsed map only for loading decisions', () => {
 	const collapsed = { status: true };

@@ -33,6 +33,12 @@ export interface QuickNotesActions {
 	toggleDone(note: QuickNoteView): void;
 	toggleItem(note: QuickNoteView, itemId: string): void;
 	setColor(note: QuickNoteView, color: string): void;
+	/** Persist a pin toggle independently of the editor draft. */
+	togglePin(note: QuickNoteView): void;
+	/** Copy all note content and attachments, never duplicate the linked prompt identity. */
+	duplicate(note: QuickNoteView): void;
+	/** Delete the note; attached files are removed by the storage service. */
+	deleteNote(note: QuickNoteView): void;
 	reorder(movingId: string, anchorId: string, placement: 'before' | 'after'): void;
 	/** Отправляет операции одновременно: неподтверждённые переигрываются по порядку, без промежуточных состояний. */
 	applyAll(operations: QuickNoteOperation[]): void;
@@ -148,6 +154,15 @@ export function useQuickNotesActions(client: QuickNotesClient): QuickNotesAction
 			}
 		},
 		setColor: (note, color) => void run({ kind: 'update', scope: note.scope, id: note.id, patch: { color }, at: new Date().toISOString() }),
+		togglePin: note => void run({
+			kind: 'update', scope: note.scope, id: note.id,
+			patch: { pinned: !note.pinned }, at: new Date().toISOString(),
+		}),
+		duplicate: note => void run({
+			kind: 'duplicate', scope: note.scope, id: note.id,
+			newId: createQuickNoteId(), at: new Date().toISOString(),
+		}),
+		deleteNote: note => void run({ kind: 'delete', scope: note.scope, id: note.id }),
 		reorder: (movingId, anchorId, placement) => {
 			const orders = buildQuickNoteMoveOrders(splitQuickNotes(clientRef.current.state?.notes ?? []).open, movingId, anchorId, placement);
 			if (orders) {

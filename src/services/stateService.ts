@@ -51,6 +51,9 @@ const PROMPT_QUICK_NOTES_SETTING_FIELDS = [
 	'newNoteScope', 'search', 'colors', 'boardGroupBy', 'boardScope', 'boardShowDone', 'descriptionHeight',
 ] as const;
 
+/** Быстрые команды хранятся глобально, без отдельного списка на каждую рабочую область. */
+const PROMPT_QUICK_COMMANDS_SETTING_FIELDS = ['items', 'target'] as const;
+
 /** Пользовательские настройки application наследуются Tunnel и участвуют в штатной Settings Sync. */
 export const PROMPT_UI_SETTING_KEYS = [
 	'editor.sectionOrder.main', 'editor.sectionOrder.process',
@@ -63,6 +66,7 @@ export const PROMPT_UI_SETTING_KEYS = [
 	...PROMPT_DOCKER_SETTING_FIELDS.map(field => `dashboardPreferences.docker.${field}`),
 	...PROMPT_TODOS_SETTING_FIELDS.map(field => `dashboardPreferences.todos.${field}`),
 	...PROMPT_QUICK_NOTES_SETTING_FIELDS.map(field => `dashboardPreferences.quickNotes.${field}`),
+	...PROMPT_QUICK_COMMANDS_SETTING_FIELDS.map(field => `dashboardPreferences.quickCommands.${field}`),
 	'dashboardPreferences.expanded',
 	'dashboardPreferences.showAllBranchProjects',
 	'dashboardPreferences.hiddenSections',
@@ -1111,6 +1115,9 @@ export class StateService {
 			for (const field of PROMPT_QUICK_NOTES_SETTING_FIELDS) {
 				seeds[`dashboardPreferences.quickNotes.${field}`] = preferences.quickNotes[field];
 			}
+			for (const field of PROMPT_QUICK_COMMANDS_SETTING_FIELDS) {
+				seeds[`dashboardPreferences.quickCommands.${field}`] = preferences.quickCommands[field];
+			}
 			for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
 				seeds[`dashboardPreferences.${field}`] = preferences[field];
 			}
@@ -1250,14 +1257,17 @@ export class StateService {
 		const quickNotes = this.readPromptUiFields<PromptDashboardPreferences['quickNotes']>(
 			'dashboardPreferences.quickNotes', PROMPT_QUICK_NOTES_SETTING_FIELDS, legacy?.quickNotes,
 		);
+		const quickCommands = this.readPromptUiFields<PromptDashboardPreferences['quickCommands']>(
+			'dashboardPreferences.quickCommands', PROMPT_QUICK_COMMANDS_SETTING_FIELDS, legacy?.quickCommands,
+		);
 		for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
 			const value = this.readPromptUiSetting(`dashboardPreferences.${field}`);
 			if (value !== undefined) {
 				Object.assign(next, { [field]: value });
 			}
 		}
-		return !legacy && !docker && !todos && !quickNotes && Object.keys(next).length === 0 ? undefined
-			: normalizePromptDashboardPreferences({ ...legacy, ...next, docker, todos, quickNotes });
+		return !legacy && !docker && !todos && !quickNotes && !quickCommands && Object.keys(next).length === 0 ? undefined
+			: normalizePromptDashboardPreferences({ ...legacy, ...next, docker, todos, quickNotes, quickCommands });
 	}
 
 	/** Адресный патч preferences сохраняет параллельные изменения других полей и явный false. */
@@ -1273,6 +1283,9 @@ export class StateService {
 			await this.writePromptUiFields('dashboardPreferences.todos', PROMPT_TODOS_SETTING_FIELDS, next.todos, base?.todos);
 			await this.writePromptUiFields(
 				'dashboardPreferences.quickNotes', PROMPT_QUICK_NOTES_SETTING_FIELDS, next.quickNotes, base?.quickNotes,
+			);
+			await this.writePromptUiFields(
+				'dashboardPreferences.quickCommands', PROMPT_QUICK_COMMANDS_SETTING_FIELDS, next.quickCommands, base?.quickCommands,
 			);
 			for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
 				if (base && JSON.stringify(base[field]) === JSON.stringify(next[field])) {

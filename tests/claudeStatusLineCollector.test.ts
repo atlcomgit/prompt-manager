@@ -78,11 +78,11 @@ async function setup() {
     const logs: string[] = [];
     /** Создаёт сервис для профилей; отключённые от входа профили возвращаются только с `includeSignedOut`. */
     const context = { globalStorageUri: { fsPath: storage } } as any;
-    const create = (profiles: TestProfile[]) => new ClaudeStatusLineService(context, {
+    const create = (profiles: TestProfile[], whenProvidersReady?: () => Promise<boolean>) => new ClaudeStatusLineService(context, {
         onDidChange: () => ({ dispose() { /* Профили в тесте не меняются. */ } }),
         getProfileDirectories: (includeSignedOut = false) => profiles
             .filter(p => includeSignedOut || p.loggedIn).map(({ id, directory }) => ({ id, directory })),
-    } as any, message => logs.push(message));
+    } as any, message => logs.push(message), whenProvidersReady);
     return {
         root, home, storage, logs, create,
         restore: () => { (Module as any)._load = originalLoad; },
@@ -99,6 +99,27 @@ async function settle(service: any): Promise<void> {
 async function readSettings(directory: string): Promise<Record<string, any>> {
     return JSON.parse(await readFile(path.join(directory, 'settings.json'), 'utf8'));
 }
+
+test('collector ignores early configuration changes when the host stops before provider readiness', async () => {
+    const env = await setup();
+    const defaultDir = path.join(env.home, '.claude');
+    let release!: (ready: boolean) => void;
+    const providerActivation = new Promise<boolean>(resolve => { release = resolve; });
+    const service = env.create([{ id: 'default', directory: defaultDir, loggedIn: true }], () => providerActivation);
+    try {
+        setCollectorEnabled(true);
+        await new Promise(resolve => setImmediate(resolve));
+        await assert.rejects(access(env.storage));
+        release(false);
+        await settle(service);
+        await assert.rejects(access(env.storage));
+        await assert.rejects(access(path.join(defaultDir, 'settings.json')));
+    } finally {
+        service.dispose();
+        env.restore();
+        await rm(env.root, { recursive: true, force: true });
+    }
+});
 
 test('disabled statusLine collector setting never installs the collector', async () => {
     const env = await setup();

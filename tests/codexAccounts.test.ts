@@ -21,6 +21,8 @@ interface FakeTerminal { options: any; disposed: boolean; show(): void; sendText
 /** Поддельный элемент строки состояния: видимость меняется через show/hide. */
 interface FakeStatusItem {
     text: string; tooltip: string; visible: boolean; show(): void; hide(): void; dispose(): void;
+    backgroundColor?: { id: string };
+    color?: { id: string };
 }
 const terminals: FakeTerminal[] = [];
 const statusItems: FakeStatusItem[] = [];
@@ -29,6 +31,7 @@ const windowStateChanged = new EventEmitter<{ focused: boolean }>();
 let codexInstalled = false;
 const vscodeMock = {
     EventEmitter,
+    ThemeColor: class { constructor(readonly id: string) {} },
     StatusBarAlignment: { Left: 1, Right: 2 },
     extensions: {
         getExtension: (id: string) => (codexInstalled && id === 'openai.chatgpt'
@@ -304,11 +307,12 @@ test('closing the login terminal finishes the pending Codex login with one final
     });
 });
 
-test('Codex status bar appears after the extension is installed and polls only from the focused window', async () => {
+test('Codex status bar keeps refreshing independently of the Accounts panel and window focus', async () => {
     const { CodexAccountsStatusBarProvider } = await import('../src/providers/codexAccountsStatusBarProvider.js');
     const changed = new EventEmitter<void>();
     const calls: unknown[][] = [];
     let stale = false;
+    let usedPercent = 20;
     const accounts = {
         onDidChange: changed.event,
         getActiveAuth: async () => fixtureAuth('account-a'),
@@ -323,7 +327,7 @@ test('Codex status bar appears after the extension is installed and polls only f
             calls.push(args);
             return {
                 windows: [{
-                    label: '5ч', usedPercent: 20, remainingPercent: 80, windowDurationMins: 300, resetsAt: null,
+                    label: '5ч', usedPercent, remainingPercent: 100 - usedPercent, windowDurationMins: 300, resetsAt: null,
                 }],
                 planType: null, updatedAt: '2026-11-19T05:00:00.000Z', stale,
             };
@@ -341,31 +345,40 @@ test('Codex status bar appears after the extension is installed and polls only f
         },
     };
     const provider = new CodexAccountsStatusBarProvider(
-        accounts as any, limits as any, async () => undefined, preference as any);
+        accounts as any, limits as any, preference as any);
     const item = statusItems[statusItems.length - 1];
+    /** Считывает текущие цвета после смены режима или ответа сервиса. */
+    const statusColors = () => [item.backgroundColor?.id, item.color?.id];
     try {
         assert.equal(item.visible, false);
         codexInstalled = true;
         await provider.refresh();
         assert.equal(item.visible, true);
-        assert.match(item.text, /Codex исп\. 5ч: 20%/);
+        assert.match(item.text, /Codex 5ч: 20%/);
         assert.match(item.tooltip, /20% использовано/);
+        assert.deepEqual(statusColors(), [undefined, undefined]);
+        usedPercent = 60;
+        await provider.refresh();
+        assert.deepEqual(statusColors(), ['statusBarItem.warningBackground', 'statusBarItem.warningForeground']);
         const countBeforeToggle = calls.length;
         mode = 'remaining';
         modeChangeHandlers.forEach(cb => cb());
-        assert.match(item.text, /Codex ост\. 5ч: 80%/);
-        assert.match(item.tooltip, /80% осталось/);
+        assert.match(item.text, /Codex 5ч: 40%/);
+        assert.match(item.tooltip, /40% осталось/);
+        assert.deepEqual(statusColors(), ['statusBarItem.warningBackground', 'statusBarItem.warningForeground']);
         assert.equal(calls.length, countBeforeToggle, 'Changing display must not poll Codex');
         mode = 'used';
         modeChangeHandlers.forEach(cb => cb());
-        assert.match(item.text, /5ч: 20%/);
+        assert.match(item.text, /5ч: 60%/);
         assert.deepEqual(calls[calls.length - 1].slice(2), [false, true]);
 
         vscodeMock.window.state.focused = false;
         stale = true;
+        usedPercent = 90;
         await provider.refresh();
-        assert.deepEqual(calls[calls.length - 1].slice(2), [false, false]);
-        assert.match(item.text, /5ч: ≈20%/);
+        assert.deepEqual(calls[calls.length - 1].slice(2), [false, true]);
+        assert.match(item.text, /5ч: ≈90%/);
+        assert.deepEqual(statusColors(), ['statusBarItem.errorBackground', 'statusBarItem.errorForeground']);
         assert.match(item.tooltip, /могли устареть/);
         await provider.refresh(true);
         assert.deepEqual(calls[calls.length - 1].slice(2), [true, true]);

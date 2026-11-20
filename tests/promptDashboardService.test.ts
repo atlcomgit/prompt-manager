@@ -486,6 +486,39 @@ test('PromptDashboardService getSnapshot reuses bootstrap Docker data and primes
 	service.dispose();
 });
 
+test('dashboard returns a snapshot during startup and refreshes only the last open prompt after providers are ready', async () => {
+	for (const close of [false, true]) {
+		let markReady!: (value: boolean) => void;
+		const ready = new Promise<boolean>(resolve => { markReady = resolve; });
+		const deliveries: string[] = [];
+		let dockerLoads = 0;
+		let bootstrapReads = 0;
+		const service = new PromptDashboardService(
+			{} as any, { getWorkspaceFolders: () => ['api'] } as any, {} as any, {} as any, {
+				onDidChange: () => ({ dispose() {} }),
+				getBootstrapDockerContainersData: () => { bootstrapReads++; return null; },
+				getDockerContainersData: async () => { dockerLoads++; return { projects: [] }; },
+			} as any, undefined, () => ready,
+		);
+		try {
+			for (const id of ['old', 'current']) {
+				const snapshot = service.getSnapshot(createPrompt({ id, promptUuid: id }), () => { deliveries.push(id); });
+				assert.equal(snapshot.promptId, id);
+			}
+			service.setDockerLiveMetricsVisibility(true);
+			if (close) service.pauseActiveScope('panel-closed');
+			assert.equal(bootstrapReads, 0);
+			assert.equal(dockerLoads, 0);
+			markReady(true);
+			await new Promise(resolve => setImmediate(resolve));
+			assert.equal(dockerLoads, close ? 0 : 1);
+			assert.deepEqual([...new Set(deliveries)], close ? [] : ['current']);
+		} finally {
+			service.dispose();
+		}
+	}
+});
+
 test('PromptDashboardService polls Docker live stats only while metrics remain visible', async () => {
 	const workspaceFolders = new Map([
 		['api', '/workspace/api'],

@@ -5,7 +5,8 @@
 import type { ChatMemorySummary, EditorPromptViewState, EditorPromptPlanViewMode, Prompt, PromptConfig, PromptContextFileCard, PromptCustomGroup, SidebarState, PromptStatistics, PromptStatus } from './prompt.js';
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerWorkspaceActionKind } from './docker.js';
-import type { DashboardQuickCommandTarget, DashboardQuickNotesWidgetState, PromptDashboardPreferences } from './promptDashboardPreferences.js';
+import type { DashboardQuickCommandEdit, DashboardQuickCommandTarget, DashboardQuickNotesWidgetState, PromptDashboardPreferences } from './promptDashboardPreferences.js';
+import type { QuickCommandTemplateResult } from '../utils/quickCommandTemplate.js';
 import type {
 	QuickNoteAttachSource,
 	QuickNoteChecklistSuggestionInput,
@@ -100,6 +101,7 @@ export type WebviewToExtensionMessage =
 	| { type: 'savePromptDashboardSectionOrder'; order: PromptDashboardSectionOrder; layoutMode?: PromptDashboardLayoutMode; requestId?: string }
 	/** Полный снимок внутренних настроек; пустые поля являются явным сохранённым выбором. */
 	| { type: 'savePromptDashboardPreferences'; state: PromptDashboardPreferences; baseState?: PromptDashboardPreferences; requestId?: string }
+	| { type: 'savePromptDashboardQuickCommand'; edit: DashboardQuickCommandEdit; migration?: PromptDashboardPreferences; requestId: string }
 	| { type: 'promptDashboardLayoutModeChanged'; layoutMode: PromptDashboardLayoutMode }
 	| { type: 'getSidebarState' }
 	| { type: 'getWorkspaceFolders' }
@@ -142,8 +144,9 @@ export type WebviewToExtensionMessage =
 	| { type: 'analyzePromptDashboardReview'; prompt: Prompt; requestId?: string }
 	/** До передачи текста клиент удостоверяется, что хост доступен и пользователь ещё ожидает вставку. */
 	| { type: 'promptDashboardQuickCommandPrepare'; requestId: string }
-	| { type: 'promptDashboardQuickCommandInsert'; requestId: string; text: string; target: DashboardQuickCommandTarget; hostDeadline: number }
-	| { type: 'promptDashboardQuickCommandCopy'; text: string }
+	| { type: 'promptDashboardQuickCommandInsert'; requestId: string; promptId: string; promptUuid: string; text: string; target: DashboardQuickCommandTarget; hostDeadline: number }
+	| { type: 'promptDashboardQuickCommandCopy'; promptId: string; promptUuid: string; text: string }
+	| { type: 'promptDashboardQuickCommandPreview'; requestId: string; promptId: string; promptUuid: string; text: string }
 	/** Быстрые заметки: состояние обеих областей и операции; ответы приходят адресно по requestId. */
 	| { type: 'quickNotesRequestState'; requestId?: string }
 	| { type: 'quickNotesSetDescriptionHeight'; height: number }
@@ -339,8 +342,11 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptDashboardSnapshot'; snapshot: PromptDashboardSnapshot; requestId?: string }
 	/** Подтверждает локальную запись настройки; облачная доставка выполняется Settings Sync отдельно. */
 	| { type: 'promptDashboardStateSaved'; requestId: string; settings?: PromptUiSettingsSnapshot }
+	| { type: 'promptDashboardQuickCommandSaved'; requestId: string; settings: PromptUiSettingsSnapshot; error?: string }
 	| { type: 'promptDashboardQuickCommandReady'; requestId: string; hostTime: number }
 	| { type: 'promptDashboardQuickCommandFinished'; requestId: string; expired?: boolean }
+	| { type: 'promptDashboardQuickCommandPreviewResult'; requestId: string; result: QuickCommandTemplateResult }
+	| { type: 'promptDashboardQuickCommandPreviewInvalidated' }
 	/** Изменения из другого окна применяются отдельно от одноразовой начальной гидратации. */
 	| { type: 'promptUiSettingsChanged'; settings: PromptUiSettingsSnapshot }
 	| { type: 'promptDashboardWidgetSnapshot'; promptId: string; promptUuid?: string; widget: PromptDashboardWidgetSnapshot<unknown>; requestId?: string }

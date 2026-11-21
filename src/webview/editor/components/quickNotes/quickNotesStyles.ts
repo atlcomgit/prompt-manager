@@ -292,6 +292,8 @@ body.vscode-light, body.vscode-high-contrast-light { --pm-qn-pink: #c2185b; --pm
 	position: fixed; inset: 0; z-index: 1000; display: flex; align-items: flex-start; justify-content: center;
 	padding: 7vh 16px 16px; background: rgba(0, 0, 0, 0.45);
 }
+.pm-dashboard-dialog-overlay { align-items: center; box-sizing: border-box; }
+.pm-dashboard-dialog-overlay .pm-qn-modal { max-height: 100%; min-width: 0; }
 body.vscode-light .pm-qn-overlay { background: rgba(0, 0, 0, 0.25); }
 .pm-qn-modal {
 	width: min(640px, 100%); max-height: 86vh; display: flex; flex-direction: column; color: var(--vscode-foreground);

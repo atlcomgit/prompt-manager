@@ -137,9 +137,9 @@ export class OpenCodeCliService {
 			|| !launch.terminal || !this.host.terminals.includes(launch.terminal)) return false;
 		// The screen buffer is released after preparation; the live shell execution still owns the PTY.
 		if (launch.stage !== 'prepared' && launch.stage !== 'submit') return false;
-		const normalized = text.replace(/\r\n?/g, '\n').trim();
-		// Управляющие байты могли бы преждевременно закрыть bracketed paste.
-		if (!normalized || normalized.length > 3000 || /[\x00-\x08\x0b-\x1f\x7f]/.test(normalized)) return false;
+		const normalized = text.replace(/\r\n?/g, '\n');
+		// Лимит относится к шаблону до подстановки. Отступы сохраняются, управляющие байты блокируются.
+		if (!normalized.trim() || /[\x00-\x08\x0b-\x1f\x7f]/.test(normalized)) return false;
 		// Separate the first draft from the command and keep standalone slash commands after submission.
 		const payload = launch.stage === 'prepared' && !launch.output.submitted ? '\n' + normalized : normalized;
 		launch.terminal.show();

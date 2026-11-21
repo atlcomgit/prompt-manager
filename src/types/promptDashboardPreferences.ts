@@ -54,15 +54,25 @@ export const DASHBOARD_QUICK_COMMAND_LIMIT = 120;
 export const DASHBOARD_QUICK_COMMAND_TEXT_LIMIT = 3000;
 export const DASHBOARD_QUICK_COMMAND_CATEGORY_LIMIT = 80;
 
-/** Фраза уникальна в списке, пустая категория означает общий список. */
+/** Название уникально в списке. Текст черновика может быть многострочным или пустым. */
 export interface DashboardQuickCommand {
+	title: string;
 	text: string;
 	category?: string;
 }
 
-/** Порядок фраз и выбранный агент общие для всех промптов. */
+/** A modal saves only its own row. The original remains the comparison base across retries. */
+export interface DashboardQuickCommandEdit {
+	original: DashboardQuickCommand | null;
+	command: DashboardQuickCommand;
+	restore?: { title: string; text: string };
+}
+
+/** Порядок команд и выбранный агент общие для всех промптов. */
 export interface DashboardQuickCommandsWidgetState {
 	items: DashboardQuickCommand[];
+	/** Unassigned legacy templates can be restored explicitly in any command editor. */
+	recoverableTexts?: Record<string, string>;
 	target?: DashboardQuickCommandTarget;
 }
 
@@ -70,18 +80,17 @@ export interface DashboardQuickCommandsWidgetState {
 export interface DashboardQuickCommandsConfiguration {
 	items: string[];
 	categories: Record<string, string>;
+	texts: Record<string, string>;
 	target?: DashboardQuickCommandTarget;
 }
 
-/** Записывает порядок отдельно от категорий, отсортированных по ключу для сравнения сохранений. */
+/** Старая фраза служит текстом по умолчанию. Явно очищенный текст сохраняется пустой строкой. */
 export function serializeDashboardQuickCommands(state: DashboardQuickCommandsWidgetState): DashboardQuickCommandsConfiguration {
-	const categories = new Map<string, string>();
-	for (const { text, category } of state.items) {
-		if (category) categories.set(text, category);
-	}
+	const byTitle = [...state.items].sort((a, b) => a.title < b.title ? -1 : a.title > b.title ? 1 : 0);
 	return {
-		items: state.items.map(command => command.text),
-		categories: Object.fromEntries([...categories].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)),
+		items: state.items.map(command => command.title),
+		categories: Object.fromEntries(byTitle.flatMap(({ title, category }) => category ? [[title, category]] : [])),
+		texts: Object.fromEntries(byTitle.filter(item => item.title !== item.text).map(item => [item.title, item.text])),
 		target: state.target,
 	};
 }
@@ -91,26 +100,38 @@ export function isDashboardQuickCommandTarget(value: unknown): value is Dashboar
 	return DASHBOARD_QUICK_COMMAND_TARGETS.some(target => target === value);
 }
 
-/** Читает сохранённые строки и записи с категориями в исходном порядке. Проверки в quickCommandsWidget.test.tsx. */
+/** Читает карту по собственным ключам, включая названия команд вроде «constructor». */
+function readQuickCommandMap(value: unknown): Map<string, unknown> {
+	return new Map(value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value) : []);
+}
+
+/** Читает старые фразы и новые именованные команды. Проверки в quickCommandsWidget.test.tsx. */
 export function normalizeDashboardQuickCommandsWidgetState(value: unknown): DashboardQuickCommandsWidgetState {
-	const input: { items?: unknown; categories?: unknown; target?: unknown } = value && typeof value === 'object' && !Array.isArray(value)
+	const input: Partial<Record<keyof DashboardQuickCommandsConfiguration | 'recoverableTexts', unknown>> = value && typeof value === 'object' && !Array.isArray(value)
 		? { ...value } : {};
 	const entries: readonly unknown[] = Array.isArray(input.items)
 		? input.items : ['/alek-review', 'есть еще уточнения или вопросы?'];
-	const categories = input.categories && typeof input.categories === 'object' && !Array.isArray(input.categories)
-		? new Map<string, unknown>(Object.entries(input.categories)) : new Map<string, unknown>();
+	const categories = readQuickCommandMap(input.categories);
+	const texts = readQuickCommandMap(input.texts);
 	const commands = new Map<string, DashboardQuickCommand>();
 	for (const entry of entries) {
-		const command: { text?: unknown; category?: unknown } = typeof entry === 'string'
-			? { text: entry } : entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : {};
-		const text = typeof command.text === 'string' ? command.text.trim() : '';
-		if (!text || text.length > DASHBOARD_QUICK_COMMAND_TEXT_LIMIT || commands.has(text)) continue;
-		const value = categories.has(text) ? categories.get(text) : command.category;
+		const command: Partial<Record<keyof DashboardQuickCommand, unknown>> =
+			entry && typeof entry === 'object' && !Array.isArray(entry) ? { ...entry } : {};
+		const named = Object.hasOwn(command, 'title');
+		const rawTitle = typeof entry === 'string' ? entry : named ? command.title : command.text;
+		const title = typeof rawTitle === 'string' ? rawTitle.trim() : '';
+		if (!title || title.length > DASHBOARD_QUICK_COMMAND_TEXT_LIMIT || commands.has(title)) continue;
+		const rawText = texts.has(title) ? texts.get(title) : named ? command.text : title;
+		const text = typeof rawText === 'string' && rawText.length <= DASHBOARD_QUICK_COMMAND_TEXT_LIMIT ? rawText : '';
+		const value = categories.has(title) ? categories.get(title) : command.category;
 		const category = typeof value === 'string' ? value.trim().slice(0, DASHBOARD_QUICK_COMMAND_CATEGORY_LIMIT) : '';
-		commands.set(text, category ? { text, category } : { text });
+		commands.set(title, { title, text, ...(category ? { category } : {}) });
 		if (commands.size === DASHBOARD_QUICK_COMMAND_LIMIT) break;
 	}
-	return { items: [...commands.values()], ...(isDashboardQuickCommandTarget(input.target) ? { target: input.target } : {}) };
+	const recovered = [...readQuickCommandMap(input.recoverableTexts)].filter((entry): entry is [string, string] =>
+		typeof entry[1] === 'string' && entry[1].length <= DASHBOARD_QUICK_COMMAND_TEXT_LIMIT);
+	return { items: [...commands.values()], ...(recovered.length ? { recoverableTexts: Object.fromEntries(recovered) } : {}),
+		...(isDashboardQuickCommandTarget(input.target) ? { target: input.target } : {}) };
 }
 
 /** Общие настройки представления виджетов, не зависящие от ширины и выбранного промпта. */

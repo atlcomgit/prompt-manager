@@ -29,7 +29,7 @@ test('dashboard preferences keep false disclosures and explicit empty values', (
 		docker: { viewMode: 'table', statusFilter: 'stopped', search: '', sortBy: 'memory',
 			expandedContainerIds: ['docker:legacy'] },
 		todos: { selectedFileTypes: [], search: '' },
-		quickCommands: { items: [{ text: '/alek-review' }, { text: 'есть еще уточнения или вопросы?' }] },
+		quickCommands: { items: [{ title: '/alek-review', text: '/alek-review' }, { title: 'есть еще уточнения или вопросы?', text: 'есть еще уточнения или вопросы?' }] },
 		quickNotes: { newNoteScope: 'global', newNoteColor: 'teal', search: 'идея', colors: ['red', '#12abef'], boardGroupBy: 'color',
 			boardScope: 'workspace', boardShowDone: true },
 		expanded: { 'project:api': false, 'branch:main': true },

@@ -1,7 +1,8 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { normalizePromptDashboardLayouts, PROMPT_DASHBOARD_SECTION_KEYS } from '../src/types/promptDashboard.js';
 import { normalizePromptDashboardPreferences } from '../src/types/promptDashboardPreferences.js';
@@ -70,9 +71,14 @@ function createConcurrentConfigurationMock() {
 /** Текущий тест заменяет настройки, сохраняя закешированный модуль vscode между импортами. */
 let activeConfiguration = createConfigurationMock();
 
+/** Окна в тесте делят один изолированный каталог профиля для блокировки записи команд. */
+const profilesRoot = mkdtempSync(path.join(tmpdir(), 'prompt-manager-settings-test-'));
+let profileDirectory = profilesRoot;
+after(() => rmSync(profilesRoot, { recursive: true, force: true }));
+
 /** Создаёт минимальный контекст без рабочих файлов, подключений и настоящего хранилища VS Code. */
 function createStateContext(workspaceState = createWorkspaceStateMock()): ExtensionContext {
-	return { workspaceState } as unknown as ExtensionContext;
+	return { workspaceState, globalStorageUri: { fsPath: profileDirectory } } as unknown as ExtensionContext;
 }
 
 const originalLoad = (Module as any)._load;
@@ -118,6 +124,7 @@ function createVsCodeMock() {
 }
 
 async function importStateService(configuration = createConfigurationMock()) {
+	profileDirectory = mkdtempSync(path.join(profilesRoot, 'profile-'));
 	activeConfiguration = configuration;
 	(Module as any)._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
 		if (request === 'vscode') {
@@ -934,7 +941,7 @@ test('StateService shares quick command strings and preserves categories after a
 	const { StateService } = await importStateService(configuration);
 	const first = new StateService(createStateContext());
 	const second = new StateService(createStateContext());
-	const items = [{ text: '/status', category: 'Git' }, { text: '/review' }];
+	const items = [{ title: '/status', text: '/status', category: 'Git' }, { title: '/review', text: '/review' }];
 	await first.savePromptDashboardPreferences({ ...base, quickCommands: { ...base.quickCommands, target: 'current' } }, base);
 	await second.savePromptDashboardPreferences({ ...base, quickCommands: { items } }, base);
 	const reopened = new StateService(createStateContext());
@@ -949,10 +956,10 @@ test('StateService shares quick command strings and preserves categories after a
 	await configuration.update(itemsKey, ['/review', '/status', '/extra'], 1);
 	// Окно со старым снимком меняет только категорию и сохраняет перестановку из старого клиента.
 	await first.savePromptDashboardPreferences({
-		...base, quickCommands: { items: [{ text: '/review', category: 'Ревью' }, { text: '/status' }] },
+		...base, quickCommands: { items: [{ title: '/review', text: '/review', category: 'Ревью' }, { title: '/status', text: '/status' }] },
 	}, base);
 	assert.deepEqual(reopened.getPromptDashboardPreferences()?.quickCommands, {
-		items: [{ text: '/review', category: 'Ревью' }, { text: '/status', category: 'Git' }, { text: '/extra' }],
+		items: [{ title: '/review', text: '/review', category: 'Ревью' }, { title: '/status', text: '/status', category: 'Git' }, { title: '/extra', text: '/extra' }],
 		target: 'current',
 	});
 });
@@ -962,9 +969,11 @@ for (const action of ['rename', 'delete'] as const) {
 	test(`Quick command ${action} preserves the visible category after a failed list write and retry`, async () => {
 		const itemsKey = 'dashboardPreferences.quickCommands.items';
 		const categoriesKey = 'dashboardPreferences.quickCommands.categories';
+		const textsKey = 'dashboardPreferences.quickCommands.texts';
 		let fail = true;
 		const configuration = createConfigurationMock({
 			[itemsKey]: ['/old', '/keep'], [categoriesKey]: { '/old': 'Git', '/keep': 'Other' },
+			[textsKey]: { '/old': 'Ревью {{taskNumber}}', '/keep': '' },
 		}, { update: async (store, key, value) => {
 			if (fail && key === itemsKey) throw new Error('list write failed');
 			store.set(key, value);
@@ -973,8 +982,8 @@ for (const action of ['rename', 'delete'] as const) {
 		const service = new StateService(createStateContext());
 		const reopened = new StateService(createStateContext());
 		const base = service.getPromptDashboardPreferences()!;
-		const items = base.quickCommands.items.filter(item => item.text !== '/old');
-		if (action === 'rename') items.unshift({ text: '/new', category: 'Git' });
+		const items = base.quickCommands.items.filter(item => item.title !== '/old');
+		if (action === 'rename') items.unshift({ title: '/new', text: base.quickCommands.items[0].text, category: 'Git' });
 		const next = { ...base, quickCommands: { items } };
 		await assert.rejects(service.savePromptDashboardPreferences(next, base), /list write failed/);
 		assert.deepEqual(reopened.getPromptDashboardPreferences()?.quickCommands, base.quickCommands);
@@ -982,8 +991,72 @@ for (const action of ['rename', 'delete'] as const) {
 		await service.savePromptDashboardPreferences(next, base);
 		assert.deepEqual(reopened.getPromptDashboardPreferences()?.quickCommands, next.quickCommands);
 		assert.equal(Object.hasOwn(configuration.store.get(categoriesKey) as object, '/old'), false);
+		assert.equal(Object.hasOwn(configuration.store.get(textsKey) as object, '/old'), false);
 	});
 }
+
+/** Раздельные карты сохраняют изменения соседнего окна, даже когда оно читало прежний снимок. */
+test('quick command body edits preserve a second window’s category, other bodies and explicit empties', async () => {
+	const itemsKey = 'dashboardPreferences.quickCommands.items';
+	const textsKey = 'dashboardPreferences.quickCommands.texts';
+	const configuration = createConfigurationMock({ [itemsKey]: ['A', 'B'] });
+	const { StateService } = await importStateService(configuration);
+	const first = new StateService(createStateContext());
+	const second = new StateService(createStateContext());
+	const base = first.getPromptDashboardPreferences()!;
+	await first.savePromptDashboardPreferences({ ...base, quickCommands: { items: [
+		{ title: 'A', text: 'A', category: 'Ревью' }, { title: 'B', text: 'Другая команда' },
+	] } }, base);
+	await second.savePromptDashboardPreferences({ ...base, quickCommands: { items: [
+		{ title: 'A', text: '' }, { title: 'B', text: 'B' },
+	] } }, base);
+	assert.deepEqual(first.getPromptDashboardPreferences()!.quickCommands.items, [
+		{ title: 'A', text: '', category: 'Ревью' }, { title: 'B', text: 'Другая команда' },
+	]);
+	assert.deepEqual(configuration.store.get(textsKey), { A: '', B: 'Другая команда' });
+	assert.equal(configuration.writes.filter(write => write.key === itemsKey).length, 0);
+});
+
+/** Настройки двух окон не подтверждают одновременно две несовместимые замены одной карты. */
+test('overlapping quick command saves can retry without losing another template', async () => {
+	const entered = createDeferred<void>();
+	const resume = createDeferred<void>();
+	const textsKey = 'dashboardPreferences.quickCommands.texts';
+	const configuration = createConfigurationMock({ 'dashboardPreferences.quickCommands.items': ['A', 'B'] }, {
+		update: async (store, key, value) => {
+			if (key === textsKey) { entered.resolve(); await resume.promise; }
+			store.set(key, value);
+		},
+	});
+	const { StateService } = await importStateService(configuration);
+	const first = new StateService(createStateContext());
+	const second = new StateService(createStateContext());
+	const base = first.getPromptDashboardPreferences()!;
+	const edit = (title: string) => ({ ...base, quickCommands: {
+		items: base.quickCommands.items.map(item => item.title === title ? { ...item, text: 'Текст ' + title } : item),
+	} });
+	const saving = first.savePromptDashboardPreferences(edit('A'), base);
+	await entered.promise;
+	try {
+		await assert.rejects(second.savePromptDashboardPreferences(edit('B'), base), { code: 'ELOCKED' });
+	} finally {
+		resume.resolve();
+		await saving;
+	}
+	// VS Code доставляет новую карту второму Extension Host отдельным сообщением после снятия блокировки.
+	const inspect = configuration.inspect;
+	configuration.inspect = <T>(key: string) => {
+		const value = inspect<T>(key);
+		return key === textsKey || key === 'quickCommandStorage.readToken' ? { ...value, globalValue: undefined } : value;
+	};
+	await assert.rejects(second.savePromptDashboardPreferences(edit('B'), base), /ещё обновляются/);
+	assert.deepEqual(configuration.store.get(textsKey), { A: 'Текст A' });
+	configuration.inspect = inspect;
+	// После доставки предыдущей записи более свежая ручная правка карты тоже должна сохраниться.
+	await configuration.update(textsKey, { A: 'Ручной текст' }, 1);
+	await second.savePromptDashboardPreferences(edit('B'), base);
+	assert.deepEqual(configuration.store.get(textsKey), { A: 'Ручной текст', B: 'Текст B' });
+});
 
 /** Повторная очистка после успешной записи списка сохраняет категорию переименованной команды. */
 test('Quick command rename retries a failed category cleanup without losing the renamed command', async () => {
@@ -999,7 +1072,7 @@ test('Quick command rename retries a failed category cleanup without losing the 
 	const { StateService } = await importStateService(configuration);
 	const writer = new StateService(createStateContext());
 	const base = writer.getPromptDashboardPreferences()!;
-	const next = { ...base, quickCommands: { items: [{ text: 'B', category: 'Git' }] } };
+	const next = { ...base, quickCommands: { items: [{ title: 'B', text: 'B', category: 'Git' }] } };
 	await assert.rejects(writer.savePromptDashboardPreferences(next, base), /cleanup failed/);
 	assert.deepEqual(new StateService(createStateContext()).getPromptDashboardPreferences()?.quickCommands, next.quickCommands);
 	fail = false;
@@ -1018,7 +1091,7 @@ test('Quick commands re-added without a category after legacy deletion remain un
 	await configuration.update(itemsKey, ['/review'], 1);
 	const writer = new StateService(createStateContext());
 	const base = writer.getPromptDashboardPreferences()!;
-	const items = [...base.quickCommands.items, { text: '/status' }];
+	const items = [...base.quickCommands.items, { title: '/status', text: '/status' }];
 	const next = { ...base, quickCommands: { items } };
 	await writer.savePromptDashboardPreferences(next, base);
 	assert.deepEqual(new StateService(createStateContext()).getPromptDashboardPreferences()?.quickCommands, next.quickCommands);
@@ -1034,7 +1107,7 @@ test('StateService migrates quick command records to strings after persisting th
 	const { StateService } = await importStateService(configuration);
 	const service = new StateService(createStateContext());
 	const base = service.getPromptDashboardPreferences()!;
-	assert.deepEqual(base.quickCommands.items, [items[0], { text: '/review', category: 'Ревью' }]);
+	assert.deepEqual(base.quickCommands.items, [{ title: '/status', ...items[0] }, { title: '/review', text: '/review', category: 'Ревью' }]);
 	const next = { ...base, quickCommands: { ...base.quickCommands, target: 'current' as const } };
 	await service.savePromptDashboardPreferences(next, base);
 	assert.deepEqual(configuration.writes.filter(write => write.key.includes('.quickCommands.')), [

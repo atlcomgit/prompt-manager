@@ -6,13 +6,28 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-11-22
+
+#### Added
+- Preview an unsaved Quick Command with the current workspace and prompt values. The preview updates
+  while typing and shows missing values inline.
+
+#### Fixed
+- Keep Quick Command drafts open until the host confirms a save, detect concurrent edits, and recover interrupted writes.
+  Templates from ambiguous legacy list edits can be restored explicitly in the editor.
+- Center the Quick Note and Quick Command editors over the widget pane, including when its width changes.
+  Keep keyboard focus in the preview, insert variables at the caret in CRLF templates, and resolve archived prompt paths by UUID.
+
 ### 2026-11-21
 
 #### Added
+- Give Quick Commands a display name and multiline template. Insert workspace and prompt variables at the
+  cursor and resolve them when copying or preparing a chat draft. Existing phrases keep their original text.
 - Click a Quick Notes row to preview its description, checklist, and attachment names.
 - Choose a color in the Quick Notes add field. The widget remembers it for subsequent notes.
 
 #### Changed
+- Quick Commands now warn about empty templates and missing values. Successful chat insertion is silent.
 - Move Add and Search into the Quick Commands header and show the search field on demand.
   The agent dropdown shows the selected name on wide cards and a chat icon on narrow cards.
 

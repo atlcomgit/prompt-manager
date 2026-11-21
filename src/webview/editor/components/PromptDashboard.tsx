@@ -2,6 +2,7 @@ import { DragHandleIcon } from '../../shared/DragHandleIcon.js';
 import { sectionDragStyles } from '../../shared/sectionDragStyles.js';
 import { QuickNotesSection } from './quickNotes/QuickNotesSection';
 import { QuickCommandsWidget } from './QuickCommandsWidget';
+import { QuickCommandModal, type QuickCommandEditSession, type QuickCommandPreviewPrompt } from './QuickCommandModal';
 import type { PromptChatTarget } from '../../../types/prompt.js';
 import { QuickNoteIcon } from './quickNotes/QuickNoteIcon';
 import { QUICK_NOTES_CSS, QUICK_WIDGET_ACTIONS_CSS } from './quickNotes/quickNotesStyles';
@@ -82,6 +83,7 @@ import {
 	normalizePromptDashboardPreferences,
 } from '../../../types/promptDashboardPreferences.js';
 import type {
+	DashboardQuickCommand,
 	DashboardQuickCommandTarget,
 	DockerContainerSortBy,
 	PromptDashboardPreferences,
@@ -137,6 +139,7 @@ interface PromptDashboardProps {
 	onDragStateChange?: (dragging: boolean) => void;
 	/** Передаёт полный снимок только после действия пользователя либо переноса старых настроек. */
 	onPreferencesChange?: (state: PromptDashboardPreferences) => void;
+	quickCommandMigration?: PromptDashboardPreferences;
 	/** Профиль измеренной ширины сетки и уведомление о его смене. */
 	layoutMode?: PromptDashboardLayoutMode;
 	onLayoutModeChange?: (mode: PromptDashboardLayoutMode) => void;
@@ -147,8 +150,9 @@ interface PromptDashboardProps {
 	chatTarget?: PromptChatTarget;
 	/** Prepares a draft in an agent chat or copies it when direct input is unavailable. */
 	/** Состояние запроса хранится в редакторе и переживает закрытие карточки. */
-	pendingQuickCommandText?: string | null;
-	onQuickCommandInsert?: (text: string, target: DashboardQuickCommandTarget) => void;
+	pendingQuickCommandTitle?: string | null;
+	quickCommandPrompt: QuickCommandPreviewPrompt;
+	onQuickCommandInsert?: (item: DashboardQuickCommand, target: DashboardQuickCommandTarget) => void;
 	onQuickCommandCopy?: (text: string) => void;
 	/** Voice dictation uses the prompt editor's existing recorder, with a distinct insertion destination. */
 	quickNotesVoiceInsertion?: { sequence: number; text: string } | null;
@@ -781,12 +785,14 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	preferencesRevision = 0,
 	onDragStateChange,
 	onPreferencesChange,
+	quickCommandMigration,
 	layoutMode = 'two-columns',
 	onLayoutModeChange,
 	layoutModeFrozen = false,
 	showGitFlowAction = false,
 	chatTarget = 'copilot',
-	pendingQuickCommandText,
+	pendingQuickCommandTitle,
+	quickCommandPrompt,
 	onQuickCommandInsert,
 	onQuickCommandCopy,
 	quickNotesVoiceInsertion,
@@ -830,6 +836,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	// Начальное состояние не зависит от snapshot/resize; первый ready может уточнить ещё не изменённый bootstrap.
 	const [initialState] = useState(() => readPromptDashboardInitialPreferences(initialPreferences));
 	const [preferences, setPreferences] = useState(initialState.preferences);
+	// Как и у заметок, смена ширины или колонки не пересоздаёт открытый редактор команды.
+	const [quickCommandEdit, setQuickCommandEdit] = useState<QuickCommandEditSession | null>(null);
 	// A menu-hidden note widget unsubscribes from host changes until it is visible again.
 	const quickNotesClient = useQuickNotesClient(!preferences.hiddenSections.includes('quickNotes'));
 	const quickNotesActions = useQuickNotesActions(quickNotesClient);
@@ -1751,10 +1759,11 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				onToggleCollapse={() => toggleSectionCollapse('quickCommands')}
 				renderShell={(actions, body) => renderQuickWidget('quickCommands', actions, body)}
 				target={preferences.quickCommands.target ?? (chatTarget === 'kilo' ? 'copilot' : chatTarget)}
-				pendingText={pendingQuickCommandText}
+				pendingTitle={pendingQuickCommandTitle}
 				onTargetChange={target => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, target } })}
 				onItemsChange={items => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, items } })}
-				onInsert={(text, target) => onQuickCommandInsert?.(text, target)}
+				onEdit={(original, opener) => setQuickCommandEdit({ original, opener })}
+				onInsert={(item, target) => onQuickCommandInsert?.(item, target)}
 				onCopy={text => onQuickCommandCopy?.(text)} />
 		),
 		quickNotes: (
@@ -1823,7 +1832,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		>
 			<style>{DOCKER_ACTION_MENU_INTERACTION_STYLES}</style>
 			<style>{DASHBOARD_RESPONSIVE_STYLES}</style>
-			<style>{hiddenSections.includes('quickNotes') ? QUICK_WIDGET_ACTIONS_CSS : QUICK_NOTES_CSS}</style>
+			<style>{hiddenSections.includes('quickNotes') && !quickCommandEdit ? QUICK_WIDGET_ACTIONS_CSS : QUICK_NOTES_CSS}</style>
 			<div style={styles.toolbar}>
 				<div style={styles.titleRow}>
 					<PromptDashboardMark />
@@ -1871,6 +1880,10 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			) : null}
 			{/* Окно заметки живёт вне колонок: перенос карточки в другую колонку не закрывает его и не теряет черновик. */}
 			<QuickNoteModalHost client={quickNotesClient} actions={quickNotesActions} />
+			{quickCommandEdit && <QuickCommandModal session={quickCommandEdit} items={preferences.quickCommands.items} prompt={quickCommandPrompt}
+				recoverableTexts={preferences.quickCommands.recoverableTexts}
+				migration={quickCommandMigration ?? (initialState.migratedLegacy ? preferences : undefined)}
+				onClose={() => setQuickCommandEdit(null)} />}
 		</aside>
 	);
 };

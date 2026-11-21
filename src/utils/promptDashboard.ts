@@ -10,6 +10,8 @@ import type { DashboardQuickCommandTarget } from '../types/promptDashboardPrefer
 /** Текст остаётся в виджете, пока расширение не ответит на запрос с тем же идентификатором. */
 export interface PendingDashboardQuickCommand {
 	requestId: string;
+	promptId: string;
+	promptUuid: string;
 	text: string;
 	target: DashboardQuickCommandTarget;
 	clientDeadline: number;
@@ -24,7 +26,7 @@ export function confirmDashboardQuickCommand(
 	const remaining = pending.clientDeadline - clientTime;
 	if (remaining <= 0) return;
 	pending.sent = true;
-	return { type: 'promptDashboardQuickCommandInsert', requestId, text: pending.text, target: pending.target,
+	return { type: 'promptDashboardQuickCommandInsert', requestId, promptId: pending.promptId, promptUuid: pending.promptUuid, text: pending.text, target: pending.target,
 		hostDeadline: hostTime + remaining };
 }
 

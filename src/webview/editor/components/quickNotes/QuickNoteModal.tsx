@@ -1,3 +1,4 @@
+import { WidgetDialogOverlay } from './WidgetDialogOverlay';
 /**
  * Окно быстрой заметки: полный просмотр и правка в черновике, запись только по «Сохранить».
  * Тесты разметки — tests/quickNotesComponents.test.tsx; чистая логика черновика — src/utils/quickNotes.ts
@@ -655,11 +656,7 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 	const scopes: QuickNoteScope[] = ['workspace', 'global'];
 
 	return (
-		<div className="pm-qn-overlay pm-qn-scope" role="presentation" onMouseDown={event => {
-			if (event.target === event.currentTarget) {
-				requestClose();
-			}
-		}}>
+		<WidgetDialogOverlay onBackdrop={requestClose}>
 			<div
 				ref={rootRef}
 				className="pm-qn-modal"
@@ -1003,6 +1000,6 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 					</button>
 				</div>
 			</div>
-		</div>
+		</WidgetDialogOverlay>
 	);
 }

@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { QuickCommandSettings, QUICK_COMMAND_PREFIX, QUICK_COMMAND_TRANSACTION } from './quickCommandSettings.js';
 import type { EditorPromptViewState, EditorPromptViewStateKeySource, EditorPromptPlanViewMode, SidebarState } from '../types/prompt.js';
 import type {
 	PromptDashboardCollapsedSections,
@@ -33,6 +34,7 @@ import {
 import {
 	normalizePromptDashboardPreferences,
 	serializeDashboardQuickCommands,
+	type DashboardQuickCommandEdit,
 	type DashboardQuickCommandsConfiguration,
 	type DashboardQuickCommandsWidgetState,
 	type PromptDashboardPreferences,
@@ -55,9 +57,8 @@ const PROMPT_QUICK_NOTES_SETTING_FIELDS = [
 ] as const;
 
 /** Глобальный строковый порядок остаётся доступен старым версиям. */
-const PROMPT_QUICK_COMMANDS_SETTING_FIELDS = ['items', 'categories', 'target'] as const;
-const PROMPT_QUICK_COMMANDS_SETTING_PREFIX = 'dashboardPreferences.quickCommands';
-
+const QUICK_COMMAND_METADATA_FIELDS = ['categories', 'texts'] as const;
+const PROMPT_QUICK_COMMANDS_SETTING_FIELDS = ['items', ...QUICK_COMMAND_METADATA_FIELDS, 'target'] as const;
 /** Пользовательские настройки application наследуются Tunnel и участвуют в штатной Settings Sync. */
 export const PROMPT_UI_SETTING_KEYS = [
 	'editor.sectionOrder.main', 'editor.sectionOrder.process',
@@ -70,7 +71,8 @@ export const PROMPT_UI_SETTING_KEYS = [
 	...PROMPT_DOCKER_SETTING_FIELDS.map(field => `dashboardPreferences.docker.${field}`),
 	...PROMPT_TODOS_SETTING_FIELDS.map(field => `dashboardPreferences.todos.${field}`),
 	...PROMPT_QUICK_NOTES_SETTING_FIELDS.map(field => `dashboardPreferences.quickNotes.${field}`),
-	...PROMPT_QUICK_COMMANDS_SETTING_FIELDS.map(field => `${PROMPT_QUICK_COMMANDS_SETTING_PREFIX}.${field}`),
+	...PROMPT_QUICK_COMMANDS_SETTING_FIELDS.map(field => `${QUICK_COMMAND_PREFIX}.${field}`),
+	`${QUICK_COMMAND_PREFIX}.textBindings`, QUICK_COMMAND_TRANSACTION,
 	'dashboardPreferences.expanded',
 	'dashboardPreferences.showAllBranchProjects',
 	'dashboardPreferences.hiddenSections',
@@ -111,6 +113,11 @@ export class StateService {
 	private promptDashboardMutationQueue: Promise<void> = Promise.resolve();
 	/** Подтверждённые значения скрывают незавершённый Configuration.update и сохраняются при ошибке записи. */
 	private readonly promptUiConfirmedValues = new Map<string, unknown>();
+	private readonly quickCommandSettings = new QuickCommandSettings(
+		() => this.context.globalStorageUri.fsPath,
+		key => vscode.workspace.getConfiguration('promptManager').inspect(key)?.globalValue,
+		async (key, value) => { await vscode.workspace.getConfiguration('promptManager').update(key, value, vscode.ConfigurationTarget.Global); },
+	);
 
 	/** Normalize persisted global-context source and keep legacy workspaces predictable. */
 	private static normalizeGlobalAgentContextSource(
@@ -1062,6 +1069,12 @@ export class StateService {
 		this.promptUiConfirmedValues.clear();
 	}
 
+	/** Capture each delivered legacy list before broadcasts coalesce its rename and a subsequent re-add. */
+	observeQuickCommandListChange(): void {
+		if (!this.quickCommandSettings.needsBindingRefresh()) return;
+		this.getPromptDashboardPreferences();
+	}
+
 	/** Единственная очередь сохраняет патч и недостающие legacy-поля; чтение/resize ничего не записывают. */
 	private async mutatePromptUiSettings(
 		mutation: () => Promise<void>,
@@ -1120,11 +1133,11 @@ export class StateService {
 				seeds[`dashboardPreferences.quickNotes.${field}`] = preferences.quickNotes[field];
 			}
 			const commands = serializeDashboardQuickCommands(preferences.quickCommands);
-			seeds[`${PROMPT_QUICK_COMMANDS_SETTING_PREFIX}.items`] = commands.items;
-			if (Object.keys(commands.categories).length > 0) {
-				seeds[`${PROMPT_QUICK_COMMANDS_SETTING_PREFIX}.categories`] = commands.categories;
+			seeds[`${QUICK_COMMAND_PREFIX}.items`] = commands.items;
+			for (const field of QUICK_COMMAND_METADATA_FIELDS) {
+				if (Object.keys(commands[field]).length) seeds[`${QUICK_COMMAND_PREFIX}.${field}`] = commands[field];
 			}
-			seeds[`${PROMPT_QUICK_COMMANDS_SETTING_PREFIX}.target`] = commands.target;
+			seeds[`${QUICK_COMMAND_PREFIX}.target`] = commands.target;
 			for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
 				seeds[`dashboardPreferences.${field}`] = preferences[field];
 			}
@@ -1264,10 +1277,10 @@ export class StateService {
 		const quickNotes = this.readPromptUiFields<PromptDashboardPreferences['quickNotes']>(
 			'dashboardPreferences.quickNotes', PROMPT_QUICK_NOTES_SETTING_FIELDS, legacy?.quickNotes,
 		);
-		const quickCommands = this.readPromptUiFields<DashboardQuickCommandsConfiguration>(
-			PROMPT_QUICK_COMMANDS_SETTING_PREFIX, PROMPT_QUICK_COMMANDS_SETTING_FIELDS,
+		const quickCommands = this.quickCommandSettings.readCommands(this.readPromptUiFields<DashboardQuickCommandsConfiguration>(
+			QUICK_COMMAND_PREFIX, PROMPT_QUICK_COMMANDS_SETTING_FIELDS,
 			legacy && serializeDashboardQuickCommands(legacy.quickCommands),
-		);
+		));
 		for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
 			const value = this.readPromptUiSetting(`dashboardPreferences.${field}`);
 			if (value !== undefined) {
@@ -1278,58 +1291,11 @@ export class StateService {
 			: normalizePromptDashboardPreferences({ ...legacy, ...next, docker, todos, quickNotes, quickCommands });
 	}
 
-	/** Применяет изменения по тексту команды к свежей карте, сохраняя соседние категории. */
-	private async patchQuickCommandCategories(key: string, changes: Map<string, string | undefined>): Promise<void> {
-		const saved = this.readPromptUiSetting<Record<string, string>>(key);
-		const categories = new Map(Object.entries(saved ?? {}));
-		let changed = saved === undefined && changes.size > 0;
-		for (const [text, category] of changes) {
-			if (categories.get(text) === category) continue;
-			if (category === undefined) categories.delete(text);
-			else categories.set(text, category);
-			changed = true;
-		}
-		if (changed) await this.writePromptUiSetting(key, Object.fromEntries(categories));
-	}
-
-	/** Готовит категории новых строк до записи порядка и удаляет старые только после её подтверждения. */
-	private async writePromptDashboardQuickCommands(
-		next: DashboardQuickCommandsWidgetState,
-		base?: DashboardQuickCommandsWidgetState,
-	): Promise<void> {
-		const prefix = PROMPT_QUICK_COMMANDS_SETTING_PREFIX;
-		const desired = serializeDashboardQuickCommands(next);
-		const previous = base && serializeDashboardQuickCommands(base);
-		const itemsChanged = !previous || JSON.stringify(desired.items) !== JSON.stringify(previous.items);
-		const categoriesChanged = !previous || JSON.stringify(desired.categories) !== JSON.stringify(previous.categories);
-		const itemsKey = `${prefix}.items`;
-		const categoriesKey = `${prefix}.categories`;
-		const rawItems = this.readPromptUiSetting<unknown>(itemsKey);
-		const migrateRecords = Array.isArray(rawItems) && rawItems.some(item => item !== null && typeof item === 'object');
-		if (migrateRecords || itemsChanged || categoriesChanged) {
-			const current = this.getPromptDashboardPreferences()?.quickCommands ?? next;
-			const original = new Map((base ?? current).items.map(item => [item.text, item.category]));
-			// При миграции категория может ещё находиться только в записи старого формата.
-			const changes = new Map<string, string | undefined>(Object.entries(serializeDashboardQuickCommands(current).categories));
-			for (const { text, category } of next.items) {
-				// Для нового имени пустая категория тоже явная: старый клиент мог оставить её в отдельной карте.
-				if (!original.has(text) || original.get(text) !== category) changes.set(text, category);
-			}
-			await this.patchQuickCommandCategories(categoriesKey, changes);
-			if (migrateRecords || itemsChanged) {
-				const items = itemsChanged ? desired.items : current.items.map(item => item.text);
-				await this.writePromptUiSetting(itemsKey, items);
-				// После неудачной записи списка прежние имена по-прежнему читаются со своими категориями.
-				const retained = new Set(items);
-				const removed = [...original.keys()].filter(text => !retained.has(text));
-				if (removed.length > 0) {
-					const live = new Set(this.getPromptDashboardPreferences()?.quickCommands.items.map(item => item.text));
-					await this.patchQuickCommandCategories(categoriesKey,
-						new Map(removed.filter(text => !live.has(text)).map(text => [text, undefined])));
-				}
-			}
-		}
-		await this.writePromptUiFields(prefix, ['target'], desired, previous);
+	/** Commit only a modal's row against current settings; the optional seed migrates previously local webview data. */
+	async saveDashboardQuickCommand(edit: DashboardQuickCommandEdit, migration?: PromptDashboardPreferences, source?: EditorPromptViewStateKeySource): Promise<void> {
+		const fallback = normalizePromptDashboardPreferences(migration);
+		await this.mutatePromptUiSettings(() => this.quickCommandSettings.edit(edit,
+			() => this.getPromptDashboardPreferences()?.quickCommands ?? fallback.quickCommands), source, fallback);
 	}
 
 	/** Адресный патч preferences сохраняет параллельные изменения других полей и явный false. */
@@ -1346,7 +1312,9 @@ export class StateService {
 			await this.writePromptUiFields(
 				'dashboardPreferences.quickNotes', PROMPT_QUICK_NOTES_SETTING_FIELDS, next.quickNotes, base?.quickNotes,
 			);
-			await this.writePromptDashboardQuickCommands(next.quickCommands, base?.quickCommands);
+			await this.quickCommandSettings.save(next.quickCommands, base?.quickCommands,
+				() => this.getPromptDashboardPreferences()?.quickCommands ?? next.quickCommands);
+			await this.writePromptUiFields(QUICK_COMMAND_PREFIX, ['target'], next.quickCommands, base?.quickCommands);
 			for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
 				if (base && JSON.stringify(base[field]) === JSON.stringify(next[field])) {
 					continue;

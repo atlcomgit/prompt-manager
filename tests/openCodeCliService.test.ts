@@ -215,6 +215,18 @@ test('OpenCode inserts a standalone quick command after automatic submission', a
 	} finally { service.dispose(); }
 }));
 
+/** Подстановка может увеличить шаблон. Отступы и последний перевод строки остаются частью черновика. */
+test('OpenCode preserves the whole expanded quick command without submitting it', async () => withContext(async request => {
+	const { service, sessions } = fixture();
+	try {
+		await service.start({ ...request, autoStart: true });
+		const expanded = '  ' + 'a'.repeat(3050) + '\n';
+		assert.equal(service.insertIntoOpenChat(request.promptUuid, expanded), true);
+		assert.equal(sessions[0].draft, expanded);
+		assert.equal(sessions[0].enters, 1);
+	} finally { service.dispose(); }
+}));
+
 /** Название не попадает в shell; обновление метаданных относится только к подтверждённому session ID. */
 test('OpenCode applies the same exact title to terminal and submitted session', async () => withContext(async request => {
 	const { service, sessions, apiCalls } = fixture();

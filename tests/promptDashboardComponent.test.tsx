@@ -319,6 +319,7 @@ function renderDashboard(
 ): string {
 	return withDashboardEnvironment(() => renderToStaticMarkup(React.createElement(PromptDashboard, {
 		snapshot,
+		quickCommandPrompt: { id: 'prompt-a', promptUuid: 'uuid-a', taskNumber: '007', title: 'Проверка' },
 		busyAction: options?.busyAction ?? null,
 		dockerBusyAction: options?.dockerBusyAction ?? null,
 		collapsedSections: options?.collapsedSections,

@@ -1,25 +1,61 @@
-## 000: Выбор области новой заметки
+## 000: Выбор области заметки и шаблоны быстрых команд
 
-- Дата: 2026-11-21.
+- Дата: 2026-11-22.
 - Автор: 🅰️🅻🅴🅺.
 - Ветка: master.
 - Что сделано: кнопка «Проект» расположена справа от цветов новой заметки.
 - Ключевые моменты: при смене области черновик остаётся раскрытым. После щелчка можно продолжить ввод с прежней позиции.
 - По ревью: предпросмотр закрывается при уходе из webview. «Свой цвет» показывает клавиатурный фокус.
   DOM-тесты проверяют уход из предпросмотра и сохранение раскрытого черновика с текстом и кареткой при смене области.
+- Быстрые команды получили название и многострочный текст. Шесть переменных доступны в окне редактирования.
+  Вставка и копирование подставляют контекст открытого промпта. Старые команды сохраняют прежний текст.
+  Пустая команда показывает предупреждение, успешная вставка завершается без уведомления.
+- «Предпросмотр» показывает несохранённый текст с подстановкой переменных. При вводе, смене промпта
+  и внешнем переносе его папки результат обновляется. Ошибки отображаются внутри окна.
+- После ревью форма сохраняет черновик до подтверждения хоста. Исправлены конфликты и восстановление
+  настроек команд, ручной возврат шаблонов старого клиента, фокус предпросмотра, CRLF и путь архивного промпта.
+  Диалоги заметки и команды центрируются по видимой области панели с виджетами.
 - Файлы:
     CHANGELOG.md
     README.md
     docs/rules/map.md
     docs/rules/Промпты/Быстрые_заметки_174.md
-    package.json
+    docs/rules/Промпты/Сохранение_и_список_без_номера.md
     package-lock.json
+    package.json
+    src/constants/webview.ts
+    src/providers/editorPanelManager.ts
+    src/services/openCodeCliService.ts
+    src/services/quickCommandSettings.ts
+    src/services/stateService.ts
+    src/services/storageService.ts
+    src/types/messages.ts
+    src/types/promptDashboardPreferences.ts
+    src/utils/promptDashboard.ts
+    src/utils/quickCommandTemplate.ts
+    src/utils/webviewHtml.ts
+    src/webview/editor/EditorApp.tsx
+    src/webview/editor/components/PromptDashboard.tsx
+    src/webview/editor/components/QuickCommandModal.tsx
+    src/webview/editor/components/QuickCommandsWidget.tsx
+    src/webview/editor/components/quickNotes/QuickNoteModal.tsx
     src/webview/editor/components/quickNotes/QuickNotePreview.tsx
     src/webview/editor/components/quickNotes/QuickNotesWidget.tsx
+    src/webview/editor/components/quickNotes/WidgetDialogOverlay.tsx
     src/webview/editor/components/quickNotes/quickNotesStyles.ts
+    src/webview/editor/quickCommandSave.ts
+    tests/editorPanelManager.test.ts
+    tests/openCodeCliService.test.ts
+    tests/promptDashboardComponent.test.tsx
+    tests/promptDashboardPreferences.test.ts
+    tests/quickCommandModal.test.tsx
+    tests/quickCommandSettings.test.ts
+    tests/quickCommandsWidget.test.tsx
     tests/quickNotesComponents.test.tsx
     tests/quickNotesFocus.test.tsx
     tests/quickNotesWidgetFixture.ts
+    tests/stateService.test.ts
+    tests/storageServiceContextFiles.test.ts
 
 ## Без номера: Интерактивный выбор исправлений после ревью
 

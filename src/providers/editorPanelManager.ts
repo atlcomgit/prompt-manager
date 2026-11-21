@@ -1,11 +1,12 @@
 import type { PromptUiSettingsSnapshot } from '../types/promptEditorLayout.js';
 import { PROMPT_UI_SETTING_KEYS } from '../services/stateService.js';
+import { QuickCommandConflict } from '../services/quickCommandSettings.js';
 import {
-	DASHBOARD_QUICK_COMMAND_TEXT_LIMIT,
 	isDashboardQuickCommandTarget,
 	normalizePromptDashboardHiddenSections,
 	type DashboardQuickCommandTarget,
 } from '../types/promptDashboardPreferences.js';
+import { expandQuickCommandText, type QuickCommandTemplateResult } from '../utils/quickCommandTemplate.js';
 /**
  * Webview-редактор промпта — одна переиспользуемая страница настройки промпта в VS Code.
  */
@@ -1787,6 +1788,15 @@ export class EditorPanelManager {
 			return;
 		}
 
+		const openPromptEntries = [...this.panelPromptRefs.entries()];
+		// В другом окне папку могут переименовать, удалить или переместить в архив без изменения полей открытой формы.
+		const directoryChanges = changes.filter(change => change.kind !== 'changed');
+		for (const [panelKey, prompt] of openPromptEntries) {
+			if (directoryChanges.some(change => change.id === prompt.id || change.config?.promptUuid === prompt.promptUuid)) {
+				const panel = this.resolveOpenEditorPanel(panelKey);
+				if (panel) void this.resolvePanelPostMessageCallback(panel)({ type: 'promptDashboardQuickCommandPreviewInvalidated' });
+			}
+		}
 		const activeChanges = changes.filter((change): change is ExternalPromptConfigChange & { config: NonNullable<ExternalPromptConfigChange['config']> } => {
 			return !change.archived && change.kind !== 'deleted' && Boolean(change.config);
 		});
@@ -1794,7 +1804,6 @@ export class EditorPanelManager {
 			return;
 		}
 
-		const openPromptEntries = [...this.panelPromptRefs.entries()];
 		for (const change of activeChanges) {
 			const matchingPanels = openPromptEntries.filter(([, prompt]) => (prompt.id || '').trim() === change.id);
 			for (const [panelKey] of matchingPanels) {
@@ -3485,6 +3494,43 @@ export class EditorPanelManager {
 			&& vscode.workspace.textDocuments.some(isDashboardNativeChatInput) ? 'copilot' : undefined;
 	}
 
+	/** Возвращает текст или ошибку для исходного промпта. Предпросмотр показывает результат внутри редактора. */
+	private resolveDashboardQuickCommandText(
+		message: { promptId: string; promptUuid: string; text: string },
+		prompt: Prompt,
+	): QuickCommandTemplateResult {
+		if (message.promptUuid !== prompt.promptUuid || message.promptId !== prompt.id) {
+			return { error: 'Открыт другой промпт. Повторите действие в нужном промпте.' };
+		}
+		const root = this.getWorkspaceRootPath();
+		return expandQuickCommandText(message.text, key => {
+			switch (key) {
+				case 'workspacePath': return root;
+				case 'workspaceRelativePath': {
+					if (!root) return undefined;
+					const relative = path.relative(os.homedir(), root);
+					// У разных дисков Windows нет общего основания для относительного пути.
+					return path.isAbsolute(relative) ? undefined : relative || '.';
+				}
+				case 'workspaceName': return vscode.workspace.name || vscode.workspace.workspaceFolders?.[0]?.name || path.basename(root);
+				case 'taskNumber': return prompt.taskNumber;
+				case 'promptTitle': return prompt.title;
+				case 'promptDirectory': return this.storageService.getSavedPromptDirectoryPath(prompt.id, prompt.promptUuid, prompt.archived);
+			}
+		});
+	}
+
+	/** При вставке и копировании ошибка показывается уведомлением VS Code. */
+	private getDashboardQuickCommandText(
+		message: Extract<WebviewToExtensionMessage, { type: 'promptDashboardQuickCommandCopy' | 'promptDashboardQuickCommandInsert' }>,
+		prompt: Prompt,
+	): string | undefined {
+		const result = this.resolveDashboardQuickCommandText(message, prompt);
+		if ('text' in result) return result.text;
+		void vscode.window.showWarningMessage(result.error);
+		return undefined;
+	}
+
 	/** Определяет доступный адресат. При сомнении сохраняет текст и возвращает причину отказа. */
 	private async prepareDashboardQuickCommand(
 		target: DashboardQuickCommandTarget,
@@ -3492,13 +3538,13 @@ export class EditorPanelManager {
 		text: string,
 		signal: AbortSignal,
 		sourcePanel?: vscode.WebviewPanel,
-	): Promise<{ ok: boolean; message: string }> {
+	): Promise<string | undefined> {
 		let destination: Exclude<DashboardQuickCommandTarget, 'current'> | undefined;
 		if (target === 'current') {
 			const sourceIsActive = () => vscode.window.state.focused && sourcePanel?.active !== false;
 			if (sourceIsActive()) destination = await this.resolveCurrentDashboardQuickCommandTarget();
 			if (!sourceIsActive()) {
-				return { ok: false, message: 'Редактор с быстрой командой потерял фокус. Повторите вставку из нужного окна.' };
+				return 'Редактор с быстрой командой потерял фокус. Повторите вставку из нужного окна.';
 			}
 		} else {
 			destination = target;
@@ -3508,10 +3554,7 @@ export class EditorPanelManager {
 			? await this.insertDashboardQuickCommand(destination, promptUuid, text, signal).catch(() => undefined)
 			: undefined;
 		signal.throwIfAborted();
-		if (result === 'inserted' || result === 'dispatched') {
-			return { ok: true, message: result === 'inserted'
-				? 'Команда вставлена в поле чата.' : 'Команда передана для вставки в поле чата.' };
-		}
+		if (result === 'inserted' || result === 'dispatched') return;
 
 		// Запрос буфера отправляем до смены фокуса, чтобы сохранить возможность ручной вставки в Web.
 		const copying = this.writeClipboardTextWithTimeout(text, CHAT_CLIPBOARD_TIMEOUT_MS);
@@ -3532,8 +3575,8 @@ export class EditorPanelManager {
 				? 'Вставьте её в терминал через Ctrl+Shift+V.'
 				: 'Откройте терминал OpenCode CLI и вставьте её через Ctrl+Shift+V.';
 		}
-		return { ok: false, message: await copying ? `${reason} Команда скопирована. ${instruction}`
-			: `${reason} Не удалось скопировать команду в буфер обмена.` };
+		return await copying ? `${reason} Команда скопирована. ${instruction}`
+			: `${reason} Не удалось скопировать команду в буфер обмена.`;
 	}
 
 	/** Ограничивает вставку и сообщает один исход. Поздняя подготовка после таймаута больше не вставляет черновик. */
@@ -3543,15 +3586,11 @@ export class EditorPanelManager {
 	): Promise<void> {
 		const controller = new AbortController();
 		try {
-			const timeout = {
-				ok: false, message: 'Истекло время ожидания вставки. Проверьте поле чата. Команду можно скопировать в виджете.',
-			};
-			const result = await this.withTimeout(
+			const error = await this.withTimeout(
 				this.prepareDashboardQuickCommand(target, promptUuid, text, controller.signal, sourcePanel),
-				timeoutMs, timeout,
+				timeoutMs, 'Истекло время ожидания вставки. Проверьте поле чата. Команду можно скопировать в виджете.',
 			);
-			if (result.ok) void vscode.window.showInformationMessage(result.message);
-			else void vscode.window.showErrorMessage(result.message);
+			if (error) void vscode.window.showErrorMessage(error);
 		} finally {
 			controller.abort();
 		}
@@ -5093,6 +5132,9 @@ export class EditorPanelManager {
 				}
 			}),
 			vscode.workspace.onDidChangeConfiguration((event) => {
+				if (event.affectsConfiguration('promptManager.dashboardPreferences.quickCommands.items')) {
+					this.stateService.observeQuickCommandListChange();
+				}
 				if (PROMPT_UI_SETTING_KEYS.some(key => event.affectsConfiguration(`promptManager.${key}`))) {
 					void this.broadcastPromptUiSettings();
 				}
@@ -10853,6 +10895,19 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'savePromptDashboardQuickCommand': {
+				if (!msg.requestId || !msg.edit?.command) break;
+				let error: string | undefined;
+				try {
+					// Only this widget's edit is applied; the modal keeps its draft until this request is acknowledged.
+					await this.stateService.saveDashboardQuickCommand(msg.edit, msg.migration, this.getPromptEditorViewStateSource(panelKey, currentPrompt));
+				} catch (cause) {
+					error = cause instanceof QuickCommandConflict ? cause.message : 'Не удалось сохранить команду. Повторите сохранение.';
+				}
+				await postMessage({ type: 'promptDashboardQuickCommandSaved', requestId: msg.requestId, settings: this.getPromptUiSettings(), error });
+				break;
+			}
+
 			case 'savePromptDashboardPreferences': {
 				// Скрытие виджетов учитывается до ожидания записи: следующий за сохранением запрос обновления
 				// показанного виджета не должен быть пропущен как запрос к скрытому.
@@ -12878,6 +12933,18 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'promptDashboardQuickCommandPreview': {
+				if (typeof msg.requestId !== 'string' || !msg.requestId) break;
+				let result: QuickCommandTemplateResult;
+				try {
+					result = this.resolveDashboardQuickCommandText(msg, currentPrompt);
+				} catch {
+					result = { error: 'Не удалось получить значения переменных для предпросмотра.' };
+				}
+				await postMessage({ type: 'promptDashboardQuickCommandPreviewResult', requestId: msg.requestId, result });
+				break;
+			}
+
 			case 'promptDashboardQuickCommandPrepare': {
 				if (typeof msg.requestId !== 'string' || !msg.requestId) break;
 				await postMessage({ type: 'promptDashboardQuickCommandReady', requestId: msg.requestId, hostTime: performance.now() });
@@ -12891,13 +12958,14 @@ export class EditorPanelManager {
 					await postMessage({ type: 'promptDashboardQuickCommandFinished', requestId: msg.requestId, expired: true });
 					break;
 				}
-				const text = typeof msg.text === 'string' ? msg.text.trim() : '';
 				const canStart = !this.dashboardQuickCommandInProgress;
 				try {
-					if (!text || text.length > DASHBOARD_QUICK_COMMAND_TEXT_LIMIT || !isDashboardQuickCommandTarget(msg.target)) {
+					if (!isDashboardQuickCommandTarget(msg.target)) {
 						void vscode.window.showErrorMessage('Некорректная быстрая команда или целевой агент.');
 					} else if (canStart) {
 						this.dashboardQuickCommandInProgress = true;
+						const text = this.getDashboardQuickCommandText(msg, currentPrompt);
+						if (text === undefined) break;
 						await this.runDashboardQuickCommand(msg.target, currentPrompt.promptUuid, text,
 								Math.min(remainingMs, DASHBOARD_QUICK_COMMAND_TIMEOUT_MS), panel);
 					} else {
@@ -12913,19 +12981,21 @@ export class EditorPanelManager {
 			}
 
 			case 'promptDashboardQuickCommandCopy': {
-				const text = typeof msg.text === 'string' ? msg.text.trim() : '';
 				if (this.dashboardQuickCommandInProgress) {
 					void vscode.window.showErrorMessage('Дождитесь завершения предыдущего действия с командой.');
 					break;
 				}
 				this.dashboardQuickCommandInProgress = true;
 				try {
-					if (text && text.length <= DASHBOARD_QUICK_COMMAND_TEXT_LIMIT
-						&& await this.writeClipboardTextWithTimeout(text, CHAT_CLIPBOARD_TIMEOUT_MS)) {
+					const text = this.getDashboardQuickCommandText(msg, currentPrompt);
+					if (text === undefined) break;
+					if (await this.writeClipboardTextWithTimeout(text, CHAT_CLIPBOARD_TIMEOUT_MS)) {
 						void vscode.window.showInformationMessage('Команда скопирована.');
 					} else {
 						void vscode.window.showErrorMessage('Не удалось скопировать команду.');
 					}
+				} catch {
+					void vscode.window.showErrorMessage('Не удалось скопировать команду.');
 				} finally {
 					this.dashboardQuickCommandInProgress = false;
 				}

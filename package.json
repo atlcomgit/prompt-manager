@@ -875,14 +875,45 @@
           "default": ["/alek-review", "есть еще уточнения или вопросы?"],
           "maxItems": 120,
           "scope": "application",
-          "markdownDescription": "Быстрые фразы и их порядок. Общий список для всех рабочих областей."
+          "markdownDescription": "Названия быстрых команд в порядке отображения. Общий список для всех рабочих областей."
         },
         "promptManager.dashboardPreferences.quickCommands.categories": {
           "type": "object",
           "additionalProperties": {"type": "string", "maxLength": 80},
           "default": {},
           "scope": "application",
-          "markdownDescription": "Глобальные категории быстрых команд по тексту фразы."
+          "markdownDescription": "Глобальные категории быстрых команд по их названиям."
+        },
+        "promptManager.dashboardPreferences.quickCommands.texts": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "maxLength": 3000},
+          "default": {},
+          "scope": "application",
+          "markdownDescription": "Тексты быстрых команд по названиям, включая переменные вида `{{workspacePath}}`. Отсутствующий ключ использует прежнюю фразу, пустая строка сохраняет команду без текста."
+        },
+        "promptManager.dashboardPreferences.quickCommands.textBindings": {
+          "type": ["object", "null"],
+          "default": null,
+          "scope": "application",
+          "properties": {
+            "titles": { "type": "array", "items": { "type": "string" }, "maxItems": 120 },
+            "detached": { "type": "object", "additionalProperties": { "type": "string" } }
+          },
+          "markdownDescription": "Привязки шаблонов при изменении списка старой версией. Неоднозначно перемещённый текст можно восстановить в форме команды."
+        },
+        "promptManager.quickCommandStorage.readToken": {
+          "type": ["string", "null"],
+          "default": null,
+          "scope": "application",
+          "ignoreSync": true,
+          "markdownDescription": "Служебный идентификатор перечитывания настроек быстрых команд этого клиента."
+        },
+        "promptManager.quickCommandStorage.pending": {
+          "type": ["object", "null"],
+          "default": null,
+          "scope": "application",
+          "ignoreSync": true,
+          "markdownDescription": "Данные восстановления незавершённой записи быстрых команд этого клиента. Очищаются после сохранения."
         },
         "promptManager.dashboardPreferences.quickCommands.target": {
           "type": ["string", "null"],

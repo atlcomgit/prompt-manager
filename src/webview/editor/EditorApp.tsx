@@ -1,3 +1,4 @@
+import { postQuickCommandSave } from './quickCommandSave';
 import { SortableEditorSections, EditorSectionDragHandle } from './components/SortableEditorSections.js';
 import { normalizePromptEditorLayout, normalizePromptEditorMainExpanded, PROMPT_EDITOR_TAB_SECTIONS, type PromptEditorLayout, type PromptUiSettingsSnapshot } from '../../types/promptEditorLayout.js';
 import { appendPendingPromptUiEdit, planPromptEditorSplitRatioSave, rejectPendingPromptUiEdit, rebasePromptUiSettings, type PendingPromptUiEdit } from '../../utils/promptUiSettings.js';
@@ -123,7 +124,7 @@ import {
   shouldResetGitOverlayStateOnPromptOpen,
 } from '../../utils/gitOverlay.js';
 import { confirmDashboardQuickCommand, type PendingDashboardQuickCommand, PROMPT_DASHBOARD_ACTIVITY_THRESHOLD_MS, PROMPT_EDITOR_FORM_MAX_WIDTH_PX, buildPromptDashboardDockerComposeBusyAction, buildPromptDashboardDockerContainerBusyAction, buildPromptDashboardDockerWorkspaceBusyAction, createPromptDashboardWidgetSnapshot, getPromptDashboardStatusProgress, getPromptDashboardTotalTimeMs, preservePromptDashboardProjectsLoadingSnapshot, resolvePromptDashboardExpandRefreshTarget, resolvePromptEditorLayout, resolvePromptEditorPanelSplitRatio, type PromptEditorFormWidthBounds, resolvePromptDashboardRequestMessageContext, shouldAcceptPromptDashboardAnalysisMessage, shouldAcceptPromptDashboardRequestMessage, shouldClearPromptDashboardBusyActionFromWidget, shouldReleasePromptDashboardProjectRequestOnNotice, shouldReleasePromptDashboardRequestId, shouldRequestPromptDashboardSnapshot, shouldRetainPromptDashboardBusyActionOnNotice, syncPromptDashboardStatusFromPrompt } from '../../utils/promptDashboard.js';
-import { normalizePromptDashboardPreferences, type DashboardQuickCommandTarget, type PromptDashboardPreferences } from '../../types/promptDashboardPreferences.js';
+import { normalizePromptDashboardPreferences, type DashboardQuickCommand, type DashboardQuickCommandTarget, type PromptDashboardPreferences } from '../../types/promptDashboardPreferences.js';
 import { appendRecognizedPromptText } from '../../shared/promptVoice.js';
 import { usePromptVoiceController, type PromptVoiceTarget } from './voice/usePromptVoiceController.js';
 import { KEEP_CURRENT_CHAT_MODEL, isKeepCurrentChatModel } from '../../constants/ai.js';
@@ -912,7 +913,7 @@ export const EditorApp: React.FC = () => {
     initialDashboardPreferenceState.migratedLegacy ? initialDashboardPreferenceState.preferences : initialPromptDashboardPreferences,
   );
   /** Индикатор переживает закрытие карточки, а идентификатор отличает ответ от прежних запросов. */
-  const [pendingQuickCommandText, setPendingQuickCommandText] = useState<string | null>(null);
+  const [pendingQuickCommandTitle, setPendingQuickCommandTitle] = useState<string | null>(null);
   const pendingQuickCommandRef = useRef<(PendingDashboardQuickCommand & { timer: number }) | null>(null);
   /** Глобальное раскрытие формы содержит только main; Process остаётся в expandedSections. */
   const [formSectionLayout, setFormSectionLayout] = useState(() => normalizePromptEditorLayout(bootWindow.__PROMPT_EDITOR_LAYOUT__));
@@ -1650,7 +1651,7 @@ export const EditorApp: React.FC = () => {
     if (!pending || pending.requestId !== requestId) return false;
     window.clearTimeout(pending.timer);
     pendingQuickCommandRef.current = null;
-    setPendingQuickCommandText(null);
+    setPendingQuickCommandTitle(null);
     return true;
   }, []);
 
@@ -1661,7 +1662,7 @@ export const EditorApp: React.FC = () => {
   }, []);
 
   /** Отправляет одну вставку за раз и восстанавливает действия виджета при потере ответа. */
-  const handleQuickCommandInsert = (text: string, target: DashboardQuickCommandTarget) => {
+  const handleQuickCommandInsert = (item: DashboardQuickCommand, target: DashboardQuickCommandTarget) => {
     if (pendingQuickCommandRef.current) return;
     const requestId = crypto.randomUUID();
     const clientDeadline = performance.now() + DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS;
@@ -1670,8 +1671,8 @@ export const EditorApp: React.FC = () => {
         setNotice({ kind: 'error', message: 'Расширение не подтвердило вставку. Проверьте поле чата. Команду можно скопировать в виджете.' });
       }
     }, DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS);
-    pendingQuickCommandRef.current = { requestId, timer, text, target, clientDeadline, sent: false };
-    setPendingQuickCommandText(text);
+    pendingQuickCommandRef.current = { requestId, timer, text: item.text, target, promptId: prompt.id, promptUuid: prompt.promptUuid, clientDeadline, sent: false };
+    setPendingQuickCommandTitle(item.title);
     vscode.postMessage({ type: 'promptDashboardQuickCommandPrepare', requestId });
   };
 
@@ -1682,8 +1683,16 @@ export const EditorApp: React.FC = () => {
     setPromptDashboardPreferences(state);
     const currentState = (vscode.getState?.() || {}) as Record<string, unknown>;
     vscode.setState?.({ ...currentState, 'pm.editor.promptDashboardPreferences': state });
-    vscode.postMessage({ type: 'savePromptDashboardPreferences', state,
-      baseState: edit.base.dashboardPreferences, requestId: edit.requestId });
+    const message = { type: 'savePromptDashboardPreferences' as const, state,
+      baseState: edit.base.dashboardPreferences, requestId: edit.requestId };
+    if (JSON.stringify(state.quickCommands.items) !== JSON.stringify(message.baseState?.quickCommands.items)) {
+      void postQuickCommandSave(message, reason => {
+        uiSettingsEditsRef.current = rejectPendingPromptUiEdit(uiSettingsEditsRef.current, edit.requestId);
+        setNotice({ kind: 'error', message: reason });
+      });
+    } else {
+      vscode.postMessage(message);
+    }
   }, [registerPromptUiEdit]);
 
   /**
@@ -4639,6 +4648,9 @@ export const EditorApp: React.FC = () => {
         if (finishQuickCommand(msg.requestId) && msg.expired) {
           setNotice({ kind: 'error', message: 'Время ожидания истекло до вставки. Повторите команду.' });
         }
+        break;
+      case 'promptDashboardQuickCommandSaved':
+        applyPromptUiSettings(msg.settings);
         break;
       case 'promptDashboardStateSaved':
         uiSettingsEditsRef.current = uiSettingsEditsRef.current.filter(edit => edit.requestId !== msg.requestId);
@@ -8311,6 +8323,7 @@ export const EditorApp: React.FC = () => {
         preferencesRevision={dashboardPreferencesRevision}
         onDragStateChange={handleUiSettingsDragChange}
         onPreferencesChange={handlePromptDashboardPreferencesChange}
+        quickCommandMigration={legacyDashboardPreferencesPendingRef.current ? promptDashboardPreferences : undefined}
         snapshot={promptDashboardSnapshot}
         busyAction={promptDashboardBusyAction}
         dockerBusyAction={promptDashboardDockerBusyActions.join('\n') || null}
@@ -8334,9 +8347,10 @@ export const EditorApp: React.FC = () => {
         quickNotesVoiceQueue={noteVoiceQueueItems.length > 0 ? (
           <PromptVoiceQueueIndicator items={noteVoiceQueueItems} onDismiss={voiceController.dismissQueueItem} t={t} />
         ) : null}
-        pendingQuickCommandText={pendingQuickCommandText}
+        pendingQuickCommandTitle={pendingQuickCommandTitle}
+        quickCommandPrompt={prompt}
         onQuickCommandInsert={handleQuickCommandInsert}
-        onQuickCommandCopy={text => vscode.postMessage({ type: 'promptDashboardQuickCommandCopy', text })}
+        onQuickCommandCopy={text => vscode.postMessage({ type: 'promptDashboardQuickCommandCopy', text, promptId: prompt.id, promptUuid: prompt.promptUuid })}
         onOpenGitFlow={handleOpenGitOverlay}
         onOpenPrompt={handlePromptDashboardOpenPrompt}
         onPullProject={handlePromptDashboardPullProject}

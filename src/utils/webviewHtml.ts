@@ -159,7 +159,8 @@ export function getWebviewHtml(
           return;
         }
 
-        pointerPressedButton = target.closest('button');
+        // A modal owns keyboard focus, including the opener it restores after closing.
+        pointerPressedButton = target.closest('[aria-modal="true"]') ? null : target.closest('button');
       }, true);
 
       document.addEventListener('click', () => {

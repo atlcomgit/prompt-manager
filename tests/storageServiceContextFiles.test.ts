@@ -536,6 +536,18 @@ test('saveActiveTask writes selected metadata without reading prompt content', a
 	assert.equal((await fsp.readdir(service.getStorageDirectoryPath())).some(name => name.endsWith('.tmp')), false);
 });
 
+/** A reused slug resolves to the folder whose UUID belongs to the open editor. */
+test('quick command prompt directory distinguishes active and archived prompts with the same id', async t => {
+	const { service, workspaceRoot } = await createTimeSaveFixture(t);
+	const active = await seedPrompt(workspaceRoot, 'same', []);
+	const archived = path.join(service.getStorageDirectoryPath(), 'archive', 'same');
+	await fsp.mkdir(archived, { recursive: true });
+	await writeTextFile(path.join(archived, 'config.json'), JSON.stringify({ promptUuid: 'archived-uuid' }));
+	assert.equal(service.getSavedPromptDirectoryPath('same', 'uuid-same'), active);
+	assert.equal(service.getSavedPromptDirectoryPath('same', 'archived-uuid'), archived);
+	assert.equal(service.getSavedPromptDirectoryPath('same', 'someone-else'), undefined);
+});
+
 /** Архив, переименование и полный путь определяются по фактическому каталогу и стабильному UUID. */
 test('saveActiveTask resolves renamed archived prompts and empty task numbers', async t => {
 	const { service, workspaceRoot } = await createTimeSaveFixture(t);
@@ -662,10 +674,13 @@ test('stale saves after rename preserve the single completed prompt and a reused
 	const finalId = 'tre-137-with-schedule';
 	await remote.savePrompt({ ...old, id: finalId, status: 'completed', content: 'final content', report: 'final report' },
 		{ previousId: old.id, skipHistory: true });
+	assert.equal(local.getSavedPromptDirectoryPath(old.id, old.promptUuid), undefined);
+	assert.equal(local.getSavedPromptDirectoryPath(finalId, old.promptUuid), path.dirname(configUri(finalId).fsPath));
 	await assert.rejects(local.savePrompt({ ...old, id: 'tre-137-and-schedule' }, { previousId: old.id, existingPrompt: null }));
 	await assert.rejects(local.savePrompt({ ...old, content: 'stale edit' }, { existingPrompt: old }));
 	const other = await remote.savePrompt({ ...old, promptUuid: 'other-uuid', content: 'other content' });
 	assert.equal(other.id, old.id);
+	assert.equal(local.getSavedPromptDirectoryPath(old.id, old.promptUuid), undefined);
 	await assert.rejects(local.savePrompt({ ...old, id: 'stale-rename' }, { previousId: old.id, existingPrompt: old }));
 	await local.saveActiveTask(old.id, old.promptUuid);
 	assert.equal((await readJson(path.join(local.getStorageDirectoryPath(), 'task-active.json'))).id, finalId);

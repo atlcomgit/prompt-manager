@@ -716,6 +716,21 @@ export class StorageService implements vscode.Disposable {
 		return this.resolvePromptStorageLocationSync(id)?.dirPath || this.promptDir(id, false);
 	}
 
+	/** Путь для шаблона существует и принадлежит открытому промпту, включая архив и старый формат UUID. */
+	getSavedPromptDirectoryPath(id: string, uuid: string, inArchive = false): string | undefined {
+		if (!id || !uuid || id === '__new__' || id === '.' || id === '..' || /[/\\\0]/.test(id) || this.isReservedPromptDirName(id)) return;
+		// Active and archived prompts can reuse a folder name. Resolve the actual open prompt by identity.
+		for (const archived of [inArchive, !inArchive]) {
+			const dirPath = this.promptDir(id, archived);
+			const config = this.readStoredConfig({ id, archived, dirPath });
+			if (config) {
+				const stored = typeof config.promptUuid === 'string' && config.promptUuid.trim();
+				if ((stored || legacyPromptUuid(dirPath)) === uuid) return dirPath;
+			}
+		}
+		return undefined;
+	}
+
 	private initializePromptConfigWatcher(): void {
 		if (this.promptConfigWatcher) {
 			return;

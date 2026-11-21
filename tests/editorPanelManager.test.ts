@@ -4,8 +4,8 @@ import { normalizePromptDashboardPreferences, type DashboardQuickCommandTarget }
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, join, relative } from 'node:path';
 import Module from 'node:module';
 import { DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS, DASHBOARD_QUICK_COMMAND_TIMEOUT_MS, EDITOR_WEBVIEW_ASSET_VERSION } from '../src/constants/webview.js';
 import { buildSaveQueueKey } from '../src/utils/promptSaveQueue.js';
@@ -14,7 +14,7 @@ import type { OpenCodeCliRequest, OpenCodeCliService } from '../src/services/ope
 
 const originalLoad = (Module as any)._load;
 const vscodeCommandCalls: Array<{ id: string; args: unknown[] }> = [];
-const vscodeNotices: Array<{ kind: 'info' | 'error'; message: string }> = [];
+const vscodeNotices: Array<{ kind: 'info' | 'warning' | 'error'; message: string }> = [];
 const vscodeCreatedWebviewPanels: any[] = [];
 const vscodeCreatedWatchers: any[] = [];
 const vscodeClosedTabs: any[] = [];
@@ -584,6 +584,7 @@ function createVsCodeMock() {
 			createOutputChannel: () => outputChannel,
 			showQuickPick: async (items: Array<{ entryId: string }>) => chooseHistoryRevision?.(items),
 			showErrorMessage: (message: string) => { vscodeNotices.push({ kind: 'error', message }); },
+			showWarningMessage: (message: string) => { vscodeNotices.push({ kind: 'warning', message }); },
 			showInformationMessage: (message: string) => { vscodeNotices.push({ kind: 'info', message }); },
 		},
 		commands: {
@@ -828,6 +829,7 @@ async function createManager(options?: {
 		getPromptEditorLayout: () => normalizePromptEditorLayout(),
 		savePromptEditorLayout: async () => undefined,
 		invalidatePromptUiSettings: () => undefined,
+		observeQuickCommandListChange: () => undefined,
 		saveStartupEditorRestoreState: async () => undefined,
 		getStartupEditorRestoreState: () => ({ wasOpen: Boolean(storedPrompt?.id), promptId: storedPrompt?.id || null }),
 		getPromptEditorViewState: () => createEditorViewState(),
@@ -882,6 +884,8 @@ async function createManager(options?: {
 		saveActiveTask: async (_id: string | null, _promptUuid?: string | null): Promise<void> => undefined,
 		getStorageDirectoryPath: () => storageDirectoryPath,
 		getPromptDirectoryPath: (id: string) => `${storageDirectoryPath}/prompts/${id}`,
+		getSavedPromptDirectoryPath: (id: string, uuid: string) => id && storedPrompt?.id === id && storedPrompt.promptUuid === uuid
+			? `${storageDirectoryPath}/prompts/${id}` : undefined,
 		getPromptMarkdownUri: (id: string) => {
 			const fsPath = `${storageDirectoryPath}/prompts/${id}/prompt.md`;
 			return {
@@ -8525,9 +8529,101 @@ test('dashboard branch diff starts right-side reads before merge base and opens 
 
 /** Сообщение после подтверждения виджетом, пока ещё хватает времени на штатную вставку. */
 function quickCommandInsert(requestId: string, target: DashboardQuickCommandTarget, text = '/review') {
-	return { type: 'promptDashboardQuickCommandInsert', requestId, text, target,
+	return { type: 'promptDashboardQuickCommandInsert', requestId, text, target, promptUuid: 'uuid-a', promptId: 'prompt-a',
 		hostDeadline: performance.now() + DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS };
 }
+
+/** Предпросмотр, вставка и копирование получают один текст. Только действия пользователя меняют чат и буфер. */
+test('quick command preview, insert, copy and manual fallback use the originating prompt and its workspace', async () => {
+	resetVsCodeCommandMock();
+	const prompt = createPrompt({ taskNumber: '007', title: 'Проверка' });
+	const { manager } = await createManager({ storageDirectoryPath: '/stored', initialPrompt: prompt });
+	const replies: unknown[] = [];
+	const panel = { webview: { postMessage: async (message: unknown) => { replies.push(message); return true; } } };
+	const handle = (message: object) => (manager as any).handleMessage(message, panel, prompt, 'panel', () => false, () => undefined);
+	const template = '  {{workspaceName}}\n{{workspacePath}}\n{{workspaceRelativePath}}\n{{taskNumber}} {{promptTitle}}\n{{promptDirectory}}  ';
+	const expected = `  workspace\n/tmp/workspace\n${relative(homedir(), '/tmp/workspace')}\n007 Проверка\n/stored/prompts/prompt-a  `;
+	const draft = createMockNativeChatInput();
+	vscodeExecuteCommandHandler = async (id, query) => {
+		if (id === 'workbench.action.chat.open') draft.setText((query as { query: string }).query);
+	};
+	try {
+		vscodeClipboardText = 'Исходный буфер';
+		await handle({ type: 'promptDashboardQuickCommandPreview', requestId: 'preview', promptId: prompt.id, promptUuid: prompt.promptUuid, text: template });
+		assert.deepEqual(replies, [{ type: 'promptDashboardQuickCommandPreviewResult', requestId: 'preview', result: { text: expected } }]);
+		assert.equal(vscodeClipboardText, 'Исходный буфер');
+		assert.deepEqual(vscodeCommandCalls, []);
+		assert.equal(vscodeNotices.length, 0);
+		await handle(quickCommandInsert('insert', 'copilot', template));
+		assert.deepEqual(vscodeCommandCalls.at(-1), { id: 'workbench.action.chat.open', args: [{ query: expected, isPartialQuery: true }] });
+		assert.equal(vscodeNotices.length, 0);
+		await handle({ type: 'promptDashboardQuickCommandCopy', promptId: prompt.id, promptUuid: prompt.promptUuid, text: template });
+		assert.equal(vscodeClipboardText, expected);
+		vscodeClipboardText = '';
+		await handle(quickCommandInsert('manual', 'opencode-cli', template));
+		assert.equal(vscodeClipboardText, expected);
+		assert.equal(vscodeNotices.at(-1)?.kind, 'error');
+	} finally {
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Архивирование или удаление открытого каталога обновляет предпросмотр даже без изменений полей формы. */
+test('quick command preview invalidates when its prompt directory moves in another window', async () => {
+	const prompt = createPrompt();
+	const { manager } = await createManager();
+	const replies: unknown[] = [];
+	(manager as any).setPanelPromptRef('panel', prompt);
+	(manager as any).resolveOpenEditorPanel = () => ({ webview: { postMessage: async (message: unknown) => { replies.push(message); return true; } } });
+	const change = { id: prompt.id, archived: false, kind: 'deleted' as const, config: null,
+		uri: { fsPath: '/old/config.json' } as import('vscode').Uri, externalChangedAt: null };
+	try {
+		await manager.handleExternalPromptConfigChanges([{ ...change, id: 'other' }]);
+		assert.deepEqual(replies, []);
+		await manager.handleExternalPromptConfigChanges([change, { ...change, id: 'renamed', kind: 'created', archived: true, config: prompt }]);
+		assert.deepEqual(replies, [{ type: 'promptDashboardQuickCommandPreviewInvalidated' }]);
+	} finally {
+		manager.disposeAll();
+	}
+});
+
+/** Пустой текст, неизвестное значение известной переменной и смена промпта не трогают чат и буфер. */
+test('empty quick commands, missing values and stale prompt requests warn without side effects', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager();
+	const prompt = createPrompt({ id: '', taskNumber: '' });
+	const replies: Array<{ type: string; requestId: string; result?: { error: string } }> = [];
+	const panel = { webview: { postMessage: async (message: typeof replies[number]) => { replies.push(message); return true; } } };
+	vscodeClipboardText = 'Сохранить буфер';
+	try {
+		for (const [template, source, id, explanation] of [
+			[' \n ', 'uuid-a', '', 'Не задан текст команды'], ['задача {{taskNumber}}', 'uuid-a', '', '{{taskNumber}}'],
+			['{{promptDirectory}}', 'uuid-a', '', '{{promptDirectory}}'], ['текст', 'другой', '', 'Открыт другой промпт'],
+			['текст', 'uuid-a', 'копия', 'Открыт другой промпт'],
+		]) {
+			vscodeNotices.length = 0;
+			await (manager as any).handleMessage({ type: 'promptDashboardQuickCommandPreview', requestId: 'check',
+				text: template, promptUuid: source, promptId: id }, panel, prompt, 'panel', () => false, () => undefined);
+			assert.equal(replies.at(-1)?.type, 'promptDashboardQuickCommandPreviewResult');
+			assert.equal(replies.at(-1)?.requestId, 'check');
+			assert.ok(replies.at(-1)?.result?.error.includes(explanation));
+			assert.equal(vscodeNotices.length, 0);
+			for (const message of [quickCommandInsert('invalid', 'copilot', template), { type: 'promptDashboardQuickCommandCopy', text: template }]) {
+				vscodeNotices.length = 0;
+				await (manager as any).handleMessage({ ...message, promptUuid: source, promptId: id }, panel, prompt, 'panel', () => false, () => undefined);
+				assert.equal(vscodeNotices.length, 1);
+				assert.equal(vscodeNotices[0].kind, 'warning');
+				assert.ok(vscodeNotices[0].message.includes(explanation));
+			}
+		}
+		assert.deepEqual(vscodeCommandCalls, []);
+		assert.equal(vscodeClipboardText, 'Сохранить буфер');
+	} finally {
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
 
 /** Просроченная доставка в любую сторону Tunnel не запускает вставку. У клиента и хоста разные часы. */
 test('dashboard quick commands require a current confirmation from the originating widget', async () => {
@@ -8544,7 +8640,7 @@ test('dashboard quick commands require a current confirmation from the originati
 		return 'dispatched';
 	};
 	const clientTime = 900_000;
-	const pending: PendingDashboardQuickCommand = { requestId: 'first', text: '/review', target: 'codex',
+	const pending: PendingDashboardQuickCommand = { requestId: 'first', promptId: 'prompt-a', promptUuid: 'uuid-a', text: '/review', target: 'codex',
 		clientDeadline: clientTime + DASHBOARD_QUICK_COMMAND_REPLY_TIMEOUT_MS, sent: false };
 	try {
 		await deliver({ type: 'promptDashboardQuickCommandPrepare', requestId: pending.requestId });
@@ -8597,10 +8693,7 @@ test('dashboard quick commands populate Copilot and Claude drafts without sendin
 		]);
 		assert.equal(vscodeClipboardText, '');
 		assert.deepEqual(childProcessSpawnCalls, []);
-		assert.deepEqual(vscodeNotices, [
-			{ kind: 'info', message: 'Команда вставлена в поле чата.' },
-			{ kind: 'info', message: 'Команда передана для вставки в поле чата.' },
-		]);
+		assert.deepEqual(vscodeNotices, []);
 	} finally {
 		resetVsCodeCommandMock();
 	}
@@ -8633,7 +8726,7 @@ test('Current quick command awaits the native draft and acknowledges the origina
 		draft.setText('/review');
 		await pending;
 		assert.deepEqual(replies, [{ type: 'promptDashboardQuickCommandFinished', requestId: 'current' }]);
-		assert.deepEqual(vscodeNotices, [{ kind: 'info', message: 'Команда вставлена в поле чата.' }]);
+		assert.deepEqual(vscodeNotices, []);
 	} finally {
 		ready.resolve();
 		manager.disposeAll();
@@ -8903,15 +8996,14 @@ test('dashboard native draft distinguishes an unpublished model from an unchange
 				await pending;
 				const failed = scenario === 'late mismatch' || scenario === 'command rejected';
 				assert.equal(vscodeClipboardText, failed ? '/review' : 'мой буфер');
-				assert.equal(vscodeNotices.length, 1);
-				assert.equal(vscodeNotices[0].kind, failed ? 'error' : 'info');
-				const messages = {
-					hidden: 'Команда передана для вставки в поле чата.',
-					'late match': 'Команда вставлена в поле чата.',
-					'late mismatch': 'VS Code не подтвердил вставку.',
-					'command rejected': 'Не удалось вставить команду.',
-				};
-				assert.ok(vscodeNotices[0].message.startsWith(messages[scenario]));
+				if (failed) {
+					assert.equal(vscodeNotices.length, 1);
+					assert.equal(vscodeNotices[0].kind, 'error');
+					const reason = scenario === 'late mismatch' ? 'VS Code не подтвердил вставку.' : 'Не удалось вставить команду.';
+					assert.ok(vscodeNotices[0].message.startsWith(reason));
+				} else {
+					assert.deepEqual(vscodeNotices, []);
+				}
 			} finally {
 				manager.disposeAll();
 				resetVsCodeCommandMock();
@@ -8969,7 +9061,7 @@ test('dashboard quick command times out a hung activation and releases copy with
 		assert.deepEqual(replies, []);
 		t.mock.timers.tick(DASHBOARD_QUICK_COMMAND_TIMEOUT_MS);
 		await pending;
-		await handle({ type: 'promptDashboardQuickCommandCopy', text: '/next' });
+		await handle({ type: 'promptDashboardQuickCommandCopy', promptId: 'prompt-a', promptUuid: 'uuid-a', text: '/next' });
 		activation.resolve();
 		await new Promise<void>(resolve => setImmediate(resolve));
 		assert.deepEqual(vscodeCommandCalls, []);
@@ -9047,7 +9139,7 @@ test('Quick Command copy uses the clipboard without focusing any chat', async ()
 	resetVsCodeCommandMock();
 	const { manager } = await createManager();
 	const copy = () => (manager as any).handleMessage(
-		{ type: 'promptDashboardQuickCommandCopy', text: '/review' },
+		{ type: 'promptDashboardQuickCommandCopy', promptId: 'prompt-a', promptUuid: 'uuid-a', text: '/review' },
 		{ webview: { postMessage: async () => true } }, createPrompt(), 'panel', () => false, () => undefined,
 	);
 	try {
@@ -12269,6 +12361,37 @@ test('dashboard persistence handles preferences acknowledgement failure and full
 		await failed;
 		manager.disposeAll();
 	}
+});
+
+/** An error replies to the modal with the persisted state. Only the matching successful retry publishes the command. */
+test('quick command modal saves just its command and receives the confirmed settings on failure and retry', async () => {
+	let saved = normalizePromptDashboardPreferences({ quickCommands: { items: [{ title: 'A', text: 'old' }] } });
+	const baseState = clonePrompt(saved);
+	const edit = { original: saved.quickCommands.items[0], command: { title: 'A', text: 'новый {{taskNumber}}' } };
+	let fail = true;
+	const { manager } = await createManager({ stateService: {
+		getPromptDashboardPreferences: () => clonePrompt(saved),
+		saveDashboardQuickCommand: async (actual: typeof edit) => {
+			assert.deepEqual(actual, edit);
+			if (fail) { fail = false; throw new Error('busy'); }
+			saved = { ...saved, quickCommands: { items: [actual.command] } };
+		},
+	} });
+	const messages: Array<{ type: string; requestId: string; error?: string; settings: { dashboardPreferences: typeof saved } }> = [];
+	const panel = { webview: { postMessage: async (message: typeof messages[number]) => { messages.push(message); return true; } } };
+	const send = (requestId: string) => (manager as any).handleMessage({ type: 'savePromptDashboardQuickCommand',
+		requestId, edit }, panel, createPrompt(), 'panel-a', () => false, () => undefined);
+	try {
+		await send('first');
+		assert.equal(messages[0].type, 'promptDashboardQuickCommandSaved');
+		assert.equal(messages[0].requestId, 'first');
+		assert.ok(messages[0].error);
+		assert.deepEqual(messages[0].settings.dashboardPreferences, baseState);
+		await send('retry');
+		assert.equal(messages[1].requestId, 'retry');
+		assert.equal(messages[1].error, undefined);
+		assert.deepEqual(messages[1].settings.dashboardPreferences, { ...baseState, quickCommands: { items: [edit.command] } });
+	} finally { manager.disposeAll(); }
 });
 
 /** Bootstrap не подставляет defaults вместо отсутствия записи и безопасно передаёт сохранённый JSON. */

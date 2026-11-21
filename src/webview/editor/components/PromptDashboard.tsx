@@ -4,6 +4,7 @@ import { QuickNotesSection } from './quickNotes/QuickNotesSection';
 import { QuickCommandsWidget } from './QuickCommandsWidget';
 import type { PromptChatTarget } from '../../../types/prompt.js';
 import { QuickNoteIcon } from './quickNotes/QuickNoteIcon';
+import { QUICK_NOTES_CSS, QUICK_WIDGET_ACTIONS_CSS } from './quickNotes/quickNotesStyles';
 import { QuickNoteModalHost, useQuickNotesActions } from './quickNotes/useQuickNotesActions';
 import { useQuickNotesClient } from './quickNotes/useQuickNotesClient';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -1718,6 +1719,21 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		</button>
 	);
 
+	/** У заметок и команд собственные действия в общей сворачиваемой шапке. */
+	const renderQuickWidget = (
+		key: 'quickCommands' | 'quickNotes', actions: React.ReactNode, body: React.ReactNode, footer?: React.ReactNode,
+	) => {
+		const title = PROMPT_DASHBOARD_SECTION_LABELS[key];
+		const collapsed = isPromptDashboardSectionCollapsed(normalizedCollapsedSections, key);
+		const toggle = () => toggleSectionCollapse(key);
+		return <section style={styles.section}>
+			{renderSectionHeader(title, <span style={styles.sectionHeaderActions}>
+				{actions}{renderSectionCollapseButton(title, collapsed, toggle)}
+			</span>, { collapsed, onToggleCollapse: toggle, dragHandle: renderSectionDragHandle(key, title) })}
+			{body && <div style={styles.sectionBody}>{body}{footer}</div>}
+		</section>;
+	};
+
 	// Build section nodes once and then place them through the shared persisted order.
 	const sectionNodesByKey: Record<PromptDashboardSectionKey, React.ReactNode> = {
 		status: renderStatus(snapshot, statusCacheStatus, busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('status', 'Статус промпта')),
@@ -1729,28 +1745,18 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		dockerContainers: renderDockerContainers(snapshot?.docker.data, dockerViewMode, dockerStatusFilter, dockerSearch, dockerSearchOpen, () => setDockerSearchOpen(open => !open), dockerSortBy, expanded, dockerCacheStatus, busyAction, effectiveDockerBusyAction, changeDockerViewMode, changeDockerStatusFilter, changeDockerSearch, clearDockerSearch, changeDockerSortBy, toggleExpanded, onDockerAction, onDockerWorkspaceAction, onDockerComposeAction, onOpenDockerComposeFile, onOpenDockerLogs, onOpenDockerTerminal, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('dockerContainers', 'Docker контейнеры')),
 		todos: renderTodos(snapshot?.todos?.data || null, visibleTodosData, todoSelectedFileTypes, todoSearch, todosCacheStatus, busyAction, expanded, normalizedCollapsedSections, toggleTodoFileType, clearTodoFileTypes, changeTodoSearch, clearTodoSearch, toggleExpanded, onOpenTodoMarker, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('todos', 'ToDo')),
 		aiAnalysis: renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('aiAnalysis', 'AI review')),
-		quickCommands: (() => {
-			const collapsed = isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'quickCommands');
-			const count = preferences.quickCommands.items.length;
-			return <section style={styles.section}>
-				{renderSectionHeader('Быстрые команды', (
-					<span style={styles.sectionHeaderActions}>
-						<span className="pm-qn-count" title="Сохранённых команд">{count}</span>
-						{renderSectionCollapseButton('Быстрые команды', collapsed, () => toggleSectionCollapse('quickCommands'))}
-					</span>
-				), { collapsed, onToggleCollapse: () => toggleSectionCollapse('quickCommands'),
-					dragHandle: renderSectionDragHandle('quickCommands', 'Быстрые команды') })}
-				{collapsed ? null : <div style={styles.sectionBody}>
-					<QuickCommandsWidget items={preferences.quickCommands.items}
-						target={preferences.quickCommands.target ?? (chatTarget === 'kilo' ? 'copilot' : chatTarget)}
-						pendingText={pendingQuickCommandText}
-						onTargetChange={target => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, target } })}
-						onItemsChange={items => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, items } })}
-						onInsert={(text, target) => onQuickCommandInsert?.(text, target)}
-						onCopy={text => onQuickCommandCopy?.(text)}/>
-				</div>}
-			</section>;
-		})(),
+		quickCommands: (
+			<QuickCommandsWidget items={preferences.quickCommands.items}
+				collapsed={isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'quickCommands')}
+				onToggleCollapse={() => toggleSectionCollapse('quickCommands')}
+				renderShell={(actions, body) => renderQuickWidget('quickCommands', actions, body)}
+				target={preferences.quickCommands.target ?? (chatTarget === 'kilo' ? 'copilot' : chatTarget)}
+				pendingText={pendingQuickCommandText}
+				onTargetChange={target => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, target } })}
+				onItemsChange={items => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, items } })}
+				onInsert={(text, target) => onQuickCommandInsert?.(text, target)}
+				onCopy={text => onQuickCommandCopy?.(text)} />
+		),
 		quickNotes: (
 			<QuickNotesSection
 				client={quickNotesClient}
@@ -1763,24 +1769,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				onAddTextChange={setQuickNotesAddText}
 				collapsed={isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'quickNotes')}
 				onToggleCollapse={() => toggleSectionCollapse('quickNotes')}
-				renderShell={(actions, body) => {
-					const quickNotesCollapsed = isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'quickNotes');
-					return (
-						<section style={styles.section}>
-							{renderSectionHeader('Быстрые заметки', (
-								<span style={styles.sectionHeaderActions}>
-									{actions}
-									{renderSectionCollapseButton('Быстрые заметки', quickNotesCollapsed, () => toggleSectionCollapse('quickNotes'))}
-								</span>
-							), {
-								collapsed: quickNotesCollapsed,
-								onToggleCollapse: () => toggleSectionCollapse('quickNotes'),
-								dragHandle: renderSectionDragHandle('quickNotes', 'Быстрые заметки'),
-							})}
-							{body ? <div style={styles.sectionBody}>{body}{quickNotesVoiceQueue}</div> : null}
-						</section>
-					);
-				}}
+				renderShell={(actions, body) => renderQuickWidget('quickNotes', actions, body, quickNotesVoiceQueue)}
 				preferences={preferences.quickNotes}
 				onPreferencesChange={quickNotes => updatePreferences({ quickNotes })}
 				expanded={expanded}
@@ -1834,6 +1823,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		>
 			<style>{DOCKER_ACTION_MENU_INTERACTION_STYLES}</style>
 			<style>{DASHBOARD_RESPONSIVE_STYLES}</style>
+			<style>{hiddenSections.includes('quickNotes') ? QUICK_WIDGET_ACTIONS_CSS : QUICK_NOTES_CSS}</style>
 			<div style={styles.toolbar}>
 				<div style={styles.titleRow}>
 					<PromptDashboardMark />

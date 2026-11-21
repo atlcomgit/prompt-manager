@@ -30,7 +30,7 @@ test('dashboard preferences keep false disclosures and explicit empty values', (
 			expandedContainerIds: ['docker:legacy'] },
 		todos: { selectedFileTypes: [], search: '' },
 		quickCommands: { items: [{ text: '/alek-review' }, { text: 'есть еще уточнения или вопросы?' }] },
-		quickNotes: { newNoteScope: 'global', search: 'идея', colors: ['red', '#12abef'], boardGroupBy: 'color',
+		quickNotes: { newNoteScope: 'global', newNoteColor: 'teal', search: 'идея', colors: ['red', '#12abef'], boardGroupBy: 'color',
 			boardScope: 'workspace', boardShowDone: true },
 		expanded: { 'project:api': false, 'branch:main': true },
 		showAllBranchProjects: true,
@@ -72,15 +72,16 @@ test('dashboard preferences preserve all valid search text and disclosure keys',
 /** Вид быстрых заметок: недопустимые значения заменяются значениями по умолчанию, цвета проверяются. */
 test('normalizePromptDashboardQuickNotesWidgetState keeps valid values and drops invalid ones', () => {
 	assert.deepEqual(normalizePromptDashboardQuickNotesWidgetState(undefined), {
-		newNoteScope: 'workspace', search: '', colors: [], boardGroupBy: 'none', boardScope: 'all', boardShowDone: false,
+		newNoteScope: 'workspace', newNoteColor: '', search: '', colors: [], boardGroupBy: 'none', boardScope: 'all', boardShowDone: false,
 	});
 	assert.deepEqual(normalizePromptDashboardQuickNotesWidgetState({
-		newNoteScope: 'other', search: 5, colors: [' RED ', 'red', 'none', '#ABCDEF', 'url(x)', 3, '#abc'],
+		newNoteScope: 'other', newNoteColor: ' #ABCDEF ', search: 5, colors: [' RED ', 'red', 'none', '#ABCDEF', 'url(x)', 3, '#abc'],
 		boardGroupBy: 'size', boardScope: 'global', boardShowDone: 'yes',
 	}), {
-		newNoteScope: 'workspace', search: '', colors: ['red', 'none', '#abcdef'], boardGroupBy: 'none', boardScope: 'global',
+		newNoteScope: 'workspace', newNoteColor: '#abcdef', search: '', colors: ['red', 'none', '#abcdef'], boardGroupBy: 'none', boardScope: 'global',
 		boardShowDone: false,
 	});
+	assert.equal(normalizePromptDashboardQuickNotesWidgetState({ newNoteColor: 'url(x)' }).newNoteColor, '');
 });
 
 

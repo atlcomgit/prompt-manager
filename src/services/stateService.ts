@@ -51,7 +51,7 @@ const PROMPT_DOCKER_SETTING_FIELDS = ['viewMode', 'statusFilter', 'search', 'sor
 const PROMPT_TODOS_SETTING_FIELDS = ['search', 'selectedFileTypes'] as const;
 /** Поля вида быстрых заметок пишутся отдельно, чтобы параллельные правки окон не затирали друг друга. */
 const PROMPT_QUICK_NOTES_SETTING_FIELDS = [
-	'newNoteScope', 'search', 'colors', 'boardGroupBy', 'boardScope', 'boardShowDone', 'descriptionHeight',
+	'newNoteScope', 'newNoteColor', 'search', 'colors', 'boardGroupBy', 'boardScope', 'boardShowDone', 'descriptionHeight',
 ] as const;
 
 /** Глобальный строковый порядок остаётся доступен старым версиям. */

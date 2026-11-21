@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import {
 	DASHBOARD_QUICK_COMMAND_CATEGORY_LIMIT,
 	DASHBOARD_QUICK_COMMAND_LIMIT,
@@ -25,11 +25,14 @@ type QuickCommandDraft = { originalText: string | null; text: string; category: 
 
 /** Общий список черновиков команд. Проверки в quickCommandsWidget.test.tsx. */
 export function QuickCommandsWidget({
-	items, target, pendingText, onTargetChange, onItemsChange, onInsert, onCopy,
+	items, target, pendingText, collapsed, onToggleCollapse, renderShell, onTargetChange, onItemsChange, onInsert, onCopy,
 }: {
 	items: DashboardQuickCommand[];
 	target: DashboardQuickCommandTarget;
 	pendingText?: string | null;
+	collapsed: boolean;
+	onToggleCollapse(): void;
+	renderShell(actions: React.ReactNode, body: React.ReactNode | null): React.ReactNode;
 	onTargetChange(target: DashboardQuickCommandTarget): void;
 	onItemsChange(items: DashboardQuickCommand[]): void;
 	onInsert(text: string, target: DashboardQuickCommandTarget): void;
@@ -37,12 +40,26 @@ export function QuickCommandsWidget({
 }): React.ReactElement {
 	// Поиск и незавершённые действия относятся только к открытому виджету.
 	const [filter, setFilter] = useState('');
+	const [searchOpen, setSearchOpen] = useState(false);
+	const searchId = useId();
+	const searchInput = useRef<HTMLInputElement>(null);
+	const editorInput = useRef<HTMLTextAreaElement>(null);
+	const focusSearchOnOpen = useRef(false);
 	const [draft, setDraft] = useState<QuickCommandDraft | null>(null);
 	const [deleting, setDeleting] = useState<string | null>(null);
 	const categoryListId = useId();
 	const commandText = draft?.text.trim() ?? '';
 	const duplicate = Boolean(draft && items.some(item => item.text === commandText && item.text !== draft.originalText));
 	const canAdd = items.length < DASHBOARD_QUICK_COMMAND_LIMIT;
+	const showSearch = searchOpen && !collapsed;
+
+	// Фокус ставится после раскрытия карточки, когда поле уже появилось в DOM.
+	useEffect(() => {
+		if (showSearch && focusSearchOnOpen.current) {
+			focusSearchOnOpen.current = false;
+			searchInput.current?.focus();
+		}
+	}, [showSearch]);
 
 	useEffect(() => {
 		// Внешнее обновление настроек может удалить строку с открытой формой или подтверждением.
@@ -52,7 +69,13 @@ export function QuickCommandsWidget({
 
 	/** Открывает форму команды с текущей категорией или пустыми полями. */
 	const openEditor = (item?: DashboardQuickCommand) => {
+		focusSearchOnOpen.current = false;
+		if (collapsed) onToggleCollapse();
 		setDeleting(null);
+		if (!item && draft?.originalText === null) {
+			editorInput.current?.focus();
+			return;
+		}
 		setDraft({ originalText: item?.text ?? null, text: item?.text ?? '', category: item?.category ?? '' });
 	};
 
@@ -103,7 +126,7 @@ export function QuickCommandsWidget({
 				setDraft(null);
 			}
 		}}>
-			<textarea rows={2} autoFocus value={draft.text} maxLength={DASHBOARD_QUICK_COMMAND_TEXT_LIMIT}
+			<textarea ref={editorInput} rows={2} autoFocus value={draft.text} maxLength={DASHBOARD_QUICK_COMMAND_TEXT_LIMIT}
 				aria-label={draft.originalText === null ? 'Новая быстрая команда' : 'Редактировать быструю команду'}
 				placeholder="Введите команду или фразу…"
 				onChange={event => setDraft({ ...draft, text: event.target.value })}
@@ -126,28 +149,51 @@ export function QuickCommandsWidget({
 		</form>
 	);
 
-	return (
+	// Кнопки и нативное меню обрабатывают клавиши и щелчки независимо от сворачивания заголовка.
+	const headerActions = (
+		<span className="pm-qn-header-actions pm-quick-commands-header" onKeyDown={event => event.stopPropagation()}>
+			<span className="pm-qn-count" title="Сохранённых команд">{items.length}</span>
+			<button type="button" className="pm-qn-icon-btn" aria-label="Поиск быстрых команд"
+				aria-expanded={showSearch} aria-controls={showSearch ? searchId : undefined} data-filter-active={query ? true : undefined}
+				title={query ? `Поиск быстрых команд — ${filter.trim()}` : 'Поиск быстрых команд'}
+				onClick={event => {
+					event.stopPropagation();
+					focusSearchOnOpen.current = !showSearch;
+					setSearchOpen(!showSearch);
+					if (collapsed) onToggleCollapse();
+				}}>
+				<QuickNoteIcon name="search" size={15} />
+			</button>
+			<button type="button" className="pm-qn-icon-btn" aria-label="Добавить быструю команду"
+				title={canAdd ? 'Добавить быструю команду' : `Максимум ${DASHBOARD_QUICK_COMMAND_LIMIT} команд`}
+				disabled={!canAdd} onClick={event => {
+					event.stopPropagation();
+					openEditor();
+				}}>
+				<QuickNoteIcon name="add" size={16} />
+			</button>
+			<label className="pm-qn-icon-btn pm-quick-commands-target" title={`Агент для быстрых команд — ${TARGET_LABELS[target]}`}
+				onClick={event => event.stopPropagation()}>
+				<QuickNoteIcon name="comment" size={14} />
+				<span className="pm-quick-commands-target-name" aria-hidden="true">{TARGET_LABELS[target]}</span>
+				<QuickNoteIcon name="chevron-down" size={10} />
+				<select value={target} aria-label="Целевой чат агента" onChange={event => {
+					const value = event.target.value;
+					if (isDashboardQuickCommandTarget(value)) onTargetChange(value);
+				}}>
+					{DASHBOARD_QUICK_COMMAND_TARGETS.map(value => (
+						<option key={value} value={value}>{TARGET_LABELS[value]}</option>
+					))}
+				</select>
+			</label>
+		</span>
+	);
+
+	const body = collapsed ? null : (
 		<div className="pm-quick-commands">
-			<style>{QUICK_COMMANDS_CSS}</style>
-			<div className="pm-quick-commands-controls">
-				<label>Агент
-					<select value={target} onChange={event => {
-						const value = event.target.value;
-						if (isDashboardQuickCommandTarget(value)) onTargetChange(value);
-					}} aria-label="Целевой чат агента">
-						{DASHBOARD_QUICK_COMMAND_TARGETS.map(value => (
-							<option key={value} value={value}>{TARGET_LABELS[value]}</option>
-						))}
-					</select>
-				</label>
-				<input value={filter} onChange={event => setFilter(event.target.value)}
-					aria-label="Фильтр быстрых команд" placeholder="Поиск команды…" />
-				<button type="button" className="pm-quick-commands-add" aria-label="Добавить быструю команду"
-					title={canAdd ? 'Добавить быструю команду' : `Максимум ${DASHBOARD_QUICK_COMMAND_LIMIT} команд`}
-					disabled={!canAdd} onClick={() => openEditor()}>
-					<QuickNoteIcon name="add" size={14} />
-				</button>
-			</div>
+			{searchOpen && <input type="search" className="pm-quick-commands-search" id={searchId} ref={searchInput}
+				aria-label="Фильтр быстрых команд" placeholder="Поиск команды…" value={filter}
+				onChange={event => setFilter(event.target.value)} />}
 			<datalist id={categoryListId}>
 				{[...categories.keys()].filter(Boolean).map(category => <option key={category} value={category} />)}
 			</datalist>
@@ -211,19 +257,29 @@ export function QuickCommandsWidget({
 			{draft?.originalText === null && editor}
 		</div>
 	);
+	return <>{renderShell(headerActions, body)}<style>{QUICK_COMMANDS_CSS}</style></>;
 }
 
 /** Компактные строки и формы используют цвета VS Code и сохраняют место для действий. */
 const QUICK_COMMANDS_CSS = `
 .pm-quick-commands, .pm-quick-commands-list { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
-.pm-quick-commands-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 7px; }
 .pm-quick-commands label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--vscode-descriptionForeground); }
-.pm-quick-commands select, .pm-quick-commands input, .pm-quick-commands textarea {
+.pm-quick-commands input, .pm-quick-commands textarea {
 	font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background);
 	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px;
 	padding: 5px 7px; min-width: 0; box-sizing: border-box;
 }
-.pm-quick-commands-controls input { flex: 1; min-width: 90px; }
+.pm-quick-commands-search { width: 100%; }
+.pm-quick-commands-header [data-filter-active] { color: var(--vscode-textLink-foreground); }
+.pm-quick-commands-header .pm-quick-commands-target { position: relative; width: auto; gap: 3px; padding: 0 3px; font-size: 11px; }
+.pm-quick-commands-target select {
+	position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer;
+	color: var(--vscode-dropdown-foreground); background: var(--vscode-dropdown-background);
+}
+.pm-quick-commands-header button:focus-visible, .pm-quick-commands-target:has(select:focus-visible) {
+	outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px;
+}
+@container pm-dashboard-widget (max-width: 359px) { .pm-quick-commands-target-name { display: none; } }
 .pm-quick-commands-list { max-height: 260px; overflow-y: auto; }
 .pm-quick-commands-category, .pm-quick-commands-muted { font-size: 11px; color: var(--vscode-descriptionForeground); }
 .pm-quick-commands-category { margin: 0 0 4px; font-weight: 600; overflow-wrap: anywhere; }
@@ -252,14 +308,13 @@ const QUICK_COMMANDS_CSS = `
 .pm-quick-commands-edit textarea { resize: vertical; }
 .pm-quick-commands-confirm { padding: 5px; font-size: 12px; }
 .pm-quick-commands-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 5px; }
-.pm-quick-commands-actions button, .pm-quick-commands-add {
+.pm-quick-commands-actions button {
 	padding: 5px 8px; color: var(--vscode-button-secondaryForeground);
 	background: var(--vscode-button-secondaryBackground); border: 0; border-radius: 4px; cursor: pointer;
 }
-.pm-quick-commands-add { display: inline-flex; align-items: center; min-height: 27px; }
 .pm-quick-commands-actions .is-primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
 .pm-quick-commands button:disabled { cursor: default; }
-.pm-quick-commands-icon:disabled, .pm-quick-commands-actions button:disabled, .pm-quick-commands-add:disabled { opacity: .55; }
+.pm-quick-commands-icon:disabled, .pm-quick-commands-actions button:disabled { opacity: .55; }
 .pm-quick-commands :focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .pm-quick-commands-error { color: var(--vscode-errorForeground); font-size: 12px; }
 `;

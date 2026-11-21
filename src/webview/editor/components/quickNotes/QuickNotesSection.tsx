@@ -7,7 +7,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { DashboardQuickNotesWidgetState } from '../../../../types/promptDashboardPreferences.js';
 import type { QuickNoteView } from '../../../../types/quickNotes.js';
 import { QuickNoteIcon } from './QuickNoteIcon';
-import { QUICK_NOTES_CSS } from './quickNotesStyles';
 import { buildQuickNoteExpandedKey, QuickNotesWidget } from './QuickNotesWidget';
 import type { QuickNotesActions } from './useQuickNotesActions';
 import type { QuickNotesClient } from './useQuickNotesClient';
@@ -101,7 +100,6 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 	const headerActions = (
 		// Enter и пробел на кнопках не всплывают к заголовку карточки, который по ним сворачивает виджет.
 		<span className="pm-qn-header-actions pm-qn-scope" onKeyDown={event => event.stopPropagation()}>
-			<style>{QUICK_NOTES_CSS}</style>
 			{openCount > 0 ? <span className="pm-qn-count" title="Открытых заметок">{openCount}</span> : null}
 			<button type="button" className="pm-qn-icon-btn" aria-pressed={searchOpen}
 				title={hasFilter && !searchOpen ? 'Поиск заметок (фильтры действуют)' : 'Поиск и фильтр заметок'}
@@ -159,8 +157,8 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 			voiceInProgress={props.voiceInProgress}
 			addText={props.addText}
 			onAddTextChange={props.onAddTextChange}
-			onAdd={(title, scope, openAfter) => {
-				const created = actions.createNote({ title, scope });
+			onAdd={(title, scope, openAfter, color) => {
+				const created = actions.createNote({ title, scope, color });
 				if (!created) {
 					return false;
 				}

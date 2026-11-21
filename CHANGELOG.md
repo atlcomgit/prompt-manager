@@ -8,7 +8,19 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ### 2026-11-21
 
+#### Added
+- Click a Quick Notes row to preview its description, checklist, and attachment names.
+- Choose a color in the Quick Notes add field. The widget remembers it for subsequent notes.
+
+#### Changed
+- Move Add and Search into the Quick Commands header and show the search field on demand.
+  The agent dropdown shows the selected name on wide cards and a chat icon on narrow cards.
+
 #### Fixed
+- Keep the Quick Notes draft open when switching between project and global notes. The switch is on the right of the color palette.
+- Dismiss a Quick Notes preview when focus leaves the editor and show keyboard focus on the custom color swatch.
+- Align Git Flow with the right-hand widgets panel after resizing the editor or moving the divider.
+  Keep a 16 px right margin and let the dialog expand left to fit the projects table with at least 16 px at the left edge.
 - Quick Commands now resolves Current from an expanded Codex, Claude Code, or built-in chat sidebar
   in VS Code 1.96 and later, including desktop connections through a Tunnel.
 - Limit Current to the widget's window when editor tabs are detached. Preserve the clipboard when

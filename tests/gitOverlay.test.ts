@@ -179,6 +179,21 @@ function renderGitOverlayMarkup(overrides: Partial<React.ComponentProps<typeof G
 	}));
 }
 
+/** Диалог учитывает правое поле от границы виджетов и помещается между боковыми полями на узком экране. */
+test('GitOverlay aligns with the dashboard and keeps gutters at the viewport edges', () => {
+	for (const dashboardLeft of [0, 318, 858, 1280]) {
+		const markup = renderGitOverlayMarkup({ dashboardLeft });
+		const backdrop = markup.slice(0, markup.indexOf('>'));
+		const dialogStyle = markup.match(/role="dialog"[^>]*style="([^"]*)"/)?.[1] ?? '';
+		assert.match(backdrop, /position:fixed/);
+		assert.match(backdrop, /justify-content:flex-end/);
+		assert.ok(backdrop.includes('padding:20px var(--pm-spacing-lg)'));
+		assert.ok(dialogStyle.includes(`width:calc(100vw - ${dashboardLeft}px - var(--pm-spacing-lg))`));
+		assert.match(dialogStyle, /min-width:min\(800px, 100%\)/);
+		assert.match(dialogStyle, /max-width:100%/);
+	}
+});
+
 test('resolveGitOverlayBranchNames keeps tracked order and appends prompt/current branches once', () => {
 	const branches = resolveGitOverlayBranchNames(['main', 'develop', 'main'], 'feature/task-42', 'feature/task-42');
 
@@ -991,6 +1006,7 @@ test('GitOverlay shows start-on-current-branches action when prompt branch is se
 	assert.match(markup, /<button[^>]*disabled=""[^>]*><span[^>]*><span>editor\.gitOverlayStart<\/span><\/span><\/button>/);
 });
 
+/** Обе кнопки предварительной проверки могут переноситься внутри узкого диалога. */
 test('GitOverlay shows start-on-current-branches action when the start button is visible but disabled', () => {
 	const markup = renderGitOverlayMarkup({
 		mode: 'start-chat-preflight',
@@ -1035,8 +1051,9 @@ test('GitOverlay shows start-on-current-branches action when the start button is
 		}),
 	});
 
-	assert.match(markup, /editor\.gitOverlayStartOnCurrentBranchesHint/);
-	assert.match(markup, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlayStartOnCurrentBranches<\/span><\/span><\/button>/);
+	const footer = markup.slice(markup.lastIndexOf('editor.gitOverlayStartOnCurrentBranchesHint'));
+	assert.match(footer, /<div style="[^"]*flex-wrap:wrap[^"]*"><button/);
+	assert.match(footer, /<button(?![^>]*disabled)[^>]*><span[^>]*><span>editor\.gitOverlayStartOnCurrentBranches<\/span><\/span><\/button>/);
 	assert.match(markup, /<button[^>]*disabled=""[^>]*><span[^>]*><span>editor\.gitOverlayStart<\/span><\/span><\/button>/);
 });
 

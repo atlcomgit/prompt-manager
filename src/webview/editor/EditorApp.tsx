@@ -1281,7 +1281,6 @@ export const EditorApp: React.FC = () => {
       ? t('editor.chatLaunchHintRenaming')
     : t('editor.chatLaunchHint');
   const [chatLaunchActivityFrame, setChatLaunchActivityFrame] = useState(0);
-  const shouldDockGitOverlaySecondHalf = pageWidth >= PROMPT_EDITOR_FORM_MAX_WIDTH_PX * 2;
   /** Узкий редактор меняет расположение, но не отключает загрузку видимых карточек; доля ширины глобальна. */
   const editorLayout = resolvePromptEditorLayout(pageWidth, formSectionLayout.panelSplitRatio);
   const promptDashboardMode = 'full' as const;
@@ -8398,7 +8397,7 @@ export const EditorApp: React.FC = () => {
           promptTitle={prompt.title}
           promptTaskNumber={prompt.taskNumber}
           selectedProjects={prompt.projects}
-          dockToSecondHalf={shouldDockGitOverlaySecondHalf}
+          dashboardLeft={editorLayout.dashboardLeft}
           preferredTrackedBranch={(prompt.trackedBranch || '').trim() || workspaceTrackedBranchPreference}
           preferredTrackedBranchesByProject={{
             ...workspaceTrackedBranchesByProjectPreference,

@@ -5,7 +5,6 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-	QUICK_NOTE_PALETTE_COLORS,
 	type QuickNoteAttachSource,
 	type QuickNoteFile,
 	type QuickNoteItem,
@@ -20,7 +19,6 @@ import {
 	getQuickNoteChecklistProgress,
 	formatQuickNoteClipboardText,
 	isQuickNoteDraftDirty,
-	normalizeQuickNoteColor,
 	resolveAdjacentQuickNoteId,
 	syncQuickNoteFilesWithSaved,
 } from '../../../../utils/quickNotes.js';
@@ -32,9 +30,9 @@ import {
 } from '../../../../utils/contextFiles.js';
 import { readClipboardImagePayloads } from '../../../shared/clipboardImages';
 import { EditorSectionDragHandle, SortableEditorSections } from '../SortableEditorSections';
+import { QuickNoteColorPicker } from './QuickNoteColorPicker';
 import { QuickNoteIcon } from './QuickNoteIcon';
 import { trapQuickNotesTabKey, useQuickNotesFocusFallback } from './quickNotesFocus';
-import { QUICK_NOTE_COLOR_LABELS, resolveQuickNoteColorCss } from './quickNotesStyles';
 import type { QuickNotesClient } from './useQuickNotesClient';
 import { resolveQuickNoteScopeLabel } from './QuickNotesWidget';
 
@@ -654,7 +652,6 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 		);
 	};
 
-	const selectedColor = normalizeQuickNoteColor(draft.color);
 	const scopes: QuickNoteScope[] = ['workspace', 'global'];
 
 	return (
@@ -767,20 +764,7 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 					<div className="pm-qn-props">
 						<div className="pm-qn-prop">
 							<span className="pm-qn-label">Цвет</span>
-							<div className="pm-qn-swatches" role="group" aria-label="Цвет заметки">
-								<button type="button" className="pm-qn-swatch is-none" aria-pressed={!selectedColor}
-									title="Без цвета" aria-label="Без цвета" onClick={() => patchDraft({ color: '' })} />
-								{QUICK_NOTE_PALETTE_COLORS.map(color => (
-									<button key={color} type="button" className="pm-qn-swatch" aria-pressed={selectedColor === color}
-										title={QUICK_NOTE_COLOR_LABELS[color]} aria-label={QUICK_NOTE_COLOR_LABELS[color]}
-										style={{ background: resolveQuickNoteColorCss(color) }} onClick={() => patchDraft({ color })} />
-								))}
-								<label className={`pm-qn-swatch is-custom${selectedColor.startsWith('#') ? ' is-selected' : ''}`} title="Свой цвет…">
-									<input type="color" aria-label={selectedColor.startsWith('#') ? `Свой цвет: ${selectedColor}, выбран` : 'Свой цвет'}
-										value={selectedColor.startsWith('#') ? selectedColor : '#3794ff'}
-										onChange={event => patchDraft({ color: event.target.value })} />
-								</label>
-							</div>
+							<QuickNoteColorPicker color={draft.color} label="Цвет заметки" onChange={color => patchDraft({ color })} />
 						</div>
 						<div className="pm-qn-prop">
 							<span className="pm-qn-label">Область</span>

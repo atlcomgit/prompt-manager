@@ -66,34 +66,34 @@ function createEmptyDockerWidget() {
 /** Форма сжимается раньше виджетов, а слишком узкий экран переходит к общей вертикальной прокрутке. */
 test('resolvePromptEditorLayout preserves both panels at every breakpoint', () => {
 	for (const width of [0, 300, 637]) {
-		assert.deepEqual(resolvePromptEditorLayout(width), { stacked: true, formWidth: width });
+		assert.deepEqual(resolvePromptEditorLayout(width), { stacked: true, formWidth: width, dashboardLeft: 0 });
 	}
 	for (const [width, formWidth] of [[638, 300], [639, 300], [677, 300], [678, 300], [679, 301],
 		[800, 422], [1119, 741], [1120, 742], [1217, 839], [1218, 840], [1219, 840], [1920, 840]]) {
-		assert.deepEqual(resolvePromptEditorLayout(width), { stacked: false, formWidth });
-		assert.ok(width - formWidth - 18 >= 320);
+		const layout = resolvePromptEditorLayout(width);
+		assert.deepEqual(layout, { stacked: false, formWidth, dashboardLeft: formWidth + 18 });
+		assert.ok(width - layout.dashboardLeft >= 320);
 	}
 	for (const invalid of [NaN, Infinity, -1]) {
-		assert.deepEqual(resolvePromptEditorLayout(invalid), { stacked: true, formWidth: 0 });
+		assert.deepEqual(resolvePromptEditorLayout(invalid), { stacked: true, formWidth: 0, dashboardLeft: 0 });
 	}
 });
 
 /** Ручная доля распределяет сумму ширин панелей, соблюдая минимумы и не ограничивая форму 840 px. */
 test('resolvePromptEditorLayout applies a manual split ratio within panel minimums', () => {
 	// При ширине страницы 1218 px сумма ширин панелей без промежутка 18 px равна 1200 px.
-	assert.deepEqual(resolvePromptEditorLayout(1218, 0.5), { stacked: false, formWidth: 600 });
-	assert.deepEqual(resolvePromptEditorLayout(1920, 0.75), { stacked: false, formWidth: 1427 });
+	assert.deepEqual(resolvePromptEditorLayout(1218, 0.5), { stacked: false, formWidth: 600, dashboardLeft: 618 });
+	assert.deepEqual(resolvePromptEditorLayout(1920, 0.75), { stacked: false, formWidth: 1427, dashboardLeft: 1445 });
 	assert.ok(resolvePromptEditorLayout(1920, 0.75).formWidth > 840);
 	// Крайние доли упираются в минимум формы и минимум правой панели.
-	assert.deepEqual(resolvePromptEditorLayout(1218, 0), { stacked: false, formWidth: 300 });
-	assert.deepEqual(resolvePromptEditorLayout(1218, 1), { stacked: false, formWidth: 880 });
+	assert.deepEqual(resolvePromptEditorLayout(1218, 0), { stacked: false, formWidth: 300, dashboardLeft: 318 });
+	assert.deepEqual(resolvePromptEditorLayout(1218, 1), { stacked: false, formWidth: 880, dashboardLeft: 898 });
 	for (const [width, formWidth] of [[638, 300], [639, 301], [640, 302]]) {
-		assert.deepEqual(resolvePromptEditorLayout(width, 1), { stacked: false, formWidth });
-		assert.ok(width - formWidth - 18 >= 320);
+		assert.deepEqual(resolvePromptEditorLayout(width, 1), { stacked: false, formWidth, dashboardLeft: width - 320 });
 	}
 	// Узкое окно остаётся вертикальным, а после расширения та же доля даёт прежнее соотношение.
-	assert.deepEqual(resolvePromptEditorLayout(637, 0.7), { stacked: true, formWidth: 637 });
-	assert.deepEqual(resolvePromptEditorLayout(1518, 0.7), { stacked: false, formWidth: 1050 });
+	assert.deepEqual(resolvePromptEditorLayout(637, 0.7), { stacked: true, formWidth: 637, dashboardLeft: 0 });
+	assert.deepEqual(resolvePromptEditorLayout(1518, 0.7), { stacked: false, formWidth: 1050, dashboardLeft: 1068 });
 	// Отсутствие, сброс и некорректные значения сохраняют автоматический расчёт.
 	for (const ratio of [undefined, null, NaN, Infinity, -0.1, 1.5, '0.5' as unknown as number]) {
 		assert.deepEqual(resolvePromptEditorLayout(1218, ratio), resolvePromptEditorLayout(1218));

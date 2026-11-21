@@ -788,6 +788,15 @@
           "scope": "application",
           "markdownDescription": "Куда сохраняется новая быстрая заметка: `workspace` — в `.vscode/prompt-manager/quick-notes.json` рабочей области, `global` — в `~/.vscode/prompt-manager/quick-notes.json`. Общая настройка интерфейса; передаётся через Settings Sync."
         },
+        "promptManager.dashboardPreferences.quickNotes.newNoteColor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Последний цвет, выбранный в поле добавления виджета «Быстрые заметки»: имя цвета палитры, `#rrggbb` или пустая строка без цвета. Общая настройка интерфейса; передаётся через Settings Sync."
+        },
         "promptManager.dashboardPreferences.quickNotes.search": {
           "type": [
             "string",
@@ -1438,6 +1447,7 @@
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.234",
+    "@happy-dom/global-registrator": "21.0.4",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.11.0",
     "@types/proper-lockfile": "4.1.4",

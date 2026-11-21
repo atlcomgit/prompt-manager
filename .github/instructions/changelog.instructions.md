@@ -1,3 +1,26 @@
+## 000: Выбор области новой заметки
+
+- Дата: 2026-11-21.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: кнопка «Проект» расположена справа от цветов новой заметки.
+- Ключевые моменты: при смене области черновик остаётся раскрытым. После щелчка можно продолжить ввод с прежней позиции.
+- По ревью: предпросмотр закрывается при уходе из webview. «Свой цвет» показывает клавиатурный фокус.
+  DOM-тесты проверяют уход из предпросмотра и сохранение раскрытого черновика с текстом и кареткой при смене области.
+- Файлы:
+    CHANGELOG.md
+    README.md
+    docs/rules/map.md
+    docs/rules/Промпты/Быстрые_заметки_174.md
+    package.json
+    package-lock.json
+    src/webview/editor/components/quickNotes/QuickNotePreview.tsx
+    src/webview/editor/components/quickNotes/QuickNotesWidget.tsx
+    src/webview/editor/components/quickNotes/quickNotesStyles.ts
+    tests/quickNotesComponents.test.tsx
+    tests/quickNotesFocus.test.tsx
+    tests/quickNotesWidgetFixture.ts
+
 ## Без номера: Интерактивный выбор исправлений после ревью
 
 - Дата: 2026-11-20.

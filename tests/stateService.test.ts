@@ -903,6 +903,27 @@ test('StateService applies stale preference patches to the latest global setting
 	assert.deepEqual(first.getPromptDashboardPreferences()?.expanded, { first: false, second: true });
 });
 
+/** Цвет новых заметок переживает новое окно и независимые правки фильтра. */
+test('StateService persists the new note color independently of the note filters', async () => {
+	const configuration = createConfigurationMock();
+	const { StateService } = await importStateService(configuration);
+	const first = new StateService(createStateContext());
+	const base = normalizePromptDashboardPreferences(undefined);
+	const selected = { ...base, quickNotes: { ...base.quickNotes, newNoteColor: 'teal' } };
+	await first.savePromptDashboardPreferences(selected, base);
+	assert.equal(configuration.store.get('dashboardPreferences.quickNotes.newNoteColor'), 'teal');
+
+	const second = new StateService(createStateContext());
+	await second.savePromptDashboardPreferences({ ...base, quickNotes: { ...base.quickNotes, colors: ['red'] } }, base);
+	const restored = second.getPromptDashboardPreferences()!;
+	assert.equal(restored.quickNotes.newNoteColor, 'teal');
+	assert.deepEqual(restored.quickNotes.colors, ['red']);
+
+	await second.savePromptDashboardPreferences({ ...restored, quickNotes: { ...restored.quickNotes, newNoteColor: '' } }, restored);
+	assert.equal(first.getPromptDashboardPreferences()?.quickNotes.newNoteColor, '');
+	assert.deepEqual(first.getPromptDashboardPreferences()?.quickNotes.colors, ['red']);
+});
+
 /** Старый клиент по-прежнему читает строки, а его правка списка сохраняет категории и агента. */
 test('StateService shares quick command strings and preserves categories after an older client edits the list', async () => {
 	const legacyItems = ['/review', '/status'];

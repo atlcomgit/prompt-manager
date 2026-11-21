@@ -46,7 +46,8 @@ type Props = {
 	promptTitle: string;
 	promptTaskNumber: string;
 	selectedProjects?: string[];
-	dockToSecondHalf?: boolean;
+	/** Смещение левого края виджетов от края редактора в пикселях. */
+	dashboardLeft?: number;
 	preferredTrackedBranch?: string;
 	preferredTrackedBranchesByProject?: Record<string, string>;
 	onClose: () => void;
@@ -904,7 +905,7 @@ export const GitOverlay: React.FC<Props> = ({
 	promptTitle,
 	promptTaskNumber,
 	selectedProjects,
-	dockToSecondHalf = false,
+	dashboardLeft = 0,
 	preferredTrackedBranch,
 	preferredTrackedBranchesByProject = {},
 	onClose,
@@ -2105,12 +2106,15 @@ export const GitOverlay: React.FC<Props> = ({
 	return (
 		<div style={styles.backdrop} onClick={onClose}>
 			<div
+				role="dialog"
+				aria-label={t('editor.gitOverlayTitle')}
 				style={{
-					...styles.panelViewport,
-					...(dockToSecondHalf ? styles.panelViewportSecondHalf : null),
+					...styles.dialog,
+					// На широкой панели диалог начинается у виджетов и заканчивается у правого поля редактора.
+					width: `calc(100vw - ${dashboardLeft}px - var(--pm-spacing-lg))`,
 				}}
+				onClick={(event) => event.stopPropagation()}
 			>
-			<div style={styles.dialog} onClick={(event) => event.stopPropagation()}>
 				<div style={styles.header}>
 					<div style={styles.headerInfo}>
 						<h2 style={styles.headerTitle}>{t('editor.gitOverlayTitle')}</h2>
@@ -3191,43 +3195,27 @@ export const GitOverlay: React.FC<Props> = ({
 					</>
 				)}
 			</div>
-			</div>
 		</div>
 	);
 };
 
 const styles: Record<string, CSSProperties> = {
 	backdrop: {
-		position: 'absolute',
-		top: 0,
-		bottom: 0,
-		left: 0,
-		right: 0,
-		width: '100%',
-		maxWidth: '100%',
+		// Привязка к видимой области сохраняет доступ к окну и после прокрутки вертикальной компоновки.
+		position: 'fixed',
+		inset: 0,
 		zIndex: 1000,
 		background: 'rgba(0, 0, 0, 0.38)',
-	},
-	panelViewport: {
-		position: 'absolute',
-		top: 0,
-		bottom: 0,
-		left: 0,
-		width: '840px',
-		maxWidth: '100%',
-		padding: '20px 16px',
+		padding: '20px var(--pm-spacing-lg)',
 		boxSizing: 'border-box',
 		display: 'flex',
 		alignItems: 'center',
-		justifyContent: 'center',
-	},
-	panelViewportSecondHalf: {
-		left: '840px',
-		width: 'calc(100% - 840px)',
-		maxWidth: 'calc(100% - 840px)',
+		justifyContent: 'flex-end',
 	},
 	dialog: {
-		width: 'min(1040px, 100%)',
+		// Минимум для таблицы ограничен местом между боковыми полями, когда окно расширяется влево.
+		minWidth: 'min(800px, 100%)',
+		maxWidth: '100%',
 		height: 'min(92vh, 100%)',
 		background: 'var(--vscode-editor-background)',
 		border: '1px solid var(--vscode-panel-border)',
@@ -4196,6 +4184,8 @@ const styles: Record<string, CSSProperties> = {
 	},
 	dialogFooterActions: {
 		display: 'flex',
+		// При узком редакторе обе кнопки запуска чата остаются внутри боковых полей.
+		flexWrap: 'wrap',
 		gap: '8px',
 		alignItems: 'center',
 		justifyContent: 'flex-end',

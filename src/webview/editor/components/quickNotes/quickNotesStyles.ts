@@ -41,17 +41,8 @@ export function resolveQuickNoteColorLabel(colorKey: string): string {
 		: `Свой цвет ${colorKey}`;
 }
 
-/** Общий CSS быстрых заметок; подключается одним элементом style в контейнере секции. */
-export const QUICK_NOTES_CSS = `
-/* Розовый и бирюзовый не входят в цвета диаграмм VS Code: свои значения для тёмной и светлой темы. */
-:root { --pm-qn-pink: #e06c9f; --pm-qn-teal: #4ec9b0; }
-body.vscode-light, body.vscode-high-contrast-light { --pm-qn-pink: #c2185b; --pm-qn-teal: #16825d; }
-.pm-qn-scope ::selection, .pm-qn-scope::selection { background: var(--vscode-editor-selectionBackground); }
-.pm-qn-scope button { font-family: inherit; }
-.pm-qn-scope button:focus-visible, .pm-qn-scope [tabindex]:focus-visible, .pm-qn-scope input:focus-visible,
-.pm-qn-scope textarea:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-
-/* Кнопка-значок в стиле кнопок панели виджетов. */
+/** Общие кнопки и счётчики заголовков нужны и при скрытом виджете заметок. */
+export const QUICK_WIDGET_ACTIONS_CSS = `
 .pm-qn-icon-btn {
 	display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0;
 	border: none; border-radius: 4px; background: transparent; cursor: pointer; flex-shrink: 0;
@@ -64,6 +55,17 @@ body.vscode-light, body.vscode-high-contrast-light { --pm-qn-pink: #c2185b; --pm
 	background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
 }
 .pm-qn-header-actions { display: inline-flex; align-items: center; gap: 2px; }
+`;
+
+/** Полный набор стилей заметок для панели и отдельной вкладки доски. */
+export const QUICK_NOTES_CSS = `${QUICK_WIDGET_ACTIONS_CSS}
+/* Розовый и бирюзовый не входят в цвета диаграмм VS Code: свои значения для тёмной и светлой темы. */
+:root { --pm-qn-pink: #e06c9f; --pm-qn-teal: #4ec9b0; }
+body.vscode-light, body.vscode-high-contrast-light { --pm-qn-pink: #c2185b; --pm-qn-teal: #16825d; }
+.pm-qn-scope ::selection, .pm-qn-scope::selection { background: var(--vscode-editor-selectionBackground); }
+.pm-qn-scope button { font-family: inherit; }
+.pm-qn-scope button:focus-visible, .pm-qn-scope [tabindex]:focus-visible, .pm-qn-scope input:focus-visible,
+.pm-qn-scope textarea:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 
 /* Тело виджета. */
 .pm-qn { display: flex; flex-direction: column; gap: 8px; }
@@ -134,6 +136,11 @@ body.vscode-light, body.vscode-high-contrast-light { --pm-qn-pink: #c2185b; --pm
 	background: transparent;
 }
 .pm-qn-add:not(.is-expanded) textarea { height: 28px !important; resize: none; }
+/* На узкой карточке образцы цвета переносятся внутри средней колонки, а область остаётся справа. */
+.pm-qn-add-colors {
+	display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px 8px;
+	border-top: 1px solid var(--vscode-panel-border);
+}
 .pm-qn-add-tools {
 	display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px;
 	padding: 5px 7px; border-top: 1px solid var(--vscode-panel-border);
@@ -166,13 +173,13 @@ body.vscode-light, body.vscode-high-contrast-light { --pm-qn-pink: #c2185b; --pm
 .pm-qn-list { display: flex; flex-direction: column; margin: 0 -4px; }
 .pm-qn-row {
 	position: relative; display: flex; align-items: center; gap: 4px; height: 28px; padding: 0 4px 0 7px;
-	border-radius: 4px; min-width: 0;
+	border-radius: 4px; min-width: 0; cursor: pointer;
 }
 .pm-qn-row::before {
 	content: ""; position: absolute; left: 1px; top: 5px; bottom: 5px; width: 3px; border-radius: 2px;
 	background: var(--pm-qn-note, transparent);
 }
-.pm-qn-row:hover, .pm-qn-row:focus-within { background: var(--vscode-list-hoverBackground); }
+.pm-qn-row:hover, .pm-qn-row:focus-within, .pm-qn-row[aria-controls] { background: var(--vscode-list-hoverBackground); }
 .pm-qn-row.is-selected {
 	background: var(--vscode-list-activeSelectionBackground);
 	color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
@@ -192,9 +199,37 @@ body.vscode-light, body.vscode-high-contrast-light { --pm-qn-pink: #c2185b; --pm
 .pm-qn-check.is-large { width: 18px; height: 18px; }
 .pm-qn-title {
 	flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 4px;
-	font-size: 13px; cursor: default;
+	font-size: 13px;
 }
 .pm-qn-row.is-done .pm-qn-title { color: var(--vscode-descriptionForeground); text-decoration: line-through; }
+
+/* Предпросмотр использует цвета подсказок VS Code и прокручивает длинную заметку внутри карточки. */
+.pm-qn-preview {
+	position: fixed; z-index: 1000; box-sizing: border-box; width: min(420px, calc(100vw - 16px));
+	overflow: auto; overscroll-behavior: contain; padding: 10px 12px; border-radius: 7px;
+	border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border));
+	border-inline-start: 3px solid var(--pm-qn-note, var(--vscode-editorHoverWidget-border, var(--vscode-panel-border)));
+	background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background));
+	color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+	box-shadow: 0 6px 22px var(--vscode-widget-shadow, rgba(0,0,0,.35));
+	font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; user-select: text;
+}
+.pm-qn-preview-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.pm-qn-preview-header h2 { min-width: 0; margin: 0; font-size: 14px; font-weight: 600; }
+.pm-qn-preview-description { margin-top: 6px; white-space: pre-wrap; }
+.pm-qn-preview-section { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--vscode-panel-border); }
+.pm-qn-preview-section h3 {
+	display: flex; align-items: center; gap: 5px; margin: 0;
+	font-size: 11px; font-weight: 600; color: var(--vscode-descriptionForeground);
+}
+.pm-qn-preview-section ul { list-style: none; padding: 0; margin: 4px 0 0; }
+.pm-qn-preview-section li { display: flex; align-items: baseline; gap: 6px; white-space: pre-wrap; }
+.pm-qn-preview-section li + li { margin-top: 3px; }
+.pm-qn-preview-section li.is-done { color: var(--vscode-descriptionForeground); text-decoration: line-through; }
+.pm-qn-preview-check {
+	flex: none; display: inline-grid; place-items: center; width: 12px; height: 12px; align-self: flex-start;
+	box-sizing: border-box; margin-top: 4px; border: 1px solid currentColor; border-radius: 3px;
+}
 .pm-qn-meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 11px; color: var(--vscode-descriptionForeground); }
 .pm-qn-meta-item { display: inline-flex; align-items: center; gap: 2px; }
 .pm-qn-meta-item.is-link { color: var(--vscode-textLink-foreground); }
@@ -302,6 +337,8 @@ body.vscode-light .pm-qn-overlay { background: rgba(0, 0, 0, 0.25); }
 .pm-qn-swatch.is-none { background: transparent; border: 1px dashed var(--vscode-descriptionForeground); }
 .pm-qn-swatch.is-custom { background: conic-gradient(#f14c4c, #cca700, #89d185, #3794ff, #b180d7, #f14c4c); overflow: hidden; }
 .pm-qn-swatch.is-custom input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+/* Клавиатурный фокус прозрачного поля показываем на видимом образце, снаружи кольца выбранного цвета. */
+.pm-qn-swatch.is-custom:has(input:focus-visible) { outline: 2px solid var(--vscode-focusBorder); outline-offset: 4px; }
 .pm-qn-swatch[aria-pressed="true"], .pm-qn-swatch.is-selected {
 	box-shadow: 0 0 0 2px var(--vscode-editor-background), 0 0 0 3.5px var(--vscode-foreground);
 }

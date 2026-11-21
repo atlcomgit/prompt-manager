@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { DashboardQuickNotesWidgetState } from '../src/types/promptDashboardPreferences.js';
-import type { QuickNoteScope, QuickNotesState, QuickNoteView } from '../src/types/quickNotes.js';
+import type { QuickNoteScope, QuickNoteView } from '../src/types/quickNotes.js';
 import { QuickNoteModal, parseQuickNoteDroppedUris, type QuickNoteModalClient } from '../src/webview/editor/components/quickNotes/QuickNoteModal.js';
 import { QuickNotesBoard, splitQuickNoteBoardInput } from '../src/webview/editor/components/quickNotes/QuickNotesBoard.js';
 import {
@@ -14,6 +13,7 @@ import {
 } from '../src/webview/editor/components/quickNotes/QuickNotesWidget.js';
 import { resolveEffectiveQuickNotesState } from '../src/webview/editor/components/quickNotes/useQuickNotesClient.js';
 import { QuickNotesBoardApp } from '../src/webview/quickNotes/QuickNotesBoardApp.js';
+import { createState, widgetDefaults } from './quickNotesWidgetFixture.js';
 
 /** Заметка с заполненными обязательными полями. */
 function note(id: string, patch: Partial<QuickNoteView> = {}, scope: QuickNoteScope = 'workspace'): QuickNoteView {
@@ -23,50 +23,11 @@ function note(id: string, patch: Partial<QuickNoteView> = {}, scope: QuickNoteSc
 	};
 }
 
-/** Состояние обеих областей с заметками. */
-function createState(notes: QuickNoteView[], patch: Partial<QuickNotesState['scopes']> = {}): QuickNotesState {
-	return {
-		scopes: {
-			workspace: { scope: 'workspace', available: true, filePath: '/ws/.vscode/prompt-manager/quick-notes.json' },
-			global: { scope: 'global', available: true, filePath: '/home/u/.vscode/prompt-manager/quick-notes.json' },
-			...patch,
-		},
-		notes,
-	};
-}
-
-/** Вид заметок по умолчанию. */
-const preferences: DashboardQuickNotesWidgetState = {
-	newNoteScope: 'workspace', search: '', colors: [], boardGroupBy: 'none', boardScope: 'all', boardShowDone: false,
-};
+const { preferences } = widgetDefaults;
 
 /** Отрисовывает виджет с заглушками действий. */
 function renderWidget(props: Partial<QuickNotesWidgetProps>): string {
-	const noop = () => undefined;
-	return renderToStaticMarkup(
-		<QuickNotesWidget
-			state={null}
-			preferences={preferences}
-			expanded={{}}
-			newNoteIds={new Set()}
-			onAdd={() => false}
-			onPreferencesChange={noop}
-			onToggleExpanded={noop}
-			onToggleDone={noop}
-			onToggleItem={noop}
-			onOpen={noop}
-			onOpenPrompt={noop}
-			onReorder={noop}
-			onClearDone={noop}
-			onOpenStorageFile={noop}
-			onReload={noop}
-			onPin={noop}
-			onDelete={noop}
-			onDuplicate={noop}
-			onSetColor={noop}
-			{...props}
-		/>,
-	);
+	return renderToStaticMarkup(<QuickNotesWidget {...widgetDefaults} {...props} />);
 }
 
 /** Клиент окна без обращения к расширению. */
@@ -100,9 +61,20 @@ test('QuickNotesWidget stays expanded for note dictation and distinguishes a bus
 	const processing = renderWidget({ state, onStartVoice, voiceInProgress: true });
 	assert.match(processing, /class="pm-qn-add is-expanded"/);
 	assert.match(processing, /class="pm-qn-add-tools"/);
+	assert.match(processing, /aria-label="Цвет новой заметки".*aria-pressed="true"[^>]+aria-label="Без цвета"/);
 	const promptRecording = renderWidget({ state, onStartVoice, voiceBusy: true });
 	assert.doesNotMatch(promptRecording, /class="pm-qn-add is-expanded"/);
+	assert.doesNotMatch(promptRecording, /aria-label="Цвет новой заметки"/);
 	assert.match(promptRecording, /title="Записать и преобразовать речь в текст" disabled=""/);
+});
+
+/** За палитрой с сохранённым цветом идёт область заметки, обе настройки расположены над действиями. */
+test('QuickNotesWidget renders the scope beside the saved color before the add actions', () => {
+	const html = renderWidget({
+		state: createState([]), voiceInProgress: true, preferences: { ...preferences, newNoteColor: '#abc123' },
+	});
+	const options = html.match(/class="pm-qn-add-colors"(.*?)class="pm-qn-add-tools"/s)?.[1] ?? '';
+	assert.match(options, /aria-label="Свой цвет: #abc123, выбран".*aria-label="Область новой заметки: Проект"/s);
 });
 
 /** Строки показывают область, прогресс, описание, файлы, промпт и блок выполненных. */

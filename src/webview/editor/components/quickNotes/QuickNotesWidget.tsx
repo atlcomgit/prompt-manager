@@ -1,8 +1,9 @@
 /**
  * Упрощённый виджет быстрых заметок: добавление, фильтры, компактный список и блок выполненных.
- * Полное управление заметкой — в окне QuickNoteModal; тесты разметки — tests/quickNotesComponents.test.tsx.
+ * Полное управление заметкой — в окне QuickNoteModal.
+ * Разметку и фокус проверяют tests/quickNotesComponents.test.tsx и tests/quickNotesFocus.test.tsx.
  */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { DashboardQuickNotesWidgetState } from '../../../../types/promptDashboardPreferences.js';
 import { QUICK_NOTE_PALETTE_COLORS, type QuickNoteScope, type QuickNotesState, type QuickNoteView } from '../../../../types/quickNotes.js';
@@ -16,7 +17,9 @@ import {
 	splitQuickNotes,
 } from '../../../../utils/quickNotes.js';
 import { EditorSectionDragHandle, SortableEditorSections } from '../SortableEditorSections';
+import { QuickNoteColorPicker } from './QuickNoteColorPicker';
 import { QuickNoteIcon } from './QuickNoteIcon';
+import { QuickNotePreview } from './QuickNotePreview';
 import { resolveQuickNoteColorCss, resolveQuickNoteColorLabel } from './quickNotesStyles';
 
 /** Ключ раскрытия строки заметки в общей карте раскрытий панели. */
@@ -54,7 +57,7 @@ export interface QuickNotesWidgetProps {
 	 * Создаёт заметку. false — заметка не создана (данные ещё не загружены), текст остаётся в поле;
 	 * обещание сообщает итог записи: при неудаче текст возвращается в пустое поле.
 	 */
-	onAdd(title: string, scope: QuickNoteScope, openAfter: boolean): false | Promise<boolean>;
+	onAdd(title: string, scope: QuickNoteScope, openAfter: boolean, color: string): false | Promise<boolean>;
 	onDismissError?(): void;
 	onPreferencesChange(patch: Partial<DashboardQuickNotesWidgetState>): void;
 	onToggleExpanded(key: string): void;
@@ -100,6 +103,11 @@ export function resolveQuickNoteListMove(
 	return null;
 }
 
+/** Кнопки в строке выполняют собственное действие при щелчке. */
+function isQuickNoteRowAction(target: EventTarget): boolean {
+	return target instanceof Element && Boolean(target.closest('button, input, a'));
+}
+
 /** Виджет «Быстрые заметки» в панели «Обзор». */
 export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactElement {
 	const { state, preferences } = props;
@@ -107,6 +115,9 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 	const [addOpen, setAddOpen] = useState(Boolean(props.voiceInProgress));
 	const addExpanded = addOpen || props.voiceInProgress;
 	const [addHeight, setAddHeight] = useState(90);
+	const previewId = useId();
+	const [preview, setPreview] = useState<{ key: string; anchor: HTMLElement } | null>(null);
+	const dismissPreview = useCallback(() => setPreview(null), []);
 	// Ключи включают область. Действия читают актуальные заметки, пока меню открыто.
 	const [selectedKeys, setSelectedKeys] = useState<ReadonlySet<string>>(new Set());
 	const [contextMenu, setContextMenu] = useState<{
@@ -195,6 +206,7 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 	const workspaceAvailable = state?.scopes.workspace.available !== false;
 	// Без открытой папки новая заметка сохраняется глобально независимо от выбора.
 	const newNoteScope: QuickNoteScope = workspaceAvailable ? preferences.newNoteScope : 'global';
+	const { newNoteColor } = preferences;
 	const notes = state?.notes ?? [];
 	const { open, done } = splitQuickNotes(notes);
 	const filter = { search: preferences.search, colors: preferences.colors };
@@ -206,6 +218,10 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 	const errors = state ? (['workspace', 'global'] as const).filter(scope => state.scopes[scope].error) : [];
 	const navigationIds = shownOpen.map(note => note.id);
 	const visibleNotes = doneExpanded ? [...shownOpen, ...shownDone] : shownOpen;
+	const previewNote = preview ? visibleNotes.find(note => buildQuickNoteExpandedKey(note) === preview.key) : undefined;
+	useEffect(() => {
+		if (preview && !previewNote) dismissPreview();
+	}, [dismissPreview, preview, previewNote]);
 	const menuNotes = contextMenu ? visibleNotes.filter(note => contextMenu.keys.has(buildQuickNoteExpandedKey(note))) : [];
 	const primaryNote = menuNotes.find(note => buildQuickNoteExpandedKey(note) === contextMenu?.primaryKey) ?? menuNotes[0];
 	const allPinned = menuNotes.every(note => note.pinned);
@@ -218,13 +234,13 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 	const saveNewNote = (openAfter = false) => {
 		const value = titleRef.current.trim();
 		if (!value || !state) return;
-		const saved = props.onAdd(value, newNoteScope, openAfter);
+		const saved = props.onAdd(value, newNoteScope, openAfter, newNoteColor);
 		if (saved === false) return;
 		const version = ++saveVersionRef.current;
 		const prepared = prepareQuickNoteCreationInput(value);
 		if (hasFilter && !matchesQuickNoteFilter({
 			title: prepared.title, description: prepared.description,
-			items: [], color: '', scope: newNoteScope,
+			items: [], color: newNoteColor, scope: newNoteScope,
 		}, filter)) props.onPreferencesChange({ search: '', colors: [] });
 		setTitle('');
 		void saved.then(ok => {
@@ -292,6 +308,11 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 		const isExpanded = !note.done && progress.total > 0 && props.expanded[expandedKey] === true;
 		const color = resolveQuickNoteColorCss(note.color);
 		const selected = selectedKeys.has(expandedKey);
+		const previewOpen = Boolean(previewNote && preview?.key === expandedKey);
+		const togglePreview = (anchor: HTMLElement) => {
+			setContextMenu(null);
+			setPreview(current => current?.key === expandedKey ? null : { key: expandedKey, anchor });
+		};
 		return (
 			<div key={note.id} data-pm-editor-section={note.id}>
 				<div
@@ -302,29 +323,43 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 					role="group"
 					tabIndex={0}
 					aria-label={selected ? `${note.title}, выделена` : note.title}
+					aria-haspopup="dialog"
+					aria-controls={previewOpen ? previewId : undefined}
+					aria-keyshortcuts="Enter Space"
 					onClickCapture={event => {
 						// Ctrl+ЛКМ выделяет строку и не выполняет действие её кнопки.
 						if (event.ctrlKey || event.metaKey) {
 							event.preventDefault();
 							event.stopPropagation();
+							dismissPreview();
 							event.currentTarget.focus({ preventScroll: true });
 							toggleSelection(expandedKey);
 						} else if (selectedKeys.size > 0) {
 							setSelectedKeys(new Set());
 						}
 					}}
+					onClick={event => {
+						if (isQuickNoteRowAction(event.target)) dismissPreview();
+						else if (event.detail < 2) togglePreview(event.currentTarget);
+					}}
 					onKeyDown={event => {
 						if (event.target !== event.currentTarget || contextMenu) return;
 						if (event.key === ' ' && (event.ctrlKey || event.metaKey)) {
 							event.preventDefault();
 							event.stopPropagation();
+							dismissPreview();
 							toggleSelection(expandedKey);
+						} else if ((event.key === 'Enter' || event.key === ' ') && !event.ctrlKey && !event.metaKey) {
+							event.preventDefault();
+							event.stopPropagation();
+							togglePreview(event.currentTarget);
 						} else if (event.key === 'Escape') {
 							setSelectedKeys(new Set());
 						}
 					}}
 					onContextMenu={event => {
 						event.preventDefault();
+						dismissPreview();
 						if (!selected) setSelectedKeys(new Set());
 						setContextMenu({
 							keys: selected ? selectedKeys : new Set([expandedKey]), primaryKey: expandedKey,
@@ -334,7 +369,8 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 					onDoubleClick={event => {
 						if (event.ctrlKey || event.metaKey) return;
 						// Двойной щелчок по отметке или значку не открывает окно поверх их действия.
-						if (!(event.target instanceof Element) || !event.target.closest('button, input, a')) {
+						if (!isQuickNoteRowAction(event.target)) {
+							dismissPreview();
 							props.onOpen(note, navigationIds);
 						}
 					}}
@@ -351,7 +387,7 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 					>
 						{note.done ? <QuickNoteIcon name="check" size={12} /> : null}
 					</button>
-					<span className="pm-qn-title" title={note.title}>{note.pinned ? "📌 " : ""}{note.title}</span>
+					<span className="pm-qn-title" title={previewOpen ? undefined : note.title}>{note.pinned ? "📌 " : ""}{note.title}</span>
 					<span className="pm-qn-meta">
 						<span className="pm-qn-meta-item" title={resolveQuickNoteScopeLabel(note.scope)}>
 							<QuickNoteIcon name={note.scope === 'global' ? 'globe' : 'folder'} size={13} />
@@ -464,15 +500,18 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 						onKeyDown={handleAddKeyDown}
 					/>
 					{!addExpanded ? microphone : null}
-					{addExpanded ? <div className="pm-qn-add-tools">
-						<button type="button" className="pm-qn-btn is-secondary is-small pm-qn-add-clear"
-							disabled={!title} onClick={clearNewNote}>Очистить</button>
-						<button type="button" className="pm-qn-btn is-secondary is-small"
-							onClick={cancelNewNote}>Отмена</button>
-						{title.trim() ? <button type="button" className="pm-qn-btn is-primary is-small"
-							aria-label="Сохранить новую заметку" onClick={() => saveNewNote()}>
-							<QuickNoteIcon name="check" size={13}/>Сохранить
-						</button> : null}
+					{addExpanded ? <div className="pm-qn-add-colors"
+						onPointerDown={event => {
+							// Webview снимает фокус с нажатых кнопок. Оставляем каретку в черновике при выборе мышью.
+							if (event.button === 0 && event.target instanceof Element && event.target.closest('button')) {
+								event.preventDefault();
+								addEditorRef.current?.querySelector('textarea')?.focus({ preventScroll: true });
+							}
+						}}>
+						<span className="pm-qn-label">Цвет</span>
+						<QuickNoteColorPicker color={newNoteColor} label="Цвет новой заметки" onChange={color => {
+							if (color !== newNoteColor) props.onPreferencesChange({ newNoteColor: color });
+						}} />
 						<button type="button" className="pm-qn-scope-toggle" disabled={!workspaceAvailable}
 							title="Где сохранить заметку"
 							aria-label={'Область новой заметки: ' + resolveQuickNoteScopeLabel(newNoteScope)}
@@ -482,6 +521,16 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 							<QuickNoteIcon name={newNoteScope === 'global' ? 'globe' : 'folder'} size={13}/>
 							{resolveQuickNoteScopeLabel(newNoteScope)}
 						</button>
+					</div> : null}
+					{addExpanded ? <div className="pm-qn-add-tools">
+						<button type="button" className="pm-qn-btn is-secondary is-small pm-qn-add-clear"
+							disabled={!title} onClick={clearNewNote}>Очистить</button>
+						<button type="button" className="pm-qn-btn is-secondary is-small"
+							onClick={cancelNewNote}>Отмена</button>
+						{title.trim() ? <button type="button" className="pm-qn-btn is-primary is-small"
+							aria-label="Сохранить новую заметку" onClick={() => saveNewNote()}>
+							<QuickNoteIcon name="check" size={13}/>Сохранить
+						</button> : null}
 						{microphone}
 					</div> : null}
 				</div>
@@ -596,6 +645,9 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 					) : null}
 				</>
 			)}
+			{preview && previewNote ? (
+				<QuickNotePreview key={preview.key} id={previewId} note={previewNote} anchor={preview.anchor} onDismiss={dismissPreview} />
+			) : null}
 			{contextMenu && primaryNote && typeof document !== 'undefined' ? createPortal(
 				<div className="pm-qn-context-menu" role="menu" ref={element => {
 					contextMenuRef.current = element;

@@ -1,6 +1,7 @@
 import type { DockerContainersStatusFilter, DockerContainersViewMode } from './docker.js';
 import { PROMPT_DASHBOARD_SECTION_KEYS, type PromptDashboardSectionKey } from './promptDashboard.js';
 import { QUICK_NOTE_PALETTE_COLORS, type QuickNoteScope, type QuickNotesBoardGroupBy, type QuickNotesBoardScopeFilter } from './quickNotes.js';
+import { normalizeQuickNoteColor } from '../utils/quickNotes.js';
 
 /** Поле сортировки контейнеров, общее для host и webview. */
 export type DockerContainerSortBy = 'name' | 'status' | 'uptime' | 'cpu' | 'memory';
@@ -29,6 +30,8 @@ export interface DashboardTodosWidgetState {
 export interface DashboardQuickNotesWidgetState {
 	/** Куда сохраняется новая заметка из поля виджета и доски при фильтре «Все». */
 	newNoteScope: QuickNoteScope;
+	/** Последний цвет, выбранный в поле добавления виджета. */
+	newNoteColor: string;
 	/** Поиск и выбранные ключи цветов списка виджета; пустой список — без фильтра. */
 	search: string;
 	colors: string[];
@@ -187,6 +190,7 @@ export function normalizePromptDashboardQuickNotesWidgetState(value: unknown): D
 		: [];
 	return {
 		newNoteScope: input.newNoteScope === 'global' ? 'global' : 'workspace',
+		newNoteColor: normalizeQuickNoteColor(input.newNoteColor),
 		search: typeof input.search === 'string' ? input.search : '',
 		colors,
 		boardGroupBy: input.boardGroupBy === 'color' || input.boardGroupBy === 'scope' ? input.boardGroupBy : 'none',

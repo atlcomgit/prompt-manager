@@ -104,20 +104,19 @@ export function resolvePromptEditorPanelSplitRatio(bounds: PromptEditorFormWidth
 export function resolvePromptEditorLayout(
 	pageWidth: number,
 	panelSplitRatio?: number | null,
-): { stacked: boolean; formWidth: number } {
+): { stacked: boolean; formWidth: number; dashboardLeft: number } {
 	const width = Number.isFinite(pageWidth) ? Math.max(0, pageWidth) : 0;
 	const bounds = resolvePromptEditorFormWidthBounds(width);
 	if (!bounds) {
-		return { stacked: true, formWidth: width };
+		return { stacked: true, formWidth: width, dashboardLeft: 0 };
 	}
 	const ratio = normalizePromptEditorPanelSplitRatio(panelSplitRatio);
-	return {
-		stacked: false,
-		formWidth: ratio === null
-			? Math.min(PROMPT_EDITOR_FORM_MAX_WIDTH_PX, Math.max(PROMPT_EDITOR_FORM_MIN_WIDTH_PX,
-				width - PROMPT_EDITOR_PANELS_GAP_PX - PROMPT_DASHBOARD_PREFERRED_WIDTH_PX))
-			: clampPromptEditorFormWidth(bounds, bounds.available * ratio),
-	};
+	// Левая граница виджетов учитывает всю ширину разделителя. Git Flow выравнивается по этой границе.
+	const formWidth = ratio === null
+		? Math.min(PROMPT_EDITOR_FORM_MAX_WIDTH_PX, Math.max(PROMPT_EDITOR_FORM_MIN_WIDTH_PX,
+			bounds.available - PROMPT_DASHBOARD_PREFERRED_WIDTH_PX))
+		: clampPromptEditorFormWidth(bounds, bounds.available * ratio);
+	return { stacked: false, formWidth, dashboardLeft: formWidth + PROMPT_EDITOR_PANELS_GAP_PX };
 }
 
 /** Keeps both the start and the ending of a long label visible inside narrow dashboard rows. */

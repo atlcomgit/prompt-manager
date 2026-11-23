@@ -6,6 +6,11 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-11-23
+
+#### Fixed
+- About now opens the bundled README on case-sensitive file systems, including Linux Dev Tunnels.
+
 ### 2026-11-22
 
 #### Added

@@ -92,6 +92,18 @@ export class AboutPanelManager {
 		return `About ${this.version}`;
 	}
 
+	/** VSIX содержит readme.md, а рабочая копия расширения — README.md. См. aboutPanelManager.test.ts. */
+	private async readReadme(): Promise<Uint8Array> {
+		try {
+			return await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'readme.md'));
+		} catch (error) {
+			if (!(error instanceof vscode.FileSystemError && error.code === 'FileNotFound')) {
+				throw error;
+			}
+		}
+		return vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.extensionUri, 'README.md'));
+	}
+
 	private async buildHtml(webview: vscode.Webview): Promise<string> {
 		const locale = vscode.env.language || 'en';
 		const labels = getLabels(locale);
@@ -100,8 +112,7 @@ export class AboutPanelManager {
 
 		let contentHtml: string;
 		try {
-			const readmeUri = vscode.Uri.joinPath(this.extensionUri, 'README.md');
-			const bytes = await vscode.workspace.fs.readFile(readmeUri);
+			const bytes = await this.readReadme();
 			const markdown = Buffer.from(bytes).toString('utf8');
 			contentHtml = addExternalLinkTargets(this.markdown.render(markdown));
 		} catch {

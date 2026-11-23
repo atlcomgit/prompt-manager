@@ -350,6 +350,8 @@ Support: Github Copilot Chat, Codex, Kilo Code, OpenCode CLI, and Claude Code (p
 
 ## Quick Start / Быстрый старт
 
+Чтобы открыть это руководство в VS Code, выберите **About** в меню `…` боковой панели Prompt Manager.
+
 1. Install the extension and open Prompt Manager from the Activity Bar. Установите расширение и откройте Prompt Manager на боковой панели.
 2. Turn on `Prompt Manager: AI Enabled` only when you want built-in AI generations, reports, or repository analysis. Включайте `Prompt Manager: AI Enabled` только когда нужны встроенные AI-генерации, отчёты и анализ репозитория.
 3. Create a prompt, then add the brief, projects, branch, files, and AI model. Создайте промпт и заполните контекст задачи.

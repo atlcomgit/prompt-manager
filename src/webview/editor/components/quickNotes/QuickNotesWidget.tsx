@@ -47,6 +47,7 @@ export interface QuickNotesWidgetProps {
 	addInputRef?: React.Ref<HTMLTextAreaElement>;
 	/** Header magnifier controls whether the filter field is visible. */
 	searchOpen?: boolean;
+	searchInputRef?: React.RefObject<HTMLInputElement>;
 	/**
 	 * Текст поля «Новая заметка…», если он хранится у контейнера: так он переживает перестройку панели
 	 * (смену числа колонок или порядка виджетов). Без этих свойств текст хранится в самом виджете.
@@ -125,14 +126,10 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 	} | null>(null);
 	const [copiedKeys, setCopiedKeys] = useState<ReadonlySet<string>>(new Set());
 	const copiedTextRef = useRef('');
-	const searchRef = useRef<HTMLInputElement>(null);
 	const addEditorRef = useRef<HTMLDivElement>(null);
 	// Позднее подтверждение не закрывает поле после отправки следующего черновика.
 	const saveVersionRef = useRef(0);
 	const contextMenuRef = useRef<HTMLDivElement | null>(null);
-	useEffect(() => {
-		if (props.searchOpen) searchRef.current?.focus();
-	}, [props.searchOpen]);
 	useEffect(() => {
 		if (!contextMenu) return;
 		const closeOutside = (event: PointerEvent) => {
@@ -568,7 +565,7 @@ export function QuickNotesWidget(props: QuickNotesWidgetProps): React.ReactEleme
 						<label className="pm-qn-search">
 							<QuickNoteIcon name="search" size={13} />
 							<input
-								ref={searchRef}
+								ref={props.searchInputRef}
 								value={preferences.search}
 								placeholder="Поиск"
 								aria-label="Поиск заметок"

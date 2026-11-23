@@ -1,3 +1,77 @@
+## Без номера: Команда alek-server
+
+- Дата: 2026-11-24.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: команда выполняет задание через SentinelX на перечисленных серверах и показывает результат по каждому.
+- Ключевые моменты: повторные имена одного хоста объединяются. Недоступность одного сервера видна отдельной строкой.
+- Файлы:
+    CHANGELOG.md
+    README.md
+    share/server.instructions.md
+
+## 000: Проекты и редактор Bash
+
+- Дата: 2026-11-24.
+- Автор: 🅰️🅻🅴🅺.
+- Ветка: master.
+- Что сделано: виджет группирует скрипты по проектам. Можно свернуть одну группу или все сразу, искать по пути и названию проекта. Раскрытие групп сохраняется между открытиями «Обзора». В строках видны длительность последнего запуска и постоянные кнопки истории, редактирования и скрытия. Пути выровнены по левому краю. В вертикальной истории полосы сравнивают подтверждённые длительности запусков. Готовый каталог открывается без повторного поиска. В проектах скрыты общие папки, различающиеся пути собраны в подгруппы.
+- Ключевые моменты: список прокручивается вместе с «Обзором». Встроенный редактор Bash поддерживает подсветку, поиск, замену, отмену и переход к строке. Перенос виджета между колонками сохраняет позицию ввода. При закрытии фокус и выделение возвращаются исходному полю, если ввод остаётся в редакторе. В чате и соседних панелях можно продолжать печатать при открытом диалоге. Строка скрипта занимает 28 px. Поле кода использует фон обычного поля. Повторный выбор того же файла сохраняет относительный путь и позволяет закрыть окно без подтверждения. В заметках и командах отмена ввода восстанавливает исходные окончания строк. Во время запуска видны серые индикатор и счётчик, длительность и история окрашены по коду завершения. Редактор сохраняет размер в границах панели, терминал сохраняет выбранную вкладку «Обзора».
+- У файлов самой общей папки есть заголовок, когда в проекте есть скрипты в подпапках. Время показано слева от часов истории.
+- Активная полоса в строке и истории Bash заполняется по длительности предыдущего измеренного запуска. Список быстрых команд прокручивается вместе с «Обзором».
+- Файлы:
+    CHANGELOG.md
+    README.md
+    docs/rules/map.md
+    docs/rules/Промпты/Bash_скрипты_000.md
+    docs/rules/Промпты/Сохранение_и_список_без_номера.md
+    esbuild.webview.mjs
+    package-lock.json
+    package.json
+    src/constants/webview.ts
+    src/extension.ts
+    src/providers/bashScriptsHostController.ts
+    src/providers/editorPanelManager.ts
+    src/services/bashScriptFile.ts
+    src/services/bashScriptsService.ts
+    src/types/bashScripts.ts
+    src/utils/webviewHtml.ts
+    src/webview/editor/components/GitOverlay.tsx
+    src/webview/editor/components/PromptDashboard.tsx
+    src/webview/editor/components/QuickCommandModal.tsx
+    src/webview/editor/components/QuickCommandsWidget.tsx
+    src/webview/editor/components/SortableEditorSections.tsx
+    src/webview/editor/components/TextArea.tsx
+    src/webview/editor/components/bashScripts/BashScriptCodeEditor.tsx
+    src/webview/editor/components/bashScripts/BashScriptEditor.tsx
+    src/webview/editor/components/bashScripts/BashScriptEditorHost.tsx
+    src/webview/editor/components/bashScripts/BashScriptRow.tsx
+    src/webview/editor/components/bashScripts/BashScriptsWidget.tsx
+    src/webview/editor/components/bashScripts/bashScriptCodeEditorStyles.ts
+    src/webview/editor/components/bashScripts/bashScriptCodeMirror.mts
+    src/webview/editor/components/bashScripts/bashScriptsStyles.ts
+    src/webview/editor/components/bashScripts/useBashScripts.ts
+    src/webview/editor/components/quickNotes/QuickNoteModal.tsx
+    src/webview/editor/components/quickNotes/QuickNotePreview.tsx
+    src/webview/editor/components/quickNotes/QuickNotesBoard.tsx
+    src/webview/editor/components/quickNotes/QuickNotesSection.tsx
+    src/webview/editor/components/quickNotes/QuickNotesWidget.tsx
+    src/webview/editor/components/quickNotes/quickNotesFocus.ts
+    src/webview/editor/components/quickNotes/useQuickNotesActions.tsx
+    src/webview/memory/components/KnowledgeGraph.tsx
+    src/webview/quickNotes/QuickNotesBoardApp.tsx
+    src/webview/shared/textareaValue.ts
+    tests/bashScriptEditorSize.test.tsx
+    tests/bashScriptGroups.test.tsx
+    tests/bashScriptTimeline.test.tsx
+    tests/bashScriptsCache.test.ts
+    tests/bashScriptsHostController.test.ts
+    tests/bashScriptsService.test.ts
+    tests/bashScriptsWidget.test.tsx
+    tests/quickNotesFocus.test.tsx
+    tests/stateService.test.ts
+    tests/widgetTextareaUndo.test.tsx
+
 ## 000: Выбор области заметки и шаблоны быстрых команд
 
 - Дата: 2026-11-22.

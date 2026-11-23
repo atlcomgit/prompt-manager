@@ -562,6 +562,12 @@
           "scope": "application",
           "markdownDescription": "Глобальное сворачивание виджета «Быстрые команды» (одна колонка)."
         },
+        "promptManager.dashboardLayouts.singleColumn.collapsed.bashScripts": {
+          "type": ["boolean", "null"],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета «Bash скрипты» в одну колонку."
+        },
         "promptManager.dashboardLayouts.singleColumn.collapsed.quickNotes": {
           "type": [
             "boolean",
@@ -672,6 +678,12 @@
           "default": null,
           "scope": "application",
           "markdownDescription": "Глобальное сворачивание виджета «Быстрые команды» (две колонки)."
+        },
+        "promptManager.dashboardLayouts.twoColumns.collapsed.bashScripts": {
+          "type": ["boolean", "null"],
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Сворачивание виджета «Bash скрипты» в две колонки."
         },
         "promptManager.dashboardLayouts.twoColumns.collapsed.quickNotes": {
           "type": [
@@ -968,7 +980,9 @@
               "dockerContainers",
               "todos",
               "aiAnalysis",
-              "quickNotes"
+              "quickNotes",
+              "quickCommands",
+              "bashScripts"
             ]
           },
           "uniqueItems": true,
@@ -1493,7 +1507,14 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/legacy-modes": "6.5.5",
+    "@codemirror/search": "6.7.2",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
     "@huggingface/transformers": "^4.0.1",
+    "@lezer/highlight": "1.2.5",
     "@vscode/codicons": "^0.0.44",
     "@xterm/headless": "5.5.0",
     "3d-force-graph": "^1.79.1",

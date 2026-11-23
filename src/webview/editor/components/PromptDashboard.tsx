@@ -1,6 +1,9 @@
+import { focusInActiveWebview, rememberWidgetDialogOpener, useWidgetDialogFocusHistory } from './quickNotes/quickNotesFocus';
+import { BashScriptEditorHost } from './bashScripts/BashScriptEditorHost';
 import { DragHandleIcon } from '../../shared/DragHandleIcon.js';
 import { sectionDragStyles } from '../../shared/sectionDragStyles.js';
 import { QuickNotesSection } from './quickNotes/QuickNotesSection';
+import { BashScriptsWidget } from './bashScripts/BashScriptsWidget';
 import { QuickCommandsWidget } from './QuickCommandsWidget';
 import { QuickCommandModal, type QuickCommandEditSession, type QuickCommandPreviewPrompt } from './QuickCommandModal';
 import type { PromptChatTarget } from '../../../types/prompt.js';
@@ -361,7 +364,7 @@ const DockerActionMenu: React.FC<{ items: DockerActionItem[]; label: string }> =
 			? enabledItemIndexes[enabledItemIndexes.length - 1]
 			: enabledItemIndexes[0];
 		focusLastOnOpenRef.current = false;
-		const frameId = window.requestAnimationFrame(() => menuItemRefs.current[targetIndex]?.focus());
+		const frameId = window.requestAnimationFrame(() => focusInActiveWebview(menuItemRefs.current[targetIndex]));
 		return () => window.cancelAnimationFrame(frameId);
 	}, [isOpen]);
 
@@ -824,6 +827,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 }) => {
 	// Состояние быстрых заметок живёт на уровне панели, а не карточки: карточка пересоздаётся при смене числа
 	// колонок и порядка виджетов, а открытое окно, его черновик и текст нового поля не должны пропадать.
+	useWidgetDialogFocusHistory();
 	const [quickNotesAddText, setQuickNotesAddText] = useState('');
 	const [quickNotesVoiceFocusSignal, setQuickNotesVoiceFocusSignal] = useState<number>();
 	useEffect(() => {
@@ -1729,7 +1733,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 
 	/** У заметок и команд собственные действия в общей сворачиваемой шапке. */
 	const renderQuickWidget = (
-		key: 'quickCommands' | 'quickNotes', actions: React.ReactNode, body: React.ReactNode, footer?: React.ReactNode,
+		key: 'quickCommands' | 'quickNotes' | 'bashScripts', actions: React.ReactNode, body: React.ReactNode, footer?: React.ReactNode,
 	) => {
 		const title = PROMPT_DASHBOARD_SECTION_LABELS[key];
 		const collapsed = isPromptDashboardSectionCollapsed(normalizedCollapsedSections, key);
@@ -1762,9 +1766,17 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				pendingTitle={pendingQuickCommandTitle}
 				onTargetChange={target => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, target } })}
 				onItemsChange={items => updatePreferences({ quickCommands: { ...preferencesRef.current.quickCommands, items } })}
-				onEdit={(original, opener) => setQuickCommandEdit({ original, opener })}
+				onEdit={(original, opener) => { rememberWidgetDialogOpener(opener); setQuickCommandEdit({ original, opener }); }}
 				onInsert={(item, target) => onQuickCommandInsert?.(item, target)}
 				onCopy={text => onQuickCommandCopy?.(text)} />
+		),
+		bashScripts: (
+			<BashScriptsWidget
+				expandedGroups={expanded}
+				onGroupChoicesChange={patch => updatePreferences({ expanded: { ...preferencesRef.current.expanded, ...patch } })}
+				collapsed={isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'bashScripts')}
+				onToggleCollapse={() => toggleSectionCollapse('bashScripts')}
+				renderShell={(actions, body) => renderQuickWidget('bashScripts', actions, body)} />
 		),
 		quickNotes: (
 			<QuickNotesSection
@@ -1820,7 +1832,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			}, []));
 
 	return (
-		<aside
+		<BashScriptEditorHost enabled={!hiddenSections.includes('bashScripts')}><aside
 			ref={railRef}
 			style={{ ...styles.rail, ...(stacked ? styles.railStacked : null) }}
 			data-pm-prompt-dashboard="true"
@@ -1832,7 +1844,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		>
 			<style>{DOCKER_ACTION_MENU_INTERACTION_STYLES}</style>
 			<style>{DASHBOARD_RESPONSIVE_STYLES}</style>
-			<style>{hiddenSections.includes('quickNotes') && !quickCommandEdit ? QUICK_WIDGET_ACTIONS_CSS : QUICK_NOTES_CSS}</style>
+			<style>{hiddenSections.includes('quickNotes') && hiddenSections.includes('bashScripts') && !quickCommandEdit
+				? QUICK_WIDGET_ACTIONS_CSS : QUICK_NOTES_CSS}</style>
 			<div style={styles.toolbar}>
 				<div style={styles.titleRow}>
 					<PromptDashboardMark />
@@ -1884,7 +1897,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				recoverableTexts={preferences.quickCommands.recoverableTexts}
 				migration={quickCommandMigration ?? (initialState.migratedLegacy ? preferences : undefined)}
 				onClose={() => setQuickCommandEdit(null)} />}
-		</aside>
+		</aside></BashScriptEditorHost>
 	);
 };
 
@@ -2089,7 +2102,7 @@ function PromptDashboardWidgetsMenu({ hiddenSections, onChange }: {
 		if (!isOpen) {
 			return;
 		}
-		const frameId = window.requestAnimationFrame(() => itemRefs.current[0]?.focus());
+		const frameId = window.requestAnimationFrame(() => focusInActiveWebview(itemRefs.current[0]));
 		return () => window.cancelAnimationFrame(frameId);
 	}, [isOpen]);
 

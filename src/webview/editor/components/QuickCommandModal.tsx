@@ -11,8 +11,9 @@ import {
 } from '../../../types/promptDashboardPreferences.js';
 import { QUICK_COMMAND_VARIABLES, type QuickCommandTemplateResult } from '../../../utils/quickCommandTemplate.js';
 import { getVsCodeApi } from '../../shared/vscodeApi';
+import { textareaDraft, textareaValue } from '../../shared/textareaValue';
 import { QuickNoteIcon } from './quickNotes/QuickNoteIcon';
-import { trapQuickNotesTabKey, useQuickNotesFocusFallback } from './quickNotes/quickNotesFocus';
+import { focusInActiveWebview, restoreWidgetDialogFocus, trapQuickNotesTabKey, useQuickNotesFocusFallback } from './quickNotes/quickNotesFocus';
 
 /** Исходная строка сохраняет привязку при перестановке команд. Кнопка получает фокус после закрытия. */
 export interface QuickCommandEditSession {
@@ -89,7 +90,7 @@ export function QuickCommandModal({ session, items, prompt, recoverableTexts, mi
 	}, [pending, name]);
 
 	useEffect(() => {
-		titleRef.current?.focus();
+		focusInActiveWebview(titleRef.current);
 		return () => {
 			// Переименование и перенос между колонками заменяют исходную кнопку новым DOM-элементом.
 			const name = savedTitle.current ?? original?.title;
@@ -101,7 +102,7 @@ export function QuickCommandModal({ session, items, prompt, recoverableTexts, mi
 				}
 				const button = target ?? (opener.isConnected ? opener
 					: document.querySelector<HTMLButtonElement>('[aria-label="Добавить быструю команду"]'));
-				button?.focus({ preventScroll: true });
+				restoreWidgetDialogFocus(opener, button ?? null);
 			};
 			restore(0);
 		};
@@ -172,8 +173,8 @@ export function QuickCommandModal({ session, items, prompt, recoverableTexts, mi
 					<datalist id={categoriesId}>{[...new Set(items.map(item => item.category).filter(Boolean))]
 						.map(value => <option key={value} value={value} />)}</datalist>
 					<label>Текст команды
-						<textarea readOnly={Boolean(pending)} className="pm-qn-textarea" ref={textRef} rows={6} value={text} maxLength={DASHBOARD_QUICK_COMMAND_TEXT_LIMIT}
-							onChange={event => { setText(event.target.value); setInsertError(''); }} />
+						<textarea readOnly={Boolean(pending)} className="pm-qn-textarea" ref={textRef} rows={6} value={textareaValue(text)} maxLength={DASHBOARD_QUICK_COMMAND_TEXT_LIMIT}
+							onChange={event => { setText(textareaDraft(event.target.value, original?.text ?? '')); setInsertError(''); }} />
 					</label>
 					<div role="group" aria-label="Вставить переменную" className="pm-quick-command-variables">
 						<span className="pm-qn-label">Вставить переменную</span>

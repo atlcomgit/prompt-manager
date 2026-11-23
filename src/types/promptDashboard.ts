@@ -18,7 +18,8 @@ export type PromptDashboardSectionKey =
 	/** Быстрые заметки получают данные отдельным каналом, а не снимком dashboard. */
 	| 'quickNotes'
 	/** Быстрые команды не требуют обновляемого снимка dashboard. */
-	| 'quickCommands';
+	| 'quickCommands'
+	| 'bashScripts';
 
 /** Persists only sections explicitly collapsed by the user. */
 export type PromptDashboardCollapsedSections = Partial<Record<PromptDashboardSectionKey, boolean>>;
@@ -54,6 +55,7 @@ export const PROMPT_DASHBOARD_SECTION_KEYS: PromptDashboardSectionKey[] = [
 	'aiAnalysis',
 	'quickNotes',
 	'quickCommands',
+	'bashScripts',
 ];
 
 /** Подписи виджетов панели «Обзор» в заголовках карточек и в меню видимости. */
@@ -69,6 +71,7 @@ export const PROMPT_DASHBOARD_SECTION_LABELS: Record<PromptDashboardSectionKey, 
 	aiAnalysis: 'AI review',
 	quickNotes: 'Быстрые заметки',
 	quickCommands: 'Быстрые команды',
+	bashScripts: 'Bash скрипты',
 };
 
 /**
@@ -89,7 +92,7 @@ export function mergePromptDashboardHiddenSections(
 }
 
 /** Секции без данных снимка dashboard: раскрытие и обновление не запрашивают виджеты расширения. */
-export const PROMPT_DASHBOARD_STANDALONE_SECTION_KEYS: PromptDashboardSectionKey[] = ['quickNotes', 'quickCommands'];
+export const PROMPT_DASHBOARD_STANDALONE_SECTION_KEYS: PromptDashboardSectionKey[] = ['quickNotes', 'quickCommands', 'bashScripts'];
 
 /** Project-derived sections share one host payload and only collapse as a group for refresh gating. */
 export const PROMPT_DASHBOARD_PROJECT_SECTION_KEYS: PromptDashboardSectionKey[] = [

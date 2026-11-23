@@ -8,6 +8,7 @@ import {
 } from '../../../types/promptDashboardPreferences.js';
 import { EditorSectionDragHandle, SortableEditorSections } from './SortableEditorSections';
 import { QuickNoteIcon } from './quickNotes/QuickNoteIcon';
+import { focusInActiveWebview } from './quickNotes/quickNotesFocus';
 
 /** Подписи целей сохраняют привычный выбор провайдера и добавляют текущий чат. */
 const TARGET_LABELS: Record<DashboardQuickCommandTarget, string> = {
@@ -48,7 +49,7 @@ export function QuickCommandsWidget({
 	useEffect(() => {
 		if (showSearch && focusSearchOnOpen.current) {
 			focusSearchOnOpen.current = false;
-			searchInput.current?.focus();
+			if (document.hasFocus() && !document.querySelector('[aria-modal="true"]')) searchInput.current?.focus({ preventScroll: true });
 		}
 	}, [showSearch]);
 
@@ -168,7 +169,7 @@ export function QuickCommandsWidget({
 											aria-label="Подтверждение удаления команды">
 											<span>Удалить эту команду?</span>
 											<div className="pm-quick-commands-actions">
-												<button type="button" autoFocus onClick={() => setDeleting(null)}>Отмена</button>
+												<button type="button" ref={focusInActiveWebview} onClick={() => setDeleting(null)}>Отмена</button>
 												<button type="button" className="is-primary" disabled={loading} onClick={() => {
 													onItemsChange(items.filter(command => command.title !== item.title));
 													setDeleting(null);
@@ -223,7 +224,6 @@ const QUICK_COMMANDS_CSS = `
 	outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px;
 }
 @container pm-dashboard-widget (max-width: 359px) { .pm-quick-commands-target-name { display: none; } }
-.pm-quick-commands-list { max-height: 260px; overflow-y: auto; }
 .pm-quick-commands-category, .pm-quick-commands-muted { font-size: 11px; color: var(--vscode-descriptionForeground); }
 .pm-quick-commands-category { margin: 0 0 4px; font-weight: 600; overflow-wrap: anywhere; }
 .pm-quick-commands-row { display: flex; align-items: stretch; border: 1px solid var(--vscode-panel-border); border-radius: 5px; }

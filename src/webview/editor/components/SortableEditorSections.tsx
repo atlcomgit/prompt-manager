@@ -144,7 +144,7 @@ export function SortableEditorSections(props: SortableEditorSectionsProps): Reac
 
 	// Перемещение DOM-узла не должно оставлять клавиатуру вне ручки, которой выполнили перенос.
 	useClientLayoutEffect(() => {
-		if (focusRef.current?.isConnected) {
+		if (focusRef.current?.isConnected && focusRef.current.ownerDocument.hasFocus()) {
 			focusRef.current.focus({ preventScroll: true });
 		}
 		focusRef.current = null;

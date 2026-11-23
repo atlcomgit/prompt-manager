@@ -840,6 +840,7 @@ export const KnowledgeGraph: React.FC<Props> = ({ data, repositories, onRequestG
 		}
 
 		const focusTimer = window.requestAnimationFrame(() => {
+			if (!document.hasFocus()) return;
 			saveViewNameInputRef.current?.focus();
 			saveViewNameInputRef.current?.select();
 		});

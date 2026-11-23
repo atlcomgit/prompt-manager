@@ -2520,7 +2520,7 @@ test('PromptDashboard renders sections in the shared custom order', () => {
 test('PromptDashboard preserves empty columns and accepts pointer and native drops into them', () => {
 	const sections: PromptDashboardSectionKey[] = [
 		'status', 'projectBranches', 'parallelBranches', 'dockerContainers', 'aiAnalysis',
-		'activity', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes', 'quickCommands',
+		'activity', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes', 'quickCommands', 'bashScripts',
 	];
 	for (const emptyIndex of [0, 1]) {
 		const order: PromptDashboardSectionOrder = emptyIndex === 0 ? [[], sections] : [sections, []];
@@ -2562,7 +2562,7 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 		),
 		[
 			['projectBranches', 'status', 'parallelBranches', 'dockerContainers', 'aiAnalysis', 'quickCommands'],
-			['activity', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes'],
+			['activity', 'reviewRequests', 'projectCommits', 'todos', 'quickNotes', 'bashScripts'],
 		],
 	);
 
@@ -2578,7 +2578,7 @@ test('reorderPromptDashboardSections moves a dragged section around the target a
 		),
 		[
 			['status', 'projectBranches', 'parallelBranches', 'aiAnalysis', 'dockerContainers', 'quickCommands'],
-			['projectCommits', 'activity', 'reviewRequests', 'todos', 'quickNotes'],
+			['projectCommits', 'activity', 'reviewRequests', 'todos', 'quickNotes', 'bashScripts'],
 		],
 	);
 });

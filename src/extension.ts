@@ -51,6 +51,7 @@ import { clearPromptAiLogIfDateChanged } from './utils/promptAiLogger.js';
 import type { ExternalPromptConfigChange } from './services/storageService.js';
 import { QuickNotesService } from './services/quickNotesService.js';
 import { QuickNotesHostController } from './providers/quickNotesHostController.js';
+import { BashScriptsHostController } from './providers/bashScriptsHostController.js';
 import { QuickNotesBoardPanelManager } from './providers/quickNotesBoardPanelManager.js';
 import { StartupExtensions } from './services/startupExtensions.js';
 import * as fs from 'fs';
@@ -579,7 +580,7 @@ export function activate(context: vscode.ExtensionContext) {
 		aiService,
 		storageService,
 		stateService,
-		getChannels: () => [...editorPanelManager.getQuickNotesChannels(), ...quickNotesBoardPanelManager.getChannels()],
+		getChannels: () => [...editorPanelManager.getEditorChannels(), ...quickNotesBoardPanelManager.getChannels()],
 		createPrompt: (content, options) => editorPanelManager.createQuickAddPrompt(content, options),
 		openPrompt: target => openPromptOutsideSidebar(target),
 		openBoard: () => quickNotesBoardPanelManager.show(),
@@ -592,6 +593,13 @@ export function activate(context: vscode.ExtensionContext) {
 		});
 	}));
 	editorPanelManager.setQuickNotesController(quickNotesController);
+	const bashScripts = new BashScriptsHostController(quickNotesGlobalDir, storageService.getStorageDirectoryPath(), () => {
+		for (const channel of editorPanelManager.getEditorChannels()) {
+			void channel.post({ type: 'bashScriptsChanged' }).catch(error => appendPromptManagerLog(String(error)));
+		}
+	}, () => gitService.getBuiltInGitApi(), context.workspaceState);
+	editorPanelManager.setBashScriptsController(bashScripts);
+	context.subscriptions.push(bashScripts);
 	quickNotesBoardPanelManager.setController(quickNotesController);
 	context.subscriptions.push(quickNotesController, quickNotesBoardPanelManager);
 

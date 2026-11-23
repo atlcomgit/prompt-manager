@@ -30,10 +30,11 @@ import {
 	getContextFileTileLabel,
 } from '../../../../utils/contextFiles.js';
 import { readClipboardImagePayloads } from '../../../shared/clipboardImages';
+import { textareaDraft, textareaValue } from '../../../shared/textareaValue';
 import { EditorSectionDragHandle, SortableEditorSections } from '../SortableEditorSections';
 import { QuickNoteColorPicker } from './QuickNoteColorPicker';
 import { QuickNoteIcon } from './QuickNoteIcon';
-import { trapQuickNotesTabKey, useQuickNotesFocusFallback } from './quickNotesFocus';
+import { focusInActiveWebview, trapQuickNotesTabKey, useQuickNotesFocusFallback } from './quickNotesFocus';
 import type { QuickNotesClient } from './useQuickNotesClient';
 import { resolveQuickNoteScopeLabel } from './QuickNotesWidget';
 
@@ -139,7 +140,7 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 	// Первый фокус только при открытии: название или описание новой заметки, открытой сочетанием Ctrl+Enter.
 	useEffect(() => {
 		const target = props.initialFocus === 'description' ? descriptionRef.current : titleRef.current;
-		target?.focus();
+		focusInActiveWebview(target);
 	}, []);
 
 	// Ширина/высота поля не относятся к конкретной заметке: сохраняем размер через общие application preferences.
@@ -214,14 +215,14 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 		}
 		const active = document.activeElement;
 		if (!active || active === document.body || active === rootRef.current || suggestionBoxRef.current?.contains(active)) {
-			suggestionInputRef.current?.focus();
+			focusInActiveWebview(suggestionInputRef.current);
 		}
 	}, [suggestion?.status]);
 
 	// Фокус на новый пункт после Enter в тексте пункта.
 	useEffect(() => {
 		if (focusItemId) {
-			itemRefs.current.get(focusItemId)?.focus();
+			focusInActiveWebview(itemRefs.current.get(focusItemId));
 			setFocusItemId(null);
 		}
 	}, [focusItemId]);
@@ -784,10 +785,10 @@ export function QuickNoteModal(props: QuickNoteModalProps): React.ReactElement {
 							ref={descriptionRef}
 							className="pm-qn-textarea"
 							style={client.descriptionHeight ? { height: client.descriptionHeight } : undefined}
-							value={draft.description}
+							value={textareaValue(draft.description)}
 							placeholder="Подробности, ссылки, идеи…"
 							aria-label="Описание заметки"
-							onChange={event => patchDraft({ description: event.target.value })}
+							onChange={event => patchDraft({ description: textareaDraft(event.target.value, original.description) })}
 						/>
 					</div>
 					<div className="pm-qn-block">

@@ -142,12 +142,13 @@ export function getWebviewHtml(
       let pointerPressedButton = null;
 
       const blurIfInactiveButtonFocused = () => {
+        if (!document.hasFocus()) return;
         const activeElement = document.activeElement;
         if (!(activeElement instanceof HTMLButtonElement)) {
           return;
         }
 
-        if (activeElement.disabled || activeElement.getAttribute('aria-disabled') === 'true') {
+        if (!activeElement.closest('[aria-modal="true"]') && (activeElement.disabled || activeElement.getAttribute('aria-disabled') === 'true')) {
           activeElement.blur();
         }
       };
@@ -173,12 +174,10 @@ export function getWebviewHtml(
         pointerPressedButton = null;
 
         window.requestAnimationFrame(() => {
-          buttonToBlur.blur();
-          if (document.activeElement instanceof HTMLElement && document.activeElement.tagName === 'BUTTON') {
-            document.activeElement.blur();
+          // A later click, dialog opener or keyboard action may already own focus.
+          if (document.hasFocus() && document.activeElement === buttonToBlur && !document.querySelector('[aria-modal="true"]')) {
+            buttonToBlur.blur();
           }
-
-          blurIfInactiveButtonFocused();
         });
       }, true);
 

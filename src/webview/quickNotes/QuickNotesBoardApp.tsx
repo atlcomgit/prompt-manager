@@ -1,3 +1,4 @@
+import { useWidgetDialogFocusHistory } from '../editor/components/quickNotes/quickNotesFocus';
 /**
  * Страница доски быстрых заметок (отдельная вкладка редактора): клиент заметок, настройки вида и окно заметки.
  * Данные и настройки общие с виджетом панели «Обзор»: расширение рассылает изменения всем открытым страницам.
@@ -57,6 +58,7 @@ function useQuickNotesPreferences(): [DashboardQuickNotesWidgetState, (patch: Pa
 
 /** Страница доски заметок. */
 export function QuickNotesBoardApp(): React.ReactElement {
+	useWidgetDialogFocusHistory();
 	const client = useQuickNotesClient();
 	const actions = useQuickNotesActions(client);
 	const [preferences, changePreferences] = useQuickNotesPreferences();

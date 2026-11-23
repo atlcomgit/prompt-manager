@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import type { QuickNoteView } from '../../../../types/quickNotes.js';
 import { getQuickNoteChecklistProgress } from '../../../../utils/quickNotes.js';
 import { QuickNoteIcon } from './QuickNoteIcon';
+import { focusInActiveWebview } from './quickNotesFocus';
 import { resolveQuickNoteColorCss } from './quickNotesStyles';
 
 /** Содержимое заметки для чтения рядом со строкой списка. */
@@ -42,7 +43,7 @@ export function QuickNotePreview({ id, note, anchor, onDismiss }: {
 	});
 
 	// Фокус позволяет сразу читать и прокручивать карточку с клавиатуры.
-	useLayoutEffect(() => cardRef.current?.focus({ preventScroll: true }), []);
+	useLayoutEffect(() => focusInActiveWebview(cardRef.current), []);
 
 	/** Возвращает фокус в список при явном закрытии карточки. */
 	const closePreview = () => {

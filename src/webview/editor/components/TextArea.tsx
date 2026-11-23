@@ -440,7 +440,7 @@ export const TextArea: React.FC<Props> = ({
   }, [requestSuggestionSignal, onRequestSuggestion, value]);
 
   useEffect(() => {
-    if (!focusSignal || !textareaRef.current) {
+    if (!focusSignal || !textareaRef.current || !document.hasFocus()) {
       return;
     }
     textareaRef.current.focus();

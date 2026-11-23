@@ -1,3 +1,4 @@
+import { rememberWidgetDialogOpener, restoreWidgetDialogFocus } from './quickNotesFocus';
 /**
  * Общие действия быстрых заметок для виджета редактора и страницы доски: создание, отметки, перенос,
  * показ ошибок операций и окно заметки. Окно выводится порталом в body.
@@ -127,6 +128,7 @@ export function useQuickNotesActions(client: QuickNotesClient): QuickNotesAction
 
 	const openModal = useCallback<QuickNotesActions['openModal']>((note, navigationIds, initialFocus = 'title') => {
 		modalOpenerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		rememberWidgetDialogOpener(modalOpenerRef.current);
 		setModal({ id: note.id, navigationIds, initialFocus });
 	}, []);
 
@@ -135,9 +137,13 @@ export function useQuickNotesActions(client: QuickNotesClient): QuickNotesAction
 		const opener = modalOpenerRef.current;
 		modalOpenerRef.current = null;
 		requestAnimationFrame(() => {
-			if (opener?.isConnected) {
-				opener.focus();
+			let fallback = opener;
+			if (opener && !opener.isConnected) {
+				const row = opener.closest<HTMLElement>('[data-pm-quick-note], [data-qn-sticky]');
+				const id = row?.dataset.pmQuickNote || row?.dataset.qnSticky;
+				if (id) fallback = document.querySelector<HTMLElement>(`[data-pm-quick-note="${CSS.escape(id)}"], [data-qn-sticky="${CSS.escape(id)}"]`);
 			}
+			restoreWidgetDialogFocus(opener, fallback);
 		});
 	}, []);
 

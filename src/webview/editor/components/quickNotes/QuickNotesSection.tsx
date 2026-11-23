@@ -47,6 +47,14 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 	}, [hasFilter]);
 	const lastVoiceFocusSignal = useRef(props.voiceFocusSignal);
 	const focusAddRef = useRef(false);
+	const searchInputRef = useRef<HTMLInputElement>(null);
+	const focusSearchRef = useRef(false);
+	useEffect(() => {
+		if (focusSearchRef.current && searchOpen && !props.collapsed) {
+			focusSearchRef.current = false;
+			if (document.hasFocus() && !document.querySelector('[aria-modal="true"]')) searchInputRef.current?.focus({ preventScroll: true });
+		}
+	}, [searchOpen, props.collapsed]);
 	const previousNotesRef = useRef<QuickNoteView[] | null>(null);
 	const expandedRef = useRef(props.expanded);
 	expandedRef.current = props.expanded;
@@ -58,7 +66,7 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 	useEffect(() => {
 		if (focusAddRef.current && !props.collapsed) {
 			focusAddRef.current = false;
-			addInputRef.current?.focus();
+			if (document.hasFocus() && !document.querySelector('[aria-modal="true"]')) addInputRef.current?.focus({ preventScroll: true });
 		}
 	}, [props.collapsed]);
 
@@ -66,7 +74,8 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 	useEffect(() => {
 		if (props.voiceBusy || props.voiceFocusSignal === lastVoiceFocusSignal.current || !addInputRef.current) return;
 		lastVoiceFocusSignal.current = props.voiceFocusSignal;
-		addInputRef.current.focus();
+		if (!document.hasFocus() || document.querySelector('[aria-modal="true"]')) return;
+		addInputRef.current.focus({ preventScroll: true });
 		addInputRef.current.setSelectionRange(props.addText.length, props.addText.length);
 	}, [props.addText, props.collapsed, props.voiceBusy, props.voiceFocusSignal]);
 
@@ -107,6 +116,7 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 				onClick={event => {
 					event.stopPropagation();
 					if (props.collapsed) props.onToggleCollapse();
+					focusSearchRef.current = props.collapsed || !searchOpen;
 					setSearchOpen(open => props.collapsed || !open);
 				}}>
 				<QuickNoteIcon name="search" size={15}/>
@@ -152,6 +162,7 @@ export function QuickNotesSection(props: QuickNotesSectionProps): React.ReactEle
 			error={actions.error}
 			addInputRef={addInputRef}
 			searchOpen={searchOpen}
+			searchInputRef={searchInputRef}
 			onStartVoice={props.onStartVoice}
 			voiceBusy={props.voiceBusy}
 			voiceInProgress={props.voiceInProgress}

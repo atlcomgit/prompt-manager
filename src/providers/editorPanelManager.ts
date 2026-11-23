@@ -169,6 +169,7 @@ import {
 	normalizeContextFileReference,
 } from '../utils/contextFiles.js';
 import type { QuickNotesChannel, QuickNotesHostController } from './quickNotesHostController.js';
+import type { BashScriptsHostController } from './bashScriptsHostController.js';
 import { buildQuickNoteStoredName } from '../utils/quickNotes.js';
 
 /** Tracks open editor panels */
@@ -420,6 +421,7 @@ export class EditorPanelManager {
 	private contentSyncDisposables: vscode.Disposable[] = [];
 	/** Контроллер быстрых заметок; null, пока расширение его не подключило. */
 	private quickNotesController: QuickNotesHostController | null = null;
+	private bashScriptsController?: BashScriptsHostController;
 	private gitOverlaySessions = new Map<string, GitOverlaySession>();
 	/** Стабильный postMessage callback панели: async Git overlay шаги сопоставляются с сессией по ссылке на него. */
 	private panelPostMessageCallbacks = new WeakMap<vscode.WebviewPanel, (message: ExtensionToWebviewMessage) => Promise<void>>();
@@ -5221,8 +5223,12 @@ export class EditorPanelManager {
 		this.quickNotesController = controller;
 	}
 
-	/** Каналы открытых панелей редактора для рассылки состояния и настроек быстрых заметок. */
-	getQuickNotesChannels(): QuickNotesChannel[] {
+	setBashScriptsController(controller: BashScriptsHostController): void {
+		this.bashScriptsController = controller;
+	}
+
+	/** Каналы открытых редакторов для обновлений самостоятельных виджетов. */
+	getEditorChannels(): QuickNotesChannel[] {
 		return [...new Set(openPanels.values())].map(panel => ({
 			webview: panel.webview,
 			post: this.resolvePanelPostMessageCallback(panel),
@@ -13002,6 +13008,9 @@ export class EditorPanelManager {
 				break;
 			}
 
+			case 'bashScriptsRequest':
+				await this.bashScriptsController?.handleMessage(msg, postMessage, panel);
+				break;
 			case 'quickNotesRequestState':
 			case 'quickNotesApply':
 			case 'quickNotesAttach':

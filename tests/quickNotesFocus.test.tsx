@@ -88,3 +88,90 @@ test('QuickNotePreview dismisses on window blur and stays open for focus inside 
 	flushSync(() => window.dispatchEvent(new Event('blur')));
 	assert.ok(!document.querySelector('.pm-qn-preview'), 'предпросмотр должен закрыться при выходе из webview');
 });
+
+/** У браузера pointerdown переводит фокус до click. Сохраняем выделение до этого перевода. */
+test('widget editors return the original selection, respect new focus and can restore a remounted field', async t => {
+	const { GlobalRegistrator } = await import('@happy-dom/global-registrator');
+	GlobalRegistrator.register();
+	const { createRoot } = await import('react-dom/client');
+	const { flushSync } = await import('react-dom');
+	const { rememberWidgetDialogOpener, restoreWidgetDialogFocus, useWidgetDialogFocusHistory } =
+		await import('../src/webview/editor/components/quickNotes/quickNotesFocus.js');
+	function Page() { useWidgetDialogFocusHistory(); return <><textarea name="previous" defaultValue="workspace" /><button>Редактировать</button><input name="other" /></>; }
+	const container = document.body.appendChild(document.createElement('div'));
+	const root = createRoot(container);
+	flushSync(() => root.render(<Page />));
+	t.after(async () => { root.unmount(); await GlobalRegistrator.unregister(); });
+	const trigger = container.querySelector('button')!;
+	const original = container.querySelector('textarea')!;
+	const other = container.querySelector('input')!;
+	const capture = () => {
+		original.focus();
+		original.setSelectionRange(3, 7, 'backward');
+		trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+		trigger.focus();
+		rememberWidgetDialogOpener(trigger);
+	};
+	capture();
+	original.setSelectionRange(0, 0);
+	assert.equal(restoreWidgetDialogFocus(trigger), true);
+	assert.equal(document.activeElement, original);
+	assert.deepEqual([original.selectionStart, original.selectionEnd, original.selectionDirection], [3, 7, 'backward']);
+	capture();
+	other.focus();
+	assert.equal(restoreWidgetDialogFocus(trigger), false);
+	assert.equal(document.activeElement, other);
+	const dialog = document.body.appendChild(document.createElement('div'));
+	dialog.setAttribute('aria-modal', 'true');
+	dialog.tabIndex = -1;
+	dialog.focus();
+	assert.equal(restoreWidgetDialogFocus(trigger), false);
+	assert.equal(document.activeElement, dialog);
+	dialog.remove();
+	const replacement = original.cloneNode(true) as HTMLTextAreaElement;
+	original.replaceWith(replacement);
+	assert.equal(restoreWidgetDialogFocus(trigger), true);
+	assert.equal(document.activeElement, replacement);
+	assert.deepEqual([replacement.selectionStart, replacement.selectionEnd, replacement.selectionDirection], [3, 7, 'backward']);
+	replacement.replaceWith(original);
+});
+
+test('dialog updates recover a removed local control and leave the keyboard in another VS Code pane', async t => {
+	const { GlobalRegistrator } = await import('@happy-dom/global-registrator');
+	GlobalRegistrator.register();
+	const { createRoot } = await import('react-dom/client');
+	const { flushSync } = await import('react-dom');
+	const { focusInActiveWebview, restoreWidgetDialogFocus, useQuickNotesFocusFallback } =
+		await import('../src/webview/editor/components/quickNotes/quickNotesFocus.js');
+	const container = document.body.appendChild(document.createElement('div'));
+	const opener = document.body.appendChild(document.createElement('button'));
+	const root = createRoot(container);
+	t.after(async () => { root.unmount(); await GlobalRegistrator.unregister(); });
+	function Dialog({ showButton }: { showButton: boolean }) {
+		const panel = React.useRef<HTMLDivElement>(null);
+		useQuickNotesFocusFallback(panel);
+		return <div ref={panel} tabIndex={-1}><input />{showButton && <button>Сохранить</button>}</div>;
+	}
+	const render = (showButton: boolean) => flushSync(() => root.render(<Dialog showButton={showButton} />));
+	render(true);
+	const field = container.querySelector('input')!;
+	field.focus();
+	container.querySelector('button')!.focus();
+	render(false);
+	assert.equal(document.activeElement, field);
+
+	// Chromium may expose body as activeElement after an adjacent iframe takes focus.
+	const fieldFocus = t.mock.method(field, 'focus');
+	const panelFocus = t.mock.method(container.firstElementChild as HTMLElement, 'focus');
+	const hasFocus = t.mock.method(document, 'hasFocus', () => false);
+	field.blur();
+	window.dispatchEvent(new Event('blur'));
+	render(true);
+	render(false);
+	focusInActiveWebview(field);
+	assert.equal(restoreWidgetDialogFocus(opener), false);
+	hasFocus.mock.restore();
+	render(true);
+	assert.equal(panelFocus.mock.callCount(), 0);
+	assert.equal(fieldFocus.mock.callCount(), 0);
+});

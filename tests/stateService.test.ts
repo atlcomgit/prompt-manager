@@ -417,7 +417,7 @@ test('StateService serializes global dashboard order writes independently of the
 	]);
 	assert.deepEqual(service.getPromptDashboardSectionOrder(), [
 		['projectBranches', 'activity', 'parallelBranches', 'dockerContainers', 'quickCommands'],
-		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis', 'todos', 'quickNotes'],
+		['status', 'reviewRequests', 'projectCommits', 'aiAnalysis', 'todos', 'quickNotes', 'bashScripts'],
 	]);
 	assert.deepEqual(service.getPromptDashboardSectionOrder('single-column'), narrowBefore);
 	assert.equal(configuration.writes.filter(write => write.key === 'dashboardLayouts.twoColumns.order').length, 2);
@@ -762,13 +762,14 @@ test('StateService restores preferences without sharing mutable values and prese
 		docker: { viewMode: 'table', statusFilter: 'stopped', search: 'api', sortBy: 'cpu',
 			expandedContainerIds: ['compose:api'] },
 		todos: { selectedFileTypes: [' TS '], search: 'FIXME' },
-		expanded: { 'project:api': false }, showAllBranchProjects: true,
+		expanded: { 'project:api': false, 'bashScripts:123abc': false, 'bashScripts:456def': true }, showAllBranchProjects: true,
 	});
 	const expected = structuredClone(state);
 	await service.savePromptDashboardPreferences(state);
 	state.docker.search = 'changed input';
 	service.getPromptDashboardPreferences()!.todos.selectedFileTypes.push('php');
 	assert.deepEqual(service.getPromptDashboardPreferences(), expected);
+	assert.deepEqual(new StateService(createStateContext()).getPromptDashboardPreferences()?.expanded, expected.expanded);
 	assert.equal(workspaceState.store.size, 0);
 	await service.savePromptDashboardPreferences(normalizePromptDashboardPreferences({ expanded: {} }));
 	assert.deepEqual(service.getPromptDashboardPreferences()?.expanded, {});

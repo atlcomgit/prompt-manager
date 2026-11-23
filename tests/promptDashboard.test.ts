@@ -1062,7 +1062,8 @@ test('quick notes section is standalone and does not trigger dashboard widget re
 		['status', 'projectBranches', 'parallelBranches', 'dockerContainers', 'aiAnalysis'],
 		['activity', 'reviewRequests', 'projectCommits', 'todos'],
 	]);
-	assert.deepEqual(legacy[1].slice(-1), ['quickNotes']);
+	assert.deepEqual(legacy[1].slice(-2), ['quickNotes', 'bashScripts']);
+	assert.equal(resolvePromptDashboardWidgetKindForSection('bashScripts'), null);
 	assert.equal(legacy.flat().filter(section => section === 'quickNotes').length, 1);
 });
 

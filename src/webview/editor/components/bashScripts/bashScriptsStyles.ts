@@ -1,0 +1,120 @@
+/** Плоский список с высотой строк как у быстрых заметок использует общую прокрутку панели. */
+export const BASH_SCRIPTS_CSS = `
+.pm-bs {
+	--bs-run: var(--vscode-testing-iconPassed, var(--vscode-charts-green, var(--vscode-terminal-ansiGreen, #39834d)));
+	--bs-result: var(--vscode-descriptionForeground);
+	--bs-border: var(--vscode-panel-border, var(--vscode-widget-border, var(--vscode-descriptionForeground)));
+	container-type: inline-size; display: flex; flex-direction: column; min-width: 0; gap: 2px;
+}
+.pm-bs-actions [data-active] { color: var(--vscode-textLink-foreground); }
+.pm-bs-filters { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 3px; min-width: 0; }
+.pm-bs-filters input { flex: 1 1 160px; }
+.pm-bs-filters > div { flex: 1 1 200px; }
+.pm-bs-filters > div, .pm-bs-path, .pm-bs-editor-fields { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.pm-bs-filters input, .pm-bs-filters select, .pm-bs-editor select {
+	box-sizing: border-box; font: inherit; font-size: 12px; padding: 5px 7px; min-width: 0; border-radius: 4px;
+	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+	background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+}
+.pm-bs-filters select { flex: 1 1 75px; }
+.pm-bs-group { min-width: 0; }
+.pm-bs-group-toggle, .pm-bs-row {
+	display: flex; align-items: center; gap: 4px; width: 100%; min-width: 0; box-sizing: border-box; border-radius: 4px;
+}
+.pm-bs-group-toggle {
+	height: 24px; padding: 0 4px; border: 0; background: transparent; color: var(--vscode-descriptionForeground);
+	font: inherit; font-size: 12px; text-align: start; cursor: pointer;
+}
+.pm-bs-group-toggle:hover, .pm-bs-row:is(:hover, :focus-within) { background: var(--vscode-list-hoverBackground); }
+.pm-bs-group-toggle > svg, .pm-bs-group-count { flex: none; }
+.pm-bs-group-name { font-weight: 600; color: var(--vscode-foreground); }
+.pm-bs-group-name, .pm-bs-group-path, .pm-bs-name, .pm-bs-path-hint {
+	min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pm-bs-group-path, .pm-bs-path-hint { font: 11px var(--vscode-editor-font-family, monospace); color: var(--vscode-descriptionForeground); }
+.pm-bs-group-path { flex-shrink: 2; }
+.pm-bs-group-count { margin-inline-start: auto; padding-inline: 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.pm-bs-list, .pm-bs-history ol { padding: 0; margin: 0; list-style: none; }
+.pm-bs-list { margin-inline-start: 9px; }
+.pm-bs-row {
+	position: relative;
+	display: grid; grid-template-columns: 20px minmax(0, 28%) minmax(0, 1fr) auto auto 40px;
+	height: 28px; padding: 0 3px;
+}
+.pm-bs-row[data-runnable], .pm-bs-row button:enabled { cursor: pointer; }
+.pm-bs-details { grid-column: 2 / 4; display: grid; grid-template-columns: subgrid; align-items: center; min-width: 0; }
+.pm-bs-name { font-size: 13px; }
+.pm-bs-path-hint {
+	text-align: start; background: transparent;
+	color: color-mix(in srgb, var(--vscode-descriptionForeground) 93%, var(--vscode-editor-background));
+}
+body:is(.vscode-high-contrast, .vscode-high-contrast-light) .pm-bs-path-hint { color: var(--vscode-descriptionForeground); }
+.pm-bs-row .pm-bs-play { width: 20px; color: var(--bs-run); }
+.pm-bs-row .pm-bs-play:disabled { color: var(--vscode-disabledForeground); opacity: 1; cursor: default; }
+.pm-bs-row .pm-bs-play[aria-busy=true] { color: var(--vscode-foreground); }
+.pm-bs [data-outcome=success] { --bs-result: var(--bs-run); }
+.pm-bs [data-outcome=error] { --bs-result: var(--vscode-testing-iconFailed, var(--vscode-charts-red, #d44444)); }
+.pm-bs [data-outcome=running] { --bs-result: var(--vscode-foreground); }
+.pm-bs-tools, .pm-bs-flags, .pm-bs-global, .pm-bs-availability, .pm-bs-last-run { display: inline-flex; align-items: center; }
+.pm-bs-flags { gap: 2px; }
+.pm-bs-global, .pm-bs-last-run { color: var(--vscode-descriptionForeground); }
+.pm-bs-tools .pm-qn-icon-btn { width: 20px; height: 22px; }
+.pm-bs-availability { gap: 3px; color: var(--vscode-editorWarning-foreground); font-size: 11px; }
+.pm-bs-last-run {
+	justify-content: end; gap: 4px; min-width: 25px; height: 22px; padding: 0 3px; border: 0; border-radius: 3px;
+	background: transparent; font: inherit; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; cursor: pointer;
+}
+.pm-bs-last-run:is(:hover, [aria-expanded=true]) { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+.pm-bs-last-run > span, .pm-bs-duration { color: var(--bs-result); }
+@container (max-width: 450px) {
+	.pm-bs-availability > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+}
+@container (max-width: 330px) {
+	.pm-bs-row { grid-template-columns: 18px minmax(0, 1fr) auto auto 40px; }
+	.pm-bs-details { grid-column: 2; grid-template-columns: minmax(0, 1fr); gap: 0; line-height: 14px; }
+	.pm-bs-path-hint { font-size: 10px; line-height: 12px; }
+}
+.pm-bs-history, .pm-bs-hide { margin: 1px 0 4px 23px; }
+.pm-bs-history { padding-inline-start: 3px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.pm-bs-history li { position: relative; padding: 3px 2px 5px 14px; }
+.pm-bs-history li::before, .pm-bs-history li::after { content: ''; position: absolute; }
+.pm-bs-history li:not(:last-child)::before { inset-inline-start: 3px; inset-block: 10px -10px; border-inline-start: 1px solid var(--bs-border); }
+.pm-bs-history li::after { inset: 8px auto auto 1px; width: 5px; height: 5px; border-radius: 50%; background: var(--bs-result); }
+.pm-bs-event-heading, .pm-bs-measure { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.pm-bs-event-heading { flex-wrap: wrap; row-gap: 0; }
+.pm-bs-event-heading time { color: var(--vscode-foreground); font-variant-numeric: tabular-nums; }
+.pm-bs-measure { display: grid; grid-template-columns: minmax(0, 1fr) 8ch; align-items: center; padding-block: 2px; }
+.pm-bs-track, .pm-bs-bar { display: block; height: 3px; border-radius: 2px; }
+.pm-bs-track { background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent); }
+.pm-bs-bar { background: var(--bs-result); }
+.pm-bs-row > .pm-bs-live { position: absolute; inset: auto 3px 0 24px; height: 2px; }
+.pm-bs-live { overflow: hidden; --bs-result: var(--vscode-descriptionForeground); }
+.pm-bs-live .pm-bs-bar { height: 100%; }
+.pm-bs-live:not([aria-valuenow]) .pm-bs-bar { width: 33.3333%; animation: pm-bs-wait 1.4s ease-in-out infinite alternate; }
+@keyframes pm-bs-wait { to { transform: translateX(200%); } }
+@media (prefers-reduced-motion: reduce) {
+	.pm-bs-live:not([aria-valuenow]) .pm-bs-bar { width: 100%; animation: none; background: repeating-linear-gradient(90deg, var(--bs-result) 0 3px, transparent 3px 7px); }
+}
+.pm-bs-duration { text-align: end; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pm-bs-unknown { display: block; padding-block: 2px; }
+@media (forced-colors: active) {
+	.pm-bs-history li::after, .pm-bs-bar { forced-color-adjust: none; }
+	.pm-bs-track { border-block-end: 1px solid GrayText; }
+}
+.pm-bs-hide { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 8px; padding: 2px 0 2px 8px; border-inline-start: 1px solid var(--bs-border); font-size: 12px; }
+.pm-bs-hide > span { flex: 1 1 170px; overflow-wrap: anywhere; }
+.pm-bs :focus-visible, .pm-bs-actions :focus-visible, .pm-bs-editor :focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+.pm-bs-editor label { display: block; font-size: 12px; }
+.pm-bs-editor-fields { align-items: end; gap: 8px; }
+.pm-bs-editor-fields label:first-child { flex: 1 1 160px; }
+.pm-bs-editor input, .pm-bs-editor textarea, .pm-bs-editor select { width: 100%; box-sizing: border-box; }
+.pm-bs-editor label > input, .pm-bs-editor label > textarea, .pm-bs-editor label > select, .pm-bs-path { display: block; margin-top: 4px; }
+.pm-bs-editor .pm-bs-path { display: flex; }
+.pm-bs-path input { flex: 1 1 110px; min-width: 0; }
+.pm-bs-editor textarea { tab-size: 4; resize: vertical; min-height: 80px; line-height: 1.45; }
+.pm-bs-editor .pm-qn-modal-f > span { flex: 1 1 100px; }
+.pm-bs-editor .pm-qn-modal-f > [role=alert] { flex-basis: 100%; }
+.pm-bs-folder-title { display: flex; align-items: center; gap: 5px; padding: 3px 4px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.pm-bs-folder-title svg { flex: none; }
+.pm-bs-folder-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+`;

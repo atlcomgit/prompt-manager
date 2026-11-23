@@ -6,7 +6,36 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-11-24
+
+#### Added
+- Add the shared `alek-server` instructions for SentinelX operations on named servers, with one concise result per host.
+- Group Bash scripts by project in collapsible, searchable lists that grow with the dashboard.
+  Keep group choices across dashboard sessions. Rows align paths and always show history, edit and hide controls.
+  The clock shows the last run duration and opens a timeline with start times and proportional duration bars.
+  The file editor uses the input theme and includes
+  shell highlighting, line numbers, search and replace, and jump to line.
+
+#### Fixed
+- Show the shared Bash folder as a subgroup when it contains scripts alongside subfolders. Align history icons to the right of run times.
+- Let long Quick Commands lists scroll with the dashboard.
+- Show elapsed Bash run progress in the row and its history using the previous measured run as the reference.
+- Reuse the Bash catalog on startup and the displayed list when expanding the widget. Opening the list no longer waits for Git.
+  Group differing relative folders and omit their shared prefix. Running scripts show elapsed time and a spinner.
+  Durations and timeline markers and bars reflect the exit code. Launching a terminal keeps the dashboard visible.
+  The script editor remembers its resized dimensions and shows a loader inside the code field.
+- Preserve keyboard focus and text selections across widget dialogs, background file reads and dashboard layout changes.
+  A script editor waiting for a file read can be closed immediately. Typing in chat stays in chat while the dialog is open.
+  Closing an unchanged script after reselecting its file skips the save prompt. Notes and commands preserve their original line endings after undo.
+
 ### 2026-11-23
+
+#### Added
+- Run project and global Bash scripts from the prompt dashboard in dedicated editor terminals. Search and filter
+  scripts, edit their names, paths and files, and inspect the last 50 launches. Rescanning preserves hidden entries.
+  Preserve script drafts across layout and scope changes, reject stale hide confirmations, and warn separately
+  when a dispatched command cannot be recorded. Saving a shared script preserves its access permissions
+  and hard links, and detects unsaved VS Code edits made through another file name.
 
 #### Fixed
 - About now opens the bundled README on case-sensitive file systems, including Linux Dev Tunnels.

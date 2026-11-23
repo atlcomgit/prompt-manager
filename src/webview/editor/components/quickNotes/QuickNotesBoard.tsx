@@ -31,7 +31,7 @@ import {
 import { getContextFileKind } from '../../../../utils/contextFiles.js';
 import { subscribeDragPointerEvents } from '../../../shared/dragPointer';
 import { QuickNoteIcon } from './QuickNoteIcon';
-import { useQuickNotesFocusFallback } from './quickNotesFocus';
+import { focusInActiveWebview, useQuickNotesFocusFallback } from './quickNotesFocus';
 import { QUICK_NOTE_COLOR_LABELS, resolveQuickNoteColorCss, resolveQuickNoteColorLabel } from './quickNotesStyles';
 import { resolveQuickNoteScopeLabel } from './QuickNotesWidget';
 
@@ -135,7 +135,7 @@ export function QuickNotesBoard(props: QuickNotesBoardProps): React.ReactElement
 
 	// Клавиши страницы (N, /) работают сразу после открытия вкладки.
 	useEffect(() => {
-		rootRef.current?.focus({ preventScroll: true });
+		focusInActiveWebview(rootRef.current);
 	}, []);
 
 	// После закрытия окна заметки, меню цвета или поля добавления фокус не теряется на body.
@@ -162,14 +162,14 @@ export function QuickNotesBoard(props: QuickNotesBoardProps): React.ReactElement
 		const id = focusNoteIdRef.current;
 		if (id) {
 			focusNoteIdRef.current = null;
-			rootRef.current?.querySelector<HTMLElement>(`[data-qn-sticky="${CSS.escape(id)}"]`)?.focus();
+			focusInActiveWebview(rootRef.current?.querySelector<HTMLElement>(`[data-qn-sticky="${CSS.escape(id)}"]`));
 		}
 	});
 
 	// Поле добавления получает фокус при открытии.
 	useEffect(() => {
 		if (adding !== null) {
-			addRef.current?.focus();
+			focusInActiveWebview(addRef.current);
 		}
 	}, [adding]);
 

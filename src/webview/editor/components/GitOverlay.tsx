@@ -28,6 +28,7 @@ import {
 	resolveGitOverlayDoneStatus,
 } from '../../../utils/gitOverlay.js';
 import { ProgressLine } from './ProgressLine';
+import { focusInActiveWebview, rememberWidgetDialogOpener, restoreWidgetDialogFocus, trapQuickNotesTabKey, useQuickNotesFocusFallback } from './quickNotes/quickNotesFocus';
 
 type Props = {
 	open: boolean;
@@ -1763,6 +1764,17 @@ export const GitOverlay: React.FC<Props> = ({
 		lastSyncedTrackedBranchesRef.current = resolvedTrackedBranchesByProject;
 	}, [preferredTrackedBranch, promptTaskNumber, promptTitle, resolvedTrackedBranchesByProject, snapshot, trackedBranchOptions]);
 
+	const dialogRef = useRef<HTMLDivElement>(null);
+	// Background updates may replace a button while a commit message is being composed.
+	useEffect(() => {
+		if (!open) return;
+		const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		rememberWidgetDialogOpener(opener);
+		focusInActiveWebview(dialogRef.current);
+		return () => { restoreWidgetDialogFocus(opener); };
+	}, [open]);
+	useQuickNotesFocusFallback(dialogRef, open);
+
 	useEffect(() => {
 		if (!open) {
 			setSelectedTrackedBranchesByProject({});
@@ -2106,7 +2118,11 @@ export const GitOverlay: React.FC<Props> = ({
 	return (
 		<div style={styles.backdrop} onClick={onClose}>
 			<div
+				ref={dialogRef}
 				role="dialog"
+				aria-modal="true"
+				tabIndex={-1}
+				onKeyDown={event => trapQuickNotesTabKey(event, event.currentTarget)}
 				aria-label={t('editor.gitOverlayTitle')}
 				style={{
 					...styles.dialog,

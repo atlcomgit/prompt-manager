@@ -6,6 +6,7 @@ import type { ChatMemorySummary, EditorPromptViewState, EditorPromptPlanViewMode
 import type { GitOverlayActionKind, GitOverlayChangeFile, GitOverlayChangeGroup, GitOverlayFileHistoryPayload, GitOverlayProjectCommitMessage, GitOverlayProjectReviewRequestInput, GitOverlayProjectSnapshot, GitOverlayReviewCliSetupRequest, GitOverlaySnapshot } from './git.js';
 import type { DockerComposeProjectActionKind, DockerContainerActionKind, DockerWorkspaceActionKind } from './docker.js';
 import type { DashboardQuickCommandEdit, DashboardQuickCommandTarget, DashboardQuickNotesWidgetState, PromptDashboardPreferences } from './promptDashboardPreferences.js';
+import type { BashScriptsRequest, BashScriptsResponse } from './bashScripts.js';
 import type { QuickCommandTemplateResult } from '../utils/quickCommandTemplate.js';
 import type {
 	QuickNoteAttachSource,
@@ -53,6 +54,7 @@ export interface PromptOpenTarget {
 // ---- Messages FROM webview TO extension ----
 
 export type WebviewToExtensionMessage =
+	| BashScriptsRequest
 	| { type: 'ready'; bootId?: string; assetVersion?: string }
 	| { type: 'getPrompts' }
 	/** Чтение текста для одной карточки без открытия редактора и побочных записей. */
@@ -289,6 +291,8 @@ export type WebviewToExtensionMessage =
 // ---- Messages FROM extension TO webview ----
 
 export type ExtensionToWebviewMessage =
+	| BashScriptsResponse
+	| { type: 'bashScriptsChanged' }
 	| { type: 'prompts'; prompts: PromptConfig[]; archivedPrompts?: PromptConfig[] }
 	/** Ответ применяется только к текущему наведению и точной identity строки. */
 	| { type: 'promptHoverPreview'; target: PromptHoverTarget; requestId: string; result: PromptHoverPreviewResult }

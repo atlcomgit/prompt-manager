@@ -5426,7 +5426,7 @@ test('savePromptDashboardSectionOrder persists the shared widget order in the ho
 	]]);
 	assert.deepEqual((manager as any).getPromptDashboardSectionOrder(), [
 		['aiAnalysis', 'activity', 'reviewRequests', 'projectCommits', 'dockerContainers', 'quickCommands'],
-		['status', 'projectBranches', 'parallelBranches', 'todos', 'quickNotes'],
+		['status', 'projectBranches', 'parallelBranches', 'todos', 'quickNotes', 'bashScripts'],
 	]);
 });
 

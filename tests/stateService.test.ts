@@ -911,6 +911,92 @@ test('StateService applies stale preference patches to the latest global setting
 	assert.deepEqual(first.getPromptDashboardPreferences()?.expanded, { first: false, second: true });
 });
 
+/** Concurrent windows share a profile lock so a stale read cannot replace independently updated keys. */
+for (const firstAction of ['folder toggle', 'legacy migration'] as const) {
+	test(`StateService keeps a second folder toggle during an overlapping ${firstAction} of expanded`, async () => {
+		const entered = createDeferred<void>();
+		const resume = createDeferred<void>();
+		const expandedKey = 'dashboardPreferences.expanded';
+		let held = false;
+		const configuration = createConfigurationMock({}, { update: async (store, key, value) => {
+			if (!held && key === expandedKey) {
+				held = true;
+				entered.resolve();
+				await resume.promise;
+			}
+			store.set(key, value);
+		} });
+		const { StateService } = await importStateService(configuration);
+		const base = normalizePromptDashboardPreferences({ expanded: { 'project:legacy': false } });
+		const first = new StateService(createStateContext(createWorkspaceStateMock({
+			'promptManager.dashboardPreferences': base,
+		})));
+		const second = new StateService(createStateContext());
+		const otherBase = normalizePromptDashboardPreferences(undefined);
+		const firstFolder = { ...base, expanded: { ...base.expanded, 'bashScripts:a': false } };
+		const firstSave = firstAction === 'folder toggle'
+			? first.savePromptDashboardPreferences(firstFolder, base)
+			: first.savePromptDashboardCollapsedSections({ activity: true }, 'single-column', {});
+		await entered.promise;
+		const secondSave = second.savePromptDashboardPreferences({
+			...otherBase, expanded: { 'bashScripts:b': true },
+		}, otherBase);
+		try {
+			await new Promise(resolve => setTimeout(resolve, 50));
+		} finally {
+			resume.resolve();
+			await Promise.all([firstSave, secondSave]);
+		}
+		assert.deepEqual(configuration.store.get(expandedKey), {
+			...(firstAction === 'folder toggle' ? firstFolder.expanded : base.expanded), 'bashScripts:b': true,
+		});
+	});
+}
+
+/** Concurrent windows share a profile lock so a stale read cannot replace independently updated keys. */
+test('StateService merges concurrent Bash preferences by list or entry across windows and restores them', async () => {
+	const entered = createDeferred<void>();
+	const resume = createDeferred<void>();
+	let held = false;
+	const configuration = createConfigurationMock({}, { update: async (store, key, value) => {
+		// Hold the first order write before it becomes visible to the competing profile window.
+		if (!held && key === 'dashboardPreferences.bashScriptOrder') {
+			held = true;
+			entered.resolve();
+			await resume.promise;
+		}
+		store.set(key, value);
+	} });
+	const { StateService } = await importStateService(configuration);
+	const first = new StateService(createStateContext());
+	const second = new StateService(createStateContext());
+	const base = normalizePromptDashboardPreferences(undefined);
+	await first.savePromptDashboardPreferences(base);
+	const left = { ...base, bashScriptOrder: { root: ['p2', 'p1'] },
+		bashScriptFavorites: { a: true }, bashScriptHiddenFolders: { x: true } };
+	const right = { ...base, bashScriptOrder: { p2: ['s2', 's1'] },
+		bashScriptFavorites: { b: true }, bashScriptHiddenFolders: { y: true } };
+	const firstSave = first.savePromptDashboardPreferences(left, base);
+	await entered.promise;
+	const secondSave = second.savePromptDashboardPreferences(right, base);
+	try {
+		await new Promise(resolve => setTimeout(resolve, 50));
+	} finally {
+		resume.resolve();
+		await Promise.all([firstSave, secondSave]);
+	}
+	// A stale first-time save from an older panel cannot clear choices it never received.
+	await second.savePromptDashboardPreferences(base);
+	const reopened = new StateService(createStateContext());
+	const merged = reopened.getPromptDashboardPreferences()!;
+	assert.deepEqual(merged.bashScriptOrder, { root: ['p2', 'p1'], p2: ['s2', 's1'] });
+	assert.deepEqual(merged.bashScriptFavorites, { a: true, b: true });
+	assert.deepEqual(merged.bashScriptHiddenFolders, { x: true, y: true });
+	await first.savePromptDashboardPreferences({ ...left, bashScriptFavorites: {}, bashScriptHiddenFolders: {} }, left);
+	assert.deepEqual(reopened.getPromptDashboardPreferences()?.bashScriptFavorites, { b: true });
+	assert.deepEqual(reopened.getPromptDashboardPreferences()?.bashScriptHiddenFolders, { y: true });
+});
+
 /** Цвет новых заметок переживает новое окно и независимые правки фильтра. */
 test('StateService persists the new note color independently of the note filters', async () => {
 	const configuration = createConfigurationMock();

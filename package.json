@@ -945,6 +945,34 @@
           "scope": "application",
           "markdownDescription": "Глобальная высота поля описания быстрых заметок; синхронизируется между окнами и проектами через Settings Sync."
         },
+        "promptManager.dashboardMapStorage.readToken": {
+          "type": ["string", "null"],
+          "default": null,
+          "scope": "application",
+          "ignoreSync": true,
+          "markdownDescription": "Служебный идентификатор перечитывания общих настроек раскрытия, порядка и отметок в панели «Обзор»."
+        },
+        "promptManager.dashboardPreferences.bashScriptOrder": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Порядок групп, папок и скриптов в виджете «Bash скрипты». Каждый список хранит свой порядок."
+        },
+        "promptManager.dashboardPreferences.bashScriptHiddenFolders": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": "boolean" },
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Подгруппы, скрытые пользователем в виджете «Bash скрипты»."
+        },
+        "promptManager.dashboardPreferences.bashScriptFavorites": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": "boolean" },
+          "default": null,
+          "scope": "application",
+          "markdownDescription": "Избранные скрипты в виджете «Bash скрипты». Их названия выделены жирным."
+        },
         "promptManager.dashboardPreferences.expanded": {
           "type": [
             "object",

@@ -33,6 +33,9 @@ test('dashboard preferences keep false disclosures and explicit empty values', (
 		quickNotes: { newNoteScope: 'global', newNoteColor: 'teal', search: 'идея', colors: ['red', '#12abef'], boardGroupBy: 'color',
 			boardScope: 'workspace', boardShowDone: true },
 		expanded: { 'project:api': false, 'branch:main': true },
+		bashScriptOrder: { project: ['folder2', 'folder1'] },
+		bashScriptFavorites: { script: true },
+		bashScriptHiddenFolders: { folder2: true },
 		showAllBranchProjects: true,
 		hiddenSections: ['status', 'aiAnalysis'],
 	};
@@ -41,8 +44,24 @@ test('dashboard preferences keep false disclosures and explicit empty values', (
 	const normalized = normalizePromptDashboardPreferences(value);
 	normalized.expanded['project:api'] = true;
 	normalized.docker.expandedContainerIds.push('other');
+	normalized.bashScriptOrder.project.reverse();
+	assert.deepEqual(value.bashScriptOrder.project, ['folder2', 'folder1']);
 	assert.equal(value.expanded['project:api'], false);
 	assert.deepEqual(value.docker.expandedContainerIds, ['docker:legacy']);
+});
+
+/** Invalid maps cannot replace, duplicate or introduce keys into the persisted Bash lists. */
+test('Bash script preferences normalize each independent list and flag map', () => {
+	const flags = JSON.parse('{"__proto__":true,"constructor":true,"":false,"a":true,"b":false,"other":1}');
+	const order = Object.assign(Object.create({ inherited: ['a'] }), {
+		root: ['b', 42, 'a', 'b', ''], invalid: true, empty: [], constructor: ['no'],
+	});
+	const result = normalizePromptDashboardPreferences({
+		bashScriptOrder: order, bashScriptFavorites: flags, bashScriptHiddenFolders: flags,
+	});
+	assert.deepEqual(result.bashScriptOrder, { root: ['b', 'a'], empty: [] });
+	assert.deepEqual(result.bashScriptFavorites, { a: true, b: false });
+	assert.deepEqual(result.bashScriptHiddenFolders, { a: true, b: false });
 });
 
 /** JSON с прототипными ключами не меняет прототип результата и сохраняет безопасные записи. */

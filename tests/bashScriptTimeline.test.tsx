@@ -11,12 +11,28 @@ function scriptRow(history: BashScriptRun[], open = true, activeRunIds?: string[
 	return <BashScriptRow entry={{ name: 'build.sh', id: '1', scope: 'project', path: 'scripts/build.sh',
 		absolutePath: '/internal/build/scripts/build.sh', project: { name: 'build', root: '/internal/build', relativePath: 'scripts/build.sh' },
 		available: true, history, activeRunIds }} busy={false} historyOpen={open} hideTarget={null} onRun={noop} onEdit={noop}
-		onHistory={noop} onHide={noop} confirmHide={noop} />;
+		favorite={false} onToggleFavorite={noop} onHistory={noop} onHide={noop} confirmHide={noop} />;
 }
 
 function renderRow(history: BashScriptRun[], open = true) {
 	return renderToStaticMarkup(scriptRow(history, open));
 }
+
+/** A narrow row has its own presentation; history and assistive technology keep the full duration. */
+test('Bash rows offer minute abbreviations and clock durations, including multi-hour runs', () => {
+	const startedAt = '2026-02-01T10:00:00Z';
+	for (const [finishedAt, full, short, clock] of [
+		['2026-02-01T10:02:40Z', '2 мин 40 с', '2 м 40 с', '02:40'],
+		['2026-02-01T11:02:03Z', '1 ч 2 мин', '1 ч 2 м', '1:02:03'],
+	]) {
+		const [row, history] = renderRow([{ id: 'a', startedAt, finishedAt, exitCode: 0 }]).split('role="region"');
+		assert.ok(row.includes(`aria-description="Успешно · ${full}"`));
+		for (const [kind, value] of [['full', full], ['short', short], ['clock', clock]]) {
+			assert.ok(row.includes(`class="pm-bs-duration-${kind}">${value}</span>`));
+		}
+		assert.ok(history.includes(`class="pm-bs-duration">${full}</span>`));
+	}
+});
 
 /** Различает подтверждение Shell, старый код и закрытие терминала независимо от записанной отметки времени. */
 test('Bash timeline scales only confirmed durations and shows the latest run duration next to history', () => {
@@ -33,7 +49,7 @@ test('Bash timeline scales only confirmed durations and shows the latest run dur
 	const [row, history] = html.split('role="region"');
 	assert.match(row, /class="pm-bs-last-run"[^>]*><span>5 с<\/span><svg\b[^>]*>/);
 	assert.doesNotMatch(row, /<time/);
-	assert.match(row, /class="pm-bs-path-hint" title="\/internal\/build\/scripts\/build.sh">scripts\/build.sh</);
+	assert.match(row, /class="pm-bs-path-hint" title="\/internal\/build\/scripts\/build.sh"><bdi>scripts\/build.sh<\/bdi>/);
 	assert.doesNotMatch(history, /scripts\/build.sh/);
 	assert.deepEqual(Array.from(history.matchAll(/class="pm-bs-bar" style="width:([\d.]+)%"/g), match => match[1]), ['25', '100', '0']);
 	assert.equal((history.match(/class="pm-bs-unknown"/g) ?? []).length, 3);
@@ -43,9 +59,23 @@ test('Bash timeline scales only confirmed durations and shows the latest run dur
 	for (const expected of ['Завершён без кода', 'Код 9', 'Терминал закрыт', 'Результат неизвестен', 'Запуск зарегистрирован', 'Успешно']) {
 		assert.ok(history.includes(expected), expected);
 	}
-	const closed = renderRow([runs[2], runs[1]], false);
+	const closed = renderRow([runs[2]], false);
 	assert.match(closed, /<span>—<\/span>/);
-	assert.doesNotMatch(closed, /class="pm-bs-history"|20 с/);
+	assert.doesNotMatch(closed, /class="pm-bs-history"/);
+});
+
+test('The row skips unknown durations while each history entry keeps its own measurement', () => {
+	const unknown: BashScriptRun = { id: 'recent', startedAt: '2026-02-04', finishedAt: '2026-02-05', endedBy: 'terminal' };
+	const untracked: BashScriptRun = { id: 'untracked', startedAt: '2026-02-03' };
+	const measured: BashScriptRun = { id: 'measured', startedAt: '2026-02-02', finishedAt: '2026-02-02T00:00:20Z', exitCode: 9 };
+	const older: BashScriptRun = { id: 'older', startedAt: '2026-02-01', finishedAt: '2026-02-01T00:00:50Z', exitCode: 0 };
+	const [row, history] = renderRow([unknown, untracked, measured, older]).split('role="region"');
+	assert.match(row, /class="pm-bs-last-run" data-outcome="error"[^>]*><span>20 с<\/span>/);
+	assert.match(row, /Последний запуск — Терминал закрыт\. Последнее измерение — 20 с \(Код 9\)/);
+	assert.deepEqual(Array.from(history.matchAll(/class="pm-bs-(?:unknown|duration)">([^<]+)</g), m => m[1]),
+		['Длительность неизвестна', 'Длительность неизвестна', '20 с', '50 с']);
+	const zero = renderRow([unknown, { ...measured, finishedAt: measured.startedAt }, older], false);
+	assert.match(zero, /<span>0 мс<\/span>/);
 });
 
 test('Live duration follows the newest active shell and switches to the final result when it ends', async t => {

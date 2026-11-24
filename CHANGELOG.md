@@ -9,10 +9,12 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 ### 2026-11-24
 
 #### Added
+- Collapse or hide Bash script folders, mark favorites with a bold name, and reorder projects, folders and scripts.
+  Restore hidden folders from the widget header. Keep the path to the right of the name on one line at every width and shorten run durations on narrow rows.
 - Add the shared `alek-server` instructions for SentinelX operations on named servers, with one concise result per host.
 - Group Bash scripts by project in collapsible, searchable lists that grow with the dashboard.
   Keep group choices across dashboard sessions. Rows align paths and always show history, edit and hide controls.
-  The clock shows the last run duration and opens a timeline with start times and proportional duration bars.
+  The clock shows live elapsed time or the most recent measured duration. The timeline retains each run’s own result and duration.
   The file editor uses the input theme and includes
   shell highlighting, line numbers, search and replace, and jump to line.
 

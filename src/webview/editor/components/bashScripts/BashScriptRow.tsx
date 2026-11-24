@@ -33,6 +33,19 @@ function formatDuration(ms: number): string {
 	return `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
 }
 
+/** Narrow rows abbreviate minutes before switching to the unambiguous mm:ss or h:mm:ss form. */
+function RowDuration({ ms, label }: { ms?: number; label: string }) {
+	if (ms === undefined || ms < 60_000) return <span>{label}</span>;
+	const minutes = Math.floor(ms / 60_000);
+	const parts = [String(minutes % 60).padStart(2, '0'), String(Math.floor(ms / 1000) % 60).padStart(2, '0')];
+	if (minutes >= 60) parts.unshift(String(Math.floor(minutes / 60)));
+	return <span aria-hidden="true">
+		<span className="pm-bs-duration-full">{label}</span>
+		<span className="pm-bs-duration-short">{label.replace('мин', 'м')}</span>
+		<span className="pm-bs-duration-clock">{parts.join(':')}</span>
+	</span>;
+}
+
 /** Время начала в локальном часовом поясе пользователя. */
 function RunTime({ value }: { value: string }) {
 	const date = new Date(value);
@@ -92,6 +105,9 @@ function RunHistory({ history, activeRunIds, now }: { history: BashScriptRun[]; 
 interface RowProps {
 	entry: BashScriptEntry;
 	displayPath?: string;
+	favorite: boolean;
+	onToggleFavorite(): void;
+	rowOrderActions?: React.ReactNode;
 	busy: boolean;
 	launching?: boolean;
 	historyOpen: boolean;
@@ -103,8 +119,9 @@ interface RowProps {
 	confirmHide(target: BashScriptEntry): void;
 }
 
-/** Постоянные действия и длительность последнего запуска. Полный путь доступен в подсказке относительного. */
-export function BashScriptRow({ entry, displayPath, busy, launching, historyOpen, hideTarget, onRun, onEdit, onHistory, onHide, confirmHide }: RowProps) {
+/** The row shows live elapsed time or the newest measured run. History keeps each run's own duration. */
+export function BashScriptRow({ entry, displayPath, favorite, onToggleFavorite, rowOrderActions,
+	busy, launching, historyOpen, hideTarget, onRun, onEdit, onHistory, onHide, confirmHide }: RowProps) {
 	const historyId = useId();
 	const hideId = useId();
 	const active = entry.activeRunIds?.length
@@ -117,12 +134,16 @@ export function BashScriptRow({ entry, displayPath, busy, launching, historyOpen
 		return () => window.clearInterval(timer);
 	}, [running]);
 	const now = Date.now();
-	const displayedRun = active ?? entry.history[0];
+	const latest = entry.history[0];
+	const displayedRun = active ?? entry.history.find(run => durationMs(run) !== undefined) ?? latest;
 	const duration = displayedRun && durationMs(displayedRun, running ? now : undefined);
 	const durationLabel = duration === undefined ? '—' : formatDuration(duration);
-	const historyHint = displayedRun
+	const timingHint = displayedRun
 		? `${runStatus(displayedRun, running)} · ${duration === undefined ? 'Длительность неизвестна' : durationLabel}`
 		: 'Не запускался';
+	const historyHint = !running && displayedRun && displayedRun !== latest
+		? `Последний запуск — ${runStatus(latest, false)}. Последнее измерение — ${durationLabel} (${runStatus(displayedRun, false)})`
+		: timingHint;
 	const disabled = !entry.available || busy || running;
 	const relativePath = displayPath ?? entry.project?.relativePath ?? entry.path;
 	const runLabel = running ? `Выполняется ${entry.name}` : launching ? `Запуск ${entry.name}` : `Запустить ${entry.name}`;
@@ -136,7 +157,18 @@ export function BashScriptRow({ entry, displayPath, busy, launching, historyOpen
 				{running || launching ? <QuickNoteIcon name="loading" size={13} className="pm-qn-spin" /> : <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5a.7.7 0 0 1 1-.6l6.6 4.5a.7.7 0 0 1 0 1.2L6 13.1a.7.7 0 0 1-1-.6Z" fill="currentColor" /></svg>}
 			</button>
 			<div className="pm-bs-details">
-				<span className="pm-bs-name" title={entry.name}>{entry.name}</span><span className="pm-bs-path-hint" title={entry.absolutePath}>{relativePath}</span>
+				<span className="pm-bs-name-cell">
+					<span className="pm-bs-name" data-favorite={favorite || undefined} title={entry.name}>{entry.name}</span>
+					<button type="button" className="pm-qn-icon-btn pm-bs-favorite" aria-pressed={favorite}
+						aria-label={`Избранное · ${entry.name}`} title={favorite ? 'Убрать из избранного' : 'Добавить в избранное'}
+						onClick={onToggleFavorite}>
+						<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"
+							fill={favorite ? 'currentColor' : 'none'} stroke="currentColor" strokeLinejoin="round">
+							<path d="m8 1.5 2 4.2 4.6.7-3.3 3.2.8 4.6L8 12l-4.1 2.2.8-4.6-3.3-3.2 4.6-.7Z" />
+						</svg>
+					</button>
+				</span>
+				<span className="pm-bs-path-hint" title={entry.absolutePath}><bdi>{relativePath}</bdi></span>
 			</div>
 			<span className="pm-bs-flags">
 				{!entry.available && <span className="pm-bs-availability" title="Недоступен"><QuickNoteIcon name="info" size={13} /><span>Недоступен</span></span>}
@@ -145,14 +177,16 @@ export function BashScriptRow({ entry, displayPath, busy, launching, historyOpen
 			<button type="button" className="pm-bs-last-run" data-outcome={running ? 'running' : outcome(displayedRun)}
 				aria-label={`История запусков ${entry.name}`} aria-description={historyHint}
 				aria-expanded={historyOpen} aria-controls={historyOpen ? historyId : undefined} title={`История запусков · ${historyHint}`} onClick={onHistory}>
-				<span>{durationLabel}</span>
+				<RowDuration ms={duration} label={durationLabel} />
 				<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"><circle cx="8" cy="8" r="5.4" /><path d="M8 4.5V8l2.4 1.5" /></svg>
 			</button>
 			<div className="pm-bs-tools">
-				<button type="button" className="pm-qn-icon-btn" data-pm-bash-editor-opener={entry.scope + ':' + entry.id} aria-label={`Редактировать ${entry.name}`} title="Редактировать скрипт"
-					onClick={e => onEdit(e.currentTarget)}><QuickNoteIcon name="file-code" size={14} /></button>
-				<button type="button" className="pm-qn-icon-btn" aria-label={`Убрать ${entry.name} из виджета`} title="Убрать из виджета"
-					aria-controls={hideTarget ? hideId : undefined} aria-expanded={!!hideTarget} onClick={() => onHide(hideTarget ? null : entry)}><QuickNoteIcon name="eye-closed" size={13} /></button>
+				{rowOrderActions ?? <>
+					<button type="button" className="pm-qn-icon-btn" data-pm-bash-editor-opener={entry.scope + ':' + entry.id} aria-label={`Редактировать ${entry.name}`} title="Редактировать скрипт"
+						onClick={e => onEdit(e.currentTarget)}><QuickNoteIcon name="file-code" size={14} /></button>
+					<button type="button" className="pm-qn-icon-btn" aria-label={`Убрать ${entry.name} из виджета`} title="Убрать из виджета"
+						aria-controls={hideTarget ? hideId : undefined} aria-expanded={!!hideTarget} onClick={() => onHide(hideTarget ? null : entry)}><QuickNoteIcon name="eye-closed" size={13} /></button>
+				</>}
 			</div>
 			{active && duration !== undefined && <RunProgress history={entry.history} run={active} elapsed={duration} />}
 		</div>

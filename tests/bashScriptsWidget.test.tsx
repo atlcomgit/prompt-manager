@@ -55,6 +55,8 @@ test('Bash widget addresses actions by scope + id, protects a file draft and res
 		await GlobalRegistrator.unregister();
 	});
 	const render = (collapsed = false) => act(async () => root.render(<BashScriptEditorHost><BashScriptsWidget collapsed={collapsed} onToggleCollapse={() => {}} expandedGroups={{}} onGroupChoicesChange={() => {}}
+		bashScriptOrder={{}} bashScriptFavorites={{}} bashScriptHiddenFolders={{}}
+		onOrderChange={() => {}} onFavoriteChange={() => {}} onFolderHiddenChange={() => {}}
 		renderShell={(actions, body) => <section><header>{actions}</header>{body}</section>} /></BashScriptEditorHost>));
 	const reply = (request: BashScriptsRequest, result: BashScriptsResult = {}, error?: string) => act(async () => {
 		window.dispatchEvent(new MessageEvent('message', { data: { type: 'bashScriptsResponse', requestId: request.requestId, result, error } }));

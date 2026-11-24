@@ -143,6 +143,12 @@ export interface PromptDashboardPreferences {
 	quickCommands: DashboardQuickCommandsWidgetState;
 	/** Явный false сохраняет закрытие узлов Git, раскрытых по умолчанию. */
 	expanded: Record<string, boolean>;
+	/** Ordered child identifiers for each list in the Bash scripts widget. */
+	bashScriptOrder: Record<string, string[]>;
+	/** Favorite scripts are keyed independently from their current folder. */
+	bashScriptFavorites: Record<string, boolean>;
+	/** Hiding a folder preserves its disclosure, scripts and ordering. */
+	bashScriptHiddenFolders: Record<string, boolean>;
 	/** Показывать в карточке веток все проекты, а не только проекты промпта. */
 	showAllBranchProjects: boolean;
 	/**
@@ -223,27 +229,44 @@ export function normalizePromptDashboardQuickNotesWidgetState(value: unknown): D
 	};
 }
 
+/** Read own map entries and exclude names that cannot safely participate in a settings patch. */
+function preferenceEntries(value: unknown): [string, unknown][] {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+	return Object.entries(value).filter(([key]) =>
+		key.trim() && key !== '__proto__' && key !== 'constructor' && key !== 'prototype');
+}
+
+/** Keep explicit false values for both default-open disclosures and manually edited settings. */
+function booleanPreferences(value: unknown): Record<string, boolean> {
+	return Object.fromEntries(preferenceEntries(value).filter((entry): entry is [string, boolean] =>
+		typeof entry[1] === 'boolean'));
+}
+
+/** Copy each child list in its saved order, retaining the first occurrence of each identifier. */
+function normalizeBashScriptOrder(value: unknown): Record<string, string[]> {
+	const result: Record<string, string[]> = {};
+	for (const [parent, children] of preferenceEntries(value)) {
+		if (!Array.isArray(children)) continue;
+		result[parent] = [...new Set(children.filter((id): id is string => typeof id === 'string' && !!id.trim()))];
+	}
+	return result;
+}
+
 /** Проверяет сохранённый JSON и сохраняет закрытые узлы; tests/promptDashboardPreferences.test.ts. */
 export function normalizePromptDashboardPreferences(value: unknown): PromptDashboardPreferences {
 	// Состояние состоит только из известных полей; прототипные ключи не становятся ключами раскрытий.
 	const input: Partial<PromptDashboardPreferences> = value && typeof value === 'object' && !Array.isArray(value)
 		? { ...value }
 		: {};
-	const expanded: Record<string, boolean> = {};
-	if (input.expanded && typeof input.expanded === 'object' && !Array.isArray(input.expanded)) {
-		for (const [key, isExpanded] of Object.entries(input.expanded)) {
-			if (key.trim() && key !== '__proto__' && key !== 'constructor' && key !== 'prototype'
-				&& typeof isExpanded === 'boolean') {
-				expanded[key] = isExpanded;
-			}
-		}
-	}
 	return {
 		docker: normalizePromptDashboardDockerWidgetState(input.docker),
 		todos: normalizePromptDashboardTodosWidgetState(input.todos),
 		quickNotes: normalizePromptDashboardQuickNotesWidgetState(input.quickNotes),
 		quickCommands: normalizeDashboardQuickCommandsWidgetState(input.quickCommands),
-		expanded,
+		expanded: booleanPreferences(input.expanded),
+		bashScriptOrder: normalizeBashScriptOrder(input.bashScriptOrder),
+		bashScriptFavorites: booleanPreferences(input.bashScriptFavorites),
+		bashScriptHiddenFolders: booleanPreferences(input.bashScriptHiddenFolders),
 		showAllBranchProjects: input.showAllBranchProjects === true,
 		hiddenSections: normalizePromptDashboardHiddenSections(input.hiddenSections),
 	};

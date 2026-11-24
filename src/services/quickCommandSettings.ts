@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { lock } from 'proper-lockfile';
+import { refreshUserSettingsSnapshot } from './userSettingsSnapshot.js';
 import {
 	DASHBOARD_QUICK_COMMAND_LIMIT, DASHBOARD_QUICK_COMMAND_TEXT_LIMIT, DASHBOARD_QUICK_COMMAND_CATEGORY_LIMIT,
 	normalizeDashboardQuickCommandsWidgetState, serializeDashboardQuickCommands,
@@ -171,13 +172,8 @@ export class QuickCommandSettings {
 
 	/** VS Code reloads user settings after a Global update. The echoed token identifies that local client's snapshot. */
 	private async refresh(): Promise<void> {
-		const token = randomUUID();
-		await this.write(READ_TOKEN, token);
-		const deadline = performance.now() + 1500;
-		while (this.read(READ_TOKEN) !== token) {
-			if (performance.now() >= deadline) throw new Error('Настройки быстрых команд ещё обновляются в этом окне.');
-			await new Promise(resolve => setTimeout(resolve, 25));
-		}
+		await refreshUserSettingsSnapshot(READ_TOKEN, this.read, this.write,
+			'Настройки быстрых команд ещё обновляются в этом окне.');
 	}
 
 	/** A failed rollback remains readable through its journal and can be resumed by a new host. */

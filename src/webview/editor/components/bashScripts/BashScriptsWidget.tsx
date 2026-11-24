@@ -7,7 +7,10 @@ import { getVsCodeApi } from '../../../shared/vscodeApi';
 import { BashScriptRow } from './BashScriptRow';
 import { newScriptDraft } from './bashScriptDraft';
 import { useBashScripts } from './useBashScripts';
+import { buildBashScriptTree, groupPreferenceKey, moveBashSibling, projectScriptFolders, PROJECT_ORDER_KEY, scriptKey } from './bashScriptGroups';
 import { BASH_SCRIPTS_CSS } from './bashScriptsStyles';
+
+export { groupBashScripts } from './bashScriptGroups';
 
 type ScriptFilter = 'all' | 'available' | 'missing' | 'recent';
 /** Область, состояние и текст применяются совместно. Недавние отсортированы по времени запуска. */
@@ -24,94 +27,6 @@ export function filterBashScripts(entries: BashScriptEntry[], search: string, sc
 		}
 		return left.name.localeCompare(right.name, 'ru', { numeric: true }) || left.absolutePath.localeCompare(right.absolutePath);
 	});
-}
-
-interface ScriptGroup {
-	key: string;
-	preferenceKey: string;
-	name: string;
-	root?: string;
-	entries: BashScriptEntry[];
-}
-
-/** Стабильный ключ FNV-1a позволяет сохранять выбор группы без полного пути в Settings Sync. */
-function groupPreferenceKey(key: string): string {
-	let hash = 0xcbf29ce484222325n;
-	for (const byte of new TextEncoder().encode(key)) {
-		hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
-	}
-	return 'bashScripts:' + hash.toString(16);
-}
-
-/** Keep duplicate project names separate and preserve the selected script ordering inside each group. */
-export function groupBashScripts(entries: readonly BashScriptEntry[]): ScriptGroup[] {
-	const groups = new Map<string, ScriptGroup>();
-	for (const entry of entries) {
-		const project = entry.project;
-		const key = project ? 'project:' + project.root : 'outside:' + entry.scope;
-		let group = groups.get(key);
-		if (!group) {
-			group = { key, preferenceKey: groupPreferenceKey(key), name: project?.name ?? (entry.scope === 'global' ? 'Глобальные скрипты' : 'Вне проектов'),
-				root: project?.root, entries: [] };
-			groups.set(key, group);
-		}
-		group.entries.push(entry);
-	}
-	return [...groups.values()].sort((a, b) => Number(!!b.root) - Number(!!a.root)
-		|| a.name.localeCompare(b.name, 'ru', { numeric: true }) || a.key.localeCompare(b.key));
-}
-
-interface ProjectFolders {
-	prefix: string;
-	multiple: boolean;
-}
-
-/** Use the unfiltered catalog so searching for one file preserves its folder heading. */
-function projectScriptFolders(entries: readonly BashScriptEntry[]): Map<string, ProjectFolders> {
-	const projects = new Map<string, ProjectFolders>();
-	for (const { project } of entries) {
-		if (!project) continue;
-		const directory = project.relativePath.slice(0, project.relativePath.lastIndexOf('/') + 1);
-		const folders = projects.get(project.root);
-		if (!folders) {
-			projects.set(project.root, { prefix: directory, multiple: false });
-			continue;
-		}
-		if (directory !== folders.prefix) folders.multiple = true;
-		while (!directory.startsWith(folders.prefix)) {
-			folders.prefix = folders.prefix.slice(0, folders.prefix.lastIndexOf('/', folders.prefix.length - 2) + 1);
-		}
-	}
-	return projects;
-}
-
-/** Keep folders in first-match order and preserve name or recency ordering within each folder. */
-function ScriptFolders({ group, projectFolders, renderRow }: {
-	group: ScriptGroup; projectFolders?: ProjectFolders; renderRow(entry: BashScriptEntry, displayPath?: string): React.ReactNode;
-}) {
-	const folders = React.useMemo(() => {
-		const byFolder = new Map<string, BashScriptEntry[]>();
-		for (const entry of group.entries) {
-			const relative = entry.project?.relativePath ?? '';
-			const folder = relative.slice(0, Math.max(0, relative.lastIndexOf('/')));
-			const scripts = byFolder.get(folder);
-			if (scripts) scripts.push(entry);
-			else byFolder.set(folder, [entry]);
-		}
-		return byFolder;
-	}, [group]);
-	return <>{Array.from(folders, ([folder, scripts]) => {
-		const rows = scripts.map(entry => {
-			const path = entry.project?.relativePath;
-			return renderRow(entry, path?.slice(path.lastIndexOf('/') + 1));
-		});
-		if (!folder || !projectFolders?.multiple) return <React.Fragment key={folder}>{rows}</React.Fragment>;
-		const title = folder.slice(projectFolders.prefix.length) || folder;
-		return <li className="pm-bs-folder" key={folder}>
-			<div className="pm-bs-folder-title" title={folder}><QuickNoteIcon name="folder" size={13} /><span>{title}</span></div>
-			<ul className="pm-bs-list" aria-label={folder}>{rows}</ul>
-		</li>;
-	})}</>;
 }
 
 /** Ранее панель хранила явный выбор групп по пути проекта в локальном состоянии webview. */
@@ -133,27 +48,52 @@ function findDuplicateNames(items: readonly { name: string }[]): Set<string> {
 	return duplicates;
 }
 
-/** Шапка группы ведёт себя как строка дерева рабочих папок. */
-function ProjectGroup({ group, duplicateName, expanded, toggle, children }: {
-	group: ScriptGroup; duplicateName: boolean; expanded: boolean; toggle(): void; children: React.ReactNode;
+/** The toggle and move buttons are separate keyboard targets at both levels of the tree. */
+function GroupHeading({ title, path, hint, folder, count, expanded, toggle, orderActions, visibilityAction, children }: {
+	title: string; path?: string; hint?: string; folder?: boolean; count?: number; expanded: boolean;
+	toggle(): void; orderActions: React.ReactNode; visibilityAction?: React.ReactNode; children: React.ReactNode;
 }) {
 	const id = useId();
-	const path = duplicateName ? group.root : undefined;
-	return <section className="pm-bs-group">
-		<button type="button" className="pm-bs-group-toggle" aria-label={path ? `${group.name} · ${path}` : group.name}
-			aria-expanded={expanded} aria-controls={expanded ? id : undefined} onClick={toggle} title={group.root ?? group.name}>
-			<QuickNoteIcon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} />
-			<span className="pm-bs-group-name">{group.name}</span>
-			{path && <code className="pm-bs-group-path">{path}</code>}
-			<span className="pm-bs-group-count">{group.entries.length}</span>
-		</button>
-		{expanded && <ul className="pm-bs-list" id={id} aria-label={group.name}>{children}</ul>}
-	</section>;
+	return <>
+		<div className="pm-bs-heading">
+			<button type="button" className={'pm-bs-group-toggle' + (folder ? ' pm-bs-folder-title' : '')}
+				aria-label={path ? `${title} · ${path}` : title} aria-expanded={expanded} aria-controls={expanded ? id : undefined}
+				onClick={toggle} title={hint || title}>
+				<QuickNoteIcon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} />
+				{folder && <QuickNoteIcon name="folder" size={13} />}
+				<span className={folder ? undefined : 'pm-bs-group-name'}>{title}</span>
+				{path && <code className="pm-bs-group-path">{path}</code>}
+				{count !== undefined && <span className="pm-bs-group-count">{count}</span>}
+			</button>
+			{visibilityAction}
+			{orderActions}
+		</div>
+		{expanded && <ul className="pm-bs-list" id={id} aria-label={folder ? hint || title : title}>{children}</ul>}
+	</>;
+}
+
+/** Keep boundary buttons focusable when the item reaches the end of its list. */
+function OrderActions({ label, index, keys, move }: {
+	label: string; index: number; keys: string[]; move(delta: number): void;
+}) {
+	return <span className="pm-bs-order-actions">
+		{[-1, 1].map(delta => {
+			const disabled = index + delta < 0 || index + delta >= keys.length;
+			const title = `Переместить ${label} ${delta < 0 ? 'выше' : 'ниже'}`;
+			return <button type="button" className="pm-qn-icon-btn" key={delta} aria-label={title}
+				title={title} aria-disabled={disabled} onClick={() => { if (!disabled) move(delta); }}>
+				<QuickNoteIcon name="chevron-down" className={delta < 0 ? 'pm-bs-up' : undefined} size={14} />
+			</button>;
+		})}
+	</span>;
 }
 
 /** Виджет использует общую оболочку панели, сохраняет черновик вне списка и ждёт подтверждения операций host. */
-export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups, onGroupChoicesChange, renderShell }: {
+export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups, onGroupChoicesChange, bashScriptOrder, bashScriptFavorites, bashScriptHiddenFolders, onFolderHiddenChange, onOrderChange, onFavoriteChange, renderShell }: {
 	collapsed: boolean; onToggleCollapse(): void; renderShell(actions: React.ReactNode, body: React.ReactNode): React.ReactNode;
+	bashScriptOrder: Record<string, string[]>; bashScriptFavorites: Record<string, boolean>;
+	bashScriptHiddenFolders: Record<string, boolean>; onFolderHiddenChange(key: string, hidden: boolean): void;
+	onOrderChange(parent: string, order: string[]): void; onFavoriteChange(key: string, favorite: boolean): void;
 	expandedGroups: Record<string, boolean>; onGroupChoicesChange(patch: Record<string, boolean>): void;
 }) {
 	const { entries, listError, send, reload, afterRun } = useBashScripts(!collapsed);
@@ -161,6 +101,8 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 	const [search, setSearch] = useState('');
 	const [scope, setScope] = useState<BashScriptScope | 'all'>('all');
 	const [filter, setFilter] = useState<ScriptFilter>('all');
+	const [showHidden, setShowHidden] = useState(false);
+	const [editingOrder, setEditingOrder] = useState(false);
 	const [historyKey, setHistoryKey] = useState('');
 	const [hideTarget, setHideTarget] = useState<BashScriptEntry | null>(null);
 	const [error, setError] = useState('');
@@ -175,8 +117,23 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 	const showFilters = !collapsed && searchOpen;
 	const hasFilters = !!search.trim() || scope !== 'all' || filter !== 'all';
 	const visible = React.useMemo(() => filterBashScripts(entries ?? [], search, scope, filter), [entries, search, scope, filter]);
-	const groups = React.useMemo(() => groupBashScripts(visible), [visible]);
 	const foldersByProject = React.useMemo(() => projectScriptFolders(entries ?? []), [entries]);
+	const tree = React.useMemo(() => buildBashScriptTree(visible, foldersByProject, filter === 'recent' ? {} : bashScriptOrder),
+		[visible, foldersByProject, filter, bashScriptOrder]);
+	const allGroupKeys = React.useMemo(() => tree.map(group => group.preferenceKey), [tree]);
+	const hiddenCount = tree.reduce((total, group) => total + group.folders.filter(folder => bashScriptHiddenFolders[folder.key]).length, 0);
+	const groups = React.useMemo(() => tree.flatMap(group => {
+		const folders = showHidden ? group.folders : group.folders.filter(folder => !bashScriptHiddenFolders[folder.key]);
+		if (!folders.length) return [];
+		return [{ ...group, folders, allFolderKeys: group.folders.map(folder => folder.key),
+			visibleCount: folders.reduce((total, folder) => total + folder.entries.length, 0) }];
+	}), [tree, showHidden, bashScriptHiddenFolders]);
+	const visibleCount = groups.reduce((total, group) => total + group.visibleCount, 0);
+	const groupKeys = groups.map(group => group.preferenceKey);
+	const hasFolderHeading = (multiple: boolean, key: string) =>
+		multiple || !!bashScriptHiddenFolders[key] || expandedGroups[key] !== undefined;
+	const foldKeys = groups.flatMap(group => [group.preferenceKey, ...group.folders
+		.filter(folder => hasFolderHeading(group.showFolders, folder.key)).map(folder => folder.key)]);
 	const query = JSON.stringify([scope, filter, search.trim().toLocaleLowerCase()]);
 	useEffect(() => setFilteredChoice(undefined), [query]);
 	const duplicateNames = React.useMemo(() => findDuplicateNames(groups), [groups]);
@@ -186,20 +143,24 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 		open(newScriptDraft(entry, scope === 'global' ? 'global' : 'project'), opener);
 	}
 	/** Поиск временно раскрывает совпадения. Для большой коллекции исходное представление — список проектов. */
-	function isGroupExpanded(group: ScriptGroup): boolean {
-		if (hasFilters) return !(filteredChoice?.query === query && filteredChoice.closed.has(group.key));
-		return expandedGroups[group.preferenceKey] ?? legacyChoices[group.key] ?? (entries?.length ?? 0) <= 8;
+	function isExpanded(key: string, defaultValue: boolean): boolean {
+		if (hasFilters) return !(filteredChoice?.query === query && filteredChoice.closed.has(key));
+		return expandedGroups[key] ?? defaultValue;
 	}
-	const collapseGroups = groups.some(isGroupExpanded);
+	const projectExpanded = (group: typeof tree[number]) =>
+		isExpanded(group.preferenceKey, legacyChoices[group.key] ?? (entries?.length ?? 0) <= 8);
+	const collapseGroups = groups.some(projectExpanded);
 	const groupAction = collapseGroups ? 'Свернуть все группы' : 'Раскрыть все группы';
-	/** Меняет видимые группы, сохраняя обычный выбор при временной фильтрации. */
-	function setGroupsExpanded(targets: ScriptGroup[], expanded: boolean) {
+	/** Filtered matches can be folded independently without changing the regular tree. */
+	function setGroupsExpanded(keys: string[], expanded: boolean) {
 		if (hasFilters) {
-			const closed = new Set(filteredChoice?.query === query ? filteredChoice.closed : []);
-			for (const { key } of targets) {
-				if (expanded) closed.delete(key); else closed.add(key);
-			}
-			setFilteredChoice({ query, closed });
+			setFilteredChoice(current => {
+				const closed = new Set(current?.query === query ? current.closed : []);
+				for (const key of keys) {
+					if (expanded) closed.delete(key); else closed.add(key);
+				}
+				return { query, closed };
+			});
 			return;
 		}
 		// При первом ручном изменении переносим из старой панели только явно сохранённые решения.
@@ -208,8 +169,13 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 			const preferenceKey = groupPreferenceKey(key);
 			if (expandedGroups[preferenceKey] === undefined) patch[preferenceKey] = value;
 		}
-		for (const group of targets) patch[group.preferenceKey] = expanded;
+		for (const key of keys) patch[key] = expanded;
 		onGroupChoicesChange(patch);
+	}
+	function orderActions(parent: string, keys: string[], index: number, name: string, allKeys: string[] = keys) {
+		if (!editingOrder || hasFilters || keys.length < 2) return null;
+		return <OrderActions keys={keys} index={index} label={name} move={delta =>
+			onOrderChange(parent, moveBashSibling(keys, index, delta, [...new Set([...(bashScriptOrder[parent] ?? []), ...allKeys])]))} />;
 	}
 	async function perform(action: 'run' | 'hide' | 'scan', key: string, entry?: BashScriptEntry) {
 		if (inFlight.current.has(key)) return;
@@ -230,12 +196,22 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 		}
 	}
 	const actions = <span className="pm-qn-header-actions pm-bs-actions" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
-		{entries && <span className="pm-qn-count" title="Скриптов в списке">{hasFilters ? `${visible.length}/${entries.length}` : entries.length}</span>}
+		{entries && <span className="pm-qn-count" title="Скриптов в списке">{hasFilters || visibleCount !== entries.length ? `${visibleCount}/${entries.length}` : entries.length}</span>}
 		<button type="button" className="pm-qn-icon-btn" title="Поиск и фильтры скриптов" aria-label="Поиск и фильтры скриптов"
 			aria-expanded={showFilters} aria-controls={showFilters ? filters : undefined} data-active={hasFilters || undefined}
 			onClick={() => { setSearchOpen(!showFilters); if (collapsed) onToggleCollapse(); }}><QuickNoteIcon name="search" size={15} /></button>
-		{!collapsed && groups.length > 1 && <button type="button" className="pm-qn-icon-btn pm-bs-fold" title={groupAction}
-			aria-label={groupAction} onClick={() => setGroupsExpanded(groups, !collapseGroups)}>
+		{!collapsed && (hiddenCount > 0 || showHidden) && <button type="button" className="pm-qn-icon-btn"
+			title="Показать скрытые подгруппы" aria-label="Показать скрытые подгруппы" aria-pressed={showHidden} data-active={showHidden || undefined}
+			onClick={() => setShowHidden(!showHidden)}><QuickNoteIcon name="eye" size={15} /></button>}
+		{!collapsed && (entries?.length ?? 0) > 1 && <button type="button" className="pm-qn-icon-btn" title={hasFilters ? 'Для изменения порядка сбросьте фильтры' : 'Изменить порядок'}
+			aria-label="Изменить порядок" aria-pressed={editingOrder && !hasFilters} data-active={editingOrder && !hasFilters || undefined} disabled={hasFilters}
+			onClick={() => setEditingOrder(!editingOrder)}>
+			<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+				<path d="M4 13V3m-3 3 3-3 3 3m5-3v10m-3-3 3 3 3-3" />
+			</svg>
+		</button>}
+		{!collapsed && foldKeys.length > 1 && <button type="button" className="pm-qn-icon-btn pm-bs-fold" title={groupAction}
+			aria-label={groupAction} onClick={() => setGroupsExpanded(foldKeys, !collapseGroups)}>
 			<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
 				<path d={collapseGroups ? 'm5 2 3 3 3-3 M3 8h10 m-8 6 3-3 3 3' : 'm5 5 3-3 3 3 M3 8h10 m-8 3 3 3 3-3'} />
 			</svg>
@@ -256,21 +232,50 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 		</div>}
 		{(error || listError) && <div className="pm-qn-error" role="alert">{error || listError}{listError && <button className="pm-qn-btn is-secondary" type="button" onClick={() => void reload()}>Повторить</button>}</div>}
 		{busy.has('scan') && <span className="pm-qn-empty" role="status">Поиск скриптов в проекте…</span>}
-		{!listError && !visible.length && <div className="pm-qn-empty" role="status">{entries === null ? 'Загрузка скриптов…' : hasFilters ? 'Подходящих скриптов нет.' : 'Скриптов пока нет. Добавьте файл кнопкой «+».'}</div>}
-		{groups.map(group => {
-			const expanded = isGroupExpanded(group);
-			return <ProjectGroup key={group.key} group={group} duplicateName={duplicateNames.has(group.name)}
-				expanded={expanded} toggle={() => setGroupsExpanded([group], !expanded)}>
-				{expanded && <ScriptFolders group={group} projectFolders={foldersByProject.get(group.root ?? '')} renderRow={(entry, displayPath) => {
-					const key = entry.scope + ':' + entry.id;
-					const target = hideTarget?.scope === entry.scope && hideTarget.id === entry.id ? hideTarget : null;
-					return <BashScriptRow key={key} entry={entry} displayPath={displayPath} busy={busy.has(key)}
-						launching={busy.get(key) === 'run'} historyOpen={historyKey === key} hideTarget={target}
-						onRun={() => void perform('run', key, entry)} onEdit={opener => openEditor(opener, entry)}
-						onHistory={() => setHistoryKey(historyKey === key ? '' : key)} onHide={setHideTarget}
-						confirmHide={shown => void perform('hide', key, shown)} />;
-				}} />}
-			</ProjectGroup>;
+		{!listError && !visibleCount && <div className="pm-qn-empty" role="status">{entries === null ? 'Загрузка скриптов…' : hiddenCount > 0 ? 'Подгруппы скрыты. Их можно показать кнопкой с глазом в шапке виджета.' : hasFilters ? 'Подходящих скриптов нет.' : 'Скриптов пока нет. Добавьте файл кнопкой «+».'}</div>}
+		{groups.map((group, groupIndex) => {
+			const expanded = projectExpanded(group);
+			const folderKeys = group.folders.map(folder => folder.key);
+			return <section className="pm-bs-group" key={group.key}>
+				<GroupHeading title={group.name} path={duplicateNames.has(group.name) ? group.root : undefined} hint={group.root}
+					count={group.visibleCount} expanded={expanded} toggle={() => setGroupsExpanded([group.preferenceKey], !expanded)}
+					orderActions={orderActions(PROJECT_ORDER_KEY, groupKeys, groupIndex, group.name, allGroupKeys)}>
+					{expanded && group.folders.map((folder, folderIndex) => {
+						const hidden = !!bashScriptHiddenFolders[folder.key];
+						const hasHeading = hasFolderHeading(group.showFolders, folder.key);
+						const open = !hasHeading || isExpanded(folder.key, true);
+						const keys = folder.entries.map(scriptKey);
+						const rows = open && folder.entries.map((entry, index) => {
+							const key = keys[index];
+							const target = hideTarget?.scope === entry.scope && hideTarget.id === entry.id ? hideTarget : null;
+							const path = entry.project?.relativePath;
+							return <BashScriptRow key={key} entry={entry} displayPath={path?.slice(path.lastIndexOf('/') + 1)} busy={busy.has(key)}
+								favorite={!!bashScriptFavorites[key]} onToggleFavorite={() => onFavoriteChange(key, !bashScriptFavorites[key])}
+								rowOrderActions={orderActions(folder.key, keys, index, entry.name)}
+								launching={busy.get(key) === 'run'} historyOpen={historyKey === key} hideTarget={target}
+								onRun={() => void perform('run', key, entry)} onEdit={opener => openEditor(opener, entry)}
+								onHistory={() => setHistoryKey(historyKey === key ? '' : key)} onHide={setHideTarget}
+								confirmHide={shown => void perform('hide', key, shown)} />;
+						});
+						if (!hasHeading) return <React.Fragment key={folder.key}>{rows}</React.Fragment>;
+						const visibilityLabel = (hidden ? 'Вернуть подгруппу ' : 'Скрыть подгруппу ') + folder.title;
+						return <li className="pm-bs-folder" key={folder.key} data-hidden={hidden || undefined}>
+							<GroupHeading folder title={folder.title} hint={folder.path} expanded={open}
+								toggle={() => setGroupsExpanded([folder.key], !open)}
+								visibilityAction={<button type="button" className="pm-qn-icon-btn pm-bs-folder-visibility"
+									aria-label={visibilityLabel} title={visibilityLabel}
+									onClick={() => {
+										onFolderHiddenChange(folder.key, !hidden);
+										if (hidden && hiddenCount === 1) setShowHidden(false);
+									}}><QuickNoteIcon name={hidden ? 'eye' : 'eye-closed'} size={13} /></button>}
+								orderActions={orderActions(group.preferenceKey, folderKeys, folderIndex, folder.title,
+									group.allFolderKeys)}>
+								{rows}
+							</GroupHeading>
+						</li>;
+					})}
+				</GroupHeading>
+			</section>;
 		})}
 	</div>;
 	return <>{renderShell(actions, body)}<style>{BASH_SCRIPTS_CSS}</style></>;

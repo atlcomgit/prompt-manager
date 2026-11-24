@@ -863,6 +863,13 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			onPreferencesChange?.(next);
 		}
 	}, [onPreferencesChange]);
+	/** Only active flags occupy space in Settings Sync; preserve other changes made during this render. */
+	function changeBashScriptFlag(field: 'bashScriptFavorites' | 'bashScriptHiddenFolders', key: string, enabled: boolean) {
+		const flags = { ...preferencesRef.current[field] };
+		if (enabled) flags[key] = true;
+		else delete flags[key];
+		updatePreferences({ [field]: flags });
+	}
 	const hiddenSections = preferences.hiddenSections;
 	/**
 	 * Сохраняет скрытие виджетов меню «⋯», затем сообщает о снова показанных: настройка уходит расширению раньше
@@ -1773,6 +1780,14 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		bashScripts: (
 			<BashScriptsWidget
 				expandedGroups={expanded}
+				bashScriptOrder={preferences.bashScriptOrder}
+				bashScriptFavorites={preferences.bashScriptFavorites}
+				onOrderChange={(parent, order) => updatePreferences({
+					bashScriptOrder: { ...preferencesRef.current.bashScriptOrder, [parent]: order },
+				})}
+				onFavoriteChange={(key, favorite) => changeBashScriptFlag('bashScriptFavorites', key, favorite)}
+				bashScriptHiddenFolders={preferences.bashScriptHiddenFolders}
+				onFolderHiddenChange={(key, hidden) => changeBashScriptFlag('bashScriptHiddenFolders', key, hidden)}
 				onGroupChoicesChange={patch => updatePreferences({ expanded: { ...preferencesRef.current.expanded, ...patch } })}
 				collapsed={isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'bashScripts')}
 				onToggleCollapse={() => toggleSectionCollapse('bashScripts')}

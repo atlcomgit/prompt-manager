@@ -7,6 +7,8 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { lock } from 'proper-lockfile';
+import { refreshUserSettingsSnapshot } from './userSettingsSnapshot.js';
 import { QuickCommandSettings, QUICK_COMMAND_PREFIX, QUICK_COMMAND_TRANSACTION } from './quickCommandSettings.js';
 import type { EditorPromptViewState, EditorPromptViewStateKeySource, EditorPromptPlanViewMode, SidebarState } from '../types/prompt.js';
 import type {
@@ -59,6 +61,11 @@ const PROMPT_QUICK_NOTES_SETTING_FIELDS = [
 /** Глобальный строковый порядок остаётся доступен старым версиям. */
 const QUICK_COMMAND_METADATA_FIELDS = ['categories', 'texts'] as const;
 const PROMPT_QUICK_COMMANDS_SETTING_FIELDS = ['items', ...QUICK_COMMAND_METADATA_FIELDS, 'target'] as const;
+/** Independently stored dashboard settings; changes inside object maps merge by key. */
+const PROMPT_DASHBOARD_PREFERENCE_FIELDS = ['showAllBranchProjects', 'hiddenSections'] as const;
+const DASHBOARD_MAP_FIELDS = ['expanded', 'bashScriptOrder', 'bashScriptFavorites', 'bashScriptHiddenFolders'] as const;
+const DASHBOARD_MAP_READ_TOKEN = 'dashboardMapStorage.readToken';
+const DASHBOARD_EXPANDED_SETTING = 'dashboardPreferences.expanded';
 /** Пользовательские настройки application наследуются Tunnel и участвуют в штатной Settings Sync. */
 export const PROMPT_UI_SETTING_KEYS = [
 	'editor.sectionOrder.main', 'editor.sectionOrder.process',
@@ -73,9 +80,8 @@ export const PROMPT_UI_SETTING_KEYS = [
 	...PROMPT_QUICK_NOTES_SETTING_FIELDS.map(field => `dashboardPreferences.quickNotes.${field}`),
 	...PROMPT_QUICK_COMMANDS_SETTING_FIELDS.map(field => `${QUICK_COMMAND_PREFIX}.${field}`),
 	`${QUICK_COMMAND_PREFIX}.textBindings`, QUICK_COMMAND_TRANSACTION,
-	'dashboardPreferences.expanded',
-	'dashboardPreferences.showAllBranchProjects',
-	'dashboardPreferences.hiddenSections',
+	...PROMPT_DASHBOARD_PREFERENCE_FIELDS.map(field => `dashboardPreferences.${field}`),
+	...DASHBOARD_MAP_FIELDS.map(field => `dashboardPreferences.${field}`),
 ] as const;
 
 interface ChatSessionLatestRequestState {
@@ -1138,7 +1144,8 @@ export class StateService {
 				if (Object.keys(commands[field]).length) seeds[`${QUICK_COMMAND_PREFIX}.${field}`] = commands[field];
 			}
 			seeds[`${QUICK_COMMAND_PREFIX}.target`] = commands.target;
-			for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
+			seeds[DASHBOARD_EXPANDED_SETTING] = preferences.expanded;
+			for (const field of PROMPT_DASHBOARD_PREFERENCE_FIELDS) {
 				seeds[`dashboardPreferences.${field}`] = preferences[field];
 			}
 		}
@@ -1148,7 +1155,13 @@ export class StateService {
 	/** Переносит отсутствующие листья, повторно проверяя Settings Sync перед каждой отдельной записью. */
 	private async migrateMissingPromptUiSettings(seeds: Record<string, unknown>): Promise<void> {
 		for (const [key, value] of Object.entries(seeds)) {
-			if (value !== undefined && this.readPromptUiSetting(key) === undefined) {
+			if (value === undefined || this.readPromptUiSetting(key) !== undefined) continue;
+			if (key === DASHBOARD_EXPANDED_SETTING) {
+				// An explicit toggle can arrive after capture, before this legacy seed reaches the profile.
+				await this.withDashboardMapLock(async read => {
+					if (read(key) === undefined) await this.writePromptUiSetting(key, value);
+				});
+			} else {
 				await this.writePromptUiSetting(key, value);
 			}
 		}
@@ -1281,7 +1294,7 @@ export class StateService {
 			QUICK_COMMAND_PREFIX, PROMPT_QUICK_COMMANDS_SETTING_FIELDS,
 			legacy && serializeDashboardQuickCommands(legacy.quickCommands),
 		));
-		for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
+		for (const field of [...PROMPT_DASHBOARD_PREFERENCE_FIELDS, ...DASHBOARD_MAP_FIELDS]) {
 			const value = this.readPromptUiSetting(`dashboardPreferences.${field}`);
 			if (value !== undefined) {
 				Object.assign(next, { [field]: value });
@@ -1296,6 +1309,46 @@ export class StateService {
 		const fallback = normalizePromptDashboardPreferences(migration);
 		await this.mutatePromptUiSettings(() => this.quickCommandSettings.edit(edit,
 			() => this.getPromptDashboardPreferences()?.quickCommands ?? fallback.quickCommands), source, fallback);
+	}
+
+	/** Read and write a whole settings map while other windows of the profile wait for their turn. */
+	private async withDashboardMapLock(update: (read: (key: string) => unknown) => Promise<void>): Promise<void> {
+		const directory = this.context.globalStorageUri.fsPath;
+		await fs.mkdir(directory, { recursive: true });
+		const release = await lock(directory, {
+			lockfilePath: path.join(directory, 'dashboard-map-settings.lock'),
+			retries: { retries: 12, minTimeout: 25, maxTimeout: 250 },
+		});
+		try {
+			const configuration = () => vscode.workspace.getConfiguration('promptManager');
+			const read = (key: string) => configuration().inspect(key)?.globalValue;
+			await refreshUserSettingsSnapshot(DASHBOARD_MAP_READ_TOKEN, read,
+				async (key, value) => { await configuration().update(key, value, vscode.ConfigurationTarget.Global); },
+				'Настройки панели «Обзор» ещё обновляются в этом окне.');
+			await update(read);
+		} finally {
+			await release();
+		}
+	}
+
+	/** Merge per-key changes into a fresh snapshot. An explicit full save replaces the legacy disclosure map. */
+	private async saveDashboardMaps(next: PromptDashboardPreferences, base?: PromptDashboardPreferences): Promise<void> {
+		const fields = DASHBOARD_MAP_FIELDS.filter(field => (field === 'expanded' && !base)
+			|| JSON.stringify(next[field]) !== JSON.stringify(base?.[field] ?? {}));
+		if (!fields.length) return;
+		await this.withDashboardMapLock(async read => {
+			for (const field of fields) {
+				const key = `dashboardPreferences.${field}`;
+				const raw = read(key);
+				// A first folder toggle migrates remaining disclosures. An explicit global null overrides the legacy map.
+				const stored = raw === undefined && field === 'expanded'
+					? this.context.workspaceState.get<PromptDashboardPreferences>(PROMPT_DASHBOARD_PREFERENCES_KEY)?.expanded
+						?? base?.expanded : raw;
+				const current = normalizePromptDashboardPreferences({ [field]: stored })[field];
+				const previous = base?.[field] ?? (field === 'expanded' ? undefined : {});
+				await this.writePromptUiSetting(key, applyUiSettingsChanges(current, next[field], previous));
+			}
+		});
 	}
 
 	/** Адресный патч preferences сохраняет параллельные изменения других полей и явный false. */
@@ -1315,7 +1368,8 @@ export class StateService {
 			await this.quickCommandSettings.save(next.quickCommands, base?.quickCommands,
 				() => this.getPromptDashboardPreferences()?.quickCommands ?? next.quickCommands);
 			await this.writePromptUiFields(QUICK_COMMAND_PREFIX, ['target'], next.quickCommands, base?.quickCommands);
-			for (const field of ['expanded', 'showAllBranchProjects', 'hiddenSections'] as const) {
+			await this.saveDashboardMaps(next, base);
+			for (const field of PROMPT_DASHBOARD_PREFERENCE_FIELDS) {
 				if (base && JSON.stringify(base[field]) === JSON.stringify(next[field])) {
 					continue;
 				}

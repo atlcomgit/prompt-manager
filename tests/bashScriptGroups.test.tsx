@@ -29,6 +29,9 @@ test('script groups remember clicks across mounts and reveal matches without ove
 	const requests: BashScriptsRequest[] = [];
 	let state: Record<string, unknown> = { unrelated: 'kept', bashScriptGroupChoices: { 'project:/two': false } };
 	let preferences: Record<string, boolean> = {};
+	let order: Record<string, string[]> = {};
+	let favorites: Record<string, boolean> = {};
+	let hiddenFolders: Record<string, boolean> = {};
 	const patches: Record<string, boolean>[] = [];
 	Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { configurable: true, value: true });
 	Object.defineProperty(globalThis, 'acquireVsCodeApi', { configurable: true, value: () => ({
@@ -53,7 +56,13 @@ test('script groups remember clicks across mounts and reveal matches without ove
 	/** Настройки дашборда переживают полное пересоздание панели и её локальной памяти. */
 	function Dashboard() {
 		const [expanded, setExpanded] = React.useState(preferences);
-		return <BashScriptsWidget collapsed={false} onToggleCollapse={() => {}} expandedGroups={expanded}
+		const [orders, setOrder] = React.useState(order);
+		const [stars, setStars] = React.useState(favorites);
+		const [hidden, setHidden] = React.useState(hiddenFolders);
+		return <BashScriptsWidget bashScriptOrder={orders} bashScriptFavorites={stars} bashScriptHiddenFolders={hidden}
+			onOrderChange={(key, value) => setOrder(order = { ...order, [key]: value })}
+			onFavoriteChange={(key, value) => setStars(favorites = { ...favorites, [key]: value })}
+			onFolderHiddenChange={(key, value) => setHidden(hiddenFolders = { ...hiddenFolders, [key]: value })} collapsed={false} onToggleCollapse={() => {}} expandedGroups={expanded}
 			onGroupChoicesChange={patch => {
 				patches.push(patch);
 				preferences = { ...preferences, ...patch };
@@ -126,5 +135,66 @@ test('script groups remember clicks across mounts and reveal matches without ove
 	assert.equal(document.querySelectorAll('.pm-bs-entry').length, 0);
 	await click('Раскрыть все группы');
 	assert.equal(document.querySelectorAll('.pm-bs-entry').length, 11);
+	const folderNames = () => Array.from(document.querySelectorAll('.pm-bs-folder-title'), title => title.textContent);
+	const namesInBuild = () => Array.from(document.querySelectorAll('ul[aria-label="ci/tools/build"] .pm-bs-name'), row => row.textContent);
+	await click('build');
+	assert.deepEqual(namesInBuild(), []);
+	await click('Поиск и фильтры скриптов');
+	await search('ci/tools/build/a.sh');
+	assert.deepEqual(namesInBuild(), ['check-1']);
+	await click('build');
+	await search('');
+	assert.deepEqual(namesInBuild(), []);
+	await click('build');
+	await click('Избранное · check-1');
+	assert.equal(button('Избранное · check-1').getAttribute('aria-pressed'), 'true');
+	await click('Изменить порядок');
+	await click('Переместить check-1 ниже');
+	assert.deepEqual(namesInBuild(), ['check-5', 'check-1', 'check-9']);
+	await click('Переместить builder выше');
+	assert.deepEqual(folderNames(), ['builder', 'build', 'ci/tools']);
+	const projects = () => Array.from(document.querySelectorAll('.pm-bs-group-path'), code => code.textContent);
+	const moveProject = document.querySelectorAll<HTMLButtonElement>('[aria-label="Переместить Сервис выше"]')[1];
+	await act(async () => { moveProject.click(); });
+	assert.deepEqual(projects(), ['/two', '/one']);
+	await click('Изменить порядок');
+	await click('Скрыть подгруппу build');
+	assert.deepEqual(folderNames(), ['builder', 'ci/tools']);
+	await search('ci/tools/build/a.sh');
+	assert.equal(document.querySelectorAll('.pm-bs-entry').length, 0);
+	await search('');
+	await act(async () => root.render(null));
+	const added = script('new', '/two');
+	added.path = added.project!.relativePath = 'ci/tools/build/new.sh';
+	added.absolutePath = '/two/' + added.path;
+	entries.push(added);
+	await mount();
+	assert.deepEqual(projects(), ['/two', '/one']);
+	assert.deepEqual(folderNames(), ['builder', 'ci/tools']);
+	await click('Показать скрытые подгруппы');
+	assert.deepEqual(folderNames(), ['builder', 'build', 'ci/tools']);
+	assert.deepEqual(namesInBuild(), ['check-5', 'check-1', 'check-9', 'new']);
+	assert.equal(button('Избранное · check-1').getAttribute('aria-pressed'), 'true');
+	await click('Вернуть подгруппу build');
+	assert.equal(button('Показать скрытые подгруппы'), null);
+	await click('Избранное · check-1');
+	assert.equal(button('Избранное · check-1').getAttribute('aria-pressed'), 'false');
+	// The first snapshot can precede Git discovery. A folder can also become the project's only remaining folder.
+	await click('build');
+	await click('Скрыть подгруппу build');
+	const nestedRoot = '/two/ci/tools';
+	for (const entry of entries.filter(entry => entry.path.startsWith('ci/tools/build/'))) {
+		entry.project = { root: nestedRoot, name: 'Вложенный', relativePath: entry.path.slice('ci/tools/'.length) };
+	}
+	await act(async () => root.render(null));
+	await mount();
+	assert.equal(button('Вложенный'), null, 'the hidden folder stays hidden after a change of Git owner');
+	await click('Показать скрытые подгруппы');
+	await click('Вложенный');
+	await click('Вернуть подгруппу build');
+	assert.equal(button('build').getAttribute('aria-expanded'), 'false');
+	await click('build');
+	assert.deepEqual(Array.from(document.querySelectorAll('ul[aria-label="build"] .pm-bs-name'), row => row.textContent),
+		['check-5', 'check-1', 'check-9', 'new']);
 	assert.equal(state.unrelated, 'kept');
 });

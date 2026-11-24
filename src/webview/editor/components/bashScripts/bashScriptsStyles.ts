@@ -4,8 +4,12 @@ export const BASH_SCRIPTS_CSS = `
 	--bs-run: var(--vscode-testing-iconPassed, var(--vscode-charts-green, var(--vscode-terminal-ansiGreen, #39834d)));
 	--bs-result: var(--vscode-descriptionForeground);
 	--bs-border: var(--vscode-panel-border, var(--vscode-widget-border, var(--vscode-descriptionForeground)));
-	container-type: inline-size; display: flex; flex-direction: column; min-width: 0; gap: 2px;
+	container-type: inline-size; display: grid; min-width: 0; gap: 2px 4px;
+	grid-template-columns: max-content minmax(0, 1fr) max-content max-content max-content;
 }
+/* Share the action widths throughout the tree so clocks, flags and long names cannot shift the path column. */
+.pm-bs > *, .pm-bs-heading, .pm-bs-history, .pm-bs-hide { grid-column: 1 / -1; }
+.pm-bs-group, .pm-bs-list, .pm-bs-folder, .pm-bs-entry, .pm-bs-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
 .pm-bs-actions [data-active] { color: var(--vscode-textLink-foreground); }
 .pm-bs-filters { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 3px; min-width: 0; }
 .pm-bs-filters input { flex: 1 1 160px; }
@@ -18,6 +22,12 @@ export const BASH_SCRIPTS_CSS = `
 }
 .pm-bs-filters select { flex: 1 1 75px; }
 .pm-bs-group { min-width: 0; }
+.pm-bs-heading { display: flex; align-items: center; min-width: 0; }
+.pm-bs-heading .pm-bs-group-toggle { flex: 1; min-width: 0; }
+.pm-bs-order-actions { display: inline-flex; flex: none; }
+.pm-bs-order-actions .pm-qn-icon-btn { width: 20px; height: 22px; }
+.pm-bs .pm-bs-order-actions button[aria-disabled=true] { color: var(--vscode-disabledForeground); cursor: default; }
+.pm-bs-up { transform: rotate(180deg); }
 .pm-bs-group-toggle, .pm-bs-row {
 	display: flex; align-items: center; gap: 4px; width: 100%; min-width: 0; box-sizing: border-box; border-radius: 4px;
 }
@@ -38,14 +48,26 @@ export const BASH_SCRIPTS_CSS = `
 .pm-bs-list { margin-inline-start: 9px; }
 .pm-bs-row {
 	position: relative;
-	display: grid; grid-template-columns: 20px minmax(0, 28%) minmax(0, 1fr) auto auto 40px;
-	height: 28px; padding: 0 3px;
+	display: grid;
+	height: 24px; padding: 0 3px;
 }
 .pm-bs-row[data-runnable], .pm-bs-row button:enabled { cursor: pointer; }
-.pm-bs-details { grid-column: 2 / 4; display: grid; grid-template-columns: subgrid; align-items: center; min-width: 0; }
+/* Keep the name and path on one line, reserving most of the available text width for the name. */
+.pm-bs-details { display: grid; grid-template-columns: minmax(0, 1fr) min(32%, 18ch); gap: 4px; align-items: center; min-width: 0; }
+.pm-bs-name-cell { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .pm-bs-name { font-size: 13px; }
+.pm-bs-name[data-favorite] { font-weight: 700; }
+.pm-bs-name-cell .pm-bs-favorite { width: 18px; height: 18px; }
+.pm-bs-favorite[aria-pressed=true] { color: var(--vscode-charts-yellow, var(--vscode-foreground)); }
+/* Leave the title its full width until a pointer or keyboard user interacts with the row. */
+@media (hover: hover) {
+	.pm-bs-row:not(:hover, :focus-within) .pm-bs-favorite[aria-pressed=false] {
+		position: absolute; opacity: 0; pointer-events: none;
+	}
+}
 .pm-bs-path-hint {
-	text-align: start; background: transparent;
+	/* Clip the directory prefix first. The isolated text keeps its original reading order. */
+	direction: rtl; text-align: left; background: transparent;
 	color: color-mix(in srgb, var(--vscode-descriptionForeground) 93%, var(--vscode-editor-background));
 }
 body:is(.vscode-high-contrast, .vscode-high-contrast-light) .pm-bs-path-hint { color: var(--vscode-descriptionForeground); }
@@ -66,13 +88,20 @@ body:is(.vscode-high-contrast, .vscode-high-contrast-light) .pm-bs-path-hint { c
 }
 .pm-bs-last-run:is(:hover, [aria-expanded=true]) { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
 .pm-bs-last-run > span, .pm-bs-duration { color: var(--bs-result); }
-@container (max-width: 450px) {
-	.pm-bs-availability > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.pm-bs-duration-short, .pm-bs-duration-clock { display: none; }
+/* Reserve more of a narrow widget for the script name. The history tooltip keeps the full duration. */
+@container (max-width: 520px) {
+	.pm-bs-duration-full { display: none; }
+	.pm-bs-duration-short { display: inline; }
 }
-@container (max-width: 330px) {
-	.pm-bs-row { grid-template-columns: 18px minmax(0, 1fr) auto auto 40px; }
-	.pm-bs-details { grid-column: 2; grid-template-columns: minmax(0, 1fr); gap: 0; line-height: 14px; }
-	.pm-bs-path-hint { font-size: 10px; line-height: 12px; }
+@container (max-width: 480px) {
+	.pm-bs-availability > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+	.pm-bs-row, .pm-bs-details { column-gap: 3px; }
+	.pm-bs-path-hint { font-size: 10px; }
+}
+@container (max-width: 350px) {
+	.pm-bs-duration-short { display: none; }
+	.pm-bs-duration-clock { display: inline; }
 }
 .pm-bs-history, .pm-bs-hide { margin: 1px 0 4px 23px; }
 .pm-bs-history { padding-inline-start: 3px; font-size: 11px; color: var(--vscode-descriptionForeground); }
@@ -115,6 +144,8 @@ body:is(.vscode-high-contrast, .vscode-high-contrast-light) .pm-bs-path-hint { c
 .pm-bs-editor .pm-qn-modal-f > span { flex: 1 1 100px; }
 .pm-bs-editor .pm-qn-modal-f > [role=alert] { flex-basis: 100%; }
 .pm-bs-folder-title { display: flex; align-items: center; gap: 5px; padding: 3px 4px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.pm-bs-heading .pm-bs-folder-visibility { width: 20px; height: 20px; flex: none; }
+.pm-bs-folder[data-hidden] > .pm-bs-heading .pm-bs-folder-title { font-style: italic; opacity: .8; }
 .pm-bs-folder-title svg { flex: none; }
 .pm-bs-folder-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 `;

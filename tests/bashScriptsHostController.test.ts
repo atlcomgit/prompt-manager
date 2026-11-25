@@ -9,6 +9,9 @@ import type { BashScriptsRequest, BashScriptsResponse } from '../src/types/bashS
 import { BashScriptsService } from '../src/services/bashScriptsService.js';
 import { readBashScript, saveBashScript } from '../src/services/bashScriptFile.js';
 
+/** Команда запуска контроллера: переход в рабочую папку и выполнение файла одним аргументом. */
+const RUN_COMMAND = 'cd -- "$PROMPT_MANAGER_BASH_CWD" && bash -- "$PROMPT_MANAGER_BASH_SCRIPT"';
+
 /** Каждый сценарий получает собственный контракт VS Code, не открывая реальный редактор. */
 function loadController(vscode: unknown): typeof import('../src/providers/bashScriptsHostController.js').BashScriptsHostController {
 	const moduleId = require.resolve('../src/providers/bashScriptsHostController.js');
@@ -86,7 +89,9 @@ test('Список и поиск получают актуальные корн�
 		onDidOpenRepository: (listener: () => void) => { opened = listener; return disposable; },
 		onDidCloseRepository: (listener: () => void) => { closed = listener; return disposable; },
 	};
+	const copied: string[] = [];
 	const Controller = loadController({ workspace, Uri: { file: (fsPath: string) => ({ fsPath }) }, RelativePattern: class {},
+		env: { clipboard: { writeText: async (text: string) => { copied.push(text); } } },
 		window: { onDidChangeWindowState: subscribe, onDidStartTerminalShellExecution: subscribe, onDidEndTerminalShellExecution: subscribe, onDidCloseTerminal: subscribe } });
 	let notifyPanel!: () => void;
 	const panelChanged = new Promise<void>(resolve => { notifyPanel = resolve; });
@@ -126,6 +131,30 @@ test('Список и поиск получают актуальные корн�
 	assert.deepEqual(searched.entries![0].project, { ...inner, name: 'Сервер' });
 	assert.equal(scans, 2);
 	assert.equal(gitRequests, 2);
+	await t.test('Чтение сообщает абсолютный путь и путь от ближайшего проекта, копирование пишет их в буфер VS Code', async () => {
+		const entry = initial.entries![0];
+		async function send(data: Omit<BashScriptsRequest, 'type' | 'requestId'>) {
+			let response: BashScriptsResponse | undefined;
+			await host.handleMessage({ type: 'bashScriptsRequest', requestId: 'copy', ...data }, async message => { response = message; });
+			return response!;
+		}
+		const read = await send({ action: 'read', scope: entry.scope, path: entry.path });
+		assert.equal(read.error, undefined);
+		assert.equal(read.result?.absolutePath, file);
+		assert.equal(read.result?.relativePath, 'check.sh', 'путь отсчитывается от вложенного репозитория, как в строке');
+		for (const pathKind of ['relative', 'absolute'] as const) {
+			assert.equal((await send({ action: 'copyPath', scope: entry.scope, path: entry.path, pathKind })).error, undefined);
+		}
+		assert.deepEqual(copied, ['check.sh', file]);
+		// Файл вне рабочих папок и репозиториев имеет только абсолютный путь.
+		const outside = path.join(path.dirname(dir), 'outside.sh');
+		const external = await send({ action: 'read', scope: 'global', path: outside });
+		assert.equal(external.result?.absolutePath, outside);
+		assert.equal(external.result?.relativePath, undefined);
+		assert.match((await send({ action: 'copyPath', scope: 'global', path: outside, pathKind: 'relative' })).error!, /вне проектов/);
+		assert.match((await send({ action: 'copyPath', scope: entry.scope, path: entry.path })).error!, /вид пути/);
+		assert.deepEqual(copied, ['check.sh', file], 'отказ не меняет буфер обмена');
+	});
 	await t.test('Чтение по абсолютному пути сохраняет исходный относительный путь, пока он ведёт к выбранному файлу', async () => {
 		const entry = initial.entries![0];
 		async function readPicked() {
@@ -148,7 +177,7 @@ test('Список и поиск получают актуальные корн�
 });
 
 /** Контракт терминала VS Code исполняется настоящим Bash с теми же командой, путём и окружением. */
-test('Bash host scans lazily and starts an isolated editor terminal with the actual Bash exit code', async t => {
+test('Bash host scans lazily and starts an isolated panel terminal with the actual Bash exit code', async t => {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pm-bash-host-'));
 	t.after(() => fs.rm(dir, { recursive: true, force: true }));
 	const root = path.join(dir, 'workspace');
@@ -162,11 +191,11 @@ test('Bash host scans lazily and starts an isolated editor terminal with the act
 	let changed = 0;
 	let fileDeleted = (_uri: { fsPath: string }) => {};
 	let commandOutput = '';
-	let terminalOptions: { location: { viewColumn: number; preserveFocus: boolean }; cwd: string; shellPath: string; env: Record<string, string> } | undefined;
+	let terminalOptions: { location: number; cwd: string; shellPath: string; env: Record<string, string> } | undefined;
 	type TerminalEvent = { terminal: unknown; execution: unknown; exitCode: number };
 	let end = (_event: TerminalEvent) => {};
 	const vscode = {
-		Uri: { file: (fsPath: string) => ({ fsPath }) }, RelativePattern: class {}, ViewColumn: { Active: -1 },
+		Uri: { file: (fsPath: string) => ({ fsPath }) }, RelativePattern: class {}, TerminalLocation: { Panel: 1 },
 		workspace: { workspaceFolders: [{ uri: { fsPath: root } }], textDocuments: [], isTrusted: true,
 			onDidChangeWorkspaceFolders: subscribe,
 			createFileSystemWatcher: (pattern: unknown) => ({ ...disposable, onDidCreate: subscribe, onDidChange: subscribe,
@@ -221,7 +250,7 @@ test('Bash host scans lazily and starts an isolated editor terminal with the act
 	changed = 0;
 	assert.equal((await request({ action: 'run', ref, path: file })).error, undefined);
 	assert.equal(shown, 0);
-	assert.deepEqual(terminalOptions?.location, { viewColumn: vscode.ViewColumn.Active, preserveFocus: true });
+	assert.equal(terminalOptions?.location, vscode.TerminalLocation.Panel);
 	for (let i = 0; i < 200 && changed < 2; i++) await new Promise(resolve => setTimeout(resolve, 10));
 	assert.equal(commandOutput, root);
 	const history = (await request({ action: 'list' })).result!.entries![0].history;
@@ -305,7 +334,7 @@ test('Bash history follows a dispatched command even with an immediate exit or a
 	let mode: 'closed' | 'rejected' | 'instant' | 'no-code' | 'plain' = 'closed';
 	let dispatched = 0;
 	const Controller = loadController({
-		Uri: { file: (fsPath: string) => ({ fsPath }) }, RelativePattern: class {}, ViewColumn: { Active: -1 },
+		Uri: { file: (fsPath: string) => ({ fsPath }) }, RelativePattern: class {}, TerminalLocation: { Panel: 1 },
 		workspace: { isTrusted: true, workspaceFolders: [{ uri: { fsPath: root } }], getWorkspaceFolder: () => ({ uri: { fsPath: root } }),
 			onDidChangeWorkspaceFolders: subscribe, createFileSystemWatcher: () => ({
 				...disposable, onDidCreate: subscribe, onDidChange: subscribe, onDidDelete: subscribe,
@@ -321,7 +350,7 @@ test('Bash history follows a dispatched command even with an immediate exit or a
 			createTerminal: () => {
 				const terminal = { ...disposable, exitStatus: mode === 'closed' ? { code: 1 } : undefined,
 					show: () => shown.push(dispatched), sendText: (value: string) => {
-						assert.equal(value, 'bash -- "$PROMPT_MANAGER_BASH_SCRIPT"');
+						assert.equal(value, RUN_COMMAND);
 						dispatched++;
 					}, shellIntegration: mode === 'plain' ? undefined : { executeCommand(value: string) {
 						if (mode === 'rejected') throw new Error('Команда отклонена терминалом');
@@ -363,6 +392,8 @@ test('Bash history follows a dispatched command even with an immediate exit or a
 	assert.equal(noCode.exitCode, undefined);
 	assert.ok(noCode.finishedAt);
 
+	// Свободный терминал прошлых запусков иначе был бы использован повторно. Пользователь закрывает его.
+	closeListeners.forEach(listener => listener(lastTerminal));
 	mode = 'plain';
 	assert.equal((await run()).error, undefined);
 	const unfinished = (await catalog.get(ref)).history[0];
@@ -373,7 +404,7 @@ test('Bash history follows a dispatched command even with an immediate exit or a
 		return list!.result!.entries![0].activeRunIds;
 	};
 	assert.equal(await activeIds(), undefined);
-	started({ terminal: lastTerminal, execution: { commandLine: { value: 'bash -- "$PROMPT_MANAGER_BASH_SCRIPT"' } } });
+	started({ terminal: lastTerminal, execution: { commandLine: { value: RUN_COMMAND } } });
 	assert.deepEqual(await activeIds(), [unfinished.id]);
 	closeListeners.forEach(listener => listener(lastTerminal));
 	for (let i = 0; i < 200 && !(await catalog.get(ref)).history[0].finishedAt; i++) {
@@ -416,7 +447,7 @@ test('Active shell runs survive workspace folder changes and clear after complet
 		createFileSystemWatcher: () => ({ ...disposable, onDidCreate: subscribe, onDidChange: subscribe, onDidDelete: subscribe }),
 	};
 	const Controller = loadController({
-		workspace, Uri: { file: (fsPath: string) => ({ fsPath }) }, RelativePattern: class {}, ViewColumn: { Active: -1 },
+		workspace, Uri: { file: (fsPath: string) => ({ fsPath }) }, RelativePattern: class {}, TerminalLocation: { Panel: 1 },
 		window: {
 			onDidChangeWindowState: subscribe, onDidStartTerminalShellExecution: subscribe, onDidCloseTerminal: subscribe,
 			onDidEndTerminalShellExecution: (listener: typeof shellEnded) => { shellEnded = listener; return disposable; },
@@ -474,61 +505,177 @@ test('Active shell runs survive workspace folder changes and clear after complet
 	assert.equal(failedWrite.history[0].id, second);
 });
 
-test('Launching from a panel restores its tab only when the new terminal displaced it', async t => {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pm-bash-focus-'));
+/** Запуск не трогает вкладки редактора и панель, а кнопка строки показывает нужный терминал до его закрытия. */
+test('Scripts start in an unrevealed panel terminal that the row can show until the terminal closes', async t => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pm-bash-panel-'));
 	t.after(() => fs.rm(dir, { recursive: true, force: true }));
 	const projectDir = path.join(dir, 'metadata');
 	const globalDir = path.join(dir, 'global');
 	const file = path.join(dir, 'build.sh');
 	await fs.writeFile(file, 'exit 0');
 	const catalog = new BashScriptsService({ projectStorageDir: projectDir, globalStorageDir: globalDir, workspaceRoots: [dir] });
-	const { scope, id } = await catalog.register('project', 'Сборка', file);
+	const ref = await catalog.register('project', 'Сборка', file);
 	const disposable = { dispose() {} };
 	const subscribe = () => disposable;
-	class TabInputTerminal {}
-	const group = { viewColumn: 2, isActive: true, activeTab: undefined as unknown, tabs: [] as unknown[] };
-	const original = { group, label: 'Обзор', input: {} };
-	const other = { group, label: 'README.md', input: {} };
-	const listeners = new Set<(event: { opened: unknown[] }) => void>();
-	const reveal = t.mock.fn();
-	const panel = { active: true, viewColumn: group.viewColumn, onDidDispose: subscribe, reveal };
-	let terminalName = '';
+	const closeListeners = new Set<(terminal: unknown) => void>();
+	const terminals: { name: string; shown: unknown[][] }[] = [];
+	let changed = 0;
+	// Мок без tabGroups и ViewColumn: обращение запуска к вкладкам редактора завершило бы тест ошибкой.
 	const Controller = loadController({
-		Uri: { file: (fsPath: string) => ({ fsPath }) }, RelativePattern: class {}, TabInputTerminal,
+		Uri: { file: (fsPath: string) => ({ fsPath }) }, RelativePattern: class {}, TerminalLocation: { Panel: 1 },
 		workspace: { isTrusted: true, workspaceFolders: [{ name: 'Проект', uri: { fsPath: dir } }],
 			getWorkspaceFolder: () => undefined, onDidChangeWorkspaceFolders: subscribe,
 			createFileSystemWatcher: () => ({ ...disposable, onDidCreate: subscribe, onDidChange: subscribe, onDidDelete: subscribe }) },
-		window: { onDidChangeWindowState: subscribe, onDidStartTerminalShellExecution: subscribe, onDidEndTerminalShellExecution: subscribe, onDidCloseTerminal: subscribe,
-			tabGroups: { activeTabGroup: group, onDidChangeTabs(listener: (event: { opened: unknown[] }) => void) {
-				listeners.add(listener);
-				return { dispose: () => listeners.delete(listener) };
+		window: { onDidChangeWindowState: subscribe, onDidStartTerminalShellExecution: subscribe, onDidEndTerminalShellExecution: subscribe,
+			onDidCloseTerminal: (listener: (terminal: unknown) => void) => {
+				closeListeners.add(listener);
+				return { dispose: () => closeListeners.delete(listener) };
+			},
+			createTerminal: (options: { name: string; location: unknown }) => {
+				assert.equal(options.location, 1);
+				const terminal = { ...disposable, name: options.name, shown: [] as unknown[][],
+					show(...args: unknown[]) { terminal.shown.push(args); },
+					shellIntegration: { executeCommand: (value: string) => ({ commandLine: { value } }) } };
+				terminals.push(terminal);
+				return terminal;
 			} },
-			createTerminal: (options: { name: string; location: { viewColumn: number; preserveFocus: boolean } }) => {
-				assert.deepEqual(options.location, { viewColumn: panel.viewColumn, preserveFocus: true });
-				terminalName = options.name;
-				return { ...disposable, shellIntegration: { executeCommand: (value: string) => ({ commandLine: { value } }) } };
+	});
+	const host = new Controller(globalDir, projectDir, () => { changed++; });
+	t.after(() => host.dispose());
+	async function request(data: Omit<BashScriptsRequest, 'type' | 'requestId'>) {
+		let response: BashScriptsResponse | undefined;
+		await host.handleMessage({ type: 'bashScriptsRequest', requestId: 'panel', ...data }, async message => { response = message; });
+		return response!;
+	}
+	const entry = async () => (await request({ action: 'list' })).result!.entries![0];
+	// Закрытие сохраняет итог запуска в истории. Ожидаем это обновление, а не фиксированное время.
+	const close = async (terminal: unknown) => {
+		const before = changed;
+		closeListeners.forEach(listener => listener(terminal));
+		for (let i = 0; i < 200 && changed === before; i++) await new Promise(resolve => setTimeout(resolve, 10));
+	};
+	assert.equal((await request({ action: 'run', ref, path: file })).error, undefined);
+	assert.equal((await request({ action: 'run', ref, path: file })).error, undefined);
+	assert.deepEqual(terminals.map(terminal => [terminal.name, terminal.shown.length]), [['Bash · Сборка', 0], ['Bash · Сборка', 0]]);
+	const running = await entry();
+	assert.deepEqual(running.terminalRunIds, running.history.map(run => run.id), 'новый терминал идёт первым');
+	const [newer, older] = running.terminalRunIds!;
+
+	assert.equal((await request({ action: 'showTerminal', ref, runId: older })).error, undefined);
+	assert.deepEqual(terminals.map(terminal => terminal.shown), [[[]], []], 'показывается терминал выбранного запуска с фокусом');
+	assert.match((await request({ action: 'showTerminal', ref: { ...ref, scope: 'global' }, runId: older })).error!, /уже закрыт/);
+
+	await close(terminals[0]);
+	assert.deepEqual((await entry()).terminalRunIds, [newer]);
+	const beforeClosed = changed;
+	assert.match((await request({ action: 'showTerminal', ref, runId: older })).error!, /уже закрыт/);
+	assert.ok(changed > beforeClosed, 'отказ обновляет список, чтобы строка убрала устаревшую кнопку');
+	await close(terminals[1]);
+	const closed = await entry();
+	assert.equal(closed.terminalRunIds, undefined);
+	assert.deepEqual(closed.history.map(run => run.endedBy), ['terminal', 'terminal']);
+	assert.deepEqual(terminals.map(terminal => terminal.shown.length), [1, 0]);
+});
+
+/** Повторный запуск идёт в свободный терминал скрипта. Занятая оболочка, другой файл и закрытый процесс требуют нового. */
+test('Rerunning a script reuses its idle terminal and opens a new one only for a busy shell, another file or an exited process', async t => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pm-bash-reuse-'));
+	t.after(() => fs.rm(dir, { recursive: true, force: true }));
+	const projectDir = path.join(dir, 'metadata');
+	const globalDir = path.join(dir, 'global');
+	const file = path.join(dir, 'build.sh');
+	const other = path.join(dir, 'other.sh');
+	await fs.writeFile(file, 'exit 0');
+	await fs.writeFile(other, 'exit 0');
+	const catalog = new BashScriptsService({ projectStorageDir: projectDir, globalStorageDir: globalDir, workspaceRoots: [dir] });
+	const ref = await catalog.register('project', 'Сборка', file);
+	const disposable = { dispose() {} };
+	const subscribe = () => disposable;
+	type Execution = { commandLine: { value: string } };
+	type ShellEvent = { terminal: unknown; execution: Execution; exitCode?: number };
+	type FakeTerminal = { commands: string[]; env: Record<string, string>; shown: number; last?: Execution; exitStatus?: { code: number } };
+	let started = (_event: ShellEvent) => {};
+	let ended = (_event: ShellEvent) => {};
+	const terminals: FakeTerminal[] = [];
+	const Controller = loadController({
+		Uri: { file: (fsPath: string) => ({ fsPath }) }, RelativePattern: class {}, TerminalLocation: { Panel: 1 },
+		workspace: { isTrusted: true, workspaceFolders: [{ name: 'Проект', uri: { fsPath: dir } }],
+			getWorkspaceFolder: () => ({ uri: { fsPath: dir } }), onDidChangeWorkspaceFolders: subscribe,
+			createFileSystemWatcher: () => ({ ...disposable, onDidCreate: subscribe, onDidChange: subscribe, onDidDelete: subscribe }) },
+		window: { onDidChangeWindowState: subscribe, onDidCloseTerminal: subscribe, showWarningMessage: () => {},
+			onDidStartTerminalShellExecution: (listener: typeof started) => { started = listener; return disposable; },
+			onDidEndTerminalShellExecution: (listener: typeof ended) => { ended = listener; return disposable; },
+			createTerminal: (options: { env: Record<string, string> }) => {
+				const terminal = { ...disposable, commands: [] as string[], env: options.env, shown: 0,
+					last: undefined as Execution | undefined, exitStatus: undefined as { code: number } | undefined,
+					show() { terminal.shown++; },
+					shellIntegration: { executeCommand(value: string) {
+						terminal.commands.push(value);
+						terminal.last = { commandLine: { value } };
+						started({ terminal, execution: terminal.last });
+						return terminal.last;
+					} } };
+				terminals.push(terminal);
+				return terminal;
 			} },
 	});
 	const host = new Controller(globalDir, projectDir, () => {});
 	t.after(() => host.dispose());
-	for (const mode of ['active', 'switched', 'inactive'] as const) {
-		panel.active = mode !== 'inactive';
-		group.activeTab = panel.active ? original : other;
-		group.tabs = [original, other];
-		reveal.mock.resetCalls();
-		await host.handleMessage({ type: 'bashScriptsRequest', action: 'run', path: file, requestId: mode, ref: { scope, id } },
-			async response => { assert.equal(response.error, undefined); }, panel as unknown as import('vscode').WebviewPanel);
-		assert.equal(terminalName, 'Bash · Сборка');
-		if (mode === 'switched') {
-			group.activeTab = other;
-			listeners.forEach(notify => notify({ opened: [] }));
-		}
-		const terminalTab = { group, label: terminalName, input: new TabInputTerminal() };
-		group.tabs.push(terminalTab);
-		listeners.forEach(notify => notify({ opened: [terminalTab] }));
-		group.activeTab = terminalTab;
-		listeners.forEach(notify => notify({ opened: [] }));
-		assert.deepEqual(reveal.mock.calls.map(call => call.arguments), mode === 'active' ? [[group.viewColumn, true]] : []);
-		assert.equal(listeners.size, 0);
+	async function request(data: Omit<BashScriptsRequest, 'type' | 'requestId'>) {
+		let response: BashScriptsResponse | undefined;
+		await host.handleMessage({ type: 'bashScriptsRequest', requestId: 'reuse', ...data }, async message => { response = message; });
+		assert.equal(response?.error, undefined);
+		return response!.result!;
 	}
+	const entry = async () => (await request({ action: 'list' })).entries![0];
+	const run = async () => {
+		await request({ action: 'run', ref, path: (await entry()).absolutePath });
+		return (await entry()).history[0].id;
+	};
+	// Окончание сохраняется в историю асинхронно: дожидаемся записи, чтобы следующий запуск видел актуальный каталог.
+	const finish = async (terminal: FakeTerminal, id: string) => {
+		ended({ terminal, execution: terminal.last!, exitCode: 0 });
+		for (let i = 0; i < 200 && !(await catalog.get(ref)).history.find(item => item.id === id)?.finishedAt; i++) {
+			await new Promise(resolve => setTimeout(resolve, 10));
+		}
+	};
+
+	const first = await run();
+	assert.equal(terminals.length, 1);
+	assert.deepEqual(terminals[0].commands, [RUN_COMMAND]);
+	assert.equal(terminals[0].env.PROMPT_MANAGER_BASH_CWD, dir);
+	await finish(terminals[0], first);
+	const second = await run();
+	assert.equal(terminals.length, 1, 'свободный терминал скрипта используется повторно');
+	assert.deepEqual(terminals[0].commands, [RUN_COMMAND, RUN_COMMAND]);
+	assert.deepEqual((await entry()).terminalRunIds, [second], 'терминал показан последним запуском');
+	await request({ action: 'showTerminal', ref, runId: first });
+	assert.equal(terminals[0].shown, 1, 'прежний запуск того же терминала по-прежнему можно показать');
+
+	// Пока команда выполняется, повторная отправка прервала бы её: нужен новый терминал.
+	const third = await run();
+	assert.equal(terminals.length, 2);
+	assert.deepEqual((await entry()).terminalRunIds, [third, second]);
+	await finish(terminals[0], second);
+	await finish(terminals[1], third);
+	// Пользователь запустил в терминале свою программу после окончания скрипта: этот терминал занят.
+	started({ terminal: terminals[1], execution: { commandLine: { value: 'tail -f build.log' } } });
+	const fourth = await run();
+	assert.deepEqual(terminals.map(terminal => terminal.commands.length), [3, 1], 'занятый пользователем терминал пропущен');
+	await finish(terminals[0], fourth);
+	ended({ terminal: terminals[1], execution: { commandLine: { value: 'tail -f build.log' } }, exitCode: 130 });
+	const fifth = await run();
+	assert.deepEqual(terminals.map(terminal => terminal.commands.length), [4, 1], 'выбирается терминал последнего запуска');
+	await finish(terminals[0], fifth);
+
+	// Окружение терминала задано при создании, поэтому другой файл скрипта получает новый терминал.
+	await catalog.edit(ref, 'Сборка', other, { name: 'Сборка', path: 'build.sh' });
+	const sixth = await run();
+	assert.equal(terminals.length, 3);
+	assert.equal(terminals[2].env.PROMPT_MANAGER_BASH_SCRIPT, other);
+	await finish(terminals[2], sixth);
+	// Завершённый процесс оболочки не принимает команды.
+	terminals[2].exitStatus = { code: 0 };
+	await run();
+	assert.equal(terminals.length, 4);
 });

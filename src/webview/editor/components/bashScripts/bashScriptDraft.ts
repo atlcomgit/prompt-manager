@@ -2,8 +2,14 @@ import type { BashScriptEntry, BashScriptRef, BashScriptScope } from '../../../.
 import { getVsCodeApi } from '../../../shared/vscodeApi';
 import { requestBashScripts, type BashScriptsAction } from './useBashScripts';
 
-/** Обе области разрешают относительный путь от одного корня. Ревизию конкретного файла проверяет host. */
-interface FileSnapshot { path: string; revision: string; original: string; exists?: boolean; nativeEditorReason?: string }
+/**
+ * Обе области разрешают относительный путь от одного корня. Ревизию конкретного файла проверяет host.
+ * Пути для копирования относятся к прочитанному файлу; у черновика старой версии их нет до повторного чтения.
+ */
+interface FileSnapshot {
+	path: string; revision: string; original: string; exists?: boolean; nativeEditorReason?: string;
+	absolutePath?: string; relativePath?: string;
+}
 interface PendingSave { id: string; deadline: number }
 export interface ScriptDraft {
 	ref?: BashScriptRef;

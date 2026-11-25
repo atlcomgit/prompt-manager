@@ -8,6 +8,18 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ### 2026-11-25
 
+#### Added
+- Copy a Bash script's project-relative or absolute path with the buttons next to the path field in the script editor.
+- Filter Bash scripts to favorites from the status filter.
+
+#### Changed
+- Run Bash scripts in a terminal in the bottom panel without opening it, so the dashboard and focus stay in place.
+  While the run's terminal is still open, a row button shows it, including after the command ends.
+- Rerun a Bash script in its already open terminal when the previous command has finished and the shell is idle,
+  instead of opening a new terminal for every run.
+- Add inner padding to Bash subgroup frames and more space between them.
+- Show Bash projects as one framed block separated by thin lines, with project headers shaded between the widget header and the list background in every theme.
+
 #### Fixed
 - Paste Quick Commands into the existing Claude Code conversation. A closed or ambiguous chat uses the clipboard for manual insertion.
 

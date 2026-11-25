@@ -9,7 +9,7 @@ export const BASH_SCRIPTS_CSS = `
 }
 /* Share the action widths throughout the tree so clocks, flags and long names cannot shift the path column. */
 .pm-bs > *, .pm-bs-heading, .pm-bs-history, .pm-bs-hide { grid-column: 1 / -1; }
-.pm-bs-group, .pm-bs-list, .pm-bs-folder, .pm-bs-entry, .pm-bs-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
+.pm-bs-groups, .pm-bs-group, .pm-bs-list, .pm-bs-folder, .pm-bs-entry, .pm-bs-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
 .pm-bs-actions [data-active] { color: var(--vscode-textLink-foreground); }
 .pm-bs-filters { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 3px; min-width: 0; }
 .pm-bs-filters input { flex: 1 1 160px; }
@@ -21,18 +21,30 @@ export const BASH_SCRIPTS_CSS = `
 	background: var(--vscode-input-background); color: var(--vscode-input-foreground);
 }
 .pm-bs-filters select { flex: 1 1 75px; }
-/* Inset outlines keep the original height of every script row and collapsed heading. */
-.pm-bs-group, .pm-bs-folder {
+/* Внутренняя рамка не меняет высоту строк и свёрнутых заголовков. Все проекты лежат в одной общей рамке. */
+.pm-bs-groups, .pm-bs-folder {
 	min-width: 0; outline: 1px solid var(--vscode-contrastBorder, color-mix(in srgb, var(--vscode-foreground) 30%, transparent));
 	outline-offset: -1px; border-radius: 5px;
 }
-.pm-bs-group > .pm-bs-heading {
-	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); border-radius: 4px 4px 0 0;
+.pm-bs-group { min-width: 0; }
+/* Соседние проекты разделяет тонкая линия без промежутка, поэтому общая рамка остаётся сплошной. */
+.pm-bs-group + .pm-bs-group {
+	border-block-start: 1px solid var(--vscode-contrastBorder, color-mix(in srgb, var(--vscode-foreground) 20%, transparent));
 }
-.pm-bs-group > .pm-bs-heading:only-child { border-radius: 4px; }
+/*
+ * Заголовок проекта лежит между шапкой виджета (sideBar) и фоном блока (editor): 40% шапки и 60% фона.
+ * Шапка бывает и темнее, и светлее фона, поэтому смесь не сливается с ней ни в светлой, ни в тёмной теме.
+ * Скругляются только углы, совпадающие с углами общей рамки.
+ */
+.pm-bs-group > .pm-bs-heading {
+	background: color-mix(in srgb, var(--vscode-sideBar-background) 40%, var(--vscode-editor-background));
+}
+.pm-bs-group:first-child > .pm-bs-heading { border-radius: 4px 4px 0 0; }
+.pm-bs-group:last-child > .pm-bs-heading:only-child { border-end-start-radius: 4px; border-end-end-radius: 4px; }
+/* Содержимое подгруппы отступает от её рамки, чтобы заголовок папки и строки не прилегали к линии. */
 .pm-bs-folder {
 	outline-color: var(--vscode-contrastBorder, color-mix(in srgb, var(--vscode-foreground) 20%, transparent));
-	border-radius: 3px;
+	border-radius: 3px; padding: 4px 8px;
 }
 .pm-bs-heading { display: flex; align-items: center; min-width: 0; }
 .pm-bs-heading .pm-bs-group-toggle { flex: 1; min-width: 0; }
@@ -59,8 +71,9 @@ export const BASH_SCRIPTS_CSS = `
 .pm-bs-group-count { margin-inline-start: auto; padding-inline: 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
 .pm-bs-list, .pm-bs-history ol { padding: 0; margin: 0; list-style: none; }
 .pm-bs-list { margin-inline-start: 9px; }
+/* Рамки подгрупп разделены промежутком 4 px. От заголовка проекта их отделяют 3 px, от низа проекта — 4 px. */
 .pm-bs-group > .pm-bs-list:has(> .pm-bs-folder) {
-	margin-block: 1px 2px; margin-inline: 6px 3px; row-gap: 2px;
+	margin-block: 3px 4px; margin-inline: 6px 3px; row-gap: 4px;
 }
 .pm-bs-row {
 	position: relative;
@@ -97,6 +110,8 @@ body:is(.vscode-high-contrast, .vscode-high-contrast-light) .pm-bs-path-hint { c
 .pm-bs-flags { gap: 2px; }
 .pm-bs-global, .pm-bs-last-run { color: var(--vscode-descriptionForeground); }
 .pm-bs-tools .pm-qn-icon-btn { width: 20px; height: 22px; }
+/* Общая колонка расширяется под кнопку терминала. Выравнивание вправо держит «Редактировать» и «Убрать» на месте. */
+.pm-bs-tools { justify-content: end; }
 .pm-bs-availability { gap: 3px; color: var(--vscode-editorWarning-foreground); font-size: 11px; }
 .pm-bs-last-run {
 	justify-content: end; gap: 4px; min-width: 25px; height: 22px; padding: 0 3px; border: 0; border-radius: 3px;
@@ -156,6 +171,10 @@ body:is(.vscode-high-contrast, .vscode-high-contrast-light) .pm-bs-path-hint { c
 .pm-bs-editor label > input, .pm-bs-editor label > textarea, .pm-bs-editor label > select, .pm-bs-path { display: block; margin-top: 4px; }
 .pm-bs-editor .pm-bs-path { display: flex; }
 .pm-bs-path input { flex: 1 1 110px; min-width: 0; }
+/* Кнопки копирования не сжимаются: при нехватке ширины переносится весь ряд, а не подпись. */
+.pm-bs-copy-path { flex: none; }
+/* Сообщение для экранного диктора не занимает место в ряду и не сдвигает кнопки. */
+.pm-bs-sr-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .pm-bs-editor textarea { tab-size: 4; resize: vertical; min-height: 80px; line-height: 1.45; }
 .pm-bs-editor .pm-qn-modal-f > span { flex: 1 1 100px; }
 .pm-bs-editor .pm-qn-modal-f > [role=alert] { flex-basis: 100%; }

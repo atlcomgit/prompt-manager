@@ -64,6 +64,11 @@ function isInside(root: string, file: string): boolean {
 	return relative !== '' && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
 }
 
+/** Путь внутри проекта всегда записывается через «/», независимо от разделителя платформы. */
+function projectRelativePath(project: ProjectRoot, file: string): string {
+	return path.relative(project.root, file).split(path.sep).join('/');
+}
+
 function projectRoot(root: string, name?: string): ProjectRoot {
 	const absolute = path.resolve(root);
 	return { root: absolute, name: name || path.basename(absolute) || absolute };
@@ -400,8 +405,18 @@ export class BashScriptsService {
 		const owner = projects.find(project => isInside(project.root, absolutePath));
 		const entry: BashScriptEntry = { id: record.id, scope, name: record.name, path: record.path, absolutePath,
 			available, history: record.history };
-		if (owner) entry.project = { ...owner, relativePath: path.relative(owner.root, absolutePath).split(path.sep).join('/') };
+		if (owner) entry.project = { ...owner, relativePath: projectRelativePath(owner, absolutePath) };
 		return entry;
+	}
+
+	/**
+	 * Абсолютный путь и путь от ближайшего корня проекта, как в строке виджета.
+	 * Для файла вне рабочих папок и известных репозиториев относительного пути нет.
+	 */
+	describePath(scope: BashScriptScope, filePath: string): { absolutePath: string; relativePath?: string } {
+		const absolutePath = this.resolvePath(scope, filePath);
+		const owner = this.projectRoots.find(project => isInside(project.root, absolutePath));
+		return owner ? { absolutePath, relativePath: projectRelativePath(owner, absolutePath) } : { absolutePath };
 	}
 
 	/** Читаем состояние файла непосредственно перед действием с выбранной записью. */

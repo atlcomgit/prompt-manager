@@ -113,6 +113,8 @@ interface RowProps {
 	historyOpen: boolean;
 	hideTarget: BashScriptEntry | null;
 	onRun(): void;
+	/** Открывает панель с терминалом указанного запуска. */
+	onShowTerminal(runId: string): void;
 	onEdit(opener: HTMLButtonElement): void;
 	onHistory(): void;
 	onHide(target: BashScriptEntry | null): void;
@@ -121,7 +123,7 @@ interface RowProps {
 
 /** The row shows live elapsed time or the newest measured run. History keeps each run's own duration. */
 export function BashScriptRow({ entry, displayPath, favorite, onToggleFavorite, rowOrderActions,
-	busy, launching, historyOpen, hideTarget, onRun, onEdit, onHistory, onHide, confirmHide }: RowProps) {
+	busy, launching, historyOpen, hideTarget, onRun, onShowTerminal, onEdit, onHistory, onHide, confirmHide }: RowProps) {
 	const historyId = useId();
 	const hideId = useId();
 	const active = entry.activeRunIds?.length
@@ -147,7 +149,10 @@ export function BashScriptRow({ entry, displayPath, favorite, onToggleFavorite, 
 	const disabled = !entry.available || busy || running;
 	const relativePath = displayPath ?? entry.project?.relativePath ?? entry.path;
 	const runLabel = running ? `Выполняется ${entry.name}` : launching ? `Запуск ${entry.name}` : `Запустить ${entry.name}`;
-	const runHint = entry.available ? `Запустить в отдельном терминале\n${entry.absolutePath}` : 'Файл недоступен';
+	const runHint = entry.available ? `Запустить в отдельном терминале нижней панели\n${entry.absolutePath}` : 'Файл недоступен';
+	// Терминал остаётся доступным и после окончания команды, пока пользователь его не закроет.
+	const terminalRunId = entry.terminalRunIds?.[0];
+	const terminalHint = running ? 'Показать терминал выполняющегося запуска' : 'Показать терминал последнего запуска';
 	return <li className="pm-bs-entry">
 		<div className="pm-bs-row" data-runnable={!disabled || undefined} onDoubleClick={event => {
 			if (!disabled && event.target instanceof Element && !event.target.closest('button')) onRun();
@@ -182,6 +187,8 @@ export function BashScriptRow({ entry, displayPath, favorite, onToggleFavorite, 
 			</button>
 			<div className="pm-bs-tools">
 				{rowOrderActions ?? <>
+					{terminalRunId && <button type="button" className="pm-qn-icon-btn" aria-label={`Показать терминал ${entry.name}`}
+						title={terminalHint} onClick={() => onShowTerminal(terminalRunId)}><QuickNoteIcon name="terminal" size={14} /></button>}
 					<button type="button" className="pm-qn-icon-btn" data-pm-bash-editor-opener={entry.scope + ':' + entry.id} aria-label={`Редактировать ${entry.name}`} title="Редактировать скрипт"
 						onClick={e => onEdit(e.currentTarget)}><QuickNoteIcon name="file-code" size={14} /></button>
 					<button type="button" className="pm-qn-icon-btn" aria-label={`Убрать ${entry.name} из виджета`} title="Убрать из виджета"

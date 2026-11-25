@@ -7,10 +7,11 @@ import type { BashScriptEntry, BashScriptRef, BashScriptsRequest, BashScriptsRes
 
 /** Исключения относятся только к автодобавлению. В этих папках файл можно выбрать вручную. */
 const AUTO_EXCLUDE = '{**/.git/**,**/node_modules/**,**/vendor/**,**/.venv/**,**/dist/**,**/build/**,**/out/**,**/out-tests/**,**/.vscode/prompt-manager/**}';
-const RUN_COMMAND = 'bash -- "$PROMPT_MANAGER_BASH_SCRIPT"';
+/** Переход в рабочую папку нужен повторному запуску: после окончания скрипта пользователь мог сменить папку оболочки. */
+const RUN_COMMAND = 'cd -- "$PROMPT_MANAGER_BASH_CWD" && bash -- "$PROMPT_MANAGER_BASH_SCRIPT"';
 const AVAILABILITY_KEY = 'bashScripts.availability.v1';
 
-/** Связывает события оболочки и вкладки с одной командой, пока сохраняется начало её запуска. */
+/** Связывает события оболочки и терминала с одной командой, пока сохраняется начало её запуска. */
 interface TerminalRun {
 	ref: BashScriptRef;
 	id: string;
@@ -18,6 +19,18 @@ interface TerminalRun {
 	execution?: vscode.TerminalShellExecution;
 	startRecorded: boolean;
 	ended?: { at: string; code?: number; by: 'shell' | 'terminal' };
+}
+
+/** Открытый терминал запусков одного скрипта. Повторный запуск идёт в него, пока оболочка свободна. */
+interface ScriptTerminal {
+	ref: BashScriptRef;
+	/** Запуски этого терминала от старого к новому. */
+	runIds: string[];
+	/** Окружение терминала задано при создании: другой файл или рабочая папка требуют нового терминала. */
+	scriptPath: string;
+	cwd: string;
+	/** Оболочка выполняет команду — запуск скрипта или набранную пользователем после его окончания. */
+	executing: boolean;
 }
 
 /** Встроенный Git сообщает уже открытые корни, включая вложенные репозитории и рабочие деревья. */
@@ -39,6 +52,8 @@ export class BashScriptsHostController implements vscode.Disposable {
 	private readonly subscriptions: vscode.Disposable[] = [];
 	private notifyTimer?: ReturnType<typeof setTimeout>;
 	private readonly runs = new Map<vscode.Terminal, TerminalRun>();
+	/** Терминалы отправленных запусков до их закрытия. Порядок вставки соответствует времени последнего запуска. */
+	private readonly terminals = new Map<vscode.Terminal, ScriptTerminal>();
 	private repositoryRoots: string[] = [];
 	private repositoriesReady?: Promise<void>;
 	private disposed = false;
@@ -63,6 +78,9 @@ export class BashScriptsHostController implements vscode.Disposable {
 				if (state.focused && this.discovery === 'ready') void this.verifyAvailability(true);
 			}),
 			vscode.window.onDidStartTerminalShellExecution(({ terminal, execution }) => {
+				// Любая команда занимает оболочку: повторный запуск прервал бы её через Ctrl+C.
+				const shell = this.terminals.get(terminal);
+				if (shell) shell.executing = true;
 				const run = this.runs.get(terminal);
 				if (run && !run.execution && execution.commandLine.value === RUN_COMMAND) {
 					run.execution = execution;
@@ -70,13 +88,19 @@ export class BashScriptsHostController implements vscode.Disposable {
 				}
 			}),
 			vscode.window.onDidEndTerminalShellExecution(event => {
+				const shell = this.terminals.get(event.terminal);
+				if (shell) shell.executing = false;
 				const run = this.runs.get(event.terminal);
 				if (run && (run.execution === event.execution ||
 					(!run.execution && event.execution.commandLine.value === RUN_COMMAND))) {
 					this.finish(event.terminal, 'shell', event.exitCode);
 				}
 			}),
-			vscode.window.onDidCloseTerminal(terminal => this.finish(terminal, 'terminal')),
+			vscode.window.onDidCloseTerminal(terminal => {
+				// Закрытый терминал больше нельзя показать. Строка убирает кнопку при следующем чтении списка.
+				if (this.terminals.delete(terminal)) this.notifySoon();
+				this.finish(terminal, 'terminal');
+			}),
 		);
 		for (const dir of [globalDir, projectDir]) {
 			const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(dir), BASH_SCRIPTS_FILE));
@@ -202,15 +226,24 @@ export class BashScriptsHostController implements vscode.Disposable {
 			const key = run.ref.scope + ':' + run.ref.id;
 			active.set(key, [...(active.get(key) ?? []), run.id]);
 		}
-		for (const entry of entries) entry.activeRunIds = active.get(entry.scope + ':' + entry.id);
+		// Один терминал представлен последним запуском. Новые терминалы идут первыми: строка показывает последний.
+		const opened = new Map<string, string[]>();
+		for (const { ref, runIds } of this.terminals.values()) {
+			const key = ref.scope + ':' + ref.id;
+			opened.set(key, [runIds[runIds.length - 1], ...(opened.get(key) ?? [])]);
+		}
+		for (const entry of entries) {
+			entry.activeRunIds = active.get(entry.scope + ':' + entry.id);
+			entry.terminalRunIds = opened.get(entry.scope + ':' + entry.id);
+		}
 		if (this.repositoryWarning) warnings.push(this.repositoryWarning);
 		return { entries, warning: warnings.join('\n') || undefined };
 	}
 
-	async handleMessage(message: BashScriptsRequest, post: (message: BashScriptsResponse) => Promise<void>, panel?: vscode.WebviewPanel): Promise<void> {
+	async handleMessage(message: BashScriptsRequest, post: (message: BashScriptsResponse) => Promise<void>): Promise<void> {
 		let response: BashScriptsResponse;
 		try {
-			const result = await this.apply(message, panel);
+			const result = await this.apply(message);
 			response = { type: 'bashScriptsResponse', requestId: message.requestId, result };
 		} catch (error) {
 			response = { type: 'bashScriptsResponse', requestId: message.requestId, error: error instanceof Error ? error.message : String(error) };
@@ -218,7 +251,7 @@ export class BashScriptsHostController implements vscode.Disposable {
 		await post(response);
 	}
 
-	private async apply(message: BashScriptsRequest, panel?: vscode.WebviewPanel): Promise<BashScriptsResult> {
+	private async apply(message: BashScriptsRequest): Promise<BashScriptsResult> {
 		if (!vscode.workspace.isTrusted) throw new Error('Для работы с Bash-скриптами нужна доверенная рабочая область.');
 		const { action, ref } = message;
 		if (action === 'list') return this.list();
@@ -237,6 +270,17 @@ export class BashScriptsHostController implements vscode.Disposable {
 			return file ? { path: file.fsPath } : {};
 		}
 		if (ref && (!ref.id || (ref.scope !== 'project' && ref.scope !== 'global'))) throw new Error('Выберите запись каталога.');
+		if (action === 'showTerminal') {
+			// Показ — явное действие пользователя: панель открывается, фокус переходит в терминал для ввода.
+			const terminal = [...this.terminals].find(([, run]) => !!message.runId && run.runIds.includes(message.runId)
+				&& run.ref.scope === ref?.scope && run.ref.id === ref.id)?.[0];
+			if (!terminal) {
+				this.invalidate();
+				throw new Error('Терминал этого запуска уже закрыт.');
+			}
+			terminal.show();
+			return {};
+		}
 		if (action === 'hide' || action === 'run') {
 			if (!ref || !message.path) throw new Error('Выберите скрипт в актуальном списке.');
 			try {
@@ -246,7 +290,7 @@ export class BashScriptsHostController implements vscode.Disposable {
 					if (entry.absolutePath !== message.path) {
 						throw new Error('Путь скрипта изменился в другом окне. Проверьте обновлённую запись перед запуском.');
 					}
-					await this.run(entry, panel);
+					await this.run(entry);
 				}
 			} finally {
 				// При отказе строка тоже получает новый путь или признак недоступности.
@@ -257,6 +301,15 @@ export class BashScriptsHostController implements vscode.Disposable {
 			const scope = ref?.scope ?? message.scope;
 			if ((scope !== 'project' && scope !== 'global') || !message.path) throw new Error('Укажите область и путь скрипта.');
 			const file = this.catalog.resolvePath(scope, message.path);
+			if (action === 'copyPath') {
+				// Буфер VS Code доступен и там, где браузер Tunnel запрещает webview запись в буфер обмена.
+				if (message.pathKind !== 'relative' && message.pathKind !== 'absolute') throw new Error('Укажите вид пути.');
+				const { absolutePath, relativePath } = this.catalog.describePath(scope, file);
+				const text = message.pathKind === 'absolute' ? absolutePath : relativePath;
+				if (!text) throw new Error('Файл находится вне проектов рабочей области, относительного пути нет.');
+				await vscode.env.clipboard.writeText(text);
+				return {};
+			}
 			if (action === 'read' || action === 'openFile') {
 				const { content, revision, mode, nativeEditorReason } = await readBashScript(file);
 				if (action === 'openFile') {
@@ -269,7 +322,8 @@ export class BashScriptsHostController implements vscode.Disposable {
 				const samePath = ref && basePath && basePath !== message.path
 					&& (path.isAbsolute(basePath) || vscode.workspace.workspaceFolders?.length)
 					&& path.relative(this.catalog.resolvePath(scope, basePath), file) === '';
-				return { path: samePath ? basePath : message.path, content, revision, exists: mode !== undefined, nativeEditorReason };
+				return { path: samePath ? basePath : message.path, content, revision, exists: mode !== undefined, nativeEditorReason,
+					...this.catalog.describePath(scope, file) };
 			}
 			if (action !== 'save' || !message.name?.trim() || typeof message.content !== 'string' || !message.revision) {
 				throw new Error('Укажите название и загрузите файл перед сохранением.');
@@ -286,51 +340,25 @@ export class BashScriptsHostController implements vscode.Disposable {
 		return {};
 	}
 
-	/** В одной группе VS Code может выбрать новую вкладку даже с preserveFocus. Возвращаем только панель запуска. */
-	private keepLauncherVisible(panel: vscode.WebviewPanel, terminalName: string): void {
-		const tabs = vscode.window.tabGroups;
-		const group = tabs.activeTabGroup;
-		const original = group.activeTab;
-		if (!panel.active || group.viewColumn !== panel.viewColumn || !original) return;
-		let created: vscode.Tab | undefined;
-		let timeout: ReturnType<typeof setTimeout>;
-		const opened = tabs.onDidChangeTabs(event => {
-			const active = group.activeTab;
-			created ??= event.opened.find(tab => tab.group === group
-				&& tab.input instanceof vscode.TabInputTerminal && tab.label === terminalName);
-			if (created && event.opened.includes(created)) {
-				// Открытие и выбор приходят соседними событиями. Поздний ручной щелчок уже принадлежит пользователю.
-				clearTimeout(timeout);
-				timeout = setTimeout(done, 150);
-			}
-			if (group.isActive && group.tabs.includes(original) && (!active || active === original)) return;
-			done();
-			if (created && active === created && group.isActive && group.tabs.includes(original)) {
-				panel.reveal(group.viewColumn, true);
-			}
-		});
-		const closed = panel.onDidDispose(() => done());
-		timeout = setTimeout(done, 5000);
-		function done() { opened.dispose(); closed.dispose(); clearTimeout(timeout); }
-	}
-
-	/** У отдельной вкладки есть собственные ввод и вывод даже при одновременном запуске одного файла. */
-	private async run(entry: BashScriptEntry, panel?: vscode.WebviewPanel): Promise<void> {
+	/**
+	 * Повторный запуск идёт в свободный терминал этого же скрипта, иначе создаётся новый со своими вводом и выводом.
+	 * Терминал создаётся в нижней панели без show(): VS Code не открывает панель и не переключает вкладки,
+	 * поэтому «Обзор» и фокус остаются на месте. Вкладка редактора так не умеет: она всегда становится видимой.
+	 */
+	private async run(entry: BashScriptEntry): Promise<void> {
 		if (!entry.available || !/\.(?:sh|bash)$/i.test(entry.absolutePath)) throw new Error('Файл Bash-скрипта недоступен.');
 		const run: TerminalRun = { ref: { scope: entry.scope, id: entry.id }, id: randomUUID(),
 			catalog: this.catalog, startRecorded: false };
 		const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(entry.absolutePath));
-		const name = 'Bash · ' + entry.name;
-		if (panel?.active) this.keepLauncherVisible(panel, name);
-		const terminal = vscode.window.createTerminal({ name,
-			location: { viewColumn: panel?.viewColumn ?? vscode.ViewColumn.Active, preserveFocus: true },
-			cwd: folder?.uri.fsPath ?? path.dirname(entry.absolutePath), shellPath: 'bash',
-			env: { PROMPT_MANAGER_BASH_SCRIPT: entry.absolutePath } });
+		const cwd = folder?.uri.fsPath ?? path.dirname(entry.absolutePath);
+		const reused = this.idleTerminal(run.ref, entry.absolutePath, cwd);
+		const terminal = reused ?? vscode.window.createTerminal({ name: 'Bash · ' + entry.name, location: vscode.TerminalLocation.Panel,
+			cwd, shellPath: 'bash', env: { PROMPT_MANAGER_BASH_SCRIPT: entry.absolutePath, PROMPT_MANAGER_BASH_CWD: cwd } });
 		this.runs.set(terminal, run);
 		let startedAt: string;
 		try {
 			if (terminal.exitStatus) throw new Error('Не удалось открыть терминал Bash.');
-			// Ждём интеграцию только своей новой вкладки. При её отсутствии Bash принимает ту же постоянную команду.
+			// Ждём интеграцию только своего нового терминала. При её отсутствии Bash принимает ту же постоянную команду.
 			const integration = terminal.shellIntegration ?? await this.waitForIntegration(terminal);
 			if (terminal.exitStatus || !this.runs.has(terminal)) throw new Error('Терминал Bash закрыт до запуска.');
 			startedAt = new Date().toISOString();
@@ -338,9 +366,18 @@ export class BashScriptsHostController implements vscode.Disposable {
 			else terminal.sendText(RUN_COMMAND);
 		} catch (error) {
 			this.runs.delete(terminal);
-			terminal.dispose();
+			// Терминал с выводом прошлых запусков остаётся у пользователя, закрывается только созданный сейчас.
+			if (!reused) terminal.dispose();
 			throw error;
 		}
+		// Команда отправлена: терминал можно показать, даже если историю не удастся записать.
+		// Повторно использованный терминал переносится в конец, чтобы строка показывала его как последний.
+		const shell = this.terminals.get(terminal) ?? { ref: run.ref, runIds: [], scriptPath: entry.absolutePath, cwd, executing: false };
+		this.terminals.delete(terminal);
+		shell.runIds.push(run.id);
+		// Мгновенная команда могла завершиться до этой строки: тогда оболочка уже свободна.
+		shell.executing = !run.ended;
+		this.terminals.set(terminal, shell);
 		try {
 			await run.catalog.recordRun(run.ref, { id: run.id, startedAt });
 			run.startRecorded = true;
@@ -350,6 +387,20 @@ export class BashScriptsHostController implements vscode.Disposable {
 			return;
 		}
 		if (run.ended) await this.saveCompletion(run, run.ended);
+	}
+
+	/**
+	 * Последний открытый терминал скрипта, в который безопасно отправить команду. Подходит только терминал
+	 * с интеграцией оболочки, подтверждённым окончанием прошлой команды и тем же файлом и рабочей папкой.
+	 * Без интеграции занятость неизвестна, а VS Code перед командой посылает Ctrl+C и прервал бы работающую программу.
+	 */
+	private idleTerminal(ref: BashScriptRef, scriptPath: string, cwd: string): vscode.Terminal | undefined {
+		let found: vscode.Terminal | undefined;
+		for (const [terminal, shell] of this.terminals) {
+			if (shell.ref.scope === ref.scope && shell.ref.id === ref.id && shell.scriptPath === scriptPath && shell.cwd === cwd
+				&& !shell.executing && !this.runs.has(terminal) && !terminal.exitStatus && terminal.shellIntegration) found = terminal;
+		}
+		return found;
 	}
 
 	private waitForIntegration(terminal: vscode.Terminal): Promise<vscode.TerminalShellIntegration | undefined> {
@@ -366,7 +417,7 @@ export class BashScriptsHostController implements vscode.Disposable {
 		});
 	}
 
-	/** Различает окончание команды и закрытие вкладки после отправки команды. */
+	/** Различает окончание команды и закрытие терминала после отправки команды. */
 	private finish(terminal: vscode.Terminal, by: 'shell' | 'terminal', code?: number): void {
 		const run = this.runs.get(terminal);
 		if (!run) return;
@@ -391,5 +442,6 @@ export class BashScriptsHostController implements vscode.Disposable {
 		clearTimeout(this.notifyTimer);
 		this.subscriptions.forEach(subscription => subscription.dispose());
 		this.runs.clear();
+		this.terminals.clear();
 	}
 }

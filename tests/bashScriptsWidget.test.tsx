@@ -15,6 +15,10 @@ test('Bash script filters combine scope, availability and path and order recent 
 	assert.deepEqual(filterBashScripts(entries, '  COMMON  ', 'global', 'missing'), [later, globalEntry]);
 	assert.deepEqual(filterBashScripts(entries, '/WORKSPACE', 'project', 'available'), [project]);
 	assert.deepEqual(filterBashScripts(entries, '', 'all', 'recent'), [later, project]);
+	// Одноимённые записи разных областей отмечаются раздельно: ключ избранного включает область.
+	assert.deepEqual(filterBashScripts(entries, '', 'all', 'favorite', { 'project:same': true, 'global:other': true }), [project]);
+	assert.deepEqual(filterBashScripts(entries, '', 'global', 'favorite', { 'project:same': true }), []);
+	assert.deepEqual(filterBashScripts(entries, '', 'all', 'favorite'), [], 'без отметок фильтр пуст');
 	assert.deepEqual(entries, [project, globalEntry, later]);
 });
 
@@ -75,14 +79,41 @@ test('Bash widget addresses actions by scope + id, protects a file draft and res
 	assert.deepEqual(newest('run').ref, { id: project.id, scope: 'project' });
 	assert.equal(newest('run').path, project.absolutePath);
 	await reply(newest('run'));
-	await reply(newest('list'), { entries: [project, globalEntry] });
+	await reply(newest('list'), { entries: [{ ...project, terminalRunIds: ['1', 'older'] }, globalEntry] });
 	const projectRow = document.querySelector<HTMLButtonElement>('.pm-bs-play:not(:disabled)')!.closest('li')!;
+	// Терминал показывается по самому новому запуску строки, а у записи без терминала кнопки нет.
+	assert.equal(document.querySelectorAll('button[aria-label="Показать терминал Сборка"]').length, 1);
+	await click(projectRow.querySelector('button[aria-label="Показать терминал Сборка"]')!);
+	assert.deepEqual(newest('showTerminal').ref, { id: project.id, scope: 'project' });
+	assert.equal(newest('showTerminal').runId, '1');
+	await reply(newest('showTerminal'));
+	assert.equal(document.querySelector('[role=alert]'), null);
+	// Закрытие терминала приходит как изменение списка: кнопка исчезает без перезагрузки виджета.
+	await act(async () => { window.dispatchEvent(new MessageEvent('message', { data: { type: 'bashScriptsChanged' } })); });
+	await reply(newest('list'), { entries: [project, globalEntry] });
+	assert.equal(document.querySelector('button[aria-label="Показать терминал Сборка"]'), null);
 	await click(projectRow.querySelector('button[aria-label^="История"]')!);
 	assert.match(projectRow.querySelector('[role=region]')!.textContent!, /Код 7/);
 	await click(projectRow.querySelector('button[aria-label^="Редактировать"]')!);
 	const initialName = document.querySelector<HTMLInputElement>('[name=bashScriptName]')!;
 	assert.ok(document.activeElement === initialName && !initialName.readOnly, 'имя доступно сразу, пока идёт чтение');
-	await reply(newest('read'), { path: project.path, content: 'echo one\r\n', revision: 'initial-revision' });
+	// Пути для копирования появляются вместе с прочитанным файлом и копируются через host.
+	const copyRelative = () => byLabel('Копировать относительный путь');
+	const copyAbsolute = () => byLabel('Копировать абсолютный путь');
+	assert.ok(copyRelative().disabled && copyAbsolute().disabled, 'до чтения пути файла неизвестны');
+	await reply(newest('read'), { path: project.path, content: 'echo one\r\n', revision: 'initial-revision',
+		absolutePath: project.absolutePath, relativePath: 'scripts/build.sh' });
+	assert.match(copyAbsolute().title, /\/workspace\/scripts\/build\.sh$/);
+	await click(copyAbsolute());
+	await reply(newest('copyPath'), {}, 'Буфер обмена недоступен.');
+	assert.match(document.querySelector('.pm-bs-editor [role=alert]')!.textContent!, /Буфер обмена недоступен/);
+	await click(copyRelative());
+	const copyRequest = newest('copyPath');
+	assert.deepEqual([copyRequest.scope, copyRequest.path, copyRequest.pathKind], ['project', project.path, 'relative']);
+	await reply(copyRequest);
+	assert.equal(document.querySelector('.pm-bs-editor [role=alert]'), null, 'успех снимает собственную ошибку копирования');
+	assert.equal(copyRelative().title, 'Скопировано');
+	assert.equal(document.querySelector('.pm-bs-sr-status')!.textContent, 'Путь скопирован');
 	await editCode('echo draft\n');
 	await click(byLabel('Закрыть редактор'));
 	assert.ok(byText('Продолжить редактирование'));

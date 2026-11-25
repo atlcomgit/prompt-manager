@@ -84,6 +84,9 @@ test('script groups remember clicks across mounts and reveal matches without ove
 	});
 	await mount();
 	assert.equal(document.querySelectorAll('.pm-bs-group').length, 2);
+	// Проекты образуют один блок: общая рамка у контейнера, а не у каждой группы.
+	assert.equal(document.querySelectorAll('.pm-bs-groups').length, 1);
+	assert.equal(document.querySelectorAll('.pm-bs-groups > .pm-bs-group').length, 2);
 	assert.equal(document.querySelectorAll('.pm-bs-entry').length, 0);
 	assert.equal(patches.length, 0);
 	await click('Сервис · /one');
@@ -175,6 +178,14 @@ test('script groups remember clicks across mounts and reveal matches without ove
 	assert.deepEqual(folderNames(), ['builder', 'build', 'ci/tools']);
 	assert.deepEqual(namesInBuild(), ['check-5', 'check-1', 'check-9', 'new']);
 	assert.equal(button('Избранное · check-1').getAttribute('aria-pressed'), 'true');
+	// «Избранные» оставляют только отмеченный скрипт и раскрывают его группы, как другие фильтры.
+	await click('Поиск и фильтры скриптов');
+	const status = document.querySelector<HTMLSelectElement>('[name=bashScriptsStatusFilter]')!;
+	const filterBy = (value: string) => act(async () => { status.value = value; Simulate.change(status); });
+	await filterBy('favorite');
+	assert.deepEqual(Array.from(document.querySelectorAll('.pm-bs-name'), name => name.textContent), ['check-1']);
+	await filterBy('all');
+	await click('Поиск и фильтры скриптов');
 	await click('Вернуть подгруппу build');
 	assert.equal(button('Показать скрытые подгруппы'), null);
 	await click('Избранное · check-1');

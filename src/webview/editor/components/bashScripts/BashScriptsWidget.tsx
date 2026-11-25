@@ -12,11 +12,16 @@ import { BASH_SCRIPTS_CSS } from './bashScriptsStyles';
 
 export { groupBashScripts } from './bashScriptGroups';
 
-type ScriptFilter = 'all' | 'available' | 'missing' | 'recent';
-/** Область, состояние и текст применяются совместно. Недавние отсортированы по времени запуска. */
-export function filterBashScripts(entries: BashScriptEntry[], search: string, scope: BashScriptScope | 'all', filter: ScriptFilter) {
+type ScriptFilter = 'all' | 'favorite' | 'available' | 'missing' | 'recent';
+/**
+ * Область, состояние и текст применяются совместно. Недавние отсортированы по времени запуска.
+ * «Избранные» оставляют записи, отмеченные звездой, по тем же ключам «область + id», что и сама отметка.
+ */
+export function filterBashScripts(entries: BashScriptEntry[], search: string, scope: BashScriptScope | 'all', filter: ScriptFilter,
+	favorites: Record<string, boolean> = {}) {
 	const query = search.trim().toLocaleLowerCase();
 	const filtered = entries.filter(entry => (scope === 'all' || scope === entry.scope)
+		&& (filter !== 'favorite' || !!favorites[scriptKey(entry)])
 		&& (filter !== 'recent' || entry.history.length > 0) && (filter !== 'available' || entry.available) && (filter !== 'missing' || !entry.available)
 		&& (!query || [entry.name, entry.path, entry.absolutePath, entry.project?.relativePath, entry.project?.name]
 			.some(value => value?.toLocaleLowerCase().includes(query))));
@@ -116,7 +121,8 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 	const searchField = useRef<HTMLInputElement>(null);
 	const showFilters = !collapsed && searchOpen;
 	const hasFilters = !!search.trim() || scope !== 'all' || filter !== 'all';
-	const visible = React.useMemo(() => filterBashScripts(entries ?? [], search, scope, filter), [entries, search, scope, filter]);
+	const visible = React.useMemo(() => filterBashScripts(entries ?? [], search, scope, filter, bashScriptFavorites),
+		[entries, search, scope, filter, bashScriptFavorites]);
 	const foldersByProject = React.useMemo(() => projectScriptFolders(entries ?? []), [entries]);
 	const tree = React.useMemo(() => buildBashScriptTree(visible, foldersByProject, filter === 'recent' ? {} : bashScriptOrder),
 		[visible, foldersByProject, filter, bashScriptOrder]);
@@ -195,6 +201,12 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 			setBusy(new Map(inFlight.current));
 		}
 	}
+	/** Показ не блокирует строку. Закрытый терминал host убирает из списка и сообщает ошибку. */
+	async function showTerminal(entry: BashScriptEntry, runId: string) {
+		setError('');
+		try { await send({ action: 'showTerminal', ref: { scope: entry.scope, id: entry.id }, runId }); }
+		catch (error) { setError((error as Error).message); }
+	}
 	const actions = <span className="pm-qn-header-actions pm-bs-actions" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
 		{entries && <span className="pm-qn-count" title="Скриптов в списке">{hasFilters || visibleCount !== entries.length ? `${visibleCount}/${entries.length}` : entries.length}</span>}
 		<button type="button" className="pm-qn-icon-btn" title="Поиск и фильтры скриптов" aria-label="Поиск и фильтры скриптов"
@@ -227,13 +239,16 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 			<div><select name="bashScriptsScopeFilter" aria-label="Область скриптов" value={scope} onChange={e => setScope(e.target.value as typeof scope)}>
 				<option value="all">Все области</option><option value="project">Проектные</option><option value="global">Глобальные</option>
 			</select><select name="bashScriptsStatusFilter" aria-label="Фильтр скриптов" value={filter} onChange={e => setFilter(e.target.value as ScriptFilter)}>
-				<option value="all">Все скрипты</option><option value="available">Доступные</option><option value="missing">Недоступные</option><option value="recent">Недавние запуски</option>
+				<option value="all">Все скрипты</option><option value="favorite">Избранные</option><option value="available">Доступные</option><option value="missing">Недоступные</option><option value="recent">Недавние запуски</option>
 			</select>{hasFilters && <button type="button" className="pm-qn-icon-btn" title="Сбросить фильтры" aria-label="Сбросить фильтры" onClick={() => { setFilter('all'); setScope('all'); setSearch(''); searchField.current?.focus(); }}><QuickNoteIcon name="close" size={14} /></button>}</div>
 		</div>}
 		{(error || listError) && <div className="pm-qn-error" role="alert">{error || listError}{listError && <button className="pm-qn-btn is-secondary" type="button" onClick={() => void reload()}>Повторить</button>}</div>}
 		{busy.has('scan') && <span className="pm-qn-empty" role="status">Поиск скриптов в проекте…</span>}
-		{!listError && !visibleCount && <div className="pm-qn-empty" role="status">{entries === null ? 'Загрузка скриптов…' : hiddenCount > 0 ? 'Подгруппы скрыты. Их можно показать кнопкой с глазом в шапке виджета.' : hasFilters ? 'Подходящих скриптов нет.' : 'Скриптов пока нет. Добавьте файл кнопкой «+».'}</div>}
-		{groups.map((group, groupIndex) => {
+		{!listError && !visibleCount && <div className="pm-qn-empty" role="status">{entries === null ? 'Загрузка скриптов…' : hiddenCount > 0 ? 'Подгруппы скрыты. Их можно показать кнопкой с глазом в шапке виджета.'
+			: filter === 'favorite' && !search.trim() && scope === 'all' ? 'Избранных скриптов нет. Отметьте скрипт звездой у названия.'
+			: hasFilters ? 'Подходящих скриптов нет.' : 'Скриптов пока нет. Добавьте файл кнопкой «+».'}</div>}
+		{/* Проекты образуют один блок с общей рамкой, соседние группы разделяет тонкая линия. */}
+		{groups.length > 0 && <div className="pm-bs-groups">{groups.map((group, groupIndex) => {
 			const expanded = projectExpanded(group);
 			const folderKeys = group.folders.map(folder => folder.key);
 			return <section className="pm-bs-group" key={group.key}>
@@ -253,7 +268,8 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 								favorite={!!bashScriptFavorites[key]} onToggleFavorite={() => onFavoriteChange(key, !bashScriptFavorites[key])}
 								rowOrderActions={orderActions(folder.key, keys, index, entry.name)}
 								launching={busy.get(key) === 'run'} historyOpen={historyKey === key} hideTarget={target}
-								onRun={() => void perform('run', key, entry)} onEdit={opener => openEditor(opener, entry)}
+								onRun={() => void perform('run', key, entry)} onShowTerminal={runId => void showTerminal(entry, runId)}
+								onEdit={opener => openEditor(opener, entry)}
 								onHistory={() => setHistoryKey(historyKey === key ? '' : key)} onHide={setHideTarget}
 								confirmHide={shown => void perform('hide', key, shown)} />;
 						});
@@ -276,7 +292,7 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 					})}
 				</GroupHeading>
 			</section>;
-		})}
+		})}</div>}
 	</div>;
 	return <>{renderShell(actions, body)}<style>{BASH_SCRIPTS_CSS}</style></>;
 }

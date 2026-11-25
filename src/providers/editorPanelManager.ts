@@ -13069,7 +13069,7 @@ export class EditorPanelManager {
 			}
 
 			case 'bashScriptsRequest':
-				await this.bashScriptsController?.handleMessage(msg, postMessage, panel);
+				await this.bashScriptsController?.handleMessage(msg, postMessage);
 				break;
 			case 'quickNotesRequestState':
 			case 'quickNotesApply':

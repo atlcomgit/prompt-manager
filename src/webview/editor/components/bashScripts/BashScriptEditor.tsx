@@ -11,6 +11,15 @@ import { rememberScriptDraft, restoreScriptDraft, submitScriptDraft, watchScript
 
 const EDITOR_SIZE_KEY = 'promptManager.bashScriptEditor.size';
 
+/** Путь от ближайшего корня проекта, как в строке виджета, или абсолютный путь файла. */
+type CopiedPath = 'relative' | 'absolute';
+
+/** Подписи кнопок копирования. Доступное имя содержит видимый текст кнопки. */
+const COPY_PATH_BUTTONS: readonly { kind: CopiedPath; text: string; label: string; hint: string }[] = [
+	{ kind: 'relative', text: 'Относительный', label: 'Копировать относительный путь', hint: 'Копировать путь от корня проекта' },
+	{ kind: 'absolute', text: 'Абсолютный', label: 'Копировать абсолютный путь', hint: 'Копировать абсолютный путь' },
+];
+
 /** Native resizing sets inline pixel sizes. Layout constraints can resize the rail without changing this preference. */
 function useEditorSize(form: React.RefObject<HTMLDivElement>): void {
 	useLayoutEffect(() => {
@@ -68,6 +77,11 @@ export function BashScriptEditor({ initial, opener, onClose }: {
 	const dirty = contentDirty || draft.name !== (draft.base?.name ?? '') || draft.path !== (draft.base?.path ?? '');
 	const loaded = draft.file?.path === draft.path;
 	const canSave = loaded && draft.name.trim() && (dirty || !draft.ref) && !pending;
+	// Подтверждение копирования показывается на нажатой кнопке. Таймер снимается при закрытии окна.
+	const [copied, setCopied] = useState<CopiedPath | null>(null);
+	const copiedTimer = useRef<number>();
+	const copyFailure = useRef('');
+	useEffect(() => () => window.clearTimeout(copiedTimer.current), []);
 
 	// Длинный скрипт передаётся в состояние webview после паузы ввода. Закрытие панели сразу сохраняет последние правки.
 	useLayoutEffect(() => {
@@ -119,7 +133,7 @@ export function BashScriptEditor({ initial, opener, onClose }: {
 		setDraft(previous => ({ ...previous, path: selectedPath, content,
 			name: !previous.name && fillName ? selectedPath.split(/[/\\]/).pop() || '' : previous.name,
 			file: { path: selectedPath, revision, original: content, exists: result.exists,
-				nativeEditorReason: result.nativeEditorReason } }));
+				nativeEditorReason: result.nativeEditorReason, absolutePath: result.absolutePath, relativePath: result.relativePath } }));
 		// Даже повторное чтение той же ревизии по подтверждению сбрасывает undo отброшенного черновика.
 		setReadVersion(version => version + 1);
 	}
@@ -139,6 +153,24 @@ export function BashScriptEditor({ initial, opener, onClose }: {
 			if (contentDirty) setConfirm({ kind: 'read', path: result.path });
 			else { setPending('read'); await readFile(result.path); }
 		});
+	}
+	/**
+	 * Путь копирует host: буфер VS Code работает и в Tunnel, где браузер может запретить запись из webview.
+	 * Копирование не блокирует остальные действия окна, а успех снимает только собственную прежнюю ошибку.
+	 */
+	async function copyPath(pathKind: CopiedPath) {
+		try {
+			await send({ action: 'copyPath', scope: draft.scope, path: draft.path, pathKind });
+			if (!mounted.current) return;
+			setError(current => current === copyFailure.current ? '' : current);
+			window.clearTimeout(copiedTimer.current);
+			setCopied(pathKind);
+			copiedTimer.current = window.setTimeout(() => setCopied(null), 1500);
+		} catch (failure) {
+			if (!mounted.current) return;
+			copyFailure.current = (failure as Error).message;
+			setError(copyFailure.current);
+		}
 	}
 	function close() { closed.current = true; rememberScriptDraft(); onClose(); }
 	function requestClose() {
@@ -206,6 +238,16 @@ export function BashScriptEditor({ initial, opener, onClose }: {
 					<input id={pathId} name="bashScriptPath" className="pm-qn-input" value={draft.path} placeholder={draft.scope === 'project' ? 'scripts/build.sh или полный путь' : 'Полный путь к скрипту'} readOnly={!!pending || !!confirm}
 						onChange={e => { const path = e.target.value; currentPath.current = path; setDraft(previous => ({ ...previous, path })); }}
 						onKeyDown={e => { if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); requestRead(draft.path); } }} />
+					{COPY_PATH_BUTTONS.map(({ kind, text, label, hint }) => {
+						// Пути известны только для прочитанного файла: изменённое поле сначала нужно загрузить.
+						const value = loaded ? draft.file?.[kind === 'relative' ? 'relativePath' : 'absolutePath'] : undefined;
+						const reason = !loaded ? 'Загрузите файл, чтобы скопировать путь'
+							: !draft.file?.absolutePath ? 'Перечитайте файл, чтобы скопировать путь' : 'Файл вне проектов рабочей области';
+						return <button key={kind} type="button" className="pm-qn-btn is-secondary pm-bs-copy-path" aria-label={label}
+							title={copied === kind ? 'Скопировано' : value ? `${hint}\n${value}` : reason} disabled={!value}
+							onClick={() => void copyPath(kind)}><QuickNoteIcon name={copied === kind ? 'check' : 'copy'} size={14} />{text}</button>;
+					})}
+					<span className="pm-bs-sr-status" role="status">{copied ? 'Путь скопирован' : ''}</span>
 					<button type="button" className="pm-qn-btn is-secondary" title="Выбрать файл скрипта" aria-label="Выбрать файл скрипта" disabled={!!pending || !!confirm} onClick={chooseFile}><QuickNoteIcon name="folder-opened" /></button>
 					<button type="button" className="pm-qn-btn is-secondary" disabled={!draft.path.trim() || !!pending || !!confirm} onClick={() => requestRead(draft.path)}>{loaded ? 'Перечитать' : 'Загрузить'}</button>
 				</div></div>

@@ -6,13 +6,29 @@ import { BashScriptRow } from '../src/webview/editor/components/bashScripts/Bash
 import type { BashScriptRun } from '../src/types/bashScripts.js';
 
 /** Первая запись каталога соответствует фактическому последнему запуску. */
-function scriptRow(history: BashScriptRun[], open = true, activeRunIds?: string[]) {
+function scriptRow(history: BashScriptRun[], open = true, activeRunIds?: string[], terminalRunIds?: string[],
+	onShowTerminal: (runId: string) => void = () => {}, rowOrderActions?: React.ReactNode) {
 	const noop = () => {};
 	return <BashScriptRow entry={{ name: 'build.sh', id: '1', scope: 'project', path: 'scripts/build.sh',
 		absolutePath: '/internal/build/scripts/build.sh', project: { name: 'build', root: '/internal/build', relativePath: 'scripts/build.sh' },
-		available: true, history, activeRunIds }} busy={false} historyOpen={open} hideTarget={null} onRun={noop} onEdit={noop}
+		available: true, history, activeRunIds, terminalRunIds }} busy={false} historyOpen={open} hideTarget={null} onRun={noop}
+		onShowTerminal={onShowTerminal} onEdit={noop} rowOrderActions={rowOrderActions}
 		favorite={false} onToggleFavorite={noop} onHistory={noop} onHide={noop} confirmHide={noop} />;
 }
+
+/** Кнопка видна только при открытом терминале и показывает самый новый запуск, в том числе завершённый. */
+test('Bash row offers the newest open terminal while running and after the command ends', () => {
+	const run: BashScriptRun = { id: 'new', startedAt: '2026-02-01T10:00:00Z' };
+	const button = /<button[^>]*aria-label="Показать терминал build.sh"[^>]*title="([^"]+)"/;
+	assert.doesNotMatch(renderToStaticMarkup(scriptRow([run], false)), button);
+	assert.equal(renderToStaticMarkup(scriptRow([run], false, ['new'], ['new', 'old'])).match(button)?.[1],
+		'Показать терминал выполняющегося запуска');
+	const finished = { ...run, finishedAt: '2026-02-01T10:00:03Z', exitCode: 1 };
+	assert.equal(renderToStaticMarkup(scriptRow([finished], false, undefined, ['new'])).match(button)?.[1],
+		'Показать терминал последнего запуска');
+	assert.doesNotMatch(renderToStaticMarkup(scriptRow([finished], false, undefined, ['new'], undefined, <span>order</span>)), button,
+		'в режиме порядка ячейка содержит только стрелки');
+});
 
 function renderRow(history: BashScriptRun[], open = true) {
 	return renderToStaticMarkup(scriptRow(history, open));

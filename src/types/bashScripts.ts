@@ -26,14 +26,20 @@ export interface BashScriptEntry extends BashScriptRef {
 	history: BashScriptRun[];
 	/** Только запуски, для которых этот хост ещё наблюдает терминал. */
 	activeRunIds?: string[];
+	/** Запуски с ещё открытым терминалом этого хоста, от нового к старому, в том числе после окончания команды. */
+	terminalRunIds?: string[];
 }
 
 /** Один запрос относится к одному диалогу или действию строки. */
 export interface BashScriptsRequest {
 	type: 'bashScriptsRequest';
 	requestId: string;
-	action: 'list' | 'scan' | 'run' | 'hide' | 'choose' | 'read' | 'save' | 'openFile';
+	action: 'list' | 'scan' | 'run' | 'hide' | 'choose' | 'read' | 'save' | 'openFile' | 'showTerminal' | 'copyPath';
 	ref?: BashScriptRef;
+	/** Запуск, терминал которого показывает действие showTerminal. */
+	runId?: string;
+	/** Какой путь файла из поля copyPath записывает в буфер обмена. */
+	pathKind?: 'relative' | 'absolute';
 	scope?: BashScriptScope;
 	path?: string;
 	name?: string;
@@ -48,6 +54,9 @@ export interface BashScriptsResult {
 	exists?: boolean;
 	nativeEditorReason?: string;
 	path?: string;
+	/** Чтение файла сообщает его абсолютный путь и путь от ближайшего корня проекта, если файл внутри проекта. */
+	absolutePath?: string;
+	relativePath?: string;
 	content?: string;
 	revision?: string;
 }

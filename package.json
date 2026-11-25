@@ -204,7 +204,11 @@
         },
         {
           "command": "promptManager.startChat",
-          "when": "view.claudeVSCodeSidebar.visible || view.claudeVSCodeSidebarSecondary.visible"
+          "when": "view.claudeVSCodeSidebar.visible"
+        },
+        {
+          "command": "promptManager.startChat",
+          "when": "view.claudeVSCodeSidebarSecondary.visible"
         },
         {
           "command": "promptManager.startChat",

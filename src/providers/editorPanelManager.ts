@@ -192,7 +192,7 @@ function isDashboardNativeChatInput(document: vscode.TextDocument | undefined): 
 
 type DashboardChatAgent = 'copilot' | 'codex' | 'claude';
 
-/** Парные условия commandPalette в package.json оставляют каждую из этих команд доступной ровно один раз. */
+/** Взаимоисключающие условия commandPalette показывают одну строку для текущего расположения панелей. */
 const dashboardChatViews: ReadonlyArray<{ agent: DashboardChatAgent; command: string; views: string[] }> = [
 	{ agent: 'codex', command: 'promptManager.openChat', views: ['chatgpt.sidebarSecondaryView', 'chatgpt.sidebarView'] },
 	{ agent: 'claude', command: 'promptManager.startChat', views: ['claudeVSCodeSidebar', 'claudeVSCodeSidebarSecondary'] },
@@ -202,6 +202,7 @@ const dashboardChatViews: ReadonlyArray<{ agent: DashboardChatAgent; command: st
 interface DashboardChatWindow {
 	part: 'main' | 'auxiliary-first-group' | 'auxiliary-later-group';
 	views: Set<DashboardChatAgent>;
+	claudeSidebar?: string;
 }
 
 /** VS Code 1.96+ возвращает строки палитры с выполненным when в окне клиента, включая подключение через Tunnel. */
@@ -209,13 +210,17 @@ async function readVisibleDashboardChatViews(): Promise<DashboardChatWindow | un
 	const entries = await Promise.resolve(vscode.commands.executeCommand('_getAllCommands', true)).catch(() => undefined);
 	if (!Array.isArray(entries)) return undefined;
 	const visible = new Set<DashboardChatAgent>();
+	let claudeSidebar: string | undefined;
 	for (const { agent, command, views } of dashboardChatViews) {
 		const rows = entries.filter(entry => entry?.command === command);
 		// В версии 1.95 приходят обе строки. При неизвестном формате используем только признаки из API вкладок.
 		if (rows.length !== 1 || typeof rows[0].precondition !== 'string') return undefined;
 		const condition: string = rows[0].precondition;
 		const keys = views.map(view => `view.${view}.visible`).sort();
-		if (condition.split(' || ').sort().join(' || ') === keys.join(' || ')) {
+		if (agent === 'claude' && keys.includes(condition)) {
+			claudeSidebar = views.find(view => condition === `view.${view}.visible`);
+			visible.add(agent);
+		} else if (condition.split(' || ').sort().join(' || ') === keys.join(' || ')) {
 			visible.add(agent);
 		} else if (condition.split(' && ').sort().join(' && ') !== keys.map(key => '!' + key).join(' && ')) {
 			return undefined;
@@ -224,11 +229,11 @@ async function readVisibleDashboardChatViews(): Promise<DashboardChatWindow | un
 	const windows = entries.filter(entry => entry?.command === 'promptManager.openPrompt');
 	if (windows.length !== 1 || typeof windows[0].precondition !== 'string') return undefined;
 	const conditions: string[] = windows[0].precondition.split(' && ');
-	if (conditions.length === 1 && conditions[0] === '!isAuxiliaryWindowFocusedContext') return { part: 'main', views: visible };
+	if (conditions.length === 1 && conditions[0] === '!isAuxiliaryWindowFocusedContext') return { part: 'main', views: visible, claudeSidebar };
 	// Боковые панели принадлежат основному окну. Их ключи могут оставаться true при фокусе в вынесенном окне.
 	if (conditions.length !== 2 || !conditions.includes('isAuxiliaryWindowFocusedContext')) return undefined;
-	if (conditions.includes('activeEditorGroupIndex <= 1')) return { part: 'auxiliary-first-group', views: new Set() };
-	if (conditions.includes('activeEditorGroupIndex > 1')) return { part: 'auxiliary-later-group', views: new Set() };
+	if (conditions.includes('activeEditorGroupIndex <= 1')) return { part: 'auxiliary-first-group', views: new Set(), claudeSidebar };
+	if (conditions.includes('activeEditorGroupIndex > 1')) return { part: 'auxiliary-later-group', views: new Set(), claudeSidebar };
 	return undefined;
 }
 
@@ -2378,7 +2383,7 @@ export class EditorPanelManager {
 	}
 
 	/** Проверяет расширение до сохранения попытки; тесты: editorPanelManager.test.ts. */
-	private async ensureClaudeChatAvailable(): Promise<void> {
+	private async ensureClaudeChatAvailable(command = 'claude-vscode.editor.open'): Promise<void> {
 		const extension = vscode.extensions.getExtension('anthropic.claude-code');
 		if (!extension) {
 			throw new Error('Claude Code: установите расширение Anthropic.claude-code.');
@@ -2386,7 +2391,8 @@ export class EditorPanelManager {
 		if (!extension.isActive) {
 			await extension.activate();
 		}
-		if (!(await vscode.commands.getCommands(true)).includes('claude-vscode.editor.open')) {
+		if (!(await vscode.commands.getCommands(true)).includes(command)) {
+			if (command === 'claude-vscode.focus') throw new Error('Команда фокусировки Claude Code недоступна.');
 			throw new Error('Claude Code: эта версия расширения не поддерживает открытие чата в боковой панели.');
 		}
 	}
@@ -3396,6 +3402,65 @@ export class EditorPanelManager {
 		}
 	}
 
+	/** Фокусирует поле существующего разговора Claude. Проверки маршрутов и отказов — editorPanelManager.test.ts. */
+	private async insertDashboardClaudeDraft(text: string, signal: AbortSignal): Promise<'dispatched' | undefined> {
+		if (vscode.env.uiKind === vscode.UIKind.Web) return undefined;
+		const groups = vscode.window.tabGroups;
+		const origin = groups.activeTabGroup.activeTab;
+		await this.ensureClaudeChatAvailable('claude-vscode.focus');
+		signal.throwIfAborted();
+		const snapshot = await readVisibleDashboardChatViews();
+		const claudeTabs = groups.all.flatMap(group => group.tabs.filter(tab => {
+			const input = tab.input as { viewType?: string } | undefined;
+			return input?.viewType === 'claudeVSCodePanel' || input?.viewType === 'mainThreadWebview-claudeVSCodePanel';
+		}));
+		const visibleTabs = claudeTabs.filter(tab => tab.group.activeTab === tab);
+		const sidebar = snapshot?.claudeSidebar;
+		if (sidebar && snapshot.part !== 'main') return undefined;
+		// focus рассылается всем видимым чатам Claude и может открыть чат с нуля при отсутствии адресата.
+		if (visibleTabs.length + Number(Boolean(sidebar)) > 1) return undefined;
+		const tab = visibleTabs[0] ?? (!sidebar && claudeTabs.length === 1 ? claudeTabs[0] : undefined);
+		if (!sidebar && !tab) return undefined;
+		if (tab && groups.all.length > 1 && getDashboardLayoutGroupCount(await vscode.commands.executeCommand('vscode.getEditorLayout'))
+			!== groups.all.length && (!visibleTabs.length || await this.resolveCurrentDashboardQuickCommandTarget() !== 'claude')) return undefined;
+		signal.throwIfAborted();
+		if (!vscode.window.state.focused || groups.activeTabGroup.activeTab !== origin) return undefined;
+		if (sidebar) {
+			await vscode.commands.executeCommand(`${sidebar}.focus`);
+		} else if (tab && !visibleTabs.length) {
+			// Эта команда умеет раскрыть существующую вкладку и не создаёт разговор, если вкладка уже закрыта.
+			await vscode.commands.executeCommand('claude-vscode.focusLastMessage');
+			// reveal() возвращает управление раньше обновления tabGroups, особенно через Remote.
+			const deadline = performance.now() + CHAT_INPUT_CONFIRMATION_TIMEOUT_MS;
+			while (groups.activeTabGroup.activeTab === origin && vscode.window.state.focused
+				&& !signal.aborted && performance.now() < deadline) {
+				await new Promise(resolve => setTimeout(resolve, 50));
+			}
+			if (groups.activeTabGroup.activeTab !== tab) return undefined;
+		}
+		signal.throwIfAborted();
+		const selection = vscode.window.activeTextEditor?.selection;
+		if (!vscode.window.state.focused || (selection && !selection.isEmpty) || (tab && tab.group.activeTab !== tab)) return undefined;
+		await vscode.commands.executeCommand('claude-vscode.focus');
+		// Claude обрабатывает фокус внутри webview на следующем кадре, уже после завершения команды.
+		await new Promise(resolve => setTimeout(resolve, 250));
+		signal.throwIfAborted();
+		const expectedTab = tab ?? origin;
+		if (!vscode.window.state.focused || groups.activeTabGroup.activeTab !== expectedTab) return undefined;
+		await vscode.env.clipboard.writeText(text);
+		signal.throwIfAborted();
+		if (sidebar) {
+			const current = await readVisibleDashboardChatViews();
+			if (current?.part !== 'main' || current.claudeSidebar !== sidebar) return undefined;
+		}
+		signal.throwIfAborted();
+		if (!vscode.window.state.focused || groups.activeTabGroup.activeTab !== expectedTab) return undefined;
+		await vscode.commands.executeCommand('editor.action.clipboardPasteAction');
+		// Дожидаемся обработки paste до разблокировки следующей команды, которая может заменить буфер.
+		await new Promise(resolve => setTimeout(resolve, 250));
+		return 'dispatched';
+	}
+
 	/** Вставляет черновик без отправки и проверяет актуальность после асинхронной подготовки провайдера. */
 	private async insertDashboardQuickCommand(
 		target: Exclude<DashboardQuickCommandTarget, 'current'>,
@@ -3408,14 +3473,7 @@ export class EditorPanelManager {
 			case 'copilot':
 				return this.insertDashboardNativeChatDraft(text, signal);
 			case 'claude':
-				await this.ensureClaudeChatAvailable();
-				signal.throwIfAborted();
-				// initialPrompt заполняет поле черновика и сохраняет выбранное место открытия Claude Code.
-				await vscode.commands.executeCommand(
-					'claude-vscode.editor.open', undefined, text, undefined, undefined, undefined,
-					{ programmatic: 'honor-preferred-location' },
-				);
-				return 'dispatched';
+				return this.insertDashboardClaudeDraft(text, signal);
 			case 'codex': {
 				const draftOnly = { autoStartChatWithXdotool: false };
 				// На локальном X11 сначала фокусируем поле, так как команда панели может выбрать её заголовок.
@@ -3572,6 +3630,8 @@ export class EditorPanelManager {
 		} else if (result === 'unconfirmed') {
 			reason = 'VS Code не подтвердил вставку.';
 			instruction = 'Проверьте поле чата и при необходимости вставьте команду через Ctrl+V.';
+		} else if (destination === 'claude') {
+			instruction = 'Вставьте её в поле нужного разговора Claude Code через Ctrl+V (на macOS — ⌘V).';
 		} else if (destination === 'opencode-cli') {
 			instruction = this.openCodeCliService?.open(promptUuid)
 				? 'Вставьте её в терминал через Ctrl+Shift+V.'

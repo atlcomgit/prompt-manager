@@ -6,9 +6,15 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-11-25
+
+#### Fixed
+- Paste Quick Commands into the existing Claude Code conversation. A closed or ambiguous chat uses the clipboard for manual insertion.
+
 ### 2026-11-24
 
 #### Added
+- Give Bash projects and folders compact frames and shade project headers for quicker scanning.
 - Collapse or hide Bash script folders, mark favorites with a bold name, and reorder projects, folders and scripts.
   Restore hidden folders from the widget header. Keep the path to the right of the name on one line at every width and shorten run durations on narrow rows.
 - Add the shared `alek-server` instructions for SentinelX operations on named servers, with one concise result per host.

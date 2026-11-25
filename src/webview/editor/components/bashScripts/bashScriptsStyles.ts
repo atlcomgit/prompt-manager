@@ -21,9 +21,22 @@ export const BASH_SCRIPTS_CSS = `
 	background: var(--vscode-input-background); color: var(--vscode-input-foreground);
 }
 .pm-bs-filters select { flex: 1 1 75px; }
-.pm-bs-group { min-width: 0; }
+/* Inset outlines keep the original height of every script row and collapsed heading. */
+.pm-bs-group, .pm-bs-folder {
+	min-width: 0; outline: 1px solid var(--vscode-contrastBorder, color-mix(in srgb, var(--vscode-foreground) 30%, transparent));
+	outline-offset: -1px; border-radius: 5px;
+}
+.pm-bs-group > .pm-bs-heading {
+	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); border-radius: 4px 4px 0 0;
+}
+.pm-bs-group > .pm-bs-heading:only-child { border-radius: 4px; }
+.pm-bs-folder {
+	outline-color: var(--vscode-contrastBorder, color-mix(in srgb, var(--vscode-foreground) 20%, transparent));
+	border-radius: 3px;
+}
 .pm-bs-heading { display: flex; align-items: center; min-width: 0; }
 .pm-bs-heading .pm-bs-group-toggle { flex: 1; min-width: 0; }
+.pm-bs-heading .pm-bs-group-toggle:focus-visible { outline-offset: -3px; }
 .pm-bs-order-actions { display: inline-flex; flex: none; }
 .pm-bs-order-actions .pm-qn-icon-btn { width: 20px; height: 22px; }
 .pm-bs .pm-bs-order-actions button[aria-disabled=true] { color: var(--vscode-disabledForeground); cursor: default; }
@@ -46,6 +59,9 @@ export const BASH_SCRIPTS_CSS = `
 .pm-bs-group-count { margin-inline-start: auto; padding-inline: 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
 .pm-bs-list, .pm-bs-history ol { padding: 0; margin: 0; list-style: none; }
 .pm-bs-list { margin-inline-start: 9px; }
+.pm-bs-group > .pm-bs-list:has(> .pm-bs-folder) {
+	margin-block: 1px 2px; margin-inline: 6px 3px; row-gap: 2px;
+}
 .pm-bs-row {
 	position: relative;
 	display: grid;

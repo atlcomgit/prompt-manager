@@ -8668,10 +8668,9 @@ test('dashboard quick commands require a current confirmation from the originati
 	}
 });
 
-/** Проверяет маршрутизацию быстрых команд до штатных редакторов черновика. */
-test('dashboard quick commands populate Copilot and Claude drafts without sending', async () => {
+/** Проверяет передачу быстрой команды как частичного запроса Copilot. */
+test('dashboard quick command populates the Copilot draft without sending', async () => {
 	resetVsCodeCommandMock();
-	vscodeAvailableCommands = ['claude-vscode.editor.open'];
 	const draft = createMockNativeChatInput();
 	vscodeExecuteCommandHandler = async id => {
 		if (id === 'workbench.action.chat.open') draft.setText('/review');
@@ -8679,23 +8678,98 @@ test('dashboard quick commands populate Copilot and Claude drafts without sendin
 	try {
 		const { manager } = await createManager();
 		const panel = { webview: { postMessage: async () => true } };
-		for (const target of ['copilot', 'claude'] as const) {
-			await (manager as any).handleMessage(
-				quickCommandInsert(target, target),
-				panel, createPrompt(), 'panel', () => false, () => undefined,
-			);
-		}
+		await (manager as any).handleMessage(quickCommandInsert('copilot', 'copilot'),
+			panel, createPrompt(), 'panel', () => false, () => undefined);
 		assert.deepEqual(vscodeCommandCalls, [
 			{ id: 'workbench.action.chat.open', args: [{ query: '/review', isPartialQuery: true }] },
-			{ id: 'claude-vscode.editor.open', args: [
-				undefined, '/review', undefined, undefined, undefined, { programmatic: 'honor-preferred-location' },
-			] },
 		]);
 		assert.equal(vscodeClipboardText, '');
 		assert.deepEqual(childProcessSpawnCalls, []);
 		assert.deepEqual(vscodeNotices, []);
 	} finally {
 		resetVsCodeCommandMock();
+	}
+});
+
+/** Для обоих вариантов адресата проверяет место фокуса, текст вставки и отсутствие открытия новой сессии. */
+test('Claude quick command pastes once into the existing conversation', async t => {
+	const text = '/review\nвторая строка';
+	const paste = 'editor.action.clipboardPasteAction';
+	for (const scenario of [
+		{ name: 'explicit primary sidebar', sidebar: 'claudeVSCodeSidebar', target: 'claude' },
+		{ name: 'current secondary sidebar', sidebar: 'claudeVSCodeSidebarSecondary', target: 'current' },
+		{ name: 'editor in a split', target: 'current' },
+		{ name: 'only hidden editor', target: 'claude', hidden: true },
+	] as const) {
+		await t.test(scenario.name, async () => {
+			resetVsCodeCommandMock();
+			const dashboard = seedPromptEditorTab();
+			const sidebar = 'sidebar' in scenario ? scenario.sidebar : undefined;
+			const hidden = 'hidden' in scenario;
+			const tab = sidebar ? undefined : createVsCodeTab('mainThreadWebview-claudeVSCodePanel', 'Claude', false);
+			if (tab && !hidden) {
+				const group = { viewColumn: 2, tabs: [tab], activeTab: tab };
+				tab.group = group;
+				vscodeTabs.splice(vscodeTabs.indexOf(tab), 1);
+				vscodeAdditionalTabGroups.push(group);
+			}
+			const focus = 'claude-vscode.focus';
+			const reveal = 'claude-vscode.focusLastMessage';
+			vscodeAvailableCommands = [focus, paste, reveal];
+			vscodeExecuteCommandHandler = async id => {
+				if (id === '_getAllCommands') return quickCommandPalette(sidebar ? [`view.${sidebar}.visible`] : []);
+				if (id === reveal && tab) setImmediate(() => { dashboard.isActive = false; tab.isActive = true; });
+				if (id === focus && tab && !hidden) vscodeDashboardActiveColumn = 2;
+				if (id === paste) assert.equal(vscodeClipboardText, text);
+			};
+			const { manager } = await createManager();
+			try {
+				await (manager as any).handleMessage(quickCommandInsert('draft', scenario.target, text),
+					{ webview: { postMessage: async () => true } }, createPrompt(), 'panel', () => false, () => undefined);
+				const dispatched = vscodeCommandCalls.filter(call => !['_getAllCommands', 'vscode.getEditorLayout'].includes(call.id));
+				assert.deepEqual(dispatched.map(call => call.id), [...(sidebar ? [`${sidebar}.focus`] : hidden ? [reveal] : []), focus, paste]);
+				assert.ok(dispatched.every(call => !call.args.length));
+				assert.deepEqual(vscodeNotices, []);
+			} finally {
+				manager.disposeAll();
+				resetVsCodeCommandMock();
+			}
+		});
+	}
+});
+
+/** Закрытый чат, неоднозначная раскладка и браузер оставляют команду для ручной вставки. */
+test('Claude quick command falls back without opening a conversation or blindly pasting', async t => {
+	for (const scenario of ['closed', 'sidebar and editor', 'web', 'lost focus', 'sidebar closed during copy', 'missing focus command']) {
+		await t.test(scenario, async () => {
+			resetVsCodeCommandMock();
+			seedPromptEditorTab();
+			const sidebar = 'claudeVSCodeSidebarSecondary';
+			let visible = scenario !== 'closed';
+			if (scenario === 'sidebar closed during copy') {
+				vscodeClipboardWriteHandler = async value => { vscodeClipboardText = value; visible = false; };
+			}
+			if (scenario === 'sidebar and editor') createVsCodeTab('claudeVSCodePanel', 'Claude');
+			if (scenario === 'web') vscodeUiKind = 2;
+			vscodeAvailableCommands = scenario === 'missing focus command' ? ['claude-vscode.editor.open'] : ['claude-vscode.focus'];
+			vscodeExecuteCommandHandler = async id => {
+				if (id === '_getAllCommands') return quickCommandPalette(visible ? [`view.${sidebar}.visible`] : []);
+				if (scenario === 'lost focus' && id === 'claude-vscode.focus') vscodeWindowFocused = false;
+			};
+			const { manager } = await createManager();
+			try {
+				await (manager as any).handleMessage(quickCommandInsert('draft', 'claude'),
+					{ webview: { postMessage: async () => true } }, createPrompt(), 'panel', () => false, () => undefined);
+				const actions = vscodeCommandCalls.map(call => call.id).filter(id => id !== '_getAllCommands');
+				const startedFocus = scenario === 'lost focus' || scenario === 'sidebar closed during copy';
+				assert.deepEqual(actions, startedFocus ? [`${sidebar}.focus`, 'claude-vscode.focus'] : []);
+				assert.equal(vscodeClipboardText, '/review');
+				assert.match(vscodeNotices[0].message, /Команда скопирована/);
+			} finally {
+				manager.disposeAll();
+				resetVsCodeCommandMock();
+			}
+		});
 	}
 });
 
@@ -9048,7 +9122,7 @@ test('dashboard quick command times out a hung activation and releases copy with
 	resetVsCodeCommandMock();
 	const activation = createDeferred<void>();
 	vscodeClaudeExtension = { isActive: false, activate: () => activation.promise };
-	vscodeAvailableCommands = ['claude-vscode.editor.open'];
+	vscodeAvailableCommands = ['claude-vscode.focus'];
 	const { manager } = await createManager();
 	t.mock.timers.enable({ apis: ['setTimeout'] });
 	const replies: unknown[] = [];

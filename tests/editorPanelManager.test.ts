@@ -1532,36 +1532,46 @@ test('prompt editor dashboard follows horizontal group widths, reveal and group 
 			panel.tab.isActive = column === 1;
 			second.activeTab = column === 2 ? panel.tab : tab;
 		};
-		const latestHidden = () => panel.postedMessages.filter(
+		const latestLayout = () => panel.postedMessages.filter(
 			(msg: { type: string }) => msg.type === 'promptEditorGroupLayoutChanged',
-		).at(-1)?.hideDashboard;
+		).at(-1);
+		const latestHidden = () => latestLayout()?.hideDashboard;
+		// Доля передаётся только с подтверждённым скрытием в известном горизонтальном split.
+		const assertFraction = (expected: number | undefined) => {
+			const layout = latestLayout();
+			assert.equal(layout.hideDashboard, expected !== undefined);
+			assert.equal(Object.hasOwn(layout, 'groupWidthFraction'), expected !== undefined);
+			assert.equal(layout.groupWidthFraction, expected);
+		};
 		const request = () => panel.emitMessage({ type: 'requestPromptEditorGroupLayout' });
 		const changed = async () => {
 			for (const listener of vscodeGroupChangeListeners) listener();
 			await flushTurns(1);
 		};
 		await request();
-		assert.equal(latestHidden(), false);
+		assertFraction(undefined);
 		vscodeAdditionalTabGroups.push(second);
 		vscodeDashboardActiveColumn = 2;
 		const cases = [
-			{ orientation: 0, groups: [{ size: 879 }, { size: 880 }], left: true, right: false },
-			{ orientation: 0, groups: [{ size: 880 }, { size: 880 }], left: true, right: true },
-			{ orientation: 0, groups: [{ size: 881 }, { size: 880 }], left: false, right: true },
-			{ orientation: 1, groups: [{ size: 420 }, { size: 740 }], left: false, right: false },
-			{ orientation: 1, groups: [{ groups: [{ size: 440 }, { size: 600 }] }], left: true, right: false },
-			{ orientation: 0, groups: [{ size: 0 }, { size: 600 }], left: false, right: false },
-			{ orientation: 0, groups: [{}, { size: 600 }], left: false, right: false },
+			{ orientation: 0, groups: [{ size: 879 }, { size: 880 }], left: 879 / 1759, right: undefined },
+			{ orientation: 0, groups: [{ size: 880 }, { size: 880 }], left: 0.5, right: 0.5 },
+			{ orientation: 0, groups: [{ size: 881 }, { size: 880 }], left: undefined, right: 880 / 1761 },
+			{ orientation: 1, groups: [{ size: 420 }, { size: 740 }], left: undefined, right: undefined },
+			{ orientation: 1, groups: [{ groups: [{ size: 440 }, { size: 600 }] }], left: 440 / 1040, right: undefined },
+			{ orientation: 0, groups: [{ size: 0 }, { size: 600 }], left: undefined, right: undefined },
+			{ orientation: 0, groups: [{ size: Infinity }, { size: 600 }], left: undefined, right: undefined },
+			{ orientation: 0, groups: [{ size: -1 }, { size: NaN }], left: undefined, right: undefined },
+			{ orientation: 0, groups: [{}, { size: 600 }], left: undefined, right: undefined },
 		];
 		for (const { orientation, groups, left, right } of cases) {
 			vscodeDashboardEditorLayout = { orientation, groups };
 			placePrompt(1);
 			await changed();
-			assert.equal(latestHidden(), left);
+			assertFraction(left);
 			placePrompt(2);
 			panel.emitVisible();
 			await flushTurns(1);
-			assert.equal(latestHidden(), right);
+			assertFraction(right);
 		}
 		vscodeDashboardEditorLayout = { orientation: 0, groups: [{ size: 700 }, { size: 700 }] };
 		await request();
@@ -1569,7 +1579,7 @@ test('prompt editor dashboard follows horizontal group widths, reveal and group 
 		vscodeAdditionalTabGroups.push({ ...second, viewColumn: 3 });
 		vscodeDashboardEditorLayout = { orientation: 0, groups: [{ size: 700 }, { groups: [{ size: 400 }, { size: 400 }] }] };
 		await changed();
-		assert.equal(latestHidden(), false);
+		assertFraction(undefined);
 
 		// При медленном Tunnel ранняя геометрия всё ещё применима, пока впереди только незавершённое чтение.
 		vscodeAdditionalTabGroups.pop();
@@ -1585,7 +1595,7 @@ test('prompt editor dashboard follows horizontal group widths, reveal and group 
 		assert.equal(latestHidden(), true);
 		secondRead.resolve({ orientation: 0, groups: [{ size: 710 }, { size: 700 }] });
 		await secondRequest;
-		assert.equal(latestHidden(), false);
+		assertFraction(undefined);
 
 		// Недоступная команда восстанавливает виджеты и допускает повторное измерение.
 		vscodeDashboardEditorLayout = { orientation: 0, groups: [{ size: 700 }, { size: 700 }] };
@@ -1596,7 +1606,7 @@ test('prompt editor dashboard follows horizontal group widths, reveal and group 
 		const failed = request();
 		unavailable.reject(new Error('command not found'));
 		await failed;
-		assert.equal(latestHidden(), false);
+		assertFraction(undefined);
 
 		// Ответ для прежних двух групп приходит после закрытия соседней вкладки.
 		const stale = createDeferred<unknown>();
@@ -1609,7 +1619,7 @@ test('prompt editor dashboard follows horizontal group widths, reveal and group 
 		const posted = panel.postedMessages.length;
 		await pending;
 		assert.equal(panel.postedMessages.length, posted);
-		assert.equal(latestHidden(), false);
+		assertFraction(undefined);
 	} finally {
 		manager.disposeAll();
 		assert.equal(vscodeGroupChangeListeners.size, 0);
@@ -1647,7 +1657,7 @@ test('first split resize reads workbench geometry and confirms only the matching
 		pending.resolve({ orientation: 0, groups: [{ size: 950 }, { size: 750 }] });
 		await resized;
 		assert.deepEqual(replies().at(-1), {
-			type: 'promptEditorGroupLayoutChanged', hideDashboard: true, singleGroup: false, viewportWidth: 750,
+			type: 'promptEditorGroupLayoutChanged', hideDashboard: true, singleGroup: false, viewportWidth: 750, groupWidthFraction: 750 / 1700,
 		});
 
 		vscodeDashboardEditorLayout = { orientation: 1, groups: [{ size: 450 }, { size: 450 }] };
@@ -1688,6 +1698,7 @@ test('prompt editor dashboard resolves auxiliary columns and retains its layout 
 		vscodeExecuteCommandHandler = async () => quickCommandPalette([]);
 		vscodeDashboardEditorLayout = { orientation: 1, groups: [{ size: 500 }, { size: 500 }] };
 		assert.equal(await request(), true);
+		assert.equal(Object.hasOwn(panel.postedMessages.at(-1), 'groupWidthFraction'), false);
 		vscodeDashboardActiveColumn = 4;
 		vscodeExecuteCommandHandler = async () => quickCommandPalette([], 2);
 		assert.equal(await request(), false);

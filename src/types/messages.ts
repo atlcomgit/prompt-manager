@@ -354,7 +354,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptDashboardQuickCommandPreviewInvalidated' }
 	/** Изменения из другого окна применяются отдельно от одноразовой начальной гидратации. */
 	| { type: 'promptUiSettingsChanged'; settings: PromptUiSettingsSnapshot }
-	| { type: 'promptEditorGroupLayoutChanged'; hideDashboard: boolean; singleGroup: boolean; viewportWidth?: number }
+	| { type: 'promptEditorGroupLayoutChanged'; hideDashboard: boolean; singleGroup: boolean; viewportWidth?: number; groupWidthFraction?: number }
 	| { type: 'promptDashboardWidgetSnapshot'; promptId: string; promptUuid?: string; widget: PromptDashboardWidgetSnapshot<unknown>; requestId?: string }
 	/** Завершает dashboard request, который host безопасно отбросил после collapse race. */
 	| { type: 'promptDashboardRequestCompleted'; requestId: string; target: PromptDashboardWidgetKind }

@@ -282,26 +282,30 @@ interface WorkbenchEditorGroupLayout {
 	size?: number;
 }
 
-/** Учитывает вложенные сетки с единственным потомком; сравнение сохраняет различие даже в один пиксель. */
-function shouldHideDashboardInGroup(layout: WorkbenchEditorGroupLayout, columnInWindow: number): boolean {
+/** Доля ширины промпта при скрытом «Обзоре»; используется для распознавания закрытия соседней группы. */
+function getHiddenDashboardGroupWidthFraction(layout: WorkbenchEditorGroupLayout, columnInWindow: number): number | undefined {
 	let { orientation, groups } = layout;
-	if (orientation !== 0 && orientation !== 1) return false;
+	if (orientation !== 0 && orientation !== 1) return undefined;
 	// На каждом следующем уровне VS Code меняет ось. Число конечных групп проверено вызывающей стороной.
 	while (groups?.length === 1) {
 		orientation = 1 - orientation;
 		groups = groups[0].groups;
 	}
-	if (orientation !== 0 || groups?.length !== 2 || (columnInWindow !== 1 && columnInWindow !== 2)) return false;
+	if (orientation !== 0 || groups?.length !== 2 || (columnInWindow !== 1 && columnInWindow !== 2)) return undefined;
 	const width = groups[columnInWindow - 1].size;
 	const neighborWidth = groups[2 - columnInWindow].size;
-	return typeof width === 'number' && Number.isFinite(width) && width > 0
-		&& typeof neighborWidth === 'number' && Number.isFinite(neighborWidth) && neighborWidth >= width;
+	if (typeof width !== 'number' || !Number.isFinite(width) || width <= 0
+		|| typeof neighborWidth !== 'number' || !Number.isFinite(neighborWidth) || neighborWidth < width) return undefined;
+	const fraction = width / (width + neighborWidth);
+	return fraction > 0 ? fraction : undefined;
 }
 
-/** Только подтверждённая одиночная группа даёт странице исходную ширину для следующего split. */
+/** Только подтверждённая геометрия текущего окна позволяет опередить ответ host при следующем resize. */
 interface PromptEditorGroupGeometry {
 	singleGroup: boolean;
 	hideDashboard?: boolean;
+	/** Доля ширины промпта в паре соседних групп, только когда «Обзор» скрыт. */
+	groupWidthFraction?: number;
 }
 
 /** Срок загрузки панели Codex в браузере, в течение которого запоздавший «Новый чат» сбрасывает файлы, мс. */
@@ -580,7 +584,10 @@ export class EditorPanelManager {
 			// Окно промпта отдельно. Его единственную группу можно доказать по оставшемуся числу групп.
 			return groups.length - count === 1 ? { singleGroup: true, hideDashboard: false } : { singleGroup: false };
 		}
-		return { singleGroup: count === 1, hideDashboard: count === 2 && shouldHideDashboardInGroup(layout, column - first + 1) };
+		const groupWidthFraction = count === 2 ? getHiddenDashboardGroupWidthFraction(layout, column - first + 1) : undefined;
+		return groupWidthFraction === undefined
+			? { singleGroup: count === 1, hideDashboard: false }
+			: { singleGroup: false, hideDashboard: true, groupWidthFraction };
 	}
 
 	/** Возвращает все видимые вкладки prompt editor независимо от внутреннего Map-трекинга. */
@@ -9539,7 +9546,7 @@ export class EditorPanelManager {
 			if (!geometry) return;
 			dashboardHidden = geometry.hideDashboard ?? dashboardHidden;
 			await this.resolvePanelPostMessageCallback(panel)({
-				type: 'promptEditorGroupLayoutChanged', hideDashboard: dashboardHidden, singleGroup: geometry.singleGroup, viewportWidth,
+				type: 'promptEditorGroupLayoutChanged', ...geometry, hideDashboard: dashboardHidden, viewportWidth,
 			});
 		};
 		const groupChanges = vscode.window.tabGroups.onDidChangeTabGroups(() => { void syncGroupLayout(true); });

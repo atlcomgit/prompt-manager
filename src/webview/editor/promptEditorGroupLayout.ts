@@ -14,13 +14,14 @@ function looksLikeEqualSplit(single: ReturnType<typeof measure>, current: Return
 		&& single.height === current.height && single.outerWidth === current.outerWidth && single.outerHeight === current.outerHeight;
 }
 
-/** Preview a new split before paint, then reconcile it with the workbench's actual group layout. */
+/** Preview splitting or rejoining editor groups before paint, then reconcile with the workbench. */
 export function observePromptEditorGroupLayout(
 	view: Window,
 	requestLayout: (width: number) => void,
 	setHidden: (hidden: boolean, beforePaint: boolean) => void,
 ): () => void {
 	let singleGroup: ReturnType<typeof measure> | undefined;
+	let hiddenSplit: { fullWidth: number; roundingTolerance: number; outerWidth: number } | undefined;
 	let previousWidth = view.innerWidth;
 	let confirmedHidden = false;
 	let displayedHidden = false;
@@ -49,6 +50,15 @@ export function observePromptEditorGroupLayout(
 			const splitStarted = previousWidth === singleGroup.width && looksLikeEqualSplit(singleGroup, current);
 			const stillNarrower = displayedHidden && current.width <= singleGroup.width / 2;
 			display(splitStarted || stillNarrower, true);
+		} else if (hiddenSplit && current.outerWidth === hiddenSplit.outerWidth) {
+			if (displayedHidden && current.width > previousWidth
+				&& Math.abs(current.width - hiddenSplit.fullWidth) <= hiddenSplit.roundingTolerance) {
+				// Use the actual restored width if the user splits again before the reply arrives.
+				hiddenSplit.fullWidth = current.width;
+				display(false, true);
+			} else if (!displayedHidden && current.width <= hiddenSplit.fullWidth / 2) {
+				display(true, true);
+			}
 		}
 		previousWidth = current.width;
 		if (timer === undefined) sendResize();
@@ -61,9 +71,17 @@ export function observePromptEditorGroupLayout(
 		const current = measure(view);
 		// An answer sampled before this resize cannot invalidate a preview or establish a new single-group width.
 		const staleWidth = message.viewportWidth !== undefined && message.viewportWidth !== current.width;
-		if (staleWidth && (singleGroup || message.singleGroup)) return;
-		if (message.viewportWidth === undefined && displayedHidden !== confirmedHidden) return;
+		const previewActive = displayedHidden !== confirmedHidden;
+		if (staleWidth && (singleGroup || message.singleGroup || previewActive)) return;
+		if (message.viewportWidth === undefined && previewActive) return;
 		singleGroup = message.singleGroup && current.width > 0 ? current : undefined;
+		const fraction = message.groupWidthFraction;
+		if (!message.hideDashboard || typeof fraction !== 'number' || !(fraction > 0 && fraction <= 0.5)) {
+			hiddenSplit = undefined;
+		} else if (!staleWidth && message.viewportWidth === current.width && current.width > 0) {
+			// Convert the pane's CSS width and its two-pixel rounding allowance into full-editor coordinates.
+			hiddenSplit = { fullWidth: current.width / fraction, roundingTolerance: 2 / fraction, outerWidth: current.outerWidth };
+		}
 		confirmedHidden = message.hideDashboard;
 		display(confirmedHidden, false);
 	}

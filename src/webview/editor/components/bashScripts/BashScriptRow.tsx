@@ -1,10 +1,12 @@
-import React, { useEffect, useId, useReducer } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import type { BashScriptEntry, BashScriptRun } from '../../../../types/bashScripts.js';
 import { QuickNoteIcon } from '../quickNotes/QuickNoteIcon';
 
 const startTime = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'short', timeStyle: 'medium' });
 const fullDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'long', timeStyle: 'medium' });
 const seconds = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
+const COMPLETION_HOLD_MS = 1000;
+const useClientLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
 /** Закрытие терминала не определяет момент окончания команды. Прежний числовой код подтверждает финиш. */
 function durationMs(run: BashScriptRun, now?: number): number | undefined {
@@ -73,12 +75,39 @@ function previousDuration(history: BashScriptRun[], run: BashScriptRun): number 
 	return undefined;
 }
 
-/** Полоса сравнивает прошедшее время с предыдущим запуском вплоть до события завершения команды. */
+/** Hold newly confirmed completions, including scripts that finish between two catalog snapshots. */
+function useFinishingRun(history: BashScriptRun[], running: boolean) {
+	const previousHistory = useRef(history);
+	const [finishing, setFinishing] = useState<BashScriptRun>();
+	useClientLayoutEffect(() => {
+		const previous = previousHistory.current;
+		previousHistory.current = history;
+		if (running) {
+			setFinishing(undefined);
+		} else if (history !== previous) {
+			const alreadyFinished = new Set(previous.filter(run => run.finishedAt).map(run => run.id));
+			const finished = history.find(run => run.finishedAt && !alreadyFinished.has(run.id) && durationMs(run) !== undefined);
+			if (finished || history[0]?.id !== previous[0]?.id) setFinishing(finished);
+		}
+	}, [history, running]);
+	useEffect(() => {
+		if (!finishing) return;
+		const timer = window.setTimeout(() => setFinishing(undefined), COMPLETION_HOLD_MS);
+		return () => window.clearTimeout(timer);
+	}, [finishing]);
+	return finishing;
+}
+
+/** The estimate uses the previous run while active; a confirmed finish always fills the track. */
 function RunProgress({ history, run, elapsed }: { history: BashScriptRun[]; run: BashScriptRun; elapsed: number }) {
-	const baseline = previousDuration(history, run);
-	const percent = baseline === undefined ? undefined : Math.min(100, elapsed / baseline * 100);
-	const hint = baseline === undefined ? 'Нет предыдущего запуска с измеренной длительностью'
-		: `Предыдущий запуск длился ${formatDuration(baseline)}`;
+	let percent: number | undefined = 100;
+	let hint = `100%. ${runStatus(run, false)}`;
+	if (!run.finishedAt) {
+		const baseline = previousDuration(history, run);
+		percent = baseline === undefined ? undefined : Math.min(100, elapsed / baseline * 100);
+		hint = baseline === undefined ? 'Нет предыдущего запуска с измеренной длительностью'
+			: `Предыдущий запуск длился ${formatDuration(baseline)}`;
+	}
 	return <span className="pm-bs-track pm-bs-live" role="progressbar" aria-label="Время выполнения скрипта"
 		aria-valuenow={percent === undefined ? undefined : Math.round(percent)} aria-valuetext={`${formatDuration(elapsed)}. ${hint}`} title={hint}>
 		<span className="pm-bs-bar" style={percent === undefined ? undefined : { width: `${percent}%` }} />
@@ -108,6 +137,11 @@ interface RowProps {
 	favorite: boolean;
 	onToggleFavorite(): void;
 	rowOrderActions?: React.ReactNode;
+	dragHandle?: React.ReactNode;
+	dropPlacement?: 'before' | 'after';
+	onDragOver?: React.DragEventHandler<HTMLDivElement>;
+	onDragLeave?: React.DragEventHandler<HTMLDivElement>;
+	onDrop?: React.DragEventHandler<HTMLDivElement>;
 	busy: boolean;
 	launching?: boolean;
 	historyOpen: boolean;
@@ -122,13 +156,15 @@ interface RowProps {
 }
 
 /** The row shows live elapsed time or the newest measured run. History keeps each run's own duration. */
-export function BashScriptRow({ entry, displayPath, favorite, onToggleFavorite, rowOrderActions,
+export function BashScriptRow({ entry, displayPath, favorite, onToggleFavorite, rowOrderActions, dragHandle,
+	dropPlacement, onDragOver, onDragLeave, onDrop,
 	busy, launching, historyOpen, hideTarget, onRun, onShowTerminal, onEdit, onHistory, onHide, confirmHide }: RowProps) {
 	const historyId = useId();
 	const hideId = useId();
 	const active = entry.activeRunIds?.length
 		? entry.history.find(run => !run.finishedAt && entry.activeRunIds?.includes(run.id)) : undefined;
 	const running = !!active;
+	const finishing = useFinishingRun(entry.history, running);
 	const [, tick] = useReducer((value: number) => value + 1, 0);
 	useEffect(() => {
 		if (!running) return;
@@ -139,6 +175,8 @@ export function BashScriptRow({ entry, displayPath, favorite, onToggleFavorite, 
 	const latest = entry.history[0];
 	const displayedRun = active ?? entry.history.find(run => durationMs(run) !== undefined) ?? latest;
 	const duration = displayedRun && durationMs(displayedRun, running ? now : undefined);
+	const progressRun = active ?? finishing;
+	const progressElapsed = active ? duration : finishing && durationMs(finishing);
 	const durationLabel = duration === undefined ? '—' : formatDuration(duration);
 	const timingHint = displayedRun
 		? `${runStatus(displayedRun, running)} · ${duration === undefined ? 'Длительность неизвестна' : durationLabel}`
@@ -154,7 +192,8 @@ export function BashScriptRow({ entry, displayPath, favorite, onToggleFavorite, 
 	const terminalRunId = entry.terminalRunIds?.[0];
 	const terminalHint = running ? 'Показать терминал выполняющегося запуска' : 'Показать терминал последнего запуска';
 	return <li className="pm-bs-entry">
-		<div className="pm-bs-row" data-runnable={!disabled || undefined} onDoubleClick={event => {
+		<div className="pm-bs-row" data-runnable={!disabled || undefined} data-drop={dropPlacement}
+			onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop} onDoubleClick={event => {
 			if (!disabled && event.target instanceof Element && !event.target.closest('button')) onRun();
 		}}>
 			<button type="button" className="pm-qn-icon-btn pm-bs-play" aria-label={runLabel} aria-busy={running || launching || undefined}
@@ -163,6 +202,7 @@ export function BashScriptRow({ entry, displayPath, favorite, onToggleFavorite, 
 			</button>
 			<div className="pm-bs-details">
 				<span className="pm-bs-name-cell">
+					{progressRun && progressElapsed !== undefined && <RunProgress history={entry.history} run={progressRun} elapsed={progressElapsed} />}
 					<span className="pm-bs-name" data-favorite={favorite || undefined} title={entry.name}>{entry.name}</span>
 					<button type="button" className="pm-qn-icon-btn pm-bs-favorite" aria-pressed={favorite}
 						aria-label={`Избранное · ${entry.name}`} title={favorite ? 'Убрать из избранного' : 'Добавить в избранное'}
@@ -186,16 +226,17 @@ export function BashScriptRow({ entry, displayPath, favorite, onToggleFavorite, 
 				<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"><circle cx="8" cy="8" r="5.4" /><path d="M8 4.5V8l2.4 1.5" /></svg>
 			</button>
 			<div className="pm-bs-tools">
+				{dragHandle}
 				{rowOrderActions ?? <>
-					{terminalRunId && <button type="button" className="pm-qn-icon-btn" aria-label={`Показать терминал ${entry.name}`}
-						title={terminalHint} onClick={() => onShowTerminal(terminalRunId)}><QuickNoteIcon name="terminal" size={14} /></button>}
+					{terminalRunId ? <button type="button" className="pm-qn-icon-btn" aria-label={`Показать терминал ${entry.name}`}
+						title={terminalHint} onClick={() => onShowTerminal(terminalRunId)}><QuickNoteIcon name="terminal" size={14} /></button>
+						: <span className="pm-bs-terminal-slot" aria-hidden="true" />}
 					<button type="button" className="pm-qn-icon-btn" data-pm-bash-editor-opener={entry.scope + ':' + entry.id} aria-label={`Редактировать ${entry.name}`} title="Редактировать скрипт"
 						onClick={e => onEdit(e.currentTarget)}><QuickNoteIcon name="file-code" size={14} /></button>
 					<button type="button" className="pm-qn-icon-btn" aria-label={`Убрать ${entry.name} из виджета`} title="Убрать из виджета"
 						aria-controls={hideTarget ? hideId : undefined} aria-expanded={!!hideTarget} onClick={() => onHide(hideTarget ? null : entry)}><QuickNoteIcon name="eye-closed" size={13} /></button>
 				</>}
 			</div>
-			{active && duration !== undefined && <RunProgress history={entry.history} run={active} elapsed={duration} />}
 		</div>
 		{historyOpen && <div className="pm-bs-history" id={historyId} role="region" aria-label={`История запусков ${entry.name}`}>
 			<RunHistory history={entry.history} activeRunIds={entry.activeRunIds} now={now} />

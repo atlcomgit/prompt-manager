@@ -6,6 +6,16 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 
 ## [Unreleased]
 
+### 2026-11-27
+
+#### Added
+- Collapse individual Quick Command categories and restore their state after searching or reopening the dashboard.
+- Drag a Bash script by its handle to reorder it within its folder.
+- Notify Taskbar Preview Panel when a dashboard-launched Bash script finishes or fails.
+
+#### Changed
+- Show Bash run progress on a visible track behind the entire name column in light and dark themes. The track extends 4 px left and 2 px above and below the label. Concurrent runs keep the 24 px row spacing. A confirmed completion displays 100% for one second, including on first and very short runs.
+
 ### 2026-11-25
 
 #### Added

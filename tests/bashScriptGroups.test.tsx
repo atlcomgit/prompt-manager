@@ -161,6 +161,24 @@ test('script groups remember clicks across mounts and reveal matches without ove
 	await act(async () => { moveProject.click(); });
 	assert.deepEqual(projects(), ['/two', '/one']);
 	await click('Изменить порядок');
+	// Only sibling rows accept a grab handle, even when another folder contains the same file name.
+	const dataTransfer = new DataTransfer();
+	const source = button('Изменить порядок · check-9');
+	const targetRow = (name: string) => button('История запусков ' + name).closest<HTMLElement>('.pm-bs-row')!;
+	const dragEvent = (target: HTMLElement, type: string) => act(async () => {
+		const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientY: -1 });
+		Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+		target.dispatchEvent(event);
+	});
+	await dragEvent(source, 'dragstart');
+	const beforeForeignDrop = { ...order };
+	await dragEvent(targetRow('check-3'), 'drop');
+	assert.deepEqual(order, beforeForeignDrop);
+	await dragEvent(targetRow('check-5'), 'dragover');
+	assert.equal(targetRow('check-5').dataset.drop, 'before');
+	await dragEvent(targetRow('check-5'), 'drop');
+	await dragEvent(source, 'dragend');
+	assert.deepEqual(namesInBuild(), ['check-9', 'check-5', 'check-1']);
 	await click('Скрыть подгруппу build');
 	assert.deepEqual(folderNames(), ['builder', 'ci/tools']);
 	await search('ci/tools/build/a.sh');
@@ -176,7 +194,7 @@ test('script groups remember clicks across mounts and reveal matches without ove
 	assert.deepEqual(folderNames(), ['builder', 'ci/tools']);
 	await click('Показать скрытые подгруппы');
 	assert.deepEqual(folderNames(), ['builder', 'build', 'ci/tools']);
-	assert.deepEqual(namesInBuild(), ['check-5', 'check-1', 'check-9', 'new']);
+	assert.deepEqual(namesInBuild(), ['check-9', 'check-5', 'check-1', 'new']);
 	assert.equal(button('Избранное · check-1').getAttribute('aria-pressed'), 'true');
 	// «Избранные» оставляют только отмеченный скрипт и раскрывают его группы, как другие фильтры.
 	await click('Поиск и фильтры скриптов');
@@ -206,6 +224,6 @@ test('script groups remember clicks across mounts and reveal matches without ove
 	assert.equal(button('build').getAttribute('aria-expanded'), 'false');
 	await click('build');
 	assert.deepEqual(Array.from(document.querySelectorAll('ul[aria-label="build"] .pm-bs-name'), row => row.textContent),
-		['check-5', 'check-1', 'check-9', 'new']);
+		['check-9', 'check-5', 'check-1', 'new']);
 	assert.equal(state.unrelated, 'kept');
 });

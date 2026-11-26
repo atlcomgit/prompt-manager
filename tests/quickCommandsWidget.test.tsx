@@ -8,14 +8,20 @@ import { expandQuickCommandText } from '../src/utils/quickCommandTemplate.js';
 import type { WebviewToExtensionMessage } from '../src/types/messages.js';
 import type { QuickCommandTemplateResult } from '../src/utils/quickCommandTemplate.js';
 
-/** Разделяет шапку и список так же, как панель, чтобы проверять расположение действий. */
-function renderQuickCommands(
+/** Собирает виджет с обычной шапкой и управляемым состоянием раскрытия. */
+function quickCommands(
 	props: Pick<React.ComponentProps<typeof QuickCommandsWidget>, 'items' | 'collapsed' | 'pendingTitle'>,
-): string {
-	return renderToStaticMarkup(<QuickCommandsWidget {...props} target="current"
+	expandedGroups: Record<string, boolean> = {}, onToggleGroup: (key: string) => void = () => undefined,
+) {
+	return <QuickCommandsWidget {...props} target="current" expandedGroups={expandedGroups} onToggleGroup={onToggleGroup}
 		renderShell={(actions, body) => <section><header>{actions}</header>{body}</section>}
 		onToggleCollapse={() => undefined} onTargetChange={() => undefined} onItemsChange={() => undefined}
-		onEdit={() => undefined} onInsert={() => undefined} onCopy={() => undefined} />);
+		onEdit={() => undefined} onInsert={() => undefined} onCopy={() => undefined} />;
+}
+
+/** Разделяет шапку и список так же, как панель, чтобы проверять расположение действий. */
+function renderQuickCommands(props: Parameters<typeof quickCommands>[0]): string {
+	return renderToStaticMarkup(quickCommands(props));
 }
 
 /** Показывает категории, управление строкой и индикатор только у вставляемой команды. */
@@ -56,6 +62,60 @@ test('Collapsed Quick Commands keeps its actions and disables Add at the command
 	assert.match(markup, /aria-label="Добавить быструю команду"[^>]+disabled=""/);
 	assert.match(markup, /aria-label="Целевой чат агента"/);
 	assert.doesNotMatch(markup, /class="pm-quick-commands"|type="search"|command-0</);
+});
+
+/** Поиск временно открывает совпадения. Перемонтирование восстанавливает выбор по каждой категории. */
+test('Quick Commands restores saved groups and keeps search toggles local to a query', async t => {
+	const { GlobalRegistrator } = await import('@happy-dom/global-registrator');
+	GlobalRegistrator.register();
+	const { createRoot } = await import('react-dom/client');
+	const { flushSync } = await import('react-dom');
+	const root = createRoot(document.body.appendChild(document.createElement('div')));
+	t.after(async () => {
+		try { root.unmount(); } finally { await GlobalRegistrator.unregister(); }
+	});
+	const props = { items: [{ title: 'Проверить', text: '/review', category: 'Git' }, { title: 'Справка', text: '/help' }], collapsed: false };
+	const settings: Record<string, boolean> = {};
+	/** Применяет сохранённое состояние так же, как родитель панели. */
+	function render() {
+		root.render(quickCommands(props, settings, key => {
+			settings[key] = !(settings[key] ?? true);
+			render();
+		}));
+	}
+	const group = (title: string) => document.querySelector<HTMLButtonElement>(`[role=group][aria-label="${title}"] .pm-quick-commands-category`)!;
+	const click = (button: HTMLButtonElement) => flushSync(() => button.click());
+	flushSync(render);
+	click(group('Git'));
+	assert.equal(group('Git').getAttribute('aria-expanded'), 'false');
+	assert.equal(document.getElementById(group('Git').getAttribute('aria-controls')!)?.hidden, true);
+	assert.equal(group('Без категории').getAttribute('aria-expanded'), 'true');
+	assert.equal(document.querySelectorAll('.pm-quick-commands-run').length, 1);
+	flushSync(() => root.render(null));
+	flushSync(render);
+	assert.equal(group('Git').getAttribute('aria-expanded'), 'false');
+
+	click(document.querySelector<HTMLButtonElement>('[aria-label="Поиск быстрых команд"]')!);
+	const search = document.querySelector<HTMLInputElement>('input[type=search]')!;
+	/** Ввод через DOM вызывает обработчик React, как ввод в webview. */
+	const typeSearch = (value: string) => flushSync(() => {
+		Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, value);
+		search.dispatchEvent(new Event('input', { bubbles: true }));
+	});
+	typeSearch('Проверить');
+	assert.equal(group('Git').getAttribute('aria-expanded'), 'true');
+	assert.equal(document.querySelector('.pm-quick-commands-run')?.textContent, 'Проверить');
+	click(group('Git'));
+	assert.equal(group('Git').getAttribute('aria-expanded'), 'false');
+	typeSearch('Git');
+	assert.equal(group('Git').getAttribute('aria-expanded'), 'true');
+	typeSearch('');
+	assert.equal(group('Git').getAttribute('aria-expanded'), 'false');
+	assert.deepEqual(settings, { 'quickCommands:Git': false });
+	click(group('Без категории'));
+	assert.equal(document.querySelectorAll('.pm-quick-commands-run').length, 0);
+	click(group('Git'));
+	assert.equal(document.querySelector('.pm-quick-commands-run')?.textContent, 'Проверить');
 });
 
 /** Поддерживает прежние строки и читает упорядоченные записи с категориями. */

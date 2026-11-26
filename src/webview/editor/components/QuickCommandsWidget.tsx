@@ -19,14 +19,32 @@ const TARGET_LABELS: Record<DashboardQuickCommandTarget, string> = {
 	'opencode-cli': 'OpenCode CLI',
 };
 
+/** Кнопка категории остаётся доступна с клавиатуры, когда её список свёрнут. */
+function QuickCommandGroup({ title, expanded, onToggle, children }: {
+	title: string; expanded: boolean; onToggle(): void; children: React.ReactNode;
+}) {
+	const listId = useId();
+	return <div role="group" aria-label={title}>
+		<button type="button" className="pm-quick-commands-category" aria-expanded={expanded} aria-controls={listId} onClick={onToggle}>
+			<QuickNoteIcon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} />
+			<span>{title}</span>
+		</button>
+		<div id={listId} hidden={!expanded}>{expanded && children}</div>
+	</div>;
+}
+
 /** Общий список черновиков команд. Проверки в quickCommandsWidget.test.tsx. */
 export function QuickCommandsWidget({
-	items, target, pendingTitle, collapsed, onToggleCollapse, renderShell, onTargetChange, onItemsChange, onEdit, onInsert, onCopy,
+	items, target, pendingTitle, collapsed, expandedGroups, onToggleGroup, onToggleCollapse,
+	renderShell, onTargetChange, onItemsChange, onEdit, onInsert, onCopy,
 }: {
 	items: DashboardQuickCommand[];
 	target: DashboardQuickCommandTarget;
 	pendingTitle?: string | null;
 	collapsed: boolean;
+	/** Состояние категорий между открытиями панели хранится в общих настройках раскрытия обзора. */
+	expandedGroups: Record<string, boolean>;
+	onToggleGroup(key: string): void;
 	onToggleCollapse(): void;
 	renderShell(actions: React.ReactNode, body: React.ReactNode | null): React.ReactNode;
 	onTargetChange(target: DashboardQuickCommandTarget): void;
@@ -37,6 +55,7 @@ export function QuickCommandsWidget({
 }): React.ReactElement {
 	// Поиск и незавершённые действия относятся только к открытому виджету.
 	const [filter, setFilter] = useState('');
+	const [searchExpanded, setSearchExpanded] = useState<Record<string, boolean>>({});
 	const [searchOpen, setSearchOpen] = useState(false);
 	const searchId = useId();
 	const searchInput = useRef<HTMLInputElement>(null);
@@ -70,8 +89,17 @@ export function QuickCommandsWidget({
 	const visibleGroups = [...categories].flatMap(([category, commands]) => {
 		const visible = category.toLocaleLowerCase().includes(query) ? commands
 			: commands.filter(item => item.title.toLocaleLowerCase().includes(query) || item.text.toLocaleLowerCase().includes(query));
-		return visible.length ? [{ category, commands, visible }] : [];
+		if (!visible.length) return [];
+		const key = 'quickCommands:' + category;
+		const expanded = (query ? searchExpanded : expandedGroups)[key] ?? true;
+		return [{ category, commands, visible, key, expanded }];
 	});
+
+	/** Сворачивание результатов действует до смены запроса. Обычный список запоминает выбор в настройках. */
+	function toggleGroup(key: string) {
+		if (query) setSearchExpanded(current => ({ ...current, [key]: !(current[key] ?? true) }));
+		else onToggleGroup(key);
+	}
 
 	/** Переставляет команды в выбранной группе, сохраняя позиции остальных групп. */
 	const reorder = (category: string, commands: DashboardQuickCommand[], order: string[]) => {
@@ -127,15 +155,17 @@ export function QuickCommandsWidget({
 		<div className="pm-quick-commands">
 			{searchOpen && <input type="search" className="pm-quick-commands-search" id={searchId} ref={searchInput}
 				aria-label="Фильтр быстрых команд" placeholder="Поиск команды…" value={filter}
-				onChange={event => setFilter(event.target.value)} />}
+				onChange={event => {
+					const value = event.target.value;
+					if (value.trim().toLocaleLowerCase() !== query) setSearchExpanded({});
+					setFilter(value);
+				}} />}
 			<div className="pm-quick-commands-list">
 				{visibleGroups.length === 0 && <span className="pm-quick-commands-muted">
 					{query ? 'Команды не найдены.' : 'Команд пока нет.'}
 				</span>}
-				{visibleGroups.map(({ category, commands, visible }) => (
-					<div key={category} role="group" aria-label={category || 'Без категории'}>
-						{(category || categories.size > 1) &&
-							<div className="pm-quick-commands-category">{category || 'Без категории'}</div>}
+				{visibleGroups.map(({ category, commands, visible, key, expanded }) => (
+					<QuickCommandGroup key={key} title={category || 'Без категории'} expanded={expanded} onToggle={() => toggleGroup(key)}>
 						<SortableEditorSections scopeKey={category} gap={4} order={commands.map(item => item.title)}
 							disabled={visible.length < 2} onReorder={order => reorder(category, commands, order)}>
 							{visible.map(item => {
@@ -180,7 +210,7 @@ export function QuickCommandsWidget({
 								);
 							})}
 						</SortableEditorSections>
-					</div>
+					</QuickCommandGroup>
 				))}
 			</div>
 		</div>
@@ -225,7 +255,14 @@ const QUICK_COMMANDS_CSS = `
 }
 @container pm-dashboard-widget (max-width: 359px) { .pm-quick-commands-target-name { display: none; } }
 .pm-quick-commands-category, .pm-quick-commands-muted { font-size: 11px; color: var(--vscode-descriptionForeground); }
-.pm-quick-commands-category { margin: 0 0 4px; font-weight: 600; overflow-wrap: anywhere; }
+.pm-quick-commands-category {
+	display: flex; align-items: center; gap: 4px; width: 100%; padding: 3px 2px;
+	border: 0; background: transparent; font-family: inherit; font-weight: 600;
+	text-align: start; overflow-wrap: anywhere; cursor: pointer;
+}
+.pm-quick-commands-category svg { flex: none; }
+.pm-quick-commands-category[aria-expanded=true] { margin-bottom: 4px; }
+.pm-quick-commands-category:hover { background: var(--vscode-list-hoverBackground); }
 .pm-quick-commands-row { display: flex; align-items: stretch; border: 1px solid var(--vscode-panel-border); border-radius: 5px; }
 .pm-quick-commands-row [data-pm-editor-section-handle] { flex: 0 0 18px; align-self: center; }
 .pm-quick-commands-run {

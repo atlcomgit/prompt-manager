@@ -124,6 +124,7 @@ test('Live duration follows the newest active shell and switches to the final re
 	const progress = () => Array.from(document.querySelectorAll('[role=progressbar]'), element => element.getAttribute('aria-valuenow'));
 	await React.act(async () => root.render(scriptRow([newer, ...history.slice(0, 2)], false, ['newer'])));
 	assert.deepEqual(progress(), [null], 'первый измеряемый запуск виден и при закрытой истории');
+	assert.ok(document.querySelector('.pm-bs-name-cell > [role="progressbar"]'), 'фон выполнения находится в колонке названия');
 	await React.act(async () => root.render(scriptRow([newer, older, ...history], true, ['older', 'newer'])));
 	assert.deepEqual(progress(), ['40', '40', '50']);
 	assert.equal(rowTime().textContent, '4 с');
@@ -154,6 +155,72 @@ test('Live duration follows the newest active shell and switches to the final re
 	assert.equal(document.querySelector('.pm-bs-history li:last-child')?.getAttribute('data-outcome'), null);
 	await React.act(async () => root.render(scriptRow([{ ...finished, exitCode: 0 }], true)));
 	assert.equal(rowTime().getAttribute('data-outcome'), 'success');
+});
+
+test('The name track holds 100% once for each confirmed finish, even between catalog snapshots', async t => {
+	const { GlobalRegistrator } = await import('@happy-dom/global-registrator');
+	GlobalRegistrator.register();
+	Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { configurable: true, value: true });
+	const { createRoot } = await import('react-dom/client');
+	const root = createRoot(document.body.appendChild(document.createElement('div')));
+	t.after(async () => {
+		await React.act(async () => root.unmount());
+		Reflect.deleteProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
+		await GlobalRegistrator.unregister();
+	});
+
+	const holds = new Map<number, () => void>();
+	let nextTimer = 0;
+	t.mock.method(window, 'setTimeout', (callback: () => void, delay: number) => {
+		assert.equal(delay, 1000);
+		holds.set(++nextTimer, callback);
+		return nextTimer;
+	});
+	t.mock.method(window, 'clearTimeout', (id: number) => holds.delete(id));
+	const start = Date.parse('2026-02-01T10:00:00Z');
+	let now = start + 200;
+	t.mock.method(Date, 'now', () => now);
+	const run: BashScriptRun = { id: 'quick', startedAt: new Date(start).toISOString() };
+	const done: BashScriptRun = { ...run, finishedAt: new Date(start + 250).toISOString(), endedBy: 'shell', exitCode: 0 };
+	const render = (history: BashScriptRun[], ids: string[] = []) =>
+		React.act(async () => root.render(scriptRow(history, false, ids)));
+	const bar = () => document.querySelector<HTMLElement>('.pm-bs-name-cell [role="progressbar"]');
+	const full = () => {
+		assert.equal(bar()?.getAttribute('aria-valuenow'), '100');
+		assert.equal(bar()?.querySelector<HTMLElement>('.pm-bs-bar')?.style.width, '100%');
+		assert.equal(document.querySelector<HTMLButtonElement>('.pm-bs-play')?.disabled, false);
+	};
+
+	await render([run], [run.id]);
+	assert.ok(bar());
+	assert.equal(bar()!.getAttribute('aria-valuenow'), null);
+	await render([done]);
+	full();
+	await render([{ ...done }]);
+	assert.equal(nextTimer, 1, 'catalog refresh keeps the original deadline');
+
+	now = start + 350;
+	const rerun = { id: 'again', startedAt: new Date(start + 300).toISOString() };
+	await render([rerun, done], [rerun.id]);
+	assert.equal(holds.size, 0, 'a new launch cancels the old hold');
+	assert.equal(bar()?.getAttribute('aria-valuenow'), '20');
+	const failed = { ...done, ...rerun, finishedAt: new Date(start + 375).toISOString(), exitCode: 3 };
+	await render([failed, done]);
+	full();
+	assert.match(bar()!.getAttribute('aria-valuetext')!, /Код 3/);
+	const [expire] = holds.values();
+	await React.act(async () => expire());
+	assert.equal(bar(), null);
+	await render([{ ...failed }, done]);
+	assert.equal(bar(), null);
+
+	await render([{ ...done, id: 'instant' }, failed, done]);
+	full();
+	await render([{ ...done, id: 'closed', endedBy: 'terminal' }]);
+	assert.equal(bar(), null, 'a terminal closure alone cannot confirm script completion');
+	await React.act(async () => root.render(null));
+	await render([done]);
+	assert.equal(bar(), null, 'opening a saved history does not replay its old completions');
 });
 
 /** Некорректные даты, нулевой масштаб и пустая история не создают мнимую полосу прогресса. */

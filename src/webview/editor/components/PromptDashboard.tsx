@@ -1766,6 +1766,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		aiAnalysis: renderAnalysis(snapshot?.aiAnalysis.data || null, snapshot?.aiAnalysis.cache.status || 'idle', busyAction, normalizedCollapsedSections, toggleSectionCollapse, onRefreshWidget, renderSectionDragHandle('aiAnalysis', 'AI review')),
 		quickCommands: (
 			<QuickCommandsWidget items={preferences.quickCommands.items}
+				expandedGroups={expanded} onToggleGroup={key => toggleExpanded(key, true)}
 				collapsed={isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'quickCommands')}
 				onToggleCollapse={() => toggleSectionCollapse('quickCommands')}
 				renderShell={(actions, body) => renderQuickWidget('quickCommands', actions, body)}

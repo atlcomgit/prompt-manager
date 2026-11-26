@@ -4,13 +4,14 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import Module from 'node:module';
 import type { BashScriptsRequest, BashScriptsResponse } from '../src/types/bashScripts.js';
 import { BashScriptsService } from '../src/services/bashScriptsService.js';
 import { readBashScript, saveBashScript } from '../src/services/bashScriptFile.js';
 
-/** Команда запуска контроллера: переход в рабочую папку и выполнение файла одним аргументом. */
-const RUN_COMMAND = 'cd -- "$PROMPT_MANAGER_BASH_CWD" && bash -- "$PROMPT_MANAGER_BASH_SCRIPT"';
+/** Запускаем тот же файл, который попадает в установленное расширение. */
+const LAUNCHER = path.join(process.cwd(), 'media', 'bash', 'widget-runner');
 
 /** Каждый сценарий получает собственный контракт VS Code, не открывая реальный редактор. */
 function loadController(vscode: unknown): typeof import('../src/providers/bashScriptsHostController.js').BashScriptsHostController {
@@ -95,7 +96,7 @@ test('Список и поиск получают актуальные корн�
 		window: { onDidChangeWindowState: subscribe, onDidStartTerminalShellExecution: subscribe, onDidEndTerminalShellExecution: subscribe, onDidCloseTerminal: subscribe } });
 	let notifyPanel!: () => void;
 	const panelChanged = new Promise<void>(resolve => { notifyPanel = resolve; });
-	const host = new Controller(path.join(dir, 'global'), path.join(dir, 'project'), notifyPanel, async () => {
+	const host = new Controller(LAUNCHER, path.join(dir, 'global'), path.join(dir, 'project'), notifyPanel, async () => {
 		gitRequests++;
 		if (gitRequests === 1) throw new Error('Git ещё не готов');
 		return git;
@@ -215,7 +216,7 @@ test('Bash host scans lazily and starts an isolated panel terminal with the actu
 				const terminal = { ...disposable, show: () => { shown++; }, shellIntegration: {
 					executeCommand: (command: string) => {
 						const execution = { commandLine: { value: command } };
-						execFile(options.shellPath, ['-c', command], { cwd: options.cwd, env: { ...process.env, ...options.env } },
+						execFile(options.shellPath, ['-c', command], { cwd: options.cwd, env: { ...process.env, ...options.env, HOME: dir } },
 							(error, stdout) => {
 								commandOutput = stdout;
 								end({ terminal, execution, exitCode: Number(error?.code ?? 0) });
@@ -228,7 +229,7 @@ test('Bash host scans lazily and starts an isolated panel terminal with the actu
 		},
 	};
 	const Controller = loadController(vscode);
-	const host = new Controller(path.join(dir, 'global'), path.join(root, '.metadata'), () => { changed++; });
+	const host = new Controller(LAUNCHER, path.join(dir, 'global'), path.join(root, '.metadata'), () => { changed++; });
 	t.after(() => host.dispose());
 	async function request(data: Omit<BashScriptsRequest, 'type' | 'requestId'>) {
 		let response: BashScriptsResponse | undefined;
@@ -329,6 +330,8 @@ test('Bash history follows a dispatched command even with an immediate exit or a
 	let started = (_event: EndEvent) => {};
 	const closeListeners = new Set<(terminal: unknown) => void>();
 	let lastTerminal: unknown;
+	let plainCommand = '';
+	let terminalEnv: Record<string, string> = {};
 	const shown: number[] = [];
 	const warnings: string[] = [];
 	let mode: 'closed' | 'rejected' | 'instant' | 'no-code' | 'plain' = 'closed';
@@ -347,10 +350,11 @@ test('Bash history follows a dispatched command even with an immediate exit or a
 			},
 			onDidEndTerminalShellExecution: (listener: typeof end) => { end = listener; return disposable; },
 			showWarningMessage: (message: string) => { warnings.push(message); },
-			createTerminal: () => {
+			createTerminal: (options: { env: Record<string, string> }) => {
+				terminalEnv = options.env;
 				const terminal = { ...disposable, exitStatus: mode === 'closed' ? { code: 1 } : undefined,
 					show: () => shown.push(dispatched), sendText: (value: string) => {
-						assert.equal(value, RUN_COMMAND);
+						plainCommand = value;
 						dispatched++;
 					}, shellIntegration: mode === 'plain' ? undefined : { executeCommand(value: string) {
 						if (mode === 'rejected') throw new Error('Команда отклонена терминалом');
@@ -363,7 +367,7 @@ test('Bash history follows a dispatched command even with an immediate exit or a
 				return terminal;
 			} },
 	});
-	const host = new Controller(globalDir, projectDir, () => {});
+	const host = new Controller(LAUNCHER, globalDir, projectDir, () => {});
 	t.after(() => host.dispose());
 	const run = async () => {
 		let response: BashScriptsResponse | undefined;
@@ -404,7 +408,30 @@ test('Bash history follows a dispatched command even with an immediate exit or a
 		return list!.result!.entries![0].activeRunIds;
 	};
 	assert.equal(await activeIds(), undefined);
-	started({ terminal: lastTerminal, execution: { commandLine: { value: RUN_COMMAND } } });
+	await t.test('Команда без интеграции оболочки уведомляет панель только о запуске из виджета', async () => {
+		const receiver = path.join(root, '.local/share/taskbar-preview-panel/hooks/panel_notify.py');
+		const events = path.join(root, 'events');
+		await fs.mkdir(path.dirname(receiver), { recursive: true });
+		await fs.writeFile(events, '');
+		// Ошибка приёмника и его вывод не должны менять результат выполнения скрипта.
+		await fs.writeFile(receiver, '#!/bin/bash\nread -r event\nprintf "%s\\n" "$*|$event|$PWD" >> "$HOME/events"\necho failed >&2\nexit 1\n', { mode: 0o700 });
+		await fs.writeFile(file, 'echo ran\nexit "${TEST_RESULT:-0}"');
+		const runShell = promisify(execFile);
+		// Если одну отправленную команду прервали до входа в обработчик, следующая всё равно уведомляет.
+		const nextCommand = plainCommand.replace(/ 1$/, ' 3');
+		assert.notEqual(nextCommand, plainCommand);
+		const commands = [plainCommand, plainCommand, 'bash -- "$PROMPT_MANAGER_BASH_SCRIPT"',
+			'export TEST_RESULT=7\n' + nextCommand, plainCommand, plainCommand.replace(/ 1$/, ' 2')];
+		const { stdout, stderr } = await runShell('bash', ['-c', commands.map(command => command + '\necho "$?"').join('\n')], {
+			env: { ...process.env, ...terminalEnv, HOME: root, TEST_RESULT: '0' },
+		});
+		assert.equal(stdout, 'ran\n0\n'.repeat(3) + 'ran\n7\n'.repeat(3));
+		assert.equal(stderr, '');
+		const received = async () => (await fs.readFile(events, 'utf8')).trim().split('\n').filter(Boolean).sort();
+		for (let i = 0; i < 200 && (await received()).length < 2; i++) await new Promise(resolve => setTimeout(resolve, 10));
+		assert.deepEqual(await received(), ['done', 'error'].map(kind => `--source custom --kind ${kind}|{"hook_event_name":"BashScriptEnd"}|${root}`));
+	});
+	started({ terminal: lastTerminal, execution: { commandLine: { value: plainCommand } } });
 	assert.deepEqual(await activeIds(), [unfinished.id]);
 	closeListeners.forEach(listener => listener(lastTerminal));
 	for (let i = 0; i < 200 && !(await catalog.get(ref)).history[0].finishedAt; i++) {
@@ -462,7 +489,7 @@ test('Active shell runs survive workspace folder changes and clear after complet
 			},
 		},
 	});
-	const host = new Controller(path.join(dir, 'global'), path.join(dir, 'metadata'), () => panelChanged());
+	const host = new Controller(LAUNCHER, path.join(dir, 'global'), path.join(dir, 'metadata'), () => panelChanged());
 	t.after(() => host.dispose());
 	async function request(data: Omit<BashScriptsRequest, 'requestId' | 'type'>) {
 		let response: BashScriptsResponse | undefined;
@@ -540,7 +567,7 @@ test('Scripts start in an unrevealed panel terminal that the row can show until 
 				return terminal;
 			} },
 	});
-	const host = new Controller(globalDir, projectDir, () => { changed++; });
+	const host = new Controller(LAUNCHER, globalDir, projectDir, () => { changed++; });
 	t.after(() => host.dispose());
 	async function request(data: Omit<BashScriptsRequest, 'type' | 'requestId'>) {
 		let response: BashScriptsResponse | undefined;
@@ -619,7 +646,7 @@ test('Rerunning a script reuses its idle terminal and opens a new one only for a
 				return terminal;
 			} },
 	});
-	const host = new Controller(globalDir, projectDir, () => {});
+	const host = new Controller(LAUNCHER, globalDir, projectDir, () => {});
 	t.after(() => host.dispose());
 	async function request(data: Omit<BashScriptsRequest, 'type' | 'requestId'>) {
 		let response: BashScriptsResponse | undefined;
@@ -642,12 +669,15 @@ test('Rerunning a script reuses its idle terminal and opens a new one only for a
 
 	const first = await run();
 	assert.equal(terminals.length, 1);
-	assert.deepEqual(terminals[0].commands, [RUN_COMMAND]);
+	const firstCommand = terminals[0].commands[0];
+	assert.equal(terminals[0].env.PROMPT_MANAGER_BASH_SESSION, first);
+	assert.ok(firstCommand.endsWith(first + ' 1'));
 	assert.equal(terminals[0].env.PROMPT_MANAGER_BASH_CWD, dir);
 	await finish(terminals[0], first);
 	const second = await run();
 	assert.equal(terminals.length, 1, 'свободный терминал скрипта используется повторно');
-	assert.deepEqual(terminals[0].commands, [RUN_COMMAND, RUN_COMMAND]);
+	assert.equal(terminals[0].commands.length, 2);
+	assert.ok(terminals[0].commands[1].endsWith(first + ' 2'));
 	assert.deepEqual((await entry()).terminalRunIds, [second], 'терминал показан последним запуском');
 	await request({ action: 'showTerminal', ref, runId: first });
 	assert.equal(terminals[0].shown, 1, 'прежний запуск того же терминала по-прежнему можно показать');

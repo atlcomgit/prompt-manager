@@ -65,8 +65,8 @@ test('Bash discovery survives restart and only invalidated script paths are chec
 		get: <T>(key: string, fallback?: T) => (values.get(key) ?? fallback) as T,
 		update: async (key, value) => { values.set(key, value); },
 	};
-	const start = (changed = () => {}, git?: ConstructorParameters<typeof Controller>[3]) =>
-		new Controller(path.join(root, 'global'), path.join(root, 'project'), changed, git, storage);
+	const start = (changed = () => {}, git?: ConstructorParameters<typeof Controller>[4]) =>
+		new Controller(path.join(process.cwd(), 'media/bash/widget-runner'), path.join(root, 'global'), path.join(root, 'project'), changed, git, storage);
 
 	let host = start();
 	t.after(() => host.dispose());

@@ -81,10 +81,17 @@ export const BASH_SCRIPTS_CSS = `
 	height: 24px; padding: 0 3px;
 }
 .pm-bs-row[data-runnable], .pm-bs-row button:enabled { cursor: pointer; }
+.pm-bs-row .pm-bs-drag:enabled { cursor: grab; color: var(--vscode-descriptionForeground); }
+.pm-bs-row .pm-bs-drag:active { cursor: grabbing; }
+.pm-bs-row[data-drop="before"] { box-shadow: inset 0 2px var(--vscode-focusBorder); }
+.pm-bs-row[data-drop="after"] { box-shadow: inset 0 -2px var(--vscode-focusBorder); }
 /* Keep the name and path on one line, reserving most of the available text width for the name. */
-.pm-bs-details { display: grid; grid-template-columns: minmax(0, 1fr) min(32%, 18ch); gap: 4px; align-items: center; min-width: 0; }
-.pm-bs-name-cell { display: flex; align-items: center; gap: 2px; min-width: 0; }
-.pm-bs-name { font-size: 13px; }
+.pm-bs-details { display: grid; grid-template-columns: minmax(0, 1fr) min(32%, 18ch); gap: 4px; align-self: stretch; align-items: center; min-width: 0; }
+.pm-bs-name-cell {
+	position: relative; isolation: isolate; align-self: stretch;
+	display: flex; align-items: center; gap: 2px; min-width: 0;
+}
+.pm-bs-name { font-size: 13px; line-height: 16px; }
 .pm-bs-name[data-favorite] { font-weight: 700; }
 .pm-bs-name-cell .pm-bs-favorite { width: 18px; height: 18px; }
 .pm-bs-favorite[aria-pressed=true] { color: var(--vscode-charts-yellow, var(--vscode-foreground)); }
@@ -109,19 +116,23 @@ body:is(.vscode-high-contrast, .vscode-high-contrast-light) .pm-bs-path-hint { c
 .pm-bs-tools, .pm-bs-flags, .pm-bs-global, .pm-bs-availability, .pm-bs-last-run { display: inline-flex; align-items: center; }
 .pm-bs-flags { gap: 2px; }
 .pm-bs-global, .pm-bs-last-run { color: var(--vscode-descriptionForeground); }
-.pm-bs-tools .pm-qn-icon-btn { width: 20px; height: 22px; }
-/* Общая колонка расширяется под кнопку терминала. Выравнивание вправо держит «Редактировать» и «Убрать» на месте. */
+.pm-bs-tools .pm-qn-icon-btn, .pm-bs-terminal-slot { width: 20px; height: 22px; }
+/* Reserve the terminal action even before the first launch, keeping the name column stationary. */
 .pm-bs-tools { justify-content: end; }
 .pm-bs-availability { gap: 3px; color: var(--vscode-editorWarning-foreground); font-size: 11px; }
+/* Give the timer a stable width for each duration format, including the transition from milliseconds to seconds. */
 .pm-bs-last-run {
-	justify-content: end; gap: 4px; min-width: 25px; height: 22px; padding: 0 3px; border: 0; border-radius: 3px;
+	justify-content: end; gap: 4px; box-sizing: border-box; width: calc(10ch + 23px); height: 22px; padding: 0 3px; border: 0; border-radius: 3px;
 	background: transparent; font: inherit; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; cursor: pointer;
 }
 .pm-bs-last-run:is(:hover, [aria-expanded=true]) { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
 .pm-bs-last-run > span, .pm-bs-duration { color: var(--bs-result); }
+.pm-bs-last-run > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pm-bs-last-run > svg { flex: none; }
 .pm-bs-duration-short, .pm-bs-duration-clock { display: none; }
 /* Reserve more of a narrow widget for the script name. The history tooltip keeps the full duration. */
 @container (max-width: 520px) {
+	.pm-bs-last-run { width: calc(9ch + 23px); }
 	.pm-bs-duration-full { display: none; }
 	.pm-bs-duration-short { display: inline; }
 }
@@ -131,6 +142,7 @@ body:is(.vscode-high-contrast, .vscode-high-contrast-light) .pm-bs-path-hint { c
 	.pm-bs-path-hint { font-size: 10px; }
 }
 @container (max-width: 350px) {
+	.pm-bs-last-run { width: calc(8ch + 23px); }
 	.pm-bs-duration-short { display: none; }
 	.pm-bs-duration-clock { display: inline; }
 }
@@ -147,8 +159,20 @@ body:is(.vscode-high-contrast, .vscode-high-contrast-light) .pm-bs-path-hint { c
 .pm-bs-track, .pm-bs-bar { display: block; height: 3px; border-radius: 2px; }
 .pm-bs-track { background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent); }
 .pm-bs-bar { background: var(--bs-result); }
-.pm-bs-row > .pm-bs-live { position: absolute; inset: auto 3px 0 24px; height: 2px; }
 .pm-bs-live { overflow: hidden; --bs-result: var(--vscode-descriptionForeground); }
+/* The 20px track leaves 2px around the 16px label and extends 4px past the start of its column. */
+.pm-bs-name-cell > .pm-bs-live {
+	position: absolute; inset: 2px 0 2px -4px; z-index: -1; pointer-events: none; box-sizing: border-box; height: auto;
+	border-radius: 4px; background: #303338; --bs-result: #505861;
+	outline: 1px solid var(--vscode-contrastBorder, #454a50); outline-offset: -1px;
+}
+.pm-bs-name-cell > .pm-bs-live .pm-bs-bar { border-radius: 0; }
+.pm-bs-name-cell:has(> .pm-bs-live) .pm-bs-name { color: #f2f3f5; }
+body:is(.vscode-light, .vscode-high-contrast-light) .pm-bs-name-cell > .pm-bs-live {
+	background: #c3cad1; --bs-result: #929eab;
+	outline-color: var(--vscode-contrastBorder, #858f99);
+}
+body:is(.vscode-light, .vscode-high-contrast-light) .pm-bs-name-cell:has(> .pm-bs-live) .pm-bs-name { color: #202328; }
 .pm-bs-live .pm-bs-bar { height: 100%; }
 .pm-bs-live:not([aria-valuenow]) .pm-bs-bar { width: 33.3333%; animation: pm-bs-wait 1.4s ease-in-out infinite alternate; }
 @keyframes pm-bs-wait { to { transform: translateX(200%); } }
@@ -160,6 +184,10 @@ body:is(.vscode-high-contrast, .vscode-high-contrast-light) .pm-bs-path-hint { c
 @media (forced-colors: active) {
 	.pm-bs-history li::after, .pm-bs-bar { forced-color-adjust: none; }
 	.pm-bs-track { border-block-end: 1px solid GrayText; }
+	body .pm-bs .pm-bs-name-cell > .pm-bs-live {
+		forced-color-adjust: none; background: Canvas; --bs-result: color-mix(in srgb, CanvasText 32%, Canvas);
+		border: 1px solid GrayText; outline: none;
+	}
 }
 .pm-bs-hide { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 8px; padding: 2px 0 2px 8px; border-inline-start: 1px solid var(--bs-border); font-size: 12px; }
 .pm-bs-hide > span { flex: 1 1 170px; overflow-wrap: anywhere; }

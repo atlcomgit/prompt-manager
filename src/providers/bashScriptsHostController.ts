@@ -7,14 +7,13 @@ import type { BashScriptEntry, BashScriptRef, BashScriptsRequest, BashScriptsRes
 
 /** Исключения относятся только к автодобавлению. В этих папках файл можно выбрать вручную. */
 const AUTO_EXCLUDE = '{**/.git/**,**/node_modules/**,**/vendor/**,**/.venv/**,**/dist/**,**/build/**,**/out/**,**/out-tests/**,**/.vscode/prompt-manager/**}';
-/** Переход в рабочую папку нужен повторному запуску: после окончания скрипта пользователь мог сменить папку оболочки. */
-const RUN_COMMAND = 'cd -- "$PROMPT_MANAGER_BASH_CWD" && bash -- "$PROMPT_MANAGER_BASH_SCRIPT"';
 const AVAILABILITY_KEY = 'bashScripts.availability.v1';
 
 /** Связывает события оболочки и терминала с одной командой, пока сохраняется начало её запуска. */
 interface TerminalRun {
 	ref: BashScriptRef;
 	id: string;
+	command: string;
 	catalog: BashScriptsService;
 	execution?: vscode.TerminalShellExecution;
 	startRecorded: boolean;
@@ -29,6 +28,7 @@ interface ScriptTerminal {
 	/** Окружение терминала задано при создании: другой файл или рабочая папка требуют нового терминала. */
 	scriptPath: string;
 	cwd: string;
+	panelCwd: string;
 	/** Оболочка выполняет команду — запуск скрипта или набранную пользователем после его окончания. */
 	executing: boolean;
 }
@@ -58,7 +58,7 @@ export class BashScriptsHostController implements vscode.Disposable {
 	private repositoriesReady?: Promise<void>;
 	private disposed = false;
 
-	constructor(private readonly globalDir: string, private readonly projectDir: string, private readonly changed: () => void,
+	constructor(private readonly launcherPath: string, private readonly globalDir: string, private readonly projectDir: string, private readonly changed: () => void,
 		private readonly getRepositories?: () => Promise<RepositoryList | null>, private readonly workspaceState?: vscode.Memento) {
 		this.catalog = this.createCatalog();
 		const saved = workspaceState?.get(AVAILABILITY_KEY);
@@ -82,7 +82,7 @@ export class BashScriptsHostController implements vscode.Disposable {
 				const shell = this.terminals.get(terminal);
 				if (shell) shell.executing = true;
 				const run = this.runs.get(terminal);
-				if (run && !run.execution && execution.commandLine.value === RUN_COMMAND) {
+				if (run && !run.execution && execution.commandLine.value === run.command) {
 					run.execution = execution;
 					if (run.startRecorded) this.invalidate();
 				}
@@ -92,7 +92,7 @@ export class BashScriptsHostController implements vscode.Disposable {
 				if (shell) shell.executing = false;
 				const run = this.runs.get(event.terminal);
 				if (run && (run.execution === event.execution ||
-					(!run.execution && event.execution.commandLine.value === RUN_COMMAND))) {
+					(!run.execution && event.execution.commandLine.value === run.command))) {
 					this.finish(event.terminal, 'shell', event.exitCode);
 				}
 			}),
@@ -347,23 +347,32 @@ export class BashScriptsHostController implements vscode.Disposable {
 	 */
 	private async run(entry: BashScriptEntry): Promise<void> {
 		if (!entry.available || !/\.(?:sh|bash)$/i.test(entry.absolutePath)) throw new Error('Файл Bash-скрипта недоступен.');
-		const run: TerminalRun = { ref: { scope: entry.scope, id: entry.id }, id: randomUUID(),
-			catalog: this.catalog, startRecorded: false };
 		const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(entry.absolutePath));
 		const cwd = folder?.uri.fsPath ?? path.dirname(entry.absolutePath);
-		const reused = this.idleTerminal(run.ref, entry.absolutePath, cwd);
+		// Для внешнего файла панель получает рабочую папку окна, в котором нажали кнопку.
+		const panelCwd = folder?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? cwd;
+		const ref = { scope: entry.scope, id: entry.id };
+		const reused = this.idleTerminal(ref, entry.absolutePath, cwd, panelCwd);
+		const id = randomUUID();
+		const previousRuns = reused && this.terminals.get(reused)?.runIds;
+		const session = previousRuns?.[0] ?? id;
+		// Оболочка принимает номер один раз. Ручной повтор старой строки лишь исполняет файл.
+		const run: TerminalRun = { ref, id, catalog: this.catalog, startRecorded: false,
+			command: `. "$PROMPT_MANAGER_BASH_LAUNCHER" ${session} ${(previousRuns?.length ?? 0) + 1}` };
 		const terminal = reused ?? vscode.window.createTerminal({ name: 'Bash · ' + entry.name, location: vscode.TerminalLocation.Panel,
-			cwd, shellPath: 'bash', env: { PROMPT_MANAGER_BASH_SCRIPT: entry.absolutePath, PROMPT_MANAGER_BASH_CWD: cwd } });
+			cwd, shellPath: 'bash', env: { PROMPT_MANAGER_BASH_SCRIPT: entry.absolutePath, PROMPT_MANAGER_BASH_CWD: cwd,
+				PROMPT_MANAGER_BASH_LAUNCHER: this.launcherPath, PROMPT_MANAGER_BASH_SESSION: session, PROMPT_MANAGER_BASH_LAST: '0',
+				PROMPT_MANAGER_BASH_PANEL_CWD: panelCwd } });
 		this.runs.set(terminal, run);
 		let startedAt: string;
 		try {
 			if (terminal.exitStatus) throw new Error('Не удалось открыть терминал Bash.');
-			// Ждём интеграцию только своего нового терминала. При её отсутствии Bash принимает ту же постоянную команду.
+			// Без интеграции оболочки ту же команду и отправку результата выполняет обычный Bash.
 			const integration = terminal.shellIntegration ?? await this.waitForIntegration(terminal);
 			if (terminal.exitStatus || !this.runs.has(terminal)) throw new Error('Терминал Bash закрыт до запуска.');
 			startedAt = new Date().toISOString();
-			if (integration) run.execution = integration.executeCommand(RUN_COMMAND);
-			else terminal.sendText(RUN_COMMAND);
+			if (integration) run.execution = integration.executeCommand(run.command);
+			else terminal.sendText(run.command);
 		} catch (error) {
 			this.runs.delete(terminal);
 			// Терминал с выводом прошлых запусков остаётся у пользователя, закрывается только созданный сейчас.
@@ -372,7 +381,7 @@ export class BashScriptsHostController implements vscode.Disposable {
 		}
 		// Команда отправлена: терминал можно показать, даже если историю не удастся записать.
 		// Повторно использованный терминал переносится в конец, чтобы строка показывала его как последний.
-		const shell = this.terminals.get(terminal) ?? { ref: run.ref, runIds: [], scriptPath: entry.absolutePath, cwd, executing: false };
+		const shell = this.terminals.get(terminal) ?? { ref: run.ref, runIds: [], scriptPath: entry.absolutePath, cwd, panelCwd, executing: false };
 		this.terminals.delete(terminal);
 		shell.runIds.push(run.id);
 		// Мгновенная команда могла завершиться до этой строки: тогда оболочка уже свободна.
@@ -394,10 +403,10 @@ export class BashScriptsHostController implements vscode.Disposable {
 	 * с интеграцией оболочки, подтверждённым окончанием прошлой команды и тем же файлом и рабочей папкой.
 	 * Без интеграции занятость неизвестна, а VS Code перед командой посылает Ctrl+C и прервал бы работающую программу.
 	 */
-	private idleTerminal(ref: BashScriptRef, scriptPath: string, cwd: string): vscode.Terminal | undefined {
+	private idleTerminal(ref: BashScriptRef, scriptPath: string, cwd: string, panelCwd: string): vscode.Terminal | undefined {
 		let found: vscode.Terminal | undefined;
 		for (const [terminal, shell] of this.terminals) {
-			if (shell.ref.scope === ref.scope && shell.ref.id === ref.id && shell.scriptPath === scriptPath && shell.cwd === cwd
+			if (shell.ref.scope === ref.scope && shell.ref.id === ref.id && shell.scriptPath === scriptPath && shell.cwd === cwd && shell.panelCwd === panelCwd
 				&& !shell.executing && !this.runs.has(terminal) && !terminal.exitStatus && terminal.shellIntegration) found = terminal;
 		}
 		return found;

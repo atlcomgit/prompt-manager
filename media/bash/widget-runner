@@ -1,0 +1,31 @@
+# Виджет передаёт идентификатор терминала и возрастающий номер запуска.
+# Команда из истории этого или другого терминала лишь повторяет сам скрипт.
+if [[ $# != 2 || -z ${PROMPT_MANAGER_BASH_SESSION:-} || $1 != "$PROMPT_MANAGER_BASH_SESSION" ||
+      ! $2 =~ ^[1-9][0-9]*$ || ! ${PROMPT_MANAGER_BASH_LAST:-} =~ ^[0-9]+$ || $2 -le $PROMPT_MANAGER_BASH_LAST ]]; then
+    cd -- "$PROMPT_MANAGER_BASH_CWD" && bash -- "$PROMPT_MANAGER_BASH_SCRIPT"
+    return $?
+fi
+PROMPT_MANAGER_BASH_LAST=$2
+cd -- "$PROMPT_MANAGER_BASH_CWD" || return $?
+
+# Состояние и обработчик выхода принадлежат только этому запуску. Рабочий терминал
+# остаётся интерактивным, а задержка или отказ панели не меняют код и вывод скрипта.
+(
+    sender="$HOME/.local/share/taskbar-preview-panel/hooks/panel_notify.py"
+    if [[ -x "$sender" ]]; then
+        notify_panel() {
+            local kind=done
+            if [[ $1 != 0 ]]; then kind=error; fi
+            (
+                cd -- "$PROMPT_MANAGER_BASH_PANEL_CWD" || exit
+                exec "$sender" --source custom --kind "$kind" <<< '{"hook_event_name":"BashScriptEnd"}'
+            ) >/dev/null 2>&1 &
+        }
+        # Bash может прервать ожидание дочерней команды до присвоения её кода в $?.
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        trap 'exit 129' HUP
+        trap 'notify_panel "$?"' EXIT
+    fi
+    bash -- "$PROMPT_MANAGER_BASH_SCRIPT"
+)

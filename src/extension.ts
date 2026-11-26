@@ -593,7 +593,7 @@ export function activate(context: vscode.ExtensionContext) {
 		});
 	}));
 	editorPanelManager.setQuickNotesController(quickNotesController);
-	const bashScripts = new BashScriptsHostController(quickNotesGlobalDir, storageService.getStorageDirectoryPath(), () => {
+	const bashScripts = new BashScriptsHostController(context.asAbsolutePath('media/bash/widget-runner'), quickNotesGlobalDir, storageService.getStorageDirectoryPath(), () => {
 		for (const channel of editorPanelManager.getEditorChannels()) {
 			void channel.post({ type: 'bashScriptsChanged' }).catch(error => appendPromptManagerLog(String(error)));
 		}

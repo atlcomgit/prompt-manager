@@ -1,6 +1,8 @@
 import React, { useContext, useEffect, useId, useRef, useState } from 'react';
 import type { BashScriptEntry, BashScriptScope } from '../../../../types/bashScripts.js';
 import { QuickNoteIcon } from '../quickNotes/QuickNoteIcon';
+import { DragHandleIcon } from '../../../shared/DragHandleIcon';
+import { reorderEditorSections, type EditorSectionDropTarget } from '../SortableEditorSections';
 import { OpenBashScriptEditor } from './BashScriptEditorHost';
 import { rememberWidgetDialogOpener } from '../quickNotes/quickNotesFocus';
 import { getVsCodeApi } from '../../../shared/vscodeApi';
@@ -13,6 +15,7 @@ import { BASH_SCRIPTS_CSS } from './bashScriptsStyles';
 export { groupBashScripts } from './bashScriptGroups';
 
 type ScriptFilter = 'all' | 'favorite' | 'available' | 'missing' | 'recent';
+const SCRIPT_DRAG_TYPE = 'application/x-prompt-manager-script';
 /**
  * Область, состояние и текст применяются совместно. Недавние отсортированы по времени запуска.
  * «Избранные» оставляют записи, отмеченные звездой, по тем же ключам «область + id», что и сама отметка.
@@ -108,6 +111,8 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 	const [filter, setFilter] = useState<ScriptFilter>('all');
 	const [showHidden, setShowHidden] = useState(false);
 	const [editingOrder, setEditingOrder] = useState(false);
+	const draggedScript = useRef<{ folder: string; key: string } | null>(null);
+	const [dropTarget, setDropTarget] = useState<EditorSectionDropTarget | null>(null);
 	const [historyKey, setHistoryKey] = useState('');
 	const [hideTarget, setHideTarget] = useState<BashScriptEntry | null>(null);
 	const [error, setError] = useState('');
@@ -182,6 +187,29 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 		if (!editingOrder || hasFilters || keys.length < 2) return null;
 		return <OrderActions keys={keys} index={index} label={name} move={delta =>
 			onOrderChange(parent, moveBashSibling(keys, index, delta, [...new Set([...(bashScriptOrder[parent] ?? []), ...allKeys])]))} />;
+	}
+	/** Clear the insertion mark when the script is dropped or the gesture is cancelled. */
+	function finishDrag() {
+		draggedScript.current = null;
+		setDropTarget(null);
+	}
+	function scriptDrop(event: React.DragEvent<HTMLElement>, folder: string, keys: string[], targetKey: string, commit: boolean) {
+		const source = draggedScript.current;
+		if (!source || !event.dataTransfer.types.includes(SCRIPT_DRAG_TYPE)
+			|| source.folder !== folder || !keys.includes(source.key) || source.key === targetKey) {
+			if (dropTarget) setDropTarget(null);
+			return;
+		}
+		event.preventDefault();
+		event.dataTransfer.dropEffect = 'move';
+		const bounds = event.currentTarget.getBoundingClientRect();
+		const placement = event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
+		const target: EditorSectionDropTarget = { sectionKey: targetKey, placement };
+		if (commit) {
+			const order = [...new Set([...(bashScriptOrder[folder] ?? []), ...keys])];
+			onOrderChange(folder, reorderEditorSections(order, source.key, target));
+			finishDrag();
+		} else if (dropTarget?.sectionKey !== targetKey || dropTarget.placement !== placement) setDropTarget(target);
 	}
 	async function perform(action: 'run' | 'hide' | 'scan', key: string, entry?: BashScriptEntry) {
 		if (inFlight.current.has(key)) return;
@@ -264,9 +292,24 @@ export function BashScriptsWidget({ collapsed, onToggleCollapse, expandedGroups,
 							const key = keys[index];
 							const target = hideTarget?.scope === entry.scope && hideTarget.id === entry.id ? hideTarget : null;
 							const path = entry.project?.relativePath;
+							const canMove = !hasFilters && keys.length > 1;
 							return <BashScriptRow key={key} entry={entry} displayPath={path?.slice(path.lastIndexOf('/') + 1)} busy={busy.has(key)}
 								favorite={!!bashScriptFavorites[key]} onToggleFavorite={() => onFavoriteChange(key, !bashScriptFavorites[key])}
 								rowOrderActions={orderActions(folder.key, keys, index, entry.name)}
+								dragHandle={canMove && <button type="button" draggable className="pm-qn-icon-btn pm-bs-drag"
+									title="Перетащите скрипт внутри подгруппы. Нажатие включает или выключает стрелки перестановки"
+									aria-label={`Изменить порядок · ${entry.name}`} aria-pressed={editingOrder}
+									onClick={() => setEditingOrder(!editingOrder)} onDragStart={event => {
+										draggedScript.current = { folder: folder.key, key };
+										event.dataTransfer.effectAllowed = 'move';
+										event.dataTransfer.setData(SCRIPT_DRAG_TYPE, 'move');
+									}} onDragEnd={finishDrag}><DragHandleIcon /></button>}
+								dropPlacement={dropTarget?.sectionKey === key ? dropTarget.placement : undefined}
+								onDragOver={canMove ? event => scriptDrop(event, folder.key, keys, key, false) : undefined}
+								onDragLeave={event => {
+									if (dropTarget?.sectionKey === key && !(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setDropTarget(null);
+								}}
+								onDrop={canMove ? event => scriptDrop(event, folder.key, keys, key, true) : undefined}
 								launching={busy.get(key) === 'run'} historyOpen={historyKey === key} hideTarget={target}
 								onRun={() => void perform('run', key, entry)} onShowTerminal={runId => void showTerminal(entry, runId)}
 								onEdit={opener => openEditor(opener, entry)}

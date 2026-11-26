@@ -2,7 +2,7 @@
   "name": "copilot-prompt-manager",
   "displayName": "Prompt-Manager",
   "description": "Manage AI prompt workflows, launch chats, and build project memory directly inside VS Code",
-  "version": "0.2.54",
+  "version": "0.2.55",
   "publisher": "alek-fiend",
   "repository": {
     "type": "git",
@@ -51,7 +51,10 @@
     "color": "#09111f",
     "theme": "dark"
   },
-  "activationEvents": ["onStartupFinished", "onWebviewPanel:promptManager.editor"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onWebviewPanel:promptManager.editor"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -113,7 +116,7 @@
       },
       {
         "command": "promptManager.showAbout",
-        "title": "About 0.2.54",
+        "title": "About 0.2.55",
         "category": "Prompt Manager",
         "icon": "$(info)"
       },
@@ -191,9 +194,18 @@
     ],
     "menus": {
       "commandPalette": [
-        { "command": "promptManager.openPrompt", "when": "!isAuxiliaryWindowFocusedContext" },
-        { "command": "promptManager.openPrompt", "when": "isAuxiliaryWindowFocusedContext && activeEditorGroupIndex <= 1" },
-        { "command": "promptManager.openPrompt", "when": "isAuxiliaryWindowFocusedContext && activeEditorGroupIndex > 1" },
+        {
+          "command": "promptManager.openPrompt",
+          "when": "!isAuxiliaryWindowFocusedContext"
+        },
+        {
+          "command": "promptManager.openPrompt",
+          "when": "isAuxiliaryWindowFocusedContext && activeEditorGroupIndex <= 1"
+        },
+        {
+          "command": "promptManager.openPrompt",
+          "when": "isAuxiliaryWindowFocusedContext && activeEditorGroupIndex > 1"
+        },
         {
           "command": "promptManager.openChat",
           "when": "view.chatgpt.sidebarSecondaryView.visible || view.chatgpt.sidebarView.visible"
@@ -561,13 +573,19 @@
           "markdownDescription": "Сворачивание виджета aiAnalysis для режима одной колонки. Общая настройка интерфейса; передаётся через Settings Sync."
         },
         "promptManager.dashboardLayouts.singleColumn.collapsed.quickCommands": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "default": null,
           "scope": "application",
           "markdownDescription": "Глобальное сворачивание виджета «Быстрые команды» (одна колонка)."
         },
         "promptManager.dashboardLayouts.singleColumn.collapsed.bashScripts": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "default": null,
           "scope": "application",
           "markdownDescription": "Сворачивание виджета «Bash скрипты» в одну колонку."
@@ -678,13 +696,19 @@
           "markdownDescription": "Сворачивание виджета aiAnalysis для режима двух колонок. Общая настройка интерфейса; передаётся через Settings Sync."
         },
         "promptManager.dashboardLayouts.twoColumns.collapsed.quickCommands": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "default": null,
           "scope": "application",
           "markdownDescription": "Глобальное сворачивание виджета «Быстрые команды» (две колонки)."
         },
         "promptManager.dashboardLayouts.twoColumns.collapsed.bashScripts": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "default": null,
           "scope": "application",
           "markdownDescription": "Сворачивание виджета «Bash скрипты» в две колонки."
@@ -876,7 +900,10 @@
         },
         "promptManager.accounts.limitDisplayMode": {
           "type": "string",
-          "enum": ["used", "remaining"],
+          "enum": [
+            "used",
+            "remaining"
+          ],
           "enumDescriptions": [
             "Показывать использованную квоту и заполнение прогресс-баров (по умолчанию).",
             "Показывать оставшуюся квоту и заполнение прогресс-баров."
@@ -887,53 +914,95 @@
         },
         "promptManager.dashboardPreferences.quickCommands.items": {
           "type": "array",
-          "items": {"type": "string", "maxLength": 3000},
-          "default": ["/alek-review", "есть еще уточнения или вопросы?"],
+          "items": {
+            "type": "string",
+            "maxLength": 3000
+          },
+          "default": [
+            "/alek-review",
+            "есть еще уточнения или вопросы?"
+          ],
           "maxItems": 120,
           "scope": "application",
           "markdownDescription": "Названия быстрых команд в порядке отображения. Общий список для всех рабочих областей."
         },
         "promptManager.dashboardPreferences.quickCommands.categories": {
           "type": "object",
-          "additionalProperties": {"type": "string", "maxLength": 80},
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 80
+          },
           "default": {},
           "scope": "application",
           "markdownDescription": "Глобальные категории быстрых команд по их названиям."
         },
         "promptManager.dashboardPreferences.quickCommands.texts": {
           "type": "object",
-          "additionalProperties": {"type": "string", "maxLength": 3000},
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 3000
+          },
           "default": {},
           "scope": "application",
           "markdownDescription": "Тексты быстрых команд по названиям, включая переменные вида `{{workspacePath}}`. Отсутствующий ключ использует прежнюю фразу, пустая строка сохраняет команду без текста."
         },
         "promptManager.dashboardPreferences.quickCommands.textBindings": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "default": null,
           "scope": "application",
           "properties": {
-            "titles": { "type": "array", "items": { "type": "string" }, "maxItems": 120 },
-            "detached": { "type": "object", "additionalProperties": { "type": "string" } }
+            "titles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 120
+            },
+            "detached": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
           },
           "markdownDescription": "Привязки шаблонов при изменении списка старой версией. Неоднозначно перемещённый текст можно восстановить в форме команды."
         },
         "promptManager.quickCommandStorage.readToken": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "default": null,
           "scope": "application",
           "ignoreSync": true,
           "markdownDescription": "Служебный идентификатор перечитывания настроек быстрых команд этого клиента."
         },
         "promptManager.quickCommandStorage.pending": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "default": null,
           "scope": "application",
           "ignoreSync": true,
           "markdownDescription": "Данные восстановления незавершённой записи быстрых команд этого клиента. Очищаются после сохранения."
         },
         "promptManager.dashboardPreferences.quickCommands.target": {
-          "type": ["string", "null"],
-          "enum": [null, "current", "copilot", "codex", "claude", "opencode-cli"],
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "current",
+            "copilot",
+            "codex",
+            "claude",
+            "opencode-cli"
+          ],
           "default": null,
           "scope": "application",
           "markdownDescription": "Агент для вставки быстрых команд. В VS Code 1.96 и новее «Текущий» распознаёт встроенный чат, Codex и Claude Code в основной или дополнительной боковой панели. В настольном VS Code учитываются и видимые вкладки чатов. Если выбор не задан, применяется агент промпта."
@@ -950,29 +1019,51 @@
           "markdownDescription": "Глобальная высота поля описания быстрых заметок; синхронизируется между окнами и проектами через Settings Sync."
         },
         "promptManager.dashboardMapStorage.readToken": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "default": null,
           "scope": "application",
           "ignoreSync": true,
           "markdownDescription": "Служебный идентификатор перечитывания общих настроек раскрытия, порядка и отметок в панели «Обзор»."
         },
         "promptManager.dashboardPreferences.bashScriptOrder": {
-          "type": ["object", "null"],
-          "additionalProperties": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
           "default": null,
           "scope": "application",
           "markdownDescription": "Порядок групп, папок и скриптов в виджете «Bash скрипты». Каждый список хранит свой порядок."
         },
         "promptManager.dashboardPreferences.bashScriptHiddenFolders": {
-          "type": ["object", "null"],
-          "additionalProperties": { "type": "boolean" },
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "boolean"
+          },
           "default": null,
           "scope": "application",
           "markdownDescription": "Подгруппы, скрытые пользователем в виджете «Bash скрипты»."
         },
         "promptManager.dashboardPreferences.bashScriptFavorites": {
-          "type": ["object", "null"],
-          "additionalProperties": { "type": "boolean" },
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "boolean"
+          },
           "default": null,
           "scope": "application",
           "markdownDescription": "Избранные скрипты в виджете «Bash скрипты». Их названия выделены жирным."

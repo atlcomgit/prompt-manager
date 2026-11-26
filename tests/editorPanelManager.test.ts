@@ -19,6 +19,8 @@ const vscodeCreatedWebviewPanels: any[] = [];
 const vscodeCreatedWatchers: any[] = [];
 const vscodeClosedTabs: any[] = [];
 const vscodeTabChangeListeners: Array<(event: { opened: any[]; closed: any[]; changed: any[] }) => void> = [];
+/** События раскладки приходят даже при неизменном размере webview. */
+const vscodeGroupChangeListeners = new Set<() => void>();
 const vscodeTabs: any[] = [];
 class MockChatTabInput {}
 const vscodeAdditionalTabGroups: Array<{ viewColumn?: number; activeTab: { input: { viewType: string } | MockChatTabInput }; tabs: unknown[] }> = [];
@@ -75,6 +77,7 @@ function resetVsCodeCommandMock() {
 	vscodeCreatedWatchers.length = 0;
 	vscodeClosedTabs.length = 0;
 	vscodeTabChangeListeners.length = 0;
+	vscodeGroupChangeListeners.clear();
 	vscodeTabs.length = 0;
 	vscodeAdditionalTabGroups.length = 0;
 	vscodeDashboardActiveColumn = 1;
@@ -562,6 +565,10 @@ function createVsCodeMock() {
 				},
 				get activeTabGroup() {
 					return vscodeAdditionalTabGroups.find(group => group.viewColumn === vscodeDashboardActiveColumn) ?? vscodePrimaryTabGroup;
+				},
+				onDidChangeTabGroups: (listener: () => void) => {
+					vscodeGroupChangeListeners.add(listener);
+					return { dispose: () => vscodeGroupChangeListeners.delete(listener) };
 				},
 				onDidChangeTabs: (listener: (event: { opened: any[]; closed: any[]; changed: any[] }) => void) => {
 					vscodeTabChangeListeners.push(listener);
@@ -1508,6 +1515,186 @@ test('openPrompt closes orphan duplicate prompt editor tab after creating single
 	assert.equal(promptEditorTabs[0]?.panel, vscodeCreatedWebviewPanels[0]);
 	assert.equal(vscodeClosedTabs.length, 1);
 	vscodeCreatedWebviewPanels[0]?.dispose();
+});
+
+/** Ширина сравнивается с соседней группой даже при смене фокуса, колонки, оси и числа групп. */
+test('prompt editor dashboard follows horizontal group widths, reveal and group changes', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({ initialPrompt: createPrompt() });
+	try {
+		await manager.openPrompt('prompt-a');
+		const panel = vscodeCreatedWebviewPanels[0];
+		panel.viewColumn = 1;
+		const tab = { input: { viewType: 'textEditor' } };
+		const second = { viewColumn: 2, activeTab: tab, tabs: [tab] };
+		const placePrompt = (column: number) => {
+			panel.viewColumn = column;
+			panel.tab.isActive = column === 1;
+			second.activeTab = column === 2 ? panel.tab : tab;
+		};
+		const latestHidden = () => panel.postedMessages.filter(
+			(msg: { type: string }) => msg.type === 'promptEditorGroupLayoutChanged',
+		).at(-1)?.hideDashboard;
+		const request = () => panel.emitMessage({ type: 'requestPromptEditorGroupLayout' });
+		const changed = async () => {
+			for (const listener of vscodeGroupChangeListeners) listener();
+			await flushTurns(1);
+		};
+		await request();
+		assert.equal(latestHidden(), false);
+		vscodeAdditionalTabGroups.push(second);
+		vscodeDashboardActiveColumn = 2;
+		const cases = [
+			{ orientation: 0, groups: [{ size: 879 }, { size: 880 }], left: true, right: false },
+			{ orientation: 0, groups: [{ size: 880 }, { size: 880 }], left: true, right: true },
+			{ orientation: 0, groups: [{ size: 881 }, { size: 880 }], left: false, right: true },
+			{ orientation: 1, groups: [{ size: 420 }, { size: 740 }], left: false, right: false },
+			{ orientation: 1, groups: [{ groups: [{ size: 440 }, { size: 600 }] }], left: true, right: false },
+			{ orientation: 0, groups: [{ size: 0 }, { size: 600 }], left: false, right: false },
+			{ orientation: 0, groups: [{}, { size: 600 }], left: false, right: false },
+		];
+		for (const { orientation, groups, left, right } of cases) {
+			vscodeDashboardEditorLayout = { orientation, groups };
+			placePrompt(1);
+			await changed();
+			assert.equal(latestHidden(), left);
+			placePrompt(2);
+			panel.emitVisible();
+			await flushTurns(1);
+			assert.equal(latestHidden(), right);
+		}
+		vscodeDashboardEditorLayout = { orientation: 0, groups: [{ size: 700 }, { size: 700 }] };
+		await request();
+		assert.equal(latestHidden(), true);
+		vscodeAdditionalTabGroups.push({ ...second, viewColumn: 3 });
+		vscodeDashboardEditorLayout = { orientation: 0, groups: [{ size: 700 }, { groups: [{ size: 400 }, { size: 400 }] }] };
+		await changed();
+		assert.equal(latestHidden(), false);
+
+		// При медленном Tunnel ранняя геометрия всё ещё применима, пока впереди только незавершённое чтение.
+		vscodeAdditionalTabGroups.pop();
+		placePrompt(1);
+		const first = createDeferred<unknown>();
+		const secondRead = createDeferred<unknown>();
+		vscodeDashboardEditorLayout = first.promise;
+		const firstRequest = request();
+		vscodeDashboardEditorLayout = secondRead.promise;
+		const secondRequest = request();
+		first.resolve({ orientation: 0, groups: [{ size: 650 }, { size: 700 }] });
+		await firstRequest;
+		assert.equal(latestHidden(), true);
+		secondRead.resolve({ orientation: 0, groups: [{ size: 710 }, { size: 700 }] });
+		await secondRequest;
+		assert.equal(latestHidden(), false);
+
+		// Недоступная команда восстанавливает виджеты и допускает повторное измерение.
+		vscodeDashboardEditorLayout = { orientation: 0, groups: [{ size: 700 }, { size: 700 }] };
+		await request();
+		assert.equal(latestHidden(), true);
+		const unavailable = createDeferred<unknown>();
+		vscodeDashboardEditorLayout = unavailable.promise;
+		const failed = request();
+		unavailable.reject(new Error('command not found'));
+		await failed;
+		assert.equal(latestHidden(), false);
+
+		// Ответ для прежних двух групп приходит после закрытия соседней вкладки.
+		const stale = createDeferred<unknown>();
+		vscodeDashboardEditorLayout = stale.promise;
+		const pending = request();
+		vscodeAdditionalTabGroups.pop();
+		vscodeDashboardEditorLayout = { orientation: 0, groups: [{ size: 1400 }] };
+		await changed();
+		stale.resolve({ orientation: 0, groups: [{ size: 700 }, { size: 700 }] });
+		const posted = panel.postedMessages.length;
+		await pending;
+		assert.equal(panel.postedMessages.length, posted);
+		assert.equal(latestHidden(), false);
+	} finally {
+		manager.disposeAll();
+		assert.equal(vscodeGroupChangeListeners.size, 0);
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Запрос с первого resize опережает синхронизацию вкладок; Split Left перемещает промпт направо. */
+test('first split resize reads workbench geometry and confirms only the matching page measurement', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({ initialPrompt: createPrompt() });
+	try {
+		await manager.openPrompt('prompt-a');
+		const panel = vscodeCreatedWebviewPanels[0];
+		panel.viewColumn = 1;
+		const replies = () => panel.postedMessages.filter((msg: { type: string }) => msg.type === 'promptEditorGroupLayoutChanged');
+		const request = (viewportWidth: number) => panel.emitMessage({ type: 'requestPromptEditorGroupLayout', viewportWidth });
+		await request(1700);
+		assert.deepEqual(replies().at(-1), {
+			type: 'promptEditorGroupLayoutChanged', hideDashboard: false, singleGroup: true, viewportWidth: 1700,
+		});
+
+		// Workbench уже разделён; запоздалая модель из одной вкладки не подтверждает прежнее состояние.
+		vscodeDashboardEditorLayout = { orientation: 0, groups: [{ size: 950 }, { size: 750 }] };
+		const posted = replies().length;
+		await request(749);
+		assert.equal(replies().length, posted);
+
+		const pending = createDeferred<unknown>();
+		vscodeDashboardEditorLayout = pending.promise;
+		const resized = request(750);
+		panel.tab.isActive = false;
+		vscodeAdditionalTabGroups.push({ viewColumn: 2, activeTab: panel.tab, tabs: [panel.tab] });
+		// viewColumn webview запаздывает, а новая модель вкладок уже знает сторону промпта.
+		pending.resolve({ orientation: 0, groups: [{ size: 950 }, { size: 750 }] });
+		await resized;
+		assert.deepEqual(replies().at(-1), {
+			type: 'promptEditorGroupLayoutChanged', hideDashboard: true, singleGroup: false, viewportWidth: 750,
+		});
+
+		vscodeDashboardEditorLayout = { orientation: 1, groups: [{ size: 450 }, { size: 450 }] };
+		for (const listener of vscodeGroupChangeListeners) listener();
+		await flushTurns(1);
+		assert.deepEqual(replies().at(-1), {
+			type: 'promptEditorGroupLayoutChanged', hideDashboard: false, singleGroup: false, viewportWidth: 750,
+		});
+	} finally {
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
+});
+
+/** Окна используют сквозные viewColumn; сетка другого окна не должна раскрывать или скрывать виджеты. */
+test('prompt editor dashboard resolves auxiliary columns and retains its layout while another window is active', async () => {
+	resetVsCodeCommandMock();
+	const { manager } = await createManager({ initialPrompt: createPrompt() });
+	try {
+		await manager.openPrompt('prompt-a');
+		const panel = vscodeCreatedWebviewPanels[0];
+		const tab = { input: { viewType: 'textEditor' } };
+		for (const viewColumn of [2, 3, 4]) vscodeAdditionalTabGroups.push({ viewColumn, activeTab: tab, tabs: [tab] });
+		panel.viewColumn = 4;
+		panel.tab.isActive = false;
+		vscodeAdditionalTabGroups[2].activeTab = panel.tab;
+		vscodeDashboardActiveColumn = 3;
+		vscodeExecuteCommandHandler = async () => quickCommandPalette([], 1);
+		vscodeDashboardEditorLayout = { orientation: 0, groups: [{ size: 900 }, { size: 600 }] };
+		const request = async () => {
+			await panel.emitMessage({ type: 'requestPromptEditorGroupLayout' });
+			return panel.postedMessages.at(-1).hideDashboard;
+		};
+		assert.equal(await request(), true);
+		assert.equal(await request(), true);
+		assert.equal(vscodeCommandCalls.filter(call => call.id === '_getAllCommands').length, 1);
+		vscodeDashboardActiveColumn = 1;
+		vscodeExecuteCommandHandler = async () => quickCommandPalette([]);
+		vscodeDashboardEditorLayout = { orientation: 1, groups: [{ size: 500 }, { size: 500 }] };
+		assert.equal(await request(), true);
+		vscodeDashboardActiveColumn = 4;
+		vscodeExecuteCommandHandler = async () => quickCommandPalette([], 2);
+		assert.equal(await request(), false);
+	} finally {
+		manager.disposeAll();
+		resetVsCodeCommandMock();
+	}
 });
 
 /** Late restoration must trigger cleanup through the real tabs API view type. */

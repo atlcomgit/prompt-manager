@@ -56,6 +56,7 @@ export interface PromptOpenTarget {
 export type WebviewToExtensionMessage =
 	| BashScriptsRequest
 	| { type: 'ready'; bootId?: string; assetVersion?: string }
+	| { type: 'requestPromptEditorGroupLayout'; viewportWidth?: number }
 	| { type: 'getPrompts' }
 	/** Чтение текста для одной карточки без открытия редактора и побочных записей. */
 	| { type: 'getPromptHoverPreview'; target: PromptHoverTarget; requestId: string }
@@ -353,6 +354,7 @@ export type ExtensionToWebviewMessage =
 	| { type: 'promptDashboardQuickCommandPreviewInvalidated' }
 	/** Изменения из другого окна применяются отдельно от одноразовой начальной гидратации. */
 	| { type: 'promptUiSettingsChanged'; settings: PromptUiSettingsSnapshot }
+	| { type: 'promptEditorGroupLayoutChanged'; hideDashboard: boolean; singleGroup: boolean; viewportWidth?: number }
 	| { type: 'promptDashboardWidgetSnapshot'; promptId: string; promptUuid?: string; widget: PromptDashboardWidgetSnapshot<unknown>; requestId?: string }
 	/** Завершает dashboard request, который host безопасно отбросил после collapse race. */
 	| { type: 'promptDashboardRequestCompleted'; requestId: string; target: PromptDashboardWidgetKind }

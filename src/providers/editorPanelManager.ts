@@ -249,6 +249,61 @@ function getDashboardLayoutGroupCount(layout: unknown): number {
 	}
 	return count;
 }
+
+/** Начальная глобальная колонка активного окна; при неоднозначной раскладке возвращает undefined. */
+function getDashboardWindowFirstColumn(
+	groups: readonly vscode.TabGroup[], activeColumn: number, windowGroupCount: number, snapshot?: DashboardChatWindow,
+): number | undefined {
+	let firstColumn = 1;
+	if (windowGroupCount !== groups.length) {
+		// viewColumn нумеруется по порядку сетки: сначала группы основного окна, затем каждого вынесенного.
+		if (!snapshot) return undefined;
+		const columns = groups.map(group => group.viewColumn);
+		if (new Set(columns).size !== groups.length
+			|| columns.some(column => !Number.isInteger(column) || column < 1 || column > groups.length)) return undefined;
+		if (snapshot.part === 'auxiliary-first-group') firstColumn = activeColumn;
+		if (snapshot.part === 'auxiliary-later-group') {
+			const earliest = Math.max(2, activeColumn - windowGroupCount + 1);
+			const latest = Math.min(activeColumn - 1, groups.length - windowGroupCount + 1);
+			// При нескольких вынесенных окнах принимаем только доказанные границы своего окна.
+			if (earliest !== latest) return undefined;
+			firstColumn = earliest;
+		}
+		if (firstColumn + windowGroupCount - 1 > groups.length || activeColumn < firstColumn
+			|| activeColumn >= firstColumn + windowGroupCount || (snapshot.part !== 'main' && firstColumn < 2)) return undefined;
+	}
+	return firstColumn;
+}
+
+/** Горизонтальный узел Editor Layout хранит размеры двух соседних групп в порядке слева направо. */
+interface WorkbenchEditorGroupLayout {
+	orientation?: number;
+	groups?: WorkbenchEditorGroupLayout[];
+	size?: number;
+}
+
+/** Учитывает вложенные сетки с единственным потомком; сравнение сохраняет различие даже в один пиксель. */
+function shouldHideDashboardInGroup(layout: WorkbenchEditorGroupLayout, columnInWindow: number): boolean {
+	let { orientation, groups } = layout;
+	if (orientation !== 0 && orientation !== 1) return false;
+	// На каждом следующем уровне VS Code меняет ось. Число конечных групп проверено вызывающей стороной.
+	while (groups?.length === 1) {
+		orientation = 1 - orientation;
+		groups = groups[0].groups;
+	}
+	if (orientation !== 0 || groups?.length !== 2 || (columnInWindow !== 1 && columnInWindow !== 2)) return false;
+	const width = groups[columnInWindow - 1].size;
+	const neighborWidth = groups[2 - columnInWindow].size;
+	return typeof width === 'number' && Number.isFinite(width) && width > 0
+		&& typeof neighborWidth === 'number' && Number.isFinite(neighborWidth) && neighborWidth >= width;
+}
+
+/** Только подтверждённая одиночная группа даёт странице исходную ширину для следующего split. */
+interface PromptEditorGroupGeometry {
+	singleGroup: boolean;
+	hideDashboard?: boolean;
+}
+
 /** Срок загрузки панели Codex в браузере, в течение которого запоздавший «Новый чат» сбрасывает файлы, мс. */
 const CODEX_WEB_PANEL_LOAD_WINDOW_MS = 15000;
 /** Интервал повторного прикрепления файлов, пока панель Codex может ещё загружаться, мс. */
@@ -499,6 +554,33 @@ export class EditorPanelManager {
 		// Restored/inactive tabs may have no WebviewPanel handle yet, especially over a remote tunnel.
 		return input.viewType === EDITOR_PANEL_VIEW_TYPE
 			|| input.viewType === `mainThreadWebview-${EDITOR_PANEL_VIEW_TYPE}`;
+	}
+
+	/** Сначала получает геометрию workbench, затем сопоставляет её с актуальными вкладками после Split Left/Right. */
+	private async readPromptEditorGroupGeometry(
+		panel: vscode.WebviewPanel, readWindowScope: (activeColumn: number) => Promise<DashboardChatWindow | undefined>,
+	): Promise<PromptEditorGroupGeometry | undefined> {
+		const layout = await vscode.commands.executeCommand<WorkbenchEditorGroupLayout>('vscode.getEditorLayout');
+		const count = getDashboardLayoutGroupCount(layout);
+		const tabs = vscode.window.tabGroups;
+		const groups = tabs.all;
+		// Сетка уже перестроена, но модель вкладок ещё в пути. Следующее событие групп подтвердит новую сторону.
+		if (count > groups.length) return undefined;
+		const visiblePrompts = groups.filter(group => group.activeTab && this.isPromptEditorTab(group.activeTab));
+		const column = visiblePrompts.length === 1 ? visiblePrompts[0].viewColumn : panel.viewColumn;
+		if (!count || !column) return { singleGroup: false, hideDashboard: false };
+		const activeColumn = tabs.activeTabGroup.viewColumn;
+		if (count !== 2 && (count === groups.length || column === activeColumn)) {
+			return { singleGroup: count === 1, hideDashboard: false };
+		}
+		const scope = count === groups.length ? undefined : await readWindowScope(activeColumn);
+		const first = getDashboardWindowFirstColumn(groups, activeColumn, count, scope);
+		if (first === undefined) return { singleGroup: false };
+		if (column < first || column >= first + count) {
+			// Окно промпта отдельно. Его единственную группу можно доказать по оставшемуся числу групп.
+			return groups.length - count === 1 ? { singleGroup: true, hideDashboard: false } : { singleGroup: false };
+		}
+		return { singleGroup: count === 1, hideDashboard: count === 2 && shouldHideDashboardInGroup(layout, column - first + 1) };
 	}
 
 	/** Возвращает все видимые вкладки prompt editor независимо от внутреннего Map-трекинга. */
@@ -3509,24 +3591,8 @@ export class EditorPanelManager {
 			|| groups.some((group, index) => group !== currentGroups[index])
 			|| !windowGroupCount || windowGroupCount > groups.length) return undefined;
 		const singleWindow = windowGroupCount === groups.length;
-		let firstColumn = 1;
-		if (!singleWindow) {
-			// viewColumn нумеруется по порядку сетки: сначала группы основного окна, затем каждого вынесенного.
-			if (!snapshot) return undefined;
-			const columns = groups.map(group => group.viewColumn);
-			if (new Set(columns).size !== groups.length
-				|| columns.some(column => !Number.isInteger(column) || column < 1 || column > groups.length)) return undefined;
-			if (snapshot.part === 'auxiliary-first-group') firstColumn = activeColumn;
-			if (snapshot.part === 'auxiliary-later-group') {
-				const earliest = Math.max(2, activeColumn - windowGroupCount + 1);
-				const latest = Math.min(activeColumn - 1, groups.length - windowGroupCount + 1);
-				// При нескольких вынесенных окнах принимаем только доказанные границы своего окна.
-				if (earliest !== latest) return undefined;
-				firstColumn = earliest;
-			}
-			if (firstColumn + windowGroupCount - 1 > groups.length || activeColumn < firstColumn
-				|| activeColumn >= firstColumn + windowGroupCount || (snapshot.part !== 'main' && firstColumn < 2)) return undefined;
-		}
+		const firstColumn = getDashboardWindowFirstColumn(groups, activeColumn, windowGroupCount, snapshot);
+		if (firstColumn === undefined) return undefined;
 		const targets = snapshot?.views ?? new Set<DashboardChatAgent>();
 		if (singleWindow && isDashboardNativeChatInput(vscode.window.activeTextEditor?.document)) targets.add('copilot');
 		// VS Code публикует конструктор вкладки встроенного чата не во всех версиях API.
@@ -9443,8 +9509,44 @@ export class EditorPanelManager {
 	): void {
 		const isRu = vscode.env.language.startsWith('ru');
 
+		// Номер принятого ответа позволяет показывать промежуточную ширину даже при медленном Tunnel.
+		let layoutRevision = 0;
+		let acceptedRevision = 0;
+		let dashboardHidden = false;
+		// Ширина, сообщённая страницей, связывает асинхронный ответ с конкретным событием resize.
+		let latestViewportWidth: number | undefined;
+		// Физическое окно меняется при смене активной группы, но не при перетаскивании её границы.
+		let windowScope: { activeColumn: number; result: Promise<DashboardChatWindow | undefined> } | undefined;
+		const readWindowScope = (activeColumn: number) => {
+			if (windowScope?.activeColumn !== activeColumn) {
+				windowScope = { activeColumn, result: readVisibleDashboardChatViews() };
+			}
+			return windowScope.result;
+		};
+		/** Обновляет видимую страницу, в том числе после повторной загрузки того же webview. */
+		const syncGroupLayout = async (groupsChanged = false): Promise<void> => {
+			const revision = ++layoutRevision;
+			if (groupsChanged) {
+				acceptedRevision = revision;
+				windowScope = undefined;
+			}
+			if (!panel.visible) return;
+			const viewportWidth = latestViewportWidth;
+			const geometry = await this.readPromptEditorGroupGeometry(panel, readWindowScope)
+				.catch(() => ({ singleGroup: false, hideDashboard: false }));
+			if (revision < acceptedRevision || !panel.visible) return;
+			acceptedRevision = revision;
+			if (!geometry) return;
+			dashboardHidden = geometry.hideDashboard ?? dashboardHidden;
+			await this.resolvePanelPostMessageCallback(panel)({
+				type: 'promptEditorGroupLayoutChanged', hideDashboard: dashboardHidden, singleGroup: geometry.singleGroup, viewportWidth,
+			});
+		};
+		const groupChanges = vscode.window.tabGroups.onDidChangeTabGroups(() => { void syncGroupLayout(true); });
 		this.promptEditorPanels.add(panel);
 		panel.onDidDispose(() => {
+			acceptedRevision = ++layoutRevision;
+			groupChanges.dispose();
 			this.promptEditorPanels.delete(panel);
 		});
 
@@ -9584,6 +9686,7 @@ export class EditorPanelManager {
 		});
 
 		panel.onDidChangeViewState((event) => {
+			void syncGroupLayout(true);
 			if (!event.webviewPanel.visible) {
 				// Host останавливает polling, даже если скрытое webview не успело отправить false.
 				this.promptDashboardService.setDockerLiveMetricsVisibility(false);
@@ -9627,6 +9730,13 @@ export class EditorPanelManager {
 		// Handle messages.
 		panel.webview.onDidReceiveMessage(
 			async (msg: WebviewToExtensionMessage) => {
+				// Геометрия доступна уже при монтировании страницы, до загрузки данных промпта.
+				if (msg.type === 'requestPromptEditorGroupLayout') {
+					latestViewportWidth = typeof msg.viewportWidth === 'number' && Number.isFinite(msg.viewportWidth) && msg.viewportWidth > 0
+						? msg.viewportWidth : undefined;
+					await syncGroupLayout();
+					return;
+				}
 				const currentPrompt = this.panelPromptRefs.get(panelKey);
 				if (!currentPrompt) {
 					return;

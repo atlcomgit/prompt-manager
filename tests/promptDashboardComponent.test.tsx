@@ -312,6 +312,7 @@ function renderDashboard(
 		localStorage?: Storage;
 		/** Общая прокрутка, явное скрытие и сохранённые workspace-предпочтения. */
 		stacked?: boolean;
+		hidden?: boolean;
 		mode?: 'full' | 'compact';
 		initialPreferences?: PromptDashboardPreferences;
 		onPreferencesChange?: (state: PromptDashboardPreferences) => void;
@@ -327,6 +328,7 @@ function renderDashboard(
 		layoutMode: options?.layoutMode,
 		mode: options?.mode ?? 'full',
 		stacked: options?.stacked,
+		hidden: options?.hidden,
 		initialPreferences: options?.initialPreferences,
 		onPreferencesChange: options?.onPreferencesChange,
 		onRefresh: () => { },
@@ -441,6 +443,17 @@ test('PromptDashboard shows in-progress status text when expanded', () => {
 		assert.equal((markup.match(/role="progressbar" aria-label="Прогресс промпта"/g) || []).length, 1);
 		assert.match(markup, /aria-valuenow="68"/);
 		assert.equal(markup.includes('В работе'), !collapsed);
+	}
+});
+
+/** Auto-hiding the rail must leave the widget tree mounted to preserve unfinished input. */
+test('PromptDashboard hides the rail and keeps its widgets in both page layouts', () => {
+	for (const stacked of [true, false]) {
+		const markup = renderDashboard(createSnapshot([]), { hidden: true, stacked });
+		const rail = markup.match(/<aside[^>]*>/)?.[0] || '';
+		assert.match(rail, /hidden=""/);
+		assert.match(rail, /display:none/);
+		assert.match(markup, /data-pm-dashboard-section="quickNotes"/);
 	}
 });
 

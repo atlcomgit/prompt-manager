@@ -133,6 +133,8 @@ interface PromptDashboardProps {
 	collapsedSections?: PromptDashboardCollapsedSections;
 	sectionOrder?: PromptDashboardSectionOrder;
 	mode: 'full' | 'compact';
+	/** Keep open dialogs and widget drafts alive while another editor group needs the space. */
+	hidden?: boolean;
 	/** Вертикальная компоновка передаёт прокрутку внешней странице редактора. */
 	stacked?: boolean;
 	/** Bootstrap допускает одно уточнение от host до локальных действий; смена промпта не сбрасывает выбор. */
@@ -783,6 +785,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	collapsedSections = createDefaultPromptDashboardCollapsedSections(),
 	sectionOrder = createDefaultPromptDashboardSectionOrder(),
 	mode,
+	hidden = false,
 	stacked = false,
 	initialPreferences,
 	preferencesRevision = 0,
@@ -825,6 +828,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	onOpenDockerTerminal,
 	onDockerLiveMetricsVisibilityChange,
 }) => {
+	const visible = mode === 'full' && !hidden;
 	// Состояние быстрых заметок живёт на уровне панели, а не карточки: карточка пересоздаётся при смене числа
 	// колонок и порядка виджетов, а открытое окно, его черновик и текст нового поля не должны пропадать.
 	useWidgetDialogFocusHistory();
@@ -1236,7 +1240,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	// Во время жеста разделителя наблюдение снято: каждая смена профиля перезапрашивает данные виджетов.
 	useEffect(() => {
 		const grid = widgetGridRef.current;
-		if (mode !== 'full' || !grid || !onLayoutModeChange) {
+		if (!visible || !grid || !onLayoutModeChange) {
 			return;
 		}
 		return observePromptDashboardLayoutMode(grid, {
@@ -1245,7 +1249,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 			view: window,
 			ResizeObserverCtor: typeof ResizeObserver !== 'undefined' ? ResizeObserver : undefined,
 		});
-	}, [layoutModeFrozen, mode, onLayoutModeChange, stacked]);
+	}, [layoutModeFrozen, visible, onLayoutModeChange, stacked]);
 
 	// Смена ширины отменяет незавершённый перенос, чтобы он не записал порядок соседнего режима.
 	useEffect(() => {
@@ -1256,11 +1260,11 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		dropIndicatorRef.current = null;
 		setDraggedSection(null);
 		setDropIndicator(null);
-	}, [layoutMode, mode, stacked]);
+	}, [layoutMode, visible, stacked]);
 
 	// В stacked корнем наблюдения служит viewport с clipping внешнего scroll, а не весь высокий rail.
 	useEffect(() => {
-		if (mode !== 'full') {
+		if (!visible) {
 			setIsDockerSectionInView(false);
 			return;
 		}
@@ -1271,19 +1275,19 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		}
 		setIsDockerSectionInView(false);
 		return observePromptDashboardDockerMetrics(railElement, stacked, setIsDockerSectionInView);
-	}, [mode, stacked, dockerViewMode, dockerSearch, dockerStatusFilter, dockerSortBy, expanded,
+	}, [visible, stacked, dockerViewMode, dockerSearch, dockerStatusFilter, dockerSortBy, expanded,
 		normalizedCollapsedSections.dockerContainers, normalizedSectionOrder, dockerMetricsLayoutKey]);
 
 	// Sync host-side Docker polling with the actual visibility of live resource blocks.
 	useEffect(() => {
-		onDockerLiveMetricsVisibilityChange?.(logicalDockerLiveMetricsVisible && isDockerSectionInView);
-	}, [isDockerSectionInView, logicalDockerLiveMetricsVisible, onDockerLiveMetricsVisibilityChange]);
+		onDockerLiveMetricsVisibilityChange?.(visible && logicalDockerLiveMetricsVisible && isDockerSectionInView);
+	}, [visible, isDockerSectionInView, logicalDockerLiveMetricsVisible, onDockerLiveMetricsVisibilityChange]);
 	// Размонтирование панели не оставляет host с последним положительным признаком видимости.
 	useEffect(() => () => onDockerLiveMetricsVisibilityChange?.(false), [onDockerLiveMetricsVisibilityChange]);
 
 	// Retry lazy details hydration for already-open blocks once the projects widget finishes refreshing.
 	useEffect(() => {
-		if (mode !== 'full') {
+		if (!visible) {
 			return;
 		}
 		for (const [key, isExpanded] of Object.entries(expanded)) {
@@ -1298,7 +1302,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				normalizedCollapsedSections,
 			);
 		}
-	}, [expanded, hydrationProjects, mode, normalizedCollapsedSections, onHydrateProjectsDetails, projectsCacheStatus]);
+	}, [expanded, hydrationProjects, visible, normalizedCollapsedSections, onHydrateProjectsDetails, projectsCacheStatus]);
 
 	if (mode !== 'full') {
 		return null;
@@ -1850,7 +1854,8 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 	return (
 		<BashScriptEditorHost enabled={!hiddenSections.includes('bashScripts')}><aside
 			ref={railRef}
-			style={{ ...styles.rail, ...(stacked ? styles.railStacked : null) }}
+			hidden={hidden}
+			style={{ ...styles.rail, ...(stacked ? styles.railStacked : null), ...(hidden ? { display: 'none' } : null) }}
 			data-pm-prompt-dashboard="true"
 			data-pm-dashboard-layout={layoutMode}
 			data-pm-dashboard-stacked={stacked ? 'true' : 'false'}

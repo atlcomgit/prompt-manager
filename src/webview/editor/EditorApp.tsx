@@ -10,6 +10,7 @@ import React, { useState, useCallback, useEffect, useLayoutEffect, useRef, useMe
 import { flushSync, unstable_batchedUpdates } from 'react-dom';
 import { getVsCodeApi } from '../shared/vscodeApi';
 import { useMessageListener } from '../shared/useMessageListener';
+import { observePromptEditorGroupLayout } from './promptEditorGroupLayout';
 import { useT } from '../shared/i18n';
 import { PromptStatusText } from '../shared/PromptStatusText';
 import { TextField } from './components/TextField';
@@ -901,6 +902,7 @@ export const EditorApp: React.FC = () => {
   const [workspaceTrackedBranchPreference, setWorkspaceTrackedBranchPreference] = useState('');
   const [workspaceTrackedBranchesByProjectPreference, setWorkspaceTrackedBranchesByProjectPreference] = useState<Record<string, string>>({});
   const [pageWidth, setPageWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : PROMPT_EDITOR_FORM_MAX_WIDTH_PX));
+  const [dashboardHiddenByGroup, setDashboardHiddenByGroup] = useState(false);
   /** Идентификаторы записи настроек не смешиваются с загрузкой данных виджетов. */
   const dashboardSettingsSaveSequenceRef = useRef(0);
   /** Первый ready может уточнить bootstrap, но ни один ответ не отменяет локальные действия. */
@@ -1284,6 +1286,7 @@ export const EditorApp: React.FC = () => {
   const [chatLaunchActivityFrame, setChatLaunchActivityFrame] = useState(0);
   /** Узкий редактор меняет расположение, но не отключает загрузку видимых карточек; доля ширины глобальна. */
   const editorLayout = resolvePromptEditorLayout(pageWidth, formSectionLayout.panelSplitRatio);
+  const formWidth = editorLayout.stacked || dashboardHiddenByGroup ? '100%' : `${editorLayout.formWidth}px`;
   const promptDashboardMode = 'full' as const;
   const promptDashboardHiddenSections = promptDashboardPreferences?.hiddenSections;
   /**
@@ -3182,6 +3185,14 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'openProjectInstructionsInEditor' });
   }, [captureProcessBodyScroll]);
 
+  useEffect(() => observePromptEditorGroupLayout(window,
+    viewportWidth => vscode.postMessage({ type: 'requestPromptEditorGroupLayout', viewportWidth }),
+    (hidden, beforePaint) => {
+      if (beforePaint) flushSync(() => setDashboardHiddenByGroup(hidden));
+      else setDashboardHiddenByGroup(hidden);
+    },
+  ), []);
+
   useEffect(() => {
     const readyTimer = window.setTimeout(() => {
       vscode.postMessage({ type: 'ready', bootId: bootIdRef.current, assetVersion: EDITOR_WEBVIEW_ASSET_VERSION });
@@ -4938,7 +4949,7 @@ export const EditorApp: React.FC = () => {
   }, [clearPromptDashboardDockerBusyActions, prompt.id, prompt.promptUuid]);
 
   useEffect(() => {
-    if (promptDashboardMode !== 'full' || !promptDashboardLayoutMode) {
+    if (dashboardHiddenByGroup || !promptDashboardLayoutMode) {
       postEditorDebugLog('editor-dashboard', 'snapshot.skipped', {
         reason: 'dashboard-hidden',
         mode: promptDashboardMode,
@@ -5024,6 +5035,7 @@ export const EditorApp: React.FC = () => {
     vscode.postMessage({ type: 'getPromptDashboardSnapshot', prompt, requestId });
   }, [
     clearPromptDashboardDockerBusyActions,
+    dashboardHiddenByGroup,
     isLoaded,
     prompt,
     promptDashboardCollapsedWidgetsSignature,
@@ -7253,7 +7265,7 @@ export const EditorApp: React.FC = () => {
   ) : null;
 
   return (
-    <div ref={editorScrollRef} data-pm-editor-layout={editorLayout.stacked ? 'stacked' : 'side-by-side'}
+    <div ref={editorScrollRef} data-pm-editor-layout={dashboardHiddenByGroup ? 'form-only' : editorLayout.stacked ? 'stacked' : 'side-by-side'}
       onWheel={editorLayout.stacked ? markProcessBodyScrollManualIntent : undefined}
       onPointerDown={editorLayout.stacked ? markProcessBodyScrollManualIntent : undefined}
       onKeyDown={editorLayout.stacked ? markProcessBodyScrollManualIntent : undefined}
@@ -7264,8 +7276,8 @@ export const EditorApp: React.FC = () => {
       <style>{EDITOR_RESPONSIVE_STYLES}</style>
       <div ref={formShellRef} className="pm-editor-form" style={{
         ...styles.contentShell,
-        flex: editorLayout.stacked ? '0 0 auto' : `0 0 ${editorLayout.formWidth}px`,
-        width: editorLayout.stacked ? '100%' : `${editorLayout.formWidth}px`,
+        flex: editorLayout.stacked ? '0 0 auto' : `0 0 ${formWidth}`,
+        width: formWidth,
       }}>
         {/* Loading overlay — stays centered within the prompt form shell */}
         {showLoader && !isLoaded && (
@@ -8303,7 +8315,7 @@ export const EditorApp: React.FC = () => {
       </div>
 
       {/* Разделитель занимает прежний промежуток между панелями; в вертикальной компоновке не нужен. */}
-      {!editorLayout.stacked ? (
+      {!editorLayout.stacked && !dashboardHiddenByGroup ? (
         <PromptPanelSplitter
           pageWidth={pageWidth}
           formWidth={editorLayout.formWidth}
@@ -8317,6 +8329,7 @@ export const EditorApp: React.FC = () => {
       ) : null}
 
       <PromptDashboard
+        hidden={dashboardHiddenByGroup}
         stacked={editorLayout.stacked}
         layoutModeFrozen={isPanelResizing}
         initialPreferences={promptDashboardPreferences}
@@ -8411,7 +8424,7 @@ export const EditorApp: React.FC = () => {
           promptTitle={prompt.title}
           promptTaskNumber={prompt.taskNumber}
           selectedProjects={prompt.projects}
-          dashboardLeft={editorLayout.dashboardLeft}
+          dashboardLeft={dashboardHiddenByGroup ? 0 : editorLayout.dashboardLeft}
           preferredTrackedBranch={(prompt.trackedBranch || '').trim() || workspaceTrackedBranchPreference}
           preferredTrackedBranchesByProject={{
             ...workspaceTrackedBranchesByProjectPreference,

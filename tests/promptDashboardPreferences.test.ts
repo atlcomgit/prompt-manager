@@ -33,6 +33,7 @@ test('dashboard preferences keep false disclosures and explicit empty values', (
 		quickNotes: { newNoteScope: 'global', newNoteColor: 'teal', search: 'идея', colors: ['red', '#12abef'], boardGroupBy: 'color',
 			boardScope: 'workspace', boardShowDone: true },
 		expanded: { 'project:api': false, 'branch:main': true },
+		bashScriptExpanded: { folder: false },
 		bashScriptOrder: { project: ['folder2', 'folder1'] },
 		bashScriptFavorites: { script: true },
 		bashScriptHiddenFolders: { folder2: true },

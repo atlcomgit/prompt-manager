@@ -42,6 +42,9 @@ import type {
 	PromptDashboardSnapshot,
 } from '../src/types/promptDashboard.js';
 import { PROMPT_DASHBOARD_SECTION_KEYS } from '../src/types/promptDashboard.js';
+import type { BashScriptEntry, BashScriptsRequest } from '../src/types/bashScripts.js';
+import { buildBashScriptTree, projectScriptFolders } from '../src/webview/editor/components/bashScripts/bashScriptGroups.js';
+import * as vscodeApi from '../src/webview/shared/vscodeApi.js';
 import type { DockerContainerSummary } from '../src/types/docker.js';
 import {
 	normalizePromptDashboardPreferences,
@@ -300,25 +303,24 @@ function createActivityItem(
 	};
 }
 
-/** Проверяет разметку и первичное восстановление; эффекты и CSS требуют отдельной браузерной проверки. */
-function renderDashboard(
-	snapshot: PromptDashboardSnapshot | null,
-	options?: {
-		busyAction?: string | null;
-		dockerBusyAction?: string | null;
-		collapsedSections?: Record<string, boolean>;
-		sectionOrder?: PromptDashboardSectionOrder;
-		layoutMode?: PromptDashboardLayoutMode;
-		localStorage?: Storage;
-		/** Общая прокрутка, явное скрытие и сохранённые workspace-предпочтения. */
-		stacked?: boolean;
-		hidden?: boolean;
-		mode?: 'full' | 'compact';
-		initialPreferences?: PromptDashboardPreferences;
-		onPreferencesChange?: (state: PromptDashboardPreferences) => void;
-	},
-): string {
-	return withDashboardEnvironment(() => renderToStaticMarkup(React.createElement(PromptDashboard, {
+interface DashboardTestOptions {
+	busyAction?: string | null;
+	dockerBusyAction?: string | null;
+	collapsedSections?: Record<string, boolean>;
+	sectionOrder?: PromptDashboardSectionOrder;
+	layoutMode?: PromptDashboardLayoutMode;
+	localStorage?: Storage;
+	/** Общая прокрутка, явное скрытие и сохранённые workspace-предпочтения. */
+	stacked?: boolean;
+	hidden?: boolean;
+	mode?: 'full' | 'compact';
+	initialPreferences?: PromptDashboardPreferences;
+	onPreferencesChange?: (state: PromptDashboardPreferences) => void;
+}
+
+/** Создаёт настоящую панель с одинаковыми входными параметрами для проверок разметки и кликов. */
+function createDashboardElement(snapshot: PromptDashboardSnapshot | null, options?: DashboardTestOptions) {
+	return React.createElement(PromptDashboard, {
 		snapshot,
 		quickCommandPrompt: { id: 'prompt-a', promptUuid: 'uuid-a', taskNumber: '007', title: 'Проверка' },
 		busyAction: options?.busyAction ?? null,
@@ -350,7 +352,12 @@ function renderDashboard(
 		onOpenDockerLogs: () => { },
 		onOpenDockerTerminal: () => { },
 		showGitFlowAction: true,
-	})), { localStorage: options?.localStorage });
+	});
+}
+
+function renderDashboard(snapshot: PromptDashboardSnapshot | null, options?: DashboardTestOptions): string {
+	return withDashboardEnvironment(() => renderToStaticMarkup(createDashboardElement(snapshot, options)),
+		{ localStorage: options?.localStorage });
 }
 
 test('normalizePromptDashboardDockerWidgetState keeps valid view mode and unique expanded containers', () => {
@@ -3614,4 +3621,60 @@ test('PromptDashboard hides widgets chosen in the widgets menu', () => {
 	});
 	assert.doesNotMatch(allHidden, /data-pm-dashboard-section=/);
 	assert.match(allHidden, /Все виджеты скрыты/);
+});
+
+/** Старый профиль и рабочая область намеренно задают противоположные состояния обоих заголовков. */
+test('PromptDashboard reads and updates Bash disclosures only in the workspace preference', async t => {
+	const { GlobalRegistrator } = await import('@happy-dom/global-registrator');
+	GlobalRegistrator.register();
+	const { createRoot } = await import('react-dom/client');
+	const root = createRoot(document.body.appendChild(document.createElement('div')));
+	Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { configurable: true, value: true });
+	t.after(async () => {
+		await React.act(async () => root.unmount());
+		Reflect.deleteProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT');
+		await GlobalRegistrator.unregister();
+	});
+
+	const entries: BashScriptEntry[] = ['build', 'deploy'].map(id => {
+		const path = id + '/check.sh';
+		return { id, name: id, path, absolutePath: '/repo/' + path, scope: 'project', available: true, history: [],
+			project: { name: 'Общий проект', root: '/repo', relativePath: path } };
+	});
+	t.mock.method(vscodeApi, 'getVsCodeApi', () => ({
+		getState: () => ({}), setState: () => {},
+		postMessage(message: BashScriptsRequest) {
+			if (message.type === 'bashScriptsRequest' && message.action === 'list') {
+				window.dispatchEvent(new MessageEvent('message', { data: {
+					type: 'bashScriptsResponse', requestId: message.requestId, result: { entries },
+				} }));
+			}
+		},
+	}));
+	const [project] = buildBashScriptTree(entries, projectScriptFolders(entries), {});
+	const projectKey = project.preferenceKey;
+	const folderKey = project.folders.find(folder => folder.path === 'build')!.key;
+	const expanded = { [projectKey]: false, [folderKey]: true };
+	const bashScriptExpanded = { [projectKey]: true, [folderKey]: false };
+	const changes: PromptDashboardPreferences[] = [];
+	await React.act(async () => root.render(createDashboardElement(null, {
+		collapsedSections: { bashScripts: false },
+		initialPreferences: normalizePromptDashboardPreferences({ expanded, bashScriptExpanded,
+			hiddenSections: PROMPT_DASHBOARD_SECTION_KEYS.filter(key => key !== 'bashScripts') }),
+		onPreferencesChange: state => changes.push(state),
+	})));
+	const projectButton = document.querySelector<HTMLButtonElement>('button[aria-label="Общий проект"]');
+	const folderButton = document.querySelector<HTMLButtonElement>('button[aria-label="build"]');
+	assert.equal(projectButton?.getAttribute('aria-expanded'), 'true', 'Проект раскрыт в рабочей области');
+	assert.equal(folderButton?.getAttribute('aria-expanded'), 'false', 'Папка свёрнута в рабочей области');
+	assert.equal(changes.length, 0);
+	await React.act(async () => folderButton!.click());
+	await React.act(async () => projectButton!.click());
+	await React.act(async () => projectButton!.click());
+	assert.deepEqual(changes.map(state => state.bashScriptExpanded), [
+		{ [projectKey]: true, [folderKey]: true },
+		{ [projectKey]: false, [folderKey]: true },
+		{ [projectKey]: true, [folderKey]: true },
+	]);
+	for (const state of changes) assert.deepEqual(state.expanded, expanded);
 });

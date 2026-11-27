@@ -108,6 +108,7 @@ const PROMPT_DASHBOARD_SECTION_ORDER_KEY = 'promptManager.dashboardSectionOrder'
 const PROMPT_DASHBOARD_LAYOUTS_KEY = 'promptManager.dashboardLayouts';
 /** Настройки содержимого виджетов общие для обоих профилей ширины. */
 const PROMPT_DASHBOARD_PREFERENCES_KEY = 'promptManager.dashboardPreferences';
+const BASH_SCRIPT_EXPANDED_KEY = 'promptManager.bashScriptExpanded';
 const STATISTICS_UI_STATE_KEY = 'promptManager.statisticsUiState';
 
 export class StateService {
@@ -1300,8 +1301,10 @@ export class StateService {
 				Object.assign(next, { [field]: value });
 			}
 		}
-		return !legacy && !docker && !todos && !quickNotes && !quickCommands && Object.keys(next).length === 0 ? undefined
-			: normalizePromptDashboardPreferences({ ...legacy, ...next, docker, todos, quickNotes, quickCommands });
+		const bashScriptExpanded = this.context.workspaceState.get<Record<string, boolean>>(BASH_SCRIPT_EXPANDED_KEY);
+		return !legacy && !docker && !todos && !quickNotes && !quickCommands
+			&& bashScriptExpanded === undefined && Object.keys(next).length === 0 ? undefined
+			: normalizePromptDashboardPreferences({ ...legacy, ...next, bashScriptExpanded, docker, todos, quickNotes, quickCommands });
 	}
 
 	/** Commit only a modal's row against current settings; the optional seed migrates previously local webview data. */
@@ -1360,6 +1363,14 @@ export class StateService {
 		const next = normalizePromptDashboardPreferences(state);
 		const base = baseState ? normalizePromptDashboardPreferences(baseState) : undefined;
 		await this.mutatePromptUiSettings(async () => {
+			// Группа и её папки могут измениться до подтверждения первого клика. Объединяем только изменения этого жеста.
+			if (!base || JSON.stringify(next.bashScriptExpanded) !== JSON.stringify(base.bashScriptExpanded)) {
+				const current = this.getPromptDashboardPreferences()?.bashScriptExpanded ?? {};
+				const merged = applyUiSettingsChanges(current, next.bashScriptExpanded, base?.bashScriptExpanded);
+				if (JSON.stringify(current) !== JSON.stringify(merged)) {
+					await this.context.workspaceState.update(BASH_SCRIPT_EXPANDED_KEY, merged);
+				}
+			}
 			await this.writePromptUiFields('dashboardPreferences.docker', PROMPT_DOCKER_SETTING_FIELDS, next.docker, base?.docker);
 			await this.writePromptUiFields('dashboardPreferences.todos', PROMPT_TODOS_SETTING_FIELDS, next.todos, base?.todos);
 			await this.writePromptUiFields(

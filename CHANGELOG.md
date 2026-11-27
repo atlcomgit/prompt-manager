@@ -14,6 +14,7 @@ Unreleased changes are grouped by the date they landed. Tagged releases remain g
 - Notify Taskbar Preview Panel when a dashboard-launched Bash script finishes or fails.
 
 #### Changed
+- Remember expanded Bash projects and folders separately for each VS Code workspace.
 - Hide the prompt dashboard when its editor group is the same width as or narrower than the other group in a two-column split. Splitting a single editor in half hides the dashboard in the first resize frame, even over a slow Tunnel connection. Closing the neighboring group restores the widgets, drafts and saved form width in the first resize frame, including after an uneven split.
 - Show Bash run progress on a visible track behind the entire name column in light and dark themes. The track extends 4 px left and 2 px above and below the label. Concurrent runs keep the 24 px row spacing. A confirmed completion displays 100% for one second, including on first and very short runs.
 

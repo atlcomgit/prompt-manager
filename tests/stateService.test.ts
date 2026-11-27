@@ -762,7 +762,7 @@ test('StateService restores preferences without sharing mutable values and prese
 		docker: { viewMode: 'table', statusFilter: 'stopped', search: 'api', sortBy: 'cpu',
 			expandedContainerIds: ['compose:api'] },
 		todos: { selectedFileTypes: [' TS '], search: 'FIXME' },
-		expanded: { 'project:api': false, 'bashScripts:123abc': false, 'bashScripts:456def': true }, showAllBranchProjects: true,
+		expanded: { 'project:api': false, 'branch:main': true }, showAllBranchProjects: true,
 	});
 	const expected = structuredClone(state);
 	await service.savePromptDashboardPreferences(state);
@@ -775,6 +775,35 @@ test('StateService restores preferences without sharing mutable values and prese
 	assert.deepEqual(service.getPromptDashboardPreferences()?.expanded, {});
 	assert.equal(service.getPromptDashboardPreferences()?.showAllBranchProjects, false);
 	assert.deepEqual(service.getPromptDashboardPreferences()?.todos.selectedFileTypes, []);
+});
+
+/** Две области одного профиля могут показывать один и тот же проект с разными раскрытыми папками. */
+test('Bash project and folder disclosures restore per workspace, including false and an empty map', async () => {
+	const project = 'bashScripts:123abc';
+	const folder = 'bashScripts:456def';
+	const shared = { [project]: true, [folder]: false, 'branch:main': true };
+	const configuration = createConfigurationMock({ 'dashboardPreferences.expanded': shared });
+	const { StateService } = await importStateService(configuration);
+	const workspaceA = createStateContext();
+	const workspaceB = createStateContext();
+	const a = new StateService(workspaceA);
+	const b = new StateService(workspaceB);
+	const original = a.getPromptDashboardPreferences()!;
+	assert.deepEqual(original.bashScriptExpanded, { [project]: true, [folder]: false });
+	assert.deepEqual(b.getPromptDashboardPreferences(), original);
+
+	// Два быстрых жеста из одного исходного снимка сохраняют независимые ключи.
+	await Promise.all([
+		a.savePromptDashboardPreferences({ ...original, bashScriptExpanded: { ...original.bashScriptExpanded, [project]: false } }, original),
+		a.savePromptDashboardPreferences({ ...original, bashScriptExpanded: { ...original.bashScriptExpanded, [folder]: true } }, original),
+	]);
+	assert.deepEqual(new StateService(workspaceA).getPromptDashboardPreferences()?.bashScriptExpanded, { [project]: false, [folder]: true });
+	assert.deepEqual(b.getPromptDashboardPreferences()?.bashScriptExpanded, original.bashScriptExpanded);
+	await b.savePromptDashboardPreferences({ ...original, bashScriptExpanded: {} }, original);
+	assert.deepEqual(new StateService(workspaceB).getPromptDashboardPreferences()?.bashScriptExpanded, {});
+	assert.deepEqual(a.getPromptDashboardPreferences()?.bashScriptExpanded, { [project]: false, [folder]: true });
+	assert.deepEqual(configuration.store.get('dashboardPreferences.expanded'), shared);
+	assert.equal(configuration.writes.some(write => write.key === 'dashboardPreferences.expanded'), false);
 });
 
 /** Явный null после переноса не подхватывает старый режим другой рабочей области при независимом сохранении. */

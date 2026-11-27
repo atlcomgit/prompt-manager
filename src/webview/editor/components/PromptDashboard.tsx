@@ -1784,7 +1784,7 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 		),
 		bashScripts: (
 			<BashScriptsWidget
-				expandedGroups={expanded}
+				expandedGroups={preferences.bashScriptExpanded}
 				bashScriptOrder={preferences.bashScriptOrder}
 				bashScriptFavorites={preferences.bashScriptFavorites}
 				onOrderChange={(parent, order) => updatePreferences({
@@ -1793,7 +1793,9 @@ export const PromptDashboard: React.FC<PromptDashboardProps> = ({
 				onFavoriteChange={(key, favorite) => changeBashScriptFlag('bashScriptFavorites', key, favorite)}
 				bashScriptHiddenFolders={preferences.bashScriptHiddenFolders}
 				onFolderHiddenChange={(key, hidden) => changeBashScriptFlag('bashScriptHiddenFolders', key, hidden)}
-				onGroupChoicesChange={patch => updatePreferences({ expanded: { ...preferencesRef.current.expanded, ...patch } })}
+				onGroupChoicesChange={patch => updatePreferences({
+					bashScriptExpanded: { ...preferencesRef.current.bashScriptExpanded, ...patch },
+				})}
 				collapsed={isPromptDashboardSectionCollapsed(normalizedCollapsedSections, 'bashScripts')}
 				onToggleCollapse={() => toggleSectionCollapse('bashScripts')}
 				renderShell={(actions, body) => renderQuickWidget('bashScripts', actions, body)} />

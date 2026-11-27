@@ -143,6 +143,8 @@ export interface PromptDashboardPreferences {
 	quickCommands: DashboardQuickCommandsWidgetState;
 	/** Явный false сохраняет закрытие узлов Git, раскрытых по умолчанию. */
 	expanded: Record<string, boolean>;
+	/** Раскрытые и свёрнутые проекты и папки Bash в текущей рабочей области. */
+	bashScriptExpanded: Record<string, boolean>;
 	/** Ordered child identifiers for each list in the Bash scripts widget. */
 	bashScriptOrder: Record<string, string[]>;
 	/** Favorite scripts are keyed independently from their current folder. */
@@ -258,12 +260,17 @@ export function normalizePromptDashboardPreferences(value: unknown): PromptDashb
 	const input: Partial<PromptDashboardPreferences> = value && typeof value === 'object' && !Array.isArray(value)
 		? { ...value }
 		: {};
+	const expanded = booleanPreferences(input.expanded);
 	return {
 		docker: normalizePromptDashboardDockerWidgetState(input.docker),
 		todos: normalizePromptDashboardTodosWidgetState(input.todos),
 		quickNotes: normalizePromptDashboardQuickNotesWidgetState(input.quickNotes),
 		quickCommands: normalizeDashboardQuickCommandsWidgetState(input.quickCommands),
-		expanded: booleanPreferences(input.expanded),
+		expanded,
+		// До появления отдельного поля виджет сохранял свои ключи в общей карте раскрытий.
+		bashScriptExpanded: input.bashScriptExpanded === undefined
+			? Object.fromEntries(Object.entries(expanded).filter(([key]) => key.startsWith('bashScripts:')))
+			: booleanPreferences(input.bashScriptExpanded),
 		bashScriptOrder: normalizeBashScriptOrder(input.bashScriptOrder),
 		bashScriptFavorites: booleanPreferences(input.bashScriptFavorites),
 		bashScriptHiddenFolders: booleanPreferences(input.bashScriptHiddenFolders),
